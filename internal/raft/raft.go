@@ -103,6 +103,7 @@ type Node struct {
 	currentTerm uint64
 	votedFor    string
 	log         []LogEntry
+	firstIndex  uint64 // Raft index of log[0]; enables log compaction after snapshots
 
 	// volatile state
 	state       NodeState
@@ -144,6 +145,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		state:      Follower,
 		config:     config,
 		log:        make([]LogEntry, 0),
+		firstIndex: 1, // Raft indices start at 1
 		nextIndex:  make(map[string]uint64),
 		matchIndex: make(map[string]uint64),
 		applyCh:    make(chan LogEntry, 64),
@@ -174,9 +176,18 @@ func (n *Node) restoreFromStore() {
 	// Restore log entries
 	lastIdx, err := n.store.LastIndex()
 	if err == nil && lastIdx > 0 {
-		entries, err := n.store.GetEntries(1, lastIdx)
+		// Find the first available index in the store
+		firstIdx := uint64(1)
+		for i := uint64(1); i <= lastIdx; i++ {
+			if _, err := n.store.GetEntry(i); err == nil {
+				firstIdx = i
+				break
+			}
+		}
+		entries, err := n.store.GetEntries(firstIdx, lastIdx)
 		if err == nil {
 			n.log = entries
+			n.firstIndex = firstIdx
 		}
 	}
 }
@@ -266,9 +277,9 @@ func (n *Node) applyLoop() {
 		}
 
 		n.mu.Lock()
-		if n.commitIndex > n.lastApplied && int(n.lastApplied) < len(n.log) {
+		if n.commitIndex > n.lastApplied && n.hasLogEntry(n.lastApplied+1) {
 			n.lastApplied++
-			entry := n.log[n.lastApplied-1]
+			entry := n.log[n.toSliceIdx(n.lastApplied)]
 			idx := entry.Index
 
 			// Signal any waiter for this index
@@ -517,15 +528,16 @@ func (n *Node) replicateTo(peer string) {
 	nextIdx := n.nextIndex[peer]
 	prevLogIndex := nextIdx - 1
 	prevLogTerm := uint64(0)
-	if prevLogIndex > 0 && int(prevLogIndex) <= len(n.log) {
-		prevLogTerm = n.log[prevLogIndex-1].Term
+	if prevLogIndex > 0 && n.hasLogEntry(prevLogIndex) {
+		prevLogTerm = n.log[n.toSliceIdx(prevLogIndex)].Term
 	}
 
 	// Collect entries to send
 	var entries []LogEntry
-	if int(nextIdx)-1 < len(n.log) {
-		entries = make([]LogEntry, len(n.log)-int(nextIdx)+1)
-		copy(entries, n.log[nextIdx-1:])
+	if n.hasLogEntry(nextIdx) {
+		si := n.toSliceIdx(nextIdx)
+		entries = make([]LogEntry, len(n.log)-si)
+		copy(entries, n.log[si:])
 	}
 	n.mu.Unlock()
 
@@ -575,10 +587,10 @@ func (n *Node) advanceCommitIndex() {
 	// Find the highest N such that a majority of matchIndex[i] >= N
 	// and log[N].term == currentTerm
 	for idx := n.lastLogIdx(); idx > n.commitIndex; idx-- {
-		if int(idx) > len(n.log) {
+		if !n.hasLogEntry(idx) {
 			continue
 		}
-		if n.log[idx-1].Term != n.currentTerm {
+		if n.log[n.toSliceIdx(idx)].Term != n.currentTerm {
 			continue
 		}
 
@@ -660,12 +672,12 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 
 	// Log consistency check
 	if args.PrevLogIndex > 0 {
-		if int(args.PrevLogIndex) > len(n.log) {
-			return reply // we don't have the entry
+		if !n.hasLogEntry(args.PrevLogIndex) {
+			return reply // we don't have the entry (compacted or not yet received)
 		}
-		if n.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+		if n.log[n.toSliceIdx(args.PrevLogIndex)].Term != args.PrevLogTerm {
 			// Conflict: delete this entry and all that follow
-			n.log = n.log[:args.PrevLogIndex-1]
+			n.log = n.log[:n.toSliceIdx(args.PrevLogIndex)]
 			return reply
 		}
 	}
@@ -674,9 +686,9 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	var newEntries []LogEntry
 	for i, entry := range args.Entries {
 		idx := args.PrevLogIndex + uint64(i) + 1
-		if int(idx) <= len(n.log) {
-			if n.log[idx-1].Term != entry.Term {
-				n.log = n.log[:idx-1]
+		if n.hasLogEntry(idx) {
+			if n.log[n.toSliceIdx(idx)].Term != entry.Term {
+				n.log = n.log[:n.toSliceIdx(idx)]
 				newEntries = args.Entries[i:]
 				n.log = append(n.log, newEntries...)
 				break
@@ -712,6 +724,9 @@ func (n *Node) signalReset() {
 
 func (n *Node) lastLogInfo() (uint64, uint64) {
 	if len(n.log) == 0 {
+		if n.firstIndex > 1 {
+			return n.firstIndex - 1, 0 // compacted: last known index is just before firstIndex
+		}
 		return 0, 0
 	}
 	last := n.log[len(n.log)-1]
@@ -720,9 +735,49 @@ func (n *Node) lastLogInfo() (uint64, uint64) {
 
 func (n *Node) lastLogIdx() uint64 {
 	if len(n.log) == 0 {
+		if n.firstIndex > 1 {
+			return n.firstIndex - 1
+		}
 		return 0
 	}
 	return n.log[len(n.log)-1].Index
+}
+
+// toSliceIdx converts a Raft log index to a slice index.
+// Returns -1 if the index is below the compacted region.
+func (n *Node) toSliceIdx(raftIdx uint64) int {
+	if raftIdx < n.firstIndex {
+		return -1
+	}
+	return int(raftIdx - n.firstIndex)
+}
+
+// hasLogEntry returns true if the given Raft index is in the in-memory log.
+func (n *Node) hasLogEntry(raftIdx uint64) bool {
+	si := n.toSliceIdx(raftIdx)
+	return si >= 0 && si < len(n.log)
+}
+
+// CompactLog removes all entries up to and including snapshotIndex from the in-memory log.
+// After compaction, firstIndex = snapshotIndex + 1.
+func (n *Node) CompactLog(snapshotIndex uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	si := n.toSliceIdx(snapshotIndex)
+	if si < 0 {
+		return // already compacted past this point
+	}
+
+	keepFrom := si + 1
+	if keepFrom >= len(n.log) {
+		n.log = nil
+	} else {
+		remaining := make([]LogEntry, len(n.log)-keepFrom)
+		copy(remaining, n.log[keepFrom:])
+		n.log = remaining
+	}
+	n.firstIndex = snapshotIndex + 1
 }
 
 func (n *Node) isLogUpToDate(lastLogIndex, lastLogTerm uint64) bool {

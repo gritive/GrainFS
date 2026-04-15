@@ -28,11 +28,6 @@
 
 ## P1: Raft 기반 인프라 (Phase 2 미완성)
 
-### Raft log offset (firstIndex)
-- **What:** raft.Node에 firstIndex 개념 도입, 모든 slice 접근을 n.log[idx-firstIndex]로 변경
-- **Why:** 현재 n.log[idx-1] raw slice indexing 사용. 스냅샷 후 로그 압축 시 n.log가 비어지면 인덱스가 깨짐. 스냅샷 통합의 필수 선행 조건
-- **Context:** raft.go 전체에서 n.log[...] 접근하는 모든 곳 수정 필요. lastLogIdx(), lastLogInfo(), applyLoop, replicateTo, HandleAppendEntries, advanceCommitIndex 등
-
 ### 스냅샷 오케스트레이션 wiring
 - **What:** SnapshotManager를 Raft Node와 cluster 시작 코드에 연결
 - **Why:** snapshot.go에 SnapshotManager(자동 트리거, 복원) 구현 완료. cluster/apply.go에 FSM.Snapshot()/Restore() 존재. 하지만 호출하는 코드가 없음

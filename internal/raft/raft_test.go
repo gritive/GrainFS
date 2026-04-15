@@ -374,3 +374,66 @@ func TestPersistLogEntries_PanicsOnError(t *testing.T) {
 		node.Propose([]byte("cmd"))
 	}, "persistLogEntries should panic on AppendEntries error")
 }
+
+func TestCompactLog_UpdatesFirstIndex(t *testing.T) {
+	config := DefaultConfig("A", nil)
+	node := NewNode(config)
+
+	// Simulate log entries 1-10
+	node.mu.Lock()
+	for i := uint64(1); i <= 10; i++ {
+		node.log = append(node.log, LogEntry{Term: 1, Index: i, Command: []byte("cmd")})
+	}
+	node.mu.Unlock()
+
+	assert.Equal(t, uint64(10), node.lastLogIdx())
+
+	// Compact up to index 5: removes entries 1-5, keeps 6-10
+	node.CompactLog(5)
+
+	node.mu.Lock()
+	logLen := len(node.log)
+	node.mu.Unlock()
+
+	assert.Equal(t, 5, logLen, "should have 5 entries remaining (6-10)")
+	assert.Equal(t, uint64(10), node.lastLogIdx(), "lastLogIdx should still be 10")
+
+	// Verify entry access still works
+	node.mu.Lock()
+	firstIdx, firstTerm := node.lastLogInfo()
+	node.mu.Unlock()
+	assert.Equal(t, uint64(10), firstIdx)
+	assert.Equal(t, uint64(1), firstTerm)
+}
+
+func TestCompactLog_HandleAppendEntriesAfterCompaction(t *testing.T) {
+	config := DefaultConfig("A", []string{"B"})
+	node := NewNode(config)
+
+	// Simulate log entries 1-5
+	node.mu.Lock()
+	for i := uint64(1); i <= 5; i++ {
+		node.log = append(node.log, LogEntry{Term: 1, Index: i, Command: []byte("cmd")})
+	}
+	node.currentTerm = 1
+	node.mu.Unlock()
+
+	// Compact up to index 3: keeps entries 4-5
+	node.CompactLog(3)
+
+	// Append new entries 6-7 via AppendEntries
+	reply := node.HandleAppendEntries(&AppendEntriesArgs{
+		Term:         1,
+		LeaderID:     "B",
+		PrevLogIndex: 5,
+		PrevLogTerm:  1,
+		Entries: []LogEntry{
+			{Term: 1, Index: 6, Command: []byte("new1")},
+			{Term: 1, Index: 7, Command: []byte("new2")},
+		},
+		LeaderCommit: 7,
+	})
+
+	assert.True(t, reply.Success, "AppendEntries should succeed after compaction")
+	assert.Equal(t, uint64(7), node.lastLogIdx())
+}
