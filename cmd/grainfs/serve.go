@@ -35,6 +35,7 @@ func init() {
 	serveCmd.Flags().IntP("port", "p", 9000, "listen port")
 	serveCmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
+	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
 	serveCmd.Flags().Bool("ec", true, "enable erasure coding (Reed-Solomon 4+2, use --ec=false to disable)")
 	serveCmd.Flags().Int("ec-data", erasure.DefaultDataShards, "number of data shards for erasure coding")
@@ -114,7 +115,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
-	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr)
+	clusterKey, _ := cmd.Flags().GetString("cluster-key")
+	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
 func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend storage.Backend, opts []server.Option, nfsPort, nbdPort int) error {
@@ -203,7 +205,7 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 	return nil
 }
 
-func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr string) error {
+func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
@@ -233,7 +235,7 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 	defer logStore.Close()
 
 	// Start QUIC transport for inter-node communication
-	quicTransport := transport.NewQUICTransport()
+	quicTransport := transport.NewQUICTransport(clusterKey)
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport: %w", err)
 	}

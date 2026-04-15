@@ -5,8 +5,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -31,18 +33,33 @@ type QUICTransport struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	streamHandler StreamHandler // bidirectional request-response handler
+	psk           string        // pre-shared key for peer authentication (empty = no auth)
 }
 
 // NewQUICTransport creates a new QUIC-based transport.
-func NewQUICTransport() *QUICTransport {
+// If psk is non-empty, connections are authenticated using the shared key.
+func NewQUICTransport(psk ...string) *QUICTransport {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &QUICTransport{
+	t := &QUICTransport{
 		conns:  make(map[string]*quic.Conn),
 		inbox:  make(chan *ReceivedMessage, 256),
 		codec:  &BinaryCodec{},
 		ctx:    ctx,
 		cancel: cancel,
 	}
+	if len(psk) > 0 {
+		t.psk = psk[0]
+	}
+	return t
+}
+
+// pskALPN returns the ALPN protocol string, incorporating PSK hash for authentication.
+func (t *QUICTransport) pskALPN() string {
+	if t.psk == "" {
+		return "grainfs"
+	}
+	h := sha256.Sum256([]byte(t.psk))
+	return "grainfs-" + hex.EncodeToString(h[:8])
 }
 
 // Listen starts accepting incoming QUIC connections.
@@ -51,6 +68,7 @@ func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("generate TLS config: %w", err)
 	}
+	tlsConf.NextProtos = []string{t.pskALPN()}
 	t.tlsConfig = tlsConf
 
 	listener, err := quic.ListenAddr(addr, tlsConf, &quic.Config{})
@@ -133,8 +151,8 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 	}
 
 	tlsConf := &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"grainfs"},
+		InsecureSkipVerify: true, // self-signed certs; PSK via ALPN provides authentication
+		NextProtos:         []string{t.pskALPN()},
 	}
 
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{})
@@ -284,6 +302,5 @@ func generateTLSConfig() (*tls.Config, error) {
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"grainfs"},
 	}, nil
 }

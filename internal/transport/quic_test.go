@@ -183,6 +183,45 @@ func TestQUICTransport_CallUnconnected(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestQUICTransport_PSK_MatchingKey(t *testing.T) {
+	ctx := context.Background()
+
+	node1 := NewQUICTransport("secret-key")
+	node2 := NewQUICTransport("secret-key")
+	defer node1.Close()
+	defer node2.Close()
+
+	require.NoError(t, node1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, node2.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, node2.Connect(ctx, node1.LocalAddr()))
+
+	msg := &Message{Type: StreamControl, Payload: []byte("authenticated")}
+	require.NoError(t, node2.Send(ctx, node1.LocalAddr(), msg))
+
+	select {
+	case recv := <-node1.Receive():
+		assert.Equal(t, "authenticated", string(recv.Message.Payload))
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestQUICTransport_PSK_MismatchRejects(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport("correct-key")
+	client := NewQUICTransport("wrong-key")
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+
+	// Connect should fail due to ALPN mismatch
+	err := client.Connect(ctx, server.LocalAddr())
+	assert.Error(t, err, "PSK mismatch should reject connection")
+}
+
 func TestQUICTransport_SendToUnconnected(t *testing.T) {
 	ctx := context.Background()
 	node := NewQUICTransport()

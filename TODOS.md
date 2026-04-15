@@ -33,13 +33,6 @@
 - **Why:** 현재 클러스터는 부트스트랩 후 정적. 노드 교체나 확장 불가
 - **Context:** FSM command 타입에 AddNode/RemoveNode 없음. Raft에 멤버십 변경 로직 없음. Raft 논문의 Joint Consensus 알고리즘 구현 필요
 
-## P1: 클러스터 보안 (Phase 5 미구현)
-
-### PSK/토큰 기반 피어 인증
-- **What:** QUIC 노드간 연결 시 피어 신원 검증
-- **Why:** transport/quic.go:120에 InsecureSkipVerify: true — 아무 노드나 클러스터에 합류 가능. 프로덕션 보안 위험
-- **Context:** TLS 인증서 검증 활성화 + PSK 헤더 또는 상호 TLS(mTLS) 구현 필요
-
 ## P2: Graceful Shutdown 개선
 
 ### Targeted Transfer 개선
