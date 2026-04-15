@@ -47,6 +47,20 @@ func encodeRPC(rpcType string, msg any) ([]byte, error) {
 			Term:    reply.Term,
 			Success: reply.Success,
 		})
+	case rpcTypeInstallSnapshot:
+		args := msg.(*InstallSnapshotArgs)
+		data, err = proto.Marshal(&pb.InstallSnapshotArgs{
+			Term:              args.Term,
+			LeaderId:          args.LeaderID,
+			LastIncludedIndex: args.LastIncludedIndex,
+			LastIncludedTerm:  args.LastIncludedTerm,
+			Data:              args.Data,
+		})
+	case rpcTypeInstallSnapshotReply:
+		reply := msg.(*InstallSnapshotReply)
+		data, err = proto.Marshal(&pb.InstallSnapshotReply{
+			Term: reply.Term,
+		})
 	default:
 		return nil, fmt.Errorf("unknown RPC type: %s", rpcType)
 	}
@@ -118,5 +132,29 @@ func decodeAppendEntriesReply(data []byte) (*AppendEntriesReply, error) {
 	return &AppendEntriesReply{
 		Term:    pb_.Term,
 		Success: pb_.Success,
+	}, nil
+}
+
+func decodeInstallSnapshotArgs(data []byte) (*InstallSnapshotArgs, error) {
+	var pb_ pb.InstallSnapshotArgs
+	if err := proto.Unmarshal(data, &pb_); err != nil {
+		return nil, err
+	}
+	return &InstallSnapshotArgs{
+		Term:              pb_.Term,
+		LeaderID:          pb_.LeaderId,
+		LastIncludedIndex: pb_.LastIncludedIndex,
+		LastIncludedTerm:  pb_.LastIncludedTerm,
+		Data:              pb_.Data,
+	}, nil
+}
+
+func decodeInstallSnapshotReply(data []byte) (*InstallSnapshotReply, error) {
+	var pb_ pb.InstallSnapshotReply
+	if err := proto.Unmarshal(data, &pb_); err != nil {
+		return nil, err
+	}
+	return &InstallSnapshotReply{
+		Term: pb_.Term,
 	}, nil
 }

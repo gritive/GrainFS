@@ -28,11 +28,6 @@
 
 ## P1: Raft 기반 인프라 (Phase 2 미완성)
 
-### InstallSnapshot RPC
-- **What:** 느린 팔로워에게 스냅샷 전송하는 RPC
-- **Why:** 팔로워가 리더 로그보다 너무 뒤처지면 로그만으로 동기화 불가. 스냅샷 전송이 유일한 방법. 로그 압축 활성화의 전제 조건
-- **Context:** raft.proto에 SnapshotMeta만 있고 전송 메시지 없음. 새 RPC 메시지 타입과 핸들러 필요
-- **Depends on:** 스냅샷 오케스트레이션 wiring
 
 ## P1: 클러스터 멤버십 변경 (Phase 5 미구현)
 

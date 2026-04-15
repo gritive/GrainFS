@@ -124,8 +124,9 @@ type Node struct {
 	stopped  bool
 
 	// transport callback for sending RPCs
-	sendRequestVote   func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
-	sendAppendEntries func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error)
+	sendRequestVote    func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
+	sendAppendEntries  func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error)
+	sendInstallSnapshot func(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error)
 
 	// durable storage (optional; when nil, state is in-memory only)
 	store LogStore
@@ -199,6 +200,13 @@ func (n *Node) SetTransport(
 ) {
 	n.sendRequestVote = sendVote
 	n.sendAppendEntries = sendAppend
+}
+
+// SetInstallSnapshotTransport sets the callback for sending snapshots to slow followers.
+func (n *Node) SetInstallSnapshotTransport(
+	send func(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error),
+) {
+	n.sendInstallSnapshot = send
 }
 
 // Start begins the Raft node's main loop.
@@ -526,6 +534,43 @@ func (n *Node) replicateTo(peer string) {
 	commitIndex := n.commitIndex
 
 	nextIdx := n.nextIndex[peer]
+
+	// If nextIdx is behind the compacted log, send snapshot instead
+	if nextIdx < n.firstIndex && n.sendInstallSnapshot != nil && n.store != nil {
+		snapIdx, snapTerm, snapData, err := n.store.LoadSnapshot()
+		if err == nil && snapData != nil {
+			args := &InstallSnapshotArgs{
+				Term:              term,
+				LeaderID:          leaderID,
+				LastIncludedIndex: snapIdx,
+				LastIncludedTerm:  snapTerm,
+				Data:              snapData,
+			}
+			n.mu.Unlock()
+
+			reply, err := n.sendInstallSnapshot(peer, args)
+			if err != nil {
+				return
+			}
+
+			n.mu.Lock()
+			if reply.Term > n.currentTerm {
+				n.currentTerm = reply.Term
+				n.state = Follower
+				n.votedFor = ""
+				n.leaderID = ""
+				n.persistState()
+				n.signalReset()
+				n.mu.Unlock()
+				return
+			}
+			n.nextIndex[peer] = snapIdx + 1
+			n.matchIndex[peer] = snapIdx
+			n.mu.Unlock()
+			return
+		}
+	}
+
 	prevLogIndex := nextIdx - 1
 	prevLogTerm := uint64(0)
 	if prevLogIndex > 0 && n.hasLogEntry(prevLogIndex) {
@@ -787,6 +832,69 @@ func (n *Node) isLogUpToDate(lastLogIndex, lastLogTerm uint64) bool {
 		return lastLogTerm > myLastTerm
 	}
 	return lastLogIndex >= myLastIndex
+}
+
+// InstallSnapshotArgs is sent by the leader to bring a slow follower up to date.
+type InstallSnapshotArgs struct {
+	Term              uint64
+	LeaderID          string
+	LastIncludedIndex uint64
+	LastIncludedTerm  uint64
+	Data              []byte
+}
+
+// InstallSnapshotReply is the response to an InstallSnapshot RPC.
+type InstallSnapshotReply struct {
+	Term uint64
+}
+
+// HandleInstallSnapshot processes an incoming snapshot from the leader.
+// The follower replaces its entire log and state with the snapshot.
+func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshotReply {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	reply := &InstallSnapshotReply{Term: n.currentTerm}
+
+	if args.Term < n.currentTerm {
+		return reply
+	}
+
+	if args.Term > n.currentTerm {
+		n.currentTerm = args.Term
+		n.votedFor = ""
+		n.persistState()
+	}
+	n.state = Follower
+	n.leaderID = args.LeaderID
+	n.signalReset()
+
+	reply.Term = n.currentTerm
+
+	// Save snapshot to store
+	if n.store != nil {
+		if err := n.store.SaveSnapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data); err != nil {
+			return reply
+		}
+	}
+
+	// Discard entire log and reset to post-snapshot state
+	n.log = nil
+	n.firstIndex = args.LastIncludedIndex + 1
+	n.lastApplied = args.LastIncludedIndex
+	n.commitIndex = args.LastIncludedIndex
+
+	// Deliver snapshot data via applyCh so the FSM can restore
+	select {
+	case n.applyCh <- LogEntry{
+		Term:    args.LastIncludedTerm,
+		Index:   args.LastIncludedIndex,
+		Command: args.Data,
+	}:
+	default:
+	}
+
+	return reply
 }
 
 // TransferLeadership voluntarily steps down as leader, allowing a follower

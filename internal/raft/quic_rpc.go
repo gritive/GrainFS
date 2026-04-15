@@ -9,10 +9,12 @@ import (
 
 // RPC message types for QUIC transport.
 const (
-	rpcTypeRequestVote        = "RequestVote"
-	rpcTypeRequestVoteReply   = "RequestVoteReply"
-	rpcTypeAppendEntries      = "AppendEntries"
-	rpcTypeAppendEntriesReply = "AppendEntriesReply"
+	rpcTypeRequestVote          = "RequestVote"
+	rpcTypeRequestVoteReply     = "RequestVoteReply"
+	rpcTypeAppendEntries        = "AppendEntries"
+	rpcTypeAppendEntriesReply   = "AppendEntriesReply"
+	rpcTypeInstallSnapshot      = "InstallSnapshot"
+	rpcTypeInstallSnapshotReply = "InstallSnapshotReply"
 )
 
 // QUICRPCTransport bridges Raft RPCs over the QUIC transport layer
@@ -34,9 +36,10 @@ func NewQUICRPCTransport(tr *transport.QUICTransport, node *Node) *QUICRPCTransp
 	return rpc
 }
 
-// SetTransport wires sendRequestVote and sendAppendEntries into the Raft node.
+// SetTransport wires all Raft RPC callbacks into the Raft node.
 func (r *QUICRPCTransport) SetTransport() {
 	r.node.SetTransport(r.sendRequestVote, r.sendAppendEntries)
+	r.node.SetInstallSnapshotTransport(r.sendInstallSnapshot)
 }
 
 func (r *QUICRPCTransport) sendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
@@ -83,6 +86,28 @@ func (r *QUICRPCTransport) sendAppendEntries(peer string, args *AppendEntriesArg
 	return decodeAppendEntriesReply(data)
 }
 
+func (r *QUICRPCTransport) sendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	envelope, err := encodeRPC(rpcTypeInstallSnapshot, args)
+	if err != nil {
+		return nil, err
+	}
+
+	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
+	resp, err := r.transport.Call(context.Background(), peer, msg)
+	if err != nil {
+		return nil, fmt.Errorf("InstallSnapshot to %s: %w", peer, err)
+	}
+
+	rpcType, data, err := decodeRPC(resp.Payload)
+	if err != nil {
+		return nil, err
+	}
+	if rpcType != rpcTypeInstallSnapshotReply {
+		return nil, fmt.Errorf("unexpected reply type: %s", rpcType)
+	}
+	return decodeInstallSnapshotReply(data)
+}
+
 // handleRPC dispatches incoming Raft RPCs to the node's handlers and returns the response.
 func (r *QUICRPCTransport) handleRPC(req *transport.Message) *transport.Message {
 	rpcType, data, err := decodeRPC(req.Payload)
@@ -108,6 +133,14 @@ func (r *QUICRPCTransport) handleRPC(req *transport.Message) *transport.Message 
 		}
 		reply := r.node.HandleAppendEntries(args)
 		replyEnvelope, _ = encodeRPC(rpcTypeAppendEntriesReply, reply)
+
+	case rpcTypeInstallSnapshot:
+		args, err := decodeInstallSnapshotArgs(data)
+		if err != nil {
+			return nil
+		}
+		reply := r.node.HandleInstallSnapshot(args)
+		replyEnvelope, _ = encodeRPC(rpcTypeInstallSnapshotReply, reply)
 
 	default:
 		return nil

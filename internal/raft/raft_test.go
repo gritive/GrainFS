@@ -375,6 +375,54 @@ func TestPersistLogEntries_PanicsOnError(t *testing.T) {
 	}, "persistLogEntries should panic on AppendEntries error")
 }
 
+// --- InstallSnapshot tests ---
+
+func TestHandleInstallSnapshot_RestoresState(t *testing.T) {
+	config := DefaultConfig("A", []string{"B"})
+	node := NewNode(config)
+
+	reply := node.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "B",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("snapshot-data"),
+	})
+
+	assert.Equal(t, uint64(2), reply.Term)
+
+	node.mu.Lock()
+	assert.Equal(t, uint64(2), node.currentTerm)
+	assert.Equal(t, uint64(5), node.lastApplied)
+	assert.Equal(t, uint64(5), node.commitIndex)
+	assert.Equal(t, uint64(6), node.firstIndex)
+	assert.Empty(t, node.log)
+	node.mu.Unlock()
+}
+
+func TestHandleInstallSnapshot_RejectsStaleTerm(t *testing.T) {
+	config := DefaultConfig("A", []string{"B"})
+	node := NewNode(config)
+
+	node.mu.Lock()
+	node.currentTerm = 5
+	node.mu.Unlock()
+
+	reply := node.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              3,
+		LeaderID:          "B",
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  3,
+		Data:              []byte("old-snap"),
+	})
+
+	assert.Equal(t, uint64(5), reply.Term)
+
+	node.mu.Lock()
+	assert.Equal(t, uint64(0), node.lastApplied)
+	node.mu.Unlock()
+}
+
 func TestCompactLog_UpdatesFirstIndex(t *testing.T) {
 	config := DefaultConfig("A", nil)
 	node := NewNode(config)
