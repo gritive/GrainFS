@@ -203,3 +203,44 @@ func TestLargeObject(t *testing.T) {
 	_, err = os.Stat(b.objectPath("test-bucket", "large.bin"))
 	require.NoError(t, err, "expected file on disk")
 }
+
+func TestLocalBackend_BucketPolicy(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.CreateBucket("policy-bucket"))
+
+	// No policy initially
+	_, err := b.GetBucketPolicy("policy-bucket")
+	assert.ErrorIs(t, err, ErrBucketNotFound)
+
+	// Set policy
+	policy := []byte(`{"Version":"2012-10-17","Statement":[]}`)
+	require.NoError(t, b.SetBucketPolicy("policy-bucket", policy))
+
+	// Get policy
+	got, err := b.GetBucketPolicy("policy-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, policy, got)
+
+	// Delete policy
+	require.NoError(t, b.DeleteBucketPolicy("policy-bucket"))
+
+	// Verify deleted
+	_, err = b.GetBucketPolicy("policy-bucket")
+	assert.ErrorIs(t, err, ErrBucketNotFound)
+
+	// Delete non-existent policy (should not error)
+	require.NoError(t, b.DeleteBucketPolicy("policy-bucket"))
+}
+
+func TestLocalBackend_Close(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.Close())
+}
+
+func TestCachedBackend_CloseAndUnwrap(t *testing.T) {
+	b := setupTestBackend(t)
+	cached := NewCachedBackend(b)
+
+	assert.Equal(t, b, cached.Unwrap())
+	require.NoError(t, cached.Close())
+}

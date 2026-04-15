@@ -26,9 +26,6 @@
 - **Context:** 현재 read forwarding, redirect-to-leader, proxy 없음
 - **Depends on:** QUICTransport→Raft wiring
 
-## P1: Raft 기반 인프라 (Phase 2 미완성)
-
-
 ## P1: 클러스터 멤버십 변경 (Phase 5 미구현)
 
 ### Joint Consensus
@@ -43,26 +40,13 @@
 - **Why:** transport/quic.go:120에 InsecureSkipVerify: true — 아무 노드나 클러스터에 합류 가능. 프로덕션 보안 위험
 - **Context:** TLS 인증서 검증 활성화 + PSK 헤더 또는 상호 TLS(mTLS) 구현 필요
 
-## P2: Graceful Shutdown - Raft 리더 이전 (구현 완료, shutdown 연결 필요)
-
-### Leader Transfer shutdown 연결
-- **What:** serve.go의 graceful shutdown에서 Raft.TransferLeadership() 호출
-- **Why:** 리더가 갑자기 종료되면 새 선거까지 클러스터 쓰기 불가 (수백ms~수초)
-- **Context:** raft.go:739에 TransferLeadership() 구현 완료 (simple step-down). serve.go shutdown 경로에 호출 추가 필요
+## P2: Graceful Shutdown 개선
 
 ### Targeted Transfer 개선
 - **What:** matchIndex 기반 best peer 선택 + TimeoutNow 메시지로 즉시 선거 시작
 - **Why:** simple step-down은 느린 팔로워가 리더가 될 수 있고 추가 선거 라운드로 수백ms 쓰기 중단
 - **Context:** 현재 raft.go:739는 단순 step-down. Raft 논문 §3.10 참고
 - **Depends on:** Leader Transfer shutdown 연결
-
-## P2: Raft 성능 개선
-
-### applyLoop 폴링 제거
-- **What:** raft.go의 applyLoop에서 time.Sleep(5ms) 폴링을 sync.Cond 또는 channel signal로 교체
-- **Why:** P99 apply 레이턴시에 최대 5ms 추가. Raft heartbeat 50ms 대비 10% 오버헤드
-- **Context:** raft.go:259-290, commitIndex 변경 시 signal 발송 필요
-- **Depends on:** 스냅샷 wiring과 함께 구현 권장
 
 ## P2: Zero-Downtime Solo→Cluster 전환 (Phase 3 미구현)
 
@@ -97,9 +81,3 @@
 - **Why:** 현재 aws-sdk-go-v2만 테스트. 다른 SDK에서 비호환 동작 가능
 - **Context:** tests/e2e/에 Go SDK 테스트만 존재. 쉘 스크립트 또는 Python 테스트 추가 필요
 
-## 테스트 커버리지
-
-### 80% 미만 패키지 커버리지 향상
-- **What:** storage(79.6%) 패키지를 80%+ 달성
-- **Why:** 프로젝트 표준 80% 미달
-- **Context:** 현재 커버리지 (2026-04-16 기준): cluster 81.5%, encrypt 83.3%, erasure 86.6%, nfsserver 100%, raft 85.9%, s3auth 91.2%, server 88.1%, storage 79.6%, transport 86.9%, vfs 91.5%, volume 84.1%

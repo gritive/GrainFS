@@ -315,7 +315,14 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 		slog.Warn("http server shutdown error", "error", err)
 	}
 
-	// 2. Stop Raft apply loop
+	// 2. Transfer Raft leadership before stopping
+	if err := node.TransferLeadership(); err != nil {
+		slog.Debug("leadership transfer skipped", "reason", err)
+	} else {
+		slog.Info("leadership transferred", "component", "raft")
+	}
+
+	// 3. Stop Raft apply loop
 	close(stopApply)
 
 	slog.Info("server stopped", "component", "server", "mode", "cluster")

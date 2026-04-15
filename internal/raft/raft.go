@@ -121,6 +121,7 @@ type Node struct {
 	applyCh  chan LogEntry
 	stopCh   chan struct{}
 	resetCh  chan struct{} // signals election timer reset
+	commitCh chan struct{} // signals applyLoop when commitIndex advances
 	stopped  bool
 
 	// transport callback for sending RPCs
@@ -152,6 +153,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		applyCh:    make(chan LogEntry, 64),
 		stopCh:     make(chan struct{}),
 		resetCh:    make(chan struct{}, 1),
+		commitCh:   make(chan struct{}, 1),
 		waiters:    make(map[uint64]chan struct{}),
 	}
 
@@ -278,33 +280,32 @@ func (n *Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) 
 
 func (n *Node) applyLoop() {
 	for {
-		select {
-		case <-n.stopCh:
-			return
-		default:
-		}
-
 		n.mu.Lock()
-		if n.commitIndex > n.lastApplied && n.hasLogEntry(n.lastApplied+1) {
-			n.lastApplied++
-			entry := n.log[n.toSliceIdx(n.lastApplied)]
-			idx := entry.Index
-
-			// Signal any waiter for this index
-			if ch, ok := n.waiters[idx]; ok {
-				close(ch)
-				delete(n.waiters, idx)
-			}
+		for n.commitIndex <= n.lastApplied || !n.hasLogEntry(n.lastApplied+1) {
 			n.mu.Unlock()
-
 			select {
-			case n.applyCh <- entry:
 			case <-n.stopCh:
 				return
+			case <-n.commitCh:
 			}
-		} else {
-			n.mu.Unlock()
-			time.Sleep(5 * time.Millisecond) // avoid busy loop
+			n.mu.Lock()
+		}
+
+		n.lastApplied++
+		entry := n.log[n.toSliceIdx(n.lastApplied)]
+		idx := entry.Index
+
+		// Signal any waiter for this index
+		if ch, ok := n.waiters[idx]; ok {
+			close(ch)
+			delete(n.waiters, idx)
+		}
+		n.mu.Unlock()
+
+		select {
+		case n.applyCh <- entry:
+		case <-n.stopCh:
+			return
 		}
 	}
 }
@@ -653,6 +654,7 @@ func (n *Node) advanceCommitIndex() {
 
 		if count > total/2 {
 			n.commitIndex = idx
+			n.signalCommit()
 			return
 		}
 	}
@@ -754,6 +756,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 		} else {
 			n.commitIndex = lastNew
 		}
+		n.signalCommit()
 	}
 
 	reply.Success = true
@@ -763,6 +766,14 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 func (n *Node) signalReset() {
 	select {
 	case n.resetCh <- struct{}{}:
+	default:
+	}
+}
+
+// signalCommit notifies the applyLoop that commitIndex has advanced.
+func (n *Node) signalCommit() {
+	select {
+	case n.commitCh <- struct{}{}:
 	default:
 	}
 }
@@ -883,6 +894,7 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	n.firstIndex = args.LastIncludedIndex + 1
 	n.lastApplied = args.LastIncludedIndex
 	n.commitIndex = args.LastIncludedIndex
+	n.signalCommit()
 
 	// Deliver snapshot data via applyCh so the FSM can restore
 	select {
