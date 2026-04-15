@@ -18,18 +18,19 @@ import (
 type Server struct {
 	backend  storage.Backend
 	volName  string
+	vfsOpts  []vfs.VFSOption
 	mu       sync.Mutex
 	listener net.Listener
 }
 
 // NewServer creates a new NFS server for the given volume.
-func NewServer(backend storage.Backend, volName string) *Server {
-	return &Server{backend: backend, volName: volName}
+func NewServer(backend storage.Backend, volName string, vfsOpts ...vfs.VFSOption) *Server {
+	return &Server{backend: backend, volName: volName, vfsOpts: vfsOpts}
 }
 
 // ListenAndServe starts the NFS server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
-	fs, err := vfs.New(s.backend, s.volName)
+	fs, err := vfs.New(s.backend, s.volName, s.vfsOpts...)
 	if err != nil {
 		return fmt.Errorf("create vfs: %w", err)
 	}

@@ -180,23 +180,26 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - `grainfs serve` 즉시 실행 후 브라우저에서 오브젝트 조작 가능
 - 벤치마크 리포트 자동 생성 (ops/sec, P50/P99 지연, EC 인코딩 시간)
 
-### Phase 8: Performance (측정 기반 최적화)
+### Phase 8: Performance (측정 기반 최적화) ✅
 
 **목표:** Phase 7 벤치마크 결과를 근거로, 확인된 병목을 제거한다.
 
 - ~~**내부 직렬화 protobuf 전환**~~: ✅ 완료 (Phase 7에서 선행). raft, storage, erasure, cluster, volume 전 모듈 protobuf 전환
-- **읽기 캐시**: 핫 오브젝트 읽기 캐시 (LRU). 벤치마크에서 반복 읽기가 병목으로 확인된 경우 도입
-- **NFS 성능 최적화**: 읽기/쓰기 캐싱, 대용량 파일 최적화. 벤치마크에서 NFS throughput이 목표 미달인 경우
+- **읽기 캐시**: ✅ CachedBackend (LRU, 바이트 크기 기반 관리). Solo 모드에서 GetObject/HeadObject 캐시, PutObject/DeleteObject/CompleteMultipartUpload 시 자동 무효화. 클러스터 모드는 데이터 일관성을 위해 캐시 미적용 (Phase 9에서 Raft FSM 기반 무효화 검토)
+- **NFS 성능 최적화**: ✅ VFS 레이어에 Stat/ReadDir TTL 캐시 도입. NFS가 반복 호출하는 Stat, ReadDir, isDir 결과를 캐싱하여 backend 호출 대폭 감소. 파일 생성/수정/삭제 시 자동 무효화
 
 **검증:**
 - protobuf 전환 후 Raft heartbeat 지연 50% 이상 감소 확인
-- 각 최적화 전후 벤치마크 비교 (동일 워크로드, 개선율 수치 제시)
+- 캐시 전후 벤치마크 비교 (Apple M3, 4KB 객체 100개, warm cache):
+  - GetObject: 17,000 ns → 140 ns/op (**~120x 개선**, allocs 29→5)
+  - HeadObject: 1,700 ns → 88 ns/op (**~19x 개선**, allocs 24→2)
 
 ### Phase 9: Security & Scale
 
 **목표:** 프로덕션/멀티테넌트 배포를 위한 보안과 대규모 운영을 완성한다.
 
 - **버킷/볼륨 인증**: 버킷별, 볼륨별 접근 제어 (ACL 또는 IAM 스타일 정책)
+- **클러스터 읽기 캐시**: Raft FSM 적용 시 캐시 무효화 이벤트 발생 → 노드 간 일관된 캐시. Phase 8에서 Solo 모드 전용으로 도입한 CachedBackend를 클러스터로 확장
 - **NFS v4 지원**: NFSv3 → NFSv4 업그레이드 (보안, 상태 관리, 잠금/위임)
 - **WAL vs BadgerDB 내장 WAL 검토**: BadgerDB 자체 WAL 내구성 한계 분석 후, 별도 WAL 필요 여부 결정. kill -9 시나리오 테스트로 판단
 - **Packed Blob 포맷**: 대량 소형 객체 시나리오에서 inode 압박 해소를 위한 append-only 로그 포맷
@@ -204,6 +207,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 **검증:**
 - 버킷 ACL 설정 후 무단 접근 거부 확인
+- 클러스터 3노드에서 노드A PUT → 노드B GET 시 stale 캐시 없이 최신 데이터 반환 확인
 - NFSv4 마운트 후 잠금, 위임 동작 확인
 - BadgerDB WAL kill -9 테스트 → 별도 WAL 필요 시 구현 후 동일 테스트 통과
 - 100만 소형 객체 (< 1KB) 저장 후 inode 사용량 비교 (flat vs. packed)

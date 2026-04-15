@@ -28,6 +28,36 @@ type GrainVFS struct {
 	bucket  string
 	root    string // chroot prefix
 	mu      sync.RWMutex
+
+	// Caching
+	statCacheTTL time.Duration
+	dirCacheTTL  time.Duration
+	statCache    map[string]*statCacheEntry
+	dirCache     map[string]*dirCacheEntry
+	cacheMu      sync.RWMutex
+}
+
+type statCacheEntry struct {
+	info    os.FileInfo
+	expires time.Time
+}
+
+type dirCacheEntry struct {
+	entries []os.FileInfo
+	expires time.Time
+}
+
+// VFSOption configures GrainVFS.
+type VFSOption func(*GrainVFS)
+
+// WithStatCacheTTL sets the TTL for Stat result caching.
+func WithStatCacheTTL(ttl time.Duration) VFSOption {
+	return func(fs *GrainVFS) { fs.statCacheTTL = ttl }
+}
+
+// WithDirCacheTTL sets the TTL for ReadDir result caching.
+func WithDirCacheTTL(ttl time.Duration) VFSOption {
+	return func(fs *GrainVFS) { fs.dirCacheTTL = ttl }
 }
 
 var (
@@ -36,13 +66,23 @@ var (
 )
 
 // New creates a new GrainVFS for the given volume name.
-func New(backend storage.Backend, volumeName string) (*GrainVFS, error) {
+func New(backend storage.Backend, volumeName string, opts ...VFSOption) (*GrainVFS, error) {
 	bucket := vfsBucketPrefix + volumeName
 	_ = backend.CreateBucket(bucket)
 	if err := backend.HeadBucket(bucket); err != nil {
 		return nil, fmt.Errorf("ensure vfs bucket: %w", err)
 	}
-	return &GrainVFS{backend: backend, bucket: bucket, root: ""}, nil
+	fs := &GrainVFS{backend: backend, bucket: bucket, root: ""}
+	for _, o := range opts {
+		o(fs)
+	}
+	if fs.statCacheTTL > 0 {
+		fs.statCache = make(map[string]*statCacheEntry)
+	}
+	if fs.dirCacheTTL > 0 {
+		fs.dirCache = make(map[string]*dirCacheEntry)
+	}
+	return fs, nil
 }
 
 func (fs *GrainVFS) fullPath(name string) string {
@@ -102,13 +142,20 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 	return f, nil
 }
 
-// Stat returns file info.
+// Stat returns file info, using the stat cache if enabled.
 func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 	fp := fs.fullPath(filename)
 
+	// Check stat cache
+	if cached := fs.getStatCache(fp); cached != nil {
+		return cached, nil
+	}
+
 	// Check if it's a directory
 	if fs.isDir(fp) {
-		return &fileInfo{name: path.Base(filename), size: 0, isDir: true, modTime: time.Now()}, nil
+		info := &fileInfo{name: path.Base(filename), size: 0, isDir: true, modTime: time.Now()}
+		fs.putStatCache(fp, info)
+		return info, nil
 	}
 
 	// Check as file
@@ -117,12 +164,14 @@ func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 		return nil, os.ErrNotExist
 	}
 
-	return &fileInfo{
+	info := &fileInfo{
 		name:    path.Base(filename),
 		size:    obj.Size,
 		isDir:   false,
 		modTime: time.Unix(obj.LastModified, 0),
-	}, nil
+	}
+	fs.putStatCache(fp, info)
+	return info, nil
 }
 
 // Rename renames a file.
@@ -147,7 +196,16 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 	}
 
 	// Delete old
-	return fs.backend.DeleteObject(fs.bucket, oldFP)
+	if err := fs.backend.DeleteObject(fs.bucket, oldFP); err != nil {
+		return err
+	}
+
+	// Invalidate caches
+	fs.invalidateStatCache(oldFP)
+	fs.invalidateStatCache(newFP)
+	fs.invalidateParentDirCache(oldFP)
+	fs.invalidateParentDirCache(newFP)
+	return nil
 }
 
 // Remove removes a file or empty directory.
@@ -156,8 +214,12 @@ func (fs *GrainVFS) Remove(filename string) error {
 	// Try as file first
 	if err := fs.backend.DeleteObject(fs.bucket, fp); err != nil {
 		// Try as directory marker
-		return fs.backend.DeleteObject(fs.bucket, fp+dirMarkerSuffix)
+		if err := fs.backend.DeleteObject(fs.bucket, fp+dirMarkerSuffix); err != nil {
+			return err
+		}
 	}
+	fs.invalidateStatCache(fp)
+	fs.invalidateParentDirCache(fp)
 	return nil
 }
 
@@ -166,9 +228,15 @@ func (fs *GrainVFS) Join(elem ...string) string {
 	return path.Join(elem...)
 }
 
-// ReadDir reads a directory.
+// ReadDir reads a directory, using the dir cache if enabled.
 func (fs *GrainVFS) ReadDir(dirPath string) ([]os.FileInfo, error) {
 	fp := fs.fullPath(dirPath)
+
+	// Check dir cache
+	if cached := fs.getDirCache(fp); cached != nil {
+		return cached, nil
+	}
+
 	prefix := ""
 	if fp != "" {
 		prefix = fp + "/"
@@ -220,6 +288,8 @@ func (fs *GrainVFS) ReadDir(dirPath string) ([]os.FileInfo, error) {
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Name() < result[j].Name()
 	})
+
+	fs.putDirCache(fp, result)
 	return result, nil
 }
 
@@ -409,7 +479,13 @@ func (f *grainFile) Close() error {
 		data := f.buf.Bytes()
 		_, err := f.fs.backend.PutObject(f.fs.bucket, f.path,
 			bytes.NewReader(data), "application/octet-stream")
-		return err
+		if err != nil {
+			return err
+		}
+		// Invalidate caches after write
+		f.fs.invalidateStatCache(f.path)
+		f.fs.invalidateParentDirCache(f.path)
+		return nil
 	}
 	return nil
 }
@@ -431,4 +507,76 @@ func (f *grainFile) Truncate(size int64) error {
 	}
 	f.buf = bytes.NewBuffer(data)
 	return nil
+}
+
+// --- Stat cache helpers ---
+
+func (fs *GrainVFS) getStatCache(fp string) os.FileInfo {
+	if fs.statCache == nil {
+		return nil
+	}
+	fs.cacheMu.RLock()
+	entry, ok := fs.statCache[fp]
+	fs.cacheMu.RUnlock()
+	if !ok || time.Now().After(entry.expires) {
+		return nil
+	}
+	return entry.info
+}
+
+func (fs *GrainVFS) putStatCache(fp string, info os.FileInfo) {
+	if fs.statCache == nil {
+		return
+	}
+	fs.cacheMu.Lock()
+	fs.statCache[fp] = &statCacheEntry{info: info, expires: time.Now().Add(fs.statCacheTTL)}
+	fs.cacheMu.Unlock()
+}
+
+func (fs *GrainVFS) invalidateStatCache(fp string) {
+	if fs.statCache == nil {
+		return
+	}
+	fs.cacheMu.Lock()
+	delete(fs.statCache, fp)
+	fs.cacheMu.Unlock()
+}
+
+// --- Dir cache helpers ---
+
+func (fs *GrainVFS) getDirCache(fp string) []os.FileInfo {
+	if fs.dirCache == nil {
+		return nil
+	}
+	fs.cacheMu.RLock()
+	entry, ok := fs.dirCache[fp]
+	fs.cacheMu.RUnlock()
+	if !ok || time.Now().After(entry.expires) {
+		return nil
+	}
+	return entry.entries
+}
+
+func (fs *GrainVFS) putDirCache(fp string, entries []os.FileInfo) {
+	if fs.dirCache == nil {
+		return
+	}
+	fs.cacheMu.Lock()
+	fs.dirCache[fp] = &dirCacheEntry{entries: entries, expires: time.Now().Add(fs.dirCacheTTL)}
+	fs.cacheMu.Unlock()
+}
+
+// invalidateParentDirCache invalidates the dir cache for the parent directory
+// of the given path, so subsequent ReadDir calls reflect the change.
+func (fs *GrainVFS) invalidateParentDirCache(fp string) {
+	if fs.dirCache == nil {
+		return
+	}
+	parent := path.Dir(fp)
+	if parent == "." {
+		parent = ""
+	}
+	fs.cacheMu.Lock()
+	delete(fs.dirCache, parent)
+	fs.cacheMu.Unlock()
 }

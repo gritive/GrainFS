@@ -153,8 +153,23 @@ type ECPolicySetter interface {
 	SetBucketECPolicy(bucket string, ecEnabled bool) error
 }
 
+// unwrapBackend returns the innermost backend, unwrapping decorators like CachedBackend.
+type unwrapper interface {
+	Unwrap() storage.Backend
+}
+
+func unwrapBackend(b storage.Backend) storage.Backend {
+	for {
+		u, ok := b.(unwrapper)
+		if !ok {
+			return b
+		}
+		b = u.Unwrap()
+	}
+}
+
 func (s *Server) setBucketECPolicy(c *app.RequestContext, bucket, ecParam string) {
-	setter, ok := s.backend.(ECPolicySetter)
+	setter, ok := unwrapBackend(s.backend).(ECPolicySetter)
 	if !ok {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "EC policy not supported by this backend")
 		return

@@ -25,6 +25,7 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/vfs"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -100,6 +101,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to initialize storage: %w", err)
 		}
+		// Wrap with read cache
+		backend = storage.NewCachedBackend(backend)
+
 		mode := "solo"
 		if ecEnabled {
 			mode = "solo-ec"
@@ -143,7 +147,10 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 			}
 		}
 
-		nfsSrv = nfsserver.NewServer(backend, defaultVolName)
+		nfsSrv = nfsserver.NewServer(backend, defaultVolName,
+			vfs.WithStatCacheTTL(1*time.Second),
+			vfs.WithDirCacheTTL(1*time.Second),
+		)
 		go func() {
 			nfsAddr := fmt.Sprintf(":%d", nfsPort)
 			if err := nfsSrv.ListenAndServe(nfsAddr); err != nil {
@@ -238,13 +245,17 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 	node.Start()
 	defer node.Stop()
 
-	backend, err := cluster.NewDistributedBackend(dataDir, db, node)
+	distBackend, err := cluster.NewDistributedBackend(dataDir, db, node)
 	if err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
 
 	stopApply := make(chan struct{})
-	go backend.RunApplyLoop(stopApply)
+	go distBackend.RunApplyLoop(stopApply)
+
+	// No read cache in cluster mode — other nodes can modify data,
+	// making local cache stale. Revisit with Raft FSM-based invalidation.
+	var backend storage.Backend = distBackend
 
 	// Auto-create "default" bucket on startup
 	if err := backend.CreateBucket("default"); err != nil {

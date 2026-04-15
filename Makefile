@@ -7,7 +7,7 @@ PROTO_SRC := $(shell find internal -name '*.proto')
 PROTO_GEN := $(PROTO_SRC:.proto=.pb.go)
 GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go' -not -name '*.pb.go')
 
-.PHONY: test test-race test-e2e clean run lint bench test-nbd-docker
+.PHONY: test test-race test-e2e clean run lint bench test-nbd-docker update-deps
 
 bin/$(BINARY): $(GO_SRC) $(PROTO_GEN)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
@@ -51,3 +51,6 @@ test-nbd-docker:
 	@echo "Running NBD E2E tests in Docker..."
 	docker build -t grainfs-nbd-test -f docker/nbd-test.Dockerfile .
 	docker run --rm --privileged -v /lib/modules:/lib/modules:ro grainfs-nbd-test
+
+update-deps:
+	find . -name "go.mod" -not -path "*/vendor/*" -execdir go get -u ./... \; -execdir go mod tidy \;
