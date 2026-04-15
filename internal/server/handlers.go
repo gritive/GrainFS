@@ -411,6 +411,66 @@ func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
 	}
 	key := keys[0]
 
+	// Validate POST policy if authentication is enabled and policy is present
+	if s.verifier != nil {
+		policyB64 := ""
+		if ps := form.Value["policy"]; len(ps) > 0 {
+			policyB64 = ps[0]
+		}
+		sig := ""
+		if ss := form.Value["X-Amz-Signature"]; len(ss) > 0 {
+			sig = ss[0]
+		}
+
+		if policyB64 != "" {
+			// Validate expiration
+			if err := s3auth.ValidatePostPolicyExpiration(policyB64); err != nil {
+				writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
+				return
+			}
+
+			// Validate conditions
+			formFields := map[string]string{
+				"bucket": bucket,
+				"key":    key,
+			}
+			for k, vs := range form.Value {
+				if len(vs) > 0 {
+					formFields[k] = vs[0]
+				}
+			}
+			if err := s3auth.ValidatePostPolicyConditions(policyB64, formFields); err != nil {
+				writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
+				return
+			}
+
+			// Validate signature
+			if sig != "" {
+				credential := ""
+				if cs := form.Value["X-Amz-Credential"]; len(cs) > 0 {
+					credential = cs[0]
+				}
+				// credential format: AKID/20260416/us-east-1/s3/aws4_request
+				parts := strings.SplitN(credential, "/", 5)
+				if len(parts) == 5 {
+					accessKey := parts[0]
+					date := parts[1]
+					region := parts[2]
+					service := parts[3]
+					secretKey := s.verifier.LookupSecret(accessKey)
+					if secretKey == "" {
+						writeXMLError(c, consts.StatusForbidden, "AccessDenied", "invalid access key")
+						return
+					}
+					if err := s3auth.VerifyPostPolicy(policyB64, sig, secretKey, date, region, service); err != nil {
+						writeXMLError(c, consts.StatusForbidden, "SignatureDoesNotMatch", err.Error())
+						return
+					}
+				}
+			}
+		}
+	}
+
 	// Extract content type (optional)
 	contentType := "application/octet-stream"
 	if cts := form.Value["Content-Type"]; len(cts) > 0 {
@@ -637,4 +697,41 @@ func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 
 	data, _ := json.Marshal(status)
 	c.Data(consts.StatusOK, "application/json", data)
+}
+
+// joinClusterHandler handles POST /api/cluster/join for runtime solo→cluster transition.
+func (s *Server) joinClusterHandler(_ context.Context, c *app.RequestContext) {
+	if s.joinCluster == nil {
+		writeXMLError(c, consts.StatusConflict, "InvalidRequest", "server is already in cluster mode or join not supported")
+		return
+	}
+
+	var req struct {
+		NodeID     string `json:"node_id"`
+		RaftAddr   string `json:"raft_addr"`
+		Peers      string `json:"peers"`
+		ClusterKey string `json:"cluster_key"`
+	}
+	body, _ := c.Body()
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeXMLError(c, consts.StatusBadRequest, "MalformedJSON", err.Error())
+		return
+	}
+
+	if req.RaftAddr == "" || req.Peers == "" {
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "raft_addr and peers are required")
+		return
+	}
+
+	if err := s.joinCluster(req.NodeID, req.RaftAddr, req.Peers, req.ClusterKey); err != nil {
+		resp, _ := json.Marshal(map[string]string{"error": err.Error()})
+		c.Data(consts.StatusInternalServerError, "application/json", resp)
+		return
+	}
+
+	// Clear the join callback so it can't be called twice
+	s.joinCluster = nil
+
+	resp, _ := json.Marshal(map[string]string{"status": "joined", "mode": "cluster"})
+	c.Data(consts.StatusOK, "application/json", resp)
 }

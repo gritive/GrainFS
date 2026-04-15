@@ -40,7 +40,8 @@ type DistributedBackend struct {
 	snapMgr     *raft.SnapshotManager
 	snapNode    *raft.Node // node for CompactLog after snapshot
 	shardSvc    *ShardService
-	allNodes    []string // all node addresses (including self) for shard placement
+	allNodes    []string      // all node addresses (including self) for shard placement
+	peerHealth  *PeerHealth
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -66,6 +67,14 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
 	b.allNodes = allNodes
+	// Build peer list (excluding self) for health tracking
+	var peers []string
+	for _, n := range allNodes {
+		if n != b.node.ID() {
+			peers = append(peers, n)
+		}
+	}
+	b.peerHealth = NewPeerHealth(peers, 10*time.Second)
 }
 
 // SetSnapshotManager configures automatic snapshot creation after N applied entries.
@@ -282,15 +291,24 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 		return nil, fmt.Errorf("write object: %w", err)
 	}
 
-	// Replicate data to all peer nodes via ShardService
+	// Replicate data to healthy peer nodes via ShardService
 	if b.shardSvc != nil {
 		ctx := context.Background()
 		for _, peer := range b.allNodes {
 			if peer == b.node.ID() {
-				continue // skip self
+				continue
+			}
+			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+				b.logger.Debug("skipping unhealthy peer for replication", "peer", peer)
+				continue
 			}
 			if err := b.shardSvc.WriteShard(ctx, peer, bucket, key, 0, data); err != nil {
 				b.logger.Warn("data replication failed", "peer", peer, "bucket", bucket, "key", key, "error", err)
+				if b.peerHealth != nil {
+					b.peerHealth.MarkUnhealthy(peer)
+				}
+			} else if b.peerHealth != nil {
+				b.peerHealth.MarkHealthy(peer)
 			}
 		}
 	}
@@ -334,16 +352,42 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		return f, obj, nil
 	}
 
-	// Local file not found — try fetching from peer nodes
+	// Local file not found — try fetching from peer nodes (healthy first, then all)
 	if b.shardSvc != nil && os.IsNotExist(err) {
 		ctx := context.Background()
+		// Try healthy peers first
 		for _, peer := range b.allNodes {
 			if peer == b.node.ID() {
 				continue
 			}
+			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+				continue
+			}
 			data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, key, 0)
 			if fetchErr == nil && data != nil {
+				if b.peerHealth != nil {
+					b.peerHealth.MarkHealthy(peer)
+				}
 				return io.NopCloser(bytes.NewReader(data)), obj, nil
+			}
+			if fetchErr != nil && b.peerHealth != nil {
+				b.peerHealth.MarkUnhealthy(peer)
+			}
+		}
+		// Fallback: try unhealthy peers (they may have recovered)
+		if b.peerHealth != nil {
+			for _, peer := range b.allNodes {
+				if peer == b.node.ID() {
+					continue
+				}
+				if b.peerHealth.IsHealthy(peer) {
+					continue // already tried
+				}
+				data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, key, 0)
+				if fetchErr == nil && data != nil {
+					b.peerHealth.MarkHealthy(peer)
+					return io.NopCloser(bytes.NewReader(data)), obj, nil
+				}
 			}
 		}
 	}
@@ -401,8 +445,14 @@ func (b *DistributedBackend) DeleteObject(bucket, key string) error {
 			if peer == b.node.ID() {
 				continue
 			}
+			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+				continue
+			}
 			if err := b.shardSvc.DeleteShards(ctx, peer, bucket, key); err != nil {
 				b.logger.Warn("remote shard delete failed", "peer", peer, "bucket", bucket, "key", key, "error", err)
+				if b.peerHealth != nil {
+					b.peerHealth.MarkUnhealthy(peer)
+				}
 			}
 		}
 	}

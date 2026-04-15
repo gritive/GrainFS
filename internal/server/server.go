@@ -26,6 +26,10 @@ type ClusterInfo interface {
 	Peers() []string
 }
 
+// JoinClusterFunc handles the runtime solo-to-cluster transition.
+// The serve layer provides this callback when starting in solo mode.
+type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
+
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend     storage.Backend
@@ -35,7 +39,8 @@ type Server struct {
 	policyStore *PolicyStore
 	ipLimiter   *RateLimiter
 	userLimiter *RateLimiter
-	cluster     ClusterInfo // nil in solo mode
+	cluster     ClusterInfo     // nil in solo mode
+	joinCluster JoinClusterFunc // nil if not in solo mode or already clustered
 }
 
 // Option configures the server.
@@ -52,6 +57,13 @@ func WithAuth(creds []s3auth.Credentials) Option {
 func WithClusterInfo(ci ClusterInfo) Option {
 	return func(s *Server) {
 		s.cluster = ci
+	}
+}
+
+// WithJoinCluster sets the callback for runtime solo-to-cluster transition.
+func WithJoinCluster(fn JoinClusterFunc) Option {
+	return func(s *Server) {
+		s.joinCluster = fn
 	}
 }
 
@@ -187,8 +199,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	// Multipart: POST /:bucket/*key with ?uploads or ?uploadId=
 	h.POST("/:bucket/*key", s.handlePost)
 
-	// Cluster status API (available in both solo and cluster mode)
+	// Cluster API (available in both solo and cluster mode)
 	h.GET("/api/cluster/status", s.clusterStatus)
+	h.POST("/api/cluster/join", s.joinClusterHandler)
 
 	// Volume management API
 	volumes := h.Group("/volumes")

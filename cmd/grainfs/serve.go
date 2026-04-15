@@ -110,7 +110,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if ecEnabled {
 			mode = "solo-ec"
 		}
-		return runSoloWithNFS(ctx, addr, dataDir, mode, backend, authOpts, nfsPort, nbdPort)
+
+		// Wrap backend in SwappableBackend to allow runtime cluster transition
+		swappable := storage.NewSwappableBackend(backend)
+		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, nfsPort, nbdPort)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -119,17 +122,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
-func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend storage.Backend, opts []server.Option, nfsPort, nbdPort int) error {
+func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, nfsPort, nbdPort int) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
 	// Auto-create "default" bucket on startup
-	if err := backend.CreateBucket("default"); err != nil {
+	if err := swappable.CreateBucket("default"); err != nil {
 		if !errors.Is(err, storage.ErrBucketAlreadyExists) {
 			return fmt.Errorf("create default bucket: %w", err)
 		}
 	}
 
-	srv := server.New(addr, backend, opts...)
+	// Join cluster callback: transitions from solo to cluster mode at runtime.
+	joinFn := func(nodeID, raftAddr, peersStr, clusterKey string) error {
+		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey)
+	}
+	opts = append(opts, server.WithJoinCluster(joinFn))
+
+	srv := server.New(addr, swappable, opts...)
 	go func() {
 		if err := srv.Run(); err != nil {
 			slog.Error("http server error", "error", err)
@@ -142,7 +151,7 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 		const defaultVolName = "default"
 		const defaultVolSize = 1024 * 1024 * 1024 // 1G
 
-		mgr := volume.NewManager(backend)
+		mgr := volume.NewManager(swappable)
 		// Ensure a default volume exists for NFS
 		if _, err := mgr.Get(defaultVolName); err != nil {
 			if _, err := mgr.Create(defaultVolName, defaultVolSize); err != nil {
@@ -150,7 +159,7 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 			}
 		}
 
-		nfsSrv = nfsserver.NewServer(backend, defaultVolName,
+		nfsSrv = nfsserver.NewServer(swappable, defaultVolName,
 			vfs.WithStatCacheTTL(1*time.Second),
 			vfs.WithDirCacheTTL(1*time.Second),
 		)
@@ -167,7 +176,7 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 		const defaultVolName2 = "default"
 		const defaultVolSize2 = 1024 * 1024 * 1024
 
-		mgr2 := volume.NewManager(backend)
+		mgr2 := volume.NewManager(swappable)
 		if _, err := mgr2.Get(defaultVolName2); err != nil {
 			if _, err := mgr2.Create(defaultVolName2, defaultVolSize2); err != nil {
 				slog.Warn("default nbd volume create failed", "error", err)
@@ -197,7 +206,7 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 	}
 
 	// 3. Close storage backend
-	if closer, ok := backend.(interface{ Close() error }); ok {
+	if closer, ok := swappable.Inner().(interface{ Close() error }); ok {
 		closer.Close()
 	}
 
@@ -268,6 +277,15 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, 
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
 	rpcTransport.SetTransport()
 
+	// Create ShardService for distributed data replication
+	shardSvc := cluster.NewShardService(dataDir, quicTransport)
+
+	// Set up StreamRouter: Raft RPCs on Control stream, Shard RPCs on Data stream
+	router := transport.NewStreamRouter()
+	router.Handle(transport.StreamControl, rpcTransport.Handler())
+	router.Handle(transport.StreamData, shardSvc.HandleRPC())
+	quicTransport.SetStreamHandler(router.Dispatch)
+
 	node.Start()
 	defer node.Stop()
 
@@ -275,6 +293,10 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, 
 	if err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
+
+	// Wire shard service for distributed fan-out replication
+	allNodes := append([]string{raftAddr}, peers...)
+	distBackend.SetShardService(shardSvc, allNodes)
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)
@@ -387,3 +409,106 @@ func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
 func (r *raftClusterInfo) Peers() []string  { return r.peers }
+
+// joinClusterLive performs the runtime solo→cluster transition.
+// It starts the QUIC transport and Raft node, migrates metadata, then swaps the backend.
+func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
+	if nodeID == "" {
+		nodeID = generateNodeID(dataDir)
+	}
+
+	peers := strings.Split(peersStr, ",")
+
+	metaDir := filepath.Join(dataDir, "meta")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		return fmt.Errorf("create meta dir: %w", err)
+	}
+	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
+	db, err := badger.Open(dbOpts)
+	if err != nil {
+		return fmt.Errorf("open metadata db: %w", err)
+	}
+
+	raftDir := filepath.Join(dataDir, "raft")
+
+	// Auto-migrate solo metadata
+	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
+		slog.Info("auto-migrating solo metadata to cluster format", "component", "join")
+		if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
+			db.Close()
+			return fmt.Errorf("auto-migrate: %w", err)
+		}
+	}
+
+	logStore, err := raft.NewBadgerLogStore(raftDir)
+	if err != nil {
+		db.Close()
+		return fmt.Errorf("open raft store: %w", err)
+	}
+
+	quicTransport := transport.NewQUICTransport(clusterKey)
+	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
+		logStore.Close()
+		db.Close()
+		return fmt.Errorf("start QUIC transport: %w", err)
+	}
+
+	for _, peer := range peers {
+		if err := quicTransport.Connect(ctx, peer); err != nil {
+			slog.Warn("failed to connect to peer", "peer", peer, "error", err)
+		}
+	}
+
+	cfg := raft.DefaultConfig(nodeID, peers)
+	node := raft.NewNode(cfg, logStore)
+
+	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
+	rpcTransport.SetTransport()
+
+	shardSvc := cluster.NewShardService(dataDir, quicTransport)
+
+	router := transport.NewStreamRouter()
+	router.Handle(transport.StreamControl, rpcTransport.Handler())
+	router.Handle(transport.StreamData, shardSvc.HandleRPC())
+	quicTransport.SetStreamHandler(router.Dispatch)
+
+	node.Start()
+
+	distBackend, err := cluster.NewDistributedBackend(dataDir, db, node)
+	if err != nil {
+		node.Stop()
+		quicTransport.Close()
+		logStore.Close()
+		db.Close()
+		return fmt.Errorf("init distributed backend: %w", err)
+	}
+
+	allNodes := append([]string{raftAddr}, peers...)
+	distBackend.SetShardService(shardSvc, allNodes)
+
+	fsm := cluster.NewFSM(db)
+	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 10000})
+	distBackend.SetSnapshotManager(snapMgr, node)
+
+	if snapIdx, err := snapMgr.Restore(); err != nil {
+		slog.Warn("snapshot restore failed", "error", err)
+	} else if snapIdx > 0 {
+		slog.Info("restored from snapshot", "index", snapIdx)
+	}
+
+	cachedBackend := storage.NewCachedBackend(distBackend)
+	distBackend.SetOnApply(func(cmdType cluster.CommandType, bucket, key string) {
+		cachedBackend.InvalidateKey(bucket, key)
+	})
+
+	stopApply := make(chan struct{})
+	go distBackend.RunApplyLoop(stopApply)
+
+	// Swap the backend atomically — new requests go to cluster mode
+	swappable.Swap(cachedBackend)
+
+	slog.Info("live cluster join complete", "component", "join",
+		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers)
+
+	return nil
+}

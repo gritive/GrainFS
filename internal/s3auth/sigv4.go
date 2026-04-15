@@ -33,6 +33,11 @@ func NewVerifier(creds []Credentials) *Verifier {
 	return &Verifier{creds: m}
 }
 
+// LookupSecret returns the secret key for the given access key, or empty if not found.
+func (v *Verifier) LookupSecret(accessKey string) string {
+	return v.creds[accessKey]
+}
+
 // Verify checks the Authorization header or query-string presigned parameters.
 // Returns the access key if valid, or an error.
 func (v *Verifier) Verify(r *http.Request) (string, error) {

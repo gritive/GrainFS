@@ -125,6 +125,11 @@ func (r *QUICRPCTransport) sendInstallSnapshot(peer string, args *InstallSnapsho
 	return decodeInstallSnapshotReply(data)
 }
 
+// Handler returns the stream handler function for registering with a StreamRouter.
+func (r *QUICRPCTransport) Handler() transport.StreamHandler {
+	return r.handleRPC
+}
+
 // handleRPC dispatches incoming Raft RPCs to the node's handlers and returns the response.
 func (r *QUICRPCTransport) handleRPC(req *transport.Message) *transport.Message {
 	rpcType, data, err := decodeRPC(req.Payload)
