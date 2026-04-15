@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/erasure"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -25,6 +26,9 @@ func init() {
 	serveCmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
+	serveCmd.Flags().Bool("ec", true, "enable erasure coding (Reed-Solomon 4+2, use --ec=false to disable)")
+	serveCmd.Flags().Int("ec-data", erasure.DefaultDataShards, "number of data shards for erasure coding")
+	serveCmd.Flags().Int("ec-parity", erasure.DefaultParityShards, "number of parity shards for erasure coding")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -44,7 +48,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	ecEnabled, _ := cmd.Flags().GetBool("ec")
+	ecData, _ := cmd.Flags().GetInt("ec-data")
+	ecParity, _ := cmd.Flags().GetInt("ec-parity")
+
 	if peersStr == "" {
+		if ecEnabled {
+			return runSoloEC(ctx, addr, dataDir, ecData, ecParity)
+		}
 		return runSolo(ctx, addr, dataDir)
 	}
 
@@ -60,6 +71,26 @@ func runSolo(ctx context.Context, addr, dataDir string) error {
 	}
 
 	slog.Info("server started", "component", "server", "mode", "solo", "version", version, "addr", addr, "data", dataDir)
+
+	srv := server.New(addr, backend)
+	go srv.Run()
+
+	<-ctx.Done()
+	slog.Info("shutting down", "component", "server")
+	backend.Close()
+	slog.Info("server stopped", "component", "server")
+	return nil
+}
+
+func runSoloEC(ctx context.Context, addr, dataDir string, ecData, ecParity int) error {
+	backend, err := erasure.NewECBackend(dataDir, ecData, ecParity)
+	if err != nil {
+		return fmt.Errorf("failed to initialize EC storage: %w", err)
+	}
+
+	slog.Info("server started", "component", "server", "mode", "solo-ec",
+		"version", version, "addr", addr, "data", dataDir,
+		"ec_data", ecData, "ec_parity", ecParity)
 
 	srv := server.New(addr, backend)
 	go srv.Run()

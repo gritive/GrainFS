@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -25,11 +26,12 @@ import (
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
 type DistributedBackend struct {
-	root   string
-	db     *badger.DB
-	node   *raft.Node
-	fsm    *FSM
-	logger *slog.Logger
+	root        string
+	db          *badger.DB
+	node        *raft.Node
+	fsm         *FSM
+	logger      *slog.Logger
+	lastApplied atomic.Uint64
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -61,6 +63,7 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			if err := b.fsm.Apply(entry.Command); err != nil {
 				b.logger.Error("fsm apply error", "index", entry.Index, "error", err)
 			}
+			b.lastApplied.Store(entry.Index)
 		}
 	}
 }
@@ -74,8 +77,21 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	_, err = b.node.ProposeWait(proposeCtx, data)
-	return err
+	idx, err := b.node.ProposeWait(proposeCtx, data)
+	if err != nil {
+		return err
+	}
+
+	// Wait until the FSM has applied this entry
+	for b.lastApplied.Load() < idx {
+		select {
+		case <-proposeCtx.Done():
+			return proposeCtx.Err()
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return nil
 }
 
 // Close closes the metadata database.

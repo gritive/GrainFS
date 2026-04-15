@@ -135,13 +135,21 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - Presigned URL
 - AWS Signature V4 전체 지원 (chunked encoding, POST policy, presigned URL)
 - Prometheus 메트릭 (노드별 지연, EC 연산 시간, 스트림 상태)
+- 운영 대시보드: 클러스터 상태, 노드 헬스, 샤드 분포, 스토리지 용량, 실시간 성능 모니터링(요청 처리량, 지연시간, EC 인코딩/디코딩 시간) 시각화 (순수 Go + embed, 싱글 바이너리 원칙 유지)
+- 데이터 암호화: at-rest encryption (AES-256-GCM), 키 관리 (KMS 연동 또는 로컬 키 파일)
+- in-transit encryption은 QUIC TLS 1.3으로 이미 제공
 - 클러스터 멤버십 변경 (Joint Consensus)
 - 클러스터 보안: PSK/토큰 기반 피어 인증, 무단 노드 연결 차단
+- 버킷 단위 EC 정책: CreateBucket 시 EC on/off 설정, 새 객체부터 적용, 기존 객체는 읽기 시 포맷 자동 감지
+- 런타임 EC 토글: 대시보드 또는 API로 버킷별 EC 정책 변경 가능 (성능 이슈 대응, 무중단 전환)
 - SDK 호환 테스트: aws-cli, boto3, aws-sdk-go
 
 **검증:**
 - k6로 수만 동시 연결에서 P99 응답 속도 측정
 - Signed URL 만료/변조 시 거부 확인
+- 암호화 활성화 시 데이터 파일이 평문으로 읽히지 않음 확인
+- 대시보드에서 클러스터 상태 실시간 반영 확인
+- 버킷별 EC 정책 변경 후 새 객체는 해당 정책으로, 기존 객체는 원본 포맷으로 정상 읽기 확인
 
 ### Phase 6: Volume Device
 
