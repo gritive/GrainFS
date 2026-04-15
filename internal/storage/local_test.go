@@ -5,15 +5,16 @@ import (
 	"io"
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func setupTestBackend(t *testing.T) *LocalBackend {
 	t.Helper()
 	dir := t.TempDir()
 	b, err := NewLocalBackend(dir)
-	if err != nil {
-		t.Fatalf("NewLocalBackend: %v", err)
-	}
+	require.NoError(t, err, "NewLocalBackend")
 	t.Cleanup(func() { b.Close() })
 	return b
 }
@@ -21,70 +22,48 @@ func setupTestBackend(t *testing.T) *LocalBackend {
 func TestCreateBucket(t *testing.T) {
 	b := setupTestBackend(t)
 
-	if err := b.CreateBucket("test-bucket"); err != nil {
-		t.Fatalf("CreateBucket: %v", err)
-	}
+	require.NoError(t, b.CreateBucket("test-bucket"), "CreateBucket")
 
 	// duplicate should fail
-	if err := b.CreateBucket("test-bucket"); err != ErrBucketAlreadyExists {
-		t.Fatalf("expected ErrBucketAlreadyExists, got %v", err)
-	}
+	require.ErrorIs(t, b.CreateBucket("test-bucket"), ErrBucketAlreadyExists)
 }
 
 func TestHeadBucket(t *testing.T) {
 	b := setupTestBackend(t)
 
-	if err := b.HeadBucket("nonexistent"); err != ErrBucketNotFound {
-		t.Fatalf("expected ErrBucketNotFound, got %v", err)
-	}
+	require.ErrorIs(t, b.HeadBucket("nonexistent"), ErrBucketNotFound)
 
 	b.CreateBucket("test-bucket")
-	if err := b.HeadBucket("test-bucket"); err != nil {
-		t.Fatalf("HeadBucket: %v", err)
-	}
+	require.NoError(t, b.HeadBucket("test-bucket"), "HeadBucket")
 }
 
 func TestDeleteBucket(t *testing.T) {
 	b := setupTestBackend(t)
 
-	if err := b.DeleteBucket("nonexistent"); err != ErrBucketNotFound {
-		t.Fatalf("expected ErrBucketNotFound, got %v", err)
-	}
+	require.ErrorIs(t, b.DeleteBucket("nonexistent"), ErrBucketNotFound)
 
 	b.CreateBucket("test-bucket")
 	b.PutObject("test-bucket", "file.txt", bytes.NewReader([]byte("data")), "text/plain")
 
-	if err := b.DeleteBucket("test-bucket"); err != ErrBucketNotEmpty {
-		t.Fatalf("expected ErrBucketNotEmpty, got %v", err)
-	}
+	require.ErrorIs(t, b.DeleteBucket("test-bucket"), ErrBucketNotEmpty)
 
 	b.DeleteObject("test-bucket", "file.txt")
-	if err := b.DeleteBucket("test-bucket"); err != nil {
-		t.Fatalf("DeleteBucket: %v", err)
-	}
+	require.NoError(t, b.DeleteBucket("test-bucket"), "DeleteBucket")
 }
 
 func TestListBuckets(t *testing.T) {
 	b := setupTestBackend(t)
 
 	buckets, err := b.ListBuckets()
-	if err != nil {
-		t.Fatalf("ListBuckets: %v", err)
-	}
-	if len(buckets) != 0 {
-		t.Fatalf("expected 0 buckets, got %d", len(buckets))
-	}
+	require.NoError(t, err, "ListBuckets")
+	require.Empty(t, buckets)
 
 	b.CreateBucket("alpha")
 	b.CreateBucket("bravo")
 
 	buckets, err = b.ListBuckets()
-	if err != nil {
-		t.Fatalf("ListBuckets: %v", err)
-	}
-	if len(buckets) != 2 {
-		t.Fatalf("expected 2 buckets, got %d", len(buckets))
-	}
+	require.NoError(t, err, "ListBuckets")
+	require.Len(t, buckets, 2)
 }
 
 func TestPutAndGetObject(t *testing.T) {
@@ -93,32 +72,18 @@ func TestPutAndGetObject(t *testing.T) {
 
 	data := []byte("hello grainfs")
 	obj, err := b.PutObject("test-bucket", "greeting.txt", bytes.NewReader(data), "text/plain")
-	if err != nil {
-		t.Fatalf("PutObject: %v", err)
-	}
-	if obj.Size != int64(len(data)) {
-		t.Fatalf("expected size %d, got %d", len(data), obj.Size)
-	}
-	if obj.ContentType != "text/plain" {
-		t.Fatalf("expected content-type text/plain, got %s", obj.ContentType)
-	}
-	if obj.ETag == "" {
-		t.Fatal("expected non-empty ETag")
-	}
+	require.NoError(t, err, "PutObject")
+	assert.Equal(t, int64(len(data)), obj.Size)
+	assert.Equal(t, "text/plain", obj.ContentType)
+	assert.NotEmpty(t, obj.ETag)
 
 	rc, meta, err := b.GetObject("test-bucket", "greeting.txt")
-	if err != nil {
-		t.Fatalf("GetObject: %v", err)
-	}
+	require.NoError(t, err, "GetObject")
 	defer rc.Close()
 
 	got, _ := io.ReadAll(rc)
-	if !bytes.Equal(got, data) {
-		t.Fatalf("data mismatch: got %q, want %q", got, data)
-	}
-	if meta.Size != int64(len(data)) {
-		t.Fatalf("meta size mismatch: got %d, want %d", meta.Size, len(data))
-	}
+	assert.Equal(t, data, got)
+	assert.Equal(t, int64(len(data)), meta.Size)
 }
 
 func TestGetObjectNotFound(t *testing.T) {
@@ -126,18 +91,14 @@ func TestGetObjectNotFound(t *testing.T) {
 	b.CreateBucket("test-bucket")
 
 	_, _, err := b.GetObject("test-bucket", "nope.txt")
-	if err != ErrObjectNotFound {
-		t.Fatalf("expected ErrObjectNotFound, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrObjectNotFound)
 }
 
 func TestGetObjectBucketNotFound(t *testing.T) {
 	b := setupTestBackend(t)
 
 	_, _, err := b.GetObject("nope", "file.txt")
-	if err != ErrBucketNotFound {
-		t.Fatalf("expected ErrBucketNotFound, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrBucketNotFound)
 }
 
 func TestHeadObject(t *testing.T) {
@@ -145,20 +106,14 @@ func TestHeadObject(t *testing.T) {
 	b.CreateBucket("test-bucket")
 
 	_, err := b.HeadObject("test-bucket", "nope.txt")
-	if err != ErrObjectNotFound {
-		t.Fatalf("expected ErrObjectNotFound, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrObjectNotFound)
 
 	data := []byte("head test")
 	b.PutObject("test-bucket", "file.txt", bytes.NewReader(data), "application/octet-stream")
 
 	obj, err := b.HeadObject("test-bucket", "file.txt")
-	if err != nil {
-		t.Fatalf("HeadObject: %v", err)
-	}
-	if obj.Size != int64(len(data)) {
-		t.Fatalf("expected size %d, got %d", len(data), obj.Size)
-	}
+	require.NoError(t, err, "HeadObject")
+	assert.Equal(t, int64(len(data)), obj.Size)
 }
 
 func TestDeleteObject(t *testing.T) {
@@ -167,19 +122,13 @@ func TestDeleteObject(t *testing.T) {
 
 	b.PutObject("test-bucket", "file.txt", bytes.NewReader([]byte("data")), "text/plain")
 
-	if err := b.DeleteObject("test-bucket", "file.txt"); err != nil {
-		t.Fatalf("DeleteObject: %v", err)
-	}
+	require.NoError(t, b.DeleteObject("test-bucket", "file.txt"), "DeleteObject")
 
 	_, err := b.HeadObject("test-bucket", "file.txt")
-	if err != ErrObjectNotFound {
-		t.Fatalf("expected ErrObjectNotFound after delete, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrObjectNotFound)
 
 	// deleting nonexistent is not an error (S3 behavior)
-	if err := b.DeleteObject("test-bucket", "nonexistent"); err != nil {
-		t.Fatalf("DeleteObject nonexistent should not error, got %v", err)
-	}
+	require.NoError(t, b.DeleteObject("test-bucket", "nonexistent"), "DeleteObject nonexistent should not error")
 }
 
 func TestListObjects(t *testing.T) {
@@ -192,30 +141,18 @@ func TestListObjects(t *testing.T) {
 
 	// list all
 	objs, err := b.ListObjects("test-bucket", "", 1000)
-	if err != nil {
-		t.Fatalf("ListObjects: %v", err)
-	}
-	if len(objs) != 3 {
-		t.Fatalf("expected 3 objects, got %d", len(objs))
-	}
+	require.NoError(t, err, "ListObjects")
+	require.Len(t, objs, 3)
 
 	// list with prefix
 	objs, err = b.ListObjects("test-bucket", "docs/", 1000)
-	if err != nil {
-		t.Fatalf("ListObjects with prefix: %v", err)
-	}
-	if len(objs) != 2 {
-		t.Fatalf("expected 2 objects with prefix docs/, got %d", len(objs))
-	}
+	require.NoError(t, err, "ListObjects with prefix")
+	require.Len(t, objs, 2)
 
 	// list with maxKeys
 	objs, err = b.ListObjects("test-bucket", "", 1)
-	if err != nil {
-		t.Fatalf("ListObjects with maxKeys: %v", err)
-	}
-	if len(objs) != 1 {
-		t.Fatalf("expected 1 object with maxKeys=1, got %d", len(objs))
-	}
+	require.NoError(t, err, "ListObjects with maxKeys")
+	require.Len(t, objs, 1)
 }
 
 func TestPutObjectOverwrite(t *testing.T) {
@@ -226,26 +163,18 @@ func TestPutObjectOverwrite(t *testing.T) {
 	b.PutObject("test-bucket", "file.txt", bytes.NewReader([]byte("version2")), "text/plain")
 
 	rc, meta, err := b.GetObject("test-bucket", "file.txt")
-	if err != nil {
-		t.Fatalf("GetObject: %v", err)
-	}
+	require.NoError(t, err, "GetObject")
 	defer rc.Close()
 	got, _ := io.ReadAll(rc)
-	if string(got) != "version2" {
-		t.Fatalf("expected version2, got %s", got)
-	}
-	if meta.Size != 8 {
-		t.Fatalf("expected size 8, got %d", meta.Size)
-	}
+	assert.Equal(t, "version2", string(got))
+	assert.Equal(t, int64(8), meta.Size)
 }
 
 func TestPutObjectToBucketNotFound(t *testing.T) {
 	b := setupTestBackend(t)
 
 	_, err := b.PutObject("nope", "file.txt", bytes.NewReader([]byte("data")), "text/plain")
-	if err != ErrBucketNotFound {
-		t.Fatalf("expected ErrBucketNotFound, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrBucketNotFound)
 }
 
 func TestLargeObject(t *testing.T) {
@@ -260,27 +189,17 @@ func TestLargeObject(t *testing.T) {
 	}
 
 	obj, err := b.PutObject("test-bucket", "large.bin", bytes.NewReader(data), "application/octet-stream")
-	if err != nil {
-		t.Fatalf("PutObject large: %v", err)
-	}
-	if obj.Size != int64(size) {
-		t.Fatalf("expected size %d, got %d", size, obj.Size)
-	}
+	require.NoError(t, err, "PutObject large")
+	assert.Equal(t, int64(size), obj.Size)
 
 	rc, _, err := b.GetObject("test-bucket", "large.bin")
-	if err != nil {
-		t.Fatalf("GetObject large: %v", err)
-	}
+	require.NoError(t, err, "GetObject large")
 	defer rc.Close()
 
 	got, _ := io.ReadAll(rc)
-	if !bytes.Equal(got, data) {
-		t.Fatal("large object data mismatch")
-	}
+	assert.Equal(t, data, got)
 
 	// verify file on disk
 	_, err = os.Stat(b.objectPath("test-bucket", "large.bin"))
-	if err != nil {
-		t.Fatalf("expected file on disk: %v", err)
-	}
+	require.NoError(t, err, "expected file on disk")
 }

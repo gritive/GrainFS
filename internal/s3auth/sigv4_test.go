@@ -3,6 +3,9 @@ package s3auth
 import (
 	"net/http"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVerifyValidSignature(t *testing.T) {
@@ -15,12 +18,8 @@ func TestVerifyValidSignature(t *testing.T) {
 	SignRequest(req, "AKID", "SECRET", "us-east-1")
 
 	accessKey, err := v.Verify(req)
-	if err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	if accessKey != "AKID" {
-		t.Fatalf("expected AKID, got %s", accessKey)
-	}
+	require.NoError(t, err, "Verify")
+	assert.Equal(t, "AKID", accessKey)
 }
 
 func TestVerifyInvalidSignature(t *testing.T) {
@@ -33,9 +32,7 @@ func TestVerifyInvalidSignature(t *testing.T) {
 	SignRequest(req, "AKID", "WRONG_SECRET", "us-east-1")
 
 	_, err := v.Verify(req)
-	if err == nil {
-		t.Fatal("expected error for wrong secret")
-	}
+	assert.Error(t, err, "expected error for wrong secret")
 }
 
 func TestVerifyMissingAuth(t *testing.T) {
@@ -46,9 +43,7 @@ func TestVerifyMissingAuth(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "http://localhost:9000/test-bucket", nil)
 
 	_, err := v.Verify(req)
-	if err == nil {
-		t.Fatal("expected error for missing auth")
-	}
+	assert.Error(t, err, "expected error for missing auth")
 }
 
 func TestVerifyUnknownAccessKey(t *testing.T) {
@@ -61,9 +56,7 @@ func TestVerifyUnknownAccessKey(t *testing.T) {
 	SignRequest(req, "UNKNOWN", "SECRET", "us-east-1")
 
 	_, err := v.Verify(req)
-	if err == nil {
-		t.Fatal("expected error for unknown access key")
-	}
+	assert.Error(t, err, "expected error for unknown access key")
 }
 
 func TestVerifyPutRequest(t *testing.T) {
@@ -76,10 +69,6 @@ func TestVerifyPutRequest(t *testing.T) {
 	SignRequest(req, "mykey", "mysecret", "us-east-1")
 
 	accessKey, err := v.Verify(req)
-	if err != nil {
-		t.Fatalf("Verify PUT: %v", err)
-	}
-	if accessKey != "mykey" {
-		t.Fatalf("expected mykey, got %s", accessKey)
-	}
+	require.NoError(t, err, "Verify PUT")
+	assert.Equal(t, "mykey", accessKey)
 }

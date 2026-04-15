@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -16,9 +19,7 @@ func setupAuthServer(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
-	if err != nil {
-		t.Fatalf("NewLocalBackend: %v", err)
-	}
+	require.NoError(t, err, "NewLocalBackend")
 	t.Cleanup(func() { backend.Close() })
 
 	port := freePort(t)
@@ -42,13 +43,9 @@ func TestAuthRejectsUnsigned(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
+	require.NoError(t, err, "request")
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestAuthAcceptsValidSignature(t *testing.T) {
@@ -58,25 +55,17 @@ func TestAuthAcceptsValidSignature(t *testing.T) {
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
+	require.NoError(t, err, "request")
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("data")))
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
 	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("put: %v", err)
-	}
+	require.NoError(t, err, "put")
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 func TestAuthRejectsWrongKey(t *testing.T) {
@@ -87,9 +76,7 @@ func TestAuthRejectsWrongKey(t *testing.T) {
 	s3auth.SignRequest(req, "testkey", "wrongsecret", "us-east-1")
 	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestNoAuthServerAllowsAll(t *testing.T) {
@@ -98,7 +85,5 @@ func TestNoAuthServerAllowsAll(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
 	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 without auth, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

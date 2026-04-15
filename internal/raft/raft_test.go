@@ -1,0 +1,309 @@
+package raft
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// testCluster sets up N interconnected Raft nodes for testing.
+type testCluster struct {
+	nodes []*Node
+	mu    sync.Mutex
+}
+
+func newTestCluster(t *testing.T, n int) *testCluster {
+	t.Helper()
+
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = nodeID(i)
+	}
+
+	cluster := &testCluster{nodes: make([]*Node, n)}
+
+	for i := 0; i < n; i++ {
+		peers := make([]string, 0, n-1)
+		for j := 0; j < n; j++ {
+			if i != j {
+				peers = append(peers, ids[j])
+			}
+		}
+		config := Config{
+			ID:               ids[i],
+			Peers:            peers,
+			ElectionTimeout:  100 * time.Millisecond,
+			HeartbeatTimeout: 30 * time.Millisecond,
+		}
+		cluster.nodes[i] = NewNode(config)
+	}
+
+	// Wire up in-process RPC
+	for i := 0; i < n; i++ {
+		idx := i
+		cluster.nodes[i].SetTransport(
+			func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+				target := cluster.nodeByID(peer)
+				if target == nil {
+					return nil, errNodeNotFound
+				}
+				_ = idx // capture
+				return target.HandleRequestVote(args), nil
+			},
+			func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+				target := cluster.nodeByID(peer)
+				if target == nil {
+					return nil, errNodeNotFound
+				}
+				return target.HandleAppendEntries(args), nil
+			},
+		)
+	}
+
+	t.Cleanup(func() {
+		for _, node := range cluster.nodes {
+			node.Stop()
+		}
+	})
+
+	return cluster
+}
+
+func (c *testCluster) nodeByID(id string) *Node {
+	for _, n := range c.nodes {
+		if n.ID() == id {
+			return n
+		}
+	}
+	return nil
+}
+
+func (c *testCluster) startAll() {
+	for _, n := range c.nodes {
+		n.Start()
+	}
+}
+
+func (c *testCluster) waitForLeader(timeout time.Duration) *Node {
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			return nil
+		default:
+			for _, n := range c.nodes {
+				if n.State() == Leader {
+					return n
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func (c *testCluster) countState(state NodeState) int {
+	count := 0
+	for _, n := range c.nodes {
+		if n.State() == state {
+			count++
+		}
+	}
+	return count
+}
+
+func nodeID(i int) string {
+	return string(rune('A' + i))
+}
+
+var errNodeNotFound = assert.AnError
+
+// --- Tests ---
+
+func TestNewNode_StartsAsFollower(t *testing.T) {
+	config := DefaultConfig("A", []string{"B", "C"})
+	node := NewNode(config)
+	assert.Equal(t, Follower, node.State())
+	assert.Equal(t, uint64(0), node.Term())
+}
+
+func TestThreeNode_ElectsLeader(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader, "no leader elected within timeout")
+	assert.Equal(t, Leader, leader.State())
+
+	// Exactly one leader
+	assert.Equal(t, 1, cluster.countState(Leader))
+}
+
+func TestThreeNode_AllAgreeOnTerm(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader)
+
+	// Give followers time to receive heartbeats
+	time.Sleep(200 * time.Millisecond)
+
+	leaderTerm := leader.Term()
+	for _, n := range cluster.nodes {
+		assert.Equal(t, leaderTerm, n.Term(), "node %s has different term", n.ID())
+	}
+}
+
+func TestThreeNode_FollowersKnowLeader(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader)
+
+	time.Sleep(200 * time.Millisecond)
+
+	for _, n := range cluster.nodes {
+		if n.ID() == leader.ID() {
+			continue
+		}
+		assert.Equal(t, Follower, n.State(), "node %s should be follower", n.ID())
+		assert.Equal(t, leader.ID(), n.LeaderID(), "node %s should know the leader", n.ID())
+	}
+}
+
+func TestFiveNode_ElectsLeader(t *testing.T) {
+	cluster := newTestCluster(t, 5)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader, "no leader elected in 5-node cluster")
+	assert.Equal(t, 1, cluster.countState(Leader))
+}
+
+func TestLeaderReelection_AfterLeaderStop(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+
+	leader1 := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader1, "no initial leader")
+	leader1ID := leader1.ID()
+
+	// Stop the leader
+	leader1.Stop()
+
+	// Wait for a new leader from the remaining nodes
+	var leader2 *Node
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("no new leader elected after leader stop")
+		default:
+			for _, n := range cluster.nodes {
+				if n.ID() != leader1ID && n.State() == Leader {
+					leader2 = n
+				}
+			}
+			if leader2 != nil {
+				goto found
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+found:
+	assert.NotEqual(t, leader1ID, leader2.ID(), "new leader should be different from stopped leader")
+	assert.GreaterOrEqual(t, leader2.Term(), leader1.Term(), "new leader should have equal or higher term")
+}
+
+func TestRequestVote_GrantsVoteOnce(t *testing.T) {
+	config := DefaultConfig("A", []string{"B", "C"})
+	node := NewNode(config)
+
+	// First request in term 1 should be granted
+	reply := node.HandleRequestVote(&RequestVoteArgs{
+		Term:        1,
+		CandidateID: "B",
+	})
+	assert.True(t, reply.VoteGranted)
+	assert.Equal(t, uint64(1), reply.Term)
+
+	// Second request from different candidate in same term should be denied
+	reply = node.HandleRequestVote(&RequestVoteArgs{
+		Term:        1,
+		CandidateID: "C",
+	})
+	assert.False(t, reply.VoteGranted)
+}
+
+func TestRequestVote_RejectsOlderTerm(t *testing.T) {
+	config := DefaultConfig("A", []string{"B", "C"})
+	node := NewNode(config)
+
+	// Set node to term 5
+	node.HandleRequestVote(&RequestVoteArgs{Term: 5, CandidateID: "B"})
+
+	// Request with term 3 should be rejected
+	reply := node.HandleRequestVote(&RequestVoteArgs{
+		Term:        3,
+		CandidateID: "C",
+	})
+	assert.False(t, reply.VoteGranted)
+	assert.Equal(t, uint64(5), reply.Term)
+}
+
+func TestRequestVote_HigherTermConvertsToFollower(t *testing.T) {
+	config := DefaultConfig("A", []string{"B", "C"})
+	node := NewNode(config)
+
+	// Simulate node being a candidate in term 2
+	node.mu.Lock()
+	node.currentTerm = 2
+	node.state = Candidate
+	node.mu.Unlock()
+
+	reply := node.HandleRequestVote(&RequestVoteArgs{
+		Term:        5,
+		CandidateID: "B",
+	})
+	assert.True(t, reply.VoteGranted)
+	assert.Equal(t, Follower, node.State())
+	assert.Equal(t, uint64(5), node.Term())
+}
+
+func TestAppendEntries_ResetsElectionTimer(t *testing.T) {
+	config := DefaultConfig("A", []string{"B", "C"})
+	node := NewNode(config)
+
+	reply := node.HandleAppendEntries(&AppendEntriesArgs{
+		Term:     1,
+		LeaderID: "B",
+	})
+	assert.True(t, reply.Success)
+	assert.Equal(t, "B", node.LeaderID())
+}
+
+func TestAppendEntries_RejectsOlderTerm(t *testing.T) {
+	config := DefaultConfig("A", []string{"B", "C"})
+	node := NewNode(config)
+
+	node.mu.Lock()
+	node.currentTerm = 5
+	node.mu.Unlock()
+
+	reply := node.HandleAppendEntries(&AppendEntriesArgs{
+		Term:     3,
+		LeaderID: "B",
+	})
+	assert.False(t, reply.Success)
+	assert.Equal(t, uint64(5), reply.Term)
+}
+
+func TestNodeState_String(t *testing.T) {
+	assert.Equal(t, "Follower", Follower.String())
+	assert.Equal(t, "Candidate", Candidate.String())
+	assert.Equal(t, "Leader", Leader.String())
+}

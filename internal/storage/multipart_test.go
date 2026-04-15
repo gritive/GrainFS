@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCreateAndCompleteMultipartUpload(t *testing.T) {
@@ -11,50 +14,31 @@ func TestCreateAndCompleteMultipartUpload(t *testing.T) {
 	b.CreateBucket("test-bucket")
 
 	upload, err := b.CreateMultipartUpload("test-bucket", "big-file.bin", "application/octet-stream")
-	if err != nil {
-		t.Fatalf("CreateMultipartUpload: %v", err)
-	}
-	if upload.UploadID == "" {
-		t.Fatal("expected non-empty UploadID")
-	}
+	require.NoError(t, err, "CreateMultipartUpload")
+	assert.NotEmpty(t, upload.UploadID)
 
 	part1Data := bytes.Repeat([]byte("A"), 5*1024*1024) // 5MB
 	part2Data := bytes.Repeat([]byte("B"), 3*1024*1024) // 3MB
 
 	p1, err := b.UploadPart("test-bucket", "big-file.bin", upload.UploadID, 1, bytes.NewReader(part1Data))
-	if err != nil {
-		t.Fatalf("UploadPart 1: %v", err)
-	}
-	if p1.PartNumber != 1 || p1.ETag == "" {
-		t.Fatalf("unexpected part1: %+v", p1)
-	}
+	require.NoError(t, err, "UploadPart 1")
+	assert.Equal(t, 1, p1.PartNumber)
+	assert.NotEmpty(t, p1.ETag)
 
 	p2, err := b.UploadPart("test-bucket", "big-file.bin", upload.UploadID, 2, bytes.NewReader(part2Data))
-	if err != nil {
-		t.Fatalf("UploadPart 2: %v", err)
-	}
+	require.NoError(t, err, "UploadPart 2")
 
 	obj, err := b.CompleteMultipartUpload("test-bucket", "big-file.bin", upload.UploadID, []Part{*p1, *p2})
-	if err != nil {
-		t.Fatalf("CompleteMultipartUpload: %v", err)
-	}
-	if obj.Size != int64(len(part1Data)+len(part2Data)) {
-		t.Fatalf("expected size %d, got %d", len(part1Data)+len(part2Data), obj.Size)
-	}
+	require.NoError(t, err, "CompleteMultipartUpload")
+	assert.Equal(t, int64(len(part1Data)+len(part2Data)), obj.Size)
 
 	// verify the completed object is readable
 	rc, meta, err := b.GetObject("test-bucket", "big-file.bin")
-	if err != nil {
-		t.Fatalf("GetObject: %v", err)
-	}
+	require.NoError(t, err, "GetObject")
 	defer rc.Close()
 	data, _ := io.ReadAll(rc)
-	if len(data) != len(part1Data)+len(part2Data) {
-		t.Fatalf("data length mismatch: got %d", len(data))
-	}
-	if meta.ContentType != "application/octet-stream" {
-		t.Fatalf("expected content-type application/octet-stream, got %s", meta.ContentType)
-	}
+	assert.Len(t, data, len(part1Data)+len(part2Data))
+	assert.Equal(t, "application/octet-stream", meta.ContentType)
 }
 
 func TestAbortMultipartUpload(t *testing.T) {
@@ -64,20 +48,14 @@ func TestAbortMultipartUpload(t *testing.T) {
 	upload, _ := b.CreateMultipartUpload("test-bucket", "aborted.bin", "application/octet-stream")
 	b.UploadPart("test-bucket", "aborted.bin", upload.UploadID, 1, bytes.NewReader([]byte("data")))
 
-	if err := b.AbortMultipartUpload("test-bucket", "aborted.bin", upload.UploadID); err != nil {
-		t.Fatalf("AbortMultipartUpload: %v", err)
-	}
+	require.NoError(t, b.AbortMultipartUpload("test-bucket", "aborted.bin", upload.UploadID), "AbortMultipartUpload")
 
 	// object should not exist
 	_, err := b.HeadObject("test-bucket", "aborted.bin")
-	if err != ErrObjectNotFound {
-		t.Fatalf("expected ErrObjectNotFound, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrObjectNotFound)
 
 	// abort again should fail
-	if err := b.AbortMultipartUpload("test-bucket", "aborted.bin", upload.UploadID); err != ErrUploadNotFound {
-		t.Fatalf("expected ErrUploadNotFound, got %v", err)
-	}
+	require.ErrorIs(t, b.AbortMultipartUpload("test-bucket", "aborted.bin", upload.UploadID), ErrUploadNotFound)
 }
 
 func TestUploadPartInvalidUploadID(t *testing.T) {
@@ -85,16 +63,12 @@ func TestUploadPartInvalidUploadID(t *testing.T) {
 	b.CreateBucket("test-bucket")
 
 	_, err := b.UploadPart("test-bucket", "file.bin", "invalid-id", 1, bytes.NewReader([]byte("data")))
-	if err != ErrUploadNotFound {
-		t.Fatalf("expected ErrUploadNotFound, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrUploadNotFound)
 }
 
 func TestCompleteMultipartBucketNotFound(t *testing.T) {
 	b := setupTestBackend(t)
 
 	_, err := b.CreateMultipartUpload("nope", "file.bin", "application/octet-stream")
-	if err != ErrBucketNotFound {
-		t.Fatalf("expected ErrBucketNotFound, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrBucketNotFound)
 }
