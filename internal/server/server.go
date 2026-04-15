@@ -17,6 +17,15 @@ import (
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
+// ClusterInfo provides cluster state for the monitoring dashboard.
+type ClusterInfo interface {
+	NodeID() string
+	State() string // "Leader", "Follower", "Candidate"
+	Term() uint64
+	LeaderID() string
+	Peers() []string
+}
+
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend     storage.Backend
@@ -26,6 +35,7 @@ type Server struct {
 	policyStore *PolicyStore
 	ipLimiter   *RateLimiter
 	userLimiter *RateLimiter
+	cluster     ClusterInfo // nil in solo mode
 }
 
 // Option configures the server.
@@ -35,6 +45,13 @@ type Option func(*Server)
 func WithAuth(creds []s3auth.Credentials) Option {
 	return func(s *Server) {
 		s.verifier = s3auth.NewVerifier(creds)
+	}
+}
+
+// WithClusterInfo sets the cluster info provider for the monitoring dashboard.
+func WithClusterInfo(ci ClusterInfo) Option {
+	return func(s *Server) {
+		s.cluster = ci
 	}
 }
 
@@ -169,6 +186,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Multipart: POST /:bucket/*key with ?uploads or ?uploadId=
 	h.POST("/:bucket/*key", s.handlePost)
+
+	// Cluster status API (available in both solo and cluster mode)
+	h.GET("/api/cluster/status", s.clusterStatus)
 
 	// Volume management API
 	volumes := h.Group("/volumes")

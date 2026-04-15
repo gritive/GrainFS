@@ -300,7 +300,7 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, 
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
-	srv := server.New(addr, backend)
+	srv := server.New(addr, backend, server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}))
 	go func() {
 		if err := srv.Run(); err != nil {
 			slog.Error("http server error", "error", err)
@@ -362,3 +362,15 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 	slog.Info("at-rest encryption enabled (auto-generated key)", "component", "server", "key_file", keyFile)
 	return encrypt.NewEncryptor(keyData)
 }
+
+// raftClusterInfo adapts raft.Node to server.ClusterInfo interface.
+type raftClusterInfo struct {
+	node  *raft.Node
+	peers []string
+}
+
+func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
+func (r *raftClusterInfo) State() string    { return r.node.State().String() }
+func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
+func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
+func (r *raftClusterInfo) Peers() []string  { return r.peers }

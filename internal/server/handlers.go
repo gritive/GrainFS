@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -618,4 +619,22 @@ func toHTTPRequest(c *app.RequestContext) *http.Request {
 		r.Header.Set(string(key), string(value))
 	})
 	return r
+}
+
+func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
+	status := map[string]any{
+		"mode": "solo",
+	}
+
+	if s.cluster != nil {
+		status["mode"] = "cluster"
+		status["node_id"] = s.cluster.NodeID()
+		status["state"] = s.cluster.State()
+		status["term"] = s.cluster.Term()
+		status["leader_id"] = s.cluster.LeaderID()
+		status["peers"] = s.cluster.Peers()
+	}
+
+	data, _ := json.Marshal(status)
+	c.Data(consts.StatusOK, "application/json", data)
 }

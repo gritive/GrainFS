@@ -40,11 +40,4 @@
 - **Why:** 현재 grainfs migrate는 서비스 중지 → 마이그레이션 → 재시작 필요. Phase 3 목표는 "무중단"
 - **Context:** cluster/migrate.go에 메타데이터 변환 로직은 있음. 온라인 마이그레이션(서비스 유지 중 Raft 부트스트랩)이 필요
 
-## P2: 운영 대시보드 고도화 (Phase 5 미구현)
-
-### 클러스터 모니터링 대시보드
-- **What:** 클러스터 상태(노드 목록/리더/term), 노드 헬스, 샤드 분포, 실시간 성능 모니터링
-- **Why:** 현재 대시보드는 4개 기본 카운터(Uptime, Requests, Storage, Objects)만 표시. 클러스터 운영에 필요한 가시성 없음
-- **Context:** server/ui/index.html의 Dashboard 탭. Prometheus 메트릭은 /metrics에서 제공되므로 추가 API 엔드포인트와 UI 구현 필요
-
 
