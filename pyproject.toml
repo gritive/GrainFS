@@ -1,0 +1,14 @@
+[project]
+name = "grainfs-tests"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.35",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests requiring a running GrainFS server",
+]
