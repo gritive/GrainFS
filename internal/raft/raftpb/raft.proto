@@ -60,3 +60,18 @@ message SnapshotMeta {
   uint64 index = 1;
   uint64 term = 2;
 }
+
+message ShardRequest {
+  string bucket = 1;
+  string key = 2;
+  int32 shard_idx = 3;
+  bytes data = 4;
+}
+
+message ShardPlacement {
+  string bucket = 1;
+  string key = 2;
+  repeated string node_ids = 3;  // node_ids[i] stores shard i
+  int32 data_shards = 4;
+  int32 parity_shards = 5;
+}

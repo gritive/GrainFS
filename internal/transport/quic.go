@@ -21,6 +21,30 @@ import (
 // StreamHandler processes an incoming request message and returns a response.
 type StreamHandler func(req *Message) *Message
 
+// StreamRouter routes incoming messages to different handlers based on StreamType.
+type StreamRouter struct {
+	handlers map[StreamType]StreamHandler
+}
+
+// NewStreamRouter creates a router that dispatches by StreamType.
+func NewStreamRouter() *StreamRouter {
+	return &StreamRouter{handlers: make(map[StreamType]StreamHandler)}
+}
+
+// Handle registers a handler for a specific stream type.
+func (r *StreamRouter) Handle(st StreamType, h StreamHandler) {
+	r.handlers[st] = h
+}
+
+// Dispatch finds the handler for the message's stream type and calls it.
+func (r *StreamRouter) Dispatch(req *Message) *Message {
+	h, ok := r.handlers[req.Type]
+	if !ok {
+		return nil
+	}
+	return h(req)
+}
+
 // QUICTransport implements Transport using QUIC for node-to-node communication.
 type QUICTransport struct {
 	mu            sync.RWMutex
