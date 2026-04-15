@@ -13,9 +13,13 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/spf13/cobra"
 
+	"crypto/rand"
+
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -29,6 +33,10 @@ func init() {
 	serveCmd.Flags().Bool("ec", true, "enable erasure coding (Reed-Solomon 4+2, use --ec=false to disable)")
 	serveCmd.Flags().Int("ec-data", erasure.DefaultDataShards, "number of data shards for erasure coding")
 	serveCmd.Flags().Int("ec-parity", erasure.DefaultParityShards, "number of parity shards for erasure coding")
+	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
+	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
+	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
+	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -52,11 +60,31 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ecData, _ := cmd.Flags().GetInt("ec-data")
 	ecParity, _ := cmd.Flags().GetInt("ec-parity")
 
+	var authOpts []server.Option
+	accessKey, _ := cmd.Flags().GetString("access-key")
+	secretKey, _ := cmd.Flags().GetString("secret-key")
+	if accessKey != "" && secretKey != "" {
+		authOpts = append(authOpts, server.WithAuth([]s3auth.Credentials{
+			{AccessKey: accessKey, SecretKey: secretKey},
+		}))
+	}
+
+	var ecOpts []erasure.ECOption
+	noEncryption, _ := cmd.Flags().GetBool("no-encryption")
+	if !noEncryption {
+		encKeyFile, _ := cmd.Flags().GetString("encryption-key-file")
+		enc, err := loadOrCreateEncryptionKey(encKeyFile, dataDir)
+		if err != nil {
+			return fmt.Errorf("encryption setup: %w", err)
+		}
+		ecOpts = append(ecOpts, erasure.WithEncryption(enc))
+	}
+
 	if peersStr == "" {
 		if ecEnabled {
-			return runSoloEC(ctx, addr, dataDir, ecData, ecParity)
+			return runSoloEC(ctx, addr, dataDir, ecData, ecParity, authOpts, ecOpts)
 		}
-		return runSolo(ctx, addr, dataDir)
+		return runSolo(ctx, addr, dataDir, authOpts)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -64,7 +92,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr)
 }
 
-func runSolo(ctx context.Context, addr, dataDir string) error {
+func runSolo(ctx context.Context, addr, dataDir string, opts []server.Option) error {
 	backend, err := storage.NewLocalBackend(dataDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize storage: %w", err)
@@ -72,7 +100,7 @@ func runSolo(ctx context.Context, addr, dataDir string) error {
 
 	slog.Info("server started", "component", "server", "mode", "solo", "version", version, "addr", addr, "data", dataDir)
 
-	srv := server.New(addr, backend)
+	srv := server.New(addr, backend, opts...)
 	go srv.Run()
 
 	<-ctx.Done()
@@ -82,8 +110,8 @@ func runSolo(ctx context.Context, addr, dataDir string) error {
 	return nil
 }
 
-func runSoloEC(ctx context.Context, addr, dataDir string, ecData, ecParity int) error {
-	backend, err := erasure.NewECBackend(dataDir, ecData, ecParity)
+func runSoloEC(ctx context.Context, addr, dataDir string, ecData, ecParity int, opts []server.Option, ecOpts []erasure.ECOption) error {
+	backend, err := erasure.NewECBackend(dataDir, ecData, ecParity, ecOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to initialize EC storage: %w", err)
 	}
@@ -92,7 +120,7 @@ func runSoloEC(ctx context.Context, addr, dataDir string, ecData, ecParity int) 
 		"version", version, "addr", addr, "data", dataDir,
 		"ec_data", ecData, "ec_parity", ecParity)
 
-	srv := server.New(addr, backend)
+	srv := server.New(addr, backend, opts...)
 	go srv.Run()
 
 	<-ctx.Done()
@@ -164,4 +192,36 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 	close(stopApply)
 	slog.Info("server stopped", "component", "server")
 	return nil
+}
+
+// loadOrCreateEncryptionKey loads a key from file or auto-generates one in the data directory.
+func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, error) {
+	if keyFile == "" {
+		keyFile = filepath.Join(dataDir, "encryption.key")
+	}
+
+	keyData, err := os.ReadFile(keyFile)
+	if err == nil {
+		slog.Info("at-rest encryption enabled", "component", "server", "key_file", keyFile)
+		return encrypt.NewEncryptor(keyData)
+	}
+
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read key file: %w", err)
+	}
+
+	// Auto-generate a new key
+	if err := os.MkdirAll(filepath.Dir(keyFile), 0o755); err != nil {
+		return nil, fmt.Errorf("create key dir: %w", err)
+	}
+	keyData = make([]byte, 32)
+	if _, err := rand.Read(keyData); err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
+	}
+	if err := os.WriteFile(keyFile, keyData, 0o600); err != nil {
+		return nil, fmt.Errorf("write key file: %w", err)
+	}
+
+	slog.Info("at-rest encryption enabled (auto-generated key)", "component", "server", "key_file", keyFile)
+	return encrypt.NewEncryptor(keyData)
 }

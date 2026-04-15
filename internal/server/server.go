@@ -2,11 +2,15 @@ package server
 
 import (
 	"context"
+	"strconv"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -40,6 +44,8 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 		server.WithMaxRequestBodySize(512*1024*1024), // 512MB max body
 	)
 
+	h.Use(s.metricsMiddleware())
+
 	if s.verifier != nil {
 		h.Use(s.authMiddleware())
 	}
@@ -56,14 +62,15 @@ func (s *Server) Run() {
 
 func (s *Server) authMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		auth := string(c.GetHeader("Authorization"))
-		if auth == "" {
-			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "missing Authorization header")
-			c.Abort()
+		// Skip auth for /metrics and /ui/ endpoints
+		path := string(c.URI().Path())
+		if path == "/metrics" || path == "/ui/" {
+			c.Next(ctx)
 			return
 		}
-		// Build a minimal http.Request for the verifier
+
 		r := toHTTPRequest(c)
+		// Check both header auth and query-string presigned auth
 		if _, err := s.verifier.Verify(r); err != nil {
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
 			c.Abort()
@@ -73,7 +80,28 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 	}
 }
 
+func (s *Server) metricsMiddleware() app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		start := time.Now()
+		c.Next(ctx)
+		duration := time.Since(start).Seconds()
+		method := string(c.Method())
+		status := strconv.Itoa(c.Response.StatusCode())
+		metrics.HTTPRequestsTotal.WithLabelValues(method, status).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(method).Observe(duration)
+	}
+}
+
 func (s *Server) registerRoutes(h *server.Hertz) {
+	// Prometheus metrics endpoint (no auth)
+	promHandler := promhttp.Handler()
+	h.GET("/metrics", func(_ context.Context, c *app.RequestContext) {
+		promHandler.ServeHTTP(newResponseWriter(c), toHTTPRequest(c))
+	})
+
+	// Dashboard UI
+	h.GET("/ui/", s.serveDashboard)
+
 	// Service-level: list buckets
 	h.GET("/", s.listBuckets)
 

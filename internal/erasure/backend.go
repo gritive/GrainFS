@@ -24,9 +24,16 @@ import (
 // Objects are split into k data + m parity shards stored on disk.
 // On read, missing shards (up to m) are reconstructed automatically.
 type ECBackend struct {
-	root  string
-	db    *badger.DB
-	codec *Codec
+	root      string
+	db        *badger.DB
+	codec     *Codec
+	encryptor Encryptor
+}
+
+// Encryptor is an optional interface for at-rest encryption.
+type Encryptor interface {
+	Encrypt(plaintext []byte) ([]byte, error)
+	Decrypt(data []byte) ([]byte, error)
 }
 
 // ecObjectMeta is the metadata stored in BadgerDB for an EC-encoded object.
@@ -41,25 +48,39 @@ type ecObjectMeta struct {
 	ShardSize    int    `json:"ShardSize"`
 }
 
+// ECOption configures the EC backend.
+type ECOption func(*ECBackend)
+
+// WithEncryption enables at-rest encryption.
+func WithEncryption(enc Encryptor) ECOption {
+	return func(b *ECBackend) {
+		b.encryptor = enc
+	}
+}
+
 // NewECBackend creates a new erasure coding storage backend.
-func NewECBackend(root string, dataShards, parityShards int) (*ECBackend, error) {
+func NewECBackend(root string, dataShards, parityShards int, opts ...ECOption) (*ECBackend, error) {
 	dataDir := filepath.Join(root, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
 	dbDir := filepath.Join(root, "meta")
-	opts := badger.DefaultOptions(dbDir).WithLogger(nil)
-	db, err := badger.Open(opts)
+	dbOpts := badger.DefaultOptions(dbDir).WithLogger(nil)
+	db, err := badger.Open(dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	return &ECBackend{
+	b := &ECBackend{
 		root:  root,
 		db:    db,
 		codec: NewCodec(dataShards, parityShards),
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b, nil
 }
 
 // Close closes the metadata database.
@@ -78,7 +99,12 @@ func (b *ECBackend) shardPath(bucket, key string, idx int) string {
 	return filepath.Join(b.ShardDir(bucket, key), fmt.Sprintf("%02d", idx))
 }
 
-func bucketKey(bucket string) []byte         { return []byte("bucket:" + bucket) }
+// bucketMeta stores per-bucket configuration.
+type bucketMeta struct {
+	ECEnabled bool `json:"ec_enabled"`
+}
+
+func bucketKey(bucket string) []byte { return []byte("bucket:" + bucket) }
 func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
 func multipartKey(uploadID string) []byte     { return []byte("mpu:" + uploadID) }
 
@@ -99,8 +125,55 @@ func (b *ECBackend) CreateBucket(bucket string) error {
 		if err := os.MkdirAll(bucketDir, 0o755); err != nil {
 			return fmt.Errorf("create bucket dir: %w", err)
 		}
-		return txn.Set(bk, []byte(`{}`))
+
+		meta := bucketMeta{ECEnabled: true}
+		metaBytes, _ := json.Marshal(meta)
+		return txn.Set(bk, metaBytes)
 	})
+}
+
+// SetBucketECPolicy sets the EC enabled/disabled flag for a bucket.
+func (b *ECBackend) SetBucketECPolicy(bucket string, ecEnabled bool) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		bk := bucketKey(bucket)
+		_, err := txn.Get(bk)
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrBucketNotFound
+		}
+		if err != nil {
+			return err
+		}
+
+		meta := bucketMeta{ECEnabled: ecEnabled}
+		metaBytes, _ := json.Marshal(meta)
+		return txn.Set(bk, metaBytes)
+	})
+}
+
+// GetBucketECPolicy returns whether EC is enabled for a bucket.
+func (b *ECBackend) GetBucketECPolicy(bucket string) (bool, error) {
+	var meta bucketMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(bucketKey(bucket))
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrBucketNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			if err := json.Unmarshal(val, &meta); err != nil {
+				// Legacy bucket with no EC metadata: default to EC enabled
+				meta.ECEnabled = true
+				return nil
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return false, err
+	}
+	return meta.ECEnabled, nil
 }
 
 func (b *ECBackend) HeadBucket(bucket string) error {
@@ -163,7 +236,8 @@ func (b *ECBackend) ListBuckets() ([]string, error) {
 // --- Object operations ---
 
 func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+	ecEnabled, err := b.GetBucketECPolicy(bucket)
+	if err != nil {
 		return nil, err
 	}
 
@@ -172,7 +246,54 @@ func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType strin
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
 
+	if !ecEnabled {
+		return b.putObjectPlain(bucket, key, data, contentType)
+	}
 	return b.putObjectData(bucket, key, data, contentType)
+}
+
+// putObjectPlain stores an object without erasure coding (flat file).
+func (b *ECBackend) putObjectPlain(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
+	objDir := filepath.Join(b.root, "data", bucket, ".plain")
+	if err := os.MkdirAll(objDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create plain dir: %w", err)
+	}
+
+	h := sha256.Sum256([]byte(key))
+	filePath := filepath.Join(objDir, hex.EncodeToString(h[:]))
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return nil, fmt.Errorf("write plain object: %w", err)
+	}
+
+	etag := fmt.Sprintf("%x", md5.Sum(data))
+	now := time.Now().Unix()
+
+	meta := ecObjectMeta{
+		Key:          key,
+		Size:         int64(len(data)),
+		ContentType:  contentType,
+		ETag:         etag,
+		LastModified: now,
+		DataShards:   0, // indicates plain storage
+		ParityShards: 0,
+	}
+
+	metaBytes, _ := json.Marshal(meta)
+	err := b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(objectMetaKey(bucket, key), metaBytes)
+	})
+	if err != nil {
+		os.Remove(filePath)
+		return nil, err
+	}
+
+	return &storage.Object{
+		Key:          key,
+		Size:         int64(len(data)),
+		ContentType:  contentType,
+		ETag:         etag,
+		LastModified: now,
+	}, nil
 }
 
 func (b *ECBackend) putObjectData(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
@@ -189,8 +310,17 @@ func (b *ECBackend) putObjectData(bucket, key string, data []byte, contentType s
 	}
 
 	for i, shard := range shards {
+		data := shard
+		if b.encryptor != nil {
+			encrypted, err := b.encryptor.Encrypt(shard)
+			if err != nil {
+				os.RemoveAll(shardDir)
+				return nil, fmt.Errorf("encrypt shard %d: %w", i, err)
+			}
+			data = encrypted
+		}
 		path := b.shardPath(bucket, key, i)
-		if err := os.WriteFile(path, shard, 0o644); err != nil {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
 			os.RemoveAll(shardDir)
 			return nil, fmt.Errorf("write shard %d: %w", i, err)
 		}
@@ -240,7 +370,12 @@ func (b *ECBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Objec
 		return nil, nil, err
 	}
 
-	data, err := b.readAndDecode(bucket, key, meta)
+	var data []byte
+	if meta.DataShards == 0 {
+		data, err = b.readPlain(bucket, key)
+	} else {
+		data, err = b.readAndDecode(bucket, key, meta)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -253,6 +388,12 @@ func (b *ECBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Objec
 		LastModified: meta.LastModified,
 	}
 	return io.NopCloser(bytes.NewReader(data)), obj, nil
+}
+
+func (b *ECBackend) readPlain(bucket, key string) ([]byte, error) {
+	h := sha256.Sum256([]byte(key))
+	filePath := filepath.Join(b.root, "data", bucket, ".plain", hex.EncodeToString(h[:]))
+	return os.ReadFile(filePath)
 }
 
 func (b *ECBackend) HeadObject(bucket, key string) (*storage.Object, error) {
@@ -275,7 +416,10 @@ func (b *ECBackend) DeleteObject(bucket, key string) error {
 		return err
 	}
 
+	// Remove both EC shards and plain file (one will be a no-op)
 	os.RemoveAll(b.ShardDir(bucket, key))
+	h := sha256.Sum256([]byte(key))
+	os.Remove(filepath.Join(b.root, "data", bucket, ".plain", hex.EncodeToString(h[:])))
 
 	return b.db.Update(func(txn *badger.Txn) error {
 		mk := objectMetaKey(bucket, key)
@@ -441,8 +585,18 @@ func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts 
 		assembled.Write(data)
 	}
 
-	// EC encode the assembled data
-	obj, err := b.putObjectData(bucket, key, assembled.Bytes(), uploadMeta.ContentType)
+	// Check bucket EC policy
+	ecEnabled, ecErr := b.GetBucketECPolicy(bucket)
+	if ecErr != nil {
+		ecEnabled = true // default to EC on error
+	}
+
+	var obj *storage.Object
+	if ecEnabled {
+		obj, err = b.putObjectData(bucket, key, assembled.Bytes(), uploadMeta.ContentType)
+	} else {
+		obj, err = b.putObjectPlain(bucket, key, assembled.Bytes(), uploadMeta.ContentType)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -518,6 +672,15 @@ func (b *ECBackend) readAndDecode(bucket, key string, meta *ecObjectMeta) ([]byt
 			// Missing shard — leave nil for reconstruction
 			shards[i] = nil
 			continue
+		}
+		if b.encryptor != nil {
+			decrypted, err := b.encryptor.Decrypt(data)
+			if err != nil {
+				// Corrupted shard — treat as missing
+				shards[i] = nil
+				continue
+			}
+			data = decrypted
 		}
 		shards[i] = data
 	}
