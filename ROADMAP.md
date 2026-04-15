@@ -165,38 +165,47 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 **검증:** NFS 클라이언트로 파일 생성/읽기/삭제 동작 확인 (E2E).
 
-### Phase 7: UX & Performance
+### Phase 7: First User Experience
 
-**목표:** 사용자 경험을 강화하고, 클러스터 성능 병목을 해소한다.
+**목표:** 실사용자가 즉시 가치를 느끼는 환경을 만든다.
 
-- **Raft 직렬화 protobuf 전환** (⚠️ 우선): JSON 이중 marshal → protobuf. 50ms heartbeat × 노드 수 = 초당 수십~수백 회 GC 압박. Raft RPC + 로그 영속화 모두 전환
-- **Object Browser**: 대시보드에 버킷/오브젝트 브라우저 UI 추가 (목록 조회, 미리보기, 업로드/다운로드)
-- **Volume 관리 UI**: 대시보드에서 볼륨 생성/삭제/조회 가능
-- **읽기 캐시**: 핫 오브젝트 읽기 캐시 (LRU) 도입으로 반복 읽기 성능 개선
-- **NFS 성능 최적화**: 읽기/쓰기 캐싱, 대용량 파일 최적화, 벤치마크
-- **기본 버킷 자동 생성**: 서버 시작 시 기본 버킷("default") 자동 생성 옵션
+- **Object Browser**: 대시보드에 버킷/오브젝트 브라우저 + 볼륨 관리 탭 (aws-cli 없이 브라우저에서 업로드/다운로드/삭제/조회)
+- **기본 버킷 자동 생성**: 서버 시작 시 기본 버킷("default") 자동 생성
+- **Graceful Shutdown**: 진행 중인 요청 drain, NFS 세션 정리, Raft 리더 이전
+- **벤치마크 스위트**: k6 기반 성능 베이스라인 측정 (S3 API throughput, 지연, EC 오버헤드, NFS 처리량). Phase 8 최적화의 근거 데이터
 - **Docker 기반 NBD 테스트**: macOS에서 Docker 컨테이너로 NBD E2E 테스트 (`make test-nbd-docker`)
 
 **검증:**
+- Object Browser에서 파일 업로드/다운로드/삭제 + 볼륨 생성/삭제 동작 확인
+- `grainfs serve` 즉시 실행 후 브라우저에서 오브젝트 조작 가능
+- 벤치마크 리포트 자동 생성 (ops/sec, P50/P99 지연, EC 인코딩 시간)
+
+### Phase 8: Performance (측정 기반 최적화)
+
+**목표:** Phase 7 벤치마크 결과를 근거로, 확인된 병목을 제거한다.
+
+- **Raft 직렬화 protobuf 전환**: JSON 이중 marshal → protobuf. 50ms heartbeat × 노드 수 = 초당 수십~수백 회 GC 압박. Raft RPC + 로그 영속화 모두 전환
+- **읽기 캐시**: 핫 오브젝트 읽기 캐시 (LRU). 벤치마크에서 반복 읽기가 병목으로 확인된 경우 도입
+- **NFS 성능 최적화**: 읽기/쓰기 캐싱, 대용량 파일 최적화. 벤치마크에서 NFS throughput이 목표 미달인 경우
+
+**검증:**
 - protobuf 전환 후 Raft heartbeat 지연 50% 이상 감소 확인
-- Object Browser에서 파일 업로드/다운로드/삭제 동작 확인
-- 읽기 캐시 hit ratio 측정, 반복 읽기 응답 시간 개선 확인
+- 각 최적화 전후 벤치마크 비교 (동일 워크로드, 개선율 수치 제시)
 
-### Phase 8: Security & Production Hardening
+### Phase 9: Security & Scale
 
-**목표:** 프로덕션 배포를 위한 보안, 내구성, 대규모 운영 최적화를 완성한다.
+**목표:** 프로덕션/멀티테넌트 배포를 위한 보안과 대규모 운영을 완성한다.
 
 - **버킷/볼륨 인증**: 버킷별, 볼륨별 접근 제어 (ACL 또는 IAM 스타일 정책)
 - **NFS v4 지원**: NFSv3 → NFSv4 업그레이드 (보안, 상태 관리, 잠금/위임)
-- **WAL (Write-Ahead Log)**: 쓰기 내구성 강화 (현재 BadgerDB 트랜잭션 의존 → 별도 WAL로 crash recovery 강화)
+- **WAL vs BadgerDB 내장 WAL 검토**: BadgerDB 자체 WAL 내구성 한계 분석 후, 별도 WAL 필요 여부 결정. kill -9 시나리오 테스트로 판단
 - **Packed Blob 포맷**: 대량 소형 객체 시나리오에서 inode 압박 해소를 위한 append-only 로그 포맷
-- **Graceful Shutdown**: 진행 중인 요청 drain, NFS 세션 정리, Raft 리더 이전
 - **Rate Limiting**: API 엔드포인트별 요청 제한
 
 **검증:**
 - 버킷 ACL 설정 후 무단 접근 거부 확인
 - NFSv4 마운트 후 잠금, 위임 동작 확인
-- WAL 활성화 후 kill -9 시나리오에서 데이터 무손실 확인
+- BadgerDB WAL kill -9 테스트 → 별도 WAL 필요 시 구현 후 동일 테스트 통과
 - 100만 소형 객체 (< 1KB) 저장 후 inode 사용량 비교 (flat vs. packed)
 
 ## 5. 핵심 설계 사양
