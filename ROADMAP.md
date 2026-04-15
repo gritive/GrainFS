@@ -136,6 +136,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - AWS Signature V4 전체 지원 (chunked encoding, POST policy, presigned URL)
 - Prometheus 메트릭 (노드별 지연, EC 연산 시간, 스트림 상태)
 - 클러스터 멤버십 변경 (Joint Consensus)
+- 클러스터 보안: PSK/토큰 기반 피어 인증, 무단 노드 연결 차단
 - SDK 호환 테스트: aws-cli, boto3, aws-sdk-go
 
 **검증:**

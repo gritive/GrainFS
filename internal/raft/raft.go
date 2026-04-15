@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -8,7 +9,10 @@ import (
 	"time"
 )
 
-var ErrNotLeader = errors.New("not the leader")
+var (
+	ErrNotLeader      = errors.New("not the leader")
+	ErrProposalFailed = errors.New("proposal failed: node stepped down")
+)
 
 // NodeState represents the current role of a Raft node.
 type NodeState int
@@ -126,6 +130,9 @@ type Node struct {
 
 	// leader tracking (observable from outside)
 	leaderID string
+
+	// proposal waiters: log index -> channel signaled when committed
+	waiters map[uint64]chan struct{}
 }
 
 // NewNode creates a new Raft node. Call Start() to begin operation.
@@ -141,6 +148,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		applyCh:    make(chan LogEntry, 64),
 		stopCh:     make(chan struct{}),
 		resetCh:    make(chan struct{}, 1),
+		waiters:    make(map[uint64]chan struct{}),
 	}
 
 	if len(store) > 0 && store[0] != nil {
@@ -206,8 +214,46 @@ func (n *Node) Propose(command []byte) error {
 	n.persistLogEntries([]LogEntry{entry})
 	// Update matchIndex for self
 	n.matchIndex[n.id] = entry.Index
+	n.advanceCommitIndex()
 
 	return nil
+}
+
+// ProposeWait appends a command and blocks until it is committed or the context is cancelled.
+// Returns the log index of the committed entry.
+func (n *Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
+	n.mu.Lock()
+
+	if n.state != Leader {
+		n.mu.Unlock()
+		return 0, ErrNotLeader
+	}
+
+	entry := LogEntry{
+		Term:    n.currentTerm,
+		Index:   n.lastLogIdx() + 1,
+		Command: command,
+	}
+	n.log = append(n.log, entry)
+	n.persistLogEntries([]LogEntry{entry})
+	n.matchIndex[n.id] = entry.Index
+
+	ch := make(chan struct{}, 1)
+	n.waiters[entry.Index] = ch
+	n.advanceCommitIndex()
+	n.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		n.mu.Lock()
+		delete(n.waiters, entry.Index)
+		n.mu.Unlock()
+		return 0, ctx.Err()
+	case <-n.stopCh:
+		return 0, ErrProposalFailed
+	case <-ch:
+		return entry.Index, nil
+	}
 }
 
 func (n *Node) applyLoop() {
@@ -222,6 +268,13 @@ func (n *Node) applyLoop() {
 		if n.commitIndex > n.lastApplied && int(n.lastApplied) < len(n.log) {
 			n.lastApplied++
 			entry := n.log[n.lastApplied-1]
+			idx := entry.Index
+
+			// Signal any waiter for this index
+			if ch, ok := n.waiters[idx]; ok {
+				close(ch)
+				delete(n.waiters, idx)
+			}
 			n.mu.Unlock()
 
 			select {
@@ -334,6 +387,19 @@ func (n *Node) runCandidate() {
 	n.mu.Unlock()
 
 	votes := 1 // vote for self
+	total := len(peers) + 1 // include self
+	majority := total/2 + 1
+
+	// Solo node: already has majority with self-vote
+	if votes >= majority {
+		n.mu.Lock()
+		n.state = Leader
+		n.leaderID = n.id
+		n.initLeaderState()
+		n.mu.Unlock()
+		return
+	}
+
 	voteCh := make(chan bool, len(peers))
 
 	for _, peer := range peers {
@@ -369,18 +435,13 @@ func (n *Node) runCandidate() {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	total := len(peers)
-	majority := (total+1)/2 + 1 // +1 for self in the cluster
-
-	for i := 0; i < total; i++ {
+	for range len(peers) {
 		select {
 		case <-n.stopCh:
 			return
 		case <-timer.C:
-			// election timeout, restart as candidate
 			return
 		case <-n.resetCh:
-			// got AppendEntries from a valid leader
 			return
 		case granted := <-voteCh:
 			if granted {
