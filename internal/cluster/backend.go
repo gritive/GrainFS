@@ -21,6 +21,10 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// OnApplyFunc is called after FSM.Apply() with the command type, bucket, and key.
+// Used for cache invalidation and metrics updates.
+type OnApplyFunc func(cmdType CommandType, bucket, key string)
+
 // DistributedBackend implements storage.Backend with Raft-replicated metadata
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
@@ -31,6 +35,7 @@ type DistributedBackend struct {
 	fsm         *FSM
 	logger      *slog.Logger
 	lastApplied atomic.Uint64
+	onApply     OnApplyFunc
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -51,6 +56,12 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 	}, nil
 }
 
+// SetOnApply sets the callback invoked after each FSM apply.
+// Must be called before RunApplyLoop.
+func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
+	b.onApply = fn
+}
+
 // RunApplyLoop consumes committed entries from the Raft node and applies them to the FSM.
 // This must run in a goroutine.
 func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
@@ -63,7 +74,46 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 				b.logger.Error("fsm apply error", "index", entry.Index, "error", err)
 			}
 			b.lastApplied.Store(entry.Index)
+
+			// Notify cache/metrics callback
+			if b.onApply != nil {
+				b.notifyOnApply(entry.Command)
+			}
 		}
+	}
+}
+
+// notifyOnApply extracts bucket/key from a committed command and calls the callback.
+func (b *DistributedBackend) notifyOnApply(raw []byte) {
+	cmd, err := DecodeCommand(raw)
+	if err != nil {
+		return
+	}
+
+	var bucket, key string
+	switch cmd.Type {
+	case CmdPutObjectMeta:
+		c, err := decodePutObjectMetaCmd(cmd.Data)
+		if err == nil {
+			bucket, key = c.Bucket, c.Key
+		}
+	case CmdDeleteObject:
+		c, err := decodeDeleteObjectCmd(cmd.Data)
+		if err == nil {
+			bucket, key = c.Bucket, c.Key
+		}
+	case CmdCompleteMultipart:
+		c, err := decodeCompleteMultipartCmd(cmd.Data)
+		if err == nil {
+			bucket, key = c.Bucket, c.Key
+		}
+	default:
+		// Other commands don't affect object cache
+		bucket = ""
+	}
+
+	if bucket != "" {
+		b.onApply(cmd.Type, bucket, key)
 	}
 }
 

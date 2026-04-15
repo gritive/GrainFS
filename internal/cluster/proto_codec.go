@@ -180,6 +180,34 @@ func decodeAbortMultipartCmd(data []byte) (AbortMultipartCmd, error) {
 	}, nil
 }
 
+// --- BucketPolicy codec ---
+
+func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
+	pb := &clusterpb.SetBucketPolicyCmd{Bucket: c.Bucket, PolicyJson: c.PolicyJSON}
+	return proto.Marshal(pb)
+}
+
+func decodeSetBucketPolicyCmd(data []byte) (SetBucketPolicyCmd, error) {
+	var pb clusterpb.SetBucketPolicyCmd
+	if err := proto.Unmarshal(data, &pb); err != nil {
+		return SetBucketPolicyCmd{}, fmt.Errorf("unmarshal SetBucketPolicyCmd: %w", err)
+	}
+	return SetBucketPolicyCmd{Bucket: pb.Bucket, PolicyJSON: pb.PolicyJson}, nil
+}
+
+func encodeDeleteBucketPolicyCmd(c DeleteBucketPolicyCmd) ([]byte, error) {
+	pb := &clusterpb.DeleteBucketPolicyCmd{Bucket: c.Bucket}
+	return proto.Marshal(pb)
+}
+
+func decodeDeleteBucketPolicyCmd(data []byte) (DeleteBucketPolicyCmd, error) {
+	var pb clusterpb.DeleteBucketPolicyCmd
+	if err := proto.Unmarshal(data, &pb); err != nil {
+		return DeleteBucketPolicyCmd{}, fmt.Errorf("unmarshal DeleteBucketPolicyCmd: %w", err)
+	}
+	return DeleteBucketPolicyCmd{Bucket: pb.Bucket}, nil
+}
+
 // --- ObjectMeta codec ---
 
 // marshalObjectMeta serializes an objectMeta to protobuf bytes.
@@ -262,6 +290,10 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeCompleteMultipartCmd(payload.(CompleteMultipartCmd))
 	case CmdAbortMultipart:
 		return encodeAbortMultipartCmd(payload.(AbortMultipartCmd))
+	case CmdSetBucketPolicy:
+		return encodeSetBucketPolicyCmd(payload.(SetBucketPolicyCmd))
+	case CmdDeleteBucketPolicy:
+		return encodeDeleteBucketPolicyCmd(payload.(DeleteBucketPolicyCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}

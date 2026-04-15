@@ -39,13 +39,18 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applyCompleteMultipart(cmd.Data)
 	case CmdAbortMultipart:
 		return f.applyAbortMultipart(cmd.Data)
+	case CmdSetBucketPolicy:
+		return f.applySetBucketPolicy(cmd.Data)
+	case CmdDeleteBucketPolicy:
+		return f.applyDeleteBucketPolicy(cmd.Data)
 	default:
 		log.Printf("fsm: unknown command type %d", cmd.Type)
 		return nil
 	}
 }
 
-func bucketKey(bucket string) []byte    { return []byte("bucket:" + bucket) }
+func bucketKey(bucket string) []byte       { return []byte("bucket:" + bucket) }
+func bucketPolicyKey(bucket string) []byte { return []byte("policy:" + bucket) }
 func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
 func multipartKey(uploadID string) []byte     { return []byte("mpu:" + uploadID) }
 
@@ -149,6 +154,30 @@ func (f *FSM) applyAbortMultipart(data []byte) error {
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		err := txn.Delete(multipartKey(c.UploadID))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		return err
+	})
+}
+
+func (f *FSM) applySetBucketPolicy(data []byte) error {
+	c, err := decodeSetBucketPolicyCmd(data)
+	if err != nil {
+		return err
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(bucketPolicyKey(c.Bucket), c.PolicyJSON)
+	})
+}
+
+func (f *FSM) applyDeleteBucketPolicy(data []byte) error {
+	c, err := decodeDeleteBucketPolicyCmd(data)
+	if err != nil {
+		return err
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete(bucketPolicyKey(c.Bucket))
 		if err == badger.ErrKeyNotFound {
 			return nil
 		}

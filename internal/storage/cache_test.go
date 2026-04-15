@@ -298,3 +298,39 @@ func TestCachedBackend_AbortMultipartPassthrough(t *testing.T) {
 	rc.Close()
 	assert.Equal(t, "persistent", string(body))
 }
+
+func TestCachedBackend_InvalidateKey(t *testing.T) {
+	cb, _ := newTestCachedBackend(t)
+
+	require.NoError(t, cb.CreateBucket("test"))
+	_, err := cb.PutObject("test", "key1", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+
+	// Populate cache
+	rc, _, err := cb.GetObject("test", "key1")
+	require.NoError(t, err)
+	io.ReadAll(rc)
+	rc.Close()
+
+	// Verify cached
+	stats := cb.Stats()
+	require.Equal(t, int64(0), stats.Hits) // first access is a miss
+
+	rc, _, err = cb.GetObject("test", "key1")
+	require.NoError(t, err)
+	io.ReadAll(rc)
+	rc.Close()
+	stats = cb.Stats()
+	require.Equal(t, int64(1), stats.Hits)
+
+	// Invalidate using the public method (simulates cluster FSM callback)
+	cb.InvalidateKey("test", "key1")
+
+	// Next access should be a miss
+	rc, _, err = cb.GetObject("test", "key1")
+	require.NoError(t, err)
+	io.ReadAll(rc)
+	rc.Close()
+	stats = cb.Stats()
+	assert.Equal(t, int64(1), stats.Hits) // still 1 — the last access was a miss
+}

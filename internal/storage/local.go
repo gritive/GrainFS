@@ -283,3 +283,45 @@ func (b *LocalBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*Objec
 	})
 	return objects, err
 }
+
+func (b *LocalBackend) policyKey(bucket string) []byte {
+	return []byte("policy:" + bucket)
+}
+
+// GetBucketPolicy returns the raw policy JSON for a bucket.
+func (b *LocalBackend) GetBucketPolicy(bucket string) ([]byte, error) {
+	var data []byte
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.policyKey(bucket))
+		if err == badger.ErrKeyNotFound {
+			return ErrBucketNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	return data, err
+}
+
+// SetBucketPolicy stores the raw policy JSON for a bucket.
+func (b *LocalBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(b.policyKey(bucket), policyJSON)
+	})
+}
+
+// DeleteBucketPolicy removes the policy for a bucket.
+func (b *LocalBackend) DeleteBucketPolicy(bucket string) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete(b.policyKey(bucket))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		return err
+	})
+}

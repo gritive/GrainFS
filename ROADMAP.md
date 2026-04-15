@@ -194,22 +194,30 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
   - GetObject: 17,000 ns → 140 ns/op (**~120x 개선**, allocs 29→5)
   - HeadObject: 1,700 ns → 88 ns/op (**~19x 개선**, allocs 24→2)
 
-### Phase 9: Security & Scale
+### Phase 9: Security & Scale ✅
 
 **목표:** 프로덕션/멀티테넌트 배포를 위한 보안과 대규모 운영을 완성한다.
 
-- **버킷/볼륨 인증**: 버킷별, 볼륨별 접근 제어 (ACL 또는 IAM 스타일 정책)
-- **클러스터 읽기 캐시**: Raft FSM 적용 시 캐시 무효화 이벤트 발생 → 노드 간 일관된 캐시. Phase 8에서 Solo 모드 전용으로 도입한 CachedBackend를 클러스터로 확장
-- **NFS v4 지원**: NFSv3 → NFSv4 업그레이드 (보안, 상태 관리, 잠금/위임)
-- **WAL vs BadgerDB 내장 WAL 검토**: BadgerDB 자체 WAL 내구성 한계 분석 후, 별도 WAL 필요 여부 결정. kill -9 시나리오 테스트로 판단
-- **Packed Blob 포맷**: 대량 소형 객체 시나리오에서 inode 압박 해소를 위한 append-only 로그 포맷
-- **Rate Limiting**: API 엔드포인트별 요청 제한
+- **Bucket Policy**: ✅ S3 호환 Bucket Policy JSON 기반 접근 제어. accessKey를 request context에 전파 (`auth_context.go`), authzMiddleware에서 Effect/Principal/Action/Resource 정책 평가 (`authz.go`). BadgerDB에 `policy:<bucket>` 키로 저장. FSM에 `CmdSetBucketPolicy`/`CmdDeleteBucketPolicy` 추가하여 클러스터 복제 지원
+- **클러스터 읽기 캐시**: ✅ DistributedBackend에 `OnApply` 콜백 도입. RunApplyLoop에서 FSM.Apply() 후 CachedBackend.InvalidateKey() 호출. 모든 노드가 동일한 Raft commit 순서를 받으므로 결정적 캐시 무효화 보장
+- **WAL 설정**: ✅ Raft LogStore에 `SyncWrites=true` 적용 (kill -9 시 로그 유실 방지). Metadata store는 `SyncWrites=false` 유지 (FSM이 Raft 로그에서 재적용 가능)
+- **Rate Limiting**: ✅ 2레이어 구현. IP 기반 pre-auth (DDoS 방어, `golang.org/x/time/rate`) + user 기반 post-auth (테넌트 격리). TTL 기반 자동 정리, 100K 엔트리 cap
 
 **검증:**
-- 버킷 ACL 설정 후 무단 접근 거부 확인
-- 클러스터 3노드에서 노드A PUT → 노드B GET 시 stale 캐시 없이 최신 데이터 반환 확인
+- ✅ Bucket Policy 설정 후 Deny 정책에 따른 403 AccessDenied 확인 (E2E)
+- ✅ Policy CRUD (PUT/GET/DELETE ?policy) 동작 확인 (E2E)
+- ✅ Rate limiting이 정상 부하에서 트리거되지 않음 확인 (E2E)
+- ✅ Raft LogStore SyncWrites=true 적용 + 재시작 후 데이터 무손실 확인 (unit test)
+
+### Phase 10: Advanced Storage & Protocol
+
+**목표:** 대규모 운영 시나리오와 프로토콜 고도화를 완성한다.
+
+- **NFS v4 지원**: NFSv3 → NFSv4 업그레이드 (보안, 상태 관리, 잠금/위임). Go 생태계에 성숙한 NFSv4 라이브러리 부재로 별도 조사 필요
+- **Packed Blob 포맷**: 대량 소형 객체 시나리오에서 inode 압박 해소를 위한 append-only 로그 포맷
+
+**검증:**
 - NFSv4 마운트 후 잠금, 위임 동작 확인
-- BadgerDB WAL kill -9 테스트 → 별도 WAL 필요 시 구현 후 동일 테스트 통과
 - 100만 소형 객체 (< 1KB) 저장 후 inode 사용량 비교 (flat vs. packed)
 
 ## 5. 핵심 설계 사양

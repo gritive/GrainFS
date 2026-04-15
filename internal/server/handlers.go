@@ -132,6 +132,12 @@ func (s *Server) listBuckets(_ context.Context, c *app.RequestContext) {
 func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 
+	// PUT /:bucket?policy — set bucket policy
+	if c.QueryArgs().Has("policy") {
+		s.putBucketPolicy(c, bucket)
+		return
+	}
+
 	// Check if this is an EC policy update: PUT /:bucket?ec=true|false
 	ecParam := string(c.QueryArgs().Peek("ec"))
 	if ecParam != "" {
@@ -194,6 +200,13 @@ func (s *Server) headBucket(_ context.Context, c *app.RequestContext) {
 
 func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
+
+	// DELETE /:bucket?policy — delete bucket policy
+	if c.QueryArgs().Has("policy") {
+		s.deleteBucketPolicy(c, bucket)
+		return
+	}
+
 	if err := s.backend.DeleteBucket(bucket); err != nil {
 		mapError(c, err)
 		return
@@ -204,6 +217,13 @@ func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 
 func (s *Server) listObjects(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
+
+	// GET /:bucket?policy — get bucket policy
+	if c.QueryArgs().Has("policy") {
+		s.getBucketPolicy(c, bucket)
+		return
+	}
+
 	prefix := string(c.QueryArgs().Peek("prefix"))
 	maxKeys := 1000
 	if mk := string(c.QueryArgs().Peek("max-keys")); mk != "" {

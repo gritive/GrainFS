@@ -87,3 +87,15 @@ func TestNoAuthServerAllowsAll(t *testing.T) {
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
+
+func TestAuthContextKey(t *testing.T) {
+	// Test that AccessKeyFromContext returns empty for unauthenticated context
+	ctx := t.Context()
+	assert.Empty(t, AccessKeyFromContext(ctx))
+}
+
+func TestAuthContextKeyRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	ctx = WithAccessKey(ctx, "user123")
+	assert.Equal(t, "user123", AccessKeyFromContext(ctx))
+}

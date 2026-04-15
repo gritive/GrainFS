@@ -19,10 +19,13 @@ import (
 
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
-	backend  storage.Backend
-	verifier *s3auth.Verifier
-	hertz    *server.Hertz
-	volMgr   *volume.Manager
+	backend     storage.Backend
+	verifier    *s3auth.Verifier
+	hertz       *server.Hertz
+	volMgr      *volume.Manager
+	policyStore *PolicyStore
+	ipLimiter   *RateLimiter
+	userLimiter *RateLimiter
 }
 
 // Option configures the server.
@@ -37,7 +40,12 @@ func WithAuth(creds []s3auth.Credentials) Option {
 
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
-	s := &Server{backend: backend}
+	s := &Server{
+		backend:     backend,
+		policyStore: NewPolicyStore(),
+		ipLimiter:   NewRateLimiter(100, 200, 100000),  // 100 req/sec per IP, burst 200, max 100K entries
+		userLimiter: NewRateLimiter(50, 100, 100000),    // 50 req/sec per user, burst 100
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -48,10 +56,14 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	)
 
 	h.Use(s.metricsMiddleware())
+	h.Use(s.ipRateLimitMiddleware())
 
 	if s.verifier != nil {
 		h.Use(s.authMiddleware())
 	}
+
+	h.Use(s.userRateLimitMiddleware())
+	h.Use(s.authzMiddleware())
 
 	s.volMgr = volume.NewManager(backend)
 	s.registerRoutes(h)
@@ -82,11 +94,14 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 
 		r := toHTTPRequest(c)
 		// Check both header auth and query-string presigned auth
-		if _, err := s.verifier.Verify(r); err != nil {
+		accessKey, err := s.verifier.Verify(r)
+		if err != nil {
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
 			c.Abort()
 			return
 		}
+		// Propagate identity to downstream handlers
+		ctx = WithAccessKey(ctx, accessKey)
 		c.Next(ctx)
 	}
 }

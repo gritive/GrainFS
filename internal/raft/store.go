@@ -58,7 +58,7 @@ type BadgerLogStore struct {
 
 // NewBadgerLogStore creates a new log store backed by BadgerDB.
 func NewBadgerLogStore(path string) (*BadgerLogStore, error) {
-	opts := badger.DefaultOptions(path).WithLogger(nil)
+	opts := badger.DefaultOptions(path).WithLogger(nil).WithSyncWrites(true)
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger log store: %w", err)

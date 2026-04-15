@@ -19,6 +19,8 @@ const (
 	CmdCreateMultipartUpload CommandType = 5
 	CmdCompleteMultipart     CommandType = 6
 	CmdAbortMultipart        CommandType = 7
+	CmdSetBucketPolicy       CommandType = 8
+	CmdDeleteBucketPolicy    CommandType = 9
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -71,6 +73,15 @@ type AbortMultipartCmd struct {
 	Bucket   string
 	Key      string
 	UploadID string
+}
+
+type SetBucketPolicyCmd struct {
+	Bucket     string
+	PolicyJSON []byte
+}
+
+type DeleteBucketPolicyCmd struct {
+	Bucket string
 }
 
 // EncodeCommand serializes a command for Raft proposal using protobuf.

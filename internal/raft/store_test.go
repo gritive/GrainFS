@@ -184,3 +184,42 @@ func TestBadgerLogStore_GetEntryNotFound(t *testing.T) {
 	_, err := store.GetEntry(999)
 	assert.Error(t, err)
 }
+
+func TestNewBadgerLogStore_SyncWritesEnabled(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// SyncWrites should be enabled for Raft log durability
+	assert.True(t, store.db.Opts().SyncWrites, "Raft LogStore must use SyncWrites=true for durability")
+}
+
+func TestNewBadgerLogStore_DurableAfterWrite(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write entries with SyncWrites=true
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	entries := []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("durable-cmd")},
+	}
+	require.NoError(t, store.AppendEntries(entries))
+	require.NoError(t, store.SaveState(2, "node-X"))
+	require.NoError(t, store.Close())
+
+	// Reopen and verify data persisted (simulates crash recovery)
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store2.Close()
+
+	entry, err := store2.GetEntry(1)
+	require.NoError(t, err)
+	assert.Equal(t, "durable-cmd", string(entry.Command))
+
+	term, votedFor, err := store2.LoadState()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), term)
+	assert.Equal(t, "node-X", votedFor)
+}

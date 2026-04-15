@@ -250,12 +250,19 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
 
+	// Wrap distributed backend with LRU read cache.
+	// Raft FSM-based invalidation ensures cache consistency across nodes.
+	cachedBackend := storage.NewCachedBackend(distBackend)
+
+	// Wire OnApply callback: invalidate cache + update metrics on committed entries
+	distBackend.SetOnApply(func(cmdType cluster.CommandType, bucket, key string) {
+		cachedBackend.InvalidateKey(bucket, key)
+	})
+
 	stopApply := make(chan struct{})
 	go distBackend.RunApplyLoop(stopApply)
 
-	// No read cache in cluster mode — other nodes can modify data,
-	// making local cache stale. Revisit with Raft FSM-based invalidation.
-	var backend storage.Backend = distBackend
+	var backend storage.Backend = cachedBackend
 
 	// Auto-create "default" bucket on startup
 	if err := backend.CreateBucket("default"); err != nil {

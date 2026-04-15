@@ -188,6 +188,12 @@ func (cb *CachedBackend) Unwrap() Backend {
 	return cb.Backend
 }
 
+// InvalidateKey removes a cache entry for the given bucket/key.
+// This is the public API used by cluster cache invalidation (OnApply callback).
+func (cb *CachedBackend) InvalidateKey(bucket, key string) {
+	cb.invalidate(bucket, key)
+}
+
 // invalidate removes a key from the cache.
 func (cb *CachedBackend) invalidate(bucket, key string) {
 	ck := cacheKey(bucket, key)

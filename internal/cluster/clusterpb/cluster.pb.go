@@ -525,6 +525,102 @@ func (x *AbortMultipartCmd) GetUploadId() string {
 	return ""
 }
 
+type SetBucketPolicyCmd struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Bucket        string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	PolicyJson    []byte                 `protobuf:"bytes,2,opt,name=policy_json,json=policyJson,proto3" json:"policy_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetBucketPolicyCmd) Reset() {
+	*x = SetBucketPolicyCmd{}
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetBucketPolicyCmd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetBucketPolicyCmd) ProtoMessage() {}
+
+func (x *SetBucketPolicyCmd) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetBucketPolicyCmd.ProtoReflect.Descriptor instead.
+func (*SetBucketPolicyCmd) Descriptor() ([]byte, []int) {
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SetBucketPolicyCmd) GetBucket() string {
+	if x != nil {
+		return x.Bucket
+	}
+	return ""
+}
+
+func (x *SetBucketPolicyCmd) GetPolicyJson() []byte {
+	if x != nil {
+		return x.PolicyJson
+	}
+	return nil
+}
+
+type DeleteBucketPolicyCmd struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Bucket        string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteBucketPolicyCmd) Reset() {
+	*x = DeleteBucketPolicyCmd{}
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteBucketPolicyCmd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteBucketPolicyCmd) ProtoMessage() {}
+
+func (x *DeleteBucketPolicyCmd) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteBucketPolicyCmd.ProtoReflect.Descriptor instead.
+func (*DeleteBucketPolicyCmd) Descriptor() ([]byte, []int) {
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DeleteBucketPolicyCmd) GetBucket() string {
+	if x != nil {
+		return x.Bucket
+	}
+	return ""
+}
+
 type ObjectMeta struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -538,7 +634,7 @@ type ObjectMeta struct {
 
 func (x *ObjectMeta) Reset() {
 	*x = ObjectMeta{}
-	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[8]
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -550,7 +646,7 @@ func (x *ObjectMeta) String() string {
 func (*ObjectMeta) ProtoMessage() {}
 
 func (x *ObjectMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[8]
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -563,7 +659,7 @@ func (x *ObjectMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObjectMeta.ProtoReflect.Descriptor instead.
 func (*ObjectMeta) Descriptor() ([]byte, []int) {
-	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{8}
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ObjectMeta) GetKey() string {
@@ -610,7 +706,7 @@ type SnapshotState struct {
 
 func (x *SnapshotState) Reset() {
 	*x = SnapshotState{}
-	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[9]
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -622,7 +718,7 @@ func (x *SnapshotState) String() string {
 func (*SnapshotState) ProtoMessage() {}
 
 func (x *SnapshotState) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[9]
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -635,7 +731,7 @@ func (x *SnapshotState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotState.ProtoReflect.Descriptor instead.
 func (*SnapshotState) Descriptor() ([]byte, []int) {
-	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{9}
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SnapshotState) GetEntries() map[string][]byte {
@@ -654,7 +750,7 @@ type MultipartMeta struct {
 
 func (x *MultipartMeta) Reset() {
 	*x = MultipartMeta{}
-	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[10]
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -666,7 +762,7 @@ func (x *MultipartMeta) String() string {
 func (*MultipartMeta) ProtoMessage() {}
 
 func (x *MultipartMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[10]
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -679,7 +775,7 @@ func (x *MultipartMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MultipartMeta.ProtoReflect.Descriptor instead.
 func (*MultipartMeta) Descriptor() ([]byte, []int) {
-	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{10}
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *MultipartMeta) GetContentType() string {
@@ -729,7 +825,13 @@ const file_internal_cluster_clusterpb_cluster_proto_rawDesc = "" +
 	"\x11AbortMultipartCmd\x12\x16\n" +
 	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x1b\n" +
-	"\tupload_id\x18\x03 \x01(\tR\buploadId\"\x8e\x01\n" +
+	"\tupload_id\x18\x03 \x01(\tR\buploadId\"M\n" +
+	"\x12SetBucketPolicyCmd\x12\x16\n" +
+	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x1f\n" +
+	"\vpolicy_json\x18\x02 \x01(\fR\n" +
+	"policyJson\"/\n" +
+	"\x15DeleteBucketPolicyCmd\x12\x16\n" +
+	"\x06bucket\x18\x01 \x01(\tR\x06bucket\"\x8e\x01\n" +
 	"\n" +
 	"ObjectMeta\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
@@ -757,7 +859,7 @@ func file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP() []byte {
 	return file_internal_cluster_clusterpb_cluster_proto_rawDescData
 }
 
-var file_internal_cluster_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_internal_cluster_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_internal_cluster_clusterpb_cluster_proto_goTypes = []any{
 	(*Command)(nil),                  // 0: clusterpb.Command
 	(*CreateBucketCmd)(nil),          // 1: clusterpb.CreateBucketCmd
@@ -767,13 +869,15 @@ var file_internal_cluster_clusterpb_cluster_proto_goTypes = []any{
 	(*CreateMultipartUploadCmd)(nil), // 5: clusterpb.CreateMultipartUploadCmd
 	(*CompleteMultipartCmd)(nil),     // 6: clusterpb.CompleteMultipartCmd
 	(*AbortMultipartCmd)(nil),        // 7: clusterpb.AbortMultipartCmd
-	(*ObjectMeta)(nil),               // 8: clusterpb.ObjectMeta
-	(*SnapshotState)(nil),            // 9: clusterpb.SnapshotState
-	(*MultipartMeta)(nil),            // 10: clusterpb.MultipartMeta
-	nil,                              // 11: clusterpb.SnapshotState.EntriesEntry
+	(*SetBucketPolicyCmd)(nil),       // 8: clusterpb.SetBucketPolicyCmd
+	(*DeleteBucketPolicyCmd)(nil),    // 9: clusterpb.DeleteBucketPolicyCmd
+	(*ObjectMeta)(nil),               // 10: clusterpb.ObjectMeta
+	(*SnapshotState)(nil),            // 11: clusterpb.SnapshotState
+	(*MultipartMeta)(nil),            // 12: clusterpb.MultipartMeta
+	nil,                              // 13: clusterpb.SnapshotState.EntriesEntry
 }
 var file_internal_cluster_clusterpb_cluster_proto_depIdxs = []int32{
-	11, // 0: clusterpb.SnapshotState.entries:type_name -> clusterpb.SnapshotState.EntriesEntry
+	13, // 0: clusterpb.SnapshotState.entries:type_name -> clusterpb.SnapshotState.EntriesEntry
 	1,  // [1:1] is the sub-list for method output_type
 	1,  // [1:1] is the sub-list for method input_type
 	1,  // [1:1] is the sub-list for extension type_name
@@ -792,7 +896,7 @@ func file_internal_cluster_clusterpb_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_cluster_clusterpb_cluster_proto_rawDesc), len(file_internal_cluster_clusterpb_cluster_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
