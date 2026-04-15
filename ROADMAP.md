@@ -165,22 +165,39 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 **검증:** NFS 클라이언트로 파일 생성/읽기/삭제 동작 확인 (E2E).
 
-### Phase 7: UX & Operations Enhancement
+### Phase 7: UX & Performance
 
-**목표:** 사용자 경험과 운영 편의성을 강화한다.
+**목표:** 사용자 경험을 강화하고, 클러스터 성능 병목을 해소한다.
 
+- **Raft 직렬화 protobuf 전환** (⚠️ 우선): JSON 이중 marshal → protobuf. 50ms heartbeat × 노드 수 = 초당 수십~수백 회 GC 압박. Raft RPC + 로그 영속화 모두 전환
 - **Object Browser**: 대시보드에 버킷/오브젝트 브라우저 UI 추가 (목록 조회, 미리보기, 업로드/다운로드)
 - **Volume 관리 UI**: 대시보드에서 볼륨 생성/삭제/조회 가능
-- **버킷/볼륨 인증**: 버킷별, 볼륨별 접근 제어 (ACL 또는 IAM 스타일 정책)
-- **기본 버킷 자동 생성**: 서버 시작 시 기본 버킷("default") 자동 생성 옵션
-- **NFS v4 지원**: NFSv3 → NFSv4 업그레이드 (보안, 성능, 상태 관리 개선)
+- **읽기 캐시**: 핫 오브젝트 읽기 캐시 (LRU) 도입으로 반복 읽기 성능 개선
 - **NFS 성능 최적화**: 읽기/쓰기 캐싱, 대용량 파일 최적화, 벤치마크
+- **기본 버킷 자동 생성**: 서버 시작 시 기본 버킷("default") 자동 생성 옵션
 - **Docker 기반 NBD 테스트**: macOS에서 Docker 컨테이너로 NBD E2E 테스트 (`make test-nbd-docker`)
 
 **검증:**
+- protobuf 전환 후 Raft heartbeat 지연 50% 이상 감소 확인
 - Object Browser에서 파일 업로드/다운로드/삭제 동작 확인
+- 읽기 캐시 hit ratio 측정, 반복 읽기 응답 시간 개선 확인
+
+### Phase 8: Security & Production Hardening
+
+**목표:** 프로덕션 배포를 위한 보안, 내구성, 대규모 운영 최적화를 완성한다.
+
+- **버킷/볼륨 인증**: 버킷별, 볼륨별 접근 제어 (ACL 또는 IAM 스타일 정책)
+- **NFS v4 지원**: NFSv3 → NFSv4 업그레이드 (보안, 상태 관리, 잠금/위임)
+- **WAL (Write-Ahead Log)**: 쓰기 내구성 강화 (현재 BadgerDB 트랜잭션 의존 → 별도 WAL로 crash recovery 강화)
+- **Packed Blob 포맷**: 대량 소형 객체 시나리오에서 inode 압박 해소를 위한 append-only 로그 포맷
+- **Graceful Shutdown**: 진행 중인 요청 drain, NFS 세션 정리, Raft 리더 이전
+- **Rate Limiting**: API 엔드포인트별 요청 제한
+
+**검증:**
 - 버킷 ACL 설정 후 무단 접근 거부 확인
 - NFSv4 마운트 후 잠금, 위임 동작 확인
+- WAL 활성화 후 kill -9 시나리오에서 데이터 무손실 확인
+- 100만 소형 객체 (< 1KB) 저장 후 inode 사용량 비교 (flat vs. packed)
 
 ## 5. 핵심 설계 사양
 
@@ -192,10 +209,3 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 | 전송 프로토콜      | QUIC (quic-go) | TLS 1.3 내장, 혼잡 제어 내장        |
 | Metadata KV        | BadgerDB       | LSM-tree, MVCC                      |
 | 라이선스           | Apache 2.0     |                                     |
-
-## 6. 미결정 사항 (Open Items)
-
-- **On-disk Blob 포맷**: Phase 1은 flat files. Phase 4에서 EC 대응 포맷으로 진화. Append-only log vs. extent-based는 Phase 3에서 결정.
-- **일관성 모델**: Read-after-write 보장? 또는 Eventual consistency?
-- **메시지 직렬화**: protobuf vs. 자체 바이너리 포맷
-- **Volume Device 구현**: ✅ 결정됨. willscott/go-nfs (NFS v3) + NBD(Linux). NFS가 macOS 주력, NBD는 Linux 블록 디바이스용.
