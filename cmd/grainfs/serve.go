@@ -25,6 +25,7 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/gritive/GrainFS/internal/vfs"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -231,17 +232,27 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 	}
 	defer logStore.Close()
 
+	// Start QUIC transport for inter-node communication
+	quicTransport := transport.NewQUICTransport()
+	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
+		return fmt.Errorf("start QUIC transport: %w", err)
+	}
+	defer quicTransport.Close()
+
+	// Connect to all peers
+	for _, peer := range peers {
+		if err := quicTransport.Connect(ctx, peer); err != nil {
+			slog.Warn("failed to connect to peer (will retry lazily)", "peer", peer, "error", err)
+		}
+	}
+
 	cfg := raft.DefaultConfig(nodeID, peers)
 	node := raft.NewNode(cfg, logStore)
 
-	node.SetTransport(
-		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-			return nil, fmt.Errorf("peer %s not reachable (stub transport)", peer)
-		},
-		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-			return nil, fmt.Errorf("peer %s not reachable (stub transport)", peer)
-		},
-	)
+	// Wire QUIC transport to Raft RPC layer
+	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
+	rpcTransport.SetTransport()
+
 	node.Start()
 	defer node.Stop()
 

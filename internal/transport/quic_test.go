@@ -150,6 +150,39 @@ func TestQUICTransport_ConcurrentSends(t *testing.T) {
 	assert.Equal(t, count, received)
 }
 
+func TestQUICTransport_Call(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	// Server echoes back the payload with "reply:" prefix
+	server.SetStreamHandler(func(reqMsg *Message) *Message {
+		return &Message{Type: reqMsg.Type, Payload: append([]byte("reply:"), reqMsg.Payload...)}
+	})
+
+	req := &Message{Type: StreamControl, Payload: []byte("ping")}
+	resp, err := client.Call(ctx, server.LocalAddr(), req)
+	require.NoError(t, err)
+	assert.Equal(t, StreamControl, resp.Type)
+	assert.Equal(t, "reply:ping", string(resp.Payload))
+}
+
+func TestQUICTransport_CallUnconnected(t *testing.T) {
+	ctx := context.Background()
+	node := NewQUICTransport()
+	defer node.Close()
+
+	_, err := node.Call(ctx, "127.0.0.1:99999", &Message{Type: StreamControl, Payload: []byte("ping")})
+	require.Error(t, err)
+}
+
 func TestQUICTransport_SendToUnconnected(t *testing.T) {
 	ctx := context.Background()
 	node := NewQUICTransport()

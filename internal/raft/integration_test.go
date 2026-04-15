@@ -63,19 +63,7 @@ func newQUICCluster(t *testing.T, n int) *quicCluster {
 	rpcs := make([]*QUICRPCTransport, n)
 	for i := range nodes {
 		rpcs[i] = NewQUICRPCTransport(transports[i], nodes[i])
-		rpc := rpcs[i]
-		nodes[i].SetTransport(
-			func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				return rpc.SendRequestVote(ctx, peer, args)
-			},
-			func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				return rpc.SendAppendEntries(ctx, peer, args)
-			},
-		)
+		rpcs[i].SetTransport()
 	}
 
 	t.Cleanup(func() {

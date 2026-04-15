@@ -28,11 +28,6 @@
 
 ## P1: Raft 기반 인프라 (Phase 2 미완성)
 
-### QUICTransport → Raft Node wiring
-- **What:** serve.go의 stub transport를 실제 QUICTransport로 교체
-- **Why:** serve.go:237-243에서 클러스터 모드 Raft 노드가 항상 에러를 반환하는 stub transport 사용. 멀티노드 클러스터가 실제로 동작하지 않음
-- **Context:** internal/transport/quic.go에 QUICTransport 구현 있음. runCluster()에서 Raft Node에 연결 필요
-
 ### Raft log offset (firstIndex)
 - **What:** raft.Node에 firstIndex 개념 도입, 모든 slice 접근을 n.log[idx-firstIndex]로 변경
 - **Why:** 현재 n.log[idx-1] raw slice indexing 사용. 스냅샷 후 로그 압축 시 n.log가 비어지면 인덱스가 깨짐. 스냅샷 통합의 필수 선행 조건
