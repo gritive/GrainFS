@@ -59,10 +59,4 @@
 - **Why:** 현재 대시보드는 4개 기본 카운터(Uptime, Requests, Storage, Objects)만 표시. 클러스터 운영에 필요한 가시성 없음
 - **Context:** server/ui/index.html의 Dashboard 탭. Prometheus 메트릭은 /metrics에서 제공되므로 추가 API 엔드포인트와 UI 구현 필요
 
-## P3: SDK 호환 테스트 (Phase 5 미구현)
-
-### aws-cli / boto3 테스트
-- **What:** aws-cli와 boto3(Python)로 실제 S3 호환성 테스트
-- **Why:** 현재 aws-sdk-go-v2만 테스트. 다른 SDK에서 비호환 동작 가능
-- **Context:** tests/e2e/에 Go SDK 테스트만 존재. 쉘 스크립트 또는 Python 테스트 추가 필요
 
