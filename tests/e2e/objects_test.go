@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"mime/multipart"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -254,4 +256,40 @@ func TestObjects_Large(t *testing.T) {
 	assert.Equal(t, int64(len(data)), aws.ToInt64(out.ContentLength))
 	body, _ := io.ReadAll(out.Body)
 	assert.Equal(t, data, body)
+}
+
+func TestE2E_FormUpload(t *testing.T) {
+	createBucket(t, "form-upload")
+
+	// Simulate a browser form upload via multipart/form-data POST
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	w.WriteField("key", "uploaded.txt")
+	w.WriteField("Content-Type", "text/plain")
+	w.WriteField("success_action_status", "201")
+
+	fw, err := w.CreateFormFile("file", "uploaded.txt")
+	require.NoError(t, err)
+	fw.Write([]byte("form upload content"))
+	w.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, testServerURL+"/form-upload", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, 201, resp.StatusCode)
+
+	// Verify the object was stored
+	ctx := context.Background()
+	out, err := testS3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("form-upload"),
+		Key:    aws.String("uploaded.txt"),
+	})
+	require.NoError(t, err)
+	defer out.Body.Close()
+
+	data, _ := io.ReadAll(out.Body)
+	assert.Equal(t, "form upload content", string(data))
 }

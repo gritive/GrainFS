@@ -383,7 +383,96 @@ func (s *Server) handlePost(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// POST /:bucket with multipart/form-data -> Form-based Upload (POST Policy)
+	ct := string(c.GetHeader("Content-Type"))
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		s.handleFormUpload(c, bucket)
+		return
+	}
+
 	writeXMLError(c, consts.StatusBadRequest, "InvalidRequest", "unsupported POST operation")
+}
+
+// handleFormUpload processes S3 POST form-based uploads (browser direct upload).
+// The form contains: key, Content-Type, policy, X-Amz-Signature, file, etc.
+func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
+	form, err := c.MultipartForm()
+	if err != nil {
+		writeXMLError(c, consts.StatusBadRequest, "MalformedPOSTRequest", "cannot parse multipart form")
+		return
+	}
+
+	// Extract key from form field
+	keys := form.Value["key"]
+	if len(keys) == 0 {
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "missing 'key' form field")
+		return
+	}
+	key := keys[0]
+
+	// Extract content type (optional)
+	contentType := "application/octet-stream"
+	if cts := form.Value["Content-Type"]; len(cts) > 0 {
+		contentType = cts[0]
+	}
+
+	// Get file data
+	files := form.File["file"]
+	if len(files) == 0 {
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "missing 'file' form field")
+		return
+	}
+
+	file, err := files[0].Open()
+	if err != nil {
+		writeXMLError(c, consts.StatusInternalServerError, "InternalError", "cannot open uploaded file")
+		return
+	}
+	defer file.Close()
+
+	obj, err := s.backend.PutObject(bucket, key, file, contentType)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+
+	metrics.ObjectsTotal.Inc()
+	metrics.StorageBytesTotal.Add(float64(obj.Size))
+
+	// Respond with 204 or redirect if success_action_redirect is set
+	if redirectURL := form.Value["success_action_redirect"]; len(redirectURL) > 0 && redirectURL[0] != "" {
+		u, err := url.Parse(redirectURL[0])
+		if err == nil {
+			q := u.Query()
+			q.Set("bucket", bucket)
+			q.Set("key", key)
+			q.Set("etag", obj.ETag)
+			u.RawQuery = q.Encode()
+			c.Redirect(consts.StatusSeeOther, []byte(u.String()))
+			return
+		}
+	}
+
+	statusStr := "204"
+	if ss := form.Value["success_action_status"]; len(ss) > 0 {
+		statusStr = ss[0]
+	}
+
+	switch statusStr {
+	case "200":
+		c.Status(consts.StatusOK)
+	case "201":
+		result := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<PostResponse>
+  <Location>%s/%s/%s</Location>
+  <Bucket>%s</Bucket>
+  <Key>%s</Key>
+  <ETag>"%s"</ETag>
+</PostResponse>`, "", bucket, key, bucket, key, obj.ETag)
+		c.Data(consts.StatusCreated, "application/xml", []byte(result))
+	default:
+		c.Status(consts.StatusNoContent)
+	}
 }
 
 func (s *Server) createMultipartUpload(c *app.RequestContext, bucket, key string) {

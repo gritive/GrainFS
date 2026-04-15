@@ -40,13 +40,6 @@
 - **Why:** 현재 grainfs migrate는 서비스 중지 → 마이그레이션 → 재시작 필요. Phase 3 목표는 "무중단"
 - **Context:** cluster/migrate.go에 메타데이터 변환 로직은 있음. 온라인 마이그레이션(서비스 유지 중 Raft 부트스트랩)이 필요
 
-## P2: SigV4 고급 기능 (Phase 5 미구현)
-
-### POST Policy (Form-based Upload)
-- **What:** 브라우저에서 직접 S3에 업로드하기 위한 POST 폼 인증
-- **Why:** 웹 클라이언트 직접 업로드에 필요. Object Browser에서도 활용 가능
-- **Context:** server/handlers.go handlePost()가 multipart upload만 처리
-
 ## P2: 운영 대시보드 고도화 (Phase 5 미구현)
 
 ### 클러스터 모니터링 대시보드
