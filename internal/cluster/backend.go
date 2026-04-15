@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -38,6 +39,8 @@ type DistributedBackend struct {
 	onApply     OnApplyFunc
 	snapMgr     *raft.SnapshotManager
 	snapNode    *raft.Node // node for CompactLog after snapshot
+	shardSvc    *ShardService
+	allNodes    []string // all node addresses (including self) for shard placement
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -56,6 +59,13 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		fsm:    fsm,
 		logger: slog.With("component", "distributed-backend"),
 	}, nil
+}
+
+// SetShardService configures the distributed shard service for fan-out.
+// allNodes includes all cluster node addresses for placement.
+func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
+	b.shardSvc = svc
+	b.allNodes = allNodes
 }
 
 // SetSnapshotManager configures automatic snapshot creation after N applied entries.
@@ -257,34 +267,43 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 		return nil, err
 	}
 
+	// Read all data into memory for replication
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read object data: %w", err)
+	}
+
 	// Write data locally
 	objPath := b.objectPath(bucket, key)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
-
-	f, err := os.Create(objPath)
-	if err != nil {
-		return nil, fmt.Errorf("create file: %w", err)
-	}
-
-	h := md5.New()
-	w := io.MultiWriter(f, h)
-	size, err := io.Copy(w, r)
-	f.Close()
-	if err != nil {
-		os.Remove(objPath)
+	if err := os.WriteFile(objPath, data, 0o644); err != nil {
 		return nil, fmt.Errorf("write object: %w", err)
 	}
 
-	etag := hex.EncodeToString(h.Sum(nil))
+	// Replicate data to all peer nodes via ShardService
+	if b.shardSvc != nil {
+		ctx := context.Background()
+		for _, peer := range b.allNodes {
+			if peer == b.node.ID() {
+				continue // skip self
+			}
+			if err := b.shardSvc.WriteShard(ctx, peer, bucket, key, 0, data); err != nil {
+				b.logger.Warn("data replication failed", "peer", peer, "bucket", bucket, "key", key, "error", err)
+			}
+		}
+	}
+
+	h := md5.Sum(data)
+	etag := hex.EncodeToString(h[:])
 	now := time.Now().Unix()
 
 	// Replicate metadata through Raft
 	err = b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      bucket,
 		Key:         key,
-		Size:        size,
+		Size:        int64(len(data)),
 		ContentType: contentType,
 		ETag:        etag,
 		ModTime:     now,
@@ -296,7 +315,7 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 
 	return &storage.Object{
 		Key:          key,
-		Size:         size,
+		Size:         int64(len(data)),
 		ContentType:  contentType,
 		ETag:         etag,
 		LastModified: now,
@@ -309,12 +328,27 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		return nil, nil, err
 	}
 
+	// Try local first
 	f, err := os.Open(b.objectPath(bucket, key))
-	if err != nil {
-		return nil, nil, fmt.Errorf("open object: %w", err)
+	if err == nil {
+		return f, obj, nil
 	}
 
-	return f, obj, nil
+	// Local file not found — try fetching from peer nodes
+	if b.shardSvc != nil && os.IsNotExist(err) {
+		ctx := context.Background()
+		for _, peer := range b.allNodes {
+			if peer == b.node.ID() {
+				continue
+			}
+			data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, key, 0)
+			if fetchErr == nil && data != nil {
+				return io.NopCloser(bytes.NewReader(data)), obj, nil
+			}
+		}
+	}
+
+	return nil, nil, fmt.Errorf("open object: %w", err)
 }
 
 func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, error) {
@@ -357,7 +391,21 @@ func (b *DistributedBackend) DeleteObject(bucket, key string) error {
 		return err
 	}
 
+	// Delete local data
 	os.Remove(b.objectPath(bucket, key))
+
+	// Delete data from peer nodes (distributed GC)
+	if b.shardSvc != nil {
+		ctx := context.Background()
+		for _, peer := range b.allNodes {
+			if peer == b.node.ID() {
+				continue
+			}
+			if err := b.shardSvc.DeleteShards(ctx, peer, bucket, key); err != nil {
+				b.logger.Warn("remote shard delete failed", "peer", peer, "bucket", bucket, "key", key, "error", err)
+			}
+		}
+	}
 
 	return b.propose(context.Background(), CmdDeleteObject, DeleteObjectCmd{
 		Bucket: bucket,

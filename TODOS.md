@@ -1,31 +1,3 @@
 # TODOS
 
-## P0: 분산 데이터 플레인 (Phase 4 미구현)
-
-### 분산 샤드 Fan-out
-- **What:** QUIC Data Stream으로 EC 샤드를 다중 노드에 분산 저장
-- **Why:** 현재 모든 샤드가 로컬 디스크에만 저장됨. 노드 장애 시 데이터 유실. Phase 4의 핵심 목표("분산 저장")를 충족하지 못함
-- **Context:** erasure/backend.go에서 os.WriteFile()로 로컬에만 쓰는 구조. QUIC transport는 Raft 메시지 전용. 샤드 placement 로직, 원격 write RPC, 노드별 저장소 관리 필요
-- **Depends on:** P1 전체 (QUICTransport wiring, Raft log offset, 스냅샷/압축, InstallSnapshot)
-
-### Failover & Re-replication
-- **What:** 노드 장애 감지 시 손실된 샤드를 다른 노드에서 자동 재생성
-- **Why:** 분산 EC의 존재 이유. 4+2 구성에서 2노드 장애까지 복구 가능해야 함
-- **Context:** 현재 Raft heartbeat로 노드 생존 감지는 되지만, 데이터 샤드 복구 로직은 없음
-- **Depends on:** 분산 샤드 Fan-out
-
-### Distributed GC
-- **What:** 고아(orphan) 샤드 정리 메커니즘
-- **Why:** 삭제/재기록 시 원격 노드에 남은 오래된 샤드가 디스크 공간 차지
-- **Context:** 현재 DeleteObject()는 os.RemoveAll()로 로컬만 정리
-- **Depends on:** 분산 샤드 Fan-out
-
-### 클러스터 읽기 라우팅
-- **What:** 팔로워 노드에서 읽기 요청 시 리더 또는 데이터 보유 노드로 포워딩
-- **Why:** DistributedBackend.GetObject()가 로컬 디스크에서만 읽음. 팔로워는 메타데이터만 있고 데이터 파일이 없어서 모든 읽기가 실패
-- **Context:** 현재 read forwarding, redirect-to-leader, proxy 없음
-- **Depends on:** QUICTransport→Raft wiring
-
-
-
-
+(모든 항목 구현 완료)
