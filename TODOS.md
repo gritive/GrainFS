@@ -33,14 +33,6 @@
 - **Why:** 현재 클러스터는 부트스트랩 후 정적. 노드 교체나 확장 불가
 - **Context:** FSM command 타입에 AddNode/RemoveNode 없음. Raft에 멤버십 변경 로직 없음. Raft 논문의 Joint Consensus 알고리즘 구현 필요
 
-## P2: Graceful Shutdown 개선
-
-### Targeted Transfer 개선
-- **What:** matchIndex 기반 best peer 선택 + TimeoutNow 메시지로 즉시 선거 시작
-- **Why:** simple step-down은 느린 팔로워가 리더가 될 수 있고 추가 선거 라운드로 수백ms 쓰기 중단
-- **Context:** 현재 raft.go:739는 단순 step-down. Raft 논문 §3.10 참고
-- **Depends on:** Leader Transfer shutdown 연결
-
 ## P2: Zero-Downtime Solo→Cluster 전환 (Phase 3 미구현)
 
 ### 무중단 마이그레이션

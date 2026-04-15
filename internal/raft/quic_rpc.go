@@ -15,7 +15,12 @@ const (
 	rpcTypeAppendEntriesReply   = "AppendEntriesReply"
 	rpcTypeInstallSnapshot      = "InstallSnapshot"
 	rpcTypeInstallSnapshotReply = "InstallSnapshotReply"
+	rpcTypeTimeoutNow           = "TimeoutNow"
+	rpcTypeTimeoutNowReply      = "TimeoutNowReply"
 )
+
+// TimeoutNowArgs is an empty message sent to trigger immediate election.
+type TimeoutNowArgs struct{}
 
 // QUICRPCTransport bridges Raft RPCs over the QUIC transport layer
 // using bidirectional streams (request-response per stream).
@@ -40,6 +45,18 @@ func NewQUICRPCTransport(tr *transport.QUICTransport, node *Node) *QUICRPCTransp
 func (r *QUICRPCTransport) SetTransport() {
 	r.node.SetTransport(r.sendRequestVote, r.sendAppendEntries)
 	r.node.SetInstallSnapshotTransport(r.sendInstallSnapshot)
+	r.node.SetTimeoutNowTransport(r.sendTimeoutNow)
+}
+
+func (r *QUICRPCTransport) sendTimeoutNow(peer string) error {
+	envelope, err := encodeRPC(rpcTypeTimeoutNow, &TimeoutNowArgs{})
+	if err != nil {
+		return err
+	}
+
+	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
+	_, err = r.transport.Call(context.Background(), peer, msg)
+	return err
 }
 
 func (r *QUICRPCTransport) sendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
@@ -141,6 +158,10 @@ func (r *QUICRPCTransport) handleRPC(req *transport.Message) *transport.Message 
 		}
 		reply := r.node.HandleInstallSnapshot(args)
 		replyEnvelope, _ = encodeRPC(rpcTypeInstallSnapshotReply, reply)
+
+	case rpcTypeTimeoutNow:
+		r.node.HandleTimeoutNow()
+		replyEnvelope, _ = encodeRPC(rpcTypeTimeoutNowReply, &TimeoutNowArgs{})
 
 	default:
 		return nil

@@ -128,6 +128,7 @@ type Node struct {
 	sendRequestVote    func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
 	sendAppendEntries  func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error)
 	sendInstallSnapshot func(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error)
+	sendTimeoutNow      func(peer string) error
 
 	// durable storage (optional; when nil, state is in-memory only)
 	store LogStore
@@ -209,6 +210,11 @@ func (n *Node) SetInstallSnapshotTransport(
 	send func(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error),
 ) {
 	n.sendInstallSnapshot = send
+}
+
+// SetTimeoutNowTransport sets the callback for sending TimeoutNow during leadership transfer.
+func (n *Node) SetTimeoutNowTransport(send func(peer string) error) {
+	n.sendTimeoutNow = send
 }
 
 // Start begins the Raft node's main loop.
@@ -909,28 +915,64 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	return reply
 }
 
-// TransferLeadership voluntarily steps down as leader, allowing a follower
-// to win the next election. Returns ErrNotLeader if not the current leader,
-// or ErrNoPeers if there are no peers to transfer to.
+// TransferLeadership transfers leadership to the most up-to-date peer.
+// Sends a TimeoutNow message to the best peer (highest matchIndex) to
+// trigger an immediate election, then steps down. Returns ErrNotLeader
+// if not the current leader, or ErrNoPeers if there are no peers.
 func (n *Node) TransferLeadership() error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if n.state != Leader {
+		n.mu.Unlock()
 		return ErrNotLeader
 	}
 
 	if len(n.config.Peers) == 0 {
+		n.mu.Unlock()
 		return ErrNoPeers
 	}
 
-	// Step down to follower — this causes the election timer to start on
-	// followers, and one of them will become the new leader.
+	// Pick the peer with the highest matchIndex
+	bestPeer := ""
+	bestMatch := uint64(0)
+	for _, peer := range n.config.Peers {
+		if n.matchIndex[peer] >= bestMatch {
+			bestMatch = n.matchIndex[peer]
+			bestPeer = peer
+		}
+	}
+
+	sendTimeout := n.sendTimeoutNow
+	n.mu.Unlock()
+
+	// Send TimeoutNow to trigger immediate election on the best peer
+	if sendTimeout != nil && bestPeer != "" {
+		_ = sendTimeout(bestPeer)
+	}
+
+	// Step down regardless of whether TimeoutNow succeeded
+	n.mu.Lock()
 	n.state = Follower
 	n.leaderID = ""
 	n.signalReset()
+	n.mu.Unlock()
 
 	return nil
+}
+
+// HandleTimeoutNow causes this node to immediately start an election.
+// Sent by the leader during leadership transfer to the chosen successor.
+func (n *Node) HandleTimeoutNow() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state != Follower {
+		return
+	}
+
+	// Immediately become candidate
+	n.state = Candidate
+	n.signalReset()
 }
 
 // persistState saves currentTerm and votedFor to durable storage.

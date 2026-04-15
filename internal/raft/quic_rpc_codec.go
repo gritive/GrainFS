@@ -61,6 +61,8 @@ func encodeRPC(rpcType string, msg any) ([]byte, error) {
 		data, err = proto.Marshal(&pb.InstallSnapshotReply{
 			Term: reply.Term,
 		})
+	case rpcTypeTimeoutNow, rpcTypeTimeoutNowReply:
+		data = []byte{} // empty payload
 	default:
 		return nil, fmt.Errorf("unknown RPC type: %s", rpcType)
 	}
