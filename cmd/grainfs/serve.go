@@ -261,6 +261,19 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
 
+	// Set up snapshot manager: auto-snapshot every 10000 applied entries
+	fsm := cluster.NewFSM(db)
+	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 10000})
+	distBackend.SetSnapshotManager(snapMgr, node)
+
+	// Restore from snapshot on startup
+	snapIdx, err := snapMgr.Restore()
+	if err != nil {
+		slog.Warn("snapshot restore failed", "error", err)
+	} else if snapIdx > 0 {
+		slog.Info("restored from snapshot", "index", snapIdx)
+	}
+
 	// Wrap distributed backend with LRU read cache.
 	// Raft FSM-based invalidation ensures cache consistency across nodes.
 	cachedBackend := storage.NewCachedBackend(distBackend)

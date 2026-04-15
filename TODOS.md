@@ -28,12 +28,6 @@
 
 ## P1: Raft 기반 인프라 (Phase 2 미완성)
 
-### 스냅샷 오케스트레이션 wiring
-- **What:** SnapshotManager를 Raft Node와 cluster 시작 코드에 연결
-- **Why:** snapshot.go에 SnapshotManager(자동 트리거, 복원) 구현 완료. cluster/apply.go에 FSM.Snapshot()/Restore() 존재. 하지만 호출하는 코드가 없음
-- **Context:** (1) applyLoop에서 MaybeTrigger() 호출 추가, (2) 노드 시작 시 Restore() 호출 추가, (3) 로그 압축(TruncateAfter)은 InstallSnapshot RPC가 준비될 때까지 비활성화 또는 retain window 적용
-- **Depends on:** Raft log offset (firstIndex)
-
 ### InstallSnapshot RPC
 - **What:** 느린 팔로워에게 스냅샷 전송하는 RPC
 - **Why:** 팔로워가 리더 로그보다 너무 뒤처지면 로그만으로 동기화 불가. 스냅샷 전송이 유일한 방법. 로그 압축 활성화의 전제 조건

@@ -327,6 +327,67 @@ func TestDistributedBackend_MultipartBadBucket(t *testing.T) {
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
+func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
+	dir := t.TempDir()
+
+	metaDir := dir + "/meta"
+	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
+	db, err := badger.Open(dbOpts)
+	require.NoError(t, err)
+
+	raftDir := dir + "/raft"
+	logStore, err := raft.NewBadgerLogStore(raftDir)
+	require.NoError(t, err)
+
+	cfg := raft.DefaultConfig("test-node", nil)
+	node := raft.NewNode(cfg, logStore)
+	node.SetTransport(
+		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+	)
+	node.Start()
+
+	require.Eventually(t, func() bool {
+		return node.State() == raft.Leader
+	}, 3*time.Second, 10*time.Millisecond)
+
+	backend, err := NewDistributedBackend(dir, db, node)
+	require.NoError(t, err)
+
+	// Set snapshot threshold to 5 entries
+	fsm := NewFSM(db)
+	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 5})
+	backend.SetSnapshotManager(snapMgr, node)
+
+	stopApply := make(chan struct{})
+	go backend.RunApplyLoop(stopApply)
+
+	t.Cleanup(func() {
+		close(stopApply)
+		node.Stop()
+		db.Close()
+		logStore.Close()
+	})
+
+	// Create 6 buckets (6 Raft entries, exceeding threshold of 5)
+	for i := range 6 {
+		require.NoError(t, backend.CreateBucket(fmt.Sprintf("snap-bucket-%d", i)))
+	}
+
+	// Wait for entries to be applied
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify snapshot was saved
+	idx, _, data, err := logStore.LoadSnapshot()
+	require.NoError(t, err)
+	assert.Greater(t, idx, uint64(0), "snapshot should have been saved")
+	assert.NotNil(t, data, "snapshot data should exist")
+}
+
 func TestDistributedBackend_Close(t *testing.T) {
 	dir := t.TempDir()
 

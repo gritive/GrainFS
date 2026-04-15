@@ -36,6 +36,8 @@ type DistributedBackend struct {
 	logger      *slog.Logger
 	lastApplied atomic.Uint64
 	onApply     OnApplyFunc
+	snapMgr     *raft.SnapshotManager
+	snapNode    *raft.Node // node for CompactLog after snapshot
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -54,6 +56,13 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		fsm:    fsm,
 		logger: slog.With("component", "distributed-backend"),
 	}, nil
+}
+
+// SetSnapshotManager configures automatic snapshot creation after N applied entries.
+// Must be called before RunApplyLoop.
+func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node *raft.Node) {
+	b.snapMgr = mgr
+	b.snapNode = node
 }
 
 // SetOnApply sets the callback invoked after each FSM apply.
@@ -78,6 +87,16 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			// Notify cache/metrics callback
 			if b.onApply != nil {
 				b.notifyOnApply(entry.Command)
+			}
+
+			// Check if snapshot should be taken
+			if b.snapMgr != nil {
+				if b.snapMgr.MaybeTrigger(entry.Index, entry.Term) {
+					b.logger.Info("snapshot taken", "index", entry.Index, "term", entry.Term)
+					if b.snapNode != nil {
+						b.snapNode.CompactLog(entry.Index)
+					}
+				}
 			}
 		}
 	}
