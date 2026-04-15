@@ -297,6 +297,11 @@ func (b *ECBackend) putObjectPlain(bucket, key string, data []byte, contentType 
 }
 
 func (b *ECBackend) putObjectData(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
+	// Empty or very small data: store as plain to avoid EC split errors
+	if len(data) < b.codec.DataShards {
+		return b.putObjectPlain(bucket, key, data, contentType)
+	}
+
 	// Erasure encode
 	shards, err := b.codec.Encode(data)
 	if err != nil {

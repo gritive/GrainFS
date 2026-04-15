@@ -17,6 +17,7 @@ import (
 var (
 	testServerURL string
 	testS3Client  *s3.Client
+	testNFSPort   int
 )
 
 func TestMain(m *testing.M) {
@@ -33,7 +34,10 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(dir)
 
-	cmd := exec.Command(binary, "serve", "--data", dir, "--port", fmt.Sprintf("%d", port))
+	nfsPort := freePort()
+
+	cmd := exec.Command(binary, "serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
+		"--nfs-port", fmt.Sprintf("%d", nfsPort))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -43,7 +47,9 @@ func TestMain(m *testing.M) {
 	defer cmd.Process.Kill()
 
 	testServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	testNFSPort = nfsPort
 	waitForPort(port, 5*time.Second)
+	waitForPort(nfsPort, 5*time.Second)
 
 	testS3Client = newS3Client(testServerURL)
 

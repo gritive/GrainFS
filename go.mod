@@ -9,10 +9,15 @@ require (
 	github.com/aws/smithy-go v1.24.2
 	github.com/cloudwego/hertz v0.10.4
 	github.com/dgraph-io/badger/v4 v4.9.1
+	github.com/go-git/go-billy/v5 v5.6.0
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/reedsolomon v1.13.3
+	github.com/prometheus/client_golang v1.23.2
 	github.com/quic-go/quic-go v0.59.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
+	github.com/willscott/go-nfs v0.0.4
+	github.com/willscott/go-nfs-client v0.0.0-20251022144359-801f10d98886
 )
 
 require (
@@ -39,16 +44,16 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
-	github.com/klauspost/reedsolomon v1.13.3 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
+	github.com/rasky/go-xdr v0.0.0-20170124162913-1a41d1a06c93 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/tidwall/gjson v1.14.4 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

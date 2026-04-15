@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // Server handles S3-compatible API requests using Hertz.
@@ -20,6 +21,7 @@ type Server struct {
 	backend  storage.Backend
 	verifier *s3auth.Verifier
 	hertz    *server.Hertz
+	volMgr   *volume.Manager
 }
 
 // Option configures the server.
@@ -50,6 +52,7 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 		h.Use(s.authMiddleware())
 	}
 
+	s.volMgr = volume.NewManager(backend)
 	s.registerRoutes(h)
 	s.hertz = h
 	return s
@@ -119,4 +122,11 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Multipart: POST /:bucket/*key with ?uploads or ?uploadId=
 	h.POST("/:bucket/*key", s.handlePost)
+
+	// Volume management API
+	volumes := h.Group("/volumes")
+	volumes.GET("/", s.listVolumes)
+	volumes.PUT("/:name", s.createVolume)
+	volumes.GET("/:name", s.getVolume)
+	volumes.DELETE("/:name", s.deleteVolume)
 }

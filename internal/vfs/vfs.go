@@ -1,0 +1,434 @@
+// Package vfs implements a billy.Filesystem backed by GrainFS object storage.
+// Files and directories are stored as objects in a dedicated bucket per volume.
+package vfs
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	billy "github.com/go-git/go-billy/v5"
+	"github.com/gritive/GrainFS/internal/storage"
+)
+
+const (
+	vfsBucketPrefix = "__grainfs_vfs_"
+	dirMarkerSuffix = "/.dir"
+)
+
+// GrainVFS implements billy.Filesystem on top of a storage.Backend.
+type GrainVFS struct {
+	backend storage.Backend
+	bucket  string
+	root    string // chroot prefix
+	mu      sync.RWMutex
+}
+
+var (
+	_ billy.Filesystem = (*GrainVFS)(nil)
+	_ billy.Change     = (*GrainVFS)(nil)
+)
+
+// New creates a new GrainVFS for the given volume name.
+func New(backend storage.Backend, volumeName string) (*GrainVFS, error) {
+	bucket := vfsBucketPrefix + volumeName
+	_ = backend.CreateBucket(bucket)
+	if err := backend.HeadBucket(bucket); err != nil {
+		return nil, fmt.Errorf("ensure vfs bucket: %w", err)
+	}
+	return &GrainVFS{backend: backend, bucket: bucket, root: ""}, nil
+}
+
+func (fs *GrainVFS) fullPath(name string) string {
+	name = cleanPath(name)
+	if fs.root == "" {
+		return name
+	}
+	return path.Join(fs.root, name)
+}
+
+func cleanPath(p string) string {
+	p = path.Clean("/" + p)
+	p = strings.TrimPrefix(p, "/")
+	if p == "." || p == "" {
+		return ""
+	}
+	return p
+}
+
+// Create creates the named file, truncating it if it exists.
+func (fs *GrainVFS) Create(filename string) (billy.File, error) {
+	return fs.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+}
+
+// Open opens the named file for reading.
+func (fs *GrainVFS) Open(filename string) (billy.File, error) {
+	return fs.OpenFile(filename, os.O_RDONLY, 0)
+}
+
+// OpenFile is the generalized open call.
+func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.File, error) {
+	fp := fs.fullPath(filename)
+	name := path.Base(filename)
+
+	f := &grainFile{
+		fs:   fs,
+		path: fp,
+		name: name,
+		flag: flag,
+		perm: perm,
+	}
+
+	if flag&os.O_CREATE != 0 {
+		if flag&os.O_TRUNC != 0 {
+			f.buf = &bytes.Buffer{}
+		} else {
+			// Try to load existing
+			f.loadExisting()
+		}
+		return f, nil
+	}
+
+	// Must exist
+	if err := f.loadExisting(); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// Stat returns file info.
+func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
+	fp := fs.fullPath(filename)
+
+	// Check if it's a directory
+	if fs.isDir(fp) {
+		return &fileInfo{name: path.Base(filename), size: 0, isDir: true, modTime: time.Now()}, nil
+	}
+
+	// Check as file
+	obj, err := fs.backend.HeadObject(fs.bucket, fp)
+	if err != nil {
+		return nil, os.ErrNotExist
+	}
+
+	return &fileInfo{
+		name:    path.Base(filename),
+		size:    obj.Size,
+		isDir:   false,
+		modTime: time.Unix(obj.LastModified, 0),
+	}, nil
+}
+
+// Rename renames a file.
+func (fs *GrainVFS) Rename(oldpath, newpath string) error {
+	oldFP := fs.fullPath(oldpath)
+	newFP := fs.fullPath(newpath)
+
+	// Read old file
+	rc, _, err := fs.backend.GetObject(fs.bucket, oldFP)
+	if err != nil {
+		return os.ErrNotExist
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return fmt.Errorf("read old file: %w", err)
+	}
+
+	// Write to new location
+	if _, err := fs.backend.PutObject(fs.bucket, newFP, bytes.NewReader(data), "application/octet-stream"); err != nil {
+		return fmt.Errorf("write new file: %w", err)
+	}
+
+	// Delete old
+	return fs.backend.DeleteObject(fs.bucket, oldFP)
+}
+
+// Remove removes a file or empty directory.
+func (fs *GrainVFS) Remove(filename string) error {
+	fp := fs.fullPath(filename)
+	// Try as file first
+	if err := fs.backend.DeleteObject(fs.bucket, fp); err != nil {
+		// Try as directory marker
+		return fs.backend.DeleteObject(fs.bucket, fp+dirMarkerSuffix)
+	}
+	return nil
+}
+
+// Join joins path elements.
+func (fs *GrainVFS) Join(elem ...string) string {
+	return path.Join(elem...)
+}
+
+// ReadDir reads a directory.
+func (fs *GrainVFS) ReadDir(dirPath string) ([]os.FileInfo, error) {
+	fp := fs.fullPath(dirPath)
+	prefix := ""
+	if fp != "" {
+		prefix = fp + "/"
+	}
+
+	objs, err := fs.backend.ListObjects(fs.bucket, prefix, 10000)
+	if err != nil {
+		return nil, fmt.Errorf("list objects: %w", err)
+	}
+
+	seen := make(map[string]os.FileInfo)
+	for _, obj := range objs {
+		rel := strings.TrimPrefix(obj.Key, prefix)
+		if rel == "" {
+			continue
+		}
+
+		parts := strings.SplitN(rel, "/", 2)
+		entryName := parts[0]
+
+		if len(parts) > 1 {
+			// It's a subdirectory
+			if _, ok := seen[entryName]; !ok {
+				seen[entryName] = &fileInfo{name: entryName, isDir: true, modTime: time.Now()}
+			}
+		} else {
+			// It's a file (skip dir markers)
+			if strings.HasSuffix(entryName, dirMarkerSuffix) || entryName == ".dir" {
+				dirName := strings.TrimSuffix(entryName, dirMarkerSuffix)
+				if dirName == "" {
+					continue
+				}
+				seen[dirName] = &fileInfo{name: dirName, isDir: true, modTime: time.Now()}
+				continue
+			}
+			seen[entryName] = &fileInfo{
+				name:    entryName,
+				size:    obj.Size,
+				isDir:   false,
+				modTime: time.Unix(obj.LastModified, 0),
+			}
+		}
+	}
+
+	result := make([]os.FileInfo, 0, len(seen))
+	for _, fi := range seen {
+		result = append(result, fi)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name() < result[j].Name()
+	})
+	return result, nil
+}
+
+// MkdirAll creates a directory and parents.
+func (fs *GrainVFS) MkdirAll(dirPath string, perm os.FileMode) error {
+	fp := fs.fullPath(dirPath)
+	marker := fp + dirMarkerSuffix
+	_, err := fs.backend.PutObject(fs.bucket, marker, strings.NewReader(""), "application/x-directory")
+	return err
+}
+
+// TempFile creates a temp file.
+func (fs *GrainVFS) TempFile(dir, prefix string) (billy.File, error) {
+	name := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
+	p := path.Join(dir, name)
+	return fs.Create(p)
+}
+
+// Lstat returns file info (symlinks not supported, same as Stat).
+func (fs *GrainVFS) Lstat(filename string) (os.FileInfo, error) {
+	return fs.Stat(filename)
+}
+
+// Symlink is not supported.
+func (fs *GrainVFS) Symlink(target, link string) error {
+	return fmt.Errorf("symlinks not supported")
+}
+
+// Readlink is not supported.
+func (fs *GrainVFS) Readlink(link string) (string, error) {
+	return "", fmt.Errorf("symlinks not supported")
+}
+
+// Chroot returns a new filesystem rooted at the given path.
+func (fs *GrainVFS) Chroot(dir string) (billy.Filesystem, error) {
+	newRoot := fs.fullPath(dir)
+	return &GrainVFS{
+		backend: fs.backend,
+		bucket:  fs.bucket,
+		root:    newRoot,
+	}, nil
+}
+
+// Root returns the root path.
+func (fs *GrainVFS) Root() string {
+	if fs.root == "" {
+		return "/"
+	}
+	return "/" + fs.root
+}
+
+// billy.Change implementation
+
+func (fs *GrainVFS) Chmod(name string, mode os.FileMode) error  { return nil }
+func (fs *GrainVFS) Lchown(name string, uid, gid int) error     { return nil }
+func (fs *GrainVFS) Chown(name string, uid, gid int) error      { return nil }
+func (fs *GrainVFS) Chtimes(name string, atime, mtime time.Time) error { return nil }
+
+func (fs *GrainVFS) isDir(fp string) bool {
+	if fp == "" || fp == "/" || fp == "." {
+		return true // root is always a directory
+	}
+	// Check for dir marker
+	if _, err := fs.backend.HeadObject(fs.bucket, fp+dirMarkerSuffix); err == nil {
+		return true
+	}
+	// Check if any objects have this as prefix (implicit directory)
+	objs, err := fs.backend.ListObjects(fs.bucket, fp+"/", 1)
+	if err == nil && len(objs) > 0 {
+		return true
+	}
+	return false
+}
+
+// fileInfo implements os.FileInfo.
+type fileInfo struct {
+	name    string
+	size    int64
+	isDir   bool
+	modTime time.Time
+}
+
+func (fi *fileInfo) Name() string      { return fi.name }
+func (fi *fileInfo) Size() int64       { return fi.size }
+func (fi *fileInfo) Mode() os.FileMode { return 0644 }
+func (fi *fileInfo) ModTime() time.Time {
+	if fi.modTime.IsZero() {
+		return time.Now()
+	}
+	return fi.modTime
+}
+func (fi *fileInfo) IsDir() bool      { return fi.isDir }
+func (fi *fileInfo) Sys() interface{} { return nil }
+
+// grainFile implements billy.File.
+type grainFile struct {
+	fs     *GrainVFS
+	path   string
+	name   string
+	flag   int
+	perm   os.FileMode
+	buf    *bytes.Buffer
+	pos    int64
+	closed bool
+}
+
+func (f *grainFile) loadExisting() error {
+	rc, _, err := f.fs.backend.GetObject(f.fs.bucket, f.path)
+	if err != nil {
+		return os.ErrNotExist
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+	f.buf = bytes.NewBuffer(data)
+	return nil
+}
+
+func (f *grainFile) Name() string { return f.name }
+
+func (f *grainFile) Write(p []byte) (int, error) {
+	if f.buf == nil {
+		f.buf = &bytes.Buffer{}
+	}
+	return f.buf.Write(p)
+}
+
+func (f *grainFile) Read(p []byte) (int, error) {
+	if f.buf == nil {
+		return 0, io.EOF
+	}
+	data := f.buf.Bytes()
+	if f.pos >= int64(len(data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, data[f.pos:])
+	f.pos += int64(n)
+	return n, nil
+}
+
+func (f *grainFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.buf == nil {
+		return 0, io.EOF
+	}
+	data := f.buf.Bytes()
+	if off >= int64(len(data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (f *grainFile) Seek(offset int64, whence int) (int64, error) {
+	size := int64(0)
+	if f.buf != nil {
+		size = int64(f.buf.Len())
+	}
+
+	switch whence {
+	case io.SeekStart:
+		f.pos = offset
+	case io.SeekCurrent:
+		f.pos += offset
+	case io.SeekEnd:
+		f.pos = size + offset
+	}
+
+	if f.pos < 0 {
+		f.pos = 0
+	}
+	return f.pos, nil
+}
+
+func (f *grainFile) Close() error {
+	if f.closed {
+		return nil
+	}
+	f.closed = true
+
+	// Flush writes to storage
+	if f.flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && f.buf != nil {
+		data := f.buf.Bytes()
+		_, err := f.fs.backend.PutObject(f.fs.bucket, f.path,
+			bytes.NewReader(data), "application/octet-stream")
+		return err
+	}
+	return nil
+}
+
+func (f *grainFile) Lock() error   { return nil }
+func (f *grainFile) Unlock() error { return nil }
+
+func (f *grainFile) Truncate(size int64) error {
+	if f.buf == nil {
+		f.buf = &bytes.Buffer{}
+	}
+	data := f.buf.Bytes()
+	if int64(len(data)) > size {
+		data = data[:size]
+	} else {
+		for int64(len(data)) < size {
+			data = append(data, 0)
+		}
+	}
+	f.buf = bytes.NewBuffer(data)
+	return nil
+}

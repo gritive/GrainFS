@@ -18,10 +18,12 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
+	"github.com/gritive/GrainFS/internal/nfsserver"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 func init() {
@@ -37,6 +39,7 @@ func init() {
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
+	serveCmd.Flags().Int("nfs-port", 9002, "NFS server port (0 = disabled, volumes managed via REST API)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -80,11 +83,24 @@ func runServe(cmd *cobra.Command, args []string) error {
 		ecOpts = append(ecOpts, erasure.WithEncryption(enc))
 	}
 
+	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
+
 	if peersStr == "" {
+		var backend storage.Backend
+		var err error
 		if ecEnabled {
-			return runSoloEC(ctx, addr, dataDir, ecData, ecParity, authOpts, ecOpts)
+			backend, err = erasure.NewECBackend(dataDir, ecData, ecParity, ecOpts...)
+		} else {
+			backend, err = storage.NewLocalBackend(dataDir)
 		}
-		return runSolo(ctx, addr, dataDir, authOpts)
+		if err != nil {
+			return fmt.Errorf("failed to initialize storage: %w", err)
+		}
+		mode := "solo"
+		if ecEnabled {
+			mode = "solo-ec"
+		}
+		return runSoloWithNFS(ctx, addr, dataDir, mode, backend, authOpts, nfsPort)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -92,40 +108,39 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr)
 }
 
-func runSolo(ctx context.Context, addr, dataDir string, opts []server.Option) error {
-	backend, err := storage.NewLocalBackend(dataDir)
-	if err != nil {
-		return fmt.Errorf("failed to initialize storage: %w", err)
-	}
-
-	slog.Info("server started", "component", "server", "mode", "solo", "version", version, "addr", addr, "data", dataDir)
+func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend storage.Backend, opts []server.Option, nfsPort int) error {
+	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
 	srv := server.New(addr, backend, opts...)
 	go srv.Run()
 
-	<-ctx.Done()
-	slog.Info("shutting down", "component", "server")
-	backend.Close()
-	slog.Info("server stopped", "component", "server")
-	return nil
-}
+	// Start NFS server if requested
+	if nfsPort > 0 {
+		const defaultVolName = "default"
+		const defaultVolSize = 1024 * 1024 * 1024 // 1G
 
-func runSoloEC(ctx context.Context, addr, dataDir string, ecData, ecParity int, opts []server.Option, ecOpts []erasure.ECOption) error {
-	backend, err := erasure.NewECBackend(dataDir, ecData, ecParity, ecOpts...)
-	if err != nil {
-		return fmt.Errorf("failed to initialize EC storage: %w", err)
+		mgr := volume.NewManager(backend)
+		// Ensure a default volume exists for NFS
+		if _, err := mgr.Get(defaultVolName); err != nil {
+			if _, err := mgr.Create(defaultVolName, defaultVolSize); err != nil {
+				slog.Warn("default nfs volume create failed (may already exist)", "error", err)
+			}
+		}
+
+		nfsSrv := nfsserver.NewServer(backend, defaultVolName)
+		go func() {
+			nfsAddr := fmt.Sprintf(":%d", nfsPort)
+			if err := nfsSrv.ListenAndServe(nfsAddr); err != nil {
+				slog.Error("nfs server error", "error", err)
+			}
+		}()
 	}
 
-	slog.Info("server started", "component", "server", "mode", "solo-ec",
-		"version", version, "addr", addr, "data", dataDir,
-		"ec_data", ecData, "ec_parity", ecParity)
-
-	srv := server.New(addr, backend, opts...)
-	go srv.Run()
-
 	<-ctx.Done()
 	slog.Info("shutting down", "component", "server")
-	backend.Close()
+	if closer, ok := backend.(interface{ Close() error }); ok {
+		closer.Close()
+	}
 	slog.Info("server stopped", "component", "server")
 	return nil
 }
