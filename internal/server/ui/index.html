@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GrainFS — Object Browser</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg-deep:#0c0f1a;--bg-surface:#151929;--bg-card:#1c2137;--bg-hover:#252b45;
+  --border:#2a3055;--text:#e2e8f0;--text-muted:#8892b0;--text-faint:#5a6380;
+  --accent:#6366f1;--accent-hover:#818cf8;--accent-subtle:rgba(99,102,241,0.12);
+  --success:#22c55e;--danger:#ef4444;--warning:#f59e0b;
+  --radius:8px;--radius-lg:12px;
+}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg-deep);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+button{cursor:pointer;font-family:inherit}
+input,select{font-family:inherit}
+
+.header{background:var(--bg-surface);border-bottom:1px solid var(--border);padding:0 1.5rem;height:56px;display:flex;align-items:center;gap:1rem;position:sticky;top:0;z-index:100}
+.header .logo{font-size:1.125rem;font-weight:700;color:var(--accent);letter-spacing:-0.02em}
+.header nav{display:flex;gap:0;margin-left:2rem}
+.header nav button{background:none;border:none;color:var(--text-muted);padding:0.75rem 1rem;font-size:0.8125rem;font-weight:500;border-bottom:2px solid transparent;transition:all 0.15s}
+.header nav button:hover{color:var(--text)}
+.header nav button.active{color:var(--accent);border-bottom-color:var(--accent)}
+.header .status{margin-left:auto;display:flex;align-items:center;gap:0.5rem;font-size:0.75rem;color:var(--text-muted)}
+.header .dot{width:7px;height:7px;border-radius:50%;background:var(--success)}
+
+.content{flex:1;display:flex;flex-direction:column;max-width:1200px;width:100%;margin:0 auto;padding:1.5rem}
+.toolbar{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem}
+.toolbar .breadcrumb{font-size:0.8125rem;color:var(--text-muted);display:flex;align-items:center;gap:0.25rem}
+.toolbar .breadcrumb span{cursor:pointer;transition:color 0.15s}
+.toolbar .breadcrumb span:hover{color:var(--accent)}
+.toolbar .breadcrumb .sep{color:var(--text-faint);cursor:default}
+.toolbar .actions{margin-left:auto;display:flex;gap:0.5rem}
+.btn{padding:0.4rem 0.85rem;border-radius:var(--radius);font-size:0.8125rem;font-weight:500;border:1px solid var(--border);background:var(--bg-card);color:var(--text);transition:all 0.15s}
+.btn:hover{border-color:var(--accent);background:var(--accent-subtle)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent-hover)}
+.btn.danger{color:var(--danger);border-color:rgba(239,68,68,0.3)}
+.btn.danger:hover{background:rgba(239,68,68,0.1)}
+
+.table-wrap{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden}
+table{width:100%;border-collapse:collapse}
+thead th{padding:0.6rem 1rem;text-align:left;font-size:0.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint);background:var(--bg-card);border-bottom:1px solid var(--border)}
+tbody td{padding:0.65rem 1rem;font-size:0.8125rem;border-bottom:1px solid var(--border)}
+tbody tr{transition:background 0.1s}
+tbody tr:hover{background:var(--bg-hover)}
+tbody tr:last-child td{border-bottom:none}
+.name-cell{font-weight:500;color:var(--accent);cursor:pointer;outline:none}
+.name-cell:hover,.name-cell:focus{text-decoration:underline;background:var(--bg-hover)}
+.size-cell{color:var(--text-muted);font-variant-numeric:tabular-nums}
+.date-cell{color:var(--text-muted);font-size:0.75rem}
+.empty-state{padding:3rem;text-align:center;color:var(--text-faint);font-size:0.875rem}
+
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:200}
+.modal{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1.5rem;width:400px;max-width:90vw}
+.modal h3{font-size:1rem;margin-bottom:1rem}
+.modal input{width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-card);color:var(--text);font-size:0.875rem;margin-bottom:0.75rem}
+.modal input:focus{outline:none;border-color:var(--accent)}
+.modal .modal-actions{display:flex;gap:0.5rem;justify-content:flex-end}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
+.stat-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1rem 1.25rem}
+.stat-card .label{font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint);margin-bottom:0.25rem}
+.stat-card .value{font-size:1.5rem;font-weight:700;font-variant-numeric:tabular-nums}
+
+.drop-zone{border:2px dashed var(--border);border-radius:var(--radius-lg);padding:2rem;text-align:center;color:var(--text-muted);transition:all 0.2s;margin-bottom:1rem;display:none}
+.drop-zone.active{display:block}
+.drop-zone.dragging{border-color:var(--accent);background:var(--accent-subtle);color:var(--accent)}
+
+.hidden{display:none !important}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">GrainFS</div>
+  <nav>
+    <button class="active" data-tab="browser">Object Browser</button>
+    <button data-tab="volumes">Volumes</button>
+    <button data-tab="dashboard">Dashboard</button>
+  </nav>
+  <div class="status"><div class="dot"></div>Running</div>
+</div>
+
+<!-- Object Browser Tab -->
+<div class="content" id="tab-browser">
+  <div class="stats" id="stats-bar">
+    <div class="stat-card"><div class="label">Buckets</div><div class="value" id="st-buckets">-</div></div>
+    <div class="stat-card"><div class="label">Objects</div><div class="value" id="st-objects">-</div></div>
+    <div class="stat-card"><div class="label">Storage</div><div class="value" id="st-storage">-</div></div>
+    <div class="stat-card"><div class="label">Requests</div><div class="value" id="st-requests">-</div></div>
+  </div>
+
+  <div class="toolbar">
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="actions">
+      <button class="btn primary" id="btn-upload" style="display:none">Upload</button>
+      <button class="btn" id="btn-create">Create Bucket</button>
+    </div>
+  </div>
+
+  <div class="drop-zone" id="drop-zone">Drop files here to upload</div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+      <tbody id="object-list"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Volumes Tab -->
+<div class="content hidden" id="tab-volumes">
+  <div class="toolbar">
+    <div class="breadcrumb"><span>Volumes</span></div>
+    <div class="actions">
+      <button class="btn primary" id="btn-create-vol">Create Volume</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Size</th><th>Block Size</th><th></th></tr></thead>
+      <tbody id="volume-list"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Dashboard Tab -->
+<div class="content hidden" id="tab-dashboard">
+  <div class="stats">
+    <div class="stat-card"><div class="label">Uptime</div><div class="value" id="dash-uptime">-</div></div>
+    <div class="stat-card"><div class="label">Total Requests</div><div class="value" id="dash-requests">-</div></div>
+    <div class="stat-card"><div class="label">Storage Bytes</div><div class="value" id="dash-storage">-</div></div>
+    <div class="stat-card"><div class="label">Objects</div><div class="value" id="dash-objects">-</div></div>
+  </div>
+</div>
+
+<!-- Modals -->
+<div class="modal-overlay hidden" id="modal-bucket">
+  <div class="modal">
+    <h3>Create Bucket</h3>
+    <input type="text" id="bucket-name-input" placeholder="Bucket name">
+    <div class="modal-actions">
+      <button class="btn" id="modal-bucket-cancel">Cancel</button>
+      <button class="btn primary" id="modal-bucket-ok">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-volume">
+  <div class="modal">
+    <h3>Create Volume</h3>
+    <input type="text" id="vol-name-input" placeholder="Volume name">
+    <div style="display:flex;gap:0.5rem">
+      <input type="number" id="vol-size-input" placeholder="Size" value="1" style="flex:1">
+      <select id="vol-size-unit" style="padding:0.5rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-card);color:var(--text);font-size:0.875rem">
+        <option value="1073741824" selected>GB</option>
+        <option value="1048576">MB</option>
+        <option value="1099511627776">TB</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="modal-volume-cancel">Cancel</button>
+      <button class="btn primary" id="modal-volume-ok">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-confirm-delete">
+  <div class="modal">
+    <h3 id="confirm-delete-label">Delete?</h3>
+    <p style="color:var(--text-muted);font-size:0.8125rem;margin-bottom:1rem">This action cannot be undone.</p>
+    <div class="modal-actions">
+      <button class="btn" id="modal-delete-cancel">Cancel</button>
+      <button class="btn danger" id="modal-delete-ok">Delete</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="file-input" multiple style="display:none">
+
+<script>
+(function() {
+  'use strict';
+  var baseURL = location.origin;
+  var currentBucket = null;
+  var startTime = Date.now();
+
+  // Helpers
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.textContent; }
+
+  function fmtBytes(b) {
+    if (b === 0) return '0 B';
+    var k = 1024, s = ['B','KB','MB','GB','TB'];
+    var i = Math.floor(Math.log(b) / Math.log(k));
+    return (b / Math.pow(k, i)).toFixed(1) + ' ' + s[i];
+  }
+
+  function fmtDate(d) {
+    if (!d) return '';
+    try { return new Date(d).toLocaleString(); } catch(e) { return d; }
+  }
+
+  function fmtUptime(ms) {
+    var s = Math.floor(ms/1000), m = Math.floor(s/60), h = Math.floor(m/60);
+    if (h > 0) return h + 'h ' + (m%60) + 'm';
+    if (m > 0) return m + 'm ' + (s%60) + 's';
+    return s + 's';
+  }
+
+  function parseMetrics(text) {
+    var m = {};
+    text.split('\n').forEach(function(l) {
+      if (l.charAt(0) === '#' || !l.trim()) return;
+      var p = l.match(/^(\S+?)(?:\{[^}]*\})?\s+(\S+)/);
+      if (p) m[p[1]] = (m[p[1]] || 0) + parseFloat(p[2]);
+    });
+    return m;
+  }
+
+  function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+  function clearChildren(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+  function mkEl(tag, attrs, children) {
+    var el = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function(k) {
+      if (k === 'className') el.className = attrs[k];
+      else if (k === 'textContent') el.textContent = attrs[k];
+      else if (k.substring(0,2) === 'on') el.addEventListener(k.substring(2), attrs[k]);
+      else el.setAttribute(k, attrs[k]);
+    });
+    if (children) children.forEach(function(c) { if (c) el.appendChild(c); });
+    return el;
+  }
+
+  function mkTd(text, cls) { return mkEl('td', { textContent: text, className: cls || '' }); }
+
+  // Tab switching
+  document.querySelectorAll('nav button').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('nav button').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      document.querySelectorAll('.content').forEach(function(c) { c.classList.add('hidden'); });
+      var tab = document.getElementById('tab-' + btn.dataset.tab);
+      if (tab) tab.classList.remove('hidden');
+      if (btn.dataset.tab === 'volumes') loadVolumes();
+      if (btn.dataset.tab === 'dashboard') refreshDashboard();
+    });
+  });
+
+  // Object Browser
+  function loadBuckets() {
+    currentBucket = null;
+    document.getElementById('btn-upload').style.display = 'none';
+    document.getElementById('btn-create').style.display = '';
+    document.getElementById('btn-create').textContent = 'Create Bucket';
+    document.getElementById('drop-zone').classList.remove('active');
+    updateBreadcrumb();
+
+    fetch(baseURL + '/').then(function(r) { return r.text(); }).then(function(text) {
+      var parser = new DOMParser();
+      var xml = parser.parseFromString(text, 'text/xml');
+      var buckets = xml.querySelectorAll('Bucket');
+      var tbody = document.getElementById('object-list');
+      clearChildren(tbody);
+
+      if (buckets.length === 0) {
+        var emptyTr = mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'No buckets yet. Create one to get started.' })]);
+        tbody.appendChild(emptyTr);
+        return;
+      }
+
+      buckets.forEach(function(b) {
+        var name = b.querySelector('Name').textContent;
+        var dateEl = b.querySelector('CreationDate');
+        var date = dateEl ? dateEl.textContent : '';
+        var tr = mkEl('tr', null, [
+          mkEl('td', { textContent: name + '/', className: 'name-cell', tabindex: '0', role: 'button', onclick: function() { openBucket(name); }, onkeydown: function(e) { if (e.key === 'Enter') openBucket(name); } }),
+          mkTd('\u2014', 'size-cell'),
+          mkTd(fmtDate(date), 'date-cell'),
+          mkEl('td', null, [mkEl('button', { className: 'btn danger', textContent: 'Delete', onclick: function() { confirmDelete('bucket', name); } })])
+        ]);
+        tbody.appendChild(tr);
+      });
+    }).catch(function(e) { console.error('loadBuckets', e); });
+  }
+
+  function openBucket(name) {
+    currentBucket = name;
+    document.getElementById('btn-upload').style.display = '';
+    document.getElementById('btn-create').style.display = 'none';
+    document.getElementById('drop-zone').classList.add('active');
+    updateBreadcrumb();
+
+    fetch(baseURL + '/' + encodeURIComponent(name)).then(function(r) { return r.text(); }).then(function(text) {
+      var parser = new DOMParser();
+      var xml = parser.parseFromString(text, 'text/xml');
+      var objects = xml.querySelectorAll('Contents');
+      var tbody = document.getElementById('object-list');
+      clearChildren(tbody);
+
+      if (objects.length === 0) {
+        var emptyTr = mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'Empty bucket. Upload a file to get started.' })]);
+        tbody.appendChild(emptyTr);
+        return;
+      }
+
+      objects.forEach(function(o) {
+        var key = o.querySelector('Key').textContent;
+        var size = o.querySelector('Size').textContent;
+        var dateEl = o.querySelector('LastModified');
+        var date = dateEl ? dateEl.textContent : '';
+        var tr = mkEl('tr', null, [
+          mkEl('td', { textContent: key, className: 'name-cell', tabindex: '0', role: 'button', onclick: function() { downloadObject(name, key); }, onkeydown: function(e) { if (e.key === 'Enter') downloadObject(name, key); } }),
+          mkTd(fmtBytes(parseInt(size)), 'size-cell'),
+          mkTd(fmtDate(date), 'date-cell'),
+          mkEl('td', null, [mkEl('button', { className: 'btn danger', textContent: 'Delete', onclick: function() { confirmDelete('object', name + '/' + key); } })])
+        ]);
+        tbody.appendChild(tr);
+      });
+    }).catch(function(e) { console.error('openBucket', e); });
+  }
+
+  function updateBreadcrumb() {
+    var bc = document.getElementById('breadcrumb');
+    clearChildren(bc);
+    bc.appendChild(mkEl('span', { textContent: 'Buckets', tabindex: '0', role: 'button', onclick: function() { loadBuckets(); }, onkeydown: function(e) { if (e.key === 'Enter') loadBuckets(); } }));
+    if (currentBucket) {
+      bc.appendChild(mkEl('span', { textContent: '/', className: 'sep' }));
+      bc.appendChild(mkEl('span', { textContent: currentBucket }));
+    }
+  }
+
+  // Confirm delete modal
+  var pendingDeleteType = null;
+  var pendingDeleteTarget = null;
+
+  function confirmDelete(type, target) {
+    pendingDeleteType = type;
+    pendingDeleteTarget = target;
+    var label = type === 'bucket' ? 'bucket "' + target + '"' : target;
+    document.getElementById('confirm-delete-label').textContent = 'Delete ' + label + '?';
+    document.getElementById('modal-confirm-delete').classList.remove('hidden');
+  }
+
+  function executeDelete() {
+    if (pendingDeleteType === 'bucket') {
+      deleteBucket(pendingDeleteTarget);
+    } else if (pendingDeleteType === 'object') {
+      var parts = pendingDeleteTarget.split('/');
+      var bucket = parts.shift();
+      var key = parts.join('/');
+      deleteObject(bucket, key);
+    } else if (pendingDeleteType === 'volume') {
+      deleteVolume(pendingDeleteTarget);
+    }
+    closeModal('modal-confirm-delete');
+  }
+
+  function createBucket() {
+    var name = document.getElementById('bucket-name-input').value.trim();
+    if (!name) return;
+    fetch(baseURL + '/' + encodeURIComponent(name), { method: 'PUT' }).then(function() {
+      closeModal('modal-bucket');
+      document.getElementById('bucket-name-input').value = '';
+      loadBuckets();
+    });
+  }
+
+  function deleteBucket(name) {
+    fetch(baseURL + '/' + encodeURIComponent(name), { method: 'DELETE' }).then(function() { loadBuckets(); });
+  }
+
+  function deleteObject(bucket, key) {
+    fetch(baseURL + '/' + encodeURIComponent(bucket) + '/' + encodeURIComponent(key), { method: 'DELETE' }).then(function() { openBucket(bucket); });
+  }
+
+  function downloadObject(bucket, key) {
+    var a = document.createElement('a');
+    a.href = baseURL + '/' + encodeURIComponent(bucket) + '/' + encodeURIComponent(key);
+    a.download = key.split('/').pop();
+    a.click();
+  }
+
+  // Upload
+  document.getElementById('btn-upload').addEventListener('click', function() { document.getElementById('file-input').click(); });
+  document.getElementById('file-input').addEventListener('change', function(e) {
+    if (!currentBucket) return;
+    var uploads = [];
+    for (var i = 0; i < e.target.files.length; i++) {
+      var file = e.target.files[i];
+      uploads.push(fetch(baseURL + '/' + encodeURIComponent(currentBucket) + '/' + encodeURIComponent(file.name), { method: 'PUT', body: file }));
+    }
+    Promise.all(uploads).then(function() {
+      e.target.value = '';
+      openBucket(currentBucket);
+    });
+  });
+
+  var dz = document.getElementById('drop-zone');
+  dz.addEventListener('dragover', function(e) { e.preventDefault(); dz.classList.add('dragging'); });
+  dz.addEventListener('dragleave', function() { dz.classList.remove('dragging'); });
+  dz.addEventListener('drop', function(e) {
+    e.preventDefault(); dz.classList.remove('dragging');
+    if (!currentBucket) return;
+    var uploads = [];
+    for (var i = 0; i < e.dataTransfer.files.length; i++) {
+      var file = e.dataTransfer.files[i];
+      uploads.push(fetch(baseURL + '/' + encodeURIComponent(currentBucket) + '/' + encodeURIComponent(file.name), { method: 'PUT', body: file }));
+    }
+    Promise.all(uploads).then(function() { openBucket(currentBucket); });
+  });
+
+  document.getElementById('btn-create').addEventListener('click', function() {
+    if (currentBucket) return;
+    document.getElementById('modal-bucket').classList.remove('hidden');
+  });
+
+  // Modal buttons
+  document.getElementById('modal-bucket-cancel').addEventListener('click', function() { closeModal('modal-bucket'); });
+  document.getElementById('modal-bucket-ok').addEventListener('click', createBucket);
+  document.getElementById('modal-volume-cancel').addEventListener('click', function() { closeModal('modal-volume'); });
+  document.getElementById('modal-volume-ok').addEventListener('click', createVolume);
+  document.getElementById('modal-delete-cancel').addEventListener('click', function() { closeModal('modal-confirm-delete'); });
+  document.getElementById('modal-delete-ok').addEventListener('click', executeDelete);
+
+  // Volumes
+  function loadVolumes() {
+    fetch(baseURL + '/volumes/').then(function(r) { return r.json(); }).then(function(vols) {
+      var tbody = document.getElementById('volume-list');
+      clearChildren(tbody);
+
+      if (!vols || vols.length === 0) {
+        var emptyTr = mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'No volumes.' })]);
+        tbody.appendChild(emptyTr);
+        return;
+      }
+
+      vols.forEach(function(v) {
+        var tr = mkEl('tr', null, [
+          mkTd(v.name),
+          mkTd(fmtBytes(v.size), 'size-cell'),
+          mkTd(String(v.block_size), 'size-cell'),
+          mkEl('td', null, [mkEl('button', { className: 'btn danger', textContent: 'Delete', onclick: function() { confirmDelete('volume', v.name); } })])
+        ]);
+        tbody.appendChild(tr);
+      });
+    }).catch(function(e) { console.error('loadVolumes', e); });
+  }
+
+  document.getElementById('btn-create-vol').addEventListener('click', function() {
+    document.getElementById('modal-volume').classList.remove('hidden');
+  });
+
+  function createVolume() {
+    var name = document.getElementById('vol-name-input').value.trim();
+    var sizeVal = parseFloat(document.getElementById('vol-size-input').value);
+    var unit = parseInt(document.getElementById('vol-size-unit').value);
+    var size = Math.round(sizeVal * unit);
+    if (!name || !size) return;
+    fetch(baseURL + '/volumes/' + encodeURIComponent(name), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size: size })
+    }).then(function() {
+      closeModal('modal-volume');
+      document.getElementById('vol-name-input').value = '';
+      loadVolumes();
+    });
+  }
+
+  function deleteVolume(name) {
+    fetch(baseURL + '/volumes/' + encodeURIComponent(name), { method: 'DELETE' }).then(function() { loadVolumes(); });
+  }
+
+  // Dashboard
+  function refreshDashboard() {
+    fetch(baseURL + '/metrics').then(function(r) { return r.text(); }).then(function(text) {
+      var m = parseMetrics(text);
+      document.getElementById('dash-uptime').textContent = fmtUptime(Date.now() - startTime);
+      document.getElementById('dash-requests').textContent = Math.round(m['grainfs_http_requests_total'] || 0);
+      document.getElementById('dash-storage').textContent = fmtBytes(m['grainfs_storage_bytes_total'] || 0);
+      document.getElementById('dash-objects').textContent = Math.round(m['grainfs_objects_total'] || 0);
+    }).catch(function(e) { console.error('refreshDashboard', e); });
+  }
+
+  // Stats bar refresh
+  function refreshStats() {
+    fetch(baseURL + '/metrics').then(function(r) { return r.text(); }).then(function(text) {
+      var m = parseMetrics(text);
+      document.getElementById('st-buckets').textContent = Math.round(m['grainfs_buckets_total'] || 0);
+      document.getElementById('st-objects').textContent = Math.round(m['grainfs_objects_total'] || 0);
+      document.getElementById('st-storage').textContent = fmtBytes(m['grainfs_storage_bytes_total'] || 0);
+      document.getElementById('st-requests').textContent = Math.round(m['grainfs_http_requests_total'] || 0);
+    }).catch(function() {});
+  }
+
+  // Init
+  loadBuckets();
+  setInterval(refreshStats, 3000);
+  refreshStats();
+})();
+</script>
+</body>
+</html>

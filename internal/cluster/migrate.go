@@ -38,10 +38,10 @@ func MigrateSoloToCluster(dataDir, nodeID string) error {
 	type objEntry struct {
 		bucket string
 		key    string
-		meta   json.RawMessage
+		meta   []byte
 	}
 	var objects []objEntry
-	var multiparts []json.RawMessage
+	var multiparts [][]byte
 
 	err = db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)

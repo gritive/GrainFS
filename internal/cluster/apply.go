@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 
@@ -50,9 +49,9 @@ func bucketKey(bucket string) []byte    { return []byte("bucket:" + bucket) }
 func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
 func multipartKey(uploadID string) []byte     { return []byte("mpu:" + uploadID) }
 
-func (f *FSM) applyCreateBucket(data json.RawMessage) error {
-	var c CreateBucketCmd
-	if err := json.Unmarshal(data, &c); err != nil {
+func (f *FSM) applyCreateBucket(data []byte) error {
+	c, err := decodeCreateBucketCmd(data)
+	if err != nil {
 		return err
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
@@ -60,9 +59,9 @@ func (f *FSM) applyCreateBucket(data json.RawMessage) error {
 	})
 }
 
-func (f *FSM) applyDeleteBucket(data json.RawMessage) error {
-	var c DeleteBucketCmd
-	if err := json.Unmarshal(data, &c); err != nil {
+func (f *FSM) applyDeleteBucket(data []byte) error {
+	c, err := decodeDeleteBucketCmd(data)
+	if err != nil {
 		return err
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
@@ -70,26 +69,29 @@ func (f *FSM) applyDeleteBucket(data json.RawMessage) error {
 	})
 }
 
-func (f *FSM) applyPutObjectMeta(data json.RawMessage) error {
-	var c PutObjectMetaCmd
-	if err := json.Unmarshal(data, &c); err != nil {
+func (f *FSM) applyPutObjectMeta(data []byte) error {
+	c, err := decodePutObjectMetaCmd(data)
+	if err != nil {
 		return err
 	}
-	meta, _ := json.Marshal(map[string]any{
-		"Key":          c.Key,
-		"Size":         c.Size,
-		"ContentType":  c.ContentType,
-		"ETag":         c.ETag,
-		"LastModified": c.ModTime,
+	meta, err := marshalObjectMeta(objectMeta{
+		Key:          c.Key,
+		Size:         c.Size,
+		ContentType:  c.ContentType,
+		ETag:         c.ETag,
+		LastModified: c.ModTime,
 	})
+	if err != nil {
+		return fmt.Errorf("marshal object meta: %w", err)
+	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(objectMetaKey(c.Bucket, c.Key), meta)
 	})
 }
 
-func (f *FSM) applyDeleteObject(data json.RawMessage) error {
-	var c DeleteObjectCmd
-	if err := json.Unmarshal(data, &c); err != nil {
+func (f *FSM) applyDeleteObject(data []byte) error {
+	c, err := decodeDeleteObjectCmd(data)
+	if err != nil {
 		return err
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
@@ -101,35 +103,37 @@ func (f *FSM) applyDeleteObject(data json.RawMessage) error {
 	})
 }
 
-func (f *FSM) applyCreateMultipartUpload(data json.RawMessage) error {
-	var c CreateMultipartUploadCmd
-	if err := json.Unmarshal(data, &c); err != nil {
+func (f *FSM) applyCreateMultipartUpload(data []byte) error {
+	c, err := decodeCreateMultipartUploadCmd(data)
+	if err != nil {
 		return err
 	}
-	meta, _ := json.Marshal(map[string]any{
-		"upload_id":    c.UploadID,
-		"bucket":       c.Bucket,
-		"key":          c.Key,
-		"content_type": c.ContentType,
-		"created_at":   c.CreatedAt,
+	meta, err := marshalClusterMultipartMeta(clusterMultipartMeta{
+		ContentType: c.ContentType,
 	})
+	if err != nil {
+		return fmt.Errorf("marshal multipart meta: %w", err)
+	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(multipartKey(c.UploadID), meta)
 	})
 }
 
-func (f *FSM) applyCompleteMultipart(data json.RawMessage) error {
-	var c CompleteMultipartCmd
-	if err := json.Unmarshal(data, &c); err != nil {
+func (f *FSM) applyCompleteMultipart(data []byte) error {
+	c, err := decodeCompleteMultipartCmd(data)
+	if err != nil {
 		return err
 	}
-	objMeta, _ := json.Marshal(map[string]any{
-		"Key":          c.Key,
-		"Size":         c.Size,
-		"ContentType":  c.ContentType,
-		"ETag":         c.ETag,
-		"LastModified": c.ModTime,
+	objMeta, err := marshalObjectMeta(objectMeta{
+		Key:          c.Key,
+		Size:         c.Size,
+		ContentType:  c.ContentType,
+		ETag:         c.ETag,
+		LastModified: c.ModTime,
 	})
+	if err != nil {
+		return fmt.Errorf("marshal object meta: %w", err)
+	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(objectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
 			return err
@@ -138,9 +142,9 @@ func (f *FSM) applyCompleteMultipart(data json.RawMessage) error {
 	})
 }
 
-func (f *FSM) applyAbortMultipart(data json.RawMessage) error {
-	var c AbortMultipartCmd
-	if err := json.Unmarshal(data, &c); err != nil {
+func (f *FSM) applyAbortMultipart(data []byte) error {
+	c, err := decodeAbortMultipartCmd(data)
+	if err != nil {
 		return err
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
@@ -172,13 +176,13 @@ func (f *FSM) Snapshot() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(state)
+	return marshalSnapshotState(state)
 }
 
 // Restore replaces the metadata state from a snapshot.
 func (f *FSM) Restore(data []byte) error {
-	var state map[string][]byte
-	if err := json.Unmarshal(data, &state); err != nil {
+	state, err := unmarshalSnapshotState(data)
+	if err != nil {
 		return err
 	}
 

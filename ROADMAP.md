@@ -165,7 +165,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 **검증:** NFS 클라이언트로 파일 생성/읽기/삭제 동작 확인 (E2E).
 
-### Phase 7: First User Experience
+### Phase 7: First User Experience ✅
 
 **목표:** 실사용자가 즉시 가치를 느끼는 환경을 만든다.
 
@@ -184,7 +184,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 **목표:** Phase 7 벤치마크 결과를 근거로, 확인된 병목을 제거한다.
 
-- **Raft 직렬화 protobuf 전환**: JSON 이중 marshal → protobuf. 50ms heartbeat × 노드 수 = 초당 수십~수백 회 GC 압박. Raft RPC + 로그 영속화 모두 전환
+- ~~**내부 직렬화 protobuf 전환**~~: ✅ 완료 (Phase 7에서 선행). raft, storage, erasure, cluster, volume 전 모듈 protobuf 전환
 - **읽기 캐시**: 핫 오브젝트 읽기 캐시 (LRU). 벤치마크에서 반복 읽기가 병목으로 확인된 경우 도입
 - **NFS 성능 최적화**: 읽기/쓰기 캐싱, 대용량 파일 최적화. 벤치마크에서 NFS throughput이 목표 미달인 경우
 

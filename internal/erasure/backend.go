@@ -5,7 +5,6 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -38,14 +37,14 @@ type Encryptor interface {
 
 // ecObjectMeta is the metadata stored in BadgerDB for an EC-encoded object.
 type ecObjectMeta struct {
-	Key          string `json:"Key"`
-	Size         int64  `json:"Size"`
-	ContentType  string `json:"ContentType"`
-	ETag         string `json:"ETag"`
-	LastModified int64  `json:"LastModified"`
-	DataShards   int    `json:"DataShards"`
-	ParityShards int    `json:"ParityShards"`
-	ShardSize    int    `json:"ShardSize"`
+	Key          string
+	Size         int64
+	ContentType  string
+	ETag         string
+	LastModified int64
+	DataShards   int
+	ParityShards int
+	ShardSize    int
 }
 
 // ECOption configures the EC backend.
@@ -101,7 +100,7 @@ func (b *ECBackend) shardPath(bucket, key string, idx int) string {
 
 // bucketMeta stores per-bucket configuration.
 type bucketMeta struct {
-	ECEnabled bool `json:"ec_enabled"`
+	ECEnabled bool
 }
 
 func bucketKey(bucket string) []byte { return []byte("bucket:" + bucket) }
@@ -127,7 +126,10 @@ func (b *ECBackend) CreateBucket(bucket string) error {
 		}
 
 		meta := bucketMeta{ECEnabled: true}
-		metaBytes, _ := json.Marshal(meta)
+		metaBytes, err := marshalBucketMeta(&meta)
+		if err != nil {
+			return fmt.Errorf("marshal bucket meta: %w", err)
+		}
 		return txn.Set(bk, metaBytes)
 	})
 }
@@ -145,7 +147,10 @@ func (b *ECBackend) SetBucketECPolicy(bucket string, ecEnabled bool) error {
 		}
 
 		meta := bucketMeta{ECEnabled: ecEnabled}
-		metaBytes, _ := json.Marshal(meta)
+		metaBytes, err := marshalBucketMeta(&meta)
+		if err != nil {
+			return fmt.Errorf("marshal bucket meta: %w", err)
+		}
 		return txn.Set(bk, metaBytes)
 	})
 }
@@ -162,11 +167,13 @@ func (b *ECBackend) GetBucketECPolicy(bucket string) (bool, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			if err := json.Unmarshal(val, &meta); err != nil {
+			m, err := unmarshalBucketMeta(val)
+			if err != nil {
 				// Legacy bucket with no EC metadata: default to EC enabled
 				meta.ECEnabled = true
 				return nil
 			}
+			meta = *m
 			return nil
 		})
 	})
@@ -278,8 +285,11 @@ func (b *ECBackend) putObjectPlain(bucket, key string, data []byte, contentType 
 		ParityShards: 0,
 	}
 
-	metaBytes, _ := json.Marshal(meta)
-	err := b.db.Update(func(txn *badger.Txn) error {
+	metaBytes, err := marshalECObjectMeta(&meta)
+	if err != nil {
+		return nil, fmt.Errorf("marshal object meta: %w", err)
+	}
+	err = b.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(objectMetaKey(bucket, key), metaBytes)
 	})
 	if err != nil {
@@ -347,7 +357,7 @@ func (b *ECBackend) putObjectData(bucket, key string, data []byte, contentType s
 		ShardSize:    len(shards[0]),
 	}
 
-	metaBytes, err := json.Marshal(meta)
+	metaBytes, err := marshalECObjectMeta(&meta)
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
@@ -458,9 +468,11 @@ func (b *ECBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.
 			if count >= maxKeys {
 				break
 			}
-			var meta ecObjectMeta
+			var meta *ecObjectMeta
 			err := it.Item().Value(func(val []byte) error {
-				return json.Unmarshal(val, &meta)
+				var unmarshalErr error
+				meta, unmarshalErr = unmarshalECObjectMeta(val)
+				return unmarshalErr
 			})
 			if err != nil {
 				return err
@@ -493,15 +505,20 @@ func (b *ECBackend) CreateMultipartUpload(bucket, key, contentType string) (*sto
 	}
 
 	now := time.Now().Unix()
-	meta, _ := json.Marshal(map[string]any{
-		"upload_id":    uploadID,
-		"bucket":       bucket,
-		"key":          key,
-		"content_type": contentType,
-		"created_at":   now,
-	})
+	mpMeta := ecMultipartMeta{
+		UploadID:    uploadID,
+		Bucket:      bucket,
+		Key:         key,
+		ContentType: contentType,
+		CreatedAt:   now,
+	}
+	meta, err := marshalECMultipartMeta(&mpMeta)
+	if err != nil {
+		os.RemoveAll(partDir)
+		return nil, fmt.Errorf("marshal multipart meta: %w", err)
+	}
 
-	err := b.db.Update(func(txn *badger.Txn) error {
+	err = b.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(multipartKey(uploadID), meta)
 	})
 	if err != nil {
@@ -555,9 +572,7 @@ func (b *ECBackend) UploadPart(bucket, key, uploadID string, partNumber int, r i
 }
 
 func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
-	var uploadMeta struct {
-		ContentType string `json:"content_type"`
-	}
+	var uploadMeta *ecMultipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(multipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
@@ -567,7 +582,9 @@ func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts 
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &uploadMeta)
+			var unmarshalErr error
+			uploadMeta, unmarshalErr = unmarshalECMultipartMeta(val)
+			return unmarshalErr
 		})
 	})
 	if err != nil {
@@ -646,7 +663,7 @@ func (b *ECBackend) getObjectMeta(bucket, key string) (*ecObjectMeta, error) {
 		return nil, err
 	}
 
-	var meta ecObjectMeta
+	var meta *ecObjectMeta
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(objectMetaKey(bucket, key))
 		if err == badger.ErrKeyNotFound {
@@ -656,13 +673,15 @@ func (b *ECBackend) getObjectMeta(bucket, key string) (*ecObjectMeta, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &meta)
+			var unmarshalErr error
+			meta, unmarshalErr = unmarshalECObjectMeta(val)
+			return unmarshalErr
 		})
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &meta, nil
+	return meta, nil
 }
 
 func (b *ECBackend) readAndDecode(bucket, key string, meta *ecObjectMeta) ([]byte, error) {

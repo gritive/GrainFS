@@ -1,0 +1,70 @@
+syntax = "proto3";
+package clusterpb;
+option go_package = "github.com/gritive/GrainFS/internal/cluster/clusterpb";
+
+message Command {
+  uint32 type = 1;
+  bytes data = 2;
+}
+
+message CreateBucketCmd {
+  string bucket = 1;
+}
+
+message DeleteBucketCmd {
+  string bucket = 1;
+}
+
+message PutObjectMetaCmd {
+  string bucket = 1;
+  string key = 2;
+  int64 size = 3;
+  string content_type = 4;
+  string etag = 5;
+  int64 mod_time = 6;
+}
+
+message DeleteObjectCmd {
+  string bucket = 1;
+  string key = 2;
+}
+
+message CreateMultipartUploadCmd {
+  string upload_id = 1;
+  string bucket = 2;
+  string key = 3;
+  string content_type = 4;
+  int64 created_at = 5;
+}
+
+message CompleteMultipartCmd {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+  int64 size = 4;
+  string content_type = 5;
+  string etag = 6;
+  int64 mod_time = 7;
+}
+
+message AbortMultipartCmd {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+}
+
+message ObjectMeta {
+  string key = 1;
+  int64 size = 2;
+  string content_type = 3;
+  string etag = 4;
+  int64 last_modified = 5;
+}
+
+message SnapshotState {
+  map<string, bytes> entries = 1;
+}
+
+message MultipartMeta {
+  string content_type = 1;
+}

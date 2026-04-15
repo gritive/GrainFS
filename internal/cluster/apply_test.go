@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/json"
 	"os"
 	"testing"
 
@@ -72,19 +71,24 @@ func TestFSM_PutObjectMeta(t *testing.T) {
 	require.NoError(t, fsm.Apply(data))
 
 	// Verify
-	var meta map[string]any
+	var meta objectMeta
 	err := db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(objectMetaKey("b", "hello.txt"))
 		if err != nil {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &meta)
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			meta = m
+			return nil
 		})
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "hello.txt", meta["Key"])
-	assert.Equal(t, float64(42), meta["Size"])
+	assert.Equal(t, "hello.txt", meta.Key)
+	assert.Equal(t, int64(42), meta.Size)
 }
 
 func TestFSM_DeleteObject(t *testing.T) {

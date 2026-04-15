@@ -2,10 +2,12 @@ package raft
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 
 	"github.com/dgraph-io/badger/v4"
+	"google.golang.org/protobuf/proto"
+
+	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
 
 // LogStore provides durable storage for Raft log entries and state.
@@ -43,9 +45,9 @@ type LogStore interface {
 
 // key prefixes for BadgerDB storage.
 var (
-	prefixLog      = []byte("raft:log:")
-	keyState       = []byte("raft:state")
-	keySnapshot    = []byte("raft:snapshot")
+	prefixLog       = []byte("raft:log:")
+	keyState        = []byte("raft:state")
+	keySnapshot     = []byte("raft:snapshot")
 	keySnapshotMeta = []byte("raft:snapshot:meta")
 )
 
@@ -74,7 +76,11 @@ func logKey(index uint64) []byte {
 func (s *BadgerLogStore) AppendEntries(entries []LogEntry) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		for _, entry := range entries {
-			data, err := json.Marshal(entry)
+			data, err := proto.Marshal(&pb.LogEntry{
+				Term:    entry.Term,
+				Index:   entry.Index,
+				Command: entry.Command,
+			})
 			if err != nil {
 				return fmt.Errorf("marshal entry %d: %w", entry.Index, err)
 			}
@@ -97,7 +103,12 @@ func (s *BadgerLogStore) GetEntry(index uint64) (*LogEntry, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &entry)
+			var pb_ pb.LogEntry
+			if err := proto.Unmarshal(val, &pb_); err != nil {
+				return err
+			}
+			entry = LogEntry{Term: pb_.Term, Index: pb_.Index, Command: pb_.Command}
+			return nil
 		})
 	})
 	if err != nil {
@@ -119,7 +130,12 @@ func (s *BadgerLogStore) GetEntries(lo, hi uint64) ([]LogEntry, error) {
 			}
 			var entry LogEntry
 			if err := item.Value(func(val []byte) error {
-				return json.Unmarshal(val, &entry)
+				var pb_ pb.LogEntry
+				if err := proto.Unmarshal(val, &pb_); err != nil {
+					return err
+				}
+				entry = LogEntry{Term: pb_.Term, Index: pb_.Index, Command: pb_.Command}
+				return nil
 			}); err != nil {
 				return err
 			}
@@ -173,13 +189,8 @@ func (s *BadgerLogStore) TruncateAfter(afterIndex uint64) error {
 	})
 }
 
-type raftState struct {
-	Term     uint64 `json:"term"`
-	VotedFor string `json:"votedFor"`
-}
-
 func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {
-	data, err := json.Marshal(raftState{Term: term, VotedFor: votedFor})
+	data, err := proto.Marshal(&pb.RaftState{Term: term, VotedFor: votedFor})
 	if err != nil {
 		return err
 	}
@@ -189,7 +200,7 @@ func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {
 }
 
 func (s *BadgerLogStore) LoadState() (uint64, string, error) {
-	var st raftState
+	var st pb.RaftState
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(keyState)
 		if err == badger.ErrKeyNotFound {
@@ -199,19 +210,14 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &st)
+			return proto.Unmarshal(val, &st)
 		})
 	})
 	return st.Term, st.VotedFor, err
 }
 
-type snapshotMeta struct {
-	Index uint64 `json:"index"`
-	Term  uint64 `json:"term"`
-}
-
 func (s *BadgerLogStore) SaveSnapshot(index, term uint64, data []byte) error {
-	meta, err := json.Marshal(snapshotMeta{Index: index, Term: term})
+	meta, err := proto.Marshal(&pb.SnapshotMeta{Index: index, Term: term})
 	if err != nil {
 		return err
 	}
@@ -224,7 +230,7 @@ func (s *BadgerLogStore) SaveSnapshot(index, term uint64, data []byte) error {
 }
 
 func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
-	var meta snapshotMeta
+	var meta pb.SnapshotMeta
 	var data []byte
 
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -237,7 +243,7 @@ func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
 			return err
 		}
 		if err := metaItem.Value(func(val []byte) error {
-			return json.Unmarshal(val, &meta)
+			return proto.Unmarshal(val, &meta)
 		}); err != nil {
 			return err
 		}

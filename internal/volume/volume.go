@@ -1,7 +1,7 @@
 package volume
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -18,9 +18,9 @@ const (
 
 // Volume represents a virtual block device backed by object storage.
 type Volume struct {
-	Name      string `json:"name"`
-	Size      int64  `json:"size"`
-	BlockSize int    `json:"block_size"`
+	Name      string
+	Size      int64
+	BlockSize int
 }
 
 // Manager manages volumes on top of a storage.Backend.
@@ -54,12 +54,12 @@ func (m *Manager) Create(name string, sizeBytes int64) (*Volume, error) {
 		BlockSize: DefaultBlockSize,
 	}
 
-	data, err := json.Marshal(vol)
+	data, err := marshalVolume(vol)
 	if err != nil {
 		return nil, fmt.Errorf("marshal volume metadata: %w", err)
 	}
 
-	if _, err := m.backend.PutObject(volumeBucketName, metaKey(name), strings.NewReader(string(data)), "application/json"); err != nil {
+	if _, err := m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return nil, fmt.Errorf("store volume metadata: %w", err)
 	}
 
@@ -82,11 +82,11 @@ func (m *Manager) Get(name string) (*Volume, error) {
 		return nil, fmt.Errorf("read volume metadata: %w", err)
 	}
 
-	var vol Volume
-	if err := json.Unmarshal(data, &vol); err != nil {
+	vol, err := unmarshalVolume(data)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal volume metadata: %w", err)
 	}
-	return &vol, nil
+	return vol, nil
 }
 
 // Delete deletes a volume and all its blocks.
@@ -139,11 +139,11 @@ func (m *Manager) List() ([]*Volume, error) {
 		if err != nil {
 			continue
 		}
-		var vol Volume
-		if err := json.Unmarshal(data, &vol); err != nil {
+		vol, err := unmarshalVolume(data)
+		if err != nil {
 			continue
 		}
-		volumes = append(volumes, &vol)
+		volumes = append(volumes, vol)
 	}
 	return volumes, nil
 }
@@ -270,11 +270,11 @@ func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
 		return nil, fmt.Errorf("read volume metadata: %w", err)
 	}
 
-	var vol Volume
-	if err := json.Unmarshal(data, &vol); err != nil {
+	vol, err := unmarshalVolume(data)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal volume metadata: %w", err)
 	}
-	return &vol, nil
+	return vol, nil
 }
 
 func metaKey(name string) string {

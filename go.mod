@@ -18,6 +18,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/willscott/go-nfs v0.0.4
 	github.com/willscott/go-nfs-client v0.0.0-20251022144359-801f10d98886
+	google.golang.org/protobuf v1.36.8
 )
 
 require (
@@ -68,6 +69,5 @@ require (
 	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
-	google.golang.org/protobuf v1.36.8 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

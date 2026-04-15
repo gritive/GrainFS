@@ -3,10 +3,21 @@ MODULE := github.com/gritive/GrainFS
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: build test test-race test-e2e clean run lint
+PROTO_SRC := $(shell find internal -name '*.proto')
+PROTO_GEN := $(PROTO_SRC:.proto=.pb.go)
+GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go' -not -name '*.pb.go')
 
-build:
-	go build $(LDFLAGS) -o bin/$(BINARY) ./cmd/grainfs/
+.PHONY: test test-race test-e2e clean run lint bench test-nbd-docker
+
+bin/$(BINARY): $(GO_SRC) $(PROTO_GEN)
+	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
+
+build: bin/$(BINARY)
+
+%.pb.go: %.proto
+	protoc --go_out=. --go_opt=paths=source_relative $<
+
+proto: $(PROTO_GEN)
 
 test:
 	go test ./... -count=1 -cover
@@ -14,10 +25,10 @@ test:
 test-race:
 	go test ./... -count=1 -race -cover
 
-test-e2e: build
+test-e2e: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -v -count=1 -timeout 60s
 
-run: build
+run: bin/$(BINARY)
 	./bin/$(BINARY) serve --data ./tmp --port 9000
 
 clean:
@@ -26,3 +37,17 @@ clean:
 lint:
 	go vet ./...
 	test -z "$$(gofmt -l .)"
+
+bench: bin/$(BINARY)
+	@echo "Starting GrainFS server for benchmarks..."
+	@./bin/$(BINARY) serve --data /tmp/grainfs-bench --port 9100 --no-encryption --nfs-port 0 & \
+		SERVER_PID=$$!; \
+		sleep 2; \
+		k6 run benchmarks/s3_bench.js --env BASE_URL=http://localhost:9100; \
+		kill $$SERVER_PID 2>/dev/null; \
+		rm -rf /tmp/grainfs-bench
+
+test-nbd-docker:
+	@echo "Running NBD E2E tests in Docker..."
+	docker build -t grainfs-nbd-test -f docker/nbd-test.Dockerfile .
+	docker run --rm --privileged -v /lib/modules:/lib/modules:ro grainfs-nbd-test

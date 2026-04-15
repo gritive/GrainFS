@@ -1,8 +1,11 @@
 package cluster
 
 import (
-	"encoding/json"
 	"fmt"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // CommandType identifies the type of FSM command replicated through Raft.
@@ -20,71 +23,77 @@ const (
 
 // Command is a serializable FSM command for Raft log entries.
 type Command struct {
-	Type CommandType     `json:"type"`
-	Data json.RawMessage `json:"data"`
+	Type CommandType
+	Data []byte
 }
 
 type CreateBucketCmd struct {
-	Bucket string `json:"bucket"`
+	Bucket string
 }
 
 type DeleteBucketCmd struct {
-	Bucket string `json:"bucket"`
+	Bucket string
 }
 
 type PutObjectMetaCmd struct {
-	Bucket      string `json:"bucket"`
-	Key         string `json:"key"`
-	Size        int64  `json:"size"`
-	ContentType string `json:"content_type"`
-	ETag        string `json:"etag"`
-	ModTime     int64  `json:"mod_time"`
+	Bucket      string
+	Key         string
+	Size        int64
+	ContentType string
+	ETag        string
+	ModTime     int64
 }
 
 type DeleteObjectCmd struct {
-	Bucket string `json:"bucket"`
-	Key    string `json:"key"`
+	Bucket string
+	Key    string
 }
 
 type CreateMultipartUploadCmd struct {
-	UploadID    string `json:"upload_id"`
-	Bucket      string `json:"bucket"`
-	Key         string `json:"key"`
-	ContentType string `json:"content_type"`
-	CreatedAt   int64  `json:"created_at"`
+	UploadID    string
+	Bucket      string
+	Key         string
+	ContentType string
+	CreatedAt   int64
 }
 
 type CompleteMultipartCmd struct {
-	Bucket      string `json:"bucket"`
-	Key         string `json:"key"`
-	UploadID    string `json:"upload_id"`
-	Size        int64  `json:"size"`
-	ContentType string `json:"content_type"`
-	ETag        string `json:"etag"`
-	ModTime     int64  `json:"mod_time"`
+	Bucket      string
+	Key         string
+	UploadID    string
+	Size        int64
+	ContentType string
+	ETag        string
+	ModTime     int64
 }
 
 type AbortMultipartCmd struct {
-	Bucket   string `json:"bucket"`
-	Key      string `json:"key"`
-	UploadID string `json:"upload_id"`
+	Bucket   string
+	Key      string
+	UploadID string
 }
 
-// EncodeCommand serializes a command for Raft proposal.
+// EncodeCommand serializes a command for Raft proposal using protobuf.
 func EncodeCommand(cmdType CommandType, payload any) ([]byte, error) {
-	data, err := json.Marshal(payload)
+	data, err := encodePayload(cmdType, payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
-	cmd := Command{Type: cmdType, Data: data}
-	return json.Marshal(cmd)
+	pbCmd := &clusterpb.Command{
+		Type: uint32(cmdType),
+		Data: data,
+	}
+	return proto.Marshal(pbCmd)
 }
 
-// DecodeCommand deserializes a command from a Raft log entry.
+// DecodeCommand deserializes a command from a Raft log entry using protobuf.
 func DecodeCommand(raw []byte) (*Command, error) {
-	var cmd Command
-	if err := json.Unmarshal(raw, &cmd); err != nil {
+	var pbCmd clusterpb.Command
+	if err := proto.Unmarshal(raw, &pbCmd); err != nil {
 		return nil, fmt.Errorf("unmarshal command: %w", err)
 	}
-	return &cmd, nil
+	return &Command{
+		Type: CommandType(pbCmd.Type),
+		Data: pbCmd.Data,
+	}, nil
 }

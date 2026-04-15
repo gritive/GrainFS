@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -264,7 +263,18 @@ func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, er
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &obj)
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			obj = storage.Object{
+				Key:          m.Key,
+				Size:         m.Size,
+				ContentType:  m.ContentType,
+				ETag:         m.ETag,
+				LastModified: m.LastModified,
+			}
+			return nil
 		})
 	})
 	if err != nil {
@@ -307,7 +317,18 @@ func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]
 			}
 			var obj storage.Object
 			err := it.Item().Value(func(val []byte) error {
-				return json.Unmarshal(val, &obj)
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				obj = storage.Object{
+					Key:          m.Key,
+					Size:         m.Size,
+					ContentType:  m.ContentType,
+					ETag:         m.ETag,
+					LastModified: m.LastModified,
+				}
+				return nil
 			})
 			if err != nil {
 				return err
@@ -393,9 +414,7 @@ func (b *DistributedBackend) UploadPart(bucket, key, uploadID string, partNumber
 
 func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
 	// Read upload metadata
-	var meta struct {
-		ContentType string `json:"content_type"`
-	}
+	var meta clusterMultipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(multipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
@@ -405,7 +424,12 @@ func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID strin
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &meta)
+			m, err := unmarshalClusterMultipartMeta(val)
+			if err != nil {
+				return err
+			}
+			meta = m
+			return nil
 		})
 	})
 	if err != nil {

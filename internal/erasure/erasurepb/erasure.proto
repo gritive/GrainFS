@@ -1,0 +1,26 @@
+syntax = "proto3";
+package erasurepb;
+option go_package = "github.com/gritive/GrainFS/internal/erasure/erasurepb";
+
+message BucketMeta {
+  bool ec_enabled = 1;
+}
+
+message ECObjectMeta {
+  string key = 1;
+  int64 size = 2;
+  string content_type = 3;
+  string etag = 4;
+  int64 last_modified = 5;
+  int32 data_shards = 6;
+  int32 parity_shards = 7;
+  int32 shard_size = 8;
+}
+
+message MultipartUploadMeta {
+  string upload_id = 1;
+  string bucket = 2;
+  string key = 3;
+  string content_type = 4;
+  int64 created_at = 5;
+}

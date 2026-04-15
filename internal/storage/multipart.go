@@ -3,7 +3,6 @@ package storage
 import (
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -28,11 +27,11 @@ func (b *LocalBackend) partPath(uploadID string, partNumber int) string {
 }
 
 type multipartMeta struct {
-	UploadID    string `json:"upload_id"`
-	Bucket      string `json:"bucket"`
-	Key         string `json:"key"`
-	ContentType string `json:"content_type"`
-	CreatedAt   int64  `json:"created_at"`
+	UploadID    string
+	Bucket      string
+	Key         string
+	ContentType string
+	CreatedAt   int64
 }
 
 func (b *LocalBackend) CreateMultipartUpload(bucket, key, contentType string) (*MultipartUpload, error) {
@@ -54,7 +53,7 @@ func (b *LocalBackend) CreateMultipartUpload(bucket, key, contentType string) (*
 		CreatedAt:   now,
 	}
 
-	data, err := json.Marshal(meta)
+	data, err := marshalMultipartMeta(&meta)
 	if err != nil {
 		return nil, fmt.Errorf("marshal multipart meta: %w", err)
 	}
@@ -76,18 +75,12 @@ func (b *LocalBackend) CreateMultipartUpload(bucket, key, contentType string) (*
 }
 
 func (b *LocalBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
-	var meta multipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.multipartKey(uploadID))
+		_, err := txn.Get(b.multipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
 			return ErrUploadNotFound
 		}
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &meta)
-		})
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -126,7 +119,12 @@ func (b *LocalBackend) CompleteMultipartUpload(bucket, key, uploadID string, par
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &meta)
+			decoded, err := unmarshalMultipartMeta(val)
+			if err != nil {
+				return err
+			}
+			meta = *decoded
+			return nil
 		})
 	})
 	if err != nil {
@@ -183,7 +181,7 @@ func (b *LocalBackend) CompleteMultipartUpload(bucket, key, uploadID string, par
 		LastModified: now,
 	}
 
-	objMeta, _ := json.Marshal(obj)
+	objMeta, _ := marshalObject(obj)
 
 	err = b.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(b.objectMetaKey(bucket, key), objMeta); err != nil {

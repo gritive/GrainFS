@@ -16,6 +16,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -142,6 +143,7 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 		mapError(c, err)
 		return
 	}
+	metrics.BucketsTotal.Inc()
 	c.Header("Location", "/"+bucket)
 	c.Status(consts.StatusOK)
 }
@@ -181,6 +183,7 @@ func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 		mapError(c, err)
 		return
 	}
+	metrics.BucketsTotal.Dec()
 	c.Status(consts.StatusNoContent)
 }
 
@@ -236,12 +239,22 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 		contentType = "application/octet-stream"
 	}
 
+	// Check if object already exists (for overwrite — don't double-count)
+	existing, _ := s.backend.HeadObject(bucket, key)
+
 	body := bytes.NewReader(c.Request.Body())
 	obj, err := s.backend.PutObject(bucket, key, body, contentType)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
+
+	if existing == nil {
+		metrics.ObjectsTotal.Inc()
+	} else {
+		metrics.StorageBytesTotal.Add(float64(-existing.Size))
+	}
+	metrics.StorageBytesTotal.Add(float64(obj.Size))
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	c.Status(consts.StatusOK)
@@ -288,9 +301,16 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
+	// Get size before deleting for metric tracking
+	existing, _ := s.backend.HeadObject(bucket, key)
+
 	if err := s.backend.DeleteObject(bucket, key); err != nil {
 		mapError(c, err)
 		return
+	}
+	metrics.ObjectsTotal.Dec()
+	if existing != nil {
+		metrics.StorageBytesTotal.Add(float64(-existing.Size))
 	}
 	c.Status(consts.StatusNoContent)
 }
@@ -374,6 +394,8 @@ func (s *Server) completeMultipartUpload(c *app.RequestContext, bucket, key, upl
 		mapError(c, err)
 		return
 	}
+	metrics.ObjectsTotal.Inc()
+	metrics.StorageBytesTotal.Add(float64(obj.Size))
 
 	result := completeMultipartUploadResult{
 		Xmlns:  "http://s3.amazonaws.com/doc/2006-03-01/",
@@ -386,102 +408,40 @@ func (s *Server) completeMultipartUpload(c *app.RequestContext, bucket, key, upl
 }
 
 func (s *Server) serveDashboard(_ context.Context, c *app.RequestContext) {
+	data, err := uiHTML.ReadFile("ui/index.html")
+	if err != nil {
+		c.String(consts.StatusInternalServerError, "UI not found")
+		return
+	}
 	c.SetContentType("text/html; charset=utf-8")
 	c.SetStatusCode(consts.StatusOK)
-	c.WriteString(dashboardHTML)
+	c.Write(data)
 }
-
-const dashboardHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GrainFS Dashboard</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
-.header{background:#1e293b;padding:1.5rem 2rem;border-bottom:1px solid #334155;display:flex;align-items:center;gap:1rem}
-.header h1{font-size:1.5rem;font-weight:700;color:#38bdf8}
-.header .badge{background:#059669;color:#fff;padding:0.25rem 0.75rem;border-radius:9999px;font-size:0.75rem;font-weight:600}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.5rem;padding:2rem}
-.card{background:#1e293b;border-radius:0.75rem;padding:1.5rem;border:1px solid #334155}
-.card h2{font-size:0.875rem;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:1rem}
-.metric{font-size:2rem;font-weight:700;color:#f1f5f9}
-.metric-label{font-size:0.75rem;color:#64748b;margin-top:0.25rem}
-.chart-container{height:200px;display:flex;align-items:flex-end;gap:4px;padding-top:1rem}
-.bar{background:linear-gradient(to top,#0ea5e9,#38bdf8);border-radius:2px 2px 0 0;min-width:8px;flex:1;transition:height 0.3s}
-.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:0.5rem}
-.status-dot.healthy{background:#22c55e}
-.table{width:100%;border-collapse:collapse;margin-top:0.5rem}
-.table th,.table td{padding:0.5rem;text-align:left;border-bottom:1px solid #334155;font-size:0.875rem}
-.table th{color:#94a3b8;font-weight:600}
-#metrics-data{font-family:monospace;font-size:0.75rem;white-space:pre;overflow-x:auto;max-height:300px;overflow-y:auto;color:#94a3b8}
-</style>
-</head>
-<body>
-<div class="header">
-<h1>GrainFS</h1>
-<span class="badge">Dashboard</span>
-</div>
-<div class="grid">
-<div class="card">
-<h2>Server Status</h2>
-<p><span class="status-dot healthy"></span>Running</p>
-<div style="margin-top:1rem">
-<div class="metric" id="uptime">-</div>
-<div class="metric-label">Uptime</div>
-</div>
-</div>
-<div class="card">
-<h2>Requests</h2>
-<div class="metric" id="total-requests">-</div>
-<div class="metric-label">Total Requests</div>
-<div class="chart-container" id="req-chart"></div>
-</div>
-<div class="card">
-<h2>Storage</h2>
-<div class="metric" id="storage-bytes">-</div>
-<div class="metric-label">Total Bytes</div>
-<table class="table" style="margin-top:1rem">
-<tr><th>Buckets</th><td id="buckets-count">-</td></tr>
-<tr><th>Objects</th><td id="objects-count">-</td></tr>
-</table>
-</div>
-</div>
-<script>
-const startTime=Date.now();
-function formatUptime(ms){const s=Math.floor(ms/1000);const m=Math.floor(s/60);const h=Math.floor(m/60);if(h>0)return h+"h "+m%60+"m";if(m>0)return m+"m "+s%60+"s";return s+"s"}
-function parseMetrics(text){const m={};text.split("\n").forEach(function(l){if(l.startsWith("#")||!l.trim())return;const p=l.match(/^(\S+?)(?:\{[^}]*\})?\s+(\S+)/);if(p)m[p[1]]=(m[p[1]]||0)+parseFloat(p[2])});return m}
-let reqHistory=[];
-async function refresh(){try{const r=await fetch("/metrics");const t=await r.text();const m=parseMetrics(t);const total=m["grainfs_http_requests_total"]||0;document.getElementById("total-requests").textContent=Math.round(total);document.getElementById("storage-bytes").textContent=formatBytes(m["grainfs_storage_bytes_total"]||0);document.getElementById("buckets-count").textContent=Math.round(m["grainfs_buckets_total"]||0);document.getElementById("objects-count").textContent=Math.round(m["grainfs_objects_total"]||0);reqHistory.push(total);if(reqHistory.length>30)reqHistory.shift();renderChart()}catch(e){console.error(e)}document.getElementById("uptime").textContent=formatUptime(Date.now()-startTime)}
-function formatBytes(b){if(b===0)return"0 B";const k=1024;const s=["B","KB","MB","GB","TB"];const i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(1)+" "+s[i]}
-function renderChart(){const c=document.getElementById("req-chart");while(c.firstChild)c.removeChild(c.firstChild);const max=Math.max.apply(null,reqHistory.concat([1]));reqHistory.forEach(function(v){const bar=document.createElement("div");bar.className="bar";bar.style.height=Math.max(4,v/max*180)+"px";c.appendChild(bar)})}
-setInterval(refresh,2000);refresh();
-</script>
-</body>
-</html>`
 
 // hertzResponseWriter adapts Hertz RequestContext to http.ResponseWriter for stdlib handlers.
 type hertzResponseWriter struct {
 	c          *app.RequestContext
+	header     http.Header
 	statusCode int
 	written    bool
 }
 
 func newResponseWriter(c *app.RequestContext) *hertzResponseWriter {
-	return &hertzResponseWriter{c: c, statusCode: http.StatusOK}
+	return &hertzResponseWriter{c: c, header: make(http.Header), statusCode: http.StatusOK}
 }
 
 func (w *hertzResponseWriter) Header() http.Header {
-	h := make(http.Header)
-	w.c.Response.Header.VisitAll(func(key, value []byte) {
-		h.Set(string(key), string(value))
-	})
-	return h
+	return w.header
 }
 
 func (w *hertzResponseWriter) Write(data []byte) (int, error) {
 	if !w.written {
+		// Flush accumulated headers to Hertz response
+		for k, vs := range w.header {
+			for _, v := range vs {
+				w.c.Response.Header.Set(k, v)
+			}
+		}
 		w.c.SetStatusCode(w.statusCode)
 		w.written = true
 	}
@@ -491,8 +451,15 @@ func (w *hertzResponseWriter) Write(data []byte) (int, error) {
 
 func (w *hertzResponseWriter) WriteHeader(statusCode int) {
 	w.statusCode = statusCode
-	w.c.SetStatusCode(statusCode)
-	w.written = true
+	if !w.written {
+		for k, vs := range w.header {
+			for _, v := range vs {
+				w.c.Response.Header.Set(k, v)
+			}
+		}
+		w.c.SetStatusCode(statusCode)
+		w.written = true
+	}
 }
 
 // toHTTPRequest converts Hertz RequestContext to a stdlib http.Request for SigV4 verification.

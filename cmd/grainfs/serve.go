@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/spf13/cobra"
@@ -40,6 +42,7 @@ func init() {
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
 	serveCmd.Flags().Int("nfs-port", 9002, "NFS server port (0 = disabled, volumes managed via REST API)")
+	serveCmd.Flags().Int("nbd-port", 0, "NBD server port (0 = disabled, Linux only)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -84,6 +87,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
+	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
 
 	if peersStr == "" {
 		var backend storage.Backend
@@ -100,7 +104,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if ecEnabled {
 			mode = "solo-ec"
 		}
-		return runSoloWithNFS(ctx, addr, dataDir, mode, backend, authOpts, nfsPort)
+		return runSoloWithNFS(ctx, addr, dataDir, mode, backend, authOpts, nfsPort, nbdPort)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -108,13 +112,25 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr)
 }
 
-func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend storage.Backend, opts []server.Option, nfsPort int) error {
+func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend storage.Backend, opts []server.Option, nfsPort, nbdPort int) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
+	// Auto-create "default" bucket on startup
+	if err := backend.CreateBucket("default"); err != nil {
+		if !errors.Is(err, storage.ErrBucketAlreadyExists) {
+			return fmt.Errorf("create default bucket: %w", err)
+		}
+	}
+
 	srv := server.New(addr, backend, opts...)
-	go srv.Run()
+	go func() {
+		if err := srv.Run(); err != nil {
+			slog.Error("http server error", "error", err)
+		}
+	}()
 
 	// Start NFS server if requested
+	var nfsSrv *nfsserver.Server
 	if nfsPort > 0 {
 		const defaultVolName = "default"
 		const defaultVolSize = 1024 * 1024 * 1024 // 1G
@@ -127,7 +143,7 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 			}
 		}
 
-		nfsSrv := nfsserver.NewServer(backend, defaultVolName)
+		nfsSrv = nfsserver.NewServer(backend, defaultVolName)
 		go func() {
 			nfsAddr := fmt.Sprintf(":%d", nfsPort)
 			if err := nfsSrv.ListenAndServe(nfsAddr); err != nil {
@@ -136,11 +152,45 @@ func runSoloWithNFS(ctx context.Context, addr, dataDir, mode string, backend sto
 		}()
 	}
 
+	// Start NBD server if requested (Linux only)
+	if nbdPort > 0 {
+		const defaultVolName2 = "default"
+		const defaultVolSize2 = 1024 * 1024 * 1024
+
+		mgr2 := volume.NewManager(backend)
+		if _, err := mgr2.Get(defaultVolName2); err != nil {
+			if _, err := mgr2.Create(defaultVolName2, defaultVolSize2); err != nil {
+				slog.Warn("default nbd volume create failed", "error", err)
+			}
+		}
+
+		if _, err := startNBDServer(mgr2, defaultVolName2, nbdPort); err != nil {
+			slog.Error("nbd server start failed", "error", err)
+		}
+	}
+
 	<-ctx.Done()
-	slog.Info("shutting down", "component", "server")
+	slog.Info("graceful shutdown started", "component", "server")
+
+	// 1. Drain in-flight HTTP requests
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("http server shutdown error", "error", err)
+	}
+
+	// 2. Close NFS server
+	if nfsSrv != nil {
+		if err := nfsSrv.Close(); err != nil {
+			slog.Warn("nfs server close error", "error", err)
+		}
+	}
+
+	// 3. Close storage backend
 	if closer, ok := backend.(interface{ Close() error }); ok {
 		closer.Close()
 	}
+
 	slog.Info("server stopped", "component", "server")
 	return nil
 }
@@ -196,16 +246,37 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr s
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)
 
+	// Auto-create "default" bucket on startup
+	if err := backend.CreateBucket("default"); err != nil {
+		if !errors.Is(err, storage.ErrBucketAlreadyExists) {
+			return fmt.Errorf("create default bucket: %w", err)
+		}
+	}
+
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
 	srv := server.New(addr, backend)
-	go srv.Run()
+	go func() {
+		if err := srv.Run(); err != nil {
+			slog.Error("http server error", "error", err)
+		}
+	}()
 
 	<-ctx.Done()
-	slog.Info("shutting down", "component", "server")
+	slog.Info("graceful shutdown started", "component", "server", "mode", "cluster")
+
+	// 1. Drain in-flight HTTP requests
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("http server shutdown error", "error", err)
+	}
+
+	// 2. Stop Raft apply loop
 	close(stopApply)
-	slog.Info("server stopped", "component", "server")
+
+	slog.Info("server stopped", "component", "server", "mode", "cluster")
 	return nil
 }
 

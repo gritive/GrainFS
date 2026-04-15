@@ -3,7 +3,6 @@ package storage
 import (
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -168,7 +167,7 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 		LastModified: now,
 	}
 
-	meta, err := json.Marshal(obj)
+	meta, err := marshalObject(obj)
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
@@ -212,7 +211,12 @@ func (b *LocalBackend) HeadObject(bucket, key string) (*Object, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &obj)
+			decoded, err := unmarshalObject(val)
+			if err != nil {
+				return err
+			}
+			obj = *decoded
+			return nil
 		})
 	})
 	if err != nil {
@@ -262,7 +266,12 @@ func (b *LocalBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*Objec
 			}
 			var obj Object
 			err := it.Item().Value(func(val []byte) error {
-				return json.Unmarshal(val, &obj)
+				decoded, err := unmarshalObject(val)
+				if err != nil {
+					return err
+				}
+				obj = *decoded
+				return nil
 			})
 			if err != nil {
 				return err

@@ -2,11 +2,13 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +37,7 @@ func setupTestServer(t *testing.T) string {
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend)
-	go srv.Run()
+	go srv.Run() //nolint:errcheck
 	// wait for server to start
 	for i := 0; i < 50; i++ {
 		conn, err := net.Dial("tcp", addr)
@@ -297,4 +299,115 @@ func TestMultipartUploadAPI(t *testing.T) {
 	got, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	assert.Len(t, got, len(part1Data)+len(part2Data))
+}
+
+func TestMetricsEndpointReturnsPlainText(t *testing.T) {
+	base := setupTestServer(t)
+
+	resp, err := http.Get(base + "/metrics")
+	require.NoError(t, err, "GET /metrics")
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	text := string(body)
+
+	// /metrics must return parseable text, not binary protobuf
+	assert.Contains(t, text, "grainfs_buckets_total", "should contain buckets_total metric as text")
+	assert.Contains(t, text, "grainfs_objects_total", "should contain objects_total metric as text")
+	assert.Contains(t, text, "grainfs_storage_bytes_total", "should contain storage_bytes_total metric as text")
+}
+
+func TestMetricsUpdateOnCRUD(t *testing.T) {
+	base := setupTestServer(t)
+
+	parseMetric := func(body, name string) string {
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, name+" ") {
+				return strings.TrimPrefix(line, name+" ")
+			}
+		}
+		return ""
+	}
+
+	getMetrics := func() string {
+		resp, _ := http.Get(base + "/metrics")
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return string(body)
+	}
+
+	// Initial state: no buckets (test starts fresh)
+	m := getMetrics()
+	assert.Equal(t, "0", parseMetric(m, "grainfs_buckets_total"), "initial buckets should be 0")
+
+	// Create bucket → buckets_total should increment
+	req, _ := http.NewRequest(http.MethodPut, base+"/test-bucket", nil)
+	http.DefaultClient.Do(req)
+
+	m = getMetrics()
+	assert.Equal(t, "1", parseMetric(m, "grainfs_buckets_total"), "after create bucket")
+
+	// Put object → objects_total should increment, storage_bytes should increase
+	data := []byte("hello metrics test")
+	req, _ = http.NewRequest(http.MethodPut, base+"/test-bucket/file.txt", bytes.NewReader(data))
+	http.DefaultClient.Do(req)
+
+	m = getMetrics()
+	assert.Equal(t, "1", parseMetric(m, "grainfs_objects_total"), "after put object")
+	assert.Equal(t, fmt.Sprintf("%d", len(data)), parseMetric(m, "grainfs_storage_bytes_total"), "storage bytes after put")
+
+	// Delete object → objects_total should decrement
+	req, _ = http.NewRequest(http.MethodDelete, base+"/test-bucket/file.txt", nil)
+	http.DefaultClient.Do(req)
+
+	m = getMetrics()
+	assert.Equal(t, "0", parseMetric(m, "grainfs_objects_total"), "after delete object")
+	assert.Equal(t, "0", parseMetric(m, "grainfs_storage_bytes_total"), "storage bytes after delete")
+
+	// Delete bucket → buckets_total should decrement
+	req, _ = http.NewRequest(http.MethodDelete, base+"/test-bucket", nil)
+	http.DefaultClient.Do(req)
+
+	m = getMetrics()
+	assert.Equal(t, "0", parseMetric(m, "grainfs_buckets_total"), "after delete bucket")
+}
+
+func TestGracefulShutdown(t *testing.T) {
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	port := freePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	srv := New(addr, backend)
+	go srv.Run()
+
+	// Wait for server to start
+	for i := 0; i < 50; i++ {
+		conn, err := net.Dial("tcp", addr)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Verify server is accepting requests
+	req, _ := http.NewRequest(http.MethodPut, "http://"+addr+"/test-bucket", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = srv.Shutdown(ctx)
+	require.NoError(t, err, "shutdown should not error")
+
+	// Verify server is no longer accepting connections
+	time.Sleep(100 * time.Millisecond)
+	_, err = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	assert.Error(t, err, "server should no longer accept connections after shutdown")
 }

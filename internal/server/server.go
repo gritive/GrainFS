@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -55,19 +56,26 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s.volMgr = volume.NewManager(backend)
 	s.registerRoutes(h)
 	s.hertz = h
+	s.initMetrics()
 	return s
 }
 
-// Run starts the server (blocking).
-func (s *Server) Run() {
-	s.hertz.Spin()
+// Run starts the server (blocking). Uses Engine.Run() instead of Spin()
+// so that signal handling is owned by the caller (serve.go), not Hertz.
+func (s *Server) Run() error {
+	return s.hertz.Run()
+}
+
+// Shutdown gracefully shuts down the server, draining in-flight requests.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.hertz.Shutdown(ctx)
 }
 
 func (s *Server) authMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		// Skip auth for /metrics and /ui/ endpoints
 		path := string(c.URI().Path())
-		if path == "/metrics" || path == "/ui/" {
+		if path == "/metrics" || strings.HasPrefix(path, "/ui/") {
 			c.Next(ctx)
 			return
 		}
@@ -93,6 +101,30 @@ func (s *Server) metricsMiddleware() app.HandlerFunc {
 		metrics.HTTPRequestsTotal.WithLabelValues(method, status).Inc()
 		metrics.HTTPRequestDuration.WithLabelValues(method).Observe(duration)
 	}
+}
+
+// initMetrics scans existing buckets and objects to set initial gauge values.
+func (s *Server) initMetrics() {
+	buckets, err := s.backend.ListBuckets()
+	if err != nil {
+		return
+	}
+	metrics.BucketsTotal.Set(float64(len(buckets)))
+
+	var totalObjects int
+	var totalBytes int64
+	for _, b := range buckets {
+		objects, err := s.backend.ListObjects(b, "", 1000000)
+		if err != nil {
+			continue
+		}
+		totalObjects += len(objects)
+		for _, obj := range objects {
+			totalBytes += obj.Size
+		}
+	}
+	metrics.ObjectsTotal.Set(float64(totalObjects))
+	metrics.StorageBytesTotal.Set(float64(totalBytes))
 }
 
 func (s *Server) registerRoutes(h *server.Hertz) {

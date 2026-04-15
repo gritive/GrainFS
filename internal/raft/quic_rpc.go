@@ -2,7 +2,6 @@ package raft
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -11,16 +10,11 @@ import (
 
 // RPC message types for QUIC transport.
 const (
-	rpcTypeRequestVote       = "RequestVote"
-	rpcTypeRequestVoteReply  = "RequestVoteReply"
-	rpcTypeAppendEntries     = "AppendEntries"
+	rpcTypeRequestVote        = "RequestVote"
+	rpcTypeRequestVoteReply   = "RequestVoteReply"
+	rpcTypeAppendEntries      = "AppendEntries"
 	rpcTypeAppendEntriesReply = "AppendEntriesReply"
 )
-
-type rpcMessage struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
-}
 
 // QUICRPCTransport bridges Raft RPCs over the QUIC transport layer.
 type QUICRPCTransport struct {
@@ -50,26 +44,26 @@ func (r *QUICRPCTransport) receiveLoop() {
 }
 
 func (r *QUICRPCTransport) handleMessage(recv *transport.ReceivedMessage) {
-	var rpc rpcMessage
-	if err := json.Unmarshal(recv.Message.Payload, &rpc); err != nil {
+	rpcType, payload, err := decodeRPC(recv.Message.Payload)
+	if err != nil {
 		return
 	}
 
-	switch rpc.Type {
+	switch rpcType {
 	case rpcTypeRequestVote:
-		var args RequestVoteArgs
-		if err := json.Unmarshal(rpc.Data, &args); err != nil {
+		args, err := decodeRequestVoteArgs(payload)
+		if err != nil {
 			return
 		}
-		reply := r.node.HandleRequestVote(&args)
+		reply := r.node.HandleRequestVote(args)
 		r.sendReply(recv.From, rpcTypeRequestVoteReply, reply)
 
 	case rpcTypeAppendEntries:
-		var args AppendEntriesArgs
-		if err := json.Unmarshal(rpc.Data, &args); err != nil {
+		args, err := decodeAppendEntriesArgs(payload)
+		if err != nil {
 			return
 		}
-		reply := r.node.HandleAppendEntries(&args)
+		reply := r.node.HandleAppendEntries(args)
 		r.sendReply(recv.From, rpcTypeAppendEntriesReply, reply)
 
 	case rpcTypeRequestVoteReply, rpcTypeAppendEntriesReply:
@@ -86,11 +80,7 @@ func (r *QUICRPCTransport) handleMessage(recv *transport.ReceivedMessage) {
 }
 
 func (r *QUICRPCTransport) sendReply(to, rpcType string, reply any) {
-	data, err := json.Marshal(reply)
-	if err != nil {
-		return
-	}
-	envelope, err := json.Marshal(rpcMessage{Type: rpcType, Data: data})
+	envelope, err := encodeRPC(rpcType, reply)
 	if err != nil {
 		return
 	}
@@ -100,11 +90,7 @@ func (r *QUICRPCTransport) sendReply(to, rpcType string, reply any) {
 
 // SendRequestVote sends a RequestVote RPC over QUIC and waits for the reply.
 func (r *QUICRPCTransport) SendRequestVote(ctx context.Context, peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
-	data, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	envelope, err := json.Marshal(rpcMessage{Type: rpcTypeRequestVote, Data: data})
+	envelope, err := encodeRPC(rpcTypeRequestVote, args)
 	if err != nil {
 		return nil, err
 	}
@@ -128,25 +114,17 @@ func (r *QUICRPCTransport) SendRequestVote(ctx context.Context, peer string, arg
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case payload := <-replyCh:
-		var rpc rpcMessage
-		if err := json.Unmarshal(payload, &rpc); err != nil {
+		_, data, err := decodeRPC(payload)
+		if err != nil {
 			return nil, err
 		}
-		var reply RequestVoteReply
-		if err := json.Unmarshal(rpc.Data, &reply); err != nil {
-			return nil, err
-		}
-		return &reply, nil
+		return decodeRequestVoteReply(data)
 	}
 }
 
 // SendAppendEntries sends an AppendEntries RPC over QUIC and waits for the reply.
 func (r *QUICRPCTransport) SendAppendEntries(ctx context.Context, peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
-	data, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	envelope, err := json.Marshal(rpcMessage{Type: rpcTypeAppendEntries, Data: data})
+	envelope, err := encodeRPC(rpcTypeAppendEntries, args)
 	if err != nil {
 		return nil, err
 	}
@@ -169,14 +147,10 @@ func (r *QUICRPCTransport) SendAppendEntries(ctx context.Context, peer string, a
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case payload := <-replyCh:
-		var rpc rpcMessage
-		if err := json.Unmarshal(payload, &rpc); err != nil {
+		_, data, err := decodeRPC(payload)
+		if err != nil {
 			return nil, err
 		}
-		var reply AppendEntriesReply
-		if err := json.Unmarshal(rpc.Data, &reply); err != nil {
-			return nil, err
-		}
-		return &reply, nil
+		return decodeAppendEntriesReply(data)
 	}
 }

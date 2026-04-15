@@ -35,6 +35,6 @@ func TestEncodeDecodeCommand(t *testing.T) {
 }
 
 func TestDecodeCommand_Invalid(t *testing.T) {
-	_, err := DecodeCommand([]byte("not json"))
+	_, err := DecodeCommand([]byte("not valid protobuf"))
 	assert.Error(t, err)
 }
