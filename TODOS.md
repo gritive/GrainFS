@@ -33,11 +33,5 @@
 - **Why:** 현재 클러스터는 부트스트랩 후 정적. 노드 교체나 확장 불가
 - **Context:** FSM command 타입에 AddNode/RemoveNode 없음. Raft에 멤버십 변경 로직 없음. Raft 논문의 Joint Consensus 알고리즘 구현 필요
 
-## P2: Zero-Downtime Solo→Cluster 전환 (Phase 3 미구현)
-
-### 무중단 마이그레이션
-- **What:** Solo 모드에서 클러스터 모드로 서비스 중단 없이 전환
-- **Why:** 현재 grainfs migrate는 서비스 중지 → 마이그레이션 → 재시작 필요. Phase 3 목표는 "무중단"
-- **Context:** cluster/migrate.go에 메타데이터 변환 로직은 있음. 온라인 마이그레이션(서비스 유지 중 Raft 부트스트랩)이 필요
 
 

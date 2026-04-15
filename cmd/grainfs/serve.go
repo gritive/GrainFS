@@ -228,6 +228,19 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, 
 	defer db.Close()
 
 	raftDir := filepath.Join(dataDir, "raft")
+
+	// Auto-migrate: if Raft directory doesn't exist yet but metadata does,
+	// automatically bootstrap from solo metadata (zero-downtime migration)
+	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dataDir, "meta")); err == nil {
+			slog.Info("auto-migrating solo metadata to cluster format", "component", "migrate")
+			if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
+				return fmt.Errorf("auto-migrate: %w", err)
+			}
+			slog.Info("auto-migration complete", "component", "migrate")
+		}
+	}
+
 	logStore, err := raft.NewBadgerLogStore(raftDir)
 	if err != nil {
 		return fmt.Errorf("open raft store: %w", err)
