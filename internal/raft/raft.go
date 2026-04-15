@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,12 @@ var (
 	ErrNotLeader      = errors.New("not the leader")
 	ErrProposalFailed = errors.New("proposal failed: node stepped down")
 	ErrNoPeers        = errors.New("no peers available for leadership transfer")
+)
+
+// Special command prefixes for configuration changes (membership)
+var (
+	configAddPrefix    = []byte("__raft_config_add:")
+	configRemovePrefix = []byte("__raft_config_remove:")
 )
 
 // NodeState represents the current role of a Raft node.
@@ -301,6 +308,13 @@ func (n *Node) applyLoop() {
 		entry := n.log[n.toSliceIdx(n.lastApplied)]
 		idx := entry.Index
 
+		// Process config changes internally (membership adds/removes)
+		if IsConfigChange(entry.Command) {
+			n.mu.Unlock()
+			n.applyConfigChange(entry.Command)
+			n.mu.Lock()
+		}
+
 		// Signal any waiter for this index
 		if ch, ok := n.waiters[idx]; ok {
 			close(ch)
@@ -308,6 +322,7 @@ func (n *Node) applyLoop() {
 		}
 		n.mu.Unlock()
 
+		// Deliver to FSM (config changes are also delivered so FSM can track membership)
 		select {
 		case n.applyCh <- entry:
 		case <-n.stopCh:
@@ -958,6 +973,57 @@ func (n *Node) TransferLeadership() error {
 	n.mu.Unlock()
 
 	return nil
+}
+
+// AddPeer proposes adding a new peer to the cluster. The change takes effect
+// when the config-change log entry is committed and applied on all nodes.
+func (n *Node) AddPeer(peerID string) error {
+	cmd := append(configAddPrefix, []byte(peerID)...)
+	return n.Propose(cmd)
+}
+
+// RemovePeer proposes removing a peer from the cluster.
+func (n *Node) RemovePeer(peerID string) error {
+	cmd := append(configRemovePrefix, []byte(peerID)...)
+	return n.Propose(cmd)
+}
+
+// applyConfigChange processes membership change commands in the apply loop.
+func (n *Node) applyConfigChange(command []byte) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if bytes.HasPrefix(command, configAddPrefix) {
+		peerID := string(command[len(configAddPrefix):])
+		// Add only if not already present
+		for _, p := range n.config.Peers {
+			if p == peerID {
+				return
+			}
+		}
+		n.config.Peers = append(n.config.Peers, peerID)
+		// Initialize leader state for new peer if we're the leader
+		if n.state == Leader {
+			n.nextIndex[peerID] = n.lastLogIdx() + 1
+			n.matchIndex[peerID] = 0
+		}
+	} else if bytes.HasPrefix(command, configRemovePrefix) {
+		peerID := string(command[len(configRemovePrefix):])
+		peers := make([]string, 0, len(n.config.Peers))
+		for _, p := range n.config.Peers {
+			if p != peerID {
+				peers = append(peers, p)
+			}
+		}
+		n.config.Peers = peers
+		delete(n.nextIndex, peerID)
+		delete(n.matchIndex, peerID)
+	}
+}
+
+// IsConfigChange returns true if the command is a membership change.
+func IsConfigChange(command []byte) bool {
+	return bytes.HasPrefix(command, configAddPrefix) || bytes.HasPrefix(command, configRemovePrefix)
 }
 
 // HandleTimeoutNow causes this node to immediately start an election.

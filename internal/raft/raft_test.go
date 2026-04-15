@@ -330,6 +330,74 @@ func TestNodeState_String(t *testing.T) {
 	assert.Equal(t, "Leader", Leader.String())
 }
 
+func TestAddPeer_ExpandsCluster(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader)
+
+	// Add a new peer
+	require.NoError(t, leader.AddPeer("D"))
+
+	// Wait for config change to be applied
+	time.Sleep(500 * time.Millisecond)
+
+	// All nodes should now have "D" in their peers
+	for _, n := range cluster.nodes {
+		n.mu.Lock()
+		hasPeer := false
+		for _, p := range n.config.Peers {
+			if p == "D" {
+				hasPeer = true
+				break
+			}
+		}
+		n.mu.Unlock()
+		assert.True(t, hasPeer, "node %s should have peer D", n.ID())
+	}
+}
+
+func TestRemovePeer_ShrinksCluster(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader)
+
+	// Find a follower to remove
+	var followerID string
+	for _, n := range cluster.nodes {
+		if n.ID() != leader.ID() {
+			followerID = n.ID()
+			break
+		}
+	}
+
+	require.NoError(t, leader.RemovePeer(followerID))
+
+	// Wait for config change to be applied
+	time.Sleep(500 * time.Millisecond)
+
+	// Leader should not have the removed peer
+	leader.mu.Lock()
+	hasPeer := false
+	for _, p := range leader.config.Peers {
+		if p == followerID {
+			hasPeer = true
+		}
+	}
+	leader.mu.Unlock()
+	assert.False(t, hasPeer, "leader should not have removed peer %s", followerID)
+}
+
+func TestIsConfigChange(t *testing.T) {
+	assert.True(t, IsConfigChange(append([]byte("__raft_config_add:"), []byte("node-D")...)))
+	assert.True(t, IsConfigChange(append([]byte("__raft_config_remove:"), []byte("node-B")...)))
+	assert.False(t, IsConfigChange([]byte("normal command")))
+	assert.False(t, IsConfigChange(nil))
+}
+
 func TestPersistState_PanicsOnError(t *testing.T) {
 	baseStore, err := NewBadgerLogStore(t.TempDir())
 	require.NoError(t, err)

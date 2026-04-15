@@ -26,12 +26,6 @@
 - **Context:** 현재 read forwarding, redirect-to-leader, proxy 없음
 - **Depends on:** QUICTransport→Raft wiring
 
-## P1: 클러스터 멤버십 변경 (Phase 5 미구현)
-
-### Joint Consensus
-- **What:** Raft 클러스터에 노드 동적 추가/제거
-- **Why:** 현재 클러스터는 부트스트랩 후 정적. 노드 교체나 확장 불가
-- **Context:** FSM command 타입에 AddNode/RemoveNode 없음. Raft에 멤버십 변경 로직 없음. Raft 논문의 Joint Consensus 알고리즘 구현 필요
 
 
 
