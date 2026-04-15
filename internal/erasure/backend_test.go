@@ -2,6 +2,7 @@ package erasure
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -232,4 +233,279 @@ func TestECBackend_DeleteBucketNotEmpty(t *testing.T) {
 
 	err = b.DeleteBucket("bucket")
 	assert.ErrorIs(t, err, storage.ErrBucketNotEmpty)
+}
+
+func TestECBackend_DeleteBucketNotFound(t *testing.T) {
+	b := newTestBackend(t)
+	err := b.DeleteBucket("nonexistent")
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_SetBucketECPolicy(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ec-toggle"))
+
+	// Default is EC enabled
+	enabled, err := b.GetBucketECPolicy("ec-toggle")
+	require.NoError(t, err)
+	assert.True(t, enabled)
+
+	// Disable EC
+	require.NoError(t, b.SetBucketECPolicy("ec-toggle", false))
+	enabled, err = b.GetBucketECPolicy("ec-toggle")
+	require.NoError(t, err)
+	assert.False(t, enabled)
+
+	// Re-enable EC
+	require.NoError(t, b.SetBucketECPolicy("ec-toggle", true))
+	enabled, err = b.GetBucketECPolicy("ec-toggle")
+	require.NoError(t, err)
+	assert.True(t, enabled)
+}
+
+func TestECBackend_SetBucketECPolicy_NotFound(t *testing.T) {
+	b := newTestBackend(t)
+	err := b.SetBucketECPolicy("nope", false)
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_GetBucketECPolicy_NotFound(t *testing.T) {
+	b := newTestBackend(t)
+	_, err := b.GetBucketECPolicy("nope")
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_PutGetPlain_ECDisabled(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("plain"))
+	require.NoError(t, b.SetBucketECPolicy("plain", false))
+
+	content := "plain storage without erasure coding"
+
+	obj, err := b.PutObject("plain", "file.txt", strings.NewReader(content), "text/plain")
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(content)), obj.Size)
+	assert.NotEmpty(t, obj.ETag)
+
+	// GetObject should read from plain storage
+	rc, gotObj, err := b.GetObject("plain", "file.txt")
+	require.NoError(t, err)
+	defer rc.Close()
+
+	data, _ := io.ReadAll(rc)
+	assert.Equal(t, content, string(data))
+	assert.Equal(t, obj.ETag, gotObj.ETag)
+	assert.Equal(t, obj.Size, gotObj.Size)
+}
+
+func TestECBackend_HeadObject(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	content := strings.Repeat("x", 1000)
+	putObj, err := b.PutObject("bucket", "head-test.txt", strings.NewReader(content), "text/plain")
+	require.NoError(t, err)
+
+	headObj, err := b.HeadObject("bucket", "head-test.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "head-test.txt", headObj.Key)
+	assert.Equal(t, int64(len(content)), headObj.Size)
+	assert.Equal(t, "text/plain", headObj.ContentType)
+	assert.Equal(t, putObj.ETag, headObj.ETag)
+}
+
+func TestECBackend_HeadObject_NotFound(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	_, err := b.HeadObject("bucket", "nope.txt")
+	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
+func TestECBackend_HeadObject_BucketNotFound(t *testing.T) {
+	b := newTestBackend(t)
+	_, err := b.HeadObject("nope", "file.txt")
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_HeadObject_ECDisabled(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("plain"))
+	require.NoError(t, b.SetBucketECPolicy("plain", false))
+
+	_, err := b.PutObject("plain", "plain.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+
+	obj, err := b.HeadObject("plain", "plain.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "plain.txt", obj.Key)
+	assert.Equal(t, int64(5), obj.Size)
+}
+
+// testEncryptor is a marker-based encryptor for testing.
+// Encrypt prepends a magic byte; Decrypt checks it and strips it.
+// This lets us detect corrupted ciphertext.
+type testEncryptor struct {
+	magic byte
+}
+
+func (e *testEncryptor) Encrypt(data []byte) ([]byte, error) {
+	out := make([]byte, len(data)+1)
+	out[0] = e.magic
+	copy(out[1:], data)
+	return out, nil
+}
+
+func (e *testEncryptor) Decrypt(data []byte) ([]byte, error) {
+	if len(data) == 0 || data[0] != e.magic {
+		return nil, fmt.Errorf("decrypt: invalid magic byte")
+	}
+	return data[1:], nil
+}
+
+func TestECBackend_WithEncryption(t *testing.T) {
+	dir := t.TempDir()
+	enc := &testEncryptor{magic: 0xAA}
+	b, err := NewECBackend(dir, DefaultDataShards, DefaultParityShards, WithEncryption(enc))
+	require.NoError(t, err)
+	t.Cleanup(func() { b.Close() })
+
+	require.NoError(t, b.CreateBucket("enc"))
+
+	content := bytes.Repeat([]byte("encrypted data test "), 200)
+	obj, err := b.PutObject("enc", "secret.bin", bytes.NewReader(content), "application/octet-stream")
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(content)), obj.Size)
+
+	// Read back and verify round-trip
+	rc, gotObj, err := b.GetObject("enc", "secret.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+
+	data, _ := io.ReadAll(rc)
+	assert.Equal(t, content, data)
+	assert.Equal(t, obj.ETag, gotObj.ETag)
+}
+
+func TestECBackend_WithEncryption_CorruptShard(t *testing.T) {
+	dir := t.TempDir()
+	enc := &testEncryptor{magic: 0xBB}
+	b, err := NewECBackend(dir, DefaultDataShards, DefaultParityShards, WithEncryption(enc))
+	require.NoError(t, err)
+	t.Cleanup(func() { b.Close() })
+
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	content := bytes.Repeat([]byte("shard corruption test "), 200)
+	_, err = b.PutObject("bucket", "corrupt.bin", bytes.NewReader(content), "application/octet-stream")
+	require.NoError(t, err)
+
+	// Corrupt shard 0 on disk (write random garbage that will fail XOR decrypt)
+	shardDir := b.ShardDir("bucket", "corrupt.bin")
+	err = os.WriteFile(shardDir+"/00", []byte("totally corrupted"), 0o644)
+	require.NoError(t, err)
+
+	// Should still reconstruct from remaining shards (1 corrupted = within parity tolerance)
+	rc, _, err := b.GetObject("bucket", "corrupt.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+
+	data, _ := io.ReadAll(rc)
+	assert.Equal(t, content, data)
+}
+
+func TestECBackend_PutObject_BucketNotFound(t *testing.T) {
+	b := newTestBackend(t)
+	_, err := b.PutObject("nope", "file.txt", strings.NewReader("data"), "text/plain")
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_DeleteObject_BucketNotFound(t *testing.T) {
+	b := newTestBackend(t)
+	err := b.DeleteObject("nope", "file.txt")
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_ListObjects_BucketNotFound(t *testing.T) {
+	b := newTestBackend(t)
+	_, err := b.ListObjects("nope", "", 100)
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_MultipartBadBucket(t *testing.T) {
+	b := newTestBackend(t)
+	_, err := b.CreateMultipartUpload("nope", "file.bin", "binary")
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestECBackend_UploadPartBadUploadID(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	_, err := b.UploadPart("bucket", "file.bin", "bad-id", 1, strings.NewReader("data"))
+	assert.ErrorIs(t, err, storage.ErrUploadNotFound)
+}
+
+func TestECBackend_CompleteMultipartBadUploadID(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	_, err := b.CompleteMultipartUpload("bucket", "file.bin", "bad-id", nil)
+	assert.ErrorIs(t, err, storage.ErrUploadNotFound)
+}
+
+func TestECBackend_AbortMultipartBadUploadID(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	err := b.AbortMultipartUpload("bucket", "file.bin", "bad-id")
+	assert.ErrorIs(t, err, storage.ErrUploadNotFound)
+}
+
+func TestECBackend_Multipart_ECDisabled(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("plain"))
+	require.NoError(t, b.SetBucketECPolicy("plain", false))
+
+	part1Data := bytes.Repeat([]byte("A"), 512)
+	part2Data := bytes.Repeat([]byte("B"), 256)
+
+	upload, err := b.CreateMultipartUpload("plain", "mp-plain.bin", "application/octet-stream")
+	require.NoError(t, err)
+
+	p1, err := b.UploadPart("plain", "mp-plain.bin", upload.UploadID, 1, bytes.NewReader(part1Data))
+	require.NoError(t, err)
+
+	p2, err := b.UploadPart("plain", "mp-plain.bin", upload.UploadID, 2, bytes.NewReader(part2Data))
+	require.NoError(t, err)
+
+	obj, err := b.CompleteMultipartUpload("plain", "mp-plain.bin", upload.UploadID, []storage.Part{
+		{PartNumber: p1.PartNumber, ETag: p1.ETag, Size: p1.Size},
+		{PartNumber: p2.PartNumber, ETag: p2.ETag, Size: p2.Size},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(part1Data)+len(part2Data)), obj.Size)
+
+	// Verify the assembled plain object
+	rc, _, err := b.GetObject("plain", "mp-plain.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+
+	data, _ := io.ReadAll(rc)
+	expected := append(part1Data, part2Data...)
+	assert.Equal(t, expected, data)
+}
+
+func TestECBackend_ListObjectsMaxKeys(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	for _, key := range []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"} {
+		_, err := b.PutObject("bucket", key, strings.NewReader("x"), "text/plain")
+		require.NoError(t, err)
+	}
+
+	objects, err := b.ListObjects("bucket", "", 3)
+	require.NoError(t, err)
+	assert.Len(t, objects, 3)
 }

@@ -12,6 +12,7 @@ import (
 var (
 	ErrNotLeader      = errors.New("not the leader")
 	ErrProposalFailed = errors.New("proposal failed: node stepped down")
+	ErrNoPeers        = errors.New("no peers available for leadership transfer")
 )
 
 // NodeState represents the current role of a Raft node.
@@ -731,6 +732,30 @@ func (n *Node) isLogUpToDate(lastLogIndex, lastLogTerm uint64) bool {
 		return lastLogTerm > myLastTerm
 	}
 	return lastLogIndex >= myLastIndex
+}
+
+// TransferLeadership voluntarily steps down as leader, allowing a follower
+// to win the next election. Returns ErrNotLeader if not the current leader,
+// or ErrNoPeers if there are no peers to transfer to.
+func (n *Node) TransferLeadership() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state != Leader {
+		return ErrNotLeader
+	}
+
+	if len(n.config.Peers) == 0 {
+		return ErrNoPeers
+	}
+
+	// Step down to follower — this causes the election timer to start on
+	// followers, and one of them will become the new leader.
+	n.state = Follower
+	n.leaderID = ""
+	n.signalReset()
+
+	return nil
 }
 
 // persistState saves currentTerm and votedFor to durable storage.

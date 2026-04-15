@@ -148,3 +148,127 @@ func TestEvaluatePolicy_EmptyPolicy(t *testing.T) {
 	// Empty policy → default deny
 	assert.False(t, p.IsAllowed("user1", "s3:GetObject", "mybucket", "file.txt"))
 }
+
+// PolicyStore unit tests
+
+func TestPolicyStore_SetAndGet(t *testing.T) {
+	ps := NewPolicyStore()
+
+	raw := []byte(`{
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Principal": {"AWS": ["user1"]},
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::mybucket/*"]
+		}]
+	}`)
+
+	err := ps.Set("mybucket", raw)
+	require.NoError(t, err)
+
+	p := ps.Get("mybucket")
+	require.NotNil(t, p)
+	assert.Len(t, p.Statement, 1)
+	assert.Equal(t, "Allow", p.Statement[0].Effect)
+}
+
+func TestPolicyStore_SetInvalidJSON(t *testing.T) {
+	ps := NewPolicyStore()
+	err := ps.Set("mybucket", []byte(`{not json`))
+	assert.Error(t, err)
+}
+
+func TestPolicyStore_GetRaw(t *testing.T) {
+	ps := NewPolicyStore()
+
+	// No policy yet
+	assert.Nil(t, ps.GetRaw("mybucket"))
+
+	raw := []byte(`{"Version":"2012-10-17","Statement":[]}`)
+	require.NoError(t, ps.Set("mybucket", raw))
+
+	got := ps.GetRaw("mybucket")
+	assert.Equal(t, raw, got)
+}
+
+func TestPolicyStore_Delete(t *testing.T) {
+	ps := NewPolicyStore()
+
+	raw := []byte(`{"Version":"2012-10-17","Statement":[]}`)
+	require.NoError(t, ps.Set("mybucket", raw))
+
+	ps.Delete("mybucket")
+	assert.Nil(t, ps.Get("mybucket"))
+	assert.Nil(t, ps.GetRaw("mybucket"))
+}
+
+func TestPolicyStore_IsAllowed_NoPolicy(t *testing.T) {
+	ps := NewPolicyStore()
+	// No policy → no restriction → allowed
+	assert.True(t, ps.IsAllowed("user1", "s3:GetObject", "mybucket", "file.txt"))
+}
+
+func TestPolicyStore_IsAllowed_WithPolicy(t *testing.T) {
+	ps := NewPolicyStore()
+
+	raw := []byte(`{
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Principal": {"AWS": ["user1"]},
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::mybucket/*"]
+		}]
+	}`)
+	require.NoError(t, ps.Set("mybucket", raw))
+
+	assert.True(t, ps.IsAllowed("user1", "s3:GetObject", "mybucket", "file.txt"))
+	assert.False(t, ps.IsAllowed("user2", "s3:GetObject", "mybucket", "file.txt"))
+}
+
+func TestPrincipalUnmarshal_AWSSingleString(t *testing.T) {
+	// {"AWS": "user1"} (single string, not array)
+	raw := `{
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Principal": {"AWS": "admin"},
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::mybucket/*"]
+		}]
+	}`
+	p, err := ParsePolicy([]byte(raw))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"admin"}, p.Statement[0].Principal.AWS)
+}
+
+func TestPrincipalUnmarshal_InvalidPrincipal(t *testing.T) {
+	// Principal is neither string nor object
+	raw := `{
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Principal": 123,
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::mybucket/*"]
+		}]
+	}`
+	_, err := ParsePolicy([]byte(raw))
+	assert.Error(t, err)
+}
+
+func TestPrincipalUnmarshal_InvalidAWSField(t *testing.T) {
+	// AWS field is neither string nor array
+	raw := `{
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Principal": {"AWS": 123},
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::mybucket/*"]
+		}]
+	}`
+	_, err := ParsePolicy([]byte(raw))
+	assert.Error(t, err)
+}

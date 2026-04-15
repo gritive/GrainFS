@@ -372,6 +372,345 @@ func TestMetricsUpdateOnCRUD(t *testing.T) {
 	assert.Equal(t, "0", parseMetric(m, "grainfs_buckets_total"), "after delete bucket")
 }
 
+// --- Policy handler integration tests ---
+
+func TestPutGetDeleteBucketPolicy(t *testing.T) {
+	base := setupTestServer(t)
+
+	// Create bucket first
+	req, _ := http.NewRequest(http.MethodPut, base+"/policy-bucket", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// PUT policy
+	policy := `{
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Principal": "*",
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::policy-bucket/*"]
+		}]
+	}`
+	req, _ = http.NewRequest(http.MethodPut, base+"/policy-bucket?policy", strings.NewReader(policy))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// GET policy
+	resp, err = http.Get(base + "/policy-bucket?policy")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "s3:GetObject")
+
+	// DELETE policy
+	req, _ = http.NewRequest(http.MethodDelete, base+"/policy-bucket?policy", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// GET policy after delete → not found
+	resp, err = http.Get(base + "/policy-bucket?policy")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestPutBucketPolicy_EmptyBody(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?policy", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestPutBucketPolicy_InvalidJSON(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?policy", strings.NewReader("{not json}"))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// --- Volume handler integration tests ---
+
+func TestVolumeHandlers_CRUD(t *testing.T) {
+	base := setupTestServer(t)
+
+	// List volumes (empty)
+	resp, err := http.Get(base + "/volumes/")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "[]", strings.TrimSpace(string(body)))
+
+	// Create volume
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/testvol?size=1048576", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Contains(t, string(body), "testvol")
+
+	// Get volume
+	resp, err = http.Get(base + "/volumes/testvol")
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "testvol")
+
+	// List volumes (1 item)
+	resp, err = http.Get(base + "/volumes/")
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "testvol")
+
+	// Delete volume
+	req, _ = http.NewRequest(http.MethodDelete, base+"/volumes/testvol", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestVolumeHandlers_GetNotFound(t *testing.T) {
+	base := setupTestServer(t)
+
+	resp, _ := http.Get(base + "/volumes/nonexistent")
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestVolumeHandlers_DeleteNotFound(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodDelete, base+"/volumes/nonexistent", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestVolumeHandlers_CreateBadSize(t *testing.T) {
+	base := setupTestServer(t)
+
+	// No size
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/badvol", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	// Negative size
+	req, _ = http.NewRequest(http.MethodPut, base+"/volumes/badvol?size=-100", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestVolumeHandlers_CreateConflict(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/dupvol?size=1048576", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// Create again → conflict
+	req, _ = http.NewRequest(http.MethodPut, base+"/volumes/dupvol?size=1048576", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+}
+
+// --- EC policy tests ---
+
+func TestSetBucketECPolicy_NotImplemented(t *testing.T) {
+	base := setupTestServer(t)
+
+	// Create bucket
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// SET EC policy on LocalBackend (doesn't implement ECPolicySetter) → NotImplemented
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?ec=true", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
+	assert.Contains(t, string(body), "NotImplemented")
+}
+
+// --- Dashboard tests ---
+
+func TestServeDashboard(t *testing.T) {
+	base := setupTestServer(t)
+
+	resp, err := http.Get(base + "/ui/")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "<!DOCTYPE html>")
+}
+
+// --- Edge case handler tests ---
+
+func TestHandlePost_UnsupportedOperation(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// POST without ?uploads or ?uploadId → InvalidRequest
+	req, _ = http.NewRequest(http.MethodPost, base+"/mybucket/file.txt", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, string(body), "InvalidRequest")
+}
+
+func TestUploadPart_InvalidPartNumber(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// Part number = 0 (invalid)
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt?uploadId=fake&partNumber=0", bytes.NewReader([]byte("data")))
+	resp, _ := http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, string(body), "InvalidArgument")
+
+	// Part number = abc (not a number)
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt?uploadId=fake&partNumber=abc", bytes.NewReader([]byte("data")))
+	resp, _ = http.DefaultClient.Do(req)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, string(body), "InvalidArgument")
+}
+
+func TestCompleteMultipartUpload_MalformedXML(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// POST with uploadId but malformed XML body
+	req, _ = http.NewRequest(http.MethodPost, base+"/mybucket/file.txt?uploadId=fake", bytes.NewReader([]byte("{not xml}")))
+	resp, _ := http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, string(body), "MalformedXML")
+}
+
+func TestListObjects_WithMaxKeys(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// Put 3 objects
+	for _, key := range []string{"a.txt", "b.txt", "c.txt"} {
+		req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/"+key, bytes.NewReader([]byte("x")))
+		http.DefaultClient.Do(req)
+	}
+
+	// List with max-keys=2
+	resp, _ := http.Get(base + "/mybucket?max-keys=2")
+	var result listObjectsResult
+	xml.NewDecoder(resp.Body).Decode(&result)
+	resp.Body.Close()
+	assert.LessOrEqual(t, len(result.Contents), 2)
+	assert.Equal(t, 2, result.MaxKeys)
+}
+
+func TestPutObject_Overwrite(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// Put object first time
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("first")))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Put object second time (overwrite) → should succeed
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("second")))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify new content
+	resp, _ = http.Get(base + "/mybucket/file.txt")
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, "second", string(got))
+}
+
+func TestDeleteObject_NonExistent(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// Delete non-existent object — S3 returns 204 even if the object doesn't exist
+	req, _ = http.NewRequest(http.MethodDelete, base+"/mybucket/nope.txt", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestListObjects_BucketNotFound(t *testing.T) {
+	base := setupTestServer(t)
+
+	resp, _ := http.Get(base + "/nonexistent-bucket")
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestDeleteBucket_NotFound(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodDelete, base+"/nonexistent-bucket", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestCreateMultipartUpload_BucketNotFound(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPost, base+"/nonexistent/file.txt?uploads", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 func TestGracefulShutdown(t *testing.T) {
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)

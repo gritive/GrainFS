@@ -134,6 +134,143 @@ func TestClusterMultipartMetaCodecRoundTrip(t *testing.T) {
 	assert.Equal(t, "application/octet-stream", decoded.ContentType)
 }
 
+func TestEncodeDecodeCommand_DeleteBucket(t *testing.T) {
+	orig := DeleteBucketCmd{Bucket: "remove-me"}
+
+	encoded, err := EncodeCommand(CmdDeleteBucket, orig)
+	require.NoError(t, err)
+
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, CmdDeleteBucket, cmd.Type)
+
+	decoded, err := decodeDeleteBucketCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Equal(t, "remove-me", decoded.Bucket)
+}
+
+func TestEncodeDecodeCommand_DeleteObject(t *testing.T) {
+	orig := DeleteObjectCmd{Bucket: "b", Key: "file.txt"}
+
+	encoded, err := EncodeCommand(CmdDeleteObject, orig)
+	require.NoError(t, err)
+
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, CmdDeleteObject, cmd.Type)
+
+	decoded, err := decodeDeleteObjectCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Equal(t, "b", decoded.Bucket)
+	assert.Equal(t, "file.txt", decoded.Key)
+}
+
+func TestEncodeDecodeCommand_CreateMultipartUpload(t *testing.T) {
+	orig := CreateMultipartUploadCmd{
+		UploadID: "mpu-123", Bucket: "b", Key: "big.bin",
+		ContentType: "application/octet-stream", CreatedAt: 1700000000,
+	}
+
+	encoded, err := EncodeCommand(CmdCreateMultipartUpload, orig)
+	require.NoError(t, err)
+
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, CmdCreateMultipartUpload, cmd.Type)
+
+	decoded, err := decodeCreateMultipartUploadCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Equal(t, "mpu-123", decoded.UploadID)
+	assert.Equal(t, "b", decoded.Bucket)
+	assert.Equal(t, "big.bin", decoded.Key)
+	assert.Equal(t, "application/octet-stream", decoded.ContentType)
+	assert.Equal(t, int64(1700000000), decoded.CreatedAt)
+}
+
+func TestEncodeDecodeCommand_AbortMultipart(t *testing.T) {
+	orig := AbortMultipartCmd{Bucket: "b", Key: "abort.bin", UploadID: "mpu-abort"}
+
+	encoded, err := EncodeCommand(CmdAbortMultipart, orig)
+	require.NoError(t, err)
+
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, CmdAbortMultipart, cmd.Type)
+
+	decoded, err := decodeAbortMultipartCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Equal(t, "b", decoded.Bucket)
+	assert.Equal(t, "abort.bin", decoded.Key)
+	assert.Equal(t, "mpu-abort", decoded.UploadID)
+}
+
+func TestEncodeDecodeCommand_SetBucketPolicy(t *testing.T) {
+	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]}`)
+	orig := SetBucketPolicyCmd{Bucket: "my-bucket", PolicyJSON: policyJSON}
+
+	encoded, err := EncodeCommand(CmdSetBucketPolicy, orig)
+	require.NoError(t, err)
+
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, CmdSetBucketPolicy, cmd.Type)
+
+	decoded, err := decodeSetBucketPolicyCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Equal(t, "my-bucket", decoded.Bucket)
+	assert.Equal(t, policyJSON, decoded.PolicyJSON)
+}
+
+func TestEncodeDecodeCommand_DeleteBucketPolicy(t *testing.T) {
+	orig := DeleteBucketPolicyCmd{Bucket: "policy-bucket"}
+
+	encoded, err := EncodeCommand(CmdDeleteBucketPolicy, orig)
+	require.NoError(t, err)
+
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, CmdDeleteBucketPolicy, cmd.Type)
+
+	decoded, err := decodeDeleteBucketPolicyCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Equal(t, "policy-bucket", decoded.Bucket)
+}
+
+func TestDecodeCommands_InvalidData(t *testing.T) {
+	invalid := []byte("not valid protobuf data")
+
+	tests := []struct {
+		name string
+		fn   func([]byte) error
+	}{
+		{"decodeCreateBucketCmd", func(d []byte) error { _, err := decodeCreateBucketCmd(d); return err }},
+		{"decodeDeleteBucketCmd", func(d []byte) error { _, err := decodeDeleteBucketCmd(d); return err }},
+		{"decodePutObjectMetaCmd", func(d []byte) error { _, err := decodePutObjectMetaCmd(d); return err }},
+		{"decodeDeleteObjectCmd", func(d []byte) error { _, err := decodeDeleteObjectCmd(d); return err }},
+		{"decodeCreateMultipartUploadCmd", func(d []byte) error { _, err := decodeCreateMultipartUploadCmd(d); return err }},
+		{"decodeCompleteMultipartCmd", func(d []byte) error { _, err := decodeCompleteMultipartCmd(d); return err }},
+		{"decodeAbortMultipartCmd", func(d []byte) error { _, err := decodeAbortMultipartCmd(d); return err }},
+		{"decodeSetBucketPolicyCmd", func(d []byte) error { _, err := decodeSetBucketPolicyCmd(d); return err }},
+		{"decodeDeleteBucketPolicyCmd", func(d []byte) error { _, err := decodeDeleteBucketPolicyCmd(d); return err }},
+		{"unmarshalObjectMeta", func(d []byte) error { _, err := unmarshalObjectMeta(d); return err }},
+		{"unmarshalSnapshotState", func(d []byte) error { _, err := unmarshalSnapshotState(d); return err }},
+		{"unmarshalClusterMultipartMeta", func(d []byte) error { _, err := unmarshalClusterMultipartMeta(d); return err }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn(invalid)
+			assert.Error(t, err, "%s should fail on invalid protobuf", tt.name)
+		})
+	}
+}
+
+func TestEncodePayload_UnknownCommandType(t *testing.T) {
+	_, err := encodePayload(CommandType(99), CreateBucketCmd{Bucket: "x"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown command type")
+}
+
 func TestClusterCodecOutputIsNotJSON(t *testing.T) {
 	// Encode a command and verify the output is not valid JSON
 	encoded, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "test"})

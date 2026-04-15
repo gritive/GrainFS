@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -69,4 +70,32 @@ func TestRateLimiter_MaxEntries(t *testing.T) {
 	count := len(rl.limiters)
 	rl.mu.RUnlock()
 	assert.LessOrEqual(t, count, 3)
+}
+
+func TestRateLimiter_StartCleanup(t *testing.T) {
+	rl := NewRateLimiter(10, 10, 100)
+	rl.Allow("cleanup-key")
+
+	// Set lastSeen to the past so cleanup will remove it
+	rl.mu.Lock()
+	if e, ok := rl.limiters["cleanup-key"]; ok {
+		e.lastSeen = time.Now().Add(-5 * time.Minute)
+	}
+	rl.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start cleanup with a very short TTL so the ticker fires quickly
+	rl.StartCleanup(ctx, 200*time.Millisecond)
+
+	// Wait for cleanup to remove the stale entry
+	require.Eventually(t, func() bool {
+		rl.mu.RLock()
+		_, exists := rl.limiters["cleanup-key"]
+		rl.mu.RUnlock()
+		return !exists
+	}, 3*time.Second, 50*time.Millisecond, "stale entry should be cleaned up by StartCleanup")
+
+	cancel() // Stop the cleanup goroutine
 }

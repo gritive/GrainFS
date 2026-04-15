@@ -72,9 +72,11 @@ aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://test/
 aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 ```
 
-### Phase 2: QUIC Transport + Custom Raft ✅
+### Phase 2: QUIC Transport + Custom Raft ⚠️
 
 **목표:** QUIC 위에서 안정적인 Raft 클러스터를 동작시킨다.
+
+> ⚠️ QUIC 전송, 리더 선출, 로그 복제, 영속성은 구현 완료. **스냅샷 생성/로그 압축/InstallSnapshot RPC/스냅샷 복원은 저장 레이어만 존재하고 오케스트레이션 미구현.** Raft 로그가 무한 성장함.
 
 #### Phase 2-1: QUIC 전송 레이어
 - quic-go 기반 노드 간 연결 관리 (Connection Pool)
@@ -96,14 +98,16 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 **검증:** netem 10% 패킷 유실 환경에서 로그가 전 노드 100% 일치.
 
 #### Phase 2-4: Raft - 영속성 및 스냅샷
-- BadgerDB에 Raft 로그 영속화
-- 스냅샷 생성 및 로그 압축
+- BadgerDB에 Raft 로그 영속화 ✅
+- ~~스냅샷 생성 및 로그 압축~~ (저장 레이어만 구현, 자동 트리거/압축/전송/복원 미구현)
 
 **검증:** 노드 재시작 후 스냅샷 + 이후 로그로 정확히 복구. Jepsen 스타일 linearizability 테스트.
 
-### Phase 3: Solo → Cluster 전환 + 분산 스토리지 ✅
+### Phase 3: Solo → Cluster 전환 + 분산 스토리지 ⚠️
 
 **목표:** Solo 인스턴스를 무중단으로 클러스터 노드로 전환한다.
+
+> ⚠️ 마이그레이션 CLI 및 메타데이터 변환은 구현 완료. **무중단(zero-downtime) 전환은 미구현** — 서비스 재시작 필요.
 
 - Storage Backend 인터페이스 정의 (로컬 ↔ 분산 교체 가능)
 - Solo 인스턴스 → 클러스터 seed 노드 전환 워크플로우
@@ -114,35 +118,39 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - Solo → 3노드 전환 시 데이터 무손실, 서비스 중단 최소화
 - 전환 전후 `aws s3 ls`로 동일 데이터 확인
 
-### Phase 4: Erasure Coding + Fan-out ✅
+### Phase 4: Erasure Coding + Fan-out ⚠️
 
 **목표:** 대용량 데이터를 쪼개고, 분산 저장하고, 복구한다.
 
-- klauspost/reedsolomon 통합 (기본 4+2, k+m 가변)
-- Storage Backend 인터페이스를 통한 분산 샤드 저장
-- QUIC Data Stream으로 다중 노드 Fan-out 전송
-- Distributed GC, Failover, Re-replication
+> ⚠️ EC codec(Reed-Solomon 4+2)과 로컬 샤드 인코딩/디코딩/복구는 구현 완료. **분산 fan-out(노드간 샤드 전송), Distributed GC, Failover, Re-replication은 미구현.** 현재는 단일 노드 EC — 모든 샤드가 로컬 디스크에 저장됨.
+
+- klauspost/reedsolomon 통합 (기본 4+2, k+m 가변) ✅
+- ~~Storage Backend 인터페이스를 통한 분산 샤드 저장~~ (로컬 저장만 구현)
+- ~~QUIC Data Stream으로 다중 노드 Fan-out 전송~~ (미구현)
+- ~~Distributed GC, Failover, Re-replication~~ (미구현)
 
 **검증:**
-- 4+2 구성에서 임의 2노드 장애 후 원본 비트 단위 복구
-- Network Partition, Disk Failure 시나리오
-- Chaos Test: 임의 노드 킬/복구 반복 24시간 무결성 유지
+- ~~4+2 구성에서 임의 2노드 장애 후 원본 비트 단위 복구~~ (단일 노드 내 샤드 손실만 복구 가능)
+- ~~Network Partition, Disk Failure 시나리오~~ (미구현)
+- ~~Chaos Test: 임의 노드 킬/복구 반복 24시간 무결성 유지~~ (미구현)
 
-### Phase 5: Operations & Hardening ✅
+### Phase 5: Operations & Hardening ⚠️
 
 **목표:** 프로덕션 운영 도구를 완성한다.
 
-- Presigned URL
-- AWS Signature V4 전체 지원 (chunked encoding, POST policy, presigned URL)
-- Prometheus 메트릭 (노드별 지연, EC 연산 시간, 스트림 상태)
-- 운영 대시보드: 클러스터 상태, 노드 헬스, 샤드 분포, 스토리지 용량, 실시간 성능 모니터링(요청 처리량, 지연시간, EC 인코딩/디코딩 시간) 시각화 (순수 Go + embed, 싱글 바이너리 원칙 유지)
-- 데이터 암호화: at-rest encryption (AES-256-GCM), 키 관리 (KMS 연동 또는 로컬 키 파일)
-- in-transit encryption은 QUIC TLS 1.3으로 이미 제공
-- 클러스터 멤버십 변경 (Joint Consensus)
-- 클러스터 보안: PSK/토큰 기반 피어 인증, 무단 노드 연결 차단
-- 버킷 단위 EC 정책: CreateBucket 시 EC on/off 설정, 새 객체부터 적용, 기존 객체는 읽기 시 포맷 자동 감지
-- 런타임 EC 토글: 대시보드 또는 API로 버킷별 EC 정책 변경 가능 (성능 이슈 대응, 무중단 전환)
-- SDK 호환 테스트: aws-cli, boto3, aws-sdk-go
+> ⚠️ Presigned URL, 암호화, Prometheus, 버킷 정책, Rate Limiting은 구현 완료. **SigV4 chunked encoding/POST policy, Joint Consensus, PSK 피어 인증, 운영 대시보드 고도화, SDK 호환 테스트(aws-cli/boto3)는 미구현.**
+
+- Presigned URL ✅
+- AWS Signature V4: Authorization header + Presigned URL ✅ / ~~chunked encoding, POST policy~~ (미구현)
+- Prometheus 메트릭 (기본: HTTP 요청수/지연, EC 연산, 스토리지 바이트) ✅
+- 운영 대시보드: 기본 4개 카운터(Uptime, Requests, Storage, Objects) ✅ / ~~클러스터 상태, 노드 헬스, 샤드 분포, 실시간 성능~~ (미구현)
+- 데이터 암호화: at-rest encryption (AES-256-GCM) ✅
+- in-transit encryption은 QUIC TLS 1.3으로 이미 제공 ✅
+- ~~클러스터 멤버십 변경 (Joint Consensus)~~ (미구현)
+- ~~클러스터 보안: PSK/토큰 기반 피어 인증~~ (미구현, InsecureSkipVerify=true)
+- 버킷 단위 EC 정책: CreateBucket 시 EC on/off 설정 ✅
+- 런타임 EC 토글: API로 버킷별 EC 정책 변경 가능 ✅
+- SDK 호환 테스트: aws-sdk-go ✅ / ~~aws-cli, boto3~~ (미구현)
 
 **검증:**
 - k6로 수만 동시 연결에서 P99 응답 속도 측정
@@ -165,15 +173,17 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 **검증:** NFS 클라이언트로 파일 생성/읽기/삭제 동작 확인 (E2E).
 
-### Phase 7: First User Experience ✅
+### Phase 7: First User Experience ⚠️
 
 **목표:** 실사용자가 즉시 가치를 느끼는 환경을 만든다.
 
-- **Object Browser**: 대시보드에 버킷/오브젝트 브라우저 + 볼륨 관리 탭 (aws-cli 없이 브라우저에서 업로드/다운로드/삭제/조회)
-- **기본 버킷 자동 생성**: 서버 시작 시 기본 버킷("default") 자동 생성
-- **Graceful Shutdown**: 진행 중인 요청 drain, NFS 세션 정리, Raft 리더 이전
-- **벤치마크 스위트**: k6 기반 성능 베이스라인 측정 (S3 API throughput, 지연, EC 오버헤드, NFS 처리량). Phase 8 최적화의 근거 데이터
-- **Docker 기반 NBD 테스트**: macOS에서 Docker 컨테이너로 NBD E2E 테스트 (`make test-nbd-docker`)
+> ⚠️ 대부분 구현 완료. **Graceful Shutdown의 "Raft 리더 이전"만 미구현** — HTTP drain과 NFS 정리는 동작.
+
+- **Object Browser**: 대시보드에 버킷/오브젝트 브라우저 + 볼륨 관리 탭 ✅
+- **기본 버킷 자동 생성**: 서버 시작 시 기본 버킷("default") 자동 생성 ✅
+- **Graceful Shutdown**: 진행 중인 요청 drain ✅, NFS 세션 정리 ✅, ~~Raft 리더 이전~~ (미구현)
+- **벤치마크 스위트**: k6 기반 성능 베이스라인 측정 ✅
+- **Docker 기반 NBD 테스트**: macOS에서 Docker 컨테이너로 NBD E2E 테스트 ✅
 
 **검증:**
 - Object Browser에서 파일 업로드/다운로드/삭제 + 볼륨 생성/삭제 동작 확인

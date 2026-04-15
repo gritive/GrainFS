@@ -203,3 +203,135 @@ func TestFSM_AbortMultipart(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
+
+func TestFSM_SetBucketPolicy(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[]}`)
+
+	data, err := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{
+		Bucket:     "policy-bucket",
+		PolicyJSON: policyJSON,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	// Verify policy is stored in DB
+	err = db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(bucketPolicyKey("policy-bucket"))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			assert.Equal(t, policyJSON, val)
+			return nil
+		})
+	})
+	assert.NoError(t, err)
+}
+
+func TestFSM_DeleteBucketPolicy(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Set a policy first
+	policyJSON := []byte(`{"Version":"2012-10-17"}`)
+	data, _ := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{
+		Bucket: "bp", PolicyJSON: policyJSON,
+	})
+	require.NoError(t, fsm.Apply(data))
+
+	// Delete the policy
+	data, _ = EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "bp"})
+	require.NoError(t, fsm.Apply(data))
+
+	// Verify policy is removed
+	err := db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(bucketPolicyKey("bp"))
+		return err
+	})
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+}
+
+func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Deleting a non-existent policy should not error (ErrKeyNotFound → nil)
+	data, _ := EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "no-policy"})
+	err := fsm.Apply(data)
+	assert.NoError(t, err)
+}
+
+func TestFSM_AbortMultipart_NotExist(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Aborting a non-existent multipart should not error (ErrKeyNotFound → nil)
+	data, _ := EncodeCommand(CmdAbortMultipart, AbortMultipartCmd{
+		Bucket: "b", Key: "nope.bin", UploadID: "nonexistent",
+	})
+	err := fsm.Apply(data)
+	assert.NoError(t, err)
+}
+
+func TestFSM_DeleteObject_NotExist(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Deleting a non-existent object should not error (ErrKeyNotFound → nil)
+	data, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "nope.txt"})
+	err := fsm.Apply(data)
+	assert.NoError(t, err)
+}
+
+func TestFSM_Apply_CorruptData(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	err := fsm.Apply([]byte("definitely not protobuf"))
+	assert.Error(t, err, "Apply should fail on corrupt data")
+}
+
+func TestFSM_Restore_CorruptData(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	err := fsm.Restore([]byte("not valid protobuf snapshot"))
+	assert.Error(t, err, "Restore should fail on corrupt snapshot data")
+}
+
+func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
+	// Test Restore overwrites existing data in the target DB
+	db1 := newTestDB(t)
+	fsm1 := NewFSM(db1)
+
+	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "src-bucket"})
+	require.NoError(t, fsm1.Apply(data))
+
+	snap, err := fsm1.Snapshot()
+	require.NoError(t, err)
+
+	// Create a second DB with different data
+	db2 := newTestDB(t)
+	fsm2 := NewFSM(db2)
+	data, _ = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "old-bucket"})
+	require.NoError(t, fsm2.Apply(data))
+
+	// Restore overwrites db2
+	require.NoError(t, fsm2.Restore(snap))
+
+	// old-bucket should be gone, src-bucket should exist
+	err = db2.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(bucketKey("src-bucket"))
+		return err
+	})
+	assert.NoError(t, err)
+
+	err = db2.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(bucketKey("old-bucket"))
+		return err
+	})
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+}
