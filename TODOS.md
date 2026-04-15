@@ -42,11 +42,6 @@
 
 ## P2: SigV4 고급 기능 (Phase 5 미구현)
 
-### aws-chunked Content Encoding
-- **What:** S3 청크 업로드 시 각 청크에 서명을 포함하는 SigV4 확장
-- **Why:** aws-sdk가 대용량 업로드 시 자동으로 사용. 미지원 시 대용량 업로드 실패 가능
-- **Context:** s3auth/sigv4.go에 Authorization header와 presigned URL만 구현
-
 ### POST Policy (Form-based Upload)
 - **What:** 브라우저에서 직접 S3에 업로드하기 위한 POST 폼 인증
 - **Why:** 웹 클라이언트 직접 업로드에 필요. Object Browser에서도 활용 가능

@@ -17,6 +17,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -277,7 +278,21 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 	// Check if object already exists (for overwrite — don't double-count)
 	existing, _ := s.backend.HeadObject(bucket, key)
 
-	body := bytes.NewReader(c.Request.Body())
+	rawBody := c.Request.Body()
+
+	// Handle aws-chunked Content-Encoding (used by AWS SDKs for streaming uploads)
+	contentEncoding := string(c.GetHeader("Content-Encoding"))
+	contentSHA := string(c.GetHeader("X-Amz-Content-Sha256"))
+	if contentEncoding == "aws-chunked" || contentSHA == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
+		decoded, err := s3auth.DecodeAWSChunkedBody(rawBody)
+		if err != nil {
+			c.AbortWithMsg(fmt.Sprintf("invalid aws-chunked encoding: %v", err), 400)
+			return
+		}
+		rawBody = decoded
+	}
+
+	body := bytes.NewReader(rawBody)
 	obj, err := s.backend.PutObject(bucket, key, body, contentType)
 	if err != nil {
 		mapError(c, err)
