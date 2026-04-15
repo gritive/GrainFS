@@ -760,18 +760,24 @@ func (n *Node) TransferLeadership() error {
 
 // persistState saves currentTerm and votedFor to durable storage.
 // Must be called with n.mu held. No-op if store is nil.
+// Panics on error: a node that fails to persist its vote could violate Raft safety.
 func (n *Node) persistState() {
 	if n.store == nil {
 		return
 	}
-	_ = n.store.SaveState(n.currentTerm, n.votedFor)
+	if err := n.store.SaveState(n.currentTerm, n.votedFor); err != nil {
+		panic(fmt.Sprintf("raft: persist state failed: %v", err))
+	}
 }
 
 // persistLogEntries saves log entries to durable storage.
 // Must be called with n.mu held. No-op if store is nil.
+// Panics on error: lost log entries break Raft durability guarantees.
 func (n *Node) persistLogEntries(entries []LogEntry) {
 	if n.store == nil || len(entries) == 0 {
 		return
 	}
-	_ = n.store.AppendEntries(entries)
+	if err := n.store.AppendEntries(entries); err != nil {
+		panic(fmt.Sprintf("raft: persist log entries failed: %v", err))
+	}
 }

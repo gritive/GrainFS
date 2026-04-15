@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -8,6 +9,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// failingStore wraps a LogStore and injects errors for SaveState/AppendEntries.
+type failingStore struct {
+	LogStore
+	saveStateErr   error
+	appendEntryErr error
+}
+
+func (f *failingStore) SaveState(term uint64, votedFor string) error {
+	if f.saveStateErr != nil {
+		return f.saveStateErr
+	}
+	return f.LogStore.SaveState(term, votedFor)
+}
+
+func (f *failingStore) AppendEntries(entries []LogEntry) error {
+	if f.appendEntryErr != nil {
+		return f.appendEntryErr
+	}
+	return f.LogStore.AppendEntries(entries)
+}
 
 // testCluster sets up N interconnected Raft nodes for testing.
 type testCluster struct {
@@ -306,4 +328,49 @@ func TestNodeState_String(t *testing.T) {
 	assert.Equal(t, "Follower", Follower.String())
 	assert.Equal(t, "Candidate", Candidate.String())
 	assert.Equal(t, "Leader", Leader.String())
+}
+
+func TestPersistState_PanicsOnError(t *testing.T) {
+	baseStore, err := NewBadgerLogStore(t.TempDir())
+	require.NoError(t, err)
+	defer baseStore.Close()
+
+	store := &failingStore{
+		LogStore:     baseStore,
+		saveStateErr: fmt.Errorf("disk full"),
+	}
+
+	config := DefaultConfig("A", []string{"B", "C"})
+	node := NewNode(config, store)
+
+	assert.Panics(t, func() {
+		node.HandleRequestVote(&RequestVoteArgs{
+			Term:        1,
+			CandidateID: "B",
+		})
+	}, "persistState should panic on SaveState error")
+}
+
+func TestPersistLogEntries_PanicsOnError(t *testing.T) {
+	baseStore, err := NewBadgerLogStore(t.TempDir())
+	require.NoError(t, err)
+	defer baseStore.Close()
+
+	store := &failingStore{
+		LogStore:       baseStore,
+		appendEntryErr: fmt.Errorf("disk full"),
+	}
+
+	config := DefaultConfig("A", nil)
+	node := NewNode(config, store)
+	node.Start()
+	defer node.Stop()
+
+	require.Eventually(t, func() bool {
+		return node.State() == Leader
+	}, 3*time.Second, 10*time.Millisecond)
+
+	assert.Panics(t, func() {
+		node.Propose([]byte("cmd"))
+	}, "persistLogEntries should panic on AppendEntries error")
 }

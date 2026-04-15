@@ -38,11 +38,6 @@
 - **Why:** 현재 n.log[idx-1] raw slice indexing 사용. 스냅샷 후 로그 압축 시 n.log가 비어지면 인덱스가 깨짐. 스냅샷 통합의 필수 선행 조건
 - **Context:** raft.go 전체에서 n.log[...] 접근하는 모든 곳 수정 필요. lastLogIdx(), lastLogInfo(), applyLoop, replicateTo, HandleAppendEntries, advanceCommitIndex 등
 
-### Raft persistence 에러 처리
-- **What:** SaveState/AppendEntries 에러를 무시하지 않고 노드 crash 또는 shutdown
-- **Why:** raft.go:766,775에서 `_ = n.store.SaveState()` / `_ = n.store.AppendEntries()`. 디스크 장애 시 SaveState 실패하면 노드가 동일 term에서 두 번 투표 가능 (Raft safety 위반)
-- **Context:** 에러 시 log.Fatal() 또는 panic() 호출로 즉시 중단. Raft 논문에서 persistence 실패는 복구 불가능 상태
-
 ### 스냅샷 오케스트레이션 wiring
 - **What:** SnapshotManager를 Raft Node와 cluster 시작 코드에 연결
 - **Why:** snapshot.go에 SnapshotManager(자동 트리거, 복원) 구현 완료. cluster/apply.go에 FSM.Snapshot()/Restore() 존재. 하지만 호출하는 코드가 없음
