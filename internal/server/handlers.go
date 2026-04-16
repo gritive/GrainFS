@@ -271,6 +271,13 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// Check for CopyObject (PUT with x-amz-copy-source header)
+	copySource := string(c.GetHeader("x-amz-copy-source"))
+	if copySource != "" {
+		s.handleCopyObject(c, bucket, key, copySource)
+		return
+	}
+
 	contentType := string(c.GetHeader("Content-Type"))
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -734,4 +741,54 @@ func (s *Server) joinClusterHandler(_ context.Context, c *app.RequestContext) {
 
 	resp, _ := json.Marshal(map[string]string{"status": "joined", "mode": "cluster"})
 	c.Data(consts.StatusOK, "application/json", resp)
+}
+
+// handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
+func (s *Server) handleCopyObject(c *app.RequestContext, dstBucket, dstKey, copySource string) {
+	// Parse copy source: /bucket/key or bucket/key
+	copySource = strings.TrimPrefix(copySource, "/")
+	parts := strings.SplitN(copySource, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-copy-source format")
+		return
+	}
+	srcBucket, srcKey := parts[0], parts[1]
+
+	// Try optimized copy if backend supports it
+	if copier, ok := s.backend.(storage.Copier); ok {
+		obj, err := copier.CopyObject(srcBucket, srcKey, dstBucket, dstKey)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+
+		result := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<CopyObjectResult>
+  <ETag>"%s"</ETag>
+  <LastModified>%s</LastModified>
+</CopyObjectResult>`, obj.ETag, time.Unix(obj.LastModified, 0).UTC().Format(time.RFC3339))
+		c.Data(consts.StatusOK, "application/xml", []byte(result))
+		return
+	}
+
+	// Fallback: read source, write to dest
+	rc, obj, err := s.backend.GetObject(srcBucket, srcKey)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	defer rc.Close()
+
+	newObj, err := s.backend.PutObject(dstBucket, dstKey, rc, obj.ContentType)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+
+	result := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<CopyObjectResult>
+  <ETag>"%s"</ETag>
+  <LastModified>%s</LastModified>
+</CopyObjectResult>`, newObj.ETag, time.Unix(newObj.LastModified, 0).UTC().Format(time.RFC3339))
+	c.Data(consts.StatusOK, "application/xml", []byte(result))
 }

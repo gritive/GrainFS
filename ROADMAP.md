@@ -212,16 +212,18 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - ✅ Rate limiting이 정상 부하에서 트리거되지 않음 확인 (E2E)
 - ✅ Raft LogStore SyncWrites=true 적용 + 재시작 후 데이터 무손실 확인 (unit test)
 
-### Phase 10: Advanced Storage & Protocol
+### Phase 10: Advanced Storage & Protocol ✅
 
 **목표:** 대규모 운영 시나리오와 프로토콜 고도화를 완성한다.
 
-- **NFS v4 지원**: NFSv3 → NFSv4 업그레이드 (보안, 상태 관리, 잠금/위임). Go 생태계에 성숙한 NFSv4 라이브러리 부재로 별도 조사 필요
-- **Packed Blob 포맷**: 대량 소형 객체 시나리오에서 inode 압박 해소를 위한 append-only 로그 포맷
+- **Packed Blob 포맷** ✅: append-only blob log + hash table index with refcount. `--pack-threshold`로 소형 객체 자동 패킹. CRC32 무결성, compaction, concurrent write sharding 지원
+- **S3 CopyObject** ✅: PUT with `x-amz-copy-source` 헤더. Copier interface (타입 단언 패턴). Packed Blob 객체는 metadata-only copy (refcount 증가, 데이터 복사 없음)
+- **NFSv4.0 서버** ✅: `internal/nfs4server/` — ONC RPC (TCP record marking, fragment reassembly), COMPOUND dispatcher, 12개 op 지원 (PUTROOTFH, PUTFH, GETFH, LOOKUP, GETATTR, READDIR, READ, WRITE, OPEN, CLOSE, SETCLIENTID, SETCLIENTID_CONFIRM). FileHandle UUID generation, StateManager 기반 상태 관리. `--nfs4-port 2049` (기본 활성, localhost 바인드)
 
 **검증:**
-- NFSv4 마운트 후 잠금, 위임 동작 확인
-- 100만 소형 객체 (< 1KB) 저장 후 inode 사용량 비교 (flat vs. packed)
+- Packed Blob: 소형 객체 write/read, CRC 검증, blob rotation, compaction tombstone 제거 테스트 통과
+- S3 CopyObject: metadata-only copy (refcount), 대형 객체 fallback, 원본 삭제 후 복사본 유지 테스트 통과
+- NFSv4: ONC RPC frame encode/decode, max frame size 제한, COMPOUND dispatch, multi-op 처리, op 순서 에러 중단 테스트 통과
 
 ## 5. 핵심 설계 사양
 

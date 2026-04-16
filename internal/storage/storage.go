@@ -27,6 +27,13 @@ type Part struct {
 	Size       int64
 }
 
+// Copier is an optional interface for backends that support metadata-only copy.
+// Backends implement this via type assertion; the HTTP handler falls back to
+// read+write if the backend does not implement Copier.
+type Copier interface {
+	CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error)
+}
+
 // Backend defines the storage operations for GrainFS.
 type Backend interface {
 	CreateBucket(bucket string) error

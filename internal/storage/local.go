@@ -284,6 +284,17 @@ func (b *LocalBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*Objec
 	return objects, err
 }
 
+// CopyObject copies an object by reading the source and writing to the destination.
+func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error) {
+	rc, obj, err := b.GetObject(srcBucket, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	return b.PutObject(dstBucket, dstKey, rc, obj.ContentType)
+}
+
 func (b *LocalBackend) policyKey(bucket string) []byte {
 	return []byte("policy:" + bucket)
 }

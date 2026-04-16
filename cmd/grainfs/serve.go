@@ -20,8 +20,10 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
+	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsserver"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -45,7 +47,9 @@ func init() {
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
 	serveCmd.Flags().Int("nfs-port", 9002, "NFS server port (0 = disabled, volumes managed via REST API)")
-	serveCmd.Flags().Int("nbd-port", 0, "NBD server port (0 = disabled, Linux only)")
+	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled)")
+	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled, Linux only)")
+	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -90,7 +94,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
+	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
+	packThreshold, _ := cmd.Flags().GetInt("pack-threshold")
 
 	if peersStr == "" {
 		var backend storage.Backend
@@ -103,6 +109,18 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to initialize storage: %w", err)
 		}
+
+		// Wrap with Packed Blob if threshold is set
+		if packThreshold > 0 {
+			blobDir := filepath.Join(dataDir, "blobs")
+			pb, err := packblob.NewPackedBackend(backend, blobDir, int64(packThreshold))
+			if err != nil {
+				return fmt.Errorf("failed to initialize packed blob: %w", err)
+			}
+			backend = pb
+			slog.Info("packed blob storage enabled", "threshold", packThreshold)
+		}
+
 		// Wrap with read cache
 		backend = storage.NewCachedBackend(backend)
 
@@ -113,7 +131,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition
 		swappable := storage.NewSwappableBackend(backend)
-		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, nfsPort, nbdPort)
+		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, nfsPort, nfs4Port, nbdPort)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -122,7 +140,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
-func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, nfsPort, nbdPort int) error {
+func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, nfsPort, nfs4Port, nbdPort int) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
 	// Auto-create "default" bucket on startup
@@ -167,6 +185,18 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 			nfsAddr := fmt.Sprintf(":%d", nfsPort)
 			if err := nfsSrv.ListenAndServe(nfsAddr); err != nil {
 				slog.Error("nfs server error", "error", err)
+			}
+		}()
+	}
+
+	// Start NFSv4 server if requested
+	var nfs4Srv *nfs4server.Server
+	if nfs4Port > 0 {
+		nfs4Srv = nfs4server.NewServer(swappable)
+		go func() {
+			nfs4Addr := fmt.Sprintf("127.0.0.1:%d", nfs4Port) // localhost only for AUTH_SYS security
+			if err := nfs4Srv.ListenAndServe(nfs4Addr); err != nil {
+				slog.Error("nfs4 server error", "error", err)
 			}
 		}()
 	}
