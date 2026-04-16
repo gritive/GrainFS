@@ -134,6 +134,16 @@ func (d *Doctor) checkDiskSpace() CheckResult {
 	// Calculate available space (in bytes)
 	available := stat.Bavail * uint64(stat.Bsize)
 	total := stat.Blocks * uint64(stat.Bsize)
+
+	// Avoid divide by zero
+	if total == 0 {
+		return CheckResult{
+			Status:   "warn",
+			Message:  "Unable to determine disk usage",
+			Duration: time.Since(start).String(),
+		}
+	}
+
 	usedPercent := 100 - (available*100)/total
 
 	switch {
