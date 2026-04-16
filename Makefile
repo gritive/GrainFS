@@ -7,7 +7,7 @@ PROTO_SRC := $(shell find internal -name '*.proto')
 PROTO_GEN := $(PROTO_SRC:.proto=.pb.go)
 GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go' -not -name '*.pb.go')
 
-.PHONY: test test-race test-e2e test-jepsen clean run lint bench test-nbd-docker update-deps
+.PHONY: test test-race test-e2e test-jepsen test-smoke clean run lint bench test-nbd-docker update-deps
 
 bin/$(BINARY): $(GO_SRC) $(PROTO_GEN)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
@@ -30,6 +30,9 @@ test-e2e: bin/$(BINARY)
 
 test-jepsen: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestJepsen -v -timeout 5m
+
+test-smoke: bin/$(BINARY)
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestSmoke -v -timeout 3m
 
 run: bin/$(BINARY)
 	./bin/$(BINARY) serve --data ./tmp --port 9000
