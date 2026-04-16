@@ -7,7 +7,7 @@ PROTO_SRC := $(shell find internal -name '*.proto')
 PROTO_GEN := $(PROTO_SRC:.proto=.pb.go)
 GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go' -not -name '*.pb.go')
 
-.PHONY: test test-race test-e2e test-jepsen test-smoke clean run lint bench test-nbd-docker update-deps
+.PHONY: test test-race test-e2e test-jepsen test-smoke test-network-fault clean run lint bench test-nbd-docker update-deps
 
 bin/$(BINARY): $(GO_SRC) $(PROTO_GEN)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
@@ -33,6 +33,10 @@ test-jepsen: bin/$(BINARY)
 
 test-smoke: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestSmoke -v -timeout 3m
+
+test-network-fault:
+	@./scripts/install_toxiproxy.sh
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestNetworkPartition -v -timeout 10m
 
 run: bin/$(BINARY)
 	./bin/$(BINARY) serve --data ./tmp --port 9000
