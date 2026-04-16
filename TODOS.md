@@ -1,15 +1,5 @@
 # TODOS
 
-## Completed (2026-04-17)
-
-### Production Safety Implementation
-- [x] Backup and restore procedures (docs/BACKUP_RESTORE.md)
-- [x] Recovery procedure automation (grainfs recover --auto)
-- [x] Disaster Recovery Playbook (grainfs doctor, diagnostic checks)
-- [x] Incident response procedures (Prometheus alerting rules)
-- [x] Data loss scenario testing (Jepsen consistency tests, network partition tests)
-- [x] Automated smoke tests (deployment verification E2E)
-
 ## Deferred Scope (Post-Phase 1)
 
 ### Production Hardening
