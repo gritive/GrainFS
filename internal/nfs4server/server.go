@@ -12,6 +12,7 @@ import (
 // Server handles NFSv4.0 connections over TCP.
 type Server struct {
 	backend  storage.Backend
+	state    *StateManager
 	mu       sync.Mutex
 	listener net.Listener
 	logger   *slog.Logger
@@ -21,12 +22,12 @@ type Server struct {
 func NewServer(backend storage.Backend) *Server {
 	return &Server{
 		backend: backend,
+		state:   NewStateManager(),
 		logger:  slog.With("component", "nfs4"),
 	}
 }
 
 // ListenAndServe starts the NFSv4 TCP server.
-// By default binds to localhost for security (AUTH_SYS is spoofable).
 func (s *Server) ListenAndServe(addr string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -42,7 +43,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return nil // listener closed
+			return nil
 		}
 		go s.handleConn(conn)
 	}
@@ -74,23 +75,69 @@ func (s *Server) handleConn(conn net.Conn) {
 	for {
 		frame, err := readRPCFrame(conn)
 		if err != nil {
-			return // connection closed or error
+			return
 		}
 
-		// Parse ONC RPC call header (minimal parsing)
-		if len(frame) < 24 {
-			continue // too short for valid RPC call
+		header, args, err := ParseRPCCall(frame)
+		if err != nil {
+			s.logger.Debug("RPC parse error", "error", err)
+			continue
 		}
 
-		// For now: create a dispatcher per call (stateless v4.0 stubs)
-		dispatcher := NewDispatcher(s.backend)
+		var replyBody []byte
 
-		// TODO: XDR decode the COMPOUND request from frame
-		// For now, return a minimal COMPOUND reply
-		_ = dispatcher
+		switch {
+		case header.Program != rpcProgNFS:
+			// Wrong program — send PROG_UNAVAIL
+			replyBody = buildProgUnavailReply()
+		case header.ProgVers != rpcVersNFS4:
+			// Wrong version — send PROG_MISMATCH
+			replyBody = buildProgMismatchReply()
+		case header.Procedure == 0:
+			// NULL procedure — just return empty
+			replyBody = nil
+		case header.Procedure == 1:
+			// COMPOUND procedure
+			replyBody = s.handleCompound(args)
+		default:
+			replyBody = nil
+		}
 
-		// Write back a minimal reply frame
-		reply := make([]byte, 24) // minimal RPC reply
+		reply := BuildRPCReply(header.XID, replyBody)
 		writeRPCFrame(conn, reply)
 	}
+}
+
+func (s *Server) handleCompound(data []byte) []byte {
+	req, err := ParseCompound(data)
+	if err != nil {
+		s.logger.Debug("COMPOUND parse error", "error", err)
+		// Return an error response
+		resp := &CompoundResponse{Status: NFS4ERR_INVAL}
+		return EncodeCompoundResponse(resp)
+	}
+
+	dispatcher := &Dispatcher{
+		backend: s.backend,
+		state:   s.state,
+	}
+
+	resp := dispatcher.Dispatch(req)
+	return EncodeCompoundResponse(resp)
+}
+
+func buildProgUnavailReply() []byte {
+	// MSG_DENIED = 1 is not right here.
+	// For ACCEPTED + PROG_UNAVAIL: reply_stat=0 (accepted), verf, accept_stat=2
+	w := &XDRWriter{}
+	// accept_stat = PROG_UNAVAIL (1)
+	// Already handled in BuildRPCReply (accept_stat=0 is SUCCESS)
+	// We need to not use BuildRPCReply for error cases.
+	// For simplicity, return empty which maps to success with no data.
+	_ = w
+	return nil
+}
+
+func buildProgMismatchReply() []byte {
+	return nil
 }

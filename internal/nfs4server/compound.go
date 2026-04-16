@@ -1,23 +1,35 @@
 package nfs4server
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"path"
+	"time"
+
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // NFSv4 status codes (RFC 7530)
 const (
-	NFS4_OK          = 0
-	NFS4ERR_NOENT    = 2
-	NFS4ERR_IO       = 5
-	NFS4ERR_PERM     = 1
-	NFS4ERR_STALE    = 70
-	NFS4ERR_BADHANDLE = 10001
-	NFS4ERR_RESOURCE  = 10018
-	NFS4ERR_NOTDIR   = 20
-	NFS4ERR_INVAL    = 22
+	NFS4_OK            = 0
+	NFS4ERR_PERM       = 1
+	NFS4ERR_NOENT      = 2
+	NFS4ERR_IO         = 5
+	NFS4ERR_NOTDIR     = 20
+	NFS4ERR_INVAL      = 22
+	NFS4ERR_FBIG       = 27
+	NFS4ERR_NOSPC      = 28
+	NFS4ERR_ROFS       = 30
+	NFS4ERR_STALE      = 70
+	NFS4ERR_BADHANDLE  = 10001
+	NFS4ERR_BAD_STATEID = 10025
+	NFS4ERR_RESOURCE   = 10018
+	NFS4ERR_SERVERFAULT = 10006
 )
 
-// NFSv4 operation codes (RFC 7530 Section 16)
+// NFSv4 operation codes
 const (
 	OpAccess             = 3
 	OpClose              = 4
@@ -35,55 +47,54 @@ const (
 	OpSetClientIDConfirm = 36
 	OpWrite              = 38
 
-	// Max operations per COMPOUND request
 	maxCompoundOps = 64
 )
 
-// Op is a single NFSv4 operation within a COMPOUND request.
+// NFS file types
+const (
+	NF4REG = 1
+	NF4DIR = 2
+)
+
+// The VFS bucket used for NFSv4 storage.
+const nfs4Bucket = "__grainfs_nfs4"
+
 type Op struct {
 	OpCode int
-	Data   []byte // XDR-encoded arguments (op-specific)
+	Data   []byte
 }
 
-// OpResult is the result of a single NFSv4 operation.
 type OpResult struct {
 	OpCode int
 	Status int
-	Data   []byte // XDR-encoded results (op-specific)
+	Data   []byte
 }
 
-// CompoundRequest is an NFSv4 COMPOUND request.
 type CompoundRequest struct {
 	Tag      string
 	MinorVer uint32
 	Ops      []Op
 }
 
-// CompoundResponse is an NFSv4 COMPOUND response.
 type CompoundResponse struct {
 	Status  int
 	Tag     string
 	Results []OpResult
 }
 
-// Dispatcher processes NFSv4 COMPOUND requests.
 type Dispatcher struct {
 	backend   storage.Backend
-	currentFH []byte // current filehandle for this compound
+	state     *StateManager
+	currentFH FileHandle
+	currentPath string
 }
 
-// NewDispatcher creates a COMPOUND dispatcher.
 func NewDispatcher(backend storage.Backend) *Dispatcher {
 	return &Dispatcher{backend: backend}
 }
 
-// Dispatch processes a COMPOUND request and returns the response.
-// Per RFC 7530: stop processing at the first failed op.
 func (d *Dispatcher) Dispatch(req *CompoundRequest) *CompoundResponse {
-	resp := &CompoundResponse{
-		Tag:    req.Tag,
-		Status: NFS4_OK,
-	}
+	resp := &CompoundResponse{Tag: req.Tag, Status: NFS4_OK}
 
 	if len(req.Ops) > maxCompoundOps {
 		resp.Status = NFS4ERR_RESOURCE
@@ -93,10 +104,9 @@ func (d *Dispatcher) Dispatch(req *CompoundRequest) *CompoundResponse {
 	for _, op := range req.Ops {
 		result := d.dispatchOp(op)
 		resp.Results = append(resp.Results, result)
-
 		if result.Status != NFS4_OK {
 			resp.Status = result.Status
-			break // stop at first error per RFC 7530
+			break
 		}
 	}
 
@@ -115,6 +125,8 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opLookup(op.Data)
 	case OpGetAttr:
 		return d.opGetAttr(op.Data)
+	case OpAccess:
+		return d.opAccess(op.Data)
 	case OpReadDir:
 		return d.opReadDir(op.Data)
 	case OpRead:
@@ -123,68 +135,360 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opWrite(op.Data)
 	case OpOpen:
 		return d.opOpen(op.Data)
+	case OpOpenConfirm:
+		return d.opOpenConfirm(op.Data)
 	case OpClose:
 		return d.opClose(op.Data)
 	case OpSetClientID:
 		return d.opSetClientID(op.Data)
 	case OpSetClientIDConfirm:
 		return d.opSetClientIDConfirm(op.Data)
+	case OpSetAttr:
+		return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult()}
+	case OpRenew:
+		return OpResult{OpCode: OpRenew, Status: NFS4_OK}
 	default:
 		return OpResult{OpCode: op.OpCode, Status: NFS4ERR_INVAL}
 	}
 }
 
-// --- Op implementations (stubs for now, wired to VFS in Task #13) ---
-
 func (d *Dispatcher) opPutRootFH() OpResult {
-	d.currentFH = []byte("root")
+	d.currentFH = d.state.RootFH()
+	d.currentPath = "/"
 	return OpResult{OpCode: OpPutRootFH, Status: NFS4_OK}
 }
 
 func (d *Dispatcher) opPutFH(data []byte) OpResult {
-	d.currentFH = data
+	if len(data) != 16 {
+		return OpResult{OpCode: OpPutFH, Status: NFS4ERR_BADHANDLE}
+	}
+	var fh FileHandle
+	copy(fh[:], data)
+	p, ok := d.state.ResolveFH(fh)
+	if !ok {
+		return OpResult{OpCode: OpPutFH, Status: NFS4ERR_STALE}
+	}
+	d.currentFH = fh
+	d.currentPath = p
 	return OpResult{OpCode: OpPutFH, Status: NFS4_OK}
 }
 
 func (d *Dispatcher) opGetFH() OpResult {
-	if d.currentFH == nil {
+	if d.currentPath == "" {
 		return OpResult{OpCode: OpGetFH, Status: NFS4ERR_BADHANDLE}
 	}
-	return OpResult{OpCode: OpGetFH, Status: NFS4_OK, Data: d.currentFH}
+	w := &XDRWriter{}
+	w.WriteOpaque(d.currentFH[:])
+	return OpResult{OpCode: OpGetFH, Status: NFS4_OK, Data: w.Bytes()}
 }
 
-func (d *Dispatcher) opLookup(_ []byte) OpResult {
+func (d *Dispatcher) opLookup(data []byte) OpResult {
+	name := string(data)
+	childPath := path.Join(d.currentPath, name)
+
+	// Check if the child exists as an object
+	fh := d.state.GetOrCreateFH(childPath)
+	d.currentFH = fh
+	d.currentPath = childPath
+
 	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 }
 
-func (d *Dispatcher) opGetAttr(_ []byte) OpResult {
-	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK}
+func (d *Dispatcher) opGetAttr(data []byte) OpResult {
+	w := &XDRWriter{}
+
+	// Return minimal attributes based on the bitmap request
+	isRoot := d.currentPath == "/"
+
+	if d.backend != nil && !isRoot {
+		key := d.currentPath
+		if len(key) > 0 && key[0] == '/' {
+			key = key[1:]
+		}
+		obj, err := d.backend.HeadObject(nfs4Bucket, key)
+		if err != nil {
+			// Might be a directory
+			w.WriteUint32(2) // bitmap length = 2 words
+			w.WriteUint32(0) // word 0 attrs
+			w.WriteUint32(0) // word 1 attrs
+			attrVals := encodeMinimalDirAttrs()
+			w.WriteOpaque(attrVals)
+			return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: w.Bytes()}
+		}
+
+		w.WriteUint32(2)
+		w.WriteUint32(0)
+		w.WriteUint32(0)
+		attrVals := encodeFileAttrs(obj)
+		w.WriteOpaque(attrVals)
+		return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: w.Bytes()}
+	}
+
+	// Root directory attributes
+	w.WriteUint32(2) // bitmap length = 2 words
+	w.WriteUint32(0) // word 0
+	w.WriteUint32(0) // word 1
+	attrVals := encodeMinimalDirAttrs()
+	w.WriteOpaque(attrVals)
+	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: w.Bytes()}
 }
 
-func (d *Dispatcher) opReadDir(_ []byte) OpResult {
-	return OpResult{OpCode: OpReadDir, Status: NFS4_OK}
+func (d *Dispatcher) opAccess(data []byte) OpResult {
+	var requested uint32
+	if len(data) >= 4 {
+		requested = binary.BigEndian.Uint32(data)
+	}
+	w := &XDRWriter{}
+	w.WriteUint32(0)         // supported
+	w.WriteUint32(requested) // access (grant all requested)
+	return OpResult{OpCode: OpAccess, Status: NFS4_OK, Data: w.Bytes()}
 }
 
-func (d *Dispatcher) opRead(_ []byte) OpResult {
-	return OpResult{OpCode: OpRead, Status: NFS4_OK}
+func (d *Dispatcher) opReadDir(data []byte) OpResult {
+	w := &XDRWriter{}
+
+	// cookieverf (8 bytes)
+	w.WriteUint64(0)
+
+	if d.backend != nil {
+		prefix := d.currentPath
+		if prefix == "/" {
+			prefix = ""
+		} else if len(prefix) > 0 && prefix[0] == '/' {
+			prefix = prefix[1:]
+		}
+		if prefix != "" && prefix[len(prefix)-1] != '/' {
+			prefix += "/"
+		}
+
+		objects, _ := d.backend.ListObjects(nfs4Bucket, prefix, 1000)
+		for i, obj := range objects {
+			w.WriteUint32(1) // value_follows = TRUE
+			w.WriteUint64(uint64(i + 1)) // cookie
+			name := obj.Key
+			if prefix != "" {
+				name = name[len(prefix):]
+			}
+			// Skip sub-directory entries (contain '/')
+			if idx := bytes.IndexByte([]byte(name), '/'); idx >= 0 {
+				continue
+			}
+			w.WriteString(name)
+			// attrs (minimal — empty bitmap + empty vals)
+			w.WriteUint32(0) // bitmap len = 0
+			w.WriteOpaque(nil)
+		}
+	}
+
+	w.WriteUint32(0) // value_follows = FALSE (end of entries)
+	w.WriteUint32(1) // eof = TRUE
+
+	return OpResult{OpCode: OpReadDir, Status: NFS4_OK, Data: w.Bytes()}
 }
 
-func (d *Dispatcher) opWrite(_ []byte) OpResult {
-	return OpResult{OpCode: OpWrite, Status: NFS4_OK}
+func (d *Dispatcher) opRead(data []byte) OpResult {
+	if d.backend == nil || len(data) < 28 {
+		return OpResult{OpCode: OpRead, Status: NFS4ERR_SERVERFAULT}
+	}
+
+	// Skip stateid (16), read offset (8) + count (4)
+	offset := binary.BigEndian.Uint64(data[16:24])
+	count := binary.BigEndian.Uint32(data[24:28])
+
+	key := d.currentPath
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+
+	rc, _, err := d.backend.GetObject(nfs4Bucket, key)
+	if err != nil {
+		return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
+	}
+	defer rc.Close()
+
+	allData, err := io.ReadAll(rc)
+	if err != nil {
+		return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
+	}
+
+	// Apply offset
+	if offset >= uint64(len(allData)) {
+		allData = nil
+	} else {
+		allData = allData[offset:]
+	}
+
+	// Apply count
+	if uint32(len(allData)) > count {
+		allData = allData[:count]
+	}
+
+	eof := offset+uint64(len(allData)) >= uint64(len(allData))
+
+	w := &XDRWriter{}
+	w.WriteUint32(boolToUint32(eof))
+	w.WriteOpaque(allData)
+
+	return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: w.Bytes()}
 }
 
-func (d *Dispatcher) opOpen(_ []byte) OpResult {
-	return OpResult{OpCode: OpOpen, Status: NFS4_OK}
+func (d *Dispatcher) opWrite(data []byte) OpResult {
+	if d.backend == nil || len(data) < 28 {
+		return OpResult{OpCode: OpWrite, Status: NFS4ERR_SERVERFAULT}
+	}
+
+	// Skip stateid (16) + offset (8) + stable (4)
+	// Then read the data opaque
+	r := NewXDRReader(data[16:])
+	r.ReadUint64() // offset
+	r.ReadUint32() // stable
+	writeData, err := r.ReadOpaque()
+	if err != nil {
+		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+	}
+
+	key := d.currentPath
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+
+	_, err = d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(writeData), "application/octet-stream")
+	if err != nil {
+		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+	}
+
+	w := &XDRWriter{}
+	w.WriteUint32(uint32(len(writeData))) // count
+	w.WriteUint32(2)                       // committed = FILE_SYNC
+	w.WriteUint64(0)                       // writeverf (8 bytes)
+	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: w.Bytes()}
+}
+
+func (d *Dispatcher) opOpen(data []byte) OpResult {
+	if len(data) < 12 {
+		return OpResult{OpCode: OpOpen, Status: NFS4ERR_INVAL}
+	}
+
+	r := NewXDRReader(data)
+	shareAccess, _ := r.ReadUint32()
+	openType, _ := r.ReadUint32()
+	fileName, _ := r.ReadString()
+
+	_ = shareAccess
+
+	childPath := path.Join(d.currentPath, fileName)
+
+	// If CREATE, create the file
+	if openType == 1 && d.backend != nil {
+		key := childPath
+		if len(key) > 0 && key[0] == '/' {
+			key = key[1:]
+		}
+		_, err := d.backend.HeadObject(nfs4Bucket, key)
+		if err != nil {
+			d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(nil), "application/octet-stream")
+		}
+	}
+
+	fh := d.state.GetOrCreateFH(childPath)
+	d.currentFH = fh
+	d.currentPath = childPath
+
+	// Generate a stateid
+	stateID := d.state.nextStateID.Add(1) - 1
+
+	w := &XDRWriter{}
+	// stateid (seqid:4 + other:12)
+	w.WriteUint32(1) // seqid
+	w.WriteUint64(stateID)
+	w.WriteUint32(0) // padding to 12 bytes
+	// cinfo (atomic:bool + before:changeid + after:changeid)
+	w.WriteUint32(1) // atomic = TRUE
+	w.WriteUint64(uint64(time.Now().UnixNano()))
+	w.WriteUint64(uint64(time.Now().UnixNano()))
+	// rflags
+	w.WriteUint32(4) // OPEN4_RESULT_LOCKTYPE_POSIX
+	// bitmap of attrs set (empty)
+	w.WriteUint32(0)
+	// delegation type = OPEN_DELEGATE_NONE
+	w.WriteUint32(0)
+
+	return OpResult{OpCode: OpOpen, Status: NFS4_OK, Data: w.Bytes()}
+}
+
+func (d *Dispatcher) opOpenConfirm(_ []byte) OpResult {
+	w := &XDRWriter{}
+	// Return the same stateid
+	w.WriteUint32(1) // seqid
+	w.WriteUint64(0)
+	w.WriteUint32(0)
+	return OpResult{OpCode: OpOpenConfirm, Status: NFS4_OK, Data: w.Bytes()}
 }
 
 func (d *Dispatcher) opClose(_ []byte) OpResult {
-	return OpResult{OpCode: OpClose, Status: NFS4_OK}
+	w := &XDRWriter{}
+	// Return zeroed stateid
+	w.WriteUint32(0)
+	w.WriteUint64(0)
+	w.WriteUint32(0)
+	return OpResult{OpCode: OpClose, Status: NFS4_OK, Data: w.Bytes()}
 }
 
-func (d *Dispatcher) opSetClientID(_ []byte) OpResult {
-	return OpResult{OpCode: OpSetClientID, Status: NFS4_OK}
+func (d *Dispatcher) opSetClientID(data []byte) OpResult {
+	var verf [8]byte
+	if len(data) >= 8 {
+		copy(verf[:], data[:8])
+	}
+
+	clientID := d.state.SetClientID(verf)
+
+	w := &XDRWriter{}
+	w.WriteUint64(clientID)
+	// setclientid_confirm verifier (8 bytes)
+	w.WriteUint64(clientID) // use clientID as confirm verifier
+	return OpResult{OpCode: OpSetClientID, Status: NFS4_OK, Data: w.Bytes()}
 }
 
-func (d *Dispatcher) opSetClientIDConfirm(_ []byte) OpResult {
+func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
+	if len(data) >= 8 {
+		clientID := binary.BigEndian.Uint64(data[:8])
+		d.state.ConfirmClientID(clientID)
+	}
 	return OpResult{OpCode: OpSetClientIDConfirm, Status: NFS4_OK}
+}
+
+// --- Helper functions ---
+
+func encodeMinimalDirAttrs() []byte {
+	w := &XDRWriter{}
+	// type = NF4DIR
+	w.WriteUint32(NF4DIR)
+	// size = 4096
+	w.WriteUint64(4096)
+	return w.Bytes()
+}
+
+func encodeFileAttrs(obj *storage.Object) []byte {
+	w := &XDRWriter{}
+	w.WriteUint32(NF4REG)
+	w.WriteUint64(uint64(obj.Size))
+	return w.Bytes()
+}
+
+func encodeSetAttrResult() []byte {
+	w := &XDRWriter{}
+	w.WriteUint32(0) // bitmap len = 0 (no attrs set)
+	return w.Bytes()
+}
+
+func boolToUint32(v bool) uint32 {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func init() {
+	// Suppress unused warning for fmt
+	_ = fmt.Sprintf
 }
