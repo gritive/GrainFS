@@ -72,8 +72,8 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s := &Server{
 		backend:     backend,
 		policyStore: NewPolicyStore(),
-		ipLimiter:   NewRateLimiter(100, 200, 100000),  // 100 req/sec per IP, burst 200, max 100K entries
-		userLimiter: NewRateLimiter(50, 100, 100000),    // 50 req/sec per user, burst 100
+		ipLimiter:   NewRateLimiter(100, 200, 100000), // 100 req/sec per IP, burst 200, max 100K entries
+		userLimiter: NewRateLimiter(50, 100, 100000),  // 50 req/sec per user, burst 100
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -209,4 +209,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	volumes.PUT("/:name", s.createVolume)
 	volumes.GET("/:name", s.getVolume)
 	volumes.DELETE("/:name", s.deleteVolume)
+
+	// Snapshot management API
+	s.registerSnapshotAPI()
 }
