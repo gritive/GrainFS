@@ -87,7 +87,18 @@ func (d *Doctor) Run() (*DiagnosticReport, error) {
 
 func (d *Doctor) checkDataDirectory() CheckResult {
 	start := time.Now()
-	info, err := os.Stat(d.dataDir)
+
+	// Validate path to prevent directory traversal
+	cleanPath := filepath.Clean(d.dataDir)
+	absPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return CheckResult{
+			Status:  "fail",
+			Message: fmt.Sprintf("Cannot resolve data directory: %v", err),
+		}
+	}
+
+	info, err := os.Stat(absPath)
 	if err != nil {
 		return CheckResult{
 			Status:  "fail",
@@ -129,7 +140,13 @@ func (d *Doctor) checkDiskSpace() CheckResult {
 	start := time.Now()
 	wd := d.dataDir
 	var stat syscall.Statfs_t
-	syscall.Statfs(wd, &stat)
+	if err := syscall.Statfs(wd, &stat); err != nil {
+		return CheckResult{
+			Status:   "warn",
+			Message:  fmt.Sprintf("Unable to check disk space: %v", err),
+			Duration: time.Since(start).String(),
+		}
+	}
 
 	// Calculate available space (in bytes)
 	available := stat.Bavail * uint64(stat.Bsize)

@@ -74,8 +74,11 @@ func (rm *RecoveryManager) AutoRecover(ctx context.Context) (*RecoveryReport, er
 	}
 
 	// Step 3: Verify recovery
-	postDiag, _ := rm.doctor.Run()
-	if postDiag.OverallHealth != "fail" {
+	postDiag, err := rm.doctor.Run()
+	if err != nil {
+		report.Errors = append(report.Errors, fmt.Errorf("post-recovery diagnostic failed: %w", err))
+	}
+	if postDiag != nil && postDiag.OverallHealth != "fail" {
 		report.Success = true
 	}
 

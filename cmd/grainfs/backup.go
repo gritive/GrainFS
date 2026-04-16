@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -34,7 +35,8 @@ Examples:
 			return fmt.Errorf("restic not found. Install with: brew install restic")
 		}
 
-		// Verify data directory exists
+		// Validate and clean data directory path
+		dataDir = filepath.Clean(dataDir)
 		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 			return fmt.Errorf("data directory not found: %s", dataDir)
 		}
