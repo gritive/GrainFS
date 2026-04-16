@@ -4,6 +4,7 @@ package nbd
 
 import (
 	"encoding/binary"
+	"io"
 	"net"
 	"testing"
 
@@ -29,13 +30,39 @@ func setupNBD(t *testing.T) (*Server, net.Conn) {
 	client, server := net.Pipe()
 	go srv.handleConn(server)
 
-	// Read handshake
-	hdr := make([]byte, 152)
-	_, err = client.Read(hdr)
+	// Step 1: Read server's newstyle header (18 bytes: magic + opt_magic + flags)
+	hdr := make([]byte, 18)
+	_, err = io.ReadFull(client, hdr)
 	require.NoError(t, err)
 
 	magic := binary.BigEndian.Uint64(hdr[0:8])
 	assert.Equal(t, nbdMagic, magic)
+	optMagic := binary.BigEndian.Uint64(hdr[8:16])
+	assert.Equal(t, nbdOptionMagic, optMagic)
+
+	// Step 2: Send client flags (4 bytes: NBD_FLAG_C_FIXED_NEWSTYLE)
+	var clientFlags [4]byte
+	binary.BigEndian.PutUint32(clientFlags[:], 1) // NBD_FLAG_C_FIXED_NEWSTYLE
+	_, err = client.Write(clientFlags[:])
+	require.NoError(t, err)
+
+	// Step 3: Send OPT_EXPORT_NAME to complete handshake
+	exportName := []byte("nbd-test")
+	optHdr := make([]byte, 16+len(exportName))
+	binary.BigEndian.PutUint64(optHdr[0:8], nbdOptionMagic)
+	binary.BigEndian.PutUint32(optHdr[8:12], nbdOptExportName)
+	binary.BigEndian.PutUint32(optHdr[12:16], uint32(len(exportName)))
+	copy(optHdr[16:], exportName)
+	_, err = client.Write(optHdr)
+	require.NoError(t, err)
+
+	// Step 4: Read export data reply (134 bytes: size + flags + zeros)
+	exportReply := make([]byte, 134)
+	_, err = io.ReadFull(client, exportReply)
+	require.NoError(t, err)
+
+	exportSize := binary.BigEndian.Uint64(exportReply[0:8])
+	assert.Equal(t, uint64(1024*1024), exportSize)
 
 	t.Cleanup(func() {
 		client.Close()
@@ -66,9 +93,9 @@ func TestNBDWriteRead(t *testing.T) {
 	_, err := conn.Write(writeReq)
 	require.NoError(t, err)
 
-	// Read write reply
+	// Read write reply (use io.ReadFull to avoid partial reads on pipe)
 	reply := make([]byte, 16)
-	_, err = conn.Read(reply)
+	_, err = io.ReadFull(conn, reply)
 	require.NoError(t, err)
 	assert.Equal(t, nbdReplyMagic, binary.BigEndian.Uint32(reply[0:4]))
 	assert.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]))
@@ -85,9 +112,9 @@ func TestNBDWriteRead(t *testing.T) {
 	_, err = conn.Write(readReq)
 	require.NoError(t, err)
 
-	// Read reply header + data
+	// Read reply header + data (use io.ReadFull to avoid partial reads on pipe)
 	replyBuf := make([]byte, 16+len(data))
-	_, err = conn.Read(replyBuf)
+	_, err = io.ReadFull(conn, replyBuf)
 	require.NoError(t, err)
 	assert.Equal(t, nbdReplyMagic, binary.BigEndian.Uint32(replyBuf[0:4]))
 	assert.Equal(t, data, replyBuf[16:])
