@@ -3,8 +3,19 @@
 ## Deferred Scope (Post-Phase 1)
 
 ### Production Hardening
-- [ ] Production deployment runbook
-- [ ] Data loss scenario drills (manual testing)
+- [x] Production deployment runbook → See `docs/RUNBOOK.md`
+- [x] Data loss scenario drills (manual testing) → See `docs/DRILL_MANUAL.md`
+
+**Completion Date:** 2026-04-17
+**Documentation:**
+- Production Deployment Runbook: `docs/RUNBOOK.md`
+- Drill Manual (7 scenarios): `docs/DRILL_MANUAL.md`
+- Learnings Template: `docs/DISASTER_RECOVERY.md`
+- Implementation Plan: `docs/superpowers/plans/2026-04-17-post-phase1-operational-readiness.md`
+
+**Status:** Documentation complete, drill execution pending (manual execution required)
+
+**Plan:** Post-Phase 1 Operational Readiness (1 week)
 
 ### Performance Optimization (Phase 2)
 - [ ] NFSv4 buffer optimization (io.Copy)
