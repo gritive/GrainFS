@@ -1,0 +1,92 @@
+groups:
+  - name: grainfs_alerts
+    interval: 30s
+    rules:
+      # SEV1: Page immediately
+      - alert: GrainFSDown
+        expr: up{job="grainfs"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          tier: sev1
+        annotations:
+          summary: "GrainFS instance down"
+          description: "GrainFS instance {{ $labels.instance }} has been down for more than 5 minutes."
+
+      - alert: GrainFSHighErrorRate
+        expr: |
+          sum(rate(grainfs_http_requests_total{status=~"5.."}[5m])) /
+          sum(rate(grainfs_http_requests_total[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          tier: sev1
+        annotations:
+          summary: "GrainFS high error rate"
+          description: "GrainFS {{ $labels.instance }} error rate is {{ $value | humanizePercentage }} (> 1%)."
+
+      - alert: GrainFSDataLossDetected
+        expr: increase(grainfs_objects_lost_total[5m]) > 0
+        labels:
+          severity: critical
+          tier: sev1
+        annotations:
+          summary: "GrainFS data loss detected"
+          description: "Data loss detected on {{ $labels.instance }}. Immediate investigation required."
+
+      # SEV2: Page within 15 minutes
+      - alert: GrainFSDegraded
+        expr: |
+          sum(rate(grainfs_http_requests_total{status=~"5.."}[5m])) /
+          sum(rate(grainfs_http_requests_total[5m])) > 0.005
+        for: 15m
+        labels:
+          severity: warning
+          tier: sev2
+        annotations:
+          summary: "GrainFS degraded performance"
+          description: "GrainFS {{ $labels.instance }} error rate is {{ $value | humanizePercentage }} (> 0.5%)."
+
+      - alert: GrainFSHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(grainfs_http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          tier: sev2
+        annotations:
+          summary: "GrainFS high latency"
+          description: "GrainFS {{ $labels.instance }} P99 latency is {{ $value }}s (> 500ms)."
+
+      - alert: GrainFSNodeUnhealthy
+        expr: grainfs_peer_healthy == 0
+        for: 5m
+        labels:
+          severity: warning
+          tier: sev2
+        annotations:
+          summary: "GrainFS peer unhealthy"
+          description: "Peer {{ $labels.peer }} has been unhealthy for more than 5 minutes."
+
+      # SEV3: Address within 1 hour
+      - alert: GrainFSDiskSpaceHigh
+        expr: grainfs_disk_usage_percent > 80
+        for: 30m
+        labels:
+          severity: info
+          tier: sev3
+        annotations:
+          summary: "GrainFS disk space high"
+          description: "GrainFS {{ $labels.instance }} disk usage is {{ $value }}% (> 80%)."
+
+      - alert: GrainFSUnderReplicatedShards
+        expr: grainfs_under_replicated_shards > 0
+        for: 30m
+        labels:
+          severity: info
+          tier: sev3
+        annotations:
+          summary: "GrainFS under-replicated shards"
+          description: "GrainFS has {{ $value }} under-replicated shards for more than 30 minutes."
