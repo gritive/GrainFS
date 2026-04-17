@@ -188,6 +188,30 @@ func (cb *CachedBackend) Unwrap() Backend {
 	return cb.Backend
 }
 
+// ListAllObjects implements Snapshotable by delegating to the inner backend.
+func (cb *CachedBackend) ListAllObjects() ([]SnapshotObject, error) {
+	if snap, ok := cb.Backend.(Snapshotable); ok {
+		return snap.ListAllObjects()
+	}
+	return nil, ErrSnapshotNotSupported
+}
+
+// RestoreObjects implements Snapshotable and invalidates the full cache after restore.
+func (cb *CachedBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlob, error) {
+	if snap, ok := cb.Backend.(Snapshotable); ok {
+		count, stale, err := snap.RestoreObjects(objects)
+		if err == nil {
+			cb.mu.Lock()
+			cb.entries = make(map[string]*lruNode)
+			cb.head, cb.tail = nil, nil
+			cb.usedBytes = 0
+			cb.mu.Unlock()
+		}
+		return count, stale, err
+	}
+	return 0, nil, ErrSnapshotNotSupported
+}
+
 // InvalidateKey removes a cache entry for the given bucket/key.
 // This is the public API used by cluster cache invalidation (OnApply callback).
 func (cb *CachedBackend) InvalidateKey(bucket, key string) {

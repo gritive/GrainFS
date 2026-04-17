@@ -1,6 +1,12 @@
 package storage
 
-import "io"
+import (
+	"errors"
+	"io"
+)
+
+// ErrSnapshotNotSupported is returned when the backend does not implement Snapshotable.
+var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend")
 
 // Object represents a stored object with metadata.
 type Object struct {
@@ -32,6 +38,31 @@ type Part struct {
 // read+write if the backend does not implement Copier.
 type Copier interface {
 	CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error)
+}
+
+// SnapshotObject is a point-in-time metadata record for a stored object.
+type SnapshotObject struct {
+	Bucket      string `json:"bucket"`
+	Key         string `json:"key"`
+	ETag        string `json:"etag"`
+	Size        int64  `json:"size"`
+	ContentType string `json:"content_type"`
+	Modified    int64  `json:"modified"`
+}
+
+// StaleBlob reports an object whose blob data was not found during restore.
+type StaleBlob struct {
+	Bucket       string `json:"bucket"`
+	Key          string `json:"key"`
+	ExpectedETag string `json:"expected_etag"`
+}
+
+// Snapshotable is an optional interface for backends that support metadata snapshots.
+// ListAllObjects enumerates every object across all buckets.
+// RestoreObjects replaces the current metadata state with the given snapshot objects.
+type Snapshotable interface {
+	ListAllObjects() ([]SnapshotObject, error)
+	RestoreObjects(objects []SnapshotObject) (restoredCount int, staleBlobs []StaleBlob, err error)
 }
 
 // Backend defines the storage operations for GrainFS.

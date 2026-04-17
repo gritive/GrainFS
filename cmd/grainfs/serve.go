@@ -155,6 +155,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 	}
 	opts = append(opts, server.WithJoinCluster(joinFn))
+	opts = append(opts, server.WithDataDir(dataDir))
 
 	srv := server.New(addr, swappable, opts...)
 	go func() {

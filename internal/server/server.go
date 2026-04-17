@@ -33,6 +33,7 @@ type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend     storage.Backend
+	dataDir     string
 	verifier    *s3auth.Verifier
 	hertz       *server.Hertz
 	volMgr      *volume.Manager
@@ -64,6 +65,13 @@ func WithClusterInfo(ci ClusterInfo) Option {
 func WithJoinCluster(fn JoinClusterFunc) Option {
 	return func(s *Server) {
 		s.joinCluster = fn
+	}
+}
+
+// WithDataDir sets the data directory used for snapshot storage.
+func WithDataDir(dir string) Option {
+	return func(s *Server) {
+		s.dataDir = dir
 	}
 }
 
@@ -226,7 +234,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	volumes.DELETE("/:name", s.deleteVolume)
 
 	// Snapshot management API
-	s.registerSnapshotAPI()
+	s.registerSnapshotAPI(h)
 
 	// Admin API for testing and operations
 	s.registerAdminAPI(h)
