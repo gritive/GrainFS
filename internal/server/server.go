@@ -236,6 +236,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	// Snapshot management API
 	s.registerSnapshotAPI(h)
 
+	// PITR (Point-in-Time Recovery) API
+	s.registerPITRAPI(h)
+
 	// Admin API for testing and operations
 	s.registerAdminAPI(h)
 }

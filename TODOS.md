@@ -9,15 +9,15 @@
 ## Phase 12: Data Safety (우선순위 순)
 
 1. [x] panic recovery (Hertz middleware + NBD goroutine)
-2. [ ] http file serving — CDN origin용 (getObject 확장: Cache-Control, ETag, If-None-Match)
+2. [x] http file serving — CDN origin용 (getObject 확장: Cache-Control, ETag, If-None-Match)
 3. [ ] `grainfs cluster status` CLI 명령 (Raft leader/term/peer lag 출력)
 4. [ ] split brain monitoring
-5. [ ] snapshot (user-facing) — snapshot_api.go 플레이스홀더 구현
-6. [ ] WAL (data-plane, Raft WAL과 별개) + PITR
+5. [x] snapshot (user-facing) — snapshot_api.go 플레이스홀더 구현
+6. [x] WAL (data-plane, Raft WAL과 별개) + PITR
 7. [ ] automated snapshot and PITR
 8. [ ] migration: Pull-through Cache (MinIO→GrainFS)
 9. [ ] migration: injector
-10. [ ] NFS null auth 경고 — serve 시작 시 stdout 출력
+10. [x] NFS null auth 경고 — serve 시작 시 stdout 출력
 
 ## Phase 13: Operations
 

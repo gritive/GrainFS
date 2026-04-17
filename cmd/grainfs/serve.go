@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/nfsserver"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
+	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -124,6 +125,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// Wrap with read cache
 		backend = storage.NewCachedBackend(backend)
 
+		// Wrap with WAL for PITR support
+		walDir := filepath.Join(dataDir, "wal")
+		w, err := wal.Open(walDir)
+		if err != nil {
+			return fmt.Errorf("open WAL: %w", err)
+		}
+		defer w.Close()
+		backend = wal.NewBackend(backend, w)
+
 		mode := "solo"
 		if ecEnabled {
 			mode = "solo-ec"
@@ -167,6 +177,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	// Start NFS server if requested
 	var nfsSrv *nfsserver.Server
 	if nfsPort > 0 {
+		fmt.Println("WARNING: NFS null auth enabled — all NFS access is unauthenticated")
 		const defaultVolName = "default"
 		const defaultVolSize = 1024 * 1024 * 1024 // 1G
 

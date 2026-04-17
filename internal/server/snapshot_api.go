@@ -35,7 +35,8 @@ func (s *Server) snapshotManager() (*snapshot.Manager, error) {
 		return nil, fmt.Errorf("backend does not support snapshots")
 	}
 	dir := filepath.Join(s.dataDir, "snapshots")
-	return snapshot.NewManager(dir, snap)
+	walDir := filepath.Join(s.dataDir, "wal")
+	return snapshot.NewManager(dir, snap, walDir)
 }
 
 // POST /admin/snapshots

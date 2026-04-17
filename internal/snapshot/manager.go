@@ -13,20 +13,28 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// WALProvider is an optional interface for backends that expose a WAL offset.
+// If the backend implements this, snapshot creation records the WAL anchor.
+type WALProvider interface {
+	WALOffset() uint64
+}
+
 // Manager manages snapshot creation, listing, restore, and deletion.
 type Manager struct {
 	dir     string
 	backend storage.Snapshotable
 	nextSeq atomic.Uint64
+	walDir  string // optional: path to WAL directory for PITR
 }
 
 // NewManager creates a Manager backed by the given snapshotable backend.
 // snapshotDir is the directory where snapshot files are stored.
-func NewManager(snapshotDir string, backend storage.Snapshotable) (*Manager, error) {
+// walDir is optional: if non-empty, enables PITR via WAL replay.
+func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string) (*Manager, error) {
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
-	m := &Manager{dir: snapshotDir, backend: backend}
+	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir}
 	// Seed nextSeq from existing snapshots
 	snaps, err := m.List()
 	if err != nil {
@@ -62,11 +70,17 @@ func (m *Manager) Create(reason string) (*Snapshot, error) {
 	}
 	sort.Strings(buckets)
 
+	// Record WAL offset before listing objects so the anchor is conservative
+	var walOffset uint64
+	if wp, ok := m.backend.(WALProvider); ok {
+		walOffset = wp.WALOffset()
+	}
+
 	seq := m.nextSeq.Add(1)
 	snap := &Snapshot{
 		Seq:         seq,
 		Timestamp:   time.Now().UTC(),
-		WALOffset:   0,
+		WALOffset:   walOffset,
 		Reason:      reason,
 		ObjectCount: len(objects),
 		SizeBytes:   totalSize,
