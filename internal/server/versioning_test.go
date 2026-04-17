@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -127,6 +128,55 @@ func TestPutBucketVersioning_BucketNotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+// TestGetObjectByVersionID_EC verifies GET /<bucket>/<key>?versionId= returns specific version.
+func TestGetObjectByVersionID_EC(t *testing.T) {
+	base := setupECTestServer(t)
+
+	// Create bucket with versioning enabled
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(body))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// PUT v1
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("content-v1"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	versionID1 := resp.Header.Get("X-Amz-Version-Id")
+	resp.Body.Close()
+	require.NotEmpty(t, versionID1)
+
+	// PUT v2
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("content-v2"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	versionID2 := resp.Header.Get("X-Amz-Version-Id")
+	resp.Body.Close()
+	require.NotEmpty(t, versionID2)
+	assert.NotEqual(t, versionID1, versionID2)
+
+	// GET latest → v2
+	resp, err = http.Get(base + "/ver-bucket/obj.txt")
+	require.NoError(t, err)
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, "content-v2", string(got))
+
+	// GET ?versionId=v1 → v1
+	resp, err = http.Get(base + "/ver-bucket/obj.txt?versionId=" + versionID1)
+	require.NoError(t, err)
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "content-v1", string(got))
 }
 
 // Ensure LocalBackend still satisfies storage.Backend (compilation check).

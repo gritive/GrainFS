@@ -581,6 +581,52 @@ func (b *ECBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Objec
 	return io.NopCloser(bytes.NewReader(data)), obj, nil
 }
 
+// GetObjectVersion retrieves a specific version of an object by versionId.
+func (b *ECBackend) GetObjectVersion(bucket, key, versionId string) (io.ReadCloser, *storage.Object, error) {
+	if err := b.HeadBucket(bucket); err != nil {
+		return nil, nil, err
+	}
+
+	var meta *ecObjectMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKeyV(bucket, key, versionId))
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			var unmarshalErr error
+			meta, unmarshalErr = unmarshalECObjectMeta(val)
+			return unmarshalErr
+		})
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var data []byte
+	if meta.DataShards == 0 {
+		data, err = b.readPlain(bucket, key, versionId)
+	} else {
+		data, err = b.readAndDecode(bucket, key, meta)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	obj := &storage.Object{
+		Key:          meta.Key,
+		Size:         meta.Size,
+		ContentType:  meta.ContentType,
+		ETag:         meta.ETag,
+		LastModified: meta.LastModified,
+		VersionID:    versionId,
+	}
+	return io.NopCloser(bytes.NewReader(data)), obj, nil
+}
+
 func (b *ECBackend) readPlain(bucket, key, versionId string) ([]byte, error) {
 	var hashInput string
 	if versionId != "" {

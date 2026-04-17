@@ -342,14 +342,48 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 	metrics.StorageBytesTotal.Add(float64(obj.Size))
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
+	if obj.VersionID != "" {
+		c.Header("X-Amz-Version-Id", obj.VersionID)
+	}
 	c.Status(consts.StatusOK)
+}
+
+// VersionedGetter is an optional interface for backends supporting retrieval by versionId.
+type VersionedGetter interface {
+	GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error)
 }
 
 func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
-	rc, obj, err := s.backend.GetObject(bucket, key)
+	versionID := string(c.QueryArgs().Peek("versionId"))
+	var rc io.ReadCloser
+	var obj *storage.Object
+	var err error
+
+	if versionID != "" {
+		if vg, ok := s.backend.(VersionedGetter); ok {
+			rc, obj, err = vg.GetObjectVersion(bucket, key, versionID)
+		} else {
+			// Walk unwrappers
+			b := s.backend
+			for b != nil {
+				if vg, ok := b.(VersionedGetter); ok {
+					rc, obj, err = vg.GetObjectVersion(bucket, key, versionID)
+					break
+				}
+				u, ok := b.(unwrapper)
+				if !ok {
+					writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versionId not supported by this backend")
+					return
+				}
+				b = u.Unwrap()
+			}
+		}
+	} else {
+		rc, obj, err = s.backend.GetObject(bucket, key)
+	}
 	if err != nil {
 		mapError(c, err)
 		return
@@ -365,6 +399,9 @@ func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	if obj.VersionID != "" {
+		c.Header("X-Amz-Version-Id", obj.VersionID)
+	}
 	if s.verifier != nil {
 		c.Header("Cache-Control", "private, no-store")
 	} else {
