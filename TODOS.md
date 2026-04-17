@@ -10,7 +10,7 @@
 
 ## Phase 13: Operations
 
-- [ ] dashboard: raft health, badgerdb vlog gc status, erasure coding status
+- [x] dashboard: raft health, badgerdb vlog gc status, erasure coding status
 - [ ] dashboard: hot config change, log tailing
 - [ ] dashboard: on-demand metric with sse
 - [ ] dashboard: snapshot, backup manage
