@@ -14,7 +14,7 @@
 4. [x] split brain monitoring
 5. [x] snapshot (user-facing) — snapshot_api.go 플레이스홀더 구현
 6. [x] WAL (data-plane, Raft WAL과 별개) + PITR
-7. [ ] automated snapshot and PITR
+7. [x] automated snapshot and PITR
 8. [ ] migration: Pull-through Cache (MinIO→GrainFS)
 9. [ ] migration: injector
 10. [x] NFS null auth 경고 — serve 시작 시 stdout 출력
