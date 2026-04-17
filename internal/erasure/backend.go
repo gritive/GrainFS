@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/md5"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -28,14 +31,42 @@ type ECBackend struct {
 	db         *badger.DB
 	codec      *Codec
 	encryptor  Encryptor
-	writeLocks sync.Map // map[string]*sync.Mutex for per-key write serialization
+	writeLocks sync.Map // map[string]*sync.RWMutex for per-key serialization
 }
 
 func (b *ECBackend) acquireWriteLock(bucket, key string) func() {
 	lockKey := bucket + "\x00" + key
-	mu, _ := b.writeLocks.LoadOrStore(lockKey, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	return func() { mu.(*sync.Mutex).Unlock() }
+	mu, _ := b.writeLocks.LoadOrStore(lockKey, &sync.RWMutex{})
+	mu.(*sync.RWMutex).Lock()
+	return func() { mu.(*sync.RWMutex).Unlock() }
+}
+
+func (b *ECBackend) acquireReadLock(bucket, key string) func() {
+	lockKey := bucket + "\x00" + key
+	mu, _ := b.writeLocks.LoadOrStore(lockKey, &sync.RWMutex{})
+	mu.(*sync.RWMutex).RLock()
+	return func() { mu.(*sync.RWMutex).RUnlock() }
+}
+
+// shardWithCRC appends a 4-byte CRC32-IEEE footer to data.
+func shardWithCRC(data []byte) []byte {
+	out := make([]byte, len(data)+4)
+	copy(out, data)
+	binary.LittleEndian.PutUint32(out[len(data):], crc32.ChecksumIEEE(data))
+	return out
+}
+
+// stripVerifyCRC verifies the 4-byte CRC32-IEEE footer and returns payload.
+func stripVerifyCRC(data []byte) ([]byte, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("shard too short for CRC footer (%d bytes)", len(data))
+	}
+	payload := data[:len(data)-4]
+	stored := binary.LittleEndian.Uint32(data[len(data)-4:])
+	if crc32.ChecksumIEEE(payload) != stored {
+		return nil, fmt.Errorf("CRC mismatch")
+	}
+	return payload, nil
 }
 
 // Encryptor is an optional interface for at-rest encryption.
@@ -337,9 +368,9 @@ func (b *ECBackend) putObjectData(bucket, key string, data []byte, contentType s
 	}
 
 	for i, shard := range shards {
-		data := shard
+		data := shardWithCRC(shard) // CRC32 footer (Eng Review #3)
 		if b.encryptor != nil {
-			encrypted, err := b.encryptor.Encrypt(shard)
+			encrypted, err := b.encryptor.Encrypt(data)
 			if err != nil {
 				os.RemoveAll(shardDir)
 				return nil, fmt.Errorf("encrypt shard %d: %w", i, err)
@@ -668,6 +699,139 @@ func (b *ECBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
 	})
 }
 
+// --- Scrubbable interface (for scrubber package) ---
+
+// ObjectExists reports whether an object's metadata still exists in BadgerDB.
+// Used by the scrubber to detect DeleteObject races (Eng Review #9).
+func (b *ECBackend) ObjectExists(bucket, key string) (bool, error) {
+	_, err := b.HeadObject(bucket, key)
+	if err == storage.ErrObjectNotFound || err == storage.ErrBucketNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ScanObjects streams EC object records for a bucket (DataShards > 0 only).
+// Scrubber API contract — do not change without bumping scrubber version.
+func (b *ECBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
+	if err := b.HeadBucket(bucket); err != nil {
+		return nil, err
+	}
+	ch := make(chan scrubber.ObjectRecord, 64)
+	go func() {
+		defer close(ch)
+		_ = b.db.View(func(txn *badger.Txn) error {
+			prefix := []byte("obj:" + bucket + "/")
+			it := txn.NewIterator(badger.DefaultIteratorOptions)
+			defer it.Close()
+			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+				var meta *ecObjectMeta
+				if err := it.Item().Value(func(val []byte) error {
+					var err error
+					meta, err = unmarshalECObjectMeta(val)
+					return err
+				}); err != nil {
+					continue
+				}
+				if meta.DataShards <= 0 { // plain objects skipped (Eng Review #10)
+					continue
+				}
+				rawKey := string(it.Item().Key())
+				key := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
+				ch <- scrubber.ObjectRecord{
+					Bucket:       bucket,
+					Key:          key,
+					DataShards:   meta.DataShards,
+					ParityShards: meta.ParityShards,
+					ETag:         meta.ETag,
+				}
+			}
+			return nil
+		})
+	}()
+	return ch, nil
+}
+
+// ShardPaths returns all shard file paths for an object.
+// Scrubber API contract — do not change without bumping scrubber version.
+func (b *ECBackend) ShardPaths(bucket, key string, totalShards int) []string {
+	paths := make([]string, totalShards)
+	for i := range paths {
+		paths[i] = b.shardPath(bucket, key, i)
+	}
+	return paths
+}
+
+// ReadShard reads a shard, decrypts it (if encryption is enabled), and verifies
+// the CRC32 footer. Uses a read lock to allow concurrent reads alongside client GETs.
+func (b *ECBackend) ReadShard(bucket, key, path string) ([]byte, error) {
+	unlock := b.acquireReadLock(bucket, key)
+	defer unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if b.encryptor != nil {
+		data, err = b.encryptor.Decrypt(data)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt shard: %w", err)
+		}
+	}
+	return stripVerifyCRC(data)
+}
+
+// WriteShard atomically writes a shard with CRC32 footer using tmp+fsync+rename
+// to protect against partial writes on power loss (Eng Review #4).
+// Uses an exclusive lock to prevent concurrent writes.
+func (b *ECBackend) WriteShard(bucket, key, path string, data []byte) error {
+	unlock := b.acquireWriteLock(bucket, key)
+	defer unlock()
+
+	toWrite := shardWithCRC(data)
+	if b.encryptor != nil {
+		var err error
+		toWrite, err = b.encryptor.Encrypt(toWrite)
+		if err != nil {
+			return fmt.Errorf("encrypt shard: %w", err)
+		}
+	}
+
+	// Crash-safe: write to .tmp, fsync, rename, then fsync parent dir
+	tmpPath := path + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create tmp shard: %w", err)
+	}
+	if _, err := f.Write(toWrite); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write tmp shard: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("sync tmp shard: %w", err)
+	}
+	f.Close()
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename shard: %w", err)
+	}
+
+	// Fsync parent directory to persist the rename
+	dir := filepath.Dir(path)
+	if df, err := os.Open(dir); err == nil {
+		_ = df.Sync()
+		df.Close()
+	}
+	return nil
+}
+
 // --- Internal helpers ---
 
 func (b *ECBackend) getObjectMeta(bucket, key string) (*ecObjectMeta, error) {
@@ -819,20 +983,24 @@ func (b *ECBackend) readAndDecode(bucket, key string, meta *ecObjectMeta) ([]byt
 		path := b.shardPath(bucket, key, i)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			// Missing shard — leave nil for reconstruction
-			shards[i] = nil
+			shards[i] = nil // missing shard — leave nil for reconstruction
 			continue
 		}
 		if b.encryptor != nil {
 			decrypted, err := b.encryptor.Decrypt(data)
 			if err != nil {
-				// Corrupted shard — treat as missing
-				shards[i] = nil
+				shards[i] = nil // corrupted — treat as missing
 				continue
 			}
 			data = decrypted
 		}
-		shards[i] = data
+		// Verify CRC32 footer and strip it
+		payload, err := stripVerifyCRC(data)
+		if err != nil {
+			shards[i] = nil // bad CRC — treat as missing for reconstruction
+			continue
+		}
+		shards[i] = payload
 	}
 
 	return codec.Decode(shards, meta.Size)

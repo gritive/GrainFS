@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +61,41 @@ func startECServer(t *testing.T) (*s3.Client, string, func()) {
 	}
 
 	return client, dir, cleanup
+}
+
+// startECServerWithScrub starts an EC server with a custom scrub interval.
+// Returns S3 client, data dir, base URL, and cleanup.
+func startECServerWithScrub(t *testing.T, scrubInterval time.Duration) (*s3.Client, string, string, func()) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "grainfs-ec-scrub-e2e-*")
+	require.NoError(t, err)
+
+	binary := getBinary()
+	port := freePort()
+
+	cmd := exec.Command(binary, "serve",
+		"--data", dir,
+		"--port", fmt.Sprintf("%d", port),
+		"--ec",
+		"--no-encryption",
+		"--scrub-interval", scrubInterval.String(),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start())
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	waitForPort(port, 5*time.Second)
+
+	client := newS3Client(baseURL)
+
+	cleanup := func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+		os.RemoveAll(dir)
+	}
+
+	return client, dir, baseURL, cleanup
 }
 
 func TestEC_BasicPutGet(t *testing.T) {
@@ -360,4 +397,77 @@ func TestEC_DeleteAndOverwrite(t *testing.T) {
 
 	body, _ := io.ReadAll(getOut.Body)
 	assert.Equal(t, "version2", string(body))
+}
+
+// TestScrubber_AutoRepair verifies that the background scrubber detects a
+// deleted shard and automatically repairs it, restoring the full shard set.
+func TestScrubber_AutoRepair(t *testing.T) {
+	// Use a short scrub interval so the test doesn't take long
+	const scrubInterval = 150 * time.Millisecond
+	client, dataDir, baseURL, cleanup := startECServerWithScrub(t, scrubInterval)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String("scrub-test"),
+	})
+	require.NoError(t, err)
+
+	// Use content large enough to trigger EC encoding (not plain storage)
+	content := bytes.Repeat([]byte("scrubber auto-repair test data "), 200) // ~6KB
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("scrub-test"),
+		Key:    aws.String("file.bin"),
+		Body:   bytes.NewReader(content),
+	})
+	require.NoError(t, err)
+
+	// Verify 6 shards exist
+	dir := shardDir(dataDir, "scrub-test", "file.bin")
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 6, "expected 6 EC shards")
+
+	// Delete shard 1 to simulate disk failure
+	require.NoError(t, os.Remove(filepath.Join(dir, "01")))
+	entries, _ = os.ReadDir(dir)
+	require.Len(t, entries, 5, "shard 01 should be deleted")
+
+	// Wait for scrubber to detect and repair the missing shard
+	deadline := time.Now().Add(3 * time.Second)
+	repaired := false
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		entries, _ = os.ReadDir(dir)
+		if len(entries) == 6 {
+			repaired = true
+			break
+		}
+	}
+	assert.True(t, repaired, "scrubber should restore shard 01 within 3s")
+
+	// S3 GET must still succeed
+	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("scrub-test"),
+		Key:    aws.String("file.bin"),
+	})
+	require.NoError(t, err, "S3 GET must succeed after scrub repair")
+	defer getOut.Body.Close()
+	got, _ := io.ReadAll(getOut.Body)
+	assert.Equal(t, content, got, "recovered data must match original")
+
+	// Verify /admin/health/scrub reports repaired > 0
+	resp, err := http.Get(baseURL + "/admin/health/scrub")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var stats struct {
+		Repaired  int64 `json:"repaired"`
+		Available bool  `json:"available"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&stats))
+	assert.True(t, stats.Available, "scrubber should be available")
+	assert.Greater(t, stats.Repaired, int64(0), "scrubber should have repaired at least 1 object")
 }

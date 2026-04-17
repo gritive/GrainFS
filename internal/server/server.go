@@ -15,6 +15,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -38,6 +39,7 @@ type Server struct {
 	backend     storage.Backend
 	dataDir     string
 	snapMgr     *snapshot.Manager
+	scrubber    *scrubber.BackgroundScrubber // nil if not using ECBackend
 	verifier    *s3auth.Verifier
 	hertz       *server.Hertz
 	volMgr      *volume.Manager
@@ -76,6 +78,13 @@ func WithJoinCluster(fn JoinClusterFunc) Option {
 func WithDataDir(dir string) Option {
 	return func(s *Server) {
 		s.dataDir = dir
+	}
+}
+
+// WithScrubber sets the background scrubber (only used with ECBackend).
+func WithScrubber(sc *scrubber.BackgroundScrubber) Option {
+	return func(s *Server) {
+		s.scrubber = sc
 	}
 }
 
@@ -274,6 +283,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// PITR (Point-in-Time Recovery) API
 	s.registerPITRAPI(h)
+
+	// Scrub health API
+	s.registerScrubAPI(h)
 
 	// Admin API for testing and operations
 	s.registerAdminAPI(h)

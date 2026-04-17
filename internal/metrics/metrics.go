@@ -111,4 +111,34 @@ var (
 		Name: "grainfs_split_brain_suspected",
 		Help: "1 if split brain is suspected (multiple leaders or large term divergence), 0 otherwise.",
 	})
+
+	// ScrubShardErrorsTotal counts shard errors (missing + corrupt) detected during scrubbing.
+	ScrubShardErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_shard_errors_total",
+		Help: "Total shard errors detected during scrubbing.",
+	})
+
+	// ScrubRepairedTotal counts objects successfully repaired by the scrubber.
+	ScrubRepairedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_repaired_total",
+		Help: "Total objects repaired by the scrubber.",
+	})
+
+	// ECDegradedTotal counts EC objects that could not be repaired (too many shards lost).
+	ECDegradedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_ec_degraded_total",
+		Help: "Total EC objects that could not be repaired.",
+	})
+
+	// ScrubObjectsCheckedTotal counts objects checked by the scrubber.
+	ScrubObjectsCheckedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_objects_checked_total",
+		Help: "Total objects checked by the scrubber.",
+	})
+
+	// ScrubSkippedOverCapTotal counts objects skipped because repair cap was reached.
+	ScrubSkippedOverCapTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_skipped_over_cap_total",
+		Help: "Total objects skipped because max_repairs_per_cycle was reached.",
+	})
 )
