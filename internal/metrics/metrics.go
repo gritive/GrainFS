@@ -87,4 +87,22 @@ var (
 		Name: "grainfs_cache_registry_size",
 		Help: "Current number of registered cache invalidators.",
 	})
+
+	// NFSv4BufferPoolGets tracks total buffer pool get operations by buffer size.
+	NFSv4BufferPoolGets = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_nfsv4_buffer_pool_gets_total",
+		Help: "Total number of buffer pool get operations.",
+	}, []string{"size"})
+
+	// NFSv4BufferPoolMisses tracks buffer pool misses (fallback allocations).
+	NFSv4BufferPoolMisses = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_nfsv4_buffer_pool_misses_total",
+		Help: "Total number of buffer pool misses (temporary allocations).",
+	}, []string{"size"})
+
+	// NFSv4BufferSizeInUse tracks current buffer size in use by pool type.
+	NFSv4BufferSizeInUse = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_nfsv4_buffer_size_bytes",
+		Help: "Current buffer size in use by pool type.",
+	}, []string{"size"})
 )

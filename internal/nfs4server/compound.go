@@ -300,34 +300,83 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		key = key[1:]
 	}
 
+	// 파일 크기 가져오기
+	obj, err := d.backend.HeadObject(nfs4Bucket, key)
+	if err != nil {
+		return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
+	}
+	fileSize := obj.Size
+
+	// 오프셋 이후의 남은 바이트 계산
+	remainingSize := fileSize
+	if offset < uint64(fileSize) {
+		remainingSize = fileSize - int64(offset)
+	} else {
+		// EOF 너머 읽기 - 빈 데이터와 eof=true 반환
+		w := &XDRWriter{}
+		w.WriteUint32(1) // eof = TRUE
+		w.WriteOpaque(nil)
+		return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: w.Bytes()}
+	}
+
+	// count가 지정된 경우 제한
+	if uint64(remainingSize) > uint64(count) {
+		remainingSize = int64(count)
+	}
+
+	// 스트리밍 읽기를 위해 객체 열기
 	rc, _, err := d.backend.GetObject(nfs4Bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
 	}
 	defer rc.Close()
 
-	allData, err := io.ReadAll(rc)
+	// 필요한 경우 오프셋으로 이동
+	if offset > 0 {
+		if seeker, ok := rc.(io.Seeker); ok {
+			_, err = seeker.Seek(int64(offset), io.SeekStart)
+			if err != nil {
+				rc.Close() // 명시적으로 닫아 resource leak 방지
+				return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
+			}
+		} else {
+			// Seek를 지원하지 않는 Reader - 데이터를 건너뛰기
+			discard := make([]byte, 4096)
+			remainingToSkip := int64(offset)
+			for remainingToSkip > 0 {
+				toSkip := remainingToSkip
+				if toSkip > int64(len(discard)) {
+					toSkip = int64(len(discard))
+				}
+				n, err := rc.Read(discard[:toSkip])
+				if err != nil {
+					rc.Close() // 명시적으로 닫아 resource leak 방지
+					return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
+				}
+				remainingToSkip -= int64(n)
+			}
+		}
+	}
+
+	// 버퍼에 데이터 읽기 (적응형 버퍼 사이징 사용)
+	buffer := &bytes.Buffer{}
+	_, err = bufferedCopy(buffer, rc, remainingSize)
 	if err != nil {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
 	}
 
-	// Apply offset
-	if offset >= uint64(len(allData)) {
-		allData = nil
-	} else {
-		allData = allData[offset:]
+	readData := buffer.Bytes()
+
+	// count 제한 적용 (이미 Seek로 offset은 적용됨)
+	if uint32(len(readData)) > count {
+		readData = readData[:count]
 	}
 
-	// Apply count
-	if uint32(len(allData)) > count {
-		allData = allData[:count]
-	}
-
-	eof := offset+uint64(len(allData)) >= uint64(len(allData))
+	eof := (offset + uint64(len(readData))) >= uint64(fileSize)
 
 	w := &XDRWriter{}
 	w.WriteUint32(boolToUint32(eof))
-	w.WriteOpaque(allData)
+	w.WriteOpaque(readData)
 
 	return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: w.Bytes()}
 }
@@ -347,11 +396,19 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 	}
 
+	// 쓰기 크기 검증 (NFSv4 사양은 단일 WRITE를 1MB로 제한)
+	const maxWriteSize = 1 * 1024 * 1024
+	if len(writeData) > maxWriteSize {
+		return OpResult{OpCode: OpWrite, Status: NFS4ERR_FBIG}
+	}
+
 	key := d.currentPath
 	if len(key) > 0 && key[0] == '/' {
 		key = key[1:]
 	}
 
+	// 추가 버퍼링 없이 직접 쓰기 (writeData는 이미 메모리에 있음)
+	// 대용량 쓰기의 경우 불필요한 복사를 피하므로 효율적
 	_, err = d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(writeData), "application/octet-stream")
 	if err != nil {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
