@@ -3,6 +3,7 @@
 ## [0.0.4] - 2026-04-18
 
 ### Added
+- **Bucket Versioning API (4a)** — `PUT /<bucket>?versioning`으로 버전 상태 설정(Enabled/Suspended), `GET /<bucket>?versioning`으로 현재 상태 조회. ECBackend에서 protobuf `BucketMeta.versioning_state` 필드로 영속화. 미지원 백엔드는 501.
 - **Dashboard health 엔드포인트** — `GET /admin/health/badger` (BadgerDB LSM/vlog 크기), `GET /admin/health/raft` (Raft node 상태, commit/applied index), `GET /admin/buckets/ec` (bucket별 EC 활성 여부). 모두 `localhostOnly()` 적용.
 - **CRC migration 구분 로깅** — 기존 CRC-없는 shard가 `scrub`에서 `Corrupt`가 아닌 `Migration` 슬라이스로 분류됨. `ErrCRCMissing`(레거시)과 `ErrCRCMismatch`(bit-rot) sentinel 구분. `grainfs_scrub_migration_rewrites_total` Prometheus 메트릭 추가.
 

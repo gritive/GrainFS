@@ -22,10 +22,11 @@ const (
 )
 
 type BucketMeta struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EcEnabled     bool                   `protobuf:"varint,1,opt,name=ec_enabled,json=ecEnabled,proto3" json:"ec_enabled,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	EcEnabled       bool                   `protobuf:"varint,1,opt,name=ec_enabled,json=ecEnabled,proto3" json:"ec_enabled,omitempty"`
+	VersioningState string                 `protobuf:"bytes,2,opt,name=versioning_state,json=versioningState,proto3" json:"versioning_state,omitempty"` // "Unversioned", "Enabled", "Suspended"
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *BucketMeta) Reset() {
@@ -63,6 +64,13 @@ func (x *BucketMeta) GetEcEnabled() bool {
 		return x.EcEnabled
 	}
 	return false
+}
+
+func (x *BucketMeta) GetVersioningState() string {
+	if x != nil {
+		return x.VersioningState
+	}
+	return ""
 }
 
 type ECObjectMeta struct {
@@ -245,11 +253,12 @@ var File_internal_erasure_erasurepb_erasure_proto protoreflect.FileDescriptor
 
 const file_internal_erasure_erasurepb_erasure_proto_rawDesc = "" +
 	"\n" +
-	"(internal/erasure/erasurepb/erasure.proto\x12\terasurepb\"+\n" +
+	"(internal/erasure/erasurepb/erasure.proto\x12\terasurepb\"V\n" +
 	"\n" +
 	"BucketMeta\x12\x1d\n" +
 	"\n" +
-	"ec_enabled\x18\x01 \x01(\bR\tecEnabled\"\xf5\x01\n" +
+	"ec_enabled\x18\x01 \x01(\bR\tecEnabled\x12)\n" +
+	"\x10versioning_state\x18\x02 \x01(\tR\x0fversioningState\"\xf5\x01\n" +
 	"\fECObjectMeta\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12!\n" +

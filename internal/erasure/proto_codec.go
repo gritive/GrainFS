@@ -15,7 +15,10 @@ type ecMultipartMeta struct {
 }
 
 func marshalBucketMeta(m *bucketMeta) ([]byte, error) {
-	return proto.Marshal(&pb.BucketMeta{EcEnabled: m.ECEnabled})
+	return proto.Marshal(&pb.BucketMeta{
+		EcEnabled:       m.ECEnabled,
+		VersioningState: m.VersioningState,
+	})
 }
 
 func unmarshalBucketMeta(data []byte) (*bucketMeta, error) {
@@ -23,7 +26,11 @@ func unmarshalBucketMeta(data []byte) (*bucketMeta, error) {
 	if err := proto.Unmarshal(data, &p); err != nil {
 		return nil, err
 	}
-	return &bucketMeta{ECEnabled: p.EcEnabled}, nil
+	state := p.VersioningState
+	if state == "" {
+		state = "Unversioned"
+	}
+	return &bucketMeta{ECEnabled: p.EcEnabled, VersioningState: state}, nil
 }
 
 func marshalECObjectMeta(m *ecObjectMeta) ([]byte, error) {

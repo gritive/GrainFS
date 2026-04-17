@@ -140,6 +140,12 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// PUT /:bucket?versioning — set versioning state
+	if c.QueryArgs().Has("versioning") {
+		s.putBucketVersioning(c, bucket)
+		return
+	}
+
 	// Check if this is an EC policy update: PUT /:bucket?ec=true|false
 	ecParam := string(c.QueryArgs().Peek("ec"))
 	if ecParam != "" {
@@ -232,12 +238,18 @@ func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 	c.Status(consts.StatusNoContent)
 }
 
-func (s *Server) listObjects(_ context.Context, c *app.RequestContext) {
+func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 
 	// GET /:bucket?policy — get bucket policy
 	if c.QueryArgs().Has("policy") {
 		s.getBucketPolicy(c, bucket)
+		return
+	}
+
+	// GET /:bucket?versioning — get versioning state
+	if c.QueryArgs().Has("versioning") {
+		s.getBucketVersioning(ctx, c, bucket)
 		return
 	}
 

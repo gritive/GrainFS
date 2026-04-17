@@ -150,7 +150,8 @@ func (b *ECBackend) shardPath(bucket, key string, idx int) string {
 
 // bucketMeta stores per-bucket configuration.
 type bucketMeta struct {
-	ECEnabled bool
+	ECEnabled        bool
+	VersioningState  string // "Unversioned" (default), "Enabled", "Suspended"
 }
 
 func bucketKey(bucket string) []byte { return []byte("bucket:" + bucket) }
@@ -188,16 +189,12 @@ func (b *ECBackend) CreateBucket(bucket string) error {
 func (b *ECBackend) SetBucketECPolicy(bucket string, ecEnabled bool) error {
 	return b.db.Update(func(txn *badger.Txn) error {
 		bk := bucketKey(bucket)
-		_, err := txn.Get(bk)
-		if err == badger.ErrKeyNotFound {
-			return storage.ErrBucketNotFound
-		}
+		meta, err := readBucketMeta(txn, bk)
 		if err != nil {
 			return err
 		}
-
-		meta := bucketMeta{ECEnabled: ecEnabled}
-		metaBytes, err := marshalBucketMeta(&meta)
+		meta.ECEnabled = ecEnabled
+		metaBytes, err := marshalBucketMeta(meta)
 		if err != nil {
 			return fmt.Errorf("marshal bucket meta: %w", err)
 		}
@@ -205,27 +202,75 @@ func (b *ECBackend) SetBucketECPolicy(bucket string, ecEnabled bool) error {
 	})
 }
 
-// GetBucketECPolicy returns whether EC is enabled for a bucket.
-func (b *ECBackend) GetBucketECPolicy(bucket string) (bool, error) {
-	var meta bucketMeta
-	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(bucketKey(bucket))
-		if err == badger.ErrKeyNotFound {
-			return storage.ErrBucketNotFound
-		}
+// SetBucketVersioning sets the versioning state for a bucket ("Unversioned" or "Enabled").
+func (b *ECBackend) SetBucketVersioning(bucket, state string) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		bk := bucketKey(bucket)
+		meta, err := readBucketMeta(txn, bk)
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalBucketMeta(val)
-			if err != nil {
-				// Legacy bucket with no EC metadata: default to EC enabled
-				meta.ECEnabled = true
-				return nil
-			}
-			meta = *m
+		meta.VersioningState = state
+		metaBytes, err := marshalBucketMeta(meta)
+		if err != nil {
+			return fmt.Errorf("marshal bucket meta: %w", err)
+		}
+		return txn.Set(bk, metaBytes)
+	})
+}
+
+// GetBucketVersioning returns the versioning state for a bucket.
+func (b *ECBackend) GetBucketVersioning(bucket string) (string, error) {
+	var meta *bucketMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		bk := bucketKey(bucket)
+		m, err := readBucketMeta(txn, bk)
+		if err != nil {
+			return err
+		}
+		meta = m
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return meta.VersioningState, nil
+}
+
+// readBucketMeta reads and unmarshals bucket metadata from a BadgerDB transaction.
+func readBucketMeta(txn *badger.Txn, bk []byte) (*bucketMeta, error) {
+	item, err := txn.Get(bk)
+	if err == badger.ErrKeyNotFound {
+		return nil, storage.ErrBucketNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var meta *bucketMeta
+	if verr := item.Value(func(val []byte) error {
+		m, err := unmarshalBucketMeta(val)
+		if err != nil {
+			meta = &bucketMeta{ECEnabled: true, VersioningState: "Unversioned"}
 			return nil
-		})
+		}
+		meta = m
+		return nil
+	}); verr != nil {
+		return nil, verr
+	}
+	return meta, nil
+}
+
+// GetBucketECPolicy returns whether EC is enabled for a bucket.
+func (b *ECBackend) GetBucketECPolicy(bucket string) (bool, error) {
+	var meta *bucketMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		m, err := readBucketMeta(txn, bucketKey(bucket))
+		if err != nil {
+			return err
+		}
+		meta = m
+		return nil
 	})
 	if err != nil {
 		return false, err

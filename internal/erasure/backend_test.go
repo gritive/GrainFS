@@ -765,3 +765,25 @@ func TestECBackend_ReadShardBlocksDuringWrite(t *testing.T) {
 		t.Fatal("ReadShard did not complete after write lock was released")
 	}
 }
+
+func TestECBackend_BucketVersioning_SetGet(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("test-bucket"))
+
+	// Initially Unversioned
+	state, err := b.GetBucketVersioning("test-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Unversioned", state)
+
+	// Enable versioning
+	require.NoError(t, b.SetBucketVersioning("test-bucket", "Enabled"))
+	state, err = b.GetBucketVersioning("test-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Enabled", state)
+}
+
+func TestECBackend_BucketVersioning_BucketNotFound(t *testing.T) {
+	b := newTestBackend(t)
+	err := b.SetBucketVersioning("no-such-bucket", "Enabled")
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}

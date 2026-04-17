@@ -4,6 +4,7 @@ option go_package = "github.com/gritive/GrainFS/internal/erasure/erasurepb";
 
 message BucketMeta {
   bool ec_enabled = 1;
+  string versioning_state = 2; // "Unversioned", "Enabled", "Suspended"
 }
 
 message ECObjectMeta {

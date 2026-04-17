@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
@@ -97,4 +99,94 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 	defer getResp2.Body.Close()
 	body2, _ := io.ReadAll(getResp2.Body)
 	assert.Equal(t, "upstream-content", string(body2))
+}
+
+// TestPullthrough_LargeObjectE2E verifies that the 2-pass streaming pull-through
+// correctly returns bytes-identical content for a large object (~5 MB).
+// This is a regression test for the A1 fix: io.ReadAll OOM → 2-pass streaming.
+func TestPullthrough_LargeObjectE2E(t *testing.T) {
+	binary := getBinary()
+	ctx := context.Background()
+
+	// --- Upstream GrainFS ---
+	upDir, err := os.MkdirTemp("", "grainfs-pt-large-up-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(upDir)
+
+	upPort := freePort()
+	upCmd := exec.Command(binary, "serve",
+		"--data", upDir,
+		"--port", fmt.Sprintf("%d", upPort),
+		"--nfs-port", "0",
+	)
+	upCmd.Stdout = os.Stdout
+	upCmd.Stderr = os.Stderr
+	require.NoError(t, upCmd.Start())
+	defer upCmd.Process.Kill()
+
+	waitForPort(upPort, 5*time.Second)
+	upEndpoint := fmt.Sprintf("http://127.0.0.1:%d", upPort)
+	upClient := newS3Client(upEndpoint)
+
+	_, err = upClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})
+	require.NoError(t, err)
+
+	// 5 MB random payload exercises the 2-pass streaming path.
+	payload := make([]byte, 5*1024*1024)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	_, err = upClient.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String("large"),
+		Key:           aws.String("bigfile.bin"),
+		Body:          bytes.NewReader(payload),
+		ContentLength: aws.Int64(int64(len(payload))),
+	})
+	require.NoError(t, err)
+
+	// --- Local GrainFS with --upstream ---
+	localDir, err := os.MkdirTemp("", "grainfs-pt-large-local-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(localDir)
+
+	localPort := freePort()
+	localCmd := exec.Command(binary, "serve",
+		"--data", localDir,
+		"--port", fmt.Sprintf("%d", localPort),
+		"--nfs-port", "0",
+		"--upstream", upEndpoint,
+	)
+	localCmd.Stdout = os.Stdout
+	localCmd.Stderr = os.Stderr
+	require.NoError(t, localCmd.Start())
+	defer localCmd.Process.Kill()
+
+	waitForPort(localPort, 5*time.Second)
+	localClient := newS3Client(fmt.Sprintf("http://127.0.0.1:%d", localPort))
+
+	_, err = localClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})
+	require.NoError(t, err)
+
+	// First GET: cache miss → pull-through streaming fetch.
+	getResp, err := localClient.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("large"),
+		Key:    aws.String("bigfile.bin"),
+	})
+	require.NoError(t, err, "pull-through GET must succeed for large object")
+	defer getResp.Body.Close()
+
+	got, err := io.ReadAll(getResp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, payload, got, "pull-through must return bytes-identical content for large object")
+
+	// Second GET: served from local cache, no upstream needed.
+	getResp2, err := localClient.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("large"),
+		Key:    aws.String("bigfile.bin"),
+	})
+	require.NoError(t, err, "cached GET must succeed")
+	defer getResp2.Body.Close()
+	got2, err := io.ReadAll(getResp2.Body)
+	require.NoError(t, err)
+	assert.Equal(t, payload, got2, "cached object must be bytes-identical to original")
 }
