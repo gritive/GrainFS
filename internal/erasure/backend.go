@@ -1412,22 +1412,26 @@ func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 // RestoreObjects implements storage.Snapshotable: replaces current object metadata with snapshot state.
 func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
 	inSnapshot := make(map[string]bool, len(objects))
+	snapshotVersionedKeys := make(map[string]bool) // "bucket/key" pairs with versioned objects
 	for _, o := range objects {
 		if o.VersionID != "" {
 			inSnapshot["obj:"+o.Bucket+"/"+o.Key+"/"+o.VersionID] = true
+			snapshotVersionedKeys[o.Bucket+"/"+o.Key] = true
 		} else {
 			inSnapshot["obj:"+o.Bucket+"/"+o.Key] = true
 		}
 	}
 
-	// Delete metadata for objects not in snapshot
+	// Delete metadata for objects not in snapshot; also clean up orphaned lat: pointers.
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		prefix := []byte("obj:")
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
 		var toDelete [][]byte
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+
+		// Orphaned obj: entries
+		objPrefix := []byte("obj:")
+		it := txn.NewIterator(opts)
+		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
 			if !inSnapshot[string(it.Item().Key())] {
 				cp := make([]byte, len(it.Item().Key()))
 				copy(cp, it.Item().Key())
@@ -1435,6 +1439,20 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 			}
 		}
 		it.Close()
+
+		// Orphaned lat: entries (versioned keys absent from snapshot)
+		latPrefix := []byte("lat:")
+		itLat := txn.NewIterator(opts)
+		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
+			suffix := string(itLat.Item().Key()[len("lat:"):])
+			if !snapshotVersionedKeys[suffix] {
+				cp := make([]byte, len(itLat.Item().Key()))
+				copy(cp, itLat.Item().Key())
+				toDelete = append(toDelete, cp)
+			}
+		}
+		itLat.Close()
+
 		for _, k := range toDelete {
 			if err := txn.Delete(k); err != nil {
 				return err
@@ -1522,11 +1540,41 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 
 	// Post-pass: set lat: pointers using the IsLatest marker captured by ListAllObjects.
 	// This is correct even when multiple versions share the same Modified timestamp.
+	latSet := make(map[string]bool)
 	for _, le := range latestVersions {
 		if err := b.db.Update(func(txn *badger.Txn) error {
 			return txn.Set(latestKey(le.bucket, le.key), []byte(le.versionID))
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore lat: %s/%s: %w", le.bucket, le.key, err)
+		}
+		latSet[le.bucket+"/"+le.key] = true
+	}
+
+	// Backward compat: old snapshots without IsLatest markers fall back to max-Modified.
+	type fbCandidate struct {
+		modified  int64
+		versionID string
+		bucket    string
+		key       string
+	}
+	fallback := make(map[string]fbCandidate)
+	for _, snap := range objects {
+		if snap.VersionID == "" {
+			continue
+		}
+		mapKey := snap.Bucket + "/" + snap.Key
+		if latSet[mapKey] {
+			continue
+		}
+		if prev, ok := fallback[mapKey]; !ok || snap.Modified > prev.modified {
+			fallback[mapKey] = fbCandidate{snap.Modified, snap.VersionID, snap.Bucket, snap.Key}
+		}
+	}
+	for _, cand := range fallback {
+		if err := b.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(latestKey(cand.bucket, cand.key), []byte(cand.versionID))
+		}); err != nil {
+			return count, stale, fmt.Errorf("restore lat: fallback %s/%s: %w", cand.bucket, cand.key, err)
 		}
 	}
 

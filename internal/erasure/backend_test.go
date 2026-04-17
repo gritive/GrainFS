@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/stretchr/testify/require"
@@ -1159,5 +1160,76 @@ func TestECBackend_RestoreObjects_MultiVersion_LatestCorrect(t *testing.T) {
 	defer rc.Close()
 	got, _ := io.ReadAll(rc)
 	assert.Equal(t, "v3", string(got))
+	assert.Equal(t, v3.VersionID, meta.VersionID)
+}
+
+// TestECBackend_RestoreObjects_CleansOrphanedLatPointers verifies that RestoreObjects
+// deletes lat: pointers for keys absent from the snapshot (Fix 1: stale lat: cleanup).
+func TestECBackend_RestoreObjects_CleansOrphanedLatPointers(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.SetBucketVersioning("bkt", "Enabled"))
+
+	_, err := b.PutObject("bkt", "key1", strings.NewReader("content"), "text/plain")
+	require.NoError(t, err)
+
+	// lat: should exist after PutObject
+	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(latestKey("bkt", "key1"))
+		return err
+	}), "lat: should exist before restore")
+
+	// Restore with empty snapshot — key1 is not in snapshot (PITR to before key1 existed)
+	count, stale, err := b.RestoreObjects([]storage.SnapshotObject{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+	assert.Empty(t, stale)
+
+	// lat: for key1 must be cleaned up
+	err = b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(latestKey("bkt", "key1"))
+		return err
+	})
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound, "lat: should be removed after restore")
+}
+
+// TestECBackend_RestoreObjects_OldSnapshot_FallbackToMaxModified verifies that
+// RestoreObjects sets lat: via max-Modified fallback when no snapshot object has
+// IsLatest=true (backward compatibility for snapshots taken before IsLatest was added).
+func TestECBackend_RestoreObjects_OldSnapshot_FallbackToMaxModified(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver"))
+	require.NoError(t, b.SetBucketVersioning("ver", "Enabled"))
+
+	v1, err := b.PutObject("ver", "k", strings.NewReader("aaaaaa"), "text/plain")
+	require.NoError(t, err)
+	v2, err := b.PutObject("ver", "k", strings.NewReader("bbbbbb"), "text/plain")
+	require.NoError(t, err)
+	v3, err := b.PutObject("ver", "k", strings.NewReader("cccccc"), "text/plain")
+	require.NoError(t, err)
+
+	// Remove lat: to simulate a fresh-restore state where lat: was never written
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(latestKey("ver", "k"))
+	}))
+
+	// Old snapshot format: IsLatest=false on all objects, deterministic Modified timestamps
+	snaps := []storage.SnapshotObject{
+		{Bucket: "ver", Key: "k", VersionID: v1.VersionID, Modified: 100, ETag: v1.ETag, Size: v1.Size, ContentType: "text/plain"},
+		{Bucket: "ver", Key: "k", VersionID: v2.VersionID, Modified: 200, ETag: v2.ETag, Size: v2.Size, ContentType: "text/plain"},
+		{Bucket: "ver", Key: "k", VersionID: v3.VersionID, Modified: 300, ETag: v3.ETag, Size: v3.Size, ContentType: "text/plain"},
+	}
+
+	count, stale, err := b.RestoreObjects(snaps)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+	assert.Empty(t, stale)
+
+	// Fallback must pick v3 (highest Modified=300)
+	rc, meta, err := b.GetObject("ver", "k")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	assert.Equal(t, "cccccc", string(got))
 	assert.Equal(t, v3.VersionID, meta.VersionID)
 }
