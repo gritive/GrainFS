@@ -1,31 +1,91 @@
 package packblob
 
 import (
+	"bytes"
+	"fmt"
+	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-// TestCompression_Pooling_PreventsOOM tests that compression pooling prevents OOM under load
-func TestCompression_Pooling_PreventsOOM(t *testing.T) {
-	// This test verifies that using a sync.Pool for encoders/decoders
-	// prevents excessive memory allocation under concurrent load
+func TestCompression_Concurrent_RoundTrip(t *testing.T) {
+	const goroutines = 100
+	data := bytes.Repeat([]byte("compress me "), 500)
 
-	t.Skip("Pool monitoring test - requires memory profiling")
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			c, err := compress(data)
+			if err != nil {
+				errs <- err
+				return
+			}
+			got, err := decompress(c)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !bytes.Equal(got, data) {
+				errs <- fmt.Errorf("data mismatch after compress/decompress")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 }
 
-// TestCompression_Concurrent1000 tests concurrent compression performance
-func TestCompression_Concurrent1000(t *testing.T) {
-	// Benchmark 1000 concurrent compressions to verify pooling works
-	// Without pooling: would allocate 1000 encoders (4MB each = 4GB)
-	// With pooling: should reuse encoders from pool (minimal allocation)
+func TestBlobStore_Compression_RoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	bs, err := NewBlobStore(tmpDir, 64*1024*1024)
+	require.NoError(t, err)
+	defer bs.Close()
 
-	t.Skip("Compression pooling not yet implemented - requires compress() function")
+	bs.EnableCompression()
+
+	data := bytes.Repeat([]byte("hello world "), 1000)
+	loc, err := bs.Append("key1", data)
+	require.NoError(t, err)
+
+	got, err := bs.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
 }
 
-// TestCompression_PoolReused tests that encoders are actually reused from pool
-func TestCompression_PoolReused(t *testing.T) {
-	// This test verifies that compression pooling prevents excessive allocation
-	// by measuring memory allocation before and after multiple compress operations
+func TestBlobStore_Compression_StoredSizeSmaller(t *testing.T) {
+	tmpDir := t.TempDir()
+	bs, err := NewBlobStore(tmpDir, 64*1024*1024)
+	require.NoError(t, err)
+	defer bs.Close()
 
-	t.Skip("Compression pooling not yet implemented - requires compress() function")
+	bs.EnableCompression()
+
+	data := bytes.Repeat([]byte("hello world "), 1000)
+	loc, err := bs.Append("key1", data)
+	require.NoError(t, err)
+
+	// Compressed length stored in BlobLocation.Length should be smaller
+	require.Less(t, int(loc.Length), len(data), "stored (compressed) size should be smaller than original")
 }
 
+func TestBlobStore_CompressionDisabled_Passthrough(t *testing.T) {
+	tmpDir := t.TempDir()
+	bs, err := NewBlobStore(tmpDir, 64*1024*1024)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	data := bytes.Repeat([]byte("hello world "), 100)
+	loc, err := bs.Append("key1", data)
+	require.NoError(t, err)
+
+	got, err := bs.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+}

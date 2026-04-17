@@ -48,9 +48,12 @@ func TestIndex_SaveAndLoad(t *testing.T) {
 	_, err = os.Stat(indexFile)
 	assert.NoError(t, err, "Index file should exist")
 
+	require.NoError(t, pb.Close())
+
 	// Create new PackedBackend to simulate restart
 	pb2, err := NewPackedBackend(inner, tmpDir, 1024)
 	require.NoError(t, err)
+	defer pb2.Close()
 
 	// TEST: Load index
 	err = pb2.LoadIndex()
@@ -99,8 +102,10 @@ func TestIndex_LoadRebuildFromBlobs(t *testing.T) {
 	assert.Greater(t, initialCount, 0, "Should have objects in index")
 
 	// TEST: Simulate restart by creating new PackedBackend
+	require.NoError(t, pb.Close())
 	pb2, err := NewPackedBackend(inner, tmpDir, 1024)
 	require.NoError(t, err)
+	defer pb2.Close()
 
 	// TEST: Load index (should rebuild from blob files)
 	err = pb2.LoadIndex()
@@ -150,8 +155,10 @@ func TestIndex_RebuildAfterCrash(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create new PackedBackend (simulates restart)
+	require.NoError(t, pb.Close())
 	pb2, err := NewPackedBackend(inner, tmpDir, 1024)
 	require.NoError(t, err)
+	defer pb2.Close()
 
 	// TEST: LoadIndex should rebuild from blob files even without index file
 	err = pb2.LoadIndex()
@@ -199,8 +206,10 @@ func TestIndex_PersistenceWithRefcounts(t *testing.T) {
 	err = pb.SaveIndex()
 	require.NoError(t, err)
 
+	require.NoError(t, pb.Close())
 	pb2, err := NewPackedBackend(inner, tmpDir, 1024)
 	require.NoError(t, err)
+	defer pb2.Close()
 	err = pb2.LoadIndex()
 	require.NoError(t, err)
 

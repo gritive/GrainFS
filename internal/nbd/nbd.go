@@ -71,8 +71,15 @@ func (s *Server) ListenAndServe(addr string) error {
 	if err != nil {
 		return fmt.Errorf("nbd listen: %w", err)
 	}
-	s.listener = ln
 	slog.Info("nbd server started", "component", "nbd", "addr", addr, "volume", s.volName)
+	return s.Serve(ln)
+}
+
+// Serve accepts connections on ln until Close is called.
+func (s *Server) Serve(ln net.Listener) error {
+	s.mu.Lock()
+	s.listener = ln
+	s.mu.Unlock()
 
 	for {
 		conn, err := ln.Accept()

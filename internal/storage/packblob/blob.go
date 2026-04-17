@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,19 +18,29 @@ type BlobLocation struct {
 	Length uint32 // data length (excluding header/checksum)
 }
 
-// entryHeader is written before each data entry in the blob file.
-// Format: [4 bytes key_len][key bytes][4 bytes data_len][data bytes][4 bytes CRC32]
-const entryOverhead = 4 + 4 + 4 // key_len + data_len + crc32
+// Entry format: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
+// flags bit 0: compressed (zstd)
+const (
+	entryOverhead   = 4 + 1 + 4 + 4 // key_len + flags + data_len + crc32
+	flagCompressed  = byte(0x01)
+)
 
 // BlobStore manages append-only blob files for packing small objects.
 type BlobStore struct {
-	dir      string
-	maxSize  int64
-	mu       sync.Mutex
-	active   *os.File
-	activeID uint64
+	dir       string
+	maxSize   int64
+	mu        sync.Mutex
+	active    *os.File
+	activeID  uint64
 	activeOff int64
-	nextID   atomic.Uint64
+	nextID    atomic.Uint64
+	compress  bool
+	lockFile  *os.File // held for the lifetime of this BlobStore (flock on unix)
+}
+
+// EnableCompression enables zstd compression for new entries.
+func (bs *BlobStore) EnableCompression() {
+	bs.compress = true
 }
 
 // NewBlobStore creates a blob store rooted at dir.
@@ -42,9 +53,32 @@ func NewBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 		dir:     dir,
 		maxSize: maxSize,
 	}
-	bs.nextID.Store(1)
+
+	// Acquire an exclusive directory lock to prevent two BlobStore instances
+	// from writing the same blob files concurrently.
+	lf, err := acquireBlobDirLock(dir)
+	if err != nil {
+		return nil, fmt.Errorf("lock blob dir: %w", err)
+	}
+	bs.lockFile = lf
+
+	// Scan existing blob files to find the highest ID so we don't overwrite them on restart.
+	maxID := uint64(0)
+	matches, err := filepath.Glob(filepath.Join(dir, "blob_*.blob"))
+	if err != nil {
+		releaseBlobDirLock(lf)
+		return nil, fmt.Errorf("scan blob dir: %w", err)
+	}
+	for _, p := range matches {
+		var id uint64
+		if _, err := fmt.Sscanf(filepath.Base(p), "blob_%016x.blob", &id); err == nil && id > maxID {
+			maxID = id
+		}
+	}
+	bs.nextID.Store(maxID + 1)
 
 	if err := bs.rotate(); err != nil {
+		releaseBlobDirLock(lf)
 		return nil, err
 	}
 	return bs, nil
@@ -55,7 +89,17 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 
-	entrySize := int64(entryOverhead + len(key) + len(data))
+	flags := byte(0)
+	payload := data
+	if bs.compress {
+		compressed, err := compress(data)
+		if err == nil && len(compressed) < len(data) {
+			payload = compressed
+			flags = flagCompressed
+		}
+	}
+
+	entrySize := int64(entryOverhead + len(key) + len(payload))
 
 	// Rotate if this entry would exceed max blob size
 	if bs.activeOff+entrySize > bs.maxSize && bs.activeOff > 0 {
@@ -66,29 +110,30 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 
 	offset := bs.activeOff
 
-	// Write: [key_len:4][key][data_len:4][data][crc32:4]
-	keyLen := make([]byte, 4)
-	binary.BigEndian.PutUint32(keyLen, uint32(len(key)))
-	if _, err := bs.active.Write(keyLen); err != nil {
+	// Write: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(key)))
+	if _, err := bs.active.Write(header); err != nil {
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.Write([]byte(key)); err != nil {
 		return BlobLocation{}, err
 	}
-
-	dataLen := make([]byte, 4)
-	binary.BigEndian.PutUint32(dataLen, uint32(len(data)))
-	if _, err := bs.active.Write(dataLen); err != nil {
+	if _, err := bs.active.Write([]byte{flags}); err != nil {
 		return BlobLocation{}, err
 	}
-	if _, err := bs.active.Write(data); err != nil {
+	binary.BigEndian.PutUint32(header, uint32(len(payload)))
+	if _, err := bs.active.Write(header); err != nil {
+		return BlobLocation{}, err
+	}
+	if _, err := bs.active.Write(payload); err != nil {
 		return BlobLocation{}, err
 	}
 
-	// CRC32 of key + data
+	// CRC32 of key + payload (compressed or raw)
 	h := crc32.NewIEEE()
 	h.Write([]byte(key))
-	h.Write(data)
+	h.Write(payload)
 	crc := make([]byte, 4)
 	binary.BigEndian.PutUint32(crc, h.Sum32())
 	if _, err := bs.active.Write(crc); err != nil {
@@ -100,7 +145,7 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	return BlobLocation{
 		BlobID: bs.activeID,
 		Offset: uint64(offset),
-		Length: uint32(len(data)),
+		Length: uint32(len(payload)),
 	}, nil
 }
 
@@ -117,56 +162,77 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		return nil, err
 	}
 
+	const maxEntrySize = 256 * 1024 * 1024 // 256MB sanity cap against corrupt blobs
+	var header [4]byte
+
 	// Read key_len
-	header := make([]byte, 4)
-	if _, err := f.Read(header); err != nil {
+	if _, err := io.ReadFull(f, header[:]); err != nil {
 		return nil, err
 	}
-	keyLen := binary.BigEndian.Uint32(header)
+	keyLen := binary.BigEndian.Uint32(header[:])
+	if keyLen > maxEntrySize {
+		return nil, fmt.Errorf("corrupt blob: keyLen %d exceeds max", keyLen)
+	}
 
 	// Read key
 	key := make([]byte, keyLen)
-	if _, err := f.Read(key); err != nil {
+	if _, err := io.ReadFull(f, key); err != nil {
 		return nil, err
 	}
+
+	// Read flags
+	var flagBuf [1]byte
+	if _, err := io.ReadFull(f, flagBuf[:]); err != nil {
+		return nil, err
+	}
+	flags := flagBuf[0]
 
 	// Read data_len
-	if _, err := f.Read(header); err != nil {
+	if _, err := io.ReadFull(f, header[:]); err != nil {
 		return nil, err
 	}
-	dataLen := binary.BigEndian.Uint32(header)
+	dataLen := binary.BigEndian.Uint32(header[:])
+	if dataLen > maxEntrySize {
+		return nil, fmt.Errorf("corrupt blob: dataLen %d exceeds max", dataLen)
+	}
 
-	// Read data
-	data := make([]byte, dataLen)
+	// Read payload (may be compressed)
+	payload := make([]byte, dataLen)
 	if dataLen > 0 {
-		if _, err := f.Read(data); err != nil {
+		if _, err := io.ReadFull(f, payload); err != nil {
 			return nil, err
 		}
 	}
 
 	// Read and verify CRC
-	if _, err := f.Read(header); err != nil {
+	if _, err := io.ReadFull(f, header[:]); err != nil {
 		return nil, err
 	}
-	expectedCRC := binary.BigEndian.Uint32(header)
+	expectedCRC := binary.BigEndian.Uint32(header[:])
 
 	h := crc32.NewIEEE()
 	h.Write(key)
-	h.Write(data)
+	h.Write(payload)
 	if h.Sum32() != expectedCRC {
 		return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
 	}
 
-	return data, nil
+	if flags&flagCompressed != 0 {
+		return decompress(payload)
+	}
+	return payload, nil
 }
 
-// Close closes the active blob file.
+// Close closes the active blob file and releases the directory lock.
 func (bs *BlobStore) Close() error {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	if bs.active != nil {
-		return bs.active.Close()
+		if err := bs.active.Close(); err != nil {
+			return err
+		}
 	}
+	releaseBlobDirLock(bs.lockFile)
 	return nil
 }
 
@@ -206,35 +272,55 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 	}
 	var entries []rawEntry
 
+	const maxEntrySize = 256 * 1024 * 1024 // 256MB sanity cap against corrupt blobs
+	var header [4]byte
+	var flagBuf [1]byte
 	for {
-		header := make([]byte, 4)
-		_, err := f.Read(header)
-		if err != nil {
-			break // EOF or error
+		if _, err := io.ReadFull(f, header[:]); err != nil {
+			break
 		}
-		keyLen := binary.BigEndian.Uint32(header)
+		keyLen := binary.BigEndian.Uint32(header[:])
+		if keyLen > maxEntrySize {
+			break
+		}
 		key := make([]byte, keyLen)
-		if _, err := f.Read(key); err != nil {
+		if _, err := io.ReadFull(f, key); err != nil {
 			break
 		}
 
-		if _, err := f.Read(header); err != nil {
+		// Read flags byte
+		if _, err := io.ReadFull(f, flagBuf[:]); err != nil {
 			break
 		}
-		dataLen := binary.BigEndian.Uint32(header)
-		data := make([]byte, dataLen)
+		flags := flagBuf[0]
+
+		if _, err := io.ReadFull(f, header[:]); err != nil {
+			break
+		}
+		dataLen := binary.BigEndian.Uint32(header[:])
+		if dataLen > maxEntrySize {
+			break
+		}
+		payload := make([]byte, dataLen)
 		if dataLen > 0 {
-			if _, err := f.Read(data); err != nil {
+			if _, err := io.ReadFull(f, payload); err != nil {
 				break
 			}
 		}
 
 		// Skip CRC
-		if _, err := f.Read(header); err != nil {
+		if _, err := io.ReadFull(f, header[:]); err != nil {
 			break
 		}
 
 		if !tombstones[string(key)] {
+			// Decompress before re-appending (Append will re-compress if needed)
+			data := payload
+			if flags&flagCompressed != 0 {
+				if dec, err := decompress(payload); err == nil {
+					data = dec
+				}
+			}
 			entries = append(entries, rawEntry{key: string(key), data: data})
 		}
 	}
@@ -265,4 +351,74 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 
 func (bs *BlobStore) blobPath(id uint64) string {
 	return filepath.Join(bs.dir, fmt.Sprintf("blob_%016x.blob", id))
+}
+
+// ScanAll scans all blob files and returns the last known location for each key.
+func (bs *BlobStore) ScanAll() (map[string]BlobLocation, error) {
+	matches, err := filepath.Glob(filepath.Join(bs.dir, "blob_*.blob"))
+	if err != nil {
+		return nil, fmt.Errorf("glob blobs: %w", err)
+	}
+
+	locs := make(map[string]BlobLocation)
+	for _, path := range matches {
+		var blobID uint64
+		if _, err := fmt.Sscanf(filepath.Base(path), "blob_%016x.blob", &blobID); err != nil {
+			continue
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+
+		const maxEntrySize = 256 * 1024 * 1024 // 256MB sanity cap
+		var header [4]byte
+		var flagBuf [1]byte
+		var offset int64
+		for {
+			if _, err := io.ReadFull(f, header[:]); err != nil {
+				break
+			}
+			keyLen := binary.BigEndian.Uint32(header[:])
+			if keyLen > maxEntrySize {
+				break
+			}
+			key := make([]byte, keyLen)
+			if _, err := io.ReadFull(f, key); err != nil {
+				break
+			}
+
+			if _, err := io.ReadFull(f, flagBuf[:]); err != nil {
+				break
+			}
+
+			if _, err := io.ReadFull(f, header[:]); err != nil {
+				break
+			}
+			dataLen := binary.BigEndian.Uint32(header[:])
+			if dataLen > maxEntrySize {
+				break
+			}
+			data := make([]byte, dataLen)
+			if dataLen > 0 {
+				if _, err := io.ReadFull(f, data); err != nil {
+					break
+				}
+			}
+			if _, err := io.ReadFull(f, header[:]); err != nil { // skip CRC
+				break
+			}
+
+			entrySize := int64(entryOverhead + int(keyLen) + int(dataLen))
+			locs[string(key)] = BlobLocation{
+				BlobID: blobID,
+				Offset: uint64(offset),
+				Length: dataLen,
+			}
+			offset += entrySize
+		}
+		f.Close()
+	}
+	return locs, nil
 }

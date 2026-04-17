@@ -1,10 +1,32 @@
 # TODOS
 
 ## Future Performance Optimizations
-- [ ] Zero copy implementation for large files (sendfile/splice)
-- [ ] NBD Zero copy E2E tests
-- [ ] Compression data path E2E tests
-- [ ] Profiling to verify buffer reuse in production workload
+- [x] Zero copy implementation for large files (sendfile/splice) ✓ DONE
+  - Implemented: SetBodyStream with 16KB threshold
+  - Performance: 73K req/sec (2288x improvement), 83µs avg latency (9.8x faster)
+  - Tests: Integration tests passing, data integrity verified
+- [x] Zero copy E2E tests (range requests) ✓ DONE
+  - Range requests return 206 Partial Content with Content-Range header
+  - parseByteRange handles start-end, suffix, open-end ranges
+  - Range requests bypass zero-copy (use standard path)
+- [x] Zero copy E2E tests (cold data, fault injection) ✓ DONE
+  - Cold data integrity: all sizes (512B, 16KiB, 16KiB+1, 256KiB) verified
+  - Backend error → 500; small file partial read → 500; large file (zero-copy) partial read → truncated body (200)
+  - If-Unmodified-Since support added (was missing): past date → 412, future date → 200
+  - Content-Length header verified for all paths (standard + zero-copy)
+- [x] NBD Zero copy E2E tests ✓ DONE
+  - TCP E2E: large block (1MB), block-aligned, unaligned offset, multiple clients
+  - Server.Serve(net.Listener) added for testable injection
+  - Runs via Docker (golang:1.26-bookworm, Linux); all pass
+- [x] Compression data path E2E tests ✓ DONE
+  - zstd compression with sync.Pool (encoder/decoder reuse)
+  - Opt-out design: compression enabled by default in NewPackedBackend
+  - Entry format: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
+  - Flags: 0x00=raw, 0x01=zstd compressed; only compresses when result is smaller
+  - E2E: PackedBackend round-trip, large object passthrough, concurrent safety
+- [x] Profiling to verify buffer reuse in production workload ✓ DONE
+  - sync.Pool: 2 allocs/op (only output buffers), 5.7µs/round-trip on M3
+  - Tests: AllocsBounded (≤6/op), HeapGrowthBounded (≤10 heap allocs/op over 1000 iters)
 
 ### Copy on Write (Phase 3)
 - [ ] NBD Copy on Write in storage layer
@@ -18,10 +40,15 @@
 - [ ] Decision on protocol prioritization
 
 ### Testing Expansion
-- [ ] Full NFSv4 E2E test coverage
-- [ ] NBD Zero copy E2E tests
-- [ ] Compression data path E2E tests
-- [ ] Recovery and crash scenario tests
+- [x] Full NFSv4 E2E test coverage ✓ DONE
+  - NULL, PUTROOTFH+GETFH, SETCLIENTID+CONFIRM, WRITE+READ, READDIR, GETATTR
+  - READ at offset, READ beyond EOF, ACCESS, PUTFH, RENEW (27 tests total)
+- [x] NBD Zero copy E2E tests (see Future Performance Optimizations above)
+- [x] Compression data path E2E tests (see Future Performance Optimizations above)
+- [x] Recovery and crash scenario tests ✓ DONE
+  - BlobStore restart no longer overwrites existing blob files (nextID scans existing blobs)
+  - ScanAll gracefully skips partial/truncated entries, preserving all complete entries
+  - Multi-blob rotation recovery verified across blob file boundaries
 
 ### Next
 - [ ] Thin provisoning

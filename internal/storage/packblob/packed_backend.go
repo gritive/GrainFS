@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"os"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -14,8 +19,16 @@ import (
 
 // indexEntry tracks a small object stored in a blob file.
 type indexEntry struct {
-	Location BlobLocation
-	Refcount int32
+	Location     BlobLocation
+	Refcount     atomic.Int64
+	OriginalSize int64 // uncompressed byte count
+}
+
+// indexEntryJSON is a serializable form of indexEntry.
+type indexEntryJSON struct {
+	Location     BlobLocation `json:"location"`
+	Refcount     int64        `json:"refcount"`
+	OriginalSize int64        `json:"original_size"`
 }
 
 // PackedBackend wraps a storage.Backend and packs small objects into blob files.
@@ -24,23 +37,39 @@ type indexEntry struct {
 type PackedBackend struct {
 	inner     storage.Backend
 	blobStore *BlobStore
+	blobDir   string
 	threshold int64 // objects below this size go into blobs
 
 	mu    sync.RWMutex
 	index map[string]*indexEntry // "bucket/key" → blob location + refcount
 }
 
+// PackedBackendOptions configures optional behavior for PackedBackend.
+type PackedBackendOptions struct {
+	Compress bool // enable zstd compression for packed (small) objects
+}
+
 // NewPackedBackend creates a packed backend wrapping inner.
 // Objects smaller than threshold bytes are packed into blob files at blobDir.
+// Compression is enabled by default; use NewPackedBackendWithOptions to opt out.
 func NewPackedBackend(inner storage.Backend, blobDir string, threshold int64) (*PackedBackend, error) {
+	return NewPackedBackendWithOptions(inner, blobDir, threshold, PackedBackendOptions{Compress: true})
+}
+
+// NewPackedBackendWithOptions creates a packed backend with optional configuration.
+func NewPackedBackendWithOptions(inner storage.Backend, blobDir string, threshold int64, opts PackedBackendOptions) (*PackedBackend, error) {
 	bs, err := NewBlobStore(blobDir, 256*1024*1024) // 256MB max blob
 	if err != nil {
 		return nil, fmt.Errorf("create blob store: %w", err)
+	}
+	if opts.Compress {
+		bs.EnableCompression()
 	}
 
 	return &PackedBackend{
 		inner:     inner,
 		blobStore: bs,
+		blobDir:   blobDir,
 		threshold: threshold,
 		index:     make(map[string]*indexEntry),
 	}, nil
@@ -53,6 +82,69 @@ func (pb *PackedBackend) Close() error {
 
 func (pb *PackedBackend) indexKey(bucket, key string) string {
 	return bucket + "/" + key
+}
+
+// SaveIndex persists the in-memory index to {blobDir}/index.json.
+func (pb *PackedBackend) SaveIndex() error {
+	pb.mu.RLock()
+	m := make(map[string]indexEntryJSON, len(pb.index))
+	for k, e := range pb.index {
+		m[k] = indexEntryJSON{
+			Location:     e.Location,
+			Refcount:     e.Refcount.Load(),
+			OriginalSize: e.OriginalSize,
+		}
+	}
+	pb.mu.RUnlock()
+
+	data, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("marshal index: %w", err)
+	}
+	// Write to temp file then rename for atomic update (prevents corrupt index on crash).
+	tmp := filepath.Join(pb.blobDir, "index.json.tmp")
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write index tmp: %w", err)
+	}
+	return os.Rename(tmp, filepath.Join(pb.blobDir, "index.json"))
+}
+
+// LoadIndex loads the index from {blobDir}/index.json.
+// If the file doesn't exist, it rebuilds the index by scanning all blob files.
+func (pb *PackedBackend) LoadIndex() error {
+	indexFile := filepath.Join(pb.blobDir, "index.json")
+	data, err := os.ReadFile(indexFile)
+	if err == nil {
+		var m map[string]indexEntryJSON
+		if err := json.Unmarshal(data, &m); err != nil {
+			return fmt.Errorf("unmarshal index: %w", err)
+		}
+		pb.mu.Lock()
+		for k, v := range m {
+			e := &indexEntry{Location: v.Location, OriginalSize: v.OriginalSize}
+			e.Refcount.Store(v.Refcount)
+			pb.index[k] = e
+		}
+		pb.mu.Unlock()
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read index file: %w", err)
+	}
+
+	// Rebuild from blob files
+	locs, err := pb.blobStore.ScanAll()
+	if err != nil {
+		return fmt.Errorf("scan blobs: %w", err)
+	}
+	pb.mu.Lock()
+	for k, loc := range locs {
+		e := &indexEntry{Location: loc}
+		e.Refcount.Store(1)
+		pb.index[k] = e
+	}
+	pb.mu.Unlock()
+	return nil
 }
 
 // --- Bucket operations (pass through to inner) ---
@@ -105,29 +197,26 @@ func (pb *PackedBackend) PutObject(bucket, key string, r io.Reader, contentType 
 	pb.mu.Lock()
 	// If replacing an existing packed entry, decrement old refcount
 	if old, ok := pb.index[ikey]; ok {
-		old.Refcount--
+		old.Refcount.Add(-1)
 	}
-	pb.index[ikey] = &indexEntry{
-		Location: loc,
-		Refcount: 1,
-	}
+	e := &indexEntry{Location: loc, OriginalSize: int64(len(data))}
+	e.Refcount.Store(1)
+	pb.index[ikey] = e
 	pb.mu.Unlock()
 
-	// Store metadata in inner backend's metadata store
-	// We use a special marker object with zero-length body
-	obj := &storage.Object{
+	// Store metadata via inner PutObject (it will create a small marker file)
+	// This keeps the metadata in BadgerDB consistent
+	if _, err := pb.inner.PutObject(bucket, key, bytes.NewReader(nil), contentType); err != nil {
+		return nil, fmt.Errorf("sync metadata: %w", err)
+	}
+
+	return &storage.Object{
 		Key:          key,
 		Size:         int64(len(data)),
 		ContentType:  contentType,
 		ETag:         etag,
 		LastModified: now,
-	}
-
-	// Store metadata via inner PutObject (it will create a small marker file)
-	// This keeps the metadata in BadgerDB consistent
-	pb.inner.PutObject(bucket, key, bytes.NewReader(nil), contentType)
-
-	return obj, nil
+	}, nil
 }
 
 func (pb *PackedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
@@ -137,7 +226,7 @@ func (pb *PackedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.
 	entry, packed := pb.index[ikey]
 	pb.mu.RUnlock()
 
-	if packed && entry.Refcount > 0 {
+	if packed && entry.Refcount.Load() > 0 {
 		data, err := pb.blobStore.Read(entry.Location)
 		if err != nil {
 			return nil, nil, fmt.Errorf("read packed object: %w", err)
@@ -164,7 +253,7 @@ func (pb *PackedBackend) HeadObject(bucket, key string) (*storage.Object, error)
 	entry, packed := pb.index[ikey]
 	pb.mu.RUnlock()
 
-	if packed && entry.Refcount > 0 {
+	if packed && entry.Refcount.Load() > 0 {
 		data, err := pb.blobStore.Read(entry.Location)
 		if err != nil {
 			return nil, fmt.Errorf("read packed object: %w", err)
@@ -187,8 +276,7 @@ func (pb *PackedBackend) DeleteObject(bucket, key string) error {
 
 	pb.mu.Lock()
 	if entry, ok := pb.index[ikey]; ok {
-		entry.Refcount--
-		if entry.Refcount <= 0 {
+		if entry.Refcount.Add(-1) <= 0 {
 			delete(pb.index, ikey)
 		}
 		pb.mu.Unlock()
@@ -214,7 +302,7 @@ func (pb *PackedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*sto
 
 	pfx := bucket + "/" + prefix
 	for ikey, entry := range pb.index {
-		if entry.Refcount <= 0 {
+		if entry.Refcount.Load() <= 0 {
 			continue
 		}
 		if len(pfx) > 0 && len(ikey) >= len(pfx) && ikey[:len(pfx)] == pfx {
@@ -232,7 +320,7 @@ func (pb *PackedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*sto
 			if !found {
 				objects = append(objects, &storage.Object{
 					Key:  k,
-					Size: int64(entry.Location.Length),
+					Size: entry.OriginalSize,
 				})
 			}
 		}
@@ -255,20 +343,34 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 
 	pb.mu.Lock()
 	srcEntry, packed := pb.index[srcIKey]
-	if packed && srcEntry.Refcount > 0 {
-		// Metadata-only copy: share the blob location, increment refcount
-		srcEntry.Refcount++
-		pb.index[dstIKey] = &indexEntry{
-			Location: srcEntry.Location,
-			Refcount: 1,
+	if packed && srcEntry.Refcount.Load() > 0 {
+		// Check for overflow before incrementing (guard at MaxInt64-1 to prevent saturation)
+		if srcEntry.Refcount.Load() >= math.MaxInt64-1 {
+			pb.mu.Unlock()
+			return nil, fmt.Errorf("refcount overflow: cannot copy object with maximum refcount")
 		}
+
+		// Read data before mutating index so a concurrent delete can't create a ghost entry.
+		loc := srcEntry.Location
 		pb.mu.Unlock()
 
-		// Read data to compute metadata
-		data, err := pb.blobStore.Read(srcEntry.Location)
+		data, err := pb.blobStore.Read(loc)
 		if err != nil {
 			return nil, err
 		}
+
+		pb.mu.Lock()
+		// Re-check after read: source may have been deleted while we were reading.
+		srcEntry, stillPacked := pb.index[srcIKey]
+		if !stillPacked || srcEntry.Refcount.Load() <= 0 {
+			pb.mu.Unlock()
+			return nil, fmt.Errorf("source object deleted during copy")
+		}
+		srcEntry.Refcount.Add(1)
+		dst := &indexEntry{Location: loc}
+		dst.Refcount.Store(1)
+		pb.index[dstIKey] = dst
+		pb.mu.Unlock()
 
 		h := md5.Sum(data)
 		return &storage.Object{

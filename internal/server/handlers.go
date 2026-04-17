@@ -176,8 +176,23 @@ func unwrapBackend(b storage.Backend) storage.Backend {
 	}
 }
 
+// findECPolicySetter walks the backend chain and returns the first ECPolicySetter found.
+func findECPolicySetter(b storage.Backend) (ECPolicySetter, bool) {
+	for b != nil {
+		if s, ok := b.(ECPolicySetter); ok {
+			return s, true
+		}
+		u, ok := b.(unwrapper)
+		if !ok {
+			break
+		}
+		b = u.Unwrap()
+	}
+	return nil, false
+}
+
 func (s *Server) setBucketECPolicy(c *app.RequestContext, bucket, ecParam string) {
-	setter, ok := unwrapBackend(s.backend).(ECPolicySetter)
+	setter, ok := findECPolicySetter(s.backend)
 	if !ok {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "EC policy not supported by this backend")
 		return
@@ -327,15 +342,127 @@ func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
 		mapError(c, err)
 		return
 	}
-	defer rc.Close()
+	defer func() {
+		if rc != nil {
+			rc.Close()
+		}
+	}()
 
+	etag := fmt.Sprintf("\"%s\"", obj.ETag)
 	c.Header("Content-Type", obj.ContentType)
-	c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
-	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
+	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
+	c.Header("Accept-Ranges", "bytes")
 
-	data, _ := io.ReadAll(rc)
-	c.Data(consts.StatusOK, obj.ContentType, data)
+	if !checkConditionals(c, etag, obj.LastModified) {
+		return
+	}
+
+	// Handle Range requests: must use standard path (sendfile transfers entire file)
+	rangeHeader := string(c.GetHeader("Range"))
+	if rangeHeader != "" {
+		start, end, ok := parseByteRange(rangeHeader, obj.Size)
+		if !ok {
+			c.Status(consts.StatusRequestedRangeNotSatisfiable)
+			c.Header("Content-Range", fmt.Sprintf("bytes */%d", obj.Size))
+			return
+		}
+
+		// Seek to start, read requested range
+		if seeker, ok := rc.(io.Seeker); ok {
+			if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+				mapError(c, err)
+				return
+			}
+		} else {
+			if _, err := io.CopyN(io.Discard, rc, start); err != nil {
+				mapError(c, err)
+				return
+			}
+		}
+
+		length := end - start + 1
+		data := make([]byte, length)
+		if _, err := io.ReadFull(rc, data); err != nil {
+			mapError(c, err)
+			return
+		}
+
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
+		c.Header("Content-Length", strconv.FormatInt(length, 10))
+		c.Data(consts.StatusPartialContent, obj.ContentType, data)
+		return
+	}
+
+	// Zero-copy for large non-range requests
+	if obj.Size > 16*1024 {
+		c.Response.SetBodyStream(rc, int(obj.Size))
+		c.Status(consts.StatusOK)
+		rc = nil
+	} else {
+		c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
+		data, err := io.ReadAll(rc)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		c.Data(consts.StatusOK, obj.ContentType, data)
+	}
+}
+
+// parseByteRange parses a "bytes=start-end" Range header.
+// Returns (start, end, ok). end is inclusive.
+func parseByteRange(rangeHeader string, size int64) (int64, int64, bool) {
+	if !strings.HasPrefix(rangeHeader, "bytes=") {
+		return 0, 0, false
+	}
+	rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
+	// Only handle single range (first one)
+	parts := strings.SplitN(rangeSpec, ",", 2)
+	spec := strings.TrimSpace(parts[0])
+
+	dash := strings.Index(spec, "-")
+	if dash < 0 {
+		return 0, 0, false
+	}
+
+	startStr := spec[:dash]
+	endStr := spec[dash+1:]
+
+	var start, end int64
+	if startStr == "" {
+		// suffix-range: bytes=-N (last N bytes)
+		if size == 0 {
+			return 0, 0, false
+		}
+		n, err := strconv.ParseInt(endStr, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, false
+		}
+		if n > size {
+			n = size
+		}
+		start = size - n
+		end = size - 1
+	} else {
+		var err error
+		start, err = strconv.ParseInt(startStr, 10, 64)
+		if err != nil || start < 0 || start >= size {
+			return 0, 0, false
+		}
+		if endStr == "" {
+			end = size - 1
+		} else {
+			end, err = strconv.ParseInt(endStr, 10, 64)
+			if err != nil || end < start {
+				return 0, 0, false
+			}
+			if end >= size {
+				end = size - 1
+			}
+		}
+	}
+	return start, end, true
 }
 
 func (s *Server) headObject(_ context.Context, c *app.RequestContext) {
@@ -348,11 +475,52 @@ func (s *Server) headObject(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
+	etag := fmt.Sprintf("\"%s\"", obj.ETag)
 	c.Header("Content-Type", obj.ContentType)
 	c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
-	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
+	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
+	c.Header("Accept-Ranges", "bytes")
+
+	if !checkConditionals(c, etag, obj.LastModified) {
+		return
+	}
+
 	c.Status(consts.StatusOK)
+}
+
+// checkConditionals evaluates RFC 7232 conditional request headers.
+// Returns false and sets response status if the request is short-circuited.
+func checkConditionals(c *app.RequestContext, etag string, lastModifiedUnix int64) bool {
+	if im := string(c.GetHeader("If-Match")); im != "" {
+		if im != "*" && im != etag {
+			c.Status(consts.StatusPreconditionFailed)
+			return false
+		}
+	}
+	if inm := string(c.GetHeader("If-None-Match")); inm != "" {
+		if inm == etag || inm == "*" {
+			c.Status(consts.StatusNotModified)
+			return false
+		}
+	}
+	if ims := string(c.GetHeader("If-Modified-Since")); ims != "" {
+		if t, err := http.ParseTime(ims); err == nil {
+			if !time.Unix(lastModifiedUnix, 0).After(t) {
+				c.Status(consts.StatusNotModified)
+				return false
+			}
+		}
+	}
+	if ius := string(c.GetHeader("If-Unmodified-Since")); ius != "" {
+		if t, err := http.ParseTime(ius); err == nil {
+			if time.Unix(lastModifiedUnix, 0).After(t) {
+				c.Status(consts.StatusPreconditionFailed)
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {

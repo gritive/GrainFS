@@ -30,6 +30,11 @@ func (sb *SwappableBackend) Inner() Backend {
 	return *sb.inner.Load()
 }
 
+// Unwrap returns the current inner backend for interface delegation.
+func (sb *SwappableBackend) Unwrap() Backend {
+	return *sb.inner.Load()
+}
+
 func (sb *SwappableBackend) CreateBucket(bucket string) error {
 	return (*sb.inner.Load()).CreateBucket(bucket)
 }
