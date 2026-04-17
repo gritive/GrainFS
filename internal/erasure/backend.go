@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -23,10 +24,18 @@ import (
 // Objects are split into k data + m parity shards stored on disk.
 // On read, missing shards (up to m) are reconstructed automatically.
 type ECBackend struct {
-	root      string
-	db        *badger.DB
-	codec     *Codec
-	encryptor Encryptor
+	root       string
+	db         *badger.DB
+	codec      *Codec
+	encryptor  Encryptor
+	writeLocks sync.Map // map[string]*sync.Mutex for per-key write serialization
+}
+
+func (b *ECBackend) acquireWriteLock(bucket, key string) func() {
+	lockKey := bucket + "\x00" + key
+	mu, _ := b.writeLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	return func() { mu.(*sync.Mutex).Unlock() }
 }
 
 // Encryptor is an optional interface for at-rest encryption.
@@ -252,6 +261,9 @@ func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType strin
 	if err != nil {
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
+
+	unlock := b.acquireWriteLock(bucket, key)
+	defer unlock()
 
 	if !ecEnabled {
 		return b.putObjectPlain(bucket, key, data, contentType)

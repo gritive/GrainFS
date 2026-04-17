@@ -68,11 +68,3 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	t.Log("✅ Jepsen test passed - linearizability verified")
 }
 
-func TestJepsen_RaftCluster_NetworkPartition(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping Jepsen test in short mode")
-	}
-
-	// This test will be implemented in Task 7 with toxiproxy
-	t.Skip("network partition test - see Task 7 (Add network partition tests)")
-}

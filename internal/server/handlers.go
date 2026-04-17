@@ -353,6 +353,7 @@ func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	c.Header("Cache-Control", "public, max-age=3600")
 
 	if !checkConditionals(c, etag, obj.LastModified) {
 		return
@@ -481,6 +482,7 @@ func (s *Server) headObject(_ context.Context, c *app.RequestContext) {
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	c.Header("Cache-Control", "public, max-age=3600")
 
 	if !checkConditionals(c, etag, obj.LastModified) {
 		return

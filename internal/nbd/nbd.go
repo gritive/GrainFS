@@ -110,6 +110,11 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("nbd: recovered panic in connection handler", "panic", r)
+		}
+	}()
 
 	vol, err := s.mgr.Get(s.volName)
 	if err != nil {
