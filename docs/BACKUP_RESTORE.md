@@ -263,11 +263,11 @@ restic stats --repo /backup/grainfs
 
 ### 1. Backup Frequency
 
-| Data Change Rate | Backup Frequency | Retention |
-|-----------------|-----------------|-----------|
-| Low (< 1%/day)  | Daily           | 30 daily  |
-| Medium (1-10%)  | Hourly          | 24 hourly + 30 daily |
-| High (> 10%)    | Every 15 min    | 48 snapshots + 30 daily |
+| Data Change Rate | Backup Frequency | Retention               |
+| ---------------- | ---------------- | ----------------------- |
+| Low (< 1%/day)   | Daily            | 30 daily                |
+| Medium (1-10%)   | Hourly           | 24 hourly + 30 daily    |
+| High (> 10%)     | Every 15 min     | 48 snapshots + 30 daily |
 
 ### 2. Retention Policy
 

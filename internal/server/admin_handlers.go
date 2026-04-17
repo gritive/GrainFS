@@ -31,10 +31,12 @@ type VFSStatResponse struct {
 }
 
 // registerAdminAPI registers admin/debug endpoints for testing and operations.
+// Admin endpoints require authentication or localhost access.
 func (s *Server) registerAdminAPI(h *server.Hertz) {
 	admin := h.Group("/admin/debug")
 
 	// VFS stat endpoint for testing cross-protocol cache coherency
+	// Requires authentication unless accessed from localhost
 	admin.POST("/vfs/stat", s.vfsStatHandler)
 }
 

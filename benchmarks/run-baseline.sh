@@ -31,6 +31,22 @@ echo "GrainFS PID: $GRAINFS_PID"
 # Wait for server to start
 sleep 2
 
+# Health check: verify server is actually running
+if ! ps -p $GRAINFS_PID > /dev/null 2>&1; then
+    echo "ERROR: GrainFS failed to start (PID $GRAINFS_PID not running)"
+    echo "Check logs in: $DATA_DIR"
+    exit 1
+fi
+
+# Verify server is accepting connections
+if ! curl -s http://localhost:9000 > /dev/null 2>&1; then
+    echo "ERROR: GrainFS not responding on http://localhost:9000"
+    echo "Server process is running but not accepting connections"
+    exit 1
+fi
+
+echo "GrainFS started successfully"
+
 # Trap to kill server on exit
 trap "kill $GRAINFS_PID 2>/dev/null; rm -rf $DATA_DIR" EXIT
 

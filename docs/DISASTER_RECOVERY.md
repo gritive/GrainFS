@@ -10,15 +10,15 @@ This document captures lessons learned from disaster recovery drills. Each drill
 
 ## Execution Summary
 
-| Drill # | Scenario | First Run | Re-run | Status |
-|---------|----------|-----------|--------|--------|
-| 1 | Disk Failure | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
-| 2 | BadgerDB Corruption | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
-| 3 | Accidental Deletion | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
-| 4 | Network Partition | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
-| 5 | Full System Recovery | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
-| 6 | Binary Rollback | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
-| 7 | Data Rollback | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
+| Drill # | Scenario             | First Run  | Re-run     | Status    |
+| ------- | -------------------- | ---------- | ---------- | --------- |
+| 1       | Disk Failure         | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
+| 2       | BadgerDB Corruption  | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
+| 3       | Accidental Deletion  | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
+| 4       | Network Partition    | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
+| 5       | Full System Recovery | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
+| 6       | Binary Rollback      | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
+| 7       | Data Rollback        | YYYY-MM-DD | YYYY-MM-DD | PASS/FAIL |
 
 **Overall Status:** ALL DRILLS PASSING / IN PROGRESS / NOT STARTED
 

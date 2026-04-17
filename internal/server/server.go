@@ -115,10 +115,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) authMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		// Skip auth for /metrics and /ui/ endpoints
+		// Admin endpoints require authentication
 		path := string(c.URI().Path())
 		if path == "/metrics" || strings.HasPrefix(path, "/ui/") {
 			c.Next(ctx)
 			return
+		}
+
+		// Admin endpoints: require authentication OR localhost access
+		if strings.HasPrefix(path, "/admin/debug/") {
+			// Check if request is from localhost
+			remoteAddr := c.RemoteAddr().String()
+			isLocalhost := remoteAddr == "127.0.0.1" ||
+				strings.HasPrefix(remoteAddr, "[::1]") ||
+				strings.HasPrefix(remoteAddr, "localhost")
+
+			if isLocalhost {
+				c.Next(ctx)
+				return
+			}
 		}
 
 		r := toHTTPRequest(c)

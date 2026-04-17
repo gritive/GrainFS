@@ -14,6 +14,7 @@ import (
 	"time"
 
 	billy "github.com/go-git/go-billy/v5"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -177,6 +178,9 @@ func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 	if cached := fs.getStatCache(fp); cached != nil {
 		return cached, nil
 	}
+
+	// Cache miss - track metric
+	metrics.CacheStatMisses.Add(1)
 
 	// Check if it's a directory
 	if fs.isDir(fp) {
@@ -548,6 +552,8 @@ func (fs *GrainVFS) getStatCache(fp string) os.FileInfo {
 	if !ok || time.Now().After(entry.expires) {
 		return nil
 	}
+
+	metrics.CacheStatHits.Add(1)
 	return entry.info
 }
 
@@ -615,15 +621,17 @@ func (fs *GrainVFS) invalidateParentDirCache(fp string) {
 // Called by Raft OnApply callback after DeleteObject commands commit.
 // Stores deletion marker in stat cache (persistent in future with BadgerDB).
 //
+// PRODUCTION LIMITATION: Deleted markers are stored in-memory only.
+// If GrainFS crashes, all deletion markers are lost, causing "zombie" files
+// to reappear in NFS. Before production deployment, implement BadgerDB
+// persistence for crash recovery. Tracked as P1 in project backlog.
+//
 // Parameters:
 // - bucket: S3 bucket name (e.g., "default")
 // - key: S3 object key (e.g., "path/to/file.txt")
 //
 // Note: Bucket is included in cache key to support multi-bucket VFS instances.
 func (fs *GrainVFS) MarkDeleted(bucket, key string) error {
-	// TODO: Add BadgerDB persistence for crash recovery
-	// For now, use in-memory stat cache with long TTL
-
 	fs.cacheMu.Lock()
 	defer fs.cacheMu.Unlock()
 
@@ -633,9 +641,15 @@ func (fs *GrainVFS) MarkDeleted(bucket, key string) error {
 
 	// Store deleted marker with bucket+key as cache key
 	cacheKey := "deleted:" + bucket + ":" + key
+	_, exists := fs.statCache[cacheKey]
 	fs.statCache[cacheKey] = &statCacheEntry{
 		info:    nil,
 		expires: time.Now().Add(24 * time.Hour), // Persist for 24h
+	}
+
+	// Update metrics
+	if !exists {
+		metrics.DeletedMarkersTotal.Inc()
 	}
 
 	return nil
@@ -677,6 +691,12 @@ func (fs *GrainVFS) IsDeleted(bucket, key string) bool {
 //
 // Called by DistributedBackend.onApply after Raft commits mutations.
 func (fs *GrainVFS) Invalidate(bucket, key string) {
+	start := time.Now()
+	defer func() {
+		metrics.CacheInvalidationDuration.Observe(time.Since(start).Seconds())
+		metrics.CacheInvalidationTotal.WithLabelValues(bucket, "vfs").Add(1)
+	}()
+
 	// Check if this VFS instance serves the specified bucket
 	if fs.bucket != vfsBucketPrefix+bucket {
 		return // Different bucket, not our concern
@@ -684,8 +704,14 @@ func (fs *GrainVFS) Invalidate(bucket, key string) {
 
 	// Clear deleted marker (file re-created after deletion)
 	fs.cacheMu.Lock()
+	_, hadDeletedMarker := fs.statCache["deleted:"+bucket+":"+key]
 	delete(fs.statCache, "deleted:"+bucket+":"+key)
 	fs.cacheMu.Unlock()
+
+	// Update metrics: decrement deleted marker count if we cleared one
+	if hadDeletedMarker {
+		metrics.DeletedMarkersTotal.Dec()
+	}
 
 	// Invalidate stat cache for the specific file
 	fs.invalidateStatCache(key)

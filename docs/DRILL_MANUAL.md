@@ -1056,15 +1056,15 @@ rm -rf $TEST_DIR $TEST_DIR.corrupted /tmp/grainfs-*.log /tmp/day*-data-*
 
 Track all drill executions:
 
-| Drill # | Scenario | Date | Outcome | RTO | Issues | Re-run |
-|---------|----------|------|--------|-----|--------|--------|
-| 1 | Disk Failure | YYYY-MM-DD | PASS/FAIL | X min | ... | Yes/No |
-| 2 | BadgerDB Corruption | YYYY-MM-DD | PASS/FAIL | X min | ... | Yes/No |
-| 3 | Accidental Deletion | YYYY-MM-DD | PASS/FAIL | X min | ... | Yes/No |
-| 4 | Network Partition | YYYY-MM-DD | PASS/FAIL | X min | ... | Yes/No |
-| 5 | Full Recovery | YYYY-MM-DD | PASS/FAIL | X min | ... | Yes/No |
-| 6 | Binary Rollback | YYYY-MM-DD | PASS/FAIL | X min | ... | Yes/No |
-| 7 | Data Rollback | YYYY-MM-DD | PASS/FAIL | X min | ... | Yes/No |
+| Drill # | Scenario            | Date       | Outcome   | RTO   | Issues | Re-run |
+| ------- | ------------------- | ---------- | --------- | ----- | ------ | ------ |
+| 1       | Disk Failure        | YYYY-MM-DD | PASS/FAIL | X min | ...    | Yes/No |
+| 2       | BadgerDB Corruption | YYYY-MM-DD | PASS/FAIL | X min | ...    | Yes/No |
+| 3       | Accidental Deletion | YYYY-MM-DD | PASS/FAIL | X min | ...    | Yes/No |
+| 4       | Network Partition   | YYYY-MM-DD | PASS/FAIL | X min | ...    | Yes/No |
+| 5       | Full Recovery       | YYYY-MM-DD | PASS/FAIL | X min | ...    | Yes/No |
+| 6       | Binary Rollback     | YYYY-MM-DD | PASS/FAIL | X min | ...    | Yes/No |
+| 7       | Data Rollback       | YYYY-MM-DD | PASS/FAIL | X min | ...    | Yes/No |
 
 **Pass criteria:** All drills must PASS with RTO < 30 minutes before production deployment.
 

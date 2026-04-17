@@ -50,4 +50,41 @@ var (
 		Name: "grainfs_objects_total",
 		Help: "Total number of objects.",
 	})
+
+	// CacheInvalidationTotal counts cache invalidation operations.
+	CacheInvalidationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_cache_invalidation_total",
+		Help: "Total number of cache invalidation operations.",
+	}, []string{"bucket", "protocol"}) // protocol: vfs, nfs, cached_backend
+
+	// CacheInvalidationDuration measures cache invalidation operation duration.
+	CacheInvalidationDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "grainfs_cache_invalidation_duration_seconds",
+		Help:    "Cache invalidation operation duration in seconds.",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	// CacheStatHits counts cache hits in stat cache.
+	CacheStatHits = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_cache_stat_hits_total",
+		Help: "Total number of cache hits in stat cache.",
+	})
+
+	// CacheStatMisses counts cache misses in stat cache.
+	CacheStatMisses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_cache_stat_misses_total",
+		Help: "Total number of cache misses in stat cache.",
+	})
+
+	// DeletedMarkersTotal tracks current number of deleted file markers.
+	DeletedMarkersTotal = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_deleted_markers_total",
+		Help: "Current number of deleted file markers in memory.",
+	})
+
+	// RegistrySize tracks current number of registered cache invalidators.
+	RegistrySize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_cache_registry_size",
+		Help: "Current number of registered cache invalidators.",
+	})
 )

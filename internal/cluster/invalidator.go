@@ -1,5 +1,9 @@
 package cluster
 
+import (
+	"github.com/gritive/GrainFS/internal/metrics"
+)
+
 // CacheInvalidator is implemented by components that maintain caches
 // which must be invalidated when objects are mutated via Raft.
 //
@@ -32,6 +36,7 @@ func NewRegistry() *Registry {
 // Register adds a cache invalidator for a specific volume.
 func (r *Registry) Register(volumeID string, invalidator CacheInvalidator) {
 	r.invalidators[volumeID] = invalidator
+	r.updateSizeMetric()
 }
 
 // InvalidateAll calls Invalidate on all registered invalidators.
@@ -49,4 +54,9 @@ func (r *Registry) GetInvalidator(volumeID string) CacheInvalidator {
 // GetInvalidators returns all registered invalidators.
 func (r *Registry) GetInvalidators() map[string]CacheInvalidator {
 	return r.invalidators
+}
+
+// updateSizeMetric updates the registry size metric.
+func (r *Registry) updateSizeMetric() {
+	metrics.RegistrySize.Set(float64(len(r.invalidators)))
 }
