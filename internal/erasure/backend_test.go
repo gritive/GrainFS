@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -716,7 +717,7 @@ func TestECBackend_ReadShardBlocksDuringWrite(t *testing.T) {
 	require.NoError(t, err)
 
 	total := DefaultDataShards + DefaultParityShards
-	paths := b.ShardPaths("bucket", "key", total)
+	paths := b.ShardPaths("bucket", "key", "", total)
 	require.NotEmpty(t, paths)
 
 	// Hold the write lock to simulate a long-running PutObject or scrubber repair.
@@ -961,4 +962,98 @@ func TestECBackend_ListObjectVersions_BucketNotFound(t *testing.T) {
 	b := newTestBackend(t)
 	_, err := b.ListObjectVersions("no-such-bucket", "", 1000)
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+// --- Task 4f: ScanObjects versioning awareness ---
+
+func TestECBackend_ScanObjects_SkipsDeleteMarkers(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	// PUT large enough for EC (> DataShards bytes)
+	data := strings.Repeat("x", 1024*64) // 64KB
+	_, err := b.PutObject("ver-bucket", "obj.bin", strings.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+
+	// DELETE → creates delete marker
+	require.NoError(t, b.DeleteObject("ver-bucket", "obj.bin"))
+
+	ch, err := b.ScanObjects("ver-bucket")
+	require.NoError(t, err)
+
+	var records []scrubber.ObjectRecord
+	for rec := range ch {
+		records = append(records, rec)
+	}
+
+	// Delete marker should NOT appear in scan (no shard data to scrub)
+	for _, rec := range records {
+		assert.False(t, rec.IsDeleteMarker, "delete marker must not appear in ScanObjects")
+	}
+	// The original version should appear with VersionID set
+	require.Len(t, records, 1)
+	assert.NotEmpty(t, records[0].VersionID)
+	assert.Equal(t, "obj.bin", records[0].Key)
+}
+
+func TestECBackend_ScanObjects_VersionedKey_HasVersionID(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	data := strings.Repeat("y", 1024*64)
+	obj, err := b.PutObject("ver-bucket", "obj.bin", strings.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	ch, err := b.ScanObjects("ver-bucket")
+	require.NoError(t, err)
+
+	var records []scrubber.ObjectRecord
+	for rec := range ch {
+		records = append(records, rec)
+	}
+	require.Len(t, records, 1)
+	assert.Equal(t, obj.VersionID, records[0].VersionID)
+	assert.Equal(t, "obj.bin", records[0].Key)
+}
+
+// --- Task 4f: Snapshot versioning awareness ---
+
+func TestECBackend_ListAllObjects_VersionedKey(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	data := strings.Repeat("z", 64)
+	obj, err := b.PutObject("ver-bucket", "obj.txt", strings.NewReader(data), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	all, err := b.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	assert.Equal(t, obj.VersionID, all[0].VersionID)
+	assert.Equal(t, "obj.txt", all[0].Key)
+	assert.False(t, all[0].IsDeleteMarker)
+}
+
+func TestECBackend_ListAllObjects_DeleteMarkerExcluded(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	data := strings.Repeat("z", 64)
+	_, err := b.PutObject("ver-bucket", "obj.txt", strings.NewReader(data), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, b.DeleteObject("ver-bucket", "obj.txt"))
+
+	all, err := b.ListAllObjects()
+	require.NoError(t, err)
+	// Delete marker should NOT appear in snapshot (no data to restore)
+	for _, o := range all {
+		assert.False(t, o.IsDeleteMarker, "delete marker must not appear in snapshot")
+	}
 }

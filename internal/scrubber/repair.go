@@ -25,7 +25,7 @@ func (r *RepairEngine) Repair(rec ObjectRecord, status ShardStatus) error {
 	}
 
 	total := rec.DataShards + rec.ParityShards
-	paths := r.backend.ShardPaths(rec.Bucket, rec.Key, total)
+	paths := r.backend.ShardPaths(rec.Bucket, rec.Key, rec.VersionID, total)
 
 	shards := make([][]byte, total)
 	for i, path := range paths {

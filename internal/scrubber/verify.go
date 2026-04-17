@@ -62,7 +62,7 @@ func (v *ShardVerifier) Verify(rec ObjectRecord) ShardStatus {
 
 func (v *ShardVerifier) check(rec ObjectRecord) ShardStatus {
 	total := rec.DataShards + rec.ParityShards
-	paths := v.backend.ShardPaths(rec.Bucket, rec.Key, total)
+	paths := v.backend.ShardPaths(rec.Bucket, rec.Key, rec.VersionID, total)
 	status := ShardStatus{Bucket: rec.Bucket, Key: rec.Key}
 	for i, path := range paths {
 		_, err := v.backend.ReadShard(rec.Bucket, rec.Key, path)

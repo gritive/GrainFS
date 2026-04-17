@@ -55,12 +55,14 @@ type Copier interface {
 
 // SnapshotObject is a point-in-time metadata record for a stored object.
 type SnapshotObject struct {
-	Bucket      string `json:"bucket"`
-	Key         string `json:"key"`
-	ETag        string `json:"etag"`
-	Size        int64  `json:"size"`
-	ContentType string `json:"content_type"`
-	Modified    int64  `json:"modified"`
+	Bucket         string `json:"bucket"`
+	Key            string `json:"key"`
+	ETag           string `json:"etag"`
+	Size           int64  `json:"size"`
+	ContentType    string `json:"content_type"`
+	Modified       int64  `json:"modified"`
+	VersionID      string `json:"version_id,omitempty"`
+	IsDeleteMarker bool   `json:"is_delete_marker,omitempty"`
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.

@@ -22,7 +22,7 @@ type Scrubbable interface {
 	// Returns false if the object was deleted between scan and verify (Eng Review #9).
 	ObjectExists(bucket, key string) (bool, error)
 	// ShardPaths returns all expected shard file paths for an object.
-	ShardPaths(bucket, key string, totalShards int) []string
+	ShardPaths(bucket, key, versionID string, totalShards int) []string
 	// ReadShard reads and decrypts a shard, verifying its CRC32 footer.
 	// bucket+key are used for locking (RLock).
 	ReadShard(bucket, key, path string) ([]byte, error)
@@ -37,7 +37,9 @@ type ObjectRecord struct {
 	Key          string
 	DataShards   int
 	ParityShards int
-	ETag         string
+	ETag            string
+	VersionID       string
+	IsDeleteMarker  bool
 }
 
 // maxRepairsPerCycle limits repairs per scrub cycle to avoid I/O storms.

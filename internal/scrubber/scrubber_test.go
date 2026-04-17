@@ -80,7 +80,7 @@ func (m *mockBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, 
 	return ch, nil
 }
 
-func (m *mockBackend) ShardPaths(bucket, key string, total int) []string {
+func (m *mockBackend) ShardPaths(bucket, key, versionID string, total int) []string {
 	paths := make([]string, total)
 	for i := range paths {
 		paths[i] = fmt.Sprintf("%s/%s/%d", bucket, key, i)

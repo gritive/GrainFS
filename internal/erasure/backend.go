@@ -1069,14 +1069,29 @@ func (b *ECBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, er
 				if meta.DataShards <= 0 { // plain objects skipped (Eng Review #10)
 					continue
 				}
+				if meta.IsDeleteMarker {
+					continue // delete markers have no shards to scrub
+				}
 				rawKey := string(it.Item().Key())
-				key := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
+				rest := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
+				// Versioned keys: "key/versionId" — split on last slash
+				objKey, versionID := rest, ""
+				if idx := strings.LastIndex(rest, "/"); idx >= 0 {
+					// heuristic: if suffix looks like a UUID (contains dashes), it's a versionId
+					suffix := rest[idx+1:]
+					if len(suffix) == 36 && strings.Count(suffix, "-") == 4 {
+						objKey = rest[:idx]
+						versionID = suffix
+					}
+				}
 				ch <- scrubber.ObjectRecord{
-					Bucket:       bucket,
-					Key:          key,
-					DataShards:   meta.DataShards,
-					ParityShards: meta.ParityShards,
-					ETag:         meta.ETag,
+					Bucket:         bucket,
+					Key:            objKey,
+					DataShards:     meta.DataShards,
+					ParityShards:   meta.ParityShards,
+					ETag:           meta.ETag,
+					VersionID:      versionID,
+					IsDeleteMarker: meta.IsDeleteMarker,
 				}
 			}
 			return nil
@@ -1087,10 +1102,10 @@ func (b *ECBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, er
 
 // ShardPaths returns all shard file paths for an object.
 // Scrubber API contract — do not change without bumping scrubber version.
-func (b *ECBackend) ShardPaths(bucket, key string, totalShards int) []string {
+func (b *ECBackend) ShardPaths(bucket, key, versionID string, totalShards int) []string {
 	paths := make([]string, totalShards)
 	for i := range paths {
-		paths[i] = b.shardPath(bucket, key, i)
+		paths[i] = b.shardPathFor(bucket, key, versionID, i)
 	}
 	return paths
 }
@@ -1236,15 +1251,13 @@ func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			rawKey := string(it.Item().Key())
 			rest := rawKey[len("obj:"):]
-			slashIdx := len(rest)
-			for i, c := range rest {
-				if c == '/' {
-					slashIdx = i
-					break
-				}
+			// rest = "<bucket>/<key>" or "<bucket>/<key>/<versionId>"
+			firstSlash := strings.Index(rest, "/")
+			if firstSlash < 0 {
+				continue
 			}
-			bucket := rest[:slashIdx]
-			key := rest[slashIdx+1:]
+			bucket := rest[:firstSlash]
+			keyAndVer := rest[firstSlash+1:]
 
 			var meta *ecObjectMeta
 			if err := it.Item().Value(func(val []byte) error {
@@ -1254,13 +1267,26 @@ func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 			}); err != nil {
 				return err
 			}
+			if meta.IsDeleteMarker {
+				continue // delete markers have no recoverable data
+			}
+			// Determine actual key (strip versionId suffix if present)
+			objKey := keyAndVer
+			versionID := meta.VersionID
+			if versionID != "" {
+				// versioned key: "key/versionId" — strip the suffix
+				if idx := strings.LastIndex(keyAndVer, "/"); idx >= 0 {
+					objKey = keyAndVer[:idx]
+				}
+			}
 			objs = append(objs, storage.SnapshotObject{
 				Bucket:      bucket,
-				Key:         key,
+				Key:         objKey,
 				ETag:        meta.ETag,
 				Size:        meta.Size,
 				ContentType: meta.ContentType,
 				Modified:    meta.LastModified,
+				VersionID:   versionID,
 			})
 		}
 		return nil
