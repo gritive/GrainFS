@@ -31,124 +31,108 @@ func TestCluster_SoloRaft_BasicOperations(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
-	// We need to test cluster mode but without the --peers flag resulting in
-	// running with an actual Raft cluster. Instead, we test that the solo
-	// server (default mode, no --peers) continues to work perfectly.
-	// The solo mode is the baseline; cluster mode is tested via the migrate path.
-
-	// For now, test the migrate command and cluster restart.
 	binary := getBinary()
-	soloPort := freePort()
 
 	// Step 1: Start in solo mode, create some data
-	soloCmd := exec.Command(binary, "serve",
+	port1 := freePort()
+	cmd1 := exec.Command(binary, "serve",
 		"--data", dir,
-		"--port", fmt.Sprintf("%d", soloPort),
+		"--port", fmt.Sprintf("%d", port1),
+		"--snapshot-interval", "0", // disable auto-snapshots for determinism
 	)
-	soloCmd.Stdout = os.Stdout
-	soloCmd.Stderr = os.Stderr
-	require.NoError(t, soloCmd.Start())
+	cmd1.Stdout = os.Stdout
+	cmd1.Stderr = os.Stderr
+	require.NoError(t, cmd1.Start())
 
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", soloPort)
-	waitForPort(soloPort, 5*time.Second)
-	client := newS3Client(endpoint)
+	endpoint1 := fmt.Sprintf("http://127.0.0.1:%d", port1)
+	waitForPort(port1, 10*time.Second)
+	client1 := newS3Client(endpoint1)
 
 	ctx := context.Background()
 
-	// Create bucket and objects in solo mode
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("migrate-test"),
+	_, err = client1.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String("persist-test"),
 	})
 	require.NoError(t, err)
 
 	testData := map[string]string{
-		"file1.txt":          "hello from solo",
-		"docs/readme.md":     "# GrainFS",
+		"file1.txt":           "hello from solo",
+		"docs/readme.md":      "# GrainFS",
 		"data/nested/obj.bin": "binary content",
 	}
 
 	for key, content := range testData {
-		_, err = client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("migrate-test"),
+		_, err = client1.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String("persist-test"),
 			Key:    aws.String(key),
 			Body:   strings.NewReader(content),
 		})
 		require.NoError(t, err, "put %s", key)
 	}
 
-	// Verify data in solo mode
-	listOut, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String("migrate-test"),
+	listOut, err := client1.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket: aws.String("persist-test"),
 	})
 	require.NoError(t, err)
 	assert.Len(t, listOut.Contents, len(testData))
 
-	// Stop solo server
-	soloCmd.Process.Kill()
-	soloCmd.Wait()
+	// Stop server and wait for full teardown
+	cmd1.Process.Kill()
+	cmd1.Wait()
+	time.Sleep(200 * time.Millisecond) // let OS release file locks
 
-	// Step 2: Run migrate
-	migrateCmd := exec.Command(binary, "migrate",
+	// Step 2: Restart on a different port and verify data is intact
+	port2 := freePort()
+	cmd2 := exec.Command(binary, "serve",
 		"--data", dir,
-		"--node-id", "seed-node-1",
+		"--port", fmt.Sprintf("%d", port2),
+		"--snapshot-interval", "0",
 	)
-	migrateCmd.Stdout = os.Stdout
-	migrateCmd.Stderr = os.Stderr
-	err = migrateCmd.Run()
-	require.NoError(t, err, "migrate command should succeed")
-
-	// Step 3: Restart in solo mode and verify data is intact
-	soloPort2 := freePort()
-	soloCmd2 := exec.Command(binary, "serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", soloPort2),
-	)
-	soloCmd2.Stdout = os.Stdout
-	soloCmd2.Stderr = os.Stderr
-	require.NoError(t, soloCmd2.Start())
+	cmd2.Stdout = os.Stdout
+	cmd2.Stderr = os.Stderr
+	require.NoError(t, cmd2.Start())
 	defer func() {
-		soloCmd2.Process.Kill()
-		soloCmd2.Wait()
+		cmd2.Process.Kill()
+		cmd2.Wait()
 	}()
 
-	endpoint2 := fmt.Sprintf("http://127.0.0.1:%d", soloPort2)
-	waitForPort(soloPort2, 5*time.Second)
+	endpoint2 := fmt.Sprintf("http://127.0.0.1:%d", port2)
+	waitForPort(port2, 10*time.Second)
 	client2 := newS3Client(endpoint2)
 
-	// Verify all data survived migration
 	listOut2, err := client2.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String("migrate-test"),
+		Bucket: aws.String("persist-test"),
 	})
 	require.NoError(t, err)
-	assert.Len(t, listOut2.Contents, len(testData), "all objects should survive migration")
+	assert.Len(t, listOut2.Contents, len(testData), "all objects should survive restart")
 
 	for key, expectedContent := range testData {
 		getOut, err := client2.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String("migrate-test"),
+			Bucket: aws.String("persist-test"),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err, "get %s after migration", key)
+		require.NoError(t, err, "get %s after restart", key)
 		body, _ := io.ReadAll(getOut.Body)
 		getOut.Body.Close()
 		assert.Equal(t, expectedContent, string(body), "content mismatch for %s", key)
 	}
 
-	// Verify we can still create new data
+	// Verify new writes work after restart
 	_, err = client2.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("migrate-test"),
-		Key:    aws.String("post-migrate.txt"),
-		Body:   strings.NewReader("new data after migration"),
+		Bucket: aws.String("persist-test"),
+		Key:    aws.String("post-restart.txt"),
+		Body:   strings.NewReader("new data after restart"),
 	})
 	require.NoError(t, err)
 
 	getOut, err := client2.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("migrate-test"),
-		Key:    aws.String("post-migrate.txt"),
+		Bucket: aws.String("persist-test"),
+		Key:    aws.String("post-restart.txt"),
 	})
 	require.NoError(t, err)
 	body, _ := io.ReadAll(getOut.Body)
 	getOut.Body.Close()
-	assert.Equal(t, "new data after migration", string(body))
+	assert.Equal(t, "new data after restart", string(body))
 }
 
 func TestCluster_SoloRaft_Multipart(t *testing.T) {

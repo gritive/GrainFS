@@ -19,6 +19,13 @@
 9. [x] migration: injector
 10. [x] NFS null auth 경고 — serve 시작 시 stdout 출력
 
+## Known Issues (Non-blocking, Phase 12 리뷰 후)
+
+- [ ] **pull-through: 메모리 OOM 위험** — `pullthrough/pullthrough.go:63` `io.ReadAll` 크기 제한 없음. 대형 파일 업스트림 fetch 시 OOM 가능. 스트리밍 저장으로 교체 필요 (프로덕션 전)
+- [ ] **snapshot retention: 수동 스냅샷도 자동 삭제** — `snapshot/auto.go:pruneOld()` 가 `maxRetain` 초과 시 auto+수동 통합 카운트로 오래된 것부터 삭제. 수동 스냅샷은 보호해야 함 (e.g. `reason="auto"` 태그로 구분)
+- [ ] **localhostOnly: IPv4-mapped IPv6 누락** — `::ffff:127.0.0.1` 형식 미처리. 실제 발생 가능성 낮지만 완전한 localhost 검사 필요
+- [ ] **snapshot-interval 기본값 변경 (0→1h)** — 업그레이드 시 기존 사용자에게 예상치 못한 자동 스냅샷 시작됨. 릴리스 노트에 명시
+
 ## Phase 13: Operations
 
 - [ ] dashboard: raft health, badgerdb vlog gc status, erasure coding status

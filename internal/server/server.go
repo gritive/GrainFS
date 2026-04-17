@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -97,6 +98,8 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 			walDir := filepath.Join(s.dataDir, "wal")
 			if mgr, err := snapshot.NewManager(dir, snap, walDir); err == nil {
 				s.snapMgr = mgr
+			} else {
+				slog.Warn("snapshot manager init failed, snapshot/PITR endpoints will be unavailable", "err", err)
 			}
 		}
 	}
