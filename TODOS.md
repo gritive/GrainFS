@@ -21,7 +21,7 @@
 - [ ] ACL embedding
 - [ ] LRU token validation
 - [ ] zero copy permission check
-- [ ] versioning
+- [x] versioning
 - [ ] soft-delete
 - [ ] life cycle management
 
