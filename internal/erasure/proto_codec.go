@@ -35,14 +35,16 @@ func unmarshalBucketMeta(data []byte) (*bucketMeta, error) {
 
 func marshalECObjectMeta(m *ecObjectMeta) ([]byte, error) {
 	return proto.Marshal(&pb.ECObjectMeta{
-		Key:          m.Key,
-		Size:         m.Size,
-		ContentType:  m.ContentType,
-		Etag:         m.ETag,
-		LastModified: m.LastModified,
-		DataShards:   int32(m.DataShards),
-		ParityShards: int32(m.ParityShards),
-		ShardSize:    int32(m.ShardSize),
+		Key:            m.Key,
+		Size:           m.Size,
+		ContentType:    m.ContentType,
+		Etag:           m.ETag,
+		LastModified:   m.LastModified,
+		DataShards:     int32(m.DataShards),
+		ParityShards:   int32(m.ParityShards),
+		ShardSize:      int32(m.ShardSize),
+		VersionId:      m.VersionID,
+		IsDeleteMarker: m.IsDeleteMarker,
 	})
 }
 
@@ -52,14 +54,16 @@ func unmarshalECObjectMeta(data []byte) (*ecObjectMeta, error) {
 		return nil, err
 	}
 	return &ecObjectMeta{
-		Key:          p.Key,
-		Size:         p.Size,
-		ContentType:  p.ContentType,
-		ETag:         p.Etag,
-		LastModified: p.LastModified,
-		DataShards:   int(p.DataShards),
-		ParityShards: int(p.ParityShards),
-		ShardSize:    int(p.ShardSize),
+		Key:            p.Key,
+		Size:           p.Size,
+		ContentType:    p.ContentType,
+		ETag:           p.Etag,
+		LastModified:   p.LastModified,
+		DataShards:     int(p.DataShards),
+		ParityShards:   int(p.ParityShards),
+		ShardSize:      int(p.ShardSize),
+		VersionID:      p.VersionId,
+		IsDeleteMarker: p.IsDeleteMarker,
 	}, nil
 }
 

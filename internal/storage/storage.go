@@ -10,11 +10,13 @@ var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend
 
 // Object represents a stored object with metadata.
 type Object struct {
-	Key          string
-	Size         int64
-	ContentType  string
-	ETag         string
-	LastModified int64 // Unix timestamp
+	Key            string
+	Size           int64
+	ContentType    string
+	ETag           string
+	LastModified   int64  // Unix timestamp
+	VersionID      string // non-empty when bucket versioning is Enabled
+	IsDeleteMarker bool   // true when this object is a delete marker
 }
 
 // MultipartUpload tracks an in-progress multipart upload.

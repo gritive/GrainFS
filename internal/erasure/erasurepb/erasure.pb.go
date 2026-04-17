@@ -74,17 +74,19 @@ func (x *BucketMeta) GetVersioningState() string {
 }
 
 type ECObjectMeta struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
-	Size          int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	ContentType   string                 `protobuf:"bytes,3,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
-	Etag          string                 `protobuf:"bytes,4,opt,name=etag,proto3" json:"etag,omitempty"`
-	LastModified  int64                  `protobuf:"varint,5,opt,name=last_modified,json=lastModified,proto3" json:"last_modified,omitempty"`
-	DataShards    int32                  `protobuf:"varint,6,opt,name=data_shards,json=dataShards,proto3" json:"data_shards,omitempty"`
-	ParityShards  int32                  `protobuf:"varint,7,opt,name=parity_shards,json=parityShards,proto3" json:"parity_shards,omitempty"`
-	ShardSize     int32                  `protobuf:"varint,8,opt,name=shard_size,json=shardSize,proto3" json:"shard_size,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Key            string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Size           int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	ContentType    string                 `protobuf:"bytes,3,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	Etag           string                 `protobuf:"bytes,4,opt,name=etag,proto3" json:"etag,omitempty"`
+	LastModified   int64                  `protobuf:"varint,5,opt,name=last_modified,json=lastModified,proto3" json:"last_modified,omitempty"`
+	DataShards     int32                  `protobuf:"varint,6,opt,name=data_shards,json=dataShards,proto3" json:"data_shards,omitempty"`
+	ParityShards   int32                  `protobuf:"varint,7,opt,name=parity_shards,json=parityShards,proto3" json:"parity_shards,omitempty"`
+	ShardSize      int32                  `protobuf:"varint,8,opt,name=shard_size,json=shardSize,proto3" json:"shard_size,omitempty"`
+	VersionId      string                 `protobuf:"bytes,9,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	IsDeleteMarker bool                   `protobuf:"varint,10,opt,name=is_delete_marker,json=isDeleteMarker,proto3" json:"is_delete_marker,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ECObjectMeta) Reset() {
@@ -173,6 +175,20 @@ func (x *ECObjectMeta) GetShardSize() int32 {
 	return 0
 }
 
+func (x *ECObjectMeta) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+func (x *ECObjectMeta) GetIsDeleteMarker() bool {
+	if x != nil {
+		return x.IsDeleteMarker
+	}
+	return false
+}
+
 type MultipartUploadMeta struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UploadId      string                 `protobuf:"bytes,1,opt,name=upload_id,json=uploadId,proto3" json:"upload_id,omitempty"`
@@ -258,7 +274,7 @@ const file_internal_erasure_erasurepb_erasure_proto_rawDesc = "" +
 	"BucketMeta\x12\x1d\n" +
 	"\n" +
 	"ec_enabled\x18\x01 \x01(\bR\tecEnabled\x12)\n" +
-	"\x10versioning_state\x18\x02 \x01(\tR\x0fversioningState\"\xf5\x01\n" +
+	"\x10versioning_state\x18\x02 \x01(\tR\x0fversioningState\"\xbe\x02\n" +
 	"\fECObjectMeta\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12!\n" +
@@ -269,7 +285,11 @@ const file_internal_erasure_erasurepb_erasure_proto_rawDesc = "" +
 	"dataShards\x12#\n" +
 	"\rparity_shards\x18\a \x01(\x05R\fparityShards\x12\x1d\n" +
 	"\n" +
-	"shard_size\x18\b \x01(\x05R\tshardSize\"\x9e\x01\n" +
+	"shard_size\x18\b \x01(\x05R\tshardSize\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\t \x01(\tR\tversionId\x12(\n" +
+	"\x10is_delete_marker\x18\n" +
+	" \x01(\bR\x0eisDeleteMarker\"\x9e\x01\n" +
 	"\x13MultipartUploadMeta\x12\x1b\n" +
 	"\tupload_id\x18\x01 \x01(\tR\buploadId\x12\x16\n" +
 	"\x06bucket\x18\x02 \x01(\tR\x06bucket\x12\x10\n" +

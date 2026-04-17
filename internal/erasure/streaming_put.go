@@ -46,17 +46,17 @@ func spoolToTemp(r io.Reader) (f *os.File, size int64, etag string, err error) {
 
 // putObjectDataStreaming encodes src (of known size and precomputed etag) using
 // streaming Reed-Solomon, keeping heap bounded to ~one shard at a time.
-func (b *ECBackend) putObjectDataStreaming(bucket, key string, src io.ReadSeeker, size int64, etag, contentType string) (*storage.Object, error) {
+func (b *ECBackend) putObjectDataStreaming(bucket, key, versionId string, src io.ReadSeeker, size int64, etag, contentType string) (*storage.Object, error) {
 	if size < int64(b.codec.DataShards) {
 		// too small for EC — read into memory and use plain path
 		data, err := io.ReadAll(src)
 		if err != nil {
 			return nil, err
 		}
-		return b.putObjectPlain(bucket, key, data, contentType)
+		return b.putObjectPlain(bucket, key, versionId, data, contentType)
 	}
 
-	shardDir := b.ShardDir(bucket, key)
+	shardDir := b.shardDirFor(bucket, key, versionId)
 	if err := os.MkdirAll(shardDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create shard dir: %w", err)
 	}
@@ -99,7 +99,7 @@ func (b *ECBackend) putObjectDataStreaming(bucket, key string, src io.ReadSeeker
 			return nil, fmt.Errorf("seek shard temp %d: %w", i, seekErr)
 		}
 
-		path := b.shardPath(bucket, key, i)
+		path := b.shardPathFor(bucket, key, versionId, i)
 
 		if b.encryptor == nil {
 			writeErr := streamWriteShardCRC(path, f)
@@ -156,14 +156,23 @@ func (b *ECBackend) putObjectDataStreaming(bucket, key string, src io.ReadSeeker
 		DataShards:   b.codec.DataShards,
 		ParityShards: b.codec.ParityShards,
 		ShardSize:    shardSz,
+		VersionID:    versionId,
 	}
 
 	metaBytes, err := marshalECObjectMeta(&meta)
 	if err != nil {
 		return nil, fmt.Errorf("marshal meta: %w", err)
 	}
+
+	var metaKey []byte
+	if versionId != "" {
+		metaKey = objectMetaKeyV(bucket, key, versionId)
+	} else {
+		metaKey = objectMetaKey(bucket, key)
+	}
+
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objectMetaKey(bucket, key), metaBytes)
+		return txn.Set(metaKey, metaBytes)
 	}); err != nil {
 		os.RemoveAll(shardDir)
 		return nil, err

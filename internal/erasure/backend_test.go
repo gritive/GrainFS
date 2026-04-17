@@ -766,6 +766,31 @@ func TestECBackend_ReadShardBlocksDuringWrite(t *testing.T) {
 	}
 }
 
+func TestECBackend_VersionedPut_GeneratesVersionID(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	obj, err := b.PutObject("ver-bucket", "file.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+	assert.NotEmpty(t, obj.VersionID, "versioned PutObject must return a VersionID")
+
+	// Second PUT must generate a different VersionID, both versions must be retrievable
+	obj2, err := b.PutObject("ver-bucket", "file.txt", strings.NewReader("world"), "text/plain")
+	require.NoError(t, err)
+	assert.NotEmpty(t, obj2.VersionID)
+	assert.NotEqual(t, obj.VersionID, obj2.VersionID)
+}
+
+func TestECBackend_UnversionedPut_NoVersionID(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("plain-bucket"))
+
+	obj, err := b.PutObject("plain-bucket", "file.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+	assert.Empty(t, obj.VersionID, "unversioned PutObject must not set VersionID")
+}
+
 func TestECBackend_BucketVersioning_SetGet(t *testing.T) {
 	b := newTestBackend(t)
 	require.NoError(t, b.CreateBucket("test-bucket"))

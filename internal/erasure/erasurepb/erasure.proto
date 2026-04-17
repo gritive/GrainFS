@@ -16,6 +16,8 @@ message ECObjectMeta {
   int32 data_shards = 6;
   int32 parity_shards = 7;
   int32 shard_size = 8;
+  string version_id = 9;
+  bool is_delete_marker = 10;
 }
 
 message MultipartUploadMeta {

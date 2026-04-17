@@ -87,14 +87,16 @@ type Encryptor interface {
 
 // ecObjectMeta is the metadata stored in BadgerDB for an EC-encoded object.
 type ecObjectMeta struct {
-	Key          string
-	Size         int64
-	ContentType  string
-	ETag         string
-	LastModified int64
-	DataShards   int
-	ParityShards int
-	ShardSize    int
+	Key            string
+	Size           int64
+	ContentType    string
+	ETag           string
+	LastModified   int64
+	DataShards     int
+	ParityShards   int
+	ShardSize      int
+	VersionID      string
+	IsDeleteMarker bool
 }
 
 // ECOption configures the EC backend.
@@ -140,12 +142,24 @@ func (b *ECBackend) Close() error {
 // ShardDir returns the directory where shards for a given bucket/key are stored.
 // Exported for testing (shard deletion simulation).
 func (b *ECBackend) ShardDir(bucket, key string) string {
-	h := sha256.Sum256([]byte(key))
+	return b.shardDirFor(bucket, key, "")
+}
+
+func (b *ECBackend) shardDirFor(bucket, key, versionId string) string {
+	input := key
+	if versionId != "" {
+		input = key + "/" + versionId
+	}
+	h := sha256.Sum256([]byte(input))
 	return filepath.Join(b.root, "data", bucket, ".ec", hex.EncodeToString(h[:]))
 }
 
 func (b *ECBackend) shardPath(bucket, key string, idx int) string {
 	return filepath.Join(b.ShardDir(bucket, key), fmt.Sprintf("%02d", idx))
+}
+
+func (b *ECBackend) shardPathFor(bucket, key, versionId string, idx int) string {
+	return filepath.Join(b.shardDirFor(bucket, key, versionId), fmt.Sprintf("%02d", idx))
 }
 
 // bucketMeta stores per-bucket configuration.
@@ -154,9 +168,11 @@ type bucketMeta struct {
 	VersioningState  string // "Unversioned" (default), "Enabled", "Suspended"
 }
 
-func bucketKey(bucket string) []byte { return []byte("bucket:" + bucket) }
-func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
-func multipartKey(uploadID string) []byte     { return []byte("mpu:" + uploadID) }
+func bucketKey(bucket string) []byte              { return []byte("bucket:" + bucket) }
+func objectMetaKey(bucket, key string) []byte     { return []byte("obj:" + bucket + "/" + key) }
+func objectMetaKeyV(bucket, key, vid string) []byte { return []byte("obj:" + bucket + "/" + key + "/" + vid) }
+func latestKey(bucket, key string) []byte         { return []byte("lat:" + bucket + "/" + key) }
+func multipartKey(uploadID string) []byte         { return []byte("mpu:" + uploadID) }
 
 // --- Bucket operations ---
 
@@ -338,9 +354,15 @@ func (b *ECBackend) ListBuckets() ([]string, error) {
 // --- Object operations ---
 
 func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
-	ecEnabled, err := b.GetBucketECPolicy(bucket)
+	bm, err := b.getBucketMeta(bucket)
 	if err != nil {
 		return nil, err
+	}
+
+	// Generate version ID for versioning-enabled buckets.
+	var versionId string
+	if bm.VersioningState == "Enabled" {
+		versionId = uuid.New().String()
 	}
 
 	// Pass 1: stream body to temp file, computing size + ETag without buffering.
@@ -353,28 +375,64 @@ func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType strin
 	unlock := b.acquireWriteLock(bucket, key)
 	defer unlock()
 
-	if !ecEnabled {
+	var obj *storage.Object
+	if !bm.ECEnabled {
 		// For plain storage, fall back to in-memory path (plain objects are
 		// typically small; EC should be enabled for large objects).
 		data, readErr := io.ReadAll(f)
 		if readErr != nil {
 			return nil, fmt.Errorf("read spooled plain data: %w", readErr)
 		}
-		return b.putObjectPlain(bucket, key, data, contentType)
+		obj, err = b.putObjectPlain(bucket, key, versionId, data, contentType)
+	} else {
+		// Pass 2+: streaming Reed-Solomon encode from temp file.
+		obj, err = b.putObjectDataStreaming(bucket, key, versionId, f, size, etag, contentType)
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	// Pass 2+: streaming Reed-Solomon encode from temp file.
-	return b.putObjectDataStreaming(bucket, key, f, size, etag, contentType)
+	// Write lat: pointer for versioned objects.
+	if versionId != "" {
+		if dbErr := b.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(latestKey(bucket, key), []byte(versionId))
+		}); dbErr != nil {
+			return nil, dbErr
+		}
+		obj.VersionID = versionId
+	}
+	return obj, nil
+}
+
+// getBucketMeta returns the bucket metadata or ErrBucketNotFound.
+func (b *ECBackend) getBucketMeta(bucket string) (*bucketMeta, error) {
+	var meta *bucketMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		m, err := readBucketMeta(txn, bucketKey(bucket))
+		if err != nil {
+			return err
+		}
+		meta = m
+		return nil
+	})
+	return meta, err
 }
 
 // putObjectPlain stores an object without erasure coding (flat file).
-func (b *ECBackend) putObjectPlain(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
+func (b *ECBackend) putObjectPlain(bucket, key, versionId string, data []byte, contentType string) (*storage.Object, error) {
 	objDir := filepath.Join(b.root, "data", bucket, ".plain")
 	if err := os.MkdirAll(objDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create plain dir: %w", err)
 	}
 
-	h := sha256.Sum256([]byte(key))
+	// Version-aware file path: sha256(key) for Unversioned, sha256(key+"/"+versionId) for Enabled.
+	var hashInput string
+	if versionId != "" {
+		hashInput = key + "/" + versionId
+	} else {
+		hashInput = key
+	}
+	h := sha256.Sum256([]byte(hashInput))
 	filePath := filepath.Join(objDir, hex.EncodeToString(h[:]))
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {
 		return nil, fmt.Errorf("write plain object: %w", err)
@@ -391,14 +449,23 @@ func (b *ECBackend) putObjectPlain(bucket, key string, data []byte, contentType 
 		LastModified: now,
 		DataShards:   0, // indicates plain storage
 		ParityShards: 0,
+		VersionID:    versionId,
 	}
 
 	metaBytes, err := marshalECObjectMeta(&meta)
 	if err != nil {
 		return nil, fmt.Errorf("marshal object meta: %w", err)
 	}
+
+	var metaKey []byte
+	if versionId != "" {
+		metaKey = objectMetaKeyV(bucket, key, versionId)
+	} else {
+		metaKey = objectMetaKey(bucket, key)
+	}
+
 	err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objectMetaKey(bucket, key), metaBytes)
+		return txn.Set(metaKey, metaBytes)
 	})
 	if err != nil {
 		os.Remove(filePath)
@@ -417,7 +484,7 @@ func (b *ECBackend) putObjectPlain(bucket, key string, data []byte, contentType 
 func (b *ECBackend) putObjectData(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
 	// Empty or very small data: store as plain to avoid EC split errors
 	if len(data) < b.codec.DataShards {
-		return b.putObjectPlain(bucket, key, data, contentType)
+		return b.putObjectPlain(bucket, key, "", data, contentType)
 	}
 
 	// Erasure encode
@@ -495,7 +562,7 @@ func (b *ECBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Objec
 
 	var data []byte
 	if meta.DataShards == 0 {
-		data, err = b.readPlain(bucket, key)
+		data, err = b.readPlain(bucket, key, meta.VersionID)
 	} else {
 		data, err = b.readAndDecode(bucket, key, meta)
 	}
@@ -509,12 +576,19 @@ func (b *ECBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Objec
 		ContentType:  meta.ContentType,
 		ETag:         meta.ETag,
 		LastModified: meta.LastModified,
+		VersionID:    meta.VersionID,
 	}
 	return io.NopCloser(bytes.NewReader(data)), obj, nil
 }
 
-func (b *ECBackend) readPlain(bucket, key string) ([]byte, error) {
-	h := sha256.Sum256([]byte(key))
+func (b *ECBackend) readPlain(bucket, key, versionId string) ([]byte, error) {
+	var hashInput string
+	if versionId != "" {
+		hashInput = key + "/" + versionId
+	} else {
+		hashInput = key
+	}
+	h := sha256.Sum256([]byte(hashInput))
 	filePath := filepath.Join(b.root, "data", bucket, ".plain", hex.EncodeToString(h[:]))
 	return os.ReadFile(filePath)
 }
@@ -531,6 +605,7 @@ func (b *ECBackend) HeadObject(bucket, key string) (*storage.Object, error) {
 		ContentType:  meta.ContentType,
 		ETag:         meta.ETag,
 		LastModified: meta.LastModified,
+		VersionID:    meta.VersionID,
 	}, nil
 }
 
@@ -729,24 +804,40 @@ func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts 
 	}
 	defer func() { spooled.Close(); os.Remove(spooled.Name()) }()
 
-	// Check bucket EC policy
-	ecEnabled, ecErr := b.GetBucketECPolicy(bucket)
-	if ecErr != nil {
-		ecEnabled = true // default to EC on error
+	// Check bucket meta for EC and versioning
+	bm, bmErr := b.getBucketMeta(bucket)
+	if bmErr != nil {
+		// Default to EC enabled on error
+		bm = &bucketMeta{ECEnabled: true}
+	}
+
+	var versionId string
+	if bm.VersioningState == "Enabled" {
+		versionId = uuid.New().String()
 	}
 
 	var obj *storage.Object
-	if ecEnabled {
-		obj, err = b.putObjectDataStreaming(bucket, key, spooled, totalSize, etag, uploadMeta.ContentType)
+	if bm.ECEnabled {
+		obj, err = b.putObjectDataStreaming(bucket, key, versionId, spooled, totalSize, etag, uploadMeta.ContentType)
 	} else {
 		data, readErr := io.ReadAll(spooled)
 		if readErr != nil {
 			return nil, fmt.Errorf("read spooled plain data: %w", readErr)
 		}
-		obj, err = b.putObjectPlain(bucket, key, data, uploadMeta.ContentType)
+		obj, err = b.putObjectPlain(bucket, key, versionId, data, uploadMeta.ContentType)
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Write lat: pointer for versioned objects.
+	if versionId != "" {
+		if dbErr := b.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(latestKey(bucket, key), []byte(versionId))
+		}); dbErr != nil {
+			return nil, dbErr
+		}
+		obj.VersionID = versionId
 	}
 
 	// Cleanup parts and multipart metadata
@@ -928,6 +1019,31 @@ func (b *ECBackend) getObjectMeta(bucket, key string) (*ecObjectMeta, error) {
 
 	var meta *ecObjectMeta
 	err := b.db.View(func(txn *badger.Txn) error {
+		// Check for a latest-version pointer (versioned objects).
+		latItem, latErr := txn.Get(latestKey(bucket, key))
+		if latErr == nil {
+			var versionId string
+			if err := latItem.Value(func(v []byte) error {
+				versionId = string(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			item, err := txn.Get(objectMetaKeyV(bucket, key, versionId))
+			if err == badger.ErrKeyNotFound {
+				return storage.ErrObjectNotFound
+			}
+			if err != nil {
+				return err
+			}
+			return item.Value(func(val []byte) error {
+				var unmarshalErr error
+				meta, unmarshalErr = unmarshalECObjectMeta(val)
+				return unmarshalErr
+			})
+		}
+
+		// Fall back to unversioned key.
 		item, err := txn.Get(objectMetaKey(bucket, key))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrObjectNotFound
@@ -1067,7 +1183,7 @@ func (b *ECBackend) readAndDecode(bucket, key string, meta *ecObjectMeta) ([]byt
 
 	shards := make([][]byte, total)
 	for i := range total {
-		path := b.shardPath(bucket, key, i)
+		path := b.shardPathFor(bucket, key, meta.VersionID, i)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			shards[i] = nil // missing shard — leave nil for reconstruction
