@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -56,15 +57,24 @@ func shardWithCRC(data []byte) []byte {
 	return out
 }
 
+// ErrCRCMissing is returned when a shard is too short to contain a CRC footer.
+// This indicates a legacy shard written before CRC was added, not bit-rot.
+var ErrCRCMissing = errors.New("shard too short for CRC footer (legacy shard)")
+
+// ErrCRCMismatch is returned when the stored CRC does not match the payload.
+// This indicates actual data corruption (bit-rot).
+var ErrCRCMismatch = errors.New("CRC mismatch (bit-rot detected)")
+
 // stripVerifyCRC verifies the 4-byte CRC32-IEEE footer and returns payload.
+// Returns ErrCRCMissing for legacy shards (no footer), ErrCRCMismatch for bit-rot.
 func stripVerifyCRC(data []byte) ([]byte, error) {
 	if len(data) < 4 {
-		return nil, fmt.Errorf("shard too short for CRC footer (%d bytes)", len(data))
+		return nil, fmt.Errorf("%w (%d bytes)", ErrCRCMissing, len(data))
 	}
 	payload := data[:len(data)-4]
 	stored := binary.LittleEndian.Uint32(data[len(data)-4:])
 	if crc32.ChecksumIEEE(payload) != stored {
-		return nil, fmt.Errorf("CRC mismatch")
+		return nil, ErrCRCMismatch
 	}
 	return payload, nil
 }
@@ -809,7 +819,11 @@ func (b *ECBackend) ReadShard(bucket, key, path string) ([]byte, error) {
 			return nil, fmt.Errorf("decrypt shard: %w", err)
 		}
 	}
-	return stripVerifyCRC(data)
+	payload, err := stripVerifyCRC(data)
+	if errors.Is(err, ErrCRCMissing) {
+		return nil, fmt.Errorf("%w", scrubber.ErrLegacyShard)
+	}
+	return payload, err
 }
 
 // WriteShard atomically writes a shard with CRC32 footer using tmp+fsync+rename

@@ -45,33 +45,57 @@ const maxRepairsPerCycle = 100
 
 // BackgroundScrubber periodically verifies and repairs EC shard integrity.
 type BackgroundScrubber struct {
-	backend  Scrubbable
-	verifier *ShardVerifier
-	repairer *RepairEngine
-	interval time.Duration
-	limiter  *rate.Limiter // 100 objects/sec scan throttle (Eng Review #8)
-	mu       sync.Mutex
-	stats    ScrubStats
+	backend      Scrubbable
+	verifier     *ShardVerifier
+	repairer     *RepairEngine
+	interval     time.Duration
+	limiter      *rate.Limiter // 100 objects/sec scan throttle (Eng Review #8)
+	mu           sync.Mutex
+	stats        ScrubStats
+	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
 }
 
 // ScrubStats is a snapshot of scrubbing statistics.
 type ScrubStats struct {
-	LastRun        time.Time
-	ObjectsChecked int64
-	ShardErrors    int64
-	Repaired       int64
-	Unrepairable   int64
+	LastRun           time.Time
+	ObjectsChecked    int64
+	ShardErrors       int64
+	Repaired          int64
+	Unrepairable      int64
+	MigrationRewrites int64
+}
+
+// ScrubberOption configures a BackgroundScrubber.
+type ScrubberOption func(*BackgroundScrubber)
+
+// WithNoRetry disables the transient-error retry delay in the verifier (for tests).
+func WithNoRetry() ScrubberOption {
+	return func(s *BackgroundScrubber) {
+		s.verifier = NewShardVerifier(s.backend, WithVerifyRetryDelay(0))
+	}
 }
 
 // New creates a BackgroundScrubber with a rate limit of 100 scans/sec.
-func New(backend Scrubbable, interval time.Duration) *BackgroundScrubber {
-	return &BackgroundScrubber{
-		backend:  backend,
-		verifier: NewShardVerifier(backend),
-		repairer: NewRepairEngine(backend),
-		interval: interval,
-		limiter:  rate.NewLimiter(100, 10),
+func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *BackgroundScrubber {
+	s := &BackgroundScrubber{
+		backend:      backend,
+		verifier:     NewShardVerifier(backend),
+		repairer:     NewRepairEngine(backend),
+		interval:     interval,
+		limiter:      rate.NewLimiter(100, 10),
+		lastStatuses: make(map[string]ShardStatus),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// LastStatus returns the last observed ShardStatus for bucket/key (for tests).
+func (s *BackgroundScrubber) LastStatus(bucket, key string) ShardStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastStatuses[bucket+"/"+key]
 }
 
 // Start launches the background scrub loop; returns immediately.
@@ -131,6 +155,11 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			atomic.AddInt64(&s.stats.ObjectsChecked, 1)
 
 			status := s.verifier.Verify(rec)
+
+			s.mu.Lock()
+			s.lastStatuses[rec.Bucket+"/"+rec.Key] = status
+			s.mu.Unlock()
+
 			if status.IsHealthy() {
 				continue
 			}
@@ -138,6 +167,13 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			errCount := int64(len(status.Missing) + len(status.Corrupt))
 			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
 			atomic.AddInt64(&s.stats.ShardErrors, errCount)
+
+			migCount := int64(len(status.Migration))
+			if migCount > 0 {
+				metrics.ScrubMigrationRewritesTotal.Add(float64(migCount))
+				atomic.AddInt64(&s.stats.MigrationRewrites, migCount)
+				slog.Info("scrub: legacy shards detected (migration rewrite)", "bucket", rec.Bucket, "key", rec.Key, "count", migCount)
+			}
 
 			// Per-cycle repair cap (Eng Review #5)
 			if repairCount >= maxRepairsPerCycle {
