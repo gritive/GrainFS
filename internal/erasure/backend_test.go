@@ -5,14 +5,68 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// zeroReader produces n bytes of zeros without heap allocation.
+type zeroReader struct{ remaining int }
+
+func (z *zeroReader) Read(p []byte) (int, error) {
+	if z.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > z.remaining {
+		n = z.remaining
+	}
+	for i := range n {
+		p[i] = 0
+	}
+	z.remaining -= n
+	return n, nil
+}
+
+// peakHeapAlloc samples runtime.MemStats.HeapAlloc every interval until the
+// returned stop channel is closed, then reports the maximum observed value.
+// HeapAlloc tracks live objects only (decreases after GC), giving a cleaner
+// peak than HeapInuse which is sticky until the OS reclaims spans.
+func peakHeapAlloc(interval time.Duration) (stop chan<- struct{}, peak func() uint64) {
+	ch := make(chan struct{})
+	var maxVal atomic.Uint64
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				for {
+					cur := maxVal.Load()
+					if ms.HeapAlloc <= cur {
+						break
+					}
+					if maxVal.CompareAndSwap(cur, ms.HeapAlloc) {
+						break
+					}
+				}
+			case <-ch:
+				return
+			}
+		}
+	}()
+	return ch, maxVal.Load
+}
 
 func newTestBackend(t *testing.T) *ECBackend {
 	t.Helper()
@@ -275,6 +329,109 @@ func TestECBackend_GetBucketECPolicy_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
+// TestECBackend_PutLargeObject_Roundtrip verifies byte-identical round-trip for a 50 MB object.
+// This passes both before and after the streaming fix — confirms correctness is preserved.
+func TestECBackend_PutLargeObject_Roundtrip(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	const size = 50 * 1024 * 1024
+	payload := bytes.Repeat([]byte{0xAB, 0xCD, 0xEF, 0x12}, size/4)
+
+	obj, err := b.PutObject("bucket", "roundtrip.bin", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	assert.Equal(t, int64(size), obj.Size)
+	assert.NotEmpty(t, obj.ETag)
+
+	rc, _, err := b.GetObject("bucket", "roundtrip.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, payload, got)
+}
+
+// TestECBackend_PutLargeObject_NoOOM verifies that PutObject does not hold the
+// entire 100 MB body in heap simultaneously (streaming spool-to-disk fix).
+// RED: current io.ReadAll implementation spikes HeapInuse by ~200 MB+; threshold is 60 MB.
+func TestECBackend_PutLargeObject_NoOOM(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-object memory test in short mode")
+	}
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	const size = 100 * 1024 * 1024
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	stop, peakFn := peakHeapAlloc(5 * time.Millisecond)
+
+	_, err := b.PutObject("bucket", "large.bin", &zeroReader{remaining: size}, "application/octet-stream")
+	require.NoError(t, err)
+
+	close(stop)
+	runtime.GC()
+
+	growth := int64(peakFn()) - int64(before.HeapInuse)
+	if growth < 0 {
+		growth = 0
+	}
+
+	const threshold = 60 * 1024 * 1024
+	assert.Less(t, growth, int64(threshold),
+		"PutObject(100MB) peak heap growth %d MB exceeds %d MB — io.ReadAll is buffering the full body",
+		growth/(1024*1024), threshold/(1024*1024))
+}
+
+// TestECBackend_Multipart_LargeParts_NoOOM verifies CompleteMultipartUpload
+// does not buffer all assembled parts (3 × 20 MB = 60 MB) in memory.
+// RED: current assembled bytes.Buffer pattern buffers all 60 MB before EC encode.
+func TestECBackend_Multipart_LargeParts_NoOOM(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large multipart memory test in short mode")
+	}
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	upload, err := b.CreateMultipartUpload("bucket", "mp-large.bin", "application/octet-stream")
+	require.NoError(t, err)
+
+	const partSize = 20 * 1024 * 1024
+	var parts []storage.Part
+	for i := 1; i <= 3; i++ {
+		p, err := b.UploadPart("bucket", "mp-large.bin", upload.UploadID, i, &zeroReader{remaining: partSize})
+		require.NoError(t, err)
+		parts = append(parts, storage.Part{PartNumber: p.PartNumber, ETag: p.ETag, Size: p.Size})
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	stop, peakFn := peakHeapAlloc(5 * time.Millisecond)
+
+	obj, err := b.CompleteMultipartUpload("bucket", "mp-large.bin", upload.UploadID, parts)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3*partSize), obj.Size)
+
+	close(stop)
+	runtime.GC()
+
+	growth := int64(peakFn()) - int64(before.HeapInuse)
+	if growth < 0 {
+		growth = 0
+	}
+
+	const threshold = 60 * 1024 * 1024
+	assert.Less(t, growth, int64(threshold),
+		"CompleteMultipartUpload(3×20MB) peak heap growth %d MB exceeds %d MB — bytes.Buffer is buffering all parts",
+		growth/(1024*1024), threshold/(1024*1024))
+}
+
 func TestECBackend_PutGetPlain_ECDisabled(t *testing.T) {
 	b := newTestBackend(t)
 	require.NoError(t, b.CreateBucket("plain"))
@@ -508,4 +665,68 @@ func TestECBackend_ListObjectsMaxKeys(t *testing.T) {
 	objects, err := b.ListObjects("bucket", "", 3)
 	require.NoError(t, err)
 	assert.Len(t, objects, 3)
+}
+
+// TestECBackend_ReadShardBlocksDuringWrite verifies that ReadShard (scrubber Verify)
+// is blocked while a write lock is held (simulating an in-progress PutObject / WriteShard).
+// This is the regression test for the per-key RWMutex fix (Eng Review #5 / A2).
+// Without acquireReadLock in ReadShard, the goroutine would read the shard immediately
+// without waiting — and the select-default case would fire, failing this test.
+func TestECBackend_ReadShardBlocksDuringWrite(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	content := bytes.Repeat([]byte("concurrent lock test "), 300)
+	_, err := b.PutObject("bucket", "key", bytes.NewReader(content), "application/octet-stream")
+	require.NoError(t, err)
+
+	total := DefaultDataShards + DefaultParityShards
+	paths := b.ShardPaths("bucket", "key", total)
+	require.NotEmpty(t, paths)
+
+	// Hold the write lock to simulate a long-running PutObject or scrubber repair.
+	lockHeld := make(chan struct{})
+	release := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		unlock := b.acquireWriteLock("bucket", "key")
+		close(lockHeld)
+		<-release
+		unlock()
+	}()
+
+	// Wait until the write lock is held before starting the reader.
+	<-lockHeld
+
+	// Start a ReadShard (scrubber Verify) for the same key — it must block.
+	readDone := make(chan struct{})
+	go func() {
+		b.ReadShard("bucket", "key", paths[1]) //nolint:errcheck
+		close(readDone)
+	}()
+
+	// Give the goroutine time to call acquireReadLock (which should block).
+	time.Sleep(20 * time.Millisecond)
+
+	// ReadShard must still be blocked (readDone channel should not be closed yet).
+	select {
+	case <-readDone:
+		t.Fatal("ReadShard completed while write lock was held — per-key RWMutex is not working")
+	default:
+		// Correct: ReadShard is blocked by the write lock.
+	}
+
+	// Release the write lock; ReadShard must proceed and complete.
+	close(release)
+	wg.Wait()
+
+	select {
+	case <-readDone:
+		// Correct: ReadShard unblocked after write lock was released.
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadShard did not complete after write lock was released")
+	}
 }

@@ -288,18 +288,28 @@ func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType strin
 		return nil, err
 	}
 
-	data, err := io.ReadAll(r)
+	// Pass 1: stream body to temp file, computing size + ETag without buffering.
+	f, size, etag, err := spoolToTemp(r)
 	if err != nil {
-		return nil, fmt.Errorf("read object data: %w", err)
+		return nil, fmt.Errorf("spool object body: %w", err)
 	}
+	defer func() { f.Close(); os.Remove(f.Name()) }()
 
 	unlock := b.acquireWriteLock(bucket, key)
 	defer unlock()
 
 	if !ecEnabled {
+		// For plain storage, fall back to in-memory path (plain objects are
+		// typically small; EC should be enabled for large objects).
+		data, readErr := io.ReadAll(f)
+		if readErr != nil {
+			return nil, fmt.Errorf("read spooled plain data: %w", readErr)
+		}
 		return b.putObjectPlain(bucket, key, data, contentType)
 	}
-	return b.putObjectData(bucket, key, data, contentType)
+
+	// Pass 2+: streaming Reed-Solomon encode from temp file.
+	return b.putObjectDataStreaming(bucket, key, f, size, etag, contentType)
 }
 
 // putObjectPlain stores an object without erasure coding (flat file).
@@ -638,17 +648,31 @@ func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts 
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
 
-	// Assemble parts into one buffer
-	var assembled bytes.Buffer
+	// Stream-assemble parts via io.MultiReader → spool → EC encode.
+	// Avoids bytes.Buffer OOM for large multipart uploads.
 	partDir := filepath.Join(b.root, "parts", uploadID)
-	for _, p := range parts {
-		partFile := filepath.Join(partDir, fmt.Sprintf("%05d", p.PartNumber))
-		data, err := os.ReadFile(partFile)
-		if err != nil {
-			return nil, fmt.Errorf("read part %d: %w", p.PartNumber, err)
+	partFiles := make([]*os.File, 0, len(parts))
+	defer func() {
+		for _, pf := range partFiles {
+			pf.Close()
 		}
-		assembled.Write(data)
+	}()
+	var partReaders []io.Reader
+	for _, p := range parts {
+		pf, openErr := os.Open(filepath.Join(partDir, fmt.Sprintf("%05d", p.PartNumber)))
+		if openErr != nil {
+			return nil, fmt.Errorf("open part %d: %w", p.PartNumber, openErr)
+		}
+		partFiles = append(partFiles, pf)
+		partReaders = append(partReaders, pf)
 	}
+
+	// Spool assembled stream to a temp file to get size + ETag in one pass.
+	spooled, totalSize, etag, spoolErr := spoolToTemp(io.MultiReader(partReaders...))
+	if spoolErr != nil {
+		return nil, fmt.Errorf("spool parts: %w", spoolErr)
+	}
+	defer func() { spooled.Close(); os.Remove(spooled.Name()) }()
 
 	// Check bucket EC policy
 	ecEnabled, ecErr := b.GetBucketECPolicy(bucket)
@@ -658,9 +682,13 @@ func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts 
 
 	var obj *storage.Object
 	if ecEnabled {
-		obj, err = b.putObjectData(bucket, key, assembled.Bytes(), uploadMeta.ContentType)
+		obj, err = b.putObjectDataStreaming(bucket, key, spooled, totalSize, etag, uploadMeta.ContentType)
 	} else {
-		obj, err = b.putObjectPlain(bucket, key, assembled.Bytes(), uploadMeta.ContentType)
+		data, readErr := io.ReadAll(spooled)
+		if readErr != nil {
+			return nil, fmt.Errorf("read spooled plain data: %w", readErr)
+		}
+		obj, err = b.putObjectPlain(bucket, key, data, uploadMeta.ContentType)
 	}
 	if err != nil {
 		return nil, err
