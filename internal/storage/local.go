@@ -3,6 +3,7 @@ package storage
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -335,4 +336,111 @@ func (b *LocalBackend) DeleteBucketPolicy(bucket string) error {
 		}
 		return err
 	})
+}
+
+// ListAllObjects implements Snapshotable: scans all object metadata across all buckets.
+func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
+	var objs []SnapshotObject
+	err := b.db.View(func(txn *badger.Txn) error {
+		prefix := []byte("obj:")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			rawKey := string(it.Item().Key())
+			rest := rawKey[len("obj:"):]
+			slashIdx := len(rest)
+			for i, c := range rest {
+				if c == '/' {
+					slashIdx = i
+					break
+				}
+			}
+			bucket := rest[:slashIdx]
+			key := rest[slashIdx+1:]
+
+			var obj Object
+			if err := it.Item().Value(func(val []byte) error {
+				decoded, err := unmarshalObject(val)
+				if err != nil {
+					return err
+				}
+				obj = *decoded
+				return nil
+			}); err != nil {
+				return err
+			}
+			objs = append(objs, SnapshotObject{
+				Bucket:      bucket,
+				Key:         key,
+				ETag:        obj.ETag,
+				Size:        obj.Size,
+				ContentType: obj.ContentType,
+				Modified:    obj.LastModified,
+			})
+		}
+		return nil
+	})
+	return objs, err
+}
+
+// RestoreObjects implements Snapshotable: replaces current object metadata with snapshot state.
+// Objects whose blobs no longer exist on disk are reported as stale.
+func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlob, error) {
+	// Build lookup set of (bucket/key) from snapshot
+	inSnapshot := make(map[string]bool, len(objects))
+	for _, o := range objects {
+		inSnapshot["obj:"+o.Bucket+"/"+o.Key] = true
+	}
+
+	// Delete metadata for objects not in snapshot
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		prefix := []byte("obj:")
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		var toDelete [][]byte
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			if !inSnapshot[string(it.Item().Key())] {
+				cp := make([]byte, len(it.Item().Key()))
+				copy(cp, it.Item().Key())
+				toDelete = append(toDelete, cp)
+			}
+		}
+		it.Close()
+		for _, k := range toDelete {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, nil, fmt.Errorf("remove obsolete objects: %w", err)
+	}
+
+	var stale []StaleBlob
+	var count int
+	for _, snap := range objects {
+		// Ensure bucket exists
+		if err := b.CreateBucket(snap.Bucket); err != nil && !errors.Is(err, ErrBucketAlreadyExists) {
+			return count, stale, fmt.Errorf("ensure bucket %s: %w", snap.Bucket, err)
+		}
+		// Check blob exists on disk
+		if _, err := os.Stat(b.objectPath(snap.Bucket, snap.Key)); os.IsNotExist(err) {
+			stale = append(stale, StaleBlob{Bucket: snap.Bucket, Key: snap.Key, ExpectedETag: snap.ETag})
+			continue
+		}
+		// Restore metadata
+		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified}
+		meta, err := marshalObject(obj)
+		if err != nil {
+			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
+		}
+		if err := b.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(b.objectMetaKey(snap.Bucket, snap.Key), meta)
+		}); err != nil {
+			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
+		}
+		count++
+	}
+	return count, stale, nil
 }

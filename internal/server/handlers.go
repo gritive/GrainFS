@@ -353,6 +353,11 @@ func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	if s.verifier != nil {
+		c.Header("Cache-Control", "private, no-store")
+	} else {
+		c.Header("Cache-Control", "public, max-age=3600")
+	}
 
 	if !checkConditionals(c, etag, obj.LastModified) {
 		return
@@ -481,6 +486,11 @@ func (s *Server) headObject(_ context.Context, c *app.RequestContext) {
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	if s.verifier != nil {
+		c.Header("Cache-Control", "private, no-store")
+	} else {
+		c.Header("Cache-Control", "public, max-age=3600")
+	}
 
 	if !checkConditionals(c, etag, obj.LastModified) {
 		return
@@ -858,7 +868,8 @@ func toHTTPRequest(c *app.RequestContext) *http.Request {
 
 func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 	status := map[string]any{
-		"mode": "solo",
+		"mode":                 "solo",
+		"split_brain_suspected": false,
 	}
 
 	if s.cluster != nil {

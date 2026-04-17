@@ -86,3 +86,19 @@ func (sb *SwappableBackend) CompleteMultipartUpload(bucket, key, uploadID string
 func (sb *SwappableBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
 	return (*sb.inner.Load()).AbortMultipartUpload(bucket, key, uploadID)
 }
+
+// ListAllObjects implements Snapshotable by delegating to the inner backend.
+func (sb *SwappableBackend) ListAllObjects() ([]SnapshotObject, error) {
+	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {
+		return snap.ListAllObjects()
+	}
+	return nil, ErrSnapshotNotSupported
+}
+
+// RestoreObjects implements Snapshotable by delegating to the inner backend.
+func (sb *SwappableBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlob, error) {
+	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {
+		return snap.RestoreObjects(objects)
+	}
+	return 0, nil, ErrSnapshotNotSupported
+}

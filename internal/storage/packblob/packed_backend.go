@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -42,6 +43,8 @@ type PackedBackend struct {
 
 	mu    sync.RWMutex
 	index map[string]*indexEntry // "bucket/key" → blob location + refcount
+
+	stopSave chan struct{} // signals the background index-save goroutine to stop
 }
 
 // PackedBackendOptions configures optional behavior for PackedBackend.
@@ -66,17 +69,43 @@ func NewPackedBackendWithOptions(inner storage.Backend, blobDir string, threshol
 		bs.EnableCompression()
 	}
 
-	return &PackedBackend{
+	pb := &PackedBackend{
 		inner:     inner,
 		blobStore: bs,
 		blobDir:   blobDir,
 		threshold: threshold,
 		index:     make(map[string]*indexEntry),
-	}, nil
+		stopSave:  make(chan struct{}),
+	}
+
+	go pb.periodicSave(30 * time.Second)
+
+	return pb, nil
 }
 
-// Close closes the blob store.
+// periodicSave calls SaveIndex on a fixed interval until Close() is called.
+// This limits index data loss to at most one interval in crash (kill -9) scenarios.
+func (pb *PackedBackend) periodicSave(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			if err := pb.SaveIndex(); err != nil {
+				slog.Warn("periodic index save failed", "err", err)
+			}
+		case <-pb.stopSave:
+			return
+		}
+	}
+}
+
+// Close stops the periodic save goroutine, persists the index, then closes the blob store.
 func (pb *PackedBackend) Close() error {
+	close(pb.stopSave)
+	if err := pb.SaveIndex(); err != nil {
+		slog.Warn("failed to save packed blob index on close", "err", err)
+	}
 	return pb.blobStore.Close()
 }
 
@@ -305,14 +334,16 @@ func (pb *PackedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*sto
 		if entry.Refcount.Load() <= 0 {
 			continue
 		}
-		if len(pfx) > 0 && len(ikey) >= len(pfx) && ikey[:len(pfx)] == pfx {
+		if len(ikey) >= len(pfx) && ikey[:len(pfx)] == pfx {
 			// Extract the key part
 			k := ikey[len(bucket)+1:]
 
-			// Check if already in the list from inner backend
+			// Update or add: packed objects have zero-byte markers in the inner backend,
+			// so we must replace the inner-reported size with the actual original size.
 			found := false
 			for _, o := range objects {
 				if o.Key == k {
+					o.Size = entry.OriginalSize
 					found = true
 					break
 				}

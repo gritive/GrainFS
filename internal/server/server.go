@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -33,6 +36,8 @@ type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend     storage.Backend
+	dataDir     string
+	snapMgr     *snapshot.Manager
 	verifier    *s3auth.Verifier
 	hertz       *server.Hertz
 	volMgr      *volume.Manager
@@ -67,6 +72,13 @@ func WithJoinCluster(fn JoinClusterFunc) Option {
 	}
 }
 
+// WithDataDir sets the data directory used for snapshot storage.
+func WithDataDir(dir string) Option {
+	return func(s *Server) {
+		s.dataDir = dir
+	}
+}
+
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s := &Server{
@@ -77,6 +89,19 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+
+	// Initialize snapshot manager once (avoids per-request allocation and concurrent seq collisions).
+	if s.dataDir != "" {
+		if snap, ok := s.backend.(storage.Snapshotable); ok {
+			dir := filepath.Join(s.dataDir, "snapshots")
+			walDir := filepath.Join(s.dataDir, "wal")
+			if mgr, err := snapshot.NewManager(dir, snap, walDir); err == nil {
+				s.snapMgr = mgr
+			} else {
+				slog.Warn("snapshot manager init failed, snapshot/PITR endpoints will be unavailable", "err", err)
+			}
+		}
 	}
 
 	h := server.Default(
@@ -122,14 +147,12 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			return
 		}
 
-		// Admin endpoints: require authentication OR localhost access
-		if strings.HasPrefix(path, "/admin/debug/") {
-			// Check if request is from localhost
+		// All /admin/ endpoints: allow localhost without credentials.
+		if strings.HasPrefix(path, "/admin/") {
 			remoteAddr := c.RemoteAddr().String()
-			isLocalhost := remoteAddr == "127.0.0.1" ||
+			isLocalhost := strings.HasPrefix(remoteAddr, "127.0.0.1") ||
 				strings.HasPrefix(remoteAddr, "[::1]") ||
 				strings.HasPrefix(remoteAddr, "localhost")
-
 			if isLocalhost {
 				c.Next(ctx)
 				return
@@ -146,6 +169,23 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		}
 		// Propagate identity to downstream handlers
 		ctx = WithAccessKey(ctx, accessKey)
+		c.Next(ctx)
+	}
+}
+
+// localhostOnly returns a middleware that rejects non-localhost connections with 403.
+func localhostOnly() app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		addr := c.RemoteAddr().String()
+		if !strings.HasPrefix(addr, "127.0.0.1") &&
+			!strings.HasPrefix(addr, "[::1]") &&
+			!strings.HasPrefix(addr, "localhost") {
+			c.JSON(consts.StatusForbidden, map[string]string{
+				"error": "admin endpoints are restricted to localhost",
+			})
+			c.Abort()
+			return
+		}
 		c.Next(ctx)
 	}
 }
@@ -226,7 +266,10 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	volumes.DELETE("/:name", s.deleteVolume)
 
 	// Snapshot management API
-	s.registerSnapshotAPI()
+	s.registerSnapshotAPI(h)
+
+	// PITR (Point-in-Time Recovery) API
+	s.registerPITRAPI(h)
 
 	// Admin API for testing and operations
 	s.registerAdminAPI(h)

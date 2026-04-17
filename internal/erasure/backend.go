@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -23,10 +24,18 @@ import (
 // Objects are split into k data + m parity shards stored on disk.
 // On read, missing shards (up to m) are reconstructed automatically.
 type ECBackend struct {
-	root      string
-	db        *badger.DB
-	codec     *Codec
-	encryptor Encryptor
+	root       string
+	db         *badger.DB
+	codec      *Codec
+	encryptor  Encryptor
+	writeLocks sync.Map // map[string]*sync.Mutex for per-key write serialization
+}
+
+func (b *ECBackend) acquireWriteLock(bucket, key string) func() {
+	lockKey := bucket + "\x00" + key
+	mu, _ := b.writeLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	return func() { mu.(*sync.Mutex).Unlock() }
 }
 
 // Encryptor is an optional interface for at-rest encryption.
@@ -252,6 +261,9 @@ func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType strin
 	if err != nil {
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
+
+	unlock := b.acquireWriteLock(bucket, key)
+	defer unlock()
 
 	if !ecEnabled {
 		return b.putObjectPlain(bucket, key, data, contentType)
@@ -682,6 +694,120 @@ func (b *ECBackend) getObjectMeta(bucket, key string) (*ecObjectMeta, error) {
 		return nil, err
 	}
 	return meta, nil
+}
+
+// ListAllObjects implements storage.Snapshotable: scans all object metadata across all buckets.
+func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
+	var objs []storage.SnapshotObject
+	err := b.db.View(func(txn *badger.Txn) error {
+		prefix := []byte("obj:")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			rawKey := string(it.Item().Key())
+			rest := rawKey[len("obj:"):]
+			slashIdx := len(rest)
+			for i, c := range rest {
+				if c == '/' {
+					slashIdx = i
+					break
+				}
+			}
+			bucket := rest[:slashIdx]
+			key := rest[slashIdx+1:]
+
+			var meta *ecObjectMeta
+			if err := it.Item().Value(func(val []byte) error {
+				var err error
+				meta, err = unmarshalECObjectMeta(val)
+				return err
+			}); err != nil {
+				return err
+			}
+			objs = append(objs, storage.SnapshotObject{
+				Bucket:      bucket,
+				Key:         key,
+				ETag:        meta.ETag,
+				Size:        meta.Size,
+				ContentType: meta.ContentType,
+				Modified:    meta.LastModified,
+			})
+		}
+		return nil
+	})
+	return objs, err
+}
+
+// RestoreObjects implements storage.Snapshotable: replaces current object metadata with snapshot state.
+func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
+	inSnapshot := make(map[string]bool, len(objects))
+	for _, o := range objects {
+		inSnapshot["obj:"+o.Bucket+"/"+o.Key] = true
+	}
+
+	// Delete metadata for objects not in snapshot
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		prefix := []byte("obj:")
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		var toDelete [][]byte
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			if !inSnapshot[string(it.Item().Key())] {
+				cp := make([]byte, len(it.Item().Key()))
+				copy(cp, it.Item().Key())
+				toDelete = append(toDelete, cp)
+			}
+		}
+		it.Close()
+		for _, k := range toDelete {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, nil, fmt.Errorf("remove obsolete objects: %w", err)
+	}
+
+	var stale []storage.StaleBlob
+	var count int
+	for _, snap := range objects {
+		// Ensure bucket exists
+		if err := b.CreateBucket(snap.Bucket); err != nil && !strings.Contains(err.Error(), "already exists") {
+			return count, stale, fmt.Errorf("ensure bucket %s: %w", snap.Bucket, err)
+		}
+		// Check shards exist
+		shardDir := b.ShardDir(snap.Bucket, snap.Key)
+		firstShard := filepath.Join(shardDir, "00")
+		fi, err := os.Stat(firstShard)
+		if err != nil {
+			stale = append(stale, storage.StaleBlob{Bucket: snap.Bucket, Key: snap.Key, ExpectedETag: snap.ETag})
+			continue
+		}
+		// Restore metadata with current codec settings and actual shard size
+		meta := &ecObjectMeta{
+			Key:          snap.Key,
+			Size:         snap.Size,
+			ContentType:  snap.ContentType,
+			ETag:         snap.ETag,
+			LastModified: snap.Modified,
+			DataShards:   b.codec.DataShards,
+			ParityShards: b.codec.ParityShards,
+			ShardSize:    int(fi.Size()),
+		}
+		metaBytes, err := marshalECObjectMeta(meta)
+		if err != nil {
+			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
+		}
+		if err := b.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(objectMetaKey(snap.Bucket, snap.Key), metaBytes)
+		}); err != nil {
+			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
+		}
+		count++
+	}
+	return count, stale, nil
 }
 
 func (b *ECBackend) readAndDecode(bucket, key string, meta *ecObjectMeta) ([]byte, error) {

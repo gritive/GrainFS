@@ -105,4 +105,10 @@ var (
 		Name: "grainfs_nfsv4_buffer_size_bytes",
 		Help: "Current buffer size in use by pool type.",
 	}, []string{"size"})
+
+	// SplitBrainSuspected is 1 when split brain is detected in the cluster, 0 otherwise.
+	SplitBrainSuspected = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_split_brain_suspected",
+		Help: "1 if split brain is suspected (multiple leaders or large term divergence), 0 otherwise.",
+	})
 )

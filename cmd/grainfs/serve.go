@@ -23,10 +23,13 @@ import (
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsserver"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/packblob"
+	"github.com/gritive/GrainFS/internal/storage/pullthrough"
+	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/gritive/GrainFS/internal/vfs"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -50,6 +53,11 @@ func init() {
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled)")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled, Linux only)")
 	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")
+	serveCmd.Flags().Duration("snapshot-interval", 1*time.Hour, "auto-snapshot interval (0 to disable)")
+	serveCmd.Flags().Int("snapshot-retain", 24, "number of auto-snapshots to retain")
+	serveCmd.Flags().String("upstream", "", "upstream S3-compatible endpoint for pull-through caching (e.g. http://minio:9000)")
+	serveCmd.Flags().String("upstream-access-key", "", "access key for upstream S3 endpoint")
+	serveCmd.Flags().String("upstream-secret-key", "", "secret key for upstream S3 endpoint")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -124,9 +132,30 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// Wrap with read cache
 		backend = storage.NewCachedBackend(backend)
 
+		// Wrap with WAL for PITR support
+		walDir := filepath.Join(dataDir, "wal")
+		w, err := wal.Open(walDir)
+		if err != nil {
+			return fmt.Errorf("open WAL: %w", err)
+		}
+		defer w.Close()
+		backend = wal.NewBackend(backend, w)
+
 		mode := "solo"
 		if ecEnabled {
 			mode = "solo-ec"
+		}
+
+		// Wrap with pull-through cache if upstream is configured
+		if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
+			upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
+			upstreamSecretKey, _ := cmd.Flags().GetString("upstream-secret-key")
+			up, err := pullthrough.NewS3Upstream(upstreamEndpoint, upstreamAccessKey, upstreamSecretKey)
+			if err != nil {
+				return fmt.Errorf("init upstream: %w", err)
+			}
+			backend = pullthrough.NewBackend(backend, up)
+			slog.Info("pull-through cache enabled", "upstream", upstreamEndpoint)
 		}
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition
@@ -155,6 +184,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 	}
 	opts = append(opts, server.WithJoinCluster(joinFn))
+	opts = append(opts, server.WithDataDir(dataDir))
 
 	srv := server.New(addr, swappable, opts...)
 	go func() {
@@ -166,6 +196,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	// Start NFS server if requested
 	var nfsSrv *nfsserver.Server
 	if nfsPort > 0 {
+		fmt.Println("WARNING: NFS null auth enabled — all NFS access is unauthenticated")
 		const defaultVolName = "default"
 		const defaultVolSize = 1024 * 1024 * 1024 // 1G
 
@@ -199,6 +230,22 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 				slog.Error("nfs4 server error", "error", err)
 			}
 		}()
+	}
+
+	// Start auto-snapshotter if interval is configured
+	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
+	snapRetain, _ := cmd.Flags().GetInt("snapshot-retain")
+	if snapInterval > 0 {
+		snapDir := filepath.Join(dataDir, "snapshots")
+		walDir := filepath.Join(dataDir, "wal")
+		snapMgr, err := snapshot.NewManager(snapDir, swappable, walDir)
+		if err != nil {
+			slog.Warn("auto-snapshot init failed", "err", err)
+		} else {
+			as := snapshot.NewAutoSnapshotter(snapMgr, snapInterval, snapRetain)
+			as.Start(ctx)
+			slog.Info("auto-snapshot enabled", "interval", snapInterval, "retain", snapRetain)
+		}
 	}
 
 	// Start NBD server if requested (Linux only)
