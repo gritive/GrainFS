@@ -791,6 +791,77 @@ func TestECBackend_UnversionedPut_NoVersionID(t *testing.T) {
 	assert.Empty(t, obj.VersionID, "unversioned PutObject must not set VersionID")
 }
 
+func TestECBackend_GetObjectByVersionID(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	// PUT v1
+	obj1, err := b.PutObject("ver-bucket", "file.txt", strings.NewReader("v1-content"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj1.VersionID)
+
+	// PUT v2 (latest)
+	obj2, err := b.PutObject("ver-bucket", "file.txt", strings.NewReader("v2-content"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj2.VersionID)
+
+	// GetObject without versionId → latest (v2)
+	rc, meta, err := b.GetObject("ver-bucket", "file.txt")
+	require.NoError(t, err)
+	data, _ := io.ReadAll(rc)
+	rc.Close()
+	assert.Equal(t, "v2-content", string(data))
+	assert.Equal(t, obj2.VersionID, meta.VersionID)
+
+	// GetObjectVersion → v1
+	rc, meta, err = b.GetObjectVersion("ver-bucket", "file.txt", obj1.VersionID)
+	require.NoError(t, err)
+	data, _ = io.ReadAll(rc)
+	rc.Close()
+	assert.Equal(t, "v1-content", string(data))
+	assert.Equal(t, obj1.VersionID, meta.VersionID)
+}
+
+func TestECBackend_DeleteCreatesMarker_WhenVersioningEnabled(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	// PUT an object
+	obj, err := b.PutObject("ver-bucket", "file.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	// DELETE → must NOT remove data, must create a delete marker
+	require.NoError(t, b.DeleteObject("ver-bucket", "file.txt"))
+
+	// GetObject after delete → ErrObjectNotFound (delete marker is latest)
+	_, _, err = b.GetObject("ver-bucket", "file.txt")
+	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
+
+	// GetObjectVersion with original versionId → data still accessible
+	rc, meta, err := b.GetObjectVersion("ver-bucket", "file.txt", obj.VersionID)
+	require.NoError(t, err)
+	data, _ := io.ReadAll(rc)
+	rc.Close()
+	assert.Equal(t, "hello", string(data))
+	assert.Equal(t, obj.VersionID, meta.VersionID)
+}
+
+func TestECBackend_DeleteUnversioned_HardDelete(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("plain-bucket"))
+
+	_, err := b.PutObject("plain-bucket", "file.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, b.DeleteObject("plain-bucket", "file.txt"))
+
+	_, _, err = b.GetObject("plain-bucket", "file.txt")
+	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
 func TestECBackend_BucketVersioning_SetGet(t *testing.T) {
 	b := newTestBackend(t)
 	require.NoError(t, b.CreateBucket("test-bucket"))

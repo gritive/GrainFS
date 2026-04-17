@@ -656,11 +656,33 @@ func (b *ECBackend) HeadObject(bucket, key string) (*storage.Object, error) {
 }
 
 func (b *ECBackend) DeleteObject(bucket, key string) error {
-	if err := b.HeadBucket(bucket); err != nil {
+	bm, err := b.getBucketMeta(bucket)
+	if err != nil {
 		return err
 	}
 
-	// Remove both EC shards and plain file (one will be a no-op)
+	if bm.VersioningState == "Enabled" {
+		// Versioning: create a delete marker (lat: → new marker UUID, no data deleted).
+		markerID := uuid.New().String()
+		markerMeta := ecObjectMeta{
+			Key:            key,
+			IsDeleteMarker: true,
+			VersionID:      markerID,
+			LastModified:   time.Now().Unix(),
+		}
+		markerBytes, err := marshalECObjectMeta(&markerMeta)
+		if err != nil {
+			return fmt.Errorf("marshal delete marker: %w", err)
+		}
+		return b.db.Update(func(txn *badger.Txn) error {
+			if err := txn.Set(objectMetaKeyV(bucket, key, markerID), markerBytes); err != nil {
+				return err
+			}
+			return txn.Set(latestKey(bucket, key), []byte(markerID))
+		})
+	}
+
+	// Unversioned: hard delete — remove shards, plain file, and meta.
 	os.RemoveAll(b.ShardDir(bucket, key))
 	h := sha256.Sum256([]byte(key))
 	os.Remove(filepath.Join(b.root, "data", bucket, ".plain", hex.EncodeToString(h[:])))
@@ -1085,7 +1107,14 @@ func (b *ECBackend) getObjectMeta(bucket, key string) (*ecObjectMeta, error) {
 			return item.Value(func(val []byte) error {
 				var unmarshalErr error
 				meta, unmarshalErr = unmarshalECObjectMeta(val)
-				return unmarshalErr
+				if unmarshalErr != nil {
+					return unmarshalErr
+				}
+				if meta.IsDeleteMarker {
+					meta = nil
+					return storage.ErrObjectNotFound
+				}
+				return nil
 			})
 		}
 
