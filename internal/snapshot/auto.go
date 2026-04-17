@@ -54,14 +54,28 @@ func (a *AutoSnapshotter) takeAndPrune() {
 	a.pruneOld()
 }
 
+// pruneOld deletes auto-created snapshots beyond maxRetain. Manual snapshots
+// (Reason != "auto" && Reason != "") are never deleted — the user must remove
+// them explicitly via the snapshot API. Legacy snapshots written before the
+// Reason field was populated (Reason == "") are treated as auto.
 func (a *AutoSnapshotter) pruneOld() {
 	snaps, err := a.mgr.List()
-	if err != nil || len(snaps) <= a.maxRetain {
+	if err != nil {
+		return
+	}
+	// Filter to auto-created snapshots only
+	var autoSnaps []*Snapshot
+	for _, s := range snaps {
+		if s.Reason == "auto" || s.Reason == "" {
+			autoSnaps = append(autoSnaps, s)
+		}
+	}
+	if len(autoSnaps) <= a.maxRetain {
 		return
 	}
 	// Sort ascending by seq so oldest are first
-	sort.Slice(snaps, func(i, j int) bool { return snaps[i].Seq < snaps[j].Seq })
-	toDelete := snaps[:len(snaps)-a.maxRetain]
+	sort.Slice(autoSnaps, func(i, j int) bool { return autoSnaps[i].Seq < autoSnaps[j].Seq })
+	toDelete := autoSnaps[:len(autoSnaps)-a.maxRetain]
 	for _, s := range toDelete {
 		if err := a.mgr.Delete(s.Seq); err != nil {
 			slog.Warn("auto-snapshot prune failed", "seq", s.Seq, "err", err)

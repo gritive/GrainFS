@@ -149,11 +149,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 
 		// All /admin/ endpoints: allow localhost without credentials.
 		if strings.HasPrefix(path, "/admin/") {
-			remoteAddr := c.RemoteAddr().String()
-			isLocalhost := strings.HasPrefix(remoteAddr, "127.0.0.1") ||
-				strings.HasPrefix(remoteAddr, "[::1]") ||
-				strings.HasPrefix(remoteAddr, "localhost")
-			if isLocalhost {
+			if isLocalhostAddr(c.RemoteAddr().String()) {
 				c.Next(ctx)
 				return
 			}
@@ -173,13 +169,21 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 	}
 }
 
+// isLocalhostAddr reports whether addr (typically from c.RemoteAddr().String(),
+// in "host:port" or "[host]:port" form) is a loopback address.
+// Covers IPv4 loopback, IPv6 loopback, the IPv4-mapped IPv6 loopback
+// ([::ffff:127.0.0.1]:PORT), and the literal "localhost" hostname.
+func isLocalhostAddr(addr string) bool {
+	return strings.HasPrefix(addr, "127.0.0.1") ||
+		strings.HasPrefix(addr, "[::1]") ||
+		strings.HasPrefix(addr, "[::ffff:127.0.0.1]") ||
+		strings.HasPrefix(addr, "localhost")
+}
+
 // localhostOnly returns a middleware that rejects non-localhost connections with 403.
 func localhostOnly() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		addr := c.RemoteAddr().String()
-		if !strings.HasPrefix(addr, "127.0.0.1") &&
-			!strings.HasPrefix(addr, "[::1]") &&
-			!strings.HasPrefix(addr, "localhost") {
+		if !isLocalhostAddr(c.RemoteAddr().String()) {
 			c.JSON(consts.StatusForbidden, map[string]string{
 				"error": "admin endpoints are restricted to localhost",
 			})

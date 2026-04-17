@@ -4,10 +4,9 @@
 package pullthrough
 
 import (
-	"bytes"
 	"errors"
+	"fmt"
 	"io"
-	"log/slog"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -53,6 +52,17 @@ func (b *Backend) HeadObject(bucket, key string) (*storage.Object, error) {
 
 // GetObject returns the object from the local cache. On miss it pulls from upstream,
 // stores a copy locally, and returns the data.
+//
+// Implementation: 2-pass streaming. The upstream body is streamed directly into
+// the local backend via PutObject (no in-memory buffering), then a fresh
+// GetObject call on the local backend serves the caller. This keeps memory
+// bounded regardless of object size. Trade-off: cache miss pays 2× local disk
+// I/O (one write + one read), but avoids unbounded memory allocation.
+//
+// Semantic change: if local caching fails, the call returns an error (previously
+// "best-effort" with log-and-return). Streaming makes cache-or-fail unavoidable
+// because the upstream reader is consumed during PutObject. Callers see a
+// reliable signal when the cache cannot accept data.
 func (b *Backend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	rc, obj, err := b.Backend.GetObject(bucket, key)
 	if err == nil {
@@ -69,22 +79,19 @@ func (b *Backend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object,
 	}
 	defer upRC.Close()
 
-	data, err := io.ReadAll(upRC)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	ct := ""
 	if upObj != nil {
 		ct = upObj.ContentType
 	}
 
-	// Store locally (best-effort; log on failure but still return the data)
-	if _, err := b.Backend.PutObject(bucket, key, bytes.NewReader(data), ct); err != nil {
-		slog.Warn("pull-through: failed to cache locally", "bucket", bucket, "key", key, "err", err)
+	// Stream upstream → local cache. If upstream fails mid-stream, PutObject
+	// returns the upstream error and the local backend removes any partial file.
+	if _, err := b.Backend.PutObject(bucket, key, upRC, ct); err != nil {
+		return nil, nil, fmt.Errorf("cache upstream object: %w", err)
 	}
 
-	return io.NopCloser(bytes.NewReader(data)), upObj, nil
+	// 2-pass: return a fresh reader from the local cache.
+	return b.Backend.GetObject(bucket, key)
 }
 
 func isNotFound(err error) bool {

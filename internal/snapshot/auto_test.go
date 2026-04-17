@@ -72,6 +72,86 @@ func TestAutoSnapshotter_RespectsRetention(t *testing.T) {
 		"auto-snapshotter must not keep more than maxRetain snapshots")
 }
 
+// TestAutoSnapshotter_PruneOld_PreservesManual verifies that manual snapshots
+// (Reason != "auto") are NOT deleted even when total count exceeds maxRetain.
+// Regression for Known Issue #2.
+func TestAutoSnapshotter_PruneOld_PreservesManual(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
+	require.NoError(t, err)
+
+	// Create 2 manual snapshots
+	for i := 0; i < 2; i++ {
+		_, err := mgr.Create("manual")
+		require.NoError(t, err)
+	}
+	// Create 3 auto snapshots
+	for i := 0; i < 3; i++ {
+		_, err := mgr.Create("auto")
+		require.NoError(t, err)
+	}
+
+	// maxRetain=1 means we want at most 1 auto snapshot kept.
+	// Running the auto-snapshotter's internal prune via a manual trigger:
+	as := snapshot.NewAutoSnapshotter(mgr, time.Hour, 1)
+	snapshot.RunPruneOld(as) // test-only helper
+
+	snaps, err := mgr.List()
+	require.NoError(t, err)
+
+	var autoCount, manualCount int
+	for _, s := range snaps {
+		if s.Reason == "auto" {
+			autoCount++
+		} else {
+			manualCount++
+		}
+	}
+	assert.Equal(t, 2, manualCount, "all manual snapshots must be preserved")
+	assert.LessOrEqual(t, autoCount, 1, "auto snapshots must be pruned to maxRetain")
+}
+
+// TestAutoSnapshotter_LegacyReason verifies that snapshots with empty Reason
+// (from before the reason field was populated) are treated as auto snapshots.
+func TestAutoSnapshotter_LegacyReason(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
+	require.NoError(t, err)
+
+	// Create 3 "legacy" snapshots with empty reason (simulated by passing "")
+	for i := 0; i < 3; i++ {
+		_, err := mgr.Create("")
+		require.NoError(t, err)
+	}
+
+	as := snapshot.NewAutoSnapshotter(mgr, time.Hour, 1)
+	snapshot.RunPruneOld(as)
+
+	snaps, err := mgr.List()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(snaps), 1, "legacy empty-reason snapshots must be treated as auto and pruned")
+}
+
+// TestAutoSnapshotter_AllManual_NoOp verifies that a population of only manual
+// snapshots is never touched by prune, even far exceeding maxRetain.
+func TestAutoSnapshotter_AllManual_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
+	require.NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		_, err := mgr.Create("manual")
+		require.NoError(t, err)
+	}
+
+	as := snapshot.NewAutoSnapshotter(mgr, time.Hour, 1)
+	snapshot.RunPruneOld(as)
+
+	snaps, err := mgr.List()
+	require.NoError(t, err)
+	assert.Equal(t, 5, len(snaps), "no manual snapshots may be deleted")
+}
+
 func TestAutoSnapshotter_StopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")

@@ -2,10 +2,9 @@
 
 ## Known Issues (Non-blocking)
 
-- [ ] **pull-through: 메모리 OOM 위험** — `pullthrough/pullthrough.go:63` `io.ReadAll` 크기 제한 없음. 대형 파일 업스트림 fetch 시 OOM 가능. 스트리밍 저장으로 교체 필요 (프로덕션 전)
-- [ ] **snapshot retention: 수동 스냅샷도 자동 삭제** — `snapshot/auto.go:pruneOld()` 가 `maxRetain` 초과 시 auto+수동 통합 카운트로 오래된 것부터 삭제. 수동 스냅샷은 보호해야 함 (e.g. `reason="auto"` 태그로 구분)
-- [ ] **localhostOnly: IPv4-mapped IPv6 누락** — `::ffff:127.0.0.1` 형식 미처리. 실제 발생 가능성 낮지만 완전한 localhost 검사 필요
-- [ ] **snapshot-interval 기본값 변경 (0→1h)** — 업그레이드 시 기존 사용자에게 예상치 못한 자동 스냅샷 시작됨. 릴리스 노트에 명시
+- [ ] **ECBackend.PutObject: io.ReadAll OOM 위험** — `erasure/backend.go:260` 동일 패턴. 대용량 PUT 시 OOM. pullthrough fix 경험 재사용하여 streaming encode로 교체. (Phase 14 또는 pullthrough fix 직후)
+- [ ] **EC on/off toggle: plain↔EC migration path** — 클러스터 config 변경 시 plain 객체와 EC 객체가 혼재. 스크러버는 DataShards=0 필터링하지만 migration 경로 없음. 데이터 손실 위험은 없으나 EC 전환 후 plain 객체는 복구 불가.
+- [ ] **scrub interval hot config** — 현재 `--scrub-interval` CLI flag만. Dashboard에서 런타임 변경 가능하도록 Phase 14 dashboard와 통합.
 
 ## Phase 13: Operations
 
