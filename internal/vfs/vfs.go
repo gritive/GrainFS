@@ -146,6 +146,13 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 	fp := fs.fullPath(filename)
 
+	// Check if file was deleted (ESTALE support for cross-protocol coherency)
+	// Extract volume name from bucket: "__grainfs_vfs_" + volumeName
+	volName := strings.TrimPrefix(fs.bucket, vfsBucketPrefix)
+	if fs.IsDeleted(volName, fp) {
+		return nil, os.ErrNotExist
+	}
+
 	// Check stat cache
 	if cached := fs.getStatCache(fp); cached != nil {
 		return cached, nil
@@ -581,6 +588,65 @@ func (fs *GrainVFS) invalidateParentDirCache(fp string) {
 	fs.cacheMu.Unlock()
 }
 
+// MarkDeleted marks a file as deleted in the VFS deleted file tracking.
+// This is used for NFS ESTALE error propagation - when S3 deletes a file,
+// NFS should return ESTALE on subsequent access attempts.
+//
+// Called by Raft OnApply callback after DeleteObject commands commit.
+// Stores deletion marker in stat cache (persistent in future with BadgerDB).
+//
+// Parameters:
+// - bucket: S3 bucket name (e.g., "default")
+// - key: S3 object key (e.g., "path/to/file.txt")
+//
+// Note: Bucket is included in cache key to support multi-bucket VFS instances.
+func (fs *GrainVFS) MarkDeleted(bucket, key string) error {
+	// TODO: Add BadgerDB persistence for crash recovery
+	// For now, use in-memory stat cache with long TTL
+
+	fs.cacheMu.Lock()
+	defer fs.cacheMu.Unlock()
+
+	if fs.statCache == nil {
+		return nil // No cache, nothing to mark
+	}
+
+	// Store deleted marker with bucket+key as cache key
+	cacheKey := "deleted:" + bucket + ":" + key
+	fs.statCache[cacheKey] = &statCacheEntry{
+		info:    nil,
+		expires: time.Now().Add(24 * time.Hour), // Persist for 24h
+	}
+
+	return nil
+}
+
+// IsDeleted checks if a file has been marked as deleted.
+// Used by NFS handler to return ESTALE error.
+//
+// Parameters:
+// - bucket: S3 bucket name (e.g., "default")
+// - key: S3 object key (e.g., "path/to/file.txt")
+//
+// Returns true if file is marked as deleted and marker hasn't expired.
+func (fs *GrainVFS) IsDeleted(bucket, key string) bool {
+	fs.cacheMu.RLock()
+	defer fs.cacheMu.RUnlock()
+
+	if fs.statCache == nil {
+		return false
+	}
+
+	cacheKey := "deleted:" + bucket + ":" + key
+	entry, ok := fs.statCache[cacheKey]
+	if !ok {
+		return false
+	}
+
+	// Check if entry expired
+	return time.Now().Before(entry.expires)
+}
+
 // Invalidate clears caches for the given S3 bucket and key.
 // This implements cluster.CacheInvalidator for cross-protocol cache coherency.
 //
@@ -595,6 +661,11 @@ func (fs *GrainVFS) Invalidate(bucket, key string) {
 	if fs.bucket != vfsBucketPrefix+bucket {
 		return // Different bucket, not our concern
 	}
+
+	// Clear deleted marker (file re-created after deletion)
+	fs.cacheMu.Lock()
+	delete(fs.statCache, "deleted:"+bucket+":"+key)
+	fs.cacheMu.Unlock()
 
 	// Invalidate stat cache for the specific file
 	fs.invalidateStatCache(key)
