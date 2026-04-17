@@ -287,6 +287,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	// Scrub health API
 	s.registerScrubAPI(h)
 
+	// Dashboard health API (badger, raft, ec status)
+	s.registerDashboardHealthAPI(h)
+
 	// Admin API for testing and operations
 	s.registerAdminAPI(h)
 }
