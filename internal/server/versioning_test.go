@@ -179,5 +179,110 @@ func TestGetObjectByVersionID_EC(t *testing.T) {
 	assert.Equal(t, "content-v1", string(got))
 }
 
+// TestListObjectVersions_EC verifies GET /<bucket>?versions returns all versions.
+func TestListObjectVersions_EC(t *testing.T) {
+	base := setupECTestServer(t)
+
+	// Create bucket and enable versioning
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(body))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// PUT two versions
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	vid1 := resp.Header.Get("X-Amz-Version-Id")
+	resp.Body.Close()
+	require.NotEmpty(t, vid1)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v2"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	vid2 := resp.Header.Get("X-Amz-Version-Id")
+	resp.Body.Close()
+	require.NotEmpty(t, vid2)
+
+	// GET ?versions
+	resp, err = http.Get(base + "/ver-bucket?versions")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result listVersionsResult
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, "ver-bucket", result.Name)
+
+	// Should have 2 Version entries (no delete markers)
+	assert.Len(t, result.Versions, 2)
+	assert.Len(t, result.DeleteMarkers, 0)
+
+	// Latest should be vid2
+	latestIDs := []string{}
+	for _, v := range result.Versions {
+		if v.IsLatest {
+			latestIDs = append(latestIDs, v.VersionID)
+		}
+	}
+	require.Len(t, latestIDs, 1)
+	assert.Equal(t, vid2, latestIDs[0])
+}
+
+// TestListObjectVersions_WithDeleteMarker_EC verifies DELETE appears as DeleteMarker.
+func TestListObjectVersions_WithDeleteMarker_EC(t *testing.T) {
+	base := setupECTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(body))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodDelete, base+"/ver-bucket/obj.txt", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	resp, err = http.Get(base + "/ver-bucket?versions")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result listVersionsResult
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&result))
+	assert.Len(t, result.Versions, 1)
+	assert.Len(t, result.DeleteMarkers, 1)
+	assert.True(t, result.DeleteMarkers[0].IsLatest)
+}
+
+// TestListObjectVersions_NotImplemented_Local verifies LocalBackend returns 501.
+func TestListObjectVersions_NotImplemented_Local(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req) //nolint:errcheck
+
+	resp, err := http.Get(base + "/mybucket?versions")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
+}
+
 // Ensure LocalBackend still satisfies storage.Backend (compilation check).
 var _ storage.Backend = (*storage.LocalBackend)(nil)

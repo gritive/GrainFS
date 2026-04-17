@@ -883,3 +883,82 @@ func TestECBackend_BucketVersioning_BucketNotFound(t *testing.T) {
 	err := b.SetBucketVersioning("no-such-bucket", "Enabled")
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
+
+// --- Task 4e: ListObjectVersions ---
+
+func TestECBackend_ListObjectVersions_Basic(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	// PUT same key twice → 2 versions
+	obj1, err := b.PutObject("ver-bucket", "mykey", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj1.VersionID)
+
+	obj2, err := b.PutObject("ver-bucket", "mykey", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj2.VersionID)
+
+	versions, err := b.ListObjectVersions("ver-bucket", "", 1000)
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+
+	// v2 is latest
+	latestVers := []*storage.ObjectVersion{}
+	for _, v := range versions {
+		if v.IsLatest {
+			latestVers = append(latestVers, v)
+		}
+	}
+	require.Len(t, latestVers, 1)
+	assert.Equal(t, obj2.VersionID, latestVers[0].VersionID)
+	assert.False(t, latestVers[0].IsDeleteMarker)
+}
+
+func TestECBackend_ListObjectVersions_WithDeleteMarker(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	obj, err := b.PutObject("ver-bucket", "mykey", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+
+	// DELETE → creates delete marker
+	require.NoError(t, b.DeleteObject("ver-bucket", "mykey"))
+
+	versions, err := b.ListObjectVersions("ver-bucket", "", 1000)
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+
+	// marker is latest
+	var marker, version *storage.ObjectVersion
+	for _, v := range versions {
+		if v.IsDeleteMarker {
+			marker = v
+		} else {
+			version = v
+		}
+	}
+	require.NotNil(t, marker)
+	require.NotNil(t, version)
+	assert.True(t, marker.IsLatest)
+	assert.False(t, version.IsLatest)
+	assert.Equal(t, obj.VersionID, version.VersionID)
+}
+
+func TestECBackend_ListObjectVersions_Unversioned_Empty(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("plain-bucket"))
+
+	// Unversioned: ListObjectVersions returns empty (no versioned keys)
+	versions, err := b.ListObjectVersions("plain-bucket", "", 1000)
+	require.NoError(t, err)
+	assert.Empty(t, versions)
+}
+
+func TestECBackend_ListObjectVersions_BucketNotFound(t *testing.T) {
+	b := newTestBackend(t)
+	_, err := b.ListObjectVersions("no-such-bucket", "", 1000)
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}

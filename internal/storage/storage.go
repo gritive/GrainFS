@@ -35,6 +35,17 @@ type Part struct {
 	Size       int64
 }
 
+// ObjectVersion represents a specific version of an object, including delete markers.
+type ObjectVersion struct {
+	Key            string
+	VersionID      string
+	IsLatest       bool
+	IsDeleteMarker bool
+	LastModified   int64
+	ETag           string
+	Size           int64
+}
+
 // Copier is an optional interface for backends that support metadata-only copy.
 // Backends implement this via type assertion; the HTTP handler falls back to
 // read+write if the backend does not implement Copier.

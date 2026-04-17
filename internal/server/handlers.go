@@ -253,6 +253,12 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// GET /:bucket?versions — list all object versions
+	if c.QueryArgs().Has("versions") {
+		s.listObjectVersions(ctx, c, bucket)
+		return
+	}
+
 	prefix := string(c.QueryArgs().Peek("prefix"))
 	maxKeys := 1000
 	if mk := string(c.QueryArgs().Peek("max-keys")); mk != "" {

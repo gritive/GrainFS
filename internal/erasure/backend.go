@@ -742,6 +742,94 @@ func (b *ECBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.
 	return objects, err
 }
 
+// ListObjectVersions returns all versions (including delete markers) for versioning-enabled bucket.
+// Keys are scanned under "obj:<bucket>/<key>/<versionId>" prefix.
+// For each unique key the lat: pointer identifies the latest version.
+func (b *ECBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
+	if err := b.HeadBucket(bucket); err != nil {
+		return nil, err
+	}
+
+	// collect latest versionId per key
+	latestByKey := map[string]string{}
+	err := b.db.View(func(txn *badger.Txn) error {
+		latPfx := []byte("lat:" + bucket + "/")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(latPfx); it.ValidForPrefix(latPfx); it.Next() {
+			k := string(it.Item().Key())
+			key := strings.TrimPrefix(k, "lat:"+bucket+"/")
+			if prefix != "" && !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			_ = it.Item().Value(func(val []byte) error {
+				latestByKey[key] = string(val)
+				return nil
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var versions []*storage.ObjectVersion
+	err = b.db.View(func(txn *badger.Txn) error {
+		vPfx := []byte("obj:" + bucket + "/")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+
+		count := 0
+		for it.Seek(vPfx); it.ValidForPrefix(vPfx); it.Next() {
+			if count >= maxKeys {
+				break
+			}
+			k := string(it.Item().Key())
+			rest := strings.TrimPrefix(k, "obj:"+bucket+"/")
+
+			// only versioned keys have two "/" separators: key/versionId
+			lastSlash := strings.LastIndex(rest, "/")
+			if lastSlash < 0 {
+				continue
+			}
+			objKey := rest[:lastSlash]
+			vid := rest[lastSlash+1:]
+			if objKey == "" || vid == "" {
+				continue
+			}
+			if prefix != "" && !strings.HasPrefix(objKey, prefix) {
+				continue
+			}
+
+			var meta ecObjectMeta
+			if err := it.Item().Value(func(val []byte) error {
+				m, err := unmarshalECObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				meta = *m
+				return nil
+			}); err != nil {
+				return err
+			}
+
+			v := &storage.ObjectVersion{
+				Key:            objKey,
+				VersionID:      vid,
+				IsLatest:       latestByKey[objKey] == vid,
+				IsDeleteMarker: meta.IsDeleteMarker,
+				LastModified:   meta.LastModified,
+				ETag:           meta.ETag,
+				Size:           meta.Size,
+			}
+			versions = append(versions, v)
+			count++
+		}
+		return nil
+	})
+	return versions, err
+}
+
 // --- Multipart operations ---
 
 func (b *ECBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
