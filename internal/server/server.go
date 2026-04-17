@@ -212,4 +212,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Snapshot management API
 	s.registerSnapshotAPI()
+
+	// Admin API for testing and operations
+	s.registerAdminAPI(h)
 }

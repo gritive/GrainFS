@@ -40,3 +40,13 @@ func (r *Registry) InvalidateAll(bucket, key string) {
 		invalidator.Invalidate(bucket, key)
 	}
 }
+
+// GetInvalidator returns a registered invalidator by volume ID.
+func (r *Registry) GetInvalidator(volumeID string) CacheInvalidator {
+	return r.invalidators[volumeID]
+}
+
+// GetInvalidators returns all registered invalidators.
+func (r *Registry) GetInvalidators() map[string]CacheInvalidator {
+	return r.invalidators
+}

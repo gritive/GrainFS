@@ -199,6 +199,24 @@ func (b *DistributedBackend) GetRegistry() *Registry {
 	return b.registry
 }
 
+// GetVFS returns a registered VFS instance by volume name.
+// Returns nil if volume not found.
+func (b *DistributedBackend) GetVFS(volumeID string) *VFSInstance {
+	// This requires importing vfs package which creates circular dependency
+	// For now, return nil - tests will need to access registry directly
+	// TODO: Add interface-based VFS retrieval to avoid circular dependency
+	return nil
+}
+
+// VFSInstance is a placeholder for VFS instance retrieval.
+// TODO: Replace with actual vfs.GrainVFS once we solve circular import.
+type VFSInstance struct{}
+
+// Stat is a placeholder - will be replaced with actual VFS.Stat call.
+func (v *VFSInstance) Stat(path string) (os.FileInfo, error) {
+	return nil, os.ErrNotExist
+}
+
 // --- Bucket operations ---
 
 func (b *DistributedBackend) CreateBucket(bucket string) error {

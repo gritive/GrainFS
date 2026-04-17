@@ -85,6 +85,26 @@ func New(backend storage.Backend, volumeName string, opts ...VFSOption) (*GrainV
 	return fs, nil
 }
 
+// NewDirect creates a new GrainVFS that uses the bucket name directly (without prefix).
+// This is used for cross-protocol access where VFS needs to access S3 buckets directly.
+func NewDirect(backend storage.Backend, bucketName string, opts ...VFSOption) (*GrainVFS, error) {
+	_ = backend.CreateBucket(bucketName)
+	if err := backend.HeadBucket(bucketName); err != nil {
+		return nil, fmt.Errorf("ensure bucket: %w", err)
+	}
+	fs := &GrainVFS{backend: backend, bucket: bucketName, root: ""}
+	for _, o := range opts {
+		o(fs)
+	}
+	if fs.statCacheTTL > 0 {
+		fs.statCache = make(map[string]*statCacheEntry)
+	}
+	if fs.dirCacheTTL > 0 {
+		fs.dirCache = make(map[string]*dirCacheEntry)
+	}
+	return fs, nil
+}
+
 func (fs *GrainVFS) fullPath(name string) string {
 	name = cleanPath(name)
 	if fs.root == "" {
