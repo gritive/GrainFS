@@ -1,6 +1,6 @@
 # Week 1 Progress - Protocol-Agnostic Storage Implementation
 
-**Iteration 1 Status:** In Progress
+**Iteration 2 Status:** Cache Invalidation Infrastructure Complete ✅
 
 ## Completed Tasks
 
@@ -73,9 +73,81 @@
 
 ## Commit Status
 
-Current commit: `abceb34` - "feat: approve protocol-agnostic storage implementation plan"
-
-Next commit should include:
+**Iteration 1 Commit:** `a599a69` - "feat: week 1 protocol-agnostic storage progress"
 - TDD test file
 - Architecture documents
 - Research documents
+
+**Iteration 2 Commit:** `fdc6b51` - "feat: implement cache invalidation infrastructure"
+- CacheInvalidator interface & Registry
+- VFS Invalidate() method
+- TDD tests for VFS and Registry
+- NFS server registration
+
+Next commits:
+- Week 4: NFS ESTALE error propagation
+- Week 5: NBD cache coherency
+- Week 6: Cross-protocol integration tests
+
+---
+
+## Iteration 2 Summary (Completed)
+
+**Achievement:** Cache invalidation infrastructure implemented and tested
+
+**Components Built:**
+1. **CacheInvalidator Interface** (`internal/cluster/invalidator.go`)
+   - Defines contract for cache invalidation
+   - Implemented by VFS (stat/dir caches)
+
+2. **Registry** (`internal/cluster/invalidator.go`)
+   - Manages multiple cache invalidators (VFS instances)
+   - `Register(volumeID, invalidator)` method
+   - `InvalidateAll(bucket, key)` broadcasts to all invalidators
+
+3. **VFS Invalidate() Method** (`internal/vfs/vfs.go`)
+   - Maps S3 bucket/key to VFS file path
+   - Clears stat cache for specific file
+   - Clears parent directory cache (so ReadDir reflects changes)
+   - Respects bucket matching (no-ops for different buckets)
+
+4. **DistributedBackend Integration** (`internal/cluster/backend.go`)
+   - Added registry field
+   - Modified `notifyOnApply()` to call `registry.InvalidateAll()`
+   - Keeps legacy callback for CachedBackend
+
+5. **NFS Server Registration** (`internal/nfsserver/nfsserver.go`)
+   - Accepts registry parameter in constructor
+   - Registers VFS instance on startup in `ListenAndServe()`
+
+**Tests Written (TDD):**
+- `TestVFSInvalidate`: Verifies stat cache cleared
+- `TestVFSInvalidateDifferentBucket`: Verifies bucket filtering
+- `TestRegistryRegister`: Verifies single invalidator
+- `TestRegistryMultipleInvalidators`: Verifies broadcast to all
+- `TestRegistryEmpty`: Verifies no-op with no invalidators
+
+**Test Results:** All tests pass ✅
+
+**Blocker:** E2E cross-protocol test still skipped (NFS client not integrated)
+
+---
+
+## Next Steps (Iteration 3)
+
+1. **Option A:** Implement NFS client wrapper (mount.nfs approach)
+   - Requires sudo/root
+   - Platform-specific (Linux vs macOS)
+   - Complex test setup
+
+2. **Option B:** Unit test cross-protocol flow directly
+   - Skip NFS mount complexity
+   - Test VFS + backend interaction only
+   - Faster iteration
+
+3. **Option C:** Move to Week 4 (ESTALE implementation)
+   - Defer NFS client integration
+   - Focus on deleted file tracking
+   - Implement ESTALE error propagation
+
+**Recommendation:** Option C - move to ESTALE implementation while NFS client approach matures. Can circle back to integration testing later.
