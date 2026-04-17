@@ -1126,3 +1126,38 @@ func TestECBackend_DeleteObjectVersion_HardDelete(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, vs)
 }
+
+func TestECBackend_RestoreObjects_MultiVersion_LatestCorrect(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	// PUT 3 versions — last PUT should be "latest"
+	v1, err := b.PutObject("ver-bucket", "obj.bin", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	v2, err := b.PutObject("ver-bucket", "obj.bin", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+	v3, err := b.PutObject("ver-bucket", "obj.bin", strings.NewReader("v3"), "text/plain")
+	require.NoError(t, err)
+	_ = v1
+	_ = v2
+
+	// Snapshot
+	all, err := b.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, all, 3)
+
+	// Restore
+	count, stale, err := b.RestoreObjects(all)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+	assert.Empty(t, stale)
+
+	// GET latest → must be v3
+	rc, meta, err := b.GetObject("ver-bucket", "obj.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	assert.Equal(t, "v3", string(got))
+	assert.Equal(t, v3.VersionID, meta.VersionID)
+}

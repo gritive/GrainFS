@@ -1336,6 +1336,27 @@ func (b *ECBackend) getObjectMeta(bucket, key string) (*ecObjectMeta, error) {
 // ListAllObjects implements storage.Snapshotable: scans all object metadata across all buckets.
 func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 	var objs []storage.SnapshotObject
+
+	// Read all lat: pointers so we can mark IsLatest correctly.
+	latMap := map[string]string{} // "bucket/key" → latestVersionID
+	if err := b.db.View(func(txn *badger.Txn) error {
+		prefix := []byte("lat:")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			bk := string(it.Item().Key()[len("lat:"):])
+			if err := it.Item().Value(func(val []byte) error {
+				latMap[bk] = string(val)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("read lat: pointers: %w", err)
+	}
+
 	err := b.db.View(func(txn *badger.Txn) error {
 		prefix := []byte("obj:")
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -1371,6 +1392,7 @@ func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 					objKey = keyAndVer[:idx]
 				}
 			}
+			isLatest := versionID == "" || latMap[bucket+"/"+objKey] == versionID
 			objs = append(objs, storage.SnapshotObject{
 				Bucket:      bucket,
 				Key:         objKey,
@@ -1379,6 +1401,7 @@ func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 				ContentType: meta.ContentType,
 				Modified:    meta.LastModified,
 				VersionID:   versionID,
+				IsLatest:    isLatest,
 			})
 		}
 		return nil
@@ -1422,6 +1445,11 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 		return 0, nil, fmt.Errorf("remove obsolete objects: %w", err)
 	}
 
+	// latestVersions collects versioned objects marked IsLatest in the snapshot.
+	// Used in a post-pass to set lat: pointers correctly after all objects are restored.
+	type latEntry struct{ bucket, key, versionID string }
+	var latestVersions []latEntry
+
 	var stale []storage.StaleBlob
 	var count int
 	for _, snap := range objects {
@@ -1429,24 +1457,47 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 		if err := b.CreateBucket(snap.Bucket); err != nil && !strings.Contains(err.Error(), "already exists") {
 			return count, stale, fmt.Errorf("ensure bucket %s: %w", snap.Bucket, err)
 		}
-		// Check shards exist
+
+		// Check data blobs exist: EC objects have a shard "00"; plain objects (DataShards=0)
+		// have a flat file under .plain/. Try EC first, then plain.
 		shardDir := b.shardDirFor(snap.Bucket, snap.Key, snap.VersionID)
 		firstShard := filepath.Join(shardDir, "00")
-		fi, err := os.Stat(firstShard)
-		if err != nil {
-			stale = append(stale, storage.StaleBlob{Bucket: snap.Bucket, Key: snap.Key, ExpectedETag: snap.ETag})
-			continue
+		shardFi, shardErr := os.Stat(firstShard)
+
+		isPlain := false
+		if shardErr != nil {
+			// Not found in EC directory — check plain flat-file path.
+			var hashInput string
+			if snap.VersionID != "" {
+				hashInput = snap.Key + "/" + snap.VersionID
+			} else {
+				hashInput = snap.Key
+			}
+			h := sha256.Sum256([]byte(hashInput))
+			plainPath := filepath.Join(b.root, "data", snap.Bucket, ".plain", hex.EncodeToString(h[:]))
+			if _, plainErr := os.Stat(plainPath); plainErr != nil {
+				stale = append(stale, storage.StaleBlob{Bucket: snap.Bucket, Key: snap.Key, ExpectedETag: snap.ETag})
+				continue
+			}
+			isPlain = true
 		}
-		// Restore metadata with current codec settings and actual shard size
+
+		// Restore metadata; preserve plain-vs-EC storage type.
+		var dataShards, parityShards, shardSize int
+		if !isPlain {
+			dataShards = b.codec.DataShards
+			parityShards = b.codec.ParityShards
+			shardSize = int(shardFi.Size())
+		}
 		meta := &ecObjectMeta{
 			Key:          snap.Key,
 			Size:         snap.Size,
 			ContentType:  snap.ContentType,
 			ETag:         snap.ETag,
 			LastModified: snap.Modified,
-			DataShards:   b.codec.DataShards,
-			ParityShards: b.codec.ParityShards,
-			ShardSize:    int(fi.Size()),
+			DataShards:   dataShards,
+			ParityShards: parityShards,
+			ShardSize:    shardSize,
 			VersionID:    snap.VersionID,
 		}
 		metaBytes, err := marshalECObjectMeta(meta)
@@ -1455,18 +1506,30 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 		}
 		if err := b.db.Update(func(txn *badger.Txn) error {
 			if snap.VersionID != "" {
-				if err := txn.Set(objectMetaKeyV(snap.Bucket, snap.Key, snap.VersionID), metaBytes); err != nil {
-					return err
-				}
-				// Restore lat: pointer so GetObject works
-				return txn.Set(latestKey(snap.Bucket, snap.Key), []byte(snap.VersionID))
+				return txn.Set(objectMetaKeyV(snap.Bucket, snap.Key, snap.VersionID), metaBytes)
 			}
 			return txn.Set(objectMetaKey(snap.Bucket, snap.Key), metaBytes)
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
 		}
 		count++
+
+		// Collect IsLatest versions for the lat: post-pass.
+		if snap.VersionID != "" && snap.IsLatest {
+			latestVersions = append(latestVersions, latEntry{snap.Bucket, snap.Key, snap.VersionID})
+		}
 	}
+
+	// Post-pass: set lat: pointers using the IsLatest marker captured by ListAllObjects.
+	// This is correct even when multiple versions share the same Modified timestamp.
+	for _, le := range latestVersions {
+		if err := b.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(latestKey(le.bucket, le.key), []byte(le.versionID))
+		}); err != nil {
+			return count, stale, fmt.Errorf("restore lat: %s/%s: %w", le.bucket, le.key, err)
+		}
+	}
+
 	return count, stale, nil
 }
 

@@ -63,6 +63,7 @@ type SnapshotObject struct {
 	Modified       int64  `json:"modified"`
 	VersionID      string `json:"version_id,omitempty"`
 	IsDeleteMarker bool   `json:"is_delete_marker,omitempty"`
+	IsLatest       bool   `json:"is_latest,omitempty"`
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.
