@@ -28,6 +28,7 @@ import (
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
+	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/gritive/GrainFS/internal/vfs"
@@ -52,8 +53,11 @@ func init() {
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled)")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled, Linux only)")
 	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")
-	serveCmd.Flags().Duration("snapshot-interval", 0, "auto-snapshot interval (0 = disabled, e.g. 1h)")
+	serveCmd.Flags().Duration("snapshot-interval", 1*time.Hour, "auto-snapshot interval (0 to disable)")
 	serveCmd.Flags().Int("snapshot-retain", 24, "number of auto-snapshots to retain")
+	serveCmd.Flags().String("upstream", "", "upstream S3-compatible endpoint for pull-through caching (e.g. http://minio:9000)")
+	serveCmd.Flags().String("upstream-access-key", "", "access key for upstream S3 endpoint")
+	serveCmd.Flags().String("upstream-secret-key", "", "secret key for upstream S3 endpoint")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -140,6 +144,18 @@ func runServe(cmd *cobra.Command, args []string) error {
 		mode := "solo"
 		if ecEnabled {
 			mode = "solo-ec"
+		}
+
+		// Wrap with pull-through cache if upstream is configured
+		if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
+			upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
+			upstreamSecretKey, _ := cmd.Flags().GetString("upstream-secret-key")
+			up, err := pullthrough.NewS3Upstream(upstreamEndpoint, upstreamAccessKey, upstreamSecretKey)
+			if err != nil {
+				return fmt.Errorf("init upstream: %w", err)
+			}
+			backend = pullthrough.NewBackend(backend, up)
+			slog.Info("pull-through cache enabled", "upstream", upstreamEndpoint)
 		}
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition

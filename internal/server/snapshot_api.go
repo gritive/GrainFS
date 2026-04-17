@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -22,7 +21,7 @@ import (
 // POST   /admin/snapshots/:seq/restore — restore snapshot
 // DELETE /admin/snapshots/:seq      — delete snapshot
 func (s *Server) registerSnapshotAPI(h *server.Hertz) {
-	admin := h.Group("/admin/snapshots")
+	admin := h.Group("/admin/snapshots", localhostOnly())
 	admin.POST("", s.createSnapshotHandler)
 	admin.GET("", s.listSnapshotsHandler)
 	admin.POST("/:seq/restore", s.restoreSnapshotHandler)
@@ -30,13 +29,10 @@ func (s *Server) registerSnapshotAPI(h *server.Hertz) {
 }
 
 func (s *Server) snapshotManager() (*snapshot.Manager, error) {
-	snap, ok := s.backend.(storage.Snapshotable)
-	if !ok {
+	if s.snapMgr == nil {
 		return nil, fmt.Errorf("backend does not support snapshots")
 	}
-	dir := filepath.Join(s.dataDir, "snapshots")
-	walDir := filepath.Join(s.dataDir, "wal")
-	return snapshot.NewManager(dir, snap, walDir)
+	return s.snapMgr, nil
 }
 
 // POST /admin/snapshots
