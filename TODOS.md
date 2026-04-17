@@ -1,10 +1,5 @@
 # TODOS
 
-## Completed Performance Optimizations
-- [x] NFSv4 buffer optimization (adaptive buffer pool with 32KB/256KB/1MB sizing)
-- [x] NFSv4 E2E tests with large files (10MB-100MB)
-- [x] Performance benchmarks for buffered copy
-
 ## Future Performance Optimizations
 - [ ] Zero copy implementation for large files (sendfile/splice)
 - [ ] NBD Zero copy E2E tests
