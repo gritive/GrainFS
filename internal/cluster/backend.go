@@ -42,6 +42,7 @@ type DistributedBackend struct {
 	shardSvc    *ShardService
 	allNodes    []string      // all node addresses (including self) for shard placement
 	peerHealth  *PeerHealth
+	registry    *Registry      // cache invalidators (VFS instances)
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -54,11 +55,12 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 
 	fsm := NewFSM(db)
 	return &DistributedBackend{
-		root:   root,
-		db:     db,
-		node:   node,
-		fsm:    fsm,
-		logger: slog.With("component", "distributed-backend"),
+		root:     root,
+		db:       db,
+		node:     node,
+		fsm:      fsm,
+		logger:   slog.With("component", "distributed-backend"),
+		registry: NewRegistry(),
 	}, nil
 }
 
@@ -151,7 +153,13 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	}
 
 	if bucket != "" {
-		b.onApply(cmd.Type, bucket, key)
+		// Invalidate all registered caches (VFS, NFS, etc.)
+		b.registry.InvalidateAll(bucket, key)
+
+		// Call legacy callback for CachedBackend
+		if b.onApply != nil {
+			b.onApply(cmd.Type, bucket, key)
+		}
 	}
 }
 
@@ -184,6 +192,29 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 // Close closes the metadata database.
 func (b *DistributedBackend) Close() error {
 	return b.db.Close()
+}
+
+// GetRegistry returns the cache invalidator registry for registering VFS instances.
+func (b *DistributedBackend) GetRegistry() *Registry {
+	return b.registry
+}
+
+// GetVFS returns a registered VFS instance by volume name.
+// Returns nil if volume not found.
+func (b *DistributedBackend) GetVFS(volumeID string) *VFSInstance {
+	// This requires importing vfs package which creates circular dependency
+	// For now, return nil - tests will need to access registry directly
+	// TODO: Add interface-based VFS retrieval to avoid circular dependency
+	return nil
+}
+
+// VFSInstance is a placeholder for VFS instance retrieval.
+// TODO: Replace with actual vfs.GrainVFS once we solve circular import.
+type VFSInstance struct{}
+
+// Stat is a placeholder - will be replaced with actual VFS.Stat call.
+func (v *VFSInstance) Stat(path string) (os.FileInfo, error) {
+	return nil, os.ErrNotExist
 }
 
 // --- Bucket operations ---

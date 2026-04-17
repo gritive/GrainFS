@@ -1,12 +1,6 @@
 # TODOS
 
-## Deferred Scope (Post-Phase 1)
-
-### Production Hardening
-- [ ] Production deployment runbook
-- [ ] Data loss scenario drills (manual testing)
-
-### Performance Optimization (Phase 2)
+## Performance Optimization (Phase 2)
 - [ ] NFSv4 buffer optimization (io.Copy)
 - [ ] Zero copy implementation for large files
 - [ ] NFSv4 E2E tests with large files (>10MB)

@@ -10,6 +10,7 @@ import (
 	nfs "github.com/willscott/go-nfs"
 	nfshelper "github.com/willscott/go-nfs/helpers"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/vfs"
 )
@@ -19,13 +20,20 @@ type Server struct {
 	backend  storage.Backend
 	volName  string
 	vfsOpts  []vfs.VFSOption
+	registry *cluster.Registry // cache invalidator registry
 	mu       sync.Mutex
 	listener net.Listener
 }
 
 // NewServer creates a new NFS server for the given volume.
-func NewServer(backend storage.Backend, volName string, vfsOpts ...vfs.VFSOption) *Server {
-	return &Server{backend: backend, volName: volName, vfsOpts: vfsOpts}
+// If registry is non-nil, the VFS instance will be registered for cache invalidation.
+func NewServer(backend storage.Backend, volName string, registry *cluster.Registry, vfsOpts ...vfs.VFSOption) *Server {
+	return &Server{
+		backend:  backend,
+		volName:  volName,
+		vfsOpts:  vfsOpts,
+		registry: registry,
+	}
 }
 
 // ListenAndServe starts the NFS server on the given address.
@@ -33,6 +41,12 @@ func (s *Server) ListenAndServe(addr string) error {
 	fs, err := vfs.New(s.backend, s.volName, s.vfsOpts...)
 	if err != nil {
 		return fmt.Errorf("create vfs: %w", err)
+	}
+
+	// Register VFS with cache invalidator registry
+	if s.registry != nil {
+		s.registry.Register(s.volName, fs)
+		slog.Info("vfs registered with cache invalidator", "volume", s.volName)
 	}
 
 	ln, err := net.Listen("tcp", addr)

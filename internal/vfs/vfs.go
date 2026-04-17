@@ -14,6 +14,7 @@ import (
 	"time"
 
 	billy "github.com/go-git/go-billy/v5"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -73,6 +74,26 @@ func New(backend storage.Backend, volumeName string, opts ...VFSOption) (*GrainV
 		return nil, fmt.Errorf("ensure vfs bucket: %w", err)
 	}
 	fs := &GrainVFS{backend: backend, bucket: bucket, root: ""}
+	for _, o := range opts {
+		o(fs)
+	}
+	if fs.statCacheTTL > 0 {
+		fs.statCache = make(map[string]*statCacheEntry)
+	}
+	if fs.dirCacheTTL > 0 {
+		fs.dirCache = make(map[string]*dirCacheEntry)
+	}
+	return fs, nil
+}
+
+// NewDirect creates a new GrainVFS that uses the bucket name directly (without prefix).
+// This is used for cross-protocol access where VFS needs to access S3 buckets directly.
+func NewDirect(backend storage.Backend, bucketName string, opts ...VFSOption) (*GrainVFS, error) {
+	_ = backend.CreateBucket(bucketName)
+	if err := backend.HeadBucket(bucketName); err != nil {
+		return nil, fmt.Errorf("ensure bucket: %w", err)
+	}
+	fs := &GrainVFS{backend: backend, bucket: bucketName, root: ""}
 	for _, o := range opts {
 		o(fs)
 	}
@@ -146,10 +167,20 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 	fp := fs.fullPath(filename)
 
+	// Check if file was deleted (ESTALE support for cross-protocol coherency)
+	// Extract volume name from bucket: "__grainfs_vfs_" + volumeName
+	volName := strings.TrimPrefix(fs.bucket, vfsBucketPrefix)
+	if fs.IsDeleted(volName, fp) {
+		return nil, os.ErrNotExist
+	}
+
 	// Check stat cache
 	if cached := fs.getStatCache(fp); cached != nil {
 		return cached, nil
 	}
+
+	// Cache miss - track metric
+	metrics.CacheStatMisses.Add(1)
 
 	// Check if it's a directory
 	if fs.isDir(fp) {
@@ -521,6 +552,8 @@ func (fs *GrainVFS) getStatCache(fp string) os.FileInfo {
 	if !ok || time.Now().After(entry.expires) {
 		return nil
 	}
+
+	metrics.CacheStatHits.Add(1)
 	return entry.info
 }
 
@@ -579,4 +612,110 @@ func (fs *GrainVFS) invalidateParentDirCache(fp string) {
 	fs.cacheMu.Lock()
 	delete(fs.dirCache, parent)
 	fs.cacheMu.Unlock()
+}
+
+// MarkDeleted marks a file as deleted in the VFS deleted file tracking.
+// This is used for NFS ESTALE error propagation - when S3 deletes a file,
+// NFS should return ESTALE on subsequent access attempts.
+//
+// Called by Raft OnApply callback after DeleteObject commands commit.
+// Stores deletion marker in stat cache (persistent in future with BadgerDB).
+//
+// PRODUCTION LIMITATION: Deleted markers are stored in-memory only.
+// If GrainFS crashes, all deletion markers are lost, causing "zombie" files
+// to reappear in NFS. Before production deployment, implement BadgerDB
+// persistence for crash recovery. Tracked as P1 in project backlog.
+//
+// Parameters:
+// - bucket: S3 bucket name (e.g., "default")
+// - key: S3 object key (e.g., "path/to/file.txt")
+//
+// Note: Bucket is included in cache key to support multi-bucket VFS instances.
+func (fs *GrainVFS) MarkDeleted(bucket, key string) error {
+	fs.cacheMu.Lock()
+	defer fs.cacheMu.Unlock()
+
+	if fs.statCache == nil {
+		return nil // No cache, nothing to mark
+	}
+
+	// Store deleted marker with bucket+key as cache key
+	cacheKey := "deleted:" + bucket + ":" + key
+	_, exists := fs.statCache[cacheKey]
+	fs.statCache[cacheKey] = &statCacheEntry{
+		info:    nil,
+		expires: time.Now().Add(24 * time.Hour), // Persist for 24h
+	}
+
+	// Update metrics
+	if !exists {
+		metrics.DeletedMarkersTotal.Inc()
+	}
+
+	return nil
+}
+
+// IsDeleted checks if a file has been marked as deleted.
+// Used by NFS handler to return ESTALE error.
+//
+// Parameters:
+// - bucket: S3 bucket name (e.g., "default")
+// - key: S3 object key (e.g., "path/to/file.txt")
+//
+// Returns true if file is marked as deleted and marker hasn't expired.
+func (fs *GrainVFS) IsDeleted(bucket, key string) bool {
+	fs.cacheMu.RLock()
+	defer fs.cacheMu.RUnlock()
+
+	if fs.statCache == nil {
+		return false
+	}
+
+	cacheKey := "deleted:" + bucket + ":" + key
+	entry, ok := fs.statCache[cacheKey]
+	if !ok {
+		return false
+	}
+
+	// Check if entry expired
+	return time.Now().Before(entry.expires)
+}
+
+// Invalidate clears caches for the given S3 bucket and key.
+// This implements cluster.CacheInvalidator for cross-protocol cache coherency.
+//
+// Maps S3 bucket/key to VFS file path:
+// - S3 bucket="default", key="path/to/file.txt"
+// - VFS bucket="__grainfs_vfs_default"
+// - VFS file path="path/to/file.txt"
+//
+// Called by DistributedBackend.onApply after Raft commits mutations.
+func (fs *GrainVFS) Invalidate(bucket, key string) {
+	start := time.Now()
+	defer func() {
+		metrics.CacheInvalidationDuration.Observe(time.Since(start).Seconds())
+		metrics.CacheInvalidationTotal.WithLabelValues(bucket, "vfs").Add(1)
+	}()
+
+	// Check if this VFS instance serves the specified bucket
+	if fs.bucket != vfsBucketPrefix+bucket {
+		return // Different bucket, not our concern
+	}
+
+	// Clear deleted marker (file re-created after deletion)
+	fs.cacheMu.Lock()
+	_, hadDeletedMarker := fs.statCache["deleted:"+bucket+":"+key]
+	delete(fs.statCache, "deleted:"+bucket+":"+key)
+	fs.cacheMu.Unlock()
+
+	// Update metrics: decrement deleted marker count if we cleared one
+	if hadDeletedMarker {
+		metrics.DeletedMarkersTotal.Dec()
+	}
+
+	// Invalidate stat cache for the specific file
+	fs.invalidateStatCache(key)
+
+	// Invalidate parent directory cache (so ReadDir reflects changes)
+	fs.invalidateParentDirCache(key)
 }
