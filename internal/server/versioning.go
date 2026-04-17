@@ -83,6 +83,45 @@ func findObjectVersionLister(b storage.Backend) (ObjectVersionLister, bool) {
 	return nil, false
 }
 
+// ObjectVersionDeleter is an optional interface for backends supporting hard-delete of a specific version.
+type ObjectVersionDeleter interface {
+	DeleteObjectVersion(bucket, key, versionId string) error
+}
+
+// VersionedSoftDeleter is an optional interface for backends that return delete-marker metadata
+// when performing a soft-delete on a versioning-enabled bucket.
+type VersionedSoftDeleter interface {
+	DeleteObjectReturningMarker(bucket, key string) (markerID string, err error)
+}
+
+func findVersionedSoftDeleter(b storage.Backend) (VersionedSoftDeleter, bool) {
+	for b != nil {
+		if v, ok := b.(VersionedSoftDeleter); ok {
+			return v, true
+		}
+		u, ok := b.(unwrapper)
+		if !ok {
+			break
+		}
+		b = u.Unwrap()
+	}
+	return nil, false
+}
+
+func findVersionDeleter(b storage.Backend) (ObjectVersionDeleter, bool) {
+	for b != nil {
+		if v, ok := b.(ObjectVersionDeleter); ok {
+			return v, true
+		}
+		u, ok := b.(unwrapper)
+		if !ok {
+			break
+		}
+		b = u.Unwrap()
+	}
+	return nil, false
+}
+
 // listVersionsResult is the S3 XML response for GET /<bucket>?versions.
 type listVersionsResult struct {
 	XMLName       xml.Name              `xml:"ListVersionsResult"`

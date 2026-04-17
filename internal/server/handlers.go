@@ -592,8 +592,42 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
+	// DELETE /:bucket/:key?versionId=<id> — hard-delete specific version
+	if versionID := string(c.QueryArgs().Peek("versionId")); versionID != "" {
+		vd, ok := findVersionDeleter(s.backend)
+		if !ok {
+			writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versionId delete not supported by this backend")
+			return
+		}
+		if err := vd.DeleteObjectVersion(bucket, key, versionID); err != nil {
+			mapError(c, err)
+			return
+		}
+		c.Status(consts.StatusNoContent)
+		return
+	}
+
 	// Get size before deleting for metric tracking
 	existing, _ := s.backend.HeadObject(bucket, key)
+
+	// If backend supports versioned soft-delete, use it to get the marker ID.
+	if vsd, ok := findVersionedSoftDeleter(s.backend); ok {
+		markerID, err := vsd.DeleteObjectReturningMarker(bucket, key)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		if markerID != "" {
+			c.Header("x-amz-delete-marker", "true")
+			c.Header("x-amz-version-id", markerID)
+		}
+		metrics.ObjectsTotal.Dec()
+		if existing != nil {
+			metrics.StorageBytesTotal.Add(float64(-existing.Size))
+		}
+		c.Status(consts.StatusNoContent)
+		return
+	}
 
 	if err := s.backend.DeleteObject(bucket, key); err != nil {
 		mapError(c, err)

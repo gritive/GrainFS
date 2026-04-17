@@ -286,3 +286,49 @@ func TestListObjectVersions_NotImplemented_Local(t *testing.T) {
 
 // Ensure LocalBackend still satisfies storage.Backend (compilation check).
 var _ storage.Backend = (*storage.LocalBackend)(nil)
+
+// TestDeleteObjectVersion_EC verifies DELETE /<bucket>/<key>?versionId= hard-deletes a version.
+func TestDeleteObjectVersion_EC(t *testing.T) {
+	base := setupECTestServer(t)
+
+	// Create bucket, enable versioning
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	putVC := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// PUT an object → get versionId
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/file.txt", strings.NewReader("hello"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	versionID := resp.Header.Get("X-Amz-Version-Id")
+	resp.Body.Close()
+	require.NotEmpty(t, versionID)
+
+	// DELETE ?versionId= → 204
+	req, _ = http.NewRequest(http.MethodDelete, base+"/ver-bucket/file.txt?versionId="+versionID, nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// GET ?versionId= must be 404
+	resp, err = http.Get(base + "/ver-bucket/file.txt?versionId=" + versionID)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	// ListVersions must be empty
+	resp, err = http.Get(base + "/ver-bucket?versions")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	var result listVersionsResult
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&result))
+	assert.Empty(t, result.Versions)
+	assert.Empty(t, result.DeleteMarkers)
+}

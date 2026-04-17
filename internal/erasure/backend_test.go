@@ -1057,3 +1057,72 @@ func TestECBackend_ListAllObjects_DeleteMarkerExcluded(t *testing.T) {
 		assert.False(t, o.IsDeleteMarker, "delete marker must not appear in snapshot")
 	}
 }
+
+// ── Advisor-identified bug fixes (RED phase) ──────────────────────────────────
+
+func TestECBackend_RestoreObjects_VersionedRoundtrip(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	data := strings.Repeat("z", 1024*64)
+	obj, err := b.PutObject("ver-bucket", "obj.bin", strings.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	// Snapshot
+	all, err := b.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, obj.VersionID, all[0].VersionID)
+
+	// Restore (overwrites metadata)
+	count, stale, err := b.RestoreObjects(all)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.Empty(t, stale)
+
+	// GetObjectVersion must still work
+	rc, meta, err := b.GetObjectVersion("ver-bucket", "obj.bin", obj.VersionID)
+	require.NoError(t, err)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	assert.Equal(t, data, string(got))
+	assert.Equal(t, obj.VersionID, meta.VersionID)
+}
+
+func TestECBackend_ListObjectVersions_NestedKey_Unversioned(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+	// Unversioned bucket — key contains "/"
+	data := strings.Repeat("a", 64)
+	_, err := b.PutObject("bucket", "folder/file.txt", strings.NewReader(data), "text/plain")
+	require.NoError(t, err)
+
+	// ListObjectVersions on unversioned bucket — should return empty (no versioned keys)
+	vs, err := b.ListObjectVersions("bucket", "", 1000)
+	require.NoError(t, err)
+	assert.Empty(t, vs, "unversioned bucket with nested key should return no versions")
+}
+
+func TestECBackend_DeleteObjectVersion_HardDelete(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("ver-bucket"))
+	require.NoError(t, b.SetBucketVersioning("ver-bucket", "Enabled"))
+
+	data := strings.Repeat("x", 512)
+	obj, err := b.PutObject("ver-bucket", "file.txt", strings.NewReader(data), "text/plain")
+	require.NoError(t, err)
+
+	// Hard-delete the specific version
+	require.NoError(t, b.DeleteObjectVersion("ver-bucket", "file.txt", obj.VersionID))
+
+	// Version must be gone
+	_, _, err = b.GetObjectVersion("ver-bucket", "file.txt", obj.VersionID)
+	assert.Error(t, err, "version must not exist after hard-delete")
+
+	// Versions list must be empty
+	vs, err := b.ListObjectVersions("ver-bucket", "", 1000)
+	require.NoError(t, err)
+	assert.Empty(t, vs)
+}

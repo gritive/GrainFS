@@ -168,6 +168,19 @@ func (cb *CachedBackend) DeleteObject(bucket, key string) error {
 	return cb.Backend.DeleteObject(bucket, key)
 }
 
+// DeleteObjectReturningMarker invalidates the cache and delegates to the inner backend.
+// This ensures the cache is evicted even when the versioned soft-delete path is taken.
+func (cb *CachedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	cb.invalidate(bucket, key)
+	type versionedSoftDeleter interface {
+		DeleteObjectReturningMarker(bucket, key string) (string, error)
+	}
+	if vsd, ok := cb.Backend.(versionedSoftDeleter); ok {
+		return vsd.DeleteObjectReturningMarker(bucket, key)
+	}
+	return "", cb.Backend.DeleteObject(bucket, key)
+}
+
 // CompleteMultipartUpload invalidates the cache entry for the key.
 func (cb *CachedBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []Part) (*Object, error) {
 	cb.invalidate(bucket, key)

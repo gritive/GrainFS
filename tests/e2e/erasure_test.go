@@ -471,3 +471,128 @@ func TestScrubber_AutoRepair(t *testing.T) {
 	assert.True(t, stats.Available, "scrubber should be available")
 	assert.Greater(t, stats.Repaired, int64(0), "scrubber should have repaired at least 1 object")
 }
+
+// TestE2E_Versioning_Full exercises the full S3 versioning lifecycle via real binary.
+func TestE2E_Versioning_Full(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
+	client, _, baseURL, cleanup := startECServerWithScrub(t, 24*time.Hour)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	bucket := "ver-e2e"
+
+	// Create bucket
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+
+	// Enable versioning via raw HTTP (aws-sdk-go-v2 PutBucketVersioning)
+	vcBody := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	req, _ := http.NewRequest(http.MethodPut, baseURL+"/"+bucket+"?versioning", strings.NewReader(vcBody))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// PUT v1
+	putOut1, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+		Body:   strings.NewReader("content-v1"),
+	})
+	require.NoError(t, err)
+	vid1 := aws.ToString(putOut1.VersionId)
+	require.NotEmpty(t, vid1)
+
+	// PUT v2
+	putOut2, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+		Body:   strings.NewReader("content-v2"),
+	})
+	require.NoError(t, err)
+	vid2 := aws.ToString(putOut2.VersionId)
+	require.NotEmpty(t, vid2)
+	assert.NotEqual(t, vid1, vid2)
+
+	// GET latest → v2
+	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+	})
+	require.NoError(t, err)
+	got, _ := io.ReadAll(getOut.Body)
+	getOut.Body.Close()
+	assert.Equal(t, "content-v2", string(got))
+
+	// GET ?versionId=vid1 → v1
+	getOut, err = client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:    aws.String(bucket),
+		Key:       aws.String("file.txt"),
+		VersionId: aws.String(vid1),
+	})
+	require.NoError(t, err)
+	got, _ = io.ReadAll(getOut.Body)
+	getOut.Body.Close()
+	assert.Equal(t, "content-v1", string(got))
+
+	// ListObjectVersions → 2 versions
+	lvOut, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket),
+	})
+	require.NoError(t, err)
+	assert.Len(t, lvOut.Versions, 2)
+	assert.Empty(t, lvOut.DeleteMarkers)
+
+	// DELETE (soft) → creates delete marker, latest is now a delete marker
+	delOut, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+	})
+	require.NoError(t, err)
+	markerID := aws.ToString(delOut.VersionId)
+	require.NotEmpty(t, markerID)
+
+	// GET latest → 404
+	_, err = client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+	})
+	require.Error(t, err)
+	var noSuchKey *types.NoSuchKey
+	assert.True(t, isS3Error(err, noSuchKey), "expected NoSuchKey or 404 after delete")
+
+	// ListVersions → 2 versions + 1 delete marker
+	lvOut, err = client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket),
+	})
+	require.NoError(t, err)
+	assert.Len(t, lvOut.Versions, 2)
+	assert.Len(t, lvOut.DeleteMarkers, 1)
+	assert.True(t, aws.ToBool(lvOut.DeleteMarkers[0].IsLatest))
+
+	// Hard-delete specific version via raw HTTP DELETE ?versionId=
+	delReq, _ := http.NewRequest(http.MethodDelete, baseURL+"/"+bucket+"/file.txt?versionId="+vid1, nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	require.NoError(t, err)
+	delResp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, delResp.StatusCode)
+
+	// ListVersions → 1 version + 1 delete marker (vid1 gone)
+	lvOut, err = client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket),
+	})
+	require.NoError(t, err)
+	assert.Len(t, lvOut.Versions, 1)
+	assert.Equal(t, vid2, aws.ToString(lvOut.Versions[0].VersionId))
+}
+
+// isS3Error checks if an error is a specific S3 error type (or a 404).
+func isS3Error(err error, _ interface{}) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NoSuchKey")
+}

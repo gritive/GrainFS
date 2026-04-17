@@ -21,8 +21,8 @@
 - [ ] ACL embedding
 - [ ] LRU token validation
 - [ ] zero copy permission check
-- [x] versioning
-- [ ] soft-delete
+- [x] versioning (Enabled/Suspended, PUT/GET/DELETE versioned, ListObjectVersions, RestoreObjects, DELETE ?versionId hard-delete, E2E)
+- [x] soft-delete (delete marker, IsDeleteMarker, lat: pointer, CachedBackend cache invalidation)
 - [ ] life cycle management
 
 ## Phase 14: Scale

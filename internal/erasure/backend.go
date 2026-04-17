@@ -655,6 +655,38 @@ func (b *ECBackend) HeadObject(bucket, key string) (*storage.Object, error) {
 	}, nil
 }
 
+// DeleteObjectReturningMarker performs a soft-delete on a versioning-enabled bucket
+// and returns the created delete marker's version ID.
+func (b *ECBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	bm, err := b.getBucketMeta(bucket)
+	if err != nil {
+		return "", err
+	}
+	if bm.VersioningState != "Enabled" {
+		return "", b.DeleteObject(bucket, key)
+	}
+	markerID := uuid.New().String()
+	markerMeta := ecObjectMeta{
+		Key:            key,
+		IsDeleteMarker: true,
+		VersionID:      markerID,
+		LastModified:   time.Now().Unix(),
+	}
+	markerBytes, err := marshalECObjectMeta(&markerMeta)
+	if err != nil {
+		return "", fmt.Errorf("marshal delete marker: %w", err)
+	}
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(objectMetaKeyV(bucket, key, markerID), markerBytes); err != nil {
+			return err
+		}
+		return txn.Set(latestKey(bucket, key), []byte(markerID))
+	}); err != nil {
+		return "", err
+	}
+	return markerID, nil
+}
+
 func (b *ECBackend) DeleteObject(bucket, key string) error {
 	bm, err := b.getBucketMeta(bucket)
 	if err != nil {
@@ -697,6 +729,63 @@ func (b *ECBackend) DeleteObject(bucket, key string) error {
 			return err
 		}
 		return txn.Delete(mk)
+	})
+}
+
+// DeleteObjectVersion hard-deletes a specific version of an object.
+func (b *ECBackend) DeleteObjectVersion(bucket, key, versionId string) error {
+	if err := b.HeadBucket(bucket); err != nil {
+		return err
+	}
+	metaKey := objectMetaKeyV(bucket, key, versionId)
+
+	return b.db.Update(func(txn *badger.Txn) error {
+		// Verify version exists
+		if _, err := txn.Get(metaKey); err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		} else if err != nil {
+			return err
+		}
+
+		// Remove version metadata
+		if err := txn.Delete(metaKey); err != nil {
+			return err
+		}
+
+		// Update lat: pointer: find remaining latest version
+		latKey := latestKey(bucket, key)
+		item, err := txn.Get(latKey)
+		if err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		if err == nil {
+			currentLatest := ""
+			_ = item.Value(func(val []byte) error { currentLatest = string(val); return nil })
+			if currentLatest == versionId {
+				// Deleted version was latest — find previous latest
+				newLatest := ""
+				pfx := []byte("obj:" + bucket + "/" + key + "/")
+				it := txn.NewIterator(badger.DefaultIteratorOptions)
+				for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+					k := string(it.Item().Key())
+					vid := strings.TrimPrefix(k, "obj:"+bucket+"/"+key+"/")
+					if vid != versionId && vid != "" {
+						newLatest = vid
+						break
+					}
+				}
+				it.Close()
+				if newLatest == "" {
+					_ = txn.Delete(latKey)
+				} else {
+					_ = txn.Set(latKey, []byte(newLatest))
+				}
+			}
+		}
+
+		// Remove shard data
+		os.RemoveAll(b.shardDirFor(bucket, key, versionId))
+		return nil
 	})
 }
 
@@ -787,14 +876,17 @@ func (b *ECBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*s
 			k := string(it.Item().Key())
 			rest := strings.TrimPrefix(k, "obj:"+bucket+"/")
 
-			// only versioned keys have two "/" separators: key/versionId
+			// versioned keys end with a UUID suffix: <key>/<36-char-uuid>
 			lastSlash := strings.LastIndex(rest, "/")
 			if lastSlash < 0 {
 				continue
 			}
-			objKey := rest[:lastSlash]
 			vid := rest[lastSlash+1:]
-			if objKey == "" || vid == "" {
+			if len(vid) != 36 || strings.Count(vid, "-") != 4 {
+				continue // not a versionId suffix
+			}
+			objKey := rest[:lastSlash]
+			if objKey == "" {
 				continue
 			}
 			if prefix != "" && !strings.HasPrefix(objKey, prefix) {
@@ -1298,7 +1390,11 @@ func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
 	inSnapshot := make(map[string]bool, len(objects))
 	for _, o := range objects {
-		inSnapshot["obj:"+o.Bucket+"/"+o.Key] = true
+		if o.VersionID != "" {
+			inSnapshot["obj:"+o.Bucket+"/"+o.Key+"/"+o.VersionID] = true
+		} else {
+			inSnapshot["obj:"+o.Bucket+"/"+o.Key] = true
+		}
 	}
 
 	// Delete metadata for objects not in snapshot
@@ -1334,7 +1430,7 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 			return count, stale, fmt.Errorf("ensure bucket %s: %w", snap.Bucket, err)
 		}
 		// Check shards exist
-		shardDir := b.ShardDir(snap.Bucket, snap.Key)
+		shardDir := b.shardDirFor(snap.Bucket, snap.Key, snap.VersionID)
 		firstShard := filepath.Join(shardDir, "00")
 		fi, err := os.Stat(firstShard)
 		if err != nil {
@@ -1351,12 +1447,20 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 			DataShards:   b.codec.DataShards,
 			ParityShards: b.codec.ParityShards,
 			ShardSize:    int(fi.Size()),
+			VersionID:    snap.VersionID,
 		}
 		metaBytes, err := marshalECObjectMeta(meta)
 		if err != nil {
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
 		}
 		if err := b.db.Update(func(txn *badger.Txn) error {
+			if snap.VersionID != "" {
+				if err := txn.Set(objectMetaKeyV(snap.Bucket, snap.Key, snap.VersionID), metaBytes); err != nil {
+					return err
+				}
+				// Restore lat: pointer so GetObject works
+				return txn.Set(latestKey(snap.Bucket, snap.Key), []byte(snap.VersionID))
+			}
 			return txn.Set(objectMetaKey(snap.Bucket, snap.Key), metaBytes)
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
