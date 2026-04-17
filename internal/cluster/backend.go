@@ -42,6 +42,7 @@ type DistributedBackend struct {
 	shardSvc    *ShardService
 	allNodes    []string      // all node addresses (including self) for shard placement
 	peerHealth  *PeerHealth
+	registry    *Registry      // cache invalidators (VFS instances)
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -54,11 +55,12 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 
 	fsm := NewFSM(db)
 	return &DistributedBackend{
-		root:   root,
-		db:     db,
-		node:   node,
-		fsm:    fsm,
-		logger: slog.With("component", "distributed-backend"),
+		root:     root,
+		db:       db,
+		node:     node,
+		fsm:      fsm,
+		logger:   slog.With("component", "distributed-backend"),
+		registry: NewRegistry(),
 	}, nil
 }
 
@@ -151,7 +153,13 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	}
 
 	if bucket != "" {
-		b.onApply(cmd.Type, bucket, key)
+		// Invalidate all registered caches (VFS, NFS, etc.)
+		b.registry.InvalidateAll(bucket, key)
+
+		// Call legacy callback for CachedBackend
+		if b.onApply != nil {
+			b.onApply(cmd.Type, bucket, key)
+		}
 	}
 }
 
@@ -184,6 +192,11 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 // Close closes the metadata database.
 func (b *DistributedBackend) Close() error {
 	return b.db.Close()
+}
+
+// GetRegistry returns the cache invalidator registry for registering VFS instances.
+func (b *DistributedBackend) GetRegistry() *Registry {
+	return b.registry
 }
 
 // --- Bucket operations ---

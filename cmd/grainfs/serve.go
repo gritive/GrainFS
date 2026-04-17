@@ -177,7 +177,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 			}
 		}
 
-		nfsSrv = nfsserver.NewServer(swappable, defaultVolName,
+		nfsSrv = nfsserver.NewServer(swappable, defaultVolName, nil, // no registry in solo mode
 			vfs.WithStatCacheTTL(1*time.Second),
 			vfs.WithDirCacheTTL(1*time.Second),
 		)

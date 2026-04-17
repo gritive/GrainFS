@@ -17,7 +17,7 @@ func TestNFSServerStartsAndAcceptsConnections(t *testing.T) {
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 
-	srv := NewServer(backend, "nfs-test-vol")
+	srv := NewServer(backend, "nfs-test-vol", nil)
 
 	// Use ephemeral port
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -50,7 +50,7 @@ func TestAddrBeforeListen(t *testing.T) {
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 
-	srv := NewServer(backend, "test-vol")
+	srv := NewServer(backend, "test-vol", nil)
 
 	// Before listening, Addr should return nil
 	assert.Nil(t, srv.Addr())
@@ -61,7 +61,7 @@ func TestAddrAfterListen(t *testing.T) {
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 
-	srv := NewServer(backend, "test-vol")
+	srv := NewServer(backend, "test-vol", nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -94,7 +94,7 @@ func TestCloseBeforeListen(t *testing.T) {
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 
-	srv := NewServer(backend, "test-vol")
+	srv := NewServer(backend, "test-vol", nil)
 
 	// Close before listen should return nil (no listener to close)
 	err = srv.Close()
@@ -135,7 +135,7 @@ func (f *failBackend) AbortMultipartUpload(string, string, string) error {
 }
 
 func TestListenAndServeVFSError(t *testing.T) {
-	srv := NewServer(&failBackend{}, "fail-vol")
+	srv := NewServer(&failBackend{}, "fail-vol", nil)
 
 	err := srv.ListenAndServe("127.0.0.1:0")
 	assert.Error(t, err)
@@ -147,7 +147,7 @@ func TestListenAndServeInvalidAddr(t *testing.T) {
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 
-	srv := NewServer(backend, "test-vol")
+	srv := NewServer(backend, "test-vol", nil)
 
 	// Use an invalid address to trigger net.Listen error
 	err = srv.ListenAndServe("invalid-address-no-port")

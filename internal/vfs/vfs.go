@@ -580,3 +580,25 @@ func (fs *GrainVFS) invalidateParentDirCache(fp string) {
 	delete(fs.dirCache, parent)
 	fs.cacheMu.Unlock()
 }
+
+// Invalidate clears caches for the given S3 bucket and key.
+// This implements cluster.CacheInvalidator for cross-protocol cache coherency.
+//
+// Maps S3 bucket/key to VFS file path:
+// - S3 bucket="default", key="path/to/file.txt"
+// - VFS bucket="__grainfs_vfs_default"
+// - VFS file path="path/to/file.txt"
+//
+// Called by DistributedBackend.onApply after Raft commits mutations.
+func (fs *GrainVFS) Invalidate(bucket, key string) {
+	// Check if this VFS instance serves the specified bucket
+	if fs.bucket != vfsBucketPrefix+bucket {
+		return // Different bucket, not our concern
+	}
+
+	// Invalidate stat cache for the specific file
+	fs.invalidateStatCache(key)
+
+	// Invalidate parent directory cache (so ReadDir reflects changes)
+	fs.invalidateParentDirCache(key)
+}
