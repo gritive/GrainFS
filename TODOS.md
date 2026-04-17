@@ -2,7 +2,7 @@
 
 ## Known Issues (Non-blocking)
 
-- [ ] **ECBackend.PutObject: io.ReadAll OOM 위험** — `erasure/backend.go:260` 동일 패턴. 대용량 PUT 시 OOM. pullthrough fix 경험 재사용하여 streaming encode로 교체. (Phase 14 또는 pullthrough fix 직후)
+- [x] **ECBackend.PutObject: io.ReadAll OOM 위험** — `erasure/backend.go:260` 동일 패턴. 대용량 PUT 시 OOM. pullthrough fix 경험 재사용하여 streaming encode로 교체. (Phase 14 또는 pullthrough fix 직후)
 - [ ] **EC on/off toggle: plain↔EC migration path** — 클러스터 config 변경 시 plain 객체와 EC 객체가 혼재. 스크러버는 DataShards=0 필터링하지만 migration 경로 없음. 데이터 손실 위험은 없으나 EC 전환 후 plain 객체는 복구 불가.
 - [ ] **scrub interval hot config** — 현재 `--scrub-interval` CLI flag만. Dashboard에서 런타임 변경 가능하도록 Phase 14 dashboard와 통합.
 - [ ] **ScrubObjects cursor pagination** — 현재 ScanObjects가 BadgerDB 전체 순회. 10K objects+ 클러스터에서 Phase 14 cursor 기반 페이지네이션 필요.
@@ -15,7 +15,7 @@
 - [ ] dashboard: on-demand metric with sse
 - [ ] dashboard: snapshot, backup manage
 - [ ] dashboard: event logging
-- [ ] self healing: data scrubbing, lazy scrubbing, ec repair
+- [x] self healing: data scrubbing, lazy scrubbing, ec repair
 - [ ] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
 - [ ] IAM, Unified ACL: policy pre-compile
 - [ ] ACL embedding
