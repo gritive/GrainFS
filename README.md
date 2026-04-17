@@ -30,7 +30,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 | QUIC Transport     | quic-go 기반 멀티플렉싱, TLS 1.3 내장                         |
 | Custom Raft        | QUIC 위 합의, 리더 선출/로그 복제/스냅샷                      |
 | Solo → Cluster     | 무중단 클러스터 전환                                          |
-| Volume Device      | NBD (Linux) + NFS v3 (macOS/Linux)                            |
+| Volume Device      | NBD (Linux) + NFS v3/v4.0 (macOS/Linux)                       |
 | Object Browser     | 웹 UI에서 버킷/오브젝트/볼륨 관리                             |
 | At-rest Encryption | AES-256-GCM, 키 자동 생성                                     |
 | Monitoring         | Prometheus 메트릭 + 대시보드                                  |
@@ -43,7 +43,8 @@ grainfs serve [flags]
 Flags:
   -d, --data string              데이터 디렉토리 (default "./data")
   -p, --port int                 HTTP 포트 (default 9000)
-      --nfs-port int             NFS 포트 (default 9002, 0=비활성)
+      --nfs-port int             NFS v3 포트 (default 9002, 0=비활성)
+      --nfs4-port int            NFS v4.0 포트 (default 2049, 0=비활성)
       --nbd-port int             NBD 포트 (default 0=비활성, Linux only)
       --ec                       Erasure Coding 활성화 (default true)
       --ec-data int              데이터 샤드 수 (default 4)
