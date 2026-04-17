@@ -2,6 +2,9 @@
 
 ## [0.0.4] - 2026-04-18
 
+### Added
+- **CRC migration 구분 로깅** — 기존 CRC-없는 shard가 `scrub`에서 `Corrupt`가 아닌 `Migration` 슬라이스로 분류됨. `ErrCRCMissing`(레거시)과 `ErrCRCMismatch`(bit-rot) sentinel 구분. `grainfs_scrub_migration_rewrites_total` Prometheus 메트릭 추가.
+
 ### Fixed
 - **ECBackend.PutObject OOM 제거** — `io.ReadAll(r)` → 2-pass spool-to-disk 스트리밍. body → 단일 tempfile(ETag 동시 계산) → StreamEncoder.Split/Encode → 샤드 tempfile 직렬 처리. 비암호화 경로 peak ~32KB(`streamWriteShardCRC`), 암호화 경로 peak ~shardSize×2(AES-GCM 블록 연산 특성상 불가피).
 - **CompleteMultipartUpload OOM 제거** — part bytes.Buffer 조립 → io.MultiReader+동일 스풀 경로 통합.

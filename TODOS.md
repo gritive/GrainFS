@@ -6,7 +6,7 @@
 - [ ] **EC on/off toggle: plain↔EC migration path** — 클러스터 config 변경 시 plain 객체와 EC 객체가 혼재. 스크러버는 DataShards=0 필터링하지만 migration 경로 없음. 데이터 손실 위험은 없으나 EC 전환 후 plain 객체는 복구 불가.
 - [ ] **scrub interval hot config** — 현재 `--scrub-interval` CLI flag만. Dashboard에서 런타임 변경 가능하도록 Phase 14 dashboard와 통합.
 - [ ] **ScrubObjects cursor pagination** — 현재 ScanObjects가 BadgerDB 전체 순회. 10K objects+ 클러스터에서 Phase 14 cursor 기반 페이지네이션 필요.
-- [ ] **CRC shard migration** — CRC 없는 기존 shard는 첫 scrub cycle에 corrupt 감지 후 rewrite. 대규모 클러스터에서 첫 scrub 시 repair storm 가능성 (maxRepairsPerCycle=100 제한으로 완화됨).
+- [x] **CRC shard migration** — CRC 없는 기존 shard는 첫 scrub cycle에 corrupt 감지 후 rewrite. 대규모 클러스터에서 첫 scrub 시 repair storm 가능성 (maxRepairsPerCycle=100 제한으로 완화됨). ErrCRCMissing/ErrCRCMismatch sentinel 구분, Migration 슬라이스, grainfs_scrub_migration_rewrites_total 메트릭 추가.
 
 ## Phase 13: Operations
 
