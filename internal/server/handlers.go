@@ -860,7 +860,8 @@ func toHTTPRequest(c *app.RequestContext) *http.Request {
 
 func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 	status := map[string]any{
-		"mode": "solo",
+		"mode":                 "solo",
+		"split_brain_suspected": false,
 	}
 
 	if s.cluster != nil {

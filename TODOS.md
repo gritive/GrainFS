@@ -11,7 +11,7 @@
 1. [x] panic recovery (Hertz middleware + NBD goroutine)
 2. [x] http file serving — CDN origin용 (getObject 확장: Cache-Control, ETag, If-None-Match)
 3. [x] `grainfs cluster status` CLI 명령 (Raft leader/term/peer lag 출력)
-4. [ ] split brain monitoring
+4. [x] split brain monitoring
 5. [x] snapshot (user-facing) — snapshot_api.go 플레이스홀더 구현
 6. [x] WAL (data-plane, Raft WAL과 별개) + PITR
 7. [ ] automated snapshot and PITR
