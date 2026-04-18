@@ -15,6 +15,7 @@
 - **리뷰 발견 4종 수정** — `closer.Close()` 에러 로깅, `WalkDir` I/O 에러 로깅, `LocalObjectPicker` 테스트 커버리지 추가, `BalancerGracePeriodActiveTicks` 리네임.
 - **E2E 포트 충돌 수정** — `TestNetworkPartitionSuite`에서 toxiproxy 포트와 프록시 리스너 포트를 동적 할당으로 전환. 전체 suite 실행 시 포트 8474/9000 고정값과의 충돌 방지.
 - **E2E PITR stale blob 오탐 수정** — `TestPITR_WALReplayAddsObjects`의 stale blob 검증을 현재 테스트 버킷으로 한정. 선행 테스트들의 cleanup으로 발생하는 외부 stale blob을 오류로 인식하던 문제 수정.
+- **E2E NBD 테스트 안정화** — `docker/nbd-test.sh`에서 stale `/dev/nbd0` 연결 해제 추가 (이전 컨테이너 SIGKILL 잔류 문제). `mkfs.ext4` 제거 후 `dd` 패턴 검증으로 교체 (테스트 시간 330s → ~2s). `--nbd-volume-size` CLI 플래그 추가.
 
 ## [0.0.7] - 2026-04-18
 
