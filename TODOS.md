@@ -7,10 +7,6 @@
 - [ ] dashboard: snapshot, backup manage
 - [ ] dashboard: event logging
 - [ ] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
-- [x] IAM, Unified ACL: policy pre-compile
-- [x] ACL embedding
-- [x] LRU token validation
-- [x] zero copy permission check
 - [ ] life cycle management
 
 ## Phase 14: Scale
