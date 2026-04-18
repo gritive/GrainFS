@@ -326,3 +326,63 @@ func TestLeaderBalance_NoTransferWhenFollower(t *testing.T) {
 
 	assert.False(t, node.transferred, "follower: no transfer expected")
 }
+
+// --- Grace period tests ---
+
+func TestBalancerProposer_GracePeriod_RelaxesTrigger(t *testing.T) {
+	// node-b joined recently: its JoinedAt is within GracePeriod (10m default).
+	// Normal trigger=20%; with any node in grace period the effective trigger is
+	// ImbalanceTriggerPct * 1.5 = 30%.
+	// Imbalance is 25% (between 20% and 30%), so proposal should be skipped.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+		JoinedAt: time.Now().Add(-1 * time.Minute)}) // recently joined
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	cfg.GracePeriod = 10 * time.Minute // grace period active for 10 min after join
+
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+	p.tickOnce(context.Background())
+
+	assert.Empty(t, node.proposed, "25% imbalance below relaxed 30% trigger during grace period: no proposal expected")
+}
+
+func TestBalancerProposer_GracePeriod_FiresAboveRelaxedTrigger(t *testing.T) {
+	// node-b joined recently; imbalance is 40% which exceeds the relaxed 30% trigger.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 90.0, DiskAvailBytes: 5 << 30})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+		JoinedAt: time.Now().Add(-1 * time.Minute)})
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	cfg.GracePeriod = 10 * time.Minute
+
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+	p.tickOnce(context.Background())
+
+	assert.NotEmpty(t, node.proposed, "40% imbalance exceeds relaxed 30% trigger: proposal expected")
+}
+
+func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) {
+	// node-b joined 15 min ago — past the 10 min grace period.
+	// Imbalance is 25%, which is above the normal 20% trigger, so proposal expected.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+		JoinedAt: time.Now().Add(-15 * time.Minute)}) // past grace period
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	cfg.GracePeriod = 10 * time.Minute
+
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+	p.tickOnce(context.Background())
+
+	assert.NotEmpty(t, node.proposed, "grace period expired: normal 20% trigger applies, 25% should fire")
+}

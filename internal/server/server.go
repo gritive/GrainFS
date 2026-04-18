@@ -51,6 +51,7 @@ type Server struct {
 	userLimiter    *RateLimiter
 	cluster     ClusterInfo     // nil in solo mode
 	joinCluster JoinClusterFunc // nil if not in solo mode or already clustered
+	balancer    BalancerInfo    // nil if balancer not enabled
 }
 
 // Option configures the server.
@@ -67,6 +68,13 @@ func WithAuth(creds []s3auth.Credentials) Option {
 func WithClusterInfo(ci ClusterInfo) Option {
 	return func(s *Server) {
 		s.cluster = ci
+	}
+}
+
+// WithBalancerInfo sets the balancer status provider for the health endpoint.
+func WithBalancerInfo(bi BalancerInfo) Option {
+	return func(s *Server) {
+		s.balancer = bi
 	}
 }
 
@@ -298,6 +306,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	// Cluster API (available in both solo and cluster mode)
 	h.GET("/api/cluster/status", s.clusterStatus)
 	h.POST("/api/cluster/join", s.joinClusterHandler)
+
+	// Balancer health API
+	s.registerBalancerAPI(h)
 
 	// Volume management API
 	volumes := h.Group("/volumes")

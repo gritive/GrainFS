@@ -3,4 +3,5 @@ tmp/
 .worktrees/
 *.test
 server.test
-grainfs
+/grainfs
+bin/grainfs

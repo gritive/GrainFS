@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // ObjectPicker selects an object stored locally on the source node for migration.
@@ -74,6 +75,10 @@ type BalancerConfig struct {
 	MigrationRate       int     // max proposals per tick (reserved for rate limiting)
 	LeaderTenureMin     time.Duration
 	LeaderLoadThreshold float64 // leader's requestsPerSec / median before transfer
+	// GracePeriod is how long after a node joins before it's counted toward the normal
+	// imbalance trigger. During this window the trigger is relaxed by 1.5× to prevent
+	// migration storms caused by newly-added nodes.
+	GracePeriod time.Duration
 }
 
 // DefaultBalancerConfig returns production-safe defaults.
@@ -86,6 +91,7 @@ func DefaultBalancerConfig() BalancerConfig {
 		MigrationRate:       1,
 		LeaderTenureMin:     5 * time.Minute,
 		LeaderLoadThreshold: 1.3,
+		GracePeriod:         10 * time.Minute,
 	}
 }
 
@@ -162,16 +168,26 @@ func (p *BalancerProposer) tickOnce(ctx context.Context) {
 		if _, overloaded := selectPeerByLoad(p.store, p.nodeID, p.cfg.LeaderLoadThreshold); overloaded {
 			if err := p.node.TransferLeadership(); err != nil {
 				p.logger.Warn("balancer: TransferLeadership failed", "err", err)
+			} else {
+				metrics.BalancerLeaderTransfersTotal.Inc()
 			}
 			return
 		}
 	}
 
 	diff := imbalancePct(p.store)
+	metrics.BalancerImbalancePct.Set(diff)
+
+	// Effective trigger: relaxed by 1.5× if any node is still within its join grace period.
+	effectiveTrigger := p.cfg.ImbalanceTriggerPct
+	if p.cfg.GracePeriod > 0 && p.anyNodeInGracePeriod() {
+		effectiveTrigger *= 1.5
+		metrics.BalancerGracePeriodSkipsTotal.Inc()
+	}
 
 	// Hysteresis: activate above trigger, deactivate below stop.
 	if !p.active {
-		if diff < p.cfg.ImbalanceTriggerPct {
+		if diff < effectiveTrigger {
 			return
 		}
 		p.active = true
@@ -188,6 +204,33 @@ func (p *BalancerProposer) tickOnce(ctx context.Context) {
 	}
 
 	p.proposeMigration(ctx, p.nodeID, dst)
+}
+
+// BalancerStatus is a point-in-time snapshot of the balancer's state.
+type BalancerStatus struct {
+	Active       bool        // true when imbalance trigger has fired
+	ImbalancePct float64     // current max-min disk usage %
+	Nodes        []NodeStats // all non-expired node stats
+}
+
+// Status returns a snapshot of the balancer's current state.
+func (p *BalancerProposer) Status() BalancerStatus {
+	return BalancerStatus{
+		Active:       p.active,
+		ImbalancePct: imbalancePct(p.store),
+		Nodes:        p.store.GetAll(),
+	}
+}
+
+// anyNodeInGracePeriod returns true if any node in the store has a non-zero JoinedAt
+// within the configured GracePeriod window.
+func (p *BalancerProposer) anyNodeInGracePeriod() bool {
+	for _, ns := range p.store.GetAll() {
+		if !ns.JoinedAt.IsZero() && time.Since(ns.JoinedAt) < p.cfg.GracePeriod {
+			return true
+		}
+	}
+	return false
 }
 
 // warmupComplete returns true once all peers have gossiped or the warmup timeout has passed.
@@ -230,7 +273,9 @@ func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string
 	}
 	if err := p.node.Propose(outer); err != nil {
 		p.logger.Warn("balancer: propose failed", "src", src, "dst", dst, "err", err)
+		return
 	}
+	metrics.BalancerMigrationsProposedTotal.Inc()
 }
 
 // selectLightestPeer returns the nodeID with the lowest DiskUsedPct, excluding self.

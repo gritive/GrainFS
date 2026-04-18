@@ -11,6 +11,7 @@ type NodeStats struct {
 	DiskUsedPct    float64
 	DiskAvailBytes uint64
 	RequestsPerSec float64
+	JoinedAt       time.Time // when this node joined the cluster (zero = unknown)
 	UpdatedAt      time.Time
 }
 

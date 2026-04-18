@@ -40,14 +40,14 @@ FSM.applyMigrateShard → MigrationExecutor.Execute()
 
 ## 설정 플래그
 
-| 플래그 | 기본값 | 설명 |
-|--------|--------|------|
-| `--balancer-enabled` | `true` | balancer 활성화 여부 |
-| `--balancer-gossip-interval` | `30s` | gossip + 불균형 평가 주기 |
-| `--balancer-imbalance-trigger-pct` | `20.0` | 마이그레이션 시작 임계값 (max-min %) |
-| `--balancer-imbalance-stop-pct` | `5.0` | 마이그레이션 중단 임계값 (hysteresis) |
-| `--balancer-migration-rate` | `1` | tick당 최대 제안 수 (미래 rate limiting 용) |
-| `--balancer-leader-tenure-min` | `5m` | 리더 최소 보유 시간 (과부하 전 leader transfer 방지) |
+| 플래그                             | 기본값 | 설명                                                 |
+| ---------------------------------- | ------ | ---------------------------------------------------- |
+| `--balancer-enabled`               | `true` | balancer 활성화 여부                                 |
+| `--balancer-gossip-interval`       | `30s`  | gossip + 불균형 평가 주기                            |
+| `--balancer-imbalance-trigger-pct` | `20.0` | 마이그레이션 시작 임계값 (max-min %)                 |
+| `--balancer-imbalance-stop-pct`    | `5.0`  | 마이그레이션 중단 임계값 (hysteresis)                |
+| `--balancer-migration-rate`        | `1`    | tick당 최대 제안 수 (미래 rate limiting 용)          |
+| `--balancer-leader-tenure-min`     | `5m`   | 리더 최소 보유 시간 (과부하 전 leader transfer 방지) |
 
 예시 (프로덕션 보수적 설정):
 
@@ -95,15 +95,15 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
 
 (metrics.go에 추가 예정: Phase 13 DX 후속)
 
-| 메트릭 | 설명 | 알람 기준 |
-|--------|------|-----------|
-| `grainfs_balancer_gossip_total` | gossip 브로드캐스트 횟수 | gossip_errors > 0 지속 |
-| `grainfs_balancer_migrations_proposed_total` | CmdMigrateShard 제안 횟수 | — |
-| `grainfs_balancer_migrations_done_total` | 완료된 마이그레이션 수 | — |
-| `grainfs_balancer_migrations_failed_total` | 실패한 마이그레이션 수 | > 0 지속 시 조사 |
-| `grainfs_balancer_imbalance_pct` | 현재 max-min 불균형 % | > trigger_pct 지속 |
-| `grainfs_balancer_pending_tasks` | pending-migration DB 키 수 | > 10 지속 시 조사 |
-| `grainfs_balancer_leader_transfers_total` | 부하 기반 leader transfer 횟수 | 빈번하면 클러스터 불안정 |
+| 메트릭                                       | 설명                           | 알람 기준                |
+| -------------------------------------------- | ------------------------------ | ------------------------ |
+| `grainfs_balancer_gossip_total`              | gossip 브로드캐스트 횟수       | gossip_errors > 0 지속   |
+| `grainfs_balancer_migrations_proposed_total` | CmdMigrateShard 제안 횟수      | —                        |
+| `grainfs_balancer_migrations_done_total`     | 완료된 마이그레이션 수         | —                        |
+| `grainfs_balancer_migrations_failed_total`   | 실패한 마이그레이션 수         | > 0 지속 시 조사         |
+| `grainfs_balancer_imbalance_pct`             | 현재 max-min 불균형 %          | > trigger_pct 지속       |
+| `grainfs_balancer_pending_tasks`             | pending-migration DB 키 수     | > 10 지속 시 조사        |
+| `grainfs_balancer_leader_transfers_total`    | 부하 기반 leader transfer 횟수 | 빈번하면 클러스터 불안정 |
 
 ---
 

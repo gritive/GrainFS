@@ -439,11 +439,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	go distBackend.RunApplyLoop(stopApply)
 
 	// Start balancer if enabled (cluster mode only).
+	var balancerProposer *cluster.BalancerProposer
 	balancerEnabled, _ := cmd.Flags().GetBool("balancer-enabled")
 	if balancerEnabled {
 		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
 		statsStore := cluster.NewNodeStatsStore(3 * bGossipInterval)
-		if err := startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc); err != nil {
+		var err error
+		balancerProposer, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc)
+		if err != nil {
 			slog.Warn("balancer start failed", "err", err)
 		}
 	}
@@ -460,7 +463,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
-	srv := server.New(addr, backend, server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}))
+	srvOpts := []server.Option{server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers})}
+	if balancerProposer != nil {
+		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
+	}
+	srv := server.New(addr, backend, srvOpts...)
 	go func() {
 		if err := srv.Run(); err != nil {
 			slog.Error("http server error", "error", err)
@@ -571,21 +578,23 @@ func startBalancer(
 	fsm *cluster.FSM,
 	quicTransport transport.Transport,
 	shardSvc *cluster.ShardService,
-) error {
+) (*cluster.BalancerProposer, error) {
 	gossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
 	triggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
 	stopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
 	migrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
 	tenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
 
+	def := cluster.DefaultBalancerConfig()
 	cfg := cluster.BalancerConfig{
 		GossipInterval:      gossipInterval,
-		WarmupTimeout:       cluster.DefaultBalancerConfig().WarmupTimeout,
+		WarmupTimeout:       def.WarmupTimeout,
 		ImbalanceTriggerPct: triggerPct,
 		ImbalanceStopPct:    stopPct,
 		MigrationRate:       migrationRate,
 		LeaderTenureMin:     tenureMin,
-		LeaderLoadThreshold: cluster.DefaultBalancerConfig().LeaderLoadThreshold,
+		LeaderLoadThreshold: def.LeaderLoadThreshold,
+		GracePeriod:         def.GracePeriod,
 	}
 
 	adapter := &raftBalancerAdapter{node: node, peers: peers}
@@ -606,6 +615,13 @@ func startBalancer(
 		slog.Warn("balancer: recover pending failed", "err", err)
 	}
 
+	// Seed local node stats so GossipSender can broadcast immediately.
+	// DiskUsedPct/DiskAvailBytes will be updated by a background metrics collector.
+	statsStore.Set(cluster.NodeStats{
+		NodeID:   nodeID,
+		JoinedAt: time.Now(),
+	})
+
 	// Gossip: broadcast local stats + receive from peers.
 	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval)
 	receiver := cluster.NewGossipReceiver(quicTransport, statsStore)
@@ -617,7 +633,32 @@ func startBalancer(
 
 	slog.Info("balancer started", "component", "balancer",
 		"gossip_interval", gossipInterval, "trigger_pct", triggerPct, "stop_pct", stopPct)
-	return nil
+	return balancer, nil
+}
+
+// balancerInfoAdapter adapts *cluster.BalancerProposer to server.BalancerInfo.
+type balancerInfoAdapter struct {
+	p *cluster.BalancerProposer
+}
+
+func (a *balancerInfoAdapter) Status() server.BalancerStatusResult {
+	st := a.p.Status()
+	nodes := make([]server.BalancerNodeInfo, len(st.Nodes))
+	for i, n := range st.Nodes {
+		nodes[i] = server.BalancerNodeInfo{
+			NodeID:         n.NodeID,
+			DiskUsedPct:    n.DiskUsedPct,
+			DiskAvailBytes: n.DiskAvailBytes,
+			RequestsPerSec: n.RequestsPerSec,
+			JoinedAt:       n.JoinedAt,
+			UpdatedAt:      n.UpdatedAt,
+		}
+	}
+	return server.BalancerStatusResult{
+		Active:       st.Active,
+		ImbalancePct: st.ImbalancePct,
+		Nodes:        nodes,
+	}
 }
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.

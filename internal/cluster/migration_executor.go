@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // MigrationTask describes a single shard migration request from Raft.
@@ -104,6 +106,7 @@ func (e *MigrationExecutor) Run(ctx context.Context, tasks <-chan MigrationTask)
 			go func(t MigrationTask) {
 				if err := e.Execute(ctx, t); err != nil {
 					e.logger.Warn("migration execute failed", "task", t.id(), "err", err)
+					metrics.BalancerMigrationsFailedTotal.Inc()
 				}
 			}(task)
 		}
@@ -149,6 +152,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 
 	if !earlyCommit {
 		// Phase 1: copy all shards src → dst
+		copyStart := time.Now()
 		for i := range e.numShards {
 			data, err := e.mover.ReadShard(ctx, task.SrcNode, task.Bucket, task.Key, i)
 			if err != nil {
@@ -156,10 +160,12 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 				return fmt.Errorf("migration read shard %d: %w", i, err)
 			}
 			if err := e.mover.WriteShard(ctx, task.DstNode, task.Bucket, task.Key, i, data); err != nil {
+				metrics.BalancerShardWriteErrorsTotal.Inc()
 				e.cleanupPending(id)
 				return fmt.Errorf("migration write shard %d: %w", i, err)
 			}
 		}
+		metrics.BalancerShardCopyDuration.Observe(time.Since(copyStart).Seconds())
 
 		// Phase 2: propose CmdMigrationDone to Raft
 		if err := e.proposeDone(task); err != nil {
@@ -176,16 +182,20 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		}
 	}
 
+	// Mark done before Phase 4: concurrent callers waiting on the commit channel
+	// would otherwise race to re-enter Execute() and start Phase 1 again before
+	// DeleteShards completes (Phase 4 is best-effort and logged on failure).
+	e.mu.Lock()
+	e.markDone(id)
+	e.mu.Unlock()
+
 	// Phase 4: delete from src — runs whether earlyCommit or normal path.
 	if err := e.mover.DeleteShards(ctx, task.SrcNode, task.Bucket, task.Key); err != nil {
 		e.logger.Warn("migration: delete src failed",
 			"src", task.SrcNode, "bucket", task.Bucket, "key", task.Key, "err", err)
 	}
 
-	e.mu.Lock()
-	e.markDone(id)
-	e.mu.Unlock()
-
+	metrics.BalancerMigrationsDoneTotal.Inc()
 	return nil
 }
 
