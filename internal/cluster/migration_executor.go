@@ -200,13 +200,15 @@ func (e *MigrationExecutor) hasPending(id string) bool {
 // It unblocks any Execute() waiting for that task's commit.
 // If Execute() has not yet registered its pending channel (early arrival), the task is
 // recorded in committed so Execute() skips Phases 1–3 but still runs Phase 4 (delete src).
+//
+// The pending channel is intentionally NOT removed here. It is removed by Execute() after
+// markDone, so that concurrent Execute calls arriving between NotifyCommit and markDone
+// see an inFlight entry and wait on the (now closed) channel rather than re-copying shards.
 func (e *MigrationExecutor) NotifyCommit(bucket, key, versionID string) {
 	id := bucket + "/" + key + "/" + versionID
 	e.mu.Lock()
 	ch, ok := e.pending[id]
-	if ok {
-		delete(e.pending, id)
-	} else {
+	if !ok {
 		// FSM applied CmdMigrationDone before Execute registered.
 		// Mark committed so Execute() still runs Phase 4 (DeleteShards).
 		e.markCommitted(id)
@@ -311,15 +313,13 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		}
 	}
 
-	// Mark done before Phase 4. For the earlyCommit path, also remove the sentinel
-	// pending channel we registered and close it to unblock any concurrent Execute
-	// that arrived after we released mu but before markDone.
-	// For the normal path, NotifyCommit already removed the channel from pending.
+	// Mark done and remove the pending channel before Phase 4.
+	// Both paths (normal and earlyCommit) delete pending[id] here, so concurrent
+	// Execute calls that arrive between NotifyCommit and markDone see an inFlight
+	// entry (a closed channel) and return nil rather than re-copying shards.
 	e.mu.Lock()
 	e.markDone(id)
-	if earlyCommit {
-		delete(e.pending, id)
-	}
+	delete(e.pending, id)
 	e.mu.Unlock()
 	if earlyCommit {
 		close(commitCh)
