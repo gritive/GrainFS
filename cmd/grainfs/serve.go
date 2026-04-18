@@ -54,6 +54,7 @@ func init() {
 	serveCmd.Flags().Int("nfs-port", 9002, "NFS server port (0 = disabled, volumes managed via REST API)")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled)")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled, Linux only)")
+	serveCmd.Flags().Int64("nbd-volume-size", 1024*1024*1024, "default NBD volume size in bytes")
 	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")
 	serveCmd.Flags().Duration("snapshot-interval", 1*time.Hour, "auto-snapshot interval (0 to disable)")
 	serveCmd.Flags().Int("snapshot-retain", 24, "number of auto-snapshots to retain")
@@ -114,6 +115,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
 	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
+	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
 	packThreshold, _ := cmd.Flags().GetInt("pack-threshold")
 
 	if peersStr == "" {
@@ -186,7 +188,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition
 		swappable := storage.NewSwappableBackend(backend)
-		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort)
+		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -195,7 +197,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
-func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int) error {
+func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
 	// Auto-create "default" bucket on startup
@@ -289,11 +291,10 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	// Start NBD server if requested (Linux only)
 	if nbdPort > 0 {
 		const defaultVolName2 = "default"
-		const defaultVolSize2 = 1024 * 1024 * 1024
 
 		mgr2 := volume.NewManager(swappable)
 		if _, err := mgr2.Get(defaultVolName2); err != nil {
-			if _, err := mgr2.Create(defaultVolName2, defaultVolSize2); err != nil {
+			if _, err := mgr2.Create(defaultVolName2, nbdVolumeSize); err != nil {
 				slog.Warn("default nbd volume create failed", "error", err)
 			}
 		}

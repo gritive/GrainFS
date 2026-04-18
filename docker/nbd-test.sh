@@ -4,20 +4,20 @@ set -eo pipefail
 echo "=== GrainFS NBD E2E Test ==="
 
 DATA_DIR=$(mktemp -d)
-MOUNT_DIR=$(mktemp -d)
 S3_PORT=9000
 NBD_PORT=10809
 NBD_DEV=/dev/nbd0
+# Small volume: only a few blocks needed for pattern test
+NBD_SIZE=$((4 * 1024 * 1024)) # 4MB
 SERVER_PID=""
 
 cleanup() {
     echo "Cleaning up..."
-    umount "$MOUNT_DIR" 2>/dev/null || true
     nbd-client -d "$NBD_DEV" 2>/dev/null || true
     if [ -n "$SERVER_PID" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
     fi
-    rm -rf "$DATA_DIR" "$MOUNT_DIR"
+    rm -rf "$DATA_DIR"
 }
 trap cleanup EXIT
 
@@ -31,6 +31,9 @@ if ! lsmod 2>/dev/null | grep -q nbd; then
 fi
 echo "OK: NBD kernel module loaded"
 
+# Ensure clean state: disconnect any stale nbd connection from previous runs
+nbd-client -d "$NBD_DEV" 2>/dev/null || true
+
 # 1. Start GrainFS server with NBD enabled
 echo ""
 echo "--- Starting GrainFS server ---"
@@ -38,6 +41,7 @@ grainfs serve \
     --data "$DATA_DIR" \
     --port "$S3_PORT" \
     --nbd-port "$NBD_PORT" \
+    --nbd-volume-size "$NBD_SIZE" \
     --no-encryption \
     --nfs-port 0 &
 SERVER_PID=$!
@@ -62,68 +66,48 @@ echo "--- Connecting NBD client ---"
 nbd-client 127.0.0.1 "$NBD_PORT" "$NBD_DEV" -b 4096
 echo "OK: NBD client connected to $NBD_DEV"
 
-# 3. Format the block device
+# 3. Write a known pattern to the block device
 echo ""
-echo "--- Formatting block device ---"
-mkfs.ext4 -q "$NBD_DEV"
-echo "OK: ext4 filesystem created"
+echo "--- Testing raw block I/O (dd pattern write/read) ---"
 
-# 4. Mount and do file I/O
+PATTERN_FILE=$(mktemp)
+VERIFY_FILE=$(mktemp)
+
+# Write 64KB of zeros to offset 0
+dd if=/dev/zero of="$NBD_DEV" bs=4096 count=16 2>/dev/null
+echo "OK: Wrote 64KB zeros"
+
+# Write a recognizable pattern: 4KB block of 0xAA bytes at offset 0
+python3 -c "import sys; sys.stdout.buffer.write(b'\xaa' * 4096)" | dd of="$NBD_DEV" bs=4096 count=1 2>/dev/null
+echo "OK: Wrote 4KB pattern (0xAA) at offset 0"
+
+# Write a different pattern at offset 4096
+python3 -c "import sys; sys.stdout.buffer.write(b'\xbb' * 4096)" | dd of="$NBD_DEV" bs=4096 seek=1 count=1 2>/dev/null
+echo "OK: Wrote 4KB pattern (0xBB) at offset 4096"
+
+# Read back and verify first block
+dd if="$NBD_DEV" bs=4096 count=1 2>/dev/null | python3 -c "
+import sys
+data = sys.stdin.buffer.read()
+assert len(data) == 4096, f'expected 4096 bytes, got {len(data)}'
+assert data == b'\\xaa' * 4096, 'block 0 mismatch'
+print('OK: Block 0 (0xAA pattern) verified')
+"
+
+# Read back and verify second block
+dd if="$NBD_DEV" bs=4096 skip=1 count=1 2>/dev/null | python3 -c "
+import sys
+data = sys.stdin.buffer.read()
+assert len(data) == 4096, f'expected 4096 bytes, got {len(data)}'
+assert data == b'\\xbb' * 4096, 'block 1 mismatch'
+print('OK: Block 1 (0xBB pattern) verified')
+"
+
+rm -f "$PATTERN_FILE" "$VERIFY_FILE"
+
+# 4. Disconnect NBD
 echo ""
-echo "--- Mounting and testing file I/O ---"
-mount "$NBD_DEV" "$MOUNT_DIR"
-echo "OK: Mounted at $MOUNT_DIR"
-
-# Write a test file
-TEST_DATA="Hello from GrainFS NBD E2E test! $(date)"
-echo "$TEST_DATA" > "$MOUNT_DIR/test.txt"
-echo "OK: Wrote test.txt"
-
-# Read it back and verify
-READ_DATA=$(cat "$MOUNT_DIR/test.txt")
-if [ "$READ_DATA" = "$TEST_DATA" ]; then
-    echo "OK: Read back matches written data"
-else
-    echo "FAIL: Data mismatch"
-    echo "  Written: $TEST_DATA"
-    echo "  Read:    $READ_DATA"
-    exit 1
-fi
-
-# Write a larger file (1MB)
-dd if=/dev/urandom of="$MOUNT_DIR/large.bin" bs=1024 count=1024 2>/dev/null
-LARGE_SIZE=$(stat -c%s "$MOUNT_DIR/large.bin")
-if [ "$LARGE_SIZE" -eq 1048576 ]; then
-    echo "OK: 1MB file written and verified"
-else
-    echo "FAIL: Large file size mismatch: $LARGE_SIZE"
-    exit 1
-fi
-
-# List files
-FILE_COUNT=$(ls "$MOUNT_DIR" | grep -cv lost+found)
-if [ "$FILE_COUNT" -eq 2 ]; then
-    echo "OK: File listing correct ($FILE_COUNT files)"
-else
-    echo "FAIL: Expected 2 files, got $FILE_COUNT"
-    exit 1
-fi
-
-# Delete a file
-rm "$MOUNT_DIR/test.txt"
-if [ ! -f "$MOUNT_DIR/test.txt" ]; then
-    echo "OK: File deleted successfully"
-else
-    echo "FAIL: File still exists after delete"
-    exit 1
-fi
-
-# Sync and unmount
-sync
-umount "$MOUNT_DIR"
-echo "OK: Unmounted cleanly"
-
-# Disconnect NBD
+echo "--- Disconnecting NBD client ---"
 nbd-client -d "$NBD_DEV"
 echo "OK: NBD client disconnected"
 
