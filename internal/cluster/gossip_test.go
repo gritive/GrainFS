@@ -236,6 +236,29 @@ func TestGossipReceiver_AcceptsMatchingNodeId(t *testing.T) {
 	}, 500*time.Millisecond, 10*time.Millisecond)
 }
 
+func TestNodeIDMatchesFrom(t *testing.T) {
+	tests := []struct {
+		nodeID string
+		from   string
+		want   bool
+	}{
+		// IP nodeID — strict validation
+		{"192.168.1.1", "192.168.1.1:9000", true},
+		{"192.168.1.1", "192.168.1.2:9000", false},
+		// Hostname nodeID + hostname from — validated by host comparison
+		{"node-b", "node-b:9000", true},
+		{"node-a", "node-b:9000", false},
+		// Hostname nodeID + IP from — can't validate, accept (QUIC handles auth)
+		{"node-a", "192.168.1.1:9000", true},
+		// Full match (nodeID includes port)
+		{"node-b:9000", "node-b:9000", true},
+	}
+	for _, tc := range tests {
+		got := nodeIDMatchesFrom(tc.nodeID, tc.from)
+		assert.Equalf(t, tc.want, got, "nodeIDMatchesFrom(%q, %q)", tc.nodeID, tc.from)
+	}
+}
+
 func TestGossipReceiver_StopsOnContextCancel(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)

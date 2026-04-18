@@ -227,6 +227,19 @@ func TestMigrationExecutor_DeleteFailureMarksTaskDone(t *testing.T) {
 	assert.True(t, isDone, "task should be marked done even if delete fails")
 }
 
+func TestMigrationExecutor_DoneMapBounded(t *testing.T) {
+	// Fill done map beyond maxDoneHistory to verify it is reset (no OOM).
+	exec := NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1)
+	exec.mu.Lock()
+	for i := range maxDoneHistory + 10 {
+		exec.markDone(fmt.Sprintf("b/k/v%d", i))
+	}
+	size := len(exec.done)
+	exec.mu.Unlock()
+	// After reset + the 10 entries added post-reset, map must be ≤ maxDoneHistory.
+	assert.LessOrEqual(t, size, maxDoneHistory, "done map must not exceed maxDoneHistory")
+}
+
 func TestMigrationExecutor_CtxCancelCleansUpPending(t *testing.T) {
 	mover := &mockShardMover{}
 	// node that never calls NotifyCommit

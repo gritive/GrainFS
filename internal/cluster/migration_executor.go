@@ -37,6 +37,10 @@ type MigrationRaft interface {
 	NodeID() string
 }
 
+// maxDoneHistory caps the idempotency set. When exceeded, the set is reset.
+// Worst case: an already-done migration is re-executed, which is idempotent.
+const maxDoneHistory = 10_000
+
 // MigrationExecutor copies all shards from src→dst, proposes CmdMigrationDone,
 // waits for FSM to confirm commit, then deletes from src.
 type MigrationExecutor struct {
@@ -45,7 +49,7 @@ type MigrationExecutor struct {
 	numShards int
 
 	mu      sync.Mutex
-	done    map[string]struct{}    // idempotency: taskID → done
+	done    map[string]struct{}     // idempotency: taskID → done
 	pending map[string]chan struct{} // commit channels: taskID → chan
 
 	logger *slog.Logger
@@ -75,7 +79,7 @@ func (e *MigrationExecutor) NotifyCommit(bucket, key, versionID string) {
 		delete(e.pending, id)
 	} else {
 		// FSM applied CmdMigrationDone before Execute registered — pre-mark done.
-		e.done[id] = struct{}{}
+		e.markDone(id)
 	}
 	e.mu.Unlock()
 	if ok {
@@ -162,7 +166,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	}
 
 	e.mu.Lock()
-	e.done[id] = struct{}{}
+	e.markDone(id)
 	e.mu.Unlock()
 
 	return nil
@@ -173,6 +177,15 @@ func (e *MigrationExecutor) cleanupPending(id string) {
 	e.mu.Lock()
 	delete(e.pending, id)
 	e.mu.Unlock()
+}
+
+// markDone records id as completed. Must be called with mu held.
+// Resets the map when it exceeds maxDoneHistory to bound memory use.
+func (e *MigrationExecutor) markDone(id string) {
+	if len(e.done) >= maxDoneHistory {
+		e.done = make(map[string]struct{}, maxDoneHistory)
+	}
+	e.done[id] = struct{}{}
 }
 
 func (e *MigrationExecutor) proposeDone(task MigrationTask) error {

@@ -160,6 +160,22 @@ func TestNodeStatsStore_PurgesExpiredOnSet(t *testing.T) {
 	assert.False(t, stillInMap, "expired entry should be purged from map on Set()")
 }
 
+func TestNodeStatsStore_ClampsInvalidValues(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+
+	store.Set(NodeStats{NodeID: "bad", DiskUsedPct: -5.0, RequestsPerSec: -100.0})
+	s, ok := store.Get("bad")
+	require.True(t, ok)
+	assert.Equal(t, 0.0, s.DiskUsedPct, "negative DiskUsedPct should be clamped to 0")
+	assert.Equal(t, 0.0, s.RequestsPerSec, "negative RequestsPerSec should be clamped to 0")
+
+	store.Set(NodeStats{NodeID: "over", DiskUsedPct: 150.0, RequestsPerSec: 999.0})
+	s, ok = store.Get("over")
+	require.True(t, ok)
+	assert.Equal(t, 100.0, s.DiskUsedPct, "DiskUsedPct > 100 should be clamped to 100")
+	assert.Equal(t, 999.0, s.RequestsPerSec, "valid RequestsPerSec should pass through unchanged")
+}
+
 func TestNodeStatsStore_TTL_PartialExpiry(t *testing.T) {
 	store := NewNodeStatsStore(50 * time.Millisecond)
 

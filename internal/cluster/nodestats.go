@@ -32,7 +32,16 @@ func NewNodeStatsStore(ttl time.Duration) *NodeStatsStore {
 
 // Set stores stats for a node, stamping UpdatedAt with now.
 // Expired entries are purged on every Set to prevent unbounded map growth.
+// Invalid ranges are clamped: DiskUsedPct→[0,100], RequestsPerSec→[0,∞).
 func (s *NodeStatsStore) Set(ns NodeStats) {
+	if ns.DiskUsedPct < 0 {
+		ns.DiskUsedPct = 0
+	} else if ns.DiskUsedPct > 100 {
+		ns.DiskUsedPct = 100
+	}
+	if ns.RequestsPerSec < 0 {
+		ns.RequestsPerSec = 0
+	}
 	now := time.Now()
 	ns.UpdatedAt = now
 	s.mu.Lock()

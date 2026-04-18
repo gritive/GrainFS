@@ -127,14 +127,26 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 }
 
 // nodeIDMatchesFrom returns true if nodeID corresponds to the connection address from.
-// Handles both "host:port" and bare "host" node ID formats.
+// Handles both "host:port" and bare "host" node ID formats for nodeID and from.
+// When from is a numeric IP but nodeID is a hostname, the comparison cannot be
+// done without DNS — the message is accepted and transport-layer auth (QUIC) is
+// the trust boundary in that deployment.
 func nodeIDMatchesFrom(nodeID, from string) bool {
 	if nodeID == from {
 		return true
 	}
-	host, _, err := net.SplitHostPort(from)
+	fromHost, _, err := net.SplitHostPort(from)
 	if err != nil {
-		return false
+		fromHost = from
 	}
-	return nodeID == host
+	nodeHost := nodeID
+	if h, _, e := net.SplitHostPort(nodeID); e == nil {
+		nodeHost = h
+	}
+	if nodeHost == fromHost {
+		return true
+	}
+	// If from is a numeric IP but nodeID is a hostname, DNS resolution is needed
+	// for strict validation. Accept the message; QUIC transport auth handles identity.
+	return net.ParseIP(fromHost) != nil && net.ParseIP(nodeHost) == nil
 }
