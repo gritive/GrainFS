@@ -536,6 +536,10 @@ func (b *ECBackend) GetObjectVersion(bucket, key, versionId string) (io.ReadClos
 		return nil, nil, err
 	}
 
+	if meta.IsDeleteMarker {
+		return nil, nil, storage.ErrMethodNotAllowed
+	}
+
 	var data []byte
 	if meta.DataShards == 0 {
 		data, err = b.readPlain(bucket, key, versionId)
@@ -555,6 +559,44 @@ func (b *ECBackend) GetObjectVersion(bucket, key, versionId string) (io.ReadClos
 		VersionID:    versionId,
 	}
 	return io.NopCloser(bytes.NewReader(data)), obj, nil
+}
+
+// HeadObjectVersion returns metadata for a specific version.
+// Returns ErrMethodNotAllowed if the version is a delete marker.
+func (b *ECBackend) HeadObjectVersion(bucket, key, versionId string) (*storage.Object, error) {
+	if err := b.HeadBucket(bucket); err != nil {
+		return nil, err
+	}
+
+	var meta *ecObjectMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKeyV(bucket, key, versionId))
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			var unmarshalErr error
+			meta, unmarshalErr = unmarshalECObjectMeta(val)
+			return unmarshalErr
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if meta.IsDeleteMarker {
+		return nil, storage.ErrMethodNotAllowed
+	}
+	return &storage.Object{
+		Key:          meta.Key,
+		Size:         meta.Size,
+		ContentType:  meta.ContentType,
+		ETag:         meta.ETag,
+		LastModified: meta.LastModified,
+		VersionID:    versionId,
+	}, nil
 }
 
 func (b *ECBackend) readPlain(bucket, key, versionId string) ([]byte, error) {

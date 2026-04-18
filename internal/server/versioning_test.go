@@ -332,3 +332,99 @@ func TestDeleteObjectVersion_EC(t *testing.T) {
 	assert.Empty(t, result.Versions)
 	assert.Empty(t, result.DeleteMarkers)
 }
+
+// TestGetObjectVersion_DeleteMarker_EC verifies GET ?versionId=<deleteMarkerID>
+// returns 405 MethodNotAllowed with x-amz-delete-marker: true (S3 spec).
+func TestGetObjectVersion_DeleteMarker_EC(t *testing.T) {
+	base := setupECTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	putVC := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// DELETE creates a delete marker
+	req, _ = http.NewRequest(http.MethodDelete, base+"/ver-bucket/obj.txt", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	markerID := resp.Header.Get("x-amz-version-id")
+	resp.Body.Close()
+	require.NotEmpty(t, markerID)
+
+	// GET ?versionId=<deleteMarkerID> → 405 + x-amz-delete-marker: true
+	resp, err = http.Get(base + "/ver-bucket/obj.txt?versionId=" + markerID)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Equal(t, "true", resp.Header.Get("x-amz-delete-marker"))
+	assert.Equal(t, markerID, resp.Header.Get("x-amz-version-id"))
+}
+
+// TestHeadObjectVersion_EC verifies HEAD /<bucket>/<key>?versionId=<id> routes
+// through HeadObjectVersion and returns 405 for delete markers.
+func TestHeadObjectVersion_EC(t *testing.T) {
+	base := setupECTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	putVC := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	versionID := resp.Header.Get("X-Amz-Version-Id")
+	resp.Body.Close()
+	require.NotEmpty(t, versionID)
+
+	// HEAD ?versionId=<id> of regular version → 200 + version header
+	req, _ = http.NewRequest(http.MethodHead, base+"/ver-bucket/obj.txt?versionId="+versionID, nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, versionID, resp.Header.Get("x-amz-version-id"))
+
+	// Create delete marker; HEAD ?versionId=<markerID> → 405
+	req, _ = http.NewRequest(http.MethodDelete, base+"/ver-bucket/obj.txt", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	markerID := resp.Header.Get("x-amz-version-id")
+	resp.Body.Close()
+	require.NotEmpty(t, markerID)
+
+	req, _ = http.NewRequest(http.MethodHead, base+"/ver-bucket/obj.txt?versionId="+markerID, nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Equal(t, "true", resp.Header.Get("x-amz-delete-marker"))
+}
+
+// TestPutBucketVersioning_RejectsUnversioned verifies that "Unversioned" is
+// rejected as a PUT status value (S3 spec allows only Enabled|Suspended).
+func TestPutBucketVersioning_RejectsUnversioned(t *testing.T) {
+	base := setupECTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req) //nolint:errcheck
+
+	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Unversioned</Status></VersioningConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}

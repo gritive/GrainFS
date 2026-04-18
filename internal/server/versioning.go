@@ -52,7 +52,7 @@ func (s *Server) putBucketVersioning(c *app.RequestContext, bucket string) {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedXML", "invalid versioning configuration XML")
 		return
 	}
-	if vc.Status != "Enabled" && vc.Status != "Suspended" && vc.Status != "Unversioned" {
+	if vc.Status != "Enabled" && vc.Status != "Suspended" {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "versioning status must be Enabled or Suspended")
 		return
 	}
@@ -194,8 +194,11 @@ func (s *Server) listObjectVersions(_ context.Context, c *app.RequestContext, bu
 		}
 	}
 
+	// TODO: S3 spec requires Owner and StorageClass in Versions/DeleteMarkers entries.
+	// Populating Owner needs proper IAM/ACL integration; StorageClass is not yet modeled.
 	data, _ := xml.Marshal(result)
-	c.Data(consts.StatusOK, "application/xml", data)
+	out := append([]byte(xml.Header), data...)
+	c.Data(consts.StatusOK, "application/xml", out)
 }
 
 // getBucketVersioning handles GET /<bucket>?versioning.

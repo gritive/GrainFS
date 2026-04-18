@@ -391,6 +391,14 @@ func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
 		rc, obj, err = s.backend.GetObject(bucket, key)
 	}
 	if err != nil {
+		if errors.Is(err, storage.ErrMethodNotAllowed) {
+			c.Header("x-amz-delete-marker", "true")
+			if versionID != "" {
+				c.Header("x-amz-version-id", versionID)
+			}
+			writeXMLError(c, consts.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource.")
+			return
+		}
 		mapError(c, err)
 		return
 	}
@@ -525,14 +533,56 @@ func parseByteRange(rangeHeader string, size int64) (int64, int64, bool) {
 	return start, end, true
 }
 
+// VersionedHeader is an optional interface for backends supporting HEAD by versionId.
+type VersionedHeader interface {
+	HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error)
+}
+
+func findVersionedHeader(b storage.Backend) (VersionedHeader, bool) {
+	for b != nil {
+		if v, ok := b.(VersionedHeader); ok {
+			return v, true
+		}
+		u, ok := b.(unwrapper)
+		if !ok {
+			break
+		}
+		b = u.Unwrap()
+	}
+	return nil, false
+}
+
 func (s *Server) headObject(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
-	obj, err := s.backend.HeadObject(bucket, key)
+	versionID := string(c.QueryArgs().Peek("versionId"))
+	var obj *storage.Object
+	var err error
+	if versionID != "" {
+		vh, ok := findVersionedHeader(s.backend)
+		if !ok {
+			writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versionId not supported by this backend")
+			return
+		}
+		obj, err = vh.HeadObjectVersion(bucket, key, versionID)
+	} else {
+		obj, err = s.backend.HeadObject(bucket, key)
+	}
 	if err != nil {
+		if errors.Is(err, storage.ErrMethodNotAllowed) {
+			c.Header("x-amz-delete-marker", "true")
+			if versionID != "" {
+				c.Header("x-amz-version-id", versionID)
+			}
+			writeXMLError(c, consts.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource.")
+			return
+		}
 		mapError(c, err)
 		return
+	}
+	if obj.VersionID != "" {
+		c.Header("x-amz-version-id", obj.VersionID)
 	}
 
 	etag := fmt.Sprintf("\"%s\"", obj.ETag)

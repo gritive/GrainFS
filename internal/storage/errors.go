@@ -9,4 +9,5 @@ var (
 	ErrObjectNotFound      = errors.New("object not found")
 	ErrUploadNotFound      = errors.New("upload not found")
 	ErrInvalidPart         = errors.New("invalid part")
+	ErrMethodNotAllowed    = errors.New("method not allowed on delete marker")
 )
