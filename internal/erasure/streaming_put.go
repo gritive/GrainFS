@@ -173,7 +173,13 @@ func (b *ECBackend) putObjectDataStreaming(bucket, key, versionId string, src io
 	}
 
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(metaKey, metaBytes)
+		if err := txn.Set(metaKey, metaBytes); err != nil {
+			return err
+		}
+		if versionId != "" {
+			return txn.Set(latestKey(bucket, key), []byte(versionId))
+		}
+		return nil
 	}); err != nil {
 		os.RemoveAll(shardDir)
 		return nil, err

@@ -141,4 +141,22 @@ var (
 		Name: "grainfs_scrub_skipped_over_cap_total",
 		Help: "Total objects skipped because max_repairs_per_cycle was reached.",
 	})
+
+	// ScrubPlainMigratedTotal counts plain objects re-encoded to EC by the scrubber.
+	ScrubPlainMigratedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_plain_migrated_total",
+		Help: "Total plain objects re-encoded to EC by the scrubber.",
+	})
+
+	// ScrubPlainMigrateErrorTotal counts plain→EC migration errors.
+	ScrubPlainMigrateErrorTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_plain_migrate_error_total",
+		Help: "Total errors during plain→EC migration by the scrubber.",
+	})
+
+	// ScrubMigrationSkippedOverCapTotal counts plain objects skipped because migration cap was reached.
+	ScrubMigrationSkippedOverCapTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_migration_skipped_over_cap_total",
+		Help: "Total plain objects skipped because max_migrations_per_cycle was reached.",
+	})
 )

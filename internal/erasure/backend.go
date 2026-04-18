@@ -389,14 +389,7 @@ func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType strin
 	if err != nil {
 		return nil, err
 	}
-
-	// Write lat: pointer for versioned objects.
 	if versionId != "" {
-		if dbErr := b.db.Update(func(txn *badger.Txn) error {
-			return txn.Set(latestKey(bucket, key), []byte(versionId))
-		}); dbErr != nil {
-			return nil, dbErr
-		}
 		obj.VersionID = versionId
 	}
 	return obj, nil
@@ -464,7 +457,13 @@ func (b *ECBackend) putObjectPlain(bucket, key, versionId string, data []byte, c
 	}
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(metaKey, metaBytes)
+		if err := txn.Set(metaKey, metaBytes); err != nil {
+			return err
+		}
+		if versionId != "" {
+			return txn.Set(latestKey(bucket, key), []byte(versionId))
+		}
+		return nil
 	})
 	if err != nil {
 		os.Remove(filePath)
@@ -1100,14 +1099,7 @@ func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts 
 	if err != nil {
 		return nil, err
 	}
-
-	// Write lat: pointer for versioned objects.
 	if versionId != "" {
-		if dbErr := b.db.Update(func(txn *badger.Txn) error {
-			return txn.Set(latestKey(bucket, key), []byte(versionId))
-		}); dbErr != nil {
-			return nil, dbErr
-		}
 		obj.VersionID = versionId
 	}
 
@@ -1213,6 +1205,126 @@ func (b *ECBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, er
 		})
 	}()
 	return ch, nil
+}
+
+// plainFilePath returns the filesystem path for a plain (non-EC) object.
+func (b *ECBackend) plainFilePath(bucket, key, versionId string) string {
+	var hashInput string
+	if versionId != "" {
+		hashInput = key + "/" + versionId
+	} else {
+		hashInput = key
+	}
+	h := sha256.Sum256([]byte(hashInput))
+	return filepath.Join(b.root, "data", bucket, ".plain", hex.EncodeToString(h[:]))
+}
+
+// ScanPlainObjects streams plain objects in the bucket that are large enough to be
+// re-encoded as EC. Only called when the backend is configured with EC (DataShards > 0).
+// Implements scrubber.Migrator.
+func (b *ECBackend) ScanPlainObjects(bucket string) (<-chan scrubber.PlainRecord, error) {
+	ch := make(chan scrubber.PlainRecord, 64)
+	if b.codec.DataShards <= 0 {
+		close(ch)
+		return ch, nil
+	}
+	if err := b.HeadBucket(bucket); err != nil {
+		close(ch)
+		return nil, err
+	}
+	go func() {
+		defer close(ch)
+		_ = b.db.View(func(txn *badger.Txn) error {
+			prefix := []byte("obj:" + bucket + "/")
+			it := txn.NewIterator(badger.DefaultIteratorOptions)
+			defer it.Close()
+			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+				var meta *ecObjectMeta
+				if err := it.Item().Value(func(val []byte) error {
+					var err error
+					meta, err = unmarshalECObjectMeta(val)
+					return err
+				}); err != nil {
+					continue
+				}
+				if meta.DataShards > 0 || meta.IsDeleteMarker {
+					continue
+				}
+				if meta.Size < int64(b.codec.DataShards) {
+					continue // too small for EC; leave as plain
+				}
+				rawKey := string(it.Item().Key())
+				rest := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
+				objKey, versionID := rest, ""
+				if idx := strings.LastIndex(rest, "/"); idx >= 0 {
+					suffix := rest[idx+1:]
+					if len(suffix) == 36 && strings.Count(suffix, "-") == 4 {
+						objKey = rest[:idx]
+						versionID = suffix
+					}
+				}
+				ch <- scrubber.PlainRecord{
+					Bucket:      bucket,
+					Key:         objKey,
+					VersionID:   versionID,
+					Size:        meta.Size,
+					ETag:        meta.ETag,
+					ContentType: meta.ContentType,
+				}
+			}
+			return nil
+		})
+	}()
+	return ch, nil
+}
+
+// MigratePlainToEC re-encodes a plain object as EC shards and deletes the old plain file.
+// Implements scrubber.Migrator.
+func (b *ECBackend) MigratePlainToEC(rec scrubber.PlainRecord) error {
+	unlock := b.acquireWriteLock(rec.Bucket, rec.Key)
+	defer unlock()
+
+	// Re-confirm under lock that the object is still plain (DataShards==0).
+	// Guards against a concurrent PutObject that re-encoded this object while
+	// the scrubber was scanning.
+	stale := false
+	_ = b.db.View(func(txn *badger.Txn) error {
+		var metaKey []byte
+		if rec.VersionID != "" {
+			metaKey = objectMetaKeyV(rec.Bucket, rec.Key, rec.VersionID)
+		} else {
+			metaKey = objectMetaKey(rec.Bucket, rec.Key)
+		}
+		item, err := txn.Get(metaKey)
+		if err != nil {
+			stale = true
+			return nil
+		}
+		return item.Value(func(val []byte) error {
+			meta, err := unmarshalECObjectMeta(val)
+			if err != nil || meta.DataShards > 0 {
+				stale = true
+			}
+			return nil
+		})
+	})
+	if stale {
+		return nil
+	}
+
+	plainPath := b.plainFilePath(rec.Bucket, rec.Key, rec.VersionID)
+	f, err := os.Open(plainPath)
+	if err != nil {
+		return fmt.Errorf("open plain file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := b.putObjectDataStreaming(rec.Bucket, rec.Key, rec.VersionID, f, rec.Size, rec.ETag, rec.ContentType); err != nil {
+		return fmt.Errorf("re-encode as EC: %w", err)
+	}
+
+	_ = os.Remove(plainPath)
+	return nil
 }
 
 // ShardPaths returns all shard file paths for an object.

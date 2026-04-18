@@ -42,8 +42,28 @@ type ObjectRecord struct {
 	IsDeleteMarker  bool
 }
 
+// PlainRecord carries metadata for a plain object that can be migrated to EC.
+type PlainRecord struct {
+	Bucket      string
+	Key         string
+	VersionID   string
+	Size        int64
+	ETag        string
+	ContentType string
+}
+
+// Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
+// If the backend implements this, the scrubber will re-encode plain objects each cycle.
+type Migrator interface {
+	ScanPlainObjects(bucket string) (<-chan PlainRecord, error)
+	MigratePlainToEC(rec PlainRecord) error
+}
+
 // maxRepairsPerCycle limits repairs per scrub cycle to avoid I/O storms.
 const maxRepairsPerCycle = 100
+
+// maxMigrationsPerCycle limits plain→EC migrations per cycle to avoid I/O storms.
+const maxMigrationsPerCycle = 50
 
 // BackgroundScrubber periodically verifies and repairs EC shard integrity.
 type BackgroundScrubber struct {
@@ -64,6 +84,7 @@ type ScrubStats struct {
 	ShardErrors    int64
 	Repaired       int64
 	Unrepairable   int64
+	PlainMigrated  int64
 }
 
 // ScrubberOption configures a BackgroundScrubber.
@@ -187,9 +208,54 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		}
 	}
 
+	// Optional: migrate plain objects to EC if backend supports it.
+	if migrator, ok := s.backend.(Migrator); ok {
+		s.runMigration(ctx, migrator, buckets)
+	}
+
 	s.mu.Lock()
 	s.stats.LastRun = time.Now()
 	s.mu.Unlock()
+}
+
+func (s *BackgroundScrubber) runMigration(ctx context.Context, migrator Migrator, buckets []string) {
+	migrateCount := 0
+	for _, bucket := range buckets {
+		plainCh, err := migrator.ScanPlainObjects(bucket)
+		if err != nil {
+			slog.Warn("scrub: scan plain objects failed", "bucket", bucket, "err", err)
+			continue
+		}
+		for rec := range plainCh {
+			select {
+			case <-ctx.Done():
+				for range plainCh { //nolint:revive // drain to unblock producer
+				}
+				return
+			default:
+			}
+			if migrateCount >= maxMigrationsPerCycle {
+				metrics.ScrubMigrationSkippedOverCapTotal.Inc()
+				for range plainCh { //nolint:revive // drain to unblock producer
+				}
+				return
+			}
+			if err := s.limiter.Wait(ctx); err != nil {
+				for range plainCh { //nolint:revive // drain to unblock producer
+				}
+				return
+			}
+			if err := migrator.MigratePlainToEC(rec); err != nil {
+				metrics.ScrubPlainMigrateErrorTotal.Inc()
+				slog.Error("scrub: plain→EC migration failed", "bucket", rec.Bucket, "key", rec.Key, "err", err)
+				continue
+			}
+			metrics.ScrubPlainMigratedTotal.Inc()
+			atomic.AddInt64(&s.stats.PlainMigrated, 1)
+			migrateCount++
+			slog.Info("scrub: plain→EC migrated", "bucket", rec.Bucket, "key", rec.Key)
+		}
+	}
 }
 
 // Stats returns a snapshot of the current scrub statistics.
