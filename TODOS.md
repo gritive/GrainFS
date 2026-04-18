@@ -2,8 +2,6 @@
 
 ## Phase 13: Operations
 
-- [x] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
-
 ### Phase 13 DX 후속 (devex review 2026-04-18)
 
 - [ ] balancer 튜닝 플래그 6종: --balancer-enabled, --balancer-gossip-interval, --balancer-imbalance-trigger-pct, --balancer-imbalance-stop-pct, --balancer-migration-rate, --balancer-leader-tenure-min (serve.go)
