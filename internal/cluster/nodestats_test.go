@@ -176,6 +176,45 @@ func TestNodeStatsStore_ClampsInvalidValues(t *testing.T) {
 	assert.Equal(t, 999.0, s.RequestsPerSec, "valid RequestsPerSec should pass through unchanged")
 }
 
+func TestNodeStatsStore_UpdateDiskStats_PreservesOtherFields(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 42.0, DiskUsedPct: 10.0})
+
+	store.UpdateDiskStats("n1", 80.0, 1000)
+
+	s, ok := store.Get("n1")
+	require.True(t, ok)
+	assert.Equal(t, 42.0, s.RequestsPerSec, "RequestsPerSec must be preserved")
+	assert.Equal(t, 80.0, s.DiskUsedPct)
+	assert.Equal(t, uint64(1000), s.DiskAvailBytes)
+}
+
+func TestNodeStatsStore_UpdateDiskStats_Clamping(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 50.0})
+
+	store.UpdateDiskStats("n1", -5.0, 0)
+	s, ok := store.Get("n1")
+	require.True(t, ok)
+	assert.Equal(t, 0.0, s.DiskUsedPct, "negative should clamp to 0")
+
+	store.UpdateDiskStats("n1", 105.0, 0)
+	s, ok = store.Get("n1")
+	require.True(t, ok)
+	assert.Equal(t, 100.0, s.DiskUsedPct, "over-100 should clamp to 100")
+}
+
+func TestNodeStatsStore_UpdateDiskStats_NoopWhenMissing(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 50.0})
+
+	store.UpdateDiskStats("unknown-node", 80.0, 0)
+
+	assert.Equal(t, 1, store.Len(), "store should be unchanged")
+	_, ok := store.Get("unknown-node")
+	assert.False(t, ok, "unknown node must not be created")
+}
+
 func TestNodeStatsStore_TTL_PartialExpiry(t *testing.T) {
 	store := NewNodeStatsStore(50 * time.Millisecond)
 

@@ -7,7 +7,7 @@
 - [ ] 실패 모드 명세: WriteShard retry/backoff/give-up, pending migration TTL orphan cleanup, DstNode disk-full circuit breaker
 - [ ] Structured logging: component="balancer" tag + phase field
 - [ ] Rolling upgrade 대응: warm-up timeout 후 available peers로 시작, protobuf unknown field tolerance
-- [ ] E2E: disk-fill 전략 — 테스트 하니스에서 diskUsedPct 주입 hook
+- [x] E2E: disk-fill 전략 — 테스트 하니스에서 diskUsedPct 주입 hook
 
 ## Phase 14: Scale
 

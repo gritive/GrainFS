@@ -160,6 +160,12 @@ var (
 		Help: "Total plain objects skipped because max_migrations_per_cycle was reached.",
 	})
 
+	// DiskUsedPct tracks local disk usage percentage per node.
+	DiskUsedPct = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_disk_used_pct",
+		Help: "Local disk usage percentage (0–100) as seen by each node.",
+	}, []string{"node_id"})
+
 	// Balancer metrics.
 
 	BalancerGossipTotal = promauto.NewCounter(prometheus.CounterOpts{

@@ -198,3 +198,23 @@ grainfs serve --balancer-enabled=false ...
 
 진행 중인 migration을 강제 중단하면 src에 복사된 shard가 dst에 남을 수 있습니다.
 이 경우 scrubber의 orphan shard 정리 기능이 자동으로 처리합니다 (Phase 14 예정).
+
+---
+
+## 테스트 / 개발
+
+실제 디스크를 채우지 않고도 balancer 동작을 재현하려면 `GRAINFS_TEST_DISK_PCT` 환경 변수를 사용합니다.
+
+```bash
+# 로컬 노드의 디스크 사용률을 80%로 고정
+GRAINFS_TEST_DISK_PCT=80 grainfs serve --data ./data --peers peer-a:9001
+```
+
+`GRAINFS_TEST_DISK_PCT`는 `DiskCollector`의 실제 `syscall.Statfs` 호출을 대체합니다.
+값이 유효하지 않으면 서버가 시작 시 즉시 실패합니다.
+
+Prometheus에서 디스크 사용률을 확인하려면:
+
+```promql
+grainfs_disk_used_pct{node_id="your-node-id"}
+```
