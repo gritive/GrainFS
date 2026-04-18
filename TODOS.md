@@ -2,12 +2,8 @@
 
 ## Phase 13: Operations
 
-- [ ] dashboard: hot config change (scrub interval 포함), log tailing
-- [ ] dashboard: on-demand metric with sse
-- [ ] dashboard: snapshot, backup manage
-- [ ] dashboard: event logging
 - [ ] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
-- [ ] life cycle management
+- [x] life cycle management
 
 ## Phase 14: Scale
 
@@ -22,6 +18,14 @@
 - [ ] migration: nfs: virtual overlay
 - [ ] migration: nbd: block proxying
 - [ ] migration: adaptive throttling, priority queue
+
+## Phase 15: Dashboard
+- [ ] storage & cluster management and monitoring
+- [ ] dashboard: hot config change (scrub interval 포함), log tailing
+- [ ] dashboard: on-demand metric with sse
+- [ ] dashboard: snapshot, backup manage
+- [ ] dashboard: event logging
+
 
 ## Copy on Write (NBD — thin provisioning 이후)
 

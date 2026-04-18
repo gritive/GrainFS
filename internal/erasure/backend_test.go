@@ -1347,3 +1347,27 @@ func TestECBackend_BucketSnapshot_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Suspended", v2)
 }
+
+// TestECBackend_ScanObjects_HasLastModified verifies that ScanObjects populates
+// LastModified so the lifecycle worker can apply expiration rules.
+func TestECBackend_ScanObjects_HasLastModified(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("lc-bucket"))
+
+	before := time.Now().Unix()
+	data := strings.Repeat("x", 1024*64) // 64KB — triggers EC
+	_, err := b.PutObject("lc-bucket", "obj.bin", strings.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+	after := time.Now().Unix()
+
+	ch, err := b.ScanObjects("lc-bucket")
+	require.NoError(t, err)
+
+	var records []scrubber.ObjectRecord
+	for rec := range ch {
+		records = append(records, rec)
+	}
+	require.Len(t, records, 1)
+	assert.GreaterOrEqual(t, records[0].LastModified, before)
+	assert.LessOrEqual(t, records[0].LastModified, after)
+}

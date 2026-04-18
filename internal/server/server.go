@@ -14,6 +14,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -44,9 +45,10 @@ type Server struct {
 	verifier    *s3auth.CachingVerifier
 	hertz       *server.Hertz
 	volMgr      *volume.Manager
-	policyStore *CompiledPolicyStore
-	ipLimiter   *RateLimiter
-	userLimiter *RateLimiter
+	policyStore    *CompiledPolicyStore
+	lifecycleStore *lifecycle.Store
+	ipLimiter      *RateLimiter
+	userLimiter    *RateLimiter
 	cluster     ClusterInfo     // nil in solo mode
 	joinCluster JoinClusterFunc // nil if not in solo mode or already clustered
 }
@@ -86,6 +88,13 @@ func WithDataDir(dir string) Option {
 func WithScrubber(sc *scrubber.BackgroundScrubber) Option {
 	return func(s *Server) {
 		s.scrubber = sc
+	}
+}
+
+// WithLifecycleStore attaches a lifecycle rule store to the server.
+func WithLifecycleStore(store *lifecycle.Store) Option {
+	return func(s *Server) {
+		s.lifecycleStore = store
 	}
 }
 

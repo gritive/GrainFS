@@ -139,6 +139,9 @@ func (b *ECBackend) Close() error {
 	return b.db.Close()
 }
 
+// DB returns the underlying BadgerDB instance for shared metadata stores (e.g. lifecycle).
+func (b *ECBackend) DB() *badger.DB { return b.db }
+
 // ShardDir returns the directory where shards for a given bucket/key are stored.
 // Exported for testing (shard deletion simulation).
 func (b *ECBackend) ShardDir(bucket, key string) string {
@@ -1268,6 +1271,7 @@ func (b *ECBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, er
 					ETag:           meta.ETag,
 					VersionID:      versionID,
 					IsDeleteMarker: meta.IsDeleteMarker,
+					LastModified:   meta.LastModified,
 				}
 			}
 			return nil

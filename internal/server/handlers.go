@@ -140,6 +140,12 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// PUT /:bucket?lifecycle — set bucket lifecycle configuration
+	if c.QueryArgs().Has("lifecycle") {
+		s.putBucketLifecycle(c, bucket)
+		return
+	}
+
 	// PUT /:bucket?versioning — set versioning state
 	if c.QueryArgs().Has("versioning") {
 		s.putBucketVersioning(c, bucket)
@@ -224,6 +230,12 @@ func (s *Server) headBucket(_ context.Context, c *app.RequestContext) {
 func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 
+	// DELETE /:bucket?lifecycle — delete bucket lifecycle configuration
+	if c.QueryArgs().Has("lifecycle") {
+		s.deleteBucketLifecycle(c, bucket)
+		return
+	}
+
 	// DELETE /:bucket?policy — delete bucket policy
 	if c.QueryArgs().Has("policy") {
 		s.deleteBucketPolicy(c, bucket)
@@ -240,6 +252,12 @@ func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 
 func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
+
+	// GET /:bucket?lifecycle — get bucket lifecycle configuration
+	if c.QueryArgs().Has("lifecycle") {
+		s.getBucketLifecycle(c, bucket)
+		return
+	}
 
 	// GET /:bucket?policy — get bucket policy
 	if c.QueryArgs().Has("policy") {

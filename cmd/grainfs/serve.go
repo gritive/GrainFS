@@ -20,6 +20,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
+	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsserver"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -57,6 +58,7 @@ func init() {
 	serveCmd.Flags().Duration("snapshot-interval", 1*time.Hour, "auto-snapshot interval (0 to disable)")
 	serveCmd.Flags().Int("snapshot-retain", 24, "number of auto-snapshots to retain")
 	serveCmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (0 to disable)")
+	serveCmd.Flags().Duration("lifecycle-interval", 1*time.Hour, "lifecycle rule evaluation interval (0 to disable)")
 	serveCmd.Flags().String("upstream", "", "upstream S3-compatible endpoint for pull-through caching (e.g. http://minio:9000)")
 	serveCmd.Flags().String("upstream-access-key", "", "access key for upstream S3 endpoint")
 	serveCmd.Flags().String("upstream-secret-key", "", "secret key for upstream S3 endpoint")
@@ -112,6 +114,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		var backend storage.Backend
 		var err error
 		var sc *scrubber.BackgroundScrubber
+		var lcStore *lifecycle.Store
+		var lcWorker *lifecycle.Worker
 		if ecEnabled {
 			ecBackend, ecErr := erasure.NewECBackend(dataDir, ecData, ecParity, ecOpts...)
 			if ecErr != nil {
@@ -120,6 +124,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 			scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
 			if scrubInterval > 0 {
 				sc = scrubber.New(ecBackend, scrubInterval)
+			}
+			lifecycleInterval, _ := cmd.Flags().GetDuration("lifecycle-interval")
+			if lifecycleInterval > 0 {
+				lcStore = lifecycle.NewStore(ecBackend.DB())
+				lcWorker = lifecycle.NewWorker(lcStore, ecBackend, &ecDeleterAdapter{ecBackend}, lifecycleInterval)
 			}
 			backend = ecBackend
 		} else {
@@ -171,7 +180,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition
 		swappable := storage.NewSwappableBackend(backend)
-		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, nfsPort, nfs4Port, nbdPort)
+		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -180,7 +189,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
-func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, nfsPort, nfs4Port, nbdPort int) error {
+func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
 	// Auto-create "default" bucket on startup
@@ -200,6 +209,13 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		opts = append(opts, server.WithScrubber(sc))
 		sc.Start(ctx)
 		slog.Info("background scrubber started")
+	}
+	if lcStore != nil {
+		opts = append(opts, server.WithLifecycleStore(lcStore))
+	}
+	if lcWorker != nil {
+		go lcWorker.Run(ctx)
+		slog.Info("lifecycle worker started")
 	}
 
 	srv := server.New(addr, swappable, opts...)
@@ -489,6 +505,19 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 
 	slog.Info("at-rest encryption enabled (auto-generated key)", "component", "server", "key_file", keyFile)
 	return encrypt.NewEncryptor(keyData)
+}
+
+// ecDeleterAdapter adapts ECBackend to lifecycle.ObjectDeleter (ListObjectVersions signature differs).
+type ecDeleterAdapter struct{ b *erasure.ECBackend }
+
+func (a *ecDeleterAdapter) DeleteObject(bucket, key string) error {
+	return a.b.DeleteObject(bucket, key)
+}
+func (a *ecDeleterAdapter) DeleteObjectVersion(bucket, key, versionID string) error {
+	return a.b.DeleteObjectVersion(bucket, key, versionID)
+}
+func (a *ecDeleterAdapter) ListObjectVersions(bucket, key string) ([]*storage.ObjectVersion, error) {
+	return a.b.ListObjectVersions(bucket, key, 10000)
 }
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.

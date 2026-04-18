@@ -33,13 +33,14 @@ type Scrubbable interface {
 
 // ObjectRecord carries metadata needed for scrubbing.
 type ObjectRecord struct {
-	Bucket       string
-	Key          string
-	DataShards   int
-	ParityShards int
-	ETag            string
-	VersionID       string
-	IsDeleteMarker  bool
+	Bucket         string
+	Key            string
+	DataShards     int
+	ParityShards   int
+	ETag           string
+	VersionID      string
+	IsDeleteMarker bool
+	LastModified   int64 // Unix seconds; used by lifecycle worker for expiration checks
 }
 
 // PlainRecord carries metadata for a plain object that can be migrated to EC.
