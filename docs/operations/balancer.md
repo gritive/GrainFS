@@ -48,6 +48,7 @@ FSM.applyMigrateShard → MigrationExecutor.Execute()
 | `--balancer-imbalance-stop-pct`    | `5.0`  | 마이그레이션 중단 임계값 (hysteresis)                |
 | `--balancer-migration-rate`        | `1`    | tick당 최대 제안 수 (미래 rate limiting 용)          |
 | `--balancer-leader-tenure-min`     | `5m`   | 리더 최소 보유 시간 (과부하 전 leader transfer 방지) |
+| `--balancer-warmup-timeout`        | `60s`  | 노드 시작 후 마이그레이션 유예 시간 (join/복구 중 오탐 방지) |
 
 예시 (프로덕션 보수적 설정):
 
