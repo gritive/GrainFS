@@ -93,6 +93,7 @@ func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	p.tickOnce(ctx)
@@ -148,6 +149,7 @@ func TestBalancerProposer_WarmupBypassAfterTimeout(t *testing.T) {
 	cfg.WarmupTimeout = 1 * time.Millisecond // immediate timeout
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	time.Sleep(5 * time.Millisecond) // let warm-up timeout pass
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -188,6 +190,7 @@ func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	p.tickOnce(ctx)

@@ -62,6 +62,12 @@ func init() {
 	serveCmd.Flags().String("upstream", "", "upstream S3-compatible endpoint for pull-through caching (e.g. http://minio:9000)")
 	serveCmd.Flags().String("upstream-access-key", "", "access key for upstream S3 endpoint")
 	serveCmd.Flags().String("upstream-secret-key", "", "secret key for upstream S3 endpoint")
+	serveCmd.Flags().Bool("balancer-enabled", true, "enable auto-balancing in cluster mode")
+	serveCmd.Flags().Duration("balancer-gossip-interval", cluster.DefaultBalancerConfig().GossipInterval, "how often the balancer evaluates disk usage")
+	serveCmd.Flags().Float64("balancer-imbalance-trigger-pct", cluster.DefaultBalancerConfig().ImbalanceTriggerPct, "start migration when max-min disk usage diff exceeds this percentage")
+	serveCmd.Flags().Float64("balancer-imbalance-stop-pct", cluster.DefaultBalancerConfig().ImbalanceStopPct, "stop migration when max-min disk usage diff drops below this percentage")
+	serveCmd.Flags().Int("balancer-migration-rate", cluster.DefaultBalancerConfig().MigrationRate, "max migration proposals per tick")
+	serveCmd.Flags().Duration("balancer-leader-tenure-min", cluster.DefaultBalancerConfig().LeaderTenureMin, "minimum time a leader must hold tenure before load-based transfer")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -186,7 +192,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
+	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
 func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int) error {
@@ -323,7 +329,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	return nil
 }
 
-func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
+func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
@@ -432,6 +438,16 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, 
 	stopApply := make(chan struct{})
 	go distBackend.RunApplyLoop(stopApply)
 
+	// Start balancer if enabled (cluster mode only).
+	balancerEnabled, _ := cmd.Flags().GetBool("balancer-enabled")
+	if balancerEnabled {
+		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
+		statsStore := cluster.NewNodeStatsStore(3 * bGossipInterval)
+		if err := startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc); err != nil {
+			slog.Warn("balancer start failed", "err", err)
+		}
+	}
+
 	var backend storage.Backend = cachedBackend
 
 	// Auto-create "default" bucket on startup
@@ -529,6 +545,79 @@ func (a *ecDeleterAdapter) ListObjectVersions(bucket, key string) ([]*storage.Ob
 		}
 	}
 	return result, nil
+}
+
+// raftBalancerAdapter wraps *raft.Node to implement cluster.RaftBalancerNode.
+type raftBalancerAdapter struct {
+	node  *raft.Node
+	peers []string // Raft peer addresses (node IDs for balancer purposes)
+}
+
+func (a *raftBalancerAdapter) Propose(data []byte) error   { return a.node.Propose(data) }
+func (a *raftBalancerAdapter) IsLeader() bool              { return a.node.State() == raft.Leader }
+func (a *raftBalancerAdapter) NodeID() string              { return a.node.ID() }
+func (a *raftBalancerAdapter) PeerIDs() []string           { return a.peers }
+func (a *raftBalancerAdapter) TransferLeadership() error   { return a.node.TransferLeadership() }
+
+// startBalancer wires and launches the BalancerProposer, GossipSender, GossipReceiver,
+// MigrationExecutor and migration task channel, then replays any persisted pending tasks.
+func startBalancer(
+	ctx context.Context,
+	cmd *cobra.Command,
+	nodeID, dataDir string,
+	statsStore *cluster.NodeStatsStore,
+	node *raft.Node,
+	peers []string,
+	fsm *cluster.FSM,
+	quicTransport transport.Transport,
+	shardSvc *cluster.ShardService,
+) error {
+	gossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
+	triggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
+	stopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
+	migrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
+	tenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
+
+	cfg := cluster.BalancerConfig{
+		GossipInterval:      gossipInterval,
+		WarmupTimeout:       cluster.DefaultBalancerConfig().WarmupTimeout,
+		ImbalanceTriggerPct: triggerPct,
+		ImbalanceStopPct:    stopPct,
+		MigrationRate:       migrationRate,
+		LeaderTenureMin:     tenureMin,
+		LeaderLoadThreshold: cluster.DefaultBalancerConfig().LeaderLoadThreshold,
+	}
+
+	adapter := &raftBalancerAdapter{node: node, peers: peers}
+	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, cfg)
+
+	balancer.SetObjectPicker(cluster.NewLocalObjectPicker(filepath.Join(dataDir, "shards")))
+
+	// Migration task channel (buffered to absorb bursts).
+	taskCh := make(chan cluster.MigrationTask, 256)
+
+	exec := cluster.NewMigrationExecutor(shardSvc, adapter, 6) // 6 = default numShards
+
+	// Wire FSM hooks: migration proposals → channel, Raft commit → executor.
+	fsm.SetMigrationHooks(taskCh, exec)
+
+	// Replay any tasks that were persisted during a previous channel-full event.
+	if err := fsm.RecoverPending(taskCh); err != nil {
+		slog.Warn("balancer: recover pending failed", "err", err)
+	}
+
+	// Gossip: broadcast local stats + receive from peers.
+	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval)
+	receiver := cluster.NewGossipReceiver(quicTransport, statsStore)
+
+	go sender.Run(ctx)
+	go receiver.Run(ctx)
+	go exec.Run(ctx, taskCh)
+	go balancer.Run(ctx)
+
+	slog.Info("balancer started", "component", "balancer",
+		"gossip_interval", gossipInterval, "trigger_pct", triggerPct, "stop_pct", stopPct)
+	return nil
 }
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -11,6 +13,56 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
+
+// ObjectPicker selects an object stored locally on the source node for migration.
+// SrcNode is always the leader itself, so implementations scan local storage.
+type ObjectPicker interface {
+	// PickObjectOnSrcNode returns a (bucket, key, versionID, ok) tuple identifying
+	// one locally-stored object suitable for migration. Returns ok=false if none found.
+	PickObjectOnSrcNode(nodeID string) (bucket, key, versionID string, ok bool)
+}
+
+// LocalObjectPicker scans the local shard directory (shardsDir/{bucket}/{key}/shard_0)
+// to find objects stored on this node. This is correct because BadgerDB obj: metadata
+// is Raft-replicated to every node — scanning it would return cluster-wide objects,
+// not locally-stored ones.
+type LocalObjectPicker struct {
+	shardsDir string
+}
+
+// NewLocalObjectPicker creates a picker that scans shardsDir for locally-stored objects.
+// shardsDir should be the directory passed to ShardService (typically dataDir/shards).
+func NewLocalObjectPicker(shardsDir string) *LocalObjectPicker {
+	return &LocalObjectPicker{shardsDir: shardsDir}
+}
+
+// PickObjectOnSrcNode returns the first object that has shard_0 stored locally.
+// nodeID is accepted for interface compatibility but ignored (always scans local dir).
+func (p *LocalObjectPicker) PickObjectOnSrcNode(_ string) (string, string, string, bool) {
+	buckets, err := os.ReadDir(p.shardsDir)
+	if err != nil {
+		return "", "", "", false
+	}
+	for _, b := range buckets {
+		if !b.IsDir() {
+			continue
+		}
+		keys, err := os.ReadDir(filepath.Join(p.shardsDir, b.Name()))
+		if err != nil {
+			continue
+		}
+		for _, k := range keys {
+			if !k.IsDir() {
+				continue
+			}
+			shard0 := filepath.Join(p.shardsDir, b.Name(), k.Name(), "shard_0")
+			if _, err := os.Stat(shard0); err == nil {
+				return b.Name(), k.Name(), "", true
+			}
+		}
+	}
+	return "", "", "", false
+}
 
 // BalancerConfig holds tunable parameters for the BalancerProposer.
 // All fields can be injected at construction time; tests use small values to speed up loops.
@@ -49,13 +101,14 @@ type RaftBalancerNode interface {
 // BalancerProposer monitors NodeStatsStore and proposes CmdMigrateShard when
 // disk usage is imbalanced across nodes. Only the Raft leader runs proposals.
 type BalancerProposer struct {
-	nodeID   string
-	store    *NodeStatsStore
-	node     RaftBalancerNode
-	cfg      BalancerConfig
-	active   bool // hysteresis state: true once trigger fired, false after stop threshold
+	nodeID    string
+	store     *NodeStatsStore
+	node      RaftBalancerNode
+	cfg       BalancerConfig
+	active    bool        // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt time.Time
-	logger   *slog.Logger
+	picker    ObjectPicker // nil = no proposals until SetObjectPicker is called
+	logger    *slog.Logger
 }
 
 // NewBalancerProposer creates a BalancerProposer with the given config.
@@ -68,6 +121,12 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 		startedAt: time.Now(),
 		logger:    slog.Default().With("component", "balancer"),
 	}
+}
+
+// SetObjectPicker sets the picker used by proposeMigration to select which object to move.
+// Must be called before Run; if never called, no migration proposals are emitted.
+func (p *BalancerProposer) SetObjectPicker(picker ObjectPicker) {
+	p.picker = picker
 }
 
 // Run starts the balancer tick loop. Blocks until ctx is cancelled.
@@ -140,13 +199,22 @@ func (p *BalancerProposer) warmupComplete(peers []string) bool {
 	return p.store.Len() >= len(peers)+1
 }
 
-// proposeMigration encodes and proposes a CmdMigrateShard for a single object.
-// In full implementation this would iterate over objects on src; here we emit one
-// placeholder proposal (the migration executor resolves actual objects).
+// proposeMigration selects one object from src via the ObjectPicker and proposes
+// a CmdMigrateShard to Raft. Returns early if picker is nil or returns ok=false.
 func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string) {
+	if p.picker == nil {
+		return
+	}
+	bucket, key, versionID, ok := p.picker.PickObjectOnSrcNode(src)
+	if !ok {
+		return
+	}
 	inner, err := proto.Marshal(&clusterpb.MigrateShardCmd{
-		SrcNode: src,
-		DstNode: dst,
+		Bucket:    bucket,
+		Key:       key,
+		VersionId: versionID,
+		SrcNode:   src,
+		DstNode:   dst,
 	})
 	if err != nil {
 		p.logger.Error("balancer: marshal MigrateShardCmd", "err", err)
