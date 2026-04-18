@@ -201,6 +201,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
+	// Start DiskCollector to expose grainfs_disk_used_pct metric even in solo mode.
+	soloNodeID := generateNodeID(dataDir)
+	diskCollector := cluster.NewDiskCollector(soloNodeID, dataDir, nil, 30*time.Second)
+	go diskCollector.Run(ctx)
+
 	// Auto-create "default" bucket on startup
 	if err := swappable.CreateBucket("default"); err != nil {
 		if !errors.Is(err, storage.ErrBucketAlreadyExists) {

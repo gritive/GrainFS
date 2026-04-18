@@ -68,6 +68,8 @@ func (d *DiskCollector) collect() {
 		usedPct = 100
 	}
 	slog.Debug("disk stat collected", "nodeID", d.nodeID, "usedPct", usedPct, "availBytes", availBytes)
-	d.store.UpdateDiskStats(d.nodeID, usedPct, availBytes)
+	if d.store != nil {
+		d.store.UpdateDiskStats(d.nodeID, usedPct, availBytes)
+	}
 	metrics.DiskUsedPct.WithLabelValues(d.nodeID).Set(usedPct)
 }
