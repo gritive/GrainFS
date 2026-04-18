@@ -62,12 +62,12 @@ func (d *DiskCollector) collect() {
 		slog.Warn("disk stat unavailable, skipping update", "nodeID", d.nodeID, "dataDir", d.dataDir)
 		return
 	}
-	slog.Debug("disk stat collected", "nodeID", d.nodeID, "usedPct", usedPct, "availBytes", availBytes)
-	d.store.UpdateDiskStats(d.nodeID, usedPct, availBytes)
 	if usedPct < 0 {
 		usedPct = 0
 	} else if usedPct > 100 {
 		usedPct = 100
 	}
+	slog.Debug("disk stat collected", "nodeID", d.nodeID, "usedPct", usedPct, "availBytes", availBytes)
+	d.store.UpdateDiskStats(d.nodeID, usedPct, availBytes)
 	metrics.DiskUsedPct.WithLabelValues(d.nodeID).Set(usedPct)
 }

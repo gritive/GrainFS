@@ -52,7 +52,7 @@ func init() {
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
 	serveCmd.Flags().Int("nfs-port", 9002, "NFS server port (0 = disabled, volumes managed via REST API)")
-	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled)")
+	serveCmd.Flags().Int("nfs4-port", 0, "NFSv4 server port (0 = disabled, default off)")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled, Linux only)")
 	serveCmd.Flags().Int64("nbd-volume-size", 1024*1024*1024, "default NBD volume size in bytes")
 	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")

@@ -54,6 +54,45 @@ func TestDiskCollector_CollectNoopIfNodeNotInStore(t *testing.T) {
 	assert.Equal(t, 0, store.Len())
 }
 
+func TestDiskCollector_Collect_SkipsOnZeroStats(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 50.0})
+
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc.SetStatFunc(func(string) (float64, uint64) { return 0, 0 })
+	dc.collect()
+
+	s, ok := store.Get("n1")
+	require.True(t, ok)
+	assert.Equal(t, 50.0, s.DiskUsedPct, "store should not be updated when stat returns (0,0)")
+}
+
+func TestDiskCollector_Collect_ClampsNegativeUsedPct(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1"})
+
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc.SetStatFunc(func(string) (float64, uint64) { return -10.0, 1000 })
+	dc.collect()
+
+	s, ok := store.Get("n1")
+	require.True(t, ok)
+	assert.Equal(t, 0.0, s.DiskUsedPct, "negative usedPct should be clamped to 0 in store")
+}
+
+func TestDiskCollector_Collect_ClampsOverHundredUsedPct(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1"})
+
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc.SetStatFunc(func(string) (float64, uint64) { return 150.0, 1000 })
+	dc.collect()
+
+	s, ok := store.Get("n1")
+	require.True(t, ok)
+	assert.Equal(t, 100.0, s.DiskUsedPct, "usedPct > 100 should be clamped to 100 in store")
+}
+
 func TestDiskCollector_RunCallsCollectOnInterval(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
