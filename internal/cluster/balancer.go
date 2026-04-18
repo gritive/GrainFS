@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -136,6 +137,7 @@ type BalancerProposer struct {
 	store     *NodeStatsStore
 	node      RaftBalancerNode
 	cfg       BalancerConfig
+	mu        sync.Mutex // protects active and inflight
 	active    bool        // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt time.Time
 	picker    ObjectPicker // nil = no proposals until SetObjectPicker is called
@@ -158,10 +160,12 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 
 // NotifyMigrationDone removes the inflight entry for the given migration, allowing
 // the same object to be re-proposed if it still exists on this node.
-// Called by the FSM when CmdMigrationDone is applied.
+// Called by the FSM when CmdMigrationDone is applied (FSM goroutine).
 func (p *BalancerProposer) NotifyMigrationDone(bucket, key, versionID string) {
 	id := bucket + "/" + key + "/" + versionID
+	p.mu.Lock()
 	delete(p.inflight, id)
+	p.mu.Unlock()
 }
 
 // SetObjectPicker sets the picker used by proposeMigration to select which object to move.
@@ -221,17 +225,22 @@ func (p *BalancerProposer) tickOnce(ctx context.Context) {
 	}
 
 	// Hysteresis: activate above trigger, deactivate below stop.
-	if !p.active {
+	p.mu.Lock()
+	active := p.active
+	if !active {
 		if diff < effectiveTrigger {
+			p.mu.Unlock()
 			return
 		}
 		p.active = true
 	} else {
 		if diff < p.cfg.ImbalanceStopPct {
 			p.active = false
+			p.mu.Unlock()
 			return
 		}
 	}
+	p.mu.Unlock()
 
 	dst, ok := selectLightestPeer(p.store, p.nodeID)
 	if !ok {
@@ -250,8 +259,11 @@ type BalancerStatus struct {
 
 // Status returns a snapshot of the balancer's current state.
 func (p *BalancerProposer) Status() BalancerStatus {
+	p.mu.Lock()
+	active := p.active
+	p.mu.Unlock()
 	return BalancerStatus{
-		Active:       p.active,
+		Active:       active,
 		ImbalancePct: imbalancePct(p.store),
 		Nodes:        p.store.GetAll(),
 	}
@@ -284,19 +296,19 @@ func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string
 		return
 	}
 
-	// Sweep expired inflight entries before checking.
+	// Sweep expired inflight entries and build skip set under the lock.
 	now := time.Now()
+	p.mu.Lock()
 	for k, exp := range p.inflight {
 		if now.After(exp) {
 			delete(p.inflight, k)
 		}
 	}
-
-	// Build skip set so picker avoids objects already in-flight.
 	skipIDs := make(map[string]bool, len(p.inflight))
 	for k := range p.inflight {
 		skipIDs[k] = true
 	}
+	p.mu.Unlock()
 
 	bucket, key, versionID, ok := p.picker.PickObjectOnSrcNode(src, skipIDs)
 	if !ok {
@@ -305,10 +317,13 @@ func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string
 
 	// Guard: picker may not respect skipIDs (e.g., mock in tests). Double-check.
 	inflightID := bucket + "/" + key + "/" + versionID
+	p.mu.Lock()
 	if exp, inFlight := p.inflight[inflightID]; inFlight && now.Before(exp) {
+		p.mu.Unlock()
 		return
 	}
 	p.inflight[inflightID] = now.Add(migrationInflightTTL)
+	p.mu.Unlock()
 
 	inner, err := proto.Marshal(&clusterpb.MigrateShardCmd{
 		Bucket:    bucket,
