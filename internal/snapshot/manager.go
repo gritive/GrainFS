@@ -76,6 +76,15 @@ func (m *Manager) Create(reason string) (*Snapshot, error) {
 		walOffset = wp.WALOffset()
 	}
 
+	// Capture bucket metadata (versioning, EC) if the backend supports it.
+	var bucketMeta []storage.SnapshotBucket
+	if bs, ok := m.backend.(storage.BucketSnapshotable); ok {
+		bucketMeta, err = bs.ListAllBuckets()
+		if err != nil {
+			return nil, fmt.Errorf("list bucket meta: %w", err)
+		}
+	}
+
 	seq := m.nextSeq.Add(1)
 	snap := &Snapshot{
 		Seq:         seq,
@@ -86,6 +95,7 @@ func (m *Manager) Create(reason string) (*Snapshot, error) {
 		SizeBytes:   totalSize,
 		Buckets:     buckets,
 		Objects:     objects,
+		BucketMeta:  bucketMeta,
 	}
 
 	// Atomic write: write to .tmp then rename
@@ -125,6 +135,11 @@ func (m *Manager) List() ([]*Snapshot, error) {
 
 // Restore restores metadata from the snapshot with the given seq.
 // Returns the number of restored objects and any stale blobs.
+//
+// When the backend implements BucketSnapshotable AND the snapshot carries
+// BucketMeta (new-format snapshots), bucket state is replayed before objects
+// so versioning/EC flags match the snapshot instant. Old-format snapshots
+// (BucketMeta == nil) leave bucket state untouched for backward compat.
 func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.StaleBlob, err error) {
 	snap, err := readSnapshot(m.path(seq))
 	if err != nil {
@@ -132,6 +147,13 @@ func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.S
 			return 0, nil, ErrNotFound
 		}
 		return 0, nil, fmt.Errorf("read snapshot %d: %w", seq, err)
+	}
+	if len(snap.BucketMeta) > 0 {
+		if bs, ok := m.backend.(storage.BucketSnapshotable); ok {
+			if err := bs.RestoreBuckets(snap.BucketMeta); err != nil {
+				return 0, nil, fmt.Errorf("restore bucket meta: %w", err)
+			}
+		}
 	}
 	return m.backend.RestoreObjects(snap.Objects)
 }

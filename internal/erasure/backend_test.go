@@ -1303,3 +1303,47 @@ func TestECBackend_DeleteObjectVersion_PicksLatestByModified(t *testing.T) {
 	assert.Equal(t, v2.VersionID, meta2.VersionID)
 	_ = v1
 }
+
+// TestECBackend_BucketSnapshot_RoundTrip verifies that ListAllBuckets captures
+// bucket metadata (versioning + EC flag) and RestoreBuckets replays it.
+func TestECBackend_BucketSnapshot_RoundTrip(t *testing.T) {
+	b := newTestBackend(t)
+
+	require.NoError(t, b.CreateBucket("b1"))
+	require.NoError(t, b.SetBucketVersioning("b1", "Enabled"))
+
+	require.NoError(t, b.CreateBucket("b2"))
+	require.NoError(t, b.SetBucketECPolicy("b2", false))
+	require.NoError(t, b.SetBucketVersioning("b2", "Suspended"))
+
+	captured, err := b.ListAllBuckets()
+	require.NoError(t, err)
+	require.Len(t, captured, 2)
+
+	byName := map[string]storage.SnapshotBucket{}
+	for _, sb := range captured {
+		byName[sb.Name] = sb
+	}
+	assert.Equal(t, "Enabled", byName["b1"].VersioningState)
+	assert.True(t, byName["b1"].ECEnabled)
+	assert.Equal(t, "Suspended", byName["b2"].VersioningState)
+	assert.False(t, byName["b2"].ECEnabled)
+
+	// Mutate state, then restore and verify round-trip.
+	require.NoError(t, b.SetBucketVersioning("b1", "Suspended"))
+	require.NoError(t, b.SetBucketECPolicy("b2", true))
+
+	require.NoError(t, b.RestoreBuckets(captured))
+
+	v1, err := b.GetBucketVersioning("b1")
+	require.NoError(t, err)
+	assert.Equal(t, "Enabled", v1)
+
+	ec2, err := b.GetBucketECPolicy("b2")
+	require.NoError(t, err)
+	assert.False(t, ec2)
+
+	v2, err := b.GetBucketVersioning("b2")
+	require.NoError(t, err)
+	assert.Equal(t, "Suspended", v2)
+}

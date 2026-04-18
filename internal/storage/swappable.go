@@ -102,3 +102,19 @@ func (sb *SwappableBackend) RestoreObjects(objects []SnapshotObject) (int, []Sta
 	}
 	return 0, nil, ErrSnapshotNotSupported
 }
+
+// ListAllBuckets implements BucketSnapshotable by delegating to the inner backend.
+func (sb *SwappableBackend) ListAllBuckets() ([]SnapshotBucket, error) {
+	if bs, ok := (*sb.inner.Load()).(BucketSnapshotable); ok {
+		return bs.ListAllBuckets()
+	}
+	return nil, nil
+}
+
+// RestoreBuckets implements BucketSnapshotable by delegating to the inner backend.
+func (sb *SwappableBackend) RestoreBuckets(buckets []SnapshotBucket) error {
+	if bs, ok := (*sb.inner.Load()).(BucketSnapshotable); ok {
+		return bs.RestoreBuckets(buckets)
+	}
+	return nil
+}

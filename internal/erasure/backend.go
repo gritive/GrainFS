@@ -1600,6 +1600,67 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 	return count, stale, nil
 }
 
+// ListAllBuckets implements storage.BucketSnapshotable: scans `bucket:` prefix
+// and returns per-bucket state (versioning, EC flag) so PITR snapshots can
+// replay the exact configuration.
+func (b *ECBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
+	var out []storage.SnapshotBucket
+	err := b.db.View(func(txn *badger.Txn) error {
+		prefix := []byte("bucket:")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			name := string(it.Item().Key()[len("bucket:"):])
+			var meta *bucketMeta
+			if err := it.Item().Value(func(val []byte) error {
+				m, err := unmarshalBucketMeta(val)
+				if err != nil {
+					meta = &bucketMeta{ECEnabled: true, VersioningState: "Unversioned"}
+					return nil
+				}
+				meta = m
+				return nil
+			}); err != nil {
+				return err
+			}
+			out = append(out, storage.SnapshotBucket{
+				Name:            name,
+				VersioningState: meta.VersioningState,
+				ECEnabled:       meta.ECEnabled,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list bucket meta: %w", err)
+	}
+	return out, nil
+}
+
+// RestoreBuckets implements storage.BucketSnapshotable: writes each snapshot
+// bucket's metadata, creating entries for buckets that no longer exist and
+// overwriting state for any that do. Does NOT delete buckets absent from the
+// snapshot — RestoreObjects handles object-level cleanup; bucket deletion is
+// a separate lifecycle concern.
+func (b *ECBackend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		for _, sb := range buckets {
+			meta := &bucketMeta{
+				ECEnabled:       sb.ECEnabled,
+				VersioningState: sb.VersioningState,
+			}
+			data, err := marshalBucketMeta(meta)
+			if err != nil {
+				return fmt.Errorf("marshal bucket meta %s: %w", sb.Name, err)
+			}
+			if err := txn.Set(bucketKey(sb.Name), data); err != nil {
+				return fmt.Errorf("set bucket meta %s: %w", sb.Name, err)
+			}
+		}
+		return nil
+	})
+}
+
 func (b *ECBackend) readAndDecode(bucket, key string, meta *ecObjectMeta) ([]byte, error) {
 	codec := NewCodec(meta.DataShards, meta.ParityShards)
 	total := codec.TotalShards()

@@ -12,14 +12,17 @@ import (
 
 // Snapshot is the on-disk representation of a metadata snapshot.
 type Snapshot struct {
-	Seq         uint64                  `json:"seq"`
-	Timestamp   time.Time               `json:"timestamp"`
-	WALOffset   uint64                  `json:"wal_offset"`
-	Reason      string                  `json:"reason,omitempty"`
-	ObjectCount int                     `json:"object_count"`
-	SizeBytes   int64                   `json:"size_bytes"`
-	Buckets     []string                `json:"buckets"`
+	Seq         uint64                   `json:"seq"`
+	Timestamp   time.Time                `json:"timestamp"`
+	WALOffset   uint64                   `json:"wal_offset"`
+	Reason      string                   `json:"reason,omitempty"`
+	ObjectCount int                      `json:"object_count"`
+	SizeBytes   int64                    `json:"size_bytes"`
+	Buckets     []string                 `json:"buckets"`
 	Objects     []storage.SnapshotObject `json:"objects"`
+	// BucketMeta is populated when the backend implements storage.BucketSnapshotable.
+	// Older snapshots omit this field; Restore treats nil as a no-op for bucket state.
+	BucketMeta []storage.SnapshotBucket `json:"bucket_meta,omitempty"`
 }
 
 func writeSnapshot(path string, snap *Snapshot) error {

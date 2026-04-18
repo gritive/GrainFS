@@ -225,6 +225,22 @@ func (cb *CachedBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleB
 	return 0, nil, ErrSnapshotNotSupported
 }
 
+// ListAllBuckets implements BucketSnapshotable by delegating to the inner backend.
+func (cb *CachedBackend) ListAllBuckets() ([]SnapshotBucket, error) {
+	if bs, ok := cb.Backend.(BucketSnapshotable); ok {
+		return bs.ListAllBuckets()
+	}
+	return nil, nil
+}
+
+// RestoreBuckets implements BucketSnapshotable by delegating to the inner backend.
+func (cb *CachedBackend) RestoreBuckets(buckets []SnapshotBucket) error {
+	if bs, ok := cb.Backend.(BucketSnapshotable); ok {
+		return bs.RestoreBuckets(buckets)
+	}
+	return nil
+}
+
 // InvalidateKey removes a cache entry for the given bucket/key.
 // This is the public API used by cluster cache invalidation (OnApply callback).
 func (cb *CachedBackend) InvalidateKey(bucket, key string) {

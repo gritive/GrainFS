@@ -78,3 +78,21 @@ func (b *Backend) RestoreObjects(objects []storage.SnapshotObject) (int, []stora
 	}
 	return restored, stale, nil
 }
+
+// ListAllBuckets implements storage.BucketSnapshotable by delegating to inner.
+func (b *Backend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
+	bs, ok := b.Backend.(storage.BucketSnapshotable)
+	if !ok {
+		return nil, nil
+	}
+	return bs.ListAllBuckets()
+}
+
+// RestoreBuckets implements storage.BucketSnapshotable by delegating to inner.
+func (b *Backend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	bs, ok := b.Backend.(storage.BucketSnapshotable)
+	if !ok {
+		return nil
+	}
+	return bs.RestoreBuckets(buckets)
+}

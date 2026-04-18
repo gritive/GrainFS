@@ -81,6 +81,23 @@ type Snapshotable interface {
 	RestoreObjects(objects []SnapshotObject) (restoredCount int, staleBlobs []StaleBlob, err error)
 }
 
+// SnapshotBucket is a point-in-time record of bucket-level metadata
+// (versioning state, EC flag). Captured by BucketSnapshotable backends so
+// PITR restores reproduce the full bucket configuration.
+type SnapshotBucket struct {
+	Name            string `json:"name"`
+	VersioningState string `json:"versioning_state,omitempty"` // "Unversioned" | "Enabled" | "Suspended"
+	ECEnabled       bool   `json:"ec_enabled,omitempty"`
+}
+
+// BucketSnapshotable is an optional interface for backends that persist
+// per-bucket metadata (versioning, EC policy) and want that state preserved
+// across snapshot/restore cycles.
+type BucketSnapshotable interface {
+	ListAllBuckets() ([]SnapshotBucket, error)
+	RestoreBuckets(buckets []SnapshotBucket) error
+}
+
 // Backend defines the storage operations for GrainFS.
 type Backend interface {
 	CreateBucket(bucket string) error
