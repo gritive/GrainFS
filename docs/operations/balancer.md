@@ -93,8 +93,6 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
 
 ## 메트릭 해석
 
-(metrics.go에 추가 예정: Phase 13 DX 후속)
-
 | 메트릭                                       | 설명                           | 알람 기준                |
 | -------------------------------------------- | ------------------------------ | ------------------------ |
 | `grainfs_balancer_gossip_total`              | gossip 브로드캐스트 횟수       | gossip_errors > 0 지속   |

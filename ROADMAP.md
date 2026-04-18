@@ -260,7 +260,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - **QUIC StreamRouter 개선** ✅ — Gossip 스트림이 전용 채널을 사용해 제어 스트림과 독립 처리. 데드락 제거.
 - **보안**: NodeId 스푸핑 방지 (`conn.RemoteAddr()` 검증), Gossip 수신값 범위 클램프.
 
-> **Note:** `BalancerProposer`/`MigrationExecutor`의 `cmd/` 배선 및 실제 오브젝트 선택 로직은 Phase 14에서 완성 예정.
+- **`cmd/` 배선 & LocalObjectPicker** ✅ — `cmd/grainfs/serve.go`에서 balancer 플래그 + `startBalancer()` 연결. `LocalObjectPicker`로 shardsDir 스캔 기반 실제 오브젝트 선택 구현 완료.
 
 **검증:**
 - 3노드 클러스터에서 Gossip 브로드캐스트 수신 및 `NodeStatsStore` 업데이트 확인 (unit/integration test)

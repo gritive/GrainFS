@@ -46,6 +46,7 @@ Flags:
       --nfs-port int             NFS v3 포트 (default 9002, 0=비활성)
       --nfs4-port int            NFS v4.0 포트 (default 2049, 0=비활성)
       --nbd-port int             NBD 포트 (default 0=비활성, Linux only)
+      --nbd-volume-size int      기본 NBD 볼륨 크기 바이트 (default 1073741824 = 1GB)
       --ec                       Erasure Coding 활성화 (default true)
       --ec-data int              데이터 샤드 수 (default 4)
       --ec-parity int            패리티 샤드 수 (default 2)
