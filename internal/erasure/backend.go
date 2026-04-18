@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -97,6 +98,7 @@ type ecObjectMeta struct {
 	ShardSize      int
 	VersionID      string
 	IsDeleteMarker bool
+	CreatedNano    int64 // UnixNano; used for sub-second version ordering in DeleteObjectVersion
 }
 
 // ECOption configures the EC backend.
@@ -439,14 +441,15 @@ func (b *ECBackend) putObjectPlain(bucket, key, versionId string, data []byte, c
 	}
 
 	etag := fmt.Sprintf("%x", md5.Sum(data))
-	now := time.Now().Unix()
+	nowNano := time.Now().UnixNano()
 
 	meta := ecObjectMeta{
 		Key:          key,
 		Size:         int64(len(data)),
 		ContentType:  contentType,
 		ETag:         etag,
-		LastModified: now,
+		LastModified: nowNano / 1e9,
+		CreatedNano:  nowNano,
 		DataShards:   0, // indicates plain storage
 		ParityShards: 0,
 		VersionID:    versionId,
@@ -477,80 +480,7 @@ func (b *ECBackend) putObjectPlain(bucket, key, versionId string, data []byte, c
 		Size:         int64(len(data)),
 		ContentType:  contentType,
 		ETag:         etag,
-		LastModified: now,
-	}, nil
-}
-
-func (b *ECBackend) putObjectData(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
-	// Empty or very small data: store as plain to avoid EC split errors
-	if len(data) < b.codec.DataShards {
-		return b.putObjectPlain(bucket, key, "", data, contentType)
-	}
-
-	// Erasure encode
-	shards, err := b.codec.Encode(data)
-	if err != nil {
-		return nil, fmt.Errorf("erasure encode: %w", err)
-	}
-
-	// Write shards to disk
-	shardDir := b.ShardDir(bucket, key)
-	if err := os.MkdirAll(shardDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create shard dir: %w", err)
-	}
-
-	for i, shard := range shards {
-		data := shardWithCRC(shard) // CRC32 footer (Eng Review #3)
-		if b.encryptor != nil {
-			encrypted, err := b.encryptor.Encrypt(data)
-			if err != nil {
-				os.RemoveAll(shardDir)
-				return nil, fmt.Errorf("encrypt shard %d: %w", i, err)
-			}
-			data = encrypted
-		}
-		path := b.shardPath(bucket, key, i)
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			os.RemoveAll(shardDir)
-			return nil, fmt.Errorf("write shard %d: %w", i, err)
-		}
-	}
-
-	// Compute ETag from original data
-	h := md5.Sum(data)
-	etag := hex.EncodeToString(h[:])
-	now := time.Now().Unix()
-
-	meta := ecObjectMeta{
-		Key:          key,
-		Size:         int64(len(data)),
-		ContentType:  contentType,
-		ETag:         etag,
-		LastModified: now,
-		DataShards:   b.codec.DataShards,
-		ParityShards: b.codec.ParityShards,
-		ShardSize:    len(shards[0]),
-	}
-
-	metaBytes, err := marshalECObjectMeta(&meta)
-	if err != nil {
-		return nil, fmt.Errorf("marshal metadata: %w", err)
-	}
-
-	err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objectMetaKey(bucket, key), metaBytes)
-	})
-	if err != nil {
-		os.RemoveAll(shardDir)
-		return nil, err
-	}
-
-	return &storage.Object{
-		Key:          key,
-		Size:         int64(len(data)),
-		ContentType:  contentType,
-		ETag:         etag,
-		LastModified: now,
+		LastModified: nowNano / 1e9,
 	}, nil
 }
 
@@ -671,6 +601,7 @@ func (b *ECBackend) DeleteObjectReturningMarker(bucket, key string) (string, err
 		IsDeleteMarker: true,
 		VersionID:      markerID,
 		LastModified:   time.Now().Unix(),
+		CreatedNano:    time.Now().UnixNano(),
 	}
 	markerBytes, err := marshalECObjectMeta(&markerMeta)
 	if err != nil {
@@ -762,17 +693,33 @@ func (b *ECBackend) DeleteObjectVersion(bucket, key, versionId string) error {
 			currentLatest := ""
 			_ = item.Value(func(val []byte) error { currentLatest = string(val); return nil })
 			if currentLatest == versionId {
-				// Deleted version was latest — find previous latest
-				newLatest := ""
+				// Deleted version was latest — find the remaining version with the highest Modified.
+				// UUIDs are random so lexicographic order does not reflect insertion order.
+				var newLatest string
+				var bestModified int64
 				pfx := []byte("obj:" + bucket + "/" + key + "/")
 				it := txn.NewIterator(badger.DefaultIteratorOptions)
 				for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
 					k := string(it.Item().Key())
 					vid := strings.TrimPrefix(k, "obj:"+bucket+"/"+key+"/")
-					if vid != versionId && vid != "" {
-						newLatest = vid
-						break
+					if vid == versionId || vid == "" {
+						continue
 					}
+					_ = it.Item().Value(func(val []byte) error {
+						m, err := unmarshalECObjectMeta(val)
+						if err == nil {
+							// Use CreatedNano for sub-second precision; fall back to LastModified for old records.
+							ts := m.CreatedNano
+							if ts == 0 {
+								ts = m.LastModified * 1e9
+							}
+							if newLatest == "" || ts > bestModified {
+								bestModified = ts
+								newLatest = vid
+							}
+						}
+						return nil
+					})
 				}
 				it.Close()
 				if newLatest == "" {
@@ -783,8 +730,10 @@ func (b *ECBackend) DeleteObjectVersion(bucket, key, versionId string) error {
 			}
 		}
 
-		// Remove shard data
-		os.RemoveAll(b.shardDirFor(bucket, key, versionId))
+		// Remove shard data; log on failure but don't roll back the committed metadata deletion.
+		if err := os.RemoveAll(b.shardDirFor(bucket, key, versionId)); err != nil {
+			slog.Warn("DeleteObjectVersion: shard removal failed", "err", err, "bucket", bucket, "key", key)
+		}
 		return nil
 	})
 }
@@ -796,6 +745,17 @@ func (b *ECBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.
 
 	var objects []*storage.Object
 	err := b.db.View(func(txn *badger.Txn) error {
+		// Pre-load lat: pointers so versioned entries can be deduplicated to latest only.
+		latMap := map[string]string{} // base key → latest versionId
+		latPfx := []byte("lat:" + bucket + "/")
+		itLat := txn.NewIterator(badger.IteratorOptions{PrefetchValues: true, PrefetchSize: 100})
+		for itLat.Seek(latPfx); itLat.ValidForPrefix(latPfx); itLat.Next() {
+			baseKey := string(itLat.Item().Key()[len("lat:"+bucket+"/"):])
+			_ = itLat.Item().Value(func(v []byte) error { latMap[baseKey] = string(v); return nil })
+		}
+		itLat.Close()
+
+		seen := map[string]bool{} // deduplicate versioned base keys
 		pfx := []byte("obj:" + bucket + "/" + prefix)
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
@@ -808,15 +768,40 @@ func (b *ECBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.
 			if count >= maxKeys {
 				break
 			}
+
+			// Detect versioned key by UUID suffix: obj:bucket/baseKey/uuid
+			rest := string(it.Item().Key()[len("obj:"+bucket+"/"):])
+			lastSlash := strings.LastIndex(rest, "/")
+			isVersioned := lastSlash >= 0 && len(rest[lastSlash+1:]) == 36 && strings.Count(rest[lastSlash+1:], "-") == 4
+
 			var meta *ecObjectMeta
-			err := it.Item().Value(func(val []byte) error {
+			if err := it.Item().Value(func(val []byte) error {
 				var unmarshalErr error
 				meta, unmarshalErr = unmarshalECObjectMeta(val)
 				return unmarshalErr
-			})
-			if err != nil {
+			}); err != nil {
 				return err
 			}
+
+			if isVersioned {
+				baseKey := rest[:lastSlash]
+				if seen[baseKey] {
+					continue
+				}
+				// Only include the latest non-delete-marker version.
+				if meta.VersionID != latMap[baseKey] || meta.IsDeleteMarker {
+					continue
+				}
+				seen[baseKey] = true
+			} else {
+				// Non-versioned key: skip if a versioned entry for the same key was already included
+				// (can happen during Suspended→Enabled transition).
+				if seen[meta.Key] {
+					continue
+				}
+				seen[meta.Key] = true
+			}
+
 			objects = append(objects, &storage.Object{
 				Key:          meta.Key,
 				Size:         meta.Size,

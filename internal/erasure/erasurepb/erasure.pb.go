@@ -85,6 +85,7 @@ type ECObjectMeta struct {
 	ShardSize      int32                  `protobuf:"varint,8,opt,name=shard_size,json=shardSize,proto3" json:"shard_size,omitempty"`
 	VersionId      string                 `protobuf:"bytes,9,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
 	IsDeleteMarker bool                   `protobuf:"varint,10,opt,name=is_delete_marker,json=isDeleteMarker,proto3" json:"is_delete_marker,omitempty"`
+	CreatedNano    int64                  `protobuf:"varint,11,opt,name=created_nano,json=createdNano,proto3" json:"created_nano,omitempty"` // UnixNano creation time for sub-second version ordering
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -189,6 +190,13 @@ func (x *ECObjectMeta) GetIsDeleteMarker() bool {
 	return false
 }
 
+func (x *ECObjectMeta) GetCreatedNano() int64 {
+	if x != nil {
+		return x.CreatedNano
+	}
+	return 0
+}
+
 type MultipartUploadMeta struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UploadId      string                 `protobuf:"bytes,1,opt,name=upload_id,json=uploadId,proto3" json:"upload_id,omitempty"`
@@ -274,7 +282,7 @@ const file_internal_erasure_erasurepb_erasure_proto_rawDesc = "" +
 	"BucketMeta\x12\x1d\n" +
 	"\n" +
 	"ec_enabled\x18\x01 \x01(\bR\tecEnabled\x12)\n" +
-	"\x10versioning_state\x18\x02 \x01(\tR\x0fversioningState\"\xbe\x02\n" +
+	"\x10versioning_state\x18\x02 \x01(\tR\x0fversioningState\"\xe1\x02\n" +
 	"\fECObjectMeta\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12!\n" +
@@ -289,7 +297,8 @@ const file_internal_erasure_erasurepb_erasure_proto_rawDesc = "" +
 	"\n" +
 	"version_id\x18\t \x01(\tR\tversionId\x12(\n" +
 	"\x10is_delete_marker\x18\n" +
-	" \x01(\bR\x0eisDeleteMarker\"\x9e\x01\n" +
+	" \x01(\bR\x0eisDeleteMarker\x12!\n" +
+	"\fcreated_nano\x18\v \x01(\x03R\vcreatedNano\"\x9e\x01\n" +
 	"\x13MultipartUploadMeta\x12\x1b\n" +
 	"\tupload_id\x18\x01 \x01(\tR\buploadId\x12\x16\n" +
 	"\x06bucket\x18\x02 \x01(\tR\x06bucket\x12\x10\n" +

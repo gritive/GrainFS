@@ -15,6 +15,7 @@ func TestIsLocalhostAddr(t *testing.T) {
 		{"external IPv4", "192.168.1.5:9000", false},
 		{"external IPv6", "[2001:db8::1]:9000", false},
 		{"other IPv4 loopback not matched", "127.0.0.2:9000", false}, // only 127.0.0.1 matched
+		{"127.0.0.10 must not match", "127.0.0.10:9000", false},     // HasPrefix "127.0.0.1" bug regression
 		{"empty", "", false},
 	}
 	for _, tt := range tests {

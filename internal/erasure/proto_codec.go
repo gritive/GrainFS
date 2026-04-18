@@ -45,6 +45,7 @@ func marshalECObjectMeta(m *ecObjectMeta) ([]byte, error) {
 		ShardSize:      int32(m.ShardSize),
 		VersionId:      m.VersionID,
 		IsDeleteMarker: m.IsDeleteMarker,
+		CreatedNano:    m.CreatedNano,
 	})
 }
 
@@ -64,6 +65,7 @@ func unmarshalECObjectMeta(data []byte) (*ecObjectMeta, error) {
 		ShardSize:      int(p.ShardSize),
 		VersionID:      p.VersionId,
 		IsDeleteMarker: p.IsDeleteMarker,
+		CreatedNano:    p.CreatedNano,
 	}, nil
 }
 

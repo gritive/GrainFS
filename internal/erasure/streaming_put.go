@@ -146,13 +146,14 @@ func (b *ECBackend) putObjectDataStreaming(bucket, key, versionId string, src io
 	}
 
 	shardSz := int((size + int64(b.codec.DataShards) - 1) / int64(b.codec.DataShards))
-	now := time.Now().Unix()
+	nowNano := time.Now().UnixNano()
 	meta := ecObjectMeta{
 		Key:          key,
 		Size:         size,
 		ContentType:  contentType,
 		ETag:         etag,
-		LastModified: now,
+		LastModified: nowNano / 1e9,
+		CreatedNano:  nowNano,
 		DataShards:   b.codec.DataShards,
 		ParityShards: b.codec.ParityShards,
 		ShardSize:    shardSz,
@@ -182,7 +183,7 @@ func (b *ECBackend) putObjectDataStreaming(bucket, key, versionId string, src io
 		Size:         size,
 		ContentType:  contentType,
 		ETag:         etag,
-		LastModified: now,
+		LastModified: nowNano / 1e9,
 	}, nil
 }
 

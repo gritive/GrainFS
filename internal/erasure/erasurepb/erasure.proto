@@ -18,6 +18,7 @@ message ECObjectMeta {
   int32 shard_size = 8;
   string version_id = 9;
   bool is_delete_marker = 10;
+  int64 created_nano = 11; // UnixNano creation time for sub-second version ordering
 }
 
 message MultipartUploadMeta {

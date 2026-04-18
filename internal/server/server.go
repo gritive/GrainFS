@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -183,10 +184,15 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 // Covers IPv4 loopback, IPv6 loopback, the IPv4-mapped IPv6 loopback
 // ([::ffff:127.0.0.1]:PORT), and the literal "localhost" hostname.
 func isLocalhostAddr(addr string) bool {
-	return strings.HasPrefix(addr, "127.0.0.1") ||
-		strings.HasPrefix(addr, "[::1]") ||
-		strings.HasPrefix(addr, "[::ffff:127.0.0.1]") ||
-		strings.HasPrefix(addr, "localhost")
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr // no port present
+	}
+	switch host {
+	case "127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost":
+		return true
+	}
+	return false
 }
 
 // localhostOnly returns a middleware that rejects non-localhost connections with 403.

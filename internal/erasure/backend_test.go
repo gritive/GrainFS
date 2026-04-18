@@ -1233,3 +1233,76 @@ func TestECBackend_RestoreObjects_OldSnapshot_FallbackToMaxModified(t *testing.T
 	assert.Equal(t, "cccccc", string(got))
 	assert.Equal(t, v3.VersionID, meta.VersionID)
 }
+
+// TestECBackend_ListObjects_VersionedBucket verifies that ListObjects returns only
+// the latest non-delete-marker version of each key, without duplicates.
+func TestECBackend_ListObjects_VersionedBucket(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.SetBucketVersioning("bkt", "Enabled"))
+
+	// Put "a" twice — latest should win
+	_, err := b.PutObject("bkt", "a", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	v2a, err := b.PutObject("bkt", "a", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+
+	// Put "b" once
+	_, err = b.PutObject("bkt", "b", strings.NewReader("b"), "text/plain")
+	require.NoError(t, err)
+
+	// Soft-delete "c" — should NOT appear in ListObjects
+	_, err = b.PutObject("bkt", "c", strings.NewReader("c"), "text/plain")
+	require.NoError(t, err)
+	err = b.DeleteObject("bkt", "c")
+	require.NoError(t, err)
+
+	objects, err := b.ListObjects("bkt", "", 100)
+	require.NoError(t, err)
+	// Must have exactly 2 objects: "a" (latest) and "b"
+	require.Len(t, objects, 2, "expected 2 objects (a and b), got %d", len(objects))
+
+	keys := make([]string, 0, len(objects))
+	for _, o := range objects {
+		keys = append(keys, o.Key)
+	}
+	assert.Contains(t, keys, "a")
+	assert.Contains(t, keys, "b")
+	assert.NotContains(t, keys, "c", "soft-deleted object must not appear")
+
+	// "a" must be the latest version (v2)
+	for _, o := range objects {
+		if o.Key == "a" {
+			assert.Equal(t, v2a.ETag, o.ETag, "ListObjects must return the latest version of 'a'")
+		}
+	}
+}
+
+// TestECBackend_DeleteObjectVersion_PicksLatestByModified verifies that after
+// hard-deleting the currently-latest version, the new lat: pointer is set to
+// the version with the highest Modified timestamp, not the first UUID lexicographically.
+func TestECBackend_DeleteObjectVersion_PicksLatestByModified(t *testing.T) {
+	b := newTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.SetBucketVersioning("bkt", "Enabled"))
+
+	v1, err := b.PutObject("bkt", "k", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	v2, err := b.PutObject("bkt", "k", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+	v3, err := b.PutObject("bkt", "k", strings.NewReader("v3"), "text/plain")
+	require.NoError(t, err)
+
+	// Hard-delete v3 (the latest)
+	err = b.DeleteObjectVersion("bkt", "k", v3.VersionID)
+	require.NoError(t, err)
+
+	// After deleting v3, v2 must become latest (highest Modified, not UUID-sort winner)
+	rc, meta2, err := b.GetObject("bkt", "k")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	assert.Equal(t, "v2", string(got), "v2 should be the new latest after v3 is deleted")
+	assert.Equal(t, v2.VersionID, meta2.VersionID)
+	_ = v1
+}
