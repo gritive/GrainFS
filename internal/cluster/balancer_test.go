@@ -421,7 +421,7 @@ func TestLocalObjectPicker_NestedKey(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(keyPath, "shard_0"), []byte("data"), 0o644))
 
 	picker := NewLocalObjectPicker(dir)
-	bucket, key, versionID, ok := picker.PickObjectOnSrcNode("any")
+	bucket, key, versionID, ok := picker.PickObjectOnSrcNode("any", nil)
 
 	require.True(t, ok, "should find the nested-key object")
 	assert.Equal(t, "mybucket", bucket)

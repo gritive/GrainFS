@@ -22,7 +22,7 @@ func TestLocalObjectPicker_PicksFirstLocalShard(t *testing.T) {
 	writeTestShard(t, root, "bucket1", "key1")
 
 	picker := NewLocalObjectPicker(root)
-	bucket, key, versionID, ok := picker.PickObjectOnSrcNode("self")
+	bucket, key, versionID, ok := picker.PickObjectOnSrcNode("self", nil)
 	require.True(t, ok)
 	assert.Equal(t, "bucket1", bucket)
 	assert.Equal(t, "key1", key)
@@ -32,7 +32,7 @@ func TestLocalObjectPicker_PicksFirstLocalShard(t *testing.T) {
 func TestLocalObjectPicker_EmptyDir_ReturnsFalse(t *testing.T) {
 	root := t.TempDir()
 	picker := NewLocalObjectPicker(root)
-	_, _, _, ok := picker.PickObjectOnSrcNode("self")
+	_, _, _, ok := picker.PickObjectOnSrcNode("self", nil)
 	assert.False(t, ok)
 }
 
@@ -44,7 +44,7 @@ func TestLocalObjectPicker_OnlyPicksLocalShards(t *testing.T) {
 	// "remotekey" has no shard files here (only on remote node's disk)
 
 	picker := NewLocalObjectPicker(root)
-	bucket, key, _, ok := picker.PickObjectOnSrcNode("self")
+	bucket, key, _, ok := picker.PickObjectOnSrcNode("self", nil)
 	require.True(t, ok)
 	assert.Equal(t, "mybucket", bucket)
 	assert.Equal(t, "localkey", key)
@@ -56,7 +56,7 @@ func TestLocalObjectPicker_NodeArgIgnored(t *testing.T) {
 	writeTestShard(t, root, "bkt", "k")
 
 	picker := NewLocalObjectPicker(root)
-	_, _, _, ok := picker.PickObjectOnSrcNode("any-node-id")
+	_, _, _, ok := picker.PickObjectOnSrcNode("any-node-id", nil)
 	assert.True(t, ok)
 }
 
@@ -83,6 +83,6 @@ type mockObjectPicker struct {
 	ok                     bool
 }
 
-func (m *mockObjectPicker) PickObjectOnSrcNode(_ string) (string, string, string, bool) {
+func (m *mockObjectPicker) PickObjectOnSrcNode(_ string, _ map[string]bool) (string, string, string, bool) {
 	return m.bucket, m.key, m.versionID, m.ok
 }

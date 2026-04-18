@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -24,16 +25,23 @@ type FSM struct {
 	commitNotifier  interface {
 		NotifyCommit(bucket, key, versionID string)
 	}
+	balancerNotifier interface {
+		NotifyMigrationDone(bucket, key, versionID string)
+	}
 }
 
 // SetMigrationHooks wires the FSM to the balancer/migration subsystem.
 // ch must be a buffered channel; Apply drops tasks if the channel is full.
+// bn (balancerNotifier) is called on CmdMigrationDone to release the inflight slot.
 func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
 	NotifyCommit(bucket, key, versionID string)
+}, bn interface {
+	NotifyMigrationDone(bucket, key, versionID string)
 }) {
 	f.mu.Lock()
 	f.onMigrateShard = ch
 	f.commitNotifier = notifier
+	f.balancerNotifier = bn
 	f.mu.Unlock()
 }
 
@@ -237,8 +245,9 @@ func (f *FSM) persistPendingMigration(task MigrationTask) error {
 }
 
 // RecoverPending reads all pending-migration keys from BadgerDB and enqueues them
-// to ch for re-execution. Call this at startup before accepting Raft traffic.
-func (f *FSM) RecoverPending(ch chan<- MigrationTask) error {
+// to ch for re-execution. Call this at startup AFTER starting the executor goroutine
+// so the channel consumer is running before tasks are sent.
+func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error {
 	prefix := []byte("pending-migration:")
 	return f.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
@@ -254,12 +263,17 @@ func (f *FSM) RecoverPending(ch chan<- MigrationTask) error {
 				slog.Error("fsm: recover pending migration: decode failed", "err", err)
 				continue
 			}
-			ch <- MigrationTask{
+			task := MigrationTask{
 				Bucket:    cmd.Bucket,
 				Key:       cmd.Key,
 				VersionID: cmd.VersionId,
 				SrcNode:   cmd.SrcNode,
 				DstNode:   cmd.DstNode,
+			}
+			select {
+			case ch <- task:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 		return nil
@@ -319,9 +333,13 @@ func (f *FSM) applyMigrationDone(data []byte) error {
 	}
 	f.mu.RLock()
 	notifier := f.commitNotifier
+	bn := f.balancerNotifier
 	f.mu.RUnlock()
 	if notifier != nil {
 		notifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionId)
+	}
+	if bn != nil {
+		bn.NotifyMigrationDone(cmd.Bucket, cmd.Key, cmd.VersionId)
 	}
 	return nil
 }

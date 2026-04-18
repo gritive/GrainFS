@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -341,7 +342,7 @@ func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
 	fsm := NewFSM(db)
 
 	ch := make(chan MigrationTask, 1)
-	fsm.SetMigrationHooks(ch, nil)
+	fsm.SetMigrationHooks(ch, nil, nil)
 
 	data, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
 		Bucket:    "my-bucket",
@@ -370,7 +371,7 @@ func TestFSM_MigrationDone_NotifiesCommit(t *testing.T) {
 	notified := make(chan struct{}, 1)
 	fsm.SetMigrationHooks(nil, &migrationDoneNotifier{fn: func(bucket, key, versionID string) {
 		notified <- struct{}{}
-	}})
+	}}, nil)
 
 	data, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
 		Bucket:    "my-bucket",
@@ -408,7 +409,7 @@ func TestFSM_MigrateShard_ChannelFull_PersistsToDB(t *testing.T) {
 
 	// Zero-capacity channel — always full
 	ch := make(chan MigrationTask, 0)
-	fsm.SetMigrationHooks(ch, nil)
+	fsm.SetMigrationHooks(ch, nil, nil)
 
 	data, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
 		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst",
@@ -434,7 +435,7 @@ func TestFSM_RecoverPending_ReplaysTasks(t *testing.T) {
 	require.NoError(t, fsm.persistPendingMigration(task))
 
 	ch := make(chan MigrationTask, 10)
-	require.NoError(t, fsm.RecoverPending(ch))
+	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
 
 	var received MigrationTask
 	select {
@@ -475,6 +476,6 @@ func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
 	ch := make(chan MigrationTask, 10)
-	require.NoError(t, fsm.RecoverPending(ch))
+	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
 	assert.Empty(t, ch)
 }

@@ -322,7 +322,9 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 
 	// 3. Close storage backend
 	if closer, ok := swappable.Inner().(interface{ Close() error }); ok {
-		closer.Close()
+		if err := closer.Close(); err != nil {
+			slog.Warn("storage backend close error", "error", err)
+		}
 	}
 
 	slog.Info("server stopped", "component", "server")
@@ -444,8 +446,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if balancerEnabled {
 		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
 		statsStore := cluster.NewNodeStatsStore(3 * bGossipInterval)
+		ecData, _ := cmd.Flags().GetInt("ec-data")
+		ecParity, _ := cmd.Flags().GetInt("ec-parity")
 		var err error
-		balancerProposer, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc)
+		balancerProposer, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
 		if err != nil {
 			slog.Warn("balancer start failed", "err", err)
 		}
@@ -578,6 +582,7 @@ func startBalancer(
 	fsm *cluster.FSM,
 	quicTransport transport.Transport,
 	shardSvc *cluster.ShardService,
+	numShards int,
 ) (*cluster.BalancerProposer, error) {
 	gossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
 	triggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
@@ -605,22 +610,11 @@ func startBalancer(
 	// Migration task channel (buffered to absorb bursts).
 	taskCh := make(chan cluster.MigrationTask, 256)
 
-	exec := cluster.NewMigrationExecutor(shardSvc, adapter, 6) // 6 = default numShards
+	exec := cluster.NewMigrationExecutor(shardSvc, adapter, numShards)
 
-	// Wire FSM hooks: migration proposals → channel, Raft commit → executor.
-	fsm.SetMigrationHooks(taskCh, exec)
-
-	// Replay any tasks that were persisted during a previous channel-full event.
-	if err := fsm.RecoverPending(taskCh); err != nil {
-		slog.Warn("balancer: recover pending failed", "err", err)
-	}
-
-	// Seed local node stats so GossipSender can broadcast immediately.
-	// DiskUsedPct/DiskAvailBytes will be updated by a background metrics collector.
-	statsStore.Set(cluster.NodeStats{
-		NodeID:   nodeID,
-		JoinedAt: time.Now(),
-	})
+	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
+	// balancer → release inflight slot on done.
+	fsm.SetMigrationHooks(taskCh, exec, balancer)
 
 	// Gossip: broadcast local stats + receive from peers.
 	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval)
@@ -628,8 +622,21 @@ func startBalancer(
 
 	go sender.Run(ctx)
 	go receiver.Run(ctx)
+	// Start executor before RecoverPending so the channel consumer is ready.
 	go exec.Run(ctx, taskCh)
 	go balancer.Run(ctx)
+
+	// Seed local node stats so GossipSender can broadcast immediately.
+	// DiskUsedPct/DiskAvailBytes start at zero; gossip from other nodes updates them.
+	statsStore.Set(cluster.NodeStats{
+		NodeID:   nodeID,
+		JoinedAt: time.Now(),
+	})
+
+	// Replay any tasks that were persisted during a previous channel-full event.
+	if err := fsm.RecoverPending(ctx, taskCh); err != nil {
+		slog.Warn("balancer: recover pending failed", "err", err)
+	}
 
 	slog.Info("balancer started", "component", "balancer",
 		"gossip_interval", gossipInterval, "trigger_pct", triggerPct, "stop_pct", stopPct)

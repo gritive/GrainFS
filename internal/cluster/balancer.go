@@ -24,8 +24,9 @@ const migrationInflightTTL = 5 * time.Minute
 // SrcNode is always the leader itself, so implementations scan local storage.
 type ObjectPicker interface {
 	// PickObjectOnSrcNode returns a (bucket, key, versionID, ok) tuple identifying
-	// one locally-stored object suitable for migration. Returns ok=false if none found.
-	PickObjectOnSrcNode(nodeID string) (bucket, key, versionID string, ok bool)
+	// one locally-stored object suitable for migration. skipIDs contains inflight
+	// migration IDs (bucket/key/versionID) to skip. Returns ok=false if none found.
+	PickObjectOnSrcNode(nodeID string, skipIDs map[string]bool) (bucket, key, versionID string, ok bool)
 }
 
 // LocalObjectPicker scans the local shard directory (shardsDir/{bucket}/{key}/shard_0)
@@ -42,17 +43,22 @@ func NewLocalObjectPicker(shardsDir string) *LocalObjectPicker {
 	return &LocalObjectPicker{shardsDir: shardsDir}
 }
 
-// PickObjectOnSrcNode returns the first locally-stored object that has a shard_0 file.
-// nodeID is accepted for interface compatibility but ignored (always scans local dir).
+// PickObjectOnSrcNode returns the first locally-stored object that has a shard_0 file
+// and is not present in skipIDs (inflight migrations). nodeID is accepted for interface
+// compatibility but ignored (always scans local dir).
 // Uses WalkDir to handle S3 keys containing '/' — ShardService stores them verbatim as
 // nested directories (e.g. key "a/b/c" → {bucket}/a/b/c/shard_0), so a 2-level ReadDir
 // would miss them. versionID is always "" because ShardService is version-oblivious.
-func (p *LocalObjectPicker) PickObjectOnSrcNode(_ string) (string, string, string, bool) {
+func (p *LocalObjectPicker) PickObjectOnSrcNode(_ string, skipIDs map[string]bool) (string, string, string, bool) {
 	var foundBucket, foundKey string
 	found := false
 
 	_ = filepath.WalkDir(p.shardsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || found {
+		if err != nil {
+			slog.Warn("LocalObjectPicker: WalkDir error", "path", path, "err", err)
+			return nil
+		}
+		if found {
 			return nil
 		}
 		if d.IsDir() || d.Name() != "shard_0" {
@@ -67,8 +73,13 @@ func (p *LocalObjectPicker) PickObjectOnSrcNode(_ string) (string, string, strin
 		if len(parts) != 2 {
 			return nil
 		}
-		foundBucket = parts[0]
-		foundKey = filepath.Dir(parts[1]) // strip trailing "/shard_0"
+		bucket := parts[0]
+		key := filepath.Dir(parts[1]) // strip trailing "/shard_0"
+		if skipIDs[bucket+"/"+key+"/"] {
+			return nil // already inflight, keep walking
+		}
+		foundBucket = bucket
+		foundKey = key
 		found = true
 		return fs.SkipAll
 	})
@@ -281,12 +292,18 @@ func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string
 		}
 	}
 
-	bucket, key, versionID, ok := p.picker.PickObjectOnSrcNode(src)
+	// Build skip set so picker avoids objects already in-flight.
+	skipIDs := make(map[string]bool, len(p.inflight))
+	for k := range p.inflight {
+		skipIDs[k] = true
+	}
+
+	bucket, key, versionID, ok := p.picker.PickObjectOnSrcNode(src, skipIDs)
 	if !ok {
 		return
 	}
 
-	// Skip objects that already have a migration in flight to avoid duplicate Raft proposals.
+	// Guard: picker may not respect skipIDs (e.g., mock in tests). Double-check.
 	inflightID := bucket + "/" + key + "/" + versionID
 	if exp, inFlight := p.inflight[inflightID]; inFlight && now.Before(exp) {
 		return

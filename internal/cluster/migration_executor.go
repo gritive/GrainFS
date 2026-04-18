@@ -200,6 +200,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	if err := e.mover.DeleteShards(ctx, task.SrcNode, task.Bucket, task.Key); err != nil {
 		e.logger.Warn("migration: delete src failed",
 			"src", task.SrcNode, "bucket", task.Bucket, "key", task.Key, "err", err)
+		metrics.BalancerMigrationsFailedTotal.Inc()
 	}
 
 	metrics.BalancerMigrationsDoneTotal.Inc()
