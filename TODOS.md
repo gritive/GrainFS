@@ -10,7 +10,6 @@
 - [ ] 신규 노드 join 시 grace period (10분, trigger 50% 완화) — migration storm 방지
 - [ ] Rolling upgrade 대응: warm-up timeout 후 available peers로 시작, protobuf unknown field tolerance
 - [ ] Health endpoint: GET /cluster/balancer/status (pending migrations, last gossip, imbalance pct)
-- [ ] Operator runbook: docs/operations/balancer.md
 - [ ] E2E: disk-fill 전략 — 테스트 하니스에서 diskUsedPct 주입 hook
 - [ ] cluster.proto NodeStatsMsg에 joined_at 필드 추가 + protobuf 재생성 (grace period 구현용)
 
