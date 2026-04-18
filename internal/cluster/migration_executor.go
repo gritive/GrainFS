@@ -143,11 +143,11 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		delete(e.committed, id)
 		earlyCommit = true
 	}
-	var commitCh chan struct{}
-	if !earlyCommit {
-		commitCh = make(chan struct{})
-		e.pending[id] = commitCh
-	}
+	// Always register a pending channel — even on earlyCommit — so that a concurrent
+	// Execute that arrives after we release mu (but before markDone) blocks here
+	// instead of falling through to Phase 1 and re-copying already-committed shards.
+	commitCh := make(chan struct{})
+	e.pending[id] = commitCh
 	e.mu.Unlock()
 
 	if !earlyCommit {
@@ -182,12 +182,19 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		}
 	}
 
-	// Mark done before Phase 4: concurrent callers waiting on the commit channel
-	// would otherwise race to re-enter Execute() and start Phase 1 again before
-	// DeleteShards completes (Phase 4 is best-effort and logged on failure).
+	// Mark done before Phase 4. For the earlyCommit path, also remove the sentinel
+	// pending channel we registered and close it to unblock any concurrent Execute
+	// that arrived after we released mu but before markDone.
+	// For the normal path, NotifyCommit already removed the channel from pending.
 	e.mu.Lock()
 	e.markDone(id)
+	if earlyCommit {
+		delete(e.pending, id)
+	}
 	e.mu.Unlock()
+	if earlyCommit {
+		close(commitCh)
+	}
 
 	// Phase 4: delete from src — runs whether earlyCommit or normal path.
 	if err := e.mover.DeleteShards(ctx, task.SrcNode, task.Bucket, task.Key); err != nil {
@@ -199,11 +206,18 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	return nil
 }
 
-// cleanupPending removes the pending channel for id, used on error paths.
+// cleanupPending removes the pending channel for id (error paths) and closes it
+// so any goroutine waiting on it unblocks and returns rather than leaking.
 func (e *MigrationExecutor) cleanupPending(id string) {
 	e.mu.Lock()
-	delete(e.pending, id)
+	ch, ok := e.pending[id]
+	if ok {
+		delete(e.pending, id)
+	}
 	e.mu.Unlock()
+	if ok {
+		close(ch)
+	}
 }
 
 // markDone records id as completed. Must be called with mu held.

@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -385,4 +387,44 @@ func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) 
 	p.tickOnce(context.Background())
 
 	assert.NotEmpty(t, node.proposed, "grace period expired: normal 20% trigger applies, 25% should fire")
+}
+
+// TestBalancerProposer_InflightDedup verifies that the same object is not
+// proposed again on the next tick while a migration is already in flight.
+func TestBalancerProposer_InflightDedup(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 10})
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+
+	// First tick: migration proposed and added to inflight.
+	p.tickOnce(context.Background())
+	require.Len(t, node.proposed, 1, "first tick must propose")
+
+	// Second tick: same object still in inflight → must be skipped.
+	p.tickOnce(context.Background())
+	assert.Len(t, node.proposed, 1, "second tick must not re-propose while migration is inflight")
+}
+
+// TestLocalObjectPicker_NestedKey verifies that PickObjectOnSrcNode finds objects
+// whose S3 key contains '/' (stored as nested directories by ShardService).
+func TestLocalObjectPicker_NestedKey(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate ShardService on-disk layout: {shardsDir}/{bucket}/{key}/shard_0
+	// Key "photos/2024/img.jpg" → nested dirs
+	keyPath := filepath.Join(dir, "mybucket", "photos", "2024", "img.jpg")
+	require.NoError(t, os.MkdirAll(keyPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keyPath, "shard_0"), []byte("data"), 0o644))
+
+	picker := NewLocalObjectPicker(dir)
+	bucket, key, versionID, ok := picker.PickObjectOnSrcNode("any")
+
+	require.True(t, ok, "should find the nested-key object")
+	assert.Equal(t, "mybucket", bucket)
+	assert.Equal(t, filepath.Join("photos", "2024", "img.jpg"), key)
+	assert.Empty(t, versionID)
 }

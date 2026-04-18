@@ -213,8 +213,8 @@ var (
 		Buckets: prometheus.DefBuckets,
 	})
 
-	BalancerGracePeriodSkipsTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "grainfs_balancer_grace_period_skips_total",
-		Help: "Total imbalance triggers skipped because a node is still in its join grace period.",
+	BalancerGracePeriodActiveTicks = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_grace_period_active_ticks_total",
+		Help: "Total balancer tick evaluations where at least one peer was within the join grace period (imbalance trigger relaxed by 1.5×).",
 	})
 )

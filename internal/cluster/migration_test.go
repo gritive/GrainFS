@@ -327,3 +327,43 @@ func TestMigrationExecutor_NotifyCommit_Unblocks(t *testing.T) {
 		t.Fatal("Execute did not unblock after NotifyCommit")
 	}
 }
+
+// TestMigrationExecutor_EarlyCommitConcurrentExecute guards the earlyCommit race:
+// G1 takes earlyCommit path, G2 arrives between G1's mu.Unlock and markDone.
+// G2 must NOT start Phase 1 again; it should block on G1's sentinel channel and return.
+func TestMigrationExecutor_EarlyCommitConcurrentExecute(t *testing.T) {
+	mover := &mockShardMover{}
+	node := &mockMigrationRaft{nodeID: "node-a"}
+	exec := NewMigrationExecutor(mover, node, 2)
+
+	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c"}
+
+	// Pre-notify: FSM applied CmdMigrationDone before Execute is called.
+	exec.NotifyCommit(task.Bucket, task.Key, task.VersionID)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 5)
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- exec.Execute(context.Background(), task)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		assert.NoError(t, err)
+	}
+	// Shards must never be copied (earlyCommit path, Phases 1-3 already done before crash).
+	mover.mu.Lock()
+	writes := len(mover.writes)
+	mover.mu.Unlock()
+	assert.Zero(t, writes, "no shard copies on earlyCommit path")
+	// Phase 4 must run exactly once.
+	mover.mu.Lock()
+	deletes := len(mover.deletes)
+	mover.mu.Unlock()
+	assert.Equal(t, 1, deletes, "DeleteShards must run exactly once")
+}

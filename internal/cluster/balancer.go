@@ -2,11 +2,12 @@ package cluster
 
 import (
 	"context"
+	"io/fs"
 	"log/slog"
 	"math"
-	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -14,6 +15,10 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
+
+// migrationInflightTTL is the duration a proposed migration is tracked to prevent
+// re-proposing the same object while Phase 1-3 are in progress.
+const migrationInflightTTL = 5 * time.Minute
 
 // ObjectPicker selects an object stored locally on the source node for migration.
 // SrcNode is always the leader itself, so implementations scan local storage.
@@ -37,30 +42,39 @@ func NewLocalObjectPicker(shardsDir string) *LocalObjectPicker {
 	return &LocalObjectPicker{shardsDir: shardsDir}
 }
 
-// PickObjectOnSrcNode returns the first object that has shard_0 stored locally.
+// PickObjectOnSrcNode returns the first locally-stored object that has a shard_0 file.
 // nodeID is accepted for interface compatibility but ignored (always scans local dir).
+// Uses WalkDir to handle S3 keys containing '/' — ShardService stores them verbatim as
+// nested directories (e.g. key "a/b/c" → {bucket}/a/b/c/shard_0), so a 2-level ReadDir
+// would miss them. versionID is always "" because ShardService is version-oblivious.
 func (p *LocalObjectPicker) PickObjectOnSrcNode(_ string) (string, string, string, bool) {
-	buckets, err := os.ReadDir(p.shardsDir)
-	if err != nil {
-		return "", "", "", false
-	}
-	for _, b := range buckets {
-		if !b.IsDir() {
-			continue
+	var foundBucket, foundKey string
+	found := false
+
+	_ = filepath.WalkDir(p.shardsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return nil
 		}
-		keys, err := os.ReadDir(filepath.Join(p.shardsDir, b.Name()))
-		if err != nil {
-			continue
+		if d.IsDir() || d.Name() != "shard_0" {
+			return nil
 		}
-		for _, k := range keys {
-			if !k.IsDir() {
-				continue
-			}
-			shard0 := filepath.Join(p.shardsDir, b.Name(), k.Name(), "shard_0")
-			if _, err := os.Stat(shard0); err == nil {
-				return b.Name(), k.Name(), "", true
-			}
+		rel, relErr := filepath.Rel(p.shardsDir, path)
+		if relErr != nil {
+			return nil
 		}
+		// rel = "{bucket}/{key...}/shard_0"
+		parts := strings.SplitN(rel, string(filepath.Separator), 2)
+		if len(parts) != 2 {
+			return nil
+		}
+		foundBucket = parts[0]
+		foundKey = filepath.Dir(parts[1]) // strip trailing "/shard_0"
+		found = true
+		return fs.SkipAll
+	})
+
+	if found {
+		return foundBucket, foundKey, "", true
 	}
 	return "", "", "", false
 }
@@ -114,6 +128,7 @@ type BalancerProposer struct {
 	active    bool        // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt time.Time
 	picker    ObjectPicker // nil = no proposals until SetObjectPicker is called
+	inflight  map[string]time.Time // proposed migrations not yet committed; keyed by task.id()
 	logger    *slog.Logger
 }
 
@@ -125,8 +140,17 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 		node:      node,
 		cfg:       cfg,
 		startedAt: time.Now(),
+		inflight:  make(map[string]time.Time),
 		logger:    slog.Default().With("component", "balancer"),
 	}
+}
+
+// NotifyMigrationDone removes the inflight entry for the given migration, allowing
+// the same object to be re-proposed if it still exists on this node.
+// Called by the FSM when CmdMigrationDone is applied.
+func (p *BalancerProposer) NotifyMigrationDone(bucket, key, versionID string) {
+	id := bucket + "/" + key + "/" + versionID
+	delete(p.inflight, id)
 }
 
 // SetObjectPicker sets the picker used by proposeMigration to select which object to move.
@@ -182,7 +206,7 @@ func (p *BalancerProposer) tickOnce(ctx context.Context) {
 	effectiveTrigger := p.cfg.ImbalanceTriggerPct
 	if p.cfg.GracePeriod > 0 && p.anyNodeInGracePeriod() {
 		effectiveTrigger *= 1.5
-		metrics.BalancerGracePeriodSkipsTotal.Inc()
+		metrics.BalancerGracePeriodActiveTicks.Inc()
 	}
 
 	// Hysteresis: activate above trigger, deactivate below stop.
@@ -248,10 +272,27 @@ func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string
 	if p.picker == nil {
 		return
 	}
+
+	// Sweep expired inflight entries before checking.
+	now := time.Now()
+	for k, exp := range p.inflight {
+		if now.After(exp) {
+			delete(p.inflight, k)
+		}
+	}
+
 	bucket, key, versionID, ok := p.picker.PickObjectOnSrcNode(src)
 	if !ok {
 		return
 	}
+
+	// Skip objects that already have a migration in flight to avoid duplicate Raft proposals.
+	inflightID := bucket + "/" + key + "/" + versionID
+	if exp, inFlight := p.inflight[inflightID]; inFlight && now.Before(exp) {
+		return
+	}
+	p.inflight[inflightID] = now.Add(migrationInflightTTL)
+
 	inner, err := proto.Marshal(&clusterpb.MigrateShardCmd{
 		Bucket:    bucket,
 		Key:       key,
