@@ -200,13 +200,99 @@ func buildCanonicalRequest(r *http.Request, signedHeadersStr string) string {
 		r.Method, uri, query, canonicalHeaders.String(), signedHeadersStr, payloadHash)
 }
 
-func calculateSignature(secretKey, date, region, service, stringToSign string) string {
+// DeriveSigningKey computes the SigV4 signing key from credential components.
+// The key is stable for the calendar day given the same (secret, date, region, service).
+func DeriveSigningKey(secretKey, date, region, service string) []byte {
 	dateKey := hmacSHA256([]byte("AWS4"+secretKey), []byte(date))
 	regionKey := hmacSHA256(dateKey, []byte(region))
 	serviceKey := hmacSHA256(regionKey, []byte(service))
-	signingKey := hmacSHA256(serviceKey, []byte("aws4_request"))
-	sig := hmacSHA256(signingKey, []byte(stringToSign))
-	return hex.EncodeToString(sig)
+	return hmacSHA256(serviceKey, []byte("aws4_request"))
+}
+
+func calculateSignature(secretKey, date, region, service, stringToSign string) string {
+	signingKey := DeriveSigningKey(secretKey, date, region, service)
+	return hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+}
+
+// VerifyWithSigningKey verifies a request using a pre-derived signing key.
+// Skips the 4-round key derivation — use when the signing key is cached.
+// Still performs full canonical request construction and HMAC verification.
+func (v *Verifier) VerifyWithSigningKey(r *http.Request, accessKey string, signingKey []byte) error {
+	if r.URL.Query().Get("X-Amz-Algorithm") != "" {
+		return v.verifyPresignedWithKey(r, signingKey)
+	}
+	return v.verifyHeaderWithKey(r, accessKey, signingKey)
+}
+
+func (v *Verifier) verifyHeaderWithKey(r *http.Request, accessKey string, signingKey []byte) error {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") {
+		return fmt.Errorf("unsupported auth scheme")
+	}
+	parts := parseAuthHeader(auth)
+	credParts := strings.Split(parts["Credential"], "/")
+	if len(credParts) < 5 {
+		return fmt.Errorf("malformed credential")
+	}
+	signedHeaders := parts["SignedHeaders"]
+	signature := parts["Signature"]
+	if signedHeaders == "" || signature == "" {
+		return fmt.Errorf("malformed Authorization header")
+	}
+	date, region, service := credParts[1], credParts[2], credParts[3]
+	amzDate := r.Header.Get("X-Amz-Date")
+
+	canonicalRequest := buildCanonicalRequest(r, signedHeaders)
+	h := sha256.Sum256([]byte(canonicalRequest))
+	scope := fmt.Sprintf("%s/%s/%s/aws4_request", date, region, service)
+	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s", amzDate, scope, hex.EncodeToString(h[:]))
+
+	expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+	if !hmac.Equal([]byte(signature), []byte(expected)) {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
+}
+
+func (v *Verifier) verifyPresignedWithKey(r *http.Request, signingKey []byte) error {
+	q := r.URL.Query()
+	amzDate := q.Get("X-Amz-Date")
+	expiresStr := q.Get("X-Amz-Expires")
+	signedHeaders := q.Get("X-Amz-SignedHeaders")
+	signature := q.Get("X-Amz-Signature")
+	credential := q.Get("X-Amz-Credential")
+
+	if credential == "" || amzDate == "" || expiresStr == "" || signedHeaders == "" || signature == "" {
+		return fmt.Errorf("missing presigned URL parameters")
+	}
+	reqTime, err := time.Parse("20060102T150405Z", amzDate)
+	if err != nil {
+		return fmt.Errorf("invalid X-Amz-Date: %w", err)
+	}
+	expires, err := strconv.Atoi(expiresStr)
+	if err != nil {
+		return fmt.Errorf("invalid X-Amz-Expires: %w", err)
+	}
+	if time.Now().After(reqTime.Add(time.Duration(expires) * time.Second)) {
+		return fmt.Errorf("presigned URL expired")
+	}
+
+	credParts := strings.Split(credential, "/")
+	if len(credParts) < 5 {
+		return fmt.Errorf("malformed credential")
+	}
+	date, region, service := credParts[1], credParts[2], credParts[3]
+
+	canonicalRequest := buildPresignedCanonicalRequest(r, signedHeaders)
+	h := sha256.Sum256([]byte(canonicalRequest))
+	scope := fmt.Sprintf("%s/%s/%s/aws4_request", date, region, service)
+	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s", amzDate, scope, hex.EncodeToString(h[:]))
+
+	expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+	if !hmac.Equal([]byte(signature), []byte(expected)) {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
 }
 
 func hmacSHA256(key, data []byte) []byte {
