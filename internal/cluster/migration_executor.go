@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -43,6 +44,16 @@ type MigrationRaft interface {
 // Worst case: an already-done migration is re-executed, which is idempotent.
 const maxDoneHistory = 10_000
 
+// ttlEntry tracks a pending migration for TTL-based cancellation.
+// Lock order: mu → pendingMu when both are needed.
+// sweepExpired holds pendingMu and calls cancel() — cancel must NOT acquire mu.
+type ttlEntry struct {
+	cancel     func()
+	deadline   time.Time    // when this entry expires; updated on extension
+	proposedAt atomic.Int64 // unix nano; non-zero after Phase 2 (Raft proposal submitted)
+	extended   atomic.Bool  // true after the single deadline extension (Option A)
+}
+
 // MigrationExecutor copies all shards from src→dst, proposes CmdMigrationDone,
 // waits for FSM to confirm commit, then deletes from src.
 type MigrationExecutor struct {
@@ -50,25 +61,139 @@ type MigrationExecutor struct {
 	node      MigrationRaft
 	numShards int
 
+	// mu protects done, committed, pending (commit channels).
+	// Lock order: mu → pendingMu when both are needed.
 	mu        sync.Mutex
 	done      map[string]struct{}     // idempotency: taskID → done
 	committed map[string]struct{}     // early commit arrivals: Raft committed before Execute()
 	pending   map[string]chan struct{} // commit channels: taskID → chan
 
+	// pendingMu protects ttlPending. sweepExpired holds pendingMu and calls cancel(),
+	// which must NOT re-acquire mu.
+	pendingMu  sync.Mutex
+	ttlPending map[string]*ttlEntry // TTL-tracked entries: taskID → entry
+	pendingTTL time.Duration        // 0 = TTL sweep disabled
+
 	logger *slog.Logger
 }
 
-// NewMigrationExecutor creates an executor with the given shard count.
+// NewMigrationExecutor creates an executor with the given shard count. TTL sweep disabled.
 func NewMigrationExecutor(mover ShardMover, node MigrationRaft, numShards int) *MigrationExecutor {
+	return newExecutor(mover, node, numShards, 0)
+}
+
+// NewMigrationExecutorWithTTL creates an executor with TTL-based pending sweep.
+// Call Start(ctx) to begin the sweep loop.
+func NewMigrationExecutorWithTTL(mover ShardMover, node MigrationRaft, numShards int, ttl time.Duration) *MigrationExecutor {
+	return newExecutor(mover, node, numShards, ttl)
+}
+
+func newExecutor(mover ShardMover, node MigrationRaft, numShards int, ttl time.Duration) *MigrationExecutor {
 	return &MigrationExecutor{
-		mover:     mover,
-		node:      node,
-		numShards: numShards,
-		done:      make(map[string]struct{}),
-		committed: make(map[string]struct{}),
-		pending:   make(map[string]chan struct{}),
-		logger:    slog.Default().With("component", "migration"),
+		mover:      mover,
+		node:       node,
+		numShards:  numShards,
+		done:       make(map[string]struct{}),
+		committed:  make(map[string]struct{}),
+		pending:    make(map[string]chan struct{}),
+		ttlPending: make(map[string]*ttlEntry),
+		pendingTTL: ttl,
+		logger:     slog.Default().With("component", "migration"),
 	}
+}
+
+// Start launches the background TTL sweep loop. No-op if pendingTTL == 0.
+func (e *MigrationExecutor) Start(ctx context.Context) {
+	if e.pendingTTL == 0 {
+		return
+	}
+	go e.sweepLoop(ctx)
+}
+
+// sweepLoop runs sweepExpired every pendingTTL/2, stopping when ctx is done.
+func (e *MigrationExecutor) sweepLoop(ctx context.Context) {
+	ticker := time.NewTicker(e.pendingTTL / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.sweepExpired()
+		}
+	}
+}
+
+// sweepExpired cancels and removes TTL entries that have passed their deadline.
+// For entries with proposedAt set (Phase 2 done, awaiting Raft commit), the
+// deadline is extended by one TTL window (Option A). A second expiry cancels.
+func (e *MigrationExecutor) sweepExpired() {
+	now := time.Now()
+
+	e.pendingMu.Lock()
+	var toCancel []func()
+	var toDelete []string
+	for id, entry := range e.ttlPending {
+		if now.Before(entry.deadline) {
+			continue // not yet expired
+		}
+		// Entry has expired.
+		if entry.proposedAt.Load() != 0 && !entry.extended.Load() {
+			// Phase 2 complete: extend once instead of cancelling (Option A).
+			entry.deadline = now.Add(e.pendingTTL)
+			entry.extended.Store(true)
+			continue
+		}
+		// Either not proposed yet, or already extended once: cancel.
+		toCancel = append(toCancel, entry.cancel)
+		toDelete = append(toDelete, id)
+	}
+	for _, id := range toDelete {
+		delete(e.ttlPending, id)
+	}
+	e.pendingMu.Unlock()
+
+	for _, cancel := range toCancel {
+		cancel()
+	}
+	if len(toDelete) > 0 {
+		metrics.BalancerMigrationPendingTTLExpiredTotal.Add(float64(len(toDelete)))
+	}
+}
+
+// registerPending adds an entry to the TTL sweep map with deadline = now + pendingTTL.
+func (e *MigrationExecutor) registerPending(id string, cancel func()) {
+	e.pendingMu.Lock()
+	e.ttlPending[id] = &ttlEntry{
+		cancel:   cancel,
+		deadline: time.Now().Add(e.pendingTTL),
+	}
+	e.pendingMu.Unlock()
+}
+
+// removePending removes an entry from the TTL sweep map (called after successful commit).
+func (e *MigrationExecutor) removePending(id string) {
+	e.pendingMu.Lock()
+	delete(e.ttlPending, id)
+	e.pendingMu.Unlock()
+}
+
+// markProposed sets proposedAt for id (called after Phase 2 succeeds).
+func (e *MigrationExecutor) markProposed(id string) {
+	e.pendingMu.Lock()
+	entry, ok := e.ttlPending[id]
+	e.pendingMu.Unlock()
+	if ok {
+		entry.proposedAt.Store(time.Now().UnixNano())
+	}
+}
+
+// hasPending reports whether id is in the TTL sweep map.
+func (e *MigrationExecutor) hasPending(id string) bool {
+	e.pendingMu.Lock()
+	_, ok := e.ttlPending[id]
+	e.pendingMu.Unlock()
+	return ok
 }
 
 // NotifyCommit is called by the FSM when CmdMigrationDone is applied.
@@ -152,6 +277,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 
 	if !earlyCommit {
 		// Phase 1: copy all shards src → dst
+		e.logger.Debug("migration phase start", "phase", "1", "task", id)
 		copyStart := time.Now()
 		for i := range e.numShards {
 			data, err := e.mover.ReadShard(ctx, task.SrcNode, task.Bucket, task.Key, i)
@@ -168,12 +294,15 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		metrics.BalancerShardCopyDuration.Observe(time.Since(copyStart).Seconds())
 
 		// Phase 2: propose CmdMigrationDone to Raft
+		e.logger.Debug("migration phase start", "phase", "2", "task", id)
 		if err := e.proposeDone(task); err != nil {
 			e.cleanupPending(id)
 			return err
 		}
+		e.markProposed(id)
 
 		// Phase 3: wait for FSM to apply CmdMigrationDone (= Raft commit confirmed)
+		e.logger.Debug("migration phase start", "phase", "3", "task", id)
 		select {
 		case <-commitCh:
 		case <-ctx.Done():
@@ -197,11 +326,13 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	}
 
 	// Phase 4: delete from src — runs whether earlyCommit or normal path.
+	e.logger.Debug("migration phase start", "phase", "4", "task", id)
 	if err := e.mover.DeleteShards(ctx, task.SrcNode, task.Bucket, task.Key); err != nil {
 		e.logger.Warn("migration: delete src failed",
-			"src", task.SrcNode, "bucket", task.Bucket, "key", task.Key, "err", err)
+			"phase", "4", "src", task.SrcNode, "bucket", task.Bucket, "key", task.Key, "err", err)
 		metrics.BalancerMigrationsFailedTotal.Inc()
 	}
+	e.removePending(id)
 
 	metrics.BalancerMigrationsDoneTotal.Inc()
 	return nil
