@@ -77,3 +77,29 @@ message SnapshotState {
 message MultipartMeta {
   string content_type = 1;
 }
+
+// NodeStatsMsg is broadcast via StreamAdmin every 30s for cluster-wide visibility.
+message NodeStatsMsg {
+  string node_id = 1;
+  double disk_used_pct = 2;
+  uint64 disk_avail_bytes = 3;
+  double requests_per_sec = 4;
+}
+
+// MigrateShardCmd requests movement of a full object copy from src to dst.
+message MigrateShardCmd {
+  string bucket = 1;
+  string key = 2;
+  string version_id = 3;
+  string src_node = 4;
+  string dst_node = 5;
+}
+
+// MigrationDoneCmd signals that a migration has completed successfully.
+message MigrationDoneCmd {
+  string bucket = 1;
+  string key = 2;
+  string version_id = 3;
+  string src_node = 4;
+  string dst_node = 5;
+}

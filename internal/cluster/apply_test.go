@@ -335,3 +335,65 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
+
+func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	ch := make(chan MigrationTask, 1)
+	fsm.SetMigrationHooks(ch, nil)
+
+	data, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
+		Bucket:    "my-bucket",
+		Key:       "my-key",
+		VersionID: "v1",
+		SrcNode:   "node-a",
+		DstNode:   "node-b",
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	var received MigrationTask
+	select {
+	case received = <-ch:
+	default:
+		t.Fatal("expected migration task on channel")
+	}
+	assert.Equal(t, "my-bucket", received.Bucket)
+	assert.Equal(t, "node-b", received.DstNode)
+}
+
+func TestFSM_MigrationDone_NotifiesCommit(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	notified := make(chan struct{}, 1)
+	fsm.SetMigrationHooks(nil, &migrationDoneNotifier{fn: func(bucket, key, versionID string) {
+		notified <- struct{}{}
+	}})
+
+	data, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
+		Bucket:    "my-bucket",
+		Key:       "my-key",
+		VersionID: "v1",
+		SrcNode:   "node-a",
+		DstNode:   "node-b",
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	select {
+	case <-notified:
+	default:
+		t.Fatal("NotifyCommit was not called")
+	}
+}
+
+// migrationDoneNotifier is a test helper implementing the commitNotifier interface.
+type migrationDoneNotifier struct {
+	fn func(bucket, key, versionID string)
+}
+
+func (n *migrationDoneNotifier) NotifyCommit(bucket, key, versionID string) {
+	n.fn(bucket, key, versionID)
+}

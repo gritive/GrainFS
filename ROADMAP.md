@@ -248,3 +248,22 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - 100MB 파일 throughput: >100MB/s (이전 ~30-50MB/s)
 - Buffer pool hit rate: >90% (연속 전송 시)
 - Concurrent 100MB transfers: 10+ 동시 처리 가능
+
+### Phase 13: Auto-Balancing ✅
+
+**목표:** 클러스터 노드 간 디스크 사용률 불균형을 자동으로 해소한다.
+
+- **Gossip 프로토콜** ✅ — 노드별 `DiskUsedPct`/`RequestsPerSec` 를 QUIC 스트림으로 주기적으로 브로드캐스트. `GossipSender`/`GossipReceiver` + `NodeStatsStore` 구현. cold-start 시 DiskUsedPct=0 브로드캐스트 스킵으로 마이그레이션 폭풍 방지.
+- **BalancerProposer** ✅ — Raft 리더만 실행하는 발란싱 루프. 히스테리시스(trigger/stop 임계값), 리더 tenure 타이머, 부하 기반 리더십 이전 포함. `BalancerConfig`로 모든 파라미터 주입 가능.
+- **MigrationExecutor** ✅ — FSM에서 `CmdMigrateShard`/`CmdMigrationDone` 수신 시 `MigrationTask` 채널로 비동기 전달. `SetMigrationHooks`로 FSM과 연결.
+- **부하 기반 읽기 라우팅** ✅ — `selectPeerByLoad`로 자신이 과부하일 때 요청을 경량 피어로 리다이렉트.
+- **QUIC StreamRouter 개선** ✅ — Gossip 스트림이 전용 채널을 사용해 제어 스트림과 독립 처리. 데드락 제거.
+- **보안**: NodeId 스푸핑 방지 (`conn.RemoteAddr()` 검증), Gossip 수신값 범위 클램프.
+
+> **Note:** `BalancerProposer`/`MigrationExecutor`의 `cmd/` 배선 및 실제 오브젝트 선택 로직은 Phase 14에서 완성 예정.
+
+**검증:**
+- 3노드 클러스터에서 Gossip 브로드캐스트 수신 및 `NodeStatsStore` 업데이트 확인 (unit/integration test)
+- `BalancerProposer.tickOnce`가 임계값 초과 시 `CmdMigrateShard` 제안 생성 확인
+- FSM `applyMigrateShard`가 `MigrationTask` 채널로 비동기 전달 확인
+- 부하 기반 피어 선택: 과부하 노드에서 최경량 피어로 리다이렉트 확인

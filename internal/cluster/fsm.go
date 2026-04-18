@@ -21,6 +21,8 @@ const (
 	CmdAbortMultipart        CommandType = 7
 	CmdSetBucketPolicy       CommandType = 8
 	CmdDeleteBucketPolicy    CommandType = 9
+	CmdMigrateShard          CommandType = 10
+	CmdMigrationDone         CommandType = 11
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -82,6 +84,24 @@ type SetBucketPolicyCmd struct {
 
 type DeleteBucketPolicyCmd struct {
 	Bucket string
+}
+
+// MigrateShardFSMCmd is the FSM-level command requesting a shard migration.
+type MigrateShardFSMCmd struct {
+	Bucket    string
+	Key       string
+	VersionID string
+	SrcNode   string
+	DstNode   string
+}
+
+// MigrationDoneFSMCmd is the FSM-level command confirming a migration is complete.
+type MigrationDoneFSMCmd struct {
+	Bucket    string
+	Key       string
+	VersionID string
+	SrcNode   string
+	DstNode   string
 }
 
 // EncodeCommand serializes a command for Raft proposal using protobuf.

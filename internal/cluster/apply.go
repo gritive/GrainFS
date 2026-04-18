@@ -2,14 +2,39 @@ package cluster
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
+	"sync"
 
 	"github.com/dgraph-io/badger/v4"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // FSM applies committed Raft log entries to BadgerDB metadata store.
 type FSM struct {
 	db *badger.DB
+
+	// Guards onMigrateShard and commitNotifier against concurrent SetMigrationHooks + Apply.
+	mu sync.RWMutex
+
+	// Optional hooks for Phase 13 balancer. Nil in solo/non-balancer mode.
+	// onMigrateShard is a buffered channel; Apply sends non-blocking to avoid blocking the Raft apply loop.
+	onMigrateShard  chan<- MigrationTask
+	commitNotifier  interface {
+		NotifyCommit(bucket, key, versionID string)
+	}
+}
+
+// SetMigrationHooks wires the FSM to the balancer/migration subsystem.
+// ch must be a buffered channel; Apply drops tasks if the channel is full.
+func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
+	NotifyCommit(bucket, key, versionID string)
+}) {
+	f.mu.Lock()
+	f.onMigrateShard = ch
+	f.commitNotifier = notifier
+	f.mu.Unlock()
 }
 
 // NewFSM creates a new finite state machine backed by BadgerDB.
@@ -43,8 +68,12 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetBucketPolicy(cmd.Data)
 	case CmdDeleteBucketPolicy:
 		return f.applyDeleteBucketPolicy(cmd.Data)
+	case CmdMigrateShard:
+		return f.applyMigrateShard(cmd.Data)
+	case CmdMigrationDone:
+		return f.applyMigrationDone(cmd.Data)
 	default:
-		log.Printf("fsm: unknown command type %d", cmd.Type)
+		slog.Warn("fsm: unknown command type", "type", cmd.Type)
 		return nil
 	}
 }
@@ -183,6 +212,49 @@ func (f *FSM) applyDeleteBucketPolicy(data []byte) error {
 		}
 		return err
 	})
+}
+
+func (f *FSM) applyMigrateShard(data []byte) error {
+	var cmd clusterpb.MigrateShardCmd
+	if err := proto.Unmarshal(data, &cmd); err != nil {
+		return fmt.Errorf("decode MigrateShardCmd: %w", err)
+	}
+	// Guard: balancer proposals without object identity are placeholders; skip them.
+	if cmd.Bucket == "" || cmd.Key == "" {
+		return nil
+	}
+	task := MigrationTask{
+		Bucket:    cmd.Bucket,
+		Key:       cmd.Key,
+		VersionID: cmd.VersionId,
+		SrcNode:   cmd.SrcNode,
+		DstNode:   cmd.DstNode,
+	}
+	f.mu.RLock()
+	ch := f.onMigrateShard
+	f.mu.RUnlock()
+	if ch != nil {
+		select {
+		case ch <- task:
+		default:
+			slog.Warn("fsm: migration queue full, dropping task", "bucket", task.Bucket, "key", task.Key)
+		}
+	}
+	return nil
+}
+
+func (f *FSM) applyMigrationDone(data []byte) error {
+	var cmd clusterpb.MigrationDoneCmd
+	if err := proto.Unmarshal(data, &cmd); err != nil {
+		return fmt.Errorf("decode MigrationDoneCmd: %w", err)
+	}
+	f.mu.RLock()
+	notifier := f.commitNotifier
+	f.mu.RUnlock()
+	if notifier != nil {
+		notifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionId)
+	}
+	return nil
 }
 
 // Snapshot serializes the full metadata state for Raft snapshots.

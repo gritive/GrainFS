@@ -39,10 +39,10 @@ type DistributedBackend struct {
 	onApply     OnApplyFunc
 	snapMgr     *raft.SnapshotManager
 	snapNode    *raft.Node // node for CompactLog after snapshot
-	shardSvc    *ShardService
-	allNodes    []string      // all node addresses (including self) for shard placement
-	peerHealth  *PeerHealth
-	registry    *Registry      // cache invalidators (VFS instances)
+	shardSvc   *ShardService
+	allNodes   []string // all node addresses (including self) for shard placement
+	peerHealth *PeerHealth
+	registry   *Registry // cache invalidators (VFS instances)
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
