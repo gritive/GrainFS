@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.10] - 2026-04-19
+
+### Added
+- **Circuit Breaker** — per-node 2-state (open/closed) disk-full 게이트. `grainfs_balancer_cb_open` (GaugeVec) 메트릭으로 상태 노출. `--balancer-cb-threshold` 플래그 (기본 0.90 = 90%)로 설정.
+- **WriteShard 재시도** — 지수 백오프 + ±20% 지터, `ErrPermanent` 즉시 실패 경로. `--balancer-migration-max-retries` 플래그 (기본 3회). `grainfs_balancer_shard_write_retries_total` (CounterVec) 메트릭.
+- **Pending Migration TTL** — 좀비 마이그레이션 자동 취소. Phase 2 이후 1회 연장(Option A), 2차 만료 시 취소. `--balancer-migration-pending-ttl` 플래그 (기본 5분). `grainfs_balancer_migration_pending_ttl_expired_total` 메트릭.
+- **Structured Logging** — `MigrationExecutor` 각 Phase(1-4)에 `phase=` 필드 포함 slog 출력.
+- **warmupComplete 수정** — `store.Len()` 비교 대신 `NodeStats.UpdatedAt` + `PeerSeenWindow` 기반 최근성 검사. `--balancer-peer-seen-window` 계열 설정 지원.
+- **4개 신규 메트릭** — `grainfs_balancer_cb_open`, `grainfs_balancer_cb_all_open_total`, `grainfs_balancer_shard_write_retries_total`, `grainfs_balancer_migration_pending_ttl_expired_total`.
+
+### Fixed
+- **MigrationExecutor 레이스 컨디션** — `NotifyCommit`이 `pending[id]`를 조기 삭제해 동시 goroutine이 Phase 1을 재실행하던 버그 수정. 이제 `Execute`가 `markDone` 직후 `mu` 홀딩 상태에서 삭제.
+- **`tickOnce`/`proposeMigration` 미사용 ctx 파라미터** — 시그니처에서 제거, 연관 테스트 정리.
+- **중복 `component=balancer` 로그 필드** — `selectDstNode` Warn 로그에서 이미 logger에 설정된 필드 중복 제거.
+
 ## [0.0.9] - 2026-04-19
 
 ### Added
