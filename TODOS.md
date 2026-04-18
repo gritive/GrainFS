@@ -3,7 +3,6 @@
 ## Phase 13: Operations
 
 - [ ] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
-- [x] life cycle management
 
 ## Phase 14: Scale
 
