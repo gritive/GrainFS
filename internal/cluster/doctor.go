@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -138,31 +137,15 @@ func (d *Doctor) checkBadgerDB() CheckResult {
 
 func (d *Doctor) checkDiskSpace() CheckResult {
 	start := time.Now()
-	wd := d.dataDir
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(wd, &stat); err != nil {
+	usedPct, availBytes := sysDiskStat(d.dataDir)
+	if usedPct == 0 && availBytes == 0 {
 		return CheckResult{
 			Status:   "warn",
-			Message:  fmt.Sprintf("Unable to check disk space: %v", err),
+			Message:  "Unable to check disk space",
 			Duration: time.Since(start).String(),
 		}
 	}
-
-	// Calculate available space (in bytes)
-	available := stat.Bavail * uint64(stat.Bsize)
-	total := stat.Blocks * uint64(stat.Bsize)
-
-	// Avoid divide by zero
-	if total == 0 {
-		return CheckResult{
-			Status:   "warn",
-			Message:  "Unable to determine disk usage",
-			Duration: time.Since(start).String(),
-		}
-	}
-
-	usedPercent := 100 - (available*100)/total
-
+	usedPercent := uint64(usedPct)
 	switch {
 	case usedPercent > 90:
 		return CheckResult{

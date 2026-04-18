@@ -130,7 +130,7 @@ avg(grainfs_node_recovery_duration_seconds)
 
 **SEV3 (Address within 1 hour):**
 - P99 latency > 100ms for 30 minutes
-- Disk usage > 80%
+- Disk usage > 80% (`grainfs_disk_used_pct{node_id="..."} > 80`)
 
 ---
 

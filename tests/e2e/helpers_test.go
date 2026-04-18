@@ -37,7 +37,8 @@ func TestMain(m *testing.M) {
 	nfsPort := freePort()
 
 	cmd := exec.Command(binary, "serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
-		"--nfs-port", fmt.Sprintf("%d", nfsPort))
+		"--nfs-port", fmt.Sprintf("%d", nfsPort),
+		"--nfs4-port", fmt.Sprintf("%d", freePort()))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

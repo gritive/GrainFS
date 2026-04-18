@@ -30,6 +30,7 @@ func startECServerWithPort(t *testing.T) (*s3.Client, string, int, func()) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
 		"--ec",
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

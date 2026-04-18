@@ -65,6 +65,7 @@ Flags:
       --balancer-imbalance-stop-pct         마이그레이션 중단 임계값 % (default 5)
       --balancer-migration-rate int         tick당 최대 제안 수 (default 1)
       --balancer-leader-tenure-min duration 리더 최소 보유 시간 (default 5m)
+      --balancer-warmup-timeout duration    노드 시작 후 마이그레이션 유예 시간 (default 60s)
 ```
 
 ## 클러스터 Balancer

@@ -138,3 +138,51 @@ func (r *notifyLoopRaft) Propose(data []byte) error {
 }
 
 func (r *notifyLoopRaft) NodeID() string { return "test-node" }
+
+// TestBalancerIntegration_DiskCollector verifies that DiskCollector drives
+// UpdateDiskStats → GossipSender skip guard → BalancerProposer triggers migration
+// when a real DiskCollector with injected 80% disk usage runs alongside a peer at 20%.
+func TestBalancerIntegration_DiskCollector(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+
+	// Seed both nodes so GossipSender skip guard passes for local node.
+	store.Set(NodeStats{NodeID: "leader", DiskUsedPct: 0.0})
+	store.Set(NodeStats{NodeID: "peer-a", DiskUsedPct: 20.0, DiskAvailBytes: 200 << 30})
+
+	node := &mockRaftNode{
+		state:   2,
+		nodeID:  "leader",
+		peerIDs: []string{"peer-a"},
+	}
+
+	cfg := BalancerConfig{
+		GossipInterval:      10 * time.Millisecond,
+		WarmupTimeout:       1 * time.Millisecond,
+		ImbalanceTriggerPct: 20.0,
+		ImbalanceStopPct:    5.0,
+		MigrationRate:       1,
+		LeaderTenureMin:     0,
+		LeaderLoadThreshold: 1.3,
+	}
+
+	p := NewBalancerProposer("leader", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+
+	// Real DiskCollector with injected 80% disk usage.
+	collector := NewDiskCollector("leader", "/tmp", store, 10*time.Millisecond)
+	collector.SetStatFunc(func(string) (float64, uint64) { return 80.0, 1 << 30 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go collector.Run(ctx)
+	go p.Run(ctx)
+
+	require.Eventually(t, func() bool {
+		return node.ProposedLen() > 0
+	}, 1*time.Second, 10*time.Millisecond, "timeout: no CmdMigrateShard proposed within 1s")
+
+	var cmd clusterpb.Command
+	require.NoError(t, proto.Unmarshal(node.ProposedAt(0), &cmd))
+	assert.Equal(t, uint32(CmdMigrateShard), cmd.Type)
+}

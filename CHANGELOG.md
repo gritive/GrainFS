@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.9] - 2026-04-19
+
+### Added
+- **DiskCollector** — 로컬 디스크 사용률을 주기적으로 읽어 `NodeStatsStore`에 반영하는 goroutine 추가. 이제 balancer가 실제 디스크 사용률에 반응한다.
+- **`grainfs_disk_used_pct` 메트릭** — node_id 레이블을 가진 Prometheus GaugeVec. DiskCollector tick마다 갱신된다.
+- **`--balancer-warmup-timeout` 플래그** — 노드 시작 후 마이그레이션 제안을 유예하는 시간 설정. 조인/복구 중 오탐 방지.
+- **`GRAINFS_TEST_DISK_PCT` 환경 변수** — 실제 디스크 사용률 대신 고정값을 주입. 통합 테스트 및 운영 시뮬레이션용. 유효하지 않은 값([0,100] 범위 초과 포함)이면 서버 시작 시 즉시 실패.
+- **Operator Runbook Testing 섹션** — `docs/operations/balancer.md`에 `GRAINFS_TEST_DISK_PCT` 사용 예제 및 Prometheus 쿼리 추가.
+- **`disk_stat_stub.go`** — `//go:build !unix` 스텁 추가. Windows/Plan9 빌드에서 `sysDiskStat`가 (0,0)을 반환해 `collect()`가 조용히 스킵.
+
+### Fixed
+- **DiskUsedPct 항상 0 문제** — GossipSender가 DiskUsedPct를 브로드캐스트하지만 실제로 syscall.Statfs를 호출하는 goroutine이 없어 항상 0으로 전송되던 근본 버그를 수정.
+- **doctor.go DRY 위반** — `checkDiskSpace()`의 Statfs 로직을 `sysDiskStat()`로 추출. DiskCollector와 동일한 코드 경로 공유.
+- **`disk_stat_unix.go` 빌드 태그 누락** — `//go:build unix` 추가 + `_unix` 파일명 suffix만으로는 Go 빌드 제약으로 인식되지 않는 문제 수정.
+- **Prometheus 클램프 누락** — `DiskCollector.collect()`에서 `metrics.DiskUsedPct.Set()`에 전달 전 [0,100] 클램프 적용.
+- **`sysDiskStat` (0,0) 오탐** — `collect()`에서 (0,0) 반환 시 `UpdateDiskStats` 호출을 스킵하고 WARN 로그 출력. 유효하지 않은 디스크 통계로 NodeStatsStore를 오염시키는 문제 수정.
+- **`GRAINFS_TEST_DISK_PCT` 범위 검증 누락** — 0~100 범위 검증 추가. 범위 초과 시 서버 시작 시 즉시 오류 반환.
+- **`DiskCollector.logger` 데드 필드** — 사용되지 않는 `logger` 필드 제거.
+
 ## [0.0.8] - 2026-04-18
 
 ### Added

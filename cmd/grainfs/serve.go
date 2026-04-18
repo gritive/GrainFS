@@ -69,6 +69,7 @@ func init() {
 	serveCmd.Flags().Float64("balancer-imbalance-stop-pct", cluster.DefaultBalancerConfig().ImbalanceStopPct, "stop migration when max-min disk usage diff drops below this percentage")
 	serveCmd.Flags().Int("balancer-migration-rate", cluster.DefaultBalancerConfig().MigrationRate, "max migration proposals per tick")
 	serveCmd.Flags().Duration("balancer-leader-tenure-min", cluster.DefaultBalancerConfig().LeaderTenureMin, "minimum time a leader must hold tenure before load-based transfer")
+	serveCmd.Flags().Duration("balancer-warmup-timeout", cluster.DefaultBalancerConfig().WarmupTimeout, "time to wait after node start before proposing disk migrations (prevents false alarms during join/recovery)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -590,11 +591,12 @@ func startBalancer(
 	stopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
 	migrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
 	tenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
+	warmupTimeout, _ := cmd.Flags().GetDuration("balancer-warmup-timeout")
 
 	def := cluster.DefaultBalancerConfig()
 	cfg := cluster.BalancerConfig{
 		GossipInterval:      gossipInterval,
-		WarmupTimeout:       def.WarmupTimeout,
+		WarmupTimeout:       warmupTimeout,
 		ImbalanceTriggerPct: triggerPct,
 		ImbalanceStopPct:    stopPct,
 		MigrationRate:       migrationRate,
@@ -628,11 +630,26 @@ func startBalancer(
 	go balancer.Run(ctx)
 
 	// Seed local node stats so GossipSender can broadcast immediately.
-	// DiskUsedPct/DiskAvailBytes start at zero; gossip from other nodes updates them.
 	statsStore.Set(cluster.NodeStats{
 		NodeID:   nodeID,
 		JoinedAt: time.Now(),
 	})
+
+	// Start DiskCollector: reads local disk stats and updates the store every gossip interval.
+	// GRAINFS_TEST_DISK_PCT overrides the real syscall for integration testing.
+	collector := cluster.NewDiskCollector(nodeID, dataDir, statsStore, gossipInterval)
+	if testPctStr := os.Getenv("GRAINFS_TEST_DISK_PCT"); testPctStr != "" {
+		var testPct float64
+		if _, err := fmt.Sscanf(testPctStr, "%f", &testPct); err != nil {
+			return nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: invalid value %q: %w", testPctStr, err)
+		}
+		if testPct < 0 || testPct > 100 {
+			return nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: value %v out of range [0,100]", testPct)
+		}
+		slog.Warn("GRAINFS_TEST_DISK_PCT active — real disk stats overridden", "pct", testPct)
+		collector.SetStatFunc(func(string) (float64, uint64) { return testPct, 0 })
+	}
+	go collector.Run(ctx)
 
 	// Replay any tasks that were persisted during a previous channel-full event.
 	if err := fsm.RecoverPending(ctx, taskCh); err != nil {

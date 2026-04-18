@@ -81,6 +81,26 @@ func (s *NodeStatsStore) GetAll() []NodeStats {
 	return out
 }
 
+// UpdateDiskStats atomically updates only the disk fields for nodeID, preserving all other fields.
+// No-op if nodeID is not in the store. Clamps usedPct to [0, 100].
+func (s *NodeStatsStore) UpdateDiskStats(nodeID string, usedPct float64, availBytes uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ns, ok := s.stats[nodeID]
+	if !ok {
+		return
+	}
+	if usedPct < 0 {
+		usedPct = 0
+	} else if usedPct > 100 {
+		usedPct = 100
+	}
+	ns.DiskUsedPct = usedPct
+	ns.DiskAvailBytes = availBytes
+	ns.UpdatedAt = time.Now()
+	s.stats[nodeID] = ns
+}
+
 // Len returns the count of non-expired entries.
 func (s *NodeStatsStore) Len() int {
 	s.mu.RLock()
