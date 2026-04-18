@@ -17,7 +17,7 @@ func TestRetryWriteShard_ExponentialBackoff(t *testing.T) {
 		calls++
 		return transient
 	}
-	err := retryWriteShard(context.Background(), fn, 3, time.Millisecond)
+	err := retryWriteShard(context.Background(), fn, 3, time.Millisecond, "", -1)
 	require.Error(t, err)
 	assert.Equal(t, 3, calls, "must attempt maxAttempts times")
 	assert.False(t, errors.Is(err, ErrPermanent))
@@ -29,7 +29,7 @@ func TestRetryWriteShard_PermanentErrorNoRetry(t *testing.T) {
 		calls++
 		return ErrPermanent
 	}
-	err := retryWriteShard(context.Background(), fn, 5, time.Millisecond)
+	err := retryWriteShard(context.Background(), fn, 5, time.Millisecond, "", -1)
 	require.Error(t, err)
 	assert.Equal(t, 1, calls, "ErrPermanent must give up immediately")
 	assert.True(t, errors.Is(err, ErrPermanent))
@@ -44,7 +44,7 @@ func TestRetryWriteShard_RecoverOnSecondAttempt(t *testing.T) {
 		}
 		return nil
 	}
-	err := retryWriteShard(context.Background(), fn, 5, time.Millisecond)
+	err := retryWriteShard(context.Background(), fn, 5, time.Millisecond, "", -1)
 	require.NoError(t, err)
 	assert.Equal(t, 3, calls)
 }
@@ -57,7 +57,7 @@ func TestRetryWriteShard_CtxCancelDuringWait(t *testing.T) {
 		cancel() // cancel after first call
 		return errors.New("transient")
 	}
-	err := retryWriteShard(ctx, fn, 10, 10*time.Millisecond)
+	err := retryWriteShard(ctx, fn, 10, 10*time.Millisecond, "", -1)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 1, calls)
@@ -68,7 +68,7 @@ func TestRetryWriteShard_JitterRange(t *testing.T) {
 	// We do this by measuring elapsed time for a single-attempt failure (no retry).
 	fn := func() error { return ErrPermanent }
 	start := time.Now()
-	_ = retryWriteShard(context.Background(), fn, 5, 50*time.Millisecond)
+	_ = retryWriteShard(context.Background(), fn, 5, 50*time.Millisecond, "", -1)
 	elapsed := time.Since(start)
 	// ErrPermanent → no sleep at all
 	assert.Less(t, elapsed, 5*time.Millisecond, "ErrPermanent must not sleep")

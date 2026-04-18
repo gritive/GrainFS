@@ -61,6 +61,10 @@ type MigrationExecutor struct {
 	node      MigrationRaft
 	numShards int
 
+	// maxWriteRetries is the maximum number of WriteShard attempts per shard (0 = no retry).
+	maxWriteRetries int
+	retryBaseDelay  time.Duration
+
 	// mu protects done, committed, pending (commit channels).
 	// Lock order: mu → pendingMu when both are needed.
 	mu        sync.Mutex
@@ -90,16 +94,23 @@ func NewMigrationExecutorWithTTL(mover ShardMover, node MigrationRaft, numShards
 
 func newExecutor(mover ShardMover, node MigrationRaft, numShards int, ttl time.Duration) *MigrationExecutor {
 	return &MigrationExecutor{
-		mover:      mover,
-		node:       node,
-		numShards:  numShards,
-		done:       make(map[string]struct{}),
-		committed:  make(map[string]struct{}),
-		pending:    make(map[string]chan struct{}),
-		ttlPending: make(map[string]*ttlEntry),
-		pendingTTL: ttl,
-		logger:     slog.Default().With("component", "migration"),
+		mover:          mover,
+		node:           node,
+		numShards:      numShards,
+		retryBaseDelay: 500 * time.Millisecond,
+		done:           make(map[string]struct{}),
+		committed:      make(map[string]struct{}),
+		pending:        make(map[string]chan struct{}),
+		ttlPending:     make(map[string]*ttlEntry),
+		pendingTTL:     ttl,
+		logger:         slog.Default().With("component", "migration"),
 	}
+}
+
+// SetMaxWriteRetries configures the maximum number of WriteShard attempts per shard.
+// 0 (default) means no retry. Call before Start.
+func (e *MigrationExecutor) SetMaxWriteRetries(n int) {
+	e.maxWriteRetries = n
 }
 
 // Start launches the background TTL sweep loop. No-op if pendingTTL == 0.
@@ -287,10 +298,18 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 				e.cleanupPending(id)
 				return fmt.Errorf("migration read shard %d: %w", i, err)
 			}
-			if err := e.mover.WriteShard(ctx, task.DstNode, task.Bucket, task.Key, i, data); err != nil {
+			writeAttempts := e.maxWriteRetries
+			if writeAttempts <= 0 {
+				writeAttempts = 1
+			}
+			shardIdx := i // capture for closure
+			writeErr := retryWriteShard(ctx, func() error {
+				return e.mover.WriteShard(ctx, task.DstNode, task.Bucket, task.Key, shardIdx, data)
+			}, writeAttempts, e.retryBaseDelay, task.DstNode, shardIdx)
+			if writeErr != nil {
 				metrics.BalancerShardWriteErrorsTotal.Inc()
 				e.cleanupPending(id)
-				return fmt.Errorf("migration write shard %d: %w", i, err)
+				return fmt.Errorf("migration write shard %d: %w", i, writeErr)
 			}
 		}
 		metrics.BalancerShardCopyDuration.Observe(time.Since(copyStart).Seconds())

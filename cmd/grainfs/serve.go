@@ -629,6 +629,9 @@ func startBalancer(
 	taskCh := make(chan cluster.MigrationTask, 256)
 
 	exec := cluster.NewMigrationExecutorWithTTL(shardSvc, adapter, numShards, migPendingTTL)
+	if migMaxRetries > 0 {
+		exec.SetMaxWriteRetries(migMaxRetries)
+	}
 	exec.Start(ctx)
 
 	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
