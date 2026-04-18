@@ -16,6 +16,13 @@
 - [ ] Operator runbook: docs/operations/balancer.md
 - [ ] E2E: disk-fill 전략 — 테스트 하니스에서 diskUsedPct 주입 hook
 
+### Phase 13 리뷰 후속 (adversarial review 2026-04-18)
+
+- [ ] **[F1] proposeMigration: 실제 오브젝트 선택** — `balancer.go:144` `proposeMigration`이 현재 SrcNode/DstNode만 전송하고 Bucket/Key/VersionID를 비워서 `applyMigrateShard`에서 모두 폐기됨. 메타데이터에서 실제 오브젝트를 조회해 채워야 함. (Phase 14 배선과 함께 구현)
+- [ ] **[F3] 프로덕션 배선** — `SetMigrationHooks`, `NewMigrationExecutor`, `NewGossipSender/Receiver`, `NewBalancerProposer`가 `cmd/`에서 연결되지 않음. Phase 14 배선 단계에서 연결.
+- [ ] **[F4] NotifyCommit 조기 도착 시 DeleteShards 스킵** — `migration_executor.go:82` FSM이 Execute() 등록 전에 CmdMigrationDone을 적용하면 src 샤드 삭제가 영구 스킵됨. 조기 도착 경로에서 Phase 4 보장 필요.
+- [ ] **[F2] 채널 풀 → 태스크 영구 소실** — `apply.go:237` 채널 풀 시 Raft는 커밋 처리하나 태스크는 소실. 영속 태스크 큐 또는 버퍼 크기 동적 조정 검토.
+
 ## Phase 14: Scale
 
 - [ ] ScrubObjects cursor pagination — ScanObjects BadgerDB 전체 순회 → cursor 기반으로 교체 (10K+ 클러스터 대비)

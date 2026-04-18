@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.7] - 2026-04-18
+
+### Added
+- **클러스터 Auto-Balancing (Phase 13)** — Gossip 프로토콜로 노드 디스크 사용률 공유, Raft 기반 샤드 마이그레이션, 리더 주도 발란싱 루프 구현. `GossipSender`/`GossipReceiver`, `MigrationExecutor`, `BalancerProposer` 추가.
+
+### Changed
+- **QUIC 스트림 라우팅** — `StreamRouter`가 스트림 타입별 독립 채널로 분배. Gossip 수신자 채널이 더 이상 데드락되지 않음.
+
+### Fixed
+- **Gossip cold-start 브로드캐스트** — 로컬 stats 미준비 시 DiskUsedPct=0 브로드캐스트를 스킵해 새 노드가 즉시 마이그레이션 폭풍의 대상이 되는 문제 수정.
+- **리더 tenure 타이머** — `BalancerProposer.Run()` 진입 시 타이머 재설정. 기존에는 생성 시점 기준이라 팔로워 기간도 LeaderTenureMin에 포함됐음.
+- **빈 Bucket/Key 가드** — `applyMigrateShard`에서 `Bucket="", Key=""` 제안을 조용히 폐기해 `//"` 키 패스 오류 방지.
+- **FSM Migration 채널 논블로킹** — `onMigrateShard`를 콜백에서 버퍼 채널로 교체. 채널 풀 시 경고 로그 후 드롭.
+- **NodeId 스푸핑 방지** — Gossip 수신 시 `conn.RemoteAddr()`와 `NodeId` 불일치 메시지 드롭. hostname nodeID + IP from 조합 처리.
+- **Gossip 수신값 범위 검증** — `DiskUsedPct`를 [0,100], `RequestsPerSec`를 [0,∞)로 클램프해 오작동 발란서 방지.
+- **Migration idempotency 맵 OOM** — `done` 맵이 10,000건 초과 시 리셋해 고유 마이그레이션 폭풍에 의한 메모리 소진 방지.
+- **Connect() TOCTOU 커넥션 누수** — Write lock 재확인으로 동시 dial 시 중복 커넥션 닫기.
+- **zstd 풀 테스트 임계값** — race detector 오버헤드(~8×)를 반영해 alloc 임계값 상향 조정.
+
 ## [0.0.6] - 2026-04-18
 
 ### Added
