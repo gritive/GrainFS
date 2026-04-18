@@ -232,8 +232,7 @@ func (p *BalancerProposer) selectDstNode() (string, bool) {
 	}
 	if allOpen && len(all) > 1 {
 		metrics.BalancerCBAllOpenTotal.Inc()
-		p.logger.Warn("balancer: all dst circuit breakers open, skipping migration tick",
-			"component", "balancer")
+		p.logger.Warn("balancer: all dst circuit breakers open, skipping migration tick")
 		return "", false
 	}
 	if lightest == "" {
@@ -270,13 +269,13 @@ func (p *BalancerProposer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.tickOnce(ctx)
+			p.tickOnce()
 		}
 	}
 }
 
 // tickOnce is a single balancer evaluation cycle, exposed for testing.
-func (p *BalancerProposer) tickOnce(ctx context.Context) {
+func (p *BalancerProposer) tickOnce() {
 	if !p.node.IsLeader() {
 		return
 	}
@@ -333,7 +332,7 @@ func (p *BalancerProposer) tickOnce(ctx context.Context) {
 		return
 	}
 
-	p.proposeMigration(ctx, p.nodeID, dst)
+	p.proposeMigration(p.nodeID, dst)
 }
 
 // BalancerStatus is a point-in-time snapshot of the balancer's state.
@@ -387,7 +386,7 @@ func (p *BalancerProposer) warmupComplete(peers []string) bool {
 
 // proposeMigration selects one object from src via the ObjectPicker and proposes
 // a CmdMigrateShard to Raft. Returns early if picker is nil or returns ok=false.
-func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string) {
+func (p *BalancerProposer) proposeMigration(src, dst string) {
 	if p.picker == nil {
 		return
 	}

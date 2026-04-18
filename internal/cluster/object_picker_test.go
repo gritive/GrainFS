@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,7 +72,7 @@ func TestBalancerProposer_OkFalse_SkipsMigrationProposal(t *testing.T) {
 	// Set an empty picker that always returns ok=false.
 	p.SetObjectPicker(&mockObjectPicker{ok: false})
 
-	p.tickOnce(context.Background())
+	p.tickOnce()
 	assert.Empty(t, node.proposed, "no proposal when picker returns ok=false")
 }
 

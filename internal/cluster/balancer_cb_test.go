@@ -22,8 +22,7 @@ func TestTickOnce_CBUpdatesFromStoreGetAll(t *testing.T) {
 	store.Set(NodeStats{NodeID: "self", DiskUsedPct: 10})
 	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 95})
 
-	ctx := t.Context()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	// n1's CB must be open
 	cb := p.getCB("n1")
@@ -48,8 +47,7 @@ func TestTickOnce_AllDstsCBOpen_NoProposal(t *testing.T) {
 	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 95})
 	store.Set(NodeStats{NodeID: "n2", DiskUsedPct: 97})
 
-	ctx := t.Context()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	// No migration proposal should have been made
 	assert.Equal(t, 0, node.ProposedLen(), "no proposal when all dst CBs are open")
@@ -72,8 +70,7 @@ func TestTickOnce_CBOpenSkipsDst(t *testing.T) {
 	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 95})
 	store.Set(NodeStats{NodeID: "n2", DiskUsedPct: 10})
 
-	ctx := t.Context()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	assert.Equal(t, 1, node.ProposedLen(), "must propose one migration to n2")
 }
