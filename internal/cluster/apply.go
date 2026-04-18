@@ -2,7 +2,7 @@ package cluster
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/dgraph-io/badger/v4"
@@ -73,7 +73,7 @@ func (f *FSM) Apply(raw []byte) error {
 	case CmdMigrationDone:
 		return f.applyMigrationDone(cmd.Data)
 	default:
-		log.Printf("fsm: unknown command type %d", cmd.Type)
+		slog.Warn("fsm: unknown command type", "type", cmd.Type)
 		return nil
 	}
 }
@@ -237,7 +237,7 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 		select {
 		case ch <- task:
 		default:
-			log.Printf("fsm: migration queue full, dropping task %s/%s", task.Bucket, task.Key)
+			slog.Warn("fsm: migration queue full, dropping task", "bucket", task.Bucket, "key", task.Key)
 		}
 	}
 	return nil

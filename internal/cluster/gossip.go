@@ -30,7 +30,7 @@ func NewGossipSender(nodeID string, peers []string, tr transport.Transport, stor
 		tr:       tr,
 		store:    store,
 		interval: interval,
-		logger:   slog.Default(),
+		logger:   slog.Default().With("component", "gossip"),
 	}
 }
 
@@ -85,7 +85,7 @@ func NewGossipReceiver(tr transport.Transport, store *NodeStatsStore) *GossipRec
 	return &GossipReceiver{
 		tr:     tr,
 		store:  store,
-		logger: slog.Default(),
+		logger: slog.Default().With("component", "gossip"),
 	}
 }
 

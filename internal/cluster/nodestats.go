@@ -33,10 +33,10 @@ func NewNodeStatsStore(ttl time.Duration) *NodeStatsStore {
 // Set stores stats for a node, stamping UpdatedAt with now.
 // Expired entries are purged on every Set to prevent unbounded map growth.
 func (s *NodeStatsStore) Set(ns NodeStats) {
-	ns.UpdatedAt = time.Now()
+	now := time.Now()
+	ns.UpdatedAt = now
 	s.mu.Lock()
 	s.stats[ns.NodeID] = ns
-	now := time.Now()
 	for id, existing := range s.stats {
 		if now.Sub(existing.UpdatedAt) > s.ttl {
 			delete(s.stats, id)

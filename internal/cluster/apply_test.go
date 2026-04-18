@@ -368,7 +368,6 @@ func TestFSM_MigrationDone_NotifiesCommit(t *testing.T) {
 	fsm := NewFSM(db)
 
 	notified := make(chan struct{}, 1)
-	type testNotifier struct{}
 	fsm.SetMigrationHooks(nil, &migrationDoneNotifier{fn: func(bucket, key, versionID string) {
 		notified <- struct{}{}
 	}})
