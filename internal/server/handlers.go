@@ -334,9 +334,33 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 	}
 
 	body := bytes.NewReader(rawBody)
-	obj, err := s.backend.PutObject(bucket, key, body, contentType)
-	if err != nil {
-		mapError(c, err)
+	aclHeader := string(c.GetHeader("x-amz-acl"))
+
+	var (
+		obj    *storage.Object
+		putErr error
+	)
+	if aclHeader != "" {
+		acl := s3auth.ParseACLHeader(aclHeader)
+		if putter, ok := unwrapBackend(s.backend).(storage.AtomicACLPutter); ok {
+			// Atomic path: store object and ACL in the same transaction.
+			obj, putErr = putter.PutObjectWithACL(bucket, key, body, contentType, uint8(acl))
+		} else {
+			obj, putErr = s.backend.PutObject(bucket, key, body, contentType)
+			if putErr == nil {
+				if setter, ok2 := unwrapBackend(s.backend).(storage.ACLSetter); ok2 {
+					if aclErr := setter.SetObjectACL(bucket, key, uint8(acl)); aclErr != nil {
+						mapError(c, aclErr)
+						return
+					}
+				}
+			}
+		}
+	} else {
+		obj, putErr = s.backend.PutObject(bucket, key, body, contentType)
+	}
+	if putErr != nil {
+		mapError(c, putErr)
 		return
 	}
 
@@ -359,7 +383,7 @@ type VersionedGetter interface {
 	GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error)
 }
 
-func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
+func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
@@ -407,6 +431,15 @@ func (s *Server) getObject(_ context.Context, c *app.RequestContext) {
 			rc.Close()
 		}
 	}()
+
+	// ACL secondary check: anonymous requests require public-read or public-read-write ACL.
+	if s.verifier != nil {
+		accessKey := AccessKeyFromContext(ctx)
+		if !s3auth.IsAuthorizedByACL(s3auth.ACLGrant(obj.ACL), accessKey, s3auth.GetObject) {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+			return
+		}
+	}
 
 	etag := fmt.Sprintf("\"%s\"", obj.ETag)
 	c.Header("Content-Type", obj.ContentType)
@@ -552,7 +585,7 @@ func findVersionedHeader(b storage.Backend) (VersionedHeader, bool) {
 	return nil, false
 }
 
-func (s *Server) headObject(_ context.Context, c *app.RequestContext) {
+func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
@@ -581,6 +614,16 @@ func (s *Server) headObject(_ context.Context, c *app.RequestContext) {
 		mapError(c, err)
 		return
 	}
+
+	// ACL secondary check: anonymous requests require public-read or public-read-write ACL.
+	if s.verifier != nil {
+		accessKey := AccessKeyFromContext(ctx)
+		if !s3auth.IsAuthorizedByACL(s3auth.ACLGrant(obj.ACL), accessKey, s3auth.HeadObject) {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+			return
+		}
+	}
+
 	if obj.VersionID != "" {
 		c.Header("x-amz-version-id", obj.VersionID)
 	}

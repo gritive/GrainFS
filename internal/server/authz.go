@@ -6,35 +6,38 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
-// s3Action maps an HTTP method + path context to an S3 action string.
-func s3Action(method, path string, hasKey bool) string {
+// s3ActionEnum maps an HTTP method + path context to an S3Action enum value.
+// path is required to distinguish sub-resource operations (e.g., ?delete).
+func s3ActionEnum(method, path string, hasKey bool) s3auth.S3Action {
 	switch method {
 	case "GET":
 		if hasKey {
-			return "s3:GetObject"
+			return s3auth.GetObject
 		}
-		return "s3:ListBucket"
+		return s3auth.ListBucket
 	case "HEAD":
 		if hasKey {
-			return "s3:GetObject"
+			return s3auth.HeadObject
 		}
-		return "s3:ListBucket"
+		return s3auth.ListBucket
 	case "PUT":
 		if hasKey {
-			return "s3:PutObject"
+			return s3auth.PutObject
 		}
-		return "s3:CreateBucket"
+		return s3auth.CreateBucket
 	case "DELETE":
 		if hasKey {
-			return "s3:DeleteObject"
+			return s3auth.DeleteObject
 		}
-		return "s3:DeleteBucket"
+		return s3auth.DeleteBucket
 	case "POST":
-		return "s3:PutObject" // multipart
+		return s3auth.PutObject // multipart upload
 	default:
-		return "s3:Unknown"
+		return s3auth.UnknownAction
 	}
 }
 
@@ -59,17 +62,20 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			return
 		}
 
-		// Check for policy CRUD: GET/PUT/DELETE /:bucket?policy
+		// Skip policy CRUD endpoints — handled by dedicated handlers
 		if c.Query("policy") != "" || string(c.QueryArgs().Peek("policy")) == "" && c.QueryArgs().Has("policy") {
 			c.Next(ctx)
 			return
 		}
 
 		accessKey := AccessKeyFromContext(ctx)
-		method := string(c.Method())
-		action := s3Action(method, path, key != "")
+		in := s3auth.PermCheckInput{
+			Principal: s3auth.Principal{AccessKey: accessKey},
+			Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+			Action:    s3ActionEnum(string(c.Method()), path, key != ""),
+		}
 
-		if !s.policyStore.IsAllowed(accessKey, action, bucket, key) {
+		if !s.policyStore.Allow(ctx, in) {
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "bucket policy denies this action")
 			c.Abort()
 			return

@@ -41,10 +41,10 @@ type Server struct {
 	dataDir     string
 	snapMgr     *snapshot.Manager
 	scrubber    *scrubber.BackgroundScrubber // nil if not using ECBackend
-	verifier    *s3auth.Verifier
+	verifier    *s3auth.CachingVerifier
 	hertz       *server.Hertz
 	volMgr      *volume.Manager
-	policyStore *PolicyStore
+	policyStore *CompiledPolicyStore
 	ipLimiter   *RateLimiter
 	userLimiter *RateLimiter
 	cluster     ClusterInfo     // nil in solo mode
@@ -54,10 +54,10 @@ type Server struct {
 // Option configures the server.
 type Option func(*Server)
 
-// WithAuth enables SigV4 authentication.
+// WithAuth enables SigV4 authentication with LRU caching.
 func WithAuth(creds []s3auth.Credentials) Option {
 	return func(s *Server) {
-		s.verifier = s3auth.NewVerifier(creds)
+		s.verifier = s3auth.NewCachingVerifier(s3auth.NewVerifier(creds), 4096, 5*time.Minute)
 	}
 }
 
@@ -93,7 +93,7 @@ func WithScrubber(sc *scrubber.BackgroundScrubber) Option {
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s := &Server{
 		backend:     backend,
-		policyStore: NewPolicyStore(),
+		policyStore: NewCompiledPolicyStore(),
 		ipLimiter:   NewRateLimiter(100, 200, 100000), // 100 req/sec per IP, burst 200, max 100K entries
 		userLimiter: NewRateLimiter(50, 100, 100000),  // 50 req/sec per user, burst 100
 	}
@@ -166,6 +166,19 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		}
 
 		r := toHTTPRequest(c)
+
+		// Anonymous fast path: unsigned GET/HEAD on plain object data may be allowed
+		// by object ACL. Subresource requests (?acl, ?tagging, etc.) and all other
+		// methods always require authentication — checked via RawQuery == "".
+		method := string(c.Method())
+		key := strings.TrimPrefix(c.Param("key"), "/")
+		isObjectRead := (method == "GET" || method == "HEAD") && key != "" && r.URL.RawQuery == ""
+		if isObjectRead && r.Header.Get("Authorization") == "" {
+			ctx = WithAccessKey(ctx, "")
+			c.Next(ctx)
+			return
+		}
+
 		// Check both header auth and query-string presigned auth
 		accessKey, err := s.verifier.Verify(r)
 		if err != nil {
