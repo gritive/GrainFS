@@ -56,7 +56,42 @@ Flags:
       --node-id string           노드 ID (클러스터 모드)
       --raft-addr string         Raft 주소 (클러스터 모드)
       --peers string             피어 목록 (클러스터 모드)
+
+  Balancer (클러스터 모드 전용):
+      --balancer-enabled                    디스크 자동 균형 활성화 (default true)
+      --balancer-gossip-interval duration   불균형 평가 주기 (default 30s)
+      --balancer-imbalance-trigger-pct      마이그레이션 시작 임계값 % (default 20)
+      --balancer-imbalance-stop-pct         마이그레이션 중단 임계값 % (default 5)
+      --balancer-migration-rate int         tick당 최대 제안 수 (default 1)
+      --balancer-leader-tenure-min duration 리더 최소 보유 시간 (default 5m)
 ```
+
+## 클러스터 Balancer
+
+클러스터 모드에서 노드 간 디스크 불균형이 20% 이상이면 자동으로 샤드를 이동한다.
+
+### 상태 확인
+
+```bash
+curl http://localhost:9000/api/cluster/balancer/status | jq .
+```
+
+응답 예시:
+```json
+{
+  "available": true,
+  "active": false,
+  "imbalance_pct": 12.3,
+  "nodes": [
+    {"node_id": "node-a", "disk_used_pct": 62.1, "disk_avail_bytes": 38654705664},
+    {"node_id": "node-b", "disk_used_pct": 49.8, "disk_avail_bytes": 53687091200}
+  ]
+}
+```
+
+`active: true`이면 마이그레이션 진행 중. `imbalance_pct`가 5% 미만으로 내려가면 자동 중단.
+
+> 상세 운영 가이드: [docs/operations/balancer.md](docs/operations/balancer.md)
 
 ## Development
 

@@ -156,6 +156,16 @@ tbody tr:last-child td{border-bottom:none}
       <tbody id="cl-peers-body"><tr><td colspan="2" class="empty-state">No cluster configured (solo mode)</td></tr></tbody>
     </table>
   </div>
+
+  <!-- Balancer section -->
+  <div id="cl-balancer-section" style="margin-top:1.5rem">
+    <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+      <h3 style="font-size:0.875rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin:0">Balancer</h3>
+      <span id="cl-balancer-badge" style="display:none;font-size:0.7rem;font-weight:600;padding:0.15rem 0.5rem;border-radius:999px;background:var(--accent-subtle);color:var(--accent)">-</span>
+      <span id="cl-balancer-imbalance" style="font-size:0.75rem;color:var(--text-muted)"></span>
+    </div>
+    <div id="cl-balancer-nodes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0.75rem"></div>
+  </div>
 </div>
 
 <!-- Modals -->
@@ -563,6 +573,48 @@ tbody tr:last-child td{border-bottom:none}
     }).catch(function() {
       document.getElementById('cl-mode').textContent = 'error';
     });
+
+    // Load balancer status alongside cluster info.
+    fetch(baseURL + '/api/cluster/balancer/status').then(function(r) { return r.json(); }).then(function(d) {
+      var section = document.getElementById('cl-balancer-section');
+      var badge = document.getElementById('cl-balancer-badge');
+      var imbalanceEl = document.getElementById('cl-balancer-imbalance');
+      var nodesEl = document.getElementById('cl-balancer-nodes');
+      nodesEl.textContent = '';
+
+      if (!d.available) {
+        badge.textContent = 'disabled';
+        badge.style.display = 'inline';
+        badge.style.background = 'rgba(255,255,255,0.05)';
+        badge.style.color = 'var(--text-muted)';
+        return;
+      }
+
+      badge.textContent = d.active ? 'migrating' : 'idle';
+      badge.style.display = 'inline';
+      badge.style.background = d.active ? 'rgba(245,158,11,0.15)' : 'rgba(34,197,94,0.1)';
+      badge.style.color = d.active ? 'var(--warning)' : 'var(--success)';
+      imbalanceEl.textContent = 'imbalance: ' + (d.imbalance_pct || 0).toFixed(1) + '%';
+
+      var nodes = d.nodes || [];
+      nodes.forEach(function(n) {
+        var pct = Math.round(n.disk_used_pct || 0);
+        var color = pct >= 80 ? 'var(--danger)' : pct >= 60 ? 'var(--warning)' : 'var(--success)';
+        var avail = n.disk_avail_bytes ? (n.disk_avail_bytes / (1 << 30)).toFixed(1) + ' GB free' : '';
+        var card = document.createElement('div');
+        card.style.cssText = 'background:var(--bg-surface);border:1px solid var(--border);border-radius:0.5rem;padding:0.75rem;';
+        card.innerHTML = '<div style="font-size:0.75rem;font-weight:600;font-family:monospace;margin-bottom:0.4rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + n.node_id + '">' + n.node_id + '</div>'
+          + '<div style="background:var(--bg-deep);border-radius:3px;height:6px;margin-bottom:0.35rem;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:' + color + ';border-radius:3px;transition:width 0.4s"></div></div>'
+          + '<div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted)">'
+          + '<span>' + pct + '% used</span>'
+          + '<span>' + avail + '</span>'
+          + '</div>';
+        nodesEl.appendChild(card);
+      });
+      if (nodes.length === 0) {
+        nodesEl.innerHTML = '<div style="font-size:0.8rem;color:var(--text-muted)">Warming up — waiting for gossip data…</div>';
+      }
+    }).catch(function() {});
   }
 
   // Init
