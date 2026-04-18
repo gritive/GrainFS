@@ -345,32 +345,3 @@ func TestScrubber_PlainObject_Skipped(t *testing.T) {
 	assert.EqualValues(t, 0, stats.ShardErrors, "ec.bin with healthy shards must show 0 errors")
 }
 
-// TestScrubber_LegacyShard_ClassifiedAsMigration verifies that a shard
-// returning ErrCRCMissing (legacy, no footer) is classified as Migration,
-// NOT as Corrupt, and that stats.MigrationRewrites increments accordingly.
-func TestScrubber_LegacyShard_ClassifiedAsMigration(t *testing.T) {
-	const (
-		dataShards   = 4
-		parityShards = 2
-	)
-	m := newMockBackend()
-
-	rec := scrubber.ObjectRecord{Bucket: "b", Key: "legacy", DataShards: dataShards, ParityShards: parityShards}
-	m.records["b"] = []scrubber.ObjectRecord{rec}
-
-	// Store healthy shards except shard 0 which returns ErrCRCMissing (legacy)
-	for i := 1; i < dataShards+parityShards; i++ {
-		m.shards[fmt.Sprintf("b/legacy/%d", i)] = []byte("ok")
-	}
-	m.shardErr[fmt.Sprintf("b/legacy/%d", 0)] = scrubber.ErrLegacyShard
-
-	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
-	s.RunOnce(context.Background())
-
-	status := s.LastStatus("b", "legacy")
-	assert.Equal(t, []int{0}, status.Migration, "shard 0 must appear in Migration, not Corrupt")
-	assert.Empty(t, status.Corrupt, "Migration shards must not appear in Corrupt")
-
-	stats := s.Stats()
-	assert.EqualValues(t, 1, stats.MigrationRewrites, "MigrationRewrites must increment for ErrLegacyShard")
-}

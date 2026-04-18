@@ -434,30 +434,27 @@ func TestECBackend_Multipart_LargeParts_NoOOM(t *testing.T) {
 		growth/(1024*1024), threshold/(1024*1024))
 }
 
-// TestStripVerifyCRC_MissingVsMismatch verifies that stripVerifyCRC returns
-// ErrCRCMissing for too-short input and ErrCRCMismatch for corrupted CRC.
-func TestStripVerifyCRC_MissingVsMismatch(t *testing.T) {
-	t.Run("too short returns ErrCRCMissing", func(t *testing.T) {
+// TestStripVerifyCRC verifies that stripVerifyCRC returns ErrCRCMismatch for
+// any invalid input (too short or corrupted) and the payload for valid input.
+func TestStripVerifyCRC(t *testing.T) {
+	t.Run("too short returns ErrCRCMismatch", func(t *testing.T) {
 		_, err := stripVerifyCRC([]byte{0x01, 0x02}) // 2 bytes < 4
-		require.Error(t, err)
-		require.ErrorIs(t, err, ErrCRCMissing, "short shard should return ErrCRCMissing, got: %v", err)
+		require.ErrorIs(t, err, ErrCRCMismatch)
 	})
 
-	t.Run("zero-length returns ErrCRCMissing", func(t *testing.T) {
+	t.Run("zero-length returns ErrCRCMismatch", func(t *testing.T) {
 		_, err := stripVerifyCRC([]byte{})
-		require.ErrorIs(t, err, ErrCRCMissing)
+		require.ErrorIs(t, err, ErrCRCMismatch)
 	})
 
 	t.Run("corrupt CRC returns ErrCRCMismatch", func(t *testing.T) {
 		payload := []byte("hello shard")
 		valid := shardWithCRC(payload)
-		// flip last byte to corrupt CRC
 		corrupt := make([]byte, len(valid))
 		copy(corrupt, valid)
 		corrupt[len(corrupt)-1] ^= 0xFF
 		_, err := stripVerifyCRC(corrupt)
-		require.Error(t, err)
-		require.ErrorIs(t, err, ErrCRCMismatch, "corrupt CRC should return ErrCRCMismatch, got: %v", err)
+		require.ErrorIs(t, err, ErrCRCMismatch)
 	})
 
 	t.Run("valid CRC returns payload", func(t *testing.T) {

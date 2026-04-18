@@ -59,12 +59,11 @@ type BackgroundScrubber struct {
 
 // ScrubStats is a snapshot of scrubbing statistics.
 type ScrubStats struct {
-	LastRun           time.Time
-	ObjectsChecked    int64
-	ShardErrors       int64
-	Repaired          int64
-	Unrepairable      int64
-	MigrationRewrites int64
+	LastRun        time.Time
+	ObjectsChecked int64
+	ShardErrors    int64
+	Repaired       int64
+	Unrepairable   int64
 }
 
 // ScrubberOption configures a BackgroundScrubber.
@@ -169,13 +168,6 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			errCount := int64(len(status.Missing) + len(status.Corrupt))
 			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
 			atomic.AddInt64(&s.stats.ShardErrors, errCount)
-
-			migCount := int64(len(status.Migration))
-			if migCount > 0 {
-				metrics.ScrubMigrationRewritesTotal.Add(float64(migCount))
-				atomic.AddInt64(&s.stats.MigrationRewrites, migCount)
-				slog.Info("scrub: legacy shards detected (migration rewrite)", "bucket", rec.Bucket, "key", rec.Key, "count", migCount)
-			}
 
 			// Per-cycle repair cap (Eng Review #5)
 			if repairCount >= maxRepairsPerCycle {

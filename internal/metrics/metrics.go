@@ -141,10 +141,4 @@ var (
 		Name: "grainfs_scrub_skipped_over_cap_total",
 		Help: "Total objects skipped because max_repairs_per_cycle was reached.",
 	})
-
-	// ScrubMigrationRewritesTotal counts legacy shards (no CRC footer) rewritten during scrubbing.
-	ScrubMigrationRewritesTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "grainfs_scrub_migration_rewrites_total",
-		Help: "Total legacy shards (pre-CRC) rewritten by the scrubber during migration.",
-	})
 )
