@@ -223,4 +223,24 @@ var (
 		Name: "grainfs_balancer_grace_period_active_ticks_total",
 		Help: "Total balancer tick evaluations where at least one peer was within the join grace period (imbalance trigger relaxed by 1.5×).",
 	})
+
+	BalancerCBOpen = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_balancer_cb_open",
+		Help: "1 when circuit breaker for a destination node is open (disk full), 0 otherwise.",
+	}, []string{"node_id"})
+
+	BalancerCBAllOpenTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_cb_all_open_total",
+		Help: "Total ticks where all destination nodes had open circuit breakers (no proposal possible).",
+	})
+
+	BalancerShardWriteRetriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_balancer_shard_write_retries_total",
+		Help: "Total shard write retries per node and shard index.",
+	}, []string{"node_id", "shard_idx"})
+
+	BalancerMigrationPendingTTLExpiredTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_migration_pending_ttl_expired_total",
+		Help: "Total pending migrations cancelled due to TTL expiry.",
+	})
 )
