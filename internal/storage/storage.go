@@ -17,6 +17,18 @@ type Object struct {
 	LastModified   int64  // Unix timestamp
 	VersionID      string // non-empty when bucket versioning is Enabled
 	IsDeleteMarker bool   // true when this object is a delete marker
+	ACL            uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
+}
+
+// ACLSetter is an optional interface for backends that support per-object ACL updates.
+type ACLSetter interface {
+	SetObjectACL(bucket, key string, acl uint8) error
+}
+
+// AtomicACLPutter is an optional interface for backends that can store an object
+// and its ACL atomically in a single transaction.
+type AtomicACLPutter interface {
+	PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error)
 }
 
 // MultipartUpload tracks an in-progress multipart upload.
@@ -64,6 +76,7 @@ type SnapshotObject struct {
 	VersionID      string `json:"version_id,omitempty"`
 	IsDeleteMarker bool   `json:"is_delete_marker,omitempty"`
 	IsLatest       bool   `json:"is_latest,omitempty"`
+	ACL            uint8  `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.
