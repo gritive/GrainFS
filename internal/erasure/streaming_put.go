@@ -14,6 +14,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/klauspost/reedsolomon"
 
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -46,14 +47,14 @@ func spoolToTemp(r io.Reader) (f *os.File, size int64, etag string, err error) {
 
 // putObjectDataStreaming encodes src (of known size and precomputed etag) using
 // streaming Reed-Solomon, keeping heap bounded to ~one shard at a time.
-func (b *ECBackend) putObjectDataStreaming(bucket, key, versionId string, src io.ReadSeeker, size int64, etag, contentType string) (*storage.Object, error) {
+func (b *ECBackend) putObjectDataStreaming(bucket, key, versionId string, src io.ReadSeeker, size int64, etag, contentType string, acl s3auth.ACLGrant) (*storage.Object, error) {
 	if size < int64(b.codec.DataShards) {
 		// too small for EC — read into memory and use plain path
 		data, err := io.ReadAll(src)
 		if err != nil {
 			return nil, err
 		}
-		return b.putObjectPlain(bucket, key, versionId, data, contentType)
+		return b.putObjectPlain(bucket, key, versionId, data, contentType, acl)
 	}
 
 	shardDir := b.shardDirFor(bucket, key, versionId)
@@ -158,6 +159,7 @@ func (b *ECBackend) putObjectDataStreaming(bucket, key, versionId string, src io
 		ParityShards: b.codec.ParityShards,
 		ShardSize:    shardSz,
 		VersionID:    versionId,
+		ACL:          acl,
 	}
 
 	metaBytes, err := marshalECObjectMeta(&meta)

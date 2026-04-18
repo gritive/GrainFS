@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 func TestBucketMetaCodecRoundTrip(t *testing.T) {
@@ -115,4 +117,43 @@ func TestECCodecOutputIsNotJSON(t *testing.T) {
 	data, err := marshalECObjectMeta(meta)
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), `{`)
+}
+
+func TestECObjectMetaACLRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		acl  s3auth.ACLGrant
+	}{
+		{"private", s3auth.ACLPrivate},
+		{"public-read", s3auth.ACLPublicRead},
+		{"public-read-write", s3auth.ACLPublicReadWrite},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := &ecObjectMeta{
+				Key:  "test/obj",
+				Size: 100,
+				ACL:  tt.acl,
+			}
+			data, err := marshalECObjectMeta(meta)
+			require.NoError(t, err)
+
+			decoded, err := unmarshalECObjectMeta(data)
+			require.NoError(t, err)
+			assert.Equal(t, tt.acl, decoded.ACL)
+		})
+	}
+}
+
+func TestECObjectMetaACLBackwardCompat(t *testing.T) {
+	// Old data: marshaled without ACL field (field 12 absent)
+	// proto3: missing field → zero value → ACLPrivate
+	old := &ecObjectMeta{Key: "legacy/obj", Size: 50}
+	data, err := marshalECObjectMeta(old)
+	require.NoError(t, err)
+
+	decoded, err := unmarshalECObjectMeta(data)
+	require.NoError(t, err)
+	assert.Equal(t, s3auth.ACLPrivate, decoded.ACL, "missing ACL field should decode as ACLPrivate")
 }

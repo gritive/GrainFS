@@ -19,6 +19,7 @@ message ECObjectMeta {
   string version_id = 9;
   bool is_delete_marker = 10;
   int64 created_nano = 11; // UnixNano creation time for sub-second version ordering
+  uint32 acl = 12; // ACLGrant bitmask; 0 = private (backward compat)
 }
 
 message MultipartUploadMeta {

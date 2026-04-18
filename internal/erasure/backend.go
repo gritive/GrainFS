@@ -21,6 +21,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -94,7 +95,8 @@ type ecObjectMeta struct {
 	ShardSize      int
 	VersionID      string
 	IsDeleteMarker bool
-	CreatedNano    int64 // UnixNano; used for sub-second version ordering in DeleteObjectVersion
+	CreatedNano    int64            // UnixNano; used for sub-second version ordering in DeleteObjectVersion
+	ACL            s3auth.ACLGrant  // object-level ACL; 0 = ACLPrivate (backward compat)
 }
 
 // ECOption configures the EC backend.
@@ -352,6 +354,16 @@ func (b *ECBackend) ListBuckets() ([]string, error) {
 // --- Object operations ---
 
 func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	return b.putObjectCore(bucket, key, r, contentType, 0)
+}
+
+// PutObjectWithACL stores an object and atomically sets its ACL in the same
+// BadgerDB transaction. Implements storage.AtomicACLPutter.
+func (b *ECBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*storage.Object, error) {
+	return b.putObjectCore(bucket, key, r, contentType, s3auth.ACLGrant(acl))
+}
+
+func (b *ECBackend) putObjectCore(bucket, key string, r io.Reader, contentType string, acl s3auth.ACLGrant) (*storage.Object, error) {
 	bm, err := b.getBucketMeta(bucket)
 	if err != nil {
 		return nil, err
@@ -381,10 +393,10 @@ func (b *ECBackend) PutObject(bucket, key string, r io.Reader, contentType strin
 		if readErr != nil {
 			return nil, fmt.Errorf("read spooled plain data: %w", readErr)
 		}
-		obj, err = b.putObjectPlain(bucket, key, versionId, data, contentType)
+		obj, err = b.putObjectPlain(bucket, key, versionId, data, contentType, acl)
 	} else {
 		// Pass 2+: streaming Reed-Solomon encode from temp file.
-		obj, err = b.putObjectDataStreaming(bucket, key, versionId, f, size, etag, contentType)
+		obj, err = b.putObjectDataStreaming(bucket, key, versionId, f, size, etag, contentType, acl)
 	}
 	if err != nil {
 		return nil, err
@@ -410,7 +422,7 @@ func (b *ECBackend) getBucketMeta(bucket string) (*bucketMeta, error) {
 }
 
 // putObjectPlain stores an object without erasure coding (flat file).
-func (b *ECBackend) putObjectPlain(bucket, key, versionId string, data []byte, contentType string) (*storage.Object, error) {
+func (b *ECBackend) putObjectPlain(bucket, key, versionId string, data []byte, contentType string, acl s3auth.ACLGrant) (*storage.Object, error) {
 	objDir := filepath.Join(b.root, "data", bucket, ".plain")
 	if err := os.MkdirAll(objDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create plain dir: %w", err)
@@ -442,6 +454,7 @@ func (b *ECBackend) putObjectPlain(bucket, key, versionId string, data []byte, c
 		DataShards:   0, // indicates plain storage
 		ParityShards: 0,
 		VersionID:    versionId,
+		ACL:          acl,
 	}
 
 	metaBytes, err := marshalECObjectMeta(&meta)
@@ -502,6 +515,7 @@ func (b *ECBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Objec
 		ETag:         meta.ETag,
 		LastModified: meta.LastModified,
 		VersionID:    meta.VersionID,
+		ACL:          uint8(meta.ACL),
 	}
 	return io.NopCloser(bytes.NewReader(data)), obj, nil
 }
@@ -552,6 +566,7 @@ func (b *ECBackend) GetObjectVersion(bucket, key, versionId string) (io.ReadClos
 		ETag:         meta.ETag,
 		LastModified: meta.LastModified,
 		VersionID:    versionId,
+		ACL:          uint8(meta.ACL),
 	}
 	return io.NopCloser(bytes.NewReader(data)), obj, nil
 }
@@ -591,7 +606,59 @@ func (b *ECBackend) HeadObjectVersion(bucket, key, versionId string) (*storage.O
 		ETag:         meta.ETag,
 		LastModified: meta.LastModified,
 		VersionID:    versionId,
+		ACL:          uint8(meta.ACL),
 	}, nil
+}
+
+// SetObjectACL updates the ACL for the latest version of an object.
+// Implements storage.ACLSetter.
+func (b *ECBackend) SetObjectACL(bucket, key string, acl uint8) error {
+	if err := b.HeadBucket(bucket); err != nil {
+		return err
+	}
+
+	return b.db.Update(func(txn *badger.Txn) error {
+		// Resolve latest version pointer if present.
+		metaKey := objectMetaKey(bucket, key)
+		if latItem, err := txn.Get(latestKey(bucket, key)); err == nil {
+			var versionId string
+			if err := latItem.Value(func(v []byte) error {
+				versionId = string(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			metaKey = objectMetaKeyV(bucket, key, versionId)
+		}
+
+		item, err := txn.Get(metaKey)
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+
+		var meta *ecObjectMeta
+		if err := item.Value(func(val []byte) error {
+			var unmarshalErr error
+			meta, unmarshalErr = unmarshalECObjectMeta(val)
+			return unmarshalErr
+		}); err != nil {
+			return err
+		}
+
+		if meta.IsDeleteMarker {
+			return storage.ErrObjectNotFound
+		}
+
+		meta.ACL = s3auth.ACLGrant(acl)
+		encoded, err := marshalECObjectMeta(meta)
+		if err != nil {
+			return err
+		}
+		return txn.Set(metaKey, encoded)
+	})
 }
 
 func (b *ECBackend) readPlain(bucket, key, versionId string) ([]byte, error) {
@@ -619,6 +686,7 @@ func (b *ECBackend) HeadObject(bucket, key string) (*storage.Object, error) {
 		ETag:         meta.ETag,
 		LastModified: meta.LastModified,
 		VersionID:    meta.VersionID,
+		ACL:          uint8(meta.ACL),
 	}, nil
 }
 
@@ -845,6 +913,7 @@ func (b *ECBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.
 				ContentType:  meta.ContentType,
 				ETag:         meta.ETag,
 				LastModified: meta.LastModified,
+				ACL:          uint8(meta.ACL),
 			})
 			count++
 		}
@@ -1088,13 +1157,13 @@ func (b *ECBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts 
 
 	var obj *storage.Object
 	if bm.ECEnabled {
-		obj, err = b.putObjectDataStreaming(bucket, key, versionId, spooled, totalSize, etag, uploadMeta.ContentType)
+		obj, err = b.putObjectDataStreaming(bucket, key, versionId, spooled, totalSize, etag, uploadMeta.ContentType, 0)
 	} else {
 		data, readErr := io.ReadAll(spooled)
 		if readErr != nil {
 			return nil, fmt.Errorf("read spooled plain data: %w", readErr)
 		}
-		obj, err = b.putObjectPlain(bucket, key, versionId, data, uploadMeta.ContentType)
+		obj, err = b.putObjectPlain(bucket, key, versionId, data, uploadMeta.ContentType, 0)
 	}
 	if err != nil {
 		return nil, err
@@ -1319,7 +1388,7 @@ func (b *ECBackend) MigratePlainToEC(rec scrubber.PlainRecord) error {
 	}
 	defer f.Close()
 
-	if _, err := b.putObjectDataStreaming(rec.Bucket, rec.Key, rec.VersionID, f, rec.Size, rec.ETag, rec.ContentType); err != nil {
+	if _, err := b.putObjectDataStreaming(rec.Bucket, rec.Key, rec.VersionID, f, rec.Size, rec.ETag, rec.ContentType, 0); err != nil {
 		return fmt.Errorf("re-encode as EC: %w", err)
 	}
 
@@ -1533,6 +1602,7 @@ func (b *ECBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 				Modified:    meta.LastModified,
 				VersionID:   versionID,
 				IsLatest:    isLatest,
+				ACL:         uint8(meta.ACL),
 			})
 		}
 		return nil
@@ -1648,6 +1718,7 @@ func (b *ECBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []sto
 			ParityShards: parityShards,
 			ShardSize:    shardSize,
 			VersionID:    snap.VersionID,
+			ACL:          s3auth.ACLGrant(snap.ACL),
 		}
 		metaBytes, err := marshalECObjectMeta(meta)
 		if err != nil {

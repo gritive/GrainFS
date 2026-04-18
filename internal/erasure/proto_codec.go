@@ -1,6 +1,7 @@
 package erasure
 
 import (
+	"github.com/gritive/GrainFS/internal/s3auth"
 	pb "github.com/gritive/GrainFS/internal/erasure/erasurepb"
 	"google.golang.org/protobuf/proto"
 )
@@ -46,6 +47,7 @@ func marshalECObjectMeta(m *ecObjectMeta) ([]byte, error) {
 		VersionId:      m.VersionID,
 		IsDeleteMarker: m.IsDeleteMarker,
 		CreatedNano:    m.CreatedNano,
+		Acl:            uint32(m.ACL),
 	})
 }
 
@@ -66,6 +68,7 @@ func unmarshalECObjectMeta(data []byte) (*ecObjectMeta, error) {
 		VersionID:      p.VersionId,
 		IsDeleteMarker: p.IsDeleteMarker,
 		CreatedNano:    p.CreatedNano,
+		ACL:            s3auth.ACLGrant(p.Acl), // proto3: missing field → 0 → ACLPrivate
 	}, nil
 }
 
