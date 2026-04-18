@@ -201,6 +201,12 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 	}
 
 	t.mu.Lock()
+	if _, exists = t.conns[addr]; exists {
+		// Another goroutine dialled the same peer concurrently; close the duplicate.
+		conn.CloseWithError(0, "duplicate connection")
+		t.mu.Unlock()
+		return nil
+	}
 	t.conns[addr] = conn
 	t.mu.Unlock()
 

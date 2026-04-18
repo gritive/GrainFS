@@ -51,7 +51,10 @@ func (s *GossipSender) Run(ctx context.Context) {
 
 // broadcastOnce sends the current node stats to all peers.
 func (s *GossipSender) broadcastOnce(ctx context.Context) {
-	stats, _ := s.store.Get(s.nodeID)
+	stats, ok := s.store.Get(s.nodeID)
+	if !ok {
+		return // local stats not yet populated; skip to avoid broadcasting DiskUsedPct=0
+	}
 
 	pb := &clusterpb.NodeStatsMsg{
 		NodeId:         s.nodeID,

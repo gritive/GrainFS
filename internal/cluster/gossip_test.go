@@ -84,6 +84,7 @@ func statsGossipMsg(ns NodeStats) *transport.Message {
 func TestGossipSender_BroadcastsToPeers(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 50.0})
 	peers := []string{"node-b:9000", "node-c:9000"}
 
 	sender := NewGossipSender("node-a", peers, tr, store, 30*time.Second)
@@ -115,6 +116,17 @@ func TestGossipSender_PayloadDecodable(t *testing.T) {
 	assert.Equal(t, "node-a", pb.NodeId)
 	assert.Equal(t, 70.0, pb.DiskUsedPct)
 	assert.Equal(t, 120.0, pb.RequestsPerSec)
+}
+
+func TestGossipSender_SkipsBroadcastWhenNoLocalStats(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	// Do NOT set any stats for "node-a" → cold-start scenario
+
+	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second)
+	sender.broadcastOnce(context.Background())
+
+	assert.Empty(t, tr.AllSent(), "should not broadcast DiskUsedPct=0 before local stats are ready")
 }
 
 func TestGossipSender_NoPeers(t *testing.T) {

@@ -72,6 +72,9 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 
 // Run starts the balancer tick loop. Blocks until ctx is cancelled.
 func (p *BalancerProposer) Run(ctx context.Context) {
+	// Reset tenure timer here so LeaderTenureMin is measured from the moment this
+	// node becomes active (leader), not from when BalancerProposer was constructed.
+	p.startedAt = time.Now()
 	ticker := time.NewTicker(p.cfg.GossipInterval)
 	defer ticker.Stop()
 	for {
