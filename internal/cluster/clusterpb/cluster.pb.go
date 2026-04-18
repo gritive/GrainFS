@@ -785,6 +785,229 @@ func (x *MultipartMeta) GetContentType() string {
 	return ""
 }
 
+// NodeStatsMsg is broadcast via StreamAdmin every 30s for cluster-wide visibility.
+type NodeStatsMsg struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	NodeId         string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	DiskUsedPct    float64                `protobuf:"fixed64,2,opt,name=disk_used_pct,json=diskUsedPct,proto3" json:"disk_used_pct,omitempty"`
+	DiskAvailBytes uint64                 `protobuf:"varint,3,opt,name=disk_avail_bytes,json=diskAvailBytes,proto3" json:"disk_avail_bytes,omitempty"`
+	RequestsPerSec float64                `protobuf:"fixed64,4,opt,name=requests_per_sec,json=requestsPerSec,proto3" json:"requests_per_sec,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *NodeStatsMsg) Reset() {
+	*x = NodeStatsMsg{}
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeStatsMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeStatsMsg) ProtoMessage() {}
+
+func (x *NodeStatsMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeStatsMsg.ProtoReflect.Descriptor instead.
+func (*NodeStatsMsg) Descriptor() ([]byte, []int) {
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *NodeStatsMsg) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *NodeStatsMsg) GetDiskUsedPct() float64 {
+	if x != nil {
+		return x.DiskUsedPct
+	}
+	return 0
+}
+
+func (x *NodeStatsMsg) GetDiskAvailBytes() uint64 {
+	if x != nil {
+		return x.DiskAvailBytes
+	}
+	return 0
+}
+
+func (x *NodeStatsMsg) GetRequestsPerSec() float64 {
+	if x != nil {
+		return x.RequestsPerSec
+	}
+	return 0
+}
+
+// MigrateShardCmd requests movement of a full object copy from src to dst.
+type MigrateShardCmd struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Bucket        string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	VersionId     string                 `protobuf:"bytes,3,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	SrcNode       string                 `protobuf:"bytes,4,opt,name=src_node,json=srcNode,proto3" json:"src_node,omitempty"`
+	DstNode       string                 `protobuf:"bytes,5,opt,name=dst_node,json=dstNode,proto3" json:"dst_node,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MigrateShardCmd) Reset() {
+	*x = MigrateShardCmd{}
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrateShardCmd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrateShardCmd) ProtoMessage() {}
+
+func (x *MigrateShardCmd) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrateShardCmd.ProtoReflect.Descriptor instead.
+func (*MigrateShardCmd) Descriptor() ([]byte, []int) {
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *MigrateShardCmd) GetBucket() string {
+	if x != nil {
+		return x.Bucket
+	}
+	return ""
+}
+
+func (x *MigrateShardCmd) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *MigrateShardCmd) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+func (x *MigrateShardCmd) GetSrcNode() string {
+	if x != nil {
+		return x.SrcNode
+	}
+	return ""
+}
+
+func (x *MigrateShardCmd) GetDstNode() string {
+	if x != nil {
+		return x.DstNode
+	}
+	return ""
+}
+
+// MigrationDoneCmd signals that a migration has completed successfully.
+type MigrationDoneCmd struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Bucket        string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	VersionId     string                 `protobuf:"bytes,3,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	SrcNode       string                 `protobuf:"bytes,4,opt,name=src_node,json=srcNode,proto3" json:"src_node,omitempty"`
+	DstNode       string                 `protobuf:"bytes,5,opt,name=dst_node,json=dstNode,proto3" json:"dst_node,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MigrationDoneCmd) Reset() {
+	*x = MigrationDoneCmd{}
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrationDoneCmd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrationDoneCmd) ProtoMessage() {}
+
+func (x *MigrationDoneCmd) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_cluster_clusterpb_cluster_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrationDoneCmd.ProtoReflect.Descriptor instead.
+func (*MigrationDoneCmd) Descriptor() ([]byte, []int) {
+	return file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *MigrationDoneCmd) GetBucket() string {
+	if x != nil {
+		return x.Bucket
+	}
+	return ""
+}
+
+func (x *MigrationDoneCmd) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *MigrationDoneCmd) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+func (x *MigrationDoneCmd) GetSrcNode() string {
+	if x != nil {
+		return x.SrcNode
+	}
+	return ""
+}
+
+func (x *MigrationDoneCmd) GetDstNode() string {
+	if x != nil {
+		return x.DstNode
+	}
+	return ""
+}
+
 var File_internal_cluster_clusterpb_cluster_proto protoreflect.FileDescriptor
 
 const file_internal_cluster_clusterpb_cluster_proto_rawDesc = "" +
@@ -845,7 +1068,26 @@ const file_internal_cluster_clusterpb_cluster_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"2\n" +
 	"\rMultipartMeta\x12!\n" +
-	"\fcontent_type\x18\x01 \x01(\tR\vcontentTypeB7Z5github.com/gritive/GrainFS/internal/cluster/clusterpbb\x06proto3"
+	"\fcontent_type\x18\x01 \x01(\tR\vcontentType\"\x9f\x01\n" +
+	"\fNodeStatsMsg\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\"\n" +
+	"\rdisk_used_pct\x18\x02 \x01(\x01R\vdiskUsedPct\x12(\n" +
+	"\x10disk_avail_bytes\x18\x03 \x01(\x04R\x0ediskAvailBytes\x12(\n" +
+	"\x10requests_per_sec\x18\x04 \x01(\x01R\x0erequestsPerSec\"\x90\x01\n" +
+	"\x0fMigrateShardCmd\x12\x16\n" +
+	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x03 \x01(\tR\tversionId\x12\x19\n" +
+	"\bsrc_node\x18\x04 \x01(\tR\asrcNode\x12\x19\n" +
+	"\bdst_node\x18\x05 \x01(\tR\adstNode\"\x91\x01\n" +
+	"\x10MigrationDoneCmd\x12\x16\n" +
+	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x03 \x01(\tR\tversionId\x12\x19\n" +
+	"\bsrc_node\x18\x04 \x01(\tR\asrcNode\x12\x19\n" +
+	"\bdst_node\x18\x05 \x01(\tR\adstNodeB7Z5github.com/gritive/GrainFS/internal/cluster/clusterpbb\x06proto3"
 
 var (
 	file_internal_cluster_clusterpb_cluster_proto_rawDescOnce sync.Once
@@ -859,7 +1101,7 @@ func file_internal_cluster_clusterpb_cluster_proto_rawDescGZIP() []byte {
 	return file_internal_cluster_clusterpb_cluster_proto_rawDescData
 }
 
-var file_internal_cluster_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_internal_cluster_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_internal_cluster_clusterpb_cluster_proto_goTypes = []any{
 	(*Command)(nil),                  // 0: clusterpb.Command
 	(*CreateBucketCmd)(nil),          // 1: clusterpb.CreateBucketCmd
@@ -874,10 +1116,13 @@ var file_internal_cluster_clusterpb_cluster_proto_goTypes = []any{
 	(*ObjectMeta)(nil),               // 10: clusterpb.ObjectMeta
 	(*SnapshotState)(nil),            // 11: clusterpb.SnapshotState
 	(*MultipartMeta)(nil),            // 12: clusterpb.MultipartMeta
-	nil,                              // 13: clusterpb.SnapshotState.EntriesEntry
+	(*NodeStatsMsg)(nil),             // 13: clusterpb.NodeStatsMsg
+	(*MigrateShardCmd)(nil),          // 14: clusterpb.MigrateShardCmd
+	(*MigrationDoneCmd)(nil),         // 15: clusterpb.MigrationDoneCmd
+	nil,                              // 16: clusterpb.SnapshotState.EntriesEntry
 }
 var file_internal_cluster_clusterpb_cluster_proto_depIdxs = []int32{
-	13, // 0: clusterpb.SnapshotState.entries:type_name -> clusterpb.SnapshotState.EntriesEntry
+	16, // 0: clusterpb.SnapshotState.entries:type_name -> clusterpb.SnapshotState.EntriesEntry
 	1,  // [1:1] is the sub-list for method output_type
 	1,  // [1:1] is the sub-list for method input_type
 	1,  // [1:1] is the sub-list for extension type_name
@@ -896,7 +1141,7 @@ func file_internal_cluster_clusterpb_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_cluster_clusterpb_cluster_proto_rawDesc), len(file_internal_cluster_clusterpb_cluster_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

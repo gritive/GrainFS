@@ -420,3 +420,33 @@ func TestDistributedBackend_Close(t *testing.T) {
 	err = backend.Close()
 	assert.NoError(t, err)
 }
+
+func TestSelectPeerByLoad_ReturnsLightestWhenOverloaded(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 300.0}) // overloaded
+	store.Set(NodeStats{NodeID: "node-b", RequestsPerSec: 50.0})
+	store.Set(NodeStats{NodeID: "node-c", RequestsPerSec: 80.0})
+
+	peer, ok := selectPeerByLoad(store, "node-a", 1.3)
+	require.True(t, ok)
+	assert.Equal(t, "node-b", peer) // lowest load
+}
+
+func TestSelectPeerByLoad_NoRedirectWhenBalanced(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 100.0})
+	store.Set(NodeStats{NodeID: "node-b", RequestsPerSec: 90.0})
+	store.Set(NodeStats{NodeID: "node-c", RequestsPerSec: 110.0})
+
+	// median ~100, node-a = 100, threshold 1.3 → 100 <= 100*1.3 → no redirect
+	_, ok := selectPeerByLoad(store, "node-a", 1.3)
+	assert.False(t, ok)
+}
+
+func TestSelectPeerByLoad_SingleNode(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 1000.0})
+
+	_, ok := selectPeerByLoad(store, "node-a", 1.3)
+	assert.False(t, ok, "single node: no peers to redirect to")
+}

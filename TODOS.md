@@ -4,6 +4,18 @@
 
 - [ ] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
 
+### Phase 13 DX 후속 (devex review 2026-04-18)
+
+- [ ] balancer 튜닝 플래그 6종: --balancer-enabled, --balancer-gossip-interval, --balancer-imbalance-trigger-pct, --balancer-imbalance-stop-pct, --balancer-migration-rate, --balancer-leader-tenure-min (serve.go)
+- [ ] internal/metrics/metrics.go에 balancer metrics 11종 추가 (gossip, migrations, leader transfer, load-aware reads, pending stale)
+- [ ] 실패 모드 명세: WriteShard retry/backoff/give-up, pending migration TTL orphan cleanup, DstNode disk-full circuit breaker
+- [ ] Structured logging: component="balancer" tag + phase field
+- [ ] 신규 노드 join 시 grace period (10분, trigger 50% 완화) — migration storm 방지
+- [ ] Rolling upgrade 대응: warm-up timeout 후 available peers로 시작, protobuf unknown field tolerance
+- [ ] Health endpoint: GET /cluster/balancer/status (pending migrations, last gossip, imbalance pct)
+- [ ] Operator runbook: docs/operations/balancer.md
+- [ ] E2E: disk-fill 전략 — 테스트 하니스에서 diskUsedPct 주입 hook
+
 ## Phase 14: Scale
 
 - [ ] ScrubObjects cursor pagination — ScanObjects BadgerDB 전체 순회 → cursor 기반으로 교체 (10K+ 클러스터 대비)

@@ -5,11 +5,28 @@ import (
 	"log"
 
 	"github.com/dgraph-io/badger/v4"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // FSM applies committed Raft log entries to BadgerDB metadata store.
 type FSM struct {
 	db *badger.DB
+
+	// Optional hooks for Phase 13 balancer. Nil in solo/non-balancer mode.
+	onMigrateShard  func(MigrationTask) // called when CmdMigrateShard is applied
+	commitNotifier  interface {         // called when CmdMigrationDone is applied
+		NotifyCommit(bucket, key, versionID string)
+	}
+}
+
+// SetMigrationHooks wires the FSM to the balancer/migration subsystem.
+func (f *FSM) SetMigrationHooks(onShard func(MigrationTask), notifier interface {
+	NotifyCommit(bucket, key, versionID string)
+}) {
+	f.onMigrateShard = onShard
+	f.commitNotifier = notifier
 }
 
 // NewFSM creates a new finite state machine backed by BadgerDB.
@@ -43,6 +60,10 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetBucketPolicy(cmd.Data)
 	case CmdDeleteBucketPolicy:
 		return f.applyDeleteBucketPolicy(cmd.Data)
+	case CmdMigrateShard:
+		return f.applyMigrateShard(cmd.Data)
+	case CmdMigrationDone:
+		return f.applyMigrationDone(cmd.Data)
 	default:
 		log.Printf("fsm: unknown command type %d", cmd.Type)
 		return nil
@@ -183,6 +204,35 @@ func (f *FSM) applyDeleteBucketPolicy(data []byte) error {
 		}
 		return err
 	})
+}
+
+func (f *FSM) applyMigrateShard(data []byte) error {
+	var cmd clusterpb.MigrateShardCmd
+	if err := proto.Unmarshal(data, &cmd); err != nil {
+		return fmt.Errorf("decode MigrateShardCmd: %w", err)
+	}
+	task := MigrationTask{
+		Bucket:    cmd.Bucket,
+		Key:       cmd.Key,
+		VersionID: cmd.VersionId,
+		SrcNode:   cmd.SrcNode,
+		DstNode:   cmd.DstNode,
+	}
+	if f.onMigrateShard != nil {
+		f.onMigrateShard(task)
+	}
+	return nil
+}
+
+func (f *FSM) applyMigrationDone(data []byte) error {
+	var cmd clusterpb.MigrationDoneCmd
+	if err := proto.Unmarshal(data, &cmd); err != nil {
+		return fmt.Errorf("decode MigrationDoneCmd: %w", err)
+	}
+	if f.commitNotifier != nil {
+		f.commitNotifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionId)
+	}
+	return nil
 }
 
 // Snapshot serializes the full metadata state for Raft snapshots.

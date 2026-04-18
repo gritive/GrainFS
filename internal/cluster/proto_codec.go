@@ -294,7 +294,31 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetBucketPolicyCmd(payload.(SetBucketPolicyCmd))
 	case CmdDeleteBucketPolicy:
 		return encodeDeleteBucketPolicyCmd(payload.(DeleteBucketPolicyCmd))
+	case CmdMigrateShard:
+		return encodeMigrateShardCmd(payload.(MigrateShardFSMCmd))
+	case CmdMigrationDone:
+		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
+}
+
+func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
+	return proto.Marshal(&clusterpb.MigrateShardCmd{
+		Bucket:    c.Bucket,
+		Key:       c.Key,
+		VersionId: c.VersionID,
+		SrcNode:   c.SrcNode,
+		DstNode:   c.DstNode,
+	})
+}
+
+func encodeMigrationDoneCmd(c MigrationDoneFSMCmd) ([]byte, error) {
+	return proto.Marshal(&clusterpb.MigrationDoneCmd{
+		Bucket:    c.Bucket,
+		Key:       c.Key,
+		VersionId: c.VersionID,
+		SrcNode:   c.SrcNode,
+		DstNode:   c.DstNode,
+	})
 }
