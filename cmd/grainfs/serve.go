@@ -517,7 +517,18 @@ func (a *ecDeleterAdapter) DeleteObjectVersion(bucket, key, versionID string) er
 	return a.b.DeleteObjectVersion(bucket, key, versionID)
 }
 func (a *ecDeleterAdapter) ListObjectVersions(bucket, key string) ([]*storage.ObjectVersion, error) {
-	return a.b.ListObjectVersions(bucket, key, 10000)
+	// ListObjectVersions uses prefix matching; filter to exact key to avoid pruning wrong versions.
+	all, err := a.b.ListObjectVersions(bucket, key, 10000)
+	if err != nil {
+		return nil, err
+	}
+	result := all[:0]
+	for _, v := range all {
+		if v.Key == key {
+			result = append(result, v)
+		}
+	}
+	return result, nil
 }
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.

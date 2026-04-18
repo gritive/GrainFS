@@ -60,6 +60,15 @@ func TestValidate_NegativeDays(t *testing.T) {
 	assert.Error(t, Validate(cfg))
 }
 
+func TestValidate_ZeroDays(t *testing.T) {
+	cfg := &LifecycleConfiguration{
+		Rules: []Rule{
+			{ID: "r", Status: "Enabled", Expiration: &Expiration{Days: 0}},
+		},
+	}
+	assert.Error(t, Validate(cfg))
+}
+
 func TestXMLRoundTrip(t *testing.T) {
 	original := &LifecycleConfiguration{
 		Rules: []Rule{

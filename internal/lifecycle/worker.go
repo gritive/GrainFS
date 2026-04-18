@@ -92,8 +92,11 @@ func (w *Worker) Stop() {
 
 // Stats returns a copy of the current worker statistics.
 func (w *Worker) Stats() Stats {
+	w.mu.Lock()
+	lastRun := w.stats.LastRun
+	w.mu.Unlock()
 	return Stats{
-		LastRun:        w.stats.LastRun,
+		LastRun:        lastRun,
 		ObjectsChecked: atomic.LoadInt64(&w.stats.ObjectsChecked),
 		Expired:        atomic.LoadInt64(&w.stats.Expired),
 		VersionsPruned: atomic.LoadInt64(&w.stats.VersionsPruned),
@@ -129,6 +132,7 @@ func (w *Worker) runCycle(ctx context.Context) {
 
 		for obj := range objs {
 			if ctx.Err() != nil {
+				go func() { for range objs {} }() // drain producer to prevent goroutine leak
 				return
 			}
 			atomic.AddInt64(&w.stats.ObjectsChecked, 1)
@@ -143,7 +147,7 @@ func (w *Worker) runCycle(ctx context.Context) {
 
 func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rules []Rule, now time.Time) {
 	for _, rule := range rules {
-		if rule.Status != "Enabled" {
+		if rule.Status != StatusEnabled {
 			continue
 		}
 		if rule.Filter != nil && rule.Filter.Prefix != "" {
@@ -152,10 +156,12 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 			}
 		}
 
-		if exp := rule.Expiration; exp != nil && exp.Days > 0 {
+		if exp := rule.Expiration; exp != nil && exp.Days > 0 && !obj.IsDeleteMarker {
 			objTime := time.Unix(obj.LastModified, 0)
 			if now.Sub(objTime) >= time.Duration(exp.Days)*24*time.Hour {
-				_ = w.limiter.Wait(ctx)
+				if err := w.limiter.Wait(ctx); err != nil {
+					return // ctx cancelled
+				}
 				if err := w.deleter.DeleteObject(obj.Bucket, obj.Key); err != nil {
 					slog.Error("lifecycle: delete object", "bucket", obj.Bucket, "key", obj.Key, "err", err)
 				} else {
@@ -177,18 +183,14 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 				if v.IsLatest {
 					continue
 				}
-				shouldDelete := false
-				if nce.NewerNoncurrentVersions > 0 && noncurrentIdx >= nce.NewerNoncurrentVersions {
-					shouldDelete = true
-				}
-				if nce.NoncurrentDays > 0 {
-					vTime := time.Unix(v.LastModified, 0)
-					if now.Sub(vTime) >= time.Duration(nce.NoncurrentDays)*24*time.Hour {
-						shouldDelete = true
+				// S3 spec: when both fields are set, both conditions must be met (AND).
+				// An unset field (0) is treated as "no constraint" (always satisfied).
+				beyondCount := nce.NewerNoncurrentVersions <= 0 || noncurrentIdx >= nce.NewerNoncurrentVersions
+				beyondAge := nce.NoncurrentDays <= 0 || now.Sub(time.Unix(v.LastModified, 0)) >= time.Duration(nce.NoncurrentDays)*24*time.Hour
+				if (nce.NewerNoncurrentVersions > 0 || nce.NoncurrentDays > 0) && beyondCount && beyondAge {
+					if err := w.limiter.Wait(ctx); err != nil {
+						return // ctx cancelled
 					}
-				}
-				if shouldDelete {
-					_ = w.limiter.Wait(ctx)
 					if err := w.deleter.DeleteObjectVersion(obj.Bucket, obj.Key, v.VersionID); err != nil {
 						slog.Error("lifecycle: delete version", "key", obj.Key, "versionID", v.VersionID, "err", err)
 					} else {

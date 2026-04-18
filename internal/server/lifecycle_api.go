@@ -9,10 +9,22 @@ import (
 	"github.com/gritive/GrainFS/internal/lifecycle"
 )
 
+const maxLifecycleBodyBytes = 64 * 1024 // 64 KiB — enough for any reasonable lifecycle config
+
 // putBucketLifecycle handles PUT /{bucket}?lifecycle.
 func (s *Server) putBucketLifecycle(c *app.RequestContext, bucket string) {
 	if s.lifecycleStore == nil {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "lifecycle not configured")
+		return
+	}
+
+	if err := s.backend.HeadBucket(bucket); err != nil {
+		mapError(c, err)
+		return
+	}
+
+	if len(c.Request.Body()) > maxLifecycleBodyBytes {
+		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", "lifecycle configuration exceeds 64 KiB limit")
 		return
 	}
 

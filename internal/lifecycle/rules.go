@@ -6,6 +6,11 @@ import (
 	"fmt"
 )
 
+const (
+	StatusEnabled  = "Enabled"
+	StatusDisabled = "Disabled"
+)
+
 // LifecycleConfiguration is the S3-compatible lifecycle config for a bucket.
 type LifecycleConfiguration struct {
 	XMLName xml.Name `xml:"LifecycleConfiguration"`
@@ -49,11 +54,11 @@ func Validate(cfg *LifecycleConfiguration) error {
 			return fmt.Errorf("duplicate lifecycle rule ID: %s", r.ID)
 		}
 		ids[r.ID] = true
-		if r.Status != "Enabled" && r.Status != "Disabled" {
+		if r.Status != StatusEnabled && r.Status != StatusDisabled {
 			return fmt.Errorf("invalid rule status %q: must be Enabled or Disabled", r.Status)
 		}
-		if r.Expiration != nil && r.Expiration.Days < 0 {
-			return fmt.Errorf("rule %q: expiration days must be >= 0", r.ID)
+		if r.Expiration != nil && r.Expiration.Days <= 0 {
+			return fmt.Errorf("rule %q: expiration days must be > 0", r.ID)
 		}
 	}
 	return nil
