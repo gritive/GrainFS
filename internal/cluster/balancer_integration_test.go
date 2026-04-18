@@ -43,21 +43,13 @@ func TestBalancerIntegration_ProposesOnImbalance(t *testing.T) {
 	go p.Run(ctx)
 
 	// Wait for at least one proposal
-	deadline := time.After(400 * time.Millisecond)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout: no CmdMigrateShard proposed within 400ms")
-		case <-time.After(10 * time.Millisecond):
-			if len(node.proposed) > 0 {
-				goto done
-			}
-		}
-	}
-done:
-	require.NotEmpty(t, node.proposed)
+	require.Eventually(t, func() bool {
+		return node.ProposedLen() > 0
+	}, 400*time.Millisecond, 10*time.Millisecond, "timeout: no CmdMigrateShard proposed within 400ms")
+
+	require.Greater(t, node.ProposedLen(), 0)
 	var cmd clusterpb.Command
-	require.NoError(t, proto.Unmarshal(node.proposed[0], &cmd))
+	require.NoError(t, proto.Unmarshal(node.ProposedAt(0), &cmd))
 	assert.Equal(t, uint32(CmdMigrateShard), cmd.Type, "should propose CmdMigrateShard")
 
 	var migrate clusterpb.MigrateShardCmd

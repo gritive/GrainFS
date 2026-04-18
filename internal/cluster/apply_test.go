@@ -340,10 +340,8 @@ func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
 
-	var received MigrationTask
-	fsm.SetMigrationHooks(func(task MigrationTask) {
-		received = task
-	}, nil)
+	ch := make(chan MigrationTask, 1)
+	fsm.SetMigrationHooks(ch, nil)
 
 	data, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
 		Bucket:    "my-bucket",
@@ -355,6 +353,12 @@ func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(data))
 
+	var received MigrationTask
+	select {
+	case received = <-ch:
+	default:
+		t.Fatal("expected migration task on channel")
+	}
 	assert.Equal(t, "my-bucket", received.Bucket)
 	assert.Equal(t, "node-b", received.DstNode)
 }

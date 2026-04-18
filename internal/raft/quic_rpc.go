@@ -37,7 +37,7 @@ func NewQUICRPCTransport(tr *transport.QUICTransport, node *Node) *QUICRPCTransp
 		transport: tr,
 		node:      node,
 	}
-	tr.SetStreamHandler(rpc.handleRPC)
+	tr.Handle(transport.StreamControl, rpc.handleRPC)
 	return rpc
 }
 

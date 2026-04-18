@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"log/slog"
+	"net"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -11,31 +12,31 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-const gossipInterval = 30 * time.Second
-
-// GossipSender broadcasts local node stats to all peers every 30s via StreamAdmin.
+// GossipSender broadcasts local node stats to all peers at a configurable interval via StreamAdmin.
 type GossipSender struct {
-	nodeID string
-	peers  []string
-	tr     transport.Transport
-	store  *NodeStatsStore
-	logger *slog.Logger
+	nodeID   string
+	peers    []string
+	tr       transport.Transport
+	store    *NodeStatsStore
+	interval time.Duration
+	logger   *slog.Logger
 }
 
-// NewGossipSender creates a sender that broadcasts nodeID's stats.
-func NewGossipSender(nodeID string, peers []string, tr transport.Transport, store *NodeStatsStore) *GossipSender {
+// NewGossipSender creates a sender that broadcasts nodeID's stats at the given interval.
+func NewGossipSender(nodeID string, peers []string, tr transport.Transport, store *NodeStatsStore, interval time.Duration) *GossipSender {
 	return &GossipSender{
-		nodeID: nodeID,
-		peers:  peers,
-		tr:     tr,
-		store:  store,
-		logger: slog.Default(),
+		nodeID:   nodeID,
+		peers:    peers,
+		tr:       tr,
+		store:    store,
+		interval: interval,
+		logger:   slog.Default(),
 	}
 }
 
 // Run starts the gossip broadcast loop. Blocks until ctx is cancelled.
 func (s *GossipSender) Run(ctx context.Context) {
-	ticker := time.NewTicker(gossipInterval)
+	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	s.broadcastOnce(ctx)
 	for {
@@ -110,6 +111,11 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 			if pb.NodeId == "" {
 				continue
 			}
+			// Verify the claimed NodeId matches the actual sender address to prevent spoofing.
+			if !nodeIDMatchesFrom(pb.NodeId, rm.From) {
+				r.logger.Warn("gossip: NodeId mismatch, dropping", "claimed", pb.NodeId, "from", rm.From)
+				continue
+			}
 			r.store.Set(NodeStats{
 				NodeID:         pb.NodeId,
 				DiskUsedPct:    pb.DiskUsedPct,
@@ -118,4 +124,17 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 			})
 		}
 	}
+}
+
+// nodeIDMatchesFrom returns true if nodeID corresponds to the connection address from.
+// Handles both "host:port" and bare "host" node ID formats.
+func nodeIDMatchesFrom(nodeID, from string) bool {
+	if nodeID == from {
+		return true
+	}
+	host, _, err := net.SplitHostPort(from)
+	if err != nil {
+		return false
+	}
+	return nodeID == host
 }

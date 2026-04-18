@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/dgraph-io/badger/v4"
 	"google.golang.org/protobuf/proto"
@@ -14,19 +15,26 @@ import (
 type FSM struct {
 	db *badger.DB
 
+	// Guards onMigrateShard and commitNotifier against concurrent SetMigrationHooks + Apply.
+	mu sync.RWMutex
+
 	// Optional hooks for Phase 13 balancer. Nil in solo/non-balancer mode.
-	onMigrateShard  func(MigrationTask) // called when CmdMigrateShard is applied
-	commitNotifier  interface {         // called when CmdMigrationDone is applied
+	// onMigrateShard is a buffered channel; Apply sends non-blocking to avoid blocking the Raft apply loop.
+	onMigrateShard  chan<- MigrationTask
+	commitNotifier  interface {
 		NotifyCommit(bucket, key, versionID string)
 	}
 }
 
 // SetMigrationHooks wires the FSM to the balancer/migration subsystem.
-func (f *FSM) SetMigrationHooks(onShard func(MigrationTask), notifier interface {
+// ch must be a buffered channel; Apply drops tasks if the channel is full.
+func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
 	NotifyCommit(bucket, key, versionID string)
 }) {
-	f.onMigrateShard = onShard
+	f.mu.Lock()
+	f.onMigrateShard = ch
 	f.commitNotifier = notifier
+	f.mu.Unlock()
 }
 
 // NewFSM creates a new finite state machine backed by BadgerDB.
@@ -211,6 +219,10 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 	if err := proto.Unmarshal(data, &cmd); err != nil {
 		return fmt.Errorf("decode MigrateShardCmd: %w", err)
 	}
+	// Guard: balancer proposals without object identity are placeholders; skip them.
+	if cmd.Bucket == "" || cmd.Key == "" {
+		return nil
+	}
 	task := MigrationTask{
 		Bucket:    cmd.Bucket,
 		Key:       cmd.Key,
@@ -218,8 +230,15 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 		SrcNode:   cmd.SrcNode,
 		DstNode:   cmd.DstNode,
 	}
-	if f.onMigrateShard != nil {
-		f.onMigrateShard(task)
+	f.mu.RLock()
+	ch := f.onMigrateShard
+	f.mu.RUnlock()
+	if ch != nil {
+		select {
+		case ch <- task:
+		default:
+			log.Printf("fsm: migration queue full, dropping task %s/%s", task.Bucket, task.Key)
+		}
 	}
 	return nil
 }
@@ -229,8 +248,11 @@ func (f *FSM) applyMigrationDone(data []byte) error {
 	if err := proto.Unmarshal(data, &cmd); err != nil {
 		return fmt.Errorf("decode MigrationDoneCmd: %w", err)
 	}
-	if f.commitNotifier != nil {
-		f.commitNotifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionId)
+	f.mu.RLock()
+	notifier := f.commitNotifier
+	f.mu.RUnlock()
+	if notifier != nil {
+		notifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionId)
 	}
 	return nil
 }

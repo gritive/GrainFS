@@ -45,7 +45,7 @@ type MigrationExecutor struct {
 	numShards int
 
 	mu      sync.Mutex
-	done    map[string]struct{}   // idempotency: taskID → done
+	done    map[string]struct{}    // idempotency: taskID → done
 	pending map[string]chan struct{} // commit channels: taskID → chan
 
 	logger *slog.Logger
@@ -65,12 +65,17 @@ func NewMigrationExecutor(mover ShardMover, node MigrationRaft, numShards int) *
 
 // NotifyCommit is called by the FSM when CmdMigrationDone is applied.
 // It unblocks any Execute() waiting for that task's commit.
+// If Execute() has not yet registered its pending channel (early arrival), the task is
+// pre-marked done so Execute() will skip the wait.
 func (e *MigrationExecutor) NotifyCommit(bucket, key, versionID string) {
 	id := bucket + "/" + key + "/" + versionID
 	e.mu.Lock()
 	ch, ok := e.pending[id]
 	if ok {
 		delete(e.pending, id)
+	} else {
+		// FSM applied CmdMigrationDone before Execute registered — pre-mark done.
+		e.done[id] = struct{}{}
 	}
 	e.mu.Unlock()
 	if ok {
@@ -78,8 +83,29 @@ func (e *MigrationExecutor) NotifyCommit(bucket, key, versionID string) {
 	}
 }
 
+// Run processes migration tasks from the channel until ctx is cancelled or ch is closed.
+// Each task is executed concurrently.
+func (e *MigrationExecutor) Run(ctx context.Context, tasks <-chan MigrationTask) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task, ok := <-tasks:
+			if !ok {
+				return
+			}
+			go func(t MigrationTask) {
+				if err := e.Execute(ctx, t); err != nil {
+					e.logger.Warn("migration execute failed", "task", t.id(), "err", err)
+				}
+			}(task)
+		}
+	}
+}
+
 // Execute performs the full migration sequence: copy → propose done → wait commit → delete src.
-// It is idempotent: repeated calls with the same (bucket, key, versionID) are no-ops.
+// It is idempotent: repeated calls with the same task id are no-ops.
+// If a concurrent Execute is already in flight for the same id, this call waits for it to complete.
 func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) error {
 	id := task.id()
 
@@ -88,7 +114,16 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		e.mu.Unlock()
 		return nil
 	}
-	// register commit channel before proposing
+	// If a concurrent Execute already registered a pending channel, wait for it instead of overwriting.
+	if existingCh, inFlight := e.pending[id]; inFlight {
+		e.mu.Unlock()
+		select {
+		case <-existingCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
 	commitCh := make(chan struct{})
 	e.pending[id] = commitCh
 	e.mu.Unlock()
@@ -97,24 +132,18 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	for i := range e.numShards {
 		data, err := e.mover.ReadShard(ctx, task.SrcNode, task.Bucket, task.Key, i)
 		if err != nil {
-			e.mu.Lock()
-			delete(e.pending, id)
-			e.mu.Unlock()
+			e.cleanupPending(id)
 			return fmt.Errorf("migration read shard %d: %w", i, err)
 		}
 		if err := e.mover.WriteShard(ctx, task.DstNode, task.Bucket, task.Key, i, data); err != nil {
-			e.mu.Lock()
-			delete(e.pending, id)
-			e.mu.Unlock()
+			e.cleanupPending(id)
 			return fmt.Errorf("migration write shard %d: %w", i, err)
 		}
 	}
 
 	// Phase 2: propose CmdMigrationDone to Raft
 	if err := e.proposeDone(task); err != nil {
-		e.mu.Lock()
-		delete(e.pending, id)
-		e.mu.Unlock()
+		e.cleanupPending(id)
 		return err
 	}
 
@@ -122,6 +151,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	select {
 	case <-commitCh:
 	case <-ctx.Done():
+		e.cleanupPending(id)
 		return fmt.Errorf("migration: commit wait cancelled for %s/%s", task.Bucket, task.Key)
 	}
 
@@ -136,6 +166,13 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	e.mu.Unlock()
 
 	return nil
+}
+
+// cleanupPending removes the pending channel for id, used on error paths.
+func (e *MigrationExecutor) cleanupPending(id string) {
+	e.mu.Lock()
+	delete(e.pending, id)
+	e.mu.Unlock()
 }
 
 func (e *MigrationExecutor) proposeDone(task MigrationTask) error {

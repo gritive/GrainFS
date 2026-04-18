@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,15 +15,18 @@ import (
 
 // mockRaftNode captures Propose calls for balancer testing.
 type mockRaftNode struct {
-	proposed     [][]byte
-	state        int // 0=Follower, 2=Leader
-	nodeID       string
-	peerIDs      []string
-	transferred  bool
+	mu          sync.Mutex
+	proposed    [][]byte
+	state       int // 0=Follower, 2=Leader
+	nodeID      string
+	peerIDs     []string
+	transferred bool
 }
 
 func (m *mockRaftNode) Propose(data []byte) error {
+	m.mu.Lock()
 	m.proposed = append(m.proposed, data)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -30,8 +34,22 @@ func (m *mockRaftNode) IsLeader() bool { return m.state == 2 }
 func (m *mockRaftNode) NodeID() string  { return m.nodeID }
 func (m *mockRaftNode) PeerIDs() []string { return m.peerIDs }
 func (m *mockRaftNode) TransferLeadership() error {
+	m.mu.Lock()
 	m.transferred = true
+	m.mu.Unlock()
 	return nil
+}
+
+func (m *mockRaftNode) ProposedLen() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.proposed)
+}
+
+func (m *mockRaftNode) ProposedAt(i int) []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.proposed[i]
 }
 
 // testBalancerConfig returns a BalancerConfig with aggressive timings for testing.
@@ -264,6 +282,31 @@ func TestLeaderBalance_NoTransferWhenBalanced(t *testing.T) {
 	p.tickOnce(context.Background())
 
 	assert.False(t, node.transferred, "leader load within threshold: no transfer expected")
+}
+
+func TestSelectPeerByLoad_EvenCountMedian(t *testing.T) {
+	// With 4 nodes (even count), loads[len/2] = loads[2] which is the upper-middle.
+	// The median of [50, 100, 150, 200] should be 125 (average of middle two).
+	// Current implementation uses loads[2]=150 as median — this test documents the behavior.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 50.0})
+	store.Set(NodeStats{NodeID: "n2", RequestsPerSec: 100.0})
+	store.Set(NodeStats{NodeID: "n3", RequestsPerSec: 150.0})
+	store.Set(NodeStats{NodeID: "n4", RequestsPerSec: 200.0})
+
+	// self=n4 with 200 rps. threshold=1.3. loads sorted: [50,100,150,200], loads[2]=150 (upper-middle).
+	// 200 > 150*1.3=195 → overloaded → should redirect
+	peer, ok := selectPeerByLoad(store, "n4", 1.3)
+	require.True(t, ok, "n4 at 200 rps should exceed 150*1.3=195 median threshold")
+	assert.Equal(t, "n1", peer, "should redirect to lightest peer n1")
+}
+
+func TestSelectPeerByLoad_SingleNodeBalancer(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 999.0})
+
+	_, ok := selectPeerByLoad(store, "n1", 1.3)
+	assert.False(t, ok, "single node cannot redirect")
 }
 
 func TestLeaderBalance_NoTransferWhenFollower(t *testing.T) {

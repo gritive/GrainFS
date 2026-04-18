@@ -39,11 +39,10 @@ type DistributedBackend struct {
 	onApply     OnApplyFunc
 	snapMgr     *raft.SnapshotManager
 	snapNode    *raft.Node // node for CompactLog after snapshot
-	shardSvc    *ShardService
-	allNodes    []string      // all node addresses (including self) for shard placement
-	peerHealth  *PeerHealth
-	statsStore  *NodeStatsStore // for hot-spot read redirection
-	registry    *Registry      // cache invalidators (VFS instances)
+	shardSvc   *ShardService
+	allNodes   []string // all node addresses (including self) for shard placement
+	peerHealth *PeerHealth
+	registry   *Registry // cache invalidators (VFS instances)
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -85,11 +84,6 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node *raft.Node) {
 	b.snapMgr = mgr
 	b.snapNode = node
-}
-
-// SetStatsStore configures the node stats store used for hot-spot read redirection.
-func (b *DistributedBackend) SetStatsStore(store *NodeStatsStore) {
-	b.statsStore = store
 }
 
 // SetOnApply sets the callback invoked after each FSM apply.
@@ -381,17 +375,6 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	obj, err := b.HeadObject(bucket, key)
 	if err != nil {
 		return nil, nil, err
-	}
-
-	// Hot-spot redirect: if this node is overloaded, forward read to a lighter peer.
-	if b.statsStore != nil && b.shardSvc != nil {
-		if peer, ok := selectPeerByLoad(b.statsStore, b.node.ID(), 1.3); ok {
-			ctx := context.Background()
-			data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, key, 0)
-			if fetchErr == nil && data != nil {
-				return io.NopCloser(bytes.NewReader(data)), obj, nil
-			}
-		}
 	}
 
 	// Try local first

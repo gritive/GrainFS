@@ -86,7 +86,7 @@ func TestGossipSender_BroadcastsToPeers(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	peers := []string{"node-b:9000", "node-c:9000"}
 
-	sender := NewGossipSender("node-a", peers, tr, store)
+	sender := NewGossipSender("node-a", peers, tr, store, 30*time.Second)
 
 	// Broadcast once synchronously
 	sender.broadcastOnce(context.Background())
@@ -104,7 +104,7 @@ func TestGossipSender_PayloadDecodable(t *testing.T) {
 	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0, RequestsPerSec: 120.0})
 	peers := []string{"node-b:9000"}
 
-	sender := NewGossipSender("node-a", peers, tr, store)
+	sender := NewGossipSender("node-a", peers, tr, store, 30*time.Second)
 	sender.broadcastOnce(context.Background())
 
 	msgs := tr.SentTo("node-b:9000")
@@ -121,7 +121,7 @@ func TestGossipSender_NoPeers(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 
-	sender := NewGossipSender("node-a", nil, tr, store)
+	sender := NewGossipSender("node-a", nil, tr, store, 30*time.Second)
 	sender.broadcastOnce(context.Background()) // should not panic
 
 	assert.Empty(t, tr.AllSent())
@@ -196,6 +196,44 @@ func TestGossipReceiver_MultipleNodes(t *testing.T) {
 	sc, _ := store.Get("node-c")
 	assert.Equal(t, 40.0, sb.DiskUsedPct)
 	assert.Equal(t, 60.0, sc.DiskUsedPct)
+}
+
+func TestGossipReceiver_DropsNodeIdSpoofing(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	recv := NewGossipReceiver(tr, store)
+	go recv.Run(ctx)
+
+	// Inject a message claiming to be "node-a" but arriving from "node-b:9000"
+	spoofed := statsGossipMsg(NodeStats{NodeID: "node-a", DiskUsedPct: 99.0})
+	tr.recv <- &transport.ReceivedMessage{From: "node-b:9000", Message: spoofed}
+
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 0, store.Len(), "spoofed NodeId should be dropped")
+}
+
+func TestGossipReceiver_AcceptsMatchingNodeId(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	recv := NewGossipReceiver(tr, store)
+	go recv.Run(ctx)
+
+	// NodeId matches the host part of From address
+	valid := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0})
+	tr.recv <- &transport.ReceivedMessage{From: "node-b:9000", Message: valid}
+
+	require.Eventually(t, func() bool {
+		_, ok := store.Get("node-b")
+		return ok
+	}, 500*time.Millisecond, 10*time.Millisecond)
 }
 
 func TestGossipReceiver_StopsOnContextCancel(t *testing.T) {

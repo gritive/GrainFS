@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -154,6 +155,95 @@ func TestMigrationExecutor_IdempotentByVersionID(t *testing.T) {
 	// Second execution of same task should be skipped
 	require.NoError(t, exec.Execute(context.Background(), task))
 	assert.Empty(t, mover.writes, "second execution of same migration should be skipped")
+}
+
+func TestMigrationExecutor_ConcurrentExecuteSameTask(t *testing.T) {
+	mover := &mockShardMover{}
+	node := &mockMigrationRaft{nodeID: "node-a"}
+	exec := NewMigrationExecutor(mover, node, 2)
+	node.exec = exec
+
+	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c"}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 3)
+	for i := range 3 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = exec.Execute(context.Background(), task)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		assert.NoError(t, err, "Execute %d should not error", i)
+	}
+	// Shards should be written exactly once (first Execute wins)
+	mover.mu.Lock()
+	writeCount := len(mover.writes)
+	mover.mu.Unlock()
+	assert.Equal(t, 2, writeCount, "shards should be copied exactly once across concurrent calls")
+}
+
+func TestMigrationExecutor_NotifyCommitBeforeExecute(t *testing.T) {
+	mover := &mockShardMover{}
+	node := &mockMigrationRaft{nodeID: "node-a"}
+	exec := NewMigrationExecutor(mover, node, 2)
+	// Do NOT wire node.exec — we call NotifyCommit manually before Execute
+	// to simulate early FSM commit (e.g., from crash replay or fast leader commit)
+
+	// Pre-notify: FSM fires CmdMigrationDone before Execute is called
+	exec.NotifyCommit("b", "k", "v1")
+
+	// Now Execute — the commit was already pre-registered, so Execute should proceed
+	// through copy phase. We wire node.exec now so proposeDone triggers NotifyCommit again...
+	// but the pre-notification already marked it done. Execute should complete without hanging.
+	err := exec.Execute(context.Background(), MigrationTask{
+		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c",
+	})
+	// Execute sees done[id] set (pre-marked by NotifyCommit) → immediate return
+	require.NoError(t, err)
+	// No shards should be copied (task was pre-marked done)
+	assert.Empty(t, mover.writes, "pre-committed task should be skipped")
+}
+
+func TestMigrationExecutor_DeleteFailureMarksTaskDone(t *testing.T) {
+	mover := &mockShardMover{deleteErr: fmt.Errorf("network error")}
+	node := &mockMigrationRaft{nodeID: "node-a"}
+	exec := NewMigrationExecutor(mover, node, 2)
+	node.exec = exec
+
+	err := exec.Execute(context.Background(), MigrationTask{
+		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c",
+	})
+	// Delete failure is logged but does not cause Execute to fail
+	require.NoError(t, err, "delete failure should not surface as Execute error")
+
+	// Task is still marked done (commit was confirmed via Raft)
+	exec.mu.Lock()
+	_, isDone := exec.done["b/k/v1"]
+	exec.mu.Unlock()
+	assert.True(t, isDone, "task should be marked done even if delete fails")
+}
+
+func TestMigrationExecutor_CtxCancelCleansUpPending(t *testing.T) {
+	mover := &mockShardMover{}
+	// node that never calls NotifyCommit
+	node := &mockMigrationRaft{nodeID: "node-a"}
+	exec := NewMigrationExecutor(mover, node, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	_ = exec.Execute(ctx, MigrationTask{
+		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c",
+	})
+
+	exec.mu.Lock()
+	_, inPending := exec.pending["b/k/v1"]
+	exec.mu.Unlock()
+	assert.False(t, inPending, "cancelled task should be removed from pending map")
 }
 
 func TestMigrationExecutor_NotifyCommit_Unblocks(t *testing.T) {

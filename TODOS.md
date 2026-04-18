@@ -2,7 +2,7 @@
 
 ## Phase 13: Operations
 
-- [ ] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
+- [x] self healing: data balancing: capacity, hot spot balancing, raft leader balancing
 
 ### Phase 13 DX 후속 (devex review 2026-04-18)
 

@@ -45,6 +45,12 @@ func (r *StreamRouter) Dispatch(req *Message) *Message {
 	return h(req)
 }
 
+// Lookup returns the handler for the given stream type, if registered.
+func (r *StreamRouter) Lookup(st StreamType) (StreamHandler, bool) {
+	h, ok := r.handlers[st]
+	return h, ok
+}
+
 // QUICTransport implements Transport using QUIC for node-to-node communication.
 type QUICTransport struct {
 	mu            sync.RWMutex
@@ -56,7 +62,8 @@ type QUICTransport struct {
 	localAddr     string
 	ctx           context.Context
 	cancel        context.CancelFunc
-	streamHandler StreamHandler // bidirectional request-response handler
+	router        *StreamRouter // per-type bidirectional handlers (takes priority)
+	streamHandler StreamHandler // catch-all bidirectional handler (backward compat)
 	psk           string        // pre-shared key for peer authentication (empty = no auth)
 }
 
@@ -68,6 +75,7 @@ func NewQUICTransport(psk ...string) *QUICTransport {
 		conns:  make(map[string]*quic.Conn),
 		inbox:  make(chan *ReceivedMessage, 256),
 		codec:  &BinaryCodec{},
+		router: NewStreamRouter(),
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -145,13 +153,21 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 		return
 	}
 
-	// If a stream handler is set, treat as request-response (bidirectional).
+	// Per-type handler takes priority over catch-all.
 	t.mu.RLock()
-	handler := t.streamHandler
+	typeHandler, hasTypeHandler := t.router.Lookup(msg.Type)
+	catchAll := t.streamHandler
 	t.mu.RUnlock()
 
-	if handler != nil {
-		resp := handler(msg)
+	if hasTypeHandler {
+		resp := typeHandler(msg)
+		if resp != nil {
+			_ = t.codec.Encode(stream, resp)
+		}
+		return
+	}
+	if catchAll != nil {
+		resp := catchAll(msg)
 		if resp != nil {
 			_ = t.codec.Encode(stream, resp)
 		}
@@ -219,11 +235,20 @@ func (t *QUICTransport) Receive() <-chan *ReceivedMessage {
 	return t.inbox
 }
 
-// SetStreamHandler registers a handler for bidirectional request-response streams.
-// When a peer calls Call(), the handler receives the request and returns a response.
+// SetStreamHandler registers a catch-all handler for bidirectional request-response streams.
+// Per-type handlers registered via Handle take priority over this handler.
 func (t *QUICTransport) SetStreamHandler(h StreamHandler) {
 	t.mu.Lock()
 	t.streamHandler = h
+	t.mu.Unlock()
+}
+
+// Handle registers a per-type handler for a specific StreamType.
+// Messages of this type are dispatched here before the catch-all SetStreamHandler.
+// Messages handled here never reach the inbox channel.
+func (t *QUICTransport) Handle(st StreamType, h StreamHandler) {
+	t.mu.Lock()
+	t.router.Handle(st, h)
 	t.mu.Unlock()
 }
 
