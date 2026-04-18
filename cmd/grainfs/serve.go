@@ -70,6 +70,9 @@ func init() {
 	serveCmd.Flags().Int("balancer-migration-rate", cluster.DefaultBalancerConfig().MigrationRate, "max migration proposals per tick")
 	serveCmd.Flags().Duration("balancer-leader-tenure-min", cluster.DefaultBalancerConfig().LeaderTenureMin, "minimum time a leader must hold tenure before load-based transfer")
 	serveCmd.Flags().Duration("balancer-warmup-timeout", cluster.DefaultBalancerConfig().WarmupTimeout, "time to wait after node start before proposing disk migrations (prevents false alarms during join/recovery)")
+	serveCmd.Flags().Float64("balancer-cb-threshold", cluster.DefaultBalancerConfig().CBThreshold, "disk-used fraction (0–1) at which a dst node's circuit breaker opens (e.g. 0.90 = 90%)")
+	serveCmd.Flags().Int("balancer-migration-max-retries", cluster.DefaultBalancerConfig().MigrationMaxRetries, "max shard write attempts per shard during migration")
+	serveCmd.Flags().Duration("balancer-migration-pending-ttl", cluster.DefaultBalancerConfig().MigrationPendingTTL, "max time a pending migration may linger before being cancelled")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -597,6 +600,9 @@ func startBalancer(
 	migrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
 	tenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
 	warmupTimeout, _ := cmd.Flags().GetDuration("balancer-warmup-timeout")
+	cbThreshold, _ := cmd.Flags().GetFloat64("balancer-cb-threshold")
+	migMaxRetries, _ := cmd.Flags().GetInt("balancer-migration-max-retries")
+	migPendingTTL, _ := cmd.Flags().GetDuration("balancer-migration-pending-ttl")
 
 	def := cluster.DefaultBalancerConfig()
 	cfg := cluster.BalancerConfig{
@@ -608,6 +614,10 @@ func startBalancer(
 		LeaderTenureMin:     tenureMin,
 		LeaderLoadThreshold: def.LeaderLoadThreshold,
 		GracePeriod:         def.GracePeriod,
+		PeerSeenWindow:      def.PeerSeenWindow,
+		CBThreshold:         cbThreshold,
+		MigrationMaxRetries: migMaxRetries,
+		MigrationPendingTTL: migPendingTTL,
 	}
 
 	adapter := &raftBalancerAdapter{node: node, peers: peers}
@@ -618,7 +628,8 @@ func startBalancer(
 	// Migration task channel (buffered to absorb bursts).
 	taskCh := make(chan cluster.MigrationTask, 256)
 
-	exec := cluster.NewMigrationExecutor(shardSvc, adapter, numShards)
+	exec := cluster.NewMigrationExecutorWithTTL(shardSvc, adapter, numShards, migPendingTTL)
+	exec.Start(ctx)
 
 	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
 	// balancer → release inflight slot on done.
