@@ -28,6 +28,7 @@ func TestNFS_NullAuthWarning(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs-port", fmt.Sprintf("%d", nfsPort),
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stdout
@@ -62,6 +63,7 @@ func TestNFS_NoWarnWhenNFSDisabled(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs-port", "0",
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stdout

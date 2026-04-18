@@ -33,6 +33,7 @@ func TestSmoke_DeploymentVerification(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

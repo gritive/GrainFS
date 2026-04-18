@@ -39,6 +39,7 @@ func TestCluster_SoloRaft_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port1),
 		"--snapshot-interval", "0", // disable auto-snapshots for determinism
+		"--nfs4-port", "0",
 	)
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
@@ -87,6 +88,7 @@ func TestCluster_SoloRaft_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port2),
 		"--snapshot-interval", "0",
+		"--nfs4-port", "0",
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
@@ -146,6 +148,7 @@ func TestCluster_SoloRaft_Multipart(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

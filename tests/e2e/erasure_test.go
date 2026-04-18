@@ -44,6 +44,7 @@ func startECServer(t *testing.T) (*s3.Client, string, func()) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
 		"--ec",
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -79,6 +80,7 @@ func startECServerWithScrub(t *testing.T, scrubInterval time.Duration) (*s3.Clie
 		"--ec",
 		"--no-encryption",
 		"--scrub-interval", scrubInterval.String(),
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

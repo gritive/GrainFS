@@ -70,6 +70,7 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	cmd := exec.Command(s.binary, "serve",
 		"--data", s.dir,
 		"--port", fmt.Sprintf("%d", s.port),
+		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

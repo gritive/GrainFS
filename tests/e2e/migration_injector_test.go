@@ -32,6 +32,7 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--data", srcDir,
 		"--port", fmt.Sprintf("%d", srcPort),
 		"--nfs-port", "0",
+		"--nfs4-port", "0",
 	)
 	srcCmd.Stdout = os.Stdout
 	srcCmd.Stderr = os.Stderr
@@ -67,6 +68,7 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--data", dstDir,
 		"--port", fmt.Sprintf("%d", dstPort),
 		"--nfs-port", "0",
+		"--nfs4-port", "0",
 	)
 	dstCmd.Stdout = os.Stdout
 	dstCmd.Stderr = os.Stderr
