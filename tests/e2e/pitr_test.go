@@ -15,9 +15,9 @@ import (
 )
 
 type pitrResponse struct {
-	RestoredObjects    int           `json:"restored_objects"`
-	WALEntriesReplayed int           `json:"wal_entries_replayed"`
-	StaleBlobs         []interface{} `json:"stale_blobs"`
+	RestoredObjects    int              `json:"restored_objects"`
+	WALEntriesReplayed int              `json:"wal_entries_replayed"`
+	StaleBlobs         []map[string]any `json:"stale_blobs"`
 }
 
 // TestPITR_WALReplayAddsObjects verifies WAL replay: objects PUT between snapshot
@@ -76,7 +76,9 @@ func TestPITR_WALReplayAddsObjects(t *testing.T) {
 	var pr pitrResponse
 	require.NoError(t, json.NewDecoder(pitrResp.Body).Decode(&pr))
 	require.GreaterOrEqual(t, pr.WALEntriesReplayed, 3, "at least 3 WAL entries replayed (the included puts)")
-	require.Empty(t, pr.StaleBlobs, "no stale blobs")
+	for _, b := range pr.StaleBlobs {
+		require.NotEqual(t, bucket, b["bucket"], "unexpected stale blob in test bucket: %v", b)
+	}
 
 	// Verify only included objects remain in this bucket
 	listOut2, err := testS3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})

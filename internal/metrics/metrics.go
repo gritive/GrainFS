@@ -159,4 +159,62 @@ var (
 		Name: "grainfs_scrub_migration_skipped_over_cap_total",
 		Help: "Total plain objects skipped because max_migrations_per_cycle was reached.",
 	})
+
+	// Balancer metrics.
+
+	BalancerGossipTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_gossip_total",
+		Help: "Total gossip broadcasts sent by this node.",
+	})
+
+	BalancerGossipErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_gossip_errors_total",
+		Help: "Total gossip send failures.",
+	})
+
+	BalancerMigrationsProposedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_migrations_proposed_total",
+		Help: "Total CmdMigrateShard proposals submitted to Raft.",
+	})
+
+	BalancerMigrationsDoneTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_migrations_done_total",
+		Help: "Total migrations completed successfully.",
+	})
+
+	BalancerMigrationsFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_migrations_failed_total",
+		Help: "Total migrations that failed.",
+	})
+
+	BalancerImbalancePct = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_balancer_imbalance_pct",
+		Help: "Current disk imbalance across cluster nodes (max - min used %).",
+	})
+
+	BalancerPendingTasks = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_balancer_pending_tasks",
+		Help: "Number of pending-migration entries persisted in BadgerDB.",
+	})
+
+	BalancerLeaderTransfersTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_leader_transfers_total",
+		Help: "Total load-based Raft leader transfers initiated.",
+	})
+
+	BalancerShardWriteErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_shard_write_errors_total",
+		Help: "Total shard write errors during migration copy phase.",
+	})
+
+	BalancerShardCopyDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "grainfs_balancer_shard_copy_duration_seconds",
+		Help:    "Duration of shard copy operations during migration.",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	BalancerGracePeriodActiveTicks = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_balancer_grace_period_active_ticks_total",
+		Help: "Total balancer tick evaluations where at least one peer was within the join grace period (imbalance trigger relaxed by 1.5×).",
+	})
 )

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // MigrationTask describes a single shard migration request from Raft.
@@ -48,9 +50,10 @@ type MigrationExecutor struct {
 	node      MigrationRaft
 	numShards int
 
-	mu      sync.Mutex
-	done    map[string]struct{}     // idempotency: taskID → done
-	pending map[string]chan struct{} // commit channels: taskID → chan
+	mu        sync.Mutex
+	done      map[string]struct{}     // idempotency: taskID → done
+	committed map[string]struct{}     // early commit arrivals: Raft committed before Execute()
+	pending   map[string]chan struct{} // commit channels: taskID → chan
 
 	logger *slog.Logger
 }
@@ -62,6 +65,7 @@ func NewMigrationExecutor(mover ShardMover, node MigrationRaft, numShards int) *
 		node:      node,
 		numShards: numShards,
 		done:      make(map[string]struct{}),
+		committed: make(map[string]struct{}),
 		pending:   make(map[string]chan struct{}),
 		logger:    slog.Default().With("component", "migration"),
 	}
@@ -70,7 +74,7 @@ func NewMigrationExecutor(mover ShardMover, node MigrationRaft, numShards int) *
 // NotifyCommit is called by the FSM when CmdMigrationDone is applied.
 // It unblocks any Execute() waiting for that task's commit.
 // If Execute() has not yet registered its pending channel (early arrival), the task is
-// pre-marked done so Execute() will skip the wait.
+// recorded in committed so Execute() skips Phases 1–3 but still runs Phase 4 (delete src).
 func (e *MigrationExecutor) NotifyCommit(bucket, key, versionID string) {
 	id := bucket + "/" + key + "/" + versionID
 	e.mu.Lock()
@@ -78,8 +82,9 @@ func (e *MigrationExecutor) NotifyCommit(bucket, key, versionID string) {
 	if ok {
 		delete(e.pending, id)
 	} else {
-		// FSM applied CmdMigrationDone before Execute registered — pre-mark done.
-		e.markDone(id)
+		// FSM applied CmdMigrationDone before Execute registered.
+		// Mark committed so Execute() still runs Phase 4 (DeleteShards).
+		e.markCommitted(id)
 	}
 	e.mu.Unlock()
 	if ok {
@@ -101,6 +106,7 @@ func (e *MigrationExecutor) Run(ctx context.Context, tasks <-chan MigrationTask)
 			go func(t MigrationTask) {
 				if err := e.Execute(ctx, t); err != nil {
 					e.logger.Warn("migration execute failed", "task", t.id(), "err", err)
+					metrics.BalancerMigrationsFailedTotal.Inc()
 				}
 			}(task)
 		}
@@ -110,6 +116,8 @@ func (e *MigrationExecutor) Run(ctx context.Context, tasks <-chan MigrationTask)
 // Execute performs the full migration sequence: copy → propose done → wait commit → delete src.
 // It is idempotent: repeated calls with the same task id are no-ops.
 // If a concurrent Execute is already in flight for the same id, this call waits for it to complete.
+// If NotifyCommit arrived early (before Execute), earlyCommit=true skips Phases 1–3 and
+// runs Phase 4 (delete src) directly — preventing orphan shards on the source node.
 func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) error {
 	id := task.id()
 
@@ -128,55 +136,89 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		}
 		return nil
 	}
+	// Check for early commit (NotifyCommit arrived before Execute was called).
+	// In this case Phases 1–3 are already complete; only Phase 4 (delete src) remains.
+	earlyCommit := false
+	if _, ec := e.committed[id]; ec {
+		delete(e.committed, id)
+		earlyCommit = true
+	}
+	// Always register a pending channel — even on earlyCommit — so that a concurrent
+	// Execute that arrives after we release mu (but before markDone) blocks here
+	// instead of falling through to Phase 1 and re-copying already-committed shards.
 	commitCh := make(chan struct{})
 	e.pending[id] = commitCh
 	e.mu.Unlock()
 
-	// Phase 1: copy all shards src → dst
-	for i := range e.numShards {
-		data, err := e.mover.ReadShard(ctx, task.SrcNode, task.Bucket, task.Key, i)
-		if err != nil {
-			e.cleanupPending(id)
-			return fmt.Errorf("migration read shard %d: %w", i, err)
+	if !earlyCommit {
+		// Phase 1: copy all shards src → dst
+		copyStart := time.Now()
+		for i := range e.numShards {
+			data, err := e.mover.ReadShard(ctx, task.SrcNode, task.Bucket, task.Key, i)
+			if err != nil {
+				e.cleanupPending(id)
+				return fmt.Errorf("migration read shard %d: %w", i, err)
+			}
+			if err := e.mover.WriteShard(ctx, task.DstNode, task.Bucket, task.Key, i, data); err != nil {
+				metrics.BalancerShardWriteErrorsTotal.Inc()
+				e.cleanupPending(id)
+				return fmt.Errorf("migration write shard %d: %w", i, err)
+			}
 		}
-		if err := e.mover.WriteShard(ctx, task.DstNode, task.Bucket, task.Key, i, data); err != nil {
+		metrics.BalancerShardCopyDuration.Observe(time.Since(copyStart).Seconds())
+
+		// Phase 2: propose CmdMigrationDone to Raft
+		if err := e.proposeDone(task); err != nil {
 			e.cleanupPending(id)
-			return fmt.Errorf("migration write shard %d: %w", i, err)
+			return err
+		}
+
+		// Phase 3: wait for FSM to apply CmdMigrationDone (= Raft commit confirmed)
+		select {
+		case <-commitCh:
+		case <-ctx.Done():
+			e.cleanupPending(id)
+			return fmt.Errorf("migration: commit wait cancelled for %s/%s", task.Bucket, task.Key)
 		}
 	}
 
-	// Phase 2: propose CmdMigrationDone to Raft
-	if err := e.proposeDone(task); err != nil {
-		e.cleanupPending(id)
-		return err
+	// Mark done before Phase 4. For the earlyCommit path, also remove the sentinel
+	// pending channel we registered and close it to unblock any concurrent Execute
+	// that arrived after we released mu but before markDone.
+	// For the normal path, NotifyCommit already removed the channel from pending.
+	e.mu.Lock()
+	e.markDone(id)
+	if earlyCommit {
+		delete(e.pending, id)
+	}
+	e.mu.Unlock()
+	if earlyCommit {
+		close(commitCh)
 	}
 
-	// Phase 3: wait for FSM to apply CmdMigrationDone (= Raft commit confirmed)
-	select {
-	case <-commitCh:
-	case <-ctx.Done():
-		e.cleanupPending(id)
-		return fmt.Errorf("migration: commit wait cancelled for %s/%s", task.Bucket, task.Key)
-	}
-
-	// Phase 4: delete from src — only after confirmed commit
+	// Phase 4: delete from src — runs whether earlyCommit or normal path.
 	if err := e.mover.DeleteShards(ctx, task.SrcNode, task.Bucket, task.Key); err != nil {
 		e.logger.Warn("migration: delete src failed",
 			"src", task.SrcNode, "bucket", task.Bucket, "key", task.Key, "err", err)
+		metrics.BalancerMigrationsFailedTotal.Inc()
 	}
 
-	e.mu.Lock()
-	e.markDone(id)
-	e.mu.Unlock()
-
+	metrics.BalancerMigrationsDoneTotal.Inc()
 	return nil
 }
 
-// cleanupPending removes the pending channel for id, used on error paths.
+// cleanupPending removes the pending channel for id (error paths) and closes it
+// so any goroutine waiting on it unblocks and returns rather than leaking.
 func (e *MigrationExecutor) cleanupPending(id string) {
 	e.mu.Lock()
-	delete(e.pending, id)
+	ch, ok := e.pending[id]
+	if ok {
+		delete(e.pending, id)
+	}
 	e.mu.Unlock()
+	if ok {
+		close(ch)
+	}
 }
 
 // markDone records id as completed. Must be called with mu held.
@@ -186,6 +228,15 @@ func (e *MigrationExecutor) markDone(id string) {
 		e.done = make(map[string]struct{}, maxDoneHistory)
 	}
 	e.done[id] = struct{}{}
+}
+
+// markCommitted records an early Raft commit for id. Must be called with mu held.
+// Resets the map when it exceeds maxDoneHistory to bound memory use.
+func (e *MigrationExecutor) markCommitted(id string) {
+	if len(e.committed) >= maxDoneHistory {
+		e.committed = make(map[string]struct{}, maxDoneHistory)
+	}
+	e.committed[id] = struct{}{}
 }
 
 func (e *MigrationExecutor) proposeDone(task MigrationTask) error {

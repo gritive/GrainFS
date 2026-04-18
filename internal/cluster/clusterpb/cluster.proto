@@ -84,6 +84,9 @@ message NodeStatsMsg {
   double disk_used_pct = 2;
   uint64 disk_avail_bytes = 3;
   double requests_per_sec = 4;
+  // joined_at is Unix epoch seconds when this node joined the cluster.
+  // Used by the balancer to apply a grace period for newly joined nodes.
+  int64 joined_at = 5;
 }
 
 // MigrateShardCmd requests movement of a full object copy from src to dst.

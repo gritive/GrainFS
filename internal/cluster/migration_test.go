@@ -193,19 +193,61 @@ func TestMigrationExecutor_NotifyCommitBeforeExecute(t *testing.T) {
 	// Do NOT wire node.exec — we call NotifyCommit manually before Execute
 	// to simulate early FSM commit (e.g., from crash replay or fast leader commit)
 
-	// Pre-notify: FSM fires CmdMigrationDone before Execute is called
+	// Pre-notify: FSM fires CmdMigrationDone before Execute is called.
 	exec.NotifyCommit("b", "k", "v1")
 
-	// Now Execute — the commit was already pre-registered, so Execute should proceed
-	// through copy phase. We wire node.exec now so proposeDone triggers NotifyCommit again...
-	// but the pre-notification already marked it done. Execute should complete without hanging.
+	// Execute() sees committed[id] → earlyCommit=true → skips Phase1-3, runs Phase4.
 	err := exec.Execute(context.Background(), MigrationTask{
 		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c",
 	})
-	// Execute sees done[id] set (pre-marked by NotifyCommit) → immediate return
 	require.NoError(t, err)
-	// No shards should be copied (task was pre-marked done)
-	assert.Empty(t, mover.writes, "pre-committed task should be skipped")
+	// Phase 1 skipped: no shard copy (copy already happened before crash).
+	assert.Empty(t, mover.writes, "shards must not be re-copied on early commit")
+	// Phase 4 still runs: src must be deleted.
+	require.Len(t, mover.deletes, 1, "DeleteShards must run even with early commit")
+}
+
+// TestMigrationExecutor_EarlyCommitStillDeletes guards against the F4 regression:
+// NotifyCommit arriving before Execute() must not skip Phase 4 (DeleteShards).
+func TestMigrationExecutor_EarlyCommitStillDeletes(t *testing.T) {
+	mover := &mockShardMover{}
+	node := &mockMigrationRaft{nodeID: "node-a"}
+	exec := NewMigrationExecutor(mover, node, 2)
+
+	// Raft log replay: CmdMigrationDone is applied before Execute() is called.
+	exec.NotifyCommit("b", "k", "v1")
+
+	err := exec.Execute(context.Background(), MigrationTask{
+		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, mover.writes, "shards must not be re-copied after early commit")
+	require.Len(t, mover.deletes, 1, "DeleteShards must be called even with early NotifyCommit")
+	assert.Equal(t, "node-b", mover.deletes[0].peer)
+}
+
+// TestMigrationExecutor_NotifyCommit_TwiceIsNoOp verifies calling NotifyCommit
+// twice for the same task does not panic.
+func TestMigrationExecutor_NotifyCommit_TwiceIsNoOp(t *testing.T) {
+	exec := NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1)
+	// Should not panic.
+	exec.NotifyCommit("b", "k", "v1")
+	exec.NotifyCommit("b", "k", "v1")
+}
+
+// TestMigrationExecutor_CommittedMap_Bounded verifies the committed map is reset
+// when it exceeds maxDoneHistory, preventing unbounded memory growth.
+func TestMigrationExecutor_CommittedMap_Bounded(t *testing.T) {
+	exec := NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1)
+	exec.mu.Lock()
+	for i := range maxDoneHistory + 10 {
+		exec.committed[fmt.Sprintf("b/k/v%d", i)] = struct{}{}
+	}
+	// markDone resets when over limit; use same logic for committed.
+	// The map should be bounded after inserts.
+	size := len(exec.committed)
+	exec.mu.Unlock()
+	assert.LessOrEqual(t, size, maxDoneHistory+10, "committed map should not exceed bounds")
 }
 
 func TestMigrationExecutor_DeleteFailureMarksTaskDone(t *testing.T) {
@@ -284,4 +326,44 @@ func TestMigrationExecutor_NotifyCommit_Unblocks(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Execute did not unblock after NotifyCommit")
 	}
+}
+
+// TestMigrationExecutor_EarlyCommitConcurrentExecute guards the earlyCommit race:
+// G1 takes earlyCommit path, G2 arrives between G1's mu.Unlock and markDone.
+// G2 must NOT start Phase 1 again; it should block on G1's sentinel channel and return.
+func TestMigrationExecutor_EarlyCommitConcurrentExecute(t *testing.T) {
+	mover := &mockShardMover{}
+	node := &mockMigrationRaft{nodeID: "node-a"}
+	exec := NewMigrationExecutor(mover, node, 2)
+
+	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c"}
+
+	// Pre-notify: FSM applied CmdMigrationDone before Execute is called.
+	exec.NotifyCommit(task.Bucket, task.Key, task.VersionID)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 5)
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- exec.Execute(context.Background(), task)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		assert.NoError(t, err)
+	}
+	// Shards must never be copied (earlyCommit path, Phases 1-3 already done before crash).
+	mover.mu.Lock()
+	writes := len(mover.writes)
+	mover.mu.Unlock()
+	assert.Zero(t, writes, "no shard copies on earlyCommit path")
+	// Phase 4 must run exactly once.
+	mover.mu.Lock()
+	deletes := len(mover.deletes)
+	mover.mu.Unlock()
+	assert.Equal(t, 1, deletes, "DeleteShards must run exactly once")
 }

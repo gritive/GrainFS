@@ -36,6 +36,7 @@ func TestBalancerIntegration_ProposesOnImbalance(t *testing.T) {
 	}
 
 	p := NewBalancerProposer("leader", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()

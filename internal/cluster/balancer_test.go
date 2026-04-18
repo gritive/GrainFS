@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +95,7 @@ func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	p.tickOnce(ctx)
@@ -148,6 +151,7 @@ func TestBalancerProposer_WarmupBypassAfterTimeout(t *testing.T) {
 	cfg.WarmupTimeout = 1 * time.Millisecond // immediate timeout
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	time.Sleep(5 * time.Millisecond) // let warm-up timeout pass
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -188,6 +192,7 @@ func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	p.tickOnce(ctx)
@@ -322,4 +327,104 @@ func TestLeaderBalance_NoTransferWhenFollower(t *testing.T) {
 	p.tickOnce(context.Background())
 
 	assert.False(t, node.transferred, "follower: no transfer expected")
+}
+
+// --- Grace period tests ---
+
+func TestBalancerProposer_GracePeriod_RelaxesTrigger(t *testing.T) {
+	// node-b joined recently: its JoinedAt is within GracePeriod (10m default).
+	// Normal trigger=20%; with any node in grace period the effective trigger is
+	// ImbalanceTriggerPct * 1.5 = 30%.
+	// Imbalance is 25% (between 20% and 30%), so proposal should be skipped.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+		JoinedAt: time.Now().Add(-1 * time.Minute)}) // recently joined
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	cfg.GracePeriod = 10 * time.Minute // grace period active for 10 min after join
+
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+	p.tickOnce(context.Background())
+
+	assert.Empty(t, node.proposed, "25% imbalance below relaxed 30% trigger during grace period: no proposal expected")
+}
+
+func TestBalancerProposer_GracePeriod_FiresAboveRelaxedTrigger(t *testing.T) {
+	// node-b joined recently; imbalance is 40% which exceeds the relaxed 30% trigger.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 90.0, DiskAvailBytes: 5 << 30})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+		JoinedAt: time.Now().Add(-1 * time.Minute)})
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	cfg.GracePeriod = 10 * time.Minute
+
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+	p.tickOnce(context.Background())
+
+	assert.NotEmpty(t, node.proposed, "40% imbalance exceeds relaxed 30% trigger: proposal expected")
+}
+
+func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) {
+	// node-b joined 15 min ago — past the 10 min grace period.
+	// Imbalance is 25%, which is above the normal 20% trigger, so proposal expected.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+		JoinedAt: time.Now().Add(-15 * time.Minute)}) // past grace period
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	cfg.GracePeriod = 10 * time.Minute
+
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+	p.tickOnce(context.Background())
+
+	assert.NotEmpty(t, node.proposed, "grace period expired: normal 20% trigger applies, 25% should fire")
+}
+
+// TestBalancerProposer_InflightDedup verifies that the same object is not
+// proposed again on the next tick while a migration is already in flight.
+func TestBalancerProposer_InflightDedup(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 10})
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+
+	// First tick: migration proposed and added to inflight.
+	p.tickOnce(context.Background())
+	require.Len(t, node.proposed, 1, "first tick must propose")
+
+	// Second tick: same object still in inflight → must be skipped.
+	p.tickOnce(context.Background())
+	assert.Len(t, node.proposed, 1, "second tick must not re-propose while migration is inflight")
+}
+
+// TestLocalObjectPicker_NestedKey verifies that PickObjectOnSrcNode finds objects
+// whose S3 key contains '/' (stored as nested directories by ShardService).
+func TestLocalObjectPicker_NestedKey(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate ShardService on-disk layout: {shardsDir}/{bucket}/{key}/shard_0
+	// Key "photos/2024/img.jpg" → nested dirs
+	keyPath := filepath.Join(dir, "mybucket", "photos", "2024", "img.jpg")
+	require.NoError(t, os.MkdirAll(keyPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keyPath, "shard_0"), []byte("data"), 0o644))
+
+	picker := NewLocalObjectPicker(dir)
+	bucket, key, versionID, ok := picker.PickObjectOnSrcNode("any", nil)
+
+	require.True(t, ok, "should find the nested-key object")
+	assert.Equal(t, "mybucket", bucket)
+	assert.Equal(t, filepath.Join("photos", "2024", "img.jpg"), key)
+	assert.Empty(t, versionID)
 }

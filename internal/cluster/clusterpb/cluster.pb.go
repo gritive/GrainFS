@@ -792,8 +792,11 @@ type NodeStatsMsg struct {
 	DiskUsedPct    float64                `protobuf:"fixed64,2,opt,name=disk_used_pct,json=diskUsedPct,proto3" json:"disk_used_pct,omitempty"`
 	DiskAvailBytes uint64                 `protobuf:"varint,3,opt,name=disk_avail_bytes,json=diskAvailBytes,proto3" json:"disk_avail_bytes,omitempty"`
 	RequestsPerSec float64                `protobuf:"fixed64,4,opt,name=requests_per_sec,json=requestsPerSec,proto3" json:"requests_per_sec,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// joined_at is Unix epoch seconds when this node joined the cluster.
+	// Used by the balancer to apply a grace period for newly joined nodes.
+	JoinedAt      int64 `protobuf:"varint,5,opt,name=joined_at,json=joinedAt,proto3" json:"joined_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NodeStatsMsg) Reset() {
@@ -850,6 +853,13 @@ func (x *NodeStatsMsg) GetDiskAvailBytes() uint64 {
 func (x *NodeStatsMsg) GetRequestsPerSec() float64 {
 	if x != nil {
 		return x.RequestsPerSec
+	}
+	return 0
+}
+
+func (x *NodeStatsMsg) GetJoinedAt() int64 {
+	if x != nil {
+		return x.JoinedAt
 	}
 	return 0
 }
@@ -1068,12 +1078,13 @@ const file_internal_cluster_clusterpb_cluster_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"2\n" +
 	"\rMultipartMeta\x12!\n" +
-	"\fcontent_type\x18\x01 \x01(\tR\vcontentType\"\x9f\x01\n" +
+	"\fcontent_type\x18\x01 \x01(\tR\vcontentType\"\xbc\x01\n" +
 	"\fNodeStatsMsg\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\"\n" +
 	"\rdisk_used_pct\x18\x02 \x01(\x01R\vdiskUsedPct\x12(\n" +
 	"\x10disk_avail_bytes\x18\x03 \x01(\x04R\x0ediskAvailBytes\x12(\n" +
-	"\x10requests_per_sec\x18\x04 \x01(\x01R\x0erequestsPerSec\"\x90\x01\n" +
+	"\x10requests_per_sec\x18\x04 \x01(\x01R\x0erequestsPerSec\x12\x1b\n" +
+	"\tjoined_at\x18\x05 \x01(\x03R\bjoinedAt\"\x90\x01\n" +
 	"\x0fMigrateShardCmd\x12\x16\n" +
 	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x1d\n" +

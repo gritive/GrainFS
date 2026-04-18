@@ -54,6 +54,7 @@ func init() {
 	serveCmd.Flags().Int("nfs-port", 9002, "NFS server port (0 = disabled, volumes managed via REST API)")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled)")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled, Linux only)")
+	serveCmd.Flags().Int64("nbd-volume-size", 1024*1024*1024, "default NBD volume size in bytes")
 	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")
 	serveCmd.Flags().Duration("snapshot-interval", 1*time.Hour, "auto-snapshot interval (0 to disable)")
 	serveCmd.Flags().Int("snapshot-retain", 24, "number of auto-snapshots to retain")
@@ -62,6 +63,12 @@ func init() {
 	serveCmd.Flags().String("upstream", "", "upstream S3-compatible endpoint for pull-through caching (e.g. http://minio:9000)")
 	serveCmd.Flags().String("upstream-access-key", "", "access key for upstream S3 endpoint")
 	serveCmd.Flags().String("upstream-secret-key", "", "secret key for upstream S3 endpoint")
+	serveCmd.Flags().Bool("balancer-enabled", true, "enable auto-balancing in cluster mode")
+	serveCmd.Flags().Duration("balancer-gossip-interval", cluster.DefaultBalancerConfig().GossipInterval, "how often the balancer evaluates disk usage")
+	serveCmd.Flags().Float64("balancer-imbalance-trigger-pct", cluster.DefaultBalancerConfig().ImbalanceTriggerPct, "start migration when max-min disk usage diff exceeds this percentage")
+	serveCmd.Flags().Float64("balancer-imbalance-stop-pct", cluster.DefaultBalancerConfig().ImbalanceStopPct, "stop migration when max-min disk usage diff drops below this percentage")
+	serveCmd.Flags().Int("balancer-migration-rate", cluster.DefaultBalancerConfig().MigrationRate, "max migration proposals per tick")
+	serveCmd.Flags().Duration("balancer-leader-tenure-min", cluster.DefaultBalancerConfig().LeaderTenureMin, "minimum time a leader must hold tenure before load-based transfer")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -108,6 +115,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
 	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
+	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
 	packThreshold, _ := cmd.Flags().GetInt("pack-threshold")
 
 	if peersStr == "" {
@@ -180,16 +188,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition
 		swappable := storage.NewSwappableBackend(backend)
-		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort)
+		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	return runCluster(ctx, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
+	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
-func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int) error {
+func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
 	// Auto-create "default" bucket on startup
@@ -283,11 +291,10 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	// Start NBD server if requested (Linux only)
 	if nbdPort > 0 {
 		const defaultVolName2 = "default"
-		const defaultVolSize2 = 1024 * 1024 * 1024
 
 		mgr2 := volume.NewManager(swappable)
 		if _, err := mgr2.Get(defaultVolName2); err != nil {
-			if _, err := mgr2.Create(defaultVolName2, defaultVolSize2); err != nil {
+			if _, err := mgr2.Create(defaultVolName2, nbdVolumeSize); err != nil {
 				slog.Warn("default nbd volume create failed", "error", err)
 			}
 		}
@@ -316,14 +323,16 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 
 	// 3. Close storage backend
 	if closer, ok := swappable.Inner().(interface{ Close() error }); ok {
-		closer.Close()
+		if err := closer.Close(); err != nil {
+			slog.Warn("storage backend close error", "error", err)
+		}
 	}
 
 	slog.Info("server stopped", "component", "server")
 	return nil
 }
 
-func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
+func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
@@ -432,6 +441,21 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, 
 	stopApply := make(chan struct{})
 	go distBackend.RunApplyLoop(stopApply)
 
+	// Start balancer if enabled (cluster mode only).
+	var balancerProposer *cluster.BalancerProposer
+	balancerEnabled, _ := cmd.Flags().GetBool("balancer-enabled")
+	if balancerEnabled {
+		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
+		statsStore := cluster.NewNodeStatsStore(3 * bGossipInterval)
+		ecData, _ := cmd.Flags().GetInt("ec-data")
+		ecParity, _ := cmd.Flags().GetInt("ec-parity")
+		var err error
+		balancerProposer, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
+		if err != nil {
+			slog.Warn("balancer start failed", "err", err)
+		}
+	}
+
 	var backend storage.Backend = cachedBackend
 
 	// Auto-create "default" bucket on startup
@@ -444,7 +468,11 @@ func runCluster(ctx context.Context, addr, dataDir, nodeID, raftAddr, peersStr, 
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
-	srv := server.New(addr, backend, server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}))
+	srvOpts := []server.Option{server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers})}
+	if balancerProposer != nil {
+		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
+	}
+	srv := server.New(addr, backend, srvOpts...)
 	go func() {
 		if err := srv.Run(); err != nil {
 			slog.Error("http server error", "error", err)
@@ -529,6 +557,116 @@ func (a *ecDeleterAdapter) ListObjectVersions(bucket, key string) ([]*storage.Ob
 		}
 	}
 	return result, nil
+}
+
+// raftBalancerAdapter wraps *raft.Node to implement cluster.RaftBalancerNode.
+type raftBalancerAdapter struct {
+	node  *raft.Node
+	peers []string // Raft peer addresses (node IDs for balancer purposes)
+}
+
+func (a *raftBalancerAdapter) Propose(data []byte) error   { return a.node.Propose(data) }
+func (a *raftBalancerAdapter) IsLeader() bool              { return a.node.State() == raft.Leader }
+func (a *raftBalancerAdapter) NodeID() string              { return a.node.ID() }
+func (a *raftBalancerAdapter) PeerIDs() []string           { return a.peers }
+func (a *raftBalancerAdapter) TransferLeadership() error   { return a.node.TransferLeadership() }
+
+// startBalancer wires and launches the BalancerProposer, GossipSender, GossipReceiver,
+// MigrationExecutor and migration task channel, then replays any persisted pending tasks.
+func startBalancer(
+	ctx context.Context,
+	cmd *cobra.Command,
+	nodeID, dataDir string,
+	statsStore *cluster.NodeStatsStore,
+	node *raft.Node,
+	peers []string,
+	fsm *cluster.FSM,
+	quicTransport transport.Transport,
+	shardSvc *cluster.ShardService,
+	numShards int,
+) (*cluster.BalancerProposer, error) {
+	gossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
+	triggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
+	stopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
+	migrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
+	tenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
+
+	def := cluster.DefaultBalancerConfig()
+	cfg := cluster.BalancerConfig{
+		GossipInterval:      gossipInterval,
+		WarmupTimeout:       def.WarmupTimeout,
+		ImbalanceTriggerPct: triggerPct,
+		ImbalanceStopPct:    stopPct,
+		MigrationRate:       migrationRate,
+		LeaderTenureMin:     tenureMin,
+		LeaderLoadThreshold: def.LeaderLoadThreshold,
+		GracePeriod:         def.GracePeriod,
+	}
+
+	adapter := &raftBalancerAdapter{node: node, peers: peers}
+	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, cfg)
+
+	balancer.SetObjectPicker(cluster.NewLocalObjectPicker(filepath.Join(dataDir, "shards")))
+
+	// Migration task channel (buffered to absorb bursts).
+	taskCh := make(chan cluster.MigrationTask, 256)
+
+	exec := cluster.NewMigrationExecutor(shardSvc, adapter, numShards)
+
+	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
+	// balancer → release inflight slot on done.
+	fsm.SetMigrationHooks(taskCh, exec, balancer)
+
+	// Gossip: broadcast local stats + receive from peers.
+	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval)
+	receiver := cluster.NewGossipReceiver(quicTransport, statsStore)
+
+	go sender.Run(ctx)
+	go receiver.Run(ctx)
+	// Start executor before RecoverPending so the channel consumer is ready.
+	go exec.Run(ctx, taskCh)
+	go balancer.Run(ctx)
+
+	// Seed local node stats so GossipSender can broadcast immediately.
+	// DiskUsedPct/DiskAvailBytes start at zero; gossip from other nodes updates them.
+	statsStore.Set(cluster.NodeStats{
+		NodeID:   nodeID,
+		JoinedAt: time.Now(),
+	})
+
+	// Replay any tasks that were persisted during a previous channel-full event.
+	if err := fsm.RecoverPending(ctx, taskCh); err != nil {
+		slog.Warn("balancer: recover pending failed", "err", err)
+	}
+
+	slog.Info("balancer started", "component", "balancer",
+		"gossip_interval", gossipInterval, "trigger_pct", triggerPct, "stop_pct", stopPct)
+	return balancer, nil
+}
+
+// balancerInfoAdapter adapts *cluster.BalancerProposer to server.BalancerInfo.
+type balancerInfoAdapter struct {
+	p *cluster.BalancerProposer
+}
+
+func (a *balancerInfoAdapter) Status() server.BalancerStatusResult {
+	st := a.p.Status()
+	nodes := make([]server.BalancerNodeInfo, len(st.Nodes))
+	for i, n := range st.Nodes {
+		nodes[i] = server.BalancerNodeInfo{
+			NodeID:         n.NodeID,
+			DiskUsedPct:    n.DiskUsedPct,
+			DiskAvailBytes: n.DiskAvailBytes,
+			RequestsPerSec: n.RequestsPerSec,
+			JoinedAt:       n.JoinedAt,
+			UpdatedAt:      n.UpdatedAt,
+		}
+	}
+	return server.BalancerStatusResult{
+		Active:       st.Active,
+		ImbalancePct: st.ImbalancePct,
+		Nodes:        nodes,
+	}
 }
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.

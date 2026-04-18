@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -56,11 +57,16 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 		return // local stats not yet populated; skip to avoid broadcasting DiskUsedPct=0
 	}
 
+	var joinedAtUnix int64
+	if !stats.JoinedAt.IsZero() {
+		joinedAtUnix = stats.JoinedAt.Unix()
+	}
 	pb := &clusterpb.NodeStatsMsg{
 		NodeId:         s.nodeID,
 		DiskUsedPct:    stats.DiskUsedPct,
 		DiskAvailBytes: stats.DiskAvailBytes,
 		RequestsPerSec: stats.RequestsPerSec,
+		JoinedAt:       joinedAtUnix,
 	}
 	payload, err := proto.Marshal(pb)
 	if err != nil {
@@ -71,6 +77,9 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	for _, peer := range s.peers {
 		if err := s.tr.Send(ctx, peer, msg); err != nil {
 			s.logger.Warn("gossip: send failed", "peer", peer, "err", err)
+			metrics.BalancerGossipErrorsTotal.Inc()
+		} else {
+			metrics.BalancerGossipTotal.Inc()
 		}
 	}
 }
@@ -119,11 +128,16 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 				r.logger.Warn("gossip: NodeId mismatch, dropping", "claimed", pb.NodeId, "from", rm.From)
 				continue
 			}
+			var joinedAt time.Time
+			if pb.JoinedAt != 0 {
+				joinedAt = time.Unix(pb.JoinedAt, 0)
+			}
 			r.store.Set(NodeStats{
 				NodeID:         pb.NodeId,
 				DiskUsedPct:    pb.DiskUsedPct,
 				DiskAvailBytes: pb.DiskAvailBytes,
 				RequestsPerSec: pb.RequestsPerSec,
+				JoinedAt:       joinedAt,
 			})
 		}
 	}

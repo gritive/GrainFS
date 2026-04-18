@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -24,16 +25,23 @@ type FSM struct {
 	commitNotifier  interface {
 		NotifyCommit(bucket, key, versionID string)
 	}
+	balancerNotifier interface {
+		NotifyMigrationDone(bucket, key, versionID string)
+	}
 }
 
 // SetMigrationHooks wires the FSM to the balancer/migration subsystem.
 // ch must be a buffered channel; Apply drops tasks if the channel is full.
+// bn (balancerNotifier) is called on CmdMigrationDone to release the inflight slot.
 func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
 	NotifyCommit(bucket, key, versionID string)
+}, bn interface {
+	NotifyMigrationDone(bucket, key, versionID string)
 }) {
 	f.mu.Lock()
 	f.onMigrateShard = ch
 	f.commitNotifier = notifier
+	f.balancerNotifier = bn
 	f.mu.Unlock()
 }
 
@@ -214,6 +222,64 @@ func (f *FSM) applyDeleteBucketPolicy(data []byte) error {
 	})
 }
 
+// pendingMigrationKey returns the BadgerDB key for a not-yet-executed migration task.
+func pendingMigrationKey(bucket, key, versionID string) []byte {
+	return []byte("pending-migration:" + bucket + "/" + key + "/" + versionID)
+}
+
+// persistPendingMigration writes a migration task to BadgerDB so it survives a crash.
+func (f *FSM) persistPendingMigration(task MigrationTask) error {
+	val, err := proto.Marshal(&clusterpb.MigrateShardCmd{
+		Bucket:    task.Bucket,
+		Key:       task.Key,
+		VersionId: task.VersionID,
+		SrcNode:   task.SrcNode,
+		DstNode:   task.DstNode,
+	})
+	if err != nil {
+		return fmt.Errorf("fsm: marshal pending migration: %w", err)
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(pendingMigrationKey(task.Bucket, task.Key, task.VersionID), val)
+	})
+}
+
+// RecoverPending reads all pending-migration keys from BadgerDB and enqueues them
+// to ch for re-execution. Call this at startup AFTER starting the executor goroutine
+// so the channel consumer is running before tasks are sent.
+func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error {
+	prefix := []byte("pending-migration:")
+	return f.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			var cmd clusterpb.MigrateShardCmd
+			if err := item.Value(func(val []byte) error {
+				return proto.Unmarshal(val, &cmd)
+			}); err != nil {
+				slog.Error("fsm: recover pending migration: decode failed", "err", err)
+				continue
+			}
+			task := MigrationTask{
+				Bucket:    cmd.Bucket,
+				Key:       cmd.Key,
+				VersionID: cmd.VersionId,
+				SrcNode:   cmd.SrcNode,
+				DstNode:   cmd.DstNode,
+			}
+			select {
+			case ch <- task:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+}
+
 func (f *FSM) applyMigrateShard(data []byte) error {
 	var cmd clusterpb.MigrateShardCmd
 	if err := proto.Unmarshal(data, &cmd); err != nil {
@@ -237,7 +303,14 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 		select {
 		case ch <- task:
 		default:
-			slog.Warn("fsm: migration queue full, dropping task", "bucket", task.Bucket, "key", task.Key)
+			// Channel full: persist to BadgerDB so the task survives a crash.
+			if err := f.persistPendingMigration(task); err != nil {
+				slog.Error("fsm: migration queue full and persist failed — task lost",
+					"bucket", task.Bucket, "key", task.Key, "err", err)
+			} else {
+				slog.Warn("fsm: migration queue full, persisted to BadgerDB",
+					"bucket", task.Bucket, "key", task.Key)
+			}
 		}
 	}
 	return nil
@@ -248,11 +321,25 @@ func (f *FSM) applyMigrationDone(data []byte) error {
 	if err := proto.Unmarshal(data, &cmd); err != nil {
 		return fmt.Errorf("decode MigrationDoneCmd: %w", err)
 	}
+	// Clean up any persisted pending-migration entry for this task.
+	if err := f.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete(pendingMigrationKey(cmd.Bucket, cmd.Key, cmd.VersionId))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		return err
+	}); err != nil {
+		slog.Warn("fsm: delete pending-migration key failed", "bucket", cmd.Bucket, "key", cmd.Key, "err", err)
+	}
 	f.mu.RLock()
 	notifier := f.commitNotifier
+	bn := f.balancerNotifier
 	f.mu.RUnlock()
 	if notifier != nil {
 		notifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionId)
+	}
+	if bn != nil {
+		bn.NotifyMigrationDone(cmd.Bucket, cmd.Key, cmd.VersionId)
 	}
 	return nil
 }

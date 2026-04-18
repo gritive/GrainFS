@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.8] - 2026-04-18
+
+### Added
+- **Balancer Prometheus 메트릭 11종** — `grainfs_balancer_gossip_total`, `grainfs_balancer_migrations_proposed_total`, `grainfs_balancer_migrations_done_total`, `grainfs_balancer_migrations_failed_total`, `grainfs_balancer_imbalance_pct`, `grainfs_balancer_pending_tasks`, `grainfs_balancer_leader_transfers_total`, `grainfs_balancer_shard_write_errors_total`, `grainfs_balancer_shard_copy_duration_seconds`, `grainfs_balancer_grace_period_active_ticks_total` 추가.
+- **Grace Period 이중 트리거 완화** — 새 노드 join 후 `GracePeriod` 동안 불균형 트리거 임계값 1.5× 완화. `BalancerGracePeriodActiveTicks` 메트릭으로 가시화.
+- **Balancer HTTP 헬스 엔드포인트** — `GET /api/cluster/balancer/status` 추가. 현재 활성 상태, 불균형 %, 노드별 stats 반환.
+- **Operator Runbook** — `docs/operations/balancer.md` 추가. 알람 임계값, 트러블슈팅 가이드, 설정 레퍼런스 포함.
+
+### Fixed
+- **Migration early-commit race** — `MigrationExecutor.Execute()`가 earlyCommit 경로에서도 sentinel `commitCh`를 mutex 하에 등록. 동시 goroutine이 Phase 1(shard copy)을 재진입하는 race 방지.
+- **`cleanupPending` 채널 누수** — 오류 경로에서 pending 채널 제거 시 `close(ch)` 추가. 대기 goroutine이 영원히 블록되는 문제 수정.
+- **`BalancerProposer` inflight 키 불일치** — `proposeMigration`의 inflight 키를 `NotifyMigrationDone` 키와 동일하게 통일 (`bucket/key/versionID`).
+- **리뷰 발견 4종 수정** — `closer.Close()` 에러 로깅, `WalkDir` I/O 에러 로깅, `LocalObjectPicker` 테스트 커버리지 추가, `BalancerGracePeriodActiveTicks` 리네임.
+- **E2E 포트 충돌 수정** — `TestNetworkPartitionSuite`에서 toxiproxy 포트와 프록시 리스너 포트를 동적 할당으로 전환. 전체 suite 실행 시 포트 8474/9000 고정값과의 충돌 방지.
+- **E2E PITR stale blob 오탐 수정** — `TestPITR_WALReplayAddsObjects`의 stale blob 검증을 현재 테스트 버킷으로 한정. 선행 테스트들의 cleanup으로 발생하는 외부 stale blob을 오류로 인식하던 문제 수정.
+- **E2E NBD 테스트 안정화** — `docker/nbd-test.sh`에서 stale `/dev/nbd0` 연결 해제 추가 (이전 컨테이너 SIGKILL 잔류 문제). `mkfs.ext4` 제거 후 `dd` 패턴 검증으로 교체 (테스트 시간 330s → ~2s). `--nbd-volume-size` CLI 플래그 추가.
+- **ObjectPicker skipIDs FSM 연결** — `NotifyMigrationDone` 3-arg 시그니처로 FSM goroutine에서 inflight 정확히 클리어. picker가 skipIDs를 무시하는 경우를 대비한 double-check guard 추가. `RecoverPending` context 전파로 ctx 취소 시 복구 루프 안전 종료.
+- **`BalancerProposer` inflight map data race** — `NotifyMigrationDone`(FSM goroutine)과 `proposeMigration`(balancer goroutine)이 동시에 `inflight` map에 접근해 발생하는 race. `sync.Mutex`로 `inflight`, `active` 필드 보호.
+
 ## [0.0.7] - 2026-04-18
 
 ### Added
