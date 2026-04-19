@@ -1371,3 +1371,95 @@ func TestECBackend_ScanObjects_HasLastModified(t *testing.T) {
 	assert.GreaterOrEqual(t, records[0].LastModified, before)
 	assert.LessOrEqual(t, records[0].LastModified, after)
 }
+
+// --- Phase 14c: ScanObjects cursor pagination ---
+
+// newTestBackendWithPageSize creates a backend with a small scan page size for pagination tests.
+func newTestBackendWithPageSize(t *testing.T, pageSize int) *ECBackend {
+	t.Helper()
+	dir := t.TempDir()
+	b, err := NewECBackend(dir, DefaultDataShards, DefaultParityShards, WithScanPageSize(pageSize))
+	require.NoError(t, err)
+	t.Cleanup(func() { b.Close() })
+	return b
+}
+
+// putECObjects is a helper that puts n EC objects with distinct keys and returns their keys.
+func putECObjects(t *testing.T, b *ECBackend, bucket string, n int) []string {
+	t.Helper()
+	keys := make([]string, n)
+	for i := range n {
+		key := fmt.Sprintf("obj-%04d", i)
+		// 64 KB triggers EC encoding
+		_, err := b.PutObject(bucket, key, strings.NewReader(strings.Repeat("x", 1024*64)), "application/octet-stream")
+		require.NoError(t, err)
+		keys[i] = key
+	}
+	return keys
+}
+
+// TestECBackend_ScanObjects_CursorPagination_AllReturned verifies that
+// ScanObjects returns every EC object even when they span multiple pages.
+func TestECBackend_ScanObjects_CursorPagination_AllReturned(t *testing.T) {
+	const pageSize = 3
+	const objCount = 10 // 10 objects → 4 pages (3+3+3+1)
+
+	b := newTestBackendWithPageSize(t, pageSize)
+	require.NoError(t, b.CreateBucket("bucket"))
+	wantKeys := putECObjects(t, b, "bucket", objCount)
+
+	ch, err := b.ScanObjects("bucket")
+	require.NoError(t, err)
+
+	var gotKeys []string
+	for rec := range ch {
+		gotKeys = append(gotKeys, rec.Key)
+	}
+
+	assert.Len(t, gotKeys, objCount)
+	assert.ElementsMatch(t, wantKeys, gotKeys, "cursor pagination must not miss or duplicate objects")
+}
+
+// TestECBackend_ScanObjects_CursorPagination_NoDuplicates verifies no key appears
+// twice across page boundaries.
+func TestECBackend_ScanObjects_CursorPagination_NoDuplicates(t *testing.T) {
+	const pageSize = 2
+	const objCount = 7 // odd count to exercise partial last page
+
+	b := newTestBackendWithPageSize(t, pageSize)
+	require.NoError(t, b.CreateBucket("bucket"))
+	putECObjects(t, b, "bucket", objCount)
+
+	ch, err := b.ScanObjects("bucket")
+	require.NoError(t, err)
+
+	seen := make(map[string]int)
+	for rec := range ch {
+		seen[rec.Key]++
+	}
+
+	for key, count := range seen {
+		assert.Equal(t, 1, count, "key %q appears %d times", key, count)
+	}
+	assert.Len(t, seen, objCount)
+}
+
+// TestECBackend_ScanObjects_CursorPagination_ExactPageSize verifies the edge case
+// where object count is exactly one full page.
+func TestECBackend_ScanObjects_CursorPagination_ExactPageSize(t *testing.T) {
+	const pageSize = 4
+
+	b := newTestBackendWithPageSize(t, pageSize)
+	require.NoError(t, b.CreateBucket("bucket"))
+	wantKeys := putECObjects(t, b, "bucket", pageSize)
+
+	ch, err := b.ScanObjects("bucket")
+	require.NoError(t, err)
+
+	var gotKeys []string
+	for rec := range ch {
+		gotKeys = append(gotKeys, rec.Key)
+	}
+
+	assert.ElementsMatch(t, wantKeys, gotKeys)
+}

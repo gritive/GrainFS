@@ -29,6 +29,12 @@
   - **Aging factor** — `effectivePriority = diskUsedPct × (1 + ageMin/10)`. 10분 지연된 50% 노드가 갓 등록된 80% 노드보다 우선될 수 있어 기아 방지.
   - **Sticky donor** — `StickyDonorHoldTime` (기본 30s)동안 동일 src 노드 유지. 우선순위 flip으로 인한 thrash 방지.
 - **2개 신규 BalancerConfig 필드** — `MigrationProposalRate float64`, `StickyDonorHoldTime time.Duration`.
+- **ScanObjects 커서 페이지네이션** — `ECBackend.ScanObjects` / `ScanPlainObjects`가 단일 장기 BadgerDB 읽기 트랜잭션 대신 페이지(기본 256개 키)마다 새 트랜잭션을 열어 MVCC 읽기 락을 조기 해제. 대규모 버킷에서 BadgerDB GC 지연 방지. 기존 API 변경 없음.
+- **`WithScanPageSize` ECOption** — 테스트 및 특수 환경에서 페이지 크기를 조정할 수 있는 옵션 추가.
+- **`WithBloomFalsePositive` ECOption** — BadgerDB SSTable 블룸 필터 오탐율을 `NewECBackend` 생성 시 지정 가능. 낮은 값은 읽기 증폭 감소, 블룸 필터 메모리 증가.
+
+### Changed
+- `NewECBackend` — 옵션을 `badger.Open` 이전에 적용해 DB 수준 설정(`BloomFalsePositive`)을 반영하도록 초기화 순서 변경. 기존 코드 호환.
 
 ## [0.0.10] - 2026-04-19
 

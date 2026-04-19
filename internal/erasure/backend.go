@@ -26,15 +26,21 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// defaultScanPageSize is the number of DB keys read per BadgerDB transaction
+// in ScanObjects. Smaller pages release MVCC read-lock earlier, reducing GC pressure.
+const defaultScanPageSize = 256
+
 // ECBackend implements storage.Backend with erasure coding.
 // Objects are split into k data + m parity shards stored on disk.
 // On read, missing shards (up to m) are reconstructed automatically.
 type ECBackend struct {
-	root       string
-	db         *badger.DB
-	codec      *Codec
-	encryptor  Encryptor
-	writeLocks sync.Map // map[string]*sync.RWMutex for per-key serialization
+	root         string
+	db           *badger.DB
+	codec        *Codec
+	encryptor    Encryptor
+	writeLocks   sync.Map // map[string]*sync.RWMutex for per-key serialization
+	scanPageSize int      // keys per ScanObjects transaction page
+	bloomFP      float64  // BadgerDB bloom filter false-positive rate (0 = use default)
 }
 
 func (b *ECBackend) acquireWriteLock(bucket, key string) func() {
@@ -109,6 +115,28 @@ func WithEncryption(enc Encryptor) ECOption {
 	}
 }
 
+// WithScanPageSize sets the number of keys read per BadgerDB transaction in ScanObjects.
+// Smaller values reduce MVCC read pressure at the cost of more transaction overhead.
+// Intended for testing; production callers should rely on the default (256).
+func WithScanPageSize(n int) ECOption {
+	return func(b *ECBackend) {
+		if n > 0 {
+			b.scanPageSize = n
+		}
+	}
+}
+
+// WithBloomFalsePositive sets the bloom filter false-positive rate for BadgerDB SSTables.
+// Lower values reduce read amplification but increase bloom filter memory usage.
+// Default is 0.01 (1%). Applied before badger.Open via NewECBackend.
+func WithBloomFalsePositive(p float64) ECOption {
+	return func(b *ECBackend) {
+		if p > 0 && p < 1 {
+			b.bloomFP = p
+		}
+	}
+}
+
 // NewECBackend creates a new erasure coding storage backend.
 func NewECBackend(root string, dataShards, parityShards int, opts ...ECOption) (*ECBackend, error) {
 	dataDir := filepath.Join(root, "data")
@@ -116,21 +144,26 @@ func NewECBackend(root string, dataShards, parityShards int, opts ...ECOption) (
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	dbDir := filepath.Join(root, "meta")
-	dbOpts := badger.DefaultOptions(dbDir).WithLogger(nil)
-	db, err := badger.Open(dbOpts)
-	if err != nil {
-		return nil, fmt.Errorf("open badger: %w", err)
-	}
-
+	// First pass: collect db-level config from options before opening BadgerDB.
 	b := &ECBackend{
-		root:  root,
-		db:    db,
-		codec: NewCodec(dataShards, parityShards),
+		root:         root,
+		codec:        NewCodec(dataShards, parityShards),
+		scanPageSize: defaultScanPageSize,
 	}
 	for _, opt := range opts {
 		opt(b)
 	}
+
+	dbDir := filepath.Join(root, "meta")
+	dbOpts := badger.DefaultOptions(dbDir).WithLogger(nil)
+	if b.bloomFP > 0 {
+		dbOpts = dbOpts.WithBloomFalsePositive(b.bloomFP)
+	}
+	db, err := badger.Open(dbOpts)
+	if err != nil {
+		return nil, fmt.Errorf("open badger: %w", err)
+	}
+	b.db = db
 	return b, nil
 }
 
@@ -1225,6 +1258,10 @@ func (b *ECBackend) ObjectExists(bucket, key string) (bool, error) {
 
 // ScanObjects streams EC object records for a bucket (DataShards > 0 only).
 // Scrubber API contract — do not change without bumping scrubber version.
+//
+// Internally iterates in pages of b.scanPageSize keys, opening a fresh BadgerDB
+// read transaction per page. This releases the MVCC read-lock between pages,
+// allowing BadgerDB GC to reclaim old value-log entries.
 func (b *ECBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
 	if err := b.HeadBucket(bucket); err != nil {
 		return nil, err
@@ -1232,50 +1269,71 @@ func (b *ECBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, er
 	ch := make(chan scrubber.ObjectRecord, 64)
 	go func() {
 		defer close(ch)
-		_ = b.db.View(func(txn *badger.Txn) error {
-			prefix := []byte("obj:" + bucket + "/")
-			it := txn.NewIterator(badger.DefaultIteratorOptions)
-			defer it.Close()
-			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-				var meta *ecObjectMeta
-				if err := it.Item().Value(func(val []byte) error {
-					var err error
-					meta, err = unmarshalECObjectMeta(val)
-					return err
-				}); err != nil {
-					continue
-				}
-				if meta.DataShards <= 0 { // plain objects skipped (Eng Review #10)
-					continue
-				}
-				if meta.IsDeleteMarker {
-					continue // delete markers have no shards to scrub
-				}
-				rawKey := string(it.Item().Key())
-				rest := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
-				// Versioned keys: "key/versionId" — split on last slash
-				objKey, versionID := rest, ""
-				if idx := strings.LastIndex(rest, "/"); idx >= 0 {
-					// heuristic: if suffix looks like a UUID (contains dashes), it's a versionId
-					suffix := rest[idx+1:]
-					if len(suffix) == 36 && strings.Count(suffix, "-") == 4 {
-						objKey = rest[:idx]
-						versionID = suffix
+		prefix := []byte("obj:" + bucket + "/")
+		// cursor is the key to seek to at the start of each page.
+		cursor := append([]byte{}, prefix...)
+		pageSize := b.scanPageSize
+
+		for {
+			var nextCursor []byte
+			_ = b.db.View(func(txn *badger.Txn) error {
+				it := txn.NewIterator(badger.DefaultIteratorOptions)
+				defer it.Close()
+				count := 0
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					if count == pageSize {
+						// Record the start key of the next page.
+						k := it.Item().Key()
+						nextCursor = make([]byte, len(k))
+						copy(nextCursor, k)
+						return nil
+					}
+					count++
+
+					var meta *ecObjectMeta
+					if err := it.Item().Value(func(val []byte) error {
+						var err error
+						meta, err = unmarshalECObjectMeta(val)
+						return err
+					}); err != nil {
+						continue
+					}
+					if meta.DataShards <= 0 { // plain objects skipped (Eng Review #10)
+						continue
+					}
+					if meta.IsDeleteMarker {
+						continue // delete markers have no shards to scrub
+					}
+					rawKey := string(it.Item().Key())
+					rest := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
+					// Versioned keys: "key/versionId" — split on last slash
+					objKey, versionID := rest, ""
+					if idx := strings.LastIndex(rest, "/"); idx >= 0 {
+						// heuristic: if suffix looks like a UUID (contains dashes), it's a versionId
+						suffix := rest[idx+1:]
+						if len(suffix) == 36 && strings.Count(suffix, "-") == 4 {
+							objKey = rest[:idx]
+							versionID = suffix
+						}
+					}
+					ch <- scrubber.ObjectRecord{
+						Bucket:         bucket,
+						Key:            objKey,
+						DataShards:     meta.DataShards,
+						ParityShards:   meta.ParityShards,
+						ETag:           meta.ETag,
+						VersionID:      versionID,
+						IsDeleteMarker: meta.IsDeleteMarker,
+						LastModified:   meta.LastModified,
 					}
 				}
-				ch <- scrubber.ObjectRecord{
-					Bucket:         bucket,
-					Key:            objKey,
-					DataShards:     meta.DataShards,
-					ParityShards:   meta.ParityShards,
-					ETag:           meta.ETag,
-					VersionID:      versionID,
-					IsDeleteMarker: meta.IsDeleteMarker,
-					LastModified:   meta.LastModified,
-				}
+				return nil
+			})
+			if nextCursor == nil {
+				return // last page exhausted
 			}
-			return nil
-		})
+			cursor = nextCursor
+		}
 	}()
 	return ch, nil
 }
@@ -1307,46 +1365,65 @@ func (b *ECBackend) ScanPlainObjects(bucket string) (<-chan scrubber.PlainRecord
 	}
 	go func() {
 		defer close(ch)
-		_ = b.db.View(func(txn *badger.Txn) error {
-			prefix := []byte("obj:" + bucket + "/")
-			it := txn.NewIterator(badger.DefaultIteratorOptions)
-			defer it.Close()
-			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-				var meta *ecObjectMeta
-				if err := it.Item().Value(func(val []byte) error {
-					var err error
-					meta, err = unmarshalECObjectMeta(val)
-					return err
-				}); err != nil {
-					continue
-				}
-				if meta.DataShards > 0 || meta.IsDeleteMarker {
-					continue
-				}
-				if meta.Size < int64(b.codec.DataShards) {
-					continue // too small for EC; leave as plain
-				}
-				rawKey := string(it.Item().Key())
-				rest := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
-				objKey, versionID := rest, ""
-				if idx := strings.LastIndex(rest, "/"); idx >= 0 {
-					suffix := rest[idx+1:]
-					if len(suffix) == 36 && strings.Count(suffix, "-") == 4 {
-						objKey = rest[:idx]
-						versionID = suffix
+		prefix := []byte("obj:" + bucket + "/")
+		cursor := append([]byte{}, prefix...)
+		pageSize := b.scanPageSize
+
+		for {
+			var nextCursor []byte
+			_ = b.db.View(func(txn *badger.Txn) error {
+				it := txn.NewIterator(badger.DefaultIteratorOptions)
+				defer it.Close()
+				count := 0
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					if count == pageSize {
+						k := it.Item().Key()
+						nextCursor = make([]byte, len(k))
+						copy(nextCursor, k)
+						return nil
+					}
+					count++
+
+					var meta *ecObjectMeta
+					if err := it.Item().Value(func(val []byte) error {
+						var err error
+						meta, err = unmarshalECObjectMeta(val)
+						return err
+					}); err != nil {
+						continue
+					}
+					if meta.DataShards > 0 || meta.IsDeleteMarker {
+						continue
+					}
+					if meta.Size < int64(b.codec.DataShards) {
+						continue // too small for EC; leave as plain
+					}
+					rawKey := string(it.Item().Key())
+					rest := strings.TrimPrefix(rawKey, "obj:"+bucket+"/")
+					objKey, versionID := rest, ""
+					if idx := strings.LastIndex(rest, "/"); idx >= 0 {
+						suffix := rest[idx+1:]
+						if len(suffix) == 36 && strings.Count(suffix, "-") == 4 {
+							objKey = rest[:idx]
+							versionID = suffix
+						}
+					}
+					ch <- scrubber.PlainRecord{
+						Bucket:      bucket,
+						Key:         objKey,
+						VersionID:   versionID,
+						Size:        meta.Size,
+						ETag:        meta.ETag,
+						ContentType: meta.ContentType,
 					}
 				}
-				ch <- scrubber.PlainRecord{
-					Bucket:      bucket,
-					Key:         objKey,
-					VersionID:   versionID,
-					Size:        meta.Size,
-					ETag:        meta.ETag,
-					ContentType: meta.ContentType,
-				}
+				return nil
+			})
+			if nextCursor == nil {
+				return
 			}
-			return nil
-		})
+			cursor = nextCursor
+		}
 	}()
 	return ch, nil
 }
