@@ -278,7 +278,40 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 ### Phase 14: Scale ✅ (v0.0.11)
 
-**목표:** 장기 운영 시 Raft 로그 무한 증가 문제를 해소하고, BadgerDB 읽기 성능을 최적화한다.
+**목표:** 장기 운영에서 발생하는 스토리지/메모리 누수를 해소하고, Raft 성능과 BadgerDB 읽기 효율을 최적화한다.
+
+#### Phase 14a: Orphan Shard Sweep ✅
+
+- **고아 샤드 탐지 및 정리** ✅ — migration Phase 3→4 크래시 갭으로 남는 src 고아 샤드 디렉토리를 자동 탐지·정리.
+- **Age gate** ✅ — 생성 후 5분 미만 샤드는 진행 중인 PUT 보호를 위해 건드리지 않음.
+- **Tombstone delay** ✅ — 2 연속 사이클에서 고아로 확인된 경우에만 삭제 (오탐 방지).
+- **I/O storm 방지** ✅ — 사이클당 최대 50개(`maxOrphansPerCycle`) 삭제 캡.
+- **Zero-config** ✅ — ECBackend가 `OrphanWalkable`을 구현하면 자동 활성. CLI 플래그 없음.
+- **3개 신규 메트릭** ✅ — `grainfs_scrub_orphan_shards_found_total`, `grainfs_scrub_orphan_shards_deleted_total`, `grainfs_scrub_orphan_sweep_capped_total`.
+
+**검증:**
+- `TestOrphanSweep_*` — age gate, tombstone delay, I/O cap, zero-orphan no-op 테스트 통과
+
+#### Phase 14b: Migration Priority Queue + Adaptive Throttle ✅
+
+- **`MigrationPriorityQueue`** ✅ — `container/heap` 기반 max-heap. 마이그레이션 소스 노드를 `DiskUsedPct` 내림차순으로 정렬해 가장 꽉 찬 노드 먼저 처리.
+- **토큰 버킷** ✅ — `MigrationProposalRate` (기본 2.0/s)로 proposal 속도 제한. I/O 폭풍 방지.
+- **Aging factor** ✅ — `effectivePriority = diskUsedPct × (1 + ageMin/10)`. 오래 대기한 노드의 우선순위가 점진적으로 상승해 기아 방지.
+- **Sticky donor** ✅ — `StickyDonorHoldTime` (기본 30s)동안 동일 src 노드 유지. 우선순위 flip으로 인한 thrash 방지.
+- **2개 신규 BalancerConfig 필드** ✅ — `MigrationProposalRate float64`, `StickyDonorHoldTime time.Duration`.
+
+**검증:**
+- `TestMigrationPriorityQueue_*` — max-heap 정렬, aging, sticky donor, 토큰 버킷 속도 제한 테스트 통과
+
+#### Phase 14c: BadgerDB 읽기 최적화 ✅
+
+- **ScanObjects 커서 페이지네이션** ✅ — 단일 장기 `db.View()` 대신 페이지(기본 256개 키)마다 새 트랜잭션 열기. MVCC 읽기 락 조기 해제로 대규모 버킷 스캔 시 GC 지연 방지. 기존 API 변경 없음.
+- **`WithScanPageSize` ECOption** ✅ — 테스트 및 특수 환경에서 페이지 크기 조정 가능.
+- **`WithBloomFalsePositive` ECOption** ✅ — `NewECBackend` 생성 시 BadgerDB SSTable 블룸 필터 오탐율 지정. 낮은 값은 읽기 증폭 감소 대신 블룸 필터 메모리 증가.
+- **`NewECBackend` 초기화 순서 변경** ✅ — 옵션을 `badger.Open` 이전에 적용해 DB 수준 설정을 반영하도록 two-pass 초기화로 변경.
+
+**검증:**
+- `TestECBackend_ScanObjects_Cursor*` — 페이지네이션 전체 반환, 중복 없음, 정확한 페이지 크기 테스트 통과
 
 #### Phase 14d: Raft Log GC — Managed Mode ✅
 
@@ -294,3 +327,17 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - `TestIntegration_LogGC_PartitionAndRecovery` — partition → GC → 복구 시나리오
 - `TestBadgerLogStore_ManagedMode_Preflight*` — 포맷 불일치 감지 (4개 케이스)
 - `TestNode_LogGC_*` — GC skip 조건, watermark 정확성
+
+#### Phase 14d': Adaptive Raft Batching ✅
+
+- **`batcherLoop` + `flushBatch`** ✅ — leader 진입 후 독립 고루틴이 `proposalCh`(buf=4096)에서 제안을 수집해 배치로 flush. 100 동시 PUT → 97% BadgerDB 커밋 감소 (100회 → 3회).
+- **EWMA 적응 알고리즘** ✅ — alpha=0.3. 저부하(<100 req/s) → 100µs flush / 4-batch, 중부하(100-500) → 1ms / 32-batch, 고부하(>500) → 5ms / 128-batch. 설정 파일 없이 자동 전환.
+- **즉시 복제 트리거** ✅ — `flushBatch` 완료 시 `replicationCh`(buf=1)에 신호 전송. HeartbeatTimeout 대기 없이 즉시 `replicateToAll()` 호출.
+- **Graceful shutdown** ✅ — `stopCh` 닫기 → pending 제안 전부 `ErrProposalFailed` 반환 후 종료.
+- **`BatchMetrics()` accessor** ✅ — `EWMARate`, `BatchTimeout`, `MaxBatch` 스냅샷 반환.
+- **7개 신규 테스트** ✅ (`batcher_test.go`): HighLoad, LowLoad, NotLeader, Shutdown, ReplicationTrigger, AdaptiveMetrics_Transition, PersistPanic.
+
+**검증:**
+- `TestBatcher_HighLoad` — 100 동시 proposal → persist 횟수 < 100 확인
+- `TestBatcher_LowLoad` — 단일 proposal flush 1ms 이내 확인
+- `TestAdaptiveMetrics_Transition` — EWMA 임계값 전환 로직 확인

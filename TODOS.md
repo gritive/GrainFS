@@ -2,14 +2,6 @@
 
 ## Phase 14: Scale
 
-- [x] ScrubObjects cursor pagination — ScanObjects BadgerDB 전체 순회 → cursor 기반으로 교체 (10K+ 클러스터 대비) [v0.0.11]
-- [x] scrubber: orphan shard 탐지 및 정리 (migration Phase-3→4 크래시 gap으로 남는 src 고아 샤드) [v0.0.11]
-- [x] badgerdb: managed mode (raft) — QuorumMinMatchIndex GC, --badger-managed-mode 플래그 [v0.0.11]
-- [x] badgerdb: write batch (audit: call site 없음, 변경 불필요) [v0.0.11]
-- [x] badgerdb: TableLoadingMode (BadgerDB v4에서 제거됨, N/A) [v0.0.11]
-- [x] badgerdb: LSM Read Amplification, bloom filter — WithBloomFalsePositive 옵션 [v0.0.11]
-- [x] migration: adaptive throttling, priority queue [v0.0.11]
-- [x] Adaptive Raft Batching — batcherLoop + EWMA adaptive flush [v0.0.11]
 - [ ] Raft waiter leak on truncation — flushBatch 등록한 n.waiters 항목이 step-down + log truncation 시 미정리. HandleAppendEntries truncation path에서 affected index 범위의 waiters 삭제 필요 (Opus review finding #1)
 - [ ] Thin provisioning
 - [ ] sharding, multi raft
