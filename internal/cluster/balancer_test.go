@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -79,9 +78,7 @@ func TestBalancerProposer_NoActionWhenBalanced(t *testing.T) {
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	assert.Empty(t, node.proposed, "should not propose when disk diff < 20%")
 }
@@ -96,9 +93,7 @@ func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	require.NotEmpty(t, node.proposed, "should propose migration when imbalanced")
 
@@ -117,9 +112,7 @@ func TestBalancerProposer_OnlyLeaderProposes(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	assert.Empty(t, node.proposed, "follower should not propose migration")
 }
@@ -133,9 +126,7 @@ func TestBalancerProposer_WarmupGate(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	assert.Empty(t, node.proposed, "should wait for all peers before proposing (warm-up gate)")
 }
@@ -154,9 +145,7 @@ func TestBalancerProposer_WarmupBypassAfterTimeout(t *testing.T) {
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	time.Sleep(5 * time.Millisecond) // let warm-up timeout pass
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	// With available peers showing 40% imbalance, should propose
 	require.NotEmpty(t, node.proposed, "should proceed after warm-up timeout")
@@ -174,9 +163,7 @@ func TestBalancerProposer_HysteresisStopsAtLowThreshold(t *testing.T) {
 	// Simulate already-triggered state (imbalance was above 20%, now dropped to 3%)
 	p.active = true
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	assert.Empty(t, node.proposed, "should stop migration when diff < 5% (hysteresis)")
 	assert.False(t, p.active, "active flag should be cleared below stop threshold")
@@ -193,9 +180,7 @@ func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	p.tickOnce(ctx)
+	p.tickOnce()
 
 	require.NotEmpty(t, node.proposed)
 	var cmd clusterpb.Command
@@ -268,7 +253,7 @@ func TestLeaderBalance_TransfersWhenOverloaded(t *testing.T) {
 	p := NewBalancerProposer("leader", store, node, cfg)
 	p.startedAt = time.Now().Add(-cfg.WarmupTimeout - time.Second) // warmup done
 
-	p.tickOnce(context.Background())
+	p.tickOnce()
 
 	assert.True(t, node.transferred, "leader overloaded: expected TransferLeadership")
 }
@@ -284,7 +269,7 @@ func TestLeaderBalance_NoTransferWhenBalanced(t *testing.T) {
 	p := NewBalancerProposer("leader", store, node, cfg)
 	p.startedAt = time.Now().Add(-cfg.WarmupTimeout - time.Second)
 
-	p.tickOnce(context.Background())
+	p.tickOnce()
 
 	assert.False(t, node.transferred, "leader load within threshold: no transfer expected")
 }
@@ -324,7 +309,7 @@ func TestLeaderBalance_NoTransferWhenFollower(t *testing.T) {
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.startedAt = time.Now().Add(-cfg.WarmupTimeout - time.Second)
 
-	p.tickOnce(context.Background())
+	p.tickOnce()
 
 	assert.False(t, node.transferred, "follower: no transfer expected")
 }
@@ -347,7 +332,7 @@ func TestBalancerProposer_GracePeriod_RelaxesTrigger(t *testing.T) {
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-	p.tickOnce(context.Background())
+	p.tickOnce()
 
 	assert.Empty(t, node.proposed, "25% imbalance below relaxed 30% trigger during grace period: no proposal expected")
 }
@@ -365,7 +350,7 @@ func TestBalancerProposer_GracePeriod_FiresAboveRelaxedTrigger(t *testing.T) {
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-	p.tickOnce(context.Background())
+	p.tickOnce()
 
 	assert.NotEmpty(t, node.proposed, "40% imbalance exceeds relaxed 30% trigger: proposal expected")
 }
@@ -384,7 +369,7 @@ func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) 
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-	p.tickOnce(context.Background())
+	p.tickOnce()
 
 	assert.NotEmpty(t, node.proposed, "grace period expired: normal 20% trigger applies, 25% should fire")
 }
@@ -402,11 +387,11 @@ func TestBalancerProposer_InflightDedup(t *testing.T) {
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 
 	// First tick: migration proposed and added to inflight.
-	p.tickOnce(context.Background())
+	p.tickOnce()
 	require.Len(t, node.proposed, 1, "first tick must propose")
 
 	// Second tick: same object still in inflight → must be skipped.
-	p.tickOnce(context.Background())
+	p.tickOnce()
 	assert.Len(t, node.proposed, 1, "second tick must not re-propose while migration is inflight")
 }
 

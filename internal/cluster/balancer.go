@@ -105,6 +105,19 @@ type BalancerConfig struct {
 	// imbalance trigger. During this window the trigger is relaxed by 1.5× to prevent
 	// migration storms caused by newly-added nodes.
 	GracePeriod time.Duration
+	// PeerSeenWindow is the maximum age of a peer's last gossip for warmupComplete.
+	// Peers with UpdatedAt older than this are treated as not-yet-gossiped.
+	// Defaults to 2× GossipInterval when zero.
+	PeerSeenWindow time.Duration
+	// CBThreshold is the disk-used percentage at which a destination node's circuit
+	// breaker opens (0–1 fraction, e.g. 0.90 = 90%). Default 0.90.
+	CBThreshold float64
+	// MigrationMaxRetries is the maximum number of shard write attempts per shard.
+	// Default 3.
+	MigrationMaxRetries int
+	// MigrationPendingTTL is how long a pending migration may linger before being
+	// cancelled. Default 5 minutes.
+	MigrationPendingTTL time.Duration
 }
 
 // DefaultBalancerConfig returns production-safe defaults.
@@ -118,6 +131,10 @@ func DefaultBalancerConfig() BalancerConfig {
 		LeaderTenureMin:     5 * time.Minute,
 		LeaderLoadThreshold: 1.3,
 		GracePeriod:         10 * time.Minute,
+		PeerSeenWindow:      60 * time.Second, // 2× default GossipInterval
+		CBThreshold:         0.90,
+		MigrationMaxRetries: 3,
+		MigrationPendingTTL: 5 * time.Minute,
 	}
 }
 
@@ -137,16 +154,20 @@ type BalancerProposer struct {
 	store     *NodeStatsStore
 	node      RaftBalancerNode
 	cfg       BalancerConfig
-	mu        sync.Mutex // protects active and inflight
-	active    bool        // hysteresis state: true once trigger fired, false after stop threshold
+	mu        sync.Mutex           // protects active, inflight; cbs written by syncCB (ticker goroutine only)
+	active    bool                 // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt time.Time
-	picker    ObjectPicker // nil = no proposals until SetObjectPicker is called
+	picker    ObjectPicker         // nil = no proposals until SetObjectPicker is called
 	inflight  map[string]time.Time // proposed migrations not yet committed; keyed by task.id()
+	cbs       map[string]*circuitBreaker // per-peer CBs; keyed by peer nodeID
 	logger    *slog.Logger
 }
 
 // NewBalancerProposer creates a BalancerProposer with the given config.
 func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancerNode, cfg BalancerConfig) *BalancerProposer {
+	if cfg.CBThreshold == 0 {
+		cfg.CBThreshold = DefaultBalancerConfig().CBThreshold
+	}
 	return &BalancerProposer{
 		nodeID:    nodeID,
 		store:     store,
@@ -154,8 +175,70 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 		cfg:       cfg,
 		startedAt: time.Now(),
 		inflight:  make(map[string]time.Time),
+		cbs:       make(map[string]*circuitBreaker),
 		logger:    slog.Default().With("component", "balancer"),
 	}
+}
+
+// syncCB updates (or creates) per-peer circuit breakers from the latest gossip stats.
+// Must be called with mu held.
+func (p *BalancerProposer) syncCB(peers []NodeStats) {
+	for _, ns := range peers {
+		if ns.NodeID == p.nodeID {
+			continue // skip self
+		}
+		cb, ok := p.cbs[ns.NodeID]
+		if !ok {
+			cb = newCircuitBreaker(p.cfg.CBThreshold)
+			p.cbs[ns.NodeID] = cb
+		}
+		cb.update(ns)
+		if !cb.allow() {
+			metrics.BalancerCBOpen.WithLabelValues(ns.NodeID).Set(1)
+		} else {
+			metrics.BalancerCBOpen.WithLabelValues(ns.NodeID).Set(0)
+		}
+	}
+}
+
+// getCB returns the circuitBreaker for nodeID, or nil if not found.
+// Used for testing only.
+func (p *BalancerProposer) getCB(nodeID string) *circuitBreaker {
+	p.mu.Lock()
+	cb := p.cbs[nodeID]
+	p.mu.Unlock()
+	return cb
+}
+
+// selectDstNode returns the lightest peer that has an open (allow=true) circuit breaker.
+// Returns ("", false) if no eligible peer exists.
+func (p *BalancerProposer) selectDstNode() (string, bool) {
+	all := p.store.GetAll()
+	var lightest string
+	var lightestPct float64 = 101 // higher than any valid value
+	allOpen := true
+	for _, ns := range all {
+		if ns.NodeID == p.nodeID {
+			continue
+		}
+		cb, ok := p.cbs[ns.NodeID]
+		if !ok || cb.allow() {
+			allOpen = false
+			if ns.DiskUsedPct < lightestPct {
+				lightestPct = ns.DiskUsedPct
+				lightest = ns.NodeID
+			}
+		}
+	}
+	if allOpen && len(all) > 1 {
+		metrics.BalancerCBAllOpenTotal.Inc()
+		p.logger.Warn("balancer: all dst circuit breakers open, skipping migration tick")
+		return "", false
+	}
+	if lightest == "" {
+		return "", false
+	}
+	return lightest, true
 }
 
 // NotifyMigrationDone removes the inflight entry for the given migration, allowing
@@ -186,13 +269,13 @@ func (p *BalancerProposer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.tickOnce(ctx)
+			p.tickOnce()
 		}
 	}
 }
 
 // tickOnce is a single balancer evaluation cycle, exposed for testing.
-func (p *BalancerProposer) tickOnce(ctx context.Context) {
+func (p *BalancerProposer) tickOnce() {
 	if !p.node.IsLeader() {
 		return
 	}
@@ -224,8 +307,10 @@ func (p *BalancerProposer) tickOnce(ctx context.Context) {
 		metrics.BalancerGracePeriodActiveTicks.Inc()
 	}
 
-	// Hysteresis: activate above trigger, deactivate below stop.
+	// Sync circuit breakers from latest gossip, then check hysteresis.
+	allPeers := p.store.GetAll()
 	p.mu.Lock()
+	p.syncCB(allPeers)
 	active := p.active
 	if !active {
 		if diff < effectiveTrigger {
@@ -242,12 +327,12 @@ func (p *BalancerProposer) tickOnce(ctx context.Context) {
 	}
 	p.mu.Unlock()
 
-	dst, ok := selectLightestPeer(p.store, p.nodeID)
+	dst, ok := p.selectDstNode()
 	if !ok {
 		return
 	}
 
-	p.proposeMigration(ctx, p.nodeID, dst)
+	p.proposeMigration(p.nodeID, dst)
 }
 
 // BalancerStatus is a point-in-time snapshot of the balancer's state.
@@ -280,18 +365,28 @@ func (p *BalancerProposer) anyNodeInGracePeriod() bool {
 	return false
 }
 
-// warmupComplete returns true once all peers have gossiped or the warmup timeout has passed.
+// warmupComplete returns true once all peers have gossiped recently or the warmup timeout has passed.
+// "Recently" is defined as UpdatedAt within PeerSeenWindow (or 2× GossipInterval if zero).
 func (p *BalancerProposer) warmupComplete(peers []string) bool {
 	if time.Since(p.startedAt) >= p.cfg.WarmupTimeout {
 		return true
 	}
-	// +1 for self
-	return p.store.Len() >= len(peers)+1
+	window := p.cfg.PeerSeenWindow
+	if window == 0 {
+		window = 2 * p.cfg.GossipInterval
+	}
+	for _, peerID := range peers {
+		ns, ok := p.store.Get(peerID)
+		if !ok || time.Since(ns.UpdatedAt) > window {
+			return false
+		}
+	}
+	return true
 }
 
 // proposeMigration selects one object from src via the ObjectPicker and proposes
 // a CmdMigrateShard to Raft. Returns early if picker is nil or returns ok=false.
-func (p *BalancerProposer) proposeMigration(ctx context.Context, src, dst string) {
+func (p *BalancerProposer) proposeMigration(src, dst string) {
 	if p.picker == nil {
 		return
 	}

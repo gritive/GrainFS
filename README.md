@@ -66,6 +66,9 @@ Flags:
       --balancer-migration-rate int         tick당 최대 제안 수 (default 1)
       --balancer-leader-tenure-min duration 리더 최소 보유 시간 (default 5m)
       --balancer-warmup-timeout duration    노드 시작 후 마이그레이션 유예 시간 (default 60s)
+      --balancer-cb-threshold float         Circuit Breaker 임계값 — 디스크 사용률 fraction (default 0.90)
+      --balancer-migration-max-retries int  shard write 최대 재시도 횟수 (default 3)
+      --balancer-migration-pending-ttl duration 좀비 마이그레이션 자동 취소 TTL (default 5m)
 ```
 
 ## 클러스터 Balancer

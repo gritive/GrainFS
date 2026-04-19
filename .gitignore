@@ -5,3 +5,4 @@ tmp/
 server.test
 /grainfs
 bin/grainfs
+.gstack/
