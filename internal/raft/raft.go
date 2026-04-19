@@ -55,6 +55,66 @@ type LogEntry struct {
 }
 
 // Config holds Raft node configuration.
+// proposal carries a single command through the batcher pipeline.
+type proposal struct {
+	command []byte
+	doneCh  chan proposalResult
+	ctx     context.Context
+}
+
+// proposalResult is the outcome delivered to ProposeWait callers.
+type proposalResult struct {
+	index uint64
+	err   error
+}
+
+// adaptiveMetrics tracks EWMA request rate to dynamically tune batch parameters.
+type adaptiveMetrics struct {
+	ewmaRate    float64
+	lastFlushAt time.Time
+	alpha       float64
+}
+
+func (m *adaptiveMetrics) update(batchSize int) {
+	now := time.Now()
+	elapsed := now.Sub(m.lastFlushAt).Seconds()
+	if elapsed <= 0 {
+		elapsed = 0.001
+	}
+	instantRate := float64(batchSize) / elapsed
+	m.ewmaRate = m.alpha*instantRate + (1-m.alpha)*m.ewmaRate
+	m.lastFlushAt = now
+}
+
+func (m *adaptiveMetrics) batchTimeout() time.Duration {
+	switch {
+	case m.ewmaRate >= 500:
+		return 5 * time.Millisecond
+	case m.ewmaRate >= 100:
+		return time.Millisecond
+	default:
+		return 100 * time.Microsecond
+	}
+}
+
+func (m *adaptiveMetrics) maxBatch() int {
+	switch {
+	case m.ewmaRate >= 500:
+		return 128
+	case m.ewmaRate >= 100:
+		return 32
+	default:
+		return 4
+	}
+}
+
+// BatchMetricsSnapshot is a point-in-time view of the adaptive batcher state.
+type BatchMetricsSnapshot struct {
+	EWMARate     float64
+	BatchTimeout time.Duration
+	MaxBatch     int
+}
+
 type Config struct {
 	ID               string
 	Peers            []string      // addresses of other nodes
@@ -154,6 +214,11 @@ type Node struct {
 	// log GC tracking (Phase 14d)
 	lastLogGC time.Time
 	gcRunning atomic.Bool // prevents overlapping GC goroutines
+
+	// batcher pipeline (Phase 14d')
+	proposalCh    chan proposal
+	replicationCh chan struct{}
+	metrics       adaptiveMetrics
 }
 
 // NewNode creates a new Raft node. Call Start() to begin operation.
@@ -171,7 +236,10 @@ func NewNode(config Config, store ...LogStore) *Node {
 		stopCh:     make(chan struct{}),
 		resetCh:    make(chan struct{}, 1),
 		commitCh:   make(chan struct{}, 1),
-		waiters:    make(map[uint64]chan struct{}),
+		waiters:       make(map[uint64]chan struct{}),
+		proposalCh:    make(chan proposal, 4096),
+		replicationCh: make(chan struct{}, 1),
+		metrics:       adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
 	}
 
 	if len(store) > 0 && store[0] != nil {
@@ -237,66 +305,65 @@ func (n *Node) SetTimeoutNowTransport(send func(peer string) error) {
 func (n *Node) Start() {
 	go n.run()
 	go n.applyLoop()
+	go n.batcherLoop()
 }
 
 // Propose appends a command to the leader's log for replication.
 // Returns ErrNotLeader if this node is not the leader.
 func (n *Node) Propose(command []byte) error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-
 	if n.state != Leader {
+		n.mu.Unlock()
 		return ErrNotLeader
 	}
+	n.mu.Unlock()
 
-	entry := LogEntry{
-		Term:    n.currentTerm,
-		Index:   n.lastLogIdx() + 1,
-		Command: command,
+	doneCh := make(chan proposalResult, 1)
+	select {
+	case n.proposalCh <- proposal{command: command, doneCh: doneCh, ctx: context.Background()}:
+		return nil
+	case <-n.stopCh:
+		return ErrProposalFailed
 	}
-	n.log = append(n.log, entry)
-	n.persistLogEntries([]LogEntry{entry})
-	// Update matchIndex for self
-	n.matchIndex[n.id] = entry.Index
-	n.advanceCommitIndex()
-
-	return nil
 }
 
 // ProposeWait appends a command and blocks until it is committed or the context is cancelled.
 // Returns the log index of the committed entry.
 func (n *Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
 	n.mu.Lock()
-
 	if n.state != Leader {
 		n.mu.Unlock()
 		return 0, ErrNotLeader
 	}
-
-	entry := LogEntry{
-		Term:    n.currentTerm,
-		Index:   n.lastLogIdx() + 1,
-		Command: command,
-	}
-	n.log = append(n.log, entry)
-	n.persistLogEntries([]LogEntry{entry})
-	n.matchIndex[n.id] = entry.Index
-
-	ch := make(chan struct{}, 1)
-	n.waiters[entry.Index] = ch
-	n.advanceCommitIndex()
 	n.mu.Unlock()
 
+	doneCh := make(chan proposalResult, 1)
 	select {
+	case n.proposalCh <- proposal{command: command, doneCh: doneCh, ctx: ctx}:
 	case <-ctx.Done():
-		n.mu.Lock()
-		delete(n.waiters, entry.Index)
-		n.mu.Unlock()
 		return 0, ctx.Err()
 	case <-n.stopCh:
 		return 0, ErrProposalFailed
-	case <-ch:
-		return entry.Index, nil
+	}
+
+	select {
+	case result := <-doneCh:
+		return result.index, result.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-n.stopCh:
+		return 0, ErrProposalFailed
+	}
+}
+
+// BatchMetrics returns a snapshot of the adaptive batcher's current state.
+func (n *Node) BatchMetrics() BatchMetricsSnapshot {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return BatchMetricsSnapshot{
+		EWMARate:     n.metrics.ewmaRate,
+		BatchTimeout: n.metrics.batchTimeout(),
+		MaxBatch:     n.metrics.maxBatch(),
 	}
 }
 
@@ -523,26 +590,28 @@ func (n *Node) initLeaderState() {
 }
 
 func (n *Node) runLeader() {
-	// Send initial AppendEntries (heartbeat/replication)
 	n.replicateToAll()
 
 	ticker := time.NewTicker(n.config.HeartbeatTimeout)
 	defer ticker.Stop()
 
-	select {
-	case <-n.stopCh:
-		return
-	case <-ticker.C:
-		n.replicateToAll()
-		if !n.gcRunning.Swap(true) {
-			go func() {
-				defer n.gcRunning.Store(false)
-				n.maybeRunLogGC()
-			}()
+	for {
+		select {
+		case <-n.stopCh:
+			return
+		case <-ticker.C:
+			n.replicateToAll()
+			if !n.gcRunning.Swap(true) {
+				go func() {
+					defer n.gcRunning.Store(false)
+					n.maybeRunLogGC()
+				}()
+			}
+		case <-n.replicationCh:
+			n.replicateToAll()
+		case <-n.resetCh:
+			return
 		}
-	case <-n.resetCh:
-		// Stepped down due to higher term
-		return
 	}
 }
 
@@ -1141,6 +1210,125 @@ func (n *Node) persistState() {
 // persistLogEntries saves log entries to durable storage.
 // Must be called with n.mu held. No-op if store is nil.
 // Panics on error: lost log entries break Raft durability guarantees.
+// batcherLoop collects proposals from proposalCh and flushes them in batches.
+// It adapts batch size and timeout based on EWMA request rate.
+func (n *Node) batcherLoop() {
+	for {
+		n.mu.Lock()
+		timeout := n.metrics.batchTimeout()
+		maxBatch := n.metrics.maxBatch()
+		n.mu.Unlock()
+
+		timer := time.NewTimer(timeout)
+		var pending []proposal
+
+	collect:
+		for {
+			select {
+			case <-n.stopCh:
+				timer.Stop()
+				for _, p := range pending {
+					select {
+					case p.doneCh <- proposalResult{err: ErrProposalFailed}:
+					default:
+					}
+				}
+				for {
+					select {
+					case p := <-n.proposalCh:
+						select {
+						case p.doneCh <- proposalResult{err: ErrProposalFailed}:
+						default:
+						}
+					default:
+						return
+					}
+				}
+			case p := <-n.proposalCh:
+				pending = append(pending, p)
+				if len(pending) >= maxBatch {
+					timer.Stop()
+					break collect
+				}
+			case <-timer.C:
+				break collect
+			}
+		}
+
+		if len(pending) > 0 {
+			n.flushBatch(pending)
+			for i := range pending {
+				pending[i] = proposal{}
+			}
+			pending = pending[:0]
+		}
+	}
+}
+
+// flushBatch persists all pending proposals as a single batch, advances commit,
+// and spawns relay goroutines that deliver results to each caller.
+func (n *Node) flushBatch(pending []proposal) {
+	n.mu.Lock()
+
+	if n.state != Leader {
+		n.mu.Unlock()
+		for _, p := range pending {
+			select {
+			case p.doneCh <- proposalResult{err: ErrNotLeader}:
+			default:
+			}
+		}
+		return
+	}
+
+	entries := make([]LogEntry, len(pending))
+	base := n.lastLogIdx() + 1
+	for i, p := range pending {
+		entries[i] = LogEntry{
+			Term:    n.currentTerm,
+			Index:   base + uint64(i),
+			Command: p.command,
+		}
+	}
+	n.log = append(n.log, entries...)
+	n.persistLogEntries(entries)
+	n.matchIndex[n.id] = entries[len(entries)-1].Index
+
+	commitChs := make([]chan struct{}, len(pending))
+	for i, entry := range entries {
+		ch := make(chan struct{}, 1)
+		n.waiters[entry.Index] = ch
+		commitChs[i] = ch
+	}
+	n.advanceCommitIndex()
+
+	n.metrics.update(len(pending))
+	n.mu.Unlock()
+
+	select {
+	case n.replicationCh <- struct{}{}:
+	default:
+	}
+
+	for i, p := range pending {
+		go func(p proposal, ch chan struct{}, entry LogEntry) {
+			select {
+			case <-ch:
+				select {
+				case p.doneCh <- proposalResult{index: entry.Index}:
+				default:
+				}
+			case <-n.stopCh:
+				select {
+				case p.doneCh <- proposalResult{err: ErrProposalFailed}:
+				default:
+				}
+			case <-p.ctx.Done():
+			}
+		}(p, commitChs[i], entries[i])
+	}
+}
+
 func (n *Node) persistLogEntries(entries []LogEntry) {
 	if n.store == nil || len(entries) == 0 {
 		return
