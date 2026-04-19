@@ -24,6 +24,11 @@
   - **I/O storm 방지** — 사이클당 최대 50개(`maxOrphansPerCycle`) 삭제 캡.
   - **Zero-config** — CLI 플래그 없이 백엔드가 `OrphanWalkable`을 구현하면 자동 활성.
 - **3개 신규 메트릭** — `grainfs_scrub_orphan_shards_found_total`, `grainfs_scrub_orphan_shards_deleted_total`, `grainfs_scrub_orphan_sweep_capped_total`.
+- **Phase 14b: Migration Priority Queue + Adaptive Throttle** — `MigrationPriorityQueue` (container/heap 기반 max-heap)로 마이그레이션 소스 노드를 DiskUsedPct 내림차순으로 정렬. 가장 꽉 찬 노드의 객체가 먼저 이동한다.
+  - **토큰 버킷** — `MigrationProposalRate` (기본 2.0/s)로 proposal 속도 제한. I/O 폭풍 방지.
+  - **Aging factor** — `effectivePriority = diskUsedPct × (1 + ageMin/10)`. 10분 지연된 50% 노드가 갓 등록된 80% 노드보다 우선될 수 있어 기아 방지.
+  - **Sticky donor** — `StickyDonorHoldTime` (기본 30s)동안 동일 src 노드 유지. 우선순위 flip으로 인한 thrash 방지.
+- **2개 신규 BalancerConfig 필드** — `MigrationProposalRate float64`, `StickyDonorHoldTime time.Duration`.
 
 ## [0.0.10] - 2026-04-19
 

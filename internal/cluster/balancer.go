@@ -118,23 +118,31 @@ type BalancerConfig struct {
 	// MigrationPendingTTL is how long a pending migration may linger before being
 	// cancelled. Default 5 minutes.
 	MigrationPendingTTL time.Duration
+	// MigrationProposalRate is the token-bucket rate (proposals/second) for the
+	// migration priority queue. Default 2.0.
+	MigrationProposalRate float64
+	// StickyDonorHoldTime is how long to keep using the same src node before
+	// considering a switch. Default 30s.
+	StickyDonorHoldTime time.Duration
 }
 
 // DefaultBalancerConfig returns production-safe defaults.
 func DefaultBalancerConfig() BalancerConfig {
 	return BalancerConfig{
-		GossipInterval:      30 * time.Second,
-		WarmupTimeout:       60 * time.Second,
-		ImbalanceTriggerPct: 20.0,
-		ImbalanceStopPct:    5.0,
-		MigrationRate:       1,
-		LeaderTenureMin:     5 * time.Minute,
-		LeaderLoadThreshold: 1.3,
-		GracePeriod:         10 * time.Minute,
-		PeerSeenWindow:      60 * time.Second, // 2× default GossipInterval
-		CBThreshold:         0.90,
-		MigrationMaxRetries: 3,
-		MigrationPendingTTL: 5 * time.Minute,
+		GossipInterval:        30 * time.Second,
+		WarmupTimeout:         60 * time.Second,
+		ImbalanceTriggerPct:   20.0,
+		ImbalanceStopPct:      5.0,
+		MigrationRate:         1,
+		LeaderTenureMin:       5 * time.Minute,
+		LeaderLoadThreshold:   1.3,
+		GracePeriod:           10 * time.Minute,
+		PeerSeenWindow:        60 * time.Second, // 2× default GossipInterval
+		CBThreshold:           0.90,
+		MigrationMaxRetries:   3,
+		MigrationPendingTTL:   5 * time.Minute,
+		MigrationProposalRate: 2.0,
+		StickyDonorHoldTime:   30 * time.Second,
 	}
 }
 
@@ -150,23 +158,33 @@ type RaftBalancerNode interface {
 // BalancerProposer monitors NodeStatsStore and proposes CmdMigrateShard when
 // disk usage is imbalanced across nodes. Only the Raft leader runs proposals.
 type BalancerProposer struct {
-	nodeID    string
-	store     *NodeStatsStore
-	node      RaftBalancerNode
-	cfg       BalancerConfig
-	mu        sync.Mutex           // protects active, inflight; cbs written by syncCB (ticker goroutine only)
-	active    bool                 // hysteresis state: true once trigger fired, false after stop threshold
-	startedAt time.Time
-	picker    ObjectPicker         // nil = no proposals until SetObjectPicker is called
-	inflight  map[string]time.Time // proposed migrations not yet committed; keyed by task.id()
-	cbs       map[string]*circuitBreaker // per-peer CBs; keyed by peer nodeID
-	logger    *slog.Logger
+	nodeID          string
+	store           *NodeStatsStore
+	node            RaftBalancerNode
+	cfg             BalancerConfig
+	mu              sync.Mutex           // protects active, inflight; cbs written by syncCB (ticker goroutine only)
+	active          bool                 // hysteresis state: true once trigger fired, false after stop threshold
+	startedAt       time.Time
+	picker          ObjectPicker         // nil = no proposals until SetObjectPicker is called
+	inflight        map[string]time.Time // proposed migrations not yet committed; keyed by task.id()
+	cbs             map[string]*circuitBreaker // per-peer CBs; keyed by peer nodeID
+	migQueue        *MigrationPriorityQueue   // ordered src candidates
+	stickyDonor     string                    // last used src node
+	stickyUntil     time.Time                 // switch donor only after this time
+	logger          *slog.Logger
 }
 
 // NewBalancerProposer creates a BalancerProposer with the given config.
 func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancerNode, cfg BalancerConfig) *BalancerProposer {
+	def := DefaultBalancerConfig()
 	if cfg.CBThreshold == 0 {
-		cfg.CBThreshold = DefaultBalancerConfig().CBThreshold
+		cfg.CBThreshold = def.CBThreshold
+	}
+	if cfg.MigrationProposalRate == 0 {
+		cfg.MigrationProposalRate = def.MigrationProposalRate
+	}
+	if cfg.StickyDonorHoldTime == 0 {
+		cfg.StickyDonorHoldTime = def.StickyDonorHoldTime
 	}
 	return &BalancerProposer{
 		nodeID:    nodeID,
@@ -176,6 +194,7 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 		startedAt: time.Now(),
 		inflight:  make(map[string]time.Time),
 		cbs:       make(map[string]*circuitBreaker),
+		migQueue:  NewMigrationPriorityQueue(cfg.MigrationProposalRate),
 		logger:    slog.Default().With("component", "balancer"),
 	}
 }
@@ -332,7 +351,31 @@ func (p *BalancerProposer) tickOnce() {
 		return
 	}
 
-	p.proposeMigration(p.nodeID, dst)
+	// Feed all overloaded nodes into the migration queue, sorted by DiskUsedPct.
+	for _, ns := range allPeers {
+		if ns.DiskUsedPct >= p.cfg.ImbalanceTriggerPct {
+			p.migQueue.Upsert(ns.NodeID, ns.DiskUsedPct)
+		}
+	}
+	// Always ensure self is in the queue (self is always a valid src when overloaded).
+	if selfNS, ok := p.store.Get(p.nodeID); ok && selfNS.DiskUsedPct >= p.cfg.ImbalanceTriggerPct {
+		p.migQueue.Upsert(p.nodeID, selfNS.DiskUsedPct)
+	}
+
+	// Sticky donor: keep using the last src node until hold time passes.
+	var src string
+	now := time.Now()
+	if p.stickyDonor != "" && now.Before(p.stickyUntil) {
+		src = p.stickyDonor
+	} else if s, ok := p.migQueue.TryDequeue(); ok {
+		src = s
+		p.stickyDonor = src
+		p.stickyUntil = now.Add(p.cfg.StickyDonorHoldTime)
+	} else {
+		src = p.nodeID // fallback to self
+	}
+
+	p.proposeMigration(src, dst)
 }
 
 // BalancerStatus is a point-in-time snapshot of the balancer's state.
