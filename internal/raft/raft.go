@@ -208,8 +208,8 @@ type Node struct {
 	// leader tracking (observable from outside)
 	leaderID string
 
-	// proposal waiters: log index -> channel signaled when committed
-	waiters map[uint64]chan struct{}
+	// proposal waiters: log index -> channel signaled when committed (nil = success, error = failure)
+	waiters map[uint64]chan error
 
 	// log GC tracking (Phase 14d)
 	lastLogGC time.Time
@@ -236,7 +236,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		stopCh:     make(chan struct{}),
 		resetCh:    make(chan struct{}, 1),
 		commitCh:   make(chan struct{}, 1),
-		waiters:       make(map[uint64]chan struct{}),
+		waiters:       make(map[uint64]chan error),
 		proposalCh:    make(chan proposal, 4096),
 		replicationCh: make(chan struct{}, 1),
 		metrics:       adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
@@ -899,6 +899,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 		}
 		if n.log[n.toSliceIdx(args.PrevLogIndex)].Term != args.PrevLogTerm {
 			// Conflict: delete this entry and all that follow
+			n.abortWaitersFrom(args.PrevLogIndex)
 			n.log = n.log[:n.toSliceIdx(args.PrevLogIndex)]
 			return reply
 		}
@@ -910,6 +911,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 		idx := args.PrevLogIndex + uint64(i) + 1
 		if n.hasLogEntry(idx) {
 			if n.log[n.toSliceIdx(idx)].Term != entry.Term {
+				n.abortWaitersFrom(idx)
 				n.log = n.log[:n.toSliceIdx(idx)]
 				newEntries = args.Entries[i:]
 				n.log = append(n.log, newEntries...)
@@ -942,6 +944,24 @@ func (n *Node) signalReset() {
 	select {
 	case n.resetCh <- struct{}{}:
 	default:
+	}
+}
+
+// abortWaitersFrom signals ErrProposalFailed to all waiters at index >= from
+// and removes them from the map. Must be called with n.mu held.
+//
+// Safety: channels are created as make(chan error, 1) in flushBatch and are
+// never sent to except here (applyLoop only closes them). Since both paths
+// hold n.mu, the buffer is always empty at this point — the send is non-blocking.
+func (n *Node) abortWaitersFrom(from uint64) {
+	for idx, ch := range n.waiters {
+		if idx >= from {
+			select {
+			case ch <- ErrProposalFailed:
+			default:
+			}
+			delete(n.waiters, idx)
+		}
 	}
 }
 
@@ -1065,6 +1085,7 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	}
 
 	// Discard entire log and reset to post-snapshot state
+	n.abortWaitersFrom(0)
 	n.log = nil
 	n.firstIndex = args.LastIncludedIndex + 1
 	n.lastApplied = args.LastIncludedIndex
@@ -1294,9 +1315,9 @@ func (n *Node) flushBatch(pending []proposal) {
 	n.persistLogEntries(entries)
 	n.matchIndex[n.id] = entries[len(entries)-1].Index
 
-	commitChs := make([]chan struct{}, len(pending))
+	commitChs := make([]chan error, len(pending))
 	for i, entry := range entries {
-		ch := make(chan struct{}, 1)
+		ch := make(chan error, 1)
 		n.waiters[entry.Index] = ch
 		commitChs[i] = ch
 	}
@@ -1311,12 +1332,19 @@ func (n *Node) flushBatch(pending []proposal) {
 	}
 
 	for i, p := range pending {
-		go func(p proposal, ch chan struct{}, entry LogEntry) {
+		go func(p proposal, ch chan error, entry LogEntry) {
 			select {
-			case <-ch:
-				select {
-				case p.doneCh <- proposalResult{index: entry.Index}:
-				default:
+			case err := <-ch:
+				if err != nil {
+					select {
+					case p.doneCh <- proposalResult{err: err}:
+					default:
+					}
+				} else {
+					select {
+					case p.doneCh <- proposalResult{index: entry.Index}:
+					default:
+					}
 				}
 			case <-n.stopCh:
 				select {
