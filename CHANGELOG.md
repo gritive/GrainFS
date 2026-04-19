@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.13] - 2026-04-20
+
+### Fixed
+- **Raft waiter correctness 버그 수정** — `HandleAppendEntries` log truncation 및 `HandleInstallSnapshot` 시 `n.waiters` map이 정리되지 않아 발생하던 false-success 시나리오 제거.
+  - `waiters map[uint64]chan struct{}` → `waiters map[uint64]chan error`로 전환. `close(ch)` = nil = 성공, `ch <- ErrProposalFailed` = 실패.
+  - `abortWaitersFrom(from uint64)` 헬퍼 추가 — truncation 시 영향받는 index의 goroutine을 즉시 종료.
+  - `HandleAppendEntries` 두 truncation 경로 및 `HandleInstallSnapshot` 에 `abortWaitersFrom` 호출 추가.
+  - split-brain 상황에서 다른 Leader가 같은 index에 다른 엔트리를 커밋할 때 원래 제안자에게 SUCCESS가 잘못 전달되던 Raft 안전성 불변식 위반 수정.
+
 ## [0.0.12] - 2026-04-20
 
 ### Changed

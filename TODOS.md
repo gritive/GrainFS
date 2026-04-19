@@ -1,9 +1,5 @@
 # TODOS
 
-## Bug Fix
-
-- [ ] Raft waiter leak on truncation — HandleAppendEntries truncation path에서 affected index 범위의 waiters 삭제 필요 (Opus review finding #1)
-
 ## Phase 15: Dashboard
 
 - [ ] storage & cluster management and monitoring
