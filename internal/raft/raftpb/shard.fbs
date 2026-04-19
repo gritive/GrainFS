@@ -1,0 +1,18 @@
+// FlatBuffers schema for Raft shard RPC messages.
+// Regenerate: make fbs
+
+namespace raftpb;
+
+table RPCMessageFB {
+  type:string;
+  data:[ubyte];
+}
+
+table ShardRequestFB {
+  bucket:string;
+  key:string;
+  shard_idx:int32;
+  data:[ubyte];
+}
+
+root_type RPCMessageFB;

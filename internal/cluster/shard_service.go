@@ -147,7 +147,7 @@ func (s *ShardService) marshalEnvelope(msgType string, innerData []byte, useFB b
 func unmarshalEnvelope(payload []byte) (msgType string, data []byte, err error) {
 	if len(payload) > 0 && payload[0] == fmtShardFB {
 		t := pb.GetRootAsRPCMessageFB(payload[1:], 0)
-		return string(t.Type()), t.Data(), nil
+		return string(t.Type()), t.DataBytes(), nil
 	}
 	rpc := &pb.RPCMessage{}
 	if err := proto.Unmarshal(payload, rpc); err != nil {
@@ -164,7 +164,7 @@ func unmarshalShardRequest(data []byte) (*shardRequest, error) {
 			Bucket:   string(t.Bucket()),
 			Key:      string(t.Key()),
 			ShardIdx: t.ShardIdx(),
-			Data:     t.Data(),
+			Data:     t.DataBytes(),
 		}, nil
 	}
 	sr := &pb.ShardRequest{}

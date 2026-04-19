@@ -6,10 +6,12 @@ LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 PROTO_SRC := $(shell find internal -name '*.proto')
 PROTO_GEN := $(PROTO_SRC:.proto=.pb.go)
 GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go' -not -name '*.pb.go')
+FBS_GEN := internal/erasure/erasurepb/ECObjectMetaFB.go \
+           internal/raft/raftpb/RPCMessageFB.go
 
-.PHONY: test test-race test-e2e test-jepsen test-smoke test-network-fault test-backup clean run lint bench test-nbd-docker update-deps
+.PHONY: test test-race test-e2e test-jepsen test-smoke test-network-fault test-backup clean run lint bench test-nbd-docker update-deps fbs
 
-bin/$(BINARY): $(GO_SRC) $(PROTO_GEN)
+bin/$(BINARY): $(GO_SRC) $(PROTO_GEN) $(FBS_GEN)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
 
 build: bin/$(BINARY)
@@ -18,6 +20,14 @@ build: bin/$(BINARY)
 	protoc --go_out=. --go_opt=paths=source_relative $<
 
 proto: $(PROTO_GEN)
+
+internal/erasure/erasurepb/ECObjectMetaFB.go: internal/erasure/erasurepb/ECObjectMeta.fbs
+	flatc --go --gen-all -o internal/erasure/ $<
+
+internal/raft/raftpb/RPCMessageFB.go: internal/raft/raftpb/shard.fbs
+	flatc --go --gen-all -o internal/raft/ $<
+
+fbs: $(FBS_GEN)
 
 test:
 	go test ./... -count=1 -cover
