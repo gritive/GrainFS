@@ -9,7 +9,8 @@
 - [x] badgerdb: TableLoadingMode (BadgerDB v4에서 제거됨, N/A) [v0.0.11]
 - [x] badgerdb: LSM Read Amplification, bloom filter — WithBloomFalsePositive 옵션 [v0.0.11]
 - [x] migration: adaptive throttling, priority queue [v0.0.11]
-- [ ] Adaptive Raft Batching
+- [x] Adaptive Raft Batching — batcherLoop + EWMA adaptive flush [v0.0.11]
+- [ ] Raft waiter leak on truncation — flushBatch 등록한 n.waiters 항목이 step-down + log truncation 시 미정리. HandleAppendEntries truncation path에서 affected index 범위의 waiters 삭제 필요 (Opus review finding #1)
 - [ ] Thin provisioning
 - [ ] sharding, multi raft
 - [ ] migration: nfs: virtual overlay
