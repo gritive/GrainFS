@@ -120,8 +120,9 @@ func (s *BadgerLogStore) checkManagedMode() error {
 				return fmt.Errorf("data dir opened in managed=true; " +
 					"use --badger-managed-mode or start fresh")
 			}
-			return fmt.Errorf("data dir opened in managed=false; " +
-				"use --badger-managed-mode=false or start fresh")
+			return fmt.Errorf("data dir opened in non-managed mode; " +
+				"remove --badger-managed-mode to continue non-managed, " +
+				"or wipe data/raft/ and restart to enable managed mode")
 		})
 	})
 }

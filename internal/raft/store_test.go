@@ -316,7 +316,7 @@ func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_NoneToManaged(t
 	// Reopen with managed → mismatch → error
 	_, err = NewBadgerLogStore(dir, WithManagedMode())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "managed=false")
+	assert.Contains(t, err.Error(), "non-managed mode")
 }
 
 func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_ManagedToNone(t *testing.T) {
