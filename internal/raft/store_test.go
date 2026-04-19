@@ -223,3 +223,135 @@ func TestNewBadgerLogStore_DurableAfterWrite(t *testing.T) {
 	assert.Equal(t, uint64(2), term)
 	assert.Equal(t, "node-X", votedFor)
 }
+
+// ── Phase 14d: TruncateBefore tests ──────────────────────────────────────
+
+func TestBadgerLogStore_TruncateBefore_RemovesOldEntries(t *testing.T) {
+	store := setupTestStore(t)
+	entries := []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("a")},
+		{Term: 1, Index: 2, Command: []byte("b")},
+		{Term: 1, Index: 3, Command: []byte("c")},
+		{Term: 1, Index: 4, Command: []byte("d")},
+		{Term: 1, Index: 5, Command: []byte("e")},
+	}
+	require.NoError(t, store.AppendEntries(entries))
+
+	// Truncate before index 4: removes 1, 2, 3; keeps 4, 5
+	require.NoError(t, store.TruncateBefore(4))
+
+	// Entries 1-3 should be gone
+	for _, idx := range []uint64{1, 2, 3} {
+		_, err := store.GetEntry(idx)
+		assert.Error(t, err, "entry %d should be deleted", idx)
+	}
+
+	// Entries 4-5 should remain
+	for _, want := range entries[3:] {
+		got, err := store.GetEntry(want.Index)
+		require.NoError(t, err, "entry %d should exist", want.Index)
+		assert.Equal(t, want.Command, got.Command)
+	}
+}
+
+func TestBadgerLogStore_TruncateBefore_NoOp_WhenNothingToRemove(t *testing.T) {
+	store := setupTestStore(t)
+	entries := []LogEntry{
+		{Term: 1, Index: 5, Command: []byte("x")},
+	}
+	require.NoError(t, store.AppendEntries(entries))
+
+	// TruncateBefore(5) → nothing before index 5 to remove
+	require.NoError(t, store.TruncateBefore(5))
+
+	got, err := store.GetEntry(5)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("x"), got.Command)
+}
+
+func TestBadgerLogStore_TruncateBefore_ExcludesIndex(t *testing.T) {
+	store := setupTestStore(t)
+	entries := []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("keep-no")},
+		{Term: 1, Index: 2, Command: []byte("keep-yes")},
+	}
+	require.NoError(t, store.AppendEntries(entries))
+
+	// TruncateBefore(2) removes index < 2 → removes index 1, keeps index 2
+	require.NoError(t, store.TruncateBefore(2))
+
+	_, err := store.GetEntry(1)
+	assert.Error(t, err, "index 1 should be deleted")
+
+	got, err := store.GetEntry(2)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("keep-yes"), got.Command)
+}
+
+// ── Phase 14d: managed mode pre-flight tests ─────────────────────────────
+
+func TestBadgerLogStore_ManagedMode_FirstOpen_DefaultIsNonManaged(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	assert.False(t, store.IsManagedMode())
+	require.NoError(t, store.Close())
+}
+
+func TestBadgerLogStore_ManagedMode_FirstOpen_Managed(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir, WithManagedMode())
+	require.NoError(t, err)
+	assert.True(t, store.IsManagedMode())
+	require.NoError(t, store.Close())
+}
+
+func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_NoneToManaged(t *testing.T) {
+	dir := t.TempDir()
+	// First open: non-managed (default)
+	s, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Reopen with managed → mismatch → error
+	_, err = NewBadgerLogStore(dir, WithManagedMode())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "managed=false")
+}
+
+func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_ManagedToNone(t *testing.T) {
+	dir := t.TempDir()
+	// First open: managed
+	s, err := NewBadgerLogStore(dir, WithManagedMode())
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Reopen without managed → mismatch → error
+	_, err = NewBadgerLogStore(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "managed=true")
+}
+
+func TestBadgerLogStore_ManagedMode_ConsistentReopenManaged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewBadgerLogStore(dir, WithManagedMode())
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	s2, err := NewBadgerLogStore(dir, WithManagedMode())
+	require.NoError(t, err)
+	defer s2.Close()
+	assert.True(t, s2.IsManagedMode())
+}
+
+func TestBadgerLogStore_ManagedMode_ConsistentReopenNonManaged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	s2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer s2.Close()
+	assert.False(t, s2.IsManagedMode())
+}

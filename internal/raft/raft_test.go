@@ -553,3 +553,321 @@ func TestCompactLog_HandleAppendEntriesAfterCompaction(t *testing.T) {
 	assert.True(t, reply.Success, "AppendEntries should succeed after compaction")
 	assert.Equal(t, uint64(7), node.lastLogIdx())
 }
+
+// ── Phase 14d: QuorumMinMatchIndex tests ──────────────────────────────────
+
+func makeNodeWithMatchIndex(id string, peers []string, matchMap map[string]uint64) *Node {
+	config := Config{
+		ID:               id,
+		Peers:            peers,
+		ElectionTimeout:  100 * time.Millisecond,
+		HeartbeatTimeout: 30 * time.Millisecond,
+	}
+	n := NewNode(config)
+	n.mu.Lock()
+	for k, v := range matchMap {
+		n.matchIndex[k] = v
+	}
+	n.mu.Unlock()
+	return n
+}
+
+func TestQuorumMinMatchIndex_Solo(t *testing.T) {
+	n := makeNodeWithMatchIndex("A", nil, map[string]uint64{"A": 42})
+	assert.Equal(t, uint64(42), n.QuorumMinMatchIndex())
+}
+
+func TestQuorumMinMatchIndex_ThreeNode_Median(t *testing.T) {
+	// peers: B=80, C=50, self A=100 → sorted desc [100,80,50] → idx 3/2=1 → 80
+	n := makeNodeWithMatchIndex("A", []string{"B", "C"}, map[string]uint64{
+		"A": 100, "B": 80, "C": 50,
+	})
+	assert.Equal(t, uint64(80), n.QuorumMinMatchIndex())
+}
+
+func TestQuorumMinMatchIndex_ThreeNode_LaggingFollower(t *testing.T) {
+	// A=100, B=50, C=0 → sorted [100,50,0] → idx 1 → 50
+	n := makeNodeWithMatchIndex("A", []string{"B", "C"}, map[string]uint64{
+		"A": 100, "B": 50, "C": 0,
+	})
+	assert.Equal(t, uint64(50), n.QuorumMinMatchIndex())
+}
+
+func TestQuorumMinMatchIndex_FiveNode_TwoPeersDown(t *testing.T) {
+	// A=100, B=90, C=80, D=0, E=0 → sorted [100,90,80,0,0] → idx 5/2=2 → 80
+	n := makeNodeWithMatchIndex("A", []string{"B", "C", "D", "E"}, map[string]uint64{
+		"A": 100, "B": 90, "C": 80, "D": 0, "E": 0,
+	})
+	assert.Equal(t, uint64(80), n.QuorumMinMatchIndex())
+}
+
+// ── Phase 14d: log GC tests ───────────────────────────────────────────────
+
+func TestNode_LogGC_TruncatesStoreToWatermark(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir, WithManagedMode())
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+
+	// Append 20 entries
+	entries := make([]LogEntry, 20)
+	for i := range entries {
+		entries[i] = LogEntry{Term: 1, Index: uint64(i + 1), Command: []byte(fmt.Sprintf("cmd%d", i+1))}
+	}
+	require.NoError(t, store.AppendEntries(entries))
+
+	// Node: leader, A=20, B=20, C=15 → watermark = sorted[1] = 20
+	config := Config{
+		ID:            "A",
+		Peers:         []string{"B", "C"},
+		ManagedMode:   true,
+		LogGCInterval: 1 * time.Millisecond,
+		ElectionTimeout:  100 * time.Millisecond,
+		HeartbeatTimeout: 30 * time.Millisecond,
+	}
+	n := NewNode(config, store)
+	n.mu.Lock()
+	n.state = Leader
+	n.matchIndex["A"] = 20
+	n.matchIndex["B"] = 20
+	n.matchIndex["C"] = 15
+	n.mu.Unlock()
+
+	time.Sleep(5 * time.Millisecond)
+	n.maybeRunLogGC()
+
+	// TruncateBefore(20) removes indices 1..19, keeps 20
+	for i := uint64(1); i < 20; i++ {
+		_, err := store.GetEntry(i)
+		assert.Error(t, err, "entry %d should be GC'd", i)
+	}
+	got, err := store.GetEntry(20)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("cmd20"), got.Command)
+}
+
+func TestNode_LogGC_SkipsWhenNotManagedMode(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir) // non-managed
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+
+	entries := []LogEntry{{Term: 1, Index: 1, Command: []byte("a")}}
+	require.NoError(t, store.AppendEntries(entries))
+
+	config := Config{
+		ID:    "A",
+		Peers: []string{"B"},
+		// ManagedMode = false (default)
+		LogGCInterval:    1 * time.Millisecond,
+		ElectionTimeout:  100 * time.Millisecond,
+		HeartbeatTimeout: 30 * time.Millisecond,
+	}
+	n := NewNode(config, store)
+	n.mu.Lock()
+	n.state = Leader
+	n.matchIndex["A"] = 1
+	n.matchIndex["B"] = 1
+	n.mu.Unlock()
+
+	time.Sleep(5 * time.Millisecond)
+	n.maybeRunLogGC() // should be a no-op
+
+	// Entry should still exist
+	got, err := store.GetEntry(1)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("a"), got.Command)
+}
+
+func TestNode_LogGC_SkipsBeforeInterval(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir, WithManagedMode())
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+
+	entries := []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("a")},
+		{Term: 1, Index: 2, Command: []byte("b")},
+	}
+	require.NoError(t, store.AppendEntries(entries))
+
+	config := Config{
+		ID:            "A",
+		Peers:         []string{"B"},
+		ManagedMode:   true,
+		LogGCInterval: 10 * time.Second, // very long interval
+		ElectionTimeout:  100 * time.Millisecond,
+		HeartbeatTimeout: 30 * time.Millisecond,
+	}
+	n := NewNode(config, store)
+	n.mu.Lock()
+	n.state = Leader
+	n.matchIndex["A"] = 2
+	n.matchIndex["B"] = 2
+	n.mu.Unlock()
+
+	// First call sets lastLogGC but skips (interval not elapsed)
+	n.maybeRunLogGC()
+	n.maybeRunLogGC() // immediate second call → interval not elapsed
+
+	// Both entries should still exist (second call was skipped)
+	// First call DID run GC (lastLogGC was zero initially)
+	// After first call: lastLogGC = now, entries 1 deleted (TruncateBefore(2))
+	// Second call: skipped (interval not elapsed)
+	// So entry 1 is gone (GC'd by first call), entry 2 remains
+	_, err = store.GetEntry(1)
+	assert.Error(t, err, "entry 1 should be GC'd by first maybeRunLogGC call")
+	got, err := store.GetEntry(2)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("b"), got.Command)
+}
+
+// ── Phase 14d: GC + partition + recovery integration test ────────────────
+
+// newTestClusterWithStores creates a 3-node in-process cluster where each
+// node has a BadgerDB store (managed mode). Returns the cluster and stores.
+func newTestClusterWithStores(t *testing.T, n int) (*testCluster, []*BadgerLogStore) {
+	t.Helper()
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = nodeID(i)
+	}
+	stores := make([]*BadgerLogStore, n)
+	for i := range stores {
+		dir := t.TempDir()
+		s, err := NewBadgerLogStore(dir, WithManagedMode())
+		require.NoError(t, err)
+		t.Cleanup(func() { s.Close() })
+		stores[i] = s
+	}
+	cluster := &testCluster{nodes: make([]*Node, n)}
+	for i := range ids {
+		peers := make([]string, 0, n-1)
+		for j := range ids {
+			if i != j {
+				peers = append(peers, ids[j])
+			}
+		}
+		config := Config{
+			ID:               ids[i],
+			Peers:            peers,
+			ManagedMode:      true,
+			LogGCInterval:    1 * time.Millisecond,
+			ElectionTimeout:  100 * time.Millisecond,
+			HeartbeatTimeout: 30 * time.Millisecond,
+		}
+		cluster.nodes[i] = NewNode(config, stores[i])
+	}
+	for i := range ids {
+		idx := i
+		cluster.nodes[i].SetTransport(
+			func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+				target := cluster.nodeByID(peer)
+				if target == nil {
+					return nil, errNodeNotFound
+				}
+				_ = idx
+				return target.HandleRequestVote(args), nil
+			},
+			func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+				target := cluster.nodeByID(peer)
+				if target == nil {
+					return nil, errNodeNotFound
+				}
+				return target.HandleAppendEntries(args), nil
+			},
+		)
+	}
+	return cluster, stores
+}
+
+func waitForCommitIndex(t *testing.T, node *Node, want uint64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			node.mu.Lock()
+			ci := node.commitIndex
+			node.mu.Unlock()
+			t.Fatalf("node %s: commitIndex=%d, want=%d (timeout)", node.ID(), ci, want)
+		default:
+			node.mu.Lock()
+			ci := node.commitIndex
+			node.mu.Unlock()
+			if ci >= want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestIntegration_LogGC_PartitionAndRecovery(t *testing.T) {
+	cluster, stores := newTestClusterWithStores(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader, "no leader elected")
+
+	// Propose 10 entries
+	for i := range 10 {
+		require.NoError(t, leader.Propose([]byte(fmt.Sprintf("cmd%d", i+1))))
+	}
+
+	// Wait for all nodes to commit all 10 entries
+	for _, n := range cluster.nodes {
+		waitForCommitIndex(t, n, 10, 3*time.Second)
+	}
+
+	// GC: run on all nodes (watermark = quorumMinMatchIndex = 10)
+	for _, n := range cluster.nodes {
+		n.mu.Lock()
+		n.lastLogGC = time.Time{} // reset to force GC
+		n.mu.Unlock()
+		n.maybeRunLogGC()
+	}
+
+	// Verify entries 1-9 are gone from all stores, entry 10 remains
+	for i, s := range stores {
+		for idx := uint64(1); idx < 10; idx++ {
+			_, err := s.GetEntry(idx)
+			assert.Error(t, err, "store[%d]: entry %d should be GC'd", i, idx)
+		}
+		got, err := s.GetEntry(10)
+		require.NoError(t, err, "store[%d]: entry 10 should remain", i)
+		assert.Equal(t, []byte("cmd10"), got.Command)
+	}
+
+	// "Partition" node C: remove from cluster transport mesh so it won't receive
+	// AppendEntries from the leader during the next round of proposals.
+	nodeC := cluster.nodes[2]
+	cluster.mu.Lock()
+	cluster.nodes = cluster.nodes[:2] // A and B only in mesh
+	cluster.mu.Unlock()
+
+	// Propose 5 more entries — only A+B quorum
+	for i := range 5 {
+		require.NoError(t, leader.Propose([]byte(fmt.Sprintf("cmd%d", 11+i))))
+	}
+	waitForCommitIndex(t, leader, 15, 3*time.Second)
+
+	// "Reconnect" C: add back to mesh
+	cluster.mu.Lock()
+	cluster.nodes = append(cluster.nodes, nodeC)
+	cluster.mu.Unlock()
+
+	// Leader will send entries 11-15 to C via AppendEntries on next heartbeat.
+	// Wait for all 3 nodes to commit all 15 entries.
+	for _, n := range cluster.nodes {
+		waitForCommitIndex(t, n, 15, 5*time.Second)
+	}
+
+	// All nodes should agree on commitIndex=15
+	for _, n := range cluster.nodes {
+		n.mu.Lock()
+		ci := n.commitIndex
+		n.mu.Unlock()
+		assert.Equal(t, uint64(15), ci, "node %s commitIndex mismatch", n.ID())
+	}
+}

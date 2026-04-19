@@ -73,6 +73,8 @@ func init() {
 	serveCmd.Flags().Float64("balancer-cb-threshold", cluster.DefaultBalancerConfig().CBThreshold, "disk-used fraction (0–1) at which a dst node's circuit breaker opens (e.g. 0.90 = 90%)")
 	serveCmd.Flags().Int("balancer-migration-max-retries", cluster.DefaultBalancerConfig().MigrationMaxRetries, "max shard write attempts per shard during migration")
 	serveCmd.Flags().Duration("balancer-migration-pending-ttl", cluster.DefaultBalancerConfig().MigrationPendingTTL, "max time a pending migration may linger before being cancelled")
+	serveCmd.Flags().Bool("badger-managed-mode", false, "enable Raft log GC using quorum watermark (WARNING: on-disk format change; see docs/badger-managed-mode-rollback.md)")
+	serveCmd.Flags().Duration("raft-log-gc-interval", 30*time.Second, "how often Raft log GC runs when --badger-managed-mode is enabled")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -216,9 +218,12 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		}
 	}
 
+	soloManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
+	soloLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
+
 	// Join cluster callback: transitions from solo to cluster mode at runtime.
 	joinFn := func(nodeID, raftAddr, peersStr, clusterKey string) error {
-		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey)
+		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey, soloManagedMode, soloLogGCInterval)
 	}
 	opts = append(opts, server.WithJoinCluster(joinFn))
 	opts = append(opts, server.WithDataDir(dataDir))
@@ -377,7 +382,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 	}
 
-	logStore, err := raft.NewBadgerLogStore(raftDir)
+	badgerManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
+	raftLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
+
+	var storeOpts []raft.BadgerLogStoreOption
+	if badgerManagedMode {
+		storeOpts = append(storeOpts, raft.WithManagedMode())
+	}
+	logStore, err := raft.NewBadgerLogStore(raftDir, storeOpts...)
 	if err != nil {
 		return fmt.Errorf("open raft store: %w", err)
 	}
@@ -398,6 +410,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 
 	cfg := raft.DefaultConfig(nodeID, peers)
+	cfg.ManagedMode = badgerManagedMode
+	cfg.LogGCInterval = raftLogGCInterval
 	node := raft.NewNode(cfg, logStore)
 
 	// Wire QUIC transport to Raft RPC layer
@@ -722,7 +736,7 @@ func (r *raftClusterInfo) Peers() []string  { return r.peers }
 
 // joinClusterLive performs the runtime solo→cluster transition.
 // It starts the QUIC transport and Raft node, migrates metadata, then swaps the backend.
-func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
+func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, dataDir, nodeID, raftAddr, peersStr, clusterKey string, managedMode bool, logGCInterval time.Duration) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 	}
@@ -750,7 +764,11 @@ func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, d
 		}
 	}
 
-	logStore, err := raft.NewBadgerLogStore(raftDir)
+	var joinStoreOpts []raft.BadgerLogStoreOption
+	if managedMode {
+		joinStoreOpts = append(joinStoreOpts, raft.WithManagedMode())
+	}
+	logStore, err := raft.NewBadgerLogStore(raftDir, joinStoreOpts...)
 	if err != nil {
 		db.Close()
 		return fmt.Errorf("open raft store: %w", err)
@@ -770,6 +788,8 @@ func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, d
 	}
 
 	cfg := raft.DefaultConfig(nodeID, peers)
+	cfg.ManagedMode = managedMode
+	cfg.LogGCInterval = logGCInterval
 	node := raft.NewNode(cfg, logStore)
 
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
