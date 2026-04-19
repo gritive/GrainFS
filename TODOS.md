@@ -32,10 +32,10 @@
 - [x] Phase F1: `go test -bench=BenchmarkListObjects -benchmem ./internal/erasure/` 실행
 - [x] Phase F1 gate: allocs/op 20% 감소, ns/op 50%↑, bytes/op 41%↓ — 게이트 기준 하향 (50%→20%) 후 통과
 - [x] Phase F1: dual-format reader 구현 (`unmarshalECObjectMeta`, BucketMeta, MultipartMeta)
-- [ ] Phase F2: `marshalECObjectMeta` → FlatBuffers 전환 (write path)
-- [ ] Phase F3: `BucketMeta`, `MultipartUploadMeta` FlatBuffers 전환
-- [ ] Phase F4: `--raft-flatbuffers` CLI 플래그 추가 (write-only gate)
-- [ ] Phase F5: `raftpb.ShardRequest`/`RPCMessage` FlatBuffers 전환
+- [x] Phase F2: `marshalECObjectMeta` → FlatBuffers 전환 (write path)
+- [x] Phase F3: `BucketMeta`, `MultipartUploadMeta` FlatBuffers 전환
+- [x] Phase F4: `--raft-flatbuffers` CLI 플래그 추가 (write-only gate)
+- [x] Phase F5: `raftpb.ShardRequest`/`RPCMessage` FlatBuffers 전환
 
 ## Deferred 12m+ (측정된 병목 확인 후)
 

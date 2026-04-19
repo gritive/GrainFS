@@ -75,6 +75,7 @@ func init() {
 	serveCmd.Flags().Duration("balancer-migration-pending-ttl", cluster.DefaultBalancerConfig().MigrationPendingTTL, "max time a pending migration may linger before being cancelled")
 	serveCmd.Flags().Bool("badger-managed-mode", false, "enable Raft log GC using quorum watermark (WARNING: on-disk format change; see docs/badger-managed-mode-rollback.md)")
 	serveCmd.Flags().Duration("raft-log-gc-interval", 30*time.Second, "how often Raft log GC runs when --badger-managed-mode is enabled")
+	serveCmd.Flags().Bool("raft-flatbuffers", false, "use FlatBuffers encoding for shard RPC messages (enable after all nodes are upgraded)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -220,10 +221,11 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 
 	soloManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
 	soloLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
+	soloRaftFlatBuffers, _ := cmd.Flags().GetBool("raft-flatbuffers")
 
 	// Join cluster callback: transitions from solo to cluster mode at runtime.
 	joinFn := func(nodeID, raftAddr, peersStr, clusterKey string) error {
-		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey, soloManagedMode, soloLogGCInterval)
+		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey, soloManagedMode, soloLogGCInterval, soloRaftFlatBuffers)
 	}
 	opts = append(opts, server.WithJoinCluster(joinFn))
 	opts = append(opts, server.WithDataDir(dataDir))
@@ -419,7 +421,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	rpcTransport.SetTransport()
 
 	// Create ShardService for distributed data replication
-	shardSvc := cluster.NewShardService(dataDir, quicTransport)
+	var shardOpts []cluster.ShardServiceOption
+	if useFlatBuffers, _ := cmd.Flags().GetBool("raft-flatbuffers"); useFlatBuffers {
+		shardOpts = append(shardOpts, cluster.WithFlatBuffers())
+	}
+	shardSvc := cluster.NewShardService(dataDir, quicTransport, shardOpts...)
 
 	// Set up StreamRouter: Raft RPCs on Control stream, Shard RPCs on Data stream
 	router := transport.NewStreamRouter()
@@ -736,7 +742,7 @@ func (r *raftClusterInfo) Peers() []string  { return r.peers }
 
 // joinClusterLive performs the runtime solo→cluster transition.
 // It starts the QUIC transport and Raft node, migrates metadata, then swaps the backend.
-func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, dataDir, nodeID, raftAddr, peersStr, clusterKey string, managedMode bool, logGCInterval time.Duration) error {
+func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, dataDir, nodeID, raftAddr, peersStr, clusterKey string, managedMode bool, logGCInterval time.Duration, raftFlatBuffers bool) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 	}
@@ -795,7 +801,11 @@ func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, d
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
 	rpcTransport.SetTransport()
 
-	shardSvc := cluster.NewShardService(dataDir, quicTransport)
+	var joinShardOpts []cluster.ShardServiceOption
+	if raftFlatBuffers {
+		joinShardOpts = append(joinShardOpts, cluster.WithFlatBuffers())
+	}
+	shardSvc := cluster.NewShardService(dataDir, quicTransport, joinShardOpts...)
 
 	router := transport.NewStreamRouter()
 	router.Handle(transport.StreamControl, rpcTransport.Handler())

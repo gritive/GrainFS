@@ -44,10 +44,7 @@ type ecMultipartMeta struct {
 }
 
 func marshalBucketMeta(m *bucketMeta) ([]byte, error) {
-	return proto.Marshal(&pb.BucketMeta{
-		EcEnabled:       m.ECEnabled,
-		VersioningState: m.VersioningState,
-	})
+	return marshalWithFBPrefix(marshalBucketMetaFB(m)), nil
 }
 
 func unmarshalBucketMeta(data []byte) (*bucketMeta, error) {
@@ -66,20 +63,7 @@ func unmarshalBucketMeta(data []byte) (*bucketMeta, error) {
 }
 
 func marshalECObjectMeta(m *ecObjectMeta) ([]byte, error) {
-	return proto.Marshal(&pb.ECObjectMeta{
-		Key:            m.Key,
-		Size:           m.Size,
-		ContentType:    m.ContentType,
-		Etag:           m.ETag,
-		LastModified:   m.LastModified,
-		DataShards:     int32(m.DataShards),
-		ParityShards:   int32(m.ParityShards),
-		ShardSize:      int32(m.ShardSize),
-		VersionId:      m.VersionID,
-		IsDeleteMarker: m.IsDeleteMarker,
-		CreatedNano:    m.CreatedNano,
-		Acl:            uint32(m.ACL),
-	})
+	return marshalWithFBPrefix(marshalECObjectMetaFB(m)), nil
 }
 
 func unmarshalECObjectMeta(data []byte) (*ecObjectMeta, error) {
@@ -107,13 +91,7 @@ func unmarshalECObjectMeta(data []byte) (*ecObjectMeta, error) {
 }
 
 func marshalECMultipartMeta(m *ecMultipartMeta) ([]byte, error) {
-	return proto.Marshal(&pb.MultipartUploadMeta{
-		UploadId:    m.UploadID,
-		Bucket:      m.Bucket,
-		Key:         m.Key,
-		ContentType: m.ContentType,
-		CreatedAt:   m.CreatedAt,
-	})
+	return marshalWithFBPrefix(marshalECMultipartMetaFB(m)), nil
 }
 
 func unmarshalECMultipartMeta(data []byte) (*ecMultipartMeta, error) {

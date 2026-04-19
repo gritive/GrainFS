@@ -74,6 +74,54 @@ func unmarshalECObjectMetaFB(data []byte) (*ecObjectMeta, error) {
 	}, nil
 }
 
+func marshalBucketMetaFB(m *bucketMeta) []byte {
+	b := builderPool.Get().(*flatbuffers.Builder)
+	defer func() {
+		b.Reset()
+		builderPool.Put(b)
+	}()
+
+	vsOff := b.CreateString(m.VersioningState)
+
+	fb.BucketMetaFBStart(b)
+	fb.BucketMetaFBAddEcEnabled(b, m.ECEnabled)
+	fb.BucketMetaFBAddVersioningState(b, vsOff)
+	root := fb.BucketMetaFBEnd(b)
+	b.Finish(root)
+
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out
+}
+
+func marshalECMultipartMetaFB(m *ecMultipartMeta) []byte {
+	b := builderPool.Get().(*flatbuffers.Builder)
+	defer func() {
+		b.Reset()
+		builderPool.Put(b)
+	}()
+
+	uploadIDOff := b.CreateString(m.UploadID)
+	bucketOff := b.CreateString(m.Bucket)
+	keyOff := b.CreateString(m.Key)
+	ctOff := b.CreateString(m.ContentType)
+
+	fb.MultipartUploadMetaFBStart(b)
+	fb.MultipartUploadMetaFBAddUploadId(b, uploadIDOff)
+	fb.MultipartUploadMetaFBAddBucket(b, bucketOff)
+	fb.MultipartUploadMetaFBAddKey(b, keyOff)
+	fb.MultipartUploadMetaFBAddContentType(b, ctOff)
+	fb.MultipartUploadMetaFBAddCreatedAt(b, m.CreatedAt)
+	root := fb.MultipartUploadMetaFBEnd(b)
+	b.Finish(root)
+
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out
+}
+
 func unmarshalBucketMetaFB(data []byte) (*bucketMeta, error) {
 	t := fb.GetRootAsBucketMetaFB(data, 0)
 	state := string(t.VersioningState())

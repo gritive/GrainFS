@@ -5,24 +5,46 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
-	"github.com/gritive/GrainFS/internal/transport"
-	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
+	flatbuffers "github.com/google/flatbuffers/go"
 	"google.golang.org/protobuf/proto"
+
+	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/transport"
 )
+
+const fmtShardFB byte = 0x01
+
+var shardBuilderPool = sync.Pool{
+	New: func() any { return flatbuffers.NewBuilder(512) },
+}
 
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
-	dataDir   string
-	transport *transport.QUICTransport
+	dataDir        string
+	transport      *transport.QUICTransport
+	useFlatBuffers bool
+}
+
+// ShardServiceOption is a functional option for ShardService.
+type ShardServiceOption func(*ShardService)
+
+// WithFlatBuffers enables FlatBuffers encoding for outgoing shard RPC messages.
+// Incoming messages are always decoded in both formats regardless of this setting.
+func WithFlatBuffers() ShardServiceOption {
+	return func(s *ShardService) { s.useFlatBuffers = true }
 }
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
-func NewShardService(dataDir string, tr *transport.QUICTransport) *ShardService {
+func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
 	s := &ShardService{
 		dataDir:   filepath.Join(dataDir, "shards"),
 		transport: tr,
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	os.MkdirAll(s.dataDir, 0o755)
 	return s
@@ -35,72 +57,48 @@ func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Messa
 
 // WriteShard sends a shard to a remote node for storage.
 func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
-	req := &pb.RPCMessage{
-		Type: "WriteShard",
-		Data: mustMarshal(&pb.ShardRequest{
-			Bucket:   bucket,
-			Key:      key,
-			ShardIdx: int32(shardIdx),
-			Data:     data,
-		}),
-	}
-	envelope, _ := proto.Marshal(req)
-	msg := &transport.Message{Type: transport.StreamData, Payload: envelope}
+	payload := s.marshalEnvelope("WriteShard", marshalShardRequestFB(bucket, key, int32(shardIdx), data), true)
+	msg := &transport.Message{Type: transport.StreamData, Payload: payload}
 
 	resp, err := s.transport.Call(ctx, peer, msg)
 	if err != nil {
 		return fmt.Errorf("write shard to %s: %w", peer, err)
 	}
 
-	rpc := &pb.RPCMessage{}
-	if err := proto.Unmarshal(resp.Payload, rpc); err != nil {
+	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
 		return fmt.Errorf("unmarshal response: %w", err)
 	}
-	if rpc.Type == "Error" {
-		return fmt.Errorf("remote error: %s", string(rpc.Data))
+	if rpcType == "Error" {
+		return fmt.Errorf("remote error from %s", peer)
 	}
 	return nil
 }
 
 // ReadShard fetches a shard from a remote node.
 func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
-	req := &pb.RPCMessage{
-		Type: "ReadShard",
-		Data: mustMarshal(&pb.ShardRequest{
-			Bucket:   bucket,
-			Key:      key,
-			ShardIdx: int32(shardIdx),
-		}),
-	}
-	envelope, _ := proto.Marshal(req)
-	msg := &transport.Message{Type: transport.StreamData, Payload: envelope}
+	payload := s.marshalEnvelope("ReadShard", marshalShardRequestFB(bucket, key, int32(shardIdx), nil), true)
+	msg := &transport.Message{Type: transport.StreamData, Payload: payload}
 
 	resp, err := s.transport.Call(ctx, peer, msg)
 	if err != nil {
 		return nil, fmt.Errorf("read shard from %s: %w", peer, err)
 	}
 
-	rpc := &pb.RPCMessage{}
-	if err := proto.Unmarshal(resp.Payload, rpc); err != nil {
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
-	if rpc.Type == "Error" {
-		return nil, fmt.Errorf("remote error: %s", string(rpc.Data))
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote error from %s", peer)
 	}
-	return rpc.Data, nil
+	return data, nil
 }
 
 // DeleteShards removes all shards for a key from a remote node.
 func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key string) error {
-	req := &pb.RPCMessage{
-		Type: "DeleteShards",
-		Data: mustMarshal(&pb.ShardRequest{
-			Bucket: bucket,
-			Key:    key,
-		}),
-	}
-	envelope, _ := proto.Marshal(req)
-	msg := &transport.Message{Type: transport.StreamData, Payload: envelope}
+	payload := s.marshalEnvelope("DeleteShards", marshalShardRequestFB(bucket, key, 0, nil), true)
+	msg := &transport.Message{Type: transport.StreamData, Payload: payload}
 
 	_, err := s.transport.Call(ctx, peer, msg)
 	return err
@@ -108,17 +106,17 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 
 // handleRPC processes incoming shard RPCs.
 func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
-	rpc := &pb.RPCMessage{}
-	if err := proto.Unmarshal(req.Payload, rpc); err != nil {
+	rpcType, srData, err := unmarshalEnvelope(req.Payload)
+	if err != nil {
 		return s.errorResponse("unmarshal error")
 	}
 
-	sr := &pb.ShardRequest{}
-	if err := proto.Unmarshal(rpc.Data, sr); err != nil {
+	sr, err := unmarshalShardRequest(srData)
+	if err != nil {
 		return s.errorResponse("unmarshal shard request error")
 	}
 
-	switch rpc.Type {
+	switch rpcType {
 	case "WriteShard":
 		return s.handleWrite(sr)
 	case "ReadShard":
@@ -126,11 +124,130 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 	case "DeleteShards":
 		return s.handleDelete(sr)
 	default:
-		return s.errorResponse("unknown shard RPC: " + rpc.Type)
+		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
 }
 
-func (s *ShardService) handleWrite(sr *pb.ShardRequest) *transport.Message {
+// marshalEnvelope serializes an RPCMessage.
+// When useFB is true and s.useFlatBuffers is set, produces FlatBuffers with 0x01 prefix.
+func (s *ShardService) marshalEnvelope(msgType string, innerData []byte, useFB bool) []byte {
+	if useFB && s.useFlatBuffers {
+		raw := marshalRPCMessageFB(msgType, innerData)
+		out := make([]byte, 1+len(raw))
+		out[0] = fmtShardFB
+		copy(out[1:], raw)
+		return out
+	}
+	rpc := &pb.RPCMessage{Type: msgType, Data: innerData}
+	data, _ := proto.Marshal(rpc)
+	return data
+}
+
+// unmarshalEnvelope decodes an RPCMessage, detecting FlatBuffers by the 0x01 prefix.
+func unmarshalEnvelope(payload []byte) (msgType string, data []byte, err error) {
+	if len(payload) > 0 && payload[0] == fmtShardFB {
+		t := pb.GetRootAsRPCMessageFB(payload[1:], 0)
+		return string(t.Type()), t.Data(), nil
+	}
+	rpc := &pb.RPCMessage{}
+	if err := proto.Unmarshal(payload, rpc); err != nil {
+		return "", nil, err
+	}
+	return rpc.Type, rpc.Data, nil
+}
+
+// unmarshalShardRequest decodes a ShardRequest (always FlatBuffers for new writes).
+func unmarshalShardRequest(data []byte) (*shardRequest, error) {
+	if len(data) > 0 && data[0] == fmtShardFB {
+		t := pb.GetRootAsShardRequestFB(data[1:], 0)
+		return &shardRequest{
+			Bucket:   string(t.Bucket()),
+			Key:      string(t.Key()),
+			ShardIdx: t.ShardIdx(),
+			Data:     t.Data(),
+		}, nil
+	}
+	sr := &pb.ShardRequest{}
+	if err := proto.Unmarshal(data, sr); err != nil {
+		return nil, err
+	}
+	return &shardRequest{
+		Bucket:   sr.Bucket,
+		Key:      sr.Key,
+		ShardIdx: sr.ShardIdx,
+		Data:     sr.Data,
+	}, nil
+}
+
+// shardRequest is a format-agnostic in-memory representation.
+type shardRequest struct {
+	Bucket   string
+	Key      string
+	ShardIdx int32
+	Data     []byte
+}
+
+// marshalShardRequestFB serializes bucket/key/shardIdx/data to FlatBuffers with 0x01 prefix.
+func marshalShardRequestFB(bucket, key string, shardIdx int32, data []byte) []byte {
+	b := shardBuilderPool.Get().(*flatbuffers.Builder)
+	defer func() {
+		b.Reset()
+		shardBuilderPool.Put(b)
+	}()
+
+	bucketOff := b.CreateString(bucket)
+	keyOff := b.CreateString(key)
+	var dataOff flatbuffers.UOffsetT
+	if len(data) > 0 {
+		dataOff = b.CreateByteVector(data)
+	}
+
+	pb.ShardRequestFBStart(b)
+	pb.ShardRequestFBAddBucket(b, bucketOff)
+	pb.ShardRequestFBAddKey(b, keyOff)
+	pb.ShardRequestFBAddShardIdx(b, shardIdx)
+	if len(data) > 0 {
+		pb.ShardRequestFBAddData(b, dataOff)
+	}
+	root := pb.ShardRequestFBEnd(b)
+	b.Finish(root)
+
+	raw := b.FinishedBytes()
+	out := make([]byte, 1+len(raw))
+	out[0] = fmtShardFB
+	copy(out[1:], raw)
+	return out
+}
+
+// marshalRPCMessageFB serializes type+data to FlatBuffers (no prefix — caller adds it).
+func marshalRPCMessageFB(msgType string, data []byte) []byte {
+	b := shardBuilderPool.Get().(*flatbuffers.Builder)
+	defer func() {
+		b.Reset()
+		shardBuilderPool.Put(b)
+	}()
+
+	typeOff := b.CreateString(msgType)
+	var dataOff flatbuffers.UOffsetT
+	if len(data) > 0 {
+		dataOff = b.CreateByteVector(data)
+	}
+
+	pb.RPCMessageFBStart(b)
+	pb.RPCMessageFBAddType(b, typeOff)
+	if len(data) > 0 {
+		pb.RPCMessageFBAddData(b, dataOff)
+	}
+	root := pb.RPCMessageFBEnd(b)
+	b.Finish(root)
+
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out
+}
+
+func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 	dir := filepath.Join(s.dataDir, sr.Bucket, sr.Key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return s.errorResponse(err.Error())
@@ -144,7 +261,7 @@ func (s *ShardService) handleWrite(sr *pb.ShardRequest) *transport.Message {
 	return s.okResponse(nil)
 }
 
-func (s *ShardService) handleRead(sr *pb.ShardRequest) *transport.Message {
+func (s *ShardService) handleRead(sr *shardRequest) *transport.Message {
 	path := filepath.Join(s.dataDir, sr.Bucket, sr.Key, fmt.Sprintf("shard_%d", sr.ShardIdx))
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -153,28 +270,23 @@ func (s *ShardService) handleRead(sr *pb.ShardRequest) *transport.Message {
 	return s.okResponse(data)
 }
 
-func (s *ShardService) handleDelete(sr *pb.ShardRequest) *transport.Message {
+func (s *ShardService) handleDelete(sr *shardRequest) *transport.Message {
 	dir := filepath.Join(s.dataDir, sr.Bucket, sr.Key)
 	os.RemoveAll(dir)
 	return s.okResponse(nil)
 }
 
 func (s *ShardService) okResponse(data []byte) *transport.Message {
-	rpc := &pb.RPCMessage{Type: "OK", Data: data}
-	envelope, _ := proto.Marshal(rpc)
-	return &transport.Message{Type: transport.StreamData, Payload: envelope}
+	return &transport.Message{
+		Type:    transport.StreamData,
+		Payload: s.marshalEnvelope("OK", data, false),
+	}
 }
 
 func (s *ShardService) errorResponse(msg string) *transport.Message {
-	rpc := &pb.RPCMessage{Type: "Error", Data: []byte(msg)}
-	envelope, _ := proto.Marshal(rpc)
-	return &transport.Message{Type: transport.StreamData, Payload: envelope}
+	return &transport.Message{
+		Type:    transport.StreamData,
+		Payload: s.marshalEnvelope("Error", []byte(msg), false),
+	}
 }
 
-func mustMarshal(m proto.Message) []byte {
-	data, err := proto.Marshal(m)
-	if err != nil {
-		panic(fmt.Sprintf("marshal: %v", err))
-	}
-	return data
-}
