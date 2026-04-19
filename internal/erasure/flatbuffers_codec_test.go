@@ -206,13 +206,17 @@ func BenchmarkListObjects_FlatBuffers(b *testing.B) {
 	const n = 1000
 	blobs := make([][]byte, n)
 	for i := range n {
-		blobs[i] = marshalECObjectMetaFB(makeBenchMeta(i))
+		var err error
+		blobs[i], err = marshalECObjectMeta(makeBenchMeta(i))
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
 		for _, data := range blobs {
-			if _, err := unmarshalECObjectMetaFB(data); err != nil {
+			if _, err := unmarshalECObjectMeta(data); err != nil {
 				b.Fatal(err)
 			}
 		}

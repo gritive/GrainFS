@@ -3,7 +3,7 @@ package cluster
 import (
 	"fmt"
 
-	"google.golang.org/protobuf/proto"
+	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
@@ -104,27 +104,44 @@ type MigrationDoneFSMCmd struct {
 	DstNode   string
 }
 
-// EncodeCommand serializes a command for Raft proposal using protobuf.
+// EncodeCommand serializes a command for Raft proposal using FlatBuffers.
 func EncodeCommand(cmdType CommandType, payload any) ([]byte, error) {
 	data, err := encodePayload(cmdType, payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
-	pbCmd := &clusterpb.Command{
-		Type: uint32(cmdType),
-		Data: data,
+	b := flatbuffers.NewBuilder(len(data) + 16)
+	var dataOff flatbuffers.UOffsetT
+	if len(data) > 0 {
+		dataOff = b.CreateByteVector(data)
 	}
-	return proto.Marshal(pbCmd)
+	clusterpb.CommandStart(b)
+	clusterpb.CommandAddType(b, uint32(cmdType))
+	if len(data) > 0 {
+		clusterpb.CommandAddData(b, dataOff)
+	}
+	root := clusterpb.CommandEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out, nil
 }
 
-// DecodeCommand deserializes a command from a Raft log entry using protobuf.
-func DecodeCommand(raw []byte) (*Command, error) {
-	var pbCmd clusterpb.Command
-	if err := proto.Unmarshal(raw, &pbCmd); err != nil {
-		return nil, fmt.Errorf("unmarshal command: %w", err)
+// DecodeCommand deserializes a command from a Raft log entry using FlatBuffers.
+func DecodeCommand(raw []byte) (cmd *Command, err error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("unmarshal command: empty data")
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			cmd = nil
+			err = fmt.Errorf("unmarshal command: invalid flatbuffer: %v", r)
+		}
+	}()
+	t := clusterpb.GetRootAsCommand(raw, 0)
 	return &Command{
-		Type: CommandType(pbCmd.Type),
-		Data: pbCmd.Data,
+		Type: CommandType(t.Type()),
+		Data: t.DataBytes(),
 	}, nil
 }

@@ -1,0 +1,22 @@
+// FlatBuffers schema for storage object metadata.
+// Regenerate: make fbs
+
+namespace storagepb;
+
+table Object {
+  key:string;
+  size:int64;
+  content_type:string;
+  etag:string;
+  last_modified:int64;
+}
+
+table MultipartMeta {
+  upload_id:string;
+  bucket:string;
+  key:string;
+  content_type:string;
+  created_at:int64;
+}
+
+root_type Object;

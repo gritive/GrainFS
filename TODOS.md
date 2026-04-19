@@ -9,12 +9,12 @@
 - [ ] migration: nbd: block proxying
 
 ## Phase 15: Dashboard
+
 - [ ] storage & cluster management and monitoring
 - [ ] dashboard: hot config change (scrub interval 포함), log tailing
 - [ ] dashboard: on-demand metric with sse
 - [ ] dashboard: snapshot, backup manage
 - [ ] dashboard: event logging
-
 
 ## Copy on Write (NBD — thin provisioning 이후)
 
@@ -54,4 +54,4 @@
 - [ ] sync.Pool의 적극 활용
 - [ ] Zstd & Reed-Solomon: 버퍼 재사용 with sync.Pool
 - [ ] nbd over internet for edge computing (powered by wireguard)
-
+- [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.

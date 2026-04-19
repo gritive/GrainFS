@@ -6,42 +6,42 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-type ShardRequestFB struct {
+type ShardRequest struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsShardRequestFB(buf []byte, offset flatbuffers.UOffsetT) *ShardRequestFB {
+func GetRootAsShardRequest(buf []byte, offset flatbuffers.UOffsetT) *ShardRequest {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &ShardRequestFB{}
+	x := &ShardRequest{}
 	x.Init(buf, n+offset)
 	return x
 }
 
-func FinishShardRequestFBBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishShardRequestBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.Finish(offset)
 }
 
-func GetSizePrefixedRootAsShardRequestFB(buf []byte, offset flatbuffers.UOffsetT) *ShardRequestFB {
+func GetSizePrefixedRootAsShardRequest(buf []byte, offset flatbuffers.UOffsetT) *ShardRequest {
 	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
-	x := &ShardRequestFB{}
+	x := &ShardRequest{}
 	x.Init(buf, n+offset+flatbuffers.SizeUint32)
 	return x
 }
 
-func FinishSizePrefixedShardRequestFBBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishSizePrefixedShardRequestBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.FinishSizePrefixed(offset)
 }
 
-func (rcv *ShardRequestFB) Init(buf []byte, i flatbuffers.UOffsetT) {
+func (rcv *ShardRequest) Init(buf []byte, i flatbuffers.UOffsetT) {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
 }
 
-func (rcv *ShardRequestFB) Table() flatbuffers.Table {
+func (rcv *ShardRequest) Table() flatbuffers.Table {
 	return rcv._tab
 }
 
-func (rcv *ShardRequestFB) Bucket() []byte {
+func (rcv *ShardRequest) Bucket() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -49,7 +49,7 @@ func (rcv *ShardRequestFB) Bucket() []byte {
 	return nil
 }
 
-func (rcv *ShardRequestFB) Key() []byte {
+func (rcv *ShardRequest) Key() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -57,7 +57,7 @@ func (rcv *ShardRequestFB) Key() []byte {
 	return nil
 }
 
-func (rcv *ShardRequestFB) ShardIdx() int32 {
+func (rcv *ShardRequest) ShardIdx() int32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
 	if o != 0 {
 		return rcv._tab.GetInt32(o + rcv._tab.Pos)
@@ -65,11 +65,11 @@ func (rcv *ShardRequestFB) ShardIdx() int32 {
 	return 0
 }
 
-func (rcv *ShardRequestFB) MutateShardIdx(n int32) bool {
+func (rcv *ShardRequest) MutateShardIdx(n int32) bool {
 	return rcv._tab.MutateInt32Slot(8, n)
 }
 
-func (rcv *ShardRequestFB) Data(j int) byte {
+func (rcv *ShardRequest) Data(j int) byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -78,7 +78,7 @@ func (rcv *ShardRequestFB) Data(j int) byte {
 	return 0
 }
 
-func (rcv *ShardRequestFB) DataLength() int {
+func (rcv *ShardRequest) DataLength() int {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
@@ -86,7 +86,7 @@ func (rcv *ShardRequestFB) DataLength() int {
 	return 0
 }
 
-func (rcv *ShardRequestFB) DataBytes() []byte {
+func (rcv *ShardRequest) DataBytes() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -94,7 +94,7 @@ func (rcv *ShardRequestFB) DataBytes() []byte {
 	return nil
 }
 
-func (rcv *ShardRequestFB) MutateData(j int, n byte) bool {
+func (rcv *ShardRequest) MutateData(j int, n byte) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -103,24 +103,24 @@ func (rcv *ShardRequestFB) MutateData(j int, n byte) bool {
 	return false
 }
 
-func ShardRequestFBStart(builder *flatbuffers.Builder) {
+func ShardRequestStart(builder *flatbuffers.Builder) {
 	builder.StartObject(4)
 }
-func ShardRequestFBAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
+func ShardRequestAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
 }
-func ShardRequestFBAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
+func ShardRequestAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(key), 0)
 }
-func ShardRequestFBAddShardIdx(builder *flatbuffers.Builder, shardIdx int32) {
+func ShardRequestAddShardIdx(builder *flatbuffers.Builder, shardIdx int32) {
 	builder.PrependInt32Slot(2, shardIdx, 0)
 }
-func ShardRequestFBAddData(builder *flatbuffers.Builder, data flatbuffers.UOffsetT) {
+func ShardRequestAddData(builder *flatbuffers.Builder, data flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(data), 0)
 }
-func ShardRequestFBStartDataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+func ShardRequestStartDataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
-func ShardRequestFBEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+func ShardRequestEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }

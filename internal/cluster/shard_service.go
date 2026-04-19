@@ -8,13 +8,10 @@ import (
 	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
-	"google.golang.org/protobuf/proto"
 
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/transport"
 )
-
-const fmtShardFB byte = 0x01
 
 var shardBuilderPool = sync.Pool{
 	New: func() any { return flatbuffers.NewBuilder(512) },
@@ -23,19 +20,12 @@ var shardBuilderPool = sync.Pool{
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
-	dataDir        string
-	transport      *transport.QUICTransport
-	useFlatBuffers bool
+	dataDir   string
+	transport *transport.QUICTransport
 }
 
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
-
-// WithFlatBuffers enables FlatBuffers encoding for outgoing shard RPC messages.
-// Incoming messages are always decoded in both formats regardless of this setting.
-func WithFlatBuffers() ShardServiceOption {
-	return func(s *ShardService) { s.useFlatBuffers = true }
-}
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
@@ -57,7 +47,7 @@ func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Messa
 
 // WriteShard sends a shard to a remote node for storage.
 func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
-	payload := s.marshalEnvelope("WriteShard", marshalShardRequestFB(bucket, key, int32(shardIdx), data), true)
+	payload := marshalEnvelope("WriteShard", marshalShardRequest(bucket, key, int32(shardIdx), data))
 	msg := &transport.Message{Type: transport.StreamData, Payload: payload}
 
 	resp, err := s.transport.Call(ctx, peer, msg)
@@ -77,7 +67,7 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 
 // ReadShard fetches a shard from a remote node.
 func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
-	payload := s.marshalEnvelope("ReadShard", marshalShardRequestFB(bucket, key, int32(shardIdx), nil), true)
+	payload := marshalEnvelope("ReadShard", marshalShardRequest(bucket, key, int32(shardIdx), nil))
 	msg := &transport.Message{Type: transport.StreamData, Payload: payload}
 
 	resp, err := s.transport.Call(ctx, peer, msg)
@@ -97,7 +87,7 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 
 // DeleteShards removes all shards for a key from a remote node.
 func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key string) error {
-	payload := s.marshalEnvelope("DeleteShards", marshalShardRequestFB(bucket, key, 0, nil), true)
+	payload := marshalEnvelope("DeleteShards", marshalShardRequest(bucket, key, 0, nil))
 	msg := &transport.Message{Type: transport.StreamData, Payload: payload}
 
 	_, err := s.transport.Call(ctx, peer, msg)
@@ -128,58 +118,61 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 	}
 }
 
-// marshalEnvelope serializes an RPCMessage.
-// When useFB is true and s.useFlatBuffers is set, produces FlatBuffers with 0x01 prefix.
-func (s *ShardService) marshalEnvelope(msgType string, innerData []byte, useFB bool) []byte {
-	if useFB && s.useFlatBuffers {
-		raw := marshalRPCMessageFB(msgType, innerData)
-		out := make([]byte, 1+len(raw))
-		out[0] = fmtShardFB
-		copy(out[1:], raw)
-		return out
+// marshalEnvelope serializes an RPCMessage as FlatBuffers.
+func marshalEnvelope(msgType string, innerData []byte) []byte {
+	b := shardBuilderPool.Get().(*flatbuffers.Builder)
+	defer func() {
+		b.Reset()
+		shardBuilderPool.Put(b)
+	}()
+
+	typeOff := b.CreateString(msgType)
+	var dataOff flatbuffers.UOffsetT
+	if len(innerData) > 0 {
+		dataOff = b.CreateByteVector(innerData)
 	}
-	rpc := &pb.RPCMessage{Type: msgType, Data: innerData}
-	data, _ := proto.Marshal(rpc)
-	return data
+	pb.RPCMessageStart(b)
+	pb.RPCMessageAddType(b, typeOff)
+	if len(innerData) > 0 {
+		pb.RPCMessageAddData(b, dataOff)
+	}
+	root := pb.RPCMessageEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out
 }
 
-// unmarshalEnvelope decodes an RPCMessage, detecting FlatBuffers by the 0x01 prefix.
+// unmarshalEnvelope decodes an RPCMessage FlatBuffer.
 func unmarshalEnvelope(payload []byte) (msgType string, data []byte, err error) {
-	if len(payload) > 0 && payload[0] == fmtShardFB {
-		t := pb.GetRootAsRPCMessageFB(payload[1:], 0)
-		return string(t.Type()), t.DataBytes(), nil
+	if len(payload) == 0 {
+		return "", nil, fmt.Errorf("empty envelope payload")
 	}
-	rpc := &pb.RPCMessage{}
-	if err := proto.Unmarshal(payload, rpc); err != nil {
-		return "", nil, err
-	}
-	return rpc.Type, rpc.Data, nil
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("unmarshal envelope: invalid flatbuffer: %v", r)
+		}
+	}()
+	t := pb.GetRootAsRPCMessage(payload, 0)
+	return string(t.Type()), t.DataBytes(), nil
 }
 
-// unmarshalShardRequest decodes a ShardRequest (always FlatBuffers for new writes).
+// unmarshalShardRequest decodes a ShardRequest FlatBuffer.
 func unmarshalShardRequest(data []byte) (*shardRequest, error) {
-	if len(data) > 0 && data[0] == fmtShardFB {
-		t := pb.GetRootAsShardRequestFB(data[1:], 0)
-		return &shardRequest{
-			Bucket:   string(t.Bucket()),
-			Key:      string(t.Key()),
-			ShardIdx: t.ShardIdx(),
-			Data:     t.DataBytes(),
-		}, nil
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty shard request")
 	}
-	sr := &pb.ShardRequest{}
-	if err := proto.Unmarshal(data, sr); err != nil {
-		return nil, err
-	}
+	t := pb.GetRootAsShardRequest(data, 0)
 	return &shardRequest{
-		Bucket:   sr.Bucket,
-		Key:      sr.Key,
-		ShardIdx: sr.ShardIdx,
-		Data:     sr.Data,
+		Bucket:   string(t.Bucket()),
+		Key:      string(t.Key()),
+		ShardIdx: t.ShardIdx(),
+		Data:     t.DataBytes(),
 	}, nil
 }
 
-// shardRequest is a format-agnostic in-memory representation.
+// shardRequest is the in-memory representation of a shard RPC request.
 type shardRequest struct {
 	Bucket   string
 	Key      string
@@ -187,8 +180,8 @@ type shardRequest struct {
 	Data     []byte
 }
 
-// marshalShardRequestFB serializes bucket/key/shardIdx/data to FlatBuffers with 0x01 prefix.
-func marshalShardRequestFB(bucket, key string, shardIdx int32, data []byte) []byte {
+// marshalShardRequest serializes a ShardRequest to FlatBuffers.
+func marshalShardRequest(bucket, key string, shardIdx int32, data []byte) []byte {
 	b := shardBuilderPool.Get().(*flatbuffers.Builder)
 	defer func() {
 		b.Reset()
@@ -202,43 +195,14 @@ func marshalShardRequestFB(bucket, key string, shardIdx int32, data []byte) []by
 		dataOff = b.CreateByteVector(data)
 	}
 
-	pb.ShardRequestFBStart(b)
-	pb.ShardRequestFBAddBucket(b, bucketOff)
-	pb.ShardRequestFBAddKey(b, keyOff)
-	pb.ShardRequestFBAddShardIdx(b, shardIdx)
+	pb.ShardRequestStart(b)
+	pb.ShardRequestAddBucket(b, bucketOff)
+	pb.ShardRequestAddKey(b, keyOff)
+	pb.ShardRequestAddShardIdx(b, shardIdx)
 	if len(data) > 0 {
-		pb.ShardRequestFBAddData(b, dataOff)
+		pb.ShardRequestAddData(b, dataOff)
 	}
-	root := pb.ShardRequestFBEnd(b)
-	b.Finish(root)
-
-	raw := b.FinishedBytes()
-	out := make([]byte, 1+len(raw))
-	out[0] = fmtShardFB
-	copy(out[1:], raw)
-	return out
-}
-
-// marshalRPCMessageFB serializes type+data to FlatBuffers (no prefix — caller adds it).
-func marshalRPCMessageFB(msgType string, data []byte) []byte {
-	b := shardBuilderPool.Get().(*flatbuffers.Builder)
-	defer func() {
-		b.Reset()
-		shardBuilderPool.Put(b)
-	}()
-
-	typeOff := b.CreateString(msgType)
-	var dataOff flatbuffers.UOffsetT
-	if len(data) > 0 {
-		dataOff = b.CreateByteVector(data)
-	}
-
-	pb.RPCMessageFBStart(b)
-	pb.RPCMessageFBAddType(b, typeOff)
-	if len(data) > 0 {
-		pb.RPCMessageFBAddData(b, dataOff)
-	}
-	root := pb.RPCMessageFBEnd(b)
+	root := pb.ShardRequestEnd(b)
 	b.Finish(root)
 
 	raw := b.FinishedBytes()
@@ -279,14 +243,13 @@ func (s *ShardService) handleDelete(sr *shardRequest) *transport.Message {
 func (s *ShardService) okResponse(data []byte) *transport.Message {
 	return &transport.Message{
 		Type:    transport.StreamData,
-		Payload: s.marshalEnvelope("OK", data, false),
+		Payload: marshalEnvelope("OK", data),
 	}
 }
 
 func (s *ShardService) errorResponse(msg string) *transport.Message {
 	return &transport.Message{
 		Type:    transport.StreamData,
-		Payload: s.marshalEnvelope("Error", []byte(msg), false),
+		Payload: marshalEnvelope("Error", []byte(msg)),
 	}
 }
-

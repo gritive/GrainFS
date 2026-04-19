@@ -6,42 +6,42 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-type ECObjectMetaFB struct {
+type ECObjectMeta struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsECObjectMetaFB(buf []byte, offset flatbuffers.UOffsetT) *ECObjectMetaFB {
+func GetRootAsECObjectMeta(buf []byte, offset flatbuffers.UOffsetT) *ECObjectMeta {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &ECObjectMetaFB{}
+	x := &ECObjectMeta{}
 	x.Init(buf, n+offset)
 	return x
 }
 
-func FinishECObjectMetaFBBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishECObjectMetaBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.Finish(offset)
 }
 
-func GetSizePrefixedRootAsECObjectMetaFB(buf []byte, offset flatbuffers.UOffsetT) *ECObjectMetaFB {
+func GetSizePrefixedRootAsECObjectMeta(buf []byte, offset flatbuffers.UOffsetT) *ECObjectMeta {
 	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
-	x := &ECObjectMetaFB{}
+	x := &ECObjectMeta{}
 	x.Init(buf, n+offset+flatbuffers.SizeUint32)
 	return x
 }
 
-func FinishSizePrefixedECObjectMetaFBBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishSizePrefixedECObjectMetaBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.FinishSizePrefixed(offset)
 }
 
-func (rcv *ECObjectMetaFB) Init(buf []byte, i flatbuffers.UOffsetT) {
+func (rcv *ECObjectMeta) Init(buf []byte, i flatbuffers.UOffsetT) {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
 }
 
-func (rcv *ECObjectMetaFB) Table() flatbuffers.Table {
+func (rcv *ECObjectMeta) Table() flatbuffers.Table {
 	return rcv._tab
 }
 
-func (rcv *ECObjectMetaFB) Key() []byte {
+func (rcv *ECObjectMeta) Key() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -49,7 +49,7 @@ func (rcv *ECObjectMetaFB) Key() []byte {
 	return nil
 }
 
-func (rcv *ECObjectMetaFB) Size() int64 {
+func (rcv *ECObjectMeta) Size() int64 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
@@ -57,11 +57,11 @@ func (rcv *ECObjectMetaFB) Size() int64 {
 	return 0
 }
 
-func (rcv *ECObjectMetaFB) MutateSize(n int64) bool {
+func (rcv *ECObjectMeta) MutateSize(n int64) bool {
 	return rcv._tab.MutateInt64Slot(6, n)
 }
 
-func (rcv *ECObjectMetaFB) ContentType() []byte {
+func (rcv *ECObjectMeta) ContentType() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -69,7 +69,7 @@ func (rcv *ECObjectMetaFB) ContentType() []byte {
 	return nil
 }
 
-func (rcv *ECObjectMetaFB) Etag() []byte {
+func (rcv *ECObjectMeta) Etag() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -77,7 +77,7 @@ func (rcv *ECObjectMetaFB) Etag() []byte {
 	return nil
 }
 
-func (rcv *ECObjectMetaFB) LastModified() int64 {
+func (rcv *ECObjectMeta) LastModified() int64 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
@@ -85,11 +85,11 @@ func (rcv *ECObjectMetaFB) LastModified() int64 {
 	return 0
 }
 
-func (rcv *ECObjectMetaFB) MutateLastModified(n int64) bool {
+func (rcv *ECObjectMeta) MutateLastModified(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
-func (rcv *ECObjectMetaFB) DataShards() int32 {
+func (rcv *ECObjectMeta) DataShards() int32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
 		return rcv._tab.GetInt32(o + rcv._tab.Pos)
@@ -97,11 +97,11 @@ func (rcv *ECObjectMetaFB) DataShards() int32 {
 	return 0
 }
 
-func (rcv *ECObjectMetaFB) MutateDataShards(n int32) bool {
+func (rcv *ECObjectMeta) MutateDataShards(n int32) bool {
 	return rcv._tab.MutateInt32Slot(14, n)
 }
 
-func (rcv *ECObjectMetaFB) ParityShards() int32 {
+func (rcv *ECObjectMeta) ParityShards() int32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
 		return rcv._tab.GetInt32(o + rcv._tab.Pos)
@@ -109,11 +109,11 @@ func (rcv *ECObjectMetaFB) ParityShards() int32 {
 	return 0
 }
 
-func (rcv *ECObjectMetaFB) MutateParityShards(n int32) bool {
+func (rcv *ECObjectMeta) MutateParityShards(n int32) bool {
 	return rcv._tab.MutateInt32Slot(16, n)
 }
 
-func (rcv *ECObjectMetaFB) ShardSize() int32 {
+func (rcv *ECObjectMeta) ShardSize() int32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
 		return rcv._tab.GetInt32(o + rcv._tab.Pos)
@@ -121,11 +121,11 @@ func (rcv *ECObjectMetaFB) ShardSize() int32 {
 	return 0
 }
 
-func (rcv *ECObjectMetaFB) MutateShardSize(n int32) bool {
+func (rcv *ECObjectMeta) MutateShardSize(n int32) bool {
 	return rcv._tab.MutateInt32Slot(18, n)
 }
 
-func (rcv *ECObjectMetaFB) VersionId() []byte {
+func (rcv *ECObjectMeta) VersionId() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -133,7 +133,7 @@ func (rcv *ECObjectMetaFB) VersionId() []byte {
 	return nil
 }
 
-func (rcv *ECObjectMetaFB) IsDeleteMarker() bool {
+func (rcv *ECObjectMeta) IsDeleteMarker() bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
@@ -141,11 +141,11 @@ func (rcv *ECObjectMetaFB) IsDeleteMarker() bool {
 	return false
 }
 
-func (rcv *ECObjectMetaFB) MutateIsDeleteMarker(n bool) bool {
+func (rcv *ECObjectMeta) MutateIsDeleteMarker(n bool) bool {
 	return rcv._tab.MutateBoolSlot(22, n)
 }
 
-func (rcv *ECObjectMetaFB) CreatedNano() int64 {
+func (rcv *ECObjectMeta) CreatedNano() int64 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
@@ -153,11 +153,11 @@ func (rcv *ECObjectMetaFB) CreatedNano() int64 {
 	return 0
 }
 
-func (rcv *ECObjectMetaFB) MutateCreatedNano(n int64) bool {
+func (rcv *ECObjectMeta) MutateCreatedNano(n int64) bool {
 	return rcv._tab.MutateInt64Slot(24, n)
 }
 
-func (rcv *ECObjectMetaFB) Acl() uint32 {
+func (rcv *ECObjectMeta) Acl() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
 	if o != 0 {
 		return rcv._tab.GetUint32(o + rcv._tab.Pos)
@@ -165,49 +165,49 @@ func (rcv *ECObjectMetaFB) Acl() uint32 {
 	return 0
 }
 
-func (rcv *ECObjectMetaFB) MutateAcl(n uint32) bool {
+func (rcv *ECObjectMeta) MutateAcl(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(26, n)
 }
 
-func ECObjectMetaFBStart(builder *flatbuffers.Builder) {
+func ECObjectMetaStart(builder *flatbuffers.Builder) {
 	builder.StartObject(12)
 }
-func ECObjectMetaFBAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
+func ECObjectMetaAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
 }
-func ECObjectMetaFBAddSize(builder *flatbuffers.Builder, size int64) {
+func ECObjectMetaAddSize(builder *flatbuffers.Builder, size int64) {
 	builder.PrependInt64Slot(1, size, 0)
 }
-func ECObjectMetaFBAddContentType(builder *flatbuffers.Builder, contentType flatbuffers.UOffsetT) {
+func ECObjectMetaAddContentType(builder *flatbuffers.Builder, contentType flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(contentType), 0)
 }
-func ECObjectMetaFBAddEtag(builder *flatbuffers.Builder, etag flatbuffers.UOffsetT) {
+func ECObjectMetaAddEtag(builder *flatbuffers.Builder, etag flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(etag), 0)
 }
-func ECObjectMetaFBAddLastModified(builder *flatbuffers.Builder, lastModified int64) {
+func ECObjectMetaAddLastModified(builder *flatbuffers.Builder, lastModified int64) {
 	builder.PrependInt64Slot(4, lastModified, 0)
 }
-func ECObjectMetaFBAddDataShards(builder *flatbuffers.Builder, dataShards int32) {
+func ECObjectMetaAddDataShards(builder *flatbuffers.Builder, dataShards int32) {
 	builder.PrependInt32Slot(5, dataShards, 0)
 }
-func ECObjectMetaFBAddParityShards(builder *flatbuffers.Builder, parityShards int32) {
+func ECObjectMetaAddParityShards(builder *flatbuffers.Builder, parityShards int32) {
 	builder.PrependInt32Slot(6, parityShards, 0)
 }
-func ECObjectMetaFBAddShardSize(builder *flatbuffers.Builder, shardSize int32) {
+func ECObjectMetaAddShardSize(builder *flatbuffers.Builder, shardSize int32) {
 	builder.PrependInt32Slot(7, shardSize, 0)
 }
-func ECObjectMetaFBAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
+func ECObjectMetaAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(versionId), 0)
 }
-func ECObjectMetaFBAddIsDeleteMarker(builder *flatbuffers.Builder, isDeleteMarker bool) {
+func ECObjectMetaAddIsDeleteMarker(builder *flatbuffers.Builder, isDeleteMarker bool) {
 	builder.PrependBoolSlot(9, isDeleteMarker, false)
 }
-func ECObjectMetaFBAddCreatedNano(builder *flatbuffers.Builder, createdNano int64) {
+func ECObjectMetaAddCreatedNano(builder *flatbuffers.Builder, createdNano int64) {
 	builder.PrependInt64Slot(10, createdNano, 0)
 }
-func ECObjectMetaFBAddAcl(builder *flatbuffers.Builder, acl uint32) {
+func ECObjectMetaAddAcl(builder *flatbuffers.Builder, acl uint32) {
 	builder.PrependUint32Slot(11, acl, 0)
 }
-func ECObjectMetaFBEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+func ECObjectMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }

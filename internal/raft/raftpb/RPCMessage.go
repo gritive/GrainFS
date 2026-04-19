@@ -6,42 +6,42 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-type RPCMessageFB struct {
+type RPCMessage struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsRPCMessageFB(buf []byte, offset flatbuffers.UOffsetT) *RPCMessageFB {
+func GetRootAsRPCMessage(buf []byte, offset flatbuffers.UOffsetT) *RPCMessage {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &RPCMessageFB{}
+	x := &RPCMessage{}
 	x.Init(buf, n+offset)
 	return x
 }
 
-func FinishRPCMessageFBBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishRPCMessageBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.Finish(offset)
 }
 
-func GetSizePrefixedRootAsRPCMessageFB(buf []byte, offset flatbuffers.UOffsetT) *RPCMessageFB {
+func GetSizePrefixedRootAsRPCMessage(buf []byte, offset flatbuffers.UOffsetT) *RPCMessage {
 	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
-	x := &RPCMessageFB{}
+	x := &RPCMessage{}
 	x.Init(buf, n+offset+flatbuffers.SizeUint32)
 	return x
 }
 
-func FinishSizePrefixedRPCMessageFBBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishSizePrefixedRPCMessageBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.FinishSizePrefixed(offset)
 }
 
-func (rcv *RPCMessageFB) Init(buf []byte, i flatbuffers.UOffsetT) {
+func (rcv *RPCMessage) Init(buf []byte, i flatbuffers.UOffsetT) {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
 }
 
-func (rcv *RPCMessageFB) Table() flatbuffers.Table {
+func (rcv *RPCMessage) Table() flatbuffers.Table {
 	return rcv._tab
 }
 
-func (rcv *RPCMessageFB) Type() []byte {
+func (rcv *RPCMessage) Type() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -49,7 +49,7 @@ func (rcv *RPCMessageFB) Type() []byte {
 	return nil
 }
 
-func (rcv *RPCMessageFB) Data(j int) byte {
+func (rcv *RPCMessage) Data(j int) byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -58,7 +58,7 @@ func (rcv *RPCMessageFB) Data(j int) byte {
 	return 0
 }
 
-func (rcv *RPCMessageFB) DataLength() int {
+func (rcv *RPCMessage) DataLength() int {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
@@ -66,7 +66,7 @@ func (rcv *RPCMessageFB) DataLength() int {
 	return 0
 }
 
-func (rcv *RPCMessageFB) DataBytes() []byte {
+func (rcv *RPCMessage) DataBytes() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -74,7 +74,7 @@ func (rcv *RPCMessageFB) DataBytes() []byte {
 	return nil
 }
 
-func (rcv *RPCMessageFB) MutateData(j int, n byte) bool {
+func (rcv *RPCMessage) MutateData(j int, n byte) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -83,18 +83,18 @@ func (rcv *RPCMessageFB) MutateData(j int, n byte) bool {
 	return false
 }
 
-func RPCMessageFBStart(builder *flatbuffers.Builder) {
+func RPCMessageStart(builder *flatbuffers.Builder) {
 	builder.StartObject(2)
 }
-func RPCMessageFBAddType(builder *flatbuffers.Builder, type_ flatbuffers.UOffsetT) {
+func RPCMessageAddType(builder *flatbuffers.Builder, type_ flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(type_), 0)
 }
-func RPCMessageFBAddData(builder *flatbuffers.Builder, data flatbuffers.UOffsetT) {
+func RPCMessageAddData(builder *flatbuffers.Builder, data flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(data), 0)
 }
-func RPCMessageFBStartDataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+func RPCMessageStartDataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
-func RPCMessageFBEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+func RPCMessageEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }

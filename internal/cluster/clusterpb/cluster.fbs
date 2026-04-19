@@ -1,0 +1,111 @@
+// FlatBuffers schema for cluster FSM commands and metadata.
+// Regenerate: make fbs
+
+namespace clusterpb;
+
+table Command {
+  type:uint32;
+  data:[ubyte];
+}
+
+table CreateBucketCmd {
+  bucket:string;
+}
+
+table DeleteBucketCmd {
+  bucket:string;
+}
+
+table PutObjectMetaCmd {
+  bucket:string;
+  key:string;
+  size:int64;
+  content_type:string;
+  etag:string;
+  mod_time:int64;
+}
+
+table DeleteObjectCmd {
+  bucket:string;
+  key:string;
+}
+
+table CreateMultipartUploadCmd {
+  upload_id:string;
+  bucket:string;
+  key:string;
+  content_type:string;
+  created_at:int64;
+}
+
+table CompleteMultipartCmd {
+  bucket:string;
+  key:string;
+  upload_id:string;
+  size:int64;
+  content_type:string;
+  etag:string;
+  mod_time:int64;
+}
+
+table AbortMultipartCmd {
+  bucket:string;
+  key:string;
+  upload_id:string;
+}
+
+table SetBucketPolicyCmd {
+  bucket:string;
+  policy_json:[ubyte];
+}
+
+table DeleteBucketPolicyCmd {
+  bucket:string;
+}
+
+table ObjectMeta {
+  key:string;
+  size:int64;
+  content_type:string;
+  etag:string;
+  last_modified:int64;
+}
+
+table KeyValue {
+  key:string;
+  value:[ubyte];
+}
+
+table SnapshotState {
+  entries:[KeyValue];
+}
+
+table MultipartMeta {
+  content_type:string;
+}
+
+table NodeStatsMsg {
+  node_id:string;
+  disk_used_pct:double;
+  disk_avail_bytes:uint64;
+  requests_per_sec:double;
+  joined_at:int64;
+}
+
+table MigrateShardCmd {
+  bucket:string;
+  key:string;
+  version_id:string;
+  src_node:string;
+  dst_node:string;
+}
+
+table MigrationDoneCmd {
+  bucket:string;
+  key:string;
+  version_id:string;
+  src_node:string;
+  dst_node:string;
+}
+
+root_type Command;

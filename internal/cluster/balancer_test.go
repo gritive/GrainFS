@@ -9,9 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
-
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // mockRaftNode captures Propose calls for balancer testing.
@@ -97,9 +94,9 @@ func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
 
 	require.NotEmpty(t, node.proposed, "should propose migration when imbalanced")
 
-	var cmd clusterpb.Command
-	require.NoError(t, proto.Unmarshal(node.proposed[0], &cmd))
-	assert.Equal(t, uint32(CmdMigrateShard), cmd.Type)
+	cmd, err := DecodeCommand(node.proposed[0])
+	require.NoError(t, err)
+	assert.Equal(t, CmdMigrateShard, cmd.Type)
 }
 
 func TestBalancerProposer_OnlyLeaderProposes(t *testing.T) {
@@ -183,10 +180,10 @@ func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
 	p.tickOnce()
 
 	require.NotEmpty(t, node.proposed)
-	var cmd clusterpb.Command
-	require.NoError(t, proto.Unmarshal(node.proposed[0], &cmd))
-	var migrate clusterpb.MigrateShardCmd
-	require.NoError(t, proto.Unmarshal(cmd.Data, &migrate))
+	cmd, err := DecodeCommand(node.proposed[0])
+	require.NoError(t, err)
+	migrate, err := decodeMigrateShardCmd(cmd.Data)
+	require.NoError(t, err)
 	assert.Equal(t, "node-c", migrate.DstNode, "should migrate to lightest node")
 }
 

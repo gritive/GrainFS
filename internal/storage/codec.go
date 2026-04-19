@@ -1,54 +1,67 @@
 package storage
 
 import (
-	pb "github.com/gritive/GrainFS/internal/storage/storagepb"
-	"google.golang.org/protobuf/proto"
+	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/gritive/GrainFS/internal/storage/storagepb"
 )
 
 func marshalObject(obj *Object) ([]byte, error) {
-	return proto.Marshal(&pb.Object{
-		Key:          obj.Key,
-		Size:         obj.Size,
-		ContentType:  obj.ContentType,
-		Etag:         obj.ETag,
-		LastModified: obj.LastModified,
-	})
+	b := flatbuffers.NewBuilder(128)
+	keyOff := b.CreateString(obj.Key)
+	ctOff := b.CreateString(obj.ContentType)
+	etagOff := b.CreateString(obj.ETag)
+	storagepb.ObjectStart(b)
+	storagepb.ObjectAddKey(b, keyOff)
+	storagepb.ObjectAddSize(b, obj.Size)
+	storagepb.ObjectAddContentType(b, ctOff)
+	storagepb.ObjectAddEtag(b, etagOff)
+	storagepb.ObjectAddLastModified(b, obj.LastModified)
+	root := storagepb.ObjectEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out, nil
 }
 
 func unmarshalObject(data []byte) (*Object, error) {
-	var p pb.Object
-	if err := proto.Unmarshal(data, &p); err != nil {
-		return nil, err
-	}
+	t := storagepb.GetRootAsObject(data, 0)
 	return &Object{
-		Key:          p.Key,
-		Size:         p.Size,
-		ContentType:  p.ContentType,
-		ETag:         p.Etag,
-		LastModified: p.LastModified,
+		Key:          string(t.Key()),
+		Size:         t.Size(),
+		ContentType:  string(t.ContentType()),
+		ETag:         string(t.Etag()),
+		LastModified: t.LastModified(),
 	}, nil
 }
 
 func marshalMultipartMeta(m *multipartMeta) ([]byte, error) {
-	return proto.Marshal(&pb.MultipartMeta{
-		UploadId:    m.UploadID,
-		Bucket:      m.Bucket,
-		Key:         m.Key,
-		ContentType: m.ContentType,
-		CreatedAt:   m.CreatedAt,
-	})
+	b := flatbuffers.NewBuilder(128)
+	uidOff := b.CreateString(m.UploadID)
+	bucketOff := b.CreateString(m.Bucket)
+	keyOff := b.CreateString(m.Key)
+	ctOff := b.CreateString(m.ContentType)
+	storagepb.MultipartMetaStart(b)
+	storagepb.MultipartMetaAddUploadId(b, uidOff)
+	storagepb.MultipartMetaAddBucket(b, bucketOff)
+	storagepb.MultipartMetaAddKey(b, keyOff)
+	storagepb.MultipartMetaAddContentType(b, ctOff)
+	storagepb.MultipartMetaAddCreatedAt(b, m.CreatedAt)
+	root := storagepb.MultipartMetaEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out, nil
 }
 
 func unmarshalMultipartMeta(data []byte) (*multipartMeta, error) {
-	var p pb.MultipartMeta
-	if err := proto.Unmarshal(data, &p); err != nil {
-		return nil, err
-	}
+	t := storagepb.GetRootAsMultipartMeta(data, 0)
 	return &multipartMeta{
-		UploadID:    p.UploadId,
-		Bucket:      p.Bucket,
-		Key:         p.Key,
-		ContentType: p.ContentType,
-		CreatedAt:   p.CreatedAt,
+		UploadID:    string(t.UploadId()),
+		Bucket:      string(t.Bucket()),
+		Key:         string(t.Key()),
+		ContentType: string(t.ContentType()),
+		CreatedAt:   t.CreatedAt(),
 	}, nil
 }

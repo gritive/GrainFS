@@ -1,0 +1,12 @@
+// FlatBuffers schema for volume metadata.
+// Regenerate: make fbs
+
+namespace volumepb;
+
+table Volume {
+  name:string;
+  size:int64;
+  block_size:int32;
+}
+
+root_type Volume;

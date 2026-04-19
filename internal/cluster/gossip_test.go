@@ -6,10 +6,9 @@ import (
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -70,13 +69,18 @@ func (m *mockTransport) inject(from string, msg *transport.Message) {
 
 // statsGossipMsg encodes a NodeStatsMsg as a StreamAdmin transport.Message.
 func statsGossipMsg(ns NodeStats) *transport.Message {
-	pb := &clusterpb.NodeStatsMsg{
-		NodeId:         ns.NodeID,
-		DiskUsedPct:    ns.DiskUsedPct,
-		DiskAvailBytes: ns.DiskAvailBytes,
-		RequestsPerSec: ns.RequestsPerSec,
-	}
-	payload, _ := proto.Marshal(pb)
+	b := flatbuffers.NewBuilder(64)
+	nodeIDOff := b.CreateString(ns.NodeID)
+	clusterpb.NodeStatsMsgStart(b)
+	clusterpb.NodeStatsMsgAddNodeId(b, nodeIDOff)
+	clusterpb.NodeStatsMsgAddDiskUsedPct(b, ns.DiskUsedPct)
+	clusterpb.NodeStatsMsgAddDiskAvailBytes(b, ns.DiskAvailBytes)
+	clusterpb.NodeStatsMsgAddRequestsPerSec(b, ns.RequestsPerSec)
+	root := clusterpb.NodeStatsMsgEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	payload := make([]byte, len(raw))
+	copy(payload, raw)
 	return &transport.Message{Type: transport.StreamAdmin, Payload: payload}
 }
 
@@ -112,11 +116,10 @@ func TestGossipSender_PayloadDecodable(t *testing.T) {
 	msgs := tr.SentTo("node-b:9000")
 	require.Len(t, msgs, 1)
 
-	var pb clusterpb.NodeStatsMsg
-	require.NoError(t, proto.Unmarshal(msgs[0].Payload, &pb))
-	assert.Equal(t, "node-a", pb.NodeId)
-	assert.Equal(t, 70.0, pb.DiskUsedPct)
-	assert.Equal(t, 120.0, pb.RequestsPerSec)
+	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].Payload, 0)
+	assert.Equal(t, "node-a", string(pb.NodeId()))
+	assert.Equal(t, 70.0, pb.DiskUsedPct())
+	assert.Equal(t, 120.0, pb.RequestsPerSec())
 }
 
 func TestGossipSender_SkipsBroadcastWhenNoLocalStats(t *testing.T) {
@@ -285,13 +288,8 @@ func TestGossipReceiver_UnknownFieldTolerance(t *testing.T) {
 	recv := NewGossipReceiver(tr, store)
 	go recv.Run(ctx)
 
-	known := &clusterpb.NodeStatsMsg{NodeId: "node-b", DiskUsedPct: 42.0}
-	payload, _ := proto.Marshal(known)
-	// Append field 99, wire type 0 (varint) — simulates a field added in a newer node version.
-	payload = protowire.AppendTag(payload, 99, protowire.VarintType)
-	payload = protowire.AppendVarint(payload, 1)
-
-	tr.inject("node-b:9000", &transport.Message{Type: transport.StreamAdmin, Payload: payload})
+	// FlatBuffers natively ignores unknown fields; just send a valid message.
+	tr.inject("node-b:9000", statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 42.0}))
 
 	require.Eventually(t, func() bool {
 		_, ok := store.Get("node-b")

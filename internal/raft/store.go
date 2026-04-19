@@ -6,8 +6,9 @@ import (
 	"errors"
 	"fmt"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	"github.com/dgraph-io/badger/v4"
-	"google.golang.org/protobuf/proto"
 
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
@@ -134,17 +135,35 @@ func logKey(index uint64) []byte {
 	return key
 }
 
+func marshalLogEntry(entry LogEntry) []byte {
+	b := flatbuffers.NewBuilder(64)
+	var cmdOff flatbuffers.UOffsetT
+	if len(entry.Command) > 0 {
+		cmdOff = b.CreateByteVector(entry.Command)
+	}
+	pb.LogEntryStart(b)
+	pb.LogEntryAddTerm(b, entry.Term)
+	pb.LogEntryAddIndex(b, entry.Index)
+	if len(entry.Command) > 0 {
+		pb.LogEntryAddCommand(b, cmdOff)
+	}
+	root := pb.LogEntryEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out
+}
+
+func unmarshalLogEntry(data []byte) LogEntry {
+	e := pb.GetRootAsLogEntry(data, 0)
+	return LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes()}
+}
+
 func (s *BadgerLogStore) AppendEntries(entries []LogEntry) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		for _, entry := range entries {
-			data, err := proto.Marshal(&pb.LogEntry{
-				Term:    entry.Term,
-				Index:   entry.Index,
-				Command: entry.Command,
-			})
-			if err != nil {
-				return fmt.Errorf("marshal entry %d: %w", entry.Index, err)
-			}
+			data := marshalLogEntry(entry)
 			if err := txn.Set(logKey(entry.Index), data); err != nil {
 				return err
 			}
@@ -164,11 +183,7 @@ func (s *BadgerLogStore) GetEntry(index uint64) (*LogEntry, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			var pb_ pb.LogEntry
-			if err := proto.Unmarshal(val, &pb_); err != nil {
-				return err
-			}
-			entry = LogEntry{Term: pb_.Term, Index: pb_.Index, Command: pb_.Command}
+			entry = unmarshalLogEntry(val)
 			return nil
 		})
 	})
@@ -191,11 +206,7 @@ func (s *BadgerLogStore) GetEntries(lo, hi uint64) ([]LogEntry, error) {
 			}
 			var entry LogEntry
 			if err := item.Value(func(val []byte) error {
-				var pb_ pb.LogEntry
-				if err := proto.Unmarshal(val, &pb_); err != nil {
-					return err
-				}
-				entry = LogEntry{Term: pb_.Term, Index: pb_.Index, Command: pb_.Command}
+				entry = unmarshalLogEntry(val)
 				return nil
 			}); err != nil {
 				return err
@@ -294,17 +305,24 @@ func (s *BadgerLogStore) TruncateBefore(beforeIndex uint64) error {
 }
 
 func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {
-	data, err := proto.Marshal(&pb.RaftState{Term: term, VotedFor: votedFor})
-	if err != nil {
-		return err
-	}
+	b := flatbuffers.NewBuilder(32)
+	votedForOff := b.CreateString(votedFor)
+	pb.RaftStateStart(b)
+	pb.RaftStateAddTerm(b, term)
+	pb.RaftStateAddVotedFor(b, votedForOff)
+	root := pb.RaftStateEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	data := make([]byte, len(raw))
+	copy(data, raw)
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(keyState, data)
 	})
 }
 
 func (s *BadgerLogStore) LoadState() (uint64, string, error) {
-	var st pb.RaftState
+	var term uint64
+	var votedFor string
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(keyState)
 		if err == badger.ErrKeyNotFound {
@@ -314,17 +332,25 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			return proto.Unmarshal(val, &st)
+			st := pb.GetRootAsRaftState(val, 0)
+			term = st.Term()
+			votedFor = string(st.VotedFor())
+			return nil
 		})
 	})
-	return st.Term, st.VotedFor, err
+	return term, votedFor, err
 }
 
 func (s *BadgerLogStore) SaveSnapshot(index, term uint64, data []byte) error {
-	meta, err := proto.Marshal(&pb.SnapshotMeta{Index: index, Term: term})
-	if err != nil {
-		return err
-	}
+	b := flatbuffers.NewBuilder(16)
+	pb.SnapshotMetaStart(b)
+	pb.SnapshotMetaAddIndex(b, index)
+	pb.SnapshotMetaAddTerm(b, term)
+	root := pb.SnapshotMetaEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	meta := make([]byte, len(raw))
+	copy(meta, raw)
 	return s.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(keySnapshotMeta, meta); err != nil {
 			return err
@@ -334,11 +360,10 @@ func (s *BadgerLogStore) SaveSnapshot(index, term uint64, data []byte) error {
 }
 
 func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
-	var meta pb.SnapshotMeta
+	var index, term uint64
 	var data []byte
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		// Load meta
 		metaItem, err := txn.Get(keySnapshotMeta)
 		if err == badger.ErrKeyNotFound {
 			return nil // no snapshot
@@ -347,12 +372,14 @@ func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
 			return err
 		}
 		if err := metaItem.Value(func(val []byte) error {
-			return proto.Unmarshal(val, &meta)
+			m := pb.GetRootAsSnapshotMeta(val, 0)
+			index = m.Index()
+			term = m.Term()
+			return nil
 		}); err != nil {
 			return err
 		}
 
-		// Load data
 		dataItem, err := txn.Get(keySnapshot)
 		if err != nil {
 			return err
@@ -363,7 +390,7 @@ func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
 			return nil
 		})
 	})
-	return meta.Index, meta.Term, data, err
+	return index, term, data, err
 }
 
 func (s *BadgerLogStore) Close() error {

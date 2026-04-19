@@ -1,6 +1,7 @@
 package erasure
 
 import (
+	"fmt"
 	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -9,55 +10,63 @@ import (
 	fb "github.com/gritive/GrainFS/internal/erasure/erasurepb"
 )
 
+// ecMultipartMeta holds multipart upload metadata for EC backend.
+type ecMultipartMeta struct {
+	UploadID    string
+	Bucket      string
+	Key         string
+	ContentType string
+	CreatedAt   int64
+}
+
+func fbRecover(err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("invalid flatbuffer: %v", r)
+	}
+}
+
 // builderPool reuses FlatBuffers builders across marshal calls to reduce allocations.
 var builderPool = sync.Pool{
 	New: func() any { return flatbuffers.NewBuilder(256) },
 }
 
-// marshalECObjectMetaFB serializes m to FlatBuffers format.
-// Borrows a Builder from the pool; the returned slice is a fresh copy safe for storage.
-func marshalECObjectMetaFB(m *ecObjectMeta) []byte {
+func marshalECObjectMeta(m *ecObjectMeta) ([]byte, error) {
 	b := builderPool.Get().(*flatbuffers.Builder)
 	defer func() {
 		b.Reset()
 		builderPool.Put(b)
 	}()
 
-	// Strings must be written before StartObject.
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 	etagOff := b.CreateString(m.ETag)
 	vidOff := b.CreateString(m.VersionID)
 
-	fb.ECObjectMetaFBStart(b)
-	fb.ECObjectMetaFBAddKey(b, keyOff)
-	fb.ECObjectMetaFBAddSize(b, m.Size)
-	fb.ECObjectMetaFBAddContentType(b, ctOff)
-	fb.ECObjectMetaFBAddEtag(b, etagOff)
-	fb.ECObjectMetaFBAddLastModified(b, m.LastModified)
-	fb.ECObjectMetaFBAddDataShards(b, int32(m.DataShards))
-	fb.ECObjectMetaFBAddParityShards(b, int32(m.ParityShards))
-	fb.ECObjectMetaFBAddShardSize(b, int32(m.ShardSize))
-	fb.ECObjectMetaFBAddVersionId(b, vidOff)
-	fb.ECObjectMetaFBAddIsDeleteMarker(b, m.IsDeleteMarker)
-	fb.ECObjectMetaFBAddCreatedNano(b, m.CreatedNano)
-	fb.ECObjectMetaFBAddAcl(b, uint32(m.ACL))
-	root := fb.ECObjectMetaFBEnd(b)
+	fb.ECObjectMetaStart(b)
+	fb.ECObjectMetaAddKey(b, keyOff)
+	fb.ECObjectMetaAddSize(b, m.Size)
+	fb.ECObjectMetaAddContentType(b, ctOff)
+	fb.ECObjectMetaAddEtag(b, etagOff)
+	fb.ECObjectMetaAddLastModified(b, m.LastModified)
+	fb.ECObjectMetaAddDataShards(b, int32(m.DataShards))
+	fb.ECObjectMetaAddParityShards(b, int32(m.ParityShards))
+	fb.ECObjectMetaAddShardSize(b, int32(m.ShardSize))
+	fb.ECObjectMetaAddVersionId(b, vidOff)
+	fb.ECObjectMetaAddIsDeleteMarker(b, m.IsDeleteMarker)
+	fb.ECObjectMetaAddCreatedNano(b, m.CreatedNano)
+	fb.ECObjectMetaAddAcl(b, uint32(m.ACL))
+	root := fb.ECObjectMetaEnd(b)
 	b.Finish(root)
 
-	// FinishedBytes points into the builder's internal buffer (reset on pool return).
-	// Copy to a stable slice before returning.
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
-	return out
+	return out, nil
 }
 
-// unmarshalECObjectMetaFB deserializes a FlatBuffers-encoded ECObjectMeta.
-// String fields are converted from the zero-copy []byte to Go strings here,
-// keeping the call signature identical to unmarshalECObjectMeta.
-func unmarshalECObjectMetaFB(data []byte) (*ecObjectMeta, error) {
-	t := fb.GetRootAsECObjectMetaFB(data, 0)
+func unmarshalECObjectMeta(data []byte) (result *ecObjectMeta, err error) {
+	defer fbRecover(&err)
+	t := fb.GetRootAsECObjectMeta(data, 0)
 	return &ecObjectMeta{
 		Key:            string(t.Key()),
 		Size:           t.Size(),
@@ -74,7 +83,7 @@ func unmarshalECObjectMetaFB(data []byte) (*ecObjectMeta, error) {
 	}, nil
 }
 
-func marshalBucketMetaFB(m *bucketMeta) []byte {
+func marshalBucketMeta(m *bucketMeta) ([]byte, error) {
 	b := builderPool.Get().(*flatbuffers.Builder)
 	defer func() {
 		b.Reset()
@@ -83,19 +92,29 @@ func marshalBucketMetaFB(m *bucketMeta) []byte {
 
 	vsOff := b.CreateString(m.VersioningState)
 
-	fb.BucketMetaFBStart(b)
-	fb.BucketMetaFBAddEcEnabled(b, m.ECEnabled)
-	fb.BucketMetaFBAddVersioningState(b, vsOff)
-	root := fb.BucketMetaFBEnd(b)
+	fb.BucketMetaStart(b)
+	fb.BucketMetaAddEcEnabled(b, m.ECEnabled)
+	fb.BucketMetaAddVersioningState(b, vsOff)
+	root := fb.BucketMetaEnd(b)
 	b.Finish(root)
 
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
-	return out
+	return out, nil
 }
 
-func marshalECMultipartMetaFB(m *ecMultipartMeta) []byte {
+func unmarshalBucketMeta(data []byte) (result *bucketMeta, err error) {
+	defer fbRecover(&err)
+	t := fb.GetRootAsBucketMeta(data, 0)
+	state := string(t.VersioningState())
+	if state == "" {
+		state = "Unversioned"
+	}
+	return &bucketMeta{ECEnabled: t.EcEnabled(), VersioningState: state}, nil
+}
+
+func marshalECMultipartMeta(m *ecMultipartMeta) ([]byte, error) {
 	b := builderPool.Get().(*flatbuffers.Builder)
 	defer func() {
 		b.Reset()
@@ -107,32 +126,24 @@ func marshalECMultipartMetaFB(m *ecMultipartMeta) []byte {
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 
-	fb.MultipartUploadMetaFBStart(b)
-	fb.MultipartUploadMetaFBAddUploadId(b, uploadIDOff)
-	fb.MultipartUploadMetaFBAddBucket(b, bucketOff)
-	fb.MultipartUploadMetaFBAddKey(b, keyOff)
-	fb.MultipartUploadMetaFBAddContentType(b, ctOff)
-	fb.MultipartUploadMetaFBAddCreatedAt(b, m.CreatedAt)
-	root := fb.MultipartUploadMetaFBEnd(b)
+	fb.MultipartUploadMetaStart(b)
+	fb.MultipartUploadMetaAddUploadId(b, uploadIDOff)
+	fb.MultipartUploadMetaAddBucket(b, bucketOff)
+	fb.MultipartUploadMetaAddKey(b, keyOff)
+	fb.MultipartUploadMetaAddContentType(b, ctOff)
+	fb.MultipartUploadMetaAddCreatedAt(b, m.CreatedAt)
+	root := fb.MultipartUploadMetaEnd(b)
 	b.Finish(root)
 
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
-	return out
+	return out, nil
 }
 
-func unmarshalBucketMetaFB(data []byte) (*bucketMeta, error) {
-	t := fb.GetRootAsBucketMetaFB(data, 0)
-	state := string(t.VersioningState())
-	if state == "" {
-		state = "Unversioned"
-	}
-	return &bucketMeta{ECEnabled: t.EcEnabled(), VersioningState: state}, nil
-}
-
-func unmarshalECMultipartMetaFB(data []byte) (*ecMultipartMeta, error) {
-	t := fb.GetRootAsMultipartUploadMetaFB(data, 0)
+func unmarshalECMultipartMeta(data []byte) (result *ecMultipartMeta, err error) {
+	defer fbRecover(&err)
+	t := fb.GetRootAsMultipartUploadMeta(data, 0)
 	return &ecMultipartMeta{
 		UploadID:    string(t.UploadId()),
 		Bucket:      string(t.Bucket()),

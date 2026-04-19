@@ -1,10 +1,9 @@
 // FlatBuffers schema for erasure metadata.
-// Table names use FB suffix to avoid conflicts with proto-generated types in the same package.
 // Regenerate: make fbs
 
 namespace erasurepb;
 
-table ECObjectMetaFB {
+table ECObjectMeta {
   key:string;
   size:int64;
   content_type:string;
@@ -19,12 +18,12 @@ table ECObjectMetaFB {
   acl:uint32;
 }
 
-table BucketMetaFB {
+table BucketMeta {
   ec_enabled:bool;
   versioning_state:string;
 }
 
-table MultipartUploadMetaFB {
+table MultipartUploadMeta {
   upload_id:string;
   bucket:string;
   key:string;
@@ -32,4 +31,4 @@ table MultipartUploadMetaFB {
   created_at:int64;
 }
 
-root_type ECObjectMetaFB;
+root_type ECObjectMeta;
