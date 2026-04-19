@@ -68,14 +68,15 @@ const maxMigrationsPerCycle = 50
 
 // BackgroundScrubber periodically verifies and repairs EC shard integrity.
 type BackgroundScrubber struct {
-	backend      Scrubbable
-	verifier     *ShardVerifier
-	repairer     *RepairEngine
-	interval     time.Duration
-	limiter      *rate.Limiter // 100 objects/sec scan throttle (Eng Review #8)
-	mu           sync.Mutex
-	stats        ScrubStats
-	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
+	backend        Scrubbable
+	verifier       *ShardVerifier
+	repairer       *RepairEngine
+	interval       time.Duration
+	limiter        *rate.Limiter // 100 objects/sec scan throttle (Eng Review #8)
+	mu             sync.Mutex
+	stats          ScrubStats
+	lastStatuses   map[string]ShardStatus  // "bucket/key" → last observed status
+	orphanTombstone map[string]struct{}    // dirs seen as orphan last cycle
 }
 
 // ScrubStats is a snapshot of scrubbing statistics.
@@ -101,12 +102,13 @@ func WithNoRetry() ScrubberOption {
 // New creates a BackgroundScrubber with a rate limit of 100 scans/sec.
 func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *BackgroundScrubber {
 	s := &BackgroundScrubber{
-		backend:      backend,
-		verifier:     NewShardVerifier(backend),
-		repairer:     NewRepairEngine(backend),
-		interval:     interval,
-		limiter:      rate.NewLimiter(100, 10),
-		lastStatuses: make(map[string]ShardStatus),
+		backend:         backend,
+		verifier:        NewShardVerifier(backend),
+		repairer:        NewRepairEngine(backend),
+		interval:        interval,
+		limiter:         rate.NewLimiter(100, 10),
+		lastStatuses:    make(map[string]ShardStatus),
+		orphanTombstone: make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -149,6 +151,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		return
 	}
 
+	knownDirs := make(map[string]bool)
 	repairCount := 0
 	for _, bucket := range buckets {
 		objCh, err := s.backend.ScanObjects(bucket)
@@ -172,6 +175,15 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			exists, err := s.backend.ObjectExists(rec.Bucket, rec.Key)
 			if err != nil || !exists {
 				continue
+			}
+
+			// Track shard dir as known (for orphan sweep).
+			total := rec.DataShards + rec.ParityShards
+			if total > 0 {
+				paths := s.backend.ShardPaths(rec.Bucket, rec.Key, rec.VersionID, total)
+				if len(paths) > 0 {
+					knownDirs[shardDirFromPath(paths[0])] = true
+				}
 			}
 
 			metrics.ScrubObjectsCheckedTotal.Inc()
@@ -212,6 +224,11 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	// Optional: migrate plain objects to EC if backend supports it.
 	if migrator, ok := s.backend.(Migrator); ok {
 		s.runMigration(ctx, migrator, buckets)
+	}
+
+	// Optional: sweep orphan shard dirs left by migration crashes.
+	if walker, ok := s.backend.(OrphanWalkable); ok {
+		s.orphanSweep(walker, knownDirs)
 	}
 
 	s.mu.Lock()

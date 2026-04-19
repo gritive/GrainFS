@@ -18,6 +18,12 @@
   - 배치 삭제(1000개/txn): 대용량 로그에서 `ErrTxnTooBig` 방지.
   - 스냅샷 게이트: 스냅샷 없이 GC 시도 시 skip + warn으로 뒤처진 팔로워 복구 경로 보호.
   - `docs/badger-managed-mode-rollback.md` — 활성화 방법, Prometheus 검증 쿼리, 롤백 절차, cut-over 체크리스트.
+- **Phase 14a: Orphan Shard Sweep** — migration Phase 3→4 크래시 갭으로 남는 고아 샤드 디렉토리를 자동으로 탐지하고 정리한다. `OrphanWalkable` 인터페이스(선택적 확장)를 구현한 ECBackend에서 활성화된다.
+  - **Age gate** — 생성 후 5분 미만인 샤드 디렉토리는 진행 중인 PUT 보호를 위해 건드리지 않는다.
+  - **Tombstone delay** — 2 연속 사이클에서 고아로 확인된 디렉토리만 삭제 (오탐 방지).
+  - **I/O storm 방지** — 사이클당 최대 50개(`maxOrphansPerCycle`) 삭제 캡.
+  - **Zero-config** — CLI 플래그 없이 백엔드가 `OrphanWalkable`을 구현하면 자동 활성.
+- **3개 신규 메트릭** — `grainfs_scrub_orphan_shards_found_total`, `grainfs_scrub_orphan_shards_deleted_total`, `grainfs_scrub_orphan_sweep_capped_total`.
 
 ## [0.0.10] - 2026-04-19
 

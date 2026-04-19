@@ -243,4 +243,21 @@ var (
 		Name: "grainfs_balancer_migration_pending_ttl_expired_total",
 		Help: "Total pending migrations cancelled due to TTL expiry.",
 	})
+
+	// Orphan shard sweep metrics.
+
+	OrphanShardsFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_shards_found_total",
+		Help: "Total orphan shard directories found during scrubbing.",
+	})
+
+	OrphanShardsDeletedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_shards_deleted_total",
+		Help: "Total orphan shard directories deleted by the scrubber.",
+	})
+
+	OrphanSweepCappedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_sweep_capped_total",
+		Help: "Total orphan shards deferred because maxOrphansPerCycle was reached.",
+	})
 )
