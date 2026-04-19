@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -269,6 +270,36 @@ func TestNodeIDMatchesFrom(t *testing.T) {
 		got := nodeIDMatchesFrom(tc.nodeID, tc.from)
 		assert.Equalf(t, tc.want, got, "nodeIDMatchesFrom(%q, %q)", tc.nodeID, tc.from)
 	}
+}
+
+// TestGossipReceiver_UnknownFieldTolerance verifies that gossip messages containing
+// fields unknown to this node (e.g., added in a newer version during rolling upgrade)
+// are parsed without error and that known fields are decoded correctly.
+func TestGossipReceiver_UnknownFieldTolerance(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	recv := NewGossipReceiver(tr, store)
+	go recv.Run(ctx)
+
+	known := &clusterpb.NodeStatsMsg{NodeId: "node-b", DiskUsedPct: 42.0}
+	payload, _ := proto.Marshal(known)
+	// Append field 99, wire type 0 (varint) — simulates a field added in a newer node version.
+	payload = protowire.AppendTag(payload, 99, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 1)
+
+	tr.inject("node-b:9000", &transport.Message{Type: transport.StreamAdmin, Payload: payload})
+
+	require.Eventually(t, func() bool {
+		_, ok := store.Get("node-b")
+		return ok
+	}, 500*time.Millisecond, 10*time.Millisecond)
+
+	stats, _ := store.Get("node-b")
+	assert.Equal(t, 42.0, stats.DiskUsedPct, "known fields intact despite unknown field")
 }
 
 func TestGossipReceiver_StopsOnContextCancel(t *testing.T) {

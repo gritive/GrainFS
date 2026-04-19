@@ -1,11 +1,5 @@
 # TODOS
 
-## Phase 13: Operations
-
-### Phase 13 DX 후속 (devex review 2026-04-18)
-
-- [ ] Rolling upgrade 대응: warm-up timeout 후 available peers로 시작, protobuf unknown field tolerance
-
 ## Phase 14: Scale
 
 - [ ] ScrubObjects cursor pagination — ScanObjects BadgerDB 전체 순회 → cursor 기반으로 교체 (10K+ 클러스터 대비)
