@@ -3,15 +3,13 @@
 ## [0.0.11] - 2026-04-19
 
 ### Added
-- **Raft Log GC — Phase 14d** (`--badger-managed-mode`)
-  - `QuorumMinMatchIndex()` on `raft.Node`: quorum 기준 최고 복제 인덱스를 반환 (리더에서 GC watermark로 사용). 팔로워는 `commitIndex`를 watermark로 사용.
-  - `TruncateBefore(index uint64)` on `BadgerLogStore`: 로그 GC 전용 메서드. `index` 미만의 모든 Raft 로그 항목을 BadgerDB에서 삭제.
-  - `--badger-managed-mode` 플래그 (bool, 기본 false) — 명시적 opt-in. 주의: on-disk 포맷이 변경되므로 플래그 없이 재시작 시 오류로 거부.
-  - `--raft-log-gc-interval` 플래그 (Duration, 기본 30s) — GC 실행 주기.
-  - Pre-flight 포맷 검사: `raft:meta:managed` 메타 키로 managed mode 상태를 DB에 기록. 재시작 시 플래그 불일치를 명확한 오류로 감지.
+- **Raft 로그 GC** (`--badger-managed-mode`) — 클러스터 부트스트랩 이후 누적된 Raft 로그를 자동 정리. 쿼럼 watermark 기준으로 안전하게 삭제하므로 `data/raft/` 가 무한히 커지지 않는다.
+  - `--badger-managed-mode` 플래그 (기본 false) — 명시적 opt-in. 활성화 후 플래그 없이 재시작하면 포맷 불일치 오류로 거부해 silent data loss를 방지.
+  - `--raft-log-gc-interval` 플래그 (기본 30s, 0=비활성) — GC 실행 주기.
+  - GC 고루틴 격리: heartbeat 루프와 별도 고루틴으로 실행 (`atomic.Bool` 가드), 대규모 GC가 heartbeat를 지연시키지 않음.
+  - 배치 삭제(1000개/txn): 대용량 로그에서 `ErrTxnTooBig` 방지.
+  - 스냅샷 게이트: 스냅샷 없이 GC 시도 시 skip + warn으로 뒤처진 팔로워 복구 경로 보호.
   - `docs/badger-managed-mode-rollback.md` — 활성화 방법, Prometheus 검증 쿼리, 롤백 절차, cut-over 체크리스트.
-  - 통합 테스트: partition → GC → 복구 시나리오 (`TestIntegration_LogGC_PartitionAndRecovery`).
-  - 단위 테스트 7개: `QuorumMinMatchIndex` (solo/3-node/5-node), `TruncateBefore` (remove/no-op/exclude), managed mode pre-flight, log GC skip conditions.
 
 ## [0.0.10] - 2026-04-19
 
