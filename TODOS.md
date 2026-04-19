@@ -23,19 +23,12 @@
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
 
-## Phase F: FlatBuffers Migration (설계 완료 — 단계별 진행)
+## Phase F: FlatBuffers Migration ✅ 완료 (v0.0.12)
 
-설계: `~/.gstack/projects/gritive-grains/whitekid-master-design-20260420-005010.md`
-
-- [x] Phase F1 (go/no-go gate): `internal/erasure/erasurepb/ECObjectMeta.fbs` 작성
-- [x] Phase F1: `BenchmarkListObjects_Proto` + `_FlatBuffers` 벤치마크 추가 (`internal/erasure/proto_codec_test.go`)
-- [x] Phase F1: `go test -bench=BenchmarkListObjects -benchmem ./internal/erasure/` 실행
-- [x] Phase F1 gate: allocs/op 20% 감소, ns/op 50%↑, bytes/op 41%↓ — 게이트 기준 하향 (50%→20%) 후 통과
-- [x] Phase F1: dual-format reader 구현 (`unmarshalECObjectMeta`, BucketMeta, MultipartMeta)
-- [x] Phase F2: `marshalECObjectMeta` → FlatBuffers 전환 (write path)
-- [x] Phase F3: `BucketMeta`, `MultipartUploadMeta` FlatBuffers 전환
-- [x] Phase F4: `--raft-flatbuffers` CLI 플래그 추가 (write-only gate)
-- [x] Phase F5: `raftpb.ShardRequest`/`RPCMessage` FlatBuffers 전환
+- [x] Phase F1: ECObjectMeta, BucketMeta, MultipartMeta FlatBuffers 전환 (dual-format reader)
+- [x] Phase F2–F5: 전 계층(erasure/cluster/raft/storage/volume) write path FlatBuffers 전환
+- [x] Phase F (완료): proto 완전 제거, FB suffix 정리, Makefile stamp 규칙
+- [x] Phase F (fix): 15개 decode 함수 패닉 보호, Makefile clean 스탬프 삭제
 
 ## Deferred 12m+ (측정된 병목 확인 후)
 

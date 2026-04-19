@@ -22,10 +22,15 @@ func marshalVolume(vol *Volume) ([]byte, error) {
 	return out, nil
 }
 
-func unmarshalVolume(data []byte) (*Volume, error) {
+func unmarshalVolume(data []byte) (vol *Volume, err error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("unmarshal volume: empty data")
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("unmarshal volume: invalid flatbuffer: %v", r)
+		}
+	}()
 	t := volumepb.GetRootAsVolume(data, 0)
 	return &Volume{
 		Name:      string(t.Name()),

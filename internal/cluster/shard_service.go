@@ -159,10 +159,15 @@ func unmarshalEnvelope(payload []byte) (msgType string, data []byte, err error) 
 }
 
 // unmarshalShardRequest decodes a ShardRequest FlatBuffer.
-func unmarshalShardRequest(data []byte) (*shardRequest, error) {
+func unmarshalShardRequest(data []byte) (req *shardRequest, err error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty shard request")
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("unmarshal shard request: invalid flatbuffer: %v", r)
+		}
+	}()
 	t := pb.GetRootAsShardRequest(data, 0)
 	return &shardRequest{
 		Bucket:   string(t.Bucket()),

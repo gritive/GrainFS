@@ -77,7 +77,12 @@ func encodeDeleteBucketCmd(c DeleteBucketCmd) ([]byte, error) {
 }
 
 func decodeDeleteBucketCmd(data []byte) (DeleteBucketCmd, error) {
-	t := clusterpb.GetRootAsDeleteBucketCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteBucketCmd {
+		return clusterpb.GetRootAsDeleteBucketCmd(d, 0)
+	})
+	if err != nil {
+		return DeleteBucketCmd{}, err
+	}
 	return DeleteBucketCmd{Bucket: string(t.Bucket())}, nil
 }
 
@@ -98,7 +103,12 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 }
 
 func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
-	t := clusterpb.GetRootAsPutObjectMetaCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectMetaCmd {
+		return clusterpb.GetRootAsPutObjectMetaCmd(d, 0)
+	})
+	if err != nil {
+		return PutObjectMetaCmd{}, err
+	}
 	return PutObjectMetaCmd{
 		Bucket:      string(t.Bucket()),
 		Key:         string(t.Key()),
@@ -120,7 +130,12 @@ func encodeDeleteObjectCmd(c DeleteObjectCmd) ([]byte, error) {
 }
 
 func decodeDeleteObjectCmd(data []byte) (DeleteObjectCmd, error) {
-	t := clusterpb.GetRootAsDeleteObjectCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectCmd {
+		return clusterpb.GetRootAsDeleteObjectCmd(d, 0)
+	})
+	if err != nil {
+		return DeleteObjectCmd{}, err
+	}
 	return DeleteObjectCmd{Bucket: string(t.Bucket()), Key: string(t.Key())}, nil
 }
 
@@ -140,7 +155,12 @@ func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) 
 }
 
 func decodeCreateMultipartUploadCmd(data []byte) (CreateMultipartUploadCmd, error) {
-	t := clusterpb.GetRootAsCreateMultipartUploadCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.CreateMultipartUploadCmd {
+		return clusterpb.GetRootAsCreateMultipartUploadCmd(d, 0)
+	})
+	if err != nil {
+		return CreateMultipartUploadCmd{}, err
+	}
 	return CreateMultipartUploadCmd{
 		UploadID:    string(t.UploadId()),
 		Bucket:      string(t.Bucket()),
@@ -169,7 +189,12 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 }
 
 func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
-	t := clusterpb.GetRootAsCompleteMultipartCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.CompleteMultipartCmd {
+		return clusterpb.GetRootAsCompleteMultipartCmd(d, 0)
+	})
+	if err != nil {
+		return CompleteMultipartCmd{}, err
+	}
 	return CompleteMultipartCmd{
 		Bucket:      string(t.Bucket()),
 		Key:         string(t.Key()),
@@ -194,7 +219,12 @@ func encodeAbortMultipartCmd(c AbortMultipartCmd) ([]byte, error) {
 }
 
 func decodeAbortMultipartCmd(data []byte) (AbortMultipartCmd, error) {
-	t := clusterpb.GetRootAsAbortMultipartCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.AbortMultipartCmd {
+		return clusterpb.GetRootAsAbortMultipartCmd(d, 0)
+	})
+	if err != nil {
+		return AbortMultipartCmd{}, err
+	}
 	return AbortMultipartCmd{
 		Bucket:   string(t.Bucket()),
 		Key:      string(t.Key()),
@@ -218,7 +248,12 @@ func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
 }
 
 func decodeSetBucketPolicyCmd(data []byte) (SetBucketPolicyCmd, error) {
-	t := clusterpb.GetRootAsSetBucketPolicyCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketPolicyCmd {
+		return clusterpb.GetRootAsSetBucketPolicyCmd(d, 0)
+	})
+	if err != nil {
+		return SetBucketPolicyCmd{}, err
+	}
 	return SetBucketPolicyCmd{Bucket: string(t.Bucket()), PolicyJSON: t.PolicyJsonBytes()}, nil
 }
 
@@ -231,7 +266,12 @@ func encodeDeleteBucketPolicyCmd(c DeleteBucketPolicyCmd) ([]byte, error) {
 }
 
 func decodeDeleteBucketPolicyCmd(data []byte) (DeleteBucketPolicyCmd, error) {
-	t := clusterpb.GetRootAsDeleteBucketPolicyCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteBucketPolicyCmd {
+		return clusterpb.GetRootAsDeleteBucketPolicyCmd(d, 0)
+	})
+	if err != nil {
+		return DeleteBucketPolicyCmd{}, err
+	}
 	return DeleteBucketPolicyCmd{Bucket: string(t.Bucket())}, nil
 }
 
@@ -252,10 +292,12 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 }
 
 func unmarshalObjectMeta(data []byte) (objectMeta, error) {
-	if len(data) == 0 {
-		return objectMeta{}, fmt.Errorf("unmarshal ObjectMeta: empty data")
+	t, err := fbSafe(data, func(d []byte) *clusterpb.ObjectMeta {
+		return clusterpb.GetRootAsObjectMeta(d, 0)
+	})
+	if err != nil {
+		return objectMeta{}, fmt.Errorf("unmarshal ObjectMeta: %w", err)
 	}
-	t := clusterpb.GetRootAsObjectMeta(data, 0)
 	return objectMeta{
 		Key:          string(t.Key()),
 		Size:         t.Size(),
@@ -340,10 +382,12 @@ func marshalClusterMultipartMeta(m clusterMultipartMeta) ([]byte, error) {
 }
 
 func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
-	if len(data) == 0 {
-		return clusterMultipartMeta{}, fmt.Errorf("unmarshal MultipartMeta: empty data")
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MultipartMeta {
+		return clusterpb.GetRootAsMultipartMeta(d, 0)
+	})
+	if err != nil {
+		return clusterMultipartMeta{}, fmt.Errorf("unmarshal MultipartMeta: %w", err)
 	}
-	t := clusterpb.GetRootAsMultipartMeta(data, 0)
 	return clusterMultipartMeta{ContentType: string(t.ContentType())}, nil
 }
 
@@ -366,7 +410,12 @@ func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
 }
 
 func decodeMigrateShardCmd(data []byte) (MigrateShardFSMCmd, error) {
-	t := clusterpb.GetRootAsMigrateShardCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MigrateShardCmd {
+		return clusterpb.GetRootAsMigrateShardCmd(d, 0)
+	})
+	if err != nil {
+		return MigrateShardFSMCmd{}, err
+	}
 	return MigrateShardFSMCmd{
 		Bucket:    string(t.Bucket()),
 		Key:       string(t.Key()),
@@ -377,7 +426,12 @@ func decodeMigrateShardCmd(data []byte) (MigrateShardFSMCmd, error) {
 }
 
 func decodeMigrationDoneCmd(data []byte) (MigrationDoneFSMCmd, error) {
-	t := clusterpb.GetRootAsMigrationDoneCmd(data, 0)
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MigrationDoneCmd {
+		return clusterpb.GetRootAsMigrationDoneCmd(d, 0)
+	})
+	if err != nil {
+		return MigrationDoneFSMCmd{}, err
+	}
 	return MigrationDoneFSMCmd{
 		Bucket:    string(t.Bucket()),
 		Key:       string(t.Key()),

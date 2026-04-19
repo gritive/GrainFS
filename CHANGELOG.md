@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.12] - 2026-04-20
+
+### Changed
+- **Phase F: FlatBuffers 완전 전환** — protobuf 의존성 제거. 직렬화 계층 전체(erasure, cluster, raft, storage, volume)를 FlatBuffers로 통일.
+  - `internal/erasure`: `ECObjectMeta`, `BucketMeta`, `MultipartUploadMeta` FlatBuffers 전환. `builderPool`(`sync.Pool`)으로 hot-path 할당 제거. `fbRecover` 헬퍼로 모든 decode에 패닉 → 에러 변환.
+  - `internal/cluster`: Raft FSM 커맨드(`CreateBucket`…`MigrationDone`), `ObjectMeta`, `MultipartMeta`, snapshot state 모두 FlatBuffers. `fbSafe` 제네릭 헬퍼로 decode 패닉 보호. 고시 수신 경로(`decodeNodeStatsMsg`)도 패닉 격리.
+  - `internal/raft`: `LogEntry`, `RaftState`, `SnapshotMeta`, Raft RPC 6종(`RequestVote`, `AppendEntries`, `InstallSnapshot` args/reply) FlatBuffers. decode 함수 전부 defer/recover 추가.
+  - `internal/storage`: `Object`, `MultipartMeta` FlatBuffers 전환. unmarshal 패닉 보호.
+  - `internal/volume`: `Volume` FlatBuffers. unmarshal 패닉 보호.
+  - `internal/cluster/shard_service`: `unmarshalShardRequest` 패닉 보호.
+  - Makefile: `%.fbs.stamp` 규칙으로 `flatc --gen-all` 1:N 출력 추적. `make clean` 시 스탬프 파일 삭제.
+- **`--raft-flatbuffers` 플래그 제거** — FlatBuffers가 유일한 포맷. 피처 플래그 불필요.
+
+### Fixed
+- `make clean` 후 `make`가 `.fbs` 파일을 재생성하지 않던 버그 수정 — `clean` 타겟에 `*.fbs.stamp` 삭제 추가.
+- FlatBuffers decode 함수 15곳 패닉 보호 누락 수정 — 손상된 데이터나 이전 포맷 바이트 입력 시 프로세스 크래시 방지.
+
 ## [0.0.11] - 2026-04-19
 
 ### Added

@@ -49,6 +49,7 @@ run: bin/$(BINARY)
 
 clean:
 	rm -rf bin/ tmp/
+	find internal -name '*.fbs.stamp' -delete
 
 lint:
 	go vet ./...

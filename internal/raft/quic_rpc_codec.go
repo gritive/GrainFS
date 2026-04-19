@@ -157,7 +157,12 @@ func decodeRPC(raw []byte) (rpcType string, data []byte, err error) {
 	return string(msg.Type()), msg.DataBytes(), nil
 }
 
-func decodeRequestVoteArgs(data []byte) (*RequestVoteArgs, error) {
+func decodeRequestVoteArgs(data []byte) (args *RequestVoteArgs, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode RequestVoteArgs: invalid flatbuffer: %v", r)
+		}
+	}()
 	a := pb.GetRootAsRequestVoteArgs(data, 0)
 	return &RequestVoteArgs{
 		Term:         a.Term(),
@@ -167,7 +172,12 @@ func decodeRequestVoteArgs(data []byte) (*RequestVoteArgs, error) {
 	}, nil
 }
 
-func decodeRequestVoteReply(data []byte) (*RequestVoteReply, error) {
+func decodeRequestVoteReply(data []byte) (reply *RequestVoteReply, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode RequestVoteReply: invalid flatbuffer: %v", r)
+		}
+	}()
 	r := pb.GetRootAsRequestVoteReply(data, 0)
 	return &RequestVoteReply{
 		Term:        r.Term(),
@@ -175,7 +185,12 @@ func decodeRequestVoteReply(data []byte) (*RequestVoteReply, error) {
 	}, nil
 }
 
-func decodeAppendEntriesArgs(data []byte) (*AppendEntriesArgs, error) {
+func decodeAppendEntriesArgs(data []byte) (args *AppendEntriesArgs, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode AppendEntriesArgs: invalid flatbuffer: %v", r)
+		}
+	}()
 	a := pb.GetRootAsAppendEntriesArgs(data, 0)
 	entries := make([]LogEntry, a.EntriesLength())
 	var e pb.LogEntry
@@ -195,7 +210,12 @@ func decodeAppendEntriesArgs(data []byte) (*AppendEntriesArgs, error) {
 	}, nil
 }
 
-func decodeAppendEntriesReply(data []byte) (*AppendEntriesReply, error) {
+func decodeAppendEntriesReply(data []byte) (reply *AppendEntriesReply, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode AppendEntriesReply: invalid flatbuffer: %v", r)
+		}
+	}()
 	r := pb.GetRootAsAppendEntriesReply(data, 0)
 	return &AppendEntriesReply{
 		Term:    r.Term(),
@@ -203,7 +223,12 @@ func decodeAppendEntriesReply(data []byte) (*AppendEntriesReply, error) {
 	}, nil
 }
 
-func decodeInstallSnapshotArgs(data []byte) (*InstallSnapshotArgs, error) {
+func decodeInstallSnapshotArgs(data []byte) (args *InstallSnapshotArgs, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode InstallSnapshotArgs: invalid flatbuffer: %v", r)
+		}
+	}()
 	a := pb.GetRootAsInstallSnapshotArgs(data, 0)
 	return &InstallSnapshotArgs{
 		Term:              a.Term(),
@@ -214,7 +239,12 @@ func decodeInstallSnapshotArgs(data []byte) (*InstallSnapshotArgs, error) {
 	}, nil
 }
 
-func decodeInstallSnapshotReply(data []byte) (*InstallSnapshotReply, error) {
+func decodeInstallSnapshotReply(data []byte) (reply *InstallSnapshotReply, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode InstallSnapshotReply: invalid flatbuffer: %v", r)
+		}
+	}()
 	r := pb.GetRootAsInstallSnapshotReply(data, 0)
 	return &InstallSnapshotReply{
 		Term: r.Term(),

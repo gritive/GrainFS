@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"fmt"
+
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/storage/storagepb"
 )
@@ -24,7 +26,15 @@ func marshalObject(obj *Object) ([]byte, error) {
 	return out, nil
 }
 
-func unmarshalObject(data []byte) (*Object, error) {
+func unmarshalObject(data []byte) (obj *Object, err error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("unmarshal object: empty data")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("unmarshal object: invalid flatbuffer: %v", r)
+		}
+	}()
 	t := storagepb.GetRootAsObject(data, 0)
 	return &Object{
 		Key:          string(t.Key()),
@@ -55,7 +65,15 @@ func marshalMultipartMeta(m *multipartMeta) ([]byte, error) {
 	return out, nil
 }
 
-func unmarshalMultipartMeta(data []byte) (*multipartMeta, error) {
+func unmarshalMultipartMeta(data []byte) (m *multipartMeta, err error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("unmarshal multipart meta: empty data")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("unmarshal multipart meta: invalid flatbuffer: %v", r)
+		}
+	}()
 	t := storagepb.GetRootAsMultipartMeta(data, 0)
 	return &multipartMeta{
 		UploadID:    string(t.UploadId()),

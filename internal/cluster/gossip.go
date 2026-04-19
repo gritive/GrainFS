@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"time"
@@ -119,7 +120,11 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 			if len(rm.Message.Payload) == 0 {
 				continue
 			}
-			pb := clusterpb.GetRootAsNodeStatsMsg(rm.Message.Payload, 0)
+			pb, err := decodeNodeStatsMsg(rm.Message.Payload)
+			if err != nil {
+				r.logger.Warn("gossip: invalid payload", "err", err)
+				continue
+			}
 			nodeID := string(pb.NodeId())
 			if nodeID == "" {
 				continue
@@ -142,6 +147,15 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 			})
 		}
 	}
+}
+
+func decodeNodeStatsMsg(data []byte) (msg *clusterpb.NodeStatsMsg, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode node stats: invalid flatbuffer: %v", r)
+		}
+	}()
+	return clusterpb.GetRootAsNodeStatsMsg(data, 0), nil
 }
 
 // nodeIDMatchesFrom returns true if nodeID corresponds to the connection address from.

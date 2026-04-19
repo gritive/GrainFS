@@ -155,9 +155,14 @@ func marshalLogEntry(entry LogEntry) []byte {
 	return out
 }
 
-func unmarshalLogEntry(data []byte) LogEntry {
+func unmarshalLogEntry(data []byte) (entry LogEntry, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("unmarshal log entry: invalid flatbuffer: %v", r)
+		}
+	}()
 	e := pb.GetRootAsLogEntry(data, 0)
-	return LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes()}
+	return LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes()}, nil
 }
 
 func (s *BadgerLogStore) AppendEntries(entries []LogEntry) error {
@@ -183,8 +188,9 @@ func (s *BadgerLogStore) GetEntry(index uint64) (*LogEntry, error) {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			entry = unmarshalLogEntry(val)
-			return nil
+			var e error
+			entry, e = unmarshalLogEntry(val)
+			return e
 		})
 	})
 	if err != nil {
@@ -206,8 +212,9 @@ func (s *BadgerLogStore) GetEntries(lo, hi uint64) ([]LogEntry, error) {
 			}
 			var entry LogEntry
 			if err := item.Value(func(val []byte) error {
-				entry = unmarshalLogEntry(val)
-				return nil
+				var e error
+				entry, e = unmarshalLogEntry(val)
+				return e
 			}); err != nil {
 				return err
 			}
@@ -331,7 +338,12 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
+		return item.Value(func(val []byte) (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("unmarshal raft state: invalid flatbuffer: %v", r)
+				}
+			}()
 			st := pb.GetRootAsRaftState(val, 0)
 			term = st.Term()
 			votedFor = string(st.VotedFor())
@@ -371,7 +383,12 @@ func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
 		if err != nil {
 			return err
 		}
-		if err := metaItem.Value(func(val []byte) error {
+		if err := metaItem.Value(func(val []byte) (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("unmarshal snapshot meta: invalid flatbuffer: %v", r)
+				}
+			}()
 			m := pb.GetRootAsSnapshotMeta(val, 0)
 			index = m.Index()
 			term = m.Term()
