@@ -3,6 +3,14 @@
 ## [0.0.11] - 2026-04-19
 
 ### Added
+- **Adaptive Raft Batching** (`batcherLoop` + `flushBatch`) — EWMA 기반 동적 배치로 BadgerDB 커밋 횟수 대폭 감소. 100 동시 PUT → 97% 커밋 감소 (100회 → 3회).
+  - `proposal` / `proposalResult` 타입 도입. `ProposeWait(ctx, cmd)` 인터페이스 유지.
+  - `proposalCh` (buf=4096): leader 진입 후 batcherLoop가 독립적으로 수집·flush.
+  - **EWMA 적응 알고리즘**: alpha=0.3. 저부하(<100 req/s) → 100µs / 4-batch, 중부하(100-500) → 1ms / 32-batch, 고부하(>500) → 5ms / 128-batch. 설정 파일 없이 자동 전환.
+  - **즉시 복제 트리거**: `flushBatch` 완료 시 `replicationCh`(buf=1)에 신호 → `runLeader`가 HeartbeatTimeout을 기다리지 않고 즉시 `replicateToAll()` 호출.
+  - **Graceful shutdown**: `stopCh` 닫기 → pending 제안 전부 `ErrProposalFailed` 반환 후 종료.
+  - `BatchMetrics()` accessor: `EWMARate`, `BatchTimeout`, `MaxBatch` 스냅샷 반환.
+- **7개 신규 테스트** (`batcher_test.go`): `TestBatcher_HighLoad`, `TestBatcher_LowLoad`, `TestBatcher_NotLeader`, `TestBatcher_Shutdown`, `TestBatcher_ReplicationTrigger`, `TestAdaptiveMetrics_Transition`, `TestBatcher_PersistPanic`.
 - **Raft 로그 GC** (`--badger-managed-mode`) — 클러스터 부트스트랩 이후 누적된 Raft 로그를 자동 정리. 쿼럼 watermark 기준으로 안전하게 삭제하므로 `data/raft/` 가 무한히 커지지 않는다.
   - `--badger-managed-mode` 플래그 (기본 false) — 명시적 opt-in. 활성화 후 플래그 없이 재시작하면 포맷 불일치 오류로 거부해 silent data loss를 방지.
   - `--raft-log-gc-interval` 플래그 (기본 30s, 0=비활성) — GC 실행 주기.

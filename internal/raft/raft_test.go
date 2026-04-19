@@ -431,15 +431,18 @@ func TestPersistLogEntries_PanicsOnError(t *testing.T) {
 
 	config := DefaultConfig("A", nil)
 	node := NewNode(config, store)
-	node.Start()
-	defer node.Stop()
 
-	require.Eventually(t, func() bool {
-		return node.State() == Leader
-	}, 3*time.Second, 10*time.Millisecond)
+	// Propose now goes through batcherLoop (async), so panic is in a goroutine.
+	// Test the invariant directly: persistLogEntries must panic synchronously.
+	entry := LogEntry{Term: 1, Index: 1, Command: []byte("cmd")}
+	node.mu.Lock()
+	node.log = append(node.log, entry)
+	node.mu.Unlock()
 
 	assert.Panics(t, func() {
-		node.Propose([]byte("cmd"))
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		node.persistLogEntries([]LogEntry{entry})
 	}, "persistLogEntries should panic on AppendEntries error")
 }
 
