@@ -23,13 +23,6 @@
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
 
-## Phase F: FlatBuffers Migration ✅ 완료 (v0.0.12)
-
-- [x] Phase F1: ECObjectMeta, BucketMeta, MultipartMeta FlatBuffers 전환 (dual-format reader)
-- [x] Phase F2–F5: 전 계층(erasure/cluster/raft/storage/volume) write path FlatBuffers 전환
-- [x] Phase F (완료): proto 완전 제거, FB suffix 정리, Makefile stamp 규칙
-- [x] Phase F (fix): 15개 decode 함수 패닉 보호, Makefile clean 스탬프 삭제
-
 ## Deferred 12m+ (측정된 병목 확인 후)
 
 - [ ] zero copy, zero allocation, sendfile (현재 SetBodyStream 검증 먼저)
