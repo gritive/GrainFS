@@ -1,0 +1,36 @@
+// FlatBuffers schema for ECObjectMeta.
+// Mirrors erasure.proto ECObjectMeta — field names and types are identical.
+// Generated Go code: run `make generate-fbs` (requires flatc >= 24.x).
+// Until then, the hand-written builder in flatbuffers_codec.go is authoritative.
+
+namespace erasurepb;
+
+table ECObjectMeta {
+  key:string;
+  size:int64;
+  content_type:string;
+  etag:string;
+  last_modified:int64;
+  data_shards:int32;
+  parity_shards:int32;
+  shard_size:int32;
+  version_id:string;
+  is_delete_marker:bool;
+  created_nano:int64;
+  acl:uint32;
+}
+
+table BucketMeta {
+  ec_enabled:bool;
+  versioning_state:string;
+}
+
+table MultipartUploadMeta {
+  upload_id:string;
+  bucket:string;
+  key:string;
+  content_type:string;
+  created_at:int64;
+}
+
+root_type ECObjectMeta;

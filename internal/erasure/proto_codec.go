@@ -6,6 +6,34 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// fmtFlatBuffers is the 1-byte prefix that marks a FlatBuffers-encoded value.
+//
+// 0x01 cannot be the first byte of any valid proto3-encoded message:
+// proto3 field tags encode as varint (field_number << 3 | wire_type).
+// 0x01 = field 0, wire type 1 — illegal in proto3. Safe as a format sentinel.
+const fmtFlatBuffers byte = 0x01
+
+func isFlatBuffers(data []byte) bool {
+	return len(data) > 0 && data[0] == fmtFlatBuffers
+}
+
+// marshalWithFBPrefix prepends fmtFlatBuffers to a FlatBuffers payload.
+func marshalWithFBPrefix(fb []byte) []byte {
+	out := make([]byte, 1+len(fb))
+	out[0] = fmtFlatBuffers
+	copy(out[1:], fb)
+	return out
+}
+
+// stripFBPrefix removes the format prefix byte for FlatBuffers data,
+// or returns data unchanged for legacy Protobuf data (no prefix).
+func stripFBPrefix(data []byte) []byte {
+	if isFlatBuffers(data) {
+		return data[1:]
+	}
+	return data
+}
+
 // ecMultipartMeta holds multipart upload metadata for EC backend.
 type ecMultipartMeta struct {
 	UploadID    string
@@ -23,6 +51,9 @@ func marshalBucketMeta(m *bucketMeta) ([]byte, error) {
 }
 
 func unmarshalBucketMeta(data []byte) (*bucketMeta, error) {
+	if isFlatBuffers(data) {
+		return unmarshalBucketMetaFB(stripFBPrefix(data))
+	}
 	var p pb.BucketMeta
 	if err := proto.Unmarshal(data, &p); err != nil {
 		return nil, err
@@ -52,6 +83,9 @@ func marshalECObjectMeta(m *ecObjectMeta) ([]byte, error) {
 }
 
 func unmarshalECObjectMeta(data []byte) (*ecObjectMeta, error) {
+	if isFlatBuffers(data) {
+		return unmarshalECObjectMetaFB(stripFBPrefix(data))
+	}
 	var p pb.ECObjectMeta
 	if err := proto.Unmarshal(data, &p); err != nil {
 		return nil, err
@@ -83,6 +117,9 @@ func marshalECMultipartMeta(m *ecMultipartMeta) ([]byte, error) {
 }
 
 func unmarshalECMultipartMeta(data []byte) (*ecMultipartMeta, error) {
+	if isFlatBuffers(data) {
+		return unmarshalECMultipartMetaFB(stripFBPrefix(data))
+	}
 	var p pb.MultipartUploadMeta
 	if err := proto.Unmarshal(data, &p); err != nil {
 		return nil, err
