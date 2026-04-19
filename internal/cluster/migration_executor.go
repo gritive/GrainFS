@@ -8,9 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -400,22 +397,15 @@ func (e *MigrationExecutor) markCommitted(id string) {
 }
 
 func (e *MigrationExecutor) proposeDone(task MigrationTask) error {
-	inner, err := proto.Marshal(&clusterpb.MigrationDoneCmd{
+	outer, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
 		Bucket:    task.Bucket,
 		Key:       task.Key,
-		VersionId: task.VersionID,
+		VersionID: task.VersionID,
 		SrcNode:   task.SrcNode,
 		DstNode:   task.DstNode,
 	})
 	if err != nil {
 		return fmt.Errorf("migration: marshal MigrationDoneCmd: %w", err)
-	}
-	outer, err := proto.Marshal(&clusterpb.Command{
-		Type: uint32(CmdMigrationDone),
-		Data: inner,
-	})
-	if err != nil {
-		return fmt.Errorf("migration: marshal Command: %w", err)
 	}
 	return e.node.Propose(outer)
 }

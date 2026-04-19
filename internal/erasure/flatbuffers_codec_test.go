@@ -1,6 +1,7 @@
 package erasure
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,4 +157,68 @@ func TestECObjectMetaACLBackwardCompat(t *testing.T) {
 	decoded, err := unmarshalECObjectMeta(data)
 	require.NoError(t, err)
 	assert.Equal(t, s3auth.ACLPrivate, decoded.ACL, "missing ACL field should decode as ACLPrivate")
+}
+
+// makeBenchMeta returns a sample ecObjectMeta for benchmarks.
+func makeBenchMeta(i int) *ecObjectMeta {
+	return &ecObjectMeta{
+		Key:          fmt.Sprintf("benchdir/subdir/object-%04d.bin", i),
+		Size:         int64(1024 * (i + 1)),
+		ContentType:  "application/octet-stream",
+		ETag:         fmt.Sprintf("etag-%032x", i),
+		LastModified: 1700000000 + int64(i),
+		DataShards:   4,
+		ParityShards: 2,
+		ShardSize:    1048576,
+		VersionID:    "",
+		CreatedNano:  1700000000000000000 + int64(i),
+		ACL:          s3auth.ACLPrivate,
+	}
+}
+
+// BenchmarkListObjects_Proto measures the Protobuf unmarshal cost for a
+// ListObjects-shaped scan (1 000 objects per iteration).
+func BenchmarkListObjects_Proto(b *testing.B) {
+	const n = 1000
+	blobs := make([][]byte, n)
+	for i := range n {
+		var err error
+		blobs[i], err = marshalECObjectMeta(makeBenchMeta(i))
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		for _, data := range blobs {
+			if _, err := unmarshalECObjectMeta(data); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+// BenchmarkListObjects_FlatBuffers measures the FlatBuffers unmarshal cost for
+// the same ListObjects-shaped scan.
+// Gate: allocs/op must be ≥50% fewer than BenchmarkListObjects_Proto.
+func BenchmarkListObjects_FlatBuffers(b *testing.B) {
+	const n = 1000
+	blobs := make([][]byte, n)
+	for i := range n {
+		var err error
+		blobs[i], err = marshalECObjectMeta(makeBenchMeta(i))
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		for _, data := range blobs {
+			if _, err := unmarshalECObjectMeta(data); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
 }

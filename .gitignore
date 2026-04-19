@@ -6,3 +6,4 @@ server.test
 /grainfs
 bin/grainfs
 .gstack/
+*.fbs.stamp

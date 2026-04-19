@@ -7,9 +7,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
-
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // TestBalancerIntegration_ProposesOnImbalance verifies that BalancerProposer.Run()
@@ -49,12 +46,12 @@ func TestBalancerIntegration_ProposesOnImbalance(t *testing.T) {
 	}, 400*time.Millisecond, 10*time.Millisecond, "timeout: no CmdMigrateShard proposed within 400ms")
 
 	require.Greater(t, node.ProposedLen(), 0)
-	var cmd clusterpb.Command
-	require.NoError(t, proto.Unmarshal(node.ProposedAt(0), &cmd))
-	assert.Equal(t, uint32(CmdMigrateShard), cmd.Type, "should propose CmdMigrateShard")
+	cmd, err := DecodeCommand(node.ProposedAt(0))
+	require.NoError(t, err)
+	assert.Equal(t, CmdMigrateShard, cmd.Type, "should propose CmdMigrateShard")
 
-	var migrate clusterpb.MigrateShardCmd
-	require.NoError(t, proto.Unmarshal(cmd.Data, &migrate))
+	migrate, err := decodeMigrateShardCmd(cmd.Data)
+	require.NoError(t, err)
 	assert.Equal(t, "leader", migrate.SrcNode)
 	assert.Equal(t, "peer-a", migrate.DstNode)
 }
@@ -182,7 +179,7 @@ func TestBalancerIntegration_DiskCollector(t *testing.T) {
 		return node.ProposedLen() > 0
 	}, 1*time.Second, 10*time.Millisecond, "timeout: no CmdMigrateShard proposed within 1s")
 
-	var cmd clusterpb.Command
-	require.NoError(t, proto.Unmarshal(node.ProposedAt(0), &cmd))
-	assert.Equal(t, uint32(CmdMigrateShard), cmd.Type)
+	cmd, err := DecodeCommand(node.ProposedAt(0))
+	require.NoError(t, err)
+	assert.Equal(t, CmdMigrateShard, cmd.Type)
 }

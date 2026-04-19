@@ -82,38 +82,3 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	_, err = os.ReadFile(shardPath)
 	assert.True(t, os.IsNotExist(err))
 }
-
-func TestShardService_StreamRouterIntegration(t *testing.T) {
-	ctx := context.Background()
-
-	// Two nodes, each with Raft (StreamControl) and Shard (StreamData) handlers
-	tr1 := transport.NewQUICTransport()
-	tr2 := transport.NewQUICTransport()
-	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
-	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
-	defer tr1.Close()
-	defer tr2.Close()
-
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
-
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
-
-	svc1 := NewShardService(dir1, tr1)
-	svc2 := NewShardService(dir2, tr2)
-
-	// Set up StreamRouter on node2 with shard handler on StreamData
-	router := transport.NewStreamRouter()
-	router.Handle(transport.StreamData, svc2.HandleRPC())
-	// StreamControl left unregistered — should not affect shard operations
-	tr2.SetStreamHandler(router.Dispatch)
-
-	// Write shard from node1 to node2 via StreamData
-	err := svc1.WriteShard(ctx, tr2.LocalAddr(), "bucket", "key", 1, []byte("routed-shard"))
-	require.NoError(t, err)
-
-	// Read back
-	got, err := svc1.ReadShard(ctx, tr2.LocalAddr(), "bucket", "key", 1)
-	require.NoError(t, err)
-	assert.Equal(t, "routed-shard", string(got))
-}

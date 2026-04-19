@@ -7,9 +7,6 @@ import (
 	"sync"
 
 	"github.com/dgraph-io/badger/v4"
-	"google.golang.org/protobuf/proto"
-
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // FSM applies committed Raft log entries to BadgerDB metadata store.
@@ -229,10 +226,10 @@ func pendingMigrationKey(bucket, key, versionID string) []byte {
 
 // persistPendingMigration writes a migration task to BadgerDB so it survives a crash.
 func (f *FSM) persistPendingMigration(task MigrationTask) error {
-	val, err := proto.Marshal(&clusterpb.MigrateShardCmd{
+	val, err := encodeMigrateShardCmd(MigrateShardFSMCmd{
 		Bucket:    task.Bucket,
 		Key:       task.Key,
-		VersionId: task.VersionID,
+		VersionID: task.VersionID,
 		SrcNode:   task.SrcNode,
 		DstNode:   task.DstNode,
 	})
@@ -256,17 +253,24 @@ func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
-			var cmd clusterpb.MigrateShardCmd
+			var taskData []byte
 			if err := item.Value(func(val []byte) error {
-				return proto.Unmarshal(val, &cmd)
+				taskData = make([]byte, len(val))
+				copy(taskData, val)
+				return nil
 			}); err != nil {
+				slog.Error("fsm: recover pending migration: read failed", "err", err)
+				continue
+			}
+			cmd, err := decodeMigrateShardCmd(taskData)
+			if err != nil {
 				slog.Error("fsm: recover pending migration: decode failed", "err", err)
 				continue
 			}
 			task := MigrationTask{
 				Bucket:    cmd.Bucket,
 				Key:       cmd.Key,
-				VersionID: cmd.VersionId,
+				VersionID: cmd.VersionID,
 				SrcNode:   cmd.SrcNode,
 				DstNode:   cmd.DstNode,
 			}
@@ -281,8 +285,8 @@ func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error
 }
 
 func (f *FSM) applyMigrateShard(data []byte) error {
-	var cmd clusterpb.MigrateShardCmd
-	if err := proto.Unmarshal(data, &cmd); err != nil {
+	cmd, err := decodeMigrateShardCmd(data)
+	if err != nil {
 		return fmt.Errorf("decode MigrateShardCmd: %w", err)
 	}
 	// Guard: balancer proposals without object identity are placeholders; skip them.
@@ -292,7 +296,7 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 	task := MigrationTask{
 		Bucket:    cmd.Bucket,
 		Key:       cmd.Key,
-		VersionID: cmd.VersionId,
+		VersionID: cmd.VersionID,
 		SrcNode:   cmd.SrcNode,
 		DstNode:   cmd.DstNode,
 	}
@@ -317,13 +321,13 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 }
 
 func (f *FSM) applyMigrationDone(data []byte) error {
-	var cmd clusterpb.MigrationDoneCmd
-	if err := proto.Unmarshal(data, &cmd); err != nil {
+	cmd, err := decodeMigrationDoneCmd(data)
+	if err != nil {
 		return fmt.Errorf("decode MigrationDoneCmd: %w", err)
 	}
 	// Clean up any persisted pending-migration entry for this task.
 	if err := f.db.Update(func(txn *badger.Txn) error {
-		err := txn.Delete(pendingMigrationKey(cmd.Bucket, cmd.Key, cmd.VersionId))
+		err := txn.Delete(pendingMigrationKey(cmd.Bucket, cmd.Key, cmd.VersionID))
 		if err == badger.ErrKeyNotFound {
 			return nil
 		}
@@ -336,10 +340,10 @@ func (f *FSM) applyMigrationDone(data []byte) error {
 	bn := f.balancerNotifier
 	f.mu.RUnlock()
 	if notifier != nil {
-		notifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionId)
+		notifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionID)
 	}
 	if bn != nil {
-		bn.NotifyMigrationDone(cmd.Bucket, cmd.Key, cmd.VersionId)
+		bn.NotifyMigrationDone(cmd.Bucket, cmd.Key, cmd.VersionID)
 	}
 	return nil
 }

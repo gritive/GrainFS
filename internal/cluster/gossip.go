@@ -2,11 +2,12 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"time"
 
-	"google.golang.org/protobuf/proto"
+	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -61,18 +62,19 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	if !stats.JoinedAt.IsZero() {
 		joinedAtUnix = stats.JoinedAt.Unix()
 	}
-	pb := &clusterpb.NodeStatsMsg{
-		NodeId:         s.nodeID,
-		DiskUsedPct:    stats.DiskUsedPct,
-		DiskAvailBytes: stats.DiskAvailBytes,
-		RequestsPerSec: stats.RequestsPerSec,
-		JoinedAt:       joinedAtUnix,
-	}
-	payload, err := proto.Marshal(pb)
-	if err != nil {
-		s.logger.Error("gossip: marshal failed", "err", err)
-		return
-	}
+	b := flatbuffers.NewBuilder(64)
+	nodeIDOff := b.CreateString(s.nodeID)
+	clusterpb.NodeStatsMsgStart(b)
+	clusterpb.NodeStatsMsgAddNodeId(b, nodeIDOff)
+	clusterpb.NodeStatsMsgAddDiskUsedPct(b, stats.DiskUsedPct)
+	clusterpb.NodeStatsMsgAddDiskAvailBytes(b, stats.DiskAvailBytes)
+	clusterpb.NodeStatsMsgAddRequestsPerSec(b, stats.RequestsPerSec)
+	clusterpb.NodeStatsMsgAddJoinedAt(b, joinedAtUnix)
+	root := clusterpb.NodeStatsMsgEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	payload := make([]byte, len(raw))
+	copy(payload, raw)
 	msg := &transport.Message{Type: transport.StreamAdmin, Payload: payload}
 	for _, peer := range s.peers {
 		if err := s.tr.Send(ctx, peer, msg); err != nil {
@@ -115,32 +117,45 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 			if rm.Message.Type != transport.StreamAdmin {
 				continue
 			}
-			var pb clusterpb.NodeStatsMsg
-			if err := proto.Unmarshal(rm.Message.Payload, &pb); err != nil {
-				r.logger.Warn("gossip: unmarshal failed", "from", rm.From, "err", err)
+			if len(rm.Message.Payload) == 0 {
 				continue
 			}
-			if pb.NodeId == "" {
+			pb, err := decodeNodeStatsMsg(rm.Message.Payload)
+			if err != nil {
+				r.logger.Warn("gossip: invalid payload", "err", err)
+				continue
+			}
+			nodeID := string(pb.NodeId())
+			if nodeID == "" {
 				continue
 			}
 			// Verify the claimed NodeId matches the actual sender address to prevent spoofing.
-			if !nodeIDMatchesFrom(pb.NodeId, rm.From) {
-				r.logger.Warn("gossip: NodeId mismatch, dropping", "claimed", pb.NodeId, "from", rm.From)
+			if !nodeIDMatchesFrom(nodeID, rm.From) {
+				r.logger.Warn("gossip: NodeId mismatch, dropping", "claimed", nodeID, "from", rm.From)
 				continue
 			}
 			var joinedAt time.Time
-			if pb.JoinedAt != 0 {
-				joinedAt = time.Unix(pb.JoinedAt, 0)
+			if pb.JoinedAt() != 0 {
+				joinedAt = time.Unix(pb.JoinedAt(), 0)
 			}
 			r.store.Set(NodeStats{
-				NodeID:         pb.NodeId,
-				DiskUsedPct:    pb.DiskUsedPct,
-				DiskAvailBytes: pb.DiskAvailBytes,
-				RequestsPerSec: pb.RequestsPerSec,
+				NodeID:         nodeID,
+				DiskUsedPct:    pb.DiskUsedPct(),
+				DiskAvailBytes: pb.DiskAvailBytes(),
+				RequestsPerSec: pb.RequestsPerSec(),
 				JoinedAt:       joinedAt,
 			})
 		}
 	}
+}
+
+func decodeNodeStatsMsg(data []byte) (msg *clusterpb.NodeStatsMsg, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode node stats: invalid flatbuffer: %v", r)
+		}
+	}()
+	return clusterpb.GetRootAsNodeStatsMsg(data, 0), nil
 }
 
 // nodeIDMatchesFrom returns true if nodeID corresponds to the connection address from.

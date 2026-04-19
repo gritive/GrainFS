@@ -11,10 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/protobuf/proto"
 
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
-	"github.com/gritive/GrainFS/internal/metrics"
+"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // migrationInflightTTL is the duration a proposed migration is tracked to prevent
@@ -463,23 +461,15 @@ func (p *BalancerProposer) proposeMigration(src, dst string) {
 	p.inflight[inflightID] = now.Add(migrationInflightTTL)
 	p.mu.Unlock()
 
-	inner, err := proto.Marshal(&clusterpb.MigrateShardCmd{
+	outer, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
 		Bucket:    bucket,
 		Key:       key,
-		VersionId: versionID,
+		VersionID: versionID,
 		SrcNode:   src,
 		DstNode:   dst,
 	})
 	if err != nil {
 		p.logger.Error("balancer: marshal MigrateShardCmd", "err", err)
-		return
-	}
-	outer, err := proto.Marshal(&clusterpb.Command{
-		Type: uint32(CmdMigrateShard),
-		Data: inner,
-	})
-	if err != nil {
-		p.logger.Error("balancer: marshal Command", "err", err)
 		return
 	}
 	if err := p.node.Propose(outer); err != nil {

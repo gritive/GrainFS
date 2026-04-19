@@ -237,32 +237,20 @@ func TestEncodeDecodeCommand_DeleteBucketPolicy(t *testing.T) {
 }
 
 func TestDecodeCommands_InvalidData(t *testing.T) {
-	invalid := []byte("not valid protobuf data")
+	// FlatBuffers panics on malformed data; test that the top-level entry
+	// points (DecodeCommand, unmarshalSnapshotState) convert panics to errors.
+	// Inner decode functions are only called with already-validated data.
+	_, err := DecodeCommand([]byte("not valid flatbuffer data"))
+	assert.Error(t, err, "DecodeCommand should fail on invalid data")
 
-	tests := []struct {
-		name string
-		fn   func([]byte) error
-	}{
-		{"decodeCreateBucketCmd", func(d []byte) error { _, err := decodeCreateBucketCmd(d); return err }},
-		{"decodeDeleteBucketCmd", func(d []byte) error { _, err := decodeDeleteBucketCmd(d); return err }},
-		{"decodePutObjectMetaCmd", func(d []byte) error { _, err := decodePutObjectMetaCmd(d); return err }},
-		{"decodeDeleteObjectCmd", func(d []byte) error { _, err := decodeDeleteObjectCmd(d); return err }},
-		{"decodeCreateMultipartUploadCmd", func(d []byte) error { _, err := decodeCreateMultipartUploadCmd(d); return err }},
-		{"decodeCompleteMultipartCmd", func(d []byte) error { _, err := decodeCompleteMultipartCmd(d); return err }},
-		{"decodeAbortMultipartCmd", func(d []byte) error { _, err := decodeAbortMultipartCmd(d); return err }},
-		{"decodeSetBucketPolicyCmd", func(d []byte) error { _, err := decodeSetBucketPolicyCmd(d); return err }},
-		{"decodeDeleteBucketPolicyCmd", func(d []byte) error { _, err := decodeDeleteBucketPolicyCmd(d); return err }},
-		{"unmarshalObjectMeta", func(d []byte) error { _, err := unmarshalObjectMeta(d); return err }},
-		{"unmarshalSnapshotState", func(d []byte) error { _, err := unmarshalSnapshotState(d); return err }},
-		{"unmarshalClusterMultipartMeta", func(d []byte) error { _, err := unmarshalClusterMultipartMeta(d); return err }},
-	}
+	_, err = unmarshalSnapshotState([]byte("not valid flatbuffer data"))
+	assert.Error(t, err, "unmarshalSnapshotState should fail on invalid data")
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.fn(invalid)
-			assert.Error(t, err, "%s should fail on invalid protobuf", tt.name)
-		})
-	}
+	_, err = DecodeCommand(nil)
+	assert.Error(t, err, "DecodeCommand should fail on nil data")
+
+	_, err = unmarshalSnapshotState(nil)
+	assert.Error(t, err, "unmarshalSnapshotState should fail on nil data")
 }
 
 func TestEncodePayload_UnknownCommandType(t *testing.T) {
