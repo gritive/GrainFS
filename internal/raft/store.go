@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/dgraph-io/badger/v4"
@@ -27,6 +29,10 @@ type LogStore interface {
 	// TruncateAfter removes all entries with index > afterIndex.
 	TruncateAfter(afterIndex uint64) error
 
+	// TruncateBefore removes all entries with index < beforeIndex.
+	// Used for Raft log GC: callers must only pass a quorum-safe watermark.
+	TruncateBefore(beforeIndex uint64) error
+
 	// SaveState persists currentTerm and votedFor atomically.
 	SaveState(term uint64, votedFor string) error
 
@@ -49,21 +55,76 @@ var (
 	keyState        = []byte("raft:state")
 	keySnapshot     = []byte("raft:snapshot")
 	keySnapshotMeta = []byte("raft:snapshot:meta")
+	keyManagedMode  = []byte("raft:meta:managed")
 )
+
+// BadgerLogStoreOption configures a BadgerLogStore.
+type BadgerLogStoreOption func(*BadgerLogStore)
+
+// WithManagedMode enables Raft log GC mode. The managed-mode flag is
+// persisted in the DB; reopening with a different setting returns an error.
+func WithManagedMode() BadgerLogStoreOption {
+	return func(s *BadgerLogStore) { s.managedMode = true }
+}
 
 // BadgerLogStore implements LogStore using BadgerDB.
 type BadgerLogStore struct {
-	db *badger.DB
+	db          *badger.DB
+	managedMode bool
 }
 
+// IsManagedMode reports whether this store was opened with managed mode.
+func (s *BadgerLogStore) IsManagedMode() bool { return s.managedMode }
+
 // NewBadgerLogStore creates a new log store backed by BadgerDB.
-func NewBadgerLogStore(path string) (*BadgerLogStore, error) {
-	opts := badger.DefaultOptions(path).WithLogger(nil).WithSyncWrites(true)
-	db, err := badger.Open(opts)
+func NewBadgerLogStore(path string, opts ...BadgerLogStoreOption) (*BadgerLogStore, error) {
+	s := &BadgerLogStore{}
+	for _, opt := range opts {
+		opt(s)
+	}
+	dbOpts := badger.DefaultOptions(path).WithLogger(nil).WithSyncWrites(true)
+	db, err := badger.Open(dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger log store: %w", err)
 	}
-	return &BadgerLogStore{db: db}, nil
+	s.db = db
+	if err := s.checkManagedMode(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// checkManagedMode writes (first open) or verifies (subsequent opens) the
+// managed-mode flag persisted in the DB. Mismatch returns a clear error.
+func (s *BadgerLogStore) checkManagedMode() error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(keyManagedMode)
+		if err != nil {
+			if !errors.Is(err, badger.ErrKeyNotFound) {
+				return err
+			}
+			// First open: record the chosen mode.
+			val := "false"
+			if s.managedMode {
+				val = "true"
+			}
+			return txn.Set(keyManagedMode, []byte(val))
+		}
+		return item.Value(func(val []byte) error {
+			stored := string(val) == "true"
+			if stored == s.managedMode {
+				return nil
+			}
+			if stored {
+				return fmt.Errorf("data dir opened in managed=true; " +
+					"use --badger-managed-mode or start fresh")
+			}
+			return fmt.Errorf("data dir opened in non-managed mode; " +
+				"remove --badger-managed-mode to continue non-managed, " +
+				"or wipe data/raft/ and restart to enable managed mode")
+		})
+	})
 }
 
 func logKey(index uint64) []byte {
@@ -187,6 +248,49 @@ func (s *BadgerLogStore) TruncateAfter(afterIndex uint64) error {
 		}
 		return nil
 	})
+}
+
+func (s *BadgerLogStore) TruncateBefore(beforeIndex uint64) error {
+	if beforeIndex == 0 {
+		return nil
+	}
+	const batchSize = 1000
+	endKey := logKey(beforeIndex)
+	for {
+		done := false
+		err := s.db.Update(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefixLog
+			it := txn.NewIterator(opts)
+			defer it.Close()
+
+			count := 0
+			for it.Seek(prefixLog); it.ValidForPrefix(prefixLog); it.Next() {
+				key := it.Item().Key()
+				if bytes.Compare(key, endKey) >= 0 {
+					done = true
+					break
+				}
+				if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
+					return err
+				}
+				count++
+				if count >= batchSize {
+					break
+				}
+			}
+			if count < batchSize {
+				done = true
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
 }
 
 func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {

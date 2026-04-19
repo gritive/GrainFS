@@ -5,8 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,6 +60,8 @@ type Config struct {
 	Peers            []string      // addresses of other nodes
 	ElectionTimeout  time.Duration // base election timeout
 	HeartbeatTimeout time.Duration
+	ManagedMode      bool          // enable periodic Raft log GC via quorum watermark
+	LogGCInterval    time.Duration // how often log GC runs (default 30s)
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -145,6 +150,10 @@ type Node struct {
 
 	// proposal waiters: log index -> channel signaled when committed
 	waiters map[uint64]chan struct{}
+
+	// log GC tracking (Phase 14d)
+	lastLogGC time.Time
+	gcRunning atomic.Bool // prevents overlapping GC goroutines
 }
 
 // NewNode creates a new Raft node. Call Start() to begin operation.
@@ -525,6 +534,12 @@ func (n *Node) runLeader() {
 		return
 	case <-ticker.C:
 		n.replicateToAll()
+		if !n.gcRunning.Swap(true) {
+			go func() {
+				defer n.gcRunning.Store(false)
+				n.maybeRunLogGC()
+			}()
+		}
 	case <-n.resetCh:
 		// Stepped down due to higher term
 		return
@@ -679,6 +694,76 @@ func (n *Node) advanceCommitIndex() {
 			return
 		}
 	}
+}
+
+// QuorumMinMatchIndex returns the highest log index replicated to at least a
+// quorum of nodes (including self). Safe to use as a GC watermark.
+// For a 3-node cluster with matchIndex [100, 80, 50], returns 80 (index 1 in
+// descending sort): that index is guaranteed on ≥2 of 3 nodes.
+func (n *Node) QuorumMinMatchIndex() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.quorumMinMatchIndexLocked()
+}
+
+func (n *Node) quorumMinMatchIndexLocked() uint64 {
+	vals := make([]uint64, 0, len(n.config.Peers)+1)
+	for _, peer := range n.config.Peers {
+		vals = append(vals, n.matchIndex[peer])
+	}
+	vals = append(vals, n.matchIndex[n.id])
+	sort.Slice(vals, func(i, j int) bool { return vals[i] > vals[j] })
+	return vals[len(vals)/2]
+}
+
+// maybeRunLogGC truncates the Raft log store up to the quorum watermark when
+// managed mode is enabled and the GC interval has elapsed.
+func (n *Node) maybeRunLogGC() {
+	n.mu.Lock()
+	if n.store == nil || !n.config.ManagedMode {
+		n.mu.Unlock()
+		return
+	}
+	interval := n.config.LogGCInterval
+	if interval == 0 {
+		interval = 30 * time.Second
+	}
+	now := time.Now()
+	if !n.lastLogGC.IsZero() && now.Sub(n.lastLogGC) < interval {
+		n.mu.Unlock()
+		return
+	}
+	// Leader: quorum watermark (highest index confirmed on majority).
+	// Follower: commitIndex (set by leader only after quorum majority).
+	var watermark uint64
+	if n.state == Leader {
+		watermark = n.quorumMinMatchIndexLocked()
+	} else {
+		watermark = n.commitIndex
+	}
+	n.lastLogGC = now
+	n.mu.Unlock()
+
+	if watermark == 0 {
+		return
+	}
+	// Snapshot gate: without a snapshot covering the watermark, lagging
+	// followers that need pre-GC entries cannot recover via InstallSnapshot.
+	snapIdx, _, _, err := n.store.LoadSnapshot()
+	if err != nil {
+		slog.Warn("raft: log GC skipped — snapshot load error", "err", err)
+		return
+	}
+	if snapIdx < watermark {
+		slog.Warn("raft: log GC skipped — no snapshot covers watermark; take a snapshot first",
+			"snapIdx", snapIdx, "watermark", watermark)
+		return
+	}
+	if err := n.store.TruncateBefore(watermark); err != nil {
+		slog.Warn("raft: log GC failed", "watermark", watermark, "err", err)
+		return
+	}
+	slog.Info("raft: log GC complete", "watermark", watermark)
 }
 
 // HandleRequestVote processes an incoming RequestVote RPC.
