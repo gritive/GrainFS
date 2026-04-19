@@ -1,13 +1,5 @@
 # TODOS
 
-## Phase 14: Scale
-
-- [ ] Raft waiter leak on truncation — flushBatch 등록한 n.waiters 항목이 step-down + log truncation 시 미정리. HandleAppendEntries truncation path에서 affected index 범위의 waiters 삭제 필요 (Opus review finding #1)
-- [ ] Thin provisioning
-- [ ] sharding, multi raft
-- [ ] migration: nfs: virtual overlay
-- [ ] migration: nbd: block proxying
-
 ## Phase 15: Dashboard
 
 - [ ] storage & cluster management and monitoring
@@ -16,28 +8,34 @@
 - [ ] dashboard: snapshot, backup manage
 - [ ] dashboard: event logging
 
-## Copy on Write (NBD — thin provisioning 이후)
+## Phase 16: Advanced Storage
 
-- [ ] NBD Copy on Write in storage layer
+- [ ] Thin provisioning
+- [ ] NBD Copy on Write in storage layer (thin provisioning 이후)
 - [ ] Reference counting for shared blocks
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
+- [ ] Erasure Coding을 활용한 Bit Rot 방지
+- [ ] io.WriteTo 구현 (FlatBuffers zero-copy)
+- [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
 
-## Deferred 12m+ (측정된 병목 확인 후)
+## Phase 17: Scale-Out
 
-- [ ] zero copy, zero allocation, sendfile (현재 SetBodyStream 검증 먼저)
-- [ ] PGO
-- [ ] io_uring
-- [ ] SoA (Structure of Arrays)
-- [ ] SIMD
-- [ ] Unified buffer cache: Centralized Page Cache
-- [ ] Zero-copy Protocol Bridge (NFS to S3)
-- [ ] SPDK
+- [ ] Sharding, multi raft
+- [ ] Migration: NFS virtual overlay
+- [ ] Migration: NBD block proxying
+- [ ] nbd over internet for edge computing (powered by wireguard)
+
+## Phase 18: Performance
+
+- [ ] sendfile syscall (SetBodyStream 완료, syscall 미구현)
 - [ ] hertz: Zero-copy Read/Write
 - [ ] go-billy: Direct File I/O; O_DIRECT
-- [ ] smithy-go: io.WriteTo를 구현하여, FlatBuffers, zero-copy, zero-allocation 활용
-- [ ] Erasure Coding을 활용한 Bit Rot 방지
-- [ ] sync.Pool의 적극 활용
-- [ ] Zstd & Reed-Solomon: 버퍼 재사용 with sync.Pool
-- [ ] nbd over internet for edge computing (powered by wireguard)
-- [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
+- [ ] Zero-copy Protocol Bridge (NFS to S3)
+- [ ] Unified buffer cache: Centralized Page Cache
+- [ ] Reed-Solomon 버퍼 재사용 with sync.Pool
+- [ ] io_uring
+- [ ] SPDK
+- [ ] SoA (Structure of Arrays)
+- [ ] SIMD
+- [ ] PGO

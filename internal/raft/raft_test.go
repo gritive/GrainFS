@@ -885,3 +885,107 @@ func TestIntegration_LogGC_PartitionAndRecovery(t *testing.T) {
 		assert.Equal(t, uint64(15), ci, "node %s commitIndex mismatch", n.ID())
 	}
 }
+
+func TestHandleAppendEntries_EntryConflictAbortsWaiters(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	node := NewNode(cfg)
+
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.log = []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("cmd1")},
+		{Term: 1, Index: 2, Command: []byte("cmd2")},
+		{Term: 1, Index: 3, Command: []byte("cmd3")},
+	}
+	ch1 := make(chan error, 1)
+	ch2 := make(chan error, 1)
+	ch3 := make(chan error, 1)
+	node.waiters[1] = ch1
+	node.waiters[2] = ch2
+	node.waiters[3] = ch3
+	node.mu.Unlock()
+
+	reply := node.HandleAppendEntries(&AppendEntriesArgs{
+		Term:     2,
+		LeaderID: "node2",
+		Entries:  []LogEntry{{Term: 2, Index: 1, Command: []byte("new")}},
+	})
+	assert.True(t, reply.Success)
+
+	node.mu.Lock()
+	assert.Empty(t, node.waiters)
+	node.mu.Unlock()
+
+	assert.ErrorIs(t, <-ch1, ErrProposalFailed)
+	assert.ErrorIs(t, <-ch2, ErrProposalFailed)
+	assert.ErrorIs(t, <-ch3, ErrProposalFailed)
+}
+
+func TestHandleAppendEntries_PrevLogConflictAbortsWaiters(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	node := NewNode(cfg)
+
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.log = []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("cmd1")},
+		{Term: 2, Index: 2, Command: []byte("cmd2")},
+		{Term: 2, Index: 3, Command: []byte("cmd3")},
+	}
+	ch2 := make(chan error, 1)
+	ch3 := make(chan error, 1)
+	node.waiters[2] = ch2
+	node.waiters[3] = ch3
+	node.mu.Unlock()
+
+	// New leader: PrevLogIndex=2, PrevLogTerm=1 (node has Term=2 at index 2 → conflict)
+	reply := node.HandleAppendEntries(&AppendEntriesArgs{
+		Term:         3,
+		LeaderID:     "node2",
+		PrevLogIndex: 2,
+		PrevLogTerm:  1,
+	})
+	assert.False(t, reply.Success)
+
+	node.mu.Lock()
+	assert.Empty(t, node.waiters)
+	node.mu.Unlock()
+
+	assert.ErrorIs(t, <-ch2, ErrProposalFailed)
+	assert.ErrorIs(t, <-ch3, ErrProposalFailed)
+}
+
+func TestHandleInstallSnapshot_AbortsWaiters(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	node := NewNode(cfg)
+
+	node.mu.Lock()
+	node.currentTerm = 1
+	node.log = []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("cmd1")},
+		{Term: 1, Index: 2, Command: []byte("cmd2")},
+	}
+	ch1 := make(chan error, 1)
+	ch2 := make(chan error, 1)
+	node.waiters[1] = ch1
+	node.waiters[2] = ch2
+	node.mu.Unlock()
+
+	reply := node.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "node2",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("snapshot"),
+	})
+	assert.Equal(t, uint64(2), reply.Term)
+
+	node.mu.Lock()
+	assert.Empty(t, node.waiters)
+	node.mu.Unlock()
+
+	assert.ErrorIs(t, <-ch1, ErrProposalFailed)
+	assert.ErrorIs(t, <-ch2, ErrProposalFailed)
+}
