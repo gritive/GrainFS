@@ -633,6 +633,9 @@ func TestNode_LogGC_TruncatesStoreToWatermark(t *testing.T) {
 	n.matchIndex["C"] = 15
 	n.mu.Unlock()
 
+	// Snapshot gate: save snapshot at watermark (index=20) before GC
+	require.NoError(t, store.SaveSnapshot(20, 1, []byte(`{"snap":"test"}`)))
+
 	time.Sleep(5 * time.Millisecond)
 	n.maybeRunLogGC()
 
@@ -705,6 +708,9 @@ func TestNode_LogGC_SkipsBeforeInterval(t *testing.T) {
 	n.matchIndex["A"] = 2
 	n.matchIndex["B"] = 2
 	n.mu.Unlock()
+
+	// Snapshot gate: save snapshot at watermark (index=2) before GC
+	require.NoError(t, store.SaveSnapshot(2, 1, []byte(`{"snap":"test"}`)))
 
 	// First call sets lastLogGC but skips (interval not elapsed)
 	n.maybeRunLogGC()
@@ -818,6 +824,11 @@ func TestIntegration_LogGC_PartitionAndRecovery(t *testing.T) {
 	// Wait for all nodes to commit all 10 entries
 	for _, n := range cluster.nodes {
 		waitForCommitIndex(t, n, 10, 3*time.Second)
+	}
+
+	// Snapshot gate: save snapshot at watermark (index=10) on all stores before GC
+	for _, s := range stores {
+		require.NoError(t, s.SaveSnapshot(10, 1, []byte(`{"snap":"test"}`)))
 	}
 
 	// GC: run on all nodes (watermark = quorumMinMatchIndex = 10)

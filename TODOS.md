@@ -4,7 +4,7 @@
 
 - [x] ScrubObjects cursor pagination — ScanObjects BadgerDB 전체 순회 → cursor 기반으로 교체 (10K+ 클러스터 대비) [v0.0.11]
 - [x] scrubber: orphan shard 탐지 및 정리 (migration Phase-3→4 크래시 gap으로 남는 src 고아 샤드) [v0.0.11]
-- [x] badgerdb: managed mode (raft) — QuorumMinMatchIndex GC, --badger-managed-mode 플래그 [v0.0.12]
+- [x] badgerdb: managed mode (raft) — QuorumMinMatchIndex GC, --badger-managed-mode 플래그 [v0.0.11]
 - [x] badgerdb: write batch (audit: call site 없음, 변경 불필요) [v0.0.11]
 - [x] badgerdb: TableLoadingMode (BadgerDB v4에서 제거됨, N/A) [v0.0.11]
 - [x] badgerdb: LSM Read Amplification, bloom filter — WithBloomFalsePositive 옵션 [v0.0.11]

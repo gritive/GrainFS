@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -152,6 +153,7 @@ type Node struct {
 
 	// log GC tracking (Phase 14d)
 	lastLogGC time.Time
+	gcRunning atomic.Bool // prevents overlapping GC goroutines
 }
 
 // NewNode creates a new Raft node. Call Start() to begin operation.
@@ -532,7 +534,12 @@ func (n *Node) runLeader() {
 		return
 	case <-ticker.C:
 		n.replicateToAll()
-		n.maybeRunLogGC()
+		if !n.gcRunning.Swap(true) {
+			go func() {
+				defer n.gcRunning.Store(false)
+				n.maybeRunLogGC()
+			}()
+		}
 	case <-n.resetCh:
 		// Stepped down due to higher term
 		return
@@ -738,6 +745,18 @@ func (n *Node) maybeRunLogGC() {
 	n.mu.Unlock()
 
 	if watermark == 0 {
+		return
+	}
+	// Snapshot gate: without a snapshot covering the watermark, lagging
+	// followers that need pre-GC entries cannot recover via InstallSnapshot.
+	snapIdx, _, _, err := n.store.LoadSnapshot()
+	if err != nil {
+		slog.Warn("raft: log GC skipped — snapshot load error", "err", err)
+		return
+	}
+	if snapIdx < watermark {
+		slog.Warn("raft: log GC skipped — no snapshot covers watermark; take a snapshot first",
+			"snapIdx", snapIdx, "watermark", watermark)
 		return
 	}
 	if err := n.store.TruncateBefore(watermark); err != nil {

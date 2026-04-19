@@ -254,24 +254,43 @@ func (s *BadgerLogStore) TruncateBefore(beforeIndex uint64) error {
 	if beforeIndex == 0 {
 		return nil
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefixLog
-		it := txn.NewIterator(opts)
-		defer it.Close()
+	const batchSize = 1000
+	endKey := logKey(beforeIndex)
+	for {
+		done := false
+		err := s.db.Update(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefixLog
+			it := txn.NewIterator(opts)
+			defer it.Close()
 
-		endKey := logKey(beforeIndex)
-		for it.Seek(prefixLog); it.ValidForPrefix(prefixLog); it.Next() {
-			key := it.Item().Key()
-			if bytes.Compare(key, endKey) >= 0 {
-				break
+			count := 0
+			for it.Seek(prefixLog); it.ValidForPrefix(prefixLog); it.Next() {
+				key := it.Item().Key()
+				if bytes.Compare(key, endKey) >= 0 {
+					done = true
+					break
+				}
+				if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
+					return err
+				}
+				count++
+				if count >= batchSize {
+					break
+				}
 			}
-			if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
-				return err
+			if count < batchSize {
+				done = true
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+		if done {
+			return nil
+		}
+	}
 }
 
 func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {
