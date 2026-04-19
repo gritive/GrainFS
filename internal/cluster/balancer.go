@@ -154,7 +154,7 @@ type BalancerProposer struct {
 	store     *NodeStatsStore
 	node      RaftBalancerNode
 	cfg       BalancerConfig
-	mu        sync.Mutex           // protects active, inflight, and cbs
+	mu        sync.Mutex           // protects active, inflight; cbs written by syncCB (ticker goroutine only)
 	active    bool                 // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt time.Time
 	picker    ObjectPicker         // nil = no proposals until SetObjectPicker is called

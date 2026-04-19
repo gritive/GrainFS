@@ -113,9 +113,9 @@ func (e *MigrationExecutor) SetMaxWriteRetries(n int) {
 	e.maxWriteRetries = n
 }
 
-// Start launches the background TTL sweep loop. No-op if pendingTTL == 0.
+// Start launches the background TTL sweep loop. No-op if pendingTTL <= 0.
 func (e *MigrationExecutor) Start(ctx context.Context) {
-	if e.pendingTTL == 0 {
+	if e.pendingTTL <= 0 {
 		return
 	}
 	go e.sweepLoop(ctx)
@@ -288,6 +288,15 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	e.pending[id] = commitCh
 	e.mu.Unlock()
 
+	// Wire TTL cancellation: derive a cancellable context so sweepExpired can abort
+	// a stuck migration by calling cancel(). defer ensures cleanup on all exit paths.
+	if e.pendingTTL > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		e.registerPending(id, cancel)
+	}
+
 	if !earlyCommit {
 		// Phase 1: copy all shards src → dst
 		e.logger.Debug("migration phase start", "phase", "1", "task", id)
@@ -369,6 +378,7 @@ func (e *MigrationExecutor) cleanupPending(id string) {
 	if ok {
 		close(ch)
 	}
+	e.removePending(id)
 }
 
 // markDone records id as completed. Must be called with mu held.

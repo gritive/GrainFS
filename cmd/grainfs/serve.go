@@ -601,6 +601,9 @@ func startBalancer(
 	tenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
 	warmupTimeout, _ := cmd.Flags().GetDuration("balancer-warmup-timeout")
 	cbThreshold, _ := cmd.Flags().GetFloat64("balancer-cb-threshold")
+	if cbThreshold < 0 || cbThreshold > 1 {
+		return nil, fmt.Errorf("balancer-cb-threshold must be in [0, 1], got %g", cbThreshold)
+	}
 	migMaxRetries, _ := cmd.Flags().GetInt("balancer-migration-max-retries")
 	migPendingTTL, _ := cmd.Flags().GetDuration("balancer-migration-pending-ttl")
 
