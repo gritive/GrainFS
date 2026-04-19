@@ -251,7 +251,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 ### Phase 13: Auto-Balancing ✅
 
-**목표:** 클러스터 노드 간 디스크 사용률 불균형을 자동으로 해소한다.
+**목표:** 클러스터 노드 간 디스크 사용률 불균형을 자동으로 해소하고, 마이그레이션 실패 상황을 안전하게 처리한다.
 
 - **Gossip 프로토콜** ✅ — 노드별 `DiskUsedPct`/`RequestsPerSec` 를 QUIC 스트림으로 주기적으로 브로드캐스트. `GossipSender`/`GossipReceiver` + `NodeStatsStore` 구현. cold-start 시 DiskUsedPct=0 브로드캐스트 스킵으로 마이그레이션 폭풍 방지.
 - **BalancerProposer** ✅ — Raft 리더만 실행하는 발란싱 루프. 히스테리시스(trigger/stop 임계값), 리더 tenure 타이머, 부하 기반 리더십 이전 포함. `BalancerConfig`로 모든 파라미터 주입 가능.
@@ -259,11 +259,19 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - **부하 기반 읽기 라우팅** ✅ — `selectPeerByLoad`로 자신이 과부하일 때 요청을 경량 피어로 리다이렉트.
 - **QUIC StreamRouter 개선** ✅ — Gossip 스트림이 전용 채널을 사용해 제어 스트림과 독립 처리. 데드락 제거.
 - **보안**: NodeId 스푸핑 방지 (`conn.RemoteAddr()` 검증), Gossip 수신값 범위 클램프.
-
 - **`cmd/` 배선 & LocalObjectPicker** ✅ — `cmd/grainfs/serve.go`에서 balancer 플래그 + `startBalancer()` 연결. `LocalObjectPicker`로 shardsDir 스캔 기반 실제 오브젝트 선택 구현 완료.
+
+#### Phase 13 Resilience ✅ (v0.0.10)
+
+- **Circuit Breaker** ✅ — 목적지 노드별 2-state 디스크-풀 게이트. `grainfs_balancer_cb_open` 메트릭 + `--balancer-cb-threshold` 플래그 (기본 90%). 디스크 사용률이 임계값 초과 시 해당 노드를 마이그레이션 대상에서 제외.
+- **WriteShard 재시도** ✅ — 지수 백오프(±20% 지터) + `ErrPermanent` 즉시 실패 경로. `--balancer-migration-max-retries` 플래그 (기본 3회). `grainfs_balancer_shard_write_retries_total` 메트릭.
+- **Pending Migration TTL** ✅ — 좀비 마이그레이션 자동 취소. Phase 2(Raft 제안) 이후 1회 연장, 2차 만료 시 context cancel. `--balancer-migration-pending-ttl` 플래그 (기본 5분).
+- **Structured Logging** ✅ — `MigrationExecutor` Phase 1~4 진행 상황을 `phase=` 필드로 추적 가능.
+- **warmupComplete 개선** ✅ — `store.Len()` 대신 `NodeStats.UpdatedAt` 기반 최근성 검사로 false-positive 방지.
 
 **검증:**
 - 3노드 클러스터에서 Gossip 브로드캐스트 수신 및 `NodeStatsStore` 업데이트 확인 (unit/integration test)
 - `BalancerProposer.tickOnce`가 임계값 초과 시 `CmdMigrateShard` 제안 생성 확인
 - FSM `applyMigrateShard`가 `MigrationTask` 채널로 비동기 전달 확인
-- 부하 기반 피어 선택: 과부하 노드에서 최경량 피어로 리다이렉트 확인
+- Circuit Breaker: 디스크 풀 노드 제외 후 정상 노드로만 마이그레이션 확인
+- TTL sweep: 좀비 마이그레이션 5분 후 자동 취소 확인 (`-race -count=5` 통과)

@@ -6,8 +6,8 @@
 - **Circuit Breaker** — per-node 2-state (open/closed) disk-full 게이트. `grainfs_balancer_cb_open` (GaugeVec) 메트릭으로 상태 노출. `--balancer-cb-threshold` 플래그 (기본 0.90 = 90%)로 설정.
 - **WriteShard 재시도** — 지수 백오프 + ±20% 지터, `ErrPermanent` 즉시 실패 경로. `--balancer-migration-max-retries` 플래그 (기본 3회). `grainfs_balancer_shard_write_retries_total` (CounterVec) 메트릭.
 - **Pending Migration TTL** — 좀비 마이그레이션 자동 취소. Phase 2 이후 1회 연장(Option A), 2차 만료 시 취소. `--balancer-migration-pending-ttl` 플래그 (기본 5분). `grainfs_balancer_migration_pending_ttl_expired_total` 메트릭.
-- **Structured Logging** — `MigrationExecutor` 각 Phase(1-4)에 `phase=` 필드 포함 slog 출력.
-- **warmupComplete 수정** — `store.Len()` 비교 대신 `NodeStats.UpdatedAt` + `PeerSeenWindow` 기반 최근성 검사. `--balancer-peer-seen-window` 계열 설정 지원.
+- **Structured Logging** — 마이그레이션 Phase 1~4 진행 상황을 `phase=` 필드로 추적. `component=migration` 로그에서 현재 어느 단계가 걸렸는지 즉시 확인 가능.
+- **warmupComplete 개선** — 워밍업 완료 판단 기준을 `store.Len()` 비교에서 `NodeStats.UpdatedAt` 최근성 검사로 교체. 노드 재시작 직후 false-positive로 마이그레이션이 즉시 시작되는 문제 해소.
 - **4개 신규 메트릭** — `grainfs_balancer_cb_open`, `grainfs_balancer_cb_all_open_total`, `grainfs_balancer_shard_write_retries_total`, `grainfs_balancer_migration_pending_ttl_expired_total`.
 
 ### Fixed

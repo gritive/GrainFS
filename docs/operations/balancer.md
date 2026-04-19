@@ -42,13 +42,16 @@ FSM.applyMigrateShard → MigrationExecutor.Execute()
 
 | 플래그                             | 기본값 | 설명                                                 |
 | ---------------------------------- | ------ | ---------------------------------------------------- |
-| `--balancer-enabled`               | `true` | balancer 활성화 여부                                 |
-| `--balancer-gossip-interval`       | `30s`  | gossip + 불균형 평가 주기                            |
-| `--balancer-imbalance-trigger-pct` | `20.0` | 마이그레이션 시작 임계값 (max-min %)                 |
-| `--balancer-imbalance-stop-pct`    | `5.0`  | 마이그레이션 중단 임계값 (hysteresis)                |
-| `--balancer-migration-rate`        | `1`    | tick당 최대 제안 수 (미래 rate limiting 용)          |
-| `--balancer-leader-tenure-min`     | `5m`   | 리더 최소 보유 시간 (과부하 전 leader transfer 방지) |
-| `--balancer-warmup-timeout`        | `60s`  | 노드 시작 후 마이그레이션 유예 시간 (join/복구 중 오탐 방지) |
+| `--balancer-enabled`               | `true`  | balancer 활성화 여부                                 |
+| `--balancer-gossip-interval`       | `30s`   | gossip + 불균형 평가 주기                            |
+| `--balancer-imbalance-trigger-pct` | `20.0`  | 마이그레이션 시작 임계값 (max-min %)                 |
+| `--balancer-imbalance-stop-pct`    | `5.0`   | 마이그레이션 중단 임계값 (hysteresis)                |
+| `--balancer-migration-rate`        | `1`     | tick당 최대 제안 수 (미래 rate limiting 용)          |
+| `--balancer-leader-tenure-min`     | `5m`    | 리더 최소 보유 시간 (과부하 전 leader transfer 방지) |
+| `--balancer-warmup-timeout`        | `60s`   | 노드 시작 후 마이그레이션 유예 시간 (join/복구 중 오탐 방지) |
+| `--balancer-cb-threshold`          | `0.90`  | Circuit Breaker 임계값 — 디스크 사용률 fraction. 초과 시 해당 노드를 마이그레이션 대상에서 제외 |
+| `--balancer-migration-max-retries` | `3`     | shard write 최대 재시도 횟수. 지수 백오프(±20% 지터), `ErrPermanent` 즉시 포기 |
+| `--balancer-migration-pending-ttl` | `5m`    | 좀비 마이그레이션 자동 취소 TTL. Phase 2(Raft 제안) 이후 1회 연장 후 2차 만료 시 취소 |
 
 예시 (프로덕션 보수적 설정):
 
