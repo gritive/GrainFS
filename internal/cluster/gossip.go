@@ -219,9 +219,12 @@ func decodeNodeStatsMsg(data []byte) (msg *clusterpb.NodeStatsMsg, err error) {
 
 // nodeIDMatchesFrom returns true if nodeID corresponds to the connection address from.
 // Handles both "host:port" and bare "host" node ID formats for nodeID and from.
-// When from is a numeric IP but nodeID is a hostname, the comparison cannot be
-// done without DNS — the message is accepted and transport-layer auth (QUIC) is
-// the trust boundary in that deployment.
+//
+// When from is a numeric IP but nodeID is a hostname, strict comparison requires
+// DNS. Strict verification resolves the hostname and checks any resolved IP
+// against fromHost; on resolution failure the message is rejected. Previously
+// this path accepted unconditionally, which let an authenticated cluster-key
+// holder impersonate any peer hostname and poison RoutingCache / NodeStats.
 func nodeIDMatchesFrom(nodeID, from string) bool {
 	if nodeID == from {
 		return true
@@ -237,7 +240,20 @@ func nodeIDMatchesFrom(nodeID, from string) bool {
 	if nodeHost == fromHost {
 		return true
 	}
-	// If from is a numeric IP but nodeID is a hostname, DNS resolution is needed
-	// for strict validation. Accept the message; QUIC transport auth handles identity.
-	return net.ParseIP(fromHost) != nil && net.ParseIP(nodeHost) == nil
+	// Mixed format (from is an IP, nodeID is a hostname): resolve and compare.
+	// Bounded DNS lookup keeps the gossip hot-path cheap; LookupHost respects
+	// the system resolver's timeout so a broken DNS never stalls the receiver.
+	if net.ParseIP(fromHost) != nil && net.ParseIP(nodeHost) == nil {
+		addrs, err := net.LookupHost(nodeHost)
+		if err != nil {
+			return false
+		}
+		for _, a := range addrs {
+			if a == fromHost {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }

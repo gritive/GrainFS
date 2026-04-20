@@ -15,6 +15,13 @@
 - **cluster mode S3 auth propagation** (`cmd/grainfs/serve.go`) — `runCluster` 가 `authOpts` 를 받지 않아 `--access-key`/`--secret-key` 가 cluster 모드에서 조용히 무시되던 기존 갭. 이제 `runServe` 에서 `authOpts` 를 전달, `runCluster` 가 `srvOpts` 에 append. HealReceipt API 를 포함한 모든 cluster-mode endpoint 가 플래그대로 auth 를 강제.
 - **fresh cluster bootstrap spurious auto-migration** (`cmd/grainfs/serve.go`) — `runCluster` 가 `os.MkdirAll(metaDir)` 를 migration 체크 전에 호출해 빈 dataDir 에서도 solo→cluster migration branch 에 진입, migration 은 이미 열린 meta BadgerDB 를 다시 열려다 dir lock 충돌로 종료시키던 문제. 이제 migration 체크를 `MkdirAll` 및 `badger.Open` 위로 이동, `os.ReadDir` 결과로 빈 meta 디렉토리를 감지해 무관한 진입을 차단. Slice 3+ 에서 새 3-node 클러스터 부팅이 단발 시도로 성공.
 
+### Pre-landing review fixes
+- **gossipReceiver always-on when heal-receipt enabled** (`cmd/grainfs/serve.go`) — `gossipReceiver` 가 `--balancer-enabled=true` 일 때만 생성되어, balancer 를 끄고 heal-receipt 만 쓰는 배포에서 `StreamReceipt`(rolling-window gossip) 메시지를 소비할 주체가 없었음. `tr.Receive()` 를 드레인하지 않으니 `RoutingCache` 는 영구 empty, `/api/receipts/:id` 는 항상 3초 broadcast 경로로 떨어짐. 이제 balancer 가 꺼져 있어도 heal-receipt 가 켜지면 독립 `GossipReceiver` 를 부팅해 `tr.Receive()` 를 한 consumer 가 드레인하도록 강제. Receive()는 단일 채널이라 여러 consumer 가 경쟁하면 메시지가 한쪽에만 전달되므로 반드시 하나만 동작.
+- **nodeIDMatchesFrom spoofing gap** (`internal/cluster/gossip.go`) — `from=IP`, `nodeID=hostname` 조합에서 무조건 `true` 를 반환하던 허용적 fallback 을 `net.LookupHost` 기반 strict verification 으로 교체. 인증된 cluster-key 보유자가 hostname 을 위장해 `RoutingCache`/`NodeStatsStore` 를 오염시키는 경로를 닫음. DNS 실패 시 reject. `TestNodeIDMatchesFrom` 에 `localhost ↔ 127.0.0.1` positive case 와 `node-a` 가상 hostname negative case 추가.
+- **ListReceipts 시간 범위 상한** (`internal/receipt/api.go`) — `NewAPI` 에 `maxRange time.Duration` 파라미터 추가, `(to - from) > maxRange` 면 `400`. wiring 에서 `retention` 을 그대로 전달해 인증된 사용자가 거대 ts:* 스캔으로 BadgerDB 를 DoS 하지 못하도록. retention 바깥은 어차피 TTL expired 라 실 결과 가림 없음. `TestAPI_ListReceipts_RejectsOversizedRange` 회귀 테스트.
+- **Store.Put Timestamp 검증** (`internal/receipt/store.go`) — `Timestamp.IsZero()` 또는 `UnixNano() < 0` 이면 `ErrInvalidTimestamp`. `tsIndexKey` 의 `%019d` padding 은 non-negative unix-nano 를 전제로 하며, 음수는 `"-…"` 접두사를 만들어 digit sort 보다 앞서 정렬돼 `List` 시간순 및 `RecentReceiptIDs` reverse scan 을 오염. `TestStore_Put_RejectsZeroTimestamp` 추가.
+- **빈 peer 필터링** (`cmd/grainfs/serve.go`) — `strings.Split("", ",")` → `[""]`, `"a,,b"` → `["a","","b"]` 가 gossip sender 의 매 tick 경고 로그와 broadcaster 의 무의미한 `""` fan-out 시도를 유발. `filterEmpty` 헬퍼로 `runCluster` 와 `joinClusterLive` 의 split 결과를 정제.
+
 ### Tests
 - `TestRoutingCache_*` — Update/Lookup/Evict 의미, concurrent reader/writer race detector 통과.
 - `TestReceiptGossip*` / `TestReceiptBroadcast*` — FlatBuffers 페이로드 round-trip, NodeId mismatch drop, fan-out 타임아웃, first-success 조기 취소.

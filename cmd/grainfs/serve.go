@@ -418,7 +418,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("--raft-addr is required when --peers is set")
 	}
 
-	peers := strings.Split(peersStr, ",")
+	// strings.Split always yields at least one element — empty input or
+	// trailing commas produce "" entries that waste a gossip tick each.
+	peers := filterEmpty(strings.Split(peersStr, ","))
 
 	metaDir := filepath.Join(dataDir, "meta")
 	raftDir := filepath.Join(dataDir, "raft")
@@ -561,6 +563,21 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err != nil {
 			slog.Warn("balancer start failed", "err", err)
 		}
+	}
+
+	// Ensure a single GossipReceiver drains tr.Receive() whenever a feature
+	// needs StreamReceipt gossip (heal-receipt's RoutingCache lives on this
+	// path). Only one consumer is allowed because Receive() is a single
+	// channel — competing readers would deliver each message to only one.
+	// When balancer is off but heal-receipt is on, create a bare receiver;
+	// its NodeStatsStore is unused in this path but required by the ctor.
+	healReceiptEnabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
+	if gossipReceiver == nil && healReceiptEnabled {
+		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
+		standaloneStats := cluster.NewNodeStatsStore(3 * bGossipInterval)
+		gossipReceiver = cluster.NewGossipReceiver(quicTransport, standaloneStats)
+		go gossipReceiver.Run(ctx)
+		slog.Info("gossip receiver started (receipt-only, balancer disabled)", "component", "gossip")
 	}
 
 	var backend storage.Backend = cachedBackend
@@ -823,6 +840,19 @@ func startBalancer(
 // until Raft commits one (quorum reached, leader elected) or the deadline
 // elapses. "ErrBucketAlreadyExists" is success. "not the leader" and
 // transport errors are treated as transient.
+// filterEmpty drops "" entries from the slice. strings.Split(",",",") and
+// strings.Split("",",") both yield elements that would be wasted as peer
+// addresses — gossip sends to "" log a warning every tick.
+func filterEmpty(ss []string) []string {
+	out := ss[:0]
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func createDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	backoff := 100 * time.Millisecond
@@ -890,7 +920,7 @@ func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, d
 		nodeID = generateNodeID(dataDir)
 	}
 
-	peers := strings.Split(peersStr, ",")
+	peers := filterEmpty(strings.Split(peersStr, ","))
 
 	metaDir := filepath.Join(dataDir, "meta")
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {

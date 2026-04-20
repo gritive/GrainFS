@@ -115,7 +115,7 @@ func (c *stitchedCluster) put(t *testing.T, location string, id string, ts time.
 // get exercises the API through the full resolution chain.
 func (c *stitchedCluster) get(t *testing.T, id string) *httptest.ResponseRecorder {
 	t.Helper()
-	api := NewAPI(c.local, c.cache, c)
+	api := NewAPI(c.local, c.cache, c, 0)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/receipts/"+id, nil)
 	api.ServeGetReceipt(rec, req, id)
@@ -179,7 +179,7 @@ func TestIntegration_ListAcrossTimeRange_LocalOnly(t *testing.T) {
 	c.put(t, "local", "rcpt-1", base.Add(30*time.Second))
 	c.put(t, "local", "rcpt-2", base.Add(2*time.Hour))
 
-	api := NewAPI(c.local, c.cache, c)
+	api := NewAPI(c.local, c.cache, c, 0)
 	rec := httptest.NewRecorder()
 	url := "/api/receipts?from=" + base.Format(time.RFC3339Nano) +
 		"&to=" + base.Add(time.Hour).Format(time.RFC3339Nano)

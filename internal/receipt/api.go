@@ -41,21 +41,25 @@ type PeerQuerier interface {
 // internal/server — this package exposes stdlib http.ResponseWriter
 // handlers so it stays framework-agnostic and easy to unit-test.
 type API struct {
-	store   *Store
-	routes  RouteLookup
-	querier PeerQuerier
-	logger  *slog.Logger
+	store    *Store
+	routes   RouteLookup
+	querier  PeerQuerier
+	maxRange time.Duration // 0 = unlimited; otherwise caps (to-from) on List
+	logger   *slog.Logger
 }
 
 // NewAPI builds an API. routes may be nil on a single-node deployment.
 // querier may be nil when this node has no peers configured (local-only
-// lookups only).
-func NewAPI(store *Store, routes RouteLookup, querier PeerQuerier) *API {
+// lookups only). maxRange caps how wide a List query can be — pass the
+// configured retention so authenticated callers can't force unbounded
+// ts:* index scans. Zero disables the cap (tests / trusted callers).
+func NewAPI(store *Store, routes RouteLookup, querier PeerQuerier, maxRange time.Duration) *API {
 	return &API{
-		store:   store,
-		routes:  routes,
-		querier: querier,
-		logger:  slog.Default().With("component", "receipt-api"),
+		store:    store,
+		routes:   routes,
+		querier:  querier,
+		maxRange: maxRange,
+		logger:   slog.Default().With("component", "receipt-api"),
 	}
 }
 
@@ -140,6 +144,13 @@ func (a *API) ServeListReceipts(w http.ResponseWriter, r *http.Request) {
 	to, err := time.Parse(time.RFC3339Nano, toStr)
 	if err != nil {
 		http.Error(w, `{"error":"invalid to timestamp"}`, http.StatusBadRequest)
+		return
+	}
+	// Cap the query window to retention so an authenticated caller cannot
+	// sweep an unbounded ts:* range. Data outside retention is already
+	// TTL-expired, so the cap never hides real results.
+	if a.maxRange > 0 && to.Sub(from) > a.maxRange {
+		http.Error(w, `{"error":"time range exceeds retention window"}`, http.StatusBadRequest)
 		return
 	}
 

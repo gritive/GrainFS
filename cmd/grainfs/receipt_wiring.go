@@ -77,7 +77,7 @@ func setupSoloReceipt(cmd *cobra.Command, dataDir string, opts []server.Option) 
 		_ = db.Close()
 		return opts, nil, fmt.Errorf("create receipt store: %w", err)
 	}
-	api := receipt.NewAPI(store, nil, nil)
+	api := receipt.NewAPI(store, nil, nil, retention)
 
 	slog.Info("heal-receipt API enabled",
 		"component", "receipt", "mode", "solo", "retention", retention)
@@ -156,7 +156,7 @@ func setupClusterReceipt(
 
 	go gossipSender.Run(ctx)
 
-	api := receipt.NewAPI(store, routingCache, broadcaster)
+	api := receipt.NewAPI(store, routingCache, broadcaster, retention)
 
 	slog.Info("heal-receipt API enabled",
 		"component", "receipt", "mode", "cluster",

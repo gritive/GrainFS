@@ -69,6 +69,24 @@ func TestStore_Put_RejectsUnsigned(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsigned)
 }
 
+// TestStore_Put_RejectsZeroTimestamp guards the ts:<nano>:<id> secondary
+// index. A zero time.Time has UnixNano well into the negative range, and
+// %019d would emit a "-…" prefix that sorts before digits — corrupting
+// chronological List and reverse RecentReceiptIDs. Put must catch it.
+func TestStore_Put_RejectsZeroTimestamp(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	r := newReceiptWithID("rcpt-zero-ts")
+	r.Timestamp = time.Time{} // zero — violates the index invariant
+	require.NoError(t, Sign(r, ks))
+	err = s.Put(r)
+	require.ErrorIs(t, err, ErrInvalidTimestamp)
+}
+
 func TestStore_BatchFlush_ByThreshold(t *testing.T) {
 	db := openTestDB(t)
 	// High interval, low threshold → threshold triggers first.

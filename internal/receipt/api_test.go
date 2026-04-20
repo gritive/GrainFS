@@ -72,7 +72,7 @@ func setupAPI(t *testing.T) (*API, *Store, *fakeRouteLookup, *fakePeerQuerier) {
 
 	routes := &fakeRouteLookup{routes: map[string]string{}}
 	querier := &fakePeerQuerier{singleResp: map[string][]byte{}, singleErr: map[string]error{}}
-	api := NewAPI(s, routes, querier)
+	api := NewAPI(s, routes, querier, 0)
 	return api, s, routes, querier
 }
 
@@ -218,6 +218,27 @@ func TestAPI_ListReceipts_InvalidTimeFormat_Returns400(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/receipts?from=not-a-time&to=also-not", nil)
+	api.ServeListReceipts(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestAPI_ListReceipts_RejectsOversizedRange verifies that an authenticated
+// caller cannot force an unbounded ts:* index scan by asking for a huge
+// window. When maxRange is non-zero, (to-from) above it returns 400.
+func TestAPI_ListReceipts_RejectsOversizedRange(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	// 24h retention — request a 48h range should bounce.
+	api := NewAPI(s, nil, nil, 24*time.Hour)
+	base := time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC)
+	rec := httptest.NewRecorder()
+	url := "/api/receipts?from=" + base.Format(time.RFC3339Nano) +
+		"&to=" + base.Add(48*time.Hour).Format(time.RFC3339Nano)
+	req := httptest.NewRequest(http.MethodGet, url, nil)
 	api.ServeListReceipts(rec, req)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)

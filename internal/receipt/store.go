@@ -31,6 +31,12 @@ var ErrNotFound = errors.New("receipt: not found")
 // 16 audit invariant forbids persisting unsigned receipts.
 var ErrUnsigned = errors.New("receipt: unsigned receipt rejected")
 
+// ErrInvalidTimestamp is returned by Put when Timestamp is zero/negative.
+// tsIndexKey padding (%019d) assumes a non-negative unix-nano value;
+// negative values print "-…" which sorts before digits and would corrupt
+// both chronological List ordering and RecentReceiptIDs reverse scan.
+var ErrInvalidTimestamp = errors.New("receipt: Timestamp must be non-zero and after epoch")
+
 // StoreOptions tunes the batching + retention behavior. Zero values fall back
 // to package defaults.
 type StoreOptions struct {
@@ -108,6 +114,9 @@ func (s *Store) Put(r *HealReceipt) error {
 	}
 	if r.ReceiptID == "" {
 		return errors.New("receipt: ReceiptID must not be empty")
+	}
+	if r.Timestamp.IsZero() || r.Timestamp.UnixNano() < 0 {
+		return ErrInvalidTimestamp
 	}
 
 	s.mu.Lock()
