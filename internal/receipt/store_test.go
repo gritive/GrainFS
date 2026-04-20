@@ -1,6 +1,7 @@
 package receipt
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -172,15 +173,5 @@ func TestStore_BurstPersistsAll(t *testing.T) {
 }
 
 func uid(i int) string {
-	return "rcpt-" + itoa4(i)
-}
-
-func itoa4(i int) string {
-	const digits = "0123456789"
-	buf := []byte{'0', '0', '0', '0'}
-	for pos := 3; pos >= 0 && i > 0; pos-- {
-		buf[pos] = digits[i%10]
-		i /= 10
-	}
-	return string(buf)
+	return fmt.Sprintf("rcpt-%04d", i)
 }

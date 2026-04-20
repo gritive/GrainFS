@@ -40,6 +40,22 @@ func TestVerify_DetectsTamperedField(t *testing.T) {
 
 	r.DurationMs = 999999 // mutate a signed field
 
+	// Sign() populates CanonicalPayload, so mutating a field trips the
+	// payload cross-check before the signature comparison runs. Either
+	// outcome is a valid tamper-detection; we assert the stricter one.
+	err := Verify(r, ks)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPayloadMismatch)
+}
+
+func TestVerify_DetectsTamperedField_WithoutStoredPayload(t *testing.T) {
+	ks := newTestKeyStore(t)
+	r := sampleReceipt()
+	require.NoError(t, Sign(r, ks))
+
+	r.CanonicalPayload = "" // simulate a receipt deserialized without the payload
+	r.DurationMs = 999999
+
 	err := Verify(r, ks)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrSignatureMismatch)
@@ -67,6 +83,18 @@ func TestVerify_UnknownKeyID(t *testing.T) {
 	err := Verify(r, ks)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrUnknownKey)
+}
+
+func TestVerify_DetectsTamperedCanonicalPayload(t *testing.T) {
+	ks := newTestKeyStore(t)
+	r := sampleReceipt()
+	require.NoError(t, Sign(r, ks))
+
+	r.CanonicalPayload = `{"receipt_id":"forged"}`
+
+	err := Verify(r, ks)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPayloadMismatch)
 }
 
 func TestSign_FailsOnEmptyKeyStore(t *testing.T) {

@@ -15,6 +15,7 @@ var (
 	ErrNoActiveKey       = errors.New("receipt: no active signing key")
 	ErrUnknownKey        = errors.New("receipt: unknown key id")
 	ErrSignatureMismatch = errors.New("receipt: signature mismatch")
+	ErrPayloadMismatch   = errors.New("receipt: canonical payload mismatch")
 )
 
 // Sign canonicalizes r, computes HMAC-SHA256 with the active key, and writes
@@ -61,9 +62,17 @@ func Verify(r *HealReceipt, ks *KeyStore) error {
 		return fmt.Errorf("receipt: canonicalize: %w", err)
 	}
 
+	// If CanonicalPayload is populated, it must match the re-canonicalized form.
+	// This closes an audit gap: without this check, tampering with the stored
+	// CanonicalPayload string would leave a misleading record even though the
+	// signature still verifies against the fields.
+	if r.CanonicalPayload != "" && r.CanonicalPayload != string(payload) {
+		return ErrPayloadMismatch
+	}
+
 	want, err := hex.DecodeString(r.Signature)
 	if err != nil {
-		return fmt.Errorf("%w: signature not hex", ErrSignatureMismatch)
+		return fmt.Errorf("%w: signature not hex: %v", ErrSignatureMismatch, err)
 	}
 
 	mac := hmac.New(sha256.New, key.Secret)

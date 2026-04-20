@@ -5,6 +5,10 @@ import (
 	"fmt"
 )
 
+// canonicalTimestampLayout is part of the signed payload. Changing it invalidates
+// every existing signature, so any update must be paired with a key rotation.
+const canonicalTimestampLayout = "2006-01-02T15:04:05.999999999Z"
+
 // canonicalize returns the JCS-compliant (RFC 8785) serialization of r,
 // excluding the CanonicalPayload and Signature fields. Signing code feeds the
 // result into HMAC-SHA256; verification recomputes the same form and compares.
@@ -22,7 +26,7 @@ func canonicalize(r *HealReceipt) ([]byte, error) {
 	m := map[string]any{
 		"receipt_id":     r.ReceiptID,
 		"key_id":         r.KeyID,
-		"timestamp":      r.Timestamp.UTC().Format("2006-01-02T15:04:05.999999999Z"),
+		"timestamp":      r.Timestamp.UTC().Format(canonicalTimestampLayout),
 		"object":         objectMap(r.Object),
 		"shards_lost":    normalizeInt32Slice(r.ShardsLost),
 		"shards_rebuilt": normalizeInt32Slice(r.ShardsRebuilt),
