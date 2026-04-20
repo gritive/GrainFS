@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.0.22] - 2026-04-21
+
+### Added
+- **Phase 16 Week 5 Slice 2 — Heal Receipt API + cluster fan-out** — `/api/receipts/:id` 단건 조회와 `/api/receipts?from=&to=&limit=` 범위 조회를 노출. 해결 순서는 (1) 로컬 store 히트, (2) gossip이 학습한 routing cache 경유 단일-피어 쿼리, (3) 3초 타임아웃의 broadcast fan-out. 타임아웃은 `503 X-Heal-Timeout` 으로 구분해 SRE가 "존재하지 않음(404)" 과 "클러스터 도달 실패(503)"를 구별 가능. `Store.List(from, to, limit)`는 `ts:<unix_nano>:<id>` 세컨더리 인덱스 역스캔으로 O(결과 크기) 보장.
+- **Rolling-window gossip** (`internal/cluster/receipt_gossip.go`) — 노드별 최근 N개 receipt ID 를 `StreamReceipt` 로 주기 브로드캐스트. 수신측 `GossipReceiver.SetReceiptCache`로 `RoutingCache`에 투영, import cycle 방지용 `ReceiptRoutingCache` 인터페이스 경유. 네임스페이스 분리된 `StreamReceipt=0x04` (one-way gossip) / `StreamReceiptQuery=0x05` (RPC) stream types 신설.
+- **ReceiptBroadcaster fan-out** (`internal/cluster/receipt_broadcast.go`) — routing cache miss 시 모든 peer 에 first-success-wins 병렬 쿼리, 남은 peer 는 context cancel 로 조기 해제. 5개 Prometheus counter(`grainfs_receipt_broadcast_{total,hit,miss,timeout,partial_success}_total`) 로 SLO 가시성 — partial-success 는 "적어도 한 peer 가 answer 했지만 전체 응답 전"의 degraded-cluster 신호.
+- **serve.go 통합 wiring** (`cmd/grainfs/receipt_wiring.go`) — Solo 모드는 `receipt.Store` + 로컬 전용 API, cluster 모드는 full stack (Store + KeyStore + RoutingCache + Broadcaster + GossipSender + `StreamReceiptQuery` handler 등록 + gossip receiver 연결). PSK 는 기본 `--cluster-key` 재사용, `--heal-receipt-psk` 로 override. CLI: `--heal-receipt-enabled`, `--heal-receipt-retention` (기본 720h), `--heal-receipt-gossip-interval` (기본 5s), `--heal-receipt-window` (기본 50).
+- **Multi-node E2E** (`tests/e2e/heal_receipt_api_test.go`) — 3-node 클러스터로 4개 해결 경로 검증: (a) local hit, (b) gossip routing-cache 경유 peer 쿼리, (c) rolling window 밖 id 의 broadcast fallback, (d) 전역 미존재 404. Slice 3의 scrubber wiring 전이므로 BadgerDB 에 사전 시드.
+
+### Fixed
+- **cluster mode 부팅 — default bucket 재시도** (`cmd/grainfs/serve.go`) — `backend.CreateBucket("default")` 가 단발 호출이라 peer 가 quorum 전에 시작하면 "not the leader" 로 프로세스가 즉시 종료. 100ms→2s exponential backoff + 30s 데드라인으로 재시도, `ErrBucketAlreadyExists`는 성공 처리, ctx 취소는 즉시 중단. 실제 부팅은 Raft leader 선출 직후 한번에 성공하므로 시간 패널티 없음.
+- **receipt API nil verifier panic** (`internal/server/receipt_api.go`) — `--access-key`/`--secret-key` 미설정 시 `s.verifier == nil` 인데 `registerReceiptAPI` 가 `s.authMiddleware()` 를 무조건 attach 해 요청마다 nil-pointer NPE 발생(server-level 미들웨어는 nil 가드로 이미 skip). 이제 조건부 체인으로 전역 auth 패턴과 동작 일치 — "`--access-key` 없음 = 전면 auth 없음".
+- **cluster mode S3 auth propagation** (`cmd/grainfs/serve.go`) — `runCluster` 가 `authOpts` 를 받지 않아 `--access-key`/`--secret-key` 가 cluster 모드에서 조용히 무시되던 기존 갭. 이제 `runServe` 에서 `authOpts` 를 전달, `runCluster` 가 `srvOpts` 에 append. HealReceipt API 를 포함한 모든 cluster-mode endpoint 가 플래그대로 auth 를 강제.
+- **fresh cluster bootstrap spurious auto-migration** (`cmd/grainfs/serve.go`) — `runCluster` 가 `os.MkdirAll(metaDir)` 를 migration 체크 전에 호출해 빈 dataDir 에서도 solo→cluster migration branch 에 진입, migration 은 이미 열린 meta BadgerDB 를 다시 열려다 dir lock 충돌로 종료시키던 문제. 이제 migration 체크를 `MkdirAll` 및 `badger.Open` 위로 이동, `os.ReadDir` 결과로 빈 meta 디렉토리를 감지해 무관한 진입을 차단. Slice 3+ 에서 새 3-node 클러스터 부팅이 단발 시도로 성공.
+
+### Pre-landing review fixes
+- **gossipReceiver always-on when heal-receipt enabled** (`cmd/grainfs/serve.go`) — `gossipReceiver` 가 `--balancer-enabled=true` 일 때만 생성되어, balancer 를 끄고 heal-receipt 만 쓰는 배포에서 `StreamReceipt`(rolling-window gossip) 메시지를 소비할 주체가 없었음. `tr.Receive()` 를 드레인하지 않으니 `RoutingCache` 는 영구 empty, `/api/receipts/:id` 는 항상 3초 broadcast 경로로 떨어짐. 이제 balancer 가 꺼져 있어도 heal-receipt 가 켜지면 독립 `GossipReceiver` 를 부팅해 `tr.Receive()` 를 한 consumer 가 드레인하도록 강제. Receive()는 단일 채널이라 여러 consumer 가 경쟁하면 메시지가 한쪽에만 전달되므로 반드시 하나만 동작.
+- **nodeIDMatchesFrom spoofing gap** (`internal/cluster/gossip.go`) — `from=IP`, `nodeID=hostname` 조합에서 무조건 `true` 를 반환하던 허용적 fallback 을 `net.LookupHost` 기반 strict verification 으로 교체. 인증된 cluster-key 보유자가 hostname 을 위장해 `RoutingCache`/`NodeStatsStore` 를 오염시키는 경로를 닫음. DNS 실패 시 reject. `TestNodeIDMatchesFrom` 에 `localhost ↔ 127.0.0.1` positive case 와 `node-a` 가상 hostname negative case 추가.
+- **ListReceipts 시간 범위 상한** (`internal/receipt/api.go`) — `NewAPI` 에 `maxRange time.Duration` 파라미터 추가, `(to - from) > maxRange` 면 `400`. wiring 에서 `retention` 을 그대로 전달해 인증된 사용자가 거대 ts:* 스캔으로 BadgerDB 를 DoS 하지 못하도록. retention 바깥은 어차피 TTL expired 라 실 결과 가림 없음. `TestAPI_ListReceipts_RejectsOversizedRange` 회귀 테스트.
+- **Store.Put Timestamp 검증** (`internal/receipt/store.go`) — `Timestamp.IsZero()` 또는 `UnixNano() < 0` 이면 `ErrInvalidTimestamp`. `tsIndexKey` 의 `%019d` padding 은 non-negative unix-nano 를 전제로 하며, 음수는 `"-…"` 접두사를 만들어 digit sort 보다 앞서 정렬돼 `List` 시간순 및 `RecentReceiptIDs` reverse scan 을 오염. `TestStore_Put_RejectsZeroTimestamp` 추가.
+- **빈 peer 필터링** (`cmd/grainfs/serve.go`) — `strings.Split("", ",")` → `[""]`, `"a,,b"` → `["a","","b"]` 가 gossip sender 의 매 tick 경고 로그와 broadcaster 의 무의미한 `""` fan-out 시도를 유발. `filterEmpty` 헬퍼로 `runCluster` 와 `joinClusterLive` 의 split 결과를 정제.
+
+### Tests
+- `TestRoutingCache_*` — Update/Lookup/Evict 의미, concurrent reader/writer race detector 통과.
+- `TestReceiptGossip*` / `TestReceiptBroadcast*` — FlatBuffers 페이로드 round-trip, NodeId mismatch drop, fan-out 타임아웃, first-success 조기 취소.
+- `TestAPI_*` — 3-tier resolution, 503 vs 404 분기, RFC 3339 parsing, limit 기본값/캡.
+- `TestBroadcastMetrics_*` — 5 카운터 Inc 검증 + partial_success 가 responded/total 에 무관.
+- `TestIntegration_*` — in-process stitchedCluster 로 local/cache/broadcast/notfound/ordering-conflict 커버.
+- `TestE2E_HealReceiptAPI_3Node` — 3-노드 실클러스터 부팅 + 4 해결 경로.
+
 ## [0.0.0.21] - 2026-04-20
 
 ### Added

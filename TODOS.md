@@ -10,8 +10,6 @@
 
 설계: `~/.gstack/projects/gritive-grains/whitekid-master-design-20260420-182422.md`
 
-- [ ] **Slice 1: Receipt Core (v0.0.21)** — `internal/receipt/` 신규 패키지, HealReceipt + JCS + HMAC-SHA256 + KeyStore(key_id rotation) + BadgerDB local-only 저장 + batch write (100 or 50ms) + 30일 retention. API/gossip/UI/OTel 제외, scrubber repair wiring 제외.
-- [ ] **Slice 2: API + Gossip** — `/api/receipts/:id`, `/api/receipts?from=&to=`, gossip 50 receipt IDs rolling window, cluster broadcast fallback
 - [ ] **Slice 3: Scrubber wiring + Blame Mode v1 UI** — repair 세션 → receipt emit, dashboard timeline + JSON download
 - [ ] **Slice 4: OTel spans** — head-based 1% sampling, `--otel-endpoint`, `--otel-sample-rate`, scrubber phase별 span
 
@@ -37,6 +35,21 @@
 
 ## Phase 17: Scale-Out
 
+- [ ] **Lock-free 아키텍처 전사 검토** — *성능·확장성 개선, Phase 16/17 한정 아님*
+  프로젝트 전체에서 `sync.Mutex`/`sync.RWMutex`를 쓰는 핫패스를 전수 조사하고, 각 상황에 맞는 lock-free 기법을 선별 적용.
+  **조사 범위**:
+  - Phase 16 receipt: `RoutingCache` (read-heavy gossip lookup), `Store.drainMu` (writer serialization), `KeyStore` rotation
+  - 기존 스토리지: `internal/scrubber/` 상태 머신, `internal/cluster/NodeStatsStore`, `internal/metadata/` BadgerDB 캐시, `internal/cluster/balancer.go` inflight 슬롯
+  - 트랜스포트: QUICTransport connection map, StreamRouter handlers
+  **후보 기법 리서치 필요**:
+  - **CAS (compare-and-swap)** — 단순 카운터/플래그, writer 1인 + reader N
+  - **Actor model** — 단일 goroutine 소유 state + channel 메시지 (예: scrubber 세션 매니저)
+  - **LMAX Disruptor** — 고처리량 단일 생산자→단일 소비자 링 버퍼 (예: HealEvent burst)
+  - **RCU (Read-Copy-Update)** — read 0 lock, writer는 grace period 후 해제 (리눅스 커널 패턴, Go는 `atomic.Pointer` 기반 구현)
+  - **Copy-on-Write + `atomic.Pointer`** — read-heavy config/라우팅 테이블 (Phase 16 RoutingCache 후보)
+  - **Wait-free 자료구조** — 절대 block 없음 보장 (SPSC 큐, seqlock)
+  **매칭 전략**: 각 자리마다 접근 패턴(1:N, N:1, N:N, 쓰기 빈도) 측정 후 가장 경량인 기법 선택. 일률적 `sync.Map` 치환 금지 — 패턴 불일치 시 오히려 느려진다.
+  **트리거 조건**: (a) Phase 17 스케일아웃 전에 벤치마크 수행해 각 lock의 p99 contention 측정, (b) 벤치마크 위에서 bottleneck ≥1ms 확인된 자리부터 순차 치환, (c) 각 치환은 race detector + long-run integration test로 검증.
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만

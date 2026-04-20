@@ -12,6 +12,8 @@ const (
 	StreamControl StreamType = 0x01 // Raft messages (votes, heartbeats, AppendEntries)
 	StreamData    StreamType = 0x02 // Shard transfers (bulk data)
 	StreamAdmin   StreamType = 0x03 // Cluster management, health checks
+	StreamReceipt      StreamType = 0x04 // Heal-receipt rolling-window gossip (Phase 16 Slice 2, one-way)
+	StreamReceiptQuery StreamType = 0x05 // Heal-receipt broadcast-fallback RPC (Phase 16 Slice 2, request/response)
 )
 
 // Message is a framed message sent over a transport stream.

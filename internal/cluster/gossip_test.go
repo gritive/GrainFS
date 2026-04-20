@@ -264,10 +264,15 @@ func TestNodeIDMatchesFrom(t *testing.T) {
 		// Hostname nodeID + hostname from — validated by host comparison
 		{"node-b", "node-b:9000", true},
 		{"node-a", "node-b:9000", false},
-		// Hostname nodeID + IP from — can't validate, accept (QUIC handles auth)
-		{"node-a", "192.168.1.1:9000", true},
+		// Hostname nodeID + IP from — tightened: DNS lookup required.
+		// A made-up hostname like "node-a" won't resolve, so the path that
+		// used to blanket-accept now rejects — closing the spoofing gap.
+		{"node-a", "192.168.1.1:9000", false},
 		// Full match (nodeID includes port)
 		{"node-b:9000", "node-b:9000", true},
+		// Localhost-to-loopback is a real hostname+IP pair we can verify:
+		// DNS resolves "localhost" → 127.0.0.1 (on any sane machine).
+		{"localhost", "127.0.0.1:9000", true},
 	}
 	for _, tc := range tests {
 		got := nodeIDMatchesFrom(tc.nodeID, tc.from)

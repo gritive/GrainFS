@@ -80,6 +80,12 @@ func init() {
 	// Phase 16 Week 4 — webhook alerts.
 	serveCmd.Flags().String("alert-webhook", "", "Slack-compatible webhook URL for critical alerts (empty disables alerts)")
 	serveCmd.Flags().String("alert-webhook-secret", "", "shared secret for X-GrainFS-Signature HMAC-SHA256 (empty disables signing)")
+	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
+	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
+	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
+	serveCmd.Flags().Duration("heal-receipt-retention", 30*24*time.Hour, "HealReceipt retention window (older entries are GC'd)")
+	serveCmd.Flags().Duration("heal-receipt-gossip-interval", 5*time.Second, "how often this node gossips its recent receipt IDs to peers")
+	serveCmd.Flags().Int("heal-receipt-window", 50, "rolling window size — how many recent receipt IDs to gossip per tick")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -219,7 +225,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
+	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts)
 }
 
 func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64, evDB *badger.DB) error {
@@ -268,6 +274,14 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		go lcWorker.Run(ctx)
 		slog.Info("lifecycle worker started")
 	}
+
+	// Phase 16 Week 5 Slice 2 — HealReceipt audit API (solo: local-only).
+	newOpts, receiptWiring, err := setupSoloReceipt(cmd, dataDir, opts)
+	if err != nil {
+		return fmt.Errorf("heal-receipt wiring: %w", err)
+	}
+	opts = newOpts
+	defer receiptWiring.Close()
 
 	srv := server.New(addr, swappable, opts...)
 
@@ -395,7 +409,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	return nil
 }
 
-func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
+func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
@@ -404,9 +418,41 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("--raft-addr is required when --peers is set")
 	}
 
-	peers := strings.Split(peersStr, ",")
+	// strings.Split always yields at least one element — empty input or
+	// trailing commas produce "" entries that waste a gossip tick each.
+	peers := filterEmpty(strings.Split(peersStr, ","))
 
 	metaDir := filepath.Join(dataDir, "meta")
+	raftDir := filepath.Join(dataDir, "raft")
+
+	// Auto-migrate BEFORE any filesystem or lock side effects. If Raft dir
+	// doesn't exist but meta dir holds an existing solo BadgerDB, convert
+	// in place. Two things previously broke this branch on fresh cluster
+	// starts with an empty dataDir:
+	//   1. MkdirAll ran before this check, so os.Stat(metaDir) succeeded
+	//      on a freshly-created empty dir and triggered a spurious
+	//      migration.
+	//   2. The migration opens the meta DB, but we had already opened it
+	//      here, and BadgerDB takes an exclusive directory lock, so the
+	//      migration aborted with "Another process is using this Badger
+	//      database".
+	// Moving the migration above both MkdirAll and badger.Open removes
+	// both failure modes.
+	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
+		if info, err := os.Stat(metaDir); err == nil && info.IsDir() {
+			// A populated solo meta dir has .sst / .vlog / MANIFEST files.
+			// Distinguish "real data" from "empty dir someone pre-created"
+			// by checking for any entries; empty → skip migration.
+			if entries, err := os.ReadDir(metaDir); err == nil && len(entries) > 0 {
+				slog.Info("auto-migrating solo metadata to cluster format", "component", "migrate")
+				if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
+					return fmt.Errorf("auto-migrate: %w", err)
+				}
+				slog.Info("auto-migration complete", "component", "migrate")
+			}
+		}
+	}
+
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
 		return fmt.Errorf("create meta dir: %w", err)
 	}
@@ -419,20 +465,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as solo.
 	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
 		return err
-	}
-
-	raftDir := filepath.Join(dataDir, "raft")
-
-	// Auto-migrate: if Raft directory doesn't exist yet but metadata does,
-	// automatically bootstrap from solo metadata (zero-downtime migration)
-	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
-		if _, err := os.Stat(filepath.Join(dataDir, "meta")); err == nil {
-			slog.Info("auto-migrating solo metadata to cluster format", "component", "migrate")
-			if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
-				return fmt.Errorf("auto-migrate: %w", err)
-			}
-			slog.Info("auto-migration complete", "component", "migrate")
-		}
 	}
 
 	badgerManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
@@ -519,6 +551,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	// Start balancer if enabled (cluster mode only).
 	var balancerProposer *cluster.BalancerProposer
+	var gossipReceiver *cluster.GossipReceiver
 	balancerEnabled, _ := cmd.Flags().GetBool("balancer-enabled")
 	if balancerEnabled {
 		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
@@ -526,19 +559,35 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		ecData, _ := cmd.Flags().GetInt("ec-data")
 		ecParity, _ := cmd.Flags().GetInt("ec-parity")
 		var err error
-		balancerProposer, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
+		balancerProposer, gossipReceiver, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
 		if err != nil {
 			slog.Warn("balancer start failed", "err", err)
 		}
 	}
 
+	// Ensure a single GossipReceiver drains tr.Receive() whenever a feature
+	// needs StreamReceipt gossip (heal-receipt's RoutingCache lives on this
+	// path). Only one consumer is allowed because Receive() is a single
+	// channel — competing readers would deliver each message to only one.
+	// When balancer is off but heal-receipt is on, create a bare receiver;
+	// its NodeStatsStore is unused in this path but required by the ctor.
+	healReceiptEnabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
+	if gossipReceiver == nil && healReceiptEnabled {
+		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
+		standaloneStats := cluster.NewNodeStatsStore(3 * bGossipInterval)
+		gossipReceiver = cluster.NewGossipReceiver(quicTransport, standaloneStats)
+		go gossipReceiver.Run(ctx)
+		slog.Info("gossip receiver started (receipt-only, balancer disabled)", "component", "gossip")
+	}
+
 	var backend storage.Backend = cachedBackend
 
-	// Auto-create "default" bucket on startup
-	if err := backend.CreateBucket("default"); err != nil {
-		if !errors.Is(err, storage.ErrBucketAlreadyExists) {
-			return fmt.Errorf("create default bucket: %w", err)
-		}
+	// Auto-create "default" bucket on startup. In cluster mode this must
+	// wait for Raft to elect a leader before the proposal can commit.
+	// Retry for up to 30s with backoff so the first node's boot does not
+	// fail the whole cluster when peers come up in any order.
+	if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
+		return fmt.Errorf("create default bucket: %w", err)
 	}
 
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
@@ -552,9 +601,25 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 	}
+	// Propagate S3 auth from --access-key / --secret-key. Previously this
+	// was solo-only; cluster mode silently ran without auth regardless of
+	// the flags.
+	srvOpts = append(srvOpts, authOpts...)
 	if balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
 	}
+
+	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip + broadcast fallback.
+	newSrvOpts, receiptWiring, err := setupClusterReceipt(
+		ctx, cmd, dataDir, nodeID, clusterKey, peers,
+		quicTransport, router, gossipReceiver, srvOpts,
+	)
+	if err != nil {
+		return fmt.Errorf("heal-receipt wiring: %w", err)
+	}
+	srvOpts = newSrvOpts
+	defer receiptWiring.Close()
+
 	srv := server.New(addr, backend, srvOpts...)
 
 	// Phase 16 Week 3: cluster mode also needs startup recovery for the
@@ -668,6 +733,8 @@ func (a *raftBalancerAdapter) TransferLeadership() error   { return a.node.Trans
 
 // startBalancer wires and launches the BalancerProposer, GossipSender, GossipReceiver,
 // MigrationExecutor and migration task channel, then replays any persisted pending tasks.
+// Returns the GossipReceiver so the caller can wire additional StreamType consumers
+// (e.g. Phase 16 Slice 2 receipt gossip) onto the same receiver.
 func startBalancer(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -679,7 +746,7 @@ func startBalancer(
 	quicTransport transport.Transport,
 	shardSvc *cluster.ShardService,
 	numShards int,
-) (*cluster.BalancerProposer, error) {
+) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
 	gossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
 	triggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
 	stopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
@@ -688,7 +755,7 @@ func startBalancer(
 	warmupTimeout, _ := cmd.Flags().GetDuration("balancer-warmup-timeout")
 	cbThreshold, _ := cmd.Flags().GetFloat64("balancer-cb-threshold")
 	if cbThreshold < 0 || cbThreshold > 1 {
-		return nil, fmt.Errorf("balancer-cb-threshold must be in [0, 1], got %g", cbThreshold)
+		return nil, nil, fmt.Errorf("balancer-cb-threshold must be in [0, 1], got %g", cbThreshold)
 	}
 	migMaxRetries, _ := cmd.Flags().GetInt("balancer-migration-max-retries")
 	migPendingTTL, _ := cmd.Flags().GetDuration("balancer-migration-pending-ttl")
@@ -749,10 +816,10 @@ func startBalancer(
 	if testPctStr := os.Getenv("GRAINFS_TEST_DISK_PCT"); testPctStr != "" {
 		var testPct float64
 		if _, err := fmt.Sscanf(testPctStr, "%f", &testPct); err != nil {
-			return nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: invalid value %q: %w", testPctStr, err)
+			return nil, nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: invalid value %q: %w", testPctStr, err)
 		}
 		if testPct < 0 || testPct > 100 {
-			return nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: value %v out of range [0,100]", testPct)
+			return nil, nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: value %v out of range [0,100]", testPct)
 		}
 		slog.Warn("GRAINFS_TEST_DISK_PCT active — real disk stats overridden", "pct", testPct)
 		collector.SetStatFunc(func(string) (float64, uint64) { return testPct, 0 })
@@ -766,7 +833,47 @@ func startBalancer(
 
 	slog.Info("balancer started", "component", "balancer",
 		"gossip_interval", gossipInterval, "trigger_pct", triggerPct, "stop_pct", stopPct)
-	return balancer, nil
+	return balancer, receiver, nil
+}
+
+// createDefaultBucketWithRetry keeps trying the "default" bucket proposal
+// until Raft commits one (quorum reached, leader elected) or the deadline
+// elapses. "ErrBucketAlreadyExists" is success. "not the leader" and
+// transport errors are treated as transient.
+// filterEmpty drops "" entries from the slice. strings.Split(",",",") and
+// strings.Split("",",") both yield elements that would be wasted as peer
+// addresses — gossip sends to "" log a warning every tick.
+func filterEmpty(ss []string) []string {
+	out := ss[:0]
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func createDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	backoff := 100 * time.Millisecond
+	const maxBackoff = 2 * time.Second
+	var lastErr error
+	for {
+		err := backend.CreateBucket("default")
+		if err == nil || errors.Is(err, storage.ErrBucketAlreadyExists) {
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("default bucket not created after %s: %w", timeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 // balancerInfoAdapter adapts *cluster.BalancerProposer to server.BalancerInfo.
@@ -813,7 +920,7 @@ func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, d
 		nodeID = generateNodeID(dataDir)
 	}
 
-	peers := strings.Split(peersStr, ",")
+	peers := filterEmpty(strings.Split(peersStr, ","))
 
 	metaDir := filepath.Join(dataDir, "meta")
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
