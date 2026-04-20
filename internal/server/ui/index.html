@@ -776,7 +776,7 @@ tbody tr:last-child td{border-bottom:none}
         return;
       }
       events.slice().reverse().forEach(function(e) {
-        var ts = e.ts ? new Date(e.ts * 1000).toLocaleString() : '';
+        var ts = e.ts ? new Date(Math.floor(e.ts / 1e6)).toLocaleString() : '';
         var typeColor = e.type === 's3' ? 'var(--accent)' : 'var(--warning)';
         var typeSpan = mkEl('span', { textContent: e.type || '' });
         typeSpan.style.color = typeColor;
