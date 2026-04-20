@@ -58,6 +58,7 @@ type Server struct {
 	joinCluster    JoinClusterFunc  // nil if not in solo mode or already clustered
 	balancer       BalancerInfo     // nil if balancer not enabled
 	evStore        *eventstore.Store // nil if event store not configured
+	alerts         *AlertsState      // nil if alerts not wired
 
 	// Bounded event queue + single worker. Decouples request handlers from
 	// BadgerDB write latency and prevents unbounded goroutine growth.
@@ -122,6 +123,15 @@ func WithLifecycleStore(store *lifecycle.Store) Option {
 func WithEventStore(store *eventstore.Store) Option {
 	return func(s *Server) {
 		s.evStore = store
+	}
+}
+
+// WithAlerts attaches an AlertsState (Phase 16 Week 4) so the server can
+// expose /api/admin/alerts/{status,resend} and let other components push
+// fault/healthy reports through s.Alerts().Tracker().
+func WithAlerts(state *AlertsState) Option {
+	return func(s *Server) {
+		s.alerts = state
 	}
 }
 
@@ -376,6 +386,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Event log query API
 	s.registerEventsAPI(h)
+
+	// Phase 16 Week 4: alerts status + force-resend (no-op if alerts not wired).
+	s.registerAlertsAPI(h)
 
 	// SSE event stream for dashboard
 	hub := s.hub

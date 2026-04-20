@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.19] - 2026-04-20
+
+### Added
+- **Phase 16 Week 4 — Webhook Alert Framework + Degraded Mode (foundation)** — Slack-compatible 인커밍 webhook을 단일 URL로 보내는 alerts 디스패처 + degraded 상태 트래커.
+  - **`internal/alerts/webhook.go` — Dispatcher**: severity {critical, warning}, dedup key=(type+resource) 10분 억제, 5회 지수 backoff 재시도, 옵션 시 `X-GrainFS-Signature` HMAC-SHA256 헤더, 빈 URL이면 no-op (operator opt-in).
+  - **`internal/alerts/degraded.go` — DegradedTracker**: entry-immediate 히스테리시스, 30s exit-stable 윈도우, 5분 5-flap 카운터 (3회 초과 시 hold + critical webhook 자동 발사).
+  - **`internal/server/alerts_api.go`**: `Server.Alerts()` accessor, `WithAlerts(...)` 옵션, gauge-mirroring `Tracker()` 래퍼로 `grainfs_degraded` 자동 갱신.
+- **Admin API**: `GET /api/admin/alerts/status` (banner snapshot — degraded/held/flap count/last failure), `POST /api/admin/alerts/resend` (Force Resend 버튼). `localhostOnly()` 가드.
+- **Dashboard 배너**:
+  - "Cluster degraded" 빨간 배너 — `role="alert"` `aria-live="assertive"` (스크린리더 즉시 공지). degraded 시에만 표시, last_reason/last_resource/held/flap_count 노출.
+  - "Alert delivery failed" 노란 배너 + Force Resend 버튼 — webhook 재시도 소진 시에만 표시. resend 성공하면 자동 사라짐.
+  - 5초 폴링 (간단한 contract — SSE 불필요).
+- **CLI flags**: `--alert-webhook URL`, `--alert-webhook-secret SECRET` (solo + cluster 양쪽).
+- **Prometheus 메트릭**: `grainfs_degraded`(게이지), `grainfs_alert_delivery_attempts_total{outcome}`, `grainfs_alert_delivery_failed_total`.
+- **Phase 16 Week 3 — Self-healing Storage at Startup** — 부팅 시 충돌 잔여물 자동 청소.
+  - `*.tmp` 파일 (atomic write 중 죽은 흔적) — 5분 in-flight guard 통과한 것만 삭제 (live writer 보호).
+  - `parts/<uploadID>/` 디렉토리 (포기된 multipart upload) — 24시간 미사용 후 삭제.
+  - 청소 액션마다 `HealEvent{Phase: startup, ErrCode: orphan_tmp|orphan_multipart}` 발행. eventstore에 영속 → 재시작 후 dashboard 새로고침해도 "Restart Recovery" 라인에 표시.
+  - 깨끗한 부팅 시 per-action 이벤트 0건 (대시보드 노이즈 방지).
+  - context 취소 지원 — 거대 데이터 디렉토리에서도 다음 부팅을 막지 않음.
+  - 의도적 비대상: flock 기반 lock 파일 (커널이 프로세스 죽음에 자동 해제), in-memory 캐시 (디스크 저장 없음), BadgerDB 내부 (Phase 17 atomic recovery).
+- **BadgerDB preflight 무결성 체크** — `badger.Open` 직후 sentinel write/read/delete 사이클로 DB가 실제로 운영 가능한지 확인. 실패 시 fail-fast + 운영자 친화적 복구 가이드 (디스크 공간/권한/snapshot 복원 안내). solo·cluster·migrate 3개 경로 모두 적용.
+
+### Tests
+- Week 3 단위 8개: `TestStartupRecovery_DeletesOldTmpFiles`, `TestStartupRecovery_DeletesOldMultipartParts`, `TestStartupRecovery_NothingToCleanEmitsNoEvents`, `TestStartupRecovery_MissingDataRoot`, `TestStartupRecovery_NilEmitterIsSafe`, `TestStartupRecovery_ContextCancelStops`, `TestPreflightBadger_HealthyDB`, `TestPreflightBadger_NilDB`, `TestPreflightBadger_RecoveryGuideOnFailure`.
+- Week 3 E2E `TestRestartRecovery_SweepsOrphanArtifacts` — orphan .tmp + multipart 디렉토리 심어 두고 부팅 → 두 아티팩트 삭제 확인 + eventstore에서 startup HealEvent 두 종류 모두 확인.
+- Week 4 단위 13개: dispatcher 8 (Slack JSON, HMAC sign/no-sign, dedup window suppress/release, 다른 resource 동일 type 통과, 5xx 재시도→실패 callback, 2xx 즉시 성공, no-URL no-op), degraded tracker 5 (entry-immediate, exit-stable 30s, 자가 fault 시 stability 리셋, flap counter hold + window cool-off, status snapshot 불변), alerts API 5 (status healthy/failed, resend 성공 시 banner clear, no-failed → reason 텍스트, gaugeTracker mirror).
+- mock webhook 수신 서버로 dispatch + dedup + retry + HMAC 통합 검증.
+- `-race -count=1` alerts / server / scrubber / eventstore 패키지 통과.
+
+### Out of scope (follow-up)
+- EC backend per-object 503 + `X-GrainFS-Degraded: isolated` 헤더 통합 — erasure 패키지 surface 변경이 커서 별도 PR로 분리.
+- 실제 fault injection E2E (degraded mode + alert path 전체) — EC 통합 후 같이.
+- `docs/alerts.md` PagerDuty 매핑 표 — 이번 PR은 Slack JSON 한정.
+- BadgerDB atomic auto-recovery — Phase 17.
+
 ## [0.0.18] - 2026-04-20
 
 ### Added

@@ -292,4 +292,21 @@ var (
 		Name: "grainfs_heal_stream_dropped_events_total",
 		Help: "HealEvents dropped because an SSE subscriber's buffer was full.",
 	})
+
+	// Phase 16 Week 4 — Degraded mode + alert delivery metrics.
+
+	Degraded = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_degraded",
+		Help: "1 when the cluster is currently in degraded mode (after hysteresis), 0 otherwise.",
+	})
+
+	AlertDeliveryAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_alert_delivery_attempts_total",
+		Help: "Webhook delivery attempts, partitioned by outcome.",
+	}, []string{"outcome"}) // outcome = success | failed | dedup_suppressed
+
+	AlertDeliveryFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_alert_delivery_failed_total",
+		Help: "Webhook deliveries that exhausted all retries.",
+	})
 )

@@ -17,6 +17,7 @@ import (
 
 	"crypto/rand"
 
+	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
@@ -76,6 +77,9 @@ func init() {
 	serveCmd.Flags().Duration("balancer-migration-pending-ttl", cluster.DefaultBalancerConfig().MigrationPendingTTL, "max time a pending migration may linger before being cancelled")
 	serveCmd.Flags().Bool("badger-managed-mode", false, "enable Raft log GC using quorum watermark (WARNING: on-disk format change; see docs/badger-managed-mode-rollback.md)")
 	serveCmd.Flags().Duration("raft-log-gc-interval", 30*time.Second, "how often Raft log GC runs when --badger-managed-mode is enabled")
+	// Phase 16 Week 4 — webhook alerts.
+	serveCmd.Flags().String("alert-webhook", "", "Slack-compatible webhook URL for critical alerts (empty disables alerts)")
+	serveCmd.Flags().String("alert-webhook-secret", "", "shared secret for X-GrainFS-Signature HMAC-SHA256 (empty disables signing)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -157,6 +161,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		var evDB *badger.DB
 		if dp, ok := backend.(storage.DBProvider); ok {
 			evDB = dp.DB()
+			// Phase 16 Week 3: Badger preflight. badger.Open already runs
+			// internal recovery; this confirms the DB is actually writable
+			// before we accept traffic and gives the operator a recovery
+			// guide if it isn't. Fail-fast is the right outcome — booting a
+			// dashboard against a broken DB only confuses the postmortem.
+			if err := server.PreflightBadger(evDB, dataDir, nil); err != nil {
+				return err
+			}
 		}
 
 		// Wrap with Packed Blob if threshold is set
@@ -243,6 +255,12 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		// wired to the server-owned heal emitter. Without this ordering the
 		// dashboard would never receive HealEvents.
 	}
+
+	// Phase 16 Week 4: webhook alerts (degraded mode + critical events).
+	alertWebhook, _ := cmd.Flags().GetString("alert-webhook")
+	alertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
+	alertsState := server.NewAlertsState(alertWebhook, alerts.Options{Secret: alertSecret}, alerts.DegradedConfig{})
+	opts = append(opts, server.WithAlerts(alertsState))
 	if lcStore != nil {
 		opts = append(opts, server.WithLifecycleStore(lcStore))
 	}
@@ -252,8 +270,23 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	}
 
 	srv := server.New(addr, swappable, opts...)
+
+	// Phase 16 Week 3: sweep crash-leftover artifacts BEFORE the scrubber
+	// starts so the scrubber doesn't trip over half-written .tmp files.
+	// HealEvents flow through the server emitter — operator sees the
+	// "Restart Recovery" dashboard line right after boot.
+	healEmitter := srv.HealEmitter()
+	if rec, err := server.RunStartupRecovery(ctx, dataDir, healEmitter); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Warn("startup recovery failed", "err", err)
+	} else if rec.OrphanTmpRemoved+rec.OrphanMultipartRemoved+len(rec.Errors) > 0 {
+		slog.Info("startup recovery summary",
+			"orphan_tmp", rec.OrphanTmpRemoved,
+			"orphan_multipart", rec.OrphanMultipartRemoved,
+			"errors", len(rec.Errors))
+	}
+
 	if sc != nil {
-		sc.SetEmitter(srv.HealEmitter())
+		sc.SetEmitter(healEmitter)
 		sc.Start(ctx)
 		slog.Info("background scrubber started")
 	}
@@ -383,6 +416,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("open metadata db: %w", err)
 	}
 	defer db.Close()
+	// Phase 16 Week 3: cluster mode preflight. Same reasoning as solo.
+	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
+		return err
+	}
 
 	raftDir := filepath.Join(dataDir, "raft")
 
@@ -507,14 +544,30 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
+	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
+	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
+	clusterAlerts := server.NewAlertsState(clusterAlertWebhook, alerts.Options{Secret: clusterAlertSecret}, alerts.DegradedConfig{})
 	srvOpts := []server.Option{
 		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}),
 		server.WithEventStore(eventstore.New(db)),
+		server.WithAlerts(clusterAlerts),
 	}
 	if balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
 	}
 	srv := server.New(addr, backend, srvOpts...)
+
+	// Phase 16 Week 3: cluster mode also needs startup recovery for the
+	// node's local data dir (per-node multipart parts + .tmp leftovers).
+	if rec, err := server.RunStartupRecovery(ctx, dataDir, srv.HealEmitter()); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Warn("startup recovery failed", "err", err)
+	} else if rec.OrphanTmpRemoved+rec.OrphanMultipartRemoved+len(rec.Errors) > 0 {
+		slog.Info("startup recovery summary",
+			"orphan_tmp", rec.OrphanTmpRemoved,
+			"orphan_multipart", rec.OrphanMultipartRemoved,
+			"errors", len(rec.Errors))
+	}
+
 	go func() {
 		if err := srv.Run(); err != nil {
 			slog.Error("http server error", "error", err)
@@ -770,6 +823,10 @@ func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, d
 	db, err := badger.Open(dbOpts)
 	if err != nil {
 		return fmt.Errorf("open metadata db: %w", err)
+	}
+	// Phase 16 Week 3: solo-to-cluster migration path also runs preflight.
+	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
+		return err
 	}
 
 	raftDir := filepath.Join(dataDir, "raft")
