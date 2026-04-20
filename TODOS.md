@@ -6,6 +6,25 @@
 
 ## Phase 16: Advanced Storage
 
+### Phase 16 Week 5 — Heal Receipt + OTel (설계 완료, 미진행)
+
+설계: `~/.gstack/projects/gritive-grains/whitekid-master-design-20260420-182422.md`
+
+- [ ] **Slice 1: Receipt Core (v0.0.21)** — `internal/receipt/` 신규 패키지, HealReceipt + JCS + HMAC-SHA256 + KeyStore(key_id rotation) + BadgerDB local-only 저장 + batch write (100 or 50ms) + 30일 retention. API/gossip/UI/OTel 제외, scrubber repair wiring 제외.
+- [ ] **Slice 2: API + Gossip** — `/api/receipts/:id`, `/api/receipts?from=&to=`, gossip 50 receipt IDs rolling window, cluster broadcast fallback
+- [ ] **Slice 3: Scrubber wiring + Blame Mode v1 UI** — repair 세션 → receipt emit, dashboard timeline + JSON download
+- [ ] **Slice 4: OTel spans** — head-based 1% sampling, `--otel-endpoint`, `--otel-sample-rate`, scrubber phase별 span
+
+### Phase 16 Week 6 — Grafana Bundle + Demo (설계 완료, 미진행)
+
+- [ ] `deploy/grafana/self-healing.json` + `//go:embed` + `GET /dashboard/grafana.json`
+- [ ] `docs/grafana-quickstart.md`
+- [ ] `scripts/demo/pull-the-disk.sh` 90초 3막 데모 + README GIF embed
+- [ ] README top section: "See it heal. See it prove it."
+- [ ] CI: `grafana-cli plugin validate-dashboard` 호환성 가드
+
+### 기타
+
 - [ ] Thin provisioning
 - [ ] NBD Copy on Write in storage layer (thin provisioning 이후)
 - [ ] Reference counting for shared blocks

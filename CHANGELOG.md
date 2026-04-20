@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.21] - 2026-04-20
+
+### Added
+- **`internal/receipt` 패키지 (Phase 16 Week 5 Slice 1)** — Heal Receipt 핵심 레이어. 한 repair 세션을 audit-ready 아티팩트로 요약: `HealReceipt` struct, HMAC-SHA256 서명, JCS 스타일 canonicalization(RFC 8785 부분 준수 — 키 알파벳 정렬 + 공백 없음), `KeyStore`로 `key_id` rotation 지원(기본 previous 3개 유지), BadgerDB 로컬 저장(Raft FSM 복제 없음) + 기본 30일 TTL, batch write(기본 100 buffer 또는 50ms flush 중 먼저 도달). 서명 실패 시 `ErrNoActiveKey`, 미서명 receipt 저장 거부(`ErrUnsigned`) — Phase 16 audit 무결성 원칙(무서명 receipt 절대 생성 금지) 강제.
+- TODOS.md Phase 16 섹션 재편 — Week 5(Slice 1–4), Week 6(Grafana + demo) 설계 완료/미진행 항목 명시.
+
+### Notes
+- 이번 슬라이스는 패키지 단독. API 엔드포인트(`/api/receipts/*`), gossip rolling window, scrubber repair 경로와의 wiring, Blame Mode UI, OTel spans는 Slice 2–4로 분리.
+
+### Tests
+- `TestCanonicalize_*` — 호출 간 byte-identical, CanonicalPayload/Signature 필드 제외, 알파벳 정렬, whitespace 금지.
+- `TestSign_*` / `TestVerify_*` — 서명 라운드트립, 필드/서명 위조 감지, 알 수 없는 key_id, empty keystore 감지.
+- `TestKeyStore_Rotate_*` — 이전 키로 검증 성공, retention 초과 시 eviction, 중복 ID rotation 거부.
+- `TestStore_*` — put/get 라운드트립, threshold/interval flush, Close 시 pending drain, 1000건 burst 전건 영속.
+
 ## [0.0.20] - 2026-04-20
 
 ### Fixed
