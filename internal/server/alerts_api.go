@@ -45,12 +45,31 @@ func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.De
 	})
 	// When the tracker trips into hold mode, send a critical webhook so
 	// the on-call human knows the system is being held degraded for them.
+	// Fire the send in a goroutine: OnHold already runs outside the tracker
+	// lock, but it runs on the caller's goroutine (scrubber, raft monitor,
+	// disk collector). A synchronous webhook retry could block that caller
+	// for tens of seconds. The dispatcher's onFailure callback still records
+	// delivery failures for the dashboard banner and Force Resend, so
+	// fire-and-forget is safe.
 	trackerCfg.OnHold = func(reason string) {
-		_ = s.dispatcher.Send(alerts.Alert{
-			Type:     "degraded_hold",
-			Severity: alerts.SeverityCritical,
-			Message:  "Tracker held in degraded mode: " + reason,
-		})
+		go func() {
+			_ = s.dispatcher.Send(alerts.Alert{
+				Type:     "degraded_hold",
+				Severity: alerts.SeverityCritical,
+				Message:  "Tracker held in degraded mode: " + reason,
+			})
+		}()
+	}
+	// Mirror tracker state into the Prometheus gauge. Runs inside the
+	// tracker's lock (see DegradedConfig.OnStateChange godoc) so the gauge
+	// cannot observe a stale value between a concurrent Report and the
+	// mirror update.
+	trackerCfg.OnStateChange = func(degraded bool) {
+		if degraded {
+			metrics.Degraded.Set(1)
+		} else {
+			metrics.Degraded.Set(0)
+		}
 	}
 	s.tracker = alerts.NewDegradedTracker(trackerCfg)
 	return s
@@ -73,33 +92,13 @@ func (s *AlertsState) Send(a alerts.Alert) error {
 }
 
 // Tracker exposes the DegradedTracker for callers (scrubber, raft, disk
-// monitor) that need to push fault/healthy reports. Wraps the tracker so
-// every Report also keeps the grainfs_degraded gauge in sync.
-func (s *AlertsState) Tracker() *gaugeTracker {
-	return &gaugeTracker{inner: s.tracker}
+// monitor) that need to push fault/healthy reports. The gauge wrapper that
+// used to live here was removed; gauge mirroring now happens inside the
+// tracker via DegradedConfig.OnStateChange, which is bit-exact-consistent
+// with tracker state.
+func (s *AlertsState) Tracker() *alerts.DegradedTracker {
+	return s.tracker
 }
-
-// gaugeTracker is a thin wrapper that mirrors DegradedTracker.Report into
-// the Prometheus grainfs_degraded gauge. Exposed via AlertsState.Tracker().
-type gaugeTracker struct {
-	inner *alerts.DegradedTracker
-}
-
-// Report forwards to the inner tracker and updates the gauge.
-func (g *gaugeTracker) Report(faulty bool, reason, resource string) {
-	g.inner.Report(faulty, reason, resource)
-	if g.inner.Degraded() {
-		metrics.Degraded.Set(1)
-	} else {
-		metrics.Degraded.Set(0)
-	}
-}
-
-// Degraded mirrors the inner tracker's accessor.
-func (g *gaugeTracker) Degraded() bool { return g.inner.Degraded() }
-
-// Status mirrors the inner tracker's snapshot.
-func (g *gaugeTracker) Status() alerts.DegradedStatus { return g.inner.Status() }
 
 // Alerts returns the AlertsState wired into this server, or nil if alerts
 // were not configured. Used by other server components (raft monitor, disk
