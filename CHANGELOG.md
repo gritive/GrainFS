@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.2.0] - 2026-04-21
+
+### Added
+
+- **Phase 18 Cluster EC end-to-end** (`internal/cluster/ec.go`, `internal/cluster/backend.go`, `cmd/grainfs/serve.go`) — Cluster mode now splits every object into k+m Reed-Solomon shards placed across distinct nodes. `PutObject` fans out shards with write-all semantics and commits `CmdPutShardPlacement` through Raft before meta; `GetObject` looks up placement and reconstructs from any k shards. Opt-in via `--cluster-ec` (default true). Auto-falls back to N× replication when cluster size < k+m — small deployments keep working unchanged.
+- **ShardPlacementMonitor** (`internal/cluster/shard_placement_monitor.go`) — 각 노드가 자신의 배치된 shard를 주기적으로 스캔하여 누락 감지. Replaces dead `ReplicationMonitor` (0 production callers). Hook (`SetOnMissing`) for Slice 5 repair integration.
+- **Background N×→EC re-placement** (`internal/cluster/reshard_manager.go`) — 기존 N× 객체를 EC로 변환하는 leader-only background task. `ConvertObjectToEC` primitive uses ETag check before commit to tolerate concurrent PUT. Start/Stop/Stats for observability.
+- **RepairShard primitive** (`internal/cluster/backend.go`) — 누락 shard를 k-of-(k+m) 나머지에서 재구성하여 원 위치에 복원. Building block for auto-heal (full wiring deferred).
+- **ConvertObjectToEC** (`internal/cluster/backend.go`) — 기존 N×-replicated object를 EC로 마이그레이션하는 primitive. ETag mismatch 감지 시 안전하게 abort + rollback.
+
+### Changed
+
+- **Placement algorithm deterministic** (`internal/cluster/ec.go`) — `(FNV32(key) + shardIdx) mod N` placement. When N == k+m, 한 key의 모든 shard가 N개 별개 노드에 배치. Spike가 검증한 동일 공식.
+- **ShardService.WriteLocalShard / ReadLocalShard / DeleteLocalShards** (`internal/cluster/shard_service.go`) — self-placement 시 QUIC loopback 생략하는 로컬 IO 경로 추가. Peer로는 기존 WriteShard/ReadShard 그대로 사용.
+- **DistributedBackend.SetShardService가 allNodes 정렬** — cluster 전체 deterministic placement 위해 정렬된 노드 리스트 사용.
+- **DeleteObject가 EC shards cascade** — legacy N× 전체 객체 파일 + local EC shards + peer shard dirs 모두 삭제.
+- **RecoveryManager → ShardPlacementMonitor 연결** (`internal/cluster/recovery.go`) — 복구 시 placement scan 실행.
+
+### Removed
+
+- **ReplicationMonitor dead code** (`internal/cluster/replication.go`, `replication_test.go`) — 0 production callers, 설계 문서에서 이미 rename 명시. ShardPlacementMonitor가 FSM-backed 대체로 Phase 18 Slice 4에서 도입.
+
+### Tests
+
+- **12+ unit tests (EC helpers, placement isolation, IterShardPlacements, IterObjectMetas, monitor scan, reshard manager)** — TDD 기반 Slice 2~5 구현.
+- **E2E TestE2E_ClusterEC_PutGet_5Node** (`tests/e2e/cluster_ec_test.go`) — 5-node cluster, 3+2 EC, varied-size 객체 round-trip + node kill 후 read-k 재구성 검증.
+- **E2E TestE2E_ClusterEC_FallbackToNx_3Node** — 3-node 클러스터가 k+m=5 미달 시 N× replication 자동 fallback 확인.
+
+### Deferred
+
+- Solo mode 삭제는 별도 PR로 분리 (runSoloWithNFS가 NFS/NBD/scrubber/snapshot/WAL/vfs/volume/lifecycle/packblob/pullthrough feature wiring을 단독 보유 — 단순 삭제 불가, consolidation 필요). `TODOS.md`에 상세 포팅 계획 기록.
+
 ## [0.0.1.0] - 2026-04-21
 
 ### Changed

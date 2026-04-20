@@ -80,6 +80,16 @@
 - [ ] HealReceipt 스키마 변경 범위 분석
 - [ ] Write-all vs write-majority tail latency 트레이드오프 재검토
 
+### Phase 18 이후 재검토
+
+- [ ] **Solo mode 제거 (Phase 18 이후 집중 작업) — consolidation 필요** — Phase 18 Cluster EC가 storage story의 중심이 된 이후, `runSolo` 분기는 유지 비용 > 가치. 하지만 현 시점에서 단순 삭제 불가: `runSoloWithNFS`가 NFS/NBD/scrubber auto-runner/snapshot 스케줄러/WAL-PITR/vfs/volume 관리/lifecycle/packblob/pullthrough 등 **feature wiring을 단독 보유** — `runCluster`에는 대부분 미구현. 삭제 = 제품 절반 손실. 올바른 순서:
+  1. runCluster에 위 feature들 모두 port (또는 shared setup 함수로 추출)
+  2. runCluster가 `--peers=""`일 때 1-node cluster로 동작 (auto-raftAddr 생성 등 — Phase 18 PR에 prototype 됐으나 revert)
+  3. solo dispatch 제거 + runSoloWithNFS/setupSoloReceipt 삭제
+  4. UI/doctor solo 분기 제거
+
+  전용 PR 권장: ~1000-1500 LOC 예상.
+
 ## Phase 19: Performance
 
 - [ ] sendfile syscall (SetBodyStream 완료, syscall 미구현)
