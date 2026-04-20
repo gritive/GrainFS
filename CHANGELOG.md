@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.21] - 2026-04-20
+## [0.0.0.21] - 2026-04-20
 
 ### Added
 - **`internal/receipt` 패키지 (Phase 16 Week 5 Slice 1)** — Heal Receipt 핵심 레이어. 한 repair 세션을 audit-ready 아티팩트로 요약: `HealReceipt` struct, HMAC-SHA256 서명, JCS 스타일 canonicalization(RFC 8785 부분 준수 — 키 알파벳 정렬 + 공백 없음), `KeyStore`로 `key_id` rotation 지원(기본 previous 3개 유지), BadgerDB 로컬 저장(Raft FSM 복제 없음) + 기본 30일 TTL, batch write(기본 100 buffer 또는 50ms flush 중 먼저 도달). 서명 실패 시 `ErrNoActiveKey`, 미서명 receipt 저장 거부(`ErrUnsigned`) — Phase 16 audit 무결성 원칙(무서명 receipt 절대 생성 금지) 강제.
