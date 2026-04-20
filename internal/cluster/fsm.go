@@ -23,6 +23,9 @@ const (
 	CmdDeleteBucketPolicy    CommandType = 9
 	CmdMigrateShard          CommandType = 10
 	CmdMigrationDone         CommandType = 11
+	// Phase 18 Cluster EC — Slice 1: shard placement metadata
+	CmdPutShardPlacement    CommandType = 12
+	CmdDeleteShardPlacement CommandType = 13
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -102,6 +105,20 @@ type MigrationDoneFSMCmd struct {
 	VersionID string
 	SrcNode   string
 	DstNode   string
+}
+
+// PutShardPlacementCmd records the EC shard placement for an object.
+// NodeIDs[i] holds shard index i; len(NodeIDs) == k+m. Phase 18 Cluster EC.
+type PutShardPlacementCmd struct {
+	Bucket  string
+	Key     string
+	NodeIDs []string
+}
+
+// DeleteShardPlacementCmd removes the EC placement record for an object.
+type DeleteShardPlacementCmd struct {
+	Bucket string
+	Key    string
 }
 
 // EncodeCommand serializes a command for Raft proposal using FlatBuffers.

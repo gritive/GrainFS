@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.0.2.0] - 2026-04-21
+
+### Added
+
+- **Phase 18 Cluster EC end-to-end** (`internal/cluster/ec.go`, `internal/cluster/backend.go`, `cmd/grainfs/serve.go`) — Cluster mode now splits every object into k+m Reed-Solomon shards placed across distinct nodes. `PutObject` fans out shards with write-all semantics and commits `CmdPutShardPlacement` through Raft before meta; `GetObject` looks up placement and reconstructs from any k shards. Opt-in via `--cluster-ec` (default true). Auto-falls back to N× replication when cluster size < k+m — small deployments keep working unchanged.
+- **ShardPlacementMonitor** (`internal/cluster/shard_placement_monitor.go`) — 각 노드가 자신의 배치된 shard를 주기적으로 스캔하여 누락 감지. Replaces dead `ReplicationMonitor` (0 production callers). Hook (`SetOnMissing`) for Slice 5 repair integration.
+- **Background N×→EC re-placement** (`internal/cluster/reshard_manager.go`) — 기존 N× 객체를 EC로 변환하는 leader-only background task. `ConvertObjectToEC` primitive uses ETag check before commit to tolerate concurrent PUT. Start/Stop/Stats for observability.
+- **RepairShard primitive** (`internal/cluster/backend.go`) — 누락 shard를 k-of-(k+m) 나머지에서 재구성하여 원 위치에 복원. Building block for auto-heal (full wiring deferred).
+- **ConvertObjectToEC** (`internal/cluster/backend.go`) — 기존 N×-replicated object를 EC로 마이그레이션하는 primitive. ETag mismatch 감지 시 안전하게 abort + rollback.
+
+### Changed
+
+- **Placement algorithm deterministic** (`internal/cluster/ec.go`) — `(FNV32(key) + shardIdx) mod N` placement. When N == k+m, 한 key의 모든 shard가 N개 별개 노드에 배치. Spike가 검증한 동일 공식.
+- **ShardService.WriteLocalShard / ReadLocalShard / DeleteLocalShards** (`internal/cluster/shard_service.go`) — self-placement 시 QUIC loopback 생략하는 로컬 IO 경로 추가. Peer로는 기존 WriteShard/ReadShard 그대로 사용.
+- **DistributedBackend.SetShardService가 allNodes 정렬** — cluster 전체 deterministic placement 위해 정렬된 노드 리스트 사용.
+- **DeleteObject가 EC shards cascade** — legacy N× 전체 객체 파일 + local EC shards + peer shard dirs 모두 삭제.
+- **RecoveryManager → ShardPlacementMonitor 연결** (`internal/cluster/recovery.go`) — 복구 시 placement scan 실행.
+
+### Removed
+
+- **ReplicationMonitor dead code** (`internal/cluster/replication.go`, `replication_test.go`) — 0 production callers, 설계 문서에서 이미 rename 명시. ShardPlacementMonitor가 FSM-backed 대체로 Phase 18 Slice 4에서 도입.
+
+### Tests
+
+- **12+ unit tests (EC helpers, placement isolation, IterShardPlacements, IterObjectMetas, monitor scan, reshard manager)** — TDD 기반 Slice 2~5 구현.
+- **E2E TestE2E_ClusterEC_PutGet_5Node** (`tests/e2e/cluster_ec_test.go`) — 5-node cluster, 3+2 EC, varied-size 객체 round-trip + node kill 후 read-k 재구성 검증.
+- **E2E TestE2E_ClusterEC_FallbackToNx_3Node** — 3-node 클러스터가 k+m=5 미달 시 N× replication 자동 fallback 확인.
+
+### Deferred
+
+- Solo mode 삭제는 별도 PR로 분리 (runSoloWithNFS가 NFS/NBD/scrubber/snapshot/WAL/vfs/volume/lifecycle/packblob/pullthrough feature wiring을 단독 보유 — 단순 삭제 불가, consolidation 필요). `TODOS.md`에 상세 포팅 계획 기록.
+
+## [0.0.1.0] - 2026-04-21
+
+### Changed
+- **Cluster storage 모델 정직화** (`ROADMAP.md`, `README.md`) — Phase 4 "EC + Fan-out ✅" 를 solo-only EC / cluster N× replication 으로 분리. `--ec*` 플래그는 solo 모드 전용임을 명시. `ReplicationMonitor`는 dead code (production caller 0), `migration_executor` 는 shardIdx 0..N-1 를 가정하지만 PutObject 가 shardIdx=0 에만 전체 객체를 쓰므로 balancer-triggered migration 은 로그 에러만 뱉고 실패한다 (FSM atomic cancel 로 데이터 안전). 이 모든 사실을 코드 주석에 inline 으로 기록.
+- **Phase 번호 재정렬** (`TODOS.md`) — Phase 18(Performance) → 19, Phase 19(Protocol Extensions) → 20. 새 Phase 18: Cluster EC 를 최상위 storage durability 작업으로 지정.
+
+### Added
+- **Phase 18 Cluster EC Slice 1: ShardPlacement FSM metadata** (`internal/cluster/shard_placement.go`, `internal/cluster/clusterpb/`) — Raft FSM 에 object 별 EC shard 배치 metadata CRUD + lookup 레이어 추가. PutObject/GetObject 통합은 Slice 2 로 이연. `CmdPutShardPlacement` / `CmdDeleteShardPlacement` 커맨드, `FSM.LookupShardPlacement(bucket, key)` read API, `applyDeleteObject` cascade GC, BadgerDB key prefix `placement:<bucket>/<key>`. k+m 은 NodeIDs 슬라이스 길이로 동적 결정 (하드코딩 없음). FSM v1→v2 breaking migration 불필요 — BadgerDB backend 특성상 unknown 커맨드는 warn+skip 으로 forward/backward compat 자동.
+- **48h de-risk spike: ecspike package** (`internal/cluster/ecspike/`) — Phase 18 commitment 전 4+2 Reed-Solomon cluster 기술 리스크 검증. `klauspost/reedsolomon` 직접 import (throwaway 불변 보존, `internal/erasure` 무손상), FNV32 기반 결정적 placement, S3 API per-node shard storage. 6-node loopback multi-process 클러스터에서 10×16MB PUT → node-0 kill → 10 GET SHA256 완전 일치 검증. LOC 219 (< 500 budget), correctness PASS. p95 904ms (nested solo-EC + S3 API overhead 포함 upper bound) 는 Phase 18 raw shard 경로에서 개선 예정 — 정확성 리스크 해소로 CONDITIONAL GO 판정.
+
+### Tests
+- **TDD coverage — Slice 1** (`internal/cluster/shard_placement_test.go`) — 11 테스트 케이스: encode/decode round-trip (4+2, 6+3, 1+1, unicode, empty nodes), Apply + Lookup + Delete + Overwrite, Snapshot/Restore 보존, DeleteObject cascade, BadgerDB key prefix isolation, 다중 객체 격리.
+- **E2E spike test** (`tests/e2e/cluster_ecspike_test.go`) — `TestECSpike_KillOneNodeStillReadable` 6-node multi-process bootstrap (기존 `exec.Command + Process.Kill()` 패턴 재사용), 10×16MB correctness verification + 100×16MB p95 measurement.
+
+### Documentation
+- **Office-hours 설계 + eng review 산출물** (`~/.gstack/projects/gritive-grains/whitekid-master-design-20260421-024627.md`) — 3-stage 플랜(Stage 0 실험 → Stage 1 문서 → Stage 2 48h spike), 5개 Stage 3 critical gap 이연, outside voice cross-model tension 3건 해결, go/no-go appendix.
+
 ## [0.0.0.22] - 2026-04-21
 
 ### Added

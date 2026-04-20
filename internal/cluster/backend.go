@@ -43,6 +43,7 @@ type DistributedBackend struct {
 	allNodes   []string // all node addresses (including self) for shard placement
 	peerHealth *PeerHealth
 	registry   *Registry // cache invalidators (VFS instances)
+	ecConfig   ECConfig  // Phase 18: erasure coding config (disabled = legacy N× path)
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -64,11 +65,19 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 	}, nil
 }
 
+// SetECConfig enables erasure coding for PutObject/GetObject when the cluster
+// is large enough. Phase 18. Call before serving traffic. Zero-value = disabled.
+func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
+	b.ecConfig = cfg
+}
+
 // SetShardService configures the distributed shard service for fan-out.
-// allNodes includes all cluster node addresses for placement.
+// allNodes includes all cluster node addresses for placement. The slice is
+// sorted for deterministic placement across the cluster.
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
-	b.allNodes = allNodes
+	b.allNodes = append([]string(nil), allNodes...)
+	sort.Strings(b.allNodes)
 	// Build peer list (excluding self) for health tracking
 	var peers []string
 	for _, n := range allNodes {
@@ -307,12 +316,24 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 		return nil, err
 	}
 
-	// Read all data into memory for replication
+	// Read all data into memory for replication (or EC split).
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
 
+	// Phase 18 Cluster EC: split across k+m nodes when enabled and cluster is large enough.
+	if b.ecConfig.IsActive(len(b.allNodes)) && b.shardSvc != nil {
+		return b.putObjectEC(bucket, key, data, contentType)
+	}
+
+	return b.putObjectNx(bucket, key, data, contentType)
+}
+
+// putObjectNx is the legacy N× full-replication path. Every peer receives
+// a copy of the full object at shardIdx=0. Preserved for small clusters
+// (< k+m) and for backward compatibility with pre-Phase-18 deployments.
+func (b *DistributedBackend) putObjectNx(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
 	// Write data locally
 	objPath := b.objectPath(bucket, key)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
@@ -349,7 +370,7 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 	now := time.Now().Unix()
 
 	// Replicate metadata through Raft
-	err = b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
+	err := b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      bucket,
 		Key:         key,
 		Size:        int64(len(data)),
@@ -371,10 +392,114 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 	}, nil
 }
 
+// putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into
+// cfg.NumShards() shards, fan-out each to its placed node (self or peer),
+// then commit placement + meta through Raft.
+//
+// Consistency: write-all. Any shard write failure → cleanup + error.
+// Raft commit order: CmdPutShardPlacement first (so a crash after this step
+// leaves the placement record as the source of truth for Slice 4 repair),
+// then CmdPutObjectMeta. Rollback on meta failure deletes all shards and
+// removes the placement record.
+func (b *DistributedBackend) putObjectEC(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
+	ctx := context.Background()
+
+	shards, err := ECSplit(b.ecConfig, data)
+	if err != nil {
+		return nil, fmt.Errorf("ec split: %w", err)
+	}
+
+	placement := PlacementForNodes(b.ecConfig, b.allNodes, key)
+	selfID := b.node.ID()
+
+	// Track nodes we wrote to so cleanup can target them precisely.
+	written := make([]string, 0, len(shards))
+	cleanup := func() {
+		for _, n := range written {
+			if n == selfID {
+				_ = b.shardSvc.DeleteLocalShards(bucket, key)
+				continue
+			}
+			_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
+		}
+	}
+
+	// Fan-out: write each shard to its placed node. Write-all consistency.
+	for i, node := range placement {
+		if node == selfID {
+			if werr := b.shardSvc.WriteLocalShard(bucket, key, i, shards[i]); werr != nil {
+				cleanup()
+				return nil, fmt.Errorf("ec write local shard %d: %w", i, werr)
+			}
+		} else {
+			if werr := b.shardSvc.WriteShard(ctx, node, bucket, key, i, shards[i]); werr != nil {
+				if b.peerHealth != nil {
+					b.peerHealth.MarkUnhealthy(node)
+				}
+				cleanup()
+				return nil, fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
+			}
+			if b.peerHealth != nil {
+				b.peerHealth.MarkHealthy(node)
+			}
+		}
+		written = append(written, node)
+	}
+
+	// Commit placement through Raft.
+	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket:  bucket,
+		Key:     key,
+		NodeIDs: placement,
+	}); perr != nil {
+		cleanup()
+		return nil, fmt.Errorf("ec propose placement: %w", perr)
+	}
+
+	h := md5.Sum(data)
+	etag := hex.EncodeToString(h[:])
+	now := time.Now().Unix()
+
+	// Commit metadata. On failure, roll back placement + shards.
+	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      bucket,
+		Key:         key,
+		Size:        int64(len(data)),
+		ContentType: contentType,
+		ETag:        etag,
+		ModTime:     now,
+	}); merr != nil {
+		_ = b.propose(ctx, CmdDeleteShardPlacement, DeleteShardPlacementCmd{Bucket: bucket, Key: key})
+		cleanup()
+		return nil, merr
+	}
+
+	return &storage.Object{
+		Key:          key,
+		Size:         int64(len(data)),
+		ContentType:  contentType,
+		ETag:         etag,
+		LastModified: now,
+	}, nil
+}
+
 func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	obj, err := b.HeadObject(bucket, key)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Phase 18: EC placement takes precedence. Absent placement falls through
+	// to the legacy N×-replicated single-shard path below.
+	if nodes, ok := b.fsm.LookupShardPlacement(bucket, key); ok && b.shardSvc != nil {
+		data, ecErr := b.getObjectEC(context.Background(), bucket, key, nodes)
+		if ecErr == nil {
+			return io.NopCloser(bytes.NewReader(data)), obj, nil
+		}
+		// Reconstruction failed — log and fall through to any legacy local/peer
+		// full-object copy that may still exist (e.g. mid-migration state).
+		b.logger.Warn("ec reconstruct failed, falling back to N× path",
+			"bucket", bucket, "key", key, "error", ecErr)
 	}
 
 	// Try local first
@@ -426,6 +551,236 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	return nil, nil, fmt.Errorf("open object: %w", err)
 }
 
+// RepairShard rebuilds a single missing shard by reading the other shards from
+// the cluster and writing the reconstructed shardIdx back to its placement
+// node. Phase 18 Slice 6: the primitive that ShardPlacementMonitor.onMissing
+// plugs into, and that an admin endpoint can trigger on demand.
+//
+// Preconditions: the object must already have a placement record (created by
+// putObjectEC or ConvertObjectToEC). shardIdx must be in [0, k+m). At least k
+// of the other shards must be readable or reconstruction fails.
+//
+// Write target: the repaired shard goes back to placement[shardIdx]. When
+// that node is this node, we use WriteLocalShard; otherwise WriteShard.
+func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string, shardIdx int) error {
+	if b.shardSvc == nil {
+		return fmt.Errorf("shard service not configured")
+	}
+	placement, ok := b.fsm.LookupShardPlacement(bucket, key)
+	if !ok {
+		return fmt.Errorf("no placement for %s/%s — object is not EC-managed", bucket, key)
+	}
+	if shardIdx < 0 || shardIdx >= len(placement) {
+		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(placement))
+	}
+	if len(placement) != b.ecConfig.NumShards() {
+		return fmt.Errorf("placement length %d != k+m %d", len(placement), b.ecConfig.NumShards())
+	}
+
+	selfID := b.node.ID()
+	shards := make([][]byte, len(placement))
+	available := 0
+
+	// Pull every OTHER shard. We intentionally skip shardIdx to avoid pulling
+	// the corrupt/missing copy into the reconstruction.
+	for i, node := range placement {
+		if i == shardIdx {
+			continue
+		}
+		var data []byte
+		var rerr error
+		if node == selfID {
+			data, rerr = b.shardSvc.ReadLocalShard(bucket, key, i)
+		} else {
+			data, rerr = b.shardSvc.ReadShard(ctx, node, bucket, key, i)
+		}
+		if rerr == nil && data != nil {
+			shards[i] = data
+			available++
+		}
+	}
+	if available < b.ecConfig.DataShards {
+		return fmt.Errorf("repair: only %d/%d other shards readable, need %d",
+			available, len(placement)-1, b.ecConfig.DataShards)
+	}
+
+	// ECReconstruct rebuilds the whole object; we then re-split to get the
+	// canonical byte layout of each shard (including the missing one).
+	data, rerr := ECReconstruct(b.ecConfig, shards)
+	if rerr != nil {
+		return fmt.Errorf("repair reconstruct: %w", rerr)
+	}
+	freshShards, serr := ECSplit(b.ecConfig, data)
+	if serr != nil {
+		return fmt.Errorf("repair re-split: %w", serr)
+	}
+
+	// Write just the missing shard back to its placement node.
+	target := placement[shardIdx]
+	if target == selfID {
+		return b.shardSvc.WriteLocalShard(bucket, key, shardIdx, freshShards[shardIdx])
+	}
+	return b.shardSvc.WriteShard(ctx, target, bucket, key, shardIdx, freshShards[shardIdx])
+}
+
+// FSMRef returns the underlying FSM so reshard / monitor code can iterate
+// placements + object metas without reaching through the backend's private fields.
+func (b *DistributedBackend) FSMRef() *FSM { return b.fsm }
+
+// ECActive reports whether Phase 18 cluster EC will be applied to the next
+// PutObject call (EC enabled + enough nodes for k+m split).
+func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.allNodes)) }
+
+// ConvertObjectToEC migrates an existing N×-replicated object to Phase 18
+// EC placement. Used by the background re-placement manager (Slice 5).
+// Idempotent: if the object already has a placement record, returns nil
+// immediately. If the object meta changes mid-conversion (detected via ETag),
+// rolls back and returns a retry-able error.
+//
+// Consistency: etag-check-before-commit. PUT races that land between read and
+// commit overwrite both the N× copy and (post-commit) the EC shards, so the
+// last writer wins per normal PUT semantics.
+func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
+	if !b.ecConfig.IsActive(len(b.allNodes)) || b.shardSvc == nil {
+		return fmt.Errorf("ec not active: enabled=%v cluster_size=%d k+m=%d",
+			b.ecConfig.Enabled, len(b.allNodes), b.ecConfig.NumShards())
+	}
+	if _, ok := b.fsm.LookupShardPlacement(bucket, key); ok {
+		return nil // already converted
+	}
+
+	// Snapshot meta before reading data so we can detect concurrent writes.
+	metaBefore, err := b.HeadObject(bucket, key)
+	if err != nil {
+		return fmt.Errorf("head before convert: %w", err)
+	}
+
+	// Read the full object via the legacy N× path. GetObject will fall through
+	// to local or peer full-replica fetch because placement is still absent.
+	rc, _, err := b.GetObject(bucket, key)
+	if err != nil {
+		return fmt.Errorf("read for convert: %w", err)
+	}
+	data, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		return fmt.Errorf("drain for convert: %w", err)
+	}
+
+	// Split + fan-out shards. Mirrors putObjectEC's write-all semantics.
+	shards, err := ECSplit(b.ecConfig, data)
+	if err != nil {
+		return fmt.Errorf("ec split for convert: %w", err)
+	}
+	placement := PlacementForNodes(b.ecConfig, b.allNodes, key)
+	selfID := b.node.ID()
+	written := make([]string, 0, len(shards))
+	rollbackShards := func() {
+		for _, n := range written {
+			if n == selfID {
+				_ = b.shardSvc.DeleteLocalShards(bucket, key)
+				continue
+			}
+			_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
+		}
+	}
+	for i, node := range placement {
+		if node == selfID {
+			if werr := b.shardSvc.WriteLocalShard(bucket, key, i, shards[i]); werr != nil {
+				rollbackShards()
+				return fmt.Errorf("convert write local shard %d: %w", i, werr)
+			}
+		} else {
+			if werr := b.shardSvc.WriteShard(ctx, node, bucket, key, i, shards[i]); werr != nil {
+				rollbackShards()
+				return fmt.Errorf("convert write shard %d to %s: %w", i, node, werr)
+			}
+		}
+		written = append(written, node)
+	}
+
+	// Re-check meta: did a PUT race us while we were writing shards?
+	metaAfter, err := b.HeadObject(bucket, key)
+	if err != nil || metaAfter.ETag != metaBefore.ETag {
+		rollbackShards()
+		return fmt.Errorf("convert aborted: meta changed mid-conversion (etag %q → %q)",
+			metaBefore.ETag, func() string {
+				if metaAfter != nil {
+					return metaAfter.ETag
+				}
+				return ""
+			}())
+	}
+
+	// Commit placement. A concurrent PUT between here and commit will also
+	// propose a placement (putObjectEC), and Raft serializes — whoever lands
+	// first wins. Idempotent applyPutShardPlacement tolerates either order.
+	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket:  bucket,
+		Key:     key,
+		NodeIDs: placement,
+	}); perr != nil {
+		rollbackShards()
+		return fmt.Errorf("convert propose placement: %w", perr)
+	}
+
+	// Cleanup legacy N× replicas on nodes NOT in the placement. The local full-
+	// object file is always deleted (whether or not self is a placement node,
+	// the full file is now redundant). Best-effort — failures just leave stale
+	// N× copies that a future sweep can reclaim.
+	_ = os.Remove(b.objectPath(bucket, key))
+	placementSet := make(map[string]bool, len(placement))
+	for _, n := range placement {
+		placementSet[n] = true
+	}
+	for _, peer := range b.allNodes {
+		if peer == selfID {
+			continue
+		}
+		if placementSet[peer] {
+			continue // this peer legitimately holds a shard now
+		}
+		// Peer only had the old full-object N× copy at shardIdx=0; DeleteShards
+		// wipes the whole <bucket>/<key>/ dir on that peer.
+		_ = b.shardSvc.DeleteShards(ctx, peer, bucket, key)
+	}
+	return nil
+}
+
+// getObjectEC reads shards from the placed nodes and reconstructs the object.
+// placement[i] is the nodeID holding shardIdx i. Tolerates up to ParityShards
+// unreachable nodes (read-k). The placement slice must have length NumShards().
+func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key string, placement []string) ([]byte, error) {
+	if len(placement) != b.ecConfig.NumShards() {
+		return nil, fmt.Errorf("placement length %d != expected %d", len(placement), b.ecConfig.NumShards())
+	}
+	selfID := b.node.ID()
+	shards := make([][]byte, len(placement))
+	available := 0
+	for i, node := range placement {
+		var data []byte
+		var err error
+		if node == selfID {
+			data, err = b.shardSvc.ReadLocalShard(bucket, key, i)
+		} else {
+			data, err = b.shardSvc.ReadShard(ctx, node, bucket, key, i)
+			if err != nil && b.peerHealth != nil {
+				b.peerHealth.MarkUnhealthy(node)
+			} else if err == nil && b.peerHealth != nil {
+				b.peerHealth.MarkHealthy(node)
+			}
+		}
+		if err == nil && data != nil {
+			shards[i] = data
+			available++
+		}
+	}
+	if available < b.ecConfig.DataShards {
+		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d", available, len(placement), b.ecConfig.DataShards)
+	}
+	return ECReconstruct(b.ecConfig, shards)
+}
+
 func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, error) {
 	if err := b.HeadBucket(bucket); err != nil {
 		return nil, err
@@ -466,10 +821,15 @@ func (b *DistributedBackend) DeleteObject(bucket, key string) error {
 		return err
 	}
 
-	// Delete local data
+	// Delete local data. Both legacy N× full-object file AND Phase 18 EC shards
+	// may exist (e.g. mid-migration). Remove both; ENOENT on either is fine.
 	os.Remove(b.objectPath(bucket, key))
+	if b.shardSvc != nil {
+		_ = b.shardSvc.DeleteLocalShards(bucket, key)
+	}
 
-	// Delete data from peer nodes (distributed GC)
+	// Delete data from peer nodes (distributed GC). DeleteShards removes the
+	// entire <bucket>/<key>/ directory on the peer, covering shardIdx 0..N-1.
 	if b.shardSvc != nil {
 		ctx := context.Background()
 		for _, peer := range b.allNodes {

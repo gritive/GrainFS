@@ -296,6 +296,10 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 
 	if !earlyCommit {
 		// Phase 1: copy all shards src → dst
+		// NOTE: In current cluster mode (N× full-replication), PutObject writes
+		// only shardIdx=0 per peer. This loop reads shardIdx 0..numShards-1, so
+		// iterations i>=1 will fail with ENOENT. Expected behavior until Phase 18
+		// Cluster EC rewires PutObject to real shard placement.
 		e.logger.Debug("migration phase start", "phase", "1", "task", id)
 		copyStart := time.Now()
 		for i := range e.numShards {

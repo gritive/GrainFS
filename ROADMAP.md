@@ -115,21 +115,26 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - Solo → 3노드 전환 시 데이터 무손실, 서비스 중단 없음
 - 전환 전후 `aws s3 ls`로 동일 데이터 확인
 
-### Phase 4: Erasure Coding + Fan-out ✅
+### Phase 4: Erasure Coding + Fan-out (부분 구현)
 
 **목표:** 대용량 데이터를 쪼개고, 분산 저장하고, 복구한다.
 
+**Solo 모드** (완료):
 - klauspost/reedsolomon 통합 (기본 4+2, k+m 가변) ✅
-- ShardService + StreamRouter로 QUIC Data Stream 분산 샤드 저장 ✅
-- QUIC Data Stream으로 다중 노드 Fan-out 전송 ✅
-- Distributed GC: DeleteObject 시 피어 노드 샤드 자동 삭제 ✅
+- ECBackend + scrubber로 shard 손상 자동 감지/복구 ✅
+
+**Cluster 모드** (실제 상태):
+- ShardService + StreamRouter QUIC transport ✅ (인프라)
+- Distributed GC: DeleteObject 시 피어 노드 데이터 삭제 ✅
 - Failover: PeerHealth 기반 unhealthy 노드 자동 건너뛰기/재시도 ✅
-- Re-replication: ReplicationMonitor로 부족한 replica 감지 + RepairPlan 생성 ✅
+- ⚠️ **Cluster mode는 EC가 아닌 N× full-replication**: PutObject가 `WriteShard(..., shardIdx=0, data)`로 전체 객체를 모든 피어에 복제. Reed-Solomon split은 solo 모드에만 적용됨.
+- ⚠️ **Re-replication 미구현**: `ReplicationMonitor`는 정의만 되어있고 production caller 0. Phase 18에서 재설계 예정.
+- ⚠️ **Balancer-triggered migration 비호환**: `migration_executor`는 `shardIdx 0..N-1`을 순회하지만 PutObject가 `shardIdx=0`에만 기록하므로 migration은 로그 에러를 뱉으며 실패 (FSM atomic cancel로 데이터는 안전). Phase 18에서 해결 예정.
 
 **검증:**
-- ShardService QUIC 기반 WriteShard/ReadShard/DeleteShards E2E 테스트 통과
-- PeerHealth cooldown 기반 자동 복구 테스트 통과
-- ReplicationMonitor 부족 replica 감지 및 복구 계획 테스트 통과
+- ShardService QUIC 기반 WriteShard/ReadShard/DeleteShards E2E 테스트 통과 ✅
+- PeerHealth cooldown 기반 자동 복구 테스트 통과 ✅
+- Cluster EC split + 2노드 장애 허용 검증 — **미구현** (Phase 18)
 
 ### Phase 5: Operations & Hardening ✅
 

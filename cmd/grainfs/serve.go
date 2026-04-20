@@ -49,6 +49,7 @@ func init() {
 	serveCmd.Flags().Bool("ec", true, "enable erasure coding (Reed-Solomon 4+2, use --ec=false to disable)")
 	serveCmd.Flags().Int("ec-data", erasure.DefaultDataShards, "number of data shards for erasure coding")
 	serveCmd.Flags().Int("ec-parity", erasure.DefaultParityShards, "number of parity shards for erasure coding")
+	serveCmd.Flags().Bool("cluster-ec", true, "Phase 18: cross-node EC in cluster mode (auto-falls back to N× replication when cluster size < ec-data+ec-parity; use --cluster-ec=false to force N×)")
 	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
@@ -523,6 +524,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Wire shard service for distributed fan-out replication
 	allNodes := append([]string{raftAddr}, peers...)
 	distBackend.SetShardService(shardSvc, allNodes)
+
+	// Phase 18 Cluster EC: opt-in via --cluster-ec (default true).
+	// Auto-falls back to N× replication when cluster size < ec-data+ec-parity.
+	clusterEC, _ := cmd.Flags().GetBool("cluster-ec")
+	clusterECData, _ := cmd.Flags().GetInt("ec-data")
+	clusterECParity, _ := cmd.Flags().GetInt("ec-parity")
+	distBackend.SetECConfig(cluster.ECConfig{
+		DataShards:   clusterECData,
+		ParityShards: clusterECParity,
+		Enabled:      clusterEC,
+	})
+	if clusterEC {
+		slog.Info("cluster EC configured", "k", clusterECData, "m", clusterECParity,
+			"active", len(allNodes) >= clusterECData+clusterECParity,
+			"cluster_size", len(allNodes))
+	}
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)

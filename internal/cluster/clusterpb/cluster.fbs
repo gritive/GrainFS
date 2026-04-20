@@ -125,6 +125,22 @@ table MigrateShardCmd {
   dst_node:string;
 }
 
+// PutShardPlacementCmd records that object <bucket>/<key> has its EC shards
+// placed on the given nodes, in order of shardIdx (0..len(node_ids)-1).
+// len(node_ids) = k+m; no hardcoded 6. Phase 18 Cluster EC Slice 1.
+table PutShardPlacementCmd {
+  bucket:string;
+  key:string;
+  node_ids:[string];
+}
+
+// DeleteShardPlacementCmd removes the placement record for an object.
+// Typically fan-out with DeleteObject. Phase 18 Cluster EC Slice 1.
+table DeleteShardPlacementCmd {
+  bucket:string;
+  key:string;
+}
+
 table MigrationDoneCmd {
   bucket:string;
   key:string;
