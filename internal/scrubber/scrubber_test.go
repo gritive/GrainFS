@@ -187,6 +187,97 @@ func TestShardVerifier_CorruptShard(t *testing.T) {
 // RepairEngine tests
 // ----------------------------------------------------------------------------
 
+// captureEmitter collects HealEvents for assertions.
+type captureEmitter struct {
+	mu     sync.Mutex
+	events []scrubber.HealEvent
+}
+
+func (c *captureEmitter) Emit(e scrubber.HealEvent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, e)
+}
+
+func (c *captureEmitter) Snapshot() []scrubber.HealEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]scrubber.HealEvent, len(c.events))
+	copy(out, c.events)
+	return out
+}
+
+func TestRepairEngine_EmitsPhaseEvents(t *testing.T) {
+	const (
+		dataShards   = 4
+		parityShards = 2
+	)
+	data := []byte("hello world this is test data for ec scrubber repair engine emit")
+	pad := (dataShards - len(data)%dataShards) % dataShards
+	padded := append(data, make([]byte, pad)...)
+
+	m := newMockBackend()
+	shards := encodeShards(t, padded, dataShards, parityShards)
+	m.storeShards("b", "k", shards)
+	delete(m.shards, "b/k/1")
+
+	cap := &captureEmitter{}
+	r := scrubber.NewRepairEngine(m, scrubber.WithRepairEmitter(cap))
+	err := r.RepairWithCorrelation(
+		scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: dataShards, ParityShards: parityShards},
+		scrubber.ShardStatus{Bucket: "b", Key: "k", Missing: []int{1}},
+		"corr-1",
+	)
+	require.NoError(t, err)
+
+	events := cap.Snapshot()
+	require.NotEmpty(t, events, "expected emitter to receive HealEvents")
+
+	phases := map[scrubber.HealPhase]int{}
+	for _, e := range events {
+		phases[e.Phase]++
+		assert.Equal(t, "corr-1", e.CorrelationID, "all events must share correlation ID")
+		assert.Equal(t, "b", e.Bucket)
+		assert.Equal(t, "k", e.Key)
+	}
+	assert.Equal(t, 1, phases[scrubber.PhaseReconstruct])
+	assert.Equal(t, 1, phases[scrubber.PhaseWrite])
+	assert.Equal(t, 1, phases[scrubber.PhaseVerify])
+
+	// Write event must reference shard 1.
+	for _, e := range events {
+		if e.Phase == scrubber.PhaseWrite {
+			assert.EqualValues(t, 1, e.ShardID)
+			assert.Equal(t, scrubber.OutcomeSuccess, e.Outcome)
+			assert.Greater(t, e.BytesRepaired, int64(0))
+		}
+	}
+}
+
+func TestRepairEngine_NoEmitterIsSafe(t *testing.T) {
+	// Passing a nil emitter via WithRepairEmitter must NOT replace the default
+	// NoopEmitter, otherwise a forgetful caller would crash on Emit.
+	const (
+		dataShards   = 4
+		parityShards = 2
+	)
+	data := []byte("nil emitter must default to noop and not panic on Emit calls")
+	pad := (dataShards - len(data)%dataShards) % dataShards
+	padded := append(data, make([]byte, pad)...)
+
+	m := newMockBackend()
+	shards := encodeShards(t, padded, dataShards, parityShards)
+	m.storeShards("b", "k", shards)
+	delete(m.shards, "b/k/0")
+
+	r := scrubber.NewRepairEngine(m, scrubber.WithRepairEmitter(nil))
+	err := r.Repair(
+		scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: dataShards, ParityShards: parityShards},
+		scrubber.ShardStatus{Bucket: "b", Key: "k", Missing: []int{0}},
+	)
+	require.NoError(t, err)
+}
+
 func TestRepairEngine_Reconstruct(t *testing.T) {
 	const (
 		dataShards   = 4

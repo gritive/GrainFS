@@ -72,3 +72,9 @@ type NoopEmitter struct{}
 
 // Emit implements Emitter by doing nothing.
 func (NoopEmitter) Emit(HealEvent) {}
+
+// newCorrelationID returns a fresh UUIDv7 string usable as a correlation ID.
+// Centralised so RepairEngine and BackgroundScrubber stay in sync on format.
+func newCorrelationID() string {
+	return uuid.Must(uuid.NewV7()).String()
+}

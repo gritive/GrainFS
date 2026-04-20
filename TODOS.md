@@ -15,7 +15,6 @@
 - [ ] io.WriteTo 구현 (FlatBuffers zero-copy)
 - [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
 - [ ] **Self-healing storage** — *zero ops* — 재시작 시 corrupted cache, stale lock, orphan tmp 자동 정리 (Phase 16 Transparent Self-Healing plan에 포함)
-- [ ] **EC shard auto-repair** — *zero ops* — scrubber가 mismatch 감지 시 자동 rebuild; dashboard에 진행도 노출
 - [ ] **Degraded mode (storage)** — *zero ops* — EC backend 실패 → read-only + critical alert; 단일 블롭 손상 → 해당 객체만 격리
 
 ## Phase 17: Scale-Out

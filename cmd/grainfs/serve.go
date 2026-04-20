@@ -239,8 +239,9 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	}
 	if sc != nil {
 		opts = append(opts, server.WithScrubber(sc))
-		sc.Start(ctx)
-		slog.Info("background scrubber started")
+		// NOTE: sc.Start() is called AFTER server.New so the scrubber can be
+		// wired to the server-owned heal emitter. Without this ordering the
+		// dashboard would never receive HealEvents.
 	}
 	if lcStore != nil {
 		opts = append(opts, server.WithLifecycleStore(lcStore))
@@ -251,6 +252,11 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	}
 
 	srv := server.New(addr, swappable, opts...)
+	if sc != nil {
+		sc.SetEmitter(srv.HealEmitter())
+		sc.Start(ctx)
+		slog.Info("background scrubber started")
+	}
 	go func() {
 		if err := srv.Run(); err != nil {
 			slog.Error("http server error", "error", err)

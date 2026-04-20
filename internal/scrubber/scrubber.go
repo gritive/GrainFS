@@ -68,15 +68,16 @@ const maxMigrationsPerCycle = 50
 
 // BackgroundScrubber periodically verifies and repairs EC shard integrity.
 type BackgroundScrubber struct {
-	backend        Scrubbable
-	verifier       *ShardVerifier
-	repairer       *RepairEngine
-	interval       time.Duration
-	resetCh        chan time.Duration // hot-reload interval signal
-	limiter        *rate.Limiter // 100 objects/sec scan throttle (Eng Review #8)
-	mu             sync.Mutex
-	stats          ScrubStats
-	lastStatuses   map[string]ShardStatus  // "bucket/key" → last observed status
+	backend         Scrubbable
+	verifier        *ShardVerifier
+	repairer        *RepairEngine
+	emitter         Emitter
+	interval        time.Duration
+	resetCh         chan time.Duration // hot-reload interval signal
+	limiter         *rate.Limiter      // 100 objects/sec scan throttle (Eng Review #8)
+	mu              sync.Mutex
+	stats           ScrubStats
+	lastStatuses    map[string]ShardStatus // "bucket/key" → last observed status
 	orphanTombstone map[string]struct{}    // dirs seen as orphan last cycle
 }
 
@@ -100,12 +101,25 @@ func WithNoRetry() ScrubberOption {
 	}
 }
 
+// WithEmitter wires the scrubber (and its repair engine) to an Emitter so that
+// HealEvents flow to the SSE hub and the eventstore. Defaults to NoopEmitter.
+func WithEmitter(e Emitter) ScrubberOption {
+	return func(s *BackgroundScrubber) {
+		if e == nil {
+			return
+		}
+		s.emitter = e
+		s.repairer = NewRepairEngine(s.backend, WithRepairEmitter(e))
+	}
+}
+
 // New creates a BackgroundScrubber with a rate limit of 100 scans/sec.
 func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *BackgroundScrubber {
 	s := &BackgroundScrubber{
 		backend:         backend,
 		verifier:        NewShardVerifier(backend),
 		repairer:        NewRepairEngine(backend),
+		emitter:         NoopEmitter{},
 		interval:        interval,
 		resetCh:         make(chan time.Duration, 1),
 		limiter:         rate.NewLimiter(100, 10),
@@ -123,6 +137,18 @@ func (s *BackgroundScrubber) LastStatus(bucket, key string) ShardStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastStatuses[bucket+"/"+key]
+}
+
+// SetEmitter swaps the HealEvent emitter at runtime. Used by serve.go to wire
+// the server-owned heal emitter into a scrubber that was constructed before
+// the server existed. Must be called before Start; concurrent emit during a
+// swap is unsafe.
+func (s *BackgroundScrubber) SetEmitter(e Emitter) {
+	if e == nil {
+		return
+	}
+	s.emitter = e
+	s.repairer = NewRepairEngine(s.backend, WithRepairEmitter(e))
 }
 
 // SetInterval changes the scrub interval at runtime without restarting.
@@ -221,19 +247,27 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
 			atomic.AddInt64(&s.stats.ShardErrors, errCount)
 
+			// Group every event for this object's repair under one correlation ID.
+			correlationID := newCorrelationID()
+			s.emitDetect(rec, status, correlationID)
+
 			// Per-cycle repair cap (Eng Review #5)
 			if repairCount >= maxRepairsPerCycle {
 				metrics.ScrubSkippedOverCapTotal.Inc()
+				ev := newRepairEvent(PhaseReconstruct, OutcomeSkipped, rec, correlationID)
+				ev.ErrCode = "cycle_cap"
+				s.emitter.Emit(ev)
 				continue
 			}
 
-			if err := s.repairer.Repair(rec, status); err != nil {
+			if err := s.repairer.RepairWithCorrelation(rec, status, correlationID); err != nil {
 				metrics.ECDegradedTotal.Inc()
 				atomic.AddInt64(&s.stats.Unrepairable, 1)
 				slog.Error("scrub: unrepairable", "bucket", rec.Bucket, "key", rec.Key, "err", err)
 				continue
 			}
 			metrics.ScrubRepairedTotal.Inc()
+			metrics.HealShardsRepairedTotal.Add(float64(errCount))
 			atomic.AddInt64(&s.stats.Repaired, 1)
 			repairCount++
 		}
@@ -299,4 +333,22 @@ func (s *BackgroundScrubber) Stats() ScrubStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.stats
+}
+
+// emitDetect publishes one detect HealEvent per missing/corrupt shard so the
+// dashboard can show what triggered a repair before reconstruct/write events
+// arrive.
+func (s *BackgroundScrubber) emitDetect(rec ObjectRecord, status ShardStatus, correlationID string) {
+	for _, idx := range status.Missing {
+		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
+		ev.ShardID = int32(idx)
+		ev.ErrCode = "missing"
+		s.emitter.Emit(ev)
+	}
+	for _, idx := range status.Corrupt {
+		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
+		ev.ShardID = int32(idx)
+		ev.ErrCode = "corrupt"
+		s.emitter.Emit(ev)
+	}
 }

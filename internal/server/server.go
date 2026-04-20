@@ -392,4 +392,28 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 		}()
 		c.Response.SetBodyStream(pr, -1)
 	})
+
+	// Phase 16: dedicated heal SSE stream. Subscribers receive only HealEvents
+	// (Event.Type == "heal") so the dashboard's Self-Healing card stays
+	// independent of the verbose log/metric stream.
+	h.GET("/api/events/heal/stream", func(ctx context.Context, c *app.RequestContext) {
+		c.Response.Header.Set("Content-Type", "text/event-stream")
+		c.Response.Header.Set("Cache-Control", "no-cache")
+		c.Response.Header.Set("Connection", "keep-alive")
+		c.SetStatusCode(consts.StatusOK)
+
+		pr, pw := io.Pipe()
+		go func() {
+			hub.WriteSSE(ctx, pw, healEvCategory)
+			pw.Close()
+		}()
+		c.Response.SetBodyStream(pr, -1)
+	})
+}
+
+// HealEmitter returns a scrubber.Emitter that fans HealEvents out to the SSE
+// hub, the eventstore, and Prometheus. Callers (the serve command) wire it
+// into scrubber.New via scrubber.WithEmitter.
+func (s *Server) HealEmitter() scrubber.Emitter {
+	return newHealEmitter(s.hub, s.emitEvent)
 }

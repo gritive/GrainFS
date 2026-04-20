@@ -139,6 +139,42 @@ tbody tr:last-child td{border-bottom:none}
     <div class="stat-card"><div class="label">Objects</div><div class="value" id="dash-objects">-</div></div>
   </div>
 
+  <!-- Phase 16: Self-Healing card -->
+  <div id="heal-section" style="margin-bottom:1.5rem">
+    <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
+      <h3 style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint)">Self-Healing</h3>
+      <span id="heal-sse-badge" aria-label="Heal stream connection status" style="font-size:0.65rem;padding:0.15rem 0.5rem;border-radius:9999px;background:rgba(239,68,68,0.15);color:var(--danger)">disconnected</span>
+    </div>
+    <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+      <div class="stat-card">
+        <div class="label">Last Heal</div>
+        <div class="value" id="heal-last-when" style="font-size:1.75rem;font-weight:700">—</div>
+        <div id="heal-last-detail" style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">No heals yet · scrubber runs in background</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Heal Rate (1h)</div>
+        <div class="value" id="heal-rate">0/hr</div>
+        <svg id="heal-sparkline" width="100%" height="32" viewBox="0 0 120 32" preserveAspectRatio="none" aria-label="Heal events per minute, last hour" style="margin-top:0.25rem;display:block">
+          <polyline id="heal-sparkline-line" fill="none" stroke="var(--accent,#3b82f6)" stroke-width="1.5" points="" />
+        </svg>
+      </div>
+      <div class="stat-card">
+        <div class="label">Restart Recovery</div>
+        <div class="value" id="heal-restart-count">0</div>
+        <div id="heal-restart-detail" style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">No cleanup needed on last restart</div>
+      </div>
+    </div>
+    <div style="margin-top:0.75rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.35rem">
+        <h4 style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint);margin:0">Live Heal Events</h4>
+        <span style="font-size:0.7rem;color:var(--text-faint)">most recent 5</span>
+      </div>
+      <div id="heal-events-table" role="log" aria-live="polite" style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);font-family:monospace;font-size:0.75rem;min-height:100px;max-height:180px;overflow-y:auto;padding:0.5rem 0.75rem;color:var(--text-muted)">
+        <div id="heal-events-empty" style="color:var(--text-faint)">No recent heal events. Your storage is healthy.</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Live log stream -->
   <div style="margin-bottom:1.5rem">
     <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
@@ -356,7 +392,7 @@ tbody tr:last-child td{border-bottom:none}
       if (btn.dataset.tab === 'volumes') loadVolumes();
       if (btn.dataset.tab === 'snapshots') loadSnapshots();
       if (btn.dataset.tab === 'events') loadEvents();
-      if (btn.dataset.tab === 'dashboard') { refreshDashboard(); startSSE(); }
+      if (btn.dataset.tab === 'dashboard') { refreshDashboard(); startSSE(); startHealSSE(); }
       if (btn.dataset.tab === 'cluster') loadCluster();
     });
   });
@@ -648,6 +684,169 @@ tbody tr:last-child td{border-bottom:none}
         }
       } catch (_) {}
     });
+  }
+
+  // Phase 16: Self-Healing card SSE consumer.
+  var healSSE = null;
+  var healEvents = [];           // rolling buffer of recent HealEvents (full objects)
+  var healMinuteBuckets = [];    // last 60 1-minute counts for sparkline
+  var healMinuteIndex = -1;      // current minute (Math.floor(Date.now()/60000))
+  var healRestartCount = 0;
+  var healRestartByType = {};    // err_code → count for tooltip
+  var MAX_HEAL_EVENTS = 5;
+
+  function startHealSSE() {
+    if (healSSE) return;
+    healSSE = new EventSource(baseURL + '/api/events/heal/stream');
+    var badge = document.getElementById('heal-sse-badge');
+
+    healSSE.onopen = function() {
+      badge.textContent = 'live';
+      badge.style.background = 'rgba(34,197,94,0.15)';
+      badge.style.color = 'var(--success)';
+    };
+
+    healSSE.onerror = function() {
+      badge.textContent = 'reconnecting';
+      badge.style.background = 'rgba(245,158,11,0.15)';
+      badge.style.color = 'var(--warning)';
+    };
+
+    healSSE.addEventListener('heal', function(e) {
+      try {
+        var ev = JSON.parse(e.data);
+        recordHealEvent(ev);
+        renderHealCard();
+      } catch (_) {}
+    });
+  }
+
+  function recordHealEvent(ev) {
+    // Track for live tail (most recent first).
+    healEvents.unshift(ev);
+    if (healEvents.length > MAX_HEAL_EVENTS) healEvents.length = MAX_HEAL_EVENTS;
+
+    // Bucket by minute for sparkline (1h window).
+    var ts = ev.timestamp ? Date.parse(ev.timestamp) : Date.now();
+    var minute = Math.floor(ts / 60000);
+    if (minute !== healMinuteIndex) {
+      // Advance buckets — fill skipped minutes with 0.
+      if (healMinuteIndex < 0) {
+        healMinuteIndex = minute;
+        healMinuteBuckets = [0];
+      } else {
+        var skipped = Math.min(minute - healMinuteIndex, 60);
+        for (var i = 0; i < skipped; i++) healMinuteBuckets.push(0);
+        healMinuteIndex = minute;
+        if (healMinuteBuckets.length > 60) {
+          healMinuteBuckets = healMinuteBuckets.slice(-60);
+        }
+      }
+    }
+    healMinuteBuckets[healMinuteBuckets.length - 1]++;
+
+    // Restart Recovery line: count startup-phase events since this dashboard loaded.
+    if (ev.phase === 'startup') {
+      healRestartCount++;
+      var key = ev.err_code || ev.outcome || 'cleaned';
+      healRestartByType[key] = (healRestartByType[key] || 0) + 1;
+    }
+  }
+
+  function renderHealCard() {
+    var last = healEvents[0];
+    if (last) {
+      var when = last.timestamp ? Date.parse(last.timestamp) : Date.now();
+      document.getElementById('heal-last-when').textContent = fmtAgo(Date.now() - when);
+      var detail = last.phase + (last.shard_id != null && last.shard_id >= 0 ? ' · shard ' + last.shard_id : '');
+      if (last.bucket && last.key) detail += ' · ' + last.bucket + '/' + last.key;
+      document.getElementById('heal-last-detail').textContent = detail;
+    }
+
+    // Heal rate = sum of buckets in last hour.
+    var rate = healMinuteBuckets.reduce(function(a, b) { return a + b; }, 0);
+    document.getElementById('heal-rate').textContent = rate + '/hr';
+
+    renderHealSparkline();
+
+    // Restart Recovery line.
+    document.getElementById('heal-restart-count').textContent = healRestartCount;
+    if (healRestartCount > 0) {
+      var parts = [];
+      for (var k in healRestartByType) {
+        parts.push(k + ':' + healRestartByType[k]);
+      }
+      document.getElementById('heal-restart-detail').textContent = parts.join(' · ');
+    }
+
+    // Live events table.
+    var tbl = document.getElementById('heal-events-table');
+    tbl.textContent = '';
+    if (!healEvents.length) {
+      var empty = document.createElement('div');
+      empty.id = 'heal-events-empty';
+      empty.style.color = 'var(--text-faint)';
+      empty.textContent = 'No recent heal events. Your storage is healthy.';
+      tbl.appendChild(empty);
+      return;
+    }
+    healEvents.forEach(function(ev) {
+      var row = document.createElement('div');
+      row.style.cssText = 'padding:0.15rem 0;display:flex;gap:0.5rem;align-items:baseline';
+      var ts = ev.timestamp ? new Date(ev.timestamp) : new Date();
+      var tsSpan = document.createElement('span');
+      tsSpan.style.color = 'var(--text-faint)';
+      tsSpan.style.minWidth = '5.5rem';
+      tsSpan.textContent = ts.toLocaleTimeString();
+      var phaseSpan = document.createElement('span');
+      phaseSpan.style.cssText = 'color:' + healOutcomeColor(ev.outcome) + ';font-weight:600;min-width:6rem';
+      phaseSpan.textContent = ev.phase;
+      var bodySpan = document.createElement('span');
+      var parts = [];
+      if (ev.bucket) parts.push(ev.bucket + (ev.key ? '/' + ev.key : ''));
+      if (ev.shard_id != null && ev.shard_id >= 0) parts.push('shard=' + ev.shard_id);
+      if (ev.duration_ms) parts.push(ev.duration_ms + 'ms');
+      if (ev.err_code) parts.push(ev.err_code);
+      bodySpan.textContent = parts.join(' · ');
+      row.appendChild(tsSpan);
+      row.appendChild(phaseSpan);
+      row.appendChild(bodySpan);
+      tbl.appendChild(row);
+    });
+  }
+
+  function healOutcomeColor(outcome) {
+    switch (outcome) {
+      case 'success': return 'var(--success)';
+      case 'failed': return 'var(--danger)';
+      case 'isolated': return 'var(--warning)';
+      default: return 'var(--text-muted)';
+    }
+  }
+
+  function renderHealSparkline() {
+    var line = document.getElementById('heal-sparkline-line');
+    if (!line || !healMinuteBuckets.length) return;
+    var max = 0;
+    healMinuteBuckets.forEach(function(v) { if (v > max) max = v; });
+    if (max === 0) { line.setAttribute('points', ''); return; }
+    var W = 120, H = 32, n = healMinuteBuckets.length;
+    var pts = healMinuteBuckets.map(function(v, i) {
+      var x = n === 1 ? W : (i / (n - 1)) * W;
+      var y = H - (v / max) * (H - 4) - 2;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    line.setAttribute('points', pts);
+  }
+
+  function fmtAgo(ms) {
+    if (ms < 1000) return ms + 'ms ago';
+    var s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's ago';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    var h = Math.floor(m / 60);
+    return h + 'h ago';
   }
 
   function renderLogStream() {
