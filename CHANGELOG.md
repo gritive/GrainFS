@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.15] - 2026-04-20
+
+### Added
+- **Phase 15: Unified Event Log** — S3 operations + system events를 하나의 BadgerDB-backed append-only log에 기록. `internal/eventstore` 신규 패키지 (ev: 키 prefix, 나노초 big-endian 키, 7일 TTL).
+  - `GET /api/eventlog?since=<초>&type=<s3|system>&limit=<N>` — 시간/타입 필터 지원.
+  - **S3 핸들러 이벤트**: `createBucket`, `deleteBucket`, `handlePut`, `getObject`, `deleteObject`, cluster join.
+  - **System 이벤트**: snapshot create/restore/delete.
+  - **대시보드 Events 탭** — 타입 필터(All/S3/System), 시간 범위 필터(5min/1hr/24hr), 이벤트 테이블(time/type/action/bucket/key/size).
+  - **대시보드 Snapshots 탭** — create(reason 입력), list, restore, delete UI.
+- **`storage.DBProvider` 인터페이스** — `DB() *badger.DB` 노출. `LocalBackend`가 구현하여 eventstore 공유 가능.
+- **Fire-and-forget `emitEvent`** — 이벤트 저장 실패해도 S3 요청 실패하지 않음.
+
+### Fixed
+- **Events 탭 "Invalid Date" 표시 버그** — `e.ts`는 나노초(int64), JS `Date()`는 밀리초 기대. `new Date(Math.floor(e.ts / 1e6))`으로 변환 (`internal/server/ui/index.html:779`).
+
 ## [0.0.14] - 2026-04-20
 
 ### Added

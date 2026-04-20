@@ -17,6 +17,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -164,6 +165,7 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 		return
 	}
 	metrics.BucketsTotal.Inc()
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionCreateBucket, Bucket: bucket})
 	c.Header("Location", "/"+bucket)
 	c.Status(consts.StatusOK)
 }
@@ -247,6 +249,7 @@ func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 		return
 	}
 	metrics.BucketsTotal.Dec()
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDeleteBucket, Bucket: bucket})
 	c.Status(consts.StatusNoContent)
 }
 
@@ -393,6 +396,7 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
 	c.Status(consts.StatusOK)
 }
 
@@ -459,6 +463,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionGet, Bucket: bucket, Key: key, Size: obj.Size})
 	etag := fmt.Sprintf("\"%s\"", obj.ETag)
 	c.Header("Content-Type", obj.ContentType)
 	c.Header("ETag", etag)
@@ -736,6 +741,7 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 		if existing != nil {
 			metrics.StorageBytesTotal.Add(float64(-existing.Size))
 		}
+		s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDelete, Bucket: bucket, Key: key})
 		c.Status(consts.StatusNoContent)
 		return
 	}
@@ -748,6 +754,7 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 	if existing != nil {
 		metrics.StorageBytesTotal.Add(float64(-existing.Size))
 	}
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDelete, Bucket: bucket, Key: key})
 	c.Status(consts.StatusNoContent)
 }
 
@@ -1117,6 +1124,7 @@ func (s *Server) joinClusterHandler(_ context.Context, c *app.RequestContext) {
 
 	// Clear the join callback so it can't be called twice
 	s.joinCluster = nil
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeSystem, Action: eventstore.EventActionClusterJoin})
 
 	resp, _ := json.Marshal(map[string]string{"status": "joined", "mode": "cluster"})
 	c.Data(consts.StatusOK, "application/json", resp)

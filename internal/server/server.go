@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -51,9 +52,10 @@ type Server struct {
 	lifecycleStore *lifecycle.Store
 	ipLimiter      *RateLimiter
 	userLimiter    *RateLimiter
-	cluster     ClusterInfo     // nil in solo mode
-	joinCluster JoinClusterFunc // nil if not in solo mode or already clustered
-	balancer    BalancerInfo    // nil if balancer not enabled
+	cluster        ClusterInfo      // nil in solo mode
+	joinCluster    JoinClusterFunc  // nil if not in solo mode or already clustered
+	balancer       BalancerInfo     // nil if balancer not enabled
+	evStore        *eventstore.Store // nil if event store not configured
 }
 
 // Option configures the server.
@@ -105,6 +107,13 @@ func WithScrubber(sc *scrubber.BackgroundScrubber) Option {
 func WithLifecycleStore(store *lifecycle.Store) Option {
 	return func(s *Server) {
 		s.lifecycleStore = store
+	}
+}
+
+// WithEventStore attaches an event store to the server for audit logging.
+func WithEventStore(store *eventstore.Store) Option {
+	return func(s *Server) {
+		s.evStore = store
 	}
 }
 
@@ -176,7 +185,8 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// Skip auth for /metrics and /ui/ endpoints
 		// Admin endpoints require authentication
 		path := string(c.URI().Path())
-		if path == "/metrics" || strings.HasPrefix(path, "/ui/") {
+		if path == "/metrics" || strings.HasPrefix(path, "/ui/") ||
+			path == "/api/events" || path == "/api/eventlog" {
 			c.Next(ctx)
 			return
 		}
@@ -341,6 +351,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Hot-reload config API
 	s.registerConfigAPI(h)
+
+	// Event log query API
+	s.registerEventsAPI(h)
 
 	// SSE event stream for dashboard
 	hub := s.hub

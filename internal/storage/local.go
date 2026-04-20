@@ -21,6 +21,9 @@ type LocalBackend struct {
 	db   *badger.DB
 }
 
+// DB exposes the underlying BadgerDB for shared use (lifecycle, events).
+func (b *LocalBackend) DB() *badger.DB { return b.db }
+
 // NewLocalBackend creates a new local storage backend.
 func NewLocalBackend(root string) (*LocalBackend, error) {
 	dataDir := filepath.Join(root, "data")

@@ -20,6 +20,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
+	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsserver"
@@ -152,6 +153,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to initialize storage: %w", err)
 		}
 
+		// Capture DB before wrapping for event store (DBProvider is either LocalBackend or ECBackend)
+		var evDB *badger.DB
+		if dp, ok := backend.(storage.DBProvider); ok {
+			evDB = dp.DB()
+		}
+
 		// Wrap with Packed Blob if threshold is set
 		if packThreshold > 0 {
 			blobDir := filepath.Join(dataDir, "blobs")
@@ -194,7 +201,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition
 		swappable := storage.NewSwappableBackend(backend)
-		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
+		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort, nbdVolumeSize, evDB)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -203,7 +210,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
 }
 
-func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64) error {
+func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64, evDB *badger.DB) error {
 	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
 
 	// Start DiskCollector to expose grainfs_disk_used_pct metric even in solo mode.
@@ -227,6 +234,9 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	}
 	opts = append(opts, server.WithJoinCluster(joinFn))
 	opts = append(opts, server.WithDataDir(dataDir))
+	if evDB != nil {
+		opts = append(opts, server.WithEventStore(eventstore.New(evDB)))
+	}
 	if sc != nil {
 		opts = append(opts, server.WithScrubber(sc))
 		sc.Start(ctx)
@@ -491,7 +501,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
-	srvOpts := []server.Option{server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers})}
+	srvOpts := []server.Option{
+		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}),
+		server.WithEventStore(eventstore.New(db)),
+	}
 	if balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
 	}
