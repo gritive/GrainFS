@@ -175,3 +175,153 @@ func TestStore_BurstPersistsAll(t *testing.T) {
 func uid(i int) string {
 	return fmt.Sprintf("rcpt-%04d", i)
 }
+
+func newReceiptWithIDAndTime(id string, ts time.Time) *HealReceipt {
+	r := sampleReceipt()
+	r.ReceiptID = id
+	r.Timestamp = ts
+	return r
+}
+
+func TestStore_List_EmptyStore(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	from := time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+	got, err := s.List(from, to, 100)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func TestStore_List_ReturnsReceiptsInRange(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	base := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+
+	// 3 in range (t+10s, t+20s, t+30s), 2 out of range (t-1h, t+2h)
+	inRange := []*HealReceipt{
+		newReceiptWithIDAndTime("rcpt-in-1", base.Add(10*time.Second)),
+		newReceiptWithIDAndTime("rcpt-in-2", base.Add(20*time.Second)),
+		newReceiptWithIDAndTime("rcpt-in-3", base.Add(30*time.Second)),
+	}
+	outOfRange := []*HealReceipt{
+		newReceiptWithIDAndTime("rcpt-before", base.Add(-time.Hour)),
+		newReceiptWithIDAndTime("rcpt-after", base.Add(2*time.Hour)),
+	}
+	for _, r := range append(inRange, outOfRange...) {
+		require.NoError(t, Sign(r, ks))
+		require.NoError(t, s.Put(r))
+	}
+	require.NoError(t, s.Flush())
+
+	got, err := s.List(base, base.Add(time.Minute), 100)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+
+	// Verify ascending timestamp order
+	require.Equal(t, "rcpt-in-1", got[0].ReceiptID)
+	require.Equal(t, "rcpt-in-2", got[1].ReceiptID)
+	require.Equal(t, "rcpt-in-3", got[2].ReceiptID)
+}
+
+func TestStore_List_EmptyRange(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	r := newReceiptWithIDAndTime("rcpt-1", time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, Sign(r, ks))
+	require.NoError(t, s.Put(r))
+	require.NoError(t, s.Flush())
+
+	// from == to: half-open interval [from, to) is empty
+	t0 := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	got, err := s.List(t0, t0, 100)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func TestStore_List_RespectsLimit(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	base := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 10; i++ {
+		r := newReceiptWithIDAndTime(uid(i), base.Add(time.Duration(i)*time.Second))
+		require.NoError(t, Sign(r, ks))
+		require.NoError(t, s.Put(r))
+	}
+	require.NoError(t, s.Flush())
+
+	got, err := s.List(base, base.Add(time.Minute), 3)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	// Earliest 3 by timestamp
+	require.Equal(t, uid(0), got[0].ReceiptID)
+	require.Equal(t, uid(1), got[1].ReceiptID)
+	require.Equal(t, uid(2), got[2].ReceiptID)
+}
+
+func TestStore_List_HalfOpenInterval(t *testing.T) {
+	// Verify [from, to) semantics: from is inclusive, to is exclusive.
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	t0 := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Second)
+
+	rFrom := newReceiptWithIDAndTime("rcpt-at-from", t0)
+	rTo := newReceiptWithIDAndTime("rcpt-at-to", t1)
+	for _, r := range []*HealReceipt{rFrom, rTo} {
+		require.NoError(t, Sign(r, ks))
+		require.NoError(t, s.Put(r))
+	}
+	require.NoError(t, s.Flush())
+
+	got, err := s.List(t0, t1, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "[from, to) should include from, exclude to")
+	require.Equal(t, "rcpt-at-from", got[0].ReceiptID)
+}
+
+func TestStore_Put_WritesTimeIndex(t *testing.T) {
+	// Verify secondary index is written alongside primary.
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	r := newReceiptWithIDAndTime("rcpt-idx-1", time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, Sign(r, ks))
+	require.NoError(t, s.Put(r))
+	require.NoError(t, s.Flush())
+
+	// Scan for time index keys directly.
+	var tsKeyCount int
+	err = db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek([]byte(tsIndexPrefix)); it.ValidForPrefix([]byte(tsIndexPrefix)); it.Next() {
+			tsKeyCount++
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, tsKeyCount, "exactly one ts:* key should exist after one Put")
+}
