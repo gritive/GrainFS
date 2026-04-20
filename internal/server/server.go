@@ -20,6 +20,7 @@ import (
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/snapshot"
@@ -59,6 +60,7 @@ type Server struct {
 	balancer       BalancerInfo     // nil if balancer not enabled
 	evStore        *eventstore.Store // nil if event store not configured
 	alerts         *AlertsState      // nil if alerts not wired
+	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
 
 	// Bounded event queue + single worker. Decouples request handlers from
 	// BadgerDB write latency and prevents unbounded goroutine growth.
@@ -123,6 +125,14 @@ func WithLifecycleStore(store *lifecycle.Store) Option {
 func WithEventStore(store *eventstore.Store) Option {
 	return func(s *Server) {
 		s.evStore = store
+	}
+}
+
+// WithReceiptAPI wires the Phase 16 Slice 2 heal-receipt read API.
+// When set, /api/receipts/:id and /api/receipts?from=&to= become live.
+func WithReceiptAPI(api *receipt.API) Option {
+	return func(s *Server) {
+		s.receiptAPI = api
 	}
 }
 
@@ -389,6 +399,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Phase 16 Week 4: alerts status + force-resend (no-op if alerts not wired).
 	s.registerAlertsAPI(h)
+
+	// Phase 16 Slice 2: heal-receipt audit API (no-op if WithReceiptAPI not set).
+	s.registerReceiptAPI(h)
 
 	// SSE event stream for dashboard
 	hub := s.hub

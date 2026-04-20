@@ -178,6 +178,36 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 	}
 }
 
+// QuerySingle asks exactly one peer for receiptID. Used when the
+// RoutingCache reports a hit — no need to fan out. Returns the same
+// (json, found, err) semantics as Query.
+//
+// A single-peer failure (network error, peer down) surfaces as err; the
+// caller can decide whether to fall back to a full Query broadcast.
+func (b *ReceiptBroadcaster) QuerySingle(ctx context.Context, peer, receiptID string) ([]byte, bool, error) {
+	qCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	payload := encodeReceiptQuery(receiptID)
+	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: payload}
+
+	resp, err := b.caller.Call(qCtx, peer, req)
+	if err != nil {
+		return nil, false, err
+	}
+	if resp == nil {
+		return nil, false, nil
+	}
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	if !parsed.Found() {
+		return nil, false, nil
+	}
+	j := parsed.ReceiptJsonBytes()
+	cp := make([]byte, len(j))
+	copy(cp, j)
+	return cp, true, nil
+}
+
 // encodeReceiptQuery builds a ReceiptQueryMsg payload for receiptID.
 func encodeReceiptQuery(receiptID string) []byte {
 	b := flatbuffers.NewBuilder(64)
