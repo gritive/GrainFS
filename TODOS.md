@@ -37,6 +37,10 @@
 
 ## Phase 17: Scale-Out
 
+- [ ] **Lock-free 아키텍처 전환** — *성능 개선*
+  현재 Phase 16 Slice 2 `internal/receipt/RoutingCache`와 `Store.drainMu`가 `sync.RWMutex` / `sync.Mutex`를 사용. gossip 수신 + 대시보드 조회가 매 초 수 KHz에 이르면 writer starvation + read 경합으로 p99 latency 튐.
+  **후보 접근**: (1) `atomic.Pointer[map[...]]` 기반 copy-on-write — read 0 lock, write는 전체 맵 복사 후 원자 교체. (2) sharded map (node_id hash % N) — write/read 파편화. (3) `sync.Map` 재평가 (rolling replace 패턴에 부적합할 수도).
+  **트리거 조건**: (a) Slice 2 gossip 주기가 1초 이내로 내려가거나, (b) routing cache size가 peer 수 × 수백 IDs를 넘거나, (c) 벤치마크에서 Lookup p99 > 100μs 나올 때. 지금은 MVP 정합성 우선, 측정 후 리팩터링.
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
