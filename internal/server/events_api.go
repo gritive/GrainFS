@@ -15,7 +15,7 @@ import (
 )
 
 func (s *Server) registerEventsAPI(h *server.Hertz) {
-	h.GET("/api/eventlog", s.queryEventLog)
+	h.GET("/api/eventlog", localhostOnly(), s.queryEventLog)
 }
 
 func (s *Server) queryEventLog(ctx context.Context, c *app.RequestContext) {
