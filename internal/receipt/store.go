@@ -243,6 +243,36 @@ func writeBatch(txn *badger.Txn, batch []*HealReceipt, ttl time.Duration) error 
 	return nil
 }
 
+// LookupReceiptJSON fetches the raw JSON-encoded receipt bytes for id.
+// Used by the cluster's ReceiptQueryHandler to answer broadcast-fallback
+// queries; returns (nil, false) when the id is unknown or its TTL expired.
+// Cheaper than Get when the caller only needs to forward bytes across the
+// network — no json.Unmarshal → re-marshal round trip.
+func (s *Store) LookupReceiptJSON(id string) ([]byte, bool) {
+	if id == "" {
+		return nil, false
+	}
+	var out []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(receiptKey(id))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			out = make([]byte, len(v))
+			copy(out, v)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
 // RecentReceiptIDs returns the most recent up-to-max receipt IDs, ordered
 // newest-first. Used by the gossip sender to build a rolling window payload
 // every tick. Walks the ts:* secondary index in reverse; cost is O(max).

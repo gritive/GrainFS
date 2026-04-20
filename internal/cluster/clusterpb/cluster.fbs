@@ -101,6 +101,22 @@ table ReceiptGossipMsg {
   receipt_ids:[string];
 }
 
+// ReceiptQueryMsg requests a specific HealReceipt by ID (broadcast fallback).
+// Sent on transport.StreamReceiptQuery, expects ReceiptQueryResponseMsg back.
+table ReceiptQueryMsg {
+  receipt_id:string;
+}
+
+// ReceiptQueryResponseMsg carries either the full receipt JSON (found=true)
+// or empty payload (found=false). JSON chosen over a FlatBuffers mirror
+// because the receipt schema lives in internal/receipt and already has a
+// canonical JSON form used for HMAC signing — re-encoding as FB would
+// create a second source of truth.
+table ReceiptQueryResponseMsg {
+  found:bool;
+  receipt_json:[ubyte];
+}
+
 table MigrateShardCmd {
   bucket:string;
   key:string;
