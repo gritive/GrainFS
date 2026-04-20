@@ -77,6 +77,10 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applyMigrateShard(cmd.Data)
 	case CmdMigrationDone:
 		return f.applyMigrationDone(cmd.Data)
+	case CmdPutShardPlacement:
+		return f.applyPutShardPlacement(cmd.Data)
+	case CmdDeleteShardPlacement:
+		return f.applyDeleteShardPlacement(cmd.Data)
 	default:
 		slog.Warn("fsm: unknown command type", "type", cmd.Type)
 		return nil
@@ -87,6 +91,9 @@ func bucketKey(bucket string) []byte       { return []byte("bucket:" + bucket) }
 func bucketPolicyKey(bucket string) []byte { return []byte("policy:" + bucket) }
 func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
 func multipartKey(uploadID string) []byte     { return []byte("mpu:" + uploadID) }
+func shardPlacementKey(bucket, key string) []byte {
+	return []byte("placement:" + bucket + "/" + key)
+}
 
 func (f *FSM) applyCreateBucket(data []byte) error {
 	c, err := decodeCreateBucketCmd(data)
@@ -134,11 +141,15 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 		return err
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
-		err := txn.Delete(objectMetaKey(c.Bucket, c.Key))
-		if err == badger.ErrKeyNotFound {
-			return nil
+		if err := txn.Delete(objectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+			return err
 		}
-		return err
+		// Cascade to shard placement if present (Phase 18 Cluster EC). ErrKeyNotFound
+		// is expected for N×-replication objects with no placement record.
+		if err := txn.Delete(shardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		return nil
 	})
 }
 
