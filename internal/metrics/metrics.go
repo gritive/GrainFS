@@ -269,4 +269,27 @@ var (
 		Name: "grainfs_scrub_orphan_sweep_capped_total",
 		Help: "Total orphan shards deferred because maxOrphansPerCycle was reached.",
 	})
+
+	// Phase 16 — Self-healing metrics.
+
+	HealEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_heal_events_total",
+		Help: "Total HealEvents emitted, partitioned by phase and outcome.",
+	}, []string{"phase", "outcome"})
+
+	HealShardsRepairedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_heal_shards_repaired_total",
+		Help: "Total EC shards reconstructed and rewritten by the scrubber.",
+	})
+
+	HealDurationMs = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "grainfs_heal_duration_ms",
+		Help:    "Per-phase healing latency in milliseconds.",
+		Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
+	}, []string{"phase"})
+
+	HealStreamDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_heal_stream_dropped_events_total",
+		Help: "HealEvents dropped because an SSE subscriber's buffer was full.",
+	})
 )
