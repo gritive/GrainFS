@@ -90,6 +90,13 @@ func RunStartupRecovery(ctx context.Context, dataRoot string, emit scrubber.Emit
 }
 
 // sweepOrphanTmp walks dataRoot for *.tmp files older than tmpInflightGuard.
+//
+// The WalkDir walkFn absorbs every per-entry error (missing root, permission
+// denied, symlink loop, transient stat failures) into res.Errors and returns
+// nil, so WalkDir itself only returns non-nil when the caller cancelled the
+// context. The tail-end error handling below reflects that contract: we
+// propagate context.Canceled, and we defensively record + log any other
+// non-context error so a future change to walkFn cannot silently drop signal.
 func sweepOrphanTmp(ctx context.Context, root string, emit scrubber.Emitter, res *StartupRecoveryResult) error {
 	cutoff := time.Now().Add(-tmpInflightGuard)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
@@ -123,9 +130,19 @@ func sweepOrphanTmp(ctx context.Context, root string, emit scrubber.Emitter, res
 		res.OrphanTmpRemoved++
 		return nil
 	})
+	if err == nil {
+		return nil
+	}
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
+	// Not reachable under the current walkFn (it never returns a non-context
+	// error), but preserve the signal if a future change introduces one.
+	// Record the error so it surfaces on the "Restart Recovery" dashboard
+	// line and emit a structured log so operators can triage.
+	res.Errors = append(res.Errors, "walkdir root="+root+": "+err.Error())
+	slog.Warn("startup recovery walkdir non-context error",
+		"root", root, "operation", "orphan_tmp", "err", err)
 	return nil
 }
 
