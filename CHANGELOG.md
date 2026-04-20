@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.1.0] - 2026-04-21
+
+### Changed
+- **Cluster storage 모델 정직화** (`ROADMAP.md`, `README.md`) — Phase 4 "EC + Fan-out ✅" 를 solo-only EC / cluster N× replication 으로 분리. `--ec*` 플래그는 solo 모드 전용임을 명시. `ReplicationMonitor`는 dead code (production caller 0), `migration_executor` 는 shardIdx 0..N-1 를 가정하지만 PutObject 가 shardIdx=0 에만 전체 객체를 쓰므로 balancer-triggered migration 은 로그 에러만 뱉고 실패한다 (FSM atomic cancel 로 데이터 안전). 이 모든 사실을 코드 주석에 inline 으로 기록.
+- **Phase 번호 재정렬** (`TODOS.md`) — Phase 18(Performance) → 19, Phase 19(Protocol Extensions) → 20. 새 Phase 18: Cluster EC 를 최상위 storage durability 작업으로 지정.
+
+### Added
+- **Phase 18 Cluster EC Slice 1: ShardPlacement FSM metadata** (`internal/cluster/shard_placement.go`, `internal/cluster/clusterpb/`) — Raft FSM 에 object 별 EC shard 배치 metadata CRUD + lookup 레이어 추가. PutObject/GetObject 통합은 Slice 2 로 이연. `CmdPutShardPlacement` / `CmdDeleteShardPlacement` 커맨드, `FSM.LookupShardPlacement(bucket, key)` read API, `applyDeleteObject` cascade GC, BadgerDB key prefix `placement:<bucket>/<key>`. k+m 은 NodeIDs 슬라이스 길이로 동적 결정 (하드코딩 없음). FSM v1→v2 breaking migration 불필요 — BadgerDB backend 특성상 unknown 커맨드는 warn+skip 으로 forward/backward compat 자동.
+- **48h de-risk spike: ecspike package** (`internal/cluster/ecspike/`) — Phase 18 commitment 전 4+2 Reed-Solomon cluster 기술 리스크 검증. `klauspost/reedsolomon` 직접 import (throwaway 불변 보존, `internal/erasure` 무손상), FNV32 기반 결정적 placement, S3 API per-node shard storage. 6-node loopback multi-process 클러스터에서 10×16MB PUT → node-0 kill → 10 GET SHA256 완전 일치 검증. LOC 219 (< 500 budget), correctness PASS. p95 904ms (nested solo-EC + S3 API overhead 포함 upper bound) 는 Phase 18 raw shard 경로에서 개선 예정 — 정확성 리스크 해소로 CONDITIONAL GO 판정.
+
+### Tests
+- **TDD coverage — Slice 1** (`internal/cluster/shard_placement_test.go`) — 11 테스트 케이스: encode/decode round-trip (4+2, 6+3, 1+1, unicode, empty nodes), Apply + Lookup + Delete + Overwrite, Snapshot/Restore 보존, DeleteObject cascade, BadgerDB key prefix isolation, 다중 객체 격리.
+- **E2E spike test** (`tests/e2e/cluster_ecspike_test.go`) — `TestECSpike_KillOneNodeStillReadable` 6-node multi-process bootstrap (기존 `exec.Command + Process.Kill()` 패턴 재사용), 10×16MB correctness verification + 100×16MB p95 measurement.
+
+### Documentation
+- **Office-hours 설계 + eng review 산출물** (`~/.gstack/projects/gritive-grains/whitekid-master-design-20260421-024627.md`) — 3-stage 플랜(Stage 0 실험 → Stage 1 문서 → Stage 2 48h spike), 5개 Stage 3 critical gap 이연, outside voice cross-model tension 3건 해결, go/no-go appendix.
+
 ## [0.0.0.22] - 2026-04-21
 
 ### Added
