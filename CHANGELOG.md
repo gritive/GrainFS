@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.17] - 2026-04-20
+
+### Added
+- **Phase 16 Event Spine 스캐폴딩** — `internal/scrubber/event.go` 신규. `HealEvent` 타입 (UUIDv7 ID, RFC3339 timestamp, phase/outcome enum, correlation_id), `HealPhase` 상수 6개(detect/reconstruct/write/verify/startup/degraded), `HealOutcome` 상수 4개(success/failed/skipped/isolated), `Emitter` 인터페이스, `NoopEmitter` 기본 구현. 엔진에 아직 주입되지 않음 — 후속 PR에서 scrubber repair/orphan/verify 경로에 emit 지점 연결.
+- **Unit + race 테스트** — `event_test.go` 8개 케이스. ID 유일성(200회), JSON 라운드트립, `omitempty` 검증, enum 문자열, 32 goroutine × 25 emit 동시성 확인 (`-race` 통과).
+
+### Changed
+- **TODOS.md Phase 16/17 경계 재조정** — Phase 16 "Self-healing storage" 항목에서 BadgerDB auto-recovery 하위 요소 제외 (Phase 17로 이동). Phase 17에 추가: BadgerDB atomic auto-recovery, Blame Mode v2(shard-level 시각적 replay), PagerDuty 네이티브 webhook. Phase 16 Transparent Self-Healing 설계(6주 스코프)와 정합성 맞춤.
+
 ## [0.0.16] - 2026-04-20
 
 ### Fixed

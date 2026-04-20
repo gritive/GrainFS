@@ -14,12 +14,15 @@
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
 - [ ] io.WriteTo 구현 (FlatBuffers zero-copy)
 - [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
-- [ ] **Self-healing storage** — *zero ops* — 재시작 시 corrupted cache, stale lock, orphan tmp 자동 정리; BadgerDB 손상 자동 복구 (log-based replay, snapshot restore)
+- [ ] **Self-healing storage** — *zero ops* — 재시작 시 corrupted cache, stale lock, orphan tmp 자동 정리 (Phase 16 Transparent Self-Healing plan에 포함)
 - [ ] **EC shard auto-repair** — *zero ops* — scrubber가 mismatch 감지 시 자동 rebuild; dashboard에 진행도 노출
 - [ ] **Degraded mode (storage)** — *zero ops* — EC backend 실패 → read-only + critical alert; 단일 블롭 손상 → 해당 객체만 격리
 
 ## Phase 17: Scale-Out
 
+- [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
+- [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
+- [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
 - [ ] Sharding, multi raft
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
 - [ ] Migration: NFS virtual overlay
