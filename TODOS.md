@@ -4,6 +4,9 @@
 
 - [ ] TestNBD_Docker: 대기 루프가 `/metrics`(S3)만 체크 → NBD 포트 10809 리스닝 대기 추가 필요 (`docker/nbd-test.sh`)
 - [ ] TestNFS_MountAndWriteReadFile: macOS NFS 클라이언트에서 mount 500초 후 disconnect → timeout/retry 또는 skip 플래그 검토 (`tests/e2e/volume_test.go`)
+- [ ] Event Log: `emitEvent` unbounded goroutine — 고부하 S3 트래픽 시 BadgerDB write 지연 시 goroutine leak 가능 (`internal/server/events_api.go:81`). worker pool 또는 buffered channel 검토
+- [ ] Event Log: `/api/eventlog`의 `since`/`until` dual-mode 로직 단순화 — `<=3600`이면 상대 오프셋, 초과하면 절대 unix초인 로직이 혼란 유발 (`internal/server/events_api.go:37-47`)
+- [ ] Event Log: `handleFormUpload`에서 `emitEvent` 호출 누락 — 다른 PUT 경로는 event emit하는데 form upload만 빠짐 (`internal/server/handlers.go:791`)
 
 ## Phase 16: Advanced Storage
 
