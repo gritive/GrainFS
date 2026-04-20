@@ -3,7 +3,13 @@ package storage
 import (
 	"errors"
 	"io"
+
+	badger "github.com/dgraph-io/badger/v4"
 )
+
+// DBProvider is implemented by backends that expose their underlying BadgerDB
+// for shared use (lifecycle, events).
+type DBProvider interface{ DB() *badger.DB }
 
 // ErrSnapshotNotSupported is returned when the backend does not implement Snapshotable.
 var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend")

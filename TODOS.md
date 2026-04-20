@@ -24,6 +24,11 @@
 - [ ] Migration: NBD block proxying
 - [ ] nbd over internet for edge computing (powered by wireguard)
 
+## Phase 19: Protocol Extensions
+
+- [ ] Redis 프로토콜 지원 (RESP, Streaming, Pub/Sub 이벤트)
+- [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원
+
 ## Phase 18: Performance
 
 - [ ] sendfile syscall (SetBodyStream 완료, syscall 미구현)

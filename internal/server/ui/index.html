@@ -79,6 +79,8 @@ tbody tr:last-child td{border-bottom:none}
   <nav>
     <button class="active" data-tab="browser">Object Browser</button>
     <button data-tab="volumes">Volumes</button>
+    <button data-tab="snapshots">Snapshots</button>
+    <button data-tab="events">Events</button>
     <button data-tab="dashboard">Dashboard</button>
     <button data-tab="cluster">Cluster</button>
   </nav>
@@ -197,6 +199,51 @@ tbody tr:last-child td{border-bottom:none}
   </div>
 </div>
 
+<!-- Snapshots Tab -->
+<div class="content hidden" id="tab-snapshots">
+  <div class="toolbar">
+    <div class="breadcrumb"><span>Snapshots</span></div>
+    <div class="actions">
+      <input id="snap-reason" type="text" placeholder="Reason (optional)" style="padding:0.35rem 0.6rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem;width:200px">
+      <button class="btn primary" id="btn-create-snap">Create Snapshot</button>
+    </div>
+  </div>
+  <div id="snap-msg" style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem"></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>Timestamp</th><th>Objects</th><th>Size</th><th>Reason</th><th></th></tr></thead>
+      <tbody id="snap-list"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Events Tab -->
+<div class="content hidden" id="tab-events">
+  <div class="toolbar">
+    <div class="breadcrumb"><span>Event Log</span></div>
+    <div class="actions" style="gap:0.5rem">
+      <select id="ev-type-filter" style="padding:0.35rem 0.5rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem">
+        <option value="">All types</option>
+        <option value="s3">S3</option>
+        <option value="system">System</option>
+      </select>
+      <select id="ev-since-filter" style="padding:0.35rem 0.5rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem">
+        <option value="3600">Last 1h</option>
+        <option value="21600">Last 6h</option>
+        <option value="86400">Last 24h</option>
+        <option value="604800">Last 7d</option>
+      </select>
+      <button class="btn" id="btn-ev-refresh">Refresh</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Time</th><th>Type</th><th>Action</th><th>Bucket</th><th>Key</th><th>Size</th></tr></thead>
+      <tbody id="ev-list"></tbody>
+    </table>
+  </div>
+</div>
+
 <!-- Modals -->
 <div class="modal-overlay hidden" id="modal-bucket">
   <div class="modal">
@@ -307,6 +354,8 @@ tbody tr:last-child td{border-bottom:none}
       var tab = document.getElementById('tab-' + btn.dataset.tab);
       if (tab) tab.classList.remove('hidden');
       if (btn.dataset.tab === 'volumes') loadVolumes();
+      if (btn.dataset.tab === 'snapshots') loadSnapshots();
+      if (btn.dataset.tab === 'events') loadEvents();
       if (btn.dataset.tab === 'dashboard') { refreshDashboard(); startSSE(); }
       if (btn.dataset.tab === 'cluster') loadCluster();
     });
@@ -647,6 +696,110 @@ tbody tr:last-child td{border-bottom:none}
       msg.textContent = 'request failed';
     });
   }
+
+  // Snapshots
+  function loadSnapshots() {
+    fetch(baseURL + '/admin/snapshots').then(function(r) { return r.json(); }).then(function(d) {
+      var tbody = document.getElementById('snap-list');
+      clearChildren(tbody);
+      var snaps = d.snapshots || [];
+      if (snaps.length === 0) {
+        tbody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '6', className: 'empty-state', textContent: 'No snapshots yet.' })]));
+        return;
+      }
+      snaps.forEach(function(s) {
+        var tr = mkEl('tr', null, [
+          mkTd(String(s.seq)),
+          mkTd(s.timestamp, 'date-cell'),
+          mkTd(String(s.object_count), 'size-cell'),
+          mkTd(fmtBytes(s.size_bytes || 0), 'size-cell'),
+          mkTd(s.reason || ''),
+          mkEl('td', null, [
+            mkEl('button', { className: 'btn', textContent: 'Restore', onclick: function() { restoreSnapshot(s.seq); } }),
+            mkEl('button', { className: 'btn danger', style: 'margin-left:0.4rem', textContent: 'Delete', onclick: function() { deleteSnapshot(s.seq); } })
+          ])
+        ]);
+        tbody.appendChild(tr);
+      });
+    }).catch(function() {
+      document.getElementById('snap-list').innerHTML = '<tr><td colspan="6" class="empty-state">Not available (snapshot manager may be disabled)</td></tr>';
+    });
+  }
+
+  function createSnapshot() {
+    var reason = document.getElementById('snap-reason').value.trim();
+    var msg = document.getElementById('snap-msg');
+    msg.textContent = 'Creating…';
+    fetch(baseURL + '/admin/snapshots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.error) { msg.style.color = 'var(--danger)'; msg.textContent = d.error; return; }
+      msg.style.color = 'var(--success)';
+      msg.textContent = 'Snapshot #' + d.seq + ' created (' + d.object_count + ' objects)';
+      document.getElementById('snap-reason').value = '';
+      loadSnapshots();
+    }).catch(function() { msg.style.color = 'var(--danger)'; msg.textContent = 'Request failed'; });
+  }
+
+  function restoreSnapshot(seq) {
+    var msg = document.getElementById('snap-msg');
+    msg.textContent = 'Restoring…';
+    fetch(baseURL + '/admin/snapshots/' + seq + '/restore', { method: 'POST' })
+      .then(function(r) { return r.json(); }).then(function(d) {
+        if (d.error) { msg.style.color = 'var(--danger)'; msg.textContent = d.error; return; }
+        msg.style.color = 'var(--success)';
+        msg.textContent = 'Restored ' + d.restored_objects + ' objects' + (d.stale_blobs && d.stale_blobs.length ? ' (' + d.stale_blobs.length + ' stale)' : '');
+      }).catch(function() { msg.style.color = 'var(--danger)'; msg.textContent = 'Request failed'; });
+  }
+
+  function deleteSnapshot(seq) {
+    fetch(baseURL + '/admin/snapshots/' + seq, { method: 'DELETE' })
+      .then(function() { loadSnapshots(); })
+      .catch(function() {});
+  }
+
+  document.getElementById('btn-create-snap').addEventListener('click', createSnapshot);
+
+  // Events
+  function loadEvents() {
+    var type = document.getElementById('ev-type-filter').value;
+    var since = document.getElementById('ev-since-filter').value;
+    var url = baseURL + '/api/eventlog?since=' + since + '&limit=200';
+    if (type) url += '&type=' + type;
+    fetch(url).then(function(r) { return r.json(); }).then(function(events) {
+      var tbody = document.getElementById('ev-list');
+      clearChildren(tbody);
+      if (!events || events.length === 0) {
+        tbody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '6', className: 'empty-state', textContent: 'No events in this period.' })]));
+        return;
+      }
+      events.slice().reverse().forEach(function(e) {
+        var ts = e.ts ? new Date(e.ts * 1000).toLocaleString() : '';
+        var typeColor = e.type === 's3' ? 'var(--accent)' : 'var(--warning)';
+        var typeSpan = mkEl('span', { textContent: e.type || '' });
+        typeSpan.style.color = typeColor;
+        var typeTd = document.createElement('td');
+        typeTd.appendChild(typeSpan);
+        var tr = mkEl('tr', null, [
+          mkTd(ts, 'date-cell'),
+          typeTd,
+          mkTd(e.action || ''),
+          mkTd(e.bucket || '', 'name-cell'),
+          mkTd(e.key || ''),
+          mkTd(e.size ? fmtBytes(e.size) : '', 'size-cell')
+        ]);
+        tbody.appendChild(tr);
+      });
+    }).catch(function() {
+      document.getElementById('ev-list').innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load events.</td></tr>';
+    });
+  }
+
+  document.getElementById('btn-ev-refresh').addEventListener('click', loadEvents);
+  document.getElementById('ev-type-filter').addEventListener('change', loadEvents);
+  document.getElementById('ev-since-filter').addEventListener('change', loadEvents);
 
   // Stats bar refresh
   function refreshStats() {

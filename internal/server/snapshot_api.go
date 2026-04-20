@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -54,6 +55,7 @@ func (s *Server) createSnapshotHandler(ctx context.Context, c *app.RequestContex
 		return
 	}
 
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeSystem, Action: eventstore.EventActionSnapshotCreate})
 	c.JSON(consts.StatusOK, map[string]interface{}{
 		"seq":          snap.Seq,
 		"timestamp":    snap.Timestamp,
@@ -136,6 +138,7 @@ func (s *Server) restoreSnapshotHandler(ctx context.Context, c *app.RequestConte
 	if stale == nil {
 		stale = []storage.StaleBlob{}
 	}
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeSystem, Action: eventstore.EventActionSnapshotRestore})
 	c.JSON(consts.StatusOK, map[string]interface{}{
 		"restored_objects": count,
 		"stale_blobs":      stale,
@@ -169,6 +172,7 @@ func (s *Server) deleteSnapshotHandler(ctx context.Context, c *app.RequestContex
 		return
 	}
 
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeSystem, Action: eventstore.EventActionSnapshotDelete})
 	c.JSON(consts.StatusOK, map[string]bool{"deleted": true})
 }
 
