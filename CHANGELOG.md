@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.19] - 2026-04-20
+
+### Added
+- **Phase 16 Week 3 — Self-healing Storage at Startup** — 부팅 시 충돌 잔여물 자동 청소.
+  - `*.tmp` 파일 (atomic write 중 죽은 흔적) — 5분 in-flight guard 통과한 것만 삭제 (live writer 보호).
+  - `parts/<uploadID>/` 디렉토리 (포기된 multipart upload) — 24시간 미사용 후 삭제.
+  - 청소 액션마다 `HealEvent{Phase: startup, ErrCode: orphan_tmp|orphan_multipart}` 발행. eventstore에 영속 → 재시작 후 dashboard 새로고침해도 "Restart Recovery" 라인에 표시.
+  - 깨끗한 부팅 시 per-action 이벤트 0건 (대시보드 노이즈 방지).
+  - context 취소 지원 — 거대 데이터 디렉토리에서도 다음 부팅을 막지 않음.
+  - 의도적 비대상: flock 기반 lock 파일 (커널이 프로세스 죽음에 자동 해제), in-memory 캐시 (디스크 저장 없음), BadgerDB 내부 (Phase 17 atomic recovery).
+- **BadgerDB preflight 무결성 체크** — `badger.Open` 직후 sentinel write/read/delete 사이클로 DB가 실제로 운영 가능한지 확인. 실패 시 fail-fast + 운영자 친화적 복구 가이드 (디스크 공간/권한/snapshot 복원 안내). solo·cluster·migrate 3개 경로 모두 적용.
+
+### Tests
+- 단위 8개 신규: `TestStartupRecovery_DeletesOldTmpFiles`, `TestStartupRecovery_DeletesOldMultipartParts`, `TestStartupRecovery_NothingToCleanEmitsNoEvents`, `TestStartupRecovery_MissingDataRoot`, `TestStartupRecovery_NilEmitterIsSafe`, `TestStartupRecovery_ContextCancelStops`, `TestPreflightBadger_HealthyDB`, `TestPreflightBadger_NilDB`, `TestPreflightBadger_RecoveryGuideOnFailure`.
+- E2E `TestRestartRecovery_SweepsOrphanArtifacts` — orphan .tmp + multipart 디렉토리 심어 두고 부팅 → 두 아티팩트 삭제 확인 + eventstore에서 startup HealEvent 두 종류 모두 확인.
+
 ## [0.0.18] - 2026-04-20
 
 ### Added
