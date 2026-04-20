@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -189,6 +190,42 @@ func TestAlertsResend_NoFailedAlertReturnsFalse(t *testing.T) {
 	require.Equal(t, http.StatusOK, postJSON(t, base+"/api/admin/alerts/resend", &out))
 	assert.Equal(t, false, out["resent"])
 	assert.Contains(t, out["reason"], "no failed alert")
+}
+
+// TestAlertsState_ConcurrentReportsHaveNoRace exercises the gauge-mirror path
+// under parallel Report traffic. With gauge updates driven by
+// DegradedConfig.OnStateChange (which fires inside the tracker lock), the race
+// detector should never flag a data race on grainfs_degraded. Previously,
+// gaugeTracker did `inner.Report()` then `inner.Degraded()` on a separate
+// read — concurrent writers could interleave between those two steps, and the
+// race detector caught the split.
+func TestAlertsState_ConcurrentReportsHaveNoRace(t *testing.T) {
+	st := NewAlertsState("", alerts.Options{}, alerts.DegradedConfig{
+		// Non-default FlapWindow bypasses the zero-config production-defaults
+		// fallback so ExitStableWindow stays at 0 (immediate exit per report).
+		FlapWindow:    1 * time.Second,
+		FlapThreshold: 999,
+	})
+	tr := st.Tracker()
+
+	const goroutines = 4
+	const perGoroutine = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				tr.Report(i%2 == 0, "shard_unrepairable", "b/k")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Settle: one final healthy report triggers a clean exit; tracker and gauge
+	// must end in the same value (race detector also validates no data race).
+	tr.Report(false, "", "")
+	require.False(t, tr.Degraded(), "final healthy report should exit degraded")
 }
 
 func TestGaugeTracker_MirrorsDegradedState(t *testing.T) {

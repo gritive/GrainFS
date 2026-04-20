@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.20] - 2026-04-20
+
+### Fixed
+- **alerts.Dispatcher dedup race** (`internal/alerts/webhook.go`) — 이전 구조에서 `shouldSuppress` 체크 후 HTTP retry loop 동안 lock이 풀려 있어, 동일 `(Type, Resource)` 키로 거의 동시에 호출된 두 `Send` 가 모두 suppress를 통과해 웹훅이 중복 발송될 수 있었다. `inFlight` 집합을 추가하고 `claimSend`가 `lastSent` 확인과 함께 키를 선점, `defer`로 전송 수명 내 panic까지 포함해 release를 보장. 동시 Send 중 하나만 HTTP에 도달 + panic-safe 계약 regression 테스트 포함.
+- **alerts.Dispatcher failure-path dedup** (`internal/alerts/webhook.go`) — 실패 시 `lastSent`를 기록하지 않아 5xx 반복 발생 시 재시도 사이클마다 웹훅 스팸이 가능했다. 이제 성공/실패 무관 delivery 완료 시 `lastSent` 기록 → outage storm 동안도 dedup window가 페이징을 억제. 수동 재시도는 `AlertsState` Force Resend 경로 유지.
+- **grainfs_degraded gauge race** (`internal/server/alerts_api.go`) — `gaugeTracker` wrapper가 `inner.Report()` → `inner.Degraded()`를 분리해 수행하던 탓에, 두 스텝 사이 다른 goroutine의 `Report`가 상태를 뒤집으면 Prometheus 게이지가 실제 상태와 불일치했다. `DegradedConfig.OnStateChange` 콜백을 추가해 tracker lock 보유 중에 게이지를 업데이트, wrapper 자체를 제거. `AlertsState.Tracker()` 반환 타입은 `*alerts.DegradedTracker`로 변경(unexported 타입이었으므로 외부 API 영향 없음).
+- **OnHold synchronous blocking** (`internal/server/alerts_api.go`) — flap threshold 트립 시 `OnHold` 콜백이 synchronous `dispatcher.Send`를 호출해, webhook HTTP retry 수십 초 동안 scrubber/raft/disk collector의 critical-path `Report()`가 block 가능했다. 이제 `go s.dispatcher.Send(...)`로 fire-and-forget — `onFailure` 콜백이 이미 실패를 dashboard banner + Force Resend 경로에 기록.
+- **startup recovery WalkDir 에러 신호 보존** (`internal/server/startup_cleanup.go`) — 기존 `walkFn`은 모든 per-entry err를 res.Errors에 기록하므로 현 구조상 `WalkDir`의 top-level return err는 `context.Canceled` 외에 발생하지 않지만, 향후 walkFn 변경 시 non-context err가 silently drop될 위험을 명시적으로 차단. `res.Errors`에 `walkdir root=...` prefix로 기록 + `slog.Warn`으로 operator 가시성 확보.
+
+### Added
+- `DegradedConfig.OnStateChange func(degraded bool)` 옵션 — tracker lock 내에서 degraded↔healthy 전이 직후 호출되어 downstream mirror(Prometheus gauge 등)가 tracker 상태와 bit-exact-consistent하게 유지.
+- webhook.go `lastSent` 필드 godoc — low-cardinality Resource invariant 명시 (자동 sweep 없음, 현재 production 호출자 `degraded_hold` 단일 경로).
+
+### Tests
+- `TestDegradedTracker_OnStateChangeFiresOnTransition` — enter/exit 시 콜백 호출, 동일 상태 반복 시 콜백 미호출.
+- `TestDegradedTracker_OnStateChangeHeldUnderLock` — 콜백 실행 중 peer goroutine의 `Status()` 호출이 블록됨으로 lock 보유를 증명.
+- `TestAlertsState_ConcurrentReportsHaveNoRace` — 4 goroutine × 50회 Report + `-race -count=3` 통과.
+- `TestDispatcher_ConcurrentSameKeyOnlyOneDelivered` — barrier-channel mock 수신자로 동시 Send 중 1개만 HTTP 도달, release 후 재시도 허용 확인.
+- `TestDispatcher_RecordSentOnFailureDedupsOutageStorm` — 5xx 반복 시 첫 delivery는 재시도 exhaustion, 두 번째 Send는 dedup window 내 suppress + 윈도우 이후 재개.
+
 ## [0.0.19] - 2026-04-20
 
 ### Added

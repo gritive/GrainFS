@@ -20,6 +20,20 @@ type DegradedConfig struct {
 	// hold mode. Servers wire this to the alerts.Dispatcher so a flapping
 	// component pages oncall (the actual "alert" wired up at the use site).
 	OnHold func(reason string)
+	// OnStateChange fires on every degraded↔healthy transition, with the new
+	// Degraded() value. Callers use this to keep downstream mirrors (e.g.,
+	// Prometheus gauges) bit-exact-consistent with the tracker's own view.
+	//
+	// IMPORTANT: This callback runs WHILE the tracker's internal lock is held.
+	// That is deliberate — Prometheus gauge.Set is concurrent-safe and trivially
+	// fast, so coupling it to the state transition eliminates the window where
+	// a concurrent Report could flip state between the tracker update and the
+	// mirror update.
+	//
+	// The callback MUST NOT call back into the tracker (Report/Degraded/Status)
+	// or it will deadlock. Contrast with OnHold, which runs OUTSIDE the lock
+	// because it fires a webhook (slow, potentially re-entrant).
+	OnStateChange func(degraded bool)
 }
 
 // DegradedStatus is the snapshot returned from Tracker.Status, intended for
@@ -104,6 +118,7 @@ func (t *DegradedTracker) Report(faulty bool, reason, resource string) {
 		// the moment something is wrong. Every fresh entry into degraded
 		// counts as one transition for the flap counter (whether we just
 		// exited or are still mid-recovery from a previous flap).
+		wasHealthy := !t.degraded
 		if !t.degraded {
 			t.enteredAt = now
 			t.transitions = append(t.transitions, now)
@@ -122,6 +137,11 @@ func (t *DegradedTracker) Report(faulty bool, reason, resource string) {
 		t.lastReason = reason
 		t.lastResource = resource
 		t.healthySince = time.Time{}
+		if wasHealthy && t.cfg.OnStateChange != nil {
+			// Fire inside the lock so gauge mirrors stay bit-exact-consistent
+			// with the tracker's view. See DegradedConfig.OnStateChange godoc.
+			t.cfg.OnStateChange(true)
+		}
 		return
 	}
 
@@ -144,6 +164,9 @@ func (t *DegradedTracker) Report(faulty bool, reason, resource string) {
 	if now.Sub(t.healthySince) >= t.cfg.ExitStableWindow {
 		t.degraded = false
 		t.healthySince = time.Time{}
+		if t.cfg.OnStateChange != nil {
+			t.cfg.OnStateChange(false)
+		}
 	}
 }
 

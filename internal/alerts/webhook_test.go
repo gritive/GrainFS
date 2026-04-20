@@ -193,6 +193,109 @@ func TestDispatcher_NoURL_NoOp(t *testing.T) {
 	assert.NoError(t, d.Send(alerts.Alert{Type: "t", Severity: alerts.SeverityCritical, Message: "m"}))
 }
 
+// TestDispatcher_ConcurrentSameKeyOnlyOneDelivered regression-tests the dedup
+// race that existed before the inFlight set landed: shouldSuppress → unlock →
+// HTTP retry → recordSent left a wide window where a second goroutine calling
+// Send() with the same (Type, Resource) could also pass the suppression check
+// and fire an independent HTTP request. Real-world symptom: duplicate webhook
+// pages for the same flapping condition.
+//
+// Under the inFlight claim, the first goroutine owns the key for the whole
+// delivery lifecycle; the second goroutine's claimSend returns false and Send
+// becomes a no-op.
+func TestDispatcher_ConcurrentSameKeyOnlyOneDelivered(t *testing.T) {
+	// Barrier channel lets us deterministically force both goroutines to race
+	// on claimSend. The receiver blocks the first delivery in-flight until we
+	// release it, which is well after the second goroutine has exited Send.
+	release := make(chan struct{})
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		<-release // simulate slow webhook so the inFlight holder has work to do
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := alerts.NewDispatcher(srv.URL, alerts.Options{
+		// Disable dedup window so ONLY the inFlight claim gates concurrent Send.
+		DedupWindow: -1,
+		MaxRetries:  0,
+		BackoffBase: time.Millisecond,
+	}, nil)
+
+	a := alerts.Alert{
+		Type:     "raft_quorum_lost",
+		Severity: alerts.SeverityCritical,
+		Resource: "cluster-prod",
+		Message:  "lost",
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = d.Send(a)
+		}()
+	}
+	close(start)
+
+	// Let both goroutines pile up: the first should be blocked in the HTTP
+	// handler (via <-release), the second should have already returned no-op.
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, int32(1), attempts.Load(),
+		"only one of the concurrent Send calls should reach the webhook")
+
+	close(release)
+	wg.Wait()
+
+	// After the first delivery completes, inFlight is released; a fresh Send
+	// for the same key should go through.
+	require.NoError(t, d.Send(a))
+	assert.Equal(t, int32(2), attempts.Load(),
+		"Send after inFlight release must be allowed through")
+}
+
+// TestDispatcher_RecordSentOnFailureDedupsOutageStorm locks in the failure-path
+// dedup contract: when a webhook receiver returns 5xx, Send records lastSent
+// anyway so a repeat page inside the dedup window is suppressed. Without this,
+// an outage that keeps returning 5xx would produce webhook spam at every retry
+// cycle (defeating dedup exactly when the receiver needs backpressure most).
+func TestDispatcher_RecordSentOnFailureDedupsOutageStorm(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	clock := newFakeClock(time.Unix(0, 0))
+	d := alerts.NewDispatcher(srv.URL, alerts.Options{
+		DedupWindow: 10 * time.Minute,
+		MaxRetries:  2,
+		BackoffBase: time.Millisecond,
+		BackoffCap:  2 * time.Millisecond,
+		Clock:       clock.Now,
+	}, nil)
+
+	a := alerts.Alert{Type: "disk_full", Severity: alerts.SeverityWarning, Resource: "node-3", Message: "m"}
+	require.Error(t, d.Send(a))
+	firstAttempts := attempts.Load()
+	require.Equal(t, int32(3), firstAttempts, "1 initial + 2 retries before failure surfaces")
+
+	clock.advance(5 * time.Minute) // still inside dedup window
+	require.NoError(t, d.Send(a), "suppressed call returns nil (matches success-path dedup contract)")
+	assert.Equal(t, firstAttempts, attempts.Load(),
+		"second Send within dedup window must NOT hit the receiver again")
+
+	clock.advance(6 * time.Minute) // 11 min total → outside window
+	require.Error(t, d.Send(a))
+	assert.Greater(t, attempts.Load(), firstAttempts,
+		"after dedup window passes, a fresh failing delivery is permitted")
+}
+
 // fakeClock lets dedup tests advance time deterministically.
 type fakeClock struct {
 	mu  sync.Mutex
