@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.18] - 2026-04-20
+
+### Added
+- **Phase 16 Week 2 — Self-Healing Dashboard Card** — 대시보드에 "납득 가능한 자가 치유" 패널 추가. 대시보드를 열면 Last Heal(가장 최근 복구 + 경과 시간), Heal Rate(1시간 단위 sparkline + 분당 버킷팅), Restart Recovery 카운트, Live Heal Events(최근 5건, role="log"/aria-live="polite") 4개 카드가 보인다. 비어 있을 때 "No recent heal events. Your storage is healthy." 친절 문구 (`internal/server/ui/index.html`).
+- **HealEvent 데이터 흐름 완성 (Week 1 잔여 작업)** — 스캐폴딩만 있던 `HealEvent`를 실제 운영 경로에 연결.
+  - `BackgroundScrubber.runOnce`가 missing/corrupt shard마다 detect 이벤트 emit, 동일 객체의 모든 이벤트는 UUIDv7 correlation_id로 묶임 (Phase 16 Week 5 Heal Receipt 사전 작업).
+  - `RepairEngine`이 reconstruct/write/verify phase별 이벤트 emit (성공/실패/duration/bytes_repaired 포함).
+  - 사이클 캡 도달 시 skipped + err_code="cycle_cap" 기록.
+  - `scrubber.WithEmitter` / `RepairEngine.WithRepairEmitter` / `BackgroundScrubber.SetEmitter` 옵션으로 주입. 기본값은 `NoopEmitter`라 기존 호출자 회귀 없음 (`internal/scrubber/scrubber.go`, `internal/scrubber/repair.go`).
+- **`/api/events/heal/stream` SSE 엔드포인트** — `Event.Type == "heal"` 만 필터링해서 스트리밍. EventSource 클라이언트는 verbose log/metric 스트림과 무관하게 heal 카드만 구독. SSE keep-alive comment(15s)로 idle 연결 유지 + 헤더 즉시 flush (`internal/server/server.go`, `internal/server/sse_hub.go`).
+- **SSE Hub 카테고리 필터** — `Hub.Subscribe(categories...)` / `Hub.WriteSSE(ctx, w, categories...)` 가변인자 추가. 카테고리 미지정 시 모든 이벤트 수신 (legacy 호환). 채널 버퍼 초과 시 비차단 drop + 카테고리별 카운터 (`internal/server/sse_hub.go`).
+- **`eventstore.Event.Metadata`** — `map[string]any` 필드 추가 (`json:"metadata,omitempty"`). HealEvent 영속화에 사용 (phase, shard_id, correlation_id, duration_ms 등). 라운드트립 단위 테스트 포함 (`internal/eventstore/store.go`).
+- **Self-healing Prometheus 메트릭** — `grainfs_heal_events_total{phase,outcome}`, `grainfs_heal_shards_repaired_total`, `grainfs_heal_duration_ms{phase}` (히스토그램), `grainfs_heal_stream_dropped_events_total` (`internal/metrics/metrics.go`).
+
+### Changed
+- **`scrubber.New(...)` 호출 후 `srv.HealEmitter()` 주입 순서 도입** — `cmd/grainfs/serve.go`에서 server 생성 후 scrubber emitter를 SetEmitter로 wiring하고 그 다음에 `sc.Start(ctx)`. 이 순서가 깨지면 대시보드에 HealEvent가 절대 도달하지 않음.
+
+### Tests
+- 단위 테스트 9개 신규: `TestHub_CategoryFilter_OnlyMatchingDelivered`, `TestHub_NoCategory_ReceivesAll`, `TestHub_MultipleCategories`, `TestHub_WriteSSE_HealCategoryOnly`, `TestHealEmitter_BroadcastsToHealCategoryOnly`, `TestHealEmitter_PersistsToEventStore`, `TestHealEmitter_NilHubAndEnqueue_NoPanic`, `TestHealEmitter_DoesNotBlockOnSlowSubscriber`, `TestRepairEngine_EmitsPhaseEvents`, `TestRepairEngine_NoEmitterIsSafe`, `TestStore_MetadataRoundTrip`, `TestStore_NoMetadataOmitsField`.
+- E2E `TestDashboardHealingCard_HTMLAndStream` — 대시보드 HTML에 카드 마크업 존재 + `/api/events/heal/stream`이 `text/event-stream` + `Cache-Control: no-cache`로 응답하는지 검증 (`tests/e2e/dashboard_healing_card_test.go`).
+- `-race -count=10` 회귀 통과 (server, scrubber, eventstore 패키지).
+
 ## [0.0.17] - 2026-04-20
 
 ### Added
