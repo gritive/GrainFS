@@ -1,5 +1,10 @@
 # TODOS
 
+## Bug Fix / Flaky Tests
+
+- [ ] TestNBD_Docker: 대기 루프가 `/metrics`(S3)만 체크 → NBD 포트 10809 리스닝 대기 추가 필요 (`docker/nbd-test.sh`)
+- [ ] TestNFS_MountAndWriteReadFile: macOS NFS 클라이언트에서 mount 500초 후 disconnect → timeout/retry 또는 skip 플래그 검토 (`tests/e2e/volume_test.go`)
+
 ## Phase 16: Advanced Storage
 
 - [ ] Thin provisioning
