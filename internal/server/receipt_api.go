@@ -25,12 +25,24 @@ func (s *Server) registerReceiptAPI(h *server.Hertz) {
 		return
 	}
 
-	h.GET("/api/receipts/:id", s.authMiddleware(), func(_ context.Context, c *app.RequestContext) {
+	// Build handler chains conditionally. When no S3 credentials are
+	// configured, s.verifier is nil and the global auth middleware was
+	// skipped in New() — attaching authMiddleware here would NPE on
+	// s.verifier.Verify. Matching the global pattern keeps behavior
+	// consistent: "no --access-key" means "no auth anywhere".
+	getByID := func(_ context.Context, c *app.RequestContext) {
 		id := c.Param("id")
 		s.receiptAPI.ServeGetReceipt(newResponseWriter(c), toHTTPRequest(c), id)
-	})
-
-	h.GET("/api/receipts", s.authMiddleware(), func(_ context.Context, c *app.RequestContext) {
+	}
+	listRange := func(_ context.Context, c *app.RequestContext) {
 		s.receiptAPI.ServeListReceipts(newResponseWriter(c), toHTTPRequest(c))
-	})
+	}
+
+	if s.verifier != nil {
+		h.GET("/api/receipts/:id", s.authMiddleware(), getByID)
+		h.GET("/api/receipts", s.authMiddleware(), listRange)
+	} else {
+		h.GET("/api/receipts/:id", getByID)
+		h.GET("/api/receipts", listRange)
+	}
 }

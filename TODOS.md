@@ -10,10 +10,6 @@
 
 설계: `~/.gstack/projects/gritive-grains/whitekid-master-design-20260420-182422.md`
 
-- [ ] **Slice 1: Receipt Core (v0.0.21)** — `internal/receipt/` 신규 패키지, HealReceipt + JCS + HMAC-SHA256 + KeyStore(key_id rotation) + BadgerDB local-only 저장 + batch write (100 or 50ms) + 30일 retention. API/gossip/UI/OTel 제외, scrubber repair wiring 제외.
-- [x] **Slice 2: API + Gossip** — `/api/receipts/:id`, `/api/receipts?from=&to=`, gossip 50 receipt IDs rolling window, cluster broadcast fallback **Completed:** v0.0.0.22 (2026-04-21). 단, 아래 통합 잔여 항목은 후속.
-- [ ] **Slice 2 후속 — serve.go 통합 wiring** — `receipt.Store` + `RoutingCache` + `ReceiptBroadcaster` + `ReceiptGossipSender`를 `cmd/grainfs/serve.go`의 `runSoloWithNFS`/`runCluster`에 플러밍. PSK 공급 (기존 cluster key 재사용 vs 신규 `--heal-receipt-psk`), retention/interval CLI 플래그, `server.WithReceiptAPI(api)` 호출. 현재는 모든 빌딩 블록이 테스트 완료·opt-in 준비.
-- [ ] **Slice 2 후속 — multi-node E2E** — `tests/e2e/heal_receipt_api_test.go`: 3-node 클러스터 부팅 → node A에서 receipt 생성 → gossip 전파 → node B의 `/api/receipts/:id` HMAC 인증 + 조회 성공 + broadcast fallback 경로(rolling window 밖 id). serve.go 통합 wiring 선행 필요.
 - [ ] **Slice 3: Scrubber wiring + Blame Mode v1 UI** — repair 세션 → receipt emit, dashboard timeline + JSON download
 - [ ] **Slice 4: OTel spans** — head-based 1% sampling, `--otel-endpoint`, `--otel-sample-rate`, scrubber phase별 span
 
@@ -64,6 +60,8 @@
 - [ ] nbd over internet for edge computing (powered by wireguard)
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 - [ ] **Raft quorum lost alert** — *zero ops* — critical alert channel로 즉시 경고; 자동 re-election 시도 로직
+- [ ] **Cluster mode S3 auth propagation** — `cmd/grainfs/serve.go`의 `runCluster`가 `--access-key`/`--secret-key`를 `server.WithAuth`로 전달하지 않음. Solo 경로만 auth wiring. HealReceipt API도 이 제약으로 cluster mode에선 S3 auth 비활성. 수정 시: `runServe`에서 `authOpts`를 `runCluster`에 넘겨 `srvOpts`에 append.
+- [ ] **Fresh cluster bootstrap — spurious auto-migration** — `runCluster`가 `os.MkdirAll(metaDir)`를 migration 체크 **전에** 수행해 빈 dataDir에서도 solo→cluster migration branch에 진입. Migration이 meta DB를 다시 열려 하다 badger lock 충돌 → 부팅 실패. 수정: `os.Stat(metaDir)`를 `MkdirAll` 전에 확인하거나 meta 디렉토리 비어있는지 추가 검사. 현재 E2E 테스트는 `raft/` 사전 생성으로 회피.
 
 ## Phase 18: Performance
 
