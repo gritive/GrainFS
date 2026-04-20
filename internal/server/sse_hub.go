@@ -35,11 +35,14 @@ func (s *subscriber) matches(eventType string) bool {
 type Hub struct {
 	clients sync.Map // id string → *subscriber
 	idSeq   atomic.Uint64
+
+	dropMu sync.Mutex
+	drops  map[string]uint64 // per-category dropped event counts
 }
 
 // NewHub returns a ready Hub.
 func NewHub() *Hub {
-	return &Hub{}
+	return &Hub{drops: map[string]uint64{}}
 }
 
 // Subscribe registers a new SSE client. With no categories, the subscriber
@@ -65,10 +68,13 @@ func (h *Hub) Subscribe(categories ...string) (id string, ch <-chan Event, cance
 	return id, c, cancel
 }
 
-// Broadcast sends e to every active subscriber whose category filter matches.
-// Slow clients are dropped (non-blocking send) to avoid head-of-line blocking;
-// drops are accounted for via h.dropped per category if needed by callers.
-func (h *Hub) Broadcast(e Event) {
+// Broadcast sends e to every active subscriber whose category filter matches
+// and returns the number of matching subscribers whose buffer was full (i.e.
+// events dropped for this single call). Drops are also tallied into the Hub's
+// per-category counter, readable via DroppedCount. Callers that need exact
+// drop attribution (e.g. Prometheus) should use the return value directly —
+// the counter diff is racy under concurrent emit.
+func (h *Hub) Broadcast(e Event) (dropped int) {
 	h.clients.Range(func(_, v any) bool {
 		sub := v.(*subscriber)
 		if !sub.matches(e.Type) {
@@ -77,30 +83,24 @@ func (h *Hub) Broadcast(e Event) {
 		select {
 		case sub.ch <- e:
 		default:
-			h.recordDrop(e.Type)
+			dropped++
 		}
 		return true
 	})
+	if dropped > 0 {
+		h.dropMu.Lock()
+		h.drops[e.Type] += uint64(dropped)
+		h.dropMu.Unlock()
+	}
+	return dropped
 }
 
-// dropCounters tracks per-category drops. Read via DroppedCount.
-var (
-	hubDropMu       sync.Mutex
-	hubDropCounters = map[string]uint64{}
-)
-
-func (h *Hub) recordDrop(category string) {
-	hubDropMu.Lock()
-	hubDropCounters[category]++
-	hubDropMu.Unlock()
-}
-
-// DroppedCount returns the number of events dropped for a given category.
-// Used by tests; production code reads this via the Prometheus counter.
+// DroppedCount returns the total number of events dropped for the given
+// category on this Hub since it was created.
 func (h *Hub) DroppedCount(category string) uint64 {
-	hubDropMu.Lock()
-	defer hubDropMu.Unlock()
-	return hubDropCounters[category]
+	h.dropMu.Lock()
+	defer h.dropMu.Unlock()
+	return h.drops[category]
 }
 
 // WriteSSE streams events from hub to w until ctx is cancelled.

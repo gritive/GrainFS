@@ -51,10 +51,8 @@ func (e *healEmitter) Emit(ev scrubber.HealEvent) {
 	}
 
 	if e.hub != nil {
-		before := e.hub.DroppedCount(healEvCategory)
-		e.hub.Broadcast(Event{Type: healEvCategory, Data: data})
-		if after := e.hub.DroppedCount(healEvCategory); after > before {
-			metrics.HealStreamDroppedTotal.Add(float64(after - before))
+		if dropped := e.hub.Broadcast(Event{Type: healEvCategory, Data: data}); dropped > 0 {
+			metrics.HealStreamDroppedTotal.Add(float64(dropped))
 		}
 	}
 
