@@ -243,6 +243,42 @@ func writeBatch(txn *badger.Txn, batch []*HealReceipt, ttl time.Duration) error 
 	return nil
 }
 
+// RecentReceiptIDs returns the most recent up-to-max receipt IDs, ordered
+// newest-first. Used by the gossip sender to build a rolling window payload
+// every tick. Walks the ts:* secondary index in reverse; cost is O(max).
+//
+// Fresh slice per call — safe for the gossip sender to hand to transport
+// without copying.
+func (s *Store) RecentReceiptIDs(max int) []string {
+	if max <= 0 {
+		return nil
+	}
+	out := make([]string, 0, max)
+	_ = s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Reverse = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		// Seek to just-past-end of ts:* space. A key one byte greater than
+		// "ts:" but still matching the prefix would work; simplest is to
+		// seek to the lexicographically-last possible ts: key.
+		it.Seek([]byte(tsIndexPrefix + "\xff"))
+		prefix := []byte(tsIndexPrefix)
+		for ; it.ValidForPrefix(prefix) && len(out) < max; it.Next() {
+			var id string
+			if err := it.Item().Value(func(v []byte) error {
+				id = string(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			out = append(out, id)
+		}
+		return nil
+	})
+	return out
+}
+
 // List returns receipts whose Timestamp falls in [from, to), ordered by
 // ascending timestamp. limit caps the result size; pass 0 for no limit.
 //

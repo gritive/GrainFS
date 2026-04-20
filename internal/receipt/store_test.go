@@ -299,6 +299,44 @@ func TestStore_List_HalfOpenInterval(t *testing.T) {
 	require.Equal(t, "rcpt-at-from", got[0].ReceiptID)
 }
 
+func TestStore_RecentReceiptIDs_NewestFirst(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	base := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	// Write 5 receipts with increasing timestamps.
+	for i := 0; i < 5; i++ {
+		r := newReceiptWithIDAndTime(uid(i), base.Add(time.Duration(i)*time.Second))
+		require.NoError(t, Sign(r, ks))
+		require.NoError(t, s.Put(r))
+	}
+	require.NoError(t, s.Flush())
+
+	got := s.RecentReceiptIDs(3)
+	require.Equal(t, []string{uid(4), uid(3), uid(2)}, got, "newest first")
+}
+
+func TestStore_RecentReceiptIDs_EmptyStore(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	require.Empty(t, s.RecentReceiptIDs(50))
+}
+
+func TestStore_RecentReceiptIDs_ZeroMax(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	require.Nil(t, s.RecentReceiptIDs(0))
+}
+
 func TestStore_Put_WritesTimeIndex(t *testing.T) {
 	// Verify secondary index is written alongside primary.
 	db := openTestDB(t)

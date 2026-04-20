@@ -92,6 +92,15 @@ table NodeStatsMsg {
   joined_at:int64;
 }
 
+// ReceiptGossipMsg broadcasts the sender's most recent HealReceipt IDs
+// (rolling window, ~50) so other nodes can route `/api/receipts/:id`
+// queries directly without a cluster-wide broadcast fallback.
+// Sent on transport.StreamReceipt.
+table ReceiptGossipMsg {
+  node_id:string;
+  receipt_ids:[string];
+}
+
 table MigrateShardCmd {
   bucket:string;
   key:string;
