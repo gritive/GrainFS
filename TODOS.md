@@ -1,11 +1,5 @@
 # TODOS
 
-## Phase 15: Dashboard (v0.0.14 — 부분 완료)
-
-- [ ] storage & cluster management and monitoring
-- [ ] dashboard: snapshot, backup manage
-- [ ] dashboard: event logging
-
 ## Phase 16: Advanced Storage
 
 - [ ] Thin provisioning
