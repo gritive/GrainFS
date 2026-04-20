@@ -41,6 +41,107 @@ func (f *FSM) applyDeleteShardPlacement(data []byte) error {
 	})
 }
 
+// ObjectMetaRef is the tuple IterObjectMetas yields for each object.
+type ObjectMetaRef struct {
+	Bucket string
+	Key    string
+	Size   int64
+	ETag   string
+}
+
+// IterObjectMetas iterates every object metadata record, invoking fn for each.
+// Used by the Phase 18 re-placement manager to find N× objects that need
+// conversion to EC. fn returning a non-nil error stops iteration.
+func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
+	return f.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		prefix := []byte("obj:")
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			rawKey := string(item.Key())
+			trimmed := rawKey[len(prefix):]
+			slash := -1
+			for i, c := range trimmed {
+				if c == '/' {
+					slash = i
+					break
+				}
+			}
+			if slash < 0 {
+				continue
+			}
+			bucket := trimmed[:slash]
+			key := trimmed[slash+1:]
+			var ref ObjectMetaRef
+			ref.Bucket = bucket
+			ref.Key = key
+			verr := item.Value(func(val []byte) error {
+				m, derr := unmarshalObjectMeta(val)
+				if derr != nil {
+					return derr
+				}
+				ref.Size = m.Size
+				ref.ETag = m.ETag
+				return nil
+			})
+			if verr != nil {
+				return verr
+			}
+			if err := fn(ref); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// IterShardPlacements iterates every shard placement record in the FSM, invoking
+// fn with the bucket, key, and ordered nodeIDs for each. Iteration stops if fn
+// returns a non-nil error, which is propagated. Used by ShardPlacementMonitor
+// to scan for missing shards.
+func (f *FSM) IterShardPlacements(fn func(bucket, key string, nodes []string) error) error {
+	return f.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		prefix := []byte("placement:")
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			rawKey := string(item.Key())
+			// Strip "placement:" prefix and split bucket/key on first '/'.
+			trimmed := rawKey[len(prefix):]
+			slash := -1
+			for i, c := range trimmed {
+				if c == '/' {
+					slash = i
+					break
+				}
+			}
+			if slash < 0 {
+				continue
+			}
+			bucket := trimmed[:slash]
+			key := trimmed[slash+1:]
+			var nodes []string
+			verr := item.Value(func(val []byte) error {
+				decoded, derr := decodePlacementValue(val)
+				if derr != nil {
+					return derr
+				}
+				nodes = decoded
+				return nil
+			})
+			if verr != nil {
+				return verr
+			}
+			if err := fn(bucket, key, nodes); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // LookupShardPlacement returns the list of nodeIDs holding shards for the
 // given object, in shardIdx order. Returns ok=false if no placement record
 // exists (typical for N× replication objects pre-Phase-18).

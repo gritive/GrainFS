@@ -57,12 +57,24 @@ func (rm *RecoveryManager) AutoRecover(ctx context.Context) (*RecoveryReport, er
 			"Snapshot restore not yet implemented (placeholder)")
 	}
 
-	// Action 2b: Trigger replication monitor for under-replicated shards
+	// Action 2b: Trigger shard placement monitor for under-replicated / missing shards.
+	// Phase 18: ReplicationMonitor was replaced by ShardPlacementMonitor which scans
+	// FSM placement entries instead of in-memory replica tracking.
 	if rm.replication != nil {
-		slog.Info("recovery: triggering shard replication check")
-		// This would trigger ReplicationMonitor.CheckAndRepair()
-		report.ActionsTaken = append(report.ActionsTaken,
-			"Replication monitor check triggered")
+		slog.Info("recovery: triggering shard placement check")
+		if m, ok := rm.replication.(*ShardPlacementMonitor); ok {
+			ctx := context.Background()
+			if missing, err := m.Scan(ctx); err != nil {
+				report.ActionsTaken = append(report.ActionsTaken,
+					fmt.Sprintf("Placement scan failed: %v", err))
+			} else {
+				report.ActionsTaken = append(report.ActionsTaken,
+					fmt.Sprintf("Placement scan found %d missing local shards", missing))
+			}
+		} else {
+			report.ActionsTaken = append(report.ActionsTaken,
+				"Placement monitor not wired (legacy type)")
+		}
 	}
 
 	// Action 2c: Mark unhealthy peers as healthy for retry
