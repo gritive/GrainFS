@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.16] - 2026-04-20
+
+### Fixed
+- **slog↔stdlib log 재귀 데드락 근본 수정** — `server.New()`의 `BroadcastHandler`가 `slog.Default().Handler()`를 wrap했는데, `slog.SetDefault`가 stdlib log 출력을 slog로 리다이렉트하여 첫 `slog.Info` 호출에서 `log.Logger` 뮤텍스 자기-재귀 데드락 발생. **프로덕션 바이너리 시작 시 데드락되어 NFS 서버가 accept를 시작하지 못하는 근본 원인**이었음. `BroadcastHandler.next`를 `slog.NewTextHandler(os.Stderr)`로 교체해 루프 차단. `New()` 반복 호출 시 재-래핑 가드 추가 (`internal/server/server.go`).
+- **Event Log `emitEvent` unbounded goroutine leak** — 이벤트마다 새 goroutine 생성 → bounded channel(4096) + 단일 worker로 전환. 큐 가득 시 `eventDropsTotal` atomic counter로 drop 기록 (`slog.Warn` 제거로 재귀 데드락 회피). `Server.Shutdown`에서 drain 보장 (`internal/server/events_api.go`, `internal/server/server.go`).
+- **`/api/eventlog` since/until dual-mode 혼란** — `<=3600`이면 상대 오프셋, 초과하면 절대 Unix 초로 해석하는 이중 의미 제거. UI의 "Last 24h"/"Last 7d" 옵션이 1970년 근처를 가리키던 버그 수정. 이제 since/until 모두 "현재로부터 상대 초"로 통일 (`internal/server/events_api.go`).
+- **`handleFormUpload` event emit 누락** — 다른 PUT 경로는 모두 `EventActionPut`을 emit하는데 S3 POST form upload 경로만 누락되어 있던 관찰성 격차 해결 (`internal/server/handlers.go`).
+- **TestNBD_Docker 포트 대기 레이스** — `docker/nbd-test.sh`가 S3 `/metrics`만 확인하고 NBD 포트는 대기하지 않아 `nbd-client` 연결 시 race. bash `/dev/tcp` TCP probe로 NBD 포트 10809 리스닝 대기 추가.
+
+### Added
+- **TODOS.md "Zero Config, Zero Ops" 섹션** — 운영자 개입 없이도 안정적으로 동작하기 위한 self-healing, preflight check, critical alert, predictive warning, auto-recovery 등 작업 항목 정의.
+- **회귀 테스트 3개** — `TestEmitEvent_BoundedQueueNoGoroutineLeak`, `TestFormUpload_EmitsEvent`, `TestQueryEventLog_SinceLargeRelativeOffset` (`internal/server/events_api_test.go`).
+
 ## [0.0.15] - 2026-04-20
 
 ### Added

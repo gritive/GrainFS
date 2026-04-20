@@ -891,6 +891,7 @@ func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
 
 	metrics.ObjectsTotal.Inc()
 	metrics.StorageBytesTotal.Add(float64(obj.Size))
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
 
 	// Respond with 204 or redirect if success_action_redirect is set
 	if redirectURL := form.Value["success_action_redirect"]; len(redirectURL) > 0 && redirectURL[0] != "" {

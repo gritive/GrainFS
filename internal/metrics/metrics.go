@@ -51,6 +51,15 @@ var (
 		Help: "Total number of objects.",
 	})
 
+	// EventQueueDropsTotal counts events dropped because the bounded event
+	// queue was full. Non-zero values indicate BadgerDB write latency is
+	// exceeding event production rate; investigate before event log gaps
+	// become user-visible.
+	EventQueueDropsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_event_queue_drops_total",
+		Help: "Total number of events dropped because the in-flight event queue was full.",
+	})
+
 	// CacheInvalidationTotal counts cache invalidation operations.
 	CacheInvalidationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_cache_invalidation_total",

@@ -58,7 +58,25 @@ for i in $(seq 1 30); do
     fi
     sleep 1
 done
-echo "OK: Server started (PID=$SERVER_PID)"
+echo "OK: S3 endpoint ready (PID=$SERVER_PID)"
+
+# Wait for NBD port to be listening — the S3 endpoint can become ready before
+# the NBD server finishes initialization, causing `nbd-client` below to race.
+echo "Waiting for NBD port $NBD_PORT..."
+for i in $(seq 1 30); do
+    # bash built-in TCP probe; avoids requiring nc/ncat in the image
+    if (exec 3<>/dev/tcp/127.0.0.1/${NBD_PORT}) 2>/dev/null; then
+        exec 3<&-
+        exec 3>&-
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "FAIL: NBD port $NBD_PORT not listening within 30s"
+        exit 1
+    fi
+    sleep 1
+done
+echo "OK: NBD port ready"
 
 # 2. Connect nbd-client to GrainFS NBD server
 echo ""

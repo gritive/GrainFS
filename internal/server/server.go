@@ -5,9 +5,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -56,6 +58,12 @@ type Server struct {
 	joinCluster    JoinClusterFunc  // nil if not in solo mode or already clustered
 	balancer       BalancerInfo     // nil if balancer not enabled
 	evStore        *eventstore.Store // nil if event store not configured
+
+	// Bounded event queue + single worker. Decouples request handlers from
+	// BadgerDB write latency and prevents unbounded goroutine growth.
+	eventCh       chan eventstore.Event
+	eventDone     chan struct{}
+	eventStopOnce sync.Once
 }
 
 // Option configures the server.
@@ -130,9 +138,18 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 		opt(s)
 	}
 
-	// Chain slog default handler through BroadcastHandler so log records are
-	// fanned out to SSE dashboard clients.
-	slog.SetDefault(slog.New(NewBroadcastHandler(slog.Default().Handler(), s.hub)))
+	// Route slog default through BroadcastHandler so log records are fanned out
+	// to SSE dashboard clients. CRITICAL: the underlying handler must write
+	// directly to stderr rather than reusing slog.Default().Handler(). The
+	// stdlib default handler emits via log.Logger, and slog.SetDefault then
+	// redirects stdlib log output back through the slog default — creating a
+	// log→slog→log recursion on log.Logger's mutex that deadlocks the first
+	// slog.Info call after New(). Use a fresh text handler here to break the
+	// loop. Also guard against re-wrapping when New() is called repeatedly.
+	if _, already := slog.Default().Handler().(*BroadcastHandler); !already {
+		base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+		slog.SetDefault(slog.New(NewBroadcastHandler(base, s.hub)))
+	}
 
 	// Initialize snapshot manager once (avoids per-request allocation and concurrent seq collisions).
 	if s.dataDir != "" {
@@ -166,6 +183,9 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s.registerRoutes(h)
 	s.hertz = h
 	s.initMetrics()
+	if s.evStore != nil {
+		s.startEventWorker()
+	}
 	return s
 }
 
@@ -177,7 +197,9 @@ func (s *Server) Run() error {
 
 // Shutdown gracefully shuts down the server, draining in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.hertz.Shutdown(ctx)
+	err := s.hertz.Shutdown(ctx)
+	s.stopEventWorker()
+	return err
 }
 
 func (s *Server) authMiddleware() app.HandlerFunc {
