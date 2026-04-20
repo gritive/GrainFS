@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/aws/smithy-go/logging"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,10 +35,8 @@ import (
 //
 // Receipts are pre-seeded into each node's BadgerDB before the node starts
 // (Slice 2 does not emit receipts from the scrubber yet; that wiring lands in
-// Slice 3). The cluster runs without S3 credentials because runCluster in
-// serve.go does not propagate --access-key/--secret-key today (a pre-existing
-// cluster-mode gap tracked separately); receipt auth is verified at unit
-// level in internal/receipt/api_test.go.
+// Slice 3). HTTP requests use AWS SigV4 because /api/receipts/:id sits behind
+// the same S3-HMAC auth middleware as object endpoints.
 //
 // The test sets --heal-receipt-window=1 so only the most recent receipt on
 // node C is gossiped. The older one must resolve via broadcast fallback —
@@ -47,7 +50,11 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
-	const clusterKey = "E2E-RECEIPT-CLUSTER-KSJGH45"
+	const (
+		clusterKey = "E2E-RECEIPT-CLUSTER-KSJGH45"
+		accessKey  = "e2e-ak"
+		secretKey  = "e2e-sk-receipt-api"
+	)
 
 	// Allocate a single batch of ports up front. freePort returns a port the
 	// OS just closed — reusing the name `sock` avoids two nodes racing for
@@ -78,12 +85,6 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 		require.NoError(t, err)
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
-		// Pre-create raft/ so serve.go's auto-migrate branch does not
-		// double-open the meta BadgerDB on fresh cluster start. The
-		// auto-migration is intended for solo→cluster upgrades and is
-		// falsely triggered on empty dataDirs because serve.go MkdirAll's
-		// meta/ unconditionally before the existence check.
-		require.NoError(t, os.MkdirAll(filepath.Join(d, "raft"), 0o755))
 	}
 
 	// ReceiptIDs used across the test — literal ids make log output readable.
@@ -115,6 +116,8 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
+			"--access-key", accessKey,
+			"--secret-key", secretKey,
 			"--heal-receipt-window=1",
 			"--heal-receipt-gossip-interval=1s",
 			"--nfs-port", "0",
@@ -147,27 +150,47 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 	// peer holds which receipt id.
 	time.Sleep(4 * time.Second)
 
+	// DisableURIPathEscaping matches what the S3 client does — the server's
+	// verifier builds its canonical URI from r.URL.Path unchanged, so any
+	// extra percent-encoding at sign time would produce a signature mismatch.
+	signer := v4.NewSigner(func(o *v4.SignerOptions) {
+		o.DisableURIPathEscaping = true
+		if testing.Verbose() {
+			o.Logger = logging.NewStandardLogger(os.Stderr)
+			o.LogSigning = true
+		}
+	})
+	creds := aws.Credentials{AccessKeyID: accessKey, SecretAccessKey: secretKey}
+	ctx := context.Background()
+
 	t.Run("LocalHit_QueryANodeForItsOwnReceipt", func(t *testing.T) {
-		body, status := httpGet(t, httpURL(0)+"/api/receipts/"+idLocalA)
+		body, status := signedGet(t, ctx, signer, creds, httpURL(0)+"/api/receipts/"+idLocalA)
 		require.Equal(t, http.StatusOK, status, "node A should answer locally for its own receipt; body=%s", body)
 		assert.Contains(t, string(body), idLocalA)
 	})
 
 	t.Run("RoutingCacheHit_QueryBForReceiptOnCThatWasGossiped", func(t *testing.T) {
-		body, status := httpGet(t, httpURL(1)+"/api/receipts/"+idCHot)
+		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCHot)
 		require.Equal(t, http.StatusOK, status, "node B should route via gossip cache to C; body=%s", body)
 		assert.Contains(t, string(body), idCHot)
 	})
 
 	t.Run("BroadcastFallback_QueryBForReceiptOnCOutsideGossipWindow", func(t *testing.T) {
-		body, status := httpGet(t, httpURL(1)+"/api/receipts/"+idCOld)
+		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCOld)
 		require.Equal(t, http.StatusOK, status, "node B should find receipt via broadcast fan-out; body=%s", body)
 		assert.Contains(t, string(body), idCOld)
 	})
 
 	t.Run("NotFound_UnknownReceiptReturns404", func(t *testing.T) {
-		body, status := httpGet(t, httpURL(1)+"/api/receipts/"+idMissing)
+		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idMissing)
 		require.Equal(t, http.StatusNotFound, status, "missing receipt must return 404, got body=%s", body)
+	})
+
+	t.Run("UnauthenticatedRequestIsRejected", func(t *testing.T) {
+		resp, err := http.Get(httpURL(0) + "/api/receipts/" + idLocalA)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode, "unsigned request must be rejected")
 	})
 }
 
@@ -204,13 +227,22 @@ func seedReceipt(t *testing.T, dataDir, psk, id string, ts time.Time, bucket, ke
 	require.NoError(t, store.Flush())
 }
 
-// httpGet performs a plain GET (no auth) and returns (body, status). Safe
-// because this E2E spins up the cluster without S3 credentials — receipt
-// HMAC auth is exercised at the unit-test level in internal/receipt.
-func httpGet(t *testing.T, url string) ([]byte, int) {
+// signedGet issues a SigV4-signed GET against the heal-receipt API and
+// returns (body, status). The server's verifier derives the payload hash
+// from the X-Amz-Content-Sha256 header (fallback "UNSIGNED-PAYLOAD"), so we
+// set it explicitly before signing to match what the signer hashed into the
+// canonical request. Without this the server and client compute different
+// canonical requests and the signature never verifies.
+func signedGet(t *testing.T, ctx context.Context, signer *v4.Signer, creds aws.Credentials, url string) ([]byte, int) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	require.NoError(t, err)
+	sum := sha256.Sum256(nil)
+	payloadHash := hex.EncodeToString(sum[:])
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	err = signer.SignHTTP(ctx, creds, req, payloadHash, "s3", "us-east-1", time.Now())
+	require.NoError(t, err)
+
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()

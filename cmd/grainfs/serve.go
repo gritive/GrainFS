@@ -225,7 +225,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey)
+	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts)
 }
 
 func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64, evDB *badger.DB) error {
@@ -409,7 +409,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 	return nil
 }
 
-func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string) error {
+func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
@@ -421,6 +421,36 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	peers := strings.Split(peersStr, ",")
 
 	metaDir := filepath.Join(dataDir, "meta")
+	raftDir := filepath.Join(dataDir, "raft")
+
+	// Auto-migrate BEFORE any filesystem or lock side effects. If Raft dir
+	// doesn't exist but meta dir holds an existing solo BadgerDB, convert
+	// in place. Two things previously broke this branch on fresh cluster
+	// starts with an empty dataDir:
+	//   1. MkdirAll ran before this check, so os.Stat(metaDir) succeeded
+	//      on a freshly-created empty dir and triggered a spurious
+	//      migration.
+	//   2. The migration opens the meta DB, but we had already opened it
+	//      here, and BadgerDB takes an exclusive directory lock, so the
+	//      migration aborted with "Another process is using this Badger
+	//      database".
+	// Moving the migration above both MkdirAll and badger.Open removes
+	// both failure modes.
+	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
+		if info, err := os.Stat(metaDir); err == nil && info.IsDir() {
+			// A populated solo meta dir has .sst / .vlog / MANIFEST files.
+			// Distinguish "real data" from "empty dir someone pre-created"
+			// by checking for any entries; empty → skip migration.
+			if entries, err := os.ReadDir(metaDir); err == nil && len(entries) > 0 {
+				slog.Info("auto-migrating solo metadata to cluster format", "component", "migrate")
+				if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
+					return fmt.Errorf("auto-migrate: %w", err)
+				}
+				slog.Info("auto-migration complete", "component", "migrate")
+			}
+		}
+	}
+
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
 		return fmt.Errorf("create meta dir: %w", err)
 	}
@@ -433,20 +463,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as solo.
 	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
 		return err
-	}
-
-	raftDir := filepath.Join(dataDir, "raft")
-
-	// Auto-migrate: if Raft directory doesn't exist yet but metadata does,
-	// automatically bootstrap from solo metadata (zero-downtime migration)
-	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
-		if _, err := os.Stat(filepath.Join(dataDir, "meta")); err == nil {
-			slog.Info("auto-migrating solo metadata to cluster format", "component", "migrate")
-			if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
-				return fmt.Errorf("auto-migrate: %w", err)
-			}
-			slog.Info("auto-migration complete", "component", "migrate")
-		}
 	}
 
 	badgerManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
@@ -568,6 +584,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 	}
+	// Propagate S3 auth from --access-key / --secret-key. Previously this
+	// was solo-only; cluster mode silently ran without auth regardless of
+	// the flags.
+	srvOpts = append(srvOpts, authOpts...)
 	if balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
 	}

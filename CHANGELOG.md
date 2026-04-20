@@ -12,9 +12,8 @@
 ### Fixed
 - **cluster mode 부팅 — default bucket 재시도** (`cmd/grainfs/serve.go`) — `backend.CreateBucket("default")` 가 단발 호출이라 peer 가 quorum 전에 시작하면 "not the leader" 로 프로세스가 즉시 종료. 100ms→2s exponential backoff + 30s 데드라인으로 재시도, `ErrBucketAlreadyExists`는 성공 처리, ctx 취소는 즉시 중단. 실제 부팅은 Raft leader 선출 직후 한번에 성공하므로 시간 패널티 없음.
 - **receipt API nil verifier panic** (`internal/server/receipt_api.go`) — `--access-key`/`--secret-key` 미설정 시 `s.verifier == nil` 인데 `registerReceiptAPI` 가 `s.authMiddleware()` 를 무조건 attach 해 요청마다 nil-pointer NPE 발생(server-level 미들웨어는 nil 가드로 이미 skip). 이제 조건부 체인으로 전역 auth 패턴과 동작 일치 — "`--access-key` 없음 = 전면 auth 없음".
-
-### Notes
-- 두 개 후속 이슈 TODOS.md 에 기록: cluster mode 가 `--access-key`/`--secret-key` 를 `server.WithAuth` 로 전파하지 않는 기존 갭; 빈 dataDir 에서 `runCluster` 가 spurious solo→cluster migration branch 에 진입해 badger lock 충돌을 일으키는 bootstrap 버그(E2E 는 `raft/` 사전 생성으로 회피).
+- **cluster mode S3 auth propagation** (`cmd/grainfs/serve.go`) — `runCluster` 가 `authOpts` 를 받지 않아 `--access-key`/`--secret-key` 가 cluster 모드에서 조용히 무시되던 기존 갭. 이제 `runServe` 에서 `authOpts` 를 전달, `runCluster` 가 `srvOpts` 에 append. HealReceipt API 를 포함한 모든 cluster-mode endpoint 가 플래그대로 auth 를 강제.
+- **fresh cluster bootstrap spurious auto-migration** (`cmd/grainfs/serve.go`) — `runCluster` 가 `os.MkdirAll(metaDir)` 를 migration 체크 전에 호출해 빈 dataDir 에서도 solo→cluster migration branch 에 진입, migration 은 이미 열린 meta BadgerDB 를 다시 열려다 dir lock 충돌로 종료시키던 문제. 이제 migration 체크를 `MkdirAll` 및 `badger.Open` 위로 이동, `os.ReadDir` 결과로 빈 meta 디렉토리를 감지해 무관한 진입을 차단. Slice 3+ 에서 새 3-node 클러스터 부팅이 단발 시도로 성공.
 
 ### Tests
 - `TestRoutingCache_*` — Update/Lookup/Evict 의미, concurrent reader/writer race detector 통과.

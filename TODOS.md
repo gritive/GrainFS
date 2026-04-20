@@ -60,8 +60,6 @@
 - [ ] nbd over internet for edge computing (powered by wireguard)
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 - [ ] **Raft quorum lost alert** — *zero ops* — critical alert channel로 즉시 경고; 자동 re-election 시도 로직
-- [ ] **Cluster mode S3 auth propagation** — `cmd/grainfs/serve.go`의 `runCluster`가 `--access-key`/`--secret-key`를 `server.WithAuth`로 전달하지 않음. Solo 경로만 auth wiring. HealReceipt API도 이 제약으로 cluster mode에선 S3 auth 비활성. 수정 시: `runServe`에서 `authOpts`를 `runCluster`에 넘겨 `srvOpts`에 append.
-- [ ] **Fresh cluster bootstrap — spurious auto-migration** — `runCluster`가 `os.MkdirAll(metaDir)`를 migration 체크 **전에** 수행해 빈 dataDir에서도 solo→cluster migration branch에 진입. Migration이 meta DB를 다시 열려 하다 badger lock 충돌 → 부팅 실패. 수정: `os.Stat(metaDir)`를 `MkdirAll` 전에 확인하거나 meta 디렉토리 비어있는지 추가 검사. 현재 E2E 테스트는 `raft/` 사전 생성으로 회피.
 
 ## Phase 18: Performance
 
