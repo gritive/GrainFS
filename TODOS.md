@@ -14,7 +14,6 @@
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
 - [ ] io.WriteTo 구현 (FlatBuffers zero-copy)
 - [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
-- [x] **Self-healing storage** — *zero ops* — 재시작 시 corrupted cache, stale lock, orphan tmp 자동 정리 (Phase 16 Transparent Self-Healing plan에 포함). **Completed:** v0.0.19 (2026-04-20) — orphan .tmp + 24h+ 포기된 multipart upload 자동 삭제, BadgerDB preflight 무결성 체크. flock 기반 lock 파일과 디스크 캐시는 N/A로 문서화 (각각 OS 자동 해제 / 메모리 전용)
 - [ ] **Degraded mode (storage)** — *zero ops* — EC backend 실패 → read-only + critical alert; 단일 블롭 손상 → 해당 객체만 격리
 
 ## Phase 17: Scale-Out
@@ -55,7 +54,6 @@
 운영자 개입 없이도 안정적으로 동작하고, 문제 발생 시 명확하게 알려주는 기본기.
 
 - [ ] **Preflight health check** — *zero config* — 부팅 시 data dir 쓰기권한, 디스크 잔여공간, BadgerDB 무결성, port 충돌, TLS 키 권한 자동 검증하고 fail-fast
-- [ ] **Critical alert channel** — *zero ops* — erasure unrecoverable, raft quorum lost, disk full imminent, encryption key missing 같은 운영자 개입 필요 이벤트를 dashboard + webhook + log로 일관되게 노출
 - [ ] **Safe defaults for every flag** — *zero config* — `grainfs serve` 기본값만으로 production-ready (encryption on, `--no-auth` 명시적 warn, fsync 정책 명확)
 - [ ] **Operator-friendly errors** — *zero ops* — 모든 fatal error에 원인 + 복구 방법 + 관련 문서 링크 포함 (e.g., "BadgerDB write failed: disk full at /data, free at least 1GB or set --data-dir")
 - [ ] **One-command bootstrap** — *zero config* — `grainfs init` 하나로 cluster key, encryption key, 기본 credential, volume 생성 + 필요 파일 권한 설정

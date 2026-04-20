@@ -17,6 +17,7 @@ import (
 
 	"crypto/rand"
 
+	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
@@ -76,6 +77,9 @@ func init() {
 	serveCmd.Flags().Duration("balancer-migration-pending-ttl", cluster.DefaultBalancerConfig().MigrationPendingTTL, "max time a pending migration may linger before being cancelled")
 	serveCmd.Flags().Bool("badger-managed-mode", false, "enable Raft log GC using quorum watermark (WARNING: on-disk format change; see docs/badger-managed-mode-rollback.md)")
 	serveCmd.Flags().Duration("raft-log-gc-interval", 30*time.Second, "how often Raft log GC runs when --badger-managed-mode is enabled")
+	// Phase 16 Week 4 — webhook alerts.
+	serveCmd.Flags().String("alert-webhook", "", "Slack-compatible webhook URL for critical alerts (empty disables alerts)")
+	serveCmd.Flags().String("alert-webhook-secret", "", "shared secret for X-GrainFS-Signature HMAC-SHA256 (empty disables signing)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -251,6 +255,12 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		// wired to the server-owned heal emitter. Without this ordering the
 		// dashboard would never receive HealEvents.
 	}
+
+	// Phase 16 Week 4: webhook alerts (degraded mode + critical events).
+	alertWebhook, _ := cmd.Flags().GetString("alert-webhook")
+	alertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
+	alertsState := server.NewAlertsState(alertWebhook, alerts.Options{Secret: alertSecret}, alerts.DegradedConfig{})
+	opts = append(opts, server.WithAlerts(alertsState))
 	if lcStore != nil {
 		opts = append(opts, server.WithLifecycleStore(lcStore))
 	}
@@ -534,9 +544,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
+	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
+	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
+	clusterAlerts := server.NewAlertsState(clusterAlertWebhook, alerts.Options{Secret: clusterAlertSecret}, alerts.DegradedConfig{})
 	srvOpts := []server.Option{
 		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}),
 		server.WithEventStore(eventstore.New(db)),
+		server.WithAlerts(clusterAlerts),
 	}
 	if balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
