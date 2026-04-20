@@ -1,10 +1,8 @@
 # TODOS
 
-## Phase 15: Dashboard
+## Phase 15: Dashboard (v0.0.14 — 부분 완료)
 
 - [ ] storage & cluster management and monitoring
-- [ ] dashboard: hot config change (scrub interval 포함), log tailing
-- [ ] dashboard: on-demand metric with sse
 - [ ] dashboard: snapshot, backup manage
 - [ ] dashboard: event logging
 

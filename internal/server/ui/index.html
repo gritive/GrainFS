@@ -133,8 +133,37 @@ tbody tr:last-child td{border-bottom:none}
   <div class="stats">
     <div class="stat-card"><div class="label">Uptime</div><div class="value" id="dash-uptime">-</div></div>
     <div class="stat-card"><div class="label">Total Requests</div><div class="value" id="dash-requests">-</div></div>
-    <div class="stat-card"><div class="label">Storage Bytes</div><div class="value" id="dash-storage">-</div></div>
+    <div class="stat-card"><div class="label">Storage</div><div class="value" id="dash-storage">-</div></div>
     <div class="stat-card"><div class="label">Objects</div><div class="value" id="dash-objects">-</div></div>
+  </div>
+
+  <!-- Live log stream -->
+  <div style="margin-bottom:1.5rem">
+    <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
+      <h3 style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint)">Live Log Stream</h3>
+      <span id="sse-badge" style="font-size:0.65rem;padding:0.15rem 0.5rem;border-radius:9999px;background:rgba(239,68,68,0.15);color:var(--danger)">disconnected</span>
+      <select id="log-level-filter" style="margin-left:auto;font-size:0.75rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:0.2rem 0.4rem">
+        <option value="">All levels</option>
+        <option value="ERROR">ERROR</option>
+        <option value="WARN">WARN</option>
+        <option value="INFO">INFO</option>
+        <option value="DEBUG">DEBUG</option>
+      </select>
+    </div>
+    <div id="log-stream" style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);font-family:monospace;font-size:0.75rem;height:200px;overflow-y:auto;padding:0.75rem;color:var(--text-muted)">
+      <div style="color:var(--text-faint)">Waiting for events…</div>
+    </div>
+  </div>
+
+  <!-- Hot Config -->
+  <div>
+    <h3 style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint);margin-bottom:0.75rem">Hot Config</h3>
+    <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+      <label style="font-size:0.8125rem;color:var(--text-muted)">Scrub Interval</label>
+      <input id="cfg-scrub-interval" type="text" placeholder="e.g. 1h, 30m" style="padding:0.35rem 0.6rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem;width:140px">
+      <button class="btn primary" onclick="applyHotConfig()">Apply</button>
+      <span id="cfg-msg" style="font-size:0.75rem;color:var(--text-muted)"></span>
+    </div>
   </div>
 </div>
 
@@ -278,7 +307,7 @@ tbody tr:last-child td{border-bottom:none}
       var tab = document.getElementById('tab-' + btn.dataset.tab);
       if (tab) tab.classList.remove('hidden');
       if (btn.dataset.tab === 'volumes') loadVolumes();
-      if (btn.dataset.tab === 'dashboard') refreshDashboard();
+      if (btn.dataset.tab === 'dashboard') { refreshDashboard(); startSSE(); }
       if (btn.dataset.tab === 'cluster') loadCluster();
     });
   });
@@ -517,6 +546,106 @@ tbody tr:last-child td{border-bottom:none}
       document.getElementById('dash-storage').textContent = fmtBytes(m['grainfs_storage_bytes_total'] || 0);
       document.getElementById('dash-objects').textContent = Math.round(m['grainfs_objects_total'] || 0);
     }).catch(function(e) { console.error('refreshDashboard', e); });
+  }
+
+  // SSE live log stream
+  var sseConn = null;
+  var logLines = [];
+  var MAX_LOG_LINES = 100;
+
+  function startSSE() {
+    if (sseConn) return;
+    sseConn = new EventSource(baseURL + '/api/events');
+    var badge = document.getElementById('sse-badge');
+
+    sseConn.onopen = function() {
+      badge.textContent = 'live';
+      badge.style.background = 'rgba(34,197,94,0.15)';
+      badge.style.color = 'var(--success)';
+    };
+
+    sseConn.onerror = function() {
+      badge.textContent = 'reconnecting';
+      badge.style.background = 'rgba(245,158,11,0.15)';
+      badge.style.color = 'var(--warning)';
+    };
+
+    sseConn.addEventListener('log', function(e) {
+      try {
+        var entry = JSON.parse(e.data);
+        var filter = document.getElementById('log-level-filter').value;
+        if (filter && entry.level !== filter) return;
+
+        var color = entry.level === 'ERROR' ? 'var(--danger)' :
+                    entry.level === 'WARN'  ? 'var(--warning)' :
+                    entry.level === 'DEBUG' ? 'var(--text-faint)' : 'var(--text-muted)';
+        logLines.push({ level: entry.level, msg: entry.msg, time: entry.time, color: color });
+        if (logLines.length > MAX_LOG_LINES) logLines.shift();
+        renderLogStream();
+      } catch (_) {}
+    });
+
+    sseConn.addEventListener('metric', function(e) {
+      try {
+        var d = JSON.parse(e.data);
+        if (d.name && d.value !== undefined) {
+          if (d.name === 'grainfs_http_requests_total') {
+            document.getElementById('dash-requests').textContent = Math.round(d.value);
+          } else if (d.name === 'grainfs_storage_bytes_total') {
+            document.getElementById('dash-storage').textContent = fmtBytes(d.value);
+          } else if (d.name === 'grainfs_objects_total') {
+            document.getElementById('dash-objects').textContent = Math.round(d.value);
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  function renderLogStream() {
+    var el = document.getElementById('log-stream');
+    el.textContent = '';
+    logLines.forEach(function(l) {
+      var line = document.createElement('div');
+      line.style.cssText = 'padding:0.1rem 0;border-bottom:1px solid rgba(255,255,255,0.03)';
+      var ts = new Date(l.time * 1000).toLocaleTimeString();
+      var tsSpan = document.createElement('span');
+      tsSpan.style.color = 'var(--text-faint)';
+      tsSpan.textContent = ts + ' ';
+      var lvSpan = document.createElement('span');
+      lvSpan.style.cssText = 'color:' + l.color + ';font-weight:600';
+      lvSpan.textContent = l.level + ' ';
+      var msgSpan = document.createElement('span');
+      msgSpan.textContent = l.msg;
+      line.appendChild(tsSpan);
+      line.appendChild(lvSpan);
+      line.appendChild(msgSpan);
+      el.appendChild(line);
+    });
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // Hot Config
+  function applyHotConfig() {
+    var interval = document.getElementById('cfg-scrub-interval').value.trim();
+    var msg = document.getElementById('cfg-msg');
+    if (!interval) { msg.textContent = 'enter a duration'; return; }
+
+    fetch(baseURL + '/api/admin/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scrub_interval: interval })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.applied) {
+        msg.style.color = 'var(--success)';
+        msg.textContent = 'applied: ' + (d.scrub_interval || interval);
+      } else {
+        msg.style.color = 'var(--danger)';
+        msg.textContent = 'failed';
+      }
+    }).catch(function() {
+      msg.style.color = 'var(--danger)';
+      msg.textContent = 'request failed';
+    });
   }
 
   // Stats bar refresh

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.14] - 2026-04-20
+
+### Added
+- **SSE 실시간 이벤트 스트림** (`GET /api/events`) — `Hub` fan-out 패턴으로 N개 대시보드 클라이언트에 `text/event-stream` 전달. 느린 클라이언트는 non-blocking drop으로 head-of-line 방지.
+- **라이브 로그 스트림** — `BroadcastHandler`가 slog 기본 핸들러를 감싸 모든 로그 레코드를 SSE `log` 이벤트로 팬아웃. 대시보드에서 ERROR/WARN/INFO/DEBUG 레벨 필터 지원.
+- **Hot Config API** (`PATCH /api/admin/config`, localhost 전용) — 재시작 없이 스크러버 인터벌 변경. `scrubber.SetInterval(d)` 채널 기반 핫-리로드, 대시보드 Hot Config 패널에서 즉시 적용.
+- **대시보드 UI 개선** — SSE 연결 상태 배지(live/reconnecting/disconnected), 라이브 로그 패널(100줄 링버퍼, 색상 레벨), Hot Config 폼 추가.
+
 ## [0.0.13] - 2026-04-20
 
 ### Fixed

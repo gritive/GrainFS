@@ -72,6 +72,7 @@ type BackgroundScrubber struct {
 	verifier       *ShardVerifier
 	repairer       *RepairEngine
 	interval       time.Duration
+	resetCh        chan time.Duration // hot-reload interval signal
 	limiter        *rate.Limiter // 100 objects/sec scan throttle (Eng Review #8)
 	mu             sync.Mutex
 	stats          ScrubStats
@@ -106,6 +107,7 @@ func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *Ba
 		verifier:        NewShardVerifier(backend),
 		repairer:        NewRepairEngine(backend),
 		interval:        interval,
+		resetCh:         make(chan time.Duration, 1),
 		limiter:         rate.NewLimiter(100, 10),
 		lastStatuses:    make(map[string]ShardStatus),
 		orphanTombstone: make(map[string]struct{}),
@@ -123,6 +125,20 @@ func (s *BackgroundScrubber) LastStatus(bucket, key string) ShardStatus {
 	return s.lastStatuses[bucket+"/"+key]
 }
 
+// SetInterval changes the scrub interval at runtime without restarting.
+func (s *BackgroundScrubber) SetInterval(d time.Duration) {
+	select {
+	case s.resetCh <- d:
+	default:
+		// Drain stale pending reset and replace it.
+		select {
+		case <-s.resetCh:
+		default:
+		}
+		s.resetCh <- d
+	}
+}
+
 // Start launches the background scrub loop; returns immediately.
 func (s *BackgroundScrubber) Start(ctx context.Context) {
 	go func() {
@@ -132,6 +148,8 @@ func (s *BackgroundScrubber) Start(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
+			case d := <-s.resetCh:
+				ticker.Reset(d)
 			case <-ticker.C:
 				s.runOnce(ctx)
 			}
