@@ -1,6 +1,21 @@
 # Changelog
 
-## [0.0.20] - 2026-04-20
+## [0.0.0.21] - 2026-04-20
+
+### Added
+- **`internal/receipt` 패키지 (Phase 16 Week 5 Slice 1)** — Heal Receipt 핵심 레이어. 한 repair 세션을 audit-ready 아티팩트로 요약: `HealReceipt` struct, HMAC-SHA256 서명, JCS 스타일 canonicalization(RFC 8785 부분 준수 — 키 알파벳 정렬 + 공백 없음), `KeyStore`로 `key_id` rotation 지원(기본 previous 3개 유지), BadgerDB 로컬 저장(Raft FSM 복제 없음) + 기본 30일 TTL, batch write(기본 100 buffer 또는 50ms flush 중 먼저 도달). 서명 실패 시 `ErrNoActiveKey`, 미서명 receipt 저장 거부(`ErrUnsigned`) — Phase 16 audit 무결성 원칙(무서명 receipt 절대 생성 금지) 강제.
+- TODOS.md Phase 16 섹션 재편 — Week 5(Slice 1–4), Week 6(Grafana + demo) 설계 완료/미진행 항목 명시.
+
+### Notes
+- 이번 슬라이스는 패키지 단독. API 엔드포인트(`/api/receipts/*`), gossip rolling window, scrubber repair 경로와의 wiring, Blame Mode UI, OTel spans는 Slice 2–4로 분리.
+
+### Tests
+- `TestCanonicalize_*` — 호출 간 byte-identical, CanonicalPayload/Signature 필드 제외, 알파벳 정렬, whitespace 금지.
+- `TestSign_*` / `TestVerify_*` — 서명 라운드트립, 필드/서명 위조 감지, 알 수 없는 key_id, empty keystore 감지.
+- `TestKeyStore_Rotate_*` — 이전 키로 검증 성공, retention 초과 시 eviction, 중복 ID rotation 거부.
+- `TestStore_*` — put/get 라운드트립, threshold/interval flush, Close 시 pending drain, 1000건 burst 전건 영속.
+
+## [0.0.0.20] - 2026-04-20
 
 ### Fixed
 - **alerts.Dispatcher dedup race** (`internal/alerts/webhook.go`) — 이전 구조에서 `shouldSuppress` 체크 후 HTTP retry loop 동안 lock이 풀려 있어, 동일 `(Type, Resource)` 키로 거의 동시에 호출된 두 `Send` 가 모두 suppress를 통과해 웹훅이 중복 발송될 수 있었다. `inFlight` 집합을 추가하고 `claimSend`가 `lastSent` 확인과 함께 키를 선점, `defer`로 전송 수명 내 panic까지 포함해 release를 보장. 동시 Send 중 하나만 HTTP에 도달 + panic-safe 계약 regression 테스트 포함.
@@ -20,7 +35,7 @@
 - `TestDispatcher_ConcurrentSameKeyOnlyOneDelivered` — barrier-channel mock 수신자로 동시 Send 중 1개만 HTTP 도달, release 후 재시도 허용 확인.
 - `TestDispatcher_RecordSentOnFailureDedupsOutageStorm` — 5xx 반복 시 첫 delivery는 재시도 exhaustion, 두 번째 Send는 dedup window 내 suppress + 윈도우 이후 재개.
 
-## [0.0.19] - 2026-04-20
+## [0.0.0.19] - 2026-04-20
 
 ### Added
 - **Phase 16 Week 4 — Webhook Alert Framework + Degraded Mode (foundation)** — Slack-compatible 인커밍 webhook을 단일 URL로 보내는 alerts 디스패처 + degraded 상태 트래커.
@@ -56,7 +71,7 @@
 - `docs/alerts.md` PagerDuty 매핑 표 — 이번 PR은 Slack JSON 한정.
 - BadgerDB atomic auto-recovery — Phase 17.
 
-## [0.0.18] - 2026-04-20
+## [0.0.0.18] - 2026-04-20
 
 ### Added
 - **Phase 16 Week 2 — Self-Healing Dashboard Card** — 대시보드에 "납득 가능한 자가 치유" 패널 추가. 대시보드를 열면 Last Heal(가장 최근 복구 + 경과 시간), Heal Rate(1시간 단위 sparkline + 분당 버킷팅), Restart Recovery 카운트, Live Heal Events(최근 5건, role="log"/aria-live="polite") 4개 카드가 보인다. 비어 있을 때 "No recent heal events. Your storage is healthy." 친절 문구 (`internal/server/ui/index.html`).
@@ -78,7 +93,7 @@
 - E2E `TestDashboardHealingCard_HTMLAndStream` — 대시보드 HTML에 카드 마크업 존재 + `/api/events/heal/stream`이 `text/event-stream` + `Cache-Control: no-cache`로 응답하는지 검증 (`tests/e2e/dashboard_healing_card_test.go`).
 - `-race -count=10` 회귀 통과 (server, scrubber, eventstore 패키지).
 
-## [0.0.17] - 2026-04-20
+## [0.0.0.17] - 2026-04-20
 
 ### Added
 - **Phase 16 Event Spine 스캐폴딩** — `internal/scrubber/event.go` 신규. `HealEvent` 타입 (UUIDv7 ID, RFC3339 timestamp, phase/outcome enum, correlation_id), `HealPhase` 상수 6개(detect/reconstruct/write/verify/startup/degraded), `HealOutcome` 상수 4개(success/failed/skipped/isolated), `Emitter` 인터페이스, `NoopEmitter` 기본 구현. 엔진에 아직 주입되지 않음 — 후속 PR에서 scrubber repair/orphan/verify 경로에 emit 지점 연결.
@@ -87,7 +102,7 @@
 ### Changed
 - **TODOS.md Phase 16/17 경계 재조정** — Phase 16 "Self-healing storage" 항목에서 BadgerDB auto-recovery 하위 요소 제외 (Phase 17로 이동). Phase 17에 추가: BadgerDB atomic auto-recovery, Blame Mode v2(shard-level 시각적 replay), PagerDuty 네이티브 webhook. Phase 16 Transparent Self-Healing 설계(6주 스코프)와 정합성 맞춤.
 
-## [0.0.16] - 2026-04-20
+## [0.0.0.16] - 2026-04-20
 
 ### Fixed
 - **slog↔stdlib log 재귀 데드락 근본 수정** — `server.New()`의 `BroadcastHandler`가 `slog.Default().Handler()`를 wrap했는데, `slog.SetDefault`가 stdlib log 출력을 slog로 리다이렉트하여 첫 `slog.Info` 호출에서 `log.Logger` 뮤텍스 자기-재귀 데드락 발생. **프로덕션 바이너리 시작 시 데드락되어 NFS 서버가 accept를 시작하지 못하는 근본 원인**이었음. `BroadcastHandler.next`를 `slog.NewTextHandler(os.Stderr)`로 교체해 루프 차단. `New()` 반복 호출 시 재-래핑 가드 추가 (`internal/server/server.go`).
@@ -100,7 +115,7 @@
 - **TODOS.md "Zero Config, Zero Ops" 섹션** — 운영자 개입 없이도 안정적으로 동작하기 위한 self-healing, preflight check, critical alert, predictive warning, auto-recovery 등 작업 항목 정의.
 - **회귀 테스트 3개** — `TestEmitEvent_BoundedQueueNoGoroutineLeak`, `TestFormUpload_EmitsEvent`, `TestQueryEventLog_SinceLargeRelativeOffset` (`internal/server/events_api_test.go`).
 
-## [0.0.15] - 2026-04-20
+## [0.0.0.15] - 2026-04-20
 
 ### Added
 - **Phase 15: Unified Event Log** — S3 operations + system events를 하나의 BadgerDB-backed append-only log에 기록. `internal/eventstore` 신규 패키지 (ev: 키 prefix, 나노초 big-endian 키, 7일 TTL).
@@ -115,7 +130,7 @@
 ### Fixed
 - **Events 탭 "Invalid Date" 표시 버그** — `e.ts`는 나노초(int64), JS `Date()`는 밀리초 기대. `new Date(Math.floor(e.ts / 1e6))`으로 변환 (`internal/server/ui/index.html:779`).
 
-## [0.0.14] - 2026-04-20
+## [0.0.0.14] - 2026-04-20
 
 ### Added
 - **SSE 실시간 이벤트 스트림** (`GET /api/events`) — `Hub` fan-out 패턴으로 N개 대시보드 클라이언트에 `text/event-stream` 전달. 느린 클라이언트는 non-blocking drop으로 head-of-line 방지.
@@ -123,7 +138,7 @@
 - **Hot Config API** (`PATCH /api/admin/config`, localhost 전용) — 재시작 없이 스크러버 인터벌 변경. `scrubber.SetInterval(d)` 채널 기반 핫-리로드, 대시보드 Hot Config 패널에서 즉시 적용.
 - **대시보드 UI 개선** — SSE 연결 상태 배지(live/reconnecting/disconnected), 라이브 로그 패널(100줄 링버퍼, 색상 레벨), Hot Config 폼 추가.
 
-## [0.0.13] - 2026-04-20
+## [0.0.0.13] - 2026-04-20
 
 ### Fixed
 - **Raft waiter correctness 버그 수정** — `HandleAppendEntries` log truncation 및 `HandleInstallSnapshot` 시 `n.waiters` map이 정리되지 않아 발생하던 false-success 시나리오 제거.
@@ -132,7 +147,7 @@
   - `HandleAppendEntries` 두 truncation 경로 및 `HandleInstallSnapshot` 에 `abortWaitersFrom` 호출 추가.
   - split-brain 상황에서 다른 Leader가 같은 index에 다른 엔트리를 커밋할 때 원래 제안자에게 SUCCESS가 잘못 전달되던 Raft 안전성 불변식 위반 수정.
 
-## [0.0.12] - 2026-04-20
+## [0.0.0.12] - 2026-04-20
 
 ### Changed
 - **Phase F: FlatBuffers 완전 전환** — protobuf 의존성 제거. 직렬화 계층 전체(erasure, cluster, raft, storage, volume)를 FlatBuffers로 통일.
@@ -149,7 +164,7 @@
 - `make clean` 후 `make`가 `.fbs` 파일을 재생성하지 않던 버그 수정 — `clean` 타겟에 `*.fbs.stamp` 삭제 추가.
 - FlatBuffers decode 함수 15곳 패닉 보호 누락 수정 — 손상된 데이터나 이전 포맷 바이트 입력 시 프로세스 크래시 방지.
 
-## [0.0.11] - 2026-04-19
+## [0.0.0.11] - 2026-04-19
 
 ### Added
 - **Adaptive Raft Batching** (`batcherLoop` + `flushBatch`) — EWMA 기반 동적 배치로 BadgerDB 커밋 횟수 대폭 감소. 100 동시 PUT → 97% 커밋 감소 (100회 → 3회).
@@ -185,7 +200,7 @@
 ### Changed
 - `NewECBackend` — 옵션을 `badger.Open` 이전에 적용해 DB 수준 설정(`BloomFalsePositive`)을 반영하도록 초기화 순서 변경. 기존 코드 호환.
 
-## [0.0.10] - 2026-04-19
+## [0.0.0.10] - 2026-04-19
 
 ### Added
 - **Circuit Breaker** — per-node 2-state (open/closed) disk-full 게이트. `grainfs_balancer_cb_open` (GaugeVec) 메트릭으로 상태 노출. `--balancer-cb-threshold` 플래그 (기본 0.90 = 90%)로 설정.
@@ -203,7 +218,7 @@
 - **음수 pendingTTL 패닉** — `Start()` 가드를 `== 0`에서 `<= 0`으로 수정해 음수 Duration 입력 시 패닉 방지.
 - **CBThreshold 입력 검증 누락** — `startBalancer()`에서 `--balancer-cb-threshold` 플래그 값이 [0, 1] 범위인지 검증 추가.
 
-## [0.0.9] - 2026-04-19
+## [0.0.0.9] - 2026-04-19
 
 ### Added
 - **DiskCollector** — 로컬 디스크 사용률을 주기적으로 읽어 `NodeStatsStore`에 반영하는 goroutine 추가. 이제 balancer가 실제 디스크 사용률에 반응한다.
@@ -222,7 +237,7 @@
 - **`GRAINFS_TEST_DISK_PCT` 범위 검증 누락** — 0~100 범위 검증 추가. 범위 초과 시 서버 시작 시 즉시 오류 반환.
 - **`DiskCollector.logger` 데드 필드** — 사용되지 않는 `logger` 필드 제거.
 
-## [0.0.8] - 2026-04-18
+## [0.0.0.8] - 2026-04-18
 
 ### Added
 - **Balancer Prometheus 메트릭 11종** — `grainfs_balancer_gossip_total`, `grainfs_balancer_migrations_proposed_total`, `grainfs_balancer_migrations_done_total`, `grainfs_balancer_migrations_failed_total`, `grainfs_balancer_imbalance_pct`, `grainfs_balancer_pending_tasks`, `grainfs_balancer_leader_transfers_total`, `grainfs_balancer_shard_write_errors_total`, `grainfs_balancer_shard_copy_duration_seconds`, `grainfs_balancer_grace_period_active_ticks_total` 추가.
@@ -241,7 +256,7 @@
 - **ObjectPicker skipIDs FSM 연결** — `NotifyMigrationDone` 3-arg 시그니처로 FSM goroutine에서 inflight 정확히 클리어. picker가 skipIDs를 무시하는 경우를 대비한 double-check guard 추가. `RecoverPending` context 전파로 ctx 취소 시 복구 루프 안전 종료.
 - **`BalancerProposer` inflight map data race** — `NotifyMigrationDone`(FSM goroutine)과 `proposeMigration`(balancer goroutine)이 동시에 `inflight` map에 접근해 발생하는 race. `sync.Mutex`로 `inflight`, `active` 필드 보호.
 
-## [0.0.7] - 2026-04-18
+## [0.0.0.7] - 2026-04-18
 
 ### Added
 - **클러스터 Auto-Balancing (Phase 13)** — Gossip 프로토콜로 노드 디스크 사용률 공유, Raft 기반 샤드 마이그레이션, 리더 주도 발란싱 루프 구현. `GossipSender`/`GossipReceiver`, `MigrationExecutor`, `BalancerProposer` 추가.
@@ -260,7 +275,7 @@
 - **Connect() TOCTOU 커넥션 누수** — Write lock 재확인으로 동시 dial 시 중복 커넥션 닫기.
 - **zstd 풀 테스트 임계값** — race detector 오버헤드(~8×)를 반영해 alloc 임계값 상향 조정.
 
-## [0.0.6] - 2026-04-18
+## [0.0.0.6] - 2026-04-18
 
 ### Added
 - **S3 Lifecycle Management** — `PutBucketLifecycleConfiguration` / `GetBucketLifecycleConfiguration` / `DeleteBucketLifecycleConfiguration` API 구현. XML 직렬화/역직렬화, `lifecycle.Store` (BadgerDB 영속화), `lifecycle.Worker` (주기적 만료 스캔). Rate limiter (100 deletes/sec)로 삭제 속도 제한.
@@ -277,7 +292,7 @@
 - **lifecycle XML 바디 크기 제한** — 64 KiB 초과 시 `EntityTooLarge` 반환.
 - **Expiration Days=0 유효성** — `Days <= 0` 으로 조건 강화. S3 스펙: Days는 1 이상이어야 함.
 
-## [0.0.5] - 2026-04-18
+## [0.0.0.5] - 2026-04-18
 
 ### Security
 - **SigV4 서명 캐시 보안 강화** — `CachingVerifier`가 캐시 히트 시에도 `VerifyWithSigningKey`로 HMAC을 재검증하도록 수정. 기존 구현은 첫 검증 성공 후 이후 요청에서 서명을 검사하지 않아 토큰 재사용 공격에 노출됐음. 서명 키(32바이트, 하루 단위 안정)만 캐시하여 키 도출 비용(HMAC 4회)은 절감하면서 매 요청 서명 검증을 유지.
@@ -293,7 +308,7 @@
 - **ACL 통합 (`s3auth.ACLGrant`)** — 오브젝트별 ACL bitmask를 ECBackend 메타데이터에 저장. `SetObjectACL`, `PutObjectWithACL` 인터페이스로 핸들러에서 접근. `GetObject`/`HeadObject`에서 ACL 기반 접근 제어 적용.
 - **SigV4 캐싱 검증자** — `CachingVerifier`가 서명 키를 LRU 캐시에 저장하고 `VerifyWithSigningKey`로 재검증. Cold 대비 Hot 경로 ~4× 성능 향상(17µs → 4µs).
 
-## [0.0.4] - 2026-04-18
+## [0.0.0.4] - 2026-04-18
 
 ### Removed (post-release review)
 - **CRC Migration 분류 코드 제거** — `ErrCRCMissing`, `ErrLegacyShard`, `ShardStatus.Migration`, `ScrubStats.MigrationRewrites`, `grainfs_scrub_migration_rewrites_total` 메트릭 제거. `stripVerifyCRC` 의 "too short" 케이스도 `ErrCRCMismatch` 로 통합. 실제 legacy shard 감지 경로가 존재하지 않아 dead code 상태였음.
@@ -329,7 +344,7 @@
 - **ECBackend.PutObject OOM 제거** — `io.ReadAll(r)` → 2-pass spool-to-disk 스트리밍. body → 단일 tempfile(ETag 동시 계산) → StreamEncoder.Split/Encode → 샤드 tempfile 직렬 처리. 비암호화 경로 peak ~32KB(`streamWriteShardCRC`), 암호화 경로 peak ~shardSize×2(AES-GCM 블록 연산 특성상 불가피).
 - **CompleteMultipartUpload OOM 제거** — part bytes.Buffer 조립 → io.MultiReader+동일 스풀 경로 통합.
 
-## [0.0.3] - 2026-04-18
+## [0.0.0.3] - 2026-04-18
 
 ### Added
 - **Self-healing MVP** — background EC shard scrubber (`--scrub-interval`, 기본 24h). 누락·손상 shard 자동 감지 후 Reed-Solomon으로 복구. `GET /admin/health/scrub`으로 상태 확인.
@@ -342,7 +357,7 @@
 - **`--scrub-interval` CLI flag** — `grainfs serve --scrub-interval=24h` (기본값). `0` 으로 비활성화.
 - **EC shard format** — CRC32 footer 추가로 기존 shard(CRC 없음)는 scrubber에서 corrupt로 감지됨. 첫 scrub cycle에 자동 rewrite.
 
-## [0.0.2] - 2026-04-18
+## [0.0.0.2] - 2026-04-18
 
 ### Added
 - **Pull-through caching** - `--upstream` 플래그로 S3 호환 업스트림 지정, 로컬 캐시 미스 시 자동 fetch·캐시 저장
@@ -362,7 +377,7 @@
 - **Cache-Control 헤더** - 인증 설정 시 `private, no-store`, 미설정 시 `public, max-age=3600` 조건부 응답
 - **Snapshot manager 초기화 실패 로깅** - 초기화 실패 시 `slog.Warn` 출력
 
-## [0.0.1] - 2026-04-17
+## [0.0.0.1] - 2026-04-17
 
 ### Added
 - **NFSv4 buffer optimization** - 적응형 버퍼 풀(32KB/256KB/1MB)을 도입하여 대용량 파일 처리 성능 2-3x 개선
