@@ -13,9 +13,12 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
-// eventDropsTotal counts events dropped due to full queue.
+// eventDropsTotal counts events dropped due to full queue. Mirrors
+// metrics.EventQueueDropsTotal so tests can assert drops without scraping
+// the Prometheus registry.
 var eventDropsTotal atomic.Uint64
 
 func (s *Server) registerEventsAPI(h *server.Hertz) {
@@ -123,5 +126,6 @@ func (s *Server) emitEvent(e eventstore.Event) {
 	case s.eventCh <- e:
 	default:
 		eventDropsTotal.Add(1)
+		metrics.EventQueueDropsTotal.Inc()
 	}
 }
