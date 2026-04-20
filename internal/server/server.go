@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net"
 	"path/filepath"
@@ -44,6 +45,7 @@ type Server struct {
 	scrubber    *scrubber.BackgroundScrubber // nil if not using ECBackend
 	verifier    *s3auth.CachingVerifier
 	hertz       *server.Hertz
+	hub         *Hub
 	volMgr      *volume.Manager
 	policyStore    *CompiledPolicyStore
 	lifecycleStore *lifecycle.Store
@@ -110,6 +112,7 @@ func WithLifecycleStore(store *lifecycle.Store) Option {
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s := &Server{
 		backend:     backend,
+		hub:         NewHub(),
 		policyStore: NewCompiledPolicyStore(),
 		ipLimiter:   NewRateLimiter(100, 200, 100000), // 100 req/sec per IP, burst 200, max 100K entries
 		userLimiter: NewRateLimiter(50, 100, 100000),  // 50 req/sec per user, burst 100
@@ -331,4 +334,23 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Admin API for testing and operations
 	s.registerAdminAPI(h)
+
+	// Hot-reload config API
+	s.registerConfigAPI(h)
+
+	// SSE event stream for dashboard
+	hub := s.hub
+	h.GET("/api/events", func(ctx context.Context, c *app.RequestContext) {
+		c.Response.Header.Set("Content-Type", "text/event-stream")
+		c.Response.Header.Set("Cache-Control", "no-cache")
+		c.Response.Header.Set("Connection", "keep-alive")
+		c.SetStatusCode(consts.StatusOK)
+
+		pr, pw := io.Pipe()
+		go func() {
+			hub.WriteSSE(ctx, pw)
+			pw.Close()
+		}()
+		c.Response.SetBodyStream(pr, -1)
+	})
 }
