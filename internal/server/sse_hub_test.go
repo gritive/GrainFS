@@ -70,3 +70,72 @@ func TestHub_CancelRemovesSubscriber(t *testing.T) {
 	})
 	require.Equal(t, 0, count)
 }
+
+func TestHub_CategoryFilter_OnlyMatchingDelivered(t *testing.T) {
+	hub := NewHub()
+
+	_, healCh, cancelHeal := hub.Subscribe("heal")
+	defer cancelHeal()
+
+	hub.Broadcast(Event{Type: "log", Data: []byte(`"ignored"`)})
+	hub.Broadcast(Event{Type: "heal", Data: []byte(`{"phase":"detect"}`)})
+
+	select {
+	case e := <-healCh:
+		assert.Equal(t, "heal", e.Type)
+	case <-time.After(time.Second):
+		t.Fatal("heal subscriber did not receive heal event")
+	}
+
+	// log event must NOT have been queued for heal subscriber.
+	select {
+	case e := <-healCh:
+		t.Fatalf("heal subscriber received unexpected event type=%s", e.Type)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHub_NoCategory_ReceivesAll(t *testing.T) {
+	// Backward compat: callers that pass no categories must receive every event.
+	hub := NewHub()
+
+	_, ch, cancel := hub.Subscribe()
+	defer cancel()
+
+	hub.Broadcast(Event{Type: "log", Data: []byte("a")})
+	hub.Broadcast(Event{Type: "heal", Data: []byte("b")})
+	hub.Broadcast(Event{Type: "metric", Data: []byte("c")})
+
+	got := map[string]bool{}
+	for range 3 {
+		select {
+		case e := <-ch:
+			got[e.Type] = true
+		case <-time.After(time.Second):
+			t.Fatalf("timed out, got=%v", got)
+		}
+	}
+	assert.True(t, got["log"] && got["heal"] && got["metric"])
+}
+
+func TestHub_MultipleCategories(t *testing.T) {
+	hub := NewHub()
+
+	_, ch, cancel := hub.Subscribe("heal", "metric")
+	defer cancel()
+
+	hub.Broadcast(Event{Type: "log", Data: []byte("ignored")})
+	hub.Broadcast(Event{Type: "heal", Data: []byte("h")})
+	hub.Broadcast(Event{Type: "metric", Data: []byte("m")})
+
+	got := map[string]bool{}
+	for range 2 {
+		select {
+		case e := <-ch:
+			got[e.Type] = true
+		case <-time.After(time.Second):
+			t.Fatalf("timeout, got=%v", got)
+		}
+	}
+	assert.True(t, got["heal"] && got["metric"])
+}
