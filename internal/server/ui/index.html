@@ -608,9 +608,17 @@ tbody tr:last-child td{border-bottom:none}
       var line = document.createElement('div');
       line.style.cssText = 'padding:0.1rem 0;border-bottom:1px solid rgba(255,255,255,0.03)';
       var ts = new Date(l.time * 1000).toLocaleTimeString();
-      line.innerHTML = '<span style="color:var(--text-faint)">' + ts + '</span> '
-        + '<span style="color:' + l.color + ';font-weight:600">' + l.level + '</span> '
-        + '<span>' + l.msg + '</span>';
+      var tsSpan = document.createElement('span');
+      tsSpan.style.color = 'var(--text-faint)';
+      tsSpan.textContent = ts + ' ';
+      var lvSpan = document.createElement('span');
+      lvSpan.style.cssText = 'color:' + l.color + ';font-weight:600';
+      lvSpan.textContent = l.level + ' ';
+      var msgSpan = document.createElement('span');
+      msgSpan.textContent = l.msg;
+      line.appendChild(tsSpan);
+      line.appendChild(lvSpan);
+      line.appendChild(msgSpan);
       el.appendChild(line);
     });
     el.scrollTop = el.scrollHeight;

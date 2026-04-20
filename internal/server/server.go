@@ -121,6 +121,10 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 		opt(s)
 	}
 
+	// Chain slog default handler through BroadcastHandler so log records are
+	// fanned out to SSE dashboard clients.
+	slog.SetDefault(slog.New(NewBroadcastHandler(slog.Default().Handler(), s.hub)))
+
 	// Initialize snapshot manager once (avoids per-request allocation and concurrent seq collisions).
 	if s.dataDir != "" {
 		if snap, ok := s.backend.(storage.Snapshotable); ok {
