@@ -223,17 +223,34 @@ func marshalShardRequest(bucket, key string, shardIdx int32, data []byte) []byte
 }
 
 func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
-	dir := filepath.Join(s.dataDir, sr.Bucket, sr.Key)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := s.WriteLocalShard(sr.Bucket, sr.Key, int(sr.ShardIdx), sr.Data); err != nil {
 		return s.errorResponse(err.Error())
 	}
-
-	path := filepath.Join(dir, fmt.Sprintf("shard_%d", sr.ShardIdx))
-	if err := os.WriteFile(path, sr.Data, 0o644); err != nil {
-		return s.errorResponse(err.Error())
-	}
-
 	return s.okResponse(nil)
+}
+
+// WriteLocalShard stores a shard on the local node's disk without involving
+// the QUIC transport. Used by PutObject when this node is the destination for
+// one of an object's shards (self-placement); avoids a loopback RPC.
+func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
+	dir := filepath.Join(s.dataDir, bucket, key)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create shard dir: %w", err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
+	return os.WriteFile(path, data, 0o644)
+}
+
+// ReadLocalShard fetches a shard from the local node's disk.
+func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
+	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	return os.ReadFile(path)
+}
+
+// DeleteLocalShards removes every shard for key on the local node (all indices).
+func (s *ShardService) DeleteLocalShards(bucket, key string) error {
+	dir := filepath.Join(s.dataDir, bucket, key)
+	return os.RemoveAll(dir)
 }
 
 func (s *ShardService) handleRead(sr *shardRequest) *transport.Message {
