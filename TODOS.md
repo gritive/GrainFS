@@ -15,6 +15,10 @@
 - [ ] io.WriteTo 구현 (FlatBuffers zero-copy)
 - [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
 - [ ] **Degraded mode (storage)** — *zero ops* — EC backend 실패 → read-only + critical alert; 단일 블롭 손상 → 해당 객체만 격리
+- [ ] **alerts.Dispatcher dedup race** — `internal/alerts/webhook.go:124-157` — `shouldSuppress` 체크와 `recordSent` 사이 lock release 구간에서 동일 (Type, Resource) 동시 Send가 둘 다 통과해 webhook 중복 발송 가능. `shouldSuppress` 통과 즉시 lastSent에 placeholder 기록하거나 Send 전체를 하나의 critical section으로 묶기
+- [ ] **gaugeTracker.Report race** — `internal/server/alerts_api.go:89-96` — `inner.Report()` 후 `inner.Degraded()` 사이 다른 goroutine의 Report가 끼어들면 `grainfs_degraded` 게이지 값이 실제 상태와 불일치 가능. Prometheus scrape 타이밍 운에 따라 잘못된 값 노출. gauge 업데이트를 DegradedTracker 내부 lock 안에서 수행하거나 gaugeTracker에 자체 mutex 추가
+- [ ] **lastSent map monotonic growth** — `internal/alerts/webhook.go:86,176-180` — dedup map에서 엔트리 삭제 경로 없음. 현재 호출자는 low-cardinality resource만 쓰지만 invariant가 코드에 없어 미래 회귀 위험. 주기적 cutoff sweep 또는 "Resource는 low-cardinality여야 함" godoc 명시
+- [ ] **startup recovery WalkDir 에러 swallow** — `internal/server/startup_cleanup.go:126-129` — `filepath.WalkDir`의 top-level 에러(root Lstat 실패 등)가 context.Canceled 외엔 nil로 변환되어 손실. `res.Errors`에 기록하거나 return err로 변경
 
 ## Phase 17: Scale-Out
 
