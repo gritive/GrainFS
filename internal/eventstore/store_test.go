@@ -124,3 +124,46 @@ func TestStore_DBNotNil(t *testing.T) {
 	s := eventstore.New(db)
 	assert.NotNil(t, s)
 }
+
+func TestStore_MetadataRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	s := eventstore.New(db)
+
+	now := time.Now()
+	in := eventstore.Event{
+		Type:   "heal",
+		Action: "reconstruct",
+		Bucket: "photos",
+		Key:    "img.jpg",
+		Metadata: map[string]any{
+			"phase":          "reconstruct",
+			"shard_id":       float64(2), // JSON numbers decode as float64
+			"correlation_id": "abc-123",
+			"duration_ms":    float64(140),
+		},
+	}
+	require.NoError(t, s.Append(in))
+
+	got, err := s.Query(now.Add(-time.Second), now.Add(time.Minute), 1, []string{"heal"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "reconstruct", got[0].Metadata["phase"])
+	assert.EqualValues(t, 2, got[0].Metadata["shard_id"])
+	assert.Equal(t, "abc-123", got[0].Metadata["correlation_id"])
+	assert.EqualValues(t, 140, got[0].Metadata["duration_ms"])
+}
+
+func TestStore_NoMetadataOmitsField(t *testing.T) {
+	// Events without Metadata must round-trip cleanly (existing call sites
+	// must not start emitting empty metadata maps).
+	db := newTestDB(t)
+	s := eventstore.New(db)
+
+	now := time.Now()
+	require.NoError(t, s.Append(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut}))
+
+	got, err := s.Query(now.Add(-time.Second), now.Add(time.Minute), 1, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Nil(t, got[0].Metadata)
+}
