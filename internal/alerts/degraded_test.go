@@ -161,12 +161,17 @@ func TestDegradedTracker_OnStateChangeHeldUnderLock(t *testing.T) {
 			// If OnStateChange runs outside the lock, Status() returns fast
 			// and the channel closes before we signal callbackReturning —
 			// test fails.
+			peerStarted := make(chan struct{})
 			go func() {
+				close(peerStarted) // signal liveness BEFORE blocking Status()
 				_ = tr.Status()
 				peerCompleted.Store(true)
 				close(peerSawLock)
 			}()
-			// Give the peer goroutine enough wall-clock to attempt Lock().
+			// Wait for the peer to actually be live before asserting. Without
+			// this, a slow-to-schedule goroutine would make the test read
+			// false for the wrong reason (not started, vs. blocked on lock).
+			<-peerStarted
 			time.Sleep(30 * time.Millisecond)
 			require.False(t, peerCompleted.Load(),
 				"Status() must block while OnStateChange runs (callback must be under lock)")
