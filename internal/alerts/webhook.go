@@ -82,8 +82,25 @@ type Dispatcher struct {
 	opts      Options
 	onFailure FailureCallback
 
-	mu       sync.Mutex
-	lastSent map[string]time.Time // dedup-key → last delivery time
+	mu sync.Mutex
+	// lastSent tracks dedup-key → last delivery timestamp. Entries are
+	// written when a delivery completes (success OR failure — failure-path
+	// recording protects against outage-storm webhook spam) and are read by
+	// claimSend to suppress repeat pages inside the dedup window.
+	//
+	// INVARIANT: Alert.Resource (and thus the dedup key) is expected to be
+	// low-cardinality — node ids, cluster ids, bucket names, small named
+	// sets. Callers that want to dedup on high-cardinality values (per-object
+	// keys, per-request ids) MUST hash or otherwise bound the set first, or
+	// lastSent grows without bound. There is no automatic sweep: the current
+	// production caller set (degraded_hold only) fits trivially in memory.
+	// Revisit if a future high-cardinality caller appears.
+	lastSent map[string]time.Time
+	// inFlight tracks dedup-keys whose delivery is currently in progress
+	// (claimed by claimSend, not yet released). Holding the key here while
+	// HTTP retries run prevents a second concurrent Send with the same key
+	// from bypassing dedup during the unlocked HTTP window.
+	inFlight map[string]struct{}
 }
 
 // NewDispatcher constructs a Dispatcher. An empty url turns Send into a
@@ -112,6 +129,7 @@ func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatc
 		opts:      opts,
 		onFailure: onFailure,
 		lastSent:  map[string]time.Time{},
+		inFlight:  map[string]struct{}{},
 	}
 }
 
@@ -129,9 +147,15 @@ func (d *Dispatcher) Send(a Alert) error {
 		a.Time = d.opts.Clock()
 	}
 
-	if d.shouldSuppress(a) {
+	key := dedupKey(a)
+	if !d.claimSend(key) {
 		return nil
 	}
+	// defer guarantees release even if the HTTP transport or marshal path
+	// panics — without it, a panic would leave inFlight holding the key
+	// permanently and silently drop every future alert of this type/resource
+	// until the process restarts.
+	defer d.releaseInFlight(key)
 
 	body, err := json.Marshal(slackPayload(a))
 	if err != nil {
@@ -145,7 +169,6 @@ func (d *Dispatcher) Send(a Alert) error {
 		}
 		lastErr = d.deliver(body)
 		if lastErr == nil {
-			d.recordSent(a)
 			return nil
 		}
 	}
@@ -156,27 +179,41 @@ func (d *Dispatcher) Send(a Alert) error {
 	return lastErr
 }
 
-// shouldSuppress reports whether an identical alert was sent inside the
-// dedup window. Dedup key is (Type, Resource); Severity intentionally NOT
+// claimSend atomically checks dedup state and reserves the key for delivery.
+// Returns true iff the caller owns this alert's delivery. False means either
+// (a) a prior delivery is still in-flight, or (b) a prior delivery landed
+// inside the dedup window. Dedup key is (Type, Resource); Severity is NOT
 // part of the key so a warning→critical escalation is NOT suppressed.
-func (d *Dispatcher) shouldSuppress(a Alert) bool {
-	if d.opts.DedupWindow <= 0 {
-		return false
-	}
-	key := dedupKey(a)
+func (d *Dispatcher) claimSend(key string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	last, ok := d.lastSent[key]
-	if !ok {
+	if _, busy := d.inFlight[key]; busy {
 		return false
 	}
-	return d.opts.Clock().Sub(last) < d.opts.DedupWindow
+	if d.opts.DedupWindow > 0 {
+		if last, ok := d.lastSent[key]; ok {
+			if d.opts.Clock().Sub(last) < d.opts.DedupWindow {
+				return false
+			}
+		}
+	}
+	d.inFlight[key] = struct{}{}
+	return true
 }
 
-func (d *Dispatcher) recordSent(a Alert) {
+// releaseInFlight drops the in-flight reservation and records the delivery
+// time for future dedup. Records on BOTH success and failure so an outage
+// storm (repeated 5xx from the receiver) doesn't produce webhook spam — the
+// failed delivery is one page's worth of signal and the dedup window should
+// still throttle follow-up pages for the same condition. The AlertsState
+// Force Resend path remains available for operator-driven retry.
+func (d *Dispatcher) releaseInFlight(key string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.lastSent[dedupKey(a)] = d.opts.Clock()
+	delete(d.inFlight, key)
+	if d.opts.DedupWindow > 0 {
+		d.lastSent[key] = d.opts.Clock()
+	}
 }
 
 func dedupKey(a Alert) string {
