@@ -20,6 +20,7 @@
 ## Phase 17: Scale-Out
 
 - [ ] Sharding, multi raft
+- [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
 - [ ] Migration: NFS virtual overlay
 - [ ] Migration: NBD block proxying
 - [ ] nbd over internet for edge computing (powered by wireguard)
