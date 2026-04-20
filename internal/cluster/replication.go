@@ -20,6 +20,10 @@ type RepairPlan struct {
 
 // ReplicationMonitor tracks which nodes hold replicas of each object
 // and identifies under-replicated keys.
+//
+// TODO(phase18): currently 0 production callers; will be renamed to
+// ShardPlacementMonitor and wired to Raft FSM ownership map in Cluster EC work.
+// See ~/.gstack/projects/gritive-grains/whitekid-master-design-20260421-024627.md
 type ReplicationMonitor struct {
 	mu       sync.RWMutex
 	desired  int

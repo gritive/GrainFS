@@ -61,7 +61,26 @@
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 - [ ] **Raft quorum lost alert** — *zero ops* — critical alert channel로 즉시 경고; 자동 re-election 시도 로직
 
-## Phase 18: Performance
+## Phase 18: Cluster EC
+
+설계: `~/.gstack/projects/gritive-grains/whitekid-master-design-20260421-024627.md` (Office-hours 2026-04-21)
+
+**동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
+
+**단계별 실행**:
+- [ ] **Stage 0**: 15분 balancer-migration 실험 (코드 리뷰로 완료 — fail-loud, 데이터 안전 확인)
+- [ ] **Stage 1**: 거짓말 제거 (ROADMAP/README/주석)
+- [ ] **Stage 2**: 48h de-risk 스파이크 (`internal/cluster/ecspike/`, LOC<500, 단일 host multi-process)
+- [ ] **Stage 3**: Phase 18 풀 구현 (스파이크 go 판정 시, 4~6주)
+
+**Stage 3 선결 과제**:
+- [ ] Raft FSM v1→v2 변환 전략 + 롤백 경로 설계
+- [ ] Min-node=6 → `k+m` 파라미터화
+- [ ] N×→EC 백그라운드 re-placement의 concurrent PUT/GET 일관성 계약
+- [ ] HealReceipt 스키마 변경 범위 분석
+- [ ] Write-all vs write-majority tail latency 트레이드오프 재검토
+
+## Phase 19: Performance
 
 - [ ] sendfile syscall (SetBodyStream 완료, syscall 미구현)
 - [ ] hertz: Zero-copy Read/Write
@@ -76,7 +95,7 @@
 - [ ] PGO
 - [ ] **Predictive resource warnings** — *zero ops* — 디스크 사용률/증가율, BadgerDB value log 크기, goroutine/FD 추세 추적하고 임계 도달 전 경고 (dashboard + log)
 
-## Phase 19: Protocol Extensions
+## Phase 20: Protocol Extensions
 
 - [ ] Redis 프로토콜 지원 (RESP, Streaming, Pub/Sub 이벤트)
 - [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원

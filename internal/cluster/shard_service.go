@@ -46,6 +46,12 @@ func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Messa
 }
 
 // WriteShard sends a shard to a remote node for storage.
+//
+// NOTE: In cluster mode, PutObject calls this with shardIdx=0 and the full object
+// (N× full-replication). migration_executor iterates shardIdx 0..N-1 but only
+// shard_0 actually exists on peers, so balancer-triggered migration currently
+// fails at ReadShard(idx>=1) — data remains safe (FSM atomic cancel).
+// Phase 18 Cluster EC will use real shardIdx routing per Reed-Solomon split.
 func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
 	payload := marshalEnvelope("WriteShard", marshalShardRequest(bucket, key, int32(shardIdx), data))
 	msg := &transport.Message{Type: transport.StreamData, Payload: payload}
