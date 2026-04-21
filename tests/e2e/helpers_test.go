@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,14 +69,26 @@ func newS3Client(endpoint string) *s3.Client {
 	})
 }
 
+// portCounter hands out unique ports to avoid TOCTOU races when multiple tests
+// allocate ports concurrently. Starts at 20000 and wraps at 59999.
+var portCounter atomic.Int32
+
+func init() { portCounter.Store(20000) }
+
 func freePort() int {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		panic(err)
+	for {
+		p := int(portCounter.Add(1))
+		if p > 59999 {
+			portCounter.Store(20000)
+			p = 20001
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err != nil {
+			continue
+		}
+		l.Close()
+		return p
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port
 }
 
 func waitForPort(port int, timeout time.Duration) {
