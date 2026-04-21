@@ -67,13 +67,16 @@
 
 **동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
 
-**단계별 실행**:
-- [ ] **Stage 0**: 15분 balancer-migration 실험 (코드 리뷰로 완료 — fail-loud, 데이터 안전 확인)
-- [ ] **Stage 1**: 거짓말 제거 (ROADMAP/README/주석)
-- [ ] **Stage 2**: 48h de-risk 스파이크 (`internal/cluster/ecspike/`, LOC<500, 단일 host multi-process)
-- [ ] **Stage 3**: Phase 18 풀 구현 (스파이크 go 판정 시, 4~6주)
+**단계별 실행** (Stage 0-2 완료, CONDITIONAL GO 판정):
+- Stage 0: 코드 리뷰로 완료 — fail-loud, 데이터 안전 확인 ✅
+- Stage 1: ROADMAP/README/주석 정직화 완료 ✅
+- Stage 2: ecspike spike 완료 (`1bc15ba`) — LOC 219, 10/10 재구성 정확도, p95 904ms (nested EC 오버헤드 포함) ✅
 
-**Stage 3 선결 과제**:
+**Stage 3 진입 선결 과제** (CONDITIONAL GO 조건):
+- `--ec=false` raw shard p95 재측정 — p95 53.5ms (임계값 500ms의 9.3×), PASS ✅
+- [ ] **Placement map 설계 확정** — Consistent Hashing vs Raft FSM map 선택 → Stage 3 WBS Week 1~2 범위 결정. `/plan-eng-review` Phase 18 상세 리뷰 시 해결.
+
+**Stage 3 선결 과제** (Phase 18 풀 구현 시작 전):
 - [ ] Raft FSM v1→v2 변환 전략 + 롤백 경로 설계
 - [ ] Min-node=6 → `k+m` 파라미터화
 - [ ] N×→EC 백그라운드 re-placement의 concurrent PUT/GET 일관성 계약
