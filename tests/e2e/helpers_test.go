@@ -50,8 +50,8 @@ func TestMain(m *testing.M) {
 
 	testServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
 	testNFSPort = nfsPort
-	waitForPort(port, 5*time.Second)
-	waitForPort(nfsPort, 5*time.Second)
+	waitForPortM(port, 5*time.Second)
+	waitForPortM(nfsPort, 5*time.Second)
 
 	testS3Client = newS3Client(testServerURL)
 
@@ -91,7 +91,8 @@ func freePort() int {
 	}
 }
 
-func waitForPort(port int, timeout time.Duration) {
+func waitForPort(t testing.TB, port int, timeout time.Duration) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
@@ -101,7 +102,22 @@ func waitForPort(port int, timeout time.Duration) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	panic(fmt.Sprintf("server did not start on port %d within %v", port, timeout))
+	t.Fatalf("server did not start on port %d within %v", port, timeout)
+}
+
+// waitForPortM is the TestMain variant of waitForPort — no *testing.T available there.
+func waitForPortM(port int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	fmt.Fprintf(os.Stderr, "server did not start on port %d within %v\n", port, timeout)
+	os.Exit(1)
 }
 
 // createBucket creates a bucket for testing and returns a cleanup function.

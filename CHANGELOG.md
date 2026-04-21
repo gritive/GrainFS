@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.4.2] - 2026-04-22
+
+### Changed
+
+- **Phase 18 Stage 0-2 완료 및 CONDITIONAL GO 검증**: `TestECSpike_RawShardP95` 추가 — `--ec=false --no-encryption` 6-node 클러스터에서 raw shard p95 측정. 결과 53.5ms (임계값 500ms의 9.3×), Phase 18 Stage 3 진입 가능 판정
+- **ecspike 클러스터 헬퍼 리팩터**: `startEcspikeCluster` → `startEcspikeClusterOpts(t, noEC bool)` 파라미터화, `startEcspikeClusterNoEC` 추가
+- **TODOS.md 정리**: Phase 18 Stage 0-2 완료 항목 제거, Stage 3 진입 선결 과제 명확화
+
 ## [0.0.4.1] - 2026-04-21
 
 ### Added
