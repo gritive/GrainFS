@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.4.1] - 2026-04-21
+
+### Added
+
+- **`storage.Snapshotable` 인터페이스 구현** on `DistributedBackend`:
+  - `ListAllObjects()` — BadgerDB `lat:` 포인터 인덱스로 모든 bucket의 live(non-tombstone) 객체 열거
+  - `RestoreObjects()` — 스냅샷 외 객체 메타데이터 하드-삭제 후 스냅샷 객체 Raft propose 재적용; blob 없는 객체는 `StaleBlob`으로 반환
+  - `blobExists()` — versioned path / EC shard / legacy unversioned path 순서로 blob 존재 확인; 빈 versionID는 `lat:` 포인터로 자동 resolve
+  - `internal/cluster/snapshotable_test.go` 8개 단위 테스트 (커버리지 78~84%)
+- **Snapshotable 기반 e2e 테스트 활성화**: `TestAutoSnapshot_*`, `TestPITR_*`, `TestSnapshot_*` 의 `t.Skip` 제거
+
+### Fixed
+
+- **e2e 포트 TOCTOU 경합 제거**: `freePort()`를 `sync/atomic` 카운터 방식으로 교체, listen-then-close 창을 없애 `TestE2E_ClusterEC_FallbackToNx_3Node` / `TestE2E_HealReceiptAPI_3Node` 간헐적 실패 해소
+
 ## [0.0.4.0] - 2026-04-21
 
 ### Changed

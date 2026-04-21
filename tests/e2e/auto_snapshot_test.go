@@ -16,7 +16,6 @@ import (
 // TestAutoSnapshot_CreatesSnapshotAutomatically verifies that when started with
 // --snapshot-interval, the server creates snapshots automatically.
 func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
-	t.Skip("DistributedBackend storage.Snapshotable port is a follow-up (tracked in TODOS v0.0.4.0)")
 	binary := getBinary()
 	dir, err := os.MkdirTemp("", "grainfs-autosnap-e2e-*")
 	require.NoError(t, err)
