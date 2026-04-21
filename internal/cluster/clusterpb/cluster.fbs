@@ -23,11 +23,21 @@ table PutObjectMetaCmd {
   content_type:string;
   etag:string;
   mod_time:int64;
+  version_id:string;
 }
 
 table DeleteObjectCmd {
   bucket:string;
   key:string;
+  version_id:string;
+}
+
+// DeleteObjectVersionCmd hard-deletes a specific version (no tombstone).
+// Used by lifecycle/scrubber to purge expired versions.
+table DeleteObjectVersionCmd {
+  bucket:string;
+  key:string;
+  version_id:string;
 }
 
 table CreateMultipartUploadCmd {
@@ -46,6 +56,7 @@ table CompleteMultipartCmd {
   content_type:string;
   etag:string;
   mod_time:int64;
+  version_id:string;
 }
 
 table AbortMultipartCmd {

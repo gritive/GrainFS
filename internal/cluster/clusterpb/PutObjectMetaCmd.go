@@ -97,8 +97,16 @@ func (rcv *PutObjectMetaCmd) MutateModTime(n int64) bool {
 	return rcv._tab.MutateInt64Slot(14, n)
 }
 
+func (rcv *PutObjectMetaCmd) VersionId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(7)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -117,6 +125,9 @@ func PutObjectMetaCmdAddEtag(builder *flatbuffers.Builder, etag flatbuffers.UOff
 }
 func PutObjectMetaCmdAddModTime(builder *flatbuffers.Builder, modTime int64) {
 	builder.PrependInt64Slot(5, modTime, 0)
+}
+func PutObjectMetaCmdAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(versionId), 0)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

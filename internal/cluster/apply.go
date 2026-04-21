@@ -18,8 +18,8 @@ type FSM struct {
 
 	// Optional hooks for Phase 13 balancer. Nil when no peers configured/non-balancer mode.
 	// onMigrateShard is a buffered channel; Apply sends non-blocking to avoid blocking the Raft apply loop.
-	onMigrateShard  chan<- MigrationTask
-	commitNotifier  interface {
+	onMigrateShard chan<- MigrationTask
+	commitNotifier interface {
 		NotifyCommit(bucket, key, versionID string)
 	}
 	balancerNotifier interface {
@@ -81,19 +81,41 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applyPutShardPlacement(cmd.Data)
 	case CmdDeleteShardPlacement:
 		return f.applyDeleteShardPlacement(cmd.Data)
+	case CmdDeleteObjectVersion:
+		return f.applyDeleteObjectVersion(cmd.Data)
 	default:
 		slog.Warn("fsm: unknown command type", "type", cmd.Type)
 		return nil
 	}
 }
 
-func bucketKey(bucket string) []byte       { return []byte("bucket:" + bucket) }
-func bucketPolicyKey(bucket string) []byte { return []byte("policy:" + bucket) }
+func bucketKey(bucket string) []byte          { return []byte("bucket:" + bucket) }
+func bucketPolicyKey(bucket string) []byte    { return []byte("policy:" + bucket) }
 func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
-func multipartKey(uploadID string) []byte     { return []byte("mpu:" + uploadID) }
+
+// objectMetaKeyV returns the per-version metadata key:
+//
+//	obj:{bucket}/{key}/{versionID}
+//
+// Coexists with the legacy latest-only objectMetaKey during the transition.
+func objectMetaKeyV(bucket, key, versionID string) []byte {
+	return []byte("obj:" + bucket + "/" + key + "/" + versionID)
+}
+
+// latestKey points to the current latest version id for an object, or the
+// literal "DEL" marker when the object has been tombstoned (soft-deleted).
+func latestKey(bucket, key string) []byte {
+	return []byte("lat:" + bucket + "/" + key)
+}
+
+func multipartKey(uploadID string) []byte { return []byte("mpu:" + uploadID) }
 func shardPlacementKey(bucket, key string) []byte {
 	return []byte("placement:" + bucket + "/" + key)
 }
+
+// deleteMarkerETag is the sentinel ETag we store on a tombstone (soft-delete).
+// Used by callers to distinguish a real object version from a delete marker.
+const deleteMarkerETag = "DEL"
 
 func (f *FSM) applyCreateBucket(data []byte) error {
 	c, err := decodeCreateBucketCmd(data)
@@ -131,7 +153,22 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objectMetaKey(c.Bucket, c.Key), meta)
+		// Dual-write: keep the legacy latest-only key in sync during the transition
+		// so readers that haven't been ported yet still see the object.
+		if err := txn.Set(objectMetaKey(c.Bucket, c.Key), meta); err != nil {
+			return err
+		}
+		// Versioned entries are only written when a VersionID is supplied. Legacy
+		// replay (empty VersionID) gets the single legacy key only.
+		if c.VersionID != "" {
+			if err := txn.Set(objectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
+				return err
+			}
+			if err := txn.Set(latestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -140,14 +177,111 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 	if err != nil {
 		return err
 	}
+	// VersionID == "" is a legacy DeleteObjectCmd (no version ID attached by the
+	// proposer). Treat it as a hard delete of the legacy latest-only records —
+	// preserves prior semantics for pre-versioning log replay.
+	if c.VersionID == "" {
+		return f.db.Update(func(txn *badger.Txn) error {
+			if err := txn.Delete(objectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
+			if err := txn.Delete(shardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
+			return nil
+		})
+	}
+
+	// Tombstone (soft-delete): write a delete marker as a new version and
+	// flip the latest pointer at it. Prior versions remain addressable via
+	// GetObjectVersion.
+	markerMeta, err := marshalObjectMeta(objectMeta{
+		Key:          c.Key,
+		Size:         0,
+		ContentType:  "",
+		ETag:         deleteMarkerETag,
+		LastModified: 0,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal delete marker: %w", err)
+	}
 	return f.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(objectMetaKeyV(c.Bucket, c.Key, c.VersionID), markerMeta); err != nil {
+			return err
+		}
+		if err := txn.Set(latestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+			return err
+		}
+		// Legacy latest-only key is removed so HeadObject returns 404 while prior
+		// versions remain queryable via GetObjectVersion. Placement records are
+		// removed too — the data is no longer addressable as the latest version.
 		if err := txn.Delete(objectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
 			return err
 		}
-		// Cascade to shard placement if present (Phase 18 Cluster EC). ErrKeyNotFound
-		// is expected for N×-replication objects with no placement record.
 		if err := txn.Delete(shardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
 			return err
+		}
+		return nil
+	})
+}
+
+// applyDeleteObjectVersion hard-deletes one specific version and, if it was the
+// latest, recomputes the latest pointer from the remaining versions (ULIDs sort
+// lexicographically by time, so the max-sorted key wins).
+func (f *FSM) applyDeleteObjectVersion(data []byte) error {
+	c, err := decodeDeleteObjectVersionCmd(data)
+	if err != nil {
+		return err
+	}
+	metaKey := objectMetaKeyV(c.Bucket, c.Key, c.VersionID)
+	latKey := latestKey(c.Bucket, c.Key)
+
+	return f.db.Update(func(txn *badger.Txn) error {
+		if _, gerr := txn.Get(metaKey); gerr == badger.ErrKeyNotFound {
+			return nil // idempotent
+		} else if gerr != nil {
+			return gerr
+		}
+		if derr := txn.Delete(metaKey); derr != nil {
+			return derr
+		}
+
+		// If the deleted version was the latest, find the new latest by scanning
+		// remaining versioned keys and picking the max (ULID sorts by time ASC).
+		if latItem, gerr := txn.Get(latKey); gerr == nil {
+			var current string
+			_ = latItem.Value(func(v []byte) error { current = string(v); return nil })
+			if current == c.VersionID {
+				newLatest := ""
+				prefix := []byte("obj:" + c.Bucket + "/" + c.Key + "/")
+				it := txn.NewIterator(badger.DefaultIteratorOptions)
+				for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+					k := string(it.Item().Key())
+					vid := k[len(prefix):]
+					if vid == "" || vid == c.VersionID {
+						continue
+					}
+					if vid > newLatest {
+						newLatest = vid
+					}
+				}
+				it.Close()
+				if newLatest == "" {
+					if derr := txn.Delete(latKey); derr != nil && derr != badger.ErrKeyNotFound {
+						return derr
+					}
+					// No versions left — drop legacy latest-only key as well.
+					if derr := txn.Delete(objectMetaKey(c.Bucket, c.Key)); derr != nil && derr != badger.ErrKeyNotFound {
+						return derr
+					}
+				} else {
+					if derr := txn.Set(latKey, []byte(newLatest)); derr != nil {
+						return derr
+					}
+				}
+			}
+		} else if gerr != badger.ErrKeyNotFound {
+			return gerr
 		}
 		return nil
 	})
@@ -185,8 +319,17 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
+		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
 		if err := txn.Set(objectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
 			return err
+		}
+		if c.VersionID != "" {
+			if err := txn.Set(objectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
+				return err
+			}
+			if err := txn.Set(latestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+				return err
+			}
 		}
 		return txn.Delete(multipartKey(c.UploadID))
 	})
