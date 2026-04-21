@@ -537,6 +537,25 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	var backend storage.Backend = cachedBackend
 
+	// Slice 5 of refactor/unify-storage-paths: wrap with WAL so object-level
+	// mutations are captured for PITR. Raft log covers metadata consistency;
+	// WAL covers PUT/DELETE/CompleteMultipart replay at the object layer. WAL
+	// sits outside the read cache so every mutation is recorded before the
+	// cache invalidation races the next request — same ordering as runLocalNode.
+	//
+	// TODO(slice-8+): wire snapshot.NewManager for cluster PITR restore.
+	// DistributedBackend does not yet implement storage.Snapshotable
+	// (RestoreObjects requires Raft proposals). Until then WAL entries are
+	// written but PITRRestore is only exercised via unit replay; operator
+	// restore remains a follow-up.
+	walDir := filepath.Join(dataDir, "wal")
+	w, err := wal.Open(walDir)
+	if err != nil {
+		return fmt.Errorf("open WAL: %w", err)
+	}
+	defer w.Close()
+	backend = wal.NewBackend(backend, w)
+
 	// Auto-create "default" bucket on startup. In cluster mode this must
 	// wait for Raft to elect a leader before the proposal can commit.
 	// Retry for up to 30s with backoff so the first node's boot does not

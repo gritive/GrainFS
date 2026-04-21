@@ -17,11 +17,19 @@ import (
 )
 
 const (
-	fileMagic   = uint32(0x57414C31) // "WAL1"
-	fileVersion = uint32(1)
+	fileMagic = uint32(0x57414C31) // "WAL1"
 
-	OpPut    = byte(0)
-	OpDelete = byte(1)
+	// fileVersionV1 is the legacy wire format (no VersionID field).
+	fileVersionV1 = uint32(1)
+	// fileVersionV2 adds VersionID to each entry so PITR can replay
+	// object-level version history across Put/Delete/DeleteVersion.
+	fileVersionV2 = uint32(2)
+	// fileVersion is the version written by new segments.
+	fileVersion = fileVersionV2
+
+	OpPut           = byte(0)
+	OpDelete        = byte(1)
+	OpDeleteVersion = byte(2)
 
 	maxSegmentBytes   = 64 * 1024 * 1024 // 64 MB
 	maxSegmentEntries = 10_000
@@ -38,6 +46,10 @@ type Entry struct {
 	ETag        string
 	ContentType string
 	Size        int64
+	// VersionID is the object version associated with the mutation.
+	// Empty for legacy (fileVersionV1) entries and for operations that do not
+	// carry a version (e.g. backends without versioning).
+	VersionID string
 }
 
 // WAL manages append-only log files in dir.
@@ -45,10 +57,10 @@ type Entry struct {
 type WAL struct {
 	dir string
 
-	mu         sync.Mutex
-	file       *os.File
-	fileBytes  int
-	fileCount  int
+	mu        sync.Mutex
+	file      *os.File
+	fileBytes int
+	fileCount int
 
 	ch   chan Entry
 	done chan struct{}
@@ -270,13 +282,14 @@ func replayFile(path string, fromSeq uint64, targetNs int64, fn func(Entry)) (in
 	}
 	defer f.Close()
 
-	if err := readHeader(f); err != nil {
+	ver, err := readHeader(f)
+	if err != nil {
 		return 0, err
 	}
 
 	var count int
 	for {
-		e, err := unmarshalEntry(f)
+		e, err := unmarshalEntry(f, ver)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
@@ -301,12 +314,13 @@ func lastSeqInFile(path string) (uint64, error) {
 		return 0, err
 	}
 	defer f.Close()
-	if err := readHeader(f); err != nil {
+	ver, err := readHeader(f)
+	if err != nil {
 		return 0, err
 	}
 	var lastSeq uint64
 	for {
-		e, err := unmarshalEntry(f)
+		e, err := unmarshalEntry(f, ver)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
@@ -328,29 +342,35 @@ func writeHeader(w io.Writer) error {
 	return err
 }
 
-func readHeader(r io.Reader) error {
+// readHeader reads and validates the segment header. Returns the wire version
+// so the caller can dispatch per-entry decoding appropriately.
+func readHeader(r io.Reader) (uint32, error) {
 	buf := make([]byte, 8)
 	if _, err := io.ReadFull(r, buf); err != nil {
-		return fmt.Errorf("wal: read header: %w", err)
+		return 0, fmt.Errorf("wal: read header: %w", err)
 	}
 	if binary.BigEndian.Uint32(buf[0:4]) != fileMagic {
-		return fmt.Errorf("wal: invalid magic")
+		return 0, fmt.Errorf("wal: invalid magic")
 	}
-	if binary.BigEndian.Uint32(buf[4:8]) != fileVersion {
-		return fmt.Errorf("wal: unsupported version")
+	v := binary.BigEndian.Uint32(buf[4:8])
+	if v != fileVersionV1 && v != fileVersionV2 {
+		return 0, fmt.Errorf("wal: unsupported version %d", v)
 	}
-	return nil
+	return v, nil
 }
 
 // marshalEntry writes an entry in binary format and returns bytes written.
-// Format: [8:seq][8:ts][1:op][2:bucket_len][bucket][2:key_len][key][2:etag_len][etag][2:ct_len][ct][8:size]
+// Format (v1): [8:seq][8:ts][1:op][2:bucket_len][bucket][2:key_len][key][2:etag_len][etag][2:ct_len][ct][8:size]
+// Format (v2): v1 fields + [2:versionid_len][versionid]
+// New segments always use v2.
 func marshalEntry(w io.Writer, e Entry) (int, error) {
 	bucket := []byte(e.Bucket)
 	key := []byte(e.Key)
 	etag := []byte(e.ETag)
 	ct := []byte(e.ContentType)
+	vid := []byte(e.VersionID)
 
-	size := 8 + 8 + 1 + 2 + len(bucket) + 2 + len(key) + 2 + len(etag) + 2 + len(ct) + 8
+	size := 8 + 8 + 1 + 2 + len(bucket) + 2 + len(key) + 2 + len(etag) + 2 + len(ct) + 8 + 2 + len(vid)
 	buf := make([]byte, size)
 	off := 0
 
@@ -377,12 +397,18 @@ func marshalEntry(w io.Writer, e Entry) (int, error) {
 	copy(buf[off:], ct)
 	off += len(ct)
 	binary.BigEndian.PutUint64(buf[off:], uint64(e.Size))
+	off += 8
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(vid)))
+	off += 2
+	copy(buf[off:], vid)
 
 	n, err := w.Write(buf)
 	return n, err
 }
 
-func unmarshalEntry(r io.Reader) (Entry, error) {
+// unmarshalEntry reads an entry in the given wire version.
+// v1 returns empty VersionID; v2 reads the trailing VersionID field.
+func unmarshalEntry(r io.Reader, wireVer uint32) (Entry, error) {
 	var fixed [8 + 8 + 1]byte
 	if _, err := io.ReadFull(r, fixed[:]); err != nil {
 		return Entry{}, err
@@ -428,5 +454,11 @@ func unmarshalEntry(r io.Reader) (Entry, error) {
 		return e, err
 	}
 	e.Size = int64(binary.BigEndian.Uint64(sizeBuf[:]))
+
+	if wireVer >= fileVersionV2 {
+		if e.VersionID, err = readStr(); err != nil {
+			return e, err
+		}
+	}
 	return e, nil
 }
