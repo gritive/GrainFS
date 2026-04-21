@@ -18,16 +18,19 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
-	"github.com/oklog/ulid/v2"
 
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// newVersionID returns a fresh ULID string for use as an object VersionID.
-// ULIDs sort lexicographically by time ASC — ListObjectVersions reverses to DESC.
+// newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
+// UUIDv7 is k-sortable by millisecond timestamp; ListObjectVersions reverses to DESC.
 func newVersionID() string {
-	return ulid.MustNewDefault(time.Now()).String()
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.NewString()
+	}
+	return id.String()
 }
 
 // OnApplyFunc is called after FSM.Apply() with the command type, bucket, and key.
