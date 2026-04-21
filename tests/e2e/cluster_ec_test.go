@@ -89,7 +89,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--cluster-ec=true",
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--ec=false", // disable solo-mode EC (nested EC adds noise)
+			"--ec=false", // disable local EC (nested EC adds noise)
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",

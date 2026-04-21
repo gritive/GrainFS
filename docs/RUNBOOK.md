@@ -140,7 +140,7 @@ Expected: Version string matches expected deployment version
 
 ### Step 4: Start GrainFS
 
-**Solo mode:**
+**Local mode:**
 ```bash
 grainfs serve \
   --data $GRAINFS_DATA_DIR \

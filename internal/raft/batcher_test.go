@@ -117,8 +117,8 @@ func (m *mockStore) SaveSnapshot(index, term uint64, data []byte) error { return
 func (m *mockStore) LoadSnapshot() (uint64, uint64, []byte, error)       { return 0, 0, nil, nil }
 func (m *mockStore) Close() error                                         { return nil }
 
-// newSoloLeader creates a solo node that becomes leader quickly, for batcher tests.
-func newSoloLeader(t *testing.T, store ...LogStore) *Node {
+// newSingletonLeader creates a single-peer node that becomes leader quickly, for batcher tests.
+func newSingletonLeader(t *testing.T, store ...LogStore) *Node {
 	t.Helper()
 	cfg := DefaultConfig("node1", nil)
 	cfg.ElectionTimeout = 50 * time.Millisecond
@@ -149,7 +149,7 @@ func newSoloLeader(t *testing.T, store ...LogStore) *Node {
 // reduces the number of AppendEntries (persist) calls below 100.
 func TestBatcher_HighLoad(t *testing.T) {
 	store := newMockStore()
-	node := newSoloLeader(t, store)
+	node := newSingletonLeader(t, store)
 
 	const N = 100
 	ctx := context.Background()
@@ -190,7 +190,7 @@ func TestBatcher_HighLoad(t *testing.T) {
 // TestBatcher_LowLoad verifies that a single proposal at low load flushes within 1ms
 // and that the node reports low-load adaptive metrics (batchTimeout = 100µs).
 func TestBatcher_LowLoad(t *testing.T) {
-	node := newSoloLeader(t)
+	node := newSingletonLeader(t)
 
 	ctx := context.Background()
 	start := time.Now()

@@ -1076,7 +1076,7 @@ func toHTTPRequest(c *app.RequestContext) *http.Request {
 
 func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 	status := map[string]any{
-		"mode":                 "solo",
+		"mode":                 "local",
 		"split_brain_suspected": false,
 	}
 
@@ -1093,7 +1093,7 @@ func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 	c.Data(consts.StatusOK, "application/json", data)
 }
 
-// joinClusterHandler handles POST /api/cluster/join for runtime solo→cluster transition.
+// joinClusterHandler handles POST /api/cluster/join for runtime local→cluster transition.
 func (s *Server) joinClusterHandler(_ context.Context, c *app.RequestContext) {
 	if s.joinCluster == nil {
 		writeXMLError(c, consts.StatusConflict, "InvalidRequest", "server is already in cluster mode or join not supported")

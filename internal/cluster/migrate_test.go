@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupSoloData creates a solo-mode data directory with metadata in BadgerDB,
+// setupLegacyData creates a legacy (pre-cluster) data directory with metadata in BadgerDB,
 // simulating what a Phase 1 LocalBackend would have produced.
-func setupSoloData(t *testing.T, dir string, buckets []string, objects map[string]map[string][]byte) {
+func setupLegacyData(t *testing.T, dir string, buckets []string, objects map[string]map[string][]byte) {
 	t.Helper()
 
 	metaDir := filepath.Join(dir, "meta")
@@ -68,15 +68,15 @@ func setupSoloData(t *testing.T, dir string, buckets []string, objects map[strin
 	require.NoError(t, db.Close())
 }
 
-func TestMigrateSoloToCluster_Basic(t *testing.T) {
+func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 	dir := t.TempDir()
 
-	setupSoloData(t, dir, []string{"docs", "images"}, map[string]map[string][]byte{
+	setupLegacyData(t, dir, []string{"docs", "images"}, map[string]map[string][]byte{
 		"docs":   {"readme.md": []byte("# Hello"), "guide.txt": []byte("guide content")},
 		"images": {"logo.png": []byte("PNG fake data")},
 	})
 
-	err := MigrateSoloToCluster(dir, "node-1")
+	err := MigrateLegacyMetaToCluster(dir, "node-1")
 	require.NoError(t, err)
 
 	// Verify Raft log was created
@@ -120,24 +120,24 @@ func TestMigrateSoloToCluster_Basic(t *testing.T) {
 	assert.Equal(t, 3, objCount)
 }
 
-func TestMigrateSoloToCluster_EmptyData(t *testing.T) {
+func TestMigrateLegacyMetaToCluster_EmptyData(t *testing.T) {
 	dir := t.TempDir()
 
-	setupSoloData(t, dir, nil, nil)
+	setupLegacyData(t, dir, nil, nil)
 
-	err := MigrateSoloToCluster(dir, "node-1")
+	err := MigrateLegacyMetaToCluster(dir, "node-1")
 	require.NoError(t, err)
 }
 
-func TestMigrateSoloToCluster_NoMetaDir(t *testing.T) {
+func TestMigrateLegacyMetaToCluster_NoMetaDir(t *testing.T) {
 	dir := t.TempDir()
 
-	err := MigrateSoloToCluster(dir, "node-1")
+	err := MigrateLegacyMetaToCluster(dir, "node-1")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "metadata directory not found")
 }
 
-func TestMigrateSoloToCluster_ManyObjects(t *testing.T) {
+func TestMigrateLegacyMetaToCluster_ManyObjects(t *testing.T) {
 	dir := t.TempDir()
 
 	objects := make(map[string][]byte)
@@ -146,10 +146,10 @@ func TestMigrateSoloToCluster_ManyObjects(t *testing.T) {
 		objects[key] = []byte("content")
 	}
 
-	setupSoloData(t, dir, []string{"bucket"}, map[string]map[string][]byte{
+	setupLegacyData(t, dir, []string{"bucket"}, map[string]map[string][]byte{
 		"bucket": objects,
 	})
 
-	err := MigrateSoloToCluster(dir, "node-1")
+	err := MigrateLegacyMetaToCluster(dir, "node-1")
 	require.NoError(t, err)
 }

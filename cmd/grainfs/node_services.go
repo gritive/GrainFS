@@ -1,13 +1,13 @@
 package main
 
 // node_services.go wires the universal "node services" (NFS v3, NFSv4, NBD)
-// onto any storage.Backend. Both the legacy solo dispatch and cluster mode
+// onto any storage.Backend. Both the legacy local dispatch and cluster mode
 // call startNodeServices so NFS/NFSv4/NBD are available regardless of which
 // storage topology the operator picked.
 //
 // Services NOT covered here — scrubber, lifecycle worker, auto-snapshotter —
 // are hard-coupled to internal/erasure.ECBackend or the WAL layer and live in
-// the solo-specific path until a follow-up PR integrates them into cluster
+// the local-specific path until a follow-up PR integrates them into cluster
 // mode's DistributedBackend.
 
 import (

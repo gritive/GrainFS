@@ -575,7 +575,7 @@ func makeNodeWithMatchIndex(id string, peers []string, matchMap map[string]uint6
 	return n
 }
 
-func TestQuorumMinMatchIndex_Solo(t *testing.T) {
+func TestQuorumMinMatchIndex_Singleton(t *testing.T) {
 	n := makeNodeWithMatchIndex("A", nil, map[string]uint64{"A": 42})
 	assert.Equal(t, uint64(42), n.QuorumMinMatchIndex())
 }

@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ecspikeNode is one of the 6 grainfs solo-mode processes used by the spike.
+// ecspikeNode is one of the 6 grainfs local processes used by the spike.
 type ecspikeNode struct {
 	port     int
 	endpoint string
@@ -33,7 +33,7 @@ func (n *ecspikeNode) kill() {
 	}
 }
 
-// startEcspikeCluster spawns 6 independent grainfs serve processes in solo mode
+// startEcspikeCluster spawns 6 independent grainfs serve processes in local mode
 // on loopback. Returns the node list and a cleanup func. Uses existing test
 // harness helpers (freePort, waitForPort, newS3Client).
 func startEcspikeCluster(t *testing.T) ([]*ecspikeNode, func()) {

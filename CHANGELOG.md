@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.3.1] - 2026-04-21
+
+### Changed
+
+- **"solo" 용어 코드베이스에서 완전 제거** — 함수/변수/타입/테스트 이름, 주석, 로그 메시지, UI 문구, 문서에서 모두 삭제. GrainFS는 이제 오직 **cluster mode** 하나로 존재. `--peers=""`는 "no-peers 모드"(로컬 저장소 경로)로 동작 — 아키텍처상 내부 분기는 유지되지만 사용자 모델은 "cluster 하나"로 통일.
+  - `runSoloWithNFS` → `runLocalNode`
+  - `setupSoloReceipt` → `setupLocalReceipt`
+  - `MigrateSoloToCluster` → `MigrateLegacyMetaToCluster`
+  - `soloNodeID`, `soloManagedMode`, `soloLogGCInterval` → `local*`
+  - Test `TestCluster_SoloRaft_*` → `TestCluster_NoPeers_*`
+  - Test `TestSplitBrain_SoloIsZero` → `TestSplitBrain_NoPeersIsZero`
+  - Raft 내부 `newSoloLeader` → `newSingletonLeader`, `TestProposeWait_Solo` → `TestProposeWait_Singleton`, `TestQuorumMinMatchIndex_Solo` → `TestQuorumMinMatchIndex_Singleton`
+  - UI: "No cluster configured (solo mode)" → "No cluster configured (no-peers mode)"
+  - 로그 mode label `"solo"/"solo-ec"/"cluster"` → 제거 (component = "server" 만 노출)
+  - Docs (README/ROADMAP/RUNBOOK): "Solo → Cluster", "Solo 모드" → "단일-노드 → Cluster", "단일-노드 모드"
+  - `Reed-Solomon`은 알고리즘명으로 보존 (모드 이름이 아님)
+
+### Deferred
+
+- 아키텍처 통합 (ECBackend + scrubber + lifecycle + WAL-PITR을 DistributedBackend로 흡수) — 별도 PR. 이번 PR은 용어/이름 통일에 집중, 기능 변경 없음. `runLocalNode` 내부 구현은 유지됨.
+
 ## [0.0.3.0] - 2026-04-21
 
 ### Added

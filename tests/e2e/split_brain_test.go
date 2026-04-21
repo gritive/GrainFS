@@ -12,7 +12,7 @@ import (
 )
 
 // TestSplitBrain_MetricExposed verifies that the Prometheus /metrics endpoint
-// exposes the grainfs_split_brain_suspected metric (always 0 in solo mode).
+// exposes the grainfs_split_brain_suspected metric (always 0 when no peers configured).
 func TestSplitBrain_MetricExposed(t *testing.T) {
 	resp, err := http.Get(testServerURL + "/metrics")
 	require.NoError(t, err)
@@ -26,8 +26,8 @@ func TestSplitBrain_MetricExposed(t *testing.T) {
 		"/metrics must expose split brain indicator")
 }
 
-// TestSplitBrain_SoloIsZero verifies that in solo mode split brain is never suspected.
-func TestSplitBrain_SoloIsZero(t *testing.T) {
+// TestSplitBrain_NoPeersIsZero verifies that when no peers configured split brain is never suspected.
+func TestSplitBrain_NoPeersIsZero(t *testing.T) {
 	resp, err := http.Get(testServerURL + "/metrics")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -37,7 +37,7 @@ func TestSplitBrain_SoloIsZero(t *testing.T) {
 
 	for _, line := range strings.Split(string(body), "\n") {
 		if strings.HasPrefix(line, "grainfs_split_brain_suspected") && !strings.HasPrefix(line, "#") {
-			assert.Contains(t, line, "0", "solo mode must report split_brain_suspected=0, got: %q", line)
+			assert.Contains(t, line, "0", "no-peers mode must report split_brain_suspected=0, got: %q", line)
 			return
 		}
 	}
@@ -58,5 +58,5 @@ func TestSplitBrain_ClusterStatusField(t *testing.T) {
 	assert.True(t, ok, "/api/cluster/status must include split_brain_suspected field")
 
 	assert.Equal(t, false, status["split_brain_suspected"],
-		"solo mode must report split_brain_suspected=false")
+		"no-peers mode must report split_brain_suspected=false")
 }

@@ -29,7 +29,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 | Erasure Coding     | Solo: Reed-Solomon 4+2 / Cluster: N× replication (Phase 18 예정) |
 | QUIC Transport     | quic-go 기반 멀티플렉싱, TLS 1.3 내장                         |
 | Custom Raft        | QUIC 위 합의, 리더 선출/로그 복제/스냅샷                      |
-| Solo → Cluster     | 무중단 클러스터 전환                                          |
+| 단일 노드 → Cluster     | 무중단 클러스터 전환                                          |
 | Volume Device      | NBD (Linux) + NFS v3/v4.0 (macOS/Linux)                       |
 | Object Browser     | 웹 UI에서 버킷/오브젝트/볼륨 관리                             |
 | At-rest Encryption | AES-256-GCM, 키 자동 생성                                     |
@@ -47,9 +47,9 @@ Flags:
       --nfs4-port int            NFS v4.0 포트 (default 2049, 0=비활성)
       --nbd-port int             NBD 포트 (default 0=비활성, Linux only)
       --nbd-volume-size int      기본 NBD 볼륨 크기 바이트 (default 1073741824 = 1GB)
-      --ec                       Erasure Coding 활성화 (default true, solo 모드 전용)
-      --ec-data int              데이터 샤드 수 (default 4, solo 모드 전용)
-      --ec-parity int            패리티 샤드 수 (default 2, solo 모드 전용)
+      --ec                       Erasure Coding 활성화 (default true, 단일 노드 모드 전용)
+      --ec-data int              데이터 샤드 수 (default 4, 단일 노드 모드 전용)
+      --ec-parity int            패리티 샤드 수 (default 2, 단일 노드 모드 전용)
       --access-key string        S3 인증 Access Key
       --secret-key string        S3 인증 Secret Key
       --encryption-key-file      암호화 키 파일 경로

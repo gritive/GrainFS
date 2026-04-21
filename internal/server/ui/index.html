@@ -239,7 +239,7 @@ tbody tr:last-child td{border-bottom:none}
   <div class="table-wrap">
     <table>
       <thead><tr><th>Address</th><th>Status</th></tr></thead>
-      <tbody id="cl-peers-body"><tr><td colspan="2" class="empty-state">No cluster configured (solo mode)</td></tr></tbody>
+      <tbody id="cl-peers-body"><tr><td colspan="2" class="empty-state">No cluster configured (no-peers mode)</td></tr></tbody>
     </table>
   </div>
 
@@ -1084,7 +1084,7 @@ tbody tr:last-child td{border-bottom:none}
   // Cluster tab
   function loadCluster() {
     fetch(baseURL + '/api/cluster/status').then(function(r) { return r.json(); }).then(function(d) {
-      document.getElementById('cl-mode').textContent = d.mode || 'solo';
+      document.getElementById('cl-mode').textContent = d.mode || 'local';
       document.getElementById('cl-node-id').textContent = d.node_id || '-';
       document.getElementById('cl-state').textContent = d.state || '-';
       document.getElementById('cl-term').textContent = d.term || '-';
@@ -1101,7 +1101,7 @@ tbody tr:last-child td{border-bottom:none}
         var td = document.createElement('td');
         td.colSpan = 2;
         td.className = 'empty-state';
-        td.textContent = d.mode === 'solo' ? 'No cluster configured (solo mode)' : 'No peers';
+        td.textContent = d.mode === 'local' ? 'No cluster configured (no-peers mode)' : 'No peers';
         tr.appendChild(td);
         tbody.appendChild(tr);
       } else {

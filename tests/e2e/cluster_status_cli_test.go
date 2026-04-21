@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestClusterStatusCLI_Solo verifies that `grainfs cluster status` outputs
-// the cluster state for a solo (non-clustered) server.
-func TestClusterStatusCLI_Solo(t *testing.T) {
+// TestClusterStatusCLI_NoPeers verifies that `grainfs cluster status` outputs
+// the cluster state for a local (non-clustered) server.
+func TestClusterStatusCLI_NoPeers(t *testing.T) {
 	binary := getBinary()
 
 	out, err := exec.Command(binary, "cluster", "status",
@@ -22,7 +22,7 @@ func TestClusterStatusCLI_Solo(t *testing.T) {
 	var status map[string]any
 	require.NoError(t, json.Unmarshal(out, &status), "output must be valid JSON")
 
-	assert.Equal(t, "solo", status["mode"], "solo server must report mode=solo")
+	assert.Equal(t, "local", status["mode"], "local server must report mode=local")
 }
 
 // TestClusterStatusCLI_HumanReadable verifies default human-readable output
@@ -38,5 +38,5 @@ func TestClusterStatusCLI_HumanReadable(t *testing.T) {
 
 	output := string(out)
 	assert.Contains(t, output, "mode", "human-readable output must include mode")
-	assert.Contains(t, output, "solo", "solo server must show solo mode")
+	assert.Contains(t, output, "local", "local server must show local mode")
 }

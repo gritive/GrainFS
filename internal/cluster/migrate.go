@@ -14,10 +14,10 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// MigrateSoloToCluster converts a solo data directory to cluster format.
+// MigrateLegacyMetaToCluster converts a legacy data directory to cluster format.
 // It reads existing metadata from BadgerDB and re-proposes it through Raft
 // as a single-node cluster, establishing a clean Raft log baseline.
-func MigrateSoloToCluster(dataDir, nodeID string) error {
+func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 	logger := slog.With("component", "migrate")
 
 	metaDir := filepath.Join(dataDir, "meta")
@@ -99,10 +99,10 @@ func MigrateSoloToCluster(dataDir, nodeID string) error {
 	defer logStore.Close()
 
 	// Create a single-node Raft cluster and propose all entries
-	cfg := raft.DefaultConfig(nodeID, nil) // no peers = solo bootstrap
+	cfg := raft.DefaultConfig(nodeID, nil) // no peers = legacy bootstrap
 	node := raft.NewNode(cfg, logStore)
 
-	// For a solo node, set transport stubs (no peers to communicate with)
+	// For a legacy node, set transport stubs (no peers to communicate with)
 	node.SetTransport(
 		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 			return nil, fmt.Errorf("no peers during migration")
@@ -116,7 +116,7 @@ func MigrateSoloToCluster(dataDir, nodeID string) error {
 	node.Start()
 	defer node.Stop()
 
-	// Wait for leadership (solo node should become leader within a few election timeouts)
+	// Wait for leadership (legacy node should become leader within a few election timeouts)
 	for range 200 {
 		if node.State() == raft.Leader {
 			break

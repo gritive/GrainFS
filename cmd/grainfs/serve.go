@@ -197,11 +197,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 		defer w.Close()
 		backend = wal.NewBackend(backend, w)
 
-		mode := "solo"
-		if ecEnabled {
-			mode = "solo-ec"
-		}
-
 		// Wrap with pull-through cache if upstream is configured
 		if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
 			upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
@@ -216,7 +211,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 		// Wrap backend in SwappableBackend to allow runtime cluster transition
 		swappable := storage.NewSwappableBackend(backend)
-		return runSoloWithNFS(ctx, cmd, addr, dataDir, mode, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort, nbdVolumeSize, evDB)
+		return runLocalNode(ctx, cmd, addr, dataDir, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort, nbdVolumeSize, evDB)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -225,12 +220,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts)
 }
 
-func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64, evDB *badger.DB) error {
-	slog.Info("server started", "component", "server", "mode", mode, "version", version, "addr", addr, "data", dataDir)
+func runLocalNode(ctx context.Context, cmd *cobra.Command, addr, dataDir string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64, evDB *badger.DB) error {
+	slog.Info("server started", "component", "server", "version", version, "addr", addr, "data", dataDir, "peers", 0)
 
-	// Start DiskCollector to expose grainfs_disk_used_pct metric even in solo mode.
-	soloNodeID := generateNodeID(dataDir)
-	diskCollector := cluster.NewDiskCollector(soloNodeID, dataDir, nil, 30*time.Second)
+	// Start DiskCollector to expose grainfs_disk_used_pct metric even in no-peers mode.
+	localNodeID := generateNodeID(dataDir)
+	diskCollector := cluster.NewDiskCollector(localNodeID, dataDir, nil, 30*time.Second)
 	go diskCollector.Run(ctx)
 
 	// Auto-create "default" bucket on startup
@@ -240,12 +235,12 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		}
 	}
 
-	soloManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
-	soloLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
+	localManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
+	localLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
 
-	// Join cluster callback: transitions from solo to cluster mode at runtime.
+	// Join cluster callback: transitions from local to cluster mode at runtime.
 	joinFn := func(nodeID, raftAddr, peersStr, clusterKey string) error {
-		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey, soloManagedMode, soloLogGCInterval)
+		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey, localManagedMode, localLogGCInterval)
 	}
 	opts = append(opts, server.WithJoinCluster(joinFn))
 	opts = append(opts, server.WithDataDir(dataDir))
@@ -272,8 +267,8 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		slog.Info("lifecycle worker started")
 	}
 
-	// Phase 16 Week 5 Slice 2 — HealReceipt audit API (solo: local-only).
-	newOpts, receiptWiring, err := setupSoloReceipt(cmd, dataDir, opts)
+	// Phase 16 Week 5 Slice 2 — HealReceipt audit API (no-peers: local-only).
+	newOpts, receiptWiring, err := setupLocalReceipt(cmd, dataDir, opts)
 	if err != nil {
 		return fmt.Errorf("heal-receipt wiring: %w", err)
 	}
@@ -370,7 +365,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	raftDir := filepath.Join(dataDir, "raft")
 
 	// Auto-migrate BEFORE any filesystem or lock side effects. If Raft dir
-	// doesn't exist but meta dir holds an existing solo BadgerDB, convert
+	// doesn't exist but meta dir holds an existing local BadgerDB, convert
 	// in place. Two things previously broke this branch on fresh cluster
 	// starts with an empty dataDir:
 	//   1. MkdirAll ran before this check, so os.Stat(metaDir) succeeded
@@ -384,12 +379,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// both failure modes.
 	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
 		if info, err := os.Stat(metaDir); err == nil && info.IsDir() {
-			// A populated solo meta dir has .sst / .vlog / MANIFEST files.
+			// A populated local meta dir has .sst / .vlog / MANIFEST files.
 			// Distinguish "real data" from "empty dir someone pre-created"
 			// by checking for any entries; empty → skip migration.
 			if entries, err := os.ReadDir(metaDir); err == nil && len(entries) > 0 {
-				slog.Info("auto-migrating solo metadata to cluster format", "component", "migrate")
-				if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
+				slog.Info("auto-migrating local metadata to cluster format", "component", "migrate")
+				if err := cluster.MigrateLegacyMetaToCluster(dataDir, nodeID); err != nil {
 					return fmt.Errorf("auto-migrate: %w", err)
 				}
 				slog.Info("auto-migration complete", "component", "migrate")
@@ -406,7 +401,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("open metadata db: %w", err)
 	}
 	defer db.Close()
-	// Phase 16 Week 3: cluster mode preflight. Same reasoning as solo.
+	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
 	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
 		return err
 	}
@@ -550,7 +545,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("create default bucket: %w", err)
 	}
 
-	slog.Info("server started", "component", "server", "mode", "cluster", "version", version,
+	slog.Info("server started", "component", "server", "version", version,
 		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
 
 	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
@@ -562,7 +557,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		server.WithAlerts(clusterAlerts),
 	}
 	// Propagate S3 auth from --access-key / --secret-key. Previously this
-	// was solo-only; cluster mode silently ran without auth regardless of
+	// was local-only; cluster mode silently ran without auth regardless of
 	// the flags.
 	srvOpts = append(srvOpts, authOpts...)
 	if balancerProposer != nil {
@@ -599,10 +594,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 	}()
 
-	// Post-Phase-18 Solo removal A.1: universal node services (NFS/NFSv4/NBD)
-	// are now wired in cluster mode too, not just solo. Formerly solo-only
+	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4/NBD)
+	// are now wired in cluster mode too, not just local. Formerly local-only
 	// because runCluster never called the NFS/NBD wiring. Scrubber/lifecycle
-	// remain solo-specific pending ECBackend→cluster integration (A.2).
+	// remain local-specific pending ECBackend→cluster integration (A.2).
 	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
 	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
@@ -611,7 +606,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	defer nodeSvc.Close()
 
 	<-ctx.Done()
-	slog.Info("graceful shutdown started", "component", "server", "mode", "cluster")
+	slog.Info("graceful shutdown started", "component", "server")
 
 	// 1. Drain in-flight HTTP requests
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -630,7 +625,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// 3. Stop Raft apply loop
 	close(stopApply)
 
-	slog.Info("server stopped", "component", "server", "mode", "cluster")
+	slog.Info("server stopped", "component", "server")
 	return nil
 }
 
@@ -884,7 +879,7 @@ func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
 func (r *raftClusterInfo) Peers() []string  { return r.peers }
 
-// joinClusterLive performs the runtime solo→cluster transition.
+// joinClusterLive performs the runtime local→cluster transition.
 // It starts the QUIC transport and Raft node, migrates metadata, then swaps the backend.
 func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, dataDir, nodeID, raftAddr, peersStr, clusterKey string, managedMode bool, logGCInterval time.Duration) error {
 	if nodeID == "" {
@@ -902,17 +897,17 @@ func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, d
 	if err != nil {
 		return fmt.Errorf("open metadata db: %w", err)
 	}
-	// Phase 16 Week 3: solo-to-cluster migration path also runs preflight.
+	// Phase 16 Week 3: legacy-to-cluster migration path also runs preflight.
 	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
 		return err
 	}
 
 	raftDir := filepath.Join(dataDir, "raft")
 
-	// Auto-migrate solo metadata
+	// Auto-migrate local metadata
 	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
-		slog.Info("auto-migrating solo metadata to cluster format", "component", "join")
-		if err := cluster.MigrateSoloToCluster(dataDir, nodeID); err != nil {
+		slog.Info("auto-migrating local metadata to cluster format", "component", "join")
+		if err := cluster.MigrateLegacyMetaToCluster(dataDir, nodeID); err != nil {
 			db.Close()
 			return fmt.Errorf("auto-migrate: %w", err)
 		}
