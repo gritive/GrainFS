@@ -1441,16 +1441,25 @@ func (b *DistributedBackend) bucketDir(bucket string) string {
 	return filepath.Join(b.root, "data", bucket)
 }
 
+// objectPath returns the legacy-unversioned local path for a full-object copy.
+// Kept as a read fallback only — writers go through objectPathV. New keys never
+// collide with objectPathV because the versioned namespace lives under a
+// sibling ".obj" directory.
 func (b *DistributedBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
 }
 
 // objectPathV returns the version-addressable local path for a full-object copy
-// in the N× path: {root}/data/{bucket}/{key}/.v/{versionID}. The ".v/" segment
-// namespaces versioned files away from any sub-prefix that happens to share the
-// key's name, so keys like "a" and "a/b" can coexist.
+// in the N× path: {root}/data/{bucket}/.obj/{key}/{versionID}.
+//
+// The ".obj/" sibling namespace was adopted in v0.0.4.0 because the previous
+// scheme ({bucket}/{key}/.v/{vid}) collided with the unversioned path — if a
+// caller like NFS wrote "foo.txt" as a plain file via an older code path, a
+// subsequent versioned write couldn't MkdirAll("foo.txt/.v/"). Splitting
+// versioned writes into a separate ".obj" root resolves that; it's at most
+// the bucket name that's reserved, which S3 already forbids keys from.
 func (b *DistributedBackend) objectPathV(bucket, key, versionID string) string {
-	return filepath.Join(b.root, "data", bucket, key, ".v", versionID)
+	return filepath.Join(b.root, "data", bucket, ".obj", key, versionID)
 }
 
 func (b *DistributedBackend) partDir(uploadID string) string {
