@@ -105,8 +105,16 @@ func (rcv *CompleteMultipartCmd) MutateModTime(n int64) bool {
 	return rcv._tab.MutateInt64Slot(16, n)
 }
 
+func (rcv *CompleteMultipartCmd) VersionId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func CompleteMultipartCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(8)
 }
 func CompleteMultipartCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -128,6 +136,9 @@ func CompleteMultipartCmdAddEtag(builder *flatbuffers.Builder, etag flatbuffers.
 }
 func CompleteMultipartCmdAddModTime(builder *flatbuffers.Builder, modTime int64) {
 	builder.PrependInt64Slot(6, modTime, 0)
+}
+func CompleteMultipartCmdAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(versionId), 0)
 }
 func CompleteMultipartCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

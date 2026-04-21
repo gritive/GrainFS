@@ -92,6 +92,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	keyOff := b.CreateString(c.Key)
 	ctOff := b.CreateString(c.ContentType)
 	etagOff := b.CreateString(c.ETag)
+	vidOff := b.CreateString(c.VersionID)
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -99,6 +100,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddContentType(b, ctOff)
 	clusterpb.PutObjectMetaCmdAddEtag(b, etagOff)
 	clusterpb.PutObjectMetaCmdAddModTime(b, c.ModTime)
+	clusterpb.PutObjectMetaCmdAddVersionId(b, vidOff)
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -116,6 +118,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		ContentType: string(t.ContentType()),
 		ETag:        string(t.Etag()),
 		ModTime:     t.ModTime(),
+		VersionID:   string(t.VersionId()),
 	}, nil
 }
 
@@ -123,9 +126,11 @@ func encodeDeleteObjectCmd(c DeleteObjectCmd) ([]byte, error) {
 	b := flatbuffers.NewBuilder(64)
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
+	vidOff := b.CreateString(c.VersionID)
 	clusterpb.DeleteObjectCmdStart(b)
 	clusterpb.DeleteObjectCmdAddBucket(b, bucketOff)
 	clusterpb.DeleteObjectCmdAddKey(b, keyOff)
+	clusterpb.DeleteObjectCmdAddVersionId(b, vidOff)
 	return fbFinish(b, clusterpb.DeleteObjectCmdEnd(b)), nil
 }
 
@@ -136,7 +141,37 @@ func decodeDeleteObjectCmd(data []byte) (DeleteObjectCmd, error) {
 	if err != nil {
 		return DeleteObjectCmd{}, err
 	}
-	return DeleteObjectCmd{Bucket: string(t.Bucket()), Key: string(t.Key())}, nil
+	return DeleteObjectCmd{
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+	}, nil
+}
+
+func encodeDeleteObjectVersionCmd(c DeleteObjectVersionCmd) ([]byte, error) {
+	b := flatbuffers.NewBuilder(64)
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	vidOff := b.CreateString(c.VersionID)
+	clusterpb.DeleteObjectVersionCmdStart(b)
+	clusterpb.DeleteObjectVersionCmdAddBucket(b, bucketOff)
+	clusterpb.DeleteObjectVersionCmdAddKey(b, keyOff)
+	clusterpb.DeleteObjectVersionCmdAddVersionId(b, vidOff)
+	return fbFinish(b, clusterpb.DeleteObjectVersionCmdEnd(b)), nil
+}
+
+func decodeDeleteObjectVersionCmd(data []byte) (DeleteObjectVersionCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectVersionCmd {
+		return clusterpb.GetRootAsDeleteObjectVersionCmd(d, 0)
+	})
+	if err != nil {
+		return DeleteObjectVersionCmd{}, err
+	}
+	return DeleteObjectVersionCmd{
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+	}, nil
 }
 
 func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) {
@@ -177,6 +212,7 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	uidOff := b.CreateString(c.UploadID)
 	ctOff := b.CreateString(c.ContentType)
 	etagOff := b.CreateString(c.ETag)
+	vidOff := b.CreateString(c.VersionID)
 	clusterpb.CompleteMultipartCmdStart(b)
 	clusterpb.CompleteMultipartCmdAddBucket(b, bucketOff)
 	clusterpb.CompleteMultipartCmdAddKey(b, keyOff)
@@ -185,6 +221,7 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	clusterpb.CompleteMultipartCmdAddContentType(b, ctOff)
 	clusterpb.CompleteMultipartCmdAddEtag(b, etagOff)
 	clusterpb.CompleteMultipartCmdAddModTime(b, c.ModTime)
+	clusterpb.CompleteMultipartCmdAddVersionId(b, vidOff)
 	return fbFinish(b, clusterpb.CompleteMultipartCmdEnd(b)), nil
 }
 
@@ -203,6 +240,7 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 		ContentType: string(t.ContentType()),
 		ETag:        string(t.Etag()),
 		ModTime:     t.ModTime(),
+		VersionID:   string(t.VersionId()),
 	}, nil
 }
 
@@ -487,6 +525,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodePutShardPlacementCmd(payload.(PutShardPlacementCmd))
 	case CmdDeleteShardPlacement:
 		return encodeDeleteShardPlacementCmd(payload.(DeleteShardPlacementCmd))
+	case CmdDeleteObjectVersion:
+		return encodeDeleteObjectVersionCmd(payload.(DeleteObjectVersionCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}

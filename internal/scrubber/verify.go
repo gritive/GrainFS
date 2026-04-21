@@ -46,23 +46,34 @@ func NewShardVerifier(b Scrubbable, opts ...VerifierOption) *ShardVerifier {
 // Verify checks all shards for rec. On transient corruption, retries once
 // after retryDelay before reporting corrupt (Eng Review #12).
 func (v *ShardVerifier) Verify(rec ObjectRecord) ShardStatus {
-	status := v.check(rec)
+	return v.VerifyIndices(rec, nil)
+}
+
+// VerifyIndices is like Verify but restricts the check to the given shard
+// indices. Passing nil verifies every shard (the legacy full-object path).
+// Used by cluster mode so each node only verifies its owned shards. Slice 3
+// of refactor/unify-storage-paths.
+func (v *ShardVerifier) VerifyIndices(rec ObjectRecord, indices []int) ShardStatus {
+	status := v.check(rec, indices)
 	if len(status.Corrupt) == 0 {
 		return status
 	}
 	// Transient retry: wait and re-check
 	time.Sleep(v.retryDelay)
-	return v.check(rec)
+	return v.check(rec, indices)
 }
 
-func (v *ShardVerifier) check(rec ObjectRecord) ShardStatus {
+func (v *ShardVerifier) check(rec ObjectRecord, indices []int) ShardStatus {
 	total := rec.DataShards + rec.ParityShards
 	paths := v.backend.ShardPaths(rec.Bucket, rec.Key, rec.VersionID, total)
 	status := ShardStatus{Bucket: rec.Bucket, Key: rec.Key}
-	for i, path := range paths {
-		_, err := v.backend.ReadShard(rec.Bucket, rec.Key, path)
+	check := func(i int) {
+		if i < 0 || i >= len(paths) {
+			return
+		}
+		_, err := v.backend.ReadShard(rec.Bucket, rec.Key, paths[i])
 		if err == nil {
-			continue
+			return
 		}
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -70,6 +81,15 @@ func (v *ShardVerifier) check(rec ObjectRecord) ShardStatus {
 		default:
 			status.Corrupt = append(status.Corrupt, i)
 		}
+	}
+	if indices == nil {
+		for i := range paths {
+			check(i)
+		}
+		return status
+	}
+	for _, i := range indices {
+		check(i)
 	}
 	return status
 }

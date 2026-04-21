@@ -14,6 +14,13 @@ import (
 	"github.com/klauspost/reedsolomon"
 )
 
+// Default EC parameters for 4+2 Reed-Solomon. Exposed so serve flags
+// and tests share a single source of truth.
+const (
+	DefaultDataShards   = 4
+	DefaultParityShards = 2
+)
+
 // ECConfig controls cluster erasure coding behavior.
 type ECConfig struct {
 	// DataShards (k) — number of data shards (e.g. 4 for 4+2).

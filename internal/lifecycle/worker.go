@@ -15,10 +15,13 @@ import (
 )
 
 // ObjectDeleter abstracts object deletion for testability.
+// ListObjectVersions signature matches server.ObjectVersionLister so a single
+// backend type can satisfy both — the worker passes key as prefix with
+// maxKeys=0 (unlimited) and filters to exact-key matches itself.
 type ObjectDeleter interface {
 	DeleteObject(bucket, key string) error
 	DeleteObjectVersion(bucket, key, versionID string) error
-	ListObjectVersions(bucket, key string) ([]*storage.ObjectVersion, error)
+	ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error)
 }
 
 // Scrubbable is the subset of scrubber.Scrubbable used by the lifecycle worker.
@@ -132,7 +135,10 @@ func (w *Worker) runCycle(ctx context.Context) {
 
 		for obj := range objs {
 			if ctx.Err() != nil {
-				go func() { for range objs {} }() // drain producer to prevent goroutine leak
+				go func() {
+					for range objs {
+					}
+				}() // drain producer to prevent goroutine leak
 				return
 			}
 			atomic.AddInt64(&w.stats.ObjectsChecked, 1)
@@ -172,10 +178,17 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 		}
 
 		if nce := rule.NoncurrentVersionExpiration; nce != nil {
-			versions, err := w.deleter.ListObjectVersions(obj.Bucket, obj.Key)
+			all, err := w.deleter.ListObjectVersions(obj.Bucket, obj.Key, 0)
 			if err != nil {
 				slog.Error("lifecycle: list versions", "bucket", obj.Bucket, "key", obj.Key, "err", err)
 				continue
+			}
+			// Narrow to exact-key matches — ListObjectVersions does prefix match.
+			versions := all[:0]
+			for _, v := range all {
+				if v.Key == obj.Key {
+					versions = append(versions, v)
+				}
 			}
 			// versions expected newest-first (as returned by ListObjectVersions)
 			noncurrentIdx := 0

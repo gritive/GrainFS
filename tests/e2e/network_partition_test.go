@@ -19,12 +19,12 @@ import (
 
 type NetworkPartitionSuite struct {
 	suite.Suite
-	dir            string
-	binary         string
-	port           int
-	toxiPort       int
-	proxyPort      int
-	toxiproxyCmd   *exec.Cmd
+	dir          string
+	binary       string
+	port         int
+	toxiPort     int
+	proxyPort    int
+	toxiproxyCmd *exec.Cmd
 }
 
 func (s *NetworkPartitionSuite) SetupSuite() {

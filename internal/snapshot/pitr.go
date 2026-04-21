@@ -14,10 +14,10 @@ var ErrNoSnapshotBefore = errors.New("no snapshot found before target time")
 
 // PITRResult holds the outcome of a PITR restore operation.
 type PITRResult struct {
-	RestoredObjects    int                  `json:"restored_objects"`
-	WALEntriesReplayed int                  `json:"wal_entries_replayed"`
-	StaleBlobs         []storage.StaleBlob  `json:"stale_blobs"`
-	BaseSnapshotSeq    uint64               `json:"base_snapshot_seq"`
+	RestoredObjects    int                 `json:"restored_objects"`
+	WALEntriesReplayed int                 `json:"wal_entries_replayed"`
+	StaleBlobs         []storage.StaleBlob `json:"stale_blobs"`
+	BaseSnapshotSeq    uint64              `json:"base_snapshot_seq"`
 }
 
 // PITRRestore restores metadata to the state it was at targetTime.
@@ -61,6 +61,14 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 					Modified:    e.Timestamp / 1e9, // ns → s
 				}
 			case wal.OpDelete:
+				// Latest-pointer delete (tombstone). PITR resolves the object map to
+				// a single latest state per key, so drop the entry.
+				delete(objects, e.Bucket+"/"+e.Key)
+			case wal.OpDeleteVersion:
+				// Hard delete of a specific version. Only affects the resolved state
+				// when that version is the one currently represented in the map.
+				// Without per-version tracking we approximate by removing the key —
+				// a later PUT within the replay window re-inserts it.
 				delete(objects, e.Bucket+"/"+e.Key)
 			}
 		})

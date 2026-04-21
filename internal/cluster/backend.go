@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +22,16 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
+// UUIDv7 is k-sortable by millisecond timestamp; ListObjectVersions reverses to DESC.
+func newVersionID() string {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.NewString()
+	}
+	return id.String()
+}
 
 // OnApplyFunc is called after FSM.Apply() with the command type, bucket, and key.
 // Used for cache invalidation and metrics updates.
@@ -39,11 +50,13 @@ type DistributedBackend struct {
 	onApply     OnApplyFunc
 	snapMgr     *raft.SnapshotManager
 	snapNode    *raft.Node // node for CompactLog after snapshot
-	shardSvc   *ShardService
-	allNodes   []string // all node addresses (including self) for shard placement
-	peerHealth *PeerHealth
-	registry   *Registry // cache invalidators (VFS instances)
-	ecConfig   ECConfig  // Phase 18: erasure coding config (disabled = legacy N× path)
+	shardSvc    *ShardService
+	allNodes    []string // all node addresses (including self) for shard placement
+	selfAddr    string   // this node's raft address (matches entries in allNodes)
+	peerHealth  *PeerHealth
+	registry    *Registry // cache invalidators (VFS instances)
+	ecConfig    ECConfig  // Phase 18: erasure coding config (disabled = legacy N× path)
+	shardLocks  sync.Map  // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -72,16 +85,21 @@ func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 }
 
 // SetShardService configures the distributed shard service for fan-out.
-// allNodes includes all cluster node addresses for placement. The slice is
-// sorted for deterministic placement across the cluster.
+// allNodes includes all cluster node addresses for placement (self first is
+// expected so the self address can be cached before the slice is sorted).
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
+	// Cache self address BEFORE sorting so per-request self-skip checks can
+	// compare raft addresses (node.ID() returns a UUID, not the address).
+	if len(allNodes) > 0 {
+		b.selfAddr = allNodes[0]
+	}
 	b.allNodes = append([]string(nil), allNodes...)
 	sort.Strings(b.allNodes)
 	// Build peer list (excluding self) for health tracking
 	var peers []string
 	for _, n := range allNodes {
-		if n != b.node.ID() {
+		if n != b.selfAddr {
 			peers = append(peers, n)
 		}
 	}
@@ -208,24 +226,6 @@ func (b *DistributedBackend) GetRegistry() *Registry {
 	return b.registry
 }
 
-// GetVFS returns a registered VFS instance by volume name.
-// Returns nil if volume not found.
-func (b *DistributedBackend) GetVFS(volumeID string) *VFSInstance {
-	// This requires importing vfs package which creates circular dependency
-	// For now, return nil - tests will need to access registry directly
-	// TODO: Add interface-based VFS retrieval to avoid circular dependency
-	return nil
-}
-
-// VFSInstance is a placeholder for VFS instance retrieval.
-// TODO: Replace with actual vfs.GrainVFS once we solve circular import.
-type VFSInstance struct{}
-
-// Stat is a placeholder - will be replaced with actual VFS.Stat call.
-func (v *VFSInstance) Stat(path string) (os.FileInfo, error) {
-	return nil, os.ErrNotExist
-}
-
 // --- Bucket operations ---
 
 func (b *DistributedBackend) CreateBucket(bucket string) error {
@@ -289,6 +289,45 @@ func (b *DistributedBackend) DeleteBucket(bucket string) error {
 	return b.propose(context.Background(), CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
 }
 
+// SetBucketVersioning satisfies server.BucketVersioner. Persists the S3
+// versioning state ("Enabled"/"Suspended") under key bucketver:{bucket} in
+// the FSM BadgerDB. NOTE: writes bypass Raft in this slice — consistent on a
+// singleton, eventually consistent across a cluster until follow-up work
+// wires a SetBucketVersioning FSM command. Object versioning itself (via
+// UUIDv7 VersionID) remains always-on regardless of this flag.
+func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		if _, err := txn.Get(bucketKey(bucket)); err != nil {
+			if err == badger.ErrKeyNotFound {
+				return storage.ErrBucketNotFound
+			}
+			return err
+		}
+		return txn.Set([]byte("bucketver:"+bucket), []byte(state))
+	})
+}
+
+// GetBucketVersioning satisfies server.BucketVersioner. Returns "Unversioned"
+// when no state has been set so the S3 semantic matches ECBackend's default.
+func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
+	var state string
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("bucketver:" + bucket))
+		if err == badger.ErrKeyNotFound {
+			state = "Unversioned"
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			state = string(v)
+			return nil
+		})
+	})
+	return state, err
+}
+
 func (b *DistributedBackend) ListBuckets() ([]string, error) {
 	var buckets []string
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -322,20 +361,30 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
 
+	// Versioning is unconditional: every PUT gets a fresh ULID so prior versions
+	// remain addressable via GetObjectVersion / ListObjectVersions. Bucket-level
+	// versioning-state gating is a later slice.
+	versionID := newVersionID()
+
 	// Phase 18 Cluster EC: split across k+m nodes when enabled and cluster is large enough.
 	if b.ecConfig.IsActive(len(b.allNodes)) && b.shardSvc != nil {
-		return b.putObjectEC(bucket, key, data, contentType)
+		return b.putObjectEC(bucket, key, versionID, data, contentType)
 	}
 
-	return b.putObjectNx(bucket, key, data, contentType)
+	return b.putObjectNx(bucket, key, versionID, data, contentType)
 }
 
 // putObjectNx is the legacy N× full-replication path. Every peer receives
 // a copy of the full object at shardIdx=0. Preserved for small clusters
 // (< k+m) and for backward compatibility with pre-Phase-18 deployments.
-func (b *DistributedBackend) putObjectNx(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
-	// Write data locally
-	objPath := b.objectPath(bucket, key)
+//
+// Version-addressable storage: the local full-object file goes under
+// {root}/data/{bucket}/{key}/.v/{versionID} so prior versions coexist with the
+// latest. Peer replicas are addressed via ShardService with key+"/"+versionID
+// so ShardService's API stays frozen (ShardService sees a longer "key").
+func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
+	// Write data locally at the versioned path.
+	objPath := b.objectPathV(bucket, key, versionID)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
@@ -343,18 +392,21 @@ func (b *DistributedBackend) putObjectNx(bucket, key string, data []byte, conten
 		return nil, fmt.Errorf("write object: %w", err)
 	}
 
-	// Replicate data to healthy peer nodes via ShardService
+	// Replicate data to healthy peer nodes via ShardService. We encode the
+	// version into the ShardService "key" parameter (key+"/"+versionID) so the
+	// ShardService signature stays unchanged for this slice.
+	shardKey := key + "/" + versionID
 	if b.shardSvc != nil {
 		ctx := context.Background()
 		for _, peer := range b.allNodes {
-			if peer == b.node.ID() {
+			if peer == b.selfAddr {
 				continue
 			}
 			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
 				b.logger.Debug("skipping unhealthy peer for replication", "peer", peer)
 				continue
 			}
-			if err := b.shardSvc.WriteShard(ctx, peer, bucket, key, 0, data); err != nil {
+			if err := b.shardSvc.WriteShard(ctx, peer, bucket, shardKey, 0, data); err != nil {
 				b.logger.Warn("data replication failed", "peer", peer, "bucket", bucket, "key", key, "error", err)
 				if b.peerHealth != nil {
 					b.peerHealth.MarkUnhealthy(peer)
@@ -377,6 +429,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key string, data []byte, conten
 		ContentType: contentType,
 		ETag:        etag,
 		ModTime:     now,
+		VersionID:   versionID,
 	})
 	if err != nil {
 		os.Remove(objPath)
@@ -389,6 +442,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key string, data []byte, conten
 		ContentType:  contentType,
 		ETag:         etag,
 		LastModified: now,
+		VersionID:    versionID,
 	}, nil
 }
 
@@ -401,7 +455,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key string, data []byte, conten
 // leaves the placement record as the source of truth for Slice 4 repair),
 // then CmdPutObjectMeta. Rollback on meta failure deletes all shards and
 // removes the placement record.
-func (b *DistributedBackend) putObjectEC(bucket, key string, data []byte, contentType string) (*storage.Object, error) {
+func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
 	ctx := context.Background()
 
 	shards, err := ECSplit(b.ecConfig, data)
@@ -409,7 +463,11 @@ func (b *DistributedBackend) putObjectEC(bucket, key string, data []byte, conten
 		return nil, fmt.Errorf("ec split: %w", err)
 	}
 
-	placement := PlacementForNodes(b.ecConfig, b.allNodes, key)
+	// ShardService's key parameter carries the versionID as a suffix so shards
+	// for different versions land at different paths without changing the API.
+	shardKey := key + "/" + versionID
+
+	placement := PlacementForNodes(b.ecConfig, b.allNodes, shardKey)
 	selfID := b.node.ID()
 
 	// Track nodes we wrote to so cleanup can target them precisely.
@@ -417,22 +475,22 @@ func (b *DistributedBackend) putObjectEC(bucket, key string, data []byte, conten
 	cleanup := func() {
 		for _, n := range written {
 			if n == selfID {
-				_ = b.shardSvc.DeleteLocalShards(bucket, key)
+				_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
 				continue
 			}
-			_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
+			_ = b.shardSvc.DeleteShards(ctx, n, bucket, shardKey)
 		}
 	}
 
 	// Fan-out: write each shard to its placed node. Write-all consistency.
 	for i, node := range placement {
 		if node == selfID {
-			if werr := b.shardSvc.WriteLocalShard(bucket, key, i, shards[i]); werr != nil {
+			if werr := b.shardSvc.WriteLocalShard(bucket, shardKey, i, shards[i]); werr != nil {
 				cleanup()
 				return nil, fmt.Errorf("ec write local shard %d: %w", i, werr)
 			}
 		} else {
-			if werr := b.shardSvc.WriteShard(ctx, node, bucket, key, i, shards[i]); werr != nil {
+			if werr := b.shardSvc.WriteShard(ctx, node, bucket, shardKey, i, shards[i]); werr != nil {
 				if b.peerHealth != nil {
 					b.peerHealth.MarkUnhealthy(node)
 				}
@@ -468,6 +526,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key string, data []byte, conten
 		ContentType: contentType,
 		ETag:        etag,
 		ModTime:     now,
+		VersionID:   versionID,
 	}); merr != nil {
 		_ = b.propose(ctx, CmdDeleteShardPlacement, DeleteShardPlacementCmd{Bucket: bucket, Key: key})
 		cleanup()
@@ -480,6 +539,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key string, data []byte, conten
 		ContentType:  contentType,
 		ETag:         etag,
 		LastModified: now,
+		VersionID:    versionID,
 	}, nil
 }
 
@@ -488,11 +548,14 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	if err != nil {
 		return nil, nil, err
 	}
+	// HeadObject already rejects tombstones with ErrObjectNotFound, so obj here
+	// is a real version. VersionID is non-empty for versioned writes and empty
+	// for legacy log replay.
 
 	// Phase 18: EC placement takes precedence. Absent placement falls through
 	// to the legacy N×-replicated single-shard path below.
 	if nodes, ok := b.fsm.LookupShardPlacement(bucket, key); ok && b.shardSvc != nil {
-		data, ecErr := b.getObjectEC(context.Background(), bucket, key, nodes)
+		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, nodes)
 		if ecErr == nil {
 			return io.NopCloser(bytes.NewReader(data)), obj, nil
 		}
@@ -502,24 +565,35 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 			"bucket", bucket, "key", key, "error", ecErr)
 	}
 
-	// Try local first
+	// Try the version-addressable local path first (new writers), then the
+	// legacy unversioned path (pre-versioning replay).
+	if obj.VersionID != "" {
+		if f, oerr := os.Open(b.objectPathV(bucket, key, obj.VersionID)); oerr == nil {
+			return f, obj, nil
+		}
+	}
 	f, err := os.Open(b.objectPath(bucket, key))
 	if err == nil {
 		return f, obj, nil
 	}
 
-	// Local file not found — try fetching from peer nodes (healthy first, then all)
+	// Local file not found — try fetching from peer nodes (healthy first, then all).
+	// Peers store under key+"/"+versionID when the write was versioned.
+	shardKey := key
+	if obj.VersionID != "" {
+		shardKey = key + "/" + obj.VersionID
+	}
 	if b.shardSvc != nil && os.IsNotExist(err) {
 		ctx := context.Background()
 		// Try healthy peers first
 		for _, peer := range b.allNodes {
-			if peer == b.node.ID() {
+			if peer == b.selfAddr {
 				continue
 			}
 			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
 				continue
 			}
-			data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, key, 0)
+			data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, shardKey, 0)
 			if fetchErr == nil && data != nil {
 				if b.peerHealth != nil {
 					b.peerHealth.MarkHealthy(peer)
@@ -533,13 +607,13 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		// Fallback: try unhealthy peers (they may have recovered)
 		if b.peerHealth != nil {
 			for _, peer := range b.allNodes {
-				if peer == b.node.ID() {
+				if peer == b.selfAddr {
 					continue
 				}
 				if b.peerHealth.IsHealthy(peer) {
 					continue // already tried
 				}
-				data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, key, 0)
+				data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, shardKey, 0)
 				if fetchErr == nil && data != nil {
 					b.peerHealth.MarkHealthy(peer)
 					return io.NopCloser(bytes.NewReader(data)), obj, nil
@@ -560,9 +634,14 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 // putObjectEC or ConvertObjectToEC). shardIdx must be in [0, k+m). At least k
 // of the other shards must be readable or reconstruction fails.
 //
+// versionID identifies the physical shard files on disk: putObjectEC writes
+// shards under `{key}/{versionID}/shard_{N}` via ShardService, and this
+// routine must read/write the same layout. When versionID is empty, the
+// latest pointer from the FSM is consulted.
+//
 // Write target: the repaired shard goes back to placement[shardIdx]. When
 // that node is this node, we use WriteLocalShard; otherwise WriteShard.
-func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string, shardIdx int) error {
+func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versionID string, shardIdx int) error {
 	if b.shardSvc == nil {
 		return fmt.Errorf("shard service not configured")
 	}
@@ -575,6 +654,19 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string
 	}
 	if len(placement) != b.ecConfig.NumShards() {
 		return fmt.Errorf("placement length %d != k+m %d", len(placement), b.ecConfig.NumShards())
+	}
+
+	// Resolve to the latest version when caller doesn't know it (monitor
+	// callback path). Empty latest means pre-versioned legacy EC; fall back
+	// to bare-key layout, preserving pre-Slice-3 behaviour.
+	if versionID == "" {
+		if latest, lerr := b.fsm.LookupLatestVersion(bucket, key); lerr == nil {
+			versionID = latest
+		}
+	}
+	shardKey := key
+	if versionID != "" {
+		shardKey = key + "/" + versionID
 	}
 
 	selfID := b.node.ID()
@@ -590,9 +682,9 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string
 		var data []byte
 		var rerr error
 		if node == selfID {
-			data, rerr = b.shardSvc.ReadLocalShard(bucket, key, i)
+			data, rerr = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
 		} else {
-			data, rerr = b.shardSvc.ReadShard(ctx, node, bucket, key, i)
+			data, rerr = b.shardSvc.ReadShard(ctx, node, bucket, shardKey, i)
 		}
 		if rerr == nil && data != nil {
 			shards[i] = data
@@ -618,14 +710,20 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string
 	// Write just the missing shard back to its placement node.
 	target := placement[shardIdx]
 	if target == selfID {
-		return b.shardSvc.WriteLocalShard(bucket, key, shardIdx, freshShards[shardIdx])
+		return b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShards[shardIdx])
 	}
-	return b.shardSvc.WriteShard(ctx, target, bucket, key, shardIdx, freshShards[shardIdx])
+	return b.shardSvc.WriteShard(ctx, target, bucket, shardKey, shardIdx, freshShards[shardIdx])
 }
 
 // FSMRef returns the underlying FSM so reshard / monitor code can iterate
 // placements + object metas without reaching through the backend's private fields.
 func (b *DistributedBackend) FSMRef() *FSM { return b.fsm }
+
+// FSMDB returns the underlying FSM BadgerDB handle.
+// Used by lifecycle.NewStore and other components needing shared metadata storage.
+// Lifecycle keys ("lifecycle:{bucket}") share the DB with FSM keys ("obj:", "lat:",
+// "bucket:", etc.); the prefixes are disjoint so they coexist safely.
+func (b *DistributedBackend) FSMDB() *badger.DB { return b.db }
 
 // ECActive reports whether Phase 18 cluster EC will be applied to the next
 // PutObject call (EC enabled + enough nodes for k+m split).
@@ -750,9 +848,17 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 // getObjectEC reads shards from the placed nodes and reconstructs the object.
 // placement[i] is the nodeID holding shardIdx i. Tolerates up to ParityShards
 // unreachable nodes (read-k). The placement slice must have length NumShards().
-func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key string, placement []string) ([]byte, error) {
+func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versionID string, placement []string) ([]byte, error) {
 	if len(placement) != b.ecConfig.NumShards() {
 		return nil, fmt.Errorf("placement length %d != expected %d", len(placement), b.ecConfig.NumShards())
+	}
+	// putObjectEC writes shards under shardKey = key + "/" + versionID so
+	// concurrent versions don't clobber one another on disk. Reads have to
+	// target the same path. Empty versionID preserves the pre-Slice-1 layout
+	// for log replay of legacy EC objects.
+	shardKey := key
+	if versionID != "" {
+		shardKey = key + "/" + versionID
 	}
 	selfID := b.node.ID()
 	shards := make([][]byte, len(placement))
@@ -761,9 +867,9 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key string
 		var data []byte
 		var err error
 		if node == selfID {
-			data, err = b.shardSvc.ReadLocalShard(bucket, key, i)
+			data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
 		} else {
-			data, err = b.shardSvc.ReadShard(ctx, node, bucket, key, i)
+			data, err = b.shardSvc.ReadShard(ctx, node, bucket, shardKey, i)
 			if err != nil && b.peerHealth != nil {
 				b.peerHealth.MarkUnhealthy(node)
 			} else if err == nil && b.peerHealth != nil {
@@ -788,7 +894,24 @@ func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, er
 
 	var obj storage.Object
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey(bucket, key))
+		// Resolve via latest-version pointer when present so callers see the
+		// most recent version. Falls back to the legacy single-key read when
+		// no lat: pointer exists (e.g., legacy replay).
+		metaKeyBytes := objectMetaKey(bucket, key)
+		versionID := ""
+		if latItem, lerr := txn.Get(latestKey(bucket, key)); lerr == nil {
+			_ = latItem.Value(func(v []byte) error {
+				versionID = string(v)
+				return nil
+			})
+			if versionID != "" {
+				metaKeyBytes = objectMetaKeyV(bucket, key, versionID)
+			}
+		} else if lerr != badger.ErrKeyNotFound {
+			return lerr
+		}
+
+		item, err := txn.Get(metaKeyBytes)
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrObjectNotFound
 		}
@@ -800,12 +923,18 @@ func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, er
 			if err != nil {
 				return err
 			}
+			// Tombstone markers aren't observable via HeadObject — callers use
+			// HeadObjectVersion / ListObjectVersions to see them explicitly.
+			if m.ETag == deleteMarkerETag {
+				return storage.ErrObjectNotFound
+			}
 			obj = storage.Object{
 				Key:          m.Key,
 				Size:         m.Size,
 				ContentType:  m.ContentType,
 				ETag:         m.ETag,
 				LastModified: m.LastModified,
+				VersionID:    versionID,
 			}
 			return nil
 		})
@@ -817,41 +946,39 @@ func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, er
 }
 
 func (b *DistributedBackend) DeleteObject(bucket, key string) error {
+	_, err := b.DeleteObjectReturningMarker(bucket, key)
+	return err
+}
+
+// DeleteObjectReturningMarker satisfies server.VersionedSoftDeleter. Same
+// tombstone semantics as DeleteObject but returns the delete marker's
+// VersionID so the S3 handler can surface it in the response header.
+func (b *DistributedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
 	if err := b.HeadBucket(bucket); err != nil {
-		return err
+		return "", err
 	}
 
-	// Delete local data. Both legacy N× full-object file AND Phase 18 EC shards
-	// may exist (e.g. mid-migration). Remove both; ENOENT on either is fine.
+	// Tombstone semantics: DeleteObject creates a delete marker as a new
+	// version. Prior version data remains addressable via GetObjectVersion and
+	// is NOT physically removed here. Hard-delete of a specific version goes
+	// through DeleteObjectVersion (used by lifecycle/scrubber).
+	//
+	// For backward compatibility with the legacy N× on-disk layout, we also
+	// remove the unversioned local object file if present — it's guaranteed to
+	// be stale (superseded by a versioned path) and keeping it risks GetObject
+	// serving it as a fallback read.
 	os.Remove(b.objectPath(bucket, key))
-	if b.shardSvc != nil {
-		_ = b.shardSvc.DeleteLocalShards(bucket, key)
-	}
 
-	// Delete data from peer nodes (distributed GC). DeleteShards removes the
-	// entire <bucket>/<key>/ directory on the peer, covering shardIdx 0..N-1.
-	if b.shardSvc != nil {
-		ctx := context.Background()
-		for _, peer := range b.allNodes {
-			if peer == b.node.ID() {
-				continue
-			}
-			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
-				continue
-			}
-			if err := b.shardSvc.DeleteShards(ctx, peer, bucket, key); err != nil {
-				b.logger.Warn("remote shard delete failed", "peer", peer, "bucket", bucket, "key", key, "error", err)
-				if b.peerHealth != nil {
-					b.peerHealth.MarkUnhealthy(peer)
-				}
-			}
-		}
-	}
-
-	return b.propose(context.Background(), CmdDeleteObject, DeleteObjectCmd{
-		Bucket: bucket,
-		Key:    key,
+	markerID := newVersionID()
+	err := b.propose(context.Background(), CmdDeleteObject, DeleteObjectCmd{
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: markerID,
 	})
+	if err != nil {
+		return "", err
+	}
+	return markerID, nil
 }
 
 func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -861,23 +988,76 @@ func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]
 
 	var objects []*storage.Object
 	err := b.db.View(func(txn *badger.Txn) error {
+		// Load latest-version pointers for this bucket so we can dedupe versioned
+		// entries down to a single row per base key (skipping delete markers).
+		latMap := make(map[string]string) // base key → latest versionID
+		latPrefix := []byte("lat:" + bucket + "/")
+		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
+		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
+			baseKey := string(itLat.Item().Key()[len(latPrefix):])
+			_ = itLat.Item().Value(func(v []byte) error {
+				latMap[baseKey] = string(v)
+				return nil
+			})
+		}
+		itLat.Close()
+
+		// Prefixed scan on obj:{bucket}/{prefix}. For base keys that appear in
+		// latMap we emit exactly the version that's current, skipping all other
+		// versioned entries. For keys not in latMap (legacy non-versioned data)
+		// we emit the single entry we find.
+		emitted := make(map[string]bool)
 		pfx := []byte("obj:" + bucket + "/" + prefix)
+		bucketPfx := []byte("obj:" + bucket + "/")
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
-
 		count := 0
-		for it.Seek(pfx); it.ValidForPrefix([]byte("obj:" + bucket + "/")); it.Next() {
+		for it.Seek(pfx); it.ValidForPrefix(bucketPfx); it.Next() {
 			if !it.ValidForPrefix(pfx) {
 				break
 			}
 			if count >= maxKeys {
 				break
 			}
+			k := string(it.Item().Key())
+			rest := k[len(bucketPfx):]
+
+			// Derive the base key. A versioned key is "{baseKey}/{versionID}";
+			// a legacy key is just "{baseKey}" with no trailing segment.
+			baseKey := rest
+			isVersioned := false
+			if slash := strings.LastIndex(rest, "/"); slash >= 0 {
+				candidateBase := rest[:slash]
+				candidateVID := rest[slash+1:]
+				if lat, ok := latMap[candidateBase]; ok && lat == candidateVID {
+					baseKey = candidateBase
+					isVersioned = true
+				} else if _, baseInLat := latMap[candidateBase]; baseInLat {
+					// This is a non-latest version of a versioned key — skip.
+					continue
+				}
+			}
+			if emitted[baseKey] {
+				continue
+			}
+
+			// If the base key has a lat: pointer but this iteration hit the
+			// legacy unversioned `obj:{bucket}/{baseKey}` entry first, we
+			// should wait and emit the versioned one. Skip this legacy entry.
+			if !isVersioned {
+				if _, inLat := latMap[baseKey]; inLat {
+					continue
+				}
+			}
+
 			var obj storage.Object
 			err := it.Item().Value(func(val []byte) error {
 				m, err := unmarshalObjectMeta(val)
 				if err != nil {
 					return err
+				}
+				if m.ETag == deleteMarkerETag {
+					return nil // tombstone — don't emit
 				}
 				obj = storage.Object{
 					Key:          m.Key,
@@ -886,12 +1066,20 @@ func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]
 					ETag:         m.ETag,
 					LastModified: m.LastModified,
 				}
+				if isVersioned {
+					obj.VersionID = latMap[baseKey]
+				}
 				return nil
 			})
 			if err != nil {
 				return err
 			}
+			if obj.Key == "" {
+				// Skipped (tombstone or empty meta).
+				continue
+			}
 			objects = append(objects, &obj)
+			emitted[baseKey] = true
 			count++
 		}
 		return nil
@@ -999,7 +1187,8 @@ func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID strin
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
 
-	objPath := b.objectPath(bucket, key)
+	versionID := newVersionID()
+	objPath := b.objectPathV(bucket, key, versionID)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
@@ -1043,6 +1232,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID strin
 		ContentType: meta.ContentType,
 		ETag:        etag,
 		ModTime:     now,
+		VersionID:   versionID,
 	})
 	if err != nil {
 		return nil, err
@@ -1056,6 +1246,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID strin
 		ContentType:  meta.ContentType,
 		ETag:         etag,
 		LastModified: now,
+		VersionID:    versionID,
 	}, nil
 }
 
@@ -1080,14 +1271,195 @@ func (b *DistributedBackend) AbortMultipartUpload(bucket, key, uploadID string) 
 	})
 }
 
+// --- Versioning ---
+
+// HeadObjectVersion returns metadata for a specific version. Returns
+// storage.ErrObjectNotFound if the version doesn't exist or is a delete marker.
+func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
+	if err := b.HeadBucket(bucket); err != nil {
+		return nil, err
+	}
+	var obj storage.Object
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			if m.ETag == deleteMarkerETag {
+				// S3 semantics: HEAD on a delete marker version returns 405
+				// MethodNotAllowed. storage.ErrMethodNotAllowed is the sentinel
+				// the server handler maps to that response, including the
+				// x-amz-delete-marker: true header.
+				return storage.ErrMethodNotAllowed
+			}
+			obj = storage.Object{
+				Key:          m.Key,
+				Size:         m.Size,
+				ContentType:  m.ContentType,
+				ETag:         m.ETag,
+				LastModified: m.LastModified,
+				VersionID:    versionID,
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &obj, nil
+}
+
+// GetObjectVersion reads a specific version's data. Returns
+// storage.ErrObjectNotFound if the version doesn't exist. For delete markers,
+// returns ErrMethodNotAllowed to mirror the erasure backend's behavior.
+func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
+	obj, err := b.HeadObjectVersion(bucket, key, versionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if obj.IsDeleteMarker {
+		return nil, nil, storage.ErrMethodNotAllowed
+	}
+	// Prefer the versioned local file; fall back to legacy unversioned path if
+	// the version happens to be the legacy latest (uncommon mid-transition case).
+	if f, oerr := os.Open(b.objectPathV(bucket, key, versionID)); oerr == nil {
+		return f, obj, nil
+	}
+	f, err := os.Open(b.objectPath(bucket, key))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open versioned object: %w", err)
+	}
+	return f, obj, nil
+}
+
+// DeleteObjectVersion hard-deletes a specific version (no tombstone).
+// Used by lifecycle/scrubber to reclaim expired versions.
+func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) error {
+	if err := b.HeadBucket(bucket); err != nil {
+		return err
+	}
+	// Local data cleanup: best-effort (ENOENT is fine — FSM apply is the source of truth).
+	_ = os.Remove(b.objectPathV(bucket, key, versionID))
+	return b.propose(context.Background(), CmdDeleteObjectVersion, DeleteObjectVersionCmd{
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: versionID,
+	})
+}
+
+// ListObjectVersions returns every version (including delete markers) under
+// the given prefix, sorted newest-first. When maxKeys > 0 the result is
+// truncated. VersionIDs are UUIDv7 (k-sortable ASC by ms timestamp), so we
+// sort DESC to get newest-first. Matches server.ObjectVersionLister.
+func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
+	if err := b.HeadBucket(bucket); err != nil {
+		return nil, err
+	}
+	var versions []*storage.ObjectVersion
+	latestMap := map[string]string{} // key → latestVID
+	err := b.db.View(func(txn *badger.Txn) error {
+		// Pre-scan latest pointers for the prefix so each version can tag IsLatest.
+		latPrefix := []byte("lat:" + bucket + "/" + prefix)
+		latIt := txn.NewIterator(badger.DefaultIteratorOptions)
+		for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
+			k := string(latIt.Item().Key())
+			key := strings.TrimPrefix(k, "lat:"+bucket+"/")
+			_ = latIt.Item().Value(func(v []byte) error { latestMap[key] = string(v); return nil })
+		}
+		latIt.Close()
+
+		// Match any object key starting with `prefix` — iterate the per-bucket
+		// versioned store and filter in-memory. The version ID is the last
+		// path segment after the final `/`; everything before is the S3 key.
+		objPrefix := []byte("obj:" + bucket + "/")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
+			k := string(it.Item().Key())
+			rest := strings.TrimPrefix(k, "obj:"+bucket+"/")
+			// Versioned format: {key}/{versionID}. Unversioned legacy: {key}.
+			slash := strings.LastIndex(rest, "/")
+			if slash < 0 {
+				continue // legacy unversioned entry, no per-version record
+			}
+			key := rest[:slash]
+			vid := rest[slash+1:]
+			if vid == "" || !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			latestVID := latestMap[key]
+			var v storage.ObjectVersion
+			if err := it.Item().Value(func(val []byte) error {
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				v = storage.ObjectVersion{
+					Key:            key,
+					VersionID:      vid,
+					IsLatest:       vid == latestVID,
+					IsDeleteMarker: m.ETag == deleteMarkerETag,
+					LastModified:   m.LastModified,
+					ETag:           m.ETag,
+					Size:           m.Size,
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			versions = append(versions, &v)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Sort DESC by VersionID (UUIDv7 is lex-ASC-by-time, so reverse = newest-first).
+	sort.Slice(versions, func(i, j int) bool {
+		if versions[i].Key != versions[j].Key {
+			return versions[i].Key < versions[j].Key
+		}
+		return versions[i].VersionID > versions[j].VersionID
+	})
+	if maxKeys > 0 && len(versions) > maxKeys {
+		versions = versions[:maxKeys]
+	}
+	return versions, nil
+}
+
 // --- Path helpers ---
 
 func (b *DistributedBackend) bucketDir(bucket string) string {
 	return filepath.Join(b.root, "data", bucket)
 }
 
+// objectPath returns the legacy-unversioned local path for a full-object copy.
+// Kept as a read fallback only — writers go through objectPathV. New keys never
+// collide with objectPathV because the versioned namespace lives under a
+// sibling ".obj" directory.
 func (b *DistributedBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
+}
+
+// objectPathV returns the version-addressable local path for a full-object copy
+// in the N× path: {root}/data/{bucket}/.obj/{key}/{versionID}.
+//
+// The ".obj/" sibling namespace was adopted in v0.0.4.0 because the previous
+// scheme ({bucket}/{key}/.v/{vid}) collided with the unversioned path — if a
+// caller like NFS wrote "foo.txt" as a plain file via an older code path, a
+// subsequent versioned write couldn't MkdirAll("foo.txt/.v/"). Splitting
+// versioned writes into a separate ".obj" root resolves that; it's at most
+// the bucket name that's reserved, which S3 already forbids keys from.
+func (b *DistributedBackend) objectPathV(bucket, key, versionID string) string {
+	return filepath.Join(b.root, "data", bucket, ".obj", key, versionID)
 }
 
 func (b *DistributedBackend) partDir(uploadID string) string {

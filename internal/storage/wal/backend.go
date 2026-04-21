@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 
@@ -31,7 +32,15 @@ func (b *Backend) PutObject(bucket, key string, r io.Reader, contentType string)
 	if err != nil {
 		return nil, err
 	}
-	b.w.AppendAsync(Entry{Op: OpPut, Bucket: bucket, Key: key, ETag: obj.ETag, ContentType: obj.ContentType, Size: obj.Size})
+	b.w.AppendAsync(Entry{
+		Op:          OpPut,
+		Bucket:      bucket,
+		Key:         key,
+		ETag:        obj.ETag,
+		ContentType: obj.ContentType,
+		Size:        obj.Size,
+		VersionID:   obj.VersionID,
+	})
 	return obj, nil
 }
 
@@ -39,6 +48,11 @@ func (b *Backend) DeleteObject(bucket, key string) error {
 	if err := b.Backend.DeleteObject(bucket, key); err != nil {
 		return err
 	}
+	// VersionID is unknown at this layer — backends that model deletes as
+	// tombstone versions (DistributedBackend) allocate the ID internally and
+	// don't expose it through Backend.DeleteObject. Replay treats an empty
+	// VersionID as a "latest-pointer delete," which is correct for either
+	// tombstone or hard-delete semantics on read-paths that walk versions.
 	b.w.AppendAsync(Entry{Op: OpDelete, Bucket: bucket, Key: key})
 	return nil
 }
@@ -48,8 +62,40 @@ func (b *Backend) CompleteMultipartUpload(bucket, key, uploadID string, parts []
 	if err != nil {
 		return nil, err
 	}
-	b.w.AppendAsync(Entry{Op: OpPut, Bucket: bucket, Key: key, ETag: obj.ETag, ContentType: obj.ContentType, Size: obj.Size})
+	b.w.AppendAsync(Entry{
+		Op:          OpPut,
+		Bucket:      bucket,
+		Key:         key,
+		ETag:        obj.ETag,
+		ContentType: obj.ContentType,
+		Size:        obj.Size,
+		VersionID:   obj.VersionID,
+	})
 	return obj, nil
+}
+
+// DeleteObjectVersion is a pass-through that records a WAL entry for
+// version-specific hard deletes (lifecycle / scrubber paths). Without this
+// hook the server's unwrap chain reaches the inner backend directly and the
+// deletion would not appear in the WAL stream used for PITR replay.
+func (b *Backend) DeleteObjectVersion(bucket, key, versionID string) error {
+	type versionDeleter interface {
+		DeleteObjectVersion(bucket, key, versionID string) error
+	}
+	vd, ok := b.Backend.(versionDeleter)
+	if !ok {
+		return fmt.Errorf("wal: inner backend does not support DeleteObjectVersion")
+	}
+	if err := vd.DeleteObjectVersion(bucket, key, versionID); err != nil {
+		return err
+	}
+	b.w.AppendAsync(Entry{
+		Op:        OpDeleteVersion,
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: versionID,
+	})
+	return nil
 }
 
 // ListAllObjects implements storage.Snapshotable by delegating to inner.

@@ -26,6 +26,10 @@ const (
 	// Phase 18 Cluster EC — Slice 1: shard placement metadata
 	CmdPutShardPlacement    CommandType = 12
 	CmdDeleteShardPlacement CommandType = 13
+	// Versioning — Slice 1 of the unify-storage-paths refactor.
+	// CmdDeleteObjectVersion hard-deletes a specific version (no tombstone);
+	// used by lifecycle/scrubber. Plain CmdDeleteObject creates a tombstone marker.
+	CmdDeleteObjectVersion CommandType = 14
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -49,11 +53,20 @@ type PutObjectMetaCmd struct {
 	ContentType string
 	ETag        string
 	ModTime     int64
+	VersionID   string
 }
 
 type DeleteObjectCmd struct {
-	Bucket string
-	Key    string
+	Bucket    string
+	Key       string
+	VersionID string // version id of the tombstone marker created by this delete (may be empty for legacy replay)
+}
+
+// DeleteObjectVersionCmd hard-deletes a specific version by id.
+type DeleteObjectVersionCmd struct {
+	Bucket    string
+	Key       string
+	VersionID string
 }
 
 type CreateMultipartUploadCmd struct {
@@ -72,6 +85,7 @@ type CompleteMultipartCmd struct {
 	ContentType string
 	ETag        string
 	ModTime     int64
+	VersionID   string
 }
 
 type AbortMultipartCmd struct {
