@@ -77,7 +77,7 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	require.NoError(s.T(), cmd.Start())
 	defer cmd.Process.Kill()
 
-	waitForPort(s.proxyPort, 10*time.Second)
+	waitForPort(s.T(), s.proxyPort, 10*time.Second)
 
 	// Create bucket and write data via proxy
 	s3Client := newS3Client(fmt.Sprintf("http://localhost:%d", s.proxyPort))

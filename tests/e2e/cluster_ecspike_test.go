@@ -81,17 +81,18 @@ func startEcspikeClusterOpts(t *testing.T, noEC bool) ([]*ecspikeNode, func()) {
 			args = append(args, "--ec=false", "--no-encryption")
 		}
 		cmd := exec.Command(binary, args...)
-		if err := cmd.Start(); err != nil {
-			cleanup()
-			require.NoErrorf(t, err, "start node %d", i)
-		}
+		// Assign before Start so cleanup() can remove dir even if Start fails.
 		nodes[i] = &ecspikeNode{
 			port:     port,
 			endpoint: fmt.Sprintf("http://127.0.0.1:%d", port),
 			dataDir:  dir,
 			cmd:      cmd,
 		}
-		waitForPort(port, 10*time.Second)
+		if err := cmd.Start(); err != nil {
+			cleanup()
+			require.NoErrorf(t, err, "start node %d", i)
+		}
+		waitForPort(t, port, 10*time.Second)
 	}
 	return nodes, cleanup
 }
