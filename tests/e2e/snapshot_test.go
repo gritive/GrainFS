@@ -53,7 +53,6 @@ func postJSON(url string, body interface{}) (*http.Response, error) {
 // Note: DeleteObject immediately removes blobs, so restore of deleted objects
 // reports stale blobs. This test uses PUT-after-snapshot instead.
 func TestSnapshot_CreateAndRestore(t *testing.T) {
-	t.Skip("DistributedBackend Snapshotable port deferred — TODOS v0.0.4.0")
 	ctx := context.Background()
 	bucket := "snapshot-e2e"
 	createBucket(t, bucket)
@@ -142,7 +141,6 @@ func TestSnapshot_CreateAndRestore(t *testing.T) {
 
 // TestSnapshot_List verifies GET /admin/snapshots returns sorted list.
 func TestSnapshot_List(t *testing.T) {
-	t.Skip("DistributedBackend Snapshotable port deferred — TODOS v0.0.4.0")
 	// Create 2 snapshots
 	for i := 0; i < 2; i++ {
 		resp, err := postJSON(testServerURL+"/admin/snapshots", map[string]string{"reason": fmt.Sprintf("list-test-%d", i)})
@@ -168,7 +166,6 @@ func TestSnapshot_List(t *testing.T) {
 
 // TestSnapshot_NotFound verifies restore of nonexistent snapshot returns 404.
 func TestSnapshot_NotFound(t *testing.T) {
-	t.Skip("DistributedBackend Snapshotable port deferred — TODOS v0.0.4.0")
 	restoreResp, err := postJSON(testServerURL+"/admin/snapshots/999999/restore", nil)
 	require.NoError(t, err)
 	defer restoreResp.Body.Close()
