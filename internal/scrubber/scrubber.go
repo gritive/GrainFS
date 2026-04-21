@@ -60,6 +60,36 @@ type Migrator interface {
 	MigratePlainToEC(rec PlainRecord) error
 }
 
+// ShardOwner is an optional interface backends can implement to scope
+// verification to the shards this node is responsible for. Cluster mode
+// fans shards out across peers; each node's scrubber should only verify
+// and repair the shards it holds locally — peer-owned shards are the peer's
+// responsibility. When the backend does not implement this interface, the
+// scrubber verifies every shard (the legacy single-node behaviour).
+//
+// Slice 3 of refactor/unify-storage-paths.
+type ShardOwner interface {
+	// NodeID identifies this node inside the placement vector.
+	NodeID() string
+	// OwnedShards returns the shard indices this node owns for the given
+	// object. Returns nil when the object has no placement (non-EC) or this
+	// node is not in the placement vector.
+	OwnedShards(bucket, key, versionID, nodeID string) []int
+}
+
+// ShardRepairer is an optional interface backends can implement to repair
+// a single owned shard by pulling surviving shards from peers and writing
+// the reconstructed bytes back to local disk. When a backend implements
+// both ShardOwner and ShardRepairer, the scrubber delegates repair of
+// missing/corrupt owned shards to RepairShardLocal instead of running the
+// in-process Reed-Solomon reconstruct path (which would fail in cluster
+// mode since this node only holds its own shards, not peers').
+//
+// Slice 3 of refactor/unify-storage-paths.
+type ShardRepairer interface {
+	RepairShardLocal(bucket, key, versionID string, shardIdx int) error
+}
+
 // maxRepairsPerCycle limits repairs per scrub cycle to avoid I/O storms.
 const maxRepairsPerCycle = 100
 
@@ -195,6 +225,15 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		return
 	}
 
+	// Cluster-mode opt-in: when the backend implements ShardOwner, we only
+	// verify the shards this node actually holds; peer-owned shards are each
+	// peer's responsibility. When ShardRepairer is also implemented, missing
+	// shards are repaired by pulling survivors from peers rather than by the
+	// in-process Reed-Solomon reconstruct path (which has no peer shards to
+	// feed it in cluster mode).
+	owner, _ := s.backend.(ShardOwner)
+	repairer, _ := s.backend.(ShardRepairer)
+
 	knownDirs := make(map[string]bool)
 	repairCount := 0
 	for _, bucket := range buckets {
@@ -221,6 +260,18 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 				continue
 			}
 
+			// Resolve the indices to verify. In ShardOwner mode an empty
+			// result means "nothing on this node" — skip the object wholesale
+			// so the orphan sweep doesn't mistake an unverified object for
+			// a healthy one.
+			var indices []int
+			if owner != nil {
+				indices = owner.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, owner.NodeID())
+				if len(indices) == 0 {
+					continue
+				}
+			}
+
 			// Track shard dir as known (for orphan sweep).
 			total := rec.DataShards + rec.ParityShards
 			if total > 0 {
@@ -233,7 +284,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			metrics.ScrubObjectsCheckedTotal.Inc()
 			atomic.AddInt64(&s.stats.ObjectsChecked, 1)
 
-			status := s.verifier.Verify(rec)
+			status := s.verifier.VerifyIndices(rec, indices)
 
 			s.mu.Lock()
 			s.lastStatuses[rec.Bucket+"/"+rec.Key] = status
@@ -260,14 +311,15 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 				continue
 			}
 
-			if err := s.repairer.RepairWithCorrelation(rec, status, correlationID); err != nil {
+			repaired, rerr := s.repairOne(ctx, rec, status, correlationID, repairer)
+			if rerr != nil {
 				metrics.ECDegradedTotal.Inc()
 				atomic.AddInt64(&s.stats.Unrepairable, 1)
-				slog.Error("scrub: unrepairable", "bucket", rec.Bucket, "key", rec.Key, "err", err)
+				slog.Error("scrub: unrepairable", "bucket", rec.Bucket, "key", rec.Key, "err", rerr)
 				continue
 			}
 			metrics.ScrubRepairedTotal.Inc()
-			metrics.HealShardsRepairedTotal.Add(float64(errCount))
+			metrics.HealShardsRepairedTotal.Add(float64(repaired))
 			atomic.AddInt64(&s.stats.Repaired, 1)
 			repairCount++
 		}
@@ -286,6 +338,51 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	s.mu.Lock()
 	s.stats.LastRun = time.Now()
 	s.mu.Unlock()
+}
+
+// repairOne drives repair for a single object. When the backend implements
+// ShardRepairer, each missing/corrupt shard is repaired by RepairShardLocal
+// (peer-sourced reconstruct). Otherwise the legacy in-process engine runs.
+// Returns the count of shards repaired.
+func (s *BackgroundScrubber) repairOne(ctx context.Context, rec ObjectRecord, status ShardStatus, correlationID string, repairer ShardRepairer) (int64, error) {
+	_ = ctx
+	if repairer == nil {
+		if err := s.repairer.RepairWithCorrelation(rec, status, correlationID); err != nil {
+			return 0, err
+		}
+		return int64(len(status.Missing) + len(status.Corrupt)), nil
+	}
+
+	damaged := append(append([]int{}, status.Missing...), status.Corrupt...)
+	var repaired int64
+	var firstErr error
+	for _, idx := range damaged {
+		reconstructStart := time.Now()
+		if err := repairer.RepairShardLocal(rec.Bucket, rec.Key, rec.VersionID, idx); err != nil {
+			ev := newRepairEvent(PhaseReconstruct, OutcomeFailed, rec, correlationID)
+			ev.ShardID = int32(idx)
+			ev.DurationMs = uint32(time.Since(reconstructStart).Milliseconds())
+			ev.ErrCode = "reconstruct_failed"
+			s.emitter.Emit(ev)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		reconstructEv := newRepairEvent(PhaseReconstruct, OutcomeSuccess, rec, correlationID)
+		reconstructEv.ShardID = int32(idx)
+		reconstructEv.DurationMs = uint32(time.Since(reconstructStart).Milliseconds())
+		s.emitter.Emit(reconstructEv)
+		writeEv := newRepairEvent(PhaseWrite, OutcomeSuccess, rec, correlationID)
+		writeEv.ShardID = int32(idx)
+		s.emitter.Emit(writeEv)
+		repaired++
+	}
+	if firstErr != nil && repaired == 0 {
+		return 0, firstErr
+	}
+	s.emitter.Emit(newRepairEvent(PhaseVerify, OutcomeSuccess, rec, correlationID))
+	return repaired, nil
 }
 
 func (s *BackgroundScrubber) runMigration(ctx context.Context, migrator Migrator, buckets []string) {

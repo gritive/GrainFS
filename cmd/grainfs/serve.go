@@ -588,6 +588,27 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			"errors", len(rec.Errors))
 	}
 
+	// Slice 3 of refactor/unify-storage-paths: cluster-mode scrubber.
+	// Every node runs the scrubber; duplicate repair attempts are safe
+	// because RepairShard pulls survivors from peers and writes to
+	// placement[shardIdx] — idempotent on success, no-op when the shard is
+	// already present on the write target.
+	//
+	// ShardPlacementMonitor auto-repair is intentionally NOT wired in this
+	// slice: the placement vector uses raft addresses while raft.Node.ID()
+	// returns the human-readable node name, so the monitor's owner filter
+	// never matches (pre-existing Phase-18 identity mismatch). The
+	// scrubber's full-scan path catches the same missing shards; a future
+	// slice can re-enable ShardOwner filtering once the identity spaces are
+	// reconciled.
+	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
+	if scrubInterval > 0 && distBackend.ECActive() {
+		sc := scrubber.New(distBackend, scrubInterval)
+		sc.SetEmitter(srv.HealEmitter())
+		sc.Start(ctx)
+		slog.Info("cluster scrubber started", "interval", scrubInterval)
+	}
+
 	go func() {
 		if err := srv.Run(); err != nil {
 			slog.Error("http server error", "error", err)
@@ -691,11 +712,11 @@ type raftBalancerAdapter struct {
 	peers []string // Raft peer addresses (node IDs for balancer purposes)
 }
 
-func (a *raftBalancerAdapter) Propose(data []byte) error   { return a.node.Propose(data) }
-func (a *raftBalancerAdapter) IsLeader() bool              { return a.node.State() == raft.Leader }
-func (a *raftBalancerAdapter) NodeID() string              { return a.node.ID() }
-func (a *raftBalancerAdapter) PeerIDs() []string           { return a.peers }
-func (a *raftBalancerAdapter) TransferLeadership() error   { return a.node.TransferLeadership() }
+func (a *raftBalancerAdapter) Propose(data []byte) error { return a.node.Propose(data) }
+func (a *raftBalancerAdapter) IsLeader() bool            { return a.node.State() == raft.Leader }
+func (a *raftBalancerAdapter) NodeID() string            { return a.node.ID() }
+func (a *raftBalancerAdapter) PeerIDs() []string         { return a.peers }
+func (a *raftBalancerAdapter) TransferLeadership() error { return a.node.TransferLeadership() }
 
 // startBalancer wires and launches the BalancerProposer, GossipSender, GossipReceiver,
 // MigrationExecutor and migration task channel, then replays any persisted pending tasks.

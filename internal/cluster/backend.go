@@ -528,7 +528,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	// Phase 18: EC placement takes precedence. Absent placement falls through
 	// to the legacy N×-replicated single-shard path below.
 	if nodes, ok := b.fsm.LookupShardPlacement(bucket, key); ok && b.shardSvc != nil {
-		data, ecErr := b.getObjectEC(context.Background(), bucket, key, nodes)
+		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, nodes)
 		if ecErr == nil {
 			return io.NopCloser(bytes.NewReader(data)), obj, nil
 		}
@@ -607,9 +607,14 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 // putObjectEC or ConvertObjectToEC). shardIdx must be in [0, k+m). At least k
 // of the other shards must be readable or reconstruction fails.
 //
+// versionID identifies the physical shard files on disk: putObjectEC writes
+// shards under `{key}/{versionID}/shard_{N}` via ShardService, and this
+// routine must read/write the same layout. When versionID is empty, the
+// latest pointer from the FSM is consulted.
+//
 // Write target: the repaired shard goes back to placement[shardIdx]. When
 // that node is this node, we use WriteLocalShard; otherwise WriteShard.
-func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string, shardIdx int) error {
+func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versionID string, shardIdx int) error {
 	if b.shardSvc == nil {
 		return fmt.Errorf("shard service not configured")
 	}
@@ -622,6 +627,19 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string
 	}
 	if len(placement) != b.ecConfig.NumShards() {
 		return fmt.Errorf("placement length %d != k+m %d", len(placement), b.ecConfig.NumShards())
+	}
+
+	// Resolve to the latest version when caller doesn't know it (monitor
+	// callback path). Empty latest means pre-versioned legacy EC; fall back
+	// to bare-key layout, preserving pre-Slice-3 behaviour.
+	if versionID == "" {
+		if latest, lerr := b.fsm.LookupLatestVersion(bucket, key); lerr == nil {
+			versionID = latest
+		}
+	}
+	shardKey := key
+	if versionID != "" {
+		shardKey = key + "/" + versionID
 	}
 
 	selfID := b.node.ID()
@@ -637,9 +655,9 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string
 		var data []byte
 		var rerr error
 		if node == selfID {
-			data, rerr = b.shardSvc.ReadLocalShard(bucket, key, i)
+			data, rerr = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
 		} else {
-			data, rerr = b.shardSvc.ReadShard(ctx, node, bucket, key, i)
+			data, rerr = b.shardSvc.ReadShard(ctx, node, bucket, shardKey, i)
 		}
 		if rerr == nil && data != nil {
 			shards[i] = data
@@ -665,9 +683,9 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key string
 	// Write just the missing shard back to its placement node.
 	target := placement[shardIdx]
 	if target == selfID {
-		return b.shardSvc.WriteLocalShard(bucket, key, shardIdx, freshShards[shardIdx])
+		return b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShards[shardIdx])
 	}
-	return b.shardSvc.WriteShard(ctx, target, bucket, key, shardIdx, freshShards[shardIdx])
+	return b.shardSvc.WriteShard(ctx, target, bucket, shardKey, shardIdx, freshShards[shardIdx])
 }
 
 // FSMRef returns the underlying FSM so reshard / monitor code can iterate
@@ -797,9 +815,17 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 // getObjectEC reads shards from the placed nodes and reconstructs the object.
 // placement[i] is the nodeID holding shardIdx i. Tolerates up to ParityShards
 // unreachable nodes (read-k). The placement slice must have length NumShards().
-func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key string, placement []string) ([]byte, error) {
+func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versionID string, placement []string) ([]byte, error) {
 	if len(placement) != b.ecConfig.NumShards() {
 		return nil, fmt.Errorf("placement length %d != expected %d", len(placement), b.ecConfig.NumShards())
+	}
+	// putObjectEC writes shards under shardKey = key + "/" + versionID so
+	// concurrent versions don't clobber one another on disk. Reads have to
+	// target the same path. Empty versionID preserves the pre-Slice-1 layout
+	// for log replay of legacy EC objects.
+	shardKey := key
+	if versionID != "" {
+		shardKey = key + "/" + versionID
 	}
 	selfID := b.node.ID()
 	shards := make([][]byte, len(placement))
@@ -808,9 +834,9 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key string
 		var data []byte
 		var err error
 		if node == selfID {
-			data, err = b.shardSvc.ReadLocalShard(bucket, key, i)
+			data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
 		} else {
-			data, err = b.shardSvc.ReadShard(ctx, node, bucket, key, i)
+			data, err = b.shardSvc.ReadShard(ctx, node, bucket, shardKey, i)
 			if err != nil && b.peerHealth != nil {
 				b.peerHealth.MarkUnhealthy(node)
 			} else if err == nil && b.peerHealth != nil {

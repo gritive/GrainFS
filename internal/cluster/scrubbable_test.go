@@ -203,8 +203,10 @@ func TestShardPaths(t *testing.T) {
 }
 
 func TestShardPaths_MatchesShardServiceLayout(t *testing.T) {
-	// ShardPaths must return the same path that ShardService.WriteLocalShard
-	// writes to, so scrubber verification reads what the EC put flow wrote.
+	// ShardPaths must return the same path that putObjectEC writes to via
+	// ShardService.WriteLocalShard. putObjectEC composes shardKey = key +
+	// "/" + versionID before calling ShardService; ShardPaths mirrors that
+	// layout so scrubber reads find what the EC put flow wrote.
 	b := newTestDistributedBackend(t)
 
 	svc := NewShardService(b.root, nil)

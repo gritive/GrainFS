@@ -18,6 +18,7 @@ package cluster
 //     sidesteps the issue entirely by iterating `lat:` pointers instead.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -137,12 +138,13 @@ func (b *DistributedBackend) ObjectExists(bucket, key string) (bool, error) {
 }
 
 // ShardPaths returns the on-disk path for each shard of the versioned
-// object, matching the layout ShardService.WriteLocalShard writes to:
+// object, matching the layout putObjectEC writes to via ShardService:
 //
 //	{dataDir}/shards/{bucket}/{key}/{versionID}/shard_{N}
 //
 // dataDir is the cluster backend's root. The shardSvc's dataDir is
-// root/shards/, so the path is root/shards/{bucket}/{key}/{versionID}/shard_{N}.
+// root/shards/; putObjectEC composes shardKey as `key/versionID` before
+// handing it to ShardService, so the physical path includes the version.
 func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShards int) []string {
 	base := filepath.Join(b.root, "shards", bucket, key, versionID)
 	paths := make([]string, totalShards)
@@ -203,4 +205,48 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 		dir.Close()
 	}
 	return nil
+}
+
+// RaftNodeID returns this node's Raft node ID. Exposed to admin tooling
+// and to Scrubber wiring helpers; not part of scrubber.ShardOwner because
+// allNodes in the current cluster implementation uses raft addresses while
+// b.node.ID() is the human-readable node name, so the two identifier spaces
+// do not line up inside the placement vector. Until that pre-existing
+// mismatch is resolved, the scrubber runs in unfiltered mode and every
+// node reconstructs locally-missing shards via RepairShardLocal below.
+// See TODO-owned-shards-filter in docs/slices.md.
+func (b *DistributedBackend) RaftNodeID() string {
+	if b.node == nil {
+		return ""
+	}
+	return b.node.ID()
+}
+
+// OwnedShards returns the shard indices of placement that match the supplied
+// nodeID. Exposed for future cluster-aware scrubber filtering (see
+// RaftNodeID). Returns nil when the object has no placement record (non-EC /
+// N× path) or when nodeID does not appear in the placement vector.
+// versionID is accepted for interface symmetry with ECBackend; the FSM
+// placement record itself is keyed by (bucket, key) only.
+func (b *DistributedBackend) OwnedShards(bucket, key, versionID, nodeID string) []int {
+	_ = versionID
+	placement, ok := b.fsm.LookupShardPlacement(bucket, key)
+	if !ok {
+		return nil
+	}
+	var owned []int
+	for i, holder := range placement {
+		if holder == nodeID {
+			owned = append(owned, i)
+		}
+	}
+	return owned
+}
+
+// RepairShardLocal is a context-less wrapper around RepairShard for the
+// scrubber, which has no request ctx of its own. Implements
+// scrubber.ShardRepairer. versionID is threaded through so the repair reads
+// and writes the correct on-disk path (shardKey = key + "/" + versionID).
+func (b *DistributedBackend) RepairShardLocal(bucket, key, versionID string, shardIdx int) error {
+	return b.RepairShard(context.Background(), bucket, key, versionID, shardIdx)
 }

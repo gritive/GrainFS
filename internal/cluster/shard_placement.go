@@ -251,6 +251,30 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, nodes []string) er
 	})
 }
 
+// LookupLatestVersion returns the most recent versionID for (bucket, key),
+// as written by applyPutObjectMeta to the `lat:` pointer. Used by
+// RepairShard to resolve the physical shard path when callers don't have a
+// versionID of their own (ShardPlacementMonitor onMissing). Returns an
+// error when the pointer is absent; callers treat that as "pre-versioned
+// legacy EC" and fall back to the bare-key layout.
+func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
+	var versionID string
+	err := f.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(latestKey(bucket, key))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			versionID = string(val)
+			return nil
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	return versionID, nil
+}
+
 // LookupShardPlacement returns the list of nodeIDs holding shards for the
 // given object, in shardIdx order. Returns ok=false if no placement record
 // exists (typical for N× replication objects pre-Phase-18).

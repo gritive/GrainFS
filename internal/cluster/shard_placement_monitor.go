@@ -62,6 +62,12 @@ func (m *ShardPlacementMonitor) SetOnMissing(fn func(bucket, key string, shardId
 // Scan walks every placement record once, verifies each shard assigned to
 // this node exists on disk, and returns the number of missing shards it
 // found. Callers can hook repair logic via SetOnMissing.
+//
+// On-disk paths compose the shardKey as `key/versionID` because
+// putObjectEC stores shards under `{bucket}/{key}/{versionID}/shard_{N}`.
+// The monitor resolves the latest versionID via the FSM `lat:` pointer;
+// pre-Slice-1 legacy EC without a version pointer falls back to the bare
+// key layout.
 func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	if m.shardSvc == nil {
 		return 0, errors.New("shard service not configured")
@@ -71,11 +77,15 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		shardKey := key
+		if version, verr := m.fsm.LookupLatestVersion(bucket, key); verr == nil && version != "" {
+			shardKey = key + "/" + version
+		}
 		for shardIdx, holder := range nodes {
 			if holder != m.nodeID {
 				continue // someone else's shard; their monitor handles it
 			}
-			if _, rerr := m.shardSvc.ReadLocalShard(bucket, key, shardIdx); rerr != nil {
+			if _, rerr := m.shardSvc.ReadLocalShard(bucket, shardKey, shardIdx); rerr != nil {
 				if os.IsNotExist(rerr) {
 					atomic.AddInt64(&missing, 1)
 					m.logger.Warn("missing local shard",
