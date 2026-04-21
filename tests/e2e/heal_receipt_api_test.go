@@ -89,12 +89,12 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 
 	// ReceiptIDs used across the test — literal ids make log output readable.
 	const (
-		idLocalA    = "rcpt-on-A-local"
-		idCHot      = "rcpt-on-C-hot-gossiped"
-		idCOld      = "rcpt-on-C-cold-outside-window"
-		idMissing   = "rcpt-nowhere-found"
-		bucketName  = "audit-test"
-		objectKey   = "some/key"
+		idLocalA   = "rcpt-on-A-local"
+		idCHot     = "rcpt-on-C-hot-gossiped"
+		idCOld     = "rcpt-on-C-cold-outside-window"
+		idMissing  = "rcpt-nowhere-found"
+		bucketName = "audit-test"
+		objectKey  = "some/key"
 	)
 
 	// Pre-seed: open each node's receipt BadgerDB BEFORE the process starts,

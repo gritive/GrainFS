@@ -80,10 +80,6 @@
 - [ ] HealReceipt 스키마 변경 범위 분석
 - [ ] Write-all vs write-majority tail latency 트레이드오프 재검토
 
-### Phase 18 이후 재검토
-
-- [x] **Solo mode 제거 — 아키텍처 통합 완료** (v0.0.3.1 + v0.0.4.0). `refactor/unify-storage-paths`에서 ECBackend 완전 삭제, `runLocalNode` 제거, 모든 경로가 `DistributedBackend`(singleton Raft = no-peers) 경유. Versioning/Scrubber/Lifecycle/WAL-PITR을 cluster 경로에 포팅.
-
 ### v0.0.4.0 follow-up
 
 - [ ] **NFS/VFS path 충돌 해결** — `objectPath(bucket, key)` (unversioned file) vs `objectPathV(bucket, key, vid)` (`key/.v/vid` 디렉터리) 경로가 충돌하여 `TestNFS_MountAndWriteReadFile`/`TestNFS_MultipleFiles` 실패. Key/version path 스킴 재설계 (예: `data/bucket/.objects/{key}/{vid}` 플랫 구조) 또는 NFS 레이어에서 별도 bucket namespace 사용.
@@ -92,6 +88,10 @@
 - [ ] **S3 ACL Raft 직렬화** — `server.ACLSetter`(SetObjectACL) 구현. 현재 `internal/server/acl_e2e_test.go`가 `t.Skip`. ObjectMeta에 ACL 필드 추가 + `CmdSetObjectACL` FSM 명령.
 - [ ] **BucketVersioning Raft 직렬화** — 현재 `bucketver:{bucket}` 키는 로컬 BadgerDB에만 씀. 멀티-노드 클러스터에서 일관성을 위해 `CmdSetBucketVersioning` FSM 명령 추가.
 - [ ] **ShardOwner 필터링 재활성화** — `scrubber.ShardOwner` 인터페이스가 선언되었지만 DistributedBackend의 `NodeID`가 raft name 반환 vs allNodes가 주소 저장 → 필터가 no-op이었음. Slice 8에서 self-addr 수정으로 이제 주소끼리 비교 가능. 별도 slice에서 `ShardPlacementMonitor`의 `SetOnMissing` 콜백 연결 포함.
+- [ ] **5-node loopback Raft 부트스트랩 안정성** — `TestE2E_ClusterEC_PutGet_5Node`가 CI에서 "no leader found" 로 flaky (130s+ 대기 후 timeout). 3-node 시나리오는 안정적. Election timeout 튜닝 또는 테스트에서 warm-up을 단계적으로 하는 방식 검토.
+- [ ] **Per-bucket EC policy 재설계** — ECBackend의 `/admin/buckets/{b}/ec-policy` 토글 API가 사라짐. DistributedBackend는 cluster 전역 `--cluster-ec`로 동작. 필요시 per-bucket `ECConfig`를 FSM에 저장하여 복원.
+- [ ] **TestE2E_Versioning_Full 재작성** — 이전 테스트는 `startECServerWithScrub` 헬퍼를 통해 ECBackend 내부에 결합. DistributedBackend 버전 API로 재작성 (`internal/cluster/versioning_test.go`는 unit 커버, e2e 경로 재구축 필요).
+- [ ] **TestCrossProtocolS3PutVFSStat 복구** — NFS/VFS flush 경로 수정(NFS 항목 참조) 뒤 자동 복구 가능성 있음. 함께 재검증.
 
 ## Phase 19: Performance
 

@@ -51,6 +51,7 @@ func startECServerWithPort(t *testing.T) (*s3.Client, string, int, func()) {
 }
 
 func TestBucketECPolicy_Toggle(t *testing.T) {
+	t.Skip("Per-bucket EC policy API was ECBackend-specific; DistributedBackend uses global --cluster-ec flag + per-object ShardPlacement. Tracked in TODOS v0.0.4.0")
 	client, dataDir, port, cleanup := startECServerWithPort(t)
 	defer cleanup()
 

@@ -68,4 +68,3 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 
 	t.Log("✅ Jepsen test passed - linearizability verified")
 }
-

@@ -222,4 +222,3 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	expected := append(part1Data, part2Data...)
 	assert.Equal(t, expected, body)
 }
-
