@@ -82,13 +82,16 @@
 
 ### Phase 18 이후 재검토
 
-- [ ] **Solo mode 제거 (Phase 18 이후 집중 작업) — consolidation 필요** — Phase 18 Cluster EC가 storage story의 중심이 된 이후, `runSolo` 분기는 유지 비용 > 가치. 하지만 현 시점에서 단순 삭제 불가: `runSoloWithNFS`가 NFS/NBD/scrubber auto-runner/snapshot 스케줄러/WAL-PITR/vfs/volume 관리/lifecycle/packblob/pullthrough 등 **feature wiring을 단독 보유** — `runCluster`에는 대부분 미구현. 삭제 = 제품 절반 손실. 올바른 순서:
-  1. runCluster에 위 feature들 모두 port (또는 shared setup 함수로 추출)
-  2. runCluster가 `--peers=""`일 때 1-node cluster로 동작 (auto-raftAddr 생성 등 — Phase 18 PR에 prototype 됐으나 revert)
-  3. solo dispatch 제거 + runSoloWithNFS/setupSoloReceipt 삭제
-  4. UI/doctor solo 분기 제거
+- [x] **Solo mode 제거 — 아키텍처 통합 완료** (v0.0.3.1 + v0.0.4.0). `refactor/unify-storage-paths`에서 ECBackend 완전 삭제, `runLocalNode` 제거, 모든 경로가 `DistributedBackend`(singleton Raft = no-peers) 경유. Versioning/Scrubber/Lifecycle/WAL-PITR을 cluster 경로에 포팅.
 
-  전용 PR 권장: ~1000-1500 LOC 예상.
+### v0.0.4.0 follow-up
+
+- [ ] **NFS/VFS path 충돌 해결** — `objectPath(bucket, key)` (unversioned file) vs `objectPathV(bucket, key, vid)` (`key/.v/vid` 디렉터리) 경로가 충돌하여 `TestNFS_MountAndWriteReadFile`/`TestNFS_MultipleFiles` 실패. Key/version path 스킴 재설계 (예: `data/bucket/.objects/{key}/{vid}` 플랫 구조) 또는 NFS 레이어에서 별도 bucket namespace 사용.
+- [ ] **PITR RestoreObjects 구현** — `DistributedBackend`가 `storage.Snapshotable`을 구현해야 auto-snapshotter 및 `TestSnapshot_*` e2e 테스트가 통과. Raft propose 기반 `RestoreObjects` 필요.
+- [ ] **At-rest encryption 복구** — 이전 ECBackend의 AES-256-GCM 경로가 삭제됨. `ShardService.WriteLocalShard`/`ReadLocalShard`에 encryption wrapper 추가, `--encryption-key-file`/`--no-encryption` 플래그 실제 사용 회로 복구.
+- [ ] **S3 ACL Raft 직렬화** — `server.ACLSetter`(SetObjectACL) 구현. 현재 `internal/server/acl_e2e_test.go`가 `t.Skip`. ObjectMeta에 ACL 필드 추가 + `CmdSetObjectACL` FSM 명령.
+- [ ] **BucketVersioning Raft 직렬화** — 현재 `bucketver:{bucket}` 키는 로컬 BadgerDB에만 씀. 멀티-노드 클러스터에서 일관성을 위해 `CmdSetBucketVersioning` FSM 명령 추가.
+- [ ] **ShardOwner 필터링 재활성화** — `scrubber.ShardOwner` 인터페이스가 선언되었지만 DistributedBackend의 `NodeID`가 raft name 반환 vs allNodes가 주소 저장 → 필터가 no-op이었음. Slice 8에서 self-addr 수정으로 이제 주소끼리 비교 가능. 별도 slice에서 `ShardPlacementMonitor`의 `SetOnMissing` 콜백 연결 포함.
 
 ## Phase 19: Performance
 

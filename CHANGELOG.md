@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.0.4.0] - 2026-04-21
+
+### Changed
+
+- **단일 storage 경로 통합 — ECBackend 완전 삭제** (`refactor/unify-storage-paths`).
+  GrainFS는 이제 어떤 peer 개수에서도 `DistributedBackend` 하나만 사용. `--peers`를
+  비워두면 singleton Raft (`127.0.0.1:0`, 커널 할당 포트)로 부팅되어 단일-노드
+  사용자 경험은 유지되면서 versioning / scrubber / lifecycle / WAL-PITR 모두
+  클러스터 경로에서 동작.
+  - `runLocalNode` 삭제, `ecDeleterAdapter` 삭제, `joinClusterLive` 삭제, `SwappableBackend` 사용처 제거
+  - `internal/erasure/` 패키지 완전 삭제 (`ECBackend` 1958줄 포함, Reed-Solomon 코덱 테스트 + ACL 테스트)
+  - `packblob` / `pull-through` / auto-snapshotter / `DiskCollector`를 `runCluster`에 포팅
+  - `cmd/grainfs/serve.go` 약 370줄 감소
+
+### Added
+
+- **Cluster-mode versioning** (`DistributedBackend`):
+  - `PutObject`/`CompleteMultipartUpload`가 UUIDv7 `VersionID`를 생성하여 반환
+  - FSM 키 스키마 확장: `obj:{bucket}/{key}:{versionID}` 버전별, `lat:{bucket}/{key}` 최신 포인터
+  - `GetObjectVersion` / `HeadObjectVersion` / `DeleteObjectVersion` / `ListObjectVersions`
+  - `DeleteObject`는 tombstone(delete marker)을 새 버전으로 생성. Hard-delete는
+    `DeleteObjectVersion`. `HeadObjectVersion`은 delete marker에 대해
+    `storage.ErrMethodNotAllowed` 반환 → HTTP 405 + `x-amz-delete-marker: true`
+  - `SetBucketVersioning` / `GetBucketVersioning` (`bucketver:{bucket}` 로컬 저장;
+    Raft 직렬화는 follow-up)
+  - `DeleteObjectReturningMarker`로 delete marker의 version ID를 S3 응답 헤더로 노출
+- **`scrubber.Scrubbable` 인터페이스 구현** on `DistributedBackend`:
+  `ScanObjects`/`ObjectExists`/`ShardPaths`/`ReadShard`/`WriteShard` + `OwnedShards` /
+  `RaftNodeID` / `RepairShardLocal` (optional `ShardOwner`/`ShardRepairer`)
+- **Cluster-mode scrubber**: `runCluster`에서 EC 활성 시 scrubber 자동 시작,
+  peer-sourced repair via `RepairShard`
+- **Cluster-mode lifecycle**: `LifecycleManager`가 Raft leadership을 polling하여
+  leader 전용으로 `lifecycle.Worker` 실행 (double-delete 방지). `FSMDB()` accessor로
+  DistributedBackend의 BadgerDB를 lifecycle store와 공유
+- **Cluster-mode WAL-PITR**: WAL 엔트리 스키마 v2 (`VersionID` 포함, v1 backward
+  compatible), `OpDeleteVersion` 추가, `wal.Backend`가 versioning 메서드 pass-through
+- **`internal/storage/eccodec`**: 공용 shard I/O + CRC32 footer 원시
+- **`internal/cluster/NewSingletonBackendForTest`**: 다른 패키지 테스트에서 DistributedBackend 부팅 도우미
+- **UUIDv7 VersionID**: `oklog/ulid` 의존성 제거, `google/uuid` NewV7()만 사용
+
+### Fixed
+
+- **Phase 18 identity mismatch**: `SetShardService`가 self raft 주소를 캐시하고
+  fan-out 시 `peer == b.selfAddr`로 비교 (기존에는 `peer == b.node.ID()`로 UUID와
+  비교해 항상 일치하지 않던 버그 → singleton에서 자신에게 RPC 시도하여 타임아웃)
+- `IterObjectMetas` / `IterShardPlacements`의 `obj:{bucket}/{key}:{vid}` 파싱 (단일 slash 분리가 버전 suffix로 깨지던 문제)
+- `getObjectEC`/`RepairShard`/`ShardPlacementMonitor`가 versioned 경로 사용 (기존에 unversioned 경로로 읽어 발생하던 ENOENT)
+
+### Removed
+
+- `internal/erasure/` 패키지 전체 (ECBackend, 기존 Reed-Solomon codec, FlatBuffers 스키마)
+- `runLocalNode` 함수와 관련 어댑터 (`ecDeleterAdapter`, `joinClusterLive`)
+- 런타임 local→cluster 전환 경로 (이제 모든 경로가 cluster이므로 의미 없음)
+- 사용되지 않는 `VFSInstance` 스텁 (circular dep 우려는 preemptive였음; 실제 cycle 없음)
+
+### Known issues (deferred)
+
+- `TestNFS_MountAndWriteReadFile` / `TestNFS_MultipleFiles` e2e 실패: versioned
+  `objectPathV` (`data/bucket/key/.v/vid`)가 unversioned `objectPath`
+  (`data/bucket/key` as a file)와 path 충돌. NFS 볼륨 경로에서 트리거됨 —
+  key/version path 스킴 재설계 필요 (follow-up PR)
+- `TestSnapshot_List` / `TestSnapshot_NotFound`: `DistributedBackend`가 아직
+  `storage.Snapshotable` 미구현 (RestoreObjects가 Raft propose 필요). WAL 기록은
+  정상 동작
+- Cluster-mode at-rest encryption: 기존 ECBackend의 AES-GCM 경로가 사라졌고
+  `ShardService.WriteLocalShard`는 raw bytes. `SetBucketVersioning`의 Raft
+  직렬화, S3 ACL의 `SetObjectACL` Raft propose 함께 follow-up
+- Phase-18 `ShardOwner` filtering은 scrubber 인터페이스에 남아있지만 비활성 — 위의
+  identity mismatch 수정으로 이제 on-the-fly 활성화 가능 (별도 slice)
+
 ## [0.0.3.1] - 2026-04-21
 
 ### Changed
