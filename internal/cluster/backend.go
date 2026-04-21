@@ -692,6 +692,12 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 // placements + object metas without reaching through the backend's private fields.
 func (b *DistributedBackend) FSMRef() *FSM { return b.fsm }
 
+// FSMDB returns the underlying FSM BadgerDB handle.
+// Used by lifecycle.NewStore and other components needing shared metadata storage.
+// Lifecycle keys ("lifecycle:{bucket}") share the DB with FSM keys ("obj:", "lat:",
+// "bucket:", etc.); the prefixes are disjoint so they coexist safely.
+func (b *DistributedBackend) FSMDB() *badger.DB { return b.db }
+
 // ECActive reports whether Phase 18 cluster EC will be applied to the next
 // PutObject call (EC enabled + enough nodes for k+m split).
 func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.allNodes)) }

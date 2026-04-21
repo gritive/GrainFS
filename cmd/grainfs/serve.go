@@ -575,6 +575,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	srvOpts = newSrvOpts
 	defer receiptWiring.Close()
 
+	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
+	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
+	// can reuse the same config store the worker scans. The worker itself
+	// runs leader-only — see LifecycleManager.Run.
+	lifecycleInterval, _ := cmd.Flags().GetDuration("lifecycle-interval")
+	var lifecycleMgr *cluster.LifecycleManager
+	if lifecycleInterval > 0 {
+		lifecycleMgr = cluster.NewLifecycleManager(distBackend, lifecycleInterval)
+		srvOpts = append(srvOpts, server.WithLifecycleStore(lifecycleMgr.Store()))
+	}
+
 	srv := server.New(addr, backend, srvOpts...)
 
 	// Phase 16 Week 3: cluster mode also needs startup recovery for the
@@ -607,6 +618,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		sc.SetEmitter(srv.HealEmitter())
 		sc.Start(ctx)
 		slog.Info("cluster scrubber started", "interval", scrubInterval)
+	}
+
+	// Start the leader-aware worker loop. Only the Raft leader runs the
+	// worker; followers skip the scan so we don't waste IO on proposals that
+	// would be rejected anyway. LifecycleManager polls node.State() and
+	// starts/stops the worker on leadership transitions.
+	if lifecycleMgr != nil {
+		go lifecycleMgr.Run(ctx)
+		slog.Info("cluster lifecycle manager started", "interval", lifecycleInterval)
 	}
 
 	go func() {
