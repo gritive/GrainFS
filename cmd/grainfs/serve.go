@@ -23,8 +23,6 @@ import (
 	"github.com/gritive/GrainFS/internal/erasure"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
-	"github.com/gritive/GrainFS/internal/nfs4server"
-	"github.com/gritive/GrainFS/internal/nfsserver"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -35,8 +33,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
-	"github.com/gritive/GrainFS/internal/vfs"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 func init() {
@@ -311,44 +307,11 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		}
 	}()
 
-	// Start NFS server if requested
-	var nfsSrv *nfsserver.Server
-	if nfsPort > 0 {
-		fmt.Println("WARNING: NFS null auth enabled — all NFS access is unauthenticated")
-		const defaultVolName = "default"
-		const defaultVolSize = 1024 * 1024 * 1024 // 1G
-
-		mgr := volume.NewManager(swappable)
-		// Ensure a default volume exists for NFS
-		if _, err := mgr.Get(defaultVolName); err != nil {
-			if _, err := mgr.Create(defaultVolName, defaultVolSize); err != nil {
-				slog.Warn("default nfs volume create failed (may already exist)", "error", err)
-			}
-		}
-
-		nfsSrv = nfsserver.NewServer(swappable, defaultVolName, nil, // no registry in solo mode
-			vfs.WithStatCacheTTL(1*time.Second),
-			vfs.WithDirCacheTTL(1*time.Second),
-		)
-		go func() {
-			nfsAddr := fmt.Sprintf(":%d", nfsPort)
-			if err := nfsSrv.ListenAndServe(nfsAddr); err != nil {
-				slog.Error("nfs server error", "error", err)
-			}
-		}()
-	}
-
-	// Start NFSv4 server if requested
-	var nfs4Srv *nfs4server.Server
-	if nfs4Port > 0 {
-		nfs4Srv = nfs4server.NewServer(swappable)
-		go func() {
-			nfs4Addr := fmt.Sprintf("127.0.0.1:%d", nfs4Port) // localhost only for AUTH_SYS security
-			if err := nfs4Srv.ListenAndServe(nfs4Addr); err != nil {
-				slog.Error("nfs4 server error", "error", err)
-			}
-		}()
-	}
+	// Universal node services (NFS/NFSv4/NBD) — shared with cluster mode.
+	// See cmd/grainfs/node_services.go. Auto-snapshotter stays below because
+	// it uses the swappable backend + WAL dir that cluster mode doesn't have.
+	nodeSvc := startNodeServices(ctx, cmd, swappable, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
+	defer nodeSvc.Close()
 
 	// Start auto-snapshotter if interval is configured
 	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
@@ -366,21 +329,8 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		}
 	}
 
-	// Start NBD server if requested (Linux only)
-	if nbdPort > 0 {
-		const defaultVolName2 = "default"
-
-		mgr2 := volume.NewManager(swappable)
-		if _, err := mgr2.Get(defaultVolName2); err != nil {
-			if _, err := mgr2.Create(defaultVolName2, nbdVolumeSize); err != nil {
-				slog.Warn("default nbd volume create failed", "error", err)
-			}
-		}
-
-		if _, err := startNBDServer(mgr2, defaultVolName2, nbdPort); err != nil {
-			slog.Error("nbd server start failed", "error", err)
-		}
-	}
+	// NFS/NBD started above via startNodeServices; nodeSvc.Close() handles
+	// teardown via the deferred call.
 
 	<-ctx.Done()
 	slog.Info("graceful shutdown started", "component", "server")
@@ -392,14 +342,7 @@ func runSoloWithNFS(ctx context.Context, cmd *cobra.Command, addr, dataDir, mode
 		slog.Warn("http server shutdown error", "error", err)
 	}
 
-	// 2. Close NFS server
-	if nfsSrv != nil {
-		if err := nfsSrv.Close(); err != nil {
-			slog.Warn("nfs server close error", "error", err)
-		}
-	}
-
-	// 3. Close storage backend
+	// 2. Close storage backend
 	if closer, ok := swappable.Inner().(interface{ Close() error }); ok {
 		if err := closer.Close(); err != nil {
 			slog.Warn("storage backend close error", "error", err)
@@ -655,6 +598,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			slog.Error("http server error", "error", err)
 		}
 	}()
+
+	// Post-Phase-18 Solo removal A.1: universal node services (NFS/NFSv4/NBD)
+	// are now wired in cluster mode too, not just solo. Formerly solo-only
+	// because runCluster never called the NFS/NBD wiring. Scrubber/lifecycle
+	// remain solo-specific pending ECBackend→cluster integration (A.2).
+	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
+	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
+	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
+	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
+	nodeSvc := startNodeServices(ctx, cmd, backend, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
+	defer nodeSvc.Close()
 
 	<-ctx.Done()
 	slog.Info("graceful shutdown started", "component", "server", "mode", "cluster")
