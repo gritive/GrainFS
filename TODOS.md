@@ -83,7 +83,6 @@
 ### v0.0.4.0 follow-up
 
 - [ ] **NFS/VFS path 충돌 해결** — `objectPath(bucket, key)` (unversioned file) vs `objectPathV(bucket, key, vid)` (`key/.v/vid` 디렉터리) 경로가 충돌하여 `TestNFS_MountAndWriteReadFile`/`TestNFS_MultipleFiles` 실패. Key/version path 스킴 재설계 (예: `data/bucket/.objects/{key}/{vid}` 플랫 구조) 또는 NFS 레이어에서 별도 bucket namespace 사용.
-- [ ] **PITR RestoreObjects 구현** — `DistributedBackend`가 `storage.Snapshotable`을 구현해야 auto-snapshotter 및 `TestSnapshot_*` e2e 테스트가 통과. Raft propose 기반 `RestoreObjects` 필요.
 - [ ] **At-rest encryption 복구** — 이전 ECBackend의 AES-256-GCM 경로가 삭제됨. `ShardService.WriteLocalShard`/`ReadLocalShard`에 encryption wrapper 추가, `--encryption-key-file`/`--no-encryption` 플래그 실제 사용 회로 복구.
 - [ ] **S3 ACL Raft 직렬화** — `server.ACLSetter`(SetObjectACL) 구현. 현재 `internal/server/acl_e2e_test.go`가 `t.Skip`. ObjectMeta에 ACL 필드 추가 + `CmdSetObjectACL` FSM 명령.
 - [ ] **BucketVersioning Raft 직렬화** — 현재 `bucketver:{bucket}` 키는 로컬 BadgerDB에만 씀. 멀티-노드 클러스터에서 일관성을 위해 `CmdSetBucketVersioning` FSM 명령 추가.

@@ -359,11 +359,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// sits outside the read cache so every mutation is recorded before the
 	// cache invalidation races the next request — same ordering as runLocalNode.
 	//
-	// TODO(slice-8+): wire snapshot.NewManager for cluster PITR restore.
-	// DistributedBackend does not yet implement storage.Snapshotable
-	// (RestoreObjects requires Raft proposals). Until then WAL entries are
-	// written but PITRRestore is only exercised via unit replay; operator
-	// restore remains a follow-up.
 	walDir := filepath.Join(dataDir, "wal")
 	w, err := wal.Open(walDir)
 	if err != nil {
@@ -401,10 +396,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				slog.Info("auto-snapshot enabled", "interval", snapInterval, "retain", snapRetain)
 			}
 		} else {
-			// Pre-existing limitation noted in Slice 5: DistributedBackend does
-			// not implement storage.Snapshotable yet (RestoreObjects requires
-			// Raft proposals). WAL entries still capture mutations — operator
-			// PITR restore will light up once Snapshotable lands.
 			slog.Debug("auto-snapshot skipped: backend does not implement Snapshotable")
 		}
 	}
@@ -434,6 +425,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}),
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
+		server.WithDataDir(dataDir),
 	}
 	// Propagate S3 auth from --access-key / --secret-key. Previously this
 	// was local-only; cluster mode silently ran without auth regardless of
