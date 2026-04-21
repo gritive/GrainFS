@@ -22,7 +22,6 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/erasure"
 	"github.com/gritive/GrainFS/internal/eventstore"
-	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -102,10 +101,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	ecEnabled, _ := cmd.Flags().GetBool("ec")
-	ecData, _ := cmd.Flags().GetInt("ec-data")
-	ecParity, _ := cmd.Flags().GetInt("ec-parity")
-
 	var authOpts []server.Option
 	accessKey, _ := cmd.Flags().GetString("access-key")
 	secretKey, _ := cmd.Flags().GetString("secret-key")
@@ -115,103 +110,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}))
 	}
 
-	var ecOpts []erasure.ECOption
+	// Encryption setup is eager even in singleton mode so the key file is
+	// materialized on first boot; actual at-rest encryption on the
+	// cluster shard path is a follow-up (Slice 8+). The key is loaded here
+	// to preserve operator workflow — nothing in runCluster consumes it yet.
 	noEncryption, _ := cmd.Flags().GetBool("no-encryption")
 	if !noEncryption {
 		encKeyFile, _ := cmd.Flags().GetString("encryption-key-file")
-		enc, err := loadOrCreateEncryptionKey(encKeyFile, dataDir)
-		if err != nil {
+		if _, err := loadOrCreateEncryptionKey(encKeyFile, dataDir); err != nil {
 			return fmt.Errorf("encryption setup: %w", err)
 		}
-		ecOpts = append(ecOpts, erasure.WithEncryption(enc))
-	}
-
-	nfsPort, _ := cmd.Flags().GetInt("nfs-port")
-	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
-	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
-	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
-	packThreshold, _ := cmd.Flags().GetInt("pack-threshold")
-
-	if peersStr == "" {
-		var backend storage.Backend
-		var err error
-		var sc *scrubber.BackgroundScrubber
-		var lcStore *lifecycle.Store
-		var lcWorker *lifecycle.Worker
-		if ecEnabled {
-			ecBackend, ecErr := erasure.NewECBackend(dataDir, ecData, ecParity, ecOpts...)
-			if ecErr != nil {
-				return fmt.Errorf("failed to initialize storage: %w", ecErr)
-			}
-			scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
-			if scrubInterval > 0 {
-				sc = scrubber.New(ecBackend, scrubInterval)
-			}
-			lifecycleInterval, _ := cmd.Flags().GetDuration("lifecycle-interval")
-			if lifecycleInterval > 0 {
-				lcStore = lifecycle.NewStore(ecBackend.DB())
-				lcWorker = lifecycle.NewWorker(lcStore, ecBackend, &ecDeleterAdapter{ecBackend}, lifecycleInterval)
-			}
-			backend = ecBackend
-		} else {
-			backend, err = storage.NewLocalBackend(dataDir)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to initialize storage: %w", err)
-		}
-
-		// Capture DB before wrapping for event store (DBProvider is either LocalBackend or ECBackend)
-		var evDB *badger.DB
-		if dp, ok := backend.(storage.DBProvider); ok {
-			evDB = dp.DB()
-			// Phase 16 Week 3: Badger preflight. badger.Open already runs
-			// internal recovery; this confirms the DB is actually writable
-			// before we accept traffic and gives the operator a recovery
-			// guide if it isn't. Fail-fast is the right outcome — booting a
-			// dashboard against a broken DB only confuses the postmortem.
-			if err := server.PreflightBadger(evDB, dataDir, nil); err != nil {
-				return err
-			}
-		}
-
-		// Wrap with Packed Blob if threshold is set
-		if packThreshold > 0 {
-			blobDir := filepath.Join(dataDir, "blobs")
-			pb, err := packblob.NewPackedBackend(backend, blobDir, int64(packThreshold))
-			if err != nil {
-				return fmt.Errorf("failed to initialize packed blob: %w", err)
-			}
-			backend = pb
-			slog.Info("packed blob storage enabled", "threshold", packThreshold)
-		}
-
-		// Wrap with read cache
-		backend = storage.NewCachedBackend(backend)
-
-		// Wrap with WAL for PITR support
-		walDir := filepath.Join(dataDir, "wal")
-		w, err := wal.Open(walDir)
-		if err != nil {
-			return fmt.Errorf("open WAL: %w", err)
-		}
-		defer w.Close()
-		backend = wal.NewBackend(backend, w)
-
-		// Wrap with pull-through cache if upstream is configured
-		if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
-			upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
-			upstreamSecretKey, _ := cmd.Flags().GetString("upstream-secret-key")
-			up, err := pullthrough.NewS3Upstream(upstreamEndpoint, upstreamAccessKey, upstreamSecretKey)
-			if err != nil {
-				return fmt.Errorf("init upstream: %w", err)
-			}
-			backend = pullthrough.NewBackend(backend, up)
-			slog.Info("pull-through cache enabled", "upstream", upstreamEndpoint)
-		}
-
-		// Wrap backend in SwappableBackend to allow runtime cluster transition
-		swappable := storage.NewSwappableBackend(backend)
-		return runLocalNode(ctx, cmd, addr, dataDir, swappable, authOpts, sc, lcStore, lcWorker, nfsPort, nfs4Port, nbdPort, nbdVolumeSize, evDB)
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -220,146 +128,28 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts)
 }
 
-func runLocalNode(ctx context.Context, cmd *cobra.Command, addr, dataDir string, swappable *storage.SwappableBackend, opts []server.Option, sc *scrubber.BackgroundScrubber, lcStore *lifecycle.Store, lcWorker *lifecycle.Worker, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64, evDB *badger.DB) error {
-	slog.Info("server started", "component", "server", "version", version, "addr", addr, "data", dataDir, "peers", 0)
-
-	// Start DiskCollector to expose grainfs_disk_used_pct metric even in no-peers mode.
-	localNodeID := generateNodeID(dataDir)
-	diskCollector := cluster.NewDiskCollector(localNodeID, dataDir, nil, 30*time.Second)
-	go diskCollector.Run(ctx)
-
-	// Auto-create "default" bucket on startup
-	if err := swappable.CreateBucket("default"); err != nil {
-		if !errors.Is(err, storage.ErrBucketAlreadyExists) {
-			return fmt.Errorf("create default bucket: %w", err)
-		}
-	}
-
-	localManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
-	localLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
-
-	// Join cluster callback: transitions from local to cluster mode at runtime.
-	joinFn := func(nodeID, raftAddr, peersStr, clusterKey string) error {
-		return joinClusterLive(ctx, swappable, dataDir, nodeID, raftAddr, peersStr, clusterKey, localManagedMode, localLogGCInterval)
-	}
-	opts = append(opts, server.WithJoinCluster(joinFn))
-	opts = append(opts, server.WithDataDir(dataDir))
-	if evDB != nil {
-		opts = append(opts, server.WithEventStore(eventstore.New(evDB)))
-	}
-	if sc != nil {
-		opts = append(opts, server.WithScrubber(sc))
-		// NOTE: sc.Start() is called AFTER server.New so the scrubber can be
-		// wired to the server-owned heal emitter. Without this ordering the
-		// dashboard would never receive HealEvents.
-	}
-
-	// Phase 16 Week 4: webhook alerts (degraded mode + critical events).
-	alertWebhook, _ := cmd.Flags().GetString("alert-webhook")
-	alertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
-	alertsState := server.NewAlertsState(alertWebhook, alerts.Options{Secret: alertSecret}, alerts.DegradedConfig{})
-	opts = append(opts, server.WithAlerts(alertsState))
-	if lcStore != nil {
-		opts = append(opts, server.WithLifecycleStore(lcStore))
-	}
-	if lcWorker != nil {
-		go lcWorker.Run(ctx)
-		slog.Info("lifecycle worker started")
-	}
-
-	// Phase 16 Week 5 Slice 2 — HealReceipt audit API (no-peers: local-only).
-	newOpts, receiptWiring, err := setupLocalReceipt(cmd, dataDir, opts)
-	if err != nil {
-		return fmt.Errorf("heal-receipt wiring: %w", err)
-	}
-	opts = newOpts
-	defer receiptWiring.Close()
-
-	srv := server.New(addr, swappable, opts...)
-
-	// Phase 16 Week 3: sweep crash-leftover artifacts BEFORE the scrubber
-	// starts so the scrubber doesn't trip over half-written .tmp files.
-	// HealEvents flow through the server emitter — operator sees the
-	// "Restart Recovery" dashboard line right after boot.
-	healEmitter := srv.HealEmitter()
-	if rec, err := server.RunStartupRecovery(ctx, dataDir, healEmitter); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Warn("startup recovery failed", "err", err)
-	} else if rec.OrphanTmpRemoved+rec.OrphanMultipartRemoved+len(rec.Errors) > 0 {
-		slog.Info("startup recovery summary",
-			"orphan_tmp", rec.OrphanTmpRemoved,
-			"orphan_multipart", rec.OrphanMultipartRemoved,
-			"errors", len(rec.Errors))
-	}
-
-	if sc != nil {
-		sc.SetEmitter(healEmitter)
-		sc.Start(ctx)
-		slog.Info("background scrubber started")
-	}
-	go func() {
-		if err := srv.Run(); err != nil {
-			slog.Error("http server error", "error", err)
-		}
-	}()
-
-	// Universal node services (NFS/NFSv4/NBD) — shared with cluster mode.
-	// See cmd/grainfs/node_services.go. Auto-snapshotter stays below because
-	// it uses the swappable backend + WAL dir that cluster mode doesn't have.
-	nodeSvc := startNodeServices(ctx, cmd, swappable, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
-	defer nodeSvc.Close()
-
-	// Start auto-snapshotter if interval is configured
-	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
-	snapRetain, _ := cmd.Flags().GetInt("snapshot-retain")
-	if snapInterval > 0 {
-		snapDir := filepath.Join(dataDir, "snapshots")
-		walDir := filepath.Join(dataDir, "wal")
-		snapMgr, err := snapshot.NewManager(snapDir, swappable, walDir)
-		if err != nil {
-			slog.Warn("auto-snapshot init failed", "err", err)
-		} else {
-			as := snapshot.NewAutoSnapshotter(snapMgr, snapInterval, snapRetain)
-			as.Start(ctx)
-			slog.Info("auto-snapshot enabled", "interval", snapInterval, "retain", snapRetain)
-		}
-	}
-
-	// NFS/NBD started above via startNodeServices; nodeSvc.Close() handles
-	// teardown via the deferred call.
-
-	<-ctx.Done()
-	slog.Info("graceful shutdown started", "component", "server")
-
-	// 1. Drain in-flight HTTP requests
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("http server shutdown error", "error", err)
-	}
-
-	// 2. Close storage backend
-	if closer, ok := swappable.Inner().(interface{ Close() error }); ok {
-		if err := closer.Close(); err != nil {
-			slog.Warn("storage backend close error", "error", err)
-		}
-	}
-
-	slog.Info("server stopped", "component", "server")
-	return nil
-}
-
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
 	}
-	if raftAddr == "" {
-		return fmt.Errorf("--raft-addr is required when --peers is set")
-	}
 
 	// strings.Split always yields at least one element — empty input or
 	// trailing commas produce "" entries that waste a gossip tick each.
 	peers := filterEmpty(strings.Split(peersStr, ","))
+
+	// When no peers are configured, we boot a singleton Raft node on a
+	// loopback port so a single-machine deployment still goes through the
+	// unified storage path (versioning, scrubber, lifecycle, WAL all work).
+	// Operators who later want to expand the cluster pick a concrete
+	// --raft-addr and --peers list; the loopback default is only for the
+	// "just start it" path.
+	if raftAddr == "" {
+		if len(peers) > 0 {
+			return fmt.Errorf("--raft-addr is required when --peers is set")
+		}
+		raftAddr = "127.0.0.1:9500"
+	}
 
 	metaDir := filepath.Join(dataDir, "meta")
 	raftDir := filepath.Join(dataDir, "raft")
@@ -492,9 +282,27 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		slog.Info("restored from snapshot", "index", snapIdx)
 	}
 
-	// Wrap distributed backend with LRU read cache.
-	// Raft FSM-based invalidation ensures cache consistency across nodes.
-	cachedBackend := storage.NewCachedBackend(distBackend)
+	// Wrapping chain (inner → outer): distBackend → packblob → cachedBackend →
+	// WAL → pullthrough. Mirrors the pre-unification local path so operators
+	// get identical semantics (small-object packing, LRU cache, PITR replay,
+	// upstream pull-through) regardless of peer count.
+	var inner storage.Backend = distBackend
+
+	// Pack small objects into blob files when --pack-threshold is set.
+	packThreshold, _ := cmd.Flags().GetInt("pack-threshold")
+	if packThreshold > 0 {
+		blobDir := filepath.Join(dataDir, "blobs")
+		pb, err := packblob.NewPackedBackend(inner, blobDir, int64(packThreshold))
+		if err != nil {
+			return fmt.Errorf("failed to initialize packed blob: %w", err)
+		}
+		inner = pb
+		slog.Info("packed blob storage enabled", "threshold", packThreshold)
+	}
+
+	// Wrap with LRU read cache. Raft FSM-based invalidation ensures cache
+	// consistency across nodes.
+	cachedBackend := storage.NewCachedBackend(inner)
 
 	// Wire OnApply callback: invalidate cache + update metrics on committed entries
 	distBackend.SetOnApply(func(cmdType cluster.CommandType, bucket, key string) {
@@ -555,6 +363,50 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	defer w.Close()
 	backend = wal.NewBackend(backend, w)
+
+	// Wrap with pull-through cache if upstream is configured.
+	if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
+		upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
+		upstreamSecretKey, _ := cmd.Flags().GetString("upstream-secret-key")
+		up, err := pullthrough.NewS3Upstream(upstreamEndpoint, upstreamAccessKey, upstreamSecretKey)
+		if err != nil {
+			return fmt.Errorf("init upstream: %w", err)
+		}
+		backend = pullthrough.NewBackend(backend, up)
+		slog.Info("pull-through cache enabled", "upstream", upstreamEndpoint)
+	}
+
+	// Start auto-snapshotter for object-level PITR snapshots (separate from
+	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
+	// anchored to the object mutation log.
+	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
+	snapRetain, _ := cmd.Flags().GetInt("snapshot-retain")
+	if snapInterval > 0 {
+		if snapshotable, ok := backend.(storage.Snapshotable); ok {
+			snapDir := filepath.Join(dataDir, "snapshots")
+			objSnapMgr, err := snapshot.NewManager(snapDir, snapshotable, walDir)
+			if err != nil {
+				slog.Warn("auto-snapshot init failed", "err", err)
+			} else {
+				as := snapshot.NewAutoSnapshotter(objSnapMgr, snapInterval, snapRetain)
+				as.Start(ctx)
+				slog.Info("auto-snapshot enabled", "interval", snapInterval, "retain", snapRetain)
+			}
+		} else {
+			// Pre-existing limitation noted in Slice 5: DistributedBackend does
+			// not implement storage.Snapshotable yet (RestoreObjects requires
+			// Raft proposals). WAL entries still capture mutations — operator
+			// PITR restore will light up once Snapshotable lands.
+			slog.Debug("auto-snapshot skipped: backend does not implement Snapshotable")
+		}
+	}
+
+	// DiskCollector exposes grainfs_disk_used_pct metric. In multi-node mode
+	// the balancer owns its own collector; in singleton mode nothing else
+	// would emit disk stats. Register unconditionally — duplicate registration
+	// is guarded inside NewDiskCollector.
+	diskCollector := cluster.NewDiskCollector(nodeID, dataDir, nil, 30*time.Second)
+	go diskCollector.Run(ctx)
 
 	// Auto-create "default" bucket on startup. In cluster mode this must
 	// wait for Raft to elect a leader before the proposal can commit.
@@ -719,30 +571,6 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 
 	slog.Info("at-rest encryption enabled (auto-generated key)", "component", "server", "key_file", keyFile)
 	return encrypt.NewEncryptor(keyData)
-}
-
-// ecDeleterAdapter adapts ECBackend to lifecycle.ObjectDeleter (ListObjectVersions signature differs).
-type ecDeleterAdapter struct{ b *erasure.ECBackend }
-
-func (a *ecDeleterAdapter) DeleteObject(bucket, key string) error {
-	return a.b.DeleteObject(bucket, key)
-}
-func (a *ecDeleterAdapter) DeleteObjectVersion(bucket, key, versionID string) error {
-	return a.b.DeleteObjectVersion(bucket, key, versionID)
-}
-func (a *ecDeleterAdapter) ListObjectVersions(bucket, key string) ([]*storage.ObjectVersion, error) {
-	// ListObjectVersions uses prefix matching; filter to exact key to avoid pruning wrong versions.
-	all, err := a.b.ListObjectVersions(bucket, key, 10000)
-	if err != nil {
-		return nil, err
-	}
-	result := all[:0]
-	for _, v := range all {
-		if v.Key == key {
-			result = append(result, v)
-		}
-	}
-	return result, nil
 }
 
 // raftBalancerAdapter wraps *raft.Node to implement cluster.RaftBalancerNode.
@@ -938,116 +766,3 @@ func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
 func (r *raftClusterInfo) Peers() []string  { return r.peers }
-
-// joinClusterLive performs the runtime local→cluster transition.
-// It starts the QUIC transport and Raft node, migrates metadata, then swaps the backend.
-func joinClusterLive(ctx context.Context, swappable *storage.SwappableBackend, dataDir, nodeID, raftAddr, peersStr, clusterKey string, managedMode bool, logGCInterval time.Duration) error {
-	if nodeID == "" {
-		nodeID = generateNodeID(dataDir)
-	}
-
-	peers := filterEmpty(strings.Split(peersStr, ","))
-
-	metaDir := filepath.Join(dataDir, "meta")
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
-		return fmt.Errorf("create meta dir: %w", err)
-	}
-	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
-	db, err := badger.Open(dbOpts)
-	if err != nil {
-		return fmt.Errorf("open metadata db: %w", err)
-	}
-	// Phase 16 Week 3: legacy-to-cluster migration path also runs preflight.
-	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
-		return err
-	}
-
-	raftDir := filepath.Join(dataDir, "raft")
-
-	// Auto-migrate local metadata
-	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
-		slog.Info("auto-migrating local metadata to cluster format", "component", "join")
-		if err := cluster.MigrateLegacyMetaToCluster(dataDir, nodeID); err != nil {
-			db.Close()
-			return fmt.Errorf("auto-migrate: %w", err)
-		}
-	}
-
-	var joinStoreOpts []raft.BadgerLogStoreOption
-	if managedMode {
-		joinStoreOpts = append(joinStoreOpts, raft.WithManagedMode())
-	}
-	logStore, err := raft.NewBadgerLogStore(raftDir, joinStoreOpts...)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("open raft store: %w", err)
-	}
-
-	quicTransport := transport.NewQUICTransport(clusterKey)
-	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
-		logStore.Close()
-		db.Close()
-		return fmt.Errorf("start QUIC transport: %w", err)
-	}
-
-	for _, peer := range peers {
-		if err := quicTransport.Connect(ctx, peer); err != nil {
-			slog.Warn("failed to connect to peer", "peer", peer, "error", err)
-		}
-	}
-
-	cfg := raft.DefaultConfig(nodeID, peers)
-	cfg.ManagedMode = managedMode
-	cfg.LogGCInterval = logGCInterval
-	node := raft.NewNode(cfg, logStore)
-
-	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
-	rpcTransport.SetTransport()
-
-	shardSvc := cluster.NewShardService(dataDir, quicTransport)
-
-	router := transport.NewStreamRouter()
-	router.Handle(transport.StreamControl, rpcTransport.Handler())
-	router.Handle(transport.StreamData, shardSvc.HandleRPC())
-	quicTransport.SetStreamHandler(router.Dispatch)
-
-	node.Start()
-
-	distBackend, err := cluster.NewDistributedBackend(dataDir, db, node)
-	if err != nil {
-		node.Stop()
-		quicTransport.Close()
-		logStore.Close()
-		db.Close()
-		return fmt.Errorf("init distributed backend: %w", err)
-	}
-
-	allNodes := append([]string{raftAddr}, peers...)
-	distBackend.SetShardService(shardSvc, allNodes)
-
-	fsm := cluster.NewFSM(db)
-	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 10000})
-	distBackend.SetSnapshotManager(snapMgr, node)
-
-	if snapIdx, err := snapMgr.Restore(); err != nil {
-		slog.Warn("snapshot restore failed", "error", err)
-	} else if snapIdx > 0 {
-		slog.Info("restored from snapshot", "index", snapIdx)
-	}
-
-	cachedBackend := storage.NewCachedBackend(distBackend)
-	distBackend.SetOnApply(func(cmdType cluster.CommandType, bucket, key string) {
-		cachedBackend.InvalidateKey(bucket, key)
-	})
-
-	stopApply := make(chan struct{})
-	go distBackend.RunApplyLoop(stopApply)
-
-	// Swap the backend atomically — new requests go to cluster mode
-	swappable.Swap(cachedBackend)
-
-	slog.Info("live cluster join complete", "component", "join",
-		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers)
-
-	return nil
-}
