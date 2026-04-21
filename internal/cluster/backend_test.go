@@ -16,7 +16,7 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// newTestDistributedBackend creates a DistributedBackend backed by a solo Raft node.
+// newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.
 func newTestDistributedBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
@@ -48,7 +48,7 @@ func newTestDistributedBackend(t *testing.T) *DistributedBackend {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	require.Equal(t, raft.Leader, node.State(), "solo node must become leader")
+	require.Equal(t, raft.Leader, node.State(), "no-peers node must become leader")
 
 	backend, err := NewDistributedBackend(dir, db, node)
 	require.NoError(t, err)

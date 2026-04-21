@@ -26,14 +26,14 @@ func getBinary() string {
 	return binary
 }
 
-func TestCluster_SoloRaft_BasicOperations(t *testing.T) {
+func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	dir, err := os.MkdirTemp("", "grainfs-cluster-e2e-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
 	binary := getBinary()
 
-	// Step 1: Start in solo mode, create some data
+	// Step 1: Start in no-peers mode, create some data
 	port1 := freePort()
 	cmd1 := exec.Command(binary, "serve",
 		"--data", dir,
@@ -57,7 +57,7 @@ func TestCluster_SoloRaft_BasicOperations(t *testing.T) {
 	require.NoError(t, err)
 
 	testData := map[string]string{
-		"file1.txt":           "hello from solo",
+		"file1.txt":           "hello from local",
 		"docs/readme.md":      "# GrainFS",
 		"data/nested/obj.bin": "binary content",
 	}
@@ -137,7 +137,7 @@ func TestCluster_SoloRaft_BasicOperations(t *testing.T) {
 	assert.Equal(t, "new data after restart", string(body))
 }
 
-func TestCluster_SoloRaft_Multipart(t *testing.T) {
+func TestCluster_NoPeers_Multipart(t *testing.T) {
 	dir, err := os.MkdirTemp("", "grainfs-cluster-mp-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)

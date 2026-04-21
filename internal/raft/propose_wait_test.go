@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestProposeWait_Solo(t *testing.T) {
+func TestProposeWait_Singleton(t *testing.T) {
 	// Single node = immediate leader, immediate commit
 	cfg := DefaultConfig("node1", nil)
 	cfg.ElectionTimeout = 50 * time.Millisecond

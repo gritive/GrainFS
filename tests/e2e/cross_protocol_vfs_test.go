@@ -123,7 +123,7 @@ func TestCrossProtocolS3DeleteVFSESTALE(t *testing.T) {
 
 	// Verify file is deleted via VFS
 	// Note: In current implementation, MarkDeleted is only called when Raft FSM
-	// applies the delete. In solo mode (which tests use), there's no Raft,
+	// applies the delete. In no-peers mode (which tests use), there's no Raft,
 	// so MarkDeleted won't be called. The file should still not exist because
 	// it's deleted from storage.
 	vfsStatCall(t, statReq, &statResp)

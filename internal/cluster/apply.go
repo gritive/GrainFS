@@ -16,7 +16,7 @@ type FSM struct {
 	// Guards onMigrateShard and commitNotifier against concurrent SetMigrationHooks + Apply.
 	mu sync.RWMutex
 
-	// Optional hooks for Phase 13 balancer. Nil in solo/non-balancer mode.
+	// Optional hooks for Phase 13 balancer. Nil when no peers configured/non-balancer mode.
 	// onMigrateShard is a buffered channel; Apply sends non-blocking to avoid blocking the Raft apply loop.
 	onMigrateShard  chan<- MigrationTask
 	commitNotifier  interface {

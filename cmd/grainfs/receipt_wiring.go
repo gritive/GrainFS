@@ -19,7 +19,7 @@ import (
 
 // healReceiptWiring bundles the Phase 16 Slice 2 components so the caller can
 // defer a single teardown. Cluster-only fields (routingCache, broadcaster,
-// gossipSender) are nil in solo mode.
+// gossipSender) are nil in no-peers mode.
 type healReceiptWiring struct {
 	db           *badger.DB
 	store        *receipt.Store
@@ -54,10 +54,10 @@ func openReceiptDB(dataDir string) (*badger.DB, error) {
 	return badger.Open(opts)
 }
 
-// setupSoloReceipt wires the HealReceipt API in solo mode: Store + API with
+// setupLocalReceipt wires the HealReceipt API in no-peers mode: Store + API with
 // nil routes/querier so lookups are local-only. Returns the updated server
 // options and a wiring handle for teardown.
-func setupSoloReceipt(cmd *cobra.Command, dataDir string, opts []server.Option) ([]server.Option, *healReceiptWiring, error) {
+func setupLocalReceipt(cmd *cobra.Command, dataDir string, opts []server.Option) ([]server.Option, *healReceiptWiring, error) {
 	enabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
 	if !enabled {
 		return opts, nil, nil
@@ -80,7 +80,7 @@ func setupSoloReceipt(cmd *cobra.Command, dataDir string, opts []server.Option) 
 	api := receipt.NewAPI(store, nil, nil, retention)
 
 	slog.Info("heal-receipt API enabled",
-		"component", "receipt", "mode", "solo", "retention", retention)
+		"component", "receipt", "mode", "local", "retention", retention)
 
 	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
 		db: db, store: store, api: api,

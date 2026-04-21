@@ -26,7 +26,7 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	binary := getBinary()
 	port := freePort()
 
-	// Start solo server
+	// Start no-peers server
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),

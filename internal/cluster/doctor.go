@@ -174,7 +174,7 @@ func (d *Doctor) checkRaftLog() CheckResult {
 	if _, err := os.Stat(raftPath); os.IsNotExist(err) {
 		return CheckResult{
 			Status:  "warn",
-			Message: "Raft log not found (solo mode)",
+			Message: "Raft log not found (no-peers mode)",
 		}
 	}
 	// Basic check: raft directory exists

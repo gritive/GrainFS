@@ -508,7 +508,7 @@ func (n *Node) runCandidate() {
 	total := len(peers) + 1 // include self
 	majority := total/2 + 1
 
-	// Solo node: already has majority with self-vote
+	// Single-peer node: already has majority with self-vote
 	if votes >= majority {
 		n.mu.Lock()
 		n.state = Leader
