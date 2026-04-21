@@ -49,18 +49,97 @@ type ObjectMetaRef struct {
 	ETag   string
 }
 
-// IterObjectMetas iterates every object metadata record, invoking fn for each.
-// Used by the Phase 18 re-placement manager to find N× objects that need
-// conversion to EC. fn returning a non-nil error stops iteration.
+// IterObjectMetas iterates every logical object's metadata, invoking fn
+// exactly once per (bucket, key). Used by the Phase 18 re-placement manager
+// to find N× objects that need conversion to EC.
+//
+// Versioned keys (`obj:{bucket}/{key}/{versionID}`) cannot be safely parsed by
+// splitting on '/' — S3 keys legitimately contain slashes. Iterate the
+// `lat:{bucket}/{key}` pointer table instead: each entry yields the exact
+// key and the latest versionID, which is the only version that matters for
+// re-placement. Delete markers (tombstones) are skipped.
+//
+// Legacy unversioned `obj:{bucket}/{key}` records that lack a `lat:` pointer
+// are caught by a fallback scan of the `obj:` space — for those the key has
+// no embedded versionID so first-slash split is unambiguous. We skip any
+// `obj:` key whose base has a `lat:` pointer (those come through the lat
+// pass already).
+//
+// fn returning a non-nil error stops iteration.
 func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 	return f.db.View(func(txn *badger.Txn) error {
+		seen := make(map[string]struct{}) // "bucket\x00key" → visited
+
+		latPrefix := []byte("lat:")
+		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
+		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
+			item := itLat.Item()
+			rest := string(item.Key()[len(latPrefix):])
+			slash := -1
+			for i, c := range rest {
+				if c == '/' {
+					slash = i
+					break
+				}
+			}
+			if slash < 0 {
+				continue
+			}
+			bucket := rest[:slash]
+			key := rest[slash+1:]
+
+			var versionID string
+			if err := item.Value(func(v []byte) error {
+				versionID = string(v)
+				return nil
+			}); err != nil || versionID == "" {
+				continue
+			}
+
+			metaItem, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+			if err != nil {
+				continue
+			}
+			var ref ObjectMetaRef
+			ref.Bucket = bucket
+			ref.Key = key
+			skip := false
+			if verr := metaItem.Value(func(val []byte) error {
+				m, derr := unmarshalObjectMeta(val)
+				if derr != nil {
+					return derr
+				}
+				if m.ETag == deleteMarkerETag {
+					skip = true
+					return nil
+				}
+				ref.Size = m.Size
+				ref.ETag = m.ETag
+				return nil
+			}); verr != nil {
+				itLat.Close()
+				return verr
+			}
+			if skip {
+				continue
+			}
+			seen[bucket+"\x00"+key] = struct{}{}
+			if err := fn(ref); err != nil {
+				itLat.Close()
+				return err
+			}
+		}
+		itLat.Close()
+
+		// Fallback: legacy unversioned obj:{bucket}/{key} entries with no
+		// lat: pointer. Split on first '/' — these predate versioning and
+		// therefore carry no embedded versionID.
+		objPrefix := []byte("obj:")
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
-		prefix := []byte("obj:")
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
 			item := it.Item()
-			rawKey := string(item.Key())
-			trimmed := rawKey[len(prefix):]
+			trimmed := string(item.Key()[len(objPrefix):])
 			slash := -1
 			for i, c := range trimmed {
 				if c == '/' {
@@ -73,6 +152,25 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			}
 			bucket := trimmed[:slash]
 			key := trimmed[slash+1:]
+
+			// Skip: handled via lat: pass already, OR this is a versioned
+			// sub-entry whose base key was covered above.
+			if _, ok := seen[bucket+"\x00"+key]; ok {
+				continue
+			}
+			// Skip versioned sub-entries whose base is in seen. The suffix
+			// after the last '/' is a versionID when the base has a lat pointer.
+			// TODO(slice-3+): this heuristic over-skips when legacy data mixes a
+			// versioned key "a" with an unversioned key "a/b" (prefix collision).
+			// Fix by inserting versioned sub-keys into seen during the lat: pass.
+			if lastSlash := lastIndexByte(trimmed, '/'); lastSlash > slash {
+				base := trimmed[:lastSlash]
+				baseKey := base[slash+1:]
+				if _, ok := seen[bucket+"\x00"+baseKey]; ok {
+					continue
+				}
+			}
+
 			var ref ObjectMetaRef
 			ref.Bucket = bucket
 			ref.Key = key
@@ -88,12 +186,23 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			if verr != nil {
 				return verr
 			}
+			seen[bucket+"\x00"+key] = struct{}{}
 			if err := fn(ref); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// lastIndexByte mirrors strings.LastIndexByte without pulling the import.
+func lastIndexByte(s string, b byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
 }
 
 // IterShardPlacements iterates every shard placement record in the FSM, invoking

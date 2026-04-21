@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,6 +52,7 @@ type DistributedBackend struct {
 	peerHealth  *PeerHealth
 	registry    *Registry // cache invalidators (VFS instances)
 	ecConfig    ECConfig  // Phase 18: erasure coding config (disabled = legacy N× path)
+	shardLocks  sync.Map  // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
