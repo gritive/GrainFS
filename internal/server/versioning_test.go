@@ -13,17 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/erasure"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// setupECTestServer starts a test server backed by ECBackend.
+// setupECTestServer starts a test server backed by a singleton DistributedBackend.
 func setupECTestServer(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	b, err := erasure.NewECBackend(dir, erasure.DefaultDataShards, erasure.DefaultParityShards)
-	require.NoError(t, err, "NewECBackend")
-	t.Cleanup(func() { b.Close() })
+	b := cluster.NewSingletonBackendForTest(t)
 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

@@ -20,7 +20,6 @@ import (
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/erasure"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -42,8 +41,8 @@ func init() {
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
 	serveCmd.Flags().Bool("ec", true, "enable erasure coding (Reed-Solomon 4+2, use --ec=false to disable)")
-	serveCmd.Flags().Int("ec-data", erasure.DefaultDataShards, "number of data shards for erasure coding")
-	serveCmd.Flags().Int("ec-parity", erasure.DefaultParityShards, "number of parity shards for erasure coding")
+	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "number of data shards for erasure coding")
+	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "number of parity shards for erasure coding")
 	serveCmd.Flags().Bool("cluster-ec", true, "Phase 18: cross-node EC in cluster mode (auto-falls back to N× replication when cluster size < ec-data+ec-parity; use --cluster-ec=false to force N×)")
 	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
@@ -148,7 +147,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if len(peers) > 0 {
 			return fmt.Errorf("--raft-addr is required when --peers is set")
 		}
-		raftAddr = "127.0.0.1:9500"
+		// Singleton: let the kernel pick a free port so multiple instances
+		// (dev, tests) coexist without collisions. No peer will ever reach it.
+		raftAddr = "127.0.0.1:0"
 	}
 
 	metaDir := filepath.Join(dataDir, "meta")
@@ -209,12 +210,19 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	defer logStore.Close()
 
-	// Start QUIC transport for inter-node communication
+	// Start QUIC transport for inter-node communication.
 	quicTransport := transport.NewQUICTransport(clusterKey)
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport: %w", err)
 	}
 	defer quicTransport.Close()
+	// Resolve `raftAddr` to its actual bound port. When the operator asked
+	// for 127.0.0.1:0 (singleton default) QUIC picks a free UDP port; we
+	// need that concrete address in allNodes so shard placement produces
+	// dialable self entries.
+	if local := quicTransport.LocalAddr(); local != "" {
+		raftAddr = local
+	}
 
 	// Connect to all peers
 	for _, peer := range peers {

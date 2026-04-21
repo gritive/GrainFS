@@ -41,7 +41,7 @@ func TestVersioning_PutTwiceListVersions(t *testing.T) {
 	o2, err := b.PutObject("vbucket", "k", strings.NewReader("v2-longer"), "text/plain")
 	require.NoError(t, err)
 
-	versions, err := b.ListObjectVersions("vbucket", "k")
+	versions, err := b.ListObjectVersions("vbucket", "k", 0)
 	require.NoError(t, err)
 	require.Len(t, versions, 2, "expected 2 versions")
 
@@ -76,7 +76,7 @@ func TestVersioning_DeleteCreatesTombstone(t *testing.T) {
 	_, err = b.HeadObject("vbucket", "k")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
 
-	versions, err := b.ListObjectVersions("vbucket", "k")
+	versions, err := b.ListObjectVersions("vbucket", "k", 0)
 	require.NoError(t, err)
 	require.Len(t, versions, 2, "expected original version + delete marker")
 	assert.True(t, versions[0].IsDeleteMarker, "newest version is the tombstone")
@@ -119,7 +119,7 @@ func TestVersioning_DeleteObjectVersion(t *testing.T) {
 	// Hard-delete the latest → the prior version becomes the new latest.
 	require.NoError(t, b.DeleteObjectVersion("vbucket", "k", o2.VersionID))
 
-	versions, err := b.ListObjectVersions("vbucket", "k")
+	versions, err := b.ListObjectVersions("vbucket", "k", 0)
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 	assert.Equal(t, o1.VersionID, versions[0].VersionID)

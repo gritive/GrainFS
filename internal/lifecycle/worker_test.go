@@ -36,10 +36,10 @@ func (m *mockBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, 
 // --- mock deleter ---
 
 type mockDeleter struct {
-	mu             sync.Mutex
-	deleted        []string         // "bucket/key"
-	deletedVersions []string        // "bucket/key/versionID"
-	versions       map[string][]*storage.ObjectVersion // "bucket/key" → versions
+	mu              sync.Mutex
+	deleted         []string                            // "bucket/key"
+	deletedVersions []string                            // "bucket/key/versionID"
+	versions        map[string][]*storage.ObjectVersion // "bucket/key" → versions
 }
 
 func (m *mockDeleter) DeleteObject(bucket, key string) error {
@@ -56,10 +56,10 @@ func (m *mockDeleter) DeleteObjectVersion(bucket, key, versionID string) error {
 	return nil
 }
 
-func (m *mockDeleter) ListObjectVersions(bucket, key string) ([]*storage.ObjectVersion, error) {
+func (m *mockDeleter) ListObjectVersions(bucket, prefix string, _ int) ([]*storage.ObjectVersion, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.versions[bucket+"/"+key], nil
+	return m.versions[bucket+"/"+prefix], nil
 }
 
 func newWorker(store *Store, backend *mockBackend, deleter *mockDeleter) *Worker {
@@ -159,9 +159,9 @@ func TestWorker_PrefixFilter(t *testing.T) {
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{
-			ID:     "expire-logs",
-			Status: "Enabled",
-			Filter: &Filter{Prefix: "logs/"},
+			ID:         "expire-logs",
+			Status:     "Enabled",
+			Filter:     &Filter{Prefix: "logs/"},
 			Expiration: &Expiration{Days: 1},
 		}},
 	}
@@ -233,10 +233,10 @@ func TestWorker_NoncurrentVersionExpiration_ByCount(t *testing.T) {
 	deleter := &mockDeleter{
 		versions: map[string][]*storage.ObjectVersion{
 			"bucket/obj": {
-				{VersionID: "v4", IsLatest: true, LastModified: oldTime},
-				{VersionID: "v3", IsLatest: false, LastModified: oldTime},  // keep (index 1 < 2+1=3)
-				{VersionID: "v2", IsLatest: false, LastModified: oldTime},  // keep (index 2 < 3)
-				{VersionID: "v1", IsLatest: false, LastModified: oldTime},  // delete (index 3 >= 3)
+				{Key: "obj", VersionID: "v4", IsLatest: true, LastModified: oldTime},
+				{Key: "obj", VersionID: "v3", IsLatest: false, LastModified: oldTime}, // keep (index 1 < 2+1=3)
+				{Key: "obj", VersionID: "v2", IsLatest: false, LastModified: oldTime}, // keep (index 2 < 3)
+				{Key: "obj", VersionID: "v1", IsLatest: false, LastModified: oldTime}, // delete (index 3 >= 3)
 			},
 		},
 	}
@@ -256,8 +256,8 @@ func TestWorker_NoncurrentVersionExpiration_ByAge(t *testing.T) {
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{
-			ID:     "prune-old",
-			Status: "Enabled",
+			ID:                          "prune-old",
+			Status:                      "Enabled",
 			NoncurrentVersionExpiration: &NoncurrentVersionExpiration{NoncurrentDays: 7},
 		}},
 	}
@@ -275,8 +275,8 @@ func TestWorker_NoncurrentVersionExpiration_ByAge(t *testing.T) {
 	deleter := &mockDeleter{
 		versions: map[string][]*storage.ObjectVersion{
 			"bucket/obj": {
-				{VersionID: "v2", IsLatest: true, LastModified: recentTime},
-				{VersionID: "v1", IsLatest: false, LastModified: oldTime},
+				{Key: "obj", VersionID: "v2", IsLatest: true, LastModified: recentTime},
+				{Key: "obj", VersionID: "v1", IsLatest: false, LastModified: oldTime},
 			},
 		},
 	}

@@ -110,8 +110,15 @@ func setupClusterReceipt(
 	if psk == "" {
 		psk = clusterKey
 	}
+	// PSK is only required when there are peers — it signs the cross-node
+	// StreamReceiptQuery payload. Singletons have no peer to authenticate
+	// against, so we fall back to a fixed local-only sentinel. Once the
+	// operator adds peers they must supply --cluster-key (validated below).
 	if psk == "" {
-		return opts, nil, fmt.Errorf("heal-receipt requires a PSK: set --heal-receipt-psk or --cluster-key")
+		if len(peers) > 0 {
+			return opts, nil, fmt.Errorf("heal-receipt requires a PSK: set --heal-receipt-psk or --cluster-key")
+		}
+		psk = "local-no-peers"
 	}
 	retention, _ := cmd.Flags().GetDuration("heal-receipt-retention")
 	gossipInterval, _ := cmd.Flags().GetDuration("heal-receipt-gossip-interval")

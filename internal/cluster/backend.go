@@ -52,6 +52,7 @@ type DistributedBackend struct {
 	snapNode    *raft.Node // node for CompactLog after snapshot
 	shardSvc    *ShardService
 	allNodes    []string // all node addresses (including self) for shard placement
+	selfAddr    string   // this node's raft address (matches entries in allNodes)
 	peerHealth  *PeerHealth
 	registry    *Registry // cache invalidators (VFS instances)
 	ecConfig    ECConfig  // Phase 18: erasure coding config (disabled = legacy N× path)
@@ -84,16 +85,21 @@ func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 }
 
 // SetShardService configures the distributed shard service for fan-out.
-// allNodes includes all cluster node addresses for placement. The slice is
-// sorted for deterministic placement across the cluster.
+// allNodes includes all cluster node addresses for placement (self first is
+// expected so the self address can be cached before the slice is sorted).
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
+	// Cache self address BEFORE sorting so per-request self-skip checks can
+	// compare raft addresses (node.ID() returns a UUID, not the address).
+	if len(allNodes) > 0 {
+		b.selfAddr = allNodes[0]
+	}
 	b.allNodes = append([]string(nil), allNodes...)
 	sort.Strings(b.allNodes)
 	// Build peer list (excluding self) for health tracking
 	var peers []string
 	for _, n := range allNodes {
-		if n != b.node.ID() {
+		if n != b.selfAddr {
 			peers = append(peers, n)
 		}
 	}
@@ -283,6 +289,45 @@ func (b *DistributedBackend) DeleteBucket(bucket string) error {
 	return b.propose(context.Background(), CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
 }
 
+// SetBucketVersioning satisfies server.BucketVersioner. Persists the S3
+// versioning state ("Enabled"/"Suspended") under key bucketver:{bucket} in
+// the FSM BadgerDB. NOTE: writes bypass Raft in this slice — consistent on a
+// singleton, eventually consistent across a cluster until follow-up work
+// wires a SetBucketVersioning FSM command. Object versioning itself (via
+// UUIDv7 VersionID) remains always-on regardless of this flag.
+func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		if _, err := txn.Get(bucketKey(bucket)); err != nil {
+			if err == badger.ErrKeyNotFound {
+				return storage.ErrBucketNotFound
+			}
+			return err
+		}
+		return txn.Set([]byte("bucketver:"+bucket), []byte(state))
+	})
+}
+
+// GetBucketVersioning satisfies server.BucketVersioner. Returns "Unversioned"
+// when no state has been set so the S3 semantic matches ECBackend's default.
+func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
+	var state string
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("bucketver:" + bucket))
+		if err == badger.ErrKeyNotFound {
+			state = "Unversioned"
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			state = string(v)
+			return nil
+		})
+	})
+	return state, err
+}
+
 func (b *DistributedBackend) ListBuckets() ([]string, error) {
 	var buckets []string
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -354,7 +399,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 	if b.shardSvc != nil {
 		ctx := context.Background()
 		for _, peer := range b.allNodes {
-			if peer == b.node.ID() {
+			if peer == b.selfAddr {
 				continue
 			}
 			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
@@ -542,7 +587,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		ctx := context.Background()
 		// Try healthy peers first
 		for _, peer := range b.allNodes {
-			if peer == b.node.ID() {
+			if peer == b.selfAddr {
 				continue
 			}
 			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
@@ -562,7 +607,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		// Fallback: try unhealthy peers (they may have recovered)
 		if b.peerHealth != nil {
 			for _, peer := range b.allNodes {
-				if peer == b.node.ID() {
+				if peer == b.selfAddr {
 					continue
 				}
 				if b.peerHealth.IsHealthy(peer) {
@@ -901,8 +946,16 @@ func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, er
 }
 
 func (b *DistributedBackend) DeleteObject(bucket, key string) error {
+	_, err := b.DeleteObjectReturningMarker(bucket, key)
+	return err
+}
+
+// DeleteObjectReturningMarker satisfies server.VersionedSoftDeleter. Same
+// tombstone semantics as DeleteObject but returns the delete marker's
+// VersionID so the S3 handler can surface it in the response header.
+func (b *DistributedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
 	if err := b.HeadBucket(bucket); err != nil {
-		return err
+		return "", err
 	}
 
 	// Tombstone semantics: DeleteObject creates a delete marker as a new
@@ -916,11 +969,16 @@ func (b *DistributedBackend) DeleteObject(bucket, key string) error {
 	// serving it as a fallback read.
 	os.Remove(b.objectPath(bucket, key))
 
-	return b.propose(context.Background(), CmdDeleteObject, DeleteObjectCmd{
+	markerID := newVersionID()
+	err := b.propose(context.Background(), CmdDeleteObject, DeleteObjectCmd{
 		Bucket:    bucket,
 		Key:       key,
-		VersionID: newVersionID(),
+		VersionID: markerID,
 	})
+	if err != nil {
+		return "", err
+	}
+	return markerID, nil
 }
 
 func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -1236,14 +1294,11 @@ func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*
 				return err
 			}
 			if m.ETag == deleteMarkerETag {
-				// Surface the delete marker explicitly; callers can check IsDeleteMarker.
-				obj = storage.Object{
-					Key:            m.Key,
-					VersionID:      versionID,
-					LastModified:   m.LastModified,
-					IsDeleteMarker: true,
-				}
-				return nil
+				// S3 semantics: HEAD on a delete marker version returns 405
+				// MethodNotAllowed. storage.ErrMethodNotAllowed is the sentinel
+				// the server handler maps to that response, including the
+				// x-amz-delete-marker: true header.
+				return storage.ErrMethodNotAllowed
 			}
 			obj = storage.Object{
 				Key:          m.Key,
@@ -1300,31 +1355,47 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 	})
 }
 
-// ListObjectVersions returns every version (including delete markers) for a
-// single key, sorted newest-first. Since VersionIDs are ULIDs (time-sortable ASC),
-// we reverse the iteration order to yield DESC.
-func (b *DistributedBackend) ListObjectVersions(bucket, key string) ([]*storage.ObjectVersion, error) {
+// ListObjectVersions returns every version (including delete markers) under
+// the given prefix, sorted newest-first. When maxKeys > 0 the result is
+// truncated. VersionIDs are UUIDv7 (k-sortable ASC by ms timestamp), so we
+// sort DESC to get newest-first. Matches server.ObjectVersionLister.
+func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
 	if err := b.HeadBucket(bucket); err != nil {
 		return nil, err
 	}
 	var versions []*storage.ObjectVersion
-	latestVID := ""
+	latestMap := map[string]string{} // key → latestVID
 	err := b.db.View(func(txn *badger.Txn) error {
-		if latItem, lerr := txn.Get(latestKey(bucket, key)); lerr == nil {
-			_ = latItem.Value(func(v []byte) error { latestVID = string(v); return nil })
-		} else if lerr != badger.ErrKeyNotFound {
-			return lerr
+		// Pre-scan latest pointers for the prefix so each version can tag IsLatest.
+		latPrefix := []byte("lat:" + bucket + "/" + prefix)
+		latIt := txn.NewIterator(badger.DefaultIteratorOptions)
+		for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
+			k := string(latIt.Item().Key())
+			key := strings.TrimPrefix(k, "lat:"+bucket+"/")
+			_ = latIt.Item().Value(func(v []byte) error { latestMap[key] = string(v); return nil })
 		}
+		latIt.Close()
 
-		prefix := []byte("obj:" + bucket + "/" + key + "/")
+		// Match any object key starting with `prefix` — iterate the per-bucket
+		// versioned store and filter in-memory. The version ID is the last
+		// path segment after the final `/`; everything before is the S3 key.
+		objPrefix := []byte("obj:" + bucket + "/")
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
 			k := string(it.Item().Key())
-			vid := k[len(prefix):]
-			if vid == "" {
+			rest := strings.TrimPrefix(k, "obj:"+bucket+"/")
+			// Versioned format: {key}/{versionID}. Unversioned legacy: {key}.
+			slash := strings.LastIndex(rest, "/")
+			if slash < 0 {
+				continue // legacy unversioned entry, no per-version record
+			}
+			key := rest[:slash]
+			vid := rest[slash+1:]
+			if vid == "" || !strings.HasPrefix(key, prefix) {
 				continue
 			}
+			latestVID := latestMap[key]
 			var v storage.ObjectVersion
 			if err := it.Item().Value(func(val []byte) error {
 				m, err := unmarshalObjectMeta(val)
@@ -1351,10 +1422,16 @@ func (b *DistributedBackend) ListObjectVersions(bucket, key string) ([]*storage.
 	if err != nil {
 		return nil, err
 	}
-	// Sort DESC by VersionID (ULIDs are lex-ASC-by-time, so reverse = newest-first).
+	// Sort DESC by VersionID (UUIDv7 is lex-ASC-by-time, so reverse = newest-first).
 	sort.Slice(versions, func(i, j int) bool {
+		if versions[i].Key != versions[j].Key {
+			return versions[i].Key < versions[j].Key
+		}
 		return versions[i].VersionID > versions[j].VersionID
 	})
+	if maxKeys > 0 && len(versions) > maxKeys {
+		versions = versions[:maxKeys]
+	}
 	return versions, nil
 }
 
