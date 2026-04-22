@@ -16,6 +16,7 @@ type objectMeta struct {
 	ContentType  string
 	ETag         string
 	LastModified int64
+	ACL          uint8 // s3auth.ACLGrant bitmask; 0 = private (backward compat)
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -326,6 +327,7 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	clusterpb.ObjectMetaAddContentType(b, ctOff)
 	clusterpb.ObjectMetaAddEtag(b, etagOff)
 	clusterpb.ObjectMetaAddLastModified(b, m.LastModified)
+	clusterpb.ObjectMetaAddAcl(b, m.ACL)
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -342,6 +344,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		ContentType:  string(t.ContentType()),
 		ETag:         string(t.Etag()),
 		LastModified: t.LastModified(),
+		ACL:          t.Acl(),
 	}, nil
 }
 
@@ -495,6 +498,54 @@ func encodeMigrationDoneCmd(c MigrationDoneFSMCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.MigrationDoneCmdEnd(b)), nil
 }
 
+func encodeSetBucketVersioningCmd(c SetBucketVersioningCmd) ([]byte, error) {
+	b := flatbuffers.NewBuilder(64)
+	bucketOff := b.CreateString(c.Bucket)
+	stateOff := b.CreateString(c.State)
+	clusterpb.SetBucketVersioningCmdStart(b)
+	clusterpb.SetBucketVersioningCmdAddBucket(b, bucketOff)
+	clusterpb.SetBucketVersioningCmdAddState(b, stateOff)
+	return fbFinish(b, clusterpb.SetBucketVersioningCmdEnd(b)), nil
+}
+
+func decodeSetBucketVersioningCmd(data []byte) (SetBucketVersioningCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketVersioningCmd {
+		return clusterpb.GetRootAsSetBucketVersioningCmd(d, 0)
+	})
+	if err != nil {
+		return SetBucketVersioningCmd{}, err
+	}
+	return SetBucketVersioningCmd{
+		Bucket: string(t.Bucket()),
+		State:  string(t.State()),
+	}, nil
+}
+
+func encodeSetObjectACLCmd(c SetObjectACLCmd) ([]byte, error) {
+	b := flatbuffers.NewBuilder(64)
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	clusterpb.SetObjectACLCmdStart(b)
+	clusterpb.SetObjectACLCmdAddBucket(b, bucketOff)
+	clusterpb.SetObjectACLCmdAddKey(b, keyOff)
+	clusterpb.SetObjectACLCmdAddAcl(b, c.ACL)
+	return fbFinish(b, clusterpb.SetObjectACLCmdEnd(b)), nil
+}
+
+func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.SetObjectACLCmd {
+		return clusterpb.GetRootAsSetObjectACLCmd(d, 0)
+	})
+	if err != nil {
+		return SetObjectACLCmd{}, err
+	}
+	return SetObjectACLCmd{
+		Bucket: string(t.Bucket()),
+		Key:    string(t.Key()),
+		ACL:    t.Acl(),
+	}, nil
+}
+
 // --- Payload encoding dispatch ---
 
 func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
@@ -527,6 +578,10 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeDeleteShardPlacementCmd(payload.(DeleteShardPlacementCmd))
 	case CmdDeleteObjectVersion:
 		return encodeDeleteObjectVersionCmd(payload.(DeleteObjectVersionCmd))
+	case CmdSetBucketVersioning:
+		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
+	case CmdSetObjectACL:
+		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}

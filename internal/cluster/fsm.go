@@ -30,6 +30,9 @@ const (
 	// CmdDeleteObjectVersion hard-deletes a specific version (no tombstone);
 	// used by lifecycle/scrubber. Plain CmdDeleteObject creates a tombstone marker.
 	CmdDeleteObjectVersion CommandType = 14
+	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning + object ACL.
+	CmdSetBucketVersioning CommandType = 15
+	CmdSetObjectACL        CommandType = 16
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -133,6 +136,19 @@ type PutShardPlacementCmd struct {
 type DeleteShardPlacementCmd struct {
 	Bucket string
 	Key    string
+}
+
+// SetBucketVersioningCmd persists the S3 versioning state for a bucket.
+type SetBucketVersioningCmd struct {
+	Bucket string
+	State  string // "Enabled" | "Suspended"
+}
+
+// SetObjectACLCmd updates the ACL bitmask for an existing object.
+type SetObjectACLCmd struct {
+	Bucket string
+	Key    string
+	ACL    uint8
 }
 
 // EncodeCommand serializes a command for Raft proposal using FlatBuffers.

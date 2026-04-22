@@ -74,8 +74,6 @@
 
 ### v0.0.4.0 follow-up
 
-- [ ] **S3 ACL Raft 직렬화** — `server.ACLSetter`(SetObjectACL) 구현. 현재 `internal/server/acl_e2e_test.go`가 `t.Skip`. ObjectMeta에 ACL 필드 추가 + `CmdSetObjectACL` FSM 명령.
-- [ ] **BucketVersioning Raft 직렬화** — 현재 `bucketver:{bucket}` 키는 로컬 BadgerDB에만 씀. 멀티-노드 클러스터에서 일관성을 위해 `CmdSetBucketVersioning` FSM 명령 추가.
 - [ ] **5-node loopback Raft 부트스트랩 안정성** — `TestE2E_ClusterEC_PutGet_5Node`가 CI에서 "no leader found" 로 flaky (130s+ 대기 후 timeout). 3-node 시나리오는 안정적. Election timeout 튜닝 또는 테스트에서 warm-up을 단계적으로 하는 방식 검토.
 - [ ] **Per-bucket EC policy 재설계** — ECBackend의 `/admin/buckets/{b}/ec-policy` 토글 API가 사라짐. DistributedBackend는 cluster 전역 `--cluster-ec`로 동작. 필요시 per-bucket `ECConfig`를 FSM에 저장하여 복원.
 
@@ -94,6 +92,7 @@
 - [ ] PGO
 - [ ] **Predictive resource warnings** — *zero ops* — 디스크 사용률/증가율, BadgerDB value log 크기, goroutine/FD 추세 추적하고 임계 도달 전 경고 (dashboard + log)
 - [ ] control plane, data plane 분리
+- [ ] **QUIC 내부 통신 압축 도입 검토** — 클러스터 노드 간 QUIC 스트림에 압축(zstd/lz4) 적용 가능 여부 및 성능 트레이드오프 측정. 벤치마크 필수 (압축 CPU 비용 vs. 네트워크 절감); EC shard 데이터는 이미 랜덤 바이트이므로 압축 이득 미미할 수 있음 — gossip/receipt/metadata 트래픽 우선 검토.
 
 ## Phase 20: Protocol Extensions
 

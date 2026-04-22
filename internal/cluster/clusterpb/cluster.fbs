@@ -80,6 +80,18 @@ table ObjectMeta {
   content_type:string;
   etag:string;
   last_modified:int64;
+  acl:uint8;
+}
+
+table SetBucketVersioningCmd {
+  bucket:string;
+  state:string;
+}
+
+table SetObjectACLCmd {
+  bucket:string;
+  key:string;
+  acl:uint8;
 }
 
 table KeyValue {
