@@ -78,7 +78,6 @@
 - [ ] **BucketVersioning Raft 직렬화** — 현재 `bucketver:{bucket}` 키는 로컬 BadgerDB에만 씀. 멀티-노드 클러스터에서 일관성을 위해 `CmdSetBucketVersioning` FSM 명령 추가.
 - [ ] **5-node loopback Raft 부트스트랩 안정성** — `TestE2E_ClusterEC_PutGet_5Node`가 CI에서 "no leader found" 로 flaky (130s+ 대기 후 timeout). 3-node 시나리오는 안정적. Election timeout 튜닝 또는 테스트에서 warm-up을 단계적으로 하는 방식 검토.
 - [ ] **Per-bucket EC policy 재설계** — ECBackend의 `/admin/buckets/{b}/ec-policy` 토글 API가 사라짐. DistributedBackend는 cluster 전역 `--cluster-ec`로 동작. 필요시 per-bucket `ECConfig`를 FSM에 저장하여 복원.
-- [ ] **TestE2E_Versioning_Full 재작성** — 이전 테스트는 `startECServerWithScrub` 헬퍼를 통해 ECBackend 내부에 결합. DistributedBackend 버전 API로 재작성 (`internal/cluster/versioning_test.go`는 unit 커버, e2e 경로 재구축 필요).
 
 ## Phase 19: Performance
 
