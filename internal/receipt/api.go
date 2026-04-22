@@ -127,10 +127,40 @@ func (a *API) ServeGetReceipt(w http.ResponseWriter, r *http.Request, id string)
 	writeJSON(w, http.StatusOK, raw)
 }
 
-// ServeListReceipts handles GET /api/receipts?from=&to=&limit=.
+// ServeGetByCorrelationID handles GET /api/receipts?correlation_id=X.
+// Returns the single receipt for a repair session identified by its correlation
+// ID, or 404 if no receipt was finalized for that session.
+func (a *API) ServeGetByCorrelationID(w http.ResponseWriter, correlationID string) {
+	r, err := a.store.GetByCorrelationID(correlationID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, `{"error":"receipt not found"}`, http.StatusNotFound)
+			return
+		}
+		a.logger.Warn("receipt-api: get by correlation_id failed", "correlation_id", correlationID, "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	body, err := json.Marshal(r)
+	if err != nil {
+		http.Error(w, `{"error":"encode failed"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// ServeListReceipts handles GET /api/receipts?from=&to=&limit= (time-range list)
+// or GET /api/receipts?correlation_id=X (session lookup).
 // Times use RFC 3339 with optional fractional seconds.
 func (a *API) ServeListReceipts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+
+	// Correlation-ID shortcut: bypass time-range logic.
+	if cid := q.Get("correlation_id"); cid != "" {
+		a.ServeGetByCorrelationID(w, cid)
+		return
+	}
+
 	fromStr, toStr := q.Get("from"), q.Get("to")
 	if fromStr == "" || toStr == "" {
 		http.Error(w, `{"error":"from and to are required (RFC 3339)"}`, http.StatusBadRequest)

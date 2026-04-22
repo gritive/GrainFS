@@ -32,6 +32,7 @@ type HealReceipt struct {
 	PeersInvolved    []string  `json:"peers_involved"`
 	DurationMs       uint32    `json:"duration_ms"`
 	EventIDs         []string  `json:"event_ids"`
+	CorrelationID    string    `json:"correlation_id,omitempty"`
 	CanonicalPayload string    `json:"canonical_payload,omitempty"`
 	Signature        string    `json:"signature,omitempty"`
 }

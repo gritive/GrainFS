@@ -13,6 +13,7 @@ import (
 const (
 	keyPrefix     = "receipt:"
 	tsIndexPrefix = "ts:"
+	cidxPrefix    = "cidx:"
 
 	// tsNanoWidth pads the decimal unix-nano timestamp so lexicographic key
 	// order matches chronological order. int64 max (9223372036854775807) is
@@ -231,9 +232,9 @@ func (s *Store) drain() error {
 	return nil
 }
 
-// writeBatch writes each receipt's primary key (receipt:<id> → JSON) and
-// secondary time-index key (ts:<unix_nano>:<id> → id) inside the same txn so
-// the two keys either both land or both fail.
+// writeBatch writes each receipt's primary key (receipt:<id> → JSON),
+// secondary time-index key (ts:<unix_nano>:<id> → id), and optional
+// correlation-index key (cidx:<correlation_id> → id) inside the same txn.
 func writeBatch(txn *badger.Txn, batch []*HealReceipt, ttl time.Duration) error {
 	for _, r := range batch {
 		data, err := json.Marshal(r)
@@ -247,6 +248,12 @@ func writeBatch(txn *badger.Txn, batch []*HealReceipt, ttl time.Duration) error 
 		idx := badger.NewEntry(tsIndexKey(r.Timestamp, r.ReceiptID), []byte(r.ReceiptID)).WithTTL(ttl)
 		if err := txn.SetEntry(idx); err != nil {
 			return fmt.Errorf("receipt: badger set ts-index %q: %w", r.ReceiptID, err)
+		}
+		if r.CorrelationID != "" {
+			cidx := badger.NewEntry(cidxKey(r.CorrelationID), []byte(r.ReceiptID)).WithTTL(ttl)
+			if err := txn.SetEntry(cidx); err != nil {
+				return fmt.Errorf("receipt: badger set cidx %q: %w", r.ReceiptID, err)
+			}
 		}
 	}
 	return nil
@@ -383,8 +390,38 @@ func bytesGTE(a, b []byte) bool {
 	return len(a) >= len(b)
 }
 
+// GetByCorrelationID returns the receipt whose CorrelationID matches, or
+// ErrNotFound when no such receipt exists or its TTL has expired.
+func (s *Store) GetByCorrelationID(correlationID string) (*HealReceipt, error) {
+	if correlationID == "" {
+		return nil, errors.New("receipt: empty correlation_id")
+	}
+	var receiptID string
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(cidxKey(correlationID))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("receipt: badger get cidx: %w", err)
+		}
+		return item.Value(func(v []byte) error {
+			receiptID = string(v)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(receiptID)
+}
+
 func receiptKey(id string) []byte {
 	return []byte(keyPrefix + id)
+}
+
+func cidxKey(correlationID string) []byte {
+	return []byte(cidxPrefix + correlationID)
 }
 
 // tsIndexKey produces "ts:<unix_nano_padded>:<id>" so BadgerDB's lexicographic

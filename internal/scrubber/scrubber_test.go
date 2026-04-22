@@ -436,3 +436,90 @@ func TestScrubber_PlainObject_Skipped(t *testing.T) {
 	assert.EqualValues(t, 0, stats.ShardErrors, "ec.bin with healthy shards must show 0 errors")
 }
 
+// ----------------------------------------------------------------------------
+// Signing-health gate tests (Phase 16 Week 5 Slice 3)
+// ----------------------------------------------------------------------------
+
+// stubSigningHealthEmitter is an Emitter + SigningHealthChecker + SessionFinalizer
+// that lets tests control signing health and count FinalizeSession calls.
+type stubSigningHealthEmitter struct {
+	signingOK     bool
+	emitted       []scrubber.HealEvent
+	finalized     []string
+	mu            sync.Mutex
+}
+
+func (e *stubSigningHealthEmitter) Emit(ev scrubber.HealEvent) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.emitted = append(e.emitted, ev)
+}
+func (e *stubSigningHealthEmitter) SigningHealthy() bool  { return e.signingOK }
+func (e *stubSigningHealthEmitter) FinalizeSession(cid string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.finalized = append(e.finalized, cid)
+}
+
+func TestScrubber_SigningHealthGate_SkipsRepairWhenUnhealthy(t *testing.T) {
+	const (
+		dataShards   = 4
+		parityShards = 2
+	)
+	data := make([]byte, 64)
+	m := newMockBackend()
+	shards := encodeShards(t, data, dataShards, parityShards)
+	m.storeShards("b", "k", shards)
+	m.records["b"] = []scrubber.ObjectRecord{{Bucket: "b", Key: "k", DataShards: dataShards, ParityShards: parityShards}}
+	delete(m.shards, "b/k/0") // one shard missing
+
+	emitter := &stubSigningHealthEmitter{signingOK: false}
+	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
+	s.SetEmitter(emitter)
+	s.RunOnce(context.Background())
+
+	// Detect events still emitted (verification ran).
+	emitter.mu.Lock()
+	detected := 0
+	for _, ev := range emitter.emitted {
+		if ev.Phase == scrubber.PhaseDetect {
+			detected++
+		}
+	}
+	emitter.mu.Unlock()
+	assert.Greater(t, detected, 0, "detect events must be emitted even when signing is unhealthy")
+
+	// But no FinalizeSession — repair was skipped.
+	emitter.mu.Lock()
+	finalizedCount := len(emitter.finalized)
+	emitter.mu.Unlock()
+	assert.Equal(t, 0, finalizedCount, "FinalizeSession must not be called when signing is unhealthy")
+
+	// Shard must still be missing — repair did not run.
+	_, repaired := m.shards["b/k/0"]
+	assert.False(t, repaired, "shard must not be repaired when signing is unhealthy")
+}
+
+func TestScrubber_SigningHealthGate_FinalizeCalledWhenHealthy(t *testing.T) {
+	const (
+		dataShards   = 4
+		parityShards = 2
+	)
+	data := make([]byte, 64)
+	m := newMockBackend()
+	shards := encodeShards(t, data, dataShards, parityShards)
+	m.storeShards("b", "k", shards)
+	m.records["b"] = []scrubber.ObjectRecord{{Bucket: "b", Key: "k", DataShards: dataShards, ParityShards: parityShards}}
+	delete(m.shards, "b/k/0") // one shard missing
+
+	emitter := &stubSigningHealthEmitter{signingOK: true}
+	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
+	s.SetEmitter(emitter)
+	s.RunOnce(context.Background())
+
+	emitter.mu.Lock()
+	finalizedCount := len(emitter.finalized)
+	emitter.mu.Unlock()
+	assert.Equal(t, 1, finalizedCount, "FinalizeSession must be called once after repair succeeds")
+}
+

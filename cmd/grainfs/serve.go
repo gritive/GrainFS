@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -81,6 +82,9 @@ func init() {
 	serveCmd.Flags().Duration("heal-receipt-retention", 30*24*time.Hour, "HealReceipt retention window (older entries are GC'd)")
 	serveCmd.Flags().Duration("heal-receipt-gossip-interval", 5*time.Second, "how often this node gossips its recent receipt IDs to peers")
 	serveCmd.Flags().Int("heal-receipt-window", 50, "rolling window size — how many recent receipt IDs to gossip per tick")
+	// Phase 16 Week 5 Slice 4 — OTel spans.
+	serveCmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
+	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -119,6 +123,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if _, err := loadOrCreateEncryptionKey(encKeyFile, dataDir); err != nil {
 			return fmt.Errorf("encryption setup: %w", err)
 		}
+	}
+
+	// Phase 16 Week 5 Slice 4 — OTel trace provider.
+	otelEndpoint, _ := cmd.Flags().GetString("otel-endpoint")
+	otelSampleRate, _ := cmd.Flags().GetFloat64("otel-sample-rate")
+	otelShutdown, err := grainotel.Init(ctx, otelEndpoint, otelSampleRate)
+	if err != nil {
+		slog.Warn("otel: init failed, tracing disabled", "err", err)
+	} else if otelEndpoint != "" {
+		slog.Info("otel: tracing enabled", "endpoint", otelEndpoint, "sample_rate", otelSampleRate)
+		defer func() { _ = otelShutdown(context.Background()) }()
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
@@ -459,9 +474,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	srv := server.New(addr, backend, srvOpts...)
 
+	// Phase 16 Week 5 Slice 3: wrap the base heal emitter with receipt tracking
+	// so every completed repair session produces a signed HealReceipt.
+	// receiptWiring.keyStore may be nil when heal-receipt is disabled — in that
+	// case newReceiptTrackingEmitter degrades to a pass-through (signing unhealthy).
+	var activeEmitter scrubber.Emitter = srv.HealEmitter()
+	if receiptWiring != nil && receiptWiring.store != nil {
+		rte := server.NewReceiptTrackingEmitter(srv.HealEmitter(), receiptWiring.store, receiptWiring.keyStore)
+		defer rte.Close()
+		activeEmitter = rte
+	}
+
 	// Phase 16 Week 3: cluster mode also needs startup recovery for the
 	// node's local data dir (per-node multipart parts + .tmp leftovers).
-	if rec, err := server.RunStartupRecovery(ctx, dataDir, srv.HealEmitter()); err != nil && !errors.Is(err, context.Canceled) {
+	if rec, err := server.RunStartupRecovery(ctx, dataDir, activeEmitter); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Warn("startup recovery failed", "err", err)
 	} else if rec.OrphanTmpRemoved+rec.OrphanMultipartRemoved+len(rec.Errors) > 0 {
 		slog.Info("startup recovery summary",
@@ -486,7 +512,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
 	if scrubInterval > 0 && distBackend.ECActive() {
 		sc := scrubber.New(distBackend, scrubInterval)
-		sc.SetEmitter(srv.HealEmitter())
+		sc.SetEmitter(activeEmitter)
 		sc.Start(ctx)
 		slog.Info("cluster scrubber started", "interval", scrubInterval)
 	}

@@ -26,9 +26,9 @@ func (f *fakeRouteLookup) Lookup(id string) (string, bool) {
 
 // fakePeerQuerier satisfies PeerQuerier for tests.
 type fakePeerQuerier struct {
-	singleResp map[string][]byte // peer → receipt JSON
-	singleErr  map[string]error
-	broadcast  []byte // set to simulate a broadcast hit
+	singleResp     map[string][]byte // peer → receipt JSON
+	singleErr      map[string]error
+	broadcast      []byte // set to simulate a broadcast hit
 	broadcastFound bool
 	broadcastErr   error
 
@@ -269,4 +269,35 @@ func TestAPI_ListReceipts_RespectsLimitParam(t *testing.T) {
 
 func uidAPI(i int) string {
 	return "rcpt-api-" + string(rune('0'+i))
+}
+
+// --- correlation_id query-param tests ---
+
+func TestAPI_ListReceipts_ByCorrelationID_Found(t *testing.T) {
+	api, s, _, _ := setupAPI(t)
+
+	r := mustSignedReceipt(t, "rcpt-cid-1", time.Now())
+	r.CorrelationID = "cid-abc"
+	require.NoError(t, s.Put(r))
+	require.NoError(t, s.Flush())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/receipts?correlation_id=cid-abc", nil)
+	api.ServeListReceipts(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got HealReceipt
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "rcpt-cid-1", got.ReceiptID)
+	assert.Equal(t, "cid-abc", got.CorrelationID)
+}
+
+func TestAPI_ListReceipts_ByCorrelationID_NotFound(t *testing.T) {
+	api, _, _, _ := setupAPI(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/receipts?correlation_id=cid-missing", nil)
+	api.ServeListReceipts(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }

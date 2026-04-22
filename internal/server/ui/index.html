@@ -194,6 +194,22 @@ tbody tr:last-child td{border-bottom:none}
     </div>
   </div>
 
+  <!-- Blame Mode modal (Phase 16 Week 5 Slice 3) -->
+  <div id="blame-modal-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="blame-modal-title">
+    <div class="modal" style="width:640px;max-width:95vw;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <h3 id="blame-modal-title" style="font-size:0.9rem;font-weight:700">Repair Session Timeline</h3>
+        <button id="blame-modal-close" class="btn" style="padding:0.25rem 0.5rem;font-size:0.75rem">Close</button>
+      </div>
+      <div id="blame-session-meta" style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.75rem;font-family:monospace"></div>
+      <div id="blame-timeline" style="font-family:monospace;font-size:0.75rem;line-height:1.6;margin-bottom:1rem"></div>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+        <button id="blame-dl-events" class="btn" style="font-size:0.75rem">Download Events JSON</button>
+        <button id="blame-dl-receipt" class="btn" style="font-size:0.75rem">Download Receipt JSON</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Live log stream -->
   <div style="margin-bottom:1.5rem">
     <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
@@ -809,6 +825,18 @@ tbody tr:last-child td{border-bottom:none}
       tbl.appendChild(empty);
       return;
     }
+    // Group events by correlationID so we can show one "Blame" button per session.
+    var sessionMap = {};
+    var sessionOrder = [];
+    healEvents.forEach(function(ev) {
+      var cid = ev.correlation_id || '';
+      if (cid && !sessionMap[cid]) {
+        sessionMap[cid] = [];
+        sessionOrder.push(cid);
+      }
+      if (cid) sessionMap[cid].push(ev);
+    });
+
     healEvents.forEach(function(ev) {
       var row = document.createElement('div');
       row.style.cssText = 'padding:0.15rem 0;display:flex;gap:0.5rem;align-items:baseline';
@@ -821,6 +849,7 @@ tbody tr:last-child td{border-bottom:none}
       phaseSpan.style.cssText = 'color:' + healOutcomeColor(ev.outcome) + ';font-weight:600;min-width:6rem';
       phaseSpan.textContent = ev.phase;
       var bodySpan = document.createElement('span');
+      bodySpan.style.flex = '1';
       var parts = [];
       if (ev.bucket) parts.push(ev.bucket + (ev.key ? '/' + ev.key : ''));
       if (ev.shard_id != null && ev.shard_id >= 0) parts.push('shard=' + ev.shard_id);
@@ -830,9 +859,125 @@ tbody tr:last-child td{border-bottom:none}
       row.appendChild(tsSpan);
       row.appendChild(phaseSpan);
       row.appendChild(bodySpan);
+      // Add "Blame" button for events with a correlationID, on the first event in the session.
+      if (ev.correlation_id) {
+        var cid = ev.correlation_id;
+        var isFirstInSession = sessionMap[cid] && sessionMap[cid][0] === ev;
+        if (isFirstInSession) {
+          var blameBtn = document.createElement('button');
+          blameBtn.className = 'btn';
+          blameBtn.style.cssText = 'font-size:0.65rem;padding:0.1rem 0.4rem;opacity:0.8';
+          blameBtn.textContent = 'Blame \u2192';
+          blameBtn.onclick = function() { openBlameMode(cid, sessionMap[cid]); };
+          row.appendChild(blameBtn);
+        }
+      }
       tbl.appendChild(row);
     });
   }
+
+  // ── Blame Mode v1 ──────────────────────────────────────────────────────────
+  var blameCurrentCID = null;
+  var blameCurrentEvents = null;
+  var blameCurrentReceipt = null;
+
+  function openBlameMode(correlationID, events) {
+    blameCurrentCID = correlationID;
+    blameCurrentEvents = events;
+    blameCurrentReceipt = null;
+
+    document.getElementById('blame-modal-overlay').classList.remove('hidden');
+    renderBlameTimeline(events);
+
+    // Attempt to load the signed receipt for this session.
+    fetch(baseURL + '/api/receipts?correlation_id=' + encodeURIComponent(correlationID))
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(receipt) {
+        blameCurrentReceipt = receipt;
+        if (receipt) {
+          var meta = document.getElementById('blame-session-meta');
+          meta.textContent = 'Receipt ' + receipt.receipt_id
+            + ' · signed with key ' + (receipt.key_id || '?')
+            + ' · ' + (receipt.duration_ms || 0) + 'ms';
+        }
+      }).catch(function() {});
+  }
+
+  function renderBlameTimeline(events) {
+    var meta = document.getElementById('blame-session-meta');
+    meta.textContent = 'Session ' + (blameCurrentCID || '').slice(0, 8) + '... · loading receipt...';
+
+    var container = document.getElementById('blame-timeline');
+    container.textContent = '';
+    if (!events || !events.length) {
+      container.textContent = 'No events in this session.';
+      return;
+    }
+
+    // Sort events by timestamp.
+    var sorted = events.slice().sort(function(a, b) {
+      return Date.parse(a.timestamp || 0) - Date.parse(b.timestamp || 0);
+    });
+
+    var startMs = Date.parse(sorted[0].timestamp || 0);
+    sorted.forEach(function(ev) {
+      var line = document.createElement('div');
+      line.style.cssText = 'padding:0.1rem 0;display:flex;gap:0.75rem;align-items:baseline';
+      var delta = Date.parse(ev.timestamp || 0) - startMs;
+      var tEl = document.createElement('span');
+      tEl.style.cssText = 'color:var(--text-faint);min-width:5rem;text-align:right';
+      tEl.textContent = '+' + delta + 'ms';
+      var phEl = document.createElement('span');
+      phEl.style.cssText = 'color:' + healOutcomeColor(ev.outcome) + ';font-weight:600;min-width:6rem';
+      phEl.textContent = ev.phase;
+      var detEl = document.createElement('span');
+      var parts = [];
+      if (ev.shard_id != null && ev.shard_id >= 0) parts.push('shard=' + ev.shard_id);
+      if (ev.peer_id) parts.push('peer=' + ev.peer_id);
+      if (ev.bytes_repaired) parts.push(ev.bytes_repaired + 'B');
+      if (ev.duration_ms) parts.push(ev.duration_ms + 'ms');
+      if (ev.err_code) parts.push(ev.err_code);
+      detEl.textContent = parts.join(' · ');
+      line.appendChild(tEl);
+      line.appendChild(phEl);
+      line.appendChild(detEl);
+      container.appendChild(line);
+    });
+  }
+
+  function closeBlameMode() {
+    document.getElementById('blame-modal-overlay').classList.add('hidden');
+    blameCurrentCID = null;
+    blameCurrentEvents = null;
+    blameCurrentReceipt = null;
+  }
+
+  function downloadJSON(obj, filename) {
+    var blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  document.getElementById('blame-modal-close').onclick = closeBlameMode;
+  document.getElementById('blame-modal-overlay').onclick = function(e) {
+    if (e.target === this) closeBlameMode();
+  };
+  document.getElementById('blame-dl-events').onclick = function() {
+    if (!blameCurrentEvents) return;
+    downloadJSON(blameCurrentEvents, 'heal-events-' + (blameCurrentCID || 'unknown') + '.json');
+  };
+  document.getElementById('blame-dl-receipt').onclick = function() {
+    if (!blameCurrentReceipt) {
+      alert('Receipt not yet available for this session. It may still be pending.');
+      return;
+    }
+    downloadJSON(blameCurrentReceipt, 'heal-receipt-' + (blameCurrentCID || 'unknown') + '.json');
+  };
+  // ── end Blame Mode ─────────────────────────────────────────────────────────
 
   function healOutcomeColor(outcome) {
     switch (outcome) {

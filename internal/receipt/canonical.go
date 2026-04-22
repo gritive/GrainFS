@@ -34,6 +34,7 @@ func canonicalize(r *HealReceipt) ([]byte, error) {
 		"peers_involved": normalizeStringSlice(r.PeersInvolved),
 		"duration_ms":    r.DurationMs,
 		"event_ids":      normalizeStringSlice(r.EventIDs),
+		"correlation_id": r.CorrelationID,
 	}
 	return json.Marshal(m)
 }

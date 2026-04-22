@@ -66,6 +66,21 @@ type Emitter interface {
 	Emit(HealEvent)
 }
 
+// SessionFinalizer is an optional extension of Emitter. When the emitter
+// implements it, the scrubber calls FinalizeSession after each repair session
+// completes so the emitter can aggregate HealEvents into a signed HealReceipt.
+type SessionFinalizer interface {
+	FinalizeSession(correlationID string)
+}
+
+// SigningHealthChecker is an optional extension of Emitter. When the emitter
+// implements it, the scrubber checks SigningHealthy() before each repair cycle.
+// If unhealthy, repairs are skipped for that cycle so no unsigned receipts are
+// ever produced (Phase 16 Week 5 failure policy).
+type SigningHealthChecker interface {
+	SigningHealthy() bool
+}
+
 // NoopEmitter discards all events. Used by tests and code paths that run
 // before the production emitter is wired up.
 type NoopEmitter struct{}
