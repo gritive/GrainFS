@@ -14,10 +14,9 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
-// Compile-time proof that DistributedBackend satisfies the optional
-// ShardRepairer contract the scrubber uses in cluster mode. ShardOwner is
-// deliberately not wired yet — see docstring on RaftNodeID.
+// Compile-time proof that DistributedBackend satisfies the scrubber contracts.
 var _ scrubber.ShardRepairer = (*DistributedBackend)(nil)
+var _ scrubber.ShardOwner = (*DistributedBackend)(nil)
 
 // writePlacement seeds a placement record directly in the FSM's BadgerDB,
 // bypassing the Raft proposal path. Matches the byte layout that
@@ -27,6 +26,13 @@ func writePlacement(t *testing.T, b *DistributedBackend, bucket, key string, nod
 	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(shardPlacementKey(bucket, key), encodePlacementValue(nodes))
 	}))
+}
+
+func TestNodeID_ReturnsSelfAddr(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	assert.Equal(t, "", b.NodeID(), "NodeID before SetShardService must be empty")
+	b.SetShardService(nil, []string{"192.168.1.1:9000", "192.168.1.2:9000"})
+	assert.Equal(t, "192.168.1.1:9000", b.NodeID(), "NodeID must return the self (first) address")
 }
 
 func TestRaftNodeID_ReturnsRaftNodeID(t *testing.T) {

@@ -234,14 +234,20 @@ func shardAAD(bucket, key, path string) []byte {
 	return []byte(bucket + "/" + key + "/" + idxStr)
 }
 
-// RaftNodeID returns this node's Raft node ID. Exposed to admin tooling
-// and to Scrubber wiring helpers; not part of scrubber.ShardOwner because
-// allNodes in the current cluster implementation uses raft addresses while
-// b.node.ID() is the human-readable node name, so the two identifier spaces
-// do not line up inside the placement vector. Until that pre-existing
-// mismatch is resolved, the scrubber runs in unfiltered mode and every
-// node reconstructs locally-missing shards via RepairShardLocal below.
-// See TODO-owned-shards-filter in docs/slices.md.
+// NodeID implements scrubber.ShardOwner. Returns the raft address (selfAddr)
+// stored by SetShardService — the same identifier written into shard placement
+// vectors by putObjectEC — so OwnedShards comparisons work correctly.
+// Returns "" before SetShardService is called (scrubber skips all objects in
+// that state, which is safe because production always calls SetShardService
+// before starting the scrubber).
+func (b *DistributedBackend) NodeID() string {
+	return b.selfAddr
+}
+
+// RaftNodeID returns this node's Raft node name (b.node.ID()). This is the
+// human-readable name configured with --node-id, distinct from the raft
+// address stored in shard placement vectors. Use NodeID() for scrubber
+// filtering; use RaftNodeID() for admin tooling and log messages.
 func (b *DistributedBackend) RaftNodeID() string {
 	if b.node == nil {
 		return ""
@@ -249,10 +255,10 @@ func (b *DistributedBackend) RaftNodeID() string {
 	return b.node.ID()
 }
 
-// OwnedShards returns the shard indices of placement that match the supplied
-// nodeID. Exposed for future cluster-aware scrubber filtering (see
-// RaftNodeID). Returns nil when the object has no placement record (non-EC /
-// N× path) or when nodeID does not appear in the placement vector.
+// OwnedShards implements scrubber.ShardOwner. Returns the shard indices of
+// placement that match the supplied nodeID. Returns nil when the object has no
+// placement record (non-EC / N× path) or when nodeID does not appear in the
+// placement vector.
 // versionID is used to construct the shardKey (key+"/"+versionID) matching
 // the placement record written by putObjectEC. Empty versionID falls back to
 // bare key lookup for legacy pre-versioned EC objects.

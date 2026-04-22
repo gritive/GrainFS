@@ -76,7 +76,6 @@
 
 - [ ] **S3 ACL Raft 직렬화** — `server.ACLSetter`(SetObjectACL) 구현. 현재 `internal/server/acl_e2e_test.go`가 `t.Skip`. ObjectMeta에 ACL 필드 추가 + `CmdSetObjectACL` FSM 명령.
 - [ ] **BucketVersioning Raft 직렬화** — 현재 `bucketver:{bucket}` 키는 로컬 BadgerDB에만 씀. 멀티-노드 클러스터에서 일관성을 위해 `CmdSetBucketVersioning` FSM 명령 추가.
-- [ ] **ShardOwner 필터링 재활성화** — `scrubber.ShardOwner` 인터페이스가 선언되었지만 DistributedBackend의 `NodeID`가 raft name 반환 vs allNodes가 주소 저장 → 필터가 no-op이었음. Slice 8에서 self-addr 수정으로 이제 주소끼리 비교 가능. 별도 slice에서 `ShardPlacementMonitor`의 `SetOnMissing` 콜백 연결 포함.
 - [ ] **5-node loopback Raft 부트스트랩 안정성** — `TestE2E_ClusterEC_PutGet_5Node`가 CI에서 "no leader found" 로 flaky (130s+ 대기 후 timeout). 3-node 시나리오는 안정적. Election timeout 튜닝 또는 테스트에서 warm-up을 단계적으로 하는 방식 검토.
 - [ ] **Per-bucket EC policy 재설계** — ECBackend의 `/admin/buckets/{b}/ec-policy` 토글 API가 사라짐. DistributedBackend는 cluster 전역 `--cluster-ec`로 동작. 필요시 per-bucket `ECConfig`를 FSM에 저장하여 복원.
 - [ ] **TestE2E_Versioning_Full 재작성** — 이전 테스트는 `startECServerWithScrub` 헬퍼를 통해 ECBackend 내부에 결합. DistributedBackend 버전 API로 재작성 (`internal/cluster/versioning_test.go`는 unit 커버, e2e 경로 재구축 필요).
@@ -95,6 +94,7 @@
 - [ ] SIMD
 - [ ] PGO
 - [ ] **Predictive resource warnings** — *zero ops* — 디스크 사용률/증가율, BadgerDB value log 크기, goroutine/FD 추세 추적하고 임계 도달 전 경고 (dashboard + log)
+- [ ] control plane, data plane 분리
 
 ## Phase 20: Protocol Extensions
 

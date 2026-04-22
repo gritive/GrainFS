@@ -491,24 +491,27 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			"errors", len(rec.Errors))
 	}
 
-	// Slice 3 of refactor/unify-storage-paths: cluster-mode scrubber.
-	// Every node runs the scrubber; duplicate repair attempts are safe
-	// because RepairShard pulls survivors from peers and writes to
-	// placement[shardIdx] — idempotent on success, no-op when the shard is
-	// already present on the write target.
+	// Cluster-mode scrubber with ShardOwner filtering.
+	// Each node only verifies shards assigned to it in the placement vector,
+	// avoiding redundant cross-node I/O. RepairShard is idempotent so
+	// concurrent repair from multiple nodes is safe.
 	//
-	// ShardPlacementMonitor auto-repair is intentionally NOT wired in this
-	// slice: the placement vector uses raft addresses while raft.Node.ID()
-	// returns the human-readable node name, so the monitor's owner filter
-	// never matches (pre-existing Phase-18 identity mismatch). The
-	// scrubber's full-scan path catches the same missing shards; a future
-	// slice can re-enable ShardOwner filtering once the identity spaces are
-	// reconciled.
+	// ShardPlacementMonitor detects locally-missing shards between full
+	// scrub cycles; its onMissing callback calls RepairShardLocal which
+	// resolves the latest version and pulls survivor shards from peers.
 	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
 	if scrubInterval > 0 && distBackend.ECActive() {
 		sc := scrubber.New(distBackend, scrubInterval)
 		sc.SetEmitter(activeEmitter)
 		sc.Start(ctx)
+
+		placementMonitor := cluster.NewShardPlacementMonitor(fsm, shardSvc, distBackend.NodeID(), scrubInterval)
+		placementMonitor.SetOnMissing(func(bucket, key string, shardIdx int) {
+			if err := distBackend.RepairShardLocal(bucket, key, "", shardIdx); err != nil {
+				slog.Warn("placement monitor repair failed", "bucket", bucket, "key", key, "shard", shardIdx, "err", err)
+			}
+		})
+		placementMonitor.Start(ctx)
 		slog.Info("cluster scrubber started", "interval", scrubInterval)
 	}
 
