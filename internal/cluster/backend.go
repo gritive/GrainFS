@@ -468,7 +468,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	shardKey := key + "/" + versionID
 
 	placement := PlacementForNodes(b.ecConfig, b.allNodes, shardKey)
-	selfID := b.node.ID()
+	selfID := b.selfAddr
 
 	// Track nodes we wrote to so cleanup can target them precisely.
 	written := make([]string, 0, len(shards))
@@ -504,10 +504,11 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 		written = append(written, node)
 	}
 
-	// Commit placement through Raft.
+	// Commit placement through Raft. Use shardKey so each version has its own
+	// placement record and versioned reads look up the correct node assignment.
 	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
 		Bucket:  bucket,
-		Key:     key,
+		Key:     shardKey,
 		NodeIDs: placement,
 	}); perr != nil {
 		cleanup()
@@ -528,7 +529,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 		ModTime:     now,
 		VersionID:   versionID,
 	}); merr != nil {
-		_ = b.propose(ctx, CmdDeleteShardPlacement, DeleteShardPlacementCmd{Bucket: bucket, Key: key})
+		_ = b.propose(ctx, CmdDeleteShardPlacement, DeleteShardPlacementCmd{Bucket: bucket, Key: shardKey})
 		cleanup()
 		return nil, merr
 	}
@@ -554,7 +555,13 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 
 	// Phase 18: EC placement takes precedence. Absent placement falls through
 	// to the legacy N×-replicated single-shard path below.
-	if nodes, ok := b.fsm.LookupShardPlacement(bucket, key); ok && b.shardSvc != nil {
+	// shardKey = key+"/"+versionID matches the key written by putObjectEC.
+	// Legacy objects without versionID fall back to bare key lookup.
+	shardKey := key
+	if obj.VersionID != "" {
+		shardKey = key + "/" + obj.VersionID
+	}
+	if nodes, ok := b.fsm.LookupShardPlacement(bucket, shardKey); ok && b.shardSvc != nil {
 		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, nodes)
 		if ecErr == nil {
 			return io.NopCloser(bytes.NewReader(data)), obj, nil
@@ -578,11 +585,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	}
 
 	// Local file not found — try fetching from peer nodes (healthy first, then all).
-	// Peers store under key+"/"+versionID when the write was versioned.
-	shardKey := key
-	if obj.VersionID != "" {
-		shardKey = key + "/" + obj.VersionID
-	}
+	// Peers store under shardKey (key+"/"+versionID) when the write was versioned.
 	if b.shardSvc != nil && os.IsNotExist(err) {
 		ctx := context.Background()
 		// Try healthy peers first
@@ -645,7 +648,24 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 	if b.shardSvc == nil {
 		return fmt.Errorf("shard service not configured")
 	}
-	placement, ok := b.fsm.LookupShardPlacement(bucket, key)
+	// Resolve to the latest version when caller doesn't know it (monitor
+	// callback path). Empty latest means pre-versioned legacy EC; fall back
+	// to bare-key layout, preserving pre-Slice-3 behaviour.
+	if versionID == "" {
+		latest, lerr := b.fsm.LookupLatestVersion(bucket, key)
+		if lerr != nil {
+			return fmt.Errorf("resolve version for repair %s/%s: %w", bucket, key, lerr)
+		}
+		versionID = latest
+	}
+	// Placement must be looked up AFTER resolving versionID so shardKey
+	// matches the key written by putObjectEC (key+"/"+versionID).
+	shardKey := key
+	if versionID != "" {
+		shardKey = key + "/" + versionID
+	}
+
+	placement, ok := b.fsm.LookupShardPlacement(bucket, shardKey)
 	if !ok {
 		return fmt.Errorf("no placement for %s/%s — object is not EC-managed", bucket, key)
 	}
@@ -656,20 +676,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		return fmt.Errorf("placement length %d != k+m %d", len(placement), b.ecConfig.NumShards())
 	}
 
-	// Resolve to the latest version when caller doesn't know it (monitor
-	// callback path). Empty latest means pre-versioned legacy EC; fall back
-	// to bare-key layout, preserving pre-Slice-3 behaviour.
-	if versionID == "" {
-		if latest, lerr := b.fsm.LookupLatestVersion(bucket, key); lerr == nil {
-			versionID = latest
-		}
-	}
-	shardKey := key
-	if versionID != "" {
-		shardKey = key + "/" + versionID
-	}
-
-	selfID := b.node.ID()
+	selfID := b.selfAddr
 	shards := make([][]byte, len(placement))
 	available := 0
 
@@ -770,8 +777,10 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	if err != nil {
 		return fmt.Errorf("ec split for convert: %w", err)
 	}
+	// ConvertObjectToEC is a legacy-to-EC migration path for pre-versioned objects,
+	// so placement uses bare key (no versionID suffix).
 	placement := PlacementForNodes(b.ecConfig, b.allNodes, key)
-	selfID := b.node.ID()
+	selfID := b.selfAddr
 	written := make([]string, 0, len(shards))
 	rollbackShards := func() {
 		for _, n := range written {
@@ -860,7 +869,7 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 	if versionID != "" {
 		shardKey = key + "/" + versionID
 	}
-	selfID := b.node.ID()
+	selfID := b.selfAddr
 	shards := make([][]byte, len(placement))
 	available := 0
 	for i, node := range placement {

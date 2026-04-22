@@ -144,7 +144,7 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 	})
 
 	for i := range procs {
-		waitForPort(httpPorts[i], 15*time.Second)
+		waitForPort(t, httpPorts[i], 15*time.Second)
 	}
 	// Give the gossip loop (1s interval) a few ticks so node B learns which
 	// peer holds which receipt id.

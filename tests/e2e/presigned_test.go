@@ -41,7 +41,7 @@ func startAuthServer(t *testing.T) (*s3.Client, string, string, func()) {
 	require.NoError(t, cmd.Start())
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	client := s3.New(s3.Options{
 		BaseEndpoint: aws.String(endpoint),

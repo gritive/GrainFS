@@ -51,7 +51,7 @@ func startECServer(t *testing.T) (*s3.Client, string, func()) {
 	require.NoError(t, cmd.Start())
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	client := newS3Client(endpoint)
 
@@ -87,7 +87,7 @@ func startECServerWithScrub(t *testing.T, scrubInterval time.Duration) (*s3.Clie
 	require.NoError(t, cmd.Start())
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	client := newS3Client(baseURL)
 

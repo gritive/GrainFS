@@ -38,7 +38,7 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	defer cmd.Process.Kill()
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 10*time.Second)
+	waitForPort(t, port, 10*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

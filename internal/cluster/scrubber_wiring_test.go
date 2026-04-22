@@ -88,12 +88,14 @@ func TestOwnedShards(t *testing.T) {
 		},
 	}
 
+	const testVersionID = "any-version"
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.seed != nil {
-				writePlacement(t, b, tc.bucket, tc.key, tc.seed)
+				// Placement is now stored under shardKey = key + "/" + versionID.
+				writePlacement(t, b, tc.bucket, tc.key+"/"+testVersionID, tc.seed)
 			}
-			got := b.OwnedShards(tc.bucket, tc.key, "any-version", tc.nodeID)
+			got := b.OwnedShards(tc.bucket, tc.key, testVersionID, tc.nodeID)
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -104,7 +106,7 @@ func TestRepairShardLocal_WithoutShardService(t *testing.T) {
 	// it must surface the "shard service not configured" error rather than
 	// panicking. This is the state of a test-only DistributedBackend.
 	b := newTestDistributedBackend(t)
-	writePlacement(t, b, "b", "k", []string{"test-node", "other-a"})
+	writePlacement(t, b, "b", "k/any-version", []string{"test-node", "other-a"})
 	err := b.RepairShardLocal("b", "k", "any-version", 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shard service not configured")

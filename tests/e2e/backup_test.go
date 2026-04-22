@@ -50,7 +50,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	defer cmd.Process.Kill()
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 10*time.Second)
+	waitForPort(t, port, 10*time.Second)
 
 	ctx := context.Background()
 	client := newS3Client(endpoint)
@@ -140,7 +140,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	defer cmd2.Process.Kill()
 
 	restoreEndpoint := fmt.Sprintf("http://127.0.0.1:%d", restorePort)
-	waitForPort(restorePort, 10*time.Second)
+	waitForPort(t, restorePort, 10*time.Second)
 
 	client2 := newS3Client(restoreEndpoint)
 

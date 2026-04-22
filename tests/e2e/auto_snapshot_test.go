@@ -34,7 +34,7 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 	require.NoError(t, cmd.Start())
 	defer cmd.Process.Kill()
 
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	// Wait for at least 2 auto-snapshots (>1s)
 	time.Sleep(1500 * time.Millisecond)

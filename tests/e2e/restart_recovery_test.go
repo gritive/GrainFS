@@ -60,7 +60,7 @@ func TestRestartRecovery_SweepsOrphanArtifacts(t *testing.T) {
 	require.NoError(t, cmd.Start())
 	defer func() { _ = cmd.Process.Kill() }()
 
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	// Sanity: orphan artifacts must be gone now that startup recovery ran.
 	_, statErr := os.Stat(staleTmp)

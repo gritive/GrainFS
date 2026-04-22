@@ -2,11 +2,23 @@
 
 ## [0.0.4.2] - 2026-04-22
 
+### Fixed
+
+- **EC 경로 node ID 불일치 수정** (`internal/cluster/backend.go`): `putObjectEC`, `getObjectEC`, `ConvertObjectToEC`, `RepairShard`에서 `b.node.ID()` (UUID)를 `b.selfAddr` (raft 주소)로 교체. 기존 코드에서 self-check가 항상 false → 모든 shard가 로컬 저장 없이 피어로 전달되는 심각한 버그 수정.
+- **Placement key skew 수정** (`internal/cluster/backend.go`, `scrubbable.go`): `putObjectEC`가 FSM에 placement record를 bare `key`로 저장하던 것을 `shardKey = key + "/" + versionID`로 통일. `GetObject`, `RepairShard`, `OwnedShards`의 lookup도 `shardKey` 기반으로 변경. 버전이 다른 동일 key의 placement record가 서로 덮어쓰이던 문제 해결.
+
+- **RepairShard LookupLatestVersion 실패 시 오류 반환** (`internal/cluster/backend.go`): 기존에 `LookupLatestVersion` 실패 시 조용히 bare key로 진행해 placement를 찾지 못하고 "not EC-managed"를 잘못 반환. 이제 적절한 에러를 반환해 scrubber가 retry 가능.
+- **waitForPort e2e 호출 시그니처 수정** (`tests/e2e/`): `waitForPort(port, timeout)` → `waitForPort(t, port, timeout)` (17개 e2e 파일).
+
+### Added
+
+- **EC 버그 수정 단위 테스트** (`internal/cluster/ec_fix_test.go`): `selfAddr` vs `node.ID()` 불일치, 버전별 placement shardKey 저장/조회, 멀티버전 no-collision 등 5개 테스트.
+
 ### Changed
 
 - **Phase 18 Stage 0-2 완료 및 CONDITIONAL GO 검증**: `TestECSpike_RawShardP95` 추가 — `--ec=false --no-encryption` 6-node 클러스터에서 raw shard p95 측정. 결과 53.5ms (임계값 500ms의 9.3×), Phase 18 Stage 3 진입 가능 판정
 - **ecspike 클러스터 헬퍼 리팩터**: `startEcspikeCluster` → `startEcspikeClusterOpts(t, noEC bool)` 파라미터화, `startEcspikeClusterNoEC` 추가
-- **TODOS.md 정리**: Phase 18 Stage 0-2 완료 항목 제거, Stage 3 진입 선결 과제 명확화
+- **TODOS.md 정리**: Phase 18 Placement map 설계 확정 선결 과제 해소, Stage 3 신규 선결 과제 5건 추가
 
 ## [0.0.4.1] - 2026-04-21
 
