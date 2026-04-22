@@ -555,13 +555,13 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 
 	// Phase 18: EC placement takes precedence. Absent placement falls through
 	// to the legacy N×-replicated single-shard path below.
-	// Use shardKey (key+"/"+versionID) to match the key used during putObjectEC.
+	// shardKey = key+"/"+versionID matches the key written by putObjectEC.
 	// Legacy objects without versionID fall back to bare key lookup.
-	ecLookupKey := key
+	shardKey := key
 	if obj.VersionID != "" {
-		ecLookupKey = key + "/" + obj.VersionID
+		shardKey = key + "/" + obj.VersionID
 	}
-	if nodes, ok := b.fsm.LookupShardPlacement(bucket, ecLookupKey); ok && b.shardSvc != nil {
+	if nodes, ok := b.fsm.LookupShardPlacement(bucket, shardKey); ok && b.shardSvc != nil {
 		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, nodes)
 		if ecErr == nil {
 			return io.NopCloser(bytes.NewReader(data)), obj, nil
@@ -585,11 +585,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	}
 
 	// Local file not found — try fetching from peer nodes (healthy first, then all).
-	// Peers store under key+"/"+versionID when the write was versioned.
-	shardKey := key
-	if obj.VersionID != "" {
-		shardKey = key + "/" + obj.VersionID
-	}
+	// Peers store under shardKey (key+"/"+versionID) when the write was versioned.
 	if b.shardSvc != nil && os.IsNotExist(err) {
 		ctx := context.Background()
 		// Try healthy peers first
@@ -660,6 +656,8 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 			versionID = latest
 		}
 	}
+	// Placement must be looked up AFTER resolving versionID so shardKey
+	// matches the key written by putObjectEC (key+"/"+versionID).
 	shardKey := key
 	if versionID != "" {
 		shardKey = key + "/" + versionID
@@ -777,6 +775,8 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	if err != nil {
 		return fmt.Errorf("ec split for convert: %w", err)
 	}
+	// ConvertObjectToEC is a legacy-to-EC migration path for pre-versioned objects,
+	// so placement uses bare key (no versionID suffix).
 	placement := PlacementForNodes(b.ecConfig, b.allNodes, key)
 	selfID := b.selfAddr
 	written := make([]string, 0, len(shards))

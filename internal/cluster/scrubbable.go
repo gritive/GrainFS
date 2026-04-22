@@ -226,6 +226,9 @@ func (b *DistributedBackend) RaftNodeID() string {
 // nodeID. Exposed for future cluster-aware scrubber filtering (see
 // RaftNodeID). Returns nil when the object has no placement record (non-EC /
 // N× path) or when nodeID does not appear in the placement vector.
+// versionID is used to construct the shardKey (key+"/"+versionID) matching
+// the placement record written by putObjectEC. Empty versionID falls back to
+// bare key lookup for legacy pre-versioned EC objects.
 func (b *DistributedBackend) OwnedShards(bucket, key, versionID, nodeID string) []int {
 	lookupKey := key
 	if versionID != "" {
