@@ -400,9 +400,9 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 	if err != nil {
 		return err
 	}
-	key := objectMetaKey(c.Bucket, c.Key)
+	legacyKey := objectMetaKey(c.Bucket, c.Key)
 	return f.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
+		item, err := txn.Get(legacyKey)
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrObjectNotFound
 		}
@@ -419,7 +419,36 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 			if merr != nil {
 				return merr
 			}
-			return txn.Set(key, newVal)
+			if err := txn.Set(legacyKey, newVal); err != nil {
+				return err
+			}
+			// Also update the versioned record if this bucket has versioning enabled.
+			latItem, lerr := txn.Get(latestKey(c.Bucket, c.Key))
+			if lerr != nil {
+				return nil //nolint:nilerr // no versioned key, nothing more to do
+			}
+			var versionID string
+			_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
+			if versionID == "" {
+				return nil
+			}
+			vKey := objectMetaKeyV(c.Bucket, c.Key, versionID)
+			vItem, verr := txn.Get(vKey)
+			if verr != nil {
+				return nil //nolint:nilerr // versioned record missing, skip
+			}
+			return vItem.Value(func(vval []byte) error {
+				vm, merr := unmarshalObjectMeta(vval)
+				if merr != nil {
+					return merr
+				}
+				vm.ACL = c.ACL
+				vNewVal, merr := marshalObjectMeta(vm)
+				if merr != nil {
+					return merr
+				}
+				return txn.Set(vKey, vNewVal)
+			})
 		})
 	})
 }
