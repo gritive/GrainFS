@@ -46,7 +46,7 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	require.NoError(t, cmd1.Start())
 
 	endpoint1 := fmt.Sprintf("http://127.0.0.1:%d", port1)
-	waitForPort(port1, 10*time.Second)
+	waitForPort(t, port1, 10*time.Second)
 	client1 := newS3Client(endpoint1)
 
 	ctx := context.Background()
@@ -99,7 +99,7 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	}()
 
 	endpoint2 := fmt.Sprintf("http://127.0.0.1:%d", port2)
-	waitForPort(port2, 10*time.Second)
+	waitForPort(t, port2, 10*time.Second)
 	client2 := newS3Client(endpoint2)
 
 	listOut2, err := client2.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -159,7 +159,7 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	}()
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 	client := newS3Client(endpoint)
 
 	ctx := context.Background()

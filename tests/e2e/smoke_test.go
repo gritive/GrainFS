@@ -41,7 +41,7 @@ func TestSmoke_DeploymentVerification(t *testing.T) {
 	defer cmd.Process.Kill()
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 10*time.Second)
+	waitForPort(t, port, 10*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

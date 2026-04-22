@@ -37,7 +37,7 @@ func startECServerWithPort(t *testing.T) (*s3.Client, string, int, func()) {
 	require.NoError(t, cmd.Start())
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	client := newS3Client(endpoint)
 

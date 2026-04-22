@@ -38,7 +38,7 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 	srcCmd.Stderr = os.Stderr
 	require.NoError(t, srcCmd.Start())
 	defer srcCmd.Process.Kill()
-	waitForPort(srcPort, 5*time.Second)
+	waitForPort(t, srcPort, 5*time.Second)
 
 	srcEndpoint := fmt.Sprintf("http://127.0.0.1:%d", srcPort)
 	srcClient := newS3Client(srcEndpoint)
@@ -74,7 +74,7 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 	dstCmd.Stderr = os.Stderr
 	require.NoError(t, dstCmd.Start())
 	defer dstCmd.Process.Kill()
-	waitForPort(dstPort, 5*time.Second)
+	waitForPort(t, dstPort, 5*time.Second)
 
 	dstEndpoint := fmt.Sprintf("http://127.0.0.1:%d", dstPort)
 	dstClient := newS3Client(dstEndpoint)

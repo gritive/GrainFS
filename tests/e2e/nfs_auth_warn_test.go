@@ -36,7 +36,7 @@ func TestNFS_NullAuthWarning(t *testing.T) {
 	require.NoError(t, cmd.Start())
 	defer cmd.Process.Kill()
 
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	cmd.Process.Kill()
 	cmd.Wait()
@@ -71,7 +71,7 @@ func TestNFS_NoWarnWhenNFSDisabled(t *testing.T) {
 	require.NoError(t, cmd.Start())
 	defer cmd.Process.Kill()
 
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 
 	cmd.Process.Kill()
 	cmd.Wait()

@@ -134,7 +134,7 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 	})
 
 	for i := range procs {
-		waitForPort(httpPorts[i], 60*time.Second)
+		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
 	time.Sleep(4 * time.Second)
 

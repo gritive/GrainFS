@@ -113,7 +113,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	t.Cleanup(killAll)
 
 	for i := range procs {
-		waitForPort(httpPorts[i], 60*time.Second)
+		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
 	time.Sleep(10 * time.Second) // 6-node Raft cluster needs longer to converge
 
@@ -285,7 +285,7 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 	})
 
 	for i := range procs {
-		waitForPort(httpPorts[i], 30*time.Second)
+		waitForPort(t, httpPorts[i], 30*time.Second)
 	}
 	time.Sleep(4 * time.Second)
 

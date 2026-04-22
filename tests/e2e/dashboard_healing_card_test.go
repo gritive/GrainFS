@@ -44,7 +44,7 @@ func TestDashboardHealingCard_HTMLAndStream(t *testing.T) {
 	require.NoError(t, cmd.Start())
 	defer func() { _ = cmd.Process.Kill() }()
 
-	waitForPort(port, 5*time.Second)
+	waitForPort(t, port, 5*time.Second)
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	t.Run("dashboard html contains self-healing card", func(t *testing.T) {
