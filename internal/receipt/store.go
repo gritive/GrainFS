@@ -392,28 +392,45 @@ func bytesGTE(a, b []byte) bool {
 
 // GetByCorrelationID returns the receipt whose CorrelationID matches, or
 // ErrNotFound when no such receipt exists or its TTL has expired.
+// Both the cidx lookup and the primary receipt read occur in a single
+// transaction to avoid a TOCTOU window where the primary expires between reads.
 func (s *Store) GetByCorrelationID(correlationID string) (*HealReceipt, error) {
 	if correlationID == "" {
 		return nil, errors.New("receipt: empty correlation_id")
 	}
-	var receiptID string
+	var out *HealReceipt
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(cidxKey(correlationID))
+		cidxItem, err := txn.Get(cidxKey(correlationID))
 		if errors.Is(err, badger.ErrKeyNotFound) {
 			return ErrNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("receipt: badger get cidx: %w", err)
 		}
-		return item.Value(func(v []byte) error {
+		var receiptID string
+		if err := cidxItem.Value(func(v []byte) error {
 			receiptID = string(v)
+			return nil
+		}); err != nil {
+			return err
+		}
+		item, err := txn.Get(receiptKey(receiptID))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("receipt: badger get receipt: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			var r HealReceipt
+			if err := json.Unmarshal(val, &r); err != nil {
+				return fmt.Errorf("receipt: decode %q: %w", receiptID, err)
+			}
+			out = &r
 			return nil
 		})
 	})
-	if err != nil {
-		return nil, err
-	}
-	return s.Get(receiptID)
+	return out, err
 }
 
 func receiptKey(id string) []byte {

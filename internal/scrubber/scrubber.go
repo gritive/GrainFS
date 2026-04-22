@@ -358,8 +358,15 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 
 			// Notify the emitter that this repair session is complete so it
 			// can aggregate the session's HealEvents into a signed HealReceipt.
+			// Re-check signing health: the key store may have rotated out after
+			// the cycle-start check; calling FinalizeSession when signing is
+			// gone would silently drop the receipt.
 			if sessionFinalizer != nil {
-				sessionFinalizer.FinalizeSession(correlationID)
+				if checker, ok := s.emitter.(SigningHealthChecker); ok && !checker.SigningHealthy() {
+					slog.Warn("scrub: signing unavailable mid-cycle, receipt dropped", "correlation_id", correlationID)
+				} else {
+					sessionFinalizer.FinalizeSession(correlationID)
+				}
 			}
 		}
 	}
