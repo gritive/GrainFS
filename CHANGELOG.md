@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.4.9] - 2026-04-23
+
+### Added
+
+- **S3 ACL Raft 직렬화** (`internal/cluster/`): `CmdSetObjectACL` FSM 명령 추가. `SetObjectACL`이 이제 Raft를 통해 복제되어 클러스터 전체 노드에 원자적으로 적용됨. `ObjectMeta`에 `acl:uint8` 필드 추가 (FlatBuffers 하위 호환, 이전 데이터는 0=private으로 읽힘).
+- **Versioned ACL 동기화** (`internal/cluster/apply.go`): Versioning 활성 버킷에서 ACL을 설정하면 legacy key와 versioned key 양쪽 모두 동일 트랜잭션에서 원자적으로 업데이트. 이전에는 legacy key만 업데이트되어 versioned 객체 읽기 시 ACL이 무시되는 버그 수정.
+- **BucketVersioning Raft 직렬화** (`internal/cluster/`): `CmdSetBucketVersioning` FSM 명령 추가. `SetBucketVersioning`이 이제 Raft를 통해 복제되어 멀티-노드 클러스터에서 일관성 보장. 이전에는 로컬 BadgerDB에만 기록하여 노드 간 불일치 가능.
+- **`LocalBackend.SetObjectACL`** (`internal/storage/local.go`): Solo 모드(단일 노드)용 ACL 직접 저장 구현. `storage.ACLSetter` 인터페이스 구현, HTTP 레이어 ACL E2E 테스트 활성화.
+
+### Fixed
+
+- **`HeadObject`, `ListObjects`, `HeadObjectVersion`의 ACL 필드 누락** (`internal/cluster/backend.go`): `storage.Object` 반환 시 `ACL: m.ACL` 필드가 빠져 있어 클라이언트가 ACL 값을 읽지 못하던 버그 수정.
+
 ## [0.0.4.8] - 2026-04-22
 
 ### Fixed
