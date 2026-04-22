@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -34,6 +36,47 @@ func TestShardService_LocalWriteAndRead(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(shardDir, "shard_0"))
 	require.NoError(t, err)
 	assert.Equal(t, "hello shard", string(data))
+}
+
+// TestShardService_Encryption verifies that shards written with an encryptor
+// are NOT stored as plaintext on disk, and can be decrypted on read.
+func TestShardService_Encryption(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	tr := transport.NewQUICTransport()
+	svc := NewShardService(dir, tr, WithEncryptor(enc))
+
+	plaintext := []byte("secret shard data")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	// Raw on-disk bytes must differ from plaintext
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	assert.NotEqual(t, plaintext, raw, "shard should be encrypted on disk")
+
+	// ReadLocalShard must return the original plaintext
+	got, err := svc.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
+// TestShardService_NoEncryption verifies plaintext storage when no encryptor is set.
+func TestShardService_NoEncryption(t *testing.T) {
+	dir := t.TempDir()
+	tr := transport.NewQUICTransport()
+	svc := NewShardService(dir, tr)
+
+	plaintext := []byte("plain shard data")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, raw, "without encryptor, shard should be stored as plaintext")
 }
 
 func TestShardService_RPCWriteReadDelete(t *testing.T) {

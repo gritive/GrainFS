@@ -9,6 +9,7 @@ import (
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -22,10 +23,17 @@ var shardBuilderPool = sync.Pool{
 type ShardService struct {
 	dataDir   string
 	transport *transport.QUICTransport
+	encryptor *encrypt.Encryptor
 }
 
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
+
+// WithEncryptor wires an AES-256-GCM encryptor into the shard service so that
+// all shards are encrypted at rest. Pass nil to disable encryption.
+func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
+	return func(s *ShardService) { s.encryptor = enc }
+}
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
@@ -232,19 +240,39 @@ func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 // WriteLocalShard stores a shard on the local node's disk without involving
 // the QUIC transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
+// When an encryptor is configured, the shard is AES-256-GCM encrypted before writing.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
 	dir := filepath.Join(s.dataDir, bucket, key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create shard dir: %w", err)
 	}
+	payload := data
+	if s.encryptor != nil {
+		var err error
+		payload, err = s.encryptor.Encrypt(data)
+		if err != nil {
+			return fmt.Errorf("encrypt shard: %w", err)
+		}
+	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, payload, 0o644)
 }
 
 // ReadLocalShard fetches a shard from the local node's disk.
+// Decrypts the data if an encryptor is configured.
 func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
 	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
-	return os.ReadFile(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if s.encryptor != nil {
+		data, err = s.encryptor.Decrypt(data)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt shard: %w", err)
+		}
+	}
+	return data, nil
 }
 
 // DeleteLocalShards removes every shard for key on the local node (all indices).
@@ -254,8 +282,7 @@ func (s *ShardService) DeleteLocalShards(bucket, key string) error {
 }
 
 func (s *ShardService) handleRead(sr *shardRequest) *transport.Message {
-	path := filepath.Join(s.dataDir, sr.Bucket, sr.Key, fmt.Sprintf("shard_%d", sr.ShardIdx))
-	data, err := os.ReadFile(path)
+	data, err := s.ReadLocalShard(sr.Bucket, sr.Key, int(sr.ShardIdx))
 	if err != nil {
 		return s.errorResponse(err.Error())
 	}
