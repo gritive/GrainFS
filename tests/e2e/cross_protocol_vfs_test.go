@@ -29,7 +29,6 @@ type vfsStatResponse struct {
 // This is an integration test that uses the admin API to perform VFS stat operations,
 // verifying cross-protocol cache coherency works end-to-end.
 func TestCrossProtocolS3PutVFSStat(t *testing.T) {
-	t.Skip("Cross-protocol S3+VFS: depends on NFS/VFS flush path (same root cause as TestNFS_*). Tracked in TODOS v0.0.4.0")
 	ctx := context.Background()
 	bucket := "test-cross-protocol-s3-put-vfs"
 
