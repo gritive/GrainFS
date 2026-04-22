@@ -511,7 +511,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				slog.Warn("placement monitor repair failed", "bucket", bucket, "key", key, "shard", shardIdx, "err", err)
 			}
 		})
-		placementMonitor.Start(ctx)
+		go placementMonitor.Start(ctx)
 		slog.Info("cluster scrubber started", "interval", scrubInterval)
 	}
 
