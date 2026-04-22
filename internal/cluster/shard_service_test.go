@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -34,6 +36,127 @@ func TestShardService_LocalWriteAndRead(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(shardDir, "shard_0"))
 	require.NoError(t, err)
 	assert.Equal(t, "hello shard", string(data))
+}
+
+// TestShardService_Encryption verifies that shards written with an encryptor
+// are NOT stored as plaintext on disk, and can be decrypted on read.
+func TestShardService_Encryption(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	tr := transport.NewQUICTransport()
+	svc := NewShardService(dir, tr, WithEncryptor(enc))
+
+	plaintext := []byte("secret shard data")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	// Raw on-disk bytes must differ from plaintext
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	assert.NotEqual(t, plaintext, raw, "shard should be encrypted on disk")
+
+	// ReadLocalShard must return the original plaintext
+	got, err := svc.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
+// TestShardService_NoEncryption verifies plaintext storage when no encryptor is set.
+func TestShardService_NoEncryption(t *testing.T) {
+	dir := t.TempDir()
+	tr := transport.NewQUICTransport()
+	svc := NewShardService(dir, tr)
+
+	plaintext := []byte("plain shard data")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, raw, "without encryptor, shard should be stored as plaintext")
+}
+
+func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport())
+
+	_, err := svc.ReadLocalShard("bkt", "no-such-obj", 0)
+	require.Error(t, err)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport(), WithEncryptor(enc))
+
+	// Write garbage bytes that look like valid data but aren't valid ciphertext
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rawPath), 0o755))
+	require.NoError(t, os.WriteFile(rawPath, []byte("not-valid-ciphertext"), 0o644))
+
+	_, err = svc.ReadLocalShard("bkt", "obj", 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypt shard")
+}
+
+func TestShardService_WithEncryptorNil(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport(), WithEncryptor(nil))
+
+	plaintext := []byte("plain data with nil encryptor")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	got, err := svc.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
+// TestShardService_RPCEncryptedWriteRead verifies that encryption works end-to-end
+// over the QUIC RPC path: write via handleWrite → WriteLocalShard (encrypt) and
+// read back via handleRead → ReadLocalShard (decrypt).
+func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
+	ctx := context.Background()
+
+	key := bytes.Repeat([]byte("e"), 32)
+	enc1, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+	enc2, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	tr1 := transport.NewQUICTransport()
+	tr2 := transport.NewQUICTransport()
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1, WithEncryptor(enc1))
+	svc2 := NewShardService(dir2, tr2, WithEncryptor(enc2))
+	tr2.SetStreamHandler(svc2.HandleRPC())
+
+	plaintext := []byte("encrypted rpc shard")
+	require.NoError(t, svc1.WriteShard(ctx, tr2.LocalAddr(), "bkt", "key", 0, plaintext))
+
+	// On-disk bytes on node2 must NOT be plaintext
+	rawPath := filepath.Join(dir2, "shards", "bkt", "key", "shard_0")
+	raw, readErr := os.ReadFile(rawPath)
+	require.NoError(t, readErr)
+	assert.NotEqual(t, plaintext, raw, "remote shard should be encrypted on disk")
+
+	// Read back via RPC must return decrypted plaintext
+	got, readErr := svc1.ReadShard(ctx, tr2.LocalAddr(), "bkt", "key", 0)
+	require.NoError(t, readErr)
+	assert.Equal(t, plaintext, got)
 }
 
 func TestShardService_RPCWriteReadDelete(t *testing.T) {

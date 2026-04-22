@@ -112,14 +112,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}))
 	}
 
-	// Encryption setup is eager even in singleton mode so the key file is
-	// materialized on first boot; actual at-rest encryption on the
-	// cluster shard path is a follow-up (Slice 8+). The key is loaded here
-	// to preserve operator workflow — nothing in runCluster consumes it yet.
 	noEncryption, _ := cmd.Flags().GetBool("no-encryption")
+	var shardEncryptor *encrypt.Encryptor
 	if !noEncryption {
 		encKeyFile, _ := cmd.Flags().GetString("encryption-key-file")
-		if _, err := loadOrCreateEncryptionKey(encKeyFile, dataDir); err != nil {
+		var err error
+		shardEncryptor, err = loadOrCreateEncryptionKey(encKeyFile, dataDir)
+		if err != nil {
 			return fmt.Errorf("encryption setup: %w", err)
 		}
 	}
@@ -137,10 +136,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts)
+	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts, shardEncryptor)
 }
 
-func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option) error {
+func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
@@ -254,7 +253,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	rpcTransport.SetTransport()
 
 	// Create ShardService for distributed data replication
-	shardSvc := cluster.NewShardService(dataDir, quicTransport)
+	shardSvc := cluster.NewShardService(dataDir, quicTransport, cluster.WithEncryptor(encryptor))
 
 	// Set up StreamRouter: Raft RPCs on Control stream, Shard RPCs on Data stream
 	router := transport.NewStreamRouter()
@@ -564,8 +563,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 }
 
 // loadOrCreateEncryptionKey loads a key from file or auto-generates one in the data directory.
+// If keyFile is explicitly provided (non-empty) and the file does not exist, an error is returned
+// rather than silently generating a new key — a missing explicit path likely means a mount failure,
+// and generating a new key would make all existing shards permanently unreadable.
 func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, error) {
-	if keyFile == "" {
+	explicitPath := keyFile != ""
+	if !explicitPath {
 		keyFile = filepath.Join(dataDir, "encryption.key")
 	}
 
@@ -579,7 +582,11 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 		return nil, fmt.Errorf("read key file: %w", err)
 	}
 
-	// Auto-generate a new key
+	if explicitPath {
+		return nil, fmt.Errorf("encryption key file not found: %s (mount failure?): %w", keyFile, err)
+	}
+
+	// Auto-generate a new key only for the default path.
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o755); err != nil {
 		return nil, fmt.Errorf("create key dir: %w", err)
 	}

@@ -164,6 +164,12 @@ func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("read shard: %w", err)
 	}
+	if b.shardSvc != nil {
+		data, err = b.shardSvc.DecryptPayload(data)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return data, nil
 }
 
@@ -174,6 +180,14 @@ func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error)
 func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) error {
 	unlock := b.acquireShardWriteLock(bucket, key)
 	defer unlock()
+	payload := data
+	if b.shardSvc != nil {
+		var err error
+		payload, err = b.shardSvc.EncryptPayload(data)
+		if err != nil {
+			return fmt.Errorf("encrypt shard: %w", err)
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
 	}
@@ -182,7 +196,7 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
+	if _, err := f.Write(payload); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)
