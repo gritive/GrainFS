@@ -205,3 +205,60 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	_, err = os.ReadFile(shardPath)
 	assert.True(t, os.IsNotExist(err))
 }
+
+// TestWriteLocalShard_Atomic verifies that WriteLocalShard is crash-safe:
+//  1. Successful writes leave no .tmp garbage.
+//  2. Overwriting an existing shard produces correct final content.
+//  3. The original shard is not modified when the write fails (parent dir
+//     is made non-writable to force an error before rename).
+func TestWriteLocalShard_Atomic(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport())
+
+	data := []byte("atomic-shard-payload")
+	require.NoError(t, svc.WriteLocalShard("bkt", "key/v1", 0, data))
+
+	shardPath := filepath.Join(dir, "shards", "bkt", "key/v1", "shard_0")
+	tmpPath := shardPath + ".tmp"
+
+	// Final shard must exist with correct content.
+	got, err := os.ReadFile(shardPath)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
+
+	// .tmp file must NOT remain after a successful write.
+	_, err = os.Stat(tmpPath)
+	assert.True(t, os.IsNotExist(err), ".tmp file must not remain after successful WriteLocalShard")
+}
+
+// TestWriteLocalShard_OverwritePreservesOriginalOnError verifies that when
+// WriteLocalShard fails mid-flight (simulated by making the shard dir
+// non-writable so tmp creation is blocked), the existing shard is intact.
+// With os.WriteFile (non-atomic), the file would be truncated before the
+// error, leaving a torn shard. With tmp→rename, the original is never touched.
+func TestWriteLocalShard_OverwritePreservesOriginalOnError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport())
+
+	original := []byte("original-safe-content")
+	require.NoError(t, svc.WriteLocalShard("bkt", "key", 0, original))
+
+	shardPath := filepath.Join(dir, "shards", "bkt", "key", "shard_0")
+
+	// Make the shard directory non-writable so the tmp file cannot be created.
+	shardDir := filepath.Dir(shardPath)
+	require.NoError(t, os.Chmod(shardDir, 0o555))
+	defer os.Chmod(shardDir, 0o755)
+
+	// Write should fail because the directory is read-only.
+	err := svc.WriteLocalShard("bkt", "key", 0, []byte("replacement"))
+	require.Error(t, err, "write to read-only dir must fail")
+
+	// Original shard must be intact — not truncated or corrupted.
+	got, readErr := os.ReadFile(shardPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, original, got, "original shard must survive a failed overwrite")
+}

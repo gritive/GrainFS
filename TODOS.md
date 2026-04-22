@@ -60,9 +60,6 @@
 
 **동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
 
-**Stage 3 진입 선결 과제** (Stage 0-2 완료, CONDITIONAL GO p95 53.5ms PASS):
-- Placement map 설계 확정 ✅ — Hybrid(FNV32 + Raft FSM) 확정. `b.node.ID()` → `b.selfAddr` 버그 수정 + placement key skew(shardKey 통일) 수정 완료 (v0.0.4.2)
-
 **Stage 3 선결 과제** (Phase 18 풀 구현 시작 전):
 - [ ] Raft FSM v1→v2 변환 전략 + 롤백 경로 설계
 - [ ] Min-node=6 → `k+m` 파라미터화
@@ -79,7 +76,6 @@
 
 - [ ] **NFS/VFS path 충돌 해결** — `objectPath(bucket, key)` (unversioned file) vs `objectPathV(bucket, key, vid)` (`key/.v/vid` 디렉터리) 경로가 충돌하여 `TestNFS_MountAndWriteReadFile`/`TestNFS_MultipleFiles` 실패. Key/version path 스킴 재설계 (예: `data/bucket/.objects/{key}/{vid}` 플랫 구조) 또는 NFS 레이어에서 별도 bucket namespace 사용.
 - [ ] **GCM AAD 바인딩** — `internal/encrypt/encrypt.go`의 AES-256-GCM 암호화에 AAD(Additional Authenticated Data)가 없음. 파일시스템 쓰기 권한을 가진 공격자가 shard 블롭을 교체해도 인증 실패가 발생하지 않음. 수정: `bucket+"/"+key+"/"+versionID+"/"+ shardIdx`를 AAD로 사용해 위치에 바인딩. (`internal/encrypt`에 `EncryptWithAAD`/`DecryptWithAAD` 추가, shard read/write 경로 전반 업데이트 필요)
-- [ ] **WriteLocalShard 원자적 쓰기** — `os.WriteFile`은 tmp→rename 없이 직접 쓰므로 crash 시 torn shard 발생 가능. `WriteShard(scrubbable.go)`처럼 tmp→fsync→rename 패턴으로 변환.
 - [ ] **암호화 다운그레이드 감지** — 노드가 암호화 없이 시작된 후 기존 암호화 shard를 읽으려 하면 조용히 garbage를 반환. 부팅 시 shard 헤더로 암호화 여부 판단하거나 메타데이터에 encryption flag 기록.
 - [ ] **Shard 파일 권한** — `WriteLocalShard`/`WriteShard`가 0o644 사용. shard는 암호화되어 있더라도 0o600이 더 적절 (동일 OS 사용자 외부 노출 최소화).
 - [ ] **S3 ACL Raft 직렬화** — `server.ACLSetter`(SetObjectACL) 구현. 현재 `internal/server/acl_e2e_test.go`가 `t.Skip`. ObjectMeta에 ACL 필드 추가 + `CmdSetObjectACL` FSM 명령.

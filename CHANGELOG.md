@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.4.5] - 2026-04-22
+
+### Fixed
+
+- **WriteLocalShard 원자적 쓰기** (`internal/cluster/shard_service.go`): `os.WriteFile` 직접 쓰기를 tmp→fsync→rename 패턴으로 교체. 프로세스가 쓰기 도중 크래시해도 shard 파일이 torn state(빈 파일 또는 부분 데이터)로 남지 않고 이전 완전한 버전 또는 새 완전한 버전으로 유지됨. `scrubbable.go:WriteShard`와 동일한 원자적 쓰기 패턴 적용.
+- **WriteLocalShard 테스트 추가**: 성공 시 `.tmp` 파일 미잔류 검증 및 읽기 전용 디렉터리 환경에서 실패 시 원본 shard 보존 검증.
+
 ## [0.0.4.4] - 2026-04-22
 
 ### Added
