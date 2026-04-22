@@ -79,6 +79,45 @@ func TestShardService_NoEncryption(t *testing.T) {
 	assert.Equal(t, plaintext, raw, "without encryptor, shard should be stored as plaintext")
 }
 
+func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport())
+
+	_, err := svc.ReadLocalShard("bkt", "no-such-obj", 0)
+	require.Error(t, err)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport(), WithEncryptor(enc))
+
+	// Write garbage bytes that look like valid data but aren't valid ciphertext
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rawPath), 0o755))
+	require.NoError(t, os.WriteFile(rawPath, []byte("not-valid-ciphertext"), 0o644))
+
+	_, err = svc.ReadLocalShard("bkt", "obj", 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypt shard")
+}
+
+func TestShardService_WithEncryptorNil(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport(), WithEncryptor(nil))
+
+	plaintext := []byte("plain data with nil encryptor")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	got, err := svc.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
 func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	ctx := context.Background()
 
