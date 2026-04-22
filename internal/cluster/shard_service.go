@@ -237,6 +237,30 @@ func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 	return s.okResponse(nil)
 }
 
+// EncryptPayload encrypts data if an encryptor is configured, otherwise returns
+// data unchanged. Used by DistributedBackend.WriteShard (scrubber path) so that
+// repair writes go through the same encryption as regular shard writes.
+func (s *ShardService) EncryptPayload(data []byte) ([]byte, error) {
+	if s.encryptor == nil {
+		return data, nil
+	}
+	return s.encryptor.Encrypt(data)
+}
+
+// DecryptPayload decrypts data if an encryptor is configured, otherwise returns
+// data unchanged. Used by DistributedBackend.ReadShard (scrubber path) so that
+// repair reads see plaintext regardless of on-disk format.
+func (s *ShardService) DecryptPayload(data []byte) ([]byte, error) {
+	if s.encryptor == nil {
+		return data, nil
+	}
+	decrypted, err := s.encryptor.Decrypt(data)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt shard: %w", err)
+	}
+	return decrypted, nil
+}
+
 // WriteLocalShard stores a shard on the local node's disk without involving
 // the QUIC transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
