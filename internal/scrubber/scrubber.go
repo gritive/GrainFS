@@ -236,10 +236,9 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		return
 	}
 
-	// Phase 16 Week 5 failure policy: if signing is unavailable no repair
-	// runs this cycle — we would produce an unaudited session with no receipt.
-	// Verification (detect phase) still runs so the dashboard shows degraded
-	// state even while signing is down.
+	// If signing is unavailable, skip repairs this cycle to avoid producing
+	// unaudited sessions with no receipt. Verification (detect phase) still
+	// runs so the dashboard shows degraded state while signing is down.
 	signingOK := true
 	if checker, ok := s.emitter.(SigningHealthChecker); ok {
 		if !checker.SigningHealthy() {
@@ -340,7 +339,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			}
 
 			// Signing unavailable this cycle: skip repair to preserve the
-			// "no unsigned receipts" audit invariant (Phase 16 failure policy).
+			// "no unsigned receipts" audit invariant.
 			if !signingOK {
 				continue
 			}
