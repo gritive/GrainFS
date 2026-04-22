@@ -262,3 +262,64 @@ func TestWriteLocalShard_OverwritePreservesOriginalOnError(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.Equal(t, original, got, "original shard must survive a failed overwrite")
 }
+
+func TestWriteReadLocalShard_Encrypted_AAD(t *testing.T) {
+	key := make([]byte, 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport(), WithEncryptor(enc))
+
+	data := []byte("secret shard payload")
+	require.NoError(t, svc.WriteLocalShard("mybucket", "obj/v1", 2, data))
+
+	// Round-trip must recover plaintext.
+	got, err := svc.ReadLocalShard("mybucket", "obj/v1", 2)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
+
+	// Raw on-disk bytes must be opaque (not equal to plaintext).
+	shardPath := filepath.Join(dir, "shards", "mybucket", "obj/v1", "shard_2")
+	raw, _ := os.ReadFile(shardPath)
+	assert.NotEqual(t, data, raw, "shard on disk must be encrypted")
+	assert.True(t, encrypt.IsEncryptedBlob(raw), "shard must have encrypted magic header")
+}
+
+func TestReadLocalShard_DowngradeDetection(t *testing.T) {
+	key := make([]byte, 32)
+	enc, _ := encrypt.NewEncryptor(key)
+
+	dir := t.TempDir()
+	svcEncrypted := NewShardService(dir, transport.NewQUICTransport(), WithEncryptor(enc))
+	svcPlain := NewShardService(dir, transport.NewQUICTransport())
+
+	// Write with encryption.
+	require.NoError(t, svcEncrypted.WriteLocalShard("b", "k", 0, []byte("secret")))
+
+	// Reading without encryption must fail with a clear error.
+	_, err := svcPlain.ReadLocalShard("b", "k", 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "encrypted", "error must mention encryption")
+}
+
+func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
+	key := make([]byte, 32)
+	enc, _ := encrypt.NewEncryptor(key)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.NewQUICTransport(), WithEncryptor(enc))
+
+	data := []byte("payload")
+	require.NoError(t, svc.WriteLocalShard("b", "k", 0, data))
+
+	// Simulate attacker copying shard_0 to shard_1 position.
+	src := filepath.Join(dir, "shards", "b", "k", "shard_0")
+	raw, _ := os.ReadFile(src)
+	dst := filepath.Join(dir, "shards", "b", "k", "shard_1")
+	require.NoError(t, os.WriteFile(dst, raw, 0o600))
+
+	// Reading shard_1 must fail because AAD doesn't match.
+	_, err := svc.ReadLocalShard("b", "k", 1)
+	require.Error(t, err, "shard moved to wrong position must fail decryption")
+}

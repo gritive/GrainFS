@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.4.7] - 2026-04-22
+
+### Added
+
+- **GCM AAD 위치 바인딩** (`internal/encrypt/encrypt.go`): `EncryptWithAAD`/`DecryptWithAAD` 추가. 2-byte 매직 헤더(`0xAE 0xE1`) + AES-256-GCM with AAD 포맷. 파일시스템 쓰기 권한을 가진 공격자가 shard 블롭을 다른 위치로 복사해도 AAD 불일치로 복호화가 실패함 (위치 바인딩).
+- **암호화 다운그레이드 감지** (`internal/cluster/shard_service.go`): `ReadLocalShard`/`DecryptPayload`에서 encryptor가 없을 때 매직 헤더 감지 후 명시적 오류 반환. 암호화로 쓴 shard를 암호화 없이 시작한 노드가 garbage로 반환하는 문제 방지.
+
+### Changed
+
+- **Shard 파일 권한 0o644 → 0o600** (`eccodec/shardio.go`, `shard_service.go`, `scrubbable.go`): 암호화 여부와 무관하게 shard 파일은 소유자 전용 권한으로 생성.
+- **NBD Docker 테스트 암호화 활성화** (`docker/nbd-test.sh`): `--no-encryption` 제거. 서버가 자동 생성 키로 at-rest 암호화 경로를 사용하므로 NBD 테스트가 실제 암호화 경로를 검증.
+
 ## [0.0.4.6] - 2026-04-22
 
 ### Fixed

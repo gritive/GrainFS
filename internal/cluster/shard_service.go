@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -237,24 +238,25 @@ func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 	return s.okResponse(nil)
 }
 
-// EncryptPayload encrypts data if an encryptor is configured, otherwise returns
-// data unchanged. Used by DistributedBackend.WriteShard (scrubber path) so that
-// repair writes go through the same encryption as regular shard writes.
-func (s *ShardService) EncryptPayload(data []byte) ([]byte, error) {
+// EncryptPayload encrypts data with AAD if an encryptor is configured.
+// Used by DistributedBackend.WriteShard (scrubber path).
+func (s *ShardService) EncryptPayload(data, aad []byte) ([]byte, error) {
 	if s.encryptor == nil {
 		return data, nil
 	}
-	return s.encryptor.Encrypt(data)
+	return s.encryptor.EncryptWithAAD(data, aad)
 }
 
-// DecryptPayload decrypts data if an encryptor is configured, otherwise returns
-// data unchanged. Used by DistributedBackend.ReadShard (scrubber path) so that
-// repair reads see plaintext regardless of on-disk format.
-func (s *ShardService) DecryptPayload(data []byte) ([]byte, error) {
+// DecryptPayload decrypts data with AAD if an encryptor is configured.
+// Used by DistributedBackend.ReadShard (scrubber path).
+func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 	if s.encryptor == nil {
+		if encrypt.IsEncryptedBlob(data) {
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		}
 		return data, nil
 	}
-	decrypted, err := s.encryptor.Decrypt(data)
+	decrypted, err := s.encryptor.DecryptWithAAD(data, aad)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt shard: %w", err)
 	}
@@ -271,17 +273,18 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create shard dir: %w", err)
 	}
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	payload := data
 	if s.encryptor != nil {
 		var err error
-		payload, err = s.encryptor.Encrypt(data)
+		payload, err = s.encryptor.EncryptWithAAD(data, aad)
 		if err != nil {
 			return fmt.Errorf("encrypt shard: %w", err)
 		}
 	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
@@ -312,17 +315,24 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 
 // ReadLocalShard fetches a shard from the local node's disk.
 // Decrypts the data if an encryptor is configured.
+// Returns an error if the shard appears encrypted but no encryptor is set
+// (downgrade guard).
 func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
 	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	if s.encryptor != nil {
-		data, err = s.encryptor.Decrypt(data)
+		data, err = s.encryptor.DecryptWithAAD(data, aad)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt shard: %w", err)
 		}
+		return data, nil
+	}
+	if encrypt.IsEncryptedBlob(data) {
+		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
 	}
 	return data, nil
 }

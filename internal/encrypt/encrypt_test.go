@@ -65,3 +65,46 @@ func TestInvalidKeySize(t *testing.T) {
 	_, err := NewEncryptor([]byte("short"))
 	assert.Error(t, err)
 }
+
+func TestEncryptDecryptWithAAD(t *testing.T) {
+	key := make([]byte, 32)
+	enc, _ := NewEncryptor(key)
+
+	plaintext := []byte("hello, world")
+	aad := []byte("bucket/key/versionID/0")
+
+	ciphertext, err := enc.EncryptWithAAD(plaintext, aad)
+	require.NoError(t, err)
+
+	assert.True(t, IsEncryptedBlob(ciphertext), "must have magic header")
+
+	// correct AAD decrypts
+	got, err := enc.DecryptWithAAD(ciphertext, aad)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+
+	// wrong AAD fails
+	_, err = enc.DecryptWithAAD(ciphertext, []byte("bucket/other-key/0"))
+	assert.Error(t, err, "wrong AAD must fail")
+
+	// wrong key fails
+	key2 := make([]byte, 32)
+	key2[0] = 0xFF
+	enc2, _ := NewEncryptor(key2)
+	_, err = enc2.DecryptWithAAD(ciphertext, aad)
+	assert.Error(t, err, "wrong key must fail")
+
+	// no magic header fails
+	_, err = enc.DecryptWithAAD([]byte("notencrypted"), aad)
+	assert.Error(t, err, "missing magic must fail")
+}
+
+func TestIsEncryptedBlob(t *testing.T) {
+	key := make([]byte, 32)
+	enc, _ := NewEncryptor(key)
+
+	ciphertext, _ := enc.EncryptWithAAD([]byte("data"), []byte("aad"))
+	assert.True(t, IsEncryptedBlob(ciphertext))
+	assert.False(t, IsEncryptedBlob([]byte("plaintext")))
+	assert.False(t, IsEncryptedBlob([]byte{}))
+}

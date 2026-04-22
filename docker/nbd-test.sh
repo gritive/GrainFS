@@ -42,7 +42,6 @@ grainfs serve \
     --port "$S3_PORT" \
     --nbd-port "$NBD_PORT" \
     --nbd-volume-size "$NBD_SIZE" \
-    --no-encryption \
     --nfs-port 0 &
 SERVER_PID=$!
 
