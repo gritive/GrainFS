@@ -166,3 +166,56 @@ func TestReceiptTrackingEmitter_OrphanSweep(t *testing.T) {
 	// memory (we don't drain on close, orphan cleanup is TTL-based). The
 	// important thing is that Close() doesn't deadlock.
 }
+
+func TestReceiptTrackingEmitter_Emit_EmptyCorrelationID(t *testing.T) {
+	store := newTestStore(t)
+	ks := newTestKeyStore(t)
+	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	defer e.Close()
+
+	ev := scrubber.NewEvent(scrubber.PhaseDetect, scrubber.OutcomeFailed)
+	ev.CorrelationID = ""
+	ev.Bucket = "b"
+	ev.Key = "k"
+	e.Emit(ev)
+
+	e.mu.Lock()
+	assert.Empty(t, e.sessions, "empty correlationID must not create a session")
+	e.mu.Unlock()
+}
+
+func TestReceiptTrackingEmitter_Emit_MaxEventsPerSession(t *testing.T) {
+	store := newTestStore(t)
+	ks := newTestKeyStore(t)
+	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	defer e.Close()
+
+	cid := "cap-test"
+	// Emit maxEventsPerSession+10 events; only maxEventsPerSession should be buffered.
+	for i := 0; i < maxEventsPerSession+10; i++ {
+		ev := scrubber.NewEvent(scrubber.PhaseDetect, scrubber.OutcomeFailed)
+		ev.CorrelationID = cid
+		ev.Bucket = "b"
+		ev.Key = "k"
+		e.Emit(ev)
+	}
+
+	e.mu.Lock()
+	sess := e.sessions[cid]
+	e.mu.Unlock()
+	require.NotNil(t, sess)
+	assert.Equal(t, maxEventsPerSession, len(sess.events), "session must not exceed maxEventsPerSession")
+}
+
+func TestReceiptTrackingEmitter_FinalizeSession_NotFound(t *testing.T) {
+	store := newTestStore(t)
+	ks := newTestKeyStore(t)
+	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	defer e.Close()
+
+	// FinalizeSession for a cid that was never emitted must be a no-op.
+	e.FinalizeSession("nonexistent-cid")
+
+	_, err := store.GetByCorrelationID("nonexistent-cid")
+	assert.ErrorIs(t, err, receipt.ErrNotFound)
+}
