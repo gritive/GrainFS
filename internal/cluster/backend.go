@@ -652,9 +652,11 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 	// callback path). Empty latest means pre-versioned legacy EC; fall back
 	// to bare-key layout, preserving pre-Slice-3 behaviour.
 	if versionID == "" {
-		if latest, lerr := b.fsm.LookupLatestVersion(bucket, key); lerr == nil {
-			versionID = latest
+		latest, lerr := b.fsm.LookupLatestVersion(bucket, key)
+		if lerr != nil {
+			return fmt.Errorf("resolve version for repair %s/%s: %w", bucket, key, lerr)
 		}
+		versionID = latest
 	}
 	// Placement must be looked up AFTER resolving versionID so shardKey
 	// matches the key written by putObjectEC (key+"/"+versionID).
