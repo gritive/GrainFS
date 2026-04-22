@@ -74,7 +74,6 @@
 
 ### v0.0.4.0 follow-up
 
-- [ ] **NFS/VFS path 충돌 해결** — `objectPath(bucket, key)` (unversioned file) vs `objectPathV(bucket, key, vid)` (`key/.v/vid` 디렉터리) 경로가 충돌하여 `TestNFS_MountAndWriteReadFile`/`TestNFS_MultipleFiles` 실패. Key/version path 스킴 재설계 (예: `data/bucket/.objects/{key}/{vid}` 플랫 구조) 또는 NFS 레이어에서 별도 bucket namespace 사용.
 - [ ] **GCM AAD 바인딩** — `internal/encrypt/encrypt.go`의 AES-256-GCM 암호화에 AAD(Additional Authenticated Data)가 없음. 파일시스템 쓰기 권한을 가진 공격자가 shard 블롭을 교체해도 인증 실패가 발생하지 않음. 수정: `bucket+"/"+key+"/"+versionID+"/"+ shardIdx`를 AAD로 사용해 위치에 바인딩. (`internal/encrypt`에 `EncryptWithAAD`/`DecryptWithAAD` 추가, shard read/write 경로 전반 업데이트 필요)
 - [ ] **암호화 다운그레이드 감지** — 노드가 암호화 없이 시작된 후 기존 암호화 shard를 읽으려 하면 조용히 garbage를 반환. 부팅 시 shard 헤더로 암호화 여부 판단하거나 메타데이터에 encryption flag 기록.
 - [ ] **Shard 파일 권한** — `WriteLocalShard`/`WriteShard`가 0o644 사용. shard는 암호화되어 있더라도 0o600이 더 적절 (동일 OS 사용자 외부 노출 최소화).
@@ -84,7 +83,6 @@
 - [ ] **5-node loopback Raft 부트스트랩 안정성** — `TestE2E_ClusterEC_PutGet_5Node`가 CI에서 "no leader found" 로 flaky (130s+ 대기 후 timeout). 3-node 시나리오는 안정적. Election timeout 튜닝 또는 테스트에서 warm-up을 단계적으로 하는 방식 검토.
 - [ ] **Per-bucket EC policy 재설계** — ECBackend의 `/admin/buckets/{b}/ec-policy` 토글 API가 사라짐. DistributedBackend는 cluster 전역 `--cluster-ec`로 동작. 필요시 per-bucket `ECConfig`를 FSM에 저장하여 복원.
 - [ ] **TestE2E_Versioning_Full 재작성** — 이전 테스트는 `startECServerWithScrub` 헬퍼를 통해 ECBackend 내부에 결합. DistributedBackend 버전 API로 재작성 (`internal/cluster/versioning_test.go`는 unit 커버, e2e 경로 재구축 필요).
-- [ ] **TestCrossProtocolS3PutVFSStat 복구** — NFS/VFS flush 경로 수정(NFS 항목 참조) 뒤 자동 복구 가능성 있음. 함께 재검증.
 
 ## Phase 19: Performance
 

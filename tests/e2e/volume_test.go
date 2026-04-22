@@ -172,7 +172,6 @@ func dialNFSTarget(t *testing.T) *nfsclient.Target {
 }
 
 func TestNFS_MountAndWriteReadFile(t *testing.T) {
-	t.Skip("NFS billy/VFS flush integration under unified backend — investigating (tracked in TODOS v0.0.4.0)")
 	target := dialNFSTarget(t)
 
 	// Create and write a file
@@ -212,7 +211,6 @@ func TestNFS_MountAndWriteReadFile(t *testing.T) {
 }
 
 func TestNFS_MultipleFiles(t *testing.T) {
-	t.Skip("NFS billy/VFS flush integration under unified backend — investigating (tracked in TODOS v0.0.4.0)")
 	target := dialNFSTarget(t)
 
 	// Create multiple files

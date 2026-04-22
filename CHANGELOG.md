@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.4.6] - 2026-04-22
+
+### Fixed
+
+- **NFS/VFS path 충돌 수정** (`internal/cluster/backend.go`): `ListObjects` 결과에서 버전 키 `"{key}/{versionID}"`가 dedup 후 `"{key}"`로 변환될 때 `prefix="key/"` 요청에서 `baseKey="key"`가 반환되어 `isDir("key")=true`로 잘못 인식되는 버그 수정. `!strings.HasPrefix(baseKey, prefix)` 필터 추가로 요청 prefix 밖의 deduped key를 무시하도록 수정.
+- `TestNFS_MountAndWriteReadFile`, `TestNFS_MultipleFiles`, `TestNFS_DeleteFile` — t.Skip 제거, 전부 통과 확인.
+- `TestCrossProtocolS3PutVFSStat` — 동일 근본 원인으로 t.Skip되어 있었음. 수정 후 통과 확인.
+
 ## [0.0.4.5] - 2026-04-22
 
 ### Fixed

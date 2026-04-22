@@ -374,9 +374,9 @@ func (fs *GrainVFS) Root() string {
 
 // billy.Change implementation
 
-func (fs *GrainVFS) Chmod(name string, mode os.FileMode) error  { return nil }
-func (fs *GrainVFS) Lchown(name string, uid, gid int) error     { return nil }
-func (fs *GrainVFS) Chown(name string, uid, gid int) error      { return nil }
+func (fs *GrainVFS) Chmod(name string, mode os.FileMode) error         { return nil }
+func (fs *GrainVFS) Lchown(name string, uid, gid int) error            { return nil }
+func (fs *GrainVFS) Chown(name string, uid, gid int) error             { return nil }
 func (fs *GrainVFS) Chtimes(name string, atime, mtime time.Time) error { return nil }
 
 func (fs *GrainVFS) isDir(fp string) bool {

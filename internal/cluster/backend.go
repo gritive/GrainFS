@@ -1046,6 +1046,12 @@ func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]
 					continue
 				}
 			}
+			// A versioned entry "foo/{versionID}" deduces to baseKey="foo", but if
+			// the caller asked for prefix "foo/", we must NOT return "foo" — that
+			// would cause isDir("foo") to return true for a regular file.
+			if !strings.HasPrefix(baseKey, prefix) {
+				continue
+			}
 			if emitted[baseKey] {
 				continue
 			}
