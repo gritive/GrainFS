@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.4.8] - 2026-04-22
+
+### Fixed
+
+- **ShardOwner 필터 재활성화** (`internal/cluster/scrubbable.go`): `NodeID()`가 Raft node 이름(`b.node.ID()`)을 반환하던 버그 수정 — placement 벡터에는 raft 주소(`selfAddr`)가 저장되므로 `OwnedShards` 비교가 항상 빈 결과를 반환하는 no-op 상태였음. `NodeID()`가 `b.selfAddr`를 반환하도록 수정, `scrubber.ShardOwner` 계약 완전 구현.
+- **PlacementMonitor `onMissing` txn 외부 실행** (`internal/cluster/shard_placement_monitor.go`): `onMissing` 콜백(QUIC 네트워크 repair 호출)이 BadgerDB `db.View` 트랜잭션 내부에서 실행되어 MVCC 버전을 장시간 핀하던 버그 수정. repair 목록을 `[]pendingRepair`로 수집 후 트랜잭션 종료 이후에 호출.
+- **PlacementMonitor `Start` goroutine 누락** (`cmd/grainfs/serve.go`): `placementMonitor.Start(ctx)` 호출에 `go` 접두사 누락으로 scrub-interval > 0 + EC 활성 시 서버가 시작 시 블로킹되던 버그 수정.
+
+### Changed
+
+- **PlacementMonitor serve.go 연결** (`cmd/grainfs/serve.go`): `scrub-interval > 0` + EC 활성 시 `ShardPlacementMonitor`를 생성하고 `SetOnMissing → RepairShardLocal` 콜백을 연결. 로컬 missing shard가 자동 repair 루프에 진입.
+
 ## [0.0.4.7] - 2026-04-22
 
 ### Added
