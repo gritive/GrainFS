@@ -42,7 +42,7 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 	require.NoError(t, upCmd.Start())
 	defer upCmd.Process.Kill()
 
-	waitForPort(upPort, 5*time.Second)
+	waitForPort(t, upPort, 5*time.Second)
 	upEndpoint := fmt.Sprintf("http://127.0.0.1:%d", upPort)
 	upClient := newS3Client(upEndpoint)
 
@@ -74,7 +74,7 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 	require.NoError(t, localCmd.Start())
 	defer localCmd.Process.Kill()
 
-	waitForPort(localPort, 5*time.Second)
+	waitForPort(t, localPort, 5*time.Second)
 	localClient := newS3Client(fmt.Sprintf("http://127.0.0.1:%d", localPort))
 
 	// Bucket must exist on local (pull-through creates it if needed)
@@ -127,7 +127,7 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 	require.NoError(t, upCmd.Start())
 	defer upCmd.Process.Kill()
 
-	waitForPort(upPort, 5*time.Second)
+	waitForPort(t, upPort, 5*time.Second)
 	upEndpoint := fmt.Sprintf("http://127.0.0.1:%d", upPort)
 	upClient := newS3Client(upEndpoint)
 
@@ -165,7 +165,7 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 	require.NoError(t, localCmd.Start())
 	defer localCmd.Process.Kill()
 
-	waitForPort(localPort, 5*time.Second)
+	waitForPort(t, localPort, 5*time.Second)
 	localClient := newS3Client(fmt.Sprintf("http://127.0.0.1:%d", localPort))
 
 	_, err = localClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})
