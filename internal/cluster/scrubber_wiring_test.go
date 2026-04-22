@@ -1,8 +1,7 @@
 package cluster
 
-// Slice 3 of refactor/unify-storage-paths: unit coverage for the
-// NodeID / OwnedShards / RepairShardLocal glue consumed by the scrubber
-// via scrubber.ShardOwner and scrubber.ShardRepairer.
+// Unit coverage for DistributedBackend scrubber contracts: scrubber.ShardOwner
+// (NodeID, OwnedShards) and scrubber.ShardRepairer (RepairShardLocal).
 
 import (
 	"testing"
@@ -14,10 +13,9 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
-// Compile-time proof that DistributedBackend satisfies the optional
-// ShardRepairer contract the scrubber uses in cluster mode. ShardOwner is
-// deliberately not wired yet — see docstring on RaftNodeID.
+// Compile-time proof that DistributedBackend satisfies the scrubber contracts.
 var _ scrubber.ShardRepairer = (*DistributedBackend)(nil)
+var _ scrubber.ShardOwner = (*DistributedBackend)(nil)
 
 // writePlacement seeds a placement record directly in the FSM's BadgerDB,
 // bypassing the Raft proposal path. Matches the byte layout that
@@ -27,6 +25,13 @@ func writePlacement(t *testing.T, b *DistributedBackend, bucket, key string, nod
 	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(shardPlacementKey(bucket, key), encodePlacementValue(nodes))
 	}))
+}
+
+func TestNodeID_ReturnsSelfAddr(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	assert.Equal(t, "", b.NodeID(), "NodeID before SetShardService must be empty")
+	b.SetShardService(nil, []string{"192.168.1.1:9000", "192.168.1.2:9000"})
+	assert.Equal(t, "192.168.1.1:9000", b.NodeID(), "NodeID must return the self (first) address")
 }
 
 func TestRaftNodeID_ReturnsRaftNodeID(t *testing.T) {
@@ -99,6 +104,27 @@ func TestOwnedShards(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestRaftNodeID_NilNode(t *testing.T) {
+	// DistributedBackend with node == nil must return "" (no panic).
+	db := newTestDB(t)
+	b := &DistributedBackend{db: db, fsm: NewFSM(db)}
+	assert.Equal(t, "", b.RaftNodeID())
+}
+
+func TestOwnedShards_EmptyVersionID(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	// Write placement under the bare key (no versionID suffix) to exercise the
+	// empty-versionID fallback branch in OwnedShards.
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(shardPlacementKey("b", "bare-key"), encodePlacementValue([]string{"test-node", "other"}))
+	}))
+
+	// Empty versionID → lookupKey = "bare-key" (no "/" + versionID appended).
+	got := b.OwnedShards("b", "bare-key", "", "test-node")
+	assert.Equal(t, []int{0}, got, "empty versionID must fall back to bare key lookup")
 }
 
 func TestRepairShardLocal_WithoutShardService(t *testing.T) {

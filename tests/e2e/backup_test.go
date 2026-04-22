@@ -127,10 +127,15 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	// Step 7: Verify restored data
 	t.Log("Step 7: Verifying restored data...")
 
+	// grainfs backup stores data under filepath.Base(dataDir), so after
+	// `restic restore --target restoreDir` the data lands at:
+	//   restoreDir/data   (not restoreDir itself)
+	restoredDataDir := filepath.Join(restoreDir, filepath.Base(dataDir))
+
 	// Start GrainFS with restored data
 	restorePort := freePort()
 	cmd2 := exec.Command(binary, "serve",
-		"--data", restoreDir,
+		"--data", restoredDataDir,
 		"--port", fmt.Sprintf("%d", restorePort),
 		"--nfs4-port", "0",
 	)

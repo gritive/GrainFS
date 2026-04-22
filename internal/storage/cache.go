@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -9,7 +10,7 @@ import (
 
 const (
 	defaultMaxCacheBytes       = 64 * 1024 * 1024 // 64MB total cache
-	defaultMaxObjectCacheBytes = 4 * 1024 * 1024   // 4MB per object
+	defaultMaxObjectCacheBytes = 4 * 1024 * 1024  // 4MB per object
 )
 
 // cacheEntry stores cached object content and metadata.
@@ -179,6 +180,18 @@ func (cb *CachedBackend) DeleteObjectReturningMarker(bucket, key string) (string
 		return vsd.DeleteObjectReturningMarker(bucket, key)
 	}
 	return "", cb.Backend.DeleteObject(bucket, key)
+}
+
+// DeleteObjectVersion invalidates the cache entry and hard-deletes the version.
+func (cb *CachedBackend) DeleteObjectVersion(bucket, key, versionID string) error {
+	cb.invalidate(bucket, key)
+	type versionDeleter interface {
+		DeleteObjectVersion(bucket, key, versionID string) error
+	}
+	if vd, ok := cb.Backend.(versionDeleter); ok {
+		return vd.DeleteObjectVersion(bucket, key, versionID)
+	}
+	return fmt.Errorf("cached: inner backend does not support DeleteObjectVersion")
 }
 
 // CompleteMultipartUpload invalidates the cache entry for the key.

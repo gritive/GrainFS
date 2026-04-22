@@ -63,35 +63,41 @@ func (m *ShardPlacementMonitor) SetOnMissing(fn func(bucket, key string, shardId
 // this node exists on disk, and returns the number of missing shards it
 // found. Callers can hook repair logic via SetOnMissing.
 //
-// On-disk paths compose the shardKey as `key/versionID` because
-// putObjectEC stores shards under `{bucket}/{key}/{versionID}/shard_{N}`.
-// The monitor resolves the latest versionID via the FSM `lat:` pointer;
-// pre-Slice-1 legacy EC without a version pointer falls back to the bare
-// key layout.
+// IterShardPlacements passes key=shardKey (object_key+"/"+versionID) as
+// stored by putObjectEC, so shards can be read directly without an
+// additional version lookup.
+//
+// onMissing callbacks are invoked AFTER the BadgerDB iterator closes so
+// the read transaction does not stay open during potentially long-running
+// network repair calls.
 func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	if m.shardSvc == nil {
 		return 0, errors.New("shard service not configured")
 	}
+
+	type pendingRepair struct {
+		bucket   string
+		key      string
+		shardIdx int
+	}
+	var repairs []pendingRepair
 	var missing int64
+
 	err := m.fsm.IterShardPlacements(func(bucket, key string, nodes []string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
-		}
-		shardKey := key
-		if version, verr := m.fsm.LookupLatestVersion(bucket, key); verr == nil && version != "" {
-			shardKey = key + "/" + version
 		}
 		for shardIdx, holder := range nodes {
 			if holder != m.nodeID {
 				continue // someone else's shard; their monitor handles it
 			}
-			if _, rerr := m.shardSvc.ReadLocalShard(bucket, shardKey, shardIdx); rerr != nil {
+			if _, rerr := m.shardSvc.ReadLocalShard(bucket, key, shardIdx); rerr != nil {
 				if os.IsNotExist(rerr) {
 					atomic.AddInt64(&missing, 1)
 					m.logger.Warn("missing local shard",
 						"bucket", bucket, "key", key, "shard_idx", shardIdx)
 					if m.onMissing != nil {
-						m.onMissing(bucket, key, shardIdx)
+						repairs = append(repairs, pendingRepair{bucket, key, shardIdx})
 					}
 					continue
 				}
@@ -109,6 +115,16 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	if err != nil {
 		return int(missing), fmt.Errorf("scan placements: %w", err)
 	}
+
+	// Invoke repair callbacks outside the BadgerDB transaction so MVCC versions
+	// are not pinned during network I/O.
+	for _, r := range repairs {
+		if ctx.Err() != nil {
+			break
+		}
+		m.onMissing(r.bucket, r.key, r.shardIdx)
+	}
+
 	return int(missing), nil
 }
 

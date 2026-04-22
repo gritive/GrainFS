@@ -8,7 +8,8 @@ RUN apk add --no-cache \
     nbd-client \
     e2fsprogs \
     kmod \
-    curl
+    curl \
+    python3
 
 WORKDIR /src
 COPY go.mod go.sum ./

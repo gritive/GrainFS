@@ -46,13 +46,17 @@ Examples:
 		fmt.Printf("Data directory: %s\n", dataDir)
 		fmt.Printf("Tag: %s\n\n", tag)
 
-		// Build restic command
-		resticArgs := []string{"backup", dataDir, "--repo", repo}
+		// Build restic command. Use the base name as the target path so that
+		// restic stores a relative path ("data") rather than the full absolute
+		// path. This makes `restic restore --target <dir>` put the data
+		// directly at <dir>/data instead of <dir>/<original-absolute-path>/data.
+		resticArgs := []string{"backup", filepath.Base(dataDir), "--repo", repo}
 		if tag != "" {
 			resticArgs = append(resticArgs, "--tag", tag)
 		}
 
 		resticCmd := exec.Command("restic", resticArgs...)
+		resticCmd.Dir = filepath.Dir(dataDir)
 		resticCmd.Stdout = os.Stdout
 		resticCmd.Stderr = os.Stderr
 
