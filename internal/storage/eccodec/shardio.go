@@ -56,7 +56,7 @@ func WriteShardAtomic(path string, data []byte) error {
 	}
 	payload := encodeWithCRC(data)
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
 	}

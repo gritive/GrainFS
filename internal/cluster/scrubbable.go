@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/dgraph-io/badger/v4"
@@ -165,7 +166,8 @@ func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error)
 		return nil, fmt.Errorf("read shard: %w", err)
 	}
 	if b.shardSvc != nil {
-		data, err = b.shardSvc.DecryptPayload(data)
+		aad := shardAAD(bucket, key, path)
+		data, err = b.shardSvc.DecryptPayload(data, aad)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +185,8 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 	payload := data
 	if b.shardSvc != nil {
 		var err error
-		payload, err = b.shardSvc.EncryptPayload(data)
+		aad := shardAAD(bucket, key, path)
+		payload, err = b.shardSvc.EncryptPayload(data, aad)
 		if err != nil {
 			return fmt.Errorf("encrypt shard: %w", err)
 		}
@@ -192,7 +195,7 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 		return fmt.Errorf("mkdir shard dir: %w", err)
 	}
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
@@ -219,6 +222,16 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 		dir.Close()
 	}
 	return nil
+}
+
+// shardAAD builds the AAD string for the given shard path.
+// path must end with /shard_N; if parsing fails an empty slice is returned.
+// Must match the AAD used by WriteLocalShard/ReadLocalShard.
+func shardAAD(bucket, key, path string) []byte {
+	// filepath.Base(path) = "shard_N"
+	base := filepath.Base(path)
+	idxStr := strings.TrimPrefix(base, "shard_")
+	return []byte(bucket + "/" + key + "/" + idxStr)
 }
 
 // RaftNodeID returns this node's Raft node ID. Exposed to admin tooling

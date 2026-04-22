@@ -1,14 +1,14 @@
 # Docker-based NBD E2E test for GrainFS
 # Usage: make test-nbd-docker
 
-FROM golang:1.26-bookworm
+FROM golang:1.26-alpine
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
+    bash \
     nbd-client \
     e2fsprogs \
     kmod \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+    curl
 
 WORKDIR /src
 COPY go.mod go.sum ./

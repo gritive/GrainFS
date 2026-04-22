@@ -62,3 +62,54 @@ func (e *Encryptor) Decrypt(data []byte) ([]byte, error) {
 
 	return plaintext, nil
 }
+
+// encMagic is a 2-byte header prepended by EncryptWithAAD to identify
+// encrypted blobs and enable downgrade detection.
+const encMagic0, encMagic1 = byte(0xAE), byte(0xE1)
+
+// IsEncryptedBlob reports whether data was produced by EncryptWithAAD.
+// Used to detect encrypted shards when the encryptor is nil (downgrade guard).
+func IsEncryptedBlob(data []byte) bool {
+	return len(data) >= 2 && data[0] == encMagic0 && data[1] == encMagic1
+}
+
+// EncryptWithAAD encrypts plaintext using AES-256-GCM with Additional
+// Authenticated Data. The AAD binds the ciphertext to its storage location so
+// that moving an encrypted shard to a different position causes decryption to
+// fail. Output format: magic(2) + nonce(12) + ciphertext + tag(16).
+func (e *Encryptor) EncryptWithAAD(plaintext, aad []byte) ([]byte, error) {
+	nonce := make([]byte, e.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+	// aead.Seal appends ciphertext+tag to nonce slice.
+	inner := e.aead.Seal(nonce, nonce, plaintext, aad)
+	out := make([]byte, 2+len(inner))
+	out[0] = encMagic0
+	out[1] = encMagic1
+	copy(out[2:], inner)
+	return out, nil
+}
+
+// DecryptWithAAD decrypts data produced by EncryptWithAAD using the same AAD.
+// Returns an error if the magic header is missing, the ciphertext is too short,
+// or the GCM tag does not match (wrong key, wrong AAD, or data corruption).
+func (e *Encryptor) DecryptWithAAD(data, aad []byte) ([]byte, error) {
+	if !IsEncryptedBlob(data) {
+		return nil, fmt.Errorf("not an encrypted blob (missing magic header)")
+	}
+	inner := data[2:]
+	nonceSize := e.aead.NonceSize()
+	if len(inner) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := inner[:nonceSize], inner[nonceSize:]
+	plaintext, err := e.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt: %w", err)
+	}
+	if plaintext == nil {
+		plaintext = []byte{}
+	}
+	return plaintext, nil
+}
