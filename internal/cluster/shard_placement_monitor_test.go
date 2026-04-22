@@ -179,6 +179,98 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 	assert.Equal(t, []string{"n0"}, seen["버킷/한글"])
 }
 
+func TestShardPlacementMonitor_Scan_NilShardSvc(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	monitor := NewShardPlacementMonitor(fsm, nil, "node-A", time.Second)
+	_, err := monitor.Scan(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shard service not configured")
+}
+
+func TestShardPlacementMonitor_Scan_NonEnoentError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("chmod 000 has no effect as root")
+	}
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	svc, dir := newTestShardService(t)
+
+	const self = "node-A"
+	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
+
+	raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket: "b", Key: "k", NodeIDs: []string{self},
+	})
+	require.NoError(t, fsm.Apply(raw))
+
+	// Write shard, then make it unreadable (permission error, not ENOENT).
+	// NewShardService roots data at dir+"/shards/", so the full shard path is:
+	// dir/shards/b/k/shard_0
+	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("data")))
+	shardPath := dir + "/shards/b/k/shard_0"
+	require.NoError(t, os.Chmod(shardPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(shardPath, 0o600) })
+
+	// Non-ENOENT error: shard exists on disk but is unreadable.
+	// Scan must not count it as "missing" and must not panic.
+	missing, err := monitor.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, missing, "unreadable (non-ENOENT) shard must not count as missing")
+}
+
+func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	svc, _ := newTestShardService(t)
+
+	monitor := NewShardPlacementMonitor(fsm, svc, "node-A", 10*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		monitor.Start(ctx)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not stop within 2s after ctx cancel")
+	}
+}
+
+func TestShardPlacementMonitor_Scan_CtxCancelMidRepair(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	svc, _ := newTestShardService(t)
+
+	const self = "node-A"
+	// Seed 5 missing shards to ensure the repair loop has entries to iterate.
+	for i := 0; i < 5; i++ {
+		raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
+			Bucket: "b", Key: fmtKey(i), NodeIDs: []string{self},
+		})
+		require.NoError(t, fsm.Apply(raw))
+	}
+
+	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// onMissing cancels the context on the first call, simulating mid-repair cancel.
+	called := 0
+	monitor.SetOnMissing(func(bucket, key string, shardIdx int) {
+		called++
+		cancel()
+	})
+
+	_, err := monitor.Scan(ctx)
+	// Scan must not panic and must have called onMissing at most once.
+	assert.LessOrEqual(t, called, 1, "mid-repair ctx cancel must stop after first callback")
+	_ = err // may or may not propagate ctx error — both are acceptable
+}
+
 func fmtShardRef(bucket, key string, idx int) string {
 	return bucket + "/" + key + "/" + itoa(idx)
 }

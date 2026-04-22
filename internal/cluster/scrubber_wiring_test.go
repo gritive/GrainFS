@@ -106,6 +106,27 @@ func TestOwnedShards(t *testing.T) {
 	}
 }
 
+func TestRaftNodeID_NilNode(t *testing.T) {
+	// DistributedBackend with node == nil must return "" (no panic).
+	db := newTestDB(t)
+	b := &DistributedBackend{db: db, fsm: NewFSM(db)}
+	assert.Equal(t, "", b.RaftNodeID())
+}
+
+func TestOwnedShards_EmptyVersionID(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	// Write placement under the bare key (no versionID suffix) to exercise the
+	// empty-versionID fallback branch in OwnedShards.
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(shardPlacementKey("b", "bare-key"), encodePlacementValue([]string{"test-node", "other"}))
+	}))
+
+	// Empty versionID → lookupKey = "bare-key" (no "/" + versionID appended).
+	got := b.OwnedShards("b", "bare-key", "", "test-node")
+	assert.Equal(t, []int{0}, got, "empty versionID must fall back to bare key lookup")
+}
+
 func TestRepairShardLocal_WithoutShardService(t *testing.T) {
 	// RepairShardLocal wraps RepairShard; when ShardService is not configured
 	// it must surface the "shard service not configured" error rather than
