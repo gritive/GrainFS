@@ -563,8 +563,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 }
 
 // loadOrCreateEncryptionKey loads a key from file or auto-generates one in the data directory.
+// If keyFile is explicitly provided (non-empty) and the file does not exist, an error is returned
+// rather than silently generating a new key — a missing explicit path likely means a mount failure,
+// and generating a new key would make all existing shards permanently unreadable.
 func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, error) {
-	if keyFile == "" {
+	explicitPath := keyFile != ""
+	if !explicitPath {
 		keyFile = filepath.Join(dataDir, "encryption.key")
 	}
 
@@ -578,7 +582,11 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 		return nil, fmt.Errorf("read key file: %w", err)
 	}
 
-	// Auto-generate a new key
+	if explicitPath {
+		return nil, fmt.Errorf("encryption key file not found: %s (mount failure?): %w", keyFile, err)
+	}
+
+	// Auto-generate a new key only for the default path.
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o755); err != nil {
 		return nil, fmt.Errorf("create key dir: %w", err)
 	}

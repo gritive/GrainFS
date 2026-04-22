@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.4.4] - 2026-04-22
+
+### Added
+
+- **ShardService AES-256-GCM at-rest 암호화** (`internal/cluster/shard_service.go`): `WithEncryptor(enc)` 함수형 옵션 추가. `WriteLocalShard`/`ReadLocalShard`가 encryptor가 설정된 경우 쓰기 전 encrypt, 읽기 후 decrypt 수행. QUIC RPC 경로(`handleWrite`→`WriteLocalShard`, `handleRead`→`ReadLocalShard`)도 동일 경로 통과.
+- **Scrubber 암호화 통합** (`internal/cluster/scrubbable.go`): `DistributedBackend.ReadShard`/`WriteShard`에 `EncryptPayload`/`DecryptPayload` 연결. RS 복구 경로도 암호화·복호화를 거치도록 보장.
+- **serve.go 암호화 회로 복구** (`cmd/grainfs/serve.go`): `loadOrCreateEncryptionKey` 반환값을 `runCluster`까지 전달하여 `ShardService`에 실제로 연결. `--encryption-key-file` 명시 경로가 존재하지 않으면 자동 생성 대신 오류 반환 (mount 실패 시 키 교체 방지).
+
+### Fixed
+
+- `--encryption-key-file`로 명시적 경로 지정 시 파일이 없으면 새 키를 자동 생성하던 버그 수정. 기존 샤드가 영구적으로 복호화 불가 상태가 되는 데이터 손실 시나리오 제거.
+- `DistributedBackend.ReadShard`(scrubber 경로)가 암호화된 shard를 평문으로 RS 재구성하던 문제 수정.
+
 ## [0.0.4.3] - 2026-04-22
 
 ### Added
