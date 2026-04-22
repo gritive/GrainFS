@@ -1,8 +1,7 @@
 package cluster
 
-// Slice 3 of refactor/unify-storage-paths: unit coverage for the
-// NodeID / OwnedShards / RepairShardLocal glue consumed by the scrubber
-// via scrubber.ShardOwner and scrubber.ShardRepairer.
+// Unit coverage for DistributedBackend scrubber contracts: scrubber.ShardOwner
+// (NodeID, OwnedShards) and scrubber.ShardRepairer (RepairShardLocal).
 
 import (
 	"testing"

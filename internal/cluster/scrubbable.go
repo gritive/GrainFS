@@ -1,20 +1,16 @@
 package cluster
 
-// Slice 2 of refactor/unify-storage-paths: Scrubbable interface on
-// DistributedBackend. The scrubber lives in internal/scrubber and, until
-// Slice 3 wires it in, has no cluster-mode caller. Slice 2 is the plumbing.
+// Scrubbable interface implementation for DistributedBackend. Exposes the
+// scrubber.ShardOwner, scrubber.ShardRepairer, and related contracts so the
+// cluster-mode scrubber can verify locally-assigned shards and repair missing
+// ones via RepairShard.
 //
-// Open issues carried to later slices:
-//   - CRC32 footer. The interface comment promises "verifying its CRC32 footer"
-//     on ReadShard, but cluster shards (written by ShardService.WriteLocalShard
-//     and friends) are raw bytes with no footer. Retrofitting requires changing
-//     every caller of Write/ReadLocalShard (putObjectEC, RepairShard, getObjectEC,
-//     the QUIC handlers), which is explicitly outside Slice 2's scope. ReadShard
-//     and WriteShard below are plain atomic I/O until Slice 3 (or a dedicated
-//     slice) retrofits the shard_service.go path through eccodec.
+// Open issues:
+//   - CRC32 footer. ReadShard and WriteShard are plain atomic I/O today;
+//     retrofitting eccodec requires changing every Write/ReadLocalShard caller
+//     (putObjectEC, RepairShard, getObjectEC, the QUIC handlers).
 //   - IterObjectMetas parses versioned `obj:{bucket}/{key}/{versionID}` keys
-//     with a first-slash split, folding the versionID into the key. See the
-//     comment on that function for the migration note. ScanObjects below
+//     with a first-slash split, folding the versionID into the key. ScanObjects
 //     sidesteps the issue entirely by iterating `lat:` pointers instead.
 
 import (
