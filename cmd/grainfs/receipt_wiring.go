@@ -23,6 +23,7 @@ import (
 type healReceiptWiring struct {
 	db           *badger.DB
 	store        *receipt.Store
+	keyStore     *receipt.KeyStore
 	api          *receipt.API
 	routingCache *receipt.RoutingCache
 	broadcaster  *cluster.ReceiptBroadcaster
@@ -62,11 +63,20 @@ func setupLocalReceipt(cmd *cobra.Command, dataDir string, opts []server.Option)
 	if !enabled {
 		return opts, nil, nil
 	}
+	psk, _ := cmd.Flags().GetString("heal-receipt-psk")
+	if psk == "" {
+		psk = "local-no-peers"
+	}
 	retention, _ := cmd.Flags().GetDuration("heal-receipt-retention")
 
 	db, err := openReceiptDB(dataDir)
 	if err != nil {
 		return opts, nil, fmt.Errorf("open receipt db: %w", err)
+	}
+	ks, err := receipt.NewKeyStore(receipt.Key{ID: "local", Secret: []byte(psk)})
+	if err != nil {
+		_ = db.Close()
+		return opts, nil, fmt.Errorf("init receipt keystore: %w", err)
 	}
 	store, err := receipt.NewStore(db, receipt.StoreOptions{
 		Retention:      retention,
@@ -83,7 +93,7 @@ func setupLocalReceipt(cmd *cobra.Command, dataDir string, opts []server.Option)
 		"component", "receipt", "mode", "local", "retention", retention)
 
 	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
-		db: db, store: store, api: api,
+		db: db, store: store, keyStore: ks, api: api,
 	}, nil
 }
 
@@ -130,8 +140,9 @@ func setupClusterReceipt(
 	}
 
 	// KeyStore is constructed here to validate the PSK at boot; the scrubber
-	// (Slice 3) will consume it when emitting receipts.
-	if _, err := receipt.NewKeyStore(receipt.Key{ID: "cluster", Secret: []byte(psk)}); err != nil {
+	// (Slice 3) consumes it via receiptTrackingEmitter to sign receipts.
+	ks, err := receipt.NewKeyStore(receipt.Key{ID: "cluster", Secret: []byte(psk)})
+	if err != nil {
 		_ = db.Close()
 		return opts, nil, fmt.Errorf("init receipt keystore: %w", err)
 	}
@@ -174,6 +185,7 @@ func setupClusterReceipt(
 	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
 		db:           db,
 		store:        store,
+		keyStore:     ks,
 		api:          api,
 		routingCache: routingCache,
 		broadcaster:  broadcaster,

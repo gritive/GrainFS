@@ -414,3 +414,42 @@ func TestStore_Put_WritesTimeIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, tsKeyCount, "exactly one ts:* key should exist after one Put")
 }
+
+func TestStore_GetByCorrelationID_Found(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	ks := newTestKeyStore(t)
+	r := newReceiptWithIDAndTime("rcpt-cidx-1", time.Now().UTC())
+	r.CorrelationID = "cid-abc-123"
+	require.NoError(t, Sign(r, ks))
+	require.NoError(t, s.Put(r))
+	require.NoError(t, s.Flush())
+
+	got, err := s.GetByCorrelationID("cid-abc-123")
+	require.NoError(t, err)
+	require.Equal(t, "rcpt-cidx-1", got.ReceiptID)
+	require.Equal(t, "cid-abc-123", got.CorrelationID)
+}
+
+func TestStore_GetByCorrelationID_NotFound(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.GetByCorrelationID("nonexistent-cid")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestStore_GetByCorrelationID_EmptyID(t *testing.T) {
+	db := openTestDB(t)
+	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.GetByCorrelationID("")
+	require.Error(t, err)
+}

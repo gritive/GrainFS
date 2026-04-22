@@ -7,10 +7,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"golang.org/x/time/rate"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 )
+
+const otelTracerName = "grainfs/scrubber"
 
 // Scrubbable is the interface ECBackend must implement for scrubbing.
 // Defined here (not in erasure) to invert the dependency.
@@ -219,10 +224,32 @@ func (s *BackgroundScrubber) RunOnce(ctx context.Context) {
 }
 
 func (s *BackgroundScrubber) runOnce(ctx context.Context) {
+	tr := otel.GetTracerProvider().Tracer(otelTracerName)
+	ctx, cycleSpan := tr.Start(ctx, "scrub.cycle")
+	defer cycleSpan.End()
+
 	buckets, err := s.backend.ListBuckets()
 	if err != nil {
 		slog.Warn("scrub: list buckets failed", "err", err)
+		cycleSpan.RecordError(err)
+		cycleSpan.SetStatus(codes.Error, "list buckets failed")
 		return
+	}
+
+	// If signing is unavailable, skip repairs this cycle to avoid producing
+	// unaudited sessions with no receipt. Verification (detect phase) still
+	// runs so the dashboard shows degraded state while signing is down.
+	signingOK := true
+	if checker, ok := s.emitter.(SigningHealthChecker); ok {
+		if !checker.SigningHealthy() {
+			signingOK = false
+			slog.Warn("scrub: signing unavailable, skipping repairs this cycle")
+		}
+	}
+	// sessionFinalizer is non-nil only when signing is available.
+	var sessionFinalizer SessionFinalizer
+	if signingOK {
+		sessionFinalizer, _ = s.emitter.(SessionFinalizer)
 	}
 
 	// Cluster-mode opt-in: when the backend implements ShardOwner, we only
@@ -311,6 +338,12 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 				continue
 			}
 
+			// Signing unavailable this cycle: skip repair to preserve the
+			// "no unsigned receipts" audit invariant.
+			if !signingOK {
+				continue
+			}
+
 			repaired, rerr := s.repairOne(ctx, rec, status, correlationID, repairer)
 			if rerr != nil {
 				metrics.ECDegradedTotal.Inc()
@@ -322,6 +355,19 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			metrics.HealShardsRepairedTotal.Add(float64(repaired))
 			atomic.AddInt64(&s.stats.Repaired, 1)
 			repairCount++
+
+			// Notify the emitter that this repair session is complete so it
+			// can aggregate the session's HealEvents into a signed HealReceipt.
+			// Re-check signing health: the key store may have rotated out after
+			// the cycle-start check; calling FinalizeSession when signing is
+			// gone would silently drop the receipt.
+			if sessionFinalizer != nil {
+				if checker, ok := s.emitter.(SigningHealthChecker); ok && !checker.SigningHealthy() {
+					slog.Warn("scrub: signing unavailable mid-cycle, receipt dropped", "correlation_id", correlationID)
+				} else {
+					sessionFinalizer.FinalizeSession(correlationID)
+				}
+			}
 		}
 	}
 
@@ -345,12 +391,26 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 // (peer-sourced reconstruct). Otherwise the legacy in-process engine runs.
 // Returns the count of shards repaired.
 func (s *BackgroundScrubber) repairOne(ctx context.Context, rec ObjectRecord, status ShardStatus, correlationID string, repairer ShardRepairer) (int64, error) {
-	_ = ctx
+	tr := otel.GetTracerProvider().Tracer(otelTracerName)
+	ctx, span := tr.Start(ctx, "scrub.repair")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("grainfs.bucket", rec.Bucket),
+		attribute.String("grainfs.key", rec.Key),
+		attribute.String("grainfs.correlation_id", correlationID),
+		attribute.Int("grainfs.shards_missing", len(status.Missing)),
+		attribute.Int("grainfs.shards_corrupt", len(status.Corrupt)),
+	)
+
 	if repairer == nil {
 		if err := s.repairer.RepairWithCorrelation(rec, status, correlationID); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "repair failed")
 			return 0, err
 		}
-		return int64(len(status.Missing) + len(status.Corrupt)), nil
+		repaired := int64(len(status.Missing) + len(status.Corrupt))
+		span.SetAttributes(attribute.Int64("grainfs.shards_repaired", repaired))
+		return repaired, nil
 	}
 
 	damaged := append(append([]int{}, status.Missing...), status.Corrupt...)

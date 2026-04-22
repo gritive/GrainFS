@@ -6,13 +6,6 @@
 
 ## Phase 16: Advanced Storage
 
-### Phase 16 Week 5 — Heal Receipt + OTel (설계 완료, 미진행)
-
-설계: `~/.gstack/projects/gritive-grains/whitekid-master-design-20260420-182422.md`
-
-- [ ] **Slice 3: Scrubber wiring + Blame Mode v1 UI** — repair 세션 → receipt emit, dashboard timeline + JSON download
-- [ ] **Slice 4: OTel spans** — head-based 1% sampling, `--otel-endpoint`, `--otel-sample-rate`, scrubber phase별 span
-
 ### Phase 16 Week 6 — Grafana Bundle + Demo (설계 완료, 미진행)
 
 - [ ] `deploy/grafana/self-healing.json` + `//go:embed` + `GET /dashboard/grafana.json`

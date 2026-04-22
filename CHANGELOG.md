@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.4.3] - 2026-04-22
+
+### Added
+
+- **HealReceipt 자동 발행** (`internal/server/receipt_emitter.go`): `ReceiptTrackingEmitter`가 `scrubber.Emitter`를 래핑해 correlationID 단위 HealEvent를 버퍼링 후 `FinalizeSession` 호출 시 서명된 `HealReceipt`를 `receipt.Store`에 퍼시스트. orphan-sweeper goroutine이 5분 TTL로 미완료 세션을 정리.
+- **서명 건강 게이트** (`internal/scrubber/scrubber.go`): `SigningHealthChecker` 인터페이스 도입. KeyStore가 없거나 활성 키가 없으면 해당 사이클의 repair를 전부 건너뜀 — "서명 없는 receipt는 퍼시스트되지 않는다" 감사 불변식 보장. Cycle 중간에 서명 불가로 전환될 경우에도 FinalizeSession 호출 직전 재확인.
+- **correlation_id 인덱스** (`internal/receipt/store.go`): `cidx:<correlationID> → receiptID` 보조 인덱스를 주 receipt 키와 동일 트랜잭션에 기록. `GetByCorrelationID`가 단일 BadgerDB View 트랜잭션 내에서 cidx + primary를 함께 읽어 TOCTOU 경쟁 제거.
+- **correlation_id API 엔드포인트** (`internal/receipt/api.go`): `GET /api/receipts?correlation_id=X`로 수리 세션 ID 기반 단일 receipt 조회 지원.
+- **OTel OTLP HTTP 추적** (`internal/otel/tracer.go`): `--otel-endpoint` / `--otel-sample-rate` 플래그로 OTLP HTTP exporter 초기화. scrub cycle 및 repair 작업에 `scrub.cycle` / `scrub.repair` span 추가.
+- **Blame Mode v1 UI** (`internal/server/ui/index.html`): scrub 이벤트 로그에 `Blame` 버튼 — 클릭 시 해당 객체의 HealReceipt를 `/api/receipts?correlation_id=` 로 조회하고 signature · shard 요약 오버레이 표시.
+
+### Fixed
+
+- `GetByCorrelationID` TOCTOU: cidx 조회와 primary 조회를 동일 트랜잭션으로 통합 (adversarial review 지적).
+- Mid-cycle 키스토어 교체 시 서명 실패로 receipt가 조용히 유실되던 문제 — FinalizeSession 직전 `SigningHealthy()` 재확인으로 명시적 경고 출력.
+
 ## [0.0.4.2] - 2026-04-22
 
 ### Fixed
