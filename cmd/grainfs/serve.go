@@ -82,7 +82,6 @@ func init() {
 	serveCmd.Flags().Duration("heal-receipt-retention", 30*24*time.Hour, "HealReceipt retention window (older entries are GC'd)")
 	serveCmd.Flags().Duration("heal-receipt-gossip-interval", 5*time.Second, "how often this node gossips its recent receipt IDs to peers")
 	serveCmd.Flags().Int("heal-receipt-window", 50, "rolling window size — how many recent receipt IDs to gossip per tick")
-	// Phase 16 Week 5 Slice 4 — OTel spans.
 	serveCmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
 	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	rootCmd.AddCommand(serveCmd)
@@ -125,7 +124,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Phase 16 Week 5 Slice 4 — OTel trace provider.
 	otelEndpoint, _ := cmd.Flags().GetString("otel-endpoint")
 	otelSampleRate, _ := cmd.Flags().GetFloat64("otel-sample-rate")
 	otelShutdown, err := grainotel.Init(ctx, otelEndpoint, otelSampleRate)
@@ -474,10 +472,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	srv := server.New(addr, backend, srvOpts...)
 
-	// Phase 16 Week 5 Slice 3: wrap the base heal emitter with receipt tracking
-	// so every completed repair session produces a signed HealReceipt.
 	// receiptWiring.keyStore may be nil when heal-receipt is disabled — in that
-	// case newReceiptTrackingEmitter degrades to a pass-through (signing unhealthy).
+	// case NewReceiptTrackingEmitter degrades to a pass-through (signing unhealthy).
 	var activeEmitter scrubber.Emitter = srv.HealEmitter()
 	if receiptWiring != nil && receiptWiring.store != nil {
 		rte := server.NewReceiptTrackingEmitter(srv.HealEmitter(), receiptWiring.store, receiptWiring.keyStore)
