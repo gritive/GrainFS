@@ -68,7 +68,7 @@
 **동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
 
 **Stage 3 진입 선결 과제** (Stage 0-2 완료, CONDITIONAL GO p95 53.5ms PASS):
-- [ ] **Placement map 설계 확정** — Consistent Hashing vs Raft FSM map 선택 → Stage 3 WBS Week 1~2 범위 결정. `/plan-eng-review` Phase 18 상세 리뷰 시 해결.
+- Placement map 설계 확정 ✅ — Hybrid(FNV32 + Raft FSM) 확정. `b.node.ID()` → `b.selfAddr` 버그 수정 + placement key skew(shardKey 통일) 수정 완료 (v0.0.4.2)
 
 **Stage 3 선결 과제** (Phase 18 풀 구현 시작 전):
 - [ ] Raft FSM v1→v2 변환 전략 + 롤백 경로 설계
@@ -76,6 +76,11 @@
 - [ ] N×→EC 백그라운드 re-placement의 concurrent PUT/GET 일관성 계약
 - [ ] HealReceipt 스키마 변경 범위 분석
 - [ ] Write-all vs write-majority tail latency 트레이드오프 재검토
+- [ ] **Dynamic allNodes topology** — `SetShardService` 호출 시 `allNodes`가 정적으로 고정됨. 노드 추가/제거 시 새 shard placement가 새 노드에 전달되지 않음. Raft peer list를 FSM source-of-truth로 사용하도록 전환.
+- [ ] **allNodes 정렬 비결정성** — 노드마다 Raft join 순서가 다를 수 있어 `allNodes` 구성이 순간적으로 다를 수 있음. Dynamic allNodes 과제와 함께 해결.
+- [ ] **Topology change E2E 테스트** — N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오.
+- [ ] **Placement record lifecycle** — DeleteObject FSM 명령에 `CmdDeleteShardPlacement` 연동. 현재 오브젝트 삭제 시 stale placement record가 BadgerDB에 남아 스냅샷 비대해짐.
+- [ ] **`LookupShardPlacement` 오류 구분** — `([]string, bool)` → `([]string, error)` 반환 타입 변경. 현재 `ok=false`가 "record 없음"과 "BadgerDB read 오류"를 구분하지 못해 데이터 손실 시 N× fallback으로 조용히 진행됨.
 
 ### v0.0.4.0 follow-up
 

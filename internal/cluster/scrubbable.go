@@ -226,11 +226,12 @@ func (b *DistributedBackend) RaftNodeID() string {
 // nodeID. Exposed for future cluster-aware scrubber filtering (see
 // RaftNodeID). Returns nil when the object has no placement record (non-EC /
 // N× path) or when nodeID does not appear in the placement vector.
-// versionID is accepted for interface symmetry with ECBackend; the FSM
-// placement record itself is keyed by (bucket, key) only.
 func (b *DistributedBackend) OwnedShards(bucket, key, versionID, nodeID string) []int {
-	_ = versionID
-	placement, ok := b.fsm.LookupShardPlacement(bucket, key)
+	lookupKey := key
+	if versionID != "" {
+		lookupKey = key + "/" + versionID
+	}
+	placement, ok := b.fsm.LookupShardPlacement(bucket, lookupKey)
 	if !ok {
 		return nil
 	}
