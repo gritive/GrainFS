@@ -118,6 +118,47 @@ func TestShardService_WithEncryptorNil(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
+// TestShardService_RPCEncryptedWriteRead verifies that encryption works end-to-end
+// over the QUIC RPC path: write via handleWrite → WriteLocalShard (encrypt) and
+// read back via handleRead → ReadLocalShard (decrypt).
+func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
+	ctx := context.Background()
+
+	key := bytes.Repeat([]byte("e"), 32)
+	enc1, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+	enc2, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	tr1 := transport.NewQUICTransport()
+	tr2 := transport.NewQUICTransport()
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1, WithEncryptor(enc1))
+	svc2 := NewShardService(dir2, tr2, WithEncryptor(enc2))
+	tr2.SetStreamHandler(svc2.HandleRPC())
+
+	plaintext := []byte("encrypted rpc shard")
+	require.NoError(t, svc1.WriteShard(ctx, tr2.LocalAddr(), "bkt", "key", 0, plaintext))
+
+	// On-disk bytes on node2 must NOT be plaintext
+	rawPath := filepath.Join(dir2, "shards", "bkt", "key", "shard_0")
+	raw, readErr := os.ReadFile(rawPath)
+	require.NoError(t, readErr)
+	assert.NotEqual(t, plaintext, raw, "remote shard should be encrypted on disk")
+
+	// Read back via RPC must return decrypted plaintext
+	got, readErr := svc1.ReadShard(ctx, tr2.LocalAddr(), "bkt", "key", 0)
+	require.NoError(t, readErr)
+	assert.Equal(t, plaintext, got)
+}
+
 func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	ctx := context.Background()
 
