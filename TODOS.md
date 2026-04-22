@@ -60,9 +60,6 @@
 
 **동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
 
-**Stage 3 진입 선결 과제** (Stage 0-2 완료, CONDITIONAL GO p95 53.5ms PASS):
-- Placement map 설계 확정 ✅ — Hybrid(FNV32 + Raft FSM) 확정. `b.node.ID()` → `b.selfAddr` 버그 수정 + placement key skew(shardKey 통일) 수정 완료 (v0.0.4.2)
-
 **Stage 3 선결 과제** (Phase 18 풀 구현 시작 전):
 - [ ] Raft FSM v1→v2 변환 전략 + 롤백 경로 설계
 - [ ] Min-node=6 → `k+m` 파라미터화
