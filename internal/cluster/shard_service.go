@@ -265,6 +265,7 @@ func (s *ShardService) DecryptPayload(data []byte) ([]byte, error) {
 // the QUIC transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
 // When an encryptor is configured, the shard is AES-256-GCM encrypted before writing.
+// Writes are crash-safe: data goes to a .tmp file, fsync'd, then renamed.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
 	dir := filepath.Join(s.dataDir, bucket, key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -279,7 +280,34 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 		}
 	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	return os.WriteFile(path, payload, 0o644)
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create tmp shard: %w", err)
+	}
+	if _, err := f.Write(payload); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write tmp shard: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("sync tmp shard: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close tmp shard: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename shard: %w", err)
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 // ReadLocalShard fetches a shard from the local node's disk.
