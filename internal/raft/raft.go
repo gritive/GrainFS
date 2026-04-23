@@ -29,7 +29,7 @@ var (
 type NodeState int
 
 const (
-	Follower  NodeState = iota
+	Follower NodeState = iota
 	Candidate
 	Leader
 )
@@ -197,8 +197,8 @@ type Node struct {
 	stopped  bool
 
 	// transport callback for sending RPCs
-	sendRequestVote    func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
-	sendAppendEntries  func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error)
+	sendRequestVote     func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
+	sendAppendEntries   func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error)
 	sendInstallSnapshot func(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error)
 	sendTimeoutNow      func(peer string) error
 
@@ -225,17 +225,17 @@ type Node struct {
 // If store is non-nil, it restores persisted state on creation.
 func NewNode(config Config, store ...LogStore) *Node {
 	n := &Node{
-		id:         config.ID,
-		state:      Follower,
-		config:     config,
-		log:        make([]LogEntry, 0),
-		firstIndex: 1, // Raft indices start at 1
-		nextIndex:  make(map[string]uint64),
-		matchIndex: make(map[string]uint64),
-		applyCh:    make(chan LogEntry, 64),
-		stopCh:     make(chan struct{}),
-		resetCh:    make(chan struct{}, 1),
-		commitCh:   make(chan struct{}, 1),
+		id:            config.ID,
+		state:         Follower,
+		config:        config,
+		log:           make([]LogEntry, 0),
+		firstIndex:    1, // Raft indices start at 1
+		nextIndex:     make(map[string]uint64),
+		matchIndex:    make(map[string]uint64),
+		applyCh:       make(chan LogEntry, 64),
+		stopCh:        make(chan struct{}),
+		resetCh:       make(chan struct{}, 1),
+		commitCh:      make(chan struct{}, 1),
 		waiters:       make(map[uint64]chan error),
 		proposalCh:    make(chan proposal, 4096),
 		replicationCh: make(chan struct{}, 1),
@@ -443,6 +443,16 @@ func (n *Node) ID() string {
 	return n.id
 }
 
+// Peers returns a snapshot of the current peer list. The caller receives a
+// copy so mutations to the returned slice do not affect the node's state.
+func (n *Node) Peers() []string {
+	n.mu.Lock()
+	out := make([]string, len(n.config.Peers))
+	copy(out, n.config.Peers)
+	n.mu.Unlock()
+	return out
+}
+
 // ApplyCh returns the channel on which committed log entries are delivered.
 func (n *Node) ApplyCh() <-chan LogEntry {
 	return n.applyCh
@@ -504,7 +514,7 @@ func (n *Node) runCandidate() {
 	peers := n.config.Peers
 	n.mu.Unlock()
 
-	votes := 1 // vote for self
+	votes := 1              // vote for self
 	total := len(peers) + 1 // include self
 	majority := total/2 + 1
 

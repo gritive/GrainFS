@@ -66,11 +66,7 @@
 - [ ] N×→EC 백그라운드 re-placement의 concurrent PUT/GET 일관성 계약
 - [ ] HealReceipt 스키마 변경 범위 분석
 - [ ] Write-all vs write-majority tail latency 트레이드오프 재검토
-- [ ] **Dynamic allNodes topology** — `SetShardService` 호출 시 `allNodes`가 정적으로 고정됨. 노드 추가/제거 시 새 shard placement가 새 노드에 전달되지 않음. Raft peer list를 FSM source-of-truth로 사용하도록 전환.
-- [ ] **allNodes 정렬 비결정성** — 노드마다 Raft join 순서가 다를 수 있어 `allNodes` 구성이 순간적으로 다를 수 있음. Dynamic allNodes 과제와 함께 해결.
 - [ ] **Topology change E2E 테스트** — N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오.
-- [ ] **Placement record lifecycle** — DeleteObject FSM 명령에 `CmdDeleteShardPlacement` 연동. 현재 오브젝트 삭제 시 stale placement record가 BadgerDB에 남아 스냅샷 비대해짐.
-- [ ] **`LookupShardPlacement` 오류 구분** — `([]string, bool)` → `([]string, error)` 반환 타입 변경. 현재 `ok=false`가 "record 없음"과 "BadgerDB read 오류"를 구분하지 못해 데이터 손실 시 N× fallback으로 조용히 진행됨.
 
 
 ## Phase 19: Performance

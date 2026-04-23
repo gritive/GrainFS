@@ -106,6 +106,26 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 	b.peerHealth = NewPeerHealth(peers, 10*time.Second)
 }
 
+// liveNodes returns the current cluster node list for placement decisions.
+// When the Raft node has configured peers (normal operation), the list is
+// built from the Raft peer set plus selfAddr so it reflects membership
+// changes without requiring a restart. Falls back to the statically-cached
+// allNodes when the node has no peers (unit tests, single-node deploy).
+func (b *DistributedBackend) liveNodes() []string {
+	if b.node != nil {
+		if peers := b.node.Peers(); len(peers) > 0 {
+			nodes := make([]string, 0, len(peers)+1)
+			if b.selfAddr != "" {
+				nodes = append(nodes, b.selfAddr)
+			}
+			nodes = append(nodes, peers...)
+			sort.Strings(nodes)
+			return nodes
+		}
+	}
+	return b.allNodes
+}
+
 // SetSnapshotManager configures automatic snapshot creation after N applied entries.
 // Must be called before RunApplyLoop.
 func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node *raft.Node) {
@@ -396,7 +416,7 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 	if be, err := b.fsm.GetBucketECEnabled(bucket); err == nil {
 		bucketECEnabled = be
 	}
-	if b.ecConfig.IsActive(len(b.allNodes)) && b.shardSvc != nil && bucketECEnabled {
+	if b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil && bucketECEnabled {
 		return b.putObjectEC(bucket, key, versionID, data, contentType)
 	}
 
@@ -427,7 +447,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 	shardKey := key + "/" + versionID
 	if b.shardSvc != nil {
 		ctx := context.Background()
-		for _, peer := range b.allNodes {
+		for _, peer := range b.liveNodes() {
 			if peer == b.selfAddr {
 				continue
 			}
@@ -496,7 +516,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	// for different versions land at different paths without changing the API.
 	shardKey := key + "/" + versionID
 
-	placement := PlacementForNodes(b.ecConfig, b.allNodes, shardKey)
+	placement := PlacementForNodes(b.ecConfig, b.liveNodes(), shardKey)
 	selfID := b.selfAddr
 
 	// Track nodes we wrote to so cleanup can target them precisely.
@@ -590,7 +610,9 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	if obj.VersionID != "" {
 		shardKey = key + "/" + obj.VersionID
 	}
-	if nodes, ok := b.fsm.LookupShardPlacement(bucket, shardKey); ok && b.shardSvc != nil {
+	if nodes, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey); lookupErr != nil {
+		return nil, nil, fmt.Errorf("lookup shard placement: %w", lookupErr)
+	} else if len(nodes) > 0 && b.shardSvc != nil {
 		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, nodes)
 		if ecErr == nil {
 			return io.NopCloser(bytes.NewReader(data)), obj, nil
@@ -618,7 +640,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	if b.shardSvc != nil && os.IsNotExist(err) {
 		ctx := context.Background()
 		// Try healthy peers first
-		for _, peer := range b.allNodes {
+		for _, peer := range b.liveNodes() {
 			if peer == b.selfAddr {
 				continue
 			}
@@ -638,7 +660,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		}
 		// Fallback: try unhealthy peers (they may have recovered)
 		if b.peerHealth != nil {
-			for _, peer := range b.allNodes {
+			for _, peer := range b.liveNodes() {
 				if peer == b.selfAddr {
 					continue
 				}
@@ -694,8 +716,11 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		shardKey = key + "/" + versionID
 	}
 
-	placement, ok := b.fsm.LookupShardPlacement(bucket, shardKey)
-	if !ok {
+	placement, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey)
+	if lookupErr != nil {
+		return fmt.Errorf("lookup shard placement: %w", lookupErr)
+	}
+	if len(placement) == 0 {
 		return fmt.Errorf("no placement for %s/%s — object is not EC-managed", bucket, key)
 	}
 	if shardIdx < 0 || shardIdx >= len(placement) {
@@ -763,7 +788,7 @@ func (b *DistributedBackend) FSMDB() *badger.DB { return b.db }
 
 // ECActive reports whether Phase 18 cluster EC will be applied to the next
 // PutObject call (EC enabled + enough nodes for k+m split).
-func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.allNodes)) }
+func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.liveNodes())) }
 
 // ConvertObjectToEC migrates an existing N×-replicated object to Phase 18
 // EC placement. Used by the background re-placement manager (Slice 5).
@@ -775,11 +800,15 @@ func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.
 // commit overwrite both the N× copy and (post-commit) the EC shards, so the
 // last writer wins per normal PUT semantics.
 func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
-	if !b.ecConfig.IsActive(len(b.allNodes)) || b.shardSvc == nil {
+	if !b.ecConfig.IsActive(len(b.liveNodes())) || b.shardSvc == nil {
 		return fmt.Errorf("ec not active: enabled=%v cluster_size=%d k+m=%d",
-			b.ecConfig.Enabled, len(b.allNodes), b.ecConfig.NumShards())
+			b.ecConfig.Enabled, len(b.liveNodes()), b.ecConfig.NumShards())
 	}
-	if _, ok := b.fsm.LookupShardPlacement(bucket, key); ok {
+	existing, lookupErr := b.fsm.LookupShardPlacement(bucket, key)
+	if lookupErr != nil {
+		return fmt.Errorf("lookup shard placement: %w", lookupErr)
+	}
+	if len(existing) > 0 {
 		return nil // already converted
 	}
 
@@ -808,7 +837,7 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	}
 	// ConvertObjectToEC is a legacy-to-EC migration path for pre-versioned objects,
 	// so placement uses bare key (no versionID suffix).
-	placement := PlacementForNodes(b.ecConfig, b.allNodes, key)
+	placement := PlacementForNodes(b.ecConfig, b.liveNodes(), key)
 	selfID := b.selfAddr
 	written := make([]string, 0, len(shards))
 	rollbackShards := func() {
@@ -869,7 +898,7 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	for _, n := range placement {
 		placementSet[n] = true
 	}
-	for _, peer := range b.allNodes {
+	for _, peer := range b.liveNodes() {
 		if peer == selfID {
 			continue
 		}

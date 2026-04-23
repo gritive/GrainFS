@@ -14,6 +14,7 @@ package cluster
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -276,9 +277,11 @@ func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
 }
 
 // LookupShardPlacement returns the list of nodeIDs holding shards for the
-// given object, in shardIdx order. Returns ok=false if no placement record
-// exists (typical for N× replication objects pre-Phase-18).
-func (f *FSM) LookupShardPlacement(bucket, key string) ([]string, bool) {
+// given object, in shardIdx order.
+// Returns (nil, nil) when no placement record exists (N× replication objects).
+// Returns (nil, err) on a real BadgerDB read error — callers must not silently
+// fall back to N× replication on an error, as that risks data loss.
+func (f *FSM) LookupShardPlacement(bucket, key string) ([]string, error) {
 	var nodes []string
 	err := f.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(shardPlacementKey(bucket, key))
@@ -295,9 +298,12 @@ func (f *FSM) LookupShardPlacement(bucket, key string) ([]string, bool) {
 		})
 	})
 	if err != nil {
-		return nil, false
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return nodes, true
+	return nodes, nil
 }
 
 // encodePlacementValue serializes a node list as a length-prefixed sequence
