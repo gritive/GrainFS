@@ -6,6 +6,8 @@ import (
 	"io"
 	"testing"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -105,4 +107,39 @@ type zeroReader struct{}
 func (zeroReader) Read(p []byte) (int, error) {
 	clear(p)
 	return len(p), nil
+}
+
+func TestBinaryCodec_EncodeWriterTo_AllocsBounded(t *testing.T) {
+	b := flatbuffers.NewBuilder(64)
+	b.StartObject(0)
+	root := b.EndObject()
+	b.Finish(root)
+
+	codec := &BinaryCodec{}
+	var buf bytes.Buffer
+	allocs := testing.AllocsPerRun(100, func() {
+		buf.Reset()
+		fw := &FlatBuffersWriter{Typ: StreamData, Builder: b}
+		_ = codec.EncodeWriterTo(&buf, fw)
+	})
+	// header [5]byte는 스택 할당. 목표: ≤1
+	assert.LessOrEqual(t, allocs, 1.0, "EncodeWriterTo should allocate ≤1")
+}
+
+func TestBinaryCodec_EncodeWriterTo_RoundTrip(t *testing.T) {
+	b := flatbuffers.NewBuilder(128)
+	b.StartObject(0)
+	root := b.EndObject()
+	b.Finish(root)
+	payload := b.FinishedBytes()
+
+	codec := &BinaryCodec{}
+	var buf bytes.Buffer
+	fw := &FlatBuffersWriter{Typ: StreamData, Builder: b}
+	require.NoError(t, codec.EncodeWriterTo(&buf, fw))
+
+	decoded, err := codec.Decode(&buf)
+	require.NoError(t, err)
+	assert.Equal(t, StreamData, decoded.Type)
+	assert.Equal(t, payload, decoded.Payload)
 }

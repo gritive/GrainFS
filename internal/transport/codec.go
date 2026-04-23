@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	flatbuffers "github.com/google/flatbuffers/go"
 )
 
 const (
@@ -27,6 +29,29 @@ func (c *BinaryCodec) Encode(w io.Writer, msg *Message) error {
 		return fmt.Errorf("write header: %w", err)
 	}
 	if _, err := w.Write(msg.Payload); err != nil {
+		return fmt.Errorf("write payload: %w", err)
+	}
+	return nil
+}
+
+// FlatBuffersWriter holds a live FlatBuffers builder for zero-copy encoding.
+// Builder는 EncodeWriterTo 반환 후 caller가 pool에 반환해야 한다.
+type FlatBuffersWriter struct {
+	Typ     StreamType
+	Builder *flatbuffers.Builder
+}
+
+// EncodeWriterTo writes the FlatBuffers payload directly from Builder.FinishedBytes()
+// without make+copy. Builder must remain alive until this returns.
+func (c *BinaryCodec) EncodeWriterTo(w io.Writer, fw *FlatBuffersWriter) error {
+	raw := fw.Builder.FinishedBytes()
+	header := [headerSize]byte{}
+	header[0] = byte(fw.Typ)
+	binary.BigEndian.PutUint32(header[1:], uint32(len(raw)))
+	if _, err := w.Write(header[:]); err != nil {
+		return fmt.Errorf("write header: %w", err)
+	}
+	if _, err := w.Write(raw); err != nil {
 		return fmt.Errorf("write payload: %w", err)
 	}
 	return nil
