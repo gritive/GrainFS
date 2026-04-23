@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.4.16] - 2026-04-24
+
+### Removed
+
+- **`--cluster-ec` CLI 플래그**: 3노드 이상 클러스터에서 EC를 끌 실무적 이유가 없고 테스트 flakiness만 유발하던 토글 제거. EC는 `clusterSize >= MinECNodes(3)`일 때 항상 활성, 1-2 노드는 N× replication으로 자동 fallback.
+- **Per-bucket EC policy API**: `PUT /:bucket?ec=true|false` 엔드포인트, `GET /admin/buckets/ec` 대시보드 API, `CmdSetBucketECPolicy` Raft 명령(opcode 17 회수), `SetBucketECPolicyCmd` FlatBuffers 테이블, `DistributedBackend.SetBucketECPolicy`/`FSM.GetBucketECEnabled`, `ECPolicySetter`/`ECPolicyProvider` 인터페이스 전부 제거.
+- **`ECConfig.Enabled` 필드** (`internal/cluster/ec.go`): 더 이상 수동 on/off가 없으므로 필드와 `IsActive`/`EffectiveConfig`의 `Enabled` 체크 제거.
+- **`SnapshotBucket.ECEnabled` 필드** (`internal/storage/storage.go`): per-bucket 정책 소멸에 따라 스냅샷 페이로드에서 제거.
+- **`tests/e2e/ec_policy_test.go`**: skip 처리되어 있던 `TestBucketECPolicy_Toggle` 포함 파일 전체 삭제.
+- **`TestECSpike_RawShardP95` + `startEcspikeClusterNoEC`** (`tests/e2e/cluster_ecspike_test.go`): `--cluster-ec=false` 기반 "raw shard p95" 측정 경로가 불가능해져 제거. Phase 18 Stage 3 CONDITIONAL GO 게이트는 이미 통과.
+
 ## [0.0.4.15] - 2026-04-23
 
 ### Fixed
