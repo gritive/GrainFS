@@ -17,19 +17,19 @@
 
 ## 파일 구조
 
-| PR | 파일 | 변경 유형 | 역할 |
-|----|------|----------|------|
-| PR2 | `internal/transport/codec.go` | 수정 | `FlatBuffersWriter` 타입 + `EncodeWriterTo` 메서드 추가 |
-| PR2 | `internal/transport/codec_test.go` | 수정 | AllocsPerRun 테스트 추가 |
-| PR4 | `internal/transport/quic.go` | 수정 | `CallFlatBuffer` 메서드 추가 (FlatBuffers 전용 호출 경로) |
-| PR4 | `internal/cluster/shard_service.go` | 수정 | `WriteShard/ReadShard/DeleteShards`에서 `CallFlatBuffer` 사용 |
-| PR5 | `internal/vfs/vfs.go` | 수정 | `Rename` 함수 io.Pipe 스트리밍으로 교체 |
-| PR5 | `internal/vfs/vfs_test.go` | 수정 | 메모리 상한 테스트 추가 |
-| PR3 | `internal/server/handlers.go` | 수정 | `getObject`에 io.WriterTo 경로 추가 |
-| PR3 | `internal/server/handlers_test.go` | 수정 | WriterTo 경로 검증 테스트 추가 |
-| PR1 | `internal/cluster/ec_pool.go` | 신규 | `encoderPool` + `shardPool` 타입 및 `sync.Pool` 인프라 |
-| PR1 | `internal/cluster/ec.go` | 수정 | `ECSplit`/`ECReconstruct`에서 풀 사용 |
-| PR1 | `internal/cluster/ec_pool_test.go` | 신규 | AllocsPerRun + 정확성 테스트 |
+| PR  | 파일                                | 변경 유형 | 역할                                                          |
+| --- | ----------------------------------- | --------- | ------------------------------------------------------------- |
+| PR2 | `internal/transport/codec.go`       | 수정      | `FlatBuffersWriter` 타입 + `EncodeWriterTo` 메서드 추가       |
+| PR2 | `internal/transport/codec_test.go`  | 수정      | AllocsPerRun 테스트 추가                                      |
+| PR4 | `internal/transport/quic.go`        | 수정      | `CallFlatBuffer` 메서드 추가 (FlatBuffers 전용 호출 경로)     |
+| PR4 | `internal/cluster/shard_service.go` | 수정      | `WriteShard/ReadShard/DeleteShards`에서 `CallFlatBuffer` 사용 |
+| PR5 | `internal/vfs/vfs.go`               | 수정      | `Rename` 함수 io.Pipe 스트리밍으로 교체                       |
+| PR5 | `internal/vfs/vfs_test.go`          | 수정      | 메모리 상한 테스트 추가                                       |
+| PR3 | `internal/server/handlers.go`       | 수정      | `getObject`에 io.WriterTo 경로 추가                           |
+| PR3 | `internal/server/handlers_test.go`  | 수정      | WriterTo 경로 검증 테스트 추가                                |
+| PR1 | `internal/cluster/ec_pool.go`       | 신규      | `encoderPool` + `shardPool` 타입 및 `sync.Pool` 인프라        |
+| PR1 | `internal/cluster/ec.go`            | 수정      | `ECSplit`/`ECReconstruct`에서 풀 사용                         |
+| PR1 | `internal/cluster/ec_pool_test.go`  | 신규      | AllocsPerRun + 정확성 테스트                                  |
 
 ---
 
@@ -127,11 +127,11 @@ go test -v -run "TestEncodeBaseline" ./internal/transport/...
 
 측정한 수치를 메모해 둔다 (이 계획 문서의 빈 칸에 채워 넣는다):
 
-| 항목 | 측정값(allocs) | PR 목표 (1/4 이하) |
-|------|---------------|-------------------|
-| ECSplit (1MB, 4+2) | _____ | _____ |
-| ECReconstruct (1MB, 4+2) | _____ | _____ |
-| BinaryCodec.Encode (64B payload) | _____ | _____ |
+| 항목                             | 측정값(allocs) | PR 목표 (1/4 이하) |
+| -------------------------------- | -------------- | ------------------ |
+| ECSplit (1MB, 4+2)               | 75             | ≤19                |
+| ECReconstruct (1MB, 4+2)         | 48             | ≤12                |
+| BinaryCodec.Encode (64B payload) | 1 (이미 최적)  | —                  |
 
 ```bash
 rm internal/cluster/baseline_test.go internal/transport/codec_baseline_test.go
@@ -1161,10 +1161,10 @@ Expected: 모든 alloc 테스트 `PASS`
 
 - [ ] **완료 확인 체크리스트**
 
-| PR | 항목 | 상태 |
-|----|------|------|
-| PR2 | codec.go FlatBuffersWriter + EncodeWriterTo | [ ] |
-| PR5 | vfs.go Rename io.Pipe | [ ] |
-| PR4 | quic.go CallFlatBuffer + shard_service.go 적용 | [ ] |
-| PR3 | handlers.go sendfile (실측 후 결정) | [ ] |
-| PR1 | ec_pool.go RS 풀 (Phase 18 P1 후) | [ ] |
+| PR  | 항목                                           | 상태 |
+| --- | ---------------------------------------------- | ---- |
+| PR2 | codec.go FlatBuffersWriter + EncodeWriterTo    | [ ]  |
+| PR5 | vfs.go Rename io.Pipe                          | [ ]  |
+| PR4 | quic.go CallFlatBuffer + shard_service.go 적용 | [ ]  |
+| PR3 | handlers.go sendfile (실측 후 결정)            | [ ]  |
+| PR1 | ec_pool.go RS 풀 (Phase 18 P1 후)              | [ ]  |
