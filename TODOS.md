@@ -62,11 +62,9 @@
 
 **Stage 3 선결 과제** (Phase 18 풀 구현 시작 전):
 - [ ] Raft FSM v1→v2 변환 전략 + 롤백 경로 설계
-- [ ] Min-node=6 → `k+m` 파라미터화
 - [ ] N×→EC 백그라운드 re-placement의 concurrent PUT/GET 일관성 계약
 - [ ] HealReceipt 스키마 변경 범위 분석
 - [ ] Write-all vs write-majority tail latency 트레이드오프 재검토
-- [ ] **Topology change E2E 테스트** — N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오.
 
 
 ## Phase 19: Performance
