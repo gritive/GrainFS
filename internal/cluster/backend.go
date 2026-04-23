@@ -289,21 +289,31 @@ func (b *DistributedBackend) DeleteBucket(bucket string) error {
 	return b.propose(context.Background(), CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
 }
 
-// SetBucketVersioning satisfies server.BucketVersioner. Persists the S3
-// versioning state ("Enabled"/"Suspended") under key bucketver:{bucket} in
-// the FSM BadgerDB. NOTE: writes bypass Raft in this slice — consistent on a
-// singleton, eventually consistent across a cluster until follow-up work
-// wires a SetBucketVersioning FSM command. Object versioning itself (via
-// UUIDv7 VersionID) remains always-on regardless of this flag.
+// SetBucketVersioning satisfies server.BucketVersioner. Replicates the
+// versioning state change through Raft so all cluster nodes apply it atomically.
 func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
-	return b.db.Update(func(txn *badger.Txn) error {
-		if _, err := txn.Get(bucketKey(bucket)); err != nil {
-			if err == badger.ErrKeyNotFound {
-				return storage.ErrBucketNotFound
-			}
-			return err
-		}
-		return txn.Set([]byte("bucketver:"+bucket), []byte(state))
+	// Pre-check: verify bucket exists locally before proposing. The FSM also
+	// checks, but propose() does not propagate FSM errors back to the caller.
+	if err := b.HeadBucket(bucket); err != nil {
+		return err
+	}
+	return b.propose(context.Background(), CmdSetBucketVersioning, SetBucketVersioningCmd{
+		Bucket: bucket,
+		State:  state,
+	})
+}
+
+// SetObjectACL satisfies storage.ACLSetter. Replicates the ACL change through
+// Raft and updates the stored objectMeta on every node.
+func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
+	// Pre-check: verify object exists locally before proposing.
+	if _, err := b.HeadObject(bucket, key); err != nil {
+		return err
+	}
+	return b.propose(context.Background(), CmdSetObjectACL, SetObjectACLCmd{
+		Bucket: bucket,
+		Key:    key,
+		ACL:    acl,
 	})
 }
 
@@ -944,6 +954,7 @@ func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, er
 				ETag:         m.ETag,
 				LastModified: m.LastModified,
 				VersionID:    versionID,
+				ACL:          m.ACL,
 			}
 			return nil
 		})
@@ -1080,6 +1091,7 @@ func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]
 					ContentType:  m.ContentType,
 					ETag:         m.ETag,
 					LastModified: m.LastModified,
+					ACL:          m.ACL,
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -1322,6 +1334,7 @@ func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*
 				ETag:         m.ETag,
 				LastModified: m.LastModified,
 				VersionID:    versionID,
+				ACL:          m.ACL,
 			}
 			return nil
 		})

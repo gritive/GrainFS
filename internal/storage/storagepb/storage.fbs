@@ -9,6 +9,7 @@ table Object {
   content_type:string;
   etag:string;
   last_modified:int64;
+  acl:uint8;
 }
 
 table MultipartMeta {

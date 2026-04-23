@@ -89,8 +89,20 @@ func (rcv *Object) MutateLastModified(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
+func (rcv *Object) Acl() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *Object) MutateAcl(n byte) bool {
+	return rcv._tab.MutateByteSlot(14, n)
+}
+
 func ObjectStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func ObjectAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -106,6 +118,9 @@ func ObjectAddEtag(builder *flatbuffers.Builder, etag flatbuffers.UOffsetT) {
 }
 func ObjectAddLastModified(builder *flatbuffers.Builder, lastModified int64) {
 	builder.PrependInt64Slot(4, lastModified, 0)
+}
+func ObjectAddAcl(builder *flatbuffers.Builder, acl byte) {
+	builder.PrependByteSlot(5, acl, 0)
 }
 func ObjectEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

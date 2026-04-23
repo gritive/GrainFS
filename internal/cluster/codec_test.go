@@ -282,3 +282,40 @@ func TestClusterCodecOutputIsNotJSON(t *testing.T) {
 	err = json.Unmarshal(snapBytes, &js)
 	assert.Error(t, err, "protobuf snapshot output should not parse as valid JSON")
 }
+
+func TestCodec_SetBucketVersioningCmd_RoundTrip(t *testing.T) {
+	cmd := SetBucketVersioningCmd{Bucket: "mybucket", State: "Enabled"}
+	raw, err := encodeSetBucketVersioningCmd(cmd)
+	require.NoError(t, err)
+	got, err := decodeSetBucketVersioningCmd(raw)
+	require.NoError(t, err)
+	assert.Equal(t, cmd, got)
+}
+
+func TestCodec_SetObjectACLCmd_RoundTrip(t *testing.T) {
+	cmd := SetObjectACLCmd{Bucket: "b", Key: "file.txt", ACL: 2}
+	raw, err := encodeSetObjectACLCmd(cmd)
+	require.NoError(t, err)
+	got, err := decodeSetObjectACLCmd(raw)
+	require.NoError(t, err)
+	assert.Equal(t, cmd, got)
+}
+
+func TestCodec_ObjectMeta_ACL_RoundTrip(t *testing.T) {
+	m := objectMeta{Key: "f", Size: 5, ContentType: "text/plain", ETag: "e", LastModified: 1, ACL: 2}
+	raw, err := marshalObjectMeta(m)
+	require.NoError(t, err)
+	got, err := unmarshalObjectMeta(raw)
+	require.NoError(t, err)
+	assert.Equal(t, m, got)
+}
+
+func TestCodec_ObjectMeta_ACL_BackwardCompat(t *testing.T) {
+	// Old record without ACL field (ACL=0) should unmarshal cleanly as ACL=0 (private).
+	m := objectMeta{Key: "f", Size: 5, ContentType: "text/plain", ETag: "e", LastModified: 1}
+	raw, err := marshalObjectMeta(m)
+	require.NoError(t, err)
+	got, err := unmarshalObjectMeta(raw)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(0), got.ACL, "legacy records should have ACL=0 (private)")
+}

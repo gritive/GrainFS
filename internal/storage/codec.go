@@ -18,6 +18,7 @@ func marshalObject(obj *Object) ([]byte, error) {
 	storagepb.ObjectAddContentType(b, ctOff)
 	storagepb.ObjectAddEtag(b, etagOff)
 	storagepb.ObjectAddLastModified(b, obj.LastModified)
+	storagepb.ObjectAddAcl(b, obj.ACL)
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
 	raw := b.FinishedBytes()
@@ -42,6 +43,7 @@ func unmarshalObject(data []byte) (obj *Object, err error) {
 		ContentType:  string(t.ContentType()),
 		ETag:         string(t.Etag()),
 		LastModified: t.LastModified(),
+		ACL:          t.Acl(),
 	}, nil
 }
 

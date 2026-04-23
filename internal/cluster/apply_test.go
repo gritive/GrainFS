@@ -479,3 +479,133 @@ func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
 	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
 	assert.Empty(t, ch)
 }
+
+func TestFSM_SetBucketVersioning(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Bucket must exist first.
+	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "vbucket"})
+	require.NoError(t, fsm.Apply(data))
+
+	data, err := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "vbucket", State: "Enabled"})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	var state string
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(bucketVerKey("vbucket"))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error { state = string(v); return nil })
+	}))
+	assert.Equal(t, "Enabled", state)
+}
+
+func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	data, _ := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "ghost", State: "Enabled"})
+	err := fsm.Apply(data)
+	assert.Error(t, err, "should fail when bucket does not exist")
+}
+
+func TestFSM_SetObjectACL(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Write object meta first.
+	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "file.txt", Size: 10, ETag: "etag1", ModTime: 1000,
+	})
+	require.NoError(t, fsm.Apply(data))
+
+	const aclPublicRead uint8 = 2
+	data, err := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "file.txt", ACL: aclPublicRead})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	var m objectMeta
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKey("b", "file.txt"))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			m, err = unmarshalObjectMeta(val)
+			return err
+		})
+	}))
+	assert.Equal(t, aclPublicRead, m.ACL)
+}
+
+func TestFSM_SetObjectACL_NotFound(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	data, _ := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "ghost.txt", ACL: 2})
+	err := fsm.Apply(data)
+	assert.Error(t, err, "should fail when object does not exist")
+}
+
+func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Create bucket first.
+	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(data))
+
+	// Enable versioning on the bucket.
+	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
+	require.NoError(t, fsm.Apply(data))
+
+	const vid = "v1"
+	const aclPublicRead uint8 = 2
+
+	// Write versioned object meta (dual-write: legacy + versioned key).
+	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v", ModTime: 2000, VersionID: vid,
+	})
+	require.NoError(t, fsm.Apply(data))
+
+	// Set ACL — should update both legacy and versioned key.
+	data, err := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "file.txt", ACL: aclPublicRead})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	var legacyACL, versionedACL uint8
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKey("b", "file.txt"))
+		if err != nil {
+			return err
+		}
+		if err := item.Value(func(val []byte) error {
+			m, merr := unmarshalObjectMeta(val)
+			if merr != nil {
+				return merr
+			}
+			legacyACL = m.ACL
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		vItem, err := txn.Get(objectMetaKeyV("b", "file.txt", vid))
+		if err != nil {
+			return err
+		}
+		return vItem.Value(func(val []byte) error {
+			m, merr := unmarshalObjectMeta(val)
+			if merr != nil {
+				return merr
+			}
+			versionedACL = m.ACL
+			return nil
+		})
+	}))
+	assert.Equal(t, aclPublicRead, legacyACL, "legacy key ACL")
+	assert.Equal(t, aclPublicRead, versionedACL, "versioned key ACL")
+}

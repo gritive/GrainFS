@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/dgraph-io/badger/v4"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // FSM applies committed Raft log entries to BadgerDB metadata store.
@@ -83,6 +85,10 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applyDeleteShardPlacement(cmd.Data)
 	case CmdDeleteObjectVersion:
 		return f.applyDeleteObjectVersion(cmd.Data)
+	case CmdSetBucketVersioning:
+		return f.applySetBucketVersioning(cmd.Data)
+	case CmdSetObjectACL:
+		return f.applySetObjectACL(cmd.Data)
 	default:
 		slog.Warn("fsm: unknown command type", "type", cmd.Type)
 		return nil
@@ -91,6 +97,7 @@ func (f *FSM) Apply(raw []byte) error {
 
 func bucketKey(bucket string) []byte          { return []byte("bucket:" + bucket) }
 func bucketPolicyKey(bucket string) []byte    { return []byte("policy:" + bucket) }
+func bucketVerKey(bucket string) []byte       { return []byte("bucketver:" + bucket) }
 func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
 
 // objectMetaKeyV returns the per-version metadata key:
@@ -370,6 +377,79 @@ func (f *FSM) applyDeleteBucketPolicy(data []byte) error {
 			return nil
 		}
 		return err
+	})
+}
+
+func (f *FSM) applySetBucketVersioning(data []byte) error {
+	c, err := decodeSetBucketVersioningCmd(data)
+	if err != nil {
+		return err
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		if _, err := txn.Get(bucketKey(c.Bucket)); err == badger.ErrKeyNotFound {
+			return storage.ErrBucketNotFound
+		} else if err != nil {
+			return err
+		}
+		return txn.Set(bucketVerKey(c.Bucket), []byte(c.State))
+	})
+}
+
+func (f *FSM) applySetObjectACL(data []byte) error {
+	c, err := decodeSetObjectACLCmd(data)
+	if err != nil {
+		return err
+	}
+	legacyKey := objectMetaKey(c.Bucket, c.Key)
+	return f.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(legacyKey)
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			m, merr := unmarshalObjectMeta(val)
+			if merr != nil {
+				return merr
+			}
+			m.ACL = c.ACL
+			newVal, merr := marshalObjectMeta(m)
+			if merr != nil {
+				return merr
+			}
+			if err := txn.Set(legacyKey, newVal); err != nil {
+				return err
+			}
+			// Also update the versioned record if this bucket has versioning enabled.
+			latItem, lerr := txn.Get(latestKey(c.Bucket, c.Key))
+			if lerr != nil {
+				return nil //nolint:nilerr // no versioned key, nothing more to do
+			}
+			var versionID string
+			_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
+			if versionID == "" {
+				return nil
+			}
+			vKey := objectMetaKeyV(c.Bucket, c.Key, versionID)
+			vItem, verr := txn.Get(vKey)
+			if verr != nil {
+				return nil //nolint:nilerr // versioned record missing, skip
+			}
+			return vItem.Value(func(vval []byte) error {
+				vm, merr := unmarshalObjectMeta(vval)
+				if merr != nil {
+					return merr
+				}
+				vm.ACL = c.ACL
+				vNewVal, merr := marshalObjectMeta(vm)
+				if merr != nil {
+					return merr
+				}
+				return txn.Set(vKey, vNewVal)
+			})
+		})
 	})
 }
 
