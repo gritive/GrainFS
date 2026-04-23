@@ -40,7 +40,7 @@ func startEcspikeCluster(t *testing.T) ([]*ecspikeNode, func()) {
 	return startEcspikeClusterOpts(t, false)
 }
 
-// startEcspikeClusterNoEC spawns 6 nodes with --ec=false --no-encryption to measure
+// startEcspikeClusterNoEC spawns 6 nodes with --cluster-ec=false --no-encryption to measure
 // raw shard p95 without nested solo EC overhead (CONDITIONAL GO prerequisite).
 func startEcspikeClusterNoEC(t *testing.T) ([]*ecspikeNode, func()) {
 	return startEcspikeClusterOpts(t, true)
@@ -78,7 +78,7 @@ func startEcspikeClusterOpts(t *testing.T, noEC bool) ([]*ecspikeNode, func()) {
 			"--nbd-port", "0",
 		}
 		if noEC {
-			args = append(args, "--ec=false", "--no-encryption")
+			args = append(args, "--cluster-ec=false", "--no-encryption")
 		}
 		cmd := exec.Command(binary, args...)
 		// Assign before Start so cleanup() can remove dir even if Start fails.
@@ -182,7 +182,7 @@ func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
 }
 
 // TestECSpike_RawShardP95 is the CONDITIONAL GO prerequisite remeasurement.
-// Nodes run with --ec=false --no-encryption to eliminate nested solo EC overhead.
+// Nodes run with --cluster-ec=false --no-encryption to eliminate nested solo EC overhead.
 // Result determines whether Phase 18 Stage 3 is safe to start.
 //
 // go/no-go: p95 < 500ms → Phase 18 진입, p95 >= 500ms → Phase 18 보류.

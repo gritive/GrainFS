@@ -422,8 +422,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// wait for Raft to elect a leader before the proposal can commit.
 	// Retry for up to 30s with backoff so the first node's boot does not
 	// fail the whole cluster when peers come up in any order.
+	//
+	// For nodes joining an existing cluster (i.e., cluster mode with peers),
+	// the default bucket should already exist. If it doesn't, a follower can't
+	// create it anyway (only the leader can propose). We log a warning but
+	// don't fail startup to allow cluster reconfiguration.
 	if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-		return fmt.Errorf("create default bucket: %w", err)
+		if len(peers) > 0 {
+			// Cluster mode with peers: joining an existing cluster.
+			// Default bucket may or may not exist; either way, follower can't create it.
+			slog.Warn("default bucket creation failed on follower (may already exist)", "error", err)
+		} else {
+			// Single-node mode: default bucket must be created.
+			return fmt.Errorf("create default bucket: %w", err)
+		}
 	}
 
 	slog.Info("server started", "component", "server", "version", version,

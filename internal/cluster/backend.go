@@ -118,7 +118,11 @@ func (b *DistributedBackend) liveNodes() []string {
 			if b.selfAddr != "" {
 				nodes = append(nodes, b.selfAddr)
 			}
-			nodes = append(nodes, peers...)
+			for _, p := range peers {
+				if b.peerHealth == nil || b.peerHealth.IsHealthy(p) {
+					nodes = append(nodes, p)
+				}
+			}
 			sort.Strings(nodes)
 			return nodes
 		}
@@ -534,6 +538,8 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	}
 
 	// Fan-out: write each shard to its placed node. Write-all consistency.
+	// Each remote write gets a 3s deadline (matching the read-side per-shard timeout)
+	// so a dead peer fails fast rather than blocking for quicMaxIdleTimeout (10s).
 	for i, node := range placement {
 		if node == selfID {
 			if werr := b.shardSvc.WriteLocalShard(bucket, shardKey, i, shards[i]); werr != nil {
@@ -541,7 +547,10 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 				return nil, fmt.Errorf("ec write local shard %d: %w", i, werr)
 			}
 		} else {
-			if werr := b.shardSvc.WriteShard(ctx, node, bucket, shardKey, i, shards[i]); werr != nil {
+			writeCtx, writeCancel := context.WithTimeout(ctx, 3*time.Second)
+			werr := b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, i, shards[i])
+			writeCancel()
+			if werr != nil {
 				if b.peerHealth != nil {
 					b.peerHealth.MarkUnhealthy(node)
 				}
@@ -954,7 +963,16 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 		if node == selfID {
 			data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
 		} else {
-			data, err = b.shardSvc.ReadShard(ctx, node, bucket, shardKey, i)
+			// Skip peers already known to be unhealthy on this request.
+			if b.peerHealth != nil && !b.peerHealth.IsHealthy(node) {
+				continue
+			}
+			// Bound each remote shard fetch so a dead peer does not block
+			// reconstruction indefinitely. quicMaxIdleTimeout is 10s; 3s gives
+			// enough room for a live peer while failing fast on a dead one.
+			shardCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
+			cancel()
 			if err != nil && b.peerHealth != nil {
 				b.peerHealth.MarkUnhealthy(node)
 			} else if err == nil && b.peerHealth != nil {

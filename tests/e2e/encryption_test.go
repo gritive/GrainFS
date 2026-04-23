@@ -36,7 +36,7 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, func()) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--ec",
+		"--cluster-ec",
 		"--encryption-key-file", keyFile,
 		"--nfs4-port", "0",
 	)
