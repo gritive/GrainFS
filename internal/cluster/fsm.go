@@ -12,6 +12,10 @@ import (
 type CommandType uint8
 
 const (
+	// CmdNoOp is proposed by a new leader to commit entries from previous terms.
+	// The FSM ignores it; it exists only to advance advanceCommitIndex.
+	CmdNoOp CommandType = 0
+
 	CmdCreateBucket          CommandType = 1
 	CmdDeleteBucket          CommandType = 2
 	CmdPutObjectMeta         CommandType = 3
@@ -153,6 +157,11 @@ type SetObjectACLCmd struct {
 	Bucket string
 	Key    string
 	ACL    uint8
+}
+
+// EncodeNoOpCommand returns a serialized CmdNoOp suitable for SetNoOpCommand.
+func EncodeNoOpCommand() ([]byte, error) {
+	return EncodeCommand(CmdNoOp, nil)
 }
 
 // EncodeCommand serializes a command for Raft proposal using FlatBuffers.

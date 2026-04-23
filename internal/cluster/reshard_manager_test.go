@@ -1,8 +1,11 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -16,11 +19,12 @@ type fakeLeader struct{ leader bool }
 func (l *fakeLeader) IsLeader() bool { return l.leader }
 
 // fakeConverter replaces DistributedBackend for reshard manager unit tests.
-// It tracks which (bucket,key) pairs were converted and can simulate errors.
+// It tracks which (bucket,key) pairs were converted/upgraded and can simulate errors.
 type fakeConverter struct {
 	fsm       *FSM
 	active    bool
 	converted []string
+	upgraded  []string
 	failOn    map[string]error
 }
 
@@ -45,7 +49,8 @@ func (c *fakeConverter) ECActive() bool { return c.active }
 func (c *fakeConverter) EffectiveECConfig() ECConfig {
 	return ECConfig{DataShards: 4, ParityShards: 2}
 }
-func (c *fakeConverter) upgradeObjectEC(_ context.Context, _, _ string, _ PlacementRecord, _ ECConfig) error {
+func (c *fakeConverter) upgradeObjectEC(_ context.Context, bucket, key string, _ PlacementRecord, _ ECConfig) error {
+	c.upgraded = append(c.upgraded, bucket+"/"+key)
 	return nil
 }
 
@@ -183,4 +188,139 @@ func TestReshardManager_Stats_InitialState(t *testing.T) {
 	assert.Zero(t, s.TotalSkipped)
 	assert.Zero(t, s.TotalErrors)
 	assert.Zero(t, s.TotalRuns)
+}
+
+func TestReshardManager_Run_UpgradesECObjects_OnKMismatch(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// Seed one N×-replicated object (no placement) and one EC object
+	// whose stored k,m differs from the effective config.
+	seedObjectMeta(t, fsm, "bkt", "nx-obj", "e1", 10)
+	seedObjectMeta(t, fsm, "bkt", "ec-obj", "e2", 20)
+
+	// ec-obj has placement with k=2,m=1, but effective config is k=4,m=2.
+	raw, err := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket: "bkt", Key: "ec-obj",
+		NodeIDs: []string{"n0", "n1", "n2"}, // k+m = 3 shards
+		K: 2, M: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(raw))
+
+	conv := &fakeConverter{
+		fsm:    fsm,
+		active: true,
+		// EffectiveECConfig returns {4,2} — mismatch with stored {2,1}.
+	}
+	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
+	cv, skip, errs := mgr.Run(context.Background())
+
+	// nx-obj → ConvertObjectToEC; ec-obj (k mismatch) → upgradeObjectEC
+	assert.Equal(t, 2, cv)
+	assert.Equal(t, 0, skip)
+	assert.Equal(t, 0, errs)
+	assert.Equal(t, []string{"bkt/nx-obj"}, conv.converted)
+	assert.Equal(t, []string{"bkt/ec-obj"}, conv.upgraded)
+}
+
+func TestReshardManager_Run_SkipsECObjects_OnKMatch(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	seedObjectMeta(t, fsm, "bkt", "ec-obj", "e1", 10)
+
+	// ec-obj placement k,m matches effective config {4,2} exactly.
+	raw, err := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket: "bkt", Key: "ec-obj",
+		NodeIDs: []string{"n0", "n1", "n2", "n3", "n4", "n5"},
+		K: 4, M: 2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(raw))
+
+	conv := &fakeConverter{fsm: fsm, active: true}
+	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
+	cv, skip, errs := mgr.Run(context.Background())
+
+	assert.Equal(t, 0, cv)
+	assert.Equal(t, 1, skip)
+	assert.Equal(t, 0, errs)
+	assert.Empty(t, conv.upgraded)
+}
+
+// TestUpgradeObjectEC_RoundTrip tests upgradeObjectEC end-to-end on a real
+// single-node backend: write shards with k=2,m=1; upgrade to k=3,m=2; verify
+// the object is still readable after the upgrade.
+func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
+	backend := NewSingletonBackendForTest(t)
+
+	// Wire a local-only ShardService (nil transport — no remote calls needed).
+	shardDir := t.TempDir()
+	svc := NewShardService(shardDir, nil)
+	backend.SetShardService(svc, []string{"self"})
+	backend.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
+
+	bucket, key := "testbkt", "roundtrip/obj"
+	data := bytes.Repeat([]byte("grainfs-ec-upgrade-"), 200) // 3800 bytes
+
+	// Create the bucket through Raft so HeadBucket passes.
+	require.NoError(t, backend.CreateBucket(bucket))
+
+	// Seed object metadata directly into the FSM (no versionID → legacy layout).
+	etag := fmt.Sprintf("%x", md5.Sum(data))
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: bucket, Key: key, Size: int64(len(data)),
+		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, backend.fsm.Apply(raw))
+
+	// Write old shards (k=2, m=1 → 3 shards) directly to local storage.
+	oldCfg := ECConfig{DataShards: 2, ParityShards: 1}
+	oldShards, err := ECSplit(oldCfg, data)
+	require.NoError(t, err)
+	for i, shard := range oldShards {
+		require.NoError(t, svc.WriteLocalShard(bucket, key, i, shard))
+	}
+
+	// Seed old placement record (k=2,m=1, all 3 shards on "self").
+	selfNodes := make([]string, oldCfg.NumShards())
+	for i := range selfNodes {
+		selfNodes[i] = "self"
+	}
+	raw, err = EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket: bucket, Key: key, NodeIDs: selfNodes, K: 2, M: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, backend.fsm.Apply(raw))
+
+	// Confirm the old placement is readable before upgrade.
+	oldRec, err := backend.fsm.LookupShardPlacement(bucket, key)
+	require.NoError(t, err)
+	require.Equal(t, 3, len(oldRec.Nodes))
+	require.Equal(t, 2, oldRec.K)
+	require.Equal(t, 1, oldRec.M)
+
+	// Upgrade from k=2,m=1 to k=3,m=2.
+	newCfg := ECConfig{DataShards: 3, ParityShards: 2}
+	ctx := context.Background()
+	require.NoError(t, backend.upgradeObjectEC(ctx, bucket, key, oldRec, newCfg))
+
+	// Verify new placement record was committed via Raft.
+	newRec, err := backend.fsm.LookupShardPlacement(bucket, key)
+	require.NoError(t, err)
+	assert.Equal(t, newCfg.NumShards(), len(newRec.Nodes), "new placement shard count")
+	assert.Equal(t, 3, newRec.K)
+	assert.Equal(t, 2, newRec.M)
+
+	// Verify the object is still fully readable after the upgrade.
+	rc, obj, err := backend.GetObject(bucket, key)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, data, got, "object content must survive EC upgrade")
 }

@@ -68,6 +68,11 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 	}
 
 	fsm := NewFSM(db)
+
+	if noOp, err := EncodeNoOpCommand(); err == nil {
+		node.SetNoOpCommand(noOp)
+	}
+
 	return &DistributedBackend{
 		root:     root,
 		db:       db,
