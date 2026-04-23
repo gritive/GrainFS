@@ -41,7 +41,6 @@ func init() {
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
-	serveCmd.Flags().Bool("ec", true, "enable erasure coding (Reed-Solomon 4+2, use --ec=false to disable)")
 	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "number of data shards for erasure coding")
 	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "number of parity shards for erasure coding")
 	serveCmd.Flags().Bool("cluster-ec", true, "Phase 18: cross-node EC in cluster mode (auto-falls back to N× replication when cluster size < ec-data+ec-parity; use --cluster-ec=false to force N×)")

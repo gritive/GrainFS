@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.4.13] - 2026-04-23
+
+### Added
+
+- **Topology change E2E 테스트** (`tests/e2e/cluster_ec_test.go`): `TestE2E_ClusterEC_TopologyChange` 추가. 5-node 3+2 클러스터에서 노드 제거 후 기존 객체의 FSM placement record 불변성 검증 (GET 재구성 가능), 그리고 신규 객체가 변경된 liveNodes() 집합을 기반으로 올바르게 기록됨을 확인.
+- **Min-node 파라미터화** (`tests/e2e/cluster_ec_test.go`): `TestE2E_ClusterEC_FallbackToNx_3Node`에 `ecData=4`, `ecParity=2` 상수 추가. 로그 메시지의 하드코딩 `k+m=6`을 동적 `k+m=%d` 포맷으로 교체.
+
 ## [0.0.4.12] - 2026-04-23
 
 ### Fixed
