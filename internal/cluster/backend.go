@@ -303,6 +303,20 @@ func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
 	})
 }
 
+// SetBucketECPolicy satisfies server.ECPolicySetter. Replicates the per-bucket
+// EC toggle through Raft so all cluster nodes apply it atomically.
+// enabled=false forces N× replication for this bucket regardless of the
+// global --cluster-ec flag.
+func (b *DistributedBackend) SetBucketECPolicy(bucket string, ecEnabled bool) error {
+	if err := b.HeadBucket(bucket); err != nil {
+		return err
+	}
+	return b.propose(context.Background(), CmdSetBucketECPolicy, SetBucketECPolicyCmd{
+		Bucket:  bucket,
+		Enabled: ecEnabled,
+	})
+}
+
 // SetObjectACL satisfies storage.ACLSetter. Replicates the ACL change through
 // Raft and updates the stored objectMeta on every node.
 func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
@@ -376,8 +390,13 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 	// versioning-state gating is a later slice.
 	versionID := newVersionID()
 
-	// Phase 18 Cluster EC: split across k+m nodes when enabled and cluster is large enough.
-	if b.ecConfig.IsActive(len(b.allNodes)) && b.shardSvc != nil {
+	// Phase 18 Cluster EC: split across k+m nodes when globally enabled, cluster
+	// is large enough, AND the per-bucket policy has not opted this bucket out.
+	bucketECEnabled := true
+	if be, err := b.fsm.GetBucketECEnabled(bucket); err == nil {
+		bucketECEnabled = be
+	}
+	if b.ecConfig.IsActive(len(b.allNodes)) && b.shardSvc != nil && bucketECEnabled {
 		return b.putObjectEC(bucket, key, versionID, data, contentType)
 	}
 

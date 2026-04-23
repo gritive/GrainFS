@@ -609,3 +609,48 @@ func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
 	assert.Equal(t, aclPublicRead, legacyACL, "legacy key ACL")
 	assert.Equal(t, aclPublicRead, versionedACL, "versioned key ACL")
 }
+
+func TestFSM_SetBucketECPolicy(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "ecbucket"})
+	require.NoError(t, fsm.Apply(data))
+
+	// disable EC
+	data, err := EncodeCommand(CmdSetBucketECPolicy, SetBucketECPolicyCmd{Bucket: "ecbucket", Enabled: false})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	enabled, err := fsm.GetBucketECEnabled("ecbucket")
+	require.NoError(t, err)
+	assert.False(t, enabled, "EC should be disabled after SetBucketECPolicy(false)")
+
+	// re-enable EC
+	data, err = EncodeCommand(CmdSetBucketECPolicy, SetBucketECPolicyCmd{Bucket: "ecbucket", Enabled: true})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	enabled, err = fsm.GetBucketECEnabled("ecbucket")
+	require.NoError(t, err)
+	assert.True(t, enabled, "EC should be re-enabled after SetBucketECPolicy(true)")
+}
+
+func TestFSM_SetBucketECPolicy_NoBucket(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	data, _ := EncodeCommand(CmdSetBucketECPolicy, SetBucketECPolicyCmd{Bucket: "ghost", Enabled: true})
+	err := fsm.Apply(data)
+	assert.Error(t, err, "should fail when bucket does not exist")
+}
+
+func TestFSM_GetBucketECEnabled_Default(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	// No record → default is enabled (true)
+	enabled, err := fsm.GetBucketECEnabled("any-bucket")
+	require.NoError(t, err)
+	assert.True(t, enabled, "EC should default to enabled when no policy record exists")
+}
