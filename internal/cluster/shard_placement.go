@@ -1,15 +1,10 @@
 package cluster
 
-// Phase 18 Cluster EC — Slice 1: FSM metadata layer for shard placement.
+// Phase 18 Cluster EC — FSM metadata layer for shard placement.
 //
-// This file adds Put/Delete/Lookup for per-object shard placement records to
-// the Raft FSM. It does NOT integrate with PutObject/GetObject yet — that is
-// Slice 2. Slice 1's only job is to get a durable, Raft-replicated placement
-// map in place so later slices can rely on it.
-//
-// Key layout: `placement:<bucket>/<key>` → FlatBuffers-encoded node list.
-// On-disk bytes are the same as the command payload (PutShardPlacementCmd
-// body), which re-uses the existing FlatBuffers schema.
+// Key layout: `placement:<bucket>/<key>` → binary-encoded PlacementRecord.
+// Format: <uvarint k> <uvarint m> <uvarint count> <uvarint len> <bytes>...
+// k and m are always written; 0,0 is invalid (no legacy format compatibility needed).
 
 import (
 	"bytes"
@@ -19,13 +14,30 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
+// PlacementRecord holds the shard node list and the EC parameters used when
+// the object was written. K=0, M=0 means legacy V0 record — callers should
+// fall back to the global ecConfig for reconstruction parameters.
+type PlacementRecord struct {
+	Nodes []string
+	K, M  int
+}
+
+// ECConfigOrFallback returns an ECConfig from stored K,M, or falls back to
+// the provided default when K==0 (legacy V0 placement record).
+func (r PlacementRecord) ECConfigOrFallback(def ECConfig) ECConfig {
+	if r.K == 0 {
+		return def
+	}
+	return ECConfig{Enabled: true, DataShards: r.K, ParityShards: r.M}
+}
+
 // applyPutShardPlacement persists the shard placement record to BadgerDB.
 func (f *FSM) applyPutShardPlacement(data []byte) error {
 	c, err := decodePutShardPlacementCmd(data)
 	if err != nil {
 		return err
 	}
-	val := encodePlacementValue(c.NodeIDs)
+	val := encodePlacementValue(PlacementRecord{Nodes: c.NodeIDs, K: c.K, M: c.M})
 	return f.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(shardPlacementKey(c.Bucket, c.Key), val)
 	})
@@ -207,10 +219,10 @@ func lastIndexByte(s string, b byte) int {
 }
 
 // IterShardPlacements iterates every shard placement record in the FSM, invoking
-// fn with the bucket, key, and ordered nodeIDs for each. Iteration stops if fn
+// fn with the bucket, key, and PlacementRecord for each. Iteration stops if fn
 // returns a non-nil error, which is propagated. Used by ShardPlacementMonitor
 // to scan for missing shards.
-func (f *FSM) IterShardPlacements(fn func(bucket, key string, nodes []string) error) error {
+func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecord) error) error {
 	return f.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
@@ -218,7 +230,6 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, nodes []string) er
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
 			rawKey := string(item.Key())
-			// Strip "placement:" prefix and split bucket/key on first '/'.
 			trimmed := rawKey[len(prefix):]
 			slash := -1
 			for i, c := range trimmed {
@@ -232,19 +243,19 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, nodes []string) er
 			}
 			bucket := trimmed[:slash]
 			key := trimmed[slash+1:]
-			var nodes []string
+			var rec PlacementRecord
 			verr := item.Value(func(val []byte) error {
 				decoded, derr := decodePlacementValue(val)
 				if derr != nil {
 					return derr
 				}
-				nodes = decoded
+				rec = decoded
 				return nil
 			})
 			if verr != nil {
 				return verr
 			}
-			if err := fn(bucket, key, nodes); err != nil {
+			if err := fn(bucket, key, rec); err != nil {
 				return err
 			}
 		}
@@ -276,13 +287,12 @@ func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
 	return versionID, nil
 }
 
-// LookupShardPlacement returns the list of nodeIDs holding shards for the
-// given object, in shardIdx order.
-// Returns (nil, nil) when no placement record exists (N× replication objects).
-// Returns (nil, err) on a real BadgerDB read error — callers must not silently
+// LookupShardPlacement returns the PlacementRecord for the given object.
+// Returns ({}, nil) with empty Nodes when no placement record exists (N× replication objects).
+// Returns ({}, err) on a real BadgerDB read error — callers must not silently
 // fall back to N× replication on an error, as that risks data loss.
-func (f *FSM) LookupShardPlacement(bucket, key string) ([]string, error) {
-	var nodes []string
+func (f *FSM) LookupShardPlacement(bucket, key string) (PlacementRecord, error) {
+	var rec PlacementRecord
 	err := f.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(shardPlacementKey(bucket, key))
 		if err != nil {
@@ -293,29 +303,31 @@ func (f *FSM) LookupShardPlacement(bucket, key string) ([]string, error) {
 			if derr != nil {
 				return derr
 			}
-			nodes = decoded
+			rec = decoded
 			return nil
 		})
 	})
 	if err != nil {
 		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil, nil
+			return PlacementRecord{}, nil
 		}
-		return nil, err
+		return PlacementRecord{}, err
 	}
-	return nodes, nil
+	return rec, nil
 }
 
-// encodePlacementValue serializes a node list as a length-prefixed sequence
-// of strings. Format: <uvarint count><uvarint len><bytes>...
-// Chosen over FlatBuffers round-trip because the value never leaves the FSM;
-// no forward/backward compat constraint, minimum bytes.
-func encodePlacementValue(nodes []string) []byte {
+// encodePlacementValue serializes a PlacementRecord.
+// Format: <uvarint k> <uvarint m> <uvarint count> <uvarint len> <bytes>...
+func encodePlacementValue(rec PlacementRecord) []byte {
 	var buf bytes.Buffer
 	var tmp [binary.MaxVarintLen64]byte
-	n := binary.PutUvarint(tmp[:], uint64(len(nodes)))
+	n := binary.PutUvarint(tmp[:], uint64(rec.K))
 	buf.Write(tmp[:n])
-	for _, s := range nodes {
+	n = binary.PutUvarint(tmp[:], uint64(rec.M))
+	buf.Write(tmp[:n])
+	n = binary.PutUvarint(tmp[:], uint64(len(rec.Nodes)))
+	buf.Write(tmp[:n])
+	for _, s := range rec.Nodes {
 		n = binary.PutUvarint(tmp[:], uint64(len(s)))
 		buf.Write(tmp[:n])
 		buf.WriteString(s)
@@ -323,27 +335,38 @@ func encodePlacementValue(nodes []string) []byte {
 	return buf.Bytes()
 }
 
-func decodePlacementValue(data []byte) ([]string, error) {
+func decodePlacementValue(data []byte) (PlacementRecord, error) {
+	if len(data) == 0 {
+		return PlacementRecord{}, nil
+	}
 	r := bytes.NewReader(data)
+	k, err := binary.ReadUvarint(r)
+	if err != nil {
+		return PlacementRecord{}, err
+	}
+	m, err := binary.ReadUvarint(r)
+	if err != nil {
+		return PlacementRecord{}, err
+	}
 	count, err := binary.ReadUvarint(r)
 	if err != nil {
-		return nil, err
+		return PlacementRecord{}, err
 	}
-	out := make([]string, 0, count)
+	nodes := make([]string, 0, count)
 	for i := uint64(0); i < count; i++ {
 		sl, err := binary.ReadUvarint(r)
 		if err != nil {
-			return nil, err
+			return PlacementRecord{}, err
 		}
 		if sl == 0 {
-			out = append(out, "")
+			nodes = append(nodes, "")
 			continue
 		}
 		buf := make([]byte, sl)
 		if _, err := r.Read(buf); err != nil {
-			return nil, err
+			return PlacementRecord{}, err
 		}
-		out = append(out, string(buf))
+		nodes = append(nodes, string(buf))
 	}
-	return out, nil
+	return PlacementRecord{K: int(k), M: int(m), Nodes: nodes}, nil
 }

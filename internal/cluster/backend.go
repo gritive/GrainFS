@@ -507,7 +507,9 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
 	ctx := context.Background()
 
-	shards, err := ECSplit(b.ecConfig, data)
+	liveNodes := b.liveNodes()
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	shards, err := ECSplit(effectiveCfg, data)
 	if err != nil {
 		return nil, fmt.Errorf("ec split: %w", err)
 	}
@@ -516,7 +518,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	// for different versions land at different paths without changing the API.
 	shardKey := key + "/" + versionID
 
-	placement := PlacementForNodes(b.ecConfig, b.liveNodes(), shardKey)
+	placement := PlacementForNodes(effectiveCfg, liveNodes, shardKey)
 	selfID := b.selfAddr
 
 	// Track nodes we wrote to so cleanup can target them precisely.
@@ -555,10 +557,14 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 
 	// Commit placement through Raft. Use shardKey so each version has its own
 	// placement record and versioned reads look up the correct node assignment.
+	// K,M record the actual EC parameters so reads can reconstruct correctly
+	// even if the cluster grows and effective k,m changes later.
 	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
 		Bucket:  bucket,
 		Key:     shardKey,
 		NodeIDs: placement,
+		K:       effectiveCfg.DataShards,
+		M:       effectiveCfg.ParityShards,
 	}); perr != nil {
 		cleanup()
 		return nil, fmt.Errorf("ec propose placement: %w", perr)
@@ -610,10 +616,10 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	if obj.VersionID != "" {
 		shardKey = key + "/" + obj.VersionID
 	}
-	if nodes, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey); lookupErr != nil {
+	if ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey); lookupErr != nil {
 		return nil, nil, fmt.Errorf("lookup shard placement: %w", lookupErr)
-	} else if len(nodes) > 0 && b.shardSvc != nil {
-		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, nodes)
+	} else if len(ecRec.Nodes) > 0 && b.shardSvc != nil {
+		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, ecRec)
 		if ecErr == nil {
 			return io.NopCloser(bytes.NewReader(data)), obj, nil
 		}
@@ -716,27 +722,28 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		shardKey = key + "/" + versionID
 	}
 
-	placement, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey)
+	ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey)
 	if lookupErr != nil {
 		return fmt.Errorf("lookup shard placement: %w", lookupErr)
 	}
-	if len(placement) == 0 {
+	if len(ecRec.Nodes) == 0 {
 		return fmt.Errorf("no placement for %s/%s — object is not EC-managed", bucket, key)
 	}
-	if shardIdx < 0 || shardIdx >= len(placement) {
-		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(placement))
+	recCfg := ecRec.ECConfigOrFallback(b.ecConfig)
+	if shardIdx < 0 || shardIdx >= len(ecRec.Nodes) {
+		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(ecRec.Nodes))
 	}
-	if len(placement) != b.ecConfig.NumShards() {
-		return fmt.Errorf("placement length %d != k+m %d", len(placement), b.ecConfig.NumShards())
+	if len(ecRec.Nodes) != recCfg.NumShards() {
+		return fmt.Errorf("placement length %d != k+m %d", len(ecRec.Nodes), recCfg.NumShards())
 	}
 
 	selfID := b.selfAddr
-	shards := make([][]byte, len(placement))
+	shards := make([][]byte, len(ecRec.Nodes))
 	available := 0
 
 	// Pull every OTHER shard. We intentionally skip shardIdx to avoid pulling
 	// the corrupt/missing copy into the reconstruction.
-	for i, node := range placement {
+	for i, node := range ecRec.Nodes {
 		if i == shardIdx {
 			continue
 		}
@@ -752,24 +759,24 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 			available++
 		}
 	}
-	if available < b.ecConfig.DataShards {
+	if available < recCfg.DataShards {
 		return fmt.Errorf("repair: only %d/%d other shards readable, need %d",
-			available, len(placement)-1, b.ecConfig.DataShards)
+			available, len(ecRec.Nodes)-1, recCfg.DataShards)
 	}
 
 	// ECReconstruct rebuilds the whole object; we then re-split to get the
 	// canonical byte layout of each shard (including the missing one).
-	data, rerr := ECReconstruct(b.ecConfig, shards)
+	data, rerr := ECReconstruct(recCfg, shards)
 	if rerr != nil {
 		return fmt.Errorf("repair reconstruct: %w", rerr)
 	}
-	freshShards, serr := ECSplit(b.ecConfig, data)
+	freshShards, serr := ECSplit(recCfg, data)
 	if serr != nil {
 		return fmt.Errorf("repair re-split: %w", serr)
 	}
 
 	// Write just the missing shard back to its placement node.
-	target := placement[shardIdx]
+	target := ecRec.Nodes[shardIdx]
 	if target == selfID {
 		return b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShards[shardIdx])
 	}
@@ -790,6 +797,12 @@ func (b *DistributedBackend) FSMDB() *badger.DB { return b.db }
 // PutObject call (EC enabled + enough nodes for k+m split).
 func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.liveNodes())) }
 
+// EffectiveECConfig returns the ECConfig proportionally scaled to the current
+// cluster size. Used by ReshardManager to determine the target k,m for upgrades.
+func (b *DistributedBackend) EffectiveECConfig() ECConfig {
+	return EffectiveConfig(len(b.liveNodes()), b.ecConfig)
+}
+
 // ConvertObjectToEC migrates an existing N×-replicated object to Phase 18
 // EC placement. Used by the background re-placement manager (Slice 5).
 // Idempotent: if the object already has a placement record, returns nil
@@ -800,15 +813,17 @@ func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.
 // commit overwrite both the N× copy and (post-commit) the EC shards, so the
 // last writer wins per normal PUT semantics.
 func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
-	if !b.ecConfig.IsActive(len(b.liveNodes())) || b.shardSvc == nil {
-		return fmt.Errorf("ec not active: enabled=%v cluster_size=%d k+m=%d",
-			b.ecConfig.Enabled, len(b.liveNodes()), b.ecConfig.NumShards())
+	liveNodes := b.liveNodes()
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	if !effectiveCfg.IsActive(len(liveNodes)) || b.shardSvc == nil {
+		return fmt.Errorf("ec not active: enabled=%v cluster_size=%d",
+			b.ecConfig.Enabled, len(liveNodes))
 	}
 	existing, lookupErr := b.fsm.LookupShardPlacement(bucket, key)
 	if lookupErr != nil {
 		return fmt.Errorf("lookup shard placement: %w", lookupErr)
 	}
-	if len(existing) > 0 {
+	if len(existing.Nodes) > 0 {
 		return nil // already converted
 	}
 
@@ -831,13 +846,13 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	}
 
 	// Split + fan-out shards. Mirrors putObjectEC's write-all semantics.
-	shards, err := ECSplit(b.ecConfig, data)
+	shards, err := ECSplit(effectiveCfg, data)
 	if err != nil {
 		return fmt.Errorf("ec split for convert: %w", err)
 	}
 	// ConvertObjectToEC is a legacy-to-EC migration path for pre-versioned objects,
 	// so placement uses bare key (no versionID suffix).
-	placement := PlacementForNodes(b.ecConfig, b.liveNodes(), key)
+	placement := PlacementForNodes(effectiveCfg, liveNodes, key)
 	selfID := b.selfAddr
 	written := make([]string, 0, len(shards))
 	rollbackShards := func() {
@@ -884,6 +899,8 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 		Bucket:  bucket,
 		Key:     key,
 		NodeIDs: placement,
+		K:       effectiveCfg.DataShards,
+		M:       effectiveCfg.ParityShards,
 	}); perr != nil {
 		rollbackShards()
 		return fmt.Errorf("convert propose placement: %w", perr)
@@ -913,11 +930,12 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 }
 
 // getObjectEC reads shards from the placed nodes and reconstructs the object.
-// placement[i] is the nodeID holding shardIdx i. Tolerates up to ParityShards
-// unreachable nodes (read-k). The placement slice must have length NumShards().
-func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versionID string, placement []string) ([]byte, error) {
-	if len(placement) != b.ecConfig.NumShards() {
-		return nil, fmt.Errorf("placement length %d != expected %d", len(placement), b.ecConfig.NumShards())
+// rec.Nodes[i] is the nodeID holding shardIdx i. rec.K and rec.M are the EC
+// parameters used when the object was written. Tolerates up to M unreachable nodes.
+func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versionID string, rec PlacementRecord) ([]byte, error) {
+	recCfg := rec.ECConfigOrFallback(b.ecConfig)
+	if len(rec.Nodes) != recCfg.NumShards() {
+		return nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
 	}
 	// putObjectEC writes shards under shardKey = key + "/" + versionID so
 	// concurrent versions don't clobber one another on disk. Reads have to
@@ -928,9 +946,9 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 		shardKey = key + "/" + versionID
 	}
 	selfID := b.selfAddr
-	shards := make([][]byte, len(placement))
+	shards := make([][]byte, len(rec.Nodes))
 	available := 0
-	for i, node := range placement {
+	for i, node := range rec.Nodes {
 		var data []byte
 		var err error
 		if node == selfID {
@@ -948,10 +966,92 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 			available++
 		}
 	}
-	if available < b.ecConfig.DataShards {
-		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d", available, len(placement), b.ecConfig.DataShards)
+	if available < recCfg.DataShards {
+		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d", available, len(rec.Nodes), recCfg.DataShards)
 	}
-	return ECReconstruct(b.ecConfig, shards)
+	return ECReconstruct(recCfg, shards)
+}
+
+// upgradeObjectEC re-encodes an EC object from oldRec's (k1,m1) to newCfg's (k2,m2).
+// Called by ReshardManager when the cluster grows and the effective EC config changes.
+// Sequence: reconstruct with old config → re-encode with new config → fan-out new shards
+// → propose updated placement → delete old shards (best-effort).
+func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key string, oldRec PlacementRecord, newCfg ECConfig) error {
+	if b.shardSvc == nil {
+		return fmt.Errorf("shard service unavailable")
+	}
+	oldCfg := oldRec.ECConfigOrFallback(b.ecConfig)
+
+	// Reconstruct original data from old shards.
+	data, err := b.getObjectEC(ctx, bucket, key, "", oldRec)
+	if err != nil {
+		return fmt.Errorf("upgrade reconstruct: %w", err)
+	}
+
+	// Re-encode with new config.
+	liveNodes := b.liveNodes()
+	newShards, err := ECSplit(newCfg, data)
+	if err != nil {
+		return fmt.Errorf("upgrade re-split: %w", err)
+	}
+	newPlacement := PlacementForNodes(newCfg, liveNodes, key)
+	selfID := b.selfAddr
+
+	written := make([]string, 0, len(newShards))
+	cleanup := func() {
+		for _, n := range written {
+			if n == selfID {
+				_ = b.shardSvc.DeleteLocalShards(bucket, key)
+			} else {
+				_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
+			}
+		}
+	}
+
+	for i, node := range newPlacement {
+		if node == selfID {
+			if werr := b.shardSvc.WriteLocalShard(bucket, key, i, newShards[i]); werr != nil {
+				cleanup()
+				return fmt.Errorf("upgrade write local shard %d: %w", i, werr)
+			}
+		} else {
+			if werr := b.shardSvc.WriteShard(ctx, node, bucket, key, i, newShards[i]); werr != nil {
+				cleanup()
+				return fmt.Errorf("upgrade write shard %d to %s: %w", i, node, werr)
+			}
+		}
+		written = append(written, node)
+	}
+
+	// Commit updated placement via Raft.
+	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket:  bucket,
+		Key:     key,
+		NodeIDs: newPlacement,
+		K:       newCfg.DataShards,
+		M:       newCfg.ParityShards,
+	}); perr != nil {
+		cleanup()
+		return fmt.Errorf("upgrade propose placement: %w", perr)
+	}
+
+	// Best-effort deletion of old shards from nodes no longer in the new placement.
+	newSet := make(map[string]struct{}, len(newPlacement))
+	for _, n := range newPlacement {
+		newSet[n] = struct{}{}
+	}
+	for _, n := range oldRec.Nodes {
+		if _, inNew := newSet[n]; inNew {
+			continue
+		}
+		_ = oldCfg.NumShards() // reference to suppress unused warning
+		if n == selfID {
+			_ = b.shardSvc.DeleteLocalShards(bucket, key)
+		} else {
+			_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
+		}
+	}
+	return nil
 }
 
 func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, error) {

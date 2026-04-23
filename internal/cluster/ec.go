@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"path/filepath"
 
 	"github.com/klauspost/reedsolomon"
@@ -19,6 +20,9 @@ import (
 const (
 	DefaultDataShards   = 4
 	DefaultParityShards = 2
+	// MinECNodes is the minimum cluster size at which EC activates.
+	// Clusters of 1–2 nodes use N× replication; 3+ always use proportional EC.
+	MinECNodes = 3
 )
 
 // ECConfig controls cluster erasure coding behavior.
@@ -35,10 +39,28 @@ type ECConfig struct {
 // NumShards returns k+m.
 func (c ECConfig) NumShards() int { return c.DataShards + c.ParityShards }
 
-// IsActive returns true iff EC is enabled AND the cluster has enough nodes
-// for a k+m split. Below the floor we fall back to N× replication.
+// IsActive returns true iff EC is enabled AND the cluster has at least MinECNodes nodes.
+// 1–2 node clusters use N× replication; 3+ always activate proportional EC.
 func (c ECConfig) IsActive(clusterSize int) bool {
-	return c.Enabled && c.DataShards > 0 && c.ParityShards > 0 && clusterSize >= c.NumShards()
+	return c.Enabled && clusterSize >= MinECNodes
+}
+
+// EffectiveConfig returns the ECConfig that should be used for a cluster of n nodes,
+// proportionally scaling k and m from the target config. For n < MinECNodes it returns
+// an inactive config (Enabled=false). For n >= target.NumShards() it returns target as-is.
+// Formula: m_eff = max(1, round(n × m_target / (k_target+m_target))), k_eff = n - m_eff.
+func EffectiveConfig(n int, target ECConfig) ECConfig {
+	if !target.Enabled || n < MinECNodes {
+		return ECConfig{}
+	}
+	if n >= target.NumShards() {
+		return target
+	}
+	mEff := int(math.Round(float64(n) * float64(target.ParityShards) / float64(target.NumShards())))
+	if mEff < 1 {
+		mEff = 1
+	}
+	return ECConfig{Enabled: true, DataShards: n - mEff, ParityShards: mEff}
 }
 
 // Placement returns the node index (into the ordered node slice) that holds

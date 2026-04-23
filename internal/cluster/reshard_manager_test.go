@@ -18,10 +18,10 @@ func (l *fakeLeader) IsLeader() bool { return l.leader }
 // fakeConverter replaces DistributedBackend for reshard manager unit tests.
 // It tracks which (bucket,key) pairs were converted and can simulate errors.
 type fakeConverter struct {
-	fsm        *FSM
-	active     bool
-	converted  []string
-	failOn     map[string]error
+	fsm       *FSM
+	active    bool
+	converted []string
+	failOn    map[string]error
 }
 
 func (c *fakeConverter) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
@@ -40,8 +40,14 @@ func (c *fakeConverter) ConvertObjectToEC(ctx context.Context, bucket, key strin
 	return nil
 }
 
-func (c *fakeConverter) FSMRef() *FSM  { return c.fsm }
+func (c *fakeConverter) FSMRef() *FSM   { return c.fsm }
 func (c *fakeConverter) ECActive() bool { return c.active }
+func (c *fakeConverter) EffectiveECConfig() ECConfig {
+	return ECConfig{Enabled: true, DataShards: 4, ParityShards: 2}
+}
+func (c *fakeConverter) upgradeObjectEC(_ context.Context, _, _ string, _ PlacementRecord, _ ECConfig) error {
+	return nil
+}
 
 // seedObjectMeta writes an object metadata record directly without going
 // through the full PutObject path — suitable for reshard manager tests.

@@ -74,8 +74,32 @@ func (rcv *PutShardPlacementCmd) NodeIdsLength() int {
 	return 0
 }
 
+func (rcv *PutShardPlacementCmd) K() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutShardPlacementCmd) MutateK(n int32) bool {
+	return rcv._tab.MutateInt32Slot(10, n)
+}
+
+func (rcv *PutShardPlacementCmd) M() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutShardPlacementCmd) MutateM(n int32) bool {
+	return rcv._tab.MutateInt32Slot(12, n)
+}
+
 func PutShardPlacementCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(5)
 }
 func PutShardPlacementCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -88,6 +112,12 @@ func PutShardPlacementCmdAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbu
 }
 func PutShardPlacementCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func PutShardPlacementCmdAddK(builder *flatbuffers.Builder, k int32) {
+	builder.PrependInt32Slot(3, k, 0)
+}
+func PutShardPlacementCmdAddM(builder *flatbuffers.Builder, m int32) {
+	builder.PrependInt32Slot(4, m, 0)
 }
 func PutShardPlacementCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

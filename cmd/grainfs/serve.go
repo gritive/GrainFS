@@ -41,9 +41,9 @@ func init() {
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
-	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "number of data shards for erasure coding")
-	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "number of parity shards for erasure coding")
-	serveCmd.Flags().Bool("cluster-ec", true, "Phase 18: cross-node EC in cluster mode (auto-falls back to N× replication when cluster size < ec-data+ec-parity; use --cluster-ec=false to force N×)")
+	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "target max data shards k; actual k scales with node count (EffectiveConfig, 3+ nodes)")
+	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "target max parity shards m; actual m=max(1,round(n×m/(k+m)))")
+	serveCmd.Flags().Bool("cluster-ec", true, "enable cluster erasure coding; activates at 3+ nodes with proportional k,m; 1-2 nodes use N× replication")
 	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
@@ -272,8 +272,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	allNodes := append([]string{raftAddr}, peers...)
 	distBackend.SetShardService(shardSvc, allNodes)
 
-	// Phase 18 Cluster EC: opt-in via --cluster-ec (default true).
-	// Auto-falls back to N× replication when cluster size < ec-data+ec-parity.
+	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
+	// 1-2 nodes always use N× replication regardless of this flag.
 	clusterEC, _ := cmd.Flags().GetBool("cluster-ec")
 	clusterECData, _ := cmd.Flags().GetInt("ec-data")
 	clusterECParity, _ := cmd.Flags().GetInt("ec-parity")

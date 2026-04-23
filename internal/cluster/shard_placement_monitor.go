@@ -83,11 +83,11 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	var repairs []pendingRepair
 	var missing int64
 
-	err := m.fsm.IterShardPlacements(func(bucket, key string, nodes []string) error {
+	err := m.fsm.IterShardPlacements(func(bucket, key string, rec PlacementRecord) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		for shardIdx, holder := range nodes {
+		for shardIdx, holder := range rec.Nodes {
 			if holder != m.nodeID {
 				continue // someone else's shard; their monitor handles it
 			}

@@ -60,12 +60,9 @@
 
 **동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
 
-**Stage 3 선결 과제** (Phase 18 풀 구현 시작 전):
-- [ ] Raft FSM v1→v2 변환 전략 + 롤백 경로 설계
-- [ ] N×→EC 백그라운드 re-placement의 concurrent PUT/GET 일관성 계약
-- [ ] HealReceipt 스키마 변경 범위 분석
-- [ ] Write-all vs write-majority tail latency 트레이드오프 재검토
-
+**Phase 18 진행 중** (Dynamic EC, v0.0.4.14):
+- [ ] EC→EC reshard E2E 검증 (NodeGrowth reshard upgrade 시나리오)
+- [ ] ShardPlacementMonitor onMissing: stored k,m 기반 RepairShard 연동
 
 ## Phase 19: Performance
 

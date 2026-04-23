@@ -263,15 +263,15 @@ func (b *DistributedBackend) OwnedShards(bucket, key, versionID, nodeID string) 
 	if versionID != "" {
 		lookupKey = key + "/" + versionID
 	}
-	placement, lookupErr := b.fsm.LookupShardPlacement(bucket, lookupKey)
+	ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, lookupKey)
 	if lookupErr != nil {
 		return nil
 	}
-	if len(placement) == 0 {
+	if len(ecRec.Nodes) == 0 {
 		return nil
 	}
 	var owned []int
-	for i, holder := range placement {
+	for i, holder := range ecRec.Nodes {
 		if holder == nodeID {
 			owned = append(owned, i)
 		}

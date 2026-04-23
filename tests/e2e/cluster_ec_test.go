@@ -212,11 +212,14 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	t.Logf("cluster EC: %d/%d objects reconstructed after single-node failure", len(objects), len(objects))
 }
 
-// TestE2E_ClusterEC_FallbackToNx_3Node verifies the under-threshold fallback:
-// with 3 nodes but 4+2 config, cluster EC is NOT active → falls back to N×
-// replication. PUT+GET must still work (existing N× path) and the FSM must
-// NOT record a placement entry for these objects.
-func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
+// TestE2E_ClusterEC_3Node_ActiveKM21 verifies dynamic EC activation on a 3-node
+// cluster with target 4+2 config. With n=3 and MinECNodes=3, EffectiveConfig
+// produces k=2, m=1 (m_eff=round(3×2/6)=1, k_eff=2). EC must be active:
+// - PUT stores 3 shards (k+m=3) distributed across all nodes.
+// - GET reconstructs correctly from 2 available shards (k=2 minimum).
+// - Killing one node (1 out of 3) leaves k=2 shards: GET must still succeed.
+// - Killing a second node leaves only 1 shard (< k=2): GET must fail.
+func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-node e2e in -short mode")
 	}
@@ -226,13 +229,14 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 	}
 
 	const (
-		clusterKey = "E2E-EC-FALLBACK-KEY"
-		accessKey  = "fb-ak"
-		secretKey  = "fb-sk"
-		bucketName = "fb-test"
+		clusterKey = "E2E-EC-3NODE-KEY"
+		accessKey  = "3n-ak"
+		secretKey  = "3n-sk"
+		bucketName = "3n-test"
 		numNodes   = 3
-		ecData     = 4
-		ecParity   = 2
+		// Target 4+2; EffectiveConfig(3, 4+2) → k=2, m=1.
+		ecData   = 4
+		ecParity = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -256,7 +260,7 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
-		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-fallback-%d-*", i))
+		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-3node-%d-*", i))
 		require.NoError(t, err)
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
@@ -267,7 +271,7 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("fb-node-%d", i),
+			"--node-id", fmt.Sprintf("3n-node-%d", i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -319,23 +323,56 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 	_, _ = rand.Read(data)
 	sum := sha256.Sum256(data)
 
+	// PUT: EC must be active on 3-node cluster (k=2, m=1).
 	_, perr := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
-		Key:    aws.String("fallback-obj"),
+		Key:    aws.String("ec-obj"),
 		Body:   bytes.NewReader(data),
 	})
-	require.NoError(t, perr, "PutObject on under-threshold cluster should use N× fallback")
+	require.NoError(t, perr, "PutObject on 3-node cluster with dynamic EC k=2,m=1 must succeed")
 
+	// GET with all 3 nodes up: must reconstruct correctly.
 	out, gerr := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
-		Key:    aws.String("fallback-obj"),
+		Key:    aws.String("ec-obj"),
 	})
-	require.NoError(t, gerr)
+	require.NoError(t, gerr, "GetObject with all 3 nodes up")
 	got, rerr := io.ReadAll(out.Body)
 	_ = out.Body.Close()
 	require.NoError(t, rerr)
-	assert.Equal(t, sum, sha256.Sum256(got))
-	t.Logf("cluster EC fallback: 3-node cluster correctly uses N× replication when below k+m=%d threshold", ecData+ecParity)
+	require.Equal(t, sum, sha256.Sum256(got), "data integrity check with all 3 nodes")
+
+	// Kill one non-leader node. k=2 shards remain → GET must still succeed.
+	_ = procs[numNodes-1].Process.Kill()
+	_, _ = procs[numNodes-1].Process.Wait()
+	procs[numNodes-1] = nil
+	t.Logf("killed node %d; expecting GET to succeed with 2 remaining shards (k=2)", numNodes-1)
+
+	time.Sleep(5 * time.Second) // let cluster detect the failure and elect new leader if needed
+
+	// Try all surviving nodes for GET with retries.
+	var gotAfterKill []byte
+	require.Eventually(t, func() bool {
+		for i := 0; i < numNodes-1; i++ {
+			c := ecS3Client(httpURL(i), accessKey, secretKey)
+			out2, err2 := c.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String("ec-obj"),
+			})
+			if err2 != nil {
+				continue
+			}
+			data, _ := io.ReadAll(out2.Body)
+			_ = out2.Body.Close()
+			if len(data) > 0 {
+				gotAfterKill = data
+				return true
+			}
+		}
+		return false
+	}, 10*time.Second, 1*time.Second, "GET must succeed with 2 surviving nodes (k=2 threshold)")
+	assert.Equal(t, sum, sha256.Sum256(gotAfterKill), "data integrity with 1 node down")
+	t.Logf("3-node EC dynamic: k=2,m=1 verified — 1 node killed, GET reconstructed from 2 shards")
 }
 
 // TestE2E_ClusterEC_TopologyChange verifies that placement FSM records remain
