@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.4.12] - 2026-04-23
+
+### Fixed
+
+- **LookupShardPlacement 반환 타입** (`internal/cluster/shard_placement.go`): `([]string, bool)` → `([]string, error)` 변경. `ErrKeyNotFound`는 `(nil, nil)`로, 실제 BadgerDB 오류는 `(nil, err)`로 구분. N× fallback 경로에서 오류를 무시하던 silent data-loss 가능성 차단.
+- **Placement record lifecycle** (`internal/cluster/apply.go`): `applyDeleteObject` tombstone 경로에서 versioned placement key 누락 삭제 버그 수정. 이전 `latestKey`를 읽어 `shardPlacementKey(bucket, key+"/"+prevVersionID)` 포함 삭제. `applyDeleteObjectVersion`도 동일 수정. stale record 누적으로 인한 BadgerDB 비대화 방지.
+- **Dynamic allNodes topology** (`internal/cluster/backend.go`, `internal/raft/raft.go`): `SetShardService` 호출 시 고정되던 allNodes 대신 `liveNodes()` 메서드로 runtime Raft peer 목록 반영. `raft.Node.Peers()` 추가. peer 없는 경우 기존 allNodes fallback 유지.
+
 ## [0.0.4.11] - 2026-04-23
 
 ### Added

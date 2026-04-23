@@ -263,8 +263,11 @@ func (b *DistributedBackend) OwnedShards(bucket, key, versionID, nodeID string) 
 	if versionID != "" {
 		lookupKey = key + "/" + versionID
 	}
-	placement, ok := b.fsm.LookupShardPlacement(bucket, lookupKey)
-	if !ok {
+	placement, lookupErr := b.fsm.LookupShardPlacement(bucket, lookupKey)
+	if lookupErr != nil {
+		return nil
+	}
+	if len(placement) == 0 {
 		return nil
 	}
 	var owned []int

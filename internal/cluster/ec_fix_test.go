@@ -83,13 +83,15 @@ func TestShardPlacementKey_VersionedStorageAndLookup(t *testing.T) {
 	writePlacement(t, b, "bkt", shardKey, nodes)
 
 	// Versioned lookup must succeed.
-	got, ok := b.fsm.LookupShardPlacement("bkt", shardKey)
-	require.True(t, ok, "LookupShardPlacement must find a record stored under the shardKey")
+	got, err := b.fsm.LookupShardPlacement("bkt", shardKey)
+	require.NoError(t, err)
+	require.NotNil(t, got, "LookupShardPlacement must find a record stored under the shardKey")
 	assert.Equal(t, nodes, got)
 
-	// Bare-key lookup must fail — no collision across versions.
-	_, ok = b.fsm.LookupShardPlacement("bkt", key)
-	assert.False(t, ok, "LookupShardPlacement with bare key must return false when only versioned record exists")
+	// Bare-key lookup must return nil — no collision across versions.
+	bare, bareErr := b.fsm.LookupShardPlacement("bkt", key)
+	assert.NoError(t, bareErr)
+	assert.Nil(t, bare, "LookupShardPlacement with bare key must return nil when only versioned record exists")
 }
 
 // TestShardPlacementKey_MultiVersionNoCollision verifies that two versions of the
@@ -107,12 +109,14 @@ func TestShardPlacementKey_MultiVersionNoCollision(t *testing.T) {
 	writePlacement(t, b, "bkt", key+"/v1", v1Nodes)
 	writePlacement(t, b, "bkt", key+"/v2", v2Nodes)
 
-	got1, ok1 := b.fsm.LookupShardPlacement("bkt", key+"/v1")
-	require.True(t, ok1, "v1 placement must be found")
+	got1, err1 := b.fsm.LookupShardPlacement("bkt", key+"/v1")
+	require.NoError(t, err1)
+	require.NotNil(t, got1, "v1 placement must be found")
 	assert.Equal(t, v1Nodes, got1, "v1 placement must not be overwritten by v2")
 
-	got2, ok2 := b.fsm.LookupShardPlacement("bkt", key+"/v2")
-	require.True(t, ok2, "v2 placement must be found")
+	got2, err2 := b.fsm.LookupShardPlacement("bkt", key+"/v2")
+	require.NoError(t, err2)
+	require.NotNil(t, got2, "v2 placement must be found")
 	assert.Equal(t, v2Nodes, got2)
 }
 

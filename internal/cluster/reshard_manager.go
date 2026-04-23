@@ -90,7 +90,7 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 			return ctx.Err()
 		}
 		// Already has placement? Skip. Cheap in-memory lookup via FSM.
-		if _, ok := fsm.LookupShardPlacement(ref.Bucket, ref.Key); ok {
+		if nodes, lookupErr := fsm.LookupShardPlacement(ref.Bucket, ref.Key); lookupErr == nil && len(nodes) > 0 {
 			skipped++
 			return nil
 		}

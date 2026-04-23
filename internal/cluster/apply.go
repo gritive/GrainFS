@@ -216,6 +216,14 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 		return fmt.Errorf("marshal delete marker: %w", err)
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
+		// Read the current latest versionID before overwriting it, so we can
+		// delete the versioned placement record that was stored under
+		// shardPlacementKey(bucket, key+"/"+prevVersionID).
+		prevVersionID := ""
+		if latItem, gerr := txn.Get(latestKey(c.Bucket, c.Key)); gerr == nil {
+			_ = latItem.Value(func(v []byte) error { prevVersionID = string(v); return nil })
+		}
+
 		if err := txn.Set(objectMetaKeyV(c.Bucket, c.Key, c.VersionID), markerMeta); err != nil {
 			return err
 		}
@@ -223,10 +231,17 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 			return err
 		}
 		// Legacy latest-only key is removed so HeadObject returns 404 while prior
-		// versions remain queryable via GetObjectVersion. Placement records are
-		// removed too — the data is no longer addressable as the latest version.
+		// versions remain queryable via GetObjectVersion.
 		if err := txn.Delete(objectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
 			return err
+		}
+		// Remove the versioned placement record for the previous latest version.
+		// Bare-key placement (legacy pre-versioned objects) is also cleaned up.
+		if prevVersionID != "" {
+			placementKey := shardPlacementKey(c.Bucket, c.Key+"/"+prevVersionID)
+			if err := txn.Delete(placementKey); err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
 		}
 		if err := txn.Delete(shardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
 			return err
@@ -253,6 +268,11 @@ func (f *FSM) applyDeleteObjectVersion(data []byte) error {
 			return gerr
 		}
 		if derr := txn.Delete(metaKey); derr != nil {
+			return derr
+		}
+		// Remove the versioned placement record stored under key+"/"+versionID.
+		placementKey := shardPlacementKey(c.Bucket, c.Key+"/"+c.VersionID)
+		if derr := txn.Delete(placementKey); derr != nil && derr != badger.ErrKeyNotFound {
 			return derr
 		}
 

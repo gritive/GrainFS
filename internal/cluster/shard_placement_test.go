@@ -85,15 +85,16 @@ func TestFSM_PutShardPlacement(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(raw))
 
-	got, ok := fsm.LookupShardPlacement("bkt", "obj")
-	require.True(t, ok, "expected placement to exist")
+	got, err := fsm.LookupShardPlacement("bkt", "obj")
+	require.NoError(t, err)
+	require.NotNil(t, got, "expected placement to exist")
 	assert.Equal(t, nodes, got)
 }
 
 func TestFSM_LookupShardPlacement_NotFound(t *testing.T) {
 	fsm := NewFSM(newTestDB(t))
-	got, ok := fsm.LookupShardPlacement("ghost", "obj")
-	assert.False(t, ok)
+	got, err := fsm.LookupShardPlacement("ghost", "obj")
+	assert.NoError(t, err)
 	assert.Nil(t, got)
 }
 
@@ -105,16 +106,17 @@ func TestFSM_DeleteShardPlacement(t *testing.T) {
 		Bucket: "b", Key: "k", NodeIDs: []string{"a", "b"},
 	})
 	require.NoError(t, fsm.Apply(put))
-	_, ok := fsm.LookupShardPlacement("b", "k")
-	require.True(t, ok)
+	_, err := fsm.LookupShardPlacement("b", "k")
+	require.NoError(t, err)
 
 	del, _ := EncodeCommand(CmdDeleteShardPlacement, DeleteShardPlacementCmd{
 		Bucket: "b", Key: "k",
 	})
 	require.NoError(t, fsm.Apply(del))
 
-	_, ok = fsm.LookupShardPlacement("b", "k")
-	assert.False(t, ok)
+	nodes, err2 := fsm.LookupShardPlacement("b", "k")
+	assert.NoError(t, err2)
+	assert.Nil(t, nodes)
 }
 
 func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
@@ -131,8 +133,9 @@ func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
 	})
 	require.NoError(t, fsm.Apply(v2))
 
-	got, ok := fsm.LookupShardPlacement("b", "k")
-	require.True(t, ok)
+	got, err := fsm.LookupShardPlacement("b", "k")
+	require.NoError(t, err)
+	require.NotNil(t, got)
 	assert.Equal(t, []string{"m0", "m1", "m2"}, got, "latest placement should win")
 }
 
@@ -155,8 +158,9 @@ func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 	freshFSM := NewFSM(freshDB)
 	require.NoError(t, freshFSM.Restore(snap))
 
-	got, ok := freshFSM.LookupShardPlacement("b", "k")
-	require.True(t, ok)
+	got, err := freshFSM.LookupShardPlacement("b", "k")
+	require.NoError(t, err)
+	require.NotNil(t, got)
 	assert.Equal(t, nodes, got)
 }
 
@@ -182,8 +186,70 @@ func TestFSM_DeleteObject_CascadesToPlacement(t *testing.T) {
 	del, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "k"})
 	require.NoError(t, fsm.Apply(del))
 
-	_, ok := fsm.LookupShardPlacement("b", "k")
-	assert.False(t, ok, "DeleteObject should cascade to placement")
+	cascaded, err := fsm.LookupShardPlacement("b", "k")
+	assert.NoError(t, err)
+	assert.Nil(t, cascaded, "DeleteObject should cascade to placement")
+}
+
+// TestFSM_DeleteObject_Tombstone_CascadesToVersionedPlacement verifies that a
+// versioned delete (tombstone path) removes the placement record stored under
+// key+"/"+prevVersionID, not just the bare key.
+func TestFSM_DeleteObject_Tombstone_CascadesToVersionedPlacement(t *testing.T) {
+	fsm := NewFSM(newTestDB(t))
+
+	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(cb))
+
+	const prevVID = "v-prev-0001"
+	po, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "k", Size: 1, ContentType: "text/plain",
+		ETag: "e", ModTime: 1, VersionID: prevVID,
+	})
+	require.NoError(t, fsm.Apply(po))
+
+	// Placement stored under versioned shardKey.
+	put, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket: "b", Key: "k/" + prevVID, NodeIDs: []string{"n0", "n1"},
+	})
+	require.NoError(t, fsm.Apply(put))
+
+	// Tombstone — new versionID for the delete marker.
+	del, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "k", VersionID: "v-del-0002"})
+	require.NoError(t, fsm.Apply(del))
+
+	// Versioned placement must be gone.
+	gone, err := fsm.LookupShardPlacement("b", "k/"+prevVID)
+	assert.NoError(t, err)
+	assert.Nil(t, gone, "tombstone must cascade to versioned placement")
+}
+
+// TestFSM_DeleteObjectVersion_CascadesToPlacement verifies that hard-deleting
+// a specific version removes its versioned placement record.
+func TestFSM_DeleteObjectVersion_CascadesToPlacement(t *testing.T) {
+	fsm := NewFSM(newTestDB(t))
+
+	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(cb))
+
+	const vid = "v-0001"
+	po, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "k", Size: 1, ContentType: "text/plain",
+		ETag: "e", ModTime: 1, VersionID: vid,
+	})
+	require.NoError(t, fsm.Apply(po))
+
+	put, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
+		Bucket: "b", Key: "k/" + vid, NodeIDs: []string{"n0", "n1"},
+	})
+	require.NoError(t, fsm.Apply(put))
+
+	// Hard-delete specific version.
+	dv, _ := EncodeCommand(CmdDeleteObjectVersion, DeleteObjectVersionCmd{Bucket: "b", Key: "k", VersionID: vid})
+	require.NoError(t, fsm.Apply(dv))
+
+	gone, err := fsm.LookupShardPlacement("b", "k/"+vid)
+	assert.NoError(t, err)
+	assert.Nil(t, gone, "DeleteObjectVersion must cascade to versioned placement")
 }
 
 func TestShardPlacementKey_Format(t *testing.T) {
@@ -220,8 +286,9 @@ func TestShardPlacementCmd_EmptyNodes(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
 	require.NoError(t, fsm.Apply(raw))
-	got, ok := fsm.LookupShardPlacement("b", "k")
-	require.True(t, ok)
+	got, err := fsm.LookupShardPlacement("b", "k")
+	require.NoError(t, err)
+	require.NotNil(t, got)
 	assert.Empty(t, got)
 }
 
