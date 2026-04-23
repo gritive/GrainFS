@@ -37,16 +37,10 @@ func (n *ecspikeNode) kill() {
 // on loopback. Returns the node list and a cleanup func. Uses existing test
 // harness helpers (freePort, waitForPort, newS3Client).
 func startEcspikeCluster(t *testing.T) ([]*ecspikeNode, func()) {
-	return startEcspikeClusterOpts(t, false)
+	return startEcspikeClusterOpts(t)
 }
 
-// startEcspikeClusterNoEC spawns 6 nodes with --cluster-ec=false --no-encryption to measure
-// raw shard p95 without nested solo EC overhead (CONDITIONAL GO prerequisite).
-func startEcspikeClusterNoEC(t *testing.T) ([]*ecspikeNode, func()) {
-	return startEcspikeClusterOpts(t, true)
-}
-
-func startEcspikeClusterOpts(t *testing.T, noEC bool) ([]*ecspikeNode, func()) {
+func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 	t.Helper()
 	binary := getBinary()
 
@@ -76,9 +70,6 @@ func startEcspikeClusterOpts(t *testing.T, noEC bool) ([]*ecspikeNode, func()) {
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
-		}
-		if noEC {
-			args = append(args, "--cluster-ec=false", "--no-encryption")
 		}
 		cmd := exec.Command(binary, args...)
 		// Assign before Start so cleanup() can remove dir even if Start fails.
@@ -181,33 +172,11 @@ func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
 	measureECSpikeP95(t)
 }
 
-// TestECSpike_RawShardP95 is the CONDITIONAL GO prerequisite remeasurement.
-// Nodes run with --cluster-ec=false --no-encryption to eliminate nested solo EC overhead.
-// Result determines whether Phase 18 Stage 3 is safe to start.
-//
-// go/no-go: p95 < 500ms → Phase 18 진입, p95 >= 500ms → Phase 18 보류.
-func TestECSpike_RawShardP95(t *testing.T) {
-	if testing.Short() {
-		t.Skip("ecspike: requires full cluster bootstrap, skipped in -short")
-	}
-	measureECSpikeP95WithOpts(t, true)
-}
-
 // measureECSpikeP95 spawns a fresh 6-node cluster, does 100 × 16MB PUTs, and
 // reports p50/p95/p99. Separate cluster so kills don't skew timing.
 func measureECSpikeP95(t *testing.T) {
-	measureECSpikeP95WithOpts(t, false)
-}
-
-func measureECSpikeP95WithOpts(t *testing.T, noEC bool) {
 	t.Helper()
-	var nodes []*ecspikeNode
-	var cleanup func()
-	if noEC {
-		nodes, cleanup = startEcspikeClusterNoEC(t)
-	} else {
-		nodes, cleanup = startEcspikeCluster(t)
-	}
+	nodes, cleanup := startEcspikeCluster(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -243,12 +212,8 @@ func measureECSpikeP95WithOpts(t *testing.T, noEC bool) {
 	_, err := rand.Read(data)
 	require.NoError(t, err, "rand data")
 
-	ecLabel := "with nested EC"
-	if noEC {
-		ecLabel = "no EC (raw shard)"
-	}
 	latencies := make([]time.Duration, iter)
-	t.Logf("ecspike: measuring p95 with %d × %d-byte PUTs (%s)", iter, objSize, ecLabel)
+	t.Logf("ecspike: measuring p95 with %d × %d-byte PUTs", iter, objSize)
 	for i := 0; i < iter; i++ {
 		key := fmt.Sprintf("lat-%03d", i)
 		start := time.Now()
@@ -266,24 +231,14 @@ func measureECSpikeP95WithOpts(t *testing.T, noEC bool) {
 	}
 	mean /= time.Duration(iter)
 
-	t.Logf("ecspike p50=%s p95=%s p99=%s mean=%s (loopback, 6-process, 4+2, 16MB, %s)",
-		p50, p95, p99, mean, ecLabel)
+	t.Logf("ecspike p50=%s p95=%s p99=%s mean=%s (loopback, 6-process, 4+2, 16MB)",
+		p50, p95, p99, mean)
 
-	if noEC {
-		// CONDITIONAL GO threshold: p95 < 500ms for raw shard (no nested EC).
-		const threshold = 500 * time.Millisecond
-		if p95 >= threshold {
-			t.Logf("CONDITIONAL GO: p95 %s >= %s — Phase 18 Stage 3 보류, 아키텍처 재검토 필요", p95, threshold)
-		} else {
-			t.Logf("CONDITIONAL GO: p95 %s < %s — Phase 18 Stage 3 진입 가능", p95, threshold)
-		}
+	// Original go/no-go threshold from design: p95 < 200ms.
+	const threshold = 200 * time.Millisecond
+	if p95 >= threshold {
+		t.Logf("ecspike go/no-go: p95 %s >= %s threshold — flag for go/no-go review", p95, threshold)
 	} else {
-		// Original go/no-go threshold from design: p95 < 200ms.
-		const threshold = 200 * time.Millisecond
-		if p95 >= threshold {
-			t.Logf("ecspike go/no-go: p95 %s >= %s threshold — flag for go/no-go review", p95, threshold)
-		} else {
-			t.Logf("ecspike go/no-go: p95 %s < %s threshold — PASS", p95, threshold)
-		}
+		t.Logf("ecspike go/no-go: p95 %s < %s threshold — PASS", p95, threshold)
 	}
 }

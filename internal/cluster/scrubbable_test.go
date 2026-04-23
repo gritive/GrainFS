@@ -68,7 +68,7 @@ func drainObjectRecords(t *testing.T, ch <-chan scrubber.ObjectRecord) []scrubbe
 // multi-node cluster just to exercise ScanObjects routing.
 func enableECForTest(t *testing.T, b *DistributedBackend, k, m int) {
 	t.Helper()
-	b.SetECConfig(ECConfig{DataShards: k, ParityShards: m, Enabled: true})
+	b.SetECConfig(ECConfig{DataShards: k, ParityShards: m})
 	nodes := make([]string, 0, k+m)
 	for i := 0; i < k+m; i++ {
 		nodes = append(nodes, fmt.Sprintf("node-%d", i))

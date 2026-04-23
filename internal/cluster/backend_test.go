@@ -450,26 +450,3 @@ func TestSelectPeerByLoad_SingleNode(t *testing.T) {
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
 	assert.False(t, ok, "single node: no peers to redirect to")
 }
-
-func TestDistributedBackend_SetBucketECPolicy(t *testing.T) {
-	b := newTestDistributedBackend(t)
-
-	require.NoError(t, b.CreateBucket("ectest"))
-
-	require.NoError(t, b.SetBucketECPolicy("ectest", false))
-	enabled, err := b.fsm.GetBucketECEnabled("ectest")
-	require.NoError(t, err)
-	assert.False(t, enabled)
-
-	require.NoError(t, b.SetBucketECPolicy("ectest", true))
-	enabled, err = b.fsm.GetBucketECEnabled("ectest")
-	require.NoError(t, err)
-	assert.True(t, enabled)
-}
-
-func TestDistributedBackend_SetBucketECPolicy_NoBucket(t *testing.T) {
-	b := newTestDistributedBackend(t)
-
-	err := b.SetBucketECPolicy("ghost", true)
-	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
-}

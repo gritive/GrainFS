@@ -540,24 +540,6 @@ func TestVolumeHandlers_CreateConflict(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 }
 
-// --- EC policy tests ---
-
-func TestSetBucketECPolicy_NotImplemented(t *testing.T) {
-	base := setupTestServer(t)
-
-	// Create bucket
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
-	http.DefaultClient.Do(req)
-
-	// SET EC policy on LocalBackend (doesn't implement ECPolicySetter) → NotImplemented
-	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?ec=true", nil)
-	resp, _ := http.DefaultClient.Do(req)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
-	assert.Contains(t, string(body), "NotImplemented")
-}
-
 // --- Dashboard tests ---
 
 func TestServeDashboard(t *testing.T) {

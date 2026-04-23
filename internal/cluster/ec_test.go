@@ -16,13 +16,11 @@ func TestECConfig_IsActive(t *testing.T) {
 		clusterSize int
 		want        bool
 	}{
-		{"disabled", ECConfig{DataShards: 4, ParityShards: 2, Enabled: false}, 6, false},
-		{"enabled enough nodes", ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}, 6, true},
-		{"enabled too few nodes", ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}, 5, false},
-		{"zero k", ECConfig{DataShards: 0, ParityShards: 2, Enabled: true}, 6, false},
-		{"zero m", ECConfig{DataShards: 4, ParityShards: 0, Enabled: true}, 6, false},
-		{"exactly k+m", ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}, 6, true},
-		{"larger cluster", ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}, 10, true},
+		{"enough nodes (k+m)", ECConfig{DataShards: 4, ParityShards: 2}, 6, true},
+		{"minimum cluster size (3)", ECConfig{DataShards: 4, ParityShards: 2}, 3, true},
+		{"single node", ECConfig{DataShards: 4, ParityShards: 2}, 1, false},
+		{"two nodes", ECConfig{DataShards: 4, ParityShards: 2}, 2, false},
+		{"larger cluster", ECConfig{DataShards: 4, ParityShards: 2}, 10, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,7 +68,7 @@ func TestECSplit_Reconstruct_RoundTrip(t *testing.T) {
 		{"1MB", 1 << 20},
 		{"not-aligned", 12345},
 	}
-	cfg := ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			data := make([]byte, tc.size)
@@ -90,7 +88,7 @@ func TestECSplit_Reconstruct_RoundTrip(t *testing.T) {
 }
 
 func TestECReconstruct_MissingParityShard(t *testing.T) {
-	cfg := ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	data := make([]byte, 1024)
 	_, _ = rand.Read(data)
 	shards, err := ECSplit(cfg, data)
@@ -104,7 +102,7 @@ func TestECReconstruct_MissingParityShard(t *testing.T) {
 }
 
 func TestECReconstruct_MissingDataShard(t *testing.T) {
-	cfg := ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	data := make([]byte, 8192)
 	_, _ = rand.Read(data)
 	shards, err := ECSplit(cfg, data)
@@ -118,7 +116,7 @@ func TestECReconstruct_MissingDataShard(t *testing.T) {
 }
 
 func TestECReconstruct_TwoMissing(t *testing.T) {
-	cfg := ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	data := make([]byte, 4096)
 	_, _ = rand.Read(data)
 	shards, err := ECSplit(cfg, data)
@@ -133,7 +131,7 @@ func TestECReconstruct_TwoMissing(t *testing.T) {
 }
 
 func TestECReconstruct_TooManyMissing(t *testing.T) {
-	cfg := ECConfig{DataShards: 4, ParityShards: 2, Enabled: true}
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	data := make([]byte, 4096)
 	_, _ = rand.Read(data)
 	shards, err := ECSplit(cfg, data)

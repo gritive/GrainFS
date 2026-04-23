@@ -35,14 +35,14 @@ func (m *mockBucketSnapshotable) RestoreBuckets(buckets []storage.SnapshotBucket
 }
 
 // TestSnapshot_PreservesBucketMeta verifies that BucketSnapshotable backends
-// have their bucket state (versioning, EC flag) captured at Create and
-// replayed at Restore.
+// have their bucket state (versioning) captured at Create and replayed at
+// Restore.
 func TestSnapshot_PreservesBucketMeta(t *testing.T) {
 	dir := t.TempDir()
 	backend := &mockBucketSnapshotable{
 		buckets: []storage.SnapshotBucket{
-			{Name: "b1", VersioningState: "Enabled", ECEnabled: true},
-			{Name: "b2", VersioningState: "Suspended", ECEnabled: false},
+			{Name: "b1", VersioningState: "Enabled"},
+			{Name: "b2", VersioningState: "Suspended"},
 		},
 	}
 	mgr, err := snapshot.NewManager(dir, backend, "")
@@ -61,9 +61,7 @@ func TestSnapshot_PreservesBucketMeta(t *testing.T) {
 
 	assert.Equal(t, "b1", backend.buckets[0].Name)
 	assert.Equal(t, "Enabled", backend.buckets[0].VersioningState)
-	assert.True(t, backend.buckets[0].ECEnabled)
 	assert.Equal(t, "Suspended", backend.buckets[1].VersioningState)
-	assert.False(t, backend.buckets[1].ECEnabled)
 }
 
 // TestSnapshot_OldFormat_BackwardCompat verifies that snapshots without
@@ -72,7 +70,7 @@ func TestSnapshot_OldFormat_BackwardCompat(t *testing.T) {
 	dir := t.TempDir()
 	backend := &mockBucketSnapshotable{
 		buckets: []storage.SnapshotBucket{
-			{Name: "pre-existing", VersioningState: "Enabled", ECEnabled: true},
+			{Name: "pre-existing", VersioningState: "Enabled"},
 		},
 	}
 	mgr, err := snapshot.NewManager(dir, backend, "")
@@ -87,7 +85,7 @@ func TestSnapshot_OldFormat_BackwardCompat(t *testing.T) {
 
 	// Change backend state to confirm Restore is a no-op for bucket meta.
 	backend.buckets = []storage.SnapshotBucket{
-		{Name: "other", VersioningState: "Suspended", ECEnabled: false},
+		{Name: "other", VersioningState: "Suspended"},
 	}
 
 	_, _, err = mgr.Restore(snap.Seq)

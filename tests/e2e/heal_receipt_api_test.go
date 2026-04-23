@@ -127,7 +127,6 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 			"--no-encryption",
-			"--cluster-ec=false",
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
