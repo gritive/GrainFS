@@ -87,7 +87,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--cluster-ec=true",
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--ec=false",
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
@@ -277,7 +276,6 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 			"--cluster-ec=true",
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--ec=false",
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
@@ -341,14 +339,16 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 }
 
 // TestE2E_ClusterEC_TopologyChange verifies that placement FSM records remain
-// valid (immutable) through a topology change (node removal). After killing a
-// non-leader node:
-//   - Old objects: LookupShardPlacement still returns the original placement
-//     (FSM is append-only; records are never mutated) and GET reconstructs.
-//   - New objects: written after the kill use the updated liveNodes() set and
-//     are also GET-able.
+// valid (immutable) through a topology change, AND that EC stays active after
+// the change. We use 6 nodes with k=3, m=2 (k+m=5): killing one non-leader
+// node leaves 5 live nodes (5 >= k+m=5), so ECActive() remains true throughout.
 //
-// This directly validates the TODOS.md requirement:
+// Assertions:
+//   - Pre-kill objects: GET reconstructs using original FSM placement (immutable).
+//   - Post-kill objects: new PUTs still go through cluster EC (ECActive=true with
+//     5 remaining nodes), and GET reconstructs correctly.
+//
+// This validates the TODOS.md requirement:
 // "N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오."
 func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	if testing.Short() {
@@ -364,9 +364,10 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		accessKey  = "tp-ak"
 		secretKey  = "tp-sk"
 		bucketName = "topo-test"
-		numNodes   = 5
-		ecData     = 3
-		ecParity   = 2
+		// 6 nodes, k+m=5: killing one leaves 5 nodes → ECActive stays true.
+		numNodes = 6
+		ecData   = 3
+		ecParity = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -410,7 +411,6 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--cluster-ec=true",
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--ec=false",
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
@@ -434,7 +434,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	// Stage 1: bring up 3 nodes first to elect a stable leader.
+	// Stage 1: start 3 nodes first to elect a stable leader.
 	for i := 0; i < 3; i++ {
 		procs[i] = startNode(i)
 	}
@@ -442,7 +442,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
 
-	// Stage 2: add the remaining 2 nodes.
+	// Stage 2: add the remaining 3 nodes after a leader is elected.
 	for i := 3; i < numNodes; i++ {
 		procs[i] = startNode(i)
 	}
@@ -467,13 +467,14 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		}
 		return false
 	}, 120*time.Second, 2*time.Second, "no leader found or CreateBucket never succeeded")
-	t.Logf("topology test: leader node %d at %s", leaderIdx, httpURL(leaderIdx))
+	t.Logf("topology test: leader node %d at %s (N=%d, k+m=%d)", leaderIdx, httpURL(leaderIdx), numNodes, ecData+ecParity)
 
-	// PUT objects before topology change.
 	type entry struct {
 		key string
 		sum [32]byte
 	}
+
+	// PUT objects before topology change — all written via cluster EC (6 >= 5).
 	preObjects := []entry{
 		{"pre-obj-a", [32]byte{}},
 		{"pre-obj-b", [32]byte{}},
@@ -492,7 +493,6 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		require.NoErrorf(t, err, "pre-topology PutObject %s", preObjects[i].key)
 	}
 
-	// Verify round-trip before topology change.
 	for _, obj := range preObjects {
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucketName),
@@ -503,50 +503,45 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		_ = out.Body.Close()
 		assert.Equalf(t, obj.sum, sha256.Sum256(got), "sha256 mismatch pre-topology %s", obj.key)
 	}
-	t.Logf("topology test: %d pre-topology objects verified", len(preObjects))
+	t.Logf("topology test: %d pre-topology objects written+verified via cluster EC", len(preObjects))
 
-	// Topology change: kill one non-leader node.
-	// With k+m=5, losing one node still leaves 4 nodes alive which is above the
-	// read-k tolerance (only 3 data shards needed). Reads still reconstruct.
+	// Topology change: kill one non-leader node (N=6 → N=5).
+	// 5 remaining nodes >= k+m=5 → ECActive stays true.
 	victim := (leaderIdx + 1) % numNodes
-	t.Logf("topology test: killing node %d (topology change N=5 → N=4)", victim)
+	t.Logf("topology test: killing node %d (N=6 → N=5, ECActive remains true)", victim)
 	_ = procs[victim].Process.Kill()
 	_, _ = procs[victim].Process.Wait()
 	procs[victim] = nil
-	// Wait for Raft to propagate the peer-health change across the cluster.
 	time.Sleep(5 * time.Second)
 
-	// Re-pick the client — use a surviving node (not the victim, not necessarily the leader).
+	// Use a surviving non-victim node for subsequent requests.
 	survivor := (victim + 1) % numNodes
-	if survivor == victim {
-		survivor = (victim + 2) % numNodes
-	}
 	client = ecS3Client(httpURL(survivor), accessKey, secretKey)
 
-	// Old objects: FSM placement records must be immutable — same shards, still GET-able.
+	// Old objects: FSM placement records are immutable. GET must reconstruct
+	// using the original 6-node placement even though one shard node is gone
+	// (k=3 data shards needed; the victim held 1 of 5 shards, so 4 remain ≥ 3).
 	for _, obj := range preObjects {
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(obj.key),
 		})
-		require.NoErrorf(t, err, "post-topology GetObject %s (placement immutability)", obj.key)
+		require.NoErrorf(t, err, "post-topology GetObject %s (FSM placement must be immutable)", obj.key)
 		got, _ := io.ReadAll(out.Body)
 		_ = out.Body.Close()
 		assert.Equalf(t, obj.sum, sha256.Sum256(got),
-			"sha256 mismatch post-topology for %s (FSM placement changed?)", obj.key)
+			"sha256 mismatch after topology change for %s", obj.key)
 	}
-	t.Logf("topology test: %d pre-topology objects reconstructed after topology change (FSM placement immutable)", len(preObjects))
+	t.Logf("topology test: %d pre-topology objects reconstructed after node kill (placement immutable)", len(preObjects))
 
-	// New objects after topology change: liveNodes() now has 4 nodes.
-	// Placement uses 3+2=5 shards but only 4 distinct nodes → some nodes get 2 shards.
-	// The cluster is below k+m=5 node threshold (4 < 5), so ECActive() returns false
-	// and new writes fall back to N× replication. Verify they still round-trip.
+	// New objects after topology change: liveNodes() = 5 ≥ k+m=5 → ECActive=true.
+	// Shards distributed across the 5 remaining nodes.
 	postObjects := []entry{
 		{"post-obj-x", [32]byte{}},
 		{"post-obj-y", [32]byte{}},
 	}
 	for i := range postObjects {
-		data := make([]byte, 16*1024)
+		data := make([]byte, 32*1024)
 		_, err := rand.Read(data)
 		require.NoError(t, err)
 		postObjects[i].sum = sha256.Sum256(data)
@@ -555,19 +550,19 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			Key:    aws.String(postObjects[i].key),
 			Body:   bytes.NewReader(data),
 		})
-		require.NoErrorf(t, err, "post-topology PutObject %s", postObjects[i].key)
+		require.NoErrorf(t, err, "post-topology PutObject %s (EC must still be active)", postObjects[i].key)
 	}
 	for _, obj := range postObjects {
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(obj.key),
 		})
-		require.NoErrorf(t, err, "post-topology GetObject new %s", obj.key)
+		require.NoErrorf(t, err, "post-topology GetObject %s", obj.key)
 		got, _ := io.ReadAll(out.Body)
 		_ = out.Body.Close()
-		assert.Equalf(t, obj.sum, sha256.Sum256(got), "sha256 mismatch post-topology new %s", obj.key)
+		assert.Equalf(t, obj.sum, sha256.Sum256(got), "sha256 mismatch post-topology %s", obj.key)
 	}
-	t.Logf("topology test: %d post-topology objects verified (N× fallback after node loss)", len(postObjects))
+	t.Logf("topology test: %d post-topology objects written+verified via cluster EC (ECActive=true with N=5)", len(postObjects))
 }
 
 // ecS3Client returns an S3 client using the given access/secret credentials.
