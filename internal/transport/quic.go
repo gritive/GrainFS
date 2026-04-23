@@ -19,6 +19,12 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
+// QUIC connection timeouts.
+const (
+	quicMaxIdleTimeout  = 10 * time.Second
+	quicKeepAlivePeriod = 3 * time.Second
+)
+
 // StreamHandler processes an incoming request message and returns a response.
 type StreamHandler func(req *Message) *Message
 
@@ -105,7 +111,7 @@ func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
 	t.tlsConfig = tlsConf
 
 	listener, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
-		MaxIdleTimeout: 10 * time.Second,
+		MaxIdleTimeout: quicMaxIdleTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -128,19 +134,32 @@ func (t *QUICTransport) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
-		go t.handleConnection(conn)
+		go t.handleInboundConnection(conn)
 	}
 }
 
+// handleInboundConnection serves an accepted (inbound) QUIC connection.
+// Inbound connections are NOT stored in the conns map — they use an ephemeral
+// remote port, so they cannot be addressed by service addr via Call/evict.
+// Cleanup is automatic: context cancellation or listener.Close unblocks AcceptStream.
+func (t *QUICTransport) handleInboundConnection(conn *quic.Conn) {
+	from := conn.RemoteAddr().String()
+	for {
+		stream, err := conn.AcceptStream(t.ctx)
+		if err != nil {
+			return
+		}
+		go t.handleStream(from, stream)
+	}
+}
+
+// handleConnection serves an outbound (dialed) QUIC connection.
+// It is always called after the connection has been stored in conns by Connect(),
+// and removes the entry on exit so the next Call triggers a fresh dial.
 func (t *QUICTransport) handleConnection(conn *quic.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
 
-	t.mu.Lock()
-	t.conns[remoteAddr] = conn
-	t.mu.Unlock()
-
 	defer func() {
-		// Remove dead connection so the next getOrConnect triggers a fresh dial.
 		t.mu.Lock()
 		if t.conns[remoteAddr] == conn {
 			delete(t.conns, remoteAddr)
@@ -208,8 +227,8 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 	}
 
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
-		KeepAlivePeriod: 3 * time.Second,
-		MaxIdleTimeout:  10 * time.Second,
+		KeepAlivePeriod: quicKeepAlivePeriod,
+		MaxIdleTimeout:  quicMaxIdleTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
