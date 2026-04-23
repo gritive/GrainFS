@@ -22,7 +22,7 @@
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
-- [ ] io.WriteTo 구현 (FlatBuffers zero-copy)
+- [ ] io.WriteTo 구현 (FlatBuffers zero-copy) — `BinaryCodec.EncodeWriterTo` 별도 메서드 추가; `Encode` 시그니처 유지. PR 4는 PR 2 완료 후.
 - [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
 - [ ] **Degraded mode (storage)** — *zero ops* — EC backend 실패 → read-only + critical alert; 단일 블롭 손상 → 해당 객체만 격리
 
