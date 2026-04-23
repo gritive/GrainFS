@@ -2,7 +2,9 @@ package vfs
 
 import (
 	"io"
+	"math/rand"
 	"os"
+	"runtime"
 	"sort"
 	"testing"
 	"time"
@@ -523,6 +525,45 @@ func TestOpenFileCreateWithoutTrunc(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "original", string(data))
 	require.NoError(t, f2.Close())
+}
+
+func TestRename_LargeFile_MemoryBounded(t *testing.T) {
+	fs := setupFS(t)
+
+	const fileSize = 5 * 1024 * 1024
+	data := make([]byte, fileSize)
+	rand.Read(data)
+
+	// 파일 생성
+	f, err := fs.Create("big.bin")
+	require.NoError(t, err)
+	_, err = f.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	// GC 후 메모리 측정
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	require.NoError(t, fs.Rename("big.bin", "big2.bin"))
+
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	// io.Pipe 사용 시 힙 증가는 OS 파이프 버퍼(~64KB) 수준이어야 함
+	heapGrowth := int64(after.TotalAlloc) - int64(before.TotalAlloc)
+	t.Logf("Rename heap alloc during: %d bytes (file size: %d)", heapGrowth, fileSize)
+	assert.Less(t, heapGrowth, int64(fileSize), "Rename should not allocate a full copy of the file in one shot")
+
+	// 데이터 정확성 확인
+	f2, err := fs.Open("big2.bin")
+	require.NoError(t, err)
+	got, err := io.ReadAll(f2)
+	require.NoError(t, err)
+	require.NoError(t, f2.Close())
+	assert.Equal(t, data, got)
 }
 
 func TestOpenNonexistent(t *testing.T) {

@@ -210,28 +210,34 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 	oldFP := fs.fullPath(oldpath)
 	newFP := fs.fullPath(newpath)
 
-	// Read old file
 	rc, _, err := fs.backend.GetObject(fs.bucket, oldFP)
 	if err != nil {
 		return os.ErrNotExist
 	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		return fmt.Errorf("read old file: %w", err)
-	}
+	defer rc.Close()
 
-	// Write to new location
-	if _, err := fs.backend.PutObject(fs.bucket, newFP, bytes.NewReader(data), "application/octet-stream"); err != nil {
+	pr, pw := io.Pipe()
+	defer pr.Close() // PutObject panic 시 writer goroutine 종료 보장
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, copyErr := io.Copy(pw, rc)
+		pw.CloseWithError(copyErr)
+	}()
+
+	_, err = fs.backend.PutObject(fs.bucket, newFP, pr, "application/octet-stream")
+	pr.CloseWithError(err)
+	wg.Wait()
+	if err != nil {
 		return fmt.Errorf("write new file: %w", err)
 	}
 
-	// Delete old
 	if err := fs.backend.DeleteObject(fs.bucket, oldFP); err != nil {
 		return err
 	}
 
-	// Invalidate caches
 	fs.invalidateStatCache(oldFP)
 	fs.invalidateStatCache(newFP)
 	fs.invalidateParentDirCache(oldFP)
