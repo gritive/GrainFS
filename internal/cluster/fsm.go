@@ -33,8 +33,6 @@ const (
 	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning + object ACL.
 	CmdSetBucketVersioning CommandType = 15
 	CmdSetObjectACL        CommandType = 16
-	// Phase 18 v0.0.4.0 follow-up: per-bucket EC policy toggle.
-	CmdSetBucketECPolicy CommandType = 17
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -155,14 +153,6 @@ type SetObjectACLCmd struct {
 	Bucket string
 	Key    string
 	ACL    uint8
-}
-
-// SetBucketECPolicyCmd enables or disables cluster EC for a specific bucket.
-// When Enabled=false, PutObject falls back to N× replication for this bucket
-// regardless of the global --cluster-ec flag.
-type SetBucketECPolicyCmd struct {
-	Bucket  string
-	Enabled bool
 }
 
 // EncodeCommand serializes a command for Raft proposal using FlatBuffers.

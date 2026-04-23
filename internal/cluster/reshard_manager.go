@@ -2,9 +2,8 @@ package cluster
 
 // Phase 18 Cluster EC — Slice 5: background N×→EC re-placement.
 //
-// When a cluster crosses the ec-data+ec-parity node threshold (or the operator
-// flips --cluster-ec to true on an existing deployment), existing objects that
-// were stored via the legacy N× path need to be converted. The ReshardManager
+// When a cluster grows past MinECNodes (3), existing objects stored via the
+// legacy N× path need to be converted to EC placement. The ReshardManager
 // runs on the Raft leader and walks object metadata, converting any object
 // without a placement record.
 //

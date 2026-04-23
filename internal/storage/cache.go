@@ -209,7 +209,7 @@ func (cb *CachedBackend) Close() error {
 }
 
 // Unwrap returns the underlying Backend, allowing callers to access
-// backend-specific interfaces (e.g., ECPolicySetter) via type assertion.
+// backend-specific interfaces via type assertion.
 func (cb *CachedBackend) Unwrap() Backend {
 	return cb.Backend
 }

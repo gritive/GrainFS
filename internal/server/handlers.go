@@ -153,13 +153,6 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Check if this is an EC policy update: PUT /:bucket?ec=true|false
-	ecParam := string(c.QueryArgs().Peek("ec"))
-	if ecParam != "" {
-		s.setBucketECPolicy(c, bucket, ecParam)
-		return
-	}
-
 	if err := s.backend.CreateBucket(bucket); err != nil {
 		mapError(c, err)
 		return
@@ -168,11 +161,6 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionCreateBucket, Bucket: bucket})
 	c.Header("Location", "/"+bucket)
 	c.Status(consts.StatusOK)
-}
-
-// ECPolicySetter is implemented by backends that support per-bucket EC policy.
-type ECPolicySetter interface {
-	SetBucketECPolicy(bucket string, ecEnabled bool) error
 }
 
 // unwrapBackend returns the innermost backend, unwrapping decorators like CachedBackend.
@@ -188,36 +176,6 @@ func unwrapBackend(b storage.Backend) storage.Backend {
 		}
 		b = u.Unwrap()
 	}
-}
-
-// findECPolicySetter walks the backend chain and returns the first ECPolicySetter found.
-func findECPolicySetter(b storage.Backend) (ECPolicySetter, bool) {
-	for b != nil {
-		if s, ok := b.(ECPolicySetter); ok {
-			return s, true
-		}
-		u, ok := b.(unwrapper)
-		if !ok {
-			break
-		}
-		b = u.Unwrap()
-	}
-	return nil, false
-}
-
-func (s *Server) setBucketECPolicy(c *app.RequestContext, bucket, ecParam string) {
-	setter, ok := findECPolicySetter(s.backend)
-	if !ok {
-		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "EC policy not supported by this backend")
-		return
-	}
-
-	ecEnabled := ecParam != "false"
-	if err := setter.SetBucketECPolicy(bucket, ecEnabled); err != nil {
-		mapError(c, err)
-		return
-	}
-	c.Status(consts.StatusOK)
 }
 
 func (s *Server) headBucket(_ context.Context, c *app.RequestContext) {
@@ -1076,7 +1034,7 @@ func toHTTPRequest(c *app.RequestContext) *http.Request {
 
 func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 	status := map[string]any{
-		"mode":                 "local",
+		"mode":                  "local",
 		"split_brain_suspected": false,
 	}
 

@@ -43,7 +43,7 @@ func (c *fakeConverter) ConvertObjectToEC(ctx context.Context, bucket, key strin
 func (c *fakeConverter) FSMRef() *FSM   { return c.fsm }
 func (c *fakeConverter) ECActive() bool { return c.active }
 func (c *fakeConverter) EffectiveECConfig() ECConfig {
-	return ECConfig{Enabled: true, DataShards: 4, ParityShards: 2}
+	return ECConfig{DataShards: 4, ParityShards: 2}
 }
 func (c *fakeConverter) upgradeObjectEC(_ context.Context, _, _ string, _ PlacementRecord, _ ECConfig) error {
 	return nil

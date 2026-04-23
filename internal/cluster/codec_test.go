@@ -319,14 +319,3 @@ func TestCodec_ObjectMeta_ACL_BackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint8(0), got.ACL, "legacy records should have ACL=0 (private)")
 }
-
-func TestCodec_SetBucketECPolicyCmd_RoundTrip(t *testing.T) {
-	for _, enabled := range []bool{true, false} {
-		cmd := SetBucketECPolicyCmd{Bucket: "my-bucket", Enabled: enabled}
-		raw, err := encodeSetBucketECPolicyCmd(cmd)
-		require.NoError(t, err)
-		got, err := decodeSetBucketECPolicyCmd(raw)
-		require.NoError(t, err)
-		assert.Equal(t, cmd, got)
-	}
-}
