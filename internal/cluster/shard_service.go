@@ -63,9 +63,8 @@ func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Messa
 // Phase 18 Cluster EC will use real shardIdx routing per Reed-Solomon split.
 func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
 	fw := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
 	resp, err := s.transport.CallFlatBuffer(ctx, peer, fw)
-	fw.Builder.Reset()
-	shardBuilderPool.Put(fw.Builder)
 	if err != nil {
 		return fmt.Errorf("write shard to %s: %w", peer, err)
 	}
@@ -83,9 +82,8 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 // ReadShard fetches a shard from a remote node.
 func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
 	fw := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
 	resp, err := s.transport.CallFlatBuffer(ctx, peer, fw)
-	fw.Builder.Reset()
-	shardBuilderPool.Put(fw.Builder)
 	if err != nil {
 		return nil, fmt.Errorf("read shard from %s: %w", peer, err)
 	}
@@ -103,9 +101,8 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 // DeleteShards removes all shards for a key from a remote node.
 func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key string) error {
 	fw := buildShardEnvelope("DeleteShards", bucket, key, 0, nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
 	_, err := s.transport.CallFlatBuffer(ctx, peer, fw)
-	fw.Builder.Reset()
-	shardBuilderPool.Put(fw.Builder)
 	return err
 }
 
@@ -234,37 +231,6 @@ type shardRequest struct {
 	Key      string
 	ShardIdx int32
 	Data     []byte
-}
-
-// marshalShardRequest serializes a ShardRequest to FlatBuffers.
-func marshalShardRequest(bucket, key string, shardIdx int32, data []byte) []byte {
-	b := shardBuilderPool.Get().(*flatbuffers.Builder)
-	defer func() {
-		b.Reset()
-		shardBuilderPool.Put(b)
-	}()
-
-	bucketOff := b.CreateString(bucket)
-	keyOff := b.CreateString(key)
-	var dataOff flatbuffers.UOffsetT
-	if len(data) > 0 {
-		dataOff = b.CreateByteVector(data)
-	}
-
-	pb.ShardRequestStart(b)
-	pb.ShardRequestAddBucket(b, bucketOff)
-	pb.ShardRequestAddKey(b, keyOff)
-	pb.ShardRequestAddShardIdx(b, shardIdx)
-	if len(data) > 0 {
-		pb.ShardRequestAddData(b, dataOff)
-	}
-	root := pb.ShardRequestEnd(b)
-	b.Finish(root)
-
-	raw := b.FinishedBytes()
-	out := make([]byte, len(raw))
-	copy(out, raw)
-	return out
 }
 
 func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
