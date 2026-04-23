@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -268,4 +269,33 @@ func TestQUICTransport_StreamIsolation(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 2, received)
+}
+
+func TestQUICTransport_CallFlatBuffer(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	// 서버: 받은 payload를 echo
+	server.SetStreamHandler(func(reqMsg *Message) *Message {
+		return &Message{Type: reqMsg.Type, Payload: append([]byte("echo:"), reqMsg.Payload...)}
+	})
+
+	// FlatBuffer 빌드: byte vector 하나
+	b := flatbuffers.NewBuilder(64)
+	off := b.CreateByteVector([]byte("hello-fb"))
+	b.Finish(off)
+
+	fw := &FlatBuffersWriter{Typ: StreamData, Builder: b}
+	resp, err := client.CallFlatBuffer(ctx, server.LocalAddr(), fw)
+	require.NoError(t, err)
+	assert.Equal(t, StreamData, resp.Type)
+	assert.Contains(t, string(resp.Payload), "echo:")
 }

@@ -22,7 +22,6 @@
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
-- [ ] io.WriteTo 구현 (FlatBuffers zero-copy)
 - [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
 - [ ] **Degraded mode (storage)** — *zero ops* — EC backend 실패 → read-only + critical alert; 단일 블롭 손상 → 해당 객체만 격리
 
@@ -66,13 +65,11 @@
 
 ## Phase 19: Performance
 
-- [ ] sendfile syscall (SetBodyStream 완료, syscall 미구현)
-- [ ] hertz: Zero-copy Read/Write
-- [ ] flatbuffers codec도 zero-allocation 고려
+- [ ] **Phase 19 착수 조건: Phase 18 P1 플레이크 해결 후 착수** (EC 코드 동시 수정 시 디버깅 복잡도 증가)
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] Zero-copy Protocol Bridge (NFS to S3)
 - [ ] Unified buffer cache: Centralized Page Cache
-- [ ] Reed-Solomon 버퍼 재사용 with sync.Pool
+- [ ] Reed-Solomon 버퍼 재사용 with sync.Pool — **Phase 18 P1 플레이크 해결 후 착수** (`ec_pool.go` 설계 완료, Phase 19 착수 조건 동일)
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)
