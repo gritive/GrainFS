@@ -89,8 +89,6 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetBucketVersioning(cmd.Data)
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(cmd.Data)
-	case CmdSetBucketECPolicy:
-		return f.applySetBucketECPolicy(cmd.Data)
 	default:
 		slog.Warn("fsm: unknown command type", "type", cmd.Type)
 		return nil
@@ -100,7 +98,6 @@ func (f *FSM) Apply(raw []byte) error {
 func bucketKey(bucket string) []byte          { return []byte("bucket:" + bucket) }
 func bucketPolicyKey(bucket string) []byte    { return []byte("policy:" + bucket) }
 func bucketVerKey(bucket string) []byte       { return []byte("bucketver:" + bucket) }
-func bucketECKey(bucket string) []byte        { return []byte("bucketec:" + bucket) }
 func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
 
 // objectMetaKeyV returns the per-version metadata key:
@@ -474,46 +471,6 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 			})
 		})
 	})
-}
-
-func (f *FSM) applySetBucketECPolicy(data []byte) error {
-	c, err := decodeSetBucketECPolicyCmd(data)
-	if err != nil {
-		return err
-	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		if _, err := txn.Get(bucketKey(c.Bucket)); err == badger.ErrKeyNotFound {
-			return storage.ErrBucketNotFound
-		} else if err != nil {
-			return err
-		}
-		val := []byte("0")
-		if c.Enabled {
-			val = []byte("1")
-		}
-		return txn.Set(bucketECKey(c.Bucket), val)
-	})
-}
-
-// GetBucketECEnabled reads the per-bucket EC policy from BadgerDB.
-// Returns (true, nil) when EC is explicitly enabled, (false, nil) when
-// explicitly disabled, and (true, nil) when no record exists (default = enabled).
-func (f *FSM) GetBucketECEnabled(bucket string) (bool, error) {
-	var enabled = true
-	err := f.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(bucketECKey(bucket))
-		if err == badger.ErrKeyNotFound {
-			return nil // default: enabled
-		}
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error {
-			enabled = len(v) > 0 && v[0] == '1'
-			return nil
-		})
-	})
-	return enabled, err
 }
 
 // pendingMigrationKey returns the BadgerDB key for a not-yet-executed migration task.

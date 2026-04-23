@@ -176,12 +176,4 @@ table MigrationDoneCmd {
   dst_node:string;
 }
 
-// SetBucketECPolicyCmd toggles per-bucket cluster EC on/off.
-// When enabled=false, PutObject for this bucket uses N× replication even if
-// the global --cluster-ec flag is true. Phase 18 v0.0.4.0 follow-up.
-table SetBucketECPolicyCmd {
-  bucket:string;
-  enabled:bool;
-}
-
 root_type Command;

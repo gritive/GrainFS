@@ -28,7 +28,7 @@ func (r PlacementRecord) ECConfigOrFallback(def ECConfig) ECConfig {
 	if r.K == 0 {
 		return def
 	}
-	return ECConfig{Enabled: true, DataShards: r.K, ParityShards: r.M}
+	return ECConfig{DataShards: r.K, ParityShards: r.M}
 }
 
 // applyPutShardPlacement persists the shard placement record to BadgerDB.

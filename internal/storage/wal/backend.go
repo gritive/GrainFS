@@ -24,7 +24,7 @@ func NewBackend(inner storage.Backend, w *WAL) *Backend {
 // Used by snapshot.Manager to record the WAL anchor point at snapshot time.
 func (b *Backend) WALOffset() uint64 { return b.w.CurrentSeq() }
 
-// Unwrap returns the inner backend for interface chaining (ECPolicySetter, etc).
+// Unwrap returns the inner backend for interface chaining.
 func (b *Backend) Unwrap() storage.Backend { return b.Backend }
 
 func (b *Backend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {

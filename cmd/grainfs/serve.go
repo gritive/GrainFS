@@ -43,7 +43,6 @@ func init() {
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
 	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "target max data shards k; actual k scales with node count (EffectiveConfig, 3+ nodes)")
 	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "target max parity shards m; actual m=max(1,round(n×m/(k+m)))")
-	serveCmd.Flags().Bool("cluster-ec", true, "enable cluster erasure coding; activates at 3+ nodes with proportional k,m; 1-2 nodes use N× replication")
 	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
@@ -273,20 +272,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	distBackend.SetShardService(shardSvc, allNodes)
 
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
-	// 1-2 nodes always use N× replication regardless of this flag.
-	clusterEC, _ := cmd.Flags().GetBool("cluster-ec")
+	// 1-2 nodes always use N× replication.
 	clusterECData, _ := cmd.Flags().GetInt("ec-data")
 	clusterECParity, _ := cmd.Flags().GetInt("ec-parity")
 	distBackend.SetECConfig(cluster.ECConfig{
 		DataShards:   clusterECData,
 		ParityShards: clusterECParity,
-		Enabled:      clusterEC,
 	})
-	if clusterEC {
-		slog.Info("cluster EC configured", "k", clusterECData, "m", clusterECParity,
-			"active", len(allNodes) >= clusterECData+clusterECParity,
-			"cluster_size", len(allNodes))
-	}
+	slog.Info("cluster EC configured", "k", clusterECData, "m", clusterECParity,
+		"active", len(allNodes) >= cluster.MinECNodes,
+		"cluster_size", len(allNodes))
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)

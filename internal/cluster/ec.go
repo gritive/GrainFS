@@ -31,26 +31,23 @@ type ECConfig struct {
 	DataShards int
 	// ParityShards (m) — number of parity shards (e.g. 2 for 4+2).
 	ParityShards int
-	// Enabled signals the operator opted in. When false, PutObject keeps the
-	// legacy N× replication path even if cluster size >= k+m.
-	Enabled bool
 }
 
 // NumShards returns k+m.
 func (c ECConfig) NumShards() int { return c.DataShards + c.ParityShards }
 
-// IsActive returns true iff EC is enabled AND the cluster has at least MinECNodes nodes.
+// IsActive returns true iff the cluster has at least MinECNodes nodes.
 // 1–2 node clusters use N× replication; 3+ always activate proportional EC.
 func (c ECConfig) IsActive(clusterSize int) bool {
-	return c.Enabled && clusterSize >= MinECNodes
+	return clusterSize >= MinECNodes
 }
 
 // EffectiveConfig returns the ECConfig that should be used for a cluster of n nodes,
 // proportionally scaling k and m from the target config. For n < MinECNodes it returns
-// an inactive config (Enabled=false). For n >= target.NumShards() it returns target as-is.
+// a zero-value config. For n >= target.NumShards() it returns target as-is.
 // Formula: m_eff = max(1, round(n × m_target / (k_target+m_target))), k_eff = n - m_eff.
 func EffectiveConfig(n int, target ECConfig) ECConfig {
-	if !target.Enabled || n < MinECNodes {
+	if n < MinECNodes {
 		return ECConfig{}
 	}
 	if n >= target.NumShards() {
@@ -60,7 +57,7 @@ func EffectiveConfig(n int, target ECConfig) ECConfig {
 	if mEff < 1 {
 		mEff = 1
 	}
-	return ECConfig{Enabled: true, DataShards: n - mEff, ParityShards: mEff}
+	return ECConfig{DataShards: n - mEff, ParityShards: mEff}
 }
 
 // Placement returns the node index (into the ordered node slice) that holds

@@ -101,17 +101,16 @@ type Snapshotable interface {
 }
 
 // SnapshotBucket is a point-in-time record of bucket-level metadata
-// (versioning state, EC flag). Captured by BucketSnapshotable backends so
-// PITR restores reproduce the full bucket configuration.
+// (versioning state). Captured by BucketSnapshotable backends so PITR
+// restores reproduce the full bucket configuration.
 type SnapshotBucket struct {
 	Name            string `json:"name"`
 	VersioningState string `json:"versioning_state,omitempty"` // "Unversioned" | "Enabled" | "Suspended"
-	ECEnabled       bool   `json:"ec_enabled,omitempty"`
 }
 
 // BucketSnapshotable is an optional interface for backends that persist
-// per-bucket metadata (versioning, EC policy) and want that state preserved
-// across snapshot/restore cycles.
+// per-bucket metadata (versioning) and want that state preserved across
+// snapshot/restore cycles.
 type BucketSnapshotable interface {
 	ListAllBuckets() ([]SnapshotBucket, error)
 	RestoreBuckets(buckets []SnapshotBucket) error

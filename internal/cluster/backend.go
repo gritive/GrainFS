@@ -55,7 +55,7 @@ type DistributedBackend struct {
 	selfAddr    string   // this node's raft address (matches entries in allNodes)
 	peerHealth  *PeerHealth
 	registry    *Registry // cache invalidators (VFS instances)
-	ecConfig    ECConfig  // Phase 18: erasure coding config (disabled = legacy N× path)
+	ecConfig    ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
 	shardLocks  sync.Map  // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 }
 
@@ -78,8 +78,9 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 	}, nil
 }
 
-// SetECConfig enables erasure coding for PutObject/GetObject when the cluster
-// is large enough. Phase 18. Call before serving traffic. Zero-value = disabled.
+// SetECConfig configures erasure-coding shard parameters (k, m) for
+// PutObject/GetObject. Phase 18. Call before serving traffic. EC activates
+// whenever the cluster has at least MinECNodes nodes.
 func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 	b.ecConfig = cfg
 }
@@ -327,20 +328,6 @@ func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
 	})
 }
 
-// SetBucketECPolicy satisfies server.ECPolicySetter. Replicates the per-bucket
-// EC toggle through Raft so all cluster nodes apply it atomically.
-// enabled=false forces N× replication for this bucket regardless of the
-// global --cluster-ec flag.
-func (b *DistributedBackend) SetBucketECPolicy(bucket string, ecEnabled bool) error {
-	if err := b.HeadBucket(bucket); err != nil {
-		return err
-	}
-	return b.propose(context.Background(), CmdSetBucketECPolicy, SetBucketECPolicyCmd{
-		Bucket:  bucket,
-		Enabled: ecEnabled,
-	})
-}
-
 // SetObjectACL satisfies storage.ACLSetter. Replicates the ACL change through
 // Raft and updates the stored objectMeta on every node.
 func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
@@ -414,13 +401,9 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 	// versioning-state gating is a later slice.
 	versionID := newVersionID()
 
-	// Phase 18 Cluster EC: split across k+m nodes when globally enabled, cluster
-	// is large enough, AND the per-bucket policy has not opted this bucket out.
-	bucketECEnabled := true
-	if be, err := b.fsm.GetBucketECEnabled(bucket); err == nil {
-		bucketECEnabled = be
-	}
-	if b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil && bucketECEnabled {
+	// Phase 18 Cluster EC: split across k+m nodes when the cluster is large
+	// enough. 1-2 node clusters fall through to the N× replication path.
+	if b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil {
 		return b.putObjectEC(bucket, key, versionID, data, contentType)
 	}
 
@@ -825,8 +808,8 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	liveNodes := b.liveNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
 	if !effectiveCfg.IsActive(len(liveNodes)) || b.shardSvc == nil {
-		return fmt.Errorf("ec not active: enabled=%v cluster_size=%d",
-			b.ecConfig.Enabled, len(liveNodes))
+		return fmt.Errorf("ec not active: cluster_size=%d shard_svc=%v",
+			len(liveNodes), b.shardSvc != nil)
 	}
 	existing, lookupErr := b.fsm.LookupShardPlacement(bucket, key)
 	if lookupErr != nil {
