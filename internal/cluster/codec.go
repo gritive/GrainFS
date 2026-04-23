@@ -582,9 +582,33 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
 	case CmdSetObjectACL:
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
+	case CmdSetBucketECPolicy:
+		return encodeSetBucketECPolicyCmd(payload.(SetBucketECPolicyCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
+}
+
+func encodeSetBucketECPolicyCmd(c SetBucketECPolicyCmd) ([]byte, error) {
+	b := flatbuffers.NewBuilder(64)
+	bucketOff := b.CreateString(c.Bucket)
+	clusterpb.SetBucketECPolicyCmdStart(b)
+	clusterpb.SetBucketECPolicyCmdAddBucket(b, bucketOff)
+	clusterpb.SetBucketECPolicyCmdAddEnabled(b, c.Enabled)
+	return fbFinish(b, clusterpb.SetBucketECPolicyCmdEnd(b)), nil
+}
+
+func decodeSetBucketECPolicyCmd(data []byte) (SetBucketECPolicyCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketECPolicyCmd {
+		return clusterpb.GetRootAsSetBucketECPolicyCmd(d, 0)
+	})
+	if err != nil {
+		return SetBucketECPolicyCmd{}, err
+	}
+	return SetBucketECPolicyCmd{
+		Bucket:  string(t.Bucket()),
+		Enabled: t.Enabled(),
+	}, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {

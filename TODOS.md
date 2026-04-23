@@ -72,10 +72,6 @@
 - [ ] **Placement record lifecycle** — DeleteObject FSM 명령에 `CmdDeleteShardPlacement` 연동. 현재 오브젝트 삭제 시 stale placement record가 BadgerDB에 남아 스냅샷 비대해짐.
 - [ ] **`LookupShardPlacement` 오류 구분** — `([]string, bool)` → `([]string, error)` 반환 타입 변경. 현재 `ok=false`가 "record 없음"과 "BadgerDB read 오류"를 구분하지 못해 데이터 손실 시 N× fallback으로 조용히 진행됨.
 
-### v0.0.4.0 follow-up
-
-- [ ] **5-node loopback Raft 부트스트랩 안정성** — `TestE2E_ClusterEC_PutGet_5Node`가 CI에서 "no leader found" 로 flaky (130s+ 대기 후 timeout). 3-node 시나리오는 안정적. Election timeout 튜닝 또는 테스트에서 warm-up을 단계적으로 하는 방식 검토.
-- [ ] **Per-bucket EC policy 재설계** — ECBackend의 `/admin/buckets/{b}/ec-policy` 토글 API가 사라짐. DistributedBackend는 cluster 전역 `--cluster-ec`로 동작. 필요시 per-bucket `ECConfig`를 FSM에 저장하여 복원.
 
 ## Phase 19: Performance
 

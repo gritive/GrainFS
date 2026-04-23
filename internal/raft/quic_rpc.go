@@ -3,8 +3,17 @@ package raft
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/transport"
+)
+
+const (
+	// raftRPCTimeout must be shorter than the minimum election timeout (150ms)
+	// so that heartbeat goroutines can reconnect and deliver a heartbeat before
+	// a follower starts a spurious election.
+	raftRPCTimeout      = 80 * time.Millisecond // AppendEntries, RequestVote, TimeoutNow
+	raftSnapshotTimeout = 60 * time.Second      // InstallSnapshot may transfer large data
 )
 
 // RPC message types for QUIC transport.
@@ -49,24 +58,30 @@ func (r *QUICRPCTransport) SetTransport() {
 }
 
 func (r *QUICRPCTransport) sendTimeoutNow(peer string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
+	defer cancel()
+
 	envelope, err := encodeRPC(rpcTypeTimeoutNow, &TimeoutNowArgs{})
 	if err != nil {
 		return err
 	}
 
 	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	_, err = r.transport.Call(context.Background(), peer, msg)
+	_, err = r.transport.Call(ctx, peer, msg)
 	return err
 }
 
 func (r *QUICRPCTransport) sendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
+	defer cancel()
+
 	envelope, err := encodeRPC(rpcTypeRequestVote, args)
 	if err != nil {
 		return nil, err
 	}
 
 	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(context.Background(), peer, msg)
+	resp, err := r.transport.Call(ctx, peer, msg)
 	if err != nil {
 		return nil, fmt.Errorf("RequestVote to %s: %w", peer, err)
 	}
@@ -82,13 +97,16 @@ func (r *QUICRPCTransport) sendRequestVote(peer string, args *RequestVoteArgs) (
 }
 
 func (r *QUICRPCTransport) sendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
+	defer cancel()
+
 	envelope, err := encodeRPC(rpcTypeAppendEntries, args)
 	if err != nil {
 		return nil, err
 	}
 
 	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(context.Background(), peer, msg)
+	resp, err := r.transport.Call(ctx, peer, msg)
 	if err != nil {
 		return nil, fmt.Errorf("AppendEntries to %s: %w", peer, err)
 	}
@@ -104,13 +122,16 @@ func (r *QUICRPCTransport) sendAppendEntries(peer string, args *AppendEntriesArg
 }
 
 func (r *QUICRPCTransport) sendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), raftSnapshotTimeout)
+	defer cancel()
+
 	envelope, err := encodeRPC(rpcTypeInstallSnapshot, args)
 	if err != nil {
 		return nil, err
 	}
 
 	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(context.Background(), peer, msg)
+	resp, err := r.transport.Call(ctx, peer, msg)
 	if err != nil {
 		return nil, fmt.Errorf("InstallSnapshot to %s: %w", peer, err)
 	}

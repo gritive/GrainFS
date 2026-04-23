@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -103,7 +104,9 @@ func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
 	tlsConf.NextProtos = []string{t.pskALPN()}
 	t.tlsConfig = tlsConf
 
-	listener, err := quic.ListenAddr(addr, tlsConf, &quic.Config{})
+	listener, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
+		MaxIdleTimeout: 10 * time.Second,
+	})
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -135,6 +138,15 @@ func (t *QUICTransport) handleConnection(conn *quic.Conn) {
 	t.mu.Lock()
 	t.conns[remoteAddr] = conn
 	t.mu.Unlock()
+
+	defer func() {
+		// Remove dead connection so the next getOrConnect triggers a fresh dial.
+		t.mu.Lock()
+		if t.conns[remoteAddr] == conn {
+			delete(t.conns, remoteAddr)
+		}
+		t.mu.Unlock()
+	}()
 
 	for {
 		stream, err := conn.AcceptStream(t.ctx)
@@ -195,7 +207,10 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 		NextProtos:         []string{t.pskALPN()},
 	}
 
-	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{})
+	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
+		KeepAlivePeriod: 3 * time.Second,
+		MaxIdleTimeout:  10 * time.Second,
+	})
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
@@ -260,6 +275,7 @@ func (t *QUICTransport) Handle(st StreamType, h StreamHandler) {
 
 // Call sends a request message and waits for a response (bidirectional stream).
 // Unlike Send, this opens a stream, writes the request, reads the response, and returns it.
+// If the cached connection is stale (idle-timed-out), it is evicted and re-dialled once.
 func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*Message, error) {
 	conn, err := t.getOrConnect(ctx, addr)
 	if err != nil {
@@ -268,7 +284,15 @@ func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*M
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("open stream to %s: %w", addr, err)
+		// Evict the stale connection and reconnect once before giving up.
+		t.evict(addr, conn)
+		conn, err = t.getOrConnect(ctx, addr)
+		if err != nil {
+			return nil, fmt.Errorf("reconnect to %s: %w", addr, err)
+		}
+		if stream, err = conn.OpenStreamSync(ctx); err != nil {
+			return nil, fmt.Errorf("open stream to %s: %w", addr, err)
+		}
 	}
 	defer stream.Close()
 
@@ -284,6 +308,21 @@ func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*M
 	}
 
 	return resp, nil
+}
+
+// evict removes conn from the active connection map if it is still the current entry for addr.
+// It also closes the connection so that any goroutines blocked on OpenStreamSync for this
+// connection unblock immediately and can reconnect on their next attempt.
+func (t *QUICTransport) evict(addr string, conn *quic.Conn) {
+	t.mu.Lock()
+	shouldClose := t.conns[addr] == conn
+	if shouldClose {
+		delete(t.conns, addr)
+	}
+	t.mu.Unlock()
+	if shouldClose {
+		conn.CloseWithError(0, "evicted: stale connection")
+	}
 }
 
 // getOrConnect returns an existing connection or lazily connects to the peer.

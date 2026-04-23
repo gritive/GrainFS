@@ -31,7 +31,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-node e2e in -short mode")
 	}
-	t.Skip("pre-existing 5-node loopback Raft bootstrap flakiness — 'no leader found or CreateBucket never succeeded'. 3-node EC coverage is provided by TestE2E_ClusterScrubber_AutoRepair. Tracked in TODOS v0.0.4.0")
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
@@ -75,8 +74,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
 
-	procs := make([]*exec.Cmd, numNodes)
-	for i := 0; i < numNodes; i++ {
+	startNode := func(i int) *exec.Cmd {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
@@ -86,11 +84,10 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			// --cluster-ec defaults to true; explicit here for clarity.
 			"--cluster-ec=true",
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--ec=false", // disable local EC (nested EC adds noise)
+			"--ec=false",
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
@@ -100,8 +97,10 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
-		procs[i] = cmd
+		return cmd
 	}
+
+	procs := make([]*exec.Cmd, numNodes)
 	killAll := func() {
 		for _, p := range procs {
 			if p != nil && p.Process != nil {
@@ -112,10 +111,23 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	for i := range procs {
+	// Stage 1: start 3 nodes first — quorum(5)=3, so they elect a stable leader
+	// without competing with 2 additional simultaneous candidates. The 5-way
+	// simultaneous start caused split-vote loops that never converged in CI.
+	for i := 0; i < 3; i++ {
+		procs[i] = startNode(i)
+	}
+	for i := 0; i < 3; i++ {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
-	time.Sleep(10 * time.Second) // 6-node Raft cluster needs longer to converge
+
+	// Stage 2: bring up the remaining 2 nodes after the cluster has a leader.
+	for i := 3; i < numNodes; i++ {
+		procs[i] = startNode(i)
+	}
+	for i := 3; i < numNodes; i++ {
+		waitForPort(t, httpPorts[i], 30*time.Second)
+	}
 
 	var client *s3.Client
 	var leaderIdx int
@@ -287,7 +299,6 @@ func TestE2E_ClusterEC_FallbackToNx_3Node(t *testing.T) {
 	for i := range procs {
 		waitForPort(t, httpPorts[i], 30*time.Second)
 	}
-	time.Sleep(4 * time.Second)
 
 	var client *s3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
