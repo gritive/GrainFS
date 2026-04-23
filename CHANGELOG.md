@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.4.19] - 2026-04-24
+
+### Performance
+
+- **BinaryCodec.EncodeWriterTo** (`internal/transport/codec.go`): `io.WriterTo` 인터페이스를 이용해 FlatBuffers Builder의 `FinishedBytes()`를 QUIC 스트림에 make+copy 없이 직접 기록. 기존 `Encode`는 항상 슬라이스 복사가 발생했으나 이 경로는 제로-카피.
+- **QUICTransport.CallFlatBuffer** (`internal/transport/quic.go`): `*FlatBuffersWriter`를 받아 `EncodeWriterTo`로 전송하는 전용 메서드 추가. ShardService RPC(Write/Read/Delete) 전체가 이 경로를 사용하도록 전환.
+- **ShardService buildShardEnvelope** (`internal/cluster/shard_service.go`): WriteShard/ReadShard/DeleteShards 세 메서드가 make+copy 기반 `marshalShardRequest` 대신 `buildShardEnvelope` + `CallFlatBuffer`를 사용하도록 재작성. 클러스터 shard RPC 당 최소 1회 힙 할당 제거.
+- **vfs.Rename io.Pipe** (`internal/vfs/vfs.go`): 파일 이동 시 소스 파일을 전량 메모리에 읽은 뒤 복사하던 방식에서 `io.Pipe` + goroutine 스트리밍으로 교체. 힙 사용량 5MB(파일 크기) → 76KB(OS 파이프 버퍼).
+
+### Fixed
+
+- **ShardService pool 누출 방지** (`internal/cluster/shard_service.go`): `CallFlatBuffer` 패닉 시 FlatBuffers builder가 `shardBuilderPool`로 반환되지 않는 문제를 `defer`로 수정.
+
 ## [0.0.4.17] - 2026-04-24
 
 ### Fixed
