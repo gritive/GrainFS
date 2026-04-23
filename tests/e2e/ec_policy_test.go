@@ -29,7 +29,7 @@ func startECServerWithPort(t *testing.T) (*s3.Client, string, int, func()) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--ec",
+		"--cluster-ec",
 		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout

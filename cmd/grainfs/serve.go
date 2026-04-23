@@ -41,9 +41,9 @@ func init() {
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
-	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "number of data shards for erasure coding")
-	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "number of parity shards for erasure coding")
-	serveCmd.Flags().Bool("cluster-ec", true, "Phase 18: cross-node EC in cluster mode (auto-falls back to N× replication when cluster size < ec-data+ec-parity; use --cluster-ec=false to force N×)")
+	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "target max data shards k; actual k scales with node count (EffectiveConfig, 3+ nodes)")
+	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "target max parity shards m; actual m=max(1,round(n×m/(k+m)))")
+	serveCmd.Flags().Bool("cluster-ec", true, "enable cluster erasure coding; activates at 3+ nodes with proportional k,m; 1-2 nodes use N× replication")
 	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
@@ -272,8 +272,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	allNodes := append([]string{raftAddr}, peers...)
 	distBackend.SetShardService(shardSvc, allNodes)
 
-	// Phase 18 Cluster EC: opt-in via --cluster-ec (default true).
-	// Auto-falls back to N× replication when cluster size < ec-data+ec-parity.
+	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
+	// 1-2 nodes always use N× replication regardless of this flag.
 	clusterEC, _ := cmd.Flags().GetBool("cluster-ec")
 	clusterECData, _ := cmd.Flags().GetInt("ec-data")
 	clusterECParity, _ := cmd.Flags().GetInt("ec-parity")
@@ -422,8 +422,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// wait for Raft to elect a leader before the proposal can commit.
 	// Retry for up to 30s with backoff so the first node's boot does not
 	// fail the whole cluster when peers come up in any order.
+	//
+	// For nodes joining an existing cluster (i.e., cluster mode with peers),
+	// the default bucket should already exist. If it doesn't, a follower can't
+	// create it anyway (only the leader can propose). We log a warning but
+	// don't fail startup to allow cluster reconfiguration.
 	if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-		return fmt.Errorf("create default bucket: %w", err)
+		if len(peers) > 0 {
+			// Cluster mode with peers: joining an existing cluster.
+			// Default bucket may or may not exist; either way, follower can't create it.
+			slog.Warn("default bucket creation failed on follower (may already exist)", "error", err)
+		} else {
+			// Single-node mode: default bucket must be created.
+			return fmt.Errorf("create default bucket: %w", err)
+		}
 	}
 
 	slog.Info("server started", "component", "server", "version", version,

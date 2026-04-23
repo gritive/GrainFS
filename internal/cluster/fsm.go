@@ -128,10 +128,14 @@ type MigrationDoneFSMCmd struct {
 
 // PutShardPlacementCmd records the EC shard placement for an object.
 // NodeIDs[i] holds shard index i; len(NodeIDs) == k+m. Phase 18 Cluster EC.
+// K and M store the actual EC parameters used (dynamic EC). Zero values mean
+// legacy placement recorded before dynamic EC; callers fall back to global ecConfig.
 type PutShardPlacementCmd struct {
 	Bucket  string
 	Key     string
 	NodeIDs []string
+	K       int
+	M       int
 }
 
 // DeleteShardPlacementCmd removes the EC placement record for an object.

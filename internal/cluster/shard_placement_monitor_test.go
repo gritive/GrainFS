@@ -150,7 +150,7 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 
 	// Empty FSM: callback never invoked.
 	count := 0
-	err := fsm.IterShardPlacements(func(bucket, key string, nodes []string) error {
+	err := fsm.IterShardPlacements(func(bucket, key string, rec PlacementRecord) error {
 		count++
 		return nil
 	})
@@ -159,9 +159,9 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 
 	// Seed a handful of placements.
 	entries := []PutShardPlacementCmd{
-		{Bucket: "b1", Key: "k1", NodeIDs: []string{"n0", "n1"}},
-		{Bucket: "b2", Key: "k/with/slashes", NodeIDs: []string{"n2", "n3", "n4"}},
-		{Bucket: "버킷", Key: "한글", NodeIDs: []string{"n0"}},
+		{Bucket: "b1", Key: "k1", NodeIDs: []string{"n0", "n1"}, K: 2, M: 1},
+		{Bucket: "b2", Key: "k/with/slashes", NodeIDs: []string{"n2", "n3", "n4"}, K: 3, M: 2},
+		{Bucket: "버킷", Key: "한글", NodeIDs: []string{"n0"}, K: 1, M: 1},
 	}
 	for _, e := range entries {
 		raw, _ := EncodeCommand(CmdPutShardPlacement, e)
@@ -169,8 +169,8 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 	}
 
 	seen := make(map[string][]string)
-	err = fsm.IterShardPlacements(func(bucket, key string, nodes []string) error {
-		seen[bucket+"/"+key] = nodes
+	err = fsm.IterShardPlacements(func(bucket, key string, rec PlacementRecord) error {
+		seen[bucket+"/"+key] = rec.Nodes
 		return nil
 	})
 	require.NoError(t, err)

@@ -108,7 +108,7 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 			"--cluster-ec=true",
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--ec=false",
+			"--cluster-ec=false",
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",

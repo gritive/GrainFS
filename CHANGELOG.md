@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.4.15] - 2026-04-23
+
+### Fixed
+
+- **Cluster EC topology change 라이브락** (`tests/e2e/cluster_ec_test.go`): `TestE2E_ClusterEC_TopologyChange`가 stage 1/stage 2 노드의 Raft peer 구성 불일치로 인한 리더 step-down 라이브락으로 실패했던 문제 해결. 모든 6개 노드가 시작부터 동일한 6-node peer 리스트 사용 (`startNodeStage1` 제거). Stage 2 노드의 election timeout이 발생해도 leader는 이미 모든 peer를 알고 있으므로 heartbeat로 방지.
+- **`liveNodes()` peerHealth 필터링** (`internal/cluster/backend.go`): Raft peer 리스트는 정적이라 죽은 노드를 계속 포함 → `putObjectEC`가 write-all consistency 정책으로 dead node에 shard 쓰기 시도 → 전체 PUT 실패. `liveNodes()`가 `peerHealth`-unhealthy peer를 제외하도록 수정. 첫 실패가 peer를 unhealthy로 마킹한 뒤 재시도에서 N-1 노드 기반 placement 사용.
+- **`putObjectEC` write 타임아웃** (`internal/cluster/backend.go`): 원격 shard 쓰기에 3s per-shard 타임아웃 추가 (read-side와 동일). 죽은 peer가 QUIC `quicMaxIdleTimeout=10s`까지 블록하지 않고 빠르게 실패.
+- **E2E 테스트 `time.Sleep` 제거** (`tests/e2e/cluster_ec_test.go`): `TestE2E_ClusterEC_PutGet_5Node`의 `time.Sleep(3s)`를 `require.Eventually`로 교체. `getObjectEC`의 3s per-shard 타임아웃이 이미 dead-node 감지를 보장.
+- **Cluster 테스트 cluster-ec 플래그 정합성** (`tests/e2e/*.go`): 다른 e2e 테스트 파일들의 `--ec=false`를 `--cluster-ec=false`로 통일.
+- **Follower default bucket 생성 실패 처리** (`cmd/grainfs/serve.go`): 클러스터 모드에서 follower 노드의 default bucket 생성 실패는 경고만 하고 서버 시작을 차단하지 않음 (leader만 propose 가능).
+
+## [0.0.4.14] - 2026-04-23
+
+### Changed
+
+- **Dynamic EC 파라미터** (`internal/cluster/ec.go`): `IsActive` 임계값을 `n>=k+m`에서 `n>=MinECNodes=3`으로 변경. 3노드 이상에서 항상 EC 활성화. `EffectiveConfig(n, target) ECConfig` 함수 추가 — n에 비례한 k,m 계산 (공식: `m_eff=max(1,round(n×m/(k+m)))`, `k_eff=n-m_eff`). 예: n=3, 4+2 target → k=2,m=1.
+- **PlacementRecord** (`internal/cluster/shard_placement.go`): `LookupShardPlacement` 반환 타입 `[]string` → `PlacementRecord{Nodes,K,M}` 변경. 인코딩 포맷 단순화 (`<k><m><count><nodes>`). `ECConfigOrFallback` 헬퍼 추가.
+- **EC 쓰기 시 k,m 저장** (`internal/cluster/backend.go`): `putObjectEC`와 `ConvertObjectToEC`가 `EffectiveConfig`로 실제 k,m 계산 후 `PutShardPlacementCmd`에 K,M 기록. `getObjectEC`는 저장된 k,m으로 재구성 (클러스터 확장 후에도 기존 객체 정확히 재구성).
+- **EC→EC 업그레이드** (`internal/cluster/reshard_manager.go`): 클러스터 확장으로 effective k,m이 바뀐 경우 기존 EC 객체를 새 k,m으로 재인코딩. `upgradeObjectEC` 메서드 구현 (reconstruct→re-encode→fan-out→propose→delete old shards).
+- **FlatBuffers 스키마** (`internal/cluster/clusterpb/cluster.fbs`): `PutShardPlacementCmd`에 `k:int32=0; m:int32=0` 필드 추가 (backward compatible). `flatc` 재생성.
+- **CLI 플래그 설명** (`cmd/grainfs/serve.go`): `--ec-data`/`--ec-parity`가 "고정 k,m"이 아닌 "target max k,m"임을 명확히 표기.
+
+### Breaking
+
+- **E2E 테스트 재작성** (`tests/e2e/cluster_ec_test.go`): `TestE2E_ClusterEC_FallbackToNx_3Node` → `TestE2E_ClusterEC_3Node_ActiveKM21`. 3노드가 N×로 fallback하는 것이 아닌 EC(2,1)으로 활성화됨을 검증.
+
 ## [0.0.4.13] - 2026-04-23
 
 ### Added

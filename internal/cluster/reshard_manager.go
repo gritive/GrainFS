@@ -38,6 +38,10 @@ type Converter interface {
 	FSMRef() *FSM
 	// ECActive returns whether EC is enabled AND cluster has enough nodes.
 	ECActive() bool
+	// EffectiveECConfig returns the ECConfig proportional to current cluster size.
+	EffectiveECConfig() ECConfig
+	// upgradeObjectEC re-encodes an EC object from oldRec's k,m to newCfg's k,m.
+	upgradeObjectEC(ctx context.Context, bucket, key string, oldRec PlacementRecord, newCfg ECConfig) error
 }
 
 // ReshardManager walks objects and triggers conversion from N× to EC.
@@ -85,26 +89,58 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 		return 0, 0, 0
 	}
 
+	currentCfg := m.backend.EffectiveECConfig()
+
 	err := fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// Already has placement? Skip. Cheap in-memory lookup via FSM.
-		if nodes, lookupErr := fsm.LookupShardPlacement(ref.Bucket, ref.Key); lookupErr == nil && len(nodes) > 0 {
+		ecRec, lookupErr := fsm.LookupShardPlacement(ref.Bucket, ref.Key)
+		if lookupErr != nil {
+			return nil // transient read error; skip this object
+		}
+		if len(ecRec.Nodes) == 0 {
+			// No placement yet: N× replication object, convert to EC.
+			if cerr := m.backend.ConvertObjectToEC(ctx, ref.Bucket, ref.Key); cerr != nil {
+				errs++
+				m.totalErrors.Add(1)
+				m.logger.Warn("reshard: convert failed",
+					"bucket", ref.Bucket, "key", ref.Key, "error", cerr)
+				return nil
+			}
+			converted++
+			m.totalConverted.Add(1)
+			m.logger.Info("reshard: converted to EC",
+				"bucket", ref.Bucket, "key", ref.Key, "size", ref.Size)
+			return nil
+		}
+		// Already EC. Check if stored k,m matches current effective config (EC→EC upgrade).
+		recK, recM := ecRec.K, ecRec.M
+		if recK == 0 {
+			// Legacy record without stored k,m; use current effective config as baseline.
+			recK, recM = currentCfg.DataShards, currentCfg.ParityShards
+		}
+		if recK == currentCfg.DataShards && recM == currentCfg.ParityShards {
 			skipped++
 			return nil
 		}
-		if cerr := m.backend.ConvertObjectToEC(ctx, ref.Bucket, ref.Key); cerr != nil {
+		// k,m mismatch: cluster grew, upgrade this object's EC encoding.
+		if uerr := m.backend.upgradeObjectEC(ctx, ref.Bucket, ref.Key, ecRec, currentCfg); uerr != nil {
 			errs++
 			m.totalErrors.Add(1)
-			m.logger.Warn("reshard: convert failed",
-				"bucket", ref.Bucket, "key", ref.Key, "error", cerr)
-			return nil // continue scanning — don't abort the whole pass
+			m.logger.Warn("reshard: EC upgrade failed",
+				"bucket", ref.Bucket, "key", ref.Key,
+				"old_k", recK, "old_m", recM,
+				"new_k", currentCfg.DataShards, "new_m", currentCfg.ParityShards,
+				"error", uerr)
+			return nil
 		}
 		converted++
 		m.totalConverted.Add(1)
-		m.logger.Info("reshard: converted to EC",
-			"bucket", ref.Bucket, "key", ref.Key, "size", ref.Size)
+		m.logger.Info("reshard: upgraded EC encoding",
+			"bucket", ref.Bucket, "key", ref.Key,
+			"old_k", recK, "old_m", recM,
+			"new_k", currentCfg.DataShards, "new_m", currentCfg.ParityShards)
 		return nil
 	})
 	m.totalSkipped.Add(uint64(skipped))

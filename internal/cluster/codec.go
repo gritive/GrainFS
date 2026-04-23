@@ -630,6 +630,8 @@ func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
 	clusterpb.PutShardPlacementCmdAddBucket(b, bucketOff)
 	clusterpb.PutShardPlacementCmdAddKey(b, keyOff)
 	clusterpb.PutShardPlacementCmdAddNodeIds(b, nodesVec)
+	clusterpb.PutShardPlacementCmdAddK(b, int32(c.K))
+	clusterpb.PutShardPlacementCmdAddM(b, int32(c.M))
 	return fbFinish(b, clusterpb.PutShardPlacementCmdEnd(b)), nil
 }
 
@@ -649,6 +651,8 @@ func decodePutShardPlacementCmd(data []byte) (PutShardPlacementCmd, error) {
 		Bucket:  string(t.Bucket()),
 		Key:     string(t.Key()),
 		NodeIDs: nodes,
+		K:       int(t.K()),
+		M:       int(t.M()),
 	}, nil
 }
 

@@ -23,7 +23,8 @@ var _ scrubber.ShardOwner = (*DistributedBackend)(nil)
 func writePlacement(t *testing.T, b *DistributedBackend, bucket, key string, nodes []string) {
 	t.Helper()
 	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(shardPlacementKey(bucket, key), encodePlacementValue(nodes))
+		rec := PlacementRecord{Nodes: nodes, K: 4, M: 2}
+		return txn.Set(shardPlacementKey(bucket, key), encodePlacementValue(rec))
 	}))
 }
 
@@ -119,7 +120,8 @@ func TestOwnedShards_EmptyVersionID(t *testing.T) {
 	// Write placement under the bare key (no versionID suffix) to exercise the
 	// empty-versionID fallback branch in OwnedShards.
 	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(shardPlacementKey("b", "bare-key"), encodePlacementValue([]string{"test-node", "other"}))
+		rec := PlacementRecord{Nodes: []string{"test-node", "other"}, K: 2, M: 1}
+		return txn.Set(shardPlacementKey("b", "bare-key"), encodePlacementValue(rec))
 	}))
 
 	// Empty versionID → lookupKey = "bare-key" (no "/" + versionID appended).
