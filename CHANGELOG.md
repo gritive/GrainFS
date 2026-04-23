@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.4.17] - 2026-04-24
+
+### Fixed
+
+- **LookupShardPlacement 리턴 타입 테스트 반영** (`internal/cluster/shard_placement_test.go`, `internal/cluster/ec_fix_test.go`): v0.0.4.14에서 `LookupShardPlacement` 반환 타입이 `[]string` → `PlacementRecord{Nodes,K,M}`으로 변경되었으나 테스트 업데이트가 누락되어 13개 단위 테스트가 실패하던 문제 수정. `got` → `got.Nodes`, `assert.Nil(t, got)` → `assert.Equal(t, PlacementRecord{}, got)` 등 기계적 반영.
+
 ## [0.0.4.16] - 2026-04-24
 
 ### Removed

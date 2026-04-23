@@ -87,15 +87,14 @@ func TestFSM_PutShardPlacement(t *testing.T) {
 
 	got, err := fsm.LookupShardPlacement("bkt", "obj")
 	require.NoError(t, err)
-	require.NotNil(t, got, "expected placement to exist")
-	assert.Equal(t, nodes, got)
+	assert.Equal(t, nodes, got.Nodes)
 }
 
 func TestFSM_LookupShardPlacement_NotFound(t *testing.T) {
 	fsm := NewFSM(newTestDB(t))
 	got, err := fsm.LookupShardPlacement("ghost", "obj")
 	assert.NoError(t, err)
-	assert.Nil(t, got)
+	assert.Equal(t, PlacementRecord{}, got)
 }
 
 func TestFSM_DeleteShardPlacement(t *testing.T) {
@@ -116,7 +115,7 @@ func TestFSM_DeleteShardPlacement(t *testing.T) {
 
 	nodes, err2 := fsm.LookupShardPlacement("b", "k")
 	assert.NoError(t, err2)
-	assert.Nil(t, nodes)
+	assert.Equal(t, PlacementRecord{}, nodes)
 }
 
 func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
@@ -135,8 +134,7 @@ func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
 
 	got, err := fsm.LookupShardPlacement("b", "k")
 	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, []string{"m0", "m1", "m2"}, got, "latest placement should win")
+	assert.Equal(t, []string{"m0", "m1", "m2"}, got.Nodes, "latest placement should win")
 }
 
 func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
@@ -160,8 +158,7 @@ func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 
 	got, err := freshFSM.LookupShardPlacement("b", "k")
 	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, nodes, got)
+	assert.Equal(t, nodes, got.Nodes)
 }
 
 func TestFSM_DeleteObject_CascadesToPlacement(t *testing.T) {
@@ -188,7 +185,7 @@ func TestFSM_DeleteObject_CascadesToPlacement(t *testing.T) {
 
 	cascaded, err := fsm.LookupShardPlacement("b", "k")
 	assert.NoError(t, err)
-	assert.Nil(t, cascaded, "DeleteObject should cascade to placement")
+	assert.Equal(t, PlacementRecord{}, cascaded, "DeleteObject should cascade to placement")
 }
 
 // TestFSM_DeleteObject_Tombstone_CascadesToVersionedPlacement verifies that a
@@ -220,7 +217,7 @@ func TestFSM_DeleteObject_Tombstone_CascadesToVersionedPlacement(t *testing.T) {
 	// Versioned placement must be gone.
 	gone, err := fsm.LookupShardPlacement("b", "k/"+prevVID)
 	assert.NoError(t, err)
-	assert.Nil(t, gone, "tombstone must cascade to versioned placement")
+	assert.Equal(t, PlacementRecord{}, gone, "tombstone must cascade to versioned placement")
 }
 
 // TestFSM_DeleteObjectVersion_CascadesToPlacement verifies that hard-deleting
@@ -249,7 +246,7 @@ func TestFSM_DeleteObjectVersion_CascadesToPlacement(t *testing.T) {
 
 	gone, err := fsm.LookupShardPlacement("b", "k/"+vid)
 	assert.NoError(t, err)
-	assert.Nil(t, gone, "DeleteObjectVersion must cascade to versioned placement")
+	assert.Equal(t, PlacementRecord{}, gone, "DeleteObjectVersion must cascade to versioned placement")
 }
 
 func TestShardPlacementKey_Format(t *testing.T) {
@@ -288,8 +285,7 @@ func TestShardPlacementCmd_EmptyNodes(t *testing.T) {
 	require.NoError(t, fsm.Apply(raw))
 	got, err := fsm.LookupShardPlacement("b", "k")
 	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Empty(t, got)
+	assert.Empty(t, got.Nodes)
 }
 
 // Ensure encoding does not leak other keys' placements.
@@ -308,8 +304,8 @@ func TestFSM_PlacementIsolation(t *testing.T) {
 
 	got1, _ := fsm.LookupShardPlacement("b", "k1")
 	got2, _ := fsm.LookupShardPlacement("b", "k2")
-	assert.Equal(t, []string{"n0", "n1"}, got1)
-	assert.Equal(t, []string{"n2", "n3"}, got2)
+	assert.Equal(t, []string{"n0", "n1"}, got1.Nodes)
+	assert.Equal(t, []string{"n2", "n3"}, got2.Nodes)
 
 	// Verify badgerDB keyspace: only 2 placement keys.
 	count := 0

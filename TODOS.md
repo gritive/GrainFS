@@ -60,16 +60,15 @@
 
 **동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
 
-**Phase 18 진행 중** (Dynamic EC, v0.0.4.14):
+**Phase 18 진행 중** (Dynamic EC, v0.0.4.16):
 - [ ] EC→EC reshard E2E 검증 (NodeGrowth reshard upgrade 시나리오)
-- [ ] ShardPlacementMonitor onMissing: stored k,m 기반 RepairShard 연동
-- [ ] **P0: cluster 단위 테스트 13개 실패 수정** — `LookupShardPlacement` 리턴 타입이 `[]string`→`PlacementRecord{Nodes,K,M}`으로 변경되면서 관련 테스트 업데이트 누락. 기계적 수정 (`got` → `got.Nodes`, 마찬가지로 IsActive 테스트 "too few nodes" 케이스 재조정). 영향 테스트: TestFSM_PutShardPlacement, TestFSM_LookupShardPlacement_NotFound, TestFSM_DeleteShardPlacement, TestFSM_PutShardPlacement_Overwrite, TestFSM_Snapshot_IncludesPlacement, TestFSM_DeleteObject_CascadesToPlacement, TestFSM_DeleteObject_Tombstone_CascadesToVersionedPlacement, TestFSM_DeleteObjectVersion_CascadesToPlacement, TestShardPlacementCmd_EmptyNodes, TestFSM_PlacementIsolation, TestShardPlacementKey_VersionedStorageAndLookup, TestShardPlacementKey_MultiVersionNoCollision, TestECConfig_IsActive
 - [ ] **P1: TestE2E_ClusterEC_3Node_ActiveKM21 full suite 플레이크** — 격리 실행시 PASS(0.6-5s), 전체 스위트에서 간헐 FAIL (30s Eventually 타임아웃). 실패시 `404 NoSuchKey` 관측 → FSM replication lag 의심. 리더 자리매김 지연 또는 follower 적용 지연.
 
 ## Phase 19: Performance
 
 - [ ] sendfile syscall (SetBodyStream 완료, syscall 미구현)
 - [ ] hertz: Zero-copy Read/Write
+- [ ] flatbuffers codec도 zero-allocation 고려
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] Zero-copy Protocol Bridge (NFS to S3)
 - [ ] Unified buffer cache: Centralized Page Cache
