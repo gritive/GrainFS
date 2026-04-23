@@ -4,19 +4,9 @@
 
 ### Added
 
-- **SetBucketECPolicy FSM/백엔드 테스트** (`internal/cluster/apply_test.go`, `backend_test.go`): `CmdSetBucketECPolicy` 활성화·비활성화·기본값·버킷 없음 케이스 커버 단위 테스트 5개 추가.
-
-### Changed
-
-- **QUIC inbound/outbound 연결 분리** (`internal/transport/quic.go`): 수락된 인바운드 연결을 `handleInboundConnection`으로 분리 — 임시(ephemeral) 포트 키로 `conns` 맵에 저장하지 않으므로 `evict()`·`Call()` 경로와 키 충돌 없음. 아웃바운드 연결만 `handleConnection`에서 관리.
-- **QUIC 타임아웃 named constants** (`internal/transport/quic.go`): `10 * time.Second`, `3 * time.Second` 리터럴을 `quicMaxIdleTimeout`, `quicKeepAlivePeriod` 상수로 추출.
-
-## [0.0.4.10] - 2026-04-23
-
-### Added
-
 - **per-bucket EC policy Raft 직렬화** (`internal/cluster/`): `CmdSetBucketECPolicy` FSM 명령 추가 (opcode 17). `SetBucketECPolicy`가 Raft를 통해 복제되어 클러스터 전체 노드에 원자적으로 적용. BadgerDB에 `bucketec:<bucket>` 키로 저장; 레코드 없을 때 기본값 true(EC 활성). `PutObject`에서 버킷별 EC 정책 확인 후 ClusterEC 경로 선택.
 - **FlatBuffers `SetBucketECPolicyCmd`** (`internal/cluster/clusterpb/`): `cluster.fbs`에 `SetBucketECPolicyCmd` 테이블 추가, 생성된 Go 코드 포함.
+- **SetBucketECPolicy FSM/백엔드 테스트** (`internal/cluster/apply_test.go`, `backend_test.go`): `CmdSetBucketECPolicy` 활성화·비활성화·기본값·버킷 없음 케이스 커버 단위 테스트 4개 추가.
 
 ### Fixed
 
@@ -24,6 +14,11 @@
 - **Raft RPC 타임아웃 누락** (`internal/raft/quic_rpc.go`): `AppendEntries`, `RequestVote`, `TimeoutNow`에 `context.WithTimeout(80ms)` 추가. election timeout(150ms)보다 짧아 spurious election 방지. `InstallSnapshot`은 60s 별도 타임아웃.
 - **QUIC 연결 유지 설정** (`internal/transport/quic.go`): `KeepAlivePeriod 3s`, `MaxIdleTimeout 10s` 설정으로 dead 연결 빠른 감지. 리스너·클라이언트 양쪽 동일 값 적용. 연결 종료 시 `handleConnection` defer로 `conns` 맵 자동 정리.
 - **E2E 5-node 스테이지드 스타트업** (`tests/e2e/cluster_ec_test.go`): 5개 노드 동시 시작 시 split-vote 루프 발생. 3개 먼저 시작해 리더 확보 후 나머지 2개 추가. CI 안정성 개선.
+
+### Changed
+
+- **QUIC inbound/outbound 연결 분리** (`internal/transport/quic.go`): 수락된 인바운드 연결을 `handleInboundConnection`으로 분리 — 임시(ephemeral) 포트 키로 `conns` 맵에 저장하지 않으므로 `evict()`·`Call()` 경로와 키 충돌 없음. 아웃바운드 연결만 `handleConnection`에서 관리.
+- **QUIC 타임아웃 named constants** (`internal/transport/quic.go`): `10 * time.Second`, `3 * time.Second` 리터럴을 `quicMaxIdleTimeout`, `quicKeepAlivePeriod` 상수로 추출.
 
 ## [0.0.4.9] - 2026-04-23
 
