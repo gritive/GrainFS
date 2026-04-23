@@ -67,8 +67,9 @@
 ## Phase 19: Performance
 
 - [ ] sendfile syscall (SetBodyStream 완료, syscall 미구현)
-- [ ] hertz: Zero-copy Read/Write
+- [ ] hertz: Zero-copy Read/Write — **착수 전 `SetBodyStreamWriter` + bufio.Writer overhead 실측 필수** (sendfile 이득이 bufio 레이어로 상쇄될 수 있음)
 - [ ] flatbuffers codec도 zero-allocation 고려
+- [ ] **Phase 19 착수 조건: Phase 18 P1 플레이크 해결 후 착수** (EC 코드 동시 수정 시 디버깅 복잡도 증가)
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] Zero-copy Protocol Bridge (NFS to S3)
 - [ ] Unified buffer cache: Centralized Page Cache

@@ -45,9 +45,12 @@ type encoderPool struct {
 }
 
 type shardPool struct {
-    pool sync.Pool  // [][]byte (k+m 슬라이스) 재사용
-    n    int        // k+m
+    pool     sync.Pool  // [][]byte (k+m 슬라이스) 재사용
+    n        int        // k+m
+    shardCap int        // 샤드당 byte capacity; Put 시 각 shard를 s[:0]으로 reset
 }
+
+// 조회: var encoderPools sync.Map // key: ECConfig, value: *encoderPool
 ```
 
 `ECSplit` / `ECReconstruct`는 기존 시그니처 유지, 내부에서 풀 사용.  
@@ -100,7 +103,10 @@ func getObject(s *Server, c *app.RequestContext) {
     // 스토리지가 io.WriterTo 반환 시 (예: *os.File) → sendfile 경로
     if wt, ok := rc.(io.WriterTo); ok {
         c.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
-            wt.WriteTo(w)
+            if _, err := wt.WriteTo(w); err != nil {
+                hlog.Errorf("sendfile WriteTo error: %v", err)
+                // 연결 레벨에서 에러 처리됨; 여기서 추가 조치 불필요
+            }
         })
         return
     }
@@ -152,6 +158,7 @@ func copyNFStoS3(nfsReader io.ReadCloser, s3Put func(io.Reader) error) error {
     }()
 
     err := s3Put(pr)
+    pr.CloseWithError(err)  // s3Put 실패 시 writer goroutine에 종료 신호
     wg.Wait()
     return err
 }
