@@ -165,3 +165,15 @@ func TestShardFilePath_Structure(t *testing.T) {
 	got := shardFilePath("/data", "bkt", "obj/path", 3)
 	assert.Equal(t, "/data/ec-shards/bkt/obj/path/shard_3", got)
 }
+
+func BenchmarkECSplit(b *testing.B) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := make([]byte, 1<<20) // 1 MiB
+	_, err := rand.Read(data)
+	require.NoError(b, err)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ECSplit(cfg, data)
+	}
+}

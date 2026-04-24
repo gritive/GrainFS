@@ -114,9 +114,9 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
 	header := encodeShardHeader(int64(len(data)))
 	out := make([][]byte, len(shards))
 	for i, s := range shards {
-		payload := make([]byte, 0, shardHeaderSize+len(s))
-		payload = append(payload, header[:]...)
-		payload = append(payload, s...)
+		payload := make([]byte, shardHeaderSize+len(s))
+		copy(payload, header[:])
+		copy(payload[shardHeaderSize:], s)
 		out[i] = payload
 	}
 	return out, nil
