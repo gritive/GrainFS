@@ -3,12 +3,13 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -29,7 +30,7 @@ type GossipSender struct {
 	tr       transport.Transport
 	store    *NodeStatsStore
 	interval time.Duration
-	logger   *slog.Logger
+	logger   zerolog.Logger
 }
 
 // NewGossipSender creates a sender that broadcasts nodeID's stats at the given interval.
@@ -40,7 +41,7 @@ func NewGossipSender(nodeID string, peers []string, tr transport.Transport, stor
 		tr:       tr,
 		store:    store,
 		interval: interval,
-		logger:   slog.Default().With("component", "gossip"),
+		logger:   log.With().Str("component", "gossip").Logger(),
 	}
 }
 
@@ -86,7 +87,7 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	msg := &transport.Message{Type: transport.StreamAdmin, Payload: payload}
 	for _, peer := range s.peers {
 		if err := s.tr.Send(ctx, peer, msg); err != nil {
-			s.logger.Warn("gossip: send failed", "peer", peer, "err", err)
+			s.logger.Warn().Str("peer", peer).Err(err).Msg("gossip: send failed")
 			metrics.BalancerGossipErrorsTotal.Inc()
 		} else {
 			metrics.BalancerGossipTotal.Inc()
@@ -105,7 +106,7 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 type GossipReceiver struct {
 	tr     transport.Transport
 	store  *NodeStatsStore
-	logger *slog.Logger
+	logger zerolog.Logger
 
 	// receiptCache is set via SetReceiptCache. Stored as atomic.Pointer so
 	// Run can read it without a lock and callers can wire it post-construction.
@@ -117,7 +118,7 @@ func NewGossipReceiver(tr transport.Transport, store *NodeStatsStore) *GossipRec
 	return &GossipReceiver{
 		tr:     tr,
 		store:  store,
-		logger: slog.Default().With("component", "gossip"),
+		logger: log.With().Str("component", "gossip").Logger(),
 	}
 }
 
@@ -157,7 +158,7 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
 	pb, err := decodeNodeStatsMsg(rm.Message.Payload)
 	if err != nil {
-		r.logger.Warn("gossip: invalid payload", "err", err)
+		r.logger.Warn().Err(err).Msg("gossip: invalid payload")
 		return
 	}
 	nodeID := string(pb.NodeId())
@@ -166,7 +167,7 @@ func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
 	}
 	// Verify the claimed NodeId matches the actual sender address to prevent spoofing.
 	if !nodeIDMatchesFrom(nodeID, rm.From) {
-		r.logger.Warn("gossip: NodeId mismatch, dropping", "claimed", nodeID, "from", rm.From)
+		r.logger.Warn().Str("claimed", nodeID).Str("from", rm.From).Msg("gossip: NodeId mismatch, dropping")
 		return
 	}
 	var joinedAt time.Time
@@ -189,7 +190,7 @@ func (r *GossipReceiver) handleReceiptGossip(rm *transport.ReceivedMessage) {
 	}
 	pb, err := decodeReceiptGossipMsg(rm.Message.Payload)
 	if err != nil {
-		r.logger.Warn("receipt-gossip: invalid payload", "err", err)
+		r.logger.Warn().Err(err).Msg("receipt-gossip: invalid payload")
 		return
 	}
 	nodeID := string(pb.NodeId())
@@ -197,7 +198,7 @@ func (r *GossipReceiver) handleReceiptGossip(rm *transport.ReceivedMessage) {
 		return
 	}
 	if !nodeIDMatchesFrom(nodeID, rm.From) {
-		r.logger.Warn("receipt-gossip: NodeId mismatch, dropping", "claimed", nodeID, "from", rm.From)
+		r.logger.Warn().Str("claimed", nodeID).Str("from", rm.From).Msg("receipt-gossip: NodeId mismatch, dropping")
 		return
 	}
 	n := pb.ReceiptIdsLength()

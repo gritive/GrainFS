@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +17,8 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -45,7 +46,7 @@ type DistributedBackend struct {
 	db          *badger.DB
 	node        *raft.Node
 	fsm         *FSM
-	logger      *slog.Logger
+	logger      zerolog.Logger
 	lastApplied atomic.Uint64
 	onApply     OnApplyFunc
 	snapMgr     *raft.SnapshotManager
@@ -78,7 +79,7 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		db:       db,
 		node:     node,
 		fsm:      fsm,
-		logger:   slog.With("component", "distributed-backend"),
+		logger:   log.With().Str("component", "distributed-backend").Logger(),
 		registry: NewRegistry(),
 	}, nil
 }
@@ -158,7 +159,7 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			return
 		case entry := <-b.node.ApplyCh():
 			if err := b.fsm.Apply(entry.Command); err != nil {
-				b.logger.Error("fsm apply error", "index", entry.Index, "error", err)
+				b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
 			}
 			b.lastApplied.Store(entry.Index)
 
@@ -170,7 +171,7 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			// Check if snapshot should be taken
 			if b.snapMgr != nil {
 				if b.snapMgr.MaybeTrigger(entry.Index, entry.Term) {
-					b.logger.Info("snapshot taken", "index", entry.Index, "term", entry.Term)
+					b.logger.Info().Uint64("index", entry.Index).Uint64("term", entry.Term).Msg("snapshot taken")
 					if b.snapNode != nil {
 						b.snapNode.CompactLog(entry.Index)
 					}
@@ -444,11 +445,11 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 				continue
 			}
 			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
-				b.logger.Debug("skipping unhealthy peer for replication", "peer", peer)
+				b.logger.Debug().Str("peer", peer).Msg("skipping unhealthy peer for replication")
 				continue
 			}
 			if err := b.shardSvc.WriteShard(ctx, peer, bucket, shardKey, 0, data); err != nil {
-				b.logger.Warn("data replication failed", "peer", peer, "bucket", bucket, "key", key, "error", err)
+				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
 				if b.peerHealth != nil {
 					b.peerHealth.MarkUnhealthy(peer)
 				}
@@ -622,8 +623,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		}
 		// Reconstruction failed — log and fall through to any legacy local/peer
 		// full-object copy that may still exist (e.g. mid-migration state).
-		b.logger.Warn("ec reconstruct failed, falling back to N× path",
-			"bucket", bucket, "key", key, "error", ecErr)
+		b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ec reconstruct failed, falling back to N× path")
 	}
 
 	// Try the version-addressable local path first (new writers), then the

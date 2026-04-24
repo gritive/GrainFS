@@ -1,11 +1,11 @@
 package server
 
 import (
-	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -109,13 +109,11 @@ func (e *receiptTrackingEmitter) FinalizeSession(correlationID string) {
 
 	r := buildReceipt(correlationID, sess.events)
 	if err := receipt.Sign(r, e.keyStore); err != nil {
-		slog.Warn("receipt: sign failed, session not persisted",
-			"correlation_id", correlationID, "err", err)
+		log.Warn().Str("correlation_id", correlationID).Err(err).Msg("receipt: sign failed, session not persisted")
 		return
 	}
 	if err := e.store.Put(r); err != nil {
-		slog.Warn("receipt: store failed",
-			"correlation_id", correlationID, "receipt_id", r.ReceiptID, "err", err)
+		log.Warn().Str("correlation_id", correlationID).Str("receipt_id", r.ReceiptID).Err(err).Msg("receipt: store failed")
 	}
 }
 

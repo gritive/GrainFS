@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -99,7 +100,7 @@ func (w *WAL) Close() error {
 	defer w.mu.Unlock()
 	if w.file != nil {
 		if err := w.file.Sync(); err != nil {
-			slog.Warn("wal: sync on close failed", "err", err)
+			log.Warn().Err(err).Msg("wal: sync on close failed")
 		}
 		return w.file.Close()
 	}
@@ -114,10 +115,10 @@ func (w *WAL) AppendAsync(e Entry) {
 	select {
 	case w.ch <- e:
 	default:
-		slog.Warn("wal: channel full, writing synchronously")
+		log.Warn().Msg("wal: channel full, writing synchronously")
 		w.mu.Lock()
 		if err := w.writeEntry(e); err != nil {
-			slog.Error("wal: sync write failed", "err", err)
+			log.Error().Err(err).Msg("wal: sync write failed")
 		}
 		w.mu.Unlock()
 	}
@@ -145,7 +146,7 @@ func (w *WAL) writer() {
 		case e := <-w.ch:
 			w.mu.Lock()
 			if err := w.writeEntry(e); err != nil {
-				slog.Error("wal: write failed", "err", err)
+				log.Error().Err(err).Msg("wal: write failed")
 			}
 			w.mu.Unlock()
 		case <-w.done:
@@ -155,7 +156,7 @@ func (w *WAL) writer() {
 				case e := <-w.ch:
 					w.mu.Lock()
 					if err := w.writeEntry(e); err != nil {
-						slog.Error("wal: drain write failed", "err", err)
+						log.Error().Err(err).Msg("wal: drain write failed")
 					}
 					w.mu.Unlock()
 				default:
@@ -188,7 +189,7 @@ func (w *WAL) writeEntry(e Entry) error {
 func (w *WAL) rotate(firstSeq uint64) error {
 	if w.file != nil {
 		if err := w.file.Sync(); err != nil {
-			slog.Warn("wal: sync on rotate failed", "err", err)
+			log.Warn().Err(err).Msg("wal: sync on rotate failed")
 		}
 		w.file.Close()
 		w.file = nil
@@ -225,7 +226,7 @@ func (w *WAL) scanMaxSeq() (uint64, error) {
 		}
 		seq, err := lastSeqInFile(filepath.Join(w.dir, e.Name()))
 		if err != nil {
-			slog.Warn("wal: scan failed", "file", e.Name(), "err", err)
+			log.Warn().Str("file", e.Name()).Err(err).Msg("wal: scan failed")
 			continue
 		}
 		if seq > maxSeq {
@@ -268,7 +269,7 @@ func Replay(dir string, fromSeq uint64, targetTime time.Time, fn func(Entry)) (i
 		n, err := replayFile(path, fromSeq, target, fn)
 		count += n
 		if err != nil {
-			slog.Warn("wal: replay file error", "file", path, "err", err)
+			log.Warn().Str("file", path).Err(err).Msg("wal: replay file error")
 			// Continue with next file
 		}
 	}

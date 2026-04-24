@@ -3,11 +3,12 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -40,7 +41,7 @@ type ReceiptBroadcaster struct {
 	caller  Caller
 	peers   []string
 	timeout time.Duration
-	logger  *slog.Logger
+	logger  zerolog.Logger
 
 	// Observability hooks (S6). Nil-safe — counters only fire when the
 	// broadcaster is wired to real metrics.
@@ -59,11 +60,11 @@ type BroadcastMetricsRecorder interface {
 
 type noopMetrics struct{}
 
-func (noopMetrics) OnBroadcastStart()                   {}
-func (noopMetrics) OnBroadcastHit()                     {}
-func (noopMetrics) OnBroadcastMiss()                    {}
-func (noopMetrics) OnBroadcastTimeout()                 {}
-func (noopMetrics) OnBroadcastPartialSuccess(int, int)  {}
+func (noopMetrics) OnBroadcastStart()                  {}
+func (noopMetrics) OnBroadcastHit()                    {}
+func (noopMetrics) OnBroadcastMiss()                   {}
+func (noopMetrics) OnBroadcastTimeout()                {}
+func (noopMetrics) OnBroadcastPartialSuccess(int, int) {}
 
 // NewReceiptBroadcaster builds a broadcaster. peers is the list of cluster
 // members to query (caller should exclude the local node address); timeout
@@ -73,7 +74,7 @@ func NewReceiptBroadcaster(caller Caller, peers []string, timeout time.Duration)
 		caller:  caller,
 		peers:   peers,
 		timeout: timeout,
-		logger:  slog.Default().With("component", "receipt-broadcast"),
+		logger:  log.With().Str("component", "receipt-broadcast").Logger(),
 		metrics: noopMetrics{},
 	}
 }
@@ -229,11 +230,11 @@ func encodeReceiptQuery(receiptID string) []byte {
 // transport layer's trust boundary assumes peer auth, but malformed
 // payloads should still fail gracefully.
 func NewReceiptQueryHandler(lookup ReceiptLookup) func(req *transport.Message) *transport.Message {
-	logger := slog.Default().With("component", "receipt-query-handler")
+	logger := log.With().Str("component", "receipt-query-handler").Logger()
 	return func(req *transport.Message) *transport.Message {
 		id, err := decodeReceiptQueryID(req.Payload)
 		if err != nil || id == "" {
-			logger.Warn("receipt-query: invalid payload", "err", err)
+			logger.Warn().Err(err).Msg("receipt-query: invalid payload")
 			return buildQueryResponseMsg(false, nil)
 		}
 		data, found := lookup.LookupReceiptJSON(id)

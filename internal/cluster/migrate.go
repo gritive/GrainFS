@@ -3,13 +3,13 @@ package cluster
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -18,7 +18,7 @@ import (
 // It reads existing metadata from BadgerDB and re-proposes it through Raft
 // as a single-node cluster, establishing a clean Raft log baseline.
 func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
-	logger := slog.With("component", "migrate")
+	logger := log.With().Str("component", "migrate").Logger()
 
 	metaDir := filepath.Join(dataDir, "meta")
 	if _, err := os.Stat(metaDir); os.IsNotExist(err) {
@@ -84,11 +84,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 		return fmt.Errorf("scan metadata: %w", err)
 	}
 
-	logger.Info("metadata scan complete",
-		"buckets", len(buckets),
-		"objects", len(objects),
-		"multiparts", len(multiparts),
-	)
+	logger.Info().Int("buckets", len(buckets)).Int("objects", len(objects)).Int("multiparts", len(multiparts)).Msg("metadata scan complete")
 
 	// Create Raft log store
 	raftDir := filepath.Join(dataDir, "raft")
@@ -137,7 +133,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 				return
 			case entry := <-node.ApplyCh():
 				if err := fsm.Apply(entry.Command); err != nil {
-					logger.Error("fsm apply error during migration", "index", entry.Index, "error", err)
+					logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error during migration")
 				}
 			}
 		}
@@ -165,7 +161,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 			LastModified int64  `json:"LastModified"`
 		}
 		if err := json.Unmarshal(obj.meta, &meta); err != nil {
-			logger.Warn("skip malformed object meta", "bucket", obj.bucket, "key", obj.key, "error", err)
+			logger.Warn().Str("bucket", obj.bucket).Str("key", obj.key).Err(err).Msg("skip malformed object meta")
 			continue
 		}
 		data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
@@ -184,10 +180,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 		}
 	}
 
-	logger.Info("migration complete",
-		"proposed_buckets", len(buckets),
-		"proposed_objects", len(objects),
-	)
+	logger.Info().Int("proposed_buckets", len(buckets)).Int("proposed_objects", len(objects)).Msg("migration complete")
 
 	return nil
 }

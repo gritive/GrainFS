@@ -2,11 +2,11 @@ package cluster
 
 import (
 	"context"
-	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -37,7 +37,7 @@ func newTestLifecycleManager(t *testing.T, lead *fakeLeadership) *LifecycleManag
 		worker:     worker,
 		interval:   10 * time.Second,
 		pollEvery:  10 * time.Millisecond,
-		logger:     slog.Default(),
+		logger:     zerolog.Nop(),
 	}
 }
 

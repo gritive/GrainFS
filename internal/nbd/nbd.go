@@ -8,17 +8,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
 const (
-	nbdMagic       = uint64(0x4e42444d41474943) // "NBDMAGIC"
-	nbdOptionMagic = uint64(0x49484156454F5054) // "IHAVEOPT"
-	nbdReplyMagic  = uint32(0x67446698)
+	nbdMagic        = uint64(0x4e42444d41474943) // "NBDMAGIC"
+	nbdOptionMagic  = uint64(0x49484156454F5054) // "IHAVEOPT"
+	nbdReplyMagic   = uint32(0x67446698)
 	nbdRequestMagic = uint32(0x25609513)
 
 	// Newstyle handshake flags (server)
@@ -35,11 +36,11 @@ const (
 	nbdOptGo         = uint32(7)
 
 	// Option reply types
-	nbdRepAck           = uint32(1)
-	nbdRepServer        = uint32(2)
-	nbdRepInfo          = uint32(3)
-	nbdRepErrUnsup      = uint32(1 | (1 << 31))
-	nbdOptReplyMagic    = uint64(0x3e889045565a9)
+	nbdRepAck        = uint32(1)
+	nbdRepServer     = uint32(2)
+	nbdRepInfo       = uint32(3)
+	nbdRepErrUnsup   = uint32(1 | (1 << 31))
+	nbdOptReplyMagic = uint64(0x3e889045565a9)
 
 	// Info types
 	nbdInfoExport = uint16(0)
@@ -71,7 +72,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	if err != nil {
 		return fmt.Errorf("nbd listen: %w", err)
 	}
-	slog.Info("nbd server started", "component", "nbd", "addr", addr, "volume", s.volName)
+	log.Info().Str("component", "nbd").Str("addr", addr).Str("volume", s.volName).Msg("nbd server started")
 	return s.Serve(ln)
 }
 
@@ -90,7 +91,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			if closed {
 				return nil
 			}
-			slog.Error("nbd accept error", "error", err)
+			log.Error().Err(err).Msg("nbd accept error")
 			continue
 		}
 		go s.handleConn(conn)
@@ -112,19 +113,19 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("nbd: recovered panic in connection handler", "panic", r)
+			log.Error().Any("panic", r).Msg("nbd: recovered panic in connection handler")
 		}
 	}()
 
 	vol, err := s.mgr.Get(s.volName)
 	if err != nil {
-		slog.Error("nbd: volume not found", "volume", s.volName, "error", err)
+		log.Error().Str("volume", s.volName).Err(err).Msg("nbd: volume not found")
 		return
 	}
 
 	// Newstyle handshake
 	if err := s.newstyleHandshake(conn, vol); err != nil {
-		slog.Error("nbd: handshake failed", "error", err)
+		log.Error().Err(err).Msg("nbd: handshake failed")
 		return
 	}
 
@@ -134,7 +135,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			if err == io.EOF {
 				return
 			}
-			slog.Error("nbd: request failed", "error", err)
+			log.Error().Err(err).Msg("nbd: request failed")
 			return
 		}
 	}

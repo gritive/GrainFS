@@ -10,9 +10,11 @@ package cluster
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -39,7 +41,7 @@ type LifecycleManager struct {
 	cancelFn context.CancelFunc
 	workerWG sync.WaitGroup
 
-	logger *slog.Logger
+	logger zerolog.Logger
 }
 
 // Store returns the lifecycle config store shared with the worker.
@@ -59,7 +61,7 @@ func NewLifecycleManager(backend *DistributedBackend, interval time.Duration) *L
 		worker:     worker,
 		interval:   interval,
 		pollEvery:  250 * time.Millisecond,
-		logger:     slog.With("component", "lifecycle-manager"),
+		logger:     log.With().Str("component", "lifecycle-manager").Logger(),
 	}
 }
 
@@ -117,9 +119,9 @@ func (m *LifecycleManager) start(parent context.Context) {
 	m.workerWG.Add(1)
 	go func() {
 		defer m.workerWG.Done()
-		m.logger.Info("starting lifecycle worker (now leader)", "interval", m.interval)
+		m.logger.Info().Dur("interval", m.interval).Msg("starting lifecycle worker (now leader)")
 		m.worker.Run(workerCtx)
-		m.logger.Info("lifecycle worker stopped")
+		m.logger.Info().Msg("lifecycle worker stopped")
 	}()
 }
 

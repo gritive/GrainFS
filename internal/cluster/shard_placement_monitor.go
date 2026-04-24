@@ -17,10 +17,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // ShardPlacementMonitor watches local shard placements and reports missing
@@ -30,7 +32,7 @@ type ShardPlacementMonitor struct {
 	shardSvc *ShardService
 	nodeID   string
 	interval time.Duration
-	logger   *slog.Logger
+	logger   zerolog.Logger
 
 	// Observability counters (atomic for lock-free read from metrics handler).
 	lastScan         atomic.Int64 // unix nanos
@@ -48,7 +50,7 @@ func NewShardPlacementMonitor(fsm *FSM, shardSvc *ShardService, nodeID string, i
 		shardSvc: shardSvc,
 		nodeID:   nodeID,
 		interval: interval,
-		logger:   slog.With("component", "shard-placement-monitor", "node", nodeID),
+		logger:   log.With().Str("component", "shard-placement-monitor").Str("node", nodeID).Logger(),
 	}
 }
 
@@ -94,8 +96,7 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 			if _, rerr := m.shardSvc.ReadLocalShard(bucket, key, shardIdx); rerr != nil {
 				if os.IsNotExist(rerr) {
 					atomic.AddInt64(&missing, 1)
-					m.logger.Warn("missing local shard",
-						"bucket", bucket, "key", key, "shard_idx", shardIdx)
+					m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Msg("missing local shard")
 					if m.onMissing != nil {
 						repairs = append(repairs, pendingRepair{bucket, key, shardIdx})
 					}
@@ -103,8 +104,7 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 				}
 				// Non-ENOENT read error — log but don't count as missing (could be
 				// a transient I/O issue; a future scan will catch persistent corruption).
-				m.logger.Warn("shard read error during scan",
-					"bucket", bucket, "key", key, "shard_idx", shardIdx, "error", rerr)
+				m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Err(rerr).Msg("shard read error during scan")
 			}
 		}
 		return nil
@@ -133,15 +133,15 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 func (m *ShardPlacementMonitor) Start(ctx context.Context) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
-	m.logger.Info("shard placement monitor started", "interval", m.interval)
+	m.logger.Info().Dur("interval", m.interval).Msg("shard placement monitor started")
 	for {
 		select {
 		case <-ctx.Done():
-			m.logger.Info("shard placement monitor stopped")
+			m.logger.Info().Msg("shard placement monitor stopped")
 			return
 		case <-ticker.C:
 			if _, err := m.Scan(ctx); err != nil {
-				m.logger.Warn("placement scan failed", "error", err)
+				m.logger.Warn().Err(err).Msg("placement scan failed")
 			}
 		}
 	}

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -45,7 +47,7 @@ type API struct {
 	routes   RouteLookup
 	querier  PeerQuerier
 	maxRange time.Duration // 0 = unlimited; otherwise caps (to-from) on List
-	logger   *slog.Logger
+	logger   zerolog.Logger
 }
 
 // NewAPI builds an API. routes may be nil on a single-node deployment.
@@ -59,7 +61,7 @@ func NewAPI(store *Store, routes RouteLookup, querier PeerQuerier, maxRange time
 		routes:   routes,
 		querier:  querier,
 		maxRange: maxRange,
-		logger:   slog.Default().With("component", "receipt-api"),
+		logger:   log.With().Str("component", "receipt-api").Logger(),
 	}
 }
 
@@ -98,8 +100,7 @@ func (a *API) ServeGetReceipt(w http.ResponseWriter, r *http.Request, id string)
 			// Fall through: cached peer didn't have it (rolling window
 			// drift) or the call failed. Broadcast will pick up the slack.
 			if err != nil {
-				a.logger.Warn("receipt-api: routed peer query failed, falling back to broadcast",
-					"id", id, "peer", peer, "err", err)
+				a.logger.Warn().Str("id", id).Str("peer", peer).Err(err).Msg("receipt-api: routed peer query failed, falling back to broadcast")
 			}
 		}
 	}
@@ -116,7 +117,7 @@ func (a *API) ServeGetReceipt(w http.ResponseWriter, r *http.Request, id string)
 			http.Error(w, `{"error":"cluster broadcast timed out"}`, http.StatusServiceUnavailable)
 			return
 		}
-		a.logger.Warn("receipt-api: broadcast error", "id", id, "err", err)
+		a.logger.Warn().Str("id", id).Err(err).Msg("receipt-api: broadcast error")
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
 	}
@@ -137,7 +138,7 @@ func (a *API) ServeGetByCorrelationID(w http.ResponseWriter, correlationID strin
 			http.Error(w, `{"error":"receipt not found"}`, http.StatusNotFound)
 			return
 		}
-		a.logger.Warn("receipt-api: get by correlation_id failed", "correlation_id", correlationID, "err", err)
+		a.logger.Warn().Str("correlation_id", correlationID).Err(err).Msg("receipt-api: get by correlation_id failed")
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
 	}
@@ -199,7 +200,7 @@ func (a *API) ServeListReceipts(w http.ResponseWriter, r *http.Request) {
 
 	receipts, err := a.store.List(from, to, limit)
 	if err != nil {
-		a.logger.Warn("receipt-api: list failed", "err", err)
+		a.logger.Warn().Err(err).Msg("receipt-api: list failed")
 		http.Error(w, `{"error":"list failed"}`, http.StatusInternalServerError)
 		return
 	}

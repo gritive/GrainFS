@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -158,18 +160,10 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 		opt(s)
 	}
 
-	// Route slog default through BroadcastHandler so log records are fanned out
-	// to SSE dashboard clients. CRITICAL: the underlying handler must write
-	// directly to stderr rather than reusing slog.Default().Handler(). The
-	// stdlib default handler emits via log.Logger, and slog.SetDefault then
-	// redirects stdlib log output back through the slog default — creating a
-	// log→slog→log recursion on log.Logger's mutex that deadlocks the first
-	// slog.Info call after New(). Use a fresh text handler here to break the
-	// loop. Also guard against re-wrapping when New() is called repeatedly.
-	if _, already := slog.Default().Handler().(*BroadcastHandler); !already {
-		base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
-		slog.SetDefault(slog.New(NewBroadcastHandler(base, s.hub)))
-	}
+	// Route zerolog global logger through broadcastWriter so every log line
+	// is also fanned out to SSE dashboard clients.
+	multi := zerolog.MultiLevelWriter(os.Stderr, &broadcastWriter{hub: s.hub})
+	log.Logger = zerolog.New(multi).With().Timestamp().Logger()
 
 	// Initialize snapshot manager once (avoids per-request allocation and concurrent seq collisions).
 	if s.dataDir != "" {
@@ -179,7 +173,7 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 			if mgr, err := snapshot.NewManager(dir, snap, walDir); err == nil {
 				s.snapMgr = mgr
 			} else {
-				slog.Warn("snapshot manager init failed, snapshot/PITR endpoints will be unavailable", "err", err)
+				log.Warn().Err(err).Msg("snapshot manager init failed, snapshot/PITR endpoints will be unavailable")
 			}
 		}
 	}
