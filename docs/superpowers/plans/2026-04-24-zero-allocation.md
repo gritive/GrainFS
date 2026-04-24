@@ -33,11 +33,14 @@
 | PR1 | `internal/cluster/ec_pool_test.go`  | 신규      | AllocsPerRun + 정확성 테스트                                  | 미완료 |
 | PR6 | `internal/encrypt/encrypt.go`       | 수정      | `EncryptWithAAD` 3→1 alloc                                    | 미완료 |
 | PR6 | `internal/encrypt/encrypt_test.go`  | 수정      | AllocsPerRun 테스트 추가                                      | 미완료 |
-| PR7 | `internal/cluster/codec.go`         | 수정      | `clusterBuilderPool` + `fbFinish` pool 반환                   | 미완료 |
-| PR7 | `internal/storage/codec.go`         | 수정      | `storageBuilderPool` + `fbFinish` pool 반환                   | 미완료 |
-| PR7 | `internal/raft/quic_rpc_codec.go`   | 수정      | `raftBuilderPool` + `fbFinishRPC` pool 반환                   | 미완료 |
-| PR7 | `internal/raft/store.go`            | 수정      | `raftBuilderPool` 사용                                        | 미완료 |
-| PR7 | `internal/volume/codec.go`          | 수정      | `volumeBuilderPool` + `fbFinish` pool 반환                    | 미완료 |
+| PR7 | `internal/cluster/codec.go`             | 수정  | `clusterBuilderPool` + `fbFinish` pool 반환 (~20함수)         | 미완료 |
+| PR7 | `internal/storage/codec.go`             | 수정  | `storageBuilderPool` + `storageFbFinish` wrapper 추가 (2함수) | 미완료 |
+| PR7 | `internal/storage/codec_test.go`        | 수정  | `marshalObject` AllocsPerRun 테스트                           | 미완료 |
+| PR7 | `internal/raft/quic_rpc_codec.go`       | 수정  | `raftBuilderPool` + `fbFinishRPC` pool 반환 (~8함수)          | 미완료 |
+| PR7 | `internal/raft/store.go`                | 수정  | `storeFbFinish` wrapper 추가 + `raftBuilderPool` 사용 (3함수) | 미완료 |
+| PR7 | `internal/raft/quic_rpc_codec_test.go`  | 수정  | raft encode AllocsPerRun 테스트                               | 미완료 |
+| PR7 | `internal/volume/codec.go`              | 수정  | `volumeBuilderPool` + `volumeFbFinish` wrapper 추가 (1함수)   | 미완료 |
+| PR7 | `internal/volume/codec_test.go`         | 수정  | `marshalVolume` AllocsPerRun 테스트                           | 미완료 |
 | PR8 | `internal/cluster/ec.go`            | 수정      | `encodeShardHeader` → `[8]byte` 반환                          | 미완료 |
 
 ---
@@ -165,19 +168,48 @@ git commit -m "feat(server): getObject io.WriterTo sendfile 경로 추가"
 
 **전제조건 없음 — Phase 18 P1 플레이크 v0.0.4.21에서 해결 완료.** EC 코드를 동시에 수정하면 디버깅이 복잡해진다.
 
-현재 `ECSplit`/`ECReconstruct`는 호출마다 `reedsolomon.New()` + 내부 `[][]byte` 슬라이스를 신규 할당한다. `sync.Pool`로 encoder와 shard 슬라이스를 재사용한다.
+현재 `ECSplit`/`ECReconstruct`는 호출마다 `reedsolomon.New()` 를 새로 할당한다. `enc.Split(data)` API는 pre-allocated `[][]byte` 인자를 받지 않으므로 shard slice pool은 사용 불가. encoderPool만 도입해 `reedsolomon.New()` alloc을 제거한다.
 
 **Files:**
 - Create: `internal/cluster/ec_pool.go`
 - Modify: `internal/cluster/ec.go`
 - Create: `internal/cluster/ec_pool_test.go`
 
-- [ ] **Step 1: Task 0에서 측정한 기준선 확인**
+- [ ] **Step 1: ECSplit / ECReconstruct alloc 기준선 실측**
 
-Task 0에서 기록한 수치를 확인한다:
-- ECSplit 기준선: _____ allocs
-- ECReconstruct 기준선: _____ allocs
-- 목표: 기준선의 1/4 이하
+```bash
+cat > /tmp/ec_baseline_test.go << 'EOF'
+package cluster
+
+import (
+    "testing"
+)
+
+func TestECSplit_Baseline(t *testing.T) {
+    cfg := ECConfig{DataShards: 4, ParityShards: 2}
+    data := make([]byte, 1<<20)
+    allocs := testing.AllocsPerRun(50, func() {
+        _, _ = ECSplit(cfg, data)
+    })
+    t.Logf("ECSplit baseline allocs: %.0f", allocs)
+}
+
+func TestECReconstruct_Baseline(t *testing.T) {
+    cfg := ECConfig{DataShards: 4, ParityShards: 2}
+    data := make([]byte, 1<<20)
+    shards, _ := ECSplit(cfg, data)
+    allocs := testing.AllocsPerRun(50, func() {
+        _, _ = ECReconstruct(cfg, shards)
+    })
+    t.Logf("ECReconstruct baseline allocs: %.0f", allocs)
+}
+EOF
+cp /tmp/ec_baseline_test.go internal/cluster/ec_baseline_test.go
+go test -v -run "TestECSplit_Baseline|TestECReconstruct_Baseline" ./internal/cluster/...
+rm internal/cluster/ec_baseline_test.go
+```
+
+로그에 출력된 수치를 Step 2의 `ecsplitBaseline` / `ecreconBaseline` 에 기록한다.
 
 - [ ] **Step 2: AllocsPerRun 회귀 테스트 작성**
 
@@ -208,12 +240,13 @@ func TestECSplit_AllocsBounded(t *testing.T) {
         _ = shards
     })
 
-    // Task 0 기준선 기반으로 목표 설정 (예: 기준선 28 → 목표 ≤7)
-    // 아래 수치는 Task 0 실측 후 업데이트 필요
-    baseline := 28.0 // Task 0에서 측정한 값으로 교체
-    target := baseline / 4
-    assert.LessOrEqual(t, allocs, target,
-        "ECSplit allocs should be ≤1/4 of baseline after pool introduction")
+    // Step 1에서 측정한 기준선 대비 감소 검증.
+    // encoderPool은 reedsolomon.New() alloc(약 1-2)만 제거.
+    // enc.Split 내부 shard/padding alloc은 제거 불가 (API 제약).
+    // 목표: Step 1 기준선 − 2 이하 (encoder alloc 제거분)
+    ecsplitBaseline := 0.0 // TODO: Step 1 실측값으로 교체
+    assert.Less(t, allocs, ecsplitBaseline,
+        "ECSplit allocs should decrease after encoderPool introduction")
 }
 
 func TestECReconstruct_AllocsBounded(t *testing.T) {
@@ -232,9 +265,8 @@ func TestECReconstruct_AllocsBounded(t *testing.T) {
         _ = out
     })
 
-    baseline := 22.0 // Task 0에서 측정한 값으로 교체
-    target := baseline / 4
-    assert.LessOrEqual(t, allocs, target)
+    ecreconBaseline := 0.0 // TODO: Step 1 실측값으로 교체
+    assert.Less(t, allocs, ecreconBaseline)
 }
 
 func TestECSplit_Correctness_WithPool(t *testing.T) {
@@ -318,55 +350,13 @@ func getEncoderPool(cfg ECConfig) *encoderPool {
     actual, _ := globalEncoderPools.LoadOrStore(cfg, p)
     return actual.(*encoderPool)
 }
-
-// shardSlicePool caches [][]byte slices of a fixed length n.
-// Each Get returns a slice with n nil-initialized elements.
-type shardSlicePool struct {
-    pool sync.Pool
-    n    int
-}
-
-func newShardSlicePool(n int) *shardSlicePool {
-    return &shardSlicePool{
-        n: n,
-        pool: sync.Pool{
-            New: func() any {
-                s := make([][]byte, n)
-                return &s
-            },
-        },
-    }
-}
-
-func (p *shardSlicePool) Get() *[][]byte {
-    sp := p.pool.Get().(*[][]byte)
-    s := *sp
-    for i := range s {
-        s[i] = nil // 이전 사용 데이터 초기화
-    }
-    return sp
-}
-
-func (p *shardSlicePool) Put(sp *[][]byte) {
-    p.pool.Put(sp)
-}
-
-// globalShardPools stores one shardSlicePool per shard count.
-var globalShardPools sync.Map // key: int (n), value: *shardSlicePool
-
-func getShardPool(n int) *shardSlicePool {
-    if v, ok := globalShardPools.Load(n); ok {
-        return v.(*shardSlicePool)
-    }
-    p := newShardSlicePool(n)
-    actual, _ := globalShardPools.LoadOrStore(n, p)
-    return actual.(*shardSlicePool)
-}
 ```
 
-- [ ] **Step 5: ec.go — ECSplit에서 풀 사용**
+> **설계 메모:** `enc.Split(data []byte) ([][]byte, error)` 는 shard slice를 내부에서 할당한다. pre-allocated destination 인자(`SplitInto`)가 없어 shardSlicePool 적용 불가. encoderPool만으로 `reedsolomon.New()` alloc을 제거한다.
 
-`internal/cluster/ec.go`의 `ECSplit` 함수를 수정한다:
+- [ ] **Step 5: ec.go — ECSplit에서 encoderPool 사용**
+
+`internal/cluster/ec.go`의 `ECSplit` 함수를 수정한다. `enc.Split(data)` API는 그대로 사용하고, encoder만 풀에서 꺼낸다:
 
 ```go
 func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
@@ -374,13 +364,8 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
     enc := ep.Get()
     defer ep.Put(enc)
 
-    sp := getShardPool(cfg.NumShards())
-    shardsPtr := sp.Get()
-    shards := *shardsPtr
-    defer sp.Put(shardsPtr)
-
-    // enc.Split은 내부적으로 shards를 채운다
-    if err := enc.SplitInto(data, shards); err != nil {
+    shards, err := enc.Split(data)
+    if err != nil {
         return nil, fmt.Errorf("ec split: %w", err)
     }
     if err := enc.Encode(shards); err != nil {
@@ -391,7 +376,7 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
     out := make([][]byte, len(shards))
     for i, s := range shards {
         payload := make([]byte, 0, shardHeaderSize+len(s))
-        payload = append(payload, header...)
+        payload = append(payload, header[:]...)
         payload = append(payload, s...)
         out[i] = payload
     }
@@ -399,15 +384,7 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
 }
 ```
 
-> **구현 메모:** `reedsolomon.Encoder`에 `SplitInto(data []byte, dst [][]byte) error` 메서드가 있는지 확인 필요. 없으면 기존 `enc.Split(data)` 호출 후 결과를 복사하는 방식 유지. `enc.Split`은 내부 슬라이스를 반환하므로, 풀에서 꺼낸 `shards` 슬라이스에 직접 쓰려면 API 확인이 필요하다.
-
-```bash
-grep -r "SplitInto\|func.*Split" $(go env GOPATH)/pkg/mod/github.com/klauspost/reedsolomon*/reedsolomon.go 2>/dev/null | head -5
-```
-
-`SplitInto`가 없으면 `ECReconstruct`에서만 풀을 사용하고, `ECSplit`은 encoder만 풀로 관리한다.
-
-- [ ] **Step 6: ec.go — ECReconstruct에서 풀 사용**
+- [ ] **Step 6: ec.go — ECReconstruct에서 encoderPool 사용**
 
 ```go
 func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {
@@ -419,11 +396,7 @@ func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {
     enc := ep.Get()
     defer ep.Put(enc)
 
-    sp := getShardPool(cfg.NumShards())
-    bodiesPtr := sp.Get()
-    bodies := *bodiesPtr
-    defer sp.Put(bodiesPtr)
-
+    bodies := make([][]byte, len(shards))
     var origSize int64 = -1
     for i, s := range shards {
         if s == nil {
@@ -583,15 +556,25 @@ func (e *Encryptor) EncryptWithAAD(plaintext, aad []byte) ([]byte, error) {
 }
 ```
 
-- [ ] **Step 5: 테스트 통과 확인**
+- [ ] **Step 5: nonce escape 분석 — [12]byte가 스택에 머무는지 확인**
+
+```bash
+go build -gcflags='-m=2' ./internal/encrypt/... 2>&1 | grep "nonce"
+```
+
+Expected: `nonce does not escape` 또는 출력 없음.  
+만약 `nonce escapes to heap` 이면 nonce가 heap alloc되어 1 alloc 목표가 무의미해진다.  
+그 경우 `var nonce [12]byte`를 `[]byte` 로 되돌리고 alloc target을 2로 조정한다.
+
+- [ ] **Step 6: 테스트 통과 확인**
 
 ```bash
 go test -v -run "TestEncryptWithAAD_AllocsBounded" ./internal/encrypt/...
 ```
 
-Expected: `PASS` — 1 alloc
+Expected: `PASS` — 1 alloc (nonce가 스택에 머무는 경우)
 
-- [ ] **Step 6: 기존 암복호화 정확성 테스트 통과 확인**
+- [ ] **Step 7: 기존 암복호화 정확성 테스트 통과 확인**
 
 ```bash
 go test -race -count=1 ./internal/encrypt/...
@@ -599,13 +582,13 @@ go test -race -count=1 ./internal/encrypt/...
 
 Expected: 모두 `PASS`
 
-- [ ] **Step 7: gofmt**
+- [ ] **Step 8: gofmt**
 
 ```bash
 gofmt -w internal/encrypt/encrypt.go internal/encrypt/encrypt_test.go
 ```
 
-- [ ] **Step 8: E2E 테스트 통과 확인**
+- [ ] **Step 9: E2E 테스트 통과 확인**
 
 ```bash
 make build && make test-e2e
@@ -613,7 +596,7 @@ make build && make test-e2e
 
 Expected: 모두 `PASS`
 
-- [ ] **Step 9: 커밋**
+- [ ] **Step 10: 커밋**
 
 ```bash
 git add internal/encrypt/encrypt.go internal/encrypt/encrypt_test.go
@@ -681,20 +664,23 @@ func fbFinish(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 }
 ```
 
-모든 encode 함수에서 `flatbuffers.NewBuilder(N)` 호출을 `clusterBuilderPool.Get().(*flatbuffers.Builder)` 로 교체한다. 예시:
+모든 encode 함수에서 `flatbuffers.NewBuilder(N)` 호출을 `clusterBuilderPool.Get().(*flatbuffers.Builder)` 로 교체한다. ~20개 함수 누락 방지를 위해 sed 사용:
 
-```go
-// 변경 전
-func EncodeCreateBucket(name string) ([]byte, error) {
-    b := flatbuffers.NewBuilder(64)
-    ...
-}
+```bash
+# 교체 전 개수 확인
+grep -c 'flatbuffers.NewBuilder' internal/cluster/codec.go
 
-// 변경 후
-func EncodeCreateBucket(name string) ([]byte, error) {
-    b := clusterBuilderPool.Get().(*flatbuffers.Builder)
-    ...
-}
+# 일괄 교체
+sed -i '' 's/flatbuffers\.NewBuilder([0-9]*)/clusterBuilderPool.Get().(* flatbuffers.Builder)/g' internal/cluster/codec.go
+
+# 공백 제거 (sed가 * 앞에 공백 삽입할 경우)
+sed -i '' 's/\*[[:space:]]*flatbuffers\.Builder/\*flatbuffers.Builder/g' internal/cluster/codec.go
+
+# 교체 후 확인 — 0개여야 함
+grep -c 'flatbuffers.NewBuilder' internal/cluster/codec.go
+
+# pool 호출 개수 확인
+grep -c 'clusterBuilderPool.Get' internal/cluster/codec.go
 ```
 
 import에 `"sync"`가 없으면 추가:
@@ -740,17 +726,43 @@ var storageBuilderPool = sync.Pool{
 }
 ```
 
-`storage/codec.go`의 모든 `flatbuffers.NewBuilder(N)` 호출을 `storageBuilderPool.Get().(*flatbuffers.Builder)` 로 교체.
+`storage/codec.go`에는 `fbFinish` helper가 없다. 로컬 wrapper를 추가하고 inline 패턴을 교체한다:
 
-storage의 `fbFinish`가 없으면 직접 패턴 확인 (`b.Finish(root); raw := b.FinishedBytes(); out := make...; copy...` 패턴을 찾아 pool 반환 추가):
-
-```bash
-grep -n "NewBuilder\|FinishedBytes\|Reset\(\)" internal/storage/codec.go
+```go
+// storageBuilderPool 아래에 추가
+func storageFbFinish(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
+    b.Finish(root)
+    raw := b.FinishedBytes()
+    out := make([]byte, len(raw))
+    copy(out, raw)
+    b.Reset()
+    storageBuilderPool.Put(b)
+    return out
+}
 ```
 
-각 encode 함수 마지막에 `b.Reset(); storageBuilderPool.Put(b)` 추가.
+기존 inline 패턴을 `storageFbFinish(b, root)` 호출로 교체한다:
 
-- [ ] **Step 6: storage/codec.go 테스트 통과 확인**
+```bash
+# inline 패턴 위치 확인
+grep -n "FinishedBytes\|NewBuilder" internal/storage/codec.go
+```
+
+- [ ] **Step 6: storage/codec.go AllocsPerRun 테스트 추가 + 통과 확인**
+
+`internal/storage/codec_test.go` 에 추가 (없으면 신규 생성):
+
+```go
+func TestMarshalObject_AllocsBounded(t *testing.T) {
+    obj := &ObjectInfo{Key: "testkey", Size: 1024, ContentType: "application/octet-stream"}
+    _, _ = marshalObject(obj)
+
+    allocs := testing.AllocsPerRun(100, func() {
+        _, _ = marshalObject(obj)
+    })
+    assert.LessOrEqual(t, allocs, 2.0, "marshalObject should allocate ≤2 after builder pool")
+}
+```
 
 ```bash
 go test -race -count=1 ./internal/storage/...
@@ -766,7 +778,7 @@ var raftBuilderPool = sync.Pool{
 }
 ```
 
-`fbFinishRPC` 함수 수정:
+`fbFinishRPC` 함수 수정 (기존 wrapper 교체):
 
 ```go
 func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
@@ -780,9 +792,43 @@ func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 }
 ```
 
-`quic_rpc_codec.go`와 `store.go`의 모든 `flatbuffers.NewBuilder(N)` → `raftBuilderPool.Get().(*flatbuffers.Builder)` 교체.
+`raft/store.go`는 `fbFinishRPC`가 없다. 로컬 wrapper 추가:
 
-- [ ] **Step 8: raft 테스트 통과 확인**
+```go
+// raft/store.go 상단 — raftBuilderPool은 quic_rpc_codec.go에 있으므로 해당 파일에서 참조 가능
+// 동일 패키지이므로 pool 변수 공유됨
+func storeFbFinish(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
+    b.Finish(root)
+    raw := b.FinishedBytes()
+    out := make([]byte, len(raw))
+    copy(out, raw)
+    b.Reset()
+    raftBuilderPool.Put(b)
+    return out
+}
+```
+
+`quic_rpc_codec.go`와 `store.go`의 모든 `flatbuffers.NewBuilder(N)` → `raftBuilderPool.Get().(*flatbuffers.Builder)` 교체:
+
+```bash
+sed -i '' 's/flatbuffers\.NewBuilder([0-9]*)/raftBuilderPool.Get().(*flatbuffers.Builder)/g' internal/raft/quic_rpc_codec.go internal/raft/store.go
+```
+
+- [ ] **Step 8: raft AllocsPerRun 테스트 추가 + 통과 확인**
+
+`internal/raft/quic_rpc_codec_test.go` 에 추가 (없으면 신규 생성):
+
+```go
+func TestEncodeRPCCommand_AllocsBounded(t *testing.T) {
+    // quic_rpc_codec.go에서 대표 encode 함수 선택 (첫 번째 public 함수)
+    // allocs 1회 워밍업 후 측정
+    allocs := testing.AllocsPerRun(100, func() {
+        // TODO: 실제 함수로 교체
+        _ = EncodeXxx(...)
+    })
+    assert.LessOrEqual(t, allocs, 2.0)
+}
+```
 
 ```bash
 go test -race -count=1 ./internal/raft/...
@@ -796,12 +842,36 @@ go test -race -count=1 ./internal/raft/...
 var volumeBuilderPool = sync.Pool{
     New: func() any { return flatbuffers.NewBuilder(128) },
 }
+
+func volumeFbFinish(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
+    b.Finish(root)
+    raw := b.FinishedBytes()
+    out := make([]byte, len(raw))
+    copy(out, raw)
+    b.Reset()
+    volumeBuilderPool.Put(b)
+    return out
+}
 ```
 
 `flatbuffers.NewBuilder(N)` → `volumeBuilderPool.Get().(*flatbuffers.Builder)` 교체.  
-함수 마지막에 `b.Reset(); volumeBuilderPool.Put(b)` 추가.
+inline `b.Finish(); FinishedBytes(); make(); copy()` 패턴을 `volumeFbFinish(b, root)` 로 교체.
 
-- [ ] **Step 10: volume 테스트 통과 확인**
+- [ ] **Step 10: volume AllocsPerRun 테스트 추가 + 통과 확인**
+
+`internal/volume/codec_test.go` 에 추가 (없으면 신규 생성):
+
+```go
+func TestMarshalVolume_AllocsBounded(t *testing.T) {
+    vol := &Volume{Name: "testvol", Size: 1 << 30}
+    _, _ = marshalVolume(vol)
+
+    allocs := testing.AllocsPerRun(100, func() {
+        _, _ = marshalVolume(vol)
+    })
+    assert.LessOrEqual(t, allocs, 2.0, "marshalVolume should allocate ≤2 after builder pool")
+}
+```
 
 ```bash
 go test -race -count=1 ./internal/volume/...
