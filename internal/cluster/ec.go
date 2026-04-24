@@ -11,8 +11,6 @@ import (
 	"hash/fnv"
 	"math"
 	"path/filepath"
-
-	"github.com/klauspost/reedsolomon"
 )
 
 // Default EC parameters for 4+2 Reed-Solomon. Exposed so serve flags
@@ -102,7 +100,7 @@ func decodeShardHeader(data []byte) (origSize int64, body []byte, err error) {
 // ECSplit encodes object data into k+m shards ready for per-node storage.
 // Each returned shard already contains the size header. Result length == cfg.NumShards().
 func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
-	enc, err := reedsolomon.New(cfg.DataShards, cfg.ParityShards)
+	enc, err := getEncoder(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ec encoder: %w", err)
 	}
@@ -148,7 +146,7 @@ func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {
 	if origSize < 0 {
 		return nil, fmt.Errorf("no readable shards")
 	}
-	enc, err := reedsolomon.New(cfg.DataShards, cfg.ParityShards)
+	enc, err := getEncoder(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ec decoder: %w", err)
 	}
