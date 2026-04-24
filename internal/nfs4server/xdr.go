@@ -15,6 +15,23 @@ type XDRWriter struct {
 	buf bytes.Buffer
 }
 
+const maxXDRWriterCap = 64 * 1024
+
+var xdrWriterPool = sync.Pool{New: func() any { return &XDRWriter{} }}
+
+func getXDRWriter() *XDRWriter {
+	return xdrWriterPool.Get().(*XDRWriter)
+}
+
+func putXDRWriter(w *XDRWriter) {
+	if w.buf.Cap() > maxXDRWriterCap {
+		w.buf = bytes.Buffer{}
+	} else {
+		w.buf.Reset()
+	}
+	xdrWriterPool.Put(w)
+}
+
 func (w *XDRWriter) WriteUint32(v uint32) {
 	var b [4]byte
 	binary.BigEndian.PutUint32(b[:], v)
