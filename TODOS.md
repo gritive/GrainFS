@@ -4,16 +4,6 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
-## Phase 16: Advanced Storage
-
-### Phase 16 Week 6 — Grafana Bundle + Demo (설계 완료, 미진행)
-
-- [ ] `deploy/grafana/self-healing.json` + `//go:embed` + `GET /dashboard/grafana.json`
-- [ ] `docs/grafana-quickstart.md`
-- [ ] `scripts/demo/pull-the-disk.sh` 90초 3막 데모 + README GIF embed
-- [ ] README top section: "See it heal. See it prove it."
-- [ ] CI: `grafana-cli plugin validate-dashboard` 호환성 가드
-
 ### 기타
 
 - [ ] Thin provisioning
@@ -56,7 +46,7 @@
 ## Phase 19: Performance
 
 - [ ] go-billy: Direct File I/O; O_DIRECT
-- [ ] Zero-copy Protocol Bridge (NFS to S3)
+- [ ] Peer fetch zero-copy: `getObjectEC` 피어 경로에서 QUIC stream 직접 반환 (`[]byte` 중간 버퍼 제거)
 - [ ] Unified buffer cache: Centralized Page Cache
 - [ ] io_uring
 - [ ] SPDK
