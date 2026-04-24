@@ -242,28 +242,31 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 		obj, err := d.backend.HeadObject(nfs4Bucket, key)
 		if err != nil {
 			// Might be a directory
-			w.WriteUint32(2) // bitmap length = 2 words
-			w.WriteUint32(0) // word 0 attrs
-			w.WriteUint32(0) // word 1 attrs
-			attrVals := encodeMinimalDirAttrs()
-			w.WriteOpaque(attrVals)
+			w.WriteUint32(2)      // bitmap length = 2 words
+			w.WriteUint32(0)      // word 0 attrs
+			w.WriteUint32(0)      // word 1 attrs
+			w.WriteUint32(12)     // attrvals length = 12 bytes (type:4 + size:8)
+			w.WriteUint32(NF4DIR) // type
+			w.WriteUint64(4096)   // size
 			return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 		}
 
 		w.WriteUint32(2)
 		w.WriteUint32(0)
 		w.WriteUint32(0)
-		attrVals := encodeFileAttrs(obj)
-		w.WriteOpaque(attrVals)
+		w.WriteUint32(12)               // attrvals length = 12 bytes
+		w.WriteUint32(NF4REG)           // type
+		w.WriteUint64(uint64(obj.Size)) // size
 		return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 	}
 
 	// Root directory attributes
-	w.WriteUint32(2) // bitmap length = 2 words
-	w.WriteUint32(0) // word 0
-	w.WriteUint32(0) // word 1
-	attrVals := encodeMinimalDirAttrs()
-	w.WriteOpaque(attrVals)
+	w.WriteUint32(2)      // bitmap length = 2 words
+	w.WriteUint32(0)      // word 0
+	w.WriteUint32(0)      // word 1
+	w.WriteUint32(12)     // attrvals length = 12 bytes (type:4 + size:8)
+	w.WriteUint32(NF4DIR) // type
+	w.WriteUint64(4096)   // size
 	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
@@ -551,22 +554,6 @@ func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
 }
 
 // --- Helper functions ---
-
-func encodeMinimalDirAttrs() []byte {
-	w := getXDRWriter()
-	// type = NF4DIR
-	w.WriteUint32(NF4DIR)
-	// size = 4096
-	w.WriteUint64(4096)
-	return xdrWriterBytes(w)
-}
-
-func encodeFileAttrs(obj *storage.Object) []byte {
-	w := getXDRWriter()
-	w.WriteUint32(NF4REG)
-	w.WriteUint64(uint64(obj.Size))
-	return xdrWriterBytes(w)
-}
 
 func encodeSetAttrResult() []byte {
 	w := getXDRWriter()

@@ -438,9 +438,8 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 // OpRenew is the RENEW operation code.
 const OpRenew = 30
 
-// EncodeCompoundResponse encodes a COMPOUND4res to XDR.
-func EncodeCompoundResponse(resp *CompoundResponse) []byte {
-	w := getXDRWriter()
+// encodeCompoundResponseInto writes a COMPOUND4res directly into w (zero extra allocation).
+func encodeCompoundResponseInto(w *XDRWriter, resp *CompoundResponse) {
 	w.WriteUint32(uint32(resp.Status))
 	w.WriteString(resp.Tag)
 	w.WriteUint32(uint32(len(resp.Results)))
@@ -451,5 +450,11 @@ func EncodeCompoundResponse(resp *CompoundResponse) []byte {
 			w.buf.Write(result.Data)
 		}
 	}
+}
+
+// EncodeCompoundResponse encodes a COMPOUND4res to XDR.
+func EncodeCompoundResponse(resp *CompoundResponse) []byte {
+	w := getXDRWriter()
+	encodeCompoundResponseInto(w, resp)
 	return xdrWriterBytes(w)
 }

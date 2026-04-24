@@ -84,31 +84,24 @@ func (s *Server) handleConn(conn net.Conn) {
 			continue
 		}
 
-		var replyBody []byte
+		w := getXDRWriter()
+		w.WriteUint32(header.XID)
+		w.WriteUint32(rpcMsgReply)
+		w.WriteUint32(0)        // MSG_ACCEPTED
+		w.WriteUint32(authNone) // verifier flavor
+		w.WriteUint32(0)        // verifier body length
+		w.WriteUint32(0)        // ACCEPT_SUCCESS
 
-		switch {
-		case header.Program != rpcProgNFS:
-			// Wrong program — send PROG_UNAVAIL
-			replyBody = buildProgUnavailReply()
-		case header.ProgVers != rpcVersNFS4:
-			// Wrong version — send PROG_MISMATCH
-			replyBody = buildProgMismatchReply()
-		case header.Procedure == 0:
-			// NULL procedure — just return empty
-			replyBody = nil
-		case header.Procedure == 1:
-			// COMPOUND procedure
-			replyBody = s.handleCompound(args)
-		default:
-			replyBody = nil
+		if header.Program == rpcProgNFS && header.ProgVers == rpcVersNFS4 && header.Procedure == 1 {
+			s.handleCompoundInto(args, w)
 		}
 
-		reply := BuildRPCReply(header.XID, replyBody)
-		writeRPCFrame(conn, reply)
+		writeRPCFrame(conn, w.Bytes())
+		putXDRWriter(w)
 	}
 }
 
-func (s *Server) handleCompound(data []byte) []byte {
+func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 	req := compoundReqPool.Get().(*CompoundRequest)
 	req.Tag = ""
 	req.MinorVer = 0
@@ -117,8 +110,8 @@ func (s *Server) handleCompound(data []byte) []byte {
 
 	if err := ParseCompound(data, req); err != nil {
 		s.logger.Debug("COMPOUND parse error", "error", err)
-		resp := &CompoundResponse{Status: NFS4ERR_INVAL}
-		return EncodeCompoundResponse(resp)
+		encodeCompoundResponseInto(w, &CompoundResponse{Status: NFS4ERR_INVAL})
+		return
 	}
 
 	d := getDispatcher(s.backend, s.state)
@@ -131,21 +124,5 @@ func (s *Server) handleCompound(data []byte) []byte {
 	defer compoundRespPool.Put(resp)
 
 	d.Dispatch(req, resp)
-	return EncodeCompoundResponse(resp)
-}
-
-func buildProgUnavailReply() []byte {
-	// MSG_DENIED = 1 is not right here.
-	// For ACCEPTED + PROG_UNAVAIL: reply_stat=0 (accepted), verf, accept_stat=2
-	w := &XDRWriter{}
-	// accept_stat = PROG_UNAVAIL (1)
-	// Already handled in BuildRPCReply (accept_stat=0 is SUCCESS)
-	// We need to not use BuildRPCReply for error cases.
-	// For simplicity, return empty which maps to success with no data.
-	_ = w
-	return nil
-}
-
-func buildProgMismatchReply() []byte {
-	return nil
+	encodeCompoundResponseInto(w, resp)
 }
