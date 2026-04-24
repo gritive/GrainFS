@@ -319,3 +319,15 @@ func TestCodec_ObjectMeta_ACL_BackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint8(0), got.ACL, "legacy records should have ACL=0 (private)")
 }
+
+func TestEncodeObjectMeta_AllocsBounded(t *testing.T) {
+	meta := objectMeta{
+		Key: "test-key", Size: 1024, ContentType: "application/octet-stream",
+		ETag: "abc123", LastModified: 1714000000,
+	}
+	_, _ = marshalObjectMeta(meta)
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = marshalObjectMeta(meta)
+	})
+	assert.LessOrEqual(t, allocs, 2.0, "marshalObjectMeta should allocate ≤2 (output slice + copy)")
+}

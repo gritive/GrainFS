@@ -2,17 +2,24 @@ package raft
 
 import (
 	"fmt"
+	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
 
+var raftBuilderPool = sync.Pool{
+	New: func() any { return flatbuffers.NewBuilder(256) },
+}
+
 func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	b.Finish(root)
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
+	b.Reset()
+	raftBuilderPool.Put(b)
 	return out
 }
 
@@ -23,7 +30,7 @@ func encodeRPC(rpcType string, msg any) ([]byte, error) {
 		return nil, err
 	}
 
-	b := flatbuffers.NewBuilder(len(data) + 32)
+	b := raftBuilderPool.Get().(*flatbuffers.Builder)
 	typeOff := b.CreateString(rpcType)
 	var dataOff flatbuffers.UOffsetT
 	if len(data) > 0 {
@@ -42,7 +49,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 	switch rpcType {
 	case rpcTypeRequestVote:
 		args := msg.(*RequestVoteArgs)
-		b := flatbuffers.NewBuilder(64)
+		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		cidOff := b.CreateString(args.CandidateID)
 		pb.RequestVoteArgsStart(b)
 		pb.RequestVoteArgsAddTerm(b, args.Term)
@@ -54,7 +61,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeRequestVoteReply:
 		reply := msg.(*RequestVoteReply)
-		b := flatbuffers.NewBuilder(16)
+		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		pb.RequestVoteReplyStart(b)
 		pb.RequestVoteReplyAddTerm(b, reply.Term)
 		pb.RequestVoteReplyAddVoteGranted(b, reply.VoteGranted)
@@ -63,7 +70,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeAppendEntries:
 		args := msg.(*AppendEntriesArgs)
-		b := flatbuffers.NewBuilder(256)
+		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 
 		// Build LogEntry objects (must be built before Start)
 		entryOffs := make([]flatbuffers.UOffsetT, len(args.Entries))
@@ -101,7 +108,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeAppendEntriesReply:
 		reply := msg.(*AppendEntriesReply)
-		b := flatbuffers.NewBuilder(16)
+		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		pb.AppendEntriesReplyStart(b)
 		pb.AppendEntriesReplyAddTerm(b, reply.Term)
 		pb.AppendEntriesReplyAddSuccess(b, reply.Success)
@@ -110,7 +117,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeInstallSnapshot:
 		args := msg.(*InstallSnapshotArgs)
-		b := flatbuffers.NewBuilder(len(args.Data) + 64)
+		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		var dataOff flatbuffers.UOffsetT
 		if len(args.Data) > 0 {
 			dataOff = b.CreateByteVector(args.Data)
@@ -129,7 +136,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeInstallSnapshotReply:
 		reply := msg.(*InstallSnapshotReply)
-		b := flatbuffers.NewBuilder(16)
+		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		pb.InstallSnapshotReplyStart(b)
 		pb.InstallSnapshotReplyAddTerm(b, reply.Term)
 		root := pb.InstallSnapshotReplyEnd(b)

@@ -136,7 +136,7 @@ func logKey(index uint64) []byte {
 }
 
 func marshalLogEntry(entry LogEntry) []byte {
-	b := flatbuffers.NewBuilder(64)
+	b := raftBuilderPool.Get().(*flatbuffers.Builder)
 	var cmdOff flatbuffers.UOffsetT
 	if len(entry.Command) > 0 {
 		cmdOff = b.CreateByteVector(entry.Command)
@@ -148,11 +148,7 @@ func marshalLogEntry(entry LogEntry) []byte {
 		pb.LogEntryAddCommand(b, cmdOff)
 	}
 	root := pb.LogEntryEnd(b)
-	b.Finish(root)
-	raw := b.FinishedBytes()
-	out := make([]byte, len(raw))
-	copy(out, raw)
-	return out
+	return fbFinishRPC(b, root)
 }
 
 func unmarshalLogEntry(data []byte) (entry LogEntry, err error) {
@@ -312,16 +308,13 @@ func (s *BadgerLogStore) TruncateBefore(beforeIndex uint64) error {
 }
 
 func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {
-	b := flatbuffers.NewBuilder(32)
+	b := raftBuilderPool.Get().(*flatbuffers.Builder)
 	votedForOff := b.CreateString(votedFor)
 	pb.RaftStateStart(b)
 	pb.RaftStateAddTerm(b, term)
 	pb.RaftStateAddVotedFor(b, votedForOff)
 	root := pb.RaftStateEnd(b)
-	b.Finish(root)
-	raw := b.FinishedBytes()
-	data := make([]byte, len(raw))
-	copy(data, raw)
+	data := fbFinishRPC(b, root)
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(keyState, data)
 	})
@@ -354,15 +347,12 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 }
 
 func (s *BadgerLogStore) SaveSnapshot(index, term uint64, data []byte) error {
-	b := flatbuffers.NewBuilder(16)
+	b := raftBuilderPool.Get().(*flatbuffers.Builder)
 	pb.SnapshotMetaStart(b)
 	pb.SnapshotMetaAddIndex(b, index)
 	pb.SnapshotMetaAddTerm(b, term)
 	root := pb.SnapshotMetaEnd(b)
-	b.Finish(root)
-	raw := b.FinishedBytes()
-	meta := make([]byte, len(raw))
-	copy(meta, raw)
+	meta := fbFinishRPC(b, root)
 	return s.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(keySnapshotMeta, meta); err != nil {
 			return err
