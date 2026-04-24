@@ -64,6 +64,33 @@ bench: bin/$(BINARY)
 		kill $$SERVER_PID 2>/dev/null; \
 		rm -rf /tmp/grainfs-bench
 
+# bench-profile: run k6 load test while collecting pprof profiles.
+# CPU profile is collected concurrently with k6 (captures real load).
+# Results in /tmp/grainfs-bench-*.out
+bench-profile: bin/$(BINARY)
+	@echo "Starting GrainFS server with pprof..."
+	@rm -rf /tmp/grainfs-bench-profile && mkdir -p /tmp/grainfs-bench-profile
+	@./bin/$(BINARY) serve --data /tmp/grainfs-bench-profile --port 9100 \
+		--pprof-port 6060 --no-encryption --nfs-port 0 --log-level warn & \
+		SERVER_PID=$$!; \
+		sleep 2; \
+		echo "Collecting CPU profile during k6 run (30s)..."; \
+		curl -sf "http://127.0.0.1:6060/debug/pprof/profile?seconds=30" -o /tmp/grainfs-bench-cpu.out & \
+		CPU_PID=$$!; \
+		k6 run benchmarks/s3_bench.js --env BASE_URL=http://localhost:9100; \
+		wait $$CPU_PID && echo "pprof saved: /tmp/grainfs-bench-cpu.out"; \
+		for p in mutex allocs heap goroutine; do \
+			curl -sf "http://127.0.0.1:6060/debug/pprof/$$p" -o /tmp/grainfs-bench-$$p.out \
+				&& echo "pprof saved: /tmp/grainfs-bench-$$p.out"; \
+		done; \
+		kill $$SERVER_PID 2>/dev/null; \
+		rm -rf /tmp/grainfs-bench-profile; \
+		echo ""; \
+		echo "Analyse:"; \
+		echo "  go tool pprof -top /tmp/grainfs-bench-cpu.out    # CPU hotspots"; \
+		echo "  go tool pprof -top /tmp/grainfs-bench-mutex.out  # lock contention"; \
+		echo "  go tool pprof -top /tmp/grainfs-bench-allocs.out # alloc hotspots"
+
 test-nbd-docker:
 	@echo "Running NBD E2E tests in Docker..."
 	docker build -t grainfs-nbd-test -f docker/nbd-test.Dockerfile .

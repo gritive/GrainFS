@@ -42,8 +42,9 @@ func TestMain(m *testing.M) {
 		"--nfs-port", fmt.Sprintf("%d", nfsPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort())}
 
-	// GRAINFS_PPROF=1 enables pprof profiling. Profiles are saved to /tmp/grainfs-e2e-*.out
-	// after all tests complete. Inspect with: go tool pprof -top /tmp/grainfs-e2e-mutex.out
+	// GRAINFS_PPROF=1 enables comprehensive pprof profiling.
+	// CPU profile is collected concurrently with the test run (25s window).
+	// All profiles are saved to /tmp/grainfs-e2e-*.out after tests complete.
 	var pprofPort int
 	if os.Getenv("GRAINFS_PPROF") == "1" {
 		pprofPort = freePort()
@@ -66,9 +67,26 @@ func TestMain(m *testing.M) {
 
 	testS3Client = newS3Client(testServerURL)
 
+	// Start CPU profile concurrently so it captures actual test load.
+	var cpuProfileDone <-chan struct{}
+	if pprofPort > 0 {
+		done := make(chan struct{})
+		cpuProfileDone = done
+		go func() {
+			defer close(done)
+			url := fmt.Sprintf("http://127.0.0.1:%d/debug/pprof/profile?seconds=25", pprofPort)
+			if err := fetchProfile(url, "/tmp/grainfs-e2e-cpu.out"); err != nil {
+				fmt.Fprintf(os.Stderr, "cpu profile: %v\n", err)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "pprof saved: /tmp/grainfs-e2e-cpu.out\n")
+		}()
+	}
+
 	code := m.Run()
 
 	if pprofPort > 0 {
+		<-cpuProfileDone // wait for CPU profile to complete before killing server
 		dumpE2EProfiles(pprofPort)
 	}
 
@@ -77,10 +95,13 @@ func TestMain(m *testing.M) {
 }
 
 // dumpE2EProfiles fetches pprof profiles from the running server and saves them to /tmp.
-// Called only when GRAINFS_PPROF=1. Inspect results with:
+// Called only when GRAINFS_PPROF=1. CPU profile is collected separately during test run.
+// Inspect results with:
 //
-//	go tool pprof -top /tmp/grainfs-e2e-mutex.out
-//	go tool pprof -top /tmp/grainfs-e2e-heap.out
+//	go tool pprof -top /tmp/grainfs-e2e-cpu.out      # CPU hotspots
+//	go tool pprof -top /tmp/grainfs-e2e-mutex.out    # lock contention
+//	go tool pprof -top /tmp/grainfs-e2e-allocs.out   # allocation hotspots
+//	go tool pprof -top /tmp/grainfs-e2e-heap.out     # live heap
 func dumpE2EProfiles(pprofPort int) {
 	base := fmt.Sprintf("http://127.0.0.1:%d/debug/pprof", pprofPort)
 	profiles := []struct {
@@ -88,6 +109,7 @@ func dumpE2EProfiles(pprofPort int) {
 		file string
 	}{
 		{base + "/mutex", "/tmp/grainfs-e2e-mutex.out"},
+		{base + "/allocs", "/tmp/grainfs-e2e-allocs.out"},
 		{base + "/heap", "/tmp/grainfs-e2e-heap.out"},
 		{base + "/goroutine", "/tmp/grainfs-e2e-goroutine.out"},
 	}
@@ -98,7 +120,10 @@ func dumpE2EProfiles(pprofPort int) {
 			fmt.Fprintf(os.Stderr, "pprof saved: %s\n", p.file)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "\nAnalyse with:\n  go tool pprof -top /tmp/grainfs-e2e-mutex.out\n")
+	fmt.Fprintf(os.Stderr, "\nAnalyse with:\n")
+	fmt.Fprintf(os.Stderr, "  go tool pprof -top /tmp/grainfs-e2e-cpu.out    # CPU hotspots\n")
+	fmt.Fprintf(os.Stderr, "  go tool pprof -top /tmp/grainfs-e2e-mutex.out  # lock contention\n")
+	fmt.Fprintf(os.Stderr, "  go tool pprof -top /tmp/grainfs-e2e-allocs.out # alloc hotspots\n")
 }
 
 func fetchProfile(url, dest string) error {
