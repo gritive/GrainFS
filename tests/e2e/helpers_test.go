@@ -3,7 +3,9 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"testing"
@@ -36,9 +38,19 @@ func TestMain(m *testing.M) {
 
 	nfsPort := freePort()
 
-	cmd := exec.Command(binary, "serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
+	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
 		"--nfs-port", fmt.Sprintf("%d", nfsPort),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()))
+		"--nfs4-port", fmt.Sprintf("%d", freePort())}
+
+	// GRAINFS_PPROF=1 enables pprof profiling. Profiles are saved to /tmp/grainfs-e2e-*.out
+	// after all tests complete. Inspect with: go tool pprof -top /tmp/grainfs-e2e-mutex.out
+	var pprofPort int
+	if os.Getenv("GRAINFS_PPROF") == "1" {
+		pprofPort = freePort()
+		args = append(args, "--pprof-port", fmt.Sprintf("%d", pprofPort))
+	}
+
+	cmd := exec.Command(binary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -55,8 +67,51 @@ func TestMain(m *testing.M) {
 	testS3Client = newS3Client(testServerURL)
 
 	code := m.Run()
+
+	if pprofPort > 0 {
+		dumpE2EProfiles(pprofPort)
+	}
+
 	cmd.Process.Kill()
 	os.Exit(code)
+}
+
+// dumpE2EProfiles fetches pprof profiles from the running server and saves them to /tmp.
+// Called only when GRAINFS_PPROF=1. Inspect results with:
+//
+//	go tool pprof -top /tmp/grainfs-e2e-mutex.out
+//	go tool pprof -top /tmp/grainfs-e2e-heap.out
+func dumpE2EProfiles(pprofPort int) {
+	base := fmt.Sprintf("http://127.0.0.1:%d/debug/pprof", pprofPort)
+	profiles := []struct {
+		url  string
+		file string
+	}{
+		{base + "/mutex", "/tmp/grainfs-e2e-mutex.out"},
+		{base + "/heap", "/tmp/grainfs-e2e-heap.out"},
+		{base + "/goroutine", "/tmp/grainfs-e2e-goroutine.out"},
+	}
+	for _, p := range profiles {
+		if err := fetchProfile(p.url, p.file); err != nil {
+			fmt.Fprintf(os.Stderr, "pprof dump %s: %v\n", p.file, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "pprof saved: %s\n", p.file)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\nAnalyse with:\n  go tool pprof -top /tmp/grainfs-e2e-mutex.out\n")
+}
+
+func fetchProfile(url, dest string) error {
+	resp, err := http.Get(url) //nolint:noctx
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dest, data, 0o644)
 }
 
 func newS3Client(endpoint string) *s3.Client {

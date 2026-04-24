@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -82,6 +84,7 @@ func init() {
 	serveCmd.Flags().Int("heal-receipt-window", 50, "rolling window size — how many recent receipt IDs to gossip per tick")
 	serveCmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
 	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
+	serveCmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -119,6 +122,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("encryption setup: %w", err)
 		}
+	}
+
+	if pprofPort, _ := cmd.Flags().GetInt("pprof-port"); pprofPort > 0 {
+		pprofAddr := fmt.Sprintf("127.0.0.1:%d", pprofPort)
+		go func() {
+			slog.Info("pprof listening", "addr", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				slog.Warn("pprof server error", "err", err)
+			}
+		}()
 	}
 
 	otelEndpoint, _ := cmd.Flags().GetString("otel-endpoint")
