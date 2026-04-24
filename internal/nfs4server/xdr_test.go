@@ -1,6 +1,7 @@
 package nfs4server
 
 import (
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,4 +70,16 @@ func TestXDRRoundTrip_Uint64(t *testing.T) {
 	v, err := r.ReadUint64()
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0x123456789ABCDEF0), v)
+}
+
+func TestXDRReader_ReadUint32_ShortRead(t *testing.T) {
+	r := NewXDRReader([]byte{0x00, 0x01}) // only 2 bytes
+	_, err := r.ReadUint32()
+	assert.Equal(t, io.ErrUnexpectedEOF, err)
+}
+
+func TestXDRReader_ReadUint64_ShortRead(t *testing.T) {
+	r := NewXDRReader([]byte{0x00, 0x01, 0x02, 0x03}) // only 4 bytes
+	_, err := r.ReadUint64()
+	assert.Equal(t, io.ErrUnexpectedEOF, err)
 }
