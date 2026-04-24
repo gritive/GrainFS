@@ -12,6 +12,7 @@ import (
 func DecodeAWSChunkedBody(data []byte) ([]byte, error) {
 	r := bytes.NewReader(data)
 	var result bytes.Buffer
+	result.Grow(len(data)) // 청크 합산 크기 ≤ len(data) → 재할당 방지
 
 	for {
 		// Read chunk header line: "hex_size;chunk-signature=...\r\n"
