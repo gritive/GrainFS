@@ -509,9 +509,13 @@ func (f *grainFile) Read(p []byte) (int, error) {
 func (f *grainFile) ReadAt(p []byte, off int64) (int, error) {
 	if f.rc != nil {
 		if off == f.pos {
-			// 순차 접근: rc에서 직접 읽어 GetObject 추가 호출 없이 스트리밍
-			n, err := f.rc.Read(p)
+			// 순차 접근: rc에서 직접 읽어 GetObject 추가 호출 없이 스트리밍.
+			// io.ReadFull 사용으로 단축 읽기 시 비-nil 에러 반환 (io.ReaderAt 계약).
+			n, err := io.ReadFull(f.rc, p)
 			f.pos += int64(n)
+			if err == io.ErrUnexpectedEOF {
+				return n, io.EOF
+			}
 			return n, err
 		}
 		// 랜덤 접근: buf 모드로 전환
@@ -584,6 +588,11 @@ func (f *grainFile) Close() error {
 		f.fs.invalidateStatCache(f.path)
 		f.fs.invalidateParentDirCache(f.path)
 		return nil
+	}
+	// O_RDONLY 파일이 buf 모드로 전환된 경우 pool에 반환
+	if f.buf != nil {
+		putBuf(f.buf)
+		f.buf = nil
 	}
 	return nil
 }
