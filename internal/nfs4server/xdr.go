@@ -15,15 +15,15 @@ type XDRWriter struct {
 }
 
 func (w *XDRWriter) WriteUint32(v uint32) {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, v)
-	w.buf.Write(b)
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	w.buf.Write(b[:])
 }
 
 func (w *XDRWriter) WriteUint64(v uint64) {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	w.buf.Write(b)
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], v)
+	w.buf.Write(b[:])
 }
 
 func (w *XDRWriter) WriteOpaque(data []byte) {
@@ -53,19 +53,19 @@ func NewXDRReader(data []byte) *XDRReader {
 }
 
 func (r *XDRReader) ReadUint32() (uint32, error) {
-	b := make([]byte, 4)
-	if _, err := io.ReadFull(r.r, b); err != nil {
+	var b [4]byte
+	if _, err := io.ReadFull(r.r, b[:]); err != nil {
 		return 0, err
 	}
-	return binary.BigEndian.Uint32(b), nil
+	return binary.BigEndian.Uint32(b[:]), nil
 }
 
 func (r *XDRReader) ReadUint64() (uint64, error) {
-	b := make([]byte, 8)
-	if _, err := io.ReadFull(r.r, b); err != nil {
+	var b [8]byte
+	if _, err := io.ReadFull(r.r, b[:]); err != nil {
 		return 0, err
 	}
-	return binary.BigEndian.Uint64(b), nil
+	return binary.BigEndian.Uint64(b[:]), nil
 }
 
 func (r *XDRReader) ReadOpaque() ([]byte, error) {
@@ -84,8 +84,8 @@ func (r *XDRReader) ReadOpaque() ([]byte, error) {
 	}
 	pad := (4 - int(length)%4) % 4
 	if pad > 0 {
-		skip := make([]byte, pad)
-		io.ReadFull(r.r, skip)
+		var skip [3]byte
+		io.ReadFull(r.r, skip[:pad])
 	}
 	return data, nil
 }
@@ -257,24 +257,24 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 
 	case OpRead:
 		// stateid (seqid:4 + other:12) + offset:8 + count:4
-		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf) // stateid
+		var buf [16]byte
+		io.ReadFull(r.r, buf[:]) // stateid
 		offset, _ := r.ReadUint64()
 		count, _ := r.ReadUint32()
 		w := &XDRWriter{}
-		w.buf.Write(buf)
+		w.buf.Write(buf[:])
 		w.WriteUint64(offset)
 		w.WriteUint32(count)
 		return w.Bytes(), nil
 
 	case OpWrite:
-		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf) // stateid
+		var buf [16]byte
+		io.ReadFull(r.r, buf[:]) // stateid
 		offset, _ := r.ReadUint64()
 		stable, _ := r.ReadUint32()
 		data, _ := r.ReadOpaque()
 		w := &XDRWriter{}
-		w.buf.Write(buf)
+		w.buf.Write(buf[:])
 		w.WriteUint64(offset)
 		w.WriteUint32(stable)
 		w.WriteOpaque(data)
