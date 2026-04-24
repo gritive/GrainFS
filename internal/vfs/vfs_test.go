@@ -594,3 +594,98 @@ func TestRenameNonexistent(t *testing.T) {
 	err := fs.Rename("nonexistent.txt", "new.txt")
 	assert.Error(t, err)
 }
+
+// TestGrainFileStreamRead: 읽기 전용 Open은 스트리밍 모드(rc != nil, buf == nil)여야 하며
+// io.ReadAll로 전체 내용을 올바르게 반환해야 한다.
+func TestGrainFileStreamRead(t *testing.T) {
+	fs := setupFS(t)
+
+	content := []byte("hello streaming world")
+	f, err := fs.Create("stream.txt")
+	require.NoError(t, err)
+	_, err = f.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	// 읽기 전용으로 열면 스트리밍 모드여야 함
+	f2, err := fs.Open("stream.txt")
+	require.NoError(t, err)
+
+	gf := f2.(*grainFile)
+	assert.NotNil(t, gf.rc, "읽기 전용 Open은 rc가 설정되어야 함 (스트리밍 모드)")
+	assert.Nil(t, gf.buf, "스트리밍 모드에서 buf는 nil이어야 함")
+
+	got, err := io.ReadAll(f2)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+	require.NoError(t, f2.Close())
+}
+
+// TestGrainFileSeekFallback: 스트리밍 모드 중 Seek 호출 시 loadExisting()으로 fallback해
+// buf 모드로 전환되어야 하며, 이후 읽기는 파일 전체를 정확히 반환해야 한다.
+func TestGrainFileSeekFallback(t *testing.T) {
+	fs := setupFS(t)
+
+	content := []byte("0123456789")
+	f, err := fs.Create("seek.txt")
+	require.NoError(t, err)
+	_, err = f.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	f2, err := fs.Open("seek.txt")
+	require.NoError(t, err)
+
+	// 앞 5바이트 스트리밍 읽기
+	buf := make([]byte, 5)
+	n, err := f2.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	assert.Equal(t, []byte("01234"), buf)
+
+	// Seek(0, SeekStart) → rc fallback 트리거
+	pos, err := f2.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), pos)
+
+	gf := f2.(*grainFile)
+	assert.Nil(t, gf.rc, "Seek 후 rc는 nil이어야 함 (buf 모드로 전환)")
+	assert.NotNil(t, gf.buf, "Seek 후 buf가 로드되어야 함")
+
+	// 처음부터 전체 읽기
+	got, err := io.ReadAll(f2)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+	require.NoError(t, f2.Close())
+}
+
+// TestGrainFileCloseWithUnconsumedRC: Read 없이 Close하면 rc.Close()가 호출되어
+// 리소스 릭이 발생하지 않아야 하며, 이후 파일 재접근이 가능해야 한다.
+func TestGrainFileCloseWithUnconsumedRC(t *testing.T) {
+	fs := setupFS(t)
+
+	f, err := fs.Create("no-read.txt")
+	require.NoError(t, err)
+	_, err = f.Write([]byte("data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	// 열고 읽지 않은 채 닫기
+	f2, err := fs.Open("no-read.txt")
+	require.NoError(t, err)
+
+	gf := f2.(*grainFile)
+	assert.NotNil(t, gf.rc, "Open 직후 스트리밍 모드여야 함")
+
+	err = f2.Close()
+	require.NoError(t, err)
+	assert.Nil(t, gf.rc, "Close 후 rc는 nil이어야 함")
+
+	// 파일이 손상되지 않았는지 재확인
+	f3, err := fs.Open("no-read.txt")
+	require.NoError(t, err)
+	got, err := io.ReadAll(f3)
+	require.NoError(t, err)
+	require.NoError(t, f3.Close())
+	assert.Equal(t, []byte("data"), got)
+}

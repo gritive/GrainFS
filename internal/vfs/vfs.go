@@ -157,6 +157,15 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 	}
 
 	// Must exist
+	if flag == os.O_RDONLY {
+		// 읽기 전용: rc를 저장해 스트리밍 모드로 진입 (io.ReadAll 버퍼링 없음)
+		rc, _, err := fs.backend.GetObject(fs.bucket, fp)
+		if err != nil {
+			return nil, os.ErrNotExist
+		}
+		f.rc = rc
+		return f, nil
+	}
 	if err := f.loadExisting(); err != nil {
 		return nil, err
 	}
@@ -431,9 +440,14 @@ type grainFile struct {
 	buf    *bytes.Buffer
 	pos    int64
 	closed bool
+	rc     io.ReadCloser // 스트리밍 모드: 읽기 전용 Open 시 설정, Seek/ReadAt/Close 시 해제
 }
 
 func (f *grainFile) loadExisting() error {
+	if f.rc != nil {
+		f.rc.Close()
+		f.rc = nil
+	}
 	rc, _, err := f.fs.backend.GetObject(f.fs.bucket, f.path)
 	if err != nil {
 		return os.ErrNotExist
@@ -457,6 +471,11 @@ func (f *grainFile) Write(p []byte) (int, error) {
 }
 
 func (f *grainFile) Read(p []byte) (int, error) {
+	if f.rc != nil {
+		n, err := f.rc.Read(p)
+		f.pos += int64(n)
+		return n, err
+	}
 	if f.buf == nil {
 		return 0, io.EOF
 	}
@@ -470,6 +489,11 @@ func (f *grainFile) Read(p []byte) (int, error) {
 }
 
 func (f *grainFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.rc != nil {
+		if err := f.loadExisting(); err != nil {
+			return 0, err
+		}
+	}
 	if f.buf == nil {
 		return 0, io.EOF
 	}
@@ -485,6 +509,11 @@ func (f *grainFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *grainFile) Seek(offset int64, whence int) (int64, error) {
+	if f.rc != nil {
+		if err := f.loadExisting(); err != nil {
+			return 0, err
+		}
+	}
 	size := int64(0)
 	if f.buf != nil {
 		size = int64(f.buf.Len())
@@ -510,6 +539,11 @@ func (f *grainFile) Close() error {
 		return nil
 	}
 	f.closed = true
+
+	if f.rc != nil {
+		f.rc.Close()
+		f.rc = nil
+	}
 
 	// Flush writes to storage
 	if f.flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && f.buf != nil {
