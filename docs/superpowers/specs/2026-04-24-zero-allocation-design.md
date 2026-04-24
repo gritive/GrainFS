@@ -7,15 +7,15 @@
 
 ---
 
-## 범위 (미완료)
+## 범위
 
 | PR | 항목 | 상태 |
 |---|---|---|
-| PR1 | Reed-Solomon encoder + shard pool | 미완료 |
-| PR3 | hertz Zero-copy sendfile | 실측 후 결정 |
-| PR6 | EncryptWithAAD 3→1 alloc | 미완료 |
-| PR7 | FlatBuffers Builder Pool (Raft Cmd 경로) | 미완료 |
-| PR8 | encodeShardHeader [8]byte stack | 미완료 |
+| PR1 | Reed-Solomon encoder 캐싱 | 완료 (ECSplit 59→11, ECReconstruct 48→3) |
+| PR3 | hertz Zero-copy sendfile | 드롭 (실측 이득 불확실) |
+| PR6 | EncryptWithAAD 3→1 alloc | 완료 |
+| PR7 | FlatBuffers Builder Pool (Raft Cmd 경로) | 완료 |
+| PR8 | encodeShardHeader [8]byte stack | 완료 |
 
 ---
 
