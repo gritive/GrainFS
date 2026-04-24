@@ -511,6 +511,8 @@ func (f *grainFile) ReadAt(p []byte, off int64) (int, error) {
 		if off == f.pos {
 			// 순차 접근: rc에서 직접 읽어 GetObject 추가 호출 없이 스트리밍.
 			// io.ReadFull 사용으로 단축 읽기 시 비-nil 에러 반환 (io.ReaderAt 계약).
+			// f.pos를 갱신하므로 io.ReaderAt "offset 독립성"에서 벗어남;
+			// NFS 단일-goroutine 순차 읽기 전용 경로.
 			n, err := io.ReadFull(f.rc, p)
 			f.pos += int64(n)
 			if err == io.ErrUnexpectedEOF {
