@@ -5,7 +5,7 @@
 ### Performance
 
 - **ECSplit double-append → copy** (`internal/cluster/ec.go`): shard 조합 루프에서 `make(0,cap)+append×2` → `make(size)+copy×2`로 교체. capacity는 이미 정확히 예약되어 있으므로 append 호출 오버헤드(slice header 갱신, 경계 체크) 제거. `BenchmarkECSplit` 추가.
-- **grainFile 스트리밍 모드** (`internal/vfs/vfs.go`): 읽기 전용 Open 시 `loadExisting()` 없이 `rc io.ReadCloser`를 저장해 스트리밍 모드로 진입. NFS 순차 읽기에서 `io.ReadAll` 버퍼링(2nd copy) 제거. `Seek()`/`ReadAt()` 호출 시 `loadExisting()` fallback으로 buf 모드 전환. `Close()` 시 rc 미소비 리소스 릭 방지. EC 백엔드 경로의 2단계 복사 체계(1st: EC 복원 불가피, 2nd: VFS 버퍼링 제거)에서 2nd copy 완전 제거.
+- **grainFile 스트리밍 모드** (`internal/vfs/vfs.go`): 읽기 전용 Open 시 `loadExisting()` 없이 `rc io.ReadCloser`를 저장해 스트리밍 모드로 진입. `ReadAt(off==pos)` 순차 접근에서 rc 직접 읽기(NFS READ RPC 핫패스); `ReadAt(off!=pos)` 랜덤 접근 및 `Seek()` 호출 시 `loadExisting()` fallback으로 buf 모드 전환. `Close()` 시 rc 미소비 리소스 릭 방지. EC 백엔드 경로의 2nd copy(VFS 버퍼링) 제거.
 
 ## [0.0.4.22] - 2026-04-24
 

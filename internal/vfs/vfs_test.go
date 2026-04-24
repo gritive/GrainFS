@@ -689,3 +689,69 @@ func TestGrainFileCloseWithUnconsumedRC(t *testing.T) {
 	require.NoError(t, f3.Close())
 	assert.Equal(t, []byte("data"), got)
 }
+
+// TestGrainFileReadAtSequential: 스트리밍 모드에서 순차 ReadAt(off==pos)은 rc에서 직접 읽어야 한다.
+// NFS READ RPC 핫패스(go-nfs onRead: Open → ReadAt)가 이 경로를 사용한다.
+func TestGrainFileReadAtSequential(t *testing.T) {
+	fs := setupFS(t)
+
+	content := []byte("ABCDEFGHIJ")
+	f, err := fs.Create("seq-readat.txt")
+	require.NoError(t, err)
+	_, err = f.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	f2, err := fs.Open("seq-readat.txt")
+	require.NoError(t, err)
+
+	gf := f2.(*grainFile)
+	assert.NotNil(t, gf.rc, "Open 후 스트리밍 모드여야 함")
+
+	// 순차 ReadAt: off=0 → off=5 (pos가 이전 읽기에 의해 진행됨)
+	buf1 := make([]byte, 5)
+	n, err := f2.(*grainFile).ReadAt(buf1, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	assert.Equal(t, []byte("ABCDE"), buf1)
+	assert.NotNil(t, gf.rc, "순차 ReadAt 후 여전히 스트리밍 모드여야 함")
+	assert.Equal(t, int64(5), gf.pos)
+
+	buf2 := make([]byte, 5)
+	n, err = f2.(*grainFile).ReadAt(buf2, 5)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	assert.Equal(t, []byte("FGHIJ"), buf2)
+	assert.NotNil(t, gf.rc, "순차 ReadAt 2회 후 여전히 스트리밍 모드여야 함")
+
+	require.NoError(t, f2.Close())
+}
+
+// TestGrainFileReadAtRandom: 스트리밍 모드에서 랜덤 ReadAt(off!=pos)은 loadExisting fallback으로 전환해야 한다.
+func TestGrainFileReadAtRandom(t *testing.T) {
+	fs := setupFS(t)
+
+	content := []byte("0123456789")
+	f, err := fs.Create("rand-readat.txt")
+	require.NoError(t, err)
+	_, err = f.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	f2, err := fs.Open("rand-readat.txt")
+	require.NoError(t, err)
+
+	gf := f2.(*grainFile)
+	assert.NotNil(t, gf.rc, "Open 후 스트리밍 모드여야 함")
+
+	// 랜덤 접근 (off=5, pos=0 → off != pos)
+	buf := make([]byte, 3)
+	n, err := f2.(*grainFile).ReadAt(buf, 5)
+	require.NoError(t, err)
+	assert.Equal(t, 3, n)
+	assert.Equal(t, []byte("567"), buf)
+	assert.Nil(t, gf.rc, "랜덤 ReadAt 후 rc는 nil이어야 함 (buf 모드)")
+	assert.NotNil(t, gf.buf, "랜덤 ReadAt 후 buf가 로드되어야 함")
+
+	require.NoError(t, f2.Close())
+}

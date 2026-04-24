@@ -490,6 +490,13 @@ func (f *grainFile) Read(p []byte) (int, error) {
 
 func (f *grainFile) ReadAt(p []byte, off int64) (int, error) {
 	if f.rc != nil {
+		if off == f.pos {
+			// 순차 접근: rc에서 직접 읽어 GetObject 추가 호출 없이 스트리밍
+			n, err := f.rc.Read(p)
+			f.pos += int64(n)
+			return n, err
+		}
+		// 랜덤 접근: buf 모드로 전환
 		if err := f.loadExisting(); err != nil {
 			return 0, err
 		}
