@@ -224,7 +224,7 @@ func ParseRPCCall(data []byte) (*RPCCallHeader, []byte, error) {
 
 // BuildRPCReply constructs an ONC RPC reply.
 func BuildRPCReply(xid uint32, replyBody []byte) []byte {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint32(xid)
 	w.WriteUint32(rpcMsgReply)
 	w.WriteUint32(0)        // MSG_ACCEPTED
@@ -232,7 +232,7 @@ func BuildRPCReply(xid uint32, replyBody []byte) []byte {
 	w.WriteUint32(0)        // verifier body length
 	w.WriteUint32(0)        // ACCEPT_SUCCESS
 	w.buf.Write(replyBody)
-	return w.Bytes()
+	return xdrWriterBytes(w)
 }
 
 // --- COMPOUND XDR ---
@@ -440,7 +440,7 @@ const OpRenew = 30
 
 // EncodeCompoundResponse encodes a COMPOUND4res to XDR.
 func EncodeCompoundResponse(resp *CompoundResponse) []byte {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint32(uint32(resp.Status))
 	w.WriteString(resp.Tag)
 	w.WriteUint32(uint32(len(resp.Results)))
@@ -451,5 +451,5 @@ func EncodeCompoundResponse(resp *CompoundResponse) []byte {
 			w.buf.Write(result.Data)
 		}
 	}
-	return w.Bytes()
+	return xdrWriterBytes(w)
 }
