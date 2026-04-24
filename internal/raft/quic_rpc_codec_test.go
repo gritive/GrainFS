@@ -126,3 +126,14 @@ func TestRPCDataDoesNotContainJSON(t *testing.T) {
 	assert.NotContains(t, str, `"candidate_id"`, "should not contain JSON field names")
 	assert.NotContains(t, str, `{`, "should not look like JSON")
 }
+
+func TestEncodeRPC_AllocsBounded(t *testing.T) {
+	args := &RequestVoteArgs{Term: 1, CandidateID: "node-1", LastLogIndex: 10, LastLogTerm: 1}
+	// warmup: populate pool
+	_, _ = encodeRPC(rpcTypeRequestVote, args)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = encodeRPC(rpcTypeRequestVote, args)
+	})
+	assert.LessOrEqual(t, allocs, float64(3), "encodeRPC allocs should be ≤3 with pool reuse")
+}
