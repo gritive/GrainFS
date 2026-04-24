@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -125,6 +126,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	if pprofPort, _ := cmd.Flags().GetInt("pprof-port"); pprofPort > 0 {
+		runtime.SetMutexProfileFraction(1)
+		runtime.SetBlockProfileRate(1)
 		pprofAddr := fmt.Sprintf("127.0.0.1:%d", pprofPort)
 		go func() {
 			slog.Info("pprof listening", "addr", pprofAddr)
