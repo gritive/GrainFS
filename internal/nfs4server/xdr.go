@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // XDR encoding/decoding helpers for NFSv4.0 (RFC 7530).
@@ -45,11 +46,31 @@ func (w *XDRWriter) Bytes() []byte {
 
 // XDRReader reads XDR-encoded values.
 type XDRReader struct {
-	r *bytes.Reader
+	r    bytes.Reader
+	pool *sync.Pool
 }
 
+var xdrReaderPool = sync.Pool{New: func() any { return &XDRReader{} }}
+
 func NewXDRReader(data []byte) *XDRReader {
-	return &XDRReader{r: bytes.NewReader(data)}
+	r := &XDRReader{}
+	r.r.Reset(data)
+	return r
+}
+
+func newXDRReaderFromPool(data []byte) *XDRReader {
+	r := xdrReaderPool.Get().(*XDRReader)
+	r.r.Reset(data)
+	r.pool = &xdrReaderPool
+	return r
+}
+
+func putXDRReader(r *XDRReader) {
+	if r.pool != nil {
+		p := r.pool
+		r.pool = nil
+		p.Put(r)
+	}
 }
 
 func (r *XDRReader) ReadUint32() (uint32, error) {
@@ -86,7 +107,7 @@ func (r *XDRReader) ReadOpaque() ([]byte, error) {
 	}
 	data := make([]byte, length)
 	if length > 0 {
-		if _, err := io.ReadFull(r.r, data); err != nil {
+		if _, err := io.ReadFull(&r.r, data); err != nil {
 			return nil, err
 		}
 	}
@@ -255,7 +276,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 	case OpReadDir:
 		cookie, _ := r.ReadUint64()
 		var cookieVerf [8]byte
-		io.ReadFull(r.r, cookieVerf[:])
+		io.ReadFull(&r.r, cookieVerf[:])
 		dircount, _ := r.ReadUint32()
 		maxcount, _ := r.ReadUint32()
 		// bitmap for attr request
@@ -272,7 +293,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 	case OpRead:
 		// stateid (seqid:4 + other:12) + offset:8 + count:4
 		var buf [16]byte
-		io.ReadFull(r.r, buf[:]) // stateid
+		io.ReadFull(&r.r, buf[:]) // stateid
 		offset, _ := r.ReadUint64()
 		count, _ := r.ReadUint32()
 		w := &XDRWriter{}
@@ -283,7 +304,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 
 	case OpWrite:
 		var buf [16]byte
-		io.ReadFull(r.r, buf[:]) // stateid
+		io.ReadFull(&r.r, buf[:]) // stateid
 		offset, _ := r.ReadUint64()
 		stable, _ := r.ReadUint32()
 		data, _ := r.ReadOpaque()
@@ -328,12 +349,12 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 	case OpClose:
 		buf := make([]byte, 16)
 		r.ReadUint32() // seqid
-		io.ReadFull(r.r, buf)
+		io.ReadFull(&r.r, buf)
 		return buf, nil
 
 	case OpSetClientID:
 		var verf [8]byte
-		io.ReadFull(r.r, verf[:])
+		io.ReadFull(&r.r, verf[:])
 		id, _ := r.ReadOpaque()
 		r.ReadUint32() // cb_program
 		r.ReadString() // netid
@@ -343,12 +364,12 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 
 	case OpSetClientIDConfirm:
 		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf)
+		io.ReadFull(&r.r, buf)
 		return buf, nil
 
 	case OpSetAttr:
 		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf) // stateid
+		io.ReadFull(&r.r, buf) // stateid
 		bitmapLen, _ := r.ReadUint32()
 		for i := uint32(0); i < bitmapLen; i++ {
 			r.ReadUint32()
@@ -358,8 +379,8 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 
 	case OpOpenConfirm:
 		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf) // stateid (open_stateid)
-		r.ReadUint32()        // seqid
+		io.ReadFull(&r.r, buf) // stateid (open_stateid)
+		r.ReadUint32()         // seqid
 		return buf, nil
 
 	case OpRenew:
