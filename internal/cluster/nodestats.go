@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,19 +18,22 @@ type NodeStats struct {
 }
 
 // NodeStatsStore is a thread-safe, TTL-based in-memory store for per-node stats.
-// Entries expire after the configured TTL and are lazily evicted on access.
+//
+// Hot path (Get / GetAll) touches zero mutexes: it loads an atomic.Pointer
+// snapshot and reads an immutable map. Writers serialise on writeMu and
+// publish a new CoW snapshot via Store.
 type NodeStatsStore struct {
-	mu    sync.RWMutex
-	stats map[string]NodeStats
-	ttl   time.Duration
+	snap    atomic.Pointer[map[string]NodeStats] // read via Load(), no lock
+	writeMu sync.Mutex                           // serialises writers
+	ttl     time.Duration
 }
 
 // NewNodeStatsStore creates a store where entries expire after ttl.
 func NewNodeStatsStore(ttl time.Duration) *NodeStatsStore {
-	return &NodeStatsStore{
-		stats: make(map[string]NodeStats),
-		ttl:   ttl,
-	}
+	s := &NodeStatsStore{ttl: ttl}
+	empty := make(map[string]NodeStats)
+	s.snap.Store(&empty)
+	return s
 }
 
 // Set stores stats for a node, stamping UpdatedAt with now.
@@ -45,21 +50,24 @@ func (s *NodeStatsStore) Set(ns NodeStats) {
 	}
 	now := time.Now()
 	ns.UpdatedAt = now
-	s.mu.Lock()
-	s.stats[ns.NodeID] = ns
-	for id, existing := range s.stats {
-		if now.Sub(existing.UpdatedAt) > s.ttl {
-			delete(s.stats, id)
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cur := *s.snap.Load()
+	next := make(map[string]NodeStats, len(cur)+1)
+	for id, existing := range cur {
+		if now.Sub(existing.UpdatedAt) <= s.ttl {
+			next[id] = existing
 		}
 	}
-	s.mu.Unlock()
+	next[ns.NodeID] = ns
+	s.snap.Store(&next)
 }
 
 // Get returns the stats for nodeID. Returns false if the entry is absent or expired.
 func (s *NodeStatsStore) Get(nodeID string) (NodeStats, bool) {
-	s.mu.RLock()
-	ns, ok := s.stats[nodeID]
-	s.mu.RUnlock()
+	ns, ok := (*s.snap.Load())[nodeID]
 	if !ok || time.Since(ns.UpdatedAt) > s.ttl {
 		return NodeStats{}, false
 	}
@@ -68,12 +76,10 @@ func (s *NodeStatsStore) Get(nodeID string) (NodeStats, bool) {
 
 // GetAll returns all non-expired entries.
 func (s *NodeStatsStore) GetAll() []NodeStats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	snap := *s.snap.Load()
 	now := time.Now()
-	out := make([]NodeStats, 0, len(s.stats))
-	for _, ns := range s.stats {
+	out := make([]NodeStats, 0, len(snap))
+	for _, ns := range snap {
 		if now.Sub(ns.UpdatedAt) <= s.ttl {
 			out = append(out, ns)
 		}
@@ -84,31 +90,36 @@ func (s *NodeStatsStore) GetAll() []NodeStats {
 // UpdateDiskStats atomically updates only the disk fields for nodeID, preserving all other fields.
 // No-op if nodeID is not in the store. Clamps usedPct to [0, 100].
 func (s *NodeStatsStore) UpdateDiskStats(nodeID string, usedPct float64, availBytes uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ns, ok := s.stats[nodeID]
-	if !ok {
-		return
-	}
 	if usedPct < 0 {
 		usedPct = 0
 	} else if usedPct > 100 {
 		usedPct = 100
 	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cur := *s.snap.Load()
+	ns, ok := cur[nodeID]
+	if !ok {
+		return
+	}
 	ns.DiskUsedPct = usedPct
 	ns.DiskAvailBytes = availBytes
 	ns.UpdatedAt = time.Now()
-	s.stats[nodeID] = ns
+
+	next := make(map[string]NodeStats, len(cur))
+	maps.Copy(next, cur)
+	next[nodeID] = ns
+	s.snap.Store(&next)
 }
 
 // Len returns the count of non-expired entries.
 func (s *NodeStatsStore) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	snap := *s.snap.Load()
 	now := time.Now()
 	count := 0
-	for _, ns := range s.stats {
+	for _, ns := range snap {
 		if now.Sub(ns.UpdatedAt) <= s.ttl {
 			count++
 		}
