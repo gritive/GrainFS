@@ -329,6 +329,39 @@ func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*M
 	return resp, nil
 }
 
+// CallFlatBuffer sends a FlatBuffers message and waits for a response.
+// Builder must remain alive until this returns; caller is responsible for returning it to pool.
+// Unlike Call, this uses EncodeWriterTo to write directly from Builder.FinishedBytes() — no make+copy.
+func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *FlatBuffersWriter) (*Message, error) {
+	conn, err := t.getOrConnect(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.evict(addr, conn)
+		conn, err = t.getOrConnect(ctx, addr)
+		if err != nil {
+			return nil, fmt.Errorf("reconnect to %s: %w", addr, err)
+		}
+		if stream, err = conn.OpenStreamSync(ctx); err != nil {
+			return nil, fmt.Errorf("open stream to %s: %w", addr, err)
+		}
+	}
+	defer stream.Close()
+
+	if err := t.codec.EncodeWriterTo(stream, fw); err != nil {
+		return nil, fmt.Errorf("encode flatbuffer: %w", err)
+	}
+
+	resp, err := t.codec.Decode(stream)
+	if err != nil {
+		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
+	}
+	return resp, nil
+}
+
 // evict removes conn from the active connection map if it is still the current entry for addr.
 // It also closes the connection so that any goroutines blocked on OpenStreamSync for this
 // connection unblock immediately and can reconnect on their next attempt.
