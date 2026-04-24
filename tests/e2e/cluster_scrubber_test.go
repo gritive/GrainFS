@@ -37,15 +37,7 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-node e2e in -short mode")
 	}
-	// Passes reliably when run alone (~8s) but flakes in the full e2e
-	// suite because prior tests hold ports / data dirs the 3-node scrubber
-	// cluster picks up. Diagnosed as test-harness pollution, not a
-	// scrubber/backend bug. Tracked in TODOS v0.0.4.0 — until the harness
-	// gets per-test isolation, skip in the full-suite sweep but keep the
-	// test available via `go test -run TestE2E_ClusterScrubber_AutoRepair`.
-	if os.Getenv("GRAINFS_E2E_RUN_CLUSTER_SCRUBBER") != "1" {
-		t.Skip("set GRAINFS_E2E_RUN_CLUSTER_SCRUBBER=1 to run; skipped in full-suite because of port/dir contention")
-	}
+
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)

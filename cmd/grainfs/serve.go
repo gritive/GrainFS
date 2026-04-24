@@ -512,9 +512,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		sc.Start(ctx)
 
 		placementMonitor := cluster.NewShardPlacementMonitor(fsm, shardSvc, distBackend.NodeID(), scrubInterval)
-		placementMonitor.SetOnMissing(func(bucket, key string, shardIdx int) {
-			if err := distBackend.RepairShardLocal(bucket, key, "", shardIdx); err != nil {
-				slog.Warn("placement monitor repair failed", "bucket", bucket, "key", key, "shard", shardIdx, "err", err)
+		placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
+			// shardKey from IterShardPlacements is objectKey+"/"+versionID.
+			// Split on the last "/" so RepairShard can skip LookupLatestVersion.
+			objectKey, versionID := shardKey, ""
+			if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
+				objectKey, versionID = shardKey[:i], shardKey[i+1:]
+			}
+			if err := distBackend.RepairShardLocal(bucket, objectKey, versionID, shardIdx); err != nil {
+				slog.Warn("placement monitor repair failed", "bucket", bucket, "key", shardKey, "shard", shardIdx, "err", err)
 			}
 		})
 		go placementMonitor.Start(ctx)

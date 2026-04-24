@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.4.21] - 2026-04-24
+
+### Fixed
+
+- **E2E timeout 예산 부족** (`Makefile`): `make test-e2e` timeout 300s → 600s. TopologyChange(~213s) + ECSpike(~43s) ≈ 256s 소진으로 ClusterScrubber 테스트가 시간 초과되던 문제 해결.
+- **ClusterScrubber E2E skip guard 제거** (`tests/e2e/cluster_scrubber_test.go`): 오진된 "port/dir contention" skip guard 제거. 실제 원인은 300s global timeout이었으며, 600s 예산으로 전체 suite에서 안정적으로 통과.
+- **ShardPlacementMonitor onMissing repair 실패** (`cmd/grainfs/serve.go`): `IterShardPlacements`가 `key = objectKey+"/"+versionID` 형식으로 shardKey를 전달하는데, `onMissing` 콜백이 이를 그대로 `RepairShardLocal(bucket, shardKey, "", shardIdx)` 로 넘겨 `LookupLatestVersion`이 "Key not found"로 실패하던 버그. shardKey를 마지막 `/` 기준으로 분리해 objectKey, versionID를 각각 전달하도록 수정.
+
 ## [0.0.4.20] - 2026-04-24
 
 ### Added
