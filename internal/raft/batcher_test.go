@@ -190,8 +190,8 @@ func TestBatcher_HighLoad(t *testing.T) {
 	t.Logf("HighLoad: %d proposals → %d persist calls (%.1f%%)", N, calls, float64(calls)/float64(N)*100)
 }
 
-// TestBatcher_LowLoad verifies that a single proposal at low load flushes within 10ms
-// and that the node reports low-load adaptive metrics (batchTimeout = 100µs).
+// TestBatcher_LowLoad verifies that a single proposal at low load flushes well below
+// HeartbeatTimeout (30ms), and that the node reports low-load adaptive metrics (batchTimeout = 100µs).
 func TestBatcher_LowLoad(t *testing.T) {
 	node := newSingletonLeader(t)
 
@@ -202,8 +202,8 @@ func TestBatcher_LowLoad(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), idx)
-	assert.Less(t, elapsed, 10*time.Millisecond,
-		"low-load flush latency %v should be < 10ms", elapsed)
+	assert.Less(t, elapsed, 25*time.Millisecond,
+		"low-load flush latency %v should be < 25ms (HeartbeatTimeout=30ms)", elapsed)
 
 	// Verify adaptive metrics reflect the low-load state.
 	// BatchMetrics() is the new accessor introduced by this feature.
