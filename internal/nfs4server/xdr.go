@@ -78,14 +78,14 @@ type XDRReader struct {
 
 var xdrReaderPool = sync.Pool{New: func() any { return &XDRReader{} }}
 
-var opArgPool16 = sync.Pool{New: func() any { b := make([]byte, 16); return &b }}
-var opArgPool8 = sync.Pool{New: func() any { b := make([]byte, 8); return &b }}
+var opArgPool16 = sync.Pool{New: func() any { var b [16]byte; return &b }}
+var opArgPool8 = sync.Pool{New: func() any { var b [8]byte; return &b }}
 
-func getOpArg16() []byte  { return (*opArgPool16.Get().(*[]byte))[:16] }
-func putOpArg16(b []byte) { b = b[:cap(b)]; opArgPool16.Put(&b) }
+func getOpArg16() []byte  { return opArgPool16.Get().(*[16]byte)[:] }
+func putOpArg16(b []byte) { opArgPool16.Put((*[16]byte)(b[:16])) }
 
-func getOpArg8() []byte  { return (*opArgPool8.Get().(*[]byte))[:8] }
-func putOpArg8(b []byte) { b = b[:cap(b)]; opArgPool8.Put(&b) }
+func getOpArg8() []byte  { return opArgPool8.Get().(*[8]byte)[:] }
+func putOpArg8(b []byte) { opArgPool8.Put((*[8]byte)(b[:8])) }
 
 func NewXDRReader(data []byte) *XDRReader {
 	r := &XDRReader{}

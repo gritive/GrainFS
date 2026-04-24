@@ -1,9 +1,12 @@
 package nfs4server
 
 import (
+	"encoding/binary"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // buildCompoundXDR builds raw XDR bytes for a COMPOUND request.
@@ -143,4 +146,148 @@ func TestDispatch_EarlyBreak_OpArgReturned(t *testing.T) {
 	d.Dispatch(req, resp)
 	// We get some result (either NFS4_OK or error), just verify no panic.
 	assert.NotNil(t, resp)
+}
+
+// --- Coverage gap tests ---
+
+func TestXDRWriterPool_LargeCapEviction(t *testing.T) {
+	w := getXDRWriter()
+	// Grow buf beyond eviction threshold (64KB)
+	large := make([]byte, maxXDRWriterCap+1)
+	w.buf.Write(large)
+	require.Greater(t, w.buf.Cap(), maxXDRWriterCap)
+
+	// putXDRWriter must evict without panic
+	putXDRWriter(w)
+
+	// Pool should still be usable after eviction
+	w2 := getXDRWriter()
+	w2.WriteUint32(42)
+	assert.Equal(t, 4, len(w2.Bytes()))
+	putXDRWriter(w2)
+}
+
+func TestOpArgPool16_ZeroAllocs(t *testing.T) {
+	allocs := testing.AllocsPerRun(100, func() {
+		b := getOpArg16()
+		putOpArg16(b)
+	})
+	assert.Equal(t, 0.0, allocs, "getOpArg16/putOpArg16 should allocate 0")
+}
+
+func TestDispatch_PoolKey16_Returned(t *testing.T) {
+	state := NewStateManager()
+	d := &Dispatcher{state: state}
+	resp := &CompoundResponse{}
+
+	// OpClose uses poolKey=16; Dispatch must return the buf to pool16 without panic.
+	buf := getOpArg16()
+	req := &CompoundRequest{
+		Ops: []Op{
+			{OpCode: OpClose, Data: buf, poolKey: 16},
+		},
+	}
+	d.Dispatch(req, resp)
+	assert.NotNil(t, resp)
+}
+
+func TestHandleCompoundInto_ParseError(t *testing.T) {
+	srv := &Server{state: NewStateManager(), logger: slog.Default()}
+	w := getXDRWriter()
+	defer putXDRWriter(w)
+
+	// Truncated data forces ParseCompound to fail → NFS4ERR_INVAL response.
+	srv.handleCompoundInto([]byte{0}, w)
+
+	b := w.Bytes()
+	require.GreaterOrEqual(t, len(b), 4, "response must contain at least a status uint32")
+	status := binary.BigEndian.Uint32(b[:4])
+	assert.Equal(t, uint32(NFS4ERR_INVAL), status)
+}
+
+func TestReadOpArgs_PutFH(t *testing.T) {
+	// OpPutFH: ReadOpaque → poolKey=0
+	w := getXDRWriter()
+	fh := []byte{1, 2, 3, 4}
+	w.WriteOpaque(fh)
+	r := NewXDRReader(w.Bytes())
+	putXDRWriter(w)
+
+	data, pk, err := readOpArgs(r, OpPutFH)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, pk)
+	assert.Equal(t, fh, data)
+}
+
+func TestReadOpArgs_SetClientIDConfirm(t *testing.T) {
+	// OpSetClientIDConfirm: reads exactly 16 bytes into pool16 buf.
+	raw := make([]byte, 16)
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+	r := NewXDRReader(raw)
+
+	data, pk, err := readOpArgs(r, OpSetClientIDConfirm)
+	assert.NoError(t, err)
+	assert.Equal(t, 16, pk)
+	assert.Equal(t, raw, data)
+	putOpArg16(data)
+}
+
+func TestReadOpArgs_OpenConfirm(t *testing.T) {
+	// OpOpenConfirm: stateid (16 bytes) + seqid (4 bytes); returns stateid only.
+	raw := make([]byte, 20)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	r := NewXDRReader(raw)
+
+	data, pk, err := readOpArgs(r, OpOpenConfirm)
+	assert.NoError(t, err)
+	assert.Equal(t, 16, pk)
+	assert.Equal(t, 16, len(data))
+	assert.Equal(t, raw[:16], data)
+	putOpArg16(data)
+}
+
+func TestReadOpArgs_Renew(t *testing.T) {
+	// OpRenew: 8-byte clientID into pool8 buf.
+	var raw [8]byte
+	binary.BigEndian.PutUint64(raw[:], 0x1234567890abcdef)
+	r := NewXDRReader(raw[:])
+
+	data, pk, err := readOpArgs(r, OpRenew)
+	assert.NoError(t, err)
+	assert.Equal(t, 8, pk)
+	assert.Equal(t, raw[:], data)
+	putOpArg8(data)
+}
+
+func TestReadOpArgs_SetAttr(t *testing.T) {
+	// OpSetAttr: stateid (16 bytes) + bitmap len 0 + empty attrvals.
+	w := getXDRWriter()
+	var stateid [16]byte
+	for i := range stateid {
+		stateid[i] = byte(i + 10)
+	}
+	w.buf.Write(stateid[:])
+	w.WriteUint32(0) // bitmap len = 0
+	w.WriteOpaque(nil)
+	r := NewXDRReader(w.Bytes())
+	putXDRWriter(w)
+
+	data, pk, err := readOpArgs(r, OpSetAttr)
+	assert.NoError(t, err)
+	assert.Equal(t, 16, pk)
+	assert.Equal(t, stateid[:], data)
+	putOpArg16(data)
+}
+
+func TestReadOpArgs_UnknownOp(t *testing.T) {
+	// Unknown op code → default case, returns nil/0/nil.
+	r := NewXDRReader(nil)
+	data, pk, err := readOpArgs(r, 9999)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, pk)
+	assert.Nil(t, data)
 }
