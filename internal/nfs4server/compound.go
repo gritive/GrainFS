@@ -6,26 +6,29 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"sync"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+var opReadBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
 // NFSv4 status codes (RFC 7530)
 const (
-	NFS4_OK            = 0
-	NFS4ERR_PERM       = 1
-	NFS4ERR_NOENT      = 2
-	NFS4ERR_IO         = 5
-	NFS4ERR_NOTDIR     = 20
-	NFS4ERR_INVAL      = 22
-	NFS4ERR_FBIG       = 27
-	NFS4ERR_NOSPC      = 28
-	NFS4ERR_ROFS       = 30
-	NFS4ERR_STALE      = 70
-	NFS4ERR_BADHANDLE  = 10001
+	NFS4_OK             = 0
+	NFS4ERR_PERM        = 1
+	NFS4ERR_NOENT       = 2
+	NFS4ERR_IO          = 5
+	NFS4ERR_NOTDIR      = 20
+	NFS4ERR_INVAL       = 22
+	NFS4ERR_FBIG        = 27
+	NFS4ERR_NOSPC       = 28
+	NFS4ERR_ROFS        = 30
+	NFS4ERR_STALE       = 70
+	NFS4ERR_BADHANDLE   = 10001
 	NFS4ERR_BAD_STATEID = 10025
-	NFS4ERR_RESOURCE   = 10018
+	NFS4ERR_RESOURCE    = 10018
 	NFS4ERR_SERVERFAULT = 10006
 )
 
@@ -83,9 +86,9 @@ type CompoundResponse struct {
 }
 
 type Dispatcher struct {
-	backend   storage.Backend
-	state     *StateManager
-	currentFH FileHandle
+	backend     storage.Backend
+	state       *StateManager
+	currentFH   FileHandle
 	currentPath string
 }
 
@@ -263,7 +266,7 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 
 		objects, _ := d.backend.ListObjects(nfs4Bucket, prefix, 1000)
 		for i, obj := range objects {
-			w.WriteUint32(1) // value_follows = TRUE
+			w.WriteUint32(1)             // value_follows = TRUE
 			w.WriteUint64(uint64(i + 1)) // cookie
 			name := obj.Key
 			if prefix != "" {
@@ -358,8 +361,10 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		}
 	}
 
-	// 버퍼에 데이터 읽기 (적응형 버퍼 사이징 사용)
-	buffer := &bytes.Buffer{}
+	// 버퍼에 데이터 읽기 (pool 재사용으로 alloc 감소)
+	buffer := opReadBufPool.Get().(*bytes.Buffer)
+	buffer.Reset()
+	defer func() { buffer.Reset(); opReadBufPool.Put(buffer) }()
 	_, err = bufferedCopy(buffer, rc, remainingSize)
 	if err != nil {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
@@ -416,8 +421,8 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 
 	w := &XDRWriter{}
 	w.WriteUint32(uint32(len(writeData))) // count
-	w.WriteUint32(2)                       // committed = FILE_SYNC
-	w.WriteUint64(0)                       // writeverf (8 bytes)
+	w.WriteUint32(2)                      // committed = FILE_SYNC
+	w.WriteUint64(0)                      // writeverf (8 bytes)
 	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: w.Bytes()}
 }
 
