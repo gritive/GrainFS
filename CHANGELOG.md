@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.4.24] - 2026-04-24
+
+### Performance
+
+- **NFS XDR WriteUint32/WriteUint64 zero-alloc** (`internal/nfs4server/xdr.go`): `make([]byte, 4/8)` → `var b [4/8]byte` 스택 배열로 교체. 인코딩 핫패스에서 heap alloc 제거.
+- **NFS XDR ReadUint32/ReadUint64 stack escape 방지** (`internal/nfs4server/xdr.go`): `io.ReadFull(r.r, b[:])` → `r.r.Read(b[:])` 직접 호출로 `bytes.Reader`의 인터페이스 dispatch를 통한 스택 배열 escape 방지.
+- **NFS RPC writeRPCFrame zero-alloc** (`internal/nfs4server/rpc.go`): `make([]byte, 4)` → `var header [4]byte`. TCP 프레임 헤더 heap alloc 제거.
+- **NFS RPC readRPCFrame single-fragment fast-path** (`internal/nfs4server/rpc.go`): 단일 fragment(일반적 경우) pre-alloc으로 result slice 불필요한 재할당 방지.
+- **NFS opRead sync.Pool** (`internal/nfs4server/compound.go`): `&bytes.Buffer{}` → `sync.Pool` 재사용. NFS READ 응답 조립 버퍼의 per-RPC heap alloc 제거.
+- **VFS grainFile bytes.Buffer sync.Pool** (`internal/vfs/vfs.go`): Open/Write/Close 경로의 `bytes.Buffer`를 `sync.Pool`로 풀링. 파일 단위 heap alloc 감소.
+- **S3Auth DecodeAWSChunkedBody Grow 사전할당** (`internal/s3auth/chunked.go`): `result.Grow(len(data))` 추가로 청크 디코딩 중 `bytes.Buffer` 재할당 방지.
+
+### Fixed
+
+- **VFS ReadAt io.ReaderAt 계약 준수** (`internal/vfs/vfs.go`): 스트리밍 패스에서 `rc.Read(p)` → `io.ReadFull(f.rc, p)`로 교체. 단축 읽기 시 비-nil 에러 반환으로 NFS 클라이언트 데이터 잘림 방지.
+- **VFS O_RDONLY grainFile pool buffer 누수** (`internal/vfs/vfs.go`): Seek/ReadAt 호출로 buf 모드 전환된 읽기 전용 파일이 Close 시 pool buffer를 반환하지 않던 버그 수정.
+
+
 ## [0.0.4.23] - 2026-04-24
 
 ### Performance

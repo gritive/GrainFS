@@ -24,9 +24,9 @@ const (
 // writeRPCFrame writes a TCP record-marked RPC frame.
 // Format: [4 bytes: length | 0x80000000 for last-fragment][payload]
 func writeRPCFrame(w io.Writer, payload []byte) error {
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(payload))|0x80000000)
-	if _, err := w.Write(header); err != nil {
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(payload))|0x80000000)
+	if _, err := w.Write(header[:]); err != nil {
 		return err
 	}
 	_, err := w.Write(payload)
@@ -36,29 +36,42 @@ func writeRPCFrame(w io.Writer, payload []byte) error {
 // readRPCFrame reads a TCP record-marked RPC frame.
 // Supports fragment reassembly (reads until last-fragment bit is set).
 func readRPCFrame(r io.Reader) ([]byte, error) {
-	var result []byte
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	raw := binary.BigEndian.Uint32(hdr[:])
+	lastFragment := (raw & 0x80000000) != 0
+	length := raw & 0x7FFFFFFF
+	if length > maxFrameSize {
+		return nil, fmt.Errorf("RPC frame size %d exceeds max %d", length, maxFrameSize)
+	}
 
+	// 단일 fragment fast-path: make 1회로 직접 읽기
+	result := make([]byte, length)
+	if _, err := io.ReadFull(r, result); err != nil {
+		return nil, err
+	}
+	if lastFragment {
+		return result, nil
+	}
+
+	// multi-fragment slow path
 	for {
-		header := make([]byte, 4)
-		if _, err := io.ReadFull(r, header); err != nil {
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
 			return nil, err
 		}
-
-		raw := binary.BigEndian.Uint32(header)
-		lastFragment := (raw & 0x80000000) != 0
-		length := raw & 0x7FFFFFFF
-
+		raw = binary.BigEndian.Uint32(hdr[:])
+		lastFragment = (raw & 0x80000000) != 0
+		length = raw & 0x7FFFFFFF
 		if length > maxFrameSize {
 			return nil, fmt.Errorf("RPC frame size %d exceeds max %d", length, maxFrameSize)
 		}
-
-		fragment := make([]byte, length)
-		if _, err := io.ReadFull(r, fragment); err != nil {
+		start := len(result)
+		result = append(result, make([]byte, length)...)
+		if _, err := io.ReadFull(r, result[start:]); err != nil {
 			return nil, err
 		}
-
-		result = append(result, fragment...)
-
 		if lastFragment {
 			break
 		}

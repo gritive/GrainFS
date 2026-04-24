@@ -755,3 +755,27 @@ func TestGrainFileReadAtRandom(t *testing.T) {
 
 	require.NoError(t, f2.Close())
 }
+
+func TestGrainFile_BufPool_Reuse(t *testing.T) {
+	fs := setupFS(t)
+
+	// 첫 번째 write+close: Close 후 buf가 nil이어야 함 (pool에 반환)
+	f1, err := fs.Create("pool-test.txt")
+	require.NoError(t, err)
+	_, err = f1.Write([]byte("hello pool"))
+	require.NoError(t, err)
+	gf1 := f1.(*grainFile)
+	require.NotNil(t, gf1.buf)
+	require.NoError(t, f1.Close())
+	assert.Nil(t, gf1.buf, "Close 후 grainFile.buf는 nil이어야 함 (pool 반환)")
+
+	// 두 번째 write+close: 정상 동작 확인 (pool 재사용은 런타임 결정)
+	f2, err := fs.Create("pool-test2.txt")
+	require.NoError(t, err)
+	_, err = f2.Write([]byte("reused"))
+	require.NoError(t, err)
+	gf2 := f2.(*grainFile)
+	require.NotNil(t, gf2.buf)
+	require.NoError(t, f2.Close())
+	assert.Nil(t, gf2.buf, "Close 후 grainFile.buf는 nil이어야 함 (pool 반환)")
+}

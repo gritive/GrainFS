@@ -23,6 +23,21 @@ const (
 	dirMarkerSuffix = "/.dir"
 )
 
+var grainBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func getBuf() *bytes.Buffer {
+	b := grainBufPool.Get().(*bytes.Buffer)
+	b.Reset()
+	return b
+}
+
+func putBuf(b *bytes.Buffer) {
+	if b != nil {
+		b.Reset()
+		grainBufPool.Put(b)
+	}
+}
+
 // GrainVFS implements billy.Filesystem on top of a storage.Backend.
 type GrainVFS struct {
 	backend storage.Backend
@@ -148,7 +163,7 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 
 	if flag&os.O_CREATE != 0 {
 		if flag&os.O_TRUNC != 0 {
-			f.buf = &bytes.Buffer{}
+			f.buf = getBuf()
 		} else {
 			// Try to load existing
 			f.loadExisting()
@@ -452,12 +467,15 @@ func (f *grainFile) loadExisting() error {
 	if err != nil {
 		return os.ErrNotExist
 	}
-	data, err := io.ReadAll(rc)
+	putBuf(f.buf)
+	f.buf = getBuf()
+	_, err = f.buf.ReadFrom(rc)
 	rc.Close()
 	if err != nil {
+		putBuf(f.buf)
+		f.buf = nil
 		return fmt.Errorf("read file: %w", err)
 	}
-	f.buf = bytes.NewBuffer(data)
 	return nil
 }
 
@@ -465,7 +483,7 @@ func (f *grainFile) Name() string { return f.name }
 
 func (f *grainFile) Write(p []byte) (int, error) {
 	if f.buf == nil {
-		f.buf = &bytes.Buffer{}
+		f.buf = getBuf()
 	}
 	return f.buf.Write(p)
 }
@@ -491,9 +509,15 @@ func (f *grainFile) Read(p []byte) (int, error) {
 func (f *grainFile) ReadAt(p []byte, off int64) (int, error) {
 	if f.rc != nil {
 		if off == f.pos {
-			// 순차 접근: rc에서 직접 읽어 GetObject 추가 호출 없이 스트리밍
-			n, err := f.rc.Read(p)
+			// 순차 접근: rc에서 직접 읽어 GetObject 추가 호출 없이 스트리밍.
+			// io.ReadFull 사용으로 단축 읽기 시 비-nil 에러 반환 (io.ReaderAt 계약).
+			// f.pos를 갱신하므로 io.ReaderAt "offset 독립성"에서 벗어남;
+			// NFS 단일-goroutine 순차 읽기 전용 경로.
+			n, err := io.ReadFull(f.rc, p)
 			f.pos += int64(n)
+			if err == io.ErrUnexpectedEOF {
+				return n, io.EOF
+			}
 			return n, err
 		}
 		// 랜덤 접근: buf 모드로 전환
@@ -557,6 +581,8 @@ func (f *grainFile) Close() error {
 		data := f.buf.Bytes()
 		_, err := f.fs.backend.PutObject(f.fs.bucket, f.path,
 			bytes.NewReader(data), "application/octet-stream")
+		putBuf(f.buf)
+		f.buf = nil
 		if err != nil {
 			return err
 		}
@@ -564,6 +590,11 @@ func (f *grainFile) Close() error {
 		f.fs.invalidateStatCache(f.path)
 		f.fs.invalidateParentDirCache(f.path)
 		return nil
+	}
+	// O_RDONLY 파일이 buf 모드로 전환된 경우 pool에 반환
+	if f.buf != nil {
+		putBuf(f.buf)
+		f.buf = nil
 	}
 	return nil
 }
@@ -573,17 +604,16 @@ func (f *grainFile) Unlock() error { return nil }
 
 func (f *grainFile) Truncate(size int64) error {
 	if f.buf == nil {
-		f.buf = &bytes.Buffer{}
+		f.buf = getBuf()
 	}
-	data := f.buf.Bytes()
-	if int64(len(data)) > size {
-		data = data[:size]
+	old := append([]byte(nil), f.buf.Bytes()...)
+	if int64(len(old)) > size {
+		old = old[:size]
 	} else {
-		for int64(len(data)) < size {
-			data = append(data, 0)
-		}
+		old = append(old, make([]byte, int(size)-len(old))...)
 	}
-	f.buf = bytes.NewBuffer(data)
+	f.buf.Reset()
+	f.buf.Write(old)
 	return nil
 }
 
