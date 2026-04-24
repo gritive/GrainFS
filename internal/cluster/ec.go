@@ -83,9 +83,9 @@ func PlacementForNodes(cfg ECConfig, nodes []string, key string) []string {
 // so Reconstruct can call reedsolomon.Join(writer, shards, dataLen).
 const shardHeaderSize = 8
 
-func encodeShardHeader(origSize int64) []byte {
-	h := make([]byte, shardHeaderSize)
-	binary.BigEndian.PutUint64(h, uint64(origSize))
+func encodeShardHeader(origSize int64) [shardHeaderSize]byte {
+	var h [shardHeaderSize]byte
+	binary.BigEndian.PutUint64(h[:], uint64(origSize))
 	return h
 }
 
@@ -115,7 +115,7 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
 	out := make([][]byte, len(shards))
 	for i, s := range shards {
 		payload := make([]byte, 0, shardHeaderSize+len(s))
-		payload = append(payload, header...)
+		payload = append(payload, header[:]...)
 		payload = append(payload, s...)
 		out[i] = payload
 	}
