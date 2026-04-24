@@ -14,6 +14,31 @@ import (
 
 var opReadBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
+var compoundReqPool = sync.Pool{New: func() any {
+	return &CompoundRequest{Ops: make([]Op, 0, maxCompoundOps)}
+}}
+
+var compoundRespPool = sync.Pool{New: func() any {
+	return &CompoundResponse{Results: make([]OpResult, 0, maxCompoundOps)}
+}}
+
+var dispatcherPool = sync.Pool{New: func() any { return &Dispatcher{} }}
+
+func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
+	d := dispatcherPool.Get().(*Dispatcher)
+	d.backend = backend
+	d.state = state
+	d.currentFH = FileHandle{}
+	d.currentPath = ""
+	return d
+}
+
+func putDispatcher(d *Dispatcher) {
+	d.backend = nil
+	d.state = nil
+	dispatcherPool.Put(d)
+}
+
 // NFSv4 status codes (RFC 7530)
 const (
 	NFS4_OK             = 0
@@ -63,8 +88,9 @@ const (
 const nfs4Bucket = "__grainfs_nfs4"
 
 type Op struct {
-	OpCode int
-	Data   []byte
+	OpCode  int
+	Data    []byte
+	poolKey int // 0=no pool, 8=opArgPool8, 16=opArgPool16
 }
 
 type OpResult struct {
@@ -96,24 +122,29 @@ func NewDispatcher(backend storage.Backend) *Dispatcher {
 	return &Dispatcher{backend: backend}
 }
 
-func (d *Dispatcher) Dispatch(req *CompoundRequest) *CompoundResponse {
-	resp := &CompoundResponse{Tag: req.Tag, Status: NFS4_OK}
+func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
+	resp.Tag = req.Tag
+	resp.Status = NFS4_OK
 
 	if len(req.Ops) > maxCompoundOps {
 		resp.Status = NFS4ERR_RESOURCE
-		return resp
+		return
 	}
 
 	for _, op := range req.Ops {
 		result := d.dispatchOp(op)
+		switch op.poolKey {
+		case 8:
+			putOpArg8(op.Data)
+		case 16:
+			putOpArg16(op.Data)
+		}
 		resp.Results = append(resp.Results, result)
 		if result.Status != NFS4_OK {
 			resp.Status = result.Status
 			break
 		}
 	}
-
-	return resp
 }
 
 func (d *Dispatcher) dispatchOp(op Op) OpResult {
@@ -180,9 +211,9 @@ func (d *Dispatcher) opGetFH() OpResult {
 	if d.currentPath == "" {
 		return OpResult{OpCode: OpGetFH, Status: NFS4ERR_BADHANDLE}
 	}
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteOpaque(d.currentFH[:])
-	return OpResult{OpCode: OpGetFH, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpGetFH, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opLookup(data []byte) OpResult {
@@ -198,7 +229,7 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opGetAttr(data []byte) OpResult {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 
 	// Return minimal attributes based on the bitmap request
 	isRoot := d.currentPath == "/"
@@ -211,29 +242,32 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 		obj, err := d.backend.HeadObject(nfs4Bucket, key)
 		if err != nil {
 			// Might be a directory
-			w.WriteUint32(2) // bitmap length = 2 words
-			w.WriteUint32(0) // word 0 attrs
-			w.WriteUint32(0) // word 1 attrs
-			attrVals := encodeMinimalDirAttrs()
-			w.WriteOpaque(attrVals)
-			return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: w.Bytes()}
+			w.WriteUint32(2)      // bitmap length = 2 words
+			w.WriteUint32(0)      // word 0 attrs
+			w.WriteUint32(0)      // word 1 attrs
+			w.WriteUint32(12)     // attrvals length = 12 bytes (type:4 + size:8)
+			w.WriteUint32(NF4DIR) // type
+			w.WriteUint64(4096)   // size
+			return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 		}
 
 		w.WriteUint32(2)
 		w.WriteUint32(0)
 		w.WriteUint32(0)
-		attrVals := encodeFileAttrs(obj)
-		w.WriteOpaque(attrVals)
-		return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: w.Bytes()}
+		w.WriteUint32(12)               // attrvals length = 12 bytes
+		w.WriteUint32(NF4REG)           // type
+		w.WriteUint64(uint64(obj.Size)) // size
+		return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 	}
 
 	// Root directory attributes
-	w.WriteUint32(2) // bitmap length = 2 words
-	w.WriteUint32(0) // word 0
-	w.WriteUint32(0) // word 1
-	attrVals := encodeMinimalDirAttrs()
-	w.WriteOpaque(attrVals)
-	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: w.Bytes()}
+	w.WriteUint32(2)      // bitmap length = 2 words
+	w.WriteUint32(0)      // word 0
+	w.WriteUint32(0)      // word 1
+	w.WriteUint32(12)     // attrvals length = 12 bytes (type:4 + size:8)
+	w.WriteUint32(NF4DIR) // type
+	w.WriteUint64(4096)   // size
+	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opAccess(data []byte) OpResult {
@@ -241,14 +275,14 @@ func (d *Dispatcher) opAccess(data []byte) OpResult {
 	if len(data) >= 4 {
 		requested = binary.BigEndian.Uint32(data)
 	}
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint32(0)         // supported
 	w.WriteUint32(requested) // access (grant all requested)
-	return OpResult{OpCode: OpAccess, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpAccess, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opReadDir(data []byte) OpResult {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 
 	// cookieverf (8 bytes)
 	w.WriteUint64(0)
@@ -286,7 +320,7 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 	w.WriteUint32(0) // value_follows = FALSE (end of entries)
 	w.WriteUint32(1) // eof = TRUE
 
-	return OpResult{OpCode: OpReadDir, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpReadDir, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opRead(data []byte) OpResult {
@@ -316,10 +350,10 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		remainingSize = fileSize - int64(offset)
 	} else {
 		// EOF 너머 읽기 - 빈 데이터와 eof=true 반환
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.WriteUint32(1) // eof = TRUE
 		w.WriteOpaque(nil)
-		return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: w.Bytes()}
+		return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 	}
 
 	// count가 지정된 경우 제한
@@ -379,11 +413,11 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 
 	eof := (offset + uint64(len(readData))) >= uint64(fileSize)
 
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint32(boolToUint32(eof))
 	w.WriteOpaque(readData)
 
-	return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opWrite(data []byte) OpResult {
@@ -419,11 +453,11 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 	}
 
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint32(uint32(len(writeData))) // count
 	w.WriteUint32(2)                      // committed = FILE_SYNC
 	w.WriteUint64(0)                      // writeverf (8 bytes)
-	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opOpen(data []byte) OpResult {
@@ -459,7 +493,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	// Generate a stateid
 	stateID := d.state.nextStateID.Add(1) - 1
 
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	// stateid (seqid:4 + other:12)
 	w.WriteUint32(1) // seqid
 	w.WriteUint64(stateID)
@@ -475,25 +509,25 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	// delegation type = OPEN_DELEGATE_NONE
 	w.WriteUint32(0)
 
-	return OpResult{OpCode: OpOpen, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpOpen, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opOpenConfirm(_ []byte) OpResult {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	// Return the same stateid
 	w.WriteUint32(1) // seqid
 	w.WriteUint64(0)
 	w.WriteUint32(0)
-	return OpResult{OpCode: OpOpenConfirm, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpOpenConfirm, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opClose(_ []byte) OpResult {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	// Return zeroed stateid
 	w.WriteUint32(0)
 	w.WriteUint64(0)
 	w.WriteUint32(0)
-	return OpResult{OpCode: OpClose, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpClose, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opSetClientID(data []byte) OpResult {
@@ -504,11 +538,11 @@ func (d *Dispatcher) opSetClientID(data []byte) OpResult {
 
 	clientID := d.state.SetClientID(verf)
 
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint64(clientID)
 	// setclientid_confirm verifier (8 bytes)
 	w.WriteUint64(clientID) // use clientID as confirm verifier
-	return OpResult{OpCode: OpSetClientID, Status: NFS4_OK, Data: w.Bytes()}
+	return OpResult{OpCode: OpSetClientID, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
@@ -521,26 +555,10 @@ func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
 
 // --- Helper functions ---
 
-func encodeMinimalDirAttrs() []byte {
-	w := &XDRWriter{}
-	// type = NF4DIR
-	w.WriteUint32(NF4DIR)
-	// size = 4096
-	w.WriteUint64(4096)
-	return w.Bytes()
-}
-
-func encodeFileAttrs(obj *storage.Object) []byte {
-	w := &XDRWriter{}
-	w.WriteUint32(NF4REG)
-	w.WriteUint64(uint64(obj.Size))
-	return w.Bytes()
-}
-
 func encodeSetAttrResult() []byte {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint32(0) // bitmap len = 0 (no attrs set)
-	return w.Bytes()
+	return xdrWriterBytes(w)
 }
 
 func boolToUint32(v bool) uint32 {

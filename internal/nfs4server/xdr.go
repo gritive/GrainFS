@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // XDR encoding/decoding helpers for NFSv4.0 (RFC 7530).
@@ -12,6 +13,32 @@ import (
 // XDRWriter writes XDR-encoded values.
 type XDRWriter struct {
 	buf bytes.Buffer
+}
+
+const maxXDRWriterCap = 64 * 1024
+
+var xdrWriterPool = sync.Pool{New: func() any { return &XDRWriter{} }}
+
+func getXDRWriter() *XDRWriter {
+	return xdrWriterPool.Get().(*XDRWriter)
+}
+
+func putXDRWriter(w *XDRWriter) {
+	if w.buf.Cap() > maxXDRWriterCap {
+		w.buf = bytes.Buffer{}
+	} else {
+		w.buf.Reset()
+	}
+	xdrWriterPool.Put(w)
+}
+
+// xdrWriterBytes copies w's contents to a new slice, returns the writer to pool, and returns the slice.
+func xdrWriterBytes(w *XDRWriter) []byte {
+	src := w.Bytes()
+	out := make([]byte, len(src))
+	copy(out, src)
+	putXDRWriter(w)
+	return out
 }
 
 func (w *XDRWriter) WriteUint32(v uint32) {
@@ -45,11 +72,40 @@ func (w *XDRWriter) Bytes() []byte {
 
 // XDRReader reads XDR-encoded values.
 type XDRReader struct {
-	r *bytes.Reader
+	r    bytes.Reader
+	pool *sync.Pool
 }
 
+var xdrReaderPool = sync.Pool{New: func() any { return &XDRReader{} }}
+
+var opArgPool16 = sync.Pool{New: func() any { var b [16]byte; return &b }}
+var opArgPool8 = sync.Pool{New: func() any { var b [8]byte; return &b }}
+
+func getOpArg16() []byte  { return opArgPool16.Get().(*[16]byte)[:] }
+func putOpArg16(b []byte) { opArgPool16.Put((*[16]byte)(b[:16])) }
+
+func getOpArg8() []byte  { return opArgPool8.Get().(*[8]byte)[:] }
+func putOpArg8(b []byte) { opArgPool8.Put((*[8]byte)(b[:8])) }
+
 func NewXDRReader(data []byte) *XDRReader {
-	return &XDRReader{r: bytes.NewReader(data)}
+	r := &XDRReader{}
+	r.r.Reset(data)
+	return r
+}
+
+func newXDRReaderFromPool(data []byte) *XDRReader {
+	r := xdrReaderPool.Get().(*XDRReader)
+	r.r.Reset(data)
+	r.pool = &xdrReaderPool
+	return r
+}
+
+func putXDRReader(r *XDRReader) {
+	if r.pool != nil {
+		p := r.pool
+		r.pool = nil
+		p.Put(r)
+	}
 }
 
 func (r *XDRReader) ReadUint32() (uint32, error) {
@@ -86,7 +142,7 @@ func (r *XDRReader) ReadOpaque() ([]byte, error) {
 	}
 	data := make([]byte, length)
 	if length > 0 {
-		if _, err := io.ReadFull(r.r, data); err != nil {
+		if _, err := io.ReadFull(&r.r, data); err != nil {
 			return nil, err
 		}
 	}
@@ -168,7 +224,7 @@ func ParseRPCCall(data []byte) (*RPCCallHeader, []byte, error) {
 
 // BuildRPCReply constructs an ONC RPC reply.
 func BuildRPCReply(xid uint32, replyBody []byte) []byte {
-	w := &XDRWriter{}
+	w := getXDRWriter()
 	w.WriteUint32(xid)
 	w.WriteUint32(rpcMsgReply)
 	w.WriteUint32(0)        // MSG_ACCEPTED
@@ -176,86 +232,92 @@ func BuildRPCReply(xid uint32, replyBody []byte) []byte {
 	w.WriteUint32(0)        // verifier body length
 	w.WriteUint32(0)        // ACCEPT_SUCCESS
 	w.buf.Write(replyBody)
-	return w.Bytes()
+	return xdrWriterBytes(w)
 }
 
 // --- COMPOUND XDR ---
 
-// ParseCompound parses a COMPOUND4args from XDR data.
-func ParseCompound(data []byte) (*CompoundRequest, error) {
-	r := NewXDRReader(data)
+// ParseCompound parses a COMPOUND4args from XDR data into req.
+// req must be pre-allocated and reset by the caller (e.g. via compoundReqPool).
+func ParseCompound(data []byte, req *CompoundRequest) error {
+	r := newXDRReaderFromPool(data)
+	defer putXDRReader(r)
 
 	tag, err := r.ReadString()
 	if err != nil {
-		return nil, fmt.Errorf("read tag: %w", err)
+		return fmt.Errorf("read tag: %w", err)
 	}
 
 	minorVer, err := r.ReadUint32()
 	if err != nil {
-		return nil, fmt.Errorf("read minor version: %w", err)
+		return fmt.Errorf("read minor version: %w", err)
 	}
 
 	opCount, err := r.ReadUint32()
 	if err != nil {
-		return nil, fmt.Errorf("read op count: %w", err)
+		return fmt.Errorf("read op count: %w", err)
 	}
 
 	if opCount > maxCompoundOps {
-		return nil, fmt.Errorf("too many ops: %d", opCount)
+		return fmt.Errorf("too many ops: %d", opCount)
 	}
 
-	ops := make([]Op, opCount)
+	req.Tag = tag
+	req.MinorVer = minorVer
+	req.Ops = req.Ops[:0]
+
 	for i := uint32(0); i < opCount; i++ {
 		opCode, err := r.ReadUint32()
 		if err != nil {
-			return nil, fmt.Errorf("read op %d code: %w", i, err)
+			return fmt.Errorf("read op %d code: %w", i, err)
 		}
 
-		argData, err := readOpArgs(r, int(opCode))
+		argData, pk, err := readOpArgs(r, int(opCode))
 		if err != nil {
-			return nil, fmt.Errorf("read op %d (%d) args: %w", i, opCode, err)
+			return fmt.Errorf("read op %d (%d) args: %w", i, opCode, err)
 		}
 
-		ops[i] = Op{OpCode: int(opCode), Data: argData}
+		req.Ops = append(req.Ops, Op{OpCode: int(opCode), Data: argData, poolKey: pk})
 	}
 
-	return &CompoundRequest{Tag: tag, MinorVer: minorVer, Ops: ops}, nil
+	return nil
 }
 
 // readOpArgs reads the XDR arguments for a specific op.
-func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
+// Returns (data, poolKey, err). poolKey 0=no pool, 8=opArgPool8, 16=opArgPool16.
+func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 	switch opCode {
 	case OpPutRootFH, OpGetFH:
-		return nil, nil
+		return nil, 0, nil
 
 	case OpPutFH:
 		fh, err := r.ReadOpaque()
-		return fh, err
+		return fh, 0, err
 
 	case OpLookup:
 		name, err := r.ReadString()
-		return []byte(name), err
+		return []byte(name), 0, err
 
 	case OpGetAttr:
 		bitmapLen, _ := r.ReadUint32()
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.WriteUint32(bitmapLen)
 		for i := uint32(0); i < bitmapLen; i++ {
 			v, _ := r.ReadUint32()
 			w.WriteUint32(v)
 		}
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpAccess:
+		b := getOpArg8()
 		v, _ := r.ReadUint32()
-		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, v)
-		return b, nil
+		binary.BigEndian.PutUint32(b[:4], v)
+		return b[:4], 8, nil
 
 	case OpReadDir:
 		cookie, _ := r.ReadUint64()
 		var cookieVerf [8]byte
-		io.ReadFull(r.r, cookieVerf[:])
+		io.ReadFull(&r.r, cookieVerf[:])
 		dircount, _ := r.ReadUint32()
 		maxcount, _ := r.ReadUint32()
 		// bitmap for attr request
@@ -263,36 +325,36 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 		for i := uint32(0); i < bitmapLen; i++ {
 			r.ReadUint32()
 		}
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.WriteUint64(cookie)
 		w.WriteUint32(dircount)
 		w.WriteUint32(maxcount)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpRead:
 		// stateid (seqid:4 + other:12) + offset:8 + count:4
 		var buf [16]byte
-		io.ReadFull(r.r, buf[:]) // stateid
+		io.ReadFull(&r.r, buf[:]) // stateid
 		offset, _ := r.ReadUint64()
 		count, _ := r.ReadUint32()
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.buf.Write(buf[:])
 		w.WriteUint64(offset)
 		w.WriteUint32(count)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpWrite:
 		var buf [16]byte
-		io.ReadFull(r.r, buf[:]) // stateid
+		io.ReadFull(&r.r, buf[:]) // stateid
 		offset, _ := r.ReadUint64()
 		stable, _ := r.ReadUint32()
 		data, _ := r.ReadOpaque()
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.buf.Write(buf[:])
 		w.WriteUint64(offset)
 		w.WriteUint32(stable)
 		w.WriteOpaque(data)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpOpen:
 		seqid, _ := r.ReadUint32()
@@ -319,66 +381,65 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 		_ = seqid
 		_ = shareDeny
 		_ = clientID
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.WriteUint32(shareAccess)
 		w.WriteUint32(openType)
 		w.WriteString(fileName)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpClose:
-		buf := make([]byte, 16)
+		buf := getOpArg16()
 		r.ReadUint32() // seqid
-		io.ReadFull(r.r, buf)
-		return buf, nil
+		io.ReadFull(&r.r, buf)
+		return buf, 16, nil
 
 	case OpSetClientID:
 		var verf [8]byte
-		io.ReadFull(r.r, verf[:])
+		io.ReadFull(&r.r, verf[:])
 		id, _ := r.ReadOpaque()
 		r.ReadUint32() // cb_program
 		r.ReadString() // netid
 		r.ReadString() // addr
 		r.ReadUint32() // callback_ident
-		return append(verf[:], id...), nil
+		return append(verf[:], id...), 0, nil
 
 	case OpSetClientIDConfirm:
-		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf)
-		return buf, nil
+		buf := getOpArg16()
+		io.ReadFull(&r.r, buf)
+		return buf, 16, nil
 
 	case OpSetAttr:
-		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf) // stateid
+		buf := getOpArg16()
+		io.ReadFull(&r.r, buf) // stateid
 		bitmapLen, _ := r.ReadUint32()
 		for i := uint32(0); i < bitmapLen; i++ {
 			r.ReadUint32()
 		}
 		r.ReadOpaque() // attrvals
-		return buf, nil
+		return buf, 16, nil
 
 	case OpOpenConfirm:
-		buf := make([]byte, 16)
-		io.ReadFull(r.r, buf) // stateid (open_stateid)
-		r.ReadUint32()        // seqid
-		return buf, nil
+		buf := getOpArg16()
+		io.ReadFull(&r.r, buf) // stateid (open_stateid)
+		r.ReadUint32()         // seqid
+		return buf, 16, nil
 
 	case OpRenew:
+		b := getOpArg8()
 		clientID, _ := r.ReadUint64()
-		b := make([]byte, 8)
 		binary.BigEndian.PutUint64(b, clientID)
-		return b, nil
+		return b, 8, nil
 
 	default:
-		return nil, nil
+		return nil, 0, nil
 	}
 }
 
 // OpRenew is the RENEW operation code.
 const OpRenew = 30
 
-// EncodeCompoundResponse encodes a COMPOUND4res to XDR.
-func EncodeCompoundResponse(resp *CompoundResponse) []byte {
-	w := &XDRWriter{}
+// encodeCompoundResponseInto writes a COMPOUND4res directly into w (zero extra allocation).
+func encodeCompoundResponseInto(w *XDRWriter, resp *CompoundResponse) {
 	w.WriteUint32(uint32(resp.Status))
 	w.WriteString(resp.Tag)
 	w.WriteUint32(uint32(len(resp.Results)))
@@ -389,5 +450,11 @@ func EncodeCompoundResponse(resp *CompoundResponse) []byte {
 			w.buf.Write(result.Data)
 		}
 	}
-	return w.Bytes()
+}
+
+// EncodeCompoundResponse encodes a COMPOUND4res to XDR.
+func EncodeCompoundResponse(resp *CompoundResponse) []byte {
+	w := getXDRWriter()
+	encodeCompoundResponseInto(w, resp)
+	return xdrWriterBytes(w)
 }

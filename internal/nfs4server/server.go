@@ -84,60 +84,45 @@ func (s *Server) handleConn(conn net.Conn) {
 			continue
 		}
 
-		var replyBody []byte
+		w := getXDRWriter()
+		w.WriteUint32(header.XID)
+		w.WriteUint32(rpcMsgReply)
+		w.WriteUint32(0)        // MSG_ACCEPTED
+		w.WriteUint32(authNone) // verifier flavor
+		w.WriteUint32(0)        // verifier body length
+		w.WriteUint32(0)        // ACCEPT_SUCCESS
 
-		switch {
-		case header.Program != rpcProgNFS:
-			// Wrong program — send PROG_UNAVAIL
-			replyBody = buildProgUnavailReply()
-		case header.ProgVers != rpcVersNFS4:
-			// Wrong version — send PROG_MISMATCH
-			replyBody = buildProgMismatchReply()
-		case header.Procedure == 0:
-			// NULL procedure — just return empty
-			replyBody = nil
-		case header.Procedure == 1:
-			// COMPOUND procedure
-			replyBody = s.handleCompound(args)
-		default:
-			replyBody = nil
+		if header.Program == rpcProgNFS && header.ProgVers == rpcVersNFS4 && header.Procedure == 1 {
+			s.handleCompoundInto(args, w)
 		}
 
-		reply := BuildRPCReply(header.XID, replyBody)
-		writeRPCFrame(conn, reply)
+		writeRPCFrame(conn, w.Bytes())
+		putXDRWriter(w)
 	}
 }
 
-func (s *Server) handleCompound(data []byte) []byte {
-	req, err := ParseCompound(data)
-	if err != nil {
+func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
+	req := compoundReqPool.Get().(*CompoundRequest)
+	req.Tag = ""
+	req.MinorVer = 0
+	req.Ops = req.Ops[:0]
+	defer compoundReqPool.Put(req)
+
+	if err := ParseCompound(data, req); err != nil {
 		s.logger.Debug("COMPOUND parse error", "error", err)
-		// Return an error response
-		resp := &CompoundResponse{Status: NFS4ERR_INVAL}
-		return EncodeCompoundResponse(resp)
+		encodeCompoundResponseInto(w, &CompoundResponse{Status: NFS4ERR_INVAL})
+		return
 	}
 
-	dispatcher := &Dispatcher{
-		backend: s.backend,
-		state:   s.state,
-	}
+	d := getDispatcher(s.backend, s.state)
+	defer putDispatcher(d)
 
-	resp := dispatcher.Dispatch(req)
-	return EncodeCompoundResponse(resp)
-}
+	resp := compoundRespPool.Get().(*CompoundResponse)
+	resp.Status = NFS4_OK
+	resp.Tag = ""
+	resp.Results = resp.Results[:0]
+	defer compoundRespPool.Put(resp)
 
-func buildProgUnavailReply() []byte {
-	// MSG_DENIED = 1 is not right here.
-	// For ACCEPTED + PROG_UNAVAIL: reply_stat=0 (accepted), verf, accept_stat=2
-	w := &XDRWriter{}
-	// accept_stat = PROG_UNAVAIL (1)
-	// Already handled in BuildRPCReply (accept_stat=0 is SUCCESS)
-	// We need to not use BuildRPCReply for error cases.
-	// For simplicity, return empty which maps to success with no data.
-	_ = w
-	return nil
-}
-
-func buildProgMismatchReply() []byte {
-	return nil
+	d.Dispatch(req, resp)
+	encodeCompoundResponseInto(w, resp)
 }

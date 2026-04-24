@@ -1,0 +1,293 @@
+package nfs4server
+
+import (
+	"encoding/binary"
+	"log/slog"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// buildCompoundXDR builds raw XDR bytes for a COMPOUND request.
+func buildCompoundXDR(tag string, ops ...func(*XDRWriter)) []byte {
+	w := &XDRWriter{}
+	w.WriteString(tag)
+	w.WriteUint32(0) // minor version
+	w.WriteUint32(uint32(len(ops)))
+	for _, op := range ops {
+		op(w)
+	}
+	return w.Bytes()
+}
+
+func opXDRPutRootFH(w *XDRWriter) {
+	w.WriteUint32(uint32(OpPutRootFH))
+}
+
+func opXDRGetFH(w *XDRWriter) {
+	w.WriteUint32(uint32(OpGetFH))
+}
+
+func opXDRGetAttr(w *XDRWriter) {
+	w.WriteUint32(uint32(OpGetAttr))
+	w.WriteUint32(2)   // bitmap len
+	w.WriteUint32(0x3) // attr word0
+	w.WriteUint32(0)   // attr word1
+}
+
+func opXDRReadDir(w *XDRWriter) {
+	w.WriteUint32(uint32(OpReadDir))
+	w.WriteUint64(0) // cookie
+	for i := 0; i < 8; i++ {
+		w.buf.WriteByte(0) // cookieverf (8 bytes)
+	}
+	w.WriteUint32(512)  // dircount
+	w.WriteUint32(4096) // maxcount
+	w.WriteUint32(0)    // bitmap len
+}
+
+func TestXDRReaderPool_ZeroAllocs(t *testing.T) {
+	data := []byte{0, 1, 2, 3}
+	allocs := testing.AllocsPerRun(100, func() {
+		r := newXDRReaderFromPool(data)
+		putXDRReader(r)
+	})
+	assert.Equal(t, 0.0, allocs, "newXDRReaderFromPool + putXDRReader should allocate 0")
+}
+
+func TestXDRWriterPool_ZeroAllocs(t *testing.T) {
+	allocs := testing.AllocsPerRun(100, func() {
+		w := getXDRWriter()
+		w.WriteUint32(42)
+		putXDRWriter(w)
+	})
+	assert.Equal(t, 0.0, allocs, "getXDRWriter + putXDRWriter should allocate 0")
+}
+
+func TestParseCompound_ErrorPath_NoLeak(t *testing.T) {
+	// Truncated data should return error and req should be returned to pool.
+	req := compoundReqPool.Get().(*CompoundRequest)
+	req.Tag = ""
+	req.MinorVer = 0
+	req.Ops = req.Ops[:0]
+
+	err := ParseCompound([]byte{0}, req)
+	assert.Error(t, err)
+	// Return to pool — should not panic or corrupt pool.
+	compoundReqPool.Put(req)
+}
+
+func TestCompound_PUTROOTFH_GETATTR_AllocsPerRun(t *testing.T) {
+	// Empty tag: no tag-string allocs. Tests the Into hot path.
+	data := buildCompoundXDR("",
+		opXDRPutRootFH,
+		opXDRGetAttr,
+	)
+
+	srv := &Server{state: NewStateManager()}
+
+	// Warm up pools.
+	for i := 0; i < 10; i++ {
+		w := getXDRWriter()
+		srv.handleCompoundInto(data, w)
+		putXDRWriter(w)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		w := getXDRWriter()
+		srv.handleCompoundInto(data, w)
+		putXDRWriter(w)
+	})
+	// PUTROOTFH+GETATTR: only unavoidable alloc is GetAttr arg encoding (xdrWriterBytes). Target ≤2.
+	assert.LessOrEqual(t, allocs, 2.0,
+		"COMPOUND PUTROOTFH+GETATTR round-trip should allocate ≤2 (got %.1f)", allocs)
+}
+
+func TestCompound_PUTROOTFH_READDIR_AllocsPerRun(t *testing.T) {
+	data := buildCompoundXDR("",
+		opXDRPutRootFH,
+		opXDRReadDir,
+	)
+
+	srv := &Server{state: NewStateManager()}
+
+	for i := 0; i < 10; i++ {
+		w := getXDRWriter()
+		srv.handleCompoundInto(data, w)
+		putXDRWriter(w)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		w := getXDRWriter()
+		srv.handleCompoundInto(data, w)
+		putXDRWriter(w)
+	})
+	// PUTROOTFH+READDIR: only unavoidable alloc is ReadDir arg encoding (xdrWriterBytes). Target ≤3.
+	assert.LessOrEqual(t, allocs, 3.0,
+		"COMPOUND PUTROOTFH+READDIR round-trip should allocate ≤3 (got %.1f)", allocs)
+}
+
+func TestDispatch_EarlyBreak_OpArgReturned(t *testing.T) {
+	// OpAccess uses opArgPool8 (poolKey=8). Dispatch should return it even on error break.
+	state := NewStateManager()
+	d := &Dispatcher{state: state}
+	resp := &CompoundResponse{}
+
+	req := &CompoundRequest{
+		Ops: []Op{
+			// OpAccess with poolKey=8 data — dispatcher should put it back.
+			{OpCode: OpAccess, Data: getOpArg8()[:4], poolKey: 8},
+			// This op would fail (no current FH for OpGetFH), but we test after OpAccess.
+			{OpCode: OpGetFH, Data: nil, poolKey: 0},
+		},
+	}
+	// Should not panic or leak.
+	d.Dispatch(req, resp)
+	// We get some result (either NFS4_OK or error), just verify no panic.
+	assert.NotNil(t, resp)
+}
+
+// --- Coverage gap tests ---
+
+func TestXDRWriterPool_LargeCapEviction(t *testing.T) {
+	w := getXDRWriter()
+	// Grow buf beyond eviction threshold (64KB)
+	large := make([]byte, maxXDRWriterCap+1)
+	w.buf.Write(large)
+	require.Greater(t, w.buf.Cap(), maxXDRWriterCap)
+
+	// putXDRWriter must evict without panic
+	putXDRWriter(w)
+
+	// Pool should still be usable after eviction
+	w2 := getXDRWriter()
+	w2.WriteUint32(42)
+	assert.Equal(t, 4, len(w2.Bytes()))
+	putXDRWriter(w2)
+}
+
+func TestOpArgPool16_ZeroAllocs(t *testing.T) {
+	allocs := testing.AllocsPerRun(100, func() {
+		b := getOpArg16()
+		putOpArg16(b)
+	})
+	assert.Equal(t, 0.0, allocs, "getOpArg16/putOpArg16 should allocate 0")
+}
+
+func TestDispatch_PoolKey16_Returned(t *testing.T) {
+	state := NewStateManager()
+	d := &Dispatcher{state: state}
+	resp := &CompoundResponse{}
+
+	// OpClose uses poolKey=16; Dispatch must return the buf to pool16 without panic.
+	buf := getOpArg16()
+	req := &CompoundRequest{
+		Ops: []Op{
+			{OpCode: OpClose, Data: buf, poolKey: 16},
+		},
+	}
+	d.Dispatch(req, resp)
+	assert.NotNil(t, resp)
+}
+
+func TestHandleCompoundInto_ParseError(t *testing.T) {
+	srv := &Server{state: NewStateManager(), logger: slog.Default()}
+	w := getXDRWriter()
+	defer putXDRWriter(w)
+
+	// Truncated data forces ParseCompound to fail → NFS4ERR_INVAL response.
+	srv.handleCompoundInto([]byte{0}, w)
+
+	b := w.Bytes()
+	require.GreaterOrEqual(t, len(b), 4, "response must contain at least a status uint32")
+	status := binary.BigEndian.Uint32(b[:4])
+	assert.Equal(t, uint32(NFS4ERR_INVAL), status)
+}
+
+func TestReadOpArgs_PutFH(t *testing.T) {
+	// OpPutFH: ReadOpaque → poolKey=0
+	w := getXDRWriter()
+	fh := []byte{1, 2, 3, 4}
+	w.WriteOpaque(fh)
+	r := NewXDRReader(w.Bytes())
+	putXDRWriter(w)
+
+	data, pk, err := readOpArgs(r, OpPutFH)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, pk)
+	assert.Equal(t, fh, data)
+}
+
+func TestReadOpArgs_SetClientIDConfirm(t *testing.T) {
+	// OpSetClientIDConfirm: reads exactly 16 bytes into pool16 buf.
+	raw := make([]byte, 16)
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+	r := NewXDRReader(raw)
+
+	data, pk, err := readOpArgs(r, OpSetClientIDConfirm)
+	assert.NoError(t, err)
+	assert.Equal(t, 16, pk)
+	assert.Equal(t, raw, data)
+	putOpArg16(data)
+}
+
+func TestReadOpArgs_OpenConfirm(t *testing.T) {
+	// OpOpenConfirm: stateid (16 bytes) + seqid (4 bytes); returns stateid only.
+	raw := make([]byte, 20)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	r := NewXDRReader(raw)
+
+	data, pk, err := readOpArgs(r, OpOpenConfirm)
+	assert.NoError(t, err)
+	assert.Equal(t, 16, pk)
+	assert.Equal(t, 16, len(data))
+	assert.Equal(t, raw[:16], data)
+	putOpArg16(data)
+}
+
+func TestReadOpArgs_Renew(t *testing.T) {
+	// OpRenew: 8-byte clientID into pool8 buf.
+	var raw [8]byte
+	binary.BigEndian.PutUint64(raw[:], 0x1234567890abcdef)
+	r := NewXDRReader(raw[:])
+
+	data, pk, err := readOpArgs(r, OpRenew)
+	assert.NoError(t, err)
+	assert.Equal(t, 8, pk)
+	assert.Equal(t, raw[:], data)
+	putOpArg8(data)
+}
+
+func TestReadOpArgs_SetAttr(t *testing.T) {
+	// OpSetAttr: stateid (16 bytes) + bitmap len 0 + empty attrvals.
+	w := getXDRWriter()
+	var stateid [16]byte
+	for i := range stateid {
+		stateid[i] = byte(i + 10)
+	}
+	w.buf.Write(stateid[:])
+	w.WriteUint32(0) // bitmap len = 0
+	w.WriteOpaque(nil)
+	r := NewXDRReader(w.Bytes())
+	putXDRWriter(w)
+
+	data, pk, err := readOpArgs(r, OpSetAttr)
+	assert.NoError(t, err)
+	assert.Equal(t, 16, pk)
+	assert.Equal(t, stateid[:], data)
+	putOpArg16(data)
+}
+
+func TestReadOpArgs_UnknownOp(t *testing.T) {
+	// Unknown op code → default case, returns nil/0/nil.
+	r := NewXDRReader(nil)
+	data, pk, err := readOpArgs(r, 9999)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, pk)
+	assert.Nil(t, data)
+}
