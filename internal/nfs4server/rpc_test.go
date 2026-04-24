@@ -57,8 +57,9 @@ func TestCompoundDispatcher_HandlesPutRootFH(t *testing.T) {
 	req := &CompoundRequest{
 		Ops: []Op{{OpCode: OpPutRootFH}},
 	}
+	resp := &CompoundResponse{}
 
-	resp := d.Dispatch(req)
+	d.Dispatch(req, resp)
 	require.Len(t, resp.Results, 1)
 	assert.Equal(t, NFS4_OK, resp.Results[0].Status)
 }
@@ -72,7 +73,8 @@ func TestCompoundDispatcher_RejectsOverMaxOps(t *testing.T) {
 	}
 
 	req := &CompoundRequest{Ops: ops}
-	resp := d.Dispatch(req)
+	resp := &CompoundResponse{}
+	d.Dispatch(req, resp)
 	assert.Equal(t, NFS4ERR_RESOURCE, resp.Status)
 }
 

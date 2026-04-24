@@ -121,12 +121,16 @@ func (s *Server) handleCompound(data []byte) []byte {
 		return EncodeCompoundResponse(resp)
 	}
 
-	dispatcher := &Dispatcher{
-		backend: s.backend,
-		state:   s.state,
-	}
+	d := getDispatcher(s.backend, s.state)
+	defer putDispatcher(d)
 
-	resp := dispatcher.Dispatch(req)
+	resp := compoundRespPool.Get().(*CompoundResponse)
+	resp.Status = NFS4_OK
+	resp.Tag = ""
+	resp.Results = resp.Results[:0]
+	defer compoundRespPool.Put(resp)
+
+	d.Dispatch(req, resp)
 	return EncodeCompoundResponse(resp)
 }
 

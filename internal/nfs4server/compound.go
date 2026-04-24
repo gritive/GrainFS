@@ -18,6 +18,27 @@ var compoundReqPool = sync.Pool{New: func() any {
 	return &CompoundRequest{Ops: make([]Op, 0, maxCompoundOps)}
 }}
 
+var compoundRespPool = sync.Pool{New: func() any {
+	return &CompoundResponse{Results: make([]OpResult, 0, maxCompoundOps)}
+}}
+
+var dispatcherPool = sync.Pool{New: func() any { return &Dispatcher{} }}
+
+func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
+	d := dispatcherPool.Get().(*Dispatcher)
+	d.backend = backend
+	d.state = state
+	d.currentFH = FileHandle{}
+	d.currentPath = ""
+	return d
+}
+
+func putDispatcher(d *Dispatcher) {
+	d.backend = nil
+	d.state = nil
+	dispatcherPool.Put(d)
+}
+
 // NFSv4 status codes (RFC 7530)
 const (
 	NFS4_OK             = 0
@@ -101,24 +122,29 @@ func NewDispatcher(backend storage.Backend) *Dispatcher {
 	return &Dispatcher{backend: backend}
 }
 
-func (d *Dispatcher) Dispatch(req *CompoundRequest) *CompoundResponse {
-	resp := &CompoundResponse{Tag: req.Tag, Status: NFS4_OK}
+func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
+	resp.Tag = req.Tag
+	resp.Status = NFS4_OK
 
 	if len(req.Ops) > maxCompoundOps {
 		resp.Status = NFS4ERR_RESOURCE
-		return resp
+		return
 	}
 
 	for _, op := range req.Ops {
 		result := d.dispatchOp(op)
+		switch op.poolKey {
+		case 8:
+			putOpArg8(op.Data)
+		case 16:
+			putOpArg16(op.Data)
+		}
 		resp.Results = append(resp.Results, result)
 		if result.Status != NFS4_OK {
 			resp.Status = result.Status
 			break
 		}
 	}
-
-	return resp
 }
 
 func (d *Dispatcher) dispatchOp(op Op) OpResult {

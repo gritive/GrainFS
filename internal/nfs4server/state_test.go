@@ -89,8 +89,9 @@ func TestCompoundDispatcher_MultiOp(t *testing.T) {
 			{OpCode: OpGetFH},
 		},
 	}
+	resp := &CompoundResponse{}
 
-	resp := d.Dispatch(req)
+	d.Dispatch(req, resp)
 	require.Len(t, resp.Results, 2)
 	assert.Equal(t, NFS4_OK, resp.Results[0].Status)
 	assert.Equal(t, NFS4_OK, resp.Results[1].Status)
@@ -105,8 +106,9 @@ func TestCompoundDispatcher_StopsOnError(t *testing.T) {
 			{OpCode: OpPutRootFH},
 		},
 	}
+	resp := &CompoundResponse{}
 
-	resp := d.Dispatch(req)
+	d.Dispatch(req, resp)
 	// Should stop after first op fails
 	require.Len(t, resp.Results, 1)
 	assert.Equal(t, NFS4ERR_BADHANDLE, resp.Results[0].Status)
