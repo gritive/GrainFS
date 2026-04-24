@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.4.25] - 2026-04-24
+
+### Performance
+
+- **NFS COMPOUND round-trip heap alloc ≤2** (`internal/nfs4server/`): Zero-Alloc Phase 3 완료.
+  - `XDRReader.r bytes.Reader` embed-by-value → 1 alloc 제거 (`xdrReaderPool` + `pool *sync.Pool` 필드)
+  - `XDRWriter sync.Pool` + cap guard (`putXDRWriter`: cap > 64KB → 폐기)
+  - `opArgPool8/16 sync.Pool` + full-cap restore (`putOpArg8/16`: `b[:cap(b)]` 후 Put)
+  - `Op.poolKey int` 필드 → `Dispatch` 루프에서 `putOpArg8/16` 자동 반환
+  - `ParseCompound` into-req 시그니처: caller 소유 req 직접 채움, `compoundReqPool`
+  - `Dispatch` into-resp 시그니처 + `compoundRespPool` / `dispatcherPool`
+  - `encodeCompoundResponseInto` + `handleCompoundInto`: Into 패턴으로 `EncodeCompoundResponse` / `BuildRPCReply` alloc 제거; `handleConn`이 단일 pooled writer 소유
+  - `opGetAttr` 인라인: `encodeMinimalDirAttrs()` / `encodeFileAttrs()` 중간 writer 제거
+
 ## [0.0.4.24] - 2026-04-24
 
 ### Performance
