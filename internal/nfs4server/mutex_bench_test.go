@@ -25,10 +25,13 @@ func BenchmarkMutexContention(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			// Mix: ~80% reads (ResolveFH) + ~20% writes (GetOrCreateFH)
-			// reflects NFS COMPOUND pattern: many lookups, occasional creates
+			// Mix: ~80% reads (ResolveFH) + ~20% GetOrCreateFH that are
+			// mostly cache hits (pre-existing paths).  Mirrors production
+			// NFS: LOOKUP/READ call GetOrCreateFH on an existing path;
+			// actual creates are rare.  Using i%1000 caps map size and
+			// ensures ~99% of GetOrCreateFH calls are fast-path hits.
 			if i%5 == 0 {
-				sm.GetOrCreateFH(fmt.Sprintf("/vol/bench/%d", i))
+				sm.GetOrCreateFH(fmt.Sprintf("/vol/dir%d/file%d", (i%1000)/100, i%1000))
 			} else {
 				sm.ResolveFH(fhs[i%len(fhs)])
 			}

@@ -59,18 +59,18 @@ func TestStateManager_SetClientID(t *testing.T) {
 	assert.Greater(t, id, uint64(0))
 
 	// Not confirmed yet
-	sm.mu.RLock()
+	sm.clientMu.Lock()
 	cs := sm.clients[id]
-	sm.mu.RUnlock()
+	sm.clientMu.Unlock()
 	assert.False(t, cs.Confirmed)
 
 	// Confirm
 	ok := sm.ConfirmClientID(id)
 	assert.True(t, ok)
 
-	sm.mu.RLock()
+	sm.clientMu.Lock()
 	cs = sm.clients[id]
-	sm.mu.RUnlock()
+	sm.clientMu.Unlock()
 	assert.True(t, cs.Confirmed)
 }
 
