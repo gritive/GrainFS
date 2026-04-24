@@ -355,3 +355,14 @@ func TestBadgerLogStore_ManagedMode_ConsistentReopenNonManaged(t *testing.T) {
 	defer s2.Close()
 	assert.False(t, s2.IsManagedMode())
 }
+
+func TestMarshalLogEntry_AllocsBounded(t *testing.T) {
+	entry := LogEntry{Term: 1, Index: 42, Command: []byte("test-command")}
+	// warmup: populate pool
+	_ = marshalLogEntry(entry)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = marshalLogEntry(entry)
+	})
+	assert.LessOrEqual(t, allocs, float64(2), "marshalLogEntry allocs should be ≤2 with pool reuse")
+}

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.4.22] - 2026-04-24
+
+### Performance
+
+- **EncryptWithAAD 3→1 alloc** (`internal/encrypt/encrypt.go`): nonce를 별도 변수 대신 `out[2:14]` sub-slice로 사용해 heap 탈출 제거. alloc 3→1.
+- **FlatBuffers Builder sync.Pool** (`internal/cluster/codec.go`, `internal/storage/codec.go`, `internal/raft/quic_rpc_codec.go`, `internal/raft/store.go`, `internal/volume/codec.go`): 5개 패키지에 패키지별 Builder pool 추가. `fbFinish`/`fbFinishRPC`에서 `b.Reset()+Pool.Put()`. make+copy는 BadgerDB/Raft 소유권 이전 상 유지.
+- **Reed-Solomon encoder 캐싱** (`internal/cluster/ec_pool.go`): `sync.Map` 기반 ECConfig별 encoder 캐시. `reedsolomon.New()` alloc 제거. ECSplit 59→11, ECReconstruct 48→3 alloc.
+- **encodeShardHeader 스택 배열** (`internal/cluster/ec.go`): 반환 타입 `[]byte`→`[8]byte`로 변경, 8B heap alloc 제거. 컴파일러가 inline+stack 배치.
+
 ## [0.0.4.21] - 2026-04-24
 
 ### Fixed

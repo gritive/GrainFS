@@ -149,7 +149,7 @@ func TestShardHeader_Roundtrip(t *testing.T) {
 	sizes := []int64{0, 1, 100, 1 << 20, 1 << 40}
 	for _, s := range sizes {
 		h := encodeShardHeader(s)
-		got, body, err := decodeShardHeader(append(h, 0xab, 0xcd))
+		got, body, err := decodeShardHeader(append(h[:], 0xab, 0xcd))
 		require.NoError(t, err)
 		assert.Equal(t, s, got)
 		assert.Equal(t, []byte{0xab, 0xcd}, body)

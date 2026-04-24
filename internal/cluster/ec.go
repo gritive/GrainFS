@@ -11,8 +11,6 @@ import (
 	"hash/fnv"
 	"math"
 	"path/filepath"
-
-	"github.com/klauspost/reedsolomon"
 )
 
 // Default EC parameters for 4+2 Reed-Solomon. Exposed so serve flags
@@ -85,9 +83,9 @@ func PlacementForNodes(cfg ECConfig, nodes []string, key string) []string {
 // so Reconstruct can call reedsolomon.Join(writer, shards, dataLen).
 const shardHeaderSize = 8
 
-func encodeShardHeader(origSize int64) []byte {
-	h := make([]byte, shardHeaderSize)
-	binary.BigEndian.PutUint64(h, uint64(origSize))
+func encodeShardHeader(origSize int64) [shardHeaderSize]byte {
+	var h [shardHeaderSize]byte
+	binary.BigEndian.PutUint64(h[:], uint64(origSize))
 	return h
 }
 
@@ -102,7 +100,7 @@ func decodeShardHeader(data []byte) (origSize int64, body []byte, err error) {
 // ECSplit encodes object data into k+m shards ready for per-node storage.
 // Each returned shard already contains the size header. Result length == cfg.NumShards().
 func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
-	enc, err := reedsolomon.New(cfg.DataShards, cfg.ParityShards)
+	enc, err := getEncoder(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ec encoder: %w", err)
 	}
@@ -117,7 +115,7 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
 	out := make([][]byte, len(shards))
 	for i, s := range shards {
 		payload := make([]byte, 0, shardHeaderSize+len(s))
-		payload = append(payload, header...)
+		payload = append(payload, header[:]...)
 		payload = append(payload, s...)
 		out[i] = payload
 	}
@@ -148,7 +146,7 @@ func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {
 	if origSize < 0 {
 		return nil, fmt.Errorf("no readable shards")
 	}
-	enc, err := reedsolomon.New(cfg.DataShards, cfg.ParityShards)
+	enc, err := getEncoder(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ec decoder: %w", err)
 	}

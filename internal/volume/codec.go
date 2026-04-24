@@ -2,13 +2,18 @@ package volume
 
 import (
 	"fmt"
+	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/volume/volumepb"
 )
 
+var volumeBuilderPool = sync.Pool{
+	New: func() any { return flatbuffers.NewBuilder(256) },
+}
+
 func marshalVolume(vol *Volume) ([]byte, error) {
-	b := flatbuffers.NewBuilder(64)
+	b := volumeBuilderPool.Get().(*flatbuffers.Builder)
 	nameOff := b.CreateString(vol.Name)
 	volumepb.VolumeStart(b)
 	volumepb.VolumeAddName(b, nameOff)
@@ -19,6 +24,8 @@ func marshalVolume(vol *Volume) ([]byte, error) {
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
+	b.Reset()
+	volumeBuilderPool.Put(b)
 	return out, nil
 }
 

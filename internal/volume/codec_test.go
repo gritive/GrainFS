@@ -87,3 +87,14 @@ func TestVolumeCodecOutputIsNotJSON(t *testing.T) {
 	// protobuf binary never starts with '{' (JSON object opener)
 	assert.NotEqual(t, byte('{'), data[0], "protobuf output should not start with '{'")
 }
+
+func TestMarshalVolume_AllocsBounded(t *testing.T) {
+	vol := &Volume{Name: "bench-vol", Size: 1 << 30, BlockSize: DefaultBlockSize}
+	// warmup: populate pool
+	_, _ = marshalVolume(vol)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = marshalVolume(vol)
+	})
+	assert.LessOrEqual(t, allocs, float64(2), "marshalVolume allocs should be ≤2 with pool reuse")
+}

@@ -60,3 +60,14 @@ func TestCodecOutputIsNotJSON(t *testing.T) {
 	assert.NotContains(t, str, `"key"`)
 	assert.NotContains(t, str, `{`)
 }
+
+func TestMarshalObject_AllocsBounded(t *testing.T) {
+	obj := &Object{Key: "bench.txt", Size: 4096, ContentType: "application/octet-stream", ETag: "abc123", LastModified: 1700000000}
+	// warmup: populate pool
+	_, _ = marshalObject(obj)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = marshalObject(obj)
+	})
+	assert.LessOrEqual(t, allocs, float64(2), "marshalObject allocs should be ≤2 with pool reuse")
+}

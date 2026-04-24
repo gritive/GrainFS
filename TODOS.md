@@ -58,7 +58,6 @@
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] Zero-copy Protocol Bridge (NFS to S3)
 - [ ] Unified buffer cache: Centralized Page Cache
-- [ ] Reed-Solomon 버퍼 재사용 with sync.Pool (`ec_pool.go` 설계 완료)
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)
