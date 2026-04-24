@@ -69,7 +69,9 @@ type proposalResult struct {
 }
 
 // adaptiveMetrics tracks EWMA request rate to dynamically tune batch parameters.
+// It has its own mutex so callers do not need to hold Node.mu for metrics reads.
 type adaptiveMetrics struct {
+	mu          sync.Mutex
 	ewmaRate    float64
 	lastFlushAt time.Time
 	alpha       float64
@@ -77,6 +79,7 @@ type adaptiveMetrics struct {
 
 func (m *adaptiveMetrics) update(batchSize int) {
 	now := time.Now()
+	m.mu.Lock()
 	elapsed := now.Sub(m.lastFlushAt).Seconds()
 	if elapsed <= 0 {
 		elapsed = 0.001
@@ -84,24 +87,48 @@ func (m *adaptiveMetrics) update(batchSize int) {
 	instantRate := float64(batchSize) / elapsed
 	m.ewmaRate = m.alpha*instantRate + (1-m.alpha)*m.ewmaRate
 	m.lastFlushAt = now
+	m.mu.Unlock()
+}
+
+func (m *adaptiveMetrics) snapshot() (ewmaRate float64, timeout time.Duration, maxBatch int) {
+	m.mu.Lock()
+	ewmaRate = m.ewmaRate
+	m.mu.Unlock()
+	timeout = calcBatchTimeout(ewmaRate)
+	maxBatch = calcMaxBatch(ewmaRate)
+	return
 }
 
 func (m *adaptiveMetrics) batchTimeout() time.Duration {
+	m.mu.Lock()
+	rate := m.ewmaRate
+	m.mu.Unlock()
+	return calcBatchTimeout(rate)
+}
+
+func (m *adaptiveMetrics) maxBatch() int {
+	m.mu.Lock()
+	rate := m.ewmaRate
+	m.mu.Unlock()
+	return calcMaxBatch(rate)
+}
+
+func calcBatchTimeout(rate float64) time.Duration {
 	switch {
-	case m.ewmaRate >= 500:
+	case rate >= 500:
 		return 5 * time.Millisecond
-	case m.ewmaRate >= 100:
+	case rate >= 100:
 		return time.Millisecond
 	default:
 		return 100 * time.Microsecond
 	}
 }
 
-func (m *adaptiveMetrics) maxBatch() int {
+func calcMaxBatch(rate float64) int {
 	switch {
-	case m.ewmaRate >= 500:
+	case rate >= 500:
 		return 128
-	case m.ewmaRate >= 100:
+	case rate >= 100:
 		return 32
 	default:
 		return 4
@@ -370,12 +397,11 @@ func (n *Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) 
 
 // BatchMetrics returns a snapshot of the adaptive batcher's current state.
 func (n *Node) BatchMetrics() BatchMetricsSnapshot {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	rate, timeout, maxBatch := n.metrics.snapshot()
 	return BatchMetricsSnapshot{
-		EWMARate:     n.metrics.ewmaRate,
-		BatchTimeout: n.metrics.batchTimeout(),
-		MaxBatch:     n.metrics.maxBatch(),
+		EWMARate:     rate,
+		BatchTimeout: timeout,
+		MaxBatch:     maxBatch,
 	}
 }
 
@@ -1267,10 +1293,9 @@ func (n *Node) persistState() {
 // It adapts batch size and timeout based on EWMA request rate.
 func (n *Node) batcherLoop() {
 	for {
-		n.mu.Lock()
+		// metrics has its own mutex — no n.mu needed here
 		timeout := n.metrics.batchTimeout()
 		maxBatch := n.metrics.maxBatch()
-		n.mu.Unlock()
 
 		timer := time.NewTimer(timeout)
 		var pending []proposal
@@ -1354,9 +1379,9 @@ func (n *Node) flushBatch(pending []proposal) {
 		commitChs[i] = ch
 	}
 	n.advanceCommitIndex()
+	n.mu.Unlock()
 
 	n.metrics.update(len(pending))
-	n.mu.Unlock()
 
 	select {
 	case n.replicationCh <- struct{}{}:
