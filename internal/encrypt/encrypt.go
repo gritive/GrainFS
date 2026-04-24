@@ -78,16 +78,16 @@ func IsEncryptedBlob(data []byte) bool {
 // that moving an encrypted shard to a different position causes decryption to
 // fail. Output format: magic(2) + nonce(12) + ciphertext + tag(16).
 func (e *Encryptor) EncryptWithAAD(plaintext, aad []byte) ([]byte, error) {
-	nonce := make([]byte, e.aead.NonceSize())
+	// Single allocation: magic(2) + nonce(12) + plaintext + tag(16).
+	// nonce is a sub-slice of out (already heap-allocated), so no 2nd alloc.
+	out := make([]byte, 2+12, 2+12+len(plaintext)+16)
+	out[0] = encMagic0
+	out[1] = encMagic1
+	nonce := out[2:14]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
-	// aead.Seal appends ciphertext+tag to nonce slice.
-	inner := e.aead.Seal(nonce, nonce, plaintext, aad)
-	out := make([]byte, 2+len(inner))
-	out[0] = encMagic0
-	out[1] = encMagic1
-	copy(out[2:], inner)
+	out = e.aead.Seal(out, nonce, plaintext, aad)
 	return out, nil
 }
 

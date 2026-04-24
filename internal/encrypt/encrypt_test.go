@@ -99,6 +99,18 @@ func TestEncryptDecryptWithAAD(t *testing.T) {
 	assert.Error(t, err, "missing magic must fail")
 }
 
+func TestEncryptWithAAD_AllocsBounded(t *testing.T) {
+	e, err := NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+	plaintext := make([]byte, 128*1024)
+	aad := []byte("bucket/key/0")
+	_, _ = e.EncryptWithAAD(plaintext, aad)
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = e.EncryptWithAAD(plaintext, aad)
+	})
+	assert.LessOrEqual(t, allocs, 1.0, "EncryptWithAAD should allocate exactly 1 (output slice)")
+}
+
 func TestIsEncryptedBlob(t *testing.T) {
 	key := make([]byte, 32)
 	enc, _ := NewEncryptor(key)
