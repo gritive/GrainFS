@@ -45,21 +45,21 @@ type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
 
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
-	backend     storage.Backend
-	dataDir     string
-	snapMgr     *snapshot.Manager
-	scrubber    *scrubber.BackgroundScrubber // nil if not using ECBackend
-	verifier    *s3auth.CachingVerifier
-	hertz       *server.Hertz
-	hub         *Hub
-	volMgr      *volume.Manager
+	backend        storage.Backend
+	dataDir        string
+	snapMgr        *snapshot.Manager
+	scrubber       *scrubber.BackgroundScrubber // nil if not using ECBackend
+	verifier       *s3auth.CachingVerifier
+	hertz          *server.Hertz
+	hub            *Hub
+	volMgr         *volume.Manager
 	policyStore    *CompiledPolicyStore
 	lifecycleStore *lifecycle.Store
 	ipLimiter      *RateLimiter
 	userLimiter    *RateLimiter
-	cluster        ClusterInfo      // nil in no-peers mode
-	joinCluster    JoinClusterFunc  // nil if not in no-peers mode or already clustered
-	balancer       BalancerInfo     // nil if balancer not enabled
+	cluster        ClusterInfo       // nil in no-peers mode
+	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
+	balancer       BalancerInfo      // nil if balancer not enabled
 	evStore        *eventstore.Store // nil if event store not configured
 	alerts         *AlertsState      // nil if alerts not wired
 	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
@@ -70,6 +70,10 @@ type Server struct {
 	eventDone     chan struct{}
 	eventStopOnce sync.Once
 }
+
+// broadcastLoggerOnce guards the global zerolog.Logger setup so it is wired
+// to the SSE hub exactly once, even when multiple Server instances are created.
+var broadcastLoggerOnce sync.Once
 
 // Option configures the server.
 type Option func(*Server)
@@ -162,8 +166,11 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 
 	// Route zerolog global logger through broadcastWriter so every log line
 	// is also fanned out to SSE dashboard clients.
-	multi := zerolog.MultiLevelWriter(os.Stderr, &broadcastWriter{hub: s.hub})
-	log.Logger = zerolog.New(multi).With().Timestamp().Logger()
+	// Once-guard prevents double-wrapping when multiple Server instances share a process (e.g. tests).
+	broadcastLoggerOnce.Do(func() {
+		multi := zerolog.MultiLevelWriter(os.Stderr, &broadcastWriter{hub: s.hub})
+		log.Logger = zerolog.New(multi).With().Timestamp().Logger()
+	})
 
 	// Initialize snapshot manager once (avoids per-request allocation and concurrent seq collisions).
 	if s.dataDir != "" {

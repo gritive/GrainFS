@@ -92,7 +92,7 @@ func (f *FSM) Apply(raw []byte) error {
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(cmd.Data)
 	default:
-		log.Warn().Any("type", cmd.Type).Msg("fsm: unknown command type")
+		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
 	}
 }

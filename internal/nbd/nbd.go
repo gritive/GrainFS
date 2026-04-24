@@ -113,7 +113,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error().Any("panic", r).Msg("nbd: recovered panic in connection handler")
+			log.Error().Str("panic", fmt.Sprintf("%v", r)).Msg("nbd: recovered panic in connection handler")
 		}
 	}()
 
