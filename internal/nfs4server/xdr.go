@@ -32,6 +32,15 @@ func putXDRWriter(w *XDRWriter) {
 	xdrWriterPool.Put(w)
 }
 
+// xdrWriterBytes copies w's contents to a new slice, returns the writer to pool, and returns the slice.
+func xdrWriterBytes(w *XDRWriter) []byte {
+	src := w.Bytes()
+	out := make([]byte, len(src))
+	copy(out, src)
+	putXDRWriter(w)
+	return out
+}
+
 func (w *XDRWriter) WriteUint32(v uint32) {
 	var b [4]byte
 	binary.BigEndian.PutUint32(b[:], v)
@@ -258,46 +267,47 @@ func ParseCompound(data []byte) (*CompoundRequest, error) {
 			return nil, fmt.Errorf("read op %d code: %w", i, err)
 		}
 
-		argData, err := readOpArgs(r, int(opCode))
+		argData, pk, err := readOpArgs(r, int(opCode))
 		if err != nil {
 			return nil, fmt.Errorf("read op %d (%d) args: %w", i, opCode, err)
 		}
 
-		ops[i] = Op{OpCode: int(opCode), Data: argData}
+		ops[i] = Op{OpCode: int(opCode), Data: argData, poolKey: pk}
 	}
 
 	return &CompoundRequest{Tag: tag, MinorVer: minorVer, Ops: ops}, nil
 }
 
 // readOpArgs reads the XDR arguments for a specific op.
-func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
+// Returns (data, poolKey, err). poolKey 0=no pool, 8=opArgPool8, 16=opArgPool16.
+func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 	switch opCode {
 	case OpPutRootFH, OpGetFH:
-		return nil, nil
+		return nil, 0, nil
 
 	case OpPutFH:
 		fh, err := r.ReadOpaque()
-		return fh, err
+		return fh, 0, err
 
 	case OpLookup:
 		name, err := r.ReadString()
-		return []byte(name), err
+		return []byte(name), 0, err
 
 	case OpGetAttr:
 		bitmapLen, _ := r.ReadUint32()
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.WriteUint32(bitmapLen)
 		for i := uint32(0); i < bitmapLen; i++ {
 			v, _ := r.ReadUint32()
 			w.WriteUint32(v)
 		}
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpAccess:
+		b := getOpArg8()
 		v, _ := r.ReadUint32()
-		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, v)
-		return b, nil
+		binary.BigEndian.PutUint32(b[:4], v)
+		return b[:4], 8, nil
 
 	case OpReadDir:
 		cookie, _ := r.ReadUint64()
@@ -310,11 +320,11 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 		for i := uint32(0); i < bitmapLen; i++ {
 			r.ReadUint32()
 		}
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.WriteUint64(cookie)
 		w.WriteUint32(dircount)
 		w.WriteUint32(maxcount)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpRead:
 		// stateid (seqid:4 + other:12) + offset:8 + count:4
@@ -322,11 +332,11 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 		io.ReadFull(&r.r, buf[:]) // stateid
 		offset, _ := r.ReadUint64()
 		count, _ := r.ReadUint32()
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.buf.Write(buf[:])
 		w.WriteUint64(offset)
 		w.WriteUint32(count)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpWrite:
 		var buf [16]byte
@@ -334,12 +344,12 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 		offset, _ := r.ReadUint64()
 		stable, _ := r.ReadUint32()
 		data, _ := r.ReadOpaque()
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.buf.Write(buf[:])
 		w.WriteUint64(offset)
 		w.WriteUint32(stable)
 		w.WriteOpaque(data)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpOpen:
 		seqid, _ := r.ReadUint32()
@@ -366,17 +376,17 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 		_ = seqid
 		_ = shareDeny
 		_ = clientID
-		w := &XDRWriter{}
+		w := getXDRWriter()
 		w.WriteUint32(shareAccess)
 		w.WriteUint32(openType)
 		w.WriteString(fileName)
-		return w.Bytes(), nil
+		return xdrWriterBytes(w), 0, nil
 
 	case OpClose:
-		buf := make([]byte, 16)
+		buf := getOpArg16()
 		r.ReadUint32() // seqid
 		io.ReadFull(&r.r, buf)
-		return buf, nil
+		return buf, 16, nil
 
 	case OpSetClientID:
 		var verf [8]byte
@@ -386,37 +396,37 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, error) {
 		r.ReadString() // netid
 		r.ReadString() // addr
 		r.ReadUint32() // callback_ident
-		return append(verf[:], id...), nil
+		return append(verf[:], id...), 0, nil
 
 	case OpSetClientIDConfirm:
-		buf := make([]byte, 16)
+		buf := getOpArg16()
 		io.ReadFull(&r.r, buf)
-		return buf, nil
+		return buf, 16, nil
 
 	case OpSetAttr:
-		buf := make([]byte, 16)
+		buf := getOpArg16()
 		io.ReadFull(&r.r, buf) // stateid
 		bitmapLen, _ := r.ReadUint32()
 		for i := uint32(0); i < bitmapLen; i++ {
 			r.ReadUint32()
 		}
 		r.ReadOpaque() // attrvals
-		return buf, nil
+		return buf, 16, nil
 
 	case OpOpenConfirm:
-		buf := make([]byte, 16)
+		buf := getOpArg16()
 		io.ReadFull(&r.r, buf) // stateid (open_stateid)
-		r.ReadUint32()         // seqid
-		return buf, nil
+		r.ReadUint32()          // seqid
+		return buf, 16, nil
 
 	case OpRenew:
+		b := getOpArg8()
 		clientID, _ := r.ReadUint64()
-		b := make([]byte, 8)
 		binary.BigEndian.PutUint64(b, clientID)
-		return b, nil
+		return b, 8, nil
 
 	default:
-		return nil, nil
+		return nil, 0, nil
 	}
 }
 
