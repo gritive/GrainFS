@@ -53,21 +53,12 @@
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 - [ ] **Raft quorum lost alert** — *zero ops* — critical alert channel로 즉시 경고; 자동 re-election 시도 로직
 
-## Phase 18: Cluster EC
-
-설계: `~/.gstack/projects/gritive-grains/whitekid-master-design-20260421-024627.md` (Office-hours 2026-04-21)
-
-**동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
-
-**Phase 18 진행 중** (Dynamic EC, v0.0.4.16):
-
 ## Phase 19: Performance
 
-- [ ] **Phase 19 착수 조건: Phase 18 P1 플레이크 해결 후 착수** (EC 코드 동시 수정 시 디버깅 복잡도 증가)
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] Zero-copy Protocol Bridge (NFS to S3)
 - [ ] Unified buffer cache: Centralized Page Cache
-- [ ] Reed-Solomon 버퍼 재사용 with sync.Pool — **Phase 18 P1 플레이크 해결 후 착수** (`ec_pool.go` 설계 완료, Phase 19 착수 조건 동일)
+- [ ] Reed-Solomon 버퍼 재사용 with sync.Pool (`ec_pool.go` 설계 완료)
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)
