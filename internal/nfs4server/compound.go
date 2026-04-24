@@ -14,6 +14,10 @@ import (
 
 var opReadBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
+var compoundReqPool = sync.Pool{New: func() any {
+	return &CompoundRequest{Ops: make([]Op, 0, maxCompoundOps)}
+}}
+
 // NFSv4 status codes (RFC 7530)
 const (
 	NFS4_OK             = 0

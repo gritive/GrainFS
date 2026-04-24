@@ -237,45 +237,50 @@ func BuildRPCReply(xid uint32, replyBody []byte) []byte {
 
 // --- COMPOUND XDR ---
 
-// ParseCompound parses a COMPOUND4args from XDR data.
-func ParseCompound(data []byte) (*CompoundRequest, error) {
-	r := NewXDRReader(data)
+// ParseCompound parses a COMPOUND4args from XDR data into req.
+// req must be pre-allocated and reset by the caller (e.g. via compoundReqPool).
+func ParseCompound(data []byte, req *CompoundRequest) error {
+	r := newXDRReaderFromPool(data)
+	defer putXDRReader(r)
 
 	tag, err := r.ReadString()
 	if err != nil {
-		return nil, fmt.Errorf("read tag: %w", err)
+		return fmt.Errorf("read tag: %w", err)
 	}
 
 	minorVer, err := r.ReadUint32()
 	if err != nil {
-		return nil, fmt.Errorf("read minor version: %w", err)
+		return fmt.Errorf("read minor version: %w", err)
 	}
 
 	opCount, err := r.ReadUint32()
 	if err != nil {
-		return nil, fmt.Errorf("read op count: %w", err)
+		return fmt.Errorf("read op count: %w", err)
 	}
 
 	if opCount > maxCompoundOps {
-		return nil, fmt.Errorf("too many ops: %d", opCount)
+		return fmt.Errorf("too many ops: %d", opCount)
 	}
 
-	ops := make([]Op, opCount)
+	req.Tag = tag
+	req.MinorVer = minorVer
+	req.Ops = req.Ops[:0]
+
 	for i := uint32(0); i < opCount; i++ {
 		opCode, err := r.ReadUint32()
 		if err != nil {
-			return nil, fmt.Errorf("read op %d code: %w", i, err)
+			return fmt.Errorf("read op %d code: %w", i, err)
 		}
 
 		argData, pk, err := readOpArgs(r, int(opCode))
 		if err != nil {
-			return nil, fmt.Errorf("read op %d (%d) args: %w", i, opCode, err)
+			return fmt.Errorf("read op %d (%d) args: %w", i, opCode, err)
 		}
 
-		ops[i] = Op{OpCode: int(opCode), Data: argData, poolKey: pk}
+		req.Ops = append(req.Ops, Op{OpCode: int(opCode), Data: argData, poolKey: pk})
 	}
 
-	return &CompoundRequest{Tag: tag, MinorVer: minorVer, Ops: ops}, nil
+	return nil
 }
 
 // readOpArgs reads the XDR arguments for a specific op.
@@ -416,7 +421,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 	case OpOpenConfirm:
 		buf := getOpArg16()
 		io.ReadFull(&r.r, buf) // stateid (open_stateid)
-		r.ReadUint32()          // seqid
+		r.ReadUint32()         // seqid
 		return buf, 16, nil
 
 	case OpRenew:

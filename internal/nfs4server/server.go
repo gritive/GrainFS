@@ -109,10 +109,14 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func (s *Server) handleCompound(data []byte) []byte {
-	req, err := ParseCompound(data)
-	if err != nil {
+	req := compoundReqPool.Get().(*CompoundRequest)
+	req.Tag = ""
+	req.MinorVer = 0
+	req.Ops = req.Ops[:0]
+	defer compoundReqPool.Put(req)
+
+	if err := ParseCompound(data, req); err != nil {
 		s.logger.Debug("COMPOUND parse error", "error", err)
-		// Return an error response
 		resp := &CompoundResponse{Status: NFS4ERR_INVAL}
 		return EncodeCompoundResponse(resp)
 	}
