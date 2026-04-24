@@ -160,6 +160,103 @@ resp.Status = 0; resp.Tag = ""; resp.Results = resp.Results[:0]
 
 `maxCompoundOps` 용량 사전 확보 → `append` 시 재할당 없음.
 
+### ParseCompound 시그니처 변경 (Amendment #3)
+
+`handleCompound`가 pool Get/Put을 소유하도록 시그니처를 변경한다.
+기존 `ParseCompound(data []byte) (*CompoundRequest, error)` 대신:
+
+```go
+func ParseCompound(data []byte, req *CompoundRequest) error
+```
+
+호출 패턴:
+```go
+// handleCompound 내부
+req := compoundReqPool.Get().(*CompoundRequest)
+req.Tag = ""; req.MinorVer = 0; req.Ops = req.Ops[:0]
+defer compoundReqPool.Put(req)   // 에러 경로 포함 항상 반환
+
+if err := ParseCompound(data, req); err != nil {
+    return err
+}
+// ... Dispatch(req) ...
+```
+
+### Op.poolKey 필드 추가 (Amendment #2)
+
+opArgPool 슬라이스를 `dispatchOp` 완료 후 안전하게 반환하기 위해
+`Op` 구조체에 `poolKey int` 필드를 추가한다.
+
+```go
+type Op struct {
+    OpCode  int
+    Data    []byte
+    poolKey int  // 0=no pool, 8=opArgPool8, 16=opArgPool16
+}
+```
+
+`readOpArgs`에서 pool 소스 슬라이스에 poolKey 설정:
+- `OpAccess`: `getOpArg8()` → `poolKey=8`  (4바이트만 사용, 8 슬라이스로 반환)
+- `OpClose`, `OpSetAttr`, `OpSetClientIDConfirm`, `OpOpenConfirm`: `getOpArg16()` → `poolKey=16`
+- `OpRenew`: `getOpArg8()` → `poolKey=8`
+- 기타 (ReadOpaque, XDRWriter copy): `poolKey=0`
+
+`Dispatch` 루프에서 `dispatchOp` 완료 후:
+```go
+for _, op := range req.Ops {
+    result := d.dispatchOp(op)
+    switch op.poolKey {
+    case 8:
+        putOpArg8(op.Data)
+    case 16:
+        putOpArg16(op.Data)
+    }
+    resp.Results = append(resp.Results, result)
+    if result.Status != NFS4_OK {
+        resp.Status = result.Status
+        break
+    }
+}
+```
+
+### CompoundResponse pool put 위치 (Amendment #1)
+
+`compoundRespPool.Put`은 `Dispatch` 내부의 defer가 아니라
+`handleCompound`에서 `EncodeCompoundResponse` 완료 후 호출한다.
+
+```go
+// handleCompound 내부
+resp := compoundRespPool.Get().(*CompoundResponse)
+resp.Status = NFS4_OK; resp.Tag = ""; resp.Results = resp.Results[:0]
+defer compoundRespPool.Put(resp)   // EncodeCompoundResponse 후에 실행됨
+
+// ...
+encoded := EncodeCompoundResponse(resp)
+// defer fires here (function return 시), resp는 이미 인코딩됨
+```
+
+`EncodeCompoundResponse`는 현재 함수 내에서 동기적으로 완료되므로
+defer가 안전하다. `Dispatch` 내부에서 defer하면 resp가 반환된 뒤
+`EncodeCompoundResponse` 호출 중 pool에서 재사용될 수 있어 use-after-free.
+
+### XDRWriter cap 상한선
+
+대형 READ 응답 후 writer 내부 bytes.Buffer가 크게 grow될 수 있다.
+pool에 반환 시 메모리를 과잉 보유하지 않도록 cap 체크를 추가한다:
+
+```go
+const maxXDRWriterCap = 64 * 1024
+
+func putXDRWriter(w *XDRWriter) {
+    if w.buf.Cap() > maxXDRWriterCap {
+        w.buf = bytes.Buffer{}  // oversized buffer 폐기
+    } else {
+        w.buf.Reset()
+    }
+    xdrWriterPool.Put(w)
+}
+```
+
 ## File Changes
 
 ### `internal/nfs4server/xdr.go`
@@ -179,11 +276,18 @@ resp.Status = 0; resp.Tag = ""; resp.Results = resp.Results[:0]
 - `BuildRPCReply`: `xdrWriterPool` 사용
 
 ### `internal/nfs4server/compound.go`
-- `dispatcherPool`, `compoundRespPool` 선언
-- `handleCompound`: `getDispatcher` + `defer putDispatcher`
-- `Dispatch`: `compoundRespPool.Get()` + reset; `defer compoundRespPool.Put`
-- `dispatchOp`: `Op.Data` 소비 완료 후 `putOpArg16` / `putOpArg8` 호출
-- `compoundReqPool` reset은 `ParseCompound` 직후 `handleCompound`에서 수행
+- `dispatcherPool`, `compoundRespPool`, `compoundReqPool` 선언
+- `handleCompound`:
+  - `compoundReqPool.Get()` + reset + `defer compoundReqPool.Put(req)` (에러 경로 포함)
+  - `ParseCompound(data, req)` 호출 (새 시그니처)
+  - `getDispatcher()` + `defer putDispatcher(d)`
+  - `compoundRespPool.Get()` + reset
+  - `EncodeCompoundResponse(resp)` 완료 후 `compoundRespPool.Put(resp)`
+- `Dispatch`: `compoundRespPool.Get/Put` 제거; req/resp를 파라미터로 받는 형태로 변경
+  - `resp *CompoundResponse` 파라미터 추가, 또는 handleCompound에서 inline 처리
+- `dispatchOp` 완료 후: `op.poolKey` 기반으로 `putOpArg8` / `putOpArg16` 호출
+- `Op` 구조체에 `poolKey int` 필드 추가
+- `opXxx` 함수들: 14개 `&XDRWriter{}` 모두 `getXDRWriter()` + `make+copy` + `putXDRWriter(w)` 패턴으로 교체
 
 ### `internal/nfs4server/server.go`
 - `handleCompound`: `ParseCompound` 호환 유지 (pool 경로는 내부에서 처리)
@@ -196,6 +300,8 @@ resp.Status = 0; resp.Tag = ""; resp.Results = resp.Results[:0]
 - `TestCompound_PUTFH_READDIR_AllocsPerRun`: ≤3.0 (ReadDir에 추가 opaque 있음)
 - `TestXDRReaderPool_ZeroAllocs`: `newXDRReaderFromPool` + `putXDRReader` = 0
 - `TestXDRWriterPool_ZeroAllocs`: `getXDRWriter` + encode + `putXDRWriter` = 0
+- `TestParseCompound_ErrorPath_NoLeak`: ParseCompound 에러 시 req가 pool로 반환됨 확인
+- `TestDispatch_EarlyBreak_OpArgReturned`: dispatchOp error break 시 poolKey 슬라이스 leak 없음
 
 ## Version
 
