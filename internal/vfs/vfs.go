@@ -43,8 +43,6 @@ type GrainVFS struct {
 	backend storage.Backend
 	bucket  string
 	root    string // chroot prefix
-	mu      sync.RWMutex
-
 	// Caching
 	statCacheTTL time.Duration
 	dirCacheTTL  time.Duration
