@@ -219,6 +219,11 @@ type Node struct {
 	proposalCh    chan proposal
 	replicationCh chan struct{}
 	metrics       adaptiveMetrics
+
+	// noOpCmd is proposed immediately when a node becomes leader so that
+	// advanceCommitIndex can commit entries from previous terms. Set via
+	// SetNoOpCommand before Start().
+	noOpCmd []byte
 }
 
 // NewNode creates a new Raft node. Call Start() to begin operation.
@@ -278,6 +283,13 @@ func (n *Node) restoreFromStore() {
 			n.firstIndex = firstIdx
 		}
 	}
+}
+
+// SetNoOpCommand sets the encoded command that will be proposed when this node
+// becomes leader. The command must be recognised and ignored by the FSM (no-op).
+// Call before Start().
+func (n *Node) SetNoOpCommand(cmd []byte) {
+	n.noOpCmd = cmd
 }
 
 // SetTransport sets the RPC callbacks for sending messages to peers.
@@ -600,6 +612,16 @@ func (n *Node) initLeaderState() {
 }
 
 func (n *Node) runLeader() {
+	// Propose a no-op in the new term so advanceCommitIndex can commit entries
+	// from previous terms (Raft §8: leader completeness via no-op).
+	if len(n.noOpCmd) > 0 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = n.ProposeWait(ctx, n.noOpCmd)
+		}()
+	}
+
 	n.replicateToAll()
 
 	ticker := time.NewTicker(n.config.HeartbeatTimeout)
@@ -1372,6 +1394,13 @@ func (n *Node) persistLogEntries(entries []LogEntry) {
 		return
 	}
 	if err := n.store.AppendEntries(entries); err != nil {
+		// Suppress write errors that occur after Stop() — the store may be
+		// closing concurrently and the error is expected.
+		select {
+		case <-n.stopCh:
+			return
+		default:
+		}
 		panic(fmt.Sprintf("raft: persist log entries failed: %v", err))
 	}
 }

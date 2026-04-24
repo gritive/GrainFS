@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.4.20] - 2026-04-24
+
+### Added
+
+- **EC→EC reshard 검증 테스트** (`internal/cluster/reshard_manager_test.go`):
+  - `TestReshardManager_Run_UpgradesECObjects_OnKMismatch`: ReshardManager가 저장된 k,m이 effective config와 다를 때 `upgradeObjectEC`를 호출하는 경로 검증. N×→EC 변환과 EC→EC 업그레이드가 한 pass에서 동시 처리됨을 확인.
+  - `TestReshardManager_Run_SkipsECObjects_OnKMatch`: k,m이 일치하는 EC 객체는 skip(converted=0, skipped=1)되는 동작 검증.
+  - `TestUpgradeObjectEC_RoundTrip`: 실제 `DistributedBackend` + 로컬 `ShardService`로 EC→EC 라운드트립 통합 테스트. k=2,m=1 shard를 seed → `upgradeObjectEC(k=3,m=2)` 호출 → Raft 커밋 확인 → `GetObject`로 데이터 무결성 검증.
+
+### Fixed
+
+- **Raft no-op on leader election** (`internal/raft/raft.go`, `internal/cluster/backend.go`, `internal/cluster/fsm.go`, `internal/cluster/codec.go`, `internal/cluster/apply.go`): 새 리더 선출 시 이전 term entry를 `advanceCommitIndex`가 커밋하지 못하는 문제 해결. `CmdNoOp CommandType = 0` 추가, `NewDistributedBackend`에서 no-op 명령을 Raft Node에 등록, `runLeader()` 진입 시 자동 propose. `TestE2E_ClusterEC_3Node_ActiveKM21` 플레이크 근본 원인 수정.
+- **`persistLogEntries` panic race** (`internal/raft/raft.go`): `node.Stop()` 후 `logStore.Close()` race로 발생하던 "DB Closed" panic. `stopCh` 체크로 정지 중 store 쓰기 실패 suppress.
+
 ## [0.0.4.19] - 2026-04-24
 
 ### Performance

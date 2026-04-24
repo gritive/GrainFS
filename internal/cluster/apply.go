@@ -57,6 +57,8 @@ func (f *FSM) Apply(raw []byte) error {
 	}
 
 	switch cmd.Type {
+	case CmdNoOp:
+		return nil
 	case CmdCreateBucket:
 		return f.applyCreateBucket(cmd.Data)
 	case CmdDeleteBucket:

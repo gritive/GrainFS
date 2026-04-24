@@ -550,6 +550,8 @@ func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
 
 func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	switch cmdType {
+	case CmdNoOp:
+		return nil, nil
 	case CmdCreateBucket:
 		return encodeCreateBucketCmd(payload.(CreateBucketCmd))
 	case CmdDeleteBucket:

@@ -60,8 +60,6 @@
 **동기**: 현재 cluster 모드는 N× full-replication (모든 피어에 전체 객체 복제)이며 solo 모드 EC와 스토리지 모델이 비대칭. `ReplicationMonitor`는 dead code, balancer-triggered migration은 runtime 불일치로 실패. "Zero-ops cluster EC" 포지셔닝 회복이 목표.
 
 **Phase 18 진행 중** (Dynamic EC, v0.0.4.16):
-- [ ] EC→EC reshard E2E 검증 (NodeGrowth reshard upgrade 시나리오)
-- [ ] **P1: TestE2E_ClusterEC_3Node_ActiveKM21 full suite 플레이크** — 격리 실행시 PASS(0.6-5s), 전체 스위트에서 간헐 FAIL (30s Eventually 타임아웃). 실패시 `404 NoSuchKey` 관측 → FSM replication lag 의심. 리더 자리매김 지연 또는 follower 적용 지연.
 
 ## Phase 19: Performance
 
