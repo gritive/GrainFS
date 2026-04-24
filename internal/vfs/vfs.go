@@ -23,6 +23,21 @@ const (
 	dirMarkerSuffix = "/.dir"
 )
 
+var grainBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func getBuf() *bytes.Buffer {
+	b := grainBufPool.Get().(*bytes.Buffer)
+	b.Reset()
+	return b
+}
+
+func putBuf(b *bytes.Buffer) {
+	if b != nil {
+		b.Reset()
+		grainBufPool.Put(b)
+	}
+}
+
 // GrainVFS implements billy.Filesystem on top of a storage.Backend.
 type GrainVFS struct {
 	backend storage.Backend
@@ -148,7 +163,7 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 
 	if flag&os.O_CREATE != 0 {
 		if flag&os.O_TRUNC != 0 {
-			f.buf = &bytes.Buffer{}
+			f.buf = getBuf()
 		} else {
 			// Try to load existing
 			f.loadExisting()
@@ -452,12 +467,15 @@ func (f *grainFile) loadExisting() error {
 	if err != nil {
 		return os.ErrNotExist
 	}
-	data, err := io.ReadAll(rc)
+	putBuf(f.buf)
+	f.buf = getBuf()
+	_, err = f.buf.ReadFrom(rc)
 	rc.Close()
 	if err != nil {
+		putBuf(f.buf)
+		f.buf = nil
 		return fmt.Errorf("read file: %w", err)
 	}
-	f.buf = bytes.NewBuffer(data)
 	return nil
 }
 
@@ -465,7 +483,7 @@ func (f *grainFile) Name() string { return f.name }
 
 func (f *grainFile) Write(p []byte) (int, error) {
 	if f.buf == nil {
-		f.buf = &bytes.Buffer{}
+		f.buf = getBuf()
 	}
 	return f.buf.Write(p)
 }
@@ -557,6 +575,8 @@ func (f *grainFile) Close() error {
 		data := f.buf.Bytes()
 		_, err := f.fs.backend.PutObject(f.fs.bucket, f.path,
 			bytes.NewReader(data), "application/octet-stream")
+		putBuf(f.buf)
+		f.buf = nil
 		if err != nil {
 			return err
 		}
@@ -573,17 +593,16 @@ func (f *grainFile) Unlock() error { return nil }
 
 func (f *grainFile) Truncate(size int64) error {
 	if f.buf == nil {
-		f.buf = &bytes.Buffer{}
+		f.buf = getBuf()
 	}
-	data := f.buf.Bytes()
-	if int64(len(data)) > size {
-		data = data[:size]
+	old := append([]byte(nil), f.buf.Bytes()...)
+	if int64(len(old)) > size {
+		old = old[:size]
 	} else {
-		for int64(len(data)) < size {
-			data = append(data, 0)
-		}
+		old = append(old, make([]byte, int(size)-len(old))...)
 	}
-	f.buf = bytes.NewBuffer(data)
+	f.buf.Reset()
+	f.buf.Write(old)
 	return nil
 }
 
