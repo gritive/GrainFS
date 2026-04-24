@@ -42,9 +42,9 @@ func TestRPCFrame_MaxSizeEnforced(t *testing.T) {
 func TestCompoundRequest_ParseMinimal(t *testing.T) {
 	// A minimal COMPOUND with just a PUTROOTFH op
 	req := &CompoundRequest{
-		Tag:       "",
-		MinorVer:  0,
-		Ops:       []Op{{OpCode: OpPutRootFH}},
+		Tag:      "",
+		MinorVer: 0,
+		Ops:      []Op{{OpCode: OpPutRootFH}},
 	}
 
 	assert.Len(t, req.Ops, 1)
@@ -74,4 +74,19 @@ func TestCompoundDispatcher_RejectsOverMaxOps(t *testing.T) {
 	req := &CompoundRequest{Ops: ops}
 	resp := d.Dispatch(req)
 	assert.Equal(t, NFS4ERR_RESOURCE, resp.Status)
+}
+
+func TestReadRPCFrame_AllocsBounded(t *testing.T) {
+	payload := []byte("hello rpc payload for alloc test")
+	var encoded bytes.Buffer
+	err := writeRPCFrame(&encoded, payload)
+	require.NoError(t, err)
+	encodedBytes := encoded.Bytes()
+
+	allocs := testing.AllocsPerRun(100, func() {
+		r := bytes.NewReader(encodedBytes)
+		_, _ = readRPCFrame(r)
+	})
+	// 단일 fragment: bytes.NewReader(1) + hdr escape via io.ReadAtLeast(1) + result(1) = 3 alloc 이하
+	assert.LessOrEqual(t, allocs, 3.0, "readRPCFrame single fragment should allocate ≤3")
 }
