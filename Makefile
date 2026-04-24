@@ -91,10 +91,17 @@ bench-profile: bin/$(BINARY)
 		echo "  go tool pprof -top /tmp/grainfs-bench-mutex.out  # lock contention"; \
 		echo "  go tool pprof -top /tmp/grainfs-bench-allocs.out # alloc hotspots"
 
+NBD_PPROF_DIR ?= $(HOME)/tmp/grainfs-nbd-pprof
+
 test-nbd-docker:
 	@echo "Running NBD E2E tests in Docker..."
 	docker build -t grainfs-nbd-test -f docker/nbd-test.Dockerfile .
-	docker run --rm --privileged -v /lib/modules:/lib/modules:ro grainfs-nbd-test
+	@mkdir -p $(NBD_PPROF_DIR)
+	docker run --rm --privileged \
+		-v /lib/modules:/lib/modules:ro \
+		-v $(NBD_PPROF_DIR):/tmp \
+		-e GRAINFS_PPROF=$(GRAINFS_PPROF) \
+		grainfs-nbd-test
 
 update-deps:
 	find . -name "go.mod" -not -path "*/vendor/*" -execdir go get -u ./... \; -execdir go mod tidy \;
