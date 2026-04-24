@@ -54,7 +54,11 @@ func NewXDRReader(data []byte) *XDRReader {
 
 func (r *XDRReader) ReadUint32() (uint32, error) {
 	var b [4]byte
-	if _, err := io.ReadFull(r.r, b[:]); err != nil {
+	n, err := r.r.Read(b[:])
+	if n < 4 {
+		if err == nil || err == io.EOF {
+			return 0, io.ErrUnexpectedEOF
+		}
 		return 0, err
 	}
 	return binary.BigEndian.Uint32(b[:]), nil
@@ -62,7 +66,11 @@ func (r *XDRReader) ReadUint32() (uint32, error) {
 
 func (r *XDRReader) ReadUint64() (uint64, error) {
 	var b [8]byte
-	if _, err := io.ReadFull(r.r, b[:]); err != nil {
+	n, err := r.r.Read(b[:])
+	if n < 8 {
+		if err == nil || err == io.EOF {
+			return 0, io.ErrUnexpectedEOF
+		}
 		return 0, err
 	}
 	return binary.BigEndian.Uint64(b[:]), nil
@@ -85,7 +93,13 @@ func (r *XDRReader) ReadOpaque() ([]byte, error) {
 	pad := (4 - int(length)%4) % 4
 	if pad > 0 {
 		var skip [3]byte
-		io.ReadFull(r.r, skip[:pad])
+		n, err := r.r.Read(skip[:pad])
+		if n < pad {
+			if err == nil || err == io.EOF {
+				return nil, io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
 	}
 	return data, nil
 }
