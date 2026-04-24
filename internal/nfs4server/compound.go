@@ -63,8 +63,9 @@ const (
 const nfs4Bucket = "__grainfs_nfs4"
 
 type Op struct {
-	OpCode int
-	Data   []byte
+	OpCode  int
+	Data    []byte
+	poolKey int // 0=no pool, 8=opArgPool8, 16=opArgPool16
 }
 
 type OpResult struct {
