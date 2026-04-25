@@ -21,8 +21,9 @@ import (
 
 // QUIC connection timeouts.
 const (
-	quicMaxIdleTimeout  = 10 * time.Second
-	quicKeepAlivePeriod = 3 * time.Second
+	quicHandshakeIdleTimeout = 20 * time.Second // idle timeout during handshake (default: 5s)
+	quicMaxIdleTimeout       = 10 * time.Second // idle timeout after handshake completion
+	quicKeepAlivePeriod      = 3 * time.Second
 )
 
 // StreamHandler processes an incoming request message and returns a response.
@@ -111,7 +112,8 @@ func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
 	t.tlsConfig = tlsConf
 
 	listener, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
-		MaxIdleTimeout: quicMaxIdleTimeout,
+		HandshakeIdleTimeout: quicHandshakeIdleTimeout,
+		MaxIdleTimeout:       quicMaxIdleTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -227,8 +229,9 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 	}
 
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
-		KeepAlivePeriod: quicKeepAlivePeriod,
-		MaxIdleTimeout:  quicMaxIdleTimeout,
+		HandshakeIdleTimeout: quicHandshakeIdleTimeout,
+		KeepAlivePeriod:      quicKeepAlivePeriod,
+		MaxIdleTimeout:       quicMaxIdleTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
