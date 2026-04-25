@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,8 +29,8 @@ func (m *mockRaftNode) Propose(data []byte) error {
 	return nil
 }
 
-func (m *mockRaftNode) IsLeader() bool { return m.state == 2 }
-func (m *mockRaftNode) NodeID() string  { return m.nodeID }
+func (m *mockRaftNode) IsLeader() bool    { return m.state == 2 }
+func (m *mockRaftNode) NodeID() string    { return m.nodeID }
 func (m *mockRaftNode) PeerIDs() []string { return m.peerIDs }
 func (m *mockRaftNode) TransferLeadership() error {
 	m.mu.Lock()
@@ -53,13 +54,13 @@ func (m *mockRaftNode) ProposedAt(i int) []byte {
 // testBalancerConfig returns a BalancerConfig with aggressive timings for testing.
 func testBalancerConfig() BalancerConfig {
 	return BalancerConfig{
-		GossipInterval:       10 * time.Millisecond,
-		WarmupTimeout:        50 * time.Millisecond,
-		ImbalanceTriggerPct:  20.0,
-		ImbalanceStopPct:     5.0,
-		MigrationRate:        100, // migrations per second in tests
-		LeaderTenureMin:      0,   // no tenure requirement in tests
-		LeaderLoadThreshold:  1.3, // trigger if leader > median × 1.3
+		GossipInterval:      10 * time.Millisecond,
+		WarmupTimeout:       50 * time.Millisecond,
+		ImbalanceTriggerPct: 20.0,
+		ImbalanceStopPct:    5.0,
+		MigrationRate:       100, // migrations per second in tests
+		LeaderTenureMin:     0,   // no tenure requirement in tests
+		LeaderLoadThreshold: 1.3, // trigger if leader > median × 1.3
 	}
 }
 
@@ -390,6 +391,49 @@ func TestBalancerProposer_InflightDedup(t *testing.T) {
 	// Second tick: same object still in inflight → must be skipped.
 	p.tickOnce()
 	assert.Len(t, node.proposed, 1, "second tick must not re-propose while migration is inflight")
+}
+
+// TestBalancerProposer_ConcurrentStatusAndNotify verifies that concurrent Status()
+// and NotifyMigrationDone() calls do not race with each other or the actor loop.
+func TestBalancerProposer_ConcurrentStatusAndNotify(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := NewNodeStatsStore(1 * time.Minute)
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	p := NewBalancerProposer("node-a", store, node, testBalancerConfig())
+	go p.Run(ctx)
+
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.NotifyMigrationDone("bkt", "key", "v1")
+		}()
+	}
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = p.Status()
+		}()
+	}
+	wg.Wait()
+}
+
+// TestBalancerProposer_StopIdempotent verifies that calling Stop() twice does not panic.
+func TestBalancerProposer_StopIdempotent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := NewNodeStatsStore(1 * time.Minute)
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{}}
+	p := NewBalancerProposer("node-a", store, node, testBalancerConfig())
+	go p.Run(ctx)
+
+	require.NotPanics(t, func() {
+		p.Stop()
+		p.Stop()
+	})
 }
 
 // TestLocalObjectPicker_NestedKey verifies that PickObjectOnSrcNode finds objects

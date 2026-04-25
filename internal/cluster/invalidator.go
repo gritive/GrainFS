@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"sync"
+
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -23,6 +25,7 @@ type CacheInvalidator interface {
 // Registry manages cache invalidators across all protocols.
 // Used by DistributedBackend to broadcast invalidation events.
 type Registry struct {
+	mu           sync.RWMutex
 	invalidators map[string]CacheInvalidator // volumeID → invalidator
 }
 
@@ -35,25 +38,57 @@ func NewRegistry() *Registry {
 
 // Register adds a cache invalidator for a specific volume.
 func (r *Registry) Register(volumeID string, invalidator CacheInvalidator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.invalidators[volumeID] = invalidator
 	r.updateSizeMetric()
 }
 
-// InvalidateAll calls Invalidate on all registered invalidators.
+// InvalidateAll calls Invalidate on all registered invalidators concurrently.
+//
+// Note: this reduces Apply loop block time from Σ(per-invalidator) to
+// max(per-invalidator). The Apply loop still blocks at wg.Wait() —
+// it's a reduction, not an elimination.
 func (r *Registry) InvalidateAll(bucket, key string) {
-	for _, invalidator := range r.invalidators {
-		invalidator.Invalidate(bucket, key)
+	r.mu.RLock()
+	invs := make([]CacheInvalidator, 0, len(r.invalidators))
+	for _, inv := range r.invalidators {
+		invs = append(invs, inv)
 	}
+	r.mu.RUnlock()
+
+	if len(invs) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, inv := range invs {
+		inv := inv
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inv.Invalidate(bucket, key)
+		}()
+	}
+	wg.Wait()
 }
 
 // GetInvalidator returns a registered invalidator by volume ID.
 func (r *Registry) GetInvalidator(volumeID string) CacheInvalidator {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.invalidators[volumeID]
 }
 
-// GetInvalidators returns all registered invalidators.
+// GetInvalidators returns a snapshot of all registered invalidators.
 func (r *Registry) GetInvalidators() map[string]CacheInvalidator {
-	return r.invalidators
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make(map[string]CacheInvalidator, len(r.invalidators))
+	for k, v := range r.invalidators {
+		result[k] = v
+	}
+	return result
 }
 
 // updateSizeMetric updates the registry size metric.

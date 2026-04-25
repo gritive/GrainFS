@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.4.28] - 2026-04-25
+
+### Performance
+
+- **Phase 18 — Actor 패턴 + EC 병렬 팬아웃** (`internal/cluster/`): 핫패스 뮤텍스 제거, EC 병렬화로 처리량 향상.
+  - `putObjectEC` / `getObjectEC` / `upgradeObjectEC`: `errgroup` 병렬 팬아웃 — EC 쓰기/읽기 Σ(latency) → max(latency)
+  - `getObjectEC` k-of-n 조기 종료: k 샤드 수신 즉시 나머지 고루틴 취소 (context cancel)
+  - `Registry.InvalidateAll`: 직렬 호출 → `sync.WaitGroup` 병렬 팬아웃 — 캐시 무효화 지연 Σ → max
+  - `BalancerProposer` Actor 전환: `sync.Mutex` 전면 제거, `chan balancerMsg` 기반 단일 소유자 패턴
+  - `MigrationExecutor.Stop()`: `sync.Once` 래핑으로 이중 호출 안전성 보장
+
+### Fixed
+
+- `NotifyMigrationDone`: blocking send → non-blocking select/default — FSM Apply 고루틴 stall 방지
+- `Status()`: `stopCh` guard 추가 — `Run()` 종료 후 호출 시 영구 데드락 방지
+- `getObjectEC`: k-of-n `context.Canceled`를 peer failure로 잘못 분류하던 버그 수정
+- `upgradeObjectEC`: `peerHealth` 추적 누락 — `putObjectEC`와 동일한 패턴으로 통일
+
+### Changed
+
+- `3*time.Second` magic number → `const shardRPCTimeout` (backend.go)
+- `64` channel buffer magic number → `const balancerChanBuf` (balancer.go)
+
 ## [0.0.4.27] - 2026-04-25
 
 ### Performance
