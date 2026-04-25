@@ -72,6 +72,8 @@ func TestDeleteShardPlacementCmd_EncodeDecode(t *testing.T) {
 	assert.Equal(t, orig, decoded)
 }
 
+// CmdPutShardPlacement is now a no-op — FSM accepts it without error and
+// does not write placement records (ring-derived placement has no BadgerDB footprint).
 func TestFSM_PutShardPlacement(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
@@ -85,9 +87,10 @@ func TestFSM_PutShardPlacement(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(raw))
 
+	// No placement written; LookupShardPlacement returns empty record.
 	got, err := fsm.LookupShardPlacement("bkt", "obj")
 	require.NoError(t, err)
-	assert.Equal(t, nodes, got.Nodes)
+	assert.Equal(t, PlacementRecord{}, got)
 }
 
 func TestFSM_LookupShardPlacement_NotFound(t *testing.T) {
@@ -118,6 +121,7 @@ func TestFSM_DeleteShardPlacement(t *testing.T) {
 	assert.Equal(t, PlacementRecord{}, nodes)
 }
 
+// CmdPutShardPlacement is a no-op; repeated applies don't cause errors.
 func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
@@ -132,18 +136,19 @@ func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
 	})
 	require.NoError(t, fsm.Apply(v2))
 
+	// Both are no-ops; placement is derived from the ring.
 	got, err := fsm.LookupShardPlacement("b", "k")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"m0", "m1", "m2"}, got.Nodes, "latest placement should win")
+	assert.Equal(t, PlacementRecord{}, got)
 }
 
+// CmdPutShardPlacement no-op: snapshot does not include placement rows.
 func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
 
-	nodes := []string{"n0", "n1", "n2", "n3"}
 	put, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket: "b", Key: "k", NodeIDs: nodes,
+		Bucket: "b", Key: "k", NodeIDs: []string{"n0", "n1", "n2", "n3"},
 	})
 	require.NoError(t, fsm.Apply(put))
 
@@ -151,14 +156,14 @@ func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, snap)
 
-	// Restore into a fresh FSM and verify placement survives.
+	// Restore into a fresh FSM and verify no stale placement rows appear.
 	freshDB := newTestDB(t)
 	freshFSM := NewFSM(freshDB)
 	require.NoError(t, freshFSM.Restore(snap))
 
 	got, err := freshFSM.LookupShardPlacement("b", "k")
 	require.NoError(t, err)
-	assert.Equal(t, nodes, got.Nodes)
+	assert.Equal(t, PlacementRecord{}, got)
 }
 
 func TestFSM_DeleteObject_CascadesToPlacement(t *testing.T) {
@@ -288,7 +293,8 @@ func TestShardPlacementCmd_EmptyNodes(t *testing.T) {
 	assert.Empty(t, got.Nodes)
 }
 
-// Ensure encoding does not leak other keys' placements.
+// CmdPutShardPlacement is now a no-op; verify FSM accepts it without error and
+// that no placement keys are written (placement is derived from the ring instead).
 func TestFSM_PlacementIsolation(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
@@ -302,12 +308,7 @@ func TestFSM_PlacementIsolation(t *testing.T) {
 	require.NoError(t, fsm.Apply(p1))
 	require.NoError(t, fsm.Apply(p2))
 
-	got1, _ := fsm.LookupShardPlacement("b", "k1")
-	got2, _ := fsm.LookupShardPlacement("b", "k2")
-	assert.Equal(t, []string{"n0", "n1"}, got1.Nodes)
-	assert.Equal(t, []string{"n2", "n3"}, got2.Nodes)
-
-	// Verify badgerDB keyspace: only 2 placement keys.
+	// No placement keys should be written — ring-based placement has no BadgerDB footprint.
 	count := 0
 	err := db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -319,5 +320,5 @@ func TestFSM_PlacementIsolation(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 2, count)
+	assert.Equal(t, 0, count)
 }

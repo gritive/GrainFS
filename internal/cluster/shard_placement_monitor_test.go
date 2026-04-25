@@ -44,6 +44,7 @@ func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	assert.Equal(t, 0, missing)
 }
 
+// CmdPutShardPlacement is a no-op; Scan finds no placement rows and reports 0 missing.
 func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
@@ -52,8 +53,7 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	const self = "node-A"
 	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
 
-	// Two placements — self is holder at different shardIdx in each. We don't
-	// create the shard files, so both should show up as missing.
+	// These applies are no-ops; no placement rows are written.
 	p1 := PutShardPlacementCmd{
 		Bucket: "b", Key: "obj1", NodeIDs: []string{self, "other", "other2"},
 	}
@@ -72,8 +72,8 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 
 	missing, err := monitor.Scan(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 2, missing)
-	assert.ElementsMatch(t, []string{"b/obj1/0", "b/obj2/2"}, reported)
+	assert.Equal(t, 0, missing)
+	assert.Empty(t, reported)
 }
 
 func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
@@ -157,7 +157,7 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, count)
 
-	// Seed a handful of placements.
+	// CmdPutShardPlacement is now a no-op — no placement rows are written.
 	entries := []PutShardPlacementCmd{
 		{Bucket: "b1", Key: "k1", NodeIDs: []string{"n0", "n1"}, K: 2, M: 1},
 		{Bucket: "b2", Key: "k/with/slashes", NodeIDs: []string{"n2", "n3", "n4"}, K: 3, M: 2},
@@ -174,9 +174,7 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	assert.Len(t, seen, 3)
-	assert.Equal(t, []string{"n2", "n3", "n4"}, seen["b2/k/with/slashes"])
-	assert.Equal(t, []string{"n0"}, seen["버킷/한글"])
+	assert.Len(t, seen, 0)
 }
 
 func TestShardPlacementMonitor_Scan_NilShardSvc(t *testing.T) {

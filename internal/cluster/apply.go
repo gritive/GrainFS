@@ -27,6 +27,8 @@ type FSM struct {
 	balancerNotifier interface {
 		NotifyMigrationDone(bucket, key, versionID string)
 	}
+
+	rings *ringStore
 }
 
 // SetMigrationHooks wires the FSM to the balancer/migration subsystem.
@@ -46,7 +48,7 @@ func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
 
 // NewFSM creates a new finite state machine backed by BadgerDB.
 func NewFSM(db *badger.DB) *FSM {
-	return &FSM{db: db}
+	return &FSM{db: db, rings: newRingStore()}
 }
 
 // Apply processes a committed command and updates the metadata store.
@@ -82,9 +84,14 @@ func (f *FSM) Apply(raw []byte) error {
 	case CmdMigrationDone:
 		return f.applyMigrationDone(cmd.Data)
 	case CmdPutShardPlacement:
-		return f.applyPutShardPlacement(cmd.Data)
+		// No-op: shard placement is now derived deterministically from the ring.
+		// Old log entries are replayed harmlessly.
+		return nil
 	case CmdDeleteShardPlacement:
-		return f.applyDeleteShardPlacement(cmd.Data)
+		// No-op: see CmdPutShardPlacement.
+		return nil
+	case CmdSetRing:
+		return f.applySetRing(cmd.Data)
 	case CmdDeleteObjectVersion:
 		return f.applyDeleteObjectVersion(cmd.Data)
 	case CmdSetBucketVersioning:
@@ -157,11 +164,14 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		ContentType:  c.ContentType,
 		ETag:         c.ETag,
 		LastModified: c.ModTime,
+		RingVersion:  uint64(c.RingVersion),
+		ECData:       c.ECData,
+		ECParity:     c.ECParity,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
+	if err := f.db.Update(func(txn *badger.Txn) error {
 		// Dual-write: keep the legacy latest-only key in sync during the transition
 		// so readers that haven't been ported yet still see the object.
 		if err := txn.Set(objectMetaKey(c.Bucket, c.Key), meta); err != nil {
@@ -178,7 +188,13 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if c.RingVersion != 0 {
+		f.rings.incRef(c.RingVersion)
+	}
+	return nil
 }
 
 func (f *FSM) applyDeleteObject(data []byte) error {
@@ -190,7 +206,16 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 	// proposer). Treat it as a hard delete of the legacy latest-only records —
 	// preserves prior semantics for pre-versioning log replay.
 	if c.VersionID == "" {
-		return f.db.Update(func(txn *badger.Txn) error {
+		var rv RingVersion
+		if err := f.db.Update(func(txn *badger.Txn) error {
+			if item, gerr := txn.Get(objectMetaKey(c.Bucket, c.Key)); gerr == nil {
+				_ = item.Value(func(v []byte) error {
+					if m, derr := unmarshalObjectMeta(v); derr == nil {
+						rv = RingVersion(m.RingVersion)
+					}
+					return nil
+				})
+			}
 			if err := txn.Delete(objectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
 				return err
 			}
@@ -198,7 +223,13 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 				return err
 			}
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		if rv != 0 {
+			f.rings.decRef(rv)
+		}
+		return nil
 	}
 
 	// Tombstone (soft-delete): write a delete marker as a new version and
@@ -657,3 +688,21 @@ func (f *FSM) Restore(data []byte) error {
 		return nil
 	})
 }
+
+// applySetRing commits a new ring snapshot to the in-memory ring store.
+// Called when cluster membership changes; version must be monotonically increasing.
+func (f *FSM) applySetRing(data []byte) error {
+	c, err := decodeSetRingCmd(data)
+	if err != nil {
+		return fmt.Errorf("decode SetRingCmd: %w", err)
+	}
+	f.rings.putRing(&Ring{
+		Version:  c.Version,
+		VNodes:   c.VNodes,
+		VPerNode: c.VPerNode,
+	})
+	return nil
+}
+
+// GetRingStore returns the FSM's ring store for use by the backend.
+func (f *FSM) GetRingStore() *ringStore { return f.rings }
