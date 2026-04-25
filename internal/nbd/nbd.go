@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog/log"
 
@@ -58,9 +58,8 @@ const (
 type Server struct {
 	mgr      *volume.Manager
 	volName  string
-	listener net.Listener
-	mu       sync.Mutex
-	closed   bool
+	listener atomic.Pointer[net.Listener]
+	closed   atomic.Bool
 }
 
 // NewServer creates a new NBD server for the named volume.
@@ -80,17 +79,11 @@ func (s *Server) ListenAndServe(addr string) error {
 
 // Serve accepts connections on ln until Close is called.
 func (s *Server) Serve(ln net.Listener) error {
-	s.mu.Lock()
-	s.listener = ln
-	s.mu.Unlock()
-
+	s.listener.Store(&ln)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			s.mu.Lock()
-			closed := s.closed
-			s.mu.Unlock()
-			if closed {
+			if s.closed.Load() {
 				return nil
 			}
 			log.Error().Err(err).Msg("nbd accept error")
@@ -102,11 +95,9 @@ func (s *Server) Serve(ln net.Listener) error {
 
 // Close stops the NBD server.
 func (s *Server) Close() error {
-	s.mu.Lock()
-	s.closed = true
-	s.mu.Unlock()
-	if s.listener != nil {
-		return s.listener.Close()
+	s.closed.Store(true)
+	if ln := s.listener.Load(); ln != nil {
+		return (*ln).Close()
 	}
 	return nil
 }
