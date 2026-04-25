@@ -19,6 +19,7 @@ func TestDegradedTracker_EntryImmediate(t *testing.T) {
 		FlapThreshold:    3,
 		Clock:            clock.Now,
 	})
+	defer tr.Stop()
 
 	require.False(t, tr.Degraded(), "tracker starts healthy")
 
@@ -34,13 +35,11 @@ func TestDegradedTracker_ExitRequiresStableWindow(t *testing.T) {
 		FlapThreshold:    3,
 		Clock:            clock.Now,
 	})
+	defer tr.Stop()
 
 	tr.Report(true, "shard_unrepairable", "b/k")
 	require.True(t, tr.Degraded())
 
-	// Heal report comes in, but tracker should HOLD degraded until 30s of
-	// continuous healthy signals have elapsed (avoids flap on transient
-	// recovery).
 	tr.Report(false, "", "")
 	clock.advance(10 * time.Second)
 	assert.True(t, tr.Degraded(), "must remain degraded inside 30s stability window")
@@ -58,6 +57,7 @@ func TestDegradedTracker_ExitResetsOnNewFault(t *testing.T) {
 		FlapThreshold:    3,
 		Clock:            clock.Now,
 	})
+	defer tr.Stop()
 
 	tr.Report(true, "shard_unrepairable", "b/k")
 	tr.Report(false, "", "")
@@ -82,6 +82,7 @@ func TestDegradedTracker_FlapCounterHoldsAfterThreshold(t *testing.T) {
 			assert.Contains(t, reason, "flap")
 		},
 	})
+	defer tr.Stop()
 
 	// 3 fault→heal cycles inside the 5-min window must trigger HOLD mode.
 	for i := 0; i < 3; i++ {
@@ -95,15 +96,11 @@ func TestDegradedTracker_FlapCounterHoldsAfterThreshold(t *testing.T) {
 	assert.True(t, tr.Degraded(), "after 3 flaps in window, tracker holds in degraded")
 	assert.Equal(t, 1, heldCalls, "OnHold callback fires exactly once on threshold cross")
 
-	// Even with sustained healthy reports, hold stays in effect until the
-	// flap window expires.
 	tr.Report(false, "", "")
 	clock.advance(2 * time.Minute)
 	tr.Report(false, "", "")
 	assert.True(t, tr.Degraded(), "hold remains until flap window cools off")
 
-	// After flap window passes (5+ min since last flap), hold releases and
-	// the tracker can exit degraded again.
 	clock.advance(6 * time.Minute)
 	tr.Report(false, "", "")
 	assert.False(t, tr.Degraded(), "after flap window cools off, hold releases")
@@ -111,18 +108,17 @@ func TestDegradedTracker_FlapCounterHoldsAfterThreshold(t *testing.T) {
 
 // TestDegradedTracker_OnStateChangeFiresOnTransition verifies OnStateChange is
 // invoked exactly on degraded↔healthy transitions, not on repeated same-state
-// reports. This is the wiring Prometheus gauges rely on to stay in sync.
+// reports.
 func TestDegradedTracker_OnStateChangeFiresOnTransition(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	var calls []bool
 	tr := alerts.NewDegradedTracker(alerts.DegradedConfig{
-		// Non-default FlapWindow bypasses the zero-config production-defaults
-		// fallback so ExitStableWindow stays at 0 (immediate exit).
 		FlapWindow:    1 * time.Second,
 		FlapThreshold: 99,
 		Clock:         clock.Now,
 		OnStateChange: func(degraded bool) { calls = append(calls, degraded) },
 	})
+	defer tr.Stop()
 
 	require.Empty(t, calls, "fresh tracker fires no callback")
 
@@ -139,12 +135,12 @@ func TestDegradedTracker_OnStateChangeFiresOnTransition(t *testing.T) {
 	require.Equal(t, []bool{true, false}, calls, "stay healthy = no callback")
 }
 
-// TestDegradedTracker_OnStateChangeHeldUnderLock proves the callback runs while
-// the tracker's internal lock is held: a peer goroutine calling Status() must
-// block until the callback returns. This is the contract that lets gauge
-// wrappers stay bit-exact-consistent with tracker state under concurrent Report
-// calls (no observable gauge/tracker divergence window).
-func TestDegradedTracker_OnStateChangeHeldUnderLock(t *testing.T) {
+// TestDegradedTracker_OnStateChangeSerializedWithStatus proves that OnStateChange
+// runs in the actor goroutine and is serialized with Status(): while the callback
+// is executing, a concurrent Status() call blocks until the callback returns.
+// This guarantees gauge mirrors stay consistent with tracker state (no observable
+// gauge/tracker divergence window).
+func TestDegradedTracker_OnStateChangeSerializedWithStatus(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 
 	peerSawLock := make(chan struct{})
@@ -157,27 +153,24 @@ func TestDegradedTracker_OnStateChangeHeldUnderLock(t *testing.T) {
 		FlapThreshold: 99,
 		Clock:         clock.Now,
 		OnStateChange: func(bool) {
-			// Peer goroutine races to acquire the lock via Status().
-			// If OnStateChange runs outside the lock, Status() returns fast
-			// and the channel closes before we signal callbackReturning —
-			// test fails.
+			// Peer goroutine races to send a Status() query to the actor.
+			// Since the actor is busy running this callback, Status() blocks
+			// until the callback returns — the actor processes one message at a time.
 			peerStarted := make(chan struct{})
 			go func() {
-				close(peerStarted) // signal liveness BEFORE blocking Status()
+				close(peerStarted)
 				_ = tr.Status()
 				peerCompleted.Store(true)
 				close(peerSawLock)
 			}()
-			// Wait for the peer to actually be live before asserting. Without
-			// this, a slow-to-schedule goroutine would make the test read
-			// false for the wrong reason (not started, vs. blocked on lock).
 			<-peerStarted
 			time.Sleep(30 * time.Millisecond)
 			require.False(t, peerCompleted.Load(),
-				"Status() must block while OnStateChange runs (callback must be under lock)")
+				"Status() must block while OnStateChange runs (actor serializes both)")
 			close(callbackReturning)
 		},
 	})
+	defer tr.Stop()
 
 	tr.Report(true, "x", "y")
 
@@ -193,6 +186,7 @@ func TestDegradedTracker_OnStateChangeHeldUnderLock(t *testing.T) {
 
 func TestDegradedTracker_StatusSnapshotDoesNotMutate(t *testing.T) {
 	tr := alerts.NewDegradedTracker(alerts.DegradedConfig{})
+	defer tr.Stop()
 	tr.Report(true, "x", "y")
 
 	s := tr.Status()
@@ -203,4 +197,10 @@ func TestDegradedTracker_StatusSnapshotDoesNotMutate(t *testing.T) {
 	// Snapshot is a value copy — mutating it must not flip tracker state.
 	s.Degraded = false
 	assert.True(t, tr.Degraded())
+}
+
+func TestDegradedTracker_StopIdempotent(t *testing.T) {
+	tr := alerts.NewDegradedTracker(alerts.DegradedConfig{})
+	tr.Stop()
+	tr.Stop() // must not panic
 }
