@@ -7,7 +7,6 @@
 ### 기타
 
 - [ ] **[P0] `tests/e2e` timeout 사전 실패** — `go test ./tests/e2e/` 가 2분 타임아웃으로 panic. master 브랜치 포함 pre-existing. 원인 조사 및 수정 필요.
-- [ ] Thin provisioning (Phase A: TRIM + allocated_blocks + 공간 리포트) — spec: `docs/superpowers/specs/2026-04-25-thin-provisioning-design.md`
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] **NFS 레이어 DISCARD passthrough** — NFS VFS에서 파일 삭제(`Truncate`/`Remove`) 시 하위 volume.Manager.Discard() 호출해 블록 회수. 현재는 NFS 삭제 후 블록 오브젝트가 남음.
 - [ ] **`grainfs volume recalculate`** — allocated_blocks 카운터 drift 복구 커맨드. 볼륨 블록 오브젝트를 ListObjects로 실제 카운트해 메타데이터 재기록.
