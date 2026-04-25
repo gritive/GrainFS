@@ -17,6 +17,7 @@ import (
 	billy "github.com/go-git/go-billy/v5"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 const (
@@ -51,6 +52,9 @@ type GrainVFS struct {
 	dirCacheTTL  time.Duration
 	dirCache     atomic.Pointer[map[string]*dirCacheEntry]
 	dirWriteMu   sync.Mutex
+	// Optional thin-provisioning accounting.
+	volMgr  *volume.Manager
+	volName string
 }
 
 type statCacheEntry struct {
@@ -74,6 +78,16 @@ func WithStatCacheTTL(ttl time.Duration) VFSOption {
 // WithDirCacheTTL sets the TTL for ReadDir result caching.
 func WithDirCacheTTL(ttl time.Duration) VFSOption {
 	return func(fs *GrainVFS) { fs.dirCacheTTL = ttl }
+}
+
+// WithVolumeManager wires a volume.Manager for thin-provisioning accounting.
+// When set, Remove() and file truncation via Close() call RecordFreedBytes()
+// to keep AllocatedBlocks consistent. Pass nil to disable (default).
+func WithVolumeManager(m *volume.Manager, volName string) VFSOption {
+	return func(fs *GrainVFS) {
+		fs.volMgr = m
+		fs.volName = volName
+	}
 }
 
 var (
@@ -167,10 +181,18 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 
 	if flag&os.O_CREATE != 0 {
 		if flag&os.O_TRUNC != 0 {
+			if fs.volMgr != nil {
+				if obj, err := fs.backend.HeadObject(fs.bucket, fp); err == nil {
+					f.oldSize = obj.Size
+				}
+			}
 			f.buf = getBuf()
 		} else {
 			// Try to load existing
 			f.loadExisting()
+			if fs.volMgr != nil && f.buf != nil {
+				f.oldSize = int64(f.buf.Len())
+			}
 		}
 		return f, nil
 	}
@@ -187,6 +209,13 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 	}
 	if err := f.loadExisting(); err != nil {
 		return nil, err
+	}
+	if fs.volMgr != nil && f.buf != nil {
+		f.oldSize = int64(f.buf.Len())
+	}
+	if flag&os.O_TRUNC != 0 {
+		putBuf(f.buf)
+		f.buf = getBuf()
 	}
 	return f, nil
 }
@@ -276,7 +305,14 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 // Remove removes a file or empty directory.
 func (fs *GrainVFS) Remove(filename string) error {
 	fp := fs.fullPath(filename)
-	// Try as file first
+
+	var oldSize int64
+	if fs.volMgr != nil {
+		if obj, err := fs.backend.HeadObject(fs.bucket, fp); err == nil {
+			oldSize = obj.Size
+		}
+	}
+
 	if err := fs.backend.DeleteObject(fs.bucket, fp); err != nil {
 		// Try as directory marker
 		if err := fs.backend.DeleteObject(fs.bucket, fp+dirMarkerSuffix); err != nil {
@@ -285,6 +321,10 @@ func (fs *GrainVFS) Remove(filename string) error {
 	}
 	fs.invalidateStatCache(fp)
 	fs.invalidateParentDirCache(fp)
+
+	if fs.volMgr != nil && oldSize > 0 {
+		fs.volMgr.RecordFreedBytes(fs.volName, oldSize) //nolint:errcheck
+	}
 	return nil
 }
 
@@ -451,15 +491,16 @@ func (fi *fileInfo) Sys() interface{} { return nil }
 
 // grainFile implements billy.File.
 type grainFile struct {
-	fs     *GrainVFS
-	path   string
-	name   string
-	flag   int
-	perm   os.FileMode
-	buf    *bytes.Buffer
-	pos    int64
-	closed bool
-	rc     io.ReadCloser // 스트리밍 모드: 읽기 전용 Open 시 설정, Seek/ReadAt/Close 시 해제
+	fs      *GrainVFS
+	path    string
+	name    string
+	flag    int
+	perm    os.FileMode
+	buf     *bytes.Buffer
+	pos     int64
+	closed  bool
+	rc      io.ReadCloser // 스트리밍 모드: 읽기 전용 Open 시 설정, Seek/ReadAt/Close 시 해제
+	oldSize int64         // backend size before this write session; 0 = new file or volMgr == nil
 }
 
 func (f *grainFile) loadExisting() error {
@@ -583,12 +624,16 @@ func (f *grainFile) Close() error {
 	// Flush writes to storage
 	if f.flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && f.buf != nil {
 		data := f.buf.Bytes()
+		newSize := int64(len(data))
 		_, err := f.fs.backend.PutObject(f.fs.bucket, f.path,
 			bytes.NewReader(data), "application/octet-stream")
 		putBuf(f.buf)
 		f.buf = nil
 		if err != nil {
 			return err
+		}
+		if f.fs.volMgr != nil && f.oldSize > 0 && newSize < f.oldSize {
+			f.fs.volMgr.RecordFreedBytes(f.fs.volName, f.oldSize-newSize) //nolint:errcheck
 		}
 		// Invalidate caches after write
 		f.fs.invalidateStatCache(f.path)

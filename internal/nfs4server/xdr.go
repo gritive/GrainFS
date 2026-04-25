@@ -408,6 +408,24 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		io.ReadFull(&r.r, buf)
 		return buf, 16, nil
 
+	case OpRemove:
+		name, err := r.ReadString()
+		return []byte(name), 0, err
+
+	case OpRename:
+		oldName, err := r.ReadString()
+		if err != nil {
+			return nil, 0, err
+		}
+		newName, err := r.ReadString()
+		if err != nil {
+			return nil, 0, err
+		}
+		w := getXDRWriter()
+		w.WriteString(oldName)
+		w.WriteString(newName)
+		return xdrWriterBytes(w), 0, nil
+
 	case OpSetAttr:
 		buf := getOpArg16()
 		io.ReadFull(&r.r, buf) // stateid
