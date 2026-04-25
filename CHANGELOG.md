@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.4.31] - 2026-04-25
+
+### Added
+
+- **Thin Provisioning Phase A** (`internal/volume/`): 블록 단위 할당 추적 + TRIM + PoolQuota.
+  - `Volume.AllocatedBlocks int64`: `-1`=untracked(기존 볼륨), `0`=빈 볼륨, `>0`=블록 카운트. FlatBuffer `allocated_blocks = -1` 기본값으로 하위 호환.
+  - `Volume.AllocatedBytes()`: `AllocatedBlocks * BlockSize` 반환 (`-1`이면 `-1`)
+  - `Manager` 인메모리 캐시 (`volumes map[string]*Volume`): S3 메타데이터 왕복 제거
+  - `Manager.WriteAt`: 신규 블록(`GetObject` 실패) 감지 → `AllocatedBlocks` 증가 후 메타 persist
+  - `Manager.Discard`: ceil/floor 수학으로 완전 커버된 블록만 삭제 + 카운터 감소 (0 미만 clamping)
+  - `ManagerOptions.PoolQuota`: `HeadObject` 기반 pre-scan으로 쓰기 전 풀 전체 용량 초과 방지 (`ErrPoolQuotaExceeded`)
+  - **NBD TRIM**: `NBD_CMD_TRIM(4)` 핸들링 + `NBD_FLAG_SEND_TRIM`(bit 5) handshake 협상 → `Manager.Discard` 연동
+  - **REST API**: `GET/POST /volumes/:name` 응답에 `allocated_bytes`, `allocated_blocks` 필드 추가
+
 ## [0.0.4.30] - 2026-04-25
 
 ### Added
