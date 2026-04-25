@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.4.32] - 2026-04-26
+
+### Changed
+
+- TODOS.md에서 완료된 Preflight health check 항목 제거 (PR #58로 구현 완료)
+
 ## [0.0.4.31] - 2026-04-25
 
 ### Added
