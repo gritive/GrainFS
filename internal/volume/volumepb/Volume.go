@@ -73,8 +73,20 @@ func (rcv *Volume) MutateBlockSize(n int32) bool {
 	return rcv._tab.MutateInt32Slot(8, n)
 }
 
+func (rcv *Volume) AllocatedBlocks() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return -1
+}
+
+func (rcv *Volume) MutateAllocatedBlocks(n int64) bool {
+	return rcv._tab.MutateInt64Slot(10, n)
+}
+
 func VolumeStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func VolumeAddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(name), 0)
@@ -84,6 +96,9 @@ func VolumeAddSize(builder *flatbuffers.Builder, size int64) {
 }
 func VolumeAddBlockSize(builder *flatbuffers.Builder, blockSize int32) {
 	builder.PrependInt32Slot(2, blockSize, 0)
+}
+func VolumeAddAllocatedBlocks(builder *flatbuffers.Builder, allocatedBlocks int64) {
+	builder.PrependInt64Slot(3, allocatedBlocks, -1)
 }
 func VolumeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
