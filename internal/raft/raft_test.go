@@ -197,6 +197,24 @@ func TestThreeNode_FollowersKnowLeader(t *testing.T) {
 	}
 }
 
+func TestThreeNode_IsLeader(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader)
+	time.Sleep(200 * time.Millisecond)
+
+	leaderCount := 0
+	for _, n := range cluster.nodes {
+		if n.IsLeader() {
+			leaderCount++
+			assert.Equal(t, leader.ID(), n.ID(), "IsLeader() true only on the elected leader")
+		}
+	}
+	assert.Equal(t, 1, leaderCount, "exactly one node should report IsLeader()")
+}
+
 func TestFiveNode_ElectsLeader(t *testing.T) {
 	cluster := newTestCluster(t, 5)
 	cluster.startAll()
@@ -621,10 +639,10 @@ func TestNode_LogGC_TruncatesStoreToWatermark(t *testing.T) {
 
 	// Node: leader, A=20, B=20, C=15 → watermark = sorted[1] = 20
 	config := Config{
-		ID:            "A",
-		Peers:         []string{"B", "C"},
-		ManagedMode:   true,
-		LogGCInterval: 1 * time.Millisecond,
+		ID:               "A",
+		Peers:            []string{"B", "C"},
+		ManagedMode:      true,
+		LogGCInterval:    1 * time.Millisecond,
 		ElectionTimeout:  100 * time.Millisecond,
 		HeartbeatTimeout: 30 * time.Millisecond,
 	}
@@ -698,10 +716,10 @@ func TestNode_LogGC_SkipsBeforeInterval(t *testing.T) {
 	require.NoError(t, store.AppendEntries(entries))
 
 	config := Config{
-		ID:            "A",
-		Peers:         []string{"B"},
-		ManagedMode:   true,
-		LogGCInterval: 10 * time.Second, // very long interval
+		ID:               "A",
+		Peers:            []string{"B"},
+		ManagedMode:      true,
+		LogGCInterval:    10 * time.Second, // very long interval
 		ElectionTimeout:  100 * time.Millisecond,
 		HeartbeatTimeout: 30 * time.Millisecond,
 	}
