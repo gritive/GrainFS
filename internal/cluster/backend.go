@@ -584,6 +584,10 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	} else {
 		placement = PlacementForNodes(effectiveCfg, liveNodes, shardKey)
 	}
+	if len(placement) != effectiveCfg.NumShards() {
+		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
+			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
+	}
 	selfID := b.selfAddr
 
 	// Track nodes we wrote to so cleanup can target them precisely.
@@ -994,6 +998,13 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 		if err != nil {
 			return fmt.Errorf("reshard: reconstruct: %w", err)
 		}
+	}
+
+	// EC 디코딩 결과가 원본과 일치하는지 검증 (Reed-Solomon은 무손실이어야 함).
+	h := md5.Sum(oldData)
+	if computedETag := hex.EncodeToString(h[:]); computedETag != obj.ETag {
+		return fmt.Errorf("reshard: ETag mismatch after EC reconstruction for %s/%s: got %s, want %s",
+			bucket, key, computedETag, obj.ETag)
 	}
 
 	_, err = b.putObjectEC(bucket, key, obj.VersionID, oldData, obj.ContentType)

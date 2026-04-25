@@ -292,7 +292,23 @@ func (f *FSM) applyDeleteObjectVersion(data []byte) error {
 	metaKey := objectMetaKeyV(c.Bucket, c.Key, c.VersionID)
 	latKey := latestKey(c.Bucket, c.Key)
 
-	return f.db.Update(func(txn *badger.Txn) error {
+	var rv RingVersion
+	if err := f.db.View(func(txn *badger.Txn) error {
+		item, gerr := txn.Get(metaKey)
+		if gerr != nil {
+			return gerr
+		}
+		return item.Value(func(v []byte) error {
+			if m, derr := unmarshalObjectMeta(v); derr == nil {
+				rv = RingVersion(m.RingVersion)
+			}
+			return nil
+		})
+	}); err != nil && err != badger.ErrKeyNotFound {
+		return err
+	}
+
+	if err := f.db.Update(func(txn *badger.Txn) error {
 		if _, gerr := txn.Get(metaKey); gerr == badger.ErrKeyNotFound {
 			return nil // idempotent
 		} else if gerr != nil {
@@ -345,7 +361,13 @@ func (f *FSM) applyDeleteObjectVersion(data []byte) error {
 			return gerr
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if rv != 0 {
+		f.rings.decRef(rv)
+	}
+	return nil
 }
 
 func (f *FSM) applyCreateMultipartUpload(data []byte) error {
