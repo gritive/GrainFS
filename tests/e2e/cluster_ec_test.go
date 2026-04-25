@@ -496,20 +496,16 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	// Start nodes 0,1,2 first; HTTP port comes up even without a quorum leader.
-	for i := 0; i < 3; i++ {
+	// All nodes share the full 6-node peer list and quorum=4, so no leader can be
+	// elected until ≥4 nodes are up. Starting all 6 simultaneously is safe — there
+	// is no livelock risk from split-term elections because no 3-node subset can
+	// ever achieve quorum.
+	for i := range numNodes {
 		procs[i] = startNode(i)
 	}
-	for i := 0; i < 3; i++ {
-		waitForPort(t, httpPorts[i], 60*time.Second)
-	}
-
-	// Add remaining 3 nodes one at a time. Once ≥4 are up, Raft can elect a leader.
-	t.Logf("Stage 2: starting nodes 3,4,5 one at a time...")
-	for i := 3; i < numNodes; i++ {
-		procs[i] = startNode(i)
-		waitForPort(t, httpPorts[i], 60*time.Second)
-		t.Logf("node %d up (http :%d)", i, httpPorts[i])
+	waitForPortsParallel(t, httpPorts, 60*time.Second)
+	for i, port := range httpPorts {
+		t.Logf("node %d up (http :%d)", i, port)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
@@ -537,10 +533,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 
 	// PUT objects before topology change — all written via cluster EC (6 >= 5).
-	// Stage 2 nodes join with full 6-node peer lists. Their election timeouts
-	// fire before they hear from the leader, sending RequestVote with a higher
-	// term that forces the current leader to step down. All PutObjects iterate
-	// all live nodes to find the current leader regardless of churn.
+	// All PutObjects iterate all live nodes to find the current leader.
 	preObjects := []entry{
 		{"pre-obj-a", [32]byte{}},
 		{"pre-obj-b", [32]byte{}},

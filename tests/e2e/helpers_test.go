@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,6 +171,38 @@ func waitForPort(t testing.TB, port int, timeout time.Duration) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("server did not start on port %d within %v", port, timeout)
+}
+
+// waitForPortsParallel waits for all ports to become available concurrently.
+// Unlike waitForPort, this does not call t.Fatalf from a goroutine.
+func waitForPortsParallel(t testing.TB, ports []int, timeout time.Duration) {
+	t.Helper()
+	var wg sync.WaitGroup
+	failed := make(chan int, len(ports))
+	for _, port := range ports {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			deadline := time.Now().Add(timeout)
+			for time.Now().Before(deadline) {
+				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), 500*time.Millisecond)
+				if err == nil {
+					conn.Close()
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			failed <- p
+		}(port)
+	}
+	wg.Wait()
+	close(failed)
+	for p := range failed {
+		t.Errorf("server did not start on port %d within %v", p, timeout)
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
 }
 
 // waitForPortM is the TestMain variant of waitForPort — no *testing.T available there.
