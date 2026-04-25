@@ -18,10 +18,10 @@ func setupManager(t *testing.T) *Manager {
 
 func TestCreateVolume(t *testing.T) {
 	tests := []struct {
-		name     string
-		volName  string
-		size     int64
-		wantErr  bool
+		name    string
+		volName string
+		size    int64
+		wantErr bool
 	}{
 		{"basic create", "test-vol", 1024 * 1024, false},
 		{"small volume", "small", 4096, false},
@@ -214,5 +214,189 @@ func TestReadAtEOF(t *testing.T) {
 
 	buf := make([]byte, 10)
 	_, err = mgr.ReadAt("eof-test", buf, 100) // exactly at end
-	assert.Error(t, err) // should be io.EOF
+	assert.Error(t, err)                      // should be io.EOF
+}
+
+func TestVolumeAllocatedBytes(t *testing.T) {
+	tests := []struct {
+		allocatedBlocks int64
+		blockSize       int
+		want            int64
+	}{
+		{-1, 4096, -1},   // untracked
+		{0, 4096, 0},     // empty
+		{3, 4096, 12288}, // 3 blocks * 4096
+	}
+	for _, tt := range tests {
+		vol := &Volume{AllocatedBlocks: tt.allocatedBlocks, BlockSize: tt.blockSize}
+		assert.Equal(t, tt.want, vol.AllocatedBytes())
+	}
+}
+
+func TestAllocatedBlocksTracking(t *testing.T) {
+	mgr := setupManager(t)
+	_, err := mgr.Create("track-test", 16384) // 4 blocks of 4096
+	require.NoError(t, err)
+
+	// 새 볼륨은 untracked (-1)
+	vol, err := mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(-1), vol.AllocatedBlocks)
+
+	// 블록 0에 쓰기 → AllocatedBlocks = 1
+	_, err = mgr.WriteAt("track-test", []byte("hello"), 0)
+	require.NoError(t, err)
+
+	vol, err = mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), vol.AllocatedBlocks)
+	assert.Equal(t, int64(4096), vol.AllocatedBytes())
+
+	// 동일 블록 덮어쓰기 → AllocatedBlocks 변화 없음
+	_, err = mgr.WriteAt("track-test", []byte("world"), 0)
+	require.NoError(t, err)
+
+	vol, err = mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), vol.AllocatedBlocks, "overwrite should not increment counter")
+
+	// 블록 1에 쓰기 → AllocatedBlocks = 2
+	_, err = mgr.WriteAt("track-test", []byte("new block"), int64(DefaultBlockSize))
+	require.NoError(t, err)
+
+	vol, err = mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), vol.AllocatedBlocks)
+}
+
+func TestDiscard(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("discard-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 블록 0, 1, 2에 쓰기
+	_, err = mgr.WriteAt("discard-test", make([]byte, blockSize*3), 0)
+	require.NoError(t, err)
+
+	vol, _ := mgr.Get("discard-test")
+	require.Equal(t, int64(3), vol.AllocatedBlocks, "should have 3 blocks after write")
+
+	// 블록 1만 discard (off=4096, length=4096)
+	err = mgr.Discard("discard-test", int64(blockSize), int64(blockSize))
+	require.NoError(t, err)
+
+	vol, _ = mgr.Get("discard-test")
+	assert.Equal(t, int64(2), vol.AllocatedBlocks, "counter should decrease by 1")
+
+	// 블록 1 읽기는 zeros
+	buf := make([]byte, blockSize)
+	_, err = mgr.ReadAt("discard-test", buf, int64(blockSize))
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, blockSize), buf, "discarded block should read as zeros")
+}
+
+func TestDiscardPartialBlock(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("partial-discard", int64(blockSize*4))
+	require.NoError(t, err)
+
+	_, err = mgr.WriteAt("partial-discard", make([]byte, blockSize*2), 0)
+	require.NoError(t, err)
+
+	// 부분 커버 discard — off=1, length=blockSize-1 → firstBlock=ceil(1/bs)=1, lastBlock=floor(bs/bs)-1=0 → 범위 없음
+	err = mgr.Discard("partial-discard", 1, int64(blockSize-1))
+	require.NoError(t, err)
+
+	vol, _ := mgr.Get("partial-discard")
+	assert.Equal(t, int64(2), vol.AllocatedBlocks, "partial discard should not free any block")
+}
+
+func TestDiscardNonExistentBlock(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("no-block-discard", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 블록 쓰기 없이 discard → 에러 없이 통과
+	err = mgr.Discard("no-block-discard", 0, int64(blockSize))
+	require.NoError(t, err, "discard of non-existent block should be idempotent")
+}
+
+func TestDiscardCounterClamp(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("clamp-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 블록 1개 쓰기 후 2블록 범위 discard
+	_, err = mgr.WriteAt("clamp-test", make([]byte, blockSize), 0)
+	require.NoError(t, err)
+
+	vol, _ := mgr.Get("clamp-test")
+	require.Equal(t, int64(1), vol.AllocatedBlocks)
+
+	// 블록 0, 1 discard (블록 1은 미존재)
+	err = mgr.Discard("clamp-test", 0, int64(blockSize*2))
+	require.NoError(t, err)
+
+	vol, _ = mgr.Get("clamp-test")
+	assert.Equal(t, int64(0), vol.AllocatedBlocks, "counter should not go below 0")
+}
+
+func setupManagerWithQuota(t *testing.T, quota int64) *Manager {
+	t.Helper()
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	return NewManagerWithOptions(backend, ManagerOptions{PoolQuota: quota})
+}
+
+func TestPoolQuotaExceeded(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	// quota = 2 blocks
+	mgr := setupManagerWithQuota(t, int64(blockSize*2))
+	_, err := mgr.Create("quota-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 2블록 쓰기 → 성공
+	_, err = mgr.WriteAt("quota-test", make([]byte, blockSize*2), 0)
+	require.NoError(t, err)
+
+	// 1블록 더 쓰기 → quota 초과
+	_, err = mgr.WriteAt("quota-test", make([]byte, blockSize), int64(blockSize*2))
+	assert.ErrorIs(t, err, ErrPoolQuotaExceeded)
+}
+
+func TestPoolQuotaBoundary(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	// quota = 2 blocks 정확히
+	mgr := setupManagerWithQuota(t, int64(blockSize*2))
+	_, err := mgr.Create("boundary-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 한 번에 2블록 쓰기 → 한도에 정확히 맞음 (통과)
+	_, err = mgr.WriteAt("boundary-test", make([]byte, blockSize*2), 0)
+	require.NoError(t, err, "write at exact quota limit should succeed")
+
+	// 1바이트라도 새 블록 → 거부
+	_, err = mgr.WriteAt("boundary-test", []byte{0x01}, int64(blockSize*2))
+	assert.ErrorIs(t, err, ErrPoolQuotaExceeded, "write beyond quota limit should fail")
+}
+
+func TestPoolQuotaOverwriteDoesNotCount(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	// quota = 1 block
+	mgr := setupManagerWithQuota(t, int64(blockSize))
+	_, err := mgr.Create("overwrite-quota", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 첫 쓰기 → 1블록 할당 (quota 소진)
+	_, err = mgr.WriteAt("overwrite-quota", make([]byte, blockSize), 0)
+	require.NoError(t, err)
+
+	// 같은 블록 덮어쓰기 → 새 블록 없으므로 quota 검사 통과
+	_, err = mgr.WriteAt("overwrite-quota", make([]byte, blockSize), 0)
+	require.NoError(t, err, "overwrite of existing block should not be quota-limited")
 }

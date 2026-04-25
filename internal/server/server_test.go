@@ -492,6 +492,29 @@ func TestVolumeHandlers_CRUD(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
+func TestVolumeHandlers_AllocatedBytesInResponse(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/allocvol?size=1048576", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// New volume: allocated_blocks = -1 (untracked), allocated_bytes = -1
+	assert.Contains(t, string(body), `"allocated_bytes":-1`)
+	assert.Contains(t, string(body), `"allocated_blocks":-1`)
+
+	// GET should also include the fields
+	resp, err = http.Get(base + "/volumes/allocvol")
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `"allocated_bytes":-1`)
+}
+
 func TestVolumeHandlers_GetNotFound(t *testing.T) {
 	base := setupTestServer(t)
 

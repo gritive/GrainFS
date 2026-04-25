@@ -14,9 +14,11 @@ type volumeRequest struct {
 }
 
 type volumeResponse struct {
-	Name      string `json:"name"`
-	Size      int64  `json:"size"`
-	BlockSize int    `json:"block_size"`
+	Name            string `json:"name"`
+	Size            int64  `json:"size"`
+	BlockSize       int    `json:"block_size"`
+	AllocatedBytes  int64  `json:"allocated_bytes"`
+	AllocatedBlocks int64  `json:"allocated_blocks"`
 }
 
 func (s *Server) listVolumes(_ context.Context, c *app.RequestContext) {
@@ -28,7 +30,7 @@ func (s *Server) listVolumes(_ context.Context, c *app.RequestContext) {
 
 	result := make([]volumeResponse, 0, len(vols))
 	for _, v := range vols {
-		result = append(result, volumeResponse{Name: v.Name, Size: v.Size, BlockSize: v.BlockSize})
+		result = append(result, volumeResponse{Name: v.Name, Size: v.Size, BlockSize: v.BlockSize, AllocatedBytes: v.AllocatedBytes(), AllocatedBlocks: v.AllocatedBlocks})
 	}
 	c.JSON(consts.StatusOK, result)
 }
@@ -60,7 +62,7 @@ func (s *Server) createVolume(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	c.JSON(consts.StatusCreated, volumeResponse{Name: vol.Name, Size: vol.Size, BlockSize: vol.BlockSize})
+	c.JSON(consts.StatusCreated, volumeResponse{Name: vol.Name, Size: vol.Size, BlockSize: vol.BlockSize, AllocatedBytes: vol.AllocatedBytes(), AllocatedBlocks: vol.AllocatedBlocks})
 }
 
 func (s *Server) getVolume(_ context.Context, c *app.RequestContext) {
@@ -72,7 +74,7 @@ func (s *Server) getVolume(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	c.JSON(consts.StatusOK, volumeResponse{Name: vol.Name, Size: vol.Size, BlockSize: vol.BlockSize})
+	c.JSON(consts.StatusOK, volumeResponse{Name: vol.Name, Size: vol.Size, BlockSize: vol.BlockSize, AllocatedBytes: vol.AllocatedBytes(), AllocatedBlocks: vol.AllocatedBlocks})
 }
 
 func (s *Server) deleteVolume(_ context.Context, c *app.RequestContext) {

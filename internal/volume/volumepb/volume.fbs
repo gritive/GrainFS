@@ -7,6 +7,7 @@ table Volume {
   name:string;
   size:int64;
   block_size:int32;
+  allocated_blocks:int64 = -1;  // -1=untracked(기존 볼륨), 0=할당없음, >0=블록수
 }
 
 root_type Volume;
