@@ -44,8 +44,11 @@ func (r *Registry) Register(volumeID string, invalidator CacheInvalidator) {
 	r.updateSizeMetric()
 }
 
-// InvalidateAll calls Invalidate on all registered invalidators.
-// Snapshot the map under RLock to avoid holding the lock during Invalidate calls.
+// InvalidateAll calls Invalidate on all registered invalidators concurrently.
+//
+// Note: this reduces Apply loop block time from Σ(per-invalidator) to
+// max(per-invalidator). The Apply loop still blocks at wg.Wait() —
+// it's a reduction, not an elimination.
 func (r *Registry) InvalidateAll(bucket, key string) {
 	r.mu.RLock()
 	invs := make([]CacheInvalidator, 0, len(r.invalidators))
@@ -54,9 +57,20 @@ func (r *Registry) InvalidateAll(bucket, key string) {
 	}
 	r.mu.RUnlock()
 
-	for _, inv := range invs {
-		inv.Invalidate(bucket, key)
+	if len(invs) == 0 {
+		return
 	}
+
+	var wg sync.WaitGroup
+	for _, inv := range invs {
+		inv := inv
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inv.Invalidate(bucket, key)
+		}()
+	}
+	wg.Wait()
 }
 
 // GetInvalidator returns a registered invalidator by volume ID.
