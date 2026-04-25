@@ -957,38 +957,62 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 	if versionID != "" {
 		shardKey = key + "/" + versionID
 	}
+	// k-of-n fast path: read all shards in parallel, stop once k succeed.
+	// cancel() signals remaining goroutines to abort after k shards received.
+	// resultCh is buffered(len(nodes)) so goroutines never block on send.
+	type shardResult struct {
+		idx  int
+		data []byte
+		err  error
+	}
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	selfID := b.selfAddr
+	resultCh := make(chan shardResult, len(rec.Nodes))
+	for i, node := range rec.Nodes {
+		i, node := i, node
+		go func() {
+			var data []byte
+			var err error
+			if node == selfID {
+				data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
+			} else {
+				if b.peerHealth != nil && !b.peerHealth.IsHealthy(node) {
+					resultCh <- shardResult{idx: i, err: fmt.Errorf("node %s unhealthy", node)}
+					return
+				}
+				shardCtx, shardCancel := context.WithTimeout(readCtx, 3*time.Second)
+				defer shardCancel()
+				data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
+				if b.peerHealth != nil {
+					if err != nil {
+						b.peerHealth.MarkUnhealthy(node)
+					} else {
+						b.peerHealth.MarkHealthy(node)
+					}
+				}
+			}
+			resultCh <- shardResult{idx: i, data: data, err: err}
+		}()
+	}
+
 	shards := make([][]byte, len(rec.Nodes))
 	available := 0
-	for i, node := range rec.Nodes {
-		var data []byte
-		var err error
-		if node == selfID {
-			data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
-		} else {
-			// Skip peers already known to be unhealthy on this request.
-			if b.peerHealth != nil && !b.peerHealth.IsHealthy(node) {
-				continue
-			}
-			// Bound each remote shard fetch so a dead peer does not block
-			// reconstruction indefinitely. quicMaxIdleTimeout is 10s; 3s gives
-			// enough room for a live peer while failing fast on a dead one.
-			shardCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
-			cancel()
-			if err != nil && b.peerHealth != nil {
-				b.peerHealth.MarkUnhealthy(node)
-			} else if err == nil && b.peerHealth != nil {
-				b.peerHealth.MarkHealthy(node)
-			}
-		}
-		if err == nil && data != nil {
-			shards[i] = data
+	for range rec.Nodes {
+		r := <-resultCh
+		if r.err == nil && r.data != nil {
+			shards[r.idx] = r.data
 			available++
+			if available == recCfg.DataShards {
+				cancel() // signal remaining goroutines to stop
+				break
+			}
 		}
 	}
 	if available < recCfg.DataShards {
-		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d", available, len(rec.Nodes), recCfg.DataShards)
+		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+			available, len(rec.Nodes), recCfg.DataShards)
 	}
 	return ECReconstruct(recCfg, shards)
 }
