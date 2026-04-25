@@ -97,11 +97,12 @@ for i in 0 1 2; do
   echo "  node-$i: HTTP=:$(http_port $i)  Raft=$(raft_addr $i)"
 done
 
-echo "=== waiting for cluster to elect leader (up to 20s) ==="
-for attempt in $(seq 1 40); do
+echo "=== waiting for cluster to become available (up to 30s) ==="
+for attempt in $(seq 1 60); do
   status=$(curl -sf "http://127.0.0.1:$HTTP0/api/cluster/balancer/status" 2>/dev/null || true)
-  if echo "$status" | grep -q '"is_leader"'; then
-    echo "  cluster ready (attempt $attempt)"
+  nodes=$(echo "$status" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('nodes',[])))" 2>/dev/null || echo 0)
+  if [[ "$nodes" -ge 3 ]]; then
+    echo "  cluster ready: $nodes nodes visible (attempt $attempt)"
     break
   fi
   sleep 0.5
@@ -110,13 +111,13 @@ done
 # Verify all 3 nodes visible
 echo "=== cluster status ==="
 curl -sf "http://127.0.0.1:$HTTP0/api/cluster/balancer/status" 2>/dev/null | \
-  python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  nodes: {len(d.get(\"nodes\",[]))}, leader: {d.get(\"is_leader\")}')" 2>/dev/null || true
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  nodes: {len(d.get(\"nodes\",[]))}, available: {d.get(\"available\")}')" 2>/dev/null || true
 
 echo ""
 echo "=== running k6 benchmark against node-0 (:$HTTP0) ==="
 k6 run benchmarks/s3_bench.js \
   --env BASE_URL="http://127.0.0.1:$HTTP0" \
   --env BUCKET="bench-cluster" \
-  --env K6_AWS_ACCESS_KEY="$ACCESS_KEY" \
-  --env K6_AWS_SECRET_KEY="$SECRET_KEY" \
+  --env AWS_ACCESS_KEY="$ACCESS_KEY" \
+  --env AWS_SECRET_KEY="$SECRET_KEY" \
   2>&1
