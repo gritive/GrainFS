@@ -6,10 +6,17 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
-import { randomString, randomBytes } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';
+// Local randomString — avoids network fetch of jslib on first run (cold-start VU delays).
+function randomString(len) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let s = '';
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
 
 const BASE = __ENV.BASE_URL || 'http://localhost:9000';
-const BUCKET = 'bench-' + Date.now();
+// Fixed name so all VUs share the same bucket (Date.now() differs per VU).
+const BUCKET = __ENV.BUCKET || 'grainfs-bench';
 
 // Custom metrics
 const putLatency = new Trend('grainfs_put_latency', true);
@@ -29,17 +36,29 @@ export const options = {
       exec: 'setupBucket',
       startTime: '0s',
     },
+    // Warm-up: ramp to 5 VUs, discard results
+    warm_up: {
+      executor: 'ramping-vus',
+      startVUs: 1,
+      stages: [
+        { duration: '5s', target: 5 },
+        { duration: '5s', target: 5 },
+      ],
+      exec: 'mixedWorkload',
+      startTime: '2s',
+      gracefulStop: '5s',
+    },
     // Main benchmark: mixed workload
     mixed_workload: {
       executor: 'ramping-vus',
-      startVUs: 1,
+      startVUs: 5,
       stages: [
         { duration: '10s', target: 10 },
         { duration: '20s', target: 10 },
         { duration: '5s', target: 0 },
       ],
       exec: 'mixedWorkload',
-      startTime: '2s',
+      startTime: '14s',
     },
   },
   thresholds: {
