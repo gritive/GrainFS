@@ -103,17 +103,25 @@ const maxMigrationsPerCycle = 50
 
 // BackgroundScrubber periodically verifies and repairs EC shard integrity.
 type BackgroundScrubber struct {
-	backend         Scrubbable
-	verifier        *ShardVerifier
-	repairer        *RepairEngine
-	emitter         Emitter
-	interval        time.Duration
-	resetCh         chan time.Duration // hot-reload interval signal
-	limiter         *rate.Limiter      // 100 objects/sec scan throttle (Eng Review #8)
-	mu              sync.Mutex
+	backend  Scrubbable
+	verifier *ShardVerifier
+	repairer *RepairEngine
+	emitter  Emitter
+	interval time.Duration
+	resetCh  chan time.Duration // hot-reload interval signal
+	limiter  *rate.Limiter      // 100 objects/sec scan throttle (Eng Review #8)
+
+	// stats and orphanTombstone are owned by the background goroutine (single writer).
+	// No synchronisation needed for writes; external reads use statsSnap.
 	stats           ScrubStats
-	lastStatuses    map[string]ShardStatus // "bucket/key" → last observed status
-	orphanTombstone map[string]struct{}    // dirs seen as orphan last cycle
+	statsSnap       atomic.Value // published at end of each cycle; stores ScrubStats
+	orphanTombstone map[string]struct{}
+
+	// mu guards lastStatuses for concurrent reads. The background goroutine is the
+	// sole writer; RWMutex lets multiple concurrent callers of LastStatus() proceed
+	// without blocking each other.
+	mu           sync.RWMutex
+	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
 }
 
 // ScrubStats is a snapshot of scrubbing statistics.
@@ -169,8 +177,8 @@ func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *Ba
 
 // LastStatus returns the last observed ShardStatus for bucket/key (for tests).
 func (s *BackgroundScrubber) LastStatus(bucket, key string) ShardStatus {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.lastStatuses[bucket+"/"+key]
 }
 
@@ -309,7 +317,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			}
 
 			metrics.ScrubObjectsCheckedTotal.Inc()
-			atomic.AddInt64(&s.stats.ObjectsChecked, 1)
+			s.stats.ObjectsChecked++
 
 			status := s.verifier.VerifyIndices(rec, indices)
 
@@ -323,7 +331,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 
 			errCount := int64(len(status.Missing) + len(status.Corrupt))
 			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
-			atomic.AddInt64(&s.stats.ShardErrors, errCount)
+			s.stats.ShardErrors += errCount
 
 			// Group every event for this object's repair under one correlation ID.
 			correlationID := newCorrelationID()
@@ -347,13 +355,13 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			repaired, rerr := s.repairOne(ctx, rec, status, correlationID, repairer)
 			if rerr != nil {
 				metrics.ECDegradedTotal.Inc()
-				atomic.AddInt64(&s.stats.Unrepairable, 1)
+				s.stats.Unrepairable++
 				log.Error().Str("bucket", rec.Bucket).Str("key", rec.Key).Err(rerr).Msg("scrub: unrepairable")
 				continue
 			}
 			metrics.ScrubRepairedTotal.Inc()
 			metrics.HealShardsRepairedTotal.Add(float64(repaired))
-			atomic.AddInt64(&s.stats.Repaired, 1)
+			s.stats.Repaired++
 			repairCount++
 
 			// Notify the emitter that this repair session is complete so it
@@ -381,9 +389,8 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		s.orphanSweep(walker, knownDirs)
 	}
 
-	s.mu.Lock()
 	s.stats.LastRun = time.Now()
-	s.mu.Unlock()
+	s.statsSnap.Store(s.stats)
 }
 
 // repairOne drives repair for a single object. When the backend implements
@@ -478,7 +485,7 @@ func (s *BackgroundScrubber) runMigration(ctx context.Context, migrator Migrator
 				continue
 			}
 			metrics.ScrubPlainMigratedTotal.Inc()
-			atomic.AddInt64(&s.stats.PlainMigrated, 1)
+			s.stats.PlainMigrated++
 			migrateCount++
 			log.Info().Str("bucket", rec.Bucket).Str("key", rec.Key).Msg("scrub: plain→EC migrated")
 		}
@@ -487,9 +494,10 @@ func (s *BackgroundScrubber) runMigration(ctx context.Context, migrator Migrator
 
 // Stats returns a snapshot of the current scrub statistics.
 func (s *BackgroundScrubber) Stats() ScrubStats {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.stats
+	if snap, ok := s.statsSnap.Load().(ScrubStats); ok {
+		return snap
+	}
+	return ScrubStats{}
 }
 
 // emitDetect publishes one detect HealEvent per missing/corrupt shard so the

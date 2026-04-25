@@ -20,6 +20,10 @@ import (
 // re-proposing the same object while Phase 1-3 are in progress.
 const migrationInflightTTL = 5 * time.Minute
 
+// balancerChanBuf is the channel buffer for actor message delivery.
+// Sized to absorb burst FSM notifications without blocking the apply loop.
+const balancerChanBuf = 64
+
 // ObjectPicker selects an object stored locally on the source node for migration.
 // SrcNode is always the leader itself, so implementations scan local storage.
 type ObjectPicker interface {
@@ -154,15 +158,31 @@ type RaftBalancerNode interface {
 	TransferLeadership() error
 }
 
+type balancerMsgKind int
+
+const (
+	msgBalancerNotifyDone balancerMsgKind = iota
+	msgBalancerStatus
+)
+
+type balancerMsg struct {
+	kind    balancerMsgKind
+	bucket  string
+	key     string
+	ver     string
+	replyCh chan BalancerStatus
+}
+
 // BalancerProposer monitors NodeStatsStore and proposes CmdMigrateShard when
 // disk usage is imbalanced across nodes. Only the Raft leader runs proposals.
+// All mutable state (active, inflight, cbs) is owned exclusively by the Run()
+// goroutine — no mutex needed.
 type BalancerProposer struct {
 	nodeID      string
 	store       *NodeStatsStore
 	node        RaftBalancerNode
 	cfg         BalancerConfig
-	mu          sync.Mutex // protects active, inflight; cbs written by syncCB (ticker goroutine only)
-	active      bool       // hysteresis state: true once trigger fired, false after stop threshold
+	active      bool // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt   time.Time
 	picker      ObjectPicker               // nil = no proposals until SetObjectPicker is called
 	inflight    map[string]time.Time       // proposed migrations not yet committed; keyed by task.id()
@@ -171,6 +191,9 @@ type BalancerProposer struct {
 	stickyDonor string                     // last used src node
 	stickyUntil time.Time                  // switch donor only after this time
 	logger      zerolog.Logger
+	ch          chan balancerMsg // inbound messages to the actor loop
+	stopCh      chan struct{}    // closed by Stop()
+	stopOnce    sync.Once
 }
 
 // NewBalancerProposer creates a BalancerProposer with the given config.
@@ -195,11 +218,13 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 		cbs:       make(map[string]*circuitBreaker),
 		migQueue:  NewMigrationPriorityQueue(cfg.MigrationProposalRate),
 		logger:    log.With().Str("component", "balancer").Logger(),
+		ch:        make(chan balancerMsg, balancerChanBuf),
+		stopCh:    make(chan struct{}),
 	}
 }
 
 // syncCB updates (or creates) per-peer circuit breakers from the latest gossip stats.
-// Must be called with mu held.
+// Must be called from the actor goroutine only.
 func (p *BalancerProposer) syncCB(peers []NodeStats) {
 	for _, ns := range peers {
 		if ns.NodeID == p.nodeID {
@@ -220,12 +245,9 @@ func (p *BalancerProposer) syncCB(peers []NodeStats) {
 }
 
 // getCB returns the circuitBreaker for nodeID, or nil if not found.
-// Used for testing only.
+// Used for testing only — must be called from the actor goroutine (or single-threaded tests).
 func (p *BalancerProposer) getCB(nodeID string) *circuitBreaker {
-	p.mu.Lock()
-	cb := p.cbs[nodeID]
-	p.mu.Unlock()
-	return cb
+	return p.cbs[nodeID]
 }
 
 // selectDstNode returns the lightest peer that has an open (allow=true) circuit breaker.
@@ -263,10 +285,13 @@ func (p *BalancerProposer) selectDstNode() (string, bool) {
 // the same object to be re-proposed if it still exists on this node.
 // Called by the FSM when CmdMigrationDone is applied (FSM goroutine).
 func (p *BalancerProposer) NotifyMigrationDone(bucket, key, versionID string) {
-	id := bucket + "/" + key + "/" + versionID
-	p.mu.Lock()
-	delete(p.inflight, id)
-	p.mu.Unlock()
+	msg := balancerMsg{kind: msgBalancerNotifyDone, bucket: bucket, key: key, ver: versionID}
+	select {
+	case p.ch <- msg:
+	default:
+		p.logger.Warn().Str("bucket", bucket).Str("key", key).
+			Msg("balancer: NotifyMigrationDone dropped — channel full; will re-propose on next sweep")
+	}
 }
 
 // SetObjectPicker sets the picker used by proposeMigration to select which object to move.
@@ -275,7 +300,7 @@ func (p *BalancerProposer) SetObjectPicker(picker ObjectPicker) {
 	p.picker = picker
 }
 
-// Run starts the balancer tick loop. Blocks until ctx is cancelled.
+// Run starts the balancer actor loop. Blocks until ctx is cancelled or Stop() is called.
 func (p *BalancerProposer) Run(ctx context.Context) {
 	// Reset tenure timer here so LeaderTenureMin is measured from the moment this
 	// node becomes active (leader), not from when BalancerProposer was constructed.
@@ -286,13 +311,37 @@ func (p *BalancerProposer) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-p.stopCh:
+			return
+		case msg := <-p.ch:
+			p.handleMsg(msg)
 		case <-ticker.C:
 			p.tickOnce()
 		}
 	}
 }
 
+// handleMsg dispatches an inbound actor message. Called from Run() goroutine only.
+func (p *BalancerProposer) handleMsg(msg balancerMsg) {
+	switch msg.kind {
+	case msgBalancerNotifyDone:
+		delete(p.inflight, msg.bucket+"/"+msg.key+"/"+msg.ver)
+	case msgBalancerStatus:
+		msg.replyCh <- BalancerStatus{
+			Active:       p.active,
+			ImbalancePct: imbalancePct(p.store),
+			Nodes:        p.store.GetAll(),
+		}
+	}
+}
+
+// Stop signals the actor loop to exit. Idempotent — safe to call multiple times.
+func (p *BalancerProposer) Stop() {
+	p.stopOnce.Do(func() { close(p.stopCh) })
+}
+
 // tickOnce is a single balancer evaluation cycle, exposed for testing.
+// Must be called from the actor goroutine only.
 func (p *BalancerProposer) tickOnce() {
 	if !p.node.IsLeader() {
 		return
@@ -327,23 +376,18 @@ func (p *BalancerProposer) tickOnce() {
 
 	// Sync circuit breakers from latest gossip, then check hysteresis.
 	allPeers := p.store.GetAll()
-	p.mu.Lock()
 	p.syncCB(allPeers)
-	active := p.active
-	if !active {
+	if !p.active {
 		if diff < effectiveTrigger {
-			p.mu.Unlock()
 			return
 		}
 		p.active = true
 	} else {
 		if diff < p.cfg.ImbalanceStopPct {
 			p.active = false
-			p.mu.Unlock()
 			return
 		}
 	}
-	p.mu.Unlock()
 
 	dst, ok := p.selectDstNode()
 	if !ok {
@@ -385,14 +429,19 @@ type BalancerStatus struct {
 }
 
 // Status returns a snapshot of the balancer's current state.
+// Blocks until the actor goroutine processes the request.
 func (p *BalancerProposer) Status() BalancerStatus {
-	p.mu.Lock()
-	active := p.active
-	p.mu.Unlock()
-	return BalancerStatus{
-		Active:       active,
-		ImbalancePct: imbalancePct(p.store),
-		Nodes:        p.store.GetAll(),
+	replyCh := make(chan BalancerStatus, 1)
+	select {
+	case p.ch <- balancerMsg{kind: msgBalancerStatus, replyCh: replyCh}:
+	case <-p.stopCh:
+		return BalancerStatus{}
+	}
+	select {
+	case s := <-replyCh:
+		return s
+	case <-p.stopCh:
+		return BalancerStatus{}
 	}
 }
 
@@ -428,14 +477,14 @@ func (p *BalancerProposer) warmupComplete(peers []string) bool {
 
 // proposeMigration selects one object from src via the ObjectPicker and proposes
 // a CmdMigrateShard to Raft. Returns early if picker is nil or returns ok=false.
+// Must be called from the actor goroutine only.
 func (p *BalancerProposer) proposeMigration(src, dst string) {
 	if p.picker == nil {
 		return
 	}
 
-	// Sweep expired inflight entries and build skip set under the lock.
+	// Sweep expired inflight entries and build skip set.
 	now := time.Now()
-	p.mu.Lock()
 	for k, exp := range p.inflight {
 		if now.After(exp) {
 			delete(p.inflight, k)
@@ -445,7 +494,6 @@ func (p *BalancerProposer) proposeMigration(src, dst string) {
 	for k := range p.inflight {
 		skipIDs[k] = true
 	}
-	p.mu.Unlock()
 
 	bucket, key, versionID, ok := p.picker.PickObjectOnSrcNode(src, skipIDs)
 	if !ok {
@@ -454,13 +502,10 @@ func (p *BalancerProposer) proposeMigration(src, dst string) {
 
 	// Guard: picker may not respect skipIDs (e.g., mock in tests). Double-check.
 	inflightID := bucket + "/" + key + "/" + versionID
-	p.mu.Lock()
 	if exp, inFlight := p.inflight[inflightID]; inFlight && now.Before(exp) {
-		p.mu.Unlock()
 		return
 	}
 	p.inflight[inflightID] = now.Add(migrationInflightTTL)
-	p.mu.Unlock()
 
 	outer, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
 		Bucket:    bucket,

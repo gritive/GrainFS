@@ -77,6 +77,11 @@ type MigrationExecutor struct {
 	ttlPending map[string]*ttlEntry // TTL-tracked entries: taskID → entry
 	pendingTTL time.Duration        // 0 = TTL sweep disabled
 
+	// quit is closed by Stop() to terminate the sweep goroutine.
+	// stopOnce ensures double-close panic cannot occur.
+	quit     chan struct{}
+	stopOnce sync.Once
+
 	logger zerolog.Logger
 }
 
@@ -102,6 +107,7 @@ func newExecutor(mover ShardMover, node MigrationRaft, numShards int, ttl time.D
 		pending:        make(map[string]chan struct{}),
 		ttlPending:     make(map[string]*ttlEntry),
 		pendingTTL:     ttl,
+		quit:           make(chan struct{}),
 		logger:         log.With().Str("component", "migration").Logger(),
 	}
 }
@@ -120,13 +126,20 @@ func (e *MigrationExecutor) Start(ctx context.Context) {
 	go e.sweepLoop(ctx)
 }
 
-// sweepLoop runs sweepExpired every pendingTTL/2, stopping when ctx is done.
+// Stop gracefully shuts down the background sweep loop. Safe to call multiple times.
+func (e *MigrationExecutor) Stop() {
+	e.stopOnce.Do(func() { close(e.quit) })
+}
+
+// sweepLoop runs sweepExpired every pendingTTL/2, stopping when ctx or quit is done.
 func (e *MigrationExecutor) sweepLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.pendingTTL / 2)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-e.quit:
 			return
 		case <-ticker.C:
 			e.sweepExpired()

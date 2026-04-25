@@ -17,7 +17,7 @@ import (
 )
 
 // newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.
-func newTestDistributedBackend(t *testing.T) *DistributedBackend {
+func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
 

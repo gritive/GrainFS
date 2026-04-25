@@ -27,12 +27,12 @@ type AlertsState struct {
 	dispatcher *alerts.Dispatcher
 	tracker    *alerts.DegradedTracker
 
-	mu              sync.Mutex
-	lastFailed      *alerts.Alert
-	lastFailedErr   string
-	lastFailedAt    time.Time
-	deliveredOK     uint64
-	deliveryFailed  uint64
+	mu             sync.Mutex
+	lastFailed     *alerts.Alert
+	lastFailedErr  string
+	lastFailedAt   time.Time
+	deliveredOK    uint64
+	deliveryFailed uint64
 }
 
 // NewAlertsState wires the dispatcher and tracker together. The dispatcher's
@@ -60,8 +60,8 @@ func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.De
 			})
 		}()
 	}
-	// Mirror tracker state into the Prometheus gauge. Runs inside the
-	// tracker's lock (see DegradedConfig.OnStateChange godoc) so the gauge
+	// Mirror tracker state into the Prometheus gauge. Runs in the actor
+	// goroutine (see DegradedConfig.OnStateChange godoc), so the gauge
 	// cannot observe a stale value between a concurrent Report and the
 	// mirror update.
 	trackerCfg.OnStateChange = func(degraded bool) {
@@ -100,6 +100,12 @@ func (s *AlertsState) Tracker() *alerts.DegradedTracker {
 	return s.tracker
 }
 
+// Close stops the DegradedTracker actor goroutine. Call once when the server
+// shuts down. Idempotent.
+func (s *AlertsState) Close() {
+	s.tracker.Stop()
+}
+
 // Alerts returns the AlertsState wired into this server, or nil if alerts
 // were not configured. Used by other server components (raft monitor, disk
 // collector) to push fault/healthy reports.
@@ -116,18 +122,18 @@ func (s *AlertsState) recordFailure(a alerts.Alert, err error) {
 
 // alertsStatusResponse mirrors the dashboard banner contract.
 type alertsStatusResponse struct {
-	Degraded         bool      `json:"degraded"`
-	Held             bool      `json:"held"`
-	LastReason       string    `json:"last_reason,omitempty"`
-	LastResource     string    `json:"last_resource,omitempty"`
-	EnteredAt        time.Time `json:"entered_at,omitempty"`
-	FlapCount        int       `json:"flap_count"`
-	DeliveredOK      uint64    `json:"delivered_ok"`
-	DeliveryFailed   uint64    `json:"delivery_failed"`
-	LastFailedType   string    `json:"last_failed_type,omitempty"`
-	LastFailedErr    string    `json:"last_failed_err,omitempty"`
-	LastFailedAt     time.Time `json:"last_failed_at,omitempty"`
-	WebhookConfigured bool     `json:"webhook_configured"`
+	Degraded          bool      `json:"degraded"`
+	Held              bool      `json:"held"`
+	LastReason        string    `json:"last_reason,omitempty"`
+	LastResource      string    `json:"last_resource,omitempty"`
+	EnteredAt         time.Time `json:"entered_at,omitempty"`
+	FlapCount         int       `json:"flap_count"`
+	DeliveredOK       uint64    `json:"delivered_ok"`
+	DeliveryFailed    uint64    `json:"delivery_failed"`
+	LastFailedType    string    `json:"last_failed_type,omitempty"`
+	LastFailedErr     string    `json:"last_failed_err,omitempty"`
+	LastFailedAt      time.Time `json:"last_failed_at,omitempty"`
+	WebhookConfigured bool      `json:"webhook_configured"`
 }
 
 func (s *Server) registerAlertsAPI(h *server.Hertz) {

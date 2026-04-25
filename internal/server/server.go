@@ -220,6 +220,9 @@ func (s *Server) Run() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.hertz.Shutdown(ctx)
 	s.stopEventWorker()
+	if s.alerts != nil {
+		s.alerts.Close()
+	}
 	return err
 }
 

@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,11 +21,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 )
+
+// shardRPCTimeout is the per-shard RPC deadline for remote writes/reads.
+// QUIC max-idle is 10 s; 3 s leaves margin for retries before the stream times out.
+const shardRPCTimeout = 3 * time.Second
 
 // newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
 // UUIDv7 is k-sortable by millisecond timestamp; ListObjectVersions reverses to DESC.
@@ -581,8 +587,13 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	selfID := b.selfAddr
 
 	// Track nodes we wrote to so cleanup can target them precisely.
-	written := make([]string, 0, len(shards))
+	// writtenMu: concurrent goroutines append to written simultaneously.
+	var (
+		writtenMu sync.Mutex
+		written   []string
+	)
 	cleanup := func() {
+		// Called after g.Wait() — single goroutine, no mutex needed here.
 		for _, n := range written {
 			if n == selfID {
 				_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
@@ -592,31 +603,40 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 		}
 	}
 
-	// Fan-out: write each shard to its placed node. Write-all consistency.
-	// Each remote write gets a 3s deadline (matching the read-side per-shard timeout)
-	// so a dead peer fails fast rather than blocking for quicMaxIdleTimeout (10s).
+	// Fan-out: write all shards in parallel. Write-all consistency.
+	// Total latency = max(per-shard latency) instead of Σ(per-shard latency).
+	// Each remote write gets a 3s deadline so a dead peer fails fast.
+	g, gctx := errgroup.WithContext(ctx)
 	for i, node := range placement {
-		if node == selfID {
-			if werr := b.shardSvc.WriteLocalShard(bucket, shardKey, i, shards[i]); werr != nil {
-				cleanup()
-				return nil, fmt.Errorf("ec write local shard %d: %w", i, werr)
-			}
-		} else {
-			writeCtx, writeCancel := context.WithTimeout(ctx, 3*time.Second)
-			werr := b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, i, shards[i])
-			writeCancel()
-			if werr != nil {
+		i, node := i, node
+		g.Go(func() error {
+			var werr error
+			if node == selfID {
+				werr = b.shardSvc.WriteLocalShard(bucket, shardKey, i, shards[i])
+			} else {
+				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
+				defer writeCancel()
+				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, i, shards[i])
 				if b.peerHealth != nil {
-					b.peerHealth.MarkUnhealthy(node)
+					if werr != nil {
+						b.peerHealth.MarkUnhealthy(node)
+					} else {
+						b.peerHealth.MarkHealthy(node)
+					}
 				}
-				cleanup()
-				return nil, fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
 			}
-			if b.peerHealth != nil {
-				b.peerHealth.MarkHealthy(node)
+			if werr != nil {
+				return fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
 			}
-		}
-		written = append(written, node)
+			writtenMu.Lock()
+			written = append(written, node)
+			writtenMu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		cleanup()
+		return nil, err
 	}
 
 	h := md5.Sum(data)
@@ -1105,38 +1125,66 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 	if versionID != "" {
 		shardKey = key + "/" + versionID
 	}
+	// k-of-n fast path: read all shards in parallel, stop once k succeed.
+	// cancel() signals remaining goroutines to abort after k shards received.
+	// resultCh is buffered(len(nodes)) so goroutines never block on send.
+	type shardResult struct {
+		idx  int
+		data []byte
+		err  error
+	}
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	selfID := b.selfAddr
+	resultCh := make(chan shardResult, len(rec.Nodes))
+	for i, node := range rec.Nodes {
+		i, node := i, node
+		go func() {
+			var data []byte
+			var err error
+			if node == selfID {
+				data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
+			} else {
+				if b.peerHealth != nil && !b.peerHealth.IsHealthy(node) {
+					resultCh <- shardResult{idx: i, err: fmt.Errorf("node %s unhealthy", node)}
+					return
+				}
+				shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
+				defer shardCancel()
+				data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
+				if b.peerHealth != nil {
+					if err != nil {
+						if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
+							// k-of-n early exit cancelled this shard — not a peer failure
+						} else {
+							b.peerHealth.MarkUnhealthy(node)
+						}
+					} else {
+						b.peerHealth.MarkHealthy(node)
+					}
+				}
+			}
+			resultCh <- shardResult{idx: i, data: data, err: err}
+		}()
+	}
+
 	shards := make([][]byte, len(rec.Nodes))
 	available := 0
-	for i, node := range rec.Nodes {
-		var data []byte
-		var err error
-		if node == selfID {
-			data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
-		} else {
-			// Skip peers already known to be unhealthy on this request.
-			if b.peerHealth != nil && !b.peerHealth.IsHealthy(node) {
-				continue
-			}
-			// Bound each remote shard fetch so a dead peer does not block
-			// reconstruction indefinitely. quicMaxIdleTimeout is 10s; 3s gives
-			// enough room for a live peer while failing fast on a dead one.
-			shardCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
-			cancel()
-			if err != nil && b.peerHealth != nil {
-				b.peerHealth.MarkUnhealthy(node)
-			} else if err == nil && b.peerHealth != nil {
-				b.peerHealth.MarkHealthy(node)
-			}
-		}
-		if err == nil && data != nil {
-			shards[i] = data
+	for range rec.Nodes {
+		r := <-resultCh
+		if r.err == nil && r.data != nil {
+			shards[r.idx] = r.data
 			available++
+			if available == recCfg.DataShards {
+				cancel() // signal remaining goroutines to stop
+				break
+			}
 		}
 	}
 	if available < recCfg.DataShards {
-		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d", available, len(rec.Nodes), recCfg.DataShards)
+		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+			available, len(rec.Nodes), recCfg.DataShards)
 	}
 	return ECReconstruct(recCfg, shards)
 }
@@ -1166,7 +1214,10 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	newPlacement := PlacementForNodes(newCfg, liveNodes, key)
 	selfID := b.selfAddr
 
-	written := make([]string, 0, len(newShards))
+	var (
+		writtenMu sync.Mutex
+		written   []string
+	)
 	cleanup := func() {
 		for _, n := range written {
 			if n == selfID {
@@ -1177,19 +1228,37 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		}
 	}
 
+	g, gctx := errgroup.WithContext(ctx)
 	for i, node := range newPlacement {
-		if node == selfID {
-			if werr := b.shardSvc.WriteLocalShard(bucket, key, i, newShards[i]); werr != nil {
-				cleanup()
-				return fmt.Errorf("upgrade write local shard %d: %w", i, werr)
+		i, node := i, node
+		g.Go(func() error {
+			var werr error
+			if node == selfID {
+				werr = b.shardSvc.WriteLocalShard(bucket, key, i, newShards[i])
+			} else {
+				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
+				defer writeCancel()
+				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, key, i, newShards[i])
+				if b.peerHealth != nil {
+					if werr != nil {
+						b.peerHealth.MarkUnhealthy(node)
+					} else {
+						b.peerHealth.MarkHealthy(node)
+					}
+				}
 			}
-		} else {
-			if werr := b.shardSvc.WriteShard(ctx, node, bucket, key, i, newShards[i]); werr != nil {
-				cleanup()
+			if werr != nil {
 				return fmt.Errorf("upgrade write shard %d to %s: %w", i, node, werr)
 			}
-		}
-		written = append(written, node)
+			writtenMu.Lock()
+			written = append(written, node)
+			writtenMu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		cleanup()
+		return err
 	}
 
 	// Commit updated placement via Raft.
