@@ -1042,7 +1042,10 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	newPlacement := PlacementForNodes(newCfg, liveNodes, key)
 	selfID := b.selfAddr
 
-	written := make([]string, 0, len(newShards))
+	var (
+		writtenMu sync.Mutex
+		written   []string
+	)
 	cleanup := func() {
 		for _, n := range written {
 			if n == selfID {
@@ -1053,19 +1056,30 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		}
 	}
 
+	g, gctx := errgroup.WithContext(ctx)
 	for i, node := range newPlacement {
-		if node == selfID {
-			if werr := b.shardSvc.WriteLocalShard(bucket, key, i, newShards[i]); werr != nil {
-				cleanup()
-				return fmt.Errorf("upgrade write local shard %d: %w", i, werr)
+		i, node := i, node
+		g.Go(func() error {
+			var werr error
+			if node == selfID {
+				werr = b.shardSvc.WriteLocalShard(bucket, key, i, newShards[i])
+			} else {
+				writeCtx, writeCancel := context.WithTimeout(gctx, 3*time.Second)
+				defer writeCancel()
+				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, key, i, newShards[i])
 			}
-		} else {
-			if werr := b.shardSvc.WriteShard(ctx, node, bucket, key, i, newShards[i]); werr != nil {
-				cleanup()
+			if werr != nil {
 				return fmt.Errorf("upgrade write shard %d to %s: %w", i, node, werr)
 			}
-		}
-		written = append(written, node)
+			writtenMu.Lock()
+			written = append(written, node)
+			writtenMu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		cleanup()
+		return err
 	}
 
 	// Commit updated placement via Raft.
