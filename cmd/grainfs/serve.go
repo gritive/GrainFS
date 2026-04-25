@@ -148,6 +148,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		defer func() { _ = otelShutdown(context.Background()) }()
 	}
 
+	if err := server.RunSystemPreflight(server.PreflightConfig{
+		DataDir:  dataDir,
+		HTTPAddr: addr,
+		NoAuth:   accessKey == "" || secretKey == "",
+	}); err != nil {
+		return err
+	}
+
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
