@@ -6,6 +6,7 @@ echo "=== GrainFS NBD E2E Test ==="
 DATA_DIR=$(mktemp -d)
 S3_PORT=9000
 NBD_PORT=10809
+PPROF_PORT=6060
 NBD_DEV=/dev/nbd0
 # Small volume: only a few blocks needed for pattern test
 NBD_SIZE=$((4 * 1024 * 1024)) # 4MB
@@ -15,6 +16,26 @@ cleanup() {
     echo "Cleaning up..."
     nbd-client -d "$NBD_DEV" 2>/dev/null || true
     if [ -n "$SERVER_PID" ]; then
+        # Wait for CPU profile collection to finish before killing the server
+        if [ -n "$CPU_PROFILE_PID" ]; then
+            echo "Waiting for CPU profile to complete..."
+            wait "$CPU_PROFILE_PID" 2>/dev/null && echo "pprof saved: /tmp/grainfs-nbd-cpu.out" \
+                || echo "cpu profile collection failed"
+        fi
+        # Collect remaining pprof profiles before killing the server
+        if [ "${GRAINFS_PPROF:-0}" = "1" ]; then
+            echo "--- Collecting pprof profiles ---"
+            for profile in mutex allocs heap goroutine; do
+                out="/tmp/grainfs-nbd-${profile}.out"
+                curl -sf "http://127.0.0.1:${PPROF_PORT}/debug/pprof/${profile}" -o "$out" \
+                    && echo "pprof saved: $out" \
+                    || echo "pprof fetch failed: $profile"
+            done
+            echo "Analyse:"
+            echo "  go tool pprof -top /tmp/grainfs-nbd-cpu.out    # CPU hotspots"
+            echo "  go tool pprof -top /tmp/grainfs-nbd-mutex.out  # lock contention"
+            echo "  go tool pprof -top /tmp/grainfs-nbd-allocs.out # alloc hotspots"
+        fi
         kill "$SERVER_PID" 2>/dev/null || true
     fi
     rm -rf "$DATA_DIR"
@@ -37,12 +58,18 @@ nbd-client -d "$NBD_DEV" 2>/dev/null || true
 # 1. Start GrainFS server with NBD enabled
 echo ""
 echo "--- Starting GrainFS server ---"
-grainfs serve \
-    --data "$DATA_DIR" \
-    --port "$S3_PORT" \
-    --nbd-port "$NBD_PORT" \
-    --nbd-volume-size "$NBD_SIZE" \
-    --nfs-port 0 &
+SERVE_ARGS=(grainfs serve
+    --data "$DATA_DIR"
+    --port "$S3_PORT"
+    --nbd-port "$NBD_PORT"
+    --nbd-volume-size "$NBD_SIZE"
+    --nfs-port 0)
+if [ "${GRAINFS_PPROF:-0}" = "1" ]; then
+    SERVE_ARGS+=(--pprof-port "$PPROF_PORT")
+    echo "pprof enabled on port $PPROF_PORT"
+fi
+"${SERVE_ARGS[@]}" &
+CPU_PROFILE_PID=""
 SERVER_PID=$!
 
 # Wait for server to be ready
@@ -76,6 +103,14 @@ for i in $(seq 1 30); do
     sleep 1
 done
 echo "OK: NBD port ready"
+
+# Start CPU profile collection in background (captures I/O test load)
+if [ "${GRAINFS_PPROF:-0}" = "1" ]; then
+    curl -sf "http://127.0.0.1:${PPROF_PORT}/debug/pprof/profile?seconds=20" \
+        -o /tmp/grainfs-nbd-cpu.out &
+    CPU_PROFILE_PID=$!
+    echo "CPU profile collection started (PID=$CPU_PROFILE_PID, 20s window)"
+fi
 
 # 2. Connect nbd-client to GrainFS NBD server
 echo ""

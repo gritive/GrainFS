@@ -153,9 +153,7 @@ func TestNodeStatsStore_PurgesExpiredOnSet(t *testing.T) {
 	// trigger purge via a new Set
 	store.Set(NodeStats{NodeID: "node-b"})
 
-	store.mu.RLock()
-	_, stillInMap := store.stats["node-a"]
-	store.mu.RUnlock()
+	_, stillInMap := (*store.snap.Load())["node-a"]
 
 	assert.False(t, stillInMap, "expired entry should be purged from map on Set()")
 }

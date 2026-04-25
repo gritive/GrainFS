@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.4.27] - 2026-04-25
+
+### Performance
+
+- **Phase 17 — Lock-free hot path** (`internal/nfs4server/`, `internal/cluster/`, `internal/raft/`): mutex contention 제거로 핫패스 최대 16.7×(193.6 → 11.62 ns/op) 단축.
+  - `StateManager.GetOrCreateFH` CoW + `atomic.Pointer` — 16.7× 개선 (193.6 → 11.62 ns/op, 8 CPU); lock-free read, writer-only clone
+  - `NodeStatsStore.Get` CoW + `atomic.Pointer` — lock-free read; `Set`은 1-writer 복사 후 스왑
+  - `raft.batcherLoop` `adaptiveMetrics` 분리 — `Node.mu` 경합 제거; 독립 `sync.Mutex` + 지수 백오프 튜닝
+  - `BenchmarkMutexContention` + mutex profile infra 추가 (`internal/nfs4server/`, `internal/vfs/`)
+
+### Added
+
+- **`--pprof-port` flag** (`cmd/grainfs/serve.go`): 지정 포트에서 `net/http/pprof` 노출 (0 = 비활성화).
+  - `runtime.SetMutexProfileFraction(1)` + `SetBlockProfileRate(1)` 자동 활성화
+  - `docker/nbd-test.sh`: `GRAINFS_PPROF=1` 환경변수로 CPU·allocs·mutex·goroutine 프로파일 자동 수집
+  - E2E `GRAINFS_PPROF=1` 연동 (`tests/e2e/helpers_test.go`)
+
 ## [0.0.4.26] - 2026-04-25
 
 ### Changed
