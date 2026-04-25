@@ -660,7 +660,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 		ECParity:    uint8(effectiveCfg.ParityShards),
 		NodeIDs:     placement,
 	}); merr != nil {
-		go b.deleteShardsAsync(placement, shardKey)
+		go b.deleteShardsAsync(bucket, placement, shardKey)
 		return nil, merr
 	}
 
@@ -676,12 +676,12 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 
 // deleteShardsAsync는 propose 실패 시 고아 샤드를 백그라운드에서 삭제한다.
 // best-effort: 실패는 무시하고 scrubber fallback에 위임한다.
-func (b *DistributedBackend) deleteShardsAsync(placement []string, shardKey string) {
+func (b *DistributedBackend) deleteShardsAsync(bucket string, placement []string, shardKey string) {
 	for _, node := range placement {
 		if node == b.selfAddr {
-			_ = b.shardSvc.DeleteLocalShards("", shardKey)
+			_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
 		} else {
-			_ = b.shardSvc.DeleteShards(context.Background(), node, "", shardKey)
+			_ = b.shardSvc.DeleteShards(context.Background(), node, bucket, shardKey)
 		}
 	}
 }
@@ -706,7 +706,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		var metaRingVersion RingVersion
 		var metaECData, metaECParity uint8
 		var metaNodeIDs []string
-		_ = b.db.View(func(txn *badger.Txn) error {
+		if viewErr := b.db.View(func(txn *badger.Txn) error {
 			var dbKey []byte
 			if obj.VersionID == "" {
 				dbKey = objectMetaKey(bucket, obj.Key)
@@ -728,7 +728,9 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 				metaNodeIDs = m.NodeIDs
 				return nil
 			})
-		})
+		}); viewErr != nil && viewErr != badger.ErrKeyNotFound {
+			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(viewErr).Msg("GetObject: failed to read EC metadata, falling back")
+		}
 
 		if metaRingVersion > 0 {
 			if ring, ringErr := b.fsm.GetRingStore().GetRing(metaRingVersion); ringErr == nil {
