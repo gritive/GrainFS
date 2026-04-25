@@ -28,13 +28,29 @@ type PutObjectMetaCmd struct {
     Bucket, Key, ETag string
     Size              int64
     RingVersion       RingVersion  // 추가: 쓰기 시 사용한 링 버전
+    ECData            uint8        // 추가: EC k (data shards) — PlacementRecord 제거 보상
+    ECParity          uint8        // 추가: EC m (parity shards) — PlacementRecord 제거 보상
     // ... 기존 필드
 }
 ```
 
-구버전 오브젝트는 `RingVersion == 0` → `LookupShardPlacement` fallback 경로 유지.
+구버전 오브젝트는 `RingVersion == 0` → `LookupShardPlacement` fallback 경로 유지.  
+`ECData == 0` 인 구버전 오브젝트는 클러스터 기본 EC 설정(`--ec-data`, `--ec-parity`)으로 fallback.
 
-BadgerDB에 저장되는 `ObjectMeta` 구조체에도 `RingVersion uint64` 필드가 추가된다. 기존 직렬화 포맷 변경이 필요하며 `encodeObjectMeta` / `decodeObjectMeta`도 함께 수정한다.
+BadgerDB에 저장되는 `ObjectMeta` 구조체에도 `RingVersion uint64`, `ECData uint8`, `ECParity uint8` 필드가 추가된다. 기존 직렬화 포맷 변경이 필요하며 `encodeObjectMeta` / `decodeObjectMeta`도 함께 수정한다.
+
+### Raft 로그 하위 호환
+
+기존 on-disk Raft 로그에 `CmdPutShardPlacement(12)` / `CmdDeleteShardPlacement(13)` 엔트리가 남아 있을 수 있다. FSM `applyCommand` switch에서 두 커맨드의 핸들러를 **no-op**으로 유지한다:
+
+```go
+case CmdPutShardPlacement:
+    // no-op: 컨시스턴트 해시 링으로 대체됨. 로그 재생 시 무시.
+case CmdDeleteShardPlacement:
+    // no-op: 동일.
+```
+
+이로써 기존 스냅샷 이전의 Raft 로그를 재생하더라도 FSM이 패닉하지 않는다.
 
 ---
 
@@ -142,9 +158,28 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 }
 ```
 
+### 샤드 Orphan 처리
+
+신 경로에서는 `CmdDeleteShardPlacement` rollback이 없어진다. 대신 두 단계로 보호한다.
+
+**1단계: ProposeForward 실패 시 즉시 best-effort 삭제**
+
+```go
+// propose 포워딩 실패 시
+if err := b.transport.ForwardPropose(ctx, leaderID, ...); err != nil {
+    // 메타가 커밋되지 않았으므로 샤드를 orphan으로 보고 즉시 삭제 시도
+    go b.deleteShards(placement, shardKey)  // best-effort, 실패 무시
+    return err
+}
+```
+
+**2단계: scrubber fallback**
+
+scrubber가 주기적으로 샤드를 스캔하며 대응하는 `ObjectMeta`가 없는 샤드를 orphan으로 표시하고 삭제한다. 이 경로는 기존 scrubber heal 경로를 확장한 것으로, 1단계가 실패한 경우를 자동 복구한다.
+
 ### 일관성 보장
 
-- 팔로워가 샤드 fan-out 후 propose 포워딩 실패 → 기존 rollback/cleanup 경로 동일
+- 팔로워가 샤드 fan-out 후 propose 포워딩 실패 → 즉시 best-effort 샤드 삭제 + scrubber fallback
 - propose 성공 후 팔로워 크래시 → Raft에 커밋됨, scrubber가 샤드 정합성 확인
 - 리더 전환 중 포워딩 → `ErrNoLeader` → 클라이언트 재시도 (S3 표준 동작)
 
@@ -179,6 +214,23 @@ type ringStore struct {
 오브젝트가 참조하는 `RingVersion`의 링이 항상 조회 가능해야 한다. 오래된 링은 해당 버전을 참조하는 오브젝트가 없을 때 GC 가능.
 
 **링 영속성:** 링 데이터는 BadgerDB에 `ring:<version>` 키로 저장된다. `applySetRing`이 BadgerDB에 직렬화해 쓰며, `ringStore`의 in-memory map은 캐시 역할. FSM 재시작 시 BadgerDB에서 전체 링 히스토리를 로드한다.
+
+**링 GC 참조 카운터:** FSM은 링 버전별 참조 카운터를 유지한다.
+
+```go
+type ringStore struct {
+    current  RingVersion
+    rings    map[RingVersion]*Ring
+    refCount map[RingVersion]int64  // 추가: 해당 버전을 참조하는 오브젝트 수
+}
+```
+
+- `applyPutObjectMeta`: `refCount[cmd.RingVersion]++`
+- `applyDeleteObjectMeta`: `refCount[meta.RingVersion]--`
+- GC 조건: `refCount[v] == 0 AND current > v AND now > ring[v].committedAt + gcFreezeWindow`
+- `gcFreezeWindow`: 기본 5분. 링이 교체된 직후 in-flight 쓰기가 아직 meta commit 전일 수 있으므로 freeze.
+- GC는 별도 goroutine이 주기적으로 돌며 조건 충족 링을 BadgerDB 및 in-memory map에서 제거한다.
+- `RingVersion == 0` 오브젝트는 카운터 대상 외: `LookupShardPlacement` fallback이므로 `shard_placement.go` 테이블이 별도 관리.
 
 ### getObjectEC 변경
 
@@ -279,7 +331,7 @@ internal/transport/
   quic.go                — MsgProposeForward, ForwardPropose()
 
 internal/raft/
-  raft.go                — IsLeader(), LeaderID() 확인/추가
+  raft.go                — IsLeader() bool 메서드 추가 필요 (현재 없음), LeaderID() 이미 존재
 ```
 
 ### 테스트 전략
