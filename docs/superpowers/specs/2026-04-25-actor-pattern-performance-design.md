@@ -95,14 +95,37 @@ for i, node := range placement {
 ### 변경 후 (병렬 write)
 
 ```go
+var (
+    writtenMu sync.Mutex
+    written   []string  // goroutine-safe: writtenMu로 보호
+)
 g, gctx := errgroup.WithContext(ctx)
 for i, node := range placement {
     i, node := i, node
     g.Go(func() error {
-        return shardSvc.WriteShard(gctx, node, shardID, data[i])
+        writeCtx, writeCancel := context.WithTimeout(gctx, 3*time.Second)
+        defer writeCancel()
+
+        var err error
+        if node == b.localNodeID {
+            // 자기 노드: 네트워크 왕복 없이 직접 쓰기
+            err = shardSvc.WriteLocalShard(writeCtx, shardID, data[i])
+        } else {
+            err = shardSvc.WriteShard(writeCtx, node, shardID, data[i])
+        }
+        if err != nil {
+            return err
+        }
+
+        writtenMu.Lock()
+        written = append(written, node)
+        writtenMu.Unlock()
+        return nil
     })
 }
 if err := g.Wait(); err != nil {
+    // g.Wait() 이후는 단일 goroutine — writtenMu 불필요
+    rollbackShards(ctx, written)
     return err
 }
 // 총 latency = max(per-shard latency) ≈ 10ms (최대 6x 개선)
@@ -164,11 +187,32 @@ if success < k {
 - `go test -race ./internal/cluster/...` 클린
 - `go test -bench=BenchmarkPutObjectEC` 전후 latency 비교
 
+**추가 테스트 (신규 작성)**:
+- `TestPutObjectEC_ParallelRollback`: 일부 shard 실패 시 already-written shard가 정리되는지 확인
+- `TestGetObjectEC_KofN_CancelsRemainder`: k개 shard 수신 후 나머지 goroutine이 결국 종료되는지 확인 (goleak)
+
 ---
 
 ## Phase 2: MigrationExecutor Actor 전환
 
 **파일**: `internal/cluster/migration_executor.go`
+
+### 측정 게이트 (구현 전 필수)
+
+TODOS.md의 "Lock-free 아키텍처 전사 검토" 발동 조건에 따라 **구현 전 아래 측정 필수**:
+
+```bash
+# MigrationExecutor mu, pendingMu lock contention p99 측정
+go test -bench=BenchmarkMigrationExecutorSubmit -cpuprofile=cpu.prof ./internal/cluster/
+go tool pprof -text cpu.prof | grep mutex
+```
+
+또는 runtime mutex profiling:
+```go
+runtime.SetMutexProfileFraction(1)  // 테스트 코드 내 임시 활성화
+```
+
+**조건**: p99 contention ≥ 1ms 확인 시 이 Phase 진행. 미달 시 Phase 건너뜀.
 
 ### 현재 문제
 
@@ -210,9 +254,10 @@ type executorReply struct {
 }
 
 type MigrationExecutor struct {
-    ch   chan executorMsg
-    quit chan struct{}
-    wg   sync.WaitGroup
+    ch       chan executorMsg
+    quit     chan struct{}
+    stopOnce sync.Once  // Stop() 이중 호출 시 close(quit) 패닉 방지
+    wg       sync.WaitGroup
 }
 
 func NewMigrationExecutor() *MigrationExecutor {
@@ -226,7 +271,7 @@ func NewMigrationExecutor() *MigrationExecutor {
 }
 
 func (e *MigrationExecutor) Stop() {
-    close(e.quit)
+    e.stopOnce.Do(func() { close(e.quit) })
     e.wg.Wait()  // run() goroutine 완전 종료 대기
 }
 
@@ -270,10 +315,12 @@ func (e *MigrationExecutor) run() {
 
 ### 공개 API (시그니처 불변)
 
+`Execute()` 시그니처는 변경하지 않는다. 내부에서만 Actor에 위임.
+
 ```go
-// Submit은 task를 admission queue에 즉시 추가 (비동기 시작).
-// 반환값은 admission 성공 여부만 나타냄 (완료 여부 아님).
-func (e *MigrationExecutor) Submit(ctx context.Context, task MigrationTask) error {
+// Execute는 기존 시그니처 유지 — 호출자 코드 변경 없음.
+// 내부적으로 Actor 채널로 전달하고 완료 채널 대기.
+func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) error {
     reply := make(chan executorReply, 1)
     select {
     case e.ch <- executorMsg{kind: msgExecSubmit, task: task, ctx: ctx, reply: reply}:
@@ -303,6 +350,10 @@ func (e *MigrationExecutor) Cancel(id string) {
 - `migration_executor_test.go` 기존 테스트 전체 통과
 - `go test -race ./internal/cluster/...` 클린
 - Stop() 호출 후 goroutine leak 없음 확인 (`goleak` 또는 `pprof`)
+
+**추가 테스트 (신규 작성)**:
+- `TestMigrationExecutor_StopIdempotent`: `Stop()` 2회 호출 시 패닉 없음 (sync.Once 검증)
+- `TestMigrationExecutor_ExecuteAfterStop`: Stop 후 Execute 호출 시 ErrExecutorStopped 반환
 
 ---
 
@@ -340,7 +391,8 @@ for _, inv := range r.invalidators {
 변경 후 — `sync.WaitGroup` 사용 (errgroup의 first-cancel이 다른 invalidator 취소하는 부작용 방지):
 
 ```go
-func (r *Registry) InvalidateAll(ctx context.Context, key string) {
+// InvalidateAll 시그니처 불변: (bucket, key string) — CacheInvalidator 인터페이스도 동일
+func (r *Registry) InvalidateAll(bucket, key string) {
     r.mu.RLock()
     invs := make([]CacheInvalidator, 0, len(r.invalidators))
     for _, inv := range r.invalidators {
@@ -354,12 +406,14 @@ func (r *Registry) InvalidateAll(ctx context.Context, key string) {
         wg.Add(1)
         go func() {
             defer wg.Done()
-            inv.Invalidate(ctx, key)  // 에러는 cache invalidation이 non-fatal이므로 무시
+            inv.Invalidate(bucket, key)  // 에러는 cache invalidation이 non-fatal이므로 무시
         }()
     }
     wg.Wait()
 }
 ```
+
+**주의 — 블록 감소이지 제거가 아님**: `wg.Wait()`는 Apply loop 블록을 *제거*하지 않는다. Apply loop는 여전히 `InvalidateAll` 반환까지 대기하지만, 대기 시간 = `max(각 invalidator 소요 시간)` (기존 `Σ(각 invalidator 소요 시간)` 대비 개선). VFS 10개 × 5ms일 때 50ms → 5ms.
 
 **참고**: cache invalidation 실패는 stale read 위험이 있으나 Raft apply가 실패해야 하는 사유는 아님. 오류는 각 invalidator가 내부 로그로 기록.
 
@@ -373,6 +427,18 @@ func (r *Registry) InvalidateAll(ctx context.Context, key string) {
 ## Phase 4: BalancerProposer Actor 형식화
 
 **파일**: `internal/cluster/balancer.go`
+
+### 측정 게이트 (구현 전 필수)
+
+TODOS.md의 "Lock-free 아키텍처 전사 검토" 발동 조건에 따라 **구현 전 아래 측정 필수**:
+
+```bash
+# BalancerProposer mu lock contention p99 측정
+go test -bench=BenchmarkBalancerStats -cpuprofile=cpu.prof ./internal/cluster/
+go tool pprof -text cpu.prof | grep mutex
+```
+
+**조건**: p99 contention ≥ 1ms 확인 시 이 Phase 진행. 미달 시 코드 품질 개선 목적으로만 진행(성능 회귀 불허).
 
 ### 현재 상태
 
@@ -442,6 +508,10 @@ func (b *BalancerProposer) Stats(ctx context.Context) (balancerStats, error) {
 - `go test -race ./internal/cluster/...` 클린
 - Prometheus metrics 정상 수집 확인
 
+**추가 테스트 (신규 작성)**:
+- `TestBalancerProposer_StatsConcurrent`: 여러 goroutine에서 Stats() 동시 호출 시 race 없음
+- `TestBalancerProposer_StopIdempotent`: Stop() 2회 호출 패닉 없음
+
 ---
 
 ## Phase 5: Raft Node Full Actor (별도 스펙)
@@ -497,7 +567,22 @@ Phase 5는 규모(1406 lines), Raft 안전성 요구사항(persistLogEntries com
 **Benchmark 추가** (`internal/cluster/backend_bench_test.go` 신규):
 
 ```go
-// 6-shard(4+2) EC write latency 측정
+// fakeShardService with 5ms delay — 네트워크 없이도 병렬성 효과 검증
+type delayShardService struct{ delay time.Duration }
+
+func (d *delayShardService) WriteShard(ctx context.Context, node, bucket, key string, idx int, data []byte) error {
+    select {
+    case <-time.After(d.delay):
+        return nil
+    case <-ctx.Done():
+        return ctx.Err()
+    }
+}
+func (d *delayShardService) WriteLocalShard(bucket, key string, idx int, data []byte) error {
+    time.Sleep(d.delay); return nil
+}
+
+// 6-shard(4+2) EC write latency 측정 — delay=5ms → 직렬 30ms vs 병렬 5ms 확인
 func BenchmarkPutObjectEC(b *testing.B) { ... }
 
 // 6-shard EC read latency (k-of-n fast path 포함)
