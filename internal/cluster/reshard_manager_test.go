@@ -53,6 +53,10 @@ func (c *fakeConverter) upgradeObjectEC(_ context.Context, bucket, key string, _
 	c.upgraded = append(c.upgraded, bucket+"/"+key)
 	return nil
 }
+func (c *fakeConverter) CurrentRingVersion() RingVersion { return 0 }
+func (c *fakeConverter) ReshardToRing(_ context.Context, _, _ string, _ RingVersion) error {
+	return nil
+}
 
 // seedObjectMeta writes an object metadata record directly without going
 // through the full PutObject path — suitable for reshard manager tests.

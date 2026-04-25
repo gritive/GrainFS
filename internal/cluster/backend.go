@@ -903,6 +903,66 @@ func (b *DistributedBackend) EffectiveECConfig() ECConfig {
 	return EffectiveConfig(len(b.liveNodes()), b.ecConfig)
 }
 
+// CurrentRingVersion returns the version of the current ring (0 if none).
+func (b *DistributedBackend) CurrentRingVersion() RingVersion {
+	ring, err := b.fsm.GetRingStore().GetCurrentRing()
+	if err != nil {
+		return 0
+	}
+	return ring.Version
+}
+
+// ReshardToRing reshards an object from oldRingVer's placement to the current
+// ring's placement. It reconstructs the object data from the old layout and
+// re-fans it out using putObjectEC (which will use the current ring).
+func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error {
+	obj, err := b.HeadObject(bucket, key)
+	if err != nil {
+		return err
+	}
+	shardKey := key
+	if obj.VersionID != "" {
+		shardKey = key + "/" + obj.VersionID
+	}
+
+	currentRing, err := b.fsm.GetRingStore().GetCurrentRing()
+	if err != nil {
+		return fmt.Errorf("reshard: no current ring: %w", err)
+	}
+	if currentRing.Version == oldRingVer {
+		return nil // already up to date
+	}
+
+	cfg := EffectiveConfig(len(b.liveNodes()), b.ecConfig)
+
+	var oldData []byte
+	if oldRingVer > 0 {
+		oldRing, rerr := b.fsm.GetRingStore().GetRing(oldRingVer)
+		if rerr != nil {
+			return fmt.Errorf("reshard: old ring %d not found: %w", oldRingVer, rerr)
+		}
+		oldPlacement := oldRing.PlacementForKey(cfg, shardKey)
+		rec := PlacementRecord{Nodes: oldPlacement, K: cfg.DataShards, M: cfg.ParityShards}
+		oldData, err = b.getObjectEC(ctx, bucket, key, obj.VersionID, rec)
+		if err != nil {
+			return fmt.Errorf("reshard: reconstruct from ring %d: %w", oldRingVer, err)
+		}
+	} else {
+		// RingVersion==0: fall back to placement record
+		ecRec, lerr := b.fsm.LookupShardPlacement(bucket, shardKey)
+		if lerr != nil || len(ecRec.Nodes) == 0 {
+			return fmt.Errorf("reshard: no placement for ring-v0 object %s/%s", bucket, key)
+		}
+		oldData, err = b.getObjectEC(ctx, bucket, key, obj.VersionID, ecRec)
+		if err != nil {
+			return fmt.Errorf("reshard: reconstruct: %w", err)
+		}
+	}
+
+	_, err = b.putObjectEC(bucket, key, obj.VersionID, oldData, obj.ContentType)
+	return err
+}
+
 // ConvertObjectToEC migrates an existing N×-replicated object to Phase 18
 // EC placement. Used by the background re-placement manager (Slice 5).
 // Idempotent: if the object already has a placement record, returns nil

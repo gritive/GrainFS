@@ -56,10 +56,13 @@ func (f *FSM) applyDeleteShardPlacement(data []byte) error {
 
 // ObjectMetaRef is the tuple IterObjectMetas yields for each object.
 type ObjectMetaRef struct {
-	Bucket string
-	Key    string
-	Size   int64
-	ETag   string
+	Bucket      string
+	Key         string
+	Size        int64
+	ETag        string
+	RingVersion RingVersion
+	ECData      uint8
+	ECParity    uint8
 }
 
 // IterObjectMetas iterates every logical object's metadata, invoking fn
@@ -128,6 +131,9 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				}
 				ref.Size = m.Size
 				ref.ETag = m.ETag
+				ref.RingVersion = RingVersion(m.RingVersion)
+				ref.ECData = m.ECData
+				ref.ECParity = m.ECParity
 				return nil
 			}); verr != nil {
 				itLat.Close()
@@ -194,6 +200,9 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				}
 				ref.Size = m.Size
 				ref.ETag = m.ETag
+				ref.RingVersion = RingVersion(m.RingVersion)
+				ref.ECData = m.ECData
+				ref.ECParity = m.ECParity
 				return nil
 			})
 			if verr != nil {
