@@ -370,6 +370,38 @@ func (m *Manager) Discard(name string, off, length int64) error {
 	return nil
 }
 
+// RecordFreedBytes decrements AllocatedBlocks by the equivalent number of blocks for freed bytes.
+// This is used by higher-level layers (e.g., VFS) that manage file objects separately from
+// block objects, but still want to keep storage accounting consistent.
+// No-op when the volume is untracked (AllocatedBlocks < 0) or bytes == 0.
+func (m *Manager) RecordFreedBytes(name string, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	vol, err := m.getVolUnlocked(name)
+	if err != nil || vol.AllocatedBlocks <= 0 {
+		return err
+	}
+
+	bs := int64(vol.BlockSize)
+	freed := (n + bs - 1) / bs // ceil(n / blockSize) blocks
+	if freed > vol.AllocatedBlocks {
+		freed = vol.AllocatedBlocks
+	}
+	vol.AllocatedBlocks -= freed
+
+	data, err := marshalVolume(vol)
+	if err != nil {
+		return err
+	}
+	m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf") //nolint:errcheck
+	return nil
+}
+
 // getVolUnlocked returns the cached volume pointer (caller must hold m.mu).
 // On cache miss, loads from storage and populates the cache.
 func (m *Manager) getVolUnlocked(name string) (*Volume, error) {

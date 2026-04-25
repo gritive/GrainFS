@@ -70,6 +70,8 @@ const (
 	OpPutRootFH          = 24
 	OpRead               = 25
 	OpReadDir            = 26
+	OpRemove             = 28
+	OpRename             = 29
 	OpSetAttr            = 34
 	OpSetClientID        = 35
 	OpSetClientIDConfirm = 36
@@ -177,6 +179,10 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opSetClientID(op.Data)
 	case OpSetClientIDConfirm:
 		return d.opSetClientIDConfirm(op.Data)
+	case OpRemove:
+		return d.opRemove(op.Data)
+	case OpRename:
+		return d.opRename(op.Data)
 	case OpSetAttr:
 		return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult()}
 	case OpRenew:
@@ -551,6 +557,82 @@ func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
 		d.state.ConfirmClientID(clientID)
 	}
 	return OpResult{OpCode: OpSetClientIDConfirm, Status: NFS4_OK}
+}
+
+func (d *Dispatcher) opRemove(data []byte) OpResult {
+	name := string(data)
+	if name == "" {
+		return OpResult{OpCode: OpRemove, Status: NFS4ERR_INVAL}
+	}
+	targetPath := path.Join(d.currentPath, name)
+	key := targetPath
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+
+	if _, err := d.backend.HeadObject(nfs4Bucket, key); err != nil {
+		return OpResult{OpCode: OpRemove, Status: NFS4ERR_NOENT}
+	}
+	if err := d.backend.DeleteObject(nfs4Bucket, key); err != nil {
+		return OpResult{OpCode: OpRemove, Status: NFS4ERR_IO}
+	}
+	d.state.InvalidateFH(targetPath)
+
+	w := getXDRWriter()
+	// change_info4: atomic + before + after
+	w.WriteUint32(1)
+	w.WriteUint64(uint64(time.Now().UnixNano()))
+	w.WriteUint64(uint64(time.Now().UnixNano()))
+	return OpResult{OpCode: OpRemove, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+}
+
+func (d *Dispatcher) opRename(data []byte) OpResult {
+	r := NewXDRReader(data)
+	oldName, err := r.ReadString()
+	if err != nil {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_INVAL}
+	}
+	newName, err := r.ReadString()
+	if err != nil {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_INVAL}
+	}
+
+	oldPath := path.Join(d.currentPath, oldName)
+	newPath := path.Join(d.currentPath, newName)
+	oldKey := oldPath
+	if len(oldKey) > 0 && oldKey[0] == '/' {
+		oldKey = oldKey[1:]
+	}
+	newKey := newPath
+	if len(newKey) > 0 && newKey[0] == '/' {
+		newKey = newKey[1:]
+	}
+
+	// Object store has no rename — read → write new → delete old.
+	rc, _, err := d.backend.GetObject(nfs4Bucket, oldKey)
+	if err != nil {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_NOENT}
+	}
+	if _, err := d.backend.PutObject(nfs4Bucket, newKey, rc, "application/octet-stream"); err != nil {
+		rc.Close()
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
+	}
+	rc.Close()
+	d.backend.DeleteObject(nfs4Bucket, oldKey) //nolint:errcheck
+
+	d.state.InvalidateFH(oldPath)
+	d.state.GetOrCreateFH(newPath)
+
+	now := uint64(time.Now().UnixNano())
+	w := getXDRWriter()
+	// source_cinfo + target_cinfo (each: atomic + before + after)
+	w.WriteUint32(1)
+	w.WriteUint64(now)
+	w.WriteUint64(now)
+	w.WriteUint32(1)
+	w.WriteUint64(now)
+	w.WriteUint64(now)
+	return OpResult{OpCode: OpRename, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 // --- Helper functions ---
