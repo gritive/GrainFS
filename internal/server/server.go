@@ -225,11 +225,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) authMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		// Skip auth for /metrics and /ui/ endpoints
-		// Admin endpoints require authentication
+		// Skip auth for monitoring/read-only status endpoints and /ui/
 		path := string(c.URI().Path())
 		if path == "/metrics" || strings.HasPrefix(path, "/ui/") ||
-			path == "/api/events" || path == "/api/eventlog" {
+			path == "/api/events" || path == "/api/eventlog" ||
+			path == "/api/cluster/status" || path == "/api/health" {
 			c.Next(ctx)
 			return
 		}
