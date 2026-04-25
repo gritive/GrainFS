@@ -143,10 +143,6 @@ func TestReceiptTrackingEmitter_FinalizeSession_NoKeyStore(t *testing.T) {
 }
 
 func TestReceiptTrackingEmitter_OrphanSweep(t *testing.T) {
-	// This test patches the constant indirectly by checking that after Close
-	// the sessions map is empty (goroutine exited). It does NOT test the TTL
-	// because waiting 5 minutes in a test is unreasonable — the TTL logic is
-	// simple enough to trust.
 	store := newTestStore(t)
 	ks := newTestKeyStore(t)
 	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
@@ -156,15 +152,11 @@ func TestReceiptTrackingEmitter_OrphanSweep(t *testing.T) {
 	ev.CorrelationID = cid
 	e.Emit(ev)
 
-	e.mu.Lock()
-	assert.Len(t, e.sessions, 1)
-	e.mu.Unlock()
+	// sessionCount round-trips the actor, ensuring the Emit is processed.
+	assert.Equal(t, 1, e.sessionCount())
 
 	e.Close()
-
-	// After close the sweeper goroutine has exited; sessions may still be in
-	// memory (we don't drain on close, orphan cleanup is TTL-based). The
-	// important thing is that Close() doesn't deadlock.
+	// After Close the actor goroutine has exited; Close must not deadlock.
 }
 
 func TestReceiptTrackingEmitter_Emit_EmptyCorrelationID(t *testing.T) {
@@ -179,9 +171,7 @@ func TestReceiptTrackingEmitter_Emit_EmptyCorrelationID(t *testing.T) {
 	ev.Key = "k"
 	e.Emit(ev)
 
-	e.mu.Lock()
-	assert.Empty(t, e.sessions, "empty correlationID must not create a session")
-	e.mu.Unlock()
+	assert.Equal(t, 0, e.sessionCount(), "empty correlationID must not create a session")
 }
 
 func TestReceiptTrackingEmitter_Emit_MaxEventsPerSession(t *testing.T) {
@@ -200,9 +190,10 @@ func TestReceiptTrackingEmitter_Emit_MaxEventsPerSession(t *testing.T) {
 		e.Emit(ev)
 	}
 
-	e.mu.Lock()
-	sess := e.sessions[cid]
-	e.mu.Unlock()
+	// FinalizeSession round-trips the actor (all Emit messages processed before reply).
+	reply := make(chan *receiptSession, 1)
+	e.finalizeCh <- finalizeReq{correlationID: cid, reply: reply}
+	sess := <-reply
 	require.NotNil(t, sess)
 	assert.Equal(t, maxEventsPerSession, len(sess.events), "session must not exceed maxEventsPerSession")
 }
@@ -218,4 +209,34 @@ func TestReceiptTrackingEmitter_FinalizeSession_NotFound(t *testing.T) {
 
 	_, err := store.GetByCorrelationID("nonexistent-cid")
 	assert.ErrorIs(t, err, receipt.ErrNotFound)
+}
+
+func TestReceiptTrackingEmitter_ConcurrentEmitAndFinalize(t *testing.T) {
+	store := newTestStore(t)
+	ks := newTestKeyStore(t)
+	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	defer e.Close()
+
+	const goroutines = 20
+	const eventsPerGoroutine = 10
+
+	done := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		cid := "concurrent-cid"
+		go func() {
+			for j := 0; j < eventsPerGoroutine; j++ {
+				ev := scrubber.NewEvent(scrubber.PhaseDetect, scrubber.OutcomeFailed)
+				ev.CorrelationID = cid
+				ev.Bucket = "b"
+				ev.Key = "k"
+				e.Emit(ev)
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+
+	// No panic, no deadlock — actor is the only writer of sessions map.
 }

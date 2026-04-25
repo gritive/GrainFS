@@ -67,6 +67,7 @@ func startTestAlertsServer(t *testing.T, st *AlertsState) string {
 		defer cancel()
 		_ = h.Shutdown(ctx)
 	})
+	t.Cleanup(st.Close)
 
 	base := "http://" + addr
 	deadline := time.Now().Add(3 * time.Second)
@@ -206,6 +207,7 @@ func TestAlertsState_ConcurrentReportsHaveNoRace(t *testing.T) {
 		FlapWindow:    1 * time.Second,
 		FlapThreshold: 999,
 	})
+	defer st.Close()
 	tr := st.Tracker()
 
 	const goroutines = 4
@@ -234,6 +236,7 @@ func TestGaugeTracker_MirrorsDegradedState(t *testing.T) {
 	st := NewAlertsState("", alerts.Options{}, alerts.DegradedConfig{
 		ExitStableWindow: -1,
 	})
+	defer st.Close()
 	g := st.Tracker()
 
 	g.Report(true, "shard_unrepairable", "b/k")
@@ -249,6 +252,7 @@ func TestGaugeTracker_MirrorsDegradedState(t *testing.T) {
 		FlapWindow:       1 * time.Second,
 		FlapThreshold:    99,
 	})
+	defer st2.Close()
 	g2 := st2.Tracker()
 	g2.Report(true, "x", "y")
 	assert.True(t, g2.Degraded())

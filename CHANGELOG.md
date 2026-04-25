@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.4.29] - 2026-04-25
+
+### Refactored
+
+- **DegradedTracker Actor 전환** (`internal/alerts/`): mutex 제거 → actor 고루틴 단일 소유 패턴.
+  - `Report/Degraded/Status`: `stopCh` guard로 Stop 이후 블로킹 방지
+  - `processReport/checkFlapThreshold`: actor goroutine 전용, mutex contention 완전 제거
+  - `recentTransitions`: copy-on-trim으로 backing array 누수 방지
+  - `OnStateChange` 콜백: actor goroutine 직렬화 → Prometheus gauge와 상태 불일치 zero window
+  - `OnHold` 콜백: flap 임계 초과 시 critical webhook 발송
+
+- **receiptTrackingEmitter Actor 전환** (`internal/server/`): mutex 제거 → actor goroutine + sync.Once.
+  - `Close()`: `sync.Once` 래핑으로 double-close panic 방지
+  - `FinalizeSession`: reply 수신에 `stopCh` guard 추가 — Close 이후 영구 블로킹 방지
+  - `sessionCount`: drain-then-count 패턴으로 Emit 순서 보장
+
+- **scrubber Stats Actor-snapshot** (`internal/scrubber/`): `atomic.Value` 스냅샷으로 hot-path mutex 제거.
+
+### Fixed
+
+- `AlertsState.Close()` 추가 + `Server.Shutdown()` 연동: DegradedTracker actor goroutine 누수 방지
+- `fix(actor)`: Report/Degraded/Status reply 수신 — Stop/Close race 시 영구 블로킹 방지
+- `OnStateChange`에서 `require.False` → `assert.False`: actor goroutine에서 `t.Fatal` 호출 방지
+
 ## [0.0.4.28] - 2026-04-25
 
 ### Performance
