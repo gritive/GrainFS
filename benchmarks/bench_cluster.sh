@@ -12,14 +12,17 @@
 #   VUS           — 최대 동시 VU 수 (기본: 20)
 #   SIZE_KB       — 오브젝트 크기 KB (기본: 64)
 #   NO_BUILD      — 1이면 빌드 건너뜀
+#   PROFILE       — 1이면 pprof 프로파일 수집 (기본: 0)
+#   PPROF_PORT    — pprof HTTP 포트 (기본: 6060, PROFILE=1일 때만 사용)
 #
 # 3노드 포트 배치:
 #   노드1: S3=9100  Raft=19100
 #   노드2: S3=9101  Raft=19101
 #   노드3: S3=9102  Raft=19102
 #
-# 부하는 노드1(리더 후보)에만 집중한다. ProposeForward가 있으므로 팔로워에
-# 요청을 보내도 동작하지만, 처음 측정은 리더 직접 경로로 기준선을 잡는다.
+# 리더 포트는 Raft 선출 후 /api/cluster/status로 자동 감지한다.
+# PROFILE=1이면 리더 노드에 --pprof-port를 열고 벤치마크와 동시에 CPU 프로파일을
+# 수집한 뒤 go tool pprof 요약을 출력한다.
 
 set -euo pipefail
 
@@ -29,6 +32,8 @@ BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-bench}"
 DURATION="${DURATION:-30s}"
 VUS="${VUS:-20}"
 SIZE_KB="${SIZE_KB:-64}"
+PROFILE="${PROFILE:-0}"
+PPROF_PORT="${PPROF_PORT:-6060}"
 SCRIPT="$(dirname "$0")/s3_bench.js"
 
 # ── 의존성 확인 ────────────────────────────────────────────────────────────────
@@ -52,14 +57,25 @@ fi
 rm -rf "$BENCH_DIR"
 mkdir -p "$BENCH_DIR"/{n1,n2,n3}
 
+# ── 프로파일 디렉토리 ────────────────────────────────────────────────────────
+PROFILE_DIR=""
+if [[ "$PROFILE" == "1" ]]; then
+  PROFILE_DIR="benchmarks/profiles/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$PROFILE_DIR"
+  echo "[bench] pprof profile dir: $PROFILE_DIR"
+fi
+
 # ── 노드 시작 헬퍼 ────────────────────────────────────────────────────────────
 PIDS=()
+# 리더 확정 후 pprof를 여기에 붙일 수 있도록 포트 기록
+LEADER_PPROF_PORT=""
 
 start_node() {
   local idx="$1"        # 1 | 2 | 3
   local s3_port="$2"
   local raft_port="$3"
   local peers="$4"      # 쉼표 구분 raft 주소 목록 (자신 제외)
+  local extra="${5:-}"  # 추가 플래그 (--pprof-port 등)
   local logfile="$BENCH_DIR/n${idx}.log"
 
   "$BINARY" serve \
@@ -71,10 +87,11 @@ start_node() {
     --no-encryption \
     --ec-data 2 \
     --ec-parity 1 \
+    $extra \
     >"$logfile" 2>&1 &
 
   PIDS+=($!)
-  echo "[bench] node${idx} started (s3=:${s3_port} raft=:${raft_port} pid=${PIDS[-1]})"
+  echo "[bench] node${idx} started (s3=:${s3_port} raft=:${raft_port} pid=${PIDS[-1]}${extra:+ $extra})"
 }
 
 # ── 종료 핸들러 ───────────────────────────────────────────────────────────────
@@ -88,12 +105,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ── 클러스터 시작 ─────────────────────────────────────────────────────────────
-PEERS_ALL="127.0.0.1:19100,127.0.0.1:19101,127.0.0.1:19102"
-
-start_node 1 9100 19100 "127.0.0.1:19101,127.0.0.1:19102"
-start_node 2 9101 19101 "127.0.0.1:19100,127.0.0.1:19102"
-start_node 3 9102 19102 "127.0.0.1:19100,127.0.0.1:19101"
+# ── 클러스터 시작 (PROFILE=1이면 노드1에 pprof 포트 예비 할당) ──────────────
+# 리더가 누가 될지 모르므로 일단 고정 포트로 3노드 모두 시작.
+# 리더 감지 후 그 노드에 pprof가 열려 있어야 하므로,
+# PROFILE=1이면 세 노드 모두에 서로 다른 pprof 포트를 할당한다.
+if [[ "$PROFILE" == "1" ]]; then
+  start_node 1 9100 19100 "127.0.0.1:19101,127.0.0.1:19102" "--pprof-port $PPROF_PORT"
+  start_node 2 9101 19101 "127.0.0.1:19100,127.0.0.1:19102" "--pprof-port $((PPROF_PORT+1))"
+  start_node 3 9102 19102 "127.0.0.1:19100,127.0.0.1:19101" "--pprof-port $((PPROF_PORT+2))"
+else
+  start_node 1 9100 19100 "127.0.0.1:19101,127.0.0.1:19102"
+  start_node 2 9101 19101 "127.0.0.1:19100,127.0.0.1:19102"
+  start_node 3 9102 19102 "127.0.0.1:19100,127.0.0.1:19101"
+fi
 
 # ── 클러스터 준비 대기 ────────────────────────────────────────────────────────
 echo "[bench] waiting for cluster to elect a leader…"
@@ -119,23 +143,36 @@ while [[ -z "$LEADER_PORT" ]]; do
     echo "[error] no Raft leader elected within 30s" >&2
     exit 1
   fi
-  for port in 9100 9101 9102; do
+  for port_idx in 0 1 2; do
+    port=$((9100 + port_idx))
     status=$(curl -sf "http://127.0.0.1:${port}/api/cluster/status" 2>/dev/null) || continue
     node_id=$(echo "$status" | grep -o '"node_id":"[^"]*"' | cut -d'"' -f4)
     leader_id=$(echo "$status" | grep -o '"leader_id":"[^"]*"' | cut -d'"' -f4)
     if [[ -n "$leader_id" && "$node_id" == "$leader_id" ]]; then
       LEADER_PORT="$port"
+      LEADER_PPROF_PORT=$((PPROF_PORT + port_idx))
       break
     fi
   done
   [[ -z "$LEADER_PORT" ]] && sleep 0.5
 done
 
-echo "[bench] cluster ready — leader on port ${LEADER_PORT}"
+if [[ "$PROFILE" == "1" ]]; then
+  echo "[bench] cluster ready — leader on port ${LEADER_PORT} (pprof=:${LEADER_PPROF_PORT})"
+else
+  echo "[bench] cluster ready — leader on port ${LEADER_PORT}"
+fi
 
 # ── 버킷 생성 ────────────────────────────────────────────────────────────────
 echo "[bench] creating bucket 'bench' on leader…"
 curl -sf -X PUT "http://127.0.0.1:${LEADER_PORT}/bench" >/dev/null 2>&1 || true
+
+# ── 프로파일: 벤치마크 전 heap 수집 ─────────────────────────────────────────
+if [[ "$PROFILE" == "1" ]]; then
+  echo "[pprof] collecting pre-benchmark heap…"
+  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/heap" \
+    -o "$PROFILE_DIR/heap_pre.pb.gz" && echo "[pprof] heap_pre.pb.gz saved" || true
+fi
 
 # ── k6 벤치마크 실행 ──────────────────────────────────────────────────────────
 echo ""
@@ -143,8 +180,24 @@ echo "=================================================================="
 echo "  GrainFS 3-node cluster benchmark"
 echo "  target : http://127.0.0.1:${LEADER_PORT}  (leader)"
 echo "  vus    : ${VUS}  duration: ${DURATION}  object: ${SIZE_KB}KB"
+[[ "$PROFILE" == "1" ]] && echo "  pprof  : http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/"
 echo "=================================================================="
 echo ""
+
+# PROFILE=1이면 CPU 프로파일을 k6와 동시에 수집 (워밍업 5s 후 시작)
+PPROF_BG_PID=""
+if [[ "$PROFILE" == "1" ]]; then
+  # DURATION에서 숫자 파싱 (예: "30s" → 30)
+  DURATION_SEC="${DURATION//[^0-9]/}"
+  CPU_SEC=$(( DURATION_SEC > 10 ? DURATION_SEC - 5 : DURATION_SEC ))
+  (
+    sleep 5
+    echo "[pprof] collecting ${CPU_SEC}s CPU profile…"
+    curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/profile?seconds=${CPU_SEC}" \
+      -o "$PROFILE_DIR/cpu.pb.gz" && echo "[pprof] cpu.pb.gz saved" || echo "[pprof] CPU profile failed"
+  ) &
+  PPROF_BG_PID=$!
+fi
 
 "$K6" run "$SCRIPT" \
   --env BASE_URL="http://127.0.0.1:${LEADER_PORT}" \
@@ -152,7 +205,45 @@ echo ""
   --env OBJECT_SIZE_KB="$SIZE_KB" \
   --env DURATION="$DURATION" \
   --env MAX_VUS="$VUS" \
-  "$@"
+  "$@" || K6_EXIT=$?
+
+# CPU 프로파일 완료 대기
+[[ -n "$PPROF_BG_PID" ]] && wait "$PPROF_BG_PID" 2>/dev/null || true
+
+# ── 프로파일: 벤치마크 후 나머지 수집 ───────────────────────────────────────
+if [[ "$PROFILE" == "1" ]]; then
+  echo ""
+  echo "[pprof] collecting post-benchmark profiles…"
+  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/heap" \
+    -o "$PROFILE_DIR/heap_post.pb.gz"   && echo "[pprof] heap_post.pb.gz"  || true
+  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/allocs" \
+    -o "$PROFILE_DIR/allocs.pb.gz"      && echo "[pprof] allocs.pb.gz"     || true
+  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/goroutine?debug=1" \
+    -o "$PROFILE_DIR/goroutine.txt"     && echo "[pprof] goroutine.txt"    || true
+  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/mutex" \
+    -o "$PROFILE_DIR/mutex.pb.gz"       && echo "[pprof] mutex.pb.gz"      || true
+  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/block" \
+    -o "$PROFILE_DIR/block.pb.gz"       && echo "[pprof] block.pb.gz"      || true
+
+  echo ""
+  echo "=================================================================="
+  echo "  pprof: CPU top-10"
+  echo "=================================================================="
+  go tool pprof -top -nodecount=10 "$PROFILE_DIR/cpu.pb.gz" 2>/dev/null || echo "  (pprof analysis failed)"
+
+  echo ""
+  echo "=================================================================="
+  echo "  pprof: heap (post-benchmark) top-10"
+  echo "=================================================================="
+  go tool pprof -top -nodecount=10 "$PROFILE_DIR/heap_post.pb.gz" 2>/dev/null || echo "  (heap analysis failed)"
+
+  echo ""
+  echo "[pprof] all profiles saved to $PROFILE_DIR/"
+  ls -lh "$PROFILE_DIR/"
+  echo ""
+  echo "  interactive: go tool pprof -http=:8080 $PROFILE_DIR/cpu.pb.gz"
+fi
 
 echo ""
 echo "[bench] done. logs in $BENCH_DIR/"
+exit "${K6_EXIT:-0}"
