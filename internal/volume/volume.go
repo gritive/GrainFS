@@ -91,7 +91,9 @@ func (m *Manager) Create(name string, sizeBytes int64) (*Volume, error) {
 		return nil, fmt.Errorf("store volume metadata: %w", err)
 	}
 
-	return vol, nil
+	m.volumes[name] = vol
+	cp := *vol
+	return &cp, nil
 }
 
 // Get returns volume metadata.
@@ -99,22 +101,12 @@ func (m *Manager) Get(name string) (*Volume, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	rc, _, err := m.backend.GetObject(volumeBucketName, metaKey(name))
+	vol, err := m.getVolUnlocked(name)
 	if err != nil {
-		return nil, fmt.Errorf("volume %q not found", name)
+		return nil, err
 	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return nil, fmt.Errorf("read volume metadata: %w", err)
-	}
-
-	vol, err := unmarshalVolume(data)
-	if err != nil {
-		return nil, fmt.Errorf("unmarshal volume metadata: %w", err)
-	}
-	return vol, nil
+	cp := *vol
+	return &cp, nil
 }
 
 // Delete deletes a volume and all its blocks.
@@ -136,7 +128,11 @@ func (m *Manager) Delete(name string) error {
 	}
 
 	// Delete metadata
-	return m.backend.DeleteObject(volumeBucketName, metaKey(name))
+	if err := m.backend.DeleteObject(volumeBucketName, metaKey(name)); err != nil {
+		return err
+	}
+	delete(m.volumes, name)
+	return nil
 }
 
 // List returns all volumes.
@@ -171,7 +167,9 @@ func (m *Manager) List() ([]*Volume, error) {
 		if err != nil {
 			continue
 		}
-		volumes = append(volumes, vol)
+		m.volumes[vol.Name] = vol
+		cp := *vol
+		volumes = append(volumes, &cp)
 	}
 	return volumes, nil
 }
@@ -285,8 +283,12 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 	return totalWritten, nil
 }
 
-// getVolUnlocked reads volume metadata without locking (caller must hold lock).
+// getVolUnlocked returns the cached volume pointer (caller must hold m.mu).
+// On cache miss, loads from storage and populates the cache.
 func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
+	if vol, ok := m.volumes[name]; ok {
+		return vol, nil
+	}
 	rc, _, err := m.backend.GetObject(volumeBucketName, metaKey(name))
 	if err != nil {
 		return nil, fmt.Errorf("volume %q not found", name)
@@ -302,6 +304,7 @@ func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal volume metadata: %w", err)
 	}
+	m.volumes[name] = vol
 	return vol, nil
 }
 
