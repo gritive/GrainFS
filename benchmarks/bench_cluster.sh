@@ -97,26 +97,36 @@ for i in 0 1 2; do
   echo "  node-$i: HTTP=:$(http_port $i)  Raft=$(raft_addr $i)"
 done
 
-echo "=== waiting for cluster to become available (up to 30s) ==="
+echo "=== waiting for cluster leader election (up to 30s) ==="
+LEADER_PORT=""
 for attempt in $(seq 1 60); do
-  status=$(curl -sf "http://127.0.0.1:$HTTP0/api/cluster/balancer/status" 2>/dev/null || true)
-  nodes=$(echo "$status" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('nodes',[])))" 2>/dev/null || echo 0)
-  if [[ "$nodes" -ge 3 ]]; then
-    echo "  cluster ready: $nodes nodes visible (attempt $attempt)"
-    break
-  fi
+  for port in $HTTP0 $HTTP1 $HTTP2; do
+    st=$(curl -sf "http://127.0.0.1:$port/api/cluster/status" 2>/dev/null || true)
+    if [ -z "$st" ]; then continue; fi
+    node_state=$(echo "$st" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('state',''))" 2>/dev/null || echo "")
+    if [[ "$node_state" == "Leader" ]]; then
+      LEADER_PORT="$port"
+      echo "  leader found at port $LEADER_PORT (attempt $attempt)"
+      break 2
+    fi
+  done
   sleep 0.5
 done
 
-# Verify all 3 nodes visible
-echo "=== cluster status ==="
-curl -sf "http://127.0.0.1:$HTTP0/api/cluster/balancer/status" 2>/dev/null | \
-  python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  nodes: {len(d.get(\"nodes\",[]))}, available: {d.get(\"available\")}')" 2>/dev/null || true
+if [[ -z "$LEADER_PORT" ]]; then
+  echo "  WARNING: no leader found after 30s, falling back to node-0 (:$HTTP0)" >&2
+  LEADER_PORT="$HTTP0"
+fi
+
+# Show cluster status from leader
+echo "=== cluster status (leader :$LEADER_PORT) ==="
+curl -sf "http://127.0.0.1:$LEADER_PORT/api/cluster/status" 2>/dev/null | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  node_id: {d.get(\"node_id\")}, state: {d.get(\"state\")}, term: {d.get(\"term\")}, peers: {len(d.get(\"peers\",[]))}')" 2>/dev/null || true
 
 echo ""
-echo "=== running k6 benchmark against node-0 (:$HTTP0) ==="
+echo "=== running k6 benchmark against leader (:$LEADER_PORT) ==="
 k6 run benchmarks/s3_bench.js \
-  --env BASE_URL="http://127.0.0.1:$HTTP0" \
+  --env BASE_URL="http://127.0.0.1:$LEADER_PORT" \
   --env BUCKET="bench-cluster" \
   --env AWS_ACCESS_KEY="$ACCESS_KEY" \
   --env AWS_SECRET_KEY="$SECRET_KEY" \
