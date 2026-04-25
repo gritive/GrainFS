@@ -77,9 +77,10 @@ func (m *Manager) Create(name string, sizeBytes int64) (*Volume, error) {
 	}
 
 	vol := &Volume{
-		Name:      name,
-		Size:      sizeBytes,
-		BlockSize: DefaultBlockSize,
+		Name:            name,
+		Size:            sizeBytes,
+		BlockSize:       DefaultBlockSize,
+		AllocatedBlocks: -1, // untracked until first write
 	}
 
 	data, err := marshalVolume(vol)
@@ -244,16 +245,18 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 
 	bs := int64(vol.BlockSize)
 	totalWritten := 0
+	newBlocks := 0
 
 	for totalWritten < len(p) && off+int64(totalWritten) < vol.Size {
 		pos := off + int64(totalWritten)
 		blkNum := pos / bs
 		blkOff := pos % bs
 
-		// Read existing block (or zeros)
+		// Read existing block (or zeros); isNew tracks if this is a new allocation
 		blkData := make([]byte, vol.BlockSize)
 		rc, _, err := m.backend.GetObject(volumeBucketName, blockKey(name, blkNum))
-		if err == nil {
+		isNew := err != nil
+		if !isNew {
 			io.ReadFull(rc, blkData)
 			rc.Close()
 		}
@@ -273,11 +276,26 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 
 		// Write the block back
 		if _, err := m.backend.PutObject(volumeBucketName, blockKey(name, blkNum),
-			strings.NewReader(string(blkData)), "application/octet-stream"); err != nil {
+			bytes.NewReader(blkData), "application/octet-stream"); err != nil {
 			return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 		}
 
+		if isNew {
+			newBlocks++
+		}
 		totalWritten += canWrite
+	}
+
+	if newBlocks > 0 {
+		if vol.AllocatedBlocks < 0 {
+			vol.AllocatedBlocks = 0 // untracked → start tracking
+		}
+		vol.AllocatedBlocks += int64(newBlocks)
+		data, err := marshalVolume(vol)
+		if err == nil {
+			m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+		}
+		// vol은 캐시 포인터이므로 캐시도 이미 갱신됨
 	}
 
 	return totalWritten, nil

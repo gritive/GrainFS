@@ -232,3 +232,39 @@ func TestVolumeAllocatedBytes(t *testing.T) {
 		assert.Equal(t, tt.want, vol.AllocatedBytes())
 	}
 }
+
+func TestAllocatedBlocksTracking(t *testing.T) {
+	mgr := setupManager(t)
+	_, err := mgr.Create("track-test", 16384) // 4 blocks of 4096
+	require.NoError(t, err)
+
+	// 새 볼륨은 untracked (-1)
+	vol, err := mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(-1), vol.AllocatedBlocks)
+
+	// 블록 0에 쓰기 → AllocatedBlocks = 1
+	_, err = mgr.WriteAt("track-test", []byte("hello"), 0)
+	require.NoError(t, err)
+
+	vol, err = mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), vol.AllocatedBlocks)
+	assert.Equal(t, int64(4096), vol.AllocatedBytes())
+
+	// 동일 블록 덮어쓰기 → AllocatedBlocks 변화 없음
+	_, err = mgr.WriteAt("track-test", []byte("world"), 0)
+	require.NoError(t, err)
+
+	vol, err = mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), vol.AllocatedBlocks, "overwrite should not increment counter")
+
+	// 블록 1에 쓰기 → AllocatedBlocks = 2
+	_, err = mgr.WriteAt("track-test", []byte("new block"), int64(DefaultBlockSize))
+	require.NoError(t, err)
+
+	vol, err = mgr.Get("track-test")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), vol.AllocatedBlocks)
+}
