@@ -66,10 +66,13 @@ type Volume struct {
     Name            string
     Size            int64
     BlockSize       int
-    AllocatedBlocks int64
+    AllocatedBlocks int64  // -1 = untracked (기존 볼륨), 0 = 할당 없음, >0 = 블록 수
 }
 
 func (v *Volume) AllocatedBytes() int64 {
+    if v.AllocatedBlocks < 0 {
+        return -1 // untracked
+    }
     return v.AllocatedBlocks * int64(v.BlockSize)
 }
 ```
@@ -92,6 +95,17 @@ func NewManager(backend storage.Backend) *Manager // ManagerOptions{} 기본값
 변경 흐름:
 ```
 WriteAt(name, p, off):
+  m.mu.Lock() (기존 유지)
+  vol = getVolUnlocked(name)
+  
+  // 1단계: PoolQuota 사전 검사 (루프 진입 전 원자적 거부)
+  if opts.PoolQuota > 0:
+    newBlocksNeeded = 각 blockKey에 대해 backend.GetObject 실패 카운트 (pre-scan)
+    currentAllocated = 전체 볼륨 AllocatedBlocks * BlockSize 합산
+    if currentAllocated + newBlocksNeeded*blockSize > opts.PoolQuota:
+      return 0, ErrPoolQuotaExceeded
+  
+  // 2단계: 실제 쓰기 루프
   newBlocks = 0
   for each block in range:
     rc, _, err = backend.GetObject(blockKey)
@@ -101,23 +115,20 @@ WriteAt(name, p, off):
     else:
       blkData = read existing
     
-    // pool quota 검사 (옵션)
-    if isNew && opts.PoolQuota > 0:
-      totalAllocated = sum of all volume allocated_bytes
-      if totalAllocated + blockSize > opts.PoolQuota:
-        return 0, ErrPoolQuotaExceeded
-    
     copy p → blkData
-    PutObject(blockKey, blkData)
+    PutObject(blockKey, bytes.NewReader(blkData), "application/octet-stream")
     if isNew: newBlocks++
   
   if newBlocks > 0:
+    if vol.AllocatedBlocks < 0 { vol.AllocatedBlocks = 0 }  // untracked → 추적 시작
     vol.AllocatedBlocks += newBlocks
     PutObject(metaKey, marshalVolume(vol))
   return totalWritten, nil
 ```
 
 **메타데이터 일관성:** 블록 쓰기 성공 후 카운터 업데이트. 서버 크래시로 카운터만 누락되면 drift 발생 → 허용(space accounting). 복구 커맨드는 별도 TODO.
+
+**PoolQuota 사전 검사 비용:** opts.PoolQuota == 0(기본값)이면 사전 검사 완전 생략. 활성화 시 O(blocks_in_range + volumes). 옵션 기능이므로 허용.
 
 ### 5. Manager.Discard
 
@@ -131,7 +142,9 @@ func (m *Manager) Discard(name string, off, length int64) error
 흐름:
 ```
 Discard(name, off, length):
-  vol = getVol(name)
+  m.mu.Lock()  // WriteAt과 동일한 write mutex
+  defer m.mu.Unlock()
+  vol = getVolUnlocked(name)
   bs = vol.BlockSize
   
   firstBlock = ceil(off / bs)          // 부분 커버 블록 제외
@@ -143,8 +156,9 @@ Discard(name, off, length):
     if err == nil: freed++
   
   if freed > 0:
-    vol.AllocatedBlocks = max(0, vol.AllocatedBlocks - freed)
-    PutObject(metaKey, marshalVolume(vol))
+    if vol.AllocatedBlocks >= 0:  // untracked(-1)인 경우 카운터 수정하지 않음
+      vol.AllocatedBlocks = max(0, vol.AllocatedBlocks - freed)
+      PutObject(metaKey, marshalVolume(vol))
   return nil
 ```
 
@@ -188,6 +202,11 @@ NBD TRIM request는 data payload 없음. offset + length만 헤더에 있음.
 }
 ```
 
+**allocated_bytes 시맨틱:**
+- `-1`: 미추적 (기존 볼륨이거나 아직 `recalculate` 미실행)
+- `0`: 할당된 블록 없음
+- `> 0`: 실제 할당 바이트
+
 ---
 
 ## 파일 구조
@@ -201,7 +220,7 @@ NBD TRIM request는 data payload 없음. offset + length만 헤더에 있음.
 | `internal/nbd/nbd.go` | 수정 | NBD_CMD_TRIM, NBD_FLAG_SEND_TRIM, handleRequest case |
 | `internal/volume/volume_test.go` | 수정 | Discard 테스트, AllocatedBlocks 추적 테스트 |
 | `internal/nbd/nbd_test.go` | 수정 | TRIM E2E (Docker NBD) |
-| `internal/server/volume_api.go` | 수정 | GET /volumes/{name} 응답에 allocated_bytes 추가 |
+| `internal/server/volume_handlers.go` | 수정 | GET /volumes/{name} 응답에 allocated_bytes 추가 |
 
 ---
 
@@ -237,6 +256,9 @@ var (
 | Discard 부분 커버 블록 — 해당 블록 보존 | 정렬 경계 처리 |
 | Discard 미존재 블록 — 오류 없이 통과 | idempotent |
 | PoolQuota 초과 시 ErrPoolQuotaExceeded | 쓰기 거부 |
+| PoolQuota 정확히 한도에서 통과, 한 블록 초과 시 거부 | 경계값 검사 |
+| Discard가 AllocatedBlocks보다 큰 범위 요청 — 0 이하로 내려가지 않음 | clamp 검사 |
+| GET /volumes/{name} 응답에 allocated_bytes 필드 존재 | API 응답 스키마 |
 
 ### NBD TRIM 통합 테스트 (`nbd_test.go`, Docker)
 
