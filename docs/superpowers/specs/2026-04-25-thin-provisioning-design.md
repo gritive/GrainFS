@@ -52,11 +52,11 @@ table Volume {
   name:string;
   size:int64;
   block_size:int32;
-  allocated_blocks:int64;  // 실제 할당된 블록 수. 0 = untracked (기존 볼륨)
+  allocated_blocks:int64 = -1;  // -1=untracked(기존볼륨), 0=할당없음, >0=블록수
 }
 ```
 
-FlatBuffers는 새 필드를 테이블 끝에 추가하면 backward-compatible. 기존 직렬화된 볼륨 읽기 시 `allocated_blocks` = 0 (기본값).
+FlatBuffers는 새 필드를 테이블 끝에 추가하면 backward-compatible. **스키마 default를 `-1`로 명시해야 한다**: 기존 직렬화된 볼륨은 해당 필드가 없으므로 reader가 스키마 default(-1)를 반환 → "untracked" 시맨틱이 자연스럽게 적용됨. codegen 시 `PrependInt64Slot(N, value, -1)` 호출로 생성 확인 필수.
 
 ### 2. Volume 구조체 확장
 
@@ -77,16 +77,30 @@ func (v *Volume) AllocatedBytes() int64 {
 }
 ```
 
-### 3. Manager 옵션
+### 3. Manager 구조 및 옵션
 
 ```go
 type ManagerOptions struct {
     PoolQuota int64 // 0 = unlimited (default). 양수면 allocated_blocks * block_size 합계가 초과 시 쓰기 거부
 }
 
+// Manager는 인메모리 볼륨 캐시를 유지한다.
+// volumes 맵은 mu 보호 하에 읽고 쓴다.
+// S3 메타데이터를 매 호출마다 읽지 않으므로 WriteAt/Discard 핫패스에서 S3 왕복이 없다.
+type Manager struct {
+    backend storage.Backend
+    mu      sync.RWMutex
+    volumes map[string]*Volume  // 인메모리 캐시; nil = 미로드
+    opts    ManagerOptions
+}
+
 func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manager
 func NewManager(backend storage.Backend) *Manager // ManagerOptions{} 기본값
 ```
+
+**캐시 정책:** Create/Get 시 캐시 적재, Delete 시 캐시 제거, WriteAt/Discard 시 캐시 갱신(S3 PutObject 성공 후). 서버 재시작 시 캐시 비어있음 → 첫 Get/WriteAt에서 S3에서 로드.
+
+**뮤텍스 설계 (Phase A):** 현재와 동일한 전역 `sync.RWMutex`. 볼륨별 Actor(goroutine+channel)는 Phase 17 Lock-free 검토 항목으로 이미 TODOS에 등록됨. 인메모리 캐시 추가로 핵심 S3 왕복 병목은 해소.
 
 ### 4. WriteAt — 신규 블록 감지
 
@@ -96,12 +110,14 @@ func NewManager(backend storage.Backend) *Manager // ManagerOptions{} 기본값
 ```
 WriteAt(name, p, off):
   m.mu.Lock() (기존 유지)
-  vol = getVolUnlocked(name)
+  vol = m.volumes[name]  // 인메모리 캐시에서 읽음
   
   // 1단계: PoolQuota 사전 검사 (루프 진입 전 원자적 거부)
   if opts.PoolQuota > 0:
-    newBlocksNeeded = 각 blockKey에 대해 backend.GetObject 실패 카운트 (pre-scan)
-    currentAllocated = 전체 볼륨 AllocatedBlocks * BlockSize 합산
+    newBlocksNeeded = 각 blockKey에 대해 backend.HeadObject 실패 카운트 (pre-scan)
+    //   HeadObject: 존재 여부만 확인, body 다운로드 없음
+    currentAllocated = sum(v.AllocatedBlocks * v.BlockSize for v in m.volumes)
+    //   인메모리 맵 O(N) 순회 — S3 왕복 없음
     if currentAllocated + newBlocksNeeded*blockSize > opts.PoolQuota:
       return 0, ErrPoolQuotaExceeded
   
@@ -122,13 +138,13 @@ WriteAt(name, p, off):
   if newBlocks > 0:
     if vol.AllocatedBlocks < 0 { vol.AllocatedBlocks = 0 }  // untracked → 추적 시작
     vol.AllocatedBlocks += newBlocks
-    PutObject(metaKey, marshalVolume(vol))
+    PutObject(metaKey, marshalVolume(vol))  // 캐시는 이미 갱신됨 (vol은 포인터)
   return totalWritten, nil
 ```
 
 **메타데이터 일관성:** 블록 쓰기 성공 후 카운터 업데이트. 서버 크래시로 카운터만 누락되면 drift 발생 → 허용(space accounting). 복구 커맨드는 별도 TODO.
 
-**PoolQuota 사전 검사 비용:** opts.PoolQuota == 0(기본값)이면 사전 검사 완전 생략. 활성화 시 O(blocks_in_range + volumes). 옵션 기능이므로 허용.
+**PoolQuota 사전 검사 비용:** opts.PoolQuota == 0(기본값)이면 사전 검사 완전 생략. 활성화 시 O(blocks_in_range) HeadObject + O(volumes) 인메모리 순회. 옵션 기능이므로 허용.
 
 ### 5. Manager.Discard
 
@@ -213,9 +229,9 @@ NBD TRIM request는 data payload 없음. offset + length만 헤더에 있음.
 
 | 파일 | 변경 유형 | 내용 |
 |------|-----------|------|
-| `internal/volume/volume.fbs` | 수정 | `allocated_blocks: int64` 추가 |
-| `internal/volume/volumepb/Volume.go` | 재생성 | `make fbs` |
-| `internal/volume/volume.go` | 수정 | AllocatedBlocks 필드, WriteAt 감지 로직, Discard(), ManagerOptions |
+| `internal/volume/volume.fbs` | 수정 | `allocated_blocks:int64 = -1` 추가 |
+| `internal/volume/volumepb/Volume.go` | 재생성 | `make fbs` + default -1 확인 |
+| `internal/volume/volume.go` | 수정 | Manager.volumes 캐시, AllocatedBlocks 필드, WriteAt 감지 로직, Discard(), ManagerOptions |
 | `internal/volume/codec.go` | 수정 | marshal/unmarshal allocated_blocks |
 | `internal/nbd/nbd.go` | 수정 | NBD_CMD_TRIM, NBD_FLAG_SEND_TRIM, handleRequest case |
 | `internal/volume/volume_test.go` | 수정 | Discard 테스트, AllocatedBlocks 추적 테스트 |
@@ -272,5 +288,8 @@ var (
 ## 주의사항
 
 - **카운터 drift:** WriteAt 중 서버 크래시 시 `allocated_blocks`와 실제 오브젝트 수가 불일치 가능. Phase A에서는 허용. 복구는 `volume recalculate` 커맨드(별도 TODO)로.
-- **부분 블록 DISCARD:** OS(Linux)는 실제로 block-aligned TRIM만 보내므로 부분 커버 스킵이 문제되지 않음. 하지만 edge case 테스트 필요.
-- **FlatBuffer 재생성:** `make fbs` 실행 필수. `.fbs.stamp` 파일이 있으므로 변경 감지 자동.
+- **부분 블록 DISCARD:** OS(Linux)는 실제로 block-aligned TRIM만 보내므로 부분 커버 스킵이 문제되지 않음. 단, `off+length`가 블록 경계에 정확히 정렬될 때 `lastBlock = floor((off+length)/bs) - 1`이 마지막 블록을 올바르게 제외함을 테스트로 검증.
+- **FlatBuffer 재생성:** `make fbs` 실행 필수. `.fbs.stamp` 파일이 있으므로 변경 감지 자동. 재생성 후 `PrependInt64Slot` default 인자가 `-1`인지 반드시 확인.
+- **클러스터 모드 범위 외:** Phase A는 단일 노드 전용. 멀티 노드에서 동일 볼륨에 동시 WriteAt 시 `allocated_blocks` 카운터가 LWW(last-write-wins)로 손실됨. 클러스터 안전성은 Phase A 범위 밖 — 볼륨 메타데이터를 Raft 로그를 통해 갱신하거나 S3 conditional put(if-match ETag) 방식으로 별도 구현 필요.
+- **DeleteObject 멱등성:** `storage.Backend` 인터페이스 계약 — missing-key delete는 `nil` 반환(S3 호환: 204 반환). 이 계약이 보장되어야 Discard의 `freed` 카운트가 정확함. 구현체(local backend 등)에서 검증 필요.
+- **인메모리 캐시 일관성:** `Manager.volumes` 맵은 서버 재시작 시 비어있음. 첫 접근 시 S3에서 로드. Create/Delete/WriteAt/Discard에서 항상 캐시를 갱신해야 함.
