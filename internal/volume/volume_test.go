@@ -268,3 +268,79 @@ func TestAllocatedBlocksTracking(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), vol.AllocatedBlocks)
 }
+
+func TestDiscard(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("discard-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 블록 0, 1, 2에 쓰기
+	_, err = mgr.WriteAt("discard-test", make([]byte, blockSize*3), 0)
+	require.NoError(t, err)
+
+	vol, _ := mgr.Get("discard-test")
+	require.Equal(t, int64(3), vol.AllocatedBlocks, "should have 3 blocks after write")
+
+	// 블록 1만 discard (off=4096, length=4096)
+	err = mgr.Discard("discard-test", int64(blockSize), int64(blockSize))
+	require.NoError(t, err)
+
+	vol, _ = mgr.Get("discard-test")
+	assert.Equal(t, int64(2), vol.AllocatedBlocks, "counter should decrease by 1")
+
+	// 블록 1 읽기는 zeros
+	buf := make([]byte, blockSize)
+	_, err = mgr.ReadAt("discard-test", buf, int64(blockSize))
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, blockSize), buf, "discarded block should read as zeros")
+}
+
+func TestDiscardPartialBlock(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("partial-discard", int64(blockSize*4))
+	require.NoError(t, err)
+
+	_, err = mgr.WriteAt("partial-discard", make([]byte, blockSize*2), 0)
+	require.NoError(t, err)
+
+	// 부분 커버 discard — off=1, length=blockSize-1 → firstBlock=ceil(1/bs)=1, lastBlock=floor(bs/bs)-1=0 → 범위 없음
+	err = mgr.Discard("partial-discard", 1, int64(blockSize-1))
+	require.NoError(t, err)
+
+	vol, _ := mgr.Get("partial-discard")
+	assert.Equal(t, int64(2), vol.AllocatedBlocks, "partial discard should not free any block")
+}
+
+func TestDiscardNonExistentBlock(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("no-block-discard", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 블록 쓰기 없이 discard → 에러 없이 통과
+	err = mgr.Discard("no-block-discard", 0, int64(blockSize))
+	require.NoError(t, err, "discard of non-existent block should be idempotent")
+}
+
+func TestDiscardCounterClamp(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("clamp-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 블록 1개 쓰기 후 2블록 범위 discard
+	_, err = mgr.WriteAt("clamp-test", make([]byte, blockSize), 0)
+	require.NoError(t, err)
+
+	vol, _ := mgr.Get("clamp-test")
+	require.Equal(t, int64(1), vol.AllocatedBlocks)
+
+	// 블록 0, 1 discard (블록 1은 미존재)
+	err = mgr.Discard("clamp-test", 0, int64(blockSize*2))
+	require.NoError(t, err)
+
+	vol, _ = mgr.Get("clamp-test")
+	assert.Equal(t, int64(0), vol.AllocatedBlocks, "counter should not go below 0")
+}

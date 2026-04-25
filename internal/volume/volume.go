@@ -301,6 +301,47 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 	return totalWritten, nil
 }
 
+// Discard marks the byte range [off, off+length) as free.
+// Only blocks fully within the range are deleted; partially covered blocks are skipped.
+// This operation is idempotent — deleting non-existent blocks is not an error.
+func (m *Manager) Discard(name string, off, length int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	vol, err := m.getVolUnlocked(name)
+	if err != nil {
+		return err
+	}
+
+	bs := int64(vol.BlockSize)
+	firstBlock := (off + bs - 1) / bs // ceil(off/bs)
+	lastBlock := (off+length)/bs - 1  // floor((off+length)/bs) - 1
+
+	if lastBlock < firstBlock {
+		return nil // no fully-covered blocks
+	}
+
+	freed := int64(0)
+	for blkNum := firstBlock; blkNum <= lastBlock; blkNum++ {
+		if err := m.backend.DeleteObject(volumeBucketName, blockKey(name, blkNum)); err == nil {
+			freed++
+		}
+	}
+
+	if freed > 0 && vol.AllocatedBlocks >= 0 {
+		if vol.AllocatedBlocks-freed < 0 {
+			vol.AllocatedBlocks = 0
+		} else {
+			vol.AllocatedBlocks -= freed
+		}
+		data, err := marshalVolume(vol)
+		if err == nil {
+			m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+		}
+	}
+	return nil
+}
+
 // getVolUnlocked returns the cached volume pointer (caller must hold m.mu).
 // On cache miss, loads from storage and populates the cache.
 func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
