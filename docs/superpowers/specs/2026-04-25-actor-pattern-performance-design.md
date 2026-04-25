@@ -485,18 +485,177 @@ Phase 5는 규모(1406 lines), Raft 안전성 요구사항(persistLogEntries com
 
 ## 성능 측정 계획
 
-각 Phase 완료 후 다음 기준으로 측정:
+각 Phase는 **구현 전 baseline 측정 → 구현 → 구현 후 측정 → 비교** 순서로 진행한다.  
+결과는 PR 본문에 before/after 수치로 기록.
 
-| Phase | 측정 항목 | 측정 방법 |
-|-------|----------|----------|
-| 1 (EC) | EC write latency p50/p99 | `BenchmarkPutObjectEC` before/after |
-| 1 (EC) | Object PUT throughput (RPS) | k6 S3 PUT 벤치마크 |
-| 2 (Migration) | race detector 클린 여부 | `go test -race` |
-| 3 (Registry) | InvalidateAll 소요 시간 | 단위 테스트 타이머 |
-| 4 (Balancer) | race detector 클린 여부 | `go test -race` |
+---
 
-Phase 1 기대값: EC write latency 최대 6x 감소 (6 shard 기준 직렬→병렬).  
-정량 baseline은 구현 전 `BenchmarkPutObjectEC`로 측정 후 기록.
+### Phase 1: EC 병렬 팬아웃
+
+**측정 대상**: EC write/read latency, 전체 PUT/GET throughput
+
+**Benchmark 추가** (`internal/cluster/backend_bench_test.go` 신규):
+
+```go
+// 6-shard(4+2) EC write latency 측정
+func BenchmarkPutObjectEC(b *testing.B) { ... }
+
+// 6-shard EC read latency (k-of-n fast path 포함)
+func BenchmarkGetObjectEC(b *testing.B) { ... }
+```
+
+**실행 명령**:
+```bash
+# baseline (구현 전 master에서)
+go test -bench=BenchmarkPutObjectEC -benchtime=10s -count=5 ./internal/cluster/ | tee bench_before.txt
+
+# 구현 후
+go test -bench=BenchmarkPutObjectEC -benchtime=10s -count=5 ./internal/cluster/ | tee bench_after.txt
+
+# 비교
+benchstat bench_before.txt bench_after.txt
+```
+
+**k6 S3 통합 측정** (단일 노드 클러스터, EC 활성화):
+```bash
+# 구현 전/후 동일 조건
+k6 run --vus=32 --duration=60s tests/k6/s3_put_get.js
+```
+
+**기대 결과**:
+- EC write latency p50: 직렬 Σ → 병렬 max (이론상 최대 6x 감소)
+- EC write latency p99: 네트워크 지터 영향, 2-4x 범위 예상
+- PUT throughput: 비례 증가
+
+---
+
+### Phase 2: MigrationExecutor Actor
+
+**측정 대상**: mutex 경합 제거 여부, goroutine leak 없음
+
+고부하 워크로드에서 mutex contention 자체는 migration이 드문 경로라 latency 영향이 작다.  
+이 Phase의 측정 초점은 **정확성**(race detector, leak) + **Actor 채널 처리 속도**.
+
+**Benchmark 추가** (`migration_executor_bench_test.go`):
+```go
+// Actor 채널 왕복 latency (Submit → admission reply)
+func BenchmarkMigrationExecutorSubmit(b *testing.B) {
+    e := NewMigrationExecutor()
+    defer e.Stop()
+    b.RunParallel(func(pb *testing.PB) {
+        for pb.Next() {
+            _ = e.Submit(context.Background(), MigrationTask{...})
+        }
+    })
+}
+```
+
+**실행 명령**:
+```bash
+go test -bench=BenchmarkMigrationExecutorSubmit -benchtime=5s -count=3 ./internal/cluster/
+go test -race -count=3 ./internal/cluster/
+```
+
+**기대 결과**:
+- Submit latency: mutex 버전 대비 동등하거나 소폭 증가 (Actor 채널 왕복 오버헤드)
+- race detector: 완전 클린
+- goroutine leak: 없음 (`goleak` 확인)
+
+---
+
+### Phase 3: Registry.InvalidateAll
+
+**측정 대상**: Raft Apply 경로에서 InvalidateAll 소요 시간, Apply throughput
+
+**Benchmark 추가** (`invalidator_bench_test.go`):
+```go
+// N개 VFS 등록 시 InvalidateAll 소요 시간
+func BenchmarkInvalidateAll(b *testing.B) {
+    for _, n := range []int{1, 5, 10, 20} {
+        b.Run(fmt.Sprintf("vfs=%d", n), func(b *testing.B) {
+            r := NewRegistry()
+            for i := range n {
+                r.Register(fmt.Sprintf("vfs%d", i), &slowInvalidator{delay: 5 * time.Millisecond})
+            }
+            b.ResetTimer()
+            for range b.N {
+                r.InvalidateAll(context.Background(), "key")
+            }
+        })
+    }
+}
+```
+
+**실행 명령**:
+```bash
+go test -bench=BenchmarkInvalidateAll -benchtime=5s -count=3 ./internal/cluster/ | tee bench_invalidate_after.txt
+benchstat bench_invalidate_before.txt bench_invalidate_after.txt
+```
+
+**기대 결과**:
+- VFS 1개: 동등 (goroutine spawn 오버헤드로 미세 증가 가능)
+- VFS 5개: 약 5x 빠름 (5 × 5ms → 5ms)
+- VFS 10개: 약 10x 빠름 (Apply loop 해방)
+
+---
+
+### Phase 4: BalancerProposer
+
+**측정 대상**: Stats() 채널 왕복 latency (Prometheus scrape 경로)
+
+Prometheus는 기본 15초 간격으로 scrape하므로 실사용 영향은 미미.  
+측정 목적은 Actor 전환 후 회귀가 없음을 확인하는 것.
+
+**Benchmark 추가** (`balancer_bench_test.go`):
+```go
+func BenchmarkBalancerStats(b *testing.B) {
+    bp := NewBalancerProposer(...)
+    defer bp.Stop()
+    b.RunParallel(func(pb *testing.PB) {
+        for pb.Next() {
+            _, _ = bp.Stats(context.Background())
+        }
+    })
+}
+```
+
+**실행 명령**:
+```bash
+go test -bench=BenchmarkBalancerStats -benchtime=5s -count=3 ./internal/cluster/
+go test -race -count=3 ./internal/cluster/
+```
+
+**기대 결과**:
+- Stats() latency: < 100µs (채널 왕복 + goroutine schedule)
+- mutex 버전 대비: 동등하거나 소폭 증가 (경합 없는 mutex는 매우 빠르므로)
+- race detector: 클린
+
+---
+
+### 전체 측정 요약
+
+| Phase | 핵심 지표 | 기대값 | 측정 도구 |
+|-------|----------|--------|----------|
+| 1 | EC write latency p50 | -50% ~ -83% | `benchstat` |
+| 1 | EC write latency p99 | -50% ~ -75% | `benchstat` |
+| 1 | PUT throughput (RPS) | +50% ~ +5x | k6 |
+| 2 | Submit latency | 동등 ± 10% | `benchstat` |
+| 2 | race detector | 클린 | `go test -race` |
+| 3 | InvalidateAll (10 VFS) | -90% | `benchstat` |
+| 3 | race detector | 클린 | `go test -race` |
+| 4 | Stats() latency | < 100µs | `benchstat` |
+| 4 | race detector | 클린 | `go test -race` |
+
+**PR 형식**: 각 Phase PR에 아래 템플릿으로 측정 결과 첨부:
+
+```
+## 성능 측정 결과
+
+| 지표 | Before | After | Delta |
+|------|--------|-------|-------|
+| EC write latency p50 | Xms | Xms | -X% |
+| EC write latency p99 | Xms | Xms | -X% |
+```
 
 ---
 
