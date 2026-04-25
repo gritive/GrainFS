@@ -21,10 +21,11 @@ type objectMeta struct {
 	ContentType  string
 	ETag         string
 	LastModified int64
-	ACL          uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
-	RingVersion  uint64 // ring version used at write time (0 = pre-ring legacy)
-	ECData       uint8  // EC k (data shards)
-	ECParity     uint8  // EC m (parity shards)
+	ACL          uint8    // s3auth.ACLGrant bitmask; 0 = private (backward compat)
+	RingVersion  uint64   // ring version used at write time (0 = pre-ring legacy)
+	ECData       uint8    // EC k (data shards)
+	ECParity     uint8    // EC m (parity shards)
+	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -104,6 +105,10 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	ctOff := b.CreateString(c.ContentType)
 	etagOff := b.CreateString(c.ETag)
 	vidOff := b.CreateString(c.VersionID)
+	var nodeIDsOff flatbuffers.UOffsetT
+	if len(c.NodeIDs) > 0 {
+		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
+	}
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -115,6 +120,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddRingVersion(b, uint64(c.RingVersion))
 	clusterpb.PutObjectMetaCmdAddEcData(b, c.ECData)
 	clusterpb.PutObjectMetaCmdAddEcParity(b, c.ECParity)
+	if nodeIDsOff != 0 {
+		clusterpb.PutObjectMetaCmdAddNodeIds(b, nodeIDsOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -124,6 +132,13 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 	})
 	if err != nil {
 		return PutObjectMetaCmd{}, err
+	}
+	var nodeIDs []string
+	if n := t.NodeIdsLength(); n > 0 {
+		nodeIDs = make([]string, n)
+		for i := range nodeIDs {
+			nodeIDs[i] = string(t.NodeIds(i))
+		}
 	}
 	return PutObjectMetaCmd{
 		Bucket:      string(t.Bucket()),
@@ -136,6 +151,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		RingVersion: RingVersion(t.RingVersion()),
 		ECData:      t.EcData(),
 		ECParity:    t.EcParity(),
+		NodeIDs:     nodeIDs,
 	}, nil
 }
 
@@ -330,6 +346,21 @@ func decodeDeleteBucketPolicyCmd(data []byte) (DeleteBucketPolicyCmd, error) {
 	return DeleteBucketPolicyCmd{Bucket: string(t.Bucket())}, nil
 }
 
+// buildStringVector encodes a []string as a FlatBuffers vector using the
+// provided startVector function (e.g. clusterpb.ObjectMetaStartNodeIdsVector).
+// All strings must be created BEFORE calling Start on the parent table.
+func buildStringVector(b *flatbuffers.Builder, ss []string, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	offs := make([]flatbuffers.UOffsetT, len(ss))
+	for i, s := range ss {
+		offs[i] = b.CreateString(s)
+	}
+	startVec(b, len(ss))
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(ss))
+}
+
 // --- ObjectMeta codec ---
 
 func marshalObjectMeta(m objectMeta) ([]byte, error) {
@@ -337,6 +368,10 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 	etagOff := b.CreateString(m.ETag)
+	var nodeIDsOff flatbuffers.UOffsetT
+	if len(m.NodeIDs) > 0 {
+		nodeIDsOff = buildStringVector(b, m.NodeIDs, clusterpb.ObjectMetaStartNodeIdsVector)
+	}
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -347,6 +382,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	clusterpb.ObjectMetaAddRingVersion(b, m.RingVersion)
 	clusterpb.ObjectMetaAddEcData(b, m.ECData)
 	clusterpb.ObjectMetaAddEcParity(b, m.ECParity)
+	if nodeIDsOff != 0 {
+		clusterpb.ObjectMetaAddNodeIds(b, nodeIDsOff)
+	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -356,6 +394,13 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 	})
 	if err != nil {
 		return objectMeta{}, fmt.Errorf("unmarshal ObjectMeta: %w", err)
+	}
+	var nodeIDs []string
+	if n := t.NodeIdsLength(); n > 0 {
+		nodeIDs = make([]string, n)
+		for i := range nodeIDs {
+			nodeIDs[i] = string(t.NodeIds(i))
+		}
 	}
 	return objectMeta{
 		Key:          string(t.Key()),
@@ -367,6 +412,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		RingVersion:  t.RingVersion(),
 		ECData:       t.EcData(),
 		ECParity:     t.EcParity(),
+		NodeIDs:      nodeIDs,
 	}, nil
 }
 

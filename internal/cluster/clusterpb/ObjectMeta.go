@@ -137,8 +137,25 @@ func (rcv *ObjectMeta) MutateEcParity(n byte) bool {
 	return rcv._tab.MutateByteSlot(20, n)
 }
 
+func (rcv *ObjectMeta) NodeIds(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *ObjectMeta) NodeIdsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func ObjectMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(10)
 }
 func ObjectMetaAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -166,6 +183,12 @@ func ObjectMetaAddEcData(builder *flatbuffers.Builder, ecData byte) {
 }
 func ObjectMetaAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
 	builder.PrependByteSlot(8, ecParity, 0)
+}
+func ObjectMetaAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(nodeIds), 0)
+}
+func ObjectMetaStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func ObjectMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

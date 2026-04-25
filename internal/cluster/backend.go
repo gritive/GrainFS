@@ -643,8 +643,9 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	etag := hex.EncodeToString(h[:])
 	now := time.Now().Unix()
 
-	// Commit metadata. RingVersion + ECData/ECParity stored so reads can
-	// recompute placement deterministically without a separate placement record.
+	// Commit metadata. RingVersion + ECData/ECParity + NodeIDs stored so reads
+	// can reconstruct shards without a separate placement record (NodeIDs fallback
+	// is used when RingVersion==0 and no placement record exists).
 	// On failure, best-effort cleanup of orphaned shards.
 	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      bucket,
@@ -657,6 +658,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 		RingVersion: ringVer,
 		ECData:      uint8(effectiveCfg.DataShards),
 		ECParity:    uint8(effectiveCfg.ParityShards),
+		NodeIDs:     placement,
 	}); merr != nil {
 		go b.deleteShardsAsync(placement, shardKey)
 		return nil, merr
@@ -703,6 +705,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 		// 신 경로: 오브젝트 메타에서 RingVersion을 읽어 배치를 재계산한다.
 		var metaRingVersion RingVersion
 		var metaECData, metaECParity uint8
+		var metaNodeIDs []string
 		_ = b.db.View(func(txn *badger.Txn) error {
 			var dbKey []byte
 			if obj.VersionID == "" {
@@ -722,6 +725,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 				metaRingVersion = RingVersion(m.RingVersion)
 				metaECData = m.ECData
 				metaECParity = m.ECParity
+				metaNodeIDs = m.NodeIDs
 				return nil
 			})
 		})
@@ -745,7 +749,18 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 			if ecErr == nil {
 				return io.NopCloser(bytes.NewReader(data)), obj, nil
 			}
-			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ec reconstruct failed, falling back to N× path")
+			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ec reconstruct failed, trying NodeIDs-from-metadata path")
+		}
+
+		// NodeIDs-from-metadata fallback: placement stored in PutObjectMetaCmd
+		// when CmdPutShardPlacement is a no-op (no ring yet).
+		if metaECData > 0 && len(metaNodeIDs) > 0 {
+			rec := PlacementRecord{Nodes: metaNodeIDs, K: int(metaECData), M: int(metaECParity)}
+			data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, rec)
+			if ecErr == nil {
+				return io.NopCloser(bytes.NewReader(data)), obj, nil
+			}
+			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("NodeIDs-from-metadata ec reconstruct failed, falling back to N× path")
 		}
 	}
 
@@ -842,7 +857,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		shardKey = key + "/" + versionID
 	}
 
-	ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey)
+	ecRec, lookupErr := b.lookupPlacementWithFallback(bucket, shardKey, versionID)
 	if lookupErr != nil {
 		return fmt.Errorf("lookup shard placement: %w", lookupErr)
 	}

@@ -167,6 +167,7 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		RingVersion:  uint64(c.RingVersion),
 		ECData:       c.ECData,
 		ECParity:     c.ECParity,
+		NodeIDs:      c.NodeIDs,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)

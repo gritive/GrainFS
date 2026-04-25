@@ -65,6 +65,7 @@ type PutObjectMetaCmd struct {
 	RingVersion RingVersion // 쓰기에 사용된 Ring 버전 (0 = 링 사용 전 레거시)
 	ECData      uint8       // EC k (data shards)
 	ECParity    uint8       // EC m (parity shards)
+	NodeIDs     []string    // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
 }
 
 // SetRingCmd는 컨시스턴트 해시 링을 FSM에 커밋하는 명령이다.

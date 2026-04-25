@@ -27,6 +27,7 @@ table PutObjectMetaCmd {
   ring_version:uint64 = 0;
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
+  node_ids:[string];
 }
 
 table DeleteObjectCmd {
@@ -87,6 +88,7 @@ table ObjectMeta {
   ring_version:uint64 = 0;
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
+  node_ids:[string];
 }
 
 table SetBucketVersioningCmd {
