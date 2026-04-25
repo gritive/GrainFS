@@ -32,18 +32,16 @@ func TestVFSInvalidate(t *testing.T) {
 	assert.NotNil(t, info1)
 
 	// Verify cache hit by checking stat cache directly
-	fs.cacheMu.RLock()
-	_, cached := fs.statCache["file.txt"]
-	fs.cacheMu.RUnlock()
+	m := fs.statCache.Load()
+	_, cached := (*m)["file.txt"]
 	assert.True(t, cached, "stat cache should be populated after Stat()")
 
 	// Call Invalidate (simulating Raft OnApply callback)
 	fs.Invalidate("test-volume", "file.txt")
 
 	// Verify stat cache was cleared
-	fs.cacheMu.RLock()
-	_, stillCached := fs.statCache["file.txt"]
-	fs.cacheMu.RUnlock()
+	m2 := fs.statCache.Load()
+	_, stillCached := (*m2)["file.txt"]
 	assert.False(t, stillCached, "stat cache should be cleared after Invalidate()")
 }
 
@@ -69,9 +67,8 @@ func TestVFSInvalidateDifferentBucket(t *testing.T) {
 	fs.Invalidate("other-volume", "file.txt")
 
 	// Verify cache still present
-	fs.cacheMu.RLock()
-	cached := fs.statCache["file.txt"]
-	fs.cacheMu.RUnlock()
+	m := fs.statCache.Load()
+	cached := (*m)["file.txt"]
 	assert.NotNil(t, cached, "stat cache should NOT be cleared for different bucket")
 }
 
