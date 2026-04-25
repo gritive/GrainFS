@@ -7,3 +7,5 @@ server.test
 bin/grainfs
 .gstack/
 *.fbs.stamp
+benchmarks/report.json
+benchmarks/profiles/
