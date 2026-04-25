@@ -44,6 +44,24 @@ func TestVolumeCodecRoundTrip(t *testing.T) {
 				BlockSize: 8192,
 			},
 		},
+		{
+			name: "untracked allocated_blocks (-1 sentinel)",
+			vol: Volume{
+				Name:            "untracked",
+				Size:            4096,
+				BlockSize:       4096,
+				AllocatedBlocks: -1,
+			},
+		},
+		{
+			name: "tracked allocated_blocks",
+			vol: Volume{
+				Name:            "tracked",
+				Size:            4096,
+				BlockSize:       4096,
+				AllocatedBlocks: 42,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -62,6 +80,7 @@ func TestVolumeCodecRoundTrip(t *testing.T) {
 			assert.Equal(t, original.Name, got.Name)
 			assert.Equal(t, original.Size, got.Size)
 			assert.Equal(t, original.BlockSize, got.BlockSize)
+			assert.Equal(t, original.AllocatedBlocks, got.AllocatedBlocks)
 		})
 	}
 }

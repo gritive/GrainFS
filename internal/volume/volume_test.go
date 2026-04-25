@@ -18,10 +18,10 @@ func setupManager(t *testing.T) *Manager {
 
 func TestCreateVolume(t *testing.T) {
 	tests := []struct {
-		name     string
-		volName  string
-		size     int64
-		wantErr  bool
+		name    string
+		volName string
+		size    int64
+		wantErr bool
 	}{
 		{"basic create", "test-vol", 1024 * 1024, false},
 		{"small volume", "small", 4096, false},
@@ -214,5 +214,21 @@ func TestReadAtEOF(t *testing.T) {
 
 	buf := make([]byte, 10)
 	_, err = mgr.ReadAt("eof-test", buf, 100) // exactly at end
-	assert.Error(t, err) // should be io.EOF
+	assert.Error(t, err)                      // should be io.EOF
+}
+
+func TestVolumeAllocatedBytes(t *testing.T) {
+	tests := []struct {
+		allocatedBlocks int64
+		blockSize       int
+		want            int64
+	}{
+		{-1, 4096, -1},   // untracked
+		{0, 4096, 0},     // empty
+		{3, 4096, 12288}, // 3 blocks * 4096
+	}
+	for _, tt := range tests {
+		vol := &Volume{AllocatedBlocks: tt.allocatedBlocks, BlockSize: tt.blockSize}
+		assert.Equal(t, tt.want, vol.AllocatedBytes())
+	}
 }

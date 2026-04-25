@@ -18,20 +18,48 @@ const (
 
 // Volume represents a virtual block device backed by object storage.
 type Volume struct {
-	Name      string
-	Size      int64
-	BlockSize int
+	Name            string
+	Size            int64
+	BlockSize       int
+	AllocatedBlocks int64 // -1=untracked, 0=empty, >0=block count
+}
+
+// AllocatedBytes returns the number of bytes allocated in backing storage.
+// Returns -1 if the volume was created before allocation tracking was introduced.
+func (v *Volume) AllocatedBytes() int64 {
+	if v.AllocatedBlocks < 0 {
+		return -1
+	}
+	return v.AllocatedBlocks * int64(v.BlockSize)
+}
+
+// ManagerOptions configures optional Manager behaviour.
+type ManagerOptions struct {
+	// PoolQuota is the maximum total allocated bytes across all volumes.
+	// 0 means unlimited (default).
+	PoolQuota int64
 }
 
 // Manager manages volumes on top of a storage.Backend.
 type Manager struct {
 	backend storage.Backend
-	mu      sync.RWMutex
+	mu      sync.Mutex         // 단일 뮤텍스: read-modify-write 원자성 보장
+	volumes map[string]*Volume // 인메모리 캐시
+	opts    ManagerOptions
 }
 
 // NewManager creates a new volume manager.
 func NewManager(backend storage.Backend) *Manager {
-	return &Manager{backend: backend}
+	return NewManagerWithOptions(backend, ManagerOptions{})
+}
+
+// NewManagerWithOptions creates a new volume manager with the given options.
+func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manager {
+	return &Manager{
+		backend: backend,
+		volumes: make(map[string]*Volume),
+		opts:    opts,
+	}
 }
 
 // Create creates a new volume with the given name and size in bytes.
@@ -68,8 +96,8 @@ func (m *Manager) Create(name string, sizeBytes int64) (*Volume, error) {
 
 // Get returns volume metadata.
 func (m *Manager) Get(name string) (*Volume, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	rc, _, err := m.backend.GetObject(volumeBucketName, metaKey(name))
 	if err != nil {
@@ -113,8 +141,8 @@ func (m *Manager) Delete(name string) error {
 
 // List returns all volumes.
 func (m *Manager) List() ([]*Volume, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	if err := m.backend.HeadBucket(volumeBucketName); err != nil {
 		return nil, nil // no volumes bucket yet
@@ -150,8 +178,8 @@ func (m *Manager) List() ([]*Volume, error) {
 
 // ReadAt reads len(p) bytes from the volume starting at byte offset off.
 func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	vol, err := m.getVolUnlocked(name)
 	if err != nil {
