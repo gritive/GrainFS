@@ -2,11 +2,11 @@ package scrubber
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -230,7 +230,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 
 	buckets, err := s.backend.ListBuckets()
 	if err != nil {
-		slog.Warn("scrub: list buckets failed", "err", err)
+		log.Warn().Err(err).Msg("scrub: list buckets failed")
 		cycleSpan.RecordError(err)
 		cycleSpan.SetStatus(codes.Error, "list buckets failed")
 		return
@@ -243,7 +243,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	if checker, ok := s.emitter.(SigningHealthChecker); ok {
 		if !checker.SigningHealthy() {
 			signingOK = false
-			slog.Warn("scrub: signing unavailable, skipping repairs this cycle")
+			log.Warn().Msg("scrub: signing unavailable, skipping repairs this cycle")
 		}
 	}
 	// sessionFinalizer is non-nil only when signing is available.
@@ -266,7 +266,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	for _, bucket := range buckets {
 		objCh, err := s.backend.ScanObjects(bucket)
 		if err != nil {
-			slog.Warn("scrub: scan objects failed", "bucket", bucket, "err", err)
+			log.Warn().Str("bucket", bucket).Err(err).Msg("scrub: scan objects failed")
 			continue
 		}
 		for rec := range objCh {
@@ -348,7 +348,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			if rerr != nil {
 				metrics.ECDegradedTotal.Inc()
 				atomic.AddInt64(&s.stats.Unrepairable, 1)
-				slog.Error("scrub: unrepairable", "bucket", rec.Bucket, "key", rec.Key, "err", rerr)
+				log.Error().Str("bucket", rec.Bucket).Str("key", rec.Key).Err(rerr).Msg("scrub: unrepairable")
 				continue
 			}
 			metrics.ScrubRepairedTotal.Inc()
@@ -363,7 +363,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			// gone would silently drop the receipt.
 			if sessionFinalizer != nil {
 				if checker, ok := s.emitter.(SigningHealthChecker); ok && !checker.SigningHealthy() {
-					slog.Warn("scrub: signing unavailable mid-cycle, receipt dropped", "correlation_id", correlationID)
+					log.Warn().Str("correlation_id", correlationID).Msg("scrub: signing unavailable mid-cycle, receipt dropped")
 				} else {
 					sessionFinalizer.FinalizeSession(correlationID)
 				}
@@ -450,7 +450,7 @@ func (s *BackgroundScrubber) runMigration(ctx context.Context, migrator Migrator
 	for _, bucket := range buckets {
 		plainCh, err := migrator.ScanPlainObjects(bucket)
 		if err != nil {
-			slog.Warn("scrub: scan plain objects failed", "bucket", bucket, "err", err)
+			log.Warn().Str("bucket", bucket).Err(err).Msg("scrub: scan plain objects failed")
 			continue
 		}
 		for rec := range plainCh {
@@ -474,13 +474,13 @@ func (s *BackgroundScrubber) runMigration(ctx context.Context, migrator Migrator
 			}
 			if err := migrator.MigratePlainToEC(rec); err != nil {
 				metrics.ScrubPlainMigrateErrorTotal.Inc()
-				slog.Error("scrub: plain→EC migration failed", "bucket", rec.Bucket, "key", rec.Key, "err", err)
+				log.Error().Str("bucket", rec.Bucket).Str("key", rec.Key).Err(err).Msg("scrub: plain→EC migration failed")
 				continue
 			}
 			metrics.ScrubPlainMigratedTotal.Inc()
 			atomic.AddInt64(&s.stats.PlainMigrated, 1)
 			migrateCount++
-			slog.Info("scrub: plain→EC migrated", "bucket", rec.Bucket, "key", rec.Key)
+			log.Info().Str("bucket", rec.Bucket).Str("key", rec.Key).Msg("scrub: plain→EC migrated")
 		}
 	}
 }

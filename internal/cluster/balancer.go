@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"io/fs"
-	"log/slog"
 	"math"
 	"path/filepath"
 	"sort"
@@ -11,8 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
-"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // migrationInflightTTL is the duration a proposed migration is tracked to prevent
@@ -54,7 +55,7 @@ func (p *LocalObjectPicker) PickObjectOnSrcNode(_ string, skipIDs map[string]boo
 
 	_ = filepath.WalkDir(p.shardsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			slog.Warn("LocalObjectPicker: WalkDir error", "path", path, "err", err)
+			log.Warn().Str("path", path).Err(err).Msg("LocalObjectPicker: WalkDir error")
 			return nil
 		}
 		if found {
@@ -156,20 +157,20 @@ type RaftBalancerNode interface {
 // BalancerProposer monitors NodeStatsStore and proposes CmdMigrateShard when
 // disk usage is imbalanced across nodes. Only the Raft leader runs proposals.
 type BalancerProposer struct {
-	nodeID          string
-	store           *NodeStatsStore
-	node            RaftBalancerNode
-	cfg             BalancerConfig
-	mu              sync.Mutex           // protects active, inflight; cbs written by syncCB (ticker goroutine only)
-	active          bool                 // hysteresis state: true once trigger fired, false after stop threshold
-	startedAt       time.Time
-	picker          ObjectPicker         // nil = no proposals until SetObjectPicker is called
-	inflight        map[string]time.Time // proposed migrations not yet committed; keyed by task.id()
-	cbs             map[string]*circuitBreaker // per-peer CBs; keyed by peer nodeID
-	migQueue        *MigrationPriorityQueue   // ordered src candidates
-	stickyDonor     string                    // last used src node
-	stickyUntil     time.Time                 // switch donor only after this time
-	logger          *slog.Logger
+	nodeID      string
+	store       *NodeStatsStore
+	node        RaftBalancerNode
+	cfg         BalancerConfig
+	mu          sync.Mutex // protects active, inflight; cbs written by syncCB (ticker goroutine only)
+	active      bool       // hysteresis state: true once trigger fired, false after stop threshold
+	startedAt   time.Time
+	picker      ObjectPicker               // nil = no proposals until SetObjectPicker is called
+	inflight    map[string]time.Time       // proposed migrations not yet committed; keyed by task.id()
+	cbs         map[string]*circuitBreaker // per-peer CBs; keyed by peer nodeID
+	migQueue    *MigrationPriorityQueue    // ordered src candidates
+	stickyDonor string                     // last used src node
+	stickyUntil time.Time                  // switch donor only after this time
+	logger      zerolog.Logger
 }
 
 // NewBalancerProposer creates a BalancerProposer with the given config.
@@ -193,7 +194,7 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 		inflight:  make(map[string]time.Time),
 		cbs:       make(map[string]*circuitBreaker),
 		migQueue:  NewMigrationPriorityQueue(cfg.MigrationProposalRate),
-		logger:    slog.Default().With("component", "balancer"),
+		logger:    log.With().Str("component", "balancer").Logger(),
 	}
 }
 
@@ -249,7 +250,7 @@ func (p *BalancerProposer) selectDstNode() (string, bool) {
 	}
 	if allOpen && len(all) > 1 {
 		metrics.BalancerCBAllOpenTotal.Inc()
-		p.logger.Warn("balancer: all dst circuit breakers open, skipping migration tick")
+		p.logger.Warn().Msg("balancer: all dst circuit breakers open, skipping migration tick")
 		return "", false
 	}
 	if lightest == "" {
@@ -306,7 +307,7 @@ func (p *BalancerProposer) tickOnce() {
 	if time.Since(p.startedAt) >= p.cfg.LeaderTenureMin {
 		if _, overloaded := selectPeerByLoad(p.store, p.nodeID, p.cfg.LeaderLoadThreshold); overloaded {
 			if err := p.node.TransferLeadership(); err != nil {
-				p.logger.Warn("balancer: TransferLeadership failed", "err", err)
+				p.logger.Warn().Err(err).Msg("balancer: TransferLeadership failed")
 			} else {
 				metrics.BalancerLeaderTransfersTotal.Inc()
 			}
@@ -469,11 +470,11 @@ func (p *BalancerProposer) proposeMigration(src, dst string) {
 		DstNode:   dst,
 	})
 	if err != nil {
-		p.logger.Error("balancer: marshal MigrateShardCmd", "err", err)
+		p.logger.Error().Err(err).Msg("balancer: marshal MigrateShardCmd")
 		return
 	}
 	if err := p.node.Propose(outer); err != nil {
-		p.logger.Warn("balancer: propose failed", "src", src, "dst", dst, "err", err)
+		p.logger.Warn().Str("src", src).Str("dst", dst).Err(err).Msg("balancer: propose failed")
 		return
 	}
 	metrics.BalancerMigrationsProposedTotal.Inc()

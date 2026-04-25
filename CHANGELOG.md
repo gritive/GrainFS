@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.4.26] - 2026-04-25
+
+### Changed
+
+- **zerolog 전면 마이그레이션** (`internal/`, `cmd/`): `log/slog` → `github.com/rs/zerolog` v1.35.1.
+  - 전체 48개 파일, 구조화 로그 필드 일관성 확보 (`Str`, `Int`, `Err` 등)
+  - SSE 대시보드 팬아웃 재구현: `BroadcastHandler(slog)` → `broadcastWriter(zerolog.LevelWriter)`
+  - `HasSubscribers()` atomic guard: 무구독자 시 브로드캐스트 alloc 제로
+  - `WriteLevel()` InfoLevel 필터: Debug/Trace 로그가 비인증 `/api/events` SSE로 누출되지 않음
+  - `broadcastLoggerOnce sync.Once`: 다중 Server 인스턴스(테스트 등)에서 global logger 이중 래핑 방지
+  - `internal/server/slog_handler.go` 삭제 (BroadcastHandler 제거)
+
 ## [0.0.4.25] - 2026-04-24
 
 ### Performance

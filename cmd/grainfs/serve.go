@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"crypto/rand"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -125,9 +126,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	otelSampleRate, _ := cmd.Flags().GetFloat64("otel-sample-rate")
 	otelShutdown, err := grainotel.Init(ctx, otelEndpoint, otelSampleRate)
 	if err != nil {
-		slog.Warn("otel: init failed, tracing disabled", "err", err)
+		log.Warn().Err(err).Msg("otel: init failed, tracing disabled")
 	} else if otelEndpoint != "" {
-		slog.Info("otel: tracing enabled", "endpoint", otelEndpoint, "sample_rate", otelSampleRate)
+		log.Info().Str("endpoint", otelEndpoint).Float64("sample_rate", otelSampleRate).Msg("otel: tracing enabled")
 		defer func() { _ = otelShutdown(context.Background()) }()
 	}
 
@@ -140,7 +141,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
-		slog.Info("auto-generated node ID", "component", "server", "node_id", nodeID)
+		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
 	}
 
 	// strings.Split always yields at least one element — empty input or
@@ -184,11 +185,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			// Distinguish "real data" from "empty dir someone pre-created"
 			// by checking for any entries; empty → skip migration.
 			if entries, err := os.ReadDir(metaDir); err == nil && len(entries) > 0 {
-				slog.Info("auto-migrating local metadata to cluster format", "component", "migrate")
+				log.Info().Str("component", "migrate").Msg("auto-migrating local metadata to cluster format")
 				if err := cluster.MigrateLegacyMetaToCluster(dataDir, nodeID); err != nil {
 					return fmt.Errorf("auto-migrate: %w", err)
 				}
-				slog.Info("auto-migration complete", "component", "migrate")
+				log.Info().Str("component", "migrate").Msg("auto-migration complete")
 			}
 		}
 	}
@@ -237,7 +238,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Connect to all peers
 	for _, peer := range peers {
 		if err := quicTransport.Connect(ctx, peer); err != nil {
-			slog.Warn("failed to connect to peer (will retry lazily)", "peer", peer, "error", err)
+			log.Warn().Str("peer", peer).Err(err).Msg("failed to connect to peer (will retry lazily)")
 		}
 	}
 
@@ -279,9 +280,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		DataShards:   clusterECData,
 		ParityShards: clusterECParity,
 	})
-	slog.Info("cluster EC configured", "k", clusterECData, "m", clusterECParity,
-		"active", len(allNodes) >= cluster.MinECNodes,
-		"cluster_size", len(allNodes))
+	log.Info().Int("k", clusterECData).Int("m", clusterECParity).
+		Bool("active", len(allNodes) >= cluster.MinECNodes).
+		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)
@@ -291,9 +292,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Restore from snapshot on startup
 	snapIdx, err := snapMgr.Restore()
 	if err != nil {
-		slog.Warn("snapshot restore failed", "error", err)
+		log.Warn().Err(err).Msg("snapshot restore failed")
 	} else if snapIdx > 0 {
-		slog.Info("restored from snapshot", "index", snapIdx)
+		log.Info().Uint64("index", snapIdx).Msg("restored from snapshot")
 	}
 
 	// Wrapping chain (inner → outer): distBackend → packblob → cachedBackend →
@@ -311,7 +312,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			return fmt.Errorf("failed to initialize packed blob: %w", err)
 		}
 		inner = pb
-		slog.Info("packed blob storage enabled", "threshold", packThreshold)
+		log.Info().Int("threshold", packThreshold).Msg("packed blob storage enabled")
 	}
 
 	// Wrap with LRU read cache. Raft FSM-based invalidation ensures cache
@@ -338,7 +339,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		var err error
 		balancerProposer, gossipReceiver, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
 		if err != nil {
-			slog.Warn("balancer start failed", "err", err)
+			log.Warn().Err(err).Msg("balancer start failed")
 		}
 	}
 
@@ -354,7 +355,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		standaloneStats := cluster.NewNodeStatsStore(3 * bGossipInterval)
 		gossipReceiver = cluster.NewGossipReceiver(quicTransport, standaloneStats)
 		go gossipReceiver.Run(ctx)
-		slog.Info("gossip receiver started (receipt-only, balancer disabled)", "component", "gossip")
+		log.Info().Str("component", "gossip").Msg("gossip receiver started (receipt-only, balancer disabled)")
 	}
 
 	var backend storage.Backend = cachedBackend
@@ -382,7 +383,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			return fmt.Errorf("init upstream: %w", err)
 		}
 		backend = pullthrough.NewBackend(backend, up)
-		slog.Info("pull-through cache enabled", "upstream", upstreamEndpoint)
+		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
 
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
@@ -395,14 +396,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			snapDir := filepath.Join(dataDir, "snapshots")
 			objSnapMgr, err := snapshot.NewManager(snapDir, snapshotable, walDir)
 			if err != nil {
-				slog.Warn("auto-snapshot init failed", "err", err)
+				log.Warn().Err(err).Msg("auto-snapshot init failed")
 			} else {
 				as := snapshot.NewAutoSnapshotter(objSnapMgr, snapInterval, snapRetain)
 				as.Start(ctx)
-				slog.Info("auto-snapshot enabled", "interval", snapInterval, "retain", snapRetain)
+				log.Info().Dur("interval", snapInterval).Int("retain", snapRetain).Msg("auto-snapshot enabled")
 			}
 		} else {
-			slog.Debug("auto-snapshot skipped: backend does not implement Snapshotable")
+			log.Debug().Msg("auto-snapshot skipped: backend does not implement Snapshotable")
 		}
 	}
 
@@ -426,15 +427,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if len(peers) > 0 {
 			// Cluster mode with peers: joining an existing cluster.
 			// Default bucket may or may not exist; either way, follower can't create it.
-			slog.Warn("default bucket creation failed on follower (may already exist)", "error", err)
+			log.Warn().Err(err).Msg("default bucket creation failed on follower (may already exist)")
 		} else {
 			// Single-node mode: default bucket must be created.
 			return fmt.Errorf("create default bucket: %w", err)
 		}
 	}
 
-	slog.Info("server started", "component", "server", "version", version,
-		"node_id", nodeID, "raft_addr", raftAddr, "peers", peers, "addr", addr, "data", dataDir)
+	log.Info().Str("component", "server").Str("version", version).
+		Str("node_id", nodeID).Str("raft_addr", raftAddr).Strs("peers", peers).
+		Str("addr", addr).Str("data", dataDir).Msg("server started")
 
 	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
 	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
@@ -489,12 +491,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Phase 16 Week 3: cluster mode also needs startup recovery for the
 	// node's local data dir (per-node multipart parts + .tmp leftovers).
 	if rec, err := server.RunStartupRecovery(ctx, dataDir, activeEmitter); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Warn("startup recovery failed", "err", err)
+		log.Warn().Err(err).Msg("startup recovery failed")
 	} else if rec.OrphanTmpRemoved+rec.OrphanMultipartRemoved+len(rec.Errors) > 0 {
-		slog.Info("startup recovery summary",
-			"orphan_tmp", rec.OrphanTmpRemoved,
-			"orphan_multipart", rec.OrphanMultipartRemoved,
-			"errors", len(rec.Errors))
+		log.Info().
+			Int("orphan_tmp", rec.OrphanTmpRemoved).
+			Int("orphan_multipart", rec.OrphanMultipartRemoved).
+			Int("errors", len(rec.Errors)).Msg("startup recovery summary")
 	}
 
 	// Cluster-mode scrubber with ShardOwner filtering.
@@ -520,11 +522,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				objectKey, versionID = shardKey[:i], shardKey[i+1:]
 			}
 			if err := distBackend.RepairShardLocal(bucket, objectKey, versionID, shardIdx); err != nil {
-				slog.Warn("placement monitor repair failed", "bucket", bucket, "key", shardKey, "shard", shardIdx, "err", err)
+				log.Warn().Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
 			}
 		})
 		go placementMonitor.Start(ctx)
-		slog.Info("cluster scrubber started", "interval", scrubInterval)
+		log.Info().Dur("interval", scrubInterval).Msg("cluster scrubber started")
 	}
 
 	// Start the leader-aware worker loop. Only the Raft leader runs the
@@ -533,12 +535,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// starts/stops the worker on leadership transitions.
 	if lifecycleMgr != nil {
 		go lifecycleMgr.Run(ctx)
-		slog.Info("cluster lifecycle manager started", "interval", lifecycleInterval)
+		log.Info().Dur("interval", lifecycleInterval).Msg("cluster lifecycle manager started")
 	}
 
 	go func() {
 		if err := srv.Run(); err != nil {
-			slog.Error("http server error", "error", err)
+			log.Error().Err(err).Msg("http server error")
 		}
 	}()
 
@@ -554,26 +556,26 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	defer nodeSvc.Close()
 
 	<-ctx.Done()
-	slog.Info("graceful shutdown started", "component", "server")
+	log.Info().Str("component", "server").Msg("graceful shutdown started")
 
 	// 1. Drain in-flight HTTP requests
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("http server shutdown error", "error", err)
+		log.Warn().Err(err).Msg("http server shutdown error")
 	}
 
 	// 2. Transfer Raft leadership before stopping
 	if err := node.TransferLeadership(); err != nil {
-		slog.Debug("leadership transfer skipped", "reason", err)
+		log.Debug().Err(err).Msg("leadership transfer skipped")
 	} else {
-		slog.Info("leadership transferred", "component", "raft")
+		log.Info().Str("component", "raft").Msg("leadership transferred")
 	}
 
 	// 3. Stop Raft apply loop
 	close(stopApply)
 
-	slog.Info("server stopped", "component", "server")
+	log.Info().Str("component", "server").Msg("server stopped")
 	return nil
 }
 
@@ -589,7 +591,7 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 
 	keyData, err := os.ReadFile(keyFile)
 	if err == nil {
-		slog.Info("at-rest encryption enabled", "component", "server", "key_file", keyFile)
+		log.Info().Str("component", "server").Str("key_file", keyFile).Msg("at-rest encryption enabled")
 		return encrypt.NewEncryptor(keyData)
 	}
 
@@ -613,7 +615,7 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 		return nil, fmt.Errorf("write key file: %w", err)
 	}
 
-	slog.Info("at-rest encryption enabled (auto-generated key)", "component", "server", "key_file", keyFile)
+	log.Info().Str("component", "server").Str("key_file", keyFile).Msg("at-rest encryption enabled (auto-generated key)")
 	return encrypt.NewEncryptor(keyData)
 }
 
@@ -719,18 +721,18 @@ func startBalancer(
 		if testPct < 0 || testPct > 100 {
 			return nil, nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: value %v out of range [0,100]", testPct)
 		}
-		slog.Warn("GRAINFS_TEST_DISK_PCT active — real disk stats overridden", "pct", testPct)
+		log.Warn().Float64("pct", testPct).Msg("GRAINFS_TEST_DISK_PCT active — real disk stats overridden")
 		collector.SetStatFunc(func(string) (float64, uint64) { return testPct, 0 })
 	}
 	go collector.Run(ctx)
 
 	// Replay any tasks that were persisted during a previous channel-full event.
 	if err := fsm.RecoverPending(ctx, taskCh); err != nil {
-		slog.Warn("balancer: recover pending failed", "err", err)
+		log.Warn().Err(err).Msg("balancer: recover pending failed")
 	}
 
-	slog.Info("balancer started", "component", "balancer",
-		"gossip_interval", gossipInterval, "trigger_pct", triggerPct, "stop_pct", stopPct)
+	log.Info().Str("component", "balancer").
+		Dur("gossip_interval", gossipInterval).Float64("trigger_pct", triggerPct).Float64("stop_pct", stopPct).Msg("balancer started")
 	return balancer, receiver, nil
 }
 

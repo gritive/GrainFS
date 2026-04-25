@@ -3,9 +3,9 @@ package server
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
@@ -54,7 +54,7 @@ func PreflightBadger(db *badger.DB, dbDir string, emit scrubber.Emitter) error {
 	}); err != nil {
 		// Cleanup failure is non-fatal — the sentinel will live on as a
 		// few bytes that operators can ignore. Log it but don't refuse boot.
-		slog.Warn("preflight cleanup failed (non-fatal)", "err", err, "dir", dbDir)
+		log.Warn().Err(err).Str("dir", dbDir).Msg("preflight cleanup failed (non-fatal)")
 	}
 
 	emitPreflight(emit, "ok", scrubber.OutcomeSuccess)

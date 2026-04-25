@@ -2,9 +2,11 @@ package nfs4server
 
 import (
 	"fmt"
-	"log/slog"
 	"net"
 	"sync"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -15,7 +17,7 @@ type Server struct {
 	state    *StateManager
 	mu       sync.Mutex
 	listener net.Listener
-	logger   *slog.Logger
+	logger   zerolog.Logger
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
@@ -23,7 +25,7 @@ func NewServer(backend storage.Backend) *Server {
 	return &Server{
 		backend: backend,
 		state:   NewStateManager(),
-		logger:  slog.With("component", "nfs4"),
+		logger:  log.With().Str("component", "nfs4").Logger(),
 	}
 }
 
@@ -38,7 +40,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	s.listener = ln
 	s.mu.Unlock()
 
-	s.logger.Info("nfs4 server started", "addr", addr)
+	s.logger.Info().Str("addr", addr).Msg("nfs4 server started")
 
 	for {
 		conn, err := ln.Accept()
@@ -80,7 +82,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		header, args, err := ParseRPCCall(frame)
 		if err != nil {
-			s.logger.Debug("RPC parse error", "error", err)
+			s.logger.Debug().Err(err).Msg("RPC parse error")
 			continue
 		}
 
@@ -109,7 +111,7 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 	defer compoundReqPool.Put(req)
 
 	if err := ParseCompound(data, req); err != nil {
-		s.logger.Debug("COMPOUND parse error", "error", err)
+		s.logger.Debug().Err(err).Msg("COMPOUND parse error")
 		encodeCompoundResponseInto(w, &CompoundResponse{Status: NFS4ERR_INVAL})
 		return
 	}

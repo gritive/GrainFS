@@ -2,12 +2,12 @@ package lifecycle
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -110,7 +110,7 @@ func (w *Worker) runCycle(ctx context.Context) {
 	now := time.Now()
 	buckets, err := w.backend.ListBuckets()
 	if err != nil {
-		slog.Error("lifecycle: list buckets", "err", err)
+		log.Error().Err(err).Msg("lifecycle: list buckets")
 		return
 	}
 
@@ -120,7 +120,7 @@ func (w *Worker) runCycle(ctx context.Context) {
 		}
 		cfg, err := w.store.Get(bucket)
 		if err != nil {
-			slog.Error("lifecycle: get config", "bucket", bucket, "err", err)
+			log.Error().Str("bucket", bucket).Err(err).Msg("lifecycle: get config")
 			continue
 		}
 		if cfg == nil {
@@ -129,7 +129,7 @@ func (w *Worker) runCycle(ctx context.Context) {
 
 		objs, err := w.backend.ScanObjects(bucket)
 		if err != nil {
-			slog.Error("lifecycle: scan objects", "bucket", bucket, "err", err)
+			log.Error().Str("bucket", bucket).Err(err).Msg("lifecycle: scan objects")
 			continue
 		}
 
@@ -169,7 +169,7 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 					return // ctx cancelled
 				}
 				if err := w.deleter.DeleteObject(obj.Bucket, obj.Key); err != nil {
-					slog.Error("lifecycle: delete object", "bucket", obj.Bucket, "key", obj.Key, "err", err)
+					log.Error().Str("bucket", obj.Bucket).Str("key", obj.Key).Err(err).Msg("lifecycle: delete object")
 				} else {
 					atomic.AddInt64(&w.stats.Expired, 1)
 				}
@@ -180,7 +180,7 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 		if nce := rule.NoncurrentVersionExpiration; nce != nil {
 			all, err := w.deleter.ListObjectVersions(obj.Bucket, obj.Key, 0)
 			if err != nil {
-				slog.Error("lifecycle: list versions", "bucket", obj.Bucket, "key", obj.Key, "err", err)
+				log.Error().Str("bucket", obj.Bucket).Str("key", obj.Key).Err(err).Msg("lifecycle: list versions")
 				continue
 			}
 			// Narrow to exact-key matches — ListObjectVersions does prefix match.
@@ -205,7 +205,7 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 						return // ctx cancelled
 					}
 					if err := w.deleter.DeleteObjectVersion(obj.Bucket, obj.Key, v.VersionID); err != nil {
-						slog.Error("lifecycle: delete version", "key", obj.Key, "versionID", v.VersionID, "err", err)
+						log.Error().Str("key", obj.Key).Str("versionID", v.VersionID).Err(err).Msg("lifecycle: delete version")
 					} else {
 						atomic.AddInt64(&w.stats.VersionsPruned, 1)
 					}

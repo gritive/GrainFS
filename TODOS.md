@@ -6,6 +6,7 @@
 
 ### 기타
 
+- [ ] **[P0] `tests/e2e` timeout 사전 실패** — `go test ./tests/e2e/` 가 2분 타임아웃으로 panic. master 브랜치 포함 pre-existing. 원인 조사 및 수정 필요.
 - [ ] Thin provisioning
 - [ ] NBD Copy on Write in storage layer (thin provisioning 이후)
 - [ ] Reference counting for shared blocks

@@ -3,10 +3,11 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -32,7 +33,7 @@ type ReceiptGossipSender struct {
 	provider ReceiptProvider
 	interval time.Duration
 	maxIDs   int
-	logger   *slog.Logger
+	logger   zerolog.Logger
 }
 
 // NewReceiptGossipSender creates a sender. interval is how often to broadcast;
@@ -52,7 +53,7 @@ func NewReceiptGossipSender(
 		provider: provider,
 		interval: interval,
 		maxIDs:   maxIDs,
-		logger:   slog.Default().With("component", "receipt-gossip"),
+		logger:   log.With().Str("component", "receipt-gossip").Logger(),
 	}
 }
 
@@ -83,7 +84,7 @@ func (s *ReceiptGossipSender) broadcastOnce(ctx context.Context) {
 	msg := &transport.Message{Type: transport.StreamReceipt, Payload: payload}
 	for _, peer := range s.peers {
 		if err := s.tr.Send(ctx, peer, msg); err != nil {
-			s.logger.Warn("receipt-gossip: send failed", "peer", peer, "err", err)
+			s.logger.Warn().Str("peer", peer).Err(err).Msg("receipt-gossip: send failed")
 		}
 	}
 }

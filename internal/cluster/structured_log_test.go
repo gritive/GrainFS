@@ -4,16 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// captureLogger returns a slog.Logger that writes JSON to buf.
-func captureLogger(buf *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+// captureLogger returns a zerolog.Logger that writes JSON to buf.
+func captureLogger(buf *bytes.Buffer) zerolog.Logger {
+	return zerolog.New(buf).With().Timestamp().Logger().Level(zerolog.DebugLevel)
 }
 
 // logLines parses all JSON log lines from buf.
@@ -89,7 +89,7 @@ func makeExecutorWithLogger(buf *bytes.Buffer) *MigrationExecutor {
 	raft := &autoNotifyRaft{nodeID: "self", exec: e}
 	e.mover = &noopMover{}
 	e.node = raft
-	e.logger = captureLogger(buf).With("component", "migration")
+	e.logger = captureLogger(buf).With().Str("component", "migration").Logger()
 	return e
 }
 

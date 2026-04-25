@@ -1,8 +1,9 @@
 package raft
 
 import (
-	"log/slog"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Snapshotter creates and restores state machine snapshots.
@@ -59,19 +60,19 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64) bool {
 	// Take snapshot
 	data, err := m.snapshotter.Snapshot()
 	if err != nil {
-		slog.Error("snapshot: create failed", "error", err)
+		log.Error().Err(err).Msg("snapshot: create failed")
 		return false
 	}
 
 	// Save snapshot to store
 	if err := m.store.SaveSnapshot(appliedIndex, appliedTerm, data); err != nil {
-		slog.Error("snapshot: save failed", "error", err)
+		log.Error().Err(err).Msg("snapshot: save failed")
 		return false
 	}
 
 	// Compact log: remove all entries (requires InstallSnapshot RPC for follower recovery)
 	if err := m.store.TruncateAfter(0); err != nil {
-		slog.Warn("snapshot: log compaction failed", "error", err)
+		log.Warn().Err(err).Msg("snapshot: log compaction failed")
 		// Snapshot is saved; compaction failure is non-fatal
 	}
 
@@ -102,4 +103,3 @@ func (m *SnapshotManager) Restore() (uint64, error) {
 	m.lastSnapIndex = index
 	return index, nil
 }
-

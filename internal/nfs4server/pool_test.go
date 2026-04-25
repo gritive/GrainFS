@@ -2,7 +2,7 @@ package nfs4server
 
 import (
 	"encoding/binary"
-	"log/slog"
+	"github.com/rs/zerolog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,10 +23,6 @@ func buildCompoundXDR(tag string, ops ...func(*XDRWriter)) []byte {
 
 func opXDRPutRootFH(w *XDRWriter) {
 	w.WriteUint32(uint32(OpPutRootFH))
-}
-
-func opXDRGetFH(w *XDRWriter) {
-	w.WriteUint32(uint32(OpGetFH))
 }
 
 func opXDRGetAttr(w *XDRWriter) {
@@ -192,7 +188,7 @@ func TestDispatch_PoolKey16_Returned(t *testing.T) {
 }
 
 func TestHandleCompoundInto_ParseError(t *testing.T) {
-	srv := &Server{state: NewStateManager(), logger: slog.Default()}
+	srv := &Server{state: NewStateManager(), logger: zerolog.Nop()}
 	w := getXDRWriter()
 	defer putXDRWriter(w)
 

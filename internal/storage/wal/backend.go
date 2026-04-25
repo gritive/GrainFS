@@ -3,7 +3,8 @@ package wal
 import (
 	"fmt"
 	"io"
-	"log/slog"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -120,7 +121,7 @@ func (b *Backend) RestoreObjects(objects []storage.SnapshotObject) (int, []stora
 	}
 	// Flush WAL after restore so the anchor point is clean
 	if ferr := b.w.Flush(); ferr != nil {
-		slog.Warn("wal: flush after restore failed", "err", ferr)
+		log.Warn().Err(ferr).Msg("wal: flush after restore failed")
 	}
 	return restored, stale, nil
 }

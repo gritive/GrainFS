@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/migration"
@@ -58,11 +58,7 @@ func runMigrateInject(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 
-	slog.Info("migration complete",
-		"copied", stats.Copied,
-		"skipped", stats.Skipped,
-		"errors", stats.Errors,
-	)
+	log.Info().Int("copied", stats.Copied).Int("skipped", stats.Skipped).Int("errors", stats.Errors).Msg("migration complete")
 	fmt.Printf("copied: %d  skipped: %d  errors: %d\n", stats.Copied, stats.Skipped, stats.Errors)
 	return nil
 }

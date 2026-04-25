@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log/slog"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -11,6 +10,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -71,7 +71,7 @@ func (s *Server) queryEventLog(ctx context.Context, c *app.RequestContext) {
 
 	events, err := s.evStore.Query(since, until, limit, types)
 	if err != nil {
-		slog.Error("eventlog query failed", "err", err)
+		log.Error().Err(err).Msg("eventlog query failed")
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -95,7 +95,7 @@ func (s *Server) startEventWorker() {
 		defer close(s.eventDone)
 		for e := range s.eventCh {
 			if err := s.evStore.Append(e); err != nil {
-				slog.Error("event append failed", "err", err)
+				log.Error().Err(err).Msg("event append failed")
 			}
 		}
 	}()

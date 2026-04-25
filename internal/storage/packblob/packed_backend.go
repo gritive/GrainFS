@@ -7,13 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -92,7 +93,7 @@ func (pb *PackedBackend) periodicSave(interval time.Duration) {
 		select {
 		case <-t.C:
 			if err := pb.SaveIndex(); err != nil {
-				slog.Warn("periodic index save failed", "err", err)
+				log.Warn().Err(err).Msg("periodic index save failed")
 			}
 		case <-pb.stopSave:
 			return
@@ -104,7 +105,7 @@ func (pb *PackedBackend) periodicSave(interval time.Duration) {
 func (pb *PackedBackend) Close() error {
 	close(pb.stopSave)
 	if err := pb.SaveIndex(); err != nil {
-		slog.Warn("failed to save packed blob index on close", "err", err)
+		log.Warn().Err(err).Msg("failed to save packed blob index on close")
 	}
 	return pb.blobStore.Close()
 }
