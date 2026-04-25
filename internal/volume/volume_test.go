@@ -344,3 +344,59 @@ func TestDiscardCounterClamp(t *testing.T) {
 	vol, _ = mgr.Get("clamp-test")
 	assert.Equal(t, int64(0), vol.AllocatedBlocks, "counter should not go below 0")
 }
+
+func setupManagerWithQuota(t *testing.T, quota int64) *Manager {
+	t.Helper()
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	return NewManagerWithOptions(backend, ManagerOptions{PoolQuota: quota})
+}
+
+func TestPoolQuotaExceeded(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	// quota = 2 blocks
+	mgr := setupManagerWithQuota(t, int64(blockSize*2))
+	_, err := mgr.Create("quota-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 2블록 쓰기 → 성공
+	_, err = mgr.WriteAt("quota-test", make([]byte, blockSize*2), 0)
+	require.NoError(t, err)
+
+	// 1블록 더 쓰기 → quota 초과
+	_, err = mgr.WriteAt("quota-test", make([]byte, blockSize), int64(blockSize*2))
+	assert.ErrorIs(t, err, ErrPoolQuotaExceeded)
+}
+
+func TestPoolQuotaBoundary(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	// quota = 2 blocks 정확히
+	mgr := setupManagerWithQuota(t, int64(blockSize*2))
+	_, err := mgr.Create("boundary-test", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 한 번에 2블록 쓰기 → 한도에 정확히 맞음 (통과)
+	_, err = mgr.WriteAt("boundary-test", make([]byte, blockSize*2), 0)
+	require.NoError(t, err, "write at exact quota limit should succeed")
+
+	// 1바이트라도 새 블록 → 거부
+	_, err = mgr.WriteAt("boundary-test", []byte{0x01}, int64(blockSize*2))
+	assert.ErrorIs(t, err, ErrPoolQuotaExceeded, "write beyond quota limit should fail")
+}
+
+func TestPoolQuotaOverwriteDoesNotCount(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	// quota = 1 block
+	mgr := setupManagerWithQuota(t, int64(blockSize))
+	_, err := mgr.Create("overwrite-quota", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 첫 쓰기 → 1블록 할당 (quota 소진)
+	_, err = mgr.WriteAt("overwrite-quota", make([]byte, blockSize), 0)
+	require.NoError(t, err)
+
+	// 같은 블록 덮어쓰기 → 새 블록 없으므로 quota 검사 통과
+	_, err = mgr.WriteAt("overwrite-quota", make([]byte, blockSize), 0)
+	require.NoError(t, err, "overwrite of existing block should not be quota-limited")
+}

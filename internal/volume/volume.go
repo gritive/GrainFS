@@ -244,6 +244,34 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 	}
 
 	bs := int64(vol.BlockSize)
+
+	// Stage 1: PoolQuota pre-scan (only when quota is configured)
+	if m.opts.PoolQuota > 0 {
+		newBlocksNeeded := int64(0)
+		firstBlk := off / bs
+		lastBlk := (off + int64(len(p)) - 1) / bs
+		if lastBlk >= vol.Size/bs {
+			lastBlk = vol.Size/bs - 1
+		}
+		for blkNum := firstBlk; blkNum <= lastBlk; blkNum++ {
+			if _, err := m.backend.HeadObject(volumeBucketName, blockKey(name, blkNum)); err != nil {
+				newBlocksNeeded++
+			}
+		}
+
+		currentAllocated := int64(0)
+		for _, v := range m.volumes {
+			if v.AllocatedBlocks > 0 {
+				currentAllocated += v.AllocatedBlocks * int64(v.BlockSize)
+			}
+		}
+
+		if currentAllocated+newBlocksNeeded*bs > m.opts.PoolQuota {
+			return 0, ErrPoolQuotaExceeded
+		}
+	}
+
+	// Stage 2: write loop
 	totalWritten := 0
 	newBlocks := 0
 
