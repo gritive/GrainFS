@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
@@ -221,30 +223,87 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	}
 }
 
+// forwardPropose는 팔로워에서 리더로 propose 요청을 QUIC RPC로 전달한다.
+// 응답 형식: [8B index big-endian][4B errLen big-endian][errBytes...]
+func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr string, data []byte) (uint64, error) {
+	if b.shardSvc == nil {
+		return 0, fmt.Errorf("forwardPropose: no transport available")
+	}
+	resp, err := b.shardSvc.SendRequest(ctx, leaderAddr, &transport.Message{
+		Type:    transport.StreamProposeForward,
+		Payload: data,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("forwardPropose: send: %w", err)
+	}
+	if len(resp.Payload) < 12 {
+		return 0, fmt.Errorf("forwardPropose: response too short: %d bytes", len(resp.Payload))
+	}
+	index := binary.BigEndian.Uint64(resp.Payload[0:8])
+	errLen := binary.BigEndian.Uint32(resp.Payload[8:12])
+	if errLen > 0 && len(resp.Payload) >= 12+int(errLen) {
+		return 0, fmt.Errorf("forwardPropose: leader error: %s", string(resp.Payload[12:12+int(errLen)]))
+	}
+	return index, nil
+}
+
+// RegisterProposeForwardHandler는 StreamProposeForward 핸들러를 QUIC 라우터에 등록한다.
+// 리더 노드에서 호출해야 하며, 팔로워의 propose를 대신 처리한다.
+func (b *DistributedBackend) RegisterProposeForwardHandler() {
+	if b.shardSvc == nil {
+		return
+	}
+	b.shardSvc.RegisterHandler(transport.StreamProposeForward, func(req *transport.Message) *transport.Message {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		idx, err := b.node.ProposeWait(ctx, req.Payload)
+		resp := make([]byte, 12)
+		if err != nil {
+			errBytes := []byte(err.Error())
+			binary.BigEndian.PutUint64(resp[0:8], 0)
+			binary.BigEndian.PutUint32(resp[8:12], uint32(len(errBytes)))
+			resp = append(resp, errBytes...)
+		} else {
+			binary.BigEndian.PutUint64(resp[0:8], idx)
+			binary.BigEndian.PutUint32(resp[8:12], 0)
+		}
+		return &transport.Message{Type: transport.StreamProposeForward, Payload: resp}
+	})
+}
+
 func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
 	data, err := EncodeCommand(cmdType, payload)
 	if err != nil {
 		return fmt.Errorf("encode command: %w", err)
 	}
 
+	if b.node.IsLeader() {
+		proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		idx, err := b.node.ProposeWait(proposeCtx, data)
+		if err != nil {
+			return err
+		}
+		for b.lastApplied.Load() < idx {
+			select {
+			case <-proposeCtx.Done():
+				return proposeCtx.Err()
+			default:
+				time.Sleep(time.Millisecond)
+			}
+		}
+		return nil
+	}
+
+	// 팔로워: 리더에게 포워딩
+	leaderID := b.node.LeaderID()
+	if leaderID == "" {
+		return raft.ErrNotLeader
+	}
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-
-	idx, err := b.node.ProposeWait(proposeCtx, data)
-	if err != nil {
-		return err
-	}
-
-	// Wait until the FSM has applied this entry
-	for b.lastApplied.Load() < idx {
-		select {
-		case <-proposeCtx.Done():
-			return proposeCtx.Err()
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	return nil
+	_, err = b.forwardPropose(proposeCtx, leaderID, data)
+	return err
 }
 
 // Close closes the metadata database.
@@ -490,13 +549,12 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 
 // putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into
 // cfg.NumShards() shards, fan-out each to its placed node (self or peer),
-// then commit placement + meta through Raft.
+// then commit metadata (with RingVersion) through Raft.
 //
 // Consistency: write-all. Any shard write failure → cleanup + error.
-// Raft commit order: CmdPutShardPlacement first (so a crash after this step
-// leaves the placement record as the source of truth for Slice 4 repair),
-// then CmdPutObjectMeta. Rollback on meta failure deletes all shards and
-// removes the placement record.
+// Placement is derived deterministically from the ring (if available) or
+// via PlacementForNodes (legacy). The RingVersion is stored in object metadata
+// so reads can recompute the same placement without a separate Raft record.
 func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
 	ctx := context.Background()
 
@@ -511,7 +569,15 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	// for different versions land at different paths without changing the API.
 	shardKey := key + "/" + versionID
 
-	placement := PlacementForNodes(effectiveCfg, liveNodes, shardKey)
+	// 링이 있으면 결정론적 배치 사용, 없으면 기존 PlacementForNodes 사용
+	var placement []string
+	var ringVer RingVersion
+	if currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing(); ringErr == nil {
+		placement = currentRing.PlacementForKey(effectiveCfg, shardKey)
+		ringVer = currentRing.Version
+	} else {
+		placement = PlacementForNodes(effectiveCfg, liveNodes, shardKey)
+	}
 	selfID := b.selfAddr
 
 	// Track nodes we wrote to so cleanup can target them precisely.
@@ -553,26 +619,13 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 		written = append(written, node)
 	}
 
-	// Commit placement through Raft. Use shardKey so each version has its own
-	// placement record and versioned reads look up the correct node assignment.
-	// K,M record the actual EC parameters so reads can reconstruct correctly
-	// even if the cluster grows and effective k,m changes later.
-	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket:  bucket,
-		Key:     shardKey,
-		NodeIDs: placement,
-		K:       effectiveCfg.DataShards,
-		M:       effectiveCfg.ParityShards,
-	}); perr != nil {
-		cleanup()
-		return nil, fmt.Errorf("ec propose placement: %w", perr)
-	}
-
 	h := md5.Sum(data)
 	etag := hex.EncodeToString(h[:])
 	now := time.Now().Unix()
 
-	// Commit metadata. On failure, roll back placement + shards.
+	// Commit metadata. RingVersion + ECData/ECParity stored so reads can
+	// recompute placement deterministically without a separate placement record.
+	// On failure, best-effort cleanup of orphaned shards.
 	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      bucket,
 		Key:         key,
@@ -581,9 +634,11 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 		ETag:        etag,
 		ModTime:     now,
 		VersionID:   versionID,
+		RingVersion: ringVer,
+		ECData:      uint8(effectiveCfg.DataShards),
+		ECParity:    uint8(effectiveCfg.ParityShards),
 	}); merr != nil {
-		_ = b.propose(ctx, CmdDeleteShardPlacement, DeleteShardPlacementCmd{Bucket: bucket, Key: shardKey})
-		cleanup()
+		go b.deleteShardsAsync(placement, shardKey)
 		return nil, merr
 	}
 
@@ -597,6 +652,18 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	}, nil
 }
 
+// deleteShardsAsync는 propose 실패 시 고아 샤드를 백그라운드에서 삭제한다.
+// best-effort: 실패는 무시하고 scrubber fallback에 위임한다.
+func (b *DistributedBackend) deleteShardsAsync(placement []string, shardKey string) {
+	for _, node := range placement {
+		if node == b.selfAddr {
+			_ = b.shardSvc.DeleteLocalShards("", shardKey)
+		} else {
+			_ = b.shardSvc.DeleteShards(context.Background(), node, "", shardKey)
+		}
+	}
+}
+
 func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	obj, err := b.HeadObject(bucket, key)
 	if err != nil {
@@ -606,24 +673,60 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	// is a real version. VersionID is non-empty for versioned writes and empty
 	// for legacy log replay.
 
-	// Phase 18: EC placement takes precedence. Absent placement falls through
-	// to the legacy N×-replicated single-shard path below.
-	// shardKey = key+"/"+versionID matches the key written by putObjectEC.
-	// Legacy objects without versionID fall back to bare key lookup.
+	// EC path: shardKey = key+"/"+versionID for versioned objects.
 	shardKey := key
 	if obj.VersionID != "" {
 		shardKey = key + "/" + obj.VersionID
 	}
-	if ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey); lookupErr != nil {
-		return nil, nil, fmt.Errorf("lookup shard placement: %w", lookupErr)
-	} else if len(ecRec.Nodes) > 0 && b.shardSvc != nil {
-		data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, ecRec)
-		if ecErr == nil {
-			return io.NopCloser(bytes.NewReader(data)), obj, nil
+
+	if b.shardSvc != nil {
+		// 신 경로: 오브젝트 메타에서 RingVersion을 읽어 배치를 재계산한다.
+		var metaRingVersion RingVersion
+		var metaECData, metaECParity uint8
+		_ = b.db.View(func(txn *badger.Txn) error {
+			var dbKey []byte
+			if obj.VersionID == "" {
+				dbKey = objectMetaKey(bucket, obj.Key)
+			} else {
+				dbKey = objectMetaKeyV(bucket, obj.Key, obj.VersionID)
+			}
+			item, err := txn.Get(dbKey)
+			if err != nil {
+				return err
+			}
+			return item.Value(func(val []byte) error {
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				metaRingVersion = RingVersion(m.RingVersion)
+				metaECData = m.ECData
+				metaECParity = m.ECParity
+				return nil
+			})
+		})
+
+		if metaRingVersion > 0 {
+			if ring, ringErr := b.fsm.GetRingStore().GetRing(metaRingVersion); ringErr == nil {
+				cfg := ECConfig{DataShards: int(metaECData), ParityShards: int(metaECParity)}
+				placement := ring.PlacementForKey(cfg, shardKey)
+				rec := PlacementRecord{Nodes: placement, K: int(metaECData), M: int(metaECParity)}
+				data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, rec)
+				if ecErr == nil {
+					return io.NopCloser(bytes.NewReader(data)), obj, nil
+				}
+				b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ring-based ec reconstruct failed, falling back")
+			}
 		}
-		// Reconstruction failed — log and fall through to any legacy local/peer
-		// full-object copy that may still exist (e.g. mid-migration state).
-		b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ec reconstruct failed, falling back to N× path")
+
+		// 구 경로 (RingVersion==0): LookupShardPlacement fallback
+		if ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey); lookupErr == nil && len(ecRec.Nodes) > 0 {
+			data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, ecRec)
+			if ecErr == nil {
+				return io.NopCloser(bytes.NewReader(data)), obj, nil
+			}
+			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ec reconstruct failed, falling back to N× path")
+		}
 	}
 
 	// Try the version-addressable local path first (new writers), then the

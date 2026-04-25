@@ -54,6 +54,22 @@ func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Messa
 	return s.handleRPC
 }
 
+// SendRequest sends a request to a peer and returns the response (bidirectional RPC).
+func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *transport.Message) (*transport.Message, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("shard service: no transport")
+	}
+	return s.transport.Call(ctx, peerAddr, msg)
+}
+
+// RegisterHandler registers a per-type stream handler on the transport.
+func (s *ShardService) RegisterHandler(st transport.StreamType, h func(*transport.Message) *transport.Message) {
+	if s.transport == nil {
+		return
+	}
+	s.transport.Handle(st, h)
+}
+
 // WriteShard sends a shard to a remote node for storage.
 //
 // NOTE: In cluster mode, PutObject calls this with shardIdx=0 and the full object
