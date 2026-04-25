@@ -60,8 +60,8 @@ func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.De
 			})
 		}()
 	}
-	// Mirror tracker state into the Prometheus gauge. Runs inside the
-	// tracker's lock (see DegradedConfig.OnStateChange godoc) so the gauge
+	// Mirror tracker state into the Prometheus gauge. Runs in the actor
+	// goroutine (see DegradedConfig.OnStateChange godoc), so the gauge
 	// cannot observe a stale value between a concurrent Report and the
 	// mirror update.
 	trackerCfg.OnStateChange = func(degraded bool) {

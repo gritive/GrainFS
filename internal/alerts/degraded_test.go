@@ -165,7 +165,10 @@ func TestDegradedTracker_OnStateChangeSerializedWithStatus(t *testing.T) {
 			}()
 			<-peerStarted
 			time.Sleep(30 * time.Millisecond)
-			require.False(t, peerCompleted.Load(),
+			// assert.False (non-fatal) because this runs in the actor goroutine,
+			// not the test goroutine; t.Fatal/require from a non-test goroutine
+			// would exit the wrong goroutine and silently pass.
+			assert.False(t, peerCompleted.Load(),
 				"Status() must block while OnStateChange runs (actor serializes both)")
 			close(callbackReturning)
 		},

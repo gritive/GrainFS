@@ -208,7 +208,14 @@ func recentTransitions(transitions []time.Time, flapWindow time.Duration, now ti
 	cutoff := now.Add(-flapWindow)
 	for i, ts := range transitions {
 		if ts.After(cutoff) {
-			return transitions[i:]
+			if i == 0 {
+				return transitions
+			}
+			// Copy to release the head of the backing array; without this the
+			// slice header keeps the full historical allocation alive.
+			trimmed := make([]time.Time, len(transitions)-i)
+			copy(trimmed, transitions[i:])
+			return trimmed
 		}
 	}
 	return nil
@@ -220,7 +227,10 @@ func (t *DegradedTracker) Report(faulty bool, reason, resource string) {
 	reply := make(chan struct{}, 1)
 	select {
 	case t.reportCh <- reportReq{faulty: faulty, reason: reason, resource: resource, reply: reply}:
-		<-reply
+		select {
+		case <-reply:
+		case <-t.stopCh:
+		}
 	case <-t.stopCh:
 	}
 }
@@ -230,7 +240,12 @@ func (t *DegradedTracker) Degraded() bool {
 	reply := make(chan bool, 1)
 	select {
 	case t.degradedCh <- reply:
-		return <-reply
+		select {
+		case v := <-reply:
+			return v
+		case <-t.stopCh:
+			return false
+		}
 	case <-t.stopCh:
 		return false
 	}
@@ -241,7 +256,12 @@ func (t *DegradedTracker) Status() DegradedStatus {
 	reply := make(chan DegradedStatus, 1)
 	select {
 	case t.statusCh <- reply:
-		return <-reply
+		select {
+		case v := <-reply:
+			return v
+		case <-t.stopCh:
+			return DegradedStatus{}
+		}
 	case <-t.stopCh:
 		return DegradedStatus{}
 	}

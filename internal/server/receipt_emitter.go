@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +57,7 @@ type receiptTrackingEmitter struct {
 	emitCh     chan scrubber.HealEvent
 	finalizeCh chan finalizeReq
 	countCh    chan sessionsCountReq // for test introspection
+	closeOnce  sync.Once
 	stopCh     chan struct{}
 }
 
@@ -132,9 +134,9 @@ drain:
 	}
 }
 
-// Close stops the actor goroutine.
+// Close stops the actor goroutine. Idempotent.
 func (e *receiptTrackingEmitter) Close() {
-	close(e.stopCh)
+	e.closeOnce.Do(func() { close(e.stopCh) })
 }
 
 // Emit forwards the event to the base emitter and buffers it per CorrelationID.
@@ -174,7 +176,12 @@ func (e *receiptTrackingEmitter) FinalizeSession(correlationID string) {
 		return
 	}
 
-	sess := <-reply
+	var sess *receiptSession
+	select {
+	case sess = <-reply:
+	case <-e.stopCh:
+		return
+	}
 	if sess == nil || len(sess.events) == 0 {
 		return
 	}
