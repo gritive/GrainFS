@@ -1,10 +1,11 @@
 package main
 
 import (
-	"log/slog"
 	"os"
 
 	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
 
@@ -20,22 +21,23 @@ func init() {
 	rootCmd.PersistentFlags().String("log-level", "info", "log level: debug, info, warn, error")
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		lvlStr, _ := rootCmd.PersistentFlags().GetString("log-level")
-		var slogLvl slog.Level
+		var zlvl zerolog.Level
 		switch lvlStr {
 		case "debug":
-			slogLvl = slog.LevelDebug
+			zlvl = zerolog.DebugLevel
 			hlog.SetLevel(hlog.LevelDebug)
 		case "warn", "warning":
-			slogLvl = slog.LevelWarn
+			zlvl = zerolog.WarnLevel
 			hlog.SetLevel(hlog.LevelWarn)
 		case "error":
-			slogLvl = slog.LevelError
+			zlvl = zerolog.ErrorLevel
 			hlog.SetLevel(hlog.LevelError)
 		default:
-			slogLvl = slog.LevelInfo
+			zlvl = zerolog.InfoLevel
 			hlog.SetLevel(hlog.LevelInfo)
 		}
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slogLvl})))
+		zerolog.SetGlobalLevel(zlvl)
+		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 		return nil
 	}
 }

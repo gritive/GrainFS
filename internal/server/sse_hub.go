@@ -35,10 +35,14 @@ func (s *subscriber) matches(eventType string) bool {
 type Hub struct {
 	clients sync.Map // id string → *subscriber
 	idSeq   atomic.Uint64
+	count   atomic.Int64 // number of active subscribers
 
 	dropMu sync.Mutex
 	drops  map[string]uint64 // per-category dropped event counts
 }
+
+// HasSubscribers reports whether any SSE clients are currently connected.
+func (h *Hub) HasSubscribers() bool { return h.count.Load() > 0 }
 
 // NewHub returns a ready Hub.
 func NewHub() *Hub {
@@ -60,8 +64,10 @@ func (h *Hub) Subscribe(categories ...string) (id string, ch <-chan Event, cance
 		}
 	}
 	h.clients.Store(id, sub)
+	h.count.Add(1)
 	cancel = func() {
 		if v, ok := h.clients.LoadAndDelete(id); ok {
+			h.count.Add(-1)
 			close(v.(*subscriber).ch)
 		}
 	}

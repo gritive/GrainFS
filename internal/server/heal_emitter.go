@@ -2,7 +2,8 @@ package server
 
 import (
 	"encoding/json"
-	"log/slog"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -46,7 +47,7 @@ func (e *healEmitter) Emit(ev scrubber.HealEvent) {
 	if err != nil {
 		// Marshal failure is unexpected (HealEvent is a flat struct) but we
 		// still want to know about it. Drop the event rather than block.
-		slog.Warn("heal: marshal failed", "err", err, "phase", ev.Phase)
+		log.Warn().Err(err).Str("phase", string(ev.Phase)).Msg("heal: marshal failed")
 		return
 	}
 

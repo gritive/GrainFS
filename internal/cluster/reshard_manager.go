@@ -18,9 +18,11 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // Leader is a minimal interface onto raft.Node for the "am I leader?" check.
@@ -48,7 +50,7 @@ type ReshardManager struct {
 	backend  Converter
 	leader   Leader
 	interval time.Duration
-	logger   *slog.Logger
+	logger   zerolog.Logger
 
 	totalConverted atomic.Uint64
 	totalSkipped   atomic.Uint64
@@ -64,7 +66,7 @@ func NewReshardManager(backend Converter, leader Leader, interval time.Duration)
 		backend:  backend,
 		leader:   leader,
 		interval: interval,
-		logger:   slog.With("component", "reshard-manager"),
+		logger:   log.With().Str("component", "reshard-manager").Logger(),
 	}
 }
 
@@ -76,11 +78,11 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 	m.lastRunNanos.Store(time.Now().UnixNano())
 
 	if m.leader != nil && !m.leader.IsLeader() {
-		m.logger.Debug("reshard: skipping — not leader")
+		m.logger.Debug().Msg("reshard: skipping — not leader")
 		return 0, 0, 0
 	}
 	if !m.backend.ECActive() {
-		m.logger.Debug("reshard: skipping — EC not active on this cluster")
+		m.logger.Debug().Msg("reshard: skipping — EC not active on this cluster")
 		return 0, 0, 0
 	}
 	fsm := m.backend.FSMRef()
@@ -103,14 +105,12 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 			if cerr := m.backend.ConvertObjectToEC(ctx, ref.Bucket, ref.Key); cerr != nil {
 				errs++
 				m.totalErrors.Add(1)
-				m.logger.Warn("reshard: convert failed",
-					"bucket", ref.Bucket, "key", ref.Key, "error", cerr)
+				m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).Err(cerr).Msg("reshard: convert failed")
 				return nil
 			}
 			converted++
 			m.totalConverted.Add(1)
-			m.logger.Info("reshard: converted to EC",
-				"bucket", ref.Bucket, "key", ref.Key, "size", ref.Size)
+			m.logger.Info().Str("bucket", ref.Bucket).Str("key", ref.Key).Int64("size", ref.Size).Msg("reshard: converted to EC")
 			return nil
 		}
 		// Already EC. Check if stored k,m matches current effective config (EC→EC upgrade).
@@ -127,28 +127,26 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 		if uerr := m.backend.upgradeObjectEC(ctx, ref.Bucket, ref.Key, ecRec, currentCfg); uerr != nil {
 			errs++
 			m.totalErrors.Add(1)
-			m.logger.Warn("reshard: EC upgrade failed",
-				"bucket", ref.Bucket, "key", ref.Key,
-				"old_k", recK, "old_m", recM,
-				"new_k", currentCfg.DataShards, "new_m", currentCfg.ParityShards,
-				"error", uerr)
+			m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).
+				Int("old_k", recK).Int("old_m", recM).
+				Int("new_k", currentCfg.DataShards).Int("new_m", currentCfg.ParityShards).
+				Err(uerr).Msg("reshard: EC upgrade failed")
 			return nil
 		}
 		converted++
 		m.totalConverted.Add(1)
-		m.logger.Info("reshard: upgraded EC encoding",
-			"bucket", ref.Bucket, "key", ref.Key,
-			"old_k", recK, "old_m", recM,
-			"new_k", currentCfg.DataShards, "new_m", currentCfg.ParityShards)
+		m.logger.Info().Str("bucket", ref.Bucket).Str("key", ref.Key).
+			Int("old_k", recK).Int("old_m", recM).
+			Int("new_k", currentCfg.DataShards).Int("new_m", currentCfg.ParityShards).
+			Msg("reshard: upgraded EC encoding")
 		return nil
 	})
 	m.totalSkipped.Add(uint64(skipped))
 	if err != nil {
-		m.logger.Warn("reshard: iter failed", "error", err)
+		m.logger.Warn().Err(err).Msg("reshard: iter failed")
 	}
 	if converted > 0 || errs > 0 {
-		m.logger.Info("reshard: pass complete",
-			"converted", converted, "skipped", skipped, "errors", errs)
+		m.logger.Info().Int("converted", converted).Int("skipped", skipped).Int("errors", errs).Msg("reshard: pass complete")
 	}
 	return converted, skipped, errs
 }
@@ -157,11 +155,11 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 func (m *ReshardManager) Start(ctx context.Context) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
-	m.logger.Info("reshard manager started", "interval", m.interval)
+	m.logger.Info().Dur("interval", m.interval).Msg("reshard manager started")
 	for {
 		select {
 		case <-ctx.Done():
-			m.logger.Info("reshard manager stopped")
+			m.logger.Info().Msg("reshard manager stopped")
 			return
 		case <-ticker.C:
 			_, _, _ = m.Run(ctx)

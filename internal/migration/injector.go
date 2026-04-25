@@ -4,7 +4,8 @@ package migration
 import (
 	"errors"
 	"io"
-	"log/slog"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -66,7 +67,7 @@ func (inj *Injector) Run() (Stats, error) {
 	for _, bucket := range buckets {
 		if err := inj.dst.CreateBucket(bucket); err != nil {
 			if !errors.Is(err, storage.ErrBucketAlreadyExists) {
-				slog.Warn("migration: create bucket failed", "bucket", bucket, "err", err)
+				log.Warn().Str("bucket", bucket).Err(err).Msg("migration: create bucket failed")
 				stats.Errors++
 				continue
 			}
@@ -74,7 +75,7 @@ func (inj *Injector) Run() (Stats, error) {
 
 		keys, err := inj.src.ListObjects(bucket)
 		if err != nil {
-			slog.Warn("migration: list objects failed", "bucket", bucket, "err", err)
+			log.Warn().Str("bucket", bucket).Err(err).Msg("migration: list objects failed")
 			stats.Errors++
 			continue
 		}
@@ -91,7 +92,7 @@ func (inj *Injector) Run() (Stats, error) {
 
 			rc, obj, err := inj.src.GetObject(bucket, key)
 			if err != nil {
-				slog.Warn("migration: get object failed", "bucket", bucket, "key", key, "err", err)
+				log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: get object failed")
 				stats.Errors++
 				continue
 			}
@@ -103,7 +104,7 @@ func (inj *Injector) Run() (Stats, error) {
 
 			if _, err := inj.dst.PutObject(bucket, key, rc, ct); err != nil {
 				rc.Close()
-				slog.Warn("migration: put object failed", "bucket", bucket, "key", key, "err", err)
+				log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: put object failed")
 				stats.Errors++
 				continue
 			}

@@ -1,8 +1,9 @@
 package scrubber
 
 import (
-	"log/slog"
 	"path"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 )
@@ -32,7 +33,7 @@ func (s *BackgroundScrubber) orphanSweep(walker OrphanWalkable, known map[string
 		return nil
 	})
 	if err != nil {
-		slog.Warn("scrub: orphan walk failed", "err", err)
+		log.Warn().Err(err).Msg("scrub: orphan walk failed")
 		return
 	}
 
@@ -57,18 +58,18 @@ func (s *BackgroundScrubber) orphanSweep(walker OrphanWalkable, known map[string
 		}
 		n, err := walker.DeleteOrphanDir(dir)
 		if err != nil {
-			slog.Warn("scrub: orphan delete failed", "dir", dir, "err", err)
+			log.Warn().Str("dir", dir).Err(err).Msg("scrub: orphan delete failed")
 			continue
 		}
 		delete(s.orphanTombstone, dir)
 		metrics.OrphanShardsDeletedTotal.Inc()
 		deleteCount++
-		slog.Info("scrub: orphan deleted", "dir", dir, "shards_removed", n)
+		log.Info().Str("dir", dir).Int("shards_removed", n).Msg("scrub: orphan deleted")
 	}
 
 	if deferred > 0 {
 		metrics.OrphanSweepCappedTotal.Add(float64(deferred))
-		slog.Warn("scrub: orphan sweep capped", "limit", maxOrphansPerCycle, "deferred", deferred)
+		log.Warn().Int("limit", maxOrphansPerCycle).Int("deferred", deferred).Msg("scrub: orphan sweep capped")
 	}
 
 	// Tombstone newly found candidates (will be deleted next cycle if still orphan).
@@ -78,7 +79,7 @@ func (s *BackgroundScrubber) orphanSweep(walker OrphanWalkable, known map[string
 		}
 		metrics.OrphanShardsFoundTotal.Inc()
 		s.orphanTombstone[dir] = struct{}{}
-		slog.Info("scrub: orphan tombstoned", "dir", dir)
+		log.Info().Str("dir", dir).Msg("scrub: orphan tombstoned")
 	}
 }
 

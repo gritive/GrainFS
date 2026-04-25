@@ -2,10 +2,11 @@ package snapshot
 
 import (
 	"context"
-	"log/slog"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // AutoSnapshotter creates snapshots at a fixed interval and enforces a retention limit.
@@ -48,7 +49,7 @@ func (a *AutoSnapshotter) Wait() {
 
 func (a *AutoSnapshotter) takeAndPrune() {
 	if _, err := a.mgr.Create("auto"); err != nil {
-		slog.Warn("auto-snapshot failed", "err", err)
+		log.Warn().Err(err).Msg("auto-snapshot failed")
 		return
 	}
 	a.pruneOld()
@@ -78,7 +79,7 @@ func (a *AutoSnapshotter) pruneOld() {
 	toDelete := autoSnaps[:len(autoSnaps)-a.maxRetain]
 	for _, s := range toDelete {
 		if err := a.mgr.Delete(s.Seq); err != nil {
-			slog.Warn("auto-snapshot prune failed", "seq", s.Seq, "err", err)
+			log.Warn().Uint64("seq", s.Seq).Err(err).Msg("auto-snapshot prune failed")
 		}
 	}
 }

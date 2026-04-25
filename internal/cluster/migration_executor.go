@@ -3,10 +3,12 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 )
@@ -65,8 +67,8 @@ type MigrationExecutor struct {
 	// mu protects done, committed, pending (commit channels).
 	// Lock order: mu → pendingMu when both are needed.
 	mu        sync.Mutex
-	done      map[string]struct{}     // idempotency: taskID → done
-	committed map[string]struct{}     // early commit arrivals: Raft committed before Execute()
+	done      map[string]struct{}      // idempotency: taskID → done
+	committed map[string]struct{}      // early commit arrivals: Raft committed before Execute()
 	pending   map[string]chan struct{} // commit channels: taskID → chan
 
 	// pendingMu protects ttlPending. sweepExpired holds pendingMu and calls cancel(),
@@ -75,7 +77,7 @@ type MigrationExecutor struct {
 	ttlPending map[string]*ttlEntry // TTL-tracked entries: taskID → entry
 	pendingTTL time.Duration        // 0 = TTL sweep disabled
 
-	logger *slog.Logger
+	logger zerolog.Logger
 }
 
 // NewMigrationExecutor creates an executor with the given shard count. TTL sweep disabled.
@@ -100,7 +102,7 @@ func newExecutor(mover ShardMover, node MigrationRaft, numShards int, ttl time.D
 		pending:        make(map[string]chan struct{}),
 		ttlPending:     make(map[string]*ttlEntry),
 		pendingTTL:     ttl,
-		logger:         slog.Default().With("component", "migration"),
+		logger:         log.With().Str("component", "migration").Logger(),
 	}
 }
 
@@ -240,7 +242,7 @@ func (e *MigrationExecutor) Run(ctx context.Context, tasks <-chan MigrationTask)
 			}
 			go func(t MigrationTask) {
 				if err := e.Execute(ctx, t); err != nil {
-					e.logger.Warn("migration execute failed", "task", t.id(), "err", err)
+					e.logger.Warn().Str("task", t.id()).Err(err).Msg("migration execute failed")
 					metrics.BalancerMigrationsFailedTotal.Inc()
 				}
 			}(task)
@@ -300,7 +302,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		// only shardIdx=0 per peer. This loop reads shardIdx 0..numShards-1, so
 		// iterations i>=1 will fail with ENOENT. Expected behavior until Phase 18
 		// Cluster EC rewires PutObject to real shard placement.
-		e.logger.Debug("migration phase start", "phase", "1", "task", id)
+		e.logger.Debug().Str("phase", "1").Str("task", id).Msg("migration phase start")
 		copyStart := time.Now()
 		for i := range e.numShards {
 			data, err := e.mover.ReadShard(ctx, task.SrcNode, task.Bucket, task.Key, i)
@@ -325,7 +327,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		metrics.BalancerShardCopyDuration.Observe(time.Since(copyStart).Seconds())
 
 		// Phase 2: propose CmdMigrationDone to Raft
-		e.logger.Debug("migration phase start", "phase", "2", "task", id)
+		e.logger.Debug().Str("phase", "2").Str("task", id).Msg("migration phase start")
 		if err := e.proposeDone(task); err != nil {
 			e.cleanupPending(id)
 			return err
@@ -333,7 +335,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 		e.markProposed(id)
 
 		// Phase 3: wait for FSM to apply CmdMigrationDone (= Raft commit confirmed)
-		e.logger.Debug("migration phase start", "phase", "3", "task", id)
+		e.logger.Debug().Str("phase", "3").Str("task", id).Msg("migration phase start")
 		select {
 		case <-commitCh:
 		case <-ctx.Done():
@@ -355,10 +357,9 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	}
 
 	// Phase 4: delete from src — runs whether earlyCommit or normal path.
-	e.logger.Debug("migration phase start", "phase", "4", "task", id)
+	e.logger.Debug().Str("phase", "4").Str("task", id).Msg("migration phase start")
 	if err := e.mover.DeleteShards(ctx, task.SrcNode, task.Bucket, task.Key); err != nil {
-		e.logger.Warn("migration: delete src failed",
-			"phase", "4", "src", task.SrcNode, "bucket", task.Bucket, "key", task.Key, "err", err)
+		e.logger.Warn().Str("phase", "4").Str("src", task.SrcNode).Str("bucket", task.Bucket).Str("key", task.Key).Err(err).Msg("migration: delete src failed")
 		metrics.BalancerMigrationsFailedTotal.Inc()
 	}
 	e.removePending(id)

@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -43,21 +45,21 @@ type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
 
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
-	backend     storage.Backend
-	dataDir     string
-	snapMgr     *snapshot.Manager
-	scrubber    *scrubber.BackgroundScrubber // nil if not using ECBackend
-	verifier    *s3auth.CachingVerifier
-	hertz       *server.Hertz
-	hub         *Hub
-	volMgr      *volume.Manager
+	backend        storage.Backend
+	dataDir        string
+	snapMgr        *snapshot.Manager
+	scrubber       *scrubber.BackgroundScrubber // nil if not using ECBackend
+	verifier       *s3auth.CachingVerifier
+	hertz          *server.Hertz
+	hub            *Hub
+	volMgr         *volume.Manager
 	policyStore    *CompiledPolicyStore
 	lifecycleStore *lifecycle.Store
 	ipLimiter      *RateLimiter
 	userLimiter    *RateLimiter
-	cluster        ClusterInfo      // nil in no-peers mode
-	joinCluster    JoinClusterFunc  // nil if not in no-peers mode or already clustered
-	balancer       BalancerInfo     // nil if balancer not enabled
+	cluster        ClusterInfo       // nil in no-peers mode
+	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
+	balancer       BalancerInfo      // nil if balancer not enabled
 	evStore        *eventstore.Store // nil if event store not configured
 	alerts         *AlertsState      // nil if alerts not wired
 	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
@@ -68,6 +70,10 @@ type Server struct {
 	eventDone     chan struct{}
 	eventStopOnce sync.Once
 }
+
+// broadcastLoggerOnce guards the global zerolog.Logger setup so it is wired
+// to the SSE hub exactly once, even when multiple Server instances are created.
+var broadcastLoggerOnce sync.Once
 
 // Option configures the server.
 type Option func(*Server)
@@ -158,18 +164,13 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 		opt(s)
 	}
 
-	// Route slog default through BroadcastHandler so log records are fanned out
-	// to SSE dashboard clients. CRITICAL: the underlying handler must write
-	// directly to stderr rather than reusing slog.Default().Handler(). The
-	// stdlib default handler emits via log.Logger, and slog.SetDefault then
-	// redirects stdlib log output back through the slog default — creating a
-	// log→slog→log recursion on log.Logger's mutex that deadlocks the first
-	// slog.Info call after New(). Use a fresh text handler here to break the
-	// loop. Also guard against re-wrapping when New() is called repeatedly.
-	if _, already := slog.Default().Handler().(*BroadcastHandler); !already {
-		base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
-		slog.SetDefault(slog.New(NewBroadcastHandler(base, s.hub)))
-	}
+	// Route zerolog global logger through broadcastWriter so every log line
+	// is also fanned out to SSE dashboard clients.
+	// Once-guard prevents double-wrapping when multiple Server instances share a process (e.g. tests).
+	broadcastLoggerOnce.Do(func() {
+		multi := zerolog.MultiLevelWriter(os.Stderr, &broadcastWriter{hub: s.hub})
+		log.Logger = zerolog.New(multi).With().Timestamp().Logger()
+	})
 
 	// Initialize snapshot manager once (avoids per-request allocation and concurrent seq collisions).
 	if s.dataDir != "" {
@@ -179,7 +180,7 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 			if mgr, err := snapshot.NewManager(dir, snap, walDir); err == nil {
 				s.snapMgr = mgr
 			} else {
-				slog.Warn("snapshot manager init failed, snapshot/PITR endpoints will be unavailable", "err", err)
+				log.Warn().Err(err).Msg("snapshot manager init failed, snapshot/PITR endpoints will be unavailable")
 			}
 		}
 	}

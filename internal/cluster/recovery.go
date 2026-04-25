@@ -3,8 +3,9 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // RecoveryManager orchestrates automatic recovery actions.
@@ -50,7 +51,7 @@ func (rm *RecoveryManager) AutoRecover(ctx context.Context) (*RecoveryReport, er
 
 	// Action 2a: Restore from latest snapshot if Raft log is corrupted
 	if diag.Checks["raft_log"].Status == "fail" {
-		slog.Info("recovery: attempting snapshot restore")
+		log.Info().Msg("recovery: attempting snapshot restore")
 		// idx, err := rm.snapshotMgr.Restore()
 		// For now, this is a placeholder - full integration would use actual SnapshotManager
 		report.ActionsTaken = append(report.ActionsTaken,
@@ -61,7 +62,7 @@ func (rm *RecoveryManager) AutoRecover(ctx context.Context) (*RecoveryReport, er
 	// Phase 18: ReplicationMonitor was replaced by ShardPlacementMonitor which scans
 	// FSM placement entries instead of in-memory replica tracking.
 	if rm.replication != nil {
-		slog.Info("recovery: triggering shard placement check")
+		log.Info().Msg("recovery: triggering shard placement check")
 		if m, ok := rm.replication.(*ShardPlacementMonitor); ok {
 			ctx := context.Background()
 			if missing, err := m.Scan(ctx); err != nil {
@@ -79,7 +80,7 @@ func (rm *RecoveryManager) AutoRecover(ctx context.Context) (*RecoveryReport, er
 
 	// Action 2c: Mark unhealthy peers as healthy for retry
 	if rm.peerHealth != nil {
-		slog.Info("recovery: resetting peer health for retry")
+		log.Info().Msg("recovery: resetting peer health for retry")
 		// This would reset peer health via PeerHealth
 		report.ActionsTaken = append(report.ActionsTaken,
 			"Peer health reset for retry")

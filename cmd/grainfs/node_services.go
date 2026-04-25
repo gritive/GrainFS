@@ -13,9 +13,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/nfs4server"
@@ -36,7 +36,7 @@ type nodeServices struct {
 func (n *nodeServices) Close() {
 	if n.nfsSrv != nil {
 		if err := n.nfsSrv.Close(); err != nil {
-			slog.Warn("nfs server close error", "error", err)
+			log.Warn().Err(err).Msg("nfs server close error")
 		}
 	}
 	// nfs4Srv exposes no Close; relies on context cancellation.
@@ -65,18 +65,18 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 		mgr := volume.NewManager(backend)
 		if _, err := mgr.Get(defaultVolName); err != nil {
 			if _, err := mgr.Create(defaultVolName, defaultVolSize); err != nil {
-				slog.Warn("default nfs volume create failed (may already exist)", "error", err)
+				log.Warn().Err(err).Msg("default nfs volume create failed (may already exist)")
 			}
 		}
 
 		svc.nfsSrv = nfsserver.NewServer(backend, defaultVolName, nil,
-			vfs.WithStatCacheTTL(1e9),  // 1s
+			vfs.WithStatCacheTTL(1e9), // 1s
 			vfs.WithDirCacheTTL(1e9),
 		)
 		go func() {
 			nfsAddr := fmt.Sprintf(":%d", nfsPort)
 			if err := svc.nfsSrv.ListenAndServe(nfsAddr); err != nil {
-				slog.Error("nfs server error", "error", err)
+				log.Error().Err(err).Msg("nfs server error")
 			}
 		}()
 	}
@@ -88,7 +88,7 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 			// public interface would let any client impersonate any UID.
 			nfs4Addr := fmt.Sprintf("127.0.0.1:%d", nfs4Port)
 			if err := svc.nfs4Srv.ListenAndServe(nfs4Addr); err != nil {
-				slog.Error("nfs4 server error", "error", err)
+				log.Error().Err(err).Msg("nfs4 server error")
 			}
 		}()
 	}
@@ -98,11 +98,11 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 		mgr := volume.NewManager(backend)
 		if _, err := mgr.Get(defaultVolName); err != nil {
 			if _, err := mgr.Create(defaultVolName, nbdVolumeSize); err != nil {
-				slog.Warn("default nbd volume create failed", "error", err)
+				log.Warn().Err(err).Msg("default nbd volume create failed")
 			}
 		}
 		if _, err := startNBDServer(mgr, defaultVolName, nbdPort); err != nil {
-			slog.Error("nbd server start failed", "error", err)
+			log.Error().Err(err).Msg("nbd server start failed")
 		}
 	}
 

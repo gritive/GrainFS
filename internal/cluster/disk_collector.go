@@ -2,9 +2,10 @@ package cluster
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 )
@@ -39,7 +40,7 @@ func (d *DiskCollector) SetStatFunc(f func(string) (float64, uint64)) {
 
 // Run starts the collection loop. Blocks until ctx is cancelled.
 func (d *DiskCollector) Run(ctx context.Context) {
-	slog.Info("disk collector started", "nodeID", d.nodeID, "dataDir", d.dataDir, "interval", d.interval)
+	log.Info().Str("nodeID", d.nodeID).Str("dataDir", d.dataDir).Dur("interval", d.interval).Msg("disk collector started")
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
 	d.collect()
@@ -59,7 +60,7 @@ func (d *DiskCollector) collect() {
 	d.mu.RUnlock()
 	usedPct, availBytes := fn(d.dataDir)
 	if usedPct == 0 && availBytes == 0 {
-		slog.Warn("disk stat unavailable, skipping update", "nodeID", d.nodeID, "dataDir", d.dataDir)
+		log.Warn().Str("nodeID", d.nodeID).Str("dataDir", d.dataDir).Msg("disk stat unavailable, skipping update")
 		return
 	}
 	if usedPct < 0 {
@@ -67,7 +68,7 @@ func (d *DiskCollector) collect() {
 	} else if usedPct > 100 {
 		usedPct = 100
 	}
-	slog.Debug("disk stat collected", "nodeID", d.nodeID, "usedPct", usedPct, "availBytes", availBytes)
+	log.Debug().Str("nodeID", d.nodeID).Float64("usedPct", usedPct).Uint64("availBytes", availBytes).Msg("disk stat collected")
 	if d.store != nil {
 		d.store.UpdateDiskStats(d.nodeID, usedPct, availBytes)
 	}

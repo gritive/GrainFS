@@ -3,10 +3,10 @@ package nfsserver
 
 import (
 	"fmt"
-	"log/slog"
 	"net"
 	"sync"
 
+	"github.com/rs/zerolog/log"
 	nfs "github.com/willscott/go-nfs"
 	nfshelper "github.com/willscott/go-nfs/helpers"
 
@@ -46,7 +46,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	// Register VFS with cache invalidator registry
 	if s.registry != nil {
 		s.registry.Register(s.volName, fs)
-		slog.Info("vfs registered with cache invalidator", "volume", s.volName)
+		log.Info().Str("volume", s.volName).Msg("vfs registered with cache invalidator")
 	}
 
 	ln, err := net.Listen("tcp", addr)
@@ -60,7 +60,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	handler := nfshelper.NewNullAuthHandler(fs)
 	cacheHandler := nfshelper.NewCachingHandler(handler, 1024)
 
-	slog.Info("nfs server started", "component", "nfs", "addr", addr, "volume", s.volName)
+	log.Info().Str("component", "nfs").Str("addr", addr).Str("volume", s.volName).Msg("nfs server started")
 	return nfs.Serve(ln, cacheHandler)
 }
 

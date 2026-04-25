@@ -29,10 +29,11 @@ import (
 	"context"
 	"errors"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -81,10 +82,7 @@ func RunStartupRecovery(ctx context.Context, dataRoot string, emit scrubber.Emit
 	}
 
 	if res.OrphanTmpRemoved > 0 || res.OrphanMultipartRemoved > 0 {
-		slog.Info("startup recovery completed",
-			"orphan_tmp", res.OrphanTmpRemoved,
-			"orphan_multipart", res.OrphanMultipartRemoved,
-			"errors", len(res.Errors))
+		log.Info().Int("orphan_tmp", res.OrphanTmpRemoved).Int("orphan_multipart", res.OrphanMultipartRemoved).Int("errors", len(res.Errors)).Msg("startup recovery completed")
 	}
 	return res, nil
 }
@@ -141,8 +139,7 @@ func sweepOrphanTmp(ctx context.Context, root string, emit scrubber.Emitter, res
 	// Record the error so it surfaces on the "Restart Recovery" dashboard
 	// line and emit a structured log so operators can triage.
 	res.Errors = append(res.Errors, "walkdir root="+root+": "+err.Error())
-	slog.Warn("startup recovery walkdir non-context error",
-		"root", root, "operation", "orphan_tmp", "err", err)
+	log.Warn().Str("root", root).Str("operation", "orphan_tmp").Err(err).Msg("startup recovery walkdir non-context error")
 	return nil
 }
 

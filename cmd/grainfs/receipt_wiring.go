@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -89,8 +89,7 @@ func setupLocalReceipt(cmd *cobra.Command, dataDir string, opts []server.Option)
 	}
 	api := receipt.NewAPI(store, nil, nil, retention)
 
-	slog.Info("heal-receipt API enabled",
-		"component", "receipt", "mode", "local", "retention", retention)
+	log.Info().Str("component", "receipt").Str("mode", "local").Dur("retention", retention).Msg("heal-receipt API enabled")
 
 	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
 		db: db, store: store, keyStore: ks, api: api,
@@ -176,11 +175,8 @@ func setupClusterReceipt(
 
 	api := receipt.NewAPI(store, routingCache, broadcaster, retention)
 
-	slog.Info("heal-receipt API enabled",
-		"component", "receipt", "mode", "cluster",
-		"retention", retention,
-		"gossip_interval", gossipInterval,
-		"window", windowSize)
+	log.Info().Str("component", "receipt").Str("mode", "cluster").
+		Dur("retention", retention).Dur("gossip_interval", gossipInterval).Int("window", windowSize).Msg("heal-receipt API enabled")
 
 	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
 		db:           db,

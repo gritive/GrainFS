@@ -3,10 +3,10 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -92,7 +92,7 @@ func (f *FSM) Apply(raw []byte) error {
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(cmd.Data)
 	default:
-		slog.Warn("fsm: unknown command type", "type", cmd.Type)
+		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
 	}
 }
@@ -515,12 +515,12 @@ func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error
 				copy(taskData, val)
 				return nil
 			}); err != nil {
-				slog.Error("fsm: recover pending migration: read failed", "err", err)
+				log.Error().Err(err).Msg("fsm: recover pending migration: read failed")
 				continue
 			}
 			cmd, err := decodeMigrateShardCmd(taskData)
 			if err != nil {
-				slog.Error("fsm: recover pending migration: decode failed", "err", err)
+				log.Error().Err(err).Msg("fsm: recover pending migration: decode failed")
 				continue
 			}
 			task := MigrationTask{
@@ -565,11 +565,9 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 		default:
 			// Channel full: persist to BadgerDB so the task survives a crash.
 			if err := f.persistPendingMigration(task); err != nil {
-				slog.Error("fsm: migration queue full and persist failed — task lost",
-					"bucket", task.Bucket, "key", task.Key, "err", err)
+				log.Error().Str("bucket", task.Bucket).Str("key", task.Key).Err(err).Msg("fsm: migration queue full and persist failed — task lost")
 			} else {
-				slog.Warn("fsm: migration queue full, persisted to BadgerDB",
-					"bucket", task.Bucket, "key", task.Key)
+				log.Warn().Str("bucket", task.Bucket).Str("key", task.Key).Msg("fsm: migration queue full, persisted to BadgerDB")
 			}
 		}
 	}
@@ -589,7 +587,7 @@ func (f *FSM) applyMigrationDone(data []byte) error {
 		}
 		return err
 	}); err != nil {
-		slog.Warn("fsm: delete pending-migration key failed", "bucket", cmd.Bucket, "key", cmd.Key, "err", err)
+		log.Warn().Str("bucket", cmd.Bucket).Str("key", cmd.Key).Err(err).Msg("fsm: delete pending-migration key failed")
 	}
 	f.mu.RLock()
 	notifier := f.commitNotifier

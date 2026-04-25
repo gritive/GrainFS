@@ -5,12 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 var (
@@ -878,19 +879,18 @@ func (n *Node) maybeRunLogGC() {
 	// followers that need pre-GC entries cannot recover via InstallSnapshot.
 	snapIdx, _, _, err := n.store.LoadSnapshot()
 	if err != nil {
-		slog.Warn("raft: log GC skipped — snapshot load error", "err", err)
+		log.Warn().Err(err).Msg("raft: log GC skipped — snapshot load error")
 		return
 	}
 	if snapIdx < watermark {
-		slog.Warn("raft: log GC skipped — no snapshot covers watermark; take a snapshot first",
-			"snapIdx", snapIdx, "watermark", watermark)
+		log.Warn().Uint64("snapIdx", snapIdx).Uint64("watermark", watermark).Msg("raft: log GC skipped — no snapshot covers watermark; take a snapshot first")
 		return
 	}
 	if err := n.store.TruncateBefore(watermark); err != nil {
-		slog.Warn("raft: log GC failed", "watermark", watermark, "err", err)
+		log.Warn().Uint64("watermark", watermark).Err(err).Msg("raft: log GC failed")
 		return
 	}
-	slog.Info("raft: log GC complete", "watermark", watermark)
+	log.Info().Uint64("watermark", watermark).Msg("raft: log GC complete")
 }
 
 // HandleRequestVote processes an incoming RequestVote RPC.
