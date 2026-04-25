@@ -24,6 +24,10 @@ table PutObjectMetaCmd {
   etag:string;
   mod_time:int64;
   version_id:string;
+  ring_version:uint64 = 0;
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  node_ids:[string];
 }
 
 table DeleteObjectCmd {
@@ -81,6 +85,10 @@ table ObjectMeta {
   etag:string;
   last_modified:int64;
   acl:uint8;
+  ring_version:uint64 = 0;
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  node_ids:[string];
 }
 
 table SetBucketVersioningCmd {
@@ -174,6 +182,17 @@ table MigrationDoneCmd {
   version_id:string;
   src_node:string;
   dst_node:string;
+}
+
+table VNodeEntry {
+  token:uint32;
+  node_id:string;
+}
+
+table SetRingCmd {
+  version:uint64;
+  vnodes:[VNodeEntry];
+  vper_node:uint32;
 }
 
 root_type Command;

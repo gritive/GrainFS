@@ -37,6 +37,7 @@ const (
 	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning + object ACL.
 	CmdSetBucketVersioning CommandType = 15
 	CmdSetObjectACL        CommandType = 16
+	CmdSetRing             CommandType = 17
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -61,6 +62,18 @@ type PutObjectMetaCmd struct {
 	ETag        string
 	ModTime     int64
 	VersionID   string
+	RingVersion RingVersion // 쓰기에 사용된 Ring 버전 (0 = 링 사용 전 레거시)
+	ECData      uint8       // EC k (data shards)
+	ECParity    uint8       // EC m (parity shards)
+	NodeIDs     []string    // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
+}
+
+// SetRingCmd는 컨시스턴트 해시 링을 FSM에 커밋하는 명령이다.
+// 멤버십 변경 시에만 propose된다.
+type SetRingCmd struct {
+	Version  RingVersion
+	VNodes   []VirtualNode
+	VPerNode int
 }
 
 type DeleteObjectCmd struct {

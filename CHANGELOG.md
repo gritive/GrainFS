@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.4.30] - 2026-04-25
+
+### Added
+
+- **Consistent Hash Ring** (`internal/cluster/ring.go`, `ring_store.go`): 결정론적 EC 샤드 배치 알고리즘.
+  - `Ring.PlacementForKey(cfg, key)`: 가상 노드 기반 CW 탐색으로 k+m 배치 결정
+  - `ringStore`: 링 버전 관리 + ref counting + GC eligibility
+  - `FSM.applySetRing`: Raft 커밋 → in-memory ring store 반영
+  - `CmdPutShardPlacement`/`CmdDeleteShardPlacement`: no-op 전환 (배치 레코드 불필요)
+
+- **Follower Write Forwarding** (`internal/cluster/backend.go`): 팔로워 propose → 리더 QUIC 포워딩.
+  - `propose()`: IsLeader() 분기 — 리더면 직접, 팔로워면 QUIC StreamProposeForward 전달
+  - `RegisterProposeForwardHandler()`: 리더 핸들러 등록
+  - `internal/raft/raft.go`: `IsLeader()` 메서드 추가
+
+- **Ring-aware EC 읽기/쓰기** (`backend.go`): 3단계 fallback 경로.
+  1. Ring 기반 재계산 (RingVersion > 0)
+  2. FSM placement record (레거시)
+  3. 오브젝트 메타 NodeIDs (CmdPutShardPlacement no-op 과도기)
+
+- **ReshardManager 링 인식** (`reshard_manager.go`): 멤버십 변경 후 오브젝트 링 전환 리샤드.
+
+- **PutObjectMetaCmd 확장** (`fsm.go`, `codec.go`): `RingVersion`, `ECData`, `ECParity`, `NodeIDs` 필드 추가.
+
+### Fixed
+
+- `deleteShardsAsync`: bucket="" 전달 버그 수정 → 올바른 샤드 경로 삭제
+- `applyDeleteObjectVersion`: 링 refcount decRef 누락 수정 → ring GC 누출 방지
+- `putObjectEC`: 배치 크기 != k+m 시 명시적 오류 반환 (panic 방지)
+- `ReshardToRing`: EC 재구성 후 ETag 검증 추가
+
 ## [0.0.4.29] - 2026-04-25
 
 ### Refactored

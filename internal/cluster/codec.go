@@ -21,7 +21,11 @@ type objectMeta struct {
 	ContentType  string
 	ETag         string
 	LastModified int64
-	ACL          uint8 // s3auth.ACLGrant bitmask; 0 = private (backward compat)
+	ACL          uint8    // s3auth.ACLGrant bitmask; 0 = private (backward compat)
+	RingVersion  uint64   // ring version used at write time (0 = pre-ring legacy)
+	ECData       uint8    // EC k (data shards)
+	ECParity     uint8    // EC m (parity shards)
+	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -101,6 +105,10 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	ctOff := b.CreateString(c.ContentType)
 	etagOff := b.CreateString(c.ETag)
 	vidOff := b.CreateString(c.VersionID)
+	var nodeIDsOff flatbuffers.UOffsetT
+	if len(c.NodeIDs) > 0 {
+		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
+	}
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -109,6 +117,12 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddEtag(b, etagOff)
 	clusterpb.PutObjectMetaCmdAddModTime(b, c.ModTime)
 	clusterpb.PutObjectMetaCmdAddVersionId(b, vidOff)
+	clusterpb.PutObjectMetaCmdAddRingVersion(b, uint64(c.RingVersion))
+	clusterpb.PutObjectMetaCmdAddEcData(b, c.ECData)
+	clusterpb.PutObjectMetaCmdAddEcParity(b, c.ECParity)
+	if nodeIDsOff != 0 {
+		clusterpb.PutObjectMetaCmdAddNodeIds(b, nodeIDsOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -119,6 +133,13 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 	if err != nil {
 		return PutObjectMetaCmd{}, err
 	}
+	var nodeIDs []string
+	if n := t.NodeIdsLength(); n > 0 {
+		nodeIDs = make([]string, n)
+		for i := range nodeIDs {
+			nodeIDs[i] = string(t.NodeIds(i))
+		}
+	}
 	return PutObjectMetaCmd{
 		Bucket:      string(t.Bucket()),
 		Key:         string(t.Key()),
@@ -127,6 +148,10 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		ETag:        string(t.Etag()),
 		ModTime:     t.ModTime(),
 		VersionID:   string(t.VersionId()),
+		RingVersion: RingVersion(t.RingVersion()),
+		ECData:      t.EcData(),
+		ECParity:    t.EcParity(),
+		NodeIDs:     nodeIDs,
 	}, nil
 }
 
@@ -321,6 +346,21 @@ func decodeDeleteBucketPolicyCmd(data []byte) (DeleteBucketPolicyCmd, error) {
 	return DeleteBucketPolicyCmd{Bucket: string(t.Bucket())}, nil
 }
 
+// buildStringVector encodes a []string as a FlatBuffers vector using the
+// provided startVector function (e.g. clusterpb.ObjectMetaStartNodeIdsVector).
+// All strings must be created BEFORE calling Start on the parent table.
+func buildStringVector(b *flatbuffers.Builder, ss []string, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	offs := make([]flatbuffers.UOffsetT, len(ss))
+	for i, s := range ss {
+		offs[i] = b.CreateString(s)
+	}
+	startVec(b, len(ss))
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(ss))
+}
+
 // --- ObjectMeta codec ---
 
 func marshalObjectMeta(m objectMeta) ([]byte, error) {
@@ -328,6 +368,10 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 	etagOff := b.CreateString(m.ETag)
+	var nodeIDsOff flatbuffers.UOffsetT
+	if len(m.NodeIDs) > 0 {
+		nodeIDsOff = buildStringVector(b, m.NodeIDs, clusterpb.ObjectMetaStartNodeIdsVector)
+	}
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -335,6 +379,12 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	clusterpb.ObjectMetaAddEtag(b, etagOff)
 	clusterpb.ObjectMetaAddLastModified(b, m.LastModified)
 	clusterpb.ObjectMetaAddAcl(b, m.ACL)
+	clusterpb.ObjectMetaAddRingVersion(b, m.RingVersion)
+	clusterpb.ObjectMetaAddEcData(b, m.ECData)
+	clusterpb.ObjectMetaAddEcParity(b, m.ECParity)
+	if nodeIDsOff != 0 {
+		clusterpb.ObjectMetaAddNodeIds(b, nodeIDsOff)
+	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -345,6 +395,13 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 	if err != nil {
 		return objectMeta{}, fmt.Errorf("unmarshal ObjectMeta: %w", err)
 	}
+	var nodeIDs []string
+	if n := t.NodeIdsLength(); n > 0 {
+		nodeIDs = make([]string, n)
+		for i := range nodeIDs {
+			nodeIDs[i] = string(t.NodeIds(i))
+		}
+	}
 	return objectMeta{
 		Key:          string(t.Key()),
 		Size:         t.Size(),
@@ -352,6 +409,10 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		ETag:         string(t.Etag()),
 		LastModified: t.LastModified(),
 		ACL:          t.Acl(),
+		RingVersion:  t.RingVersion(),
+		ECData:       t.EcData(),
+		ECParity:     t.EcParity(),
+		NodeIDs:      nodeIDs,
 	}, nil
 }
 
@@ -553,6 +614,51 @@ func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
 	}, nil
 }
 
+// encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
+func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	// VNodeEntry 객체들을 먼저 역순으로 빌드 (FlatBuffers vector prepend 방식)
+	vnOffsets := make([]flatbuffers.UOffsetT, len(c.VNodes))
+	for i := len(c.VNodes) - 1; i >= 0; i-- {
+		nodeIDOff := b.CreateString(c.VNodes[i].NodeID)
+		clusterpb.VNodeEntryStart(b)
+		clusterpb.VNodeEntryAddToken(b, c.VNodes[i].Token)
+		clusterpb.VNodeEntryAddNodeId(b, nodeIDOff)
+		vnOffsets[i] = clusterpb.VNodeEntryEnd(b)
+	}
+	clusterpb.SetRingCmdStartVnodesVector(b, len(vnOffsets))
+	for i := len(vnOffsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(vnOffsets[i])
+	}
+	vnodesVec := b.EndVector(len(vnOffsets))
+	clusterpb.SetRingCmdStart(b)
+	clusterpb.SetRingCmdAddVersion(b, uint64(c.Version))
+	clusterpb.SetRingCmdAddVnodes(b, vnodesVec)
+	clusterpb.SetRingCmdAddVperNode(b, uint32(c.VPerNode))
+	return fbFinish(b, clusterpb.SetRingCmdEnd(b)), nil
+}
+
+// decodeSetRingCmd deserializes a SetRingCmd from Raft log data.
+func decodeSetRingCmd(data []byte) (SetRingCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.SetRingCmd {
+		return clusterpb.GetRootAsSetRingCmd(d, 0)
+	})
+	if err != nil {
+		return SetRingCmd{}, err
+	}
+	vnodes := make([]VirtualNode, t.VnodesLength())
+	for i := 0; i < t.VnodesLength(); i++ {
+		var vn clusterpb.VNodeEntry
+		t.Vnodes(&vn, i)
+		vnodes[i] = VirtualNode{Token: vn.Token(), NodeID: string(vn.NodeId())}
+	}
+	return SetRingCmd{
+		Version:  RingVersion(t.Version()),
+		VNodes:   vnodes,
+		VPerNode: int(t.VperNode()),
+	}, nil
+}
+
 // --- Payload encoding dispatch ---
 
 func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
@@ -591,6 +697,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
 	case CmdSetObjectACL:
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
+	case CmdSetRing:
+		return encodeSetRingCmd(payload.(SetRingCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}

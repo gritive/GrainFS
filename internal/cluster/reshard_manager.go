@@ -43,6 +43,10 @@ type Converter interface {
 	EffectiveECConfig() ECConfig
 	// upgradeObjectEC re-encodes an EC object from oldRec's k,m to newCfg's k,m.
 	upgradeObjectEC(ctx context.Context, bucket, key string, oldRec PlacementRecord, newCfg ECConfig) error
+	// CurrentRingVersion returns the current ring version (0 if no ring).
+	CurrentRingVersion() RingVersion
+	// ReshardToRing reshards the object to the current ring layout.
+	ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error
 }
 
 // ReshardManager walks objects and triggers conversion from N× to EC.
@@ -145,6 +149,37 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 	if err != nil {
 		m.logger.Warn().Err(err).Msg("reshard: iter failed")
 	}
+
+	// 링 리샤드 패스: RingVersion < currentRingVersion인 오브젝트를 현재 링으로 리샤드
+	currentRingVer := m.backend.CurrentRingVersion()
+	if currentRingVer > 0 {
+		rerr := fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if ref.RingVersion >= currentRingVer {
+				skipped++
+				return nil
+			}
+			if err := m.backend.ReshardToRing(ctx, ref.Bucket, ref.Key, ref.RingVersion); err != nil {
+				errs++
+				m.totalErrors.Add(1)
+				m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).
+					Uint64("ring_ver", uint64(ref.RingVersion)).Err(err).Msg("reshard: ring-based reshard failed")
+				return nil
+			}
+			converted++
+			m.totalConverted.Add(1)
+			m.logger.Info().Str("bucket", ref.Bucket).Str("key", ref.Key).
+				Uint64("old_ring", uint64(ref.RingVersion)).Uint64("new_ring", uint64(currentRingVer)).
+				Msg("reshard: resharded to new ring")
+			return nil
+		})
+		if rerr != nil {
+			m.logger.Warn().Err(rerr).Msg("reshard: ring iter failed")
+		}
+	}
+
 	if converted > 0 || errs > 0 {
 		m.logger.Info().Int("converted", converted).Int("skipped", skipped).Int("errors", errs).Msg("reshard: pass complete")
 	}

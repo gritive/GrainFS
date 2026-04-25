@@ -105,8 +105,61 @@ func (rcv *PutObjectMetaCmd) VersionId() []byte {
 	return nil
 }
 
+func (rcv *PutObjectMetaCmd) RingVersion() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateRingVersion(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(18, n)
+}
+
+func (rcv *PutObjectMetaCmd) EcData() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateEcData(n byte) bool {
+	return rcv._tab.MutateByteSlot(20, n)
+}
+
+func (rcv *PutObjectMetaCmd) EcParity() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateEcParity(n byte) bool {
+	return rcv._tab.MutateByteSlot(22, n)
+}
+
+func (rcv *PutObjectMetaCmd) NodeIds(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *PutObjectMetaCmd) NodeIdsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(11)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -128,6 +181,21 @@ func PutObjectMetaCmdAddModTime(builder *flatbuffers.Builder, modTime int64) {
 }
 func PutObjectMetaCmdAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(versionId), 0)
+}
+func PutObjectMetaCmdAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
+	builder.PrependUint64Slot(7, ringVersion, 0)
+}
+func PutObjectMetaCmdAddEcData(builder *flatbuffers.Builder, ecData byte) {
+	builder.PrependByteSlot(8, ecData, 0)
+}
+func PutObjectMetaCmdAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
+	builder.PrependByteSlot(9, ecParity, 0)
+}
+func PutObjectMetaCmdAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(nodeIds), 0)
+}
+func PutObjectMetaCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

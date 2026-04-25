@@ -257,17 +257,66 @@ func (b *DistributedBackend) RaftNodeID() string {
 // placement vector.
 // versionID is used to construct the shardKey (key+"/"+versionID) matching
 // the placement record written by putObjectEC. Empty versionID falls back to
+// lookupPlacementWithFallback resolves a PlacementRecord for shardKey by trying:
+// 1. FSM placement index (CmdPutShardPlacement)
+// 2. NodeIDs stored in object metadata (PutObjectMetaCmd fallback for no-ring writes)
+func (b *DistributedBackend) lookupPlacementWithFallback(bucket, shardKey, versionID string) (PlacementRecord, error) {
+	ecRec, err := b.fsm.LookupShardPlacement(bucket, shardKey)
+	if err == nil && len(ecRec.Nodes) > 0 {
+		return ecRec, nil
+	}
+
+	// Fallback: NodeIDs stored in object metadata.
+	var meta objectMeta
+	_ = b.db.View(func(txn *badger.Txn) error {
+		var dbKey []byte
+		if versionID == "" {
+			dbKey = objectMetaKey(bucket, shardKey) // bare key for legacy
+		} else {
+			dbKey = objectMetaKeyV(bucket, extractBaseKey(shardKey), versionID)
+		}
+		item, gerr := txn.Get(dbKey)
+		if gerr != nil {
+			return gerr
+		}
+		return item.Value(func(val []byte) error {
+			meta, gerr = unmarshalObjectMeta(val)
+			return gerr
+		})
+	})
+	if meta.ECData > 0 && len(meta.NodeIDs) > 0 {
+		return PlacementRecord{
+			Nodes: meta.NodeIDs,
+			K:     int(meta.ECData),
+			M:     int(meta.ECParity),
+		}, nil
+	}
+	if err != nil {
+		return PlacementRecord{}, err
+	}
+	return PlacementRecord{}, fmt.Errorf("no placement for %s/%s", bucket, shardKey)
+}
+
+// extractBaseKey strips the "/versionID" suffix from a shardKey to get the
+// original object key. Used only when constructing the versioned metadata key.
+func extractBaseKey(shardKey string) string {
+	// shardKey is either "key" (legacy) or "key/versionID".
+	// Return everything before the last slash as the base key, or the full
+	// string if there is no slash.
+	if idx := strings.LastIndex(shardKey, "/"); idx >= 0 {
+		return shardKey[:idx]
+	}
+	return shardKey
+}
+
 // bare key lookup for legacy pre-versioned EC objects.
 func (b *DistributedBackend) OwnedShards(bucket, key, versionID, nodeID string) []int {
 	lookupKey := key
 	if versionID != "" {
 		lookupKey = key + "/" + versionID
 	}
-	ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, lookupKey)
-	if lookupErr != nil {
-		return nil
-	}
-	if len(ecRec.Nodes) == 0 {
+	ecRec, err := b.lookupPlacementWithFallback(bucket, lookupKey, versionID)
+	if err != nil || len(ecRec.Nodes) == 0 {
 		return nil
 	}
 	var owned []int

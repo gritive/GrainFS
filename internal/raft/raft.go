@@ -477,6 +477,13 @@ func (n *Node) LeaderID() string {
 	return n.leaderID
 }
 
+// IsLeader reports whether this node is the current Raft leader.
+func (n *Node) IsLeader() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.leaderID == n.id && n.leaderID != ""
+}
+
 // ID returns the node's ID.
 func (n *Node) ID() string {
 	return n.id
