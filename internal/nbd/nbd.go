@@ -28,6 +28,7 @@ const (
 	// Transmission flags
 	nbdFlagHasFlags  = uint16(1 << 0)
 	nbdFlagSendFlush = uint16(1 << 2)
+	nbdFlagSendTrim  = uint16(1 << 5) // NBD spec: bit 5
 
 	// Option types
 	nbdOptExportName = uint32(1)
@@ -50,6 +51,7 @@ const (
 	nbdCmdWrite = uint32(1)
 	nbdCmdDisc  = uint32(2)
 	nbdCmdFlush = uint32(3)
+	nbdCmdTrim  = uint32(4)
 )
 
 // Server serves a single volume over NBD protocol.
@@ -213,7 +215,7 @@ func (s *Server) sendExportData(conn net.Conn, vol *volume.Volume) error {
 	// For NBD_OPT_EXPORT_NAME: send size(8) + transmission flags(2) + zeros(124)
 	buf := make([]byte, 134)
 	binary.BigEndian.PutUint64(buf[0:8], uint64(vol.Size))
-	binary.BigEndian.PutUint16(buf[8:10], nbdFlagHasFlags|nbdFlagSendFlush)
+	binary.BigEndian.PutUint16(buf[8:10], nbdFlagHasFlags|nbdFlagSendFlush|nbdFlagSendTrim)
 	// rest is zeros
 	_, err := conn.Write(buf)
 	return err
@@ -224,7 +226,7 @@ func (s *Server) handleOptGo(conn net.Conn, vol *volume.Volume, optType uint32) 
 	info := make([]byte, 12)
 	binary.BigEndian.PutUint16(info[0:2], nbdInfoExport)
 	binary.BigEndian.PutUint64(info[2:10], uint64(vol.Size))
-	binary.BigEndian.PutUint16(info[10:12], nbdFlagHasFlags|nbdFlagSendFlush)
+	binary.BigEndian.PutUint16(info[10:12], nbdFlagHasFlags|nbdFlagSendFlush|nbdFlagSendTrim)
 	if err := s.sendOptReply(conn, optType, nbdRepInfo, info); err != nil {
 		return err
 	}
@@ -298,6 +300,12 @@ func (s *Server) handleRequest(conn net.Conn) error {
 		return io.EOF
 
 	case nbdCmdFlush:
+		return s.sendReply(conn, handle, 0, nil)
+
+	case nbdCmdTrim:
+		if err := s.mgr.Discard(s.volName, int64(offset), int64(length)); err != nil {
+			return s.sendReply(conn, handle, 5, nil) // EIO
+		}
 		return s.sendReply(conn, handle, 0, nil)
 
 	default:
