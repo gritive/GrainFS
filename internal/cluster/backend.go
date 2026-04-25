@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,10 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// shardRPCTimeout is the per-shard RPC deadline for remote writes/reads.
+// QUIC max-idle is 10 s; 3 s leaves margin for retries before the stream times out.
+const shardRPCTimeout = 3 * time.Second
 
 // newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
 // UUIDv7 is k-sortable by millisecond timestamp; ListObjectVersions reverses to DESC.
@@ -543,7 +548,7 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 			if node == selfID {
 				werr = b.shardSvc.WriteLocalShard(bucket, shardKey, i, shards[i])
 			} else {
-				writeCtx, writeCancel := context.WithTimeout(gctx, 3*time.Second)
+				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
 				defer writeCancel()
 				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, i, shards[i])
 				if b.peerHealth != nil {
@@ -982,12 +987,16 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 					resultCh <- shardResult{idx: i, err: fmt.Errorf("node %s unhealthy", node)}
 					return
 				}
-				shardCtx, shardCancel := context.WithTimeout(readCtx, 3*time.Second)
+				shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
 				defer shardCancel()
 				data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
 				if b.peerHealth != nil {
 					if err != nil {
-						b.peerHealth.MarkUnhealthy(node)
+						if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
+							// k-of-n early exit cancelled this shard — not a peer failure
+						} else {
+							b.peerHealth.MarkUnhealthy(node)
+						}
 					} else {
 						b.peerHealth.MarkHealthy(node)
 					}
@@ -1064,9 +1073,16 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 			if node == selfID {
 				werr = b.shardSvc.WriteLocalShard(bucket, key, i, newShards[i])
 			} else {
-				writeCtx, writeCancel := context.WithTimeout(gctx, 3*time.Second)
+				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
 				defer writeCancel()
 				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, key, i, newShards[i])
+				if b.peerHealth != nil {
+					if werr != nil {
+						b.peerHealth.MarkUnhealthy(node)
+					} else {
+						b.peerHealth.MarkHealthy(node)
+					}
+				}
 			}
 			if werr != nil {
 				return fmt.Errorf("upgrade write shard %d to %s: %w", i, node, werr)

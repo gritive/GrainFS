@@ -20,6 +20,10 @@ import (
 // re-proposing the same object while Phase 1-3 are in progress.
 const migrationInflightTTL = 5 * time.Minute
 
+// balancerChanBuf is the channel buffer for actor message delivery.
+// Sized to absorb burst FSM notifications without blocking the apply loop.
+const balancerChanBuf = 64
+
 // ObjectPicker selects an object stored locally on the source node for migration.
 // SrcNode is always the leader itself, so implementations scan local storage.
 type ObjectPicker interface {
@@ -214,7 +218,7 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 		cbs:       make(map[string]*circuitBreaker),
 		migQueue:  NewMigrationPriorityQueue(cfg.MigrationProposalRate),
 		logger:    log.With().Str("component", "balancer").Logger(),
-		ch:        make(chan balancerMsg, 64),
+		ch:        make(chan balancerMsg, balancerChanBuf),
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -281,7 +285,13 @@ func (p *BalancerProposer) selectDstNode() (string, bool) {
 // the same object to be re-proposed if it still exists on this node.
 // Called by the FSM when CmdMigrationDone is applied (FSM goroutine).
 func (p *BalancerProposer) NotifyMigrationDone(bucket, key, versionID string) {
-	p.ch <- balancerMsg{kind: msgBalancerNotifyDone, bucket: bucket, key: key, ver: versionID}
+	msg := balancerMsg{kind: msgBalancerNotifyDone, bucket: bucket, key: key, ver: versionID}
+	select {
+	case p.ch <- msg:
+	default:
+		p.logger.Warn().Str("bucket", bucket).Str("key", key).
+			Msg("balancer: NotifyMigrationDone dropped — channel full; will re-propose on next sweep")
+	}
 }
 
 // SetObjectPicker sets the picker used by proposeMigration to select which object to move.
@@ -422,8 +432,17 @@ type BalancerStatus struct {
 // Blocks until the actor goroutine processes the request.
 func (p *BalancerProposer) Status() BalancerStatus {
 	replyCh := make(chan BalancerStatus, 1)
-	p.ch <- balancerMsg{kind: msgBalancerStatus, replyCh: replyCh}
-	return <-replyCh
+	select {
+	case p.ch <- balancerMsg{kind: msgBalancerStatus, replyCh: replyCh}:
+	case <-p.stopCh:
+		return BalancerStatus{}
+	}
+	select {
+	case s := <-replyCh:
+		return s
+	case <-p.stopCh:
+		return BalancerStatus{}
+	}
 }
 
 // anyNodeInGracePeriod returns true if any node in the store has a non-zero JoinedAt
