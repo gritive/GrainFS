@@ -22,11 +22,13 @@ build: bin/$(BINARY)
 
 fbs: $(FBS_STAMPS)
 
+UNIT_PKGS := $(shell go list ./... | grep -v '/tests/e2e')
+
 test:
-	go test ./... -count=1 -cover
+	go test $(UNIT_PKGS) -count=1 -cover
 
 test-race:
-	go test ./... -count=1 -race -cover
+	go test $(UNIT_PKGS) -count=1 -race -cover
 
 test-e2e: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -v -count=1 -timeout 600s
