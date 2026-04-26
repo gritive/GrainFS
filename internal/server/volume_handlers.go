@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
-	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 type volumeRequest struct {
@@ -95,7 +97,7 @@ func (s *Server) recalculateVolume(_ context.Context, c *app.RequestContext) {
 	before, after, err := s.volMgr.Recalculate(name)
 	if err != nil {
 		status := consts.StatusInternalServerError
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, volume.ErrNotFound) {
 			status = consts.StatusNotFound
 		}
 		c.JSON(status, map[string]string{"error": err.Error()})

@@ -2,6 +2,7 @@ package volume
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -9,6 +10,9 @@ import (
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// ErrNotFound is returned when a volume does not exist.
+var ErrNotFound = errors.New("volume not found")
 
 const (
 	DefaultBlockSize  = 4096
@@ -118,7 +122,7 @@ func (m *Manager) Delete(name string) error {
 
 	// Verify volume exists
 	if _, _, err := m.backend.GetObject(volumeBucketName, metaKey(name)); err != nil {
-		return fmt.Errorf("volume %q not found", name)
+		return fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
 
 	// Delete all block objects
@@ -445,7 +449,7 @@ func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
 	}
 	rc, _, err := m.backend.GetObject(volumeBucketName, metaKey(name))
 	if err != nil {
-		return nil, fmt.Errorf("volume %q not found", name)
+		return nil, fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
 	defer rc.Close()
 
