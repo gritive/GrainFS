@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package nbd implements an NBD (Network Block Device) server backed by a volume.Manager.
 // NBD protocol spec: https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md
 package nbd

@@ -22,6 +22,7 @@ Remove the `Preflight health check` item — shipped in commit `1a988fd` (#58).
 - `internal/nbd/nbd.go` — remove `//go:build linux` tag
 - `cmd/grainfs/serve_nbd_other.go` — delete (stub no longer needed)
 - `cmd/grainfs/serve_nbd_linux.go` — rename to `serve_nbd.go`, remove `//go:build linux` tag
+- `cmd/grainfs/serve.go:56` — update `--nbd-port` description: `"NBD server port (0 = disabled). Client-side nbd-client still requires Linux."`
 - `internal/nbd/nbd_test.go`, `e2e_test.go`, `panic_recovery_test.go` — keep `//go:build linux` (require Linux kernel NBD client)
 
 **Result:** `grainfs` binary compiles on macOS/Windows. NBD client usage still requires Linux.
@@ -50,6 +51,11 @@ No flag changes. Warning only. Existing `--no-auth` behavior unchanged.
 
 ### Backend — `internal/volume/volume.go`
 
+Add constant (also update `Delete()` to use it):
+```go
+const maxBlockListLimit = 1_000_000
+```
+
 New exported method on `Manager`:
 
 ```go
@@ -61,14 +67,17 @@ func (m *Manager) Recalculate(name string) (int64, int64, error)
 Implementation:
 1. Lock `m.mu`
 2. Lookup volume by name; error if not found
-3. `ListObjects(volumeBucketName, blockPrefix(name), 1_000_000)`
-4. `after = int64(len(objs))`
-5. `before = vol.AllocatedBlocks`
-6. If `before == after`, return early (no write)
-7. `vol.AllocatedBlocks = after`; `PutObject` the updated metadata
-8. Return `before, after, nil`
+3. `objs, err := ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)`
+4. If `err != nil`, return `0, 0, err` (do not write)
+5. `after = int64(len(objs))`
+6. `before = vol.AllocatedBlocks`
+7. If `before == after`, return early (no write)
+8. `vol.AllocatedBlocks = after`; `if err := PutObject(...); err != nil { return 0, 0, err }`
+9. Return `before, after, nil`
 
-### REST Endpoint — `internal/server/server.go`
+Note: `before=-1` (untracked volume) is treated the same as any other drift — Recalculate initializes tracking.
+
+### REST Endpoint — `internal/server/volume_handlers.go`
 
 ```
 POST /volumes/:name/recalculate
@@ -93,8 +102,13 @@ grainfs volume recalculate <name> [--endpoint http://localhost:9000]
 
 ### Testing
 
-- Unit test for `Manager.Recalculate`: create volume, write 3 blocks, manually set `AllocatedBlocks = 99`, call `Recalculate`, assert `before=99, after=3`
-- No REST handler test needed (handler is a thin pass-through)
+Unit tests in `internal/volume/volume_test.go` (table-driven):
+1. **Drift**: create volume, write 3 blocks, set `AllocatedBlocks=99`, call `Recalculate` → assert `before=99, after=3, err=nil`
+2. **Not found**: `Recalculate("nonexistent")` → assert `err != nil`
+3. **ListObjects error**: inject failing backend → assert error propagated, metadata not written
+4. **Early return**: write 3 blocks, `AllocatedBlocks` already=3 → assert `before==after`, no write
+
+No REST handler test needed (handler is a thin pass-through).
 
 ---
 
@@ -106,8 +120,20 @@ grainfs volume recalculate <name> [--endpoint http://localhost:9000]
 | `internal/nbd/nbd.go` | Remove `//go:build linux` |
 | `cmd/grainfs/serve_nbd_other.go` | Delete |
 | `cmd/grainfs/serve_nbd_linux.go` | Rename → `serve_nbd.go`, remove build tag |
-| `cmd/grainfs/serve.go` | Add no-auth warning |
-| `internal/volume/volume.go` | Add `Recalculate()` method |
-| `internal/server/server.go` | Add `POST /volumes/:name/recalculate` handler |
+| `cmd/grainfs/serve.go` | Add no-auth warning; update `--nbd-port` description |
+| `internal/volume/volume.go` | Add `maxBlockListLimit` const + `Recalculate()` method; update `Delete()` to use const |
+| `internal/server/volume_handlers.go` | Add `recalculateVolume` handler + register route in server.go |
 | `cmd/grainfs/volume.go` | New file — `grainfs volume recalculate` CLI |
-| `internal/volume/volume_test.go` | Add `Recalculate` unit test |
+| `internal/volume/volume_test.go` | Add `Recalculate` unit tests (4 cases) |
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAN | 5 issues resolved, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+**VERDICT:** ENG CLEARED — ready to implement.

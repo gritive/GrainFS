@@ -53,7 +53,7 @@ func init() {
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
 	serveCmd.Flags().Int("nfs-port", 9002, "NFS server port (0 = disabled, volumes managed via REST API)")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled)")
-	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled, Linux only)")
+	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")
 	serveCmd.Flags().Int64("nbd-volume-size", 1024*1024*1024, "default NBD volume size in bytes")
 	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")
 	serveCmd.Flags().Duration("snapshot-interval", 1*time.Hour, "auto-snapshot interval (0 to disable)")
@@ -113,6 +113,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		authOpts = append(authOpts, server.WithAuth([]s3auth.Credentials{
 			{AccessKey: accessKey, SecretKey: secretKey},
 		}))
+	} else {
+		log.Warn().Msg("S3 authentication disabled — set --access-key and --secret-key for production")
 	}
 
 	noEncryption, _ := cmd.Flags().GetBool("no-encryption")

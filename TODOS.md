@@ -6,15 +6,15 @@
 
 ### 기타
 
+- [ ] **ListObjects pagination** — `Recalculate`, `Delete` 등이 사용하는 1M 블록 한도를 페이지네이션으로 대체해 초대형 볼륨에서 메모리 폭증 방지.
+- [ ] **NBD clean shutdown** — `nodeServices` 구조체에 `*nbd.Server`를 보관해 서버 종료 시 `srv.Close()` 호출 가능하도록 개선.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
-- [ ] **`grainfs volume recalculate`** — allocated_blocks 카운터 drift 복구 커맨드. 볼륨 블록 오브젝트를 ListObjects로 실제 카운트해 메타데이터 재기록.
 - [ ] **블록 중복 제거 (dedup)** — 동일 내용 블록을 해시로 식별해 공유. thin provisioning 위에 얹는 스토리지 효율화.
 - [ ] NBD Copy on Write in storage layer (thin provisioning Phase B: CoW 스냅샷)
 - [ ] Reference counting for shared blocks
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
-- [ ] nbd server가 굳이 linux만 컴파일 될 필요는 없잖아. 클라이언트만 리눅스 제한이지.
 - [ ] **Degraded mode (storage)** — *zero ops* — EC backend 실패 → read-only + critical alert; 단일 블롭 손상 → 해당 객체만 격리
 
 ## Phase 17: Scale-Out
@@ -53,7 +53,6 @@
 
 운영자 개입 없이도 안정적으로 동작하고, 문제 발생 시 명확하게 알려주는 기본기.
 
-- [ ] **Preflight health check** — *zero config* — 부팅 시 data dir 쓰기권한, 디스크 잔여공간, BadgerDB 무결성, port 충돌, TLS 키 권한 자동 검증하고 fail-fast
 - [ ] **Safe defaults for every flag** — *zero config* — `grainfs serve` 기본값만으로 production-ready (encryption on, `--no-auth` 명시적 warn, fsync 정책 명확)
 - [ ] **Operator-friendly errors** — *zero ops* — 모든 fatal error에 원인 + 복구 방법 + 관련 문서 링크 포함 (e.g., "BadgerDB write failed: disk full at /data, free at least 1GB or set --data-dir")
 - [ ] **One-command bootstrap** — *zero config* — `grainfs init` 하나로 cluster key, encryption key, 기본 credential, volume 생성 + 필요 파일 권한 설정

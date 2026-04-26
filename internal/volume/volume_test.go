@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -399,4 +400,82 @@ func TestPoolQuotaOverwriteDoesNotCount(t *testing.T) {
 	// 같은 블록 덮어쓰기 → 새 블록 없으므로 quota 검사 통과
 	_, err = mgr.WriteAt("overwrite-quota", make([]byte, blockSize), 0)
 	require.NoError(t, err, "overwrite of existing block should not be quota-limited")
+}
+
+// listErrBackend wraps LocalBackend but fails ListObjects.
+type listErrBackend struct {
+	storage.Backend
+}
+
+func (b *listErrBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	// Fail only for the volume block listing; pass through meta listing.
+	if prefix != metaPrefix {
+		return nil, fmt.Errorf("injected list error")
+	}
+	return b.Backend.ListObjects(bucket, prefix, maxKeys)
+}
+
+func TestRecalculate(t *testing.T) {
+	const blockSize = DefaultBlockSize
+
+	t.Run("drift fixed", func(t *testing.T) {
+		dir := t.TempDir()
+		backend, err := storage.NewLocalBackend(dir)
+		require.NoError(t, err)
+		mgr := NewManager(backend)
+
+		_, err = mgr.Create("drift-vol", int64(blockSize*10))
+		require.NoError(t, err)
+
+		// Write 3 blocks
+		_, err = mgr.WriteAt("drift-vol", make([]byte, blockSize*3), 0)
+		require.NoError(t, err)
+
+		// Artificially drift AllocatedBlocks
+		mgr.mu.Lock()
+		mgr.volumes["drift-vol"].AllocatedBlocks = 99
+		mgr.mu.Unlock()
+
+		before, after, err := mgr.Recalculate("drift-vol")
+		require.NoError(t, err)
+		assert.Equal(t, int64(99), before)
+		assert.Equal(t, int64(3), after)
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		mgr := setupManager(t)
+		_, _, err := mgr.Recalculate("nonexistent")
+		assert.Error(t, err)
+	})
+
+	t.Run("list error propagated", func(t *testing.T) {
+		dir := t.TempDir()
+		base, err := storage.NewLocalBackend(dir)
+		require.NoError(t, err)
+		mgr := NewManager(&listErrBackend{Backend: base})
+
+		_, err = mgr.Create("err-vol", int64(blockSize*4))
+		require.NoError(t, err)
+
+		_, _, err = mgr.Recalculate("err-vol")
+		assert.Error(t, err)
+	})
+
+	t.Run("no drift no write", func(t *testing.T) {
+		dir := t.TempDir()
+		backend, err := storage.NewLocalBackend(dir)
+		require.NoError(t, err)
+		mgr := NewManager(backend)
+
+		_, err = mgr.Create("nodrift-vol", int64(blockSize*10))
+		require.NoError(t, err)
+
+		_, err = mgr.WriteAt("nodrift-vol", make([]byte, blockSize*3), 0)
+		require.NoError(t, err)
+
+		// AllocatedBlocks should already be 3 after WriteAt
+		before, after, err := mgr.Recalculate("nodrift-vol")
+		require.NoError(t, err)
+		assert.Equal(t, before, after, "no drift: before and after must match")
+	})
 }
