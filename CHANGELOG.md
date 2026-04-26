@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.4.32] - 2026-04-26
+
+### Fixed
+
+- **make test e2e 테스트 격리** (`Makefile`): `UNIT_PKGS` 변수 도입으로 `make test`/`make test-race`에서 `tests/e2e` 제외. E2E 서버 기동이 유닛 테스트 QUIC handshake 고루틴을 CPU 기아 상태로 만들어 발생하던 `TestQUICTransport_ThreeNodes` 간헐적 실패 수정.
+
 ## [0.0.4.31] - 2026-04-25
 
 ### Added
