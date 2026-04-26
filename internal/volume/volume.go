@@ -2,6 +2,7 @@ package volume
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,10 +11,14 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// ErrNotFound is returned when a volume does not exist.
+var ErrNotFound = errors.New("volume not found")
+
 const (
-	DefaultBlockSize = 4096
-	volumeBucketName = "__grainfs_volumes"
-	metaPrefix       = "__vol/"
+	DefaultBlockSize  = 4096
+	volumeBucketName  = "__grainfs_volumes"
+	metaPrefix        = "__vol/"
+	maxBlockListLimit = 1_000_000
 )
 
 // Volume represents a virtual block device backed by object storage.
@@ -117,11 +122,11 @@ func (m *Manager) Delete(name string) error {
 
 	// Verify volume exists
 	if _, _, err := m.backend.GetObject(volumeBucketName, metaKey(name)); err != nil {
-		return fmt.Errorf("volume %q not found", name)
+		return fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
 
 	// Delete all block objects
-	objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), 100000)
+	objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)
 	if err == nil {
 		for _, obj := range objs {
 			_ = m.backend.DeleteObject(volumeBucketName, obj.Key)
@@ -402,6 +407,40 @@ func (m *Manager) RecordFreedBytes(name string, n int64) error {
 	return nil
 }
 
+// Recalculate counts actual block objects via ListObjects and rewrites AllocatedBlocks.
+// Returns (before, after int64, err error). If before==after no write is performed.
+// AllocatedBlocks=-1 (untracked) is treated as drift — Recalculate initializes tracking.
+func (m *Manager) Recalculate(name string) (int64, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	vol, err := m.getVolUnlocked(name)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list blocks for recalculate: %w", err)
+	}
+
+	after := int64(len(objs))
+	before := vol.AllocatedBlocks
+	if before == after {
+		return before, after, nil
+	}
+
+	vol.AllocatedBlocks = after
+	data, err := marshalVolume(vol)
+	if err != nil {
+		return 0, 0, fmt.Errorf("marshal volume metadata: %w", err)
+	}
+	if _, err := m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
+		return 0, 0, fmt.Errorf("store volume metadata: %w", err)
+	}
+	return before, after, nil
+}
+
 // getVolUnlocked returns the cached volume pointer (caller must hold m.mu).
 // On cache miss, loads from storage and populates the cache.
 func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
@@ -410,7 +449,7 @@ func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
 	}
 	rc, _, err := m.backend.GetObject(volumeBucketName, metaKey(name))
 	if err != nil {
-		return nil, fmt.Errorf("volume %q not found", name)
+		return nil, fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
 	defer rc.Close()
 

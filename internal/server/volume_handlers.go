@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 type volumeRequest struct {
@@ -86,4 +89,25 @@ func (s *Server) deleteVolume(_ context.Context, c *app.RequestContext) {
 	}
 
 	c.SetStatusCode(consts.StatusNoContent)
+}
+
+func (s *Server) recalculateVolume(_ context.Context, c *app.RequestContext) {
+	name := c.Param("name")
+
+	before, after, err := s.volMgr.Recalculate(name)
+	if err != nil {
+		status := consts.StatusInternalServerError
+		if errors.Is(err, volume.ErrNotFound) {
+			status = consts.StatusNotFound
+		}
+		c.JSON(status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	c.JSON(consts.StatusOK, map[string]any{
+		"volume": name,
+		"before": before,
+		"after":  after,
+		"fixed":  before != after,
+	})
 }

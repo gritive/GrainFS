@@ -563,6 +563,30 @@ func TestVolumeHandlers_CreateConflict(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 }
 
+func TestVolumeHandlers_Recalculate(t *testing.T) {
+	base := setupTestServer(t)
+
+	// Create volume and write one block so AllocatedBlocks=1.
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/recalcvol?size=1048576", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// Recalculate on fresh volume (no blocks yet) → before=-1, after=0.
+	req, _ = http.NewRequest(http.MethodPost, base+"/volumes/recalcvol/recalculate", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `"volume":"recalcvol"`)
+
+	// Recalculate on nonexistent volume → 404.
+	req, _ = http.NewRequest(http.MethodPost, base+"/volumes/nosuchvol/recalculate", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 // --- Dashboard tests ---
 
 func TestServeDashboard(t *testing.T) {

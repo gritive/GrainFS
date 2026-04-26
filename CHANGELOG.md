@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.4.33] - 2026-04-26
+
+### Added
+
+- **`grainfs volume recalculate <name>`** (`cmd/grainfs/volume.go`): `AllocatedBlocks` drift 복구 CLI. `POST /volumes/:name/recalculate` 호출 후 before/after 출력.
+- **`Manager.Recalculate(name)`** (`internal/volume/volume.go`): ListObjects로 실제 블록 수 재산정, drift 있을 때만 메타데이터 갱신. `maxBlockListLimit = 1_000_000` 상수 도입 (Delete()도 공유).
+- **`POST /volumes/:name/recalculate`** (`internal/server/`): recalculate HTTP 엔드포인트. `{"volume","before","after","fixed"}` JSON 응답.
+- **No-auth 경고** (`cmd/grainfs/serve.go`): `--access-key`/`--secret-key` 미설정 시 서버 기동 시 `WARN` 로그 출력.
+- **NBD 서버 크로스 플랫폼** (`internal/nbd/nbd.go`, `cmd/grainfs/serve_nbd.go`): `//go:build linux` 태그 제거. NBD 서버 자체는 모든 OS에서 빌드·실행 가능(클라이언트 `nbd-client`는 여전히 Linux 필요).
+
+### Changed
+
+- **`--nbd-port` 설명 개선**: `Linux only` → `Client-side nbd-client still requires Linux.`
+
+### Refactored
+
+- **`volume.ErrNotFound` sentinel** (`internal/volume/volume.go`): "not found" 에러를 문자열 매칭 대신 `errors.Is()` 로 처리. 기존 `strings.Contains(err.Error(), "not found")` 패턴 제거.
+
 ## [0.0.4.32] - 2026-04-26
 
 ### Fixed
