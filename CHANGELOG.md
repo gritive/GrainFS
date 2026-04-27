@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.4.39] - 2026-04-28
+
+### Added
+
+- **Direct I/O on EC shard writes** (`internal/storage/directio/`, `cmd/grainfs/serve.go`): 새 `directio` 패키지 — Linux는 `O_DIRECT`, macOS는 `F_NOCACHE`, 그 외 플랫폼은 pass-through. `ShardService.WithDirectIO()` 옵션 + `--direct-io` 플래그(기본 `true`)로 활성. 1MB shard 쓰기는 ~10x, 4MB는 +40% 빨라짐 (Docker Linux VM 측정). overlayfs/일부 tmpfs가 `O_DIRECT`를 거부하면 자동으로 buffered 경로로 fallback — 운영자 조치 불필요.
+- **Phase 2 research benchmarks** (`internal/cluster/shardio_directio_bench_test.go`): EC shard write 경로의 O_DIRECT vs default 비교 + 동시성 1/4/16/64 스케일링. 결과를 주석으로 함께 보존해 후속 결정의 근거 제공. `make test-e2e-docker`로 실행 가능.
+
+### Changed
+
+- **Phase 2 io_uring 평가 — 미구현 결정**: 동시성 벤치마크에서 throughput이 ~600-700 MB/s에서 plateau, 즉 disk fsync가 병목이고 syscall layer가 아님이 확인됨. io_uring의 가치 명제(batched submission, no per-op syscall)가 GrainFS의 fsync-dominated EC shard write에 적용되지 않음. WAL 등 append-only 경로 도입 시 재평가.
+
 ## [0.0.4.38] - 2026-04-28
 
 ### Added
