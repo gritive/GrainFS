@@ -154,10 +154,20 @@ export function setupBucket() {
   check(res, { 'bucket ready': (r) => r.status === 200 || r.status === 409 });
 }
 
+// goja에서 randomString(N)은 char-by-char Math.random()을 부르므로 N≥256KB
+// 시 매우 비싸다. PUT 본문은 random이어야 할 이유가 없으므로 init context
+// (모든 VU 공유)에서 'x'.repeat으로 한 번만 만든다. 단 hash가 일정해 dedup
+// 효과가 다른 시스템에서 깨끗히 비교되도록 SHA prefix 정도만 random으로
+// 섞는다 (16 bytes).
+const FIXED_PAYLOAD = OBJECT_SIZE_KB > 0
+  ? randomString(16) + 'x'.repeat(OBJECT_SIZE_KB * 1024 - 16)
+  : null;
+
 export function mixedWorkload() {
   const key     = `obj-${__VU}-${__ITER}-${randomString(6)}`;
-  const size    = OBJECT_SIZE_KB > 0 ? OBJECT_SIZE_KB * 1024 : [1024, 4096, 16384, 65536][Math.floor(Math.random() * 4)];
-  const payload = randomString(size);
+  const payload = FIXED_PAYLOAD !== null
+    ? FIXED_PAYLOAD
+    : randomString([1024, 4096, 16384, 65536][Math.floor(Math.random() * 4)]);
 
   // PUT
   const putUrl = `${BASE}/${BUCKET}/${key}`;
