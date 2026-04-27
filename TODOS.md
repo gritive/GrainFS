@@ -6,8 +6,6 @@
 
 ### 기타
 
-- [ ] **[P0] Pre-existing E2E 실패 — TestCoW_SnapshotRollbackRestoresData / TestCoW_SnapshotListAndDelete** — v0.0.4.37 이후 master에서 지속적으로 실패. Phase 1 ship 시점 pre-existing 확인됨. 별도 조사 필요.
-- [ ] **Cross-platform Docker E2E** — Linux/macOS 구현이 다른 코드 경로(NBD Linux-only, 향후 O_DIRECT vs F_NOCACHE)는 Docker 컨테이너에서도 E2E 검증 필요. `make test-e2e-docker` 타깃 추가.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
