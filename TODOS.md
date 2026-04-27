@@ -26,7 +26,7 @@
 ## Phase 19: Performance
 
 - [ ] go-billy: Direct File I/O; O_DIRECT
-- [ ] Unified buffer cache: Centralized Page Cache
+- [ ] **EC shard cache 본구현** — 측정 완료 (3-node E2E, large object repeat 90% hit). `internal/cache/shardcache/` 신규 + getObjectEC 통합 + write/delete invalidate + `--shard-cache-size` 플래그. blockcache 패턴 재사용 (sharded LRU, byte budget, lock-free counters).
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)

@@ -20,6 +20,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -68,6 +69,7 @@ type Server struct {
 	alerts         *AlertsState      // nil if alerts not wired
 	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
 	degradedFlag   atomic.Bool       // true when EC degraded mode is active
+	blockCache     *blockcache.Cache // nil 또는 비활성. /api/cache/status가 노출.
 
 	// Bounded event queue + single worker. Decouples request handlers from
 	// BadgerDB write latency and prevents unbounded goroutine growth.
@@ -87,6 +89,14 @@ type Option func(*Server)
 func WithAuth(creds []s3auth.Credentials) Option {
 	return func(s *Server) {
 		s.verifier = s3auth.NewCachingVerifier(s3auth.NewVerifier(creds), 4096, 5*time.Minute)
+	}
+}
+
+// WithBlockCache wires the volume block cache so /api/cache/status can
+// expose its hits/misses/resident bytes for the dashboard.
+func WithBlockCache(c *blockcache.Cache) Option {
+	return func(s *Server) {
+		s.blockCache = c
 	}
 }
 
@@ -394,6 +404,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Cluster API (available in both local and cluster mode)
 	h.GET("/api/cluster/status", s.clusterStatus)
+	h.GET("/api/cache/status", s.cacheStatus)
 	h.POST("/api/cluster/join", s.joinClusterHandler)
 
 	// Balancer health API

@@ -1081,6 +1081,38 @@ func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 	c.Data(consts.StatusOK, "application/json", data)
 }
 
+// cacheStatus handles GET /api/cache/status. Reports the volume block
+// cache hit/miss counters + resident bytes so the operations dashboard
+// can show whether the cache is doing useful work and how full it is.
+// CachedBackend (object-level) and readamp (simulator) counters live in
+// /metrics; this endpoint is the human-readable summary the dashboard
+// consumes.
+func (s *Server) cacheStatus(_ context.Context, c *app.RequestContext) {
+	resp := map[string]any{
+		"block_cache": map[string]any{
+			"enabled": false,
+		},
+	}
+	if s.blockCache != nil {
+		stats := s.blockCache.Stats()
+		hitRate := 0.0
+		if stats.Hits+stats.Misses > 0 {
+			hitRate = 100 * float64(stats.Hits) / float64(stats.Hits+stats.Misses)
+		}
+		resp["block_cache"] = map[string]any{
+			"enabled":        stats.CapacityByte > 0,
+			"hits":           stats.Hits,
+			"misses":         stats.Misses,
+			"evictions":      stats.Evictions,
+			"resident_bytes": stats.ResidentByte,
+			"capacity_bytes": stats.CapacityByte,
+			"hit_rate_pct":   hitRate,
+		}
+	}
+	data, _ := json.Marshal(resp)
+	c.Data(consts.StatusOK, "application/json", data)
+}
+
 // joinClusterHandler handles POST /api/cluster/join for runtime local→cluster transition.
 func (s *Server) joinClusterHandler(_ context.Context, c *app.RequestContext) {
 	if s.joinCluster == nil {

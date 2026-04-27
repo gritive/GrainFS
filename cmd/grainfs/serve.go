@@ -25,9 +25,11 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -94,6 +96,16 @@ func init() {
 	// (some overlayfs/tmpfs) fall back to the buffered path automatically;
 	// pass --direct-io=false to force buffered everywhere.
 	serveCmd.Flags().Bool("direct-io", true, "bypass page cache on local EC shard writes (Linux O_DIRECT / macOS F_NOCACHE)")
+	// Phase 2 #3 evaluation flag: when on, every volume-block and EC-shard
+	// read is fed to the read-amplification simulator at three cache sizes
+	// (16/64/256 MB equivalent) per path. Hit/miss counters appear at
+	// /metrics under grainfs_readamp_*. Off by default — production pays
+	// only an atomic.Bool load per read when this is unset.
+	serveCmd.Flags().Bool("measure-read-amp", false, "enable read-amplification simulator (informs Unified Buffer Cache decision)")
+	// Phase 2 #3 implementation: in-memory block cache for volume.ReadAt.
+	// Default 64 MB matches the simulator's measured "knee" — workloads with
+	// temporal locality saturate around that budget. Set 0 to disable.
+	serveCmd.Flags().Int64("block-cache-size", 64*1024*1024, "volume block cache capacity in bytes (0 disables)")
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
 	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
 	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
@@ -299,6 +311,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
 		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
+	}
+	if measureReadAmp, _ := cmd.Flags().GetBool("measure-read-amp"); measureReadAmp {
+		readamp.Enable()
+		log.Info().Msg("read-amplification simulator enabled — see grainfs_readamp_* counters at /metrics")
 	}
 	shardSvc := cluster.NewShardService(dataDir, quicTransport, shardSvcOpts...)
 
@@ -567,14 +583,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		srvOpts = append(srvOpts, server.WithLifecycleStore(lifecycleMgr.Store()))
 	}
 
-	volMgr, dedupDB, err := buildVolumeManager(cmd, dataDir, backend)
+	volMgr, blockCache, dedupDB, err := buildVolumeManager(cmd, dataDir, backend)
 	if err != nil {
 		return fmt.Errorf("volume manager: %w", err)
 	}
 	if dedupDB != nil {
 		defer dedupDB.Close()
 	}
-	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr))
+	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache))
 
 	srv := server.New(addr, backend, srvOpts...)
 
@@ -686,24 +702,33 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	return nil
 }
 
-// buildVolumeManager creates the shared volume.Manager for the serve path.
-// When --dedup is set, it opens a dedicated BadgerDB at {dataDir}/dedup/ and
-// returns both the manager and the DB (caller must close the DB on shutdown).
-func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Backend) (*volume.Manager, *badger.DB, error) {
+// buildVolumeManager creates the shared volume.Manager for the serve
+// path. When --dedup is set, it opens a dedicated BadgerDB at
+// {dataDir}/dedup/ and returns the manager + DB (caller closes the DB
+// on shutdown). The block cache is constructed here so the same
+// instance is shared with the dashboard endpoint via WithBlockCache.
+func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Backend) (*volume.Manager, *blockcache.Cache, *badger.DB, error) {
 	dedupEnabled, _ := cmd.Flags().GetBool("dedup")
+	cacheSize, _ := cmd.Flags().GetInt64("block-cache-size")
+	cache := blockcache.New(cacheSize)
+	if cacheSize > 0 {
+		log.Info().Int64("bytes", cacheSize).Msg("volume block cache enabled")
+	}
+	opts := volume.ManagerOptions{BlockCache: cache}
 	if !dedupEnabled {
-		return volume.NewManager(backend), nil, nil
+		return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
 	}
 	dir := filepath.Join(dataDir, "dedup")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("create dedup dir: %w", err)
+		return nil, nil, nil, fmt.Errorf("create dedup dir: %w", err)
 	}
 	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
 	if err != nil {
-		return nil, nil, fmt.Errorf("open dedup db: %w", err)
+		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)
 	}
-	mgr := volume.NewManagerWithOptions(backend, volume.ManagerOptions{DedupIndex: dedup.NewBadgerIndex(db)})
-	return mgr, db, nil
+	opts.DedupIndex = dedup.NewBadgerIndex(db)
+	mgr := volume.NewManagerWithOptions(backend, opts)
+	return mgr, cache, db, nil
 }
 
 // loadOrCreateEncryptionKey loads a key from file or auto-generates one in the data directory.

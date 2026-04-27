@@ -15,6 +15,8 @@ import (
 	"crypto/sha256"
 
 	"github.com/google/uuid"
+	"github.com/gritive/GrainFS/internal/cache/blockcache"
+	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
@@ -54,6 +56,13 @@ type ManagerOptions struct {
 
 	// DedupIndex enables block-level deduplication. nil disables dedup.
 	DedupIndex dedup.DedupIndex
+
+	// BlockCache, if non-nil, sits in front of backend.GetObject on
+	// the ReadAt path. Hits skip the storage backend entirely; misses
+	// populate the cache so subsequent reads of the same physical
+	// block are free. Pass `blockcache.New(0)` (or leave nil) to
+	// disable. Sizing guidance is in the blockcache package doc.
+	BlockCache *blockcache.Cache
 }
 
 // SnapshotInfo describes a point-in-time snapshot of a volume.
@@ -66,10 +75,11 @@ type SnapshotInfo struct {
 // Manager manages volumes on top of a storage.Backend.
 type Manager struct {
 	backend  storage.Backend
-	mu       sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장
+	mu       sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장. lock-free actor 검토 — Manager는 메타·dedup·live_map 다중 자료구조의 cross-volume 원자성을 요구하고, 모든 read/write/snapshot operations이 통과하므로 channel-based actor는 핫패스 round-trip 비용 + 메타 RMW 시퀀싱 복잡도가 mutex보다 큼. 추후 sharded mutex 분리 검토 가능.
 	volumes  map[string]*Volume          // 인메모리 캐시
 	liveMaps map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
 	dedup    dedup.DedupIndex            // nil = dedup 비활성화
+	blocks   *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
 	opts     ManagerOptions
 }
 
@@ -85,6 +95,7 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 		volumes:  make(map[string]*Volume),
 		liveMaps: make(map[string]map[int64]string),
 		dedup:    opts.DedupIndex,
+		blocks:   opts.BlockCache,
 		opts:     opts,
 	}
 }
@@ -249,17 +260,44 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 			phyKey = physicalKey(name, blkNum, liveMap)
 		}
 
-		// Read the block
+		// Read the block. Order: simulator (always-on metering),
+		// real cache (skip backend on hit), backend fallback.
+		readamp.RecordVolumeBlock(phyKey)
 		blkData := make([]byte, vol.BlockSize)
+		if m.blocks != nil {
+			if cached, ok := m.blocks.Get(phyKey); ok {
+				copy(blkData, cached)
+				if len(cached) < vol.BlockSize {
+					clear(blkData[len(cached):])
+				}
+				canRead := int(bs - blkOff)
+				remaining := len(p) - totalRead
+				if canRead > remaining {
+					canRead = remaining
+				}
+				endPos := off + int64(totalRead) + int64(canRead)
+				if endPos > vol.Size {
+					canRead = int(vol.Size - pos)
+				}
+				copy(p[totalRead:totalRead+canRead], blkData[blkOff:blkOff+int64(canRead)])
+				totalRead += canRead
+				continue
+			}
+		}
 		rc, _, err := m.backend.GetObject(volumeBucketName, phyKey)
 		if err != nil {
-			// Block doesn't exist (or never written with dedup) = zeros
+			// Block doesn't exist (or never written with dedup) = zeros.
+			// We do NOT cache this — keeping zero entries pollutes the
+			// cache with phantom blocks for sparse volumes.
 			clear(blkData)
 		} else {
 			n, _ := io.ReadFull(rc, blkData)
 			rc.Close()
 			if n < vol.BlockSize {
 				clear(blkData[n:])
+			}
+			if m.blocks != nil {
+				m.blocks.Put(phyKey, blkData)
 			}
 		}
 
@@ -347,6 +385,12 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 	totalWritten := 0
 	newBlocks := 0
 	liveMapDirty := false
+	// invalidations accumulates every physical key whose cached
+	// content could be stale after this WriteAt call. We invalidate
+	// in a single pass at the end so the per-iteration write paths
+	// stay focused; the cache hit on a never-evicted key after a
+	// write is the only failure mode to avoid here.
+	var invalidations []string
 
 	for totalWritten < len(p) && off+int64(totalWritten) < vol.Size {
 		pos := off + int64(totalWritten)
@@ -370,6 +414,10 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 					io.ReadFull(rc, blkData)
 					rc.Close()
 				}
+				// Old canonical's content for THIS block is about to be
+				// replaced or the refcount decremented — drop the cache
+				// entry so a later read sees fresh state.
+				invalidations = append(invalidations, canonical)
 			} else {
 				isNew = true
 			}
@@ -381,6 +429,10 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 				io.ReadFull(rc, blkData)
 				rc.Close()
 			}
+			// In-place / CoW path: oldKey is the previous version of
+			// this block. Either we're about to overwrite it (direct)
+			// or replace its mapping (CoW) — invalidate either way.
+			invalidations = append(invalidations, oldKey)
 		}
 
 		// Write into the block buffer
@@ -448,7 +500,20 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		if m.dedup == nil && isNew {
 			newBlocks++
 		}
+		// targetKey holds the freshly-written content. If the cache
+		// already had a stale entry under this key (rare but possible
+		// across CoW version churn), drop it so the next read does not
+		// hand back outdated bytes.
+		if targetKey != "" {
+			invalidations = append(invalidations, targetKey)
+		}
 		totalWritten += canWrite
+	}
+
+	if m.blocks != nil {
+		for _, k := range invalidations {
+			m.blocks.Invalidate(k)
+		}
 	}
 
 	if liveMapDirty {
@@ -501,6 +566,7 @@ func (m *Manager) Discard(name string, off, length int64) error {
 	}
 
 	freed := int64(0)
+	var invalidations []string
 	for blkNum := firstBlock; blkNum <= lastBlock; blkNum++ {
 		if m.dedup != nil {
 			// Dedup path: block mapping and refcount managed in BadgerDB.
@@ -508,18 +574,25 @@ func (m *Manager) Discard(name string, off, length int64) error {
 			if freeErr != nil {
 				return fmt.Errorf("dedup free block %d: %w", blkNum, freeErr)
 			}
+			invalidations = append(invalidations, objectKey)
 			if shouldDelete {
 				freed++
 				m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
 			}
 		} else {
 			key := physicalKey(name, blkNum, liveMap)
+			invalidations = append(invalidations, key)
 			if err := m.backend.DeleteObject(volumeBucketName, key); err == nil {
 				freed++
 				if liveMap != nil {
 					delete(liveMap, blkNum)
 				}
 			}
+		}
+	}
+	if m.blocks != nil {
+		for _, k := range invalidations {
+			m.blocks.Invalidate(k)
 		}
 	}
 	if freed > 0 && liveMap != nil {

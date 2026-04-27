@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -1172,6 +1173,10 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 	resultCh := make(chan shardResult, len(rec.Nodes))
 	for i, node := range rec.Nodes {
 		i, node := i, node
+		// readamp tracks every shard fetch (local + remote) so the
+		// hit-rate curve reflects real reconstruction load. The cache
+		// would sit in front of both paths, so both must contribute.
+		readamp.RecordECShard(fmt.Sprintf("%s/%s/%d", bucket, shardKey, i))
 		go func() {
 			var data []byte
 			var err error
