@@ -70,6 +70,7 @@ tbody tr:last-child td{border-bottom:none}
 .drop-zone.dragging{border-color:var(--accent);background:var(--accent-subtle);color:var(--accent)}
 
 .hidden{display:none !important}
+[hidden]{display:none !important}
 </style>
 </head>
 <body>
@@ -208,6 +209,53 @@ tbody tr:last-child td{border-bottom:none}
         <button id="blame-dl-receipt" class="btn" style="font-size:0.75rem">Download Receipt JSON</button>
       </div>
     </div>
+  </div>
+
+  <!-- Cache Performance (Phase 2 #3 + follow-up): block_cache (volume.ReadAt) + shard_cache (getObjectEC) -->
+  <div id="cache-section" style="margin-bottom:1.5rem">
+    <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
+      <h3 style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint)">Cache Performance</h3>
+      <span id="cache-status-badge" aria-label="Cache status" style="font-size:0.65rem;padding:0.15rem 0.5rem;border-radius:9999px;background:rgba(255,255,255,0.05);color:var(--text-muted)">loading…</span>
+    </div>
+    <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+      <!-- Volume Block Cache -->
+      <div class="stat-card" id="block-cache-card">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.25rem">
+          <div class="label">Volume Block Cache</div>
+          <span id="block-cache-state" style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:9999px;background:rgba(255,255,255,0.05);color:var(--text-muted)">—</span>
+        </div>
+        <div class="value" id="block-cache-hit-rate" style="font-size:1.75rem">—</div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-top:0.25rem">hit rate · <span id="block-cache-hits">0</span> hits / <span id="block-cache-misses">0</span> miss</div>
+        <div style="margin-top:0.5rem">
+          <div style="background:var(--bg-deep);border-radius:3px;height:6px;overflow:hidden">
+            <div id="block-cache-fill" style="height:100%;width:0%;background:var(--accent,#3b82f6);border-radius:3px;transition:width 0.4s"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);margin-top:0.25rem">
+            <span><span id="block-cache-resident">0 B</span> / <span id="block-cache-capacity">0 B</span> resident</span>
+            <span><span id="block-cache-evictions">0</span> evicts</span>
+          </div>
+        </div>
+      </div>
+      <!-- EC Shard Cache -->
+      <div class="stat-card" id="shard-cache-card">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.25rem">
+          <div class="label">EC Shard Cache</div>
+          <span id="shard-cache-state" style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:9999px;background:rgba(255,255,255,0.05);color:var(--text-muted)">—</span>
+        </div>
+        <div class="value" id="shard-cache-hit-rate" style="font-size:1.75rem">—</div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-top:0.25rem">hit rate · <span id="shard-cache-hits">0</span> hits / <span id="shard-cache-misses">0</span> miss</div>
+        <div style="margin-top:0.5rem">
+          <div style="background:var(--bg-deep);border-radius:3px;height:6px;overflow:hidden">
+            <div id="shard-cache-fill" style="height:100%;width:0%;background:var(--accent,#3b82f6);border-radius:3px;transition:width 0.4s"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);margin-top:0.25rem">
+            <span><span id="shard-cache-resident">0 B</span> / <span id="shard-cache-capacity">0 B</span> resident</span>
+            <span><span id="shard-cache-evictions">0</span> evicts</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="cache-tip" style="margin-top:0.5rem;font-size:0.7rem;color:var(--text-faint)">Block cache fronts volume.ReadAt block fetches; shard cache fronts EC reconstruction shard fan-out. Both are sharded LRU with byte budgets; configure via <code>--block-cache-size</code> / <code>--shard-cache-size</code>.</div>
   </div>
 
   <!-- Live log stream -->
@@ -1313,10 +1361,60 @@ tbody tr:last-child td{border-bottom:none}
     }).catch(function() {});
   }
 
+  // Cache Performance polling: hits/misses/resident from /api/cache/status.
+  // Endpoint is auth-bypassed read-only (same tier as /metrics) so the
+  // dashboard fetches without credentials.
+  function paintCacheCard(prefix, c) {
+    var stateEl = document.getElementById(prefix + '-cache-state');
+    var hitRateEl = document.getElementById(prefix + '-cache-hit-rate');
+    if (!c || c.enabled === false) {
+      stateEl.textContent = 'disabled';
+      stateEl.style.background = 'rgba(255,255,255,0.05)';
+      stateEl.style.color = 'var(--text-muted)';
+      hitRateEl.textContent = 'off';
+      hitRateEl.style.color = 'var(--text-muted)';
+      document.getElementById(prefix + '-cache-fill').style.width = '0%';
+      return;
+    }
+    stateEl.textContent = 'active';
+    stateEl.style.background = 'rgba(34,197,94,0.12)';
+    stateEl.style.color = 'var(--success,#22c55e)';
+    var pct = c.hit_rate_pct || 0;
+    hitRateEl.textContent = pct.toFixed(1) + '%';
+    hitRateEl.style.color = pct >= 80 ? 'var(--success,#22c55e)' : pct >= 30 ? 'var(--accent,#3b82f6)' : 'var(--text)';
+    document.getElementById(prefix + '-cache-hits').textContent = (c.hits || 0).toLocaleString();
+    document.getElementById(prefix + '-cache-misses').textContent = (c.misses || 0).toLocaleString();
+    document.getElementById(prefix + '-cache-evictions').textContent = (c.evictions || 0).toLocaleString();
+    document.getElementById(prefix + '-cache-resident').textContent = fmtBytes(c.resident_bytes || 0);
+    document.getElementById(prefix + '-cache-capacity').textContent = fmtBytes(c.capacity_bytes || 0);
+    var fillPct = c.capacity_bytes > 0 ? Math.min(100, (c.resident_bytes / c.capacity_bytes) * 100) : 0;
+    document.getElementById(prefix + '-cache-fill').style.width = fillPct.toFixed(1) + '%';
+    document.getElementById(prefix + '-cache-fill').style.background = fillPct >= 90 ? 'var(--warning,#f59e0b)' : 'var(--accent,#3b82f6)';
+  }
+  function refreshCacheStatus() {
+    var badge = document.getElementById('cache-status-badge');
+    fetch(baseURL + '/api/cache/status').then(function(r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.json();
+    }).then(function(d) {
+      badge.textContent = 'live';
+      badge.style.background = 'rgba(34,197,94,0.12)';
+      badge.style.color = 'var(--success,#22c55e)';
+      paintCacheCard('block', d.block_cache);
+      paintCacheCard('shard', d.shard_cache);
+    }).catch(function() {
+      badge.textContent = 'offline';
+      badge.style.background = 'rgba(239,68,68,0.12)';
+      badge.style.color = 'var(--danger,#ef4444)';
+    });
+  }
+
   // Init
   loadBuckets();
   setInterval(refreshStats, 3000);
   refreshStats();
+  setInterval(refreshCacheStatus, 3000);
+  refreshCacheStatus();
 })();
 </script>
 </body>
