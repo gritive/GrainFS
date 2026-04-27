@@ -10,6 +10,10 @@
 
 - **Phase 2 QUIC 내부 통신 압축 — 미구현 결정**: 측정 결과 raft_batch(45 KB AppendEntries)에서만 zstd가 32배 압축 + 1 Gbps에서 +311 µs 순이득. 그 외 모든 payload class(작은 gossip, receipt, single Raft cmd)는 압축/해제 cost가 wire saving을 초과. 10 Gbps DC LAN에서는 raft_batch조차 동률, 25 Gbps에서는 net loss. WAN/cross-region 배포가 표준이 되거나 batch-aware Raft pipelining이 도입될 때 재평가. 자세한 측정 데이터는 `~/.gstack/projects/gritive-grains/whitekid-master-design-20260427-180827-stability-perf-roadmap.md` Phase 2 #2 항목 참조.
 
+### Fixed
+
+- **NBD dedup E2E**: `TestNBD_Dedup`의 SavingsRatio 시나리오가 fresh volume에서 실패하던 문제 수정 (`docker/nbd-dedup-test.sh`). 새 볼륨은 `AllocatedBlocks=-1` (legacy 호환용 untracked sentinel)을 리턴하는데 스크립트의 `BASELINE+1` assertion이 -1+1=0 != 실제 1로 어긋남. 스크립트에서 `-1`을 `0`으로 정규화. 프로덕션 시맨틱은 변경 없음.
+
 ## [0.0.4.39] - 2026-04-28
 
 ### Added
