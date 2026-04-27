@@ -89,7 +89,7 @@ func init() {
 	serveCmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
 	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	serveCmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
-	serveCmd.Flags().Bool("dedup", false, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
+	serveCmd.Flags().Bool("dedup", true, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
 	rootCmd.AddCommand(serveCmd)
 }
 
