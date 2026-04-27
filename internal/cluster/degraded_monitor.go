@@ -132,9 +132,11 @@ func (m *DegradedMonitor) checkQuorum() {
 }
 
 func (m *DegradedMonitor) check() {
-	// If EC is not configured at all (DataShards == 0 = solo mode),
-	// there is nothing to protect — never degraded.
-	if m.backend.ecConfig.DataShards == 0 {
+	// Guard 1: EC not configured at all (DataShards == 0) — solo deploy.
+	// Guard 2: EC configured but cluster too small to actually erasure-code
+	// (e.g. single node with k=4 m=2). ECActive() handles this — without the
+	// guard we'd false-positive every single-node test that has EC configured.
+	if m.backend.ecConfig.DataShards == 0 || !m.backend.ECActive() {
 		m.tracker.Report(false, "", "")
 		return
 	}
