@@ -43,6 +43,11 @@ func TestMain(m *testing.M) {
 		"--nfs-port", fmt.Sprintf("%d", nfsPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort())}
 
+	// GRAINFS_DEDUP=1 enables block-level deduplication via BadgerDB index.
+	if os.Getenv("GRAINFS_DEDUP") == "1" {
+		args = append(args, "--dedup")
+	}
+
 	// GRAINFS_PPROF=1 enables comprehensive pprof profiling.
 	// CPU profile is collected concurrently with the test run (25s window).
 	// All profiles are saved to /tmp/grainfs-e2e-*.out after tests complete.
