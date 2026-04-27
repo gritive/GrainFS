@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/volume/dedup"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -674,4 +676,157 @@ func TestRecalculate(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, before, after, "no drift: before and after must match")
 	})
+}
+
+// --- Dedup integration tests ---
+
+func openTestBadger(t *testing.T) *badger.DB {
+	t.Helper()
+	opts := badger.DefaultOptions("").WithInMemory(true).WithLogger(nil)
+	db, err := badger.Open(opts)
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func setupDedupManager(t *testing.T) *Manager {
+	t.Helper()
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	idx := dedup.NewBadgerIndex(openTestBadger(t))
+	return NewManagerWithOptions(backend, ManagerOptions{DedupIndex: idx})
+}
+
+// countObjects returns the number of S3 objects under the given prefix.
+func countObjects(t *testing.T, m *Manager, prefix string) int {
+	t.Helper()
+	objs, err := m.backend.ListObjects(volumeBucketName, prefix, maxBlockListLimit)
+	require.NoError(t, err)
+	return len(objs)
+}
+
+// TestDedupWriteSameContent writes the same 4KB block twice: the second write
+// must reuse the existing S3 object (refcount→2, no extra PutObject).
+func TestDedupWriteSameContent(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "dedup-vol"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*4))
+	require.NoError(t, err)
+
+	data := bytes.Repeat([]byte{0xAB}, DefaultBlockSize)
+
+	// First write: block 0
+	_, err = mgr.WriteAt(volName, data, 0)
+	require.NoError(t, err)
+
+	// Second write: same content to block 1
+	_, err = mgr.WriteAt(volName, data, int64(DefaultBlockSize))
+	require.NoError(t, err)
+
+	// Both logical blocks should read back correctly
+	buf := make([]byte, DefaultBlockSize)
+	_, err = mgr.ReadAt(volName, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, data, buf)
+
+	_, err = mgr.ReadAt(volName, buf, int64(DefaultBlockSize))
+	require.NoError(t, err)
+	assert.Equal(t, data, buf)
+
+	// Only one S3 block object should exist (dedup hit)
+	blockObjs := countObjects(t, mgr, blockPrefix(volName))
+	assert.Equal(t, 1, blockObjs, "dedup: same content block must share one S3 object")
+}
+
+// TestDedupDiscardReleasesRef verifies that Discard decrements the refcount,
+// and only deletes the S3 object when the last reference is removed.
+func TestDedupDiscardReleasesRef(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "dedup-discard"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*4))
+	require.NoError(t, err)
+
+	data := bytes.Repeat([]byte{0xCD}, DefaultBlockSize)
+
+	// Write same content to blocks 0 and 1 → refcount = 2, one S3 object
+	_, err = mgr.WriteAt(volName, data, 0)
+	require.NoError(t, err)
+	_, err = mgr.WriteAt(volName, data, int64(DefaultBlockSize))
+	require.NoError(t, err)
+
+	before := countObjects(t, mgr, blockPrefix(volName))
+	require.Equal(t, 1, before)
+
+	// Discard block 0 → refcount → 1, S3 object must survive
+	err = mgr.Discard(volName, 0, int64(DefaultBlockSize))
+	require.NoError(t, err)
+	assert.Equal(t, 1, countObjects(t, mgr, blockPrefix(volName)), "S3 object must survive while ref remains")
+
+	// Discard block 1 → refcount → 0, S3 object must be deleted
+	err = mgr.Discard(volName, int64(DefaultBlockSize), int64(DefaultBlockSize))
+	require.NoError(t, err)
+	assert.Equal(t, 0, countObjects(t, mgr, blockPrefix(volName)), "last ref gone: S3 object must be deleted")
+}
+
+// TestDedupOverwriteReleasesOldRef writes block 0 twice with different content.
+// The overwrite must release the old object's refcount (→0 → deleted) and
+// register the new content as a fresh S3 object.
+func TestDedupOverwriteReleasesOldRef(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "dedup-overwrite"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*4))
+	require.NoError(t, err)
+
+	data1 := bytes.Repeat([]byte{0x11}, DefaultBlockSize)
+	data2 := bytes.Repeat([]byte{0x22}, DefaultBlockSize)
+
+	// First write
+	_, err = mgr.WriteAt(volName, data1, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, countObjects(t, mgr, blockPrefix(volName)))
+
+	// Overwrite with different content: old object refcount→0 → deleted; new object created
+	_, err = mgr.WriteAt(volName, data2, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, countObjects(t, mgr, blockPrefix(volName)), "one new object after overwrite")
+
+	// Read back must return data2
+	buf := make([]byte, DefaultBlockSize)
+	_, err = mgr.ReadAt(volName, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, data2, buf)
+}
+
+// TestDedupPartialWritePreservesUntouchedBytes is the regression test for the
+// P0 data-loss bug: a sub-block partial write in dedup mode must load the
+// existing block via its canonical key before merging, not via physicalKey.
+// Without the fix, the untouched tail of the block would be zeroed out.
+func TestDedupPartialWritePreservesUntouchedBytes(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "dedup-partial"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*4))
+	require.NoError(t, err)
+
+	// Fill block 0 with a recognisable pattern.
+	full := bytes.Repeat([]byte{0xAA}, DefaultBlockSize)
+	_, err = mgr.WriteAt(volName, full, 0)
+	require.NoError(t, err)
+
+	// Partial overwrite: write 512 bytes of 0xBB at intra-block offset 512.
+	// Only bytes [512, 1024) should change; the rest must stay 0xAA.
+	const patchOffset = 512
+	const patchLen = 512
+	patch := bytes.Repeat([]byte{0xBB}, patchLen)
+	_, err = mgr.WriteAt(volName, patch, patchOffset)
+	require.NoError(t, err)
+
+	// Read back the whole block and verify byte-by-byte.
+	got := make([]byte, DefaultBlockSize)
+	_, err = mgr.ReadAt(volName, got, 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, full[:patchOffset], got[:patchOffset], "bytes before patch must be unchanged (0xAA)")
+	assert.Equal(t, patch, got[patchOffset:patchOffset+patchLen], "patched region must be 0xBB")
+	assert.Equal(t, full[patchOffset+patchLen:], got[patchOffset+patchLen:], "bytes after patch must be unchanged (0xAA)")
 }
