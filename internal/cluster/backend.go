@@ -58,16 +58,22 @@ type DistributedBackend struct {
 	fsm         *FSM
 	logger      zerolog.Logger
 	lastApplied atomic.Uint64
-	onApply     OnApplyFunc
-	snapMgr     *raft.SnapshotManager
-	snapNode    *raft.Node // node for CompactLog after snapshot
-	shardSvc    *ShardService
-	allNodes    []string // all node addresses (including self) for shard placement
-	selfAddr    string   // this node's raft address (matches entries in allNodes)
-	peerHealth  *PeerHealth
-	registry    *Registry // cache invalidators (VFS instances)
-	ecConfig    ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
-	shardLocks  sync.Map  // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+	// appliedSig is a "version channel" — atomically swapped on every Apply
+	// progression. propose() waits on the current channel instead of polling
+	// lastApplied, removing the 1ms time.Sleep tax from cluster-mode PUTs.
+	// Lock-free: each apply Swaps a fresh channel and closes the old one,
+	// so multiple concurrent applies/waits never share a close target.
+	appliedSig atomic.Pointer[chan struct{}]
+	onApply    OnApplyFunc
+	snapMgr    *raft.SnapshotManager
+	snapNode   *raft.Node // node for CompactLog after snapshot
+	shardSvc   *ShardService
+	allNodes   []string // all node addresses (including self) for shard placement
+	selfAddr   string   // this node's raft address (matches entries in allNodes)
+	peerHealth *PeerHealth
+	registry   *Registry // cache invalidators (VFS instances)
+	ecConfig   ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
+	shardLocks sync.Map  // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard
@@ -91,14 +97,40 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		node.SetNoOpCommand(noOp)
 	}
 
-	return &DistributedBackend{
+	b := &DistributedBackend{
 		root:     root,
 		db:       db,
 		node:     node,
 		fsm:      fsm,
 		logger:   log.With().Str("component", "distributed-backend").Logger(),
 		registry: NewRegistry(),
-	}, nil
+	}
+	initSig := make(chan struct{})
+	b.appliedSig.Store(&initSig)
+	return b, nil
+}
+
+// signalApplied atomically swaps the wait channel for a fresh one and closes
+// the old one so all current waiters wake. Lock-free; close-before-swap is
+// not used because two concurrent signalApplied calls would otherwise close
+// the same channel.
+func (b *DistributedBackend) signalApplied() {
+	newCh := make(chan struct{})
+	old := b.appliedSig.Swap(&newCh)
+	close(*old)
+}
+
+// waitApplied blocks until lastApplied >= idx or ctx fires.
+func (b *DistributedBackend) waitApplied(ctx context.Context, idx uint64) error {
+	for b.lastApplied.Load() < idx {
+		ch := *b.appliedSig.Load()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // SetShardCache configures the EC shard cache. Pass a cache built with
@@ -205,6 +237,7 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 				b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
 			}
 			b.lastApplied.Store(entry.Index)
+			b.signalApplied()
 
 			// Notify cache/metrics callback
 			if b.onApply != nil {
@@ -337,15 +370,7 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 		if err != nil {
 			return err
 		}
-		for b.lastApplied.Load() < idx {
-			select {
-			case <-proposeCtx.Done():
-				return proposeCtx.Err()
-			default:
-				time.Sleep(time.Millisecond)
-			}
-		}
-		return nil
+		return b.waitApplied(proposeCtx, idx)
 	}
 
 	// 팔로워: 리더에게 포워딩
