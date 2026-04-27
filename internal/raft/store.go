@@ -68,10 +68,20 @@ func WithManagedMode() BadgerLogStoreOption {
 	return func(s *BadgerLogStore) { s.managedMode = true }
 }
 
+// WithoutSyncWrites disables BadgerDB SyncWrites for the Raft log store.
+// Default is fsync-on-every-append (durability over latency). With this
+// option, writes batch through the page cache and survive process crashes
+// but not OS / power loss for the most recent entries. Use only when an
+// upstream layer provides equivalent durability or in benchmark setups.
+func WithoutSyncWrites() BadgerLogStoreOption {
+	return func(s *BadgerLogStore) { s.syncWrites = false }
+}
+
 // BadgerLogStore implements LogStore using BadgerDB.
 type BadgerLogStore struct {
 	db          *badger.DB
 	managedMode bool
+	syncWrites  bool
 }
 
 // IsManagedMode reports whether this store was opened with managed mode.
@@ -79,11 +89,11 @@ func (s *BadgerLogStore) IsManagedMode() bool { return s.managedMode }
 
 // NewBadgerLogStore creates a new log store backed by BadgerDB.
 func NewBadgerLogStore(path string, opts ...BadgerLogStoreOption) (*BadgerLogStore, error) {
-	s := &BadgerLogStore{}
+	s := &BadgerLogStore{syncWrites: true} // default: durable
 	for _, opt := range opts {
 		opt(s)
 	}
-	dbOpts := badger.DefaultOptions(path).WithLogger(nil).WithSyncWrites(true)
+	dbOpts := badger.DefaultOptions(path).WithLogger(nil).WithSyncWrites(s.syncWrites)
 	db, err := badger.Open(dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger log store: %w", err)

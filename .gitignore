@@ -9,6 +9,7 @@ bin/grainfs
 *.fbs.stamp
 benchmarks/report.json
 benchmarks/profiles/
+benchmarks/results-*/
 meta/
 raft/
 receipts/

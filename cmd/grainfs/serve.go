@@ -125,6 +125,7 @@ func init() {
 	serveCmd.Flags().Bool("dedup", true, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
 	// Rate limit overrides — defaults are production-safe (100/200 ip, 50/100 user).
 	// Benchmarks/dev/upstream-proxied deployments can relax these. 0 disables that layer.
+	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (default true; false trades durability for ~5–10ms PUT latency)")
 	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
 	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
 	serveCmd.Flags().Float64("rate-limit-user-rps", 50, "per-authenticated-user rate limit in requests/sec (0 disables)")
@@ -282,6 +283,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	var storeOpts []raft.BadgerLogStoreOption
 	if badgerManagedMode {
 		storeOpts = append(storeOpts, raft.WithManagedMode())
+	}
+	if raftLogFsync, _ := cmd.Flags().GetBool("raft-log-fsync"); !raftLogFsync {
+		storeOpts = append(storeOpts, raft.WithoutSyncWrites())
+		log.Warn().Msg("raft log fsync DISABLED — last entries may be lost on OS crash / power loss")
 	}
 	logStore, err := raft.NewBadgerLogStore(raftDir, storeOpts...)
 	if err != nil {

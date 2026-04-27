@@ -710,32 +710,45 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		cleanup()
-		return nil, err
-	}
-
+	// ETag (md5) + propose는 shard fan-out과 독립이라 parallel하게 띄운다.
+	// wall time = max(shard fan-out, raft commit) 가 되어 sum이 줄어든다.
 	h := md5.Sum(data)
 	etag := hex.EncodeToString(h[:])
 	now := time.Now().Unix()
 
-	// Commit metadata. RingVersion + ECData/ECParity + NodeIDs stored so reads
-	// can reconstruct shards without a separate placement record (NodeIDs fallback
-	// is used when RingVersion==0 and no placement record exists).
-	// On failure, best-effort cleanup of orphaned shards.
-	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      bucket,
-		Key:         key,
-		Size:        int64(len(data)),
-		ContentType: contentType,
-		ETag:        etag,
-		ModTime:     now,
-		VersionID:   versionID,
-		RingVersion: ringVer,
-		ECData:      uint8(effectiveCfg.DataShards),
-		ECParity:    uint8(effectiveCfg.ParityShards),
-		NodeIDs:     placement,
-	}); merr != nil {
+	proposeErrCh := make(chan error, 1)
+	go func() {
+		proposeErrCh <- b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+			Bucket:      bucket,
+			Key:         key,
+			Size:        int64(len(data)),
+			ContentType: contentType,
+			ETag:        etag,
+			ModTime:     now,
+			VersionID:   versionID,
+			RingVersion: ringVer,
+			ECData:      uint8(effectiveCfg.DataShards),
+			ECParity:    uint8(effectiveCfg.ParityShards),
+			NodeIDs:     placement,
+		})
+	}()
+
+	if err := g.Wait(); err != nil {
+		// Shard fan-out 실패. propose가 commit됐다면 metadata가 orphan되니
+		// 명시적으로 delete를 propose해 회수한다.
+		if perr := <-proposeErrCh; perr == nil {
+			_ = b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
+				Bucket:    bucket,
+				Key:       key,
+				VersionID: versionID,
+			})
+		}
+		cleanup()
+		return nil, err
+	}
+
+	if merr := <-proposeErrCh; merr != nil {
+		// Shards landed but metadata 못 commit → 고아 shard 비동기 삭제.
 		go b.deleteShardsAsync(bucket, placement, shardKey)
 		return nil, merr
 	}

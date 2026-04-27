@@ -41,6 +41,7 @@ grainfs_start_single() {
     --no-encryption \
     --rate-limit-ip-rps 1000000 --rate-limit-ip-burst 1000000 \
     --rate-limit-user-rps 1000000 --rate-limit-user-burst 1000000 \
+    --raft-log-fsync=false \
     $extra \
     >"$data_dir/grainfs.log" 2>&1 &
   GRAINFS_PIDS+=($!)
@@ -92,6 +93,7 @@ grainfs_start_cluster() {
       --no-encryption \
       --rate-limit-ip-rps 1000000 --rate-limit-ip-burst 1000000 \
       --rate-limit-user-rps 1000000 --rate-limit-user-burst 1000000 \
+      --raft-log-fsync=false \
       $extra \
       >"$data_dir/grainfs_n${i}.log" 2>&1 &
     GRAINFS_PIDS+=($!)
