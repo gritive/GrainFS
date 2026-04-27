@@ -80,6 +80,10 @@ func init() {
 	// Phase 16 Week 4 — webhook alerts.
 	serveCmd.Flags().String("alert-webhook", "", "Slack-compatible webhook URL for critical alerts (empty disables alerts)")
 	serveCmd.Flags().String("alert-webhook-secret", "", "shared secret for X-GrainFS-Signature HMAC-SHA256 (empty disables signing)")
+	// Predictive disk warnings — fires zerolog.Warn + critical webhook on transitions
+	// between OK/Warn/Critical levels. Defaults match the Phase 1 design (80%/90%).
+	serveCmd.Flags().Float64("disk-warn-threshold", 0.80, "disk used fraction (0-1) at which a 'disk_warn' alert+log fires")
+	serveCmd.Flags().Float64("disk-critical-threshold", 0.90, "disk used fraction (0-1) at which a 'disk_critical' alert+log fires")
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
 	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
 	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
@@ -441,7 +445,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// would emit disk stats. Register unconditionally — duplicate registration
 	// is guarded inside NewDiskCollector.
 	diskCollector := cluster.NewDiskCollector(nodeID, dataDir, nil, 30*time.Second)
-	go diskCollector.Run(ctx)
+	// Wiring of OnThreshold + Run() happens after clusterAlerts is built (below)
+	// so the callback can dispatch critical webhooks on transitions.
 
 	// Auto-create "default" bucket on startup. In cluster mode this must
 	// wait for Raft to elect a leader before the proposal can commit.
@@ -470,6 +475,42 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
 	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
 	clusterAlerts := server.NewAlertsState(clusterAlertWebhook, alerts.Options{Secret: clusterAlertSecret}, alerts.DegradedConfig{})
+
+	// Wire predictive disk warnings into the collector now that clusterAlerts
+	// exists. Thresholds are taken as fractions on the flag (more natural for
+	// operators) but DiskCollector works in percent.
+	diskWarnFrac, _ := cmd.Flags().GetFloat64("disk-warn-threshold")
+	diskCritFrac, _ := cmd.Flags().GetFloat64("disk-critical-threshold")
+	diskCollector.SetThresholds(diskWarnFrac*100, diskCritFrac*100)
+	diskCollector.SetOnThreshold(func(level cluster.DiskThresholdLevel, pct float64, availBytes uint64) {
+		// Webhook send may block on retries — dispatch in a goroutine so the
+		// collect loop is never delayed.
+		switch level {
+		case cluster.DiskLevelCritical:
+			log.Warn().Float64("pct", pct).Uint64("avail_bytes", availBytes).Msg("disk usage CRITICAL")
+			go func() {
+				_ = clusterAlerts.Send(alerts.Alert{
+					Type:     "disk_critical",
+					Severity: alerts.SeverityCritical,
+					Resource: nodeID,
+					Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
+				})
+			}()
+		case cluster.DiskLevelWarn:
+			log.Warn().Float64("pct", pct).Uint64("avail_bytes", availBytes).Msg("disk usage warning")
+			go func() {
+				_ = clusterAlerts.Send(alerts.Alert{
+					Type:     "disk_warn",
+					Severity: alerts.SeverityWarning,
+					Resource: nodeID,
+					Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
+				})
+			}()
+		case cluster.DiskLevelOK:
+			log.Info().Float64("pct", pct).Msg("disk usage recovered to normal")
+		}
+	})
+	go diskCollector.Run(ctx)
 	srvOpts := []server.Option{
 		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers, backend: distBackend}),
 		server.WithEventStore(eventstore.New(db)),
