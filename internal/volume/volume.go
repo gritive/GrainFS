@@ -12,8 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"crypto/sha256"
+
 	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
 
 // ErrNotFound is returned when a volume does not exist.
@@ -49,6 +52,9 @@ type ManagerOptions struct {
 	// PoolQuota is the maximum total allocated bytes across all volumes.
 	// 0 means unlimited (default).
 	PoolQuota int64
+
+	// DedupIndex enables block-level deduplication. nil disables dedup.
+	DedupIndex dedup.DedupIndex
 }
 
 // SnapshotInfo describes a point-in-time snapshot of a volume.
@@ -64,6 +70,7 @@ type Manager struct {
 	mu       sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장
 	volumes  map[string]*Volume          // 인메모리 캐시
 	liveMaps map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
+	dedup    dedup.DedupIndex            // nil = dedup 비활성화
 	opts     ManagerOptions
 }
 
@@ -78,6 +85,7 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 		backend:  backend,
 		volumes:  make(map[string]*Volume),
 		liveMaps: make(map[string]map[int64]string),
+		dedup:    opts.DedupIndex,
 		opts:     opts,
 	}
 }
@@ -336,27 +344,57 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 
 		copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
 
-		// Determine the target key: CoW allocates a new versioned key
+		// Determine the target key and write the block.
+		// With dedup: use content-addressed UUID keys; skip PutObject on cache hit.
+		// With CoW (no dedup): use versioned UUID keys; delete old on overwrite.
+		// Fallback: overwrite positional key in-place.
 		var targetKey string
-		if useCow {
+		if m.dedup != nil {
+			newKey := fmt.Sprintf("%s%s/blk_%012d_v%s", metaPrefix, name, blkNum, uuid.Must(uuid.NewV7()).String())
+			hash := sha256.Sum256(blkData)
+			canonical, dedupIsNew, dedupErr := m.dedup.LookupOrRegister(hash, newKey)
+			if dedupErr != nil {
+				return totalWritten, fmt.Errorf("dedup block %d: %w", blkNum, dedupErr)
+			}
+			targetKey = canonical
+			if dedupIsNew {
+				if _, err := m.backend.PutObject(volumeBucketName, targetKey,
+					bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+					return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
+				}
+			}
+			// Release old key if the block was overwritten with a different object
+			if !isNew && liveMap != nil {
+				if old, ok := liveMap[blkNum]; ok && old != targetKey {
+					m.mu.Unlock()
+					m.onLiveMapEntryRemoved(old)
+					m.mu.Lock()
+				}
+			}
+			if liveMap != nil {
+				liveMap[blkNum] = targetKey
+				liveMapDirty = true
+			}
+		} else if useCow {
 			targetKey = cowBlockKey(name, blkNum)
+			if _, err := m.backend.PutObject(volumeBucketName, targetKey,
+				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
+			}
+			// CoW: delete old physical object (PackedBackend decrements ref; deletes at ref=0)
+			if oldKey != targetKey {
+				if !isNew {
+					m.backend.DeleteObject(volumeBucketName, oldKey) //nolint:errcheck
+				}
+				liveMap[blkNum] = targetKey
+				liveMapDirty = true
+			}
 		} else {
 			targetKey = blockKey(name, blkNum)
-		}
-
-		// Write the block
-		if _, err := m.backend.PutObject(volumeBucketName, targetKey,
-			bytes.NewReader(blkData), "application/octet-stream"); err != nil {
-			return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
-		}
-
-		// CoW: delete old physical object (PackedBackend decrements ref; deletes at ref=0)
-		if useCow && oldKey != targetKey {
-			if !isNew {
-				m.backend.DeleteObject(volumeBucketName, oldKey) //nolint:errcheck
+			if _, err := m.backend.PutObject(volumeBucketName, targetKey,
+				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 			}
-			liveMap[blkNum] = targetKey
-			liveMapDirty = true
 		}
 
 		if isNew {
@@ -413,7 +451,21 @@ func (m *Manager) Discard(name string, off, length int64) error {
 
 	freed := int64(0)
 	for blkNum := firstBlock; blkNum <= lastBlock; blkNum++ {
-		if err := m.backend.DeleteObject(volumeBucketName, physicalKey(name, blkNum, liveMap)); err == nil {
+		key := physicalKey(name, blkNum, liveMap)
+		if m.dedup != nil {
+			// With dedup: refcount-aware deletion.
+			// Release the lock while calling onLiveMapEntryRemoved (which may hit S3).
+			if liveMap != nil {
+				if _, ok := liveMap[blkNum]; !ok {
+					continue // block not allocated
+				}
+				delete(liveMap, blkNum)
+				freed++
+			}
+			m.mu.Unlock()
+			m.onLiveMapEntryRemoved(key)
+			m.mu.Lock()
+		} else if err := m.backend.DeleteObject(volumeBucketName, key); err == nil {
 			freed++
 			if liveMap != nil {
 				delete(liveMap, blkNum)
@@ -585,7 +637,7 @@ func physicalKey(name string, blkNum int64, liveMap map[int64]string) string {
 }
 
 // getLiveMapUnlocked loads (or returns cached) the live_map for a volume.
-// Returns nil when the volume has no snapshots (zero overhead hot path).
+// Returns nil when the volume has no snapshots AND dedup is disabled (zero overhead hot path).
 // Caller must hold m.mu.
 func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 	if lm, ok := m.liveMaps[name]; ok {
@@ -595,13 +647,14 @@ func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if vol.SnapshotCount == 0 {
+	// Dedup requires live_map to track content-addressed keys even without snapshots.
+	if vol.SnapshotCount == 0 && m.dedup == nil {
 		m.liveMaps[name] = nil
 		return nil, nil
 	}
 	rc, _, err := m.backend.GetObject(volumeBucketName, liveMapKey(name))
 	if err != nil {
-		// No live_map object yet (fresh snapshot on volume with no previous writes)
+		// No live_map object yet (fresh volume or fresh snapshot)
 		lm := make(map[int64]string)
 		m.liveMaps[name] = lm
 		return lm, nil
@@ -613,6 +666,22 @@ func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 	}
 	m.liveMaps[name] = lm
 	return lm, nil
+}
+
+// onLiveMapEntryRemoved decrements the dedup refcount for objectKey.
+// If the refcount reaches zero, it deletes the S3 object.
+// When dedup is disabled, falls back to direct DeleteObject.
+// Caller must NOT hold m.mu (badgerIndex has its own mutex).
+func (m *Manager) onLiveMapEntryRemoved(objectKey string) {
+	if m.dedup == nil {
+		m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
+		return
+	}
+	shouldDelete, err := m.dedup.Release(objectKey)
+	if err != nil || !shouldDelete {
+		return
+	}
+	m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
 }
 
 // persistLiveMapUnlocked writes the live_map to storage. Caller must hold m.mu.
