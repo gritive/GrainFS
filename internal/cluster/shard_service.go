@@ -32,6 +32,11 @@ type ShardService struct {
 	// WithDirectIO and the --direct-io flag once measurement on the target
 	// filesystem confirms the win (see shardio_directio_bench_test.go).
 	directIO bool
+	// fsyncWrites controls whether shard writes call f.Sync() and dir.Sync().
+	// Default true (durable). Cluster deployments can opt out: EC parity on
+	// other nodes provides the redundancy that fsync would otherwise enforce
+	// on a single drive. WithoutFsync sets this to false.
+	fsyncWrites bool
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -51,11 +56,19 @@ func WithDirectIO() ShardServiceOption {
 	return func(s *ShardService) { s.directIO = true }
 }
 
+// WithoutFsync disables f.Sync()/dir.Sync() on shard writes. Trades single-
+// node OS-crash durability for ~5–10ms per PUT (macOS APFS). Safe in cluster
+// mode (≥3 nodes) because EC parity provides redundancy across hosts.
+func WithoutFsync() ShardServiceOption {
+	return func(s *ShardService) { s.fsyncWrites = false }
+}
+
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
 	s := &ShardService{
-		dataDir:   filepath.Join(dataDir, "shards"),
-		transport: tr,
+		dataDir:     filepath.Join(dataDir, "shards"),
+		transport:   tr,
+		fsyncWrites: true, // durable default
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -340,9 +353,11 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 	if err := s.writeShardFile(path, payload); err != nil {
 		return err
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		d.Close()
+	if s.fsyncWrites {
+		if d, err := os.Open(dir); err == nil {
+			_ = d.Sync()
+			d.Close()
+		}
 	}
 	return nil
 }
@@ -372,7 +387,7 @@ func (s *ShardService) writeShardFile(path string, payload []byte) error {
 			return err
 		}
 	}
-	if err := writeBuffered(tmp, payload); err != nil {
+	if err := writeBuffered(tmp, payload, s.fsyncWrites); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -382,9 +397,10 @@ func (s *ShardService) writeShardFile(path string, payload []byte) error {
 	return nil
 }
 
-// writeBuffered is the historical write path: open + write + sync + close.
+// writeBuffered is the historical write path: open + write + (sync) + close.
 // Kept verbatim for the !directIO branch and the direct-I/O fallback path.
-func writeBuffered(tmp string, payload []byte) error {
+// fsync is conditional on the caller's policy.
+func writeBuffered(tmp string, payload []byte, fsync bool) error {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
@@ -394,10 +410,12 @@ func writeBuffered(tmp string, payload []byte) error {
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("sync tmp shard: %w", err)
+	if fsync {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return fmt.Errorf("sync tmp shard: %w", err)
+		}
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)

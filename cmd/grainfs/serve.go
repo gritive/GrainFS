@@ -125,7 +125,7 @@ func init() {
 	serveCmd.Flags().Bool("dedup", true, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
 	// Rate limit overrides — defaults are production-safe (100/200 ip, 50/100 user).
 	// Benchmarks/dev/upstream-proxied deployments can relax these. 0 disables that layer.
-	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (default true; false trades durability for ~5–10ms PUT latency)")
+	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (auto: cluster=false (consensus provides redundancy), single=true; explicit value always wins)")
 	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
 	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
 	serveCmd.Flags().Float64("rate-limit-user-rps", 50, "per-authenticated-user rate limit in requests/sec (0 disables)")
@@ -284,9 +284,18 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if badgerManagedMode {
 		storeOpts = append(storeOpts, raft.WithManagedMode())
 	}
-	if raftLogFsync, _ := cmd.Flags().GetBool("raft-log-fsync"); !raftLogFsync {
+	// raft-log-fsync default policy:
+	//   - single (no peers): fsync=true   (1 노드뿐이라 redundancy 없음)
+	//   - cluster (peers≥1): fsync=false  (consensus 자체가 redundancy)
+	// 사용자가 flag를 명시했으면 그 값을 그대로 따른다.
+	raftLogFsync, _ := cmd.Flags().GetBool("raft-log-fsync")
+	if !cmd.Flags().Changed("raft-log-fsync") {
+		raftLogFsync = len(peers) == 0 // 명시 안 했으면 peer 수로 결정
+	}
+	if !raftLogFsync {
 		storeOpts = append(storeOpts, raft.WithoutSyncWrites())
-		log.Warn().Msg("raft log fsync DISABLED — last entries may be lost on OS crash / power loss")
+		log.Warn().Bool("cluster", len(peers) > 0).
+			Msg("raft log fsync DISABLED — durability via raft consensus (single-node setups should re-enable with --raft-log-fsync=true)")
 	}
 	logStore, err := raft.NewBadgerLogStore(raftDir, storeOpts...)
 	if err != nil {
@@ -329,6 +338,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
 		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
+	}
+	// Reuse raftLogFsync's auto/explicit policy: shard fsync follows the same
+	// rule (cluster=false because EC parity provides cross-host redundancy,
+	// single=true because there is no parity peer).
+	if !raftLogFsync {
+		shardSvcOpts = append(shardSvcOpts, cluster.WithoutFsync())
 	}
 	if measureReadAmp, _ := cmd.Flags().GetBool("measure-read-amp"); measureReadAmp {
 		readamp.Enable()
