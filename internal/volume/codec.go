@@ -20,6 +20,7 @@ func marshalVolume(vol *Volume) ([]byte, error) {
 	volumepb.VolumeAddSize(b, vol.Size)
 	volumepb.VolumeAddBlockSize(b, int32(vol.BlockSize))
 	volumepb.VolumeAddAllocatedBlocks(b, vol.AllocatedBlocks)
+	volumepb.VolumeAddSnapshotCount(b, vol.SnapshotCount)
 	root := volumepb.VolumeEnd(b)
 	b.Finish(root)
 	raw := b.FinishedBytes()
@@ -45,5 +46,6 @@ func unmarshalVolume(data []byte) (vol *Volume, err error) {
 		Size:            t.Size(),
 		BlockSize:       int(t.BlockSize()),
 		AllocatedBlocks: t.AllocatedBlocks(), // -1 if field absent (old volumes)
+		SnapshotCount:   t.SnapshotCount(),   // 0 if field absent (old volumes)
 	}, nil
 }

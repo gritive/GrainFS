@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.4.34] - 2026-04-27
+
+### Added
+
+- **CoW Snapshot Phase B** (`internal/volume/`, `internal/server/`, `cmd/grainfs/`): 볼륨 스냅샷 + Copy-on-Write + 클론 전체 구현.
+  - **FlatBuffers 스키마 확장** (`volumepb/volume.fbs`): `snapshot_count:int32 = 0` 필드 추가 — 하위 호환 기본값.
+  - **live_map 메커니즘**: 논리 블록 번호 → 물리 오브젝트 키 매핑. `__vol/{name}/live_map` 에 탭 구분 텍스트로 persist. `SnapshotCount == 0` 이면 nil 반환으로 오버헤드 제로.
+  - **`Manager.CreateSnapshot(name)`**: 현재 live_map을 스냅샷에 복사 → `__vol/{name}/snap/{snapID}/map` persist. SnapshotCount 증가. UUIDv7 기반 스냅샷 ID.
+  - **`Manager.ListSnapshots(name)`**: 스냅샷 메타 + 블록 수 조회.
+  - **`Manager.DeleteSnapshot(name, snapID)`**: 스냅샷 메타/블록 전체 삭제. SnapshotCount가 0이 되면 live_map 초기화 (CoW 모드 해제).
+  - **`Manager.Rollback(name, snapID)`**: 스냅샷 live_map을 복원. 스냅샷 이후 추가된 CoW 블록 삭제.
+  - **`Manager.Clone(srcName, dstName)`**: live_map + 모든 블록 복사(Copier 인터페이스 → CopyObject, 없으면 read+write fallback).
+  - **CoW WriteAt**: `SnapshotCount > 0` 일 때 신규 UUIDv7 물리 키로 블록 기록 → live_map 갱신 → persist.
+  - **5 HTTP 엔드포인트** (`internal/server/`): `POST /volumes/:name/snapshots`, `GET /volumes/:name/snapshots`, `DELETE /volumes/:name/snapshots/:snap_id`, `POST /volumes/:name/snapshots/:snap_id/rollback`, `POST /volumes/clone`.
+  - **CLI 서브커맨드** (`cmd/grainfs/volume.go`): `volume clone`, `volume rollback`, `snapshot create`, `snapshot list`, `snapshot delete`.
+  - **통합 테스트** (`internal/server/server_test.go`): `TestSnapshotHandlers_*` 4종 추가.
+  - **유닛 테스트** (`internal/volume/volume_test.go`): `TestCreateSnapshot`, `TestListSnapshots`, `TestSnapshotIsolation`, `TestDeleteSnapshot`, `TestClone`, `TestNoOverheadWithoutSnapshots`, `TestLiveMapParseRoundTrip` 등 10종 추가.
+
 ## [0.0.4.33] - 2026-04-26
 
 ### Added

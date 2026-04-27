@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -109,5 +110,117 @@ func (s *Server) recalculateVolume(_ context.Context, c *app.RequestContext) {
 		"before": before,
 		"after":  after,
 		"fixed":  before != after,
+	})
+}
+
+// --- Snapshot handlers ---
+
+type snapshotResponse struct {
+	ID         string    `json:"id"`
+	CreatedAt  time.Time `json:"created_at"`
+	BlockCount int64     `json:"block_count"`
+}
+
+func (s *Server) createSnapshot(_ context.Context, c *app.RequestContext) {
+	name := c.Param("name")
+
+	snapID, err := s.volMgr.CreateSnapshot(name)
+	if err != nil {
+		status := consts.StatusInternalServerError
+		if errors.Is(err, volume.ErrNotFound) {
+			status = consts.StatusNotFound
+		}
+		c.JSON(status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	snaps, _ := s.volMgr.ListSnapshots(name)
+	for _, snap := range snaps {
+		if snap.ID == snapID {
+			c.JSON(consts.StatusCreated, snapshotResponse{ID: snap.ID, CreatedAt: snap.CreatedAt, BlockCount: snap.BlockCount})
+			return
+		}
+	}
+	c.JSON(consts.StatusCreated, map[string]string{"id": snapID})
+}
+
+func (s *Server) listSnapshots(_ context.Context, c *app.RequestContext) {
+	name := c.Param("name")
+
+	snaps, err := s.volMgr.ListSnapshots(name)
+	if err != nil {
+		status := consts.StatusInternalServerError
+		if errors.Is(err, volume.ErrNotFound) {
+			status = consts.StatusNotFound
+		}
+		c.JSON(status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	result := make([]snapshotResponse, 0, len(snaps))
+	for _, snap := range snaps {
+		result = append(result, snapshotResponse{ID: snap.ID, CreatedAt: snap.CreatedAt, BlockCount: snap.BlockCount})
+	}
+	c.JSON(consts.StatusOK, result)
+}
+
+func (s *Server) deleteSnapshot(_ context.Context, c *app.RequestContext) {
+	name := c.Param("name")
+	snapID := c.Param("snap_id")
+
+	if err := s.volMgr.DeleteSnapshot(name, snapID); err != nil {
+		status := consts.StatusInternalServerError
+		if errors.Is(err, volume.ErrNotFound) {
+			status = consts.StatusNotFound
+		}
+		c.JSON(status, map[string]string{"error": err.Error()})
+		return
+	}
+	c.SetStatusCode(consts.StatusNoContent)
+}
+
+func (s *Server) rollbackVolume(_ context.Context, c *app.RequestContext) {
+	name := c.Param("name")
+	snapID := c.Param("snap_id")
+
+	if err := s.volMgr.Rollback(name, snapID); err != nil {
+		status := consts.StatusInternalServerError
+		if errors.Is(err, volume.ErrNotFound) {
+			status = consts.StatusNotFound
+		}
+		c.JSON(status, map[string]string{"error": err.Error()})
+		return
+	}
+	c.SetStatusCode(consts.StatusNoContent)
+}
+
+func (s *Server) cloneVolume(_ context.Context, c *app.RequestContext) {
+	var req struct {
+		Src string `json:"src"`
+		Dst string `json:"dst"`
+	}
+	body, _ := c.Body()
+	if err := json.Unmarshal(body, &req); err != nil || req.Src == "" || req.Dst == "" {
+		c.JSON(consts.StatusBadRequest, map[string]string{"error": "src and dst are required"})
+		return
+	}
+
+	if err := s.volMgr.Clone(req.Src, req.Dst); err != nil {
+		status := consts.StatusInternalServerError
+		if errors.Is(err, volume.ErrNotFound) {
+			status = consts.StatusNotFound
+		}
+		c.JSON(status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	vol, err := s.volMgr.Get(req.Dst)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	c.JSON(consts.StatusCreated, volumeResponse{
+		Name: vol.Name, Size: vol.Size, BlockSize: vol.BlockSize,
+		AllocatedBytes: vol.AllocatedBytes(), AllocatedBlocks: vol.AllocatedBlocks,
 	})
 }

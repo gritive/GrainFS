@@ -380,6 +380,11 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	volumes.GET("/:name", s.getVolume)
 	volumes.DELETE("/:name", s.deleteVolume)
 	volumes.POST("/:name/recalculate", s.recalculateVolume)
+	volumes.POST("/clone", s.cloneVolume)
+	volumes.POST("/:name/snapshots", s.createSnapshot)
+	volumes.GET("/:name/snapshots", s.listSnapshots)
+	volumes.DELETE("/:name/snapshots/:snap_id", s.deleteSnapshot)
+	volumes.POST("/:name/snapshots/:snap_id/rollback", s.rollbackVolume)
 
 	// Snapshot management API
 	s.registerSnapshotAPI(h)
