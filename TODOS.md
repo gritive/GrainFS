@@ -9,7 +9,7 @@
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
-- [ ] **Degraded mode (storage) — 단일 블롭 손상 격리** — Phase 1에서 클러스터 레벨 EC degraded 구현 완료. 단일 블롭 손상 시 해당 객체만 격리하는 후속 작업 남음.
+- [ ] **단일 블롭 손상 격리** — *zero ops* — 손상된 블롭 객체만 격리해 read-only로 표시; 동일 볼륨의 다른 객체는 정상 서비스 유지.
 
 ## Phase 17: Scale-Out
 
@@ -31,7 +31,7 @@
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)
 - [ ] SIMD
-- [ ] **Predictive resource warnings — BadgerDB / goroutine / FD** — Phase 1에서 디스크 사용률 임계값 경고 구현 완료. BadgerDB value log 크기, goroutine/FD 추세 추적은 후속 작업.
+- [ ] **Predictive resource warnings — BadgerDB / goroutine / FD** — *zero ops* — BadgerDB value log 크기, goroutine 수, open FD 추세를 추적하고 임계 도달 전 경고. 디스크 사용률 경고와 동일 패턴(transition-only firing).
 - [ ] control plane, data plane 분리
 - [ ] **QUIC 내부 통신 압축 도입 검토** — 클러스터 노드 간 QUIC 스트림에 압축(zstd/lz4) 적용 가능 여부 및 성능 트레이드오프 측정. 벤치마크 필수 (압축 CPU 비용 vs. 네트워크 절감); EC shard 데이터는 이미 랜덤 바이트이므로 압축 이득 미미할 수 있음 — gossip/receipt/metadata 트래픽 우선 검토.
 
@@ -45,4 +45,4 @@
 운영자 개입 없이도 안정적으로 동작하고, 문제 발생 시 명확하게 알려주는 기본기.
 
 - [ ] **One-command bootstrap** — *zero config* — `grainfs init` 하나로 cluster key, encryption key, 기본 credential, volume 생성 + 필요 파일 권한 설정
-- [ ] **Config drift detection — hot reload 감지** — Phase 1에서 startup snapshot + 재시작 간 변경 감지 구현 완료. 런타임 hot reload 시 drift 감지는 config 파일 시스템 도입 후 가능.
+- [ ] **Hot reload drift detection** — *zero ops* — config 파일 시스템 도입 후, 런타임 reload 시 디스크 config와 메모리 상태 불일치 감지 + 명확한 에러. config 파일 시스템 자체가 선행 조건.
