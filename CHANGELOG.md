@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.4.44] - 2026-04-28
+
+### Fixed
+
+- **Dashboard Self-Healing 배지가 cluster 모드에서 영구 "reconnecting"**: SigV4 인증 활성 시 (`--access-key`/`--secret-key` 설정된 cluster 배포) `/api/events/heal/stream`이 auth middleware로 인해 **403 Forbidden**을 반환. 브라우저 EventSource는 SigV4 헤더를 보낼 수 없으므로 onerror가 즉시 firing → 배지가 "reconnecting"에 갇힘. `/api/events`와 동일하게 read-only 모니터링 stream으로 분류해 auth bypass 리스트에 추가. 단일 노드/클러스터 모두 정상 연결 시 "live" 표시 확인. 회귀 방지 테스트(`internal/server/sse_auth_bypass_test.go`)에서 두 SSE endpoint가 모두 무인증으로 200 + `text/event-stream`을 반환하는지 검증.
+
 ## [0.0.4.43] - 2026-04-28
 
 ### Added

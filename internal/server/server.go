@@ -277,7 +277,8 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// Skip auth for monitoring/read-only status endpoints and /ui/
 		path := string(c.URI().Path())
 		if path == "/metrics" || strings.HasPrefix(path, "/ui/") ||
-			path == "/api/events" || path == "/api/eventlog" ||
+			path == "/api/events" || path == "/api/events/heal/stream" ||
+			path == "/api/eventlog" ||
 			path == "/api/cluster/status" || path == "/api/health" ||
 			path == "/api/cache/status" {
 			c.Next(ctx)
