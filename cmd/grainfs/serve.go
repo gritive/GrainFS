@@ -36,6 +36,8 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/gritive/GrainFS/internal/volume"
+	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
 
 func init() {
@@ -87,6 +89,7 @@ func init() {
 	serveCmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
 	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	serveCmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
+	serveCmd.Flags().Bool("dedup", false, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -503,6 +506,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		srvOpts = append(srvOpts, server.WithLifecycleStore(lifecycleMgr.Store()))
 	}
 
+	volMgr, dedupDB, err := buildVolumeManager(cmd, dataDir, backend)
+	if err != nil {
+		return fmt.Errorf("volume manager: %w", err)
+	}
+	if dedupDB != nil {
+		defer dedupDB.Close()
+	}
+	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr))
+
 	srv := server.New(addr, backend, srvOpts...)
 
 	// receiptWiring.keyStore may be nil when heal-receipt is disabled — in that
@@ -578,7 +590,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
 	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
-	nodeSvc := startNodeServices(ctx, cmd, backend, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
+	nodeSvc := startNodeServices(ctx, cmd, backend, volMgr, nfsPort, nfs4Port, nbdPort, nbdVolumeSize)
 	defer nodeSvc.Close()
 
 	<-ctx.Done()
@@ -603,6 +615,26 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	log.Info().Str("component", "server").Msg("server stopped")
 	return nil
+}
+
+// buildVolumeManager creates the shared volume.Manager for the serve path.
+// When --dedup is set, it opens a dedicated BadgerDB at {dataDir}/dedup/ and
+// returns both the manager and the DB (caller must close the DB on shutdown).
+func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Backend) (*volume.Manager, *badger.DB, error) {
+	dedupEnabled, _ := cmd.Flags().GetBool("dedup")
+	if !dedupEnabled {
+		return volume.NewManager(backend), nil, nil
+	}
+	dir := filepath.Join(dataDir, "dedup")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, nil, fmt.Errorf("create dedup dir: %w", err)
+	}
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open dedup db: %w", err)
+	}
+	mgr := volume.NewManagerWithOptions(backend, volume.ManagerOptions{DedupIndex: dedup.NewBadgerIndex(db)})
+	return mgr, db, nil
 }
 
 // loadOrCreateEncryptionKey loads a key from file or auto-generates one in the data directory.

@@ -55,12 +55,12 @@ func (n *nodeServices) Close() {
 // NFS listen is surfaced in logs but the HTTP/S3 path keeps serving.
 //
 // Args:
-//   - backend: the storage backend NFS/NBD should mount (typically the same
-//     backend the HTTP server uses; safe to pass a cached/wrapped backend).
+//   - backend: the storage backend NFS should mount (NFS v3 uses backend directly).
+//   - volMgr: shared volume.Manager (may have dedup enabled); used by NBD.
 //   - nfsPort, nfs4Port, nbdPort: 0 disables the service.
 //   - nbdVolumeSize: default volume size when the NBD worker auto-creates it.
 func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.Backend,
-	nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64,
+	volMgr *volume.Manager, nfsPort, nfs4Port, nbdPort int, nbdVolumeSize int64,
 ) *nodeServices {
 	svc := &nodeServices{}
 
@@ -69,9 +69,8 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 		const defaultVolName = "default"
 		const defaultVolSize = 1024 * 1024 * 1024 // 1G
 
-		mgr := volume.NewManager(backend)
-		if _, err := mgr.Get(defaultVolName); err != nil {
-			if _, err := mgr.Create(defaultVolName, defaultVolSize); err != nil {
+		if _, err := volMgr.Get(defaultVolName); err != nil {
+			if _, err := volMgr.Create(defaultVolName, defaultVolSize); err != nil {
 				log.Warn().Err(err).Msg("default nfs volume create failed (may already exist)")
 			}
 		}
@@ -102,13 +101,12 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 
 	if nbdPort > 0 {
 		const defaultVolName = "default"
-		mgr := volume.NewManager(backend)
-		if _, err := mgr.Get(defaultVolName); err != nil {
-			if _, err := mgr.Create(defaultVolName, nbdVolumeSize); err != nil {
+		if _, err := volMgr.Get(defaultVolName); err != nil {
+			if _, err := volMgr.Create(defaultVolName, nbdVolumeSize); err != nil {
 				log.Warn().Err(err).Msg("default nbd volume create failed")
 			}
 		}
-		nbdSrv, err := startNBDServer(mgr, defaultVolName, nbdPort)
+		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort)
 		if err != nil {
 			log.Error().Err(err).Msg("nbd server start failed")
 		} else {

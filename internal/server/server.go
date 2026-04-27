@@ -151,6 +151,14 @@ func WithAlerts(state *AlertsState) Option {
 	}
 }
 
+// WithVolumeManager injects a pre-built volume.Manager (e.g. one with dedup enabled).
+// When not set, New() creates a plain manager via volume.NewManager(backend).
+func WithVolumeManager(mgr *volume.Manager) Option {
+	return func(s *Server) {
+		s.volMgr = mgr
+	}
+}
+
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s := &Server{
@@ -200,7 +208,9 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	h.Use(s.userRateLimitMiddleware())
 	h.Use(s.authzMiddleware())
 
-	s.volMgr = volume.NewManager(backend)
+	if s.volMgr == nil {
+		s.volMgr = volume.NewManager(backend)
+	}
 	s.registerRoutes(h)
 	s.hertz = h
 	s.initMetrics()
