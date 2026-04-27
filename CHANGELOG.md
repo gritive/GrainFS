@@ -7,6 +7,10 @@
 - **Web UI Cache Performance 패널**: Dashboard 탭에 Volume Block Cache + EC Shard Cache 카드를 추가. hit rate %, hits/misses 카운트, resident/capacity 게이지, eviction 카운터를 3초 주기로 갱신. `--block-cache-size=0` / `--shard-cache-size=0` 으로 비활성된 캐시는 "disabled" 배지 + "off" 표시. 게이지 막대는 80%+ hit rate에서 success 색, 90%+ resident에서 warning 색으로 전환되어 캐시 포화 임박을 시각적으로 알림.
 - **`/api/cache/status` 단위 테스트** (`internal/server/cache_status_test.go`): 활성/비활성 두 상태에서 `block_cache` + `shard_cache` JSON 섹션이 모두 정확히 노출되는지, SigV4 auth bypass가 유지되는지 검증.
 
+### Fixed
+
+- **Dashboard false alert banner 노출**: `degraded-banner` / `alert-delivery-banner`가 백엔드는 `degraded:false`인데도 항상 보이던 버그. 원인: 두 banner의 인라인 `style="display:flex;..."`가 HTML `hidden` 속성의 기본 `display:none`을 specificity 차이로 이김. `el.hidden = true`로 JS가 토글해도 inline display가 살아남음. CSS에 `[hidden]{display:none !important}` 한 줄을 추가해 `hidden` 속성이 inline 스타일을 강제로 이기도록 수정. 단일 노드 / 정상 클러스터에서 false alert 사라짐.
+
 ## [0.0.4.42] - 2026-04-28
 
 ### Added
