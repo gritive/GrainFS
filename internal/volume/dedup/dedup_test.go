@@ -26,80 +26,153 @@ func hash32(seed byte) [32]byte {
 	return h
 }
 
-func TestLookupOrRegister_NewBlock(t *testing.T) {
+func TestWriteBlock_New(t *testing.T) {
 	idx := dedup.NewBadgerIndex(openTestDB(t))
-
-	canonical, isNew, err := idx.LookupOrRegister(hash32(1), "key-a")
+	res, err := idx.WriteBlock("vol", 0, hash32(1), "key-a")
 	require.NoError(t, err)
-	assert.True(t, isNew)
-	assert.Equal(t, "key-a", canonical)
+	assert.True(t, res.IsNew)
+	assert.Equal(t, "key-a", res.Canonical)
+	assert.Empty(t, res.ToDelete)
 }
 
-func TestLookupOrRegister_Duplicate(t *testing.T) {
+func TestWriteBlock_DedupHit(t *testing.T) {
 	idx := dedup.NewBadgerIndex(openTestDB(t))
+	h := hash32(1)
 
-	_, _, err := idx.LookupOrRegister(hash32(1), "key-a")
+	// Block 0 first
+	_, err := idx.WriteBlock("vol", 0, h, "key-a")
 	require.NoError(t, err)
 
-	canonical, isNew, err := idx.LookupOrRegister(hash32(1), "key-b")
+	// Block 1 with same hash → reuses canonical from block 0
+	res, err := idx.WriteBlock("vol", 1, h, "key-b")
 	require.NoError(t, err)
-	assert.False(t, isNew)
-	assert.Equal(t, "key-a", canonical)
+	assert.False(t, res.IsNew)
+	assert.Equal(t, "key-a", res.Canonical)
+	assert.Empty(t, res.ToDelete)
 }
 
-func TestRelease_Shared(t *testing.T) {
+func TestWriteBlock_Overwrite_DifferentContent(t *testing.T) {
 	idx := dedup.NewBadgerIndex(openTestDB(t))
 
-	_, _, _ = idx.LookupOrRegister(hash32(1), "key-a")
-	_, _, _ = idx.LookupOrRegister(hash32(1), "key-b") // duplicate: refcount → 2
-
-	shouldDelete, err := idx.Release("key-a")
+	_, err := idx.WriteBlock("vol", 0, hash32(1), "key-a")
 	require.NoError(t, err)
+
+	// Overwrite block 0 with different content
+	res, err := idx.WriteBlock("vol", 0, hash32(2), "key-b")
+	require.NoError(t, err)
+	assert.True(t, res.IsNew)
+	assert.Equal(t, "key-b", res.Canonical)
+	assert.Equal(t, "key-a", res.ToDelete, "old object must be scheduled for deletion")
+}
+
+func TestWriteBlock_Overwrite_SameContent(t *testing.T) {
+	idx := dedup.NewBadgerIndex(openTestDB(t))
+	h := hash32(1)
+
+	_, err := idx.WriteBlock("vol", 0, h, "key-a")
+	require.NoError(t, err)
+
+	// Overwrite block 0 with same content (no-op)
+	res, err := idx.WriteBlock("vol", 0, h, "key-a2")
+	require.NoError(t, err)
+	assert.False(t, res.IsNew, "same content must not create a new object")
+	assert.Equal(t, "key-a", res.Canonical, "canonical must remain the first key")
+	assert.Empty(t, res.ToDelete, "no deletion when content is unchanged")
+}
+
+func TestReadBlock_NotFound(t *testing.T) {
+	idx := dedup.NewBadgerIndex(openTestDB(t))
+	canonical, found, err := idx.ReadBlock("vol", 0)
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, canonical)
+}
+
+func TestReadBlock_Found(t *testing.T) {
+	idx := dedup.NewBadgerIndex(openTestDB(t))
+	res, err := idx.WriteBlock("vol", 0, hash32(1), "key-a")
+	require.NoError(t, err)
+
+	canonical, found, err := idx.ReadBlock("vol", 0)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, res.Canonical, canonical)
+}
+
+func TestFreeBlock_Last(t *testing.T) {
+	idx := dedup.NewBadgerIndex(openTestDB(t))
+	_, err := idx.WriteBlock("vol", 0, hash32(1), "key-a")
+	require.NoError(t, err)
+
+	objectKey, shouldDelete, err := idx.FreeBlock("vol", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "key-a", objectKey)
+	assert.True(t, shouldDelete, "last reference: caller must delete the S3 object")
+}
+
+func TestFreeBlock_Shared(t *testing.T) {
+	idx := dedup.NewBadgerIndex(openTestDB(t))
+	h := hash32(1)
+
+	_, _ = idx.WriteBlock("vol", 0, h, "key-a")
+	_, _ = idx.WriteBlock("vol", 1, h, "key-b") // duplicate: refcount → 2
+
+	// Free block 0 → refcount → 1, must NOT delete
+	objectKey, shouldDelete, err := idx.FreeBlock("vol", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "key-a", objectKey)
 	assert.False(t, shouldDelete, "still has references, should not delete")
 }
 
-func TestRelease_Last(t *testing.T) {
+func TestFreeBlock_NotFound(t *testing.T) {
 	idx := dedup.NewBadgerIndex(openTestDB(t))
-
-	_, _, _ = idx.LookupOrRegister(hash32(1), "key-a")
-
-	shouldDelete, err := idx.Release("key-a")
+	objectKey, shouldDelete, err := idx.FreeBlock("vol", 99)
 	require.NoError(t, err)
-	assert.True(t, shouldDelete, "last reference, should delete S3 object")
+	assert.Empty(t, objectKey)
+	assert.False(t, shouldDelete)
 }
 
-func TestReleaseNotFound(t *testing.T) {
+func TestFreeBlock_CleansHashIndex(t *testing.T) {
 	idx := dedup.NewBadgerIndex(openTestDB(t))
-
-	// objectKey without vd:r entry — not a dedup object, delegate to existing GC
-	shouldDelete, err := idx.Release("unknown-key")
-	require.NoError(t, err)
-	assert.False(t, shouldDelete, "not tracked by dedup — caller uses existing GC path")
-}
-
-func TestRelease_DeleteCleansHashIndex(t *testing.T) {
-	db := openTestDB(t)
-	idx := dedup.NewBadgerIndex(db)
-
 	h := hash32(1)
-	_, _, _ = idx.LookupOrRegister(h, "key-a")
 
-	shouldDelete, err := idx.Release("key-a")
-	require.NoError(t, err)
-	assert.True(t, shouldDelete)
+	_, _ = idx.WriteBlock("vol", 0, h, "key-a")
+	_, _, _ = idx.FreeBlock("vol", 0)
 
-	// After last release, same hash should be treated as new block again
-	canonical, isNew, err := idx.LookupOrRegister(h, "key-b")
+	// After last free, same hash should be treated as new block again
+	res, err := idx.WriteBlock("vol", 0, h, "key-b")
 	require.NoError(t, err)
-	assert.True(t, isNew, "hash index should be cleaned up, so this is a new block")
-	assert.Equal(t, "key-b", canonical)
+	assert.True(t, res.IsNew, "hash index should be cleaned up after last free")
+	assert.Equal(t, "key-b", res.Canonical)
+}
+
+func TestDeleteVolume(t *testing.T) {
+	idx := dedup.NewBadgerIndex(openTestDB(t))
+
+	_, _ = idx.WriteBlock("vol", 0, hash32(1), "key-a") // refcount=1
+	_, _ = idx.WriteBlock("vol", 1, hash32(2), "key-b") // refcount=1
+	// Block 2 shares content with "vol2" block 0 → refcount will be 2
+	_, _ = idx.WriteBlock("vol", 2, hash32(3), "key-c")
+	_, _ = idx.WriteBlock("vol2", 0, hash32(3), "key-c2") // dedup hit: canonical=key-c, refcount=2
+
+	toDelete, err := idx.DeleteVolume("vol")
+	require.NoError(t, err)
+
+	// key-a and key-b: refcount reaches 0 → must delete
+	// key-c: refcount 2→1 (vol2 still references) → must NOT delete
+	assert.ElementsMatch(t, []string{"key-a", "key-b"}, toDelete)
+
+	// vol2's block 0 should still be accessible
+	canonical, found, err := idx.ReadBlock("vol2", 0)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "key-c", canonical)
 }
 
 func TestConcurrentWrites(t *testing.T) {
 	idx := dedup.NewBadgerIndex(openTestDB(t))
 
-	// 20 goroutines is sufficient to verify concurrency safety without
-	// saturating BadgerDB MVCC retry budget (3 retries × 100 concurrent = unrealistic load)
+	// 20 goroutines, each writing block 0 of their own volume with the same hash.
 	const goroutines = 20
 	h := hash32(42)
 
@@ -112,31 +185,30 @@ func TestConcurrentWrites(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			key := fmt.Sprintf("key-%d", i)
-			canonical, _, err := idx.LookupOrRegister(h, key)
-			canonicals[i] = canonical
+			res, err := idx.WriteBlock(fmt.Sprintf("vol%d", i), 0, h, key)
+			canonicals[i] = res.Canonical
 			errs[i] = err
 		}(i)
 	}
 	wg.Wait()
 
-	// All goroutines must succeed
 	for i, err := range errs {
 		require.NoError(t, err, "goroutine %d failed", i)
 	}
 
-	// All must agree on the same canonical key
+	// All goroutines must agree on the same canonical key
 	first := canonicals[0]
 	for i, c := range canonicals {
 		assert.Equal(t, first, c, "goroutine %d returned different canonical key", i)
 	}
 
-	// Verify refcount via repeated Release: only the last should return shouldDelete=true
+	// Verify refcount via sequential FreeBlock: only the last should shouldDelete=true
 	for i := 0; i < goroutines-1; i++ {
-		shouldDelete, err := idx.Release(first)
+		_, shouldDelete, err := idx.FreeBlock(fmt.Sprintf("vol%d", i), 0)
 		require.NoError(t, err)
 		assert.False(t, shouldDelete, "release %d should not delete yet", i+1)
 	}
-	shouldDelete, err := idx.Release(first)
+	_, shouldDelete, err := idx.FreeBlock(fmt.Sprintf("vol%d", goroutines-1), 0)
 	require.NoError(t, err)
 	assert.True(t, shouldDelete, "last release should signal delete")
 }

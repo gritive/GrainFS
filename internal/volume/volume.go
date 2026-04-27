@@ -148,11 +148,19 @@ func (m *Manager) Delete(name string) error {
 		return fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
 
-	// Delete all block objects
-	objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)
-	if err == nil {
-		for _, obj := range objs {
-			_ = m.backend.DeleteObject(volumeBucketName, obj.Key)
+	// Delete all block objects, respecting dedup refcounts.
+	if m.dedup != nil {
+		// Dedup path: BadgerDB tracks all block mappings; release refcounts atomically.
+		toDelete, _ := m.dedup.DeleteVolume(name)
+		for _, key := range toDelete {
+			m.backend.DeleteObject(volumeBucketName, key) //nolint:errcheck
+		}
+	} else {
+		objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)
+		if err == nil {
+			for _, obj := range objs {
+				_ = m.backend.DeleteObject(volumeBucketName, obj.Key)
+			}
 		}
 	}
 
@@ -230,11 +238,22 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 		blkNum := pos / bs
 		blkOff := pos % bs
 
+		// Resolve physical object key for this block
+		var phyKey string
+		if m.dedup != nil {
+			phyKey, _, err = m.dedup.ReadBlock(name, blkNum)
+			if err != nil {
+				return totalRead, fmt.Errorf("dedup read block %d: %w", blkNum, err)
+			}
+		} else {
+			phyKey = physicalKey(name, blkNum, liveMap)
+		}
+
 		// Read the block
 		blkData := make([]byte, vol.BlockSize)
-		rc, _, err := m.backend.GetObject(volumeBucketName, physicalKey(name, blkNum, liveMap))
+		rc, _, err := m.backend.GetObject(volumeBucketName, phyKey)
 		if err != nil {
-			// Block doesn't exist = zeros
+			// Block doesn't exist (or never written with dedup) = zeros
 			clear(blkData)
 		} else {
 			n, _ := io.ReadFull(rc, blkData)
@@ -276,13 +295,16 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		return 0, fmt.Errorf("offset %d out of range [0, %d)", off, vol.Size)
 	}
 
-	liveMap, err := m.getLiveMapUnlocked(name)
-	if err != nil {
-		return 0, fmt.Errorf("load live_map: %w", err)
+	var liveMap map[int64]string
+	if m.dedup == nil {
+		liveMap, err = m.getLiveMapUnlocked(name)
+		if err != nil {
+			return 0, fmt.Errorf("load live_map: %w", err)
+		}
 	}
 
 	bs := int64(vol.BlockSize)
-	useCow := vol.SnapshotCount > 0
+	useCow := m.dedup == nil && vol.SnapshotCount > 0
 
 	// Stage 1: PoolQuota pre-scan (only when quota is configured)
 	if m.opts.PoolQuota > 0 {
@@ -345,35 +367,26 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
 
 		// Determine the target key and write the block.
-		// With dedup: use content-addressed UUID keys; skip PutObject on cache hit.
-		// With CoW (no dedup): use versioned UUID keys; delete old on overwrite.
+		// With dedup: content-addressed UUID keys stored in BadgerDB; no live_map.
+		// With CoW (no dedup): versioned UUID keys; delete old on overwrite.
 		// Fallback: overwrite positional key in-place.
 		var targetKey string
 		if m.dedup != nil {
 			newKey := fmt.Sprintf("%s%s/blk_%012d_v%s", metaPrefix, name, blkNum, uuid.Must(uuid.NewV7()).String())
 			hash := sha256.Sum256(blkData)
-			canonical, dedupIsNew, dedupErr := m.dedup.LookupOrRegister(hash, newKey)
+			res, dedupErr := m.dedup.WriteBlock(name, blkNum, hash, newKey)
 			if dedupErr != nil {
 				return totalWritten, fmt.Errorf("dedup block %d: %w", blkNum, dedupErr)
 			}
-			targetKey = canonical
-			if dedupIsNew {
+			targetKey = res.Canonical
+			if res.IsNew {
 				if _, err := m.backend.PutObject(volumeBucketName, targetKey,
 					bytes.NewReader(blkData), "application/octet-stream"); err != nil {
 					return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 				}
 			}
-			// Release old key if the block was overwritten with a different object
-			if !isNew && liveMap != nil {
-				if old, ok := liveMap[blkNum]; ok && old != targetKey {
-					m.mu.Unlock()
-					m.onLiveMapEntryRemoved(old)
-					m.mu.Lock()
-				}
-			}
-			if liveMap != nil {
-				liveMap[blkNum] = targetKey
-				liveMapDirty = true
+			if res.ToDelete != "" {
+				m.backend.DeleteObject(volumeBucketName, res.ToDelete) //nolint:errcheck
 			}
 		} else if useCow {
 			targetKey = cowBlockKey(name, blkNum)
@@ -451,24 +464,25 @@ func (m *Manager) Discard(name string, off, length int64) error {
 
 	freed := int64(0)
 	for blkNum := firstBlock; blkNum <= lastBlock; blkNum++ {
-		key := physicalKey(name, blkNum, liveMap)
 		if m.dedup != nil {
-			// With dedup: refcount-aware deletion.
-			// Release the lock while calling onLiveMapEntryRemoved (which may hit S3).
-			if liveMap != nil {
-				if _, ok := liveMap[blkNum]; !ok {
-					continue // block not allocated
-				}
-				delete(liveMap, blkNum)
-				freed++
+			// Dedup path: block mapping and refcount managed in BadgerDB.
+			objectKey, shouldDelete, freeErr := m.dedup.FreeBlock(name, blkNum)
+			if freeErr != nil {
+				return fmt.Errorf("dedup free block %d: %w", blkNum, freeErr)
 			}
-			m.mu.Unlock()
-			m.onLiveMapEntryRemoved(key)
-			m.mu.Lock()
-		} else if err := m.backend.DeleteObject(volumeBucketName, key); err == nil {
-			freed++
-			if liveMap != nil {
-				delete(liveMap, blkNum)
+			if objectKey != "" {
+				freed++
+				if shouldDelete {
+					m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
+				}
+			}
+		} else {
+			key := physicalKey(name, blkNum, liveMap)
+			if err := m.backend.DeleteObject(volumeBucketName, key); err == nil {
+				freed++
+				if liveMap != nil {
+					delete(liveMap, blkNum)
+				}
 			}
 		}
 	}
@@ -637,7 +651,8 @@ func physicalKey(name string, blkNum int64, liveMap map[int64]string) string {
 }
 
 // getLiveMapUnlocked loads (or returns cached) the live_map for a volume.
-// Returns nil when the volume has no snapshots AND dedup is disabled (zero overhead hot path).
+// Returns nil when the volume has no snapshots, or when dedup is active (block
+// mappings live in BadgerDB instead of the S3 live_map).
 // Caller must hold m.mu.
 func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 	if lm, ok := m.liveMaps[name]; ok {
@@ -647,8 +662,16 @@ func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Dedup requires live_map to track content-addressed keys even without snapshots.
-	if vol.SnapshotCount == 0 && m.dedup == nil {
+	// When dedup is active, block mappings live in BadgerDB (vd:b: prefix).
+	// S3 live_map is not used; snapshots are incompatible with dedup in Phase A.
+	if m.dedup != nil {
+		if vol.SnapshotCount > 0 {
+			return nil, errors.New("dedup + snapshots not supported in Phase A")
+		}
+		m.liveMaps[name] = nil
+		return nil, nil
+	}
+	if vol.SnapshotCount == 0 {
 		m.liveMaps[name] = nil
 		return nil, nil
 	}
@@ -666,22 +689,6 @@ func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 	}
 	m.liveMaps[name] = lm
 	return lm, nil
-}
-
-// onLiveMapEntryRemoved decrements the dedup refcount for objectKey.
-// If the refcount reaches zero, it deletes the S3 object.
-// When dedup is disabled, falls back to direct DeleteObject.
-// Caller must NOT hold m.mu (badgerIndex has its own mutex).
-func (m *Manager) onLiveMapEntryRemoved(objectKey string) {
-	if m.dedup == nil {
-		m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
-		return
-	}
-	shouldDelete, err := m.dedup.Release(objectKey)
-	if err != nil || !shouldDelete {
-		return
-	}
-	m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
 }
 
 // persistLiveMapUnlocked writes the live_map to storage. Caller must hold m.mu.
