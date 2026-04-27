@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsserver"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -30,6 +31,7 @@ import (
 type nodeServices struct {
 	nfsSrv  *nfsserver.Server
 	nfs4Srv *nfs4server.Server
+	nbdSrv  *nbd.Server
 }
 
 // Close shuts down any started services. Safe to call on the zero value.
@@ -37,6 +39,11 @@ func (n *nodeServices) Close() {
 	if n.nfsSrv != nil {
 		if err := n.nfsSrv.Close(); err != nil {
 			log.Warn().Err(err).Msg("nfs server close error")
+		}
+	}
+	if n.nbdSrv != nil {
+		if err := n.nbdSrv.Close(); err != nil {
+			log.Warn().Err(err).Msg("nbd server close error")
 		}
 	}
 	// nfs4Srv exposes no Close; relies on context cancellation.
@@ -101,8 +108,11 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 				log.Warn().Err(err).Msg("default nbd volume create failed")
 			}
 		}
-		if _, err := startNBDServer(mgr, defaultVolName, nbdPort); err != nil {
+		nbdSrv, err := startNBDServer(mgr, defaultVolName, nbdPort)
+		if err != nil {
 			log.Error().Err(err).Msg("nbd server start failed")
+		} else {
+			svc.nbdSrv = nbdSrv
 		}
 	}
 

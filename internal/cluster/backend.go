@@ -1528,6 +1528,92 @@ func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]
 	return objects, err
 }
 
+func (b *DistributedBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+	if err := b.HeadBucket(bucket); err != nil {
+		return err
+	}
+	return b.db.View(func(txn *badger.Txn) error {
+		latMap := make(map[string]string)
+		latPrefix := []byte("lat:" + bucket + "/")
+		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
+		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
+			baseKey := string(itLat.Item().Key()[len(latPrefix):])
+			_ = itLat.Item().Value(func(v []byte) error {
+				latMap[baseKey] = string(v)
+				return nil
+			})
+		}
+		itLat.Close()
+
+		emitted := make(map[string]bool)
+		pfx := []byte("obj:" + bucket + "/" + prefix)
+		bucketPfx := []byte("obj:" + bucket + "/")
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+			k := string(it.Item().Key())
+			rest := k[len(bucketPfx):]
+
+			baseKey := rest
+			isVersioned := false
+			if slash := strings.LastIndex(rest, "/"); slash >= 0 {
+				candidateBase := rest[:slash]
+				candidateVID := rest[slash+1:]
+				if lat, ok := latMap[candidateBase]; ok && lat == candidateVID {
+					baseKey = candidateBase
+					isVersioned = true
+				} else if _, baseInLat := latMap[candidateBase]; baseInLat {
+					continue
+				}
+			}
+			if !strings.HasPrefix(baseKey, prefix) {
+				continue
+			}
+			if emitted[baseKey] {
+				continue
+			}
+			if !isVersioned {
+				if _, inLat := latMap[baseKey]; inLat {
+					continue
+				}
+			}
+
+			var obj storage.Object
+			if err := it.Item().Value(func(val []byte) error {
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				if m.ETag == deleteMarkerETag {
+					return nil
+				}
+				obj = storage.Object{
+					Key:          m.Key,
+					Size:         m.Size,
+					ContentType:  m.ContentType,
+					ETag:         m.ETag,
+					LastModified: m.LastModified,
+					ACL:          m.ACL,
+				}
+				if isVersioned {
+					obj.VersionID = latMap[baseKey]
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			if obj.Key == "" {
+				continue
+			}
+			emitted[baseKey] = true
+			if err := fn(&obj); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // --- Multipart operations ---
 
 func (b *DistributedBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {

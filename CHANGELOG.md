@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`WalkObjects` — O(1) 메모리 블록 순회** (`storage.Backend` 인터페이스, `LocalBackend`, `DistributedBackend`, `PackedBackend`, `SwappableBackend`): `ListObjects(maxKeys=1M)` 대신 콜백 기반 스트리밍 순회. `volume.Delete`, `Recalculate`, `CreateSnapshot`, `ListSnapshots`, `Clone` 5개 call site 교체. 초대형 볼륨에서 메모리 폭증 제거.
+
+### Fixed
+
+- **NBD clean shutdown** (`cmd/grainfs/node_services.go`): `startNBDServer` 반환값을 버리던 버그 수정. `nodeServices.nbdSrv` 필드에 보관해 종료 시 `Close()` 호출.
+
 ## [0.0.4.35] - 2026-04-27
 
 ### Added

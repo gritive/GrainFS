@@ -129,6 +129,10 @@ func (m *mockBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storag
 	return nil, errors.New("not implemented")
 }
 
+func (m *mockBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+	return errors.New("not implemented")
+}
+
 func (m *mockBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
 	return nil, errors.New("not implemented")
 }

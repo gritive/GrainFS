@@ -128,6 +128,11 @@ type Backend interface {
 	HeadObject(bucket, key string) (*Object, error)
 	DeleteObject(bucket, key string) error
 	ListObjects(bucket, prefix string, maxKeys int) ([]*Object, error)
+	// WalkObjects iterates over all objects with the given prefix, calling fn
+	// for each. Unlike ListObjects, it is not bounded by a maxKeys limit and
+	// uses O(1) memory regardless of object count. fn returning a non-nil error
+	// stops the walk and that error is returned.
+	WalkObjects(bucket, prefix string, fn func(*Object) error) error
 
 	CreateMultipartUpload(bucket, key, contentType string) (*MultipartUpload, error)
 	UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error)

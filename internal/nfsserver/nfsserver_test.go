@@ -104,10 +104,10 @@ func TestCloseBeforeListen(t *testing.T) {
 // failBackend is a mock that fails HeadBucket, causing vfs.New to fail.
 type failBackend struct{}
 
-func (f *failBackend) CreateBucket(string) error                            { return nil }
-func (f *failBackend) HeadBucket(string) error                              { return fmt.Errorf("mock: bucket not found") }
-func (f *failBackend) DeleteBucket(string) error                            { return fmt.Errorf("not implemented") }
-func (f *failBackend) ListBuckets() ([]string, error)                       { return nil, fmt.Errorf("not implemented") }
+func (f *failBackend) CreateBucket(string) error      { return nil }
+func (f *failBackend) HeadBucket(string) error        { return fmt.Errorf("mock: bucket not found") }
+func (f *failBackend) DeleteBucket(string) error      { return fmt.Errorf("not implemented") }
+func (f *failBackend) ListBuckets() ([]string, error) { return nil, fmt.Errorf("not implemented") }
 func (f *failBackend) PutObject(string, string, io.Reader, string) (*storage.Object, error) {
 	return nil, fmt.Errorf("not implemented")
 }
@@ -120,6 +120,9 @@ func (f *failBackend) HeadObject(string, string) (*storage.Object, error) {
 func (f *failBackend) DeleteObject(string, string) error { return fmt.Errorf("not implemented") }
 func (f *failBackend) ListObjects(string, string, int) ([]*storage.Object, error) {
 	return nil, fmt.Errorf("not implemented")
+}
+func (f *failBackend) WalkObjects(string, string, func(*storage.Object) error) error {
+	return fmt.Errorf("not implemented")
 }
 func (f *failBackend) CreateMultipartUpload(string, string, string) (*storage.MultipartUpload, error) {
 	return nil, fmt.Errorf("not implemented")

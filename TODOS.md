@@ -6,8 +6,6 @@
 
 ### 기타
 
-- [ ] **ListObjects pagination** — `Recalculate`, `Delete` 등이 사용하는 1M 블록 한도를 페이지네이션으로 대체해 초대형 볼륨에서 메모리 폭증 방지.
-- [ ] **NBD clean shutdown** — `nodeServices` 구조체에 `*nbd.Server`를 보관해 서버 종료 시 `srv.Close()` 호출 가능하도록 개선.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
