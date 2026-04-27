@@ -934,6 +934,10 @@ func (b *DistributedBackend) FSMRef() *FSM { return b.fsm }
 // "bucket:", etc.); the prefixes are disjoint so they coexist safely.
 func (b *DistributedBackend) FSMDB() *badger.DB { return b.db }
 
+// LiveNodes returns the list of cluster nodes currently considered reachable.
+// This is the public counterpart of the internal liveNodes() method.
+func (b *DistributedBackend) LiveNodes() []string { return b.liveNodes() }
+
 // ECActive reports whether Phase 18 cluster EC will be applied to the next
 // PutObject call (EC enabled + enough nodes for k+m split).
 func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.liveNodes())) }

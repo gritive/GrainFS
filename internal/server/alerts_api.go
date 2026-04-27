@@ -10,6 +10,7 @@ package server
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -33,6 +34,11 @@ type AlertsState struct {
 	lastFailedAt   time.Time
 	deliveredOK    uint64
 	deliveryFailed uint64
+
+	// Secondary OnStateChange callbacks wired after construction (e.g. by Server).
+	// Lock-free: append-only via CompareAndSwap, snapshot-read in the tracker's
+	// actor goroutine. Callbacks must not block or call back into the tracker.
+	secondaryCallbacks atomic.Pointer[[]func(bool)]
 }
 
 // NewAlertsState wires the dispatcher and tracker together. The dispatcher's
@@ -70,9 +76,39 @@ func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.De
 		} else {
 			metrics.Degraded.Set(0)
 		}
+		// Call secondary callbacks (e.g. Server.degradedFlag.Store) — lock-free read.
+		if cbs := s.secondaryCallbacks.Load(); cbs != nil {
+			for _, cb := range *cbs {
+				cb(degraded)
+			}
+		}
 	}
 	s.tracker = alerts.NewDegradedTracker(trackerCfg)
 	return s
+}
+
+// AddOnStateChange registers a callback that is invoked whenever the degraded
+// state changes. Callbacks run inside the tracker's actor goroutine and must
+// not block or call back into the tracker (deadlock risk).
+// Safe to call at any time, including after the tracker has started.
+//
+// Lock-free CAS: read the current slice, build next, swap; retry if another
+// caller raced. In practice all registrations happen at startup so the loop
+// rarely iterates more than once.
+func (s *AlertsState) AddOnStateChange(fn func(bool)) {
+	for {
+		cur := s.secondaryCallbacks.Load()
+		var existing []func(bool)
+		if cur != nil {
+			existing = *cur
+		}
+		next := make([]func(bool), len(existing)+1)
+		copy(next, existing)
+		next[len(existing)] = fn
+		if s.secondaryCallbacks.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
 }
 
 // Send fires an alert through the dispatcher and updates counters/metrics.

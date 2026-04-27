@@ -471,7 +471,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
 	clusterAlerts := server.NewAlertsState(clusterAlertWebhook, alerts.Options{Secret: clusterAlertSecret}, alerts.DegradedConfig{})
 	srvOpts := []server.Option{
-		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}),
+		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers, backend: distBackend}),
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
@@ -575,6 +575,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		go lifecycleMgr.Run(ctx)
 		log.Info().Dur("interval", lifecycleInterval).Msg("cluster lifecycle manager started")
 	}
+
+	// Start the degraded mode monitor — checks live node count vs EC threshold
+	// every 30 s. The first check fires immediately so the server knows its
+	// state before serving any requests.
+	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), 30*time.Second)
+	go degradedMon.Run(ctx)
 
 	go func() {
 		if err := srv.Run(); err != nil {
@@ -861,8 +867,9 @@ func (a *balancerInfoAdapter) Status() server.BalancerStatusResult {
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.
 type raftClusterInfo struct {
-	node  *raft.Node
-	peers []string
+	node    *raft.Node
+	peers   []string
+	backend *cluster.DistributedBackend
 }
 
 func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
@@ -870,3 +877,9 @@ func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
 func (r *raftClusterInfo) Peers() []string  { return r.peers }
+func (r *raftClusterInfo) LivePeers() []string {
+	if r.backend == nil {
+		return r.peers
+	}
+	return r.backend.LiveNodes()
+}

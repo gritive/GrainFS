@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -37,6 +38,9 @@ type ClusterInfo interface {
 	Term() uint64
 	LeaderID() string
 	Peers() []string
+	// LivePeers returns the subset of peers that are currently reachable.
+	// Used to compute down_nodes in the cluster status endpoint.
+	LivePeers() []string
 }
 
 // JoinClusterFunc handles the runtime local-to-cluster transition.
@@ -63,6 +67,7 @@ type Server struct {
 	evStore        *eventstore.Store // nil if event store not configured
 	alerts         *AlertsState      // nil if alerts not wired
 	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
+	degradedFlag   atomic.Bool       // true when EC degraded mode is active
 
 	// Bounded event queue + single worker. Decouples request handlers from
 	// BadgerDB write latency and prevents unbounded goroutine growth.
@@ -172,6 +177,14 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 		opt(s)
 	}
 
+	// Wire degradedFlag into the AlertsState tracker so it stays in sync with
+	// the tracker's degraded state without needing to poll.
+	if s.alerts != nil {
+		s.alerts.AddOnStateChange(func(degraded bool) {
+			s.degradedFlag.Store(degraded)
+		})
+	}
+
 	// Route zerolog global logger through broadcastWriter so every log line
 	// is also fanned out to SSE dashboard clients.
 	// Once-guard prevents double-wrapping when multiple Server instances share a process (e.g. tests).
@@ -219,6 +232,9 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	}
 	return s
 }
+
+// isDegraded reports whether the server is currently in EC degraded mode.
+func (s *Server) isDegraded() bool { return s.degradedFlag.Load() }
 
 // Run starts the server (blocking). Uses Engine.Run() instead of Spin()
 // so that signal handling is owned by the caller (serve.go), not Hertz.
