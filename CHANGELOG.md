@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.4.40] - 2026-04-28
+
+### Added
+
+- **QUIC 내부 통신 압축 평가 벤치마크** (`internal/transport/compression_bench_test.go`): 6종 대표 payload(NodeStatsMsg gossip, ReceiptGossipMsg, HealReceipt JSON, PutObjectMetaCmd, raft AppendEntries batch, SetRingCmd)에 대해 zstd / s2(Snappy fork)의 압축비 + encode/decode round-trip 측정. 결과는 design doc에 보존.
+
+### Changed
+
+- **Phase 2 QUIC 내부 통신 압축 — 미구현 결정**: 측정 결과 raft_batch(45 KB AppendEntries)에서만 zstd가 32배 압축 + 1 Gbps에서 +311 µs 순이득. 그 외 모든 payload class(작은 gossip, receipt, single Raft cmd)는 압축/해제 cost가 wire saving을 초과. 10 Gbps DC LAN에서는 raft_batch조차 동률, 25 Gbps에서는 net loss. WAN/cross-region 배포가 표준이 되거나 batch-aware Raft pipelining이 도입될 때 재평가. 자세한 측정 데이터는 `~/.gstack/projects/gritive-grains/whitekid-master-design-20260427-180827-stability-perf-roadmap.md` Phase 2 #2 항목 참조.
+
 ## [0.0.4.39] - 2026-04-28
 
 ### Added
