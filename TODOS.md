@@ -28,13 +28,11 @@
 ## Phase 19: Performance
 
 - [ ] go-billy: Direct File I/O; O_DIRECT
-- [ ] Peer fetch zero-copy: `getObjectEC` 피어 경로에서 QUIC stream 직접 반환 (`[]byte` 중간 버퍼 제거)
 - [ ] Unified buffer cache: Centralized Page Cache
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)
 - [ ] SIMD
-- [ ] PGO
 - [ ] **Predictive resource warnings** — *zero ops* — 디스크 사용률/증가율, BadgerDB value log 크기, goroutine/FD 추세 추적하고 임계 도달 전 경고 (dashboard + log)
 - [ ] control plane, data plane 분리
 - [ ] **QUIC 내부 통신 압축 도입 검토** — 클러스터 노드 간 QUIC 스트림에 압축(zstd/lz4) 적용 가능 여부 및 성능 트레이드오프 측정. 벤치마크 필수 (압축 CPU 비용 vs. 네트워크 절감); EC shard 데이터는 이미 랜덤 바이트이므로 압축 이득 미미할 수 있음 — gossip/receipt/metadata 트래픽 우선 검토.

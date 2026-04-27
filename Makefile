@@ -7,12 +7,25 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-jepsen test-smoke test-network-fault test-backup clean run lint bench test-nbd-docker update-deps fbs
+.PHONY: test test-race test-e2e test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs
+
+PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 
 bin/$(BINARY): $(GO_SRC) $(FBS_STAMPS)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
 
 build: bin/$(BINARY)
+
+# build-pgo: compile with Profile-Guided Optimization using a previously collected
+# pprof CPU profile (from `make bench-profile`). Typically 5-15% faster on hot paths.
+# Usage: make bench-profile && make build-pgo
+build-pgo: $(GO_SRC) $(FBS_STAMPS)
+	@if [ ! -f "$(PGO_PROFILE)" ]; then \
+		echo "No profile found at $(PGO_PROFILE). Run 'make bench-profile' first."; \
+		exit 1; \
+	fi
+	go build $(LDFLAGS) -pgo=$(PGO_PROFILE) -o bin/$(BINARY)-pgo ./cmd/grainfs/
+	@echo "PGO binary: bin/$(BINARY)-pgo (profile: $(PGO_PROFILE))"
 
 # Each .fbs generates multiple .go files; a stamp tracks the last-run time.
 # Output dir is the parent of the directory containing the .fbs file.
