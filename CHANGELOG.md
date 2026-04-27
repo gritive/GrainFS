@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Block-level Deduplication Phase A** (`internal/volume/dedup/`, `internal/volume/`): 동일 내용 블록을 SHA-256 해시로 식별해 S3 객체 공유. BadgerDB로 레퍼런스 카운트 관리.
+  - **`DedupIndex` 인터페이스** (`internal/volume/dedup/dedup.go`): `LookupOrRegister(hash, newKey)` — 신규 블록 등록 또는 기존 canonical key 반환. `Release(objectKey)` — refcount 감소 및 마지막 참조 시 삭제 시그널 반환.
+  - **BadgerDB 구현체** (`internal/volume/dedup/dedup.go`): `vd:h:{sha256hex}` → objectKey (해시 인덱스), `vd:r:{objectKey}` → {refcount int32 BE, hash [32]byte} (레퍼런스 테이블). `ErrConflict` 시 최대 3회 재시도.
+  - **Manager 통합** (`internal/volume/volume.go`): `ManagerOptions.DedupIndex` 필드. WriteAt: `isNew=true` 일 때만 `backend.PutObject` 호출. Discard: refcount-aware 삭제 — 마지막 참조 제거 시에만 S3 객체 삭제.
+  - **단위 테스트** (`internal/volume/dedup/dedup_test.go`): NewBlock/Duplicate/Shared/Last/NotFound/CleanHashIndex/ConcurrentWrites 7종.
+  - **통합 테스트** (`internal/volume/volume_test.go`): DedupWriteSameContent/DedupDiscardReleasesRef/DedupOverwriteReleasesOldRef 3종.
+  - **벤치마크** (`internal/volume/bench_test.go`): 로컬 FS 기준 NoDedup 40 MB/s → DedupHit 28 MB/s (−30%: BadgerDB txn 오버헤드). 실 S3 환경에서는 PUT 레이턴시가 지배적이므로 오버헤드 무시 가능.
+
 ## [0.0.4.34] - 2026-04-27
 
 ### Added
