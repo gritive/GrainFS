@@ -223,6 +223,102 @@ func TestDistributedBackend_ListObjectsBadBucket(t *testing.T) {
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
+func TestDistributedBackend_WalkObjects(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	for _, kv := range []struct{ key, val string }{
+		{"docs/a.txt", "a"},
+		{"docs/b.txt", "b"},
+		{"images/c.png", "c"},
+	} {
+		_, err := b.PutObject("bucket", kv.key, strings.NewReader(kv.val), "text/plain")
+		require.NoError(t, err)
+	}
+
+	var all []*storage.Object
+	err := b.WalkObjects("bucket", "", func(obj *storage.Object) error {
+		all = append(all, obj)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Len(t, all, 3)
+
+	var docs []*storage.Object
+	err = b.WalkObjects("bucket", "docs/", func(obj *storage.Object) error {
+		docs = append(docs, obj)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Len(t, docs, 2)
+}
+
+func TestDistributedBackend_WalkObjectsBadBucket(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	err := b.WalkObjects("nope", "", func(*storage.Object) error { return nil })
+	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestDistributedBackend_WalkObjectsDeletedSkipped(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	_, err := b.PutObject("bucket", "keep.txt", strings.NewReader("keep"), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject("bucket", "gone.txt", strings.NewReader("gone"), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, b.DeleteObject("bucket", "gone.txt"))
+
+	var keys []string
+	err = b.WalkObjects("bucket", "", func(obj *storage.Object) error {
+		keys = append(keys, obj.Key)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"keep.txt"}, keys)
+}
+
+func TestDistributedBackend_WalkObjectsVersionedLatestOnly(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	_, err := b.PutObject("bucket", "f.txt", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject("bucket", "f.txt", strings.NewReader("v2-longer"), "text/plain")
+	require.NoError(t, err)
+
+	var objs []*storage.Object
+	err = b.WalkObjects("bucket", "", func(obj *storage.Object) error {
+		objs = append(objs, obj)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, objs, 1, "only latest version should be emitted")
+	assert.Equal(t, int64(9), objs[0].Size, "should report latest version size")
+}
+
+func TestDistributedBackend_WalkObjectsEarlyStop(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket("bucket"))
+
+	for i := range 5 {
+		_, err := b.PutObject("bucket", fmt.Sprintf("f%d.txt", i), strings.NewReader("x"), "text/plain")
+		require.NoError(t, err)
+	}
+
+	sentinel := fmt.Errorf("stop")
+	count := 0
+	err := b.WalkObjects("bucket", "", func(*storage.Object) error {
+		count++
+		if count == 2 {
+			return sentinel
+		}
+		return nil
+	})
+	assert.ErrorIs(t, err, sentinel)
+	assert.Equal(t, 2, count)
+}
+
 func TestDistributedBackend_Overwrite(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket("bucket"))
