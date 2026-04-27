@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -585,6 +586,115 @@ func TestVolumeHandlers_Recalculate(t *testing.T) {
 	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+// --- Snapshot handlers integration tests ---
+
+func TestSnapshotHandlers_CreateListDelete(t *testing.T) {
+	base := setupTestServer(t)
+
+	// Create volume
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/snapvol?size=1048576", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// List snapshots (empty)
+	resp, err := http.Get(base + "/volumes/snapvol/snapshots")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "[]", strings.TrimSpace(string(body)))
+
+	// Create snapshot
+	req, _ = http.NewRequest(http.MethodPost, base+"/volumes/snapvol/snapshots", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var snap struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(body, &snap))
+	assert.NotEmpty(t, snap.ID)
+
+	// List snapshots (1 item)
+	resp, _ = http.Get(base + "/volumes/snapvol/snapshots")
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), snap.ID)
+
+	// Delete snapshot
+	req, _ = http.NewRequest(http.MethodDelete, base+"/volumes/snapvol/snapshots/"+snap.ID, nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// List snapshots (empty again)
+	resp, _ = http.Get(base + "/volumes/snapvol/snapshots")
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "[]", strings.TrimSpace(string(body)))
+}
+
+func TestSnapshotHandlers_Rollback(t *testing.T) {
+	base := setupTestServer(t)
+
+	// Create volume
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/rollvol?size=1048576", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// Create snapshot
+	req, _ = http.NewRequest(http.MethodPost, base+"/volumes/rollvol/snapshots", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var snap struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(body, &snap))
+
+	// Rollback
+	req, _ = http.NewRequest(http.MethodPost, base+"/volumes/rollvol/snapshots/"+snap.ID+"/rollback", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestSnapshotHandlers_Clone(t *testing.T) {
+	base := setupTestServer(t)
+
+	// Create source volume
+	req, _ := http.NewRequest(http.MethodPut, base+"/volumes/srcvol?size=1048576", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// Clone
+	cloneBody := `{"src":"srcvol","dst":"dstvol"}`
+	resp, err := http.Post(base+"/volumes/clone", "application/json", strings.NewReader(cloneBody))
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Contains(t, string(body), "dstvol")
+}
+
+func TestSnapshotHandlers_CloneBadRequest(t *testing.T) {
+	base := setupTestServer(t)
+
+	resp, _ := http.Post(base+"/volumes/clone", "application/json", strings.NewReader(`{}`))
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 // --- Dashboard tests ---

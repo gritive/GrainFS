@@ -8,6 +8,7 @@ table Volume {
   size:int64;
   block_size:int32;
   allocated_blocks:int64 = -1;  // -1=untracked(기존 볼륨), 0=할당없음, >0=블록수
+  snapshot_count:int32 = 0;     // 활성 스냅샷 수; 0이면 live_map 없음
 }
 
 root_type Volume;

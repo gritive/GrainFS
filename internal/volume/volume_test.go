@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
@@ -413,6 +414,201 @@ func (b *listErrBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*sto
 		return nil, fmt.Errorf("injected list error")
 	}
 	return b.Backend.ListObjects(bucket, prefix, maxKeys)
+}
+
+// --- CoW Snapshot tests ---
+
+func TestCreateSnapshot(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("snap-vol", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 블록 0, 1 쓰기
+	_, err = mgr.WriteAt("snap-vol", bytes.Repeat([]byte{0xAA}, blockSize*2), 0)
+	require.NoError(t, err)
+
+	snapID, err := mgr.CreateSnapshot("snap-vol")
+	require.NoError(t, err)
+	assert.NotEmpty(t, snapID)
+
+	vol, err := mgr.Get("snap-vol")
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), vol.SnapshotCount)
+}
+
+func TestCreateSnapshotNonexistent(t *testing.T) {
+	mgr := setupManager(t)
+	_, err := mgr.CreateSnapshot("no-such-vol")
+	assert.Error(t, err)
+}
+
+func TestListSnapshots(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("list-snap-vol", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 스냅샷 없을 때
+	snaps, err := mgr.ListSnapshots("list-snap-vol")
+	require.NoError(t, err)
+	assert.Empty(t, snaps)
+
+	// 스냅샷 2개 생성
+	id1, err := mgr.CreateSnapshot("list-snap-vol")
+	require.NoError(t, err)
+	id2, err := mgr.CreateSnapshot("list-snap-vol")
+	require.NoError(t, err)
+
+	snaps, err = mgr.ListSnapshots("list-snap-vol")
+	require.NoError(t, err)
+	assert.Len(t, snaps, 2)
+
+	ids := map[string]bool{}
+	for _, s := range snaps {
+		ids[s.ID] = true
+	}
+	assert.True(t, ids[id1])
+	assert.True(t, ids[id2])
+}
+
+func TestSnapshotIsolation(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("iso-vol", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// 초기 데이터 쓰기
+	original := bytes.Repeat([]byte{0xAA}, blockSize)
+	_, err = mgr.WriteAt("iso-vol", original, 0)
+	require.NoError(t, err)
+
+	// 스냅샷 생성
+	snapID, err := mgr.CreateSnapshot("iso-vol")
+	require.NoError(t, err)
+
+	// 스냅샷 후 블록 0 덮어쓰기
+	modified := bytes.Repeat([]byte{0xBB}, blockSize)
+	_, err = mgr.WriteAt("iso-vol", modified, 0)
+	require.NoError(t, err)
+
+	// 현재 상태 확인: 0xBB
+	buf := make([]byte, blockSize)
+	_, err = mgr.ReadAt("iso-vol", buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, modified, buf, "current state should be modified (0xBB)")
+
+	// Rollback 후 블록 0은 0xAA 복원
+	err = mgr.Rollback("iso-vol", snapID)
+	require.NoError(t, err)
+
+	_, err = mgr.ReadAt("iso-vol", buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, original, buf, "after rollback should be original (0xAA)")
+}
+
+func TestDeleteSnapshot(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("del-snap-vol", int64(blockSize*4))
+	require.NoError(t, err)
+
+	snapID, err := mgr.CreateSnapshot("del-snap-vol")
+	require.NoError(t, err)
+
+	err = mgr.DeleteSnapshot("del-snap-vol", snapID)
+	require.NoError(t, err)
+
+	vol, err := mgr.Get("del-snap-vol")
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), vol.SnapshotCount)
+
+	snaps, err := mgr.ListSnapshots("del-snap-vol")
+	require.NoError(t, err)
+	assert.Empty(t, snaps)
+}
+
+func TestDeleteSnapshotNonexistent(t *testing.T) {
+	mgr := setupManager(t)
+	_, err := mgr.Create("ds-vol", 4096)
+	require.NoError(t, err)
+
+	err = mgr.DeleteSnapshot("ds-vol", "nonexistent-id")
+	assert.Error(t, err)
+}
+
+func TestClone(t *testing.T) {
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("src-clone", int64(blockSize*4))
+	require.NoError(t, err)
+
+	// src에 데이터 쓰기
+	data := bytes.Repeat([]byte{0xCC}, blockSize)
+	_, err = mgr.WriteAt("src-clone", data, 0)
+	require.NoError(t, err)
+
+	// 클론 생성
+	err = mgr.Clone("src-clone", "dst-clone")
+	require.NoError(t, err)
+
+	// dst에서 데이터 읽기 확인
+	buf := make([]byte, blockSize)
+	_, err = mgr.ReadAt("dst-clone", buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, data, buf)
+
+	// dst 수정이 src에 영향 없는지 확인
+	_, err = mgr.WriteAt("dst-clone", bytes.Repeat([]byte{0xDD}, blockSize), 0)
+	require.NoError(t, err)
+
+	_, err = mgr.ReadAt("src-clone", buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, data, buf, "src should be unaffected by dst write")
+}
+
+func TestCloneNonexistent(t *testing.T) {
+	mgr := setupManager(t)
+	err := mgr.Clone("no-such-src", "dst")
+	assert.Error(t, err)
+}
+
+func TestNoOverheadWithoutSnapshots(t *testing.T) {
+	// snapshot_count == 0인 볼륨은 live_map 없이 기존 블록키 사용 확인
+	const blockSize = DefaultBlockSize
+	mgr := setupManager(t)
+	_, err := mgr.Create("no-snap-vol", int64(blockSize*4))
+	require.NoError(t, err)
+
+	data := bytes.Repeat([]byte{0xEE}, blockSize)
+	_, err = mgr.WriteAt("no-snap-vol", data, 0)
+	require.NoError(t, err)
+
+	// liveMaps에 nil 엔트리가 없거나 nil이어야 함 (live_map 비활성)
+	mgr.mu.Lock()
+	lm := mgr.liveMaps["no-snap-vol"]
+	mgr.mu.Unlock()
+	assert.Nil(t, lm, "volume with no snapshots should have nil live_map cache")
+
+	buf := make([]byte, blockSize)
+	_, err = mgr.ReadAt("no-snap-vol", buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, data, buf)
+}
+
+func TestLiveMapParseRoundTrip(t *testing.T) {
+	lm := map[int64]string{
+		0: "__vol/vol1/blk_000000000000",
+		5: "__vol/vol1/blk_000000000005_v018f4e7c-1d9e-7bf6-b5d1-2e3c8f9a0b1c",
+	}
+
+	var buf bytes.Buffer
+	err := serializeLiveMap(lm, &buf)
+	require.NoError(t, err)
+
+	parsed, err := parseLiveMap(&buf)
+	require.NoError(t, err)
+	assert.Equal(t, lm, parsed)
 }
 
 func TestRecalculate(t *testing.T) {
