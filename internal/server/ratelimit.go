@@ -26,8 +26,12 @@ type RateLimiter struct {
 }
 
 // NewRateLimiter creates a rate limiter with the given requests/sec, burst size,
-// and maximum number of tracked keys.
+// and maximum number of tracked keys. A non-positive rps disables the limiter
+// (returns nil); callers must handle the nil case (the middleware does).
 func NewRateLimiter(rps float64, burst, maxEntries int) *RateLimiter {
+	if rps <= 0 {
+		return nil
+	}
 	rl := &RateLimiter{
 		limiters:   make(map[string]*limiterEntry),
 		rateLimit:  rate.Limit(rps),
@@ -37,8 +41,12 @@ func NewRateLimiter(rps float64, burst, maxEntries int) *RateLimiter {
 	return rl
 }
 
-// Allow checks if the key is within rate limits.
+// Allow checks if the key is within rate limits. A nil receiver always allows
+// (limiter disabled).
 func (rl *RateLimiter) Allow(key string) bool {
+	if rl == nil {
+		return true
+	}
 	rl.mu.Lock()
 	e, ok := rl.limiters[key]
 	if !ok {
@@ -59,7 +67,11 @@ func (rl *RateLimiter) Allow(key string) bool {
 }
 
 // StartCleanup runs a background goroutine that cleans up stale entries.
+// A nil receiver is a no-op (limiter disabled).
 func (rl *RateLimiter) StartCleanup(ctx context.Context, ttl time.Duration) {
+	if rl == nil {
+		return
+	}
 	go func() {
 		ticker := time.NewTicker(ttl / 2)
 		defer ticker.Stop()

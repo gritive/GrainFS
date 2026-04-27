@@ -123,6 +123,12 @@ func init() {
 	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	serveCmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
 	serveCmd.Flags().Bool("dedup", true, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
+	// Rate limit overrides — defaults are production-safe (100/200 ip, 50/100 user).
+	// Benchmarks/dev/upstream-proxied deployments can relax these. 0 disables that layer.
+	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
+	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
+	serveCmd.Flags().Float64("rate-limit-user-rps", 50, "per-authenticated-user rate limit in requests/sec (0 disables)")
+	serveCmd.Flags().Int("rate-limit-user-burst", 100, "per-authenticated-user rate limit burst size")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -608,6 +614,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		defer dedupDB.Close()
 	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
+
+	// Rate limit overrides from CLI (defaults match server.New built-ins).
+	rlIPRPS, _ := cmd.Flags().GetFloat64("rate-limit-ip-rps")
+	rlIPBurst, _ := cmd.Flags().GetInt("rate-limit-ip-burst")
+	rlUserRPS, _ := cmd.Flags().GetFloat64("rate-limit-user-rps")
+	rlUserBurst, _ := cmd.Flags().GetInt("rate-limit-user-burst")
+	srvOpts = append(srvOpts, server.WithRateLimits(rlIPRPS, rlIPBurst, rlUserRPS, rlUserBurst))
 
 	srv := server.New(addr, backend, srvOpts...)
 

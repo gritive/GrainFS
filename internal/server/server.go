@@ -184,6 +184,17 @@ func WithVolumeManager(mgr *volume.Manager) Option {
 	}
 }
 
+// WithRateLimits overrides the default IP/user rate limits.
+// Setting an rps to 0 (or negative) disables that layer entirely — useful for
+// benchmarking, dev, or when an upstream proxy already enforces limits.
+// Defaults: ip=100 rps/burst 200, user=50 rps/burst 100.
+func WithRateLimits(ipRPS float64, ipBurst int, userRPS float64, userBurst int) Option {
+	return func(s *Server) {
+		s.ipLimiter = NewRateLimiter(ipRPS, ipBurst, 100000)
+		s.userLimiter = NewRateLimiter(userRPS, userBurst, 100000)
+	}
+}
+
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s := &Server{
