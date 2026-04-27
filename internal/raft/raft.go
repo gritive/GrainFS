@@ -115,11 +115,15 @@ func (m *adaptiveMetrics) maxBatch() int {
 }
 
 func calcBatchTimeout(rate float64) time.Duration {
+	// Tighter caps so a single propose's worst-case batch wait is sub-ms,
+	// even under high load. Larger maxBatch covers throughput; long timeouts
+	// only hurt p50 latency without adding meaningful coalescing on top of
+	// the batch-size cap.
 	switch {
 	case rate >= 500:
-		return 5 * time.Millisecond
-	case rate >= 100:
 		return time.Millisecond
+	case rate >= 100:
+		return 500 * time.Microsecond
 	default:
 		return 100 * time.Microsecond
 	}
