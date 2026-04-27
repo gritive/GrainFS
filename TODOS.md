@@ -21,18 +21,25 @@
 - [ ] Migration: NFS virtual overlay
 - [ ] Migration: NBD block proxying
 - [ ] nbd over internet for edge computing (powered by wireguard)
+- [ ] **NBD 인증 및 TLS 지원** — 현재 NBD 서버(`internal/nbd/nbd.go`)는 인증/암호화 없이 평문 TCP 익명 접속을 허용한다. 누구나 NBD 포트에 붙으면 read/write 가능 (cluster-key/access-key는 S3에만 적용). 표준 `NBD_OPT_STARTTLS` 옵션 처리 + TLS server cert + 선택적 client cert 인증 또는 사전 공유 키(PSK) 추가. 우선 TLS만이라도 활성화해 wire eavesdropping 차단. NBD 서버는 platform-agnostic이므로 Linux 외에서도 동일 적용.
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 
 ## Phase 19: Performance
 
+- [ ] **PUT handler latency breakdown 측정** — 2026-04-28 MinIO 비교 측정에서 grainfs PUT이 single 4KB 4x, cluster 64KB 5.3x 느림 (p50). pprof CPU 84% syscall이라 알고리즘 문제 아님 — PUT마다 발생하는 (1) BadgerDB metadata fsync, (2) raft ProposeWait, (3) EC shard fsync 직렬화 비용 추정. `handlePut` 안에 단계별 trace span 추가하고 metadata fsync 비중이 30%+면 BadgerDB WriteBatch group commit 또는 metadata-EC parallel write 검토. 결과 [`benchmarks/results-20260428-064151/ANALYSIS.md`](benchmarks/results-20260428-064151/ANALYSIS.md). 재오픈 조건은 이 측정 자체.
+- [ ] **PUT crypto sync.Pool화** — 같은 측정에서 매 요청 `crypto/internal/fips140/sha256.New` 33MB, `hmac.New` 21MB allocs/30s. SigV4 검증 + ETag md5가 매 요청 객체 생성. sync.Pool로 재사용 → GC pause p99 감소 기대. 절대 throughput 영향은 작음 (CPU bound 아님). 트리거: GC pause p99 5ms 초과 시.
+- [ ] **cluster 내부 QUIC PQ TLS handshake 검증** — `mlkem.NewDecapsulationKey768` + `cryptobyte.Builder` allocs 26MB+/30s 관찰. raft RPC connection은 long-lived여야 정상이나 매 RPC reconnect라면 큰 낭비. quic connection idle timeout / pooling 확인.
+- [ ] **bench_compare.sh 1MB+ 시나리오 fix** — 현재 `s3_bench.js`의 `randomString(N)`을 매 iteration 호출하는데 N=1MB일 때 goja JS 엔진이 너무 오래 걸려 ramp-up 안에 첫 PUT조차 못 끝냄 (2026-04-28 측정에서 모든 시스템 1024KB가 0 ops). setup phase에 1회만 buffer 생성 후 재사용하도록 수정. → grainfs/minio 큰 객체 비교 가능하게.
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] **EC shard cache 사이즈 튜닝** — 본구현 완료 v0.0.4.42 (E2E 85.7% hit). 운영 telemetry(`grainfs_ec_shard_cache_hit_rate`)로 working set 측정 후 default 256 MB 적정성 검증. 큰 객체 백업 워크로드면 GB 단위까지, 작은 객체 위주면 비활성화 권장.
-- [ ] io_uring
-- [ ] SPDK
-- [ ] SoA (Structure of Arrays)
-- [ ] SIMD
+- [ ] **SPDK** — Phase 21+. NVMe direct user-space I/O로 io_uring 대비 1.5–3x 추가 throughput 가능. 구현 비용 큼(C library + cgo + kernel module 의존성), Linux 전용. 트리거: 운영 telemetry에서 io_uring path가 NVMe queue depth 포화 + p99 latency 한계 도달 시 재평가.
 - [ ] **Predictive resource warnings — BadgerDB / goroutine / FD** — *zero ops* — BadgerDB value log 크기, goroutine 수, open FD 추세를 추적하고 임계 도달 전 경고. 디스크 사용률 경고와 동일 패턴(transition-only firing).
-- [ ] control plane, data plane 분리
+
+### Phase 21+ 후보 (측정 후 결정 / 현재 상태)
+
+- **~~SIMD~~** — **NOT PURSUE (2026-04-28 측정)**. pprof 10s GET load 측정 결과 top 30 중 **98%가 `syscall.RawSyscall` + `runtime.kevent` + `runtime.pthread_cond_*`** (전부 syscall + scheduler). Reed-Solomon / AES / MD5 / CRC32 등 SIMD 대상 함수는 단 한 개도 sample에 등장 안 함 — GrainFS는 CPU compute bound가 아니라 I/O syscall bound. transitively-SIMD 라이브러리(klauspost/reedsolomon AVX-512, Go stdlib AES-NI, hardware CRC32)가 이미 모든 hot path 커버함이 측정으로 확인. **재오픈 조건**: 아키텍처 크게 달라지거나 (예: SPDK/io_uring 도입으로 syscall 비중 급감) 운영 telemetry에서 EC encode/decode가 5%+ CPU 차지 시.
+- **SoA (Structure of Arrays)** — Go GC + pointer-heavy 코드베이스에서 cache benefit marginal. 후보(scrubber bulk metadata scan, placement records 배치 순회)도 sequential hot loop인지 확인 필요. 트리거: scrubber single-pass 30s+ 또는 BadgerDB iteration이 GC pressure 일으킬 때.
+- **~~Raft leader 부담 경감 (commit-cycle 효율화)~~** — **NOT PURSUE (2026-04-28 측정)**. 3-node 클러스터에서 32-concurrent PUT 부하 (64 KB × 12s) 동안 leader/follower pprof 비교: Leader CPU 27.6% vs Follower 24.4% (**차이 3%, idle 70%+**). 둘 다 95%가 syscall + scheduler. propose / forwardPropose / ProposeWait 함수는 top 25에 한 번도 등장 안 함 — Raft commit이 hot path가 아님. Leader-only 추가 부하는 ETag md5(1.4%) + BadgerDB fsync madvise(1.2%) 정도로 작음. 코드 측에서도 `propose()` 12개 호출 전부 합의 필수(versioning/ETag/ring 일관성), bypass 가능 path 없음. read/list/shard-fetch/gossip/SSE/status는 이미 모두 leader 안 거치는 구조. **재오픈 조건**: 100+ node 클러스터 운영, PUT throughput 현재 5x 목표(10k+ PUT/s), 또는 propose-to-apply p99 SLO 위반 측정 시. batch propose / async commit / Raft pipelining / forwardPropose batching 후보는 그때 재평가.
 
 ## Phase 20: Protocol Extensions
 

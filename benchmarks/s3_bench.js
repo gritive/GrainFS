@@ -148,6 +148,9 @@ function sign(method, url, body, addContentType) {
 export function setupBucket() {
   const url = `${BASE}/${BUCKET}`;
   const res = http.put(url, null, { headers: sign('PUT', url, '', false) });
+  if (res.status !== 200 && res.status !== 409) {
+    console.log(`setupBucket failed: status=${res.status} body=${(res.body || '').substring(0, 400)}`);
+  }
   check(res, { 'bucket ready': (r) => r.status === 200 || r.status === 409 });
 }
 
@@ -161,9 +164,14 @@ export function mixedWorkload() {
   const putRes = http.put(putUrl, payload, { headers: sign('PUT', putUrl, payload, true) });
   putLatency.add(putRes.timings.duration);
   putOps.add(1);
-  if (!check(putRes, { 'put ok': (r) => r.status === 200 })) {
-    console.log(`PUT failed: status=${putRes.status} body=${putRes.body.substring(0, 200)}`);
+  // 200 OK가 아닌 경우 디버그 출력은 setup 실패 / 비호환 케이스 한정.
+  // 정상 부하 중에는 status가 200이므로 침묵.
+  if (putRes.status !== 200) {
+    if (__VU === 1 && __ITER < 3) {
+      console.log(`PUT failed: status=${putRes.status} body=${(putRes.body||'').substring(0, 200)}`);
+    }
   }
+  check(putRes, { 'put ok': (r) => r.status === 200 });
 
   // GET
   const getUrl = `${BASE}/${BUCKET}/${key}`;
@@ -196,10 +204,10 @@ export function handleSummary(data) {
     delete: extractMetric(data, 'grainfs_delete_latency', 'grainfs_delete_ops'),
   };
 
-  return {
-    stdout: formatReport(report),
-    'benchmarks/report.json': JSON.stringify(report, null, 2),
-  };
+  const reportPath = __ENV.REPORT_PATH || 'benchmarks/report.json';
+  const out = { stdout: formatReport(report) };
+  out[reportPath] = JSON.stringify(report, null, 2);
+  return out;
 }
 
 function extractMetric(data, latencyKey, opsKey) {

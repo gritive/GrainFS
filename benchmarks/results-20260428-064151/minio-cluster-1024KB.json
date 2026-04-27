@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-04-27T21:53:35.714Z",
+  "summary": {
+    "total_requests": 1,
+    "failed_requests": 1
+  },
+  "put": {
+    "ops": 0,
+    "p50_ms": "0.00",
+    "p99_ms": "0.00",
+    "avg_ms": "0.00",
+    "min_ms": "0.00",
+    "max_ms": "0.00"
+  },
+  "get": {
+    "ops": 0,
+    "p50_ms": "0.00",
+    "p99_ms": "0.00",
+    "avg_ms": "0.00",
+    "min_ms": "0.00",
+    "max_ms": "0.00"
+  },
+  "delete": {
+    "ops": 0,
+    "p50_ms": "0.00",
+    "p99_ms": "0.00",
+    "avg_ms": "0.00",
+    "min_ms": "0.00",
+    "max_ms": "0.00"
+  },
+  "system": "minio",
+  "mode": "cluster",
+  "object_size_kb": 1024,
+  "duration": "30s",
+  "vus": 20
+}
