@@ -86,6 +86,12 @@ echo ""
 echo "--- Test 1: SavingsRatio ---"
 
 BASELINE=$(get_allocated_blocks)
+# Fresh volumes report AllocatedBlocks=-1 (the "untracked" sentinel kept
+# for legacy-volume compatibility — see internal/volume/volume.go:110).
+# The first write flips tracking on and the counter starts at 0+newBlocks.
+# Normalize the baseline so the post-write assertion math works on a fresh
+# volume the same way it does on a volume that already has writes.
+[ "$BASELINE" -lt 0 ] && BASELINE=0
 echo "Baseline allocated_blocks (before writes) = $BASELINE"
 
 # Write same 4KB block to 4 consecutive positions
