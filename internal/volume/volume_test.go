@@ -797,3 +797,36 @@ func TestDedupOverwriteReleasesOldRef(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data2, buf)
 }
+
+// TestDedupPartialWritePreservesUntouchedBytes is the regression test for the
+// P0 data-loss bug: a sub-block partial write in dedup mode must load the
+// existing block via its canonical key before merging, not via physicalKey.
+// Without the fix, the untouched tail of the block would be zeroed out.
+func TestDedupPartialWritePreservesUntouchedBytes(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "dedup-partial"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*4))
+	require.NoError(t, err)
+
+	// Fill block 0 with a recognisable pattern.
+	full := bytes.Repeat([]byte{0xAA}, DefaultBlockSize)
+	_, err = mgr.WriteAt(volName, full, 0)
+	require.NoError(t, err)
+
+	// Partial overwrite: write 512 bytes of 0xBB at intra-block offset 512.
+	// Only bytes [512, 1024) should change; the rest must stay 0xAA.
+	const patchOffset = 512
+	const patchLen = 512
+	patch := bytes.Repeat([]byte{0xBB}, patchLen)
+	_, err = mgr.WriteAt(volName, patch, patchOffset)
+	require.NoError(t, err)
+
+	// Read back the whole block and verify byte-by-byte.
+	got := make([]byte, DefaultBlockSize)
+	_, err = mgr.ReadAt(volName, got, 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, full[:patchOffset], got[:patchOffset], "bytes before patch must be unchanged (0xAA)")
+	assert.Equal(t, patch, got[patchOffset:patchOffset+patchLen], "patched region must be 0xBB")
+	assert.Equal(t, full[patchOffset+patchLen:], got[patchOffset+patchLen:], "bytes after patch must be unchanged (0xAA)")
+}
