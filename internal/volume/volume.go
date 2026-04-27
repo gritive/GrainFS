@@ -417,6 +417,10 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 			if res.ToDelete != "" {
 				m.backend.DeleteObject(volumeBucketName, res.ToDelete) //nolint:errcheck
+				newBlocks--                                            // freed one unique S3 object (refcount → 0)
+			}
+			if res.IsNew {
+				newBlocks++ // created one new unique S3 object
 			}
 		} else if useCow {
 			targetKey = cowBlockKey(name, blkNum)
@@ -440,7 +444,8 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 		}
 
-		if isNew {
+		// dedup path tracks newBlocks inside the if m.dedup != nil block above.
+		if m.dedup == nil && isNew {
 			newBlocks++
 		}
 		totalWritten += canWrite
@@ -452,11 +457,14 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		}
 	}
 
-	if newBlocks > 0 {
+	if newBlocks != 0 {
 		if vol.AllocatedBlocks < 0 {
 			vol.AllocatedBlocks = 0 // untracked → start tracking
 		}
 		vol.AllocatedBlocks += int64(newBlocks)
+		if vol.AllocatedBlocks < 0 {
+			vol.AllocatedBlocks = 0
+		}
 		data, err := marshalVolume(vol)
 		if err == nil {
 			m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf") //nolint:errcheck
@@ -500,11 +508,9 @@ func (m *Manager) Discard(name string, off, length int64) error {
 			if freeErr != nil {
 				return fmt.Errorf("dedup free block %d: %w", blkNum, freeErr)
 			}
-			if objectKey != "" {
+			if shouldDelete {
 				freed++
-				if shouldDelete {
-					m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
-				}
+				m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
 			}
 		} else {
 			key := physicalKey(name, blkNum, liveMap)

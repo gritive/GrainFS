@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.4.37] - 2026-04-27
+
+### Added
+
+- **`--dedup` 플래그** (`cmd/grainfs serve`): `--dedup` 플래그로 블록 레벨 중복 제거 활성화. BadgerDB 인덱스를 `{data}/dedup/`에 생성. NFS·NBD·HTTP 서버가 단일 `volume.Manager` 인스턴스를 공유해 dedup 상태 일관성 보장.
+- **CoW E2E 테스트 3종** (`tests/e2e/cow_e2e_test.go`): NFS 기반 스냅샷 롤백, 스냅샷 list/delete, 클론 라이프사이클 독립성 검증. `GRAINFS_DEDUP=1` 환경변수로 dedup 활성화 상태에서도 실행 가능.
+
+### Fixed
+
+- **`AllocatedBlocks` dedup 계산 버그** (`internal/volume/volume.go`): dedup 모드에서 블록 위치(position)가 아닌 실제 S3 객체(`res.IsNew`/`res.ToDelete`) 기준으로 카운트하도록 수정. 동일 내용 4회 쓰기 시 `AllocatedBlocks = 1` 정상 반환.
+- **`Discard` dedup refcount 버그** (`internal/volume/volume.go`): refcount > 1인 객체 해제 시 `freed`를 잘못 증가시키던 버그 수정. S3 객체가 실제 삭제(`shouldDelete = true`)될 때만 카운트 감소.
+
 ## [0.0.4.36] - 2026-04-27
 
 ### Added

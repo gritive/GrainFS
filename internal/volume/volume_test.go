@@ -808,6 +808,91 @@ func TestDedupOverwriteReleasesOldRef(t *testing.T) {
 	assert.Equal(t, data2, buf)
 }
 
+// TestAllocatedBlocks_Dedup_Counts_Unique_Objects verifies that AllocatedBlocks
+// reflects unique S3 objects, not block positions. Writing the same content to
+// 4 positions must leave AllocatedBlocks == 1.
+func TestAllocatedBlocks_Dedup_Counts_Unique_Objects(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "alloc-dedup-unique"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*8))
+	require.NoError(t, err)
+
+	data := bytes.Repeat([]byte{0xAB}, DefaultBlockSize)
+
+	for i := 0; i < 4; i++ {
+		_, err = mgr.WriteAt(volName, data, int64(i)*int64(DefaultBlockSize))
+		require.NoError(t, err)
+	}
+
+	vol, err := mgr.Get(volName)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), vol.AllocatedBlocks,
+		"4 writes of identical content must allocate exactly 1 S3 object")
+}
+
+// TestAllocatedBlocks_Dedup_Discard_OnlyOnObjectDelete verifies that Discard
+// only decrements AllocatedBlocks when the last reference to an S3 object is removed.
+func TestAllocatedBlocks_Dedup_Discard_OnlyOnObjectDelete(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "alloc-dedup-discard"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*4))
+	require.NoError(t, err)
+
+	data := bytes.Repeat([]byte{0xCD}, DefaultBlockSize)
+
+	_, err = mgr.WriteAt(volName, data, 0)
+	require.NoError(t, err)
+	_, err = mgr.WriteAt(volName, data, int64(DefaultBlockSize))
+	require.NoError(t, err)
+
+	vol, err := mgr.Get(volName)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), vol.AllocatedBlocks, "setup: 2 positions, 1 S3 object")
+
+	// Discard block 0: refcount 2→1, S3 object survives → AllocatedBlocks must stay 1
+	err = mgr.Discard(volName, 0, int64(DefaultBlockSize))
+	require.NoError(t, err)
+	vol, err = mgr.Get(volName)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), vol.AllocatedBlocks,
+		"freeing one of two references must not decrement AllocatedBlocks")
+
+	// Discard block 1: refcount 1→0, S3 object deleted → AllocatedBlocks must reach 0
+	err = mgr.Discard(volName, int64(DefaultBlockSize), int64(DefaultBlockSize))
+	require.NoError(t, err)
+	vol, err = mgr.Get(volName)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), vol.AllocatedBlocks,
+		"freeing last reference must decrement AllocatedBlocks")
+}
+
+// TestAllocatedBlocks_Dedup_Overwrite_NetZero verifies that overwriting a block
+// with unique new content keeps AllocatedBlocks stable (old S3 object freed, new one created).
+func TestAllocatedBlocks_Dedup_Overwrite_NetZero(t *testing.T) {
+	mgr := setupDedupManager(t)
+	const volName = "alloc-dedup-overwrite"
+	_, err := mgr.Create(volName, int64(DefaultBlockSize*4))
+	require.NoError(t, err)
+
+	dataA := bytes.Repeat([]byte{0x11}, DefaultBlockSize)
+	dataB := bytes.Repeat([]byte{0x22}, DefaultBlockSize)
+
+	_, err = mgr.WriteAt(volName, dataA, 0)
+	require.NoError(t, err)
+	vol, err := mgr.Get(volName)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), vol.AllocatedBlocks, "initial write")
+
+	// Overwrite with different unique content: A freed (refcount→0), B created.
+	// Net change to S3 objects = 0 → AllocatedBlocks must stay 1.
+	_, err = mgr.WriteAt(volName, dataB, 0)
+	require.NoError(t, err)
+	vol, err = mgr.Get(volName)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), vol.AllocatedBlocks,
+		"overwrite unique content: one freed, one created, net 0")
+}
+
 // TestDedupPartialWritePreservesUntouchedBytes is the regression test for the
 // P0 data-loss bug: a sub-block partial write in dedup mode must load the
 // existing block via its canonical key before merging, not via physicalKey.
