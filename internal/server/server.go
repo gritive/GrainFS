@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
+	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -70,6 +71,7 @@ type Server struct {
 	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
 	degradedFlag   atomic.Bool       // true when EC degraded mode is active
 	blockCache     *blockcache.Cache // nil 또는 비활성. /api/cache/status가 노출.
+	shardCache     *shardcache.Cache // nil 또는 비활성. EC shard cache, /api/cache/status에 함께 노출.
 
 	// Bounded event queue + single worker. Decouples request handlers from
 	// BadgerDB write latency and prevents unbounded goroutine growth.
@@ -97,6 +99,14 @@ func WithAuth(creds []s3auth.Credentials) Option {
 func WithBlockCache(c *blockcache.Cache) Option {
 	return func(s *Server) {
 		s.blockCache = c
+	}
+}
+
+// WithShardCache wires the EC shard cache so /api/cache/status can
+// expose its hits/misses/resident bytes alongside the block cache.
+func WithShardCache(c *shardcache.Cache) Option {
+	return func(s *Server) {
+		s.shardCache = c
 	}
 }
 
@@ -268,7 +278,8 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		path := string(c.URI().Path())
 		if path == "/metrics" || strings.HasPrefix(path, "/ui/") ||
 			path == "/api/events" || path == "/api/eventlog" ||
-			path == "/api/cluster/status" || path == "/api/health" {
+			path == "/api/cluster/status" || path == "/api/health" ||
+			path == "/api/cache/status" {
 			c.Next(ctx)
 			return
 		}
