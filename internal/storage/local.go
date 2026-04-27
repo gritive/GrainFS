@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+
+	"github.com/gritive/GrainFS/internal/metrics/readamp"
 )
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
@@ -187,6 +189,12 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 }
 
 func (b *LocalBackend) GetObject(bucket, key string) (io.ReadCloser, *Object, error) {
+	// Backend boundary readamp: every disk-touching GetObject feeds
+	// the simulator. CachedBackend sits in front of us, so callers
+	// that hit the object cache never reach this point. The hit-rate
+	// curve at this tracker therefore answers exactly what UBC would
+	// have caught beyond the existing object cache.
+	readamp.RecordBackendObject(bucket + "/" + key)
 	obj, err := b.HeadObject(bucket, key)
 	if err != nil {
 		return nil, nil, err

@@ -26,7 +26,7 @@
 ## Phase 19: Performance
 
 - [ ] go-billy: Direct File I/O; O_DIRECT
-- [ ] Unified buffer cache: Centralized Page Cache
+- [ ] **EC shard cache 검토** — Phase 2 #3 narrow 구현은 volume layer만. EC reconstruct 경로의 shard 재요청 hit rate는 multi-node E2E telemetry 후 결정. `grainfs_readamp_hits_total{tracker="ec_shard_64mb"} / total > 20%` 관측 시 별도 narrow 추가.
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.4.41] - 2026-04-28
+
+### Added
+
+- **Read amplification simulator** (`internal/metrics/readamp/`): LRU 기반 캐시 시뮬레이터 — 실제 데이터를 캐싱하지 않고 hit/miss 카운터만 추적해서 "이 cache size를 도입했다면 hit rate은 얼마였을까"에 데이터로 답한다. 16/64/256 MB 동시 시뮬레이션을 volume.ReadAt + EC reconstruction + LocalBackend.GetObject에 와이어. `--measure-read-amp` 플래그로 ON (기본 OFF, 비활성 시 atomic.Bool load 1회/read 외 오버헤드 없음). Prometheus `grainfs_readamp_hits_total{tracker="..."}` + `_misses_total` 노출.
+- **Volume block cache** (`internal/cache/blockcache/`): bounded sharded LRU (16 shards, FNV hash). 4 KB 블록 데이터 캐싱 + write/discard 시 invalidation. `--block-cache-size` 플래그 (기본 64 MB, 0 비활성). 측정 검증: 5000 blocks(20 MB) × 2-pass 워크로드에서 cold pass 251 ms → warm pass 3.5 ms — **72배 가속**, warm hit rate 100%. Prometheus `grainfs_block_cache_hits_total` / `_misses_total` / `_evictions_total` / `_resident_bytes` / `_capacity_bytes` 노출.
+- **Read amplification 워크로드 평가 테스트** (`internal/volume/readamp_workload_test.go`, `internal/storage/readamp_workload_test.go`): volume layer 6종 + object layer 5종 합성 워크로드 측정 결과를 design doc Phase 2 #3에 표로 보존.
+
+### Changed
+
+- **Phase 2 #3 Unified Buffer Cache — narrow scope 결정**: "Unified" 측정 결과가 path별로 매우 다른 결론. **Volume layer**: cache 부재 → 추가 시 Pareto 90% / locality 워크로드 50%-100% hit, 측정에서 72× wall-clock 가속 확인 → narrow `internal/cache/blockcache` 도입. **Object layer**: 기존 `CachedBackend(64 MB LRU)`가 이미 모든 locality 워크로드를 흡수, working set이 캐시 초과 시에만 0%→50% marginal win → 그대로 유지, UBC 추가 시 pure double-caching. EC shard layer는 multi-node telemetry 후 별도 결정. 자세한 데이터·재오픈 조건은 design doc Phase 2 #3 참조.
+- **Lock-free 우선 원칙 적용 강화**: blockcache는 `sync.Mutex` 대신 (a) 16-shard sharded mutex로 contention 분산 (b) 카운터는 `atomic.Uint64` (c) actor goroutine 패턴 부적합 근거 (hot-path channel round-trip ≫ sharded mutex)를 소스에 명시. `volume.Manager.mu` 의 단일 mutex 사용 근거(cross-volume RMW 원자성)도 코드 주석에 풀어 적음.
+
 ## [0.0.4.40] - 2026-04-28
 
 ### Added
