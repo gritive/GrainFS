@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs
+.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 
@@ -117,6 +117,19 @@ test-nbd-docker:
 		-v $(NBD_PPROF_DIR):/tmp \
 		-e GRAINFS_PPROF=$(GRAINFS_PPROF) \
 		grainfs-nbd-test
+
+# Run the full host-side E2E suite inside a Linux container. Use this on macOS
+# when you want to exercise platform-specific code paths (NBD kernel module,
+# future O_DIRECT/io_uring) that don't run natively. Mounts the docker socket
+# so tests that themselves invoke docker (TestNBD_*) keep working.
+test-e2e-docker:
+	@echo "Running cross-platform E2E tests in Linux Docker..."
+	docker build -t grainfs-e2e -f docker/e2e.Dockerfile .
+	docker run --rm --privileged \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v /lib/modules:/lib/modules:ro \
+		-e GRAINFS_BINARY=/usr/local/bin/grainfs \
+		grainfs-e2e
 
 update-deps:
 	find . -name "go.mod" -not -path "*/vendor/*" -execdir go get -u ./... \; -execdir go mod tidy \;

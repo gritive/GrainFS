@@ -40,7 +40,8 @@ grainfs serve \
     --port "$S3_PORT" \
     --nbd-port "$NBD_PORT" \
     --nbd-volume-size "$NBD_SIZE" \
-    --nfs-port 0 &
+    --nfs-port 0 \
+    --dedup=false &
 SERVER_PID=$!
 
 # Wait for HTTP

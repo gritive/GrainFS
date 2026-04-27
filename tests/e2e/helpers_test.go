@@ -43,6 +43,13 @@ func TestMain(m *testing.M) {
 		"--nfs-port", fmt.Sprintf("%d", nfsPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort())}
 
+	// GRAINFS_DEDUP=1 opts into dedup. Default is OFF for the e2e suite because
+	// dedup + snapshots is not implemented in Phase A — CoW E2E tests would
+	// fail starting from the second snapshot otherwise.
+	if os.Getenv("GRAINFS_DEDUP") != "1" {
+		args = append(args, "--dedup=false")
+	}
+
 	// GRAINFS_PPROF=1 enables comprehensive pprof profiling.
 	// CPU profile is collected concurrently with the test run (25s window).
 	// All profiles are saved to /tmp/grainfs-e2e-*.out after tests complete.
