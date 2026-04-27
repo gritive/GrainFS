@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,12 +11,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"crypto/rand"
 
@@ -472,6 +475,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		Str("node_id", nodeID).Str("raft_addr", raftAddr).Strs("peers", peers).
 		Str("addr", addr).Str("data", dataDir).Msg("server started")
 
+	// Startup config snapshot — debug-level log of every flag-derived runtime
+	// value. Useful for diffing against a known-good config when an operator
+	// is comparing two installs or troubleshooting drift after a restart.
+	logStartupConfigSnapshot(cmd, addr, dataDir, nodeID, raftAddr, peers)
+
 	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
 	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
 	clusterAlerts := server.NewAlertsState(clusterAlertWebhook, alerts.Options{Secret: clusterAlertSecret}, alerts.DegradedConfig{})
@@ -925,4 +933,83 @@ func (r *raftClusterInfo) LivePeers() []string {
 		return r.peers
 	}
 	return r.backend.LiveNodes()
+}
+
+// logStartupConfigSnapshot dumps every flag's resolved value at debug level
+// and writes a JSON snapshot to {dataDir}/.last-config.json. On the next
+// start the previous snapshot is compared and any changed key is logged at
+// info level so the operator sees what was reconfigured between restarts.
+//
+// Limited to flag values — there is no live-config-file system in grainfs,
+// so true "drift detection" (file vs runtime) is out of scope until a config
+// file is added (Phase 20). What this catches is unintentional flag changes
+// across restarts, which is the realistic operator failure mode today.
+func logStartupConfigSnapshot(cmd *cobra.Command, addr, dataDir, nodeID, raftAddr string, peers []string) {
+	snapshot := map[string]any{
+		"addr":      addr,
+		"data_dir":  dataDir,
+		"node_id":   nodeID,
+		"raft_addr": raftAddr,
+		"peers":     peers,
+	}
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		// Strip secrets from the snapshot — they should never hit a debug
+		// log or an on-disk plaintext file.
+		switch f.Name {
+		case "secret-key", "cluster-key", "alert-webhook-secret", "heal-receipt-psk":
+			if f.Value.String() != "" {
+				snapshot[f.Name] = "<redacted>"
+			}
+			return
+		}
+		snapshot[f.Name] = f.Value.String()
+	})
+
+	log.Debug().Interface("flags", snapshot).Msg("startup config snapshot")
+
+	// Compare against previous snapshot, log diff at info level.
+	snapPath := filepath.Join(dataDir, ".last-config.json")
+	if prev, err := os.ReadFile(snapPath); err == nil {
+		var prevMap map[string]any
+		if err := json.Unmarshal(prev, &prevMap); err == nil {
+			diff := diffSnapshots(prevMap, snapshot)
+			if len(diff) > 0 {
+				log.Info().Interface("changed", diff).Msg("config changed since last startup")
+			}
+		}
+	}
+
+	// Persist current snapshot for next restart's comparison. Failure here
+	// is non-fatal — drift detection is best-effort observability.
+	if data, err := json.MarshalIndent(snapshot, "", "  "); err == nil {
+		if err := os.WriteFile(snapPath, data, 0o600); err != nil {
+			log.Debug().Err(err).Str("path", snapPath).Msg("could not persist startup config snapshot")
+		}
+	}
+}
+
+// diffSnapshots returns a map of key→{prev, curr} for every key whose value
+// changed between snapshots. Keys present in only one side are also reported.
+func diffSnapshots(prev, curr map[string]any) map[string]map[string]any {
+	out := make(map[string]map[string]any)
+	keys := make(map[string]struct{}, len(prev)+len(curr))
+	for k := range prev {
+		keys[k] = struct{}{}
+	}
+	for k := range curr {
+		keys[k] = struct{}{}
+	}
+	sortedKeys := make([]string, 0, len(keys))
+	for k := range keys {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+	for _, k := range sortedKeys {
+		pv, pok := prev[k]
+		cv, cok := curr[k]
+		if !pok || !cok || fmt.Sprintf("%v", pv) != fmt.Sprintf("%v", cv) {
+			out[k] = map[string]any{"prev": pv, "curr": cv}
+		}
+	}
+	return out
 }
