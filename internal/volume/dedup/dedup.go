@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -76,6 +77,9 @@ func blockBadgerPrefix(vol string) []byte {
 }
 
 func (b *badgerIndex) WriteBlock(vol string, blkNum int64, hash [32]byte, newKey string) (WriteResult, error) {
+	if strings.Contains(vol, ":") {
+		return WriteResult{}, fmt.Errorf("dedup: volume name %q must not contain ':'", vol)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -350,6 +354,9 @@ func decrementRefcount(txn *badger.Txn, objectKey string) (shouldDelete bool, ha
 	}
 	var rc int32
 	if err := item.Value(func(v []byte) error {
+		if len(v) < 36 {
+			return fmt.Errorf("dedup: corrupt ref entry for %q (len %d, want 36)", objectKey, len(v))
+		}
 		rc, hash = decodeRefVal(v)
 		return nil
 	}); err != nil {

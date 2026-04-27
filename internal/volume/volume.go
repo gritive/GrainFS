@@ -151,7 +151,10 @@ func (m *Manager) Delete(name string) error {
 	// Delete all block objects, respecting dedup refcounts.
 	if m.dedup != nil {
 		// Dedup path: BadgerDB tracks all block mappings; release refcounts atomically.
-		toDelete, _ := m.dedup.DeleteVolume(name)
+		toDelete, err := m.dedup.DeleteVolume(name)
+		if err != nil {
+			return fmt.Errorf("dedup delete volume: %w", err)
+		}
 		for _, key := range toDelete {
 			m.backend.DeleteObject(volumeBucketName, key) //nolint:errcheck
 		}
@@ -315,7 +318,18 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			lastBlk = vol.Size/bs - 1
 		}
 		for blkNum := firstBlk; blkNum <= lastBlk; blkNum++ {
-			if _, err := m.backend.HeadObject(volumeBucketName, physicalKey(name, blkNum, liveMap)); err != nil {
+			var existErr error
+			if m.dedup != nil {
+				_, found, err := m.dedup.ReadBlock(name, blkNum)
+				if err != nil {
+					existErr = err
+				} else if !found {
+					existErr = fmt.Errorf("not found")
+				}
+			} else {
+				_, existErr = m.backend.HeadObject(volumeBucketName, physicalKey(name, blkNum, liveMap))
+			}
+			if existErr != nil {
 				newBlocksNeeded++
 			}
 		}
@@ -342,15 +356,34 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		blkNum := pos / bs
 		blkOff := pos % bs
 
-		oldKey := physicalKey(name, blkNum, liveMap)
-
-		// Read existing block (or zeros); isNew tracks if this is a new allocation
+		// Read existing block (or zeros); isNew tracks if this is a new allocation.
+		// Dedup mode: canonical key lives in BadgerDB — positional key doesn't exist in the
+		// backend. Must read via ReadBlock to preserve bytes outside the write window.
 		blkData := make([]byte, vol.BlockSize)
-		rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
-		isNew := readErr != nil
-		if !isNew {
-			io.ReadFull(rc, blkData)
-			rc.Close()
+		var isNew bool
+		var oldKey string // only populated in non-dedup paths
+		if m.dedup != nil {
+			canonical, found, rErr := m.dedup.ReadBlock(name, blkNum)
+			if rErr != nil {
+				return totalWritten, fmt.Errorf("read dedup block %d: %w", blkNum, rErr)
+			}
+			if found {
+				rc, _, readErr := m.backend.GetObject(volumeBucketName, canonical)
+				if readErr == nil {
+					io.ReadFull(rc, blkData)
+					rc.Close()
+				}
+			} else {
+				isNew = true
+			}
+		} else {
+			oldKey = physicalKey(name, blkNum, liveMap)
+			rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
+			isNew = readErr != nil
+			if !isNew {
+				io.ReadFull(rc, blkData)
+				rc.Close()
+			}
 		}
 
 		// Write into the block buffer
