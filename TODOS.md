@@ -26,7 +26,7 @@
 ## Phase 19: Performance
 
 - [ ] go-billy: Direct File I/O; O_DIRECT
-- [ ] **EC shard cache 본구현** — 측정 완료 (3-node E2E, large object repeat 90% hit). `internal/cache/shardcache/` 신규 + getObjectEC 통합 + write/delete invalidate + `--shard-cache-size` 플래그. blockcache 패턴 재사용 (sharded LRU, byte budget, lock-free counters).
+- [ ] **EC shard cache 사이즈 튜닝** — 본구현 완료 v0.0.4.42 (E2E 85.7% hit). 운영 telemetry(`grainfs_ec_shard_cache_hit_rate`)로 working set 측정 후 default 256 MB 적정성 검증. 큰 객체 백업 워크로드면 GB 단위까지, 작은 객체 위주면 비활성화 권장.
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)

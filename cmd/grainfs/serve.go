@@ -26,6 +26,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
+	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
@@ -106,6 +107,12 @@ func init() {
 	// Default 64 MB matches the simulator's measured "knee" — workloads with
 	// temporal locality saturate around that budget. Set 0 to disable.
 	serveCmd.Flags().Int64("block-cache-size", 64*1024*1024, "volume block cache capacity in bytes (0 disables)")
+	// EC shard cache (Phase 2 #3 follow-up). Sits in front of getObjectEC's
+	// per-shard fan-out. Default 256 MB — multi-node measurement on PR #71
+	// showed large_repeat (16 MB×10) hits 90% at every reachable cache size,
+	// so the working set is small relative to memory budget. Set 0 to
+	// disable when running --measure-read-amp baselines.
+	serveCmd.Flags().Int64("shard-cache-size", 256*1024*1024, "EC shard cache capacity in bytes (0 disables)")
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
 	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
 	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
@@ -347,6 +354,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	log.Info().Int("k", clusterECData).Int("m", clusterECParity).
 		Bool("active", len(allNodes) >= cluster.MinECNodes).
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
+
+	// EC shard cache (Phase 2 #3 follow-up). Multi-node measurement on
+	// PR #71 showed 90% hit rate on large object repeated GET — the cache
+	// pays for itself any time the same large object is read more than
+	// once before its shards age out. Disabled when --shard-cache-size=0
+	// (used by --measure-read-amp baselines).
+	shardCacheSize, _ := cmd.Flags().GetInt64("shard-cache-size")
+	shardCache := shardcache.New(shardCacheSize)
+	distBackend.SetShardCache(shardCache)
+	log.Info().Int64("bytes", shardCacheSize).Msg("ec shard cache configured")
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)
@@ -590,7 +607,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if dedupDB != nil {
 		defer dedupDB.Close()
 	}
-	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache))
+	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
 
 	srv := server.New(addr, backend, srvOpts...)
 

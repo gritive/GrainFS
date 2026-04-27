@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -67,6 +68,13 @@ type DistributedBackend struct {
 	registry    *Registry // cache invalidators (VFS instances)
 	ecConfig    ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
 	shardLocks  sync.Map  // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+
+	// shardCache caches reconstructed/fetched EC shards. Sits in front of
+	// getObjectEC's per-shard fan-out: a full hit (every needed shard
+	// resident) skips disk and network entirely. Nil disables caching.
+	// See internal/cache/shardcache for the rationale (sharded LRU,
+	// lock-free counters, why we do not use an actor pattern here).
+	shardCache *shardcache.Cache
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -91,6 +99,32 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		logger:   log.With().Str("component", "distributed-backend").Logger(),
 		registry: NewRegistry(),
 	}, nil
+}
+
+// SetShardCache configures the EC shard cache. Pass a cache built with
+// shardcache.New(byteBudget). Pass nil (or shardcache.New(0)) to leave
+// caching disabled. Must be called before serving traffic.
+func (b *DistributedBackend) SetShardCache(c *shardcache.Cache) {
+	b.shardCache = c
+}
+
+// shardCacheKey is the canonical cache key for a single EC shard. Must
+// match the readamp tracker key (backend.go:getObjectEC RecordECShard
+// call) so simulator and real cache share the same identity.
+func shardCacheKey(bucket, shardKey string, idx int) string {
+	return fmt.Sprintf("%s/%s/%d", bucket, shardKey, idx)
+}
+
+// invalidateShardCache drops every shard slot for one shardKey. Used by
+// PutObject overwrite, DeleteObject, and repairShardEC so a subsequent
+// read sees post-write state. nShards covers the full k+m fan-out.
+func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShards int) {
+	if b.shardCache == nil {
+		return
+	}
+	for i := 0; i < nShards; i++ {
+		b.shardCache.Invalidate(shardCacheKey(bucket, shardKey, i))
+	}
 }
 
 // SetECConfig configures erasure-coding shard parameters (k, m) for
@@ -682,6 +716,10 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 // deleteShardsAsync는 propose 실패 시 고아 샤드를 백그라운드에서 삭제한다.
 // best-effort: 실패는 무시하고 scrubber fallback에 위임한다.
 func (b *DistributedBackend) deleteShardsAsync(bucket string, placement []string, shardKey string) {
+	// Drop any cached entries for this shardKey before/after the disk
+	// delete. Reads after this point must miss the cache so they can
+	// learn the object is gone (or at least re-fetch fresh placement).
+	b.invalidateShardCache(bucket, shardKey, len(placement))
 	for _, node := range placement {
 		if node == b.selfAddr {
 			_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
@@ -919,10 +957,19 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 
 	// Write just the missing shard back to its placement node.
 	target := ecRec.Nodes[shardIdx]
+	var werr error
 	if target == selfID {
-		return b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShards[shardIdx])
+		werr = b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShards[shardIdx])
+	} else {
+		werr = b.shardSvc.WriteShard(ctx, target, bucket, shardKey, shardIdx, freshShards[shardIdx])
 	}
-	return b.shardSvc.WriteShard(ctx, target, bucket, shardKey, shardIdx, freshShards[shardIdx])
+	if werr == nil && b.shardCache != nil {
+		// Repaired shard bytes may differ from any cached copy of the
+		// corrupted slot. Drop the cache entry so subsequent reads pull
+		// fresh data — repaint > stale.
+		b.shardCache.Invalidate(shardCacheKey(bucket, shardKey, shardIdx))
+	}
+	return werr
 }
 
 // FSMRef returns the underlying FSM so reshard / monitor code can iterate
@@ -1162,21 +1209,53 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 	// cancel() signals remaining goroutines to abort after k shards received.
 	// resultCh is buffered(len(nodes)) so goroutines never block on send.
 	type shardResult struct {
-		idx  int
-		data []byte
-		err  error
+		idx       int
+		data      []byte
+		err       error
+		fromCache bool
 	}
+
+	// Cache pre-pass: try to satisfy from cache first. A full hit means
+	// we never touch disk or the network. Partial hit narrows the
+	// fan-out to just the missing slots.
+	shards := make([][]byte, len(rec.Nodes))
+	available := 0
+	cached := make([]bool, len(rec.Nodes))
+	if b.shardCache != nil {
+		for i := range rec.Nodes {
+			// readamp records every read intent (cache + miss) so the
+			// simulator hit-rate curve stays comparable to runs that
+			// disable the real cache.
+			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
+			if data, ok := b.shardCache.Get(shardCacheKey(bucket, shardKey, i)); ok {
+				shards[i] = data
+				cached[i] = true
+				available++
+				if available == recCfg.DataShards {
+					return ECReconstruct(recCfg, shards)
+				}
+			}
+		}
+	}
+
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	selfID := b.selfAddr
+	dispatched := 0
 	resultCh := make(chan shardResult, len(rec.Nodes))
 	for i, node := range rec.Nodes {
+		if cached[i] {
+			continue
+		}
 		i, node := i, node
-		// readamp tracks every shard fetch (local + remote) so the
-		// hit-rate curve reflects real reconstruction load. The cache
-		// would sit in front of both paths, so both must contribute.
-		readamp.RecordECShard(fmt.Sprintf("%s/%s/%d", bucket, shardKey, i))
+		// readamp recording was done in the cache pre-pass when the
+		// cache is enabled; keep parity for the disabled path so the
+		// readamp histogram covers every fetch attempt.
+		if b.shardCache == nil {
+			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
+		}
+		dispatched++
 		go func() {
 			var data []byte
 			var err error
@@ -1206,17 +1285,27 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 		}()
 	}
 
-	shards := make([][]byte, len(rec.Nodes))
-	available := 0
-	for range rec.Nodes {
-		r := <-resultCh
-		if r.err == nil && r.data != nil {
-			shards[r.idx] = r.data
-			available++
-			if available == recCfg.DataShards {
-				cancel() // signal remaining goroutines to stop
-				break
-			}
+	// We drain ALL dispatched responses, not just the first k. The
+	// extra m responses no longer block reconstruction — cancel()
+	// already signaled them to abort — but any that already received
+	// bytes before cancel arrived populate the cache. Without this the
+	// next read would always miss the m-th shard slot, ceiling the
+	// real hit rate at k/(k+m). With it, repeat reads of the same
+	// object hit fully and skip the fan-out entirely.
+	for r := 0; r < dispatched; r++ {
+		res := <-resultCh
+		if res.err != nil || res.data == nil {
+			continue
+		}
+		if available < recCfg.DataShards {
+			shards[res.idx] = res.data
+		}
+		if b.shardCache != nil {
+			b.shardCache.Put(shardCacheKey(bucket, shardKey, res.idx), res.data)
+		}
+		available++
+		if available == recCfg.DataShards {
+			cancel() // signal remaining in-flight goroutines to abort
 		}
 	}
 	if available < recCfg.DataShards {

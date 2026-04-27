@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.4.42] - 2026-04-28
+
+### Added
+
+- **EC shard cache** (`internal/cache/shardcache/`): Phase 2 #3 follow-up 본구현. PR #71의 multi-node 측정에서 large 객체(>4 MB) 반복 GET이 90% shard hit rate 보였던 데이터를 근거로 도입. `getObjectEC`의 per-shard fan-out 앞단에 16-shard sharded LRU 캐시. 캐시 pre-pass에서 k개 shard를 모두 hit하면 디스크/네트워크 접근 없이 `ECReconstruct`만 실행 — full hit는 fan-out 자체를 skip. Partial hit는 missing slot에만 goroutine 발사. `--shard-cache-size` 플래그 (기본 256 MB; 운영 EC shard가 MB 단위라 per-shard 16 MB 슬롯이 필요해 64 MB 미만은 silent drop). Prometheus `grainfs_ec_shard_cache_*` 메트릭 + `/api/cache/status` JSON 응답에 `shard_cache` 섹션 추가. blockcache와 동일하게 actor 패턴 미적용 근거(hot-path channel round-trip 비용)를 소스에 명시.
+- **Active-cache E2E 검증 테스트** (`tests/e2e/ec_shardcache_eval_test.go::TestE2E_ECShardCacheActive`): 3-node 클러스터에서 캐시 활성화 (`--shard-cache-size=256MB`) 후 16 MB 객체 ×10 GET — `/api/cache/status` 클러스터 합산 hit rate ≥80% 게이트. 측정 결과 85.7% (18 hit / 3 miss) — 첫 GET의 m-th shard만 cancel-race로 빠지고 이후 9회는 모두 cache pre-pass에서 short-circuit. 기존 `TestE2E_ECShardCacheEval`은 `--shard-cache-size=0`으로 simulator-only baseline 보존.
+
+### Changed
+
+- **getObjectEC fan-out drain 변경**: k+m shard goroutine을 띄우고 k개 응답만 받고 break하던 기존 로직을 모든 응답을 drain하도록 수정. cancel()은 그대로라 in-flight RPC는 즉시 abort되지만 이미 응답한 shard는 캐시에 populate. 이 변경 없이는 매번 m번째 shard가 캐시에 안 들어가서 실 hit rate가 k/(k+m) ceiling에 갇힌다. ECReconstruct는 여전히 k개로만 동작 — 추가 shard는 캐시 적재용.
+- **`/api/cache/status` auth bypass 추가**: `/metrics`와 동일한 read-only 모니터링 엔드포인트라 SigV4 auth middleware skip 리스트에 합류. 운영 대시보드와 E2E 측정 테스트가 access-key 없이 캐시 통계 수집 가능.
+
 ## [0.0.4.41] - 2026-04-28
 
 ### Added

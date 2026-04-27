@@ -1092,6 +1092,9 @@ func (s *Server) cacheStatus(_ context.Context, c *app.RequestContext) {
 		"block_cache": map[string]any{
 			"enabled": false,
 		},
+		"shard_cache": map[string]any{
+			"enabled": false,
+		},
 	}
 	if s.blockCache != nil {
 		stats := s.blockCache.Stats()
@@ -1100,6 +1103,22 @@ func (s *Server) cacheStatus(_ context.Context, c *app.RequestContext) {
 			hitRate = 100 * float64(stats.Hits) / float64(stats.Hits+stats.Misses)
 		}
 		resp["block_cache"] = map[string]any{
+			"enabled":        stats.CapacityByte > 0,
+			"hits":           stats.Hits,
+			"misses":         stats.Misses,
+			"evictions":      stats.Evictions,
+			"resident_bytes": stats.ResidentByte,
+			"capacity_bytes": stats.CapacityByte,
+			"hit_rate_pct":   hitRate,
+		}
+	}
+	if s.shardCache != nil {
+		stats := s.shardCache.Stats()
+		hitRate := 0.0
+		if stats.Hits+stats.Misses > 0 {
+			hitRate = 100 * float64(stats.Hits) / float64(stats.Hits+stats.Misses)
+		}
+		resp["shard_cache"] = map[string]any{
 			"enabled":        stats.CapacityByte > 0,
 			"hits":           stats.Hits,
 			"misses":         stats.Misses,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -112,6 +113,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--measure-read-amp", // ← the whole point of this test
 			"--block-cache-size=0",
+			"--shard-cache-size=0", // simulator-only baseline; real cache off
 			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
@@ -319,4 +321,192 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 		}
 		report(t, "20 unique 8mb GETs", base)
 	})
+}
+
+// TestE2E_ECShardCacheActive turns the real EC shard cache ON and
+// verifies the production cache delivers the hit rate the simulator
+// predicted. Companion to TestE2E_ECShardCacheEval, which measures the
+// same access patterns with the cache OFF.
+//
+// Workload: 16 MB object, repeated GET ×10. CachedBackend bypasses the
+// object (4 MB-per-object cap) so every iteration goes through
+// getObjectEC. The first GET fetches K shards and populates the cache;
+// the next 9 should hit on the per-shard pre-pass and short-circuit
+// reconstruction without any ReadShard / ReadLocalShard call.
+//
+// Expectation: ≥80% real cache hit rate cluster-wide. The 90% number
+// the simulator measured on PR #71 is the upper bound; we leave 10%
+// margin for cold misses and cross-node placement details.
+func TestE2E_ECShardCacheActive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("multi-node EC active-cache test is too slow for -short mode")
+	}
+	binary := getBinary()
+	if _, err := os.Stat(binary); err != nil {
+		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
+	}
+
+	const (
+		clusterKey = "E2E-EC-SHARDCACHE-ACTIVE"
+		accessKey  = "ec-active-ak"
+		secretKey  = "ec-active-sk"
+		bucketName = "ec-shardcache-active"
+		numNodes   = 3
+		ecData     = 2
+		ecParity   = 1
+	)
+
+	httpPorts := make([]int, numNodes)
+	raftPorts := make([]int, numNodes)
+	for i := range httpPorts {
+		httpPorts[i] = freePort()
+		raftPorts[i] = freePort()
+	}
+	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
+	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
+	peersFor := func(i int) string {
+		var out []string
+		for j := range raftPorts {
+			if j == i {
+				continue
+			}
+			out = append(out, raftAddr(j))
+		}
+		return strings.Join(out, ",")
+	}
+
+	dataDirs := make([]string, numNodes)
+	for i := range dataDirs {
+		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-shcache-active-%d-*", i))
+		require.NoError(t, err)
+		dataDirs[i] = d
+		t.Cleanup(func() { _ = os.RemoveAll(d) })
+	}
+
+	startNode := func(i int) *exec.Cmd {
+		cmd := exec.Command(binary, "serve",
+			"--data", dataDirs[i],
+			"--port", fmt.Sprintf("%d", httpPorts[i]),
+			"--node-id", fmt.Sprintf("ec-cache-active-%d", i),
+			"--raft-addr", raftAddr(i),
+			"--peers", peersFor(i),
+			"--cluster-key", clusterKey,
+			"--access-key", accessKey,
+			"--secret-key", secretKey,
+			fmt.Sprintf("--ec-data=%d", ecData),
+			fmt.Sprintf("--ec-parity=%d", ecParity),
+			"--block-cache-size=0", // isolate: only EC shard cache active
+			// 256 MB total → 16 MB per-shard budget. Each EC shard for
+			// a 16 MB object at k=2 is ≈8 MB, which exceeds a 4 MB slot
+			// (= 64 MB / 16 shards) and silently drops at Put. 256 MB is
+			// the production default precisely because real EC shards
+			// are MB-sized, not KB-sized like volume blocks.
+			"--shard-cache-size=268435456",
+			"--nfs-port", "0",
+			"--nfs4-port", "0",
+			"--nbd-port", "0",
+			"--snapshot-interval", "0",
+			"--scrub-interval", "0",
+			"--lifecycle-interval", "0",
+			"--no-encryption",
+		)
+		require.NoError(t, cmd.Start(), "start node %d", i)
+		return cmd
+	}
+
+	procs := make([]*exec.Cmd, numNodes)
+	t.Cleanup(func() {
+		for _, p := range procs {
+			if p != nil && p.Process != nil {
+				_ = p.Process.Kill()
+				_, _ = p.Process.Wait()
+			}
+		}
+	})
+	for i := 0; i < numNodes; i++ {
+		procs[i] = startNode(i)
+	}
+	for i := 0; i < numNodes; i++ {
+		waitForPort(t, httpPorts[i], 60*time.Second)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	var client *s3.Client
+	var leaderURL string
+	require.Eventually(t, func() bool {
+		for i := 0; i < numNodes; i++ {
+			c := ecS3Client(httpURL(i), accessKey, secretKey)
+			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
+			if err == nil {
+				client = c
+				leaderURL = httpURL(i)
+				return true
+			}
+		}
+		return false
+	}, 120*time.Second, 2*time.Second, "no leader found")
+	t.Logf("leader: %s", leaderURL)
+
+	largeKey := "large-16mb"
+	largeData := make([]byte, 16*1024*1024)
+	if _, err := rand.Read(largeData); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(largeKey),
+		Body:   bytes.NewReader(largeData),
+	}); err != nil {
+		t.Fatalf("put large: %v", err)
+	}
+
+	// Repeated GET ×10 to drive cache hits.
+	for i := 0; i < 10; i++ {
+		out, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(largeKey),
+		})
+		require.NoError(t, err, "GET iteration %d", i)
+		_, _ = io.Copy(io.Discard, out.Body)
+		_ = out.Body.Close()
+	}
+
+	// Sum cluster-wide cache stats. Shards land on different nodes, so
+	// per-process numbers each capture a slice of the work.
+	type cacheStatus struct {
+		ShardCache struct {
+			Enabled       bool    `json:"enabled"`
+			Hits          uint64  `json:"hits"`
+			Misses        uint64  `json:"misses"`
+			ResidentBytes int64   `json:"resident_bytes"`
+			HitRatePct    float64 `json:"hit_rate_pct"`
+		} `json:"shard_cache"`
+	}
+	var totalHits, totalMisses uint64
+	for i := 0; i < numNodes; i++ {
+		resp, err := http.Get(httpURL(i) + "/api/cache/status")
+		require.NoError(t, err, "fetch cache status from node %d", i)
+		var st cacheStatus
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
+		_ = resp.Body.Close()
+		require.True(t, st.ShardCache.Enabled, "node %d shard_cache must be enabled", i)
+		t.Logf("node %d: hits=%d misses=%d resident=%d hit_rate=%.1f%%",
+			i, st.ShardCache.Hits, st.ShardCache.Misses, st.ShardCache.ResidentBytes, st.ShardCache.HitRatePct)
+		totalHits += st.ShardCache.Hits
+		totalMisses += st.ShardCache.Misses
+	}
+	total := totalHits + totalMisses
+	require.Greater(t, total, uint64(0), "shard cache recorded zero accesses — wiring broken")
+	hitRate := 100 * float64(totalHits) / float64(total)
+	t.Logf("cluster-wide shard cache: %d hits / %d misses → %.1f%% hit rate", totalHits, totalMisses, hitRate)
+
+	// First GET is necessarily a miss for every shard; the next 9 should
+	// be served from cache. With k=2, m=1 we issue 3 read intents per
+	// GET (2 needed for reconstruction). 10 GETs × 3 shards = 30 lookups
+	// per cache. Best case ≈90% (3 misses out of 30); we accept ≥80%.
+	if hitRate < 80 {
+		t.Fatalf("real shard cache hit rate %.1f%% is below the 80%% floor — getObjectEC is not consulting the cache as expected", hitRate)
+	}
 }
