@@ -314,6 +314,34 @@ func (b *LocalBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*Objec
 	return objects, err
 }
 
+func (b *LocalBackend) WalkObjects(bucket, prefix string, fn func(*Object) error) error {
+	if err := b.HeadBucket(bucket); err != nil {
+		return err
+	}
+	return b.db.View(func(txn *badger.Txn) error {
+		pfx := []byte("obj:" + bucket + "/" + prefix)
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+			var obj Object
+			if err := it.Item().Value(func(val []byte) error {
+				decoded, err := unmarshalObject(val)
+				if err != nil {
+					return err
+				}
+				obj = *decoded
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := fn(&obj); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // CopyObject copies an object by reading the source and writing to the destination.
 func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error) {
 	rc, obj, err := b.GetObject(srcBucket, srcKey)

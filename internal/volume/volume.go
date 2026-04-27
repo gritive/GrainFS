@@ -23,10 +23,9 @@ import (
 var ErrNotFound = errors.New("volume not found")
 
 const (
-	DefaultBlockSize  = 4096
-	volumeBucketName  = "__grainfs_volumes"
-	metaPrefix        = "__vol/"
-	maxBlockListLimit = 1_000_000
+	DefaultBlockSize = 4096
+	volumeBucketName = "__grainfs_volumes"
+	metaPrefix       = "__vol/"
 )
 
 // Volume represents a virtual block device backed by object storage.
@@ -159,12 +158,10 @@ func (m *Manager) Delete(name string) error {
 			m.backend.DeleteObject(volumeBucketName, key) //nolint:errcheck
 		}
 	} else {
-		objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)
-		if err == nil {
-			for _, obj := range objs {
-				_ = m.backend.DeleteObject(volumeBucketName, obj.Key)
-			}
-		}
+		_ = m.backend.WalkObjects(volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
+			_ = m.backend.DeleteObject(volumeBucketName, obj.Key)
+			return nil
+		})
 	}
 
 	// Delete metadata
@@ -581,12 +578,14 @@ func (m *Manager) Recalculate(name string) (int64, int64, error) {
 		return 0, 0, err
 	}
 
-	objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)
-	if err != nil {
+	var after int64
+	if err := m.backend.WalkObjects(volumeBucketName, blockPrefix(name), func(_ *storage.Object) error {
+		after++
+		return nil
+	}); err != nil {
 		return 0, 0, fmt.Errorf("list blocks for recalculate: %w", err)
 	}
 
-	after := int64(len(objs))
 	before := vol.AllocatedBlocks
 	if before == after {
 		return before, after, nil
@@ -797,16 +796,14 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	snapMap := make(map[int64]string)
 	if liveMap == nil || len(liveMap) == 0 {
 		// No live_map: enumerate default block objects
-		objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(name), maxBlockListLimit)
-		if err != nil {
-			return "", fmt.Errorf("list blocks: %w", err)
-		}
-		for _, obj := range objs {
+		if err := m.backend.WalkObjects(volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
 			blkNum, ok := parseBlockNum(obj.Key)
-			if !ok {
-				continue
+			if ok {
+				snapMap[blkNum] = obj.Key
 			}
-			snapMap[blkNum] = obj.Key
+			return nil
+		}); err != nil {
+			return "", fmt.Errorf("list blocks: %w", err)
 		}
 	} else {
 		for k, v := range liveMap {
@@ -875,30 +872,28 @@ func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
 	}
 
 	prefix := snapPrefix(name)
-	objs, err := m.backend.ListObjects(volumeBucketName, prefix, maxBlockListLimit)
-	if err != nil {
-		return nil, fmt.Errorf("list snapshots: %w", err)
-	}
-
 	var snaps []SnapshotInfo
-	for _, obj := range objs {
+	if err := m.backend.WalkObjects(volumeBucketName, prefix, func(obj *storage.Object) error {
 		if !strings.HasSuffix(obj.Key, "/meta") {
-			continue
+			return nil
 		}
 		rc, _, err := m.backend.GetObject(volumeBucketName, obj.Key)
 		if err != nil {
-			continue
+			return nil
 		}
 		data, err := io.ReadAll(rc)
 		rc.Close()
 		if err != nil {
-			continue
+			return nil
 		}
 		var meta snapshotMetaJSON
 		if err := json.Unmarshal(data, &meta); err != nil {
-			continue
+			return nil
 		}
 		snaps = append(snaps, SnapshotInfo{ID: meta.ID, CreatedAt: meta.CreatedAt, BlockCount: meta.BlockCount})
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("list snapshots: %w", err)
 	}
 	return snaps, nil
 }
@@ -1057,19 +1052,15 @@ func (m *Manager) Clone(srcName, dstName string) error {
 		}
 	} else {
 		// Case 2: no live_map — enumerate default blk_N objects
-		objs, err := m.backend.ListObjects(volumeBucketName, blockPrefix(srcName), maxBlockListLimit)
-		if err != nil {
-			return fmt.Errorf("list source blocks: %w", err)
-		}
-		for _, obj := range objs {
+		if err := m.backend.WalkObjects(volumeBucketName, blockPrefix(srcName), func(obj *storage.Object) error {
 			blkNum, ok := parseBlockNum(obj.Key)
 			if !ok {
-				continue
+				return nil
 			}
 			dstKey := blockKey(dstName, blkNum)
-			if err := doCopy(obj.Key, dstKey); err != nil {
-				return fmt.Errorf("clone block %d: %w", blkNum, err)
-			}
+			return doCopy(obj.Key, dstKey)
+		}); err != nil {
+			return fmt.Errorf("clone blocks: %w", err)
 		}
 	}
 

@@ -1,6 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.4.36] - 2026-04-27
+
+### Added
+
+- **`WalkObjects` — O(1) 메모리 블록 순회** (`storage.Backend` 인터페이스, `LocalBackend`, `DistributedBackend`, `PackedBackend`, `SwappableBackend`): `ListObjects(maxKeys=1M)` 대신 콜백 기반 스트리밍 순회. `volume.Delete`, `Recalculate`, `CreateSnapshot`, `ListSnapshots`, `Clone` 5개 call site 교체. 초대형 볼륨에서 메모리 폭증 제거.
+- **Peer fetch 응답 zero-copy** (`internal/cluster/shard_service.go`): `okResponse`/`errorResponse`에서 `marshalResponseDirect` 사용. 응답 FlatBuffer를 pooled builder로 직렬화한 뒤 `make+copy`하던 것을 non-pooled builder + `FinishedBytes()` 직접 반환으로 변경. 샤드당 1회 allocation 제거.
+- **PGO 빌드 타겟** (`Makefile`): `make build-pgo` 추가. `make bench-profile`로 수집한 pprof CPU 프로파일로 `-pgo=<profile>` 빌드. 핫 경로에서 5–15% CPU 개선 가능. 프로파일 경로: `PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out`.
+
+### Fixed
+
+- **NBD clean shutdown** (`cmd/grainfs/node_services.go`): `startNBDServer` 반환값을 버리던 버그 수정. `nodeServices.nbdSrv` 필드에 보관해 종료 시 `Close()` 호출.
 
 ## [0.0.4.35] - 2026-04-27
 

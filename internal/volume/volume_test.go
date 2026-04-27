@@ -405,17 +405,23 @@ func TestPoolQuotaOverwriteDoesNotCount(t *testing.T) {
 	require.NoError(t, err, "overwrite of existing block should not be quota-limited")
 }
 
-// listErrBackend wraps LocalBackend but fails ListObjects.
+// listErrBackend wraps LocalBackend but fails ListObjects and WalkObjects for block prefixes.
 type listErrBackend struct {
 	storage.Backend
 }
 
 func (b *listErrBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
-	// Fail only for the volume block listing; pass through meta listing.
 	if prefix != metaPrefix {
 		return nil, fmt.Errorf("injected list error")
 	}
 	return b.Backend.ListObjects(bucket, prefix, maxKeys)
+}
+
+func (b *listErrBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+	if prefix != metaPrefix {
+		return fmt.Errorf("injected list error")
+	}
+	return b.Backend.WalkObjects(bucket, prefix, fn)
 }
 
 // --- CoW Snapshot tests ---
@@ -701,9 +707,13 @@ func setupDedupManager(t *testing.T) *Manager {
 // countObjects returns the number of S3 objects under the given prefix.
 func countObjects(t *testing.T, m *Manager, prefix string) int {
 	t.Helper()
-	objs, err := m.backend.ListObjects(volumeBucketName, prefix, maxBlockListLimit)
+	var count int
+	err := m.backend.WalkObjects(volumeBucketName, prefix, func(_ *storage.Object) error {
+		count++
+		return nil
+	})
 	require.NoError(t, err)
-	return len(objs)
+	return count
 }
 
 // TestDedupWriteSameContent writes the same 4KB block twice: the second write

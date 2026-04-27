@@ -1,6 +1,7 @@
 package packblob
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -115,4 +116,93 @@ func TestPackedBackend_BucketOperations(t *testing.T) {
 
 	require.NoError(t, pb.DeleteBucket("mybucket"))
 	assert.ErrorIs(t, pb.HeadBucket("mybucket"), storage.ErrBucketNotFound)
+}
+
+func TestPackedBackend_WalkObjectsPackedObjects(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket("test"))
+
+	for _, kv := range []struct{ key, val string }{
+		{"a.txt", "aaa"},
+		{"b.txt", "bbbbb"},
+		{"c.txt", "cc"},
+	} {
+		_, err := pb.PutObject("test", kv.key, strings.NewReader(kv.val), "text/plain")
+		require.NoError(t, err)
+	}
+
+	var keys []string
+	err := pb.WalkObjects("test", "", func(obj *storage.Object) error {
+		keys = append(keys, obj.Key)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Len(t, keys, 3)
+	assert.ElementsMatch(t, []string{"a.txt", "b.txt", "c.txt"}, keys)
+}
+
+func TestPackedBackend_WalkObjectsSizeFixup(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket("test"))
+
+	content := "hello world"
+	_, err := pb.PutObject("test", "file.txt", strings.NewReader(content), "text/plain")
+	require.NoError(t, err)
+
+	var objs []*storage.Object
+	err = pb.WalkObjects("test", "", func(obj *storage.Object) error {
+		objs = append(objs, obj)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	assert.Equal(t, int64(len(content)), objs[0].Size, "packed object size should reflect original content")
+}
+
+func TestPackedBackend_WalkObjectsPrefix(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket("test"))
+
+	for _, kv := range []struct{ key, val string }{
+		{"docs/a.txt", "a"},
+		{"docs/b.txt", "b"},
+		{"images/c.png", "c"},
+	} {
+		_, err := pb.PutObject("test", kv.key, strings.NewReader(kv.val), "text/plain")
+		require.NoError(t, err)
+	}
+
+	var keys []string
+	err := pb.WalkObjects("test", "docs/", func(obj *storage.Object) error {
+		keys = append(keys, obj.Key)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Len(t, keys, 2)
+	for _, k := range keys {
+		assert.True(t, strings.HasPrefix(k, "docs/"), "unexpected key: %s", k)
+	}
+}
+
+func TestPackedBackend_WalkObjectsEarlyStop(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket("test"))
+
+	for i := range 5 {
+		_, err := pb.PutObject("test", strings.Repeat(string(rune('a'+i)), 1)+"_file.txt",
+			strings.NewReader("x"), "text/plain")
+		require.NoError(t, err)
+	}
+
+	sentinel := fmt.Errorf("stop")
+	count := 0
+	err := pb.WalkObjects("test", "", func(*storage.Object) error {
+		count++
+		if count == 2 {
+			return sentinel
+		}
+		return nil
+	})
+	assert.ErrorIs(t, err, sentinel)
+	assert.Equal(t, 2, count)
 }

@@ -365,6 +365,45 @@ func (pb *PackedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*sto
 	return objects, nil
 }
 
+func (pb *PackedBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+	// Collect packed-index keys that match so we can fix sizes / emit extras.
+	pb.mu.RLock()
+	pfx := bucket + "/" + prefix
+	packed := make(map[string]int64) // key → OriginalSize
+	for ikey, entry := range pb.index {
+		if entry.Refcount.Load() <= 0 {
+			continue
+		}
+		if len(ikey) >= len(pfx) && ikey[:len(pfx)] == pfx {
+			k := ikey[len(bucket)+1:]
+			packed[k] = entry.OriginalSize
+		}
+	}
+	pb.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	if err := pb.inner.WalkObjects(bucket, prefix, func(obj *storage.Object) error {
+		seen[obj.Key] = true
+		if sz, ok := packed[obj.Key]; ok {
+			obj.Size = sz
+		}
+		return fn(obj)
+	}); err != nil {
+		return err
+	}
+
+	// Emit packed-only entries not found in inner.
+	for k, sz := range packed {
+		if seen[k] {
+			continue
+		}
+		if err := fn(&storage.Object{Key: k, Size: sz}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // --- Copy operations (Copier interface) ---
 
 // CopyObject performs a metadata-only copy for packed objects.

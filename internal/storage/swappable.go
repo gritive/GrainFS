@@ -71,6 +71,10 @@ func (sb *SwappableBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*
 	return (*sb.inner.Load()).ListObjects(bucket, prefix, maxKeys)
 }
 
+func (sb *SwappableBackend) WalkObjects(bucket, prefix string, fn func(*Object) error) error {
+	return (*sb.inner.Load()).WalkObjects(bucket, prefix, fn)
+}
+
 func (sb *SwappableBackend) CreateMultipartUpload(bucket, key, contentType string) (*MultipartUpload, error) {
 	return (*sb.inner.Load()).CreateMultipartUpload(bucket, key, contentType)
 }

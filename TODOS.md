@@ -6,8 +6,6 @@
 
 ### 기타
 
-- [ ] **ListObjects pagination** — `Recalculate`, `Delete` 등이 사용하는 1M 블록 한도를 페이지네이션으로 대체해 초대형 볼륨에서 메모리 폭증 방지.
-- [ ] **NBD clean shutdown** — `nodeServices` 구조체에 `*nbd.Server`를 보관해 서버 종료 시 `srv.Close()` 호출 가능하도록 개선.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] CoW E2E tests
 - [ ] Memory usage validation
@@ -30,13 +28,11 @@
 ## Phase 19: Performance
 
 - [ ] go-billy: Direct File I/O; O_DIRECT
-- [ ] Peer fetch zero-copy: `getObjectEC` 피어 경로에서 QUIC stream 직접 반환 (`[]byte` 중간 버퍼 제거)
 - [ ] Unified buffer cache: Centralized Page Cache
 - [ ] io_uring
 - [ ] SPDK
 - [ ] SoA (Structure of Arrays)
 - [ ] SIMD
-- [ ] PGO
 - [ ] **Predictive resource warnings** — *zero ops* — 디스크 사용률/증가율, BadgerDB value log 크기, goroutine/FD 추세 추적하고 임계 도달 전 경고 (dashboard + log)
 - [ ] control plane, data plane 분리
 - [ ] **QUIC 내부 통신 압축 도입 검토** — 클러스터 노드 간 QUIC 스트림에 압축(zstd/lz4) 적용 가능 여부 및 성능 트레이드오프 측정. 벤치마크 필수 (압축 CPU 비용 vs. 네트워크 절감); EC shard 데이터는 이미 랜덤 바이트이므로 압축 이득 미미할 수 있음 — gossip/receipt/metadata 트래픽 우선 검토.
