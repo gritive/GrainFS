@@ -318,6 +318,18 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 		return fmt.Errorf("encode command: %w", err)
 	}
 
+	// Single-node fast path: with no peers there is no consensus to reach, so
+	// the ProposeWait → commit → apply round-trip is pure overhead. Apply the
+	// command directly to the FSM and fire OnApply callbacks. Single-node
+	// deployments still get crash recovery via BadgerDB's own WAL/SyncWrites.
+	if b.node != nil && len(b.node.Peers()) == 0 {
+		if applyErr := b.fsm.Apply(data); applyErr != nil {
+			return applyErr
+		}
+		b.notifyOnApply(data)
+		return nil
+	}
+
 	if b.node.IsLeader() {
 		proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
