@@ -6,8 +6,26 @@ import (
 	"net"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/raft"
 )
+
+// RaftStateProvider is the minimal slice of *raft.Node used by the quorum
+// monitor: just current role and leader id. Defined here as an interface so
+// tests can drive the monitor without spinning up a full Raft instance.
+type RaftStateProvider interface {
+	State() raft.NodeState
+	LeaderID() string
+}
+
+// AlertSender is the minimal slice of *server.AlertsState used by the quorum
+// monitor — a single Send call. Defined here to avoid a cluster→server
+// circular import.
+type AlertSender interface {
+	Send(alerts.Alert) error
+}
 
 // probeTimeout is the maximum time to wait for a UDP response when probing a
 // peer's QUIC port. On a loopback interface "connection refused" arrives in
@@ -31,6 +49,15 @@ type DegradedMonitor struct {
 	backend  *DistributedBackend
 	tracker  *alerts.DegradedTracker
 	interval time.Duration
+
+	// Quorum monitoring (optional — nil when running without raft, e.g. solo).
+	raftNode    RaftStateProvider
+	alertSender AlertSender
+	// quorumLostTicks counts consecutive ticks where State==Follower &&
+	// LeaderID=="". Alert fires once when it crosses quorumAlertThreshold,
+	// then resets to avoid spamming. Cleared the moment a leader appears.
+	quorumLostTicks      int
+	quorumAlertThreshold int
 }
 
 // NewDegradedMonitor creates a monitor that checks EC liveness every interval.
@@ -41,10 +68,22 @@ func NewDegradedMonitor(backend *DistributedBackend, tracker *alerts.DegradedTra
 		interval = 30 * time.Second
 	}
 	return &DegradedMonitor{
-		backend:  backend,
-		tracker:  tracker,
-		interval: interval,
+		backend:              backend,
+		tracker:              tracker,
+		interval:             interval,
+		quorumAlertThreshold: 2, // ~60 s with default 30 s tick — absorbs startup leader-election jitter
 	}
+}
+
+// WithQuorumCheck wires the optional Raft quorum-lost monitor. When the node
+// is a follower with no leader for quorumAlertThreshold consecutive ticks
+// (default 2 → ~60 s with 30 s interval), a critical alert is dispatched.
+// QuorumMinMatchIndex() is intentionally NOT used: it is a GC watermark and
+// can lag indefinitely on a write-quiet cluster, producing false positives.
+func (m *DegradedMonitor) WithQuorumCheck(node RaftStateProvider, sender AlertSender) *DegradedMonitor {
+	m.raftNode = node
+	m.alertSender = sender
+	return m
 }
 
 // Run starts the monitor loop. It blocks until ctx is cancelled.
@@ -52,6 +91,7 @@ func NewDegradedMonitor(backend *DistributedBackend, tracker *alerts.DegradedTra
 func (m *DegradedMonitor) Run(ctx context.Context) {
 	// Fire immediately, then every interval.
 	m.check()
+	m.checkQuorum()
 
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
@@ -61,7 +101,33 @@ func (m *DegradedMonitor) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.check()
+			m.checkQuorum()
 		}
+	}
+}
+
+// checkQuorum fires a critical alert when this node has been a follower
+// with no known leader for quorumAlertThreshold consecutive ticks.
+// No-op when WithQuorumCheck has not been wired.
+func (m *DegradedMonitor) checkQuorum() {
+	if m.raftNode == nil || m.alertSender == nil {
+		return
+	}
+	if m.raftNode.State() == raft.Follower && m.raftNode.LeaderID() == "" {
+		m.quorumLostTicks++
+		if m.quorumLostTicks == m.quorumAlertThreshold {
+			alert := alerts.Alert{
+				Type:     "raft_quorum_lost",
+				Severity: alerts.SeverityCritical,
+				Resource: "cluster",
+				Message:  fmt.Sprintf("no leader for %d consecutive %s ticks — quorum likely lost", m.quorumAlertThreshold, m.interval),
+			}
+			if err := m.alertSender.Send(alert); err != nil {
+				log.Warn().Err(err).Msg("quorum-lost alert send failed")
+			}
+		}
+	} else {
+		m.quorumLostTicks = 0
 	}
 }
 

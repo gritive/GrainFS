@@ -579,7 +579,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Start the degraded mode monitor — checks live node count vs EC threshold
 	// every 30 s. The first check fires immediately so the server knows its
 	// state before serving any requests.
-	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), 30*time.Second)
+	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), 30*time.Second).
+		WithQuorumCheck(node, clusterAlerts)
 	go degradedMon.Run(ctx)
 
 	go func() {
