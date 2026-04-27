@@ -2,15 +2,25 @@
 
 ## [Unreleased]
 
+## [0.0.4.35] - 2026-04-27
+
 ### Added
 
 - **Block-level Deduplication Phase A** (`internal/volume/dedup/`, `internal/volume/`): 동일 내용 블록을 SHA-256 해시로 식별해 S3 객체 공유. BadgerDB로 레퍼런스 카운트 관리.
-  - **`DedupIndex` 인터페이스** (`internal/volume/dedup/dedup.go`): `LookupOrRegister(hash, newKey)` — 신규 블록 등록 또는 기존 canonical key 반환. `Release(objectKey)` — refcount 감소 및 마지막 참조 시 삭제 시그널 반환.
-  - **BadgerDB 구현체** (`internal/volume/dedup/dedup.go`): `vd:h:{sha256hex}` → objectKey (해시 인덱스), `vd:r:{objectKey}` → {refcount int32 BE, hash [32]byte} (레퍼런스 테이블). `ErrConflict` 시 최대 3회 재시도.
+  - **`DedupIndex` 인터페이스** (`internal/volume/dedup/dedup.go`): `WriteBlock`/`ReadBlock`/`FreeBlock`/`DeleteVolume` — BadgerDB 기반 블록 매핑 + refcount 관리.
+  - **BadgerDB 구현체** (`internal/volume/dedup/dedup.go`): `vd:h:{sha256hex}` → canonicalKey (해시 인덱스), `vd:r:{objectKey}` → {refcount int32 BE, hash [32]byte} (레퍼런스 테이블), `vd:b:{vol}:{blkNum:12d}` → canonicalKey (블록 매핑). `ErrConflict` 시 최대 3회 재시도.
   - **Manager 통합** (`internal/volume/volume.go`): `ManagerOptions.DedupIndex` 필드. WriteAt: `isNew=true` 일 때만 `backend.PutObject` 호출. Discard: refcount-aware 삭제 — 마지막 참조 제거 시에만 S3 객체 삭제.
-  - **단위 테스트** (`internal/volume/dedup/dedup_test.go`): NewBlock/Duplicate/Shared/Last/NotFound/CleanHashIndex/ConcurrentWrites 7종.
-  - **통합 테스트** (`internal/volume/volume_test.go`): DedupWriteSameContent/DedupDiscardReleasesRef/DedupOverwriteReleasesOldRef 3종.
+  - **단위 테스트** (`internal/volume/dedup/dedup_test.go`): NewBlock/DedupHit/Overwrite/SameContent/ReadBlock/FreeBlock/DeleteVolume/ConcurrentWrites 11종.
+  - **통합 테스트** (`internal/volume/volume_test.go`): DedupWriteSameContent/DedupDiscardReleasesRef/DedupOverwriteReleasesOldRef + P0 부분 쓰기 보존 회귀 테스트 4종.
   - **벤치마크** (`internal/volume/bench_test.go`): 로컬 FS 기준 NoDedup 40 MB/s → DedupHit 28 MB/s (−30%: BadgerDB txn 오버헤드). 실 S3 환경에서는 PUT 레이턴시가 지배적이므로 오버헤드 무시 가능.
+
+### Fixed
+
+- **P0: dedup 모드 부분 쓰기 데이터 손실** (`internal/volume/volume.go`): 기존 블록 읽기 시 `physicalKey(nil)` 대신 `m.dedup.ReadBlock()` + `GetObject(canonical)` 사용. 부분 오버라이트 시 블록 나머지 바이트가 0으로 덮어쓰여지던 버그 수정.
+- **P1: PoolQuota dedup 모드 오버카운트** (`internal/volume/volume.go`): `HeadObject(physicalKey)` 항상 실패 → quota 과다 계산 버그. `m.dedup.ReadBlock()` 기반으로 대체.
+- **P1: DeleteVolume BadgerDB 에러 무시** (`internal/volume/volume.go`): `toDelete, _ =` 패턴을 에러 전파로 수정.
+- **P2: decodeRefVal 부패 데이터 silent 처리** (`internal/volume/dedup/dedup.go`): 36바이트 미만 페이로드를 0으로 반환하던 버그 → 에러 반환으로 수정.
+- **P2: 볼륨 이름 ':' 포함 시 BadgerDB 키 충돌** (`internal/volume/dedup/dedup.go`): `WriteBlock` 진입 시 즉시 에러 반환.
 
 ## [0.0.4.34] - 2026-04-27
 
