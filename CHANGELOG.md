@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.4.43] - 2026-04-28
+
+### Added
+
+- **Web UI Cache Performance 패널**: Dashboard 탭에 Volume Block Cache + EC Shard Cache 카드를 추가. hit rate %, hits/misses 카운트, resident/capacity 게이지, eviction 카운터를 3초 주기로 갱신. `--block-cache-size=0` / `--shard-cache-size=0` 으로 비활성된 캐시는 "disabled" 배지 + "off" 표시. 게이지 막대는 80%+ hit rate에서 success 색, 90%+ resident에서 warning 색으로 전환되어 캐시 포화 임박을 시각적으로 알림.
+- **`/api/cache/status` 단위 테스트** (`internal/server/cache_status_test.go`): 활성/비활성 두 상태에서 `block_cache` + `shard_cache` JSON 섹션이 모두 정확히 노출되는지, SigV4 auth bypass가 유지되는지 검증.
+
 ## [0.0.4.42] - 2026-04-28
 
 ### Added
