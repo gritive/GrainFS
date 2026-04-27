@@ -335,6 +335,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
+	// direct-io는 EC shard size가 1MB+ 일 때 유리 (페이지 정렬, prefetch 회피).
+	// 4KB 같은 작은 shard는 buffered + page cache가 더 빠름이 측정에서 확인됨.
+	// default true이지만 4KB 같은 크기에서는 false로 override 권장.
 	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
 		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")

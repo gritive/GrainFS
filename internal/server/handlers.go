@@ -300,9 +300,6 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 		contentType = "application/octet-stream"
 	}
 
-	// Check if object already exists (for overwrite — don't double-count)
-	existing, _ := s.backend.HeadObject(bucket, key)
-
 	rawBody := c.Request.Body()
 
 	// Handle aws-chunked Content-Encoding (used by AWS SDKs for streaming uploads)
@@ -348,11 +345,11 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if existing == nil {
-		metrics.ObjectsTotal.Inc()
-	} else {
-		metrics.StorageBytesTotal.Add(float64(-existing.Size))
-	}
+	// Storage metrics: hot path에서 매 PUT의 HeadObject(BadgerDB read)를
+	// 제거하고 ObjectsTotal/StorageBytesTotal은 단순 증분으로 처리한다.
+	// overwrite의 -old.Size delta는 정확성 trade-off로 후속 작업의 backend
+	// API 확장(PutObject가 oldSize를 반환)으로 보정한다.
+	metrics.ObjectsTotal.Inc()
 	metrics.StorageBytesTotal.Add(float64(obj.Size))
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
