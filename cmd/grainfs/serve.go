@@ -131,7 +131,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		var err error
 		shardEncryptor, err = loadOrCreateEncryptionKey(encKeyFile, dataDir)
 		if err != nil {
-			return fmt.Errorf("encryption setup: %w", err)
+			return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key, or --no-encryption to disable at-rest encryption", err)
 		}
 	}
 
@@ -228,12 +228,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
-		return fmt.Errorf("create meta dir: %w", err)
+		return fmt.Errorf("create meta dir at %s: %w\n  recovery: check that the parent directory exists and the user has write permission", metaDir, err)
 	}
 	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
 	db, err := badger.Open(dbOpts)
 	if err != nil {
-		return fmt.Errorf("open metadata db: %w", err)
+		return fmt.Errorf("open metadata db at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK), see README#badger-troubleshooting", metaDir, err, metaDir)
 	}
 	defer db.Close()
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
@@ -250,14 +250,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	logStore, err := raft.NewBadgerLogStore(raftDir, storeOpts...)
 	if err != nil {
-		return fmt.Errorf("open raft store: %w", err)
+		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", raftDir, err, raftDir)
 	}
 	defer logStore.Close()
 
 	// Start QUIC transport for inter-node communication.
 	quicTransport := transport.NewQUICTransport(clusterKey)
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
-		return fmt.Errorf("start QUIC transport: %w", err)
+		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)
 	}
 	defer quicTransport.Close()
 	// Resolve `raftAddr` to its actual bound port. When the operator asked
@@ -626,7 +626,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	go func() {
 		if err := srv.Run(); err != nil {
-			log.Error().Err(err).Msg("http server error")
+			log.Error().Err(err).Str("addr", addr).
+				Msg("http server error — confirm TCP port is free (lsof -i TCP:" + addr + "), or pass --port=0 to pick a free port")
 		}
 	}()
 
