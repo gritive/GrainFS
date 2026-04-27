@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.4.39] - 2026-04-28
+
+### Added
+
+- **Direct I/O on EC shard writes** (`internal/storage/directio/`, `cmd/grainfs/serve.go`): 새 `directio` 패키지 — Linux는 `O_DIRECT`, macOS는 `F_NOCACHE`, 그 외 플랫폼은 pass-through. `ShardService.WithDirectIO()` 옵션 + `--direct-io` 플래그(기본 `true`)로 활성. 1MB shard 쓰기는 ~10x, 4MB는 +40% 빨라짐 (Docker Linux VM 측정). overlayfs/일부 tmpfs가 `O_DIRECT`를 거부하면 자동으로 buffered 경로로 fallback — 운영자 조치 불필요.
+- **Phase 2 research benchmarks** (`internal/cluster/shardio_directio_bench_test.go`): EC shard write 경로의 O_DIRECT vs default 비교 + 동시성 1/4/16/64 스케일링. 결과를 주석으로 함께 보존해 후속 결정의 근거 제공. `make test-e2e-docker`로 실행 가능.
+
+### Changed
+
+- **Phase 2 io_uring 평가 — 미구현 결정**: 동시성 벤치마크에서 throughput이 ~600-700 MB/s에서 plateau, 즉 disk fsync가 병목이고 syscall layer가 아님이 확인됨. io_uring의 가치 명제(batched submission, no per-op syscall)가 GrainFS의 fsync-dominated EC shard write에 적용되지 않음. WAL 등 append-only 경로 도입 시 재평가.
+
+## [0.0.4.38] - 2026-04-28
+
+### Added
+
+- **EC degraded mode** (`internal/cluster/degraded_monitor.go`, `internal/server/server.go`): 클러스터에서 EC 데이터 샤드 수 미만으로 노드가 죽으면 PUT/POST/DELETE는 503을 반환하고 GET/HEAD는 계속 서비스. 30초 ticker로 active UDP probe 기반 liveness 측정 — PeerHealth가 shard I/O 없이는 갱신되지 않는 한계 보완. `Server.degradedFlag atomic.Bool`로 핫패스 제로 비용 체크. 단일 노드 모드에서는 `ECActive()` guard로 false-positive 방지.
+- **Raft quorum-lost alert** (`internal/cluster/degraded_monitor.go`): 이 노드가 follower이고 leader가 없는 상태가 2 연속 tick(~60s) 지속되면 critical webhook 발송. `QuorumMinMatchIndex()`(GC 워터마크) 대신 `State() == Follower && LeaderID() == ""`로 판정 — write 없는 클러스터의 false positive 제거.
+- **Predictive disk warnings** (`internal/cluster/disk_collector.go`, `cmd/grainfs/serve.go`): 80% warn / 90% critical 임계값을 가로지르는 transition 시점에 1회 webhook + zerolog. 같은 레벨 유지 중에는 침묵. `--disk-warn-threshold` / `--disk-critical-threshold` 플래그.
+- **Operator-friendly errors** (`cmd/grainfs/serve.go`): BadgerDB open / Raft store / QUIC listen / encryption setup 실패 시 원인 + 복구 명령(lsof, --raft-addr=:0, --no-encryption 등) 포함. fmt.Errorf("%w\n recovery: ...") 패턴.
+- **Startup config snapshot + drift detection** (`cmd/grainfs/serve.go`): 서버 시작 시 모든 플래그 값을 debug 로그로 덤프하고 `{dataDir}/.last-config.json`에 0o600 모드로 저장. 다음 시작 시 이전 스냅샷과 비교해 변경된 키만 info 레벨로 보고. 비밀(secret-key, cluster-key, alert-webhook-secret, heal-receipt-psk)은 `<redacted>` 처리.
+- **대시보드 degraded 표시** (`internal/server/handlers.go`): `/api/cluster/status`에 `degraded` + `down_nodes` 필드. SSE hub로 실시간 broadcast.
+- **단위 테스트 11종**: `degraded_monitor_test.go`(quorum 5종) + `disk_collector_test.go`(threshold transition 4종 추가) + `degraded_test.go` E2E(노드 3개 kill → PUT 503).
+
+### Fixed
+
+- **DegradedMonitor 단일 노드 false-positive** (`internal/cluster/degraded_monitor.go`): EC가 설정되어 있지만 클러스터 크기가 부족해 stripe 형성 불가능한 경우(`ECActive()` false) degraded 진입하던 버그. `DataShards == 0` 외에 `!ECActive()` 가드 추가. 단일 노드 EC 테스트가 503을 받던 회귀 해결.
+
+### Changed
+
+- **`alerts_api.go` secondary callbacks**: `sync.Mutex`에서 `atomic.Pointer[[]func(bool)]` CAS 패턴으로 교체. lock-free 핫패스 읽기.
+
 ## [0.0.4.37] - 2026-04-27
 
 ### Added

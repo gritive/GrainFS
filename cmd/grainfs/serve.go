@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,12 +11,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"crypto/rand"
 
@@ -80,6 +83,17 @@ func init() {
 	// Phase 16 Week 4 — webhook alerts.
 	serveCmd.Flags().String("alert-webhook", "", "Slack-compatible webhook URL for critical alerts (empty disables alerts)")
 	serveCmd.Flags().String("alert-webhook-secret", "", "shared secret for X-GrainFS-Signature HMAC-SHA256 (empty disables signing)")
+	// Predictive disk warnings — fires zerolog.Warn + critical webhook on transitions
+	// between OK/Warn/Critical levels. Defaults match the Phase 1 design (80%/90%).
+	serveCmd.Flags().Float64("disk-warn-threshold", 0.80, "disk used fraction (0-1) at which a 'disk_warn' alert+log fires")
+	serveCmd.Flags().Float64("disk-critical-threshold", 0.90, "disk used fraction (0-1) at which a 'disk_critical' alert+log fires")
+	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
+	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
+	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
+	// shards, 40% on 4MB, neutral on 16MB. Filesystems that reject O_DIRECT
+	// (some overlayfs/tmpfs) fall back to the buffered path automatically;
+	// pass --direct-io=false to force buffered everywhere.
+	serveCmd.Flags().Bool("direct-io", true, "bypass page cache on local EC shard writes (Linux O_DIRECT / macOS F_NOCACHE)")
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
 	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
 	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
@@ -127,7 +141,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		var err error
 		shardEncryptor, err = loadOrCreateEncryptionKey(encKeyFile, dataDir)
 		if err != nil {
-			return fmt.Errorf("encryption setup: %w", err)
+			return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key, or --no-encryption to disable at-rest encryption", err)
 		}
 	}
 
@@ -224,12 +238,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
-		return fmt.Errorf("create meta dir: %w", err)
+		return fmt.Errorf("create meta dir at %s: %w\n  recovery: check that the parent directory exists and the user has write permission", metaDir, err)
 	}
 	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
 	db, err := badger.Open(dbOpts)
 	if err != nil {
-		return fmt.Errorf("open metadata db: %w", err)
+		return fmt.Errorf("open metadata db at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK), see README#badger-troubleshooting", metaDir, err, metaDir)
 	}
 	defer db.Close()
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
@@ -246,14 +260,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	logStore, err := raft.NewBadgerLogStore(raftDir, storeOpts...)
 	if err != nil {
-		return fmt.Errorf("open raft store: %w", err)
+		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", raftDir, err, raftDir)
 	}
 	defer logStore.Close()
 
 	// Start QUIC transport for inter-node communication.
 	quicTransport := transport.NewQUICTransport(clusterKey)
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
-		return fmt.Errorf("start QUIC transport: %w", err)
+		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)
 	}
 	defer quicTransport.Close()
 	// Resolve `raftAddr` to its actual bound port. When the operator asked
@@ -281,7 +295,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	rpcTransport.SetTransport()
 
 	// Create ShardService for distributed data replication
-	shardSvc := cluster.NewShardService(dataDir, quicTransport, cluster.WithEncryptor(encryptor))
+	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
+	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {
+		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
+		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
+	}
+	shardSvc := cluster.NewShardService(dataDir, quicTransport, shardSvcOpts...)
 
 	// Set up StreamRouter: Raft RPCs on Control stream, Shard RPCs on Data stream
 	router := transport.NewStreamRouter()
@@ -441,7 +460,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// would emit disk stats. Register unconditionally — duplicate registration
 	// is guarded inside NewDiskCollector.
 	diskCollector := cluster.NewDiskCollector(nodeID, dataDir, nil, 30*time.Second)
-	go diskCollector.Run(ctx)
+	// Wiring of OnThreshold + Run() happens after clusterAlerts is built (below)
+	// so the callback can dispatch critical webhooks on transitions.
 
 	// Auto-create "default" bucket on startup. In cluster mode this must
 	// wait for Raft to elect a leader before the proposal can commit.
@@ -467,11 +487,52 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		Str("node_id", nodeID).Str("raft_addr", raftAddr).Strs("peers", peers).
 		Str("addr", addr).Str("data", dataDir).Msg("server started")
 
+	// Startup config snapshot — debug-level log of every flag-derived runtime
+	// value. Useful for diffing against a known-good config when an operator
+	// is comparing two installs or troubleshooting drift after a restart.
+	logStartupConfigSnapshot(cmd, addr, dataDir, nodeID, raftAddr, peers)
+
 	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
 	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
 	clusterAlerts := server.NewAlertsState(clusterAlertWebhook, alerts.Options{Secret: clusterAlertSecret}, alerts.DegradedConfig{})
+
+	// Wire predictive disk warnings into the collector now that clusterAlerts
+	// exists. Thresholds are taken as fractions on the flag (more natural for
+	// operators) but DiskCollector works in percent.
+	diskWarnFrac, _ := cmd.Flags().GetFloat64("disk-warn-threshold")
+	diskCritFrac, _ := cmd.Flags().GetFloat64("disk-critical-threshold")
+	diskCollector.SetThresholds(diskWarnFrac*100, diskCritFrac*100)
+	diskCollector.SetOnThreshold(func(level cluster.DiskThresholdLevel, pct float64, availBytes uint64) {
+		// Webhook send may block on retries — dispatch in a goroutine so the
+		// collect loop is never delayed.
+		switch level {
+		case cluster.DiskLevelCritical:
+			log.Warn().Float64("pct", pct).Uint64("avail_bytes", availBytes).Msg("disk usage CRITICAL")
+			go func() {
+				_ = clusterAlerts.Send(alerts.Alert{
+					Type:     "disk_critical",
+					Severity: alerts.SeverityCritical,
+					Resource: nodeID,
+					Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
+				})
+			}()
+		case cluster.DiskLevelWarn:
+			log.Warn().Float64("pct", pct).Uint64("avail_bytes", availBytes).Msg("disk usage warning")
+			go func() {
+				_ = clusterAlerts.Send(alerts.Alert{
+					Type:     "disk_warn",
+					Severity: alerts.SeverityWarning,
+					Resource: nodeID,
+					Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
+				})
+			}()
+		case cluster.DiskLevelOK:
+			log.Info().Float64("pct", pct).Msg("disk usage recovered to normal")
+		}
+	})
+	go diskCollector.Run(ctx)
 	srvOpts := []server.Option{
-		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers}),
+		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers, backend: distBackend}),
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
@@ -576,9 +637,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Dur("interval", lifecycleInterval).Msg("cluster lifecycle manager started")
 	}
 
+	// Start the degraded mode monitor — checks live node count vs EC threshold
+	// every 30 s. The first check fires immediately so the server knows its
+	// state before serving any requests.
+	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), 30*time.Second).
+		WithQuorumCheck(node, clusterAlerts)
+	go degradedMon.Run(ctx)
+
 	go func() {
 		if err := srv.Run(); err != nil {
-			log.Error().Err(err).Msg("http server error")
+			log.Error().Err(err).Str("addr", addr).
+				Msg("http server error — confirm TCP port is free (lsof -i TCP:" + addr + "), or pass --port=0 to pick a free port")
 		}
 	}()
 
@@ -861,8 +930,9 @@ func (a *balancerInfoAdapter) Status() server.BalancerStatusResult {
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.
 type raftClusterInfo struct {
-	node  *raft.Node
-	peers []string
+	node    *raft.Node
+	peers   []string
+	backend *cluster.DistributedBackend
 }
 
 func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
@@ -870,3 +940,88 @@ func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
 func (r *raftClusterInfo) Peers() []string  { return r.peers }
+func (r *raftClusterInfo) LivePeers() []string {
+	if r.backend == nil {
+		return r.peers
+	}
+	return r.backend.LiveNodes()
+}
+
+// logStartupConfigSnapshot dumps every flag's resolved value at debug level
+// and writes a JSON snapshot to {dataDir}/.last-config.json. On the next
+// start the previous snapshot is compared and any changed key is logged at
+// info level so the operator sees what was reconfigured between restarts.
+//
+// Limited to flag values — there is no live-config-file system in grainfs,
+// so true "drift detection" (file vs runtime) is out of scope until a config
+// file is added (Phase 20). What this catches is unintentional flag changes
+// across restarts, which is the realistic operator failure mode today.
+func logStartupConfigSnapshot(cmd *cobra.Command, addr, dataDir, nodeID, raftAddr string, peers []string) {
+	snapshot := map[string]any{
+		"addr":      addr,
+		"data_dir":  dataDir,
+		"node_id":   nodeID,
+		"raft_addr": raftAddr,
+		"peers":     peers,
+	}
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		// Strip secrets from the snapshot — they should never hit a debug
+		// log or an on-disk plaintext file.
+		switch f.Name {
+		case "secret-key", "cluster-key", "alert-webhook-secret", "heal-receipt-psk":
+			if f.Value.String() != "" {
+				snapshot[f.Name] = "<redacted>"
+			}
+			return
+		}
+		snapshot[f.Name] = f.Value.String()
+	})
+
+	log.Debug().Interface("flags", snapshot).Msg("startup config snapshot")
+
+	// Compare against previous snapshot, log diff at info level.
+	snapPath := filepath.Join(dataDir, ".last-config.json")
+	if prev, err := os.ReadFile(snapPath); err == nil {
+		var prevMap map[string]any
+		if err := json.Unmarshal(prev, &prevMap); err == nil {
+			diff := diffSnapshots(prevMap, snapshot)
+			if len(diff) > 0 {
+				log.Info().Interface("changed", diff).Msg("config changed since last startup")
+			}
+		}
+	}
+
+	// Persist current snapshot for next restart's comparison. Failure here
+	// is non-fatal — drift detection is best-effort observability.
+	if data, err := json.MarshalIndent(snapshot, "", "  "); err == nil {
+		if err := os.WriteFile(snapPath, data, 0o600); err != nil {
+			log.Debug().Err(err).Str("path", snapPath).Msg("could not persist startup config snapshot")
+		}
+	}
+}
+
+// diffSnapshots returns a map of key→{prev, curr} for every key whose value
+// changed between snapshots. Keys present in only one side are also reported.
+func diffSnapshots(prev, curr map[string]any) map[string]map[string]any {
+	out := make(map[string]map[string]any)
+	keys := make(map[string]struct{}, len(prev)+len(curr))
+	for k := range prev {
+		keys[k] = struct{}{}
+	}
+	for k := range curr {
+		keys[k] = struct{}{}
+	}
+	sortedKeys := make([]string, 0, len(keys))
+	for k := range keys {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+	for _, k := range sortedKeys {
+		pv, pok := prev[k]
+		cv, cok := curr[k]
+		if !pok || !cok || fmt.Sprintf("%v", pv) != fmt.Sprintf("%v", cv) {
+			out[k] = map[string]any{"prev": pv, "curr": cv}
+		}
+	}
+	return out
+}

@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -25,6 +27,11 @@ type ShardService struct {
 	dataDir   string
 	transport *transport.QUICTransport
 	encryptor *encrypt.Encryptor
+	// directIO bypasses the kernel page cache for shard writes when true.
+	// Linux uses O_DIRECT, macOS uses F_NOCACHE. Default false: enable via
+	// WithDirectIO and the --direct-io flag once measurement on the target
+	// filesystem confirms the win (see shardio_directio_bench_test.go).
+	directIO bool
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -34,6 +41,14 @@ type ShardServiceOption func(*ShardService)
 // all shards are encrypted at rest. Pass nil to disable encryption.
 func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
 	return func(s *ShardService) { s.encryptor = enc }
+}
+
+// WithDirectIO enables direct I/O (page-cache bypass) on the local shard
+// write path. Beneficial for the typical EC shard size range (1-4 MB),
+// neutral for larger shards. Off by default — opt in after measuring on the
+// target filesystem (some overlayfs/tmpfs configs reject O_DIRECT).
+func WithDirectIO() ShardServiceOption {
+	return func(s *ShardService) { s.directIO = true }
 }
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
@@ -322,7 +337,54 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 		}
 	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
+	if err := s.writeShardFile(path, payload); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
+// writeShardFile writes payload to path using the atomic
+// (tmp + sync + rename) recipe. Branches on s.directIO: when true the tmp
+// file is opened with platform-specific direct-I/O hints and the payload is
+// padded to alignment + truncated; when false the standard buffered path
+// runs unchanged. Errors at any step delete the tmp file before returning.
+func (s *ShardService) writeShardFile(path string, payload []byte) error {
 	tmp := path + ".tmp"
+	if s.directIO {
+		if err := writeDirect(tmp, payload); err == nil {
+			if err := os.Rename(tmp, path); err != nil {
+				os.Remove(tmp)
+				return fmt.Errorf("rename shard: %w", err)
+			}
+			return nil
+		} else if isUnsupportedDirectIO(err) {
+			// Some filesystems (overlayfs, certain tmpfs configs) reject
+			// O_DIRECT with EINVAL. Fall back to the buffered path so
+			// production stays up — log nothing here; the operator already
+			// opted in and the tests cover both branches.
+			os.Remove(tmp)
+		} else {
+			os.Remove(tmp)
+			return err
+		}
+	}
+	if err := writeBuffered(tmp, payload); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename shard: %w", err)
+	}
+	return nil
+}
+
+// writeBuffered is the historical write path: open + write + sync + close.
+// Kept verbatim for the !directIO branch and the direct-I/O fallback path.
+func writeBuffered(tmp string, payload []byte) error {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
@@ -341,15 +403,52 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 		os.Remove(tmp)
 		return fmt.Errorf("close tmp shard: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename shard: %w", err)
+	return nil
+}
+
+// writeDirect uses directio.OpenFile + AlignedCopy to bypass the page cache.
+// The payload is copied into an aligned buffer once; the file is truncated
+// back to the payload's true length so readers see exactly the bytes the
+// caller passed in. Sync is still required — direct I/O does not flush
+// disk firmware caches.
+func writeDirect(tmp string, payload []byte) error {
+	f, err := directio.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create tmp shard (direct): %w", err)
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		d.Close()
+	buf, alignedLen := directio.AlignedCopy(payload)
+	if _, err := f.Write(buf); err != nil {
+		f.Close()
+		return fmt.Errorf("write tmp shard (direct): %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("sync tmp shard (direct): %w", err)
+	}
+	if alignedLen != len(payload) {
+		if err := f.Truncate(int64(len(payload))); err != nil {
+			f.Close()
+			return fmt.Errorf("truncate tmp shard (direct): %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close tmp shard (direct): %w", err)
 	}
 	return nil
+}
+
+// isUnsupportedDirectIO recognises filesystem-level rejections of O_DIRECT
+// (EINVAL or "operation not supported") so the caller can fall back to the
+// buffered path silently. A production deploy on overlayfs (Docker default)
+// will hit this; we don't want to crash, just degrade gracefully.
+func isUnsupportedDirectIO(err error) bool {
+	if err == nil {
+		return false
+	}
+	es := err.Error()
+	return strings.Contains(es, "invalid argument") ||
+		strings.Contains(es, "operation not supported") ||
+		strings.Contains(es, "not implemented")
 }
 
 // ReadLocalShard fetches a shard from the local node's disk.

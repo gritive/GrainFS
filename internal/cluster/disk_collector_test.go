@@ -111,3 +111,85 @@ func TestDiskCollector_RunCallsCollectOnInterval(t *testing.T) {
 
 	assert.GreaterOrEqual(t, count.Load(), int64(3))
 }
+
+// thresholdCall captures one OnThreshold invocation for assertion.
+type thresholdCall struct {
+	level     DiskThresholdLevel
+	pct       float64
+	availByts uint64
+}
+
+func TestDiskCollector_Threshold_FiresOnceOnEntry(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1"})
+
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+
+	var calls []thresholdCall
+	dc.SetOnThreshold(func(l DiskThresholdLevel, p float64, a uint64) {
+		calls = append(calls, thresholdCall{l, p, a})
+	})
+
+	// 1st sample: 85% → enters Warn → fires once.
+	dc.SetStatFunc(func(string) (float64, uint64) { return 85.0, 1000 })
+	dc.collect()
+	require.Len(t, calls, 1)
+	assert.Equal(t, DiskLevelWarn, calls[0].level)
+	assert.Equal(t, 85.0, calls[0].pct)
+
+	// 2nd sample: still 85% → no transition → no new call.
+	dc.collect()
+	require.Len(t, calls, 1, "must not re-fire on same level")
+
+	// 3rd sample: 92% → Warn → Critical transition → fires.
+	dc.SetStatFunc(func(string) (float64, uint64) { return 92.0, 500 })
+	dc.collect()
+	require.Len(t, calls, 2)
+	assert.Equal(t, DiskLevelCritical, calls[1].level)
+
+	// 4th sample: 70% → recovers to OK → fires (operator visibility).
+	dc.SetStatFunc(func(string) (float64, uint64) { return 70.0, 5000 })
+	dc.collect()
+	require.Len(t, calls, 3)
+	assert.Equal(t, DiskLevelOK, calls[2].level)
+}
+
+func TestDiskCollector_Threshold_NoCallback_NoOp(t *testing.T) {
+	// Unset callback must not panic at any disk percentage.
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1"})
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc.SetStatFunc(func(string) (float64, uint64) { return 95.0, 100 })
+	assert.NotPanics(t, func() { dc.collect() })
+}
+
+func TestDiskCollector_SetThresholds_OverridesDefaults(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1"})
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc.SetThresholds(50, 70) // tighter
+
+	var got DiskThresholdLevel
+	dc.SetOnThreshold(func(l DiskThresholdLevel, _ float64, _ uint64) { got = l })
+	dc.SetStatFunc(func(string) (float64, uint64) { return 60.0, 1000 })
+	dc.collect()
+	assert.Equal(t, DiskLevelWarn, got, "60% should be warn under (50,70)")
+}
+
+func TestDiskCollector_SetThresholds_RejectsInvalidInput(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1"})
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+
+	dc.SetThresholds(90, 80) // warn > critical, invalid
+	dc.SetThresholds(0, 50)  // warn=0, invalid
+	dc.SetThresholds(50, 0)  // critical=0, invalid
+	dc.SetThresholds(-1, 90) // negative, invalid
+
+	var got DiskThresholdLevel
+	dc.SetOnThreshold(func(l DiskThresholdLevel, _ float64, _ uint64) { got = l })
+	dc.SetStatFunc(func(string) (float64, uint64) { return 85.0, 100 })
+	dc.collect()
+	// Defaults (80, 90) must still be in effect — 85% should be Warn.
+	assert.Equal(t, DiskLevelWarn, got, "invalid SetThresholds calls must be ignored")
+}

@@ -272,6 +272,11 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
+	if s.isDegraded() {
+		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
+		return
+	}
+
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
@@ -663,6 +668,11 @@ func checkConditionals(c *app.RequestContext, etag string, lastModifiedUnix int6
 }
 
 func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
+	if s.isDegraded() {
+		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
+		return
+	}
+
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
@@ -718,6 +728,11 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 
 // handlePost routes POST requests for multipart upload operations.
 func (s *Server) handlePost(_ context.Context, c *app.RequestContext) {
+	if s.isDegraded() {
+		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
+		return
+	}
+
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
@@ -1036,6 +1051,7 @@ func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 	status := map[string]any{
 		"mode":                  "local",
 		"split_brain_suspected": false,
+		"degraded":              s.degradedFlag.Load(),
 	}
 
 	if s.cluster != nil {
@@ -1045,6 +1061,20 @@ func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 		status["term"] = s.cluster.Term()
 		status["leader_id"] = s.cluster.LeaderID()
 		status["peers"] = s.cluster.Peers()
+
+		// Compute down nodes: configured peers minus live peers.
+		livePeers := s.cluster.LivePeers()
+		liveSet := make(map[string]struct{}, len(livePeers))
+		for _, p := range livePeers {
+			liveSet[p] = struct{}{}
+		}
+		var downNodes []string
+		for _, p := range s.cluster.Peers() {
+			if _, ok := liveSet[p]; !ok {
+				downNodes = append(downNodes, p)
+			}
+		}
+		status["down_nodes"] = downNodes
 	}
 
 	data, _ := json.Marshal(status)
