@@ -87,6 +87,13 @@ func init() {
 	// between OK/Warn/Critical levels. Defaults match the Phase 1 design (80%/90%).
 	serveCmd.Flags().Float64("disk-warn-threshold", 0.80, "disk used fraction (0-1) at which a 'disk_warn' alert+log fires")
 	serveCmd.Flags().Float64("disk-critical-threshold", 0.90, "disk used fraction (0-1) at which a 'disk_critical' alert+log fires")
+	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
+	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
+	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
+	// shards, 40% on 4MB, neutral on 16MB. Filesystems that reject O_DIRECT
+	// (some overlayfs/tmpfs) fall back to the buffered path automatically;
+	// pass --direct-io=false to force buffered everywhere.
+	serveCmd.Flags().Bool("direct-io", true, "bypass page cache on local EC shard writes (Linux O_DIRECT / macOS F_NOCACHE)")
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
 	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
 	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
@@ -288,7 +295,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	rpcTransport.SetTransport()
 
 	// Create ShardService for distributed data replication
-	shardSvc := cluster.NewShardService(dataDir, quicTransport, cluster.WithEncryptor(encryptor))
+	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
+	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {
+		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
+		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
+	}
+	shardSvc := cluster.NewShardService(dataDir, quicTransport, shardSvcOpts...)
 
 	// Set up StreamRouter: Raft RPCs on Control stream, Shard RPCs on Data stream
 	router := transport.NewStreamRouter()
