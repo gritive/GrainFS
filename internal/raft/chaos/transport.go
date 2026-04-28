@@ -139,7 +139,11 @@ func (c *ChaosTransport) Wire(n *raft.Node) {
 		if !ok {
 			return nil, errPartitioned
 		}
-		return target.HandleRequestVote(args), nil
+		modifiedArgs, drop := c.applyRVHook(from, peer, args)
+		if drop {
+			return nil, errPartitioned
+		}
+		return target.HandleRequestVote(modifiedArgs), nil
 	}
 
 	sendAppend := func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
