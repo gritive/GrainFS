@@ -1,0 +1,128 @@
+package chaos
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/gritive/GrainFS/internal/raft"
+)
+
+// Cluster is an in-memory N-node Raft test harness. It owns the transport,
+// node configs, and lifecycle. Implements Driver.
+type Cluster struct {
+	t         *testing.T
+	transport *ChaosTransport
+	configs   map[string]raft.Config
+	nodes     map[string]*raft.Node
+	ids       []string
+}
+
+// NewCluster constructs N nodes named "node-0".."node-(N-1)" with default
+// timeouts and a fully-meshed peer list. Nodes are NOT started; call StartAll.
+// Cleanup (Close all nodes) is registered via t.Cleanup.
+func NewCluster(t *testing.T, n int) *Cluster {
+	t.Helper()
+
+	c := &Cluster{
+		t:         t,
+		transport: NewChaosTransport(),
+		configs:   make(map[string]raft.Config, n),
+		nodes:     make(map[string]*raft.Node, n),
+		ids:       make([]string, n),
+	}
+
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("node-%d", i)
+		c.ids[i] = id
+	}
+
+	for i, id := range c.ids {
+		peers := make([]string, 0, n-1)
+		for j, pid := range c.ids {
+			if i != j {
+				peers = append(peers, pid)
+			}
+		}
+		cfg := raft.Config{
+			ID:               id,
+			Peers:            peers,
+			ElectionTimeout:  200 * time.Millisecond,
+			HeartbeatTimeout: 50 * time.Millisecond,
+		}
+		c.configs[id] = cfg
+
+		node := raft.NewNode(cfg)
+		c.nodes[id] = node
+		c.transport.Register(node)
+		c.transport.Wire(node)
+	}
+
+	t.Cleanup(func() {
+		for _, nd := range c.nodes {
+			nd.Close()
+		}
+	})
+
+	return c
+}
+
+// StartAll starts every node in the cluster.
+func (c *Cluster) StartAll() {
+	for _, n := range c.nodes {
+		n.Start()
+	}
+}
+
+// WaitForLeader polls until a leader is elected or timeout elapses.
+// Returns nil on timeout.
+func (c *Cluster) WaitForLeader(timeout time.Duration) *raft.Node {
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			return nil
+		default:
+			for _, n := range c.nodes {
+				if n.IsLeader() {
+					return n
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// CurrentLeader returns the current leader, or nil if none.
+func (c *Cluster) CurrentLeader() *raft.Node {
+	for _, n := range c.nodes {
+		if n.IsLeader() {
+			return n
+		}
+	}
+	return nil
+}
+
+// Nodes returns all nodes (order is not guaranteed).
+func (c *Cluster) Nodes() []*raft.Node {
+	out := make([]*raft.Node, 0, len(c.nodes))
+	for _, n := range c.nodes {
+		out = append(out, n)
+	}
+	return out
+}
+
+// NodeIDs returns the cluster node IDs in creation order.
+func (c *Cluster) NodeIDs() []string {
+	out := make([]string, len(c.ids))
+	copy(out, c.ids)
+	return out
+}
+
+// Driver primitive delegations.
+
+func (c *Cluster) PartitionPeer(nodeID string)        { c.transport.PartitionPeer(nodeID) }
+func (c *Cluster) HealPartition(nodeID string)        { c.transport.HealPartition(nodeID) }
+func (c *Cluster) DropMessage(from, to string, n int) { c.transport.DropMessage(from, to, n) }
+
+// RestartNode is implemented in Task 7.
