@@ -98,7 +98,48 @@ func TestChaosTransport_DropMessageDecrementsCounter(t *testing.T) {
 	assert.True(t, tr.shouldDeliver("B", "A"), "B→A unaffected by A→B drop")
 }
 
-func TestChaosTransport_RequestVoteHook_DropsPreVote(t *testing.T) {
+// TestChaosTransport_RequestVoteHook_API verifies SetRequestVoteHook and
+// applyRVHook behaviour directly without relying on election timing.
+func TestChaosTransport_RequestVoteHook_API(t *testing.T) {
+	tr := NewChaosTransport()
+
+	var dropped atomic.Int64
+	tr.SetRequestVoteHook("C", func(from, to string, args *raft.RequestVoteArgs) (*raft.RequestVoteArgs, bool) {
+		if args.PreVote {
+			dropped.Add(1)
+			return nil, true // drop pre-vote
+		}
+		return args, false // pass through real vote
+	})
+
+	preVoteArgs := &raft.RequestVoteArgs{PreVote: true, Term: 1, CandidateID: "A"}
+	realVoteArgs := &raft.RequestVoteArgs{PreVote: false, Term: 1, CandidateID: "A"}
+
+	// Hook drops PreVote=true to C.
+	_, drop := tr.applyRVHook("A", "C", preVoteArgs)
+	assert.True(t, drop, "hook must drop PreVote=true to C")
+	assert.Equal(t, int64(1), dropped.Load(), "counter must be 1 after first drop")
+
+	// Hook passes through PreVote=false to C.
+	_, drop = tr.applyRVHook("A", "C", realVoteArgs)
+	assert.False(t, drop, "hook must pass through PreVote=false to C")
+	assert.Equal(t, int64(1), dropped.Load(), "counter must not change for real vote")
+
+	// No hook on B — nothing dropped.
+	_, drop = tr.applyRVHook("A", "B", preVoteArgs)
+	assert.False(t, drop, "no hook on B: must not drop")
+	assert.Equal(t, int64(1), dropped.Load(), "counter must not change for B")
+
+	// nil fn removes the hook.
+	tr.SetRequestVoteHook("C", nil)
+	_, drop = tr.applyRVHook("A", "C", preVoteArgs)
+	assert.False(t, drop, "removed hook must not drop")
+}
+
+// TestChaosTransport_RequestVoteHook_ClusterElectsLeader verifies that a
+// cluster can elect a leader even when one node drops all incoming pre-votes
+// (simulating a mixed old/new deployment).
+func TestChaosTransport_RequestVoteHook_ClusterElectsLeader(t *testing.T) {
 	tr := NewChaosTransport()
 
 	cfgA := raft.DefaultConfig("A", []string{"B", "C"})
@@ -116,11 +157,10 @@ func TestChaosTransport_RequestVoteHook_DropsPreVote(t *testing.T) {
 	tr.Wire(b)
 	tr.Wire(c)
 
-	var dropped atomic.Int64
-	// Simulate C as an "old" node that silently drops incoming PreVote RPCs.
+	// Simulate C as an "old" node: drop all incoming PreVote RPCs.
+	// A and B can form a pre-vote majority (2/3) without C.
 	tr.SetRequestVoteHook("C", func(from, to string, args *raft.RequestVoteArgs) (*raft.RequestVoteArgs, bool) {
 		if args.PreVote {
-			dropped.Add(1)
 			return nil, true
 		}
 		return args, false
@@ -130,13 +170,9 @@ func TestChaosTransport_RequestVoteHook_DropsPreVote(t *testing.T) {
 	b.Start()
 	c.Start()
 
-	// A and B can form a pre-vote majority (2/3) between themselves;
-	// cluster must still elect a leader despite C dropping all pre-votes.
 	require.Eventually(t, func() bool {
 		return a.IsLeader() || b.IsLeader() || c.IsLeader()
 	}, 5*time.Second, 50*time.Millisecond, "cluster must elect leader with one pre-vote-dropping node")
-
-	assert.Greater(t, dropped.Load(), int64(0), "hook must have fired at least once")
 }
 
 // TestChaosTransport_Wire_UnregisteredPeer exercises the "peer not registered"
