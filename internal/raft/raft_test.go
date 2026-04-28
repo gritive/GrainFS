@@ -95,6 +95,8 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 }
 
 func (c *testCluster) nodeByID(id string) *Node {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, n := range c.nodes {
 		if n.ID() == id {
 			return n

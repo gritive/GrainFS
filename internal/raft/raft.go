@@ -745,6 +745,10 @@ func (n *Node) initLeaderState() {
 	}
 	// Track self's matchIndex
 	n.matchIndex[n.id] = n.lastLogIdx()
+	// When this node steps down via CheckQuorum it becomes a follower with
+	// knowledge of a recent leader (itself). Seed lastLeaderContact so the
+	// stickiness window applies and we don't immediately grant votes.
+	n.lastLeaderContact = now
 }
 
 // hasQuorum returns true if a majority of the cluster (including self) has
@@ -1047,8 +1051,11 @@ func (n *Node) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	// incrementing its term. We must not change currentTerm, votedFor, or state.
 	if args.PreVote {
 		reply := &RequestVoteReply{Term: n.currentTerm}
-		// Reject if we heard from a leader recently — cluster is healthy.
-		if time.Since(n.lastLeaderContact) < n.config.ElectionTimeout {
+		// Reject if we ARE the leader (there is definitely a live leader in the
+		// cluster), or if we heard from one recently.
+		// The leader never updates lastLeaderContact (it sends AE, not receives),
+		// so the time-based check alone would cause the leader to grant pre-votes.
+		if n.state == Leader || time.Since(n.lastLeaderContact) < n.config.ElectionTimeout {
 			return reply
 		}
 		reply.VoteGranted = args.Term > n.currentTerm &&
