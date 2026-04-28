@@ -75,6 +75,13 @@ type DistributedBackend struct {
 	// See internal/cache/shardcache for the rationale (sharded LRU,
 	// lock-free counters, why we do not use an actor pattern here).
 	shardCache *shardcache.Cache
+
+	// vfsFixedVersion controls VFS-internal-bucket behavior:
+	// true (default) → PutObject for "__grainfs_vfs_*" uses fixed versionID
+	//   "current" so on-disk usage stays bounded to one copy per key.
+	// false → legacy behavior (fresh ULID per PUT). Operators can flip via
+	//   --backend-vfs-fixed-version=false to roll back without rebuild.
+	vfsFixedVersion atomic.Bool
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -91,14 +98,27 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		node.SetNoOpCommand(noOp)
 	}
 
-	return &DistributedBackend{
+	b := &DistributedBackend{
 		root:     root,
 		db:       db,
 		node:     node,
 		fsm:      fsm,
 		logger:   log.With().Str("component", "distributed-backend").Logger(),
 		registry: NewRegistry(),
-	}, nil
+	}
+	b.vfsFixedVersion.Store(true) // default on; toggle via --backend-vfs-fixed-version=false
+	return b, nil
+}
+
+// SetVFSFixedVersionEnabled toggles the fixed-versionID behavior for
+// __grainfs_vfs_* buckets. See vfsFixedVersion field comment.
+func (b *DistributedBackend) SetVFSFixedVersionEnabled(on bool) {
+	b.vfsFixedVersion.Store(on)
+}
+
+// VFSFixedVersionEnabled reports the current toggle state.
+func (b *DistributedBackend) VFSFixedVersionEnabled() bool {
+	return b.vfsFixedVersion.Load()
 }
 
 // SetShardCache configures the EC shard cache. Pass a cache built with
@@ -502,17 +522,23 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
 
-	// Versioning is unconditional: every PUT gets a fresh ULID so prior versions
-	// remain addressable via GetObjectVersion / ListObjectVersions. Bucket-level
-	// versioning-state gating is a later slice.
+	// VFS internal buckets ("__grainfs_vfs_*") are owned exclusively by the
+	// VFS layer; multi-versioning has no meaning there and accumulates disk
+	// usage proportional to NFS WRITE RPC count (see docs/superpowers/specs/
+	// 2026-04-28-vfs-write-amp-design.md). Use a fixed versionID so the on-
+	// disk path is overwritten in place. EC is also disabled for these
+	// buckets: a fixed versionID combined with EC's RingVersion-keyed shard
+	// placement would leak stale shards on ring topology changes.
 	versionID := newVersionID()
-
-	// Phase 18 Cluster EC: split across k+m nodes when the cluster is large
-	// enough. 1-2 node clusters fall through to the N× replication path.
-	if b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil {
-		return b.putObjectEC(bucket, key, versionID, data, contentType)
+	useEC := b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil
+	if storage.IsVFSBucket(bucket) && b.vfsFixedVersion.Load() {
+		versionID = "current"
+		useEC = false
 	}
 
+	if useEC {
+		return b.putObjectEC(bucket, key, versionID, data, contentType)
+	}
 	return b.putObjectNx(bucket, key, versionID, data, contentType)
 }
 
@@ -530,7 +556,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
-	if err := os.WriteFile(objPath, data, 0o644); err != nil {
+	if err := writeFileAtomic(objPath, data); err != nil {
 		return nil, fmt.Errorf("write object: %w", err)
 	}
 
@@ -2073,6 +2099,39 @@ func (b *DistributedBackend) bucketDir(bucket string) string {
 // sibling ".obj" directory.
 func (b *DistributedBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
+}
+
+// writeFileAtomic writes data to path using a temp+rename recipe. The temp
+// file lives in the same directory as the target so rename is a metadata-
+// only operation on the same filesystem. Caller must have ensured the
+// parent directory exists (MkdirAll). On error the temp file is best-effort
+// removed.
+//
+// This is the lock-free serialization primitive for VFS bucket fixed-
+// versionID writes: concurrent writers race their renames; POSIX rename
+// atomicity yields last-writer-wins semantics with no torn intermediate
+// state visible to readers.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename tmp→target: %w", err)
+	}
+	return nil
 }
 
 // objectPathV returns the version-addressable local path for a full-object copy

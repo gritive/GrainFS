@@ -13,3 +13,7 @@ meta/
 /raft/
 receipts/
 docs/superpowers/
+benchmarks/scratch/
+
+# superpowers 스킬 산출물 — git 미포함
+docs/superpowers/

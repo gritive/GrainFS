@@ -123,6 +123,14 @@ func init() {
 	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	serveCmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
 	serveCmd.Flags().Bool("dedup", true, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
+	// Rate limit overrides — defaults are production-safe (100/200 ip, 50/100 user).
+	// Benchmarks/dev/upstream-proxied deployments can relax these. 0 disables that layer.
+	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (auto: cluster=false (consensus provides redundancy), single=true; explicit value always wins)")
+	serveCmd.Flags().Bool("backend-vfs-fixed-version", true, "use fixed versionID 'current' for __grainfs_vfs_* buckets to bound on-disk usage; disable for legacy multi-version behavior (cluster mode only)")
+	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
+	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
+	serveCmd.Flags().Float64("rate-limit-user-rps", 50, "per-authenticated-user rate limit in requests/sec (0 disables)")
+	serveCmd.Flags().Int("rate-limit-user-burst", 100, "per-authenticated-user rate limit burst size")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -354,6 +362,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	log.Info().Int("k", clusterECData).Int("m", clusterECParity).
 		Bool("active", len(allNodes) >= cluster.MinECNodes).
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
+
+	// VFS bucket fixed-versionID toggle (rollback path for the write-amp fix).
+	vfsFixed, _ := cmd.Flags().GetBool("backend-vfs-fixed-version")
+	distBackend.SetVFSFixedVersionEnabled(vfsFixed)
+	log.Info().Bool("enabled", vfsFixed).Msg("VFS bucket fixed-versionID configured")
 
 	// EC shard cache (Phase 2 #3 follow-up). Multi-node measurement on
 	// PR #71 showed 90% hit rate on large object repeated GET — the cache
