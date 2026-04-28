@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.5.0] - 2026-04-29
+
+### Added
+
+- **Raft PR 1a — Pre-vote + CheckQuorum + Leader Stickiness** (`internal/raft/`): Raft 논문 §9.6 기반 선출 안정성 3종 세트.
+  - **Pre-vote** (`runPreVote`): 후보가 term 증가 전 pre-vote 라운드 실행. 파티션 복귀 노드가 term을 부풀려 현 리더를 step-down 시키는 문제 차단.
+  - **Leader Stickiness (Disrupting Prevention)** (`HandleRequestVote`): 팔로워가 `ElectionTimeout` 안에 AppendEntries를 받은 경우 RequestVote 거부. 리더 고정성 강화.
+  - **CheckQuorum** (`hasQuorum`, `runLeader`): 리더가 3 heartbeat 주기(150ms) 내 과반수 ack 없으면 자발적 step-down. minority-side stale write 방지.
+  - **`lastLeaderContact` 추적** (`HandleAppendEntries`, `HandleInstallSnapshot`): stickiness 판단 기준 타임스탬프.
+  - **LeaderTransfer 호환성 수정** (`HandleTimeoutNow`, `runCandidate`, `RequestVoteArgs.LeaderTransfer`): `TransferLeadership` 호출 경로에서 stickiness gate 우회. `cluster/balancer.go` 프로덕션 사용처 대응.
+  - **단위 테스트 8건** 추가 (`raft_test.go`): HasQuorum, HandleRequestVote pre-vote/stickiness, AppendEntries/InstallSnapshot lastLeaderContact, 2-node quorum, leader rejects pre-vote.
+  - **Chaos 시나리오 3건 활성화** (`chaos/scenarios/`): `TestSplitBrain_PreVotePreventsLeaderDisruption`, `TestLeaderIsolation_CheckQuorumStepsDown`, `TestStaleLogElected_PreVotePreventsTermInflation` (t.Skip 제거).
+
 ## [0.0.4.46] - 2026-04-29
 
 ### Added
