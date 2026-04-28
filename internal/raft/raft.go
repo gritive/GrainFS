@@ -557,10 +557,91 @@ func (n *Node) runFollower() {
 	case <-n.resetCh:
 		return // restart the loop, new timeout
 	case <-timer.C:
+		if !n.runPreVote() {
+			return // pre-vote failed; stay follower for next timeout
+		}
+		// S1: re-check lastLeaderContact — a leader may have contacted us
+		// while pre-vote RPCs were in flight. Stay follower if so.
 		n.mu.Lock()
+		if time.Since(n.lastLeaderContact) < n.config.ElectionTimeout {
+			n.mu.Unlock()
+			return
+		}
 		n.state = Candidate
 		n.mu.Unlock()
 	}
+}
+
+// runPreVote sends pre-vote RPCs to all peers before the node increments its
+// term. Returns true if a majority granted the pre-vote (caller may proceed to
+// a real election). Returns false if peers indicate the cluster is healthy.
+func (n *Node) runPreVote() bool {
+	n.mu.Lock()
+	proposedTerm := n.currentTerm + 1
+	lastLogIndex, lastLogTerm := n.lastLogInfo()
+	peers := n.config.Peers
+	n.mu.Unlock()
+
+	if len(peers) == 0 {
+		return true // single-node: always wins
+	}
+
+	total := len(peers) + 1
+	majority := total/2 + 1
+
+	type result struct {
+		granted bool
+		term    uint64
+	}
+	resultCh := make(chan result, len(peers))
+	for _, peer := range peers {
+		go func(p string) {
+			args := &RequestVoteArgs{
+				Term:         proposedTerm,
+				CandidateID:  n.id,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm:  lastLogTerm,
+				PreVote:      true,
+			}
+			reply, err := n.sendRequestVote(p, args)
+			if err != nil {
+				resultCh <- result{}
+				return
+			}
+			resultCh <- result{granted: reply.VoteGranted, term: reply.Term}
+		}(peer)
+	}
+
+	votes := 1 // self
+	var maxReplyTerm uint64
+	timer := time.NewTimer(n.randomElectionTimeout())
+	defer timer.Stop()
+
+	for votes < majority {
+		select {
+		case <-n.stopCh:
+			return false
+		case <-timer.C:
+			return false
+		case r := <-resultCh:
+			if r.granted {
+				votes++
+			}
+			if r.term > maxReplyTerm {
+				maxReplyTerm = r.term
+			}
+		}
+	}
+
+	// M2: if a peer carries a higher term, there's a live leader we're unaware
+	// of. Reset our timer so we don't immediately retry.
+	n.mu.Lock()
+	if maxReplyTerm > n.currentTerm {
+		n.signalReset()
+	}
+	n.mu.Unlock()
+
+	return true
 }
 
 func (n *Node) runCandidate() {
