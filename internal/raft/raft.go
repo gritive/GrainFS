@@ -166,11 +166,12 @@ func DefaultConfig(id string, peers []string) Config {
 
 // RequestVoteArgs is sent by candidates to gather votes.
 type RequestVoteArgs struct {
-	Term         uint64
-	CandidateID  string
-	LastLogIndex uint64
-	LastLogTerm  uint64
-	PreVote      bool // true = pre-vote round; receiver must not update state/term
+	Term           uint64
+	CandidateID    string
+	LastLogIndex   uint64
+	LastLogTerm    uint64
+	PreVote        bool // true = pre-vote round; receiver must not update state/term
+	LeaderTransfer bool // true = leadership transfer; receiver must bypass stickiness
 }
 
 // RequestVoteReply is the response to a RequestVote RPC.
@@ -243,6 +244,10 @@ type Node struct {
 
 	// CheckQuorum: per-peer time of last AppendEntries reply (leader only)
 	checkQuorumAcks map[string]time.Time
+
+	// leaderTransfer is set by HandleTimeoutNow to signal runCandidate that
+	// this election is a leader-transfer; RequestVote must bypass stickiness on receivers.
+	leaderTransfer bool
 
 	// proposal waiters: log index -> channel signaled when committed (nil = success, error = failure)
 	waiters map[uint64]chan error
@@ -656,6 +661,8 @@ func (n *Node) runCandidate() {
 	term := n.currentTerm
 	lastLogIndex, lastLogTerm := n.lastLogInfo()
 	peers := n.config.Peers
+	isTransfer := n.leaderTransfer
+	n.leaderTransfer = false // consume the flag
 	n.mu.Unlock()
 
 	votes := 1              // vote for self
@@ -677,10 +684,11 @@ func (n *Node) runCandidate() {
 	for _, peer := range peers {
 		go func(p string) {
 			args := &RequestVoteArgs{
-				Term:         term,
-				CandidateID:  n.id,
-				LastLogIndex: lastLogIndex,
-				LastLogTerm:  lastLogTerm,
+				Term:           term,
+				CandidateID:    n.id,
+				LastLogIndex:   lastLogIndex,
+				LastLogTerm:    lastLogTerm,
+				LeaderTransfer: isTransfer,
 			}
 			reply, err := n.sendRequestVote(p, args)
 			if err != nil {
@@ -1078,7 +1086,10 @@ func (n *Node) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	// Critical: do NOT update currentTerm here. Updating would cause the leader
 	// to see our next AppendEntriesReply with a higher term and step down —
 	// the exact disruption we're preventing.
-	if time.Since(n.lastLeaderContact) < n.config.ElectionTimeout {
+	//
+	// Exception: leader-transfer elections are intentional disruptions;
+	// the sender explicitly asked us to step aside.
+	if !args.LeaderTransfer && time.Since(n.lastLeaderContact) < n.config.ElectionTimeout {
 		return reply
 	}
 
@@ -1448,7 +1459,8 @@ func (n *Node) HandleTimeoutNow() {
 		return
 	}
 
-	// Immediately become candidate
+	// Immediately become candidate, bypassing pre-vote and stickiness on peers.
+	n.leaderTransfer = true
 	n.state = Candidate
 	n.signalReset()
 }
