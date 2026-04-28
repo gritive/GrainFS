@@ -81,6 +81,13 @@ type DistributedBackend struct {
 	// See internal/cache/shardcache for the rationale (sharded LRU,
 	// lock-free counters, why we do not use an actor pattern here).
 	shardCache *shardcache.Cache
+
+	// vfsFixedVersion controls VFS-internal-bucket behavior:
+	// true (default) → PutObject for "__grainfs_vfs_*" uses fixed versionID
+	//   "current" so on-disk usage stays bounded to one copy per key.
+	// false → legacy behavior (fresh ULID per PUT). Operators can flip via
+	//   --backend-vfs-fixed-version=false to roll back without rebuild.
+	vfsFixedVersion atomic.Bool
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -107,7 +114,19 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 	}
 	initSig := make(chan struct{})
 	b.appliedSig.Store(&initSig)
+	b.vfsFixedVersion.Store(true) // default on; toggle via --backend-vfs-fixed-version=false
 	return b, nil
+}
+
+// SetVFSFixedVersionEnabled toggles the fixed-versionID behavior for
+// __grainfs_vfs_* buckets. See vfsFixedVersion field comment.
+func (b *DistributedBackend) SetVFSFixedVersionEnabled(on bool) {
+	b.vfsFixedVersion.Store(on)
+}
+
+// VFSFixedVersionEnabled reports the current toggle state.
+func (b *DistributedBackend) VFSFixedVersionEnabled() bool {
+	return b.vfsFixedVersion.Load()
 }
 
 // signalApplied atomically swaps the wait channel for a fresh one and closes
