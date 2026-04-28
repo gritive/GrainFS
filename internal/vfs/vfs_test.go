@@ -779,3 +779,78 @@ func TestGrainFile_BufPool_Reuse(t *testing.T) {
 	require.NoError(t, f2.Close())
 	assert.Nil(t, gf2.buf, "Close 후 grainFile.buf는 nil이어야 함 (pool 반환)")
 }
+
+func TestGrainFile_RandomWrite_HonorsPos(t *testing.T) {
+	// Iteration 3 fix — without this, every Write appended regardless of pos.
+	fs := setupFS(t)
+
+	f, err := fs.OpenFile("rand.bin", os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// Pre-fill with 16 bytes so we can overlay.
+	_, err = f.Write([]byte("AAAAAAAAAAAAAAAA"))
+	require.NoError(t, err)
+
+	// Overlay write at offset 4 with 4 bytes 'B'.
+	_, err = f.Seek(4, io.SeekStart)
+	require.NoError(t, err)
+	n, err := f.Write([]byte("BBBB"))
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+
+	// Overlay+extend at offset 14 with 6 bytes 'C' (4 overlay + 2 append).
+	_, err = f.Seek(14, io.SeekStart)
+	require.NoError(t, err)
+	n, err = f.Write([]byte("CCCCCC"))
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+
+	// Pos beyond end at offset 22 — gap of 2 zeros.
+	_, err = f.Seek(22, io.SeekStart)
+	require.NoError(t, err)
+	n, err = f.Write([]byte("DD"))
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+
+	require.NoError(t, f.Close())
+
+	// Read back.
+	r, err := fs.Open("rand.bin")
+	require.NoError(t, err)
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.Equal(t, "AAAABBBBAAAAAACCCCCC\x00\x00DD", string(got))
+}
+
+func TestGrainFile_RandomWrite_FixedSize(t *testing.T) {
+	// 4 KB writes at 100 random offsets in a 64 KB file MUST keep file ≤ 64 KB.
+	// Pre-fix: file would grow to 100 × 4 KB = 400 KB.
+	fs := setupFS(t)
+
+	f, err := fs.OpenFile("rand2.bin", os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	const fileSize = 64 * 1024
+	const blkSize = 4 * 1024
+	// Pre-fill 64 KB.
+	_, err = f.Write(make([]byte, fileSize))
+	require.NoError(t, err)
+
+	// 100 random 4 KB writes within [0, 60KB).
+	rng := rand.New(rand.NewSource(42))
+	for i := 0; i < 100; i++ {
+		off := int64(rng.Intn(fileSize - blkSize))
+		_, err = f.Seek(off, io.SeekStart)
+		require.NoError(t, err)
+		n, err := f.Write(make([]byte, blkSize))
+		require.NoError(t, err)
+		require.Equal(t, blkSize, n)
+	}
+	require.NoError(t, f.Close())
+
+	info, err := fs.Stat("rand2.bin")
+	require.NoError(t, err)
+	require.Equal(t, int64(fileSize), info.Size(),
+		"random writes must not inflate file size beyond initial extent")
+}

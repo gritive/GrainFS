@@ -525,11 +525,52 @@ func (f *grainFile) loadExisting() error {
 
 func (f *grainFile) Name() string { return f.name }
 
+// Write honors f.pos: appends when pos==len, overlays when pos<len, and
+// zero-pads + appends when pos>len. The previous version always appended
+// to buf regardless of pos, which inflated random-write workloads to size
+// proportional to write count rather than offset extent (NFS rand_write_4k
+// hit OOM in Phase 2 measurement before this fix).
 func (f *grainFile) Write(p []byte) (int, error) {
 	if f.buf == nil {
 		f.buf = getBuf()
 	}
-	return f.buf.Write(p)
+	cur := int64(f.buf.Len())
+	switch {
+	case f.pos == cur:
+		// Sequential append — original fast path.
+		n, err := f.buf.Write(p)
+		f.pos += int64(n)
+		return n, err
+	case f.pos < cur:
+		// Overlay write: mutate in-place up to current end, append remainder.
+		dst := f.buf.Bytes() // slice into buf's internal storage
+		end := f.pos + int64(len(p))
+		if end <= cur {
+			// Wholly within existing extent.
+			n := copy(dst[f.pos:end], p)
+			f.pos += int64(n)
+			return n, nil
+		}
+		// Partial overlay + tail extend.
+		head := int(cur - f.pos)
+		copy(dst[f.pos:cur], p[:head])
+		n2, err := f.buf.Write(p[head:])
+		f.pos = cur + int64(n2)
+		return head + n2, err
+	default:
+		// pos > cur: zero-pad gap, then append payload.
+		gap := f.pos - cur
+		// bytes.Buffer.Grow + zero fill via Write of zero slice.
+		if gap > 0 {
+			zeros := make([]byte, gap)
+			if _, err := f.buf.Write(zeros); err != nil {
+				return 0, err
+			}
+		}
+		n, err := f.buf.Write(p)
+		f.pos += int64(n)
+		return n, err
+	}
 }
 
 func (f *grainFile) Read(p []byte) (int, error) {

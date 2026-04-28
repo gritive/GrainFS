@@ -98,7 +98,7 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		node.SetNoOpCommand(noOp)
 	}
 
-	return &DistributedBackend{
+	b := &DistributedBackend{
 		root:     root,
 		db:       db,
 		node:     node,
@@ -106,8 +106,6 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		logger:   log.With().Str("component", "distributed-backend").Logger(),
 		registry: NewRegistry(),
 	}
-	initSig := make(chan struct{})
-	b.appliedSig.Store(&initSig)
 	b.vfsFixedVersion.Store(true) // default on; toggle via --backend-vfs-fixed-version=false
 	return b, nil
 }
@@ -121,29 +119,6 @@ func (b *DistributedBackend) SetVFSFixedVersionEnabled(on bool) {
 // VFSFixedVersionEnabled reports the current toggle state.
 func (b *DistributedBackend) VFSFixedVersionEnabled() bool {
 	return b.vfsFixedVersion.Load()
-}
-
-// signalApplied atomically swaps the wait channel for a fresh one and closes
-// the old one so all current waiters wake. Lock-free; close-before-swap is
-// not used because two concurrent signalApplied calls would otherwise close
-// the same channel.
-func (b *DistributedBackend) signalApplied() {
-	newCh := make(chan struct{})
-	old := b.appliedSig.Swap(&newCh)
-	close(*old)
-}
-
-// waitApplied blocks until lastApplied >= idx or ctx fires.
-func (b *DistributedBackend) waitApplied(ctx context.Context, idx uint64) error {
-	for b.lastApplied.Load() < idx {
-		ch := *b.appliedSig.Load()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
 }
 
 // SetShardCache configures the EC shard cache. Pass a cache built with
