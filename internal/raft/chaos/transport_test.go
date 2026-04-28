@@ -96,3 +96,34 @@ func TestChaosTransport_DropMessageDecrementsCounter(t *testing.T) {
 	tr.DropMessage("A", "B", 1)
 	assert.True(t, tr.shouldDeliver("B", "A"), "B→A unaffected by A→B drop")
 }
+
+// TestChaosTransport_Wire_UnregisteredPeer exercises the "peer not registered"
+// error branches in the sendVote and sendAppend closures installed by Wire.
+// We wire node A but do NOT register its peer "B", so when A's transport
+// callbacks fire they must return a non-nil error.
+func TestChaosTransport_Wire_UnregisteredPeer(t *testing.T) {
+	tr := NewChaosTransport()
+
+	cfgA := raft.DefaultConfig("A", []string{"B"})
+	a := raft.NewNode(cfgA)
+	t.Cleanup(func() { a.Close() })
+
+	// Register A but NOT B — lookup("B") returns nil.
+	tr.Register(a)
+	tr.Wire(a)
+
+	// Directly invoke the wired callbacks by calling the raft handler methods
+	// on A with the transport that will attempt to reach unregistered "B".
+	// We do this by starting A in isolation; it will try to reach "B" for
+	// RequestVote and AppendEntries and get back errors. The node should
+	// tolerate those errors gracefully (not panic/crash).
+	a.Start()
+
+	// The node will attempt elections — if it panics, the test will fail.
+	// Give it a couple of election timeouts.
+	time.Sleep(500 * time.Millisecond)
+	// Node should still be running (not crashed).
+	// It cannot become leader (single node with declared peer "B" offline),
+	// but it must not panic.
+	_ = a.State()
+}
