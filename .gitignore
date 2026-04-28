@@ -10,5 +10,6 @@ bin/grainfs
 benchmarks/report.json
 benchmarks/profiles/
 meta/
-raft/
+/raft/
 receipts/
+docs/superpowers/

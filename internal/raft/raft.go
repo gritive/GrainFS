@@ -223,6 +223,7 @@ type Node struct {
 	resetCh  chan struct{} // signals election timer reset
 	commitCh chan struct{} // signals applyLoop when commitIndex advances
 	stopped  bool
+	wg       sync.WaitGroup // tracks goroutines started by Start()
 
 	// transport callback for sending RPCs
 	sendRequestVote     func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
@@ -343,9 +344,10 @@ func (n *Node) SetTimeoutNowTransport(send func(peer string) error) {
 
 // Start begins the Raft node's main loop.
 func (n *Node) Start() {
-	go n.run()
-	go n.applyLoop()
-	go n.batcherLoop()
+	n.wg.Add(3)
+	go func() { defer n.wg.Done(); n.run() }()
+	go func() { defer n.wg.Done(); n.applyLoop() }()
+	go func() { defer n.wg.Done(); n.batcherLoop() }()
 }
 
 // Propose appends a command to the leader's log for replication.
@@ -454,6 +456,13 @@ func (n *Node) Stop() {
 		n.stopped = true
 		close(n.stopCh)
 	}
+}
+
+// Close stops the node and waits for all goroutines started by Start() and all
+// replicateTo goroutines to exit. Safe to call multiple times.
+func (n *Node) Close() {
+	n.Stop()
+	n.wg.Wait()
 }
 
 // State returns the node's current state.
@@ -691,7 +700,8 @@ func (n *Node) replicateToAll() {
 	n.mu.Unlock()
 
 	for _, peer := range peers {
-		go n.replicateTo(peer)
+		n.wg.Add(1)
+		go func(p string) { defer n.wg.Done(); n.replicateTo(p) }(peer)
 	}
 }
 

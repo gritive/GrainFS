@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.4.45] - 2026-04-29
+
+### Added
+
+- **Raft chaos test harness** (`internal/raft/chaos/`): PR #0 — in-memory fault injection 인프라. `ChaosTransport`가 `*raft.Node` 인스턴스 간 RPC를 동기 라우팅하며 세 가지 Driver 프리미티브를 제공:
+  - `PartitionPeer`/`HealPartition`: 노드 양방향 네트워크 차단/복구
+  - `DropMessage(from, to, n)`: 단방향 메시지 n건 드롭 (카운터 소진 후 정상 복귀)
+  - `RestartNode`: 노드 Close 후 동일 Config으로 재시작 (in-memory state reset)
+- **`Cluster` 하네스** (`chaos/cluster.go`): N-node 인메모리 클러스터. `WaitForLeader`, `CurrentLeader`, `NodeIDs`, `RestartNode` 제공. `t.Cleanup`으로 자동 Close.
+- **5가지 시나리오 테스트** (`chaos/scenarios/`): split_brain, leader_isolation, stale_log_elected (3개 — PR 1a `t.Skip`), wal_torn_write (passing — BadgerDB atomic 커버리지), mixed_version_rolling_upgrade baseline (passing).
+- **`Node.Close()` 고루틴 안전 종료** (`internal/raft/raft.go`): `replicateTo` 고루틴을 `wg`에 추적해 `Close()` 후 완전 종료 보장 (ghost goroutine 버그 수정).
+- **TOCTOU 수정** (`resolveDelivery`): `shouldDeliver` + `lookup` 두 번의 락 획득을 단일 `resolveDelivery`로 합쳐 파티션 상태 변경 레이스 제거.
+
 ## [0.0.4.44] - 2026-04-28
 
 ### Fixed
