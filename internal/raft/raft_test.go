@@ -1030,6 +1030,36 @@ func TestNode_Close_WaitsForGoroutines(t *testing.T) {
 	}
 }
 
+func TestHasQuorum_TrueWhenMajorityRecent(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.checkQuorumAcks = map[string]time.Time{
+		"n1": time.Now(),
+		"n2": {},
+	}
+	result := n.hasQuorum()
+	n.mu.Unlock()
+
+	assert.True(t, result, "n0(self)+n1=2 of 3 is majority")
+}
+
+func TestHasQuorum_FalseWhenNoPeersResponded(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.checkQuorumAcks = map[string]time.Time{
+		"n1": {},
+		"n2": {},
+	}
+	result := n.hasQuorum()
+	n.mu.Unlock()
+
+	assert.False(t, result, "only self=1 of 3, not majority")
+}
+
 func TestHandleRequestVote_PreVoteNoStateChange(t *testing.T) {
 	cfg := DefaultConfig("n0", []string{"n1", "n2"})
 	n := NewNode(cfg)

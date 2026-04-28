@@ -241,6 +241,9 @@ type Node struct {
 	// leader stickiness: time of last valid AppendEntries from a live leader
 	lastLeaderContact time.Time
 
+	// CheckQuorum: per-peer time of last AppendEntries reply (leader only)
+	checkQuorumAcks map[string]time.Time
+
 	// proposal waiters: log index -> channel signaled when committed (nil = success, error = failure)
 	waiters map[uint64]chan error
 
@@ -263,21 +266,22 @@ type Node struct {
 // If store is non-nil, it restores persisted state on creation.
 func NewNode(config Config, store ...LogStore) *Node {
 	n := &Node{
-		id:            config.ID,
-		state:         Follower,
-		config:        config,
-		log:           make([]LogEntry, 0),
-		firstIndex:    1, // Raft indices start at 1
-		nextIndex:     make(map[string]uint64),
-		matchIndex:    make(map[string]uint64),
-		applyCh:       make(chan LogEntry, 64),
-		stopCh:        make(chan struct{}),
-		resetCh:       make(chan struct{}, 1),
-		commitCh:      make(chan struct{}, 1),
-		waiters:       make(map[uint64]chan error),
-		proposalCh:    make(chan proposal, 4096),
-		replicationCh: make(chan struct{}, 1),
-		metrics:       adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
+		id:              config.ID,
+		state:           Follower,
+		config:          config,
+		log:             make([]LogEntry, 0),
+		firstIndex:      1, // Raft indices start at 1
+		nextIndex:       make(map[string]uint64),
+		matchIndex:      make(map[string]uint64),
+		checkQuorumAcks: make(map[string]time.Time),
+		applyCh:         make(chan LogEntry, 64),
+		stopCh:          make(chan struct{}),
+		resetCh:         make(chan struct{}, 1),
+		commitCh:        make(chan struct{}, 1),
+		waiters:         make(map[uint64]chan error),
+		proposalCh:      make(chan proposal, 4096),
+		replicationCh:   make(chan struct{}, 1),
+		metrics:         adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
 	}
 
 	if len(store) > 0 && store[0] != nil {
@@ -731,12 +735,36 @@ func (n *Node) runCandidate() {
 
 func (n *Node) initLeaderState() {
 	nextIdx := n.lastLogIdx() + 1
+	now := time.Now()
 	for _, peer := range n.config.Peers {
 		n.nextIndex[peer] = nextIdx
 		n.matchIndex[peer] = 0
+		// Seed with now so CheckQuorum doesn't fire before the first heartbeat
+		// round completes (grace period = 3×HeartbeatTimeout from now).
+		n.checkQuorumAcks[peer] = now
 	}
 	// Track self's matchIndex
 	n.matchIndex[n.id] = n.lastLogIdx()
+}
+
+// hasQuorum returns true if a majority of the cluster (including self) has
+// replied to at least one AppendEntries within 3×HeartbeatTimeout.
+// Must be called with n.mu held.
+func (n *Node) hasQuorum() bool {
+	if len(n.config.Peers) == 0 {
+		return true // single-node
+	}
+	threshold := time.Now().Add(-3 * n.config.HeartbeatTimeout)
+	total := len(n.config.Peers) + 1
+	majority := total/2 + 1
+
+	acks := 1 // self always counts
+	for _, peer := range n.config.Peers {
+		if last, ok := n.checkQuorumAcks[peer]; ok && last.After(threshold) {
+			acks++
+		}
+	}
+	return acks >= majority
 }
 
 func (n *Node) runLeader() {
@@ -882,6 +910,9 @@ func (n *Node) replicateTo(peer string) {
 	if n.state != Leader || n.currentTerm != term {
 		return
 	}
+
+	// Record peer responded (CheckQuorum: any reply counts, not just Success).
+	n.checkQuorumAcks[peer] = time.Now()
 
 	if reply.Success {
 		n.nextIndex[peer] = nextIdx + uint64(len(entries))
