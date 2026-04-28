@@ -13,3 +13,4 @@ benchmarks/results-*/
 meta/
 raft/
 receipts/
+benchmarks/scratch/
