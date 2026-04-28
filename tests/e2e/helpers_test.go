@@ -20,7 +20,6 @@ import (
 var (
 	testServerURL string
 	testS3Client  *s3.Client
-	testNFSPort   int
 )
 
 func TestMain(m *testing.M) {
@@ -37,10 +36,7 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(dir)
 
-	nfsPort := freePort()
-
 	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
-		"--nfs-port", fmt.Sprintf("%d", nfsPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort())}
 
 	// GRAINFS_DEDUP=1 opts into dedup. Default is OFF for the e2e suite because
@@ -69,9 +65,7 @@ func TestMain(m *testing.M) {
 	defer cmd.Process.Kill()
 
 	testServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-	testNFSPort = nfsPort
 	waitForPortM(port, 5*time.Second)
-	waitForPortM(nfsPort, 5*time.Second)
 
 	testS3Client = newS3Client(testServerURL)
 

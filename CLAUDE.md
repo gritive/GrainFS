@@ -17,7 +17,7 @@
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
 - 단일 바이너리: S3 + NFS + NBD + Web UI를 하나로 제공
 - 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(QUIC/Raft)
-- internal 하위 패키지: cluster, encrypt, erasure, metadata, metrics, nbd, nfsserver, raft, s3auth, server, storage, transport, vfs, volume
+- internal 하위 패키지: cluster, encrypt, erasure, metadata, metrics, nbd, raft, s3auth, server, storage, transport, vfs, volume
 
 ### 보안 규칙
 - S3 인증: access-key/secret-key 플래그로 HMAC-SHA256 서명 검증

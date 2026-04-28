@@ -120,7 +120,6 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 			"--secret-key", secretKey,
 			"--heal-receipt-window=1",
 			"--heal-receipt-gossip-interval=1s",
-			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 			"--snapshot-interval", "0",

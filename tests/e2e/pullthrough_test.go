@@ -34,7 +34,6 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 	upCmd := exec.Command(binary, "serve",
 		"--data", upDir,
 		"--port", fmt.Sprintf("%d", upPort),
-		"--nfs-port", "0",
 		"--nfs4-port", "0",
 	)
 	upCmd.Stdout = os.Stdout
@@ -65,7 +64,6 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 	localCmd := exec.Command(binary, "serve",
 		"--data", localDir,
 		"--port", fmt.Sprintf("%d", localPort),
-		"--nfs-port", "0",
 		"--nfs4-port", "0",
 		"--upstream", upEndpoint,
 	)
@@ -119,7 +117,6 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 	upCmd := exec.Command(binary, "serve",
 		"--data", upDir,
 		"--port", fmt.Sprintf("%d", upPort),
-		"--nfs-port", "0",
 		"--nfs4-port", "0",
 	)
 	upCmd.Stdout = os.Stdout
@@ -156,7 +153,6 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 	localCmd := exec.Command(binary, "serve",
 		"--data", localDir,
 		"--port", fmt.Sprintf("%d", localPort),
-		"--nfs-port", "0",
 		"--nfs4-port", "0",
 		"--upstream", upEndpoint,
 	)
