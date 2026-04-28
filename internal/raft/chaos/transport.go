@@ -10,13 +10,17 @@ import (
 // ChaosTransport routes RPC callbacks between in-memory raft.Node instances.
 // All Driver primitives (Partition, DropMessage) are gated here.
 type ChaosTransport struct {
-	mu    sync.Mutex
-	nodes map[string]*raft.Node
+	mu          sync.Mutex
+	nodes       map[string]*raft.Node
+	partitioned map[string]bool
 }
 
 // NewChaosTransport creates an empty transport. Register nodes before Wire.
 func NewChaosTransport() *ChaosTransport {
-	return &ChaosTransport{nodes: make(map[string]*raft.Node)}
+	return &ChaosTransport{
+		nodes:       make(map[string]*raft.Node),
+		partitioned: make(map[string]bool),
+	}
 }
 
 // Register adds a node to the routing table by its ID.
@@ -33,10 +37,43 @@ func (c *ChaosTransport) lookup(id string) *raft.Node {
 	return c.nodes[id]
 }
 
+// shouldDeliver returns true if a message from→to should be delivered.
+// False if either endpoint is partitioned.
+func (c *ChaosTransport) shouldDeliver(from, to string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.partitioned[from] || c.partitioned[to] {
+		return false
+	}
+	return true
+}
+
+// PartitionPeer blocks all messages in and out of nodeID.
+func (c *ChaosTransport) PartitionPeer(nodeID string) {
+	c.mu.Lock()
+	c.partitioned[nodeID] = true
+	c.mu.Unlock()
+}
+
+// HealPartition restores message delivery for nodeID.
+func (c *ChaosTransport) HealPartition(nodeID string) {
+	c.mu.Lock()
+	delete(c.partitioned, nodeID)
+	c.mu.Unlock()
+}
+
+// errPartitioned is returned by gated callbacks when a message is dropped.
+var errPartitioned = errors.New("chaos: partitioned")
+
 // Wire installs the chaos-routed transport callbacks on n. n must already be
-// Registered (so peers can route back to it).
+// Registered.
 func (c *ChaosTransport) Wire(n *raft.Node) {
+	from := n.ID()
+
 	sendVote := func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+		if !c.shouldDeliver(from, peer) {
+			return nil, errPartitioned
+		}
 		target := c.lookup(peer)
 		if target == nil {
 			return nil, errors.New("chaos: peer not registered: " + peer)
@@ -45,6 +82,9 @@ func (c *ChaosTransport) Wire(n *raft.Node) {
 	}
 
 	sendAppend := func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+		if !c.shouldDeliver(from, peer) {
+			return nil, errPartitioned
+		}
 		target := c.lookup(peer)
 		if target == nil {
 			return nil, errors.New("chaos: peer not registered: " + peer)
