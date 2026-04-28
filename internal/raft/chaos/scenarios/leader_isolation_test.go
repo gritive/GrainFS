@@ -24,7 +24,6 @@ import (
 //
 // Acceptance for PR 1a: remove the t.Skip line; this test must pass.
 func TestLeaderIsolation_CheckQuorumStepsDown(t *testing.T) {
-	t.Skip("FAILING: closed by PR 1a CheckQuorum — see docs/superpowers/plans/2026-04-29-raft-pr0-chaos-harness.md and design doc")
 
 	cluster := chaos.NewCluster(t, 3)
 	cluster.StartAll()
