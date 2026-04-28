@@ -1126,6 +1126,62 @@ func TestHandleAppendEntries_UpdatesLastLeaderContact(t *testing.T) {
 		"lastLeaderContact should not be in the future")
 }
 
+func TestHandleInstallSnapshot_UpdatesLastLeaderContact(t *testing.T) {
+	cfg := DefaultConfig("A", []string{"B"})
+	n := NewNode(cfg)
+
+	before := time.Now()
+	n.HandleInstallSnapshot(&InstallSnapshotArgs{Term: 1, LeaderID: "B"})
+	after := time.Now()
+
+	n.mu.Lock()
+	contact := n.lastLeaderContact
+	n.mu.Unlock()
+
+	assert.True(t, contact.After(before.Add(-time.Millisecond)),
+		"lastLeaderContact should be set on InstallSnapshot")
+	assert.True(t, contact.Before(after.Add(time.Millisecond)),
+		"lastLeaderContact should not be in the future")
+}
+
+func TestHasQuorum_TwoNodeCluster(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.checkQuorumAcks = map[string]time.Time{"n1": time.Now()}
+	withPeer := n.hasQuorum()
+	n.checkQuorumAcks = map[string]time.Time{"n1": {}}
+	withoutPeer := n.hasQuorum()
+	n.mu.Unlock()
+
+	assert.True(t, withPeer, "2-node: self+peer=2/2, quorum")
+	assert.False(t, withoutPeer, "2-node: only self=1/2, not quorum")
+}
+
+func TestHandleRequestVote_LeaderRejectsPreVote(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 3
+	n.mu.Unlock()
+
+	reply := n.HandleRequestVote(&RequestVoteArgs{
+		Term:        4,
+		CandidateID: "n1",
+		PreVote:     true,
+	})
+
+	assert.False(t, reply.VoteGranted, "leader must reject pre-vote")
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	assert.Equal(t, Leader, n.state, "leader state must not change on pre-vote")
+	assert.Equal(t, uint64(3), n.currentTerm, "term must not change on pre-vote")
+}
+
 func TestNode_Close_IsIdempotent(t *testing.T) {
 	cfg := DefaultConfig("node-1", nil)
 	n := NewNode(cfg)
