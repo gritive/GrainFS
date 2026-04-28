@@ -22,6 +22,6 @@ type Driver interface {
 	DropMessage(from, to string, n int)
 
 	// RestartNode performs Close() on the node, then NewNode + Start with the
-	// same Config and LogStore (BadgerDB persistence preserved).
+	// same Config. Log store state is NOT preserved — in-memory only.
 	RestartNode(nodeID string)
 }

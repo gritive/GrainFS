@@ -37,15 +37,27 @@ func (c *ChaosTransport) Register(n *raft.Node) {
 	c.mu.Unlock()
 }
 
-// lookup returns the registered node for an ID, or nil.
-func (c *ChaosTransport) lookup(id string) *raft.Node {
+// resolveDelivery atomically checks delivery policy AND returns the target node.
+// Returns (nil, false) if either endpoint is partitioned, a drop counter fires,
+// or the target is not registered. A single lock acquisition prevents a TOCTOU
+// race where PartitionPeer fires between the delivery check and the lookup.
+func (c *ChaosTransport) resolveDelivery(from, to string) (*raft.Node, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.nodes[id]
+	if c.partitioned[from] || c.partitioned[to] {
+		return nil, false
+	}
+	e := edge{from, to}
+	if cnt := c.dropCounts[e]; cnt > 0 {
+		c.dropCounts[e] = cnt - 1
+		return nil, false
+	}
+	target := c.nodes[to]
+	return target, target != nil
 }
 
 // shouldDeliver returns true if a message from→to should be delivered.
-// False if either endpoint is partitioned or there is a pending drop counter.
+// Used only in tests for targeted assertions. Wire callbacks use resolveDelivery.
 func (c *ChaosTransport) shouldDeliver(from, to string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -91,23 +103,17 @@ func (c *ChaosTransport) Wire(n *raft.Node) {
 	from := n.ID()
 
 	sendVote := func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-		if !c.shouldDeliver(from, peer) {
+		target, ok := c.resolveDelivery(from, peer)
+		if !ok {
 			return nil, errPartitioned
-		}
-		target := c.lookup(peer)
-		if target == nil {
-			return nil, errors.New("chaos: peer not registered: " + peer)
 		}
 		return target.HandleRequestVote(args), nil
 	}
 
 	sendAppend := func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-		if !c.shouldDeliver(from, peer) {
+		target, ok := c.resolveDelivery(from, peer)
+		if !ok {
 			return nil, errPartitioned
-		}
-		target := c.lookup(peer)
-		if target == nil {
-			return nil, errors.New("chaos: peer not registered: " + peer)
 		}
 		return target.HandleAppendEntries(args), nil
 	}

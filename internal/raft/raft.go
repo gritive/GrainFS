@@ -458,9 +458,8 @@ func (n *Node) Stop() {
 	}
 }
 
-// Close stops the node and waits for all goroutines started by Start() to exit.
-// Safe to call multiple times. Per-peer replicateTo goroutines are NOT tracked;
-// they exit on next loop iteration after stopCh closes.
+// Close stops the node and waits for all goroutines started by Start() and all
+// replicateTo goroutines to exit. Safe to call multiple times.
 func (n *Node) Close() {
 	n.Stop()
 	n.wg.Wait()
@@ -701,7 +700,8 @@ func (n *Node) replicateToAll() {
 	n.mu.Unlock()
 
 	for _, peer := range peers {
-		go n.replicateTo(peer)
+		n.wg.Add(1)
+		go func(p string) { defer n.wg.Done(); n.replicateTo(p) }(peer)
 	}
 }
 

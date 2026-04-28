@@ -10,6 +10,8 @@ import (
 
 // Cluster is an in-memory N-node Raft test harness. It owns the transport,
 // node configs, and lifecycle. Implements Driver.
+var _ Driver = (*Cluster)(nil)
+
 type Cluster struct {
 	t         *testing.T
 	transport *ChaosTransport
