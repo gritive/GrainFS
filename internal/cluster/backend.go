@@ -558,17 +558,23 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
 
-	// Versioning is unconditional: every PUT gets a fresh ULID so prior versions
-	// remain addressable via GetObjectVersion / ListObjectVersions. Bucket-level
-	// versioning-state gating is a later slice.
+	// VFS internal buckets ("__grainfs_vfs_*") are owned exclusively by the
+	// VFS layer; multi-versioning has no meaning there and accumulates disk
+	// usage proportional to NFS WRITE RPC count (see docs/superpowers/specs/
+	// 2026-04-28-vfs-write-amp-design.md). Use a fixed versionID so the on-
+	// disk path is overwritten in place. EC is also disabled for these
+	// buckets: a fixed versionID combined with EC's RingVersion-keyed shard
+	// placement would leak stale shards on ring topology changes.
 	versionID := newVersionID()
-
-	// Phase 18 Cluster EC: split across k+m nodes when the cluster is large
-	// enough. 1-2 node clusters fall through to the N× replication path.
-	if b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil {
-		return b.putObjectEC(bucket, key, versionID, data, contentType)
+	useEC := b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil
+	if storage.IsVFSBucket(bucket) && b.vfsFixedVersion.Load() {
+		versionID = "current"
+		useEC = false
 	}
 
+	if useEC {
+		return b.putObjectEC(bucket, key, versionID, data, contentType)
+	}
 	return b.putObjectNx(bucket, key, versionID, data, contentType)
 }
 
