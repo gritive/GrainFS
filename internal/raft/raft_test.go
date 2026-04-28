@@ -1030,6 +1030,52 @@ func TestNode_Close_WaitsForGoroutines(t *testing.T) {
 	}
 }
 
+func TestHandleRequestVote_PreVoteNoStateChange(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.lastLeaderContact = time.Now()
+	n.mu.Unlock()
+
+	reply := n.HandleRequestVote(&RequestVoteArgs{
+		Term:        1,
+		CandidateID: "n1",
+		PreVote:     true,
+	})
+
+	assert.False(t, reply.VoteGranted, "pre-vote must be rejected when leader is recent")
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	assert.Equal(t, uint64(0), n.currentTerm, "pre-vote must not update term")
+	assert.Equal(t, Follower, n.state, "pre-vote must not change state")
+	assert.Equal(t, "", n.votedFor, "pre-vote must not set votedFor")
+}
+
+func TestHandleRequestVote_LeaderStickyRejectsHigherTerm(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.currentTerm = 5
+	n.lastLeaderContact = time.Now()
+	n.mu.Unlock()
+
+	reply := n.HandleRequestVote(&RequestVoteArgs{
+		Term:        6,
+		CandidateID: "n1",
+		PreVote:     false,
+	})
+
+	assert.False(t, reply.VoteGranted, "leader stickiness must reject higher-term vote")
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	assert.Equal(t, uint64(5), n.currentTerm,
+		"leader stickiness must suppress term update from rogue node")
+}
+
 func TestHandleAppendEntries_UpdatesLastLeaderContact(t *testing.T) {
 	cfg := DefaultConfig("A", []string{"B"})
 	n := NewNode(cfg)

@@ -170,6 +170,7 @@ type RequestVoteArgs struct {
 	CandidateID  string
 	LastLogIndex uint64
 	LastLogTerm  uint64
+	PreVote      bool // true = pre-vote round; receiver must not update state/term
 }
 
 // RequestVoteReply is the response to a RequestVote RPC.
@@ -918,14 +919,40 @@ func (n *Node) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	// Pre-vote path: assess candidacy without mutating any state.
+	// The caller wants to know "would you vote for me?" before committing to
+	// incrementing its term. We must not change currentTerm, votedFor, or state.
+	if args.PreVote {
+		reply := &RequestVoteReply{Term: n.currentTerm}
+		// Reject if we heard from a leader recently — cluster is healthy.
+		if time.Since(n.lastLeaderContact) < n.config.ElectionTimeout {
+			return reply
+		}
+		reply.VoteGranted = args.Term > n.currentTerm &&
+			n.isLogUpToDate(args.LastLogIndex, args.LastLogTerm)
+		return reply
+	}
+
 	reply := &RequestVoteReply{Term: n.currentTerm}
 
-	// Reply false if term < currentTerm
+	// Reply false if term < currentTerm.
 	if args.Term < n.currentTerm {
 		return reply
 	}
 
-	// If RPC request's term > currentTerm, update and convert to follower
+	// Leader stickiness: reject RequestVote (and suppress term update) if we
+	// heard from a live leader within ElectionTimeout. This blocks a
+	// partition-returning node from disrupting the cluster even if it bypassed
+	// pre-vote (e.g. direct RPC injection).
+	//
+	// Critical: do NOT update currentTerm here. Updating would cause the leader
+	// to see our next AppendEntriesReply with a higher term and step down —
+	// the exact disruption we're preventing.
+	if time.Since(n.lastLeaderContact) < n.config.ElectionTimeout {
+		return reply
+	}
+
+	// If RPC request's term > currentTerm, update and convert to follower.
 	if args.Term > n.currentTerm {
 		n.currentTerm = args.Term
 		n.state = Follower
@@ -936,7 +963,7 @@ func (n *Node) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	reply.Term = n.currentTerm
 
 	// Grant vote if we haven't voted or already voted for this candidate,
-	// and candidate's log is at least as up-to-date as ours
+	// and candidate's log is at least as up-to-date as ours.
 	if (n.votedFor == "" || n.votedFor == args.CandidateID) && n.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		n.votedFor = args.CandidateID
 		n.persistState()
