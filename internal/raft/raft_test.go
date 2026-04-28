@@ -1007,3 +1007,35 @@ func TestHandleInstallSnapshot_AbortsWaiters(t *testing.T) {
 	assert.ErrorIs(t, <-ch1, ErrProposalFailed)
 	assert.ErrorIs(t, <-ch2, ErrProposalFailed)
 }
+
+func TestNode_Close_WaitsForGoroutines(t *testing.T) {
+	cfg := DefaultConfig("node-1", nil)
+	n := NewNode(cfg)
+	n.Start()
+
+	// Give Start a moment so all goroutines actually launch.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		n.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// success
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not return within 2s — goroutines leaked or wg untracked")
+	}
+}
+
+func TestNode_Close_IsIdempotent(t *testing.T) {
+	cfg := DefaultConfig("node-1", nil)
+	n := NewNode(cfg)
+	n.Start()
+	time.Sleep(50 * time.Millisecond)
+	n.Close()
+	// Second Close must not panic on double wg.Wait or double close(stopCh).
+	n.Close()
+}
