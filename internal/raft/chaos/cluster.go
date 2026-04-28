@@ -126,6 +126,21 @@ func (c *Cluster) NodeIDs() []string {
 func (c *Cluster) PartitionPeer(nodeID string)        { c.transport.PartitionPeer(nodeID) }
 func (c *Cluster) HealPartition(nodeID string)        { c.transport.HealPartition(nodeID) }
 func (c *Cluster) DropMessage(from, to string, n int) { c.transport.DropMessage(from, to, n) }
+func (c *Cluster) SetRequestVoteHook(toNodeID string, fn RequestVoteHookFn) {
+	c.transport.SetRequestVoteHook(toNodeID, fn)
+}
+
+// InjectRequestVote calls HandleRequestVote directly on targetNodeID,
+// bypassing all chaos transport gating (partition, drop, hooks).
+// Used to test disrupting-prevention at the handler level.
+func (c *Cluster) InjectRequestVote(targetNodeID string, args *raft.RequestVoteArgs) *raft.RequestVoteReply {
+	c.t.Helper()
+	n, ok := c.nodes[targetNodeID]
+	if !ok {
+		c.t.Fatalf("InjectRequestVote: unknown node %q", targetNodeID)
+	}
+	return n.HandleRequestVote(args)
+}
 
 // RestartNode performs Close() on the named node, then constructs a fresh
 // *raft.Node with the original Config, re-wires the transport, and Starts it.
