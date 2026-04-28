@@ -1,6 +1,7 @@
 package chaos
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,6 +96,47 @@ func TestChaosTransport_DropMessageDecrementsCounter(t *testing.T) {
 	// DropMessage is directional — does not affect B→A.
 	tr.DropMessage("A", "B", 1)
 	assert.True(t, tr.shouldDeliver("B", "A"), "B→A unaffected by A→B drop")
+}
+
+func TestChaosTransport_RequestVoteHook_DropsPreVote(t *testing.T) {
+	tr := NewChaosTransport()
+
+	cfgA := raft.DefaultConfig("A", []string{"B", "C"})
+	cfgB := raft.DefaultConfig("B", []string{"A", "C"})
+	cfgC := raft.DefaultConfig("C", []string{"A", "B"})
+	a := raft.NewNode(cfgA)
+	b := raft.NewNode(cfgB)
+	c := raft.NewNode(cfgC)
+	t.Cleanup(func() { a.Close(); b.Close(); c.Close() })
+
+	tr.Register(a)
+	tr.Register(b)
+	tr.Register(c)
+	tr.Wire(a)
+	tr.Wire(b)
+	tr.Wire(c)
+
+	var dropped atomic.Int64
+	// Simulate C as an "old" node that silently drops incoming PreVote RPCs.
+	tr.SetRequestVoteHook("C", func(from, to string, args *raft.RequestVoteArgs) (*raft.RequestVoteArgs, bool) {
+		if args.PreVote {
+			dropped.Add(1)
+			return nil, true
+		}
+		return args, false
+	})
+
+	a.Start()
+	b.Start()
+	c.Start()
+
+	// A and B can form a pre-vote majority (2/3) between themselves;
+	// cluster must still elect a leader despite C dropping all pre-votes.
+	require.Eventually(t, func() bool {
+		return a.IsLeader() || b.IsLeader() || c.IsLeader()
+	}, 5*time.Second, 50*time.Millisecond, "cluster must elect leader with one pre-vote-dropping node")
+
+	assert.Greater(t, dropped.Load(), int64(0), "hook must have fired at least once")
 }
 
 // TestChaosTransport_Wire_UnregisteredPeer exercises the "peer not registered"
