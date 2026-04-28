@@ -1,8 +1,10 @@
 package cluster
 
 import (
+	"bytes"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -75,4 +77,47 @@ func TestPutObject_NormalBucket_StillUsesULID(t *testing.T) {
 	o2, err := b.PutObject(bucket, "k", strings.NewReader("b"), "application/octet-stream")
 	require.NoError(t, err)
 	require.NotEqual(t, o1.VersionID, o2.VersionID, "non-VFS buckets must keep multi-version behavior")
+}
+
+func TestPutObject_VFSBucket_ConcurrentSameKeyAtomicLastWriterWins(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	bucket := storage.VFSBucketPrefix + "concurrent"
+	require.NoError(t, b.CreateBucket(bucket))
+
+	const writers = 32
+	const payloadKB = 64
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			payload := bytes.Repeat([]byte{byte('A' + (i % 26))}, payloadKB*1024)
+			_, err := b.PutObject(bucket, "shared.bin", bytes.NewReader(payload), "application/octet-stream")
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatalf("concurrent PutObject error: %v", e)
+	}
+
+	// Result must be one of the 32 payloads, no torn write.
+	rc, _, err := b.GetObject(bucket, "shared.bin")
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	require.NoError(t, err)
+
+	require.Equal(t, payloadKB*1024, len(got),
+		"object size must match a complete payload (no torn write)")
+	first := got[0]
+	for j, by := range got {
+		require.Equalf(t, first, by,
+			"byte %d differs (%c vs %c) — torn write detected", j, by, first)
+	}
 }

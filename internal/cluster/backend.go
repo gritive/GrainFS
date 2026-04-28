@@ -592,7 +592,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
-	if err := os.WriteFile(objPath, data, 0o644); err != nil {
+	if err := writeFileAtomic(objPath, data); err != nil {
 		return nil, fmt.Errorf("write object: %w", err)
 	}
 
@@ -2148,6 +2148,39 @@ func (b *DistributedBackend) bucketDir(bucket string) string {
 // sibling ".obj" directory.
 func (b *DistributedBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
+}
+
+// writeFileAtomic writes data to path using a temp+rename recipe. The temp
+// file lives in the same directory as the target so rename is a metadata-
+// only operation on the same filesystem. Caller must have ensured the
+// parent directory exists (MkdirAll). On error the temp file is best-effort
+// removed.
+//
+// This is the lock-free serialization primitive for VFS bucket fixed-
+// versionID writes: concurrent writers race their renames; POSIX rename
+// atomicity yields last-writer-wins semantics with no torn intermediate
+// state visible to readers.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename tmp→target: %w", err)
+	}
+	return nil
 }
 
 // objectPathV returns the version-addressable local path for a full-object copy
