@@ -125,4 +125,24 @@ func (c *Cluster) PartitionPeer(nodeID string)        { c.transport.PartitionPee
 func (c *Cluster) HealPartition(nodeID string)        { c.transport.HealPartition(nodeID) }
 func (c *Cluster) DropMessage(from, to string, n int) { c.transport.DropMessage(from, to, n) }
 
-// RestartNode is implemented in Task 7.
+// RestartNode performs Close() on the named node, then constructs a fresh
+// *raft.Node with the original Config, re-wires the transport, and Starts it.
+// Per-node BadgerDB stores are not preserved (in-memory state only). If a
+// scenario needs durable restart, extend NewCluster to accept a store factory.
+func (c *Cluster) RestartNode(nodeID string) {
+	c.t.Helper()
+
+	old, ok := c.nodes[nodeID]
+	if !ok {
+		c.t.Fatalf("RestartNode: unknown node %q", nodeID)
+	}
+
+	old.Close()
+
+	cfg := c.configs[nodeID]
+	newNode := raft.NewNode(cfg)
+	c.nodes[nodeID] = newNode
+	c.transport.Register(newNode) // overwrite registry entry
+	c.transport.Wire(newNode)
+	newNode.Start()
+}

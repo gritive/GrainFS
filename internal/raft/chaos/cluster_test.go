@@ -24,3 +24,18 @@ func TestCluster_ThreeNodeElectsLeader(t *testing.T) {
 	}
 	assert.Equal(t, 1, leaderCount, "exactly one leader")
 }
+
+func TestCluster_RestartLeaderElectsNew(t *testing.T) {
+	cluster := NewCluster(t, 3)
+	cluster.StartAll()
+
+	leader := cluster.WaitForLeader(5 * time.Second)
+	require.NotNil(t, leader)
+	oldLeaderID := leader.ID()
+
+	cluster.RestartNode(oldLeaderID)
+
+	require.Eventually(t, func() bool {
+		return cluster.CurrentLeader() != nil
+	}, 5*time.Second, 50*time.Millisecond, "no leader after restart")
+}
