@@ -95,6 +95,8 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 }
 
 func (c *testCluster) nodeByID(id string) *Node {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, n := range c.nodes {
 		if n.ID() == id {
 			return n
@@ -1028,6 +1030,156 @@ func TestNode_Close_WaitsForGoroutines(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close() did not return within 2s — goroutines leaked or wg untracked")
 	}
+}
+
+func TestHasQuorum_TrueWhenMajorityRecent(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.checkQuorumAcks = map[string]time.Time{
+		"n1": time.Now(),
+		"n2": {},
+	}
+	result := n.hasQuorum()
+	n.mu.Unlock()
+
+	assert.True(t, result, "n0(self)+n1=2 of 3 is majority")
+}
+
+func TestHasQuorum_FalseWhenNoPeersResponded(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.checkQuorumAcks = map[string]time.Time{
+		"n1": {},
+		"n2": {},
+	}
+	result := n.hasQuorum()
+	n.mu.Unlock()
+
+	assert.False(t, result, "only self=1 of 3, not majority")
+}
+
+func TestHandleRequestVote_PreVoteNoStateChange(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.lastLeaderContact = time.Now()
+	n.mu.Unlock()
+
+	reply := n.HandleRequestVote(&RequestVoteArgs{
+		Term:        1,
+		CandidateID: "n1",
+		PreVote:     true,
+	})
+
+	assert.False(t, reply.VoteGranted, "pre-vote must be rejected when leader is recent")
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	assert.Equal(t, uint64(0), n.currentTerm, "pre-vote must not update term")
+	assert.Equal(t, Follower, n.state, "pre-vote must not change state")
+	assert.Equal(t, "", n.votedFor, "pre-vote must not set votedFor")
+}
+
+func TestHandleRequestVote_LeaderStickyRejectsHigherTerm(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.currentTerm = 5
+	n.lastLeaderContact = time.Now()
+	n.mu.Unlock()
+
+	reply := n.HandleRequestVote(&RequestVoteArgs{
+		Term:        6,
+		CandidateID: "n1",
+		PreVote:     false,
+	})
+
+	assert.False(t, reply.VoteGranted, "leader stickiness must reject higher-term vote")
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	assert.Equal(t, uint64(5), n.currentTerm,
+		"leader stickiness must suppress term update from rogue node")
+}
+
+func TestHandleAppendEntries_UpdatesLastLeaderContact(t *testing.T) {
+	cfg := DefaultConfig("A", []string{"B"})
+	n := NewNode(cfg)
+
+	before := time.Now()
+	n.HandleAppendEntries(&AppendEntriesArgs{Term: 1, LeaderID: "B"})
+	after := time.Now()
+
+	n.mu.Lock()
+	contact := n.lastLeaderContact
+	n.mu.Unlock()
+
+	assert.True(t, contact.After(before.Add(-time.Millisecond)),
+		"lastLeaderContact should be set on AppendEntries")
+	assert.True(t, contact.Before(after.Add(time.Millisecond)),
+		"lastLeaderContact should not be in the future")
+}
+
+func TestHandleInstallSnapshot_UpdatesLastLeaderContact(t *testing.T) {
+	cfg := DefaultConfig("A", []string{"B"})
+	n := NewNode(cfg)
+
+	before := time.Now()
+	n.HandleInstallSnapshot(&InstallSnapshotArgs{Term: 1, LeaderID: "B"})
+	after := time.Now()
+
+	n.mu.Lock()
+	contact := n.lastLeaderContact
+	n.mu.Unlock()
+
+	assert.True(t, contact.After(before.Add(-time.Millisecond)),
+		"lastLeaderContact should be set on InstallSnapshot")
+	assert.True(t, contact.Before(after.Add(time.Millisecond)),
+		"lastLeaderContact should not be in the future")
+}
+
+func TestHasQuorum_TwoNodeCluster(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.checkQuorumAcks = map[string]time.Time{"n1": time.Now()}
+	withPeer := n.hasQuorum()
+	n.checkQuorumAcks = map[string]time.Time{"n1": {}}
+	withoutPeer := n.hasQuorum()
+	n.mu.Unlock()
+
+	assert.True(t, withPeer, "2-node: self+peer=2/2, quorum")
+	assert.False(t, withoutPeer, "2-node: only self=1/2, not quorum")
+}
+
+func TestHandleRequestVote_LeaderRejectsPreVote(t *testing.T) {
+	cfg := DefaultConfig("n0", []string{"n1", "n2"})
+	n := NewNode(cfg)
+
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 3
+	n.mu.Unlock()
+
+	reply := n.HandleRequestVote(&RequestVoteArgs{
+		Term:        4,
+		CandidateID: "n1",
+		PreVote:     true,
+	})
+
+	assert.False(t, reply.VoteGranted, "leader must reject pre-vote")
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	assert.Equal(t, Leader, n.state, "leader state must not change on pre-vote")
+	assert.Equal(t, uint64(3), n.currentTerm, "term must not change on pre-vote")
 }
 
 func TestNode_Close_IsIdempotent(t *testing.T) {
