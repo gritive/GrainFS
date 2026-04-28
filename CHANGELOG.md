@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.4.46] - 2026-04-29
+
+### Added
+
+- **VFS write-amplification fix — Phase 1** (`internal/cluster/backend.go`, PR #77): `__grainfs_vfs_*` 버킷의 `PutObject`가 매번 새 ULID versionID를 생성해 NFS WRITE RPC 수 비례로 디스크가 무한 증가하던 문제 수정. 같은 key에 대한 덮어쓰기가 on-disk 1카피로 수렴.
+  - **`vfsFixedVersion` 토글** (`atomic.Bool`, 기본 `true`): VFS 버킷에 고정 versionID `"current"` 사용. `--backend-vfs-fixed-version=false`로 rollback 가능.
+  - **EC 비활성화 for VFS 버킷**: 고정 versionID + EC RingVersion 조합이 stale shard 누수를 유발할 수 있어 VFS 버킷은 N× 복제 경로로만 작동.
+  - **`writeFileAtomic` (temp+rename)**: `putObjectNx`가 `os.WriteFile` 대신 임시 파일 생성 후 rename. POSIX rename 원자성으로 부분 쓰기 노출 없음; 동시 write 레이스는 last-writer-wins 보장.
+- **`internal/storage.VFSBucketPrefix` / `IsVFSBucket()`**: 순환 의존성 없이 모든 레이어에서 VFS 버킷 판별 가능.
+- **`grainFile.Write` pos 정합성 수정** (`internal/vfs/vfs.go`): `f.pos`를 무시하고 항상 buf에 append하던 구현을 pos 기반 in-place overlay(pos<len), extend(pos==len), zero-pad(pos>len) 3분기로 교체. Phase 2 rand_write_4k 측정에서 OOM 유발하던 O(n×writes) 메모리 팽창 해소.
+- **테스트**: `internal/cluster/backend_vfs_test.go` — 고정 versionID 버전 누적 없음, 토글 on/off, 일반 버킷 ULID 유지, 32 고루틴 동시 write + 손상 없음 검증. `internal/storage/bucket_test.go` — `IsVFSBucket` / prefix 상수 불변성.
+
 ## [0.0.4.45] - 2026-04-29
 
 ### Added
