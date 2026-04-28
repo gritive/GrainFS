@@ -67,7 +67,12 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 	if nfsPort > 0 {
 		fmt.Println("WARNING: NFS null auth enabled — all NFS access is unauthenticated")
 		const defaultVolName = "default"
-		const defaultVolSize = 1024 * 1024 * 1024 // 1G
+		// Default NFS volume size. nbdVolumeSize에 같은 값을 재활용해 NFS와 NBD가
+		// 동일 volume을 공유하더라도 큰 쪽이 적용되도록 한다. 0이면 1G 안전 default.
+		defaultVolSize := nbdVolumeSize
+		if defaultVolSize <= 0 {
+			defaultVolSize = 1024 * 1024 * 1024 // 1G
+		}
 
 		if _, err := volMgr.Get(defaultVolName); err != nil {
 			if _, err := volMgr.Create(defaultVolName, defaultVolSize); err != nil {
