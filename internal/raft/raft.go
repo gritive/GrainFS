@@ -788,6 +788,17 @@ func (n *Node) runLeader() {
 		case <-n.stopCh:
 			return
 		case <-ticker.C:
+			n.mu.Lock()
+			if !n.hasQuorum() {
+				// Cannot hear from majority: step down rather than accepting
+				// Propose calls that will never commit.
+				n.state = Follower
+				n.leaderID = ""
+				n.mu.Unlock()
+				n.signalReset()
+				return
+			}
+			n.mu.Unlock()
 			n.replicateToAll()
 			if !n.gcRunning.Swap(true) {
 				go func() {
