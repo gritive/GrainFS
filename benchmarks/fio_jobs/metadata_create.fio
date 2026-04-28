@@ -1,0 +1,14 @@
+[global]
+ioengine=psync
+direct=0
+group_reporting=1
+runtime=10
+time_based=1
+ramp_time=2
+nrfiles=100
+
+[metadata-create]
+rw=write
+bs=4k
+size=4k
+numjobs=2

@@ -1,0 +1,13 @@
+[global]
+ioengine=psync
+direct=0
+group_reporting=1
+runtime=10
+time_based=1
+ramp_time=2
+
+[seq-write-64k]
+rw=write
+bs=64k
+size=128m
+numjobs=2

@@ -1,0 +1,14 @@
+[global]
+ioengine=psync
+direct=0
+group_reporting=1
+runtime=10
+time_based=1
+ramp_time=2
+
+[seq-read-1m]
+rw=read
+bs=1m
+size=128m
+numjobs=2
+pre_read=1
