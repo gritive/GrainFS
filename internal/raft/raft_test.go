@@ -1030,6 +1030,24 @@ func TestNode_Close_WaitsForGoroutines(t *testing.T) {
 	}
 }
 
+func TestHandleAppendEntries_UpdatesLastLeaderContact(t *testing.T) {
+	cfg := DefaultConfig("A", []string{"B"})
+	n := NewNode(cfg)
+
+	before := time.Now()
+	n.HandleAppendEntries(&AppendEntriesArgs{Term: 1, LeaderID: "B"})
+	after := time.Now()
+
+	n.mu.Lock()
+	contact := n.lastLeaderContact
+	n.mu.Unlock()
+
+	assert.True(t, contact.After(before.Add(-time.Millisecond)),
+		"lastLeaderContact should be set on AppendEntries")
+	assert.True(t, contact.Before(after.Add(time.Millisecond)),
+		"lastLeaderContact should not be in the future")
+}
+
 func TestNode_Close_IsIdempotent(t *testing.T) {
 	cfg := DefaultConfig("node-1", nil)
 	n := NewNode(cfg)

@@ -237,6 +237,9 @@ type Node struct {
 	// leader tracking (observable from outside)
 	leaderID string
 
+	// leader stickiness: time of last valid AppendEntries from a live leader
+	lastLeaderContact time.Time
+
 	// proposal waiters: log index -> channel signaled when committed (nil = success, error = failure)
 	waiters map[uint64]chan error
 
@@ -963,6 +966,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	}
 	n.state = Follower
 	n.leaderID = args.LeaderID
+	n.lastLeaderContact = time.Now()
 	n.signalReset()
 
 	reply.Term = n.currentTerm
@@ -1148,6 +1152,7 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	}
 	n.state = Follower
 	n.leaderID = args.LeaderID
+	n.lastLeaderContact = time.Now()
 	n.signalReset()
 
 	reply.Term = n.currentTerm
