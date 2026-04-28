@@ -2,8 +2,9 @@
 
 - **Date**: 2026-04-28
 - **Branch**: bench/grainfs-vs-minio
-- **Status**: Draft (awaiting user review)
+- **Status**: Draft → revised after eng review (2026-04-28)
 - **Related**: NFS vs Ganesha 벤치마크 (Phase 19+)
+- **Eng review**: 2026-04-28 — 결정사항 11건 (Task #15–#26 참조). 주요 변경: cache layer GrainVFS → nfsserver, Phase 분리(A 단독 → B 후속), go-nfs fork 필요, lock-free temp+rename, cache memory cap, COMMIT 처리.
 
 ## 1. Background
 
@@ -266,3 +267,33 @@ type grainFile struct {
 3. 새 unit/E2E 테스트 통과
 4. 기존 vfs_test.go, backend_test.go 회귀 없음
 5. fio sweep 결과 ganesha 대비 grainfs 성능 비교 가능 상태로 진입
+
+---
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 11 issues identified, all converted to follow-up tasks (Task #15–#26) |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | n/a (backend-only) |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | n/a |
+
+- **OUTSIDE VOICE**: Codex 인증 실패 (gpt-5-codex ChatGPT 계정 미지원). Claude subagent fallback 실행. 7개 추가 blind spot 발견 (layer choice, sequencing, EC RingVersion, ListVersions cleanup, S3 clobber, flush failure handling, accounting drift).
+- **CROSS-MODEL TENSION**: 7건 — 사용자 모두 outside voice 채택. Architecture pivot: cache layer를 GrainVFS에서 nfsserver wrap으로 이동.
+- **UNRESOLVED**: 0
+- **VERDICT**: PLAN_REVISED — Eng Review가 11개 follow-up task 식별 → spec 본문 업데이트 후 implementation plan(/writing-plans) 진행. Phase 1 (Approach A 단독 + feature flag) 먼저 출시, Phase 2 (cache at nfsserver layer) 후속.
+
+### Completion summary
+
+- Step 0 Scope Challenge: 스코프 유지, 단 Phase 분리 결정
+- Architecture: 4 issues resolved → Task #15, #16, #17, #18, #19, #20
+- Code Quality: 1 issue resolved → Task #21
+- Test Review: 17 tests + REGRESSION-CRITICAL 3건 → Task #22
+- Performance: 1 issue resolved → Task #23
+- Outside Voice: ran (claude subagent fallback)
+- Cross-model tension: 2 critical resolved (#24, #25) + batch 5건 (#26)
+- TODOS.md: deferred items captured in tasks
+- Failure modes: silent flush failure → Task #26에 freeze 정책
+- Lake Score: 9/9 (모든 결정에서 complete option 채택)

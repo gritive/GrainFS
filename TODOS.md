@@ -45,6 +45,7 @@
 
 - [ ] Redis 프로토콜 지원 (RESP, Streaming, Pub/Sub 이벤트)
 - [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원
+- [ ] **S3 Tables API 지원** — AWS S3 Tables (Iceberg-backed table storage). `CreateTable`/`GetTable`/`DeleteTable`/`ListTables` + namespace 관리 + Iceberg metadata catalog 통합. analytics/lakehouse 워크로드 (Spark/Trino/Athena) 호환 목표.
 
 ## Phase 20: Operations & Onboarding
 
