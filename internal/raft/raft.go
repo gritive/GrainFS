@@ -239,7 +239,9 @@ type Node struct {
 	// leader tracking (observable from outside)
 	leaderID string
 
-	// leader stickiness: time of last valid AppendEntries from a live leader
+	// leader stickiness: time of last valid AppendEntries from a live leader.
+	// Only followers update this; the leader never refreshes it (it sends AE, not receives).
+	// The leader relies on pre-vote and CheckQuorum for self-defense, not stickiness.
 	lastLeaderContact time.Time
 
 	// CheckQuorum: per-peer time of last AppendEntries reply (leader only)
@@ -642,8 +644,12 @@ func (n *Node) runPreVote() bool {
 		}
 	}
 
-	// M2: if a peer carries a higher term, there's a live leader we're unaware
-	// of. Reset our timer so we don't immediately retry.
+	// M2: if a peer carries a higher term, there may be a live leader we are
+	// unaware of. Signal reset so we don't spin-retry immediately; the real
+	// election (if we proceed) will fail on term mismatch and the next
+	// AppendEntries from the actual leader will update our term naturally.
+	// (Returning false here would create a liveness issue: the node stays at
+	// its stale term and can never win pre-vote until it hears from the leader.)
 	n.mu.Lock()
 	if maxReplyTerm > n.currentTerm {
 		n.signalReset()

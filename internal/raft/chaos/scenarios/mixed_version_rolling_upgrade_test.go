@@ -23,12 +23,16 @@ import (
 func TestMixedVersionRollingUpgrade_PreVoteGracefulFallback(t *testing.T) {
 	cluster := chaos.NewCluster(t, 3)
 
-	// Simulate node-2 as an old node: drop all incoming PreVote RPCs.
-	// Real RequestVote RPCs (PreVote=false) are delivered normally so node-2
-	// can still participate in actual elections once a candidate has formed.
+	// Simulate the *receive* side of an old node: drop all incoming PreVote RPCs
+	// delivered to node-2. This models the scenario where the old software simply
+	// does not handle PreRequestVote and the RPC is silently discarded.
+	// Note: node-2 still emits PreVote=true (it is the same binary), so this
+	// is a partial simulation — it captures the "old node cannot receive PreVote"
+	// case that matters for cluster availability. node-0 and node-1 form a 2/3
+	// pre-vote majority among themselves and can proceed to election.
 	cluster.SetRequestVoteHook("node-2", func(from, to string, args *raft.RequestVoteArgs) (*raft.RequestVoteArgs, bool) {
 		if args.PreVote {
-			return nil, true // drop — simulates old node ignoring PreRequestVote
+			return nil, true // drop incoming PreVote to node-2
 		}
 		return args, false
 	})

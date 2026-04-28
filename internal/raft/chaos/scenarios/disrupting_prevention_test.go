@@ -58,8 +58,23 @@ func TestDisruptingPrevention_HighTermVoteBlocked(t *testing.T) {
 	require.NotNil(t, reply)
 	assert.False(t, reply.VoteGranted, "stickiness must reject high-term vote from rogue candidate")
 
+	// Stickiness must NOT have updated the follower's term: the rejection path
+	// returns without mutating state. A regression that bumps currentTerm before
+	// the stickiness check would cause the leader to step down on the next heartbeat.
+	var followerNode *raft.Node
+	for _, n := range cluster.Nodes() {
+		if n.ID() == followerID {
+			followerNode = n
+			break
+		}
+	}
+	require.NotNil(t, followerNode)
+	assert.Equal(t, originalTerm, followerNode.Term(),
+		"stickiness must not update follower term on rejection")
+
 	// Give the cluster a moment to process any side-effects of the injection.
-	time.Sleep(200 * time.Millisecond)
+	// 100ms < ElectionTimeout (200ms in NewCluster) — stickiness window still open.
+	time.Sleep(100 * time.Millisecond)
 
 	current := cluster.CurrentLeader()
 	require.NotNil(t, current, "cluster must still have a leader")
