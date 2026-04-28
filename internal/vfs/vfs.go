@@ -21,7 +21,6 @@ import (
 )
 
 const (
-	vfsBucketPrefix = "__grainfs_vfs_"
 	dirMarkerSuffix = "/.dir"
 )
 
@@ -97,7 +96,7 @@ var (
 
 // New creates a new GrainVFS for the given volume name.
 func New(backend storage.Backend, volumeName string, opts ...VFSOption) (*GrainVFS, error) {
-	bucket := vfsBucketPrefix + volumeName
+	bucket := storage.VFSBucketPrefix + volumeName
 	_ = backend.CreateBucket(bucket)
 	if err := backend.HeadBucket(bucket); err != nil {
 		return nil, fmt.Errorf("ensure vfs bucket: %w", err)
@@ -226,7 +225,7 @@ func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 
 	// Check if file was deleted (ESTALE support for cross-protocol coherency)
 	// Extract volume name from bucket: "__grainfs_vfs_" + volumeName
-	volName := strings.TrimPrefix(fs.bucket, vfsBucketPrefix)
+	volName := strings.TrimPrefix(fs.bucket, storage.VFSBucketPrefix)
 	if fs.IsDeleted(volName, fp) {
 		return nil, os.ErrNotExist
 	}
@@ -852,7 +851,7 @@ func (fs *GrainVFS) Invalidate(bucket, key string) {
 	}()
 
 	// Check if this VFS instance serves the specified bucket
-	if fs.bucket != vfsBucketPrefix+bucket {
+	if fs.bucket != storage.VFSBucketPrefix+bucket {
 		return // Different bucket, not our concern
 	}
 
