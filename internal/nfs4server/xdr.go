@@ -168,6 +168,15 @@ func (r *XDRReader) ReadString() (string, error) {
 	return string(data), nil
 }
 
+// ReadFixed reads exactly n bytes (fixed-length opaque, no XDR length prefix).
+func (r *XDRReader) ReadFixed(n int) ([]byte, error) {
+	data := make([]byte, n)
+	if _, err := io.ReadFull(&r.r, data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
 func (r *XDRReader) Remaining() int {
 	return int(r.r.Len())
 }
@@ -308,6 +317,29 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		}
 		return xdrWriterBytes(w), 0, nil
 
+	case OpCreate:
+		// CREATE4args: createtype4 objtype + component4 objname + fattr4 createattrs
+		objType, _ := r.ReadUint32() // nfs_ftype4
+		if objType == 5 {            // NF4LNK: skip linktext4 (string)
+			r.ReadOpaque()
+		}
+		// For NF4BLK/NF4CHR skip specdata4 (2 uint32s); others have no extra data.
+		if objType == 3 || objType == 4 {
+			r.ReadUint32()
+			r.ReadUint32()
+		}
+		name, _ := r.ReadString()
+		// fattr4 createattrs: bitmap4 + opaque attrlist
+		bitmapLen, _ := r.ReadUint32()
+		for i := uint32(0); i < bitmapLen; i++ {
+			r.ReadUint32()
+		}
+		r.ReadOpaque()
+		w := getXDRWriter()
+		w.WriteUint32(objType)
+		w.WriteString(name)
+		return xdrWriterBytes(w), 0, nil
+
 	case OpAccess:
 		b := getOpArg8()
 		v, _ := r.ReadUint32()
@@ -365,12 +397,22 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		openType, _ := r.ReadUint32()
 		if openType == 1 { // CREATE
 			createMode, _ := r.ReadUint32()
-			if createMode == 0 { // UNCHECKED
+			switch createMode {
+			case 0, 1: // UNCHECKED4, GUARDED4: both carry fattr4
 				bitmapLen, _ := r.ReadUint32()
 				for i := uint32(0); i < bitmapLen; i++ {
 					r.ReadUint32()
 				}
 				r.ReadOpaque() // attrvals
+			case 2: // EXCLUSIVE4: 8-byte verifier
+				r.ReadFixed(8)
+			case 3: // EXCLUSIVE4_1: verifier + fattr4
+				r.ReadFixed(8)
+				bitmapLen, _ := r.ReadUint32()
+				for i := uint32(0); i < bitmapLen; i++ {
+					r.ReadUint32()
+				}
+				r.ReadOpaque()
 			}
 		}
 		claimType, _ := r.ReadUint32()
@@ -386,6 +428,11 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		w.WriteUint32(openType)
 		w.WriteString(fileName)
 		return xdrWriterBytes(w), 0, nil
+
+	case OpCommit:
+		r.ReadUint64() // offset
+		r.ReadUint32() // count
+		return nil, 0, nil
 
 	case OpClose:
 		buf := getOpArg16()
@@ -448,9 +495,110 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		binary.BigEndian.PutUint64(b, clientID)
 		return b, 8, nil
 
+	case OpExchangeID:
+		// client_owner4: verifier(8) + co_ownerid(opaque)
+		var verf [8]byte
+		io.ReadFull(&r.r, verf[:])
+		ownerID, _ := r.ReadOpaque()
+		// eia_flags
+		flags, _ := r.ReadUint32()
+		// eia_state_protect: spa_how + optional params
+		spaHow, _ := r.ReadUint32()
+		// SP4_NONE=0, SP4_MACH_CRED=1, SP4_SSV=2
+		// For SP4_MACH_CRED skip two bitmaps; we only support SP4_NONE
+		if spaHow == 1 {
+			for i := 0; i < 2; i++ {
+				blen, _ := r.ReadUint32()
+				for j := uint32(0); j < blen; j++ {
+					r.ReadUint32()
+				}
+			}
+		}
+		// eia_client_impl_id: nfs_impl_id4<1>
+		implCount, _ := r.ReadUint32()
+		for i := uint32(0); i < implCount; i++ {
+			r.ReadOpaque() // nii_domain
+			r.ReadOpaque() // nii_name
+			r.ReadUint64() // nii_date (nfstime4: seconds)
+			r.ReadUint32() // nii_date: nseconds
+		}
+		_ = flags
+		_ = spaHow
+		w := getXDRWriter()
+		w.buf.Write(verf[:])
+		w.WriteOpaque(ownerID)
+		return xdrWriterBytes(w), 0, nil
+
+	case OpCreateSession:
+		clientID, _ := r.ReadUint64()
+		seq, _ := r.ReadUint32()
+		flags, _ := r.ReadUint32()
+		_ = flags
+		// fore channel attrs
+		fore := readChannelAttrs(r)
+		// back channel attrs (skip)
+		readChannelAttrs(r)
+		r.ReadUint32() // csa_cb_program
+		// csa_sec_parms count
+		secCount, _ := r.ReadUint32()
+		for i := uint32(0); i < secCount; i++ {
+			r.ReadUint32() // cb_secflavor; we only expect AUTH_NONE=0
+		}
+		w := getXDRWriter()
+		w.WriteUint64(clientID)
+		w.WriteUint32(seq)
+		w.WriteUint32(fore.HeaderPadSize)
+		w.WriteUint32(fore.MaxRequestSize)
+		w.WriteUint32(fore.MaxResponseSize)
+		w.WriteUint32(fore.MaxResponseSizeCached)
+		w.WriteUint32(fore.MaxOperations)
+		w.WriteUint32(fore.MaxRequests)
+		return xdrWriterBytes(w), 0, nil
+
+	case OpDestroySession:
+		var sid [16]byte
+		io.ReadFull(&r.r, sid[:])
+		return sid[:], 0, nil
+
+	case OpSequence:
+		// sessionid(16) + sequenceid(4) + slotid(4) + highest_slotid(4) + cachethis(4)
+		buf := make([]byte, 32)
+		io.ReadFull(&r.r, buf[:16])         // sessionid
+		seq, _ := r.ReadUint32()
+		slotID, _ := r.ReadUint32()
+		highSlot, _ := r.ReadUint32()
+		cacheThis, _ := r.ReadUint32()
+		w := getXDRWriter()
+		w.buf.Write(buf[:16])
+		w.WriteUint32(seq)
+		w.WriteUint32(slotID)
+		w.WriteUint32(highSlot)
+		w.WriteUint32(cacheThis)
+		return xdrWriterBytes(w), 0, nil
+
+	case OpReclaimComplete:
+		r.ReadUint32() // rca_one_fs (bool)
+		return nil, 0, nil
+
 	default:
 		return nil, 0, nil
 	}
+}
+
+// readChannelAttrs reads a channel_attrs4 struct.
+func readChannelAttrs(r *XDRReader) ChannelAttrs {
+	ca := ChannelAttrs{}
+	ca.HeaderPadSize, _ = r.ReadUint32()
+	ca.MaxRequestSize, _ = r.ReadUint32()
+	ca.MaxResponseSize, _ = r.ReadUint32()
+	ca.MaxResponseSizeCached, _ = r.ReadUint32()
+	ca.MaxOperations, _ = r.ReadUint32()
+	ca.MaxRequests, _ = r.ReadUint32()
+	rdmaCount, _ := r.ReadUint32()
+	for i := uint32(0); i < rdmaCount; i++ {
+		r.ReadUint32()
+	}
+	return ca
 }
 
 // OpRenew is the RENEW operation code.

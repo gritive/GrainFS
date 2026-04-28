@@ -17,7 +17,7 @@ import (
 
 var (
 	colimaHostIP   = envOrDefault("HOST_IP", "192.168.5.2")
-	colimaNFS4Port = envOrDefault("NFS4_PORT", "2049")
+	colimaNFS4Port = envOrDefault("NFS4_PORT", "19249")
 	colimaHTTPPort = envOrDefault("HTTP_PORT", "19200")
 )
 
@@ -84,8 +84,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// HTTP health 폴링 (최대 10초)
-	healthURL := fmt.Sprintf("http://127.0.0.1:%s/api/health", colimaHTTPPort)
+	// HTTP health 폴링 (최대 10초) — GET / 는 listBuckets(200)로 항상 존재
+	healthURL := fmt.Sprintf("http://127.0.0.1:%s/", colimaHTTPPort)
 	deadline := time.Now().Add(10 * time.Second)
 	ready := false
 	for time.Now().Before(deadline) {
@@ -120,6 +120,7 @@ func TestNFS4_BasicOps(t *testing.T) {
 
 	runColimaSSH(t, "sudo", "mkdir", "-p", mnt)
 	runColimaSSH(t, "sudo", "mount", "-t", "nfs4",
+		"-o", fmt.Sprintf("vers=4.0,port=%s", colimaNFS4Port),
 		fmt.Sprintf("%s:/", colimaHostIP), mnt)
 	t.Cleanup(func() {
 		colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck

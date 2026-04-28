@@ -159,7 +159,7 @@ func TestE2E_GetAttr_File(t *testing.T) {
 	ops.WriteString("attrs.txt")
 	ops.WriteUint32(uint32(OpGetAttr))
 	ops.WriteUint32(2)     // bitmap len = 2
-	ops.WriteUint32(0x18)  // request type (bit3) + size (bit4)
+	ops.WriteUint32(0x12)  // request type (bit1) + size (bit4)
 	ops.WriteUint32(0)
 
 	reply := c.sendCompound(ops.Bytes(), 3)

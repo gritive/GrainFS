@@ -21,12 +21,19 @@ type Server struct {
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
+// It ensures the NFS storage bucket exists.
 func NewServer(backend storage.Backend) *Server {
-	return &Server{
+	s := &Server{
 		backend: backend,
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 	}
+	if err := backend.HeadBucket(nfs4Bucket); err != nil {
+		if err := backend.CreateBucket(nfs4Bucket); err != nil {
+			s.logger.Warn().Err(err).Str("bucket", nfs4Bucket).Msg("nfs4: could not create storage bucket")
+		}
+	}
+	return s
 }
 
 // ListenAndServe starts the NFSv4 TCP server.
@@ -74,6 +81,8 @@ func (s *Server) Addr() net.Addr {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	s.logger.Debug().Str("remote", conn.RemoteAddr().String()).Msg("nfs4: new connection")
+
 	for {
 		frame, err := readRPCFrame(conn)
 		if err != nil {
@@ -96,6 +105,12 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		if header.Program == rpcProgNFS && header.ProgVers == rpcVersNFS4 && header.Procedure == 1 {
 			s.handleCompoundInto(args, w)
+		} else {
+			s.logger.Debug().
+				Uint32("prog", header.Program).
+				Uint32("vers", header.ProgVers).
+				Uint32("proc", header.Procedure).
+				Msg("non-compound RPC call")
 		}
 
 		writeRPCFrame(conn, w.Bytes())
@@ -115,6 +130,12 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 		encodeCompoundResponseInto(w, &CompoundResponse{Status: NFS4ERR_INVAL})
 		return
 	}
+
+	ops := make([]int, len(req.Ops))
+	for i, op := range req.Ops {
+		ops[i] = op.OpCode
+	}
+	s.logger.Debug().Uint32("minorver", req.MinorVer).Ints("ops", ops).Msg("nfs4: COMPOUND")
 
 	d := getDispatcher(s.backend, s.state)
 	defer putDispatcher(d)

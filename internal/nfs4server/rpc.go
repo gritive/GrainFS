@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	// maxFrameSize caps ONC RPC frame size to prevent DoS (1MB).
-	maxFrameSize = 1 * 1024 * 1024
+	// maxFrameSize caps ONC RPC frame size to prevent DoS (4MB).
+	// Must be larger than MAXWRITE (1MB) + RPC/COMPOUND overhead.
+	maxFrameSize = 4 * 1024 * 1024
 
 	// RPC constants
 	rpcProgNFS  = 100003
@@ -18,7 +19,6 @@ const (
 
 	// Auth flavors
 	authNone = 0
-	authSys  = 1
 )
 
 // writeRPCFrame writes a TCP record-marked RPC frame.
