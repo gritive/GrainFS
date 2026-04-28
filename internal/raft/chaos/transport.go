@@ -7,12 +7,18 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
+// edge identifies a directional message lane for DropMessage.
+type edge struct {
+	from, to string
+}
+
 // ChaosTransport routes RPC callbacks between in-memory raft.Node instances.
 // All Driver primitives (Partition, DropMessage) are gated here.
 type ChaosTransport struct {
 	mu          sync.Mutex
 	nodes       map[string]*raft.Node
 	partitioned map[string]bool
+	dropCounts  map[edge]int
 }
 
 // NewChaosTransport creates an empty transport. Register nodes before Wire.
@@ -20,6 +26,7 @@ func NewChaosTransport() *ChaosTransport {
 	return &ChaosTransport{
 		nodes:       make(map[string]*raft.Node),
 		partitioned: make(map[string]bool),
+		dropCounts:  make(map[edge]int),
 	}
 }
 
@@ -38,11 +45,16 @@ func (c *ChaosTransport) lookup(id string) *raft.Node {
 }
 
 // shouldDeliver returns true if a message from→to should be delivered.
-// False if either endpoint is partitioned.
+// False if either endpoint is partitioned or there is a pending drop counter.
 func (c *ChaosTransport) shouldDeliver(from, to string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.partitioned[from] || c.partitioned[to] {
+		return false
+	}
+	e := edge{from, to}
+	if cnt := c.dropCounts[e]; cnt > 0 {
+		c.dropCounts[e] = cnt - 1
 		return false
 	}
 	return true
@@ -59,6 +71,14 @@ func (c *ChaosTransport) PartitionPeer(nodeID string) {
 func (c *ChaosTransport) HealPartition(nodeID string) {
 	c.mu.Lock()
 	delete(c.partitioned, nodeID)
+	c.mu.Unlock()
+}
+
+// DropMessage drops the next n outbound messages from→to. Counter persists
+// until exhausted, then normal delivery resumes. Direction is one-way.
+func (c *ChaosTransport) DropMessage(from, to string, n int) {
+	c.mu.Lock()
+	c.dropCounts[edge{from, to}] += n
 	c.mu.Unlock()
 }
 

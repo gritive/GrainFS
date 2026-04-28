@@ -80,3 +80,19 @@ func TestChaosTransport_PartitionBlocksBothDirections(t *testing.T) {
 	assert.True(t, tr.shouldDeliver("A", "B"), "heal must restore A→B")
 	assert.True(t, tr.shouldDeliver("B", "A"), "heal must restore B→A")
 }
+
+func TestChaosTransport_DropMessageDecrementsCounter(t *testing.T) {
+	tr := NewChaosTransport()
+
+	// Drop next 3 messages from A to B.
+	tr.DropMessage("A", "B", 3)
+
+	assert.False(t, tr.shouldDeliver("A", "B"), "drop 1 of 3")
+	assert.False(t, tr.shouldDeliver("A", "B"), "drop 2 of 3")
+	assert.False(t, tr.shouldDeliver("A", "B"), "drop 3 of 3")
+	assert.True(t, tr.shouldDeliver("A", "B"), "counter exhausted, deliver resumes")
+
+	// DropMessage is directional — does not affect B→A.
+	tr.DropMessage("A", "B", 1)
+	assert.True(t, tr.shouldDeliver("B", "A"), "B→A unaffected by A→B drop")
+}
