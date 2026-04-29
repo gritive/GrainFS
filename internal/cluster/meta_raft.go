@@ -126,8 +126,10 @@ func (m *MetaRaft) Close() error {
 	return m.store.Close()
 }
 
-// Join adds node with id/addr as a learner then promotes it to voter,
-// and records it in the FSM.
+// Join adds node with id/addr as a learner, promotes it to voter, and records it
+// in the FSM. The three steps are not atomic: if ProposeAddNode fails after
+// PromoteToVoter succeeds, the node exists in the Raft configuration but not in
+// MetaFSM.Nodes(). Callers must retry or use RemoveVoter to restore consistency.
 func (m *MetaRaft) Join(ctx context.Context, id, addr string) error {
 	if err := m.node.AddLearner(id, addr); err != nil {
 		return fmt.Errorf("meta_raft: AddLearner %s: %w", id, err)
@@ -158,14 +160,19 @@ func (m *MetaRaft) ProposeAddNode(ctx context.Context, entry MetaNodeEntry) erro
 
 // waitApplied blocks until the FSM apply loop has processed the entry at idx.
 // Uses generation channels to avoid goroutine leaks on context cancellation.
+//
+// Ordering invariant: snapshot the channel BEFORE checking lastApplied.
+// If the applier fires between the snapshot and the check, lastApplied is already
+// updated so the check returns immediately. If it fires after the check, the waiter
+// holds the channel that will be closed by the applier — no notification is missed.
 func (m *MetaRaft) waitApplied(ctx context.Context, idx uint64) error {
 	for {
-		if m.lastApplied.Load() >= idx {
+		m.applyNotifyMu.Lock()
+		ch := m.applyNotify // snapshot first
+		m.applyNotifyMu.Unlock()
+		if m.lastApplied.Load() >= idx { // check after snapshot
 			return nil
 		}
-		m.applyNotifyMu.Lock()
-		ch := m.applyNotify
-		m.applyNotifyMu.Unlock()
 		select {
 		case <-ch:
 			// a new entry was applied; re-check lastApplied

@@ -101,6 +101,9 @@ func (f *MetaFSM) applyAddNode(data []byte) error {
 		Address: string(node.Address()),
 		Role:    node.Role(),
 	}
+	if entry.ID == "" {
+		return fmt.Errorf("meta_fsm: AddNode: empty node ID")
+	}
 	f.mu.Lock()
 	f.nodes[entry.ID] = entry
 	f.mu.Unlock()
