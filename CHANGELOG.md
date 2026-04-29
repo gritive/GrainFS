@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.0.5.6] — 2026-04-29
+
+### Added
+
+- **NFSv4.1 SEQUENCE 리플레이 캐시** (`internal/nfs4server/`):
+  - 슬롯별 at-most-once 시맨틱: 동일 (sessionID, slotID, seqID) 재요청 시 캐시된 COMPOUND 응답 반환.
+  - RFC 5661 §2.10.5.1.1: SeqID 첫 요청 검증 (slotID seqID==0 이면 seqID==1 강제).
+  - RFC 5661 §2.10.5.1.3: RETRY_UNCACHED_REP — cacheThis=1이었으나 캐시 없으면 NFS4ERR_RETRY_UNCACHED_REP(10070) 반환.
+  - SlotEntry에 `WasCacheThis bool` 추가로 캐시 누락 구분.
+
+- **NFSv4.1 클라이언트 관리** (`internal/nfs4server/`):
+  - `OpDestroyClientID`: 클라이언트 세션 정리 + NFS4ERR_STALE_CLIENTID(10022) 검증.
+  - `OpFreeStateID`, `OpTestStateID`: stub 구현 (GrainFS는 세밀한 stateid 추적 불필요).
+
+- **NFSv4.1 MinorVer 검증**:
+  - COMPOUND 요청의 minorversion 0/1/2만 허용; 그 외 NFS4ERR_MINOR_VERS_MISMATCH.
+  - NFSv4.1+ 전용 연산(EXCHANGE_ID, CREATE_SESSION 등)을 v4.0 요청에서 NFS4ERR_OP_ILLEGAL로 차단.
+
+- **NFSv4.2 연산 구현** (RFC 7862):
+  - `OpSeek` (op 69): DATA/HOLE whence 처리. GrainFS에 sparse 없음; HOLE whence = EOF.
+  - `OpAllocate` (op 59): 파일 크기 확장 (zero-fill read-modify-write).
+  - `OpDeallocate` (op 62): 바이트 범위 zero-fill (hole punch 시뮬레이션).
+  - `OpCopy` (op 60): 서버사이드 복사; savedFH → currentFH.
+  - `OpIOAdvise` (op 63): 힌트 무시, 빈 비트맵 반환.
+
+- **Colima e2e 파라미터화**: vers=4.0/4.1/4.2 동일 기능 테스트.
+
+### Fixed
+
+- **opAllocate TOCTOU 레이스**: HeadObject를 LockPath 바깥에서 호출하던 문제 수정; early-exit 판단을 락 내부로 이동.
+- **opAllocate io.ReadAll 에러 무시**: `existing, _ = io.ReadAll(...)` → 에러 체크 추가; 부분 읽기 시 NFS4ERR_IO 반환.
+- **opDeallocate uint64 오버플로우**: `offset + length` 오버플로우 클램프 처리.
+- **opAllocate/Deallocate OOM 방지**: 64MB 초과 파일 → NFS4ERR_FBIG / NFS4ERR_NOTSUPP.
+
+### Refactored
+
+- **StateManager lock-free 전환**:
+  - `clientMu + map[uint64]*ClientState` → `sync.Map` (lock-free 읽기).
+  - `sessionMu + map[SessionID]*Session` → `sync.Map` (GetSession 핫패스 무락).
+  - `exchSeq map[uint64]uint32` → `sync.Map[uint64]*atomic.Uint32` (ExchangeID 원자적 카운터).
+  - `ClientState.Confirmed bool` → `atomic.Bool`.
+  - `sessionMu` → `slotMu`로 이름 변경 (슬롯 상태 보호만 담당).
+
+### Tests
+
+- SEQUENCE 리플레이 캐시 유닛 테스트 (cache-hit, cache-miss, first-seqID 검증).
+- OpSeek/Allocate/Deallocate/Copy/IOAdvise 유닛 테스트.
+- Colima e2e: NFSv4.0/4.1/4.2 동일 기능 smoke 테스트.
+
 ## [0.0.5.5] — 2026-04-29
 
 ### Added

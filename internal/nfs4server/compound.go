@@ -36,35 +36,58 @@ func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
 	d.currentPath = ""
 	d.savedFH = FileHandle{}
 	d.savedPath = ""
+	d.minorVer = 0
+	d.replayFull = nil
+	d.pendingCacheSlot = nil
 	return d
 }
 
 func putDispatcher(d *Dispatcher) {
 	d.backend = nil
 	d.state = nil
+	d.replayFull = nil
+	d.pendingCacheSlot = nil
 	dispatcherPool.Put(d)
+}
+
+// storePendingCache stores the full encoded COMPOUND response in the pending slot cache.
+func (d *Dispatcher) storePendingCache(response []byte) {
+	if d.pendingCacheSlot == nil {
+		return
+	}
+	d.state.slotMu.Lock()
+	d.pendingCacheSlot.Response = response
+	d.pendingCacheSlot.HasCache = true
+	d.state.slotMu.Unlock()
+	d.pendingCacheSlot = nil
 }
 
 // NFSv4 status codes (RFC 7530)
 const (
-	NFS4_OK              = 0
-	NFS4ERR_PERM         = 1
-	NFS4ERR_NOENT        = 2
-	NFS4ERR_IO           = 5
-	NFS4ERR_NOTDIR       = 20
-	NFS4ERR_INVAL        = 22
-	NFS4ERR_FBIG         = 27
-	NFS4ERR_NOSPC        = 28
-	NFS4ERR_ROFS         = 30
-	NFS4ERR_STALE        = 70
-	NFS4ERR_BADHANDLE    = 10001
-	NFS4ERR_BAD_STATEID  = 10025
-	NFS4ERR_RESOURCE     = 10018
-	NFS4ERR_SERVERFAULT  = 10006
-	NFS4ERR_NOTSUPP      = 10004
-	NFS4ERR_RESTOREFH    = 10030
-	NFS4ERR_NOFILEHANDLE = 10020
-	NFS4ERR_BADSESSION   = 10052
+	NFS4_OK                     = 0
+	NFS4ERR_PERM                = 1
+	NFS4ERR_NOENT               = 2
+	NFS4ERR_IO                  = 5
+	NFS4ERR_NOTDIR              = 20
+	NFS4ERR_INVAL               = 22
+	NFS4ERR_FBIG                = 27
+	NFS4ERR_NOSPC               = 28
+	NFS4ERR_ROFS                = 30
+	NFS4ERR_STALE               = 70
+	NFS4ERR_BADHANDLE           = 10001
+	NFS4ERR_BAD_STATEID         = 10025
+	NFS4ERR_RESOURCE            = 10018
+	NFS4ERR_SERVERFAULT         = 10006
+	NFS4ERR_NOTSUPP             = 10004
+	NFS4ERR_RESTOREFH           = 10030
+	NFS4ERR_NOFILEHANDLE        = 10020
+	NFS4ERR_BADSESSION          = 10052
+	NFS4ERR_BADSLOT             = 10060
+	NFS4ERR_SEQ_MISORDERED      = 10063
+	NFS4ERR_RETRY_UNCACHED_REP  = 10070
+	NFS4ERR_STALE_CLIENTID      = 10022
+	NFS4ERR_MINOR_VERS_MISMATCH = 10021
+	NFS4ERR_OP_ILLEGAL          = 10044
 )
 
 // NFSv4 operation codes
@@ -89,12 +112,22 @@ const (
 	OpSetClientIDConfirm = 36
 	OpWrite              = 38
 
-	// NFSv4.1/4.2 ops (RFC 5661)
+	// NFSv4.1 ops (RFC 5661)
 	OpExchangeID      = 42
 	OpCreateSession   = 43
 	OpDestroySession  = 44
+	OpFreeStateID     = 45
 	OpSequence        = 53
+	OpTestStateID     = 55
+	OpDestroyClientID = 57
 	OpReclaimComplete = 58
+
+	// NFSv4.2 ops (RFC 7862)
+	OpAllocate   = 59
+	OpCopy       = 60
+	OpDeallocate = 62
+	OpIOAdvise   = 63
+	OpSeek       = 69
 
 	maxCompoundOps = 64
 )
@@ -133,12 +166,15 @@ type CompoundResponse struct {
 }
 
 type Dispatcher struct {
-	backend     storage.Backend
-	state       *StateManager
-	currentFH   FileHandle
-	currentPath string
-	savedFH     FileHandle
-	savedPath   string
+	backend          storage.Backend
+	state            *StateManager
+	currentFH        FileHandle
+	currentPath      string
+	savedFH          FileHandle
+	savedPath        string
+	minorVer         uint32
+	replayFull       []byte     // non-nil when a SEQUENCE cache hit provides the full COMPOUND response
+	pendingCacheSlot *SlotEntry // non-nil when cacheThis=1; filled after full response is encoded
 }
 
 const (
@@ -153,6 +189,12 @@ func NewDispatcher(backend storage.Backend) *Dispatcher {
 func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
 	resp.Tag = req.Tag
 	resp.Status = NFS4_OK
+	d.minorVer = req.MinorVer
+
+	if req.MinorVer > 2 {
+		resp.Status = NFS4ERR_MINOR_VERS_MISMATCH
+		return
+	}
 
 	if len(req.Ops) > maxCompoundOps {
 		resp.Status = NFS4ERR_RESOURCE
@@ -175,10 +217,29 @@ func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
 			resp.Status = result.Status
 			break
 		}
+		if d.replayFull != nil {
+			// SEQUENCE cache hit: full cached COMPOUND response is ready; skip remaining ops.
+			break
+		}
+	}
+}
+
+func minVersionForOp(opCode int) uint32 {
+	switch opCode {
+	case OpExchangeID, OpCreateSession, OpDestroySession, OpSequence,
+		OpReclaimComplete, OpDestroyClientID, OpFreeStateID, OpTestStateID:
+		return 1
+	case OpSeek, OpAllocate, OpDeallocate, OpCopy, OpIOAdvise:
+		return 2
+	default:
+		return 0
 	}
 }
 
 func (d *Dispatcher) dispatchOp(op Op) OpResult {
+	if minVersionForOp(op.OpCode) > d.minorVer {
+		return OpResult{OpCode: op.OpCode, Status: NFS4ERR_OP_ILLEGAL}
+	}
 	switch op.OpCode {
 	case OpPutRootFH:
 		return d.opPutRootFH()
@@ -234,6 +295,22 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opSequence(op.Data)
 	case OpReclaimComplete:
 		return OpResult{OpCode: OpReclaimComplete, Status: NFS4_OK}
+	case OpDestroyClientID:
+		return d.opDestroyClientID(op.Data)
+	case OpFreeStateID:
+		return d.opFreeStateID(op.Data)
+	case OpTestStateID:
+		return d.opTestStateID(op.Data)
+	case OpSeek:
+		return d.opSeek(op.Data)
+	case OpAllocate:
+		return d.opAllocate(op.Data)
+	case OpDeallocate:
+		return d.opDeallocate(op.Data)
+	case OpCopy:
+		return d.opCopy(op.Data)
+	case OpIOAdvise:
+		return d.opIOAdvise(op.Data)
 	default:
 		log.Debug().Int("opcode", op.OpCode).Msg("nfs4: unknown opcode → NFS4ERR_NOTSUPP")
 		return OpResult{OpCode: op.OpCode, Status: NFS4ERR_NOTSUPP}
@@ -1113,11 +1190,15 @@ func (d *Dispatcher) opExchangeID(data []byte) OpResult {
 
 	res := d.state.ExchangeID(verf, ownerID)
 
+	// RFC 5661 §18.35.3: server MUST set at least one of USE_NON_PNFS/USE_PNFS_MDS/USE_PNFS_DS.
+	// Without this bit, the Linux kernel's nfs4_discover_server_trunking returns EINVAL.
+	const eirFlagUseNonPNFS = uint32(0x00010000)
+
 	w := getXDRWriter()
-	w.WriteUint64(res.ClientID)   // eir_clientid
-	w.WriteUint32(res.SequenceID) // eir_sequenceid
-	w.WriteUint32(0)              // eir_flags
-	w.WriteUint32(0)              // eir_state_protect.spr_how = SP4_NONE
+	w.WriteUint64(res.ClientID)      // eir_clientid
+	w.WriteUint32(res.SequenceID)    // eir_sequenceid
+	w.WriteUint32(eirFlagUseNonPNFS) // eir_flags
+	w.WriteUint32(0)                 // eir_state_protect.spr_how = SP4_NONE
 	// eir_server_owner: minor_id + major_id
 	w.WriteUint64(1)         // server minor id
 	w.WriteString("grainfs") // server major id
@@ -1195,18 +1276,55 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	}
 	r := NewXDRReader(data)
 	var sidBytes [16]byte
-	io.ReadFull(&r.r, sidBytes[:])
+	io.ReadFull(&r.r, sidBytes[:]) //nolint:errcheck
 	var sid SessionID
 	copy(sid[:], sidBytes[:])
 
 	seqID, _ := r.ReadUint32()
 	slotID, _ := r.ReadUint32()
 	highSlot, _ := r.ReadUint32()
-	_, _ = r.ReadUint32() // cacheThis
+	cacheThis, _ := r.ReadUint32()
 
 	sess := d.state.GetSession(sid)
 	if sess == nil {
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_BADSESSION}
+	}
+
+	d.state.slotMu.Lock()
+	if int(slotID) >= len(sess.Slots) {
+		d.state.slotMu.Unlock()
+		return OpResult{OpCode: OpSequence, Status: NFS4ERR_BADSLOT}
+	}
+	slot := &sess.Slots[slotID]
+
+	// Replay detection: same seqID → return cached full COMPOUND response if available.
+	if slot.SeqID == seqID && slot.SeqID > 0 {
+		if slot.HasCache {
+			d.replayFull = slot.Response // full COMPOUND bytes; used by server.go
+			d.state.slotMu.Unlock()
+			return OpResult{OpCode: OpSequence, Status: NFS4_OK}
+		}
+		if slot.WasCacheThis {
+			// cacheThis=1 was set on the original request but the response was never
+			// stored (e.g. server crashed between request and commit). RFC 5661 §18.46.3
+			// requires NFS4ERR_RETRY_UNCACHED_REP in this case.
+			d.state.slotMu.Unlock()
+			return OpResult{OpCode: OpSequence, Status: NFS4ERR_RETRY_UNCACHED_REP}
+		}
+		// cacheThis was false on first call; re-execute remaining ops (RFC 5661 §2.10.5.1.3).
+		d.state.slotMu.Unlock()
+		// fall through to re-build response below
+	} else if slot.SeqID > 0 && seqID != slot.SeqID+1 {
+		// Stale or future seqID (not the expected next or a replay).
+		d.state.slotMu.Unlock()
+		return OpResult{OpCode: OpSequence, Status: NFS4ERR_SEQ_MISORDERED}
+	} else {
+		// First request on this slot: RFC 5661 §18.46.3 requires seqID == 1.
+		if slot.SeqID == 0 && seqID != 1 {
+			d.state.slotMu.Unlock()
+			return OpResult{OpCode: OpSequence, Status: NFS4ERR_SEQ_MISORDERED}
+		}
+		d.state.slotMu.Unlock()
 	}
 
 	w := getXDRWriter()
@@ -1216,7 +1334,23 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	w.WriteUint32(highSlot) // sr_highest_slotid
 	w.WriteUint32(highSlot) // sr_target_highest_slotid
 	w.WriteUint32(0)        // sr_status_flags
-	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+	seqResp := xdrWriterBytes(w)
+
+	d.state.slotMu.Lock()
+	slot.SeqID = seqID
+	if cacheThis != 0 {
+		// Full COMPOUND response will be stored by storePendingCache after encoding.
+		d.pendingCacheSlot = slot
+		slot.HasCache = false
+		slot.WasCacheThis = true
+	} else {
+		slot.HasCache = false
+		slot.WasCacheThis = false
+		slot.Response = nil
+	}
+	d.state.slotMu.Unlock()
+
+	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: seqResp}
 }
 
 // nfsFileMeta stores per-file NFS metadata that must survive server restarts.
@@ -1270,6 +1404,41 @@ func boolToUint32(v bool) uint32 {
 		return 1
 	}
 	return 0
+}
+
+func (d *Dispatcher) opDestroyClientID(data []byte) OpResult {
+	if len(data) < 8 {
+		return OpResult{OpCode: OpDestroyClientID, Status: NFS4ERR_INVAL}
+	}
+	clientID := binary.BigEndian.Uint64(data[:8])
+	if !d.state.ClientExists(clientID) {
+		return OpResult{OpCode: OpDestroyClientID, Status: NFS4ERR_STALE_CLIENTID}
+	}
+	d.state.DestroyClientID(clientID)
+	return OpResult{OpCode: OpDestroyClientID, Status: NFS4_OK}
+}
+
+func (d *Dispatcher) opFreeStateID(data []byte) OpResult {
+	if len(data) < 16 {
+		return OpResult{OpCode: OpFreeStateID, Status: NFS4ERR_INVAL}
+	}
+	stateID := binary.BigEndian.Uint64(data[:8])
+	d.state.FreeStateID(stateID)
+	return OpResult{OpCode: OpFreeStateID, Status: NFS4_OK}
+}
+
+func (d *Dispatcher) opTestStateID(data []byte) OpResult {
+	if len(data) < 4 {
+		return OpResult{OpCode: OpTestStateID, Status: NFS4ERR_INVAL}
+	}
+	count := binary.BigEndian.Uint32(data[:4])
+	statuses := d.state.TestStateIDs(int(count))
+	w := getXDRWriter()
+	w.WriteUint32(uint32(len(statuses)))
+	for _, s := range statuses {
+		w.WriteUint32(s)
+	}
+	return OpResult{OpCode: OpTestStateID, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func init() {

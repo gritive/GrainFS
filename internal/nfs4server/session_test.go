@@ -28,10 +28,10 @@ func buildExchangeIDOp(verifier [8]byte, ownerID string) []byte {
 	w := &XDRWriter{}
 	w.WriteUint32(OpExchangeID)
 	w.buf.Write(verifier[:]) // verifier
-	w.WriteString(ownerID)  // eia_clientowner.co_ownerid
-	w.WriteUint32(0)        // eia_flags
-	w.WriteUint32(0)        // eia_state_protect.spa_how = SP4_NONE
-	w.WriteUint32(0)        // eia_client_impl_id count = 0
+	w.WriteString(ownerID)   // eia_clientowner.co_ownerid
+	w.WriteUint32(0)         // eia_flags
+	w.WriteUint32(0)         // eia_state_protect.spa_how = SP4_NONE
+	w.WriteUint32(0)         // eia_client_impl_id count = 0
 	return w.Bytes()
 }
 
@@ -44,16 +44,16 @@ func buildCreateSessionOp(clientID uint64, seq uint32) []byte {
 	w.WriteUint32(0)        // csa_flags
 
 	// fore channel attrs
-	w.WriteUint32(0)       // ca_headerpadsize
-	w.WriteUint32(262144)  // ca_maxrequestsize
-	w.WriteUint32(262144)  // ca_maxresponsesize
-	w.WriteUint32(4096)    // ca_maxresponsesize_cached
-	w.WriteUint32(64)      // ca_maxoperations
-	w.WriteUint32(64)      // ca_maxrequests
-	w.WriteUint32(0)       // ca_rdma_ird count = 0
+	w.WriteUint32(0)      // ca_headerpadsize
+	w.WriteUint32(262144) // ca_maxrequestsize
+	w.WriteUint32(262144) // ca_maxresponsesize
+	w.WriteUint32(4096)   // ca_maxresponsesize_cached
+	w.WriteUint32(64)     // ca_maxoperations
+	w.WriteUint32(64)     // ca_maxrequests
+	w.WriteUint32(0)      // ca_rdma_ird count = 0
 
 	// back channel attrs (minimal)
-	w.WriteUint32(0)  // ca_headerpadsize
+	w.WriteUint32(0) // ca_headerpadsize
 	w.WriteUint32(4096)
 	w.WriteUint32(4096)
 	w.WriteUint32(4096)
@@ -232,9 +232,9 @@ func TestE2E_Sequence(t *testing.T) {
 	reply2, err := readRPCFrame(conn)
 	require.NoError(t, err)
 	_, r2 := parseCompoundReply(t, reply2)
-	r2.ReadUint32() // opCount
-	r2.ReadUint32() // opCode
-	r2.ReadUint32() // opStatus
+	r2.ReadUint32()                 // opCount
+	r2.ReadUint32()                 // opCode
+	r2.ReadUint32()                 // opStatus
 	sidBytes, _ := r2.ReadFixed(16) // csr_sessionid: fixed 16 bytes
 	var sessionID SessionID
 	copy(sessionID[:], sidBytes)
@@ -306,7 +306,9 @@ func TestE2E_ReclaimComplete(t *testing.T) {
 	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(30, compound1)))
 	reply1, _ := readRPCFrame(conn)
 	_, r1 := parseCompoundReply(t, reply1)
-	r1.ReadUint32(); r1.ReadUint32(); r1.ReadUint32()
+	r1.ReadUint32()
+	r1.ReadUint32()
+	r1.ReadUint32()
 	clientID, _ := r1.ReadUint64()
 	seqID, _ := r1.ReadUint32()
 
@@ -314,7 +316,9 @@ func TestE2E_ReclaimComplete(t *testing.T) {
 	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(31, compound2)))
 	reply2, _ := readRPCFrame(conn)
 	_, r2 := parseCompoundReply(t, reply2)
-	r2.ReadUint32(); r2.ReadUint32(); r2.ReadUint32()
+	r2.ReadUint32()
+	r2.ReadUint32()
+	r2.ReadUint32()
 	sidBytes, _ := r2.ReadFixed(16) // csr_sessionid: fixed 16 bytes
 	var sessionID SessionID
 	copy(sessionID[:], sidBytes)
@@ -340,9 +344,14 @@ func TestE2E_ReclaimComplete(t *testing.T) {
 	assert.Equal(t, uint32(2), opCount)
 
 	// SEQUENCE
-	r3.ReadUint32(); r3.ReadUint32() // opCode + opStatus
-	r3.ReadFixed(16)                 // sr_sessionid: fixed 16 bytes
-	r3.ReadUint32(); r3.ReadUint32(); r3.ReadUint32(); r3.ReadUint32(); r3.ReadUint32()
+	r3.ReadUint32()
+	r3.ReadUint32()  // opCode + opStatus
+	r3.ReadFixed(16) // sr_sessionid: fixed 16 bytes
+	r3.ReadUint32()
+	r3.ReadUint32()
+	r3.ReadUint32()
+	r3.ReadUint32()
+	r3.ReadUint32()
 
 	// RECLAIM_COMPLETE
 	rcCode, _ := r3.ReadUint32()
@@ -461,6 +470,147 @@ func TestDestroySession_Twice(t *testing.T) {
 	assert.Equal(t, uint32(NFS4ERR_BADSESSION), status2)
 }
 
+// exchangeIDWithClientID is like exchangeIDAndCreateSession but also returns the clientID.
+func exchangeIDWithClientID(t *testing.T, conn net.Conn, xid uint32) (SessionID, uint64) {
+	t.Helper()
+	var verifier [8]byte
+	binary.BigEndian.PutUint64(verifier[:], uint64(xid)^0xaabbccdd11223344)
+	compound1 := buildCompound41(buildExchangeIDOp(verifier, fmt.Sprintf("dc-client-%d", xid)))
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(xid, compound1)))
+	reply1, err := readRPCFrame(conn)
+	require.NoError(t, err)
+	_, r1 := parseCompoundReply(t, reply1)
+	r1.ReadUint32() // opCount
+	r1.ReadUint32() // opCode
+	r1.ReadUint32() // opStatus
+	clientID, _ := r1.ReadUint64()
+	seqID, _ := r1.ReadUint32()
+
+	compound2 := buildCompound41(buildCreateSessionOp(clientID, seqID))
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(xid+1, compound2)))
+	reply2, err := readRPCFrame(conn)
+	require.NoError(t, err)
+	_, r2 := parseCompoundReply(t, reply2)
+	r2.ReadUint32()
+	r2.ReadUint32()
+	r2.ReadUint32()
+	sidBytes, _ := r2.ReadFixed(16)
+	var sid SessionID
+	copy(sid[:], sidBytes)
+	return sid, clientID
+}
+
+func TestDestroyClientID(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, clientID := exchangeIDWithClientID(t, conn, 500)
+
+	// DESTROY_CLIENTID: op_code(4) + clientid(8)
+	destroyOp := func() []byte {
+		w := &XDRWriter{}
+		w.WriteUint32(OpDestroyClientID)
+		w.WriteUint64(clientID)
+		return w.Bytes()
+	}
+
+	compound := buildCompound41(destroyOp())
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(502, compound)))
+	reply, err := readRPCFrame(conn)
+	require.NoError(t, err)
+
+	status, r := parseCompoundReply(t, reply)
+	assert.Equal(t, uint32(NFS4_OK), status)
+	r.ReadUint32() // opCount
+	opCode, _ := r.ReadUint32()
+	assert.Equal(t, uint32(OpDestroyClientID), opCode)
+	opStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(NFS4_OK), opStatus)
+}
+
+func TestFreeStateID(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	sid := exchangeIDAndCreateSession(t, conn, 510)
+
+	// FREE_STATEID: op_code(4) + stateid(16: seqid(4)+other(12))
+	freeOp := func() []byte {
+		w := &XDRWriter{}
+		w.WriteUint32(OpFreeStateID)
+		w.WriteUint32(1)  // seqid
+		w.WriteUint64(42) // other[0:8]
+		w.WriteUint32(0)  // other[8:12]
+		return w.Bytes()
+	}
+
+	seqOp := buildSequenceOp(sid, 1, 0, 0, false)
+	compound := buildCompound41(seqOp, freeOp())
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(512, compound)))
+	reply, err := readRPCFrame(conn)
+	require.NoError(t, err)
+
+	status, _ := parseCompoundReply(t, reply)
+	assert.Equal(t, uint32(NFS4_OK), status)
+}
+
+func TestTestStateID(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	sid := exchangeIDAndCreateSession(t, conn, 520)
+
+	// TEST_STATEID: op_code(4) + count(4) + N×stateid(16)
+	testOp := func() []byte {
+		w := &XDRWriter{}
+		w.WriteUint32(OpTestStateID)
+		w.WriteUint32(1)  // count = 1
+		w.WriteUint32(1)  // seqid
+		w.WriteUint64(99) // other[0:8]
+		w.WriteUint32(0)  // other[8:12]
+		return w.Bytes()
+	}
+
+	seqOp := buildSequenceOp(sid, 1, 0, 0, false)
+	compound := buildCompound41(seqOp, testOp())
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(522, compound)))
+	reply, err := readRPCFrame(conn)
+	require.NoError(t, err)
+
+	status, r := parseCompoundReply(t, reply)
+	assert.Equal(t, uint32(NFS4_OK), status)
+
+	opCount, _ := r.ReadUint32()
+	require.Equal(t, uint32(2), opCount)
+
+	// SEQUENCE result
+	r.ReadUint32()  // opCode
+	r.ReadUint32()  // opStatus
+	r.ReadFixed(16) //nolint:errcheck // sr_sessionid
+	r.ReadUint32()  // sr_sequenceid
+	r.ReadUint32()  // sr_slotid
+	r.ReadUint32()  // sr_highest_slotid
+	r.ReadUint32()  // sr_target_highest_slotid
+	r.ReadUint32()  // sr_status_flags
+
+	// TEST_STATEID result
+	opCode, _ := r.ReadUint32()
+	assert.Equal(t, uint32(OpTestStateID), opCode)
+	opStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(NFS4_OK), opStatus)
+	// tsrr_status_codes: count(4) + status[count](4*N)
+	count, _ := r.ReadUint32()
+	assert.Equal(t, uint32(1), count)
+	statusCode, _ := r.ReadUint32()
+	assert.Equal(t, uint32(NFS4_OK), statusCode)
+}
+
 func TestDestroySession_SeqAfter(t *testing.T) {
 	addr, _ := startTestNFS4Server(t)
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -485,4 +635,75 @@ func TestDestroySession_SeqAfter(t *testing.T) {
 	require.NoError(t, err)
 	status2, _ := parseCompoundReply(t, reply2)
 	assert.Equal(t, uint32(NFS4ERR_BADSESSION), status2)
+}
+
+func TestMinorVersion3Rejected(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// minorversion=3 COMPOUND → NFS4ERR_MINOR_VERS_MISMATCH
+	w := &XDRWriter{}
+	w.WriteString("") // tag
+	w.WriteUint32(3)  // minorversion = 3
+	w.WriteUint32(1)  // op count
+	w.WriteUint32(OpPutRootFH)
+	compound := w.Bytes()
+
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(600, compound)))
+	reply, err := readRPCFrame(conn)
+	require.NoError(t, err)
+
+	status, _ := parseCompoundReply(t, reply)
+	assert.Equal(t, uint32(NFS4ERR_MINOR_VERS_MISMATCH), status)
+}
+
+func TestOpIllegalOnWrongMinorVer(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	sid := exchangeIDAndCreateSession(t, conn, 610)
+
+	// minorversion=1 COMPOUND에 OpSeek (4.2 op) → NFS4ERR_OP_ILLEGAL
+	seekOp := func() []byte {
+		w := &XDRWriter{}
+		w.WriteUint32(OpSeek)
+		w.WriteUint32(0) // stateid seqid
+		w.WriteUint64(0) // stateid other[0:8]
+		w.WriteUint32(0) // stateid other[8:12]
+		w.WriteUint64(0) // offset
+		w.WriteUint32(0) // whence=DATA
+		return w.Bytes()
+	}
+
+	seqOp := buildSequenceOp(sid, 1, 0, 0, false)
+	compound := buildCompound41(seqOp, seekOp())
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(612, compound)))
+	reply, err := readRPCFrame(conn)
+	require.NoError(t, err)
+
+	status, r := parseCompoundReply(t, reply)
+	_ = status // compound status may be OK (stopped at failed op) or OP_ILLEGAL
+	opCount, _ := r.ReadUint32()
+	require.Equal(t, uint32(2), opCount)
+
+	// SEQUENCE result (should be OK)
+	r.ReadUint32() // opCode
+	seqStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(NFS4_OK), seqStatus)
+	r.ReadFixed(16) //nolint:errcheck // sr_sessionid
+	r.ReadUint32()  // sr_sequenceid
+	r.ReadUint32()  // sr_slotid
+	r.ReadUint32()  // sr_highest_slotid
+	r.ReadUint32()  // sr_target_highest_slotid
+	r.ReadUint32()  // sr_status_flags
+
+	// SEEK result → NFS4ERR_OP_ILLEGAL
+	opCode, _ := r.ReadUint32()
+	assert.Equal(t, uint32(OpSeek), opCode)
+	opStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(NFS4ERR_OP_ILLEGAL), opStatus)
 }

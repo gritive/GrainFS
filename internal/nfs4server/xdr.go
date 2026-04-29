@@ -599,6 +599,99 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		r.ReadUint32() // rca_one_fs (bool)
 		return nil, 0, nil
 
+	case OpSeek:
+		// stateid(16) + offset(8) + whence(4)
+		w := getXDRWriter()
+		sid, _ := r.ReadFixed(16)
+		w.buf.Write(sid)
+		offset, _ := r.ReadUint64()
+		w.WriteUint64(offset)
+		whence, _ := r.ReadUint32()
+		w.WriteUint32(whence)
+		return xdrWriterBytes(w), 0, nil
+
+	case OpAllocate:
+		// stateid(16) + offset(8) + length(8)
+		w := getXDRWriter()
+		sid, _ := r.ReadFixed(16)
+		w.buf.Write(sid)
+		offset, _ := r.ReadUint64()
+		w.WriteUint64(offset)
+		length, _ := r.ReadUint64()
+		w.WriteUint64(length)
+		return xdrWriterBytes(w), 0, nil
+
+	case OpDeallocate:
+		// stateid(16) + offset(8) + length(8)
+		w := getXDRWriter()
+		sid, _ := r.ReadFixed(16)
+		w.buf.Write(sid)
+		offset, _ := r.ReadUint64()
+		w.WriteUint64(offset)
+		length, _ := r.ReadUint64()
+		w.WriteUint64(length)
+		return xdrWriterBytes(w), 0, nil
+
+	case OpCopy:
+		// src stateid(16) + dst stateid(16) + src_offset(8) + dst_offset(8) + count(8)
+		// + ca_consecutive(4) + ca_synchronous(4) + source_server count(4)
+		w := getXDRWriter()
+		srcSid, _ := r.ReadFixed(16)
+		w.buf.Write(srcSid)
+		dstSid, _ := r.ReadFixed(16)
+		w.buf.Write(dstSid)
+		srcOffset, _ := r.ReadUint64()
+		w.WriteUint64(srcOffset)
+		dstOffset, _ := r.ReadUint64()
+		w.WriteUint64(dstOffset)
+		count, _ := r.ReadUint64()
+		w.WriteUint64(count)
+		r.ReadUint32() // ca_consecutive
+		r.ReadUint32() // ca_synchronous
+		srcCount, _ := r.ReadUint32()
+		for i := uint32(0); i < srcCount; i++ {
+			r.ReadOpaque() //nolint:errcheck // na_netid
+			r.ReadOpaque() //nolint:errcheck // na_uaddr
+		}
+		return xdrWriterBytes(w), 0, nil
+
+	case OpIOAdvise:
+		// stateid(16) + offset(8) + count(8) + hints bitmap
+		r.ReadFixed(16) //nolint:errcheck // stateid
+		r.ReadUint64()  // offset
+		r.ReadUint64()  // count
+		blen, _ := r.ReadUint32()
+		for i := uint32(0); i < blen; i++ {
+			r.ReadUint32()
+		}
+		return nil, 0, nil
+
+	case OpDestroyClientID:
+		b := getOpArg8()
+		clientID, _ := r.ReadUint64()
+		binary.BigEndian.PutUint64(b, clientID)
+		return b, 8, nil
+
+	case OpFreeStateID:
+		// stateid4: seqid(4) + other(12)
+		var buf [16]byte
+		io.ReadFull(&r.r, buf[:])
+		data := make([]byte, 16)
+		copy(data, buf[:])
+		return data, 0, nil
+
+	case OpTestStateID:
+		// tsria_stateids: count(4) + N×stateid4(16)
+		count, _ := r.ReadUint32()
+		w := getXDRWriter()
+		w.WriteUint32(count)
+		for i := uint32(0); i < count; i++ {
+			var sid [16]byte
+			io.ReadFull(&r.r, sid[:])
+			w.buf.Write(sid[:])
+		}
+		return xdrWriterBytes(w), 0, nil
+
 	default:
 		return nil, 0, nil
 	}

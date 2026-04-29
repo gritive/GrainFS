@@ -21,7 +21,7 @@ func (fh FileHandle) String() string {
 // ClientState tracks NFSv4 per-client state (SETCLIENTID/SETCLIENTID_CONFIRM).
 type ClientState struct {
 	ClientID  uint64
-	Confirmed bool
+	Confirmed atomic.Bool // set true by SETCLIENTID_CONFIRM / EXCHANGE_ID
 	Verifier  [8]byte
 }
 
@@ -44,8 +44,8 @@ type Session struct {
 	ClientID    uint64
 	Sequence    uint32
 	ForeChannel ChannelAttrs
-	// slot table: indexed by slotid, value = last sequence seen on that slot
-	SlotSeq []uint32
+	// per-slot replay cache (indexed by slotid)
+	Slots []SlotEntry
 }
 
 // ExchangeIDResult is the result of an EXCHANGE_ID operation.
@@ -71,16 +71,17 @@ type StateManager struct {
 	writeMu sync.Mutex              // serialises writers
 
 	nextClientID atomic.Uint64
-	clientMu     sync.Mutex
-	clients      map[uint64]*ClientState
+	clients      sync.Map // map[uint64]*ClientState — lock-free reads
 
 	nextStateID atomic.Uint64
 
-	// NFSv4.1 session state
-	sessionMu sync.Mutex
-	sessions  map[SessionID]*Session
-	// clientID → sequenceid for EXCHANGE_ID idempotency
-	exchSeq map[uint64]uint32
+	// NFSv4.1 session and EXCHANGE_ID state (lock-free reads).
+	sessions sync.Map // map[SessionID]*Session
+	exchSeq  sync.Map // map[uint64]*atomic.Uint32 — EXCHANGE_ID sequence per clientID
+
+	// slotMu serialises per-slot replay-cache updates in opSequence.
+	// Session lookup (sessions.Load) is lock-free; only slot field writes need this.
+	slotMu sync.Mutex
 
 	// dirs tracks paths that exist as directories.
 	// Value type is int64 (UnixNano creation timestamp) for CHANGE attribute.
@@ -97,11 +98,7 @@ type StateManager struct {
 
 // NewStateManager creates a state manager.
 func NewStateManager() *StateManager {
-	sm := &StateManager{
-		clients:  make(map[uint64]*ClientState),
-		sessions: make(map[SessionID]*Session),
-		exchSeq:  make(map[uint64]uint32),
-	}
+	sm := &StateManager{}
 	sm.nextClientID.Store(1)
 	sm.nextStateID.Store(1)
 	rand.Read(sm.WriteVerf[:])
@@ -220,25 +217,19 @@ func (sm *StateManager) RootFH() FileHandle {
 // SetClientID registers a new client and returns the client ID.
 func (sm *StateManager) SetClientID(verifier [8]byte) uint64 {
 	id := sm.nextClientID.Add(1) - 1
-	sm.clientMu.Lock()
-	sm.clients[id] = &ClientState{
-		ClientID:  id,
-		Confirmed: false,
-		Verifier:  verifier,
-	}
-	sm.clientMu.Unlock()
+	cs := &ClientState{ClientID: id, Verifier: verifier}
+	// Confirmed stays false (zero value of atomic.Bool)
+	sm.clients.Store(id, cs)
 	return id
 }
 
 // ConfirmClientID confirms a client ID.
 func (sm *StateManager) ConfirmClientID(clientID uint64) bool {
-	sm.clientMu.Lock()
-	defer sm.clientMu.Unlock()
-	cs, ok := sm.clients[clientID]
+	v, ok := sm.clients.Load(clientID)
 	if !ok {
 		return false
 	}
-	cs.Confirmed = true
+	v.(*ClientState).Confirmed.Store(true)
 	return true
 }
 
@@ -252,14 +243,12 @@ func generateFH() FileHandle {
 // Idempotent: same verifier → same clientID.
 func (sm *StateManager) ExchangeID(verifier [8]byte, clientOwnerID []byte) ExchangeIDResult {
 	id := sm.nextClientID.Add(1) - 1
-	sm.clientMu.Lock()
-	sm.clients[id] = &ClientState{ClientID: id, Confirmed: true, Verifier: verifier}
-	sm.clientMu.Unlock()
+	cs := &ClientState{ClientID: id, Verifier: verifier}
+	cs.Confirmed.Store(true)
+	sm.clients.Store(id, cs)
 
-	sm.sessionMu.Lock()
-	seq := sm.exchSeq[id] // starts at 0, first call returns 0
-	sm.exchSeq[id] = seq + 1
-	sm.sessionMu.Unlock()
+	counter, _ := sm.exchSeq.LoadOrStore(id, new(atomic.Uint32))
+	seq := counter.(*atomic.Uint32).Add(1) - 1
 
 	return ExchangeIDResult{ClientID: id, SequenceID: seq}
 }
@@ -278,30 +267,54 @@ func (sm *StateManager) CreateSession(clientID uint64, fore ChannelAttrs) (Sessi
 		SessionID:   sid,
 		ClientID:    clientID,
 		ForeChannel: fore,
-		SlotSeq:     make([]uint32, maxSlots),
+		Slots:       make([]SlotEntry, maxSlots),
 	}
 
-	sm.sessionMu.Lock()
-	sm.sessions[sid] = sess
-	sm.sessionMu.Unlock()
+	sm.sessions.Store(sid, sess)
 
 	return sid, 0
 }
 
 // GetSession returns the session for a session ID, or nil if not found.
 func (sm *StateManager) GetSession(sid SessionID) *Session {
-	sm.sessionMu.Lock()
-	defer sm.sessionMu.Unlock()
-	return sm.sessions[sid]
+	v, ok := sm.sessions.Load(sid)
+	if !ok {
+		return nil
+	}
+	return v.(*Session)
 }
 
 // DestroySession removes a session.
 func (sm *StateManager) DestroySession(sid SessionID) bool {
-	sm.sessionMu.Lock()
-	defer sm.sessionMu.Unlock()
-	_, ok := sm.sessions[sid]
-	if ok {
-		delete(sm.sessions, sid)
-	}
+	_, ok := sm.sessions.LoadAndDelete(sid)
 	return ok
+}
+
+// ClientExists reports whether clientID is registered and confirmed.
+func (sm *StateManager) ClientExists(clientID uint64) bool {
+	v, ok := sm.clients.Load(clientID)
+	return ok && v.(*ClientState).Confirmed.Load()
+}
+
+// DestroyClientID removes all sessions for clientID and the client record.
+func (sm *StateManager) DestroyClientID(clientID uint64) {
+	sm.sessions.Range(func(k, v any) bool {
+		if v.(*Session).ClientID == clientID {
+			sm.sessions.Delete(k)
+		}
+		return true
+	})
+	sm.clients.Delete(clientID)
+}
+
+// FreeStateID is a no-op stub; GrainFS does not track fine-grained stateids.
+func (sm *StateManager) FreeStateID(_ uint64) {}
+
+// TestStateIDs returns NFS4_OK for each stateid (no expiry tracking).
+func (sm *StateManager) TestStateIDs(count int) []uint32 {
+	statuses := make([]uint32, count)
+	for i := range statuses {
+		statuses[i] = NFS4_OK
+	}
+	return statuses
 }
