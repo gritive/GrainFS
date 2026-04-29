@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.5.8] — 2026-04-29
+
+### Changed
+
+- **generic pool wrappers** (`internal/pool`): `Pool[T]`, `SyncMap[K,V]`, `AtomicValue[T]` 추가.
+  코드베이스 전체의 `sync.Pool`/`sync.Map`/`atomic.Value` 타입 단언(`.(T)`) 을 제거하여
+  런타임 패닉 가능성 원천 차단 및 가독성 향상 (23 파일).
+
 ## [0.0.5.7] — 2026-04-29
 
 ### Added
