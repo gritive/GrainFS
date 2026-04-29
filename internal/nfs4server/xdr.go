@@ -5,7 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sync"
+
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
 // XDR encoding/decoding helpers for NFSv4.0 (RFC 7530).
@@ -17,10 +18,10 @@ type XDRWriter struct {
 
 const maxXDRWriterCap = 64 * 1024
 
-var xdrWriterPool = sync.Pool{New: func() any { return &XDRWriter{} }}
+var xdrWriterPool = pool.New(func() *XDRWriter { return &XDRWriter{} })
 
 func getXDRWriter() *XDRWriter {
-	return xdrWriterPool.Get().(*XDRWriter)
+	return xdrWriterPool.Get()
 }
 
 func putXDRWriter(w *XDRWriter) {
@@ -72,19 +73,19 @@ func (w *XDRWriter) Bytes() []byte {
 
 // XDRReader reads XDR-encoded values.
 type XDRReader struct {
-	r    bytes.Reader
-	pool *sync.Pool
+	r      bytes.Reader
+	pooled bool
 }
 
-var xdrReaderPool = sync.Pool{New: func() any { return &XDRReader{} }}
+var xdrReaderPool = pool.New(func() *XDRReader { return &XDRReader{} })
 
-var opArgPool16 = sync.Pool{New: func() any { var b [16]byte; return &b }}
-var opArgPool8 = sync.Pool{New: func() any { var b [8]byte; return &b }}
+var opArgPool16 = pool.New(func() *[16]byte { return new([16]byte) })
+var opArgPool8 = pool.New(func() *[8]byte { return new([8]byte) })
 
-func getOpArg16() []byte  { return opArgPool16.Get().(*[16]byte)[:] }
+func getOpArg16() []byte  { return opArgPool16.Get()[:] }
 func putOpArg16(b []byte) { opArgPool16.Put((*[16]byte)(b[:16])) }
 
-func getOpArg8() []byte  { return opArgPool8.Get().(*[8]byte)[:] }
+func getOpArg8() []byte  { return opArgPool8.Get()[:] }
 func putOpArg8(b []byte) { opArgPool8.Put((*[8]byte)(b[:8])) }
 
 func NewXDRReader(data []byte) *XDRReader {
@@ -94,17 +95,16 @@ func NewXDRReader(data []byte) *XDRReader {
 }
 
 func newXDRReaderFromPool(data []byte) *XDRReader {
-	r := xdrReaderPool.Get().(*XDRReader)
+	r := xdrReaderPool.Get()
 	r.r.Reset(data)
-	r.pool = &xdrReaderPool
+	r.pooled = true
 	return r
 }
 
 func putXDRReader(r *XDRReader) {
-	if r.pool != nil {
-		p := r.pool
-		r.pool = nil
-		p.Put(r)
+	if r.pooled {
+		r.pooled = false
+		xdrReaderPool.Put(r)
 	}
 }
 

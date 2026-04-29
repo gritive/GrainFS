@@ -143,7 +143,7 @@ func logKey(index uint64) []byte {
 }
 
 func marshalLogEntry(entry LogEntry) []byte {
-	b := raftBuilderPool.Get().(*flatbuffers.Builder)
+	b := raftBuilderPool.Get()
 	var cmdOff flatbuffers.UOffsetT
 	if len(entry.Command) > 0 {
 		cmdOff = b.CreateByteVector(entry.Command)
@@ -315,7 +315,7 @@ func (s *BadgerLogStore) TruncateBefore(beforeIndex uint64) error {
 }
 
 func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {
-	b := raftBuilderPool.Get().(*flatbuffers.Builder)
+	b := raftBuilderPool.Get()
 	votedForOff := b.CreateString(votedFor)
 	pb.RaftStateStart(b)
 	pb.RaftStateAddTerm(b, term)
@@ -354,7 +354,7 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 }
 
 func (s *BadgerLogStore) SaveSnapshot(index, term uint64, data []byte) error {
-	b := raftBuilderPool.Get().(*flatbuffers.Builder)
+	b := raftBuilderPool.Get()
 	pb.SnapshotMetaStart(b)
 	pb.SnapshotMetaAddIndex(b, index)
 	pb.SnapshotMetaAddTerm(b, term)

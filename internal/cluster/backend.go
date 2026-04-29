@@ -25,6 +25,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -67,7 +68,7 @@ type DistributedBackend struct {
 	peerHealth  *PeerHealth
 	registry    *Registry // cache invalidators (VFS instances)
 	ecConfig    ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
-	shardLocks  sync.Map  // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+	shardLocks  pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard

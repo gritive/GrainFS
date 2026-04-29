@@ -3,16 +3,14 @@ package cluster
 import (
 	"fmt"
 	"sort"
-	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
-var clusterBuilderPool = sync.Pool{
-	New: func() any { return flatbuffers.NewBuilder(256) },
-}
+var clusterBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
 
 // objectMeta is a local struct for serializing object metadata to BadgerDB.
 type objectMeta struct {
@@ -63,7 +61,7 @@ func fbSafe[T any](data []byte, fn func([]byte) T) (t T, err error) {
 // --- Command encode/decode ---
 
 func encodeCreateBucketCmd(c CreateBucketCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	clusterpb.CreateBucketCmdStart(b)
 	clusterpb.CreateBucketCmdAddBucket(b, bucketOff)
@@ -81,7 +79,7 @@ func decodeCreateBucketCmd(data []byte) (CreateBucketCmd, error) {
 }
 
 func encodeDeleteBucketCmd(c DeleteBucketCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	clusterpb.DeleteBucketCmdStart(b)
 	clusterpb.DeleteBucketCmdAddBucket(b, bucketOff)
@@ -99,7 +97,7 @@ func decodeDeleteBucketCmd(data []byte) (DeleteBucketCmd, error) {
 }
 
 func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	ctOff := b.CreateString(c.ContentType)
@@ -156,7 +154,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 }
 
 func encodeDeleteObjectCmd(c DeleteObjectCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	vidOff := b.CreateString(c.VersionID)
@@ -182,7 +180,7 @@ func decodeDeleteObjectCmd(data []byte) (DeleteObjectCmd, error) {
 }
 
 func encodeDeleteObjectVersionCmd(c DeleteObjectVersionCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	vidOff := b.CreateString(c.VersionID)
@@ -208,7 +206,7 @@ func decodeDeleteObjectVersionCmd(data []byte) (DeleteObjectVersionCmd, error) {
 }
 
 func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	uidOff := b.CreateString(c.UploadID)
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
@@ -239,7 +237,7 @@ func decodeCreateMultipartUploadCmd(data []byte) (CreateMultipartUploadCmd, erro
 }
 
 func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	uidOff := b.CreateString(c.UploadID)
@@ -278,7 +276,7 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 }
 
 func encodeAbortMultipartCmd(c AbortMultipartCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	uidOff := b.CreateString(c.UploadID)
@@ -304,7 +302,7 @@ func decodeAbortMultipartCmd(data []byte) (AbortMultipartCmd, error) {
 }
 
 func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	var policyOff flatbuffers.UOffsetT
 	if len(c.PolicyJSON) > 0 {
@@ -329,7 +327,7 @@ func decodeSetBucketPolicyCmd(data []byte) (SetBucketPolicyCmd, error) {
 }
 
 func encodeDeleteBucketPolicyCmd(c DeleteBucketPolicyCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	clusterpb.DeleteBucketPolicyCmdStart(b)
 	clusterpb.DeleteBucketPolicyCmdAddBucket(b, bucketOff)
@@ -364,7 +362,7 @@ func buildStringVector(b *flatbuffers.Builder, ss []string, startVec func(*flatb
 // --- ObjectMeta codec ---
 
 func marshalObjectMeta(m objectMeta) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 	etagOff := b.CreateString(m.ETag)
@@ -419,7 +417,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 // --- SnapshotState codec ---
 
 func marshalSnapshotState(state map[string][]byte) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 
 	// Sort keys for deterministic output.
 	keys := make([]string, 0, len(state))
@@ -483,7 +481,7 @@ func unmarshalSnapshotState(data []byte) (result map[string][]byte, err error) {
 // --- ClusterMultipartMeta codec ---
 
 func marshalClusterMultipartMeta(m clusterMultipartMeta) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	ctOff := b.CreateString(m.ContentType)
 	clusterpb.MultipartMetaStart(b)
 	clusterpb.MultipartMetaAddContentType(b, ctOff)
@@ -503,7 +501,7 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 // --- MigrateShard / MigrationDone codec ---
 
 func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	vidOff := b.CreateString(c.VersionID)
@@ -551,7 +549,7 @@ func decodeMigrationDoneCmd(data []byte) (MigrationDoneFSMCmd, error) {
 }
 
 func encodeMigrationDoneCmd(c MigrationDoneFSMCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	vidOff := b.CreateString(c.VersionID)
@@ -567,7 +565,7 @@ func encodeMigrationDoneCmd(c MigrationDoneFSMCmd) ([]byte, error) {
 }
 
 func encodeSetBucketVersioningCmd(c SetBucketVersioningCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	stateOff := b.CreateString(c.State)
 	clusterpb.SetBucketVersioningCmdStart(b)
@@ -590,7 +588,7 @@ func decodeSetBucketVersioningCmd(data []byte) (SetBucketVersioningCmd, error) {
 }
 
 func encodeSetObjectACLCmd(c SetObjectACLCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	clusterpb.SetObjectACLCmdStart(b)
@@ -616,7 +614,7 @@ func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
 
 // encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
 func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	// VNodeEntry 객체들을 먼저 역순으로 빌드 (FlatBuffers vector prepend 방식)
 	vnOffsets := make([]flatbuffers.UOffsetT, len(c.VNodes))
 	for i := len(c.VNodes) - 1; i >= 0; i-- {
@@ -705,7 +703,7 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 
@@ -750,7 +748,7 @@ func decodePutShardPlacementCmd(data []byte) (PutShardPlacementCmd, error) {
 }
 
 func encodeDeleteShardPlacementCmd(c DeleteShardPlacementCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	clusterpb.DeleteShardPlacementCmdStart(b)

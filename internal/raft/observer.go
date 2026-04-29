@@ -2,7 +2,8 @@ package raft
 
 import (
 	"sync"
-	"sync/atomic"
+
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
 // EventType identifies the kind of observation emitted by a Raft node.
@@ -37,7 +38,7 @@ type Event struct {
 func (n *Node) RegisterObserver(ch chan<- Event) {
 	n.observerMu.Lock()
 	defer n.observerMu.Unlock()
-	cur, _ := n.observers.Load().([]chan<- Event)
+	cur := n.observers.Load()
 	next := make([]chan<- Event, len(cur)+1)
 	copy(next, cur)
 	next[len(cur)] = ch
@@ -48,7 +49,7 @@ func (n *Node) RegisterObserver(ch chan<- Event) {
 func (n *Node) DeregisterObserver(ch chan<- Event) {
 	n.observerMu.Lock()
 	defer n.observerMu.Unlock()
-	cur, _ := n.observers.Load().([]chan<- Event)
+	cur := n.observers.Load()
 	next := make([]chan<- Event, 0, len(cur))
 	for _, obs := range cur {
 		if obs != ch {
@@ -61,7 +62,7 @@ func (n *Node) DeregisterObserver(ch chan<- Event) {
 // notifyObservers delivers e to all registered observers non-blockingly.
 // Read path is lock-free via atomic.Value COW; observerMu only serializes writes.
 func (n *Node) notifyObservers(e Event) {
-	obs, _ := n.observers.Load().([]chan<- Event)
+	obs := n.observers.Load()
 	for _, ch := range obs {
 		select {
 		case ch <- e:
@@ -72,6 +73,6 @@ func (n *Node) notifyObservers(e Event) {
 
 // observerState holds the observer fields embedded in Node.
 type observerState struct {
-	observers  atomic.Value // stores []chan<- Event; read lock-free via COW
-	observerMu sync.Mutex   // serializes Register/Deregister only
+	observers  pool.AtomicValue[[]chan<- Event] // read lock-free via COW
+	observerMu sync.Mutex                       // serializes Register/Deregister only
 }
