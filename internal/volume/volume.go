@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
@@ -81,6 +82,7 @@ type Manager struct {
 	dedup    dedup.DedupIndex            // nil = dedup 비활성화
 	blocks   *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
 	opts     ManagerOptions
+	blkPool  *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
 }
 
 // NewManager creates a new volume manager.
@@ -97,6 +99,24 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 		dedup:    opts.DedupIndex,
 		blocks:   opts.BlockCache,
 		opts:     opts,
+		blkPool:  pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
+	}
+}
+
+// getBlkBuf returns a zeroed block buffer from the pool, or allocates one for non-default sizes.
+func (m *Manager) getBlkBuf(blockSize int) []byte {
+	if blockSize == DefaultBlockSize {
+		b := m.blkPool.Get()
+		clear(b)
+		return b
+	}
+	return make([]byte, blockSize)
+}
+
+// putBlkBuf returns a block buffer to the pool (only for default-size buffers).
+func (m *Manager) putBlkBuf(b []byte) {
+	if len(b) == DefaultBlockSize {
+		m.blkPool.Put(b)
 	}
 }
 
@@ -263,33 +283,37 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 		// Read the block. Order: simulator (always-on metering),
 		// real cache (skip backend on hit), backend fallback.
 		readamp.RecordVolumeBlock(phyKey)
-		blkData := make([]byte, vol.BlockSize)
+
+		canRead := int(bs - blkOff)
+		remaining := len(p) - totalRead
+		if canRead > remaining {
+			canRead = remaining
+		}
+		if off+int64(totalRead)+int64(canRead) > vol.Size {
+			canRead = int(vol.Size - pos)
+		}
+
 		if m.blocks != nil {
 			if cached, ok := m.blocks.Get(phyKey); ok {
-				copy(blkData, cached)
-				if len(cached) < vol.BlockSize {
-					clear(blkData[len(cached):])
+				// Cache hit: copy directly without an intermediate buffer.
+				src := cached[blkOff:]
+				if len(src) < canRead {
+					// Short cached block (partial last block) — copy available, zero the rest.
+					copy(p[totalRead:totalRead+len(src)], src)
+					clear(p[totalRead+len(src) : totalRead+canRead])
+				} else {
+					copy(p[totalRead:totalRead+canRead], src[:canRead])
 				}
-				canRead := int(bs - blkOff)
-				remaining := len(p) - totalRead
-				if canRead > remaining {
-					canRead = remaining
-				}
-				endPos := off + int64(totalRead) + int64(canRead)
-				if endPos > vol.Size {
-					canRead = int(vol.Size - pos)
-				}
-				copy(p[totalRead:totalRead+canRead], blkData[blkOff:blkOff+int64(canRead)])
 				totalRead += canRead
 				continue
 			}
 		}
+
+		// Cache miss: use pool buffer, then copy to output.
+		blkData := m.getBlkBuf(vol.BlockSize)
 		rc, _, err := m.backend.GetObject(volumeBucketName, phyKey)
 		if err != nil {
-			// Block doesn't exist (or never written with dedup) = zeros.
-			// We do NOT cache this — keeping zero entries pollutes the
-			// cache with phantom blocks for sparse volumes.
-			clear(blkData)
+			// Block doesn't exist = zeros; blkData is already cleared by getBlkBuf.
 		} else {
 			n, _ := io.ReadFull(rc, blkData)
 			rc.Close()
@@ -297,22 +321,11 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 				clear(blkData[n:])
 			}
 			if m.blocks != nil {
-				m.blocks.Put(phyKey, blkData)
+				m.blocks.Put(phyKey, blkData) // Put copies; blkData can be pooled after.
 			}
 		}
-
-		// Copy from block to output
-		canRead := int(bs - blkOff)
-		remaining := len(p) - totalRead
-		if canRead > remaining {
-			canRead = remaining
-		}
-		endPos := off + int64(totalRead) + int64(canRead)
-		if endPos > vol.Size {
-			canRead = int(vol.Size - pos)
-		}
-
-		copy(p[totalRead:totalRead+canRead], blkData[blkOff:blkOff+int64(canRead)])
+		copy(p[totalRead:totalRead+canRead], blkData[blkOff:int(blkOff)+canRead])
+		m.putBlkBuf(blkData)
 		totalRead += canRead
 	}
 
@@ -418,13 +431,14 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		// backend. Must read via ReadBlock to preserve bytes outside the write window.
 		var blkData []byte
 		if !isFullBlock {
-			blkData = make([]byte, vol.BlockSize)
+			blkData = m.getBlkBuf(vol.BlockSize)
 		}
 		var isNew bool
 		var oldKey string // only populated in non-dedup paths
 		if m.dedup != nil {
 			canonical, found, rErr := m.dedup.ReadBlock(name, blkNum)
 			if rErr != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("read dedup block %d: %w", blkNum, rErr)
 			}
 			if found {
@@ -474,12 +488,14 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			hash := sha256.Sum256(blkData)
 			res, dedupErr := m.dedup.WriteBlock(name, blkNum, hash, newKey)
 			if dedupErr != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("dedup block %d: %w", blkNum, dedupErr)
 			}
 			targetKey = res.Canonical
 			if res.IsNew {
 				if _, err := m.backend.PutObject(volumeBucketName, targetKey,
 					bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+					m.putBlkBuf(blkData)
 					return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 				}
 			}
@@ -494,6 +510,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			targetKey = cowBlockKey(name, blkNum)
 			if _, err := m.backend.PutObject(volumeBucketName, targetKey,
 				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 			}
 			// CoW: delete old physical object (PackedBackend decrements ref; deletes at ref=0)
@@ -513,6 +530,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 				src = bytes.NewReader(blkData)
 			}
 			if _, err := m.backend.PutObject(volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 			}
 		}
@@ -528,6 +546,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		if targetKey != "" {
 			invalidations = append(invalidations, targetKey)
 		}
+		m.putBlkBuf(blkData) // no-op when blkData is nil (isFullBlock path)
 		totalWritten += canWrite
 	}
 

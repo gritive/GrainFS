@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -52,17 +53,26 @@ const (
 	nbdCmdTrim  = uint32(4)
 )
 
+// nbdPoolBufSize is the buffer size that the pool recycles. Matches the
+// default NBD block size (4 KiB) and the most common fio workload size.
+const nbdPoolBufSize = 4096
+
 // Server serves a single volume over NBD protocol.
 type Server struct {
 	mgr      *volume.Manager
 	volName  string
 	listener atomic.Pointer[net.Listener]
 	closed   atomic.Bool
+	bufPool  *pool.Pool[[]byte]
 }
 
 // NewServer creates a new NBD server for the named volume.
 func NewServer(mgr *volume.Manager, volName string) *Server {
-	return &Server{mgr: mgr, volName: volName}
+	return &Server{
+		mgr:     mgr,
+		volName: volName,
+		bufPool: pool.New(func() []byte { return make([]byte, nbdPoolBufSize) }),
+	}
 }
 
 // ListenAndServe starts the NBD server on the given address.
@@ -254,6 +264,21 @@ func (s *Server) sendOptReply(conn net.Conn, optType, replyType uint32, data []b
 	return nil
 }
 
+// getBuf returns a buffer of exactly length bytes. Pooled for nbdPoolBufSize.
+func (s *Server) getBuf(length uint32) []byte {
+	if length == nbdPoolBufSize {
+		return s.bufPool.Get()
+	}
+	return make([]byte, length)
+}
+
+// putBuf returns buf to the pool if it was pool-allocated.
+func (s *Server) putBuf(buf []byte) {
+	if len(buf) == nbdPoolBufSize {
+		s.bufPool.Put(buf)
+	}
+}
+
 func (s *Server) handleRequest(conn net.Conn) error {
 	var hdr [28]byte
 	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
@@ -273,16 +298,20 @@ func (s *Server) handleRequest(conn net.Conn) error {
 
 	switch cmdType {
 	case nbdCmdRead:
-		buf := make([]byte, length)
+		buf := s.getBuf(length)
 		_, _ = s.mgr.ReadAt(s.volName, buf, int64(offset))
-		return s.sendReply(conn, handle, 0, buf)
+		err := s.sendReply(conn, handle, 0, buf)
+		s.putBuf(buf)
+		return err
 
 	case nbdCmdWrite:
-		buf := make([]byte, length)
+		buf := s.getBuf(length)
 		if _, err := io.ReadFull(conn, buf); err != nil {
+			s.putBuf(buf)
 			return fmt.Errorf("read write data: %w", err)
 		}
 		_, _ = s.mgr.WriteAt(s.volName, buf, int64(offset))
+		s.putBuf(buf)
 		return s.sendReply(conn, handle, 0, nil)
 
 	case nbdCmdDisc:
