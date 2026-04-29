@@ -24,4 +24,9 @@ type Driver interface {
 	// RestartNode performs Close() on the node, then NewNode + Start with the
 	// same Config. Log store state is NOT preserved — in-memory only.
 	RestartNode(nodeID string)
+
+	// SetRequestVoteHook installs a hook that fires before each RequestVote RPC
+	// delivery to toNodeID. Return (nil, true) to drop, (args, false) to deliver.
+	// A nil fn removes the hook.
+	SetRequestVoteHook(toNodeID string, fn RequestVoteHookFn)
 }

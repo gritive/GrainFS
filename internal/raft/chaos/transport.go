@@ -12,6 +12,11 @@ type edge struct {
 	from, to string
 }
 
+// RequestVoteHookFn intercepts an outbound RequestVote RPC before delivery.
+// Return (nil, true) to drop the message, or (args, false) to deliver
+// (possibly modified) args. Keyed by the destination node ID.
+type RequestVoteHookFn func(from, to string, args *raft.RequestVoteArgs) (*raft.RequestVoteArgs, bool)
+
 // ChaosTransport routes RPC callbacks between in-memory raft.Node instances.
 // All Driver primitives (Partition, DropMessage) are gated here.
 type ChaosTransport struct {
@@ -19,6 +24,7 @@ type ChaosTransport struct {
 	nodes       map[string]*raft.Node
 	partitioned map[string]bool
 	dropCounts  map[edge]int
+	rvHooks     map[string]RequestVoteHookFn
 }
 
 // NewChaosTransport creates an empty transport. Register nodes before Wire.
@@ -27,6 +33,7 @@ func NewChaosTransport() *ChaosTransport {
 		nodes:       make(map[string]*raft.Node),
 		partitioned: make(map[string]bool),
 		dropCounts:  make(map[edge]int),
+		rvHooks:     make(map[string]RequestVoteHookFn),
 	}
 }
 
@@ -94,6 +101,31 @@ func (c *ChaosTransport) DropMessage(from, to string, n int) {
 	c.mu.Unlock()
 }
 
+// SetRequestVoteHook installs a hook that fires before each RequestVote
+// delivery to toNodeID. A nil fn removes the hook.
+func (c *ChaosTransport) SetRequestVoteHook(toNodeID string, fn RequestVoteHookFn) {
+	c.mu.Lock()
+	if fn == nil {
+		delete(c.rvHooks, toNodeID)
+	} else {
+		c.rvHooks[toNodeID] = fn
+	}
+	c.mu.Unlock()
+}
+
+// applyRVHook applies the per-destination hook (if any) for a RequestVote
+// from→to. Must be called without c.mu held.
+// Returns (modified args, drop). drop=true means the caller must not deliver.
+func (c *ChaosTransport) applyRVHook(from, to string, args *raft.RequestVoteArgs) (*raft.RequestVoteArgs, bool) {
+	c.mu.Lock()
+	fn := c.rvHooks[to]
+	c.mu.Unlock()
+	if fn == nil {
+		return args, false
+	}
+	return fn(from, to, args)
+}
+
 // errPartitioned is returned by gated callbacks when a message is dropped.
 var errPartitioned = errors.New("chaos: partitioned")
 
@@ -107,7 +139,11 @@ func (c *ChaosTransport) Wire(n *raft.Node) {
 		if !ok {
 			return nil, errPartitioned
 		}
-		return target.HandleRequestVote(args), nil
+		modifiedArgs, drop := c.applyRVHook(from, peer, args)
+		if drop {
+			return nil, errPartitioned
+		}
+		return target.HandleRequestVote(modifiedArgs), nil
 	}
 
 	sendAppend := func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {

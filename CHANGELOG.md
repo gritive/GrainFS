@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.5.1] - 2026-04-29
+
+### Added
+
+- **Raft PR 1b — Chaos Harness Phase 2: RequestVoteHook + Disrupting Prevention + Mixed-Version Upgrade** (`internal/raft/chaos/`):
+  - **`RequestVoteHookFn`** (`chaos/transport.go`): per-destination-node 훅 타입. `(nil, true)` 반환 시 드롭, `(args, false)` 반환 시 (수정된) args 전달. partition/drop 체크 이후 발화.
+  - **`SetRequestVoteHook`** (`ChaosTransport`, `Cluster`, `Driver`): 훅 설치/제거 API. 구버전 노드 시뮬레이션(PreVote 드롭)에 활용.
+  - **`InjectRequestVote`** (`Cluster`): 모든 chaos transport 게이팅을 우회하고 `HandleRequestVote`를 직접 호출. Disrupting Prevention 검증에 활용.
+  - **Chaos 시나리오 2건 추가**:
+    - `TestDisruptingPrevention_HighTermVoteBlocked`: 팔로워에게 term+10 real RequestVote 주입 → stickiness가 거부 + 리더 유지 검증. PR 1a 리뷰 M3(옵션 A)의 후속 시나리오.
+    - `TestMixedVersionRollingUpgrade_PreVoteGracefulFallback`: node-2가 PreVote를 드롭하는 혼합 버전 클러스터에서 node-0/1이 pre-vote 과반수(2/3)로 정상 선출되는지 검증. PR 1a baseline 주석의 명시적 요청 이행.
+  - **단위 테스트 2건 추가** (`chaos/transport_test.go`): `TestChaosTransport_RequestVoteHook_API` — `applyRVHook` 직접 검증 (drop/pass-through/nil-remove). `TestChaosTransport_RequestVoteHook_ClusterElectsLeader` — 훅 하에서 클러스터 선출 통합 검증.
+
 ## [0.0.5.0] - 2026-04-29
 
 ### Added
