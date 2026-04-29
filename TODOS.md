@@ -39,6 +39,22 @@
 - [ ] nbd over internet for edge computing (powered by wireguard)
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 
+## Phase 18: FUSE-over-S3 (외부 도구 호환성 보증)
+
+**방침**: 별도 FUSE 바이너리/서버 사이드 마운트를 만들지 않는다. GrainFS는 표준 S3 API만 제공하고, 클라이언트는 rclone / s3fs / goofys 같은 기존 FUSE-over-S3 도구를 그대로 사용한다. 클라이언트 머신에 grainfs 바이너리 설치 불필요.
+
+**완료**:
+- [x] `internal/storage/errors.go` — sentinel errors (`ErrECDegraded`, `ErrNoSpace`, `ErrQuotaExceeded`, `ErrInvalidVersion`)
+- [x] `internal/vfs/vfs.go` — `grainFile.ReadAt` 동시성 안전 (`mu sync.Mutex` + `rc`/`pos` 보호) — io.ReaderAt 계약 준수, S3 GetObject 병렬 range read 지원
+- [x] `tests/fuse_s3_colima/` — Colima Linux VM에서 rclone mount로 macOS 호스트 GrainFS S3 endpoint 마운트 후 smoke / directories / rename / cross-protocol round-trip 검증 (`make test-fuse-s3-colima`)
+- [x] `tests/fuse_s3_colima/bench_test.go` — FUSE mount vs direct S3 처리량 벤치 (`make bench-fuse-s3-colima`). 64 MiB / Apple M3 / loopback / `--vfs-cache-mode off` / 3회 평균: Direct PUT 96.8 MB/s · Direct GET 108.0 MB/s · FUSE Write 106.7 MB/s · FUSE Read 107.3 MB/s — **FUSE 오버헤드 ≈ 0%**
+- [x] README "FUSE-over-S3 마운트" 섹션 — 마운트 가이드 + 지원/미지원 연산표 + 처리량 결과
+
+**향후 (선택)**:
+- [ ] s3fs-fuse, goofys 호환성 추가 검증 (현재 rclone만 검증)
+- [ ] FUSE-over-S3 throughput 벤치 (NFSv4 baseline 대비)
+- [ ] 엄격한 POSIX 시맨틱(atomic rename, file locking)이 필요하면 NFSv4 권장 — 별도 FUSE 솔루션 도입은 NFSv4 운영성 부족이 입증된 이후
+
 ## Phase 19: Performance
 
 - [ ] go-billy: Direct File I/O; O_DIRECT
