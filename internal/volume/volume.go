@@ -397,10 +397,29 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		blkNum := pos / bs
 		blkOff := pos % bs
 
+		// Compute write range first to detect full-block overwrite before reading.
+		canWrite := int(bs - blkOff)
+		remaining := len(p) - totalWritten
+		if canWrite > remaining {
+			canWrite = remaining
+		}
+		endPos := off + int64(totalWritten) + int64(canWrite)
+		if endPos > vol.Size {
+			canWrite = int(vol.Size - pos)
+		}
+
+		// Full-block overwrite fast path: skip GetObject entirely.
+		// Only safe for fallback path (non-dedup, non-CoW); dedup and CoW
+		// paths need old content for content-addressing or refcounting.
+		isFullBlock := m.dedup == nil && !useCow && blkOff == 0 && canWrite == int(bs)
+
 		// Read existing block (or zeros); isNew tracks if this is a new allocation.
 		// Dedup mode: canonical key lives in BadgerDB — positional key doesn't exist in the
 		// backend. Must read via ReadBlock to preserve bytes outside the write window.
-		blkData := make([]byte, vol.BlockSize)
+		var blkData []byte
+		if !isFullBlock {
+			blkData = make([]byte, vol.BlockSize)
+		}
 		var isNew bool
 		var oldKey string // only populated in non-dedup paths
 		if m.dedup != nil {
@@ -423,11 +442,17 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 		} else {
 			oldKey = physicalKey(name, blkNum, liveMap)
-			rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
-			isNew = readErr != nil
-			if !isNew {
-				io.ReadFull(rc, blkData)
-				rc.Close()
+			if isFullBlock {
+				// Existence check only — skip the data read.
+				_, headErr := m.backend.HeadObject(volumeBucketName, oldKey)
+				isNew = headErr != nil
+			} else {
+				rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
+				isNew = readErr != nil
+				if !isNew {
+					io.ReadFull(rc, blkData)
+					rc.Close()
+				}
 			}
 			// In-place / CoW path: oldKey is the previous version of
 			// this block. Either we're about to overwrite it (direct)
@@ -435,18 +460,9 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			invalidations = append(invalidations, oldKey)
 		}
 
-		// Write into the block buffer
-		canWrite := int(bs - blkOff)
-		remaining := len(p) - totalWritten
-		if canWrite > remaining {
-			canWrite = remaining
+		if !isFullBlock {
+			copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
 		}
-		endPos := off + int64(totalWritten) + int64(canWrite)
-		if endPos > vol.Size {
-			canWrite = int(vol.Size - pos)
-		}
-
-		copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
 
 		// Determine the target key and write the block.
 		// With dedup: content-addressed UUID keys stored in BadgerDB; no live_map.
@@ -490,8 +506,13 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 		} else {
 			targetKey = blockKey(name, blkNum)
-			if _, err := m.backend.PutObject(volumeBucketName, targetKey,
-				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+			var src io.Reader
+			if isFullBlock {
+				src = bytes.NewReader(p[totalWritten : totalWritten+canWrite])
+			} else {
+				src = bytes.NewReader(blkData)
+			}
+			if _, err := m.backend.PutObject(volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
 				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 			}
 		}

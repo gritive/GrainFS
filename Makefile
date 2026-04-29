@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima
+.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 
@@ -48,6 +48,12 @@ test-e2e: bin/$(BINARY)
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
+
+test-nbd-colima: build
+	go test -v -tags colima -timeout 120s ./tests/nbd_colima/
+
+bench-nbd: build
+	./benchmarks/bench_nbd_profile.sh
 
 test-jepsen: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestJepsen -v -timeout 5m
