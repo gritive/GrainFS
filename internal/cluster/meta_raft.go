@@ -83,6 +83,9 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 // Node returns the underlying raft.Node for external transport wiring.
 func (m *MetaRaft) Node() *raft.Node { return m.node }
 
+// IsLeader reports whether this MetaRaft node is the current cluster leader.
+func (m *MetaRaft) IsLeader() bool { return m.node.IsLeader() }
+
 // FSM returns the MetaFSM for callback registration and state inspection.
 // Callers must set callbacks before Start() to avoid a data race with the apply loop.
 func (m *MetaRaft) FSM() *MetaFSM { return m.fsm }

@@ -410,6 +410,21 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	distBackend.SetRouter(clusterRouter)
 	distBackend.SetBucketAssigner(metaRaft)
 
+	// PR-D: Rebalancer 배선 — LoadReporter와 함께 meta-Raft leader가 자율 리밸런스 수행.
+	rebalancerCfg := cluster.DefaultRebalancerConfig()
+	rebalancer := cluster.NewRebalancer(nodeID, metaRaft, dgMgr, rebalancerCfg)
+	rebalancer.SetGroupRebalancer(cluster.StubGroupRebalancer{})
+	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
+		execCtx, execCancel := context.WithTimeout(context.Background(), rebalancerCfg.PlanTimeout)
+		go func() {
+			defer execCancel()
+			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
+				log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
+			}
+		}()
+	})
+	go rebalancer.Run(ctx)
+
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
 	// 1-2 nodes always use N× replication.
 	clusterECData, _ := cmd.Flags().GetInt("ec-data")
