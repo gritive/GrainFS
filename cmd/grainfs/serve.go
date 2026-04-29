@@ -323,6 +323,25 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
 	rpcTransport.SetTransport()
 
+	// Meta-Raft: dedicated control-plane Raft group for cluster membership.
+	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
+		NodeID:  nodeID,
+		Peers:   peers,
+		DataDir: dataDir,
+	})
+	if err != nil {
+		return fmt.Errorf("init meta-raft: %w", err)
+	}
+	metaTransport := cluster.NewMetaTransportQUIC(quicTransport, metaRaft.Node())
+	metaRaft.SetTransport(metaTransport)
+	if err := metaRaft.Bootstrap(); err != nil {
+		return fmt.Errorf("meta-raft bootstrap: %w", err)
+	}
+	if err := metaRaft.Start(ctx); err != nil {
+		return fmt.Errorf("meta-raft start: %w", err)
+	}
+	defer metaRaft.Close()
+
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
 	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {

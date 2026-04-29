@@ -40,7 +40,8 @@ type MetaRaft struct {
 }
 
 // NewMetaRaft constructs a MetaRaft from config. The node is not started yet;
-// call Bootstrap then Start.
+// call Bootstrap then Start. Transport may be nil here and set later via
+// SetTransport (needed when the QUIC transport requires the node handle first).
 func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	storePath := cfg.DataDir + "/meta_raft"
 	store, err := raft.NewBadgerLogStore(storePath)
@@ -57,12 +58,6 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	nodeCfg := raft.DefaultConfig(cfg.NodeID, cfg.Peers)
 	node := raft.NewNode(nodeCfg, store)
 
-	node.SetTransport(
-		cfg.Transport.SendRequestVote,
-		cfg.Transport.SendAppendEntries,
-	)
-	node.SetInstallSnapshotTransport(cfg.Transport.SendInstallSnapshot)
-
 	m := &MetaRaft{
 		node:    node,
 		store:   store,
@@ -72,7 +67,26 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 		done:    make(chan struct{}),
 	}
 	m.applyCV = sync.NewCond(&m.applyMu)
+
+	if cfg.Transport != nil {
+		m.wireTransport(cfg.Transport)
+	}
 	return m, nil
+}
+
+// Node returns the underlying raft.Node for external transport wiring.
+func (m *MetaRaft) Node() *raft.Node { return m.node }
+
+// SetTransport wires a MetaTransport into the Raft node after construction.
+// Must be called before Start.
+func (m *MetaRaft) SetTransport(t MetaTransport) {
+	m.cfg.Transport = t
+	m.wireTransport(t)
+}
+
+func (m *MetaRaft) wireTransport(t MetaTransport) {
+	m.node.SetTransport(t.SendRequestVote, t.SendAppendEntries)
+	m.node.SetInstallSnapshotTransport(t.SendInstallSnapshot)
 }
 
 // Bootstrap marks the store as bootstrapped. Idempotent.
