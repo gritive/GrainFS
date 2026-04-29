@@ -56,13 +56,18 @@ func (r *Router) AssignBucket(bucket, groupID string) {
 	}
 }
 
-// Sync replaces the entire bucket→group map from a MetaFSM snapshot (bootstrap-only).
-// Must be called once after MetaRaft start/restore. Runtime additions from the
-// OnBucketAssigned callback must use AssignBucket to avoid overwriting concurrent updates.
+// Sync merges assignments from a MetaFSM snapshot into the routing table (bootstrap-only).
+// Must be called once after MetaRaft start/restore. Existing entries (e.g., those added
+// by the OnBucketAssigned callback during concurrent log replay) are preserved; snapshot
+// entries take precedence over any conflicting prior value.
+// Runtime additions must use AssignBucket to avoid overwriting concurrent updates.
 func (r *Router) Sync(assignments map[string]string) {
 	for {
 		old := r.snap.Load()
-		newMap := make(map[string]string, len(assignments))
+		newMap := make(map[string]string, len(old.bucketMap)+len(assignments))
+		for k, v := range old.bucketMap {
+			newMap[k] = v
+		}
 		for k, v := range assignments {
 			newMap[k] = v
 		}

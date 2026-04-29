@@ -242,6 +242,9 @@ func (f *MetaFSM) applyPutBucketAssignment(data []byte) error {
 	if bucket == "" {
 		return fmt.Errorf("meta_fsm: PutBucketAssignment: empty bucket")
 	}
+	if groupID == "" {
+		return fmt.Errorf("meta_fsm: PutBucketAssignment: empty groupID")
+	}
 
 	f.mu.Lock()
 	f.bucketAssignments[bucket] = groupID

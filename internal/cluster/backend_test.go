@@ -562,6 +562,17 @@ func TestDistributedBackend_SetBucketAssigner_NilNoPanic(t *testing.T) {
 	require.NoError(t, b.CreateBucket("photos"))
 }
 
+func TestDistributedBackend_CreateBucket_AssignerWithoutRouter_Errors(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
+		return nil
+	}})
+	// router not set → must return an error, not panic
+	err := b.CreateBucket("photos")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "router not configured")
+}
+
 func TestDistributedBackend_CreateBucket_CallsAssigner(t *testing.T) {
 	b := newTestDistributedBackend(t)
 

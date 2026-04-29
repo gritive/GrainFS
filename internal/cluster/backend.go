@@ -415,8 +415,13 @@ func (b *DistributedBackend) CreateBucket(bucket string) error {
 
 	// PR-D: persist bucket→group assignment in meta-Raft before data-Raft create.
 	// assigner nil means single-node or not-yet-wired (legacy skip).
-	// RouteKey failure is returned immediately to prevent unroutable bucket creation.
+	// If ProposeBucketAssignment succeeds but b.propose(CmdCreateBucket) below fails,
+	// the assignment is durable but the bucket key won't exist yet. A retry will
+	// re-propose (idempotent overwrite) and re-create — safe by design.
 	if b.assigner != nil {
+		if b.router == nil {
+			return fmt.Errorf("create bucket %q: router not configured", bucket)
+		}
 		g, routeErr := b.router.RouteKey(bucket, "")
 		if routeErr != nil {
 			return fmt.Errorf("route bucket %q: %w", bucket, routeErr)
