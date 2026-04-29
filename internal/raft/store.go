@@ -46,6 +46,12 @@ type LogStore interface {
 	// LoadSnapshot loads the latest snapshot.
 	LoadSnapshot() (index, term uint64, data []byte, err error)
 
+	// IsBootstrapped reports whether Bootstrap has been called on this store.
+	IsBootstrapped() (bool, error)
+
+	// SaveBootstrapMarker marks this store as bootstrapped. Idempotent.
+	SaveBootstrapMarker() error
+
 	// Close closes the store.
 	Close() error
 }
@@ -57,6 +63,7 @@ var (
 	keySnapshot     = []byte("raft:snapshot")
 	keySnapshotMeta = []byte("raft:snapshot:meta")
 	keyManagedMode  = []byte("raft:meta:managed")
+	keyBootstrapped = []byte("raft:meta:bootstrapped")
 )
 
 // BadgerLogStoreOption configures a BadgerLogStore.
@@ -398,6 +405,28 @@ func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
 		})
 	})
 	return index, term, data, err
+}
+
+// IsBootstrapped reports whether Bootstrap has been called on this store.
+func (s *BadgerLogStore) IsBootstrapped() (bool, error) {
+	err := s.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(keyBootstrapped)
+		return err
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SaveBootstrapMarker marks this store as bootstrapped.
+func (s *BadgerLogStore) SaveBootstrapMarker() error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(keyBootstrapped, []byte{1})
+	})
 }
 
 func (s *BadgerLogStore) Close() error {
