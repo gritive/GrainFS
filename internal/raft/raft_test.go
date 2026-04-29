@@ -1752,3 +1752,98 @@ func TestObserver_StepDownLeaderIDEmpty(t *testing.T) {
 		}
 	}, 2*time.Second, 10*time.Millisecond, "step-down EventLeaderChange not received")
 }
+
+// applyCC applies a ConfChange directly to the node's state under lock.
+// Only for testing — bypasses proposal pipeline.
+func applyCC(t *testing.T, n *Node, op ConfChangeOp, id, addr string) {
+	t.Helper()
+	entry := LogEntry{
+		Type:    LogEntryConfChange,
+		Command: encodeConfChange(op, id, addr),
+		Index:   1,
+	}
+	n.mu.Lock()
+	n.applyConfigChangeLocked(entry)
+	n.mu.Unlock()
+}
+
+func TestApplyConfigChange_AddVoterUsesAddress(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"existing:9000"})
+	n := NewNode(cfg)
+	applyCC(t, n, ConfChangeAddVoter, "node-3", "10.0.0.3:9000")
+
+	n.mu.Lock()
+	peers := append([]string{}, n.config.Peers...)
+	n.mu.Unlock()
+
+	require.Contains(t, peers, "10.0.0.3:9000", "peerKey must be cc.Address")
+	require.NotContains(t, peers, "node-3", "cc.ID must not appear when cc.Address is set")
+}
+
+func TestApplyConfigChange_AddLearnerTracked(t *testing.T) {
+	cfg := DefaultConfig("self", nil)
+	n := NewNode(cfg)
+	applyCC(t, n, ConfChangeAddLearner, "learner-1", "10.0.0.1:9001")
+
+	n.mu.Lock()
+	peerKey := n.learnerIDs["learner-1"]
+	inVoters := false
+	for _, p := range n.config.Peers {
+		if p == "10.0.0.1:9001" {
+			inVoters = true
+			break
+		}
+	}
+	n.mu.Unlock()
+
+	require.Equal(t, "10.0.0.1:9001", peerKey, "learnerIDs[id] must be peerKey")
+	require.False(t, inVoters, "learner must NOT be in voter peers")
+}
+
+func TestApplyConfigChange_PromoteLearnerToVoter(t *testing.T) {
+	cfg := DefaultConfig("self", nil)
+	n := NewNode(cfg)
+	applyCC(t, n, ConfChangeAddLearner, "node-3", "10.0.0.3:9000")
+	applyCC(t, n, ConfChangePromote, "node-3", "")
+
+	n.mu.Lock()
+	peers := append([]string{}, n.config.Peers...)
+	_, stillLearner := n.learnerIDs["node-3"]
+	n.mu.Unlock()
+
+	require.Contains(t, peers, "10.0.0.3:9000", "promoted peer must appear in voters")
+	require.False(t, stillLearner, "promoted peer must be removed from learnerIDs")
+}
+
+func TestApplyConfigChange_RemoveVoterByAddress(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"10.0.0.1:9000"})
+	n := NewNode(cfg)
+	applyCC(t, n, ConfChangeRemoveVoter, "10.0.0.1:9000", "")
+
+	n.mu.Lock()
+	peers := append([]string{}, n.config.Peers...)
+	n.mu.Unlock()
+
+	require.NotContains(t, peers, "10.0.0.1:9000")
+}
+
+func TestPeerMatchIndex_LearnerTracked(t *testing.T) {
+	cfg := DefaultConfig("self", nil)
+	n := NewNode(cfg)
+	// PeerMatchIndex is a leader-side API; set leader state so applyCC populates matchIndex.
+	n.mu.Lock()
+	n.state = Leader
+	n.mu.Unlock()
+	applyCC(t, n, ConfChangeAddLearner, "learner-1", "10.0.0.1:9001")
+
+	idx, ok := n.PeerMatchIndex("10.0.0.1:9001")
+	require.True(t, ok, "learner must be in matchIndex after AddLearner")
+	require.Equal(t, uint64(0), idx)
+}
+
+func TestPeerMatchIndex_UnknownPeer(t *testing.T) {
+	cfg := DefaultConfig("self", nil)
+	n := NewNode(cfg)
+	_, ok := n.PeerMatchIndex("unknown:9000")
+	require.False(t, ok)
+}

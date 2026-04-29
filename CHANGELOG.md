@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.6.3] — 2026-04-30
+## [0.0.6.4] — 2026-04-30
 
 ### Added
 
@@ -13,6 +13,23 @@
 ### Changed
 
 - `internal/vfs/vfs.go` `grainFile.ReadAt`: `mu sync.Mutex` 추가로 동시 ReadAt에서 `rc`/`pos` 보호 (`io.ReaderAt` 계약 준수). FUSE-over-S3 도구가 발행하는 병렬 range GET 요청에 안전.
+
+## [0.0.6.3] — 2026-04-30
+
+### Added
+
+- **cluster**: `DataGroupPlanExecutor` — `MoveReplica` 실제 Raft voter 마이그레이션 구현 (AddLearner → catch-up 대기 → PromoteToVoter → RemoveVoter → MetaFSM ProposeShardGroup). `StubGroupRebalancer` 대체.
+- **cluster**: `DataRaftNode` 인터페이스 — `dataRaftNode` exported alias; `raft.Node`가 compile-time 구현 검증.
+- **cluster**: `DataGroupPlanExecutorForTest` — 테스트용 `nodeFor` 주입 팩토리.
+- **raft**: `AddLearner`/`PromoteToVoter`/`RemoveVoter` 실 구현 — `applyConfigChangeLocked`에서 `ConfChangeAddLearner`, `ConfChangePromote` 처리; `learnerIDs` 맵으로 learner 추적.
+- **raft**: `PeerMatchIndex(peerKey)` — learner catch-up 대기에 필요한 replication 상태 조회.
+- **raft**: `replicateToAll` — voter 외에 learner에게도 log 복제.
+- **raft/chaos/scenarios**: `TestVoterMigration_AddLearnerPromoteRemove` — 4-node chaos cluster voter 교체 통합 테스트.
+- **cluster**: `TestVoterMigration_ViaDataGroupPlanExecutor` — real `raft.Node` e2e 테스트.
+
+### Fixed
+
+- **cluster**: `TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds` — real joiner node(m1, m2) 사용으로 재작성; AddLearner/PromoteToVoter가 실 구현이 된 이후에도 conf change serial enforcement 검증 가능.
 
 ## [0.0.6.2] — 2026-04-30
 

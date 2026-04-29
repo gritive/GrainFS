@@ -301,25 +301,26 @@ func TestMetaRaft_ProposeAbortPlan_CommitToFSM(t *testing.T) {
 	assert.Empty(t, m.FSM().ActivePlanID())
 }
 
+// TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds verifies that concurrent Join
+// requests are serialised at the ConfChange level: only one pending conf change
+// at a time, but at least one of two concurrent Join calls must succeed.
+// Uses real joiner nodes so that learner replication can actually complete.
 func TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds(t *testing.T) {
-	dir0 := t.TempDir()
 	tr := newMetaTransportFake()
 
-	m0, err := NewMetaRaft(MetaRaftConfig{
-		NodeID:    "node-0",
-		Peers:     nil,
-		DataDir:   dir0,
-		Transport: tr,
-	})
+	m0, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", Peers: nil, DataDir: t.TempDir(), Transport: tr})
 	require.NoError(t, err)
 	tr.register("node-0-addr", m0)
 
-	// Create two potential joiners but don't start them — we only care about
-	// the leader-side sequential enforcement
-	tr.register("node-a-addr", m0) // reuse m0 just to avoid "not found" errors
-	tr.register("node-b-addr", m0)
+	m1, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-a", Peers: []string{"node-0-addr"}, DataDir: t.TempDir(), Transport: tr})
+	require.NoError(t, err)
+	tr.register("node-a-addr", m1)
 
-	t.Cleanup(func() { _ = m0.Close() })
+	m2, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-b", Peers: []string{"node-0-addr"}, DataDir: t.TempDir(), Transport: tr})
+	require.NoError(t, err)
+	tr.register("node-b-addr", m2)
+
+	t.Cleanup(func() { _ = m0.Close(); _ = m1.Close(); _ = m2.Close() })
 
 	require.NoError(t, m0.Bootstrap())
 	require.NoError(t, m0.Start(context.Background()))
@@ -327,22 +328,29 @@ func TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds(t *testing.T) {
 		return m0.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
 
+	// Start joiners after m0 is leader so they don't interfere with election.
+	require.NoError(t, m1.Bootstrap())
+	require.NoError(t, m1.Start(context.Background()))
+	require.NoError(t, m2.Bootstrap())
+	require.NoError(t, m2.Start(context.Background()))
+
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
-	for i, id := range []string{"node-a", "node-b"} {
+	for i, args := range []struct{ id, addr string }{
+		{"node-a", "node-a-addr"},
+		{"node-b", "node-b-addr"},
+	} {
 		wg.Add(1)
-		i, id := i, id
+		i, args := i, args
 		go func() {
 			defer wg.Done()
-			addr := id + "-addr"
-			errs[i] = m0.Join(ctx, id, addr)
+			errs[i] = m0.Join(ctx, args.id, args.addr)
 		}()
 	}
 	wg.Wait()
 
-	// On a single-node cluster conf changes commit in microseconds; both may succeed.
-	// The invariant is: at least one must succeed and neither may crash the leader.
+	// At least one must succeed; the other may fail with ErrConfChangeInProgress.
 	successCount := 0
 	for _, err := range errs {
 		if err == nil {

@@ -142,39 +142,65 @@ func (n *Node) applyConfigChangeLocked(entry LogEntry) {
 		return
 	}
 	cc := decodeConfChange(entry.Command)
+	// peerKey: data-Raft uses QUIC address; meta-Raft uses nodeID.
+	peerKey := cc.ID
+	if cc.Address != "" {
+		peerKey = cc.Address
+	}
+
 	switch cc.Op {
 	case ConfChangeAddVoter:
 		alreadyPresent := false
 		for _, p := range n.config.Peers {
-			if p == cc.ID {
+			if p == peerKey {
 				alreadyPresent = true
 				break
 			}
 		}
 		if !alreadyPresent {
-			n.config.Peers = append(n.config.Peers, cc.ID)
+			n.config.Peers = append(n.config.Peers, peerKey)
 			if n.state == Leader {
-				n.nextIndex[cc.ID] = n.lastLogIdx() + 1
-				n.matchIndex[cc.ID] = 0
+				n.nextIndex[peerKey] = n.lastLogIdx() + 1
+				n.matchIndex[peerKey] = 0
 			}
 		}
 
 	case ConfChangeRemoveVoter:
 		peers := make([]string, 0, len(n.config.Peers))
 		for _, p := range n.config.Peers {
-			if p != cc.Address && p != cc.ID {
+			if p != peerKey {
 				peers = append(peers, p)
 			}
 		}
 		n.config.Peers = peers
-		delete(n.nextIndex, cc.ID)
-		delete(n.matchIndex, cc.ID)
+		delete(n.nextIndex, peerKey)
+		delete(n.matchIndex, peerKey)
 
 	case ConfChangeAddLearner:
-		// Learner tracking will be added in PR-B (meta-Raft).
+		if _, exists := n.learnerIDs[cc.ID]; !exists {
+			n.learnerIDs[cc.ID] = peerKey
+			if n.state == Leader {
+				n.nextIndex[peerKey] = n.lastLogIdx() + 1
+				n.matchIndex[peerKey] = 0
+			}
+		}
 
 	case ConfChangePromote:
-		// Learner → Voter promotion is handled in PR-B.
+		pk, ok := n.learnerIDs[cc.ID]
+		if !ok {
+			break // idempotent: already promoted or not tracked
+		}
+		delete(n.learnerIDs, cc.ID)
+		alreadyVoter := false
+		for _, p := range n.config.Peers {
+			if p == pk {
+				alreadyVoter = true
+				break
+			}
+		}
+		if !alreadyVoter {
+			n.config.Peers = append(n.config.Peers, pk)
+		}
 	}
 
 	n.pendingConfChangeIndex = entry.Index
@@ -187,6 +213,7 @@ func (n *Node) rebuildConfigFromLog() {
 	// Start from bootstrap peers
 	peers := make([]string, len(n.initialPeers))
 	copy(peers, n.initialPeers)
+	learnerAddrs := make(map[string]string) // nodeID → peerKey for replay
 
 	// Replay all ConfChange entries still in the log
 	for _, entry := range n.log {
@@ -194,27 +221,48 @@ func (n *Node) rebuildConfigFromLog() {
 			continue
 		}
 		cc := decodeConfChange(entry.Command)
+		peerKey := cc.ID
+		if cc.Address != "" {
+			peerKey = cc.Address
+		}
 		switch cc.Op {
 		case ConfChangeAddVoter:
 			found := false
 			for _, p := range peers {
-				if p == cc.ID {
+				if p == peerKey {
 					found = true
 					break
 				}
 			}
 			if !found {
-				peers = append(peers, cc.ID)
+				peers = append(peers, peerKey)
 			}
 		case ConfChangeRemoveVoter:
 			out := peers[:0]
 			for _, p := range peers {
-				if p != cc.Address && p != cc.ID {
+				if p != peerKey {
 					out = append(out, p)
 				}
 			}
 			peers = out
+		case ConfChangeAddLearner:
+			learnerAddrs[cc.ID] = peerKey
+		case ConfChangePromote:
+			if pk, ok := learnerAddrs[cc.ID]; ok {
+				delete(learnerAddrs, cc.ID)
+				found := false
+				for _, p := range peers {
+					if p == pk {
+						found = true
+						break
+					}
+				}
+				if !found {
+					peers = append(peers, pk)
+				}
+			}
 		}
 	}
 	n.config.Peers = peers
+	n.learnerIDs = learnerAddrs // persist surviving learners after replay
 }
