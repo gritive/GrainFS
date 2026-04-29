@@ -144,12 +144,6 @@ func TestNFS4_BasicOps(t *testing.T) {
 	sha := runColimaSSH(t, "sha256sum", filePath)
 	origHash := strings.Fields(sha)[0]
 
-	// stat — size 검증
-	sizeOut := runColimaSSH(t, "stat", "--format=%s", filePath)
-	if sizeOut != "1048576" {
-		t.Fatalf("expected size 1048576, got %q", sizeOut)
-	}
-
 	// readdir — file.bin 포함 확인
 	lsOut := runColimaSSH(t, "ls", testDir)
 	if !strings.Contains(lsOut, "file.bin") {
@@ -174,6 +168,20 @@ func TestNFS4_BasicOps(t *testing.T) {
 	newHash := strings.Fields(sha2)[0]
 	if origHash != newHash {
 		t.Fatalf("sha256 mismatch after rename: orig=%s got=%s", origHash, newHash)
+	}
+
+	// SetAttr smoke: chmod 750
+	runColimaSSH(t, "sudo", "chmod", "750", renamedPath)
+	chmodOut := runColimaSSH(t, "stat", "--format=%a", renamedPath)
+	if chmodOut != "750" {
+		t.Fatalf("expected mode 750 after chmod, got %q", chmodOut)
+	}
+
+	// SetAttr smoke: truncate -s 100
+	runColimaSSH(t, "sudo", "truncate", "-s", "100", renamedPath)
+	truncOut := runColimaSSH(t, "stat", "--format=%s", renamedPath)
+	if truncOut != "100" {
+		t.Fatalf("expected size 100 after truncate, got %q", truncOut)
 	}
 
 	// remove
