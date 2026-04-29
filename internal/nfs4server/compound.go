@@ -3,6 +3,7 @@ package nfs4server
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"path"
@@ -354,6 +355,7 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 	isDir := d.state.IsDir(d.currentPath)
 	var fileSize uint64
 	var lastModUnix int64
+	var sidecarMode uint32
 	fileid := pathToFileID(d.currentPath)
 
 	if !isDir && d.backend != nil {
@@ -371,6 +373,16 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 			isDir = true
 			fileSize = 4096
 		}
+
+		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
+		if !isDir {
+			if meta := d.loadFileMeta(key); meta.Mode != 0 {
+				sidecarMode = meta.Mode
+				if meta.Mtime > 0 {
+					lastModUnix = meta.Mtime / 1e9
+				}
+			}
+		}
 	} else {
 		fileSize = 4096
 	}
@@ -381,6 +393,9 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 
 	fileType := uint32(NF4REG)
 	mode := uint32(0644)
+	if sidecarMode != 0 {
+		mode = sidecarMode
+	}
 	numlinks := uint32(1)
 	if isDir {
 		fileType = NF4DIR
@@ -862,7 +877,83 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 	if d.currentPath == "" {
 		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_NOFILEHANDLE}
 	}
-	// TODO: implement (Task 8)
+	// data layout: stateid(16) + bm0(4) + bm1(4) + attrVals(opaque)
+	if len(data) < 24 {
+		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_INVAL}
+	}
+	r := NewXDRReader(data[16:]) // skip stateid
+	bm0, _ := r.ReadUint32()
+	bm1, _ := r.ReadUint32()
+	attrVals, _ := r.ReadOpaque()
+
+	key := d.currentPath
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+
+	ar := NewXDRReader(attrVals)
+
+	// FATTR4_SIZE (word0 bit 4)
+	if bm0&(1<<4) != 0 {
+		size, _ := ar.ReadUint64()
+		release := d.state.LockPath(key)
+		defer release()
+		if tr, ok := d.backend.(storage.Truncatable); ok {
+			if err := tr.Truncate(nfs4Bucket, key, int64(size)); err != nil {
+				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+			}
+		} else {
+			var existing []byte
+			if rc, _, err := d.backend.GetObject(nfs4Bucket, key); err == nil {
+				existing, _ = io.ReadAll(rc)
+				rc.Close()
+			}
+			sz := int64(size)
+			cur := int64(len(existing))
+			if cur > sz {
+				existing = existing[:sz]
+			} else if cur < sz {
+				existing = append(existing, make([]byte, sz-cur)...)
+			}
+			if _, err := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+			}
+		}
+	}
+
+	meta := d.loadFileMeta(key)
+	metaChanged := false
+
+	// FATTR4_MODE (word1 bit 1 = bit 33)
+	if bm1&(1<<1) != 0 {
+		mode, _ := ar.ReadUint32()
+		meta.Mode = mode
+		metaChanged = true
+	}
+
+	// FATTR4_TIME_MODIFY_SET (word1 bit 21 = bit 53)
+	if bm1&(1<<21) != 0 {
+		how, _ := ar.ReadUint32()
+		var mtimeNs int64
+		if how == 1 { // SET_TO_CLIENT_TIME4
+			hi, _ := ar.ReadUint32()
+			lo, _ := ar.ReadUint32()
+			secs := int64(hi)<<32 | int64(lo)
+			nsecs, _ := ar.ReadUint32()
+			mtimeNs = secs*1e9 + int64(nsecs)
+		} else { // SET_TO_SERVER_TIME4
+			mtimeNs = time.Now().UnixNano()
+		}
+		meta.Mtime = mtimeNs
+		metaChanged = true
+	}
+
+	if metaChanged {
+		if err := d.saveFileMeta(key, meta); err != nil {
+			return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+		}
+	}
+
 	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult()}
 }
 
@@ -1105,6 +1196,40 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	w.WriteUint32(highSlot) // sr_target_highest_slotid
 	w.WriteUint32(0)        // sr_status_flags
 	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+}
+
+// nfsFileMeta stores per-file NFS metadata that must survive server restarts.
+// Persisted as JSON in the nfs4Bucket under key "__meta/<path>".
+type nfsFileMeta struct {
+	Mode  uint32 `json:"mode"`
+	Mtime int64  `json:"mtime_ns"` // UnixNano; 0 means "use object LastModified"
+}
+
+func metaSidecarKey(key string) string {
+	return "__meta/" + key
+}
+
+func (d *Dispatcher) loadFileMeta(key string) nfsFileMeta {
+	rc, _, err := d.backend.GetObject(nfs4Bucket, metaSidecarKey(key))
+	if err != nil {
+		return nfsFileMeta{Mode: 0644}
+	}
+	defer rc.Close()
+	data, _ := io.ReadAll(rc)
+	var m nfsFileMeta
+	if err := json.Unmarshal(data, &m); err != nil || m.Mode == 0 {
+		m.Mode = 0644
+	}
+	return m
+}
+
+func (d *Dispatcher) saveFileMeta(key string, m nfsFileMeta) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	_, err = d.backend.PutObject(nfs4Bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
+	return err
 }
 
 // --- Helper functions ---
