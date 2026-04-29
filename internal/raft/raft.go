@@ -150,6 +150,8 @@ type Config struct {
 	HeartbeatTimeout time.Duration
 	ManagedMode      bool          // enable periodic Raft log GC via quorum watermark
 	LogGCInterval    time.Duration // how often log GC runs (default 30s)
+	MaxEntriesPerAE  uint64        // 0 = unlimited; default via DefaultConfig = 512
+	TrailingLogs     uint64        // entries to keep after snapshot; default 10240
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -159,6 +161,8 @@ func DefaultConfig(id string, peers []string) Config {
 		Peers:            peers,
 		ElectionTimeout:  150 * time.Millisecond,
 		HeartbeatTimeout: 50 * time.Millisecond,
+		MaxEntriesPerAE:  512,
+		TrailingLogs:     10240,
 	}
 }
 
@@ -909,6 +913,12 @@ func (n *Node) replicateTo(peer string) {
 		si := n.toSliceIdx(nextIdx)
 		entries = make([]LogEntry, len(n.log)-si)
 		copy(entries, n.log[si:])
+	}
+
+	// Cap payload size to avoid oversized AE messages.
+	if n.config.MaxEntriesPerAE > 0 && uint64(len(entries)) > n.config.MaxEntriesPerAE {
+		entries = entries[:n.config.MaxEntriesPerAE]
+		raftAESplitCountTotal.Inc()
 	}
 	n.mu.Unlock()
 

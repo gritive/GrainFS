@@ -1269,3 +1269,40 @@ func TestAEReply_FallbackToMinusOneForOldPeer(t *testing.T) {
 
 	assert.Equal(t, uint64(3), got) // decremented by 1
 }
+
+// TestAESize_SplitsAtMaxEntries verifies that when MaxEntriesPerAE is set,
+// replicateTo sends at most that many entries per RPC call.
+func TestAESize_SplitsAtMaxEntries(t *testing.T) {
+	sentCounts := make([]int, 0)
+	n := NewNode(Config{
+		ID:              "leader",
+		Peers:           []string{"follower"},
+		MaxEntriesPerAE: 3,
+	})
+	n.SetTransport(
+		func(_ string, _ *RequestVoteArgs) (*RequestVoteReply, error) { return nil, nil },
+		func(_ string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+			sentCounts = append(sentCounts, len(args.Entries))
+			return &AppendEntriesReply{Term: 1, Success: true}, nil
+		},
+	)
+
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 1
+	n.log = make([]LogEntry, 7)
+	for i := range n.log {
+		n.log[i] = LogEntry{Index: uint64(i + 1), Term: 1}
+	}
+	n.firstIndex = 1
+	n.nextIndex = map[string]uint64{"follower": 1}
+	n.matchIndex = map[string]uint64{"follower": 0}
+	n.commitIndex = 7
+	n.checkQuorumAcks = map[string]time.Time{}
+	n.mu.Unlock()
+
+	n.replicateTo("follower")
+
+	require.NotEmpty(t, sentCounts)
+	assert.LessOrEqual(t, sentCounts[0], 3, "first AE must send ≤ MaxEntriesPerAE entries")
+}
