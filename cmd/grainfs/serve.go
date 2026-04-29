@@ -414,7 +414,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Rebalancer가 leader에서 주기적으로 평가해 RebalancePlan을 제안·실행한다.
 	rebalancerCfg := cluster.DefaultRebalancerConfig()
 	rebalancer := cluster.NewRebalancer(nodeID, metaRaft, dgMgr, rebalancerCfg)
-	rebalancer.SetGroupRebalancer(cluster.StubGroupRebalancer{})
+	rebalancer.SetGroupRebalancer(
+		cluster.NewDataGroupPlanExecutor(dgMgr, metaRaft.FSM(), metaRaft),
+	)
 	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
 		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
 		go func() {
@@ -430,7 +432,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	loadReporterStore := cluster.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
 	loadReporter := cluster.NewLoadReporter(nodeID, loadReporterStore, metaRaft, cluster.DefaultLoadReportInterval)
 	go loadReporter.Run(ctx)
-
 
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
 	// 1-2 nodes always use N× replication.
