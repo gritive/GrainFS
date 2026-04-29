@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.6.3] — 2026-04-30
+
+### Added
+
+- **FUSE-over-S3 호환성 검증** — GrainFS는 별도 FUSE 클라이언트 바이너리 없이 표준 S3-compatible 도구(rclone/s3fs/goofys)로 마운트할 수 있음을 e2e + 처리량 벤치로 보증. 클라이언트 머신에 grainfs 설치 불필요.
+- `tests/fuse_s3_colima/` — Colima Linux VM에서 macOS 호스트 GrainFS S3 endpoint를 rclone mount로 마운트해 검증하는 e2e 4건 (smoke / directories / rename / cross-protocol). `make test-fuse-s3-colima`.
+- `tests/fuse_s3_colima/bench_test.go` — Direct S3(rclone copyto) vs FUSE mount(rclone mount) 처리량 비교 벤치. 64 MiB · `--vfs-cache-mode off` · 3회 평균: Direct PUT 96.8 MB/s · Direct GET 108.0 MB/s · FUSE Write 106.7 MB/s · FUSE Read 107.3 MB/s. **FUSE 오버헤드 ≈ 0%**. `make bench-fuse-s3-colima`.
+- README "FUSE-over-S3 마운트" 섹션 — rclone 설정 가이드 + 지원/미지원 연산표(rename ⚠️ non-atomic, chmod ❌, file locking ❌) + 처리량 결과.
+- `internal/storage/errors.go`: sentinel errors `ErrECDegraded`, `ErrNoSpace`, `ErrQuotaExceeded`, `ErrInvalidVersion` — 향후 backend별 에러 분류용.
+
+### Changed
+
+- `internal/vfs/vfs.go` `grainFile.ReadAt`: `mu sync.Mutex` 추가로 동시 ReadAt에서 `rc`/`pos` 보호 (`io.ReaderAt` 계약 준수). FUSE-over-S3 도구가 발행하는 병렬 range GET 요청에 안전.
+
 ## [0.0.6.2] — 2026-04-30
 
 ### Added
