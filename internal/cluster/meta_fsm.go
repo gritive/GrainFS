@@ -286,6 +286,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for _, sg := range f.shardGroups {
 		shardGroups = append(shardGroups, sg)
 	}
+	type bucketKV struct{ bucket, groupID string }
+	buckets := make([]bucketKV, 0, len(f.bucketAssignments))
+	for bucket, groupID := range f.bucketAssignments {
+		buckets = append(buckets, bucketKV{bucket, groupID})
+	}
 	f.mu.RUnlock()
 
 	b := clusterBuilderPool.Get()
@@ -333,9 +338,27 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	nodesVec := b.EndVector(len(nodeOffs))
 
+	// Build BucketAssignmentEntry offsets
+	baOffs := make([]flatbuffers.UOffsetT, len(buckets))
+	for i := len(buckets) - 1; i >= 0; i-- {
+		bkt := buckets[i]
+		bucketOff := b.CreateString(bkt.bucket)
+		groupIDOff := b.CreateString(bkt.groupID)
+		clusterpb.BucketAssignmentEntryStart(b)
+		clusterpb.BucketAssignmentEntryAddBucket(b, bucketOff)
+		clusterpb.BucketAssignmentEntryAddGroupId(b, groupIDOff)
+		baOffs[i] = clusterpb.BucketAssignmentEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartBucketAssignmentsVector(b, len(baOffs))
+	for i := len(baOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(baOffs[i])
+	}
+	baVec := b.EndVector(len(baOffs))
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
+	clusterpb.MetaStateSnapshotAddBucketAssignments(b, baVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	return fbFinish(b, root), nil
 }
@@ -391,9 +414,20 @@ func (f *MetaFSM) Restore(data []byte) error {
 		newShardGroups[e.ID] = e
 	}
 
+	newBucketAssignments := make(map[string]string, snap.BucketAssignmentsLength())
+	var baEntry clusterpb.BucketAssignmentEntry
+	for i := 0; i < snap.BucketAssignmentsLength(); i++ {
+		if !snap.BucketAssignments(&baEntry, i) {
+			return fmt.Errorf("meta_fsm: Restore: bucket assignment %d decode failed", i)
+		}
+		bucket := string(baEntry.Bucket())
+		newBucketAssignments[bucket] = string(baEntry.GroupId())
+	}
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
+	f.bucketAssignments = newBucketAssignments
 	f.mu.Unlock()
 	return nil
 }
