@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -545,4 +546,54 @@ func TestSelectPeerByLoad_SingleNode(t *testing.T) {
 
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
 	assert.False(t, ok, "single node: no peers to redirect to")
+}
+
+type mockBucketAssigner struct {
+	fn func(ctx context.Context, bucket, groupID string) error
+}
+
+func (m *mockBucketAssigner) ProposeBucketAssignment(ctx context.Context, bucket, groupID string) error {
+	return m.fn(ctx, bucket, groupID)
+}
+
+func TestDistributedBackend_SetBucketAssigner_NilNoPanic(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	b.SetBucketAssigner(nil)
+	require.NoError(t, b.CreateBucket("photos"))
+}
+
+func TestDistributedBackend_CreateBucket_CallsAssigner(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
+	r := NewRouter(mgr)
+	r.SetDefault("group-0")
+	b.SetRouter(r)
+
+	var calledBucket, calledGroup string
+	b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
+		calledBucket = bucket
+		calledGroup = groupID
+		return nil
+	}})
+
+	require.NoError(t, b.CreateBucket("photos"))
+	assert.Equal(t, "photos", calledBucket)
+	assert.Equal(t, "group-0", calledGroup)
+}
+
+func TestDistributedBackend_CreateBucket_RouterError_Propagates(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	// Router with no default and no assignment → RouteKey returns ErrNoGroup
+	mgr := NewDataGroupManager()
+	r := NewRouter(mgr)
+	b.SetRouter(r)
+	b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
+		return nil
+	}})
+
+	err := b.CreateBucket("photos")
+	require.Error(t, err)
 }
