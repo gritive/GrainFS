@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,11 +39,6 @@ type Configuration struct {
 	Servers []Server
 }
 
-// Special command prefixes for configuration changes (membership)
-var (
-	configAddPrefix    = []byte("__raft_config_add:")
-	configRemovePrefix = []byte("__raft_config_remove:")
-)
 
 // NodeState represents the current role of a Raft node.
 type NodeState int
@@ -73,14 +67,16 @@ type LogEntry struct {
 	Term    uint64
 	Index   uint64
 	Command []byte
+	Type    LogEntryType // 0 = Command (default, backward-compatible)
 }
 
 // Config holds Raft node configuration.
 // proposal carries a single command through the batcher pipeline.
 type proposal struct {
-	command []byte
-	doneCh  chan proposalResult
-	ctx     context.Context
+	command   []byte
+	entryType LogEntryType // 0 = Command (default)
+	doneCh    chan proposalResult
+	ctx       context.Context
 }
 
 // proposalResult is the outcome delivered to ProposeWait callers.
@@ -281,6 +277,10 @@ type Node struct {
 	// proposal waiters: log index -> channel signaled when committed (nil = success, error = failure)
 	waiters map[uint64]chan error
 
+	// §4.4 membership change tracking
+	pendingConfChangeIndex uint64   // index of in-flight ConfChange entry; 0 = none
+	initialPeers           []string // bootstrap peers; used to rebuild config after log truncation
+
 	// log GC tracking (Phase 14d)
 	lastLogGC time.Time
 	gcRunning atomic.Bool // prevents overlapping GC goroutines
@@ -302,6 +302,9 @@ type Node struct {
 // NewNode creates a new Raft node. Call Start() to begin operation.
 // If store is non-nil, it restores persisted state on creation.
 func NewNode(config Config, store ...LogStore) *Node {
+	initialPeers := make([]string, len(config.Peers))
+	copy(initialPeers, config.Peers)
+
 	n := &Node{
 		id:              config.ID,
 		state:           Follower,
@@ -319,6 +322,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		proposalCh:      make(chan proposal, 4096),
 		replicationCh:   make(chan struct{}, 1),
 		metrics:         adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
+		initialPeers:    initialPeers,
 	}
 
 	if len(store) > 0 && store[0] != nil {
@@ -496,11 +500,10 @@ func (n *Node) applyLoop() {
 		entry := n.log[n.toSliceIdx(n.lastApplied)]
 		idx := entry.Index
 
-		// Process config changes internally (membership adds/removes)
-		if IsConfigChange(entry.Command) {
-			n.mu.Unlock()
-			n.applyConfigChange(entry.Command)
-			n.mu.Lock()
+		// ConfChange entries are already applied on append (§4.4).
+		// On commit, only clear the pending index so the next change may proceed.
+		if entry.Type == LogEntryConfChange && n.pendingConfChangeIndex == idx {
+			n.pendingConfChangeIndex = 0
 		}
 
 		// Signal any waiter for this index
@@ -601,6 +604,17 @@ func (n *Node) Configuration() Configuration {
 	}
 	n.mu.Unlock()
 	return Configuration{Servers: servers}
+}
+
+// currentConfigServers returns a copy of all known servers (self + peers).
+// MUST be called with n.mu held.
+func (n *Node) currentConfigServers() []Server {
+	out := make([]Server, 0, len(n.config.Peers)+1)
+	out = append(out, Server{ID: n.id, Suffrage: Voter})
+	for _, p := range n.config.Peers {
+		out = append(out, Server{ID: p, Suffrage: Voter})
+	}
+	return out
 }
 
 func (n *Node) run() {
@@ -950,12 +964,15 @@ func (n *Node) replicateTo(peer string) {
 	if nextIdx < n.firstIndex && n.sendInstallSnapshot != nil && n.store != nil {
 		snapIdx, snapTerm, snapData, err := n.store.LoadSnapshot()
 		if err == nil && snapData != nil {
+			// Capture current config while holding the lock (read just above)
+			snapshotServers := n.currentConfigServers()
 			args := &InstallSnapshotArgs{
 				Term:              term,
 				LeaderID:          leaderID,
 				LastIncludedIndex: snapIdx,
 				LastIncludedTerm:  snapTerm,
 				Data:              snapData,
+				Servers:           snapshotServers,
 			}
 			n.mu.Unlock()
 
@@ -1297,6 +1314,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 
 	// Append new entries (skip already present)
 	var newEntries []LogEntry
+	truncated := false
 	for i, entry := range args.Entries {
 		idx := args.PrevLogIndex + uint64(i) + 1
 		if n.hasLogEntry(idx) {
@@ -1305,6 +1323,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 				n.log = n.log[:n.toSliceIdx(idx)]
 				newEntries = args.Entries[i:]
 				n.log = append(n.log, newEntries...)
+				truncated = true
 				break
 			}
 		} else {
@@ -1314,6 +1333,17 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 		}
 	}
 	n.persistLogEntries(newEntries)
+
+	// §4.4: after truncation, rebuild config from initial peers + remaining log,
+	// then apply ConfChange entries in the newly appended batch.
+	if truncated {
+		n.rebuildConfigFromLog()
+	}
+	for i := range newEntries {
+		if newEntries[i].Type == LogEntryConfChange {
+			n.applyConfigChangeLocked(newEntries[i])
+		}
+	}
 
 	// Update commit index
 	if args.LeaderCommit > n.commitIndex {
@@ -1461,6 +1491,7 @@ type InstallSnapshotArgs struct {
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
 	Data              []byte
+	Servers           []Server // cluster config at snapshot point; restores config.Peers on follower
 }
 
 // InstallSnapshotReply is the response to an InstallSnapshot RPC.
@@ -1505,7 +1536,20 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	n.firstIndex = args.LastIncludedIndex + 1
 	n.lastApplied = args.LastIncludedIndex
 	n.commitIndex = args.LastIncludedIndex
+	n.pendingConfChangeIndex = 0
 	n.signalCommit()
+
+	// Restore cluster config from snapshot (Violation 3 fix).
+	if len(args.Servers) > 0 {
+		peers := make([]string, 0, len(args.Servers))
+		for _, s := range args.Servers {
+			if s.ID != n.id {
+				peers = append(peers, s.ID)
+			}
+		}
+		n.config.Peers = peers
+		n.initialPeers = peers
+	}
 
 	// Deliver snapshot data via applyCh so the FSM can restore
 	select {
@@ -1565,56 +1609,6 @@ func (n *Node) TransferLeadership() error {
 	return nil
 }
 
-// AddPeer proposes adding a new peer to the cluster. The change takes effect
-// when the config-change log entry is committed and applied on all nodes.
-func (n *Node) AddPeer(peerID string) error {
-	cmd := append(configAddPrefix, []byte(peerID)...)
-	return n.Propose(cmd)
-}
-
-// RemovePeer proposes removing a peer from the cluster.
-func (n *Node) RemovePeer(peerID string) error {
-	cmd := append(configRemovePrefix, []byte(peerID)...)
-	return n.Propose(cmd)
-}
-
-// applyConfigChange processes membership change commands in the apply loop.
-func (n *Node) applyConfigChange(command []byte) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	if bytes.HasPrefix(command, configAddPrefix) {
-		peerID := string(command[len(configAddPrefix):])
-		// Add only if not already present
-		for _, p := range n.config.Peers {
-			if p == peerID {
-				return
-			}
-		}
-		n.config.Peers = append(n.config.Peers, peerID)
-		// Initialize leader state for new peer if we're the leader
-		if n.state == Leader {
-			n.nextIndex[peerID] = n.lastLogIdx() + 1
-			n.matchIndex[peerID] = 0
-		}
-	} else if bytes.HasPrefix(command, configRemovePrefix) {
-		peerID := string(command[len(configRemovePrefix):])
-		peers := make([]string, 0, len(n.config.Peers))
-		for _, p := range n.config.Peers {
-			if p != peerID {
-				peers = append(peers, p)
-			}
-		}
-		n.config.Peers = peers
-		delete(n.nextIndex, peerID)
-		delete(n.matchIndex, peerID)
-	}
-}
-
-// IsConfigChange returns true if the command is a membership change.
-func IsConfigChange(command []byte) bool {
-	return bytes.HasPrefix(command, configAddPrefix) || bytes.HasPrefix(command, configRemovePrefix)
-}
 
 // HandleTimeoutNow causes this node to immediately start an election.
 // Sent by the leader during leadership transfer to the chosen successor.
@@ -1724,11 +1718,19 @@ func (n *Node) flushBatch(pending []proposal) {
 			Term:    n.currentTerm,
 			Index:   base + uint64(i),
 			Command: p.command,
+			Type:    p.entryType,
 		}
 	}
 	n.log = append(n.log, entries...)
 	n.persistLogEntries(entries)
 	n.matchIndex[n.id] = entries[len(entries)-1].Index
+
+	// §4.4: apply ConfChange entries immediately on append (leader path).
+	for i := range entries {
+		if entries[i].Type == LogEntryConfChange {
+			n.applyConfigChangeLocked(entries[i])
+		}
+	}
 
 	commitChs := make([]chan error, len(pending))
 	for i, entry := range entries {

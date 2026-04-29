@@ -128,6 +128,41 @@ func (c *Cluster) NodeByID(id string) *raft.Node {
 	return c.nodes[id]
 }
 
+// AddNode creates a new raft node with the given id, registers it in the
+// transport (so the leader can replicate to it), and starts it. The caller is
+// responsible for proposing AddVoter to the leader to include the node in the
+// configuration. t.Cleanup will Close the node when the test ends.
+func (c *Cluster) AddNode(id string) *raft.Node {
+	c.t.Helper()
+	cfg := raft.Config{
+		ID:               id,
+		Peers:            nil, // learns peers via AppendEntries from leader
+		ElectionTimeout:  200 * time.Millisecond,
+		HeartbeatTimeout: 50 * time.Millisecond,
+		MaxEntriesPerAE:  512,
+		TrailingLogs:     1024,
+	}
+	c.configs[id] = cfg
+	node := raft.NewNode(cfg)
+	c.nodes[id] = node
+	c.ids = append(c.ids, id)
+	c.transport.Register(node)
+	c.transport.Wire(node)
+	node.Start()
+	c.t.Cleanup(func() { node.Close() })
+	return node
+}
+
+// StopNode calls Close on the named node. The node remains in the routing
+// table so that partitioned-peer tests still see it as a registered target;
+// use PartitionPeer to silence it.
+func (c *Cluster) StopNode(nodeID string) {
+	c.t.Helper()
+	if n, ok := c.nodes[nodeID]; ok {
+		n.Close()
+	}
+}
+
 // Driver primitive delegations.
 
 func (c *Cluster) PartitionPeer(nodeID string)        { c.transport.PartitionPeer(nodeID) }
