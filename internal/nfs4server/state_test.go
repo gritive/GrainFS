@@ -59,19 +59,18 @@ func TestStateManager_SetClientID(t *testing.T) {
 	assert.Greater(t, id, uint64(0))
 
 	// Not confirmed yet
-	sm.clientMu.Lock()
-	cs := sm.clients[id]
-	sm.clientMu.Unlock()
-	assert.False(t, cs.Confirmed)
+	v, ok2 := sm.clients.Load(id)
+	assert.True(t, ok2)
+	cs := v.(*ClientState)
+	assert.False(t, cs.Confirmed.Load())
 
 	// Confirm
 	ok := sm.ConfirmClientID(id)
 	assert.True(t, ok)
 
-	sm.clientMu.Lock()
-	cs = sm.clients[id]
-	sm.clientMu.Unlock()
-	assert.True(t, cs.Confirmed)
+	v, _ = sm.clients.Load(id)
+	cs = v.(*ClientState)
+	assert.True(t, cs.Confirmed.Load())
 }
 
 func TestStateManager_ConfirmInvalidClientID(t *testing.T) {

@@ -55,10 +55,10 @@ func (d *Dispatcher) storePendingCache(response []byte) {
 	if d.pendingCacheSlot == nil {
 		return
 	}
-	d.state.sessionMu.Lock()
+	d.state.slotMu.Lock()
 	d.pendingCacheSlot.Response = response
 	d.pendingCacheSlot.HasCache = true
-	d.state.sessionMu.Unlock()
+	d.state.slotMu.Unlock()
 	d.pendingCacheSlot = nil
 }
 
@@ -1290,9 +1290,9 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_BADSESSION}
 	}
 
-	d.state.sessionMu.Lock()
+	d.state.slotMu.Lock()
 	if int(slotID) >= len(sess.Slots) {
-		d.state.sessionMu.Unlock()
+		d.state.slotMu.Unlock()
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_BADSLOT}
 	}
 	slot := &sess.Slots[slotID]
@@ -1301,30 +1301,30 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	if slot.SeqID == seqID && slot.SeqID > 0 {
 		if slot.HasCache {
 			d.replayFull = slot.Response // full COMPOUND bytes; used by server.go
-			d.state.sessionMu.Unlock()
+			d.state.slotMu.Unlock()
 			return OpResult{OpCode: OpSequence, Status: NFS4_OK}
 		}
 		if slot.WasCacheThis {
 			// cacheThis=1 was set on the original request but the response was never
 			// stored (e.g. server crashed between request and commit). RFC 5661 §18.46.3
 			// requires NFS4ERR_RETRY_UNCACHED_REP in this case.
-			d.state.sessionMu.Unlock()
+			d.state.slotMu.Unlock()
 			return OpResult{OpCode: OpSequence, Status: NFS4ERR_RETRY_UNCACHED_REP}
 		}
 		// cacheThis was false on first call; re-execute remaining ops (RFC 5661 §2.10.5.1.3).
-		d.state.sessionMu.Unlock()
+		d.state.slotMu.Unlock()
 		// fall through to re-build response below
 	} else if slot.SeqID > 0 && seqID != slot.SeqID+1 {
 		// Stale or future seqID (not the expected next or a replay).
-		d.state.sessionMu.Unlock()
+		d.state.slotMu.Unlock()
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_SEQ_MISORDERED}
 	} else {
 		// First request on this slot: RFC 5661 §18.46.3 requires seqID == 1.
 		if slot.SeqID == 0 && seqID != 1 {
-			d.state.sessionMu.Unlock()
+			d.state.slotMu.Unlock()
 			return OpResult{OpCode: OpSequence, Status: NFS4ERR_SEQ_MISORDERED}
 		}
-		d.state.sessionMu.Unlock()
+		d.state.slotMu.Unlock()
 	}
 
 	w := getXDRWriter()
@@ -1336,7 +1336,7 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	w.WriteUint32(0)        // sr_status_flags
 	seqResp := xdrWriterBytes(w)
 
-	d.state.sessionMu.Lock()
+	d.state.slotMu.Lock()
 	slot.SeqID = seqID
 	if cacheThis != 0 {
 		// Full COMPOUND response will be stored by storePendingCache after encoding.
@@ -1348,7 +1348,7 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 		slot.WasCacheThis = false
 		slot.Response = nil
 	}
-	d.state.sessionMu.Unlock()
+	d.state.slotMu.Unlock()
 
 	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: seqResp}
 }
