@@ -1,10 +1,30 @@
 # Changelog
 
-## [0.0.5.2] — 2026-04-29
+## [0.0.5.1] - 2026-04-29
 
-### Fixed
+### Added
 
-- `testCluster.mu`: `sync.Mutex` → `sync.RWMutex`; `nodeByID` / `waitForLeader` / `countState` / `startAll`에 `RLock` 추가하여 `TestIntegration_LogGC_PartitionAndRecovery` data race 제거 (#76에서 도입)
+- **Raft PR 1b — Chaos Harness Phase 2: RequestVoteHook + Disrupting Prevention + Mixed-Version Upgrade** (`internal/raft/chaos/`):
+  - **`RequestVoteHookFn`** (`chaos/transport.go`): per-destination-node 훅 타입. `(nil, true)` 반환 시 드롭, `(args, false)` 반환 시 (수정된) args 전달. partition/drop 체크 이후 발화.
+  - **`SetRequestVoteHook`** (`ChaosTransport`, `Cluster`, `Driver`): 훅 설치/제거 API. 구버전 노드 시뮬레이션(PreVote 드롭)에 활용.
+  - **`InjectRequestVote`** (`Cluster`): 모든 chaos transport 게이팅을 우회하고 `HandleRequestVote`를 직접 호출. Disrupting Prevention 검증에 활용.
+  - **Chaos 시나리오 2건 추가**:
+    - `TestDisruptingPrevention_HighTermVoteBlocked`: 팔로워에게 term+10 real RequestVote 주입 → stickiness가 거부 + 리더 유지 검증. PR 1a 리뷰 M3(옵션 A)의 후속 시나리오.
+    - `TestMixedVersionRollingUpgrade_PreVoteGracefulFallback`: node-2가 PreVote를 드롭하는 혼합 버전 클러스터에서 node-0/1이 pre-vote 과반수(2/3)로 정상 선출되는지 검증. PR 1a baseline 주석의 명시적 요청 이행.
+  - **단위 테스트 2건 추가** (`chaos/transport_test.go`): `TestChaosTransport_RequestVoteHook_API` — `applyRVHook` 직접 검증 (drop/pass-through/nil-remove). `TestChaosTransport_RequestVoteHook_ClusterElectsLeader` — 훅 하에서 클러스터 선출 통합 검증.
+
+## [0.0.5.0] - 2026-04-29
+
+### Added
+
+- **Raft PR 1a — Pre-vote + CheckQuorum + Leader Stickiness** (`internal/raft/`): Raft 논문 §9.6 기반 선출 안정성 3종 세트.
+  - **Pre-vote** (`runPreVote`): 후보가 term 증가 전 pre-vote 라운드 실행. 파티션 복귀 노드가 term을 부풀려 현 리더를 step-down 시키는 문제 차단.
+  - **Leader Stickiness (Disrupting Prevention)** (`HandleRequestVote`): 팔로워가 `ElectionTimeout` 안에 AppendEntries를 받은 경우 RequestVote 거부. 리더 고정성 강화.
+  - **CheckQuorum** (`hasQuorum`, `runLeader`): 리더가 3 heartbeat 주기(150ms) 내 과반수 ack 없으면 자발적 step-down. minority-side stale write 방지.
+  - **`lastLeaderContact` 추적** (`HandleAppendEntries`, `HandleInstallSnapshot`): stickiness 판단 기준 타임스탬프.
+  - **LeaderTransfer 호환성 수정** (`HandleTimeoutNow`, `runCandidate`, `RequestVoteArgs.LeaderTransfer`): `TransferLeadership` 호출 경로에서 stickiness gate 우회. `cluster/balancer.go` 프로덕션 사용처 대응.
+  - **단위 테스트 8건** 추가 (`raft_test.go`): HasQuorum, HandleRequestVote pre-vote/stickiness, AppendEntries/InstallSnapshot lastLeaderContact, 2-node quorum, leader rejects pre-vote.
+  - **Chaos 시나리오 3건 활성화** (`chaos/scenarios/`): `TestSplitBrain_PreVotePreventsLeaderDisruption`, `TestLeaderIsolation_CheckQuorumStepsDown`, `TestStaleLogElected_PreVotePreventsTermInflation` (t.Skip 제거).
 
 ## [0.0.4.46] - 2026-04-29
 
