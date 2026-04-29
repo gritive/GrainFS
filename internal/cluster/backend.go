@@ -2271,3 +2271,8 @@ func (b *DistributedBackend) partDir(uploadID string) string {
 func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
 }
+
+// RaftNode returns the underlying raft.Node for direct API access (e.g. learner management).
+func (b *DistributedBackend) RaftNode() *raft.Node {
+	return b.node
+}
