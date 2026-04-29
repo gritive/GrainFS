@@ -342,6 +342,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	defer metaRaft.Close()
 
+	// Propose initial shard group group-0 asynchronously.
+	// DataGroupManager/Router wiring with DistributedBackend is PR-D scope.
+	go func() {
+		sgCtx, sgCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer sgCancel()
+		if err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
+			ID:      "group-0",
+			PeerIDs: append([]string{nodeID}, peers...),
+		}); err != nil {
+			log.Warn().Err(err).Msg("initial shard group propose failed (non-fatal, PR-D에서 재시도)")
+		}
+	}()
+
+
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
 	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {

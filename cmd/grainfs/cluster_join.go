@@ -71,7 +71,11 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 	}
 	defer metaRaft.Close()
 
-	fmt.Printf("joined cluster via %s (node-id: %s)\n", peerAddr, nodeID)
+	// TODO(PR-E): 현재 로컬 MetaRaft 준비만 완료. 실제 참가는 리더에게
+	// "AddLearner + PromoteToVoter + ProposeAddNode"를 수행하도록 admin RPC
+	// (SendJoin 스트림 타입)를 추가해야 한다. MetaTransport에 JoinRequest
+	// 엔드포인트 추가 및 MetaTransportQUIC 구현은 PR-E scope.
+	fmt.Printf("local meta-raft ready (node-id: %s); leader join via PR-E admin RPC pending\n", nodeID)
 	return nil
 }
 

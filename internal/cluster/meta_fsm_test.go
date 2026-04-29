@@ -82,6 +82,46 @@ func TestMetaFSM_Snapshot_Restore(t *testing.T) {
 	assert.True(t, ids["node-2"])
 }
 
+func makePutShardGroupCmd(t *testing.T, id string, peers []string) []byte {
+	t.Helper()
+	data, err := encodeMetaPutShardGroupCmd(ShardGroupEntry{ID: id, PeerIDs: peers})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypePutShardGroup, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func TestMetaFSM_Apply_PutShardGroup(t *testing.T) {
+	f := NewMetaFSM()
+	err := f.applyCmd(makePutShardGroupCmd(t, "group-0", []string{"node-0", "node-1"}))
+	require.NoError(t, err)
+
+	groups := f.ShardGroups()
+	require.Len(t, groups, 1)
+	assert.Equal(t, "group-0", groups[0].ID)
+	assert.Equal(t, []string{"node-0", "node-1"}, groups[0].PeerIDs)
+}
+
+func TestMetaFSM_ShardGroups_Snapshot_Restore(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-0", "10.0.0.1:7001", 0)))
+	require.NoError(t, f.applyCmd(makePutShardGroupCmd(t, "group-0", []string{"node-0"})))
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+	require.NotEmpty(t, snap)
+
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(snap))
+
+	assert.Len(t, f2.Nodes(), 1)
+
+	groups := f2.ShardGroups()
+	require.Len(t, groups, 1)
+	assert.Equal(t, "group-0", groups[0].ID)
+	assert.Equal(t, []string{"node-0"}, groups[0].PeerIDs)
+}
+
 func TestMetaFSM_Apply_UnknownType_Noop(t *testing.T) {
 	f := NewMetaFSM()
 	// MetaCmdType 255 is unknown — must not panic
