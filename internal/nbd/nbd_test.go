@@ -1,5 +1,3 @@
-//go:build linux
-
 package nbd
 
 import (
@@ -76,6 +74,81 @@ func TestNBDHandshake(t *testing.T) {
 	// If we get here, handshake succeeded
 }
 
+// sendWriteConn writes data at offset over conn and reads the reply.
+func sendWriteConn(t *testing.T, conn net.Conn, offset uint64, data []byte) {
+	t.Helper()
+	req := make([]byte, 28+len(data))
+	binary.BigEndian.PutUint32(req[0:4], nbdRequestMagic)
+	binary.BigEndian.PutUint16(req[4:6], 0)
+	binary.BigEndian.PutUint16(req[6:8], uint16(nbdCmdWrite))
+	binary.BigEndian.PutUint64(req[8:16], 1)
+	binary.BigEndian.PutUint64(req[16:24], offset)
+	binary.BigEndian.PutUint32(req[24:28], uint32(len(data)))
+	copy(req[28:], data)
+	_, err := conn.Write(req)
+	require.NoError(t, err)
+	reply := make([]byte, 16)
+	_, err = io.ReadFull(conn, reply)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "write should succeed")
+}
+
+// sendFlushConn sends NBD_CMD_FLUSH and reads the reply.
+func sendFlushConn(t *testing.T, conn net.Conn) {
+	t.Helper()
+	req := make([]byte, 28)
+	binary.BigEndian.PutUint32(req[0:4], nbdRequestMagic)
+	binary.BigEndian.PutUint16(req[6:8], uint16(nbdCmdFlush))
+	_, err := conn.Write(req)
+	require.NoError(t, err)
+	reply := make([]byte, 16)
+	_, err = io.ReadFull(conn, reply)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "flush should succeed")
+}
+
+// sendReadConn reads length bytes at offset from conn.
+func sendReadConn(t *testing.T, conn net.Conn, offset uint64, length int) []byte {
+	t.Helper()
+	req := make([]byte, 28)
+	binary.BigEndian.PutUint32(req[0:4], nbdRequestMagic)
+	binary.BigEndian.PutUint16(req[6:8], uint16(nbdCmdRead))
+	binary.BigEndian.PutUint64(req[8:16], 2)
+	binary.BigEndian.PutUint64(req[16:24], offset)
+	binary.BigEndian.PutUint32(req[24:28], uint32(length))
+	_, err := conn.Write(req)
+	require.NoError(t, err)
+	reply := make([]byte, 16+length)
+	_, err = io.ReadFull(conn, reply)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "read should succeed")
+	return reply[16:]
+}
+
+// TestNBDFlushWriteOrdering verifies that writing the same block twice then
+// flushing returns the last-written value. This guards against a regression
+// where concurrent flush goroutines could commit out of order.
+func TestNBDFlushWriteOrdering(t *testing.T) {
+	_, conn := setupNBD(t)
+	const blockSize = 4096
+
+	first := make([]byte, blockSize)
+	for i := range first {
+		first[i] = 0xAA
+	}
+	second := make([]byte, blockSize)
+	for i := range second {
+		second[i] = 0xBB
+	}
+
+	sendWriteConn(t, conn, 0, first)
+	sendWriteConn(t, conn, 0, second)
+	sendFlushConn(t, conn)
+
+	got := sendReadConn(t, conn, 0, blockSize)
+	require.Equal(t, second, got, "second write must win after flush")
+}
+
 func TestNBDWriteRead(t *testing.T) {
 	_, conn := setupNBD(t)
 
@@ -83,10 +156,10 @@ func TestNBDWriteRead(t *testing.T) {
 	data := []byte("Hello NBD!")
 	writeReq := make([]byte, 28+len(data))
 	binary.BigEndian.PutUint32(writeReq[0:4], nbdRequestMagic)
-	binary.BigEndian.PutUint16(writeReq[4:6], 0)             // flags
+	binary.BigEndian.PutUint16(writeReq[4:6], 0) // flags
 	binary.BigEndian.PutUint16(writeReq[6:8], uint16(nbdCmdWrite))
-	binary.BigEndian.PutUint64(writeReq[8:16], 1)            // handle
-	binary.BigEndian.PutUint64(writeReq[16:24], 0)           // offset
+	binary.BigEndian.PutUint64(writeReq[8:16], 1)  // handle
+	binary.BigEndian.PutUint64(writeReq[16:24], 0) // offset
 	binary.BigEndian.PutUint32(writeReq[24:28], uint32(len(data)))
 	copy(writeReq[28:], data)
 
@@ -105,8 +178,8 @@ func TestNBDWriteRead(t *testing.T) {
 	binary.BigEndian.PutUint32(readReq[0:4], nbdRequestMagic)
 	binary.BigEndian.PutUint16(readReq[4:6], 0)
 	binary.BigEndian.PutUint16(readReq[6:8], uint16(nbdCmdRead))
-	binary.BigEndian.PutUint64(readReq[8:16], 2)            // handle
-	binary.BigEndian.PutUint64(readReq[16:24], 0)           // offset
+	binary.BigEndian.PutUint64(readReq[8:16], 2)  // handle
+	binary.BigEndian.PutUint64(readReq[16:24], 0) // offset
 	binary.BigEndian.PutUint32(readReq[24:28], uint32(len(data)))
 
 	_, err = conn.Write(readReq)

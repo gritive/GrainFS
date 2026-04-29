@@ -1,5 +1,3 @@
-//go:build linux
-
 package nbd
 
 import (
@@ -150,11 +148,20 @@ func BenchmarkNBD_Write64K(b *testing.B) {
 
 // helpers (encoding/binary-free to avoid import cycle in bench)
 func putU64(b []byte, v uint64) {
-	b[0] = byte(v >> 56); b[1] = byte(v >> 48); b[2] = byte(v >> 40); b[3] = byte(v >> 32)
-	b[4] = byte(v >> 24); b[5] = byte(v >> 16); b[6] = byte(v >> 8); b[7] = byte(v)
+	b[0] = byte(v >> 56)
+	b[1] = byte(v >> 48)
+	b[2] = byte(v >> 40)
+	b[3] = byte(v >> 32)
+	b[4] = byte(v >> 24)
+	b[5] = byte(v >> 16)
+	b[6] = byte(v >> 8)
+	b[7] = byte(v)
 }
 func putU32(b []byte, v uint32) {
-	b[0] = byte(v >> 24); b[1] = byte(v >> 16); b[2] = byte(v >> 8); b[3] = byte(v)
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
 }
 func putU16(b []byte, v uint16) { b[0] = byte(v >> 8); b[1] = byte(v) }
 func readFull(conn net.Conn, buf []byte) (int, error) {
