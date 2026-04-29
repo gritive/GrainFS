@@ -274,6 +274,9 @@ type Node struct {
 	// advanceCommitIndex can commit entries from previous terms. Set via
 	// SetNoOpCommand before Start().
 	noOpCmd []byte
+
+	// Observer pattern (PR3): event delivery to external consumers.
+	observerState
 }
 
 // NewNode creates a new Raft node. Call Start() to begin operation.
@@ -543,6 +546,7 @@ func (n *Node) ApplyCh() <-chan LogEntry {
 }
 
 func (n *Node) run() {
+	var prevState NodeState = Follower
 	for {
 		select {
 		case <-n.stopCh:
@@ -552,7 +556,18 @@ func (n *Node) run() {
 
 		n.mu.Lock()
 		state := n.state
+		leaderID := n.leaderID
+		term := n.currentTerm
 		n.mu.Unlock()
+
+		if state != prevState {
+			if state == Leader {
+				n.notifyObservers(Event{Type: EventLeaderChange, IsLeader: true, LeaderID: n.id, Term: term})
+			} else if prevState == Leader {
+				n.notifyObservers(Event{Type: EventLeaderChange, IsLeader: false, LeaderID: leaderID, Term: term})
+			}
+		}
+		prevState = state
 
 		switch state {
 		case Follower:
@@ -940,6 +955,7 @@ func (n *Node) replicateTo(peer string) {
 	}
 	reply, err := n.sendAppendEntries(peer, args)
 	if err != nil {
+		n.notifyObservers(Event{Type: EventFailedHeartbeat, PeerID: peer})
 		return
 	}
 

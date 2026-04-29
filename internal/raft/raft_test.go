@@ -115,6 +115,16 @@ func (c *testCluster) startAll() {
 	}
 }
 
+func (c *testCluster) stopAll() {
+	c.mu.RLock()
+	nodes := make([]*Node, len(c.nodes))
+	copy(nodes, c.nodes)
+	c.mu.RUnlock()
+	for _, n := range nodes {
+		n.Close()
+	}
+}
+
 func (c *testCluster) waitForLeader(timeout time.Duration) *Node {
 	deadline := time.After(timeout)
 	for {
@@ -1362,4 +1372,27 @@ func TestTrailingLogs_ZeroRemovesAll(t *testing.T) {
 
 	assert.Equal(t, uint64(4), fi)
 	assert.Equal(t, 0, ll)
+}
+
+func TestObserver_DeliversLeaderChange(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	ch := make(chan Event, 24)
+	for _, n := range cluster.nodes {
+		n.RegisterObserver(ch)
+	}
+	cluster.startAll()
+	defer cluster.stopAll()
+
+	require.Eventually(t, func() bool {
+		for {
+			select {
+			case e := <-ch:
+				if e.Type == EventLeaderChange && e.IsLeader {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}, 5*time.Second, 10*time.Millisecond, "observer must deliver EventLeaderChange with IsLeader=true")
 }
