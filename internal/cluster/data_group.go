@@ -10,6 +10,7 @@ import (
 type DataGroup struct {
 	id      string
 	peerIDs []string
+	backend *DistributedBackend // PR-D: nil until wired in serve.go
 }
 
 // NewDataGroup creates a DataGroup with the given peer list.
@@ -17,11 +18,19 @@ func NewDataGroup(id string, peerIDs []string) *DataGroup {
 	return &DataGroup{id: id, peerIDs: peerIDs}
 }
 
+// NewDataGroupWithBackend creates a DataGroup pre-wired with a DistributedBackend.
+func NewDataGroupWithBackend(id string, peerIDs []string, b *DistributedBackend) *DataGroup {
+	return &DataGroup{id: id, peerIDs: peerIDs, backend: b}
+}
+
 func (g *DataGroup) ID() string { return g.id }
 
 // PeerIDs returns the peer list for this group.
 // The returned slice is read-only; callers must not modify or append to it.
 func (g *DataGroup) PeerIDs() []string { return g.peerIDs }
+
+// Backend returns the DistributedBackend wired to this group, or nil if not yet set.
+func (g *DataGroup) Backend() *DistributedBackend { return g.backend }
 
 // groupSnapshot is an immutable snapshot of DataGroupManager. COW replacement enables lock-free reads.
 type groupSnapshot struct {

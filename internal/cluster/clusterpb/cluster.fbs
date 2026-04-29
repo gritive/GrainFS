@@ -199,11 +199,12 @@ root_type Command;
 
 // PR-B: meta-Raft FSM commands — cluster control plane
 enum MetaCmdType : uint8 {
-  NoOp          = 0,
-  AddNode        = 1,
-  RemoveNode     = 2,
-  PutShardGroup  = 3,   // shard → Raft 그룹 매핑 (PR-C)
-  SetActivePlan  = 4    // 진행 중 rebalance plan ID (PR-D)
+  NoOp                = 0,
+  AddNode             = 1,
+  RemoveNode          = 2,
+  PutShardGroup       = 3,   // shard → Raft 그룹 매핑 (PR-C)
+  SetActivePlan       = 4,   // 진행 중 rebalance plan ID
+  PutBucketAssignment = 5    // bucket → group_id 영속 매핑 (PR-D)
 }
 
 table MetaNodeEntry {
@@ -237,7 +238,19 @@ table MetaPutShardGroupCmd {
   group:ShardGroupEntry;
 }
 
+// PR-D: bucket→group 매핑 엔트리 1건
+table BucketAssignmentEntry {
+  bucket:string;
+  group_id:string;
+}
+
+// PR-D: PutBucketAssignment 커맨드
+table MetaPutBucketAssignmentCmd {
+  entry:BucketAssignmentEntry;
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
-  shard_groups:[ShardGroupEntry];  // PR-C: 추가
+  shard_groups:[ShardGroupEntry];          // PR-C
+  bucket_assignments:[BucketAssignmentEntry]; // PR-D
 }

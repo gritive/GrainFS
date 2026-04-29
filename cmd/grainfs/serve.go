@@ -334,6 +334,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	metaTransport := cluster.NewMetaTransportQUIC(quicTransport, metaRaft.Node())
 	metaRaft.SetTransport(metaTransport)
+
+	// PR-D: DataGroupManager + Router — created before metaRaft.Start() so the
+	// OnBucketAssigned callback is registered before the apply loop starts (race-free).
+	dgMgr := cluster.NewDataGroupManager()
+	clusterRouter := cluster.NewRouter(dgMgr)
+	clusterRouter.SetDefault("group-0")
+	// SetOnBucketAssigned uses f.mu.Lock() internally; must be called before Start().
+	metaRaft.FSM().SetOnBucketAssigned(func(bucket, groupID string) {
+		clusterRouter.AssignBucket(bucket, groupID)
+	})
+
 	if err := metaRaft.Bootstrap(); err != nil {
 		return fmt.Errorf("meta-raft bootstrap: %w", err)
 	}
@@ -342,8 +353,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	defer metaRaft.Close()
 
+	// Seed Router with any bucket assignments already persisted in FSM state.
+	// Start() returns before replay finishes; onBucketAssigned fires live updates.
+	clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
+
 	// Propose initial shard group group-0 asynchronously.
-	// DataGroupManager/Router wiring with DistributedBackend is PR-D scope.
 	go func() {
 		sgCtx, sgCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer sgCancel()
@@ -354,7 +368,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			log.Warn().Err(err).Msg("initial shard group propose failed (non-fatal, PR-D에서 재시도)")
 		}
 	}()
-
 
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
@@ -385,6 +398,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Wire shard service for distributed fan-out replication
 	allNodes := append([]string{raftAddr}, peers...)
 	distBackend.SetShardService(shardSvc, allNodes)
+
+	// PR-D: wire group-0 into DataGroupManager and hook Router + BucketAssigner.
+	// distBackend is created after metaRaft so we build group-0 here with the live backend.
+	group0 := cluster.NewDataGroupWithBackend(
+		"group-0",
+		append([]string{nodeID}, peers...),
+		distBackend,
+	)
+	dgMgr.Add(group0)
+	distBackend.SetRouter(clusterRouter)
+	distBackend.SetBucketAssigner(metaRaft)
 
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
 	// 1-2 nodes always use N× replication.

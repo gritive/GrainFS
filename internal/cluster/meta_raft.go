@@ -83,6 +83,10 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 // Node returns the underlying raft.Node for external transport wiring.
 func (m *MetaRaft) Node() *raft.Node { return m.node }
 
+// FSM returns the MetaFSM for callback registration and state inspection.
+// Callers must set callbacks before Start() to avoid a data race with the apply loop.
+func (m *MetaRaft) FSM() *MetaFSM { return m.fsm }
+
 // SetTransport wires a MetaTransport into the Raft node after construction.
 // Must be called before Start.
 func (m *MetaRaft) SetTransport(t MetaTransport) {
@@ -148,6 +152,24 @@ func (m *MetaRaft) ProposeAddNode(ctx context.Context, entry MetaNodeEntry) erro
 		return fmt.Errorf("meta_raft: encode AddNode: %w", err)
 	}
 	data, err := encodeMetaCmd(MetaCmdTypeAddNode, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
+// ProposeBucketAssignment encodes a PutBucketAssignment command and proposes it to
+// the cluster, blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeBucketAssignment(ctx context.Context, bucket, groupID string) error {
+	payload, err := encodeMetaPutBucketAssignmentCmd(bucket, groupID)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode PutBucketAssignment: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypePutBucketAssignment, payload)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}

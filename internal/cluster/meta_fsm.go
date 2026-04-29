@@ -14,10 +14,11 @@ import (
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp          = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode       = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode    = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup = clusterpb.MetaCmdTypePutShardGroup // PR-C
+	MetaCmdTypeNoOp                = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode             = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode          = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup       = clusterpb.MetaCmdTypePutShardGroup       // PR-C
+	MetaCmdTypePutBucketAssignment = clusterpb.MetaCmdTypePutBucketAssignment // PR-D
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -36,16 +37,31 @@ type ShardGroupEntry struct {
 
 // MetaFSM implements raft.Snapshotter for the meta-Raft group.
 // It holds cluster membership state.
+//
+// Lock discipline: mu is a RWMutex shared by all three state maps (nodes,
+// shardGroups, bucketAssignments) and the callback field.
+// RWMutex is justified here because:
+//   - There is exactly ONE writer goroutine (runApplyLoop), so write contention
+//     is zero and write locks are never contended.
+//   - Multiple reader goroutines (HTTP handlers, routing) hold RLock concurrently
+//     while the writer is idle — RWMutex allows this, plain Mutex would not.
+//   - Snapshot() and Restore() must read/write all three maps atomically; a
+//     single lock (rather than per-map atomics) is the simplest consistency guarantee.
+//   - onBucketAssigned is stored in the same lock to ensure the callback always
+//     sees the freshly updated map state without a separate atomic.
 type MetaFSM struct {
-	mu          sync.RWMutex
-	nodes       map[string]MetaNodeEntry
-	shardGroups map[string]ShardGroupEntry // key = group ID
+	mu                sync.RWMutex
+	nodes             map[string]MetaNodeEntry
+	shardGroups       map[string]ShardGroupEntry // key = group ID
+	bucketAssignments map[string]string          // bucket → group_id (PR-D)
+	onBucketAssigned  func(string, string)       // protected by mu; set before Start() (PR-D)
 }
 
 func NewMetaFSM() *MetaFSM {
 	return &MetaFSM{
-		nodes:       make(map[string]MetaNodeEntry),
-		shardGroups: make(map[string]ShardGroupEntry),
+		nodes:             make(map[string]MetaNodeEntry),
+		shardGroups:       make(map[string]ShardGroupEntry),
+		bucketAssignments: make(map[string]string),
 	}
 }
 
@@ -80,6 +96,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyRemoveNode(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutShardGroup:
 		return f.applyPutShardGroup(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePutBucketAssignment:
+		return f.applyPutBucketAssignment(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -195,6 +213,69 @@ func (f *MetaFSM) applyPutShardGroup(data []byte) error {
 	return nil
 }
 
+func (f *MetaFSM) applyPutBucketAssignment(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: PutBucketAssignment: empty payload")
+	}
+	var (
+		c      *clusterpb.MetaPutBucketAssignmentCmd
+		decErr error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				decErr = fmt.Errorf("meta_fsm: invalid MetaPutBucketAssignmentCmd flatbuffer: %v", r)
+			}
+		}()
+		c = clusterpb.GetRootAsMetaPutBucketAssignmentCmd(data, 0)
+	}()
+	if decErr != nil {
+		return decErr
+	}
+
+	entry := c.Entry(nil)
+	if entry == nil {
+		return fmt.Errorf("meta_fsm: PutBucketAssignment: nil entry")
+	}
+	bucket := string(entry.Bucket())
+	groupID := string(entry.GroupId())
+	if bucket == "" {
+		return fmt.Errorf("meta_fsm: PutBucketAssignment: empty bucket")
+	}
+	if groupID == "" {
+		return fmt.Errorf("meta_fsm: PutBucketAssignment: empty groupID")
+	}
+
+	f.mu.Lock()
+	f.bucketAssignments[bucket] = groupID
+	cb := f.onBucketAssigned
+	f.mu.Unlock()
+
+	if cb != nil {
+		cb(bucket, groupID)
+	}
+	return nil
+}
+
+// SetOnBucketAssigned registers a callback fired after each PutBucketAssignment is applied.
+// Must be called before MetaRaft.Start() to avoid a data race with the apply loop.
+func (f *MetaFSM) SetOnBucketAssigned(fn func(bucket, groupID string)) {
+	f.mu.Lock()
+	f.onBucketAssigned = fn
+	f.mu.Unlock()
+}
+
+// BucketAssignments returns a copy of the current bucket→group_id map.
+func (f *MetaFSM) BucketAssignments() map[string]string {
+	f.mu.RLock()
+	out := make(map[string]string, len(f.bucketAssignments))
+	for k, v := range f.bucketAssignments {
+		out[k] = v
+	}
+	f.mu.RUnlock()
+	return out
+}
+
 // ShardGroups returns a deep copy of current shard groups.
 // PeerIDs slices are copied so callers cannot mutate FSM state.
 func (f *MetaFSM) ShardGroups() []ShardGroupEntry {
@@ -219,6 +300,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	shardGroups := make([]ShardGroupEntry, 0, len(f.shardGroups))
 	for _, sg := range f.shardGroups {
 		shardGroups = append(shardGroups, sg)
+	}
+	type bucketKV struct{ bucket, groupID string }
+	buckets := make([]bucketKV, 0, len(f.bucketAssignments))
+	for bucket, groupID := range f.bucketAssignments {
+		buckets = append(buckets, bucketKV{bucket, groupID})
 	}
 	f.mu.RUnlock()
 
@@ -267,9 +353,27 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	nodesVec := b.EndVector(len(nodeOffs))
 
+	// Build BucketAssignmentEntry offsets
+	baOffs := make([]flatbuffers.UOffsetT, len(buckets))
+	for i := len(buckets) - 1; i >= 0; i-- {
+		bkt := buckets[i]
+		bucketOff := b.CreateString(bkt.bucket)
+		groupIDOff := b.CreateString(bkt.groupID)
+		clusterpb.BucketAssignmentEntryStart(b)
+		clusterpb.BucketAssignmentEntryAddBucket(b, bucketOff)
+		clusterpb.BucketAssignmentEntryAddGroupId(b, groupIDOff)
+		baOffs[i] = clusterpb.BucketAssignmentEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartBucketAssignmentsVector(b, len(baOffs))
+	for i := len(baOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(baOffs[i])
+	}
+	baVec := b.EndVector(len(baOffs))
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
+	clusterpb.MetaStateSnapshotAddBucketAssignments(b, baVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	return fbFinish(b, root), nil
 }
@@ -325,10 +429,27 @@ func (f *MetaFSM) Restore(data []byte) error {
 		newShardGroups[e.ID] = e
 	}
 
+	newBucketAssignments := make(map[string]string, snap.BucketAssignmentsLength())
+	var baEntry clusterpb.BucketAssignmentEntry
+	for i := 0; i < snap.BucketAssignmentsLength(); i++ {
+		if !snap.BucketAssignments(&baEntry, i) {
+			return fmt.Errorf("meta_fsm: Restore: bucket assignment %d decode failed", i)
+		}
+		bucket := string(baEntry.Bucket())
+		newBucketAssignments[bucket] = string(baEntry.GroupId())
+	}
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
+	f.bucketAssignments = newBucketAssignments
+	cb := f.onBucketAssigned
 	f.mu.Unlock()
+	if cb != nil {
+		for bucket, groupID := range newBucketAssignments {
+			cb(bucket, groupID)
+		}
+	}
 	return nil
 }
 
@@ -381,6 +502,19 @@ func encodeMetaRemoveNodeCmd(nodeID string) ([]byte, error) {
 	clusterpb.MetaRemoveNodeCmdStart(b)
 	clusterpb.MetaRemoveNodeCmdAddNodeId(b, idOff)
 	return fbFinish(b, clusterpb.MetaRemoveNodeCmdEnd(b)), nil
+}
+
+func encodeMetaPutBucketAssignmentCmd(bucket, groupID string) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(bucket)
+	groupIDOff := b.CreateString(groupID)
+	clusterpb.BucketAssignmentEntryStart(b)
+	clusterpb.BucketAssignmentEntryAddBucket(b, bucketOff)
+	clusterpb.BucketAssignmentEntryAddGroupId(b, groupIDOff)
+	entryOff := clusterpb.BucketAssignmentEntryEnd(b)
+	clusterpb.MetaPutBucketAssignmentCmdStart(b)
+	clusterpb.MetaPutBucketAssignmentCmdAddEntry(b, entryOff)
+	return fbFinish(b, clusterpb.MetaPutBucketAssignmentCmdEnd(b)), nil
 }
 
 func encodeMetaPutShardGroupCmd(sg ShardGroupEntry) ([]byte, error) {

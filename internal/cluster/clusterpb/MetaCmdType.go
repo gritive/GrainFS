@@ -7,27 +7,30 @@ import "strconv"
 type MetaCmdType byte
 
 const (
-	MetaCmdTypeNoOp          MetaCmdType = 0
-	MetaCmdTypeAddNode       MetaCmdType = 1
-	MetaCmdTypeRemoveNode    MetaCmdType = 2
-	MetaCmdTypePutShardGroup MetaCmdType = 3
-	MetaCmdTypeSetActivePlan MetaCmdType = 4
+	MetaCmdTypeNoOp                MetaCmdType = 0
+	MetaCmdTypeAddNode             MetaCmdType = 1
+	MetaCmdTypeRemoveNode          MetaCmdType = 2
+	MetaCmdTypePutShardGroup       MetaCmdType = 3
+	MetaCmdTypeSetActivePlan       MetaCmdType = 4
+	MetaCmdTypePutBucketAssignment MetaCmdType = 5
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
-	MetaCmdTypeNoOp:          "NoOp",
-	MetaCmdTypeAddNode:       "AddNode",
-	MetaCmdTypeRemoveNode:    "RemoveNode",
-	MetaCmdTypePutShardGroup: "PutShardGroup",
-	MetaCmdTypeSetActivePlan: "SetActivePlan",
+	MetaCmdTypeNoOp:                "NoOp",
+	MetaCmdTypeAddNode:             "AddNode",
+	MetaCmdTypeRemoveNode:          "RemoveNode",
+	MetaCmdTypePutShardGroup:       "PutShardGroup",
+	MetaCmdTypeSetActivePlan:       "SetActivePlan",
+	MetaCmdTypePutBucketAssignment: "PutBucketAssignment",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
-	"NoOp":          MetaCmdTypeNoOp,
-	"AddNode":       MetaCmdTypeAddNode,
-	"RemoveNode":    MetaCmdTypeRemoveNode,
-	"PutShardGroup": MetaCmdTypePutShardGroup,
-	"SetActivePlan": MetaCmdTypeSetActivePlan,
+	"NoOp":                MetaCmdTypeNoOp,
+	"AddNode":             MetaCmdTypeAddNode,
+	"RemoveNode":          MetaCmdTypeRemoveNode,
+	"PutShardGroup":       MetaCmdTypePutShardGroup,
+	"SetActivePlan":       MetaCmdTypeSetActivePlan,
+	"PutBucketAssignment": MetaCmdTypePutBucketAssignment,
 }
 
 func (v MetaCmdType) String() string {

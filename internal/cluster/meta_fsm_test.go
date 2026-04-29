@@ -130,3 +130,80 @@ func TestMetaFSM_Apply_UnknownType_Noop(t *testing.T) {
 	require.NoError(t, f.applyCmd(unknownCmd))
 	assert.Empty(t, f.Nodes())
 }
+
+func makePutBucketAssignmentCmd(t *testing.T, bucket, groupID string) []byte {
+	t.Helper()
+	data, err := encodeMetaPutBucketAssignmentCmd(bucket, groupID)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypePutBucketAssignment, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func TestMetaFSM_Apply_PutBucketAssignment(t *testing.T) {
+	f := NewMetaFSM()
+	err := f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0"))
+	require.NoError(t, err)
+
+	assignments := f.BucketAssignments()
+	require.Len(t, assignments, 1)
+	assert.Equal(t, "group-0", assignments["photos"])
+}
+
+func TestMetaFSM_Apply_PutBucketAssignment_Overwrite(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0")))
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+
+	assignments := f.BucketAssignments()
+	require.Len(t, assignments, 1)
+	assert.Equal(t, "group-1", assignments["photos"])
+}
+
+func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0")))
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "videos", "group-1")))
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+	require.NotEmpty(t, snap)
+
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(snap))
+
+	assignments := f2.BucketAssignments()
+	require.Len(t, assignments, 2)
+	assert.Equal(t, "group-0", assignments["photos"])
+	assert.Equal(t, "group-1", assignments["videos"])
+}
+
+func TestMetaFSM_OnBucketAssigned_CallbackFired(t *testing.T) {
+	f := NewMetaFSM()
+	var cbBucket, cbGroup string
+	f.SetOnBucketAssigned(func(bucket, groupID string) {
+		cbBucket = bucket
+		cbGroup = groupID
+	})
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0")))
+	assert.Equal(t, "photos", cbBucket)
+	assert.Equal(t, "group-0", cbGroup)
+}
+
+func TestMetaFSM_Restore_FiresOnBucketAssignedCallback(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0")))
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "videos", "group-1")))
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+
+	f2 := NewMetaFSM()
+	got := make(map[string]string)
+	f2.SetOnBucketAssigned(func(bucket, groupID string) {
+		got[bucket] = groupID
+	})
+	require.NoError(t, f2.Restore(snap))
+
+	assert.Equal(t, map[string]string{"photos": "group-0", "videos": "group-1"}, got)
+}

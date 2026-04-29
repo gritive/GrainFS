@@ -49,6 +49,12 @@ func newVersionID() string {
 // Used for cache invalidation and metrics updates.
 type OnApplyFunc func(cmdType CommandType, bucket, key string)
 
+// BucketAssigner proposes a bucket→group assignment to the meta-Raft cluster.
+// Implemented by *MetaRaft; nil = no persistence (single-node legacy mode).
+type BucketAssigner interface {
+	ProposeBucketAssignment(ctx context.Context, bucket, groupID string) error
+}
+
 // DistributedBackend implements storage.Backend with Raft-replicated metadata
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
@@ -76,6 +82,9 @@ type DistributedBackend struct {
 	// See internal/cache/shardcache for the rationale (sharded LRU,
 	// lock-free counters, why we do not use an actor pattern here).
 	shardCache *shardcache.Cache
+
+	assigner BucketAssigner // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
+	router   *Router        // PR-D: bucket→group routing; nil = no routing
 
 	// vfsFixedVersion controls VFS-internal-bucket behavior:
 	// true (default) → PutObject for "__grainfs_vfs_*" uses fixed versionID
@@ -378,6 +387,13 @@ func (b *DistributedBackend) GetRegistry() *Registry {
 	return b.registry
 }
 
+// SetBucketAssigner injects the MetaRaft proposer for bucket assignment persistence.
+// Must be called before CreateBucket. Nil disables persistence (single-node legacy mode).
+func (b *DistributedBackend) SetBucketAssigner(a BucketAssigner) { b.assigner = a }
+
+// SetRouter wires a Router for bucket→group routing used by CreateBucket.
+func (b *DistributedBackend) SetRouter(r *Router) { b.router = r }
+
 // --- Bucket operations ---
 
 func (b *DistributedBackend) CreateBucket(bucket string) error {
@@ -395,6 +411,24 @@ func (b *DistributedBackend) CreateBucket(bucket string) error {
 
 	if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
 		return fmt.Errorf("create bucket dir: %w", err)
+	}
+
+	// PR-D: persist bucket→group assignment in meta-Raft before data-Raft create.
+	// assigner nil means single-node or not-yet-wired (legacy skip).
+	// If ProposeBucketAssignment succeeds but b.propose(CmdCreateBucket) below fails,
+	// the assignment is durable but the bucket key won't exist yet. A retry will
+	// re-propose (idempotent overwrite) and re-create — safe by design.
+	if b.assigner != nil {
+		if b.router == nil {
+			return fmt.Errorf("create bucket %q: router not configured", bucket)
+		}
+		g, routeErr := b.router.RouteKey(bucket, "")
+		if routeErr != nil {
+			return fmt.Errorf("route bucket %q: %w", bucket, routeErr)
+		}
+		if propErr := b.assigner.ProposeBucketAssignment(context.Background(), bucket, g.ID()); propErr != nil {
+			return fmt.Errorf("propose bucket assignment: %w", propErr)
+		}
 	}
 
 	return b.propose(context.Background(), CmdCreateBucket, CreateBucketCmd{Bucket: bucket})

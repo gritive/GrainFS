@@ -56,6 +56,28 @@ func (r *Router) AssignBucket(bucket, groupID string) {
 	}
 }
 
+// Sync merges assignments from a MetaFSM snapshot into the routing table (bootstrap-only).
+// Must be called once after MetaRaft start/restore. Existing entries (e.g., those added
+// by the OnBucketAssigned callback during concurrent log replay) are preserved; snapshot
+// entries take precedence over any conflicting prior value.
+// Runtime additions must use AssignBucket to avoid overwriting concurrent updates.
+func (r *Router) Sync(assignments map[string]string) {
+	for {
+		old := r.snap.Load()
+		newMap := make(map[string]string, len(old.bucketMap)+len(assignments))
+		for k, v := range old.bucketMap {
+			newMap[k] = v
+		}
+		for k, v := range assignments {
+			newMap[k] = v
+		}
+		newSnap := &routerSnap{bucketMap: newMap, defaultGroupID: old.defaultGroupID}
+		if r.snap.CompareAndSwap(old, newSnap) {
+			return
+		}
+	}
+}
+
 // RouteKey returns the DataGroup for the given bucket.
 // key is accepted but unused at Layer 1; reserved for future Layer 2 (ringFNV32) integration.
 func (r *Router) RouteKey(bucket, _ string) (*DataGroup, error) {
