@@ -106,7 +106,11 @@ func (c *testCluster) nodeByID(id string) *Node {
 }
 
 func (c *testCluster) startAll() {
-	for _, n := range c.nodes {
+	c.mu.RLock()
+	nodes := make([]*Node, len(c.nodes))
+	copy(nodes, c.nodes)
+	c.mu.RUnlock()
+	for _, n := range nodes {
 		n.Start()
 	}
 }
