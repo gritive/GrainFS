@@ -45,6 +45,33 @@ func (b *Backend) PutObject(bucket, key string, r io.Reader, contentType string)
 	return obj, nil
 }
 
+// WriteAt is a pass-through for pwrite-based partial writes on internal
+// buckets (NFS4, VFS). No WAL entry is written: internal buckets are ephemeral
+// and not subject to PITR replay.
+func (b *Backend) WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	type writeAtter interface {
+		WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error)
+	}
+	wa, ok := b.Backend.(writeAtter)
+	if !ok {
+		return nil, fmt.Errorf("wal: inner backend does not support WriteAt")
+	}
+	return wa.WriteAt(bucket, key, offset, data)
+}
+
+// ReadAt is a pass-through for pread-based partial reads on internal buckets.
+// No WAL entry: reads are not mutations.
+func (b *Backend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+	type readAtter interface {
+		ReadAt(bucket, key string, offset int64, buf []byte) (int, error)
+	}
+	ra, ok := b.Backend.(readAtter)
+	if !ok {
+		return 0, fmt.Errorf("wal: inner backend does not support ReadAt")
+	}
+	return ra.ReadAt(bucket, key, offset, buf)
+}
+
 func (b *Backend) DeleteObject(bucket, key string) error {
 	if err := b.Backend.DeleteObject(bucket, key); err != nil {
 		return err

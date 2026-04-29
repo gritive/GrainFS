@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -18,6 +20,12 @@ import (
 
 var opReadBufPool = pool.New(func() *bytes.Buffer { return new(bytes.Buffer) })
 var bytesReaderPool = pool.New(func() *bytes.Reader { return new(bytes.Reader) })
+
+// nfsMaxReadBlock matches the rsize mount option (131072 = 128 KiB).
+// Pooling at this size eliminates per-call allocs in the ReadAt fast path.
+const nfsMaxReadBlock = 131072
+
+var opReadAtBufPool = pool.New(func() []byte { return make([]byte, nfsMaxReadBlock) })
 
 var compoundReqPool = pool.New(func() *CompoundRequest {
 	return &CompoundRequest{Ops: make([]Op, 0, maxCompoundOps)}
@@ -711,6 +719,12 @@ func (d *Dispatcher) opReadDir(_ []byte) OpResult {
 	return OpResult{OpCode: OpReadDir, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
+// readAtBackend is the zero-overhead partial-read interface.
+// Implementations skip HeadObject, GetObject, and Seek entirely.
+type readAtBackend interface {
+	ReadAt(bucket, key string, offset int64, buf []byte) (int, error)
+}
+
 func (d *Dispatcher) opRead(data []byte) OpResult {
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_SERVERFAULT}
@@ -725,54 +739,80 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		key = key[1:]
 	}
 
-	// 파일 크기 가져오기
+	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
+	if ra, ok := d.backend.(readAtBackend); ok {
+		var buf []byte
+		var pooled bool
+		if count <= nfsMaxReadBlock {
+			buf = opReadAtBufPool.Get()
+			buf = buf[:count]
+			pooled = true
+		} else {
+			buf = make([]byte, count)
+		}
+		n, err := ra.ReadAt(nfs4Bucket, key, int64(offset), buf)
+		if err != nil && !errors.Is(err, io.EOF) {
+			if pooled {
+				opReadAtBufPool.Put(buf[:nfsMaxReadBlock])
+			}
+			if os.IsNotExist(err) {
+				return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
+			}
+			return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
+		}
+		eof := errors.Is(err, io.EOF) || n < int(count)
+		w := getXDRWriter()
+		w.WriteUint32(boolToUint32(eof))
+		w.WriteOpaque(buf[:n]) // WriteOpaque copies into XDR buf, pool is safe to reuse after
+		result := OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+		if pooled {
+			opReadAtBufPool.Put(buf[:nfsMaxReadBlock])
+		}
+		return result
+	}
+
+	// Slow path: HeadObject + GetObject + Seek (backends without ReadAt).
 	obj, err := d.backend.HeadObject(nfs4Bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
 	}
 	fileSize := obj.Size
 
-	// 오프셋 이후의 남은 바이트 계산
 	remainingSize := fileSize
 	if offset < uint64(fileSize) {
 		remainingSize = fileSize - int64(offset)
 	} else {
-		// EOF 너머 읽기 - 빈 데이터와 eof=true 반환
 		w := getXDRWriter()
 		w.WriteUint32(1) // eof = TRUE
 		w.WriteOpaque(nil)
 		return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 	}
 
-	// count가 지정된 경우 제한
 	if uint64(remainingSize) > uint64(count) {
 		remainingSize = int64(count)
 	}
 
-	// 스트리밍 읽기를 위해 객체 열기
 	rc, _, err := d.backend.GetObject(nfs4Bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
 	}
 	defer rc.Close()
 
-	// 필요한 경우 오프셋으로 이동
 	if offset > 0 {
 		if seeker, ok := rc.(io.Seeker); ok {
 			_, err = seeker.Seek(int64(offset), io.SeekStart)
 			if err != nil {
-				rc.Close() // 명시적으로 닫아 resource leak 방지
+				rc.Close()
 				return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
 			}
 		} else {
-			// Seek를 지원하지 않는 Reader - 데이터를 건너뛰기
 			discard := make([]byte, 4096)
 			remainingToSkip := int64(offset)
 			for remainingToSkip > 0 {
 				toSkip := min(remainingToSkip, int64(len(discard)))
 				n, err := rc.Read(discard[:toSkip])
 				if err != nil {
-					rc.Close() // 명시적으로 닫아 resource leak 방지
+					rc.Close()
 					return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
 				}
 				remainingToSkip -= int64(n)
@@ -780,7 +820,6 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		}
 	}
 
-	// 버퍼에 데이터 읽기 (pool 재사용으로 alloc 감소)
 	buffer := opReadBufPool.Get()
 	buffer.Reset()
 	defer func() { buffer.Reset(); opReadBufPool.Put(buffer) }()
@@ -790,8 +829,6 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	}
 
 	readData := buffer.Bytes()
-
-	// count 제한 적용 (이미 Seek로 offset은 적용됨)
 	if uint32(len(readData)) > count {
 		readData = readData[:count]
 	}

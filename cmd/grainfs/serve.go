@@ -431,6 +431,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	loadReporter := cluster.NewLoadReporter(nodeID, loadReporterStore, metaRaft, cluster.DefaultLoadReportInterval)
 	go loadReporter.Run(ctx)
 
+
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
 	// 1-2 nodes always use N× replication.
 	clusterECData, _ := cmd.Flags().GetInt("ec-data")

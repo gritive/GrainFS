@@ -343,3 +343,76 @@ func TestCachedBackend_CloseAndUnwrap(t *testing.T) {
 	assert.Equal(t, b, cached.Unwrap())
 	require.NoError(t, cached.Close())
 }
+
+func TestLocalBackend_ReadAt(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+
+	data := []byte("hello world")
+	_, err := b.PutObject("bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+
+	buf := make([]byte, 5)
+	n, err := b.ReadAt("bkt", "obj", 6, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	assert.Equal(t, []byte("world"), buf[:n])
+}
+
+func TestLocalBackend_ReadAt_EOF(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+
+	_, err := b.PutObject("bkt", "obj", bytes.NewReader([]byte("abc")), "application/octet-stream")
+	require.NoError(t, err)
+
+	buf := make([]byte, 10)
+	n, err := b.ReadAt("bkt", "obj", 0, buf)
+	assert.ErrorIs(t, err, io.EOF)
+	assert.Equal(t, 3, n)
+	assert.Equal(t, []byte("abc"), buf[:n])
+}
+
+func TestLocalBackend_ReadAt_NotExist(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+
+	buf := make([]byte, 4)
+	_, err := b.ReadAt("bkt", "missing", 0, buf)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestCachedBackend_ReadAt_CacheHit(t *testing.T) {
+	cb, _ := newTestCachedBackend(t, WithMaxObjectCacheBytes(1024*1024))
+	require.NoError(t, cb.CreateBucket("bkt"))
+
+	data := []byte("cached content")
+	_, err := cb.PutObject("bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+
+	// Warm the cache.
+	rc, _, err := cb.GetObject("bkt", "obj")
+	require.NoError(t, err)
+	rc.Close()
+
+	buf := make([]byte, 6)
+	n, err := cb.ReadAt("bkt", "obj", 7, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 6, n)
+	assert.Equal(t, []byte("conten"), buf[:n])
+}
+
+func TestCachedBackend_ReadAt_CacheMiss(t *testing.T) {
+	cb, _ := newTestCachedBackend(t)
+	require.NoError(t, cb.CreateBucket("bkt"))
+
+	data := []byte("uncached data")
+	_, err := cb.PutObject("bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+
+	buf := make([]byte, 8)
+	n, err := cb.ReadAt("bkt", "obj", 0, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 8, n)
+	assert.Equal(t, []byte("uncached"), buf[:n])
+}

@@ -177,6 +177,29 @@ func (cb *CachedBackend) WriteAt(bucket, key string, offset uint64, data []byte)
 	return wa.WriteAt(bucket, key, offset, data)
 }
 
+// ReadAt serves pread from the in-memory cache on hit; delegates to inner on miss.
+// For large objects (not cached), bypasses GetObject/Seek overhead entirely.
+func (cb *CachedBackend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+	ck := cacheKey(bucket, key)
+	cb.mu.Lock()
+	node, ok := cb.entries[ck]
+	if ok {
+		data := node.val.data
+		cb.mu.Unlock()
+		return bytes.NewReader(data).ReadAt(buf, offset)
+	}
+	cb.mu.Unlock()
+
+	type readAtter interface {
+		ReadAt(bucket, key string, offset int64, buf []byte) (int, error)
+	}
+	ra, ok := cb.Backend.(readAtter)
+	if !ok {
+		return 0, fmt.Errorf("inner backend does not support ReadAt")
+	}
+	return ra.ReadAt(bucket, key, offset, buf)
+}
+
 // DeleteObject invalidates the cache entry for the key.
 func (cb *CachedBackend) DeleteObject(bucket, key string) error {
 	cb.invalidate(bucket, key)

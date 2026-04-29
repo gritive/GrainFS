@@ -15,8 +15,17 @@
 
 ## [0.0.6.1] — 2026-04-30
 
+### Performance
+
+- **NFSv4 opRead ReadAt fast path** (`internal/nfs4server/compound.go`, `internal/cluster/backend.go`, `internal/storage/cache.go`, `internal/storage/wal/backend.go`): sequential read 2.6 MiB/s → 116 MiB/s (44×). 근본 원인: opRead마다 `HeadObject×2 + GetObject(os.Open) + Seek` = 4×BadgerDB 조회 + 파일 오픈/클로즈가 128 KiB NFS READ마다 발생 (256 MiB 파일 = 2048 READ = 8192 BadgerDB reads + 2048 파일 오픈). `ReadAt(bucket,key,offset,buf)` 인터페이스 추가 — `DistributedBackend.ReadAt`은 HeadObject/EC path 우회, `os.File.ReadAt(pread)` 직접 호출. `CachedBackend.ReadAt`은 캐시 히트 시 `bytes.Reader.ReadAt` (zero-copy), 미스 시 inner backend 위임. `opRead` 패스트패스: `readAtBackend` 타입 어서션으로 HeadObject+GetObject+Seek 전면 제거. 128 KiB ReadAt 버퍼 pool화로 per-call alloc(1921 MB) 제거.
+
 ### Added
 
+- `DistributedBackend.ReadAt` — 내부 버킷 전용 pread(2) API, EC/shardSvc/HeadObject 우회.
+- `wal.Backend.ReadAt` — pass-through (read는 WAL 항목 없음).
+- `CachedBackend.ReadAt` — 캐시 히트/미스 양 경로 지원.
+- `readAtBackend` 인터페이스 (`internal/nfs4server/compound.go`).
+- `opReadAtBufPool` — 128 KiB 읽기 버퍼 pool.
 - **cluster**: `PutBucketAssignment` Raft 커맨드 — bucket→shard-group 매핑을 MetaFSM 로그에 persist; `Snapshot`/`Restore` 시리얼라이즈 포함.
 - **cluster**: `MetaRaft.ProposeBucketAssignment` — 동기 propose + apply-wait.
 - **cluster**: `BucketAssigner` 인터페이스 — `server.CreateBucket` 호출 시 MetaRaft로 버킷을 shard group에 자동 배정.
