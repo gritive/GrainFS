@@ -58,11 +58,16 @@ func TestAutoRebalance_E2E_ProposeAndExecute(t *testing.T) {
 	require.NoError(t, m0.Join(joinCtx, "node-1", "node-1"))
 	require.NoError(t, m0.Join(joinCtx, "node-2", "node-2"))
 
-	// — chaos data-Raft cluster (node-0, node-1, node-2 as initial voters) —
-	cl := chaos.NewCluster(t, 3)
+	// — chaos data-Raft cluster (node-0, node-1 as initial voters; node-2 non-voter) —
+	// NewCluster(t,3)은 node-2를 voter로 만들어 AddLearner 시 already-voter config change로 leader가
+	// step down하는 race가 생긴다. NewCluster(t,2)+AddNode("node-2")를 사용해 TestFullSharding_E2E와
+	// 동일한 패턴을 유지한다.
+	cl := chaos.NewCluster(t, 2) // node-0, node-1
 	cl.StartAll()
 	dataLeader := cl.WaitForLeader(5 * time.Second)
 	require.NotNil(t, dataLeader, "data-Raft leader election timeout")
+
+	cl.AddNode("node-2") // non-voter; MoveReplica가 AddLearner→PromoteToVoter 수행
 
 	// 베이스라인 쓰기 (commitIndex 진행)
 	for i := 0; i < 3; i++ {
@@ -75,7 +80,7 @@ func TestAutoRebalance_E2E_ProposeAndExecute(t *testing.T) {
 	gm.Add(NewDataGroup("group-0", []string{"node-0", "node-1"}))
 
 	// addrBook: chaos transport는 nodeID를 addr로 사용
-	allIDs := cl.NodeIDs() // [node-0, node-1, node-2]
+	allIDs := append(cl.NodeIDs(), "node-2") // [node-0, node-1, node-2]
 	addrBook := &autoRebalAddrBook{ids: allIDs}
 
 	exec := NewDataGroupPlanExecutorForTest("node-0", gm, addrBook, m0,
