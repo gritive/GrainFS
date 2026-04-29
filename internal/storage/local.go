@@ -14,10 +14,15 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/pool"
 )
+
+// localTraceEnabled activates per-stage PutObject/HeadObject latency logging.
+// Enable with GRAINFS_VOLUME_TRACE=1.
+var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 var md5Pool = pool.New(func() hash.Hash { return md5.New() })
 
@@ -153,6 +158,12 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
 
+	var tStart, tStage time.Time
+	if localTraceEnabled {
+		tStart = time.Now()
+		tStage = tStart
+	}
+
 	// Write to a temp file in the same directory, then atomically rename onto
 	// objPath. This prevents readers from observing a truncated file
 	// mid-write (os.Create truncates on open).
@@ -163,6 +174,11 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 	tmpPath := tmp.Name()
 	cleanupTmp := func() {
 		_ = os.Remove(tmpPath)
+	}
+
+	if localTraceEnabled {
+		log.Debug().Dur("create_temp", time.Since(tStage)).Str("bucket", bucket).Msg("PutObject trace")
+		tStage = time.Now()
 	}
 
 	var (
@@ -192,11 +208,21 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 		md5Pool.Put(h)
 	}
 
+	if localTraceEnabled {
+		log.Debug().Dur("copy_close", time.Since(tStage)).Int64("bytes", size).Msg("PutObject trace")
+		tStage = time.Now()
+	}
+
 	if err := os.Rename(tmpPath, objPath); err != nil {
 		cleanupTmp()
 		return nil, fmt.Errorf("rename object: %w", err)
 	}
 	now := time.Now().Unix()
+
+	if localTraceEnabled {
+		log.Debug().Dur("rename", time.Since(tStage)).Msg("PutObject trace")
+		tStage = time.Now()
+	}
 
 	obj := &Object{
 		Key:          key,
@@ -216,6 +242,10 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if localTraceEnabled {
+		log.Debug().Dur("badger_update", time.Since(tStage)).Dur("total", time.Since(tStart)).Msg("PutObject trace")
 	}
 
 	return obj, nil
@@ -246,6 +276,11 @@ func (b *LocalBackend) HeadObject(bucket, key string) (*Object, error) {
 		return nil, err
 	}
 
+	var tHead time.Time
+	if localTraceEnabled {
+		tHead = time.Now()
+	}
+
 	var obj Object
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(b.objectMetaKey(bucket, key))
@@ -264,6 +299,11 @@ func (b *LocalBackend) HeadObject(bucket, key string) (*Object, error) {
 			return nil
 		})
 	})
+
+	if localTraceEnabled {
+		log.Debug().Dur("badger_view", time.Since(tHead)).Str("bucket", bucket).Msg("HeadObject trace")
+	}
+
 	if err != nil {
 		return nil, err
 	}
