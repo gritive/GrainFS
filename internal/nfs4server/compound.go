@@ -958,8 +958,20 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opCommit() OpResult {
+	if d.currentPath == "" {
+		return OpResult{OpCode: OpCommit, Status: NFS4ERR_NOFILEHANDLE}
+	}
+	key := d.currentPath
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+	if s, ok := d.backend.(storage.Syncable); ok {
+		if err := s.Sync(nfs4Bucket, key); err != nil {
+			return OpResult{OpCode: OpCommit, Status: NFS4ERR_IO}
+		}
+	}
 	w := getXDRWriter()
-	w.WriteUint64(0) // writeverf4 (8 bytes)
+	w.buf.Write(d.state.WriteVerf[:]) // writeverf4: 8 bytes
 	return OpResult{OpCode: OpCommit, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
