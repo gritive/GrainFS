@@ -68,5 +68,7 @@ func init() {
 	clusterStatusCmd.Flags().String("endpoint", "http://127.0.0.1:9000", "GrainFS server endpoint")
 	clusterStatusCmd.Flags().String("format", "json", "Output format: json or text")
 	clusterCmd.AddCommand(clusterStatusCmd)
+	clusterCmd.AddCommand(planShowCmd())
+	clusterCmd.AddCommand(rebalanceCmd())
 	rootCmd.AddCommand(clusterCmd)
 }
