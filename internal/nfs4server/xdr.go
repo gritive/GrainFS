@@ -599,6 +599,32 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		r.ReadUint32() // rca_one_fs (bool)
 		return nil, 0, nil
 
+	case OpDestroyClientID:
+		b := getOpArg8()
+		clientID, _ := r.ReadUint64()
+		binary.BigEndian.PutUint64(b, clientID)
+		return b, 8, nil
+
+	case OpFreeStateID:
+		// stateid4: seqid(4) + other(12)
+		var buf [16]byte
+		io.ReadFull(&r.r, buf[:])
+		data := make([]byte, 16)
+		copy(data, buf[:])
+		return data, 0, nil
+
+	case OpTestStateID:
+		// tsria_stateids: count(4) + N×stateid4(16)
+		count, _ := r.ReadUint32()
+		w := getXDRWriter()
+		w.WriteUint32(count)
+		for i := uint32(0); i < count; i++ {
+			var sid [16]byte
+			io.ReadFull(&r.r, sid[:])
+			w.buf.Write(sid[:])
+		}
+		return xdrWriterBytes(w), 0, nil
+
 	default:
 		return nil, 0, nil
 	}

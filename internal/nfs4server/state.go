@@ -305,3 +305,30 @@ func (sm *StateManager) DestroySession(sid SessionID) bool {
 	}
 	return ok
 }
+
+// DestroyClientID removes all sessions for clientID and the client record.
+func (sm *StateManager) DestroyClientID(clientID uint64) {
+	sm.sessionMu.Lock()
+	for sid, sess := range sm.sessions {
+		if sess.ClientID == clientID {
+			delete(sm.sessions, sid)
+		}
+	}
+	sm.sessionMu.Unlock()
+
+	sm.clientMu.Lock()
+	delete(sm.clients, clientID)
+	sm.clientMu.Unlock()
+}
+
+// FreeStateID is a no-op stub; GrainFS does not track fine-grained stateids.
+func (sm *StateManager) FreeStateID(_ uint64) {}
+
+// TestStateIDs returns NFS4_OK for each stateid (no expiry tracking).
+func (sm *StateManager) TestStateIDs(count int) []uint32 {
+	statuses := make([]uint32, count)
+	for i := range statuses {
+		statuses[i] = NFS4_OK
+	}
+	return statuses
+}

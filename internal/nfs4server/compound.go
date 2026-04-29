@@ -91,11 +91,14 @@ const (
 	OpSetClientIDConfirm = 36
 	OpWrite              = 38
 
-	// NFSv4.1/4.2 ops (RFC 5661)
+	// NFSv4.1 ops (RFC 5661)
 	OpExchangeID      = 42
 	OpCreateSession   = 43
 	OpDestroySession  = 44
+	OpFreeStateID     = 45
 	OpSequence        = 53
+	OpTestStateID     = 55
+	OpDestroyClientID = 57
 	OpReclaimComplete = 58
 
 	maxCompoundOps = 64
@@ -236,6 +239,12 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opSequence(op.Data)
 	case OpReclaimComplete:
 		return OpResult{OpCode: OpReclaimComplete, Status: NFS4_OK}
+	case OpDestroyClientID:
+		return d.opDestroyClientID(op.Data)
+	case OpFreeStateID:
+		return d.opFreeStateID(op.Data)
+	case OpTestStateID:
+		return d.opTestStateID(op.Data)
 	default:
 		log.Debug().Int("opcode", op.OpCode).Msg("nfs4: unknown opcode → NFS4ERR_NOTSUPP")
 		return OpResult{OpCode: op.OpCode, Status: NFS4ERR_NOTSUPP}
@@ -1309,6 +1318,38 @@ func boolToUint32(v bool) uint32 {
 		return 1
 	}
 	return 0
+}
+
+func (d *Dispatcher) opDestroyClientID(data []byte) OpResult {
+	if len(data) < 8 {
+		return OpResult{OpCode: OpDestroyClientID, Status: NFS4ERR_INVAL}
+	}
+	clientID := binary.BigEndian.Uint64(data[:8])
+	d.state.DestroyClientID(clientID)
+	return OpResult{OpCode: OpDestroyClientID, Status: NFS4_OK}
+}
+
+func (d *Dispatcher) opFreeStateID(data []byte) OpResult {
+	if len(data) < 16 {
+		return OpResult{OpCode: OpFreeStateID, Status: NFS4ERR_INVAL}
+	}
+	stateID := binary.BigEndian.Uint64(data[:8])
+	d.state.FreeStateID(stateID)
+	return OpResult{OpCode: OpFreeStateID, Status: NFS4_OK}
+}
+
+func (d *Dispatcher) opTestStateID(data []byte) OpResult {
+	if len(data) < 4 {
+		return OpResult{OpCode: OpTestStateID, Status: NFS4ERR_INVAL}
+	}
+	count := binary.BigEndian.Uint32(data[:4])
+	statuses := d.state.TestStateIDs(int(count))
+	w := getXDRWriter()
+	w.WriteUint32(uint32(len(statuses)))
+	for _, s := range statuses {
+		w.WriteUint32(s)
+	}
+	return OpResult{OpCode: OpTestStateID, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func init() {
