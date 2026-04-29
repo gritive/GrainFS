@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -407,6 +408,49 @@ func TestConfChange_AppliesOnAppendNotCommit(t *testing.T) {
 	assert.True(t, hasPeer, "ConfChange must be applied on append, before commit")
 }
 
+func TestConfChange_AppliesOnAppendNotCommit_Leader(t *testing.T) {
+	// §4.4: leader must apply ConfChange when the entry is appended (flushBatch),
+	// not when it is committed.
+	node := NewNode(DefaultConfig("A", []string{"B"}))
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.nextIndex = map[string]uint64{"B": 1}
+	node.matchIndex = map[string]uint64{"B": 0}
+	node.mu.Unlock()
+	defer node.Close()
+
+	cmd := encodeConfChange(ConfChangeAddVoter, "C", "C")
+	p := proposal{command: cmd, entryType: LogEntryConfChange, doneCh: make(chan proposalResult, 1), ctx: context.Background()}
+
+	// LeaderCommit never advances (B hasn't acked), so C is not committed.
+	node.flushBatch([]proposal{p})
+
+	node.mu.Lock()
+	hasPeer := false
+	for _, peer := range node.config.Peers {
+		if peer == "C" {
+			hasPeer = true
+		}
+	}
+	node.mu.Unlock()
+	assert.True(t, hasPeer, "ConfChange must be applied on append (leader path), before commit")
+}
+
+func TestConfChange_MixedVersionRejected(t *testing.T) {
+	node := NewNode(DefaultConfig("A", []string{"B", "C"}))
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.nextIndex = map[string]uint64{"B": 1, "C": 1}
+	node.matchIndex = map[string]uint64{"B": 0, "C": 0}
+	node.mu.Unlock()
+
+	node.SetMixedVersion(true)
+	err := node.AddVoter("D", "D")
+	assert.ErrorIs(t, err, ErrMixedVersionNoMembershipChange)
+}
+
 func TestConfChange_RejectsConcurrent(t *testing.T) {
 	node := NewNode(DefaultConfig("A", []string{"B", "C"}))
 	node.mu.Lock()
@@ -419,6 +463,43 @@ func TestConfChange_RejectsConcurrent(t *testing.T) {
 
 	err := node.AddVoter("D", "D")
 	assert.ErrorIs(t, err, ErrConfChangeInProgress)
+}
+
+func TestConfChange_RejectsConcurrentGoroutine(t *testing.T) {
+	// Simulate the TOCTOU window: two ConfChange proposals arrive in the same
+	// flushBatch call (both passed proposeConfChangeWait's pre-check before
+	// either set pendingConfChangeIndex). The lock-protected filter in
+	// flushBatch must reject the second one synchronously.
+	node := NewNode(DefaultConfig("A", []string{"B", "C"}))
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.nextIndex = map[string]uint64{"B": 1, "C": 1}
+	node.matchIndex = map[string]uint64{"B": 0, "C": 0}
+	node.mu.Unlock()
+	defer node.Close()
+
+	makeCC := func(id string) proposal {
+		cmd := encodeConfChange(ConfChangeAddVoter, id, id)
+		return proposal{command: cmd, entryType: LogEntryConfChange, doneCh: make(chan proposalResult, 1), ctx: context.Background()}
+	}
+	p1 := makeCC("D")
+	p2 := makeCC("E")
+
+	node.flushBatch([]proposal{p1, p2})
+
+	// The rejected proposal's doneCh is populated synchronously during flushBatch.
+	var rejected int
+	for _, ch := range []chan proposalResult{p1.doneCh, p2.doneCh} {
+		select {
+		case r := <-ch:
+			if errors.Is(r.err, ErrConfChangeInProgress) {
+				rejected++
+			}
+		default:
+		}
+	}
+	assert.Equal(t, 1, rejected, "exactly one ConfChange per batch must be rejected")
 }
 
 func TestConfChange_LearnerNotInQuorum(t *testing.T) {

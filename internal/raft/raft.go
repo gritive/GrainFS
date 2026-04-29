@@ -39,7 +39,6 @@ type Configuration struct {
 	Servers []Server
 }
 
-
 // NodeState represents the current role of a Raft node.
 type NodeState int
 
@@ -280,6 +279,7 @@ type Node struct {
 	// §4.4 membership change tracking
 	pendingConfChangeIndex uint64   // index of in-flight ConfChange entry; 0 = none
 	initialPeers           []string // bootstrap peers; used to rebuild config after log truncation
+	mixedVersion           bool     // true = cluster has nodes on different versions; blocks membership changes
 
 	// log GC tracking (Phase 14d)
 	lastLogGC time.Time
@@ -1609,7 +1609,6 @@ func (n *Node) TransferLeadership() error {
 	return nil
 }
 
-
 // HandleTimeoutNow causes this node to immediately start an election.
 // Sent by the leader during leadership transfer to the chosen successor.
 func (n *Node) HandleTimeoutNow() {
@@ -1708,6 +1707,31 @@ func (n *Node) flushBatch(pending []proposal) {
 			default:
 			}
 		}
+		return
+	}
+
+	// §4.4 guard: at most one ConfChange may be in-flight at a time.
+	// Reject extras synchronously so doneCh callers unblock immediately.
+	{
+		var confChangeSeen bool
+		filtered := pending[:0]
+		for _, p := range pending {
+			if p.entryType == LogEntryConfChange {
+				if n.pendingConfChangeIndex != 0 || confChangeSeen {
+					select {
+					case p.doneCh <- proposalResult{err: ErrConfChangeInProgress}:
+					default:
+					}
+					continue
+				}
+				confChangeSeen = true
+			}
+			filtered = append(filtered, p)
+		}
+		pending = filtered
+	}
+	if len(pending) == 0 {
+		n.mu.Unlock()
 		return
 	}
 

@@ -87,6 +87,15 @@ func (n *Node) PromoteToVoter(id string) error {
 	return n.proposeConfChangeWait(context.Background(), ConfChangePromote, id, "")
 }
 
+// SetMixedVersion marks the cluster as mixed-version, blocking all membership
+// changes until cleared. Call with true when a rolling upgrade is in progress;
+// call with false once all nodes are confirmed to be on the same version.
+func (n *Node) SetMixedVersion(v bool) {
+	n.mu.Lock()
+	n.mixedVersion = v
+	n.mu.Unlock()
+}
+
 // proposeConfChangeWait enforces the single-pending-change invariant and waits
 // for the ConfChange entry to be committed (or context to cancel).
 func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, addr string) error {
@@ -94,6 +103,10 @@ func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, a
 	if n.state != Leader {
 		n.mu.Unlock()
 		return ErrNotLeader
+	}
+	if n.mixedVersion {
+		n.mu.Unlock()
+		return ErrMixedVersionNoMembershipChange
 	}
 	if n.pendingConfChangeIndex != 0 {
 		n.mu.Unlock()
@@ -133,13 +146,13 @@ func (n *Node) applyConfigChangeLocked(entry LogEntry) {
 	case ConfChangeAddVoter:
 		alreadyPresent := false
 		for _, p := range n.config.Peers {
-			if p == cc.Address {
+			if p == cc.ID {
 				alreadyPresent = true
 				break
 			}
 		}
 		if !alreadyPresent {
-			n.config.Peers = append(n.config.Peers, cc.Address)
+			n.config.Peers = append(n.config.Peers, cc.ID)
 			if n.state == Leader {
 				n.nextIndex[cc.ID] = n.lastLogIdx() + 1
 				n.matchIndex[cc.ID] = 0
@@ -185,13 +198,13 @@ func (n *Node) rebuildConfigFromLog() {
 		case ConfChangeAddVoter:
 			found := false
 			for _, p := range peers {
-				if p == cc.Address {
+				if p == cc.ID {
 					found = true
 					break
 				}
 			}
 			if !found {
-				peers = append(peers, cc.Address)
+				peers = append(peers, cc.ID)
 			}
 		case ConfChangeRemoveVoter:
 			out := peers[:0]
