@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.6.0] — 2026-04-29
+
+### Performance
+
+- **NFSv4 opWrite WriteAt fast path** (`internal/nfs4server/compound.go`, `internal/storage/local.go`): RMW 경로의 `io.ReadAll`(alloc 프로파일 76.61%, 24.4 GB) 제거. `LocalBackend.WriteAt` 추가 — prefix/suffix를 `io.Copy` 스트리밍으로 처리하여 전체 파일을 힙에 올리지 않음. 원자적 temp→rename 패턴 유지로 reader visibility 보장.
+- **DistributedBackend MD5 skip for internal buckets** (`internal/cluster/backend.go`): `putObjectNx`에서 NFS 내부 버킷(`IsInternalBucket` 체크)에 대해 불필요한 MD5 계산(CPU 프로파일 51.52%) 스킵.
+
+### Added
+
+- `LocalBackend.WriteAt(bucket, key string, offset uint64, data []byte)` — 부분 쓰기 API, streaming copy로 힙 0-alloc.
+- `CachedBackend.WriteAt` — 캐시 무효화 후 inner backend WriteAt 위임.
+- `TestLocalBackend_WriteAt`, `TestLocalBackend_WriteAt_NewFile`, `TestCachedBackend_WriteAt` 단위 테스트.
+
 ## [0.0.5.9] — 2026-04-29
 
 ### Fixed

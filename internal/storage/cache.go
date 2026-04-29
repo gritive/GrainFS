@@ -163,6 +163,20 @@ func (cb *CachedBackend) PutObject(bucket, key string, r io.Reader, contentType 
 	return cb.Backend.PutObject(bucket, key, r, contentType)
 }
 
+// WriteAt delegates to the inner backend's WriteAt if available, then invalidates
+// the cache entry so subsequent reads fetch the updated content.
+func (cb *CachedBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error) {
+	type writeAtter interface {
+		WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error)
+	}
+	wa, ok := cb.Backend.(writeAtter)
+	if !ok {
+		return nil, fmt.Errorf("inner backend does not support WriteAt")
+	}
+	cb.invalidate(bucket, key)
+	return wa.WriteAt(bucket, key, offset, data)
+}
+
 // DeleteObject invalidates the cache entry for the key.
 func (cb *CachedBackend) DeleteObject(bucket, key string) error {
 	cb.invalidate(bucket, key)

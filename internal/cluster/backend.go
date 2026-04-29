@@ -66,8 +66,8 @@ type DistributedBackend struct {
 	allNodes    []string // all node addresses (including self) for shard placement
 	selfAddr    string   // this node's raft address (matches entries in allNodes)
 	peerHealth  *PeerHealth
-	registry    *Registry // cache invalidators (VFS instances)
-	ecConfig    ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
+	registry    *Registry                           // cache invalidators (VFS instances)
+	ecConfig    ECConfig                            // Phase 18: erasure coding config (k+m shard parameters)
 	shardLocks  pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
@@ -586,8 +586,11 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 		}
 	}
 
-	h := md5.Sum(data)
-	etag := hex.EncodeToString(h[:])
+	var etag string
+	if !storage.IsInternalBucket(bucket) {
+		h := md5.Sum(data)
+		etag = hex.EncodeToString(h[:])
+	}
 	now := time.Now().Unix()
 
 	// Replicate metadata through Raft
