@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -34,16 +38,18 @@ type MetaRaft struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 
-	applyMu     sync.Mutex
-	applyCV     *sync.Cond
-	lastApplied uint64
+	// lastApplied is read atomically from waitApplied (hot path).
+	// applyNotifyMu protects applyNotify channel swaps only.
+	lastApplied   atomic.Uint64
+	applyNotifyMu sync.Mutex
+	applyNotify   chan struct{} // closed each time an entry is applied; replaced atomically
 }
 
 // NewMetaRaft constructs a MetaRaft from config. The node is not started yet;
 // call Bootstrap then Start. Transport may be nil here and set later via
 // SetTransport (needed when the QUIC transport requires the node handle first).
 func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
-	storePath := cfg.DataDir + "/meta_raft"
+	storePath := filepath.Join(cfg.DataDir, "meta_raft")
 	store, err := raft.NewBadgerLogStore(storePath)
 	if err != nil {
 		return nil, fmt.Errorf("meta_raft: open store: %w", err)
@@ -59,14 +65,14 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	node := raft.NewNode(nodeCfg, store)
 
 	m := &MetaRaft{
-		node:    node,
-		store:   store,
-		snapMgr: snapMgr,
-		fsm:     fsm,
-		cfg:     cfg,
-		done:    make(chan struct{}),
+		node:        node,
+		store:       store,
+		snapMgr:     snapMgr,
+		fsm:         fsm,
+		cfg:         cfg,
+		done:        make(chan struct{}),
+		applyNotify: make(chan struct{}),
 	}
-	m.applyCV = sync.NewCond(&m.applyMu)
 
 	if cfg.Transport != nil {
 		m.wireTransport(cfg.Transport)
@@ -108,12 +114,15 @@ func (m *MetaRaft) Start(ctx context.Context) error {
 }
 
 // Close shuts down the node and waits for the apply loop to exit.
+// Safe to call even if Start was never called.
 func (m *MetaRaft) Close() error {
 	if m.cancel != nil {
 		m.cancel()
+		m.node.Close()
+		<-m.done
+	} else {
+		m.node.Close()
 	}
-	m.node.Close()
-	<-m.done
 	return m.store.Close()
 }
 
@@ -148,21 +157,23 @@ func (m *MetaRaft) ProposeAddNode(ctx context.Context, entry MetaNodeEntry) erro
 }
 
 // waitApplied blocks until the FSM apply loop has processed the entry at idx.
+// Uses generation channels to avoid goroutine leaks on context cancellation.
 func (m *MetaRaft) waitApplied(ctx context.Context, idx uint64) error {
-	done := make(chan struct{})
-	go func() {
-		m.applyMu.Lock()
-		for m.lastApplied < idx {
-			m.applyCV.Wait()
+	for {
+		if m.lastApplied.Load() >= idx {
+			return nil
 		}
-		m.applyMu.Unlock()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		m.applyNotifyMu.Lock()
+		ch := m.applyNotify
+		m.applyNotifyMu.Unlock()
+		select {
+		case <-ch:
+			// a new entry was applied; re-check lastApplied
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.done:
+			return fmt.Errorf("meta_raft: apply loop stopped before entry %d was applied", idx)
+		}
 	}
 }
 
@@ -179,16 +190,16 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 			}
 			if entry.Type == raft.LogEntryCommand && len(entry.Command) > 0 {
 				if err := m.fsm.applyCmd(entry.Command); err != nil {
-					_ = err
+					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM apply error")
 				}
 				m.snapMgr.MaybeTrigger(entry.Index, entry.Term)
 			}
-			m.applyMu.Lock()
-			if entry.Index > m.lastApplied {
-				m.lastApplied = entry.Index
-			}
-			m.applyCV.Broadcast()
-			m.applyMu.Unlock()
+			m.lastApplied.Store(entry.Index)
+			m.applyNotifyMu.Lock()
+			old := m.applyNotify
+			m.applyNotify = make(chan struct{})
+			m.applyNotifyMu.Unlock()
+			close(old) // wake all waitApplied callers for this generation
 		case <-ctx.Done():
 			return
 		}

@@ -15,7 +15,7 @@ var clusterJoinCmd = &cobra.Command{
 	Use:   "join <peer-address>",
 	Short: "Join this node to an existing meta-Raft cluster",
 	Long: `Sends a join request to the given peer address.
-The peer must be the leader or will forward the request to the leader.
+The peer must be the current leader; non-leader peers return ErrNotLeader.
 The local MetaRaft node must have been bootstrapped first (grainfs serve starts it automatically).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runClusterJoin,

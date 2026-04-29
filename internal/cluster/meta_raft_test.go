@@ -229,12 +229,12 @@ func TestMetaRaft_ConcurrentJoin_SecondFails(t *testing.T) {
 	}
 	wg.Wait()
 
-	// At least one must succeed, at most one may fail with conf-change error
+	// Raft serializes conf-changes: exactly one must succeed, one must fail
 	successCount := 0
 	for _, err := range errs {
 		if err == nil {
 			successCount++
 		}
 	}
-	assert.GreaterOrEqual(t, successCount, 1, "at least one Join must succeed")
+	assert.Equal(t, 1, successCount, "exactly one concurrent Join must succeed")
 }
