@@ -237,6 +237,7 @@ type Node struct {
 	// leader volatile state
 	nextIndex  map[string]uint64
 	matchIndex map[string]uint64
+	learnerIDs map[string]string // nodeID → peerKey; learners not counted for quorum
 
 	// config
 	config Config
@@ -313,6 +314,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		firstIndex:      1, // Raft indices start at 1
 		nextIndex:       make(map[string]uint64),
 		matchIndex:      make(map[string]uint64),
+		learnerIDs:      make(map[string]string),
 		checkQuorumAcks: make(map[string]time.Time),
 		applyCh:         make(chan LogEntry, 64),
 		stopCh:          make(chan struct{}),
@@ -940,11 +942,20 @@ func (n *Node) replicateToAll() {
 		return
 	}
 	peers := n.config.Peers
+	learners := make([]string, 0, len(n.learnerIDs))
+	for _, pk := range n.learnerIDs {
+		learners = append(learners, pk)
+	}
 	n.mu.Unlock()
 
 	for _, peer := range peers {
 		n.wg.Add(1)
 		go func(p string) { defer n.wg.Done(); n.replicateTo(p) }(peer)
+	}
+	// Learners receive log entries for catch-up but do not count toward quorum.
+	for _, peerKey := range learners {
+		n.wg.Add(1)
+		go func(p string) { defer n.wg.Done(); n.replicateTo(p) }(peerKey)
 	}
 }
 
