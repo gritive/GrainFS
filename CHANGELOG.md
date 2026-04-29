@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.5.8] — 2026-04-29
+
+### Added
+
+- **cluster**: `ShardGroupEntry` FlatBuffers schema (`cluster.fbs`) + `make fbs` 재생성
+- **cluster**: MetaFSM `PutShardGroup` 커맨드 — `applyPutShardGroup`, `ShardGroups()`, `Snapshot`/`Restore` 확장
+- **cluster**: `DataGroup` + `DataGroupManager` — lock-free `atomic.Pointer[groupSnapshot]` COW scaffold
+- **cluster**: `Router` — bucket-level 라우팅 (`shard_map: bucket→group_id`, `defaultGroupID` fallback)
+- **cluster**: `MetaRaft.ProposeShardGroup` — `waitApplied` 기반 동기 propose
+- **serve**: 초기 단일 shard group `group-0` 비동기 propose (PR-D 연결 예고)
+
 ## [0.0.5.7] — 2026-04-29
 
 ### Added
