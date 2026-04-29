@@ -16,6 +16,7 @@ import (
 
 	billy "github.com/go-git/go-billy/v5"
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -24,10 +25,10 @@ const (
 	dirMarkerSuffix = "/.dir"
 )
 
-var grainBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+var grainBufPool = pool.New(func() *bytes.Buffer { return new(bytes.Buffer) })
 
 func getBuf() *bytes.Buffer {
-	b := grainBufPool.Get().(*bytes.Buffer)
+	b := grainBufPool.Get()
 	b.Reset()
 	return b
 }

@@ -33,15 +33,15 @@ import (
 func (b *DistributedBackend) acquireShardWriteLock(bucket, key string) func() {
 	lockKey := bucket + "\x00" + key
 	mu, _ := b.shardLocks.LoadOrStore(lockKey, &sync.RWMutex{})
-	mu.(*sync.RWMutex).Lock()
-	return func() { mu.(*sync.RWMutex).Unlock() }
+	mu.Lock()
+	return func() { mu.Unlock() }
 }
 
 func (b *DistributedBackend) acquireShardReadLock(bucket, key string) func() {
 	lockKey := bucket + "\x00" + key
 	mu, _ := b.shardLocks.LoadOrStore(lockKey, &sync.RWMutex{})
-	mu.(*sync.RWMutex).RLock()
-	return func() { mu.(*sync.RWMutex).RUnlock() }
+	mu.RLock()
+	return func() { mu.RUnlock() }
 }
 
 // ScanObjects streams one scrubber.ObjectRecord per live EC object in the

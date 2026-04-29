@@ -63,7 +63,7 @@ func TestXDRWriterPool_ZeroAllocs(t *testing.T) {
 
 func TestParseCompound_ErrorPath_NoLeak(t *testing.T) {
 	// Truncated data should return error and req should be returned to pool.
-	req := compoundReqPool.Get().(*CompoundRequest)
+	req := compoundReqPool.Get()
 	req.Tag = ""
 	req.MinorVer = 0
 	req.Ops = req.Ops[:0]

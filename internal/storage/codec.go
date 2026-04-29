@@ -2,18 +2,16 @@ package storage
 
 import (
 	"fmt"
-	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage/storagepb"
 )
 
-var storageBuilderPool = sync.Pool{
-	New: func() any { return flatbuffers.NewBuilder(256) },
-}
+var storageBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
 
 func marshalObject(obj *Object) ([]byte, error) {
-	b := storageBuilderPool.Get().(*flatbuffers.Builder)
+	b := storageBuilderPool.Get()
 	keyOff := b.CreateString(obj.Key)
 	ctOff := b.CreateString(obj.ContentType)
 	etagOff := b.CreateString(obj.ETag)
@@ -55,7 +53,7 @@ func unmarshalObject(data []byte) (obj *Object, err error) {
 }
 
 func marshalMultipartMeta(m *multipartMeta) ([]byte, error) {
-	b := storageBuilderPool.Get().(*flatbuffers.Builder)
+	b := storageBuilderPool.Get()
 	uidOff := b.CreateString(m.UploadID)
 	bucketOff := b.CreateString(m.Bucket)
 	keyOff := b.CreateString(m.Key)

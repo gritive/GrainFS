@@ -355,6 +355,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 	}()
 
+
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
 	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {

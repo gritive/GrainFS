@@ -119,7 +119,7 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
-	req := compoundReqPool.Get().(*CompoundRequest)
+	req := compoundReqPool.Get()
 	req.Tag = ""
 	req.MinorVer = 0
 	req.Ops = req.Ops[:0]
@@ -142,7 +142,7 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 	d := getDispatcher(s.backend, s.state)
 	defer putDispatcher(d)
 
-	resp := compoundRespPool.Get().(*CompoundResponse)
+	resp := compoundRespPool.Get()
 	resp.Status = NFS4_OK
 	resp.Tag = ""
 	resp.Results = resp.Results[:0]
