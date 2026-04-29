@@ -376,11 +376,10 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 
 		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
 		if !isDir {
-			if meta := d.loadFileMeta(key); meta.Mode != 0 {
-				sidecarMode = meta.Mode
-				if meta.Mtime > 0 {
-					lastModUnix = meta.Mtime / 1e9
-				}
+			meta := d.loadFileMeta(key)
+			sidecarMode = meta.Mode
+			if meta.Mtime > 0 {
+				lastModUnix = meta.Mtime / 1e9
 			}
 		}
 	} else {
@@ -420,7 +419,7 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 		setBit(0)
 		supW0 := uint32(1<<0 | 1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5 | 1<<6 |
 			1<<7 | 1<<8 | 1<<9 | 1<<10 | 1<<13 | 1<<14 | 1<<20 | 1<<27 | 1<<30 | 1<<31)
-		supW1 := uint32(1<<1 | 1<<3 | 1<<4 | 1<<5 | 1<<13 | 1<<15 | 1<<20 | 1<<21 | 1<<23)
+		supW1 := uint32(1<<1 | 1<<3 | 1<<4 | 1<<5 | 1<<13 | 1<<15 | 1<<16 | 1<<20 | 1<<21 | 1<<22 | 1<<23)
 		attrW.WriteUint32(2)
 		attrW.WriteUint32(supW0)
 		attrW.WriteUint32(supW1)
@@ -931,8 +930,18 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		metaChanged = true
 	}
 
-	// FATTR4_TIME_MODIFY_SET (word1 bit 21 = bit 53)
-	if bm1&(1<<21) != 0 {
+	// FATTR4_TIME_ACCESS_SET (word1 bit 16 = attr 48) — consume bytes to keep reader aligned; atime not stored
+	if bm1&(1<<16) != 0 {
+		how, _ := ar.ReadUint32()
+		if how == 1 { // SET_TO_CLIENT_TIME4: skip nfstime4 (hi+lo+nsecs)
+			ar.ReadUint32()
+			ar.ReadUint32()
+			ar.ReadUint32()
+		}
+	}
+
+	// FATTR4_TIME_MODIFY_SET (word1 bit 22 = attr 54)
+	if bm1&(1<<22) != 0 {
 		how, _ := ar.ReadUint32()
 		var mtimeNs int64
 		if how == 1 { // SET_TO_CLIENT_TIME4
@@ -954,7 +963,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		}
 	}
 
-	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult()}
+	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult(bm0, bm1)}
 }
 
 func (d *Dispatcher) opCommit() OpResult {
@@ -1246,9 +1255,13 @@ func (d *Dispatcher) saveFileMeta(key string, m nfsFileMeta) error {
 
 // --- Helper functions ---
 
-func encodeSetAttrResult() []byte {
+// encodeSetAttrResult returns the attrsset bitmap so the NFS client knows
+// which attributes were actually changed and can invalidate its cache.
+func encodeSetAttrResult(bm0, bm1 uint32) []byte {
 	w := getXDRWriter()
-	w.WriteUint32(0) // bitmap len = 0 (no attrs set)
+	w.WriteUint32(2)
+	w.WriteUint32(bm0)
+	w.WriteUint32(bm1)
 	return xdrWriterBytes(w)
 }
 

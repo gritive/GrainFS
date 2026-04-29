@@ -14,9 +14,10 @@ import (
 
 // FATTR4 bitmap bit positions
 const (
-	fattr4Size       = 4  // word0 bit 4
-	fattr4Mode       = 33 // word1 bit 1
-	fattr4TimeModify = 53 // word1 bit 21
+	fattr4Size          = 4  // word0 bit 4
+	fattr4Mode          = 33 // word1 bit 1
+	fattr4TimeModify    = 53 // word1 bit 21 — GETATTR (read-only)
+	fattr4TimeModifySet = 54 // word1 bit 22 — SETATTR (writable)
 )
 
 // buildSetAttrOp encodes a SETATTR4args op.
@@ -258,7 +259,7 @@ func TestSetAttr_Mtime(t *testing.T) {
 		w.WriteUint32(0) // nseconds
 		return w.Bytes()
 	}()
-	setAttrOp := buildSetAttrOp(0, 1<<(fattr4TimeModify-32), mtimeVals)
+	setAttrOp := buildSetAttrOp(0, 1<<(fattr4TimeModifySet-32), mtimeVals)
 	setAttrCompound := buildCompound40(
 		buildPutRootFHOp(),
 		buildLookupOp("mtime.txt"),
