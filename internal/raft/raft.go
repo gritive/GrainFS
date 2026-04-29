@@ -150,6 +150,8 @@ type Config struct {
 	HeartbeatTimeout time.Duration
 	ManagedMode      bool          // enable periodic Raft log GC via quorum watermark
 	LogGCInterval    time.Duration // how often log GC runs (default 30s)
+	MaxEntriesPerAE  uint64        // 0 = unlimited; default via DefaultConfig = 512
+	TrailingLogs     uint64        // entries to keep after snapshot; default 10240
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -159,6 +161,8 @@ func DefaultConfig(id string, peers []string) Config {
 		Peers:            peers,
 		ElectionTimeout:  150 * time.Millisecond,
 		HeartbeatTimeout: 50 * time.Millisecond,
+		MaxEntriesPerAE:  512,
+		TrailingLogs:     10240,
 	}
 }
 
@@ -192,8 +196,10 @@ type AppendEntriesArgs struct {
 
 // AppendEntriesReply is the response to an AppendEntries RPC.
 type AppendEntriesReply struct {
-	Term    uint64
-	Success bool
+	Term          uint64
+	Success       bool
+	ConflictTerm  uint64 // term of conflicting entry; 0 = not set or old peer
+	ConflictIndex uint64 // first index of ConflictTerm; 0 = not set
 }
 
 // Node is a single Raft consensus node.
@@ -208,9 +214,10 @@ type Node struct {
 	firstIndex  uint64 // Raft index of log[0]; enables log compaction after snapshots
 
 	// volatile state
-	state       NodeState
-	commitIndex uint64
-	lastApplied uint64
+	state         NodeState
+	commitIndex   uint64
+	lastApplied   uint64
+	snapshotIndex uint64 // Raft index of the most recent snapshot; 0 = no snapshot yet
 
 	// leader volatile state
 	nextIndex  map[string]uint64
@@ -511,6 +518,13 @@ func (n *Node) IsLeader() bool {
 // ID returns the node's ID.
 func (n *Node) ID() string {
 	return n.id
+}
+
+// CommittedIndex returns the current commitIndex. Safe to call concurrently.
+func (n *Node) CommittedIndex() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.commitIndex
 }
 
 // Peers returns a snapshot of the current peer list. The caller receives a
@@ -908,6 +922,12 @@ func (n *Node) replicateTo(peer string) {
 		entries = make([]LogEntry, len(n.log)-si)
 		copy(entries, n.log[si:])
 	}
+
+	// Cap payload size to avoid oversized AE messages.
+	if n.config.MaxEntriesPerAE > 0 && uint64(len(entries)) > n.config.MaxEntriesPerAE {
+		entries = entries[:n.config.MaxEntriesPerAE]
+		raftAESplitCountTotal.Inc()
+	}
 	n.mu.Unlock()
 
 	args := &AppendEntriesArgs{
@@ -948,9 +968,41 @@ func (n *Node) replicateTo(peer string) {
 		n.matchIndex[peer] = n.nextIndex[peer] - 1
 		n.advanceCommitIndex()
 	} else {
-		// Decrement nextIndex and retry on next heartbeat
-		if n.nextIndex[peer] > 1 {
-			n.nextIndex[peer]--
+		n.applyConflictHint(peer, reply, nextIdx, entries)
+	}
+}
+
+// applyConflictHint updates nextIndex[peer] based on a failed AppendEntries reply.
+// Must be called with n.mu held.
+// sentNextIdx is the nextIndex that was sent in the failed request.
+func (n *Node) applyConflictHint(peer string, reply *AppendEntriesReply, sentNextIdx uint64, _ []LogEntry) {
+	if reply.ConflictIndex > 0 {
+		if reply.ConflictTerm == 0 {
+			// Follower missing entries: jump directly to ConflictIndex.
+			n.nextIndex[peer] = reply.ConflictIndex
+		} else {
+			// Scan leader's log backwards for the last entry with ConflictTerm.
+			// If found, set nextIndex = that entry's index + 1 (skip past our own copy).
+			// If not found, use follower's ConflictIndex (skip the follower's bad term).
+			newNext := reply.ConflictIndex
+			for i := len(n.log) - 1; i >= 0; i-- {
+				raftIdx := n.firstIndex + uint64(i)
+				switch {
+				case n.log[i].Term == reply.ConflictTerm:
+					newNext = raftIdx + 1
+					raftConflictTermJumpsTotal.Inc()
+					goto applyDone
+				case n.log[i].Term < reply.ConflictTerm:
+					goto applyDone // not in our log, use follower hint
+				}
+			}
+		applyDone:
+			n.nextIndex[peer] = newNext
+		}
+	} else {
+		// Old peer without hint support: decrement by 1.
+		if sentNextIdx > 1 {
+			n.nextIndex[peer] = sentNextIdx - 1
 		}
 	}
 }
@@ -1148,10 +1200,21 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	// Log consistency check
 	if args.PrevLogIndex > 0 {
 		if !n.hasLogEntry(args.PrevLogIndex) {
-			return reply // we don't have the entry (compacted or not yet received)
+			// Follower is behind: tell leader our last index so it can jump directly.
+			reply.ConflictIndex = n.lastLogIdx() + 1
+			return reply
 		}
 		if n.log[n.toSliceIdx(args.PrevLogIndex)].Term != args.PrevLogTerm {
-			// Conflict: delete this entry and all that follow
+			// Term conflict: find the first index of the conflicting term
+			// so the leader can skip the entire bad term in one step.
+			conflictTerm := n.log[n.toSliceIdx(args.PrevLogIndex)].Term
+			conflictIdx := args.PrevLogIndex
+			for conflictIdx > n.firstIndex && n.hasLogEntry(conflictIdx-1) &&
+				n.log[n.toSliceIdx(conflictIdx-1)].Term == conflictTerm {
+				conflictIdx--
+			}
+			reply.ConflictTerm = conflictTerm
+			reply.ConflictIndex = conflictIdx
 			n.abortWaitersFrom(args.PrevLogIndex)
 			n.log = n.log[:n.toSliceIdx(args.PrevLogIndex)]
 			return reply
@@ -1262,26 +1325,50 @@ func (n *Node) hasLogEntry(raftIdx uint64) bool {
 	return si >= 0 && si < len(n.log)
 }
 
-// CompactLog removes all entries up to and including snapshotIndex from the in-memory log.
-// After compaction, firstIndex = snapshotIndex + 1.
+// CompactLog removes log entries before snapshotIndex according to TrailingLogs.
+// If TrailingLogs > 0, the last TrailingLogs entries before snapshotIndex+1 are kept
+// in memory so slightly-lagged followers can catch up without InstallSnapshot.
+// After compaction, firstIndex = max(current firstIndex, snapshotIndex+1-TrailingLogs).
 func (n *Node) CompactLog(snapshotIndex uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	si := n.toSliceIdx(snapshotIndex)
-	if si < 0 {
-		return // already compacted past this point
+	n.snapshotIndex = snapshotIndex
+
+	trailing := n.config.TrailingLogs
+	var keepFrom uint64
+	if trailing == 0 {
+		// Original behavior: remove all entries up to and including snapshotIndex.
+		keepFrom = snapshotIndex + 1
+	} else if snapshotIndex+1 > trailing {
+		keepFrom = snapshotIndex + 1 - trailing
+	} else {
+		keepFrom = n.firstIndex // TrailingLogs > snapshotIndex; keep everything
+	}
+	if keepFrom < n.firstIndex {
+		keepFrom = n.firstIndex // can't go back further than in-memory
 	}
 
-	keepFrom := si + 1
-	if keepFrom >= len(n.log) {
+	si := n.toSliceIdx(keepFrom)
+	if si < 0 {
+		// keepFrom is already past what we have; set firstIndex to snapshotIndex+1
 		n.log = nil
-	} else {
-		remaining := make([]LogEntry, len(n.log)-keepFrom)
-		copy(remaining, n.log[keepFrom:])
+		n.firstIndex = snapshotIndex + 1
+		return
+	}
+
+	if si >= len(n.log) {
+		n.log = nil
+		n.firstIndex = snapshotIndex + 1
+		return
+	}
+
+	if si > 0 {
+		remaining := make([]LogEntry, len(n.log)-si)
+		copy(remaining, n.log[si:])
 		n.log = remaining
 	}
-	n.firstIndex = snapshotIndex + 1
+	n.firstIndex = keepFrom
 }
 
 func (n *Node) isLogUpToDate(lastLogIndex, lastLogTerm uint64) bool {

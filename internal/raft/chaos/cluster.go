@@ -51,6 +51,8 @@ func NewCluster(t *testing.T, n int) *Cluster {
 			Peers:            peers,
 			ElectionTimeout:  200 * time.Millisecond,
 			HeartbeatTimeout: 50 * time.Millisecond,
+			MaxEntriesPerAE:  512,
+			TrailingLogs:     1024,
 		}
 		c.configs[id] = cfg
 
@@ -119,6 +121,11 @@ func (c *Cluster) NodeIDs() []string {
 	out := make([]string, len(c.ids))
 	copy(out, c.ids)
 	return out
+}
+
+// NodeByID returns the node with the given ID, or nil if not found.
+func (c *Cluster) NodeByID(id string) *raft.Node {
+	return c.nodes[id]
 }
 
 // Driver primitive delegations.

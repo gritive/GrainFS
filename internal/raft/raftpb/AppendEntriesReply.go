@@ -65,14 +65,44 @@ func (rcv *AppendEntriesReply) MutateSuccess(n bool) bool {
 	return rcv._tab.MutateBoolSlot(6, n)
 }
 
+func (rcv *AppendEntriesReply) ConflictTerm() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *AppendEntriesReply) MutateConflictTerm(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(8, n)
+}
+
+func (rcv *AppendEntriesReply) ConflictIndex() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *AppendEntriesReply) MutateConflictIndex(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(10, n)
+}
+
 func AppendEntriesReplyStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(4)
 }
 func AppendEntriesReplyAddTerm(builder *flatbuffers.Builder, term uint64) {
 	builder.PrependUint64Slot(0, term, 0)
 }
 func AppendEntriesReplyAddSuccess(builder *flatbuffers.Builder, success bool) {
 	builder.PrependBoolSlot(1, success, false)
+}
+func AppendEntriesReplyAddConflictTerm(builder *flatbuffers.Builder, conflictTerm uint64) {
+	builder.PrependUint64Slot(2, conflictTerm, 0)
+}
+func AppendEntriesReplyAddConflictIndex(builder *flatbuffers.Builder, conflictIndex uint64) {
+	builder.PrependUint64Slot(3, conflictIndex, 0)
 }
 func AppendEntriesReplyEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

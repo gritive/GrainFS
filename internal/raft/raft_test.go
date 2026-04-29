@@ -527,7 +527,7 @@ func TestHandleInstallSnapshot_RejectsStaleTerm(t *testing.T) {
 }
 
 func TestCompactLog_UpdatesFirstIndex(t *testing.T) {
-	config := DefaultConfig("A", nil)
+	config := Config{ID: "A", TrailingLogs: 0} // TrailingLogs=0: remove all up to snapshotIndex
 	node := NewNode(config)
 
 	// Simulate log entries 1-10
@@ -1202,4 +1202,164 @@ func TestNode_Close_IsIdempotent(t *testing.T) {
 	n.Close()
 	// Second Close must not panic on double wg.Wait or double close(stopCh).
 	n.Close()
+}
+
+// TestAEReply_ConflictTermJumpsCorrectly verifies that when the leader receives
+// an AppendEntriesReply with ConflictTerm/ConflictIndex, it jumps nextIndex to
+// skip all conflicting entries in one step instead of decrementing one-by-one.
+func TestAEReply_ConflictTermJumpsCorrectly(t *testing.T) {
+	// Leader has log: [T1@1, T1@2, T1@3, T2@4, T2@5]
+	// Follower has:   [T1@1, T3@2]  — term conflict at index 2
+	// Reply: ConflictTerm=3, ConflictIndex=2
+	// Leader scans backwards: no T3 entry → nextIndex = ConflictIndex = 2
+	n := NewNode(Config{ID: "leader", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 2
+	n.log = []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 1},
+		{Index: 4, Term: 2},
+		{Index: 5, Term: 2},
+	}
+	n.firstIndex = 1
+	n.nextIndex = map[string]uint64{"follower": 6}
+	n.matchIndex = map[string]uint64{"follower": 0}
+	n.mu.Unlock()
+
+	reply := &AppendEntriesReply{
+		Term:          2,
+		Success:       false,
+		ConflictTerm:  3,
+		ConflictIndex: 2,
+	}
+	n.mu.Lock()
+	n.applyConflictHint("follower", reply, 6, []LogEntry{{Index: 5, Term: 2}})
+	got := n.nextIndex["follower"]
+	n.mu.Unlock()
+
+	// ConflictTerm=3 not in leader log → use ConflictIndex=2
+	assert.Equal(t, uint64(2), got)
+}
+
+// TestAEReply_FallbackToMinusOneForOldPeer verifies that when ConflictIndex=0
+// (old peer without conflict hint support), nextIndex decrements by 1.
+func TestAEReply_FallbackToMinusOneForOldPeer(t *testing.T) {
+	n := NewNode(Config{ID: "leader", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 1
+	n.log = []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
+	n.firstIndex = 1
+	n.nextIndex = map[string]uint64{"follower": 4}
+	n.matchIndex = map[string]uint64{"follower": 0}
+	n.mu.Unlock()
+
+	reply := &AppendEntriesReply{
+		Term:          1,
+		Success:       false,
+		ConflictTerm:  0,
+		ConflictIndex: 0, // old peer
+	}
+	n.mu.Lock()
+	n.applyConflictHint("follower", reply, 4, []LogEntry{{Index: 3, Term: 1}})
+	got := n.nextIndex["follower"]
+	n.mu.Unlock()
+
+	assert.Equal(t, uint64(3), got) // decremented by 1
+}
+
+// TestAESize_SplitsAtMaxEntries verifies that when MaxEntriesPerAE is set,
+// replicateTo sends at most that many entries per RPC call.
+func TestAESize_SplitsAtMaxEntries(t *testing.T) {
+	sentCounts := make([]int, 0)
+	n := NewNode(Config{
+		ID:              "leader",
+		Peers:           []string{"follower"},
+		MaxEntriesPerAE: 3,
+	})
+	n.SetTransport(
+		func(_ string, _ *RequestVoteArgs) (*RequestVoteReply, error) { return nil, nil },
+		func(_ string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+			sentCounts = append(sentCounts, len(args.Entries))
+			return &AppendEntriesReply{Term: 1, Success: true}, nil
+		},
+	)
+
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 1
+	n.log = make([]LogEntry, 7)
+	for i := range n.log {
+		n.log[i] = LogEntry{Index: uint64(i + 1), Term: 1}
+	}
+	n.firstIndex = 1
+	n.nextIndex = map[string]uint64{"follower": 1}
+	n.matchIndex = map[string]uint64{"follower": 0}
+	n.commitIndex = 7
+	n.checkQuorumAcks = map[string]time.Time{}
+	n.mu.Unlock()
+
+	n.replicateTo("follower")
+
+	require.NotEmpty(t, sentCounts)
+	assert.LessOrEqual(t, sentCounts[0], 3, "first AE must send ≤ MaxEntriesPerAE entries")
+}
+
+// TestTrailingLogs_KeepsLastN verifies that CompactLog with a non-zero TrailingLogs
+// retains the last TrailingLogs entries in memory so a slightly-lagged follower
+// can catch up without InstallSnapshot.
+func TestTrailingLogs_KeepsLastN(t *testing.T) {
+	n := NewNode(Config{
+		ID:           "n1",
+		Peers:        nil,
+		TrailingLogs: 3,
+	})
+	n.mu.Lock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 1},
+		{Index: 4, Term: 1},
+		{Index: 5, Term: 1},
+	}
+	n.firstIndex = 1
+	n.mu.Unlock()
+
+	n.CompactLog(5) // snapshot at index 5, trailing=3 → keep [3,4,5]
+
+	n.mu.Lock()
+	fi := n.firstIndex
+	li := n.lastLogIdx()
+	si := n.snapshotIndex
+	n.mu.Unlock()
+
+	assert.Equal(t, uint64(3), fi, "firstIndex should be snapshotIndex+1-trailing = 3")
+	assert.Equal(t, uint64(5), li, "lastLogIdx should still be 5")
+	assert.Equal(t, uint64(5), si, "snapshotIndex should be 5")
+}
+
+// TestTrailingLogs_ZeroRemovesAll verifies that CompactLog with TrailingLogs=0
+// (default unset) removes all entries up to snapshotIndex (original behavior).
+func TestTrailingLogs_ZeroRemovesAll(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: nil, TrailingLogs: 0})
+	n.mu.Lock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 1},
+	}
+	n.firstIndex = 1
+	n.mu.Unlock()
+
+	n.CompactLog(3)
+
+	n.mu.Lock()
+	fi := n.firstIndex
+	ll := len(n.log)
+	n.mu.Unlock()
+
+	assert.Equal(t, uint64(4), fi)
+	assert.Equal(t, 0, ll)
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.5.2] — 2026-04-29
+
+### Added
+
+- **Raft PR 2 — Fast Log Backtracking + AE Payload Limit + TrailingLogs** (`internal/raft/`):
+  - **`AppendEntriesReply`**: `ConflictTerm`/`ConflictIndex` 필드 추가 (FlatBuffers `shard.fbs` + 재생성 + codec). follower가 불일치 구간의 term과 시작 index를 리더에게 알려준다.
+  - **`HandleAppendEntries`**: PrevLog 불일치 시 `ConflictTerm`/`ConflictIndex` 채우기. 불일치 term의 첫 번째 index를 스캔해 리더가 그 term 전체를 건너뛸 수 있도록 힌트 제공.
+  - **`replicateTo` fast backtracking**: `applyConflictHint()` 추출. `ConflictTerm` 힌트로 `nextIndex`를 O(1) 점프 (이전: `nextIndex--` O(N)). 구버전 peer(`ConflictIndex=0`)는 자동 fallback.
+  - **`Config.MaxEntriesPerAE`**: 단일 AppendEntries RPC 항목 수 한계 (default 512). 대량 페이로드로 인한 수신자 메모리 급증 방지.
+  - **`Config.TrailingLogs` / `SnapshotConfig.TrailingLogs`**: 스냅샷 후에도 마지막 N개 항목 보존 (default 10240). lag < 10240인 follower는 InstallSnapshot 없이 AppendEntries로 catch-up 가능.
+  - **`Node.snapshotIndex`**: 최근 스냅샷 Raft index 추적 필드.
+  - **`metrics.go`**: `raft_conflict_term_jumps_total`, `raft_ae_split_count_total` Prometheus 카운터.
+  - **단위 테스트 4건**: `TestAEReply_ConflictTermJumpsCorrectly`, `TestAEReply_FallbackToMinusOneForOldPeer`, `TestAESize_SplitsAtMaxEntries`, `TestTrailingLogs_KeepsLastN`/`ZeroRemovesAll`.
+  - **chaos 시나리오**: `TestLaggedFollower_ConflictTermCatchup` — 12000-entry lag follower가 5초 내 catch-up.
+
 ## [0.0.5.1] - 2026-04-29
 
 ### Added

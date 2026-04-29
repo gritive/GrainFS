@@ -17,6 +17,10 @@ type SnapshotConfig struct {
 	// Threshold is the number of applied entries since the last snapshot
 	// before a new snapshot is triggered.
 	Threshold uint64
+
+	// TrailingLogs is the number of log entries to retain on disk after
+	// a snapshot is taken. 0 = remove all (original behavior).
+	TrailingLogs uint64
 }
 
 // SnapshotManager handles automatic snapshot creation, log compaction,
@@ -70,10 +74,17 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64) bool {
 		return false
 	}
 
-	// Compact log: remove all entries (requires InstallSnapshot RPC for follower recovery)
-	if err := m.store.TruncateAfter(0); err != nil {
-		log.Warn().Err(err).Msg("snapshot: log compaction failed")
-		// Snapshot is saved; compaction failure is non-fatal
+	// Compact log on disk.
+	if m.config.TrailingLogs == 0 {
+		// Original behavior: remove all log entries.
+		if err := m.store.TruncateAfter(0); err != nil {
+			log.Warn().Err(err).Msg("snapshot: disk log compaction failed")
+		}
+	} else if appliedIndex+1 > m.config.TrailingLogs {
+		keepFrom := appliedIndex + 1 - m.config.TrailingLogs
+		if err := m.store.TruncateBefore(keepFrom); err != nil {
+			log.Warn().Err(err).Msg("snapshot: disk log compaction failed")
+		}
 	}
 
 	m.lastSnapIndex = appliedIndex
