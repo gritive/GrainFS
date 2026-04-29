@@ -37,6 +37,18 @@ type ShardGroupEntry struct {
 
 // MetaFSM implements raft.Snapshotter for the meta-Raft group.
 // It holds cluster membership state.
+//
+// Lock discipline: mu is a RWMutex shared by all three state maps (nodes,
+// shardGroups, bucketAssignments) and the callback field.
+// RWMutex is justified here because:
+//   - There is exactly ONE writer goroutine (runApplyLoop), so write contention
+//     is zero and write locks are never contended.
+//   - Multiple reader goroutines (HTTP handlers, routing) hold RLock concurrently
+//     while the writer is idle — RWMutex allows this, plain Mutex would not.
+//   - Snapshot() and Restore() must read/write all three maps atomically; a
+//     single lock (rather than per-map atomics) is the simplest consistency guarantee.
+//   - onBucketAssigned is stored in the same lock to ensure the callback always
+//     sees the freshly updated map state without a separate atomic.
 type MetaFSM struct {
 	mu                sync.RWMutex
 	nodes             map[string]MetaNodeEntry

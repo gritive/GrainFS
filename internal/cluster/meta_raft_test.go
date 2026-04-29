@@ -189,6 +189,50 @@ func TestMetaRaft_Close_StopsApplyLoop(t *testing.T) {
 	}
 }
 
+func TestMetaRaft_ProposeBucketAssignment_CommitToFSM(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeBucketAssignment(ctx, "photos", "group-0"))
+
+	assignments := m.FSM().BucketAssignments()
+	assert.Equal(t, "group-0", assignments["photos"])
+}
+
+func TestMetaRaft_ProposeBucketAssignment_CallbackFired(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	var cbBucket, cbGroup string
+	m.FSM().SetOnBucketAssigned(func(bucket, groupID string) {
+		cbBucket = bucket
+		cbGroup = groupID
+	})
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeBucketAssignment(ctx, "videos", "group-1"))
+
+	require.Eventually(t, func() bool {
+		return cbBucket == "videos"
+	}, 2*time.Second, 10*time.Millisecond, "callback must fire after propose")
+	assert.Equal(t, "group-1", cbGroup)
+}
+
 func TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds(t *testing.T) {
 	dir0 := t.TempDir()
 	tr := newMetaTransportFake()
