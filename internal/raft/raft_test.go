@@ -1826,3 +1826,24 @@ func TestApplyConfigChange_RemoveVoterByAddress(t *testing.T) {
 
 	require.NotContains(t, peers, "10.0.0.1:9000")
 }
+
+func TestPeerMatchIndex_LearnerTracked(t *testing.T) {
+	cfg := DefaultConfig("self", nil)
+	n := NewNode(cfg)
+	// PeerMatchIndex is a leader-side API; set leader state so applyCC populates matchIndex.
+	n.mu.Lock()
+	n.state = Leader
+	n.mu.Unlock()
+	applyCC(t, n, ConfChangeAddLearner, "learner-1", "10.0.0.1:9001")
+
+	idx, ok := n.PeerMatchIndex("10.0.0.1:9001")
+	require.True(t, ok, "learner must be in matchIndex after AddLearner")
+	require.Equal(t, uint64(0), idx)
+}
+
+func TestPeerMatchIndex_UnknownPeer(t *testing.T) {
+	cfg := DefaultConfig("self", nil)
+	n := NewNode(cfg)
+	_, ok := n.PeerMatchIndex("unknown:9000")
+	require.False(t, ok)
+}

@@ -581,6 +581,16 @@ func (n *Node) CommittedIndex() uint64 {
 	return n.commitIndex
 }
 
+// PeerMatchIndex returns the last log index replicated to peer.
+// peerKey is a QUIC address for data-Raft or a nodeID for meta-Raft.
+// Returns (0, false) if the peer is not tracked.
+func (n *Node) PeerMatchIndex(peerKey string) (uint64, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	idx, ok := n.matchIndex[peerKey]
+	return idx, ok
+}
+
 // Peers returns a snapshot of the current peer list. The caller receives a
 // copy so mutations to the returned slice do not affect the node's state.
 func (n *Node) Peers() []string {
