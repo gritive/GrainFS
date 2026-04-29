@@ -263,6 +263,47 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	})
 }
 
+// Truncate implements storage.Truncatable.
+func (b *LocalBackend) Truncate(bucket, key string, size int64) error {
+	objPath := b.objectPath(bucket, key)
+	if err := os.Truncate(objPath, size); err != nil {
+		return fmt.Errorf("truncate: %w", err)
+	}
+	mk := b.objectMetaKey(bucket, key)
+	return b.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(mk)
+		if err == badger.ErrKeyNotFound {
+			return ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			obj, merr := unmarshalObject(val)
+			if merr != nil {
+				return merr
+			}
+			obj.Size = size
+			newVal, merr := marshalObject(obj)
+			if merr != nil {
+				return merr
+			}
+			return txn.Set(mk, newVal)
+		})
+	})
+}
+
+// Sync implements storage.Syncable.
+func (b *LocalBackend) Sync(bucket, key string) error {
+	objPath := b.objectPath(bucket, key)
+	f, err := os.OpenFile(objPath, os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("sync open: %w", err)
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
 func (b *LocalBackend) DeleteObject(bucket, key string) error {
 	if err := b.HeadBucket(bucket); err != nil {
 		return err

@@ -139,3 +139,15 @@ type Backend interface {
 	CompleteMultipartUpload(bucket, key, uploadID string, parts []Part) (*Object, error)
 	AbortMultipartUpload(bucket, key, uploadID string) error
 }
+
+// Truncatable is an optional interface for backends that can efficiently truncate an object.
+// Backends that do not implement this interface fall back to GetObject→slice→PutObject.
+type Truncatable interface {
+	Truncate(bucket, key string, size int64) error
+}
+
+// Syncable is an optional interface for backends that can fsync a specific object.
+// Backends that do not implement this interface skip the fsync in COMMIT.
+type Syncable interface {
+	Sync(bucket, key string) error
+}
