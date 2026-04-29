@@ -17,9 +17,12 @@ func IsVFSBucket(bucket string) bool {
 	return strings.HasPrefix(bucket, VFSBucketPrefix)
 }
 
-// IsInternalBucket reports whether bucket is an internal GrainFS bucket
-// (VFS or NFSv4). Internal buckets never expose ETag to S3 clients, so
-// MD5 hashing during PutObject can be skipped.
+// internalBucketPrefix is the common prefix for all GrainFS-internal buckets.
+// Internal buckets never expose ETag to S3 clients, so MD5 hashing during
+// PutObject can be skipped.
+const internalBucketPrefix = "__grainfs_"
+
+// IsInternalBucket reports whether bucket is an internal GrainFS bucket.
 func IsInternalBucket(bucket string) bool {
-	return bucket == NFS4BucketName || strings.HasPrefix(bucket, VFSBucketPrefix)
+	return strings.HasPrefix(bucket, internalBucketPrefix)
 }

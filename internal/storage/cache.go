@@ -163,6 +163,21 @@ func (cb *CachedBackend) PutObject(bucket, key string, r io.Reader, contentType 
 	return cb.Backend.PutObject(bucket, key, r, contentType)
 }
 
+// PutObjectAsync delegates to the inner backend's async write-back path if available.
+// The cache entry is invalidated immediately so reads after write don't return stale data.
+func (cb *CachedBackend) PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*Object, func() error, error) {
+	type asyncPutter interface {
+		PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*Object, func() error, error)
+	}
+	ap, ok := cb.Backend.(asyncPutter)
+	if !ok {
+		obj, err := cb.PutObject(bucket, key, r, contentType)
+		return obj, func() error { return nil }, err
+	}
+	cb.invalidate(bucket, key)
+	return ap.PutObjectAsync(bucket, key, r, contentType)
+}
+
 // WriteAt delegates to the inner backend's WriteAt if available, then invalidates
 // the cache entry so subsequent reads fetch the updated content.
 func (cb *CachedBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error) {

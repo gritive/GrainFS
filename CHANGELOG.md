@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.6.5] — 2026-04-30
+
+### Added
+
+- **NBD write-back async path** (`internal/volume/volume.go`) — `WriteAtDeferred()` splits local disk write from Raft commit. NBD write handler acknowledges after local write; Raft commits are deferred and batched on `NBD_CMD_FLUSH`, enabling Raft batcher coalescing (~10× fewer fdatasync calls).
+- **NBD per-key flush serialization** (`internal/nbd/nbd.go`) — `flushPending()` groups deferred commits by block offset: concurrent across distinct blocks (maximizes Raft batcher throughput), sequential within each block (preserves per-block write ordering). Fixes `--end_fsync=1` flush tail latency: 34 s → 5 s (×6.8).
+- **`PutObjectAsync`** across backend layers — `DistributedBackend`, `CachedBackend`, `WALBackend` each implement the write-back interface. WAL entries are appended inside `commitFn` so PITR records only committed objects.
+- **`GRAINFS_VOLUME_TRACE=1`** — per-stage latency logging in `PutObject` (create_temp, copy_close, rename, badger_update), `HeadObject`, `Raft flushBatch` — diagnostic instrumentation for NBD hot path.
+- `internal/nbd/nbd_bench_test.go` — in-process NBD benchmarks via `net.Pipe()`: `BenchmarkNBD_Read4K`, `BenchmarkNBD_Read64K`, `BenchmarkNBD_Write4K`, `BenchmarkNBD_Write64K`.
+- `internal/nbd/nbd_test.go` — `TestNBDFlushWriteOrdering`: write same block twice then flush; asserts second write wins (guards per-key ordering regression).
+- `tests/nbd_colima/` — Colima Linux VM end-to-end NBD tests (macOS server → nbd-client). `make test-nbd-colima`.
+- `benchmarks/bench_nbd_profile.sh` — fio workload suite with pprof capture. `make bench-nbd`.
+- `benchmarks/bench_nbd_trace.sh` — trace-mode benchmark for per-stage latency breakdown.
+
+### Performance
+
+- NBD `--end_fsync=1` (worst-case batch flush): **34 s → 5 s** (×6.8 improvement)
+- NBD 4 KiB sequential write throughput: ~450 MB/s (net.Pipe baseline)
+- Raft commit coalescing: from per-write proposal to batched-per-flush proposal
+
 ## [0.0.6.4] — 2026-04-30
 
 ### Added

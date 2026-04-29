@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-fuse-s3-colima bench-fuse-s3-colima
+.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd test-fuse-s3-colima bench-fuse-s3-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 
@@ -48,6 +48,12 @@ test-e2e: bin/$(BINARY)
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
+
+test-nbd-colima: build
+	go test -v -tags colima -timeout 120s ./tests/nbd_colima/
+
+bench-nbd: build
+	./benchmarks/bench_nbd_profile.sh
 
 # FUSE-over-S3 e2e: macOS host runs grainfs serve, Colima Linux VM mounts via
 # rclone mount and exercises common filesystem operations. Verifies that
