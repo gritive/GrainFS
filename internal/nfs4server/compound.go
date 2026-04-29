@@ -47,24 +47,26 @@ func putDispatcher(d *Dispatcher) {
 
 // NFSv4 status codes (RFC 7530)
 const (
-	NFS4_OK              = 0
-	NFS4ERR_PERM         = 1
-	NFS4ERR_NOENT        = 2
-	NFS4ERR_IO           = 5
-	NFS4ERR_NOTDIR       = 20
-	NFS4ERR_INVAL        = 22
-	NFS4ERR_FBIG         = 27
-	NFS4ERR_NOSPC        = 28
-	NFS4ERR_ROFS         = 30
-	NFS4ERR_STALE        = 70
-	NFS4ERR_BADHANDLE    = 10001
-	NFS4ERR_BAD_STATEID  = 10025
-	NFS4ERR_RESOURCE     = 10018
-	NFS4ERR_SERVERFAULT  = 10006
-	NFS4ERR_NOTSUPP      = 10004
-	NFS4ERR_RESTOREFH    = 10030
-	NFS4ERR_NOFILEHANDLE = 10020
-	NFS4ERR_BADSESSION   = 10052
+	NFS4_OK                = 0
+	NFS4ERR_PERM           = 1
+	NFS4ERR_NOENT          = 2
+	NFS4ERR_IO             = 5
+	NFS4ERR_NOTDIR         = 20
+	NFS4ERR_INVAL          = 22
+	NFS4ERR_FBIG           = 27
+	NFS4ERR_NOSPC          = 28
+	NFS4ERR_ROFS           = 30
+	NFS4ERR_STALE          = 70
+	NFS4ERR_BADHANDLE      = 10001
+	NFS4ERR_BAD_STATEID    = 10025
+	NFS4ERR_RESOURCE       = 10018
+	NFS4ERR_SERVERFAULT    = 10006
+	NFS4ERR_NOTSUPP        = 10004
+	NFS4ERR_RESTOREFH      = 10030
+	NFS4ERR_NOFILEHANDLE   = 10020
+	NFS4ERR_BADSESSION     = 10052
+	NFS4ERR_BADSLOT        = 10060
+	NFS4ERR_SEQ_MISORDERED = 10063
 )
 
 // NFSv4 operation codes
@@ -1195,18 +1197,43 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	}
 	r := NewXDRReader(data)
 	var sidBytes [16]byte
-	io.ReadFull(&r.r, sidBytes[:])
+	io.ReadFull(&r.r, sidBytes[:]) //nolint:errcheck
 	var sid SessionID
 	copy(sid[:], sidBytes[:])
 
 	seqID, _ := r.ReadUint32()
 	slotID, _ := r.ReadUint32()
 	highSlot, _ := r.ReadUint32()
-	_, _ = r.ReadUint32() // cacheThis
+	cacheThis, _ := r.ReadUint32()
 
 	sess := d.state.GetSession(sid)
 	if sess == nil {
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_BADSESSION}
+	}
+
+	d.state.sessionMu.Lock()
+	if int(slotID) >= len(sess.Slots) {
+		d.state.sessionMu.Unlock()
+		return OpResult{OpCode: OpSequence, Status: NFS4ERR_BADSLOT}
+	}
+	slot := &sess.Slots[slotID]
+
+	// Replay detection: same seqID → return cached response if available.
+	if slot.SeqID == seqID && (slot.HasCache || slot.SeqID > 0) {
+		if slot.HasCache {
+			cached := slot.Response
+			d.state.sessionMu.Unlock()
+			return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: cached}
+		}
+		// cacheThis was false on first call; replay without cached bytes is still OK.
+		d.state.sessionMu.Unlock()
+		// fall through to re-build response below
+	} else if slot.SeqID > 0 && seqID != slot.SeqID+1 {
+		// Stale or future seqID (not the expected next or a replay).
+		d.state.sessionMu.Unlock()
+		return OpResult{OpCode: OpSequence, Status: NFS4ERR_SEQ_MISORDERED}
+	} else {
+		d.state.sessionMu.Unlock()
 	}
 
 	w := getXDRWriter()
@@ -1216,7 +1243,19 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	w.WriteUint32(highSlot) // sr_highest_slotid
 	w.WriteUint32(highSlot) // sr_target_highest_slotid
 	w.WriteUint32(0)        // sr_status_flags
-	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+	resp := xdrWriterBytes(w)
+
+	d.state.sessionMu.Lock()
+	slot.SeqID = seqID
+	if cacheThis != 0 {
+		slot.Response = resp
+		slot.HasCache = true
+	} else {
+		slot.HasCache = false
+	}
+	d.state.sessionMu.Unlock()
+
+	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: resp}
 }
 
 // nfsFileMeta stores per-file NFS metadata that must survive server restarts.

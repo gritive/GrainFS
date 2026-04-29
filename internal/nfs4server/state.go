@@ -44,8 +44,8 @@ type Session struct {
 	ClientID    uint64
 	Sequence    uint32
 	ForeChannel ChannelAttrs
-	// slot table: indexed by slotid, value = last sequence seen on that slot
-	SlotSeq []uint32
+	// per-slot replay cache (indexed by slotid)
+	Slots []SlotEntry
 }
 
 // ExchangeIDResult is the result of an EXCHANGE_ID operation.
@@ -278,7 +278,7 @@ func (sm *StateManager) CreateSession(clientID uint64, fore ChannelAttrs) (Sessi
 		SessionID:   sid,
 		ClientID:    clientID,
 		ForeChannel: fore,
-		SlotSeq:     make([]uint32, maxSlots),
+		Slots:       make([]SlotEntry, maxSlots),
 	}
 
 	sm.sessionMu.Lock()
