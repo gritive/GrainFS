@@ -61,8 +61,9 @@ const (
 	NFS4ERR_RESOURCE    = 10018
 	NFS4ERR_SERVERFAULT = 10006
 	NFS4ERR_NOTSUPP     = 10004
-	NFS4ERR_RESTOREFH   = 10030
-	NFS4ERR_BADSESSION  = 10052
+	NFS4ERR_RESTOREFH    = 10030
+	NFS4ERR_BADSESSION   = 10052
+	NFS4ERR_NOFILEHANDLE = 10020
 )
 
 // NFSv4 operation codes
@@ -1062,7 +1063,9 @@ func (d *Dispatcher) opDestroySession(data []byte) OpResult {
 	}
 	var sid SessionID
 	copy(sid[:], data[:16])
-	d.state.DestroySession(sid)
+	if !d.state.DestroySession(sid) {
+		return OpResult{OpCode: OpDestroySession, Status: NFS4ERR_BADSESSION}
+	}
 	return OpResult{OpCode: OpDestroySession, Status: NFS4_OK}
 }
 
