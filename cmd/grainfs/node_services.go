@@ -8,7 +8,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
@@ -74,7 +73,5 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 		}
 	}
 
-	_ = ctx
-	_ = os.Getpid
 	return svc
 }

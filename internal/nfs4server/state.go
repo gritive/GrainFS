@@ -6,6 +6,7 @@ import (
 	"maps"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // FileHandle is an opaque 128-bit identifier for a file/directory.
@@ -29,12 +30,12 @@ type SessionID [16]byte
 
 // ChannelAttrs holds negotiated channel parameters.
 type ChannelAttrs struct {
-	HeaderPadSize      uint32
-	MaxRequestSize     uint32
-	MaxResponseSize    uint32
+	HeaderPadSize         uint32
+	MaxRequestSize        uint32
+	MaxResponseSize       uint32
 	MaxResponseSizeCached uint32
-	MaxOperations      uint32
-	MaxRequests        uint32
+	MaxOperations         uint32
+	MaxRequests           uint32
 }
 
 // Session tracks NFSv4.1 session state.
@@ -81,8 +82,13 @@ type StateManager struct {
 	// clientID → sequenceid for EXCHANGE_ID idempotency
 	exchSeq map[uint64]uint32
 
-	// dirs tracks paths that exist as directories (value type is struct{})
+	// dirs tracks paths that exist as directories.
+	// Value type is int64 (UnixNano creation timestamp) for CHANGE attribute.
 	dirs sync.Map
+
+	// writeGates holds per-path channel semaphores to serialise RMW writes.
+	// Value type is chan struct{} (buffered 1).
+	writeGates sync.Map
 }
 
 // NewStateManager creates a state manager.
@@ -104,20 +110,38 @@ func NewStateManager() *StateManager {
 	initial.pathToFH["/"] = rootFH
 	sm.fhMaps.Store(initial)
 
-	sm.dirs.Store("/", struct{}{})
+	sm.dirs.Store("/", time.Now().UnixNano())
 
 	return sm
 }
 
-// MarkDir records path as a known directory.
+// MarkDir records path as a known directory with current timestamp.
 func (sm *StateManager) MarkDir(p string) {
-	sm.dirs.Store(p, struct{}{})
+	sm.dirs.Store(p, time.Now().UnixNano())
 }
 
 // IsDir reports whether path is a known directory.
 func (sm *StateManager) IsDir(p string) bool {
 	_, ok := sm.dirs.Load(p)
 	return ok
+}
+
+// DirMtime returns the creation UnixNano timestamp for a directory,
+// or time.Now().UnixNano() if not tracked (e.g. the root).
+func (sm *StateManager) DirMtime(p string) int64 {
+	if v, ok := sm.dirs.Load(p); ok {
+		return v.(int64)
+	}
+	return time.Now().UnixNano()
+}
+
+// LockPath acquires a per-path channel semaphore and returns a release func.
+// Use for serialising concurrent read-modify-write operations on the same path.
+func (sm *StateManager) LockPath(p string) func() {
+	sem, _ := sm.writeGates.LoadOrStore(p, make(chan struct{}, 1))
+	ch := sem.(chan struct{})
+	ch <- struct{}{} // blocks until acquired
+	return func() { <-ch }
 }
 
 // RemoveDir removes path from the directory set.

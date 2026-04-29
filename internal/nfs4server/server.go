@@ -131,11 +131,13 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 		return
 	}
 
-	ops := make([]int, len(req.Ops))
-	for i, op := range req.Ops {
-		ops[i] = op.OpCode
+	if e := s.logger.Debug(); e.Enabled() {
+		ops := make([]int, len(req.Ops))
+		for i, op := range req.Ops {
+			ops[i] = op.OpCode
+		}
+		e.Uint32("minorver", req.MinorVer).Ints("ops", ops).Msg("nfs4: COMPOUND")
 	}
-	s.logger.Debug().Uint32("minorver", req.MinorVer).Ints("ops", ops).Msg("nfs4: COMPOUND")
 
 	d := getDispatcher(s.backend, s.state)
 	defer putDispatcher(d)

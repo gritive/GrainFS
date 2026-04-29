@@ -516,6 +516,9 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		}
 		// eia_client_impl_id: nfs_impl_id4<1>
 		implCount, _ := r.ReadUint32()
+		if implCount > 16 {
+			implCount = 0
+		}
 		for i := uint32(0); i < implCount; i++ {
 			r.ReadOpaque() // nii_domain
 			r.ReadOpaque() // nii_name
@@ -541,6 +544,9 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		r.ReadUint32() // csa_cb_program
 		// csa_sec_parms count
 		secCount, _ := r.ReadUint32()
+		if secCount > 64 {
+			secCount = 0
+		}
 		for i := uint32(0); i < secCount; i++ {
 			r.ReadUint32() // cb_secflavor; we only expect AUTH_NONE=0
 		}
@@ -563,7 +569,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 	case OpSequence:
 		// sessionid(16) + sequenceid(4) + slotid(4) + highest_slotid(4) + cachethis(4)
 		buf := make([]byte, 32)
-		io.ReadFull(&r.r, buf[:16])         // sessionid
+		io.ReadFull(&r.r, buf[:16]) // sessionid
 		seq, _ := r.ReadUint32()
 		slotID, _ := r.ReadUint32()
 		highSlot, _ := r.ReadUint32()
@@ -595,6 +601,9 @@ func readChannelAttrs(r *XDRReader) ChannelAttrs {
 	ca.MaxOperations, _ = r.ReadUint32()
 	ca.MaxRequests, _ = r.ReadUint32()
 	rdmaCount, _ := r.ReadUint32()
+	if rdmaCount > 64 {
+		rdmaCount = 0
+	}
 	for i := uint32(0); i < rdmaCount; i++ {
 		r.ReadUint32()
 	}

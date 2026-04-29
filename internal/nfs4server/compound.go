@@ -270,6 +270,9 @@ func (d *Dispatcher) opGetFH() OpResult {
 
 func (d *Dispatcher) opLookup(data []byte) OpResult {
 	name := string(data)
+	if name == "" || name == "." || name == ".." {
+		return OpResult{OpCode: OpLookup, Status: NFS4ERR_INVAL}
+	}
 	childPath := path.Join(d.currentPath, name)
 
 	// Check existence: backend file, tracked directory, or root
@@ -301,7 +304,7 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	r := NewXDRReader(data)
 	objType, _ := r.ReadUint32()
 	objName, _ := r.ReadString()
-	if objName == "" {
+	if objName == "" || objName == "." || objName == ".." {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
 	}
 
@@ -369,6 +372,10 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 		}
 	} else {
 		fileSize = 4096
+	}
+	if isDir {
+		// Use creation timestamp so CHANGE is non-zero and stable within a session.
+		lastModUnix = d.state.DirMtime(d.currentPath) / 1e9
 	}
 
 	fileType := uint32(NF4REG)
@@ -585,9 +592,8 @@ func (d *Dispatcher) opReadDir(_ []byte) OpResult {
 		}
 
 		objects, _ := d.backend.ListObjects(nfs4Bucket, prefix, 1000)
-		for i, obj := range objects {
-			w.WriteUint32(1)             // value_follows = TRUE
-			w.WriteUint64(uint64(i + 1)) // cookie
+		cookie := uint64(0)
+		for _, obj := range objects {
 			name := obj.Key
 			if prefix != "" {
 				name = name[len(prefix):]
@@ -596,6 +602,9 @@ func (d *Dispatcher) opReadDir(_ []byte) OpResult {
 			if strings.ContainsRune(name, '/') {
 				continue
 			}
+			cookie++
+			w.WriteUint32(1) // value_follows = TRUE
+			w.WriteUint64(cookie)
 			w.WriteString(name)
 			// attrs (minimal — empty bitmap + empty vals)
 			w.WriteUint32(0) // bitmap len = 0
@@ -730,7 +739,10 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	if offset == 0 {
 		_, err = d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(writeData), "application/octet-stream")
 	} else {
-		// Read-modify-write for non-zero offset
+		// Serialise concurrent RMW on the same path via per-path channel semaphore.
+		release := d.state.LockPath(key)
+		defer release()
+
 		var existing []byte
 		if rc, _, rerr := d.backend.GetObject(nfs4Bucket, key); rerr == nil {
 			existing, err = io.ReadAll(rc)
@@ -739,9 +751,9 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 				return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 			}
 		}
-		end := int(offset) + len(writeData)
-		if len(existing) < end {
-			existing = append(existing, make([]byte, end-len(existing))...)
+		end := offset + uint64(len(writeData))
+		if uint64(len(existing)) < end {
+			existing = append(existing, make([]byte, end-uint64(len(existing)))...)
 		}
 		copy(existing[offset:], writeData)
 		_, err = d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream")
@@ -981,13 +993,13 @@ func (d *Dispatcher) opExchangeID(data []byte) OpResult {
 	res := d.state.ExchangeID(verf, ownerID)
 
 	w := getXDRWriter()
-	w.WriteUint64(res.ClientID)  // eir_clientid
+	w.WriteUint64(res.ClientID)   // eir_clientid
 	w.WriteUint32(res.SequenceID) // eir_sequenceid
-	w.WriteUint32(0)             // eir_flags
-	w.WriteUint32(0)             // eir_state_protect.spr_how = SP4_NONE
+	w.WriteUint32(0)              // eir_flags
+	w.WriteUint32(0)              // eir_state_protect.spr_how = SP4_NONE
 	// eir_server_owner: minor_id + major_id
-	w.WriteUint64(1)             // server minor id
-	w.WriteString("grainfs")    // server major id
+	w.WriteUint64(1)         // server minor id
+	w.WriteString("grainfs") // server major id
 	// eir_server_scope
 	w.WriteString("grainfs-scope")
 	// eir_server_impl_id count = 0
@@ -1022,9 +1034,9 @@ func (d *Dispatcher) opCreateSession(data []byte) OpResult {
 	sid, seq := d.state.CreateSession(clientID, fore)
 
 	w := getXDRWriter()
-	w.buf.Write(sid[:])        // csr_sessionid: fixed 16 bytes (no length prefix)
-	w.WriteUint32(seq)         // csr_sequence
-	w.WriteUint32(0)           // csr_flags
+	w.buf.Write(sid[:]) // csr_sessionid: fixed 16 bytes (no length prefix)
+	w.WriteUint32(seq)  // csr_sequence
+	w.WriteUint32(0)    // csr_flags
 	// fore channel attrs echo
 	w.WriteUint32(fore.HeaderPadSize)
 	w.WriteUint32(fore.MaxRequestSize)
@@ -1032,7 +1044,7 @@ func (d *Dispatcher) opCreateSession(data []byte) OpResult {
 	w.WriteUint32(fore.MaxResponseSizeCached)
 	w.WriteUint32(fore.MaxOperations)
 	w.WriteUint32(fore.MaxRequests)
-	w.WriteUint32(0)           // ca_rdma_ird count
+	w.WriteUint32(0) // ca_rdma_ird count
 	// back channel attrs (minimal echo)
 	w.WriteUint32(0)
 	w.WriteUint32(4096)
@@ -1075,12 +1087,12 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	}
 
 	w := getXDRWriter()
-	w.buf.Write(sid[:])        // sr_sessionid: fixed 16 bytes (no length prefix)
-	w.WriteUint32(seqID)       // sr_sequenceid
-	w.WriteUint32(slotID)      // sr_slotid
-	w.WriteUint32(highSlot)    // sr_highest_slotid
-	w.WriteUint32(highSlot)    // sr_target_highest_slotid
-	w.WriteUint32(0)           // sr_status_flags
+	w.buf.Write(sid[:])     // sr_sessionid: fixed 16 bytes (no length prefix)
+	w.WriteUint32(seqID)    // sr_sequenceid
+	w.WriteUint32(slotID)   // sr_slotid
+	w.WriteUint32(highSlot) // sr_highest_slotid
+	w.WriteUint32(highSlot) // sr_target_highest_slotid
+	w.WriteUint32(0)        // sr_status_flags
 	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
