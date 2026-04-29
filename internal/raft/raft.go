@@ -520,6 +520,13 @@ func (n *Node) ID() string {
 	return n.id
 }
 
+// CommittedIndex returns the current commitIndex. Safe to call concurrently.
+func (n *Node) CommittedIndex() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.commitIndex
+}
+
 // Peers returns a snapshot of the current peer list. The caller receives a
 // copy so mutations to the returned slice do not affect the node's state.
 func (n *Node) Peers() []string {

@@ -121,6 +121,11 @@ func (c *Cluster) NodeIDs() []string {
 	return out
 }
 
+// NodeByID returns the node with the given ID, or nil if not found.
+func (c *Cluster) NodeByID(id string) *raft.Node {
+	return c.nodes[id]
+}
+
 // Driver primitive delegations.
 
 func (c *Cluster) PartitionPeer(nodeID string)        { c.transport.PartitionPeer(nodeID) }
