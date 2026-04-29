@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.6.1] — 2026-04-30
+
+### Added
+
+- **cluster**: `PutBucketAssignment` Raft 커맨드 — bucket→shard-group 매핑을 MetaFSM 로그에 persist; `Snapshot`/`Restore` 시리얼라이즈 포함.
+- **cluster**: `MetaRaft.ProposeBucketAssignment` — 동기 propose + apply-wait.
+- **cluster**: `BucketAssigner` 인터페이스 — `server.CreateBucket` 호출 시 MetaRaft로 버킷을 shard group에 자동 배정.
+- **cluster**: `DataGroup.Backend` — shard group 단위 `object.Backend` 래퍼; `Router.AssignBucket`/`Sync` COW (`atomic.Pointer + CAS`) 라우팅 테이블.
+- **serve**: `BucketAssigner` + `Router` + `DataGroupManager` 완전 연결 (PR-D Task 7).
+
+### Fixed
+
+- **cluster**: `MetaFSM.Restore()` — snapshot install 후 `onBucketAssigned` 콜백 미호출로 Router 상태 불일치. 콜백을 잠금 해제 이후 순회하여 호출.
+- **cluster**: `DistributedBackend.PutObject` nil router guard, 빈 groupID 검증 추가.
+- **cluster**: `Router.Sync` merge semantics — bootstrap 시 기존 라우팅을 덮어쓰지 않음.
+
 ## [0.0.6.0] — 2026-04-29
 
 ### Performance
