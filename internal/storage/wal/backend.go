@@ -45,6 +45,39 @@ func (b *Backend) PutObject(bucket, key string, r io.Reader, contentType string)
 	return obj, nil
 }
 
+// PutObjectAsync delegates to the inner backend's write-back path and appends
+// the WAL entry inside the commitFn so PITR records only committed objects.
+func (b *Backend) PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
+	type asyncPutter interface {
+		PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error)
+	}
+	ap, ok := b.Backend.(asyncPutter)
+	if !ok {
+		obj, err := b.PutObject(bucket, key, r, contentType)
+		return obj, func() error { return nil }, err
+	}
+	obj, innerCommit, err := ap.PutObjectAsync(bucket, key, r, contentType)
+	if err != nil {
+		return nil, nil, err
+	}
+	commitFn := func() error {
+		if err := innerCommit(); err != nil {
+			return err
+		}
+		b.w.AppendAsync(Entry{
+			Op:          OpPut,
+			Bucket:      bucket,
+			Key:         key,
+			ETag:        obj.ETag,
+			ContentType: obj.ContentType,
+			Size:        obj.Size,
+			VersionID:   obj.VersionID,
+		})
+		return nil
+	}
+	return obj, commitFn, nil
+}
+
 func (b *Backend) DeleteObject(bucket, key string) error {
 	if err := b.Backend.DeleteObject(bucket, key); err != nil {
 		return err

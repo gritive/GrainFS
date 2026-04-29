@@ -585,7 +585,17 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 // {root}/data/{bucket}/{key}/.v/{versionID} so prior versions coexist with the
 // latest. Peer replicas are addressed via ShardService with key+"/"+versionID
 // so ShardService's API stays frozen (ShardService sees a longer "key").
+// clusterTraceEnabled activates per-stage putObjectNx latency logging.
+// Enable with GRAINFS_VOLUME_TRACE=1.
+var clusterTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
+
 func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
+	var tStart, tStage time.Time
+	if clusterTraceEnabled {
+		tStart = time.Now()
+		tStage = tStart
+	}
+
 	// Write data locally at the versioned path.
 	objPath := b.objectPathV(bucket, key, versionID)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
@@ -593,6 +603,11 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 	}
 	if err := writeFileAtomic(objPath, data); err != nil {
 		return nil, fmt.Errorf("write object: %w", err)
+	}
+
+	if clusterTraceEnabled {
+		log.Debug().Dur("write_file_atomic", time.Since(tStage)).Str("bucket", bucket).Int("bytes", len(data)).Msg("putObjectNx trace")
+		tStage = time.Now()
 	}
 
 	// Replicate data to healthy peer nodes via ShardService. We encode the
@@ -642,6 +657,10 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 		return nil, err
 	}
 
+	if clusterTraceEnabled {
+		log.Debug().Dur("raft_propose", time.Since(tStage)).Dur("total", time.Since(tStart)).Str("bucket", bucket).Msg("putObjectNx trace")
+	}
+
 	return &storage.Object{
 		Key:          key,
 		Size:         int64(len(data)),
@@ -650,6 +669,113 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 		LastModified: now,
 		VersionID:    versionID,
 	}, nil
+}
+
+// PutObjectAsync is the write-back variant of PutObject.
+// It writes data locally and replicates to peers (fast path ~0.3ms), then
+// returns a commitFn that defers the Raft metadata proposal (~2ms).
+// On flush the caller runs all commitFns concurrently so the Raft batcher
+// coalesces them into a single fdatasync.
+func (b *DistributedBackend) PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
+	if err := b.HeadBucket(bucket); err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read object data: %w", err)
+	}
+	versionID := newVersionID()
+	useEC := b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil
+	if storage.IsVFSBucket(bucket) && b.vfsFixedVersion.Load() {
+		versionID = "current"
+		useEC = false
+	}
+	if useEC {
+		obj, err := b.putObjectEC(bucket, key, versionID, data, contentType)
+		return obj, func() error { return nil }, err
+	}
+	return b.putObjectNxAsync(bucket, key, versionID, data, contentType)
+}
+
+// putObjectNxAsync splits putObjectNx into fast (local write + peer replication)
+// and slow (Raft propose) parts. The caller must invoke commitFn before flush.
+func (b *DistributedBackend) putObjectNxAsync(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, func() error, error) {
+	t0 := time.Now()
+	objPath := b.objectPathV(bucket, key, versionID)
+	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+		return nil, nil, fmt.Errorf("create object dir: %w", err)
+	}
+	if err := writeFileAtomic(objPath, data); err != nil {
+		return nil, nil, fmt.Errorf("write object: %w", err)
+	}
+	wfaDur := time.Since(t0)
+
+	shardKey := key + "/" + versionID
+	if b.shardSvc != nil {
+		ctx := context.Background()
+		for _, peer := range b.liveNodes() {
+			if peer == b.selfAddr {
+				continue
+			}
+			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+				continue
+			}
+			if err := b.shardSvc.WriteShard(ctx, peer, bucket, shardKey, 0, data); err != nil {
+				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
+				if b.peerHealth != nil {
+					b.peerHealth.MarkUnhealthy(peer)
+				}
+			} else if b.peerHealth != nil {
+				b.peerHealth.MarkHealthy(peer)
+			}
+		}
+	}
+
+	var etag string
+	if !storage.IsInternalBucket(bucket) {
+		h := md5.Sum(data)
+		etag = hex.EncodeToString(h[:])
+	}
+	now := time.Now().Unix()
+
+	obj := &storage.Object{
+		Key:          key,
+		Size:         int64(len(data)),
+		ContentType:  contentType,
+		ETag:         etag,
+		LastModified: now,
+		VersionID:    versionID,
+	}
+	if os.Getenv("GRAINFS_VOLUME_TRACE") == "1" {
+		b.logger.Debug().
+			Str("bucket", bucket).Str("key", key).
+			Dur("write_file_atomic", wfaDur).
+			Msg("putObjectNxAsync trace")
+	}
+	commitFn := func() error {
+		t1 := time.Now()
+		err := b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
+			Bucket:      bucket,
+			Key:         key,
+			Size:        int64(len(data)),
+			ContentType: contentType,
+			ETag:        etag,
+			ModTime:     now,
+			VersionID:   versionID,
+		})
+		if err != nil {
+			os.Remove(objPath)
+			return err
+		}
+		if os.Getenv("GRAINFS_VOLUME_TRACE") == "1" {
+			b.logger.Debug().
+				Str("bucket", bucket).Str("key", key).
+				Dur("raft_propose", time.Since(t1)).
+				Msg("putObjectNxAsync commit trace")
+		}
+		return nil
+	}
+	return obj, commitFn, nil
 }
 
 // putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into

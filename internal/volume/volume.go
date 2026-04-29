@@ -580,6 +580,138 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 	return totalWritten, nil
 }
 
+// asyncPutter is an optional interface for write-back NBD.
+// Backends that implement it split the write into a fast local path and a
+// deferred Raft commit. NBD accumulates commitFns and drains them on flush.
+type asyncPutter interface {
+	PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error)
+}
+
+// WriteAtDeferred is the write-back variant of WriteAt.
+// It writes data to local storage immediately and returns Raft commit functions
+// that the caller must invoke (concurrently) on NBD_CMD_FLUSH.
+// Falls back to synchronous WriteAt when the backend doesn't implement asyncPutter
+// or when dedup/CoW is active.
+func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() error, int, error) {
+	ap, ok := m.backend.(asyncPutter)
+	if !ok {
+		n, err := m.WriteAt(name, p, off)
+		return nil, n, err
+	}
+
+	m.mu.Lock()
+
+	vol, err := m.getVolUnlocked(name)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, 0, err
+	}
+	if off < 0 || off >= vol.Size {
+		m.mu.Unlock()
+		return nil, 0, fmt.Errorf("offset %d out of range [0, %d)", off, vol.Size)
+	}
+
+	// Async path only supports the non-dedup, non-CoW fallback.
+	if m.dedup != nil || vol.SnapshotCount > 0 || m.opts.PoolQuota > 0 {
+		m.mu.Unlock()
+		n, err := m.WriteAt(name, p, off)
+		return nil, n, err
+	}
+
+	liveMap, err := m.getLiveMapUnlocked(name)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, 0, fmt.Errorf("load live_map: %w", err)
+	}
+
+	bs := int64(vol.BlockSize)
+	var commits []func() error
+	var invalidations []string
+	totalWritten := 0
+	newBlocks := 0
+
+	for totalWritten < len(p) && off+int64(totalWritten) < vol.Size {
+		pos := off + int64(totalWritten)
+		blkNum := pos / bs
+		blkOff := pos % bs
+
+		canWrite := int(bs - blkOff)
+		if rem := len(p) - totalWritten; canWrite > rem {
+			canWrite = rem
+		}
+		if end := off + int64(totalWritten) + int64(canWrite); end > vol.Size {
+			canWrite = int(vol.Size - pos)
+		}
+
+		isFullBlock := blkOff == 0 && canWrite == int(bs)
+		oldKey := physicalKey(name, blkNum, liveMap)
+		targetKey := blockKey(name, blkNum)
+		invalidations = append(invalidations, oldKey, targetKey)
+
+		var blkSrc io.Reader
+		if isFullBlock {
+			_, headErr := m.backend.HeadObject(volumeBucketName, oldKey)
+			if headErr != nil {
+				newBlocks++
+			}
+			blkSrc = bytes.NewReader(p[totalWritten : totalWritten+canWrite])
+		} else {
+			blkData := m.getBlkBuf(vol.BlockSize)
+			rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
+			if readErr != nil {
+				newBlocks++
+			} else {
+				io.ReadFull(rc, blkData) //nolint:errcheck
+				rc.Close()
+			}
+			copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
+			// PutObjectAsync reads data via io.ReadAll before returning, so blkData
+			// is safe to return to the pool immediately after.
+			blkSrc = bytes.NewReader(blkData)
+			_, commitFn, putErr := ap.PutObjectAsync(volumeBucketName, targetKey, blkSrc, "application/octet-stream")
+			m.putBlkBuf(blkData)
+			if putErr != nil {
+				m.mu.Unlock()
+				return nil, totalWritten, fmt.Errorf("write block %d: %w", blkNum, putErr)
+			}
+			commits = append(commits, commitFn)
+			totalWritten += canWrite
+			continue
+		}
+
+		_, commitFn, putErr := ap.PutObjectAsync(volumeBucketName, targetKey, blkSrc, "application/octet-stream")
+		if putErr != nil {
+			m.mu.Unlock()
+			return nil, totalWritten, fmt.Errorf("write block %d: %w", blkNum, putErr)
+		}
+		commits = append(commits, commitFn)
+		totalWritten += canWrite
+	}
+
+	if m.blocks != nil {
+		for _, k := range invalidations {
+			m.blocks.Invalidate(k)
+		}
+	}
+
+	if newBlocks != 0 {
+		if vol.AllocatedBlocks < 0 {
+			vol.AllocatedBlocks = 0
+		}
+		vol.AllocatedBlocks += int64(newBlocks)
+		if vol.AllocatedBlocks < 0 {
+			vol.AllocatedBlocks = 0
+		}
+		if data, merr := marshalVolume(vol); merr == nil {
+			_, metaCommit, _ := ap.PutObjectAsync(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+			commits = append(commits, metaCommit)
+		}
+	}
+
+	m.mu.Unlock()
+	return commits, totalWritten, nil
+}
+
 // Discard marks the byte range [off, off+length) as free.
 // Only blocks fully within the range are deleted; partially covered blocks are skipped.
 // This operation is idempotent — deleting non-existent blocks is not an error.
