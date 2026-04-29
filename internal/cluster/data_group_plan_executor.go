@@ -168,3 +168,26 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 
 // compile-time check: *raft.Node must satisfy dataRaftNode.
 var _ dataRaftNode = (*raft.Node)(nil)
+
+// DataRaftNode is the exported alias of dataRaftNode for test injection.
+type DataRaftNode = dataRaftNode
+
+// NewDataGroupPlanExecutorForTest creates a DataGroupPlanExecutor with custom nodeFor.
+// Only for use in tests.
+func NewDataGroupPlanExecutorForTest(
+	dgMgr *DataGroupManager,
+	addrBook NodeAddressBook,
+	sgUpdater ShardGroupUpdater,
+	nodeFor func(*DataGroup) DataRaftNode,
+) *DataGroupPlanExecutor {
+	return &DataGroupPlanExecutor{
+		dgMgr:          dgMgr,
+		addrBook:       addrBook,
+		sgUpdater:      sgUpdater,
+		catchUpTimeout: 30 * time.Second,
+		nodeFor:        nodeFor,
+	}
+}
+
+// DGMgr exposes the DataGroupManager for test setup.
+func (e *DataGroupPlanExecutor) DGMgr() *DataGroupManager { return e.dgMgr }
