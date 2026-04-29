@@ -443,7 +443,13 @@ func (f *MetaFSM) Restore(data []byte) error {
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
 	f.bucketAssignments = newBucketAssignments
+	cb := f.onBucketAssigned
 	f.mu.Unlock()
+	if cb != nil {
+		for bucket, groupID := range newBucketAssignments {
+			cb(bucket, groupID)
+		}
+	}
 	return nil
 }
 

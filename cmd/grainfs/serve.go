@@ -353,7 +353,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	defer metaRaft.Close()
 
-	// PR-D: sync Router from FSM state after log/snapshot replay during Start().
+	// Seed Router with any bucket assignments already persisted in FSM state.
+	// Start() returns before replay finishes; onBucketAssigned fires live updates.
 	clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
 
 	// Propose initial shard group group-0 asynchronously.
