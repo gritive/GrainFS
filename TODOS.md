@@ -20,7 +20,17 @@
   - PR-A: §4.4 one-at-a-time membership change 정확 구현 (AddVoter/RemoveVoter/AddLearner/PromoteToVoter, FlatBuffers ConfChangeEntry)
   - PR-B: meta-Raft scaffold (클러스터 사실의 소스, shard_map, load_snapshot)
   - PR-C: 데이터 그룹 다중화 + bucket→group Router
-  - PR-D: autonomous rebalance (10s tick + meta-Raft leader 평가 + RebalancePlan)
+  - PR-D: autonomous rebalance (10s tick + meta-Raft leader 평가 + RebalancePlan) — 플랜 리뷰 + 교차검증 완료, must-fix 확인됨:
+    - M1: tickOnce resume 분기 (leader restart) + executingPlan atomic.Pointer + 리더십 이탈 시 cancel
+    - M2: MetaAbortPlanCmd reason:uint8 (Should-fix — PR-E로 이연 가능)
+    - ~~M3: 기각~~ — serve.go에서 이미 seed, broadcastOnce() 수정 불필요
+    - M4: CreateVectorOfSortedTables → StartEntriesVector 패턴 교체 (Snapshot() line도 포함)
+    - M5: applyAbortPlan() idempotent guard — planID 불일치 시 no-op (에러 반환 금지)
+    - T1-T3: restart-with-active-plan, ExecutePlan failure, Stop+goroutine leak 테스트
+    - P1: EvalInterval 30s + zero/stale 노드 제외 (~177 MB/day → ~44 MB/day)
+    - A1: Snapshot() FlatBuffers 빌드 순서 — lsVec을 Start 이전 완성
+    - A2: SetOnRebalancePlan callback doc "must not block" 추가
+    - A3: make fbs 선행 후 Entries() 시그니처 확인 후 decode 코드 작성
   - PR-E: EC + Multi-Raft 통합 마무리 + k6 256 group 벤치
   - 설계: `~/.gstack/projects/gritive-GrainFS/whitekid-joint-consensus-design-20260429.md`
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)

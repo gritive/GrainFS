@@ -233,6 +233,74 @@ func TestMetaRaft_ProposeBucketAssignment_CallbackFired(t *testing.T) {
 	assert.Equal(t, "group-1", cbGroup)
 }
 
+func TestMetaRaft_ProposeLoadSnapshot_CommitToFSM(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	entries := []LoadStatEntry{
+		{NodeID: "n1", DiskUsedPct: 80.0, DiskAvailBytes: 1000, UpdatedAt: time.Now()},
+		{NodeID: "n2", DiskUsedPct: 20.0, DiskAvailBytes: 9000, UpdatedAt: time.Now()},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeLoadSnapshot(ctx, entries))
+
+	snap := m.FSM().LoadSnapshot()
+	require.Len(t, snap, 2)
+	assert.InDelta(t, 80.0, snap["n1"].DiskUsedPct, 0.01)
+	assert.InDelta(t, 20.0, snap["n2"].DiskUsedPct, 0.01)
+}
+
+func TestMetaRaft_ProposeRebalancePlan_CommitToFSM(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	plan := RebalancePlan{
+		PlanID:    "plan-1",
+		GroupID:   "group-0",
+		FromNode:  "n1",
+		ToNode:    "n2",
+		CreatedAt: time.Now(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeRebalancePlan(ctx, plan))
+	assert.Equal(t, "plan-1", m.FSM().ActivePlanID())
+}
+
+func TestMetaRaft_ProposeAbortPlan_CommitToFSM(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	plan := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
+	require.NoError(t, m.ProposeRebalancePlan(ctx, plan))
+	require.Equal(t, "plan-1", m.FSM().ActivePlanID())
+
+	require.NoError(t, m.ProposeAbortPlan(ctx, "plan-1"))
+	assert.Empty(t, m.FSM().ActivePlanID())
+}
+
 func TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds(t *testing.T) {
 	dir0 := t.TempDir()
 	tr := newMetaTransportFake()
