@@ -196,3 +196,35 @@ table SetRingCmd {
 }
 
 root_type Command;
+
+// PR-B: meta-Raft FSM commands — cluster control plane
+enum MetaCmdType : uint8 {
+  NoOp          = 0,
+  AddNode        = 1,
+  RemoveNode     = 2,
+  PutShardGroup  = 3,   // shard → Raft 그룹 매핑 (PR-C)
+  SetActivePlan  = 4    // 진행 중 rebalance plan ID (PR-D)
+}
+
+table MetaNodeEntry {
+  id:string;
+  address:string;
+  role:uint8;  // 0=Voter 1=Learner
+}
+
+table MetaCmd {
+  type:MetaCmdType;
+  data:[ubyte];
+}
+
+table MetaAddNodeCmd {
+  node:MetaNodeEntry;
+}
+
+table MetaRemoveNodeCmd {
+  node_id:string;
+}
+
+table MetaStateSnapshot {
+  nodes:[MetaNodeEntry];
+}

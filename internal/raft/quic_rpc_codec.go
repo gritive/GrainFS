@@ -47,7 +47,7 @@ func encodeRPC(rpcType string, msg any) ([]byte, error) {
 
 func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 	switch rpcType {
-	case rpcTypeRequestVote:
+	case rpcTypeRequestVote, metaRPCRequestVote:
 		args := msg.(*RequestVoteArgs)
 		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		cidOff := b.CreateString(args.CandidateID)
@@ -59,7 +59,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		root := pb.RequestVoteArgsEnd(b)
 		return fbFinishRPC(b, root), nil
 
-	case rpcTypeRequestVoteReply:
+	case rpcTypeRequestVoteReply, metaRPCRequestVoteReply:
 		reply := msg.(*RequestVoteReply)
 		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		pb.RequestVoteReplyStart(b)
@@ -68,7 +68,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		root := pb.RequestVoteReplyEnd(b)
 		return fbFinishRPC(b, root), nil
 
-	case rpcTypeAppendEntries:
+	case rpcTypeAppendEntries, metaRPCAppendEntries:
 		args := msg.(*AppendEntriesArgs)
 		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 
@@ -109,7 +109,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		root := pb.AppendEntriesArgsEnd(b)
 		return fbFinishRPC(b, root), nil
 
-	case rpcTypeAppendEntriesReply:
+	case rpcTypeAppendEntriesReply, metaRPCAppendEntriesReply:
 		reply := msg.(*AppendEntriesReply)
 		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		pb.AppendEntriesReplyStart(b)
@@ -120,7 +120,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		root := pb.AppendEntriesReplyEnd(b)
 		return fbFinishRPC(b, root), nil
 
-	case rpcTypeInstallSnapshot:
+	case rpcTypeInstallSnapshot, metaRPCInstallSnapshot:
 		args := msg.(*InstallSnapshotArgs)
 		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 
@@ -162,7 +162,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		root := pb.InstallSnapshotArgsEnd(b)
 		return fbFinishRPC(b, root), nil
 
-	case rpcTypeInstallSnapshotReply:
+	case rpcTypeInstallSnapshotReply, metaRPCInstallSnapshotReply:
 		reply := msg.(*InstallSnapshotReply)
 		b := raftBuilderPool.Get().(*flatbuffers.Builder)
 		pb.InstallSnapshotReplyStart(b)
