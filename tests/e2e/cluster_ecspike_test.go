@@ -67,7 +67,6 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 			"serve",
 			"--data", dir,
 			"--port", fmt.Sprintf("%d", port),
-			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 		}

@@ -114,7 +114,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--measure-read-amp", // ← the whole point of this test
 			"--block-cache-size=0",
 			"--shard-cache-size=0", // simulator-only baseline; real cache off
-			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 			"--snapshot-interval", "0",
@@ -402,7 +401,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			// the production default precisely because real EC shards
 			// are MB-sized, not KB-sized like volume blocks.
 			"--shard-cache-size=268435456",
-			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 			"--snapshot-interval", "0",

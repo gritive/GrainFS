@@ -80,7 +80,6 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--nfs-port", "0",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 			"--snapshot-interval", "0",

@@ -34,7 +34,7 @@ func (f *failingStore) AppendEntries(entries []LogEntry) error {
 // testCluster sets up N interconnected Raft nodes for testing.
 type testCluster struct {
 	nodes []*Node
-	mu    sync.Mutex
+	mu    sync.RWMutex
 }
 
 func newTestCluster(t *testing.T, n int) *testCluster {
@@ -95,8 +95,8 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 }
 
 func (c *testCluster) nodeByID(id string) *Node {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	for _, n := range c.nodes {
 		if n.ID() == id {
 			return n
@@ -106,7 +106,11 @@ func (c *testCluster) nodeByID(id string) *Node {
 }
 
 func (c *testCluster) startAll() {
-	for _, n := range c.nodes {
+	c.mu.RLock()
+	nodes := make([]*Node, len(c.nodes))
+	copy(nodes, c.nodes)
+	c.mu.RUnlock()
+	for _, n := range nodes {
 		n.Start()
 	}
 }
@@ -118,7 +122,11 @@ func (c *testCluster) waitForLeader(timeout time.Duration) *Node {
 		case <-deadline:
 			return nil
 		default:
-			for _, n := range c.nodes {
+			c.mu.RLock()
+			nodes := make([]*Node, len(c.nodes))
+			copy(nodes, c.nodes)
+			c.mu.RUnlock()
+			for _, n := range nodes {
 				if n.State() == Leader {
 					return n
 				}
@@ -129,8 +137,12 @@ func (c *testCluster) waitForLeader(timeout time.Duration) *Node {
 }
 
 func (c *testCluster) countState(state NodeState) int {
+	c.mu.RLock()
+	nodes := make([]*Node, len(c.nodes))
+	copy(nodes, c.nodes)
+	c.mu.RUnlock()
 	count := 0
-	for _, n := range c.nodes {
+	for _, n := range nodes {
 		if n.State() == state {
 			count++
 		}

@@ -25,7 +25,6 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs-port", "0",
 		"--nfs4-port", "0",
 		"--snapshot-interval", "500ms",
 	)

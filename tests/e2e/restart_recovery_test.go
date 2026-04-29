@@ -52,7 +52,6 @@ func TestRestartRecovery_SweepsOrphanArtifacts(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs-port", "0",
 		"--nfs4-port", "0",
 	)
 	cmd.Stdout = os.Stdout
