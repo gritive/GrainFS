@@ -1375,7 +1375,7 @@ func TestTrailingLogs_ZeroRemovesAll(t *testing.T) {
 	assert.Equal(t, 0, ll)
 }
 
-func TestConfiguration_RaceSafeUnderMembershipChange(t *testing.T) {
+func TestConfiguration_ConcurrentReads(t *testing.T) {
 	cluster := newTestCluster(t, 3)
 	cluster.startAll()
 	defer cluster.stopAll()
@@ -1567,4 +1567,66 @@ func TestObserver_FailedHeartbeat(t *testing.T) {
 			}
 		}
 	}, 2*time.Second, 10*time.Millisecond, "EventFailedHeartbeat must be delivered for node2")
+}
+
+// TestObserver_StepDownLeaderIDEmpty verifies that when a leader steps down
+// due to receiving a higher-term RequestVote (no new leader known yet), the
+// EventLeaderChange has IsLeader=false and LeaderID="".
+func TestObserver_StepDownLeaderIDEmpty(t *testing.T) {
+	// Single-node leader that wins election immediately.
+	cfg := DefaultConfig("node1", []string{"node2"})
+	cfg.ElectionTimeout = 50 * time.Millisecond
+	cfg.HeartbeatTimeout = 30 * time.Millisecond
+	node := NewNode(cfg)
+	node.SetTransport(
+		func(_ string, _ *RequestVoteArgs) (*RequestVoteReply, error) {
+			return &RequestVoteReply{Term: 0, VoteGranted: true}, nil
+		},
+		func(_ string, _ *AppendEntriesArgs) (*AppendEntriesReply, error) {
+			return &AppendEntriesReply{Term: 0, Success: true}, nil
+		},
+	)
+
+	ch := make(chan Event, 16)
+	node.RegisterObserver(ch)
+	defer node.DeregisterObserver(ch)
+
+	node.Start()
+	defer node.Stop()
+	go func() {
+		for range node.ApplyCh() {
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		return node.State() == Leader
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Inject a higher-term RequestVote. HandleRequestVote clears leaderID to "".
+	node.mu.Lock()
+	higherTerm := node.currentTerm + 1
+	node.mu.Unlock()
+
+	node.HandleRequestVote(&RequestVoteArgs{
+		Term:        higherTerm,
+		CandidateID: "node2",
+		// LastLogIndex/LastLogTerm left zero; vote not required — step-down alone is enough.
+		LeaderTransfer: true, // bypass stickiness guard
+	})
+
+	// Should receive a step-down event with LeaderID == "".
+	require.Eventually(t, func() bool {
+		for {
+			select {
+			case e := <-ch:
+				if e.Type == EventLeaderChange && !e.IsLeader {
+					assert.Equal(t, "", e.LeaderID,
+						"step-down event must have empty LeaderID")
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}, 2*time.Second, 10*time.Millisecond, "step-down EventLeaderChange not received")
 }

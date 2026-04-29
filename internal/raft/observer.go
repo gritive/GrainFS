@@ -31,6 +31,9 @@ type Event struct {
 
 // RegisterObserver registers ch to receive Raft events. Delivery is
 // non-blocking: a full channel drops the event rather than blocking Raft.
+//
+// The caller owns ch. Call DeregisterObserver before closing ch; sending
+// on a closed channel will panic.
 func (n *Node) RegisterObserver(ch chan<- Event) {
 	n.observerMu.Lock()
 	defer n.observerMu.Unlock()
