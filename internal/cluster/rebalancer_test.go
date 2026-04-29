@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -130,4 +131,27 @@ func TestRebalancer_SkipsIfBalanced(t *testing.T) {
 	r := NewRebalancer("leader", mc, gm, DefaultRebalancerConfig())
 	r.tickOnce(context.Background())
 	assert.Empty(t, mc.proposedPlans)
+}
+
+func TestRebalancer_ExecutePlan_FailureAbortsplan(t *testing.T) {
+	mc := newMockMetaClient()
+	plan := RebalancePlan{
+		PlanID:    "p-fail",
+		GroupID:   "g0",
+		FromNode:  "heavy",
+		ToNode:    "light",
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, mc.fsm.applyCmd(makeRebalancePlanCmd(plan)))
+
+	mock := &MockGroupRebalancer{}
+	mock.SetError(errors.New("move failed"))
+
+	r := NewRebalancer("leader", mc, NewDataGroupManager(), DefaultRebalancerConfig())
+	r.SetGroupRebalancer(mock)
+
+	err := r.ExecutePlan(context.Background(), &plan)
+	require.Error(t, err)
+	require.Len(t, mc.abortedPlans, 1, "AbortPlan must be called on MoveReplica failure")
+	assert.Equal(t, "p-fail", mc.abortedPlans[0])
 }

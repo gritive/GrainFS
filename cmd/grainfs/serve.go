@@ -410,12 +410,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	distBackend.SetRouter(clusterRouter)
 	distBackend.SetBucketAssigner(metaRaft)
 
-	// PR-D: Rebalancer 배선 — LoadReporter와 함께 meta-Raft leader가 자율 리밸런스 수행.
+	// PR-D: Rebalancer 배선 — LoadReporter가 meta-Raft FSM에 부하 스냅샷을 커밋하고
+	// Rebalancer가 leader에서 주기적으로 평가해 RebalancePlan을 제안·실행한다.
 	rebalancerCfg := cluster.DefaultRebalancerConfig()
 	rebalancer := cluster.NewRebalancer(nodeID, metaRaft, dgMgr, rebalancerCfg)
 	rebalancer.SetGroupRebalancer(cluster.StubGroupRebalancer{})
 	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
-		execCtx, execCancel := context.WithTimeout(context.Background(), rebalancerCfg.PlanTimeout)
+		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
 		go func() {
 			defer execCancel()
 			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
@@ -424,6 +425,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}()
 	})
 	go rebalancer.Run(ctx)
+
+	// LoadReporter: leader 전용 — NodeStatsStore에서 읽어 meta-Raft FSM에 부하 통계 커밋.
+	loadReporterStore := cluster.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
+	loadReporter := cluster.NewLoadReporter(nodeID, loadReporterStore, metaRaft, cluster.DefaultLoadReportInterval)
+	go loadReporter.Run(ctx)
 
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
 	// 1-2 nodes always use N× replication.
