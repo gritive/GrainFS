@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -206,4 +207,120 @@ func TestMetaFSM_Restore_FiresOnBucketAssignedCallback(t *testing.T) {
 	require.NoError(t, f2.Restore(snap))
 
 	assert.Equal(t, map[string]string{"photos": "group-0", "videos": "group-1"}, got)
+}
+
+// --- PR-D: LoadSnapshot + RebalancePlan tests ---
+
+func makeSetLoadSnapshotCmd(t *testing.T, entries []LoadStatEntry) []byte {
+	t.Helper()
+	data, err := encodeMetaSetLoadSnapshotCmd(entries)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeSetLoadSnapshot, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeProposeRebalancePlanCmd(t *testing.T, plan RebalancePlan) []byte {
+	t.Helper()
+	data, err := encodeMetaProposeRebalancePlanCmd(plan)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeProposeRebalancePlan, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeAbortPlanCmd(t *testing.T, planID string) []byte {
+	t.Helper()
+	data, err := encodeMetaAbortPlanCmd(planID)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeAbortPlan, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func TestMetaFSM_Apply_SetLoadSnapshot(t *testing.T) {
+	f := NewMetaFSM()
+	entries := []LoadStatEntry{
+		{NodeID: "n1", DiskUsedPct: 80.0, DiskAvailBytes: 1000},
+		{NodeID: "n2", DiskUsedPct: 20.0, DiskAvailBytes: 9000},
+	}
+	require.NoError(t, f.applyCmd(makeSetLoadSnapshotCmd(t, entries)))
+
+	snap := f.LoadSnapshot()
+	require.Len(t, snap, 2)
+	assert.InDelta(t, 80.0, snap["n1"].DiskUsedPct, 0.01)
+}
+
+func TestMetaFSM_Apply_ProposeRebalancePlan(t *testing.T) {
+	f := NewMetaFSM()
+	plan := RebalancePlan{
+		PlanID:    "plan-1",
+		GroupID:   "group-0",
+		FromNode:  "n1",
+		ToNode:    "n2",
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
+	assert.Equal(t, "plan-1", f.ActivePlanID())
+}
+
+func TestMetaFSM_Apply_ProposeRebalancePlan_RejectsIfActive(t *testing.T) {
+	f := NewMetaFSM()
+	plan1 := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
+	plan2 := RebalancePlan{PlanID: "plan-2", GroupID: "g0", FromNode: "n1", ToNode: "n3", CreatedAt: time.Now()}
+	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan1)))
+	require.ErrorContains(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan2)), "active plan")
+}
+
+func TestMetaFSM_Apply_AbortPlan(t *testing.T) {
+	f := NewMetaFSM()
+	plan := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
+	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
+	require.NoError(t, f.applyCmd(makeAbortPlanCmd(t, "plan-1")))
+	assert.Empty(t, f.ActivePlanID())
+}
+
+func TestMetaFSM_Apply_AbortPlan_Idempotent(t *testing.T) {
+	f := NewMetaFSM()
+	// Aborting when no plan is active must be a no-op (not an error).
+	require.NoError(t, f.applyCmd(makeAbortPlanCmd(t, "nonexistent")))
+	assert.Empty(t, f.ActivePlanID())
+}
+
+func TestMetaFSM_OnRebalancePlan_CallbackFired(t *testing.T) {
+	f := NewMetaFSM()
+	var got *RebalancePlan
+	f.SetOnRebalancePlan(func(p *RebalancePlan) { got = p })
+
+	plan := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
+	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
+	require.NotNil(t, got)
+	assert.Equal(t, "plan-1", got.PlanID)
+}
+
+func TestMetaFSM_LoadSnapshot_Snapshot_Restore(t *testing.T) {
+	f := NewMetaFSM()
+	entries := []LoadStatEntry{{NodeID: "n1", DiskUsedPct: 75.0}}
+	require.NoError(t, f.applyCmd(makeSetLoadSnapshotCmd(t, entries)))
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(snap))
+	ls := f2.LoadSnapshot()
+	assert.InDelta(t, 75.0, ls["n1"].DiskUsedPct, 0.01)
+}
+
+func TestMetaFSM_ActivePlan_Snapshot_Restore(t *testing.T) {
+	f := NewMetaFSM()
+	plan := RebalancePlan{PlanID: "plan-99", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
+	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(snap))
+	assert.Equal(t, "plan-99", f2.ActivePlanID())
 }

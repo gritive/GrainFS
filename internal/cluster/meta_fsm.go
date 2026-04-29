@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/rs/zerolog/log"
@@ -14,11 +15,14 @@ import (
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode             = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode          = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup       = clusterpb.MetaCmdTypePutShardGroup       // PR-C
-	MetaCmdTypePutBucketAssignment = clusterpb.MetaCmdTypePutBucketAssignment // PR-D
+	MetaCmdTypeNoOp                 = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode              = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode           = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup        = clusterpb.MetaCmdTypePutShardGroup        // PR-C
+	MetaCmdTypePutBucketAssignment  = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
+	MetaCmdTypeSetLoadSnapshot      = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
+	MetaCmdTypeProposeRebalancePlan = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
+	MetaCmdTypeAbortPlan            = clusterpb.MetaCmdTypeAbortPlan            // PR-D
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -33,6 +37,24 @@ type MetaNodeEntry struct {
 type ShardGroupEntry struct {
 	ID      string
 	PeerIDs []string
+}
+
+// LoadStatEntry is the plain-Go representation of per-node load statistics.
+type LoadStatEntry struct {
+	NodeID         string
+	DiskUsedPct    float64
+	DiskAvailBytes uint64
+	RequestsPerSec float64
+	UpdatedAt      time.Time
+}
+
+// RebalancePlan describes a single voter migration between data Raft group nodes.
+type RebalancePlan struct {
+	PlanID    string
+	GroupID   string
+	FromNode  string
+	ToNode    string
+	CreatedAt time.Time
 }
 
 // MetaFSM implements raft.Snapshotter for the meta-Raft group.
@@ -54,7 +76,10 @@ type MetaFSM struct {
 	nodes             map[string]MetaNodeEntry
 	shardGroups       map[string]ShardGroupEntry // key = group ID
 	bucketAssignments map[string]string          // bucket → group_id (PR-D)
+	loadSnapshot      map[string]LoadStatEntry   // node_id → stats (PR-D)
+	activePlan        *RebalancePlan             // nil = no active plan (PR-D)
 	onBucketAssigned  func(string, string)       // protected by mu; set before Start() (PR-D)
+	onRebalancePlan   func(*RebalancePlan)       // must not block; set before Start() (PR-D)
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -62,6 +87,7 @@ func NewMetaFSM() *MetaFSM {
 		nodes:             make(map[string]MetaNodeEntry),
 		shardGroups:       make(map[string]ShardGroupEntry),
 		bucketAssignments: make(map[string]string),
+		loadSnapshot:      make(map[string]LoadStatEntry),
 	}
 }
 
@@ -98,6 +124,12 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyPutShardGroup(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutBucketAssignment:
 		return f.applyPutBucketAssignment(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeSetLoadSnapshot:
+		return f.applySetLoadSnapshot(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeProposeRebalancePlan:
+		return f.applyProposeRebalancePlan(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeAbortPlan:
+		return f.applyAbortPlan(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -257,6 +289,169 @@ func (f *MetaFSM) applyPutBucketAssignment(data []byte) error {
 	return nil
 }
 
+func (f *MetaFSM) applySetLoadSnapshot(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: SetLoadSnapshot: empty payload")
+	}
+	var (
+		c      *clusterpb.MetaSetLoadSnapshotCmd
+		decErr error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				decErr = fmt.Errorf("meta_fsm: invalid MetaSetLoadSnapshotCmd flatbuffer: %v", r)
+			}
+		}()
+		c = clusterpb.GetRootAsMetaSetLoadSnapshotCmd(data, 0)
+	}()
+	if decErr != nil {
+		return decErr
+	}
+
+	newSnap := make(map[string]LoadStatEntry, c.EntriesLength())
+	var e clusterpb.LoadStatEntry
+	for i := 0; i < c.EntriesLength(); i++ {
+		if !c.Entries(&e, i) {
+			continue
+		}
+		entry := LoadStatEntry{
+			NodeID:         string(e.NodeId()),
+			DiskUsedPct:    e.DiskUsedPct(),
+			DiskAvailBytes: e.DiskAvailBytes(),
+			RequestsPerSec: e.RequestsPerSec(),
+			UpdatedAt:      time.Unix(e.UpdatedAtUnix(), 0),
+		}
+		newSnap[entry.NodeID] = entry
+	}
+	f.mu.Lock()
+	f.loadSnapshot = newSnap
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *MetaFSM) applyProposeRebalancePlan(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: ProposeRebalancePlan: empty payload")
+	}
+	var (
+		c      *clusterpb.MetaProposeRebalancePlanCmd
+		decErr error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				decErr = fmt.Errorf("meta_fsm: invalid MetaProposeRebalancePlanCmd flatbuffer: %v", r)
+			}
+		}()
+		c = clusterpb.GetRootAsMetaProposeRebalancePlanCmd(data, 0)
+	}()
+	if decErr != nil {
+		return decErr
+	}
+
+	p := c.Plan(nil)
+	if p == nil {
+		return fmt.Errorf("meta_fsm: ProposeRebalancePlan: nil plan")
+	}
+	plan := &RebalancePlan{
+		PlanID:    string(p.PlanId()),
+		GroupID:   string(p.GroupId()),
+		FromNode:  string(p.FromNode()),
+		ToNode:    string(p.ToNode()),
+		CreatedAt: time.Unix(p.CreatedAtUnix(), 0),
+	}
+	if plan.PlanID == "" {
+		return fmt.Errorf("meta_fsm: ProposeRebalancePlan: empty plan ID")
+	}
+
+	f.mu.Lock()
+	if f.activePlan != nil {
+		f.mu.Unlock()
+		return fmt.Errorf("meta_fsm: ProposeRebalancePlan: active plan %q already exists", f.activePlan.PlanID)
+	}
+	f.activePlan = plan
+	cb := f.onRebalancePlan
+	f.mu.Unlock()
+
+	if cb != nil {
+		cb(plan)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyAbortPlan(data []byte) error {
+	if len(data) == 0 {
+		return nil // idempotent: empty payload treated as no-op
+	}
+	var (
+		c      *clusterpb.MetaAbortPlanCmd
+		decErr error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				decErr = fmt.Errorf("meta_fsm: invalid MetaAbortPlanCmd flatbuffer: %v", r)
+			}
+		}()
+		c = clusterpb.GetRootAsMetaAbortPlanCmd(data, 0)
+	}()
+	if decErr != nil {
+		return decErr
+	}
+
+	planID := string(c.PlanId())
+	f.mu.Lock()
+	if f.activePlan == nil || f.activePlan.PlanID != planID {
+		f.mu.Unlock()
+		return nil // idempotent: no-op if plan absent or ID mismatch (M5)
+	}
+	f.activePlan = nil
+	f.mu.Unlock()
+	return nil
+}
+
+// LoadSnapshot returns a copy of the current per-node load statistics.
+func (f *MetaFSM) LoadSnapshot() map[string]LoadStatEntry {
+	f.mu.RLock()
+	out := make(map[string]LoadStatEntry, len(f.loadSnapshot))
+	for k, v := range f.loadSnapshot {
+		out[k] = v
+	}
+	f.mu.RUnlock()
+	return out
+}
+
+// ActivePlanID returns the plan ID of the currently active rebalance plan, or "".
+func (f *MetaFSM) ActivePlanID() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.activePlan == nil {
+		return ""
+	}
+	return f.activePlan.PlanID
+}
+
+// ActivePlan returns a copy of the currently active rebalance plan, or nil.
+func (f *MetaFSM) ActivePlan() *RebalancePlan {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.activePlan == nil {
+		return nil
+	}
+	cp := *f.activePlan
+	return &cp
+}
+
+// SetOnRebalancePlan registers a callback fired after each ProposeRebalancePlan is applied.
+// The callback must not block; it is called with f.mu released.
+// Must be called before MetaRaft.Start() to avoid a data race with the apply loop.
+func (f *MetaFSM) SetOnRebalancePlan(fn func(*RebalancePlan)) {
+	f.mu.Lock()
+	f.onRebalancePlan = fn
+	f.mu.Unlock()
+}
+
 // SetOnBucketAssigned registers a callback fired after each PutBucketAssignment is applied.
 // Must be called before MetaRaft.Start() to avoid a data race with the apply loop.
 func (f *MetaFSM) SetOnBucketAssigned(fn func(bucket, groupID string)) {
@@ -306,11 +501,22 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for bucket, groupID := range f.bucketAssignments {
 		buckets = append(buckets, bucketKV{bucket, groupID})
 	}
+	lsEntries := make([]LoadStatEntry, 0, len(f.loadSnapshot))
+	for _, v := range f.loadSnapshot {
+		lsEntries = append(lsEntries, v)
+	}
+	var activePlanCopy *RebalancePlan
+	if f.activePlan != nil {
+		cp := *f.activePlan
+		activePlanCopy = &cp
+	}
 	f.mu.RUnlock()
 
 	b := clusterBuilderPool.Get()
 
-	// Build ShardGroupEntry offsets first (nested objects before parent Start)
+	// All nested objects must be built BEFORE MetaStateSnapshotStart (A1).
+
+	// Build ShardGroupEntry offsets
 	sgOffs := make([]flatbuffers.UOffsetT, len(shardGroups))
 	for i := len(shardGroups) - 1; i >= 0; i-- {
 		sg := shardGroups[i]
@@ -370,10 +576,49 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	baVec := b.EndVector(len(baOffs))
 
+	// Build LoadStatEntry offsets (lsVec must be complete before MetaStateSnapshotStart)
+	lsOffs := make([]flatbuffers.UOffsetT, len(lsEntries))
+	for i := len(lsEntries) - 1; i >= 0; i-- {
+		e := lsEntries[i]
+		nodeIDOff := b.CreateString(e.NodeID)
+		clusterpb.LoadStatEntryStart(b)
+		clusterpb.LoadStatEntryAddNodeId(b, nodeIDOff)
+		clusterpb.LoadStatEntryAddDiskUsedPct(b, e.DiskUsedPct)
+		clusterpb.LoadStatEntryAddDiskAvailBytes(b, e.DiskAvailBytes)
+		clusterpb.LoadStatEntryAddRequestsPerSec(b, e.RequestsPerSec)
+		clusterpb.LoadStatEntryAddUpdatedAtUnix(b, e.UpdatedAt.Unix())
+		lsOffs[i] = clusterpb.LoadStatEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartLoadSnapshotVector(b, len(lsOffs))
+	for i := len(lsOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(lsOffs[i])
+	}
+	lsVec := b.EndVector(len(lsOffs))
+
+	// Build active plan offset (activePlanOff must be complete before MetaStateSnapshotStart)
+	var activePlanOff flatbuffers.UOffsetT
+	if activePlanCopy != nil {
+		planIDOff := b.CreateString(activePlanCopy.PlanID)
+		groupIDOff := b.CreateString(activePlanCopy.GroupID)
+		fromOff := b.CreateString(activePlanCopy.FromNode)
+		toOff := b.CreateString(activePlanCopy.ToNode)
+		clusterpb.RebalancePlanStart(b)
+		clusterpb.RebalancePlanAddPlanId(b, planIDOff)
+		clusterpb.RebalancePlanAddGroupId(b, groupIDOff)
+		clusterpb.RebalancePlanAddFromNode(b, fromOff)
+		clusterpb.RebalancePlanAddToNode(b, toOff)
+		clusterpb.RebalancePlanAddCreatedAtUnix(b, activePlanCopy.CreatedAt.Unix())
+		activePlanOff = clusterpb.RebalancePlanEnd(b)
+	}
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
 	clusterpb.MetaStateSnapshotAddBucketAssignments(b, baVec)
+	clusterpb.MetaStateSnapshotAddLoadSnapshot(b, lsVec)
+	if activePlanCopy != nil {
+		clusterpb.MetaStateSnapshotAddActivePlan(b, activePlanOff)
+	}
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	return fbFinish(b, root), nil
 }
@@ -439,10 +684,40 @@ func (f *MetaFSM) Restore(data []byte) error {
 		newBucketAssignments[bucket] = string(baEntry.GroupId())
 	}
 
+	newLoadSnapshot := make(map[string]LoadStatEntry, snap.LoadSnapshotLength())
+	var lsEntry clusterpb.LoadStatEntry
+	for i := 0; i < snap.LoadSnapshotLength(); i++ {
+		if !snap.LoadSnapshot(&lsEntry, i) {
+			continue
+		}
+		e := LoadStatEntry{
+			NodeID:         string(lsEntry.NodeId()),
+			DiskUsedPct:    lsEntry.DiskUsedPct(),
+			DiskAvailBytes: lsEntry.DiskAvailBytes(),
+			RequestsPerSec: lsEntry.RequestsPerSec(),
+			UpdatedAt:      time.Unix(lsEntry.UpdatedAtUnix(), 0),
+		}
+		newLoadSnapshot[e.NodeID] = e
+	}
+
+	var newActivePlan *RebalancePlan
+	var planFB clusterpb.RebalancePlan
+	if p := snap.ActivePlan(&planFB); p != nil && len(p.PlanId()) > 0 {
+		newActivePlan = &RebalancePlan{
+			PlanID:    string(p.PlanId()),
+			GroupID:   string(p.GroupId()),
+			FromNode:  string(p.FromNode()),
+			ToNode:    string(p.ToNode()),
+			CreatedAt: time.Unix(p.CreatedAtUnix(), 0),
+		}
+	}
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
 	f.bucketAssignments = newBucketAssignments
+	f.loadSnapshot = newLoadSnapshot
+	f.activePlan = newActivePlan
 	cb := f.onBucketAssigned
 	f.mu.Unlock()
 	if cb != nil {
@@ -450,6 +725,8 @@ func (f *MetaFSM) Restore(data []byte) error {
 			cb(bucket, groupID)
 		}
 	}
+	// onRebalancePlan is intentionally NOT called here.
+	// Rebalancer handles resume on next tick by checking ActivePlan().
 	return nil
 }
 
@@ -515,6 +792,56 @@ func encodeMetaPutBucketAssignmentCmd(bucket, groupID string) ([]byte, error) {
 	clusterpb.MetaPutBucketAssignmentCmdStart(b)
 	clusterpb.MetaPutBucketAssignmentCmdAddEntry(b, entryOff)
 	return fbFinish(b, clusterpb.MetaPutBucketAssignmentCmdEnd(b)), nil
+}
+
+func encodeMetaSetLoadSnapshotCmd(entries []LoadStatEntry) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	entryOffs := make([]flatbuffers.UOffsetT, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		nodeIDOff := b.CreateString(e.NodeID)
+		clusterpb.LoadStatEntryStart(b)
+		clusterpb.LoadStatEntryAddNodeId(b, nodeIDOff)
+		clusterpb.LoadStatEntryAddDiskUsedPct(b, e.DiskUsedPct)
+		clusterpb.LoadStatEntryAddDiskAvailBytes(b, e.DiskAvailBytes)
+		clusterpb.LoadStatEntryAddRequestsPerSec(b, e.RequestsPerSec)
+		clusterpb.LoadStatEntryAddUpdatedAtUnix(b, e.UpdatedAt.Unix())
+		entryOffs[i] = clusterpb.LoadStatEntryEnd(b)
+	}
+	clusterpb.MetaSetLoadSnapshotCmdStartEntriesVector(b, len(entryOffs))
+	for i := len(entryOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(entryOffs[i])
+	}
+	entriesVec := b.EndVector(len(entryOffs))
+	clusterpb.MetaSetLoadSnapshotCmdStart(b)
+	clusterpb.MetaSetLoadSnapshotCmdAddEntries(b, entriesVec)
+	return fbFinish(b, clusterpb.MetaSetLoadSnapshotCmdEnd(b)), nil
+}
+
+func encodeMetaProposeRebalancePlanCmd(plan RebalancePlan) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	planIDOff := b.CreateString(plan.PlanID)
+	groupIDOff := b.CreateString(plan.GroupID)
+	fromOff := b.CreateString(plan.FromNode)
+	toOff := b.CreateString(plan.ToNode)
+	clusterpb.RebalancePlanStart(b)
+	clusterpb.RebalancePlanAddPlanId(b, planIDOff)
+	clusterpb.RebalancePlanAddGroupId(b, groupIDOff)
+	clusterpb.RebalancePlanAddFromNode(b, fromOff)
+	clusterpb.RebalancePlanAddToNode(b, toOff)
+	clusterpb.RebalancePlanAddCreatedAtUnix(b, plan.CreatedAt.Unix())
+	planOff := clusterpb.RebalancePlanEnd(b)
+	clusterpb.MetaProposeRebalancePlanCmdStart(b)
+	clusterpb.MetaProposeRebalancePlanCmdAddPlan(b, planOff)
+	return fbFinish(b, clusterpb.MetaProposeRebalancePlanCmdEnd(b)), nil
+}
+
+func encodeMetaAbortPlanCmd(planID string) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	planIDOff := b.CreateString(planID)
+	clusterpb.MetaAbortPlanCmdStart(b)
+	clusterpb.MetaAbortPlanCmdAddPlanId(b, planIDOff)
+	return fbFinish(b, clusterpb.MetaAbortPlanCmdEnd(b)), nil
 }
 
 func encodeMetaPutShardGroupCmd(sg ShardGroupEntry) ([]byte, error) {
