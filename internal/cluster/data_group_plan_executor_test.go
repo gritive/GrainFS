@@ -21,6 +21,7 @@ type fakeRaftNode struct {
 	addLearnerFn func(id, addr string) error
 	promoteFn    func(id string) error
 	removeFn     func(id string) error
+	transferFn   func() error
 	addedLearner [2]string // [id, addr]
 	promoted     string
 	removed      string
@@ -28,6 +29,12 @@ type fakeRaftNode struct {
 
 func (f *fakeRaftNode) IsLeader() bool         { return f.isLeader }
 func (f *fakeRaftNode) CommittedIndex() uint64 { return f.committed }
+func (f *fakeRaftNode) TransferLeadership() error {
+	if f.transferFn != nil {
+		return f.transferFn()
+	}
+	return nil
+}
 func (f *fakeRaftNode) PeerMatchIndex(peerKey string) (uint64, bool) {
 	if f.matchIndexes == nil {
 		return 0, false
@@ -92,7 +99,7 @@ func newTestExecutor(t *testing.T, fakeNode *fakeRaftNode, nodes []cluster.MetaN
 	addrBook := &fakeAddrBook{nodes: nodes}
 	sgUpdater := &fakeSGUpdater{}
 	dgMgr := cluster.NewDataGroupManager()
-	exec := cluster.NewDataGroupPlanExecutorForTest(dgMgr, addrBook, sgUpdater, func(dg *cluster.DataGroup) cluster.DataRaftNode {
+	exec := cluster.NewDataGroupPlanExecutorForTest("local-node", dgMgr, addrBook, sgUpdater, func(dg *cluster.DataGroup) cluster.DataRaftNode {
 		return fakeNode
 	})
 	return exec, sgUpdater
@@ -222,7 +229,7 @@ func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
 	addrBook := &fakeAddrBook{nodes: nodes}
 	sgUpdater := &fakeSGUpdater{err: sgErr}
 	dgMgr := cluster.NewDataGroupManager()
-	exec := cluster.NewDataGroupPlanExecutorForTest(dgMgr, addrBook, sgUpdater,
+	exec := cluster.NewDataGroupPlanExecutorForTest("", dgMgr, addrBook, sgUpdater,
 		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
 		[]string{"node-0"}, nil))
@@ -232,6 +239,32 @@ func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
 	require.ErrorIs(t, err, sgErr)
 	// Raft voter change was committed; MetaFSM is stale — RemoveVoter must have run.
 	assert.Equal(t, "10.0.0.0:9000", fakeNode.removed)
+}
+
+func TestMoveReplica_TransfersLeadershipWhenFromNodeIsLocal(t *testing.T) {
+	transferCalled := false
+	fakeNode := &fakeRaftNode{
+		isLeader:  true,
+		committed: 5,
+		transferFn: func() error {
+			transferCalled = true
+			return nil
+		},
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
+	addrBook := &fakeAddrBook{nodes: nodes}
+	sgUpdater := &fakeSGUpdater{}
+	dgMgr := cluster.NewDataGroupManager()
+	exec := cluster.NewDataGroupPlanExecutorForTest("node-0", dgMgr, addrBook, sgUpdater, func(_ *cluster.DataGroup) cluster.DataRaftNode {
+		return fakeNode
+	})
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0", []string{"node-0"}, nil))
+
+	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
+	require.ErrorIs(t, err, cluster.ErrLeadershipTransferred)
+	assert.True(t, transferCalled, "TransferLeadership must be called when fromNode is local")
 }
 
 func TestMoveReplica_ContextCancelDuringCatchup(t *testing.T) {

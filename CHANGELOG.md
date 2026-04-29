@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.6.6] — 2026-04-30
+
+### Added
+
+- **cluster**: `DataGroupPlanExecutor` leader self-removal guard — `fromNode == localNodeID` 시 `TransferLeadership()` 호출 후 `ErrLeadershipTransferred` 반환; 새 리더가 plan을 재개.
+- **cluster**: `TransferLeadership()` — `dataRaftNode` 인터페이스에 추가; serve.go에서 `nodeID` 인자로 배선.
+- **cluster**: `TestAutoRebalance_E2E_ProposeAndExecute` — Mock 제거, 실 chaos data-Raft + `DataGroupPlanExecutor` 로 업그레이드. node-1=90% 부하 불균형 → voter 마이그레이션 → MetaFSM 멤버십 검증.
+- **cluster**: `TestFullSharding_E2E` — MetaRaft 3-node + Rebalancer + DataGroupPlanExecutor + chaos data-Raft 완전 통합 e2e. node-3 AddLearner→PromoteToVoter→RemoveVoter 마이그레이션 검증.
+- **cluster**: `TestMoveReplica_TransfersLeadershipWhenFromNodeIsLocal` — 자기 제거 가드 단위 테스트.
+
+### Changed
+
+- **rebalancer**: `ExecutePlan` — `ErrLeadershipTransferred`는 INFO 로그(정상 플로우), 그 외 에러만 ERROR 로그 + `ProposeAbortPlan`.
+
 ## [0.0.6.5] — 2026-04-30
 
 ### Added
@@ -34,6 +48,7 @@
 
 - `internal/vfs/vfs.go` `grainFile.ReadAt`: `mu sync.Mutex` 추가로 동시 ReadAt에서 `rc`/`pos` 보호 (`io.ReaderAt` 계약 준수). FUSE-over-S3 도구가 발행하는 병렬 range GET 요청에 안전.
 
+>>>>>>> origin/master
 ## [0.0.6.3] — 2026-04-30
 
 ### Added

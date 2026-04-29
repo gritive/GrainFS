@@ -415,7 +415,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	rebalancerCfg := cluster.DefaultRebalancerConfig()
 	rebalancer := cluster.NewRebalancer(nodeID, metaRaft, dgMgr, rebalancerCfg)
 	rebalancer.SetGroupRebalancer(
-		cluster.NewDataGroupPlanExecutor(dgMgr, metaRaft.FSM(), metaRaft),
+		cluster.NewDataGroupPlanExecutor(nodeID, dgMgr, metaRaft.FSM(), metaRaft),
 	)
 	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
 		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)

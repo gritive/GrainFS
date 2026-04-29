@@ -2,12 +2,18 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
 )
+
+// ErrLeadershipTransferred is returned by MoveReplica when fromNode is the local
+// node. Leadership has been handed off; the caller should abort the plan and let
+// the new leader re-propose.
+var ErrLeadershipTransferred = errors.New("data_group_executor: leadership transferred to peer — retry on new leader")
 
 // NodeAddressBook resolves cluster nodeIDs to their QUIC addresses.
 // *MetaFSM implements this interface.
@@ -30,6 +36,7 @@ type dataRaftNode interface {
 	PromoteToVoter(id string) error
 	RemoveVoter(id string) error
 	PeerMatchIndex(peerKey string) (uint64, bool)
+	TransferLeadership() error
 }
 
 // DataGroupPlanExecutor implements GroupRebalancer via real Raft voter migration.
@@ -41,6 +48,7 @@ type dataRaftNode interface {
 //
 // Must be called from the data-group Raft leader only.
 type DataGroupPlanExecutor struct {
+	localNodeID    string
 	dgMgr          *DataGroupManager
 	addrBook       NodeAddressBook
 	sgUpdater      ShardGroupUpdater
@@ -50,13 +58,16 @@ type DataGroupPlanExecutor struct {
 }
 
 // NewDataGroupPlanExecutor creates a DataGroupPlanExecutor.
+// localNodeID identifies this node and enables the self-removal guard in MoveReplica.
 // addrBook is typically metaRaft.FSM(); sgUpdater is typically metaRaft.
 func NewDataGroupPlanExecutor(
+	localNodeID string,
 	dgMgr *DataGroupManager,
 	addrBook NodeAddressBook,
 	sgUpdater ShardGroupUpdater,
 ) *DataGroupPlanExecutor {
 	e := &DataGroupPlanExecutor{
+		localNodeID:    localNodeID,
 		dgMgr:          dgMgr,
 		addrBook:       addrBook,
 		sgUpdater:      sgUpdater,
@@ -87,6 +98,16 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 	node := e.nodeFor(dg)
 	if !node.IsLeader() {
 		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
+	}
+
+	// Self-removal guard: if we are the data-Raft leader and fromNode is this
+	// node, transferring ourselves out is unsafe mid-migration. Hand off
+	// leadership first; the new leader will pick up the plan on the next cycle.
+	if e.localNodeID != "" && fromNode == e.localNodeID {
+		if err := node.TransferLeadership(); err != nil {
+			return fmt.Errorf("data_group_executor: TransferLeadership before self-removal: %w", err)
+		}
+		return ErrLeadershipTransferred
 	}
 
 	// Pre-flight: fromNode must be a current voter so we don't accidentally
@@ -187,12 +208,14 @@ type DataRaftNode = dataRaftNode
 // NewDataGroupPlanExecutorForTest creates a DataGroupPlanExecutor with custom nodeFor.
 // Only for use in tests.
 func NewDataGroupPlanExecutorForTest(
+	localNodeID string,
 	dgMgr *DataGroupManager,
 	addrBook NodeAddressBook,
 	sgUpdater ShardGroupUpdater,
 	nodeFor func(*DataGroup) DataRaftNode,
 ) *DataGroupPlanExecutor {
 	return &DataGroupPlanExecutor{
+		localNodeID:    localNodeID,
 		dgMgr:          dgMgr,
 		addrBook:       addrBook,
 		sgUpdater:      sgUpdater,

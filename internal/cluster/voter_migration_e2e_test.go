@@ -43,6 +43,7 @@ func (a *raftNodeAdapter) PeerMatchIndex(pk string) (uint64, bool) {
 func (a *raftNodeAdapter) AddLearner(id, _ string) error  { return a.n.AddLearner(id, "") }
 func (a *raftNodeAdapter) PromoteToVoter(id string) error { return a.n.PromoteToVoter(id) }
 func (a *raftNodeAdapter) RemoveVoter(id string) error    { return a.n.RemoveVoter(id) }
+func (a *raftNodeAdapter) TransferLeadership() error      { return a.n.TransferLeadership() }
 
 // TestVoterMigration_ViaDataGroupPlanExecutor is an end-to-end test that
 // exercises the full DataGroupPlanExecutor.MoveReplica path with real raft.Node
@@ -79,9 +80,10 @@ func TestVoterMigration_ViaDataGroupPlanExecutor(t *testing.T) {
 	dgMgr.Add(cluster.NewDataGroupWithBackend("group-0",
 		[]string{"node-0", "node-1", "node-2"}, nil))
 
-	// Inject real raft.Node via adapter so executor uses the real Raft state machine
+	// Inject real raft.Node via adapter so executor uses the real Raft state machine.
+	// localNodeID="node-0"; fromNode="node-1" so self-removal guard does not fire.
 	exec := cluster.NewDataGroupPlanExecutorForTest(
-		dgMgr, addrBook, sgUpdater,
+		"node-0", dgMgr, addrBook, sgUpdater,
 		func(dg *cluster.DataGroup) cluster.DataRaftNode {
 			return &raftNodeAdapter{n: leader}
 		},
