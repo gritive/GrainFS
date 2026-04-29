@@ -527,7 +527,7 @@ func TestHandleInstallSnapshot_RejectsStaleTerm(t *testing.T) {
 }
 
 func TestCompactLog_UpdatesFirstIndex(t *testing.T) {
-	config := DefaultConfig("A", nil)
+	config := Config{ID: "A", TrailingLogs: 0} // TrailingLogs=0: remove all up to snapshotIndex
 	node := NewNode(config)
 
 	// Simulate log entries 1-10
@@ -1305,4 +1305,61 @@ func TestAESize_SplitsAtMaxEntries(t *testing.T) {
 
 	require.NotEmpty(t, sentCounts)
 	assert.LessOrEqual(t, sentCounts[0], 3, "first AE must send ≤ MaxEntriesPerAE entries")
+}
+
+// TestTrailingLogs_KeepsLastN verifies that CompactLog with a non-zero TrailingLogs
+// retains the last TrailingLogs entries in memory so a slightly-lagged follower
+// can catch up without InstallSnapshot.
+func TestTrailingLogs_KeepsLastN(t *testing.T) {
+	n := NewNode(Config{
+		ID:           "n1",
+		Peers:        nil,
+		TrailingLogs: 3,
+	})
+	n.mu.Lock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 1},
+		{Index: 4, Term: 1},
+		{Index: 5, Term: 1},
+	}
+	n.firstIndex = 1
+	n.mu.Unlock()
+
+	n.CompactLog(5) // snapshot at index 5, trailing=3 → keep [3,4,5]
+
+	n.mu.Lock()
+	fi := n.firstIndex
+	li := n.lastLogIdx()
+	si := n.snapshotIndex
+	n.mu.Unlock()
+
+	assert.Equal(t, uint64(3), fi, "firstIndex should be snapshotIndex+1-trailing = 3")
+	assert.Equal(t, uint64(5), li, "lastLogIdx should still be 5")
+	assert.Equal(t, uint64(5), si, "snapshotIndex should be 5")
+}
+
+// TestTrailingLogs_ZeroRemovesAll verifies that CompactLog with TrailingLogs=0
+// (default unset) removes all entries up to snapshotIndex (original behavior).
+func TestTrailingLogs_ZeroRemovesAll(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: nil, TrailingLogs: 0})
+	n.mu.Lock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 1},
+	}
+	n.firstIndex = 1
+	n.mu.Unlock()
+
+	n.CompactLog(3)
+
+	n.mu.Lock()
+	fi := n.firstIndex
+	ll := len(n.log)
+	n.mu.Unlock()
+
+	assert.Equal(t, uint64(4), fi)
+	assert.Equal(t, 0, ll)
 }

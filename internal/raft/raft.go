@@ -214,9 +214,10 @@ type Node struct {
 	firstIndex  uint64 // Raft index of log[0]; enables log compaction after snapshots
 
 	// volatile state
-	state       NodeState
-	commitIndex uint64
-	lastApplied uint64
+	state         NodeState
+	commitIndex   uint64
+	lastApplied   uint64
+	snapshotIndex uint64 // Raft index of the most recent snapshot; 0 = no snapshot yet
 
 	// leader volatile state
 	nextIndex  map[string]uint64
@@ -1317,26 +1318,50 @@ func (n *Node) hasLogEntry(raftIdx uint64) bool {
 	return si >= 0 && si < len(n.log)
 }
 
-// CompactLog removes all entries up to and including snapshotIndex from the in-memory log.
-// After compaction, firstIndex = snapshotIndex + 1.
+// CompactLog removes log entries before snapshotIndex according to TrailingLogs.
+// If TrailingLogs > 0, the last TrailingLogs entries before snapshotIndex+1 are kept
+// in memory so slightly-lagged followers can catch up without InstallSnapshot.
+// After compaction, firstIndex = max(current firstIndex, snapshotIndex+1-TrailingLogs).
 func (n *Node) CompactLog(snapshotIndex uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	si := n.toSliceIdx(snapshotIndex)
-	if si < 0 {
-		return // already compacted past this point
+	n.snapshotIndex = snapshotIndex
+
+	trailing := n.config.TrailingLogs
+	var keepFrom uint64
+	if trailing == 0 {
+		// Original behavior: remove all entries up to and including snapshotIndex.
+		keepFrom = snapshotIndex + 1
+	} else if snapshotIndex+1 > trailing {
+		keepFrom = snapshotIndex + 1 - trailing
+	} else {
+		keepFrom = n.firstIndex // TrailingLogs > snapshotIndex; keep everything
+	}
+	if keepFrom < n.firstIndex {
+		keepFrom = n.firstIndex // can't go back further than in-memory
 	}
 
-	keepFrom := si + 1
-	if keepFrom >= len(n.log) {
+	si := n.toSliceIdx(keepFrom)
+	if si < 0 {
+		// keepFrom is already past what we have; set firstIndex to snapshotIndex+1
 		n.log = nil
-	} else {
-		remaining := make([]LogEntry, len(n.log)-keepFrom)
-		copy(remaining, n.log[keepFrom:])
+		n.firstIndex = snapshotIndex + 1
+		return
+	}
+
+	if si >= len(n.log) {
+		n.log = nil
+		n.firstIndex = snapshotIndex + 1
+		return
+	}
+
+	if si > 0 {
+		remaining := make([]LogEntry, len(n.log)-si)
+		copy(remaining, n.log[si:])
 		n.log = remaining
 	}
-	n.firstIndex = snapshotIndex + 1
+	n.firstIndex = keepFrom
 }
 
 func (n *Node) isLogUpToDate(lastLogIndex, lastLogTerm uint64) bool {
