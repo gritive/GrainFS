@@ -1410,6 +1410,40 @@ func TestConfiguration_RaceSafeUnderMembershipChange(t *testing.T) {
 	}
 }
 
+func TestBootstrap_RejectsSecondCall(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store.Close()
+
+	cfg := DefaultConfig("node-0", []string{"node-1", "node-2"})
+	node := NewNode(cfg, store)
+
+	require.NoError(t, node.Bootstrap(cfg))
+	err = node.Bootstrap(cfg)
+	assert.ErrorIs(t, err, ErrAlreadyBootstrapped)
+}
+
+func TestBootstrap_AutoDetectsExistingStore(t *testing.T) {
+	dir := t.TempDir()
+
+	store1, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, store1.SaveState(1, "node-0"))
+	require.NoError(t, store1.Close())
+
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store2.Close()
+
+	cfg := DefaultConfig("node-0", []string{"node-1", "node-2"})
+	node := NewNode(cfg, store2)
+
+	err = node.Bootstrap(cfg)
+	assert.ErrorIs(t, err, ErrAlreadyBootstrapped,
+		"Bootstrap must detect pre-existing hard state (term=1)")
+}
+
 func TestObserver_DeliversLeaderChange(t *testing.T) {
 	cluster := newTestCluster(t, 3)
 	ch := make(chan Event, 24)

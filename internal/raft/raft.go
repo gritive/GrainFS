@@ -366,6 +366,32 @@ func (n *Node) SetNoOpCommand(cmd []byte) {
 	n.noOpCmd = cmd
 }
 
+// Bootstrap initializes the cluster for the first time by saving a bootstrap
+// marker to the durable store. Returns ErrAlreadyBootstrapped if the store
+// already has a bootstrap marker or existing hard state (term > 0 or votedFor set).
+//
+// Call Bootstrap once before the very first Start(). On subsequent restarts
+// Bootstrap returns ErrAlreadyBootstrapped, which callers should ignore.
+// No-op when store is nil (in-memory nodes).
+func (n *Node) Bootstrap(config Config) error {
+	if n.store == nil {
+		return nil
+	}
+	bootstrapped, err := n.store.IsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("raft: check bootstrap: %w", err)
+	}
+	if bootstrapped {
+		return ErrAlreadyBootstrapped
+	}
+	// Detect pre-PR3 nodes that already have hard state but no marker.
+	term, votedFor, err := n.store.LoadState()
+	if err == nil && (term > 0 || votedFor != "") {
+		return ErrAlreadyBootstrapped
+	}
+	return n.store.SaveBootstrapMarker()
+}
+
 // SetTransport sets the RPC callbacks for sending messages to peers.
 func (n *Node) SetTransport(
 	sendVote func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error),
