@@ -46,24 +46,24 @@ func putDispatcher(d *Dispatcher) {
 
 // NFSv4 status codes (RFC 7530)
 const (
-	NFS4_OK             = 0
-	NFS4ERR_PERM        = 1
-	NFS4ERR_NOENT       = 2
-	NFS4ERR_IO          = 5
-	NFS4ERR_NOTDIR      = 20
-	NFS4ERR_INVAL       = 22
-	NFS4ERR_FBIG        = 27
-	NFS4ERR_NOSPC       = 28
-	NFS4ERR_ROFS        = 30
-	NFS4ERR_STALE       = 70
-	NFS4ERR_BADHANDLE   = 10001
-	NFS4ERR_BAD_STATEID = 10025
-	NFS4ERR_RESOURCE    = 10018
-	NFS4ERR_SERVERFAULT = 10006
-	NFS4ERR_NOTSUPP     = 10004
+	NFS4_OK              = 0
+	NFS4ERR_PERM         = 1
+	NFS4ERR_NOENT        = 2
+	NFS4ERR_IO           = 5
+	NFS4ERR_NOTDIR       = 20
+	NFS4ERR_INVAL        = 22
+	NFS4ERR_FBIG         = 27
+	NFS4ERR_NOSPC        = 28
+	NFS4ERR_ROFS         = 30
+	NFS4ERR_STALE        = 70
+	NFS4ERR_BADHANDLE    = 10001
+	NFS4ERR_BAD_STATEID  = 10025
+	NFS4ERR_RESOURCE     = 10018
+	NFS4ERR_SERVERFAULT  = 10006
+	NFS4ERR_NOTSUPP      = 10004
 	NFS4ERR_RESTOREFH    = 10030
-	NFS4ERR_BADSESSION   = 10052
 	NFS4ERR_NOFILEHANDLE = 10020
+	NFS4ERR_BADSESSION   = 10052
 )
 
 // NFSv4 operation codes
@@ -214,7 +214,7 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 	case OpRename:
 		return d.opRename(op.Data)
 	case OpSetAttr:
-		return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult()}
+		return d.opSetAttr(op.Data)
 	case OpCommit:
 		return d.opCommit()
 	case OpRestoreFH:
@@ -856,6 +856,14 @@ func (d *Dispatcher) opRestoreFH() OpResult {
 	d.currentFH = d.savedFH
 	d.currentPath = d.savedPath
 	return OpResult{OpCode: OpRestoreFH, Status: NFS4_OK}
+}
+
+func (d *Dispatcher) opSetAttr(data []byte) OpResult {
+	if d.currentPath == "" {
+		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_NOFILEHANDLE}
+	}
+	// TODO: implement (Task 8)
+	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult()}
 }
 
 func (d *Dispatcher) opCommit() OpResult {
