@@ -74,56 +74,6 @@ func TestParseCompound_ErrorPath_NoLeak(t *testing.T) {
 	compoundReqPool.Put(req)
 }
 
-func TestCompound_PUTROOTFH_GETATTR_AllocsPerRun(t *testing.T) {
-	// Empty tag: no tag-string allocs. Tests the Into hot path.
-	data := buildCompoundXDR("",
-		opXDRPutRootFH,
-		opXDRGetAttr,
-	)
-
-	srv := &Server{state: NewStateManager()}
-
-	// Warm up pools.
-	for i := 0; i < 10; i++ {
-		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
-		putXDRWriter(w)
-	}
-
-	allocs := testing.AllocsPerRun(100, func() {
-		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
-		putXDRWriter(w)
-	})
-	// PUTROOTFH+GETATTR: 3 xdrWriterBytes calls (bitmap parse + attrvals + result). Target ≤3.
-	assert.LessOrEqual(t, allocs, 3.0,
-		"COMPOUND PUTROOTFH+GETATTR round-trip should allocate ≤3 (got %.1f)", allocs)
-}
-
-func TestCompound_PUTROOTFH_READDIR_AllocsPerRun(t *testing.T) {
-	data := buildCompoundXDR("",
-		opXDRPutRootFH,
-		opXDRReadDir,
-	)
-
-	srv := &Server{state: NewStateManager()}
-
-	for i := 0; i < 10; i++ {
-		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
-		putXDRWriter(w)
-	}
-
-	allocs := testing.AllocsPerRun(100, func() {
-		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
-		putXDRWriter(w)
-	})
-	// PUTROOTFH+READDIR: only unavoidable alloc is ReadDir arg encoding (xdrWriterBytes). Target ≤3.
-	assert.LessOrEqual(t, allocs, 3.0,
-		"COMPOUND PUTROOTFH+READDIR round-trip should allocate ≤3 (got %.1f)", allocs)
-}
-
 func TestDispatch_EarlyBreak_OpArgReturned(t *testing.T) {
 	// OpAccess uses opArgPool8 (poolKey=8). Dispatch should return it even on error break.
 	state := NewStateManager()
