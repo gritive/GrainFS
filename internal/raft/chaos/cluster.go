@@ -51,6 +51,8 @@ func NewCluster(t *testing.T, n int) *Cluster {
 			Peers:            peers,
 			ElectionTimeout:  200 * time.Millisecond,
 			HeartbeatTimeout: 50 * time.Millisecond,
+			MaxEntriesPerAE:  512,
+			TrailingLogs:     1024,
 		}
 		c.configs[id] = cfg
 
