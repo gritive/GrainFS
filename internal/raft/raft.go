@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 )
+
+var raftTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 var (
 	ErrNotLeader           = errors.New("not the leader")
@@ -76,6 +79,7 @@ type proposal struct {
 	entryType LogEntryType // 0 = Command (default)
 	doneCh    chan proposalResult
 	ctx       context.Context
+	submitAt  time.Time
 }
 
 // proposalResult is the outcome delivered to ProposeWait callers.
@@ -458,7 +462,7 @@ func (n *Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) 
 
 	doneCh := make(chan proposalResult, 1)
 	select {
-	case n.proposalCh <- proposal{command: command, doneCh: doneCh, ctx: ctx}:
+	case n.proposalCh <- proposal{command: command, doneCh: doneCh, ctx: ctx, submitAt: time.Now()}:
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-n.stopCh:
@@ -1756,6 +1760,7 @@ func (n *Node) flushBatch(pending []proposal) {
 		return
 	}
 
+	flushStart := time.Now()
 	entries := make([]LogEntry, len(pending))
 	base := n.lastLogIdx() + 1
 	for i, p := range pending {
@@ -1767,7 +1772,9 @@ func (n *Node) flushBatch(pending []proposal) {
 		}
 	}
 	n.log = append(n.log, entries...)
+	persistStart := time.Now()
 	n.persistLogEntries(entries)
+	persistDur := time.Since(persistStart)
 	n.matchIndex[n.id] = entries[len(entries)-1].Index
 
 	// §4.4: apply ConfChange entries immediately on append (leader path).
@@ -1797,6 +1804,13 @@ func (n *Node) flushBatch(pending []proposal) {
 		go func(p proposal, ch chan error, entry LogEntry) {
 			select {
 			case err := <-ch:
+				if raftTraceEnabled && !p.submitAt.IsZero() {
+					log.Debug().
+						Dur("batch_wait", flushStart.Sub(p.submitAt)).
+						Dur("persist_log", persistDur).
+						Dur("flush_total", time.Since(flushStart)).
+						Msg("raftFlush trace")
+				}
 				if err != nil {
 					select {
 					case p.doneCh <- proposalResult{err: err}:

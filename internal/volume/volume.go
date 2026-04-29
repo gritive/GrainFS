@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
@@ -81,6 +82,7 @@ type Manager struct {
 	dedup    dedup.DedupIndex            // nil = dedup 비활성화
 	blocks   *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
 	opts     ManagerOptions
+	blkPool  *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
 }
 
 // NewManager creates a new volume manager.
@@ -97,6 +99,24 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 		dedup:    opts.DedupIndex,
 		blocks:   opts.BlockCache,
 		opts:     opts,
+		blkPool:  pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
+	}
+}
+
+// getBlkBuf returns a zeroed block buffer from the pool, or allocates one for non-default sizes.
+func (m *Manager) getBlkBuf(blockSize int) []byte {
+	if blockSize == DefaultBlockSize {
+		b := m.blkPool.Get()
+		clear(b)
+		return b
+	}
+	return make([]byte, blockSize)
+}
+
+// putBlkBuf returns a block buffer to the pool (only for default-size buffers).
+func (m *Manager) putBlkBuf(b []byte) {
+	if len(b) == DefaultBlockSize {
+		m.blkPool.Put(b)
 	}
 }
 
@@ -263,33 +283,37 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 		// Read the block. Order: simulator (always-on metering),
 		// real cache (skip backend on hit), backend fallback.
 		readamp.RecordVolumeBlock(phyKey)
-		blkData := make([]byte, vol.BlockSize)
+
+		canRead := int(bs - blkOff)
+		remaining := len(p) - totalRead
+		if canRead > remaining {
+			canRead = remaining
+		}
+		if off+int64(totalRead)+int64(canRead) > vol.Size {
+			canRead = int(vol.Size - pos)
+		}
+
 		if m.blocks != nil {
 			if cached, ok := m.blocks.Get(phyKey); ok {
-				copy(blkData, cached)
-				if len(cached) < vol.BlockSize {
-					clear(blkData[len(cached):])
+				// Cache hit: copy directly without an intermediate buffer.
+				src := cached[blkOff:]
+				if len(src) < canRead {
+					// Short cached block (partial last block) — copy available, zero the rest.
+					copy(p[totalRead:totalRead+len(src)], src)
+					clear(p[totalRead+len(src) : totalRead+canRead])
+				} else {
+					copy(p[totalRead:totalRead+canRead], src[:canRead])
 				}
-				canRead := int(bs - blkOff)
-				remaining := len(p) - totalRead
-				if canRead > remaining {
-					canRead = remaining
-				}
-				endPos := off + int64(totalRead) + int64(canRead)
-				if endPos > vol.Size {
-					canRead = int(vol.Size - pos)
-				}
-				copy(p[totalRead:totalRead+canRead], blkData[blkOff:blkOff+int64(canRead)])
 				totalRead += canRead
 				continue
 			}
 		}
+
+		// Cache miss: use pool buffer, then copy to output.
+		blkData := m.getBlkBuf(vol.BlockSize)
 		rc, _, err := m.backend.GetObject(volumeBucketName, phyKey)
 		if err != nil {
-			// Block doesn't exist (or never written with dedup) = zeros.
-			// We do NOT cache this — keeping zero entries pollutes the
-			// cache with phantom blocks for sparse volumes.
-			clear(blkData)
+			// Block doesn't exist = zeros; blkData is already cleared by getBlkBuf.
 		} else {
 			n, _ := io.ReadFull(rc, blkData)
 			rc.Close()
@@ -297,22 +321,11 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 				clear(blkData[n:])
 			}
 			if m.blocks != nil {
-				m.blocks.Put(phyKey, blkData)
+				m.blocks.Put(phyKey, blkData) // Put copies; blkData can be pooled after.
 			}
 		}
-
-		// Copy from block to output
-		canRead := int(bs - blkOff)
-		remaining := len(p) - totalRead
-		if canRead > remaining {
-			canRead = remaining
-		}
-		endPos := off + int64(totalRead) + int64(canRead)
-		if endPos > vol.Size {
-			canRead = int(vol.Size - pos)
-		}
-
-		copy(p[totalRead:totalRead+canRead], blkData[blkOff:blkOff+int64(canRead)])
+		copy(p[totalRead:totalRead+canRead], blkData[blkOff:int(blkOff)+canRead])
+		m.putBlkBuf(blkData)
 		totalRead += canRead
 	}
 
@@ -397,15 +410,35 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		blkNum := pos / bs
 		blkOff := pos % bs
 
+		// Compute write range first to detect full-block overwrite before reading.
+		canWrite := int(bs - blkOff)
+		remaining := len(p) - totalWritten
+		if canWrite > remaining {
+			canWrite = remaining
+		}
+		endPos := off + int64(totalWritten) + int64(canWrite)
+		if endPos > vol.Size {
+			canWrite = int(vol.Size - pos)
+		}
+
+		// Full-block overwrite fast path: skip GetObject entirely.
+		// Only safe for fallback path (non-dedup, non-CoW); dedup and CoW
+		// paths need old content for content-addressing or refcounting.
+		isFullBlock := m.dedup == nil && !useCow && blkOff == 0 && canWrite == int(bs)
+
 		// Read existing block (or zeros); isNew tracks if this is a new allocation.
 		// Dedup mode: canonical key lives in BadgerDB — positional key doesn't exist in the
 		// backend. Must read via ReadBlock to preserve bytes outside the write window.
-		blkData := make([]byte, vol.BlockSize)
+		var blkData []byte
+		if !isFullBlock {
+			blkData = m.getBlkBuf(vol.BlockSize)
+		}
 		var isNew bool
 		var oldKey string // only populated in non-dedup paths
 		if m.dedup != nil {
 			canonical, found, rErr := m.dedup.ReadBlock(name, blkNum)
 			if rErr != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("read dedup block %d: %w", blkNum, rErr)
 			}
 			if found {
@@ -423,11 +456,17 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 		} else {
 			oldKey = physicalKey(name, blkNum, liveMap)
-			rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
-			isNew = readErr != nil
-			if !isNew {
-				io.ReadFull(rc, blkData)
-				rc.Close()
+			if isFullBlock {
+				// Existence check only — skip the data read.
+				_, headErr := m.backend.HeadObject(volumeBucketName, oldKey)
+				isNew = headErr != nil
+			} else {
+				rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
+				isNew = readErr != nil
+				if !isNew {
+					io.ReadFull(rc, blkData)
+					rc.Close()
+				}
 			}
 			// In-place / CoW path: oldKey is the previous version of
 			// this block. Either we're about to overwrite it (direct)
@@ -435,18 +474,9 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			invalidations = append(invalidations, oldKey)
 		}
 
-		// Write into the block buffer
-		canWrite := int(bs - blkOff)
-		remaining := len(p) - totalWritten
-		if canWrite > remaining {
-			canWrite = remaining
+		if !isFullBlock {
+			copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
 		}
-		endPos := off + int64(totalWritten) + int64(canWrite)
-		if endPos > vol.Size {
-			canWrite = int(vol.Size - pos)
-		}
-
-		copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
 
 		// Determine the target key and write the block.
 		// With dedup: content-addressed UUID keys stored in BadgerDB; no live_map.
@@ -458,12 +488,14 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			hash := sha256.Sum256(blkData)
 			res, dedupErr := m.dedup.WriteBlock(name, blkNum, hash, newKey)
 			if dedupErr != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("dedup block %d: %w", blkNum, dedupErr)
 			}
 			targetKey = res.Canonical
 			if res.IsNew {
 				if _, err := m.backend.PutObject(volumeBucketName, targetKey,
 					bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+					m.putBlkBuf(blkData)
 					return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 				}
 			}
@@ -478,6 +510,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			targetKey = cowBlockKey(name, blkNum)
 			if _, err := m.backend.PutObject(volumeBucketName, targetKey,
 				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 			}
 			// CoW: delete old physical object (PackedBackend decrements ref; deletes at ref=0)
@@ -490,8 +523,14 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 		} else {
 			targetKey = blockKey(name, blkNum)
-			if _, err := m.backend.PutObject(volumeBucketName, targetKey,
-				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
+			var src io.Reader
+			if isFullBlock {
+				src = bytes.NewReader(p[totalWritten : totalWritten+canWrite])
+			} else {
+				src = bytes.NewReader(blkData)
+			}
+			if _, err := m.backend.PutObject(volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
+				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 			}
 		}
@@ -507,6 +546,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		if targetKey != "" {
 			invalidations = append(invalidations, targetKey)
 		}
+		m.putBlkBuf(blkData) // no-op when blkData is nil (isFullBlock path)
 		totalWritten += canWrite
 	}
 
@@ -538,6 +578,138 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 	}
 
 	return totalWritten, nil
+}
+
+// asyncPutter is an optional interface for write-back NBD.
+// Backends that implement it split the write into a fast local path and a
+// deferred Raft commit. NBD accumulates commitFns and drains them on flush.
+type asyncPutter interface {
+	PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error)
+}
+
+// WriteAtDeferred is the write-back variant of WriteAt.
+// It writes data to local storage immediately and returns Raft commit functions
+// that the caller must invoke (concurrently) on NBD_CMD_FLUSH.
+// Falls back to synchronous WriteAt when the backend doesn't implement asyncPutter
+// or when dedup/CoW is active.
+func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() error, int, error) {
+	ap, ok := m.backend.(asyncPutter)
+	if !ok {
+		n, err := m.WriteAt(name, p, off)
+		return nil, n, err
+	}
+
+	m.mu.Lock()
+
+	vol, err := m.getVolUnlocked(name)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, 0, err
+	}
+	if off < 0 || off >= vol.Size {
+		m.mu.Unlock()
+		return nil, 0, fmt.Errorf("offset %d out of range [0, %d)", off, vol.Size)
+	}
+
+	// Async path only supports the non-dedup, non-CoW fallback.
+	if m.dedup != nil || vol.SnapshotCount > 0 || m.opts.PoolQuota > 0 {
+		m.mu.Unlock()
+		n, err := m.WriteAt(name, p, off)
+		return nil, n, err
+	}
+
+	liveMap, err := m.getLiveMapUnlocked(name)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, 0, fmt.Errorf("load live_map: %w", err)
+	}
+
+	bs := int64(vol.BlockSize)
+	var commits []func() error
+	var invalidations []string
+	totalWritten := 0
+	newBlocks := 0
+
+	for totalWritten < len(p) && off+int64(totalWritten) < vol.Size {
+		pos := off + int64(totalWritten)
+		blkNum := pos / bs
+		blkOff := pos % bs
+
+		canWrite := int(bs - blkOff)
+		if rem := len(p) - totalWritten; canWrite > rem {
+			canWrite = rem
+		}
+		if end := off + int64(totalWritten) + int64(canWrite); end > vol.Size {
+			canWrite = int(vol.Size - pos)
+		}
+
+		isFullBlock := blkOff == 0 && canWrite == int(bs)
+		oldKey := physicalKey(name, blkNum, liveMap)
+		targetKey := blockKey(name, blkNum)
+		invalidations = append(invalidations, oldKey, targetKey)
+
+		var blkSrc io.Reader
+		if isFullBlock {
+			_, headErr := m.backend.HeadObject(volumeBucketName, oldKey)
+			if headErr != nil {
+				newBlocks++
+			}
+			blkSrc = bytes.NewReader(p[totalWritten : totalWritten+canWrite])
+		} else {
+			blkData := m.getBlkBuf(vol.BlockSize)
+			rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
+			if readErr != nil {
+				newBlocks++
+			} else {
+				io.ReadFull(rc, blkData) //nolint:errcheck
+				rc.Close()
+			}
+			copy(blkData[blkOff:blkOff+int64(canWrite)], p[totalWritten:totalWritten+canWrite])
+			// PutObjectAsync reads data via io.ReadAll before returning, so blkData
+			// is safe to return to the pool immediately after.
+			blkSrc = bytes.NewReader(blkData)
+			_, commitFn, putErr := ap.PutObjectAsync(volumeBucketName, targetKey, blkSrc, "application/octet-stream")
+			m.putBlkBuf(blkData)
+			if putErr != nil {
+				m.mu.Unlock()
+				return nil, totalWritten, fmt.Errorf("write block %d: %w", blkNum, putErr)
+			}
+			commits = append(commits, commitFn)
+			totalWritten += canWrite
+			continue
+		}
+
+		_, commitFn, putErr := ap.PutObjectAsync(volumeBucketName, targetKey, blkSrc, "application/octet-stream")
+		if putErr != nil {
+			m.mu.Unlock()
+			return nil, totalWritten, fmt.Errorf("write block %d: %w", blkNum, putErr)
+		}
+		commits = append(commits, commitFn)
+		totalWritten += canWrite
+	}
+
+	if m.blocks != nil {
+		for _, k := range invalidations {
+			m.blocks.Invalidate(k)
+		}
+	}
+
+	if newBlocks != 0 {
+		if vol.AllocatedBlocks < 0 {
+			vol.AllocatedBlocks = 0
+		}
+		vol.AllocatedBlocks += int64(newBlocks)
+		if vol.AllocatedBlocks < 0 {
+			vol.AllocatedBlocks = 0
+		}
+		if data, merr := marshalVolume(vol); merr == nil {
+			_, metaCommit, _ := ap.PutObjectAsync(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+			commits = append(commits, metaCommit)
+		}
+	}
+
+	m.mu.Unlock()
+	return commits, totalWritten, nil
 }
 
 // Discard marks the byte range [off, off+length) as free.

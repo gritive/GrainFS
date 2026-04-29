@@ -127,6 +127,57 @@ make bench
 
 S3 PUT/GET/DELETE throughput과 P50/P99 지연을 측정한다. 결과는 `benchmarks/report.json`에 저장.
 
+### FUSE-over-S3 마운트 (rclone/s3fs/goofys)
+
+GrainFS는 **표준 S3-compatible** API를 제공하므로, 별도 클라이언트 바이너리 없이 기존 FUSE-over-S3 도구로 마운트할 수 있다. 클라이언트 머신에 GrainFS 바이너리 설치는 불필요하다.
+
+**예: rclone (Linux 클라이언트, macOS 서버)**
+
+```bash
+# 1. (서버) GrainFS 시작 — auth 필수 (rclone v4 sig 사용)
+grainfs serve --port 9000 --access-key <ak> --secret-key <sk>
+
+# 2. (클라이언트) rclone config 작성: ~/.config/rclone/rclone.conf
+[grainfs]
+type = s3
+provider = Other
+access_key_id = <ak>
+secret_access_key = <sk>
+endpoint = http://<server-host>:9000
+region = us-east-1
+force_path_style = true
+
+# 3. (클라이언트) 버킷 생성 + 마운트
+rclone mkdir grainfs:mybucket
+rclone mount grainfs:mybucket /mnt/grainfs \
+    --vfs-cache-mode writes --dir-cache-time 1s --allow-other --daemon
+```
+
+**지원/미지원 연산** (S3 시맨틱의 한계)
+
+| 연산                 | 지원 | 비고                                                |
+| -------------------- | ---- | --------------------------------------------------- |
+| read / write         | ✅   | rclone `--vfs-cache-mode writes`로 close-to-open    |
+| mkdir / ls / rm      | ✅   | S3 prefix 기반 (실제 디렉토리 inode 없음)           |
+| rename (mv)          | ⚠️   | CopyObject + DeleteObject — **non-atomic**          |
+| chmod / chown        | ❌   | S3는 POSIX permissions 미지원                       |
+| atomic create+rename | ❌   | rsync `--inplace` 필요한 워크로드는 NFSv4 권장      |
+| file locking         | ❌   | DB / git 인덱스 동시쓰기 워크로드는 NFSv4 권장      |
+
+엄격한 POSIX 시맨틱이 필요하면 NFSv4를 사용한다 (`mount -t nfs4 host:/ /mnt/x`).
+
+검증: `make test-fuse-s3-colima` (macOS 호스트 + Colima Linux VM, rclone 마운트로 핵심 연산 round-trip 테스트).
+
+**처리량 벤치** (`make bench-fuse-s3-colima`, 64 MiB 페이로드, Apple M3, Colima loopback, 3회 평균)
+
+| 경로                       | Write       | Read        |
+| -------------------------- | ----------- | ----------- |
+| Direct S3 (rclone copyto)  | 96.8 MB/s   | 108.0 MB/s  |
+| FUSE mount (rclone mount)  | 106.7 MB/s  | 107.3 MB/s  |
+| FUSE 오버헤드              | ≈ 0%        | ≈ 0%        |
+
+`--vfs-cache-mode off`로 close(2)가 PUT 완료까지 블록되도록 설정 → 동기 처리량 측정. `--vfs-cache-mode writes/full`을 쓰면 close 후 백그라운드 업로드 + 로컬 캐시 효과로 체감 처리량은 더 높지만, 정확한 S3 round-trip 측정에는 부적절.
+
 ### NBD 테스트 (macOS)
 
 macOS에서 NBD는 커널 모듈이 필요하므로 Docker Desktop 대신 **colima**를 사용한다. Docker Desktop의 LinuxKit VM에는 NBD 모듈이 없다.

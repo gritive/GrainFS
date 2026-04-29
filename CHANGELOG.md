@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.0.6.6] — 2026-04-30
+
+### Added
+
+- **cluster**: `DataGroupPlanExecutor` leader self-removal guard — `fromNode == localNodeID` 시 `TransferLeadership()` 호출 후 `ErrLeadershipTransferred` 반환; 새 리더가 plan을 재개.
+- **cluster**: `TransferLeadership()` — `dataRaftNode` 인터페이스에 추가; serve.go에서 `nodeID` 인자로 배선.
+- **cluster**: `TestAutoRebalance_E2E_ProposeAndExecute` — Mock 제거, 실 chaos data-Raft + `DataGroupPlanExecutor` 로 업그레이드. node-1=90% 부하 불균형 → voter 마이그레이션 → MetaFSM 멤버십 검증.
+- **cluster**: `TestFullSharding_E2E` — MetaRaft 3-node + Rebalancer + DataGroupPlanExecutor + chaos data-Raft 완전 통합 e2e. node-3 AddLearner→PromoteToVoter→RemoveVoter 마이그레이션 검증.
+- **cluster**: `TestMoveReplica_TransfersLeadershipWhenFromNodeIsLocal` — 자기 제거 가드 단위 테스트.
+
+### Changed
+
+- **rebalancer**: `ExecutePlan` — `ErrLeadershipTransferred`는 INFO 로그(정상 플로우), 그 외 에러만 ERROR 로그 + `ProposeAbortPlan`.
+
+## [0.0.6.5] — 2026-04-30
+
+### Added
+
+- **NBD write-back async path** (`internal/volume/volume.go`) — `WriteAtDeferred()` splits local disk write from Raft commit. NBD write handler acknowledges after local write; Raft commits are deferred and batched on `NBD_CMD_FLUSH`, enabling Raft batcher coalescing (~10× fewer fdatasync calls).
+- **NBD per-key flush serialization** (`internal/nbd/nbd.go`) — `flushPending()` groups deferred commits by block offset: concurrent across distinct blocks (maximizes Raft batcher throughput), sequential within each block (preserves per-block write ordering). Fixes `--end_fsync=1` flush tail latency: 34 s → 5 s (×6.8).
+- **`PutObjectAsync`** across backend layers — `DistributedBackend`, `CachedBackend`, `WALBackend` each implement the write-back interface. WAL entries are appended inside `commitFn` so PITR records only committed objects.
+- **`GRAINFS_VOLUME_TRACE=1`** — per-stage latency logging in `PutObject` (create_temp, copy_close, rename, badger_update), `HeadObject`, `Raft flushBatch` — diagnostic instrumentation for NBD hot path.
+- `internal/nbd/nbd_bench_test.go` — in-process NBD benchmarks via `net.Pipe()`: `BenchmarkNBD_Read4K`, `BenchmarkNBD_Read64K`, `BenchmarkNBD_Write4K`, `BenchmarkNBD_Write64K`.
+- `internal/nbd/nbd_test.go` — `TestNBDFlushWriteOrdering`: write same block twice then flush; asserts second write wins (guards per-key ordering regression).
+- `tests/nbd_colima/` — Colima Linux VM end-to-end NBD tests (macOS server → nbd-client). `make test-nbd-colima`.
+- `benchmarks/bench_nbd_profile.sh` — fio workload suite with pprof capture. `make bench-nbd`.
+- `benchmarks/bench_nbd_trace.sh` — trace-mode benchmark for per-stage latency breakdown.
+
+### Performance
+
+- NBD `--end_fsync=1` (worst-case batch flush): **34 s → 5 s** (×6.8 improvement)
+- NBD 4 KiB sequential write throughput: ~450 MB/s (net.Pipe baseline)
+- Raft commit coalescing: from per-write proposal to batched-per-flush proposal
+
+## [0.0.6.4] — 2026-04-30
+
+### Added
+
+- **FUSE-over-S3 호환성 검증** — GrainFS는 별도 FUSE 클라이언트 바이너리 없이 표준 S3-compatible 도구(rclone/s3fs/goofys)로 마운트할 수 있음을 e2e + 처리량 벤치로 보증. 클라이언트 머신에 grainfs 설치 불필요.
+- `tests/fuse_s3_colima/` — Colima Linux VM에서 macOS 호스트 GrainFS S3 endpoint를 rclone mount로 마운트해 검증하는 e2e 4건 (smoke / directories / rename / cross-protocol). `make test-fuse-s3-colima`.
+- `tests/fuse_s3_colima/bench_test.go` — Direct S3(rclone copyto) vs FUSE mount(rclone mount) 처리량 비교 벤치. 64 MiB · `--vfs-cache-mode off` · 3회 평균: Direct PUT 96.8 MB/s · Direct GET 108.0 MB/s · FUSE Write 106.7 MB/s · FUSE Read 107.3 MB/s. **FUSE 오버헤드 ≈ 0%**. `make bench-fuse-s3-colima`.
+- README "FUSE-over-S3 마운트" 섹션 — rclone 설정 가이드 + 지원/미지원 연산표(rename ⚠️ non-atomic, chmod ❌, file locking ❌) + 처리량 결과.
+- `internal/storage/errors.go`: sentinel errors `ErrECDegraded`, `ErrNoSpace`, `ErrQuotaExceeded`, `ErrInvalidVersion` — 향후 backend별 에러 분류용.
+
+### Changed
+
+- `internal/vfs/vfs.go` `grainFile.ReadAt`: `mu sync.Mutex` 추가로 동시 ReadAt에서 `rc`/`pos` 보호 (`io.ReaderAt` 계약 준수). FUSE-over-S3 도구가 발행하는 병렬 range GET 요청에 안전.
+
+>>>>>>> origin/master
 ## [0.0.6.3] — 2026-04-30
 
 ### Added

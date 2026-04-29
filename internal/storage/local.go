@@ -14,10 +14,15 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/pool"
 )
+
+// localTraceEnabled activates per-stage PutObject/HeadObject latency logging.
+// Enable with GRAINFS_VOLUME_TRACE=1.
+var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 var md5Pool = pool.New(func() hash.Hash { return md5.New() })
 
@@ -153,6 +158,12 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
 
+	var tStart, tStage time.Time
+	if localTraceEnabled {
+		tStart = time.Now()
+		tStage = tStart
+	}
+
 	// Write to a temp file in the same directory, then atomically rename onto
 	// objPath. This prevents readers from observing a truncated file
 	// mid-write (os.Create truncates on open).
@@ -163,6 +174,11 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 	tmpPath := tmp.Name()
 	cleanupTmp := func() {
 		_ = os.Remove(tmpPath)
+	}
+
+	if localTraceEnabled {
+		log.Debug().Dur("create_temp", time.Since(tStage)).Str("bucket", bucket).Msg("PutObject trace")
+		tStage = time.Now()
 	}
 
 	var (
@@ -192,11 +208,21 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 		md5Pool.Put(h)
 	}
 
+	if localTraceEnabled {
+		log.Debug().Dur("copy_close", time.Since(tStage)).Int64("bytes", size).Msg("PutObject trace")
+		tStage = time.Now()
+	}
+
 	if err := os.Rename(tmpPath, objPath); err != nil {
 		cleanupTmp()
 		return nil, fmt.Errorf("rename object: %w", err)
 	}
 	now := time.Now().Unix()
+
+	if localTraceEnabled {
+		log.Debug().Dur("rename", time.Since(tStage)).Msg("PutObject trace")
+		tStage = time.Now()
+	}
 
 	obj := &Object{
 		Key:          key,
@@ -216,6 +242,10 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if localTraceEnabled {
+		log.Debug().Dur("badger_update", time.Since(tStage)).Dur("total", time.Since(tStart)).Msg("PutObject trace")
 	}
 
 	return obj, nil
@@ -246,6 +276,11 @@ func (b *LocalBackend) HeadObject(bucket, key string) (*Object, error) {
 		return nil, err
 	}
 
+	var tHead time.Time
+	if localTraceEnabled {
+		tHead = time.Now()
+	}
+
 	var obj Object
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(b.objectMetaKey(bucket, key))
@@ -264,6 +299,11 @@ func (b *LocalBackend) HeadObject(bucket, key string) (*Object, error) {
 			return nil
 		})
 	})
+
+	if localTraceEnabled {
+		log.Debug().Dur("badger_view", time.Since(tHead)).Str("bucket", bucket).Msg("HeadObject trace")
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -326,86 +366,34 @@ func (b *LocalBackend) Truncate(bucket, key string, size int64) error {
 	})
 }
 
-// WriteAt atomically patches the range [offset, offset+len(data)) of the stored object
-// without reading the full file into memory. The file grows if offset+len(data) exceeds
-// the current size. Existing bytes outside the written range are preserved.
+// WriteAt patches [offset, offset+len(data)) of the stored object using pwrite(2).
+// The file is created if it does not exist; it is extended if the write exceeds the
+// current size. Bytes outside the written range are preserved, and writes before the
+// first byte produce a sparse hole filled with zeros.
 //
-// Unlike the RMW pattern (GetObject → io.ReadAll → modify → PutObject) this streams
-// prefix and suffix bytes directly via io.Copy, eliminating the heap allocation.
+// This is O(len(data)) — no full-file copy per write.
 func (b *LocalBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error) {
 	objPath := b.objectPath(bucket, key)
-	objDir := filepath.Dir(objPath)
-	if err := os.MkdirAll(objDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create dir: %w", err)
 	}
 
-	end := offset + uint64(len(data))
-
-	tmp, err := os.CreateTemp(objDir, ".tmp-*")
+	// O_CREATE|O_RDWR: create if new, open in-place if existing.
+	f, err := os.OpenFile(objPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("create temp: %w", err)
+		return nil, fmt.Errorf("open: %w", err)
 	}
-	tmpPath := tmp.Name()
-	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+	defer f.Close()
 
-	// Open existing file (may not exist for new files).
-	var existingSize uint64
-	src, srcErr := os.Open(objPath)
-	if srcErr == nil {
-		if info, err2 := src.Stat(); err2 == nil {
-			existingSize = uint64(info.Size())
-		}
+	if _, err := f.WriteAt(data, int64(offset)); err != nil {
+		return nil, fmt.Errorf("pwrite: %w", err)
 	}
 
-	// 1. Copy [0, offset) — no allocation, kernel-buffered I/O.
-	if offset > 0 {
-		if srcErr == nil {
-			if _, err2 := io.CopyN(tmp, src, int64(offset)); err2 != nil && err2 != io.EOF {
-				cleanup()
-				src.Close()
-				return nil, fmt.Errorf("copy prefix: %w", err2)
-			}
-		} else {
-			// No existing file: seek creates a sparse hole (no zero allocation).
-			if _, err2 := tmp.Seek(int64(offset), io.SeekStart); err2 != nil {
-				cleanup()
-				return nil, fmt.Errorf("seek: %w", err2)
-			}
-		}
-	}
-
-	// 2. Write new data.
-	if _, err2 := tmp.Write(data); err2 != nil {
-		cleanup()
-		if srcErr == nil {
-			src.Close()
-		}
-		return nil, fmt.Errorf("write data: %w", err2)
-	}
-
-	// 3. Copy [end, existingSize) if existing file was larger — preserves tail bytes.
-	if srcErr == nil {
-		if existingSize > end {
-			if _, err2 := src.Seek(int64(end), io.SeekStart); err2 == nil {
-				io.Copy(tmp, src) //nolint:errcheck — best effort; tmp is local
-			}
-		}
-		src.Close()
-	}
-
-	tmp.Close()
-
-	info, err := os.Stat(tmpPath)
+	fi, err := f.Stat()
 	if err != nil {
-		os.Remove(tmpPath)
-		return nil, fmt.Errorf("stat temp: %w", err)
+		return nil, fmt.Errorf("stat: %w", err)
 	}
-	size := info.Size()
-
-	if err := os.Rename(tmpPath, objPath); err != nil {
-		os.Remove(tmpPath)
-		return nil, fmt.Errorf("rename: %w", err)
-	}
+	size := fi.Size()
 
 	now := time.Now().Unix()
 	obj := &Object{
