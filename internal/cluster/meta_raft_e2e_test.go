@@ -101,3 +101,28 @@ func TestMetaRaft_ThreeNodeBootstrap_E2E(t *testing.T) {
 	}
 	assert.Equal(t, 1, leaderCount, "exactly one leader must exist in the group")
 }
+
+func TestMetaRaft_ProposeShardGroup_E2E(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	sg := ShardGroupEntry{
+		ID:      "group-0",
+		PeerIDs: []string{"node-0"},
+	}
+	require.NoError(t, m.ProposeShardGroup(ctx, sg))
+
+	groups := m.fsm.ShardGroups()
+	require.Len(t, groups, 1)
+	assert.Equal(t, "group-0", groups[0].ID)
+	assert.Equal(t, []string{"node-0"}, groups[0].PeerIDs)
+}

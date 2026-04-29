@@ -158,6 +158,24 @@ func (m *MetaRaft) ProposeAddNode(ctx context.Context, entry MetaNodeEntry) erro
 	return m.waitApplied(ctx, idx)
 }
 
+// ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
+// it is applied to the local FSM.
+func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error {
+	payload, err := encodeMetaPutShardGroupCmd(sg)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode PutShardGroup: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypePutShardGroup, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
 // waitApplied blocks until the FSM apply loop has processed the entry at idx.
 // Uses generation channels to avoid goroutine leaks on context cancellation.
 //
