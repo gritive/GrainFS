@@ -135,6 +135,9 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 	}
 
 	end := offset + length
+	if end < offset { // uint64 overflow: clamp to file size
+		end = uint64(len(current))
+	}
 	if end > uint64(len(current)) {
 		end = uint64(len(current))
 	}
@@ -152,6 +155,9 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 // opCopy handles COPY (op 60, RFC 7862 §15.2).
 // Server-side copy from saved FH path to current FH path.
 func (d *Dispatcher) opCopy(data []byte) OpResult {
+	if len(data) < 56 {
+		return OpResult{OpCode: OpCopy, Status: NFS4ERR_INVAL}
+	}
 	if d.currentPath == "" || d.savedPath == "" {
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_NOFILEHANDLE}
 	}
