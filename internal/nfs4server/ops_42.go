@@ -9,6 +9,11 @@ import (
 const (
 	seek4WData = 0 // NFS4_CONTENT_DATA
 	seek4WHole = 1 // NFS4_CONTENT_HOLE
+
+	// maxObjectBytes caps read-modify-write ops so object storage backends
+	// don't OOM on huge files. Clients get NFS4ERR_FBIG/NFS4ERR_NOTSUPP for
+	// files exceeding this limit; SETATTR/WRITE are not affected.
+	maxObjectBytes = 64 << 20 // 64 MB
 )
 
 // opSeek handles SEEK (op 69, RFC 7862 §15.11).
@@ -80,6 +85,9 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_FBIG}
 	}
 	required := int64(offset) + int64(length)
+	if required > maxObjectBytes {
+		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_FBIG}
+	}
 	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size >= required {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
@@ -121,6 +129,10 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 	key := pathToKey(d.currentPath)
 	if d.backend == nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
+	}
+
+	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size > maxObjectBytes {
+		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_NOTSUPP}
 	}
 
 	release := d.state.LockPath(d.currentPath)
