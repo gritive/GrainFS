@@ -1166,11 +1166,15 @@ func (d *Dispatcher) opExchangeID(data []byte) OpResult {
 
 	res := d.state.ExchangeID(verf, ownerID)
 
+	// RFC 5661 §18.35.3: server MUST set at least one of USE_NON_PNFS/USE_PNFS_MDS/USE_PNFS_DS.
+	// Without this bit, the Linux kernel's nfs4_discover_server_trunking returns EINVAL.
+	const eirFlagUseNonPNFS = uint32(0x00010000)
+
 	w := getXDRWriter()
-	w.WriteUint64(res.ClientID)   // eir_clientid
-	w.WriteUint32(res.SequenceID) // eir_sequenceid
-	w.WriteUint32(0)              // eir_flags
-	w.WriteUint32(0)              // eir_state_protect.spr_how = SP4_NONE
+	w.WriteUint64(res.ClientID)      // eir_clientid
+	w.WriteUint32(res.SequenceID)    // eir_sequenceid
+	w.WriteUint32(eirFlagUseNonPNFS) // eir_flags
+	w.WriteUint32(0)                 // eir_state_protect.spr_how = SP4_NONE
 	// eir_server_owner: minor_id + major_id
 	w.WriteUint64(1)         // server minor id
 	w.WriteString("grainfs") // server major id

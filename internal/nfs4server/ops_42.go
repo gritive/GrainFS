@@ -57,13 +57,42 @@ func (d *Dispatcher) opSeek(data []byte) OpResult {
 }
 
 // opAllocate handles ALLOCATE (op 59, RFC 7862 §15.1).
-// GrainFS treats this as a no-op: space is allocated implicitly on write.
+// RFC requires that after ALLOCATE, the file size MUST be at least offset+length.
 func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	if len(data) < 32 {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_INVAL}
 	}
 	if d.currentPath == "" {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_NOFILEHANDLE}
+	}
+	r := NewXDRReader(data)
+	r.ReadFixed(16) //nolint:errcheck // stateid
+	offset, _ := r.ReadUint64()
+	length, _ := r.ReadUint64()
+
+	key := pathToKey(d.currentPath)
+	if d.backend == nil {
+		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
+	}
+
+	required := int64(offset + length)
+	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size >= required {
+		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
+	}
+
+	release := d.state.LockPath(d.currentPath)
+	defer release()
+
+	var existing []byte
+	if body, _, err := d.backend.GetObject(nfs4Bucket, key); err == nil {
+		existing, _ = io.ReadAll(body)
+		body.Close()
+	}
+	if int64(len(existing)) < required {
+		existing = append(existing, make([]byte, required-int64(len(existing)))...)
+	}
+	if _, err := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 	}
 	return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 }
@@ -153,7 +182,17 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	if _, err := d.backend.PutObject(nfs4Bucket, dstKey, bytes.NewReader(srcData), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 	}
-	return OpResult{OpCode: OpCopy, Status: NFS4_OK}
+
+	// RFC 7862 §15.2: return COPY4resok { write_response4, cr_consecutive, cr_synchronous }
+	// write_response4: wr_callback_id<1>=[] + wr_bytes_written + wr_stable + wr_writeverf(8)
+	w := getXDRWriter()
+	w.WriteUint32(0)                    // wr_callback_id count = 0 (synchronous)
+	w.WriteUint64(uint64(len(srcData))) // wr_bytes_written
+	w.WriteUint32(2)                    // wr_stable = FILE_SYNC
+	w.buf.Write(d.state.WriteVerf[:])   // wr_writeverf (8 bytes)
+	w.WriteUint32(1)                    // cr_consecutive = TRUE
+	w.WriteUint32(1)                    // cr_synchronous = TRUE
+	return OpResult{OpCode: OpCopy, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 // opIOAdvise handles IO_ADVISE (op 63, RFC 7862 §15.6).

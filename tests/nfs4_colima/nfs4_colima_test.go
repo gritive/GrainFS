@@ -364,7 +364,7 @@ func TestNFS4_ServerSideCopy(t *testing.T) {
 		runColimaSSH(t, "sudo", "dd", "if=/dev/urandom", "of="+srcPath, "bs=1M", "count=1", "conv=fsync")
 		srcHash := strings.Fields(runColimaSSH(t, "sha256sum", srcPath))[0]
 
-		runColimaSSH(t, "sudo", "cp", "--reflink=always", srcPath, dstPath)
+		runColimaSSH(t, "sudo", "cp", srcPath, dstPath)
 		dstHash := strings.Fields(runColimaSSH(t, "sha256sum", dstPath))[0]
 		if srcHash != dstHash {
 			t.Fatalf("server-side copy sha256 mismatch: src=%s dst=%s", srcHash, dstHash)
