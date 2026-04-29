@@ -40,7 +40,16 @@ cleanup() {
   echo "=== cleanup ==="
   colima ssh -- sudo umount -l "$MNT" 2>/dev/null || true
   colima ssh -- sudo rmdir "$MNT" 2>/dev/null || true
-  [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null || true
+  [[ -n "${PPROF_PID:-}" ]] && kill "$PPROF_PID" 2>/dev/null || true
+  if [[ -n "${SERVER_PID:-}" ]]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    # Wait up to 3s for graceful shutdown, then SIGKILL
+    for _ in $(seq 1 15); do
+      kill -0 "$SERVER_PID" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -9 "$SERVER_PID" 2>/dev/null || true
+  fi
   rm -rf "$DATA_DIR"
 }
 trap cleanup EXIT
