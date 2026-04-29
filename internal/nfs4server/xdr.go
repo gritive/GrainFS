@@ -474,14 +474,27 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		return xdrWriterBytes(w), 0, nil
 
 	case OpSetAttr:
-		buf := getOpArg16()
-		io.ReadFull(&r.r, buf) // stateid
+		var stateid [16]byte
+		io.ReadFull(&r.r, stateid[:])
 		bitmapLen, _ := r.ReadUint32()
-		for i := uint32(0); i < bitmapLen; i++ {
+		var bm [2]uint32
+		if bitmapLen >= 1 {
+			bm[0], _ = r.ReadUint32()
+		}
+		if bitmapLen >= 2 {
+			bm[1], _ = r.ReadUint32()
+		}
+		for i := uint32(2); i < bitmapLen; i++ {
 			r.ReadUint32()
 		}
-		r.ReadOpaque() // attrvals
-		return buf, 16, nil
+		attrVals, _ := r.ReadOpaque()
+		// encode: stateid(16) + bm[0](4) + bm[1](4) + attrVals(opaque)
+		w := getXDRWriter()
+		w.buf.Write(stateid[:])
+		w.WriteUint32(bm[0])
+		w.WriteUint32(bm[1])
+		w.WriteOpaque(attrVals)
+		return xdrWriterBytes(w), 0, nil
 
 	case OpOpenConfirm:
 		buf := getOpArg16()

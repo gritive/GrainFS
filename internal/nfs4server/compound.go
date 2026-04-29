@@ -3,6 +3,7 @@ package nfs4server
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"path"
@@ -46,23 +47,24 @@ func putDispatcher(d *Dispatcher) {
 
 // NFSv4 status codes (RFC 7530)
 const (
-	NFS4_OK             = 0
-	NFS4ERR_PERM        = 1
-	NFS4ERR_NOENT       = 2
-	NFS4ERR_IO          = 5
-	NFS4ERR_NOTDIR      = 20
-	NFS4ERR_INVAL       = 22
-	NFS4ERR_FBIG        = 27
-	NFS4ERR_NOSPC       = 28
-	NFS4ERR_ROFS        = 30
-	NFS4ERR_STALE       = 70
-	NFS4ERR_BADHANDLE   = 10001
-	NFS4ERR_BAD_STATEID = 10025
-	NFS4ERR_RESOURCE    = 10018
-	NFS4ERR_SERVERFAULT = 10006
-	NFS4ERR_NOTSUPP     = 10004
-	NFS4ERR_RESTOREFH   = 10030
-	NFS4ERR_BADSESSION  = 10052
+	NFS4_OK              = 0
+	NFS4ERR_PERM         = 1
+	NFS4ERR_NOENT        = 2
+	NFS4ERR_IO           = 5
+	NFS4ERR_NOTDIR       = 20
+	NFS4ERR_INVAL        = 22
+	NFS4ERR_FBIG         = 27
+	NFS4ERR_NOSPC        = 28
+	NFS4ERR_ROFS         = 30
+	NFS4ERR_STALE        = 70
+	NFS4ERR_BADHANDLE    = 10001
+	NFS4ERR_BAD_STATEID  = 10025
+	NFS4ERR_RESOURCE     = 10018
+	NFS4ERR_SERVERFAULT  = 10006
+	NFS4ERR_NOTSUPP      = 10004
+	NFS4ERR_RESTOREFH    = 10030
+	NFS4ERR_NOFILEHANDLE = 10020
+	NFS4ERR_BADSESSION   = 10052
 )
 
 // NFSv4 operation codes
@@ -213,7 +215,7 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 	case OpRename:
 		return d.opRename(op.Data)
 	case OpSetAttr:
-		return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult()}
+		return d.opSetAttr(op.Data)
 	case OpCommit:
 		return d.opCommit()
 	case OpRestoreFH:
@@ -353,6 +355,7 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 	isDir := d.state.IsDir(d.currentPath)
 	var fileSize uint64
 	var lastModUnix int64
+	var sidecarMode uint32
 	fileid := pathToFileID(d.currentPath)
 
 	if !isDir && d.backend != nil {
@@ -370,6 +373,15 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 			isDir = true
 			fileSize = 4096
 		}
+
+		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
+		if !isDir {
+			meta := d.loadFileMeta(key)
+			sidecarMode = meta.Mode
+			if meta.Mtime > 0 {
+				lastModUnix = meta.Mtime / 1e9
+			}
+		}
 	} else {
 		fileSize = 4096
 	}
@@ -380,6 +392,9 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 
 	fileType := uint32(NF4REG)
 	mode := uint32(0644)
+	if sidecarMode != 0 {
+		mode = sidecarMode
+	}
 	numlinks := uint32(1)
 	if isDir {
 		fileType = NF4DIR
@@ -404,7 +419,7 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 		setBit(0)
 		supW0 := uint32(1<<0 | 1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5 | 1<<6 |
 			1<<7 | 1<<8 | 1<<9 | 1<<10 | 1<<13 | 1<<14 | 1<<20 | 1<<27 | 1<<30 | 1<<31)
-		supW1 := uint32(1<<1 | 1<<3 | 1<<4 | 1<<5 | 1<<13 | 1<<15 | 1<<20 | 1<<21 | 1<<23)
+		supW1 := uint32(1<<1 | 1<<3 | 1<<4 | 1<<5 | 1<<13 | 1<<15 | 1<<16 | 1<<20 | 1<<21 | 1<<22 | 1<<23)
 		attrW.WriteUint32(2)
 		attrW.WriteUint32(supW0)
 		attrW.WriteUint32(supW1)
@@ -857,9 +872,115 @@ func (d *Dispatcher) opRestoreFH() OpResult {
 	return OpResult{OpCode: OpRestoreFH, Status: NFS4_OK}
 }
 
+func (d *Dispatcher) opSetAttr(data []byte) OpResult {
+	if d.currentPath == "" {
+		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_NOFILEHANDLE}
+	}
+	// data layout: stateid(16) + bm0(4) + bm1(4) + attrVals(opaque)
+	if len(data) < 24 {
+		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_INVAL}
+	}
+	r := NewXDRReader(data[16:]) // skip stateid
+	bm0, _ := r.ReadUint32()
+	bm1, _ := r.ReadUint32()
+	attrVals, _ := r.ReadOpaque()
+
+	key := d.currentPath
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+
+	ar := NewXDRReader(attrVals)
+
+	// FATTR4_SIZE (word0 bit 4)
+	if bm0&(1<<4) != 0 {
+		size, _ := ar.ReadUint64()
+		release := d.state.LockPath(key)
+		defer release()
+		if tr, ok := d.backend.(storage.Truncatable); ok {
+			if err := tr.Truncate(nfs4Bucket, key, int64(size)); err != nil {
+				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+			}
+		} else {
+			var existing []byte
+			if rc, _, err := d.backend.GetObject(nfs4Bucket, key); err == nil {
+				existing, _ = io.ReadAll(rc)
+				rc.Close()
+			}
+			sz := int64(size)
+			cur := int64(len(existing))
+			if cur > sz {
+				existing = existing[:sz]
+			} else if cur < sz {
+				existing = append(existing, make([]byte, sz-cur)...)
+			}
+			if _, err := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+			}
+		}
+	}
+
+	meta := d.loadFileMeta(key)
+	metaChanged := false
+
+	// FATTR4_MODE (word1 bit 1 = bit 33)
+	if bm1&(1<<1) != 0 {
+		mode, _ := ar.ReadUint32()
+		meta.Mode = mode
+		metaChanged = true
+	}
+
+	// FATTR4_TIME_ACCESS_SET (word1 bit 16 = attr 48) — consume bytes to keep reader aligned; atime not stored
+	if bm1&(1<<16) != 0 {
+		how, _ := ar.ReadUint32()
+		if how == 1 { // SET_TO_CLIENT_TIME4: skip nfstime4 (hi+lo+nsecs)
+			ar.ReadUint32()
+			ar.ReadUint32()
+			ar.ReadUint32()
+		}
+	}
+
+	// FATTR4_TIME_MODIFY_SET (word1 bit 22 = attr 54)
+	if bm1&(1<<22) != 0 {
+		how, _ := ar.ReadUint32()
+		var mtimeNs int64
+		if how == 1 { // SET_TO_CLIENT_TIME4
+			hi, _ := ar.ReadUint32()
+			lo, _ := ar.ReadUint32()
+			secs := int64(hi)<<32 | int64(lo)
+			nsecs, _ := ar.ReadUint32()
+			mtimeNs = secs*1e9 + int64(nsecs)
+		} else { // SET_TO_SERVER_TIME4
+			mtimeNs = time.Now().UnixNano()
+		}
+		meta.Mtime = mtimeNs
+		metaChanged = true
+	}
+
+	if metaChanged {
+		if err := d.saveFileMeta(key, meta); err != nil {
+			return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+		}
+	}
+
+	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult(bm0, bm1)}
+}
+
 func (d *Dispatcher) opCommit() OpResult {
+	if d.currentPath == "" {
+		return OpResult{OpCode: OpCommit, Status: NFS4ERR_NOFILEHANDLE}
+	}
+	key := d.currentPath
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+	if s, ok := d.backend.(storage.Syncable); ok {
+		if err := s.Sync(nfs4Bucket, key); err != nil {
+			return OpResult{OpCode: OpCommit, Status: NFS4ERR_IO}
+		}
+	}
 	w := getXDRWriter()
-	w.WriteUint64(0) // writeverf4 (8 bytes)
+	w.buf.Write(d.state.WriteVerf[:]) // writeverf4: 8 bytes
 	return OpResult{OpCode: OpCommit, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
@@ -1062,7 +1183,9 @@ func (d *Dispatcher) opDestroySession(data []byte) OpResult {
 	}
 	var sid SessionID
 	copy(sid[:], data[:16])
-	d.state.DestroySession(sid)
+	if !d.state.DestroySession(sid) {
+		return OpResult{OpCode: OpDestroySession, Status: NFS4ERR_BADSESSION}
+	}
 	return OpResult{OpCode: OpDestroySession, Status: NFS4_OK}
 }
 
@@ -1096,11 +1219,49 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
+// nfsFileMeta stores per-file NFS metadata that must survive server restarts.
+// Persisted as JSON in the nfs4Bucket under key "__meta/<path>".
+type nfsFileMeta struct {
+	Mode  uint32 `json:"mode"`
+	Mtime int64  `json:"mtime_ns"` // UnixNano; 0 means "use object LastModified"
+}
+
+func metaSidecarKey(key string) string {
+	return "__meta/" + key
+}
+
+func (d *Dispatcher) loadFileMeta(key string) nfsFileMeta {
+	rc, _, err := d.backend.GetObject(nfs4Bucket, metaSidecarKey(key))
+	if err != nil {
+		return nfsFileMeta{Mode: 0644}
+	}
+	defer rc.Close()
+	data, _ := io.ReadAll(rc)
+	var m nfsFileMeta
+	if err := json.Unmarshal(data, &m); err != nil || m.Mode == 0 {
+		m.Mode = 0644
+	}
+	return m
+}
+
+func (d *Dispatcher) saveFileMeta(key string, m nfsFileMeta) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	_, err = d.backend.PutObject(nfs4Bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
+	return err
+}
+
 // --- Helper functions ---
 
-func encodeSetAttrResult() []byte {
+// encodeSetAttrResult returns the attrsset bitmap so the NFS client knows
+// which attributes were actually changed and can invalidate its cache.
+func encodeSetAttrResult(bm0, bm1 uint32) []byte {
 	w := getXDRWriter()
-	w.WriteUint32(0) // bitmap len = 0 (no attrs set)
+	w.WriteUint32(2)
+	w.WriteUint32(bm0)
+	w.WriteUint32(bm1)
 	return xdrWriterBytes(w)
 }
 

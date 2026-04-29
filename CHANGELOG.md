@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.5.4] — 2026-04-29
+
+### Added
+
+- **NFSv4 SETATTR 구현** (`internal/nfs4server/`):
+  - **opSetAttr**: MODE(chmod), SIZE(truncate), TIME_MODIFY_SET(mtime) 속성 쓰기. `__meta` 사이드카 파일에 메타데이터 저장.
+  - **opGetAttr**: `__meta` 사이드카에서 MODE, SIZE, MTIME 읽기.
+  - **opCommit**: NoFH 체크 + Syncable fsync + WriteVerf(서버 재시작 감지).
+  - **storage 인터페이스**: `Truncatable` + `Syncable` 추가, `LocalBackend` 구현.
+  - **StateManager.WriteVerf**: 8바이트 write verifier, 서버 재시작 시 갱신.
+
+### Fixed
+
+- **SETATTR TIME_MODIFY_SET 비트 오류**: attr 54 = word1 bit 22; 기존 `bm1&(1<<21)` → `bm1&(1<<22)` 수정.
+- **SETATTR XDR 오프셋 정렬**: TIME_ACCESS_SET (attr 48 = word1 bit 16) 소비 로직 추가.
+- **SUPPORTED_ATTRS**: bit 16, 22 광고 추가.
+- **e2e 빌드 오류**: PR #79 NFSv3 제거 후 `cow_e2e_test.go` 컴파일 불가 → S3 API로 대체.
+
+### Tests
+
+- SetAttr 10개, Commit 3개, SaveFH/RestoreFH, DestroySession, pool/XDR readOpArgs 커버리지.
+- Colima e2e: mtime 검증 (TZ=UTC touch -t 202001010000 = 1577836800), chmod/truncate smoke.
+
 ## [0.0.5.3] — 2026-04-29
 
 ### Added

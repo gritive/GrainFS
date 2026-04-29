@@ -210,23 +210,34 @@ func TestReadOpArgs_Renew(t *testing.T) {
 }
 
 func TestReadOpArgs_SetAttr(t *testing.T) {
-	// OpSetAttr: stateid (16 bytes) + bitmap len 0 + empty attrvals.
+	// OpSetAttr: stateid(16) + bitmap[2] + attrVals encoded as:
+	// output = stateid(16) + bm0(4) + bm1(4) + attrVals(opaque)
 	w := getXDRWriter()
 	var stateid [16]byte
 	for i := range stateid {
 		stateid[i] = byte(i + 10)
 	}
 	w.buf.Write(stateid[:])
-	w.WriteUint32(0) // bitmap len = 0
-	w.WriteOpaque(nil)
+	w.WriteUint32(2)    // bitmap len = 2
+	w.WriteUint32(0xAA) // bm0
+	w.WriteUint32(0xBB) // bm1
+	attrVals := []byte{1, 2, 3, 4}
+	w.WriteOpaque(attrVals)
 	r := NewXDRReader(w.Bytes())
 	putXDRWriter(w)
 
 	data, pk, err := readOpArgs(r, OpSetAttr)
 	assert.NoError(t, err)
-	assert.Equal(t, 16, pk)
-	assert.Equal(t, stateid[:], data)
-	putOpArg16(data)
+	assert.Equal(t, 0, pk) // pk=0 means caller should NOT call putOpArg16
+
+	// data layout: stateid(16) + bm0(4) + bm1(4) + attrVals(opaque)
+	assert.Equal(t, stateid[:], data[:16])
+	// bm0 at bytes 16-19 (big-endian uint32 0xAA = 170)
+	assert.Equal(t, byte(0), data[16])
+	assert.Equal(t, byte(0), data[17])
+	assert.Equal(t, byte(0), data[18])
+	assert.Equal(t, byte(0xAA), data[19])
+	_ = data // data returned from pool-less allocation; no putOpArg16
 }
 
 func TestReadOpArgs_UnknownOp(t *testing.T) {

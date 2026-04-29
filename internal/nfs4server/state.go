@@ -89,6 +89,10 @@ type StateManager struct {
 	// writeGates holds per-path channel semaphores to serialise RMW writes.
 	// Value type is chan struct{} (buffered 1).
 	writeGates sync.Map
+
+	// WriteVerf is the 8-byte write verifier returned in COMMIT responses.
+	// Initialized once with crypto/rand per server instance; changes on restart.
+	WriteVerf [8]byte
 }
 
 // NewStateManager creates a state manager.
@@ -100,6 +104,7 @@ func NewStateManager() *StateManager {
 	}
 	sm.nextClientID.Store(1)
 	sm.nextStateID.Store(1)
+	rand.Read(sm.WriteVerf[:])
 
 	initial := &fhState{
 		fhToPath: make(map[FileHandle]string),

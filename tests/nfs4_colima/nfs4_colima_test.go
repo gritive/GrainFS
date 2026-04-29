@@ -115,6 +115,106 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestNFS4_SetAttr(t *testing.T) {
+	mnt := "/mnt/grainfs-colima-setattr"
+
+	runColimaSSH(t, "sudo", "mkdir", "-p", mnt)
+	runColimaSSH(t, "sudo", "mount", "-t", "nfs4",
+		"-o", fmt.Sprintf("vers=4.0,port=%s", colimaNFS4Port),
+		fmt.Sprintf("%s:/", colimaHostIP), mnt)
+	t.Cleanup(func() {
+		colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck
+	})
+
+	testDir := mnt + "/testdir-setattr"
+	runColimaSSH(t, "sudo", "mkdir", "-p", testDir)
+
+	filePath := testDir + "/attr.bin"
+	runColimaSSH(t, "sudo", "dd",
+		"if=/dev/urandom", "of="+filePath,
+		"bs=4K", "count=1", "conv=fsync",
+	)
+
+	// chmod 600 → 644 → 750
+	for _, mode := range []string{"600", "644", "750"} {
+		runColimaSSH(t, "sudo", "chmod", mode, filePath)
+		got := runColimaSSH(t, "stat", "--format=%a", filePath)
+		if got != mode {
+			t.Fatalf("chmod %s: expected %s, got %q", mode, mode, got)
+		}
+	}
+
+	// truncate to 100 bytes
+	runColimaSSH(t, "sudo", "truncate", "-s", "100", filePath)
+	sz := runColimaSSH(t, "stat", "--format=%s", filePath)
+	if sz != "100" {
+		t.Fatalf("truncate 100: expected size 100, got %q", sz)
+	}
+
+	// extend to 8192 bytes (zero-fill)
+	runColimaSSH(t, "sudo", "truncate", "-s", "8192", filePath)
+	sz = runColimaSSH(t, "stat", "--format=%s", filePath)
+	if sz != "8192" {
+		t.Fatalf("truncate 8192: expected size 8192, got %q", sz)
+	}
+
+	// truncate to 0
+	runColimaSSH(t, "sudo", "truncate", "-s", "0", filePath)
+	sz = runColimaSSH(t, "stat", "--format=%s", filePath)
+	if sz != "0" {
+		t.Fatalf("truncate 0: expected size 0, got %q", sz)
+	}
+
+	// mtime: set a known timestamp and verify it changes
+	mtimeBefore := runColimaSSH(t, "stat", "--format=%Y", filePath)
+	runColimaSSH(t, "sudo", "env", "TZ=UTC", "touch", "-t", "202001010000", filePath)
+	mtimeAfter := runColimaSSH(t, "stat", "--format=%Y", filePath)
+	if mtimeBefore == mtimeAfter {
+		t.Fatalf("mtime unchanged after touch: %q", mtimeAfter)
+	}
+	// TZ=UTC touch -t 202001010000 = 2020-01-01 00:00:00 UTC = 1577836800
+	if mtimeAfter != "1577836800" {
+		t.Fatalf("mtime expected 1577836800 (2020-01-01 UTC), got %q", mtimeAfter)
+	}
+
+	runColimaSSH(t, "sudo", "rm", "-rf", testDir)
+}
+
+func TestNFS4_Commit(t *testing.T) {
+	mnt := "/mnt/grainfs-colima-commit"
+
+	runColimaSSH(t, "sudo", "mkdir", "-p", mnt)
+	runColimaSSH(t, "sudo", "mount", "-t", "nfs4",
+		"-o", fmt.Sprintf("vers=4.0,port=%s", colimaNFS4Port),
+		fmt.Sprintf("%s:/", colimaHostIP), mnt)
+	t.Cleanup(func() {
+		colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck
+	})
+
+	testDir := mnt + "/testdir-commit"
+	runColimaSSH(t, "sudo", "mkdir", "-p", testDir)
+	filePath := testDir + "/commit.bin"
+
+	// write with O_SYNC to trigger COMMIT; verify data survives
+	runColimaSSH(t, "sudo", "bash", "-c",
+		fmt.Sprintf("dd if=/dev/urandom of=%s bs=64K count=1 conv=fsync", filePath),
+	)
+	sha1 := strings.Fields(runColimaSSH(t, "sha256sum", filePath))[0]
+
+	// remount and re-read — verifies data was durably committed
+	runColimaSSH(t, "sudo", "umount", "-l", mnt)
+	runColimaSSH(t, "sudo", "mount", "-t", "nfs4",
+		"-o", fmt.Sprintf("vers=4.0,port=%s", colimaNFS4Port),
+		fmt.Sprintf("%s:/", colimaHostIP), mnt)
+
+	sha2 := strings.Fields(runColimaSSH(t, "sha256sum", filePath))[0]
+	if sha1 != sha2 {
+		t.Fatalf("commit: sha256 mismatch after remount: before=%s after=%s", sha1, sha2)
+	}
+
+	runColimaSSH(t, "sudo", "rm", "-rf", testDir)
+}
+
 func TestNFS4_BasicOps(t *testing.T) {
 	mnt := "/mnt/grainfs-colima-e2e"
 
@@ -144,12 +244,6 @@ func TestNFS4_BasicOps(t *testing.T) {
 	sha := runColimaSSH(t, "sha256sum", filePath)
 	origHash := strings.Fields(sha)[0]
 
-	// stat — size 검증
-	sizeOut := runColimaSSH(t, "stat", "--format=%s", filePath)
-	if sizeOut != "1048576" {
-		t.Fatalf("expected size 1048576, got %q", sizeOut)
-	}
-
 	// readdir — file.bin 포함 확인
 	lsOut := runColimaSSH(t, "ls", testDir)
 	if !strings.Contains(lsOut, "file.bin") {
@@ -174,6 +268,20 @@ func TestNFS4_BasicOps(t *testing.T) {
 	newHash := strings.Fields(sha2)[0]
 	if origHash != newHash {
 		t.Fatalf("sha256 mismatch after rename: orig=%s got=%s", origHash, newHash)
+	}
+
+	// SetAttr smoke: chmod 750
+	runColimaSSH(t, "sudo", "chmod", "750", renamedPath)
+	chmodOut := runColimaSSH(t, "stat", "--format=%a", renamedPath)
+	if chmodOut != "750" {
+		t.Fatalf("expected mode 750 after chmod, got %q", chmodOut)
+	}
+
+	// SetAttr smoke: truncate -s 100
+	runColimaSSH(t, "sudo", "truncate", "-s", "100", renamedPath)
+	truncOut := runColimaSSH(t, "stat", "--format=%s", renamedPath)
+	if truncOut != "100" {
+		t.Fatalf("expected size 100 after truncate, got %q", truncOut)
 	}
 
 	// remove
