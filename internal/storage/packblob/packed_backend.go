@@ -220,8 +220,11 @@ func (pb *PackedBackend) PutObject(bucket, key string, r io.Reader, contentType 
 		return nil, fmt.Errorf("blob append: %w", err)
 	}
 
-	h := md5.Sum(data)
-	etag := hex.EncodeToString(h[:])
+	var etag string
+	if !storage.IsInternalBucket(bucket) {
+		h := md5.Sum(data)
+		etag = hex.EncodeToString(h[:])
+	}
 	now := time.Now().Unix()
 
 	pb.mu.Lock()

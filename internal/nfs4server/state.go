@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
 // FileHandle is an opaque 128-bit identifier for a file/directory.
@@ -85,11 +87,11 @@ type StateManager struct {
 
 	// dirs tracks paths that exist as directories.
 	// Value type is int64 (UnixNano creation timestamp) for CHANGE attribute.
-	dirs sync.Map
+	dirs pool.SyncMap[string, int64]
 
 	// writeGates holds per-path channel semaphores to serialise RMW writes.
 	// Value type is chan struct{} (buffered 1).
-	writeGates sync.Map
+	writeGates pool.SyncMap[string, chan struct{}]
 
 	// WriteVerf is the 8-byte write verifier returned in COMMIT responses.
 	// Initialized once with crypto/rand per server instance; changes on restart.
@@ -132,7 +134,7 @@ func (sm *StateManager) IsDir(p string) bool {
 // or time.Now().UnixNano() if not tracked (e.g. the root).
 func (sm *StateManager) DirMtime(p string) int64 {
 	if v, ok := sm.dirs.Load(p); ok {
-		return v.(int64)
+		return v
 	}
 	return time.Now().UnixNano()
 }
@@ -140,8 +142,7 @@ func (sm *StateManager) DirMtime(p string) int64 {
 // LockPath acquires a per-path channel semaphore and returns a release func.
 // Use for serialising concurrent read-modify-write operations on the same path.
 func (sm *StateManager) LockPath(p string) func() {
-	sem, _ := sm.writeGates.LoadOrStore(p, make(chan struct{}, 1))
-	ch := sem.(chan struct{})
+	ch, _ := sm.writeGates.LoadOrStore(p, make(chan struct{}, 1))
 	ch <- struct{}{} // blocks until acquired
 	return func() { <-ch }
 }

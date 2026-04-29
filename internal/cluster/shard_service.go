@@ -7,19 +7,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-var shardBuilderPool = sync.Pool{
-	New: func() any { return flatbuffers.NewBuilder(512) },
-}
+var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(512) })
 
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
@@ -141,7 +139,7 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 // Returns a FlatBuffersWriter whose Builder MUST be Reset()+Put() to shardBuilderPool after use.
 func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte) *transport.FlatBuffersWriter {
 	// Build ShardRequest in b; b.FinishedBytes() points into b's internal buffer.
-	b := shardBuilderPool.Get().(*flatbuffers.Builder)
+	b := shardBuilderPool.Get()
 	bucketOff := b.CreateString(bucket)
 	keyOff := b.CreateString(key)
 	var dataOff flatbuffers.UOffsetT
@@ -159,7 +157,7 @@ func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte
 	srBytes := b.FinishedBytes()
 
 	// Build RPCMessage in b2; CreateByteVector copies srBytes into b2's buffer.
-	b2 := shardBuilderPool.Get().(*flatbuffers.Builder)
+	b2 := shardBuilderPool.Get()
 	typeOff := b2.CreateString(msgType)
 	srVec := b2.CreateByteVector(srBytes) // srBytes copied — b can now be returned
 	b.Reset()
@@ -200,7 +198,7 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 // marshalEnvelope serializes an RPCMessage as FlatBuffers.
 // Uses a pooled builder; the returned slice is an owned copy safe after the builder is Reset.
 func marshalEnvelope(msgType string, innerData []byte) []byte {
-	b := shardBuilderPool.Get().(*flatbuffers.Builder)
+	b := shardBuilderPool.Get()
 	defer func() {
 		b.Reset()
 		shardBuilderPool.Put(b)

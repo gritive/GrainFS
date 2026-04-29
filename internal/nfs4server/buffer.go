@@ -2,9 +2,9 @@ package nfs4server
 
 import (
 	"io"
-	"sync"
 
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
 const (
@@ -13,11 +13,11 @@ const (
 	bufferLarge  = 1 * 1024 * 1024 // 1MB
 )
 
-// BufferPool은 sync.Pool을 사용하여 다양한 크기의 재사용 가능한 버퍼를 관리합니다.
+// BufferPool은 다양한 크기의 재사용 가능한 버퍼를 관리합니다.
 type BufferPool struct {
-	small  *sync.Pool
-	medium *sync.Pool
-	large  *sync.Pool
+	small  *pool.Pool[[]byte]
+	medium *pool.Pool[[]byte]
+	large  *pool.Pool[[]byte]
 }
 
 // 전역 버퍼 풀 인스턴스.
@@ -30,21 +30,9 @@ func init() {
 // NewBufferPool은 32KB, 256KB, 1MB 버퍼로 새 버퍼 풀을 생성합니다.
 func NewBufferPool() *BufferPool {
 	return &BufferPool{
-		small: &sync.Pool{
-			New: func() interface{} {
-				return make([]byte, bufferSmall)
-			},
-		},
-		medium: &sync.Pool{
-			New: func() interface{} {
-				return make([]byte, bufferMedium)
-			},
-		},
-		large: &sync.Pool{
-			New: func() interface{} {
-				return make([]byte, bufferLarge)
-			},
-		},
+		small:  pool.New(func() []byte { return make([]byte, bufferSmall) }),
+		medium: pool.New(func() []byte { return make([]byte, bufferMedium) }),
+		large:  pool.New(func() []byte { return make([]byte, bufferLarge) }),
 	}
 }
 
@@ -57,13 +45,13 @@ func (p *BufferPool) getBuffer(size int64) []byte {
 	var sizeLabel string
 
 	if size < 1*1024*1024 {
-		buf = p.small.Get().([]byte)
+		buf = p.small.Get()
 		sizeLabel = "small"
 	} else if size < 10*1024*1024 {
-		buf = p.medium.Get().([]byte)
+		buf = p.medium.Get()
 		sizeLabel = "medium"
 	} else {
-		buf = p.large.Get().([]byte)
+		buf = p.large.Get()
 		sizeLabel = "large"
 	}
 

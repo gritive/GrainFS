@@ -146,7 +146,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	f.mu.RUnlock()
 
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 
 	// Build each MetaNodeEntry offset (must be done before StartObject)
 	nodeOffs := make([]flatbuffers.UOffsetT, len(nodes))
@@ -229,7 +229,7 @@ func (f *MetaFSM) Nodes() []MetaNodeEntry {
 
 // encodeMetaCmd wraps a typed payload in a MetaCmd FlatBuffers envelope.
 func encodeMetaCmd(cmdType MetaCmdType, payload []byte) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	var dataOff flatbuffers.UOffsetT
 	if len(payload) > 0 {
 		dataOff = b.CreateByteVector(payload)
@@ -243,7 +243,7 @@ func encodeMetaCmd(cmdType MetaCmdType, payload []byte) ([]byte, error) {
 }
 
 func encodeMetaAddNodeCmd(node MetaNodeEntry) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	idOff := b.CreateString(node.ID)
 	addrOff := b.CreateString(node.Address)
 	clusterpb.MetaNodeEntryStart(b)
@@ -258,7 +258,7 @@ func encodeMetaAddNodeCmd(node MetaNodeEntry) ([]byte, error) {
 }
 
 func encodeMetaRemoveNodeCmd(nodeID string) ([]byte, error) {
-	b := clusterBuilderPool.Get().(*flatbuffers.Builder)
+	b := clusterBuilderPool.Get()
 	idOff := b.CreateString(nodeID)
 	clusterpb.MetaRemoveNodeCmdStart(b)
 	clusterpb.MetaRemoveNodeCmdAddNodeId(b, idOff)

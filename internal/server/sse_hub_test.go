@@ -64,7 +64,7 @@ func TestHub_CancelRemovesSubscriber(t *testing.T) {
 
 	// After cancel, no clients should be registered.
 	count := 0
-	hub.clients.Range(func(_, _ any) bool {
+	hub.clients.Range(func(_ string, _ *subscriber) bool {
 		count++
 		return true
 	})

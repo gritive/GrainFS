@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,7 +16,10 @@ import (
 	"github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
+	"github.com/gritive/GrainFS/internal/pool"
 )
+
+var md5Pool = pool.New(func() hash.Hash { return md5.New() })
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
@@ -153,16 +157,32 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 		return nil, fmt.Errorf("create file: %w", err)
 	}
 
-	h := md5.New()
-	w := io.MultiWriter(f, h)
-	size, err := io.Copy(w, r)
-	f.Close()
-	if err != nil {
-		os.Remove(objPath)
-		return nil, fmt.Errorf("write object: %w", err)
+	var (
+		size int64
+		etag string
+		cerr error
+	)
+	if IsInternalBucket(bucket) {
+		size, cerr = io.Copy(f, r)
+		f.Close()
+		if cerr != nil {
+			os.Remove(objPath)
+			return nil, fmt.Errorf("write object: %w", cerr)
+		}
+	} else {
+		h := md5Pool.Get()
+		h.Reset()
+		w := io.MultiWriter(f, h)
+		size, cerr = io.Copy(w, r)
+		f.Close()
+		if cerr != nil {
+			md5Pool.Put(h)
+			os.Remove(objPath)
+			return nil, fmt.Errorf("write object: %w", cerr)
+		}
+		etag = hex.EncodeToString(h.Sum(nil))
+		md5Pool.Put(h)
 	}
-
-	etag := hex.EncodeToString(h.Sum(nil))
 	now := time.Now().Unix()
 
 	obj := &Object{

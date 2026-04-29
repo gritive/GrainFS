@@ -8,28 +8,29 @@ import (
 	"io"
 	"path"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-var opReadBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+var opReadBufPool = pool.New(func() *bytes.Buffer { return new(bytes.Buffer) })
+var bytesReaderPool = pool.New(func() *bytes.Reader { return new(bytes.Reader) })
 
-var compoundReqPool = sync.Pool{New: func() any {
+var compoundReqPool = pool.New(func() *CompoundRequest {
 	return &CompoundRequest{Ops: make([]Op, 0, maxCompoundOps)}
-}}
+})
 
-var compoundRespPool = sync.Pool{New: func() any {
+var compoundRespPool = pool.New(func() *CompoundResponse {
 	return &CompoundResponse{Results: make([]OpResult, 0, maxCompoundOps)}
-}}
+})
 
-var dispatcherPool = sync.Pool{New: func() any { return &Dispatcher{} }}
+var dispatcherPool = pool.New(func() *Dispatcher { return &Dispatcher{} })
 
 func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
-	d := dispatcherPool.Get().(*Dispatcher)
+	d := dispatcherPool.Get()
 	d.backend = backend
 	d.state = state
 	d.currentFH = FileHandle{}
@@ -139,7 +140,7 @@ const (
 )
 
 // The VFS bucket used for NFSv4 storage.
-const nfs4Bucket = "__grainfs_nfs4"
+const nfs4Bucket = storage.NFS4BucketName
 
 type Op struct {
 	OpCode  int
@@ -780,7 +781,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	}
 
 	// 버퍼에 데이터 읽기 (pool 재사용으로 alloc 감소)
-	buffer := opReadBufPool.Get().(*bytes.Buffer)
+	buffer := opReadBufPool.Get()
 	buffer.Reset()
 	defer func() { buffer.Reset(); opReadBufPool.Put(buffer) }()
 	_, err = bufferedCopy(buffer, rc, remainingSize)
@@ -828,8 +829,10 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		key = key[1:]
 	}
 
+	br := bytesReaderPool.Get()
 	if offset == 0 {
-		_, err = d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(writeData), "application/octet-stream")
+		br.Reset(writeData)
+		_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
 	} else {
 		// Serialise concurrent RMW on the same path via per-path channel semaphore.
 		release := d.state.LockPath(key)
@@ -840,6 +843,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 			existing, err = io.ReadAll(rc)
 			rc.Close()
 			if err != nil {
+				bytesReaderPool.Put(br)
 				return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 			}
 		}
@@ -848,8 +852,10 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 			existing = append(existing, make([]byte, end-uint64(len(existing)))...)
 		}
 		copy(existing[offset:], writeData)
-		_, err = d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream")
+		br.Reset(existing)
+		_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
 	}
+	bytesReaderPool.Put(br)
 	if err != nil {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 	}

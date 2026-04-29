@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
 // Event is a typed message broadcast to SSE clients.
@@ -33,7 +35,7 @@ func (s *subscriber) matches(eventType string) bool {
 
 // Hub fan-outs Events to all active SSE subscribers.
 type Hub struct {
-	clients sync.Map // id string → *subscriber
+	clients pool.SyncMap[string, *subscriber]
 	idSeq   atomic.Uint64
 	count   atomic.Int64 // number of active subscribers
 
@@ -68,7 +70,7 @@ func (h *Hub) Subscribe(categories ...string) (id string, ch <-chan Event, cance
 	cancel = func() {
 		if v, ok := h.clients.LoadAndDelete(id); ok {
 			h.count.Add(-1)
-			close(v.(*subscriber).ch)
+			close(v.ch)
 		}
 	}
 	return id, c, cancel
@@ -81,8 +83,7 @@ func (h *Hub) Subscribe(categories ...string) (id string, ch <-chan Event, cance
 // drop attribution (e.g. Prometheus) should use the return value directly —
 // the counter diff is racy under concurrent emit.
 func (h *Hub) Broadcast(e Event) (dropped int) {
-	h.clients.Range(func(_, v any) bool {
-		sub := v.(*subscriber)
+	h.clients.Range(func(_ string, sub *subscriber) bool {
 		if !sub.matches(e.Type) {
 			return true
 		}

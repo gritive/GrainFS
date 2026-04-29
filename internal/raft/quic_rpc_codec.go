@@ -2,16 +2,14 @@ package raft
 
 import (
 	"fmt"
-	"sync"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
+	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
 
-var raftBuilderPool = sync.Pool{
-	New: func() any { return flatbuffers.NewBuilder(256) },
-}
+var raftBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
 
 func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	b.Finish(root)
@@ -30,7 +28,7 @@ func encodeRPC(rpcType string, msg any) ([]byte, error) {
 		return nil, err
 	}
 
-	b := raftBuilderPool.Get().(*flatbuffers.Builder)
+	b := raftBuilderPool.Get()
 	typeOff := b.CreateString(rpcType)
 	var dataOff flatbuffers.UOffsetT
 	if len(data) > 0 {
@@ -49,7 +47,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 	switch rpcType {
 	case rpcTypeRequestVote, metaRPCRequestVote:
 		args := msg.(*RequestVoteArgs)
-		b := raftBuilderPool.Get().(*flatbuffers.Builder)
+		b := raftBuilderPool.Get()
 		cidOff := b.CreateString(args.CandidateID)
 		pb.RequestVoteArgsStart(b)
 		pb.RequestVoteArgsAddTerm(b, args.Term)
@@ -61,7 +59,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeRequestVoteReply, metaRPCRequestVoteReply:
 		reply := msg.(*RequestVoteReply)
-		b := raftBuilderPool.Get().(*flatbuffers.Builder)
+		b := raftBuilderPool.Get()
 		pb.RequestVoteReplyStart(b)
 		pb.RequestVoteReplyAddTerm(b, reply.Term)
 		pb.RequestVoteReplyAddVoteGranted(b, reply.VoteGranted)
@@ -70,7 +68,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeAppendEntries, metaRPCAppendEntries:
 		args := msg.(*AppendEntriesArgs)
-		b := raftBuilderPool.Get().(*flatbuffers.Builder)
+		b := raftBuilderPool.Get()
 
 		// Build LogEntry objects (must be built before Start)
 		entryOffs := make([]flatbuffers.UOffsetT, len(args.Entries))
@@ -111,7 +109,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeAppendEntriesReply, metaRPCAppendEntriesReply:
 		reply := msg.(*AppendEntriesReply)
-		b := raftBuilderPool.Get().(*flatbuffers.Builder)
+		b := raftBuilderPool.Get()
 		pb.AppendEntriesReplyStart(b)
 		pb.AppendEntriesReplyAddTerm(b, reply.Term)
 		pb.AppendEntriesReplyAddSuccess(b, reply.Success)
@@ -122,7 +120,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeInstallSnapshot, metaRPCInstallSnapshot:
 		args := msg.(*InstallSnapshotArgs)
-		b := raftBuilderPool.Get().(*flatbuffers.Builder)
+		b := raftBuilderPool.Get()
 
 		// Build ServerEntry objects before Start (FlatBuffers reverse-order rule)
 		serverOffs := make([]flatbuffers.UOffsetT, len(args.Servers))
@@ -164,7 +162,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 
 	case rpcTypeInstallSnapshotReply, metaRPCInstallSnapshotReply:
 		reply := msg.(*InstallSnapshotReply)
-		b := raftBuilderPool.Get().(*flatbuffers.Builder)
+		b := raftBuilderPool.Get()
 		pb.InstallSnapshotReplyStart(b)
 		pb.InstallSnapshotReplyAddTerm(b, reply.Term)
 		root := pb.InstallSnapshotReplyEnd(b)
