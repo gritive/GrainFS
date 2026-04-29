@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.5.2] — 2026-04-29
+
+### Fixed
+
+- `testCluster.mu`: `sync.Mutex` → `sync.RWMutex`; `nodeByID` / `waitForLeader` / `countState` / `startAll`에 `RLock` 추가하여 `TestIntegration_LogGC_PartitionAndRecovery` data race 제거 (#76에서 도입)
+
 ## [0.0.4.46] - 2026-04-29
 
 ### Added
