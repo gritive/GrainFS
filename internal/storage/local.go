@@ -326,6 +326,106 @@ func (b *LocalBackend) Truncate(bucket, key string, size int64) error {
 	})
 }
 
+// WriteAt atomically patches the range [offset, offset+len(data)) of the stored object
+// without reading the full file into memory. The file grows if offset+len(data) exceeds
+// the current size. Existing bytes outside the written range are preserved.
+//
+// Unlike the RMW pattern (GetObject → io.ReadAll → modify → PutObject) this streams
+// prefix and suffix bytes directly via io.Copy, eliminating the heap allocation.
+func (b *LocalBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error) {
+	objPath := b.objectPath(bucket, key)
+	objDir := filepath.Dir(objPath)
+	if err := os.MkdirAll(objDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create dir: %w", err)
+	}
+
+	end := offset + uint64(len(data))
+
+	tmp, err := os.CreateTemp(objDir, ".tmp-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+
+	// Open existing file (may not exist for new files).
+	var existingSize uint64
+	src, srcErr := os.Open(objPath)
+	if srcErr == nil {
+		if info, err2 := src.Stat(); err2 == nil {
+			existingSize = uint64(info.Size())
+		}
+	}
+
+	// 1. Copy [0, offset) — no allocation, kernel-buffered I/O.
+	if offset > 0 {
+		if srcErr == nil {
+			if _, err2 := io.CopyN(tmp, src, int64(offset)); err2 != nil && err2 != io.EOF {
+				cleanup()
+				src.Close()
+				return nil, fmt.Errorf("copy prefix: %w", err2)
+			}
+		} else {
+			// No existing file: seek creates a sparse hole (no zero allocation).
+			if _, err2 := tmp.Seek(int64(offset), io.SeekStart); err2 != nil {
+				cleanup()
+				return nil, fmt.Errorf("seek: %w", err2)
+			}
+		}
+	}
+
+	// 2. Write new data.
+	if _, err2 := tmp.Write(data); err2 != nil {
+		cleanup()
+		if srcErr == nil {
+			src.Close()
+		}
+		return nil, fmt.Errorf("write data: %w", err2)
+	}
+
+	// 3. Copy [end, existingSize) if existing file was larger — preserves tail bytes.
+	if srcErr == nil {
+		if existingSize > end {
+			if _, err2 := src.Seek(int64(end), io.SeekStart); err2 == nil {
+				io.Copy(tmp, src) //nolint:errcheck — best effort; tmp is local
+			}
+		}
+		src.Close()
+	}
+
+	tmp.Close()
+
+	info, err := os.Stat(tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("stat temp: %w", err)
+	}
+	size := info.Size()
+
+	if err := os.Rename(tmpPath, objPath); err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("rename: %w", err)
+	}
+
+	now := time.Now().Unix()
+	obj := &Object{
+		Key:          key,
+		Size:         size,
+		ContentType:  "application/octet-stream",
+		LastModified: now,
+	}
+	meta, err := marshalObject(obj)
+	if err != nil {
+		return nil, fmt.Errorf("marshal metadata: %w", err)
+	}
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(b.objectMetaKey(bucket, key), meta)
+	}); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
 // Sync implements storage.Syncable.
 func (b *LocalBackend) Sync(bucket, key string) error {
 	objPath := b.objectPath(bucket, key)

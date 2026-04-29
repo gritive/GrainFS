@@ -237,6 +237,105 @@ func TestLocalBackend_Close(t *testing.T) {
 	require.NoError(t, b.Close())
 }
 
+func TestLocalBackend_WriteAt(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+
+	full := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
+
+	// Seed the file via PutObject.
+	_, err := b.PutObject("bkt", "key", bytes.NewReader(full), "application/octet-stream")
+	require.NoError(t, err)
+
+	cases := []struct {
+		name       string
+		offset     uint64
+		data       []byte
+		wantBytes  []byte
+		wantSize   int64
+	}{
+		{
+			name:      "overwrite middle",
+			offset:    5,
+			data:      []byte("XYZ"),
+			wantBytes: []byte("ABCDEXYZIJKLMNOPQRSTUVWXYZ"),
+			wantSize:  26,
+		},
+		{
+			name:      "overwrite and extend",
+			offset:    24,
+			data:      []byte("0123"),
+			wantBytes: []byte("ABCDEXYZIJKLMNOPQRSTUVWX0123"),
+			wantSize:  28,
+		},
+		{
+			name:      "overwrite from zero",
+			offset:    0,
+			data:      []byte("aa"),
+			wantBytes: []byte("aaCDEXYZIJKLMNOPQRSTUVWX0123"),
+			wantSize:  28,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj, err := b.WriteAt("bkt", "key", tc.offset, tc.data)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSize, obj.Size)
+
+			rc, got, err := b.GetObject("bkt", "key")
+			require.NoError(t, err)
+			defer rc.Close()
+			gotBytes, _ := io.ReadAll(rc)
+			assert.Equal(t, tc.wantBytes, gotBytes)
+			assert.Equal(t, tc.wantSize, got.Size)
+		})
+	}
+}
+
+func TestLocalBackend_WriteAt_NewFile(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+
+	// Write at offset > 0 to a non-existent file → should create with sparse prefix.
+	obj, err := b.WriteAt("bkt", "sparse", 4, []byte("DATA"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(8), obj.Size)
+
+	rc, _, err := b.GetObject("bkt", "sparse")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	assert.Equal(t, 8, len(got))
+	assert.Equal(t, []byte{0, 0, 0, 0}, got[:4]) // sparse hole = zeros
+	assert.Equal(t, []byte("DATA"), got[4:])
+}
+
+func TestCachedBackend_WriteAt(t *testing.T) {
+	b := setupTestBackend(t)
+	require.NoError(t, b.CreateBucket("bkt"))
+	cached := NewCachedBackend(b)
+
+	_, err := cached.PutObject("bkt", "key", bytes.NewReader([]byte("hello world")), "text/plain")
+	require.NoError(t, err)
+
+	// Warm the cache.
+	rc, _, err := cached.GetObject("bkt", "key")
+	require.NoError(t, err)
+	rc.Close()
+
+	// WriteAt should invalidate cache and update content.
+	obj, err := cached.WriteAt("bkt", "key", 6, []byte("Go!"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(11), obj.Size)
+
+	rc, _, err = cached.GetObject("bkt", "key")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	assert.Equal(t, []byte("hello Go!ld"), got)
+}
+
 func TestCachedBackend_CloseAndUnwrap(t *testing.T) {
 	b := setupTestBackend(t)
 	cached := NewCachedBackend(b)
