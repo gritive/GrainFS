@@ -198,6 +198,60 @@ func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) er
 	return m.waitApplied(ctx, idx)
 }
 
+// ProposeLoadSnapshot encodes a SetLoadSnapshot command and proposes it to the
+// cluster, blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeLoadSnapshot(ctx context.Context, entries []LoadStatEntry) error {
+	payload, err := encodeMetaSetLoadSnapshotCmd(entries)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode SetLoadSnapshot: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypeSetLoadSnapshot, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
+// ProposeRebalancePlan encodes a ProposeRebalancePlan command and proposes it to the
+// cluster, blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeRebalancePlan(ctx context.Context, plan RebalancePlan) error {
+	payload, err := encodeMetaProposeRebalancePlanCmd(plan)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode ProposeRebalancePlan: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypeProposeRebalancePlan, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
+// ProposeAbortPlan encodes an AbortPlan command and proposes it to the cluster,
+// blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string) error {
+	payload, err := encodeMetaAbortPlanCmd(planID)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode AbortPlan: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypeAbortPlan, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
 // waitApplied blocks until the FSM apply loop has processed the entry at idx.
 // Uses generation channels to avoid goroutine leaks on context cancellation.
 //
