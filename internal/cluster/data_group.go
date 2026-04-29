@@ -17,7 +17,10 @@ func NewDataGroup(id string, peerIDs []string) *DataGroup {
 	return &DataGroup{id: id, peerIDs: peerIDs}
 }
 
-func (g *DataGroup) ID() string        { return g.id }
+func (g *DataGroup) ID() string { return g.id }
+
+// PeerIDs returns the peer list for this group.
+// The returned slice is read-only; callers must not modify or append to it.
 func (g *DataGroup) PeerIDs() []string { return g.peerIDs }
 
 // groupSnapshot is an immutable snapshot of DataGroupManager. COW replacement enables lock-free reads.

@@ -186,18 +186,24 @@ func (f *MetaFSM) applyPutShardGroup(data []byte) error {
 	if entry.ID == "" {
 		return fmt.Errorf("meta_fsm: PutShardGroup: empty group ID")
 	}
+	if len(peers) == 0 {
+		return fmt.Errorf("meta_fsm: PutShardGroup: group %q has no peers", entry.ID)
+	}
 	f.mu.Lock()
 	f.shardGroups[entry.ID] = entry
 	f.mu.Unlock()
 	return nil
 }
 
-// ShardGroups returns a copy of current shard groups.
+// ShardGroups returns a deep copy of current shard groups.
+// PeerIDs slices are copied so callers cannot mutate FSM state.
 func (f *MetaFSM) ShardGroups() []ShardGroupEntry {
 	f.mu.RLock()
 	out := make([]ShardGroupEntry, 0, len(f.shardGroups))
 	for _, sg := range f.shardGroups {
-		out = append(out, sg)
+		peers := make([]string, len(sg.PeerIDs))
+		copy(peers, sg.PeerIDs)
+		out = append(out, ShardGroupEntry{ID: sg.ID, PeerIDs: peers})
 	}
 	f.mu.RUnlock()
 	return out
@@ -305,17 +311,18 @@ func (f *MetaFSM) Restore(data []byte) error {
 	newShardGroups := make(map[string]ShardGroupEntry, snap.ShardGroupsLength())
 	var sgEntry clusterpb.ShardGroupEntry
 	for i := 0; i < snap.ShardGroupsLength(); i++ {
-		if snap.ShardGroups(&sgEntry, i) {
-			peers := make([]string, sgEntry.PeerIdsLength())
-			for j := 0; j < sgEntry.PeerIdsLength(); j++ {
-				peers[j] = string(sgEntry.PeerIds(j))
-			}
-			e := ShardGroupEntry{
-				ID:      string(sgEntry.Id()),
-				PeerIDs: peers,
-			}
-			newShardGroups[e.ID] = e
+		if !snap.ShardGroups(&sgEntry, i) {
+			return fmt.Errorf("meta_fsm: Restore: shard group %d decode failed", i)
 		}
+		peers := make([]string, sgEntry.PeerIdsLength())
+		for j := 0; j < sgEntry.PeerIdsLength(); j++ {
+			peers[j] = string(sgEntry.PeerIds(j))
+		}
+		e := ShardGroupEntry{
+			ID:      string(sgEntry.Id()),
+			PeerIDs: peers,
+		}
+		newShardGroups[e.ID] = e
 	}
 
 	f.mu.Lock()

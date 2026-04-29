@@ -9,6 +9,7 @@ import (
 var ErrNoGroup = errors.New("router: no data group for bucket")
 
 // routerSnap is the immutable routing table for Router. COW replacement enables lock-free reads.
+// bucketMap is frozen once published via atomic.Pointer.Store — never mutate in-place; always copy-on-write.
 type routerSnap struct {
 	bucketMap      map[string]string // bucket → group_id (explicit assignments)
 	defaultGroupID string            // fallback group_id for unassigned buckets
@@ -56,7 +57,7 @@ func (r *Router) AssignBucket(bucket, groupID string) {
 }
 
 // RouteKey returns the DataGroup for the given bucket.
-// key is ignored at Layer 1. key-range sharding is excluded.
+// key is accepted but unused at Layer 1; reserved for future Layer 2 (ringFNV32) integration.
 func (r *Router) RouteKey(bucket, _ string) (*DataGroup, error) {
 	snap := r.snap.Load()
 	gid, ok := snap.bucketMap[bucket]
