@@ -306,6 +306,14 @@ func (sm *StateManager) DestroySession(sid SessionID) bool {
 	return ok
 }
 
+// ClientExists reports whether clientID is registered and confirmed.
+func (sm *StateManager) ClientExists(clientID uint64) bool {
+	sm.clientMu.Lock()
+	defer sm.clientMu.Unlock()
+	cs, ok := sm.clients[clientID]
+	return ok && cs.Confirmed
+}
+
 // DestroyClientID removes all sessions for clientID and the client record.
 func (sm *StateManager) DestroyClientID(clientID uint64) {
 	sm.sessionMu.Lock()

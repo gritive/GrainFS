@@ -88,12 +88,14 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	if required > maxObjectBytes {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_FBIG}
 	}
+	release := d.state.LockPath(d.currentPath)
+	defer release()
+
+	// Recheck size inside the lock to avoid TOCTOU: another writer may have
+	// extended the file between an earlier HeadObject and now.
 	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size >= required {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
-
-	release := d.state.LockPath(d.currentPath)
-	defer release()
 
 	var existing []byte
 	if body, _, err := d.backend.GetObject(nfs4Bucket, key); err == nil {

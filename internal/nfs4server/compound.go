@@ -84,6 +84,8 @@ const (
 	NFS4ERR_BADSESSION          = 10052
 	NFS4ERR_BADSLOT             = 10060
 	NFS4ERR_SEQ_MISORDERED      = 10063
+	NFS4ERR_RETRY_UNCACHED_REP  = 10070
+	NFS4ERR_STALE_CLIENTID      = 10022
 	NFS4ERR_MINOR_VERS_MISMATCH = 10021
 	NFS4ERR_OP_ILLEGAL          = 10044
 )
@@ -1296,13 +1298,20 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	slot := &sess.Slots[slotID]
 
 	// Replay detection: same seqID → return cached full COMPOUND response if available.
-	if slot.SeqID == seqID && (slot.HasCache || slot.SeqID > 0) {
+	if slot.SeqID == seqID && slot.SeqID > 0 {
 		if slot.HasCache {
 			d.replayFull = slot.Response // full COMPOUND bytes; used by server.go
 			d.state.sessionMu.Unlock()
 			return OpResult{OpCode: OpSequence, Status: NFS4_OK}
 		}
-		// cacheThis was false on first call; re-execute remaining ops (acceptable per RFC 5661).
+		if slot.WasCacheThis {
+			// cacheThis=1 was set on the original request but the response was never
+			// stored (e.g. server crashed between request and commit). RFC 5661 §18.46.3
+			// requires NFS4ERR_RETRY_UNCACHED_REP in this case.
+			d.state.sessionMu.Unlock()
+			return OpResult{OpCode: OpSequence, Status: NFS4ERR_RETRY_UNCACHED_REP}
+		}
+		// cacheThis was false on first call; re-execute remaining ops (RFC 5661 §2.10.5.1.3).
 		d.state.sessionMu.Unlock()
 		// fall through to re-build response below
 	} else if slot.SeqID > 0 && seqID != slot.SeqID+1 {
@@ -1310,6 +1319,11 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 		d.state.sessionMu.Unlock()
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_SEQ_MISORDERED}
 	} else {
+		// First request on this slot: RFC 5661 §18.46.3 requires seqID == 1.
+		if slot.SeqID == 0 && seqID != 1 {
+			d.state.sessionMu.Unlock()
+			return OpResult{OpCode: OpSequence, Status: NFS4ERR_SEQ_MISORDERED}
+		}
 		d.state.sessionMu.Unlock()
 	}
 
@@ -1328,8 +1342,10 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 		// Full COMPOUND response will be stored by storePendingCache after encoding.
 		d.pendingCacheSlot = slot
 		slot.HasCache = false
+		slot.WasCacheThis = true
 	} else {
 		slot.HasCache = false
+		slot.WasCacheThis = false
 		slot.Response = nil
 	}
 	d.state.sessionMu.Unlock()
@@ -1395,6 +1411,9 @@ func (d *Dispatcher) opDestroyClientID(data []byte) OpResult {
 		return OpResult{OpCode: OpDestroyClientID, Status: NFS4ERR_INVAL}
 	}
 	clientID := binary.BigEndian.Uint64(data[:8])
+	if !d.state.ClientExists(clientID) {
+		return OpResult{OpCode: OpDestroyClientID, Status: NFS4ERR_STALE_CLIENTID}
+	}
 	d.state.DestroyClientID(clientID)
 	return OpResult{OpCode: OpDestroyClientID, Status: NFS4_OK}
 }
