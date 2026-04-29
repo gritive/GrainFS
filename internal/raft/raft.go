@@ -192,8 +192,10 @@ type AppendEntriesArgs struct {
 
 // AppendEntriesReply is the response to an AppendEntries RPC.
 type AppendEntriesReply struct {
-	Term    uint64
-	Success bool
+	Term          uint64
+	Success       bool
+	ConflictTerm  uint64 // term of conflicting entry; 0 = not set or old peer
+	ConflictIndex uint64 // first index of ConflictTerm; 0 = not set
 }
 
 // Node is a single Raft consensus node.
@@ -948,9 +950,41 @@ func (n *Node) replicateTo(peer string) {
 		n.matchIndex[peer] = n.nextIndex[peer] - 1
 		n.advanceCommitIndex()
 	} else {
-		// Decrement nextIndex and retry on next heartbeat
-		if n.nextIndex[peer] > 1 {
-			n.nextIndex[peer]--
+		n.applyConflictHint(peer, reply, nextIdx, entries)
+	}
+}
+
+// applyConflictHint updates nextIndex[peer] based on a failed AppendEntries reply.
+// Must be called with n.mu held.
+// sentNextIdx is the nextIndex that was sent in the failed request.
+func (n *Node) applyConflictHint(peer string, reply *AppendEntriesReply, sentNextIdx uint64, _ []LogEntry) {
+	if reply.ConflictIndex > 0 {
+		if reply.ConflictTerm == 0 {
+			// Follower missing entries: jump directly to ConflictIndex.
+			n.nextIndex[peer] = reply.ConflictIndex
+		} else {
+			// Scan leader's log backwards for the last entry with ConflictTerm.
+			// If found, set nextIndex = that entry's index + 1 (skip past our own copy).
+			// If not found, use follower's ConflictIndex (skip the follower's bad term).
+			newNext := reply.ConflictIndex
+			for i := len(n.log) - 1; i >= 0; i-- {
+				raftIdx := n.firstIndex + uint64(i)
+				switch {
+				case n.log[i].Term == reply.ConflictTerm:
+					newNext = raftIdx + 1
+					raftConflictTermJumpsTotal.Inc()
+					goto applyDone
+				case n.log[i].Term < reply.ConflictTerm:
+					goto applyDone // not in our log, use follower hint
+				}
+			}
+		applyDone:
+			n.nextIndex[peer] = newNext
+		}
+	} else {
+		// Old peer without hint support: decrement by 1.
+		if sentNextIdx > 1 {
+			n.nextIndex[peer] = sentNextIdx - 1
 		}
 	}
 }
@@ -1148,10 +1182,21 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	// Log consistency check
 	if args.PrevLogIndex > 0 {
 		if !n.hasLogEntry(args.PrevLogIndex) {
-			return reply // we don't have the entry (compacted or not yet received)
+			// Follower is behind: tell leader our last index so it can jump directly.
+			reply.ConflictIndex = n.lastLogIdx() + 1
+			return reply
 		}
 		if n.log[n.toSliceIdx(args.PrevLogIndex)].Term != args.PrevLogTerm {
-			// Conflict: delete this entry and all that follow
+			// Term conflict: find the first index of the conflicting term
+			// so the leader can skip the entire bad term in one step.
+			conflictTerm := n.log[n.toSliceIdx(args.PrevLogIndex)].Term
+			conflictIdx := args.PrevLogIndex
+			for conflictIdx > n.firstIndex && n.hasLogEntry(conflictIdx-1) &&
+				n.log[n.toSliceIdx(conflictIdx-1)].Term == conflictTerm {
+				conflictIdx--
+			}
+			reply.ConflictTerm = conflictTerm
+			reply.ConflictIndex = conflictIdx
 			n.abortWaitersFrom(args.PrevLogIndex)
 			n.log = n.log[:n.toSliceIdx(args.PrevLogIndex)]
 			return reply

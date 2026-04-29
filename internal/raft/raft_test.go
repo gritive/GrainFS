@@ -1203,3 +1203,69 @@ func TestNode_Close_IsIdempotent(t *testing.T) {
 	// Second Close must not panic on double wg.Wait or double close(stopCh).
 	n.Close()
 }
+
+// TestAEReply_ConflictTermJumpsCorrectly verifies that when the leader receives
+// an AppendEntriesReply with ConflictTerm/ConflictIndex, it jumps nextIndex to
+// skip all conflicting entries in one step instead of decrementing one-by-one.
+func TestAEReply_ConflictTermJumpsCorrectly(t *testing.T) {
+	// Leader has log: [T1@1, T1@2, T1@3, T2@4, T2@5]
+	// Follower has:   [T1@1, T3@2]  — term conflict at index 2
+	// Reply: ConflictTerm=3, ConflictIndex=2
+	// Leader scans backwards: no T3 entry → nextIndex = ConflictIndex = 2
+	n := NewNode(Config{ID: "leader", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 2
+	n.log = []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 1},
+		{Index: 4, Term: 2},
+		{Index: 5, Term: 2},
+	}
+	n.firstIndex = 1
+	n.nextIndex = map[string]uint64{"follower": 6}
+	n.matchIndex = map[string]uint64{"follower": 0}
+	n.mu.Unlock()
+
+	reply := &AppendEntriesReply{
+		Term:          2,
+		Success:       false,
+		ConflictTerm:  3,
+		ConflictIndex: 2,
+	}
+	n.mu.Lock()
+	n.applyConflictHint("follower", reply, 6, []LogEntry{{Index: 5, Term: 2}})
+	got := n.nextIndex["follower"]
+	n.mu.Unlock()
+
+	// ConflictTerm=3 not in leader log → use ConflictIndex=2
+	assert.Equal(t, uint64(2), got)
+}
+
+// TestAEReply_FallbackToMinusOneForOldPeer verifies that when ConflictIndex=0
+// (old peer without conflict hint support), nextIndex decrements by 1.
+func TestAEReply_FallbackToMinusOneForOldPeer(t *testing.T) {
+	n := NewNode(Config{ID: "leader", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 1
+	n.log = []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
+	n.firstIndex = 1
+	n.nextIndex = map[string]uint64{"follower": 4}
+	n.matchIndex = map[string]uint64{"follower": 0}
+	n.mu.Unlock()
+
+	reply := &AppendEntriesReply{
+		Term:          1,
+		Success:       false,
+		ConflictTerm:  0,
+		ConflictIndex: 0, // old peer
+	}
+	n.mu.Lock()
+	n.applyConflictHint("follower", reply, 4, []LogEntry{{Index: 3, Term: 1}})
+	got := n.nextIndex["follower"]
+	n.mu.Unlock()
+
+	assert.Equal(t, uint64(3), got) // decremented by 1
+}

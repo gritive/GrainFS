@@ -45,6 +45,8 @@ table AppendEntriesArgs {
 table AppendEntriesReply {
   term:uint64;
   success:bool;
+  conflict_term:uint64;   // term of conflicting entry; 0 = not set / old peer
+  conflict_index:uint64;  // first log index of conflict_term; 0 = not set
 }
 
 table InstallSnapshotArgs {

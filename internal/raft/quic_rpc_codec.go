@@ -112,6 +112,8 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		pb.AppendEntriesReplyStart(b)
 		pb.AppendEntriesReplyAddTerm(b, reply.Term)
 		pb.AppendEntriesReplyAddSuccess(b, reply.Success)
+		pb.AppendEntriesReplyAddConflictTerm(b, reply.ConflictTerm)
+		pb.AppendEntriesReplyAddConflictIndex(b, reply.ConflictIndex)
 		root := pb.AppendEntriesReplyEnd(b)
 		return fbFinishRPC(b, root), nil
 
@@ -225,8 +227,10 @@ func decodeAppendEntriesReply(data []byte) (reply *AppendEntriesReply, err error
 	}()
 	r := pb.GetRootAsAppendEntriesReply(data, 0)
 	return &AppendEntriesReply{
-		Term:    r.Term(),
-		Success: r.Success(),
+		Term:          r.Term(),
+		Success:       r.Success(),
+		ConflictTerm:  r.ConflictTerm(),
+		ConflictIndex: r.ConflictIndex(),
 	}, nil
 }
 
