@@ -65,14 +65,40 @@ func (rcv *SnapshotMeta) MutateTerm(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(6, n)
 }
 
+func (rcv *SnapshotMeta) Servers(obj *ServerEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *SnapshotMeta) ServersLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func SnapshotMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func SnapshotMetaAddIndex(builder *flatbuffers.Builder, index uint64) {
 	builder.PrependUint64Slot(0, index, 0)
 }
 func SnapshotMetaAddTerm(builder *flatbuffers.Builder, term uint64) {
 	builder.PrependUint64Slot(1, term, 0)
+}
+func SnapshotMetaAddServers(builder *flatbuffers.Builder, servers flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(servers), 0)
+}
+func SnapshotMetaStartServersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func SnapshotMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

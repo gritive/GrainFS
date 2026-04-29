@@ -15,10 +15,33 @@ table ShardRequest {
   data:[ubyte];
 }
 
+enum LogEntryType : byte {
+  Command = 0,        // normal FSM command (default; backward-compatible)
+  ConfChange = 1,     // §4.4 single-server membership change
+  JointConfChange = 2 // §4.3 joint consensus (reserved; not yet implemented)
+}
+
+enum ConfChangeOp : byte {
+  AddVoter = 0,
+  RemoveVoter = 1,
+  AddLearner = 2,
+  PromoteToVoter = 3
+}
+
+table ConfChangeEntry {
+  op:ConfChangeOp;
+  server_id:string;
+  server_address:string;
+  // §4.3 reserved fields (unused in §4.4 ops, kept for future joint consensus):
+  new_config:[string];
+  old_config:[string];
+}
+
 table LogEntry {
   term:uint64;
   index:uint64;
   command:[ubyte];
+  entry_type:LogEntryType = Command; // default 0 = backward-compatible
 }
 
 table RequestVoteArgs {
@@ -49,12 +72,19 @@ table AppendEntriesReply {
   conflict_index:uint64;  // first log index of conflict_term; 0 = not set
 }
 
+table ServerEntry {
+  id:string;
+  address:string;
+  suffrage:int8; // 0=Voter, 1=NonVoter
+}
+
 table InstallSnapshotArgs {
   term:uint64;
   leader_id:string;
   last_included_index:uint64;
   last_included_term:uint64;
   data:[ubyte];
+  servers:[ServerEntry]; // cluster config at snapshot point; restores config.Peers on follower
 }
 
 table InstallSnapshotReply {
@@ -69,6 +99,7 @@ table RaftState {
 table SnapshotMeta {
   index:uint64;
   term:uint64;
+  servers:[ServerEntry]; // cluster config at snapshot point
 }
 
 root_type RPCMessage;

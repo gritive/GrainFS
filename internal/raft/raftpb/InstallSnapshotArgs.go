@@ -119,8 +119,28 @@ func (rcv *InstallSnapshotArgs) MutateData(j int, n byte) bool {
 	return false
 }
 
+func (rcv *InstallSnapshotArgs) Servers(obj *ServerEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *InstallSnapshotArgs) ServersLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func InstallSnapshotArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func InstallSnapshotArgsAddTerm(builder *flatbuffers.Builder, term uint64) {
 	builder.PrependUint64Slot(0, term, 0)
@@ -139,6 +159,12 @@ func InstallSnapshotArgsAddData(builder *flatbuffers.Builder, data flatbuffers.U
 }
 func InstallSnapshotArgsStartDataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
+}
+func InstallSnapshotArgsAddServers(builder *flatbuffers.Builder, servers flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(servers), 0)
+}
+func InstallSnapshotArgsStartServersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func InstallSnapshotArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
