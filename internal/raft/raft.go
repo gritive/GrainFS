@@ -373,7 +373,7 @@ func (n *Node) SetNoOpCommand(cmd []byte) {
 // Call Bootstrap once before the very first Start(). On subsequent restarts
 // Bootstrap returns ErrAlreadyBootstrapped, which callers should ignore.
 // No-op when store is nil (in-memory nodes).
-func (n *Node) Bootstrap(config Config) error {
+func (n *Node) Bootstrap() error {
 	if n.store == nil {
 		return nil
 	}

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -1419,8 +1420,8 @@ func TestBootstrap_RejectsSecondCall(t *testing.T) {
 	cfg := DefaultConfig("node-0", []string{"node-1", "node-2"})
 	node := NewNode(cfg, store)
 
-	require.NoError(t, node.Bootstrap(cfg))
-	err = node.Bootstrap(cfg)
+	require.NoError(t, node.Bootstrap())
+	err = node.Bootstrap()
 	assert.ErrorIs(t, err, ErrAlreadyBootstrapped)
 }
 
@@ -1439,7 +1440,7 @@ func TestBootstrap_AutoDetectsExistingStore(t *testing.T) {
 	cfg := DefaultConfig("node-0", []string{"node-1", "node-2"})
 	node := NewNode(cfg, store2)
 
-	err = node.Bootstrap(cfg)
+	err = node.Bootstrap()
 	assert.ErrorIs(t, err, ErrAlreadyBootstrapped,
 		"Bootstrap must detect pre-existing hard state (term=1)")
 }
@@ -1465,4 +1466,105 @@ func TestObserver_DeliversLeaderChange(t *testing.T) {
 			}
 		}
 	}, 5*time.Second, 10*time.Millisecond, "observer must deliver EventLeaderChange with IsLeader=true")
+}
+
+// TestObserver_DeregisterStopsDelivery verifies that after DeregisterObserver
+// no further events are delivered to the deregistered channel.
+func TestObserver_DeregisterStopsDelivery(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	n := NewNode(cfg)
+
+	ch := make(chan Event, 10)
+	n.RegisterObserver(ch)
+
+	e := Event{Type: EventLeaderChange, IsLeader: true, Term: 1}
+	n.notifyObservers(e)
+	require.Len(t, ch, 1, "event should be delivered before deregister")
+
+	n.DeregisterObserver(ch)
+	<-ch // drain
+
+	n.notifyObservers(e)
+	assert.Len(t, ch, 0, "no event should be delivered after deregister")
+}
+
+// TestObserver_FullChannelDrops verifies that a full observer channel causes
+// the event to be dropped rather than blocking Raft.
+func TestObserver_FullChannelDrops(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	n := NewNode(cfg)
+
+	ch := make(chan Event, 1)
+	n.RegisterObserver(ch)
+	ch <- Event{} // fill the channel
+
+	// This must not block.
+	done := make(chan struct{})
+	go func() {
+		n.notifyObservers(Event{Type: EventLeaderChange, IsLeader: true, Term: 1})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("notifyObservers blocked on full channel")
+	}
+}
+
+// TestBootstrap_NilStoreNoOp verifies that Bootstrap with a nil store is a no-op
+// (returns nil error) — used when running with in-memory state for tests.
+func TestBootstrap_NilStoreNoOp(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	node := NewNode(cfg) // no store argument → store is nil
+	err := node.Bootstrap()
+	assert.NoError(t, err)
+}
+
+// TestObserver_FailedHeartbeat verifies that EventFailedHeartbeat fires when
+// replicateTo cannot send AppendEntries to a peer.
+func TestObserver_FailedHeartbeat(t *testing.T) {
+	cfg := DefaultConfig("node1", []string{"node2"})
+	cfg.ElectionTimeout = 50 * time.Millisecond
+	cfg.HeartbeatTimeout = 30 * time.Millisecond
+	node := NewNode(cfg)
+
+	failCh := make(chan Event, 10)
+	node.RegisterObserver(failCh)
+
+	node.SetTransport(
+		func(_ string, _ *RequestVoteArgs) (*RequestVoteReply, error) {
+			return &RequestVoteReply{Term: 0, VoteGranted: true}, nil
+		},
+		func(_ string, _ *AppendEntriesArgs) (*AppendEntriesReply, error) {
+			return nil, fmt.Errorf("simulated network failure")
+		},
+	)
+	node.Start()
+	defer node.Stop()
+	go func() {
+		for range node.ApplyCh() {
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		return node.State() == Leader
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Trigger replication by proposing.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go node.ProposeWait(ctx, []byte("cmd")) //nolint:errcheck
+
+	require.Eventually(t, func() bool {
+		for {
+			select {
+			case e := <-failCh:
+				if e.Type == EventFailedHeartbeat && e.PeerID == "node2" {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}, 2*time.Second, 10*time.Millisecond, "EventFailedHeartbeat must be delivered for node2")
 }
