@@ -620,8 +620,11 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 		}
 	}
 
-	h := md5.Sum(data)
-	etag := hex.EncodeToString(h[:])
+	var etag string
+	if !storage.IsInternalBucket(bucket) {
+		h := md5.Sum(data)
+		etag = hex.EncodeToString(h[:])
+	}
 	now := time.Now().Unix()
 
 	// Replicate metadata through Raft

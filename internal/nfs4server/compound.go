@@ -830,45 +830,54 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	}
 
 	// Serialise all writes to the same path. Without this, an offset=0
-	// PutObject can run concurrently with an offset>0 RMW (GetObject →
-	// modify → PutObject), clobbering the RMW writer's data.
+	// PutObject can run concurrently with an offset>0 RMW, clobbering data.
 	release := d.state.LockPath(key)
 	defer release()
 
-	// Determine whether this write fully covers the existing file. If so,
-	// PutObject can replace the file directly (cheap path). Otherwise we
-	// must RMW so bytes outside [offset, end) are preserved (NFSv4 WRITE
-	// is partial overwrite, not truncate).
-	var existingSize uint64
-	if obj, herr := d.backend.HeadObject(nfs4Bucket, key); herr == nil {
-		existingSize = uint64(obj.Size)
+	// writeAtBackend is the zero-allocation partial-write interface.
+	// LocalBackend (and CachedBackend wrapping it) implement this.
+	type writeAtBackend interface {
+		WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error)
 	}
-	end := offset + uint64(len(writeData))
 
-	br := bytesReaderPool.Get()
-	defer bytesReaderPool.Put(br)
-
-	if offset == 0 && end >= existingSize {
-		br.Reset(writeData)
-		_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
+	if wa, ok := d.backend.(writeAtBackend); ok {
+		// Fast path: stream prefix+data+suffix via kernel I/O — no heap allocation.
+		if _, err = wa.WriteAt(nfs4Bucket, key, offset, writeData); err != nil {
+			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+		}
 	} else {
-		var existing []byte
-		if rc, _, rerr := d.backend.GetObject(nfs4Bucket, key); rerr == nil {
-			existing, err = io.ReadAll(rc)
-			rc.Close()
-			if err != nil {
-				return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+		// Fallback: RMW for backends that don't implement WriteAt.
+		var existingSize uint64
+		if obj, herr := d.backend.HeadObject(nfs4Bucket, key); herr == nil {
+			existingSize = uint64(obj.Size)
+		}
+		end := offset + uint64(len(writeData))
+
+		br := bytesReaderPool.Get()
+		defer bytesReaderPool.Put(br)
+
+		if offset == 0 && end >= existingSize {
+			br.Reset(writeData)
+			_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
+		} else {
+			var existing []byte
+			if rc, _, rerr := d.backend.GetObject(nfs4Bucket, key); rerr == nil {
+				existing, err = io.ReadAll(rc)
+				rc.Close()
+				if err != nil {
+					return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+				}
 			}
+			if uint64(len(existing)) < end {
+				existing = append(existing, make([]byte, end-uint64(len(existing)))...)
+			}
+			copy(existing[offset:], writeData)
+			br.Reset(existing)
+			_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
 		}
-		if uint64(len(existing)) < end {
-			existing = append(existing, make([]byte, end-uint64(len(existing)))...)
+		if err != nil {
+			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 		}
-		copy(existing[offset:], writeData)
-		br.Reset(existing)
-		_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
-	}
-	if err != nil {
-		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 	}
 
 	w := getXDRWriter()
