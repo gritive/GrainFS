@@ -54,6 +54,39 @@ func TestRouter_RouteKey_KeyIgnored(t *testing.T) {
 	assert.Equal(t, g1.ID(), g2.ID(), "same bucket → same group, key is ignored")
 }
 
+func TestRouter_Sync_Bootstrap(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
+	r := NewRouter(mgr)
+	r.SetDefault("group-0")
+
+	r.Sync(map[string]string{
+		"photos": "group-0",
+		"videos": "group-0",
+	})
+
+	g, err := r.RouteKey("photos", "")
+	require.NoError(t, err)
+	assert.Equal(t, "group-0", g.ID())
+
+	g2, err := r.RouteKey("videos", "")
+	require.NoError(t, err)
+	assert.Equal(t, "group-0", g2.ID())
+}
+
+func TestRouter_AssignBucket_RuntimeUpdate(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
+	r := NewRouter(mgr)
+	r.SetDefault("group-0")
+
+	r.AssignBucket("photos", "group-0")
+
+	g, err := r.RouteKey("photos", "")
+	require.NoError(t, err)
+	assert.Equal(t, "group-0", g.ID())
+}
+
 func TestRouter_ConcurrentReadWrite_Race(t *testing.T) {
 	const nGroups = 10
 	mgr := NewDataGroupManager()
