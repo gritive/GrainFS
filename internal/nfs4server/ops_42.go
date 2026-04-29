@@ -89,8 +89,11 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 
 	var existing []byte
 	if body, _, err := d.backend.GetObject(nfs4Bucket, key); err == nil {
-		existing, _ = io.ReadAll(body)
+		existing, err = io.ReadAll(body)
 		body.Close()
+		if err != nil {
+			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
+		}
 	}
 	if int64(len(existing)) < required {
 		existing = append(existing, make([]byte, required-int64(len(existing)))...)
