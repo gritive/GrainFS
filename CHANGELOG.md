@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.6.2] — 2026-04-30
+
+### Added
+- **cluster**: MetaFSM `loadSnapshot`, `activePlan` 필드 + `SetLoadSnapshot`, `ProposeRebalancePlan`, `AbortPlan` MetaCmdType 3종
+- **cluster**: LoadReporter — meta-Raft leader-only 30s load commit 루프 (P1: ~44 MB/day)
+- **cluster**: Rebalancer actor — imbalance 평가 + RebalancePlan 제안 + 10분 plan timeout abort
+- **cluster**: GroupRebalancer interface + StubGroupRebalancer (PR-E에서 real executor 구현)
+- **cluster**: MockGroupRebalancer — 테스트용 MoveReplica recorder
+- **cluster**: FlatBuffers `LoadStatEntry`, `RebalancePlan`, `MetaSetLoadSnapshotCmd`, `MetaProposeRebalancePlanCmd`, `MetaAbortPlanCmd`
+- **cluster**: MetaRaft `ProposeLoadSnapshot`, `ProposeRebalancePlan`, `ProposeAbortPlan`, `IsLeader` 메서드
+- **cli**: `grainfs cluster plan-show` — 활성 rebalance plan + load snapshot 출력
+- **cli**: `grainfs cluster rebalance --dry-run` — 불균형 감지 preview
+
 ## [0.0.6.1] — 2026-04-30
 
 ### Added
