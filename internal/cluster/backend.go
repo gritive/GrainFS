@@ -566,7 +566,7 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 	// placement would leak stale shards on ring topology changes.
 	versionID := newVersionID()
 	useEC := b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil
-	if storage.IsVFSBucket(bucket) && b.vfsFixedVersion.Load() {
+	if storage.IsInternalBucket(bucket) && b.vfsFixedVersion.Load() {
 		versionID = "current"
 		useEC = false
 	}
@@ -776,6 +776,85 @@ func (b *DistributedBackend) putObjectNxAsync(bucket, key, versionID string, dat
 		return nil
 	}
 	return obj, commitFn, nil
+}
+
+// WriteAt implements a pwrite-based fast path for internal buckets (NFS4 and
+// VFS). It avoids the full-file RMW cost by calling pwrite(2) directly on the
+// versioned path, then updating BadgerDB metadata without a Raft propose.
+//
+// Constraints: single-node only — no peer replication, no EC. Callers MUST
+// check IsInternalBucket before relying on this; ErrNotSupported is returned
+// for user-facing buckets.
+func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	if !storage.IsInternalBucket(bucket) {
+		return nil, fmt.Errorf("WriteAt not supported for user bucket %q", bucket)
+	}
+
+	objPath := b.objectPathV(bucket, key, "current")
+	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+		return nil, fmt.Errorf("create object dir: %w", err)
+	}
+
+	f, err := os.OpenFile(objPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open object: %w", err)
+	}
+	defer f.Close()
+
+	if _, err = f.WriteAt(data, int64(offset)); err != nil {
+		return nil, fmt.Errorf("pwrite object: %w", err)
+	}
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat object: %w", err)
+	}
+	newSize := fi.Size()
+	now := time.Now().Unix()
+
+	meta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         newSize,
+		ContentType:  "application/octet-stream",
+		LastModified: now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal object meta: %w", err)
+	}
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
+			return err
+		}
+		if err := txn.Set(objectMetaKeyV(bucket, key, "current"), meta); err != nil {
+			return err
+		}
+		return txn.Set(latestKey(bucket, key), []byte("current"))
+	}); err != nil {
+		return nil, fmt.Errorf("update object meta: %w", err)
+	}
+
+	return &storage.Object{
+		Key:          key,
+		Size:         newSize,
+		ContentType:  "application/octet-stream",
+		LastModified: now,
+		VersionID:    "current",
+	}, nil
+}
+
+// ReadAt implements zero-overhead pread for internal buckets (NFS4/VFS).
+// Bypasses HeadObject, EC path, and shardSvc — directly pread(2) the
+// versioned local file. Only valid for internal buckets with "current" version.
+func (b *DistributedBackend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+	if !storage.IsInternalBucket(bucket) {
+		return 0, fmt.Errorf("ReadAt not supported for user bucket %q", bucket)
+	}
+	f, err := os.Open(b.objectPathV(bucket, key, "current"))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.ReadAt(buf, offset)
 }
 
 // putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into
@@ -2317,4 +2396,9 @@ func (b *DistributedBackend) partDir(uploadID string) string {
 
 func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
+}
+
+// RaftNode returns the underlying raft.Node for direct API access (e.g. learner management).
+func (b *DistributedBackend) RaftNode() *raft.Node {
+	return b.node
 }

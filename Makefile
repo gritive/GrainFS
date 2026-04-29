@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd
+.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd test-fuse-s3-colima bench-fuse-s3-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 
@@ -54,6 +54,18 @@ test-nbd-colima: build
 
 bench-nbd: build
 	./benchmarks/bench_nbd_profile.sh
+
+# FUSE-over-S3 e2e: macOS host runs grainfs serve, Colima Linux VM mounts via
+# rclone mount and exercises common filesystem operations. Verifies that
+# GrainFS's S3 API works with standard FUSE-over-S3 client tooling.
+# Prereqs in the VM: rclone, fuse3 (e.g., colima ssh -- sudo apt install -y rclone fuse3)
+test-fuse-s3-colima: build
+	go test -v -tags colima -timeout 180s ./tests/fuse_s3_colima/ -run TestFUSE_S3
+
+# FUSE-over-S3 throughput benchmark: compares direct S3 GET/PUT vs rclone mount
+# read/write to quantify the FUSE overhead. Run after test-fuse-s3-colima.
+bench-fuse-s3-colima: build
+	go test -v -tags colima -timeout 300s -run '^$$' -bench BenchmarkFUSE_S3_Throughput -benchtime 1x ./tests/fuse_s3_colima/
 
 test-jepsen: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestJepsen -v -timeout 5m

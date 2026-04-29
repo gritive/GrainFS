@@ -20,7 +20,17 @@
   - PR-A: §4.4 one-at-a-time membership change 정확 구현 (AddVoter/RemoveVoter/AddLearner/PromoteToVoter, FlatBuffers ConfChangeEntry)
   - PR-B: meta-Raft scaffold (클러스터 사실의 소스, shard_map, load_snapshot)
   - PR-C: 데이터 그룹 다중화 + bucket→group Router
-  - PR-D: autonomous rebalance (10s tick + meta-Raft leader 평가 + RebalancePlan)
+  - PR-D: autonomous rebalance (10s tick + meta-Raft leader 평가 + RebalancePlan) — 플랜 리뷰 + 교차검증 완료, must-fix 확인됨:
+    - M1: tickOnce resume 분기 (leader restart) + executingPlan atomic.Pointer + 리더십 이탈 시 cancel
+    - M2: MetaAbortPlanCmd reason:uint8 (Should-fix — PR-E로 이연 가능)
+    - ~~M3: 기각~~ — serve.go에서 이미 seed, broadcastOnce() 수정 불필요
+    - M4: CreateVectorOfSortedTables → StartEntriesVector 패턴 교체 (Snapshot() line도 포함)
+    - M5: applyAbortPlan() idempotent guard — planID 불일치 시 no-op (에러 반환 금지)
+    - T1-T3: restart-with-active-plan, ExecutePlan failure, Stop+goroutine leak 테스트
+    - P1: EvalInterval 30s + zero/stale 노드 제외 (~177 MB/day → ~44 MB/day)
+    - A1: Snapshot() FlatBuffers 빌드 순서 — lsVec을 Start 이전 완성
+    - A2: SetOnRebalancePlan callback doc "must not block" 추가
+    - A3: make fbs 선행 후 Entries() 시그니처 확인 후 decode 코드 작성
   - PR-E: EC + Multi-Raft 통합 마무리 + k6 256 group 벤치
   - 설계: `~/.gstack/projects/gritive-GrainFS/whitekid-joint-consensus-design-20260429.md`
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
@@ -28,6 +38,22 @@
 - [ ] Migration: NBD block proxying
 - [ ] nbd over internet for edge computing (powered by wireguard)
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
+
+## Phase 18: FUSE-over-S3 (외부 도구 호환성 보증)
+
+**방침**: 별도 FUSE 바이너리/서버 사이드 마운트를 만들지 않는다. GrainFS는 표준 S3 API만 제공하고, 클라이언트는 rclone / s3fs / goofys 같은 기존 FUSE-over-S3 도구를 그대로 사용한다. 클라이언트 머신에 grainfs 바이너리 설치 불필요.
+
+**완료**:
+- [x] `internal/storage/errors.go` — sentinel errors (`ErrECDegraded`, `ErrNoSpace`, `ErrQuotaExceeded`, `ErrInvalidVersion`)
+- [x] `internal/vfs/vfs.go` — `grainFile.ReadAt` 동시성 안전 (`mu sync.Mutex` + `rc`/`pos` 보호) — io.ReaderAt 계약 준수, S3 GetObject 병렬 range read 지원
+- [x] `tests/fuse_s3_colima/` — Colima Linux VM에서 rclone mount로 macOS 호스트 GrainFS S3 endpoint 마운트 후 smoke / directories / rename / cross-protocol round-trip 검증 (`make test-fuse-s3-colima`)
+- [x] `tests/fuse_s3_colima/bench_test.go` — FUSE mount vs direct S3 처리량 벤치 (`make bench-fuse-s3-colima`). 64 MiB / Apple M3 / loopback / `--vfs-cache-mode off` / 3회 평균: Direct PUT 96.8 MB/s · Direct GET 108.0 MB/s · FUSE Write 106.7 MB/s · FUSE Read 107.3 MB/s — **FUSE 오버헤드 ≈ 0%**
+- [x] README "FUSE-over-S3 마운트" 섹션 — 마운트 가이드 + 지원/미지원 연산표 + 처리량 결과
+
+**향후 (선택)**:
+- [ ] s3fs-fuse, goofys 호환성 추가 검증 (현재 rclone만 검증)
+- [ ] FUSE-over-S3 throughput 벤치 (NFSv4 baseline 대비)
+- [ ] 엄격한 POSIX 시맨틱(atomic rename, file locking)이 필요하면 NFSv4 권장 — 별도 FUSE 솔루션 도입은 NFSv4 운영성 부족이 입증된 이후
 
 ## Phase 19: Performance
 

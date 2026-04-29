@@ -1,9 +1,62 @@
 # Changelog
 
-## [0.0.6.1] — 2026-04-30
+## [0.0.6.4] — 2026-04-30
 
 ### Added
 
+- **FUSE-over-S3 호환성 검증** — GrainFS는 별도 FUSE 클라이언트 바이너리 없이 표준 S3-compatible 도구(rclone/s3fs/goofys)로 마운트할 수 있음을 e2e + 처리량 벤치로 보증. 클라이언트 머신에 grainfs 설치 불필요.
+- `tests/fuse_s3_colima/` — Colima Linux VM에서 macOS 호스트 GrainFS S3 endpoint를 rclone mount로 마운트해 검증하는 e2e 4건 (smoke / directories / rename / cross-protocol). `make test-fuse-s3-colima`.
+- `tests/fuse_s3_colima/bench_test.go` — Direct S3(rclone copyto) vs FUSE mount(rclone mount) 처리량 비교 벤치. 64 MiB · `--vfs-cache-mode off` · 3회 평균: Direct PUT 96.8 MB/s · Direct GET 108.0 MB/s · FUSE Write 106.7 MB/s · FUSE Read 107.3 MB/s. **FUSE 오버헤드 ≈ 0%**. `make bench-fuse-s3-colima`.
+- README "FUSE-over-S3 마운트" 섹션 — rclone 설정 가이드 + 지원/미지원 연산표(rename ⚠️ non-atomic, chmod ❌, file locking ❌) + 처리량 결과.
+- `internal/storage/errors.go`: sentinel errors `ErrECDegraded`, `ErrNoSpace`, `ErrQuotaExceeded`, `ErrInvalidVersion` — 향후 backend별 에러 분류용.
+
+### Changed
+
+- `internal/vfs/vfs.go` `grainFile.ReadAt`: `mu sync.Mutex` 추가로 동시 ReadAt에서 `rc`/`pos` 보호 (`io.ReaderAt` 계약 준수). FUSE-over-S3 도구가 발행하는 병렬 range GET 요청에 안전.
+
+## [0.0.6.3] — 2026-04-30
+
+### Added
+
+- **cluster**: `DataGroupPlanExecutor` — `MoveReplica` 실제 Raft voter 마이그레이션 구현 (AddLearner → catch-up 대기 → PromoteToVoter → RemoveVoter → MetaFSM ProposeShardGroup). `StubGroupRebalancer` 대체.
+- **cluster**: `DataRaftNode` 인터페이스 — `dataRaftNode` exported alias; `raft.Node`가 compile-time 구현 검증.
+- **cluster**: `DataGroupPlanExecutorForTest` — 테스트용 `nodeFor` 주입 팩토리.
+- **raft**: `AddLearner`/`PromoteToVoter`/`RemoveVoter` 실 구현 — `applyConfigChangeLocked`에서 `ConfChangeAddLearner`, `ConfChangePromote` 처리; `learnerIDs` 맵으로 learner 추적.
+- **raft**: `PeerMatchIndex(peerKey)` — learner catch-up 대기에 필요한 replication 상태 조회.
+- **raft**: `replicateToAll` — voter 외에 learner에게도 log 복제.
+- **raft/chaos/scenarios**: `TestVoterMigration_AddLearnerPromoteRemove` — 4-node chaos cluster voter 교체 통합 테스트.
+- **cluster**: `TestVoterMigration_ViaDataGroupPlanExecutor` — real `raft.Node` e2e 테스트.
+
+### Fixed
+
+- **cluster**: `TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds` — real joiner node(m1, m2) 사용으로 재작성; AddLearner/PromoteToVoter가 실 구현이 된 이후에도 conf change serial enforcement 검증 가능.
+
+## [0.0.6.2] — 2026-04-30
+
+### Added
+- **cluster**: MetaFSM `loadSnapshot`, `activePlan` 필드 + `SetLoadSnapshot`, `ProposeRebalancePlan`, `AbortPlan` MetaCmdType 3종
+- **cluster**: LoadReporter — meta-Raft leader-only 30s load commit 루프 (P1: ~44 MB/day)
+- **cluster**: Rebalancer actor — imbalance 평가 + RebalancePlan 제안 + 10분 plan timeout abort
+- **cluster**: GroupRebalancer interface + StubGroupRebalancer (PR-E에서 real executor 구현)
+- **cluster**: MockGroupRebalancer — 테스트용 MoveReplica recorder
+- **cluster**: FlatBuffers `LoadStatEntry`, `RebalancePlan`, `MetaSetLoadSnapshotCmd`, `MetaProposeRebalancePlanCmd`, `MetaAbortPlanCmd`
+- **cluster**: MetaRaft `ProposeLoadSnapshot`, `ProposeRebalancePlan`, `ProposeAbortPlan`, `IsLeader` 메서드
+- **cli**: `grainfs cluster plan-show` — 활성 rebalance plan + load snapshot 출력
+- **cli**: `grainfs cluster rebalance --dry-run` — 불균형 감지 preview
+
+## [0.0.6.1] — 2026-04-30
+
+### Performance
+
+- **NFSv4 opRead ReadAt fast path** (`internal/nfs4server/compound.go`, `internal/cluster/backend.go`, `internal/storage/cache.go`, `internal/storage/wal/backend.go`): sequential read 2.6 MiB/s → 116 MiB/s (44×). 근본 원인: opRead마다 `HeadObject×2 + GetObject(os.Open) + Seek` = 4×BadgerDB 조회 + 파일 오픈/클로즈가 128 KiB NFS READ마다 발생 (256 MiB 파일 = 2048 READ = 8192 BadgerDB reads + 2048 파일 오픈). `ReadAt(bucket,key,offset,buf)` 인터페이스 추가 — `DistributedBackend.ReadAt`은 HeadObject/EC path 우회, `os.File.ReadAt(pread)` 직접 호출. `CachedBackend.ReadAt`은 캐시 히트 시 `bytes.Reader.ReadAt` (zero-copy), 미스 시 inner backend 위임. `opRead` 패스트패스: `readAtBackend` 타입 어서션으로 HeadObject+GetObject+Seek 전면 제거. 128 KiB ReadAt 버퍼 pool화로 per-call alloc(1921 MB) 제거.
+
+### Added
+
+- `DistributedBackend.ReadAt` — 내부 버킷 전용 pread(2) API, EC/shardSvc/HeadObject 우회.
+- `wal.Backend.ReadAt` — pass-through (read는 WAL 항목 없음).
+- `CachedBackend.ReadAt` — 캐시 히트/미스 양 경로 지원.
+- `readAtBackend` 인터페이스 (`internal/nfs4server/compound.go`).
+- `opReadAtBufPool` — 128 KiB 읽기 버퍼 pool.
 - **cluster**: `PutBucketAssignment` Raft 커맨드 — bucket→shard-group 매핑을 MetaFSM 로그에 persist; `Snapshot`/`Restore` 시리얼라이즈 포함.
 - **cluster**: `MetaRaft.ProposeBucketAssignment` — 동기 propose + apply-wait.
 - **cluster**: `BucketAssigner` 인터페이스 — `server.CreateBucket` 호출 시 MetaRaft로 버킷을 shard group에 자동 배정.

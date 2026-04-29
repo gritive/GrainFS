@@ -7,30 +7,39 @@ import "strconv"
 type MetaCmdType byte
 
 const (
-	MetaCmdTypeNoOp                MetaCmdType = 0
-	MetaCmdTypeAddNode             MetaCmdType = 1
-	MetaCmdTypeRemoveNode          MetaCmdType = 2
-	MetaCmdTypePutShardGroup       MetaCmdType = 3
-	MetaCmdTypeSetActivePlan       MetaCmdType = 4
-	MetaCmdTypePutBucketAssignment MetaCmdType = 5
+	MetaCmdTypeNoOp                 MetaCmdType = 0
+	MetaCmdTypeAddNode              MetaCmdType = 1
+	MetaCmdTypeRemoveNode           MetaCmdType = 2
+	MetaCmdTypePutShardGroup        MetaCmdType = 3
+	MetaCmdTypeSetActivePlan        MetaCmdType = 4
+	MetaCmdTypePutBucketAssignment  MetaCmdType = 5
+	MetaCmdTypeSetLoadSnapshot      MetaCmdType = 6
+	MetaCmdTypeProposeRebalancePlan MetaCmdType = 7
+	MetaCmdTypeAbortPlan            MetaCmdType = 8
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
-	MetaCmdTypeNoOp:                "NoOp",
-	MetaCmdTypeAddNode:             "AddNode",
-	MetaCmdTypeRemoveNode:          "RemoveNode",
-	MetaCmdTypePutShardGroup:       "PutShardGroup",
-	MetaCmdTypeSetActivePlan:       "SetActivePlan",
-	MetaCmdTypePutBucketAssignment: "PutBucketAssignment",
+	MetaCmdTypeNoOp:                 "NoOp",
+	MetaCmdTypeAddNode:              "AddNode",
+	MetaCmdTypeRemoveNode:           "RemoveNode",
+	MetaCmdTypePutShardGroup:        "PutShardGroup",
+	MetaCmdTypeSetActivePlan:        "SetActivePlan",
+	MetaCmdTypePutBucketAssignment:  "PutBucketAssignment",
+	MetaCmdTypeSetLoadSnapshot:      "SetLoadSnapshot",
+	MetaCmdTypeProposeRebalancePlan: "ProposeRebalancePlan",
+	MetaCmdTypeAbortPlan:            "AbortPlan",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
-	"NoOp":                MetaCmdTypeNoOp,
-	"AddNode":             MetaCmdTypeAddNode,
-	"RemoveNode":          MetaCmdTypeRemoveNode,
-	"PutShardGroup":       MetaCmdTypePutShardGroup,
-	"SetActivePlan":       MetaCmdTypeSetActivePlan,
-	"PutBucketAssignment": MetaCmdTypePutBucketAssignment,
+	"NoOp":                 MetaCmdTypeNoOp,
+	"AddNode":              MetaCmdTypeAddNode,
+	"RemoveNode":           MetaCmdTypeRemoveNode,
+	"PutShardGroup":        MetaCmdTypePutShardGroup,
+	"SetActivePlan":        MetaCmdTypeSetActivePlan,
+	"PutBucketAssignment":  MetaCmdTypePutBucketAssignment,
+	"SetLoadSnapshot":      MetaCmdTypeSetLoadSnapshot,
+	"ProposeRebalancePlan": MetaCmdTypeProposeRebalancePlan,
+	"AbortPlan":            MetaCmdTypeAbortPlan,
 }
 
 func (v MetaCmdType) String() string {
