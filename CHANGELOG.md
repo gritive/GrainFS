@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.5.7] — 2026-04-29
+
+### Added
+
+- **MetaFSM** (`internal/cluster/meta_fsm.go`): FlatBuffers 기반 클러스터 멤버십 상태 머신 (AddNode/RemoveNode/Snapshot/Restore).
+- **MetaRaft** (`internal/cluster/meta_raft.go`): 컨트롤 플레인 전용 `raft.Node`; lock-free apply-wait (generation channel + `atomic.Uint64`).
+- **MetaTransportQUIC** (`internal/raft/meta_transport_quic.go`): QUIC 스트림 `StreamMetaRaft = 0x07`로 데이터 플레인과 분리.
+- **`cluster join` CLI** (`cmd/grainfs/cluster_join.go`): 운영자용 meta-Raft 클러스터 참가 서브커맨드.
+- **3-node E2E 테스트** (`internal/cluster/meta_raft_e2e_test.go`): in-process 부트스트랩, Join×2, 리더 검증.
+
+### Fixed
+
+- **QUIC codec MetaRPC 등록 누락** (`internal/raft/quic_rpc_codec.go`): `"MetaRequestVote"` 등 6개 타입 문자열 미등록으로 프로덕션 QUIC meta-Raft RPC 전체 실패 (silent error). 멀티-케이스 레이블 추가로 수정.
+- **waitApplied TOCTOU 순서 버그**: load-then-snapshot 순서가 snapshot-then-check로 역전되면 알림 누락. snapshot-first 순서로 수정.
+
 ## [0.0.5.6] — 2026-04-29
 
 ### Added
