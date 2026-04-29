@@ -315,6 +315,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	cfg.ManagedMode = badgerManagedMode
 	cfg.LogGCInterval = raftLogGCInterval
 	node := raft.NewNode(cfg, logStore)
+	if err := node.Bootstrap(cfg); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
+		return fmt.Errorf("raft bootstrap: %w", err)
+	}
 
 	// Wire QUIC transport to Raft RPC layer
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
