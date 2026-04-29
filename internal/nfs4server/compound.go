@@ -277,6 +277,16 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opFreeStateID(op.Data)
 	case OpTestStateID:
 		return d.opTestStateID(op.Data)
+	case OpSeek:
+		return d.opSeek(op.Data)
+	case OpAllocate:
+		return d.opAllocate(op.Data)
+	case OpDeallocate:
+		return d.opDeallocate(op.Data)
+	case OpCopy:
+		return d.opCopy(op.Data)
+	case OpIOAdvise:
+		return d.opIOAdvise(op.Data)
 	default:
 		log.Debug().Int("opcode", op.OpCode).Msg("nfs4: unknown opcode → NFS4ERR_NOTSUPP")
 		return OpResult{OpCode: op.OpCode, Status: NFS4ERR_NOTSUPP}
