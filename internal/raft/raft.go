@@ -15,10 +15,30 @@ import (
 )
 
 var (
-	ErrNotLeader      = errors.New("not the leader")
-	ErrProposalFailed = errors.New("proposal failed: node stepped down")
-	ErrNoPeers        = errors.New("no peers available for leadership transfer")
+	ErrNotLeader           = errors.New("not the leader")
+	ErrProposalFailed      = errors.New("proposal failed: node stepped down")
+	ErrNoPeers             = errors.New("no peers available for leadership transfer")
+	ErrAlreadyBootstrapped = errors.New("raft: already bootstrapped")
 )
+
+// ServerSuffrage describes whether a cluster member has a vote.
+type ServerSuffrage int
+
+const (
+	Voter    ServerSuffrage = iota // full voting member
+	NonVoter                       // read-only observer (reserved)
+)
+
+// Server describes a single node in the cluster configuration.
+type Server struct {
+	ID       string
+	Suffrage ServerSuffrage
+}
+
+// Configuration is a point-in-time snapshot of cluster membership.
+type Configuration struct {
+	Servers []Server
+}
 
 // Special command prefixes for configuration changes (membership)
 var (
@@ -543,6 +563,18 @@ func (n *Node) Peers() []string {
 // ApplyCh returns the channel on which committed log entries are delivered.
 func (n *Node) ApplyCh() <-chan LogEntry {
 	return n.applyCh
+}
+
+// Configuration returns a race-safe snapshot of the current cluster membership.
+func (n *Node) Configuration() Configuration {
+	n.mu.Lock()
+	servers := make([]Server, 0, len(n.config.Peers)+1)
+	servers = append(servers, Server{ID: n.id, Suffrage: Voter})
+	for _, p := range n.config.Peers {
+		servers = append(servers, Server{ID: p, Suffrage: Voter})
+	}
+	n.mu.Unlock()
+	return Configuration{Servers: servers}
 }
 
 func (n *Node) run() {

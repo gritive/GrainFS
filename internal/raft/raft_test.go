@@ -1374,6 +1374,42 @@ func TestTrailingLogs_ZeroRemovesAll(t *testing.T) {
 	assert.Equal(t, 0, ll)
 }
 
+func TestConfiguration_RaceSafeUnderMembershipChange(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+	defer cluster.stopAll()
+
+	require.Eventually(t, func() bool {
+		for _, n := range cluster.nodes {
+			if n.IsLeader() {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			cfg := cluster.nodes[0].Configuration()
+			assert.NotEmpty(t, cfg.Servers, "servers must not be empty")
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Configuration() concurrent reads timed out")
+	}
+
+	cfg := cluster.nodes[0].Configuration()
+	assert.Len(t, cfg.Servers, 3)
+	for _, s := range cfg.Servers {
+		assert.Equal(t, Voter, s.Suffrage)
+	}
+}
+
 func TestObserver_DeliversLeaderChange(t *testing.T) {
 	cluster := newTestCluster(t, 3)
 	ch := make(chan Event, 24)
