@@ -225,6 +225,19 @@ table MetaRemoveNodeCmd {
   node_id:string;
 }
 
+// PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.
+// bucket→group 매핑(shard_map)은 별도 메타데이터로 관리. key-range sharding 제외.
+table ShardGroupEntry {
+  id:string;           // e.g. "group-0"
+  peer_ids:[string];   // 이 데이터 그룹의 Raft voter 노드 ID 목록
+}
+
+// PR-C: MetaPutShardGroup 커맨드 — shard group 매핑을 기록·갱신한다.
+table MetaPutShardGroupCmd {
+  group:ShardGroupEntry;
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
+  shard_groups:[ShardGroupEntry];  // PR-C: 추가
 }
