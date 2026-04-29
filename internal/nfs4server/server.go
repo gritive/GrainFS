@@ -149,5 +149,19 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 	defer compoundRespPool.Put(resp)
 
 	d.Dispatch(req, resp)
-	encodeCompoundResponseInto(w, resp)
+
+	if d.replayFull != nil {
+		// Full cached COMPOUND response from SEQUENCE replay cache; write directly.
+		w.buf.Write(d.replayFull)
+		return
+	}
+
+	if d.pendingCacheSlot != nil {
+		// cacheThis=1: encode to []byte so we can cache and write in one pass.
+		respBytes := EncodeCompoundResponse(resp)
+		w.buf.Write(respBytes)
+		d.storePendingCache(respBytes)
+	} else {
+		encodeCompoundResponseInto(w, resp)
+	}
 }

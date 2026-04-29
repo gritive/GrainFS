@@ -3,6 +3,7 @@ package nfs4server
 import (
 	"bytes"
 	"io"
+	"math"
 )
 
 const (
@@ -75,7 +76,10 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
-	required := int64(offset + length)
+	if offset > math.MaxInt64 || length > uint64(math.MaxInt64)-offset {
+		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_FBIG}
+	}
+	required := int64(offset) + int64(length)
 	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size >= required {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
@@ -116,6 +120,9 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
 	}
 
+	release := d.state.LockPath(d.currentPath)
+	defer release()
+
 	body, _, err := d.backend.GetObject(nfs4Bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
@@ -135,9 +142,6 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 		zeros := make([]byte, end-offset)
 		copy(current[offset:end], zeros)
 	}
-
-	release := d.state.LockPath(d.currentPath)
-	defer release()
 
 	if _, err := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(current), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
@@ -165,13 +169,15 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 		return OpResult{OpCode: OpCopy, Status: NFS4_OK}
 	}
 
+	releaseSrc := d.state.LockPath(d.savedPath)
 	srcBody, _, err := d.backend.GetObject(nfs4Bucket, srcKey)
 	if err != nil {
+		releaseSrc()
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 	}
-	defer srcBody.Close()
-
 	srcData, err := io.ReadAll(srcBody)
+	srcBody.Close()
+	releaseSrc()
 	if err != nil {
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 	}

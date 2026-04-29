@@ -37,13 +37,29 @@ func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
 	d.savedFH = FileHandle{}
 	d.savedPath = ""
 	d.minorVer = 0
+	d.replayFull = nil
+	d.pendingCacheSlot = nil
 	return d
 }
 
 func putDispatcher(d *Dispatcher) {
 	d.backend = nil
 	d.state = nil
+	d.replayFull = nil
+	d.pendingCacheSlot = nil
 	dispatcherPool.Put(d)
+}
+
+// storePendingCache stores the full encoded COMPOUND response in the pending slot cache.
+func (d *Dispatcher) storePendingCache(response []byte) {
+	if d.pendingCacheSlot == nil {
+		return
+	}
+	d.state.sessionMu.Lock()
+	d.pendingCacheSlot.Response = response
+	d.pendingCacheSlot.HasCache = true
+	d.state.sessionMu.Unlock()
+	d.pendingCacheSlot = nil
 }
 
 // NFSv4 status codes (RFC 7530)
@@ -148,13 +164,15 @@ type CompoundResponse struct {
 }
 
 type Dispatcher struct {
-	backend     storage.Backend
-	state       *StateManager
-	currentFH   FileHandle
-	currentPath string
-	savedFH     FileHandle
-	savedPath   string
-	minorVer    uint32
+	backend          storage.Backend
+	state            *StateManager
+	currentFH        FileHandle
+	currentPath      string
+	savedFH          FileHandle
+	savedPath        string
+	minorVer         uint32
+	replayFull       []byte     // non-nil when a SEQUENCE cache hit provides the full COMPOUND response
+	pendingCacheSlot *SlotEntry // non-nil when cacheThis=1; filled after full response is encoded
 }
 
 const (
@@ -195,6 +213,10 @@ func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
 		resp.Results = append(resp.Results, result)
 		if result.Status != NFS4_OK {
 			resp.Status = result.Status
+			break
+		}
+		if d.replayFull != nil {
+			// SEQUENCE cache hit: full cached COMPOUND response is ready; skip remaining ops.
 			break
 		}
 	}
@@ -1273,14 +1295,14 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	}
 	slot := &sess.Slots[slotID]
 
-	// Replay detection: same seqID → return cached response if available.
+	// Replay detection: same seqID → return cached full COMPOUND response if available.
 	if slot.SeqID == seqID && (slot.HasCache || slot.SeqID > 0) {
 		if slot.HasCache {
-			cached := slot.Response
+			d.replayFull = slot.Response // full COMPOUND bytes; used by server.go
 			d.state.sessionMu.Unlock()
-			return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: cached}
+			return OpResult{OpCode: OpSequence, Status: NFS4_OK}
 		}
-		// cacheThis was false on first call; replay without cached bytes is still OK.
+		// cacheThis was false on first call; re-execute remaining ops (acceptable per RFC 5661).
 		d.state.sessionMu.Unlock()
 		// fall through to re-build response below
 	} else if slot.SeqID > 0 && seqID != slot.SeqID+1 {
@@ -1298,19 +1320,21 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	w.WriteUint32(highSlot) // sr_highest_slotid
 	w.WriteUint32(highSlot) // sr_target_highest_slotid
 	w.WriteUint32(0)        // sr_status_flags
-	resp := xdrWriterBytes(w)
+	seqResp := xdrWriterBytes(w)
 
 	d.state.sessionMu.Lock()
 	slot.SeqID = seqID
 	if cacheThis != 0 {
-		slot.Response = resp
-		slot.HasCache = true
+		// Full COMPOUND response will be stored by storePendingCache after encoding.
+		d.pendingCacheSlot = slot
+		slot.HasCache = false
 	} else {
 		slot.HasCache = false
+		slot.Response = nil
 	}
 	d.state.sessionMu.Unlock()
 
-	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: resp}
+	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: seqResp}
 }
 
 // nfsFileMeta stores per-file NFS metadata that must survive server restarts.
