@@ -90,6 +90,7 @@ SERVE_ARGS=(
   --nbd-port "$NBD_PORT"
   --nbd-volume-size "$VOL_SIZE"
   --nfs4-port 0
+  --dedup=false
 )
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
   SERVE_ARGS+=(--pprof-port "$PPROF_PORT")
