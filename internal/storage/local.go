@@ -426,6 +426,16 @@ func (b *LocalBackend) WriteAt(bucket, key string, offset uint64, data []byte) (
 	return obj, nil
 }
 
+// ReadAt reads len(buf) bytes from the object at the given offset via pread(2).
+func (b *LocalBackend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+	f, err := os.Open(b.objectPath(bucket, key))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.ReadAt(buf, offset)
+}
+
 // Sync implements storage.Syncable.
 func (b *LocalBackend) Sync(bucket, key string) error {
 	objPath := b.objectPath(bucket, key)
