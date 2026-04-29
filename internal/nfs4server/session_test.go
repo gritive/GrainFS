@@ -636,3 +636,74 @@ func TestDestroySession_SeqAfter(t *testing.T) {
 	status2, _ := parseCompoundReply(t, reply2)
 	assert.Equal(t, uint32(NFS4ERR_BADSESSION), status2)
 }
+
+func TestMinorVersion3Rejected(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// minorversion=3 COMPOUND → NFS4ERR_MINOR_VERS_MISMATCH
+	w := &XDRWriter{}
+	w.WriteString("") // tag
+	w.WriteUint32(3)  // minorversion = 3
+	w.WriteUint32(1)  // op count
+	w.WriteUint32(OpPutRootFH)
+	compound := w.Bytes()
+
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(600, compound)))
+	reply, err := readRPCFrame(conn)
+	require.NoError(t, err)
+
+	status, _ := parseCompoundReply(t, reply)
+	assert.Equal(t, uint32(NFS4ERR_MINOR_VERS_MISMATCH), status)
+}
+
+func TestOpIllegalOnWrongMinorVer(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	sid := exchangeIDAndCreateSession(t, conn, 610)
+
+	// minorversion=1 COMPOUND에 OpSeek (4.2 op) → NFS4ERR_OP_ILLEGAL
+	seekOp := func() []byte {
+		w := &XDRWriter{}
+		w.WriteUint32(OpSeek)
+		w.WriteUint32(0) // stateid seqid
+		w.WriteUint64(0) // stateid other[0:8]
+		w.WriteUint32(0) // stateid other[8:12]
+		w.WriteUint64(0) // offset
+		w.WriteUint32(0) // whence=DATA
+		return w.Bytes()
+	}
+
+	seqOp := buildSequenceOp(sid, 1, 0, 0, false)
+	compound := buildCompound41(seqOp, seekOp())
+	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(612, compound)))
+	reply, err := readRPCFrame(conn)
+	require.NoError(t, err)
+
+	status, r := parseCompoundReply(t, reply)
+	_ = status // compound status may be OK (stopped at failed op) or OP_ILLEGAL
+	opCount, _ := r.ReadUint32()
+	require.Equal(t, uint32(2), opCount)
+
+	// SEQUENCE result (should be OK)
+	r.ReadUint32() // opCode
+	seqStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(NFS4_OK), seqStatus)
+	r.ReadFixed(16) //nolint:errcheck // sr_sessionid
+	r.ReadUint32()  // sr_sequenceid
+	r.ReadUint32()  // sr_slotid
+	r.ReadUint32()  // sr_highest_slotid
+	r.ReadUint32()  // sr_target_highest_slotid
+	r.ReadUint32()  // sr_status_flags
+
+	// SEEK result → NFS4ERR_OP_ILLEGAL
+	opCode, _ := r.ReadUint32()
+	assert.Equal(t, uint32(OpSeek), opCode)
+	opStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(NFS4ERR_OP_ILLEGAL), opStatus)
+}

@@ -36,6 +36,7 @@ func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
 	d.currentPath = ""
 	d.savedFH = FileHandle{}
 	d.savedPath = ""
+	d.minorVer = 0
 	return d
 }
 
@@ -47,26 +48,28 @@ func putDispatcher(d *Dispatcher) {
 
 // NFSv4 status codes (RFC 7530)
 const (
-	NFS4_OK                = 0
-	NFS4ERR_PERM           = 1
-	NFS4ERR_NOENT          = 2
-	NFS4ERR_IO             = 5
-	NFS4ERR_NOTDIR         = 20
-	NFS4ERR_INVAL          = 22
-	NFS4ERR_FBIG           = 27
-	NFS4ERR_NOSPC          = 28
-	NFS4ERR_ROFS           = 30
-	NFS4ERR_STALE          = 70
-	NFS4ERR_BADHANDLE      = 10001
-	NFS4ERR_BAD_STATEID    = 10025
-	NFS4ERR_RESOURCE       = 10018
-	NFS4ERR_SERVERFAULT    = 10006
-	NFS4ERR_NOTSUPP        = 10004
-	NFS4ERR_RESTOREFH      = 10030
-	NFS4ERR_NOFILEHANDLE   = 10020
-	NFS4ERR_BADSESSION     = 10052
-	NFS4ERR_BADSLOT        = 10060
-	NFS4ERR_SEQ_MISORDERED = 10063
+	NFS4_OK                     = 0
+	NFS4ERR_PERM                = 1
+	NFS4ERR_NOENT               = 2
+	NFS4ERR_IO                  = 5
+	NFS4ERR_NOTDIR              = 20
+	NFS4ERR_INVAL               = 22
+	NFS4ERR_FBIG                = 27
+	NFS4ERR_NOSPC               = 28
+	NFS4ERR_ROFS                = 30
+	NFS4ERR_STALE               = 70
+	NFS4ERR_BADHANDLE           = 10001
+	NFS4ERR_BAD_STATEID         = 10025
+	NFS4ERR_RESOURCE            = 10018
+	NFS4ERR_SERVERFAULT         = 10006
+	NFS4ERR_NOTSUPP             = 10004
+	NFS4ERR_RESTOREFH           = 10030
+	NFS4ERR_NOFILEHANDLE        = 10020
+	NFS4ERR_BADSESSION          = 10052
+	NFS4ERR_BADSLOT             = 10060
+	NFS4ERR_SEQ_MISORDERED      = 10063
+	NFS4ERR_MINOR_VERS_MISMATCH = 10021
+	NFS4ERR_OP_ILLEGAL          = 10044
 )
 
 // NFSv4 operation codes
@@ -100,6 +103,13 @@ const (
 	OpTestStateID     = 55
 	OpDestroyClientID = 57
 	OpReclaimComplete = 58
+
+	// NFSv4.2 ops (RFC 7862)
+	OpAllocate   = 59
+	OpCopy       = 60
+	OpDeallocate = 62
+	OpIOAdvise   = 63
+	OpSeek       = 69
 
 	maxCompoundOps = 64
 )
@@ -144,6 +154,7 @@ type Dispatcher struct {
 	currentPath string
 	savedFH     FileHandle
 	savedPath   string
+	minorVer    uint32
 }
 
 const (
@@ -158,6 +169,12 @@ func NewDispatcher(backend storage.Backend) *Dispatcher {
 func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
 	resp.Tag = req.Tag
 	resp.Status = NFS4_OK
+	d.minorVer = req.MinorVer
+
+	if req.MinorVer > 2 {
+		resp.Status = NFS4ERR_MINOR_VERS_MISMATCH
+		return
+	}
 
 	if len(req.Ops) > maxCompoundOps {
 		resp.Status = NFS4ERR_RESOURCE
@@ -183,7 +200,22 @@ func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
 	}
 }
 
+func minVersionForOp(opCode int) uint32 {
+	switch opCode {
+	case OpExchangeID, OpCreateSession, OpDestroySession, OpSequence,
+		OpReclaimComplete, OpDestroyClientID, OpFreeStateID, OpTestStateID:
+		return 1
+	case OpSeek, OpAllocate, OpDeallocate, OpCopy, OpIOAdvise:
+		return 2
+	default:
+		return 0
+	}
+}
+
 func (d *Dispatcher) dispatchOp(op Op) OpResult {
+	if minVersionForOp(op.OpCode) > d.minorVer {
+		return OpResult{OpCode: op.OpCode, Status: NFS4ERR_OP_ILLEGAL}
+	}
 	switch op.OpCode {
 	case OpPutRootFH:
 		return d.opPutRootFH()
