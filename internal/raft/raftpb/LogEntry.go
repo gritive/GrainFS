@@ -99,8 +99,20 @@ func (rcv *LogEntry) MutateCommand(j int, n byte) bool {
 	return false
 }
 
+func (rcv *LogEntry) EntryType() LogEntryType {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return LogEntryType(rcv._tab.GetInt8(o + rcv._tab.Pos))
+	}
+	return 0
+}
+
+func (rcv *LogEntry) MutateEntryType(n LogEntryType) bool {
+	return rcv._tab.MutateInt8Slot(10, int8(n))
+}
+
 func LogEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func LogEntryAddTerm(builder *flatbuffers.Builder, term uint64) {
 	builder.PrependUint64Slot(0, term, 0)
@@ -113,6 +125,9 @@ func LogEntryAddCommand(builder *flatbuffers.Builder, command flatbuffers.UOffse
 }
 func LogEntryStartCommandVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
+}
+func LogEntryAddEntryType(builder *flatbuffers.Builder, entryType LogEntryType) {
+	builder.PrependInt8Slot(3, int8(entryType), 0)
 }
 func LogEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

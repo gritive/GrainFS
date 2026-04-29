@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -373,72 +374,193 @@ func TestNodeState_String(t *testing.T) {
 	assert.Equal(t, "Leader", Leader.String())
 }
 
-func TestAddPeer_ExpandsCluster(t *testing.T) {
-	cluster := newTestCluster(t, 3)
-	cluster.startAll()
+// --- Membership change tests (§4.4) ---
 
-	leader := cluster.waitForLeader(3 * time.Second)
-	require.NotNil(t, leader)
+func TestConfChange_AppliesOnAppendNotCommit(t *testing.T) {
+	// §4.4: config must be applied when the entry is appended, not when committed.
+	node := NewNode(DefaultConfig("A", []string{"B"}))
+	node.mu.Lock()
+	node.currentTerm = 1
+	node.mu.Unlock()
 
-	// Add a new peer
-	require.NoError(t, leader.AddPeer("D"))
+	cmd := encodeConfChange(ConfChangeAddVoter, "C", "C")
+	entry := LogEntry{Term: 1, Index: 1, Type: LogEntryConfChange, Command: cmd}
 
-	// Wait for config change to be applied
-	time.Sleep(500 * time.Millisecond)
+	// LeaderCommit = 0: the ConfChange entry is NOT committed yet.
+	reply := node.HandleAppendEntries(&AppendEntriesArgs{
+		Term:         1,
+		LeaderID:     "B",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      []LogEntry{entry},
+		LeaderCommit: 0,
+	})
+	require.True(t, reply.Success)
 
-	// All nodes should now have "D" in their peers
-	for _, n := range cluster.nodes {
-		n.mu.Lock()
-		hasPeer := false
-		for _, p := range n.config.Peers {
-			if p == "D" {
-				hasPeer = true
-				break
-			}
-		}
-		n.mu.Unlock()
-		assert.True(t, hasPeer, "node %s should have peer D", n.ID())
-	}
-}
-
-func TestRemovePeer_ShrinksCluster(t *testing.T) {
-	cluster := newTestCluster(t, 3)
-	cluster.startAll()
-
-	leader := cluster.waitForLeader(3 * time.Second)
-	require.NotNil(t, leader)
-
-	// Find a follower to remove
-	var followerID string
-	for _, n := range cluster.nodes {
-		if n.ID() != leader.ID() {
-			followerID = n.ID()
-			break
-		}
-	}
-
-	require.NoError(t, leader.RemovePeer(followerID))
-
-	// Wait for config change to be applied
-	time.Sleep(500 * time.Millisecond)
-
-	// Leader should not have the removed peer
-	leader.mu.Lock()
+	node.mu.Lock()
 	hasPeer := false
-	for _, p := range leader.config.Peers {
-		if p == followerID {
+	for _, p := range node.config.Peers {
+		if p == "C" {
 			hasPeer = true
 		}
 	}
-	leader.mu.Unlock()
-	assert.False(t, hasPeer, "leader should not have removed peer %s", followerID)
+	node.mu.Unlock()
+	assert.True(t, hasPeer, "ConfChange must be applied on append, before commit")
 }
 
-func TestIsConfigChange(t *testing.T) {
-	assert.True(t, IsConfigChange(append([]byte("__raft_config_add:"), []byte("node-D")...)))
-	assert.True(t, IsConfigChange(append([]byte("__raft_config_remove:"), []byte("node-B")...)))
-	assert.False(t, IsConfigChange([]byte("normal command")))
-	assert.False(t, IsConfigChange(nil))
+func TestConfChange_AppliesOnAppendNotCommit_Leader(t *testing.T) {
+	// §4.4: leader must apply ConfChange when the entry is appended (flushBatch),
+	// not when it is committed.
+	node := NewNode(DefaultConfig("A", []string{"B"}))
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.nextIndex = map[string]uint64{"B": 1}
+	node.matchIndex = map[string]uint64{"B": 0}
+	node.mu.Unlock()
+	defer node.Close()
+
+	cmd := encodeConfChange(ConfChangeAddVoter, "C", "C")
+	p := proposal{command: cmd, entryType: LogEntryConfChange, doneCh: make(chan proposalResult, 1), ctx: context.Background()}
+
+	// LeaderCommit never advances (B hasn't acked), so C is not committed.
+	node.flushBatch([]proposal{p})
+
+	node.mu.Lock()
+	hasPeer := false
+	for _, peer := range node.config.Peers {
+		if peer == "C" {
+			hasPeer = true
+		}
+	}
+	node.mu.Unlock()
+	assert.True(t, hasPeer, "ConfChange must be applied on append (leader path), before commit")
+}
+
+func TestConfChange_MixedVersionRejected(t *testing.T) {
+	node := NewNode(DefaultConfig("A", []string{"B", "C"}))
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.nextIndex = map[string]uint64{"B": 1, "C": 1}
+	node.matchIndex = map[string]uint64{"B": 0, "C": 0}
+	node.mu.Unlock()
+
+	node.SetMixedVersion(true)
+	err := node.AddVoter("D", "D")
+	assert.ErrorIs(t, err, ErrMixedVersionNoMembershipChange)
+}
+
+func TestConfChange_RejectsConcurrent(t *testing.T) {
+	node := NewNode(DefaultConfig("A", []string{"B", "C"}))
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.pendingConfChangeIndex = 1
+	node.nextIndex = map[string]uint64{"B": 1, "C": 1}
+	node.matchIndex = map[string]uint64{"B": 0, "C": 0}
+	node.mu.Unlock()
+
+	err := node.AddVoter("D", "D")
+	assert.ErrorIs(t, err, ErrConfChangeInProgress)
+}
+
+func TestConfChange_RejectsConcurrentGoroutine(t *testing.T) {
+	// Simulate the TOCTOU window: two ConfChange proposals arrive in the same
+	// flushBatch call (both passed proposeConfChangeWait's pre-check before
+	// either set pendingConfChangeIndex). The lock-protected filter in
+	// flushBatch must reject the second one synchronously.
+	node := NewNode(DefaultConfig("A", []string{"B", "C"}))
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.nextIndex = map[string]uint64{"B": 1, "C": 1}
+	node.matchIndex = map[string]uint64{"B": 0, "C": 0}
+	node.mu.Unlock()
+	defer node.Close()
+
+	makeCC := func(id string) proposal {
+		cmd := encodeConfChange(ConfChangeAddVoter, id, id)
+		return proposal{command: cmd, entryType: LogEntryConfChange, doneCh: make(chan proposalResult, 1), ctx: context.Background()}
+	}
+	p1 := makeCC("D")
+	p2 := makeCC("E")
+
+	node.flushBatch([]proposal{p1, p2})
+
+	// The rejected proposal's doneCh is populated synchronously during flushBatch.
+	var rejected int
+	for _, ch := range []chan proposalResult{p1.doneCh, p2.doneCh} {
+		select {
+		case r := <-ch:
+			if errors.Is(r.err, ErrConfChangeInProgress) {
+				rejected++
+			}
+		default:
+		}
+	}
+	assert.Equal(t, 1, rejected, "exactly one ConfChange per batch must be rejected")
+}
+
+func TestConfChange_LearnerNotInQuorum(t *testing.T) {
+	node := NewNode(DefaultConfig("A", []string{"B", "C"}))
+	node.mu.Lock()
+	initialPeerCount := len(node.config.Peers)
+
+	cmd := encodeConfChange(ConfChangeAddLearner, "D", "D")
+	entry := LogEntry{Term: 1, Index: 1, Type: LogEntryConfChange, Command: cmd}
+	node.applyConfigChangeLocked(entry)
+
+	assert.Equal(t, initialPeerCount, len(node.config.Peers), "AddLearner must not expand config.Peers")
+	assert.Equal(t, uint64(1), node.pendingConfChangeIndex)
+	node.mu.Unlock()
+}
+
+func TestConfChange_SnapshotPreservesConfig(t *testing.T) {
+	node := NewNode(DefaultConfig("A", []string{"B"}))
+
+	reply := node.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "B",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("snapshot"),
+		Servers: []Server{
+			{ID: "A", Suffrage: Voter},
+			{ID: "B", Suffrage: Voter},
+			{ID: "C", Suffrage: Voter},
+		},
+	})
+	require.Equal(t, uint64(2), reply.Term)
+
+	node.mu.Lock()
+	peers := make([]string, len(node.config.Peers))
+	copy(peers, node.config.Peers)
+	node.mu.Unlock()
+
+	assert.ElementsMatch(t, []string{"B", "C"}, peers, "config.Peers must be restored from snapshot Servers, excluding self")
+}
+
+func TestConfChange_RebuildConfigAfterTruncation(t *testing.T) {
+	// When conflicting entries are truncated, config must be rebuilt from initialPeers + remaining log.
+	node := NewNode(DefaultConfig("A", []string{"B"}))
+
+	cmd := encodeConfChange(ConfChangeAddVoter, "C", "C")
+	node.mu.Lock()
+	node.log = []LogEntry{
+		{Term: 1, Index: 1, Type: LogEntryConfChange, Command: cmd},
+	}
+	node.config.Peers = []string{"B", "C"}
+
+	// Simulate truncation: ConfChange entry is removed from the log.
+	node.log = nil
+	node.rebuildConfigFromLog()
+
+	peers := make([]string, len(node.config.Peers))
+	copy(peers, node.config.Peers)
+	node.mu.Unlock()
+
+	assert.ElementsMatch(t, []string{"B"}, peers, "after truncation config must revert to initialPeers")
 }
 
 func TestPersistState_PanicsOnError(t *testing.T) {

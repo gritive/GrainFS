@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.5.5] — 2026-04-29
+
+### Added
+
+- **Raft §4.4 단일 서버 멤버십 변경** (`internal/raft/`):
+  - `membership.go`: `AddVoter`, `RemoveVoter`, `AddLearner`, `PromoteToVoter` API.
+  - `proposeConfChangeWait`: ConfChange proposal을 leader에게 보내고 커밋까지 대기.
+  - `applyConfigChangeLocked`: 로그에 Append되는 시점(커밋 전)에 `config.Peers` 즉시 갱신 (§4.4 요구사항).
+  - `rebuildConfigFromLog`: 로그 截断 후 메모리 config 재구성.
+  - `SetMixedVersion(bool)`: 롤링 업그레이드 중 멤버십 변경 차단.
+  - FlatBuffers `ConfChangeEntry` 스키마 (`raftpb/shard.fbs`): Op, ServerId, ServerAddress.
+
+- **Chaos 시나리오**: `TestMembership_ReplaceNodeOneAtATime` — 3→4→3 노드 전환 중 가용성 유지 검증.
+
+### Fixed
+
+- **ID/address 혼용 버그**: `applyConfigChangeLocked`와 `rebuildConfigFromLog`에서 `cc.Address` → `cc.ID` 수정.
+  라우팅은 ID 기준이므로 `config.Peers`에 주소가 들어가면 `nextIndex`/`matchIndex` 미생성.
+- **TOCTOU 경쟁 조건**: `proposeConfChangeWait`의 check-release 패턴을 `flushBatch` 내부로 이동.
+  같은 배치의 두 번째 ConfChange와 크로스-배치 중복 모두 `ErrConfChangeInProgress`로 거부.
+- **dead error 활성화**: `ErrMixedVersionNoMembershipChange` 선언만 있던 코드에 실제 `mixedVersion` 필드 + `SetMixedVersion` + guard 구현.
+
+### Tests
+
+- `TestConfChange_AppliesOnAppendNotCommit_Leader`: flushBatch 직후 `config.Peers` 갱신 검증 (§4.4 leader path).
+- `TestConfChange_MixedVersionRejected`: SetMixedVersion(true) 시 AddVoter 거부.
+- `TestConfChange_RejectsConcurrentGoroutine`: 동일 배치 내 두 ConfChange 중 하나 즉시 거부.
+
 ## [0.0.5.4] — 2026-04-29
 
 ### Added

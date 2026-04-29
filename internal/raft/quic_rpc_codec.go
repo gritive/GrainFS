@@ -86,6 +86,9 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 			if len(e.Command) > 0 {
 				pb.LogEntryAddCommand(b, cmdOff)
 			}
+			if e.Type != LogEntryCommand {
+				pb.LogEntryAddEntryType(b, pb.LogEntryType(e.Type))
+			}
 			entryOffs[i] = pb.LogEntryEnd(b)
 		}
 
@@ -120,6 +123,26 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 	case rpcTypeInstallSnapshot:
 		args := msg.(*InstallSnapshotArgs)
 		b := raftBuilderPool.Get().(*flatbuffers.Builder)
+
+		// Build ServerEntry objects before Start (FlatBuffers reverse-order rule)
+		serverOffs := make([]flatbuffers.UOffsetT, len(args.Servers))
+		for i := len(args.Servers) - 1; i >= 0; i-- {
+			s := args.Servers[i]
+			idOff := b.CreateString(s.ID)
+			pb.ServerEntryStart(b)
+			pb.ServerEntryAddId(b, idOff)
+			pb.ServerEntryAddSuffrage(b, int8(s.Suffrage))
+			serverOffs[i] = pb.ServerEntryEnd(b)
+		}
+		var serversVec flatbuffers.UOffsetT
+		if len(serverOffs) > 0 {
+			pb.InstallSnapshotArgsStartServersVector(b, len(serverOffs))
+			for i := len(serverOffs) - 1; i >= 0; i-- {
+				b.PrependUOffsetT(serverOffs[i])
+			}
+			serversVec = b.EndVector(len(serverOffs))
+		}
+
 		var dataOff flatbuffers.UOffsetT
 		if len(args.Data) > 0 {
 			dataOff = b.CreateByteVector(args.Data)
@@ -132,6 +155,9 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		pb.InstallSnapshotArgsAddLastIncludedTerm(b, args.LastIncludedTerm)
 		if len(args.Data) > 0 {
 			pb.InstallSnapshotArgsAddData(b, dataOff)
+		}
+		if len(serverOffs) > 0 {
+			pb.InstallSnapshotArgsAddServers(b, serversVec)
 		}
 		root := pb.InstallSnapshotArgsEnd(b)
 		return fbFinishRPC(b, root), nil
@@ -207,7 +233,7 @@ func decodeAppendEntriesArgs(data []byte) (args *AppendEntriesArgs, err error) {
 		if !a.Entries(&e, i) {
 			continue
 		}
-		entries[i] = LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes()}
+		entries[i] = LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes(), Type: LogEntryType(e.EntryType())}
 	}
 	return &AppendEntriesArgs{
 		Term:         a.Term(),
@@ -241,12 +267,20 @@ func decodeInstallSnapshotArgs(data []byte) (args *InstallSnapshotArgs, err erro
 		}
 	}()
 	a := pb.GetRootAsInstallSnapshotArgs(data, 0)
+	servers := make([]Server, a.ServersLength())
+	var se pb.ServerEntry
+	for i := 0; i < a.ServersLength(); i++ {
+		if a.Servers(&se, i) {
+			servers[i] = Server{ID: string(se.Id()), Suffrage: ServerSuffrage(se.Suffrage())}
+		}
+	}
 	return &InstallSnapshotArgs{
 		Term:              a.Term(),
 		LeaderID:          string(a.LeaderId()),
 		LastIncludedIndex: a.LastIncludedIndex(),
 		LastIncludedTerm:  a.LastIncludedTerm(),
 		Data:              a.DataBytes(),
+		Servers:           servers,
 	}, nil
 }
 

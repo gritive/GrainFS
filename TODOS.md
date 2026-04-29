@@ -16,7 +16,13 @@
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
-- [ ] Sharding, multi raft
+- [ ] **Multi-Raft (Joint consensus 설계 완료)** — 5 PR 시퀀스:
+  - PR-A: §4.4 one-at-a-time membership change 정확 구현 (AddVoter/RemoveVoter/AddLearner/PromoteToVoter, FlatBuffers ConfChangeEntry)
+  - PR-B: meta-Raft scaffold (클러스터 사실의 소스, shard_map, load_snapshot)
+  - PR-C: 데이터 그룹 다중화 + bucket→group Router
+  - PR-D: autonomous rebalance (10s tick + meta-Raft leader 평가 + RebalancePlan)
+  - PR-E: EC + Multi-Raft 통합 마무리 + k6 256 group 벤치
+  - 설계: `~/.gstack/projects/gritive-GrainFS/whitekid-joint-consensus-design-20260429.md`
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
 - [ ] Migration: NFS virtual overlay
 - [ ] Migration: NBD block proxying
