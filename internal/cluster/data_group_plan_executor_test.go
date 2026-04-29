@@ -40,10 +40,15 @@ func (f *fakeRaftNode) AddLearner(id, addr string) error {
 	if f.matchIndexes == nil {
 		f.matchIndexes = make(map[string]uint64)
 	}
+	// Mirror real raft.Node peerKey derivation: addr if non-empty, else id.
+	peerKey := addr
+	if peerKey == "" {
+		peerKey = id
+	}
 	if f.autoCatchup {
-		f.matchIndexes[addr] = f.committed
+		f.matchIndexes[peerKey] = f.committed
 	} else {
-		f.matchIndexes[addr] = 0
+		f.matchIndexes[peerKey] = 0
 	}
 	if f.addLearnerFn != nil {
 		return f.addLearnerFn(id, addr)
@@ -152,6 +157,81 @@ func TestMoveReplica_AddLearnerError_Propagates(t *testing.T) {
 	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
 	require.Error(t, err)
 	require.ErrorIs(t, err, addErr)
+}
+
+func TestMoveReplica_FromNodeNotInGroup(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true}
+	exec, _ := newTestExecutor(t, fakeNode, nil)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0", "node-1", "node-2"}, nil))
+
+	err := exec.MoveReplica(context.Background(), "group-0", "node-99", "node-3")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a voter")
+}
+
+func TestMoveReplica_PromoteToVoterError_Propagates(t *testing.T) {
+	promoteErr := errors.New("raft: not leader")
+	fakeNode := &fakeRaftNode{
+		isLeader:    true,
+		committed:   5,
+		autoCatchup: true,
+		promoteFn:   func(_ string) error { return promoteErr },
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
+	exec, _ := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
+	require.Error(t, err)
+	require.ErrorIs(t, err, promoteErr)
+}
+
+func TestMoveReplica_RemoveVoterError_Propagates(t *testing.T) {
+	removeErr := errors.New("raft: quorum lost")
+	fakeNode := &fakeRaftNode{
+		isLeader:    true,
+		committed:   5,
+		autoCatchup: true,
+		removeFn:    func(_ string) error { return removeErr },
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
+	exec, _ := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
+	require.Error(t, err)
+	require.ErrorIs(t, err, removeErr)
+}
+
+func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
+	sgErr := errors.New("meta-raft: not leader")
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 5, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
+	addrBook := &fakeAddrBook{nodes: nodes}
+	sgUpdater := &fakeSGUpdater{err: sgErr}
+	dgMgr := cluster.NewDataGroupManager()
+	exec := cluster.NewDataGroupPlanExecutorForTest(dgMgr, addrBook, sgUpdater,
+		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
+	require.Error(t, err)
+	require.ErrorIs(t, err, sgErr)
+	// Raft voter change was committed; MetaFSM is stale — RemoveVoter must have run.
+	assert.Equal(t, "10.0.0.0:9000", fakeNode.removed)
 }
 
 func TestMoveReplica_ContextCancelDuringCatchup(t *testing.T) {

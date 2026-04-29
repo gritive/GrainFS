@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -88,6 +89,12 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
 	}
 
+	// Pre-flight: fromNode must be a current voter so we don't accidentally
+	// evict an unrelated node if the rebalancer has a stale plan.
+	if !slices.Contains(dg.PeerIDs(), fromNode) {
+		return fmt.Errorf("data_group_executor: fromNode %q is not a voter in group %q", fromNode, groupID)
+	}
+
 	// Resolve toNode's QUIC address
 	toAddr, err := e.resolveAddr(toNode)
 	if err != nil {
@@ -137,7 +144,12 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 		return fmt.Errorf("data_group_executor: PromoteToVoter %s: %w", toNode, err)
 	}
 
-	// Step 5: Remove old voter (data-Raft uses QUIC address as voter key)
+	// Step 5: Remove old voter (data-Raft uses QUIC address as voter key).
+	// NOTE: after this point the Raft membership has changed. If any subsequent
+	// step fails, the Raft log reflects the new membership but MetaFSM and the
+	// local DataGroupManager remain stale. Callers should retry MoveReplica or
+	// reconcile via a full rebalance pass; the operation is idempotent when
+	// toNode is already a voter and fromNode is already absent.
 	fromAddr, err := e.resolveAddr(fromNode)
 	if err != nil {
 		return fmt.Errorf("data_group_executor: resolve fromNode: %w", err)

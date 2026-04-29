@@ -69,8 +69,8 @@ func TestVoterMigration_ViaDataGroupPlanExecutor(t *testing.T) {
 	// Register 4th node
 	node3 := cl.AddNode("node-3")
 
-	// Build executor wiring
-	allIDs := append(cl.NodeIDs(), "node-3")
+	// Build executor wiring — NodeIDs() already includes node-3 after AddNode.
+	allIDs := cl.NodeIDs()
 	addrBook := addrBookFromChaos(allIDs)
 	sgUpdater := &fakeSGUpdater{}
 	dgMgr := cluster.NewDataGroupManager()
