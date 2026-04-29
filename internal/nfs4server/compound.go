@@ -829,25 +829,37 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		key = key[1:]
 	}
 
+	// Serialise all writes to the same path. Without this, an offset=0
+	// PutObject can run concurrently with an offset>0 RMW (GetObject →
+	// modify → PutObject), clobbering the RMW writer's data.
+	release := d.state.LockPath(key)
+	defer release()
+
+	// Determine whether this write fully covers the existing file. If so,
+	// PutObject can replace the file directly (cheap path). Otherwise we
+	// must RMW so bytes outside [offset, end) are preserved (NFSv4 WRITE
+	// is partial overwrite, not truncate).
+	var existingSize uint64
+	if obj, herr := d.backend.HeadObject(nfs4Bucket, key); herr == nil {
+		existingSize = uint64(obj.Size)
+	}
+	end := offset + uint64(len(writeData))
+
 	br := bytesReaderPool.Get()
-	if offset == 0 {
+	defer bytesReaderPool.Put(br)
+
+	if offset == 0 && end >= existingSize {
 		br.Reset(writeData)
 		_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
 	} else {
-		// Serialise concurrent RMW on the same path via per-path channel semaphore.
-		release := d.state.LockPath(key)
-		defer release()
-
 		var existing []byte
 		if rc, _, rerr := d.backend.GetObject(nfs4Bucket, key); rerr == nil {
 			existing, err = io.ReadAll(rc)
 			rc.Close()
 			if err != nil {
-				bytesReaderPool.Put(br)
 				return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 			}
 		}
-		end := offset + uint64(len(writeData))
 		if uint64(len(existing)) < end {
 			existing = append(existing, make([]byte, end-uint64(len(existing)))...)
 		}
@@ -855,7 +867,6 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		br.Reset(existing)
 		_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
 	}
-	bytesReaderPool.Put(br)
 	if err != nil {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 	}

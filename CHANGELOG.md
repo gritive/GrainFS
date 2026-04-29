@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.5.9] — 2026-04-29
+
+### Fixed
+
+- **NFSv4 동시 쓰기 race condition** (`internal/nfs4server/compound.go`): `opWrite`의 `offset == 0` 경로가 `LockPath` 없이 `PutObject`를 직접 호출 → RMW(`offset > 0`) 경로와 동시 실행 시 데이터 손실. 항상 `LockPath` 사용 + `HeadObject`로 기존 파일 size 확인하여 partial overwrite 보존 (`offset == 0 && end >= existingSize`만 직접 PutObject, 그 외는 RMW).
+- **LocalBackend.PutObject torn read** (`internal/storage/local.go`): `os.Create`가 즉시 truncate하여 동시 reader가 빈 파일을 보고 `eof + empty` 반환. fio randrw 벤치마크에서 `full resid` EIO 발생의 핵심 원인. `os.CreateTemp` + `os.Rename` atomic publish로 수정 (rename → metadata write 순서 유지).
+
+### Added
+
+- **NFSv4 동시 쓰기 회귀 테스트** (`internal/nfs4server/concurrent_write_test.go`): writer-vs-writer race(`TestConcurrentWrite_OffsetZeroVsRMW`)와 reader-vs-writer race(`TestConcurrentWrite_ReaderVsWriter`) 두 시나리오 byte-by-byte 검증.
+- **NFSv4 fio 벤치마크 스크립트** (`benchmarks/bench_nfs_profile.sh`): Colima VM에서 fio mixed workload(seq write/seq read/randrw) 실행 + pprof CPU/heap/mutex/block 프로파일 동시 수집.
+
 ## [0.0.5.8] — 2026-04-29
 
 ### Changed

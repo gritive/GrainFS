@@ -148,13 +148,21 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 	}
 
 	objPath := b.objectPath(bucket, key)
-	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+	objDir := filepath.Dir(objPath)
+	if err := os.MkdirAll(objDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
 
-	f, err := os.Create(objPath)
+	// Write to a temp file in the same directory, then atomically rename onto
+	// objPath. This prevents readers from observing a truncated file
+	// mid-write (os.Create truncates on open).
+	tmp, err := os.CreateTemp(objDir, ".tmp-*")
 	if err != nil {
-		return nil, fmt.Errorf("create file: %w", err)
+		return nil, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanupTmp := func() {
+		_ = os.Remove(tmpPath)
 	}
 
 	var (
@@ -163,25 +171,30 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 		cerr error
 	)
 	if IsInternalBucket(bucket) {
-		size, cerr = io.Copy(f, r)
-		f.Close()
+		size, cerr = io.Copy(tmp, r)
+		tmp.Close()
 		if cerr != nil {
-			os.Remove(objPath)
+			cleanupTmp()
 			return nil, fmt.Errorf("write object: %w", cerr)
 		}
 	} else {
 		h := md5Pool.Get()
 		h.Reset()
-		w := io.MultiWriter(f, h)
+		w := io.MultiWriter(tmp, h)
 		size, cerr = io.Copy(w, r)
-		f.Close()
+		tmp.Close()
 		if cerr != nil {
 			md5Pool.Put(h)
-			os.Remove(objPath)
+			cleanupTmp()
 			return nil, fmt.Errorf("write object: %w", cerr)
 		}
 		etag = hex.EncodeToString(h.Sum(nil))
 		md5Pool.Put(h)
+	}
+
+	if err := os.Rename(tmpPath, objPath); err != nil {
+		cleanupTmp()
+		return nil, fmt.Errorf("rename object: %w", err)
 	}
 	now := time.Now().Unix()
 
