@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.5.3] — 2026-04-29
+
+### Added
+
+- **Raft PR 3 — Observer Pattern + Configuration Snapshot + Bootstrap** (`internal/raft/`):
+  - **Observer pattern** (`internal/raft/observer.go`): `RegisterObserver`/`DeregisterObserver`/`notifyObservers`. COW `atomic.Value` + `observerMu`로 read lock-free, write serialize. 전달 non-blocking (full channel → drop).
+  - **`EventLeaderChange`**: 리더 전환/step-down 시 발화. `IsLeader`, `LeaderID`, `Term` 필드. step-down 시 `LeaderID=""` (알려진 리더 없음).
+  - **`EventFailedHeartbeat`**: AppendEntries RPC 실패 시 발화. `PeerID` 필드.
+  - **`Configuration()`**: `n.mu` 보호 하에 현재 peer 목록 snapshot 반환. race-safe.
+  - **`Bootstrap()`**: 첫 클러스터 부트스트랩 전용. 이미 부트스트랩됐거나 hard state(term/vote)가 있으면 `ErrAlreadyBootstrapped`. `LogStore.IsBootstrapped()`/`SaveBootstrapMarker()` 활용.
+  - **`serve.go`**: 기동 시 `node.Bootstrap()` 자동 호출, `ErrAlreadyBootstrapped`는 정상 처리.
+  - **단위 테스트 8건**: `TestObserver_*` 4건 + `TestBootstrap_*` 4건 (nil store no-op, 이중 호출 거부, 기존 hard state 감지, deregister/full-channel 경계).
+
 ## [0.0.5.2] — 2026-04-29
 
 ### Added

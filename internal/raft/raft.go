@@ -15,10 +15,30 @@ import (
 )
 
 var (
-	ErrNotLeader      = errors.New("not the leader")
-	ErrProposalFailed = errors.New("proposal failed: node stepped down")
-	ErrNoPeers        = errors.New("no peers available for leadership transfer")
+	ErrNotLeader           = errors.New("not the leader")
+	ErrProposalFailed      = errors.New("proposal failed: node stepped down")
+	ErrNoPeers             = errors.New("no peers available for leadership transfer")
+	ErrAlreadyBootstrapped = errors.New("raft: already bootstrapped")
 )
+
+// ServerSuffrage describes whether a cluster member has a vote.
+type ServerSuffrage int
+
+const (
+	Voter    ServerSuffrage = iota // full voting member
+	NonVoter                       // read-only observer (reserved)
+)
+
+// Server describes a single node in the cluster configuration.
+type Server struct {
+	ID       string
+	Suffrage ServerSuffrage
+}
+
+// Configuration is a point-in-time snapshot of cluster membership.
+type Configuration struct {
+	Servers []Server
+}
 
 // Special command prefixes for configuration changes (membership)
 var (
@@ -274,6 +294,9 @@ type Node struct {
 	// advanceCommitIndex can commit entries from previous terms. Set via
 	// SetNoOpCommand before Start().
 	noOpCmd []byte
+
+	// Observer pattern (PR3): event delivery to external consumers.
+	observerState
 }
 
 // NewNode creates a new Raft node. Call Start() to begin operation.
@@ -341,6 +364,32 @@ func (n *Node) restoreFromStore() {
 // Call before Start().
 func (n *Node) SetNoOpCommand(cmd []byte) {
 	n.noOpCmd = cmd
+}
+
+// Bootstrap initializes the cluster for the first time by saving a bootstrap
+// marker to the durable store. Returns ErrAlreadyBootstrapped if the store
+// already has a bootstrap marker or existing hard state (term > 0 or votedFor set).
+//
+// Call Bootstrap once before the very first Start(). On subsequent restarts
+// Bootstrap returns ErrAlreadyBootstrapped, which callers should ignore.
+// No-op when store is nil (in-memory nodes).
+func (n *Node) Bootstrap() error {
+	if n.store == nil {
+		return nil
+	}
+	bootstrapped, err := n.store.IsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("raft: check bootstrap: %w", err)
+	}
+	if bootstrapped {
+		return ErrAlreadyBootstrapped
+	}
+	// Detect pre-PR3 nodes that already have hard state but no marker.
+	term, votedFor, err := n.store.LoadState()
+	if err == nil && (term > 0 || votedFor != "") {
+		return ErrAlreadyBootstrapped
+	}
+	return n.store.SaveBootstrapMarker()
 }
 
 // SetTransport sets the RPC callbacks for sending messages to peers.
@@ -542,7 +591,20 @@ func (n *Node) ApplyCh() <-chan LogEntry {
 	return n.applyCh
 }
 
+// Configuration returns a race-safe snapshot of the current cluster membership.
+func (n *Node) Configuration() Configuration {
+	n.mu.Lock()
+	servers := make([]Server, 0, len(n.config.Peers)+1)
+	servers = append(servers, Server{ID: n.id, Suffrage: Voter})
+	for _, p := range n.config.Peers {
+		servers = append(servers, Server{ID: p, Suffrage: Voter})
+	}
+	n.mu.Unlock()
+	return Configuration{Servers: servers}
+}
+
 func (n *Node) run() {
+	var prevState NodeState = Follower
 	for {
 		select {
 		case <-n.stopCh:
@@ -552,7 +614,18 @@ func (n *Node) run() {
 
 		n.mu.Lock()
 		state := n.state
+		leaderID := n.leaderID
+		term := n.currentTerm
 		n.mu.Unlock()
+
+		if state != prevState {
+			if state == Leader {
+				n.notifyObservers(Event{Type: EventLeaderChange, IsLeader: true, LeaderID: n.id, Term: term})
+			} else if prevState == Leader {
+				n.notifyObservers(Event{Type: EventLeaderChange, IsLeader: false, LeaderID: leaderID, Term: term})
+			}
+		}
+		prevState = state
 
 		switch state {
 		case Follower:
@@ -940,6 +1013,7 @@ func (n *Node) replicateTo(peer string) {
 	}
 	reply, err := n.sendAppendEntries(peer, args)
 	if err != nil {
+		n.notifyObservers(Event{Type: EventFailedHeartbeat, PeerID: peer})
 		return
 	}
 

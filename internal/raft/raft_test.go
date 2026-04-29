@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -112,6 +113,16 @@ func (c *testCluster) startAll() {
 	c.mu.RUnlock()
 	for _, n := range nodes {
 		n.Start()
+	}
+}
+
+func (c *testCluster) stopAll() {
+	c.mu.RLock()
+	nodes := make([]*Node, len(c.nodes))
+	copy(nodes, c.nodes)
+	c.mu.RUnlock()
+	for _, n := range nodes {
+		n.Close()
 	}
 }
 
@@ -1362,4 +1373,260 @@ func TestTrailingLogs_ZeroRemovesAll(t *testing.T) {
 
 	assert.Equal(t, uint64(4), fi)
 	assert.Equal(t, 0, ll)
+}
+
+func TestConfiguration_ConcurrentReads(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+	defer cluster.stopAll()
+
+	require.Eventually(t, func() bool {
+		for _, n := range cluster.nodes {
+			if n.IsLeader() {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			cfg := cluster.nodes[0].Configuration()
+			assert.NotEmpty(t, cfg.Servers, "servers must not be empty")
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Configuration() concurrent reads timed out")
+	}
+
+	cfg := cluster.nodes[0].Configuration()
+	assert.Len(t, cfg.Servers, 3)
+	for _, s := range cfg.Servers {
+		assert.Equal(t, Voter, s.Suffrage)
+	}
+}
+
+func TestBootstrap_RejectsSecondCall(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store.Close()
+
+	cfg := DefaultConfig("node-0", []string{"node-1", "node-2"})
+	node := NewNode(cfg, store)
+
+	require.NoError(t, node.Bootstrap())
+	err = node.Bootstrap()
+	assert.ErrorIs(t, err, ErrAlreadyBootstrapped)
+}
+
+func TestBootstrap_AutoDetectsExistingStore(t *testing.T) {
+	dir := t.TempDir()
+
+	store1, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, store1.SaveState(1, "node-0"))
+	require.NoError(t, store1.Close())
+
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store2.Close()
+
+	cfg := DefaultConfig("node-0", []string{"node-1", "node-2"})
+	node := NewNode(cfg, store2)
+
+	err = node.Bootstrap()
+	assert.ErrorIs(t, err, ErrAlreadyBootstrapped,
+		"Bootstrap must detect pre-existing hard state (term=1)")
+}
+
+func TestObserver_DeliversLeaderChange(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	ch := make(chan Event, 24)
+	for _, n := range cluster.nodes {
+		n.RegisterObserver(ch)
+	}
+	cluster.startAll()
+	defer cluster.stopAll()
+
+	require.Eventually(t, func() bool {
+		for {
+			select {
+			case e := <-ch:
+				if e.Type == EventLeaderChange && e.IsLeader {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}, 5*time.Second, 10*time.Millisecond, "observer must deliver EventLeaderChange with IsLeader=true")
+}
+
+// TestObserver_DeregisterStopsDelivery verifies that after DeregisterObserver
+// no further events are delivered to the deregistered channel.
+func TestObserver_DeregisterStopsDelivery(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	n := NewNode(cfg)
+
+	ch := make(chan Event, 10)
+	n.RegisterObserver(ch)
+
+	e := Event{Type: EventLeaderChange, IsLeader: true, Term: 1}
+	n.notifyObservers(e)
+	require.Len(t, ch, 1, "event should be delivered before deregister")
+
+	n.DeregisterObserver(ch)
+	<-ch // drain
+
+	n.notifyObservers(e)
+	assert.Len(t, ch, 0, "no event should be delivered after deregister")
+}
+
+// TestObserver_FullChannelDrops verifies that a full observer channel causes
+// the event to be dropped rather than blocking Raft.
+func TestObserver_FullChannelDrops(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	n := NewNode(cfg)
+
+	ch := make(chan Event, 1)
+	n.RegisterObserver(ch)
+	ch <- Event{} // fill the channel
+
+	// This must not block.
+	done := make(chan struct{})
+	go func() {
+		n.notifyObservers(Event{Type: EventLeaderChange, IsLeader: true, Term: 1})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("notifyObservers blocked on full channel")
+	}
+}
+
+// TestBootstrap_NilStoreNoOp verifies that Bootstrap with a nil store is a no-op
+// (returns nil error) — used when running with in-memory state for tests.
+func TestBootstrap_NilStoreNoOp(t *testing.T) {
+	cfg := DefaultConfig("node1", nil)
+	node := NewNode(cfg) // no store argument → store is nil
+	err := node.Bootstrap()
+	assert.NoError(t, err)
+}
+
+// TestObserver_FailedHeartbeat verifies that EventFailedHeartbeat fires when
+// replicateTo cannot send AppendEntries to a peer.
+func TestObserver_FailedHeartbeat(t *testing.T) {
+	cfg := DefaultConfig("node1", []string{"node2"})
+	cfg.ElectionTimeout = 50 * time.Millisecond
+	cfg.HeartbeatTimeout = 30 * time.Millisecond
+	node := NewNode(cfg)
+
+	failCh := make(chan Event, 10)
+	node.RegisterObserver(failCh)
+
+	node.SetTransport(
+		func(_ string, _ *RequestVoteArgs) (*RequestVoteReply, error) {
+			return &RequestVoteReply{Term: 0, VoteGranted: true}, nil
+		},
+		func(_ string, _ *AppendEntriesArgs) (*AppendEntriesReply, error) {
+			return nil, fmt.Errorf("simulated network failure")
+		},
+	)
+	node.Start()
+	defer node.Stop()
+	go func() {
+		for range node.ApplyCh() {
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		return node.State() == Leader
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Trigger replication by proposing.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go node.ProposeWait(ctx, []byte("cmd")) //nolint:errcheck
+
+	require.Eventually(t, func() bool {
+		for {
+			select {
+			case e := <-failCh:
+				if e.Type == EventFailedHeartbeat && e.PeerID == "node2" {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}, 2*time.Second, 10*time.Millisecond, "EventFailedHeartbeat must be delivered for node2")
+}
+
+// TestObserver_StepDownLeaderIDEmpty verifies that when a leader steps down
+// due to receiving a higher-term RequestVote (no new leader known yet), the
+// EventLeaderChange has IsLeader=false and LeaderID="".
+func TestObserver_StepDownLeaderIDEmpty(t *testing.T) {
+	// Single-node leader that wins election immediately.
+	cfg := DefaultConfig("node1", []string{"node2"})
+	cfg.ElectionTimeout = 50 * time.Millisecond
+	cfg.HeartbeatTimeout = 30 * time.Millisecond
+	node := NewNode(cfg)
+	node.SetTransport(
+		func(_ string, _ *RequestVoteArgs) (*RequestVoteReply, error) {
+			return &RequestVoteReply{Term: 0, VoteGranted: true}, nil
+		},
+		func(_ string, _ *AppendEntriesArgs) (*AppendEntriesReply, error) {
+			return &AppendEntriesReply{Term: 0, Success: true}, nil
+		},
+	)
+
+	ch := make(chan Event, 16)
+	node.RegisterObserver(ch)
+	defer node.DeregisterObserver(ch)
+
+	node.Start()
+	defer node.Stop()
+	go func() {
+		for range node.ApplyCh() {
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		return node.State() == Leader
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Inject a higher-term RequestVote. HandleRequestVote clears leaderID to "".
+	node.mu.Lock()
+	higherTerm := node.currentTerm + 1
+	node.mu.Unlock()
+
+	node.HandleRequestVote(&RequestVoteArgs{
+		Term:        higherTerm,
+		CandidateID: "node2",
+		// LastLogIndex/LastLogTerm left zero; vote not required — step-down alone is enough.
+		LeaderTransfer: true, // bypass stickiness guard
+	})
+
+	// Should receive a step-down event with LeaderID == "".
+	require.Eventually(t, func() bool {
+		for {
+			select {
+			case e := <-ch:
+				if e.Type == EventLeaderChange && !e.IsLeader {
+					assert.Equal(t, "", e.LeaderID,
+						"step-down event must have empty LeaderID")
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}, 2*time.Second, 10*time.Millisecond, "step-down EventLeaderChange not received")
 }
