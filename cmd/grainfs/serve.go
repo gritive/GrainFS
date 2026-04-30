@@ -1169,9 +1169,11 @@ func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int
 	return func(bucket, key, versionID string) int {
 		k, m, err := fsm.LookupObjectECShards(bucket, key, versionID)
 		if err != nil {
+			// Return 0 so Execute falls back to numShards (cluster-wide k+m).
+			// Returning 1 would copy only shard 0 then delete all k+m source shards — data loss.
 			log.Warn().Err(err).Str("bucket", bucket).Str("key", key).Str("version", versionID).
-				Msg("LookupObjectECShards failed, falling back to N× mode")
-			return 1
+				Msg("LookupObjectECShards failed, using numShards fallback")
+			return 0
 		}
 		if k == 0 {
 			return 1 // N× 모드: EC 메타 없음
