@@ -769,11 +769,23 @@ func (n *Node) checkLearnerCatchup() {
 	if n.pendingConfChangeIndex != 0 {
 		return
 	}
+	// Guard 1: jointPhase != None blocks auto-promote during the joint window.
+	// Once a JointEnter has been proposed, the joint will atomically promote
+	// new voters via C_new; auto-promote here would race.
+	if n.jointPhase != JointNone {
+		return
+	}
 	threshold := n.config.LearnerCatchupThreshold
 	if threshold == 0 {
 		threshold = 100
 	}
 	for nodeID, peerKey := range n.learnerIDs {
+		// Guard 2: jointManagedLearners blocks auto-promote during the
+		// pre-joint AddLearner→catch-up window on the leader that initiated
+		// ChangeMembership.
+		if _, joint := n.jointManagedLearners[nodeID]; joint {
+			continue
+		}
 		mi := n.matchIndex[peerKey]
 		if mi+threshold < n.commitIndex {
 			continue
