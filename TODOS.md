@@ -34,6 +34,22 @@
   - PR-E: EC + Multi-Raft 통합 마무리 + k6 256 group 벤치
   - 설계: `~/.gstack/projects/gritive-GrainFS/whitekid-joint-consensus-design-20260429.md`
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
+- [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
+  - ReadIndex (현재 `IsLeader()` 보증으로 충분; FSM linearizable read 요구 시)
+  - Public `Snapshot()` trigger API (운영 도구)
+  - BatchingFSM (FSM apply throughput 한계 도달 시)
+  - Snapshot chunking + Concurrent snapshotting (FSM이 QUIC stream max 근접 시)
+  - Per-PR Prometheus dashboard 갱신 PR
+- [ ] **raft-ehn Tier 3** (별도 브랜치, 각 sub-project는 독립 design + plan + worktree):
+  - **Tier 3-1: Joint consensus + Learner** — Multi-Raft atomic move-replica · multi-server replacement 안전성. wire format `JointConfChange=2` + `new_config:[string]` / `old_config:[string]` 슬롯 reserved (PR-A에서). 세 sub-project로 분해:
+    - **Sub-project 1: Learner-first 정책** — 새 voter 추가 시 자동 learner → catch-up 감지 → promote. 의존성 없음. Joint consensus의 안전망. 작음 (~3-5 PR). **진행 중** (worktree `feat-raft-joint-consensus`).
+      - 후속 검토: `AddVoterDirect` skip mode (recovery/migration 운영 도구로 필요 시); Learner stuck watchdog auto-remove (현재는 caller ctx timeout 채택); 추가 chaos scenarios (slow learner, repeated leader change during catch-up).
+    - **Sub-project 2: Joint consensus core** — §4.3 wire activation, 4-state machine (normal → C_old+new → C_new), dual-quorum, ConfChange entry encoding. 큼 (~6-8 PR). Sub-project 1 완료 후.
+    - **Sub-project 3: Multi-server replacement API** — `ChangeMembership(add, remove)` public, PR-E `DataGroupPlanExecutor`를 joint으로 전환. 중간 (~2-3 PR). Sub-project 2 의존.
+  - **Tier 3-2: RecoverCluster** — 단일 노드 재해 복구 운영 도구
+  - **Tier 3-3: 클라이언트 dedup** — ClientID + RequestID 기반 dedup table, S3 SDK retry 시 중복 PUT 방지
+  - **Tier 3-4: AE pipelining** — in-flight AppendEntries 1 → N (replication throughput)
+- [ ] **§2.x 잔여 항목** (필요 시 design doc 재발굴) — 4-30 §2.3 snapshot servers persistence(#103 v0.0.6.11) 동일 series의 다른 violation 항목이 있었는지 다음 brainstorming session에서 확인.
 - [ ] Migration: NFS virtual overlay
 - [ ] Migration: NBD block proxying
 - [ ] nbd over internet for edge computing (powered by wireguard)
