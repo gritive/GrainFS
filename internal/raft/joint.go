@@ -577,7 +577,7 @@ func (n *Node) ChangeMembership(ctx context.Context, adds []ServerEntry, removes
 	if !opts.SkipLearnerPhase {
 		// 1. AddLearner each.
 		for _, a := range adds {
-			if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, a.ID, a.Address); err != nil {
+			if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, a.ID, a.Address, true); err != nil {
 				cleanupOnError()
 				return err
 			}
