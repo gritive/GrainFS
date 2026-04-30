@@ -231,7 +231,7 @@ func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
 	addrBook := &fakeAddrBook{nodes: nodes}
 	sgUpdater := &fakeSGUpdater{err: sgErr}
 	dgMgr := cluster.NewDataGroupManager()
-	exec := cluster.NewDataGroupPlanExecutorForTest("", dgMgr, addrBook, sgUpdater,
+	exec := cluster.NewDataGroupPlanExecutorForTest("node-1", dgMgr, addrBook, sgUpdater,
 		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
 		[]string{"node-0"}, nil))
