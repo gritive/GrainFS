@@ -234,6 +234,38 @@ func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
 	require.NotNil(t, n.jointPromoteCh)
 }
 
+// TestApply_JointLeave_LearnerPromotionClearsLearnerIDs — Sub-project 3 prereq.
+// When JointLeave commits with C_new containing IDs that were previously
+// learners, those IDs become voters; learnerIDs must be cleaned to keep the
+// state machine invariant (a server is voter or learner, never both).
+func TestApply_JointLeave_LearnerPromotionClearsLearnerIDs(t *testing.T) {
+	n := jointTestNode("n1")
+	n.learnerIDs["n4"] = "n4"
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n3", "n4"}
+	n.jointEnterIndex = 5
+
+	entry := LogEntry{
+		Index: 6,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op: JointOpLeave,
+			NewServers: []ServerEntry{
+				{ID: "n1", Address: "n1", Suffrage: Voter},
+				{ID: "n2", Address: "n2", Suffrage: Voter},
+				{ID: "n3", Address: "n3", Suffrage: Voter},
+				{ID: "n4", Address: "n4", Suffrage: Voter},
+			},
+		}),
+	}
+	n.applyJointConfChangeLocked(entry)
+
+	require.NotContains(t, n.learnerIDs, "n4",
+		"learnerIDs must be cleaned of IDs promoted to voter via JointLeave")
+	require.Contains(t, n.config.Peers, "n4", "config.Peers includes promoted voter")
+}
+
 func TestCheckJointAdvance_LogLookaheadIdempotency(t *testing.T) {
 	n := jointTestNode("n1")
 	n.state = Leader

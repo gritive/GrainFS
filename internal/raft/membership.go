@@ -305,6 +305,12 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		// sets in joint entries include self because §4.3 reasons about full
 		// voter membership.
 		n.config.Peers = peersExcludingSelf(jc.NewServers, n.id)
+		// learnerIDs cleanup: any ID promoted to voter via this JointLeave
+		// must be removed from learnerIDs to keep the state-machine invariant
+		// (a server is either voter or learner, never both).
+		for _, s := range jc.NewServers {
+			delete(n.learnerIDs, s.ID)
+		}
 		n.jointPhase = JointNone
 		n.jointOldVoters = nil
 		n.jointNewVoters = nil
