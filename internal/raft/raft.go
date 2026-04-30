@@ -808,22 +808,37 @@ func (n *Node) runFollower() {
 
 // runPreVote sends pre-vote RPCs to all peers before the node increments its
 // term. Returns true if a majority granted the pre-vote (caller may proceed to
-// a real election). Returns false if peers indicate the cluster is healthy.
+// a real election). In joint mode (jointPhase == JointEntering), majority is
+// required in BOTH old and new voter sets (§4.3).
+// Returns false if peers indicate the cluster is healthy.
 func (n *Node) runPreVote() bool {
 	n.mu.Lock()
 	proposedTerm := n.currentTerm + 1
 	lastLogIndex, lastLogTerm := n.lastLogInfo()
-	peers := n.config.Peers
+	// Snapshot of all voters across both quorum sets (peers we need to contact).
+	voterSet := make(map[string]struct{}, len(n.config.Peers))
+	for _, p := range n.config.Peers {
+		voterSet[p] = struct{}{}
+	}
+	for _, p := range n.jointOldVoters {
+		voterSet[p] = struct{}{}
+	}
+	for _, p := range n.jointNewVoters {
+		voterSet[p] = struct{}{}
+	}
+	delete(voterSet, n.id)
+	peers := make([]string, 0, len(voterSet))
+	for p := range voterSet {
+		peers = append(peers, p)
+	}
 	n.mu.Unlock()
 
 	if len(peers) == 0 {
 		return true // single-node: always wins
 	}
 
-	total := len(peers) + 1
-	majority := total/2 + 1
-
 	type result struct {
+		peer    string
 		granted bool
 		term    uint64
 	}
@@ -839,27 +854,38 @@ func (n *Node) runPreVote() bool {
 			}
 			reply, err := n.sendRequestVote(p, args)
 			if err != nil {
-				resultCh <- result{}
+				resultCh <- result{peer: p}
 				return
 			}
-			resultCh <- result{granted: reply.VoteGranted, term: reply.Term}
+			resultCh <- result{peer: p, granted: reply.VoteGranted, term: reply.Term}
 		}(peer)
 	}
 
-	votes := 1 // self
+	granted := make(map[string]bool, len(peers))
 	var maxReplyTerm uint64
 	timer := time.NewTimer(n.randomElectionTimeout())
 	defer timer.Stop()
 
-	for votes < majority {
+	pending := len(peers)
+	for {
+		n.mu.Lock()
+		if n.dualMajority(granted) {
+			n.mu.Unlock()
+			break
+		}
+		n.mu.Unlock()
+		if pending == 0 {
+			return false
+		}
 		select {
 		case <-n.stopCh:
 			return false
 		case <-timer.C:
 			return false
 		case r := <-resultCh:
+			pending--
 			if r.granted {
-				votes++
+				granted[r.peer] = true
 			}
 			if r.term > maxReplyTerm {
 				maxReplyTerm = r.term
@@ -889,7 +915,22 @@ func (n *Node) runCandidate() {
 	n.persistState()
 	term := n.currentTerm
 	lastLogIndex, lastLogTerm := n.lastLogInfo()
-	peers := n.config.Peers
+	// Snapshot of all voters across both quorum sets (peers we need to contact).
+	voterSet := make(map[string]struct{}, len(n.config.Peers))
+	for _, p := range n.config.Peers {
+		voterSet[p] = struct{}{}
+	}
+	for _, p := range n.jointOldVoters {
+		voterSet[p] = struct{}{}
+	}
+	for _, p := range n.jointNewVoters {
+		voterSet[p] = struct{}{}
+	}
+	delete(voterSet, n.id)
+	peers := make([]string, 0, len(voterSet))
+	for p := range voterSet {
+		peers = append(peers, p)
+	}
 	isTransfer := n.leaderTransfer
 	n.leaderTransfer = false // consume the flag
 	n.mu.Unlock()
@@ -905,21 +946,23 @@ func (n *Node) runCandidate() {
 		n.mu.Unlock()
 	}()
 
-	votes := 1              // vote for self
-	total := len(peers) + 1 // include self
-	majority := total/2 + 1
-
-	// Single-peer node: already has majority with self-vote
-	if votes >= majority {
+	// Single-peer node: dualMajority with empty granted map already passes (self-only).
+	if len(peers) == 0 {
 		n.mu.Lock()
-		n.state = Leader
-		n.leaderID = n.id
-		n.initLeaderState()
+		if n.dualMajority(map[string]bool{}) {
+			n.state = Leader
+			n.leaderID = n.id
+			n.initLeaderState()
+		}
 		n.mu.Unlock()
 		return
 	}
 
-	voteCh := make(chan bool, len(peers))
+	type voteResult struct {
+		peer    string
+		granted bool
+	}
+	voteCh := make(chan voteResult, len(peers))
 
 	for _, peer := range peers {
 		go func(p string) {
@@ -932,7 +975,7 @@ func (n *Node) runCandidate() {
 			}
 			reply, err := n.sendRequestVote(p, args)
 			if err != nil {
-				voteCh <- false
+				voteCh <- voteResult{peer: p}
 				return
 			}
 
@@ -943,11 +986,11 @@ func (n *Node) runCandidate() {
 				n.votedFor = ""
 				n.persistState()
 				n.mu.Unlock()
-				voteCh <- false
+				voteCh <- voteResult{peer: p}
 				return
 			}
 			n.mu.Unlock()
-			voteCh <- reply.VoteGranted
+			voteCh <- voteResult{peer: p, granted: reply.VoteGranted}
 		}(peer)
 	}
 
@@ -955,6 +998,7 @@ func (n *Node) runCandidate() {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
+	granted := make(map[string]bool, len(peers))
 	for range len(peers) {
 		select {
 		case <-n.stopCh:
@@ -963,12 +1007,12 @@ func (n *Node) runCandidate() {
 			return
 		case <-n.resetCh:
 			return
-		case granted := <-voteCh:
-			if granted {
-				votes++
+		case r := <-voteCh:
+			if r.granted {
+				granted[r.peer] = true
 			}
-			if votes >= majority {
-				n.mu.Lock()
+			n.mu.Lock()
+			if n.dualMajority(granted) {
 				if n.state == Candidate && n.currentTerm == term {
 					n.state = Leader
 					n.leaderID = n.id
@@ -977,6 +1021,7 @@ func (n *Node) runCandidate() {
 				n.mu.Unlock()
 				return
 			}
+			n.mu.Unlock()
 		}
 	}
 }
@@ -1010,22 +1055,22 @@ func (n *Node) initLeaderState() {
 
 // hasQuorum returns true if a majority of the cluster (including self) has
 // replied to at least one AppendEntries within 3×HeartbeatTimeout.
+// In joint mode (jointPhase == JointEntering), majority is required in BOTH
+// the old and new voter sets (§4.3).
 // Must be called with n.mu held.
 func (n *Node) hasQuorum() bool {
-	if len(n.config.Peers) == 0 {
-		return true // single-node
+	current, _ := n.quorumSets()
+	if len(current) == 0 {
+		return true // single-node bootstrap
 	}
 	threshold := time.Now().Add(-3 * n.config.HeartbeatTimeout)
-	total := len(n.config.Peers) + 1
-	majority := total/2 + 1
-
-	acks := 1 // self always counts
-	for _, peer := range n.config.Peers {
-		if last, ok := n.checkQuorumAcks[peer]; ok && last.After(threshold) {
-			acks++
+	matched := make(map[string]bool, len(n.checkQuorumAcks))
+	for peer, last := range n.checkQuorumAcks {
+		if last.After(threshold) {
+			matched[peer] = true
 		}
 	}
-	return acks >= majority
+	return n.dualMajority(matched)
 }
 
 func (n *Node) runLeader() {
@@ -1254,8 +1299,8 @@ func (n *Node) applyConflictHint(peer string, reply *AppendEntriesReply, sentNex
 }
 
 func (n *Node) advanceCommitIndex() {
-	// Find the highest N such that a majority of matchIndex[i] >= N
-	// and log[N].term == currentTerm
+	// Find the highest N such that a majority of matchIndex[i] >= N (in BOTH
+	// quorums during joint mode) and log[N].term == currentTerm.
 	for idx := n.lastLogIdx(); idx > n.commitIndex; idx-- {
 		if !n.hasLogEntry(idx) {
 			continue
@@ -1264,23 +1309,19 @@ func (n *Node) advanceCommitIndex() {
 			continue
 		}
 
-		count := 0
-		total := len(n.config.Peers) + 1 // include self
-		for _, peer := range n.config.Peers {
-			if n.matchIndex[peer] >= idx {
-				count++
+		matched := make(map[string]bool, len(n.matchIndex))
+		for peer, mi := range n.matchIndex {
+			if mi >= idx {
+				matched[peer] = true
 			}
 		}
-		// Count self
-		if n.matchIndex[n.id] >= idx {
-			count++
+		if !n.dualMajority(matched) {
+			continue
 		}
 
-		if count > total/2 {
-			n.commitIndex = idx
-			n.signalCommit()
-			return
-		}
+		n.commitIndex = idx
+		n.signalCommit()
+		return
 	}
 }
 
@@ -1295,13 +1336,29 @@ func (n *Node) QuorumMinMatchIndex() uint64 {
 }
 
 func (n *Node) quorumMinMatchIndexLocked() uint64 {
-	vals := make([]uint64, 0, len(n.config.Peers)+1)
-	for _, peer := range n.config.Peers {
-		vals = append(vals, n.matchIndex[peer])
+	current, old := n.quorumSets()
+
+	medianMatch := func(set []string) uint64 {
+		if len(set) == 0 {
+			return 0
+		}
+		vals := make([]uint64, 0, len(set))
+		for _, peer := range set {
+			vals = append(vals, n.matchIndex[peer])
+		}
+		sort.Slice(vals, func(i, j int) bool { return vals[i] > vals[j] })
+		return vals[len(vals)/2]
 	}
-	vals = append(vals, n.matchIndex[n.id])
-	sort.Slice(vals, func(i, j int) bool { return vals[i] > vals[j] })
-	return vals[len(vals)/2]
+
+	cur := medianMatch(current)
+	if old == nil {
+		return cur
+	}
+	o := medianMatch(old)
+	if cur < o {
+		return cur
+	}
+	return o
 }
 
 // maybeRunLogGC truncates the Raft log store up to the quorum watermark when
