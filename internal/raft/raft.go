@@ -611,24 +611,32 @@ func (n *Node) ApplyCh() <-chan LogEntry {
 }
 
 // Configuration returns a race-safe snapshot of the current cluster membership.
+// Configuration returns the current cluster configuration (self + voters + learners).
 func (n *Node) Configuration() Configuration {
 	n.mu.Lock()
-	servers := make([]Server, 0, len(n.config.Peers)+1)
+	servers := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
 	servers = append(servers, Server{ID: n.id, Suffrage: Voter})
 	for _, p := range n.config.Peers {
 		servers = append(servers, Server{ID: p, Suffrage: Voter})
+	}
+	for _, pk := range n.learnerIDs {
+		servers = append(servers, Server{ID: pk, Suffrage: NonVoter})
 	}
 	n.mu.Unlock()
 	return Configuration{Servers: servers}
 }
 
-// currentConfigServers returns a copy of all known servers (self + peers).
+// currentConfigServers returns a copy of all known servers (self + voters + learners).
+// Learners are included with NonVoter suffrage so snapshots capture full membership.
 // MUST be called with n.mu held.
 func (n *Node) currentConfigServers() []Server {
-	out := make([]Server, 0, len(n.config.Peers)+1)
+	out := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
 	out = append(out, Server{ID: n.id, Suffrage: Voter})
 	for _, p := range n.config.Peers {
 		out = append(out, Server{ID: p, Suffrage: Voter})
+	}
+	for _, pk := range n.learnerIDs {
+		out = append(out, Server{ID: pk, Suffrage: NonVoter})
 	}
 	return out
 }
