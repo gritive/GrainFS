@@ -157,7 +157,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			}
 		}
 		return false
-	}, 120*time.Second, 2*time.Second, "no leader found")
+	}, 15*time.Second, 500*time.Millisecond, "no leader found")
 	t.Logf("leader: %s", leaderURL)
 
 	// One 16 MB object — bypasses CachedBackend (4 MB per-obj cap).
@@ -444,7 +444,7 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			}
 		}
 		return false
-	}, 120*time.Second, 2*time.Second, "no leader found")
+	}, 15*time.Second, 500*time.Millisecond, "no leader found")
 	t.Logf("leader: %s", leaderURL)
 
 	largeKey := "large-16mb"

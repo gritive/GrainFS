@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.6.10] — 2026-04-30
+
+### Fixed
+
+- **cluster**: `putObjectEC` 링 배치에 unhealthy/제거된 노드가 포함될 때 write-all 실패하던 버그 수정 — 링이 N-노드 토폴로지로 만들어진 후 일부 노드가 죽으면 `Ring.PlacementForKey`가 dead 노드를 후보에 포함시켜 EC PUT 전체가 실패. 후보 placement를 `liveNodes` 셋과 비교해 하나라도 dead 노드가 있으면 `PlacementForNodes(liveNodes)`로 폴백 (`ringVer=0` → read는 `metaNodeIDs` 경로 사용). `TestE2E_ClusterEC_TopologyChange` 노드 종료 후 PUT 복구.
+
+### Changed
+
+- **cluster**: placement 선택 로직을 `selectECPlacement(ring, ringErr, cfg, liveNodes, key)` 자유함수로 추출 — 순수 함수로 만들어 backend 의존성 없이 모든 분기(no-ring / all-live / dead-node 포함 / ringErr)를 단위 테스트.
+
+### Tests
+
+- **cluster**: `placement_select_test.go` — `selectECPlacement` 5개 단위 테스트 (`TestSelectECPlacement_NoRing`, `RingAllLive`, `RingHasDeadNode`, `RingPartialDead`, `RingErrPropagates`). E2E `TestE2E_ClusterEC_TopologyChange`가 검증하던 ring 폴백 동작을 단위 수준에서 보장.
+- **e2e**: `cluster_ec_test.go` / `degraded_test.go` 포트 대기 순차 루프를 `waitForPortsParallel`로 병렬화 — 5노드 클러스터 부팅 단계 단축.
+- **e2e**: `degraded_test.go` 리더 발견 윈도우 15s → 30s — loaded macOS에서 Raft 수렴 여유 확보.
+- **e2e**: `ec_shardcache_eval_test.go` 리더 발견 폴링 120s/2s → 15s/500ms — 부트 직후 빠른 리더 확인.
+
+### Chore
+
+- **deps**: aws-sdk-go-v2 v1.41.7, fsnotify v1.10.0, genproto/googleapis 2026-04-27 minor bump.
+
 ## [0.0.6.9] — 2026-04-30
 
 ### Fixed
