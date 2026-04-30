@@ -160,6 +160,16 @@ func TestRoundTrip_AllWireStructs(t *testing.T) {
 		require.Equal(t, orig, got)
 	})
 
+	t.Run("RequestVoteArgs_ZeroFlags", func(t *testing.T) {
+		// FlatBuffers omits false bool fields (default value); verify decoder returns false via vtable default.
+		orig := &RequestVoteArgs{Term: 3, CandidateID: "n2", LastLogIndex: 0, LastLogTerm: 0}
+		data, err := encodeRPCPayload(rpcTypeRequestVote, orig)
+		require.NoError(t, err)
+		got, err := decodeRequestVoteArgs(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+
 	t.Run("RequestVoteReply", func(t *testing.T) {
 		orig := &RequestVoteReply{Term: 9, VoteGranted: true}
 		data, err := encodeRPCPayload(rpcTypeRequestVoteReply, orig)
