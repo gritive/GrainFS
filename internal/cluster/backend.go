@@ -215,6 +215,11 @@ func (b *DistributedBackend) liveNodes() []string {
 func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node *raft.Node) {
 	b.snapMgr = mgr
 	b.snapNode = node
+	if mgr != nil && node != nil {
+		// §4.3 joint state persistence: capture on snapshot, restore on load.
+		mgr.SetJointStateProvider(node.JointSnapshotState)
+		mgr.SetJointStateRestorer(node.RestoreJointStateFromSnapshot)
+	}
 }
 
 // SetOnApply sets the callback invoked after each FSM apply.

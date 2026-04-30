@@ -328,6 +328,95 @@ func TestEqualServerSets(t *testing.T) {
 	require.False(t, equalServerSets(a, d), "different members")
 }
 
+func TestSnapshot_RoundtripPreservesJointState(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store.Close()
+
+	in := Snapshot{
+		Index:           42,
+		Term:            7,
+		Data:            []byte("fsm-state"),
+		Servers:         []Server{{ID: "n1", Suffrage: Voter}, {ID: "n2", Suffrage: Voter}, {ID: "n3", Suffrage: Voter}},
+		JointPhase:      JointEntering,
+		JointOldVoters:  []string{"n1", "n2", "n3"},
+		JointNewVoters:  []string{"n1", "n2", "n4"},
+		JointEnterIndex: 40,
+	}
+	require.NoError(t, store.SaveSnapshot(in))
+
+	out, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, in.Index, out.Index)
+	require.Equal(t, in.Term, out.Term)
+	require.Equal(t, in.Data, out.Data)
+	require.Equal(t, JointEntering, out.JointPhase)
+	require.Equal(t, []string{"n1", "n2", "n3"}, out.JointOldVoters)
+	require.Equal(t, []string{"n1", "n2", "n4"}, out.JointNewVoters)
+	require.Equal(t, uint64(40), out.JointEnterIndex)
+}
+
+func TestSnapshot_LegacyHasZeroJointState(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Legacy snapshot: no joint fields set — JointPhase is zero, vectors empty.
+	require.NoError(t, store.SaveSnapshot(Snapshot{
+		Index: 10, Term: 1, Data: []byte("x"),
+		Servers: []Server{{ID: "n1", Suffrage: Voter}},
+	}))
+
+	out, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, JointNone, out.JointPhase)
+	require.Empty(t, out.JointOldVoters)
+	require.Empty(t, out.JointNewVoters)
+	require.Equal(t, uint64(0), out.JointEnterIndex)
+}
+
+func TestRestoreJointStateFromSnapshot_ResetsLeaveProposed(t *testing.T) {
+	n := jointTestNode("n1")
+	n.jointLeaveProposed = true // pre-existing flag from before restart
+
+	n.RestoreJointStateFromSnapshot(int8(JointEntering),
+		[]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n4"}, 42)
+
+	require.Equal(t, JointEntering, n.jointPhase)
+	require.Equal(t, []string{"n1", "n2", "n3"}, n.jointOldVoters)
+	require.Equal(t, []string{"n1", "n2", "n4"}, n.jointNewVoters)
+	require.Equal(t, uint64(42), n.jointEnterIndex)
+	// flag reset so heartbeat watcher re-evaluates after snapshot restore.
+	require.False(t, n.jointLeaveProposed)
+}
+
+func TestApply_JointLeave_SelfRemoval_StepsDown(t *testing.T) {
+	// Append-time apply does NOT step the leader down; commit-time apply (apply
+	// loop) does. This test pins the append-time behavior — leader stays Leader
+	// after append, even when the entry removes self. Commit-time step-down is
+	// covered by TestApply_JointLeave_SelfRemoval_CommitTime below.
+	n := jointTestLeader("n1", []string{"n2", "n3"})
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n2", "n3"} // self removed
+
+	entry := LogEntry{
+		Index: 10, Term: 1, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			NewServers: []ServerEntry{{ID: "n2"}, {ID: "n3"}},
+		}),
+	}
+	n.applyConfigChangeLocked(entry)
+
+	// Append-time: phase + config.Peers updated; state still Leader (commit-time hook handles step-down).
+	require.Equal(t, JointNone, n.jointPhase)
+	require.Equal(t, []string{"n2", "n3"}, n.config.Peers)
+	require.Equal(t, Leader, n.state, "step-down deferred to commit-time apply hook")
+}
+
 // TestJoint_E2E_RemoveOne — full joint cycle on a 4-node in-memory cluster.
 // Leader proposes a JointEnter to remove the last voter; the heartbeat watcher
 // auto-proposes JointLeave; on commit the apply loop closes jointPromoteCh and

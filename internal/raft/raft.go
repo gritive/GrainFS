@@ -705,6 +705,32 @@ func (n *Node) Configuration() Configuration {
 	return Configuration{Servers: servers}
 }
 
+// JointSnapshotState captures the §4.3 joint state for snapshot persistence.
+// Use as JointStateProvider for SnapshotManager. Returns int8 phase to keep the
+// jointPhase type unexported across package boundaries.
+func (n *Node) JointSnapshotState() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return int8(n.jointPhase),
+		append([]string(nil), n.jointOldVoters...),
+		append([]string(nil), n.jointNewVoters...),
+		n.jointEnterIndex
+}
+
+// RestoreJointStateFromSnapshot adopts §4.3 joint state read from a snapshot.
+// Use as JointStateRestorer for SnapshotManager. jointLeaveProposed is reset to
+// false so the leader's heartbeat watcher re-evaluates and re-proposes JointLeave
+// if the JointEnter entry is still committed but Leave hasn't run yet.
+func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.jointPhase = jointPhase(phase)
+	n.jointOldVoters = jointOldVoters
+	n.jointNewVoters = jointNewVoters
+	n.jointEnterIndex = jointEnterIndex
+	n.jointLeaveProposed = false
+}
+
 // currentConfigServers returns a copy of all known servers (self + voters + learners).
 // Learners are included with NonVoter suffrage so snapshots capture full membership.
 // MUST be called with n.mu held.
