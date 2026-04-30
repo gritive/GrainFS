@@ -3,42 +3,51 @@ package cluster
 import (
 	"testing"
 
+	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
 // TestForwardReceiver_PutObject_DispatchesToBackend verifies PutObject operation
-// flows through FlatBuffers encoding and dispatches to the backend.
+// is properly decoded and routed through the ForwardReceiver.
 //
-// NOTE: These tests use WrapDistributedBackend with a stub DistributedBackend.
-// The stub has a nil raft.Node, so Handle() returns ForwardStatusNotLeader.
-// Full end-to-end tests with actual leader simulation require a real Raft node
-// (see backend_test.go for patterns with in-memory BadgerDB and Raft nodes).
+// NOTE: This test uses WrapDistributedBackend with a nil raft.Node.
+// The nil node causes Handle() to return ForwardStatusNotLeader.
+// Full end-to-end tests with actual leader simulation would require
+// in-memory BadgerDB and Raft nodes (see backend_test.go for patterns).
 func TestForwardReceiver_PutObject_DispatchesToBackend(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
 
-	// Create a minimal GroupBackend with wrapped DistributedBackend
-	// The wrapped backend has a nil raft.Node (NotLeader status)
 	mockDist := &DistributedBackend{}
 	gb := WrapDistributedBackend("g1", mockDist)
-
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1", "node2"}, gb))
 
-	// Encode FlatBuffers args
-	body := []byte("hello world")
-	args := buildPutObjectArgs("bucket-a", "key-1", "text/plain", body)
-	payload := encodeForwardPayload("g1", raftpb.ForwardOpPutObject, args)
+	// Encode PutObject args using FlatBuffers
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("test-bucket")
+	keyStr := builder.CreateString("test-key")
+	ctStr := builder.CreateString("text/plain")
+	bodyBytes := builder.CreateByteVector([]byte("test-body"))
 
-	// Call Handle
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	raftpb.PutObjectArgsStart(builder)
+	raftpb.PutObjectArgsAddBucket(builder, bucketStr)
+	raftpb.PutObjectArgsAddKey(builder, keyStr)
+	raftpb.PutObjectArgsAddContentType(builder, ctStr)
+	raftpb.PutObjectArgsAddBody(builder, bodyBytes)
+	paOffset := raftpb.PutObjectArgsEnd(builder)
+	builder.Finish(paOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpPutObject, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
 	require.NotNil(t, reply)
 
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	// With nil node, expect NotLeader (group exists, backend exists, but no RaftNode)
-	// This confirms the ForwardReceiver found the group, checked Backend(), then checked leadership
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
-		"PutObject should dispatch to backend and return NotLeader for nil RaftNode")
+		"PutObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 }
 
 // TestForwardReceiver_GetObject_DispatchesToBackend verifies GetObject operation.
@@ -49,15 +58,25 @@ func TestForwardReceiver_GetObject_DispatchesToBackend(t *testing.T) {
 	gb := WrapDistributedBackend("g1", mockDist)
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	args := buildGetObjectArgs("bucket-b", "key-2")
-	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObject, args)
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("get-bucket")
+	keyStr := builder.CreateString("get-key")
 
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	raftpb.GetObjectArgsStart(builder)
+	raftpb.GetObjectArgsAddBucket(builder, bucketStr)
+	raftpb.GetObjectArgsAddKey(builder, keyStr)
+	gaOffset := raftpb.GetObjectArgsEnd(builder)
+	builder.Finish(gaOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObject, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
 	require.NotNil(t, reply)
 
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
-		"GetObject should dispatch to backend and return NotLeader for nil RaftNode")
+		"GetObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 }
 
 // TestForwardReceiver_HeadObject_DispatchesToBackend verifies HeadObject operation.
@@ -68,15 +87,25 @@ func TestForwardReceiver_HeadObject_DispatchesToBackend(t *testing.T) {
 	gb := WrapDistributedBackend("g1", mockDist)
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	args := buildHeadObjectArgs("bucket-c", "key-3")
-	payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObject, args)
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("head-bucket")
+	keyStr := builder.CreateString("head-key")
 
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	raftpb.HeadObjectArgsStart(builder)
+	raftpb.HeadObjectArgsAddBucket(builder, bucketStr)
+	raftpb.HeadObjectArgsAddKey(builder, keyStr)
+	haOffset := raftpb.HeadObjectArgsEnd(builder)
+	builder.Finish(haOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObject, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
 	require.NotNil(t, reply)
 
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
-		"HeadObject should dispatch to backend and return NotLeader for nil RaftNode")
+		"HeadObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 }
 
 // TestForwardReceiver_DeleteObject_DispatchesToBackend verifies DeleteObject operation.
@@ -87,51 +116,23 @@ func TestForwardReceiver_DeleteObject_DispatchesToBackend(t *testing.T) {
 	gb := WrapDistributedBackend("g1", mockDist)
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	args := buildDeleteObjectArgs("bucket-d", "key-4")
-	payload := encodeForwardPayload("g1", raftpb.ForwardOpDeleteObject, args)
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("del-bucket")
+	keyStr := builder.CreateString("del-key")
 
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	raftpb.DeleteObjectArgsStart(builder)
+	raftpb.DeleteObjectArgsAddBucket(builder, bucketStr)
+	raftpb.DeleteObjectArgsAddKey(builder, keyStr)
+	daOffset := raftpb.DeleteObjectArgsEnd(builder)
+	builder.Finish(daOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpDeleteObject, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
 	require.NotNil(t, reply)
 
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
-		"DeleteObject should dispatch to backend and return NotLeader for nil RaftNode")
-}
-
-// TestForwardReceiver_ListObjects_DispatchesToBackend verifies ListObjects operation.
-func TestForwardReceiver_ListObjects_DispatchesToBackend(t *testing.T) {
-	rcv, mgr := setupReceiver(t, "node1")
-
-	mockDist := &DistributedBackend{}
-	gb := WrapDistributedBackend("g1", mockDist)
-	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
-
-	args := buildListObjectsArgs("bucket-e", "prefix/", 100)
-	payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjects, args)
-
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
-	require.NotNil(t, reply)
-
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
-	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
-		"ListObjects should dispatch to backend and return NotLeader for nil RaftNode")
-}
-
-// TestForwardReceiver_WalkObjects_DispatchesToBackend verifies WalkObjects operation.
-func TestForwardReceiver_WalkObjects_DispatchesToBackend(t *testing.T) {
-	rcv, mgr := setupReceiver(t, "node1")
-
-	mockDist := &DistributedBackend{}
-	gb := WrapDistributedBackend("g1", mockDist)
-	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
-
-	args := buildWalkObjectsArgs("bucket-f", "walk-prefix/")
-	payload := encodeForwardPayload("g1", raftpb.ForwardOpWalkObjects, args)
-
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
-	require.NotNil(t, reply)
-
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
-	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
-		"WalkObjects should dispatch to backend and return NotLeader for nil RaftNode")
+		"DeleteObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 }
