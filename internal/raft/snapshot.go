@@ -107,7 +107,8 @@ func (m *SnapshotManager) Restore() (uint64, error) {
 		return 0, err
 	}
 
-	if snap.Data == nil {
+	// Index == 0 means no snapshot has been saved (Raft indices are 1-based).
+	if snap.Index == 0 {
 		return 0, nil
 	}
 

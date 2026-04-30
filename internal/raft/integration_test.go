@@ -434,3 +434,36 @@ func TestSnapshotPreservesClusterMembership(t *testing.T) {
 		assert.True(t, peerIDs[addr], "restarted follower must know peer %s from snapshot", addr)
 	}
 }
+
+func TestRestoreFromStore_LegacySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	// Legacy snapshot: servers field is nil.
+	require.NoError(t, store.SaveSnapshot(Snapshot{
+		Index: 7,
+		Term:  3,
+		Data:  []byte("legacy-fsm-state"),
+	}))
+	require.NoError(t, store.Close())
+
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { store2.Close() })
+
+	cfg := DefaultConfig("node-1", []string{"node-2", "node-3"})
+	node := NewNode(cfg, store2)
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	// Snapshot watermark must be applied even for legacy snapshots.
+	assert.Equal(t, uint64(7), node.lastApplied, "lastApplied must match snapshot index")
+	assert.Equal(t, uint64(7), node.commitIndex, "commitIndex must match snapshot index")
+	assert.Equal(t, uint64(3), node.currentTerm, "term must be restored from snapshot")
+
+	// Best-effort fallback: config falls back to initialPeers (no membership data in snapshot).
+	assert.ElementsMatch(t, []string{"node-2", "node-3"}, node.config.Peers,
+		"legacy snapshot must fall back to initialPeers")
+}

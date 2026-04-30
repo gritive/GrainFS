@@ -370,6 +370,12 @@ func (n *Node) restoreFromStore() {
 		}
 	}
 
+	// Legacy snapshot fallback: when servers were not persisted, best-effort
+	// replay all ConfChange entries from initialPeers to reconstruct membership.
+	// Marker: do this BEFORE log entries are loaded so the rebuild covers the
+	// full log range below. Effective only after n.log is populated.
+	legacySnapshot := snapErr == nil && snap.Index > 0 && len(snap.Servers) == 0
+
 	// Restore log entries
 	lastIdx, err := n.store.LastIndex()
 	if err == nil && lastIdx > 0 {
@@ -391,6 +397,9 @@ func (n *Node) restoreFromStore() {
 	if snapErr == nil && snap.Index > 0 && len(snap.Servers) > 0 {
 		basePeers, baseLearners := restoreConfigFromServers(snap.Servers, n.id)
 		n.rebuildConfigFromLog(snap.Index+1, basePeers, baseLearners)
+	} else if legacySnapshot {
+		// Legacy fallback: replay full log from initialPeers (best-effort).
+		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
 	}
 }
 
@@ -635,8 +644,8 @@ func (n *Node) ApplyCh() <-chan LogEntry {
 	return n.applyCh
 }
 
-// Configuration returns a race-safe snapshot of the current cluster membership.
-// Configuration returns the current cluster configuration (self + voters + learners).
+// Configuration returns a race-safe snapshot of the current cluster membership
+// (self as Voter + peers as Voter + learners as NonVoter).
 func (n *Node) Configuration() Configuration {
 	n.mu.Lock()
 	servers := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
