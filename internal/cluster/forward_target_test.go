@@ -50,3 +50,28 @@ func TestLookupForwardTarget_EmptyPeers(t *testing.T) {
 	_, err := lookupForwardTarget(src, "group-0")
 	require.ErrorIs(t, err, ErrUnknownGroup)
 }
+
+// TestPeersForForward_SelfLast verifies that self is moved to the END of the
+// attempt order — non-self peers are tried first to encourage cross-node load
+// distribution. Self only handles the call when every other peer is unreachable.
+func TestPeersForForward_SelfLast(t *testing.T) {
+	entry := ShardGroupEntry{ID: "g", PeerIDs: []string{"a", "self", "b"}}
+	got := PeersForForward(entry, "self")
+	require.Equal(t, []string{"a", "b", "self"}, got)
+}
+
+// TestPeersForForward_SelfNotInPeers verifies that when this node is NOT a
+// member of the group, the original peer order is preserved unchanged.
+func TestPeersForForward_SelfNotInPeers(t *testing.T) {
+	entry := ShardGroupEntry{ID: "g", PeerIDs: []string{"a", "b", "c"}}
+	got := PeersForForward(entry, "self")
+	require.Equal(t, []string{"a", "b", "c"}, got)
+}
+
+// TestPeersForForward_EmptyPeers verifies the degenerate case — caller will
+// observe an empty list and return ErrNoReachablePeer without dialing.
+func TestPeersForForward_EmptyPeers(t *testing.T) {
+	entry := ShardGroupEntry{ID: "g", PeerIDs: nil}
+	got := PeersForForward(entry, "self")
+	require.Empty(t, got)
+}

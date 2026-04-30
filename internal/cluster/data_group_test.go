@@ -49,3 +49,27 @@ func TestDataGroupManager_ConcurrentAdd(t *testing.T) {
 	mgr.Add(NewDataGroup("group-b", []string{"node-1"}))
 	<-done
 }
+
+// TestDataGroupManager_GroupForBucket verifies the bucket→group lookup used by
+// ClusterCoordinator's bucket-scoped routing path. Three cases:
+//   - happy path: assigned bucket returns its group
+//   - unassigned bucket returns (nil, false) (no default set in this test)
+//   - nil router returns (nil, false) (defensive — coordinator may be wired
+//     before router exists during startup race)
+func TestDataGroupManager_GroupForBucket(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-1", []string{"a", "b", "c"}))
+
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+
+	dg, ok := mgr.GroupForBucket("photos", router)
+	require.True(t, ok)
+	require.Equal(t, "group-1", dg.ID())
+
+	_, ok = mgr.GroupForBucket("not-assigned", router)
+	require.False(t, ok)
+
+	_, ok = mgr.GroupForBucket("photos", nil)
+	require.False(t, ok)
+}
