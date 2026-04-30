@@ -21,4 +21,14 @@ var (
 	// ErrInvalidVersion is returned when the object version does not match
 	// the expected value (optimistic concurrency conflict).
 	ErrInvalidVersion = errors.New("invalid object version")
+
+	// ErrNoSuchBucket is returned when a routed bucket has no shard-group
+	// assignment in the meta-FSM (used by ClusterCoordinator). Distinct from
+	// ErrBucketNotFound which is returned by the base storage layer when the
+	// bucket directory doesn't exist on disk.
+	ErrNoSuchBucket = errors.New("no such bucket")
+
+	// ErrEntityTooLarge is returned when a forwarded request body or response
+	// payload exceeds the 5 MB hard cap enforced by ClusterCoordinator.
+	ErrEntityTooLarge = errors.New("entity too large")
 )
