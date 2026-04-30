@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/gritive/GrainFS/internal/pool"
 )
@@ -79,13 +80,20 @@ type XDRReader struct {
 
 var xdrReaderPool = pool.New(func() *XDRReader { return &XDRReader{} })
 
-var opArgPool16 = pool.New(func() *[16]byte { return new([16]byte) })
-var opArgPool8 = pool.New(func() *[8]byte { return new([8]byte) })
+// opArgPool16/opArgPool8: raw sync.Pool 사용 — generic pool.Pool[*[N]byte]는 Go 1.26.2
+// 컴파일러 ICE를 트리거한다 (`internal compiler error: bad ptr to array in slice
+// go.shape.*uint8`). `make test`처럼 다수 패키지 + `-cover` 조합으로 병렬 빌드할 때만
+// 재현되며 단독 빌드는 정상. 원인은 fixed-size array pointer (`*[N]byte`)를 generic
+// type parameter로 instantiate한 후 결과를 슬라이싱하는 패턴에서 shape 분석 버그.
+// 같은 generic Pool[T]는 *XDRWriter/*XDRReader 등 struct pointer에서는 정상 동작하므로
+// 이 두 케이스만 raw sync.Pool로 우회한다. Go upstream 수정 시 generic으로 복원 가능.
+var opArgPool16 = sync.Pool{New: func() any { return new([16]byte) }}
+var opArgPool8 = sync.Pool{New: func() any { return new([8]byte) }}
 
-func getOpArg16() []byte  { return opArgPool16.Get()[:] }
+func getOpArg16() []byte  { return opArgPool16.Get().(*[16]byte)[:] }
 func putOpArg16(b []byte) { opArgPool16.Put((*[16]byte)(b[:16])) }
 
-func getOpArg8() []byte  { return opArgPool8.Get()[:] }
+func getOpArg8() []byte  { return opArgPool8.Get().(*[8]byte)[:] }
 func putOpArg8(b []byte) { opArgPool8.Put((*[8]byte)(b[:8])) }
 
 func NewXDRReader(data []byte) *XDRReader {
