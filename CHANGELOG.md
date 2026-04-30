@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.6.19] — 2026-04-30
+
+### Added
+
+- **raft (Sub-project 2 PR-J4)**: §4.3 caller API. `proposeJointConfChangeWait(ctx, adds, removes) error` — adds/removes로부터 C_old/C_new 자동 산출 → JointEnter propose → leader heartbeat watcher가 자동 JointLeave → commit-time apply path가 jointPromoteCh close → caller wakeup. Internal-only (Sub-project 3에서 public 노출).
+- **raft**: `equalServerSets` 헬퍼 (id-keyed, order-independent voter set 비교). C_old == C_new no-op detection.
+- **raft**: `peersExcludingSelf` (`internal/raft/membership.go`) — joint voter set (self 포함)을 기존 `config.Peers` 컨벤션 (self 제외)으로 변환. JointLeave apply + truncation revert에서 사용.
+
+### Tests
+
+- 단위 6개: RejectsNotLeader / RejectsConcurrentJoint / RejectsConcurrentSingleServer / RejectsMixedVersion / NoOpEqualSets / EqualServerSets.
+- 통합 1개: `TestJoint_E2E_RemoveOne` — 4-node in-memory cluster, leader가 non-self peer 제거. Full joint cycle (JointEnter → auto JointLeave → commit-time wakeup) 검증. config.Peers는 self 제외 컨벤션 유지.
+
+### Notes
+
+- Edge cases (CtxTimeout 시 state 보존, partition 시 leader change, mid-failure recovery)는 PR-J5 chaos scenarios에서 검증.
+
 ## [0.0.6.18] — 2026-04-30
 
 ### Added

@@ -380,3 +380,136 @@ func serverEntriesFromIDs(ids []string, addrs map[string]string) []ServerEntry {
 	}
 	return out
 }
+
+// proposeJointConfChangeWait performs an atomic multi-server membership change.
+//
+// Inputs:
+//
+//	adds:    voters to add (full ServerEntry — id+address required for standalone groups).
+//	removes: voter ids to remove from the current configuration.
+//
+// Behavior:
+//
+//	C_old = current voters (config.Peers + self).
+//	C_new = (C_old \ removes) ∪ adds.
+//	Propose JointEnter(C_old, C_new). The leader's heartbeat watcher auto-proposes
+//	JointLeave once C_old+new commits. Caller wakes up when JointLeave commits on
+//	this node's apply loop (commit-time close, truncation-safe).
+//
+// Edge cases:
+//
+//   - C_old == C_new: no-op, returns nil immediately without proposing.
+//   - ctx canceled: returns ctx.Err(); joint state is preserved (a new leader's
+//     heartbeat watcher continues auto-progression — no rollback).
+//   - jointPhase != JointNone or pendingConfChangeIndex != 0: ErrConfChangeInProgress.
+//   - Not leader: ErrNotLeader.
+//   - mixedVersion: ErrMixedVersionNoMembershipChange.
+//
+// MUST NOT be called with n.mu held.
+func (n *Node) proposeJointConfChangeWait(ctx context.Context, adds []ServerEntry, removes []string) error {
+	n.mu.Lock()
+	if n.state != Leader {
+		n.mu.Unlock()
+		return ErrNotLeader
+	}
+	if n.mixedVersion {
+		n.mu.Unlock()
+		return ErrMixedVersionNoMembershipChange
+	}
+	if n.jointPhase != JointNone || n.pendingConfChangeIndex != 0 {
+		n.mu.Unlock()
+		return ErrConfChangeInProgress
+	}
+
+	// C_old = self + config.Peers as ServerEntry. Address falls back to id when
+	// a peer-key registry is not maintained (data-Raft uses peerKey == address).
+	oldVoters := make([]ServerEntry, 0, len(n.config.Peers)+1)
+	oldVoters = append(oldVoters, ServerEntry{ID: n.id, Address: n.id, Suffrage: Voter})
+	for _, peer := range n.config.Peers {
+		if peer == n.id {
+			continue
+		}
+		oldVoters = append(oldVoters, ServerEntry{ID: peer, Address: peer, Suffrage: Voter})
+	}
+
+	// C_new = (C_old \ removes) ∪ adds.
+	removeSet := make(map[string]struct{}, len(removes))
+	for _, r := range removes {
+		removeSet[r] = struct{}{}
+	}
+	newVoters := make([]ServerEntry, 0, len(oldVoters))
+	for _, v := range oldVoters {
+		if _, removed := removeSet[v.ID]; removed {
+			continue
+		}
+		newVoters = append(newVoters, v)
+	}
+	for _, a := range adds {
+		dup := false
+		for _, v := range newVoters {
+			if v.ID == a.ID {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			entry := a
+			if entry.Suffrage == 0 {
+				entry.Suffrage = Voter
+			}
+			newVoters = append(newVoters, entry)
+		}
+	}
+
+	if equalServerSets(oldVoters, newVoters) {
+		n.mu.Unlock()
+		return nil
+	}
+
+	ch := make(chan struct{})
+	n.jointPromoteCh = ch
+	n.mu.Unlock()
+
+	if err := n.proposeJointEnter(ctx, oldVoters, newVoters); err != nil {
+		// Propose failed before the entry hit the log; release the wait channel
+		// so a retry can install a fresh one. JointEnter that failed never moved
+		// the state machine, so jointPhase remains JointNone.
+		n.mu.Lock()
+		if n.jointPromoteCh == ch {
+			n.jointPromoteCh = nil
+		}
+		n.mu.Unlock()
+		return err
+	}
+
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		// Joint state is left intact. The cluster's heartbeat watcher (this node
+		// or the next leader) will drive C_old+new → C_new on its own. A new
+		// caller cannot reattach in this sub-project; that is Sub-project 3's
+		// observation API.
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrProposalFailed
+	}
+}
+
+// equalServerSets reports whether two ServerEntry slices represent the same
+// voter set (id-keyed, order-independent).
+func equalServerSets(a, b []ServerEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	setA := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		setA[v.ID] = struct{}{}
+	}
+	for _, v := range b {
+		if _, ok := setA[v.ID]; !ok {
+			return false
+		}
+	}
+	return true
+}
