@@ -788,6 +788,17 @@ func (n *Node) runCandidate() {
 	n.leaderTransfer = false // consume the flag
 	n.mu.Unlock()
 
+	// If we don't win the election, revert to Follower so run() re-enters
+	// runFollower with a fresh random timeout instead of looping back into
+	// runCandidate and incrementing the term again on every iteration.
+	defer func() {
+		n.mu.Lock()
+		if n.state == Candidate {
+			n.state = Follower
+		}
+		n.mu.Unlock()
+	}()
+
 	votes := 1              // vote for self
 	total := len(peers) + 1 // include self
 	majority := total/2 + 1
