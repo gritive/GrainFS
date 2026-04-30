@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.6.15] — 2026-04-30
+
+### Tests
+
+- **raft/chaos**: learner-first scenarios 3개 추가 (`TestChaos_LearnerFirst_LeaderChange_NewLeaderPromotes`, `TestChaos_LearnerFirst_SlowLearner_CallerCtxTimeout`, `TestChaos_LearnerFirst_RepeatedLeaderChange_EventualPromote`) — Tier 3-1 sub-project 1 (Learner-first AddVoter)의 in-memory chaos 검증. flaky QUIC E2E `TestAddVoter_E2E_LeaderChange_StillPromotes`의 stable 대체. 10/10 pass rate.
+
 ## [0.0.6.14] — 2026-04-30
 
 ### Added
