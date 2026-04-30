@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.6.12] — 2026-04-30
+
+### Fixed
+
+- **nfs4server**: Go 1.26.2 컴파일러 ICE 우회 — `internal/nfs4server/xdr.go`의 `opArgPool16`/`opArgPool8` (fixed-size `*[N]byte` 풀)을 generic `pool.Pool[T]`에서 raw `sync.Pool`로 교체. `make test`(다수 패키지 + `-cover` 병렬 빌드) 조합에서 재현되던 `internal compiler error: bad ptr to array in slice go.shape.*uint8`(xdr.go:344, 85) 해결. 원인은 fixed-size array pointer를 generic type parameter로 instantiate 후 결과를 슬라이싱하는 패턴에서 shape 분석 버그 — `*XDRWriter`/`*XDRReader` 등 struct pointer pool은 영향 없음.
+
 ## [0.0.6.11] — 2026-04-30
 
 ### Fixed

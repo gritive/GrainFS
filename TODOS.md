@@ -10,7 +10,6 @@
 - [ ] Memory usage validation
 - [ ] Erasure Coding을 활용한 Bit Rot 방지
 - [ ] **단일 블롭 손상 격리** — *zero ops* — 손상된 블롭 객체만 격리해 read-only로 표시; 동일 볼륨의 다른 객체는 정상 서비스 유지.
-- [ ] **Go 1.26.2 컴파일러 ICE — `internal/nfs4server/xdr.go`** — `make test`(병렬 빌드 + `-cover`) 조합에서 `internal compiler error: 'readOpArgs': bad ptr to array in slice go.shape.*uint8` (xdr.go:344, getOpArg16/getOpArg8 패턴) 재현. 단독 실행 또는 `-p 1`은 정상. 원인: generics `pool.New[*[N]byte]().Get()[:]` 슬라이싱이 Go 1.26.2 컴파일러 shape 분석에서 ICE. 우회: (1) Go upstream 업그레이드 후 재확인, (2) `getOpArg16/8`을 type assertion 우회 패턴으로 리팩터링, (3) Go issue tracker에 minimal reproducer 보고. 현재 CI 없으므로 로컬만 영향.
 
 ## Phase 17: Scale-Out
 
