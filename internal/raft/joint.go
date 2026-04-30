@@ -550,11 +550,124 @@ func (n *Node) ChangeMembership(ctx context.Context, adds []ServerEntry, removes
 		return n.proposeJointConfChangeWait(ctx, nil, removes)
 	}
 
-	// Full learner-first hybrid path implemented in subsequent task.
-	return errChangeMembershipAddsNotImplemented
+	// Adds path: learner-first hybrid. Register adds as joint-managed before
+	// proposing AddLearner so checkLearnerCatchup Guard 2 sees the entry at
+	// the moment AddLearner commits.
+	n.mu.Lock()
+	opts := n.effectiveChangeMembershipOpts()
+	for _, a := range adds {
+		n.jointManagedLearners[a.ID] = struct{}{}
+	}
+	n.mu.Unlock()
+
+	// addedIDs tracks learners successfully proposed; defer cleanup attempts
+	// RemoveVoter on each on any error path.
+	addedIDs := make([]string, 0, len(adds))
+	cleanupOnError := func() {
+		for _, id := range addedIDs {
+			_ = n.RemoveVoter(id)
+		}
+		n.mu.Lock()
+		for _, a := range adds {
+			delete(n.jointManagedLearners, a.ID)
+		}
+		n.mu.Unlock()
+	}
+
+	if !opts.SkipLearnerPhase {
+		// 1. AddLearner each.
+		for _, a := range adds {
+			if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, a.ID, a.Address); err != nil {
+				cleanupOnError()
+				return err
+			}
+			addedIDs = append(addedIDs, a.ID)
+		}
+
+		// 2. Wait for each learner to catch up (heartbeat-tick polling).
+		if err := n.waitLearnersCaughtUp(ctx, adds, opts.CatchUpTimeout); err != nil {
+			cleanupOnError()
+			return err
+		}
+	}
+
+	// 3. Joint atomic promote+remove.
+	promoteAdds := make([]ServerEntry, len(adds))
+	for i, a := range adds {
+		entry := a
+		entry.Suffrage = Voter
+		promoteAdds[i] = entry
+	}
+	if err := n.proposeJointConfChangeWait(ctx, promoteAdds, removes); err != nil {
+		cleanupOnError()
+		return err
+	}
+
+	// 4. Joint applied — learnerIDs cleared in apply path. Clear our
+	// jointManagedLearners (defensive; apply path doesn't touch it in K1).
+	n.mu.Lock()
+	for _, a := range adds {
+		delete(n.jointManagedLearners, a.ID)
+	}
+	n.mu.Unlock()
+	return nil
 }
 
-var errChangeMembershipAddsNotImplemented = errors.New("ChangeMembership: adds path not yet implemented")
+// ErrLearnerCatchUpTimeout is returned by ChangeMembership when an added
+// learner failed to catch up within the configured timeout.
+var ErrLearnerCatchUpTimeout = errors.New("raft: learner catch-up timeout in ChangeMembership")
+
+// waitLearnersCaughtUp polls each added learner's matchIndex against
+// commitIndex at heartbeat-tick frequency, returning when all catch up
+// (mi+threshold ≥ commitIndex) or the deadline expires.
+func (n *Node) waitLearnersCaughtUp(ctx context.Context, adds []ServerEntry, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+
+	tickInterval := 50 * time.Millisecond
+	if n.config.HeartbeatTimeout > 0 {
+		tickInterval = n.config.HeartbeatTimeout
+	}
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		n.mu.Lock()
+		threshold := n.config.LearnerCatchupThreshold
+		if threshold == 0 {
+			threshold = 100
+		}
+		commit := n.commitIndex
+		caught := 0
+		for _, a := range adds {
+			peerKey := a.Address
+			if peerKey == "" {
+				peerKey = a.ID
+			}
+			mi := n.matchIndex[peerKey]
+			if mi+threshold >= commit {
+				caught++
+			}
+		}
+		n.mu.Unlock()
+		if caught == len(adds) {
+			return nil
+		}
+
+		select {
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return ErrLearnerCatchUpTimeout
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-n.stopCh:
+			return ErrProposalFailed
+		}
+	}
+}
 
 // ChangeMembershipOpts configures default behavior for ChangeMembership.
 type ChangeMembershipOpts struct {

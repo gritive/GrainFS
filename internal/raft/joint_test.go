@@ -543,6 +543,53 @@ func TestJoint_E2E_RemoveOne(t *testing.T) {
 	require.Len(t, peers, 2, "leader sees 3-node cluster minus self after removal")
 }
 
+// TestChangeMembership_AddRemove_LearnerFirstHappyPath — Sub-project 3 PR-K1.
+// Uses high catch-up threshold to make a fake unreachable learner trivially
+// caught up, then verifies joint atomic promote+remove.
+func TestChangeMembership_AddRemove_LearnerFirstHappyPath(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader)
+
+	// Drive commitIndex up so AddLearner can commit + threshold trick activates.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, leader.Propose([]byte("entry")))
+	}
+	leader.SetLearnerCatchupThreshold(1_000_000) // fake learner trivially passes
+
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		if p != leader.id {
+			removeID = p
+			break
+		}
+	}
+	leader.mu.Unlock()
+	require.NotEmpty(t, removeID)
+
+	leader.SetChangeMembershipDefaults(ChangeMembershipOpts{CatchUpTimeout: 3 * time.Second})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := leader.ChangeMembership(ctx,
+		[]ServerEntry{{ID: "fake-new-voter", Address: "127.0.0.1:65530", Suffrage: Voter}},
+		[]string{removeID},
+	)
+	require.NoError(t, err, "joint cycle should complete via dual quorum from C_old")
+
+	leader.mu.Lock()
+	peers := append([]string(nil), leader.config.Peers...)
+	managed := len(leader.jointManagedLearners)
+	leader.mu.Unlock()
+
+	require.NotContains(t, peers, removeID, "removed voter dropped from C_new")
+	require.Contains(t, peers, "127.0.0.1:65530", "new voter address present in C_new")
+	require.Zero(t, managed, "jointManagedLearners cleared after success")
+}
+
 // TestChangeMembership_RemovesOnly_E2E — Sub-project 3 PR-K1. Verifies the
 // removes-only fast path through ChangeMembership end-to-end.
 func TestChangeMembership_RemovesOnly_E2E(t *testing.T) {
