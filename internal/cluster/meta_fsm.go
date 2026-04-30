@@ -485,6 +485,20 @@ func (f *MetaFSM) ShardGroups() []ShardGroupEntry {
 	return out
 }
 
+// ShardGroup returns the entry for id and true, or zero-value and false if not found.
+// Returned PeerIDs is a defensive copy.
+func (f *MetaFSM) ShardGroup(id string) (ShardGroupEntry, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	g, ok := f.shardGroups[id]
+	if !ok {
+		return ShardGroupEntry{}, false
+	}
+	peers := make([]string, len(g.PeerIDs))
+	copy(peers, g.PeerIDs)
+	return ShardGroupEntry{ID: g.ID, PeerIDs: peers}, true
+}
+
 // Snapshot serializes current state as FlatBuffers MetaStateSnapshot.
 func (f *MetaFSM) Snapshot() ([]byte, error) {
 	f.mu.RLock()
