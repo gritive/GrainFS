@@ -13,6 +13,15 @@ import (
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
 
+// Snapshot is a point-in-time FSM state capture including cluster membership.
+// Servers == nil means a legacy snapshot (no membership saved).
+type Snapshot struct {
+	Index   uint64
+	Term    uint64
+	Data    []byte
+	Servers []Server // cluster config at snapshot time; nil = legacy
+}
+
 // LogStore provides durable storage for Raft log entries and state.
 type LogStore interface {
 	// AppendEntries persists log entries starting at the given index.
@@ -40,11 +49,11 @@ type LogStore interface {
 	// LoadState loads the last persisted term and votedFor.
 	LoadState() (term uint64, votedFor string, err error)
 
-	// SaveSnapshot stores a snapshot at the given index/term.
-	SaveSnapshot(index, term uint64, data []byte) error
+	// SaveSnapshot stores a snapshot (index, term, data, and cluster servers).
+	SaveSnapshot(snap Snapshot) error
 
 	// LoadSnapshot loads the latest snapshot.
-	LoadSnapshot() (index, term uint64, data []byte, err error)
+	LoadSnapshot() (Snapshot, error)
 
 	// IsBootstrapped reports whether Bootstrap has been called on this store.
 	IsBootstrapped() (bool, error)
@@ -353,29 +362,27 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 	return term, votedFor, err
 }
 
-func (s *BadgerLogStore) SaveSnapshot(index, term uint64, data []byte) error {
+func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 	b := raftBuilderPool.Get()
 	pb.SnapshotMetaStart(b)
-	pb.SnapshotMetaAddIndex(b, index)
-	pb.SnapshotMetaAddTerm(b, term)
+	pb.SnapshotMetaAddIndex(b, snap.Index)
+	pb.SnapshotMetaAddTerm(b, snap.Term)
 	root := pb.SnapshotMetaEnd(b)
 	meta := fbFinishRPC(b, root)
 	return s.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(keySnapshotMeta, meta); err != nil {
 			return err
 		}
-		return txn.Set(keySnapshot, data)
+		return txn.Set(keySnapshot, snap.Data)
 	})
 }
 
-func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
-	var index, term uint64
-	var data []byte
-
+func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
+	var snap Snapshot
 	err := s.db.View(func(txn *badger.Txn) error {
 		metaItem, err := txn.Get(keySnapshotMeta)
 		if err == badger.ErrKeyNotFound {
-			return nil // no snapshot
+			return nil
 		}
 		if err != nil {
 			return err
@@ -387,24 +394,23 @@ func (s *BadgerLogStore) LoadSnapshot() (uint64, uint64, []byte, error) {
 				}
 			}()
 			m := pb.GetRootAsSnapshotMeta(val, 0)
-			index = m.Index()
-			term = m.Term()
+			snap.Index = m.Index()
+			snap.Term = m.Term()
 			return nil
 		}); err != nil {
 			return err
 		}
-
 		dataItem, err := txn.Get(keySnapshot)
 		if err != nil {
 			return err
 		}
 		return dataItem.Value(func(val []byte) error {
-			data = make([]byte, len(val))
-			copy(data, val)
+			snap.Data = make([]byte, len(val))
+			copy(snap.Data, val)
 			return nil
 		})
 	})
-	return index, term, data, err
+	return snap, err
 }
 
 // IsBootstrapped reports whether Bootstrap has been called on this store.

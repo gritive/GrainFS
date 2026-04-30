@@ -44,7 +44,7 @@ func NewSnapshotManager(store LogStore, snap Snapshotter, config SnapshotConfig)
 
 // MaybeTrigger checks if a snapshot should be taken based on the number of
 // applied entries since the last snapshot. Returns true if a snapshot was taken.
-func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64) bool {
+func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers []Server) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -69,7 +69,12 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64) bool {
 	}
 
 	// Save snapshot to store
-	if err := m.store.SaveSnapshot(appliedIndex, appliedTerm, data); err != nil {
+	if err := m.store.SaveSnapshot(Snapshot{
+		Index:   appliedIndex,
+		Term:    appliedTerm,
+		Data:    data,
+		Servers: servers,
+	}); err != nil {
 		log.Error().Err(err).Msg("snapshot: save failed")
 		return false
 	}
@@ -97,20 +102,19 @@ func (m *SnapshotManager) Restore() (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	index, _, data, err := m.store.LoadSnapshot()
+	snap, err := m.store.LoadSnapshot()
 	if err != nil {
 		return 0, err
 	}
 
-	// No snapshot
-	if data == nil {
+	if snap.Data == nil {
 		return 0, nil
 	}
 
-	if err := m.snapshotter.Restore(data); err != nil {
+	if err := m.snapshotter.Restore(snap.Data); err != nil {
 		return 0, err
 	}
 
-	m.lastSnapIndex = index
-	return index, nil
+	m.lastSnapIndex = snap.Index
+	return snap.Index, nil
 }

@@ -296,7 +296,7 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 				if err := m.fsm.applyCmd(entry.Command); err != nil {
 					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM apply error")
 				}
-				m.snapMgr.MaybeTrigger(entry.Index, entry.Term)
+				m.snapMgr.MaybeTrigger(entry.Index, entry.Term, m.node.Configuration().Servers)
 			}
 			m.lastApplied.Store(entry.Index)
 			m.applyNotifyMu.Lock()

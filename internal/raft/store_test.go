@@ -126,21 +126,21 @@ func TestBadgerLogStore_SaveAndLoadSnapshot(t *testing.T) {
 	store := setupTestStore(t)
 
 	// No snapshot initially
-	idx, term, data, err := store.LoadSnapshot()
+	snap, err := store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(0), idx)
-	assert.Equal(t, uint64(0), term)
-	assert.Nil(t, data)
+	assert.Equal(t, uint64(0), snap.Index)
+	assert.Equal(t, uint64(0), snap.Term)
+	assert.Nil(t, snap.Data)
 
 	// Save snapshot
 	snapData := []byte(`{"state":"snapshot-data"}`)
-	require.NoError(t, store.SaveSnapshot(10, 3, snapData))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 10, Term: 3, Data: snapData}))
 
-	idx, term, data, err = store.LoadSnapshot()
+	snap, err = store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), idx)
-	assert.Equal(t, uint64(3), term)
-	assert.Equal(t, snapData, data)
+	assert.Equal(t, uint64(10), snap.Index)
+	assert.Equal(t, uint64(3), snap.Term)
+	assert.Equal(t, snapData, snap.Data)
 }
 
 func TestBadgerLogStore_PersistenceAcrossReopen(t *testing.T) {
@@ -155,7 +155,7 @@ func TestBadgerLogStore_PersistenceAcrossReopen(t *testing.T) {
 	}
 	require.NoError(t, store1.AppendEntries(entries))
 	require.NoError(t, store1.SaveState(3, "node-A"))
-	require.NoError(t, store1.SaveSnapshot(1, 1, []byte("snap")))
+	require.NoError(t, store1.SaveSnapshot(Snapshot{Index: 1, Term: 1, Data: []byte("snap")}))
 	require.NoError(t, store1.Close())
 
 	// Reopen and verify
@@ -172,11 +172,11 @@ func TestBadgerLogStore_PersistenceAcrossReopen(t *testing.T) {
 	assert.Equal(t, uint64(3), term)
 	assert.Equal(t, "node-A", votedFor)
 
-	idx, snapTerm, data, err := store2.LoadSnapshot()
+	snap2, err := store2.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(1), idx)
-	assert.Equal(t, uint64(1), snapTerm)
-	assert.Equal(t, "snap", string(data))
+	assert.Equal(t, uint64(1), snap2.Index)
+	assert.Equal(t, uint64(1), snap2.Term)
+	assert.Equal(t, "snap", string(snap2.Data))
 }
 
 func TestBadgerLogStore_GetEntryNotFound(t *testing.T) {

@@ -215,7 +215,7 @@ func TestIntegration_PersistenceAndRecovery(t *testing.T) {
 	}
 	require.NoError(t, store.AppendEntries(entries))
 	require.NoError(t, store.SaveState(2, "node-B"))
-	require.NoError(t, store.SaveSnapshot(2, 1, []byte(`{"x":1}`)))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 2, Term: 1, Data: []byte(`{"x":1}`)}))
 	require.NoError(t, store.Close())
 
 	store2, err := NewBadgerLogStore(dir)
@@ -231,11 +231,11 @@ func TestIntegration_PersistenceAndRecovery(t *testing.T) {
 	assert.Equal(t, uint64(2), term)
 	assert.Equal(t, "node-B", votedFor)
 
-	snapIdx, snapTerm, snapData, err := store2.LoadSnapshot()
+	snap2, err := store2.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(2), snapIdx)
-	assert.Equal(t, uint64(1), snapTerm)
-	assert.Equal(t, `{"x":1}`, string(snapData))
+	assert.Equal(t, uint64(2), snap2.Index)
+	assert.Equal(t, uint64(1), snap2.Term)
+	assert.Equal(t, `{"x":1}`, string(snap2.Data))
 
 	for _, want := range entries {
 		got, err := store2.GetEntry(want.Index)

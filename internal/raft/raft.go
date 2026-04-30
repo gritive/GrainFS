@@ -998,16 +998,16 @@ func (n *Node) replicateTo(peer string) {
 
 	// If nextIdx is behind the compacted log, send snapshot instead
 	if nextIdx < n.firstIndex && n.sendInstallSnapshot != nil && n.store != nil {
-		snapIdx, snapTerm, snapData, err := n.store.LoadSnapshot()
-		if err == nil && snapData != nil {
+		snap, err := n.store.LoadSnapshot()
+		if err == nil && snap.Data != nil {
 			// Capture current config while holding the lock (read just above)
 			snapshotServers := n.currentConfigServers()
 			args := &InstallSnapshotArgs{
 				Term:              term,
 				LeaderID:          leaderID,
-				LastIncludedIndex: snapIdx,
-				LastIncludedTerm:  snapTerm,
-				Data:              snapData,
+				LastIncludedIndex: snap.Index,
+				LastIncludedTerm:  snap.Term,
+				Data:              snap.Data,
 				Servers:           snapshotServers,
 			}
 			n.mu.Unlock()
@@ -1028,8 +1028,8 @@ func (n *Node) replicateTo(peer string) {
 				n.mu.Unlock()
 				return
 			}
-			n.nextIndex[peer] = snapIdx + 1
-			n.matchIndex[peer] = snapIdx
+			n.nextIndex[peer] = snap.Index + 1
+			n.matchIndex[peer] = snap.Index
 			n.mu.Unlock()
 			return
 		}
@@ -1218,7 +1218,8 @@ func (n *Node) maybeRunLogGC() {
 	}
 	// Snapshot gate: without a snapshot covering the watermark, lagging
 	// followers that need pre-GC entries cannot recover via InstallSnapshot.
-	snapIdx, _, _, err := n.store.LoadSnapshot()
+	snap, err := n.store.LoadSnapshot()
+	snapIdx := snap.Index
 	if err != nil {
 		log.Warn().Err(err).Msg("raft: log GC skipped — snapshot load error")
 		return
@@ -1561,7 +1562,12 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 
 	// Save snapshot to store
 	if n.store != nil {
-		if err := n.store.SaveSnapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data); err != nil {
+		if err := n.store.SaveSnapshot(Snapshot{
+			Index:   args.LastIncludedIndex,
+			Term:    args.LastIncludedTerm,
+			Data:    args.Data,
+			Servers: args.Servers,
+		}); err != nil {
 			return reply
 		}
 	}
