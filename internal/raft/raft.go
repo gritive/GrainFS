@@ -343,6 +343,7 @@ func (n *Node) restoreFromStore() {
 	if n.store == nil {
 		return
 	}
+
 	// Restore term and votedFor
 	term, votedFor, err := n.store.LoadState()
 	if err == nil {
@@ -350,10 +351,28 @@ func (n *Node) restoreFromStore() {
 		n.votedFor = votedFor
 	}
 
+	// Restore snapshot watermark and cluster config from snapshot.
+	snap, snapErr := n.store.LoadSnapshot()
+	if snapErr == nil && snap.Index > 0 {
+		n.snapshotIndex = snap.Index
+		n.lastApplied = snap.Index
+		n.commitIndex = snap.Index
+		n.currentTerm = snap.Term
+
+		if len(snap.Servers) == 0 {
+			log.Warn().
+				Uint64("snap_index", snap.Index).
+				Msg("raft: legacy snapshot has no server list; replaying full log for membership")
+		} else {
+			basePeers, baseLearners := restoreConfigFromServers(snap.Servers, n.id)
+			n.config.Peers = basePeers
+			n.learnerIDs = baseLearners
+		}
+	}
+
 	// Restore log entries
 	lastIdx, err := n.store.LastIndex()
 	if err == nil && lastIdx > 0 {
-		// Find the first available index in the store
 		firstIdx := uint64(1)
 		for i := uint64(1); i <= lastIdx; i++ {
 			if _, err := n.store.GetEntry(i); err == nil {
@@ -366,6 +385,12 @@ func (n *Node) restoreFromStore() {
 			n.log = entries
 			n.firstIndex = firstIdx
 		}
+	}
+
+	// Replay post-snapshot ConfChange entries to apply membership changes after the snapshot.
+	if snapErr == nil && snap.Index > 0 && len(snap.Servers) > 0 {
+		basePeers, baseLearners := restoreConfigFromServers(snap.Servers, n.id)
+		n.rebuildConfigFromLog(snap.Index+1, basePeers, baseLearners)
 	}
 }
 

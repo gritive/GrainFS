@@ -243,3 +243,44 @@ func TestIntegration_PersistenceAndRecovery(t *testing.T) {
 		assert.Equal(t, string(want.Command), string(got.Command))
 	}
 }
+
+func TestRestoreFromStore_LoadsSnapshotServers(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	snap := Snapshot{
+		Index: 10,
+		Term:  2,
+		Data:  []byte("fsm-state"),
+		Servers: []Server{
+			{ID: "node-1", Suffrage: Voter},
+			{ID: "node-2", Suffrage: Voter},
+			{ID: "node-3", Suffrage: Voter},
+		},
+	}
+	require.NoError(t, store.SaveSnapshot(snap))
+	require.NoError(t, store.Close())
+
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { store2.Close() })
+
+	cfg := DefaultConfig("node-1", nil)
+	node := NewNode(cfg, store2)
+
+	cfg2 := node.Configuration()
+	ids := make(map[string]bool, len(cfg2.Servers))
+	for _, s := range cfg2.Servers {
+		ids[s.ID] = true
+	}
+	assert.True(t, ids["node-2"], "node-2 must be restored from snapshot")
+	assert.True(t, ids["node-3"], "node-3 must be restored from snapshot")
+	assert.True(t, ids["node-1"], "self (node-1) must be in configuration")
+
+	node.mu.Lock()
+	assert.Equal(t, uint64(10), node.lastApplied, "lastApplied must match snapshot index")
+	assert.Equal(t, uint64(10), node.commitIndex, "commitIndex must match snapshot index")
+	assert.Equal(t, uint64(2), node.currentTerm, "term must be restored from snapshot")
+	node.mu.Unlock()
+}
