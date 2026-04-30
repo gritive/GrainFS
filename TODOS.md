@@ -16,22 +16,14 @@
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
-- [ ] **Multi-Raft (Joint consensus 설계 완료)** — 5 PR 시퀀스:
-  - ✅ PR-A: §4.4 one-at-a-time membership change (v0.0.6.11 snapshot membership 까지 완결)
-  - ✅ PR-B: meta-Raft scaffold (`MetaRaft`, `MetaFSM`, shard_map, load_snapshot)
-  - ✅ PR-C: 데이터 그룹 다중화 + bucket→group Router (`DataGroup.Backend`, `Router.AssignBucket` COW)
-  - ✅ PR-D: autonomous rebalance (v0.0.6.6 `DataGroupPlanExecutor` + Full Sharding E2E)
-  - ✅ PR-E: Multi-Raft scale micro-bench (v0.0.6.14 #106) — N=8/32/64/128 sweep, RSS/heap/goroutine flat
-  - ✅ **PR-G+H 인프라 (v0.0.6.21)**: per-group raft.Node + BadgerDB lifecycle, `pickVoters` rendezvous hashing, `GroupBackend` 신규 타입, `OnShardGroupAdded` async callback, hash-based bucket→group assignment, `StreamProposeGroupForward (0x08)` wire-compat.
-    - 설계: `docs/superpowers/specs/2026-04-30-live-multi-raft-sharding-design.md`
-    - **남은 작업 (v0.0.7.x — Live Multi-Raft Sharding 후속)**:
-      - **데이터 plane 라우팅** — PUT/GET이 그룹별 backend로 dispatch. `ClusterCoordinator` 타입 도입 + S3 server wiring. v0.0.7.0의 핵심.
-      - **Cross-node forward** — 비-voter 노드 PUT 받았을 때 voter로 forward. 인프라(0x08 stream)는 들어왔으나 호출 path 미배선.
-      - **e2e tests 활성화** — BucketAssignment / RestartRecovery / PerGroupPersistence / CrossNodeDispatch / GroupLeaderFailover. macOS 멀티프로세스 leader change race 해결 (라우팅 path가 자체 redirect하면 안정화).
-      - **perf sanity** — N=8 sharded mode 30s 측정 + PR-E single-backend 비교.
-  - PR-F (트리거 시): §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
-  - PR-D 잔여 must-fix (PR-E 본 작업과 무관, 별도 follow-up):
-    - M2: MetaAbortPlanCmd reason:uint8 추가
+- [ ] **Live Multi-Raft Sharding 후속 (v0.0.7.x)** — PR-G+H 인프라(v0.0.6.21)에서 분리된 잔여 작업:
+  - **데이터 plane 라우팅** — PUT/GET이 그룹별 backend로 dispatch. `ClusterCoordinator` 타입 도입 + S3 server wiring. v0.0.7.0의 핵심.
+  - **Cross-node forward** — 비-voter 노드 PUT 받았을 때 voter로 forward. 인프라(`StreamProposeGroupForward = 0x08`)는 들어왔으나 호출 path 미배선.
+  - **e2e tests 활성화** — BucketAssignment / RestartRecovery / PerGroupPersistence / CrossNodeDispatch / GroupLeaderFailover. macOS 멀티프로세스 leader change race 해결 (라우팅 path가 자체 redirect하면 안정화).
+  - **perf sanity** — N=8 sharded mode 30s 측정 + PR-E single-backend 비교.
+  - 설계: `docs/superpowers/specs/2026-04-30-live-multi-raft-sharding-design.md`
+- [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
+- [ ] **PR-D 잔여 must-fix**: MetaAbortPlanCmd reason:uint8 추가
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
   - ReadIndex (현재 `IsLeader()` 보증으로 충분; FSM linearizable read 요구 시)
