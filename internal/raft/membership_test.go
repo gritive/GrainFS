@@ -363,3 +363,73 @@ func TestInitLeaderState_InitializesLearnerReplicationState(t *testing.T) {
 	require.Equal(t, expectedNext, n.nextIndex["learner-addr"], "learner nextIndex must be initialized")
 	require.Equal(t, uint64(0), n.matchIndex["learner-addr"], "learner matchIndex must start at 0")
 }
+
+func TestConfChangePayload_ManagedByJointRoundtrip(t *testing.T) {
+	original := ConfChangePayload{
+		Op:             ConfChangeAddLearner,
+		ID:             "learner-1",
+		Address:        "addr-1",
+		ManagedByJoint: true,
+	}
+
+	cmd := encodeConfChange(original)
+	decoded := decodeConfChange(cmd)
+
+	if decoded.Op != original.Op {
+		t.Errorf("Op mismatch: got %v, want %v", decoded.Op, original.Op)
+	}
+	if decoded.ID != original.ID {
+		t.Errorf("ID mismatch: got %s, want %s", decoded.ID, original.ID)
+	}
+	if decoded.Address != original.Address {
+		t.Errorf("Address mismatch: got %s, want %s", decoded.Address, original.Address)
+	}
+	if decoded.ManagedByJoint != original.ManagedByJoint {
+		t.Errorf("ManagedByJoint mismatch: got %v, want %v", decoded.ManagedByJoint, original.ManagedByJoint)
+	}
+}
+
+func TestEncodeConfChange_OmitManagedByJointDefaultsToFalse(t *testing.T) {
+	// Go zero value for bool is false - test that omitted field defaults to false
+	payload := ConfChangePayload{
+		Op:      ConfChangeAddLearner,
+		ID:      "learner-1",
+		Address: "addr-1",
+		// ManagedByJoint omitted - should default to false
+	}
+
+	cmd := encodeConfChange(payload)
+	decoded := decodeConfChange(cmd)
+
+	if decoded.ManagedByJoint != false {
+		t.Errorf("ManagedByJoint should default to false when omitted, got %v", decoded.ManagedByJoint)
+	}
+}
+
+func TestDecodeConfChange_ExtractsManagedByJoint(t *testing.T) {
+	testCases := []struct {
+		name           string
+		managedByJoint bool
+	}{
+		{"managed by joint", true},
+		{"not managed", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := ConfChangePayload{
+				Op:             ConfChangeAddLearner,
+				ID:             "learner-1",
+				Address:        "addr-1",
+				ManagedByJoint: tc.managedByJoint,
+			}
+
+			cmd := encodeConfChange(payload)
+			decoded := decodeConfChange(cmd)
+
+			if decoded.ManagedByJoint != tc.managedByJoint {
+				t.Errorf("ManagedByJoint mismatch: got %v, want %v", decoded.ManagedByJoint, tc.managedByJoint)
+			}
+		})
+	}
+}
