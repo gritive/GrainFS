@@ -31,3 +31,26 @@ func lookupForwardTarget(src shardGroupSource, groupID string) (string, error) {
 	}
 	return entry.PeerIDs[0], nil
 }
+
+// PeersForForward returns the group's peers in attempt order, with self moved
+// to the END. Non-self peers are tried first to encourage cross-node load
+// distribution; self is the last resort (only dialed when every other peer is
+// unreachable, in which case ForwardSender's in-process shortcut kicks in).
+//
+// If selfID is not in the group's peer list, the original order is returned
+// unchanged. Caller (ClusterCoordinator) feeds the result to ForwardSender.Send.
+func PeersForForward(entry ShardGroupEntry, selfID string) []string {
+	out := make([]string, 0, len(entry.PeerIDs))
+	var selfFound bool
+	for _, p := range entry.PeerIDs {
+		if p == selfID {
+			selfFound = true
+			continue
+		}
+		out = append(out, p)
+	}
+	if selfFound {
+		out = append(out, selfID)
+	}
+	return out
+}
