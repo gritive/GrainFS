@@ -401,6 +401,17 @@ func (n *Node) restoreFromStore() {
 			basePeers, baseLearners := restoreConfigFromServers(snap.Servers, n.id)
 			n.config.Peers = basePeers
 			n.learnerIDs = baseLearners
+			// Derive removedFromCluster: if self is not in the snapshot's
+			// server list, we were an orphan at snapshot time. The orphan
+			// election guard must persist so we don't split votes on cold-start.
+			selfPresent := false
+			for _, sv := range snap.Servers {
+				if sv.ID == n.id {
+					selfPresent = true
+					break
+				}
+			}
+			n.removedFromCluster = !selfPresent
 		}
 	}
 
@@ -810,10 +821,15 @@ func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNe
 
 // currentConfigServers returns a copy of all known servers (self + voters + learners).
 // Learners are included with NonVoter suffrage so snapshots capture full membership.
+// Self is omitted when removedFromCluster — a snapshotted orphan node must not
+// claim to be a voter in its own snapshot. The restore path uses self ∉ Servers
+// to derive removedFromCluster on cold-start.
 // MUST be called with n.mu held.
 func (n *Node) currentConfigServers() []Server {
 	out := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
-	out = append(out, Server{ID: n.id, Suffrage: Voter})
+	if !n.removedFromCluster {
+		out = append(out, Server{ID: n.id, Suffrage: Voter})
+	}
 	for _, p := range n.config.Peers {
 		out = append(out, Server{ID: p, Suffrage: Voter})
 	}
@@ -1913,6 +1929,17 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 		n.config.Peers = peers
 		n.initialPeers = peers
 		n.learnerIDs = learners
+		// Derive removedFromCluster from snapshot Servers (mirror of cold-start
+		// path in NewNode). InstallSnapshot from a leader represents authoritative
+		// cluster state; if self is absent, we are an orphan.
+		selfPresent := false
+		for _, sv := range args.Servers {
+			if sv.ID == n.id {
+				selfPresent = true
+				break
+			}
+		}
+		n.removedFromCluster = !selfPresent
 	}
 
 	// Deliver snapshot data via applyCh so the FSM can restore

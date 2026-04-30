@@ -770,6 +770,38 @@ func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T
 	require.False(t, n.jointLeaveProposed)
 }
 
+// TestCurrentConfigServers_OmitsSelfWhenRemoved — PR-K1 follow-up.
+// A snapshotted orphan node must not include self in the Servers list,
+// otherwise the restore path can't derive removedFromCluster.
+func TestCurrentConfigServers_OmitsSelfWhenRemoved(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.removedFromCluster = true
+
+	servers := n.currentConfigServers()
+
+	for _, sv := range servers {
+		require.NotEqual(t, "n1", sv.ID,
+			"removed node must not include self in Servers list")
+	}
+	require.Len(t, servers, 2, "only the two voter peers should remain")
+}
+
+func TestCurrentConfigServers_IncludesSelfWhenNotRemoved(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+
+	servers := n.currentConfigServers()
+
+	foundSelf := false
+	for _, sv := range servers {
+		if sv.ID == "n1" {
+			foundSelf = true
+		}
+	}
+	require.True(t, foundSelf, "non-removed node includes self as Voter")
+}
+
 // TestRebuildConfigFromLog_RestoresRemovedFromCluster — PR-K1 follow-up.
 // Replay path must mirror commit-time hook (raft.go:586) and set
 // removedFromCluster when JointLeave commits with self ∉ C_new. Without this,
