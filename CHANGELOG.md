@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.6.18] — 2026-04-30
+
+### Added
+
+- **raft (Sub-project 2 PR-J3)**: §4.3 apply path + auto-progression + truncation revert.
+  - `applyConfigChangeLocked` JointConfChange 분기 (`internal/raft/membership.go`). JointEnter는 append-time에 jointPhase=Entering + voter sets 설정, leader는 새 voter (newServers \ oldServers)에 한해 nextIndex/matchIndex bootstrap. JointLeave는 append-time에 jointPhase=None + config.Peers=newServers (§4.4 invariant 유지).
+  - Apply loop (commit-time, `internal/raft/raft.go`): JointLeave 커밋 시 `jointPromoteCh` close + 자기 제거된 leader는 step-down. **Truncation safety**: append-time이 아닌 commit-time gating으로 새 leader가 JointLeave를 truncate해도 caller가 잘못 wake up하지 않음.
+  - `rebuildConfigFromLog`이 JointConfChange entry도 replay (truncation revert). 로그에 JointEnter는 있지만 JointLeave가 잘린 경우 jointPhase=Entering으로 자동 복구 → dual-quorum 유지.
+  - `runLeader` heartbeat tick에 `checkJointAdvance` 추가 (`checkLearnerCatchup` 옆). JointEnter committed 감지 시 leader가 자동으로 JointLeave propose. 5단계 idempotency (state, phase, commitIndex, log lookahead, flag).
+  - `flushBatch` §4.3/§4.4 통합 가드: jointPhase != JointNone 시 일반 ConfChange reject, 동시 batch 내 JointEnter/Leave는 1개만, JointEnter는 jointPhase=None일 때만, JointLeave는 jointPhase=Entering일 때만.
+  - `internal/raft/joint.go`: `serverPeerKeys`, `containsPeer`, `initLeaderStateForNewVoters`, `hasJointLeaveAfter`, `proposeJointEnter`, `proposeJointLeave`, `proposeJointEntry`, `checkJointAdvance`, `peerAddressSnapshotLocked`, `serverEntriesFromIDs` 헬퍼.
+
+### Tests
+
+- `TestApply_JointEnter_ActivatesJointPhase` — append-time 상태 전환
+- `TestApply_JointEnter_LeaderInitsNewVotersOnly` — 새 voter만 replication state init, 기존 voter 보존
+- `TestApply_JointLeave_DeactivatesAtAppendTime` — phase reset + config.Peers 갱신, jointPromoteCh는 commit-time까지 close 안 함
+- `TestCheckJointAdvance_LogLookaheadIdempotency` — log에 JointLeave 이미 있으면 propose 안 함
+- `TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering` — truncated Leave → Entering revert
+
+### Notes
+
+- 본 PR 시점에 propose path는 internal-only (`proposeJointEnter`/`proposeJointLeave`). 외부 caller API는 PR-J4에서 추가.
+- Integration test (E2E joint cycle)도 PR-J4의 caller API와 함께 작성.
+
 ## [0.0.6.17] — 2026-04-30
 
 ### Changed

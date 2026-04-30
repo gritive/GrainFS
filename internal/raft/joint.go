@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"context"
+
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -165,5 +167,216 @@ func decodeJointConfChange(data []byte) JointConfChange {
 
 	out.NewServers = read(e.NewServersLength(), e.NewServers)
 	out.OldServers = read(e.OldServersLength(), e.OldServers)
+	return out
+}
+
+// serverPeerKeys returns the peer-key list for a ServerEntry slice.
+// peerKey matches the convention from membership.go: prefer Address (data-Raft
+// QUIC address), fall back to ID (meta-Raft nodeID). The result is what gets
+// stored in config.Peers / jointOldVoters / jointNewVoters.
+func serverPeerKeys(servers []ServerEntry) []string {
+	out := make([]string, len(servers))
+	for i, s := range servers {
+		if s.Address != "" {
+			out[i] = s.Address
+		} else {
+			out[i] = s.ID
+		}
+	}
+	return out
+}
+
+func containsPeer(set []string, item string) bool {
+	for _, s := range set {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// initLeaderStateForNewVoters bootstraps replication state (nextIndex / matchIndex)
+// only for voters introduced by a JointEnter — i.e. members in newServers but not
+// in oldServers. Existing voters retain their replication progress so a partial
+// joint commit doesn't stall already-replicating peers.
+//
+// Caller MUST hold n.mu and be the Leader.
+func (n *Node) initLeaderStateForNewVoters(oldServers, newServers []ServerEntry) {
+	oldKeys := make(map[string]struct{}, len(oldServers))
+	for _, s := range oldServers {
+		key := s.Address
+		if key == "" {
+			key = s.ID
+		}
+		oldKeys[key] = struct{}{}
+	}
+	nextIdx := n.lastLogIdx() + 1
+	for _, s := range newServers {
+		key := s.Address
+		if key == "" {
+			key = s.ID
+		}
+		if _, existed := oldKeys[key]; existed {
+			continue
+		}
+		if key == n.id {
+			continue
+		}
+		n.nextIndex[key] = nextIdx
+		n.matchIndex[key] = 0
+	}
+}
+
+// hasJointLeaveAfter scans the in-memory log for a JointLeave entry at index
+// > startIndex. The check is committed-agnostic — uncommitted tail entries are
+// considered too. Used by checkJointAdvance for log-state idempotency: a leader
+// re-elected mid-joint must not append a duplicate JointLeave when one already
+// exists in the log it inherited.
+//
+// Caller MUST hold n.mu.
+func (n *Node) hasJointLeaveAfter(startIndex uint64) bool {
+	for _, entry := range n.log {
+		if entry.Index <= startIndex {
+			continue
+		}
+		if entry.Type != LogEntryJointConfChange {
+			continue
+		}
+		jc := decodeJointConfChange(entry.Command)
+		if jc.Op == JointOpLeave {
+			return true
+		}
+	}
+	return false
+}
+
+// proposeJointEnter sends a JointEnter entry through the proposal pipeline.
+// MUST NOT be called with n.mu held (proposalCh consumer takes the lock).
+func (n *Node) proposeJointEnter(ctx context.Context, oldServers, newServers []ServerEntry) error {
+	cmd := encodeJointConfChange(JointConfChange{
+		Op:         JointOpEnter,
+		NewServers: newServers,
+		OldServers: oldServers,
+	})
+	return n.proposeJointEntry(ctx, cmd)
+}
+
+// proposeJointLeave sends a JointLeave entry through the proposal pipeline.
+// MUST NOT be called with n.mu held.
+func (n *Node) proposeJointLeave(ctx context.Context, newServers []ServerEntry) error {
+	cmd := encodeJointConfChange(JointConfChange{
+		Op:         JointOpLeave,
+		NewServers: newServers,
+		OldServers: nil,
+	})
+	return n.proposeJointEntry(ctx, cmd)
+}
+
+// proposeJointEntry submits a JointConfChange command via the batcher pipeline
+// and waits for commit (or context cancellation / node stop).
+func (n *Node) proposeJointEntry(ctx context.Context, cmd []byte) error {
+	doneCh := make(chan proposalResult, 1)
+	p := proposal{command: cmd, entryType: LogEntryJointConfChange, doneCh: doneCh, ctx: ctx}
+	select {
+	case n.proposalCh <- p:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrProposalFailed
+	}
+	select {
+	case result := <-doneCh:
+		return result.err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrProposalFailed
+	}
+}
+
+// checkJointAdvance is called inline on the leader's heartbeat tick. When the
+// JointEnter entry has committed and no JointLeave is yet in the log, the
+// leader auto-proposes JointLeave to drive the joint phase to completion.
+//
+// Idempotency layers:
+//  1. state != Leader → no-op (only leader drives advance).
+//  2. jointPhase != JointEntering → already done or never started.
+//  3. commitIndex < jointEnterIndex → C_old+new not yet committed.
+//  4. log already contains a JointLeave at index > jointEnterIndex → in flight.
+//  5. jointLeaveProposed flag → propose goroutine already in progress.
+//
+// Caller MUST hold n.mu.
+func (n *Node) checkJointAdvance() {
+	if n.state != Leader {
+		return
+	}
+	if n.jointPhase != JointEntering {
+		return
+	}
+	if n.jointEnterIndex == 0 || n.commitIndex < n.jointEnterIndex {
+		return
+	}
+	if n.hasJointLeaveAfter(n.jointEnterIndex) {
+		return
+	}
+	if n.jointLeaveProposed {
+		return
+	}
+	n.jointLeaveProposed = true
+
+	// Snapshot voter list and addresses under lock; propose off-lock.
+	newVoters := make([]string, len(n.jointNewVoters))
+	copy(newVoters, n.jointNewVoters)
+	addrs := n.peerAddressSnapshotLocked()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*n.config.HeartbeatTimeout)
+		defer cancel()
+		entries := serverEntriesFromIDs(newVoters, addrs)
+		if err := n.proposeJointLeave(ctx, entries); err != nil {
+			n.mu.Lock()
+			n.jointLeaveProposed = false
+			n.mu.Unlock()
+		}
+	}()
+}
+
+// peerAddressSnapshotLocked returns a peerKey → address map for joint payloads.
+// In data-Raft mode peerKey already equals address (so the map is identity); in
+// meta-Raft mode peerKey is the nodeID and address resolution lives elsewhere
+// — for this codebase the joint payload Address may be left equal to ID since
+// the in-memory peerKey lookups already resolve through the same convention.
+//
+// Caller MUST hold n.mu.
+func (n *Node) peerAddressSnapshotLocked() map[string]string {
+	addrs := make(map[string]string, len(n.config.Peers)+1)
+	addrs[n.id] = n.id
+	for _, p := range n.config.Peers {
+		addrs[p] = p
+	}
+	for _, p := range n.jointOldVoters {
+		if _, ok := addrs[p]; !ok {
+			addrs[p] = p
+		}
+	}
+	for _, p := range n.jointNewVoters {
+		if _, ok := addrs[p]; !ok {
+			addrs[p] = p
+		}
+	}
+	return addrs
+}
+
+// serverEntriesFromIDs builds a ServerEntry slice from id list and address map.
+// Suffrage defaults to Voter — joint membership entries describe voter sets only.
+func serverEntriesFromIDs(ids []string, addrs map[string]string) []ServerEntry {
+	out := make([]ServerEntry, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, ServerEntry{
+			ID:       id,
+			Address:  addrs[id],
+			Suffrage: Voter,
+		})
+	}
 	return out
 }
