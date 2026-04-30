@@ -206,6 +206,37 @@ func waitForPortsParallel(t testing.TB, ports []int, timeout time.Duration) {
 	}
 }
 
+// waitForPortsParallelErr is a non-fatal variant of waitForPortsParallel.
+// Returns the first port that did not come up within timeout, or nil on success.
+// Used by retry-aware test helpers (e.g., mrCluster) that need to recover
+// from transient bind failures rather than abort the whole test.
+func waitForPortsParallelErr(ports []int, timeout time.Duration) error {
+	var wg sync.WaitGroup
+	failed := make(chan int, len(ports))
+	for _, port := range ports {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			deadline := time.Now().Add(timeout)
+			for time.Now().Before(deadline) {
+				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), 500*time.Millisecond)
+				if err == nil {
+					conn.Close()
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			failed <- p
+		}(port)
+	}
+	wg.Wait()
+	close(failed)
+	for p := range failed {
+		return fmt.Errorf("server did not start on port %d within %v", p, timeout)
+	}
+	return nil
+}
+
 // waitForPortM is the TestMain variant of waitForPort — no *testing.T available there.
 func waitForPortM(port int, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)

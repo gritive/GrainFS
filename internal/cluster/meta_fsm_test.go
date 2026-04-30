@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -101,6 +103,81 @@ func TestMetaFSM_Apply_PutShardGroup(t *testing.T) {
 	require.Len(t, groups, 1)
 	assert.Equal(t, "group-0", groups[0].ID)
 	assert.Equal(t, []string{"node-0", "node-1"}, groups[0].PeerIDs)
+}
+
+// TestMetaFSM_OnShardGroupAdded_FiresOnApply verifies the callback registered
+// via SetOnShardGroupAdded receives every applied PutShardGroup entry with
+// independently allocated PeerIDs (so the callback can keep references safely).
+func TestMetaFSM_OnShardGroupAdded_FiresOnApply(t *testing.T) {
+	f := NewMetaFSM()
+
+	var got []ShardGroupEntry
+	var mu sync.Mutex
+	f.SetOnShardGroupAdded(func(e ShardGroupEntry) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, e)
+	})
+
+	require.NoError(t, f.applyCmd(makePutShardGroupCmd(t, "g-1", []string{"a", "b", "c"})))
+	require.NoError(t, f.applyCmd(makePutShardGroupCmd(t, "g-2", []string{"a", "d", "e"})))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, got, 2)
+	assert.Equal(t, "g-1", got[0].ID)
+	assert.Equal(t, []string{"a", "b", "c"}, got[0].PeerIDs)
+	assert.Equal(t, "g-2", got[1].ID)
+
+	// Ensure the callback received a defensive copy — mutating must not
+	// affect the FSM's stored state.
+	got[0].PeerIDs[0] = "MUTATED"
+	stored := f.ShardGroups()
+	for _, g := range stored {
+		if g.ID == "g-1" {
+			assert.Equal(t, "a", g.PeerIDs[0], "FSM state must be insulated from callback mutation")
+		}
+	}
+}
+
+// TestMetaFSM_OnShardGroupAdded_AsyncCallbackDoesNotBlockApply verifies that
+// callers who dispatch the callback to a goroutine do not block the apply
+// path. The fix for the cold-start serve.go race: instantiateLocalGroup is
+// heavy (BadgerDB+raft.Node), so wrapping in `go func()` keeps apply moving.
+//
+// REGRESSION GUARD: pre-fix, a slow callback (50ms) ran 8 times serially
+// during the seed loop's apply → 400ms blocking → meta-Raft replication
+// stalls → no leader. Async callback decouples apply from heavy startup.
+func TestMetaFSM_OnShardGroupAdded_AsyncCallbackDoesNotBlockApply(t *testing.T) {
+	f := NewMetaFSM()
+
+	asyncDone := make(chan struct{}, 8)
+	f.SetOnShardGroupAdded(func(e ShardGroupEntry) {
+		go func() {
+			time.Sleep(50 * time.Millisecond) // simulate heavy work
+			asyncDone <- struct{}{}
+		}()
+	})
+
+	start := time.Now()
+	for i := 0; i < 8; i++ {
+		require.NoError(t, f.applyCmd(makePutShardGroupCmd(t,
+			fmt.Sprintf("g-%d", i), []string{"a"})))
+	}
+	elapsed := time.Since(start)
+
+	// Apply path must complete fast (well under sum of callback delays).
+	require.Less(t, elapsed, 100*time.Millisecond,
+		"apply path took %v — callback blocking?", elapsed)
+
+	// Drain async callbacks.
+	for i := 0; i < 8; i++ {
+		select {
+		case <-asyncDone:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("async callback %d did not complete", i)
+		}
+	}
 }
 
 func TestMetaFSM_ShardGroups_Snapshot_Restore(t *testing.T) {

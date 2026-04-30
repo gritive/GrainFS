@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.6.21] — 2026-04-30 — Live Multi-Raft Sharding (PR-G+H 인프라)
+
+### Added
+
+- **cluster (PR-G+H 인프라)**: per-group raft.Node + BadgerDB lifecycle. 각 노드가 자기가 voter인 그룹들에 대해 별도 BadgerDB + raft.Node 인스턴스를 띄움. spec: `docs/superpowers/specs/2026-04-30-live-multi-raft-sharding-design.md`.
+- **cluster**: `pickVoters(groupID, allNodes, RF)` — rendezvous hashing(HRW) 기반 deterministic voter 선택. SHA-256 ranking + sorted output. RF가 cluster size 초과 시 자동 클램프.
+- **cluster**: `instantiateLocalGroup` / `shutdownLocalGroup` — BadgerDB+raft.Node 부팅/종료. 5s timeout 후 ungraceful close (WAL 보존). idempotent recovery.
+- **cluster**: `GroupBackend` 신규 타입 — *DistributedBackend embedding으로 데이터 plane 메서드 자동 promote. `WrapDistributedBackend(id, b)` 헬퍼로 group-0 (legacy 공유 backend) 등록.
+- **cluster**: `lookupForwardTarget(src, groupID)` — PeerIDs[0] 픽 (단순). raft NotLeader redirect 패턴 사용 (leader 캐시 없음 — cold path 1 RTT 손실 OK).
+- **cluster**: `MetaFSM.OnShardGroupAdded` callback — apply path가 PutShardGroup commit 시 점화. **반드시 비동기로 dispatch** (heavy work이라 apply loop 블록 위험).
+- **cluster**: `MetaFSM.ShardGroup(id)` — 단일 entry 조회 (defensive copy).
+- **cluster**: `DistributedBackend.SetShardGroupSource` — CreateBucket의 hash assignment 경로용.
+- **cluster**: `Router.HashAssign(bucket, groups)` — FNV-32 % len(groups). CreateBucket이 explicit assignment 없으면 hash로 결정.
+- **cluster**: `DataGroupManager.Remove(id)` — graceful detach 시 사용.
+- **transport**: `StreamProposeGroupForward = 0x08` — per-group ProposeForward용 신규 stream type. payload: `[4B groupIDLen][groupID][cmdData]`. legacy `StreamProposeForward = 0x06` wire 그대로 (REGRESSION 테스트 가드).
+- **cmd/grainfs**: serve.go가 cold-start에 `metaFSM.ShardGroups()` 순회 + `OnShardGroupAdded` callback으로 owned 그룹 자동 instantiate. 5s timeout shutdown loop. `clusterPeers = [raftAddr, peers...]`로 cluster-wide identity 통일 (이전: nodeID label 혼재).
+
+### Tests
+
+- `voter_picker_test.go` — 결정론, 균등 분포, RF 클램프, 단일 노드, 빈 입력, sorted output (7건).
+- `forward_target_test.go` — 첫 peer 반환, unknown group, empty peers (3건).
+- `forward_wire_test.go` — encode/decode 라운드트립, empty groupID, malformed, **REGRESSION**: legacy wire 호환 (5건).
+- `group_backend_test.go` — ID, PUT/GET round-trip, ListBuckets, Close 멱등성 (4건).
+- `group_lifecycle_test.go` — 성공, idempotent recovery, BadgerDB open 실패, empty group/node ID, 5s timeout ungraceful sim (6건).
+- `router_hash_test.go` — 결정론, spread, empty/single group (4건).
+- `meta_fsm_test.go` — `OnShardGroupAdded_FiresOnApply` (defensive copy), `OnShardGroupAdded_AsyncCallbackDoesNotBlockApply` (REGRESSION: apply path는 callback 작업 합산보다 훨씬 짧아야 함).
+- `rebalancer_test.go` — `NewNodeUnderUtilization_TriggersMigration` (advisor 우려 검증: findImbalance가 이미 lightest 노드를 ToNode로 처리).
+- `tests/e2e/multiraft_sharding_test.go` — `TestE2E_MultiRaftSharding_Boot` (5-proc, 8 그룹, 노드별 그룹 디렉토리 검증).
+
+### Deferred to v0.0.7.x
+
+- **데이터 plane 라우팅**: PUT/GET이 그룹별 backend로 dispatch되지 않음. 모든 트래픽 여전히 group-0 (legacy 공유 distBackend)로 흐름. Per-group BadgerDB는 부팅만 되고 비어있는 상태. 별도 `ClusterCoordinator` 타입 도입 + S3 server wiring 필요.
+- **Cross-node forward**: 비-voter 노드가 PUT 받았을 때 voter로 forward. `StreamProposeGroupForward (0x08)` 인프라 + encoder는 들어왔으나 호출 path 미배선.
+- **e2e BucketAssignment / RestartRecovery / PerGroupPersistence / CrossNodeDispatch / GroupLeaderFailover**: macOS 멀티프로세스에서 meta-Raft leader change race로 AWS SDK retry 시간 초과. 데이터 plane 라우팅 path 도입 후 stable.
+
+### Notes
+
+- 단일 PR로 묶었던 design은 plan-eng-review에서 결정 (Issue 2-C / TODO 1-C / 2-C / 3-C 모두 "이번 PR 포함"). 실제 구현 중 데이터 plane 라우팅이 spec scope 1.5x 이상으로 확대됨이 명백해져 사용자와 합의 후 인프라만 v0.0.6.21로, 라우팅 v0.0.7.x로 분리.
+- `OnShardGroupAdded` 동기 콜백이 apply loop 블록 → meta-Raft 복제 stall → "no leader" — async dispatch로 해결. 이 트랩은 `OnBucketAssigned` 패턴(이미 존재) 따라가는 게 안전. 향후 비슷한 callback 추가 시 동일 가이드.
+
 ## [0.0.6.20] — 2026-04-30
 
 ### Added

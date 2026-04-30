@@ -76,6 +76,37 @@ func TestRebalancer_ProposesPlanWhenImbalanced(t *testing.T) {
 	assert.Equal(t, "group-0", mc.proposedPlans[0].GroupID)
 }
 
+// TestRebalancer_NewNodeUnderUtilization verifies that an underutilized node
+// (e.g., freshly joined with DiskUsedPct=0) triggers a voter migration plan
+// when other nodes are above the imbalance threshold.
+//
+// findImbalance picks the lightest node as ToNode automatically; this test
+// documents that behavior and guards against regression. Advisor flagged a
+// concern that under-utilization required a new signal — this test demonstrates
+// it does not.
+func TestRebalancer_NewNodeUnderUtilization_TriggersMigration(t *testing.T) {
+	mc := newMockMetaClient()
+	entries := []LoadStatEntry{
+		{NodeID: "n0", DiskUsedPct: 60.0},
+		{NodeID: "n1", DiskUsedPct: 55.0},
+		{NodeID: "n2", DiskUsedPct: 58.0},
+		{NodeID: "fresh", DiskUsedPct: 0.0}, // newly joined, empty
+	}
+	require.NoError(t, mc.fsm.applyCmd(makeSetLoadSnapshotCmdDirect(entries)))
+
+	gm := NewDataGroupManager()
+	gm.Add(NewDataGroup("group-0", []string{"n0", "n1", "n2"}))
+
+	r := NewRebalancer("leader", mc, gm, DefaultRebalancerConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	r.tickOnce(ctx)
+
+	require.Len(t, mc.proposedPlans, 1, "expected migration plan toward fresh node")
+	assert.Equal(t, "n0", mc.proposedPlans[0].FromNode, "heaviest must be FromNode")
+	assert.Equal(t, "fresh", mc.proposedPlans[0].ToNode, "lightest (fresh) must be ToNode")
+}
+
 func TestRebalancer_SkipsIfNotLeader(t *testing.T) {
 	mc := newMockMetaClient()
 	mc.leader = false

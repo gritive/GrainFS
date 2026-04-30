@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -375,15 +376,39 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		seedGroups = 1
 	}
 	go func() {
-		allPeers := append([]string{nodeID}, peers...)
+		// Wait for meta-Raft leader to settle before seeding (single-node: ~150ms;
+		// multi-node: up to election timeout). Without this, the very first
+		// ProposeShardGroup races and fails with NotLeader on cold start.
+		leaderDeadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(leaderDeadline) {
+			if metaRaft.IsLeader() || metaRaft.Node().LeaderID() != "" {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		// Use raft addresses as cluster-wide identity for ShardGroupEntry.PeerIDs —
+		// every node sees the same set, so pickVoters output is reproducible across
+		// processes. nodeID is a local label; raftAddr is globally consistent.
+		clusterPeers := append([]string{raftAddr}, peers...)
+		const replicationFactor = 3
 		for i := 0; i < seedGroups; i++ {
 			groupID := fmt.Sprintf("group-%d", i)
+			// group-0 keeps full membership for backward-compat with legacy
+			// single-backend deployment. Groups 1..N-1 use rendezvous-hashed
+			// voter placement (RF=3) for true sharding.
+			var voters []string
+			if i == 0 {
+				voters = clusterPeers
+			} else {
+				voters = cluster.PickVoters(groupID, clusterPeers, replicationFactor)
+			}
 			sgCtx, sgCancel := context.WithTimeout(ctx, 30*time.Second)
 			if err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
 				ID:      groupID,
-				PeerIDs: allPeers,
+				PeerIDs: voters,
 			}); err != nil {
-				// group-0 외 그룹은 leader에서만 성공. follower의 NotLeader 실패는 정상.
+				// Followers reject with NotLeader; only the leader's seed loop succeeds.
 				log.Debug().Str("group", groupID).Err(err).Msg("seed shard group propose failed (non-fatal)")
 			}
 			sgCancel()
@@ -420,16 +445,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	allNodes := append([]string{raftAddr}, peers...)
 	distBackend.SetShardService(shardSvc, allNodes)
 
-	// PR-D: wire group-0 into DataGroupManager and hook Router + BucketAssigner.
-	// distBackend is created after metaRaft so we build group-0 here with the live backend.
+	// Live multi-raft sharding (v0.0.7.0): group-0 keeps using the shared
+	// distBackend (legacy single-backend deployment is the group-0 instance);
+	// groups 1..N-1 get their own per-group BadgerDB+raft via instantiateLocalGroup
+	// when this node is a voter (see ownedGroups loop below).
+	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
 	group0 := cluster.NewDataGroupWithBackend(
 		"group-0",
 		append([]string{nodeID}, peers...),
-		distBackend,
+		group0Backend,
 	)
 	dgMgr.Add(group0)
 	distBackend.SetRouter(clusterRouter)
 	distBackend.SetBucketAssigner(metaRaft)
+	distBackend.SetShardGroupSource(metaRaft.FSM())
 
 	// PR-D: Rebalancer 배선 — LoadReporter가 meta-Raft FSM에 부하 스냅샷을 커밋하고
 	// Rebalancer가 leader에서 주기적으로 평가해 RebalancePlan을 제안·실행한다.
@@ -449,15 +478,109 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	})
 	go rebalancer.Run(ctx)
 
+	// EC config read early — instantiateLocalGroup needs it for per-group EC.
+	clusterECData, _ := cmd.Flags().GetInt("ec-data")
+	clusterECParity, _ := cmd.Flags().GetInt("ec-parity")
+
+	// Live multi-raft sharding (v0.0.7.0): instantiate per-group raft.Node +
+	// BadgerDB + GroupBackend for each group this node is a voter of. group-0
+	// is already wired with the shared distBackend (legacy compat).
+	//
+	// Two paths cover all entries:
+	//   1. Iterate ShardGroups() once for entries already in FSM.
+	//   2. SetOnShardGroupAdded for entries replayed/applied later.
+	// Both call into instantiateOwnedIfNeeded which is idempotent — duplicates
+	// from concurrent paths are no-ops.
+	ownedGroups := struct {
+		mu sync.Mutex
+		m  map[string]*cluster.GroupBackend
+	}{m: make(map[string]*cluster.GroupBackend)}
+
+	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) {
+		// group-0 is already wired with the shared distBackend.
+		if entry.ID == "group-0" {
+			return
+		}
+		// Only instantiate for groups where we are a voter. PeerIDs use the
+		// cluster-wide raft address as identity (set by the seed loop above);
+		// match against our raftAddr.
+		isVoter := false
+		for _, p := range entry.PeerIDs {
+			if p == raftAddr {
+				isVoter = true
+				break
+			}
+		}
+		if !isVoter {
+			return
+		}
+		ownedGroups.mu.Lock()
+		if _, ok := ownedGroups.m[entry.ID]; ok {
+			ownedGroups.mu.Unlock()
+			return // already instantiated
+		}
+		ownedGroups.mu.Unlock()
+
+		gb, err := cluster.InstantiateLocalGroup(cluster.GroupLifecycleConfig{
+			NodeID:   raftAddr, // identity = raftAddr (matches PeerIDs)
+			DataDir:  dataDir,
+			ShardSvc: shardSvc,
+			EC: cluster.ECConfig{
+				DataShards:   clusterECData,
+				ParityShards: clusterECParity,
+			},
+		}, entry)
+		if err != nil {
+			log.Fatal().Err(err).Str("group_id", entry.ID).Msg("instantiateLocalGroup failed — voter status fatal")
+		}
+		dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
+		ownedGroups.mu.Lock()
+		ownedGroups.m[entry.ID] = gb
+		ownedGroups.mu.Unlock()
+		log.Info().Str("group_id", entry.ID).Strs("peers", entry.PeerIDs).Msg("instantiateLocalGroup ok")
+	}
+
+	// Cold-start instantiation for entries already in FSM (restart path).
+	// Run async so the apply loop is not blocked by BadgerDB+raft.Node startup.
+	go func() {
+		for _, entry := range metaRaft.FSM().ShardGroups() {
+			instantiateOwnedIfNeeded(entry)
+		}
+	}()
+	// Runtime: handle entries replayed/applied after this point (fresh boot path).
+	// Dispatch to goroutine so apply loop is not blocked by BadgerDB+raft.Node startup.
+	metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
+		go instantiateOwnedIfNeeded(entry)
+	})
+
+	// Shutdown hook: close all owned groups in parallel with 5s timeout each.
+	defer func() {
+		ownedGroups.mu.Lock()
+		toClose := make([]*cluster.GroupBackend, 0, len(ownedGroups.m))
+		for _, gb := range ownedGroups.m {
+			toClose = append(toClose, gb)
+		}
+		ownedGroups.mu.Unlock()
+		var wg sync.WaitGroup
+		for _, gb := range toClose {
+			wg.Add(1)
+			go func(gb *cluster.GroupBackend) {
+				defer wg.Done()
+				if err := cluster.ShutdownLocalGroup(context.Background(), gb, 5*time.Second); err != nil {
+					log.Warn().Err(err).Str("group_id", gb.ID()).Msg("shutdownLocalGroup")
+				}
+			}(gb)
+		}
+		wg.Wait()
+	}()
+
 	// LoadReporter: leader 전용 — NodeStatsStore에서 읽어 meta-Raft FSM에 부하 통계 커밋.
 	loadReporterStore := cluster.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
 	loadReporter := cluster.NewLoadReporter(nodeID, loadReporterStore, metaRaft, cluster.DefaultLoadReportInterval)
 	go loadReporter.Run(ctx)
 
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
-	// 1-2 nodes always use N× replication.
-	clusterECData, _ := cmd.Flags().GetInt("ec-data")
-	clusterECParity, _ := cmd.Flags().GetInt("ec-parity")
+	// 1-2 nodes always use N× replication. (clusterECData/Parity read above for instantiateOwned.)
 	distBackend.SetECConfig(cluster.ECConfig{
 		DataShards:   clusterECData,
 		ParityShards: clusterECParity,
