@@ -16,12 +16,14 @@
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
-- [ ] **Live Multi-Raft Sharding 후속 (v0.0.7.x)** — PR-G+H 인프라(v0.0.6.21)에서 분리된 잔여 작업:
-  - **데이터 plane 라우팅** — PUT/GET이 그룹별 backend로 dispatch. `ClusterCoordinator` 타입 도입 + S3 server wiring. v0.0.7.0의 핵심.
-  - **Cross-node forward** — 비-voter 노드 PUT 받았을 때 voter로 forward. 인프라(`StreamProposeGroupForward = 0x08`)는 들어왔으나 호출 path 미배선.
-  - **e2e tests 활성화** — BucketAssignment / RestartRecovery / PerGroupPersistence / CrossNodeDispatch / GroupLeaderFailover. macOS 멀티프로세스 leader change race 해결 (라우팅 path가 자체 redirect하면 안정화).
-  - **perf sanity** — N=8 sharded mode 30s 측정 + PR-E single-backend 비교.
+- [ ] **Live Multi-Raft Sharding v0.0.7.1 (PR-D)** — v0.0.7.0에서 분리된 후속 작업:
+  - **ForwardReceiver 구현** — 0x08 handler, ForwardReply 빌더, NotLeader hint + try-each-peer
+  - **serve.go wiring** — ClusterCoordinator + ForwardSender + ForwardReceiver 연결
+  - **e2e tests 활성화** — BucketAssignment / RestartRecovery / PerGroupPersistence / CrossNodeDispatch / GroupLeaderFailover + NFSv4 smoke
+  - **wire coexistence REGRESSION** — 0x06 (legacy) + 0x08 (new) 동시 등록 검증
+  - **perf sanity** — N=8 sharded mode 30s 측정 + PR-E single-backend 비교
   - 설계: `docs/superpowers/specs/2026-04-30-live-multi-raft-sharding-design.md`
+
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
 - [ ] **PR-D 잔여 must-fix**: MetaAbortPlanCmd reason:uint8 추가
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
@@ -51,13 +53,6 @@
 ## Phase 18: FUSE-over-S3 (외부 도구 호환성 보증)
 
 **방침**: 별도 FUSE 바이너리/서버 사이드 마운트를 만들지 않는다. GrainFS는 표준 S3 API만 제공하고, 클라이언트는 rclone / s3fs / goofys 같은 기존 FUSE-over-S3 도구를 그대로 사용한다. 클라이언트 머신에 grainfs 바이너리 설치 불필요.
-
-**완료**:
-- [x] `internal/storage/errors.go` — sentinel errors (`ErrECDegraded`, `ErrNoSpace`, `ErrQuotaExceeded`, `ErrInvalidVersion`)
-- [x] `internal/vfs/vfs.go` — `grainFile.ReadAt` 동시성 안전 (`mu sync.Mutex` + `rc`/`pos` 보호) — io.ReaderAt 계약 준수, S3 GetObject 병렬 range read 지원
-- [x] `tests/fuse_s3_colima/` — Colima Linux VM에서 rclone mount로 macOS 호스트 GrainFS S3 endpoint 마운트 후 smoke / directories / rename / cross-protocol round-trip 검증 (`make test-fuse-s3-colima`)
-- [x] `tests/fuse_s3_colima/bench_test.go` — FUSE mount vs direct S3 처리량 벤치 (`make bench-fuse-s3-colima`). 64 MiB / Apple M3 / loopback / `--vfs-cache-mode off` / 3회 평균: Direct PUT 96.8 MB/s · Direct GET 108.0 MB/s · FUSE Write 106.7 MB/s · FUSE Read 107.3 MB/s — **FUSE 오버헤드 ≈ 0%**
-- [x] README "FUSE-over-S3 마운트" 섹션 — 마운트 가이드 + 지원/미지원 연산표 + 처리량 결과
 
 **향후 (선택)**:
 - [ ] s3fs-fuse, goofys 호환성 추가 검증 (현재 rclone만 검증)
