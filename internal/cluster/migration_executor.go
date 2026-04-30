@@ -118,7 +118,7 @@ func newExecutor(mover ShardMover, node MigrationRaft, numShards int, ttl time.D
 
 // SetShardCounter installs a per-object shard-count callback. fn receives (bucket,
 // key, versionID) and returns the number of shards that exist for that object.
-// A return value of 0 falls back to numShards. Call before Start.
+// A return value of 0 falls back to numShards (not "zero shards"). Call before Start.
 func (e *MigrationExecutor) SetShardCounter(fn func(bucket, key, versionID string) int) {
 	e.shardCountFor = fn
 }

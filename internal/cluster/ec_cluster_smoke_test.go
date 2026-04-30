@@ -10,6 +10,7 @@ import (
 // TestLookupObjectECShards_NxMode verifies that LookupObjectECShards returns
 // (0, 0, nil) when no ObjectMeta key exists (N× replication mode).
 func TestLookupObjectECShards_NxMode(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	fsm := NewFSM(db)
 
@@ -22,6 +23,7 @@ func TestLookupObjectECShards_NxMode(t *testing.T) {
 // TestLookupObjectECShards_ECMode verifies that LookupObjectECShards returns
 // the correct (k, m) stored in ObjectMeta via CmdPutObjectMeta.
 func TestLookupObjectECShards_ECMode(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	fsm := NewFSM(db)
 

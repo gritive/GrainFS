@@ -13,6 +13,7 @@ import (
 // TestMigrationExecutor_StopIdempotent verifies that calling Stop() twice
 // does not panic (sync.Once prevents double-close of quit channel).
 func TestMigrationExecutor_StopIdempotent(t *testing.T) {
+	t.Parallel()
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
 	e := NewMigrationExecutor(mover, node, 1)
@@ -51,6 +52,9 @@ type fakeRaft struct {
 	exec *MigrationExecutor
 }
 
+// Propose simulates an immediate Raft commit by calling NotifyCommit synchronously.
+// Non-MigrationDone commands (e.g. unknown opcodes) are silently dropped — this is
+// intentional: the test harness only needs to simulate the commit path.
 func (f *fakeRaft) Propose(data []byte) error {
 	cmd, err := DecodeCommand(data)
 	if err != nil {
