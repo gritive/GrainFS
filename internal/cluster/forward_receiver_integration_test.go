@@ -136,3 +136,209 @@ func TestForwardReceiver_DeleteObject_DispatchesToBackend(t *testing.T) {
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
 		"DeleteObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 }
+
+// TestForwardReceiver_ListObjects_DispatchesToBackend verifies ListObjects operation.
+func TestForwardReceiver_ListObjects_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+
+	mockDist := &DistributedBackend{}
+	gb := WrapDistributedBackend("g1", mockDist)
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("list-bucket")
+	prefixStr := builder.CreateString("prefix/")
+
+	raftpb.ListObjectsArgsStart(builder)
+	raftpb.ListObjectsArgsAddBucket(builder, bucketStr)
+	raftpb.ListObjectsArgsAddPrefix(builder, prefixStr)
+	raftpb.ListObjectsArgsAddMaxKeys(builder, 100)
+	laOffset := raftpb.ListObjectsArgsEnd(builder)
+	builder.Finish(laOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjects, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
+		"ListObjects should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
+
+// TestForwardReceiver_WalkObjects_DispatchesToBackend verifies WalkObjects operation.
+func TestForwardReceiver_WalkObjects_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+
+	mockDist := &DistributedBackend{}
+	gb := WrapDistributedBackend("g1", mockDist)
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("walk-bucket")
+	prefixStr := builder.CreateString("walk-prefix/")
+
+	raftpb.WalkObjectsArgsStart(builder)
+	raftpb.WalkObjectsArgsAddBucket(builder, bucketStr)
+	raftpb.WalkObjectsArgsAddPrefix(builder, prefixStr)
+	waOffset := raftpb.WalkObjectsArgsEnd(builder)
+	builder.Finish(waOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpWalkObjects, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
+		"WalkObjects should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
+
+// TestForwardReceiver_CreateMultipartUpload_DispatchesToBackend verifies CreateMultipartUpload operation.
+func TestForwardReceiver_CreateMultipartUpload_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+
+	mockDist := &DistributedBackend{}
+	gb := WrapDistributedBackend("g1", mockDist)
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("mpu-bucket")
+	keyStr := builder.CreateString("mpu-key")
+	ctStr := builder.CreateString("application/octet-stream")
+
+	raftpb.CreateMultipartUploadArgsStart(builder)
+	raftpb.CreateMultipartUploadArgsAddBucket(builder, bucketStr)
+	raftpb.CreateMultipartUploadArgsAddKey(builder, keyStr)
+	raftpb.CreateMultipartUploadArgsAddContentType(builder, ctStr)
+	cmaOffset := raftpb.CreateMultipartUploadArgsEnd(builder)
+	builder.Finish(cmaOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpCreateMultipartUpload, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
+		"CreateMultipartUpload should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
+
+// TestForwardReceiver_UploadPart_DispatchesToBackend verifies UploadPart operation.
+func TestForwardReceiver_UploadPart_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+
+	mockDist := &DistributedBackend{}
+	gb := WrapDistributedBackend("g1", mockDist)
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("upload-bucket")
+	keyStr := builder.CreateString("upload-key")
+	uploadIDStr := builder.CreateString("test-upload-id")
+	partData := builder.CreateByteVector([]byte("part-data-body"))
+
+	raftpb.UploadPartArgsStart(builder)
+	raftpb.UploadPartArgsAddBucket(builder, bucketStr)
+	raftpb.UploadPartArgsAddKey(builder, keyStr)
+	raftpb.UploadPartArgsAddUploadId(builder, uploadIDStr)
+	raftpb.UploadPartArgsAddPartNumber(builder, 1)
+	raftpb.UploadPartArgsAddBody(builder, partData)
+	upaOffset := raftpb.UploadPartArgsEnd(builder)
+	builder.Finish(upaOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpUploadPart, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
+		"UploadPart should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
+
+// TestForwardReceiver_CompleteMultipartUpload_DispatchesToBackend verifies CompleteMultipartUpload operation.
+func TestForwardReceiver_CompleteMultipartUpload_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+
+	mockDist := &DistributedBackend{}
+	gb := WrapDistributedBackend("g1", mockDist)
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("complete-bucket")
+	keyStr := builder.CreateString("complete-key")
+	uploadIDStr := builder.CreateString("test-upload-id")
+
+	// Build PartRef vector
+	etag1Str := builder.CreateString("etag-1")
+	raftpb.PartRefStart(builder)
+	raftpb.PartRefAddPartNumber(builder, 1)
+	raftpb.PartRefAddEtag(builder, etag1Str)
+	part1Offset := raftpb.PartRefEnd(builder)
+
+	etag2Str := builder.CreateString("etag-2")
+	raftpb.PartRefStart(builder)
+	raftpb.PartRefAddPartNumber(builder, 2)
+	raftpb.PartRefAddEtag(builder, etag2Str)
+	part2Offset := raftpb.PartRefEnd(builder)
+
+	// Create vector
+	raftpb.CompleteMultipartUploadArgsStartPartsVector(builder, 2)
+	builder.PrependUOffsetT(part2Offset)
+	builder.PrependUOffsetT(part1Offset)
+	partsVector := builder.EndVector(2)
+
+	raftpb.CompleteMultipartUploadArgsStart(builder)
+	raftpb.CompleteMultipartUploadArgsAddBucket(builder, bucketStr)
+	raftpb.CompleteMultipartUploadArgsAddKey(builder, keyStr)
+	raftpb.CompleteMultipartUploadArgsAddUploadId(builder, uploadIDStr)
+	raftpb.CompleteMultipartUploadArgsAddParts(builder, partsVector)
+	cmaOffset := raftpb.CompleteMultipartUploadArgsEnd(builder)
+	builder.Finish(cmaOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpCompleteMultipartUpload, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
+		"CompleteMultipartUpload should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
+
+// TestForwardReceiver_AbortMultipartUpload_DispatchesToBackend verifies AbortMultipartUpload operation.
+func TestForwardReceiver_AbortMultipartUpload_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+
+	mockDist := &DistributedBackend{}
+	gb := WrapDistributedBackend("g1", mockDist)
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	builder := flatbuffers.NewBuilder(0)
+	bucketStr := builder.CreateString("abort-bucket")
+	keyStr := builder.CreateString("abort-key")
+	uploadIDStr := builder.CreateString("test-upload-id")
+
+	raftpb.AbortMultipartUploadArgsStart(builder)
+	raftpb.AbortMultipartUploadArgsAddBucket(builder, bucketStr)
+	raftpb.AbortMultipartUploadArgsAddKey(builder, keyStr)
+	raftpb.AbortMultipartUploadArgsAddUploadId(builder, uploadIDStr)
+	amaOffset := raftpb.AbortMultipartUploadArgsEnd(builder)
+	builder.Finish(amaOffset)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpAbortMultipartUpload, builder.FinishedBytes())
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
+		"AbortMultipartUpload should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
