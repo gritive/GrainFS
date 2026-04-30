@@ -9,7 +9,7 @@
 - **raft**: `Node.JointPhase()` — observation API returning (phase, oldVoters, newVoters, enterIndex). `JointPhase` type alias exported.
 - **raft**: `Node.Configuration()` — extended to return union of C_old ∪ C_new during JointEntering.
 - **raft**: `jointManagedLearners` set + dual guard in `checkLearnerCatchup` (jointPhase != None OR managed-by-joint) preventing auto-promote race during ChangeMembership.
-- **raft**: `removedFromCluster` flag — orphan election guard. Set in commit-time JointLeave hook when self ∉ C_new; runFollower skips election if true. Reset when self rejoins.
+- **raft**: `removedFromCluster` flag — orphan election guard. Set in commit-time JointLeave hook when self ∉ C_new; runFollower skips election if true. Reset when self rejoins. Persists across restart via (a) `rebuildConfigFromLog` replay path, (b) snapshot derivation from Servers list (`currentConfigServers` omits self when removed; restore + InstallSnapshot derive flag from `self ∉ Servers`).
 - **raft**: `ErrLearnerCatchUpTimeout` sentinel; defer cleanup attempts best-effort RemoveVoter on added learners.
 - **test**: `TestJoint_E2E_RemoveSelf` — leader self-removal verified end-to-end (50/50 stable).
 - **test**: `TestChangeMembership_*` unit + E2E coverage; `TestCheckLearnerCatchup_SkipsDuringJoint` + `TestCheckLearnerCatchup_SkipsJointManaged` regression guards.
