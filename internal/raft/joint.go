@@ -603,8 +603,8 @@ func (n *Node) ChangeMembership(ctx context.Context, adds []ServerEntry, removes
 		return err
 	}
 
-	// 4. Joint applied — learnerIDs cleared in apply path. Clear our
-	// jointManagedLearners (defensive; apply path doesn't touch it in K1).
+	// 4. Joint applied — learnerIDs and jointManagedLearners cleared in apply path.
+	// Defensive clear here in case apply path races or was skipped.
 	n.mu.Lock()
 	for _, a := range adds {
 		delete(n.jointManagedLearners, a.ID)
