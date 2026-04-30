@@ -857,6 +857,40 @@ func (b *DistributedBackend) ReadAt(bucket, key string, offset int64, buf []byte
 	return f.ReadAt(buf, offset)
 }
 
+// selectECPlacement decides where each shard for shardKey should land.
+//
+// Preference order:
+//  1. Ring-deterministic placement when ring exists AND every candidate node is
+//     in liveNodes (allLive). Returns (placement, ring.Version).
+//  2. PlacementForNodes(liveNodes) fallback when ring is missing OR any
+//     candidate is offline/unhealthy. Returns (placement, 0).
+//
+// The ringVer=0 fallback is required because EC has write-all consistency: if
+// even one ring-chosen node is dead, the whole PUT fails and the object is
+// unrecoverable. Read paths that see ringVer=0 must reconstruct via
+// metaNodeIDs (always written into object metadata) instead of recomputing
+// from a stale ring.
+func selectECPlacement(ring *Ring, ringErr error, cfg ECConfig, liveNodes []string, shardKey string) (placement []string, ringVer RingVersion) {
+	if ringErr == nil && ring != nil {
+		candidate := ring.PlacementForKey(cfg, shardKey)
+		liveSet := make(map[string]bool, len(liveNodes))
+		for _, n := range liveNodes {
+			liveSet[n] = true
+		}
+		allLive := true
+		for _, n := range candidate {
+			if !liveSet[n] {
+				allLive = false
+				break
+			}
+		}
+		if allLive {
+			return candidate, ring.Version
+		}
+	}
+	return PlacementForNodes(cfg, liveNodes, shardKey), 0
+}
+
 // putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into
 // cfg.NumShards() shards, fan-out each to its placed node (self or peer),
 // then commit metadata (with RingVersion) through Raft.
@@ -879,33 +913,8 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	// for different versions land at different paths without changing the API.
 	shardKey := key + "/" + versionID
 
-	// 링이 있으면 결정론적 배치 사용, 없으면 기존 PlacementForNodes 사용.
-	// 링 배치에 unhealthy 노드가 포함되면 write-all 실패하므로 live 노드만 사용하는
-	// PlacementForNodes로 폴백한다 (ringVer=0 → read는 metaNodeIDs 경로 사용).
-	var placement []string
-	var ringVer RingVersion
-	if currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing(); ringErr == nil {
-		candidate := currentRing.PlacementForKey(effectiveCfg, shardKey)
-		liveSet := make(map[string]bool, len(liveNodes))
-		for _, n := range liveNodes {
-			liveSet[n] = true
-		}
-		allLive := true
-		for _, n := range candidate {
-			if !liveSet[n] {
-				allLive = false
-				break
-			}
-		}
-		if allLive {
-			placement = candidate
-			ringVer = currentRing.Version
-		} else {
-			placement = PlacementForNodes(effectiveCfg, liveNodes, shardKey)
-		}
-	} else {
-		placement = PlacementForNodes(effectiveCfg, liveNodes, shardKey)
-	}
+	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
+	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
 	if len(placement) != effectiveCfg.NumShards() {
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
