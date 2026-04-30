@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.7.0] — 2026-04-30 — Live Multi-Raft Sharding (PR-C 데이터 plane 라우팅)
+
+### Added
+
+- **cluster**: `ClusterCoordinator` — `storage.Backend` implementation routing bucket-scoped ops to per-group Raft leaders. 4 cluster-wide ops (CreateBucket, HeadBucket, DeleteBucket, ListBuckets) delegate to base `DistributedBackend`; 10 bucket-scoped ops (GetObject, HeadObject, DeleteObject, ListObjects, WalkObjects, CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload, PutObject) route via `Router.RouteKey` → `ForwardSender.Send` over QUIC stream `0x08`. spec: `docs/superpowers/specs/2026-04-30-live-multi-raft-sharding-design.md`.
+- **cluster**: `ForwardSender` — client-side single-shot Send with try-each-peer reliability (peers attempted in order, self last) and NotLeader hint redirect (1× round-trip). Returns `ErrNoReachablePeer` after all peers exhausted.
+- **cluster**: `forward_codec.go` — FlatBuffers args builders (10 ops) + reply parsers (`objectFromReply`, `objectsFromReply`, `uploadFromReply`, `partFromReply`, `parseReplyStatus`). Body-bearing ops (PutObject, UploadPart) embed bytes ≤5MB inside FBS args — single-message wire model, no chunked streaming.
+- **cluster**: `ClusterCoordinator.PutObject` / `UploadPart` — 5MB hard cap enforcement via `io.ReadAll(io.LimitReader(r, maxBody+1))`. Returns `storage.ErrEntityTooLarge` on overflow.
+- **cluster**: `routeTarget` — self-leader shortcut optimization. When self is a voter AND local GroupBackend's `RaftNode().IsLeader()` returns true, ops call backend directly bypassing QUIC wire.
+- **raft/raftpb**: `forward_cmd.fbs` + generated bindings — FlatBuffers schema for 10 op-arg structs + `ForwardOp` enum + `ForwardReply` envelope with `ForwardObjectMeta`, `ForwardMultipartUploadMeta`, `ForwardPartMeta`, `objects` vector, `read_body` bytes.
+
+### Changed
+
+- **cluster**: `DataGroup.GroupForBucket(bucket, router)` helper — bucket → DataGroup lookup via router. Returns (nil, false) if router nil or no assignment.
+- **cluster**: `lookupForwardTarget` → `PeersForForward(entry, selfID)` — returns attempt-ordered peer list (voters first, leader first, self last) for try-each-peer pattern. Used by `ClusterCoordinator.routeBucket`.
+
+### Technical Notes
+
+- ForwardReceiver implementation (server-side 0x08 handler) deferred to v0.0.7.1 PR-D.
+- serve.go wiring (ClusterCoordinator + ForwardSender + ForwardReceiver registration) deferred to v0.0.7.1.
+- e2e tests, wire coexistence REGRESSION test, perf benchmarks deferred to v0.0.7.1.
+
 ## [0.0.6.22] — 2026-04-30 — ChangeMembership Public API (Sub-project 3 PR-K1)
 
 ### Added
