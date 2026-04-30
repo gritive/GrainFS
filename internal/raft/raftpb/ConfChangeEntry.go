@@ -69,40 +69,6 @@ func (rcv *ConfChangeEntry) ServerAddress() []byte {
 	return nil
 }
 
-func (rcv *ConfChangeEntry) NewConfig(j int) []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
-	if o != 0 {
-		a := rcv._tab.Vector(o)
-		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
-	}
-	return nil
-}
-
-func (rcv *ConfChangeEntry) NewConfigLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
-func (rcv *ConfChangeEntry) OldConfig(j int) []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
-	if o != 0 {
-		a := rcv._tab.Vector(o)
-		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
-	}
-	return nil
-}
-
-func (rcv *ConfChangeEntry) OldConfigLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
 func ConfChangeEntryStart(builder *flatbuffers.Builder) {
 	builder.StartObject(5)
 }
@@ -114,18 +80,6 @@ func ConfChangeEntryAddServerId(builder *flatbuffers.Builder, serverId flatbuffe
 }
 func ConfChangeEntryAddServerAddress(builder *flatbuffers.Builder, serverAddress flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(serverAddress), 0)
-}
-func ConfChangeEntryAddNewConfig(builder *flatbuffers.Builder, newConfig flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(newConfig), 0)
-}
-func ConfChangeEntryStartNewConfigVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
-}
-func ConfChangeEntryAddOldConfig(builder *flatbuffers.Builder, oldConfig flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(oldConfig), 0)
-}
-func ConfChangeEntryStartOldConfigVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
 }
 func ConfChangeEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

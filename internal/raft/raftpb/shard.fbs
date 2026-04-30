@@ -32,9 +32,24 @@ table ConfChangeEntry {
   op:ConfChangeOp;
   server_id:string;
   server_address:string;
-  // §4.3 reserved fields (unused in §4.4 ops, kept for future joint consensus):
-  new_config:[string];
-  old_config:[string];
+  // §4.3 deprecated: superseded by JointConfChangeEntry (PR-J1).
+  // Removed in cleanup PR after mixed-version compatibility window closes.
+  new_config:[string] (deprecated);
+  old_config:[string] (deprecated);
+}
+
+enum JointOp : byte {
+  Enter = 0, // C_old → C_old+new
+  Leave = 1  // C_old+new → C_new
+}
+
+// §4.3 joint consensus entry. Carries the membership transition payload.
+// new_servers / old_servers are full ServerEntry lists (id+address+suffrage)
+// because standalone Raft groups have no external address registry.
+table JointConfChangeEntry {
+  op:JointOp;
+  new_servers:[ServerEntry];
+  old_servers:[ServerEntry];
 }
 
 table LogEntry {
@@ -102,6 +117,14 @@ table SnapshotMeta {
   index:uint64;
   term:uint64;
   servers:[ServerEntry]; // cluster config at snapshot point
+  // §4.3 joint consensus state at snapshot point (PR-J5).
+  // joint_phase 0=None, 1=Entering. When Entering, the other three fields
+  // describe the in-flight C_old+new transition; on restore the leader's
+  // checkJointAdvance auto-resumes if C_new majority is reachable.
+  joint_phase:int8;
+  joint_old_voters:[string];
+  joint_new_voters:[string];
+  joint_enter_index:uint64;
 }
 
 root_type RPCMessage;
