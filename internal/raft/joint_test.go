@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -214,9 +216,11 @@ func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
 	}
 	n.applyConfigChangeLocked(entry)
 
-	// Append-time: phase reset, config.Peers updated.
+	// Append-time: phase reset, config.Peers updated. config.Peers excludes self
+	// (n1) per existing convention; the JointLeave entry carries the full voter
+	// list including self.
 	require.Equal(t, JointNone, n.jointPhase)
-	require.Equal(t, []string{"n1", "n2", "n4", "n5"}, n.config.Peers)
+	require.Equal(t, []string{"n2", "n4", "n5"}, n.config.Peers)
 	require.Empty(t, n.jointOldVoters)
 	require.Empty(t, n.jointNewVoters)
 	require.Equal(t, uint64(0), n.jointEnterIndex)
@@ -251,6 +255,117 @@ func TestCheckJointAdvance_LogLookaheadIdempotency(t *testing.T) {
 
 	require.False(t, n.jointLeaveProposed,
 		"flag stays false; log lookahead returns early without proposing")
+}
+
+// jointTestLeader builds a Node sufficient for proposeJointConfChangeWait
+// pre-flight checks (state guards, no-op detection) without standing up the
+// proposal pipeline. proposeCh is non-nil but unbuffered tests should not
+// reach the propose path.
+func jointTestLeader(id string, peers []string) *Node {
+	n := jointTestNode(id)
+	n.state = Leader
+	n.config.Peers = peers
+	n.proposalCh = make(chan proposal, 16)
+	n.stopCh = make(chan struct{})
+	return n
+}
+
+func TestProposeJointConfChangeWait_RejectsNotLeader(t *testing.T) {
+	n := jointTestLeader("n1", []string{"n2", "n3"})
+	n.state = Follower
+
+	err := n.proposeJointConfChangeWait(context.Background(),
+		[]ServerEntry{{ID: "n4", Address: "n4"}}, nil)
+	require.ErrorIs(t, err, ErrNotLeader)
+}
+
+func TestProposeJointConfChangeWait_RejectsConcurrentJoint(t *testing.T) {
+	n := jointTestLeader("n1", []string{"n2", "n3"})
+	n.jointPhase = JointEntering
+
+	err := n.proposeJointConfChangeWait(context.Background(),
+		[]ServerEntry{{ID: "n4", Address: "n4"}}, nil)
+	require.ErrorIs(t, err, ErrConfChangeInProgress)
+}
+
+func TestProposeJointConfChangeWait_RejectsConcurrentSingleServer(t *testing.T) {
+	n := jointTestLeader("n1", []string{"n2", "n3"})
+	n.pendingConfChangeIndex = 5
+
+	err := n.proposeJointConfChangeWait(context.Background(),
+		[]ServerEntry{{ID: "n4", Address: "n4"}}, nil)
+	require.ErrorIs(t, err, ErrConfChangeInProgress)
+}
+
+func TestProposeJointConfChangeWait_RejectsMixedVersion(t *testing.T) {
+	n := jointTestLeader("n1", []string{"n2", "n3"})
+	n.mixedVersion = true
+
+	err := n.proposeJointConfChangeWait(context.Background(),
+		[]ServerEntry{{ID: "n4", Address: "n4"}}, nil)
+	require.ErrorIs(t, err, ErrMixedVersionNoMembershipChange)
+}
+
+func TestProposeJointConfChangeWait_NoOpEqualSets(t *testing.T) {
+	n := jointTestLeader("n1", []string{"n2", "n3"})
+
+	// adds 없고 removes 없음 → C_old == C_new → no-op.
+	err := n.proposeJointConfChangeWait(context.Background(), nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, JointNone, n.jointPhase, "no propose, no state change")
+	require.Nil(t, n.jointPromoteCh, "wait channel not installed for no-op")
+}
+
+func TestEqualServerSets(t *testing.T) {
+	a := []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}}
+	b := []ServerEntry{{ID: "n3"}, {ID: "n1"}, {ID: "n2"}}
+	require.True(t, equalServerSets(a, b), "id-keyed comparison ignores order")
+
+	c := []ServerEntry{{ID: "n1"}, {ID: "n2"}}
+	require.False(t, equalServerSets(a, c), "different size")
+
+	d := []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n4"}}
+	require.False(t, equalServerSets(a, d), "different members")
+}
+
+// TestJoint_E2E_RemoveOne — full joint cycle on a 4-node in-memory cluster.
+// Leader proposes a JointEnter to remove the last voter; the heartbeat watcher
+// auto-proposes JointLeave; on commit the apply loop closes jointPromoteCh and
+// the caller returns. Verifies commit-time close (truncation safety) end-to-end.
+func TestJoint_E2E_RemoveOne(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader, "no leader elected")
+
+	// Identify a non-leader peer to remove (must not be the leader itself —
+	// self-removal step-down is exercised in PR-J5 chaos scenarios).
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		if p != leader.id {
+			removeID = p
+			break
+		}
+	}
+	leader.mu.Unlock()
+	require.NotEmpty(t, removeID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	err := leader.proposeJointConfChangeWait(ctx, nil, []string{removeID})
+	require.NoError(t, err, "joint cycle did not complete")
+
+	// On wakeup: jointPhase is None and config.Peers excludes removeID.
+	leader.mu.Lock()
+	phase := leader.jointPhase
+	peers := append([]string(nil), leader.config.Peers...)
+	leader.mu.Unlock()
+
+	require.Equal(t, JointNone, phase, "joint phase should clear on commit-time close")
+	require.NotContains(t, peers, removeID, "C_new excludes removed voter")
+	require.Len(t, peers, 2, "leader sees 3-node cluster minus self after removal")
 }
 
 func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T) {

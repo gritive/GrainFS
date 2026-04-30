@@ -300,17 +300,35 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 
 	case JointOpLeave:
 		// Append-time: §4.4 invariant — config.Peers updates immediately so
-		// quorum decisions on subsequent entries use C_new. jointPhase resets
-		// to JointNone so /next/ membership change may begin (caller-visible
-		// completion is gated on commit-time close in applyLoop, not here, to
-		// remain truncation-safe).
-		n.config.Peers = serverPeerKeys(jc.NewServers)
+		// quorum decisions on subsequent entries use C_new. config.Peers in
+		// this codebase excludes self (peer IDs are the OTHER nodes); voter
+		// sets in joint entries include self because §4.3 reasons about full
+		// voter membership.
+		n.config.Peers = peersExcludingSelf(jc.NewServers, n.id)
 		n.jointPhase = JointNone
 		n.jointOldVoters = nil
 		n.jointNewVoters = nil
 		n.jointEnterIndex = 0
 		n.jointLeaveProposed = false
 	}
+}
+
+// peersExcludingSelf returns peerKeys for every entry whose id is not selfID.
+// This bridges the §4.3 voter-set convention (full membership) and the existing
+// config.Peers convention (peers excluding self).
+func peersExcludingSelf(servers []ServerEntry, selfID string) []string {
+	out := make([]string, 0, len(servers))
+	for _, s := range servers {
+		key := s.Address
+		if key == "" {
+			key = s.ID
+		}
+		if key == selfID || s.ID == selfID {
+			continue
+		}
+		out = append(out, key)
+	}
+	return out
 }
 
 // restoreConfigFromServers splits a snapshot servers list into peers (Voter,
@@ -410,7 +428,7 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				jNewVoters = serverPeerKeys(jc.NewServers)
 				jEnterIndex = entry.Index
 			case JointOpLeave:
-				peers = serverPeerKeys(jc.NewServers)
+				peers = peersExcludingSelf(jc.NewServers, n.id)
 				jPhase = JointNone
 				jOldVoters = nil
 				jNewVoters = nil
