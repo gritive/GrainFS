@@ -138,3 +138,140 @@ func TestQuorumMinMatchIndex_SingleMode(t *testing.T) {
 	require.Equal(t, uint64(90), n.quorumMinMatchIndexLocked(),
 		"single-mode uses configuration median")
 }
+
+func TestApply_JointEnter_ActivatesJointPhase(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.state = Follower
+
+	entry := LogEntry{
+		Index: 10,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n4"}, {ID: "n5"}},
+		}),
+	}
+	n.applyConfigChangeLocked(entry)
+
+	require.Equal(t, JointEntering, n.jointPhase)
+	require.Equal(t, []string{"n1", "n2", "n3"}, n.jointOldVoters)
+	require.Equal(t, []string{"n1", "n2", "n4", "n5"}, n.jointNewVoters)
+	require.Equal(t, uint64(10), n.jointEnterIndex)
+	require.False(t, n.jointLeaveProposed)
+}
+
+func TestApply_JointEnter_LeaderInitsNewVotersOnly(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.state = Leader
+	n.matchIndex["n2"] = 50 // pre-existing replication state
+	n.nextIndex["n2"] = 51
+	// log lastLogIdx=10 setup
+	n.log = []LogEntry{{Index: 10, Term: 1}}
+
+	entry := LogEntry{
+		Index: 11,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n4"}, {ID: "n5"}},
+		}),
+	}
+	n.applyConfigChangeLocked(entry)
+
+	// New voters n4/n5 initialized at lastLogIdx+1.
+	require.Equal(t, uint64(11), n.nextIndex["n4"])
+	require.Equal(t, uint64(11), n.nextIndex["n5"])
+	require.Equal(t, uint64(0), n.matchIndex["n4"])
+	require.Equal(t, uint64(0), n.matchIndex["n5"])
+	// Existing voter n2 untouched.
+	require.Equal(t, uint64(51), n.nextIndex["n2"])
+	require.Equal(t, uint64(50), n.matchIndex["n2"])
+}
+
+func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
+	n := jointTestNode("n1")
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n4", "n5"}
+	n.jointEnterIndex = 10
+	ch := make(chan struct{})
+	n.jointPromoteCh = ch
+
+	entry := LogEntry{
+		Index: 11,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n4"}, {ID: "n5"}},
+		}),
+	}
+	n.applyConfigChangeLocked(entry)
+
+	// Append-time: phase reset, config.Peers updated.
+	require.Equal(t, JointNone, n.jointPhase)
+	require.Equal(t, []string{"n1", "n2", "n4", "n5"}, n.config.Peers)
+	require.Empty(t, n.jointOldVoters)
+	require.Empty(t, n.jointNewVoters)
+	require.Equal(t, uint64(0), n.jointEnterIndex)
+
+	// Append-time does NOT close jointPromoteCh — that gates on commit (truncation safety).
+	select {
+	case <-ch:
+		t.Fatal("jointPromoteCh should not be closed at append time")
+	default:
+	}
+	require.NotNil(t, n.jointPromoteCh)
+}
+
+func TestCheckJointAdvance_LogLookaheadIdempotency(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+	n.jointPhase = JointEntering
+	n.jointEnterIndex = 10
+	n.commitIndex = 11
+	n.jointLeaveProposed = false
+
+	// log already contains a JointLeave entry (uncommitted tail or just-appended).
+	n.log = []LogEntry{
+		{Index: 10, Type: LogEntryJointConfChange, Command: encodeJointConfChange(
+			JointConfChange{Op: JointOpEnter})},
+		{Index: 11, Type: LogEntryJointConfChange, Command: encodeJointConfChange(
+			JointConfChange{Op: JointOpLeave})},
+	}
+
+	// checkJointAdvance must not propose again — log has the entry already.
+	n.checkJointAdvance()
+
+	require.False(t, n.jointLeaveProposed,
+		"flag stays false; log lookahead returns early without proposing")
+}
+
+func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n1", "n2", "n3"}
+
+	// Log retained only JointEnter — JointLeave was truncated by a new leader.
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(
+			JointConfChange{
+				Op:         JointOpEnter,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.Equal(t, JointEntering, n.jointPhase, "truncated Leave reverts to Entering")
+	require.Equal(t, uint64(1), n.jointEnterIndex)
+	require.Equal(t, []string{"n1", "n2", "n3"}, n.jointOldVoters)
+	require.Equal(t, []string{"n1", "n2", "n4", "n5"}, n.jointNewVoters)
+	require.False(t, n.jointLeaveProposed)
+}

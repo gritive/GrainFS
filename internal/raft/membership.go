@@ -194,13 +194,21 @@ func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, a
 	}
 }
 
-// applyConfigChangeLocked applies a ConfChange entry to config.Peers immediately
-// when the entry is appended (§4.4: "regardless of whether committed").
+// applyConfigChangeLocked applies a ConfChange or JointConfChange entry to
+// config.Peers immediately when the entry is appended (§4.4: "regardless of
+// whether committed"). For JointConfChange this also maintains the §4.3 phase
+// state on every node, including caller wakeup on JointLeave commit.
 // MUST be called with n.mu held.
 func (n *Node) applyConfigChangeLocked(entry LogEntry) {
-	if entry.Type != LogEntryConfChange {
-		return
+	switch entry.Type {
+	case LogEntryConfChange:
+		n.applyConfChangeLocked(entry)
+	case LogEntryJointConfChange:
+		n.applyJointConfChangeLocked(entry)
 	}
+}
+
+func (n *Node) applyConfChangeLocked(entry LogEntry) {
 	cc := decodeConfChange(entry.Command)
 	// peerKey: data-Raft uses QUIC address; meta-Raft uses nodeID.
 	peerKey := cc.ID
@@ -266,6 +274,45 @@ func (n *Node) applyConfigChangeLocked(entry LogEntry) {
 	n.pendingConfChangeIndex = entry.Index
 }
 
+// applyJointConfChangeLocked drives the §4.3 state machine.
+//
+//	JointEnter:
+//	  jointPhase = JointEntering, voter sets recorded, jointEnterIndex = entry.Index.
+//	  Leader bootstraps replication state for newly added voters.
+//	JointLeave:
+//	  jointPhase = JointNone, config.Peers = newServers (single mode).
+//	  jointPromoteCh closed on every node so proposeJointConfChangeWait callers
+//	  wake up regardless of which node currently holds leadership.
+//	  Leader self-removal triggers step-down at the end of apply (Decision 8 +
+//	  cross-model Codex #7 / Gemini #8 — apply-time, not append-time).
+func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
+	jc := decodeJointConfChange(entry.Command)
+	switch jc.Op {
+	case JointOpEnter:
+		n.jointPhase = JointEntering
+		n.jointOldVoters = serverPeerKeys(jc.OldServers)
+		n.jointNewVoters = serverPeerKeys(jc.NewServers)
+		n.jointEnterIndex = entry.Index
+		n.jointLeaveProposed = false
+		if n.state == Leader {
+			n.initLeaderStateForNewVoters(jc.OldServers, jc.NewServers)
+		}
+
+	case JointOpLeave:
+		// Append-time: §4.4 invariant — config.Peers updates immediately so
+		// quorum decisions on subsequent entries use C_new. jointPhase resets
+		// to JointNone so /next/ membership change may begin (caller-visible
+		// completion is gated on commit-time close in applyLoop, not here, to
+		// remain truncation-safe).
+		n.config.Peers = serverPeerKeys(jc.NewServers)
+		n.jointPhase = JointNone
+		n.jointOldVoters = nil
+		n.jointNewVoters = nil
+		n.jointEnterIndex = 0
+		n.jointLeaveProposed = false
+	}
+}
+
 // restoreConfigFromServers splits a snapshot servers list into peers (Voter,
 // excluding self) and a learnerIDs map (NonVoter, nodeID → nodeID).
 // selfID is the local node's ID; it is excluded from both outputs.
@@ -297,56 +344,85 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 		learnerAddrs[k] = v
 	}
 
+	// Joint state replays alongside ConfChange entries so a truncated JointLeave
+	// reverts to JointEntering state (Decision 4-bis). Without this, a node that
+	// applied JointLeave but had it truncated by a new leader would silently
+	// keep config.Peers = C_new while the cluster expects C_old+new dual quorum.
+	var jPhase jointPhase
+	var jOldVoters, jNewVoters []string
+	var jEnterIndex uint64
+
 	for _, entry := range n.log {
 		if entry.Index < startIndex {
 			continue
 		}
-		if entry.Type != LogEntryConfChange {
-			continue
-		}
-		cc := decodeConfChange(entry.Command)
-		peerKey := cc.ID
-		if cc.Address != "" {
-			peerKey = cc.Address
-		}
-		switch cc.Op {
-		case ConfChangeAddVoter:
-			found := false
-			for _, p := range peers {
-				if p == peerKey {
-					found = true
-					break
-				}
+		switch entry.Type {
+		case LogEntryConfChange:
+			cc := decodeConfChange(entry.Command)
+			peerKey := cc.ID
+			if cc.Address != "" {
+				peerKey = cc.Address
 			}
-			if !found {
-				peers = append(peers, peerKey)
-			}
-		case ConfChangeRemoveVoter:
-			out := peers[:0]
-			for _, p := range peers {
-				if p != peerKey {
-					out = append(out, p)
-				}
-			}
-			peers = out
-		case ConfChangeAddLearner:
-			learnerAddrs[cc.ID] = peerKey
-		case ConfChangePromote:
-			if pk, ok := learnerAddrs[cc.ID]; ok {
-				delete(learnerAddrs, cc.ID)
+			switch cc.Op {
+			case ConfChangeAddVoter:
 				found := false
 				for _, p := range peers {
-					if p == pk {
+					if p == peerKey {
 						found = true
 						break
 					}
 				}
 				if !found {
-					peers = append(peers, pk)
+					peers = append(peers, peerKey)
 				}
+			case ConfChangeRemoveVoter:
+				out := peers[:0]
+				for _, p := range peers {
+					if p != peerKey {
+						out = append(out, p)
+					}
+				}
+				peers = out
+			case ConfChangeAddLearner:
+				learnerAddrs[cc.ID] = peerKey
+			case ConfChangePromote:
+				if pk, ok := learnerAddrs[cc.ID]; ok {
+					delete(learnerAddrs, cc.ID)
+					found := false
+					for _, p := range peers {
+						if p == pk {
+							found = true
+							break
+						}
+					}
+					if !found {
+						peers = append(peers, pk)
+					}
+				}
+			}
+
+		case LogEntryJointConfChange:
+			jc := decodeJointConfChange(entry.Command)
+			switch jc.Op {
+			case JointOpEnter:
+				jPhase = JointEntering
+				jOldVoters = serverPeerKeys(jc.OldServers)
+				jNewVoters = serverPeerKeys(jc.NewServers)
+				jEnterIndex = entry.Index
+			case JointOpLeave:
+				peers = serverPeerKeys(jc.NewServers)
+				jPhase = JointNone
+				jOldVoters = nil
+				jNewVoters = nil
+				jEnterIndex = 0
 			}
 		}
 	}
 	n.config.Peers = peers
 	n.learnerIDs = learnerAddrs
+	n.jointPhase = jPhase
+	n.jointOldVoters = jOldVoters
+	n.jointNewVoters = jNewVoters
+	n.jointEnterIndex = jEnterIndex
+	n.jointLeaveProposed = false // truncation 후 leader watcher가 재평가
 }

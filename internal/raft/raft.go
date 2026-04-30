@@ -570,6 +570,27 @@ func (n *Node) applyLoop() {
 			}
 		}
 
+		// JointConfChange entries are already applied on append for the §4.3
+		// dual-quorum invariant. On JointLeave commit, perform truncation-safe
+		// caller wakeup and self-removal step-down — both gated to commit so an
+		// uncommitted JointLeave that gets truncated by a new leader does not
+		// falsely release callers or step the leader down prematurely.
+		if entry.Type == LogEntryJointConfChange {
+			jc := decodeJointConfChange(entry.Command)
+			if jc.Op == JointOpLeave {
+				if n.jointPromoteCh != nil {
+					close(n.jointPromoteCh)
+					n.jointPromoteCh = nil
+				}
+				newPeers := serverPeerKeys(jc.NewServers)
+				if n.state == Leader && !containsPeer(newPeers, n.id) {
+					n.state = Follower
+					n.leaderID = ""
+					n.signalReset()
+				}
+			}
+		}
+
 		// Signal any waiter for this index
 		if ch, ok := n.waiters[idx]; ok {
 			close(ch)
@@ -1107,8 +1128,10 @@ func (n *Node) runLeader() {
 			n.mu.Unlock()
 			n.replicateToAll()
 			// Learner-first: check if any learner caught up and propose Promote.
+			// Joint consensus: drive C_old+new → C_new auto-advance.
 			n.mu.Lock()
 			n.checkLearnerCatchup()
+			n.checkJointAdvance()
 			n.mu.Unlock()
 			if !n.gcRunning.Swap(true) {
 				go func() {
@@ -1547,13 +1570,17 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	}
 	n.persistLogEntries(newEntries)
 
-	// §4.4: after truncation, rebuild config from initial peers + remaining log,
-	// then apply ConfChange entries in the newly appended batch.
+	// §4.4 / §4.3: after truncation, rebuild config (and joint state) from
+	// initial peers + remaining log, then apply membership entries in the newly
+	// appended batch. rebuildConfigFromLog reverts an uncommitted JointLeave
+	// back to JointEntering so dual-quorum stays in force until the next leader
+	// re-commits Leave.
 	if truncated {
 		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
 	}
 	for i := range newEntries {
-		if newEntries[i].Type == LogEntryConfChange {
+		switch newEntries[i].Type {
+		case LogEntryConfChange, LogEntryJointConfChange:
 			n.applyConfigChangeLocked(newEntries[i])
 		}
 	}
@@ -1924,14 +1951,18 @@ func (n *Node) flushBatch(pending []proposal) {
 		return
 	}
 
-	// §4.4 guard: at most one ConfChange may be in-flight at a time.
-	// Reject extras synchronously so doneCh callers unblock immediately.
+	// §4.3/§4.4 guard: at most one membership change may be in-flight at a time.
+	// Joint and single-server changes cannot interleave — the §4.3 invariant is
+	// jointPhase=None ↔ no §4.4 entry pending. Reject extras synchronously so
+	// doneCh callers unblock immediately.
 	{
 		var confChangeSeen bool
+		var jointSeen bool
 		filtered := pending[:0]
 		for _, p := range pending {
-			if p.entryType == LogEntryConfChange {
-				if n.pendingConfChangeIndex != 0 || confChangeSeen {
+			switch p.entryType {
+			case LogEntryConfChange:
+				if n.pendingConfChangeIndex != 0 || confChangeSeen || n.jointPhase != JointNone {
 					select {
 					case p.doneCh <- proposalResult{err: ErrConfChangeInProgress}:
 					default:
@@ -1939,6 +1970,35 @@ func (n *Node) flushBatch(pending []proposal) {
 					continue
 				}
 				confChangeSeen = true
+
+			case LogEntryJointConfChange:
+				if jointSeen {
+					select {
+					case p.doneCh <- proposalResult{err: ErrConfChangeInProgress}:
+					default:
+					}
+					continue
+				}
+				jc := decodeJointConfChange(p.command)
+				switch jc.Op {
+				case JointOpEnter:
+					if n.jointPhase != JointNone || n.pendingConfChangeIndex != 0 {
+						select {
+						case p.doneCh <- proposalResult{err: ErrConfChangeInProgress}:
+						default:
+						}
+						continue
+					}
+				case JointOpLeave:
+					if n.jointPhase != JointEntering {
+						select {
+						case p.doneCh <- proposalResult{err: ErrConfChangeInProgress}:
+						default:
+						}
+						continue
+					}
+				}
+				jointSeen = true
 			}
 			filtered = append(filtered, p)
 		}
@@ -1966,9 +2026,12 @@ func (n *Node) flushBatch(pending []proposal) {
 	persistDur := time.Since(persistStart)
 	n.matchIndex[n.id] = entries[len(entries)-1].Index
 
-	// §4.4: apply ConfChange entries immediately on append (leader path).
+	// §4.4 / §4.3: apply membership entries immediately on append (leader path).
+	// Joint entries activate the dual-quorum phase even before commit so that
+	// subsequent advanceCommitIndex uses the correct voter sets.
 	for i := range entries {
-		if entries[i].Type == LogEntryConfChange {
+		switch entries[i].Type {
+		case LogEntryConfChange, LogEntryJointConfChange:
 			n.applyConfigChangeLocked(entries[i])
 		}
 	}
