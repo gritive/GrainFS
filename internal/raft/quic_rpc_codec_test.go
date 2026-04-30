@@ -9,10 +9,12 @@ import (
 
 func TestEncodeDecodeRequestVote(t *testing.T) {
 	args := &RequestVoteArgs{
-		Term:         5,
-		CandidateID:  "node-1",
-		LastLogIndex: 42,
-		LastLogTerm:  3,
+		Term:           5,
+		CandidateID:    "node-1",
+		LastLogIndex:   42,
+		LastLogTerm:    3,
+		PreVote:        true,
+		LeaderTransfer: true,
 	}
 
 	data, err := encodeRPC(rpcTypeRequestVote, args)
@@ -29,6 +31,8 @@ func TestEncodeDecodeRequestVote(t *testing.T) {
 	assert.Equal(t, args.CandidateID, decoded.CandidateID)
 	assert.Equal(t, args.LastLogIndex, decoded.LastLogIndex)
 	assert.Equal(t, args.LastLogTerm, decoded.LastLogTerm)
+	assert.Equal(t, args.PreVote, decoded.PreVote, "PreVote must round-trip; lost flag silently regresses pre-vote protection")
+	assert.Equal(t, args.LeaderTransfer, decoded.LeaderTransfer, "LeaderTransfer must round-trip; lost flag breaks leader transfer election")
 }
 
 func TestEncodeDecodeRequestVoteReply(t *testing.T) {
@@ -136,4 +140,97 @@ func TestEncodeRPC_AllocsBounded(t *testing.T) {
 		_, _ = encodeRPC(rpcTypeRequestVote, args)
 	})
 	assert.LessOrEqual(t, allocs, float64(4), "encodeRPC allocs should be ≤4 with pool reuse")
+}
+
+// TestRoundTrip_AllWireStructs uses reflect.DeepEqual on fully populated
+// instances of every wire struct so that a future field added to the Go
+// struct must also be wired into the FBS schema and codec, otherwise
+// this test fails with a clear diff.
+func TestRoundTrip_AllWireStructs(t *testing.T) {
+	t.Run("RequestVoteArgs", func(t *testing.T) {
+		orig := &RequestVoteArgs{
+			Term: 7, CandidateID: "n1",
+			LastLogIndex: 42, LastLogTerm: 6,
+			PreVote: true, LeaderTransfer: true,
+		}
+		data, err := encodeRPCPayload(rpcTypeRequestVote, orig)
+		require.NoError(t, err)
+		got, err := decodeRequestVoteArgs(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+
+	t.Run("RequestVoteArgs_ZeroFlags", func(t *testing.T) {
+		// FlatBuffers omits false bool fields (default value); verify decoder returns false via vtable default.
+		orig := &RequestVoteArgs{Term: 3, CandidateID: "n2", LastLogIndex: 0, LastLogTerm: 0}
+		data, err := encodeRPCPayload(rpcTypeRequestVote, orig)
+		require.NoError(t, err)
+		got, err := decodeRequestVoteArgs(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+
+	t.Run("RequestVoteReply", func(t *testing.T) {
+		orig := &RequestVoteReply{Term: 9, VoteGranted: true}
+		data, err := encodeRPCPayload(rpcTypeRequestVoteReply, orig)
+		require.NoError(t, err)
+		got, err := decodeRequestVoteReply(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+
+	t.Run("AppendEntriesArgs", func(t *testing.T) {
+		orig := &AppendEntriesArgs{
+			Term: 11, LeaderID: "leader-7",
+			PrevLogIndex: 99, PrevLogTerm: 10,
+			Entries: []LogEntry{
+				{Term: 11, Index: 100, Command: []byte("cmd-A"), Type: LogEntryCommand},
+				{Term: 11, Index: 101, Command: []byte("cmd-B"), Type: LogEntryConfChange},
+			},
+			LeaderCommit: 99,
+		}
+		data, err := encodeRPCPayload(rpcTypeAppendEntries, orig)
+		require.NoError(t, err)
+		got, err := decodeAppendEntriesArgs(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+
+	t.Run("AppendEntriesReply", func(t *testing.T) {
+		orig := &AppendEntriesReply{
+			Term: 13, Success: true,
+			ConflictTerm: 12, ConflictIndex: 88,
+		}
+		data, err := encodeRPCPayload(rpcTypeAppendEntriesReply, orig)
+		require.NoError(t, err)
+		got, err := decodeAppendEntriesReply(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+
+	t.Run("InstallSnapshotArgs", func(t *testing.T) {
+		orig := &InstallSnapshotArgs{
+			Term: 14, LeaderID: "leader-9",
+			LastIncludedIndex: 1234, LastIncludedTerm: 13,
+			Data: []byte("snapshot-bytes"),
+			Servers: []Server{
+				{ID: "n1", Suffrage: Voter},
+				{ID: "n2", Suffrage: NonVoter},
+			},
+		}
+		data, err := encodeRPCPayload(rpcTypeInstallSnapshot, orig)
+		require.NoError(t, err)
+		got, err := decodeInstallSnapshotArgs(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+
+	t.Run("InstallSnapshotReply", func(t *testing.T) {
+		orig := &InstallSnapshotReply{Term: 15}
+		data, err := encodeRPCPayload(rpcTypeInstallSnapshotReply, orig)
+		require.NoError(t, err)
+		got, err := decodeInstallSnapshotReply(data)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
 }
