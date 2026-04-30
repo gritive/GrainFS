@@ -79,6 +79,66 @@ func encodeJointConfChange(jc JointConfChange) []byte {
 	return b.FinishedBytes()
 }
 
+// quorumSets returns the voter sets used for quorum decisions, with self
+// always included for uniform majority arithmetic.
+//
+// Single mode (jointPhase == JointNone): current = config.Peers + self, old = nil.
+//
+//	(config.Peers in this codebase lists peer IDs excluding self; we splice self
+//	in here so dualMajority/hasMajorityInSet can use a single uniform formula.)
+//
+// Joint mode (jointPhase == JointEntering): current = jointNewVoters,
+//
+//	old = jointOldVoters. Joint voter sets already carry full membership lists
+//	including self (or excluding it if self is being removed).
+//
+// Caller MUST hold n.mu.
+func (n *Node) quorumSets() (current []string, old []string) {
+	if n.jointPhase == JointEntering {
+		return n.jointNewVoters, n.jointOldVoters
+	}
+	cur := make([]string, 0, len(n.config.Peers)+1)
+	cur = append(cur, n.id)
+	cur = append(cur, n.config.Peers...)
+	return cur, nil
+}
+
+// hasMajorityInSet reports whether matched ids form a strict majority of set.
+// Self counts as matched if and only if self is a voter in this configuration —
+// nodes that are not part of the configuration cannot contribute to its quorum.
+//
+// Caller MUST hold n.mu.
+func (n *Node) hasMajorityInSet(matched map[string]bool, set []string) bool {
+	if len(set) == 0 {
+		return false
+	}
+	count := 0
+	for _, id := range set {
+		if id == n.id || matched[id] {
+			count++
+		}
+	}
+	return count > len(set)/2
+}
+
+// dualMajority returns true if matched satisfies majority in BOTH the current
+// voter set AND (when in joint mode) the old voter set.
+//
+// In single mode, only the current set is checked. In joint mode (JointEntering),
+// quorum requires both — this is the §4.3 safety guarantee.
+//
+// Caller MUST hold n.mu.
+func (n *Node) dualMajority(matched map[string]bool) bool {
+	current, old := n.quorumSets()
+	if !n.hasMajorityInSet(matched, current) {
+		return false
+	}
+	if old != nil && !n.hasMajorityInSet(matched, old) {
+		return false
+	}
+	return true
+}
+
 // decodeJointConfChange deserializes a JointConfChange from LogEntry.Command bytes.
 func decodeJointConfChange(data []byte) JointConfChange {
 	e := pb.GetRootAsJointConfChangeEntry(data, 0)

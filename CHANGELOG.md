@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.6.17] — 2026-04-30
+
+### Changed
+
+- **raft (Sub-project 2 PR-J2)**: §4.3 dual-quorum 핵심 함수. `quorumSets`/`hasMajorityInSet`/`dualMajority` 헬퍼 (`internal/raft/joint.go`) 도입. `hasQuorum`, `advanceCommitIndex`, `runPreVote`, `runCandidate`, `quorumMinMatchIndexLocked`을 dual-aware로 전환 — joint mode (`jointPhase == JointEntering`)에서 old/new 양쪽 voter set 모두 majority 도달 시에만 quorum 인정.
+- **raft**: vote/quorum 카운트가 단순 정수 누적에서 `map[id]bool` set 기반으로 변경. PreVote/Election에서 voter set 합집합으로부터 peer 리스트 산출 — joint mode 시 old/new에 동시 존재하는 peer는 한 번만 RPC.
+
+### Notes
+
+- `jointPhase == JointNone` 인 single mode에서는 기존 majority 의미를 정확히 유지 (회귀 테스트 통과). 새 entry는 propose되지 않아 시스템 동작 변화 없음.
+- 단위 테스트 4개 추가 (`TestDualQuorum_*`, `TestQuorumMinMatchIndex_JointMode_Conservative`, `TestQuorumMinMatchIndex_SingleMode`).
+- Voter set lock-free read는 별도 follow-up — 본 sub-project 5개 PR 머지 후 brainstorming.
+
 ## [0.0.6.16] — 2026-04-30
 
 ### Added
