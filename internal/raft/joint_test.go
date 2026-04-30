@@ -543,6 +543,37 @@ func TestJoint_E2E_RemoveOne(t *testing.T) {
 	require.Len(t, peers, 2, "leader sees 3-node cluster minus self after removal")
 }
 
+// TestChangeMembership_CatchUpTimeout_AttemptsCleanup — Sub-project 3 PR-K1.
+// Tight catch-up timeout + low threshold so the fake unreachable learner
+// times out. defer cleanup must clear jointManagedLearners.
+func TestChangeMembership_CatchUpTimeout_AttemptsCleanup(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader)
+
+	// Drive commitIndex up so threshold check is non-trivial.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, leader.Propose([]byte("entry")))
+	}
+	leader.SetLearnerCatchupThreshold(1) // tight; fake learner can't catch up
+	leader.SetChangeMembershipDefaults(ChangeMembershipOpts{CatchUpTimeout: 200 * time.Millisecond})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := leader.ChangeMembership(ctx,
+		[]ServerEntry{{ID: "fake-unreachable", Address: "127.0.0.1:65531", Suffrage: Voter}},
+		nil,
+	)
+	require.ErrorIs(t, err, ErrLearnerCatchUpTimeout)
+
+	leader.mu.Lock()
+	managed := len(leader.jointManagedLearners)
+	leader.mu.Unlock()
+	require.Zero(t, managed, "defer cleanup must clear jointManagedLearners")
+}
+
 // TestChangeMembership_AddRemove_LearnerFirstHappyPath — Sub-project 3 PR-K1.
 // Uses high catch-up threshold to make a fake unreachable learner trivially
 // caught up, then verifies joint atomic promote+remove.
