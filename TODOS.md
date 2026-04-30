@@ -17,22 +17,20 @@
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
 - [ ] **Multi-Raft (Joint consensus 설계 완료)** — 5 PR 시퀀스:
-  - PR-A: §4.4 one-at-a-time membership change 정확 구현 (AddVoter/RemoveVoter/AddLearner/PromoteToVoter, FlatBuffers ConfChangeEntry)
-  - PR-B: meta-Raft scaffold (클러스터 사실의 소스, shard_map, load_snapshot)
-  - PR-C: 데이터 그룹 다중화 + bucket→group Router
-  - PR-D: autonomous rebalance (10s tick + meta-Raft leader 평가 + RebalancePlan) — 플랜 리뷰 + 교차검증 완료, must-fix 확인됨:
-    - M1: tickOnce resume 분기 (leader restart) + executingPlan atomic.Pointer + 리더십 이탈 시 cancel
-    - M2: MetaAbortPlanCmd reason:uint8 (Should-fix — PR-E로 이연 가능)
-    - ~~M3: 기각~~ — serve.go에서 이미 seed, broadcastOnce() 수정 불필요
-    - M4: CreateVectorOfSortedTables → StartEntriesVector 패턴 교체 (Snapshot() line도 포함)
-    - M5: applyAbortPlan() idempotent guard — planID 불일치 시 no-op (에러 반환 금지)
-    - T1-T3: restart-with-active-plan, ExecutePlan failure, Stop+goroutine leak 테스트
-    - P1: EvalInterval 30s + zero/stale 노드 제외 (~177 MB/day → ~44 MB/day)
-    - A1: Snapshot() FlatBuffers 빌드 순서 — lsVec을 Start 이전 완성
-    - A2: SetOnRebalancePlan callback doc "must not block" 추가
-    - A3: make fbs 선행 후 Entries() 시그니처 확인 후 decode 코드 작성
-  - PR-E: EC + Multi-Raft 통합 마무리 + k6 256 group 벤치
+  - ✅ PR-A: §4.4 one-at-a-time membership change (v0.0.6.11 snapshot membership 까지 완결)
+  - ✅ PR-B: meta-Raft scaffold (`MetaRaft`, `MetaFSM`, shard_map, load_snapshot)
+  - ✅ PR-C: 데이터 그룹 다중화 + bucket→group Router (`DataGroup.Backend`, `Router.AssignBucket` COW)
+  - ✅ PR-D: autonomous rebalance (v0.0.6.6 `DataGroupPlanExecutor` + Full Sharding E2E)
+  - [ ] **PR-E: Multi-Raft scale micro-bench** (현재 진행 중 — 설계: `docs/superpowers/specs/2026-04-30-multi-raft-scale-microbench-design.md`)
+    - in-process N-group raft 하네스 (5 호스트, 그룹별 3 voter)
+    - sweep N=8/32/64/128 (호스트당 raft Node 수: 5/19/38/77 — N=128이 운영 목표 256×10host 와 동일 부하)
+    - 측정: heap, CPU idle %, heartbeat msg/sec, election count, goroutines
+    - 산출: `internal/cluster/scale_bench_test.go` + design doc 결과 표 + CHANGELOG
+    - **out of scope**: k6 throughput, Docker Compose 다중 노드, BadgerDB I/O, 실 EC 부하 (운영 단계로 이연)
   - 설계: `~/.gstack/projects/gritive-GrainFS/whitekid-joint-consensus-design-20260429.md`
+  - PR-F (트리거 시): §4.3 joint consensus atomic multi-server replacement
+  - PR-D 잔여 must-fix (PR-E 본 작업과 무관, 별도 follow-up):
+    - M2: MetaAbortPlanCmd reason:uint8 추가
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
   - ReadIndex (현재 `IsLeader()` 보증으로 충분; FSM linearizable read 요구 시)
