@@ -109,8 +109,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	t.Cleanup(killAll)
 
 	// Stage 1: start 3 nodes first — quorum(5)=3, so they elect a stable leader
-	// without competing with 2 additional simultaneous candidates. The 5-way
-	// simultaneous start caused split-vote loops that never converged in CI.
+	// before the remaining 2 join. Reduces split-vote noise in CI.
 	for i := 0; i < 3; i++ {
 		procs[i] = startNode(i)
 	}
@@ -141,7 +140,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			}
 		}
 		return false
-	}, 120*time.Second, 2*time.Second, "no leader found or CreateBucket never succeeded")
+	}, 15*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
 	t.Logf("leader: node %d at %s", leaderIdx, httpURL(leaderIdx))
 
 	// Write 5 random objects of varied sizes. Verify each round-trips.
@@ -521,7 +520,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			}
 		}
 		return false
-	}, 120*time.Second, 2*time.Second, "no leader found or CreateBucket never succeeded")
+	}, 15*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
 	t.Logf("topology test: leader node %d at %s (N=%d, k+m=%d)", leaderIdx, httpURL(leaderIdx), numNodes, ecData+ecParity)
 
 	type entry struct {

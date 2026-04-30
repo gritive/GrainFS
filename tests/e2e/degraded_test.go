@@ -135,7 +135,7 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			}
 		}
 		return false
-	}, 120*time.Second, 2*time.Second, "no leader found or CreateBucket never succeeded")
+	}, 15*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
 	t.Logf("degraded test: leader node %d at %s", leaderIdx, httpURL(leaderIdx))
 
 	// Verify normal PUT works before killing nodes.
