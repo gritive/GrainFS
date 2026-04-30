@@ -438,9 +438,9 @@ func (n *Node) restoreFromStore() {
 	} else if legacySnapshot {
 		// Legacy fallback: replay full log from initialPeers (best-effort).
 		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
-	} else if snap.Index == 0 && lastIdx > 0 {
-		// No snapshot yet (fresh cluster): replay full log so PR-K3
-		// jointManagedLearners is restored even before the first snapshot.
+	} else if snapErr == nil && snap.Index == 0 && lastIdx > 0 {
+		// No snapshot yet (fresh cluster, not a load error): replay full log so
+		// PR-K3 jointManagedLearners is restored even before the first snapshot.
 		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
 	}
 }
