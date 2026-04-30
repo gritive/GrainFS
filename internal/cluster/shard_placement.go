@@ -379,3 +379,28 @@ func decodePlacementValue(data []byte) (PlacementRecord, error) {
 	}
 	return PlacementRecord{K: int(k), M: int(m), Nodes: nodes}, nil
 }
+
+// LookupObjectECShards returns the EC shard parameters (k, m) stored in ObjectMeta
+// for the given versioned object. Returns (0, 0, nil) when the object has no EC
+// metadata (N× replication mode). Returns (0, 0, err) on a real BadgerDB read error.
+func (f *FSM) LookupObjectECShards(bucket, key, versionID string) (k, m int, err error) {
+	err = f.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			meta, derr := unmarshalObjectMeta(val)
+			if derr != nil {
+				return derr
+			}
+			k = int(meta.ECData)
+			m = int(meta.ECParity)
+			return nil
+		})
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return 0, 0, nil // N× 모드: EC 메타 없음
+	}
+	return k, m, err
+}

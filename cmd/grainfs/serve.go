@@ -735,7 +735,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// scrub cycles; its onMissing callback calls RepairShardLocal which
 	// resolves the latest version and pulls survivor shards from peers.
 	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
-	if scrubInterval > 0 && distBackend.ECActive() {
+	if scrubInterval > 0 {
 		sc := scrubber.New(distBackend, scrubInterval)
 		sc.SetEmitter(activeEmitter)
 		sc.Start(ctx)
@@ -951,6 +951,13 @@ func startBalancer(
 	if migMaxRetries > 0 {
 		exec.SetMaxWriteRetries(migMaxRetries)
 	}
+	exec.SetShardCounter(func(bucket, key, versionID string) int {
+		k, m, err := fsm.LookupObjectECShards(bucket, key, versionID)
+		if err != nil || k == 0 {
+			return 1 // N× 모드: shardIdx=0만 존재
+		}
+		return k + m
+	})
 	exec.Start(ctx)
 
 	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
