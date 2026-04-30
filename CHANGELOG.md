@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.6.20] — 2026-04-30
+
+### Added
+
+- **raft (Sub-project 2 PR-J5 — 마지막)**: §4.3 snapshot persistence. `Snapshot` struct에 `JointPhase` / `JointOldVoters` / `JointNewVoters` / `JointEnterIndex` 4 필드. `BadgerLogStore.SaveSnapshot` / `LoadSnapshot` 직렬화/복원. Legacy snapshot은 zero values로 자연스럽게 호환.
+- **raft**: `SnapshotManager`에 `SetJointStateProvider` / `SetJointStateRestorer` callback. `MaybeTrigger`는 자동 트리거 시점에 provider로부터 joint state 캡처, `Restore`는 restorer로 Node에 적용. Provider/restorer가 nil이면 zero values (legacy 호환).
+- **raft**: `Node.JointSnapshotState() (int8, []string, []string, uint64)` + `Node.RestoreJointStateFromSnapshot(int8, []string, []string, uint64)` 헬퍼. int8 phase로 jointPhase unexported 유지.
+- **cluster**: `DistributedBackend.SetSnapshotManager` 및 `meta_raft.go` 초기화 시점에 joint state callback 등록. 운영에서 자동 snapshot이 joint phase 진행 중 발생해도 restart 후 phase 자동 재개.
+
+### Tests
+
+- `TestSnapshot_RoundtripPreservesJointState` — full struct roundtrip (Index, Term, Data, Servers, joint 4 필드).
+- `TestSnapshot_LegacyHasZeroJointState` — joint 필드 미설정 snapshot이 JointNone + 빈 vectors로 복원.
+- `TestRestoreJointStateFromSnapshot_ResetsLeaveProposed` — restart 후 `jointLeaveProposed` flag 리셋해서 leader watcher가 재평가.
+- `TestApply_JointLeave_SelfRemoval_StepsDown` — append-time 적용은 leader state 유지 (commit-time hook이 step-down 처리).
+
+### Notes
+
+- Mixed-version reject은 PR-J4에서 이미 `mixedVersion` flag로 통합 (`ErrMixedVersionNoMembershipChange`). 별도 `ErrMixedVersionNoJointChange` 에러는 over-engineering이라 미도입.
+- Chaos scenarios (LeaderCrashBetweenEnterAndLeave / PartitionDuringJoint / RepeatedLeaderChange) + E2E `TestJoint_E2E_SnapshotMidJoint_AutoCompletes`는 internal-only `proposeJointConfChangeWait`라 chaos pkg(별 package)에서 호출 불가하여 skip. Sub-project 3 `ChangeMembership` public API 노출 후 follow-up (TODOS.md 등록).
+- Sub-project 2 완결. 5 PR 시퀀스: PR-J1 FBS schema, PR-J2 dual-quorum, PR-J3 apply/auto-progression/truncation revert, PR-J4 caller API + commit-time close, PR-J5 snapshot persistence + self-removal step-down 검증.
+
 ## [0.0.6.19] — 2026-04-30
 
 ### Added

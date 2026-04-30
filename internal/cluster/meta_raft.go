@@ -64,6 +64,10 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	nodeCfg := raft.DefaultConfig(cfg.NodeID, cfg.Peers)
 	node := raft.NewNode(nodeCfg, store)
 
+	// §4.3 joint state persistence wiring (Sub-project 2 PR-J5).
+	snapMgr.SetJointStateProvider(node.JointSnapshotState)
+	snapMgr.SetJointStateRestorer(node.RestoreJointStateFromSnapshot)
+
 	m := &MetaRaft{
 		node:        node,
 		store:       store,

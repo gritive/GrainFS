@@ -23,6 +23,16 @@ type SnapshotConfig struct {
 	TrailingLogs uint64
 }
 
+// JointStateProvider returns the §4.3 joint consensus state at snapshot trigger
+// time. Phase is the int8 form of jointPhase (0=None, 1=Entering). Empty slices /
+// zero index when JointPhase is None.
+type JointStateProvider func() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64)
+
+// JointStateRestorer is called by SnapshotManager.Restore with the joint state
+// stored alongside the snapshot. The implementation should adopt those fields
+// onto the Node (typically Node.RestoreJointStateFromSnapshot).
+type JointStateRestorer func(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64)
+
 // SnapshotManager handles automatic snapshot creation, log compaction,
 // and snapshot restoration on startup.
 type SnapshotManager struct {
@@ -31,6 +41,11 @@ type SnapshotManager struct {
 	snapshotter   Snapshotter
 	config        SnapshotConfig
 	lastSnapIndex uint64
+
+	// Optional joint state hooks. nil providers / restorers leave joint fields
+	// at zero, which is correct for callers that never enter joint consensus.
+	jointStateProvider JointStateProvider
+	jointStateRestorer JointStateRestorer
 }
 
 // NewSnapshotManager creates a snapshot manager.
@@ -40,6 +55,22 @@ func NewSnapshotManager(store LogStore, snap Snapshotter, config SnapshotConfig)
 		snapshotter: snap,
 		config:      config,
 	}
+}
+
+// SetJointStateProvider wires the §4.3 capture hook used during MaybeTrigger.
+// Pass Node.JointSnapshotState (or equivalent). Safe to leave unset for callers
+// that never enter joint consensus.
+func (m *SnapshotManager) SetJointStateProvider(fn JointStateProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jointStateProvider = fn
+}
+
+// SetJointStateRestorer wires the §4.3 apply hook used during Restore.
+func (m *SnapshotManager) SetJointStateRestorer(fn JointStateRestorer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jointStateRestorer = fn
 }
 
 // MaybeTrigger checks if a snapshot should be taken based on the number of
@@ -68,12 +99,25 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers
 		return false
 	}
 
+	// §4.3 joint state at snapshot point. Provider returns zero values when
+	// not in a joint cycle; legacy callers without a provider also get zeros.
+	var jPhase int8
+	var jOld, jNew []string
+	var jIdx uint64
+	if m.jointStateProvider != nil {
+		jPhase, jOld, jNew, jIdx = m.jointStateProvider()
+	}
+
 	// Save snapshot to store
 	if err := m.store.SaveSnapshot(Snapshot{
-		Index:   appliedIndex,
-		Term:    appliedTerm,
-		Data:    data,
-		Servers: servers,
+		Index:           appliedIndex,
+		Term:            appliedTerm,
+		Data:            data,
+		Servers:         servers,
+		JointPhase:      jointPhase(jPhase),
+		JointOldVoters:  jOld,
+		JointNewVoters:  jNew,
+		JointEnterIndex: jIdx,
 	}); err != nil {
 		log.Error().Err(err).Msg("snapshot: save failed")
 		return false
@@ -114,6 +158,12 @@ func (m *SnapshotManager) Restore() (uint64, error) {
 
 	if err := m.snapshotter.Restore(snap.Data); err != nil {
 		return 0, err
+	}
+
+	// §4.3 joint state restoration. Triggered after FSM restore so any leader
+	// promotion that follows has the correct phase to drive checkJointAdvance.
+	if m.jointStateRestorer != nil {
+		m.jointStateRestorer(int8(snap.JointPhase), snap.JointOldVoters, snap.JointNewVoters, snap.JointEnterIndex)
 	}
 
 	m.lastSnapIndex = snap.Index

@@ -20,6 +20,16 @@ type Snapshot struct {
 	Term    uint64
 	Data    []byte
 	Servers []Server // cluster config at snapshot time; nil = legacy
+
+	// §4.3 joint consensus state at snapshot point. JointPhase=JointNone
+	// (zero value) means the snapshot was taken outside any joint cycle
+	// — the other fields are unused. When restoring during JointEntering,
+	// the leader's heartbeat watcher (checkJointAdvance) auto-resumes the
+	// transition once C_new majority is reachable.
+	JointPhase      jointPhase
+	JointOldVoters  []string
+	JointNewVoters  []string
+	JointEnterIndex uint64
 }
 
 // LogStore provides durable storage for Raft log entries and state.
@@ -384,11 +394,42 @@ func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 		serversVec = b.EndVector(len(serverOffs))
 	}
 
+	// §4.3 joint voter sets serialize as plain string vectors. JointPhase=JointNone
+	// (zero) leaves the vectors empty so legacy snapshots remain readable.
+	stringVec := func(ss []string) flatbuffers.UOffsetT {
+		if len(ss) == 0 {
+			return 0
+		}
+		offs := make([]flatbuffers.UOffsetT, len(ss))
+		for i, s := range ss {
+			offs[i] = b.CreateString(s)
+		}
+		b.StartVector(4, len(ss), 4)
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		return b.EndVector(len(ss))
+	}
+	jointOldVec := stringVec(snap.JointOldVoters)
+	jointNewVec := stringVec(snap.JointNewVoters)
+
 	pb.SnapshotMetaStart(b)
 	pb.SnapshotMetaAddIndex(b, snap.Index)
 	pb.SnapshotMetaAddTerm(b, snap.Term)
 	if len(snap.Servers) > 0 {
 		pb.SnapshotMetaAddServers(b, serversVec)
+	}
+	if snap.JointPhase != JointNone {
+		pb.SnapshotMetaAddJointPhase(b, int8(snap.JointPhase))
+	}
+	if jointOldVec != 0 {
+		pb.SnapshotMetaAddJointOldVoters(b, jointOldVec)
+	}
+	if jointNewVec != 0 {
+		pb.SnapshotMetaAddJointNewVoters(b, jointNewVec)
+	}
+	if snap.JointEnterIndex != 0 {
+		pb.SnapshotMetaAddJointEnterIndex(b, snap.JointEnterIndex)
 	}
 	root := pb.SnapshotMetaEnd(b)
 	meta := fbFinishRPC(b, root)
@@ -429,6 +470,20 @@ func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 					})
 				}
 			}
+			snap.JointPhase = jointPhase(m.JointPhase())
+			if oldLen := m.JointOldVotersLength(); oldLen > 0 {
+				snap.JointOldVoters = make([]string, oldLen)
+				for i := 0; i < oldLen; i++ {
+					snap.JointOldVoters[i] = string(m.JointOldVoters(i))
+				}
+			}
+			if newLen := m.JointNewVotersLength(); newLen > 0 {
+				snap.JointNewVoters = make([]string, newLen)
+				for i := 0; i < newLen; i++ {
+					snap.JointNewVoters[i] = string(m.JointNewVoters(i))
+				}
+			}
+			snap.JointEnterIndex = m.JointEnterIndex()
 			return nil
 		}); err != nil {
 			return err
