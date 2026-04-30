@@ -174,6 +174,7 @@ func marshalLogEntry(entry LogEntry) []byte {
 	if len(entry.Command) > 0 {
 		pb.LogEntryAddCommand(b, cmdOff)
 	}
+	pb.LogEntryAddEntryType(b, pb.LogEntryType(entry.Type))
 	root := pb.LogEntryEnd(b)
 	return fbFinishRPC(b, root)
 }
@@ -185,7 +186,7 @@ func unmarshalLogEntry(data []byte) (entry LogEntry, err error) {
 		}
 	}()
 	e := pb.GetRootAsLogEntry(data, 0)
-	return LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes()}, nil
+	return LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes(), Type: LogEntryType(e.EntryType())}, nil
 }
 
 func (s *BadgerLogStore) AppendEntries(entries []LogEntry) error {
