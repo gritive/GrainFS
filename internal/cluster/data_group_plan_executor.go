@@ -38,6 +38,7 @@ type dataRaftNode interface {
 	PeerMatchIndex(peerKey string) (uint64, bool)
 	TransferLeadership() error
 	AddVoterCtx(ctx context.Context, id, addr string) error
+	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
 }
 
 // DataGroupPlanExecutor implements GroupRebalancer via real Raft voter migration.
