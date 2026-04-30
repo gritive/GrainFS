@@ -47,6 +47,9 @@ func (a *raftNodeAdapter) TransferLeadership() error      { return a.n.TransferL
 func (a *raftNodeAdapter) AddVoterCtx(ctx context.Context, id, addr string) error {
 	return a.n.AddVoterCtx(ctx, id, addr)
 }
+func (a *raftNodeAdapter) ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error {
+	return a.n.ChangeMembership(ctx, adds, removes)
+}
 
 // TestVoterMigration_ViaDataGroupPlanExecutor is an end-to-end test that
 // exercises the full DataGroupPlanExecutor.MoveReplica path with real raft.Node
@@ -63,6 +66,7 @@ func TestVoterMigration_ViaDataGroupPlanExecutor(t *testing.T) {
 
 	leader := cl.WaitForLeader(5 * time.Second)
 	require.NotNil(t, leader, "leader election timeout")
+	leaderID := leader.ID()
 
 	// Write baseline data
 	for i := 0; i < 5; i++ {
@@ -83,24 +87,31 @@ func TestVoterMigration_ViaDataGroupPlanExecutor(t *testing.T) {
 	dgMgr.Add(cluster.NewDataGroupWithBackend("group-0",
 		[]string{"node-0", "node-1", "node-2"}, nil))
 
+	// Pick fromNode = a non-leader voter so migration does not require self-removal
+	// step-down (which would invalidate the `leader` reference for post-migration
+	// ProposeWait). Self-removal is covered by TestVoterMigration_SelfRemoval_E2E.
+	fromNode := "node-1"
+	if leaderID == fromNode {
+		fromNode = "node-2"
+	}
+
 	// Inject real raft.Node via adapter so executor uses the real Raft state machine.
-	// localNodeID="node-0"; fromNode="node-1" so self-removal guard does not fire.
 	exec := cluster.NewDataGroupPlanExecutorForTest(
-		"node-0", dgMgr, addrBook, sgUpdater,
+		leaderID, dgMgr, addrBook, sgUpdater,
 		func(dg *cluster.DataGroup) cluster.DataRaftNode {
 			return &raftNodeAdapter{n: leader}
 		},
 	)
 
-	// Execute voter migration: node-1 → node-3
-	err := exec.MoveReplica(ctx, "group-0", "node-1", "node-3")
+	// Execute voter migration: fromNode → node-3
+	err := exec.MoveReplica(ctx, "group-0", fromNode, "node-3")
 	require.NoError(t, err)
 
 	// MetaFSM notified with new membership
 	require.Len(t, sgUpdater.proposed, 1)
 	assert.Equal(t, "group-0", sgUpdater.proposed[0].ID)
 	assert.Contains(t, sgUpdater.proposed[0].PeerIDs, "node-3")
-	assert.NotContains(t, sgUpdater.proposed[0].PeerIDs, "node-1")
+	assert.NotContains(t, sgUpdater.proposed[0].PeerIDs, fromNode)
 
 	// node-3 must be fully caught up
 	require.Eventually(t, func() bool {
@@ -118,7 +129,7 @@ func TestVoterMigration_ViaDataGroupPlanExecutor(t *testing.T) {
 	dg := dgMgr.Get("group-0")
 	require.NotNil(t, dg)
 	assert.Contains(t, dg.PeerIDs(), "node-3")
-	assert.NotContains(t, dg.PeerIDs(), "node-1")
+	assert.NotContains(t, dg.PeerIDs(), fromNode)
 
 	// node-3 node is live and has the latest entries
 	assert.Eventually(t, func() bool {

@@ -2,18 +2,12 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
 )
-
-// ErrLeadershipTransferred is returned by MoveReplica when fromNode is the local
-// node. Leadership has been handed off; the caller should abort the plan and let
-// the new leader re-propose.
-var ErrLeadershipTransferred = errors.New("data_group_executor: leadership transferred to peer — retry on new leader")
 
 // NodeAddressBook resolves cluster nodeIDs to their QUIC addresses.
 // *MetaFSM implements this interface.
@@ -43,10 +37,14 @@ type dataRaftNode interface {
 
 // DataGroupPlanExecutor implements GroupRebalancer via real Raft voter migration.
 //
-// MoveReplica algorithm:
+// MoveReplica algorithm (PR-K2 — single §4.3 atomic call):
 //
-//	AddLearner(toNode) → wait learner tracked → wait catch-up → PromoteToVoter →
-//	RemoveVoter(fromAddr) → ProposeShardGroup (MetaFSM) → DataGroupManager.Add
+//	ChangeMembership(adds=[toNode], removes=[fromAddr]) → ProposeShardGroup (MetaFSM) →
+//	DataGroupManager.Add
+//
+// Self-removal is handled by the joint commit-time step-down hook in
+// internal/raft/raft.go: jointPromoteCh closes BEFORE state=Follower, so
+// the caller wakes up with nil even when removing self.
 //
 // Must be called from the data-group Raft leader only.
 type DataGroupPlanExecutor struct {
@@ -89,8 +87,10 @@ func (e *DataGroupPlanExecutor) resolveAddr(nodeID string) (string, error) {
 	return "", fmt.Errorf("data_group_executor: node %q not found in address book", nodeID)
 }
 
-// MoveReplica migrates a Raft voter in groupID from fromNode to toNode.
-// fromNode must not be the local leader; leadership transfer is caller's responsibility.
+// MoveReplica migrates a Raft voter in groupID from fromNode to toNode using a
+// single §4.3 atomic ChangeMembership call. Self-removal is handled by the joint
+// commit-time step-down hook in raft.Node (jointPromoteCh closes BEFORE
+// state=Follower), so the caller wakes up with nil even when removing self.
 func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNode, toNode string) error {
 	dg := e.dgMgr.Get(groupID)
 	if dg == nil {
@@ -102,51 +102,34 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
 	}
 
-	// Self-removal guard: if we are the data-Raft leader and fromNode is this
-	// node, transferring ourselves out is unsafe mid-migration. Hand off
-	// leadership first; the new leader will pick up the plan on the next cycle.
-	if e.localNodeID != "" && fromNode == e.localNodeID {
-		if err := node.TransferLeadership(); err != nil {
-			return fmt.Errorf("data_group_executor: TransferLeadership before self-removal: %w", err)
-		}
-		return ErrLeadershipTransferred
-	}
-
 	// Pre-flight: fromNode must be a current voter so we don't accidentally
 	// evict an unrelated node if the rebalancer has a stale plan.
 	if !slices.Contains(dg.PeerIDs(), fromNode) {
 		return fmt.Errorf("data_group_executor: fromNode %q is not a voter in group %q", fromNode, groupID)
 	}
 
-	// Resolve toNode's QUIC address
 	toAddr, err := e.resolveAddr(toNode)
 	if err != nil {
 		return fmt.Errorf("data_group_executor: resolve toNode: %w", err)
 	}
-
-	// Steps 1-4 unified: AddVoterCtx performs learner-first internally
-	// (AddLearner → catch-up watcher → PromoteToVoter), bounded by catchUpTimeout.
-	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
-	defer cancel()
-	if err := node.AddVoterCtx(addCtx, toNode, toAddr); err != nil {
-		return fmt.Errorf("data_group_executor: AddVoter %s: %w", toNode, err)
-	}
-
-	// Step 5: Remove old voter (data-Raft uses QUIC address as voter key).
-	// NOTE: after this point the Raft membership has changed. If any subsequent
-	// step fails, the Raft log reflects the new membership but MetaFSM and the
-	// local DataGroupManager remain stale. Callers should retry MoveReplica or
-	// reconcile via a full rebalance pass; the operation is idempotent when
-	// toNode is already a voter and fromNode is already absent.
 	fromAddr, err := e.resolveAddr(fromNode)
 	if err != nil {
 		return fmt.Errorf("data_group_executor: resolve fromNode: %w", err)
 	}
-	if err := node.RemoveVoter(fromAddr); err != nil {
-		return fmt.Errorf("data_group_executor: RemoveVoter %s: %w", fromNode, err)
+
+	// Single atomic §4.3 call: learner-first add + joint propose + commit + leave.
+	// Self-removal: joint commit-time hook closes jointPromoteCh BEFORE state=Follower
+	// (verified ordering invariant in internal/raft/raft.go), so caller wakes up nil.
+	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+	defer cancel()
+	if err := node.ChangeMembership(addCtx,
+		[]raft.ServerEntry{{ID: toNode, Address: toAddr, Suffrage: raft.Voter}},
+		[]string{fromAddr}, // data-Raft uses address as peerKey
+	); err != nil {
+		return fmt.Errorf("data_group_executor: ChangeMembership: %w", err)
 	}
 
-	// Step 6: Build new peerIDs (replace fromNode with toNode)
+	// Build new peerIDs (replace fromNode with toNode).
 	oldPeers := dg.PeerIDs()
 	newPeers := make([]string, 0, len(oldPeers))
 	for _, p := range oldPeers {
@@ -156,12 +139,13 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 	}
 	newPeers = append(newPeers, toNode)
 
-	// Step 7: Persist new membership to MetaFSM
+	// Persist new membership to MetaFSM. Even after self-removal of the data-Raft
+	// leader, this node may still be meta-Raft leader; if not, ProposeShardGroup
+	// forwards or fails — caller can reconcile later.
 	if err := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
 		return fmt.Errorf("data_group_executor: ProposeShardGroup: %w", err)
 	}
 
-	// Step 8: Update local DataGroupManager (COW; Add overwrites by ID)
 	e.dgMgr.Add(NewDataGroupWithBackend(groupID, newPeers, dg.Backend()))
 	return nil
 }

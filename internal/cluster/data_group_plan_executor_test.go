@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // fakeRaftNode implements cluster.DataRaftNode for testing.
@@ -25,6 +26,12 @@ type fakeRaftNode struct {
 	addedLearner [2]string // [id, addr]
 	promoted     string
 	removed      string
+
+	// ChangeMembership tracking (PR-K2)
+	changeMembershipFn    func(ctx context.Context, adds []raft.ServerEntry, removes []string) error
+	changeMembershipCalls int
+	lastAdds              []raft.ServerEntry
+	lastRemoves           []string
 }
 
 func (f *fakeRaftNode) IsLeader() bool         { return f.isLeader }
@@ -90,6 +97,21 @@ func (f *fakeRaftNode) AddVoterCtx(ctx context.Context, id, addr string) error {
 	return f.PromoteToVoter(id)
 }
 
+func (f *fakeRaftNode) ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error {
+	f.changeMembershipCalls++
+	f.lastAdds = adds
+	f.lastRemoves = removes
+	if f.changeMembershipFn != nil {
+		return f.changeMembershipFn(ctx, adds, removes)
+	}
+	// Default: simulate catch-up wait when autoCatchup is false (parity with AddVoterCtx).
+	if !f.autoCatchup && len(adds) > 0 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
 type fakeAddrBook struct{ nodes []cluster.MetaNodeEntry }
 
 func (f *fakeAddrBook) Nodes() []cluster.MetaNodeEntry { return f.nodes }
@@ -133,10 +155,13 @@ func TestMoveReplica_HappyPath(t *testing.T) {
 	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
 	require.NoError(t, err)
 
-	assert.Equal(t, "node-3", fakeNode.addedLearner[0])
-	assert.Equal(t, "10.0.0.3:9003", fakeNode.addedLearner[1])
-	assert.Equal(t, "node-3", fakeNode.promoted)
-	assert.Equal(t, "10.0.0.0:9000", fakeNode.removed)
+	// PR-K2: single ChangeMembership call replaces the 5-step sequence.
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Len(t, fakeNode.lastAdds, 1)
+	assert.Equal(t, "node-3", fakeNode.lastAdds[0].ID)
+	assert.Equal(t, "10.0.0.3:9003", fakeNode.lastAdds[0].Address)
+	assert.Equal(t, raft.Voter, fakeNode.lastAdds[0].Suffrage)
+	assert.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
 
 	require.Len(t, sgUpdater.proposed, 1)
 	assert.Equal(t, "group-0", sgUpdater.proposed[0].ID)
@@ -162,21 +187,27 @@ func TestMoveReplica_GroupNotFound(t *testing.T) {
 	require.Contains(t, err.Error(), "not found")
 }
 
-func TestMoveReplica_AddLearnerError_Propagates(t *testing.T) {
-	addErr := errors.New("quorum unavailable")
+func TestMoveReplica_ChangeMembershipError_Propagates(t *testing.T) {
+	cmErr := errors.New("quorum unavailable")
 	fakeNode := &fakeRaftNode{
-		isLeader:     true,
-		committed:    5,
-		addLearnerFn: func(_, _ string) error { return addErr },
+		isLeader:    true,
+		committed:   5,
+		autoCatchup: true,
+		changeMembershipFn: func(_ context.Context, _ []raft.ServerEntry, _ []string) error {
+			return cmErr
+		},
 	}
-	nodes := []cluster.MetaNodeEntry{{ID: "node-3", Address: "10.0.0.3:9003"}}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
 	exec, _ := newTestExecutor(t, fakeNode, nodes)
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
 		[]string{"node-0"}, nil))
 
 	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
 	require.Error(t, err)
-	require.ErrorIs(t, err, addErr)
+	require.ErrorIs(t, err, cmErr)
 }
 
 func TestMoveReplica_FromNodeNotInGroup(t *testing.T) {
@@ -188,48 +219,6 @@ func TestMoveReplica_FromNodeNotInGroup(t *testing.T) {
 	err := exec.MoveReplica(context.Background(), "group-0", "node-99", "node-3")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not a voter")
-}
-
-func TestMoveReplica_PromoteToVoterError_Propagates(t *testing.T) {
-	promoteErr := errors.New("raft: not leader")
-	fakeNode := &fakeRaftNode{
-		isLeader:    true,
-		committed:   5,
-		autoCatchup: true,
-		promoteFn:   func(_ string) error { return promoteErr },
-	}
-	nodes := []cluster.MetaNodeEntry{
-		{ID: "node-0", Address: "10.0.0.0:9000"},
-		{ID: "node-3", Address: "10.0.0.3:9003"},
-	}
-	exec, _ := newTestExecutor(t, fakeNode, nodes)
-	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
-		[]string{"node-0"}, nil))
-
-	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
-	require.Error(t, err)
-	require.ErrorIs(t, err, promoteErr)
-}
-
-func TestMoveReplica_RemoveVoterError_Propagates(t *testing.T) {
-	removeErr := errors.New("raft: quorum lost")
-	fakeNode := &fakeRaftNode{
-		isLeader:    true,
-		committed:   5,
-		autoCatchup: true,
-		removeFn:    func(_ string) error { return removeErr },
-	}
-	nodes := []cluster.MetaNodeEntry{
-		{ID: "node-0", Address: "10.0.0.0:9000"},
-		{ID: "node-3", Address: "10.0.0.3:9003"},
-	}
-	exec, _ := newTestExecutor(t, fakeNode, nodes)
-	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
-		[]string{"node-0"}, nil))
-
-	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
-	require.Error(t, err)
-	require.ErrorIs(t, err, removeErr)
 }
 
 func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
@@ -250,34 +239,33 @@ func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
 	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
 	require.Error(t, err)
 	require.ErrorIs(t, err, sgErr)
-	// Raft voter change was committed; MetaFSM is stale — RemoveVoter must have run.
-	assert.Equal(t, "10.0.0.0:9000", fakeNode.removed)
+	// Raft voter change committed via ChangeMembership; MetaFSM is stale.
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
 }
 
-func TestMoveReplica_TransfersLeadershipWhenFromNodeIsLocal(t *testing.T) {
-	transferCalled := false
-	fakeNode := &fakeRaftNode{
-		isLeader:  true,
-		committed: 5,
-		transferFn: func() error {
-			transferCalled = true
-			return nil
-		},
-	}
+// PR-K2: Self-removal no longer requires TransferLeadership pre-step. The
+// joint commit-time step-down hook in raft.Node closes jointPromoteCh BEFORE
+// state=Follower, so the caller wakes up nil even when removing self.
+func TestMoveReplica_SelfRemoval_UsesChangeMembership(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 5, autoCatchup: true}
 	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
 		{ID: "node-3", Address: "10.0.0.3:9003"},
 	}
 	addrBook := &fakeAddrBook{nodes: nodes}
 	sgUpdater := &fakeSGUpdater{}
 	dgMgr := cluster.NewDataGroupManager()
-	exec := cluster.NewDataGroupPlanExecutorForTest("node-0", dgMgr, addrBook, sgUpdater, func(_ *cluster.DataGroup) cluster.DataRaftNode {
-		return fakeNode
-	})
+	// localNodeID == fromNode → self-removal scenario.
+	exec := cluster.NewDataGroupPlanExecutorForTest("node-0", dgMgr, addrBook, sgUpdater,
+		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0", []string{"node-0"}, nil))
 
 	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
-	require.ErrorIs(t, err, cluster.ErrLeadershipTransferred)
-	assert.True(t, transferCalled, "TransferLeadership must be called when fromNode is local")
+	require.NoError(t, err, "self-removal returns nil via joint commit-time hook")
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
+	require.Len(t, fakeNode.lastAdds, 1)
+	assert.Equal(t, "node-3", fakeNode.lastAdds[0].ID)
 }
 
 func TestMoveReplica_ContextCancelDuringCatchup(t *testing.T) {
@@ -286,7 +274,10 @@ func TestMoveReplica_ContextCancelDuringCatchup(t *testing.T) {
 		committed:   100,
 		autoCatchup: false,
 	}
-	nodes := []cluster.MetaNodeEntry{{ID: "node-3", Address: "10.0.0.3:9003"}}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
 	exec, _ := newTestExecutor(t, fakeNode, nodes)
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
 		[]string{"node-0"}, nil))

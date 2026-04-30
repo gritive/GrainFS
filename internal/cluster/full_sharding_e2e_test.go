@@ -208,3 +208,6 @@ func (a *fullShardDataNode) TransferLeadership() error      { return a.n.Transfe
 func (a *fullShardDataNode) AddVoterCtx(ctx context.Context, id, addr string) error {
 	return a.n.AddVoterCtx(ctx, id, addr)
 }
+func (a *fullShardDataNode) ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error {
+	return a.n.ChangeMembership(ctx, adds, removes)
+}
