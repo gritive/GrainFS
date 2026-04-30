@@ -274,3 +274,36 @@ func TestAddVoter_Idempotent_AlreadyLearner(t *testing.T) {
 	n.mu.Unlock()
 	require.False(t, mu, "learner must not be in config.Peers")
 }
+
+// TestInitLeaderState_InitializesLearnerReplicationState is a regression test
+// for a bug where a node elected leader after a learner had been added in a
+// previous term would have unset nextIndex/matchIndex for that learner.
+// Without this initialization, the catch-up watcher reads matchIndex=0 from
+// an absent map entry, replicateToAll's learner replication starts from
+// nextIdx=0 (snapshot mode unintentionally), and learner promotion stalls.
+func TestInitLeaderState_InitializesLearnerReplicationState(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"voter-1"})
+	n := NewNode(cfg)
+
+	// Simulate state after a learner was added in a previous term while this
+	// node was a follower (applyConfigChangeLocked added it to learnerIDs but
+	// did not touch nextIndex/matchIndex — those are leader-only state).
+	n.mu.Lock()
+	n.learnerIDs["learner-1"] = "learner-addr"
+	// Simulate some entries in the log
+	n.log = []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("e1")},
+		{Term: 1, Index: 2, Command: []byte("e2")},
+	}
+	n.firstIndex = 1
+
+	// Now this node becomes leader.
+	n.initLeaderState()
+	defer n.mu.Unlock()
+
+	// Both voter and learner must have nextIndex set to lastLogIdx+1.
+	expectedNext := uint64(3) // lastLogIdx (2) + 1
+	require.Equal(t, expectedNext, n.nextIndex["voter-1"], "voter nextIndex must be initialized")
+	require.Equal(t, expectedNext, n.nextIndex["learner-addr"], "learner nextIndex must be initialized")
+	require.Equal(t, uint64(0), n.matchIndex["learner-addr"], "learner matchIndex must start at 0")
+}

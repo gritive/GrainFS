@@ -983,6 +983,15 @@ func (n *Node) initLeaderState() {
 		// round completes (grace period = 3×HeartbeatTimeout from now).
 		n.checkQuorumAcks[peer] = now
 	}
+	// Initialize learner replication state too (learners receive AppendEntries
+	// for catch-up but don't count toward quorum). Without this, a new leader
+	// elected after a learner was added in a previous term would have unset
+	// nextIndex for that learner, breaking learner replication and the
+	// catch-up watcher.
+	for _, peerKey := range n.learnerIDs {
+		n.nextIndex[peerKey] = nextIdx
+		n.matchIndex[peerKey] = 0
+	}
 	// Track self's matchIndex
 	n.matchIndex[n.id] = n.lastLogIdx()
 	// When this node steps down via CheckQuorum it becomes a follower with
