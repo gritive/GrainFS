@@ -85,8 +85,66 @@ func (rcv *SnapshotMeta) ServersLength() int {
 	return 0
 }
 
+func (rcv *SnapshotMeta) JointPhase() int8 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetInt8(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *SnapshotMeta) MutateJointPhase(n int8) bool {
+	return rcv._tab.MutateInt8Slot(10, n)
+}
+
+func (rcv *SnapshotMeta) JointOldVoters(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *SnapshotMeta) JointOldVotersLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *SnapshotMeta) JointNewVoters(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *SnapshotMeta) JointNewVotersLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *SnapshotMeta) JointEnterIndex() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *SnapshotMeta) MutateJointEnterIndex(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(16, n)
+}
+
 func SnapshotMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(7)
 }
 func SnapshotMetaAddIndex(builder *flatbuffers.Builder, index uint64) {
 	builder.PrependUint64Slot(0, index, 0)
@@ -99,6 +157,24 @@ func SnapshotMetaAddServers(builder *flatbuffers.Builder, servers flatbuffers.UO
 }
 func SnapshotMetaStartServersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func SnapshotMetaAddJointPhase(builder *flatbuffers.Builder, jointPhase int8) {
+	builder.PrependInt8Slot(3, jointPhase, 0)
+}
+func SnapshotMetaAddJointOldVoters(builder *flatbuffers.Builder, jointOldVoters flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(jointOldVoters), 0)
+}
+func SnapshotMetaStartJointOldVotersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func SnapshotMetaAddJointNewVoters(builder *flatbuffers.Builder, jointNewVoters flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(jointNewVoters), 0)
+}
+func SnapshotMetaStartJointNewVotersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func SnapshotMetaAddJointEnterIndex(builder *flatbuffers.Builder, jointEnterIndex uint64) {
+	builder.PrependUint64Slot(6, jointEnterIndex, 0)
 }
 func SnapshotMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

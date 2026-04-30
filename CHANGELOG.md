@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.6.16] — 2026-04-30
+
+### Added
+
+- **raft (Sub-project 2 PR-J1)**: §4.3 joint consensus wire format 활성화. `JointConfChangeEntry` FBS table + `JointOp` enum 추가 (`ServerEntry` 재사용). `LogEntryType=JointConfChange (2)` slot 활성. `SnapshotMeta`에 `joint_phase` / `joint_old_voters` / `joint_new_voters` / `joint_enter_index` 4 필드 추가. PR-A `ConfChangeEntry.new_config`/`old_config`은 `(deprecated)` 표시 (mixed-version 윈도우 종료 후 별도 cleanup PR로 제거).
+- **raft**: `Node`에 jointPhase/jointOldVoters/jointNewVoters/jointEnterIndex/jointLeaveProposed/jointPromoteCh 필드. `internal/raft/joint.go`에 `encodeJointConfChange`/`decodeJointConfChange` + roundtrip 테스트 3개.
+
+### Notes
+
+- 본 PR 머지 시점에 새 entry는 propose되지 않음 — parsing/serialization layer만 활성. 시스템 동작 변화 없음.
+
 ## [0.0.6.15] — 2026-04-30
 
 ### Tests

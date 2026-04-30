@@ -291,6 +291,14 @@ type Node struct {
 	initialPeers           []string // bootstrap peers; used to rebuild config after log truncation
 	mixedVersion           bool     // true = cluster has nodes on different versions; blocks membership changes
 
+	// §4.3 joint consensus state (Sub-project 2)
+	jointPhase         jointPhase    // current phase; JointNone unless C_old+new is committed
+	jointOldVoters     []string      // C_old voter ids; valid only when jointPhase == JointEntering
+	jointNewVoters     []string      // C_new voter ids; valid only when jointPhase == JointEntering
+	jointEnterIndex    uint64        // log index of committed JointEnter entry; 0 = none
+	jointLeaveProposed bool          // leader-only idempotency flag for checkJointAdvance
+	jointPromoteCh     chan struct{} // closed by every node's apply path on JointLeave commit; wakes proposeJointConfChangeWait callers
+
 	// log GC tracking (Phase 14d)
 	lastLogGC time.Time
 	gcRunning atomic.Bool // prevents overlapping GC goroutines
