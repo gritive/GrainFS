@@ -109,6 +109,22 @@ func TestMigrationExecutor_ECMode_WithShardCounter_AllShards(t *testing.T) {
 	assert.Equal(t, []int{0, 1, 2}, mover.movedShards)
 }
 
+// TestMigrationExecutor_ShardCounter_ZeroFallback: SetShardCounter returning 0 must
+// fall back to numShards (not loop zero times, skipping migration entirely).
+func TestMigrationExecutor_ShardCounter_ZeroFallback(t *testing.T) {
+	t.Parallel()
+	mover := &fakeMover{shards: map[int][]byte{0: []byte("data"), 1: []byte("d1"), 2: []byte("p0")}}
+	fr := &fakeRaft{}
+	exec := NewMigrationExecutor(mover, fr, 3)
+	fr.exec = exec
+	exec.SetShardCounter(func(_, _, _ string) int { return 0 }) // 0 → fallback to numShards=3
+	err := exec.Execute(context.Background(), MigrationTask{
+		Bucket: "bkt", Key: "obj", VersionID: "v1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []int{0, 1, 2}, mover.movedShards, "numShards=3 fallback: all 3 shards must be moved")
+}
+
 // TestMigrationExecutor_SweepLoopExitsOnStop verifies that Start() launches the
 // sweep goroutine and Stop() terminates it via the quit channel.
 func TestMigrationExecutor_SweepLoopExitsOnStop(t *testing.T) {
