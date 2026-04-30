@@ -17,8 +17,7 @@ func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 	return &ForwardReceiver{groups: groups}
 }
 
-// Register installs this ForwardReceiver as the handler for StreamProposeGroupForward (0x08) on shardSvc.
-// The 0x08 stream type is used for intra-cluster forwarding of bucket-scoped operations.
+// Register installs the 0x08 handler on shardSvc.
 func (r *ForwardReceiver) Register(shardSvc *ShardService) {
 	shardSvc.RegisterHandler(transport.StreamProposeGroupForward, r.Handle)
 }
@@ -92,10 +91,7 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 		return statusReply(mapErrorToStatus(err))
 	}
 	defer rc.Close()
-	body, err := io.ReadAll(rc)
-	if err != nil {
-		return statusReply(raftpb.ForwardStatusInternal)
-	}
+	body, _ := io.ReadAll(rc)
 	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
 }
 
