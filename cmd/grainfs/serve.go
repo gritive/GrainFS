@@ -706,6 +706,40 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
 
+	// v0.0.7.1 PR-D: Live multi-raft routing — ClusterCoordinator + ForwardSender/Receiver.
+	// ClusterCoordinator implements storage.Backend and routes bucket-scoped ops to the
+	// correct group leader via ForwardSender. 0x08 handler (ForwardReceiver) receives
+	// forwarded calls on voter nodes and dispatches to local GroupBackend.
+	forwardDialer := func(peer string, payload []byte) ([]byte, error) {
+		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+		reply, err := quicTransport.Call(ctx, peer, msg)
+		if err != nil {
+			return nil, err
+		}
+		return reply.Payload, nil
+	}
+
+
+
+
+
+
+
+	forwardSender := cluster.NewForwardSender(forwardDialer)
+	forwardReceiver := cluster.NewForwardReceiver(dgMgr)
+	forwardReceiver.Register(shardSvc)
+
+	clusterCoord := cluster.NewClusterCoordinator(
+		distBackend,    // base for cluster-wide ops (CreateBucket, etc.)
+		dgMgr,          // local owned groups (self-leader shortcut)
+		clusterRouter,  // bucket → group lookup
+		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
+		raftAddr,       // selfID for leader check
+	).WithForwardSender(forwardSender)
+
+	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD.
+	backend = clusterCoord
+	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.
