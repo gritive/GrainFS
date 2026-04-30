@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.6.8] — 2026-04-30
+
+### Fixed
+
+- **raft**: `PreVote`/`LeaderTransfer` 필드가 QUIC wire codec에서 유실되던 버그 수정 — FlatBuffers `RequestVoteArgs` 스키마에 `pre_vote:bool`/`leader_transfer:bool` 추가, 인코더/디코더 배선. PreVote 손실 시 pre-vote 보호 무효화, LeaderTransfer 손실 시 leader transfer 선거 중단 되던 문제 해결.
+
+### Tests
+
+- **raft**: `TestRoundTrip_AllWireStructs` — 모든 wire struct의 reflect.DeepEqual round-trip 검증. 스키마에 없는 필드는 이 테스트에서 즉시 감지.
+- **raft**: `RequestVoteArgs_ZeroFlags` subtest — FlatBuffers default-value omission 커버리지. false bool은 버퍼에 기록되지 않고 vtable default로 반환됨을 검증.
+
 ## [0.0.6.7] — 2026-04-30
 
 ### Added
@@ -67,7 +78,6 @@
 
 - `internal/vfs/vfs.go` `grainFile.ReadAt`: `mu sync.Mutex` 추가로 동시 ReadAt에서 `rc`/`pos` 보호 (`io.ReaderAt` 계약 준수). FUSE-over-S3 도구가 발행하는 병렬 range GET 요청에 안전.
 
->>>>>>> origin/master
 ## [0.0.6.3] — 2026-04-30
 
 ### Added

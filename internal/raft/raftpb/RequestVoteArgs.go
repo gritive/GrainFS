@@ -85,8 +85,32 @@ func (rcv *RequestVoteArgs) MutateLastLogTerm(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(10, n)
 }
 
+func (rcv *RequestVoteArgs) PreVote() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *RequestVoteArgs) MutatePreVote(n bool) bool {
+	return rcv._tab.MutateBoolSlot(12, n)
+}
+
+func (rcv *RequestVoteArgs) LeaderTransfer() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *RequestVoteArgs) MutateLeaderTransfer(n bool) bool {
+	return rcv._tab.MutateBoolSlot(14, n)
+}
+
 func RequestVoteArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(6)
 }
 func RequestVoteArgsAddTerm(builder *flatbuffers.Builder, term uint64) {
 	builder.PrependUint64Slot(0, term, 0)
@@ -99,6 +123,12 @@ func RequestVoteArgsAddLastLogIndex(builder *flatbuffers.Builder, lastLogIndex u
 }
 func RequestVoteArgsAddLastLogTerm(builder *flatbuffers.Builder, lastLogTerm uint64) {
 	builder.PrependUint64Slot(3, lastLogTerm, 0)
+}
+func RequestVoteArgsAddPreVote(builder *flatbuffers.Builder, preVote bool) {
+	builder.PrependBoolSlot(4, preVote, false)
+}
+func RequestVoteArgsAddLeaderTransfer(builder *flatbuffers.Builder, leaderTransfer bool) {
+	builder.PrependBoolSlot(5, leaderTransfer, false)
 }
 func RequestVoteArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

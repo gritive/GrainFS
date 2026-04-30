@@ -54,6 +54,8 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		pb.RequestVoteArgsAddCandidateId(b, cidOff)
 		pb.RequestVoteArgsAddLastLogIndex(b, args.LastLogIndex)
 		pb.RequestVoteArgsAddLastLogTerm(b, args.LastLogTerm)
+		pb.RequestVoteArgsAddPreVote(b, args.PreVote)
+		pb.RequestVoteArgsAddLeaderTransfer(b, args.LeaderTransfer)
 		root := pb.RequestVoteArgsEnd(b)
 		return fbFinishRPC(b, root), nil
 
@@ -198,10 +200,12 @@ func decodeRequestVoteArgs(data []byte) (args *RequestVoteArgs, err error) {
 	}()
 	a := pb.GetRootAsRequestVoteArgs(data, 0)
 	return &RequestVoteArgs{
-		Term:         a.Term(),
-		CandidateID:  string(a.CandidateId()),
-		LastLogIndex: a.LastLogIndex(),
-		LastLogTerm:  a.LastLogTerm(),
+		Term:           a.Term(),
+		CandidateID:    string(a.CandidateId()),
+		LastLogIndex:   a.LastLogIndex(),
+		LastLogTerm:    a.LastLogTerm(),
+		PreVote:        a.PreVote(),
+		LeaderTransfer: a.LeaderTransfer(),
 	}, nil
 }
 
