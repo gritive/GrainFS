@@ -511,3 +511,29 @@ func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T
 	require.Equal(t, []string{"n1", "n2", "n4", "n5"}, n.jointNewVoters)
 	require.False(t, n.jointLeaveProposed)
 }
+
+// TestRebuildConfigFromLog_JointLeavePromotionClearsLearners — Sub-project 3
+// prereq: replay path mirror of TestApply_JointLeave_LearnerPromotionClearsLearnerIDs.
+func TestRebuildConfigFromLog_JointLeavePromotionClearsLearners(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n1", "n2", "n3"}
+
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddLearner, "n4", "n4")},
+		{Index: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+		})},
+		{Index: 3, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+		})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.NotContains(t, n.learnerIDs, "n4",
+		"replay must clear promoted learners from learnerIDs")
+	require.Contains(t, n.config.Peers, "n4", "n4 should be a voter in config.Peers")
+}

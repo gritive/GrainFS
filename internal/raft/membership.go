@@ -435,6 +435,10 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				jEnterIndex = entry.Index
 			case JointOpLeave:
 				peers = peersExcludingSelf(jc.NewServers, n.id)
+				// Mirror apply path: clear promoted learners from the replay map.
+				for _, s := range jc.NewServers {
+					delete(learnerAddrs, s.ID)
+				}
 				jPhase = JointNone
 				jOldVoters = nil
 				jNewVoters = nil
