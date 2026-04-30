@@ -1,0 +1,131 @@
+// FlatBuffers schema for v0.0.7.0 Live Multi-Raft Sharding data plane routing.
+// Wire stream: type=0x08 (StreamProposeGroupForward), payload = single
+// transport.Message frame:
+//   [4B BE groupIDLen][groupID bytes][1B opcode][4B BE argsLen][FBS args]
+// Body bytes (PutObject/UploadPart) live INSIDE FBS args. 5 MB hard cap.
+// Regenerate: make fbs
+
+namespace raftpb;
+
+enum ForwardOp : byte {
+  PutObject = 1,
+  GetObject = 2,
+  HeadObject = 3,
+  DeleteObject = 4,
+  ListObjects = 5,
+  WalkObjects = 6,
+  CreateMultipartUpload = 7,
+  UploadPart = 8,
+  CompleteMultipartUpload = 9,
+  AbortMultipartUpload = 10
+}
+
+table PutObjectArgs {
+  bucket:string;
+  key:string;
+  content_type:string;
+  body:[ubyte];
+}
+
+table GetObjectArgs {
+  bucket:string;
+  key:string;
+}
+
+table HeadObjectArgs {
+  bucket:string;
+  key:string;
+}
+
+table DeleteObjectArgs {
+  bucket:string;
+  key:string;
+}
+
+table ListObjectsArgs {
+  bucket:string;
+  prefix:string;
+  max_keys:int32;
+}
+
+table WalkObjectsArgs {
+  bucket:string;
+  prefix:string;
+}
+
+table CreateMultipartUploadArgs {
+  bucket:string;
+  key:string;
+  content_type:string;
+}
+
+table UploadPartArgs {
+  bucket:string;
+  key:string;
+  upload_id:string;
+  part_number:int32;
+  body:[ubyte];
+}
+
+table PartRef {
+  part_number:int32;
+  etag:string;
+}
+
+table CompleteMultipartUploadArgs {
+  bucket:string;
+  key:string;
+  upload_id:string;
+  parts:[PartRef];
+}
+
+table AbortMultipartUploadArgs {
+  bucket:string;
+  key:string;
+  upload_id:string;
+}
+
+enum ForwardStatus : byte {
+  OK = 0,
+  NotLeader = 1,
+  NotVoter = 2,
+  NoSuchBucket = 3,
+  NoSuchKey = 4,
+  EntityTooLarge = 5,
+  Internal = 99
+}
+
+table ForwardObjectMeta {
+  bucket:string;
+  key:string;
+  size:long;
+  etag:string;
+  content_type:string;
+  modified_unix_ms:long;
+  version_id:string;
+}
+
+table ForwardPartMeta {
+  part_number:int32;
+  etag:string;
+  size:long;
+}
+
+table ForwardMultipartUploadMeta {
+  bucket:string;
+  key:string;
+  upload_id:string;
+}
+
+table ForwardReply {
+  status:ForwardStatus;
+  leader_hint:string;
+  // op-specific reply fields (one populated per op):
+  object:ForwardObjectMeta;          // PutObject, HeadObject (no body)
+  objects:[ForwardObjectMeta];       // ListObjects, WalkObjects
+  read_body:[ubyte];                 // GetObject (≤5 MB)
+  upload:ForwardMultipartUploadMeta; // CreateMultipartUpload
+  part:ForwardPartMeta;              // UploadPart
+}
+
+root_type ForwardReply;
