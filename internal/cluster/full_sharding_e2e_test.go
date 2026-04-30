@@ -155,15 +155,19 @@ func TestFullSharding_E2E(t *testing.T) {
 		return meta0.FSM().ActivePlanID() == ""
 	}, 5*time.Second, 50*time.Millisecond, "activePlanID must be cleared")
 
-	// 마이그레이션 후에도 data-Raft 쓰기 가능
+	// 마이그레이션 후에도 data-Raft 쓰기 가능. dataLeader가 제거 대상이었던 경우
+	// self-removal로 step down했으므로 새 leader 재획득.
+	require.Eventually(t, func() bool { return cl.CurrentLeader() != nil },
+		5*time.Second, 50*time.Millisecond, "data-Raft leader must be elected post-migration")
+	postLeader := cl.CurrentLeader()
 	for i := 0; i < 5; i++ {
-		_, err := dataLeader.ProposeWait(ctx, []byte("post-migration"))
+		_, err := postLeader.ProposeWait(ctx, []byte("post-migration"))
 		require.NoError(t, err)
 	}
 
 	// node-3이 commitIndex를 따라잡음
 	require.Eventually(t, func() bool {
-		return node3.CommittedIndex() == dataLeader.CommittedIndex()
+		return node3.CommittedIndex() == postLeader.CommittedIndex()
 	}, 10*time.Second, 100*time.Millisecond, "node-3 must catch up to leader commitIndex")
 
 	// MetaFSM에 새 멤버십 반영
