@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.6.11] — 2026-04-30
+
+### Fixed
+
+- **raft**: 스냅샷에 클러스터 멤버십(servers)을 저장하지 않아 재시작 후 멤버십이 초기화되던 §2.3 silent drift 버그 수정 — `BadgerLogStore.SaveSnapshot`이 `SnapshotMeta.servers`를 인코딩하지 않아 `LoadSnapshot` 시 nil이 반환되었고, follower 재시작 시 `restoreFromStore`가 cluster config를 복원하지 못해 quorum 계산이 잘못되었음.
+- **raft**: `HandleInstallSnapshot`이 `Server.Suffrage`를 무시하고 NonVoter를 voter로 등록하던 버그 수정 — `restoreConfigFromServers` 헬퍼로 Voter는 `config.Peers`로, NonVoter는 `learnerIDs`로 분리.
+- **raft**: 기동 시 `restoreFromStore`가 스냅샷 index/term을 `lastApplied`/`commitIndex`에 반영하지 않아 이미 스냅샷된 엔트리를 재적용하던 버그 수정.
+
+### Changed
+
+- **raft**: `LogStore.SaveSnapshot`/`LoadSnapshot` API를 `Snapshot` struct로 통일 (index/term/data/servers).
+- **raft**: `SnapshotManager.MaybeTrigger` 시그니처에 `servers []Server` 파라미터 추가 — caller가 `Configuration().Servers`를 전달.
+- **raft**: `currentConfigServers()`/`Configuration()`이 learner(NonVoter)를 포함하도록 수정 — 스냅샷이 전체 멤버십 캡처.
+- **raft**: `rebuildConfigFromLog`에 `startIndex`/`basePeers`/`baseLearners` 파라미터 추가 — 스냅샷 이후 로그만 재생 가능.
+
+### Added
+
+- **raft**: `restoreConfigFromServers([]Server, selfID)` 헬퍼 — Suffrage 인식, self 필터링, 두 복원 경로(`HandleInstallSnapshot`, `restoreFromStore`)에서 공유.
+
+### Tests
+
+- **raft**: `TestSaveLoadSnapshot_WithServers` — servers 필드 FBS round-trip (3개, NonVoter 포함).
+- **raft**: `TestSaveLoadSnapshot_Legacy` — servers=nil 레거시 포맷 호환.
+- **raft**: `TestRestoreConfigFromServers_VoterLearnerSplit` — Voter/NonVoter 분리 + self 필터.
+- **raft**: `TestRestoreConfigFromServers_EmptyServers` — empty input 처리.
+- **raft**: `TestRebuildConfigFromLog_WithBase` — basePeers + 로그 항목 합산.
+- **raft**: `TestRebuildConfigFromLog_SkipsBeforeStartIndex` — startIndex 이전 항목 스킵.
+- **raft**: `TestHandleInstallSnapshot_SuffrageFix` — NonVoter → learnerIDs.
+- **raft**: `TestRestoreFromStore_LoadsSnapshotServers` — 기동 시 스냅샷 서버 + lastApplied/commitIndex/term 복원.
+- **raft**: `TestRestoreFromStore_LegacySnapshot` — legacy snapshot (servers=nil) fallback 경로.
+- **raft**: `TestSnapshotPreservesClusterMembership` — 3-노드 클러스터 §2.3 end-to-end 통합 테스트.
+
 ## [0.0.6.10] — 2026-04-30
 
 ### Fixed
