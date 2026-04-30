@@ -284,3 +284,153 @@ func TestRestoreFromStore_LoadsSnapshotServers(t *testing.T) {
 	assert.Equal(t, uint64(2), node.currentTerm, "term must be restored from snapshot")
 	node.mu.Unlock()
 }
+
+// TestSnapshotPreservesClusterMembership verifies the full §2.3 fix:
+// after a snapshot is taken and a follower restarts, the follower recovers
+// its peer list from the snapshot (not from initial peers).
+func TestSnapshotPreservesClusterMembership(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test skipped in short mode")
+	}
+
+	ctx := context.Background()
+	const numNodes = 3
+
+	dirs := make([]string, numNodes)
+	stores := make([]*BadgerLogStore, numNodes)
+	for i := range dirs {
+		dirs[i] = t.TempDir()
+		var err error
+		stores[i], err = NewBadgerLogStore(dirs[i])
+		require.NoError(t, err)
+	}
+
+	transports := make([]*transport.QUICTransport, numNodes)
+	for i := range transports {
+		transports[i] = transport.NewQUICTransport()
+		require.NoError(t, transports[i].Listen(ctx, "127.0.0.1:0"))
+	}
+	addrs := make([]string, numNodes)
+	for i, tr := range transports {
+		addrs[i] = tr.LocalAddr()
+	}
+
+	nodes := make([]*Node, numNodes)
+	for i := 0; i < numNodes; i++ {
+		peers := make([]string, 0, numNodes-1)
+		for j := 0; j < numNodes; j++ {
+			if i != j {
+				peers = append(peers, addrs[j])
+			}
+		}
+		cfg := Config{
+			ID:               addrs[i],
+			Peers:            peers,
+			ElectionTimeout:  200 * time.Millisecond,
+			HeartbeatTimeout: 50 * time.Millisecond,
+		}
+		nodes[i] = NewNode(cfg, stores[i])
+	}
+
+	for i := range transports {
+		for j := range transports {
+			if i != j {
+				require.NoError(t, transports[i].Connect(ctx, addrs[j]))
+			}
+		}
+	}
+
+	rpcs := make([]*QUICRPCTransport, numNodes)
+	for i := range nodes {
+		rpcs[i] = NewQUICRPCTransport(transports[i], nodes[i])
+		rpcs[i].SetTransport()
+	}
+
+	t.Cleanup(func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+		for _, tr := range transports {
+			tr.Close()
+		}
+		for _, s := range stores {
+			s.Close()
+		}
+	})
+
+	for _, n := range nodes {
+		n.Start()
+	}
+	cluster := &quicCluster{nodes: nodes, transports: transports, rpcs: rpcs}
+	leader := cluster.waitForLeader(5 * time.Second)
+	require.NotNil(t, leader, "cluster must elect a leader")
+
+	leaderIdx := -1
+	for i, n := range nodes {
+		if n.State() == Leader {
+			leaderIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, leaderIdx, 0, "leader index must be found")
+
+	snapServers := nodes[leaderIdx].Configuration().Servers
+	require.Len(t, snapServers, numNodes, "leader config must have all 3 nodes")
+
+	snapToSave := Snapshot{
+		Index:   5,
+		Term:    leader.Term(),
+		Data:    []byte("test-state"),
+		Servers: snapServers,
+	}
+	require.NoError(t, stores[leaderIdx].SaveSnapshot(snapToSave))
+
+	followerIdx := -1
+	for i, n := range nodes {
+		if n.State() != Leader {
+			followerIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, followerIdx, 0, "follower must exist")
+
+	require.NoError(t, stores[followerIdx].SaveSnapshot(Snapshot{
+		Index:   5,
+		Term:    leader.Term(),
+		Data:    []byte("test-state"),
+		Servers: snapServers,
+	}))
+
+	nodes[followerIdx].Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	followerAddr := addrs[followerIdx]
+	allOtherPeers := make([]string, 0, numNodes-1)
+	for j, a := range addrs {
+		if j != followerIdx {
+			allOtherPeers = append(allOtherPeers, a)
+		}
+	}
+	restartCfg := Config{
+		ID:               followerAddr,
+		Peers:            nil, // intentionally empty — must restore from snapshot
+		ElectionTimeout:  200 * time.Millisecond,
+		HeartbeatTimeout: 50 * time.Millisecond,
+	}
+	restartedNode := NewNode(restartCfg, stores[followerIdx])
+	nodes[followerIdx] = restartedNode
+	rpcs[followerIdx] = NewQUICRPCTransport(transports[followerIdx], restartedNode)
+	rpcs[followerIdx].SetTransport()
+	restartedNode.Start()
+
+	time.Sleep(300 * time.Millisecond)
+
+	cfg := restartedNode.Configuration()
+	peerIDs := make(map[string]bool)
+	for _, s := range cfg.Servers {
+		peerIDs[s.ID] = true
+	}
+	for _, addr := range allOtherPeers {
+		assert.True(t, peerIDs[addr], "restarted follower must know peer %s from snapshot", addr)
+	}
+}
