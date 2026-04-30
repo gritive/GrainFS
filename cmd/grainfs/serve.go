@@ -55,6 +55,7 @@ func init() {
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
 	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "target max data shards k; actual k scales with node count (EffectiveConfig, 3+ nodes)")
 	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "target max parity shards m; actual m=max(1,round(n×m/(k+m)))")
+	serveCmd.Flags().Int("seed-groups", 0, "number of data groups to seed at bootstrap (0 = auto: max(8, (cluster_size)*4) — covers future cluster expansion)")
 	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
@@ -357,15 +358,35 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Start() returns before replay finishes; onBucketAssigned fires live updates.
 	clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
 
-	// Propose initial shard group group-0 asynchronously.
+	// Propose initial shard groups asynchronously (idempotent: ProposeShardGroup is leader-only;
+	// non-leader는 NotLeader 에러를 리턴하고 다음 leader가 take-over).
+	//
+	// Default 0 = auto-derived from cluster size: max(8, (1+len(peers))*4).
+	// Solo(peers=0)=8, 5-node=20, 10-node=40 — 클러스터 확장 시 sharding 헤드룸 확보.
+	// 명시값 ≥1 = 그 값 그대로, <0 = 1로 클램프.
+	seedGroups, _ := cmd.Flags().GetInt("seed-groups")
+	if seedGroups == 0 {
+		clusterSize := 1 + len(peers)
+		seedGroups = clusterSize * 4
+		if seedGroups < 8 {
+			seedGroups = 8
+		}
+	} else if seedGroups < 1 {
+		seedGroups = 1
+	}
 	go func() {
-		sgCtx, sgCancel := context.WithTimeout(ctx, 30*time.Second)
-		defer sgCancel()
-		if err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
-			ID:      "group-0",
-			PeerIDs: append([]string{nodeID}, peers...),
-		}); err != nil {
-			log.Warn().Err(err).Msg("initial shard group propose failed (non-fatal, PR-D에서 재시도)")
+		allPeers := append([]string{nodeID}, peers...)
+		for i := 0; i < seedGroups; i++ {
+			groupID := fmt.Sprintf("group-%d", i)
+			sgCtx, sgCancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
+				ID:      groupID,
+				PeerIDs: allPeers,
+			}); err != nil {
+				// group-0 외 그룹은 leader에서만 성공. follower의 NotLeader 실패는 정상.
+				log.Debug().Str("group", groupID).Err(err).Msg("seed shard group propose failed (non-fatal)")
+			}
+			sgCancel()
 		}
 	}()
 
