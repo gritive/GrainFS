@@ -71,11 +71,12 @@ func TestJointConfChangeEntry_PreservesNonVoter(t *testing.T) {
 // avoided — these tests exercise only in-memory voter-set arithmetic.
 func jointTestNode(id string) *Node {
 	return &Node{
-		id:               id,
-		matchIndex:       make(map[string]uint64),
-		nextIndex:        make(map[string]uint64),
-		learnerIDs:       make(map[string]string),
-		learnerPromoteCh: make(map[string]chan struct{}),
+		id:                   id,
+		matchIndex:           make(map[string]uint64),
+		nextIndex:            make(map[string]uint64),
+		learnerIDs:           make(map[string]string),
+		learnerPromoteCh:     make(map[string]chan struct{}),
+		jointManagedLearners: make(map[string]struct{}),
 	}
 }
 
@@ -232,6 +233,91 @@ func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
 	default:
 	}
 	require.NotNil(t, n.jointPromoteCh)
+}
+
+// TestChangeMembership_NoOp_NilArgs — empty diff is a no-op success.
+func TestChangeMembership_NoOp_NilArgs(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+
+	err := n.ChangeMembership(context.Background(), nil, nil)
+	require.NoError(t, err)
+
+	n.mu.Lock()
+	phase := n.jointPhase
+	n.mu.Unlock()
+	require.Equal(t, JointNone, phase)
+}
+
+func TestChangeMembership_NotLeader_ReturnsErrNotLeader(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Follower
+
+	err := n.ChangeMembership(context.Background(), nil, []string{"n2"})
+	require.ErrorIs(t, err, ErrNotLeader)
+}
+
+func TestChangeMembership_JointInFlight_ReturnsErrConfChangeInProgress(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+	n.jointPhase = JointEntering
+
+	err := n.ChangeMembership(context.Background(), nil, []string{"n2"})
+	require.ErrorIs(t, err, ErrConfChangeInProgress)
+}
+
+// TestSetChangeMembershipDefaults_PersistsAcrossCalls — Sub-project 3 PR-K1.
+func TestSetChangeMembershipDefaults_PersistsAcrossCalls(t *testing.T) {
+	n := jointTestNode("n1")
+	n.SetChangeMembershipDefaults(ChangeMembershipOpts{CatchUpTimeout: 5 * time.Second})
+
+	n.mu.Lock()
+	got := n.effectiveChangeMembershipOpts()
+	n.mu.Unlock()
+
+	require.Equal(t, 5*time.Second, got.CatchUpTimeout)
+}
+
+func TestEffectiveChangeMembershipOpts_DefaultTimeout(t *testing.T) {
+	n := jointTestNode("n1")
+
+	n.mu.Lock()
+	got := n.effectiveChangeMembershipOpts()
+	n.mu.Unlock()
+
+	require.Equal(t, 30*time.Second, got.CatchUpTimeout)
+}
+
+// TestApply_JointLeave_LearnerPromotionClearsLearnerIDs — Sub-project 3 prereq.
+// When JointLeave commits with C_new containing IDs that were previously
+// learners, those IDs become voters; learnerIDs must be cleaned to keep the
+// state machine invariant (a server is voter or learner, never both).
+func TestApply_JointLeave_LearnerPromotionClearsLearnerIDs(t *testing.T) {
+	n := jointTestNode("n1")
+	n.learnerIDs["n4"] = "n4"
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n3", "n4"}
+	n.jointEnterIndex = 5
+
+	entry := LogEntry{
+		Index: 6,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op: JointOpLeave,
+			NewServers: []ServerEntry{
+				{ID: "n1", Address: "n1", Suffrage: Voter},
+				{ID: "n2", Address: "n2", Suffrage: Voter},
+				{ID: "n3", Address: "n3", Suffrage: Voter},
+				{ID: "n4", Address: "n4", Suffrage: Voter},
+			},
+		}),
+	}
+	n.applyJointConfChangeLocked(entry)
+
+	require.NotContains(t, n.learnerIDs, "n4",
+		"learnerIDs must be cleaned of IDs promoted to voter via JointLeave")
+	require.Contains(t, n.config.Peers, "n4", "config.Peers includes promoted voter")
 }
 
 func TestCheckJointAdvance_LogLookaheadIdempotency(t *testing.T) {
@@ -457,6 +543,210 @@ func TestJoint_E2E_RemoveOne(t *testing.T) {
 	require.Len(t, peers, 2, "leader sees 3-node cluster minus self after removal")
 }
 
+// TestJointPhase_None_ReturnsZeroes — Sub-project 3 PR-K1.
+func TestJointPhase_None_ReturnsZeroes(t *testing.T) {
+	n := jointTestNode("n1")
+	phase, oldV, newV, idx := n.JointPhase()
+	require.Equal(t, JointNone, phase)
+	require.Empty(t, oldV)
+	require.Empty(t, newV)
+	require.Zero(t, idx)
+}
+
+func TestJointPhase_Entering_ReportsAllFour(t *testing.T) {
+	n := jointTestNode("n1")
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n4"}
+	n.jointEnterIndex = 42
+
+	phase, oldV, newV, idx := n.JointPhase()
+	require.Equal(t, JointEntering, phase)
+	require.Equal(t, []string{"n1", "n2", "n3"}, oldV)
+	require.Equal(t, []string{"n1", "n2", "n4"}, newV)
+	require.Equal(t, uint64(42), idx)
+}
+
+// TestConfiguration_JointEntering_ReturnsUnion — Sub-project 3 PR-K1.
+func TestConfiguration_JointEntering_ReturnsUnion(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n4"} // n3 removed, n4 added
+
+	cfg := n.Configuration()
+
+	ids := make([]string, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		ids = append(ids, s.ID)
+		require.Equal(t, Voter, s.Suffrage, "all dual-quorum members should be Voter")
+	}
+	require.ElementsMatch(t, []string{"n1", "n2", "n3", "n4"}, ids,
+		"during JointEntering, return union of C_old and C_new")
+}
+
+// TestChangeMembership_CatchUpTimeout_AttemptsCleanup — Sub-project 3 PR-K1.
+// Tight catch-up timeout + low threshold so the fake unreachable learner
+// times out. defer cleanup must clear jointManagedLearners.
+func TestChangeMembership_CatchUpTimeout_AttemptsCleanup(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader)
+
+	// Drive commitIndex up so threshold check is non-trivial.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, leader.Propose([]byte("entry")))
+	}
+	leader.SetLearnerCatchupThreshold(1) // tight; fake learner can't catch up
+	leader.SetChangeMembershipDefaults(ChangeMembershipOpts{CatchUpTimeout: 200 * time.Millisecond})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := leader.ChangeMembership(ctx,
+		[]ServerEntry{{ID: "fake-unreachable", Address: "127.0.0.1:65531", Suffrage: Voter}},
+		nil,
+	)
+	require.ErrorIs(t, err, ErrLearnerCatchUpTimeout)
+
+	leader.mu.Lock()
+	managed := len(leader.jointManagedLearners)
+	leader.mu.Unlock()
+	require.Zero(t, managed, "defer cleanup must clear jointManagedLearners")
+}
+
+// TestChangeMembership_AddRemove_LearnerFirstHappyPath — Sub-project 3 PR-K1.
+// Uses high catch-up threshold to make a fake unreachable learner trivially
+// caught up, then verifies joint atomic promote+remove.
+func TestChangeMembership_AddRemove_LearnerFirstHappyPath(t *testing.T) {
+	cluster := newTestCluster(t, 3)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader)
+
+	// Drive commitIndex up so AddLearner can commit + threshold trick activates.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, leader.Propose([]byte("entry")))
+	}
+	leader.SetLearnerCatchupThreshold(1_000_000) // fake learner trivially passes
+
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		if p != leader.id {
+			removeID = p
+			break
+		}
+	}
+	leader.mu.Unlock()
+	require.NotEmpty(t, removeID)
+
+	leader.SetChangeMembershipDefaults(ChangeMembershipOpts{CatchUpTimeout: 3 * time.Second})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := leader.ChangeMembership(ctx,
+		[]ServerEntry{{ID: "fake-new-voter", Address: "127.0.0.1:65530", Suffrage: Voter}},
+		[]string{removeID},
+	)
+	require.NoError(t, err, "joint cycle should complete via dual quorum from C_old")
+
+	leader.mu.Lock()
+	peers := append([]string(nil), leader.config.Peers...)
+	managed := len(leader.jointManagedLearners)
+	leader.mu.Unlock()
+
+	require.NotContains(t, peers, removeID, "removed voter dropped from C_new")
+	require.Contains(t, peers, "127.0.0.1:65530", "new voter address present in C_new")
+	require.Zero(t, managed, "jointManagedLearners cleared after success")
+}
+
+// TestJoint_E2E_RemoveSelf — Sub-project 3 PR-K1 acceptance test.
+// Leader removes itself via ChangeMembership. Verifies commit-time step-down
+// ordering: jointPromoteCh closes BEFORE state=Follower (raft.go:578-592),
+// so the caller wakes up with nil. Then a new leader is elected from C_new.
+func TestJoint_E2E_RemoveSelf(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	cluster.startAll()
+	oldLeader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, oldLeader)
+
+	oldLeaderID := oldLeader.id
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := oldLeader.ChangeMembership(ctx, nil, []string{oldLeaderID})
+	require.NoError(t, err, "self-removal returns nil via commit-time wakeup")
+
+	require.Equal(t, Follower, oldLeader.State(), "old leader steps down to Follower")
+
+	// New leader from remaining 3 nodes. Allow generous timeout because the
+	// old leader is now a Follower in the same election space (its config.Peers
+	// still references the cluster) and may compete in split votes until it
+	// either wins (and immediately discovers it's not in C_new — see assertion
+	// below) or loses repeatedly to one of the C_new nodes.
+	require.Eventually(t, func() bool {
+		for _, n := range cluster.nodes {
+			if n.State() == Leader && n.id != oldLeaderID {
+				return true
+			}
+		}
+		return false
+	}, 15*time.Second, 50*time.Millisecond, "new leader elected from C_new")
+
+	// New leader's view excludes removed self.
+	var newLeader *Node
+	for _, n := range cluster.nodes {
+		if n.State() == Leader {
+			newLeader = n
+			break
+		}
+	}
+	require.NotNil(t, newLeader)
+	newLeader.mu.Lock()
+	peers := append([]string(nil), newLeader.config.Peers...)
+	newLeader.mu.Unlock()
+	require.NotContains(t, peers, oldLeaderID)
+}
+
+// TestChangeMembership_RemovesOnly_E2E — Sub-project 3 PR-K1. Verifies the
+// removes-only fast path through ChangeMembership end-to-end.
+func TestChangeMembership_RemovesOnly_E2E(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader)
+
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		if p != leader.id {
+			removeID = p
+			break
+		}
+	}
+	leader.mu.Unlock()
+	require.NotEmpty(t, removeID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	err := leader.ChangeMembership(ctx, nil, []string{removeID})
+	require.NoError(t, err)
+
+	leader.mu.Lock()
+	phase := leader.jointPhase
+	peers := append([]string(nil), leader.config.Peers...)
+	leader.mu.Unlock()
+
+	require.Equal(t, JointNone, phase)
+	require.NotContains(t, peers, removeID)
+}
+
 func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T) {
 	n := jointTestNode("n1")
 	n.initialPeers = []string{"n1", "n2", "n3"}
@@ -478,4 +768,108 @@ func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T
 	require.Equal(t, []string{"n1", "n2", "n3"}, n.jointOldVoters)
 	require.Equal(t, []string{"n1", "n2", "n4", "n5"}, n.jointNewVoters)
 	require.False(t, n.jointLeaveProposed)
+}
+
+// TestCurrentConfigServers_OmitsSelfWhenRemoved — PR-K1 follow-up.
+// A snapshotted orphan node must not include self in the Servers list,
+// otherwise the restore path can't derive removedFromCluster.
+func TestCurrentConfigServers_OmitsSelfWhenRemoved(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.removedFromCluster = true
+
+	servers := n.currentConfigServers()
+
+	for _, sv := range servers {
+		require.NotEqual(t, "n1", sv.ID,
+			"removed node must not include self in Servers list")
+	}
+	require.Len(t, servers, 2, "only the two voter peers should remain")
+}
+
+func TestCurrentConfigServers_IncludesSelfWhenNotRemoved(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+
+	servers := n.currentConfigServers()
+
+	foundSelf := false
+	for _, sv := range servers {
+		if sv.ID == "n1" {
+			foundSelf = true
+		}
+	}
+	require.True(t, foundSelf, "non-removed node includes self as Voter")
+}
+
+// TestRebuildConfigFromLog_RestoresRemovedFromCluster — PR-K1 follow-up.
+// Replay path must mirror commit-time hook (raft.go:586) and set
+// removedFromCluster when JointLeave commits with self ∉ C_new. Without this,
+// a restarted orphan node has flag=false and rejoins elections.
+func TestRebuildConfigFromLog_RestoresRemovedFromCluster(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n1", "n2", "n3", "n4"}
+
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+			NewServers: []ServerEntry{{ID: "n2"}, {ID: "n3"}, {ID: "n4"}}, // n1 removed
+		})},
+		{Index: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			NewServers: []ServerEntry{{ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+		})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.True(t, n.removedFromCluster,
+		"replay must set removedFromCluster when JointLeave excludes self")
+}
+
+func TestRebuildConfigFromLog_RejoinClearsRemovedFromCluster(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n2", "n3"}
+	// Stale state from a previous removal.
+	n.removedFromCluster = true
+
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}}, // n1 rejoined
+		})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.False(t, n.removedFromCluster,
+		"JointEnter that brings self into C_new clears removedFromCluster")
+}
+
+// TestRebuildConfigFromLog_JointLeavePromotionClearsLearners — Sub-project 3
+// prereq: replay path mirror of TestApply_JointLeave_LearnerPromotionClearsLearnerIDs.
+func TestRebuildConfigFromLog_JointLeavePromotionClearsLearners(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n1", "n2", "n3"}
+
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddLearner, "n4", "n4")},
+		{Index: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+		})},
+		{Index: 3, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+		})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.NotContains(t, n.learnerIDs, "n4",
+		"replay must clear promoted learners from learnerIDs")
+	require.Contains(t, n.config.Peers, "n4", "n4 should be a voter in config.Peers")
 }

@@ -2,6 +2,8 @@ package raft
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -512,4 +514,184 @@ func equalServerSets(a, b []ServerEntry) bool {
 		}
 	}
 	return true
+}
+
+// ChangeMembership atomically transitions the cluster from C_old to
+// C_new = (C_old \ removes) ∪ adds via §4.3 joint consensus, with §4.4
+// learner-first catch-up for added voters.
+//
+// See docs/superpowers/specs/2026-04-30-raft-changemembership-design.md.
+//
+// MUST NOT be called with n.mu held.
+func (n *Node) ChangeMembership(ctx context.Context, adds []ServerEntry, removes []string) error {
+	n.mu.Lock()
+	if n.state != Leader {
+		n.mu.Unlock()
+		return ErrNotLeader
+	}
+	if n.mixedVersion {
+		n.mu.Unlock()
+		return ErrMixedVersionNoMembershipChange
+	}
+	if n.jointPhase != JointNone || n.pendingConfChangeIndex != 0 {
+		n.mu.Unlock()
+		return ErrConfChangeInProgress
+	}
+
+	// Empty diff: caller wants no change.
+	if len(adds) == 0 && len(removes) == 0 {
+		n.mu.Unlock()
+		return nil
+	}
+	n.mu.Unlock()
+
+	// Adds-empty fast path: skip learner phase, go straight to joint.
+	if len(adds) == 0 {
+		return n.proposeJointConfChangeWait(ctx, nil, removes)
+	}
+
+	// Adds path: learner-first hybrid. Register adds as joint-managed before
+	// proposing AddLearner so checkLearnerCatchup Guard 2 sees the entry at
+	// the moment AddLearner commits.
+	n.mu.Lock()
+	opts := n.effectiveChangeMembershipOpts()
+	for _, a := range adds {
+		n.jointManagedLearners[a.ID] = struct{}{}
+	}
+	n.mu.Unlock()
+
+	// addedIDs tracks learners successfully proposed; defer cleanup attempts
+	// RemoveVoter on each on any error path.
+	addedIDs := make([]string, 0, len(adds))
+	cleanupOnError := func() {
+		for _, id := range addedIDs {
+			_ = n.RemoveVoter(id)
+		}
+		n.mu.Lock()
+		for _, a := range adds {
+			delete(n.jointManagedLearners, a.ID)
+		}
+		n.mu.Unlock()
+	}
+
+	if !opts.SkipLearnerPhase {
+		// 1. AddLearner each.
+		for _, a := range adds {
+			if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, a.ID, a.Address); err != nil {
+				cleanupOnError()
+				return err
+			}
+			addedIDs = append(addedIDs, a.ID)
+		}
+
+		// 2. Wait for each learner to catch up (heartbeat-tick polling).
+		if err := n.waitLearnersCaughtUp(ctx, adds, opts.CatchUpTimeout); err != nil {
+			cleanupOnError()
+			return err
+		}
+	}
+
+	// 3. Joint atomic promote+remove.
+	promoteAdds := make([]ServerEntry, len(adds))
+	for i, a := range adds {
+		entry := a
+		entry.Suffrage = Voter
+		promoteAdds[i] = entry
+	}
+	if err := n.proposeJointConfChangeWait(ctx, promoteAdds, removes); err != nil {
+		cleanupOnError()
+		return err
+	}
+
+	// 4. Joint applied — learnerIDs cleared in apply path. Clear our
+	// jointManagedLearners (defensive; apply path doesn't touch it in K1).
+	n.mu.Lock()
+	for _, a := range adds {
+		delete(n.jointManagedLearners, a.ID)
+	}
+	n.mu.Unlock()
+	return nil
+}
+
+// ErrLearnerCatchUpTimeout is returned by ChangeMembership when an added
+// learner failed to catch up within the configured timeout.
+var ErrLearnerCatchUpTimeout = errors.New("raft: learner catch-up timeout in ChangeMembership")
+
+// waitLearnersCaughtUp polls each added learner's matchIndex against
+// commitIndex at heartbeat-tick frequency, returning when all catch up
+// (mi+threshold ≥ commitIndex) or the deadline expires.
+func (n *Node) waitLearnersCaughtUp(ctx context.Context, adds []ServerEntry, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+
+	tickInterval := 50 * time.Millisecond
+	if n.config.HeartbeatTimeout > 0 {
+		tickInterval = n.config.HeartbeatTimeout
+	}
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		n.mu.Lock()
+		threshold := n.config.LearnerCatchupThreshold
+		if threshold == 0 {
+			threshold = 100
+		}
+		commit := n.commitIndex
+		caught := 0
+		for _, a := range adds {
+			peerKey := a.Address
+			if peerKey == "" {
+				peerKey = a.ID
+			}
+			mi := n.matchIndex[peerKey]
+			if mi+threshold >= commit {
+				caught++
+			}
+		}
+		n.mu.Unlock()
+		if caught == len(adds) {
+			return nil
+		}
+
+		select {
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return ErrLearnerCatchUpTimeout
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-n.stopCh:
+			return ErrProposalFailed
+		}
+	}
+}
+
+// ChangeMembershipOpts configures default behavior for ChangeMembership.
+type ChangeMembershipOpts struct {
+	// CatchUpTimeout bounds the per-learner catch-up wait. Default 30s.
+	CatchUpTimeout time.Duration
+	// SkipLearnerPhase forces direct joint propose (no learner-first catch-up).
+	// Use only when callers have other catch-up guarantees.
+	SkipLearnerPhase bool
+}
+
+// SetChangeMembershipDefaults configures default ChangeMembership behavior.
+// Concurrent updates are safe under n.mu. Zero CatchUpTimeout falls back to 30s.
+func (n *Node) SetChangeMembershipDefaults(opts ChangeMembershipOpts) {
+	n.mu.Lock()
+	n.changeMembershipDefaults = opts
+	n.mu.Unlock()
+}
+
+// effectiveChangeMembershipOpts returns the merged options (caller's defaults
+// vs internal fallback). Called with n.mu held.
+func (n *Node) effectiveChangeMembershipOpts() ChangeMembershipOpts {
+	opts := n.changeMembershipDefaults
+	if opts.CatchUpTimeout <= 0 {
+		opts.CatchUpTimeout = 30 * time.Second
+	}
+	return opts
 }

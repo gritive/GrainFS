@@ -143,6 +143,42 @@ func TestBadgerLogStore_SaveAndLoadSnapshot(t *testing.T) {
 	assert.Equal(t, snapData, snap.Data)
 }
 
+// TestBadgerLogStore_SnapshotRoundTrip_PreservesRemovedFromCluster — PR-K1 follow-up.
+// Verifies the Servers-derived persistence wiring: a node with removedFromCluster=true
+// produces a snapshot whose Servers list omits self; on reopen the orphan flag
+// is reconstructed from `self ∉ Servers`.
+func TestBadgerLogStore_SnapshotRoundTrip_PreservesRemovedFromCluster(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	// Save snapshot whose Servers list excludes self ID "n1" — represents an
+	// orphan node's view at snapshot time.
+	require.NoError(t, store.SaveSnapshot(Snapshot{
+		Index: 5,
+		Term:  2,
+		Data:  []byte(`{"fsm":"ok"}`),
+		Servers: []Server{
+			{ID: "n2", Suffrage: Voter},
+			{ID: "n3", Suffrage: Voter},
+			{ID: "n4", Suffrage: Voter},
+		},
+	}))
+	require.NoError(t, store.Close())
+
+	// Reopen and verify Servers list is preserved without self.
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	defer store2.Close()
+
+	snap, err := store2.LoadSnapshot()
+	require.NoError(t, err)
+	require.Len(t, snap.Servers, 3)
+	require.False(t, containsServer(snap.Servers, "n1"),
+		"orphan snapshot must not contain self in restored Servers")
+	require.True(t, containsServer(snap.Servers, "n2"))
+}
+
 func TestBadgerLogStore_PersistenceAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 

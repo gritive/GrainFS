@@ -149,6 +149,62 @@ func TestCheckLearnerCatchup_Threshold(t *testing.T) {
 	}
 }
 
+// TestCheckLearnerCatchup_SkipsDuringJoint — Sub-project 3 PR-K1 regression
+// guard. While JointEntering, auto-promote watcher must not propose because
+// the joint will atomically promote new voters via C_new.
+func TestCheckLearnerCatchup_SkipsDuringJoint(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.commitIndex = 100
+	n.learnerIDs["learner-1"] = "learner-1"
+	n.matchIndex["learner-1"] = 100
+	n.jointPhase = JointEntering // joint in flight
+	n.mu.Unlock()
+
+	n.mu.Lock()
+	n.checkLearnerCatchup()
+	n.mu.Unlock()
+
+	select {
+	case p := <-n.proposalCh:
+		t.Fatalf("watcher must not propose during JointEntering: %v", p)
+	default:
+	}
+}
+
+// TestCheckLearnerCatchup_SkipsJointManaged — Sub-project 3 PR-K1 regression
+// guard. ChangeMembership-managed learners must not be auto-promoted during
+// the pre-joint catch-up window.
+func TestCheckLearnerCatchup_SkipsJointManaged(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.commitIndex = 100
+	n.learnerIDs["managed"] = "managed"
+	n.matchIndex["managed"] = 100
+	n.learnerIDs["unmanaged"] = "unmanaged"
+	n.matchIndex["unmanaged"] = 100
+	n.jointManagedLearners["managed"] = struct{}{}
+	n.mu.Unlock()
+
+	n.mu.Lock()
+	n.checkLearnerCatchup()
+	n.mu.Unlock()
+
+	select {
+	case p := <-n.proposalCh:
+		cc := decodeConfChange(p.command)
+		require.Equal(t, ConfChangePromote, cc.Op)
+		require.Equal(t, "unmanaged", cc.ID,
+			"only the non-managed learner should be promoted")
+	default:
+		t.Fatal("watcher must propose for unmanaged caught-up learner")
+	}
+}
+
 func TestApplyLoopClosesPromoteCh(t *testing.T) {
 	cfg := DefaultConfig("self", []string{"peer-1"})
 	n := NewNode(cfg)

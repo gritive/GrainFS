@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.6.22] — 2026-04-30 — ChangeMembership Public API (Sub-project 3 PR-K1)
+
+### Added
+
+- **raft**: `Node.ChangeMembership(ctx, adds, removes)` — public §4.3 joint API with §4.4 learner-first hybrid catch-up. Internal flow: register adds in `jointManagedLearners` → AddLearner each → wait catch-up → atomic JointEnter (promote+remove) → auto JointLeave on commit → caller wakeup nil. Self-removal supported via commit-time step-down hook. spec: `docs/superpowers/specs/2026-04-30-raft-changemembership-design.md`.
+- **raft**: `Node.SetChangeMembershipDefaults(opts)` — runtime config of CatchUpTimeout (default 30s) + SkipLearnerPhase opt-out.
+- **raft**: `Node.JointPhase()` — observation API returning (phase, oldVoters, newVoters, enterIndex). `JointPhase` type alias exported.
+- **raft**: `Node.Configuration()` — extended to return union of C_old ∪ C_new during JointEntering.
+- **raft**: `jointManagedLearners` set + dual guard in `checkLearnerCatchup` (jointPhase != None OR managed-by-joint) preventing auto-promote race during ChangeMembership.
+- **raft**: `removedFromCluster` flag — orphan election guard. Set in commit-time JointLeave hook when self ∉ C_new; runFollower skips election if true. Reset when self rejoins. Persists across restart via (a) `rebuildConfigFromLog` replay path, (b) snapshot derivation from Servers list (`currentConfigServers` omits self when removed; restore + InstallSnapshot derive flag from `self ∉ Servers`).
+- **raft**: `ErrLearnerCatchUpTimeout` sentinel; defer cleanup attempts best-effort RemoveVoter on added learners.
+- **test**: `TestJoint_E2E_RemoveSelf` — leader self-removal verified end-to-end (50/50 stable).
+- **test**: `TestChangeMembership_*` unit + E2E coverage; `TestCheckLearnerCatchup_SkipsDuringJoint` + `TestCheckLearnerCatchup_SkipsJointManaged` regression guards.
+
+### Fixed
+
+- **raft**: `applyJointConfChangeLocked` JointLeave now removes promoted learners from `learnerIDs` (state-machine torn invariant). Mirror fix in `rebuildConfigFromLog` replay path. Previously dormant — activated by ChangeMembership's joint promote.
+
 ## [0.0.6.21] — 2026-04-30 — Live Multi-Raft Sharding (PR-G+H 인프라)
 
 ### Added

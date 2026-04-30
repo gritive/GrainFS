@@ -248,6 +248,25 @@ type Node struct {
 	learnerIDs       map[string]string        // nodeID → peerKey; learners not counted for quorum
 	learnerPromoteCh map[string]chan struct{} // nodeID → ch; closed in apply loop when PromoteToVoter commits (AddVoter caller wakeup)
 
+	// jointManagedLearners tracks learners that ChangeMembership added in the
+	// pre-joint window. checkLearnerCatchup skips these to prevent the
+	// auto-promote watcher from racing with the upcoming JointEnter. Cleared
+	// on joint apply success or defer cleanup. Leader-only volatile in K1/K2;
+	// PR-K3 makes this a state-machine output via ConfChange.managed_by_joint.
+	jointManagedLearners map[string]struct{}
+
+	// removedFromCluster is set when the local node observed its own removal
+	// via JointLeave (commit-time self-removal hook). Disables election
+	// participation so the orphan node does not split votes against C_new.
+	// Cleared on apply of ConfChangeAddVoter / ConfChangeAddLearner for self
+	// id, or on JointEnter where self is in C_new.
+	removedFromCluster bool
+
+	// changeMembershipDefaults configures default behavior of ChangeMembership.
+	// Mutated under mu via SetChangeMembershipDefaults. Zero CatchUpTimeout
+	// falls back to 30s.
+	changeMembershipDefaults ChangeMembershipOpts
+
 	// config
 	config Config
 
@@ -332,7 +351,8 @@ func NewNode(config Config, store ...LogStore) *Node {
 		nextIndex:        make(map[string]uint64),
 		matchIndex:       make(map[string]uint64),
 		learnerIDs:       make(map[string]string),
-		learnerPromoteCh: make(map[string]chan struct{}),
+		learnerPromoteCh:     make(map[string]chan struct{}),
+		jointManagedLearners: make(map[string]struct{}),
 		checkQuorumAcks:  make(map[string]time.Time),
 		applyCh:          make(chan LogEntry, 64),
 		stopCh:           make(chan struct{}),
@@ -381,6 +401,10 @@ func (n *Node) restoreFromStore() {
 			basePeers, baseLearners := restoreConfigFromServers(snap.Servers, n.id)
 			n.config.Peers = basePeers
 			n.learnerIDs = baseLearners
+			// Derive removedFromCluster: if self is not in the snapshot's
+			// server list, we were an orphan at snapshot time. The orphan
+			// election guard must persist so we don't split votes on cold-start.
+			n.removedFromCluster = !containsServer(snap.Servers, n.id)
 		}
 	}
 
@@ -583,10 +607,15 @@ func (n *Node) applyLoop() {
 					n.jointPromoteCh = nil
 				}
 				newPeers := serverPeerKeys(jc.NewServers)
-				if n.state == Leader && !containsPeer(newPeers, n.id) {
-					n.state = Follower
-					n.leaderID = ""
-					n.signalReset()
+				if !containsPeer(newPeers, n.id) {
+					n.removedFromCluster = true
+					if n.state == Leader {
+						n.state = Follower
+						n.leaderID = ""
+						n.signalReset()
+					}
+				} else {
+					n.removedFromCluster = false
 				}
 			}
 		}
@@ -691,8 +720,39 @@ func (n *Node) ApplyCh() <-chan LogEntry {
 
 // Configuration returns a race-safe snapshot of the current cluster membership
 // (self as Voter + peers as Voter + learners as NonVoter).
+//
+// During §4.3 JointEntering, returns the union of C_old and C_new voters so
+// callers see all servers participating in the dual quorum. Address lookup is
+// the caller's responsibility (peer keys are returned as Server.ID).
 func (n *Node) Configuration() Configuration {
 	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.jointPhase == JointEntering {
+		seen := make(map[string]struct{},
+			len(n.jointOldVoters)+len(n.jointNewVoters)+len(n.learnerIDs))
+		servers := make([]Server, 0, len(seen))
+		for _, v := range n.jointOldVoters {
+			if _, ok := seen[v]; !ok {
+				seen[v] = struct{}{}
+				servers = append(servers, Server{ID: v, Suffrage: Voter})
+			}
+		}
+		for _, v := range n.jointNewVoters {
+			if _, ok := seen[v]; !ok {
+				seen[v] = struct{}{}
+				servers = append(servers, Server{ID: v, Suffrage: Voter})
+			}
+		}
+		for _, pk := range n.learnerIDs {
+			if _, ok := seen[pk]; !ok {
+				seen[pk] = struct{}{}
+				servers = append(servers, Server{ID: pk, Suffrage: NonVoter})
+			}
+		}
+		return Configuration{Servers: servers}
+	}
+
 	servers := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
 	servers = append(servers, Server{ID: n.id, Suffrage: Voter})
 	for _, p := range n.config.Peers {
@@ -701,9 +761,30 @@ func (n *Node) Configuration() Configuration {
 	for _, pk := range n.learnerIDs {
 		servers = append(servers, Server{ID: pk, Suffrage: NonVoter})
 	}
-	n.mu.Unlock()
 	return Configuration{Servers: servers}
 }
+
+// JointPhase returns the current §4.3 joint state, including the dual voter
+// sets when in JointEntering. enterIndex is 0 when phase == JointNone.
+//
+// The returned phase is the unexported jointPhase type promoted via int8 cast
+// at package boundaries; callers can use raft.JointNone / raft.JointEntering
+// constants for comparison.
+func (n *Node) JointPhase() (phase JointPhase, oldVoters []string, newVoters []string, enterIndex uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	phase = JointPhase(n.jointPhase)
+	if n.jointPhase == JointEntering {
+		oldVoters = append([]string(nil), n.jointOldVoters...)
+		newVoters = append([]string(nil), n.jointNewVoters...)
+		enterIndex = n.jointEnterIndex
+	}
+	return
+}
+
+// JointPhase is the exported alias of jointPhase for callers querying joint
+// state via Node.JointPhase().
+type JointPhase = jointPhase
 
 // JointSnapshotState captures the §4.3 joint state for snapshot persistence.
 // Use as JointStateProvider for SnapshotManager. Returns int8 phase to keep the
@@ -731,12 +812,29 @@ func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNe
 	n.jointLeaveProposed = false
 }
 
+// containsServer reports whether servers contains an entry with the given id.
+// Used to derive removedFromCluster from snapshot Servers (cold-start +
+// InstallSnapshot paths) — replay path uses containsPeer over peer-key slices.
+func containsServer(servers []Server, id string) bool {
+	for _, sv := range servers {
+		if sv.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // currentConfigServers returns a copy of all known servers (self + voters + learners).
 // Learners are included with NonVoter suffrage so snapshots capture full membership.
+// Self is omitted when removedFromCluster — a snapshotted orphan node must not
+// claim to be a voter in its own snapshot. The restore path uses self ∉ Servers
+// to derive removedFromCluster on cold-start.
 // MUST be called with n.mu held.
 func (n *Node) currentConfigServers() []Server {
 	out := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
-	out = append(out, Server{ID: n.id, Suffrage: Voter})
+	if !n.removedFromCluster {
+		out = append(out, Server{ID: n.id, Suffrage: Voter})
+	}
 	for _, p := range n.config.Peers {
 		out = append(out, Server{ID: p, Suffrage: Voter})
 	}
@@ -756,11 +854,23 @@ func (n *Node) checkLearnerCatchup() {
 	if n.pendingConfChangeIndex != 0 {
 		return
 	}
+	// Guard 1: jointPhase != None blocks auto-promote during the joint window.
+	// Once a JointEnter has been proposed, the joint will atomically promote
+	// new voters via C_new; auto-promote here would race.
+	if n.jointPhase != JointNone {
+		return
+	}
 	threshold := n.config.LearnerCatchupThreshold
 	if threshold == 0 {
 		threshold = 100
 	}
 	for nodeID, peerKey := range n.learnerIDs {
+		// Guard 2: jointManagedLearners blocks auto-promote during the
+		// pre-joint AddLearner→catch-up window on the leader that initiated
+		// ChangeMembership.
+		if _, joint := n.jointManagedLearners[nodeID]; joint {
+			continue
+		}
 		mi := n.matchIndex[peerKey]
 		if mi+threshold < n.commitIndex {
 			continue
@@ -838,6 +948,14 @@ func (n *Node) runFollower() {
 	case <-n.resetCh:
 		return // restart the loop, new timeout
 	case <-timer.C:
+		// Skip elections if self was removed from the cluster — orphan nodes
+		// must not split votes against the surviving voter set.
+		n.mu.Lock()
+		removed := n.removedFromCluster
+		n.mu.Unlock()
+		if removed {
+			return
+		}
 		if !n.runPreVote() {
 			return // pre-vote failed; stay follower for next timeout
 		}
@@ -1816,6 +1934,10 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 		n.config.Peers = peers
 		n.initialPeers = peers
 		n.learnerIDs = learners
+		// Derive removedFromCluster from snapshot Servers (mirror of cold-start
+		// path in NewNode). InstallSnapshot from a leader represents authoritative
+		// cluster state; if self is absent, we are an orphan.
+		n.removedFromCluster = !containsServer(args.Servers, n.id)
 	}
 
 	// Deliver snapshot data via applyCh so the FSM can restore
