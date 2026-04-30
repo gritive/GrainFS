@@ -513,10 +513,9 @@ func TestAddVoter_E2E_LearnerFirstThenPromote(t *testing.T) {
 }
 
 func TestAddVoter_E2E_LeaderChange_StillPromotes(t *testing.T) {
-	t.Skip("flaky on real QUIC transport (timing-sensitive election + commit propagation, ~30% pass rate). " +
-		"The mechanism IS verified: when the test does pass it shows the new leader's watcher " +
-		"correctly proposes PromoteToVoter for the learner inherited from the old leader. " +
-		"TODO: rewrite as in-memory chaos scenario for reliable CI.")
+	t.Skip("flaky on real QUIC transport (timing-sensitive election + commit propagation). " +
+		"Stable equivalent: TestChaos_LearnerFirst_LeaderChange_NewLeaderPromotes in " +
+		"internal/raft/chaos/scenarios (in-memory, deterministic, 10/10 pass).")
 	if testing.Short() {
 		t.Skip("integration test skipped in short mode")
 	}
