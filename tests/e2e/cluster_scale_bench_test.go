@@ -118,7 +118,7 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 			}
 		}
 		return false
-	}, 60*time.Second, 1*time.Second, "no leader found")
+	}, 120*time.Second, 1*time.Second, "no leader found")
 
 	// seed loop가 끝날 때까지 대기 (N × ~400ms 추정 + 여유 5s, 최대 60s 클램프)
 	settleTime := time.Duration(n)*400*time.Millisecond + 5*time.Second
@@ -164,3 +164,32 @@ func TestE2E_ClusterScaleBench_N8(t *testing.T) {
 	t.Logf("N=8 result: boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d",
 		r.bootSec, r.perProc.rssMB, r.perProc.heapMB, r.perProc.cpuPct, r.perProc.goroutines)
 }
+
+// 각 N을 별도 Test 함수로 분리한다 — t.Run으로 묶으면 sub-test 사이의 cleanup이
+// 즉시 풀리지 않고 macOS에서 5 process × N groups boot이 누적되어 flake.
+// shell loop로 각 N을 별도 `go test` 프로세스에서 실행해 fresh state 보장.
+//
+// 권장 실행:
+//   GRAINFS_BENCH_FULL=1 for N in 8 32 64 128; do
+//     go test -count=1 -timeout 600s -v \
+//       -run "^TestE2E_ClusterScaleBench_N${N}$" ./tests/e2e/ |\
+//       tee -a /tmp/grainfs-bench/sweep.log
+//     sleep 5
+//   done
+
+func runScaleBenchTest(t *testing.T, n int) {
+	if testing.Short() {
+		t.Skip("skipping scale bench in -short mode")
+	}
+	if os.Getenv("GRAINFS_BENCH_FULL") != "1" && n > 8 {
+		t.Skip("set GRAINFS_BENCH_FULL=1 to run N>8 scale bench")
+	}
+	r := runScaleBench(t, n)
+	t.Logf("N=%d result: boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d",
+		r.n, r.bootSec, r.perProc.rssMB, r.perProc.heapMB, r.perProc.cpuPct, r.perProc.goroutines)
+	t.Logf("BENCH_ROW: %s", formatRow(r.n, r.perProc, r.bootSec, r.elections))
+}
+
+func TestE2E_ClusterScaleBench_N32(t *testing.T)  { runScaleBenchTest(t, 32) }
+func TestE2E_ClusterScaleBench_N64(t *testing.T)  { runScaleBenchTest(t, 64) }
+func TestE2E_ClusterScaleBench_N128(t *testing.T) { runScaleBenchTest(t, 128) }
