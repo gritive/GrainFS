@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.6.7] — 2026-04-30
+
+### Added
+
+- **cluster**: `FSM.LookupObjectECShards(bucket, key, versionID)` — BadgerDB에서 EC 파라미터 (k, m) 조회. N× 오브젝트(메타 없음)는 `(0, 0, nil)` 반환.
+- **cluster**: `MigrationExecutor.SetShardCounter(fn)` — 오브젝트별 shard 수 콜백. N× 오브젝트(k=0)는 1 반환, EC 오브젝트는 k+m 반환, fn=nil 또는 반환값 0이면 `numShards` fallback.
+- **cluster**: `ec_cluster_smoke_test.go` — `TestLookupObjectECShards_NxMode`, `TestLookupObjectECShards_ECMode` 단위 테스트.
+- **cluster**: `TestECCluster_Smoke_3Node` — Phase 19에서 활성화 예정 (t.Skip stub).
+- **cluster**: `TestMigrationExecutor_NxMode_*`, `TestMigrationExecutor_ECMode_*`, `TestMigrationExecutor_ShardCounter_ZeroFallback` — SetShardCounter 경로 단위 테스트.
+- **serve**: `ecShardCounterFor(fsm)` — SetShardCounter용 named factory 함수.
+
+### Changed
+
+- **serve**: EC 스크러버 시작 조건 `scrubInterval > 0 && ECActive()` → `scrubInterval > 0` — N× 클러스터에서도 스크러버 활성화.
+
+### Fixed
+
+- **serve**: `ecShardCounterFor` DB 에러 시 `return 1` → `return 0` — shard 0만 복사 후 전체 삭제하던 데이터 손실 경로 수정 (numShards fallback으로 전환).
+
 ## [0.0.6.6] — 2026-04-30
 
 ### Added
