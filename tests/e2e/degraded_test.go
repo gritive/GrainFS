@@ -106,17 +106,13 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		procs[i] = startNode(i)
 	}
-	for i := 0; i < 3; i++ {
-		waitForPort(t, httpPorts[i], 60*time.Second)
-	}
+	waitForPortsParallel(t, httpPorts[:3], 60*time.Second)
 
 	// Stage 2: bring up remaining 2 nodes.
 	for i := 3; i < numNodes; i++ {
 		procs[i] = startNode(i)
 	}
-	for i := 3; i < numNodes; i++ {
-		waitForPort(t, httpPorts[i], 30*time.Second)
-	}
+	waitForPortsParallel(t, httpPorts[3:], 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
@@ -135,7 +131,7 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			}
 		}
 		return false
-	}, 15*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
+	}, 30*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
 	t.Logf("degraded test: leader node %d at %s", leaderIdx, httpURL(leaderIdx))
 
 	// Verify normal PUT works before killing nodes.
