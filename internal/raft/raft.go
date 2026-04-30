@@ -171,17 +171,21 @@ type Config struct {
 	LogGCInterval    time.Duration // how often log GC runs (default 30s)
 	MaxEntriesPerAE  uint64        // 0 = unlimited; default via DefaultConfig = 512
 	TrailingLogs     uint64        // entries to keep after snapshot; default 10240
+	// LearnerCatchupThreshold: matchIndex+threshold >= commitIndex 시 watcher가 PromoteToVoter propose.
+	// 0 면 100으로 fallback. AddVoter 자동 learner-first의 promote 트리거.
+	LearnerCatchupThreshold uint64
 }
 
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig(id string, peers []string) Config {
 	return Config{
-		ID:               id,
-		Peers:            peers,
-		ElectionTimeout:  150 * time.Millisecond,
-		HeartbeatTimeout: 50 * time.Millisecond,
-		MaxEntriesPerAE:  512,
-		TrailingLogs:     10240,
+		ID:                      id,
+		Peers:                   peers,
+		ElectionTimeout:         150 * time.Millisecond,
+		HeartbeatTimeout:        50 * time.Millisecond,
+		MaxEntriesPerAE:         512,
+		TrailingLogs:            10240,
+		LearnerCatchupThreshold: 100,
 	}
 }
 
@@ -239,9 +243,10 @@ type Node struct {
 	snapshotIndex uint64 // Raft index of the most recent snapshot; 0 = no snapshot yet
 
 	// leader volatile state
-	nextIndex  map[string]uint64
-	matchIndex map[string]uint64
-	learnerIDs map[string]string // nodeID → peerKey; learners not counted for quorum
+	nextIndex        map[string]uint64
+	matchIndex       map[string]uint64
+	learnerIDs       map[string]string        // nodeID → peerKey; learners not counted for quorum
+	learnerPromoteCh map[string]chan struct{} // nodeID → ch; closed in apply loop when PromoteToVoter commits (AddVoter caller wakeup)
 
 	// config
 	config Config
@@ -311,24 +316,25 @@ func NewNode(config Config, store ...LogStore) *Node {
 	copy(initialPeers, config.Peers)
 
 	n := &Node{
-		id:              config.ID,
-		state:           Follower,
-		config:          config,
-		log:             make([]LogEntry, 0),
-		firstIndex:      1, // Raft indices start at 1
-		nextIndex:       make(map[string]uint64),
-		matchIndex:      make(map[string]uint64),
-		learnerIDs:      make(map[string]string),
-		checkQuorumAcks: make(map[string]time.Time),
-		applyCh:         make(chan LogEntry, 64),
-		stopCh:          make(chan struct{}),
-		resetCh:         make(chan struct{}, 1),
-		commitCh:        make(chan struct{}, 1),
-		waiters:         make(map[uint64]chan error),
-		proposalCh:      make(chan proposal, 4096),
-		replicationCh:   make(chan struct{}, 1),
-		metrics:         adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
-		initialPeers:    initialPeers,
+		id:               config.ID,
+		state:            Follower,
+		config:           config,
+		log:              make([]LogEntry, 0),
+		firstIndex:       1, // Raft indices start at 1
+		nextIndex:        make(map[string]uint64),
+		matchIndex:       make(map[string]uint64),
+		learnerIDs:       make(map[string]string),
+		learnerPromoteCh: make(map[string]chan struct{}),
+		checkQuorumAcks:  make(map[string]time.Time),
+		applyCh:          make(chan LogEntry, 64),
+		stopCh:           make(chan struct{}),
+		resetCh:          make(chan struct{}, 1),
+		commitCh:         make(chan struct{}, 1),
+		waiters:          make(map[uint64]chan error),
+		proposalCh:       make(chan proposal, 4096),
+		replicationCh:    make(chan struct{}, 1),
+		metrics:          adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
+		initialPeers:     initialPeers,
 	}
 
 	if len(store) > 0 && store[0] != nil {
@@ -542,8 +548,18 @@ func (n *Node) applyLoop() {
 
 		// ConfChange entries are already applied on append (§4.4).
 		// On commit, only clear the pending index so the next change may proceed.
-		if entry.Type == LogEntryConfChange && n.pendingConfChangeIndex == idx {
-			n.pendingConfChangeIndex = 0
+		if entry.Type == LogEntryConfChange {
+			if n.pendingConfChangeIndex == idx {
+				n.pendingConfChangeIndex = 0
+			}
+			// Close promoteCh on commit (truncation-safe wakeup for AddVoter caller).
+			cc := decodeConfChange(entry.Command)
+			if cc.Op == ConfChangePromote {
+				if ch, ok := n.learnerPromoteCh[cc.ID]; ok {
+					close(ch)
+					delete(n.learnerPromoteCh, cc.ID)
+				}
+			}
 		}
 
 		// Signal any waiter for this index
@@ -673,6 +689,46 @@ func (n *Node) currentConfigServers() []Server {
 		out = append(out, Server{ID: pk, Suffrage: NonVoter})
 	}
 	return out
+}
+
+// checkLearnerCatchup proposes PromoteToVoter for any learner that has caught up.
+// MUST be called with n.mu held; called from runLeader after heartbeat tick.
+// Respects single-pending-change invariant: skips if a ConfChange is in flight.
+func (n *Node) checkLearnerCatchup() {
+	if n.state != Leader {
+		return
+	}
+	if n.pendingConfChangeIndex != 0 {
+		return
+	}
+	threshold := n.config.LearnerCatchupThreshold
+	if threshold == 0 {
+		threshold = 100
+	}
+	for nodeID, peerKey := range n.learnerIDs {
+		mi := n.matchIndex[peerKey]
+		if mi+threshold < n.commitIndex {
+			continue
+		}
+		cmd := encodeConfChange(ConfChangePromote, nodeID, "")
+		select {
+		case n.proposalCh <- proposal{
+			command:   cmd,
+			entryType: LogEntryConfChange,
+			doneCh:    nil,
+			ctx:       context.Background(),
+		}:
+		default: // proposal channel full; retry next tick
+		}
+		return // 한 번에 하나만 (single-pending invariant)
+	}
+}
+
+// SetLearnerCatchupThreshold updates the threshold at runtime (operations / tests).
+func (n *Node) SetLearnerCatchupThreshold(threshold uint64) {
+	n.mu.Lock()
+	n.config.LearnerCatchupThreshold = threshold
+	n.mu.Unlock()
 }
 
 func (n *Node) run() {
@@ -927,6 +983,15 @@ func (n *Node) initLeaderState() {
 		// round completes (grace period = 3×HeartbeatTimeout from now).
 		n.checkQuorumAcks[peer] = now
 	}
+	// Initialize learner replication state too (learners receive AppendEntries
+	// for catch-up but don't count toward quorum). Without this, a new leader
+	// elected after a learner was added in a previous term would have unset
+	// nextIndex for that learner, breaking learner replication and the
+	// catch-up watcher.
+	for _, peerKey := range n.learnerIDs {
+		n.nextIndex[peerKey] = nextIdx
+		n.matchIndex[peerKey] = 0
+	}
 	// Track self's matchIndex
 	n.matchIndex[n.id] = n.lastLogIdx()
 	// When this node steps down via CheckQuorum it becomes a follower with
@@ -988,6 +1053,10 @@ func (n *Node) runLeader() {
 			}
 			n.mu.Unlock()
 			n.replicateToAll()
+			// Learner-first: check if any learner caught up and propose Promote.
+			n.mu.Lock()
+			n.checkLearnerCatchup()
+			n.mu.Unlock()
 			if !n.gcRunning.Swap(true) {
 				go func() {
 					defer n.gcRunning.Store(false)

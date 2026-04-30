@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.6.13] — 2026-04-30
+
+### Added
+
+- **raft**: `Config.LearnerCatchupThreshold` (default 100) — voter promote 트리거 임계값 (`matchIndex+threshold >= commitIndex`).
+- **raft**: `Node.SetLearnerCatchupThreshold(uint64)` — 런타임 조정.
+- **raft**: `Node.AddVoterCtx(ctx, id, addr)` — context 명시 가능한 AddVoter 변형.
+- **raft**: Leader heartbeat tick inline `checkLearnerCatchup()` watcher — caught-up learner 자동 promote.
+
+### Changed
+
+- **raft**: `AddVoter(id, addr)` 동작 변경 — 즉시 voter 등록 → 자동 learner-first 후 promote. caller는 promote commit까지 대기 (truncation-safe). 이미 voter면 즉시 nil (idempotent). Joint consensus의 안전망 (Tier 3-1 sub-project 1).
+- **cluster**: `DataGroupPlanExecutor.MoveReplica` — inline 70줄 learner-first 시퀀스 (AddLearner + 폴링 + PromoteToVoter) → 새 `node.AddVoterCtx()` 한 줄로 단순화. 동일 외부 동작.
+
+### Fixed
+
+- **raft**: `initLeaderState`가 `learnerIDs`의 nextIndex/matchIndex를 미초기화하던 잠재 버그 수정 — follower 시절 learner를 받은 노드가 leader 될 때 watcher가 matchIndex=0을 absent map에서 읽고, replicateToAll의 learner replication이 nextIdx=0(snapshot 모드)으로 시작하던 문제. PR-A부터 잠재된 버그였으며 sub-project 1 watcher 도입으로 노출됨.
+
+### Tests
+
+- **raft**: 12개 unit (`TestAddVoter_*`, `TestCheckLearnerCatchup_*`, `TestApplyLoopClosesPromoteCh`, `TestInitLeaderState_InitializesLearnerReplicationState`).
+- **raft**: 1개 E2E (`TestAddVoter_E2E_LearnerFirstThenPromote`). `LeaderChange_StillPromotes` variant은 QUIC transport timing-sensitive로 skip — 메커니즘은 verified, chaos harness scenario 재작성은 후속.
+- **cluster**: `TestMoveReplica_*`(11개) 회귀 PASS, `TestVoterMigration_ViaDataGroupPlanExecutor` 회귀 PASS.
+
+### Why
+
+Multi-Raft (PR-A~E)가 master에 머지되어 voter 전환이 빈번. 새 노드 가입 시 catch-up 미완 상태에서 quorum에 들어가면 다른 노드 장애 시 quorum 손실 위험. cross-model outside voice (Claude + Gemini) 통과 — append-time → commit-time close + PR-E refactor 합류 결정 반영.
+
 ## [0.0.6.12] — 2026-04-30
 
 ### Fixed

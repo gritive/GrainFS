@@ -77,6 +77,19 @@ func (f *fakeRaftNode) RemoveVoter(id string) error {
 	return nil
 }
 
+func (f *fakeRaftNode) AddVoterCtx(ctx context.Context, id, addr string) error {
+	if err := f.AddLearner(id, addr); err != nil {
+		return err
+	}
+	// Simulate the watcher's catch-up wait: if autoCatchup is false, the learner
+	// never catches up and AddVoter is bounded by ctx.
+	if !f.autoCatchup {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return f.PromoteToVoter(id)
+}
+
 type fakeAddrBook struct{ nodes []cluster.MetaNodeEntry }
 
 func (f *fakeAddrBook) Nodes() []cluster.MetaNodeEntry { return f.nodes }

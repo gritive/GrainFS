@@ -67,8 +67,68 @@ func decodeConfChange(data []byte) ConfChangePayload {
 }
 
 // AddVoter proposes adding a new full voting member to the cluster.
+// Performs learner-first: AddLearner → wait catch-up → PromoteToVoter automatically.
+// Idempotent if the node is already a voter (returns nil immediately).
 func (n *Node) AddVoter(id, addr string) error {
-	return n.proposeConfChangeWait(context.Background(), ConfChangeAddVoter, id, addr)
+	return n.AddVoterCtx(context.Background(), id, addr)
+}
+
+// AddVoterCtx is AddVoter with an explicit context for cancellation/timeout.
+//
+// Sequence:
+//  1. Pre-check: if id (or addr) is already in config.Peers, return nil (idempotent).
+//  2. Propose AddLearner ConfChange and wait for commit.
+//  3. Register a per-id promote channel and wait until apply loop closes it
+//     (PromoteToVoter committed by the leader watcher).
+//
+// Failure modes: ErrNotLeader (caller on follower), ErrMixedVersionNoMembershipChange,
+// ErrConfChangeInProgress (concurrent), ctx.Err() (timeout — learner remains).
+func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
+	// 0. Already-voter pre-check (idempotent, prevents voter→learner regression)
+	n.mu.Lock()
+	for _, p := range n.config.Peers {
+		if p == id || p == addr {
+			n.mu.Unlock()
+			return nil
+		}
+	}
+	n.mu.Unlock()
+
+	// 1. AddLearner (proposeConfChangeWait checks ErrNotLeader / MixedVersion / ConfChangeInProgress)
+	if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, id, addr); err != nil {
+		return err
+	}
+
+	// 2. Register promote notification channel
+	promoteCh := make(chan struct{})
+	n.mu.Lock()
+	n.learnerPromoteCh[id] = promoteCh
+	_, isStillLearner := n.learnerIDs[id]
+	n.mu.Unlock()
+
+	if !isStillLearner {
+		// Promoted between AddLearner commit and registration — cleanup and return.
+		n.mu.Lock()
+		delete(n.learnerPromoteCh, id)
+		n.mu.Unlock()
+		return nil
+	}
+
+	// 3. Wait for promote commit (apply loop closes promoteCh on commit-time)
+	defer func() {
+		n.mu.Lock()
+		delete(n.learnerPromoteCh, id)
+		n.mu.Unlock()
+	}()
+
+	select {
+	case <-promoteCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrProposalFailed
+	}
 }
 
 // RemoveVoter proposes removing a voting member from the cluster.

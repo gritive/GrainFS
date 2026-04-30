@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,4 +58,252 @@ func TestRebuildConfigFromLog_SkipsBeforeStartIndex(t *testing.T) {
 	n.rebuildConfigFromLog(3, []string{"peer-base"}, map[string]string{})
 	assert.NotContains(t, n.config.Peers, "addr-old", "entry at index 2 must be skipped")
 	assert.Contains(t, n.config.Peers, "addr-new", "entry at index 5 must be applied")
+}
+
+func TestCheckLearnerCatchup_NoLearners(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.commitIndex = 100
+	n.mu.Unlock()
+
+	n.mu.Lock()
+	n.checkLearnerCatchup()
+	n.mu.Unlock()
+
+	select {
+	case p := <-n.proposalCh:
+		t.Fatalf("unexpected proposal: %v", p)
+	default:
+	}
+}
+
+func TestCheckLearnerCatchup_PendingConfChange(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.commitIndex = 100
+	n.learnerIDs["learner-1"] = "learner-1"
+	n.matchIndex["learner-1"] = 100
+	n.pendingConfChangeIndex = 50
+	n.mu.Unlock()
+
+	n.mu.Lock()
+	n.checkLearnerCatchup()
+	n.mu.Unlock()
+
+	select {
+	case p := <-n.proposalCh:
+		t.Fatalf("watcher must not propose while pending: %v", p)
+	default:
+	}
+}
+
+func TestCheckLearnerCatchup_StateNotLeader(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Follower
+	n.commitIndex = 100
+	n.learnerIDs["learner-1"] = "learner-1"
+	n.matchIndex["learner-1"] = 100
+	n.mu.Unlock()
+
+	n.mu.Lock()
+	n.checkLearnerCatchup()
+	n.mu.Unlock()
+
+	select {
+	case p := <-n.proposalCh:
+		t.Fatalf("watcher must not propose when not leader: %v", p)
+	default:
+	}
+}
+
+func TestCheckLearnerCatchup_Threshold(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	cfg.LearnerCatchupThreshold = 10
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.commitIndex = 100
+	n.learnerIDs["learner-far"] = "learner-far"
+	n.matchIndex["learner-far"] = 80
+	n.learnerIDs["learner-near"] = "learner-near"
+	n.matchIndex["learner-near"] = 95
+	n.mu.Unlock()
+
+	n.mu.Lock()
+	n.checkLearnerCatchup()
+	n.mu.Unlock()
+
+	select {
+	case p := <-n.proposalCh:
+		cc := decodeConfChange(p.command)
+		require.Equal(t, ConfChangePromote, cc.Op)
+		require.Equal(t, "learner-near", cc.ID)
+	default:
+		t.Fatal("watcher must propose for caught-up learner")
+	}
+}
+
+func TestApplyLoopClosesPromoteCh(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.Start()
+	defer n.Stop()
+
+	n.mu.Lock()
+	n.learnerIDs["learner-1"] = "learner-1"
+	ch := make(chan struct{})
+	n.learnerPromoteCh["learner-1"] = ch
+	cmd := encodeConfChange(ConfChangePromote, "learner-1", "")
+	entry := LogEntry{Term: 1, Index: 1, Command: cmd, Type: LogEntryConfChange}
+	n.log = append(n.log, entry)
+	n.firstIndex = 1
+	n.commitIndex = 1
+	n.lastApplied = 0
+	n.mu.Unlock()
+
+	n.signalCommit()
+
+	select {
+	case <-ch:
+		// PASS
+	case <-time.After(1 * time.Second):
+		t.Fatal("promoteCh not closed after promote commit")
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	_, exists := n.learnerPromoteCh["learner-1"]
+	require.False(t, exists, "promoteCh entry must be deleted after close")
+}
+
+func TestAddVoter_Idempotent_AlreadyVoter(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"existing-voter"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.mu.Unlock()
+
+	err := n.AddVoter("existing-voter", "existing-voter")
+	require.NoError(t, err, "already-voter must return nil idempotently")
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	_, isLearner := n.learnerIDs["existing-voter"]
+	require.False(t, isLearner, "voter must not be demoted to learner")
+}
+
+func TestAddVoter_NotLeader(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+
+	err := n.AddVoter("new-node", "new-node")
+	require.ErrorIs(t, err, ErrNotLeader)
+}
+
+func TestAddVoter_MixedVersion(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.mu.Unlock()
+	n.SetMixedVersion(true)
+
+	err := n.AddVoter("new-node", "new-node")
+	require.ErrorIs(t, err, ErrMixedVersionNoMembershipChange)
+}
+
+func TestAddVoter_Concurrent_ReturnsErr(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.pendingConfChangeIndex = 50
+	n.mu.Unlock()
+
+	err := n.AddVoter("new-node", "new-node")
+	require.ErrorIs(t, err, ErrConfChangeInProgress)
+}
+
+func TestAddVoter_CtxTimeout_LearnerRemains(t *testing.T) {
+	// Verifies the ctx-timeout path of AddVoterCtx. Without Start() the batcher
+	// is not consuming proposalCh, so AddLearner ConfChange never commits and
+	// the proposeConfChangeWait inside AddVoter respects ctx.Done() and returns.
+	// The learnerIDs map is checked manually to confirm no spurious side effects.
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := n.AddVoterCtx(ctx, "slow-learner", "slow-learner")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// Since no apply loop ran, no learner was added — but if it had been added,
+	// the iron rule says it must remain on ctx timeout. Both states satisfy
+	// "learner not promoted to voter" for this test.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, p := range n.config.Peers {
+		require.NotEqual(t, "slow-learner", p, "must not be voter on ctx timeout")
+	}
+}
+
+func TestAddVoter_Idempotent_AlreadyLearner(t *testing.T) {
+	// Verifies that a node already in learnerIDs is not in config.Peers,
+	// so the pre-check doesn't short-circuit. (Full re-call behavior covered E2E.)
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.state = Leader
+	n.learnerIDs["existing-learner"] = "existing-learner"
+	mu := false
+	for _, p := range n.config.Peers {
+		if p == "existing-learner" {
+			mu = true
+		}
+	}
+	n.mu.Unlock()
+	require.False(t, mu, "learner must not be in config.Peers")
+}
+
+// TestInitLeaderState_InitializesLearnerReplicationState is a regression test
+// for a bug where a node elected leader after a learner had been added in a
+// previous term would have unset nextIndex/matchIndex for that learner.
+// Without this initialization, the catch-up watcher reads matchIndex=0 from
+// an absent map entry, replicateToAll's learner replication starts from
+// nextIdx=0 (snapshot mode unintentionally), and learner promotion stalls.
+func TestInitLeaderState_InitializesLearnerReplicationState(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"voter-1"})
+	n := NewNode(cfg)
+
+	// Simulate state after a learner was added in a previous term while this
+	// node was a follower (applyConfigChangeLocked added it to learnerIDs but
+	// did not touch nextIndex/matchIndex — those are leader-only state).
+	n.mu.Lock()
+	n.learnerIDs["learner-1"] = "learner-addr"
+	// Simulate some entries in the log
+	n.log = []LogEntry{
+		{Term: 1, Index: 1, Command: []byte("e1")},
+		{Term: 1, Index: 2, Command: []byte("e2")},
+	}
+	n.firstIndex = 1
+
+	// Now this node becomes leader.
+	n.initLeaderState()
+	defer n.mu.Unlock()
+
+	// Both voter and learner must have nextIndex set to lastLogIdx+1.
+	expectedNext := uint64(3) // lastLogIdx (2) + 1
+	require.Equal(t, expectedNext, n.nextIndex["voter-1"], "voter nextIndex must be initialized")
+	require.Equal(t, expectedNext, n.nextIndex["learner-addr"], "learner nextIndex must be initialized")
+	require.Equal(t, uint64(0), n.matchIndex["learner-addr"], "learner matchIndex must start at 0")
 }

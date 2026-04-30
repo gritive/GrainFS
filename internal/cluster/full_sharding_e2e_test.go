@@ -205,3 +205,6 @@ func (a *fullShardDataNode) AddLearner(id, _ string) error  { return a.n.AddLear
 func (a *fullShardDataNode) PromoteToVoter(id string) error { return a.n.PromoteToVoter(id) }
 func (a *fullShardDataNode) RemoveVoter(id string) error    { return a.n.RemoveVoter(id) }
 func (a *fullShardDataNode) TransferLeadership() error      { return a.n.TransferLeadership() }
+func (a *fullShardDataNode) AddVoterCtx(ctx context.Context, id, addr string) error {
+	return a.n.AddVoterCtx(ctx, id, addr)
+}
