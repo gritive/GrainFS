@@ -879,12 +879,30 @@ func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []b
 	// for different versions land at different paths without changing the API.
 	shardKey := key + "/" + versionID
 
-	// 링이 있으면 결정론적 배치 사용, 없으면 기존 PlacementForNodes 사용
+	// 링이 있으면 결정론적 배치 사용, 없으면 기존 PlacementForNodes 사용.
+	// 링 배치에 unhealthy 노드가 포함되면 write-all 실패하므로 live 노드만 사용하는
+	// PlacementForNodes로 폴백한다 (ringVer=0 → read는 metaNodeIDs 경로 사용).
 	var placement []string
 	var ringVer RingVersion
 	if currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing(); ringErr == nil {
-		placement = currentRing.PlacementForKey(effectiveCfg, shardKey)
-		ringVer = currentRing.Version
+		candidate := currentRing.PlacementForKey(effectiveCfg, shardKey)
+		liveSet := make(map[string]bool, len(liveNodes))
+		for _, n := range liveNodes {
+			liveSet[n] = true
+		}
+		allLive := true
+		for _, n := range candidate {
+			if !liveSet[n] {
+				allLive = false
+				break
+			}
+		}
+		if allLive {
+			placement = candidate
+			ringVer = currentRing.Version
+		} else {
+			placement = PlacementForNodes(effectiveCfg, liveNodes, shardKey)
+		}
 	} else {
 		placement = PlacementForNodes(effectiveCfg, liveNodes, shardKey)
 	}
