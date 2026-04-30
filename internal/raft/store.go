@@ -364,11 +364,35 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 
 func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 	b := raftBuilderPool.Get()
+
+	// Build ServerEntry objects BEFORE SnapshotMetaStart (FlatBuffers rule: create nested objects before parent).
+	var serversVec flatbuffers.UOffsetT
+	if len(snap.Servers) > 0 {
+		serverOffs := make([]flatbuffers.UOffsetT, len(snap.Servers))
+		for i := len(snap.Servers) - 1; i >= 0; i-- {
+			sv := snap.Servers[i]
+			idOff := b.CreateString(sv.ID)
+			pb.ServerEntryStart(b)
+			pb.ServerEntryAddId(b, idOff)
+			pb.ServerEntryAddSuffrage(b, int8(sv.Suffrage))
+			serverOffs[i] = pb.ServerEntryEnd(b)
+		}
+		pb.SnapshotMetaStartServersVector(b, len(serverOffs))
+		for i := len(serverOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(serverOffs[i])
+		}
+		serversVec = b.EndVector(len(serverOffs))
+	}
+
 	pb.SnapshotMetaStart(b)
 	pb.SnapshotMetaAddIndex(b, snap.Index)
 	pb.SnapshotMetaAddTerm(b, snap.Term)
+	if len(snap.Servers) > 0 {
+		pb.SnapshotMetaAddServers(b, serversVec)
+	}
 	root := pb.SnapshotMetaEnd(b)
 	meta := fbFinishRPC(b, root)
+
 	return s.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(keySnapshotMeta, meta); err != nil {
 			return err
@@ -396,6 +420,15 @@ func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 			m := pb.GetRootAsSnapshotMeta(val, 0)
 			snap.Index = m.Index()
 			snap.Term = m.Term()
+			var se pb.ServerEntry
+			for i := 0; i < m.ServersLength(); i++ {
+				if m.Servers(&se, i) {
+					snap.Servers = append(snap.Servers, Server{
+						ID:       string(se.Id()),
+						Suffrage: ServerSuffrage(se.Suffrage()),
+					})
+				}
+			}
 			return nil
 		}); err != nil {
 			return err
