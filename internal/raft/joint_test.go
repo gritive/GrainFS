@@ -71,11 +71,12 @@ func TestJointConfChangeEntry_PreservesNonVoter(t *testing.T) {
 // avoided — these tests exercise only in-memory voter-set arithmetic.
 func jointTestNode(id string) *Node {
 	return &Node{
-		id:               id,
-		matchIndex:       make(map[string]uint64),
-		nextIndex:        make(map[string]uint64),
-		learnerIDs:       make(map[string]string),
-		learnerPromoteCh: make(map[string]chan struct{}),
+		id:                   id,
+		matchIndex:           make(map[string]uint64),
+		nextIndex:            make(map[string]uint64),
+		learnerIDs:           make(map[string]string),
+		learnerPromoteCh:     make(map[string]chan struct{}),
+		jointManagedLearners: make(map[string]struct{}),
 	}
 }
 
@@ -232,6 +233,28 @@ func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
 	default:
 	}
 	require.NotNil(t, n.jointPromoteCh)
+}
+
+// TestSetChangeMembershipDefaults_PersistsAcrossCalls — Sub-project 3 PR-K1.
+func TestSetChangeMembershipDefaults_PersistsAcrossCalls(t *testing.T) {
+	n := jointTestNode("n1")
+	n.SetChangeMembershipDefaults(ChangeMembershipOpts{CatchUpTimeout: 5 * time.Second})
+
+	n.mu.Lock()
+	got := n.effectiveChangeMembershipOpts()
+	n.mu.Unlock()
+
+	require.Equal(t, 5*time.Second, got.CatchUpTimeout)
+}
+
+func TestEffectiveChangeMembershipOpts_DefaultTimeout(t *testing.T) {
+	n := jointTestNode("n1")
+
+	n.mu.Lock()
+	got := n.effectiveChangeMembershipOpts()
+	n.mu.Unlock()
+
+	require.Equal(t, 30*time.Second, got.CatchUpTimeout)
 }
 
 // TestApply_JointLeave_LearnerPromotionClearsLearnerIDs — Sub-project 3 prereq.

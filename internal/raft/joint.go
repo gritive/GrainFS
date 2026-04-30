@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -512,4 +513,31 @@ func equalServerSets(a, b []ServerEntry) bool {
 		}
 	}
 	return true
+}
+
+// ChangeMembershipOpts configures default behavior for ChangeMembership.
+type ChangeMembershipOpts struct {
+	// CatchUpTimeout bounds the per-learner catch-up wait. Default 30s.
+	CatchUpTimeout time.Duration
+	// SkipLearnerPhase forces direct joint propose (no learner-first catch-up).
+	// Use only when callers have other catch-up guarantees.
+	SkipLearnerPhase bool
+}
+
+// SetChangeMembershipDefaults configures default ChangeMembership behavior.
+// Concurrent updates are safe under n.mu. Zero CatchUpTimeout falls back to 30s.
+func (n *Node) SetChangeMembershipDefaults(opts ChangeMembershipOpts) {
+	n.mu.Lock()
+	n.changeMembershipDefaults = opts
+	n.mu.Unlock()
+}
+
+// effectiveChangeMembershipOpts returns the merged options (caller's defaults
+// vs internal fallback). Called with n.mu held.
+func (n *Node) effectiveChangeMembershipOpts() ChangeMembershipOpts {
+	opts := n.changeMembershipDefaults
+	if opts.CatchUpTimeout <= 0 {
+		opts.CatchUpTimeout = 30 * time.Second
+	}
+	return opts
 }

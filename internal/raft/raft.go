@@ -248,6 +248,18 @@ type Node struct {
 	learnerIDs       map[string]string        // nodeID → peerKey; learners not counted for quorum
 	learnerPromoteCh map[string]chan struct{} // nodeID → ch; closed in apply loop when PromoteToVoter commits (AddVoter caller wakeup)
 
+	// jointManagedLearners tracks learners that ChangeMembership added in the
+	// pre-joint window. checkLearnerCatchup skips these to prevent the
+	// auto-promote watcher from racing with the upcoming JointEnter. Cleared
+	// on joint apply success or defer cleanup. Leader-only volatile in K1/K2;
+	// PR-K3 makes this a state-machine output via ConfChange.managed_by_joint.
+	jointManagedLearners map[string]struct{}
+
+	// changeMembershipDefaults configures default behavior of ChangeMembership.
+	// Mutated under mu via SetChangeMembershipDefaults. Zero CatchUpTimeout
+	// falls back to 30s.
+	changeMembershipDefaults ChangeMembershipOpts
+
 	// config
 	config Config
 
@@ -332,7 +344,8 @@ func NewNode(config Config, store ...LogStore) *Node {
 		nextIndex:        make(map[string]uint64),
 		matchIndex:       make(map[string]uint64),
 		learnerIDs:       make(map[string]string),
-		learnerPromoteCh: make(map[string]chan struct{}),
+		learnerPromoteCh:     make(map[string]chan struct{}),
+		jointManagedLearners: make(map[string]struct{}),
 		checkQuorumAcks:  make(map[string]time.Time),
 		applyCh:          make(chan LogEntry, 64),
 		stopCh:           make(chan struct{}),
