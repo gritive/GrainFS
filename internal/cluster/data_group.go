@@ -84,6 +84,23 @@ func (m *DataGroupManager) All() []*DataGroup {
 	return m.snap.Load().all
 }
 
+// GroupForBucket resolves a bucket to its DataGroup via the supplied router.
+// Returns (nil, false) if router is nil, the bucket has no assignment and no
+// default group is set, or the assigned group has been removed from the manager.
+//
+// This is the ClusterCoordinator's single entry point for bucket-scoped routing
+// — keeping the lookup in one place avoids drift between coordinator code paths.
+func (m *DataGroupManager) GroupForBucket(bucket string, router *Router) (*DataGroup, bool) {
+	if router == nil {
+		return nil, false
+	}
+	dg, err := router.RouteKey(bucket, "")
+	if err != nil || dg == nil {
+		return nil, false
+	}
+	return dg, true
+}
+
 // Remove removes the group with the given ID. Returns true if removed.
 // Used during graceful shutdown when a node leaves a voter set.
 func (m *DataGroupManager) Remove(id string) bool {
