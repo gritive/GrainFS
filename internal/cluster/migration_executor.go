@@ -60,6 +60,10 @@ type MigrationExecutor struct {
 	node      MigrationRaft
 	numShards int
 
+	// shardCountFor returns the number of shards for a given versioned object.
+	// nil means use numShards for every object (legacy behaviour).
+	shardCountFor func(bucket, key, versionID string) int
+
 	// maxWriteRetries is the maximum number of WriteShard attempts per shard (0 = no retry).
 	maxWriteRetries int
 	retryBaseDelay  time.Duration
@@ -110,6 +114,13 @@ func newExecutor(mover ShardMover, node MigrationRaft, numShards int, ttl time.D
 		quit:           make(chan struct{}),
 		logger:         log.With().Str("component", "migration").Logger(),
 	}
+}
+
+// SetShardCounter installs a per-object shard-count callback. fn receives (bucket,
+// key, versionID) and returns the number of shards that exist for that object.
+// A return value of 0 falls back to numShards (not "zero shards"). Call before Start.
+func (e *MigrationExecutor) SetShardCounter(fn func(bucket, key, versionID string) int) {
+	e.shardCountFor = fn
 }
 
 // SetMaxWriteRetries configures the maximum number of WriteShard attempts per shard.
@@ -311,13 +322,15 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 
 	if !earlyCommit {
 		// Phase 1: copy all shards src → dst
-		// NOTE: In current cluster mode (N× full-replication), PutObject writes
-		// only shardIdx=0 per peer. This loop reads shardIdx 0..numShards-1, so
-		// iterations i>=1 will fail with ENOENT. Expected behavior until Phase 18
-		// Cluster EC rewires PutObject to real shard placement.
 		e.logger.Debug().Str("phase", "1").Str("task", id).Msg("migration phase start")
 		copyStart := time.Now()
-		for i := range e.numShards {
+		nShards := e.numShards
+		if e.shardCountFor != nil {
+			if n := e.shardCountFor(task.Bucket, task.Key, task.VersionID); n > 0 {
+				nShards = n
+			}
+		}
+		for i := range nShards {
 			data, err := e.mover.ReadShard(ctx, task.SrcNode, task.Bucket, task.Key, i)
 			if err != nil {
 				e.cleanupPending(id)
