@@ -543,6 +543,40 @@ func TestJoint_E2E_RemoveOne(t *testing.T) {
 	require.Len(t, peers, 2, "leader sees 3-node cluster minus self after removal")
 }
 
+// TestChangeMembership_RemovesOnly_E2E — Sub-project 3 PR-K1. Verifies the
+// removes-only fast path through ChangeMembership end-to-end.
+func TestChangeMembership_RemovesOnly_E2E(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader)
+
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		if p != leader.id {
+			removeID = p
+			break
+		}
+	}
+	leader.mu.Unlock()
+	require.NotEmpty(t, removeID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	err := leader.ChangeMembership(ctx, nil, []string{removeID})
+	require.NoError(t, err)
+
+	leader.mu.Lock()
+	phase := leader.jointPhase
+	peers := append([]string(nil), leader.config.Peers...)
+	leader.mu.Unlock()
+
+	require.Equal(t, JointNone, phase)
+	require.NotContains(t, peers, removeID)
+}
+
 func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T) {
 	n := jointTestNode("n1")
 	n.initialPeers = []string{"n1", "n2", "n3"}
