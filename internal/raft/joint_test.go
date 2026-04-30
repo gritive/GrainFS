@@ -770,6 +770,52 @@ func TestRebuildConfigFromLog_TruncatedJointLeave_RevertsToEntering(t *testing.T
 	require.False(t, n.jointLeaveProposed)
 }
 
+// TestRebuildConfigFromLog_RestoresRemovedFromCluster — PR-K1 follow-up.
+// Replay path must mirror commit-time hook (raft.go:586) and set
+// removedFromCluster when JointLeave commits with self ∉ C_new. Without this,
+// a restarted orphan node has flag=false and rejoins elections.
+func TestRebuildConfigFromLog_RestoresRemovedFromCluster(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n1", "n2", "n3", "n4"}
+
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+			NewServers: []ServerEntry{{ID: "n2"}, {ID: "n3"}, {ID: "n4"}}, // n1 removed
+		})},
+		{Index: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			NewServers: []ServerEntry{{ID: "n2"}, {ID: "n3"}, {ID: "n4"}},
+		})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.True(t, n.removedFromCluster,
+		"replay must set removedFromCluster when JointLeave excludes self")
+}
+
+func TestRebuildConfigFromLog_RejoinClearsRemovedFromCluster(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n2", "n3"}
+	// Stale state from a previous removal.
+	n.removedFromCluster = true
+
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}}, // n1 rejoined
+		})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.False(t, n.removedFromCluster,
+		"JointEnter that brings self into C_new clears removedFromCluster")
+}
+
 // TestRebuildConfigFromLog_JointLeavePromotionClearsLearners — Sub-project 3
 // prereq: replay path mirror of TestApply_JointLeave_LearnerPromotionClearsLearnerIDs.
 func TestRebuildConfigFromLog_JointLeavePromotionClearsLearners(t *testing.T) {

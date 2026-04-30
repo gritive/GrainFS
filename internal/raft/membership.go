@@ -375,6 +375,11 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 	var jPhase jointPhase
 	var jOldVoters, jNewVoters []string
 	var jEnterIndex uint64
+	// removedFromCluster mirrors the apply-path commit-time hook (raft.go:586):
+	// orphan election guard must survive process restart from log replay.
+	// Without this, a restarted self-removed node has flag=false and rejoins
+	// elections, splitting votes against C_new.
+	var removed bool
 
 	for _, entry := range n.log {
 		if entry.Index < startIndex {
@@ -433,12 +438,19 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				jOldVoters = serverPeerKeys(jc.OldServers)
 				jNewVoters = serverPeerKeys(jc.NewServers)
 				jEnterIndex = entry.Index
+				// JointEnter that brings self into C_new clears any prior
+				// removal flag (rejoin scenario).
+				if containsPeer(jNewVoters, n.id) {
+					removed = false
+				}
 			case JointOpLeave:
 				peers = peersExcludingSelf(jc.NewServers, n.id)
 				// Mirror apply path: clear promoted learners from the replay map.
 				for _, s := range jc.NewServers {
 					delete(learnerAddrs, s.ID)
 				}
+				// Mirror commit-time hook (raft.go:586): orphan election guard.
+				removed = !containsPeer(serverPeerKeys(jc.NewServers), n.id)
 				jPhase = JointNone
 				jOldVoters = nil
 				jNewVoters = nil
@@ -452,5 +464,6 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 	n.jointOldVoters = jOldVoters
 	n.jointNewVoters = jNewVoters
 	n.jointEnterIndex = jEnterIndex
+	n.removedFromCluster = removed
 	n.jointLeaveProposed = false // truncation 후 leader watcher가 재평가
 }
