@@ -206,17 +206,41 @@ func (n *Node) applyConfigChangeLocked(entry LogEntry) {
 	n.pendingConfChangeIndex = entry.Index
 }
 
-// rebuildConfigFromLog reconstructs config.Peers from initialPeers and all
-// ConfChange entries in the current in-memory log (after log truncation).
-// MUST be called with n.mu held.
-func (n *Node) rebuildConfigFromLog() {
-	// Start from bootstrap peers
-	peers := make([]string, len(n.initialPeers))
-	copy(peers, n.initialPeers)
-	learnerAddrs := make(map[string]string) // nodeID → peerKey for replay
+// restoreConfigFromServers splits a snapshot servers list into peers (Voter,
+// excluding self) and a learnerIDs map (NonVoter, nodeID → nodeID).
+// selfID is the local node's ID; it is excluded from both outputs.
+func restoreConfigFromServers(servers []Server, selfID string) (peers []string, learners map[string]string) {
+	learners = make(map[string]string)
+	for _, sv := range servers {
+		if sv.ID == selfID {
+			continue
+		}
+		if sv.Suffrage == Voter {
+			peers = append(peers, sv.ID)
+		} else {
+			learners[sv.ID] = sv.ID
+		}
+	}
+	return peers, learners
+}
 
-	// Replay all ConfChange entries still in the log
+// rebuildConfigFromLog reconstructs config.Peers from basePeers and all
+// ConfChange entries in the current in-memory log at index ≥ startIndex.
+// Pass startIndex=0 and basePeers=n.initialPeers for normal bootstrap.
+// Pass the snapshot index and servers-derived peers when restoring from snapshot.
+// MUST be called with n.mu held.
+func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseLearners map[string]string) {
+	peers := make([]string, len(basePeers))
+	copy(peers, basePeers)
+	learnerAddrs := make(map[string]string, len(baseLearners))
+	for k, v := range baseLearners {
+		learnerAddrs[k] = v
+	}
+
 	for _, entry := range n.log {
+		if entry.Index < startIndex {
+			continue
+		}
 		if entry.Type != LogEntryConfChange {
 			continue
 		}
@@ -264,5 +288,5 @@ func (n *Node) rebuildConfigFromLog() {
 		}
 	}
 	n.config.Peers = peers
-	n.learnerIDs = learnerAddrs // persist surviving learners after replay
+	n.learnerIDs = learnerAddrs
 }

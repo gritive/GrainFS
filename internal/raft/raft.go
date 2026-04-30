@@ -1374,7 +1374,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	// §4.4: after truncation, rebuild config from initial peers + remaining log,
 	// then apply ConfChange entries in the newly appended batch.
 	if truncated {
-		n.rebuildConfigFromLog()
+		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
 	}
 	for i := range newEntries {
 		if newEntries[i].Type == LogEntryConfChange {

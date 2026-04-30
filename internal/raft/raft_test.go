@@ -554,7 +554,7 @@ func TestConfChange_RebuildConfigAfterTruncation(t *testing.T) {
 
 	// Simulate truncation: ConfChange entry is removed from the log.
 	node.log = nil
-	node.rebuildConfigFromLog()
+	node.rebuildConfigFromLog(0, node.initialPeers, map[string]string{})
 
 	peers := make([]string, len(node.config.Peers))
 	copy(peers, node.config.Peers)
