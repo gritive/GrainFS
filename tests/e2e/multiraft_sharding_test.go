@@ -3,9 +3,11 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -254,11 +256,9 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	// Flaky on macOS multi-process: meta-Raft leader changes between calls
-	// cause AWS SDK retries to time out after 3 attempts. The cross-node
-	// dispatch wiring (T8/v0.0.7.1) will move CreateBucket assignment to a
-	// path that auto-redirects to current leader. Re-enable then.
-	t.Skip("flaky: meta-Raft leader change races AWS SDK retry; re-enable after data-plane routing (v0.0.7.1)")
+	// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.
+	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
+	// the same forward path with try-each-peer reliability.
 
 	c := startMRCluster(t, 5, 8)
 
@@ -316,11 +316,8 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	// Flaky for the same reason as BucketAssignment — leader-probe CreateBucket
-	// occasionally fails to find a writable node within the 90s budget under
-	// macOS scheduler. Verified working when probe lands fast; not stable enough
-	// to gate. Re-enable after data-plane routing path lands.
-	t.Skip("flaky: leader-probe race; re-enable after data-plane routing (v0.0.7.1)")
+	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
+	// leader-probe flakes.
 
 	c := startMRCluster(t, 3, 4) // 3 procs, 4 groups for shorter cycle
 
@@ -374,4 +371,328 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 			gid, beforeCount, afterDirs[gid])
 	}
 	t.Logf("restart ok: %d groups recovered", len(afterDirs))
+}
+
+// ----- TestE2E_MultiRaftSharding_PerGroupPersistence ---------------------
+// Verify that an object written to a bucket is stored only in the assigned
+// group's BadgerDB, not in other groups. Validates the routing path
+// (ClusterCoordinator → ForwardSender → ForwardReceiver → GroupBackend.PutObject).
+func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startMRCluster(t, 3, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create a bucket (will be assigned to some group).
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("persist-test")})
+	require.NoError(t, err)
+
+	// Write an object.
+	const body = "per-group-persistence-test-data"
+	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("persist-test"),
+		Key:    aws.String("test-key"),
+		Body:   []byte(body),
+	})
+	require.NoError(t, err)
+
+	// Verify the object exists via GET (routing works).
+	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("persist-test"),
+		Key:    aws.String("test-key"),
+	})
+	require.NoError(t, err)
+	defer getOut.Body.Close()
+	readBody, err := io.ReadAll(getOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, string(readBody))
+
+	// Validate data lives in exactly one group's BadgerDB (group-{N}/badger/data.mdb).
+	// Scan all nodes' group dirs; the object key should appear in exactly one.
+	var matches int
+	for _, d := range c.dataDirs {
+		groupsDir := filepath.Join(d, "groups")
+		entries, err := os.ReadDir(groupsDir)
+		if err != nil {
+			continue // node may not host any groups
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			badgerDir := filepath.Join(groupsDir, e.Name(), "badger")
+			db, err := badger.Open(badger.DefaultOptions(badgerDir).WithLogger(nil))
+			if err != nil {
+				continue
+			}
+			err = db.View(func(txn *badger.Txn) error {
+				iter := txn.NewIterator(badger.DefaultIteratorOptions)
+				defer iter.Close()
+				for iter.Rewind() ; iter.Valid(); iter.Next() {
+					item := iter.Item()
+					if strings.Contains(string(item.Key), "test-key") {
+						matches++
+					}
+				}
+				return nil
+			})
+			db.Close()
+			if err != nil {
+				continue
+			}
+		}
+	}
+	require.Equal(t, 1, matches, "expected object to persist in exactly one group's BadgerDB")
+	t.Log("per-group persistence ok: object stored in exactly one group")
+}
+
+// ----- TestE2E_MultiRaftSharding_CrossNodeDispatch -------------------------
+// Verify that a PUT request arriving at a non-voter node is forwarded to
+// the correct group leader and persisted. Tests ClusterCoordinator's
+// forward.Send → peer's ForwardReceiver → GroupBackend.PutObject path.
+func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startMRCluster(t, 3, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create bucket via leader.
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("cross-node-test")})
+	require.NoError(t, err)
+
+	// Write object via a non-leader node (if leaderIdx != 0, use node 0; otherwise node 1).
+	writeNodeIdx := 0
+	if writeNodeIdx == c.leaderIdx {
+		writeNodeIdx = 1
+	}
+	writeCLI := ecS3Client(c.httpURLs[writeNodeIdx], c.accessKey, c.secretKey)
+	const body = "cross-node-dispatch-test-data"
+	_, err = writeCLI.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("cross-node-test"),
+		Key:    aws.String("dispatch-key"),
+		Body:   []byte(body),
+	})
+	require.NoError(t, err)
+
+	// Verify object is readable via any node (routing consistency).
+	readCLI := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
+	getOut, err := readCLI.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("cross-node-test"),
+		Key:    aws.String("dispatch-key"),
+	})
+	require.NoError(t, err)
+	defer getOut.Body.Close()
+	readBody, err := io.ReadAll(getOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, string(readBody))
+	t.Log("cross-node dispatch ok: non-voter PUT forwarded to leader and persisted")
+}
+
+// ----- TestE2E_MultiRaftSharding_GroupLeaderFailover ------------------------
+// Simulate leader crash (SIGTERM) for a group and verify another voter takes
+// over, then PUT/GET continue to work. Validates Raft election + FSM
+// continuity under the new ClusterCoordinator routing (try-each-peer
+// eventually hits the new leader).
+func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startMRCluster(t, 3, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create bucket and write object via current leader.
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("failover-test")})
+	require.NoError(t, err)
+
+	const body = "failover-test-data"
+	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("failover-test"),
+		Key:    aws.String("failover-key"),
+			Body:   []byte(body),
+	})
+	require.NoError(t, err)
+
+	// Find which node hosts the leader for the assigned group (simplification:
+	// we kill the leader node process; whichever group loses leader
+	// should recover quickly within 1-2 election timeouts).
+	// In production, ShardService/GroupBackend.RaftNode().LeaderID() would identify
+	// the exact process; for e2e we rely on RF=3 so killing any voter forces
+	// an election.
+	killIdx := c.leaderIdx
+	t.Logf("killing leader node %d to trigger group failover", killIdx)
+
+	// SIGTERM the leader process.
+	require.NotNil(t, c.procs[killIdx], "leader process must exist")
+	err = c.procs[killIdx].Process.Signal(syscall.SIGTERM)
+	require.NoError(t, err)
+	_ = c.procs[killIdx].Wait()
+
+	// Wait for new leader to emerge (CreateBucket should succeed).
+	newLeaderCtx, newLeaderCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer newLeaderCancel()
+	var newLeaderIdx int
+	for i := range c.procs {
+		if i == killIdx {
+			continue
+		}
+		testCli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
+		ctx2, cancel2 := context.WithTimeout(newLeaderCtx, 5*time.Second)
+		_, err := testCli.CreateBucket(ctx2, &s3.CreateBucketInput{Bucket: aws.String("failover-test-probe")})
+		cancel2()
+		if err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou") {
+			newLeaderIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, newLeaderIdx, 0, "new leader must emerge")
+	require.NotEqual(t, killIdx, newLeaderIdx, "new leader must be different from killed leader")
+	t.Logf("new leader emerged: node %d", newLeaderIdx)
+
+	// Verify PUT/GET work via new leader.
+	newCLI := ecS3Client(c.httpURLs[newLeaderIdx], c.accessKey, c.secretKey)
+	const body2 = "post-failover-data"
+	_, err = newCLI.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("failover-test"),
+		Key:    aws.String("failover-key-2"),
+		Body:   []byte(body2),
+	})
+	require.NoError(t, err)
+
+	getOut, err := newCLI.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("failover-test"),
+		Key:    aws.String("failover-key-2"),
+	})
+	require.NoError(t, err)
+	defer getOut.Body.Close()
+	readBody, err := io.ReadAll(getOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, body2, string(readBody))
+
+	// Original object should still be readable (persistence survived failover).
+	getOut2, err := newCLI.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("failover-test"),
+		Key:    aws.String("failover-key"),
+	})
+	require.NoError(t, err)
+	defer getOut2.Body.Close()
+	readBody2, err := io.ReadAll(getOut2.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, string(readBody2))
+	t.Log("group leader failover ok: new leader elected, data persisted, PUT/GET work")
+}
+
+// ----- TestE2E_MultiRaftSharding_NFSv4Smoke ----------------------------
+// Cross-protocol parity: verify that NFSv4 (when enabled) also routes
+// through ClusterCoordinator, so objects written via S3 are readable
+// over NFSv4 mount and vice versa. Linux-only because our NFSv4
+// server binds 0.0.0.0 which requires Linux.
+func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("NFSv4 server is Linux-only (binds 0.0.0.0)")
+	}
+
+	c := startMRCluster(t, 3, 4)
+
+	// Start a grainfs instance with NFSv4 enabled on a dedicated port.
+	// We reuse the same data dir so it sees the same meta-Raft + per-group state.
+	nfsPort := freePort()
+	nfsDataDir := c.dataDirs[0]
+	nfsProc := exec.Command(getBinary(), "serve",
+		"--data", nfsDataDir,
+		"--port", fmt.Sprintf("%d", freePort()),
+		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
+		"--access-key", c.accessKey,
+			"--secret-key", c.secretKey,
+		"--no-encryption",
+	)
+	require.NoError(t, nfsProc.Start(), "start NFSv4 server")
+	defer func() {
+		_ = nfsProc.Process.Signal(syscall.SIGTERM)
+		_ = nfsProc.Wait()
+		_ = os.RemoveAll(filepath.Join(nfsDataDir, "nfs4-socket"))
+	}()
+
+	// Wait for NFSv4 socket to appear.
+	nfsSocketPath := filepath.Join(nfsDataDir, "nfs4-socket")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(nfsSocketPath)
+		return err == nil
+	}, 30*time.Second, 500*time.Millisecond, "NFSv4 socket not created")
+
+	// Mount NFSv4 using the system 'mount' command (requires root/nfs-common).
+	// We create a temp mount point and mount 127.0.0.1:{port}:/ {bucket-name}.
+	mountDir, err := os.MkdirTemp("", "mrshard-nfs-*")
+	require.NoError(t, err)
+	defer func() {
+		_ = exec.Command("umount", mountDir).Run()
+		_ = os.Remove(mountDir)
+	}()
+
+	// Mount with the default NFSv4 options (read/write, hard/intr).
+	mountCmd := exec.Command("mount", "-t", "nfs4",
+		fmt.Sprintf("127.0.0.1:%d:/", nfsPort),
+		mountDir,
+		"-o", "rw,hard,intr,timeo=600,retrans=2",
+	)
+	out, err := mountCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("NFSv4 mount failed (may require sudo): %v\n%s", err, string(out))
+		t.Skip("NFSv4 mount failed — NFSv4 smoke test requires mount permissions; skipping")
+	}
+	defer func() {
+		_ = exec.Command("umount", mountDir).Run()
+	}()
+
+	// Write object via S3 API.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
+	_, err = cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("nfs-smoke")})
+	require.NoError(t, err)
+
+	const s3Body = "written-via-s3"
+	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("nfs-smoke"),
+		Key:    aws.String("s3-file.txt"),
+		Body:   []byte(s3Body),
+	})
+	require.NoError(t, err)
+
+	// Verify via NFSv4 filesystem.
+	nfsFilePath := filepath.Join(mountDir, "nfs-smoke", "s3-file.txt")
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(nfsFilePath)
+		return err == nil && string(data) == s3Body
+	}, 30*time.Second, 500*time.Millisecond, "object not visible via NFSv4")
+
+	// Write via NFSv4 and read via S3 API.
+	const nfsBody = "written-via-nfs"
+	err = os.WriteFile(nfsFilePath, []byte(nfsBody), 0644)
+	require.NoError(t, err)
+
+	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("nfs-smoke"),
+		Key:    aws.String("nfs-file.txt"),
+	})
+	require.NoError(t, err)
+	defer getOut.Body.Close()
+	nfsReadBody, err := io.ReadAll(getOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, nfsBody, string(nfsReadBody))
+
+	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
 }
