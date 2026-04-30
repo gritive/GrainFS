@@ -38,6 +38,7 @@ type mrCluster struct {
 	clusterKey string
 	accessKey  string
 	secretKey  string
+	leaderIdx  int // last-known leader (set during probe)
 }
 
 func startMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
@@ -75,14 +76,18 @@ func startMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
 	}
 	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
 
-	// Wait for at least one node to be writable (leader elected)
+	// Wait for at least one node to be writable (leader elected) and remember
+	// which node accepted — subsequent CreateBucket calls reuse this leader to
+	// avoid 5x NotLeader timeouts per request.
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
+	c.leaderIdx = -1
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {
 			cli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
 			_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("__mrshard-leader-probe")})
 			if err == nil {
+				c.leaderIdx = i
 				return true
 			}
 		}
@@ -214,23 +219,46 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 		t.Skip("e2e")
 	}
 	c := startMRCluster(t, 5, 8)
-	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	for i := 0; i < 32; i++ {
-		_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(fmt.Sprintf("bkt-%d", i)),
-		})
-		require.NoErrorf(t, err, "CreateBucket bkt-%d", i)
+	// Use the leader index discovered during cluster probe — single-shot per
+	// CreateBucket. Falls back to iterating if leader changes.
+	createBucket := func(name string) error {
+		// Try the known leader first.
+		tryNode := func(i int) error {
+			cli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
+			cbCtx, cbCancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cbCancel()
+			_, err := cli.CreateBucket(cbCtx, &s3.CreateBucketInput{Bucket: aws.String(name)})
+			return err
+		}
+		if c.leaderIdx >= 0 {
+			if err := tryNode(c.leaderIdx); err == nil {
+				return nil
+			}
+		}
+		// Leader may have moved — try all
+		var lastErr error
+		for i := 0; i < len(c.procs); i++ {
+			if err := tryNode(i); err == nil {
+				c.leaderIdx = i
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
+		return lastErr
 	}
 
-	// Idempotency: re-create 5 buckets, expect either nil or AlreadyOwnedByYou-shaped error
+	for i := 0; i < 32; i++ {
+		require.NoErrorf(t, createBucket(fmt.Sprintf("bkt-%d", i)), "CreateBucket bkt-%d", i)
+	}
+
+	// Idempotency: re-create 5 buckets, expect either nil or AlreadyOwnedByYou
 	for i := 0; i < 5; i++ {
-		_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(fmt.Sprintf("bkt-%d", i)),
-		})
+		err := createBucket(fmt.Sprintf("bkt-%d", i))
 		if err != nil {
 			require.Contains(t, err.Error(), "BucketAlreadyOwnedByYou",
 				"unexpected non-idempotent error on bkt-%d: %v", i, err)

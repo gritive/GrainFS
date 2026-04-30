@@ -387,7 +387,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		allPeers := append([]string{nodeID}, peers...)
+		// Use raft addresses as cluster-wide identity for ShardGroupEntry.PeerIDs —
+		// every node sees the same set, so pickVoters output is reproducible across
+		// processes. nodeID is a local label; raftAddr is globally consistent.
+		clusterPeers := append([]string{raftAddr}, peers...)
 		const replicationFactor = 3
 		for i := 0; i < seedGroups; i++ {
 			groupID := fmt.Sprintf("group-%d", i)
@@ -396,9 +399,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			// voter placement (RF=3) for true sharding.
 			var voters []string
 			if i == 0 {
-				voters = allPeers
+				voters = clusterPeers
 			} else {
-				voters = cluster.PickVoters(groupID, allPeers, replicationFactor)
+				voters = cluster.PickVoters(groupID, clusterPeers, replicationFactor)
 			}
 			sgCtx, sgCancel := context.WithTimeout(ctx, 30*time.Second)
 			if err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
@@ -488,8 +491,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	//   2. SetOnShardGroupAdded for entries replayed/applied later.
 	// Both call into instantiateOwnedIfNeeded which is idempotent — duplicates
 	// from concurrent paths are no-ops.
-	allClusterPeers := append([]string{nodeID}, peers...)
-	_ = allClusterPeers // referenced via voters in ShardGroupEntry
 	ownedGroups := struct {
 		mu sync.Mutex
 		m  map[string]*cluster.GroupBackend
@@ -500,10 +501,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if entry.ID == "group-0" {
 			return
 		}
-		// Only instantiate for groups where we are a voter.
+		// Only instantiate for groups where we are a voter. PeerIDs use the
+		// cluster-wide raft address as identity (set by the seed loop above);
+		// match against our raftAddr.
 		isVoter := false
 		for _, p := range entry.PeerIDs {
-			if p == nodeID {
+			if p == raftAddr {
 				isVoter = true
 				break
 			}
@@ -519,7 +522,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		ownedGroups.mu.Unlock()
 
 		gb, err := cluster.InstantiateLocalGroup(cluster.GroupLifecycleConfig{
-			NodeID:   nodeID,
+			NodeID:   raftAddr, // identity = raftAddr (matches PeerIDs)
 			DataDir:  dataDir,
 			ShardSvc: shardSvc,
 			EC: cluster.ECConfig{
@@ -538,11 +541,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 
 	// Cold-start instantiation for entries already in FSM (restart path).
-	for _, entry := range metaRaft.FSM().ShardGroups() {
-		instantiateOwnedIfNeeded(entry)
-	}
+	// Run async so the apply loop is not blocked by BadgerDB+raft.Node startup.
+	go func() {
+		for _, entry := range metaRaft.FSM().ShardGroups() {
+			instantiateOwnedIfNeeded(entry)
+		}
+	}()
 	// Runtime: handle entries replayed/applied after this point (fresh boot path).
-	metaRaft.FSM().SetOnShardGroupAdded(instantiateOwnedIfNeeded)
+	// Dispatch to goroutine so apply loop is not blocked by BadgerDB+raft.Node startup.
+	metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
+		go instantiateOwnedIfNeeded(entry)
+	})
 
 	// Shutdown hook: close all owned groups in parallel with 5s timeout each.
 	defer func() {
