@@ -49,6 +49,8 @@ table RequestVoteArgs {
   candidate_id:string;
   last_log_index:uint64;
   last_log_term:uint64;
+  pre_vote:bool;        // §9.6 pre-vote round; receiver must not update state/term
+  leader_transfer:bool; // §3.10 leadership transfer; receiver bypasses stickiness
 }
 
 table RequestVoteReply {
