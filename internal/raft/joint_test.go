@@ -664,6 +664,55 @@ func TestChangeMembership_AddRemove_LearnerFirstHappyPath(t *testing.T) {
 	require.Zero(t, managed, "jointManagedLearners cleared after success")
 }
 
+// TestJoint_E2E_RemoveSelf — Sub-project 3 PR-K1 acceptance test.
+// Leader removes itself via ChangeMembership. Verifies commit-time step-down
+// ordering: jointPromoteCh closes BEFORE state=Follower (raft.go:578-592),
+// so the caller wakes up with nil. Then a new leader is elected from C_new.
+func TestJoint_E2E_RemoveSelf(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	cluster.startAll()
+	oldLeader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, oldLeader)
+
+	oldLeaderID := oldLeader.id
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := oldLeader.ChangeMembership(ctx, nil, []string{oldLeaderID})
+	require.NoError(t, err, "self-removal returns nil via commit-time wakeup")
+
+	require.Equal(t, Follower, oldLeader.State(), "old leader steps down to Follower")
+
+	// New leader from remaining 3 nodes. Allow generous timeout because the
+	// old leader is now a Follower in the same election space (its config.Peers
+	// still references the cluster) and may compete in split votes until it
+	// either wins (and immediately discovers it's not in C_new — see assertion
+	// below) or loses repeatedly to one of the C_new nodes.
+	require.Eventually(t, func() bool {
+		for _, n := range cluster.nodes {
+			if n.State() == Leader && n.id != oldLeaderID {
+				return true
+			}
+		}
+		return false
+	}, 15*time.Second, 50*time.Millisecond, "new leader elected from C_new")
+
+	// New leader's view excludes removed self.
+	var newLeader *Node
+	for _, n := range cluster.nodes {
+		if n.State() == Leader {
+			newLeader = n
+			break
+		}
+	}
+	require.NotNil(t, newLeader)
+	newLeader.mu.Lock()
+	peers := append([]string(nil), newLeader.config.Peers...)
+	newLeader.mu.Unlock()
+	require.NotContains(t, peers, oldLeaderID)
+}
+
 // TestChangeMembership_RemovesOnly_E2E — Sub-project 3 PR-K1. Verifies the
 // removes-only fast path through ChangeMembership end-to-end.
 func TestChangeMembership_RemovesOnly_E2E(t *testing.T) {

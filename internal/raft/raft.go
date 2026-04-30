@@ -255,6 +255,13 @@ type Node struct {
 	// PR-K3 makes this a state-machine output via ConfChange.managed_by_joint.
 	jointManagedLearners map[string]struct{}
 
+	// removedFromCluster is set when the local node observed its own removal
+	// via JointLeave (commit-time self-removal hook). Disables election
+	// participation so the orphan node does not split votes against C_new.
+	// Cleared on apply of ConfChangeAddVoter / ConfChangeAddLearner for self
+	// id, or on JointEnter where self is in C_new.
+	removedFromCluster bool
+
 	// changeMembershipDefaults configures default behavior of ChangeMembership.
 	// Mutated under mu via SetChangeMembershipDefaults. Zero CatchUpTimeout
 	// falls back to 30s.
@@ -596,10 +603,15 @@ func (n *Node) applyLoop() {
 					n.jointPromoteCh = nil
 				}
 				newPeers := serverPeerKeys(jc.NewServers)
-				if n.state == Leader && !containsPeer(newPeers, n.id) {
-					n.state = Follower
-					n.leaderID = ""
-					n.signalReset()
+				if !containsPeer(newPeers, n.id) {
+					n.removedFromCluster = true
+					if n.state == Leader {
+						n.state = Follower
+						n.leaderID = ""
+						n.signalReset()
+					}
+				} else {
+					n.removedFromCluster = false
 				}
 			}
 		}
@@ -915,6 +927,14 @@ func (n *Node) runFollower() {
 	case <-n.resetCh:
 		return // restart the loop, new timeout
 	case <-timer.C:
+		// Skip elections if self was removed from the cluster — orphan nodes
+		// must not split votes against the surviving voter set.
+		n.mu.Lock()
+		removed := n.removedFromCluster
+		n.mu.Unlock()
+		if removed {
+			return
+		}
 		if !n.runPreVote() {
 			return // pre-vote failed; stay follower for next timeout
 		}
