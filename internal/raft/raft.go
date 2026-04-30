@@ -704,8 +704,39 @@ func (n *Node) ApplyCh() <-chan LogEntry {
 
 // Configuration returns a race-safe snapshot of the current cluster membership
 // (self as Voter + peers as Voter + learners as NonVoter).
+//
+// During §4.3 JointEntering, returns the union of C_old and C_new voters so
+// callers see all servers participating in the dual quorum. Address lookup is
+// the caller's responsibility (peer keys are returned as Server.ID).
 func (n *Node) Configuration() Configuration {
 	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.jointPhase == JointEntering {
+		seen := make(map[string]struct{},
+			len(n.jointOldVoters)+len(n.jointNewVoters)+len(n.learnerIDs))
+		servers := make([]Server, 0, len(seen))
+		for _, v := range n.jointOldVoters {
+			if _, ok := seen[v]; !ok {
+				seen[v] = struct{}{}
+				servers = append(servers, Server{ID: v, Suffrage: Voter})
+			}
+		}
+		for _, v := range n.jointNewVoters {
+			if _, ok := seen[v]; !ok {
+				seen[v] = struct{}{}
+				servers = append(servers, Server{ID: v, Suffrage: Voter})
+			}
+		}
+		for _, pk := range n.learnerIDs {
+			if _, ok := seen[pk]; !ok {
+				seen[pk] = struct{}{}
+				servers = append(servers, Server{ID: pk, Suffrage: NonVoter})
+			}
+		}
+		return Configuration{Servers: servers}
+	}
+
 	servers := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
 	servers = append(servers, Server{ID: n.id, Suffrage: Voter})
 	for _, p := range n.config.Peers {
@@ -714,7 +745,6 @@ func (n *Node) Configuration() Configuration {
 	for _, pk := range n.learnerIDs {
 		servers = append(servers, Server{ID: pk, Suffrage: NonVoter})
 	}
-	n.mu.Unlock()
 	return Configuration{Servers: servers}
 }
 

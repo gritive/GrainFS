@@ -543,6 +543,25 @@ func TestJoint_E2E_RemoveOne(t *testing.T) {
 	require.Len(t, peers, 2, "leader sees 3-node cluster minus self after removal")
 }
 
+// TestConfiguration_JointEntering_ReturnsUnion — Sub-project 3 PR-K1.
+func TestConfiguration_JointEntering_ReturnsUnion(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n4"} // n3 removed, n4 added
+
+	cfg := n.Configuration()
+
+	ids := make([]string, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		ids = append(ids, s.ID)
+		require.Equal(t, Voter, s.Suffrage, "all dual-quorum members should be Voter")
+	}
+	require.ElementsMatch(t, []string{"n1", "n2", "n3", "n4"}, ids,
+		"during JointEntering, return union of C_old and C_new")
+}
+
 // TestChangeMembership_CatchUpTimeout_AttemptsCleanup — Sub-project 3 PR-K1.
 // Tight catch-up timeout + low threshold so the fake unreachable learner
 // times out. defer cleanup must clear jointManagedLearners.
