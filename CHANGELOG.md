@@ -22,6 +22,24 @@
 - serve.go wiring (ClusterCoordinator + ForwardSender + ForwardReceiver registration) deferred to v0.0.7.1.
 - e2e tests, wire coexistence REGRESSION test, perf benchmarks deferred to v0.0.7.1.
 
+## [0.0.6.23] — 2026-04-30 — MoveReplica → ChangeMembership (Sub-project 3 PR-K2)
+
+### Changed
+
+- **cluster**: `DataGroupPlanExecutor.MoveReplica` now uses a single §4.3 atomic `ChangeMembership` call instead of the 5-step §4.4 sequence (AddLearner → catch-up → PromoteToVoter → RemoveVoter). Self-removal handled by joint commit-time step-down hook in `raft.Node` (jointPromoteCh closes BEFORE state=Follower), so caller wakes up nil even when removing self.
+- **cluster**: `dataRaftNode` interface gains `ChangeMembership(ctx, adds, removes)` — wired to `*raft.Node.ChangeMembership` via test fakes (`fakeRaftNode`, `raftNodeAdapter`, `autoRebalDataNode`, `fullShardDataNode`).
+- **cluster**: `Rebalancer.ExecutePlan` no longer special-cases `ErrLeadershipTransferred` — single error log + AbortPlan path.
+
+### Removed
+
+- **cluster**: `ErrLeadershipTransferred` sentinel + caller-retry contract. With joint consensus, self-removal is in-place (no leadership round-trip required).
+
+### Tests
+
+- **test**: `TestVoterMigration_SelfRemoval_E2E` — leader self-removal via real raft.Node + chaos transport. New leader emerges from C_new; group voter set excludes old leader.
+- **test**: `TestMoveReplica_SelfRemoval_UsesChangeMembership` — unit-level self-removal asserts ChangeMembership called with correct adds/removes, returns nil.
+- **test**: `TestVoterMigration_ViaDataGroupPlanExecutor` — fixed pre-existing leader-stepdown race by picking `fromNode = non-leader voter` deterministically.
+
 ## [0.0.6.22] — 2026-04-30 — ChangeMembership Public API (Sub-project 3 PR-K1)
 
 ### Added

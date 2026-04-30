@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -162,11 +161,7 @@ func (r *Rebalancer) ExecutePlan(ctx context.Context, plan *RebalancePlan) error
 	}
 	err := r.rebalance.MoveReplica(ctx, plan.GroupID, plan.FromNode, plan.ToNode)
 	if err != nil {
-		if errors.Is(err, ErrLeadershipTransferred) {
-			r.logger.Info().Str("plan_id", plan.PlanID).Msg("leadership transferred before self-removal — new leader will retry")
-		} else {
-			r.logger.Error().Err(err).Str("plan_id", plan.PlanID).Msg("MoveReplica failed, aborting plan")
-		}
+		r.logger.Error().Err(err).Str("plan_id", plan.PlanID).Msg("MoveReplica failed, aborting plan")
 		_ = r.meta.ProposeAbortPlan(ctx, plan.PlanID)
 		return err
 	}

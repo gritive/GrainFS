@@ -144,9 +144,13 @@ func TestAutoRebalance_E2E_ProposeAndExecute(t *testing.T) {
 		return m0.FSM().ActivePlanID() == ""
 	}, 3*time.Second, 50*time.Millisecond, "activePlanID must be cleared after migration")
 
-	// 마이그레이션 후에도 data-Raft 쓰기 가능
+	// 마이그레이션 후에도 data-Raft 쓰기 가능. dataLeader가 node-1(제거 대상)이었던
+	// 경우 self-removal로 step down했으므로 새 leader를 재획득.
+	require.Eventually(t, func() bool { return cl.CurrentLeader() != nil },
+		5*time.Second, 50*time.Millisecond, "data-Raft leader must be elected post-migration")
+	postLeader := cl.CurrentLeader()
 	for i := 0; i < 3; i++ {
-		_, err := dataLeader.ProposeWait(ctx, []byte("post-rebalance"))
+		_, err := postLeader.ProposeWait(ctx, []byte("post-rebalance"))
 		require.NoError(t, err)
 	}
 
@@ -189,4 +193,7 @@ func (a *autoRebalDataNode) RemoveVoter(id string) error    { return a.n.RemoveV
 func (a *autoRebalDataNode) TransferLeadership() error      { return a.n.TransferLeadership() }
 func (a *autoRebalDataNode) AddVoterCtx(ctx context.Context, id, addr string) error {
 	return a.n.AddVoterCtx(ctx, id, addr)
+}
+func (a *autoRebalDataNode) ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error {
+	return a.n.ChangeMembership(ctx, adds, removes)
 }
