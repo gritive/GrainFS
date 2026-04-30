@@ -215,7 +215,7 @@ func TestIntegration_PersistenceAndRecovery(t *testing.T) {
 	}
 	require.NoError(t, store.AppendEntries(entries))
 	require.NoError(t, store.SaveState(2, "node-B"))
-	require.NoError(t, store.SaveSnapshot(2, 1, []byte(`{"x":1}`)))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 2, Term: 1, Data: []byte(`{"x":1}`)}))
 	require.NoError(t, store.Close())
 
 	store2, err := NewBadgerLogStore(dir)
@@ -231,15 +231,239 @@ func TestIntegration_PersistenceAndRecovery(t *testing.T) {
 	assert.Equal(t, uint64(2), term)
 	assert.Equal(t, "node-B", votedFor)
 
-	snapIdx, snapTerm, snapData, err := store2.LoadSnapshot()
+	snap2, err := store2.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(2), snapIdx)
-	assert.Equal(t, uint64(1), snapTerm)
-	assert.Equal(t, `{"x":1}`, string(snapData))
+	assert.Equal(t, uint64(2), snap2.Index)
+	assert.Equal(t, uint64(1), snap2.Term)
+	assert.Equal(t, `{"x":1}`, string(snap2.Data))
 
 	for _, want := range entries {
 		got, err := store2.GetEntry(want.Index)
 		require.NoError(t, err)
 		assert.Equal(t, string(want.Command), string(got.Command))
 	}
+}
+
+func TestRestoreFromStore_LoadsSnapshotServers(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	snap := Snapshot{
+		Index: 10,
+		Term:  2,
+		Data:  []byte("fsm-state"),
+		Servers: []Server{
+			{ID: "node-1", Suffrage: Voter},
+			{ID: "node-2", Suffrage: Voter},
+			{ID: "node-3", Suffrage: Voter},
+		},
+	}
+	require.NoError(t, store.SaveSnapshot(snap))
+	require.NoError(t, store.Close())
+
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { store2.Close() })
+
+	cfg := DefaultConfig("node-1", nil)
+	node := NewNode(cfg, store2)
+
+	cfg2 := node.Configuration()
+	ids := make(map[string]bool, len(cfg2.Servers))
+	for _, s := range cfg2.Servers {
+		ids[s.ID] = true
+	}
+	assert.True(t, ids["node-2"], "node-2 must be restored from snapshot")
+	assert.True(t, ids["node-3"], "node-3 must be restored from snapshot")
+	assert.True(t, ids["node-1"], "self (node-1) must be in configuration")
+
+	node.mu.Lock()
+	assert.Equal(t, uint64(10), node.lastApplied, "lastApplied must match snapshot index")
+	assert.Equal(t, uint64(10), node.commitIndex, "commitIndex must match snapshot index")
+	assert.Equal(t, uint64(2), node.currentTerm, "term must be restored from snapshot")
+	node.mu.Unlock()
+}
+
+// TestSnapshotPreservesClusterMembership verifies the full §2.3 fix:
+// after a snapshot is taken and a follower restarts, the follower recovers
+// its peer list from the snapshot (not from initial peers).
+func TestSnapshotPreservesClusterMembership(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test skipped in short mode")
+	}
+
+	ctx := context.Background()
+	const numNodes = 3
+
+	dirs := make([]string, numNodes)
+	stores := make([]*BadgerLogStore, numNodes)
+	for i := range dirs {
+		dirs[i] = t.TempDir()
+		var err error
+		stores[i], err = NewBadgerLogStore(dirs[i])
+		require.NoError(t, err)
+	}
+
+	transports := make([]*transport.QUICTransport, numNodes)
+	for i := range transports {
+		transports[i] = transport.NewQUICTransport()
+		require.NoError(t, transports[i].Listen(ctx, "127.0.0.1:0"))
+	}
+	addrs := make([]string, numNodes)
+	for i, tr := range transports {
+		addrs[i] = tr.LocalAddr()
+	}
+
+	nodes := make([]*Node, numNodes)
+	for i := 0; i < numNodes; i++ {
+		peers := make([]string, 0, numNodes-1)
+		for j := 0; j < numNodes; j++ {
+			if i != j {
+				peers = append(peers, addrs[j])
+			}
+		}
+		cfg := Config{
+			ID:               addrs[i],
+			Peers:            peers,
+			ElectionTimeout:  200 * time.Millisecond,
+			HeartbeatTimeout: 50 * time.Millisecond,
+		}
+		nodes[i] = NewNode(cfg, stores[i])
+	}
+
+	for i := range transports {
+		for j := range transports {
+			if i != j {
+				require.NoError(t, transports[i].Connect(ctx, addrs[j]))
+			}
+		}
+	}
+
+	rpcs := make([]*QUICRPCTransport, numNodes)
+	for i := range nodes {
+		rpcs[i] = NewQUICRPCTransport(transports[i], nodes[i])
+		rpcs[i].SetTransport()
+	}
+
+	t.Cleanup(func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+		for _, tr := range transports {
+			tr.Close()
+		}
+		for _, s := range stores {
+			s.Close()
+		}
+	})
+
+	for _, n := range nodes {
+		n.Start()
+	}
+	cluster := &quicCluster{nodes: nodes, transports: transports, rpcs: rpcs}
+	leader := cluster.waitForLeader(5 * time.Second)
+	require.NotNil(t, leader, "cluster must elect a leader")
+
+	leaderIdx := -1
+	for i, n := range nodes {
+		if n.State() == Leader {
+			leaderIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, leaderIdx, 0, "leader index must be found")
+
+	snapServers := nodes[leaderIdx].Configuration().Servers
+	require.Len(t, snapServers, numNodes, "leader config must have all 3 nodes")
+
+	snapToSave := Snapshot{
+		Index:   5,
+		Term:    leader.Term(),
+		Data:    []byte("test-state"),
+		Servers: snapServers,
+	}
+	require.NoError(t, stores[leaderIdx].SaveSnapshot(snapToSave))
+
+	followerIdx := -1
+	for i, n := range nodes {
+		if n.State() != Leader {
+			followerIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, followerIdx, 0, "follower must exist")
+
+	require.NoError(t, stores[followerIdx].SaveSnapshot(Snapshot{
+		Index:   5,
+		Term:    leader.Term(),
+		Data:    []byte("test-state"),
+		Servers: snapServers,
+	}))
+
+	nodes[followerIdx].Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	followerAddr := addrs[followerIdx]
+	allOtherPeers := make([]string, 0, numNodes-1)
+	for j, a := range addrs {
+		if j != followerIdx {
+			allOtherPeers = append(allOtherPeers, a)
+		}
+	}
+	restartCfg := Config{
+		ID:               followerAddr,
+		Peers:            nil, // intentionally empty — must restore from snapshot
+		ElectionTimeout:  200 * time.Millisecond,
+		HeartbeatTimeout: 50 * time.Millisecond,
+	}
+	restartedNode := NewNode(restartCfg, stores[followerIdx])
+	nodes[followerIdx] = restartedNode
+	rpcs[followerIdx] = NewQUICRPCTransport(transports[followerIdx], restartedNode)
+	rpcs[followerIdx].SetTransport()
+	restartedNode.Start()
+
+	time.Sleep(300 * time.Millisecond)
+
+	cfg := restartedNode.Configuration()
+	peerIDs := make(map[string]bool)
+	for _, s := range cfg.Servers {
+		peerIDs[s.ID] = true
+	}
+	for _, addr := range allOtherPeers {
+		assert.True(t, peerIDs[addr], "restarted follower must know peer %s from snapshot", addr)
+	}
+}
+
+func TestRestoreFromStore_LegacySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	// Legacy snapshot: servers field is nil.
+	require.NoError(t, store.SaveSnapshot(Snapshot{
+		Index: 7,
+		Term:  3,
+		Data:  []byte("legacy-fsm-state"),
+	}))
+	require.NoError(t, store.Close())
+
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { store2.Close() })
+
+	cfg := DefaultConfig("node-1", []string{"node-2", "node-3"})
+	node := NewNode(cfg, store2)
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	// Snapshot watermark must be applied even for legacy snapshots.
+	assert.Equal(t, uint64(7), node.lastApplied, "lastApplied must match snapshot index")
+	assert.Equal(t, uint64(7), node.commitIndex, "commitIndex must match snapshot index")
+	assert.Equal(t, uint64(3), node.currentTerm, "term must be restored from snapshot")
+
+	// Best-effort fallback: config falls back to initialPeers (no membership data in snapshot).
+	assert.ElementsMatch(t, []string{"node-2", "node-3"}, node.config.Peers,
+		"legacy snapshot must fall back to initialPeers")
 }

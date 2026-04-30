@@ -243,7 +243,7 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 
 			// Check if snapshot should be taken
 			if b.snapMgr != nil {
-				if b.snapMgr.MaybeTrigger(entry.Index, entry.Term) {
+				if b.snapMgr.MaybeTrigger(entry.Index, entry.Term, b.snapNode.Configuration().Servers) {
 					b.logger.Info().Uint64("index", entry.Index).Uint64("term", entry.Term).Msg("snapshot taken")
 					if b.snapNode != nil {
 						b.snapNode.CompactLog(entry.Index)

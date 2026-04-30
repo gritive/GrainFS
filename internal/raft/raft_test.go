@@ -554,7 +554,7 @@ func TestConfChange_RebuildConfigAfterTruncation(t *testing.T) {
 
 	// Simulate truncation: ConfChange entry is removed from the log.
 	node.log = nil
-	node.rebuildConfigFromLog()
+	node.rebuildConfigFromLog(0, node.initialPeers, map[string]string{})
 
 	peers := make([]string, len(node.config.Peers))
 	copy(peers, node.config.Peers)
@@ -802,7 +802,7 @@ func TestNode_LogGC_TruncatesStoreToWatermark(t *testing.T) {
 	n.mu.Unlock()
 
 	// Snapshot gate: save snapshot at watermark (index=20) before GC
-	require.NoError(t, store.SaveSnapshot(20, 1, []byte(`{"snap":"test"}`)))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 20, Term: 1, Data: []byte(`{"snap":"test"}`)}))
 
 	time.Sleep(5 * time.Millisecond)
 	n.maybeRunLogGC()
@@ -878,7 +878,7 @@ func TestNode_LogGC_SkipsBeforeInterval(t *testing.T) {
 	n.mu.Unlock()
 
 	// Snapshot gate: save snapshot at watermark (index=2) before GC
-	require.NoError(t, store.SaveSnapshot(2, 1, []byte(`{"snap":"test"}`)))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 2, Term: 1, Data: []byte(`{"snap":"test"}`)}))
 
 	// First call sets lastLogGC but skips (interval not elapsed)
 	n.maybeRunLogGC()
@@ -996,7 +996,7 @@ func TestIntegration_LogGC_PartitionAndRecovery(t *testing.T) {
 
 	// Snapshot gate: save snapshot at watermark (index=10) on all stores before GC
 	for _, s := range stores {
-		require.NoError(t, s.SaveSnapshot(10, 1, []byte(`{"snap":"test"}`)))
+		require.NoError(t, s.SaveSnapshot(Snapshot{Index: 10, Term: 1, Data: []byte(`{"snap":"test"}`)}))
 	}
 
 	// GC: run on all nodes (watermark = quorumMinMatchIndex = 10)
@@ -1846,4 +1846,33 @@ func TestPeerMatchIndex_UnknownPeer(t *testing.T) {
 	n := NewNode(cfg)
 	_, ok := n.PeerMatchIndex("unknown:9000")
 	require.False(t, ok)
+}
+
+func TestHandleInstallSnapshot_SuffrageFix(t *testing.T) {
+	cfg := DefaultConfig("node-1", []string{"node-2"})
+	node := NewNode(cfg)
+
+	args := &InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  1,
+		Data:              []byte("snapshot-data"),
+		Servers: []Server{
+			{ID: "node-1", Suffrage: Voter},
+			{ID: "node-2", Suffrage: Voter},
+			{ID: "node-3", Suffrage: NonVoter}, // learner — must NOT become a voter
+		},
+	}
+
+	reply := node.HandleInstallSnapshot(args)
+	require.NotNil(t, reply)
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	assert.Contains(t, node.config.Peers, "node-2", "node-2 (voter) must be in config.Peers")
+	assert.NotContains(t, node.config.Peers, "node-3", "node-3 (NonVoter) must NOT be in config.Peers")
+	_, learnerExists := node.learnerIDs["node-3"]
+	assert.True(t, learnerExists, "node-3 must be in learnerIDs as a NonVoter")
 }

@@ -126,21 +126,21 @@ func TestBadgerLogStore_SaveAndLoadSnapshot(t *testing.T) {
 	store := setupTestStore(t)
 
 	// No snapshot initially
-	idx, term, data, err := store.LoadSnapshot()
+	snap, err := store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(0), idx)
-	assert.Equal(t, uint64(0), term)
-	assert.Nil(t, data)
+	assert.Equal(t, uint64(0), snap.Index)
+	assert.Equal(t, uint64(0), snap.Term)
+	assert.Nil(t, snap.Data)
 
 	// Save snapshot
 	snapData := []byte(`{"state":"snapshot-data"}`)
-	require.NoError(t, store.SaveSnapshot(10, 3, snapData))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 10, Term: 3, Data: snapData}))
 
-	idx, term, data, err = store.LoadSnapshot()
+	snap, err = store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), idx)
-	assert.Equal(t, uint64(3), term)
-	assert.Equal(t, snapData, data)
+	assert.Equal(t, uint64(10), snap.Index)
+	assert.Equal(t, uint64(3), snap.Term)
+	assert.Equal(t, snapData, snap.Data)
 }
 
 func TestBadgerLogStore_PersistenceAcrossReopen(t *testing.T) {
@@ -155,7 +155,7 @@ func TestBadgerLogStore_PersistenceAcrossReopen(t *testing.T) {
 	}
 	require.NoError(t, store1.AppendEntries(entries))
 	require.NoError(t, store1.SaveState(3, "node-A"))
-	require.NoError(t, store1.SaveSnapshot(1, 1, []byte("snap")))
+	require.NoError(t, store1.SaveSnapshot(Snapshot{Index: 1, Term: 1, Data: []byte("snap")}))
 	require.NoError(t, store1.Close())
 
 	// Reopen and verify
@@ -172,11 +172,52 @@ func TestBadgerLogStore_PersistenceAcrossReopen(t *testing.T) {
 	assert.Equal(t, uint64(3), term)
 	assert.Equal(t, "node-A", votedFor)
 
-	idx, snapTerm, data, err := store2.LoadSnapshot()
+	snap2, err := store2.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(1), idx)
-	assert.Equal(t, uint64(1), snapTerm)
-	assert.Equal(t, "snap", string(data))
+	assert.Equal(t, uint64(1), snap2.Index)
+	assert.Equal(t, uint64(1), snap2.Term)
+	assert.Equal(t, "snap", string(snap2.Data))
+}
+
+func TestSaveLoadSnapshot_WithServers(t *testing.T) {
+	store := setupTestStore(t)
+
+	servers := []Server{
+		{ID: "node-1", Suffrage: Voter},
+		{ID: "node-2", Suffrage: Voter},
+		{ID: "node-3", Suffrage: NonVoter},
+	}
+	snap := Snapshot{
+		Index:   42,
+		Term:    3,
+		Data:    []byte("fsm-state"),
+		Servers: servers,
+	}
+	require.NoError(t, store.SaveSnapshot(snap))
+
+	got, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), got.Index)
+	assert.Equal(t, uint64(3), got.Term)
+	assert.Equal(t, []byte("fsm-state"), got.Data)
+	require.Len(t, got.Servers, 3, "all 3 servers must survive round-trip")
+	assert.Equal(t, "node-1", got.Servers[0].ID)
+	assert.Equal(t, Voter, got.Servers[0].Suffrage)
+	assert.Equal(t, "node-3", got.Servers[2].ID)
+	assert.Equal(t, NonVoter, got.Servers[2].Suffrage, "NonVoter suffrage must round-trip")
+}
+
+func TestSaveLoadSnapshot_Legacy(t *testing.T) {
+	// 레거시: servers=nil인 스냅샷을 저장하면 LoadSnapshot이 nil Servers 반환
+	store := setupTestStore(t)
+
+	snap := Snapshot{Index: 5, Term: 1, Data: []byte("old-state")}
+	require.NoError(t, store.SaveSnapshot(snap))
+
+	got, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5), got.Index)
+	assert.Nil(t, got.Servers, "legacy snapshot must have nil Servers")
 }
 
 func TestBadgerLogStore_GetEntryNotFound(t *testing.T) {

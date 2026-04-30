@@ -343,6 +343,7 @@ func (n *Node) restoreFromStore() {
 	if n.store == nil {
 		return
 	}
+
 	// Restore term and votedFor
 	term, votedFor, err := n.store.LoadState()
 	if err == nil {
@@ -350,10 +351,34 @@ func (n *Node) restoreFromStore() {
 		n.votedFor = votedFor
 	}
 
+	// Restore snapshot watermark and cluster config from snapshot.
+	snap, snapErr := n.store.LoadSnapshot()
+	if snapErr == nil && snap.Index > 0 {
+		n.snapshotIndex = snap.Index
+		n.lastApplied = snap.Index
+		n.commitIndex = snap.Index
+		n.currentTerm = snap.Term
+
+		if len(snap.Servers) == 0 {
+			log.Warn().
+				Uint64("snap_index", snap.Index).
+				Msg("raft: legacy snapshot has no server list; replaying full log for membership")
+		} else {
+			basePeers, baseLearners := restoreConfigFromServers(snap.Servers, n.id)
+			n.config.Peers = basePeers
+			n.learnerIDs = baseLearners
+		}
+	}
+
+	// Legacy snapshot fallback: when servers were not persisted, best-effort
+	// replay all ConfChange entries from initialPeers to reconstruct membership.
+	// Marker: do this BEFORE log entries are loaded so the rebuild covers the
+	// full log range below. Effective only after n.log is populated.
+	legacySnapshot := snapErr == nil && snap.Index > 0 && len(snap.Servers) == 0
+
 	// Restore log entries
 	lastIdx, err := n.store.LastIndex()
 	if err == nil && lastIdx > 0 {
-		// Find the first available index in the store
 		firstIdx := uint64(1)
 		for i := uint64(1); i <= lastIdx; i++ {
 			if _, err := n.store.GetEntry(i); err == nil {
@@ -366,6 +391,15 @@ func (n *Node) restoreFromStore() {
 			n.log = entries
 			n.firstIndex = firstIdx
 		}
+	}
+
+	// Replay post-snapshot ConfChange entries to apply membership changes after the snapshot.
+	if snapErr == nil && snap.Index > 0 && len(snap.Servers) > 0 {
+		basePeers, baseLearners := restoreConfigFromServers(snap.Servers, n.id)
+		n.rebuildConfigFromLog(snap.Index+1, basePeers, baseLearners)
+	} else if legacySnapshot {
+		// Legacy fallback: replay full log from initialPeers (best-effort).
+		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
 	}
 }
 
@@ -610,25 +644,33 @@ func (n *Node) ApplyCh() <-chan LogEntry {
 	return n.applyCh
 }
 
-// Configuration returns a race-safe snapshot of the current cluster membership.
+// Configuration returns a race-safe snapshot of the current cluster membership
+// (self as Voter + peers as Voter + learners as NonVoter).
 func (n *Node) Configuration() Configuration {
 	n.mu.Lock()
-	servers := make([]Server, 0, len(n.config.Peers)+1)
+	servers := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
 	servers = append(servers, Server{ID: n.id, Suffrage: Voter})
 	for _, p := range n.config.Peers {
 		servers = append(servers, Server{ID: p, Suffrage: Voter})
+	}
+	for _, pk := range n.learnerIDs {
+		servers = append(servers, Server{ID: pk, Suffrage: NonVoter})
 	}
 	n.mu.Unlock()
 	return Configuration{Servers: servers}
 }
 
-// currentConfigServers returns a copy of all known servers (self + peers).
+// currentConfigServers returns a copy of all known servers (self + voters + learners).
+// Learners are included with NonVoter suffrage so snapshots capture full membership.
 // MUST be called with n.mu held.
 func (n *Node) currentConfigServers() []Server {
-	out := make([]Server, 0, len(n.config.Peers)+1)
+	out := make([]Server, 0, len(n.config.Peers)+1+len(n.learnerIDs))
 	out = append(out, Server{ID: n.id, Suffrage: Voter})
 	for _, p := range n.config.Peers {
 		out = append(out, Server{ID: p, Suffrage: Voter})
+	}
+	for _, pk := range n.learnerIDs {
+		out = append(out, Server{ID: pk, Suffrage: NonVoter})
 	}
 	return out
 }
@@ -998,16 +1040,16 @@ func (n *Node) replicateTo(peer string) {
 
 	// If nextIdx is behind the compacted log, send snapshot instead
 	if nextIdx < n.firstIndex && n.sendInstallSnapshot != nil && n.store != nil {
-		snapIdx, snapTerm, snapData, err := n.store.LoadSnapshot()
-		if err == nil && snapData != nil {
+		snap, err := n.store.LoadSnapshot()
+		if err == nil && snap.Data != nil {
 			// Capture current config while holding the lock (read just above)
 			snapshotServers := n.currentConfigServers()
 			args := &InstallSnapshotArgs{
 				Term:              term,
 				LeaderID:          leaderID,
-				LastIncludedIndex: snapIdx,
-				LastIncludedTerm:  snapTerm,
-				Data:              snapData,
+				LastIncludedIndex: snap.Index,
+				LastIncludedTerm:  snap.Term,
+				Data:              snap.Data,
 				Servers:           snapshotServers,
 			}
 			n.mu.Unlock()
@@ -1028,8 +1070,8 @@ func (n *Node) replicateTo(peer string) {
 				n.mu.Unlock()
 				return
 			}
-			n.nextIndex[peer] = snapIdx + 1
-			n.matchIndex[peer] = snapIdx
+			n.nextIndex[peer] = snap.Index + 1
+			n.matchIndex[peer] = snap.Index
 			n.mu.Unlock()
 			return
 		}
@@ -1218,7 +1260,8 @@ func (n *Node) maybeRunLogGC() {
 	}
 	// Snapshot gate: without a snapshot covering the watermark, lagging
 	// followers that need pre-GC entries cannot recover via InstallSnapshot.
-	snapIdx, _, _, err := n.store.LoadSnapshot()
+	snap, err := n.store.LoadSnapshot()
+	snapIdx := snap.Index
 	if err != nil {
 		log.Warn().Err(err).Msg("raft: log GC skipped — snapshot load error")
 		return
@@ -1373,7 +1416,7 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	// §4.4: after truncation, rebuild config from initial peers + remaining log,
 	// then apply ConfChange entries in the newly appended batch.
 	if truncated {
-		n.rebuildConfigFromLog()
+		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
 	}
 	for i := range newEntries {
 		if newEntries[i].Type == LogEntryConfChange {
@@ -1561,7 +1604,12 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 
 	// Save snapshot to store
 	if n.store != nil {
-		if err := n.store.SaveSnapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data); err != nil {
+		if err := n.store.SaveSnapshot(Snapshot{
+			Index:   args.LastIncludedIndex,
+			Term:    args.LastIncludedTerm,
+			Data:    args.Data,
+			Servers: args.Servers,
+		}); err != nil {
 			return reply
 		}
 	}
@@ -1575,16 +1623,12 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	n.pendingConfChangeIndex = 0
 	n.signalCommit()
 
-	// Restore cluster config from snapshot (Violation 3 fix).
+	// Restore cluster config from snapshot using Suffrage-aware helper.
 	if len(args.Servers) > 0 {
-		peers := make([]string, 0, len(args.Servers))
-		for _, s := range args.Servers {
-			if s.ID != n.id {
-				peers = append(peers, s.ID)
-			}
-		}
+		peers, learners := restoreConfigFromServers(args.Servers, n.id)
 		n.config.Peers = peers
 		n.initialPeers = peers
+		n.learnerIDs = learners
 	}
 
 	// Deliver snapshot data via applyCh so the FSM can restore

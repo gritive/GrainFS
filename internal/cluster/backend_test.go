@@ -479,10 +479,10 @@ func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify snapshot was saved
-	idx, _, data, err := logStore.LoadSnapshot()
+	snap, err := logStore.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Greater(t, idx, uint64(0), "snapshot should have been saved")
-	assert.NotNil(t, data, "snapshot data should exist")
+	assert.Greater(t, snap.Index, uint64(0), "snapshot should have been saved")
+	assert.NotNil(t, snap.Data, "snapshot data should exist")
 }
 
 func TestDistributedBackend_Close(t *testing.T) {

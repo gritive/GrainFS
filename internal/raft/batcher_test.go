@@ -113,11 +113,11 @@ func (m *mockStore) LoadState() (uint64, string, error) {
 	return m.term, m.votedFor, nil
 }
 
-func (m *mockStore) SaveSnapshot(index, term uint64, data []byte) error { return nil }
-func (m *mockStore) LoadSnapshot() (uint64, uint64, []byte, error)      { return 0, 0, nil, nil }
-func (m *mockStore) IsBootstrapped() (bool, error)                      { return false, nil }
-func (m *mockStore) SaveBootstrapMarker() error                         { return nil }
-func (m *mockStore) Close() error                                       { return nil }
+func (m *mockStore) SaveSnapshot(snap Snapshot) error { return nil }
+func (m *mockStore) LoadSnapshot() (Snapshot, error)  { return Snapshot{}, nil }
+func (m *mockStore) IsBootstrapped() (bool, error)    { return false, nil }
+func (m *mockStore) SaveBootstrapMarker() error       { return nil }
+func (m *mockStore) Close() error                     { return nil }
 
 // newSingletonLeader creates a single-peer node that becomes leader quickly, for batcher tests.
 func newSingletonLeader(t *testing.T, store ...LogStore) *Node {

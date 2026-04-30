@@ -48,15 +48,15 @@ func TestSnapshotManager_TriggerOnThreshold(t *testing.T) {
 
 	makeTestEntries(t, store, 1, 1, 5)
 
-	triggered := mgr.MaybeTrigger(5, 1)
+	triggered := mgr.MaybeTrigger(5, 1, nil)
 	assert.True(t, triggered, "snapshot should trigger at threshold")
 
 	// Verify snapshot was saved
-	idx, term, data, err := store.LoadSnapshot()
+	snap2, err := store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(5), idx)
-	assert.Equal(t, uint64(1), term)
-	assert.Equal(t, []byte("snap-state"), data)
+	assert.Equal(t, uint64(5), snap2.Index)
+	assert.Equal(t, uint64(1), snap2.Term)
+	assert.Equal(t, []byte("snap-state"), snap2.Data)
 }
 
 func TestSnapshotManager_NoTriggerBelowThreshold(t *testing.T) {
@@ -69,13 +69,13 @@ func TestSnapshotManager_NoTriggerBelowThreshold(t *testing.T) {
 
 	makeTestEntries(t, store, 1, 1, 3)
 
-	triggered := mgr.MaybeTrigger(3, 1)
+	triggered := mgr.MaybeTrigger(3, 1, nil)
 	assert.False(t, triggered, "should not trigger below threshold")
 
 	// No snapshot saved
-	_, _, data, err := store.LoadSnapshot()
+	snap2, err := store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Nil(t, data)
+	assert.Nil(t, snap2.Data)
 }
 
 func TestSnapshotManager_CompactsLogAfterSnapshot(t *testing.T) {
@@ -89,7 +89,7 @@ func TestSnapshotManager_CompactsLogAfterSnapshot(t *testing.T) {
 	makeTestEntries(t, store, 1, 1, 10)
 
 	// Trigger snapshot at index 10
-	triggered := mgr.MaybeTrigger(10, 1)
+	triggered := mgr.MaybeTrigger(10, 1, nil)
 	require.True(t, triggered)
 
 	// Entries up to snapshot index should be compacted
@@ -103,7 +103,7 @@ func TestSnapshotManager_RestoreOnStartup(t *testing.T) {
 	snap := &mockSnapshotter{snapshotData: []byte("snap")}
 
 	// Save a snapshot manually
-	require.NoError(t, store.SaveSnapshot(5, 2, []byte("saved-state")))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 5, Term: 2, Data: []byte("saved-state")}))
 
 	mgr := NewSnapshotManager(store, snap, SnapshotConfig{
 		Threshold: 10,
@@ -141,19 +141,19 @@ func TestSnapshotManager_ConsecutiveSnapshots(t *testing.T) {
 
 	// First batch: entries 1-5
 	makeTestEntries(t, store, 1, 1, 5)
-	triggered := mgr.MaybeTrigger(5, 1)
+	triggered := mgr.MaybeTrigger(5, 1, nil)
 	require.True(t, triggered)
 
 	// Second batch: entries 6-10
 	makeTestEntries(t, store, 1, 6, 5)
-	triggered = mgr.MaybeTrigger(10, 1)
+	triggered = mgr.MaybeTrigger(10, 1, nil)
 	require.True(t, triggered)
 
 	// Snapshot should be at index 10
-	idx, term, _, err := store.LoadSnapshot()
+	snap2, err := store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), idx)
-	assert.Equal(t, uint64(1), term)
+	assert.Equal(t, uint64(10), snap2.Index)
+	assert.Equal(t, uint64(1), snap2.Term)
 }
 
 func TestSnapshotManager_SnapshotError(t *testing.T) {
@@ -166,13 +166,13 @@ func TestSnapshotManager_SnapshotError(t *testing.T) {
 
 	makeTestEntries(t, store, 1, 1, 5)
 
-	triggered := mgr.MaybeTrigger(5, 1)
+	triggered := mgr.MaybeTrigger(5, 1, nil)
 	assert.False(t, triggered, "should not trigger when Snapshot() fails")
 
 	// No snapshot should be saved
-	_, _, data, err := store.LoadSnapshot()
+	snap2, err := store.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Nil(t, data)
+	assert.Nil(t, snap2.Data)
 }
 
 func TestSnapshotManager_SaveSnapshotError(t *testing.T) {
@@ -190,7 +190,7 @@ func TestSnapshotManager_SaveSnapshotError(t *testing.T) {
 	// Close store to force SaveSnapshot error
 	store.Close()
 
-	triggered := mgr.MaybeTrigger(5, 1)
+	triggered := mgr.MaybeTrigger(5, 1, nil)
 	assert.False(t, triggered, "should not trigger when SaveSnapshot fails")
 }
 
@@ -199,7 +199,7 @@ func TestSnapshotManager_RestoreError(t *testing.T) {
 	snap := &mockSnapshotter{restoreErr: fmt.Errorf("restore failed")}
 
 	// Save a snapshot manually
-	require.NoError(t, store.SaveSnapshot(5, 2, []byte("saved-state")))
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 5, Term: 2, Data: []byte("saved-state")}))
 
 	mgr := NewSnapshotManager(store, snap, SnapshotConfig{
 		Threshold: 10,
