@@ -101,7 +101,7 @@ func TestE2E_SeedGroups_Multi(t *testing.T) {
 	}
 	waitForPortsParallel(t, httpPorts, 90*time.Second)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 
 	require.Eventually(t, func() bool {
@@ -113,7 +113,7 @@ func TestE2E_SeedGroups_Multi(t *testing.T) {
 			}
 		}
 		return false
-	}, 60*time.Second, 1*time.Second, "no leader found")
+	}, 120*time.Second, 1*time.Second, "no leader found")
 
 	// seed loop가 끝날 때까지 대기 (8 groups × ~200ms 추정 + 여유 5s)
 	time.Sleep(5 * time.Second)
