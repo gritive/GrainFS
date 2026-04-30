@@ -951,18 +951,7 @@ func startBalancer(
 	if migMaxRetries > 0 {
 		exec.SetMaxWriteRetries(migMaxRetries)
 	}
-	exec.SetShardCounter(func(bucket, key, versionID string) int {
-		k, m, err := fsm.LookupObjectECShards(bucket, key, versionID)
-		if err != nil {
-			log.Warn().Err(err).Str("bucket", bucket).Str("key", key).Str("version", versionID).
-				Msg("LookupObjectECShards failed, falling back to N× mode")
-			return 1
-		}
-		if k == 0 {
-			return 1 // N× 모드: EC 메타 없음
-		}
-		return k + m
-	})
+	exec.SetShardCounter(ecShardCounterFor(fsm))
 	exec.Start(ctx)
 
 	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
@@ -1172,4 +1161,21 @@ func diffSnapshots(prev, curr map[string]any) map[string]map[string]any {
 		}
 	}
 	return out
+}
+
+// ecShardCounterFor returns a per-object shard-count function for MigrationExecutor.
+// Returns 1 for N× objects (no EC metadata) and k+m for EC objects.
+func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int {
+	return func(bucket, key, versionID string) int {
+		k, m, err := fsm.LookupObjectECShards(bucket, key, versionID)
+		if err != nil {
+			log.Warn().Err(err).Str("bucket", bucket).Str("key", key).Str("version", versionID).
+				Msg("LookupObjectECShards failed, falling back to N× mode")
+			return 1
+		}
+		if k == 0 {
+			return 1 // N× 모드: EC 메타 없음
+		}
+		return k + m
+	}
 }
