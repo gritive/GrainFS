@@ -27,6 +27,7 @@
 
 - **raft**: `runCandidate()` 선거 실패 시 `state`가 `Candidate`로 유지되던 버그 수정 — 선거 패배·쿼럼 미달 시 `Follower`로 복귀하지 않아 `run()` 루프가 매 틱마다 `runCandidate`를 재호출하고 term을 무한 증가시키는 term-inflation livelock 발생. defer로 선거 종료 시 `Candidate → Follower` 복귀 보장. `TestE2E_ClusterEC_TopologyChange` 6-노드 MetaRaft 리더 선출 복구.
 
+
 ## [0.0.6.8] — 2026-04-30
 
 ### Fixed
