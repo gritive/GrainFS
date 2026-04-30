@@ -9,10 +9,12 @@ import (
 
 func TestEncodeDecodeRequestVote(t *testing.T) {
 	args := &RequestVoteArgs{
-		Term:         5,
-		CandidateID:  "node-1",
-		LastLogIndex: 42,
-		LastLogTerm:  3,
+		Term:           5,
+		CandidateID:    "node-1",
+		LastLogIndex:   42,
+		LastLogTerm:    3,
+		PreVote:        true,
+		LeaderTransfer: true,
 	}
 
 	data, err := encodeRPC(rpcTypeRequestVote, args)
@@ -29,6 +31,8 @@ func TestEncodeDecodeRequestVote(t *testing.T) {
 	assert.Equal(t, args.CandidateID, decoded.CandidateID)
 	assert.Equal(t, args.LastLogIndex, decoded.LastLogIndex)
 	assert.Equal(t, args.LastLogTerm, decoded.LastLogTerm)
+	assert.Equal(t, args.PreVote, decoded.PreVote, "PreVote must round-trip; lost flag silently regresses pre-vote protection")
+	assert.Equal(t, args.LeaderTransfer, decoded.LeaderTransfer, "LeaderTransfer must round-trip; lost flag breaks leader transfer election")
 }
 
 func TestEncodeDecodeRequestVoteReply(t *testing.T) {
