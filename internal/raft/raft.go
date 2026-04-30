@@ -404,14 +404,7 @@ func (n *Node) restoreFromStore() {
 			// Derive removedFromCluster: if self is not in the snapshot's
 			// server list, we were an orphan at snapshot time. The orphan
 			// election guard must persist so we don't split votes on cold-start.
-			selfPresent := false
-			for _, sv := range snap.Servers {
-				if sv.ID == n.id {
-					selfPresent = true
-					break
-				}
-			}
-			n.removedFromCluster = !selfPresent
+			n.removedFromCluster = !containsServer(snap.Servers, n.id)
 		}
 	}
 
@@ -817,6 +810,18 @@ func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNe
 	n.jointNewVoters = jointNewVoters
 	n.jointEnterIndex = jointEnterIndex
 	n.jointLeaveProposed = false
+}
+
+// containsServer reports whether servers contains an entry with the given id.
+// Used to derive removedFromCluster from snapshot Servers (cold-start +
+// InstallSnapshot paths) — replay path uses containsPeer over peer-key slices.
+func containsServer(servers []Server, id string) bool {
+	for _, sv := range servers {
+		if sv.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // currentConfigServers returns a copy of all known servers (self + voters + learners).
@@ -1932,14 +1937,7 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 		// Derive removedFromCluster from snapshot Servers (mirror of cold-start
 		// path in NewNode). InstallSnapshot from a leader represents authoritative
 		// cluster state; if self is absent, we are an orphan.
-		selfPresent := false
-		for _, sv := range args.Servers {
-			if sv.ID == n.id {
-				selfPresent = true
-				break
-			}
-		}
-		n.removedFromCluster = !selfPresent
+		n.removedFromCluster = !containsServer(args.Servers, n.id)
 	}
 
 	// Deliver snapshot data via applyCh so the FSM can restore
