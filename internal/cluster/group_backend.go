@@ -23,6 +23,7 @@ import (
 type GroupBackend struct {
 	*DistributedBackend
 	groupID   string
+	logStore  raft.LogStore // owned: closed on GroupBackend.Close
 	closed    atomic.Bool
 	closeOnce sync.Once
 }
@@ -35,6 +36,7 @@ type GroupBackendConfig struct {
 	Root     string
 	DB       *badger.DB
 	Node     *raft.Node
+	LogStore raft.LogStore // optional — owned by GroupBackend (closed on Close)
 	ShardSvc *ShardService // may be nil for in-process / single-node tests
 	PeerIDs  []string      // EC node pool = group voter set
 	EC       ECConfig
@@ -68,6 +70,7 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 	return &GroupBackend{
 		DistributedBackend: dist,
 		groupID:            cfg.ID,
+		logStore:           cfg.LogStore,
 	}, nil
 }
 
@@ -88,7 +91,12 @@ func (g *GroupBackend) Close() error {
 		if g.node != nil {
 			g.node.Close()
 		}
-		err = g.DistributedBackend.Close() // closes BadgerDB
+		err = g.DistributedBackend.Close() // closes meta BadgerDB
+		if g.logStore != nil {
+			if cErr := g.logStore.Close(); cErr != nil && err == nil {
+				err = cErr
+			}
+		}
 	})
 	return err
 }
