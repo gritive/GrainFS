@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.6.14] — 2026-04-30
+
+### Added
+
+- **serve**: `--seed-groups N` CLI 플래그 — leader가 부트스트랩 시 N개 데이터 그룹을 idempotent ProposeShardGroup 루프로 시드. default 0 = auto: `max(8, (1+len(peers))*4)` (솔로=8, 5-node=20, 10-node=40). 클러스터 확장 시 sharding 헤드룸 미리 확보 — 이전 default(group-0 1개만)는 후속 노드 추가 시 sharding 부재로 위험했다.
+
+### Tests
+
+- **e2e**: `TestE2E_SeedGroups_Multi` — 5 process boot + `--seed-groups=8` 회귀 가드.
+- **e2e**: `TestE2E_ClusterScaleBench_N8/N32/N64/N128` — multi-process scale 측정 (`GRAINFS_BENCH_FULL=1` 환경변수 게이트, 각 1-2분 소요).
+- **e2e**: `scale_bench_metrics_test.go` — pprof heap/goroutine + ps RSS/CPU 샘플링 helpers (재사용 가능).
+
+### Documentation
+
+- **specs**: `docs/superpowers/specs/2026-04-30-multi-raft-scale-microbench-design.md` — N=8/32/64/128 실측치 + Inflection Point Analysis + Recommendations 채움. 핵심 결과: boot 선형 (~0.4s/group), RSS/CPU/goroutine flat, heap만 그룹당 ~1MB 완만 증가 — N=128(운영 목표)까지 안정. multiplexed transport + raft tick coalescing 효과 확인.
+
 ## [0.0.6.13] — 2026-04-30
 
 ### Added
