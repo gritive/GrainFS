@@ -953,8 +953,13 @@ func startBalancer(
 	}
 	exec.SetShardCounter(func(bucket, key, versionID string) int {
 		k, m, err := fsm.LookupObjectECShards(bucket, key, versionID)
-		if err != nil || k == 0 {
-			return 1 // N× 모드: shardIdx=0만 존재
+		if err != nil {
+			log.Warn().Err(err).Str("bucket", bucket).Str("key", key).Str("version", versionID).
+				Msg("LookupObjectECShards failed, falling back to N× mode")
+			return 1
+		}
+		if k == 0 {
+			return 1 // N× 모드: EC 메타 없음
 		}
 		return k + m
 	})
