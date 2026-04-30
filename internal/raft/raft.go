@@ -789,20 +789,25 @@ type JointPhase = jointPhase
 // JointSnapshotState captures the §4.3 joint state for snapshot persistence.
 // Use as JointStateProvider for SnapshotManager. Returns int8 phase to keep the
 // jointPhase type unexported across package boundaries.
-func (n *Node) JointSnapshotState() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64) {
+func (n *Node) JointSnapshotState() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	ml := make([]string, 0, len(n.jointManagedLearners))
+	for id := range n.jointManagedLearners {
+		ml = append(ml, id)
+	}
 	return int8(n.jointPhase),
 		append([]string(nil), n.jointOldVoters...),
 		append([]string(nil), n.jointNewVoters...),
-		n.jointEnterIndex
+		n.jointEnterIndex,
+		ml
 }
 
 // RestoreJointStateFromSnapshot adopts §4.3 joint state read from a snapshot.
 // Use as JointStateRestorer for SnapshotManager. jointLeaveProposed is reset to
 // false so the leader's heartbeat watcher re-evaluates and re-proposes JointLeave
 // if the JointEnter entry is still committed but Leave hasn't run yet.
-func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64) {
+func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.jointPhase = jointPhase(phase)
@@ -810,6 +815,10 @@ func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNe
 	n.jointNewVoters = jointNewVoters
 	n.jointEnterIndex = jointEnterIndex
 	n.jointLeaveProposed = false
+	n.jointManagedLearners = make(map[string]struct{}, len(managedLearners))
+	for _, id := range managedLearners {
+		n.jointManagedLearners[id] = struct{}{}
+	}
 }
 
 // containsServer reports whether servers contains an entry with the given id.

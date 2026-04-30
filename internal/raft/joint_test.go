@@ -468,7 +468,7 @@ func TestRestoreJointStateFromSnapshot_ResetsLeaveProposed(t *testing.T) {
 	n.jointLeaveProposed = true // pre-existing flag from before restart
 
 	n.RestoreJointStateFromSnapshot(int8(JointEntering),
-		[]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n4"}, 42)
+		[]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n4"}, 42, nil)
 
 	require.Equal(t, JointEntering, n.jointPhase)
 	require.Equal(t, []string{"n1", "n2", "n3"}, n.jointOldVoters)

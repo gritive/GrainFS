@@ -26,10 +26,11 @@ type Snapshot struct {
 	// — the other fields are unused. When restoring during JointEntering,
 	// the leader's heartbeat watcher (checkJointAdvance) auto-resumes the
 	// transition once C_new majority is reachable.
-	JointPhase      jointPhase
-	JointOldVoters  []string
-	JointNewVoters  []string
-	JointEnterIndex uint64
+	JointPhase           jointPhase
+	JointOldVoters       []string
+	JointNewVoters       []string
+	JointEnterIndex      uint64
+	JointManagedLearners []string // PR-K3: learners added by ChangeMembership
 }
 
 // LogStore provides durable storage for Raft log entries and state.
@@ -412,6 +413,7 @@ func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 	}
 	jointOldVec := stringVec(snap.JointOldVoters)
 	jointNewVec := stringVec(snap.JointNewVoters)
+	jointManagedVec := stringVec(snap.JointManagedLearners)
 
 	pb.SnapshotMetaStart(b)
 	pb.SnapshotMetaAddIndex(b, snap.Index)
@@ -430,6 +432,9 @@ func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 	}
 	if snap.JointEnterIndex != 0 {
 		pb.SnapshotMetaAddJointEnterIndex(b, snap.JointEnterIndex)
+	}
+	if jointManagedVec != 0 {
+		pb.SnapshotMetaAddJointManagedLearners(b, jointManagedVec)
 	}
 	root := pb.SnapshotMetaEnd(b)
 	meta := fbFinishRPC(b, root)
@@ -484,6 +489,12 @@ func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 				}
 			}
 			snap.JointEnterIndex = m.JointEnterIndex()
+			if mLen := m.JointManagedLearnersLength(); mLen > 0 {
+				snap.JointManagedLearners = make([]string, mLen)
+				for i := 0; i < mLen; i++ {
+					snap.JointManagedLearners[i] = string(m.JointManagedLearners(i))
+				}
+			}
 			return nil
 		}); err != nil {
 			return err

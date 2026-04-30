@@ -25,13 +25,14 @@ type SnapshotConfig struct {
 
 // JointStateProvider returns the §4.3 joint consensus state at snapshot trigger
 // time. Phase is the int8 form of jointPhase (0=None, 1=Entering). Empty slices /
-// zero index when JointPhase is None.
-type JointStateProvider func() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64)
+// zero index when JointPhase is None. managedLearners is the set of learner IDs
+// added by ChangeMembership (PR-K3); nil when none.
+type JointStateProvider func() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string)
 
 // JointStateRestorer is called by SnapshotManager.Restore with the joint state
 // stored alongside the snapshot. The implementation should adopt those fields
 // onto the Node (typically Node.RestoreJointStateFromSnapshot).
-type JointStateRestorer func(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64)
+type JointStateRestorer func(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string)
 
 // SnapshotManager handles automatic snapshot creation, log compaction,
 // and snapshot restoration on startup.
@@ -104,20 +105,22 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers
 	var jPhase int8
 	var jOld, jNew []string
 	var jIdx uint64
+	var jManaged []string
 	if m.jointStateProvider != nil {
-		jPhase, jOld, jNew, jIdx = m.jointStateProvider()
+		jPhase, jOld, jNew, jIdx, jManaged = m.jointStateProvider()
 	}
 
 	// Save snapshot to store
 	if err := m.store.SaveSnapshot(Snapshot{
-		Index:           appliedIndex,
-		Term:            appliedTerm,
-		Data:            data,
-		Servers:         servers,
-		JointPhase:      jointPhase(jPhase),
-		JointOldVoters:  jOld,
-		JointNewVoters:  jNew,
-		JointEnterIndex: jIdx,
+		Index:                appliedIndex,
+		Term:                 appliedTerm,
+		Data:                 data,
+		Servers:              servers,
+		JointPhase:           jointPhase(jPhase),
+		JointOldVoters:       jOld,
+		JointNewVoters:       jNew,
+		JointEnterIndex:      jIdx,
+		JointManagedLearners: jManaged,
 	}); err != nil {
 		log.Error().Err(err).Msg("snapshot: save failed")
 		return false
@@ -163,7 +166,7 @@ func (m *SnapshotManager) Restore() (uint64, error) {
 	// §4.3 joint state restoration. Triggered after FSM restore so any leader
 	// promotion that follows has the correct phase to drive checkJointAdvance.
 	if m.jointStateRestorer != nil {
-		m.jointStateRestorer(int8(snap.JointPhase), snap.JointOldVoters, snap.JointNewVoters, snap.JointEnterIndex)
+		m.jointStateRestorer(int8(snap.JointPhase), snap.JointOldVoters, snap.JointNewVoters, snap.JointEnterIndex, snap.JointManagedLearners)
 	}
 
 	m.lastSnapIndex = snap.Index
