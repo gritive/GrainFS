@@ -69,8 +69,20 @@ func (rcv *ConfChangeEntry) ServerAddress() []byte {
 	return nil
 }
 
+func (rcv *ConfChangeEntry) ManagedByJoint() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *ConfChangeEntry) MutateManagedByJoint(n bool) bool {
+	return rcv._tab.MutateBoolSlot(10, n)
+}
+
 func ConfChangeEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func ConfChangeEntryAddOp(builder *flatbuffers.Builder, op ConfChangeOp) {
 	builder.PrependInt8Slot(0, int8(op), 0)
@@ -80,6 +92,9 @@ func ConfChangeEntryAddServerId(builder *flatbuffers.Builder, serverId flatbuffe
 }
 func ConfChangeEntryAddServerAddress(builder *flatbuffers.Builder, serverAddress flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(serverAddress), 0)
+}
+func ConfChangeEntryAddManagedByJoint(builder *flatbuffers.Builder, managedByJoint bool) {
+	builder.PrependBoolSlot(3, managedByJoint, false)
 }
 func ConfChangeEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

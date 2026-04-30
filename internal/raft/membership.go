@@ -37,20 +37,23 @@ const (
 
 // ConfChangePayload is the decoded in-memory representation of a membership change.
 type ConfChangePayload struct {
-	Op      ConfChangeOp
-	ID      string
-	Address string
+	Op             ConfChangeOp
+	ID             string
+	Address        string
+	ManagedByJoint bool // PR-K3: true if ChangeMembership added this learner
 }
 
 // encodeConfChange serializes a membership change for use as LogEntry.Command.
-func encodeConfChange(op ConfChangeOp, id, addr string) []byte {
+// managedByJoint is true for learners added by ChangeMembership (PR-K3).
+func encodeConfChange(p ConfChangePayload) []byte {
 	b := flatbuffers.NewBuilder(128)
-	idOff := b.CreateString(id)
-	addrOff := b.CreateString(addr)
+	idOff := b.CreateString(p.ID)
+	addrOff := b.CreateString(p.Address)
 	pb.ConfChangeEntryStart(b)
-	pb.ConfChangeEntryAddOp(b, pb.ConfChangeOp(op))
+	pb.ConfChangeEntryAddOp(b, pb.ConfChangeOp(p.Op))
 	pb.ConfChangeEntryAddServerId(b, idOff)
 	pb.ConfChangeEntryAddServerAddress(b, addrOff)
+	pb.ConfChangeEntryAddManagedByJoint(b, p.ManagedByJoint)
 	root := pb.ConfChangeEntryEnd(b)
 	pb.FinishConfChangeEntryBuffer(b, root)
 	return b.FinishedBytes()
@@ -60,9 +63,10 @@ func encodeConfChange(op ConfChangeOp, id, addr string) []byte {
 func decodeConfChange(data []byte) ConfChangePayload {
 	e := pb.GetRootAsConfChangeEntry(data, 0)
 	return ConfChangePayload{
-		Op:      ConfChangeOp(e.Op()),
-		ID:      string(e.ServerId()),
-		Address: string(e.ServerAddress()),
+		Op:             ConfChangeOp(e.Op()),
+		ID:             string(e.ServerId()),
+		Address:        string(e.ServerAddress()),
+		ManagedByJoint: e.ManagedByJoint(),
 	}
 }
 
@@ -174,7 +178,7 @@ func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, a
 	}
 	n.mu.Unlock()
 
-	cmd := encodeConfChange(op, id, addr)
+	cmd := encodeConfChange(ConfChangePayload{Op: op, ID: id, Address: addr, ManagedByJoint: false})
 	doneCh := make(chan proposalResult, 1)
 	p := proposal{command: cmd, entryType: LogEntryConfChange, doneCh: doneCh, ctx: ctx}
 	select {

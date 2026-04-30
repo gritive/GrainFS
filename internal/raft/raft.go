@@ -343,26 +343,26 @@ func NewNode(config Config, store ...LogStore) *Node {
 	copy(initialPeers, config.Peers)
 
 	n := &Node{
-		id:               config.ID,
-		state:            Follower,
-		config:           config,
-		log:              make([]LogEntry, 0),
-		firstIndex:       1, // Raft indices start at 1
-		nextIndex:        make(map[string]uint64),
-		matchIndex:       make(map[string]uint64),
-		learnerIDs:       make(map[string]string),
+		id:                   config.ID,
+		state:                Follower,
+		config:               config,
+		log:                  make([]LogEntry, 0),
+		firstIndex:           1, // Raft indices start at 1
+		nextIndex:            make(map[string]uint64),
+		matchIndex:           make(map[string]uint64),
+		learnerIDs:           make(map[string]string),
 		learnerPromoteCh:     make(map[string]chan struct{}),
 		jointManagedLearners: make(map[string]struct{}),
-		checkQuorumAcks:  make(map[string]time.Time),
-		applyCh:          make(chan LogEntry, 64),
-		stopCh:           make(chan struct{}),
-		resetCh:          make(chan struct{}, 1),
-		commitCh:         make(chan struct{}, 1),
-		waiters:          make(map[uint64]chan error),
-		proposalCh:       make(chan proposal, 4096),
-		replicationCh:    make(chan struct{}, 1),
-		metrics:          adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
-		initialPeers:     initialPeers,
+		checkQuorumAcks:      make(map[string]time.Time),
+		applyCh:              make(chan LogEntry, 64),
+		stopCh:               make(chan struct{}),
+		resetCh:              make(chan struct{}, 1),
+		commitCh:             make(chan struct{}, 1),
+		waiters:              make(map[uint64]chan error),
+		proposalCh:           make(chan proposal, 4096),
+		replicationCh:        make(chan struct{}, 1),
+		metrics:              adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
+		initialPeers:         initialPeers,
 	}
 
 	if len(store) > 0 && store[0] != nil {
@@ -875,7 +875,7 @@ func (n *Node) checkLearnerCatchup() {
 		if mi+threshold < n.commitIndex {
 			continue
 		}
-		cmd := encodeConfChange(ConfChangePromote, nodeID, "")
+		cmd := encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: nodeID, Address: "", ManagedByJoint: false})
 		select {
 		case n.proposalCh <- proposal{
 			command:   cmd,
