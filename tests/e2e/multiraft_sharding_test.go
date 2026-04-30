@@ -48,6 +48,26 @@ func startMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
+	// macOS multi-process e2e: freePort() TOCTOU + meta-Raft 5-node election
+	// timing → ~25% transient failure rate per attempt. Retry the whole boot
+	// sequence with fresh ports up to 3x to absorb flakes; a real defect
+	// produces a deterministic failure across all attempts.
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		c, err := tryStartMRCluster(t, numNodes, seedGroups)
+		if err == nil {
+			return c
+		}
+		lastErr = err
+		t.Logf("startMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
+	}
+	t.Fatalf("startMRCluster failed after %d attempts: %v", maxAttempts, lastErr)
+	return nil
+}
+
+func tryStartMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster, error) {
+	t.Helper()
 	c := &mrCluster{
 		t:          t,
 		clusterKey: "E2E-MR-SHARDING-KEY",
@@ -60,43 +80,59 @@ func startMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
 	c.dataDirs = make([]string, numNodes)
 	c.procs = make([]*exec.Cmd, numNodes)
 
-	for i := range c.httpPorts {
-		c.httpPorts[i] = freePort()
+	// Allocate raft ports up-front: peers list must be known before any node
+	// starts. HTTP ports are allocated just before each spawn to minimize the
+	// freePort() TOCTOU race window (port can be reassigned by the OS between
+	// listener.Close() and child process bind).
+	for i := range c.raftPorts {
 		c.raftPorts[i] = freePort()
-		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		d, err := os.MkdirTemp("", fmt.Sprintf("mrshard-%d-*", i))
-		require.NoError(t, err)
+		if err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("mkdir tmp: %w", err)
+		}
 		c.dataDirs[i] = d
 	}
 
 	t.Cleanup(c.Stop)
 
 	for i := 0; i < numNodes; i++ {
+		c.httpPorts[i] = freePort()
+		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		c.procs[i] = c.startNode(i, seedGroups)
 	}
-	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
+	if err := waitForPortsParallelErr(c.httpPorts, 60*time.Second); err != nil {
+		c.Stop()
+		return nil, err
+	}
 
-	// Wait for at least one node to be writable (leader elected) and remember
-	// which node accepted — subsequent CreateBucket calls reuse this leader to
-	// avoid 5x NotLeader timeouts per request.
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// Wait for at least one node to be writable (leader elected).
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	c.leaderIdx = -1
-	require.Eventually(t, func() bool {
+	leaderDeadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(leaderDeadline) {
 		for i := 0; i < numNodes; i++ {
 			cli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
 			_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("__mrshard-leader-probe")})
 			if err == nil {
 				c.leaderIdx = i
-				return true
+				break
 			}
 		}
-		return false
-	}, 90*time.Second, 1*time.Second, "no leader found")
+		if c.leaderIdx >= 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if c.leaderIdx < 0 {
+		c.Stop()
+		return nil, fmt.Errorf("no leader found within timeout")
+	}
 
 	// Allow seed loop to complete (proposes seedGroups × ProposeShardGroup).
 	time.Sleep(8 * time.Second)
-	return c
+	return c, nil
 }
 
 func (c *mrCluster) startNode(i int, seedGroups int) *exec.Cmd {
