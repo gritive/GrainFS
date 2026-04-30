@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -326,4 +327,54 @@ func TestClusterCoordinator_GetObject_NoSuchBucketStatus(t *testing.T) {
 	d.replyByOp[raftpb.ForwardOpGetObject] = buildSimpleReply(raftpb.ForwardStatusNoSuchBucket, "")
 	_, _, err := c.GetObject("bk", "k")
 	require.ErrorIs(t, err, storage.ErrNoSuchBucket)
+}
+
+// --- T7 PutObject + UploadPart ---
+
+// TestClusterCoordinator_PutObject_Forward verifies the full PutObject path
+// with a sub-cap body — body bytes ride inside FBS args, single-message wire.
+func TestClusterCoordinator_PutObject_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
+	body := bytes.Repeat([]byte("x"), 4*1024*1024) // 4 MB, under cap
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put"}, "bk",
+	)
+	obj, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
+}
+
+// TestClusterCoordinator_PutObject_TooLarge_413 verifies the 5 MB hard cap is
+// enforced BEFORE encoding/forwarding — caller sees ErrEntityTooLarge without
+// any wire activity (recordingDialer recorded no calls).
+func TestClusterCoordinator_PutObject_TooLarge_413(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("x"), 6*1024*1024) // 6 MB, over cap
+	_, err := c.PutObject("bk", "k", bytes.NewReader(body), "")
+	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
+	require.Empty(t, d.calls)
+}
+
+// TestClusterCoordinator_UploadPart_Forward — happy path under cap.
+func TestClusterCoordinator_UploadPart_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("y"), 1024)
+	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: int64(len(body))},
+	)
+	p, err := c.UploadPart("bk", "k", "uid", 7, bytes.NewReader(body))
+	require.NoError(t, err)
+	require.Equal(t, 7, p.PartNumber)
+	require.Equal(t, "etag-part", p.ETag)
+	require.Equal(t, raftpb.ForwardOpUploadPart, d.calls[0].op)
+}
+
+// TestClusterCoordinator_UploadPart_5MB_Cap — same enforcement on multipart.
+func TestClusterCoordinator_UploadPart_5MB_Cap(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("x"), 6*1024*1024)
+	_, err := c.UploadPart("bk", "k", "uid", 1, bytes.NewReader(body))
+	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
+	require.Empty(t, d.calls)
 }

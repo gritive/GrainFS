@@ -333,6 +333,74 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(bucket, key, uploadID strin
 	return objectFromReply(reply)
 }
 
+// PutObject buffers the body up to maxBody+1 bytes (5 MB +1 to detect the
+// over-limit case in one read). The full body is embedded inside the FBS args
+// and sent in a single message — chunked streaming would have removed this
+// cap but at the cost of a transport refactor. See design doc §"핵심 단순화".
+func (c *ClusterCoordinator) PutObject(
+	bucket, key string, r io.Reader, contentType string,
+) (*storage.Object, error) {
+	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > c.maxBody {
+		return nil, storage.ErrEntityTooLarge
+	}
+
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.PutObject(bucket, key, bytes.NewReader(body), contentType)
+		}
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildPutObjectArgs(bucket, key, contentType, body)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpPutObject, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectFromReply(reply)
+}
+
+// UploadPart applies the same 5 MB body cap as PutObject. S3 spec allows up to
+// 5 GB per part — clients targeting GrainFS must split larger payloads.
+func (c *ClusterCoordinator) UploadPart(
+	bucket, key, uploadID string, partNumber int, r io.Reader,
+) (*storage.Part, error) {
+	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > c.maxBody {
+		return nil, storage.ErrEntityTooLarge
+	}
+
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.UploadPart(bucket, key, uploadID, partNumber, bytes.NewReader(body))
+		}
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpUploadPart, args)
+	if err != nil {
+		return nil, err
+	}
+	return partFromReply(reply)
+}
+
 func (c *ClusterCoordinator) AbortMultipartUpload(bucket, key, uploadID string) error {
 	target, err := c.routeBucket(bucket)
 	if err != nil {
@@ -353,3 +421,6 @@ func (c *ClusterCoordinator) AbortMultipartUpload(bucket, key, uploadID string) 
 	}
 	return parseReplyStatus(reply)
 }
+
+// Compile-time assertion: ClusterCoordinator implements storage.Backend.
+var _ storage.Backend = (*ClusterCoordinator)(nil)
