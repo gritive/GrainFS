@@ -21,14 +21,15 @@
   - ✅ PR-B: meta-Raft scaffold (`MetaRaft`, `MetaFSM`, shard_map, load_snapshot)
   - ✅ PR-C: 데이터 그룹 다중화 + bucket→group Router (`DataGroup.Backend`, `Router.AssignBucket` COW)
   - ✅ PR-D: autonomous rebalance (v0.0.6.6 `DataGroupPlanExecutor` + Full Sharding E2E)
-  - [ ] **PR-E: Multi-Raft scale micro-bench** (현재 진행 중 — 설계: `docs/superpowers/specs/2026-04-30-multi-raft-scale-microbench-design.md`)
-    - in-process N-group raft 하네스 (5 호스트, 그룹별 3 voter)
-    - sweep N=8/32/64/128 (호스트당 raft Node 수: 5/19/38/77 — N=128이 운영 목표 256×10host 와 동일 부하)
-    - 측정: heap, CPU idle %, heartbeat msg/sec, election count, goroutines
-    - 산출: `internal/cluster/scale_bench_test.go` + design doc 결과 표 + CHANGELOG
-    - **out of scope**: k6 throughput, Docker Compose 다중 노드, BadgerDB I/O, 실 EC 부하 (운영 단계로 이연)
-  - 설계: `~/.gstack/projects/gritive-GrainFS/whitekid-joint-consensus-design-20260429.md`
-  - PR-F (트리거 시): §4.3 joint consensus atomic multi-server replacement
+  - ✅ PR-E: Multi-Raft scale micro-bench (v0.0.6.14 #106) — N=8/32/64/128 sweep, RSS/heap/goroutine flat
+  - ✅ **PR-G+H 인프라 (v0.0.6.21)**: per-group raft.Node + BadgerDB lifecycle, `pickVoters` rendezvous hashing, `GroupBackend` 신규 타입, `OnShardGroupAdded` async callback, hash-based bucket→group assignment, `StreamProposeGroupForward (0x08)` wire-compat.
+    - 설계: `docs/superpowers/specs/2026-04-30-live-multi-raft-sharding-design.md`
+    - **남은 작업 (v0.0.7.x — Live Multi-Raft Sharding 후속)**:
+      - **데이터 plane 라우팅** — PUT/GET이 그룹별 backend로 dispatch. `ClusterCoordinator` 타입 도입 + S3 server wiring. v0.0.7.0의 핵심.
+      - **Cross-node forward** — 비-voter 노드 PUT 받았을 때 voter로 forward. 인프라(0x08 stream)는 들어왔으나 호출 path 미배선.
+      - **e2e tests 활성화** — BucketAssignment / RestartRecovery / PerGroupPersistence / CrossNodeDispatch / GroupLeaderFailover. macOS 멀티프로세스 leader change race 해결 (라우팅 path가 자체 redirect하면 안정화).
+      - **perf sanity** — N=8 sharded mode 30s 측정 + PR-E single-backend 비교.
+  - PR-F (트리거 시): §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
   - PR-D 잔여 must-fix (PR-E 본 작업과 무관, 별도 follow-up):
     - M2: MetaAbortPlanCmd reason:uint8 추가
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
