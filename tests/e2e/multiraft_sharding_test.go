@@ -429,10 +429,10 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			err = db.View(func(txn *badger.Txn) error {
+			scanErr := db.View(func(txn *badger.Txn) error {
 				iter := txn.NewIterator(badger.DefaultIteratorOptions)
 				defer iter.Close()
-				for iter.Rewind() ; iter.Valid(); iter.Next() {
+				for iter.Rewind(); iter.Valid(); iter.Next() {
 					item := iter.Item()
 					if strings.Contains(string(item.Key), "test-key") {
 						matches++
@@ -441,8 +441,8 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 				return nil
 			})
 			db.Close()
-			if err != nil {
-				continue
+			if scanErr != nil {
+				t.Logf("warning: BadgerDB scan failed for %s: %v", badgerDir, scanErr)
 			}
 		}
 	}
@@ -519,7 +519,7 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("failover-test"),
 		Key:    aws.String("failover-key"),
-			Body:   []byte(body),
+		Body:   []byte(body),
 	})
 	require.NoError(t, err)
 
@@ -616,7 +616,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 		"--port", fmt.Sprintf("%d", freePort()),
 		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
 		"--access-key", c.accessKey,
-			"--secret-key", c.secretKey,
+		"--secret-key", c.secretKey,
 		"--no-encryption",
 	)
 	require.NoError(t, nfsProc.Start(), "start NFSv4 server")
