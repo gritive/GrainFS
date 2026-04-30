@@ -80,6 +80,7 @@ type MetaFSM struct {
 	activePlan        *RebalancePlan             // nil = no active plan (PR-D)
 	onBucketAssigned  func(string, string)       // protected by mu; set before Start() (PR-D)
 	onRebalancePlan   func(*RebalancePlan)       // must not block; set before Start() (PR-D)
+	onShardGroupAdded func(ShardGroupEntry)      // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -241,7 +242,14 @@ func (f *MetaFSM) applyPutShardGroup(data []byte) error {
 	}
 	f.mu.Lock()
 	f.shardGroups[entry.ID] = entry
+	cb := f.onShardGroupAdded
 	f.mu.Unlock()
+	if cb != nil {
+		// Defensive copy of peers — callback may keep references.
+		cbPeers := make([]string, len(entry.PeerIDs))
+		copy(cbPeers, entry.PeerIDs)
+		cb(ShardGroupEntry{ID: entry.ID, PeerIDs: cbPeers})
+	}
 	return nil
 }
 
@@ -449,6 +457,16 @@ func (f *MetaFSM) ActivePlan() *RebalancePlan {
 func (f *MetaFSM) SetOnRebalancePlan(fn func(*RebalancePlan)) {
 	f.mu.Lock()
 	f.onRebalancePlan = fn
+	f.mu.Unlock()
+}
+
+// SetOnShardGroupAdded registers a callback fired after each PutShardGroup is applied.
+// The callback fires on every applied entry (including idempotent overwrites with
+// identical PeerIDs) — caller must dedupe if needed.
+// Must not block. Set before Start() to avoid races with the apply loop.
+func (f *MetaFSM) SetOnShardGroupAdded(fn func(ShardGroupEntry)) {
+	f.mu.Lock()
+	f.onShardGroupAdded = fn
 	f.mu.Unlock()
 }
 

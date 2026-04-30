@@ -23,7 +23,8 @@ import (
 type GroupBackend struct {
 	*DistributedBackend
 	groupID   string
-	logStore  raft.LogStore // owned: closed on GroupBackend.Close
+	logStore  raft.LogStore // owned: closed on GroupBackend.Close (nil if wrapped)
+	wrapped   bool          // true → Close is no-op (caller owns lifecycle)
 	closed    atomic.Bool
 	closeOnce sync.Once
 }
@@ -40,6 +41,21 @@ type GroupBackendConfig struct {
 	ShardSvc *ShardService // may be nil for in-process / single-node tests
 	PeerIDs  []string      // EC node pool = group voter set
 	EC       ECConfig
+}
+
+// WrapDistributedBackend wraps an EXISTING DistributedBackend as a GroupBackend.
+// Used to register group-0 (legacy single-backend deployment) into
+// DataGroupManager without doubly-opening a BadgerDB.
+//
+// The wrapped DistributedBackend's lifecycle is owned by the caller — Close()
+// on this GroupBackend will NOT close the wrapped instance (logStore=nil,
+// closeOnce protects against double-close on the embedded type).
+func WrapDistributedBackend(groupID string, b *DistributedBackend) *GroupBackend {
+	return &GroupBackend{
+		DistributedBackend: b,
+		groupID:            groupID,
+		wrapped:            true,
+	}
 }
 
 // NewGroupBackend creates a GroupBackend by wrapping a fresh DistributedBackend
@@ -88,6 +104,10 @@ func (g *GroupBackend) Close() error {
 	var err error
 	g.closeOnce.Do(func() {
 		g.closed.Store(true)
+		if g.wrapped {
+			// Caller owns DB/Node lifecycle.
+			return
+		}
 		if g.node != nil {
 			g.node.Close()
 		}

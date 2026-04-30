@@ -10,7 +10,7 @@ import (
 type DataGroup struct {
 	id      string
 	peerIDs []string
-	backend *DistributedBackend // PR-D: nil until wired in serve.go
+	backend *GroupBackend // nil until wired (per-group dispatch unavailable)
 }
 
 // NewDataGroup creates a DataGroup with the given peer list.
@@ -18,8 +18,8 @@ func NewDataGroup(id string, peerIDs []string) *DataGroup {
 	return &DataGroup{id: id, peerIDs: peerIDs}
 }
 
-// NewDataGroupWithBackend creates a DataGroup pre-wired with a DistributedBackend.
-func NewDataGroupWithBackend(id string, peerIDs []string, b *DistributedBackend) *DataGroup {
+// NewDataGroupWithBackend creates a DataGroup pre-wired with a GroupBackend.
+func NewDataGroupWithBackend(id string, peerIDs []string, b *GroupBackend) *DataGroup {
 	return &DataGroup{id: id, peerIDs: peerIDs, backend: b}
 }
 
@@ -29,8 +29,8 @@ func (g *DataGroup) ID() string { return g.id }
 // The returned slice is read-only; callers must not modify or append to it.
 func (g *DataGroup) PeerIDs() []string { return g.peerIDs }
 
-// Backend returns the DistributedBackend wired to this group, or nil if not yet set.
-func (g *DataGroup) Backend() *DistributedBackend { return g.backend }
+// Backend returns the GroupBackend wired to this group, or nil if not yet set.
+func (g *DataGroup) Backend() *GroupBackend { return g.backend }
 
 // groupSnapshot is an immutable snapshot of DataGroupManager. COW replacement enables lock-free reads.
 type groupSnapshot struct {
@@ -82,4 +82,30 @@ func (m *DataGroupManager) Get(id string) *DataGroup {
 // All returns the current slice of DataGroups sorted by ID.
 func (m *DataGroupManager) All() []*DataGroup {
 	return m.snap.Load().all
+}
+
+// Remove removes the group with the given ID. Returns true if removed.
+// Used during graceful shutdown when a node leaves a voter set.
+func (m *DataGroupManager) Remove(id string) bool {
+	for {
+		old := m.snap.Load()
+		if _, ok := old.byID[id]; !ok {
+			return false
+		}
+		newByID := make(map[string]*DataGroup, len(old.byID)-1)
+		for k, v := range old.byID {
+			if k != id {
+				newByID[k] = v
+			}
+		}
+		all := make([]*DataGroup, 0, len(newByID))
+		for _, dg := range newByID {
+			all = append(all, dg)
+		}
+		sort.Slice(all, func(i, j int) bool { return all[i].id < all[j].id })
+		newSnap := &groupSnapshot{byID: newByID, all: all}
+		if m.snap.CompareAndSwap(old, newSnap) {
+			return true
+		}
+	}
 }
