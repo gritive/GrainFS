@@ -136,3 +136,77 @@ func TestVoterMigration_ViaDataGroupPlanExecutor(t *testing.T) {
 		return node3.CommittedIndex() == leader.CommittedIndex()
 	}, 5*time.Second, 50*time.Millisecond, "node-3 committed index diverged")
 }
+
+// TestVoterMigration_SelfRemoval_E2E exercises the full self-removal path
+// through DataGroupPlanExecutor.MoveReplica with real raft.Node objects:
+//
+//  1. 3-node chaos cluster, write baseline entries
+//  2. Add 4th node, then call MoveReplica(group-0, leader → node-3)
+//  3. Verify: ChangeMembership returns nil (joint commit-time hook unblocks
+//     caller before state=Follower), a NEW leader is elected from the C_new
+//     voter set, and the group no longer contains the old leader.
+//
+// PR-K2: this scenario was previously gated by ErrLeadershipTransferred which
+// required a TransferLeadership pre-step + caller retry on the new leader.
+// Joint consensus eliminates the round-trip.
+func TestVoterMigration_SelfRemoval_E2E(t *testing.T) {
+	cl := chaos.NewCluster(t, 3)
+	cl.StartAll()
+
+	ctx := context.Background()
+
+	leader := cl.WaitForLeader(5 * time.Second)
+	require.NotNil(t, leader, "leader election timeout")
+	leaderID := leader.ID()
+
+	// Write baseline data to confirm the cluster is functional.
+	for i := 0; i < 5; i++ {
+		_, err := leader.ProposeWait(ctx, []byte("baseline"))
+		require.NoError(t, err)
+	}
+
+	node3 := cl.AddNode("node-3")
+
+	allIDs := cl.NodeIDs()
+	addrBook := addrBookFromChaos(allIDs)
+	sgUpdater := &fakeSGUpdater{}
+	dgMgr := cluster.NewDataGroupManager()
+
+	// DataGroup uses the original 3 nodes as voters.
+	dgMgr.Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0", "node-1", "node-2"}, nil))
+
+	// Self-removal: localNodeID == leaderID == fromNode.
+	exec := cluster.NewDataGroupPlanExecutorForTest(
+		leaderID, dgMgr, addrBook, sgUpdater,
+		func(dg *cluster.DataGroup) cluster.DataRaftNode {
+			return &raftNodeAdapter{n: leader}
+		},
+	)
+
+	// Execute self-removal: leader → node-3. ChangeMembership returns nil via
+	// joint commit-time step-down hook (jointPromoteCh closes BEFORE
+	// state=Follower in raft.Node).
+	err := exec.MoveReplica(ctx, "group-0", leaderID, "node-3")
+	require.NoError(t, err, "self-removal must return nil via joint commit-time hook")
+
+	// MetaFSM notified with new membership (no old leader, includes node-3).
+	require.Len(t, sgUpdater.proposed, 1)
+	assert.Contains(t, sgUpdater.proposed[0].PeerIDs, "node-3")
+	assert.NotContains(t, sgUpdater.proposed[0].PeerIDs, leaderID)
+
+	// A NEW leader is eventually elected from C_new = {non-leader peers + node-3}.
+	require.Eventually(t, func() bool {
+		newLeader := cl.CurrentLeader()
+		return newLeader != nil && newLeader.ID() != leaderID
+	}, 10*time.Second, 100*time.Millisecond, "new leader must be elected from C_new")
+
+	// node-3 caught up with the post-migration cluster.
+	assert.Eventually(t, func() bool {
+		newLeader := cl.CurrentLeader()
+		if newLeader == nil {
+			return false
+		}
+		return node3.CommittedIndex() == newLeader.CommittedIndex()
+	}, 10*time.Second, 50*time.Millisecond, "node-3 committed index must match new leader")
+}
