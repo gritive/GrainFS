@@ -113,17 +113,13 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		procs[i] = startNode(i)
 	}
-	for i := 0; i < 3; i++ {
-		waitForPort(t, httpPorts[i], 60*time.Second)
-	}
+	waitForPortsParallel(t, httpPorts[:3], 60*time.Second)
 
 	// Stage 2: bring up the remaining 2 nodes after the cluster has a leader.
 	for i := 3; i < numNodes; i++ {
 		procs[i] = startNode(i)
 	}
-	for i := 3; i < numNodes; i++ {
-		waitForPort(t, httpPorts[i], 30*time.Second)
-	}
+	waitForPortsParallel(t, httpPorts[3:], 60*time.Second)
 
 	var client *s3.Client
 	var leaderIdx int
@@ -300,9 +296,7 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		}
 	})
 
-	for i := range procs {
-		waitForPort(t, httpPorts[i], 30*time.Second)
-	}
+	waitForPortsParallel(t, httpPorts, 60*time.Second)
 
 	var client *s3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
