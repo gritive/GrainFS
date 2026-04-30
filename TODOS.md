@@ -41,7 +41,8 @@
 - [ ] **raft-ehn Tier 3** (별도 브랜치, 각 sub-project는 독립 design + plan + worktree):
   - **Tier 3-1: Joint consensus + Learner** — Multi-Raft atomic move-replica · multi-server replacement 안전성. wire format `JointConfChange=2` + `new_config:[string]` / `old_config:[string]` 슬롯 reserved (PR-A에서). 세 sub-project로 분해:
     - **Sub-project 1: Learner-first 정책** — 새 voter 추가 시 자동 learner → catch-up 감지 → promote. 의존성 없음. Joint consensus의 안전망. 4 PR (~880 LOC). **진행 중** (worktree `feat-raft-joint-consensus`). plan-eng-review + cross-model outside voice 통과 (Claude + Gemini, REVISE→commit-time close 채택, RETHINK→PR-E refactor 합류).
-      - 후속 검토: `AddVoterDirect` skip mode (recovery/migration 운영 도구로 필요 시); Learner stuck watchdog auto-remove (현재는 caller ctx timeout 채택); 추가 chaos scenarios (slow learner, repeated leader change during catch-up).
+      - 후속 검토: `AddVoterDirect` skip mode (recovery/migration 운영 도구로 필요 시); Learner stuck watchdog auto-remove (현재는 caller ctx timeout 채택).
+      - chaos scenarios 추가 완료 (`TestChaos_LearnerFirst_*` × 3: LeaderChange/SlowLearner/RepeatedLeaderChange) — flaky QUIC E2E `TestAddVoter_E2E_LeaderChange_StillPromotes`의 stable in-memory 대체.
     - **Sub-project 2: Joint consensus core** — §4.3 wire activation, 4-state machine (normal → C_old+new → C_new), dual-quorum, ConfChange entry encoding. 큼 (~6-8 PR). Sub-project 1 완료 후.
     - **Sub-project 3: Multi-server replacement API** — `ChangeMembership(add, remove)` public, PR-E `DataGroupPlanExecutor`를 joint으로 전환. 중간 (~2-3 PR). Sub-project 2 의존.
   - **Tier 3-2: RecoverCluster** — 단일 노드 재해 복구 운영 도구
