@@ -1847,3 +1847,32 @@ func TestPeerMatchIndex_UnknownPeer(t *testing.T) {
 	_, ok := n.PeerMatchIndex("unknown:9000")
 	require.False(t, ok)
 }
+
+func TestHandleInstallSnapshot_SuffrageFix(t *testing.T) {
+	cfg := DefaultConfig("node-1", []string{"node-2"})
+	node := NewNode(cfg)
+
+	args := &InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  1,
+		Data:              []byte("snapshot-data"),
+		Servers: []Server{
+			{ID: "node-1", Suffrage: Voter},
+			{ID: "node-2", Suffrage: Voter},
+			{ID: "node-3", Suffrage: NonVoter}, // learner — must NOT become a voter
+		},
+	}
+
+	reply := node.HandleInstallSnapshot(args)
+	require.NotNil(t, reply)
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	assert.Contains(t, node.config.Peers, "node-2", "node-2 (voter) must be in config.Peers")
+	assert.NotContains(t, node.config.Peers, "node-3", "node-3 (NonVoter) must NOT be in config.Peers")
+	_, learnerExists := node.learnerIDs["node-3"]
+	assert.True(t, learnerExists, "node-3 must be in learnerIDs as a NonVoter")
+}

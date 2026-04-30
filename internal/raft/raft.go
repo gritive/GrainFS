@@ -1589,16 +1589,12 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	n.pendingConfChangeIndex = 0
 	n.signalCommit()
 
-	// Restore cluster config from snapshot (Violation 3 fix).
+	// Restore cluster config from snapshot using Suffrage-aware helper.
 	if len(args.Servers) > 0 {
-		peers := make([]string, 0, len(args.Servers))
-		for _, s := range args.Servers {
-			if s.ID != n.id {
-				peers = append(peers, s.ID)
-			}
-		}
+		peers, learners := restoreConfigFromServers(args.Servers, n.id)
 		n.config.Peers = peers
 		n.initialPeers = peers
+		n.learnerIDs = learners
 	}
 
 	// Deliver snapshot data via applyCh so the FSM can restore
