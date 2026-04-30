@@ -44,6 +44,9 @@ func (a *raftNodeAdapter) AddLearner(id, _ string) error  { return a.n.AddLearne
 func (a *raftNodeAdapter) PromoteToVoter(id string) error { return a.n.PromoteToVoter(id) }
 func (a *raftNodeAdapter) RemoveVoter(id string) error    { return a.n.RemoveVoter(id) }
 func (a *raftNodeAdapter) TransferLeadership() error      { return a.n.TransferLeadership() }
+func (a *raftNodeAdapter) AddVoterCtx(ctx context.Context, id, addr string) error {
+	return a.n.AddVoterCtx(ctx, id, addr)
+}
 
 // TestVoterMigration_ViaDataGroupPlanExecutor is an end-to-end test that
 // exercises the full DataGroupPlanExecutor.MoveReplica path with real raft.Node

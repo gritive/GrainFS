@@ -187,3 +187,6 @@ func (a *autoRebalDataNode) AddLearner(id, _ string) error  { return a.n.AddLear
 func (a *autoRebalDataNode) PromoteToVoter(id string) error { return a.n.PromoteToVoter(id) }
 func (a *autoRebalDataNode) RemoveVoter(id string) error    { return a.n.RemoveVoter(id) }
 func (a *autoRebalDataNode) TransferLeadership() error      { return a.n.TransferLeadership() }
+func (a *autoRebalDataNode) AddVoterCtx(ctx context.Context, id, addr string) error {
+	return a.n.AddVoterCtx(ctx, id, addr)
+}

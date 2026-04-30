@@ -37,6 +37,7 @@ type dataRaftNode interface {
 	RemoveVoter(id string) error
 	PeerMatchIndex(peerKey string) (uint64, bool)
 	TransferLeadership() error
+	AddVoterCtx(ctx context.Context, id, addr string) error
 }
 
 // DataGroupPlanExecutor implements GroupRebalancer via real Raft voter migration.
@@ -122,47 +123,12 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 		return fmt.Errorf("data_group_executor: resolve toNode: %w", err)
 	}
 
-	// Step 1: Add toNode as learner
-	if err := node.AddLearner(toNode, toAddr); err != nil {
-		return fmt.Errorf("data_group_executor: AddLearner %s: %w", toNode, err)
-	}
-
-	// Step 2: Wait for learner ConfChange to be applied (matchIndex entry appears)
-	const trackTimeout = 500 * time.Millisecond
-	deadline := time.Now().Add(trackTimeout)
-	for {
-		if _, ok := node.PeerMatchIndex(toAddr); ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("data_group_executor: learner %s not tracked after %v", toNode, trackTimeout)
-		}
-		select {
-		case <-time.After(10 * time.Millisecond):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	// Step 3: Wait for catch-up — learner's matchIndex >= committed at the time of AddLearner.
-	// Guarded by catchUpTimeout so a stalled learner never blocks the caller forever.
-	committed := node.CommittedIndex()
-	catchCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+	// Steps 1-4 unified: AddVoterCtx performs learner-first internally
+	// (AddLearner → catch-up watcher → PromoteToVoter), bounded by catchUpTimeout.
+	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
 	defer cancel()
-	for {
-		if match, ok := node.PeerMatchIndex(toAddr); ok && match >= committed {
-			break
-		}
-		select {
-		case <-time.After(50 * time.Millisecond):
-		case <-catchCtx.Done():
-			return fmt.Errorf("data_group_executor: catch-up timed out waiting for %s: %w", toNode, catchCtx.Err())
-		}
-	}
-
-	// Step 4: Promote learner to full voter
-	if err := node.PromoteToVoter(toNode); err != nil {
-		return fmt.Errorf("data_group_executor: PromoteToVoter %s: %w", toNode, err)
+	if err := node.AddVoterCtx(addCtx, toNode, toAddr); err != nil {
+		return fmt.Errorf("data_group_executor: AddVoter %s: %w", toNode, err)
 	}
 
 	// Step 5: Remove old voter (data-Raft uses QUIC address as voter key).
