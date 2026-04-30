@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -514,6 +515,46 @@ func equalServerSets(a, b []ServerEntry) bool {
 	}
 	return true
 }
+
+// ChangeMembership atomically transitions the cluster from C_old to
+// C_new = (C_old \ removes) ∪ adds via §4.3 joint consensus, with §4.4
+// learner-first catch-up for added voters.
+//
+// See docs/superpowers/specs/2026-04-30-raft-changemembership-design.md.
+//
+// MUST NOT be called with n.mu held.
+func (n *Node) ChangeMembership(ctx context.Context, adds []ServerEntry, removes []string) error {
+	n.mu.Lock()
+	if n.state != Leader {
+		n.mu.Unlock()
+		return ErrNotLeader
+	}
+	if n.mixedVersion {
+		n.mu.Unlock()
+		return ErrMixedVersionNoMembershipChange
+	}
+	if n.jointPhase != JointNone || n.pendingConfChangeIndex != 0 {
+		n.mu.Unlock()
+		return ErrConfChangeInProgress
+	}
+
+	// Empty diff: caller wants no change.
+	if len(adds) == 0 && len(removes) == 0 {
+		n.mu.Unlock()
+		return nil
+	}
+	n.mu.Unlock()
+
+	// Adds-empty fast path: skip learner phase, go straight to joint.
+	if len(adds) == 0 {
+		return n.proposeJointConfChangeWait(ctx, nil, removes)
+	}
+
+	// Full learner-first hybrid path implemented in subsequent task.
+	return errChangeMembershipAddsNotImplemented
+}
+
+var errChangeMembershipAddsNotImplemented = errors.New("ChangeMembership: adds path not yet implemented")
 
 // ChangeMembershipOpts configures default behavior for ChangeMembership.
 type ChangeMembershipOpts struct {

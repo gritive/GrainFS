@@ -235,6 +235,37 @@ func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
 	require.NotNil(t, n.jointPromoteCh)
 }
 
+// TestChangeMembership_NoOp_NilArgs — empty diff is a no-op success.
+func TestChangeMembership_NoOp_NilArgs(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+
+	err := n.ChangeMembership(context.Background(), nil, nil)
+	require.NoError(t, err)
+
+	n.mu.Lock()
+	phase := n.jointPhase
+	n.mu.Unlock()
+	require.Equal(t, JointNone, phase)
+}
+
+func TestChangeMembership_NotLeader_ReturnsErrNotLeader(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Follower
+
+	err := n.ChangeMembership(context.Background(), nil, []string{"n2"})
+	require.ErrorIs(t, err, ErrNotLeader)
+}
+
+func TestChangeMembership_JointInFlight_ReturnsErrConfChangeInProgress(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+	n.jointPhase = JointEntering
+
+	err := n.ChangeMembership(context.Background(), nil, []string{"n2"})
+	require.ErrorIs(t, err, ErrConfChangeInProgress)
+}
+
 // TestSetChangeMembershipDefaults_PersistsAcrossCalls — Sub-project 3 PR-K1.
 func TestSetChangeMembershipDefaults_PersistsAcrossCalls(t *testing.T) {
 	n := jointTestNode("n1")
