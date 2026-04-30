@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeShardGroupSource implements shardGroupSource for unit testing.
+// fakeShardGroupSource implements ShardGroupSource for unit testing.
 type fakeShardGroupSource struct {
 	groups map[string]ShardGroupEntry
 }
@@ -14,6 +14,14 @@ type fakeShardGroupSource struct {
 func (f *fakeShardGroupSource) ShardGroup(id string) (ShardGroupEntry, bool) {
 	g, ok := f.groups[id]
 	return g, ok
+}
+
+func (f *fakeShardGroupSource) ShardGroups() []ShardGroupEntry {
+	out := make([]ShardGroupEntry, 0, len(f.groups))
+	for _, g := range f.groups {
+		out = append(out, g)
+	}
+	return out
 }
 
 func TestLookupForwardTarget_ReturnsFirstPeer(t *testing.T) {

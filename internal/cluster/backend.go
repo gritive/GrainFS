@@ -83,8 +83,9 @@ type DistributedBackend struct {
 	// lock-free counters, why we do not use an actor pattern here).
 	shardCache *shardcache.Cache
 
-	assigner BucketAssigner // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
-	router   *Router        // PR-D: bucket→group routing; nil = no routing
+	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
+	router     *Router          // PR-D: bucket→group routing; nil = no routing
+	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
 
 	// vfsFixedVersion controls VFS-internal-bucket behavior:
 	// true (default) → PutObject for "__grainfs_vfs_*" uses fixed versionID
@@ -399,6 +400,12 @@ func (b *DistributedBackend) SetBucketAssigner(a BucketAssigner) { b.assigner = 
 // SetRouter wires a Router for bucket→group routing used by CreateBucket.
 func (b *DistributedBackend) SetRouter(r *Router) { b.router = r }
 
+// SetShardGroupSource wires a ShardGroupSource (typically *MetaFSM) so
+// CreateBucket can query the active group list for hash-based assignment.
+// Must be called before serving traffic. Nil falls back to Router.RouteKey
+// only (legacy default-group behavior).
+func (b *DistributedBackend) SetShardGroupSource(s ShardGroupSource) { b.shardGroup = s }
+
 // --- Bucket operations ---
 
 func (b *DistributedBackend) CreateBucket(bucket string) error {
@@ -427,11 +434,27 @@ func (b *DistributedBackend) CreateBucket(bucket string) error {
 		if b.router == nil {
 			return fmt.Errorf("create bucket %q: router not configured", bucket)
 		}
-		g, routeErr := b.router.RouteKey(bucket, "")
-		if routeErr != nil {
-			return fmt.Errorf("route bucket %q: %w", bucket, routeErr)
+		// Determine target group:
+		//   1. If meta-FSM has an explicit assignment (e.g., from rebalance), preserve it.
+		//   2. Else, hash-assign across active groups (if shardGroup wired).
+		//   3. Else, fall back to Router.RouteKey (legacy default-group path).
+		groupID := ""
+		if g, err := b.router.RouteKey(bucket, ""); err == nil && g != nil {
+			groupID = g.ID()
 		}
-		if propErr := b.assigner.ProposeBucketAssignment(context.Background(), bucket, g.ID()); propErr != nil {
+		if groupID == "" && b.shardGroup != nil {
+			entries := b.shardGroup.ShardGroups()
+			ids := make([]string, 0, len(entries))
+			for _, e := range entries {
+				ids = append(ids, e.ID)
+			}
+			sort.Strings(ids) // deterministic
+			groupID = HashAssign(bucket, ids)
+		}
+		if groupID == "" {
+			return fmt.Errorf("create bucket %q: no active groups for assignment", bucket)
+		}
+		if propErr := b.assigner.ProposeBucketAssignment(context.Background(), bucket, groupID); propErr != nil {
 			return fmt.Errorf("propose bucket assignment: %w", propErr)
 		}
 	}

@@ -455,6 +455,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	dgMgr.Add(group0)
 	distBackend.SetRouter(clusterRouter)
 	distBackend.SetBucketAssigner(metaRaft)
+	distBackend.SetShardGroupSource(metaRaft.FSM())
 
 	// PR-D: Rebalancer 배선 — LoadReporter가 meta-Raft FSM에 부하 스냅샷을 커밋하고
 	// Rebalancer가 leader에서 주기적으로 평가해 RebalancePlan을 제안·실행한다.

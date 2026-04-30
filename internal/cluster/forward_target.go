@@ -6,11 +6,17 @@ import "errors"
 // or the entry has no peers.
 var ErrUnknownGroup = errors.New("forward_target: unknown group or no peers")
 
-// shardGroupSource is the minimal interface lookupForwardTarget needs.
-// MetaFSM satisfies this; tests use a fake.
-type shardGroupSource interface {
+// ShardGroupSource is the interface used by callers (DistributedBackend,
+// lookupForwardTarget) to query meta-FSM shard group state. *MetaFSM satisfies
+// it; tests use a fake.
+type ShardGroupSource interface {
 	ShardGroup(id string) (ShardGroupEntry, bool)
+	ShardGroups() []ShardGroupEntry
 }
+
+// shardGroupSource is the unexported alias used by lookupForwardTarget. Older
+// callers can keep the unexported type; new code uses ShardGroupSource.
+type shardGroupSource = ShardGroupSource
 
 // lookupForwardTarget returns the first peer of the given group as the forward
 // target. Caller forwards the propose RPC; if the target is a follower, raft

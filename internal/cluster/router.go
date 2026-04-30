@@ -2,11 +2,28 @@ package cluster
 
 import (
 	"errors"
+	"hash/fnv"
 	"sync/atomic"
 )
 
 // ErrNoGroup is returned by Router when no DataGroup can be found for a bucket.
 var ErrNoGroup = errors.New("router: no data group for bucket")
+
+// HashAssign returns the group_id for bucket using FNV-32 hash modulo the
+// caller-supplied list of group IDs. Returns "" if groups is empty.
+//
+// Deterministic across processes given the same inputs. Used by CreateBucket
+// to record an initial bucket→group mapping in meta-Raft. Caller must pass a
+// sorted, deduplicated group list — the modulo result is position-dependent.
+func HashAssign(bucket string, groups []string) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(bucket))
+	idx := h.Sum32() % uint32(len(groups))
+	return groups[idx]
+}
 
 // routerSnap is the immutable routing table for Router. COW replacement enables lock-free reads.
 // bucketMap is frozen once published via atomic.Pointer.Store — never mutate in-place; always copy-on-write.
