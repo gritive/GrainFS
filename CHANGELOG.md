@@ -48,6 +48,7 @@
 
 - `internal/vfs/vfs.go` `grainFile.ReadAt`: `mu sync.Mutex` 추가로 동시 ReadAt에서 `rc`/`pos` 보호 (`io.ReaderAt` 계약 준수). FUSE-over-S3 도구가 발행하는 병렬 range GET 요청에 안전.
 
+>>>>>>> origin/master
 ## [0.0.6.3] — 2026-04-30
 
 ### Added
