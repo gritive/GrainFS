@@ -1,8 +1,12 @@
 package cluster
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"io"
 
+	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -131,4 +135,221 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (*routeTarget, error) {
 		}
 	}
 	return t, nil
+}
+
+// localBackend returns the GroupBackend embedded in the named group. Caller
+// guarantees groups != nil and the group exists (typically via routeBucket
+// having returned selfIsLeader = true). Returns nil if any link is missing.
+func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
+	if c.groups == nil {
+		return nil
+	}
+	dg := c.groups.Get(groupID)
+	if dg == nil {
+		return nil
+	}
+	return dg.Backend()
+}
+
+// --- Bucket-scoped routings (8 of 10 — PutObject + UploadPart in T7) ---
+//
+// All eight share the same shape:
+//  1. routeBucket → groupID, peer order, self-leader hint
+//  2. self-leader: call local GroupBackend (skip wire)
+//  3. else: forward.Send → reply parse
+//
+// The wire opcode is one of raftpb.ForwardOp* values; the reply layout is
+// dictated by ForwardReply (see forward_codec.go).
+
+// GetObject reads the object body and metadata. Body is embedded inside the
+// reply (≤5 MB enforced server-side). Returns ErrNoSuchBucket / ErrObjectNotFound
+// for the obvious cases.
+func (c *ClusterCoordinator) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.GetObject(bucket, key)
+		}
+	}
+	if c.forward == nil {
+		return nil, nil, ErrCoordinatorNoRouter
+	}
+	args := buildGetObjectArgs(bucket, key)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpGetObject, args)
+	if err != nil {
+		return nil, nil, err
+	}
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		return nil, nil, err
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	body := fr.ReadBodyBytes()
+	// Reply buffer is reused by ForwardSender — copy the body bytes into a
+	// caller-owned slice before wrapping. obj already deep-copies via accessors.
+	bodyCopy := make([]byte, len(body))
+	copy(bodyCopy, body)
+	return io.NopCloser(bytes.NewReader(bodyCopy)), obj, nil
+}
+
+func (c *ClusterCoordinator) HeadObject(bucket, key string) (*storage.Object, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.HeadObject(bucket, key)
+		}
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildHeadObjectArgs(bucket, key)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpHeadObject, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectFromReply(reply)
+}
+
+func (c *ClusterCoordinator) DeleteObject(bucket, key string) error {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.DeleteObject(bucket, key)
+		}
+	}
+	if c.forward == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildDeleteObjectArgs(bucket, key)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpDeleteObject, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
+}
+
+func (c *ClusterCoordinator) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.ListObjects(bucket, prefix, maxKeys)
+		}
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildListObjectsArgs(bucket, prefix, int32(maxKeys))
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpListObjects, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectsFromReply(reply)
+}
+
+// WalkObjects buffers ALL matching objects on the server and returns them in
+// one reply (≤5 MB cap on the encoded size). Callers expecting >5 MB worth of
+// keys should use ListObjects with maxKeys pagination instead.
+func (c *ClusterCoordinator) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.WalkObjects(bucket, prefix, fn)
+		}
+	}
+	if c.forward == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildWalkObjectsArgs(bucket, prefix)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpWalkObjects, args)
+	if err != nil {
+		return err
+	}
+	objs, err := objectsFromReply(reply)
+	if err != nil {
+		return err
+	}
+	for _, o := range objs {
+		if err := fn(o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *ClusterCoordinator) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.CreateMultipartUpload(bucket, key, contentType)
+		}
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildCreateMultipartUploadArgs(bucket, key, contentType)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpCreateMultipartUpload, args)
+	if err != nil {
+		return nil, err
+	}
+	return uploadFromReply(reply)
+}
+
+func (c *ClusterCoordinator) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.CompleteMultipartUpload(bucket, key, uploadID, parts)
+		}
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildCompleteMultipartUploadArgs(bucket, key, uploadID, parts)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpCompleteMultipartUpload, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectFromReply(reply)
+}
+
+func (c *ClusterCoordinator) AbortMultipartUpload(bucket, key, uploadID string) error {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.AbortMultipartUpload(bucket, key, uploadID)
+		}
+	}
+	if c.forward == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildAbortMultipartUploadArgs(bucket, key, uploadID)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpAbortMultipartUpload, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
 }

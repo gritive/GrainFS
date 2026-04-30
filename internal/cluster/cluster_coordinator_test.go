@@ -1,10 +1,12 @@
 package cluster
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -150,4 +152,178 @@ func TestClusterCoordinator_RouteBucket_SelfIsVoter_NotLeader(t *testing.T) {
 	require.False(t, target.selfIsLeader)
 	// PeersForForward order: non-self first, self last.
 	require.Equal(t, []string{"a", "b", "self"}, target.peers)
+}
+
+// --- T6 forward-path test scaffolding ---
+
+// recordingDialer captures every (peer, payload) pair the ForwardSender hands
+// it and returns a canned reply. The op-specific reply bytes are provided by
+// the caller via replyByOp; missing op → buildErrorReply(Internal).
+type recordingDialer struct {
+	calls      []dialerCall
+	replyByOp  map[raftpb.ForwardOp][]byte
+	defaultErr error
+}
+
+type dialerCall struct {
+	peer  string
+	op    raftpb.ForwardOp
+	gid   string
+	args  []byte
+	rawly []byte // raw payload (decoded inside the test if asserting)
+}
+
+func (d *recordingDialer) dial(peer string, payload []byte) ([]byte, error) {
+	if d.defaultErr != nil {
+		return nil, d.defaultErr
+	}
+	gid, op, args, err := decodeForwardPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	// copy args because they alias payload, which the sender may reuse.
+	argsCopy := make([]byte, len(args))
+	copy(argsCopy, args)
+	d.calls = append(d.calls, dialerCall{peer: peer, op: op, gid: gid, args: argsCopy, rawly: payload})
+	if reply, ok := d.replyByOp[op]; ok {
+		return reply, nil
+	}
+	return buildSimpleReply(raftpb.ForwardStatusInternal, ""), nil
+}
+
+// setupCoordWithForward builds a coordinator wired to a recording dialer for
+// a single bucket → group mapping. self is NOT a voter so all calls forward.
+func setupCoordWithForward(t *testing.T, bucket, groupID string, peers []string) (*ClusterCoordinator, *recordingDialer) {
+	t.Helper()
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup(groupID, peers))
+	router := NewRouter(mgr)
+	router.AssignBucket(bucket, groupID)
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		groupID: {ID: groupID, PeerIDs: peers},
+	}}
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
+	sender := NewForwardSender(d.dial)
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(sender)
+	return c, d
+}
+
+// TestClusterCoordinator_GetObject_Forward verifies the GetObject routing
+// path: routeBucket → ForwardSender.Send → objectFromReply. body is embedded
+// inside ForwardReply.read_body.
+func TestClusterCoordinator_GetObject_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "b"})
+	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
+		&storage.Object{Key: "k", Size: 5, ETag: "etag", ContentType: "text/plain"},
+		"bk", []byte("hello"),
+	)
+
+	rc, obj, err := c.GetObject("bk", "k")
+	require.NoError(t, err)
+	require.Equal(t, int64(5), obj.Size)
+	require.Equal(t, "etag", obj.ETag)
+	body, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte("hello"), body)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpGetObject, d.calls[0].op)
+	require.Equal(t, "g1", d.calls[0].gid)
+}
+
+func TestClusterCoordinator_HeadObject_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpHeadObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: 99, ETag: "etag-x"}, "bk",
+	)
+	obj, err := c.HeadObject("bk", "k")
+	require.NoError(t, err)
+	require.Equal(t, int64(99), obj.Size)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+}
+
+func TestClusterCoordinator_DeleteObject_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpDeleteObject] = buildOKReply()
+	require.NoError(t, c.DeleteObject("bk", "k"))
+	require.Equal(t, raftpb.ForwardOpDeleteObject, d.calls[0].op)
+}
+
+func TestClusterCoordinator_ListObjects_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpListObjects] = buildObjectsReply("bk", []*storage.Object{
+		{Key: "k1", Size: 1},
+		{Key: "k2", Size: 2},
+	})
+	out, err := c.ListObjects("bk", "p/", 100)
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	require.Equal(t, "k1", out[0].Key)
+	require.Equal(t, raftpb.ForwardOpListObjects, d.calls[0].op)
+}
+
+func TestClusterCoordinator_WalkObjects_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpWalkObjects] = buildObjectsReply("bk", []*storage.Object{
+		{Key: "a1"}, {Key: "a2"}, {Key: "a3"},
+	})
+	var seen []string
+	require.NoError(t, c.WalkObjects("bk", "a", func(o *storage.Object) error {
+		seen = append(seen, o.Key)
+		return nil
+	}))
+	require.Equal(t, []string{"a1", "a2", "a3"}, seen)
+	require.Equal(t, raftpb.ForwardOpWalkObjects, d.calls[0].op)
+}
+
+func TestClusterCoordinator_WalkObjects_FnError_Stops(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpWalkObjects] = buildObjectsReply("bk", []*storage.Object{
+		{Key: "a1"}, {Key: "a2"},
+	})
+	stopErr := errors.New("stop")
+	err := c.WalkObjects("bk", "a", func(o *storage.Object) error {
+		return stopErr
+	})
+	require.ErrorIs(t, err, stopErr)
+}
+
+func TestClusterCoordinator_CreateMultipartUpload_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpCreateMultipartUpload] = buildUploadReply("bk", "k", "upload-1")
+	up, err := c.CreateMultipartUpload("bk", "k", "text/plain")
+	require.NoError(t, err)
+	require.Equal(t, "upload-1", up.UploadID)
+	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+}
+
+func TestClusterCoordinator_CompleteMultipartUpload_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpCompleteMultipartUpload] = buildObjectReply(
+		&storage.Object{Key: "k", Size: 1024, ETag: "merged-etag"}, "bk",
+	)
+	obj, err := c.CompleteMultipartUpload("bk", "k", "upload-1", []storage.Part{
+		{PartNumber: 1, ETag: "p1"}, {PartNumber: 2, ETag: "p2"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1024), obj.Size)
+	require.Equal(t, "merged-etag", obj.ETag)
+	require.Equal(t, raftpb.ForwardOpCompleteMultipartUpload, d.calls[0].op)
+}
+
+func TestClusterCoordinator_AbortMultipartUpload_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpAbortMultipartUpload] = buildOKReply()
+	require.NoError(t, c.AbortMultipartUpload("bk", "k", "upload-1"))
+	require.Equal(t, raftpb.ForwardOpAbortMultipartUpload, d.calls[0].op)
+}
+
+// TestClusterCoordinator_GetObject_NoSuchBucketStatus verifies that a server-
+// side NoSuchBucket reply gets surfaced as storage.ErrNoSuchBucket — the
+// status code conversion is the contract S3 handlers depend on for 404 vs 500.
+func TestClusterCoordinator_GetObject_NoSuchBucketStatus(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpGetObject] = buildSimpleReply(raftpb.ForwardStatusNoSuchBucket, "")
+	_, _, err := c.GetObject("bk", "k")
+	require.ErrorIs(t, err, storage.ErrNoSuchBucket)
 }
