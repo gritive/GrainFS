@@ -855,7 +855,7 @@ func TestRebuildConfigFromLog_JointLeavePromotionClearsLearners(t *testing.T) {
 	n.initialPeers = []string{"n1", "n2", "n3"}
 
 	n.log = []LogEntry{
-		{Index: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddLearner, "n4", "n4")},
+		{Index: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddLearner, ID: "n4", Address: "n4", ManagedByJoint: false})},
 		{Index: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
 			Op:         JointOpEnter,
 			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},

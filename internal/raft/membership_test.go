@@ -33,7 +33,7 @@ func TestRestoreConfigFromServers_EmptyServers(t *testing.T) {
 func TestRebuildConfigFromLog_WithBase(t *testing.T) {
 	n := &Node{
 		log: []LogEntry{
-			{Index: 3, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddVoter, "peer-3", "addr-3")},
+			{Index: 3, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-3", Address: "addr-3", ManagedByJoint: false})},
 		},
 		nextIndex:  map[string]uint64{},
 		matchIndex: map[string]uint64{},
@@ -49,8 +49,8 @@ func TestRebuildConfigFromLog_WithBase(t *testing.T) {
 func TestRebuildConfigFromLog_SkipsBeforeStartIndex(t *testing.T) {
 	n := &Node{
 		log: []LogEntry{
-			{Index: 2, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddVoter, "peer-old", "addr-old")},
-			{Index: 5, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddVoter, "peer-new", "addr-new")},
+			{Index: 2, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-old", Address: "addr-old", ManagedByJoint: false})},
+			{Index: 5, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-new", Address: "addr-new", ManagedByJoint: false})},
 		},
 		nextIndex:  map[string]uint64{},
 		matchIndex: map[string]uint64{},
@@ -215,7 +215,7 @@ func TestApplyLoopClosesPromoteCh(t *testing.T) {
 	n.learnerIDs["learner-1"] = "learner-1"
 	ch := make(chan struct{})
 	n.learnerPromoteCh["learner-1"] = ch
-	cmd := encodeConfChange(ConfChangePromote, "learner-1", "")
+	cmd := encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: "learner-1", Address: "", ManagedByJoint: false})
 	entry := LogEntry{Term: 1, Index: 1, Command: cmd, Type: LogEntryConfChange}
 	n.log = append(n.log, entry)
 	n.firstIndex = 1
