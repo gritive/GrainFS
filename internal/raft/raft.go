@@ -748,6 +748,28 @@ func (n *Node) Configuration() Configuration {
 	return Configuration{Servers: servers}
 }
 
+// JointPhase returns the current §4.3 joint state, including the dual voter
+// sets when in JointEntering. enterIndex is 0 when phase == JointNone.
+//
+// The returned phase is the unexported jointPhase type promoted via int8 cast
+// at package boundaries; callers can use raft.JointNone / raft.JointEntering
+// constants for comparison.
+func (n *Node) JointPhase() (phase JointPhase, oldVoters []string, newVoters []string, enterIndex uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	phase = JointPhase(n.jointPhase)
+	if n.jointPhase == JointEntering {
+		oldVoters = append([]string(nil), n.jointOldVoters...)
+		newVoters = append([]string(nil), n.jointNewVoters...)
+		enterIndex = n.jointEnterIndex
+	}
+	return
+}
+
+// JointPhase is the exported alias of jointPhase for callers querying joint
+// state via Node.JointPhase().
+type JointPhase = jointPhase
+
 // JointSnapshotState captures the §4.3 joint state for snapshot persistence.
 // Use as JointStateProvider for SnapshotManager. Returns int8 phase to keep the
 // jointPhase type unexported across package boundaries.

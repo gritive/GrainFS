@@ -543,6 +543,30 @@ func TestJoint_E2E_RemoveOne(t *testing.T) {
 	require.Len(t, peers, 2, "leader sees 3-node cluster minus self after removal")
 }
 
+// TestJointPhase_None_ReturnsZeroes — Sub-project 3 PR-K1.
+func TestJointPhase_None_ReturnsZeroes(t *testing.T) {
+	n := jointTestNode("n1")
+	phase, oldV, newV, idx := n.JointPhase()
+	require.Equal(t, JointNone, phase)
+	require.Empty(t, oldV)
+	require.Empty(t, newV)
+	require.Zero(t, idx)
+}
+
+func TestJointPhase_Entering_ReportsAllFour(t *testing.T) {
+	n := jointTestNode("n1")
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n4"}
+	n.jointEnterIndex = 42
+
+	phase, oldV, newV, idx := n.JointPhase()
+	require.Equal(t, JointEntering, phase)
+	require.Equal(t, []string{"n1", "n2", "n3"}, oldV)
+	require.Equal(t, []string{"n1", "n2", "n4"}, newV)
+	require.Equal(t, uint64(42), idx)
+}
+
 // TestConfiguration_JointEntering_ReturnsUnion — Sub-project 3 PR-K1.
 func TestConfiguration_JointEntering_ReturnsUnion(t *testing.T) {
 	n := jointTestNode("n1")
