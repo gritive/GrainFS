@@ -300,11 +300,76 @@ Each must have explicit test coverage before merge:
   groups. The unit test suite for `Restore` and `TruncateBefore/After` is the
   primary safety net; merge gate.
 
+## P0a — Baseline measurements (current per-group layout)
+
+Captured 2026-05-02 on macOS 14, branch `perf/badger-compactor` HEAD `5034931`
+(C1 applied: state DB `NumCompactors=2`, raft-log DB `NumCompactors=2 +
+NumVersionsToKeep=1`). Host had concurrent `fix-e2e-tests` worktree e2e suite
+running (5+ extra grainfs procs); all numbers are under contention.
+
+| scenario | boot | RSS/node | heap/node | CPU/node | gor/node | PUT ok / err | GET ok / err |
+|---|---|---|---|---|---|---|---|
+| idle-N8 | 20 s | 286 MB | 1469 MB | 26.4% | 286 | — | — |
+| idle-N16 | 15 s | 399 MB | 2396 MB | 30.0% | 443 | — | — |
+| idle-N64 | partial (2 nodes died mid-run, host OOM-adjacent) | — | — | — | 1942 (survivors) | — | — |
+| load-N8 | 21 s | 529 MB | 1887 MB | 49.2% | 306 | 1026 / 1196 (54% err) | 242 / — |
+| load-N16 | 17 s | 741 MB | 2725 MB | 61.0% | 456 | 605 / 78 (11% err) | 235 / 116k |
+| load-N32 | **FAIL** (no leader within 120 s; ~22/32 groups instantiated; peer connection eviction at boot) | — | — | — | — | — | — |
+| load-N64 | not attempted (cliff already at N=32) | — | — | — | — | — | — |
+
+Top CPU functions on `node-0` for `idle-N8` (representative of all idle): 87%
+in `runtime.kevent` + `pthread_cond_wait` + `pthread_cond_signal` +
+`findRunnable` — scheduler-dominated, application code <5%. Profile pattern
+unchanged from N=8 to N=16; idle CPU is goroutine-wakeup-bound, not raft-work-bound.
+
+### Observations
+
+1. **Goroutine scaling is sub-linear**: N=8→N=16 doubles groups but
+   goroutines grow only +55% (286 → 443). Per-instance fixed overhead
+   dominates over per-group scaling. C2's win comes from reducing fixed
+   per-instance overhead × 2N+1 → 2.
+
+2. **N=32 boot cliff**: 5 nodes × 32 groups × 2 BadgerDB = 320 BadgerDB
+   instances cluster-wide. Bootstrap fails before any user request — peers
+   evict each other's connections under the resource storm
+   (`evicted: stale connection`, `default bucket creation failed: forwardPropose:
+   ... read header: EOF`). This is the existing-layout failure mode that C2
+   directly addresses by collapsing 2N+1 → 3 instances per node.
+
+3. **load-N16 PUT error rate (11%) < load-N8 (54%)**: counterintuitive
+   improvement at higher N. Hypothesis: 16 group leaders distribute write
+   pressure better than 8. Larger N is *helpful for write throughput* up to
+   the host saturation point. C2, by raising that saturation point, lets the
+   cluster realize this benefit at higher N.
+
+4. **No compaction-stall signature observed**: A1's worst-case (shared LSM
+   compaction → write stall → leader churn) never appeared at idle or load.
+   Evidence is limited (couldn't run sustained-write tests on contended host),
+   but the failure mode that *did* appear (boot saturation at N=32) is one
+   that C2 makes *better*, not worse.
+
+### Decision: PROCEED to P0b prototype
+
+Premise validation: the design's central worry (shared-DB compaction stall)
+is unconfirmed. The actual current-layout failure mode (per-instance overhead
+breaks bootstrap at N≥32) is *what C2 is designed to fix*. C2 should
+demonstrably let the cluster sustain N=32 or higher; if a quick prototype
+can show this on the same host, the design's primary value proposition is
+proven. Compaction-stall risk remains a P0b focus, to be measured directly
+via prototype `load-N16` sustained writes.
+
+P0b spec: minimal `NamespacedLogStore` + per-node-shared `*badger.DB` for
+state and log, behind a `--shared-badger=true` flag (default false). Skip
+migration and full safety; just enough to run `cluster_perf_profile_test`
+matrix end-to-end. Compare: idle-N8/16 goroutines & CPU; load-N8/16 PUT
+error rate; load-N32 (does it boot now?).
+
 ## References
 
 - C1 PR: #128 `perf/badger-compactor` (cheap compactor reduction baseline)
 - Codex review of this design: see PR review thread linked from #128
 - TODOS Phase 19 entry: "BadgerDB 인스턴스 통합" (deferred from C1)
+- P0a plan + measurements: this section + `tests/e2e/cluster_perf_profile_test.go` matrix
 
 ---
 

@@ -102,8 +102,11 @@ func TestE2E_ClusterPerf_All(t *testing.T) {
 
 	scenarios := []perfScenario{
 		{name: "idle-N8", n: 8, withLoad: false},
+		{name: "idle-N16", n: 16, withLoad: false}, // C2 P0a — scaling curve
 		{name: "idle-N64", n: 64, withLoad: false},
 		{name: "load-N8", n: 8, withLoad: true},
+		{name: "load-N16", n: 16, withLoad: true}, // C2 P0a — scaling curve
+		{name: "load-N32", n: 32, withLoad: true}, // C2 P0a — premise validation gate
 		{name: "load-N64", n: 64, withLoad: true},
 	}
 	// GRAINFS_PERF_SCENARIO=idle-N8,load-N8 형태로 필터.
