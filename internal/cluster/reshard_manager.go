@@ -17,6 +17,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -47,6 +48,7 @@ type Converter interface {
 	CurrentRingVersion() RingVersion
 	// ReshardToRing reshards the object to the current ring layout.
 	ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error
+	ResolvePlacement(ctx context.Context, bucket, key string, meta PlacementMeta) (ResolvedPlacement, error)
 }
 
 // ReshardManager walks objects and triggers conversion from N× to EC.
@@ -95,28 +97,47 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 	}
 
 	currentCfg := m.backend.EffectiveECConfig()
-
+	var refs []ObjectMetaRef
 	err := fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
+		refs = append(refs, ref)
+		return nil
+	})
+	if err != nil {
+		m.logger.Warn().Err(err).Msg("reshard: iter failed")
+		return 0, 0, 1
+	}
+
+	for _, ref := range refs {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			break
 		}
-		ecRec, lookupErr := fsm.LookupShardPlacement(ref.Bucket, ref.Key)
-		if lookupErr != nil {
-			return nil // transient read error; skip this object
-		}
-		if len(ecRec.Nodes) == 0 {
+		resolved, lookupErr := m.backend.ResolvePlacement(ctx, ref.Bucket, ref.Key, PlacementMeta{
+			VersionID:   ref.VersionID,
+			RingVersion: ref.RingVersion,
+			ECData:      ref.ECData,
+			ECParity:    ref.ECParity,
+			NodeIDs:     ref.NodeIDs,
+		})
+		if errors.Is(lookupErr, ErrNotEC) {
 			// No placement yet: N× replication object, convert to EC.
 			if cerr := m.backend.ConvertObjectToEC(ctx, ref.Bucket, ref.Key); cerr != nil {
 				errs++
 				m.totalErrors.Add(1)
 				m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).Err(cerr).Msg("reshard: convert failed")
-				return nil
+				continue
 			}
 			converted++
 			m.totalConverted.Add(1)
 			m.logger.Info().Str("bucket", ref.Bucket).Str("key", ref.Key).Int64("size", ref.Size).Msg("reshard: converted to EC")
-			return nil
+			continue
 		}
+		if lookupErr != nil {
+			errs++
+			m.totalErrors.Add(1)
+			m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).Err(lookupErr).Msg("reshard: resolve placement failed")
+			continue
+		}
+		ecRec := resolved.Record
 		// Already EC. Check if stored k,m matches current effective config (EC→EC upgrade).
 		recK, recM := ecRec.K, ecRec.M
 		if recK == 0 {
@@ -125,7 +146,7 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 		}
 		if recK == currentCfg.DataShards && recM == currentCfg.ParityShards {
 			skipped++
-			return nil
+			continue
 		}
 		// k,m mismatch: cluster grew, upgrade this object's EC encoding.
 		if uerr := m.backend.upgradeObjectEC(ctx, ref.Bucket, ref.Key, ecRec, currentCfg); uerr != nil {
@@ -135,7 +156,7 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 				Int("old_k", recK).Int("old_m", recM).
 				Int("new_k", currentCfg.DataShards).Int("new_m", currentCfg.ParityShards).
 				Err(uerr).Msg("reshard: EC upgrade failed")
-			return nil
+			continue
 		}
 		converted++
 		m.totalConverted.Add(1)
@@ -143,42 +164,33 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 			Int("old_k", recK).Int("old_m", recM).
 			Int("new_k", currentCfg.DataShards).Int("new_m", currentCfg.ParityShards).
 			Msg("reshard: upgraded EC encoding")
-		return nil
-	})
-	m.totalSkipped.Add(uint64(skipped))
-	if err != nil {
-		m.logger.Warn().Err(err).Msg("reshard: iter failed")
 	}
-
 	// 링 리샤드 패스: RingVersion < currentRingVersion인 오브젝트를 현재 링으로 리샤드
 	currentRingVer := m.backend.CurrentRingVersion()
 	if currentRingVer > 0 {
-		rerr := fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
+		for _, ref := range refs {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				break
 			}
 			if ref.RingVersion >= currentRingVer {
 				skipped++
-				return nil
+				continue
 			}
 			if err := m.backend.ReshardToRing(ctx, ref.Bucket, ref.Key, ref.RingVersion); err != nil {
 				errs++
 				m.totalErrors.Add(1)
 				m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).
 					Uint64("ring_ver", uint64(ref.RingVersion)).Err(err).Msg("reshard: ring-based reshard failed")
-				return nil
+				continue
 			}
 			converted++
 			m.totalConverted.Add(1)
 			m.logger.Info().Str("bucket", ref.Bucket).Str("key", ref.Key).
 				Uint64("old_ring", uint64(ref.RingVersion)).Uint64("new_ring", uint64(currentRingVer)).
 				Msg("reshard: resharded to new ring")
-			return nil
-		})
-		if rerr != nil {
-			m.logger.Warn().Err(rerr).Msg("reshard: ring iter failed")
 		}
 	}
+	m.totalSkipped.Add(uint64(skipped))
 
 	if converted > 0 || errs > 0 {
 		m.logger.Info().Int("converted", converted).Int("skipped", skipped).Int("errors", errs).Msg("reshard: pass complete")

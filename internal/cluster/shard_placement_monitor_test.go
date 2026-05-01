@@ -27,7 +27,7 @@ func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
 
 	// Write a placement where self holds shard 1.
 	nodes := []string{"node-B", self, "node-C"}
@@ -51,7 +51,7 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
 
 	// These applies are no-ops; no placement rows are written.
 	p1 := PutShardPlacementCmd{
@@ -76,13 +76,47 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	assert.Empty(t, reported)
 }
 
+func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	backend := &DistributedBackend{db: db, fsm: fsm}
+	svc, _ := newTestShardService(t)
+
+	const self = "node-A"
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      "b",
+		Key:         "obj",
+		VersionID:   "v1",
+		Size:        10,
+		ContentType: "application/octet-stream",
+		ETag:        "etag",
+		ModTime:     1,
+		ECData:      2,
+		ECParity:    1,
+		NodeIDs:     []string{self, "node-B", "node-C"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(raw))
+
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+	var reported []string
+	monitor.SetOnMissing(func(bucket, key string, shardIdx int) {
+		reported = append(reported, fmtShardRef(bucket, key, shardIdx))
+	})
+
+	missing, err := monitor.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, missing)
+	assert.Equal(t, []string{"b/obj/v1/0"}, reported)
+}
+
 func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
 
 	// self is NOT in the placement — monitor should skip every shard.
 	raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
@@ -100,7 +134,7 @@ func TestShardPlacementMonitor_Scan_NoPlacements(t *testing.T) {
 	fsm := NewFSM(db)
 	svc, _ := newTestShardService(t)
 
-	monitor := NewShardPlacementMonitor(fsm, svc, "anyone", time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, "anyone", time.Second)
 	missing, err := monitor.Scan(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, missing)
@@ -111,7 +145,7 @@ func TestShardPlacementMonitor_Stats(t *testing.T) {
 	fsm := NewFSM(db)
 	svc, _ := newTestShardService(t)
 
-	monitor := NewShardPlacementMonitor(fsm, svc, "node-A", time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", time.Second)
 	pre := monitor.Stats()
 	assert.Zero(t, pre.TotalScans)
 	assert.Zero(t, pre.LastScanUnixNano)
@@ -137,7 +171,7 @@ func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
-	monitor := NewShardPlacementMonitor(fsm, svc, "node-A", time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", time.Second)
 	_, err := monitor.Scan(ctx)
 	// Either ctx.Err wraps to non-nil scan error, or scan completes before
 	// first ctx check — both are acceptable. We only assert no panic.
@@ -180,7 +214,7 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 func TestShardPlacementMonitor_Scan_NilShardSvc(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db)
-	monitor := NewShardPlacementMonitor(fsm, nil, "node-A", time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, nil, "node-A", time.Second)
 	_, err := monitor.Scan(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shard service not configured")
@@ -195,7 +229,7 @@ func TestShardPlacementMonitor_Scan_NonEnoentError(t *testing.T) {
 	svc, dir := newTestShardService(t)
 
 	const self = "node-A"
-	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
 
 	raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
 		Bucket: "b", Key: "k", NodeIDs: []string{self},
@@ -222,7 +256,7 @@ func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
 	fsm := NewFSM(db)
 	svc, _ := newTestShardService(t)
 
-	monitor := NewShardPlacementMonitor(fsm, svc, "node-A", 10*time.Millisecond)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", 10*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -253,7 +287,7 @@ func TestShardPlacementMonitor_Scan_CtxCancelMidRepair(t *testing.T) {
 		require.NoError(t, fsm.Apply(raw))
 	}
 
-	monitor := NewShardPlacementMonitor(fsm, svc, self, time.Second)
+	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// onMissing cancels the context on the first call, simulating mid-repair cancel.

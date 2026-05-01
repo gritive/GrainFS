@@ -57,6 +57,9 @@ func (c *fakeConverter) CurrentRingVersion() RingVersion { return 0 }
 func (c *fakeConverter) ReshardToRing(_ context.Context, _, _ string, _ RingVersion) error {
 	return nil
 }
+func (c *fakeConverter) ResolvePlacement(ctx context.Context, bucket, key string, meta PlacementMeta) (ResolvedPlacement, error) {
+	return (&DistributedBackend{db: c.fsm.db, fsm: c.fsm}).ResolvePlacement(ctx, bucket, key, meta)
+}
 
 // seedObjectMeta writes an object metadata record directly without going
 // through the full PutObject path — suitable for reshard manager tests.
@@ -65,6 +68,17 @@ func seedObjectMeta(t *testing.T, fsm *FSM, bucket, key, etag string, size int64
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket: bucket, Key: key, Size: size,
 		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(raw))
+}
+
+func seedObjectMetaEC(t *testing.T, fsm *FSM, bucket, key, etag string, size int64, k, m uint8, nodes []string) {
+	t.Helper()
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: bucket, Key: key, Size: size,
+		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
+		ECData: k, ECParity: m, NodeIDs: nodes,
 	})
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(raw))
@@ -249,6 +263,40 @@ func TestReshardManager_Run_SkipsECObjects_OnKMatch(t *testing.T) {
 	assert.Equal(t, 1, cv)
 	assert.Equal(t, 0, skip)
 	assert.Equal(t, 0, errs)
+	assert.Empty(t, conv.upgraded)
+}
+
+func TestReshardManager_Run_SkipsMetadataOnlyECObjects_OnKMatch(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	seedObjectMetaEC(t, fsm, "bkt", "ec-obj", "e1", 10, 4, 2, []string{"n0", "n1", "n2", "n3", "n4", "n5"})
+
+	conv := &fakeConverter{fsm: fsm, active: true}
+	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
+	cv, skip, errs := mgr.Run(context.Background())
+
+	assert.Equal(t, 0, cv)
+	assert.Equal(t, 1, skip)
+	assert.Equal(t, 0, errs)
+	assert.Empty(t, conv.converted)
+	assert.Empty(t, conv.upgraded)
+}
+
+func TestReshardManager_Run_DoesNotConvertCorruptPlacement(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+
+	seedObjectMetaEC(t, fsm, "bkt", "bad-ec", "e1", 10, 4, 2, []string{"n0"})
+
+	conv := &fakeConverter{fsm: fsm, active: true}
+	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
+	cv, skip, errs := mgr.Run(context.Background())
+
+	assert.Equal(t, 0, cv)
+	assert.Equal(t, 0, skip)
+	assert.Equal(t, 1, errs)
+	assert.Empty(t, conv.converted)
 	assert.Empty(t, conv.upgraded)
 }
 

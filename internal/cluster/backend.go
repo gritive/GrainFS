@@ -1157,7 +1157,7 @@ func (b *DistributedBackend) deleteShardsAsync(bucket string, placement []string
 }
 
 func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	obj, err := b.HeadObject(bucket, key)
+	obj, placementMeta, err := b.headObjectMeta(bucket, key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1172,67 +1172,16 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	}
 
 	if b.shardSvc != nil {
-		// 신 경로: 오브젝트 메타에서 RingVersion을 읽어 배치를 재계산한다.
-		var metaRingVersion RingVersion
-		var metaECData, metaECParity uint8
-		var metaNodeIDs []string
-		if viewErr := b.db.View(func(txn *badger.Txn) error {
-			var dbKey []byte
-			if obj.VersionID == "" {
-				dbKey = objectMetaKey(bucket, obj.Key)
-			} else {
-				dbKey = objectMetaKeyV(bucket, obj.Key, obj.VersionID)
+		resolved, rerr := b.ResolvePlacement(context.Background(), bucket, key, placementMeta)
+		if rerr == nil {
+			data, ecErr := b.getObjectECAtShardKey(context.Background(), bucket, resolved.ShardKey, resolved.Record)
+			if ecErr != nil {
+				return nil, nil, fmt.Errorf("ec reconstruct %s/%s via %s: %w", bucket, key, resolved.Source, ecErr)
 			}
-			item, err := txn.Get(dbKey)
-			if err != nil {
-				return err
-			}
-			return item.Value(func(val []byte) error {
-				m, err := unmarshalObjectMeta(val)
-				if err != nil {
-					return err
-				}
-				metaRingVersion = RingVersion(m.RingVersion)
-				metaECData = m.ECData
-				metaECParity = m.ECParity
-				metaNodeIDs = m.NodeIDs
-				return nil
-			})
-		}); viewErr != nil && viewErr != badger.ErrKeyNotFound {
-			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(viewErr).Msg("GetObject: failed to read EC metadata, falling back")
+			return io.NopCloser(bytes.NewReader(data)), obj, nil
 		}
-
-		if metaRingVersion > 0 {
-			if ring, ringErr := b.fsm.GetRingStore().GetRing(metaRingVersion); ringErr == nil {
-				cfg := ECConfig{DataShards: int(metaECData), ParityShards: int(metaECParity)}
-				placement := ring.PlacementForKey(cfg, shardKey)
-				rec := PlacementRecord{Nodes: placement, K: int(metaECData), M: int(metaECParity)}
-				data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, rec)
-				if ecErr == nil {
-					return io.NopCloser(bytes.NewReader(data)), obj, nil
-				}
-				b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ring-based ec reconstruct failed, falling back")
-			}
-		}
-
-		// 구 경로 (RingVersion==0): LookupShardPlacement fallback
-		if ecRec, lookupErr := b.fsm.LookupShardPlacement(bucket, shardKey); lookupErr == nil && len(ecRec.Nodes) > 0 {
-			data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, ecRec)
-			if ecErr == nil {
-				return io.NopCloser(bytes.NewReader(data)), obj, nil
-			}
-			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("ec reconstruct failed, trying NodeIDs-from-metadata path")
-		}
-
-		// NodeIDs-from-metadata fallback: placement stored in PutObjectMetaCmd
-		// when CmdPutShardPlacement is a no-op (no ring yet).
-		if metaECData > 0 && len(metaNodeIDs) > 0 {
-			rec := PlacementRecord{Nodes: metaNodeIDs, K: int(metaECData), M: int(metaECParity)}
-			data, ecErr := b.getObjectEC(context.Background(), bucket, key, obj.VersionID, rec)
-			if ecErr == nil {
-				return io.NopCloser(bytes.NewReader(data)), obj, nil
-			}
-			b.logger.Warn().Str("bucket", bucket).Str("key", key).Err(ecErr).Msg("NodeIDs-from-metadata ec reconstruct failed, falling back to N× path")
+		if !errors.Is(rerr, ErrNotEC) {
+			return nil, nil, fmt.Errorf("resolve placement for %s/%s: %w", bucket, key, rerr)
 		}
 	}
 
@@ -1329,13 +1278,15 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		shardKey = key + "/" + versionID
 	}
 
-	ecRec, lookupErr := b.lookupPlacementWithFallback(bucket, shardKey, versionID)
+	resolved, lookupErr := b.ResolvePlacement(ctx, bucket, key, b.readPlacementMeta(bucket, key, versionID))
+	if errors.Is(lookupErr, ErrNotEC) {
+		return fmt.Errorf("no placement for %s/%s — object is not EC-managed", bucket, key)
+	}
 	if lookupErr != nil {
 		return fmt.Errorf("lookup shard placement: %w", lookupErr)
 	}
-	if len(ecRec.Nodes) == 0 {
-		return fmt.Errorf("no placement for %s/%s — object is not EC-managed", bucket, key)
-	}
+	ecRec := resolved.Record
+	shardKey = resolved.ShardKey
 	recCfg := ecRec.ECConfigOrFallback(b.ecConfig)
 	if shardIdx < 0 || shardIdx >= len(ecRec.Nodes) {
 		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(ecRec.Nodes))
@@ -1436,13 +1387,9 @@ func (b *DistributedBackend) CurrentRingVersion() RingVersion {
 // ring's placement. It reconstructs the object data from the old layout and
 // re-fans it out using putObjectEC (which will use the current ring).
 func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error {
-	obj, err := b.HeadObject(bucket, key)
+	obj, placementMeta, err := b.headObjectMeta(bucket, key)
 	if err != nil {
 		return err
-	}
-	shardKey := key
-	if obj.VersionID != "" {
-		shardKey = key + "/" + obj.VersionID
 	}
 
 	currentRing, err := b.fsm.GetRingStore().GetCurrentRing()
@@ -1455,28 +1402,18 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 
 	cfg := EffectiveConfig(len(b.liveNodes()), b.ecConfig)
 
-	var oldData []byte
-	if oldRingVer > 0 {
-		oldRing, rerr := b.fsm.GetRingStore().GetRing(oldRingVer)
-		if rerr != nil {
-			return fmt.Errorf("reshard: old ring %d not found: %w", oldRingVer, rerr)
-		}
-		oldPlacement := oldRing.PlacementForKey(cfg, shardKey)
-		rec := PlacementRecord{Nodes: oldPlacement, K: cfg.DataShards, M: cfg.ParityShards}
-		oldData, err = b.getObjectEC(ctx, bucket, key, obj.VersionID, rec)
-		if err != nil {
-			return fmt.Errorf("reshard: reconstruct from ring %d: %w", oldRingVer, err)
-		}
-	} else {
-		// RingVersion==0: fall back to placement record
-		ecRec, lerr := b.fsm.LookupShardPlacement(bucket, shardKey)
-		if lerr != nil || len(ecRec.Nodes) == 0 {
-			return fmt.Errorf("reshard: no placement for ring-v0 object %s/%s", bucket, key)
-		}
-		oldData, err = b.getObjectEC(ctx, bucket, key, obj.VersionID, ecRec)
-		if err != nil {
-			return fmt.Errorf("reshard: reconstruct: %w", err)
-		}
+	placementMeta.RingVersion = oldRingVer
+	if placementMeta.ECData == 0 {
+		placementMeta.ECData = uint8(cfg.DataShards)
+		placementMeta.ECParity = uint8(cfg.ParityShards)
+	}
+	resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
+	if rerr != nil {
+		return fmt.Errorf("reshard: resolve old placement: %w", rerr)
+	}
+	oldData, err := b.getObjectECAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record)
+	if err != nil {
+		return fmt.Errorf("reshard: reconstruct from %s: %w", resolved.Source, err)
 	}
 
 	// EC 디코딩 결과가 원본과 일치하는지 검증 (Reed-Solomon은 무손실이어야 함).
@@ -1620,10 +1557,6 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 // rec.Nodes[i] is the nodeID holding shardIdx i. rec.K and rec.M are the EC
 // parameters used when the object was written. Tolerates up to M unreachable nodes.
 func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versionID string, rec PlacementRecord) ([]byte, error) {
-	recCfg := rec.ECConfigOrFallback(b.ecConfig)
-	if len(rec.Nodes) != recCfg.NumShards() {
-		return nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
-	}
 	// putObjectEC writes shards under shardKey = key + "/" + versionID so
 	// concurrent versions don't clobber one another on disk. Reads have to
 	// target the same path. Empty versionID preserves the pre-Slice-1 layout
@@ -1631,6 +1564,14 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 	shardKey := key
 	if versionID != "" {
 		shardKey = key + "/" + versionID
+	}
+	return b.getObjectECAtShardKey(ctx, bucket, shardKey, rec)
+}
+
+func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) ([]byte, error) {
+	recCfg := rec.ECConfigOrFallback(b.ecConfig)
+	if len(rec.Nodes) != recCfg.NumShards() {
+		return nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
 	}
 	// k-of-n fast path: read all shards in parallel, stop once k succeed.
 	// cancel() signals remaining goroutines to abort after k shards received.
@@ -1846,11 +1787,17 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 }
 
 func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+	obj, _, err := b.headObjectMeta(bucket, key)
+	return obj, err
+}
+
+func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object, PlacementMeta, error) {
 	if err := b.HeadBucket(bucket); err != nil {
-		return nil, err
+		return nil, PlacementMeta{}, err
 	}
 
 	var obj storage.Object
+	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {
 		// Resolve via latest-version pointer when present so callers see the
 		// most recent version. Falls back to the legacy single-key read when
@@ -1895,13 +1842,46 @@ func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, er
 				VersionID:    versionID,
 				ACL:          m.ACL,
 			}
+			placement = PlacementMeta{
+				VersionID:   versionID,
+				RingVersion: RingVersion(m.RingVersion),
+				ECData:      m.ECData,
+				ECParity:    m.ECParity,
+				NodeIDs:     m.NodeIDs,
+			}
 			return nil
 		})
 	})
 	if err != nil {
-		return nil, err
+		return nil, PlacementMeta{}, err
 	}
-	return &obj, nil
+	return &obj, placement, nil
+}
+
+func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) PlacementMeta {
+	meta := PlacementMeta{VersionID: versionID}
+	_ = b.db.View(func(txn *badger.Txn) error {
+		dbKey := objectMetaKey(bucket, key)
+		if versionID != "" {
+			dbKey = objectMetaKeyV(bucket, key, versionID)
+		}
+		item, err := txn.Get(dbKey)
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			meta.RingVersion = RingVersion(m.RingVersion)
+			meta.ECData = m.ECData
+			meta.ECParity = m.ECParity
+			meta.NodeIDs = m.NodeIDs
+			return nil
+		})
+	})
+	return meta
 }
 
 func (b *DistributedBackend) DeleteObject(bucket, key string) error {
