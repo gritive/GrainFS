@@ -124,6 +124,22 @@ func TestReadIndex_Leader_ReturnsCommitIndex(t *testing.T) {
 	assert.GreaterOrEqual(t, idx, uint64(0))
 }
 
+func TestReadIndex_SingleNodeLeader_ReturnsImmediately(t *testing.T) {
+	n := NewNode(DefaultConfig("A", nil))
+	n.mu.Lock()
+	n.state = Leader
+	n.leaderID = n.id
+	n.commitIndex = 7
+	n.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	idx, err := n.ReadIndex(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7), idx)
+}
+
 func TestReadIndex_NotLeader_ReturnsError(t *testing.T) {
 	cluster := newTestCluster(t, 3)
 	cluster.startAll()

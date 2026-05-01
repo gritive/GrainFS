@@ -1952,6 +1952,10 @@ func (n *Node) leaderReadIndex(ctx context.Context) (uint64, error) {
 		acked:       make(map[string]bool),
 		ch:          ch,
 	}
+	if n.dualMajority(w.acked) {
+		n.mu.Unlock()
+		return commitIndex, nil
+	}
 	n.pendingReadIndex = append(n.pendingReadIndex, w)
 	n.mu.Unlock()
 
