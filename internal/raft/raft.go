@@ -1707,6 +1707,10 @@ func (n *Node) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	if n.stopped {
+		return &RequestVoteReply{Term: n.currentTerm}
+	}
+
 	// Pre-vote path: assess candidacy without mutating any state.
 	// The caller wants to know "would you vote for me?" before committing to
 	// incrementing its term. We must not change currentTerm, votedFor, or state.
@@ -1774,6 +1778,10 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	defer n.mu.Unlock()
 
 	reply := &AppendEntriesReply{Term: n.currentTerm}
+
+	if n.stopped {
+		return reply
+	}
 
 	if args.Term < n.currentTerm {
 		return reply
@@ -2136,6 +2144,10 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	defer n.mu.Unlock()
 
 	reply := &InstallSnapshotReply{Term: n.currentTerm}
+
+	if n.stopped {
+		return reply
+	}
 
 	if args.Term < n.currentTerm {
 		return reply
