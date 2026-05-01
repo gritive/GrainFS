@@ -33,7 +33,7 @@ func TestRestoreConfigFromServers_EmptyServers(t *testing.T) {
 func TestRebuildConfigFromLog_WithBase(t *testing.T) {
 	n := &Node{
 		log: []LogEntry{
-			{Index: 3, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddVoter, "peer-3", "addr-3")},
+			{Index: 3, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-3", Address: "addr-3", ManagedByJoint: false})},
 		},
 		nextIndex:  map[string]uint64{},
 		matchIndex: map[string]uint64{},
@@ -49,8 +49,8 @@ func TestRebuildConfigFromLog_WithBase(t *testing.T) {
 func TestRebuildConfigFromLog_SkipsBeforeStartIndex(t *testing.T) {
 	n := &Node{
 		log: []LogEntry{
-			{Index: 2, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddVoter, "peer-old", "addr-old")},
-			{Index: 5, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddVoter, "peer-new", "addr-new")},
+			{Index: 2, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-old", Address: "addr-old", ManagedByJoint: false})},
+			{Index: 5, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-new", Address: "addr-new", ManagedByJoint: false})},
 		},
 		nextIndex:  map[string]uint64{},
 		matchIndex: map[string]uint64{},
@@ -215,7 +215,7 @@ func TestApplyLoopClosesPromoteCh(t *testing.T) {
 	n.learnerIDs["learner-1"] = "learner-1"
 	ch := make(chan struct{})
 	n.learnerPromoteCh["learner-1"] = ch
-	cmd := encodeConfChange(ConfChangePromote, "learner-1", "")
+	cmd := encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: "learner-1", Address: "", ManagedByJoint: false})
 	entry := LogEntry{Term: 1, Index: 1, Command: cmd, Type: LogEntryConfChange}
 	n.log = append(n.log, entry)
 	n.firstIndex = 1
@@ -362,4 +362,157 @@ func TestInitLeaderState_InitializesLearnerReplicationState(t *testing.T) {
 	require.Equal(t, expectedNext, n.nextIndex["voter-1"], "voter nextIndex must be initialized")
 	require.Equal(t, expectedNext, n.nextIndex["learner-addr"], "learner nextIndex must be initialized")
 	require.Equal(t, uint64(0), n.matchIndex["learner-addr"], "learner matchIndex must start at 0")
+}
+
+func TestConfChangePayload_ManagedByJointRoundtrip(t *testing.T) {
+	original := ConfChangePayload{
+		Op:             ConfChangeAddLearner,
+		ID:             "learner-1",
+		Address:        "addr-1",
+		ManagedByJoint: true,
+	}
+
+	cmd := encodeConfChange(original)
+	decoded := decodeConfChange(cmd)
+
+	if decoded.Op != original.Op {
+		t.Errorf("Op mismatch: got %v, want %v", decoded.Op, original.Op)
+	}
+	if decoded.ID != original.ID {
+		t.Errorf("ID mismatch: got %s, want %s", decoded.ID, original.ID)
+	}
+	if decoded.Address != original.Address {
+		t.Errorf("Address mismatch: got %s, want %s", decoded.Address, original.Address)
+	}
+	if decoded.ManagedByJoint != original.ManagedByJoint {
+		t.Errorf("ManagedByJoint mismatch: got %v, want %v", decoded.ManagedByJoint, original.ManagedByJoint)
+	}
+}
+
+func TestEncodeConfChange_OmitManagedByJointDefaultsToFalse(t *testing.T) {
+	// Go zero value for bool is false - test that omitted field defaults to false
+	payload := ConfChangePayload{
+		Op:      ConfChangeAddLearner,
+		ID:      "learner-1",
+		Address: "addr-1",
+		// ManagedByJoint omitted - should default to false
+	}
+
+	cmd := encodeConfChange(payload)
+	decoded := decodeConfChange(cmd)
+
+	if decoded.ManagedByJoint != false {
+		t.Errorf("ManagedByJoint should default to false when omitted, got %v", decoded.ManagedByJoint)
+	}
+}
+
+func TestDecodeConfChange_ExtractsManagedByJoint(t *testing.T) {
+	testCases := []struct {
+		name           string
+		managedByJoint bool
+	}{
+		{"managed by joint", true},
+		{"not managed", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := ConfChangePayload{
+				Op:             ConfChangeAddLearner,
+				ID:             "learner-1",
+				Address:        "addr-1",
+				ManagedByJoint: tc.managedByJoint,
+			}
+
+			cmd := encodeConfChange(payload)
+			decoded := decodeConfChange(cmd)
+
+			if decoded.ManagedByJoint != tc.managedByJoint {
+				t.Errorf("ManagedByJoint mismatch: got %v, want %v", decoded.ManagedByJoint, tc.managedByJoint)
+			}
+		})
+	}
+}
+
+// Stage 2: Apply path — ManagedByJoint registration in jointManagedLearners.
+
+func TestApplyConfChange_ManagedByJoint_RegistersInSet(t *testing.T) {
+	tests := []struct {
+		name      string
+		managed   bool
+		wantInSet bool
+	}{
+		{"managed=true registers", true, true},
+		{"managed=false skips", false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig("self", []string{"peer-1"})
+			n := NewNode(cfg)
+			n.mu.Lock()
+			entry := LogEntry{
+				Index: 1, Term: 1, Type: LogEntryConfChange,
+				Command: encodeConfChange(ConfChangePayload{
+					Op: ConfChangeAddLearner, ID: "learner-1", Address: "addr-1",
+					ManagedByJoint: tc.managed,
+				}),
+			}
+			n.applyConfigChangeLocked(entry)
+			_, inSet := n.jointManagedLearners["learner-1"]
+			n.mu.Unlock()
+			require.Equal(t, tc.wantInSet, inSet)
+		})
+	}
+}
+
+// Stage 2: Replay path — rebuildConfigFromLog restores jointManagedLearners.
+
+func TestRebuildConfigFromLog_ManagedByJoint_RestoresState(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1, Type: LogEntryConfChange,
+			Command: encodeConfChange(ConfChangePayload{
+				Op: ConfChangeAddLearner, ID: "managed", Address: "addr-m", ManagedByJoint: true,
+			})},
+		{Index: 2, Term: 1, Type: LogEntryConfChange,
+			Command: encodeConfChange(ConfChangePayload{
+				Op: ConfChangeAddLearner, ID: "unmanaged", Address: "addr-u", ManagedByJoint: false,
+			})},
+	}
+	n.firstIndex = 1
+	n.rebuildConfigFromLog(0, nil, nil)
+	_, managedInSet := n.jointManagedLearners["managed"]
+	_, unmanagedInSet := n.jointManagedLearners["unmanaged"]
+	n.mu.Unlock()
+
+	require.True(t, managedInSet, "managed learner must be in jointManagedLearners after rebuild")
+	require.False(t, unmanagedInSet, "unmanaged learner must not be in jointManagedLearners after rebuild")
+}
+
+func TestRebuildConfigFromLog_JointLeave_ClearsManaged(t *testing.T) {
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1, Type: LogEntryConfChange,
+			Command: encodeConfChange(ConfChangePayload{
+				Op: ConfChangeAddLearner, ID: "managed-1", Address: "addr-m", ManagedByJoint: true,
+			})},
+		{Index: 2, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op: JointOpLeave,
+				NewServers: []ServerEntry{
+					{ID: "self", Address: "self", Suffrage: Voter},
+					{ID: "managed-1", Address: "addr-m", Suffrage: Voter},
+				},
+			})},
+	}
+	n.firstIndex = 1
+	n.rebuildConfigFromLog(0, nil, nil)
+	_, inSet := n.jointManagedLearners["managed-1"]
+	n.mu.Unlock()
+
+	require.False(t, inSet, "managed learner must be cleared from jointManagedLearners after JointOpLeave")
 }

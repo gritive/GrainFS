@@ -258,3 +258,61 @@ func TestLeaderTransfer_SingleNode(t *testing.T) {
 	err := node.TransferLeadership()
 	assert.Error(t, err, "should fail with no peers to transfer to")
 }
+
+// Stage 3: Snapshot persistence of JointManagedLearners.
+
+func TestSnapshotManager_PersistsManagedLearners(t *testing.T) {
+	store := setupTestStore(t)
+	snap := &mockSnapshotter{snapshotData: []byte("state")}
+	mgr := NewSnapshotManager(store, snap, SnapshotConfig{Threshold: 5})
+	mgr.SetJointStateProvider(func() (int8, []string, []string, uint64, []string) {
+		return int8(JointEntering),
+			[]string{"n1", "n2"},
+			[]string{"n1", "n3"},
+			10,
+			[]string{"learner-1", "learner-2"}
+	})
+
+	makeTestEntries(t, store, 1, 1, 5)
+	require.True(t, mgr.MaybeTrigger(5, 1, nil))
+
+	loaded, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"learner-1", "learner-2"}, loaded.JointManagedLearners)
+}
+
+func TestSnapshotManager_RestoresManagedLearners(t *testing.T) {
+	store := setupTestStore(t)
+	snap := &mockSnapshotter{}
+	require.NoError(t, store.SaveSnapshot(Snapshot{
+		Index: 5, Term: 1, Data: []byte("state"),
+		JointManagedLearners: []string{"learner-A"},
+	}))
+
+	mgr := NewSnapshotManager(store, snap, SnapshotConfig{Threshold: 10})
+
+	var gotManaged []string
+	mgr.SetJointStateRestorer(func(_ int8, _, _ []string, _ uint64, managed []string) {
+		gotManaged = managed
+	})
+
+	_, err := mgr.Restore()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"learner-A"}, gotManaged)
+}
+
+func TestSnapshotManager_EmptyManagedLearners_RoundtripsClean(t *testing.T) {
+	store := setupTestStore(t)
+	snap := &mockSnapshotter{snapshotData: []byte("state")}
+	mgr := NewSnapshotManager(store, snap, SnapshotConfig{Threshold: 5})
+	mgr.SetJointStateProvider(func() (int8, []string, []string, uint64, []string) {
+		return 0, nil, nil, 0, nil // no managed learners
+	})
+
+	makeTestEntries(t, store, 1, 1, 5)
+	require.True(t, mgr.MaybeTrigger(5, 1, nil))
+
+	loaded, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	assert.Empty(t, loaded.JointManagedLearners)
+}

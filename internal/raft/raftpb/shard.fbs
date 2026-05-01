@@ -32,6 +32,10 @@ table ConfChangeEntry {
   op:ConfChangeOp;
   server_id:string;
   server_address:string;
+  // PR-K3: true if this learner is managed-by-joint (ChangeMembership added it).
+  // Prevents auto-promote watcher from racing with upcoming JointEnter.
+  // Persists across restart so leader crash doesn't lose this state.
+  managed_by_joint:bool;
   // §4.3 deprecated: superseded by JointConfChangeEntry (PR-J1).
   // Removed in cleanup PR after mixed-version compatibility window closes.
   new_config:[string] (deprecated);
@@ -125,6 +129,8 @@ table SnapshotMeta {
   joint_old_voters:[string];
   joint_new_voters:[string];
   joint_enter_index:uint64;
+  // PR-K3: learners added by ChangeMembership that must not be auto-promoted.
+  joint_managed_learners:[string];
 }
 
 root_type RPCMessage;

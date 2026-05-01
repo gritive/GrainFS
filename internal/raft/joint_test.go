@@ -468,7 +468,7 @@ func TestRestoreJointStateFromSnapshot_ResetsLeaveProposed(t *testing.T) {
 	n.jointLeaveProposed = true // pre-existing flag from before restart
 
 	n.RestoreJointStateFromSnapshot(int8(JointEntering),
-		[]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n4"}, 42)
+		[]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n4"}, 42, nil)
 
 	require.Equal(t, JointEntering, n.jointPhase)
 	require.Equal(t, []string{"n1", "n2", "n3"}, n.jointOldVoters)
@@ -855,7 +855,7 @@ func TestRebuildConfigFromLog_JointLeavePromotionClearsLearners(t *testing.T) {
 	n.initialPeers = []string{"n1", "n2", "n3"}
 
 	n.log = []LogEntry{
-		{Index: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangeAddLearner, "n4", "n4")},
+		{Index: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddLearner, ID: "n4", Address: "n4", ManagedByJoint: false})},
 		{Index: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
 			Op:         JointOpEnter,
 			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},

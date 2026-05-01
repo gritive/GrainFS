@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.7.1] — 2026-05-01 — Raft managed_by_joint persistence (PR-K3)
+
+### Added
+
+- **raft**: `jointManagedLearners` state now survives process restart. Learners added by `ChangeMembership` are tagged `ManagedByJoint=true` in the ConfChange log entry; on restart the leader replays the log (or loads the snapshot) and rebuilds the guard set that blocks premature auto-promotion of these learners during the joint-consensus window (Guard 2 in `checkLearnerCatchup`).
+- **raft**: Snapshot carries `JointManagedLearners []string` field (FlatBuffers `SnapshotMeta.joint_managed_learners`). Nodes restored from a snapshot have Guard 2 active without needing full log replay.
+- **raft**: `restoreFromStore` now replays ConfChange entries from the full log even when no snapshot has been taken yet (fresh cluster), closing the gap between first `ChangeMembership` call and first snapshot.
+
+### Fixed
+
+- **raft**: `marshalLogEntry` was not persisting the `entry_type` field. All log entries loaded from BadgerDB were deserialized as `LogEntryCommand` (type 0), causing `rebuildConfigFromLog` to silently skip ConfChange and JointConfChange entries on restart. The field is now written correctly; FlatBuffers' zero-default maintains backward read compatibility with existing entries.
+- **raft**: `restoreFromStore` no-snapshot replay branch now correctly guards against `LoadSnapshot` errors with `snapErr == nil`.
+
 ## [0.0.7.0] — 2026-04-30 — Live Multi-Raft Sharding (PR-C 데이터 plane 라우팅)
 
 ### Added

@@ -343,26 +343,26 @@ func NewNode(config Config, store ...LogStore) *Node {
 	copy(initialPeers, config.Peers)
 
 	n := &Node{
-		id:               config.ID,
-		state:            Follower,
-		config:           config,
-		log:              make([]LogEntry, 0),
-		firstIndex:       1, // Raft indices start at 1
-		nextIndex:        make(map[string]uint64),
-		matchIndex:       make(map[string]uint64),
-		learnerIDs:       make(map[string]string),
+		id:                   config.ID,
+		state:                Follower,
+		config:               config,
+		log:                  make([]LogEntry, 0),
+		firstIndex:           1, // Raft indices start at 1
+		nextIndex:            make(map[string]uint64),
+		matchIndex:           make(map[string]uint64),
+		learnerIDs:           make(map[string]string),
 		learnerPromoteCh:     make(map[string]chan struct{}),
 		jointManagedLearners: make(map[string]struct{}),
-		checkQuorumAcks:  make(map[string]time.Time),
-		applyCh:          make(chan LogEntry, 64),
-		stopCh:           make(chan struct{}),
-		resetCh:          make(chan struct{}, 1),
-		commitCh:         make(chan struct{}, 1),
-		waiters:          make(map[uint64]chan error),
-		proposalCh:       make(chan proposal, 4096),
-		replicationCh:    make(chan struct{}, 1),
-		metrics:          adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
-		initialPeers:     initialPeers,
+		checkQuorumAcks:      make(map[string]time.Time),
+		applyCh:              make(chan LogEntry, 64),
+		stopCh:               make(chan struct{}),
+		resetCh:              make(chan struct{}, 1),
+		commitCh:             make(chan struct{}, 1),
+		waiters:              make(map[uint64]chan error),
+		proposalCh:           make(chan proposal, 4096),
+		replicationCh:        make(chan struct{}, 1),
+		metrics:              adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
+		initialPeers:         initialPeers,
 	}
 
 	if len(store) > 0 && store[0] != nil {
@@ -437,6 +437,10 @@ func (n *Node) restoreFromStore() {
 		n.rebuildConfigFromLog(snap.Index+1, basePeers, baseLearners)
 	} else if legacySnapshot {
 		// Legacy fallback: replay full log from initialPeers (best-effort).
+		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
+	} else if snapErr == nil && snap.Index == 0 && lastIdx > 0 {
+		// No snapshot yet (fresh cluster, not a load error): replay full log so
+		// PR-K3 jointManagedLearners is restored even before the first snapshot.
 		n.rebuildConfigFromLog(0, n.initialPeers, map[string]string{})
 	}
 }
@@ -789,20 +793,26 @@ type JointPhase = jointPhase
 // JointSnapshotState captures the §4.3 joint state for snapshot persistence.
 // Use as JointStateProvider for SnapshotManager. Returns int8 phase to keep the
 // jointPhase type unexported across package boundaries.
-func (n *Node) JointSnapshotState() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64) {
+func (n *Node) JointSnapshotState() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	ml := make([]string, 0, len(n.jointManagedLearners))
+	for id := range n.jointManagedLearners {
+		ml = append(ml, id)
+	}
+	sort.Strings(ml)
 	return int8(n.jointPhase),
 		append([]string(nil), n.jointOldVoters...),
 		append([]string(nil), n.jointNewVoters...),
-		n.jointEnterIndex
+		n.jointEnterIndex,
+		ml
 }
 
 // RestoreJointStateFromSnapshot adopts §4.3 joint state read from a snapshot.
 // Use as JointStateRestorer for SnapshotManager. jointLeaveProposed is reset to
 // false so the leader's heartbeat watcher re-evaluates and re-proposes JointLeave
 // if the JointEnter entry is still committed but Leave hasn't run yet.
-func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64) {
+func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.jointPhase = jointPhase(phase)
@@ -810,6 +820,10 @@ func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNe
 	n.jointNewVoters = jointNewVoters
 	n.jointEnterIndex = jointEnterIndex
 	n.jointLeaveProposed = false
+	n.jointManagedLearners = make(map[string]struct{}, len(managedLearners))
+	for _, id := range managedLearners {
+		n.jointManagedLearners[id] = struct{}{}
+	}
 }
 
 // containsServer reports whether servers contains an entry with the given id.
@@ -875,7 +889,7 @@ func (n *Node) checkLearnerCatchup() {
 		if mi+threshold < n.commitIndex {
 			continue
 		}
-		cmd := encodeConfChange(ConfChangePromote, nodeID, "")
+		cmd := encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: nodeID, Address: "", ManagedByJoint: false})
 		select {
 		case n.proposalCh <- proposal{
 			command:   cmd,

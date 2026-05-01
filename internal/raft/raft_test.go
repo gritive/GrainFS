@@ -383,7 +383,7 @@ func TestConfChange_AppliesOnAppendNotCommit(t *testing.T) {
 	node.currentTerm = 1
 	node.mu.Unlock()
 
-	cmd := encodeConfChange(ConfChangeAddVoter, "C", "C")
+	cmd := encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "C", Address: "C", ManagedByJoint: false})
 	entry := LogEntry{Term: 1, Index: 1, Type: LogEntryConfChange, Command: cmd}
 
 	// LeaderCommit = 0: the ConfChange entry is NOT committed yet.
@@ -420,7 +420,7 @@ func TestConfChange_AppliesOnAppendNotCommit_Leader(t *testing.T) {
 	node.mu.Unlock()
 	defer node.Close()
 
-	cmd := encodeConfChange(ConfChangeAddVoter, "C", "C")
+	cmd := encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "C", Address: "C", ManagedByJoint: false})
 	p := proposal{command: cmd, entryType: LogEntryConfChange, doneCh: make(chan proposalResult, 1), ctx: context.Background()}
 
 	// LeaderCommit never advances (B hasn't acked), so C is not committed.
@@ -480,7 +480,7 @@ func TestConfChange_RejectsConcurrentGoroutine(t *testing.T) {
 	defer node.Close()
 
 	makeCC := func(id string) proposal {
-		cmd := encodeConfChange(ConfChangeAddVoter, id, id)
+		cmd := encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: id, Address: id, ManagedByJoint: false})
 		return proposal{command: cmd, entryType: LogEntryConfChange, doneCh: make(chan proposalResult, 1), ctx: context.Background()}
 	}
 	p1 := makeCC("D")
@@ -507,7 +507,7 @@ func TestConfChange_LearnerNotInQuorum(t *testing.T) {
 	node.mu.Lock()
 	initialPeerCount := len(node.config.Peers)
 
-	cmd := encodeConfChange(ConfChangeAddLearner, "D", "D")
+	cmd := encodeConfChange(ConfChangePayload{Op: ConfChangeAddLearner, ID: "D", Address: "D", ManagedByJoint: false})
 	entry := LogEntry{Term: 1, Index: 1, Type: LogEntryConfChange, Command: cmd}
 	node.applyConfigChangeLocked(entry)
 
@@ -545,7 +545,7 @@ func TestConfChange_RebuildConfigAfterTruncation(t *testing.T) {
 	// When conflicting entries are truncated, config must be rebuilt from initialPeers + remaining log.
 	node := NewNode(DefaultConfig("A", []string{"B"}))
 
-	cmd := encodeConfChange(ConfChangeAddVoter, "C", "C")
+	cmd := encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "C", Address: "C", ManagedByJoint: false})
 	node.mu.Lock()
 	node.log = []LogEntry{
 		{Term: 1, Index: 1, Type: LogEntryConfChange, Command: cmd},
@@ -1759,7 +1759,7 @@ func applyCC(t *testing.T, n *Node, op ConfChangeOp, id, addr string) {
 	t.Helper()
 	entry := LogEntry{
 		Type:    LogEntryConfChange,
-		Command: encodeConfChange(op, id, addr),
+		Command: encodeConfChange(ConfChangePayload{Op: op, ID: id, Address: addr, ManagedByJoint: false}),
 		Index:   1,
 	}
 	n.mu.Lock()

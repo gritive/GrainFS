@@ -37,20 +37,23 @@ const (
 
 // ConfChangePayload is the decoded in-memory representation of a membership change.
 type ConfChangePayload struct {
-	Op      ConfChangeOp
-	ID      string
-	Address string
+	Op             ConfChangeOp
+	ID             string
+	Address        string
+	ManagedByJoint bool // PR-K3: true if ChangeMembership added this learner
 }
 
 // encodeConfChange serializes a membership change for use as LogEntry.Command.
-func encodeConfChange(op ConfChangeOp, id, addr string) []byte {
+// managedByJoint is true for learners added by ChangeMembership (PR-K3).
+func encodeConfChange(p ConfChangePayload) []byte {
 	b := flatbuffers.NewBuilder(128)
-	idOff := b.CreateString(id)
-	addrOff := b.CreateString(addr)
+	idOff := b.CreateString(p.ID)
+	addrOff := b.CreateString(p.Address)
 	pb.ConfChangeEntryStart(b)
-	pb.ConfChangeEntryAddOp(b, pb.ConfChangeOp(op))
+	pb.ConfChangeEntryAddOp(b, pb.ConfChangeOp(p.Op))
 	pb.ConfChangeEntryAddServerId(b, idOff)
 	pb.ConfChangeEntryAddServerAddress(b, addrOff)
+	pb.ConfChangeEntryAddManagedByJoint(b, p.ManagedByJoint)
 	root := pb.ConfChangeEntryEnd(b)
 	pb.FinishConfChangeEntryBuffer(b, root)
 	return b.FinishedBytes()
@@ -60,9 +63,10 @@ func encodeConfChange(op ConfChangeOp, id, addr string) []byte {
 func decodeConfChange(data []byte) ConfChangePayload {
 	e := pb.GetRootAsConfChangeEntry(data, 0)
 	return ConfChangePayload{
-		Op:      ConfChangeOp(e.Op()),
-		ID:      string(e.ServerId()),
-		Address: string(e.ServerAddress()),
+		Op:             ConfChangeOp(e.Op()),
+		ID:             string(e.ServerId()),
+		Address:        string(e.ServerAddress()),
+		ManagedByJoint: e.ManagedByJoint(),
 	}
 }
 
@@ -95,7 +99,7 @@ func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
 	n.mu.Unlock()
 
 	// 1. AddLearner (proposeConfChangeWait checks ErrNotLeader / MixedVersion / ConfChangeInProgress)
-	if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, id, addr); err != nil {
+	if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, id, addr, false); err != nil {
 		return err
 	}
 
@@ -133,18 +137,18 @@ func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
 
 // RemoveVoter proposes removing a voting member from the cluster.
 func (n *Node) RemoveVoter(id string) error {
-	return n.proposeConfChangeWait(context.Background(), ConfChangeRemoveVoter, id, "")
+	return n.proposeConfChangeWait(context.Background(), ConfChangeRemoveVoter, id, "", false)
 }
 
 // AddLearner proposes adding a non-voting observer to the cluster.
 // Learners replicate the log but do not count toward quorum.
 func (n *Node) AddLearner(id, addr string) error {
-	return n.proposeConfChangeWait(context.Background(), ConfChangeAddLearner, id, addr)
+	return n.proposeConfChangeWait(context.Background(), ConfChangeAddLearner, id, addr, false)
 }
 
 // PromoteToVoter promotes a learner to a full voting member.
 func (n *Node) PromoteToVoter(id string) error {
-	return n.proposeConfChangeWait(context.Background(), ConfChangePromote, id, "")
+	return n.proposeConfChangeWait(context.Background(), ConfChangePromote, id, "", false)
 }
 
 // SetMixedVersion marks the cluster as mixed-version, blocking all membership
@@ -158,7 +162,7 @@ func (n *Node) SetMixedVersion(v bool) {
 
 // proposeConfChangeWait enforces the single-pending-change invariant and waits
 // for the ConfChange entry to be committed (or context to cancel).
-func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, addr string) error {
+func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, addr string, managedByJoint bool) error {
 	n.mu.Lock()
 	if n.state != Leader {
 		n.mu.Unlock()
@@ -174,7 +178,7 @@ func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, a
 	}
 	n.mu.Unlock()
 
-	cmd := encodeConfChange(op, id, addr)
+	cmd := encodeConfChange(ConfChangePayload{Op: op, ID: id, Address: addr, ManagedByJoint: managedByJoint})
 	doneCh := make(chan proposalResult, 1)
 	p := proposal{command: cmd, entryType: LogEntryConfChange, doneCh: doneCh, ctx: ctx}
 	select {
@@ -252,6 +256,9 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 				n.matchIndex[peerKey] = 0
 			}
 		}
+		if cc.ManagedByJoint {
+			n.jointManagedLearners[cc.ID] = struct{}{}
+		}
 
 	case ConfChangePromote:
 		pk, ok := n.learnerIDs[cc.ID]
@@ -310,6 +317,7 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		// (a server is either voter or learner, never both).
 		for _, s := range jc.NewServers {
 			delete(n.learnerIDs, s.ID)
+			delete(n.jointManagedLearners, s.ID)
 		}
 		n.jointPhase = JointNone
 		n.jointOldVoters = nil
@@ -380,6 +388,8 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 	// Without this, a restarted self-removed node has flag=false and rejoins
 	// elections, splitting votes against C_new.
 	var removed bool
+	// managedLearners mirrors n.jointManagedLearners for the replay path.
+	managedLearners := make(map[string]struct{})
 
 	for _, entry := range n.log {
 		if entry.Index < startIndex {
@@ -414,6 +424,9 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				peers = out
 			case ConfChangeAddLearner:
 				learnerAddrs[cc.ID] = peerKey
+				if cc.ManagedByJoint {
+					managedLearners[cc.ID] = struct{}{}
+				}
 			case ConfChangePromote:
 				if pk, ok := learnerAddrs[cc.ID]; ok {
 					delete(learnerAddrs, cc.ID)
@@ -448,6 +461,7 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				// Mirror apply path: clear promoted learners from the replay map.
 				for _, s := range jc.NewServers {
 					delete(learnerAddrs, s.ID)
+					delete(managedLearners, s.ID)
 				}
 				// Mirror commit-time hook (raft.go:586): orphan election guard.
 				removed = !containsPeer(serverPeerKeys(jc.NewServers), n.id)
@@ -465,5 +479,6 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 	n.jointNewVoters = jNewVoters
 	n.jointEnterIndex = jEnterIndex
 	n.removedFromCluster = removed
+	n.jointManagedLearners = managedLearners
 	n.jointLeaveProposed = false // truncation 후 leader watcher가 재평가
 }

@@ -591,3 +591,64 @@ func TestAddVoter_E2E_LeaderChange_StillPromotes(t *testing.T) {
 		return false
 	}, 15*time.Second, 100*time.Millisecond, "new leader's watcher must promote learner")
 }
+
+// Stage 4 — PR-K3 integration tests.
+
+// TestManagedLearner_LogReplay_RestoresGuard verifies that when a node restarts
+// from a store that has a snapshot followed by an AddLearner entry with
+// ManagedByJoint=true, the jointManagedLearners set is restored via
+// rebuildConfigFromLog (post-snapshot replay), and Guard 2 blocks auto-promotion.
+func TestManagedLearner_LogReplay_RestoresGuard(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	// Snapshot at index 2 so restoreFromStore triggers rebuildConfigFromLog.
+	require.NoError(t, store.SaveSnapshot(Snapshot{
+		Index: 2, Term: 1, Data: []byte("fsm"),
+		Servers: []Server{
+			{ID: "self", Suffrage: Voter},
+			{ID: "peer-1", Suffrage: Voter},
+		},
+	}))
+	// AddLearner at index 3, after the snapshot — must be replayed.
+	require.NoError(t, store.AppendEntries([]LogEntry{
+		{Term: 1, Index: 3, Type: LogEntryConfChange,
+			Command: encodeConfChange(ConfChangePayload{
+				Op: ConfChangeAddLearner, ID: "managed-lrn", Address: "addr-m",
+				ManagedByJoint: true,
+			})},
+	}))
+	require.NoError(t, store.Close())
+
+	// Reopen store — simulates process restart.
+	store2, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { store2.Close() })
+
+	cfg := DefaultConfig("self", []string{"peer-1"})
+	node := NewNode(cfg, store2)
+
+	node.mu.Lock()
+	_, inSet := node.jointManagedLearners["managed-lrn"]
+	node.mu.Unlock()
+	require.True(t, inSet, "managed learner must be in jointManagedLearners after post-snapshot log replay")
+
+	// Guard 2: even with a high matchIndex, checkLearnerCatchup must NOT propose Promote.
+	node.mu.Lock()
+	node.state = Leader
+	node.commitIndex = 100
+	node.matchIndex["addr-m"] = 100
+	node.checkLearnerCatchup()
+	node.mu.Unlock()
+
+	select {
+	case p := <-node.proposalCh:
+		cc := decodeConfChange(p.command)
+		if cc.Op == ConfChangePromote && cc.ID == "managed-lrn" {
+			t.Fatal("Guard 2 must block auto-promote for managed learner after restart")
+		}
+	default:
+		// correct: no promote proposal
+	}
+}
