@@ -17,6 +17,7 @@ type mockMetaRaftClient struct {
 	leader        bool
 	proposedPlans []RebalancePlan
 	abortedPlans  []string
+	abortReasons  []clusterpb.AbortPlanReason
 	fsm           *MetaFSM
 }
 
@@ -32,8 +33,9 @@ func (m *mockMetaRaftClient) ProposeRebalancePlan(_ context.Context, p Rebalance
 	return m.fsm.applyCmd(makeRebalancePlanCmd(p))
 }
 
-func (m *mockMetaRaftClient) ProposeAbortPlan(_ context.Context, planID string, _ clusterpb.AbortPlanReason) error {
+func (m *mockMetaRaftClient) ProposeAbortPlan(_ context.Context, planID string, reason clusterpb.AbortPlanReason) error {
 	m.abortedPlans = append(m.abortedPlans, planID)
+	m.abortReasons = append(m.abortReasons, reason)
 	return m.fsm.applyCmd(makeAbortCmd(planID))
 }
 
@@ -149,6 +151,8 @@ func TestRebalancer_AbortsPlanOnTimeout(t *testing.T) {
 
 	require.Len(t, mc.abortedPlans, 1)
 	assert.Equal(t, "stale", mc.abortedPlans[0])
+	require.Len(t, mc.abortReasons, 1)
+	assert.Equal(t, clusterpb.AbortPlanReasonTimeout, mc.abortReasons[0])
 }
 
 func TestRebalancer_SkipsIfBalanced(t *testing.T) {
@@ -187,4 +191,30 @@ func TestRebalancer_ExecutePlan_FailureAbortsplan(t *testing.T) {
 	require.Error(t, err)
 	require.Len(t, mc.abortedPlans, 1, "AbortPlan must be called on MoveReplica failure")
 	assert.Equal(t, "p-fail", mc.abortedPlans[0])
+	require.Len(t, mc.abortReasons, 1)
+	assert.Equal(t, clusterpb.AbortPlanReasonExecutionFailed, mc.abortReasons[0])
+}
+
+func TestRebalancer_ExecutePlan_SuccessAbortsWithCompleted(t *testing.T) {
+	mc := newMockMetaClient()
+	plan := RebalancePlan{
+		PlanID:    "p-ok",
+		GroupID:   "g0",
+		FromNode:  "heavy",
+		ToNode:    "light",
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, mc.fsm.applyCmd(makeRebalancePlanCmd(plan)))
+
+	mock := &MockGroupRebalancer{} // no error → success
+
+	r := NewRebalancer("leader", mc, NewDataGroupManager(), DefaultRebalancerConfig())
+	r.SetGroupRebalancer(mock)
+
+	err := r.ExecutePlan(context.Background(), &plan)
+	require.NoError(t, err)
+	require.Len(t, mc.abortedPlans, 1, "AbortPlan must be called on success as completion marker")
+	assert.Equal(t, "p-ok", mc.abortedPlans[0])
+	require.Len(t, mc.abortReasons, 1)
+	assert.Equal(t, clusterpb.AbortPlanReasonCompleted, mc.abortReasons[0])
 }
