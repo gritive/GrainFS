@@ -58,11 +58,13 @@ func (f *FSM) applyDeleteShardPlacement(data []byte) error {
 type ObjectMetaRef struct {
 	Bucket      string
 	Key         string
+	VersionID   string
 	Size        int64
 	ETag        string
 	RingVersion RingVersion
 	ECData      uint8
 	ECParity    uint8
+	NodeIDs     []string
 }
 
 // IterObjectMetas iterates every logical object's metadata, invoking fn
@@ -119,6 +121,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			var ref ObjectMetaRef
 			ref.Bucket = bucket
 			ref.Key = key
+			ref.VersionID = versionID
 			skip := false
 			if verr := metaItem.Value(func(val []byte) error {
 				m, derr := unmarshalObjectMeta(val)
@@ -134,6 +137,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				ref.RingVersion = RingVersion(m.RingVersion)
 				ref.ECData = m.ECData
 				ref.ECParity = m.ECParity
+				ref.NodeIDs = m.NodeIDs
 				return nil
 			}); verr != nil {
 				itLat.Close()
@@ -203,6 +207,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				ref.RingVersion = RingVersion(m.RingVersion)
 				ref.ECData = m.ECData
 				ref.ECParity = m.ECParity
+				ref.NodeIDs = m.NodeIDs
 				return nil
 			})
 			if verr != nil {

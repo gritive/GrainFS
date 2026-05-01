@@ -29,6 +29,7 @@ import (
 // shards. Zero value is not usable — call NewShardPlacementMonitor.
 type ShardPlacementMonitor struct {
 	fsm      *FSM
+	resolver PlacementResolver
 	shardSvc *ShardService
 	nodeID   string
 	interval time.Duration
@@ -41,12 +42,19 @@ type ShardPlacementMonitor struct {
 	onMissing        func(bucket, key string, shardIdx int) // Slice 5 hook
 }
 
+type pendingRepair struct {
+	bucket   string
+	key      string
+	shardIdx int
+}
+
 // NewShardPlacementMonitor creates a monitor rooted at the given FSM. interval
 // is how often Scan runs when Start is used. shardSvc and nodeID identify the
 // local node's shard storage.
-func NewShardPlacementMonitor(fsm *FSM, shardSvc *ShardService, nodeID string, interval time.Duration) *ShardPlacementMonitor {
+func NewShardPlacementMonitor(fsm *FSM, resolver PlacementResolver, shardSvc *ShardService, nodeID string, interval time.Duration) *ShardPlacementMonitor {
 	return &ShardPlacementMonitor{
 		fsm:      fsm,
+		resolver: resolver,
 		shardSvc: shardSvc,
 		nodeID:   nodeID,
 		interval: interval,
@@ -77,36 +85,50 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 		return 0, errors.New("shard service not configured")
 	}
 
-	type pendingRepair struct {
-		bucket   string
-		key      string
-		shardIdx int
-	}
 	var repairs []pendingRepair
 	var missing int64
+	seen := make(map[string]struct{})
+
+	if m.resolver != nil {
+		var refs []ObjectMetaRef
+		err := m.fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
+			refs = append(refs, ref)
+			return nil
+		})
+		if err != nil {
+			return 0, fmt.Errorf("scan object metas: %w", err)
+		}
+		for _, ref := range refs {
+			if ctx.Err() != nil {
+				return int(missing), ctx.Err()
+			}
+			resolved, rerr := m.resolver.ResolvePlacement(ctx, ref.Bucket, ref.Key, PlacementMeta{
+				VersionID:   ref.VersionID,
+				RingVersion: ref.RingVersion,
+				ECData:      ref.ECData,
+				ECParity:    ref.ECParity,
+				NodeIDs:     ref.NodeIDs,
+			})
+			if errors.Is(rerr, ErrNotEC) {
+				continue
+			}
+			if rerr != nil {
+				m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).Err(rerr).Msg("resolve placement during scan failed")
+				continue
+			}
+			seen[ref.Bucket+"\x00"+resolved.ShardKey] = struct{}{}
+			m.scanRecord(ctx, ref.Bucket, resolved.ShardKey, resolved.Record, &missing, &repairs)
+		}
+	}
 
 	err := m.fsm.IterShardPlacements(func(bucket, key string, rec PlacementRecord) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		for shardIdx, holder := range rec.Nodes {
-			if holder != m.nodeID {
-				continue // someone else's shard; their monitor handles it
-			}
-			if _, rerr := m.shardSvc.ReadLocalShard(bucket, key, shardIdx); rerr != nil {
-				if os.IsNotExist(rerr) {
-					atomic.AddInt64(&missing, 1)
-					m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Msg("missing local shard")
-					if m.onMissing != nil {
-						repairs = append(repairs, pendingRepair{bucket, key, shardIdx})
-					}
-					continue
-				}
-				// Non-ENOENT read error — log but don't count as missing (could be
-				// a transient I/O issue; a future scan will catch persistent corruption).
-				m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Err(rerr).Msg("shard read error during scan")
-			}
+		if _, ok := seen[bucket+"\x00"+key]; ok {
+			return nil
 		}
+		m.scanRecord(ctx, bucket, key, rec, &missing, &repairs)
 		return nil
 	})
 	m.lastScan.Store(time.Now().UnixNano())
@@ -126,6 +148,30 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	}
 
 	return int(missing), nil
+}
+
+func (m *ShardPlacementMonitor) scanRecord(ctx context.Context, bucket, key string, rec PlacementRecord, missing *int64, repairs *[]pendingRepair) {
+	if ctx.Err() != nil {
+		return
+	}
+	for shardIdx, holder := range rec.Nodes {
+		if holder != m.nodeID {
+			continue // someone else's shard; their monitor handles it
+		}
+		if _, rerr := m.shardSvc.ReadLocalShard(bucket, key, shardIdx); rerr != nil {
+			if os.IsNotExist(rerr) {
+				atomic.AddInt64(missing, 1)
+				m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Msg("missing local shard")
+				if m.onMissing != nil {
+					*repairs = append(*repairs, pendingRepair{bucket, key, shardIdx})
+				}
+				continue
+			}
+			// Non-ENOENT read error — log but don't count as missing (could be
+			// a transient I/O issue; a future scan will catch persistent corruption).
+			m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Err(rerr).Msg("shard read error during scan")
+		}
+	}
 }
 
 // Start runs Scan in a loop until ctx is cancelled. Errors are logged and do

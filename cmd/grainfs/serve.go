@@ -917,19 +917,39 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		sc.SetEmitter(activeEmitter)
 		sc.Start(ctx)
 
-		placementMonitor := cluster.NewShardPlacementMonitor(fsm, shardSvc, distBackend.NodeID(), scrubInterval)
-		placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
-			// shardKey from IterShardPlacements is objectKey+"/"+versionID.
-			// Split on the last "/" so RepairShard can skip LookupLatestVersion.
-			objectKey, versionID := shardKey, ""
-			if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
-				objectKey, versionID = shardKey[:i], shardKey[i+1:]
+		placementMonitors := newPlacementMonitorRegistry()
+		startPlacementMonitor := func(monitorCtx context.Context, dg *cluster.DataGroup) {
+			gb := dg.Backend()
+			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), scrubInterval)
+			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
+				// shardKey from placement resolution is objectKey+"/"+versionID.
+				// Split on the last "/" so RepairShard can skip LookupLatestVersion.
+				objectKey, versionID := shardKey, ""
+				if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
+					objectKey, versionID = shardKey[:i], shardKey[i+1:]
+				}
+				if err := gb.RepairShardLocal(bucket, objectKey, versionID, shardIdx); err != nil {
+					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
+				}
+			})
+			go placementMonitor.Start(monitorCtx)
+		}
+		refreshPlacementMonitors := func() {
+			placementMonitors.refresh(ctx, dgMgr.All(), startPlacementMonitor)
+		}
+		refreshPlacementMonitors()
+		go func() {
+			ticker := time.NewTicker(scrubInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					refreshPlacementMonitors()
+				}
 			}
-			if err := distBackend.RepairShardLocal(bucket, objectKey, versionID, shardIdx); err != nil {
-				log.Warn().Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
-			}
-		})
-		go placementMonitor.Start(ctx)
+		}()
 		log.Info().Dur("interval", scrubInterval).Msg("cluster scrubber started")
 	}
 

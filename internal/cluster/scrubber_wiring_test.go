@@ -129,6 +129,30 @@ func TestOwnedShards_EmptyVersionID(t *testing.T) {
 	assert.Equal(t, []int{0}, got, "empty versionID must fall back to bare key lookup")
 }
 
+func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	b := &DistributedBackend{db: db, fsm: fsm}
+
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      "b",
+		Key:         "obj",
+		VersionID:   "v1",
+		Size:        1,
+		ContentType: "application/octet-stream",
+		ETag:        "etag",
+		ModTime:     1,
+		ECData:      2,
+		ECParity:    1,
+		NodeIDs:     []string{"test-node", "other", "test-node"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(raw))
+
+	got := b.OwnedShards("b", "obj", "v1", "test-node")
+	assert.Equal(t, []int{0, 2}, got)
+}
+
 func TestRepairShardLocal_WithoutShardService(t *testing.T) {
 	// RepairShardLocal wraps RepairShard; when ShardService is not configured
 	// it must surface the "shard service not configured" error rather than

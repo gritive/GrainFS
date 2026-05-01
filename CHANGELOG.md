@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.7.8] — 2026-05-02 — Shared EC placement resolver + shard repair wiring
+
+### Added
+
+- **cluster**: shared placement resolver that resolves EC shard placement in priority order: ring metadata, object metadata `NodeIDs`, then legacy placement records.
+- **cluster**: shard placement monitor metadata scan path, so metadata-only EC objects are included in missing-shard detection and repair.
+- **cmd/grainfs**: placement monitor registry for per-data-group monitors, including backend replacement and removal lifecycle handling.
+- **tests**: regression coverage for metadata-only placement, legacy bare-key fallback, reshard classification, monitor repair detection, and data-group monitor replacement.
+
+### Fixed
+
+- **cluster**: `GetObject` and `ReshardToRing` now read EC shards using the resolver's physical shard key, preserving legacy bare-key fallback for versioned metadata.
+- **cluster**: `RepairShard`, scrubber ownership, reshard conversion, and monitor scans now share one placement resolution path instead of drifting fallback logic.
+- **cmd/grainfs**: cluster scrubber repair now starts placement monitors for routed data-group backends, enabling auto-repair in live multi-raft sharding mode.
+
 ## [0.0.7.7] — 2026-05-01 — Raft joint chaos hardening + e2e port isolation
 
 ### Added

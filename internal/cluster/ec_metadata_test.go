@@ -12,9 +12,14 @@ package cluster
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,4 +87,64 @@ func TestEC_NoRing_LargeObject(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	assert.Equal(t, content, got, "large object must round-trip via EC with no ring")
+}
+
+func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
+	backend := setupECBackend(t)
+
+	require.NoError(t, backend.CreateBucket("b"))
+	content := bytes.Repeat([]byte("repair-metadata-only-"), 64)
+	obj, err := backend.PutObject("b", "obj", bytes.NewReader(content), "application/octet-stream")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	shardKey := "obj/" + obj.VersionID
+	require.NoError(t, os.Remove(filepath.Join(backend.shardSvc.dataDir, "b", shardKey, "shard_0")))
+
+	require.NoError(t, backend.RepairShard(t.Context(), "b", "obj", obj.VersionID, 0))
+
+	rc, _, err := backend.GetObject("b", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+}
+
+func TestGetObject_UsesResolvedLegacyBareShardKey(t *testing.T) {
+	backend := setupECBackend(t)
+
+	require.NoError(t, backend.CreateBucket("b"))
+	content := bytes.Repeat([]byte("legacy-bare-placement-"), 64)
+	versionID := "v1"
+	sum := md5.Sum(content)
+
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      "b",
+		Key:         "obj",
+		VersionID:   versionID,
+		Size:        int64(len(content)),
+		ContentType: "application/octet-stream",
+		ETag:        hex.EncodeToString(sum[:]),
+		ModTime:     1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, backend.fsm.Apply(raw))
+
+	shards, err := ECSplit(ECConfig{DataShards: 1, ParityShards: 1}, content)
+	require.NoError(t, err)
+	for i, shard := range shards {
+		require.NoError(t, backend.shardSvc.WriteLocalShard("b", "obj", i, shard))
+	}
+	require.NoError(t, backend.db.Update(func(txn *badger.Txn) error {
+		rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
+		return txn.Set(shardPlacementKey("b", "obj"), encodePlacementValue(rec))
+	}))
+
+	rc, _, err := backend.GetObject("b", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
 }
