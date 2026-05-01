@@ -55,8 +55,8 @@ func extractGroupID(buf []byte) (groupID string, payload []byte, err error) {
 	if len(buf) < 4 {
 		return "", nil, fmt.Errorf("group raft mux: short header")
 	}
-	gidLen := binary.BigEndian.Uint32(buf[:4])
-	if uint32(len(buf)) < 4+gidLen {
+	gidLen := int(binary.BigEndian.Uint32(buf[:4]))
+	if gidLen > 256 || len(buf) < 4+gidLen {
 		return "", nil, fmt.Errorf("group raft mux: truncated group ID")
 	}
 	return string(buf[4 : 4+gidLen]), buf[4+gidLen:], nil

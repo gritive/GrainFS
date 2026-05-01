@@ -724,7 +724,8 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 
 	// Write via NFSv4 and read via S3 API.
 	const nfsBody = "written-via-nfs"
-	err = os.WriteFile(nfsFilePath, []byte(nfsBody), 0644)
+	nfsNewFilePath := filepath.Join(mountDir, "nfs-smoke", "nfs-file.txt")
+	err = os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0644)
 	require.NoError(t, err)
 
 	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{

@@ -69,16 +69,16 @@ func decodeForwardPayload(buf []byte) (groupID string, op raftpb.ForwardOp, fbsA
 		err = ErrShortHeader
 		return
 	}
-	gidLen := binary.BigEndian.Uint32(buf[0:4])
-	if uint32(len(buf)) < 4+gidLen+1+4 {
+	gidLen := int(binary.BigEndian.Uint32(buf[0:4]))
+	if gidLen > 256 || len(buf) < 4+gidLen+1+4 {
 		err = ErrShortHeader
 		return
 	}
 	groupID = string(buf[4 : 4+gidLen])
 	op = raftpb.ForwardOp(buf[4+gidLen])
 	argsStart := 4 + gidLen + 1
-	argsLen := binary.BigEndian.Uint32(buf[argsStart : argsStart+4])
-	if uint32(len(buf)) < argsStart+4+argsLen {
+	argsLen := int(binary.BigEndian.Uint32(buf[argsStart : argsStart+4]))
+	if len(buf) < argsStart+4+argsLen {
 		err = fmt.Errorf("%w: have %d need %d", ErrTruncatedArgs, len(buf), argsStart+4+argsLen)
 		return
 	}

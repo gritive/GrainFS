@@ -496,9 +496,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		m  map[string]*cluster.GroupBackend
 	}{m: make(map[string]*cluster.GroupBackend)}
 
-	// Declared early so instantiateOwnedIfNeeded can capture it; initialized
-	// below after distBackend.RunApplyLoop is started.
-	var stopApply chan struct{}
+	// Shared stop channel for all apply loops (distBackend + per-group).
+	// Must be initialized before any goroutine that passes it to RunApplyLoop.
+	stopApply := make(chan struct{})
 
 	// GroupRaftQUICMux multiplexes per-group raft RPCs over StreamGroupRaft (0x09).
 	// Registered once; each group uses ForGroup(groupID) as its raft transport.
@@ -655,7 +655,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		cachedBackend.InvalidateKey(bucket, key)
 	})
 
-	stopApply = make(chan struct{})
 	go distBackend.RunApplyLoop(stopApply)
 
 	// Start balancer if enabled (cluster mode only).

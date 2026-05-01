@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"errors"
 	"io"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -92,7 +93,13 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 		return statusReply(mapErrorToStatus(err))
 	}
 	defer rc.Close()
-	body, _ := io.ReadAll(rc)
+	body, err := io.ReadAll(io.LimitReader(rc, DefaultMaxForwardBodyBytes+1))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	if int64(len(body)) > DefaultMaxForwardBodyBytes {
+		return statusReply(raftpb.ForwardStatusEntityTooLarge)
+	}
 	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
 }
 
@@ -215,13 +222,13 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	if err == nil {
 		return raftpb.ForwardStatusOK
 	}
-	if err == storage.ErrNoSuchBucket {
+	if errors.Is(err, storage.ErrNoSuchBucket) {
 		return raftpb.ForwardStatusNoSuchBucket
 	}
-	if err == storage.ErrObjectNotFound {
+	if errors.Is(err, storage.ErrObjectNotFound) {
 		return raftpb.ForwardStatusNoSuchKey
 	}
-	if err == storage.ErrEntityTooLarge {
+	if errors.Is(err, storage.ErrEntityTooLarge) {
 		return raftpb.ForwardStatusEntityTooLarge
 	}
 	return raftpb.ForwardStatusInternal
