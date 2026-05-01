@@ -26,7 +26,6 @@
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
 - [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
-  - ReadIndex (현재 `IsLeader()` 보증으로 충분; FSM linearizable read 요구 시)
   - Public `Snapshot()` trigger API (운영 도구)
   - BatchingFSM (FSM apply throughput 한계 도달 시)
   - Snapshot chunking + Concurrent snapshotting (FSM이 QUIC stream max 근접 시)
