@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.9.0] — 2026-05-02 — Offline RecoverCluster drill
+
+### Added
+
+- **recover**: `grainfs recover cluster plan`, `execute`, and `verify --mark-writable` commands for promoting an offline Raft snapshot into a fresh single-node cluster.
+- **cluster**: RecoverCluster planning and execution flow that inspects source Raft state read-only, refuses multi-Raft group recovery in v1, rewrites snapshot membership to one recovered voter, and writes a recovery marker with writes disabled by default.
+- **storage**: recovery write gate that keeps recovered clusters read-only until verification while preserving read/list/head and policy read paths.
+- **docs**: operator drill guide for RecoverCluster, including source/target safety rules and the writable verification step.
+- **tests**: coverage for recovery planning, marker handling, joint-state refusal, managed-mode mismatch, write-gate mutation blocking, and stopped Raft RPCs after close.
+
+### Changed
+
+- **recover**: legacy `recover --auto` now fails closed instead of attempting unsafe automatic snapshot recovery, and doctor/SLO guidance now points operators to dry-run and RecoverCluster planning.
+
+### Fixed
+
+- **raft**: stopped nodes now reject late RequestVote, AppendEntries, and InstallSnapshot RPCs before touching persistent storage, preventing closed-store panics during shutdown races.
+
 ## [0.0.8.1] — 2026-05-02 — E2E cluster startup hardening
 
 ### Fixed

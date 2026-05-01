@@ -122,3 +122,70 @@ func TestNode_RecoveredNodeJoinsCluster(t *testing.T) {
 	assert.Equal(t, "old-cmd-2", string(node.log[1].Command))
 	node.mu.Unlock()
 }
+
+func TestNode_RequestVoteAfterCloseDoesNotPersist(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	node := NewNode(DefaultConfig("A", []string{"B"}), store)
+	node.Close()
+	require.NoError(t, store.Close())
+
+	require.NotPanics(t, func() {
+		reply := node.HandleRequestVote(&RequestVoteArgs{
+			Term:         2,
+			CandidateID:  "B",
+			LastLogIndex: 0,
+			LastLogTerm:  0,
+		})
+		require.False(t, reply.VoteGranted)
+		require.Equal(t, uint64(0), reply.Term)
+	})
+}
+
+func TestNode_AppendEntriesAfterCloseDoesNotPersist(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	node := NewNode(DefaultConfig("A", []string{"B"}), store)
+	node.Close()
+	require.NoError(t, store.Close())
+
+	require.NotPanics(t, func() {
+		reply := node.HandleAppendEntries(&AppendEntriesArgs{
+			Term:         2,
+			LeaderID:     "B",
+			PrevLogIndex: 0,
+			PrevLogTerm:  0,
+		})
+		require.False(t, reply.Success)
+		require.Equal(t, uint64(0), reply.Term)
+	})
+}
+
+func TestNode_InstallSnapshotAfterCloseDoesNotPersist(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+
+	node := NewNode(DefaultConfig("A", []string{"B"}), store)
+	node.Close()
+	require.NoError(t, store.Close())
+
+	require.NotPanics(t, func() {
+		reply := node.HandleInstallSnapshot(&InstallSnapshotArgs{
+			Term:              2,
+			LeaderID:          "B",
+			LastIncludedIndex: 10,
+			LastIncludedTerm:  2,
+			Data:              []byte("snapshot"),
+			Servers:           []Server{{ID: "A", Suffrage: Voter}},
+		})
+		require.Equal(t, uint64(0), reply.Term)
+	})
+}

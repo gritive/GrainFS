@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
-	"os"
-	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/spf13/cobra"
@@ -13,14 +11,14 @@ import (
 var recoverCmd = &cobra.Command{
 	Use:   "recover",
 	Short: "Recover from detected issues",
-	Long: `Recover attempts to fix issues detected by 'grainfs doctor'.
+	Long: `Recover inspects issues detected by 'grainfs doctor' and exposes
+operator-driven disaster recovery commands.
 
-Actions taken (auto mode):
-- Restore from latest snapshot (if Raft log corrupted)
-- Trigger replication monitor (for under-replicated shards)
-- Reset peer health (for retry)
+The legacy --auto path is deprecated and exits without mutating data.
+Use 'recover cluster plan' and 'recover cluster execute' for offline
+snapshot recovery into a fresh single-node cluster.
 
-Use --auto for automatic recovery, or --dry-run to preview actions.`,
+Use --dry-run to preview doctor recommendations.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dataDir, _ := cmd.Flags().GetString("data")
 		autoMode, _ := cmd.Flags().GetBool("auto")
@@ -31,40 +29,7 @@ Use --auto for automatic recovery, or --dry-run to preview actions.`,
 		}
 
 		if autoMode {
-			fmt.Println("🔧 Starting automatic recovery...")
-			fmt.Printf("Data directory: %s\n\n", dataDir)
-
-			// Create recovery manager (without full cluster setup for now)
-			recoveryMgr := cluster.NewRecoveryManager(dataDir, nil, nil, nil)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-
-			report, err := recoveryMgr.AutoRecover(ctx)
-			if err != nil {
-				return fmt.Errorf("recovery failed: %w", err)
-			}
-
-			fmt.Printf("\nRecovery completed in %s\n", report.EndTime.Sub(report.StartTime))
-			fmt.Printf("Success: %v\n", report.Success)
-
-			if len(report.ActionsTaken) > 0 {
-				fmt.Println("\nActions taken:")
-				for _, action := range report.ActionsTaken {
-					fmt.Printf("  ✓ %s\n", action)
-				}
-			}
-
-			if len(report.Errors) > 0 {
-				fmt.Println("\nErrors encountered:")
-				for _, err := range report.Errors {
-					fmt.Printf("  ✗ %v\n", err)
-				}
-			}
-
-			if !report.Success {
-				os.Exit(1)
-			}
+			return fmt.Errorf("recover --auto is deprecated and does not perform snapshot disaster recovery; use 'grainfs recover cluster plan' first")
 		}
 
 		if dryRun {
@@ -98,9 +63,120 @@ Use --auto for automatic recovery, or --dry-run to preview actions.`,
 	},
 }
 
+var recoverClusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Recover an offline Raft snapshot into a fresh single-node cluster",
+}
+
+var recoverClusterPlanCmd = &cobra.Command{
+	Use:   "plan",
+	Short: "Inspect a source snapshot and print the recovery plan",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		opts, err := recoverClusterOptions(cmd)
+		if err != nil {
+			return err
+		}
+		plan, err := cluster.BuildRecoverClusterPlan(opts)
+		if err != nil {
+			return err
+		}
+		return printRecoverClusterPlan(plan)
+	},
+}
+
+var recoverClusterExecuteCmd = &cobra.Command{
+	Use:   "execute",
+	Short: "Promote a source snapshot into a fresh target data directory",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		opts, err := recoverClusterOptions(cmd)
+		if err != nil {
+			return err
+		}
+		plan, err := cluster.BuildRecoverClusterPlan(opts)
+		if err != nil {
+			return err
+		}
+		if err := cluster.ExecuteRecoverClusterPlan(plan); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "recovered snapshot %d/%d into %s; writes disabled until 'grainfs recover cluster verify --mark-writable'\n", plan.SnapshotIndex, plan.SnapshotTerm, opts.TargetData)
+		return nil
+	},
+}
+
+var recoverClusterVerifyCmd = &cobra.Command{
+	Use:   "verify",
+	Short: "Verify a recovered target and optionally mark it writable",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		target, _ := cmd.Flags().GetString("target-data")
+		markWritable, _ := cmd.Flags().GetBool("mark-writable")
+		if target == "" {
+			return fmt.Errorf("--target-data is required")
+		}
+		marker, err := cluster.LoadRecoverClusterMarker(target)
+		if err != nil {
+			return err
+		}
+		if marker == nil {
+			return fmt.Errorf("recovery marker not found at %s", target)
+		}
+		if !markWritable {
+			raw, _ := json.MarshalIndent(marker, "", "  ")
+			fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+			return nil
+		}
+		if err := cluster.MarkRecoverClusterWritable(target); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "recovery marker marked writable: %s\n", target)
+		return nil
+	},
+}
+
 func init() {
 	recoverCmd.Flags().String("data", "./data", "GrainFS data directory")
-	recoverCmd.Flags().Bool("auto", false, "Execute automatic recovery")
+	recoverCmd.Flags().Bool("auto", false, "deprecated; exits without mutating data")
 	recoverCmd.Flags().Bool("dry-run", false, "Preview recovery actions without executing")
+	addRecoverClusterFlags(recoverClusterPlanCmd)
+	addRecoverClusterFlags(recoverClusterExecuteCmd)
+	recoverClusterVerifyCmd.Flags().String("target-data", "", "fresh recovered target data directory")
+	recoverClusterVerifyCmd.Flags().Bool("mark-writable", false, "mark a recovered target writable after external verification")
+	recoverClusterCmd.AddCommand(recoverClusterPlanCmd, recoverClusterExecuteCmd, recoverClusterVerifyCmd)
+	recoverCmd.AddCommand(recoverClusterCmd)
 	rootCmd.AddCommand(recoverCmd)
+}
+
+func addRecoverClusterFlags(cmd *cobra.Command) {
+	cmd.Flags().String("source-data", "", "offline source GrainFS data directory")
+	cmd.Flags().String("target-data", "", "fresh target GrainFS data directory")
+	cmd.Flags().String("new-node-id", "", "node ID for the recovered single voter")
+	cmd.Flags().String("new-raft-addr", "", "Raft address for the recovered node")
+	cmd.Flags().Bool("badger-managed-mode", false, "open recovered target Raft store in managed mode")
+	cmd.Flags().Bool("strip-joint-state", false, "recover a mid-joint snapshot as a clean single-node cluster")
+}
+
+func recoverClusterOptions(cmd *cobra.Command) (cluster.RecoverClusterOptions, error) {
+	source, _ := cmd.Flags().GetString("source-data")
+	target, _ := cmd.Flags().GetString("target-data")
+	nodeID, _ := cmd.Flags().GetString("new-node-id")
+	raftAddr, _ := cmd.Flags().GetString("new-raft-addr")
+	managed, _ := cmd.Flags().GetBool("badger-managed-mode")
+	stripJoint, _ := cmd.Flags().GetBool("strip-joint-state")
+	return cluster.RecoverClusterOptions{
+		SourceData:        source,
+		TargetData:        target,
+		NewNodeID:         nodeID,
+		NewRaftAddr:       raftAddr,
+		BadgerManagedMode: managed,
+		StripJointState:   stripJoint,
+	}, nil
+}
+
+func printRecoverClusterPlan(plan *cluster.RecoverClusterPlan) error {
+	out, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
 }

@@ -74,6 +74,32 @@ Flags:
       --balancer-migration-pending-ttl duration 좀비 마이그레이션 자동 취소 TTL (default 5m)
 ```
 
+### Recovery Commands
+
+```bash
+grainfs recover --dry-run --data /var/lib/grainfs
+
+grainfs recover cluster plan \
+  --source-data /var/lib/grainfs \
+  --target-data /var/lib/grainfs-recovered \
+  --new-node-id node-recovered \
+  --new-raft-addr 10.0.0.10:19100
+
+grainfs recover cluster execute \
+  --source-data /var/lib/grainfs \
+  --target-data /var/lib/grainfs-recovered \
+  --new-node-id node-recovered \
+  --new-raft-addr 10.0.0.10:19100
+
+grainfs recover cluster verify \
+  --target-data /var/lib/grainfs-recovered \
+  --mark-writable
+```
+
+`recover --auto`는 더 이상 데이터를 변경하지 않고 실패한다. 다수결을 잃은 클러스터는 먼저 `recover cluster plan`으로 offline source를 읽기 전용 검사한 뒤 fresh target에 복구한다.
+
+상세 절차: [docs/recover-cluster.md](docs/recover-cluster.md)
+
 ## 클러스터 Balancer
 
 클러스터 모드에서 노드 간 디스크 불균형이 20% 이상이면 자동으로 샤드를 이동한다.
@@ -100,6 +126,16 @@ curl http://localhost:9000/api/cluster/balancer/status | jq .
 `active: true`이면 마이그레이션 진행 중. `imbalance_pct`가 5% 미만으로 내려가면 자동 중단.
 
 > 상세 운영 가이드: [docs/operations/balancer.md](docs/operations/balancer.md)
+
+## Documentation
+
+- [Backup and restore](docs/BACKUP_RESTORE.md)
+- [Disaster recovery drill log](docs/DISASTER_RECOVERY.md)
+- [Drill manual](docs/DRILL_MANUAL.md)
+- [Production runbook](docs/RUNBOOK.md)
+- [SLI/SLO](docs/SLI_SLO.md)
+- [RecoverCluster drill](docs/recover-cluster.md)
+- [Badger managed mode rollback](docs/badger-managed-mode-rollback.md)
 
 ## Development
 

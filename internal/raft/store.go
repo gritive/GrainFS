@@ -33,6 +33,21 @@ type Snapshot struct {
 	JointManagedLearners []string // PR-K3: learners added by ChangeMembership
 }
 
+// SnapshotMeta describes a persisted snapshot without loading the snapshot
+// payload. It is used by offline recovery planning where dry-run memory use and
+// source immutability matter.
+type SnapshotMeta struct {
+	Index                uint64
+	Term                 uint64
+	DataSize             int64
+	Servers              []Server
+	JointPhase           JointPhase
+	JointOldVoters       []string
+	JointNewVoters       []string
+	JointEnterIndex      uint64
+	JointManagedLearners []string
+}
+
 // LogStore provides durable storage for Raft log entries and state.
 type LogStore interface {
 	// AppendEntries persists log entries starting at the given index.
@@ -451,6 +466,177 @@ func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 	var snap Snapshot
 	err := s.db.View(func(txn *badger.Txn) error {
+		metaItem, err := txn.Get(keySnapshotMeta)
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := metaItem.Value(func(val []byte) (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("unmarshal snapshot meta: invalid flatbuffer: %v", r)
+				}
+			}()
+			m := pb.GetRootAsSnapshotMeta(val, 0)
+			snap.Index = m.Index()
+			snap.Term = m.Term()
+			var se pb.ServerEntry
+			for i := 0; i < m.ServersLength(); i++ {
+				if m.Servers(&se, i) {
+					snap.Servers = append(snap.Servers, Server{
+						ID:       string(se.Id()),
+						Suffrage: ServerSuffrage(se.Suffrage()),
+					})
+				}
+			}
+			snap.JointPhase = jointPhase(m.JointPhase())
+			if oldLen := m.JointOldVotersLength(); oldLen > 0 {
+				snap.JointOldVoters = make([]string, oldLen)
+				for i := 0; i < oldLen; i++ {
+					snap.JointOldVoters[i] = string(m.JointOldVoters(i))
+				}
+			}
+			if newLen := m.JointNewVotersLength(); newLen > 0 {
+				snap.JointNewVoters = make([]string, newLen)
+				for i := 0; i < newLen; i++ {
+					snap.JointNewVoters[i] = string(m.JointNewVoters(i))
+				}
+			}
+			snap.JointEnterIndex = m.JointEnterIndex()
+			if mLen := m.JointManagedLearnersLength(); mLen > 0 {
+				snap.JointManagedLearners = make([]string, mLen)
+				for i := 0; i < mLen; i++ {
+					snap.JointManagedLearners[i] = string(m.JointManagedLearners(i))
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		dataItem, err := txn.Get(keySnapshot)
+		if err != nil {
+			return err
+		}
+		return dataItem.Value(func(val []byte) error {
+			snap.Data = make([]byte, len(val))
+			copy(snap.Data, val)
+			return nil
+		})
+	})
+	return snap, err
+}
+
+// InspectManagedModeReadOnly reads the persisted managed-mode bit without
+// running NewBadgerLogStore's first-open write path.
+func InspectManagedModeReadOnly(path string) (managed bool, present bool, err error) {
+	db, err := badger.Open(badger.DefaultOptions(path).WithLogger(nil).WithReadOnly(true))
+	if err != nil {
+		return false, false, fmt.Errorf("open raft store read-only: %w", err)
+	}
+	defer db.Close()
+	err = db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(keyManagedMode)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		present = true
+		return item.Value(func(val []byte) error {
+			managed = string(val) == "true"
+			return nil
+		})
+	})
+	return managed, present, err
+}
+
+// InspectSnapshotMetaReadOnly returns snapshot metadata and payload size without
+// reading the payload bytes.
+func InspectSnapshotMetaReadOnly(path string) (SnapshotMeta, error) {
+	db, err := badger.Open(badger.DefaultOptions(path).WithLogger(nil).WithReadOnly(true))
+	if err != nil {
+		return SnapshotMeta{}, fmt.Errorf("open raft store read-only: %w", err)
+	}
+	defer db.Close()
+
+	var meta SnapshotMeta
+	err = db.View(func(txn *badger.Txn) error {
+		metaItem, err := txn.Get(keySnapshotMeta)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := metaItem.Value(func(val []byte) (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("unmarshal snapshot meta: invalid flatbuffer: %v", r)
+				}
+			}()
+			m := pb.GetRootAsSnapshotMeta(val, 0)
+			meta.Index = m.Index()
+			meta.Term = m.Term()
+			var se pb.ServerEntry
+			for i := 0; i < m.ServersLength(); i++ {
+				if m.Servers(&se, i) {
+					meta.Servers = append(meta.Servers, Server{
+						ID:       string(se.Id()),
+						Suffrage: ServerSuffrage(se.Suffrage()),
+					})
+				}
+			}
+			meta.JointPhase = JointPhase(m.JointPhase())
+			if oldLen := m.JointOldVotersLength(); oldLen > 0 {
+				meta.JointOldVoters = make([]string, oldLen)
+				for i := 0; i < oldLen; i++ {
+					meta.JointOldVoters[i] = string(m.JointOldVoters(i))
+				}
+			}
+			if newLen := m.JointNewVotersLength(); newLen > 0 {
+				meta.JointNewVoters = make([]string, newLen)
+				for i := 0; i < newLen; i++ {
+					meta.JointNewVoters[i] = string(m.JointNewVoters(i))
+				}
+			}
+			meta.JointEnterIndex = m.JointEnterIndex()
+			if managedLen := m.JointManagedLearnersLength(); managedLen > 0 {
+				meta.JointManagedLearners = make([]string, managedLen)
+				for i := 0; i < managedLen; i++ {
+					meta.JointManagedLearners[i] = string(m.JointManagedLearners(i))
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		dataItem, err := txn.Get(keySnapshot)
+		if err != nil {
+			return err
+		}
+		meta.DataSize = dataItem.ValueSize()
+		return nil
+	})
+	return meta, err
+}
+
+// LoadSnapshotReadOnly loads the full snapshot payload for offline recovery
+// execution without mutating source metadata.
+func LoadSnapshotReadOnly(path string) (Snapshot, error) {
+	db, err := badger.Open(badger.DefaultOptions(path).WithLogger(nil).WithReadOnly(true))
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("open raft store read-only: %w", err)
+	}
+	defer db.Close()
+	return loadSnapshotFromDB(db)
+}
+
+func loadSnapshotFromDB(db *badger.DB) (Snapshot, error) {
+	var snap Snapshot
+	err := db.View(func(txn *badger.Txn) error {
 		metaItem, err := txn.Get(keySnapshotMeta)
 		if err == badger.ErrKeyNotFound {
 			return nil

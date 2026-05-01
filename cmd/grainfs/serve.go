@@ -736,6 +736,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		backend = pullthrough.NewBackend(backend, up)
 		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
+	recoveryReadOnly := false
+	if marker, err := cluster.LoadRecoverClusterMarker(dataDir); err != nil {
+		return fmt.Errorf("load recovery marker: %w", err)
+	} else if marker != nil && !marker.Writable {
+		recoveryReadOnly = true
+		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		log.Warn().Str("marker", filepath.Join(dataDir, cluster.RecoverClusterMarkerPath)).Msg("recovered cluster write gate enabled")
+	}
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.
@@ -770,16 +778,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Cluster nodes must not block HTTP readiness on a metadata proposal:
 	// during simultaneous cold start, followers can spend the whole retry
 	// window returning "not leader" before the service socket is even open.
-	if len(peers) == 0 {
-		if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-			return fmt.Errorf("create default bucket: %w", err)
-		}
-	} else {
-		go func() {
+	// Recovered clusters stay read-only until verification, so skip bucket
+	// creation entirely when the recovery write gate is active.
+	if !recoveryReadOnly {
+		if len(peers) == 0 {
 			if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-				log.Warn().Err(err).Msg("default bucket creation failed in background (may already exist)")
+				return fmt.Errorf("create default bucket: %w", err)
 			}
-		}()
+		} else {
+			go func() {
+				if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
+					log.Warn().Err(err).Msg("default bucket creation failed in background (may already exist)")
+				}
+			}()
+		}
 	}
 
 	log.Info().Str("component", "server").Str("version", version).
