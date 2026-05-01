@@ -53,6 +53,8 @@
 ### 제품 스펙
 - ROADMAP.md: 개발 로드맵 및 Phase별 기능 정의
 - README.md: Quick Start 및 CLI 옵션
+- docs/recover-cluster.md: RecoverCluster offline 재해 복구 절차
+- docs/RUNBOOK.md, docs/DRILL_MANUAL.md, docs/SLI_SLO.md: 운영/드릴/SLO 문서
 
 ## Coding Behavior Guidelines
 

@@ -50,6 +50,9 @@ grainfs recover cluster verify \
   `blobs`, `wal`, or `snapshots`.
 - V1 refuses sources with `groups/*` because per-group Raft recovery needs its
   own consistency design.
+- Snapshots captured during joint consensus are refused unless the operator
+  explicitly reruns `plan`/`execute` with `--strip-joint-state` to recover as a
+  clean single-node cluster.
 - Active recovered snapshot membership is rewritten to exactly one voter: the
   new node ID. Original membership is preserved in
   `recovery/recovercluster.json`.
