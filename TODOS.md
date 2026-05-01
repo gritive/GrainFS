@@ -59,6 +59,7 @@
 - [ ] SoA (Structure of Arrays)
 - [ ] SIMD
 - [ ] **Predictive resource warnings — BadgerDB / goroutine / FD** — *zero ops* — BadgerDB value log 크기, goroutine 수, open FD 추세를 추적하고 임계 도달 전 경고. 디스크 사용률 경고와 동일 패턴(transition-only firing).
+- [ ] **BadgerDB 인스턴스 통합 (per-node 1 state + 1 raft-log)** — 현재 그룹마다 별도 BadgerDB 2개 → 8 그룹 시 노드당 16 인스턴스. idle CPU 27%/노드 + goroutines 307의 주 원인. 컴팩터 축소(NumCompactors 4→2)로 -7% goroutine, -4% CPU만 확보됨. 의미 있는 개선은 인스턴스 수 자체를 줄여야 함. 작업: NamespacedLogStore(groupID, *badger.DB) 신설, FSM Snapshot/Restore prefix-scoping (`internal/cluster/apply.go:660,683` 현재 DB 전체 키 직렬화/삭제), group teardown DropPrefix 전환, cross-group snapshot/truncate/teardown 안전성 e2e 테스트. 추정: 며칠. cluster_perf_profile_test.go로 효과 정량 측정 가능.
 - [ ] control plane, data plane 분리
 
 ## Phase 20: Protocol Extensions
