@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,31 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+type blockingSnapshotter struct {
+	entered chan struct{}
+	release chan struct{}
+	closed  atomic.Bool
+}
+
+func newBlockingSnapshotter() *blockingSnapshotter {
+	return &blockingSnapshotter{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (s *blockingSnapshotter) Snapshot() ([]byte, error) {
+	if s.closed.CompareAndSwap(false, true) {
+		close(s.entered)
+	}
+	<-s.release
+	return []byte("blocked-snapshot"), nil
+}
+
+func (s *blockingSnapshotter) Restore([]byte) error {
+	return nil
+}
 
 // newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.
 func newTestDistributedBackend(t testing.TB) *DistributedBackend {
@@ -483,6 +509,140 @@ func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, snap.Index, uint64(0), "snapshot should have been saved")
 	assert.NotNil(t, snap.Data, "snapshot data should exist")
+}
+
+func TestDistributedBackend_TriggerRaftSnapshotLeader(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
+	require.NoError(t, err)
+	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
+	require.NoError(t, err)
+	node := raft.NewNode(raft.DefaultConfig("leader", nil), logStore)
+	node.SetTransport(
+		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+	)
+	node.Start()
+	require.Eventually(t, func() bool { return node.State() == raft.Leader }, 3*time.Second, 10*time.Millisecond)
+	backend, err := NewDistributedBackend(dir, db, node)
+	require.NoError(t, err)
+	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, backend.fsm, raft.SnapshotConfig{Threshold: 100}), node)
+
+	stopApply := make(chan struct{})
+	go backend.RunApplyLoop(stopApply)
+	t.Cleanup(func() {
+		close(stopApply)
+		node.Stop()
+		db.Close()
+		logStore.Close()
+	})
+
+	require.NoError(t, backend.CreateBucket("manual-snap"))
+	require.Eventually(t, func() bool {
+		return backend.lastApplied.Load() > 0
+	}, 3*time.Second, 10*time.Millisecond)
+
+	result, err := backend.TriggerRaftSnapshot(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, backend.lastApplied.Load(), result.Index)
+
+	status, err := backend.RaftSnapshotStatus()
+	require.NoError(t, err)
+	assert.True(t, status.Available)
+	assert.Equal(t, result.Index, status.Index)
+}
+
+func TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
+	require.NoError(t, err)
+	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
+	require.NoError(t, err)
+	node := raft.NewNode(raft.DefaultConfig("leader", nil), logStore)
+	node.SetTransport(
+		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+	)
+	node.Start()
+	require.Eventually(t, func() bool { return node.State() == raft.Leader }, 3*time.Second, 10*time.Millisecond)
+	backend, err := NewDistributedBackend(dir, db, node)
+	require.NoError(t, err)
+
+	stopApply := make(chan struct{})
+	go backend.RunApplyLoop(stopApply)
+	t.Cleanup(func() {
+		close(stopApply)
+		node.Stop()
+		db.Close()
+		logStore.Close()
+	})
+
+	require.NoError(t, backend.CreateBucket("before-snapshot"))
+	initialApplied := backend.lastApplied.Load()
+	require.NotZero(t, initialApplied)
+
+	blockingSnap := newBlockingSnapshotter()
+	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, blockingSnap, raft.SnapshotConfig{Threshold: 100}), node)
+
+	triggerDone := make(chan error, 1)
+	go func() {
+		_, err := backend.TriggerRaftSnapshot(context.Background())
+		triggerDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		select {
+		case <-blockingSnap.entered:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	applyDone := make(chan error, 1)
+	go func() {
+		applyDone <- backend.CreateBucket("during-snapshot")
+	}()
+
+	assert.Never(t, func() bool {
+		return backend.lastApplied.Load() > initialApplied
+	}, 150*time.Millisecond, 10*time.Millisecond, "apply loop must not advance while manual snapshot is reading FSM state")
+	select {
+	case err := <-applyDone:
+		require.NoError(t, err)
+		t.Fatal("CreateBucket applied before snapshot finished")
+	default:
+	}
+
+	close(blockingSnap.release)
+	require.NoError(t, <-triggerDone)
+	require.NoError(t, <-applyDone)
+	assert.Greater(t, backend.lastApplied.Load(), initialApplied)
+}
+
+func TestDistributedBackend_TriggerRaftSnapshotRejectsFollower(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
+	require.NoError(t, err)
+	defer db.Close()
+	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
+	require.NoError(t, err)
+	defer logStore.Close()
+
+	node := raft.NewNode(raft.DefaultConfig("follower", []string{"leader"}), logStore)
+	backend, err := NewDistributedBackend(dir, db, node)
+	require.NoError(t, err)
+	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, backend.fsm, raft.SnapshotConfig{Threshold: 100}), node)
+
+	_, err = backend.TriggerRaftSnapshot(context.Background())
+	assert.ErrorIs(t, err, raft.ErrNotLeader)
 }
 
 func TestDistributedBackend_Close(t *testing.T) {
