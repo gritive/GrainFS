@@ -311,6 +311,9 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		}
 
 	case JointOpLeave:
+		if n.jointPhase != JointEntering {
+			return // idempotency guard: JointAbort already resolved this transition
+		}
 		// Append-time: §4.4 invariant — config.Peers updates immediately so
 		// quorum decisions on subsequent entries use C_new. config.Peers in
 		// this codebase excludes self (peer IDs are the OTHER nodes); voter
@@ -409,6 +412,10 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 	var removed bool
 	// managedLearners mirrors n.jointManagedLearners for the replay path.
 	managedLearners := make(map[string]struct{})
+	// jAborted tracks whether the current joint cycle was resolved by a
+	// JointOpAbort so that a subsequent JointOpLeave (for the same cycle)
+	// is skipped rather than re-applied.
+	var jAborted bool
 
 	for _, entry := range n.log {
 		if entry.Index < startIndex {
@@ -476,6 +483,12 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 					removed = false
 				}
 			case JointOpLeave:
+				if jAborted {
+					// JointOpAbort already resolved this joint cycle; skip the
+					// stale JointOpLeave that was appended before the abort committed.
+					jAborted = false
+					continue
+				}
 				peers = peersExcludingSelf(jc.NewServers, n.id)
 				// Mirror apply path: clear promoted learners from the replay map.
 				for _, s := range jc.NewServers {
@@ -497,6 +510,7 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				jOldVoters = nil
 				jNewVoters = nil
 				jEnterIndex = 0
+				jAborted = true // signal to skip any stale JointOpLeave in this cycle
 			}
 		}
 	}

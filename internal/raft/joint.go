@@ -418,9 +418,15 @@ func (n *Node) ForceAbortJoint(ctx context.Context) error {
 		n.mu.Unlock()
 		return ErrNotInJointPhase
 	}
+	// Set flag inside the lock so concurrent checkJointAdvance heartbeat ticks
+	// cannot propose a JointLeave between this unlock and the abort proposal.
+	n.jointAbortProposed = true
 	n.mu.Unlock()
 
 	if err := n.proposeJointAbort(ctx); err != nil {
+		n.mu.Lock()
+		n.jointAbortProposed = false
+		n.mu.Unlock()
 		return err
 	}
 	// proposeJointEntry waits for commit; abort is applied by membership.go.

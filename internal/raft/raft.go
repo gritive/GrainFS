@@ -1514,7 +1514,10 @@ func (n *Node) advanceCommitIndex() {
 		}
 		if isJointAbortEntry(n.log[n.toSliceIdx(idx)]) {
 			// JointOpAbort commits under C_old quorum only — C_new may be down.
-			if !n.hasMajorityInSet(matched, n.jointOldVoters) {
+			// Read C_old from the entry payload: n.jointOldVoters is nil here
+			// because applyConfigChangeLocked already cleared it at append time.
+			jc := decodeJointConfChange(n.log[n.toSliceIdx(idx)].Command)
+			if !n.hasMajorityInSet(matched, serverPeerKeys(jc.OldServers)) {
 				continue
 			}
 		} else if !n.dualMajority(matched) {

@@ -516,3 +516,44 @@ func TestRebuildConfigFromLog_JointLeave_ClearsManaged(t *testing.T) {
 
 	require.False(t, inSet, "managed learner must be cleared from jointManagedLearners after JointOpLeave")
 }
+
+// TestRebuildConfigFromLog_AbortThenLeave_LeaveIsSkipped verifies that when the log
+// contains JointOpAbort followed by a stale JointOpLeave (both in the same joint
+// cycle), rebuildConfigFromLog skips the JointOpLeave so config stays at C_old.
+// This is the log-replay counterpart to applyJointConfChangeLocked's idempotency guard.
+func TestRebuildConfigFromLog_AbortThenLeave_LeaveIsSkipped(t *testing.T) {
+	cfg := DefaultConfig("n1", []string{"n2", "n3"})
+	n := NewNode(cfg)
+	n.mu.Lock()
+	// C_old = {n1, n2, n3}, C_new = {n1, n4, n5}
+	n.log = []LogEntry{
+		{Index: 1, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpEnter,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+		{Index: 2, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpAbort,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+		// Stale JointOpLeave proposed before the abort committed.
+		{Index: 3, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpLeave,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+	}
+	n.firstIndex = 1
+	n.rebuildConfigFromLog(0, nil, nil)
+	peers := n.config.Peers
+	phase := n.jointPhase
+	n.mu.Unlock()
+
+	require.Equal(t, JointNone, phase, "phase must be JointNone after abort+leave sequence")
+	require.Equal(t, []string{"n2", "n3"}, peers,
+		"peers must be C_old after abort; stale JointOpLeave must not switch to C_new")
+}
