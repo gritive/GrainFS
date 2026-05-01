@@ -36,10 +36,6 @@ table ConfChangeEntry {
   // Prevents auto-promote watcher from racing with upcoming JointEnter.
   // Persists across restart so leader crash doesn't lose this state.
   managed_by_joint:bool;
-  // §4.3 deprecated: superseded by JointConfChangeEntry (PR-J1).
-  // Removed in cleanup PR after mixed-version compatibility window closes.
-  new_config:[string] (deprecated);
-  old_config:[string] (deprecated);
 }
 
 enum JointOp : byte {

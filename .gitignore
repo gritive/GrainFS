@@ -5,6 +5,7 @@ tmp/
 server.test
 /grainfs
 bin/grainfs
+.claude/*.lock
 .gstack/
 *.fbs.stamp
 benchmarks/report.json

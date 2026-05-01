@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -243,8 +244,8 @@ func (m *MetaRaft) ProposeRebalancePlan(ctx context.Context, plan RebalancePlan)
 
 // ProposeAbortPlan encodes an AbortPlan command and proposes it to the cluster,
 // blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string) error {
-	payload, err := encodeMetaAbortPlanCmd(planID)
+func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string, reason clusterpb.AbortPlanReason) error {
+	payload, err := encodeMetaAbortPlanCmd(planID, reason)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode AbortPlan: %w", err)
 	}

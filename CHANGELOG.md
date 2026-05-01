@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.7.5] — 2026-05-01 — AbortPlanReason enum + ConfChangeEntry cleanup (PR-D must-fix + PR-A)
+
+### Added
+
+- **cluster**: `AbortPlanReason` enum (`Unknown`, `Timeout`, `ExecutionFailed`, `Completed`) added to `MetaAbortPlanCmd` FlatBuffers message. `ProposeAbortPlan` now carries the reason so operators can distinguish plan abort causes in logs and future metrics.
+
+### Changed
+
+- **cluster**: `MetaRaft.ProposeAbortPlan`, `MetaRaftClient` interface, and all `Rebalancer` callers updated to pass `AbortPlanReason` — timeout aborts use `Timeout`, `MoveReplica` failures use `ExecutionFailed`, successful plan completion uses `Completed`.
+
+### Removed
+
+- **raft**: `ConfChangeEntry.new_config` and `ConfChangeEntry.old_config` FlatBuffers fields removed. These were deprecated in PR-J1 (superseded by `JointConfChangeEntry`) and are now safe to drop after the mixed-version compatibility window.
+
 ## [0.0.7.4] — 2026-05-01 — Live Multi-Raft Routing E2E (PR-D 완료)
 
 ### Added

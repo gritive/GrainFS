@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 func makeAddNodeCmd(t *testing.T, id, addr string, role uint8) []byte {
@@ -308,7 +310,12 @@ func makeProposeRebalancePlanCmd(t *testing.T, plan RebalancePlan) []byte {
 
 func makeAbortPlanCmd(t *testing.T, planID string) []byte {
 	t.Helper()
-	data, err := encodeMetaAbortPlanCmd(planID)
+	return makeAbortPlanCmdWithReason(t, planID, clusterpb.AbortPlanReasonUnknown)
+}
+
+func makeAbortPlanCmdWithReason(t *testing.T, planID string, reason clusterpb.AbortPlanReason) []byte {
+	t.Helper()
+	data, err := encodeMetaAbortPlanCmd(planID, reason)
 	require.NoError(t, err)
 	cmd, err := encodeMetaCmd(MetaCmdTypeAbortPlan, data)
 	require.NoError(t, err)
@@ -362,6 +369,29 @@ func TestMetaFSM_Apply_AbortPlan_Idempotent(t *testing.T) {
 	// Aborting when no plan is active must be a no-op (not an error).
 	require.NoError(t, f.applyCmd(makeAbortPlanCmd(t, "nonexistent")))
 	assert.Empty(t, f.ActivePlanID())
+}
+
+// TestEncodeMetaAbortPlanCmd_ReasonRoundTrip verifies that every AbortPlanReason
+// value survives a FlatBuffers encode → decode cycle intact.
+func TestEncodeMetaAbortPlanCmd_ReasonRoundTrip(t *testing.T) {
+	cases := []struct {
+		reason clusterpb.AbortPlanReason
+		name   string
+	}{
+		{clusterpb.AbortPlanReasonUnknown, "Unknown"},
+		{clusterpb.AbortPlanReasonTimeout, "Timeout"},
+		{clusterpb.AbortPlanReasonExecutionFailed, "ExecutionFailed"},
+		{clusterpb.AbortPlanReasonCompleted, "Completed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := encodeMetaAbortPlanCmd("plan-rt", tc.reason)
+			require.NoError(t, err)
+			cmd := clusterpb.GetRootAsMetaAbortPlanCmd(data, 0)
+			assert.Equal(t, tc.reason, cmd.Reason())
+			assert.Equal(t, tc.name, cmd.Reason().String())
+		})
+	}
 }
 
 func TestMetaFSM_OnRebalancePlan_CallbackFired(t *testing.T) {
