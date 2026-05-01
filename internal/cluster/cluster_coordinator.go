@@ -79,8 +79,19 @@ func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordin
 
 func (c *ClusterCoordinator) CreateBucket(bucket string) error { return c.base.CreateBucket(bucket) }
 func (c *ClusterCoordinator) HeadBucket(bucket string) error   { return c.base.HeadBucket(bucket) }
-func (c *ClusterCoordinator) DeleteBucket(bucket string) error { return c.base.DeleteBucket(bucket) }
-func (c *ClusterCoordinator) ListBuckets() ([]string, error)   { return c.base.ListBuckets() }
+func (c *ClusterCoordinator) DeleteBucket(bucket string) error {
+	if c.router != nil && c.meta != nil {
+		objects, err := c.ListObjects(bucket, "", 1)
+		if err != nil {
+			return err
+		}
+		if len(objects) > 0 {
+			return storage.ErrBucketNotEmpty
+		}
+	}
+	return c.base.DeleteBucket(bucket)
+}
+func (c *ClusterCoordinator) ListBuckets() ([]string, error) { return c.base.ListBuckets() }
 
 // ListAllObjects implements storage.Snapshotable by enumerating bucket-routed
 // objects across every cluster-wide bucket.

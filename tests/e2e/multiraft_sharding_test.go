@@ -37,6 +37,8 @@ type mrCluster struct {
 	dataDirs   []string
 	httpPorts  []int
 	raftPorts  []int
+	nfs4Ports  []int
+	nbdPorts   []int
 	httpURLs   []string
 	stopped    bool
 	clusterKey string
@@ -80,16 +82,22 @@ func tryStartMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster, erro
 	}
 	c.httpPorts = make([]int, numNodes)
 	c.raftPorts = make([]int, numNodes)
+	c.nfs4Ports = make([]int, numNodes)
+	c.nbdPorts = make([]int, numNodes)
 	c.httpURLs = make([]string, numNodes)
 	c.dataDirs = make([]string, numNodes)
 	c.procs = make([]*exec.Cmd, numNodes)
 
-	// Allocate raft ports up-front: peers list must be known before any node
-	// starts. HTTP ports are allocated just before each spawn to minimize the
-	// freePort() TOCTOU race window (port can be reassigned by the OS between
-	// listener.Close() and child process bind).
-	for i := range c.raftPorts {
-		c.raftPorts[i] = freePort()
+	// Allocate every listener port from one de-duplicated pool so HTTP, Raft,
+	// NFSv4 and NBD cannot collide within this cluster attempt.
+	ports := uniqueFreePorts(numNodes * 4)
+	for i := 0; i < numNodes; i++ {
+		c.httpPorts[i] = ports[i]
+		c.raftPorts[i] = ports[numNodes+i]
+		c.nfs4Ports[i] = ports[2*numNodes+i]
+		c.nbdPorts[i] = ports[3*numNodes+i]
+		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
+
 		d, err := os.MkdirTemp("", fmt.Sprintf("mrshard-%d-*", i))
 		if err != nil {
 			c.Stop()
@@ -101,8 +109,6 @@ func tryStartMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster, erro
 	t.Cleanup(c.Stop)
 
 	for i := 0; i < numNodes; i++ {
-		c.httpPorts[i] = freePort()
-		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		c.procs[i] = c.startNode(i, seedGroups)
 	}
 	if err := waitForPortsParallelErr(c.httpPorts, 60*time.Second); err != nil {
@@ -160,8 +166,8 @@ func (c *mrCluster) startNode(i int, seedGroups int) *exec.Cmd {
 		"--access-key", c.accessKey,
 		"--secret-key", c.secretKey,
 		fmt.Sprintf("--seed-groups=%d", seedGroups),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
+		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",

@@ -161,6 +161,20 @@ func freePort() int {
 	return port
 }
 
+func uniqueFreePorts(n int) []int {
+	ports := make([]int, 0, n)
+	seen := make(map[int]struct{}, n)
+	for len(ports) < n {
+		p := freePort()
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		ports = append(ports, p)
+	}
+	return ports
+}
+
 func waitForPort(t testing.TB, port int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
