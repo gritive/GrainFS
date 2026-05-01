@@ -49,9 +49,17 @@ type ClusterInfo interface {
 // The serve layer provides this callback when starting in no-peers mode.
 type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
 
+// ReadIndexer provides linearizable read fencing for S3 GET/HEAD handlers.
+// Implemented by cluster.DistributedBackend; nil in single-node mode.
+type ReadIndexer interface {
+	ReadIndex(ctx context.Context) (uint64, error)
+	WaitApplied(ctx context.Context, index uint64) error
+}
+
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend        storage.Backend
+	readIndexer    ReadIndexer // nil = no gate (single-node)
 	dataDir        string
 	snapMgr        *snapshot.Manager
 	scrubber       *scrubber.BackgroundScrubber // nil if not using ECBackend
@@ -128,6 +136,13 @@ func WithBalancerInfo(bi BalancerInfo) Option {
 func WithJoinCluster(fn JoinClusterFunc) Option {
 	return func(s *Server) {
 		s.joinCluster = fn
+	}
+}
+
+// WithReadIndexer wires a ReadIndexer so GET/HEAD handlers are linearizable.
+func WithReadIndexer(ri ReadIndexer) Option {
+	return func(s *Server) {
+		s.readIndexer = ri
 	}
 }
 

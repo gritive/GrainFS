@@ -3,18 +3,26 @@
 package nbd
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/volume"
 )
+
+// ReadIndexer provides linearizable read fencing. Implemented by cluster.DistributedBackend.
+type ReadIndexer interface {
+	ReadIndex(ctx context.Context) (uint64, error)
+	WaitApplied(ctx context.Context, index uint64) error
+}
 
 // pendingWrite pairs a block key with its deferred Raft commit function.
 // key = offset (exact write-start address), used to group writes to the same block.
@@ -93,11 +101,12 @@ const nbdPoolBufSize = 4096
 
 // Server serves a single volume over NBD protocol.
 type Server struct {
-	mgr      *volume.Manager
-	volName  string
-	listener atomic.Pointer[net.Listener]
-	closed   atomic.Bool
-	bufPool  *pool.Pool[[]byte]
+	mgr         *volume.Manager
+	volName     string
+	listener    atomic.Pointer[net.Listener]
+	closed      atomic.Bool
+	bufPool     *pool.Pool[[]byte]
+	readIndexer ReadIndexer // nil = no gate (single-node / non-distributed)
 }
 
 // NewServer creates a new NBD server for the named volume.
@@ -107,6 +116,11 @@ func NewServer(mgr *volume.Manager, volName string) *Server {
 		volName: volName,
 		bufPool: pool.New(func() []byte { return make([]byte, nbdPoolBufSize) }),
 	}
+}
+
+// SetReadIndexer wires a ReadIndexer so NBD reads are linearizable.
+func (s *Server) SetReadIndexer(ri ReadIndexer) {
+	s.readIndexer = ri
 }
 
 // ListenAndServe starts the NBD server on the given address.
@@ -338,6 +352,19 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingWrite) error {
 
 	switch cmdType {
 	case nbdCmdRead:
+		if ri := s.readIndexer; ri != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			idx, err := ri.ReadIndex(ctx)
+			cancel()
+			if err == nil {
+				ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+				err = ri.WaitApplied(ctx2, idx)
+				cancel2()
+			}
+			if err != nil {
+				return s.sendReply(conn, handle, 1, nil) // EIO
+			}
+		}
 		buf := s.getBuf(length)
 		_, _ = s.mgr.ReadAt(s.volName, buf, int64(offset))
 		err := s.sendReply(conn, handle, 0, buf)
