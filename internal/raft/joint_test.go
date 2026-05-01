@@ -1011,6 +1011,49 @@ func TestJointAbortRestart_RebuildConfigCorrect(t *testing.T) {
 	require.Equal(t, uint64(0), n.jointEnterIndex)
 }
 
+// TestApply_JointAbort_IdempotencyGuard verifies that applyJointConfChangeLocked
+// is a no-op when jointPhase != JointEntering (e.g., already JointNone after a
+// concurrent apply). This is the safety guard against double-reset on replay.
+func TestApply_JointAbort_IdempotencyGuard(t *testing.T) {
+	n := jointTestNode("n1")
+	n.jointPhase = JointNone // not in entering phase
+	n.config.Peers = []string{"n2", "n3"}
+	initialPeers := []string{"n2", "n3"}
+
+	entry := LogEntry{
+		Index: 5,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpAbort,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+		}),
+	}
+	n.applyJointConfChangeLocked(entry)
+
+	// Must be a strict no-op — peers, phase, and indices unchanged.
+	require.Equal(t, JointNone, n.jointPhase, "idempotency: phase must stay JointNone")
+	require.Equal(t, initialPeers, n.config.Peers, "idempotency: peers must be unchanged")
+}
+
+// TestInitLeaderState_ResetsJointAbortProposed verifies that initLeaderState
+// resets jointAbortProposed to false so a newly elected leader re-evaluates
+// whether abort needs to be proposed (re-election correctness).
+func TestInitLeaderState_ResetsJointAbortProposed(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.checkQuorumAcks = make(map[string]time.Time)
+	n.jointAbortProposed = true // stale flag from previous leadership term
+	n.jointLeaveProposed = true
+
+	n.initLeaderState()
+
+	require.False(t, n.jointAbortProposed,
+		"initLeaderState must reset jointAbortProposed so the new leader re-evaluates abort")
+	require.False(t, n.jointLeaveProposed,
+		"initLeaderState must reset jointLeaveProposed")
+}
+
 // TestAdvanceCommitIndex_JointAbortUsesOldQuorumOnly verifies the critical
 // quorum branch: a JointOpAbort entry commits when C_old has majority but C_new
 // does not. The negative control (JointOpLeave) must NOT advance commitIndex
