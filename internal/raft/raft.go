@@ -23,6 +23,7 @@ var (
 	ErrAlreadyBootstrapped = errors.New("raft: already bootstrapped")
 	ErrJointAborted        = errors.New("raft: joint consensus aborted — config reverted to C_old")
 	ErrNotInJointPhase     = errors.New("raft: ForceAbortJoint called outside JointEntering phase")
+	ErrLeadershipLost      = errors.New("raft: leadership lost during joint consensus")
 )
 
 // ServerSuffrage describes whether a cluster member has a vote.
@@ -802,6 +803,17 @@ func (n *Node) JointPhase() (phase JointPhase, oldVoters []string, newVoters []s
 // state via Node.JointPhase().
 type JointPhase = jointPhase
 
+// LearnerIDs returns a snapshot of the current learner node IDs.
+func (n *Node) LearnerIDs() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	ids := make([]string, 0, len(n.learnerIDs))
+	for id := range n.learnerIDs {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // JointSnapshotState captures the §4.3 joint state for snapshot persistence.
 // Use as JointStateProvider for SnapshotManager. Returns int8 phase to keep the
 // jointPhase type unexported across package boundaries.
@@ -967,6 +979,18 @@ func (n *Node) randomElectionTimeout() time.Duration {
 }
 
 func (n *Node) runFollower() {
+	// Drain jointResultCh so any blocked ChangeMembership goroutine unblocks
+	// with ErrLeadershipLost when this node transitions Leader→Follower.
+	n.mu.Lock()
+	if n.jointResultCh != nil {
+		select {
+		case n.jointResultCh <- ErrLeadershipLost:
+		default: // commit path already sent; goroutine already unblocked
+		}
+		n.jointResultCh = nil
+	}
+	n.mu.Unlock()
+
 	timeout := n.randomElectionTimeout()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()

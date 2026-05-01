@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.7.3] — 2026-05-01 — Raft joint P2 correctness fixes + LearnerIDs API
+
+### Added
+
+- **raft**: `ErrLeadershipLost` — new sentinel error returned to `ChangeMembership` callers when a natural Leader→Follower transition occurs while a joint operation is in progress.
+- **raft**: `LearnerIDs() []string` — public API on `*Node` returning a snapshot of current learner node IDs, safe for concurrent access.
+
+### Fixed
+
+- **raft**: `JointOpAbort` apply now removes managed learner IDs from `learnerIDs` before clearing `jointManagedLearners`. Without this fix, `checkLearnerCatchup` would treat managed learners as ordinary learners after an abort and attempt spurious auto-promotion into the wrong voter set.
+- **raft**: `runFollower()` now drains `jointResultCh` with `ErrLeadershipLost` at entry, unblocking any `ChangeMembership` goroutine blocked in `proposeJointConfChangeWait` during a natural Leader→Follower transition. Prevents goroutine leak when leadership is lost without `StopNode`.
+
 ## [0.0.7.2] — 2026-05-01 — Raft stuck-joint abort (JointOpAbort)
 
 ### Added

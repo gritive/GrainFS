@@ -517,6 +517,55 @@ func TestRebuildConfigFromLog_JointLeave_ClearsManaged(t *testing.T) {
 	require.False(t, inSet, "managed learner must be cleared from jointManagedLearners after JointOpLeave")
 }
 
+// TestJointOpAbort_ManagedLearnerCleared is the unit test for Bug 1: after
+// JointOpAbort applies, managed learner IDs must be removed from learnerIDs.
+// Without the fix, checkLearnerCatchup sees them as ordinary learners and
+// auto-promotes them into the wrong voter set.
+func TestJointOpAbort_ManagedLearnerCleared(t *testing.T) {
+	n := &Node{
+		id:                   "n1",
+		matchIndex:           make(map[string]uint64),
+		nextIndex:            make(map[string]uint64),
+		learnerIDs:           map[string]string{"n4": "n4-addr"},
+		learnerPromoteCh:     make(map[string]chan struct{}),
+		jointManagedLearners: map[string]struct{}{"n4": {}},
+	}
+
+	oldServers := []ServerEntry{
+		{ID: "n1", Address: "n1", Suffrage: Voter},
+		{ID: "n2", Address: "n2", Suffrage: Voter},
+		{ID: "n3", Address: "n3", Suffrage: Voter},
+	}
+	newServers := []ServerEntry{
+		{ID: "n1", Address: "n1", Suffrage: Voter},
+		{ID: "n2", Address: "n2", Suffrage: Voter},
+		{ID: "n3", Address: "n3", Suffrage: Voter},
+		{ID: "n4", Address: "n4-addr", Suffrage: Voter},
+	}
+
+	// Simulate JointOpEnter (sets jointPhase = JointEntering).
+	n.applyJointConfChangeLocked(LogEntry{
+		Index: 1, Term: 1, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op: JointOpEnter, OldServers: oldServers, NewServers: newServers,
+		}),
+	})
+	require.Equal(t, JointEntering, n.jointPhase)
+
+	// Apply JointOpAbort — n4 must be removed from learnerIDs.
+	n.applyJointConfChangeLocked(LogEntry{
+		Index: 2, Term: 1, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op: JointOpAbort, OldServers: oldServers, NewServers: newServers,
+		}),
+	})
+
+	require.Equal(t, JointNone, n.jointPhase)
+	require.NotContains(t, n.LearnerIDs(), "n4",
+		"JointOpAbort must remove managed learner from learnerIDs to prevent spurious auto-promote")
+	require.Nil(t, n.jointManagedLearners, "jointManagedLearners must be nil after abort")
+}
+
 // TestRebuildConfigFromLog_AbortThenLeave_LeaveIsSkipped verifies that when the log
 // contains JointOpAbort followed by a stale JointOpLeave (both in the same joint
 // cycle), rebuildConfigFromLog skips the JointOpLeave so config stays at C_old.
