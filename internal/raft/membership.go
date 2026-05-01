@@ -346,6 +346,12 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		n.jointEnterIndex = 0
 		n.jointLeaveProposed = false
 		n.jointAbortProposed = false
+		// Remove managed learners from learnerIDs before clearing the map.
+		// Without this, checkLearnerCatchup would see them as ordinary learners
+		// and attempt auto-promotion after the abort.
+		for id := range n.jointManagedLearners {
+			delete(n.learnerIDs, id)
+		}
 		n.jointManagedLearners = nil
 	}
 }

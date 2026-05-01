@@ -1132,6 +1132,63 @@ func TestAdvanceCommitIndex_JointAbortUsesOldQuorumOnly(t *testing.T) {
 	})
 }
 
+// followerTestNode builds a minimal Node for runFollower() unit tests.
+// ElectionTimeout must be non-zero for randomElectionTimeout(); stopCh is
+// pre-closed so the select in runFollower() returns immediately.
+func followerTestNode(id string, peers []string) *Node {
+	n := jointTestLeader(id, peers)
+	n.config.ElectionTimeout = 150 * time.Millisecond
+	return n
+}
+
+// TestRunFollower_DrainsJointResultCh_ReturnsErrLeadershipLost verifies that
+// when a node transitions Leader→Follower with a blocked ChangeMembership
+// goroutine waiting on jointResultCh, runFollower() unblocks it with
+// ErrLeadershipLost. This is the goroutine-leak fix for Bug 2.
+func TestRunFollower_DrainsJointResultCh_ReturnsErrLeadershipLost(t *testing.T) {
+	n := followerTestNode("n1", []string{"n2", "n3"})
+	// Pre-install a buffered channel simulating proposeJointConfChangeWait.
+	ch := make(chan error, 1)
+	n.mu.Lock()
+	n.jointResultCh = ch
+	n.mu.Unlock()
+	// Close stopCh so runFollower() returns immediately after the drain.
+	close(n.stopCh)
+
+	n.runFollower()
+
+	select {
+	case err := <-ch:
+		require.ErrorIs(t, err, ErrLeadershipLost,
+			"runFollower must send ErrLeadershipLost to unblock blocked ChangeMembership")
+	default:
+		t.Fatal("runFollower did not drain jointResultCh — goroutine leak not fixed")
+	}
+}
+
+// TestRunFollower_DrainIsIdempotent_WhenChAlreadySent verifies that if the
+// commit path has already sent on jointResultCh (buffered size 1), the drain
+// in runFollower() does not block or overwrite the result.
+func TestRunFollower_DrainIsIdempotent_WhenChAlreadySent(t *testing.T) {
+	n := followerTestNode("n1", []string{"n2", "n3"})
+	ch := make(chan error, 1)
+	ch <- nil // simulate commit path already delivered result
+	n.mu.Lock()
+	n.jointResultCh = ch
+	n.mu.Unlock()
+	close(n.stopCh)
+
+	n.runFollower() // must not block
+
+	// Channel still holds the original nil from the commit path.
+	select {
+	case err := <-ch:
+		require.NoError(t, err, "commit-path result must be preserved, not overwritten")
+	default:
+		t.Fatal("channel should still hold the commit-path result")
+	}
+}
+
 // TestApply_JointLeave_IdempotencyAfterAbort verifies that applyJointConfChangeLocked
 // treats JointOpLeave as a no-op when jointPhase is already JointNone (cleared by a
 // preceding JointOpAbort). This guards the window where a stale JointOpLeave that was
