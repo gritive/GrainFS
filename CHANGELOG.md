@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.8.1] — 2026-05-02 — E2E cluster startup hardening
+
+### Fixed
+
+- **tests/e2e**: `make test-e2e` now runs e2e tests one at a time with `-p 1` and `-parallel 1`, reducing cross-test cluster and port interference.
+- **tests/e2e**: EC, topology, scale-bench, NFSv4, and NBD test nodes now use explicit free-port pools instead of disabling protocols or racing ad hoc port allocation.
+- **cluster**: bucket deletion now checks routed data groups before deleting base bucket metadata, preserving S3 `BucketNotEmpty` semantics for multi-raft routed objects.
+- **cmd/grainfs**: cluster-mode default bucket creation no longer blocks HTTP readiness during simultaneous peer startup.
+- **raft**: Meta-Raft QUIC timing and election defaults were relaxed for multi-node cold starts on loaded e2e hosts.
+
 ## [0.0.8.0] — 2026-05-02 — Raft snapshot admin trigger
 
 ### Added

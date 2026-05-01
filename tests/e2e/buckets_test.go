@@ -92,13 +92,14 @@ func TestBuckets_DeleteNotEmpty(t *testing.T) {
 	ctx := context.Background()
 	createBucket(t, "notempty-test")
 
-	testS3Client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := testS3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("notempty-test"),
 		Key:    aws.String("file.txt"),
 		Body:   stringReader("data"),
 	})
+	require.NoError(t, err)
 
-	_, err := testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+	_, err = testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String("notempty-test"),
 	})
 	require.Error(t, err)

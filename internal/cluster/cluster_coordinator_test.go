@@ -101,6 +101,29 @@ func TestClusterCoordinator_DeleteBucket_DelegatesToBase(t *testing.T) {
 	require.Equal(t, []string{"DeleteBucket:bk1"}, base.calls)
 }
 
+func TestClusterCoordinator_DeleteBucket_ChecksRoutedDataGroupBeforeBaseDelete(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"peer-a"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk1", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"peer-a"}},
+	}}
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{
+		raftpb.ForwardOpListObjects: buildObjectsReply("bk1", []*storage.Object{
+			{Key: "file.txt", Size: 4},
+		}),
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(NewForwardSender(d.dial))
+
+	err := c.DeleteBucket("bk1")
+	require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
+	require.Empty(t, base.calls)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpListObjects, d.calls[0].op)
+}
+
 func TestClusterCoordinator_ListBuckets_DelegatesToBase(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"a", "b"}}
 	c := NewClusterCoordinator(base, nil, nil, nil, "self")

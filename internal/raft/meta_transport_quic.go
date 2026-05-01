@@ -8,8 +8,13 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-const metaRaftRPCTimeout = 80 * time.Millisecond
-const metaRaftSnapshotTimeout = 60 * time.Second
+const (
+	// Meta-Raft elections run alongside data Raft, shard RPC, and S3 traffic in
+	// multi-process tests. 80ms was too tight under local/CI CPU contention and
+	// could leave the control plane without a leader even after data Raft elected.
+	metaRaftRPCTimeout      = 500 * time.Millisecond
+	metaRaftSnapshotTimeout = 60 * time.Second
+)
 
 // RPC type constants for meta-Raft QUIC transport.
 const (
