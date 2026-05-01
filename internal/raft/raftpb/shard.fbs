@@ -44,7 +44,8 @@ table ConfChangeEntry {
 
 enum JointOp : byte {
   Enter = 0, // C_old → C_old+new
-  Leave = 1  // C_old+new → C_new
+  Leave = 1, // C_old+new → C_new
+  Abort = 2  // C_old+new → C_old (revert; commits under C_old quorum only)
 }
 
 // §4.3 joint consensus entry. Carries the membership transition payload.

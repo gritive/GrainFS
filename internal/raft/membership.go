@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -288,10 +289,13 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 //	  Leader bootstraps replication state for newly added voters.
 //	JointLeave:
 //	  jointPhase = JointNone, config.Peers = newServers (single mode).
-//	  jointPromoteCh closed on every node so proposeJointConfChangeWait callers
+//	  jointResultCh signaled on every node so proposeJointConfChangeWait callers
 //	  wake up regardless of which node currently holds leadership.
 //	  Leader self-removal triggers step-down at the end of apply (Decision 8 +
 //	  cross-model Codex #7 / Gemini #8 — apply-time, not append-time).
+//	JointAbort:
+//	  jointPhase = JointNone, config.Peers restored to C_old from entry payload.
+//	  jointResultCh signaled with ErrJointAborted. No-op if not in JointEntering.
 func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 	jc := decodeJointConfChange(entry.Command)
 	switch jc.Op {
@@ -300,12 +304,16 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		n.jointOldVoters = serverPeerKeys(jc.OldServers)
 		n.jointNewVoters = serverPeerKeys(jc.NewServers)
 		n.jointEnterIndex = entry.Index
+		n.jointEnterTime = time.Now()
 		n.jointLeaveProposed = false
 		if n.state == Leader {
 			n.initLeaderStateForNewVoters(jc.OldServers, jc.NewServers)
 		}
 
 	case JointOpLeave:
+		if n.jointPhase != JointEntering {
+			return // idempotency guard: JointAbort already resolved this transition
+		}
 		// Append-time: §4.4 invariant — config.Peers updates immediately so
 		// quorum decisions on subsequent entries use C_new. config.Peers in
 		// this codebase excludes self (peer IDs are the OTHER nodes); voter
@@ -324,6 +332,21 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		n.jointNewVoters = nil
 		n.jointEnterIndex = 0
 		n.jointLeaveProposed = false
+		n.jointAbortProposed = false
+
+	case JointOpAbort:
+		if n.jointPhase != JointEntering {
+			return // idempotency guard: already resolved
+		}
+		// Restore C_old from entry payload — self-contained, safe after snapshot truncation.
+		n.config.Peers = peersExcludingSelf(jc.OldServers, n.id)
+		n.jointPhase = JointNone
+		n.jointOldVoters = nil
+		n.jointNewVoters = nil
+		n.jointEnterIndex = 0
+		n.jointLeaveProposed = false
+		n.jointAbortProposed = false
+		n.jointManagedLearners = nil
 	}
 }
 
@@ -390,6 +413,10 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 	var removed bool
 	// managedLearners mirrors n.jointManagedLearners for the replay path.
 	managedLearners := make(map[string]struct{})
+	// jAborted tracks whether the current joint cycle was resolved by a
+	// JointOpAbort so that a subsequent JointOpLeave (for the same cycle)
+	// is skipped rather than re-applied.
+	var jAborted bool
 
 	for _, entry := range n.log {
 		if entry.Index < startIndex {
@@ -451,12 +478,19 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				jOldVoters = serverPeerKeys(jc.OldServers)
 				jNewVoters = serverPeerKeys(jc.NewServers)
 				jEnterIndex = entry.Index
+				jAborted = false // new joint cycle resets prior abort flag
 				// JointEnter that brings self into C_new clears any prior
 				// removal flag (rejoin scenario).
 				if containsPeer(jNewVoters, n.id) {
 					removed = false
 				}
 			case JointOpLeave:
+				if jAborted {
+					// JointOpAbort already resolved this joint cycle; skip the
+					// stale JointOpLeave that was appended before the abort committed.
+					jAborted = false
+					continue
+				}
 				peers = peersExcludingSelf(jc.NewServers, n.id)
 				// Mirror apply path: clear promoted learners from the replay map.
 				for _, s := range jc.NewServers {
@@ -469,6 +503,16 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				jOldVoters = nil
 				jNewVoters = nil
 				jEnterIndex = 0
+
+			case JointOpAbort:
+				// Restore C_old from entry payload — self-contained, safe after snapshot truncation.
+				peers = peersExcludingSelf(jc.OldServers, n.id)
+				managedLearners = make(map[string]struct{})
+				jPhase = JointNone
+				jOldVoters = nil
+				jNewVoters = nil
+				jEnterIndex = 0
+				jAborted = true // signal to skip any stale JointOpLeave in this cycle
 			}
 		}
 	}

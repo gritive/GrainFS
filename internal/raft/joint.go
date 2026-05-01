@@ -31,6 +31,7 @@ type JointOp int8
 const (
 	JointOpEnter JointOp = 0 // C_old → C_old+new
 	JointOpLeave JointOp = 1 // C_old+new → C_new
+	JointOpAbort JointOp = 2 // C_old+new → C_old (revert; commits under C_old quorum only)
 )
 
 // ServerEntry is the in-memory mirror of raftpb.ServerEntry. Joint entries
@@ -299,6 +300,7 @@ func (n *Node) proposeJointEntry(ctx context.Context, cmd []byte) error {
 // checkJointAdvance is called inline on the leader's heartbeat tick. When the
 // JointEnter entry has committed and no JointLeave is yet in the log, the
 // leader auto-proposes JointLeave to drive the joint phase to completion.
+// If JointAbortTimeout is set and elapsed, triggers abort instead.
 //
 // Idempotency layers:
 //  1. state != Leader → no-op (only leader drives advance).
@@ -306,6 +308,7 @@ func (n *Node) proposeJointEntry(ctx context.Context, cmd []byte) error {
 //  3. commitIndex < jointEnterIndex → C_old+new not yet committed.
 //  4. log already contains a JointLeave at index > jointEnterIndex → in flight.
 //  5. jointLeaveProposed flag → propose goroutine already in progress.
+//  6. jointAbortProposed flag → abort goroutine already in progress (mutually exclusive with leave).
 //
 // Caller MUST hold n.mu.
 func (n *Node) checkJointAdvance() {
@@ -321,7 +324,17 @@ func (n *Node) checkJointAdvance() {
 	if n.hasJointLeaveAfter(n.jointEnterIndex) {
 		return
 	}
-	if n.jointLeaveProposed {
+
+	// Auto-abort if timeout is configured and elapsed.
+	if n.config.JointAbortTimeout > 0 &&
+		!n.jointAbortProposed &&
+		!n.jointEnterTime.IsZero() &&
+		time.Since(n.jointEnterTime) > n.config.JointAbortTimeout {
+		n.triggerAbortAsync()
+		return
+	}
+
+	if n.jointLeaveProposed || n.jointAbortProposed {
 		return
 	}
 	n.jointLeaveProposed = true
@@ -341,6 +354,85 @@ func (n *Node) checkJointAdvance() {
 			n.mu.Unlock()
 		}
 	}()
+}
+
+// proposeJointAbort sends a JointOpAbort entry through the proposal pipeline.
+// The entry carries old_servers (C_old) so it is self-contained after snapshot truncation.
+// MUST NOT be called with n.mu held.
+func (n *Node) proposeJointAbort(ctx context.Context) error {
+	n.mu.Lock()
+	oldVoters := make([]ServerEntry, 0, len(n.jointOldVoters))
+	addrs := n.peerAddressSnapshotLocked()
+	for _, id := range n.jointOldVoters {
+		oldVoters = append(oldVoters, ServerEntry{ID: id, Address: addrs[id], Suffrage: Voter})
+	}
+	n.mu.Unlock()
+
+	cmd := encodeJointConfChange(JointConfChange{
+		Op:         JointOpAbort,
+		NewServers: nil,
+		OldServers: oldVoters,
+	})
+	return n.proposeJointEntry(ctx, cmd)
+}
+
+// triggerAbortAsync launches a goroutine to propose JointOpAbort.
+// Caller MUST hold n.mu.
+func (n *Node) triggerAbortAsync() {
+	if n.jointAbortProposed {
+		return
+	}
+	n.jointAbortProposed = true
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*n.config.HeartbeatTimeout)
+		defer cancel()
+		select {
+		case <-n.stopCh:
+			return
+		default:
+		}
+		if err := n.proposeJointAbort(ctx); err != nil {
+			n.mu.Lock()
+			n.jointAbortProposed = false
+			n.mu.Unlock()
+		}
+	}()
+}
+
+// ForceAbortJoint proposes a JointOpAbort entry, reverting the cluster to C_old.
+// Only valid when this node is leader and in JointEntering phase.
+//
+// Returns:
+//   - nil: abort committed, config reverted to C_old.
+//   - ErrNotLeader: not the current leader.
+//   - ErrNotInJointPhase: not in JointEntering; safe no-op.
+//   - ErrProposalFailed: proposal pipeline error.
+//   - ctx.Err(): context cancelled before commit.
+func (n *Node) ForceAbortJoint(ctx context.Context) error {
+	n.mu.Lock()
+	if n.state != Leader {
+		n.mu.Unlock()
+		return ErrNotLeader
+	}
+	if n.jointPhase != JointEntering {
+		n.mu.Unlock()
+		return ErrNotInJointPhase
+	}
+	// Set flag inside the lock so concurrent checkJointAdvance heartbeat ticks
+	// cannot propose a JointLeave between this unlock and the abort proposal.
+	n.jointAbortProposed = true
+	n.mu.Unlock()
+
+	if err := n.proposeJointAbort(ctx); err != nil {
+		n.mu.Lock()
+		n.jointAbortProposed = false
+		n.mu.Unlock()
+		return err
+	}
+	// proposeJointEntry waits for commit; abort is applied by membership.go.
+	return nil
 }
 
 // peerAddressSnapshotLocked returns a peerKey → address map for joint payloads.
@@ -468,8 +560,8 @@ func (n *Node) proposeJointConfChangeWait(ctx context.Context, adds []ServerEntr
 		return nil
 	}
 
-	ch := make(chan struct{})
-	n.jointPromoteCh = ch
+	ch := make(chan error, 1)
+	n.jointResultCh = ch
 	n.mu.Unlock()
 
 	if err := n.proposeJointEnter(ctx, oldVoters, newVoters); err != nil {
@@ -477,16 +569,16 @@ func (n *Node) proposeJointConfChangeWait(ctx context.Context, adds []ServerEntr
 		// so a retry can install a fresh one. JointEnter that failed never moved
 		// the state machine, so jointPhase remains JointNone.
 		n.mu.Lock()
-		if n.jointPromoteCh == ch {
-			n.jointPromoteCh = nil
+		if n.jointResultCh == ch {
+			n.jointResultCh = nil
 		}
 		n.mu.Unlock()
 		return err
 	}
 
 	select {
-	case <-ch:
-		return nil
+	case err := <-ch:
+		return err
 	case <-ctx.Done():
 		// Joint state is left intact. The cluster's heartbeat watcher (this node
 		// or the next leader) will drive C_old+new → C_new on its own. A new

@@ -9,16 +9,19 @@ type JointOp int8
 const (
 	JointOpEnter JointOp = 0
 	JointOpLeave JointOp = 1
+	JointOpAbort JointOp = 2
 )
 
 var EnumNamesJointOp = map[JointOp]string{
 	JointOpEnter: "Enter",
 	JointOpLeave: "Leave",
+	JointOpAbort: "Abort",
 }
 
 var EnumValuesJointOp = map[string]JointOp{
 	"Enter": JointOpEnter,
 	"Leave": JointOpLeave,
+	"Abort": JointOpAbort,
 }
 
 func (v JointOp) String() string {

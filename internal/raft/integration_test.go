@@ -652,3 +652,80 @@ func TestManagedLearner_LogReplay_RestoresGuard(t *testing.T) {
 		// correct: no promote proposal
 	}
 }
+
+// TestChangeMembership_ReturnsErrJointAborted verifies the end-to-end channel flow:
+// ChangeMembership starts a joint transition, ForceAbortJoint is called concurrently,
+// and ChangeMembership returns ErrJointAborted once the abort commits.
+//
+// The test controls the proposal pipeline directly (no real QUIC) to avoid
+// timing races between JointLeave and JointAbort committing in a live cluster.
+func TestChangeMembership_ReturnsErrJointAborted(t *testing.T) {
+	n := &Node{
+		id:                   "n1",
+		state:                Leader,
+		config:               Config{Peers: []string{"n2", "n3"}, HeartbeatTimeout: 50 * time.Millisecond},
+		matchIndex:           make(map[string]uint64),
+		nextIndex:            make(map[string]uint64),
+		learnerIDs:           make(map[string]string),
+		learnerPromoteCh:     make(map[string]chan struct{}),
+		jointManagedLearners: make(map[string]struct{}),
+		proposalCh:           make(chan proposal, 16),
+		stopCh:               make(chan struct{}),
+	}
+
+	changeDone := make(chan error, 1)
+	go func() {
+		err := n.proposeJointConfChangeWait(context.Background(),
+			[]ServerEntry{{ID: "n4", Address: "n4", Suffrage: Voter}}, nil)
+		changeDone <- err
+	}()
+
+	// Fake pipeline goroutine: intercepts proposals, applies entries, signals doneCh.
+	go func() {
+		// 1. JointEnter proposal
+		enterP := <-n.proposalCh
+		n.mu.Lock()
+		n.applyConfigChangeLocked(LogEntry{Index: 1, Term: 1, Type: LogEntryJointConfChange, Command: enterP.command})
+		n.mu.Unlock()
+		enterP.doneCh <- proposalResult{} // signal commit
+
+		// 2. JointAbort proposal (from ForceAbortJoint)
+		abortP := <-n.proposalCh
+		n.mu.Lock()
+		n.applyConfigChangeLocked(LogEntry{Index: 2, Term: 1, Type: LogEntryJointConfChange, Command: abortP.command})
+		// Mirror raft.go apply loop: send ErrJointAborted to jointResultCh on abort commit.
+		if n.jointResultCh != nil {
+			n.jointResultCh <- ErrJointAborted
+			n.jointResultCh = nil
+		}
+		n.mu.Unlock()
+		abortP.doneCh <- proposalResult{} // signal commit
+	}()
+
+	// Wait until proposeJointConfChangeWait has installed jointResultCh and is waiting.
+	require.Eventually(t, func() bool {
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		return n.jointPhase == JointEntering && n.jointResultCh != nil
+	}, 2*time.Second, 5*time.Millisecond, "joint phase not entered")
+
+	// Operator calls ForceAbortJoint — returns nil on successful abort commit.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, n.ForceAbortJoint(ctx), "ForceAbortJoint should return nil on success")
+
+	// ChangeMembership must return ErrJointAborted.
+	select {
+	case err := <-changeDone:
+		require.ErrorIs(t, err, ErrJointAborted,
+			"ChangeMembership must return ErrJointAborted after ForceAbortJoint")
+	case <-time.After(2 * time.Second):
+		t.Fatal("ChangeMembership did not return")
+	}
+
+	// Config reverted to C_old.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	require.Equal(t, JointNone, n.jointPhase)
+	require.ElementsMatch(t, []string{"n2", "n3"}, n.config.Peers)
+}

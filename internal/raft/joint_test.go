@@ -203,8 +203,8 @@ func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
 	n.jointOldVoters = []string{"n1", "n2", "n3"}
 	n.jointNewVoters = []string{"n1", "n2", "n4", "n5"}
 	n.jointEnterIndex = 10
-	ch := make(chan struct{})
-	n.jointPromoteCh = ch
+	ch := make(chan error, 1)
+	n.jointResultCh = ch
 
 	entry := LogEntry{
 		Index: 11,
@@ -226,13 +226,13 @@ func TestApply_JointLeave_DeactivatesAtAppendTime(t *testing.T) {
 	require.Empty(t, n.jointNewVoters)
 	require.Equal(t, uint64(0), n.jointEnterIndex)
 
-	// Append-time does NOT close jointPromoteCh — that gates on commit (truncation safety).
+	// Append-time does NOT send to jointResultCh — that gates on commit (truncation safety).
 	select {
 	case <-ch:
-		t.Fatal("jointPromoteCh should not be closed at append time")
+		t.Fatal("jointResultCh should not be signaled at append time")
 	default:
 	}
-	require.NotNil(t, n.jointPromoteCh)
+	require.NotNil(t, n.jointResultCh)
 }
 
 // TestChangeMembership_NoOp_NilArgs — empty diff is a no-op success.
@@ -399,7 +399,7 @@ func TestProposeJointConfChangeWait_NoOpEqualSets(t *testing.T) {
 	err := n.proposeJointConfChangeWait(context.Background(), nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, JointNone, n.jointPhase, "no propose, no state change")
-	require.Nil(t, n.jointPromoteCh, "wait channel not installed for no-op")
+	require.Nil(t, n.jointResultCh, "wait channel not installed for no-op")
 }
 
 func TestEqualServerSets(t *testing.T) {
@@ -872,4 +872,296 @@ func TestRebuildConfigFromLog_JointLeavePromotionClearsLearners(t *testing.T) {
 	require.NotContains(t, n.learnerIDs, "n4",
 		"replay must clear promoted learners from learnerIDs")
 	require.Contains(t, n.config.Peers, "n4", "n4 should be a voter in config.Peers")
+}
+
+// TestForceAbortJoint_ResetsToC_old verifies that ForceAbortJoint applies
+// JointOpAbort and reverts config.Peers to C_old with jointPhase = JointNone.
+// ForceAbortJoint returns nil on success; ErrJointAborted goes to ChangeMembership callers.
+func TestForceAbortJoint_ResetsToC_old(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n4"}
+	n.jointEnterIndex = 5
+	n.config.Peers = []string{"n2", "n4"} // joint merged config
+	n.proposalCh = make(chan proposal, 16)
+	n.stopCh = make(chan struct{})
+
+	// Simulate the abort being committed immediately (no real Raft pipeline).
+	// proposeJointEntry waits on p.doneCh for the commit result.
+	go func() {
+		p := <-n.proposalCh
+		// Decode abort entry and apply directly.
+		entry := LogEntry{
+			Index:   6,
+			Term:    1,
+			Type:    LogEntryJointConfChange,
+			Command: p.command,
+		}
+		n.mu.Lock()
+		n.applyConfigChangeLocked(entry)
+		n.mu.Unlock()
+		// Signal commit (nil = success) to unblock proposeJointEntry.
+		p.doneCh <- proposalResult{}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// ForceAbortJoint returns nil on successful abort commit.
+	err := n.ForceAbortJoint(ctx)
+	require.NoError(t, err)
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	require.Equal(t, JointNone, n.jointPhase)
+	// config.Peers should be C_old excluding self (n1).
+	require.ElementsMatch(t, []string{"n2", "n3"}, n.config.Peers)
+	require.Nil(t, n.jointOldVoters)
+	require.Nil(t, n.jointNewVoters)
+	require.Equal(t, uint64(0), n.jointEnterIndex)
+}
+
+// TestForceAbortJoint_NotInJointPhase returns ErrNotInJointPhase when called
+// outside JointEntering.
+func TestForceAbortJoint_NotInJointPhase(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+	n.jointPhase = JointNone
+	n.proposalCh = make(chan proposal, 16)
+	n.stopCh = make(chan struct{})
+
+	err := n.ForceAbortJoint(context.Background())
+	require.ErrorIs(t, err, ErrNotInJointPhase)
+}
+
+// TestForceAbortJoint_NotLeader returns ErrNotLeader when called on a follower.
+func TestForceAbortJoint_NotLeader(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Follower
+	n.jointPhase = JointEntering
+	n.proposalCh = make(chan proposal, 16)
+	n.stopCh = make(chan struct{})
+
+	err := n.ForceAbortJoint(context.Background())
+	require.ErrorIs(t, err, ErrNotLeader)
+}
+
+// TestJointAbortTimeout_TriggersAfterDeadline verifies that checkJointAdvance
+// triggers abort when JointAbortTimeout elapses.
+func TestJointAbortTimeout_TriggersAfterDeadline(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n2", "n4"}
+	n.jointEnterIndex = 1
+	n.commitIndex = 2
+	n.jointEnterTime = time.Now().Add(-200 * time.Millisecond)
+	n.config.JointAbortTimeout = 100 * time.Millisecond
+	n.config.HeartbeatTimeout = 50 * time.Millisecond
+	n.proposalCh = make(chan proposal, 16)
+	n.stopCh = make(chan struct{})
+
+	n.mu.Lock()
+	n.checkJointAdvance()
+	n.mu.Unlock()
+
+	// Abort goroutine must have been triggered (jointAbortProposed set).
+	n.mu.Lock()
+	proposed := n.jointAbortProposed
+	n.mu.Unlock()
+	require.True(t, proposed, "jointAbortProposed should be true after timeout")
+
+	// Drain the proposal if the goroutine fired quickly.
+	select {
+	case p := <-n.proposalCh:
+		jc := decodeJointConfChange(p.command)
+		require.Equal(t, JointOpAbort, jc.Op)
+		require.Len(t, jc.OldServers, 3, "abort entry must carry C_old servers")
+	case <-time.After(500 * time.Millisecond):
+		// goroutine may still be in flight; abort proposal verified by flag above
+	}
+}
+
+// TestJointAbortRestart_RebuildConfigCorrect verifies that rebuildConfigFromLog
+// correctly restores C_old when replaying a JointOpAbort entry.
+func TestJointAbortRestart_RebuildConfigCorrect(t *testing.T) {
+	n := jointTestNode("n1")
+	n.initialPeers = []string{"n2", "n3"}
+	n.log = []LogEntry{
+		{Index: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpEnter,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n4"}},
+		})},
+		{Index: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpAbort,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+		})},
+	}
+
+	n.rebuildConfigFromLog(0, n.initialPeers, nil)
+
+	require.Equal(t, JointNone, n.jointPhase, "JointOpAbort must reset phase to JointNone")
+	require.ElementsMatch(t, []string{"n2", "n3"}, n.config.Peers,
+		"config.Peers must be C_old (n2, n3) after abort, excluding self n1")
+	require.Nil(t, n.jointOldVoters)
+	require.Nil(t, n.jointNewVoters)
+	require.Equal(t, uint64(0), n.jointEnterIndex)
+}
+
+// TestApply_JointAbort_IdempotencyGuard verifies that applyJointConfChangeLocked
+// is a no-op when jointPhase != JointEntering (e.g., already JointNone after a
+// concurrent apply). This is the safety guard against double-reset on replay.
+func TestApply_JointAbort_IdempotencyGuard(t *testing.T) {
+	n := jointTestNode("n1")
+	n.jointPhase = JointNone // not in entering phase
+	n.config.Peers = []string{"n2", "n3"}
+	initialPeers := []string{"n2", "n3"}
+
+	entry := LogEntry{
+		Index: 5,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpAbort,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+		}),
+	}
+	n.applyJointConfChangeLocked(entry)
+
+	// Must be a strict no-op — peers, phase, and indices unchanged.
+	require.Equal(t, JointNone, n.jointPhase, "idempotency: phase must stay JointNone")
+	require.Equal(t, initialPeers, n.config.Peers, "idempotency: peers must be unchanged")
+}
+
+// TestInitLeaderState_ResetsJointAbortProposed verifies that initLeaderState
+// resets jointAbortProposed to false so a newly elected leader re-evaluates
+// whether abort needs to be proposed (re-election correctness).
+func TestInitLeaderState_ResetsJointAbortProposed(t *testing.T) {
+	n := jointTestNode("n1")
+	n.config.Peers = []string{"n2", "n3"}
+	n.checkQuorumAcks = make(map[string]time.Time)
+	n.jointAbortProposed = true // stale flag from previous leadership term
+	n.jointLeaveProposed = true
+
+	n.initLeaderState()
+
+	require.False(t, n.jointAbortProposed,
+		"initLeaderState must reset jointAbortProposed so the new leader re-evaluates abort")
+	require.False(t, n.jointLeaveProposed,
+		"initLeaderState must reset jointLeaveProposed")
+}
+
+// TestAdvanceCommitIndex_JointAbortUsesOldQuorumOnly verifies the critical
+// quorum branch: a JointOpAbort entry commits when C_old has majority but C_new
+// does not. The negative control (JointOpLeave) must NOT advance commitIndex
+// under the same replication state — it requires dual quorum.
+func TestAdvanceCommitIndex_JointAbortUsesOldQuorumOnly(t *testing.T) {
+	// C_old={n1,n2,n3}, C_new={n1,n4,n5}.
+	// matchIndex: n2=2, n3=2 → C_old majority OK (n1 self + n2 + n3 = 3/3).
+	//             n4=0, n5=0 → C_new majority FAILS (n1 self only = 1/3).
+	// abortNode reflects the post-append-time state for a JointOpAbort entry:
+	// applyConfigChangeLocked(JointOpAbort) has run, so jointPhase=JointNone,
+	// config.Peers=C_old, and jointOldVoters=nil. advanceCommitIndex must read
+	// C_old from the entry payload, NOT from n.jointOldVoters.
+	abortNode := func() *Node {
+		n := jointTestNode("n1")
+		n.jointPhase = JointNone              // cleared by append-time apply
+		n.config.Peers = []string{"n2", "n3"} // restored to C_old by append-time apply
+		n.currentTerm = 1
+		n.commitIndex = 1
+		n.firstIndex = 1
+		n.log = []LogEntry{
+			{Index: 1, Term: 1},
+			{Index: 2, Term: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpAbort,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+		}
+		n.matchIndex = map[string]uint64{
+			"n2": 2, "n3": 2, // C_old majority replicated
+			"n4": 0, "n5": 0, // C_new not replicated
+		}
+		return n
+	}
+
+	// leaveNode reflects the post-append-time state for a JointOpLeave entry:
+	// applyConfigChangeLocked(JointOpLeave) has run, so jointPhase=JointNone,
+	// config.Peers=C_new. advanceCommitIndex uses single-mode quorum of C_new.
+	leaveNode := func() *Node {
+		n := jointTestNode("n1")
+		n.jointPhase = JointNone              // cleared by append-time apply
+		n.config.Peers = []string{"n4", "n5"} // C_new peers set by append-time apply
+		n.currentTerm = 1
+		n.commitIndex = 1
+		n.firstIndex = 1
+		n.log = []LogEntry{
+			{Index: 1, Term: 1},
+			{Index: 2, Term: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpLeave,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+		}
+		n.matchIndex = map[string]uint64{
+			"n2": 2, "n3": 2, // C_old replicated — irrelevant for Leave quorum
+			"n4": 0, "n5": 0, // C_new (n4, n5) not replicated
+		}
+		return n
+	}
+
+	t.Run("Abort commits with C_old majority only (from payload)", func(t *testing.T) {
+		n := abortNode()
+		n.mu.Lock()
+		n.advanceCommitIndex()
+		n.mu.Unlock()
+		require.Equal(t, uint64(2), n.commitIndex,
+			"JointOpAbort must commit using OldServers from entry payload when C_old majority matches")
+	})
+
+	t.Run("Leave does not commit without C_new majority", func(t *testing.T) {
+		n := leaveNode()
+		n.mu.Lock()
+		n.advanceCommitIndex()
+		n.mu.Unlock()
+		require.Equal(t, uint64(1), n.commitIndex,
+			"JointOpLeave uses single-mode C_new quorum; n4+n5 not replicated so must not advance")
+	})
+}
+
+// TestApply_JointLeave_IdempotencyAfterAbort verifies that applyJointConfChangeLocked
+// treats JointOpLeave as a no-op when jointPhase is already JointNone (cleared by a
+// preceding JointOpAbort). This guards the window where a stale JointOpLeave that was
+// appended before the abort committed gets applied after the abort entry.
+func TestApply_JointLeave_IdempotencyAfterAbort(t *testing.T) {
+	// Simulate post-abort state: Abort was applied, restoring C_old peers.
+	n := jointTestNode("n1")
+	n.jointPhase = JointNone
+	n.config.Peers = []string{"n2", "n3"} // C_old restored by JointOpAbort
+	n.learnerIDs = map[string]string{"managed-1": "managed-1"}
+	n.jointManagedLearners = map[string]struct{}{"managed-1": {}}
+
+	// Now apply a stale JointOpLeave (C_new = {n1, n4, n5}).
+	entry := LogEntry{
+		Index: 5,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+		}),
+	}
+	n.applyJointConfChangeLocked(entry)
+
+	// Must be a strict no-op: C_old peers and managed learner unchanged.
+	require.Equal(t, JointNone, n.jointPhase, "phase must remain JointNone")
+	require.Equal(t, []string{"n2", "n3"}, n.config.Peers,
+		"peers must stay at C_old, not switch to C_new from stale JointOpLeave")
+	_, stillManaged := n.jointManagedLearners["managed-1"]
+	require.True(t, stillManaged,
+		"managed learner must not be cleared by stale JointOpLeave after abort")
 }

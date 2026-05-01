@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.7.2] — 2026-05-01 — Raft stuck-joint abort (JointOpAbort)
+
+### Added
+
+- **raft**: `JointOpAbort` — new `JointOp` enum value (= 2) that reverts the cluster from `JointEntering` back to C_old under C_old-only quorum. Allows recovery when C_new loses majority after `JointEnter` commits, ending the deadlock where no entry (including `JointLeave`) could commit.
+- **raft**: `ForceAbortJoint(ctx) error` — public API on `*Node`. Leader-only, valid in `JointEntering` phase. Proposes `JointOpAbort`; returns `nil` on success, `ErrNotLeader` / `ErrNotInJointPhase` / `ErrProposalFailed` / `ctx.Err()` otherwise.
+- **raft**: `Config.JointAbortTimeout time.Duration` — optional auto-abort. When set, `checkJointAdvance` triggers abort after this duration elapses from `JointEnter` commit. Default `0` (disabled).
+- **raft**: `ErrJointAborted` / `ErrNotInJointPhase` — two new sentinel errors. `ErrJointAborted` propagates to `ChangeMembership` callers so they can distinguish abort from success.
+- **raft**: `jointResultCh chan error` (buffered 1) replaces `jointPromoteCh chan struct{}`. Sends `nil` on `JointLeave` commit, `ErrJointAborted` on `JointAbort` commit. Buffer prevents apply-loop deadlock when caller context cancels before abort commits.
+- **raft**: `rebuildConfigFromLog` handles `JointOpAbort` — restores C_old from entry payload (`OldServers`) so a node restarted after an abort does not re-enter `JointEntering` on the next leader tick.
+
+### Fixed
+
+- **raft**: `applyJointConfChangeLocked` JointOpAbort idempotency guard — no-op when `jointPhase != JointEntering`, preventing double-apply if both `JointLeave` and `JointAbort` are in flight.
+- **raft**: `initLeaderState` now resets `jointLeaveProposed` and `jointAbortProposed` on every leader election, allowing the new leader to re-trigger auto-abort if a previous abort goroutine was in flight when the old leader stepped down.
+- **raft**: `rebuildConfigFromLog` now resets the `jAborted` flag on `JointOpEnter`, preventing a prior cycle's abort from silently skipping the subsequent cycle's `JointOpLeave` during log replay (multi-cycle abort→reenter→leave sequence).
+- **raft**: `applyJointConfChangeLocked` `JointOpLeave` now resets `jointAbortProposed = false`, clearing any stale flag from a racing abort proposal that resolved before the leave committed.
+- **raft**: `RestoreJointStateFromSnapshot` now also resets `jointAbortProposed` and `jointEnterTime` so a newly elected leader starting from a snapshot does not inherit stale abort-proposal state.
+- **raft**: `triggerAbortAsync` goroutine now tracked by `n.wg`, preventing it from accessing node state after `Close()` returns.
+
 ## [0.0.7.1] — 2026-05-01 — Raft managed_by_joint persistence (PR-K3)
 
 ### Added
