@@ -10,6 +10,10 @@ FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 .PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd test-fuse-s3-colima bench-fuse-s3-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
+E2E_TEST_PATTERN ?= ^Test
+E2E_TEST_TIMEOUT ?= 600s
+E2E_TEST_PARALLEL ?= 1
+E2E_TEST_P ?= 1
 
 bin/$(BINARY): $(GO_SRC) $(FBS_STAMPS)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
@@ -44,7 +48,15 @@ test-race:
 	go test $(UNIT_PKGS) -count=1 -race -cover
 
 test-e2e: bin/$(BINARY)
-	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -v -count=1 -timeout 600s
+	@set -e; \
+	list_out=$$(mktemp); \
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -p $(E2E_TEST_P) ./tests/e2e/ -parallel $(E2E_TEST_PARALLEL) -list '$(E2E_TEST_PATTERN)' > $$list_out; \
+	tests=$$(awk '/^Test/ { print $$1 }' $$list_out); \
+	rm -f $$list_out; \
+	for test in $$tests; do \
+		echo "=== RUN SINGLE $$test ==="; \
+		GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -p $(E2E_TEST_P) ./tests/e2e/ -parallel $(E2E_TEST_PARALLEL) -run "^$$test$$" -v -count=1 -timeout $(E2E_TEST_TIMEOUT); \
+	done
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4

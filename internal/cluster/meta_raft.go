@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -63,6 +64,12 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	})
 
 	nodeCfg := raft.DefaultConfig(cfg.NodeID, cfg.Peers)
+	// Meta-Raft shares the QUIC transport and process with data Raft, shard RPC,
+	// S3 startup probes, and per-group Raft workers. Give the control plane a
+	// wider election window so local/CI CPU contention does not leave bucket
+	// assignment without a stable leader during multi-process cold starts.
+	nodeCfg.ElectionTimeout = 750 * time.Millisecond
+	nodeCfg.HeartbeatTimeout = 150 * time.Millisecond
 	node := raft.NewNode(nodeCfg, store)
 
 	// §4.3 joint state persistence wiring (Sub-project 2 PR-J5).

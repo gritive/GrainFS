@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,11 +37,16 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
+	nfs4Ports := make([]int, numNodes)
+	nbdPorts := make([]int, numNodes)
 	pprofPorts := make([]int, numNodes)
+	ports := uniqueFreePorts(numNodes * 5)
 	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
-		pprofPorts[i] = freePort()
+		httpPorts[i] = ports[i*5]
+		raftPorts[i] = ports[i*5+1]
+		nfs4Ports[i] = ports[i*5+2]
+		nbdPorts[i] = ports[i*5+3]
+		pprofPorts[i] = ports[i*5+4]
 	}
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
@@ -68,6 +71,8 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	}
 
 	startNode := func(i int) *exec.Cmd {
+		stderrFile, err := os.Create(fmt.Sprintf("/tmp/scale-n%d-node-%d-stderr.log", n, i))
+		require.NoError(t, err, "create stderr file for node %d", i)
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
@@ -79,14 +84,24 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--seed-groups=%d", n),
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
+			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 			"--no-encryption",
 		)
+		cmd.Stdout = stderrFile
+		cmd.Stderr = stderrFile
 		require.NoError(t, cmd.Start(), "start node %d", i)
+		t.Cleanup(func() {
+			stderrFile.Close()
+			if t.Failed() {
+				t.Logf("N=%d node %d stderr saved to %s", n, i, stderrFile.Name())
+			} else {
+				os.Remove(stderrFile.Name())
+			}
+		})
 		return cmd
 	}
 
@@ -103,6 +118,7 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 
 	for i := 0; i < numNodes; i++ {
 		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 180*time.Second)
 	waitForPortsParallel(t, pprofPorts, 30*time.Second)
@@ -112,7 +128,7 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {
 			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(fmt.Sprintf("scale-n%d", n))})
+			err := tryCreateBucket(ctx, c, fmt.Sprintf("scale-n%d", n))
 			if err == nil {
 				return true
 			}

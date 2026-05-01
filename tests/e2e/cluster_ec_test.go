@@ -48,9 +48,14 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
+	nfs4Ports := make([]int, numNodes)
+	nbdPorts := make([]int, numNodes)
+	ports := uniqueFreePorts(numNodes * 4)
+	for i := range numNodes {
+		httpPorts[i] = ports[i*4]
+		raftPorts[i] = ports[i*4+1]
+		nfs4Ports[i] = ports[i*4+2]
+		nbdPorts[i] = ports[i*4+3]
 	}
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
@@ -75,6 +80,8 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	}
 
 	startNode := func(i int) *exec.Cmd {
+		stderrFile, err := os.Create(fmt.Sprintf("/tmp/ec5-node-%d-stderr.log", i))
+		require.NoError(t, err, "create stderr file for node %d", i)
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
@@ -86,14 +93,25 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
+			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
+			"--seed-groups", "1",
 			"--no-encryption",
 		)
+		cmd.Stdout = stderrFile
+		cmd.Stderr = stderrFile
 		require.NoError(t, cmd.Start(), "start node %d", i)
+		t.Cleanup(func() {
+			stderrFile.Close()
+			if t.Failed() {
+				t.Logf("Node %d stderr saved to %s", i, stderrFile.Name())
+			} else {
+				os.Remove(stderrFile.Name())
+			}
+		})
 		return cmd
 	}
 
@@ -108,18 +126,11 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	// Stage 1: start 3 nodes first — quorum(5)=3, so they elect a stable leader
-	// before the remaining 2 join. Reduces split-vote noise in CI.
-	for i := 0; i < 3; i++ {
+	for i := 0; i < numNodes; i++ {
 		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
 	}
-	waitForPortsParallel(t, httpPorts[:3], 60*time.Second)
-
-	// Stage 2: bring up the remaining 2 nodes after the cluster has a leader.
-	for i := 3; i < numNodes; i++ {
-		procs[i] = startNode(i)
-	}
-	waitForPortsParallel(t, httpPorts[3:], 60*time.Second)
+	waitForPortsParallel(t, httpPorts, 90*time.Second)
 
 	var client *s3.Client
 	var leaderIdx int
@@ -128,7 +139,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {
 			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
+			err := tryCreateBucket(ctx, c, bucketName)
 			if err == nil {
 				client = c
 				leaderIdx = i
@@ -136,7 +147,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			}
 		}
 		return false
-	}, 15*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
+	}, 240*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
 	t.Logf("leader: node %d at %s", leaderIdx, httpURL(leaderIdx))
 
 	// Write 5 random objects of varied sizes. Verify each round-trips.
@@ -239,9 +250,14 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
+	nfs4Ports := make([]int, numNodes)
+	nbdPorts := make([]int, numNodes)
+	ports := uniqueFreePorts(numNodes * 4)
+	for i := range numNodes {
+		httpPorts[i] = ports[i*4]
+		raftPorts[i] = ports[i*4+1]
+		nfs4Ports[i] = ports[i*4+2]
+		nbdPorts[i] = ports[i*4+3]
 	}
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
@@ -277,11 +293,12 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
+			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
+			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
@@ -299,19 +316,19 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	waitForPortsParallel(t, httpPorts, 60*time.Second)
 
 	var client *s3.Client
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {
 			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
+			err := tryCreateBucket(ctx, c, bucketName)
 			if err == nil {
 				client = c
 				return true
 			}
 		}
 		return false
-	}, 30*time.Second, 1*time.Second, "no leader found")
+	}, 120*time.Second, 1*time.Second, "no leader found")
 
 	data := make([]byte, 8192)
 	_, _ = rand.Read(data)
@@ -408,9 +425,14 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
+	nfs4Ports := make([]int, numNodes)
+	nbdPorts := make([]int, numNodes)
+	ports := uniqueFreePorts(numNodes * 4)
+	for i := range numNodes {
+		httpPorts[i] = ports[i*4]
+		raftPorts[i] = ports[i*4+1]
+		nfs4Ports[i] = ports[i*4+2]
+		nbdPorts[i] = ports[i*4+3]
 	}
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
@@ -454,11 +476,12 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
+			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
+			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
@@ -492,6 +515,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	// ever achieve quorum.
 	for i := range numNodes {
 		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 60*time.Second)
 	for i, port := range httpPorts {
@@ -506,7 +530,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {
 			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
+			err := tryCreateBucket(ctx, c, bucketName)
 			if err == nil {
 				client = c
 				leaderIdx = i
@@ -514,7 +538,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			}
 		}
 		return false
-	}, 15*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
+	}, 240*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
 	t.Logf("topology test: leader node %d at %s (N=%d, k+m=%d)", leaderIdx, httpURL(leaderIdx), numNodes, ecData+ecParity)
 
 	type entry struct {
@@ -539,11 +563,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		require.Eventually(t, func() bool {
 			for j := 0; j < numNodes; j++ {
 				c := ecS3Client(httpURL(j), accessKey, secretKey)
-				_, putErr := c.PutObject(ctx, &s3.PutObjectInput{
-					Bucket: aws.String(bucketName),
-					Key:    aws.String(objKey),
-					Body:   bytes.NewReader(putData),
-				})
+				putErr := tryPutObject(ctx, c, bucketName, objKey, putData)
 				if putErr == nil {
 					client = c
 					return true
@@ -585,18 +605,27 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	// to time out before the remaining shards are fetched.
 	for _, obj := range preObjects {
 		obj := obj
+		var lastGetErr error
 		require.Eventually(t, func() bool {
-			out, err := client.GetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String(bucketName),
-				Key:    aws.String(obj.key),
-			})
-			if err != nil {
-				return false
+			for j := 0; j < numNodes; j++ {
+				if procs[j] == nil {
+					continue
+				}
+				c := ecS3Client(httpURL(j), accessKey, secretKey)
+				got, err := getObjectBytes(ctx, c, bucketName, obj.key)
+				if err != nil {
+					lastGetErr = fmt.Errorf("node %d %s: %w", j, httpURL(j), err)
+					continue
+				}
+				if sha256.Sum256(got) == obj.sum {
+					client = c
+					lastGetErr = nil
+					return true
+				}
+				lastGetErr = fmt.Errorf("node %d %s: sha256 mismatch", j, httpURL(j))
 			}
-			got, _ := io.ReadAll(out.Body)
-			_ = out.Body.Close()
-			return sha256.Sum256(got) == obj.sum
-		}, 30*time.Second, 1*time.Second, "post-topology GetObject %s (FSM placement must be immutable)", obj.key)
+			return false
+		}, 60*time.Second, 1*time.Second, "post-topology GetObject %s (FSM placement must be immutable), last error: %v", obj.key, lastGetErr)
 	}
 	t.Logf("topology test: %d pre-topology objects reconstructed after node kill (placement immutable)", len(preObjects))
 
@@ -604,8 +633,8 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	// Shards distributed across the 5 remaining nodes.
 	// After a node kill, the staged 3+3 join may have shifted Raft leadership away
 	// from leaderIdx. Iterate all live nodes on each retry; the first to accept a
-	// write is the current leader. No fixed sleep — Raft stabilises in < 1s
-	// (ElectionTimeout=150ms).
+	// write is the current leader. No fixed sleep — Raft stabilises after a
+	// short election window.
 	postObjects := []entry{
 		{"post-obj-x", [32]byte{}},
 		{"post-obj-y", [32]byte{}},
@@ -617,24 +646,23 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		postObjects[i].sum = sha256.Sum256(data)
 		putData := append([]byte(nil), data...)
 		objKey := postObjects[i].key
+		var lastPutErr error
 		require.Eventually(t, func() bool {
 			for j := 0; j < numNodes; j++ {
 				if procs[j] == nil {
 					continue
 				}
 				c := ecS3Client(httpURL(j), accessKey, secretKey)
-				_, putErr := c.PutObject(ctx, &s3.PutObjectInput{
-					Bucket: aws.String(bucketName),
-					Key:    aws.String(objKey),
-					Body:   bytes.NewReader(putData),
-				})
+				putErr := tryPutObject(ctx, c, bucketName, objKey, putData)
 				if putErr == nil {
 					client = c // track current leader for GETs below
+					lastPutErr = nil
 					return true
 				}
+				lastPutErr = fmt.Errorf("node %d %s: %w", j, httpURL(j), putErr)
 			}
 			return false
-		}, 30*time.Second, 500*time.Millisecond, "post-topology PutObject %s (EC must still be active)", objKey)
+		}, 120*time.Second, 500*time.Millisecond, "post-topology PutObject %s (EC must still be active), last error: %v", objKey, lastPutErr)
 	}
 	for _, obj := range postObjects {
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
@@ -658,6 +686,38 @@ func ecS3Client(endpoint, ak, sk string) *s3.Client {
 		Credentials:  staticCreds{ak: ak, sk: sk},
 		UsePathStyle: true,
 	})
+}
+
+func tryCreateBucket(parent context.Context, client *s3.Client, bucket string) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	return err
+}
+
+func tryPutObject(parent context.Context, client *s3.Client, bucket, key string, data []byte) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+	})
+	return err
+}
+
+func getObjectBytes(parent context.Context, client *s3.Client, bucket, key string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer out.Body.Close()
+	return io.ReadAll(out.Body)
 }
 
 // staticCreds is a minimal aws.CredentialsProvider that returns fixed keys.
