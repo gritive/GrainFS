@@ -24,7 +24,15 @@ var (
 	ErrJointAborted        = errors.New("raft: joint consensus aborted — config reverted to C_old")
 	ErrNotInJointPhase     = errors.New("raft: ForceAbortJoint called outside JointEntering phase")
 	ErrLeadershipLost      = errors.New("raft: leadership lost during joint consensus")
+	ErrNodeStopped         = errors.New("raft: node stopped")
 )
+
+// readIndexWaiter tracks a pending leader-side ReadIndex quorum confirmation.
+type readIndexWaiter struct {
+	commitIndex uint64
+	acked       map[string]bool // peers that ACKed; self is implicit
+	ch          chan error
+}
 
 // ServerSuffrage describes whether a cluster member has a vote.
 type ServerSuffrage int
@@ -277,12 +285,16 @@ type Node struct {
 	config Config
 
 	// channels
-	applyCh  chan LogEntry
-	stopCh   chan struct{}
-	resetCh  chan struct{} // signals election timer reset
-	commitCh chan struct{} // signals applyLoop when commitIndex advances
-	stopped  bool
-	wg       sync.WaitGroup // tracks goroutines started by Start()
+	applyCh     chan LogEntry
+	stopCh      chan struct{}
+	resetCh     chan struct{} // signals election timer reset
+	commitCh    chan struct{} // signals applyLoop when commitIndex advances
+	stopped     bool
+	appliedCond sync.Cond      // broadcast when lastApplied advances or node stops
+	wg          sync.WaitGroup // tracks goroutines started by Start()
+
+	// ReadIndex: pending leader quorum confirmation requests (guarded by mu)
+	pendingReadIndex []readIndexWaiter
 
 	// transport callback for sending RPCs
 	sendRequestVote     func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
@@ -372,6 +384,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		metrics:              adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
 		initialPeers:         initialPeers,
 	}
+	n.appliedCond = *sync.NewCond(&n.mu)
 
 	if len(store) > 0 && store[0] != nil {
 		n.store = store[0]
@@ -574,6 +587,12 @@ func (n *Node) BatchMetrics() BatchMetricsSnapshot {
 }
 
 func (n *Node) applyLoop() {
+	defer func() {
+		n.mu.Lock()
+		n.stopped = true
+		n.appliedCond.Broadcast()
+		n.mu.Unlock()
+	}()
 	for {
 		n.mu.Lock()
 		for n.commitIndex <= n.lastApplied || !n.hasLogEntry(n.lastApplied+1) {
@@ -587,6 +606,7 @@ func (n *Node) applyLoop() {
 		}
 
 		n.lastApplied++
+		n.appliedCond.Broadcast()
 		entry := n.log[n.toSliceIdx(n.lastApplied)]
 		idx := entry.Index
 
@@ -1296,6 +1316,12 @@ func (n *Node) hasQuorum() bool {
 }
 
 func (n *Node) runLeader() {
+	defer func() {
+		n.mu.Lock()
+		n.drainPendingReadIndex(ErrLeadershipLost)
+		n.mu.Unlock()
+	}()
+
 	// Propose a no-op in the new term so advanceCommitIndex can commit entries
 	// from previous terms (Raft §8: leader completeness via no-op).
 	if len(n.noOpCmd) > 0 {
@@ -1482,6 +1508,7 @@ func (n *Node) replicateTo(peer string) {
 		n.nextIndex[peer] = nextIdx + uint64(len(entries))
 		n.matchIndex[peer] = n.nextIndex[peer] - 1
 		n.advanceCommitIndex()
+		n.tickReadIndexAcks(peer)
 	} else {
 		n.applyConflictHint(peer, reply, nextIdx, entries)
 	}
@@ -1842,6 +1869,124 @@ func (n *Node) abortWaitersFrom(from uint64) {
 			delete(n.waiters, idx)
 		}
 	}
+}
+
+// drainPendingReadIndex sends err to all pending ReadIndex waiters and clears the slice.
+// Must be called with n.mu held.
+func (n *Node) drainPendingReadIndex(err error) {
+	for _, w := range n.pendingReadIndex {
+		select {
+		case w.ch <- err:
+		default:
+		}
+	}
+	n.pendingReadIndex = n.pendingReadIndex[:0]
+}
+
+// tickReadIndexAcks is called after a successful AppendEntries reply from peer.
+// It increments that peer's ACK in each pending waiter and resolves those that
+// have achieved quorum. Must be called with n.mu held.
+func (n *Node) tickReadIndexAcks(peer string) {
+	pending := n.pendingReadIndex[:0]
+	for _, w := range n.pendingReadIndex {
+		w.acked[peer] = true
+		if n.dualMajority(w.acked) {
+			select {
+			case w.ch <- nil:
+			default:
+			}
+		} else {
+			pending = append(pending, w)
+		}
+	}
+	n.pendingReadIndex = pending
+}
+
+// removeReadIndexWaiter removes the waiter with the given channel from pendingReadIndex.
+// Must be called with n.mu held.
+func (n *Node) removeReadIndexWaiter(ch chan error) {
+	pending := n.pendingReadIndex[:0]
+	for _, w := range n.pendingReadIndex {
+		if w.ch != ch {
+			pending = append(pending, w)
+		}
+	}
+	n.pendingReadIndex = pending
+}
+
+// WaitApplied blocks until n.lastApplied >= index or ctx is done.
+func (n *Node) WaitApplied(ctx context.Context, index uint64) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		n.appliedCond.Broadcast()
+	}()
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for n.lastApplied < index {
+		if n.stopped {
+			return ErrNodeStopped
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n.appliedCond.Wait()
+	}
+	return nil
+}
+
+// leaderReadIndex confirms leadership via heartbeat quorum and returns the current
+// commitIndex as a linearizable read fence. Must be called when n.state == Leader.
+func (n *Node) leaderReadIndex(ctx context.Context) (uint64, error) {
+	n.mu.Lock()
+	if n.state != Leader {
+		n.mu.Unlock()
+		return 0, ErrNotLeader
+	}
+	commitIndex := n.commitIndex
+	ch := make(chan error, 1)
+	w := readIndexWaiter{
+		commitIndex: commitIndex,
+		acked:       make(map[string]bool),
+		ch:          ch,
+	}
+	n.pendingReadIndex = append(n.pendingReadIndex, w)
+	n.mu.Unlock()
+
+	// Trigger an AE round so peers ACK and tickReadIndexAcks fires.
+	select {
+	case n.replicationCh <- struct{}{}:
+	default:
+	}
+
+	select {
+	case err := <-ch:
+		if err != nil {
+			return 0, err
+		}
+		return commitIndex, nil
+	case <-ctx.Done():
+		n.mu.Lock()
+		n.removeReadIndexWaiter(ch)
+		n.mu.Unlock()
+		return 0, ctx.Err()
+	}
+}
+
+// ReadIndex returns a log index that serves as a linearizable read fence:
+// the caller must wait until lastApplied >= index before serving reads.
+// On a leader, this triggers a heartbeat round to confirm leadership.
+// On a follower, returns ErrNotLeader (caller should forward to leader).
+func (n *Node) ReadIndex(ctx context.Context) (uint64, error) {
+	n.mu.Lock()
+	isLeader := n.state == Leader
+	n.mu.Unlock()
+	if isLeader {
+		return n.leaderReadIndex(ctx)
+	}
+	return 0, ErrNotLeader
 }
 
 // signalCommit notifies the applyLoop that commitIndex has advanced.
