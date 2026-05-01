@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,11 @@ func freePort(t *testing.T) int {
 
 func setupTestServer(t *testing.T) string {
 	t.Helper()
+	return setupTestServerWithOptions(t)
+}
+
+func setupTestServerWithOptions(t *testing.T, opts ...Option) string {
+	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err, "NewLocalBackend")
@@ -37,7 +43,7 @@ func setupTestServer(t *testing.T) string {
 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := New(addr, backend)
+	srv := New(addr, backend, opts...)
 	go srv.Run() //nolint:errcheck
 	// wait for server to start
 	for i := 0; i < 50; i++ {
@@ -49,6 +55,25 @@ func setupTestServer(t *testing.T) string {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return "http://" + addr
+}
+
+type recordingReadIndexer struct {
+	readCalls atomic.Int32
+	waitCalls atomic.Int32
+	index     uint64
+}
+
+func (r *recordingReadIndexer) ReadIndex(context.Context) (uint64, error) {
+	r.readCalls.Add(1)
+	return r.index, nil
+}
+
+func (r *recordingReadIndexer) WaitApplied(_ context.Context, index uint64) error {
+	r.waitCalls.Add(1)
+	if index != r.index {
+		return fmt.Errorf("unexpected wait index: got %d want %d", index, r.index)
+	}
+	return nil
 }
 
 func TestCreateAndHeadBucket(t *testing.T) {
@@ -125,6 +150,35 @@ func TestPutGetObject(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	got, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, body, string(got))
+}
+
+func TestGetAndHeadObjectUseReadIndexer(t *testing.T) {
+	ri := &recordingReadIndexer{index: 42}
+	base := setupTestServerWithOptions(t, WithReadIndexer(ri))
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("data")))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	resp, err = http.Get(base + "/mybucket/file.txt")
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodHead, base+"/mybucket/file.txt", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.Equal(t, int32(2), ri.readCalls.Load())
+	assert.Equal(t, int32(2), ri.waitCalls.Load())
 }
 
 func TestHeadObject(t *testing.T) {
