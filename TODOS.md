@@ -32,7 +32,6 @@
 - [ ] **raft-ehn Tier 3** (별도 브랜치, 각 sub-project는 독립 design + plan + worktree):
   - **Tier 3-1: Joint consensus + Learner** — Multi-Raft atomic move-replica · multi-server replacement 안전성. Sub-project 1 (Learner-first, v0.0.6.13 #105 + chaos #107) + Sub-project 2 (Joint core, v0.0.6.16~v0.0.6.20 #108~#112) 완료. 남은 작업:
     - **후속: Voter set lock-free read** — `n.mu` hold 안 voter set read를 `atomic.Pointer[voterSets]` COW swap으로 분리. raft.go 전반 multi-field invariant 안에서 voter set만 분리하려면 design 필요.
-    - **후속: E2E snapshot mid-joint** — Public `Snapshot()` trigger API 기반으로 `TestJoint_E2E_SnapshotMidJoint_AutoCompletes`의 manual compaction setup 제거 후 skip 해제.
   - **Tier 3-2: RecoverCluster** — 단일 노드 재해 복구 운영 도구
   - **Tier 3-3: 클라이언트 dedup** — ClientID + RequestID 기반 dedup table, S3 SDK retry 시 중복 PUT 방지
   - **Tier 3-4: AE pipelining** — in-flight AppendEntries 1 → N (replication throughput)
