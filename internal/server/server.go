@@ -25,6 +25,7 @@ import (
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -56,10 +57,17 @@ type ReadIndexer interface {
 	WaitApplied(ctx context.Context, index uint64) error
 }
 
+// RaftSnapshotter exposes operator-triggered Raft FSM snapshots.
+type RaftSnapshotter interface {
+	TriggerRaftSnapshot(ctx context.Context) (raft.SnapshotResult, error)
+	RaftSnapshotStatus() (raft.SnapshotStatus, error)
+}
+
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend        storage.Backend
 	readIndexer    ReadIndexer // nil = no gate (single-node)
+	raftSnapshots  RaftSnapshotter
 	dataDir        string
 	snapMgr        *snapshot.Manager
 	scrubber       *scrubber.BackgroundScrubber // nil if not using ECBackend
@@ -143,6 +151,13 @@ func WithJoinCluster(fn JoinClusterFunc) Option {
 func WithReadIndexer(ri ReadIndexer) Option {
 	return func(s *Server) {
 		s.readIndexer = ri
+	}
+}
+
+// WithRaftSnapshotter wires the operator Raft snapshot trigger/status API.
+func WithRaftSnapshotter(rs RaftSnapshotter) Option {
+	return func(s *Server) {
+		s.raftSnapshots = rs
 	}
 }
 
@@ -452,6 +467,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Snapshot management API
 	s.registerSnapshotAPI(h)
+	s.registerRaftSnapshotAPI(h)
 
 	// PITR (Point-in-Time Recovery) API
 	s.registerPITRAPI(h)

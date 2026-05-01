@@ -49,6 +49,16 @@ func newVersionID() string {
 // Used for cache invalidation and metrics updates.
 type OnApplyFunc func(cmdType CommandType, bucket, key string)
 
+type raftSnapshotRequest struct {
+	ctx  context.Context
+	resp chan raftSnapshotResponse
+}
+
+type raftSnapshotResponse struct {
+	result raft.SnapshotResult
+	err    error
+}
+
 // BucketAssigner proposes a bucket→group assignment to the meta-Raft cluster.
 // Implemented by *MetaRaft; nil = no persistence (single-node legacy mode).
 type BucketAssigner interface {
@@ -59,22 +69,24 @@ type BucketAssigner interface {
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
 type DistributedBackend struct {
-	root        string
-	db          *badger.DB
-	node        *raft.Node
-	fsm         *FSM
-	logger      zerolog.Logger
-	lastApplied atomic.Uint64
-	onApply     OnApplyFunc
-	snapMgr     *raft.SnapshotManager
-	snapNode    *raft.Node // node for CompactLog after snapshot
-	shardSvc    *ShardService
-	allNodes    []string // all node addresses (including self) for shard placement
-	selfAddr    string   // this node's raft address (matches entries in allNodes)
-	peerHealth  *PeerHealth
-	registry    *Registry                           // cache invalidators (VFS instances)
-	ecConfig    ECConfig                            // Phase 18: erasure coding config (k+m shard parameters)
-	shardLocks  pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+	root            string
+	db              *badger.DB
+	node            *raft.Node
+	fsm             *FSM
+	logger          zerolog.Logger
+	lastApplied     atomic.Uint64
+	lastAppliedTerm atomic.Uint64
+	snapRequests    chan raftSnapshotRequest
+	onApply         OnApplyFunc
+	snapMgr         *raft.SnapshotManager
+	snapNode        *raft.Node // node for CompactLog after snapshot
+	shardSvc        *ShardService
+	allNodes        []string // all node addresses (including self) for shard placement
+	selfAddr        string   // this node's raft address (matches entries in allNodes)
+	peerHealth      *PeerHealth
+	registry        *Registry                           // cache invalidators (VFS instances)
+	ecConfig        ECConfig                            // Phase 18: erasure coding config (k+m shard parameters)
+	shardLocks      pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard
@@ -115,12 +127,13 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 	}
 
 	b := &DistributedBackend{
-		root:     root,
-		db:       db,
-		node:     node,
-		fsm:      fsm,
-		logger:   log.With().Str("component", "distributed-backend").Logger(),
-		registry: NewRegistry(),
+		root:         root,
+		db:           db,
+		node:         node,
+		fsm:          fsm,
+		logger:       log.With().Str("component", "distributed-backend").Logger(),
+		registry:     NewRegistry(),
+		snapRequests: make(chan raftSnapshotRequest),
 	}
 	b.vfsFixedVersion.Store(true) // default on; toggle via --backend-vfs-fixed-version=false
 	return b, nil
@@ -228,6 +241,77 @@ func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node 
 	}
 }
 
+// TriggerRaftSnapshot forces a Raft FSM snapshot on the current leader.
+func (b *DistributedBackend) TriggerRaftSnapshot(ctx context.Context) (raft.SnapshotResult, error) {
+	if err := ctx.Err(); err != nil {
+		return raft.SnapshotResult{}, err
+	}
+	if b.snapMgr == nil || b.snapNode == nil {
+		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot manager unavailable")
+	}
+	if !b.snapNode.IsLeader() {
+		return raft.SnapshotResult{}, raft.ErrNotLeader
+	}
+	if b.snapRequests == nil {
+		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot apply loop unavailable")
+	}
+
+	req := raftSnapshotRequest{
+		ctx:  ctx,
+		resp: make(chan raftSnapshotResponse, 1),
+	}
+	select {
+	case b.snapRequests <- req:
+	case <-ctx.Done():
+		return raft.SnapshotResult{}, ctx.Err()
+	}
+	select {
+	case resp := <-req.resp:
+		return resp.result, resp.err
+	case <-ctx.Done():
+		return raft.SnapshotResult{}, ctx.Err()
+	}
+}
+
+func (b *DistributedBackend) triggerRaftSnapshotInApplyLoop(ctx context.Context) (raft.SnapshotResult, error) {
+	if err := ctx.Err(); err != nil {
+		return raft.SnapshotResult{}, err
+	}
+	if b.snapMgr == nil || b.snapNode == nil {
+		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot manager unavailable")
+	}
+	if !b.snapNode.IsLeader() {
+		return raft.SnapshotResult{}, raft.ErrNotLeader
+	}
+	idx := b.lastApplied.Load()
+	term := b.lastAppliedTerm.Load()
+	if idx == 0 {
+		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot unavailable: no applied entries")
+	}
+	result, err := b.snapMgr.Trigger(idx, term, b.snapNode.Configuration().Servers)
+	if err != nil {
+		return raft.SnapshotResult{}, err
+	}
+	b.snapNode.CompactLog(result.Index)
+	return result, nil
+}
+
+func (b *DistributedBackend) completeRaftSnapshotRequest(req raftSnapshotRequest) {
+	result, err := b.triggerRaftSnapshotInApplyLoop(req.ctx)
+	select {
+	case req.resp <- raftSnapshotResponse{result: result, err: err}:
+	case <-req.ctx.Done():
+	}
+}
+
+// RaftSnapshotStatus reports the latest persisted Raft FSM snapshot.
+func (b *DistributedBackend) RaftSnapshotStatus() (raft.SnapshotStatus, error) {
+	if b.snapMgr == nil {
+		return raft.SnapshotStatus{}, fmt.Errorf("raft snapshot manager unavailable")
+	}
+	return b.snapMgr.Status()
+}
+
 // SetOnApply sets the callback invoked after each FSM apply.
 // Must be called before RunApplyLoop.
 func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
@@ -241,11 +325,14 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 		select {
 		case <-stop:
 			return
+		case req := <-b.snapRequests:
+			b.completeRaftSnapshotRequest(req)
 		case entry := <-b.node.ApplyCh():
 			if err := b.fsm.Apply(entry.Command); err != nil {
 				b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
 			}
 			b.lastApplied.Store(entry.Index)
+			b.lastAppliedTerm.Store(entry.Term)
 
 			// Notify cache/metrics callback
 			if b.onApply != nil {

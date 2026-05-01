@@ -78,6 +78,51 @@ func TestSnapshotManager_NoTriggerBelowThreshold(t *testing.T) {
 	assert.Nil(t, snap2.Data)
 }
 
+func TestSnapshotManager_TriggerForcesSnapshotBelowThreshold(t *testing.T) {
+	store := setupTestStore(t)
+	snap := &mockSnapshotter{snapshotData: []byte("manual-snap")}
+
+	mgr := NewSnapshotManager(store, snap, SnapshotConfig{
+		Threshold: 100,
+	})
+
+	makeTestEntries(t, store, 7, 1, 3)
+
+	result, err := mgr.Trigger(3, 7, []Server{{ID: "A", Suffrage: Voter}})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), result.Index)
+	assert.Equal(t, uint64(7), result.Term)
+	assert.Equal(t, len("manual-snap"), result.SizeBytes)
+
+	loaded, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), loaded.Index)
+	assert.Equal(t, uint64(7), loaded.Term)
+	assert.Equal(t, []byte("manual-snap"), loaded.Data)
+	assert.Equal(t, []Server{{ID: "A", Suffrage: Voter}}, loaded.Servers)
+}
+
+func TestSnapshotManager_StatusReportsLatestSnapshot(t *testing.T) {
+	store := setupTestStore(t)
+	snap := &mockSnapshotter{snapshotData: []byte("manual-snap")}
+	mgr := NewSnapshotManager(store, snap, SnapshotConfig{Threshold: 100})
+
+	status, err := mgr.Status()
+	require.NoError(t, err)
+	assert.False(t, status.Available)
+	assert.Equal(t, uint64(0), status.Index)
+
+	_, err = mgr.Trigger(3, 7, nil)
+	require.NoError(t, err)
+
+	status, err = mgr.Status()
+	require.NoError(t, err)
+	assert.True(t, status.Available)
+	assert.Equal(t, uint64(3), status.Index)
+	assert.Equal(t, uint64(7), status.Term)
+	assert.Equal(t, len("manual-snap"), status.SizeBytes)
+}
+
 func TestSnapshotManager_CompactsLogAfterSnapshot(t *testing.T) {
 	store := setupTestStore(t)
 	snap := &mockSnapshotter{snapshotData: []byte("snap")}

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.8.0] — 2026-05-02 — Raft snapshot admin trigger
+
+### Added
+
+- **raft**: manual snapshot trigger primitive with status reporting for the latest snapshot index, term, and size.
+- **server**: localhost-only `/admin/raft/snapshot` GET/POST API for checking snapshot status and forcing a leader-side snapshot.
+- **metrics**: snapshot trigger counters and last snapshot index/size gauges for operator visibility.
+- **tests**: unit and e2e coverage for the admin trigger, status response, metrics, follower rejection, unavailable snapshotter path, and apply-loop serialization.
+
+### Fixed
+
+- **cluster**: manual snapshot triggers now run through the Raft apply loop, so snapshot creation reads a consistent applied index/term without racing normal apply progress.
+
 ## [0.0.7.8] — 2026-05-02 — Shared EC placement resolver + shard repair wiring
 
 ### Added

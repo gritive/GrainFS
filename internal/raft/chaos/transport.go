@@ -154,5 +154,15 @@ func (c *ChaosTransport) Wire(n *raft.Node) {
 		return target.HandleAppendEntries(args), nil
 	}
 
+	sendTimeoutNow := func(peer string) error {
+		target, ok := c.resolveDelivery(from, peer)
+		if !ok {
+			return errPartitioned
+		}
+		target.HandleTimeoutNow()
+		return nil
+	}
+
 	n.SetTransport(sendVote, sendAppend)
+	n.SetTimeoutNowTransport(sendTimeoutNow)
 }

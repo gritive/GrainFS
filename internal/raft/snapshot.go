@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -21,6 +22,21 @@ type SnapshotConfig struct {
 	// TrailingLogs is the number of log entries to retain on disk after
 	// a snapshot is taken. 0 = remove all (original behavior).
 	TrailingLogs uint64
+}
+
+// SnapshotResult reports a snapshot that was successfully created.
+type SnapshotResult struct {
+	Index     uint64
+	Term      uint64
+	SizeBytes int
+}
+
+// SnapshotStatus reports the latest snapshot persisted in the LogStore.
+type SnapshotStatus struct {
+	Available bool
+	Index     uint64
+	Term      uint64
+	SizeBytes int
 }
 
 // JointStateProvider returns the §4.3 joint consensus state at snapshot trigger
@@ -93,11 +109,49 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers
 		return false
 	}
 
-	// Take snapshot
+	if _, err := m.createSnapshotLocked(appliedIndex, appliedTerm, servers); err != nil {
+		log.Error().Err(err).Msg("snapshot: trigger failed")
+		return false
+	}
+	return true
+}
+
+// Trigger forces a snapshot at the caller-provided applied index, regardless of
+// the automatic threshold. It is intended for operator/admin flows.
+func (m *SnapshotManager) Trigger(appliedIndex, appliedTerm uint64, servers []Server) (SnapshotResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createSnapshotLocked(appliedIndex, appliedTerm, servers)
+}
+
+// Status reports the latest persisted snapshot without mutating state.
+func (m *SnapshotManager) Status() (SnapshotStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snap, err := m.store.LoadSnapshot()
+	if err != nil {
+		return SnapshotStatus{}, err
+	}
+	if snap.Index == 0 {
+		return SnapshotStatus{}, nil
+	}
+	return SnapshotStatus{
+		Available: true,
+		Index:     snap.Index,
+		Term:      snap.Term,
+		SizeBytes: len(snap.Data),
+	}, nil
+}
+
+func (m *SnapshotManager) createSnapshotLocked(appliedIndex, appliedTerm uint64, servers []Server) (SnapshotResult, error) {
+	if appliedIndex == 0 {
+		return SnapshotResult{}, fmt.Errorf("snapshot: applied index is zero")
+	}
+
 	data, err := m.snapshotter.Snapshot()
 	if err != nil {
-		log.Error().Err(err).Msg("snapshot: create failed")
-		return false
+		return SnapshotResult{}, fmt.Errorf("snapshot: create: %w", err)
 	}
 
 	// §4.3 joint state at snapshot point. Provider returns zero values when
@@ -110,7 +164,6 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers
 		jPhase, jOld, jNew, jIdx, jManaged = m.jointStateProvider()
 	}
 
-	// Save snapshot to store
 	if err := m.store.SaveSnapshot(Snapshot{
 		Index:                appliedIndex,
 		Term:                 appliedTerm,
@@ -122,11 +175,9 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers
 		JointEnterIndex:      jIdx,
 		JointManagedLearners: jManaged,
 	}); err != nil {
-		log.Error().Err(err).Msg("snapshot: save failed")
-		return false
+		return SnapshotResult{}, fmt.Errorf("snapshot: save: %w", err)
 	}
 
-	// Compact log on disk.
 	if m.config.TrailingLogs == 0 {
 		// Original behavior: remove all log entries.
 		if err := m.store.TruncateAfter(0); err != nil {
@@ -140,7 +191,7 @@ func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers
 	}
 
 	m.lastSnapIndex = appliedIndex
-	return true
+	return SnapshotResult{Index: appliedIndex, Term: appliedTerm, SizeBytes: len(data)}, nil
 }
 
 // Restore loads the latest snapshot from the store and applies it to the
