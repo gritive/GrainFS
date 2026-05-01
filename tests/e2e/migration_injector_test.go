@@ -31,7 +31,8 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 	srcCmd := exec.Command(binary, "serve",
 		"--data", srcDir,
 		"--port", fmt.Sprintf("%d", srcPort),
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	srcCmd.Stdout = os.Stdout
 	srcCmd.Stderr = os.Stderr
@@ -66,7 +67,8 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 	dstCmd := exec.Command(binary, "serve",
 		"--data", dstDir,
 		"--port", fmt.Sprintf("%d", dstPort),
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	dstCmd.Stdout = os.Stdout
 	dstCmd.Stderr = os.Stderr

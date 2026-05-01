@@ -231,10 +231,13 @@ func (n *Node) initLeaderStateForNewVoters(oldServers, newServers []ServerEntry)
 }
 
 // hasJointLeaveAfter scans the in-memory log for a JointLeave entry at index
-// > startIndex. The check is committed-agnostic — uncommitted tail entries are
-// considered too. Used by checkJointAdvance for log-state idempotency: a leader
-// re-elected mid-joint must not append a duplicate JointLeave when one already
-// exists in the log it inherited.
+// > startIndex that is "in flight": either from the current term (the active
+// leader's own proposal) or already committed (the apply loop will finalise it).
+//
+// Old-term entries written by a prior leader before it crashed are NOT counted.
+// Such entries cannot commit on their own — they need a current-term entry to
+// piggyback on. The current leader must re-propose JointLeave so the joint
+// phase can advance.
 //
 // Caller MUST hold n.mu.
 func (n *Node) hasJointLeaveAfter(startIndex uint64) bool {
@@ -247,6 +250,50 @@ func (n *Node) hasJointLeaveAfter(startIndex uint64) bool {
 		}
 		jc := decodeJointConfChange(entry.Command)
 		if jc.Op == JointOpLeave {
+			if entry.Term == n.currentTerm || entry.Index <= n.commitIndex {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasCommittedJointLeaveAfter reports whether a JointLeave after startIndex has
+// already committed and only needs the apply loop to finalise the transition.
+//
+// Caller MUST hold n.mu.
+func (n *Node) hasCommittedJointLeaveAfter(startIndex uint64) bool {
+	for _, entry := range n.log {
+		if entry.Index <= startIndex || entry.Index > n.commitIndex {
+			continue
+		}
+		if entry.Type != LogEntryJointConfChange {
+			continue
+		}
+		jc := decodeJointConfChange(entry.Command)
+		if jc.Op == JointOpLeave {
+			return true
+		}
+	}
+	return false
+}
+
+// hasJointAbortAfter reports whether a later JointAbort exists in the local log.
+// A leave immediately followed by abort is stale once the abort is present; the
+// abort must be allowed to restore C_old instead of becoming a no-op behind the
+// leave's phase reset.
+//
+// Caller MUST hold n.mu.
+func (n *Node) hasJointAbortAfter(startIndex uint64) bool {
+	for _, entry := range n.log {
+		if entry.Index <= startIndex {
+			continue
+		}
+		if entry.Type != LogEntryJointConfChange {
+			continue
+		}
+		jc := decodeJointConfChange(entry.Command)
+		if jc.Op == JointOpAbort {
 			return true
 		}
 	}
@@ -321,16 +368,21 @@ func (n *Node) checkJointAdvance() {
 	if n.jointEnterIndex == 0 || n.commitIndex < n.jointEnterIndex {
 		return
 	}
-	if n.hasJointLeaveAfter(n.jointEnterIndex) {
-		return
-	}
 
-	// Auto-abort if timeout is configured and elapsed.
+	// Auto-abort if timeout is configured and elapsed. An in-flight but
+	// uncommitted JointLeave must not suppress abort; it may be unable to form
+	// C_new quorum. A committed JointLeave is different: the apply loop will
+	// finalise it, so do not append an abort behind it.
 	if n.config.JointAbortTimeout > 0 &&
 		!n.jointAbortProposed &&
 		!n.jointEnterTime.IsZero() &&
-		time.Since(n.jointEnterTime) > n.config.JointAbortTimeout {
+		time.Since(n.jointEnterTime) > n.config.JointAbortTimeout &&
+		!n.hasCommittedJointLeaveAfter(n.jointEnterIndex) {
 		n.triggerAbortAsync()
+		return
+	}
+
+	if n.hasJointLeaveAfter(n.jointEnterIndex) {
 		return
 	}
 

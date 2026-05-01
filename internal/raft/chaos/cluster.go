@@ -18,13 +18,56 @@ type Cluster struct {
 	configs   map[string]raft.Config
 	nodes     map[string]*raft.Node
 	ids       []string
+	opts      clusterOptions
+}
+
+type clusterOptions struct {
+	electionTimeout   time.Duration
+	heartbeatTimeout  time.Duration
+	jointAbortTimeout time.Duration
+}
+
+// Option configures a chaos Cluster.
+type Option func(*clusterOptions)
+
+// WithElectionTimeout overrides the per-node election timeout.
+func WithElectionTimeout(timeout time.Duration) Option {
+	return func(opts *clusterOptions) {
+		opts.electionTimeout = timeout
+	}
+}
+
+// WithHeartbeatTimeout overrides the per-node heartbeat timeout.
+func WithHeartbeatTimeout(timeout time.Duration) Option {
+	return func(opts *clusterOptions) {
+		opts.heartbeatTimeout = timeout
+	}
+}
+
+// WithJointAbortTimeout enables automatic JointOpAbort after a stuck joint.
+func WithJointAbortTimeout(timeout time.Duration) Option {
+	return func(opts *clusterOptions) {
+		opts.jointAbortTimeout = timeout
+	}
+}
+
+func defaultClusterOptions() clusterOptions {
+	return clusterOptions{
+		electionTimeout:  200 * time.Millisecond,
+		heartbeatTimeout: 50 * time.Millisecond,
+	}
 }
 
 // NewCluster constructs N nodes named "node-0".."node-(N-1)" with default
 // timeouts and a fully-meshed peer list. Nodes are NOT started; call StartAll.
 // Cleanup (Close all nodes) is registered via t.Cleanup.
-func NewCluster(t *testing.T, n int) *Cluster {
+func NewCluster(t *testing.T, n int, options ...Option) *Cluster {
 	t.Helper()
+
+	opts := defaultClusterOptions()
+	for _, option := range options {
+		option(&opts)
+	}
 
 	c := &Cluster{
 		t:         t,
@@ -32,6 +75,7 @@ func NewCluster(t *testing.T, n int) *Cluster {
 		configs:   make(map[string]raft.Config, n),
 		nodes:     make(map[string]*raft.Node, n),
 		ids:       make([]string, n),
+		opts:      opts,
 	}
 
 	for i := 0; i < n; i++ {
@@ -47,12 +91,13 @@ func NewCluster(t *testing.T, n int) *Cluster {
 			}
 		}
 		cfg := raft.Config{
-			ID:               id,
-			Peers:            peers,
-			ElectionTimeout:  200 * time.Millisecond,
-			HeartbeatTimeout: 50 * time.Millisecond,
-			MaxEntriesPerAE:  512,
-			TrailingLogs:     1024,
+			ID:                id,
+			Peers:             peers,
+			ElectionTimeout:   opts.electionTimeout,
+			HeartbeatTimeout:  opts.heartbeatTimeout,
+			JointAbortTimeout: opts.jointAbortTimeout,
+			MaxEntriesPerAE:   512,
+			TrailingLogs:      1024,
 		}
 		c.configs[id] = cfg
 
@@ -135,12 +180,13 @@ func (c *Cluster) NodeByID(id string) *raft.Node {
 func (c *Cluster) AddNode(id string) *raft.Node {
 	c.t.Helper()
 	cfg := raft.Config{
-		ID:               id,
-		Peers:            nil, // learns peers via AppendEntries from leader
-		ElectionTimeout:  200 * time.Millisecond,
-		HeartbeatTimeout: 50 * time.Millisecond,
-		MaxEntriesPerAE:  512,
-		TrailingLogs:     1024,
+		ID:                id,
+		Peers:             nil, // learns peers via AppendEntries from leader
+		ElectionTimeout:   c.opts.electionTimeout,
+		HeartbeatTimeout:  c.opts.heartbeatTimeout,
+		JointAbortTimeout: c.opts.jointAbortTimeout,
+		MaxEntriesPerAE:   512,
+		TrailingLogs:      1024,
 	}
 	c.configs[id] = cfg
 	node := raft.NewNode(cfg)

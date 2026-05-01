@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.7.7] — 2026-05-01 — Raft joint chaos hardening + e2e port isolation
+
+### Added
+
+- **raft**: chaos coverage for joint-consensus partition/abort behavior, including managed learner cleanup and C_old voter preservation.
+- **cluster**: `ClusterCoordinator` snapshot/PITR coverage for listing and restoring bucket-routed group objects.
+
+### Fixed
+
+- **raft**: joint operation result channels are drained on stop or leadership loss, preventing blocked membership-change callers.
+- **raft**: stale old-term `JointLeave` entries and aborted in-flight leaves no longer confuse joint abort/leave detection.
+- **cluster**: object snapshots now enumerate data-group objects through `ClusterCoordinator` routing, and restores remove extra group objects instead of delegating to empty base metadata.
+- **cmd/grainfs**: cluster mode now wraps the `ClusterCoordinator` with WAL, so routed object mutations are recorded for PITR replay.
+- **tests/e2e**: all S3, NFSv4, NBD, and pprof ports used by e2e processes are allocated via `freePort()` to avoid cross-test port collisions.
+
 ## [0.0.7.6] — 2026-05-01 — Linearizable ReadIndex reads for S3 and NBD
 
 ### Added

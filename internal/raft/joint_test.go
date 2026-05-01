@@ -984,6 +984,42 @@ func TestJointAbortTimeout_TriggersAfterDeadline(t *testing.T) {
 	}
 }
 
+func TestJointAbortTimeout_IgnoresUncommittedInFlightLeave(t *testing.T) {
+	n := jointTestNode("n1")
+	n.state = Leader
+	n.currentTerm = 3
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n4", "n5"}
+	n.jointEnterIndex = 1
+	n.commitIndex = 1
+	n.jointEnterTime = time.Now().Add(-200 * time.Millisecond)
+	n.config.JointAbortTimeout = 100 * time.Millisecond
+	n.config.HeartbeatTimeout = 50 * time.Millisecond
+	n.proposalCh = make(chan proposal, 16)
+	n.stopCh = make(chan struct{})
+	n.log = []LogEntry{
+		{Index: 1, Term: 3, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{Op: JointOpEnter})},
+		{Index: 2, Term: 3, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{Op: JointOpLeave})},
+	}
+
+	n.mu.Lock()
+	n.checkJointAdvance()
+	n.mu.Unlock()
+
+	n.mu.Lock()
+	proposed := n.jointAbortProposed
+	n.mu.Unlock()
+	require.True(t, proposed, "uncommitted JointLeave must not suppress timeout abort")
+
+	select {
+	case p := <-n.proposalCh:
+		jc := decodeJointConfChange(p.command)
+		require.Equal(t, JointOpAbort, jc.Op)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
 // TestJointAbortRestart_RebuildConfigCorrect verifies that rebuildConfigFromLog
 // correctly restores C_old when replaying a JointOpAbort entry.
 func TestJointAbortRestart_RebuildConfigCorrect(t *testing.T) {
@@ -1189,6 +1225,29 @@ func TestRunFollower_DrainIsIdempotent_WhenChAlreadySent(t *testing.T) {
 	}
 }
 
+// TestRun_DrainsJointResultChOnStop verifies the node shutdown path also
+// releases ChangeMembership callers. A leader can be stopped without first
+// transitioning through runFollower(), so run() must drain jointResultCh before
+// returning from the stopCh case.
+func TestRun_DrainsJointResultChOnStop(t *testing.T) {
+	n := followerTestNode("n1", []string{"n2", "n3"})
+	ch := make(chan error, 1)
+	n.mu.Lock()
+	n.jointResultCh = ch
+	n.mu.Unlock()
+	close(n.stopCh)
+
+	n.run()
+
+	select {
+	case err := <-ch:
+		require.ErrorIs(t, err, ErrLeadershipLost,
+			"run stop path must send ErrLeadershipLost to unblock blocked ChangeMembership")
+	default:
+		t.Fatal("run stop path did not drain jointResultCh")
+	}
+}
+
 // TestApply_JointLeave_IdempotencyAfterAbort verifies that applyJointConfChangeLocked
 // treats JointOpLeave as a no-op when jointPhase is already JointNone (cleared by a
 // preceding JointOpAbort). This guards the window where a stale JointOpLeave that was
@@ -1221,4 +1280,681 @@ func TestApply_JointLeave_IdempotencyAfterAbort(t *testing.T) {
 	_, stillManaged := n.jointManagedLearners["managed-1"]
 	require.True(t, stillManaged,
 		"managed learner must not be cleared by stale JointOpLeave after abort")
+}
+
+func TestApply_JointAbortAfterUncommittedLeave_RestoresOldConfig(t *testing.T) {
+	n := jointTestNode("n1")
+	n.jointPhase = JointEntering
+	n.config.Peers = []string{"n2", "n3", "n4", "n5"}
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n4", "n5"}
+	n.jointEnterIndex = 1
+	n.learnerIDs = map[string]string{"n4": "n4", "n5": "n5"}
+	n.jointManagedLearners = map[string]struct{}{"n4": {}, "n5": {}}
+
+	leave := LogEntry{
+		Index: 2,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpLeave,
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+		}),
+	}
+	abort := LogEntry{
+		Index: 3,
+		Term:  1,
+		Type:  LogEntryJointConfChange,
+		Command: encodeJointConfChange(JointConfChange{
+			Op:         JointOpAbort,
+			OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+			NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+		}),
+	}
+	n.log = []LogEntry{
+		{Index: 1, Term: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{Op: JointOpEnter})},
+		leave,
+		abort,
+	}
+
+	n.applyJointConfChangeLocked(leave)
+	n.applyJointConfChangeLocked(abort)
+
+	require.Equal(t, JointNone, n.jointPhase)
+	require.Equal(t, []string{"n2", "n3"}, n.config.Peers,
+		"abort after stale uncommitted leave must restore C_old")
+	require.NotContains(t, n.LearnerIDs(), "n4")
+	require.NotContains(t, n.LearnerIDs(), "n5")
+}
+
+func TestHasJointLeaveAfter_SkipsStaleOldTermLeave(t *testing.T) {
+	n := jointTestNode("n1")
+	n.currentTerm = 3
+	n.commitIndex = 1
+	n.log = []LogEntry{
+		{Index: 1, Term: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{Op: JointOpEnter})},
+		{Index: 2, Term: 2, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{Op: JointOpLeave})},
+		{Index: 3, Term: 3, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{Op: JointOpLeave})},
+	}
+
+	require.True(t, n.hasJointLeaveAfter(1),
+		"stale old-term JointLeave must not hide a later current-term JointLeave")
+}
+
+// TestJointPhase_AfterRestart_QueryReturnsEntering verifies that rebuildConfigFromLog
+// correctly restores JointEntering state after a process restart when the
+// JointOpEnter entry is still in the persisted log (not yet compacted).
+//
+// Single-node cluster adds a fake peer B so JointLeave cannot commit (C_new quorum
+// requires both A and B). The node is stopped while stuck in JointEntering. After
+// recreating the node from the same BadgerStore, JointPhase() must report
+// JointEntering before the node is even started — proving that restoreFromStore
+// drives the state machine via rebuildConfigFromLog.
+func TestJointPhase_AfterRestart_QueryReturnsEntering(t *testing.T) {
+	cluster, stores := newTestClusterWithStores(t, 1)
+
+	// Prevent auto-abort so the stuck-in-Entering state persists long enough.
+	cluster.nodes[0].mu.Lock()
+	cluster.nodes[0].config.JointAbortTimeout = 30 * time.Minute
+	cluster.nodes[0].mu.Unlock()
+
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader, "single node should elect itself")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		// Adds fake B; C_new={A,B}. JointLeave needs B to respond — it never will.
+		_ = leader.proposeJointConfChangeWait(ctx,
+			[]ServerEntry{{ID: "B", Address: "B"}}, nil)
+	}()
+
+	// Wait until JointEntering is active (set at append time, before replication).
+	require.Eventually(t, func() bool {
+		phase, _, _, _ := leader.JointPhase()
+		return phase == JointEntering
+	}, 3*time.Second, 10*time.Millisecond, "JointEntering must activate")
+
+	cancel()
+	leader.Close()
+
+	// Recreate node from the same store — do NOT Start() yet.
+	// restoreFromStore → rebuildConfigFromLog must restore jointPhase.
+	id := leader.id
+	peers := append([]string(nil), leader.initialPeers...)
+	newNode := NewNode(Config{
+		ID:                id,
+		Peers:             peers,
+		ManagedMode:       true,
+		ElectionTimeout:   100 * time.Millisecond,
+		HeartbeatTimeout:  30 * time.Millisecond,
+		JointAbortTimeout: 30 * time.Minute,
+	}, stores[0])
+	defer newNode.Close()
+
+	phase, _, _, _ := newNode.JointPhase()
+	require.Equal(t, JointEntering, phase,
+		"JointEntering must be restored by rebuildConfigFromLog on NewNode creation")
+}
+
+// TestJointPhase_AfterRestart_CallerCanRecover verifies that after crashing
+// mid-joint (JointOpEnter committed, JointLeave not yet proposed) and restarting
+// all nodes, a caller can detect JointEntering via JointPhase() and explicitly
+// revert to C_old using ForceAbortJoint — without waiting for auto-completion.
+//
+// Uses a 3-node cluster (A,B,C) with removes=[C] so C_new={A,B}. A large
+// HeartbeatTimeout gives a reliable window to crash before the leader's
+// heartbeat watcher can fire checkJointAdvance and auto-propose JointLeave.
+func TestJointPhase_AfterRestart_CallerCanRecover(t *testing.T) {
+	const (
+		hb = 200 * time.Millisecond
+		el = 600 * time.Millisecond
+	)
+
+	ids := [3]string{"A", "B", "C"}
+	makeConfig := func(i int) Config {
+		peers := make([]string, 0, 2)
+		for j, id := range ids {
+			if j != i {
+				peers = append(peers, id)
+			}
+		}
+		return Config{
+			ID:                ids[i],
+			Peers:             peers,
+			ManagedMode:       true,
+			ElectionTimeout:   el,
+			HeartbeatTimeout:  hb,
+			JointAbortTimeout: 30 * time.Minute,
+		}
+	}
+
+	stores := make([]*BadgerLogStore, 3)
+	for i := range stores {
+		s, err := NewBadgerLogStore(t.TempDir(), WithManagedMode())
+		require.NoError(t, err)
+		t.Cleanup(func() { s.Close() })
+		stores[i] = s
+	}
+
+	makeCluster := func() *testCluster {
+		cl := &testCluster{nodes: make([]*Node, 3)}
+		for i := range 3 {
+			cl.nodes[i] = NewNode(makeConfig(i), stores[i])
+		}
+		for i := range cl.nodes {
+			cl.nodes[i].SetTransport(
+				func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+					target := cl.nodeByID(peer)
+					if target == nil {
+						return nil, errNodeNotFound
+					}
+					return target.HandleRequestVote(args), nil
+				},
+				func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+					target := cl.nodeByID(peer)
+					if target == nil {
+						return nil, errNodeNotFound
+					}
+					return target.HandleAppendEntries(args), nil
+				},
+			)
+		}
+		return cl
+	}
+
+	cl1 := makeCluster()
+	cl1.startAll()
+
+	leader := cl1.waitForLeader(3 * time.Second)
+	require.NotNil(t, leader, "no leader elected")
+
+	// Pick a non-leader peer to remove.
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		removeID = p
+		break
+	}
+	leader.mu.Unlock()
+	require.NotEmpty(t, removeID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = leader.proposeJointConfChangeWait(ctx, nil, []string{removeID})
+	}()
+
+	// Wait for JointEntering on the leader (set at append-time, before replication).
+	require.Eventually(t, func() bool {
+		phase, _, _, _ := leader.JointPhase()
+		return phase == JointEntering
+	}, 3*time.Second, 10*time.Millisecond, "JointEntering must activate")
+
+	// Stop all nodes before the next heartbeat tick triggers checkJointAdvance.
+	// With hb=200ms the window is comfortably wide.
+	cancel()
+	cl1.stopAll()
+
+	// Restart all nodes with the same persisted stores.
+	cl2 := makeCluster()
+	cl2.startAll()
+	defer cl2.stopAll()
+
+	newLeader := cl2.waitForLeader(3 * time.Second)
+	require.NotNil(t, newLeader, "no leader after restart")
+
+	phase, _, _, _ := newLeader.JointPhase()
+	require.Equal(t, JointEntering, phase, "new leader must see JointEntering after restart")
+
+	abortCtx, abortCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer abortCancel()
+	require.NoError(t, newLeader.ForceAbortJoint(abortCtx))
+
+	phase, _, _, _ = newLeader.JointPhase()
+	require.Equal(t, JointNone, phase, "ForceAbortJoint must reset to JointNone")
+}
+
+// TestJoint_Chaos_LeaderCrashBetweenEnterAndLeave verifies that when the leader
+// crashes after JointOpEnter commits but before JointLeave is proposed, a new
+// leader is elected under dual quorum, auto-proposes JointLeave, and drives the
+// joint phase to JointNone — all without operator intervention.
+//
+// 4-node cluster (A,B,C,D), removes=[D]: C_new={A,B,C}.
+// After leader crash (A): C_old quorum B+C+D=3/4 ✓, C_new quorum B+C=2/3 ✓.
+//
+// SetNoOpCommand is used so the new leader can commit a current-term entry,
+// indirectly committing JointOpEnter from the previous term (standard Raft
+// commitment rule: a leader may only directly commit its own term's entries).
+func TestJoint_Chaos_LeaderCrashBetweenEnterAndLeave(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	for _, n := range cluster.nodes {
+		n.SetNoOpCommand([]byte("noop"))
+	}
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader, "no leader")
+
+	// Pick a non-leader peer to remove so C_new still has 3 real voters (B,C,D).
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		removeID = p
+		break
+	}
+	leader.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = leader.proposeJointConfChangeWait(ctx, nil, []string{removeID})
+	}()
+
+	// Wait for JointOpEnter to commit on the leader. The new leader needs the
+	// commit to be visible (via heartbeat propagation) to drive JointLeave.
+	require.Eventually(t, func() bool {
+		leader.mu.Lock()
+		defer leader.mu.Unlock()
+		return leader.jointPhase == JointEntering &&
+			leader.jointEnterIndex > 0 &&
+			leader.commitIndex >= leader.jointEnterIndex
+	}, 3*time.Second, 10*time.Millisecond, "JointOpEnter must commit on leader")
+
+	// Crash the leader. Remaining 3 nodes form a quorum in both C_old and C_new.
+	crashedID := leader.ID()
+	leader.Close()
+	cancel()
+
+	// Remove crashed node from the transport mesh so it doesn't receive messages.
+	cluster.mu.Lock()
+	filtered := cluster.nodes[:0]
+	for _, n := range cluster.nodes {
+		if n.ID() != crashedID {
+			filtered = append(filtered, n)
+		}
+	}
+	cluster.nodes = filtered
+	cluster.mu.Unlock()
+
+	// New leader should emerge and auto-complete JointLeave via no-op + checkJointAdvance.
+	newLeader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, newLeader, "new leader must emerge after leader crash")
+
+	require.Eventually(t, func() bool {
+		phase, _, _, _ := newLeader.JointPhase()
+		return phase == JointNone
+	}, 5*time.Second, 20*time.Millisecond, "JointNone must auto-complete after new leader")
+
+	newLeader.mu.Lock()
+	peers := append([]string(nil), newLeader.config.Peers...)
+	newLeader.mu.Unlock()
+	require.NotContains(t, peers, removeID, "C_new must exclude the removed voter")
+}
+
+// TestJoint_Chaos_PartitionDuringJoint verifies that a network partition during
+// JointEntering causes the leader to step down (losing C_old quorum), and that
+// after the partition heals a new leader is elected and drives JointNone.
+//
+// 4-node cluster (A,B,C,D), removes=[D]. Partition isolates C and D, leaving
+// only A+B visible to each other. A loses C_old quorum (A+B=2/4 < 3) and steps
+// down to Follower. After healing, all four nodes are reconnected and a new leader
+// wins under dual quorum (C_old:3/4, C_new:2/3).
+//
+// SetNoOpCommand is used so the post-heal leader can commit a current-term entry
+// to indirectly commit JointOpEnter from the previous term.
+func TestJoint_Chaos_PartitionDuringJoint(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	for _, n := range cluster.nodes {
+		n.SetNoOpCommand([]byte("noop"))
+	}
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader, "no leader")
+
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		removeID = p
+		break
+	}
+	leader.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = leader.proposeJointConfChangeWait(ctx, nil, []string{removeID})
+	}()
+
+	require.Eventually(t, func() bool {
+		phase, _, _, _ := leader.JointPhase()
+		return phase == JointEntering
+	}, 3*time.Second, 10*time.Millisecond, "JointEntering must activate")
+
+	// Save the original 4-node list for restoration after healing.
+	cluster.mu.RLock()
+	allNodes := make([]*Node, len(cluster.nodes))
+	copy(allNodes, cluster.nodes)
+	cluster.mu.RUnlock()
+
+	// Partition: retain only [leader, one other] in the mesh.
+	// Leader sees only 1 peer → C_old quorum = 2/4 < 3 → leader steps down.
+	var oneOther *Node
+	for _, n := range allNodes {
+		if n.ID() != leader.ID() {
+			oneOther = n
+			break
+		}
+	}
+	cluster.mu.Lock()
+	cluster.nodes = []*Node{leader, oneOther}
+	cluster.mu.Unlock()
+
+	// Wait for the leader to step down due to hasQuorum failure (3×HB timeout).
+	require.Eventually(t, func() bool {
+		return leader.State() != Leader
+	}, 5*time.Second, 20*time.Millisecond, "leader must step down after losing C_old quorum")
+
+	// Heal: restore all 4 nodes to the mesh.
+	cluster.mu.Lock()
+	cluster.nodes = allNodes
+	cluster.mu.Unlock()
+
+	newLeader := cluster.waitForLeader(5 * time.Second)
+	require.NotNil(t, newLeader, "new leader must emerge after partition heals")
+
+	require.Eventually(t, func() bool {
+		phase, _, _, _ := newLeader.JointPhase()
+		return phase == JointNone
+	}, 5*time.Second, 20*time.Millisecond, "JointNone must auto-complete after healing")
+}
+
+// TestJoint_Chaos_RepeatedLeaderChange verifies data consistency through a leader
+// change during JointEntering: entries committed before the joint cycle survive the
+// crash, the new leader inherits and completes the joint cycle, and the cluster can
+// commit additional entries after recovery.
+//
+// This complements TestJoint_Chaos_LeaderCrashBetweenEnterAndLeave which only
+// verifies config state. Here the focus is on committed log entries remaining
+// stable across the leadership transition.
+//
+// SetNoOpCommand is used so the new leader can commit JointOpEnter from the
+// previous term indirectly via a current-term no-op entry.
+func TestJoint_Chaos_RepeatedLeaderChange(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	for _, n := range cluster.nodes {
+		n.SetNoOpCommand([]byte("noop"))
+	}
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader, "no leader")
+
+	// Commit 5 entries before the joint cycle.
+	const preEntries = 5
+	for i := range preEntries {
+		require.NoError(t, leader.Propose([]byte{byte(i + 1)}))
+	}
+
+	// Wait for all pre-joint entries to commit on the leader.
+	require.Eventually(t, func() bool {
+		leader.mu.Lock()
+		ci := leader.commitIndex
+		leader.mu.Unlock()
+		return ci >= preEntries
+	}, 3*time.Second, 10*time.Millisecond, "pre-joint entries must commit")
+
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		removeID = p
+		break
+	}
+	leader.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = leader.proposeJointConfChangeWait(ctx, nil, []string{removeID})
+	}()
+
+	require.Eventually(t, func() bool {
+		leader.mu.Lock()
+		defer leader.mu.Unlock()
+		return leader.jointPhase == JointEntering &&
+			leader.jointEnterIndex > 0 &&
+			leader.commitIndex >= leader.jointEnterIndex
+	}, 3*time.Second, 10*time.Millisecond, "JointOpEnter must commit on leader")
+
+	// Crash the leader while joint is in progress.
+	crashedID := leader.ID()
+	leader.Close()
+	cancel()
+
+	cluster.mu.Lock()
+	filtered := cluster.nodes[:0]
+	for _, n := range cluster.nodes {
+		if n.ID() != crashedID {
+			filtered = append(filtered, n)
+		}
+	}
+	cluster.nodes = filtered
+	cluster.mu.Unlock()
+
+	newLeader := cluster.waitForLeader(3 * time.Second)
+	require.NotNil(t, newLeader, "new leader must emerge after crash")
+
+	// New leader auto-completes JointLeave.
+	require.Eventually(t, func() bool {
+		phase, _, _, _ := newLeader.JointPhase()
+		return phase == JointNone
+	}, 5*time.Second, 20*time.Millisecond, "JointNone must complete on new leader")
+
+	// Pre-joint entries must still be committed on the new leader.
+	newLeader.mu.Lock()
+	ci := newLeader.commitIndex
+	newLeader.mu.Unlock()
+	require.GreaterOrEqual(t, ci, uint64(preEntries),
+		"pre-joint entries must survive leader crash (commitIndex must be >= %d)", preEntries)
+
+	// Cluster must be able to commit new entries after recovery.
+	// Re-fetch the current leader: the node stored in newLeader may have stepped
+	// down between JointNone detection and the propose call.
+	currentLeader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, currentLeader, "a leader must exist for post-recovery proposal")
+	postCtx, postCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer postCancel()
+	_, err := currentLeader.ProposeWait(postCtx, []byte("post-recovery"))
+	require.NoError(t, err, "cluster must accept new entries after joint recovery")
+}
+
+// TestJoint_E2E_SnapshotMidJoint_AutoCompletes verifies that when the log is
+// compacted after JointOpEnter (removing it from the in-memory log), calling
+// RestoreJointStateFromSnapshot before Start() correctly rehydrates the joint
+// state, and the restarted node drives JointLeave to completion automatically.
+//
+// Uses a 3-node cluster with BadgerDB stores. After JointOpEnter commits, a
+// snapshot is saved on the leader's store with full joint metadata, and
+// CompactLog removes the JointOpEnter entry from memory. The leader is stopped,
+// recreated from the same store, RestoreJointStateFromSnapshot is called, and
+// the node restarts. The cluster auto-completes JointLeave within a few seconds.
+func TestJoint_E2E_SnapshotMidJoint_AutoCompletes(t *testing.T) {
+	t.Skip("deferred until public snapshot API work; current manual compaction setup is intentionally out of PR-L2 scope")
+
+	cluster, stores := newTestClusterWithStores(t, 3)
+	cluster.startAll()
+
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader, "no leader")
+
+	var leaderIdx int
+	for i, n := range cluster.nodes {
+		if n.ID() == leader.ID() {
+			leaderIdx = i
+			break
+		}
+	}
+
+	var removeID string
+	leader.mu.Lock()
+	for _, p := range leader.config.Peers {
+		removeID = p
+		break
+	}
+	leader.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = leader.proposeJointConfChangeWait(ctx, nil, []string{removeID})
+	}()
+
+	// Wait for JointOpEnter to commit (commitIndex >= enterIndex) on the leader.
+	require.Eventually(t, func() bool {
+		leader.mu.Lock()
+		defer leader.mu.Unlock()
+		return leader.jointPhase == JointEntering &&
+			leader.jointEnterIndex > 0 &&
+			leader.commitIndex >= leader.jointEnterIndex
+	}, 3*time.Second, 10*time.Millisecond, "JointOpEnter must commit")
+
+	leader.mu.Lock()
+	snapIndex := leader.jointEnterIndex
+	snapTerm := leader.currentTerm
+	oldVoters := append([]string(nil), leader.jointOldVoters...)
+	newVoters := append([]string(nil), leader.jointNewVoters...)
+	enterIndex := leader.jointEnterIndex
+
+	// Build server list: union of C_old and C_new so the snapshot reflects the
+	// joint membership.
+	seenIDs := make(map[string]struct{})
+	var snapServers []Server
+	for _, id := range leader.jointOldVoters {
+		if _, ok := seenIDs[id]; !ok {
+			seenIDs[id] = struct{}{}
+			snapServers = append(snapServers, Server{ID: id, Suffrage: Voter})
+		}
+	}
+	for _, id := range leader.jointNewVoters {
+		if _, ok := seenIDs[id]; !ok {
+			seenIDs[id] = struct{}{}
+			snapServers = append(snapServers, Server{ID: id, Suffrage: Voter})
+		}
+	}
+	leader.mu.Unlock()
+
+	// Save snapshot with full joint metadata on the leader's store.
+	snap := Snapshot{
+		Index:           snapIndex,
+		Term:            snapTerm,
+		Data:            []byte("state-at-joint"),
+		Servers:         snapServers,
+		JointPhase:      JointEntering,
+		JointOldVoters:  oldVoters,
+		JointNewVoters:  newVoters,
+		JointEnterIndex: enterIndex,
+	}
+	require.NoError(t, stores[leaderIdx].SaveSnapshot(snap))
+
+	// Compact the log to remove JointOpEnter from the in-memory log.
+	leader.CompactLog(snapIndex)
+
+	// Verify the entry is gone from the in-memory log.
+	leader.mu.Lock()
+	foundInLog := false
+	for _, e := range leader.log {
+		if e.Index == snapIndex {
+			foundInLog = true
+		}
+	}
+	leader.mu.Unlock()
+	require.False(t, foundInLog, "JointOpEnter must be compacted from in-memory log")
+
+	// Stop the leader and rebuild with the same store.
+	leaderID := leader.ID()
+	leaderCfg := leader.config
+	cancel()
+	leader.Close()
+
+	// Recreate the leader node from the persisted store.
+	// rebuildConfigFromLog alone cannot find JointOpEnter (it was compacted);
+	// RestoreJointStateFromSnapshot must be called to rehydrate joint state.
+	newNode := NewNode(leaderCfg, stores[leaderIdx])
+
+	// Diagnostic: dump initial state after NewNode (before RestoreJointStateFromSnapshot).
+	newNode.mu.Lock()
+	t.Logf("newNode after NewNode: ci=%d sni=%d lastApplied=%d logLen=%d phase=%v jei=%d",
+		newNode.commitIndex, newNode.snapshotIndex, newNode.lastApplied, len(newNode.log), newNode.jointPhase, newNode.jointEnterIndex)
+	newNode.mu.Unlock()
+
+	// Without RestoreJointStateFromSnapshot, jointPhase would be JointNone.
+	phaseBeforeRestore, _, _, _ := newNode.JointPhase()
+	require.Equal(t, JointNone, phaseBeforeRestore,
+		"before restore: compacted log means jointPhase is JointNone")
+
+	newNode.RestoreJointStateFromSnapshot(
+		int8(snap.JointPhase),
+		snap.JointOldVoters,
+		snap.JointNewVoters,
+		snap.JointEnterIndex,
+		nil,
+	)
+
+	phaseAfterRestore, _, _, _ := newNode.JointPhase()
+	require.Equal(t, JointEntering, phaseAfterRestore,
+		"after RestoreJointStateFromSnapshot: jointPhase must be JointEntering")
+
+	// Plug newNode back into the cluster mesh.
+	cluster.mu.Lock()
+	for i, n := range cluster.nodes {
+		if n.ID() == leaderID {
+			cluster.nodes[i] = newNode
+			break
+		}
+	}
+	cluster.mu.Unlock()
+
+	newNode.SetTransport(
+		func(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+			target := cluster.nodeByID(peer)
+			if target == nil {
+				return nil, errNodeNotFound
+			}
+			return target.HandleRequestVote(args), nil
+		},
+		func(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+			target := cluster.nodeByID(peer)
+			if target == nil {
+				return nil, errNodeNotFound
+			}
+			return target.HandleAppendEntries(args), nil
+		},
+	)
+	newNode.Start()
+	defer newNode.Close()
+
+	// Wait for any node to drive JointLeave to completion.
+	require.Eventually(t, func() bool {
+		for _, n := range cluster.nodes {
+			n.mu.Lock()
+			state := n.state
+			term := n.currentTerm
+			phase := n.jointPhase
+			ci := n.commitIndex
+			lli := n.lastLogIdx()
+			jei := n.jointEnterIndex
+			jlp := n.jointLeaveProposed
+			jab := n.jointAbortProposed
+			logLen := len(n.log)
+			n.mu.Unlock()
+			t.Logf("node %s: state=%v term=%d phase=%v ci=%d lli=%d jei=%d jlp=%v jab=%v logLen=%d",
+				n.ID(), state, term, phase, ci, lli, jei, jlp, jab, logLen)
+			if phase == JointNone {
+				return true
+			}
+		}
+		return false
+	}, 8*time.Second, 500*time.Millisecond, "JointNone must auto-complete after snapshot restore")
 }

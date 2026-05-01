@@ -82,6 +82,117 @@ func (c *ClusterCoordinator) HeadBucket(bucket string) error   { return c.base.H
 func (c *ClusterCoordinator) DeleteBucket(bucket string) error { return c.base.DeleteBucket(bucket) }
 func (c *ClusterCoordinator) ListBuckets() ([]string, error)   { return c.base.ListBuckets() }
 
+// ListAllObjects implements storage.Snapshotable by enumerating bucket-routed
+// objects across every cluster-wide bucket.
+func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) {
+	if c.router == nil || c.groups == nil {
+		snap, ok := c.base.(storage.Snapshotable)
+		if !ok {
+			return nil, storage.ErrSnapshotNotSupported
+		}
+		return snap.ListAllObjects()
+	}
+	buckets, err := c.ListBuckets()
+	if err != nil {
+		return nil, err
+	}
+	var out []storage.SnapshotObject
+	for _, bucket := range buckets {
+		if err := c.WalkObjects(bucket, "", func(obj *storage.Object) error {
+			out = append(out, storage.SnapshotObject{
+				Bucket:         bucket,
+				Key:            obj.Key,
+				ETag:           obj.ETag,
+				Size:           obj.Size,
+				ContentType:    obj.ContentType,
+				Modified:       obj.LastModified,
+				VersionID:      obj.VersionID,
+				IsDeleteMarker: obj.IsDeleteMarker,
+				IsLatest:       true,
+				ACL:            obj.ACL,
+			})
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// RestoreObjects implements storage.Snapshotable by routing object metadata
+// restore to the data group that owns each object's bucket.
+func (c *ClusterCoordinator) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
+	if c.router == nil || c.groups == nil {
+		snap, ok := c.base.(storage.Snapshotable)
+		if !ok {
+			return 0, nil, storage.ErrSnapshotNotSupported
+		}
+		return snap.RestoreObjects(objects)
+	}
+
+	want := make(map[string]struct{}, len(objects))
+	for _, obj := range objects {
+		want[obj.Bucket+"\x00"+obj.Key] = struct{}{}
+	}
+	current, err := c.ListAllObjects()
+	if err != nil {
+		return 0, nil, err
+	}
+	for _, obj := range current {
+		if _, ok := want[obj.Bucket+"\x00"+obj.Key]; ok {
+			continue
+		}
+		if err := c.DeleteObject(obj.Bucket, obj.Key); err != nil {
+			return 0, nil, err
+		}
+	}
+
+	byGroup := make(map[string][]storage.SnapshotObject)
+	for _, obj := range objects {
+		target, err := c.routeBucket(obj.Bucket)
+		if err != nil {
+			return 0, nil, err
+		}
+		byGroup[target.groupID] = append(byGroup[target.groupID], obj)
+	}
+
+	var restored int
+	var stale []storage.StaleBlob
+	for groupID, groupObjects := range byGroup {
+		gb := c.localBackend(groupID)
+		if gb == nil {
+			return restored, stale, ErrCoordinatorNoRouter
+		}
+		count, groupStale, err := gb.RestoreObjects(groupObjects)
+		restored += count
+		stale = append(stale, groupStale...)
+		if err != nil {
+			return restored, stale, err
+		}
+	}
+	return restored, stale, nil
+}
+
+// ListAllBuckets implements storage.BucketSnapshotable by delegating to the
+// base backend.
+func (c *ClusterCoordinator) ListAllBuckets() ([]storage.SnapshotBucket, error) {
+	snap, ok := c.base.(storage.BucketSnapshotable)
+	if !ok {
+		return nil, storage.ErrSnapshotNotSupported
+	}
+	return snap.ListAllBuckets()
+}
+
+// RestoreBuckets implements storage.BucketSnapshotable by delegating to the
+// base backend.
+func (c *ClusterCoordinator) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	snap, ok := c.base.(storage.BucketSnapshotable)
+	if !ok {
+		return storage.ErrSnapshotNotSupported
+	}
+	return snap.RestoreBuckets(buckets)
+}
+
 // --- Routing helper ---
 
 // routeTarget captures everything an op needs to dispatch a bucket-scoped

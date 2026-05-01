@@ -807,6 +807,19 @@ func (n *Node) Configuration() Configuration {
 // The returned phase is the unexported jointPhase type promoted via int8 cast
 // at package boundaries; callers can use raft.JointNone / raft.JointEntering
 // constants for comparison.
+//
+// Restart recovery pattern — log-based restart (no snapshot truncation):
+//
+//	if phase, _, _, _ := n.JointPhase(); phase == JointEntering {
+//	    // Option A: wait — the new leader auto-proposes JointLeave on its
+//	    //   first heartbeat tick once commitIndex >= enterIndex.
+//	    // Option B: abort — call n.ForceAbortJoint(ctx) to revert to C_old.
+//	}
+//
+// Snapshot-based restart (JointOpEnter compacted from log): callers MUST call
+// RestoreJointStateFromSnapshot before Start() so the heartbeat watcher can
+// drive JointLeave or JointAbort correctly. Without the restore call the node
+// starts with jointPhase=JointNone and the joint cycle is silently lost.
 func (n *Node) JointPhase() (phase JointPhase, oldVoters []string, newVoters []string, enterIndex uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -962,6 +975,9 @@ func (n *Node) run() {
 	for {
 		select {
 		case <-n.stopCh:
+			n.mu.Lock()
+			n.drainJointResultLocked(ErrLeadershipLost)
+			n.mu.Unlock()
 			return
 		default:
 		}
@@ -992,6 +1008,18 @@ func (n *Node) run() {
 	}
 }
 
+// drainJointResultLocked releases any ChangeMembership caller waiting for joint
+// consensus completion. Caller MUST hold n.mu.
+func (n *Node) drainJointResultLocked(err error) {
+	if n.jointResultCh != nil {
+		select {
+		case n.jointResultCh <- err:
+		default: // commit path already sent; goroutine already unblocked
+		}
+		n.jointResultCh = nil
+	}
+}
+
 func (n *Node) randomElectionTimeout() time.Duration {
 	base := n.config.ElectionTimeout
 	jitter := time.Duration(rand.Int63n(int64(base)))
@@ -1002,13 +1030,7 @@ func (n *Node) runFollower() {
 	// Drain jointResultCh so any blocked ChangeMembership goroutine unblocks
 	// with ErrLeadershipLost when this node transitions Leader→Follower.
 	n.mu.Lock()
-	if n.jointResultCh != nil {
-		select {
-		case n.jointResultCh <- ErrLeadershipLost:
-		default: // commit path already sent; goroutine already unblocked
-		}
-		n.jointResultCh = nil
-	}
+	n.drainJointResultLocked(ErrLeadershipLost)
 	n.mu.Unlock()
 
 	timeout := n.randomElectionTimeout()

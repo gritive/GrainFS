@@ -67,8 +67,8 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 			"serve",
 			"--data", dir,
 			"--port", fmt.Sprintf("%d", port),
-			"--nfs4-port", "0",
-			"--nbd-port", "0",
+			"--nfs4-port", fmt.Sprintf("%d", freePort()),
+			"--nbd-port", fmt.Sprintf("%d", freePort()),
 		}
 		cmd := exec.Command(binary, args...)
 		// Assign before Start so cleanup() can remove dir even if Start fails.

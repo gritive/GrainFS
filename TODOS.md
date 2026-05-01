@@ -36,7 +36,7 @@
     - **후속: Joint phase observation API** — process restart 시 caller lost 위험 (cross-model 발견 Codex #1). Sub-project 3 ChangeMembership 공개 시 idempotent reattach + `Configuration()`/`JointPhase()` query API 노출 검토.
     - **후속: Stuck joint abort 메커니즘** — v0.0.7.2 #118 완료. `JointOpAbort` + `ForceAbortJoint` API 구현; multi-cycle jAborted reset + wg 누수 수정 포함.
     - **후속: Voter set lock-free read** — `n.mu` hold 안 voter set read를 `atomic.Pointer[voterSets]` COW swap으로 분리. raft.go 전반 multi-field invariant 안에서 voter set만 분리하려면 design 필요.
-    - **후속: Joint chaos scenarios + E2E snapshot mid-joint** — Sub-project 3 `ChangeMembership` public API 노출 후 chaos scenarios 3개 (LeaderCrashBetweenEnterAndLeave / PartitionDuringJoint / RepeatedLeaderChange) + `TestJoint_E2E_SnapshotMidJoint_AutoCompletes` 작성.
+    - **후속: E2E snapshot mid-joint** — Public `Snapshot()` trigger API 이후 `TestJoint_E2E_SnapshotMidJoint_AutoCompletes` 작성.
   - **Tier 3-2: RecoverCluster** — 단일 노드 재해 복구 운영 도구
   - **Tier 3-3: 클라이언트 dedup** — ClientID + RequestID 기반 dedup table, S3 SDK retry 시 중복 PUT 방지
   - **Tier 3-4: AE pipelining** — in-flight AppendEntries 1 → N (replication throughput)

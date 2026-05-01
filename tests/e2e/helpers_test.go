@@ -37,7 +37,8 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(dir)
 
 	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort())}
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort())}
 
 	// GRAINFS_DEDUP=1 opts into dedup. Default is OFF for the e2e suite because
 	// dedup + snapshots is not implemented in Phase A — CoW E2E tests would
