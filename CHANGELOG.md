@@ -15,6 +15,10 @@
 
 - **raft**: `applyJointConfChangeLocked` JointOpAbort idempotency guard — no-op when `jointPhase != JointEntering`, preventing double-apply if both `JointLeave` and `JointAbort` are in flight.
 - **raft**: `initLeaderState` now resets `jointLeaveProposed` and `jointAbortProposed` on every leader election, allowing the new leader to re-trigger auto-abort if a previous abort goroutine was in flight when the old leader stepped down.
+- **raft**: `rebuildConfigFromLog` now resets the `jAborted` flag on `JointOpEnter`, preventing a prior cycle's abort from silently skipping the subsequent cycle's `JointOpLeave` during log replay (multi-cycle abort→reenter→leave sequence).
+- **raft**: `applyJointConfChangeLocked` `JointOpLeave` now resets `jointAbortProposed = false`, clearing any stale flag from a racing abort proposal that resolved before the leave committed.
+- **raft**: `RestoreJointStateFromSnapshot` now also resets `jointAbortProposed` and `jointEnterTime` so a newly elected leader starting from a snapshot does not inherit stale abort-proposal state.
+- **raft**: `triggerAbortAsync` goroutine now tracked by `n.wg`, preventing it from accessing node state after `Close()` returns.
 
 ## [0.0.7.1] — 2026-05-01 — Raft managed_by_joint persistence (PR-K3)
 

@@ -4,6 +4,11 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
+### Raft
+
+- [ ] **JointOpAbort: 관리 learner orphan 처리** — `ForceAbortJoint` 직접 호출 시 (ChangeMembership 없이) abort 이후에도 `learnerIDs`에 남은 managed learner가 `checkLearnerCatchup`에 의해 auto-promote될 수 있음. `JointOpAbort` apply 시 `jointManagedLearners`의 learner를 `learnerIDs`에서 제거하거나, `ForceAbortJoint` API에서 정리하는 방향으로 처리 필요. **Priority:** P2
+- [ ] **JointOpAbort: leadership change 중 jointResultCh goroutine 누수** — node가 follower로 전환되면 `ChangeMembership`의 `proposeJointConfChangeWait`가 `jointResultCh` 신호를 기다리다 누수될 수 있음. `stopCh` 클로즈 없이 follower 전환 시 goroutine 대기 상태 유지. 장기적으로 leader-change 이벤트에 `jointResultCh`에 error를 주입하는 방식으로 해결. **Priority:** P2
+
 ### 기타
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
