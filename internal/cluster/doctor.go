@@ -72,7 +72,7 @@ func (d *Doctor) Run() (*DiagnosticReport, error) {
 	case failCount > 0:
 		report.OverallHealth = "fail"
 		report.Recommendations = append(report.Recommendations,
-			"Critical issues detected. Run 'grainfs recover --auto' to attempt automatic recovery.")
+			"Critical issues detected. Run 'grainfs recover --dry-run' for recommendations; use 'grainfs recover cluster plan' for offline snapshot recovery.")
 	case warnCount > 0:
 		report.OverallHealth = "warn"
 		report.Recommendations = append(report.Recommendations,

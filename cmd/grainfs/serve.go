@@ -736,6 +736,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		backend = pullthrough.NewBackend(backend, up)
 		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
+	recoveryReadOnly := false
+	if marker, err := cluster.LoadRecoverClusterMarker(dataDir); err != nil {
+		return fmt.Errorf("load recovery marker: %w", err)
+	} else if marker != nil && !marker.Writable {
+		recoveryReadOnly = true
+		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		log.Warn().Str("marker", filepath.Join(dataDir, cluster.RecoverClusterMarkerPath)).Msg("recovered cluster write gate enabled")
+	}
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.
@@ -774,7 +782,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// the default bucket should already exist. If it doesn't, a follower can't
 	// create it anyway (only the leader can propose). We log a warning but
 	// don't fail startup to allow cluster reconfiguration.
-	if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
+	if !recoveryReadOnly {
+		err = createDefaultBucketWithRetry(ctx, backend, 30*time.Second)
+	}
+	if err != nil {
 		if len(peers) > 0 {
 			// Cluster mode with peers: joining an existing cluster.
 			// Default bucket may or may not exist; either way, follower can't create it.

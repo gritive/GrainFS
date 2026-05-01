@@ -88,7 +88,7 @@ avg(grainfs_node_recovery_duration_seconds)
 
 **SLO:** ≤ 10 minutes for single node failure
 
-**Verification:** `grainfs recover --auto` execution time
+**Verification:** cluster rejoin timing and `grainfs recover --dry-run`/`grainfs recover cluster plan` operator drill timing
 
 ---
 
