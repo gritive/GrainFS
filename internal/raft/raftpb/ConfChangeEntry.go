@@ -82,7 +82,7 @@ func (rcv *ConfChangeEntry) MutateManagedByJoint(n bool) bool {
 }
 
 func ConfChangeEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(4)
 }
 func ConfChangeEntryAddOp(builder *flatbuffers.Builder, op ConfChangeOp) {
 	builder.PrependInt8Slot(0, int8(op), 0)

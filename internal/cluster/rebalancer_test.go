@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // mockMetaRaftClient satisfies MetaRaftClient for Rebalancer tests.
@@ -30,7 +32,7 @@ func (m *mockMetaRaftClient) ProposeRebalancePlan(_ context.Context, p Rebalance
 	return m.fsm.applyCmd(makeRebalancePlanCmd(p))
 }
 
-func (m *mockMetaRaftClient) ProposeAbortPlan(_ context.Context, planID string) error {
+func (m *mockMetaRaftClient) ProposeAbortPlan(_ context.Context, planID string, _ clusterpb.AbortPlanReason) error {
 	m.abortedPlans = append(m.abortedPlans, planID)
 	return m.fsm.applyCmd(makeAbortCmd(planID))
 }
@@ -42,7 +44,7 @@ func makeRebalancePlanCmd(plan RebalancePlan) []byte {
 }
 
 func makeAbortCmd(planID string) []byte {
-	data, _ := encodeMetaAbortPlanCmd(planID)
+	data, _ := encodeMetaAbortPlanCmd(planID, clusterpb.AbortPlanReasonUnknown)
 	cmd, _ := encodeMetaCmd(MetaCmdTypeAbortPlan, data)
 	return cmd
 }

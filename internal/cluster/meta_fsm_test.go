@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 func makeAddNodeCmd(t *testing.T, id, addr string, role uint8) []byte {
@@ -308,7 +310,7 @@ func makeProposeRebalancePlanCmd(t *testing.T, plan RebalancePlan) []byte {
 
 func makeAbortPlanCmd(t *testing.T, planID string) []byte {
 	t.Helper()
-	data, err := encodeMetaAbortPlanCmd(planID)
+	data, err := encodeMetaAbortPlanCmd(planID, clusterpb.AbortPlanReasonUnknown)
 	require.NoError(t, err)
 	cmd, err := encodeMetaCmd(MetaCmdTypeAbortPlan, data)
 	require.NoError(t, err)
