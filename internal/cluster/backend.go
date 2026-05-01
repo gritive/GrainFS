@@ -353,6 +353,86 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 	})
 }
 
+// forwardReadIndex sends a StreamReadIndex RPC to leaderAddr and returns the leader's commitIndex.
+// Wire: request=[empty], response=[8B commitIndex BE][4B errLen BE][errBytes...]
+func (b *DistributedBackend) forwardReadIndex(ctx context.Context, leaderAddr string) (uint64, error) {
+	if b.shardSvc == nil {
+		return 0, fmt.Errorf("forwardReadIndex: no transport available")
+	}
+	resp, err := b.shardSvc.SendRequest(ctx, leaderAddr, &transport.Message{
+		Type:    transport.StreamReadIndex,
+		Payload: []byte{},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("forwardReadIndex: %w", err)
+	}
+	if len(resp.Payload) < 12 {
+		return 0, fmt.Errorf("forwardReadIndex: short response: %d bytes", len(resp.Payload))
+	}
+	idx := binary.BigEndian.Uint64(resp.Payload[0:8])
+	errLen := binary.BigEndian.Uint32(resp.Payload[8:12])
+	if errLen > 0 && len(resp.Payload) >= 12+int(errLen) {
+		return 0, fmt.Errorf("forwardReadIndex: leader: %s", string(resp.Payload[12:12+int(errLen)]))
+	}
+	return idx, nil
+}
+
+// RegisterReadIndexHandler registers the StreamReadIndex handler on this (leader) node.
+// Incoming requests call node.ReadIndex and return the commitIndex to the follower.
+func (b *DistributedBackend) RegisterReadIndexHandler() {
+	if b.shardSvc == nil {
+		return
+	}
+	b.shardSvc.RegisterHandler(transport.StreamReadIndex, func(req *transport.Message) *transport.Message {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp := make([]byte, 12)
+		idx, err := b.node.ReadIndex(ctx)
+		if err != nil {
+			errBytes := []byte(err.Error())
+			binary.BigEndian.PutUint64(resp[0:8], 0)
+			binary.BigEndian.PutUint32(resp[8:12], uint32(len(errBytes)))
+			resp = append(resp, errBytes...)
+		} else {
+			binary.BigEndian.PutUint64(resp[0:8], idx)
+			binary.BigEndian.PutUint32(resp[8:12], 0)
+		}
+		return &transport.Message{Type: transport.StreamReadIndex, Payload: resp}
+	})
+}
+
+// ReadIndex returns a linearizable read fence index.
+// On the leader it confirms leadership via heartbeat quorum.
+// On a follower it forwards to the leader via StreamReadIndex QUIC RPC.
+func (b *DistributedBackend) ReadIndex(ctx context.Context) (uint64, error) {
+	idx, err := b.node.ReadIndex(ctx)
+	if err == nil {
+		return idx, nil
+	}
+	if !errors.Is(err, raft.ErrNotLeader) {
+		return 0, err
+	}
+	// follower: forward to leader
+	peers := b.node.Peers()
+	if len(peers) == 0 {
+		return 0, raft.ErrNotLeader
+	}
+	var lastErr error
+	for _, peer := range peers {
+		var ci uint64
+		ci, lastErr = b.forwardReadIndex(ctx, peer)
+		if lastErr == nil {
+			return ci, nil
+		}
+	}
+	return 0, lastErr
+}
+
+// WaitApplied blocks until the node's FSM has applied at least index or ctx is done.
+func (b *DistributedBackend) WaitApplied(ctx context.Context, index uint64) error {
+	return b.node.WaitApplied(ctx, index)
+}
+
 func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
 	data, err := EncodeCommand(cmdType, payload)
 	if err != nil {

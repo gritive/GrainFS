@@ -885,6 +885,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		defer dedupDB.Close()
 	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
+	srvOpts = append(srvOpts, server.WithReadIndexer(distBackend))
+
+	distBackend.RegisterReadIndexHandler()
 
 	srv := server.New(addr, backend, srvOpts...)
 
@@ -968,7 +971,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
 	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
-	nodeSvc := startNodeServices(ctx, cmd, backend, volMgr, nfs4Port, nbdPort, nbdVolumeSize)
+	nodeSvc := startNodeServices(ctx, cmd, backend, volMgr, nfs4Port, nbdPort, nbdVolumeSize, distBackend)
 	defer nodeSvc.Close()
 
 	<-ctx.Done()
