@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -288,10 +289,13 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 //	  Leader bootstraps replication state for newly added voters.
 //	JointLeave:
 //	  jointPhase = JointNone, config.Peers = newServers (single mode).
-//	  jointPromoteCh closed on every node so proposeJointConfChangeWait callers
+//	  jointResultCh signaled on every node so proposeJointConfChangeWait callers
 //	  wake up regardless of which node currently holds leadership.
 //	  Leader self-removal triggers step-down at the end of apply (Decision 8 +
 //	  cross-model Codex #7 / Gemini #8 — apply-time, not append-time).
+//	JointAbort:
+//	  jointPhase = JointNone, config.Peers restored to C_old from entry payload.
+//	  jointResultCh signaled with ErrJointAborted. No-op if not in JointEntering.
 func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 	jc := decodeJointConfChange(entry.Command)
 	switch jc.Op {
@@ -300,6 +304,7 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		n.jointOldVoters = serverPeerKeys(jc.OldServers)
 		n.jointNewVoters = serverPeerKeys(jc.NewServers)
 		n.jointEnterIndex = entry.Index
+		n.jointEnterTime = time.Now()
 		n.jointLeaveProposed = false
 		if n.state == Leader {
 			n.initLeaderStateForNewVoters(jc.OldServers, jc.NewServers)
@@ -324,6 +329,20 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		n.jointNewVoters = nil
 		n.jointEnterIndex = 0
 		n.jointLeaveProposed = false
+
+	case JointOpAbort:
+		if n.jointPhase != JointEntering {
+			return // idempotency guard: already resolved
+		}
+		// Restore C_old from entry payload — self-contained, safe after snapshot truncation.
+		n.config.Peers = peersExcludingSelf(jc.OldServers, n.id)
+		n.jointPhase = JointNone
+		n.jointOldVoters = nil
+		n.jointNewVoters = nil
+		n.jointEnterIndex = 0
+		n.jointLeaveProposed = false
+		n.jointAbortProposed = false
+		n.jointManagedLearners = nil
 	}
 }
 
@@ -465,6 +484,15 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				}
 				// Mirror commit-time hook (raft.go:586): orphan election guard.
 				removed = !containsPeer(serverPeerKeys(jc.NewServers), n.id)
+				jPhase = JointNone
+				jOldVoters = nil
+				jNewVoters = nil
+				jEnterIndex = 0
+
+			case JointOpAbort:
+				// Restore C_old from entry payload — self-contained, safe after snapshot truncation.
+				peers = peersExcludingSelf(jc.OldServers, n.id)
+				managedLearners = make(map[string]struct{})
 				jPhase = JointNone
 				jOldVoters = nil
 				jNewVoters = nil

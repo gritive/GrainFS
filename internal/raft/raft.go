@@ -21,6 +21,8 @@ var (
 	ErrProposalFailed      = errors.New("proposal failed: node stepped down")
 	ErrNoPeers             = errors.New("no peers available for leadership transfer")
 	ErrAlreadyBootstrapped = errors.New("raft: already bootstrapped")
+	ErrJointAborted        = errors.New("raft: joint consensus aborted — config reverted to C_old")
+	ErrNotInJointPhase     = errors.New("raft: ForceAbortJoint called outside JointEntering phase")
 )
 
 // ServerSuffrage describes whether a cluster member has a vote.
@@ -174,6 +176,9 @@ type Config struct {
 	// LearnerCatchupThreshold: matchIndex+threshold >= commitIndex 시 watcher가 PromoteToVoter propose.
 	// 0 면 100으로 fallback. AddVoter 자동 learner-first의 promote 트리거.
 	LearnerCatchupThreshold uint64
+	// JointAbortTimeout: JointEnter 커밋 후 이 시간이 지나도 JointLeave가 커밋되지 않으면
+	// 자동으로 JointOpAbort를 propose한다. 0이면 비활성 (기본값).
+	JointAbortTimeout time.Duration
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -311,12 +316,14 @@ type Node struct {
 	mixedVersion           bool     // true = cluster has nodes on different versions; blocks membership changes
 
 	// §4.3 joint consensus state (Sub-project 2)
-	jointPhase         jointPhase    // current phase; JointNone unless C_old+new is committed
-	jointOldVoters     []string      // C_old voter ids; valid only when jointPhase == JointEntering
-	jointNewVoters     []string      // C_new voter ids; valid only when jointPhase == JointEntering
-	jointEnterIndex    uint64        // log index of committed JointEnter entry; 0 = none
-	jointLeaveProposed bool          // leader-only idempotency flag for checkJointAdvance
-	jointPromoteCh     chan struct{} // closed by every node's apply path on JointLeave commit; wakes proposeJointConfChangeWait callers
+	jointPhase         jointPhase // current phase; JointNone unless C_old+new is committed
+	jointOldVoters     []string   // C_old voter ids; valid only when jointPhase == JointEntering
+	jointNewVoters     []string   // C_new voter ids; valid only when jointPhase == JointEntering
+	jointEnterIndex    uint64     // log index of committed JointEnter entry; 0 = none
+	jointLeaveProposed bool       // leader-only idempotency flag for checkJointAdvance
+	jointResultCh      chan error // buffered(1); send nil on JointLeave commit, ErrJointAborted on JointAbort commit
+	jointEnterTime     time.Time  // when JointOpEnter was applied; used for JointAbortTimeout
+	jointAbortProposed bool       // leader-only idempotency flag; prevent concurrent abort + leave
 
 	// log GC tracking (Phase 14d)
 	lastLogGC time.Time
@@ -599,16 +606,16 @@ func (n *Node) applyLoop() {
 		}
 
 		// JointConfChange entries are already applied on append for the §4.3
-		// dual-quorum invariant. On JointLeave commit, perform truncation-safe
-		// caller wakeup and self-removal step-down — both gated to commit so an
-		// uncommitted JointLeave that gets truncated by a new leader does not
-		// falsely release callers or step the leader down prematurely.
+		// dual-quorum invariant. On JointLeave/JointAbort commit, perform
+		// truncation-safe caller wakeup — gated to commit so an uncommitted entry
+		// that gets truncated by a new leader does not falsely release callers.
 		if entry.Type == LogEntryJointConfChange {
 			jc := decodeJointConfChange(entry.Command)
-			if jc.Op == JointOpLeave {
-				if n.jointPromoteCh != nil {
-					close(n.jointPromoteCh)
-					n.jointPromoteCh = nil
+			switch jc.Op {
+			case JointOpLeave:
+				if n.jointResultCh != nil {
+					n.jointResultCh <- nil
+					n.jointResultCh = nil
 				}
 				newPeers := serverPeerKeys(jc.NewServers)
 				if !containsPeer(newPeers, n.id) {
@@ -620,6 +627,11 @@ func (n *Node) applyLoop() {
 					}
 				} else {
 					n.removedFromCluster = false
+				}
+			case JointOpAbort:
+				if n.jointResultCh != nil {
+					n.jointResultCh <- ErrJointAborted
+					n.jointResultCh = nil
 				}
 			}
 		}
@@ -1226,6 +1238,10 @@ func (n *Node) initLeaderState() {
 	}
 	// Track self's matchIndex
 	n.matchIndex[n.id] = n.lastLogIdx()
+	// Reset per-leadership idempotency flags so the new leader re-evaluates
+	// whether JointLeave or JointAbort needs to be proposed.
+	n.jointLeaveProposed = false
+	n.jointAbortProposed = false
 	// When this node steps down via CheckQuorum it becomes a follower with
 	// knowledge of a recent leader (itself). Seed lastLeaderContact so the
 	// stickiness window applies and we don't immediately grant votes.
@@ -1496,7 +1512,12 @@ func (n *Node) advanceCommitIndex() {
 				matched[peer] = true
 			}
 		}
-		if !n.dualMajority(matched) {
+		if isJointAbortEntry(n.log[n.toSliceIdx(idx)]) {
+			// JointOpAbort commits under C_old quorum only — C_new may be down.
+			if !n.hasMajorityInSet(matched, n.jointOldVoters) {
+				continue
+			}
+		} else if !n.dualMajority(matched) {
 			continue
 		}
 
@@ -1504,6 +1525,16 @@ func (n *Node) advanceCommitIndex() {
 		n.signalCommit()
 		return
 	}
+}
+
+// isJointAbortEntry returns true iff entry is a JointConfChange with op=Abort.
+// Must check entry type before decoding FlatBuffers to avoid panic on non-joint payloads.
+func isJointAbortEntry(entry LogEntry) bool {
+	if entry.Type != LogEntryJointConfChange {
+		return false
+	}
+	jc := decodeJointConfChange(entry.Command)
+	return jc.Op == JointOpAbort
 }
 
 // QuorumMinMatchIndex returns the highest log index replicated to at least a
