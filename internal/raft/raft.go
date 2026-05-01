@@ -821,9 +821,10 @@ func (n *Node) JointSnapshotState() (phase int8, jointOldVoters, jointNewVoters 
 }
 
 // RestoreJointStateFromSnapshot adopts §4.3 joint state read from a snapshot.
-// Use as JointStateRestorer for SnapshotManager. jointLeaveProposed is reset to
-// false so the leader's heartbeat watcher re-evaluates and re-proposes JointLeave
-// if the JointEnter entry is still committed but Leave hasn't run yet.
+// Use as JointStateRestorer for SnapshotManager. Leader-only proposal flags and
+// the abort timer are reset so the new leader's heartbeat watcher re-evaluates
+// and re-proposes JointLeave if the JointEnter entry is still committed but Leave
+// hasn't run yet.
 func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -832,6 +833,8 @@ func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNe
 	n.jointNewVoters = jointNewVoters
 	n.jointEnterIndex = jointEnterIndex
 	n.jointLeaveProposed = false
+	n.jointAbortProposed = false
+	n.jointEnterTime = time.Time{}
 	n.jointManagedLearners = make(map[string]struct{}, len(managedLearners))
 	for _, id := range managedLearners {
 		n.jointManagedLearners[id] = struct{}{}

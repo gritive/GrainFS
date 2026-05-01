@@ -332,6 +332,7 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		n.jointNewVoters = nil
 		n.jointEnterIndex = 0
 		n.jointLeaveProposed = false
+		n.jointAbortProposed = false
 
 	case JointOpAbort:
 		if n.jointPhase != JointEntering {
@@ -477,6 +478,7 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				jOldVoters = serverPeerKeys(jc.OldServers)
 				jNewVoters = serverPeerKeys(jc.NewServers)
 				jEnterIndex = entry.Index
+				jAborted = false // new joint cycle resets prior abort flag
 				// JointEnter that brings self into C_new clears any prior
 				// removal flag (rejoin scenario).
 				if containsPeer(jNewVoters, n.id) {

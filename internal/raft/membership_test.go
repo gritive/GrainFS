@@ -557,3 +557,58 @@ func TestRebuildConfigFromLog_AbortThenLeave_LeaveIsSkipped(t *testing.T) {
 	require.Equal(t, []string{"n2", "n3"}, peers,
 		"peers must be C_old after abort; stale JointOpLeave must not switch to C_new")
 }
+
+// TestRebuildConfigFromLog_AbortThenEnterThenLeave verifies that a second joint
+// cycle that follows an aborted first cycle is replayed correctly. The jAborted
+// flag must be cleared on JointOpEnter so the second cycle's JointOpLeave is not
+// mistakenly skipped.
+//
+// Sequence: Enter(C_old→C_new1) → Abort → Enter(C_old→C_new2) → Leave(C_new2)
+// Expected: config.Peers == C_new2, jointPhase == JointNone.
+func TestRebuildConfigFromLog_AbortThenEnterThenLeave(t *testing.T) {
+	n := &Node{
+		id:                   "n1",
+		matchIndex:           map[string]uint64{},
+		nextIndex:            map[string]uint64{},
+		learnerIDs:           map[string]string{},
+		learnerPromoteCh:     map[string]chan struct{}{},
+		jointManagedLearners: map[string]struct{}{},
+	}
+	n.mu.Lock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpEnter,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+		{Index: 2, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpAbort,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+		// Second cycle: new C_new = {n1, n6, n7}.
+		{Index: 3, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpEnter,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n6"}, {ID: "n7"}},
+			})},
+		{Index: 4, Term: 1, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange(JointConfChange{
+				Op:         JointOpLeave,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n6"}, {ID: "n7"}},
+			})},
+	}
+	n.firstIndex = 1
+	n.rebuildConfigFromLog(0, nil, nil)
+	peers := n.config.Peers
+	phase := n.jointPhase
+	n.mu.Unlock()
+
+	require.Equal(t, JointNone, phase, "second cycle committed: phase must be JointNone")
+	require.Equal(t, []string{"n6", "n7"}, peers,
+		"second cycle Leave must apply; jAborted from first cycle must not bleed over")
+}

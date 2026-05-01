@@ -383,7 +383,9 @@ func (n *Node) triggerAbortAsync() {
 		return
 	}
 	n.jointAbortProposed = true
+	n.wg.Add(1)
 	go func() {
+		defer n.wg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*n.config.HeartbeatTimeout)
 		defer cancel()
 		select {
