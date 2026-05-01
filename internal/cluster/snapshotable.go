@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -64,6 +65,56 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 		}
 	}
 	return result, nil
+}
+
+// ListAllBuckets implements storage.BucketSnapshotable by capturing bucket
+// metadata persisted in the cluster FSM.
+func (b *DistributedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
+	buckets, err := b.ListBuckets()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storage.SnapshotBucket, 0, len(buckets))
+	for _, bucket := range buckets {
+		state, err := b.GetBucketVersioning(bucket)
+		if err != nil {
+			return nil, fmt.Errorf("get bucket versioning %s: %w", bucket, err)
+		}
+		out = append(out, storage.SnapshotBucket{
+			Name:            bucket,
+			VersioningState: state,
+		})
+	}
+	return out, nil
+}
+
+// RestoreBuckets implements storage.BucketSnapshotable by recreating buckets
+// and restoring their versioning metadata through Raft proposals.
+func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	for _, bucket := range buckets {
+		if bucket.Name == "" {
+			continue
+		}
+		if err := b.HeadBucket(bucket.Name); err != nil {
+			if !errors.Is(err, storage.ErrBucketNotFound) {
+				return err
+			}
+			if err := b.propose(context.Background(), CmdCreateBucket, CreateBucketCmd{Bucket: bucket.Name}); err != nil {
+				return fmt.Errorf("restore bucket %s: %w", bucket.Name, err)
+			}
+		}
+		state := bucket.VersioningState
+		if state == "" {
+			state = "Unversioned"
+		}
+		if err := b.propose(context.Background(), CmdSetBucketVersioning, SetBucketVersioningCmd{
+			Bucket: bucket.Name,
+			State:  state,
+		}); err != nil {
+			return fmt.Errorf("restore bucket versioning %s: %w", bucket.Name, err)
+		}
+	}
+	return nil
 }
 
 // RestoreObjects implements storage.Snapshotable.

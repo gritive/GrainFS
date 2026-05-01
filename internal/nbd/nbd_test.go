@@ -1,9 +1,12 @@
 package nbd
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -14,6 +17,11 @@ import (
 
 func setupNBD(t *testing.T) (*Server, net.Conn) {
 	t.Helper()
+	return setupNBDWithReadIndexer(t, nil)
+}
+
+func setupNBDWithReadIndexer(t *testing.T, ri ReadIndexer) (*Server, net.Conn) {
+	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
@@ -23,6 +31,9 @@ func setupNBD(t *testing.T) (*Server, net.Conn) {
 	require.NoError(t, err)
 
 	srv := NewServer(mgr, "nbd-test")
+	if ri != nil {
+		srv.SetReadIndexer(ri)
+	}
 
 	// Use a pipe for testing
 	client, server := net.Pipe()
@@ -67,6 +78,24 @@ func setupNBD(t *testing.T) (*Server, net.Conn) {
 	})
 
 	return srv, client
+}
+
+type fakeReadIndexer struct {
+	readCalls atomic.Int32
+	waitCalls atomic.Int32
+	readErr   error
+	waitErr   error
+	index     uint64
+}
+
+func (f *fakeReadIndexer) ReadIndex(context.Context) (uint64, error) {
+	f.readCalls.Add(1)
+	return f.index, f.readErr
+}
+
+func (f *fakeReadIndexer) WaitApplied(context.Context, uint64) error {
+	f.waitCalls.Add(1)
+	return f.waitErr
 }
 
 func TestNBDHandshake(t *testing.T) {
@@ -191,4 +220,34 @@ func TestNBDWriteRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, nbdReplyMagic, binary.BigEndian.Uint32(replyBuf[0:4]))
 	assert.Equal(t, data, replyBuf[16:])
+}
+
+func TestNBDReadUsesReadIndexer(t *testing.T) {
+	ri := &fakeReadIndexer{index: 9}
+	_, conn := setupNBDWithReadIndexer(t, ri)
+
+	sendReadConn(t, conn, 0, 4)
+
+	assert.Equal(t, int32(1), ri.readCalls.Load())
+	assert.Equal(t, int32(1), ri.waitCalls.Load())
+}
+
+func TestNBDReadReturnsErrorWhenReadIndexFails(t *testing.T) {
+	ri := &fakeReadIndexer{readErr: errors.New("not leader")}
+	_, conn := setupNBDWithReadIndexer(t, ri)
+
+	req := make([]byte, 28)
+	binary.BigEndian.PutUint32(req[0:4], nbdRequestMagic)
+	binary.BigEndian.PutUint16(req[6:8], uint16(nbdCmdRead))
+	binary.BigEndian.PutUint64(req[8:16], 2)
+	binary.BigEndian.PutUint32(req[24:28], 4)
+	_, err := conn.Write(req)
+	require.NoError(t, err)
+
+	reply := make([]byte, 16)
+	_, err = io.ReadFull(conn, reply)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), binary.BigEndian.Uint32(reply[4:8]))
+	assert.Equal(t, int32(1), ri.readCalls.Load())
+	assert.Equal(t, int32(0), ri.waitCalls.Load())
 }

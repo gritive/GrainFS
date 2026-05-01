@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.7.7] — 2026-05-01 — Raft joint chaos hardening + e2e port isolation
+
+### Added
+
+- **raft**: chaos coverage for joint-consensus partition/abort behavior, including managed learner cleanup and C_old voter preservation.
+- **cluster**: `ClusterCoordinator` snapshot/PITR coverage for listing and restoring bucket-routed group objects.
+
+### Fixed
+
+- **raft**: joint operation result channels are drained on stop or leadership loss, preventing blocked membership-change callers.
+- **raft**: stale old-term `JointLeave` entries and aborted in-flight leaves no longer confuse joint abort/leave detection.
+- **cluster**: object snapshots now enumerate data-group objects through `ClusterCoordinator` routing, and restores remove extra group objects instead of delegating to empty base metadata.
+- **cmd/grainfs**: cluster mode now wraps the `ClusterCoordinator` with WAL, so routed object mutations are recorded for PITR replay.
+- **tests/e2e**: all S3, NFSv4, NBD, and pprof ports used by e2e processes are allocated via `freePort()` to avoid cross-test port collisions.
+
+## [0.0.7.6] — 2026-05-01 — Linearizable ReadIndex reads for S3 and NBD
+
+### Added
+
+- **raft**: `ReadIndex` and `WaitApplied` read fences for serving linearizable reads after the local FSM has applied the leader-confirmed commit index.
+- **cluster**: follower read forwarding over the new `StreamReadIndex (0x0A)` QUIC RPC, so followers can ask the leader for a safe read index instead of rejecting read traffic.
+- **server**: S3 `GET` and `HEAD` object handlers now wait behind the ReadIndex fence in clustered mode before returning object data or metadata.
+- **nbd**: NBD reads now use the same ReadIndex fence in clustered mode, keeping block reads aligned with committed Raft state.
+- **tests**: coverage for ReadIndex quorum behavior, single-node ReadIndex fast path, WaitApplied wakeups, S3 read-fence wiring, and NBD read-fence success and failure paths.
+
+### Fixed
+
+- **raft**: single-node leaders now return their current commit index immediately from `ReadIndex` instead of waiting for peer acknowledgements that can never arrive.
+
 ## [0.0.7.5] — 2026-05-01 — AbortPlanReason enum + ConfChangeEntry cleanup (PR-D must-fix + PR-A)
 
 ### Added

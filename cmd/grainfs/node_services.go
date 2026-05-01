@@ -43,8 +43,9 @@ func (n *nodeServices) Close() {
 //   - volMgr: shared volume.Manager (may have dedup enabled); used by NBD.
 //   - nfs4Port, nbdPort: 0 disables the service.
 //   - nbdVolumeSize: default volume size when the NBD worker auto-creates it.
+//   - ri: optional ReadIndexer for linearizable NBD reads; nil = no gate.
 func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.Backend,
-	volMgr *volume.Manager, nfs4Port, nbdPort int, nbdVolumeSize int64,
+	volMgr *volume.Manager, nfs4Port, nbdPort int, nbdVolumeSize int64, ri nbd.ReadIndexer,
 ) *nodeServices {
 	svc := &nodeServices{}
 
@@ -65,7 +66,7 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 				log.Warn().Err(err).Msg("default nbd volume create failed")
 			}
 		}
-		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort)
+		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri)
 		if err != nil {
 			log.Error().Err(err).Msg("nbd server start failed")
 		} else {

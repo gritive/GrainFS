@@ -314,6 +314,9 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		if n.jointPhase != JointEntering {
 			return // idempotency guard: JointAbort already resolved this transition
 		}
+		if n.hasJointAbortAfter(entry.Index) {
+			return // stale JointLeave superseded by a later JointOpAbort
+		}
 		// Append-time: §4.4 invariant — config.Peers updates immediately so
 		// quorum decisions on subsequent entries use C_new. config.Peers in
 		// this codebase excludes self (peer IDs are the OTHER nodes); voter

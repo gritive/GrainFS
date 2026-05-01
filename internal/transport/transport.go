@@ -18,6 +18,7 @@ const (
 	StreamMetaRaft            StreamType = 0x07 // meta-Raft control-plane RPCs (membership, shard-map)
 	StreamProposeGroupForward StreamType = 0x08 // Per-group ProposeForward RPC, payload prefixed with [4B groupIDLen][groupID][cmdData]
 	StreamGroupRaft           StreamType = 0x09 // Per-group Raft RPCs (RequestVote, AppendEntries), payload prefixed with [4B groupIDLen][groupID][raftRPC]
+	StreamReadIndex           StreamType = 0x0A // Follower → leader ReadIndex RPC; response: [8B commitIndex big-endian][4B errLen][errBytes]
 )
 
 // Message is a framed message sent over a transport stream.

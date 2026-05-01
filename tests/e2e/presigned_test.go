@@ -34,7 +34,8 @@ func startAuthServer(t *testing.T) (*s3.Client, string, string, func()) {
 		"--port", fmt.Sprintf("%d", port),
 		"--access-key", "testkey",
 		"--secret-key", "testsecret",
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

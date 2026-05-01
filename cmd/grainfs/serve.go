@@ -688,33 +688,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("component", "gossip").Msg("gossip receiver started (receipt-only, balancer disabled)")
 	}
 
-	var backend storage.Backend = cachedBackend
-
-	// Slice 5 of refactor/unify-storage-paths: wrap with WAL so object-level
-	// mutations are captured for PITR. Raft log covers metadata consistency;
-	// WAL covers PUT/DELETE/CompleteMultipart replay at the object layer. WAL
-	// sits outside the read cache so every mutation is recorded before the
-	// cache invalidation races the next request — same ordering as runLocalNode.
-	//
 	walDir := filepath.Join(dataDir, "wal")
 	w, err := wal.Open(walDir)
 	if err != nil {
 		return fmt.Errorf("open WAL: %w", err)
 	}
 	defer w.Close()
-	backend = wal.NewBackend(backend, w)
-
-	// Wrap with pull-through cache if upstream is configured.
-	if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
-		upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
-		upstreamSecretKey, _ := cmd.Flags().GetString("upstream-secret-key")
-		up, err := pullthrough.NewS3Upstream(upstreamEndpoint, upstreamAccessKey, upstreamSecretKey)
-		if err != nil {
-			return fmt.Errorf("init upstream: %w", err)
-		}
-		backend = pullthrough.NewBackend(backend, up)
-		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
-	}
 
 	// v0.0.7.1 PR-D: Live multi-raft routing — ClusterCoordinator + ForwardSender/Receiver.
 	// ClusterCoordinator implements storage.Backend and routes bucket-scoped ops to the
@@ -741,9 +720,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		raftAddr,       // selfID for leader check
 	).WithForwardSender(forwardSender)
 
-	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD.
-	backend = clusterCoord
+	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD, then
+	// wrap it with WAL so routed object mutations are captured for PITR.
+	var backend storage.Backend = wal.NewBackend(clusterCoord, w)
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
+
+	// Wrap with pull-through cache if upstream is configured.
+	if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
+		upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
+		upstreamSecretKey, _ := cmd.Flags().GetString("upstream-secret-key")
+		up, err := pullthrough.NewS3Upstream(upstreamEndpoint, upstreamAccessKey, upstreamSecretKey)
+		if err != nil {
+			return fmt.Errorf("init upstream: %w", err)
+		}
+		backend = pullthrough.NewBackend(backend, up)
+		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
+	}
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.
@@ -885,6 +877,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		defer dedupDB.Close()
 	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
+	srvOpts = append(srvOpts, server.WithReadIndexer(distBackend))
+
+	distBackend.RegisterReadIndexHandler()
 
 	srv := server.New(addr, backend, srvOpts...)
 
@@ -968,7 +963,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
 	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
-	nodeSvc := startNodeServices(ctx, cmd, backend, volMgr, nfs4Port, nbdPort, nbdVolumeSize)
+	nodeSvc := startNodeServices(ctx, cmd, backend, volMgr, nfs4Port, nbdPort, nbdVolumeSize, distBackend)
 	defer nodeSvc.Close()
 
 	<-ctx.Done()

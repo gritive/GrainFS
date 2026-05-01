@@ -30,7 +30,8 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

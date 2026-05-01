@@ -369,6 +369,17 @@ type VersionedGetter interface {
 }
 
 func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
+	if ri := s.readIndexer; ri != nil {
+		readIdx, err := ri.ReadIndex(ctx)
+		if err == nil {
+			err = ri.WaitApplied(ctx, readIdx)
+		}
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+	}
+
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
@@ -572,6 +583,17 @@ func findVersionedHeader(b storage.Backend) (VersionedHeader, bool) {
 }
 
 func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
+	if ri := s.readIndexer; ri != nil {
+		readIdx, err := ri.ReadIndex(ctx)
+		if err == nil {
+			err = ri.WaitApplied(ctx, readIdx)
+		}
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+	}
+
 	bucket := c.Param("bucket")
 	key := getKey(c)
 

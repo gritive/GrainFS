@@ -39,7 +39,8 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port1),
 		"--snapshot-interval", "0", // disable auto-snapshots for determinism
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
@@ -88,7 +89,8 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port2),
 		"--snapshot-interval", "0",
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
@@ -148,7 +150,8 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -37,7 +37,8 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, func()) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
 		"--encryption-key-file", keyFile,
-		"--nfs4-port", "0",
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

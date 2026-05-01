@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -107,6 +108,87 @@ func TestClusterCoordinator_ListBuckets_DelegatesToBase(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"a", "b"}, got)
 	require.Equal(t, []string{"ListBuckets"}, base.calls)
+}
+
+func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb := newTestGroupBackend(t, "group-1")
+	_, err := gb.PutObject("photos", "a.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	objs, err := c.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	require.Equal(t, storage.SnapshotObject{
+		Bucket:      "photos",
+		Key:         "a.txt",
+		ETag:        objs[0].ETag,
+		Size:        5,
+		ContentType: "text/plain",
+		Modified:    objs[0].Modified,
+		VersionID:   objs[0].VersionID,
+		IsLatest:    true,
+	}, objs[0])
+	require.NotEmpty(t, objs[0].ETag)
+	require.NotEmpty(t, objs[0].VersionID)
+}
+
+func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb := newTestGroupBackend(t, "group-1")
+	_, err := gb.PutObject("photos", "keep.txt", strings.NewReader("keep"), "text/plain")
+	require.NoError(t, err)
+	_, err = gb.PutObject("photos", "extra.txt", strings.NewReader("extra"), "text/plain")
+	require.NoError(t, err)
+
+	current, err := gb.ListObjects("photos", "", 100)
+	require.NoError(t, err)
+	var keep storage.SnapshotObject
+	for _, obj := range current {
+		if obj.Key == "keep.txt" {
+			keep = storage.SnapshotObject{
+				Bucket:      "photos",
+				Key:         obj.Key,
+				ETag:        obj.ETag,
+				Size:        obj.Size,
+				ContentType: obj.ContentType,
+				Modified:    obj.LastModified,
+				VersionID:   obj.VersionID,
+				IsLatest:    true,
+				ACL:         obj.ACL,
+			}
+			break
+		}
+	}
+	require.Equal(t, "keep.txt", keep.Key)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	restored, stale, err := c.RestoreObjects([]storage.SnapshotObject{keep})
+	require.NoError(t, err)
+	require.Equal(t, 1, restored)
+	require.Empty(t, stale)
+
+	objs, err := gb.ListObjects("photos", "", 100)
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	require.Equal(t, "keep.txt", objs[0].Key)
 }
 
 // TestClusterCoordinator_RouteBucket_NoRouter verifies that routeBucket fails
