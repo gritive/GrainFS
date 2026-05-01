@@ -24,19 +24,15 @@
   - PR-D 후속: Test coverage enhancements (integration tests + self-removal retry) ✅
 
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
-- [ ] Raft leader 부하 분산 검토 (follower proxy, read-only query, lease read 등)
+- [ ] Raft leader 쓰기 경로 부하 분산 검토 (batching, pipelining, leader transfer 등)
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
-  - Public `Snapshot()` trigger API (운영 도구)
   - BatchingFSM (FSM apply throughput 한계 도달 시)
   - Snapshot chunking + Concurrent snapshotting (FSM이 QUIC stream max 근접 시)
   - Per-PR Prometheus dashboard 갱신 PR
 - [ ] **raft-ehn Tier 3** (별도 브랜치, 각 sub-project는 독립 design + plan + worktree):
   - **Tier 3-1: Joint consensus + Learner** — Multi-Raft atomic move-replica · multi-server replacement 안전성. Sub-project 1 (Learner-first, v0.0.6.13 #105 + chaos #107) + Sub-project 2 (Joint core, v0.0.6.16~v0.0.6.20 #108~#112) 완료. 남은 작업:
-    - **Sub-project 3 완료**: PR-K1 (v0.0.6.22 #114) · PR-K2 (v0.0.6.23) · PR-K3 (v0.0.7.1 #117 managed_by_joint persistence) — 모두 master 머지 완료.
-    - **후속: Joint phase observation API** — process restart 시 caller lost 위험 (cross-model 발견 Codex #1). Sub-project 3 ChangeMembership 공개 시 idempotent reattach + `Configuration()`/`JointPhase()` query API 노출 검토.
-    - **후속: Stuck joint abort 메커니즘** — v0.0.7.2 #118 완료. `JointOpAbort` + `ForceAbortJoint` API 구현; multi-cycle jAborted reset + wg 누수 수정 포함.
     - **후속: Voter set lock-free read** — `n.mu` hold 안 voter set read를 `atomic.Pointer[voterSets]` COW swap으로 분리. raft.go 전반 multi-field invariant 안에서 voter set만 분리하려면 design 필요.
-    - **후속: E2E snapshot mid-joint** — Public `Snapshot()` trigger API 이후 `TestJoint_E2E_SnapshotMidJoint_AutoCompletes` 작성.
+    - **후속: E2E snapshot mid-joint** — Public `Snapshot()` trigger API 기반으로 `TestJoint_E2E_SnapshotMidJoint_AutoCompletes`의 manual compaction setup 제거 후 skip 해제.
   - **Tier 3-2: RecoverCluster** — 단일 노드 재해 복구 운영 도구
   - **Tier 3-3: 클라이언트 dedup** — ClientID + RequestID 기반 dedup table, S3 SDK retry 시 중복 PUT 방지
   - **Tier 3-4: AE pipelining** — in-flight AppendEntries 1 → N (replication throughput)
