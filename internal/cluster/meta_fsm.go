@@ -409,11 +409,13 @@ func (f *MetaFSM) applyAbortPlan(data []byte) error {
 	}
 
 	planID := string(c.PlanId())
+	reason := c.Reason()
 	f.mu.Lock()
 	if f.activePlan == nil || f.activePlan.PlanID != planID {
 		f.mu.Unlock()
 		return nil // idempotent: no-op if plan absent or ID mismatch (M5)
 	}
+	log.Info().Str("plan_id", planID).Str("reason", reason.String()).Msg("meta_fsm: aborting active plan")
 	f.activePlan = nil
 	f.mu.Unlock()
 	return nil
@@ -868,11 +870,12 @@ func encodeMetaProposeRebalancePlanCmd(plan RebalancePlan) ([]byte, error) {
 	return fbFinish(b, clusterpb.MetaProposeRebalancePlanCmdEnd(b)), nil
 }
 
-func encodeMetaAbortPlanCmd(planID string) ([]byte, error) {
+func encodeMetaAbortPlanCmd(planID string, reason clusterpb.AbortPlanReason) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	planIDOff := b.CreateString(planID)
 	clusterpb.MetaAbortPlanCmdStart(b)
 	clusterpb.MetaAbortPlanCmdAddPlanId(b, planIDOff)
+	clusterpb.MetaAbortPlanCmdAddReason(b, reason)
 	return fbFinish(b, clusterpb.MetaAbortPlanCmdEnd(b)), nil
 }
 

@@ -280,9 +280,17 @@ table MetaProposeRebalancePlanCmd {
   plan:RebalancePlan;
 }
 
+enum AbortPlanReason : uint8 {
+  Unknown = 0,
+  Timeout = 1,
+  ExecutionFailed = 2,
+  Completed = 3,
+}
+
 // PR-D: plan timeout / operator 취소 / 완료 마커
 table MetaAbortPlanCmd {
   plan_id:string;
+  reason:AbortPlanReason;
 }
 
 table MetaStateSnapshot {

@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 // GroupRebalancer executes a voter move within a data Raft group.
@@ -40,7 +42,7 @@ func DefaultRebalancerConfig() RebalancerConfig {
 type MetaRaftClient interface {
 	IsLeader() bool
 	ProposeRebalancePlan(ctx context.Context, plan RebalancePlan) error
-	ProposeAbortPlan(ctx context.Context, planID string) error
+	ProposeAbortPlan(ctx context.Context, planID string, reason clusterpb.AbortPlanReason) error
 	FSM() *MetaFSM
 }
 
@@ -106,7 +108,7 @@ func (r *Rebalancer) tickOnce(ctx context.Context) {
 	if plan := fsm.ActivePlan(); plan != nil {
 		if time.Since(plan.CreatedAt) > r.cfg.PlanTimeout {
 			r.logger.Warn().Str("plan_id", plan.PlanID).Msg("plan execution timeout, aborting")
-			if err := r.meta.ProposeAbortPlan(ctx, plan.PlanID); err != nil {
+			if err := r.meta.ProposeAbortPlan(ctx, plan.PlanID, clusterpb.AbortPlanReasonTimeout); err != nil {
 				r.logger.Error().Err(err).Msg("ProposeAbortPlan failed")
 			}
 		}
@@ -162,11 +164,11 @@ func (r *Rebalancer) ExecutePlan(ctx context.Context, plan *RebalancePlan) error
 	err := r.rebalance.MoveReplica(ctx, plan.GroupID, plan.FromNode, plan.ToNode)
 	if err != nil {
 		r.logger.Error().Err(err).Str("plan_id", plan.PlanID).Msg("MoveReplica failed, aborting plan")
-		_ = r.meta.ProposeAbortPlan(ctx, plan.PlanID)
+		_ = r.meta.ProposeAbortPlan(ctx, plan.PlanID, clusterpb.AbortPlanReasonExecutionFailed)
 		return err
 	}
 	// Success: AbortPlan serves as the plan completion marker.
-	return r.meta.ProposeAbortPlan(ctx, plan.PlanID)
+	return r.meta.ProposeAbortPlan(ctx, plan.PlanID, clusterpb.AbortPlanReasonCompleted)
 }
 
 // selectGroupToMigrate returns the group ID where heaviestNode is a voter, or "".

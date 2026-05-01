@@ -49,11 +49,26 @@ func (rcv *MetaAbortPlanCmd) PlanId() []byte {
 	return nil
 }
 
+func (rcv *MetaAbortPlanCmd) Reason() AbortPlanReason {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return AbortPlanReason(rcv._tab.GetByte(o + rcv._tab.Pos))
+	}
+	return 0
+}
+
+func (rcv *MetaAbortPlanCmd) MutateReason(n AbortPlanReason) bool {
+	return rcv._tab.MutateByteSlot(6, byte(n))
+}
+
 func MetaAbortPlanCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(1)
+	builder.StartObject(2)
 }
 func MetaAbortPlanCmdAddPlanId(builder *flatbuffers.Builder, planId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(planId), 0)
+}
+func MetaAbortPlanCmdAddReason(builder *flatbuffers.Builder, reason AbortPlanReason) {
+	builder.PrependByteSlot(1, byte(reason), 0)
 }
 func MetaAbortPlanCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -297,7 +298,7 @@ func TestMetaRaft_ProposeAbortPlan_CommitToFSM(t *testing.T) {
 	require.NoError(t, m.ProposeRebalancePlan(ctx, plan))
 	require.Equal(t, "plan-1", m.FSM().ActivePlanID())
 
-	require.NoError(t, m.ProposeAbortPlan(ctx, "plan-1"))
+	require.NoError(t, m.ProposeAbortPlan(ctx, "plan-1", clusterpb.AbortPlanReasonCompleted))
 	assert.Empty(t, m.FSM().ActivePlanID())
 }
 

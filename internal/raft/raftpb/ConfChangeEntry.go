@@ -81,8 +81,13 @@ func (rcv *ConfChangeEntry) MutateManagedByJoint(n bool) bool {
 	return rcv._tab.MutateBoolSlot(10, n)
 }
 
+// ConfChangeEntryStart begins building a ConfChangeEntry.
+// PR-A: field count reduced from 6 to 4 (deprecated new_config/old_config removed).
+// FlatBuffers forward/backward compatibility ensures persisted entries written by
+// old binaries (StartObject(6)) are still readable; cluster must be fully upgraded
+// before any downgrade attempt.
 func ConfChangeEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(4)
 }
 func ConfChangeEntryAddOp(builder *flatbuffers.Builder, op ConfChangeOp) {
 	builder.PrependInt8Slot(0, int8(op), 0)
