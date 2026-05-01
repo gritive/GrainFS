@@ -496,6 +496,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		m  map[string]*cluster.GroupBackend
 	}{m: make(map[string]*cluster.GroupBackend)}
 
+	// Shared stop channel for all apply loops (distBackend + per-group).
+	// Must be initialized before any goroutine that passes it to RunApplyLoop.
+	stopApply := make(chan struct{})
+
+	// GroupRaftQUICMux multiplexes per-group raft RPCs over StreamGroupRaft (0x09).
+	// Registered once; each group uses ForGroup(groupID) as its raft transport.
+	groupRaftMux := raft.NewGroupRaftQUICMux(quicTransport)
+
 	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) {
 		// group-0 is already wired with the shared distBackend.
 		if entry.ID == "group-0" {
@@ -522,9 +530,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		ownedGroups.mu.Unlock()
 
 		gb, err := cluster.InstantiateLocalGroup(cluster.GroupLifecycleConfig{
-			NodeID:   raftAddr, // identity = raftAddr (matches PeerIDs)
-			DataDir:  dataDir,
-			ShardSvc: shardSvc,
+			NodeID:    raftAddr, // identity = raftAddr (matches PeerIDs)
+			DataDir:   dataDir,
+			ShardSvc:  shardSvc,
+			Transport: groupRaftMux.ForGroup(entry.ID),
 			EC: cluster.ECConfig{
 				DataShards:   clusterECData,
 				ParityShards: clusterECParity,
@@ -533,7 +542,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err != nil {
 			log.Fatal().Err(err).Str("group_id", entry.ID).Msg("instantiateLocalGroup failed — voter status fatal")
 		}
+		groupRaftMux.Register(entry.ID, gb.RaftNode())
 		dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
+		go gb.RunApplyLoop(stopApply)
 		ownedGroups.mu.Lock()
 		ownedGroups.m[entry.ID] = gb
 		ownedGroups.mu.Unlock()
@@ -644,7 +655,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		cachedBackend.InvalidateKey(bucket, key)
 	})
 
-	stopApply := make(chan struct{})
 	go distBackend.RunApplyLoop(stopApply)
 
 	// Start balancer if enabled (cluster mode only).
@@ -706,6 +716,34 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
 
+	// v0.0.7.1 PR-D: Live multi-raft routing — ClusterCoordinator + ForwardSender/Receiver.
+	// ClusterCoordinator implements storage.Backend and routes bucket-scoped ops to the
+	// correct group leader via ForwardSender. 0x08 handler (ForwardReceiver) receives
+	// forwarded calls on voter nodes and dispatches to local GroupBackend.
+	forwardDialer := func(peer string, payload []byte) ([]byte, error) {
+		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+		reply, err := quicTransport.Call(ctx, peer, msg)
+		if err != nil {
+			return nil, err
+		}
+		return reply.Payload, nil
+	}
+
+	forwardSender := cluster.NewForwardSender(forwardDialer)
+	forwardReceiver := cluster.NewForwardReceiver(dgMgr)
+	forwardReceiver.Register(shardSvc)
+
+	clusterCoord := cluster.NewClusterCoordinator(
+		distBackend,    // base for cluster-wide ops (CreateBucket, etc.)
+		dgMgr,          // local owned groups (self-leader shortcut)
+		clusterRouter,  // bucket → group lookup
+		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
+		raftAddr,       // selfID for leader check
+	).WithForwardSender(forwardSender)
+
+	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD.
+	backend = clusterCoord
+	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.

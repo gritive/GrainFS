@@ -2,12 +2,17 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
 )
+
+// ErrLeadershipTransferred is returned by MoveReplica when the node must remove
+// itself: it transfers leadership first, then the caller retries on the new leader.
+var ErrLeadershipTransferred = errors.New("leadership transferred to another voter")
 
 // NodeAddressBook resolves cluster nodeIDs to their QUIC addresses.
 // *MetaFSM implements this interface.
@@ -88,9 +93,10 @@ func (e *DataGroupPlanExecutor) resolveAddr(nodeID string) (string, error) {
 }
 
 // MoveReplica migrates a Raft voter in groupID from fromNode to toNode using a
-// single §4.3 atomic ChangeMembership call. Self-removal is handled by the joint
-// commit-time step-down hook in raft.Node (jointPromoteCh closes BEFORE
-// state=Follower), so the caller wakes up with nil even when removing self.
+// single §4.3 atomic ChangeMembership call.
+//
+// Self-removal (fromNode == localNodeID): transfers leadership to another voter
+// and returns ErrLeadershipTransferred so the caller retries on the new leader.
 func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNode, toNode string) error {
 	dg := e.dgMgr.Get(groupID)
 	if dg == nil {
@@ -106,6 +112,15 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 	// evict an unrelated node if the rebalancer has a stale plan.
 	if !slices.Contains(dg.PeerIDs(), fromNode) {
 		return fmt.Errorf("data_group_executor: fromNode %q is not a voter in group %q", fromNode, groupID)
+	}
+
+	// Self-removal guard: if this node is being removed, transfer leadership first
+	// so the new leader can retry the migration.
+	if fromNode == e.localNodeID {
+		if err := node.TransferLeadership(); err != nil {
+			return fmt.Errorf("data_group_executor: TransferLeadership: %w", err)
+		}
+		return ErrLeadershipTransferred
 	}
 
 	toAddr, err := e.resolveAddr(toNode)

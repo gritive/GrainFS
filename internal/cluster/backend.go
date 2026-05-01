@@ -87,6 +87,11 @@ type DistributedBackend struct {
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
 
+	// bypassBucketCheck skips the HeadBucket pre-check in PutObject. Set by
+	// GroupBackend: bucket existence is guaranteed by the router (design doc
+	// invariant 5), so the per-group DB need not duplicate the META-DB check.
+	bypassBucketCheck bool
+
 	// vfsFixedVersion controls VFS-internal-bucket behavior:
 	// true (default) → PutObject for "__grainfs_vfs_*" uses fixed versionID
 	//   "current" so on-disk usage stays bounded to one copy per key.
@@ -373,14 +378,24 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	}
 
 	// 팔로워: 리더에게 포워딩
-	leaderID := b.node.LeaderID()
-	if leaderID == "" {
+	// LeaderID()는 raft 노드 ID(예: "mrshard-node-2")를 반환하며 QUIC 주소가 아니다.
+	// QUIC peer 주소를 순서대로 시도해 리더를 찾는다.
+	if b.node.LeaderID() == "" {
 		return raft.ErrNotLeader
 	}
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err = b.forwardPropose(proposeCtx, leaderID, data)
-	return err
+	peers := b.node.Peers()
+	if len(peers) == 0 {
+		return raft.ErrNotLeader
+	}
+	var lastErr error
+	for _, peer := range peers {
+		if _, lastErr = b.forwardPropose(proposeCtx, peer, data); lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
 }
 
 // Close closes the metadata database.
@@ -437,10 +452,10 @@ func (b *DistributedBackend) CreateBucket(bucket string) error {
 		// Determine target group:
 		//   1. If meta-FSM has an explicit assignment (e.g., from rebalance), preserve it.
 		//   2. Else, hash-assign across active groups (if shardGroup wired).
-		//   3. Else, fall back to Router.RouteKey (legacy default-group path).
+		//   3. Else, fall back to the router's default group (single-group / test deployments).
 		groupID := ""
-		if g, err := b.router.RouteKey(bucket, ""); err == nil && g != nil {
-			groupID = g.ID()
+		if gid, ok := b.router.ExplicitGroup(bucket); ok {
+			groupID = gid
 		}
 		if groupID == "" && b.shardGroup != nil {
 			entries := b.shardGroup.ShardGroups()
@@ -450,6 +465,11 @@ func (b *DistributedBackend) CreateBucket(bucket string) error {
 			}
 			sort.Strings(ids) // deterministic
 			groupID = HashAssign(bucket, ids)
+		}
+		if groupID == "" {
+			if dg, routeErr := b.router.RouteKey(bucket, ""); routeErr == nil {
+				groupID = dg.ID()
+			}
 		}
 		if groupID == "" {
 			return fmt.Errorf("create bucket %q: no active groups for assignment", bucket)
@@ -463,6 +483,9 @@ func (b *DistributedBackend) CreateBucket(bucket string) error {
 }
 
 func (b *DistributedBackend) HeadBucket(bucket string) error {
+	if b.bypassBucketCheck {
+		return nil
+	}
 	return b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(bucketKey(bucket))
 		if err == badger.ErrKeyNotFound {

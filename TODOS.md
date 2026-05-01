@@ -21,13 +21,12 @@
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
-- [ ] **Live Multi-Raft Sharding v0.0.7.1 (PR-D)** — v0.0.7.0에서 분리된 후속 작업:
-  - **ForwardReceiver 구현** — 0x08 handler, ForwardReply 빌더, NotLeader hint + try-each-peer
-  - **serve.go wiring** — ClusterCoordinator + ForwardSender + ForwardReceiver 연결
-  - **e2e tests 활성화** — BucketAssignment / RestartRecovery / PerGroupPersistence / CrossNodeDispatch / GroupLeaderFailover + NFSv4 smoke
-  - **wire coexistence REGRESSION** — 0x06 (legacy) + 0x08 (new) 동시 등록 검증
-  - **perf sanity** — N=8 sharded mode 30s 측정 + PR-E single-backend 비교
-  - 설계: `docs/superpowers/specs/2026-04-30-live-multi-raft-sharding-design.md`
+- **Phase 17 — Multi-Raft Data Plane 라우팅 완료 (v0.0.7.0 #117 ~ v0.0.7.1 #123)**
+  - PR-A: ShardGroupAssignment + FSM (v0.0.7.0 #117) ✅
+  - PR-B: Per-Group Raft + BadgerDB (v0.0.7.0 #118) ✅
+  - PR-C: Router + Coordinator scaffold (v0.0.7.0 #119) ✅
+  - PR-D 후속: ForwardReceiver + serve.go wiring + e2e tests (v0.0.7.1 #123) ✅
+  - PR-D 후속: Test coverage enhancements (integration tests + self-removal retry) ✅
 
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
 - [ ] **PR-D 잔여 must-fix**: MetaAbortPlanCmd reason:uint8 추가

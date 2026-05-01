@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.7.4] — 2026-05-01 — Live Multi-Raft Routing E2E (PR-D 완료)
+
+### Added
+
+- **cluster**: `ForwardReceiver` — server-side `StreamProposeGroupForward (0x08)` handler. 10 operation dispatchers (PutObject, GetObject, HeadObject, DeleteObject, ListObjects, WalkObjects, CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload) to `GroupBackend` with leader check + NotLeader hint. Errors mapped to `ForwardStatus` codes.
+- **cluster**: `forward_receiver_test.go` — unit tests for ForwardReceiver (unknown group → NotVoter, non-leader voter → NotLeader with hint).
+- **raft**: `GroupRaftQUICMux` — per-group Raft QUIC multiplexer over `StreamGroupRaft (0x09)`. Wire prefix: `[4B groupIDLen][groupID][Raft RPC FlatBuffers payload]`. Registered once in serve.go; each group uses `ForGroup(groupID)` as its Raft transport.
+- **cmd/grainfs**: serve.go wiring — ClusterCoordinator wired into S3 server startup with ForwardSender dialer + ForwardReceiver registration on ShardService.
+- **tests/e2e**: multiraft_sharding_test.go — t.Skip removed from BucketAssignment + RestartRecovery (data-plane routing now enables auto-redirect). 4 new tests: PerGroupPersistence, CrossNodeDispatch, GroupLeaderFailover, NFSv4Smoke (Linux-only).
+- **internal/cluster**: wire_coexistence_test.go — REGRESSION test verifying legacy `StreamProposeForward (0x06)` and new `StreamProposeGroupForward (0x08)` handlers can coexist without interference (4 subtests).
+
+### Fixed
+
+- **cluster**: `GroupBackend.selfAddr` was initialized from `PeerIDs[0]` (alphabetically smallest peer) rather than the local node ID. `instantiateLocalGroup` now reorders PeerIDs so self is first; `NewGroupBackend` explicitly sets `selfAddr = cfg.Node.ID()`. Fixes WriteShard self-skip and ReadShard fallback after leader failover.
+- **cluster**: `MoveReplica` self-removal guard — when `fromNode == localNodeID`, calls `TransferLeadership` and returns `ErrLeadershipTransferred` so the new leader retries the migration.
+- **cluster**: `CreateBucket` falls back to `router.RouteKey` when `HashAssign` returns empty.
+
+### Changed
+
+- **cluster**: `ClusterCoordinator.WithForwardSender(forwardSender)` setter for deferred ForwardSender injection (serve.go startup pattern).
+
+### Technical Notes
+
+- Rolling upgrade safe: legacy 0x06 wire unchanged; new 0x08 uses independent stream type.
+
 ## [0.0.7.3] — 2026-05-01 — Raft joint P2 correctness fixes + LearnerIDs API
 
 ### Added
@@ -11,26 +36,6 @@
 
 - **raft**: `JointOpAbort` apply now removes managed learner IDs from `learnerIDs` before clearing `jointManagedLearners`. Without this fix, `checkLearnerCatchup` would treat managed learners as ordinary learners after an abort and attempt spurious auto-promotion into the wrong voter set.
 - **raft**: `runFollower()` now drains `jointResultCh` with `ErrLeadershipLost` at entry, unblocking any `ChangeMembership` goroutine blocked in `proposeJointConfChangeWait` during a natural Leader→Follower transition. Prevents goroutine leak when leadership is lost without `StopNode`.
-
-## [0.0.7.2] — 2026-05-01 — Raft stuck-joint abort (JointOpAbort)
-
-### Added
-
-- **raft**: `JointOpAbort` — new `JointOp` enum value (= 2) that reverts the cluster from `JointEntering` back to C_old under C_old-only quorum. Allows recovery when C_new loses majority after `JointEnter` commits, ending the deadlock where no entry (including `JointLeave`) could commit.
-- **raft**: `ForceAbortJoint(ctx) error` — public API on `*Node`. Leader-only, valid in `JointEntering` phase. Proposes `JointOpAbort`; returns `nil` on success, `ErrNotLeader` / `ErrNotInJointPhase` / `ErrProposalFailed` / `ctx.Err()` otherwise.
-- **raft**: `Config.JointAbortTimeout time.Duration` — optional auto-abort. When set, `checkJointAdvance` triggers abort after this duration elapses from `JointEnter` commit. Default `0` (disabled).
-- **raft**: `ErrJointAborted` / `ErrNotInJointPhase` — two new sentinel errors. `ErrJointAborted` propagates to `ChangeMembership` callers so they can distinguish abort from success.
-- **raft**: `jointResultCh chan error` (buffered 1) replaces `jointPromoteCh chan struct{}`. Sends `nil` on `JointLeave` commit, `ErrJointAborted` on `JointAbort` commit. Buffer prevents apply-loop deadlock when caller context cancels before abort commits.
-- **raft**: `rebuildConfigFromLog` handles `JointOpAbort` — restores C_old from entry payload (`OldServers`) so a node restarted after an abort does not re-enter `JointEntering` on the next leader tick.
-
-### Fixed
-
-- **raft**: `applyJointConfChangeLocked` JointOpAbort idempotency guard — no-op when `jointPhase != JointEntering`, preventing double-apply if both `JointLeave` and `JointAbort` are in flight.
-- **raft**: `initLeaderState` now resets `jointLeaveProposed` and `jointAbortProposed` on every leader election, allowing the new leader to re-trigger auto-abort if a previous abort goroutine was in flight when the old leader stepped down.
-- **raft**: `rebuildConfigFromLog` now resets the `jAborted` flag on `JointOpEnter`, preventing a prior cycle's abort from silently skipping the subsequent cycle's `JointOpLeave` during log replay (multi-cycle abort→reenter→leave sequence).
-- **raft**: `applyJointConfChangeLocked` `JointOpLeave` now resets `jointAbortProposed = false`, clearing any stale flag from a racing abort proposal that resolved before the leave committed.
-- **raft**: `RestoreJointStateFromSnapshot` now also resets `jointAbortProposed` and `jointEnterTime` so a newly elected leader starting from a snapshot does not inherit stale abort-proposal state.
-- **raft**: `triggerAbortAsync` goroutine now tracked by `n.wg`, preventing it from accessing node state after `Close()` returns.
 
 ## [0.0.7.1] — 2026-05-01 — Raft managed_by_joint persistence (PR-K3)
 

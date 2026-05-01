@@ -231,7 +231,7 @@ func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
 	addrBook := &fakeAddrBook{nodes: nodes}
 	sgUpdater := &fakeSGUpdater{err: sgErr}
 	dgMgr := cluster.NewDataGroupManager()
-	exec := cluster.NewDataGroupPlanExecutorForTest("", dgMgr, addrBook, sgUpdater,
+	exec := cluster.NewDataGroupPlanExecutorForTest("node-1", dgMgr, addrBook, sgUpdater,
 		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
 		[]string{"node-0"}, nil))
@@ -243,11 +243,19 @@ func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
 	require.Equal(t, 1, fakeNode.changeMembershipCalls)
 }
 
-// PR-K2: Self-removal no longer requires TransferLeadership pre-step. The
-// joint commit-time step-down hook in raft.Node closes jointPromoteCh BEFORE
-// state=Follower, so the caller wakes up nil even when removing self.
-func TestMoveReplica_SelfRemoval_UsesChangeMembership(t *testing.T) {
-	fakeNode := &fakeRaftNode{isLeader: true, committed: 5, autoCatchup: true}
+// Self-removal guard: when fromNode == localNodeID, MoveReplica calls
+// TransferLeadership and returns ErrLeadershipTransferred so the new leader
+// can retry the migration.
+func TestMoveReplica_SelfRemoval_TransfersLeadership(t *testing.T) {
+	transferred := false
+	fakeNode := &fakeRaftNode{
+		isLeader:  true,
+		committed: 5,
+		transferFn: func() error {
+			transferred = true
+			return nil
+		},
+	}
 	nodes := []cluster.MetaNodeEntry{
 		{ID: "node-0", Address: "10.0.0.0:9000"},
 		{ID: "node-3", Address: "10.0.0.3:9003"},
@@ -255,17 +263,16 @@ func TestMoveReplica_SelfRemoval_UsesChangeMembership(t *testing.T) {
 	addrBook := &fakeAddrBook{nodes: nodes}
 	sgUpdater := &fakeSGUpdater{}
 	dgMgr := cluster.NewDataGroupManager()
-	// localNodeID == fromNode → self-removal scenario.
 	exec := cluster.NewDataGroupPlanExecutorForTest("node-0", dgMgr, addrBook, sgUpdater,
 		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0", []string{"node-0"}, nil))
 
 	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
-	require.NoError(t, err, "self-removal returns nil via joint commit-time hook")
-	require.Equal(t, 1, fakeNode.changeMembershipCalls)
-	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
-	require.Len(t, fakeNode.lastAdds, 1)
-	assert.Equal(t, "node-3", fakeNode.lastAdds[0].ID)
+	require.ErrorIs(t, err, cluster.ErrLeadershipTransferred,
+		"self-removal must return ErrLeadershipTransferred")
+	require.True(t, transferred, "TransferLeadership must be called before returning")
+	require.Equal(t, 0, fakeNode.changeMembershipCalls, "ChangeMembership must not be called")
+	require.Empty(t, sgUpdater.proposed, "ProposeShardGroup must not be called")
 }
 
 func TestMoveReplica_ContextCancelDuringCatchup(t *testing.T) {
