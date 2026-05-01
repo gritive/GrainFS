@@ -175,6 +175,29 @@ func TestChaosTransport_RequestVoteHook_ClusterElectsLeader(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "cluster must elect leader with one pre-vote-dropping node")
 }
 
+func TestChaosTransport_WiresTimeoutNowForLeadershipTransfer(t *testing.T) {
+	cl := NewCluster(t, 3)
+	cl.StartAll()
+
+	leader := cl.WaitForLeader(5 * time.Second)
+	require.NotNil(t, leader, "initial leader election timeout")
+	oldLeaderID := leader.ID()
+
+	require.NoError(t, leader.TransferLeadership())
+
+	require.Eventually(t, func() bool {
+		for _, id := range cl.NodeIDs() {
+			if id == oldLeaderID {
+				continue
+			}
+			if n := cl.NodeByID(id); n != nil && n.IsLeader() {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 25*time.Millisecond, "TimeoutNow must elect a different peer")
+}
+
 // TestChaosTransport_Wire_UnregisteredPeer exercises the "peer not registered"
 // error branches in the sendVote and sendAppend closures installed by Wire.
 // We wire node A but do NOT register its peer "B", so when A's transport

@@ -80,9 +80,8 @@ func TestVoterMigration_SelfRemovalWithRetry_E2E(t *testing.T) {
 	require.Eventually(t, func() bool {
 		for _, id := range []string{"node-0", "node-1", "node-2"} {
 			if n := cl.NodeByID(id); n != nil && n.ID() != oldLeaderID {
-				currentLeader := cl.CurrentLeader()
-				if currentLeader != nil && currentLeader.ID() == n.ID() {
-					newLeader = currentLeader
+				if n.IsLeader() {
+					newLeader = n
 					return true
 				}
 			}
