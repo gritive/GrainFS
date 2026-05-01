@@ -40,10 +40,10 @@
   - Per-PR Prometheus dashboard 갱신 PR
 - [ ] **raft-ehn Tier 3** (별도 브랜치, 각 sub-project는 독립 design + plan + worktree):
   - **Tier 3-1: Joint consensus + Learner** — Multi-Raft atomic move-replica · multi-server replacement 안전성. Sub-project 1 (Learner-first, v0.0.6.13 #105 + chaos #107) + Sub-project 2 (Joint core, v0.0.6.16~v0.0.6.20 #108~#112) 완료. 남은 작업:
-    - **Sub-project 3 (in progress)**: PR-K1 (v0.0.6.22 #114) — public `ChangeMembership` + `Configuration`/`JointPhase` observation + self-removal E2E + learnerIDs cleanup prereq + `removedFromCluster` orphan election guard. PR-K2 (v0.0.6.23) — `DataGroupPlanExecutor.MoveReplica` → `ChangeMembership`; `ErrLeadershipTransferred` sentinel 제거. PR-K3 (managed_by_joint persistence) 남음.
+    - **Sub-project 3 완료**: PR-K1 (v0.0.6.22 #114) · PR-K2 (v0.0.6.23) · PR-K3 (v0.0.7.1 #117 managed_by_joint persistence) — 모두 master 머지 완료.
     - **후속: PR-A reserved field cleanup** — `ConfChangeEntry.new_config`/`old_config` 두 deprecated field 제거 (Sub-project 2 PR-J1에서 FBS `(deprecated)` 표시). mixed-version 호환 윈도우 종료 후 별도 cleanup PR.
     - **후속: Joint phase observation API** — process restart 시 caller lost 위험 (cross-model 발견 Codex #1). Sub-project 3 ChangeMembership 공개 시 idempotent reattach + `Configuration()`/`JointPhase()` query API 노출 검토.
-    - **후속: Stuck joint abort 메커니즘** — JointEnter committed 후 C_new가 majority 도달 못하면 jointPhase 가드로 모든 propose 차단 → deadlock (cross-model 발견 Gemini #7). Force-abort entry 또는 운영 도구로 reset.
+    - **후속: Stuck joint abort 메커니즘** — v0.0.7.2 #118 완료. `JointOpAbort` + `ForceAbortJoint` API 구현; multi-cycle jAborted reset + wg 누수 수정 포함.
     - **후속: Voter set lock-free read** — `n.mu` hold 안 voter set read를 `atomic.Pointer[voterSets]` COW swap으로 분리. raft.go 전반 multi-field invariant 안에서 voter set만 분리하려면 design 필요.
     - **후속: Joint chaos scenarios + E2E snapshot mid-joint** — Sub-project 3 `ChangeMembership` public API 노출 후 chaos scenarios 3개 (LeaderCrashBetweenEnterAndLeave / PartitionDuringJoint / RepeatedLeaderChange) + `TestJoint_E2E_SnapshotMidJoint_AutoCompletes` 작성.
   - **Tier 3-2: RecoverCluster** — 단일 노드 재해 복구 운영 도구
