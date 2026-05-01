@@ -1010,3 +1010,53 @@ func TestJointAbortRestart_RebuildConfigCorrect(t *testing.T) {
 	require.Nil(t, n.jointNewVoters)
 	require.Equal(t, uint64(0), n.jointEnterIndex)
 }
+
+// TestAdvanceCommitIndex_JointAbortUsesOldQuorumOnly verifies the critical
+// quorum branch: a JointOpAbort entry commits when C_old has majority but C_new
+// does not. The negative control (JointOpLeave) must NOT advance commitIndex
+// under the same replication state — it requires dual quorum.
+func TestAdvanceCommitIndex_JointAbortUsesOldQuorumOnly(t *testing.T) {
+	// C_old={n1,n2,n3}, C_new={n1,n4,n5}.
+	// matchIndex: n2=2, n3=2 → C_old majority OK (n1 self + n2 + n3 = 3/3).
+	//             n4=0, n5=0 → C_new majority FAILS (n1 self only = 1/3).
+	makeNode := func(op JointOp) *Node {
+		n := jointTestNode("n1")
+		n.jointPhase = JointEntering
+		n.jointOldVoters = []string{"n1", "n2", "n3"}
+		n.jointNewVoters = []string{"n1", "n4", "n5"}
+		n.currentTerm = 1
+		n.commitIndex = 1
+		n.firstIndex = 1
+		n.log = []LogEntry{
+			{Index: 1, Term: 1},
+			{Index: 2, Term: 1, Type: LogEntryJointConfChange, Command: encodeJointConfChange(JointConfChange{
+				Op:         op,
+				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
+				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
+			})},
+		}
+		n.matchIndex = map[string]uint64{
+			"n2": 2, "n3": 2, // C_old peers fully replicated
+			"n4": 0, "n5": 0, // C_new peers not replicated
+		}
+		return n
+	}
+
+	t.Run("Abort commits with C_old majority only", func(t *testing.T) {
+		n := makeNode(JointOpAbort)
+		n.mu.Lock()
+		n.advanceCommitIndex()
+		n.mu.Unlock()
+		require.Equal(t, uint64(2), n.commitIndex,
+			"JointOpAbort must commit when C_old has majority, regardless of C_new")
+	})
+
+	t.Run("Leave does not commit without C_new majority", func(t *testing.T) {
+		n := makeNode(JointOpLeave)
+		n.mu.Lock()
+		n.advanceCommitIndex()
+		n.mu.Unlock()
+		require.Equal(t, uint64(1), n.commitIndex,
+			"JointOpLeave requires dual quorum; C_new has no majority so index must not advance")
+	})
+}
