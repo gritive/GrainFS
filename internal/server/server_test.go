@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -76,6 +77,23 @@ func (r *recordingReadIndexer) WaitApplied(_ context.Context, index uint64) erro
 	return nil
 }
 
+type recordingRaftSnapshotter struct {
+	triggerCalls atomic.Int32
+	status       raft.SnapshotStatus
+	result       raft.SnapshotResult
+	triggerErr   error
+	statusErr    error
+}
+
+func (r *recordingRaftSnapshotter) TriggerRaftSnapshot(context.Context) (raft.SnapshotResult, error) {
+	r.triggerCalls.Add(1)
+	return r.result, r.triggerErr
+}
+
+func (r *recordingRaftSnapshotter) RaftSnapshotStatus() (raft.SnapshotStatus, error) {
+	return r.status, r.statusErr
+}
+
 func TestCreateAndHeadBucket(t *testing.T) {
 	base := setupTestServer(t)
 
@@ -96,6 +114,66 @@ func TestCreateAndHeadBucket(t *testing.T) {
 	require.NoError(t, err, "head nonexistent")
 	resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestRaftSnapshotAdminTrigger(t *testing.T) {
+	rs := &recordingRaftSnapshotter{
+		result: raft.SnapshotResult{Index: 12, Term: 3, SizeBytes: 4096},
+	}
+	base := setupTestServerWithOptions(t, WithRaftSnapshotter(rs))
+
+	resp, err := http.Post(base+"/admin/raft/snapshot", "application/json", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, float64(12), got["index"])
+	assert.Equal(t, float64(3), got["term"])
+	assert.Equal(t, float64(4096), got["size_bytes"])
+	assert.Equal(t, int32(1), rs.triggerCalls.Load())
+}
+
+func TestRaftSnapshotAdminTriggerUnavailable(t *testing.T) {
+	base := setupTestServer(t)
+
+	resp, err := http.Post(base+"/admin/raft/snapshot", "application/json", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+func TestRaftSnapshotAdminTriggerNotLeader(t *testing.T) {
+	rs := &recordingRaftSnapshotter{
+		triggerErr: raft.ErrNotLeader,
+	}
+	base := setupTestServerWithOptions(t, WithRaftSnapshotter(rs))
+
+	resp, err := http.Post(base+"/admin/raft/snapshot", "application/json", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+	assert.Equal(t, int32(1), rs.triggerCalls.Load())
+}
+
+func TestRaftSnapshotAdminStatus(t *testing.T) {
+	rs := &recordingRaftSnapshotter{
+		status: raft.SnapshotStatus{Available: true, Index: 9, Term: 2, SizeBytes: 128},
+	}
+	base := setupTestServerWithOptions(t, WithRaftSnapshotter(rs))
+
+	resp, err := http.Get(base + "/admin/raft/snapshot")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, true, got["available"])
+	assert.Equal(t, float64(9), got["index"])
+	assert.Equal(t, float64(2), got["term"])
+	assert.Equal(t, float64(128), got["size_bytes"])
 }
 
 func TestCreateBucketConflict(t *testing.T) {

@@ -878,6 +878,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
 	srvOpts = append(srvOpts, server.WithReadIndexer(distBackend))
+	srvOpts = append(srvOpts, server.WithRaftSnapshotter(distBackend))
 
 	distBackend.RegisterReadIndexHandler()
 

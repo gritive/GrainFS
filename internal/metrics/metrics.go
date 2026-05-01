@@ -309,4 +309,20 @@ var (
 		Name: "grainfs_alert_delivery_failed_total",
 		Help: "Webhook deliveries that exhausted all retries.",
 	})
+
+	// Raft snapshot operator metrics.
+	RaftSnapshotTriggerTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_raft_snapshot_trigger_total",
+		Help: "Total operator-triggered Raft snapshots, partitioned by outcome.",
+	}, []string{"outcome"})
+
+	RaftSnapshotLastIndex = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_raft_snapshot_last_index",
+		Help: "Raft log index of the last successfully operator-triggered snapshot.",
+	})
+
+	RaftSnapshotLastSizeBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_raft_snapshot_last_size_bytes",
+		Help: "Size in bytes of the last successfully operator-triggered Raft snapshot.",
+	})
 )
