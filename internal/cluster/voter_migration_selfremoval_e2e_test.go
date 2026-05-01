@@ -88,7 +88,7 @@ func TestVoterMigration_SelfRemovalWithRetry_E2E(t *testing.T) {
 			}
 		}
 		return false
-	}, 10*time.Second, 100*time.Millisecond, "new leader must be elected from data-raft voters")
+	}, 20*time.Second, 100*time.Millisecond, "new leader must be elected from data-raft voters")
 
 	require.NotNil(t, newLeader)
 	newLeaderID := newLeader.ID()

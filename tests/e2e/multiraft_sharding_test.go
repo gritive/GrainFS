@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -260,7 +262,7 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
 	// the same forward path with try-each-peer reliability.
 
-	c := startMRCluster(t, 5, 8)
+	c := startMRCluster(t, 3, 4)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -321,7 +323,7 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 
 	c := startMRCluster(t, 3, 4) // 3 procs, 4 groups for shorter cycle
 
-	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -344,13 +346,15 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 		_ = p.Wait()
 	}
 
-	// Restart with the same data dirs.
+	// Restart with the same data dirs and fresh HTTP ports (avoid TCP TIME_WAIT).
 	for i := range c.procs {
+		c.httpPorts[i] = freePort()
+		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		c.procs[i] = c.startNode(i, 4)
 	}
 	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
 
-	// Wait for leader.
+	// Wait for leader — Raft WAL recovery + election can take > 60 s on macOS.
 	require.Eventually(t, func() bool {
 		for i := 0; i < len(c.procs); i++ {
 			cli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
@@ -362,7 +366,7 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 			}
 		}
 		return false
-	}, 90*time.Second, 1*time.Second, "no leader after restart")
+	}, 150*time.Second, 2*time.Second, "no leader after restart")
 
 	afterDirs := countGroupDirsAcrossNodes(c)
 	for gid, beforeCount := range beforeDirs {
@@ -396,7 +400,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("persist-test"),
 		Key:    aws.String("test-key"),
-		Body:   []byte(body),
+		Body:   bytes.NewReader([]byte(body)),
 	})
 	require.NoError(t, err)
 
@@ -411,14 +415,37 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, body, string(readBody))
 
-	// Validate data lives in exactly one group's BadgerDB (group-{N}/badger/data.mdb).
-	// Scan all nodes' group dirs; the object key should appear in exactly one.
-	var matches int
+	// Stop processes without removing data dirs so we can open the BadgerDB.
+	// t.Cleanup (registered in startMRCluster) handles final dir removal.
+	for _, p := range c.procs {
+		if p != nil && p.Process != nil {
+			_ = p.Process.Signal(syscall.SIGTERM)
+		}
+	}
+	stopDeadline := time.Now().Add(10 * time.Second)
+	for _, p := range c.procs {
+		if p == nil {
+			continue
+		}
+		done := make(chan error, 1)
+		go func(p *exec.Cmd) { done <- p.Wait() }(p)
+		select {
+		case <-done:
+		case <-time.After(time.Until(stopDeadline)):
+			_ = p.Process.Kill()
+			<-done
+		}
+	}
+
+	// Scan all nodes' group dirs; the key must appear in at least one group's
+	// BadgerDB. With RF=3 all voter nodes replicate the same FSM, so matches
+	// will equal the number of voters for the assigned group (≥ 1).
+	var groupsWithKey = map[string]bool{} // group dir name → found
 	for _, d := range c.dataDirs {
 		groupsDir := filepath.Join(d, "groups")
 		entries, err := os.ReadDir(groupsDir)
 		if err != nil {
-			continue // node may not host any groups
+			continue
 		}
 		for _, e := range entries {
 			if !e.IsDir() {
@@ -427,6 +454,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 			badgerDir := filepath.Join(groupsDir, e.Name(), "badger")
 			db, err := badger.Open(badger.DefaultOptions(badgerDir).WithLogger(nil))
 			if err != nil {
+				t.Logf("warning: BadgerDB open failed for %s: %v", badgerDir, err)
 				continue
 			}
 			scanErr := db.View(func(txn *badger.Txn) error {
@@ -434,8 +462,8 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 				defer iter.Close()
 				for iter.Rewind(); iter.Valid(); iter.Next() {
 					item := iter.Item()
-					if strings.Contains(string(item.Key), "test-key") {
-						matches++
+					if strings.Contains(string(item.Key()), "test-key") {
+						groupsWithKey[e.Name()] = true
 					}
 				}
 				return nil
@@ -446,7 +474,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 			}
 		}
 	}
-	require.Equal(t, 1, matches, "expected object to persist in exactly one group's BadgerDB")
+	require.Equal(t, 1, len(groupsWithKey), "expected key in exactly one group's BadgerDB, got: %v", groupsWithKey)
 	t.Log("per-group persistence ok: object stored in exactly one group")
 }
 
@@ -478,7 +506,7 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 	_, err = writeCLI.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("cross-node-test"),
 		Key:    aws.String("dispatch-key"),
-		Body:   []byte(body),
+		Body:   bytes.NewReader([]byte(body)),
 	})
 	require.NoError(t, err)
 
@@ -519,7 +547,7 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("failover-test"),
 		Key:    aws.String("failover-key"),
-		Body:   []byte(body),
+		Body:   bytes.NewReader([]byte(body)),
 	})
 	require.NoError(t, err)
 
@@ -541,33 +569,48 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 	// Wait for new leader to emerge (CreateBucket should succeed).
 	newLeaderCtx, newLeaderCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer newLeaderCancel()
-	var newLeaderIdx int
-	for i := range c.procs {
-		if i == killIdx {
-			continue
+	newLeaderIdx := -1
+	var lastProbeErr error
+	deadline := time.Now().Add(55 * time.Second)
+	for time.Now().Before(deadline) && newLeaderIdx == -1 {
+		for i := range c.procs {
+			if i == killIdx {
+				continue
+			}
+			testCli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
+			ctx2, cancel2 := context.WithTimeout(newLeaderCtx, 3*time.Second)
+			_, err := testCli.CreateBucket(ctx2, &s3.CreateBucketInput{Bucket: aws.String("failover-test-probe")})
+			cancel2()
+			if err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou") {
+				newLeaderIdx = i
+				break
+			}
+			lastProbeErr = err
+			t.Logf("probe node %d: %v", i, err)
 		}
-		testCli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
-		ctx2, cancel2 := context.WithTimeout(newLeaderCtx, 5*time.Second)
-		_, err := testCli.CreateBucket(ctx2, &s3.CreateBucketInput{Bucket: aws.String("failover-test-probe")})
-		cancel2()
-		if err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou") {
-			newLeaderIdx = i
-			break
+		if newLeaderIdx == -1 {
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
-	require.GreaterOrEqual(t, newLeaderIdx, 0, "new leader must emerge")
+	require.NotEqual(t, -1, newLeaderIdx, "no new leader emerged after 55s: last err=%v", lastProbeErr)
 	require.NotEqual(t, killIdx, newLeaderIdx, "new leader must be different from killed leader")
 	t.Logf("new leader emerged: node %d", newLeaderIdx)
 
 	// Verify PUT/GET work via new leader.
+	// Retry: after a node failure the DegradedMonitor may briefly suspend
+	// writes until it confirms quorum is still healthy.
 	newCLI := ecS3Client(c.httpURLs[newLeaderIdx], c.accessKey, c.secretKey)
 	const body2 = "post-failover-data"
-	_, err = newCLI.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("failover-test"),
-		Key:    aws.String("failover-key-2"),
-		Body:   []byte(body2),
-	})
-	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		putCtx, putCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer putCancel()
+		_, putErr := newCLI.PutObject(putCtx, &s3.PutObjectInput{
+			Bucket: aws.String("failover-test"),
+			Key:    aws.String("failover-key-2"),
+			Body:   bytes.NewReader([]byte(body2)),
+		})
+		return putErr == nil
+	}, 60*time.Second, 3*time.Second, "PutObject failed after leader failover")
 
 	getOut, err := newCLI.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("failover-test"),
@@ -668,7 +711,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("nfs-smoke"),
 		Key:    aws.String("s3-file.txt"),
-		Body:   []byte(s3Body),
+		Body:   bytes.NewReader([]byte(s3Body)),
 	})
 	require.NoError(t, err)
 

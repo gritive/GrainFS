@@ -110,3 +110,25 @@ func TestShutdownLocalGroup_Timeout_Ungraceful(t *testing.T) {
 func TestShutdownLocalGroup_Nil_NoError(t *testing.T) {
 	require.NoError(t, shutdownLocalGroup(context.Background(), nil, 100*time.Millisecond))
 }
+
+// TestInstantiateLocalGroup_SelfAddrFirst verifies that the GroupBackend's
+// DistributedBackend uses cfg.NodeID as selfAddr even when entry.PeerIDs is
+// sorted alphabetically (as PickVoters returns it) and cfg.NodeID is not first.
+// Regression test for the WriteShard/ReadShard self-skip bug.
+func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
+	dir := t.TempDir()
+	// "node-b" sorts between "node-a" and "node-c" — PickVoters would place it
+	// second in the alphabetically-sorted PeerIDs slice.
+	cfg := GroupLifecycleConfig{NodeID: "node-b", DataDir: dir}
+	entry := ShardGroupEntry{
+		ID:      "group-selfaddr",
+		PeerIDs: []string{"node-a", "node-b", "node-c"}, // alphabetically sorted, self not first
+	}
+
+	gb, err := instantiateLocalGroup(cfg, entry)
+	require.NoError(t, err)
+	defer shutdownLocalGroup(context.Background(), gb, 5*time.Second) //nolint:errcheck
+
+	require.Equal(t, "node-b", gb.selfAddr,
+		"selfAddr must equal cfg.NodeID regardless of PeerIDs sort order")
+}

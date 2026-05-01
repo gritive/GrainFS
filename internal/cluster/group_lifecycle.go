@@ -109,6 +109,16 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	}
 	node.Start()
 
+	// SetShardService requires self first in allNodes for correct self-skip in
+	// WriteShard/ReadShard. PickVoters sorts alphabetically so we reorder here.
+	peerIDsSelfFirst := make([]string, 0, len(entry.PeerIDs))
+	peerIDsSelfFirst = append(peerIDsSelfFirst, cfg.NodeID)
+	for _, p := range entry.PeerIDs {
+		if p != cfg.NodeID {
+			peerIDsSelfFirst = append(peerIDsSelfFirst, p)
+		}
+	}
+
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       entry.ID,
 		Root:     groupDir,
@@ -116,7 +126,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 		Node:     node,
 		LogStore: logStore,
 		ShardSvc: cfg.ShardSvc,
-		PeerIDs:  entry.PeerIDs,
+		PeerIDs:  peerIDsSelfFirst,
 		EC:       cfg.EC,
 	})
 	if err != nil {

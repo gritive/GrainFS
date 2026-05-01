@@ -77,11 +77,16 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 		return nil, fmt.Errorf("GroupBackend %s: NewDistributedBackend: %w", cfg.ID, err)
 	}
 
+	// selfAddr must equal this node's raft ID so WriteShard/ReadShard self-skip
+	// is correct. instantiateLocalGroup ensures cfg.PeerIDs[0] == cfg.NodeID.
+	dist.selfAddr = cfg.Node.ID()
 	if cfg.ShardSvc != nil {
 		dist.SetShardService(cfg.ShardSvc, cfg.PeerIDs)
 	}
 	// EC config is per-group; activates only when len(PeerIDs) >= MinECNodes.
 	dist.SetECConfig(cfg.EC)
+	// Bucket existence is trusted from the router; per-group DB has no bucket keys.
+	dist.bypassBucketCheck = true
 
 	return &GroupBackend{
 		DistributedBackend: dist,

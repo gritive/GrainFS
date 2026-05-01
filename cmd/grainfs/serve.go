@@ -496,6 +496,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		m  map[string]*cluster.GroupBackend
 	}{m: make(map[string]*cluster.GroupBackend)}
 
+	// Declared early so instantiateOwnedIfNeeded can capture it; initialized
+	// below after distBackend.RunApplyLoop is started.
+	var stopApply chan struct{}
+
+	// GroupRaftQUICMux multiplexes per-group raft RPCs over StreamGroupRaft (0x09).
+	// Registered once; each group uses ForGroup(groupID) as its raft transport.
+	groupRaftMux := raft.NewGroupRaftQUICMux(quicTransport)
+
 	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) {
 		// group-0 is already wired with the shared distBackend.
 		if entry.ID == "group-0" {
@@ -522,9 +530,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		ownedGroups.mu.Unlock()
 
 		gb, err := cluster.InstantiateLocalGroup(cluster.GroupLifecycleConfig{
-			NodeID:   raftAddr, // identity = raftAddr (matches PeerIDs)
-			DataDir:  dataDir,
-			ShardSvc: shardSvc,
+			NodeID:    raftAddr, // identity = raftAddr (matches PeerIDs)
+			DataDir:   dataDir,
+			ShardSvc:  shardSvc,
+			Transport: groupRaftMux.ForGroup(entry.ID),
 			EC: cluster.ECConfig{
 				DataShards:   clusterECData,
 				ParityShards: clusterECParity,
@@ -533,7 +542,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err != nil {
 			log.Fatal().Err(err).Str("group_id", entry.ID).Msg("instantiateLocalGroup failed — voter status fatal")
 		}
+		groupRaftMux.Register(entry.ID, gb.RaftNode())
 		dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
+		go gb.RunApplyLoop(stopApply)
 		ownedGroups.mu.Lock()
 		ownedGroups.m[entry.ID] = gb
 		ownedGroups.mu.Unlock()
@@ -644,7 +655,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		cachedBackend.InvalidateKey(bucket, key)
 	})
 
-	stopApply := make(chan struct{})
+	stopApply = make(chan struct{})
 	go distBackend.RunApplyLoop(stopApply)
 
 	// Start balancer if enabled (cluster mode only).
@@ -718,12 +729,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		return reply.Payload, nil
 	}
-
-
-
-
-
-
 
 	forwardSender := cluster.NewForwardSender(forwardDialer)
 	forwardReceiver := cluster.NewForwardReceiver(dgMgr)

@@ -95,6 +95,15 @@ func (r *Router) Sync(assignments map[string]string) {
 	}
 }
 
+// ExplicitGroup returns the group_id explicitly assigned to bucket, or ("", false)
+// if the bucket has no explicit assignment (i.e., would fall through to the default).
+// Used by CreateBucket to distinguish "already assigned" from "needs hash-assign".
+func (r *Router) ExplicitGroup(bucket string) (string, bool) {
+	snap := r.snap.Load()
+	gid, ok := snap.bucketMap[bucket]
+	return gid, ok
+}
+
 // RouteKey returns the DataGroup for the given bucket.
 // key is accepted but unused at Layer 1; reserved for future Layer 2 (ringFNV32) integration.
 func (r *Router) RouteKey(bucket, _ string) (*DataGroup, error) {
