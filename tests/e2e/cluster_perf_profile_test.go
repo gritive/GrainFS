@@ -208,6 +208,12 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 			"--lifecycle-interval", "0",
 			"--no-encryption",
 		)
+		// 노드별 stdout/stderr를 scenarioDir에 캡처해 leader-election 실패 등 boot 단계
+		// 진단을 가능하게 한다. 파일은 cleanup()에서 procs와 함께 회수.
+		nodeLog, err := os.Create(filepath.Join(scenarioDir, fmt.Sprintf("node-%d.log", i)))
+		require.NoError(t, err, "create node-%d log", i)
+		cmd.Stdout = nodeLog
+		cmd.Stderr = nodeLog
 		require.NoError(t, cmd.Start(), "start node %d", i)
 		procs[i] = cmd
 	}
