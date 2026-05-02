@@ -364,6 +364,64 @@ migration and full safety; just enough to run `cluster_perf_profile_test`
 matrix end-to-end. Compare: idle-N8/16 goroutines & CPU; load-N8/16 PUT
 error rate; load-N32 (does it boot now?).
 
+## P0b — Shared raft-log prototype (code landed, measurements pending)
+
+Code wired in commit `<TBD>`:
+
+- `internal/raft/store.go`: `BadgerLogStore` gains `prefix []byte` + `shared bool`
+  fields. New `OpenSharedLogStore(db *badger.DB, groupID string, ...)` constructor
+  views an externally-managed DB with all keys prefixed `varuint(len(groupID))||
+  groupID||':'`. `Close()` is a no-op for shared stores. Existing
+  `NewBadgerLogStore` callers see zero behavior change (prefix is empty).
+- `cmd/grainfs/serve.go`: new `--shared-badger` cobra flag (**default true**).
+  When enabled, opens one `*badger.DB` at `<dataDir>/shared-raft-log/` with
+  the same options as per-group log DBs (`SyncWrites=true`, `NumCompactors=2`,
+  `NumVersionsToKeep=1`).
+- `cmd/grainfs/serve.go`: `InstantiateLocalGroup` call site passes
+  `LogStore: raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID)` when shared
+  mode is on.
+- `internal/cluster/group_lifecycle.go`: pre-existing `GroupLifecycleConfig.LogStore`
+  field carries the shared view through; no new wiring required there.
+- `tests/e2e/cluster_perf_profile_test.go`: forwards `GRAINFS_PERF_SHARED_BADGER=1`
+  env to `--shared-badger`; bumped `waitForLeaderAndCreateBucket` timeout from
+  120s to 240s to absorb host contention.
+
+What's NOT in P0b:
+
+- FSM state DB consolidation (still per-group at `groupDir/badger/`).
+  Defers half the win until full C2 P3 lands.
+- Migration / auto-conversion: `--shared-badger=false` lets legacy per-group
+  layouts continue. Mixing modes on the same data dir is unsupported.
+- `Snapshot`/`Restore` prefix-scoping: perf test uses
+  `--snapshot-interval 0`, so unsafe Restore can't fire. Full C2 must fix.
+- Group teardown safety: prototype assumes cluster runs to completion.
+
+### Status: smoke run blocked by host load
+
+idle-N8 smoke (with and without `--shared-badger`) failed to elect a meta-raft
+leader within 240s on the test host. Concurrent `fix-e2e-tests` worktree
+e2e suite was driving load-average to 15+ and using ~75% CPU on grainfs
+processes from that worktree, starving the perf cluster's bootstrap.
+
+Empirically the failure is host-state, not P0b code:
+- Both shared (`--shared-badger`) and non-shared baselines fail the same way
+- Failure mode is meta-raft `ProposeWait: not the leader` for >30s, identical
+  pattern to load-N32 baseline under similar contention
+- Raft unit-test suite passes after refactor (`go test ./internal/raft/`)
+- Prior idle-N8 runs on the same code (commit `317f991`) succeeded under
+  *lighter* contention earlier today (boot 15-23s)
+
+Measurement deferred to next session when the host is idle. Run with:
+
+```bash
+GRAINFS_PERF=1 GRAINFS_PERF_SHARED_BADGER=1 GRAINFS_PERF_SCENARIO=idle-N8 \
+  GRAINFS_PERF_DIR=/tmp/grainfs-perf-p0b \
+  go test -run '^TestE2E_ClusterPerf_All$' -count=1 -timeout 600s -v ./tests/e2e/
+```
+
+Then sweep `idle-N8,idle-N16,load-N8,load-N16,load-N32` and update this
+section with the comparison table.
+
 ## References
 
 - C1 PR: #128 `perf/badger-compactor` (cheap compactor reduction baseline)

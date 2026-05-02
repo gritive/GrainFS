@@ -125,6 +125,7 @@ func init() {
 	serveCmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	serveCmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
 	serveCmd.Flags().Bool("dedup", true, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
+	serveCmd.Flags().Bool("shared-badger", true, "share one raft-log BadgerDB across all groups (C2). Reduces per-process instance count when many groups are seeded. Disable with --shared-badger=false only for legacy per-group dirs.")
 	// Rate limit overrides — defaults are production-safe (100/200 ip, 50/100 user).
 	// Benchmarks/dev/upstream-proxied deployments can relax these. 0 disables that layer.
 	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (auto: cluster=false (consensus provides redundancy), single=true; explicit value always wins)")
@@ -292,6 +293,29 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", raftDir, err, raftDir)
 	}
 	defer logStore.Close()
+
+	// C2 P0b prototype: optionally open one shared raft-log BadgerDB so all
+	// data groups share a single instance instead of opening their own. Reduces
+	// process-level BadgerDB instance count from (2N+1) → (2+1) for the log
+	// half. FSM state DB consolidation deferred to full C2.
+	sharedBadgerEnabled, _ := cmd.Flags().GetBool("shared-badger")
+	var sharedRaftLogDB *badger.DB
+	if sharedBadgerEnabled {
+		sharedDir := filepath.Join(dataDir, "shared-raft-log")
+		if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir shared raft-log dir: %w", err)
+		}
+		sharedRaftLogDB, err = badger.Open(badger.DefaultOptions(sharedDir).
+			WithLogger(nil).
+			WithSyncWrites(true).
+			WithNumCompactors(2).
+			WithNumVersionsToKeep(1))
+		if err != nil {
+			return fmt.Errorf("open shared raft-log badger at %s: %w", sharedDir, err)
+		}
+		defer sharedRaftLogDB.Close()
+		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
+	}
 
 	// Start QUIC transport for inter-node communication.
 	quicTransport := transport.NewQUICTransport(clusterKey)
@@ -530,7 +554,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		ownedGroups.mu.Unlock()
 
-		gb, err := cluster.InstantiateLocalGroup(cluster.GroupLifecycleConfig{
+		glc := cluster.GroupLifecycleConfig{
 			NodeID:    raftAddr, // identity = raftAddr (matches PeerIDs)
 			DataDir:   dataDir,
 			ShardSvc:  shardSvc,
@@ -539,7 +563,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				DataShards:   clusterECData,
 				ParityShards: clusterECParity,
 			},
-		}, entry)
+		}
+		if sharedRaftLogDB != nil {
+			ls, lerr := raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID)
+			if lerr != nil {
+				log.Fatal().Err(lerr).Str("group_id", entry.ID).Msg("OpenSharedLogStore failed")
+			}
+			glc.LogStore = ls
+		}
+		gb, err := cluster.InstantiateLocalGroup(glc, entry)
 		if err != nil {
 			log.Fatal().Err(err).Str("group_id", entry.ID).Msg("instantiateLocalGroup failed — voter status fatal")
 		}

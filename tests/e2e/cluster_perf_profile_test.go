@@ -211,6 +211,10 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 			"--lifecycle-interval", "0",
 			"--no-encryption",
 		)
+		// C2 P0b: forward GRAINFS_PERF_SHARED_BADGER=1 → --shared-badger
+		if os.Getenv("GRAINFS_PERF_SHARED_BADGER") == "1" {
+			cmd.Args = append(cmd.Args, "--shared-badger")
+		}
 		// 노드별 stdout/stderr를 scenarioDir에 캡처해 leader-election 실패 등 boot 단계
 		// 진단을 가능하게 한다. 파일은 cleanup()에서 procs와 함께 회수.
 		nodeLog, err := os.Create(filepath.Join(scenarioDir, fmt.Sprintf("node-%d.log", i)))
@@ -342,7 +346,7 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 // 성공한 노드 인덱스를 리더(또는 라우팅 가능한 노드)로 본다.
 func waitForLeaderAndCreateBucket(t *testing.T, httpURL func(int) string, bucket string) int {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	var leader = -1
 	require.Eventually(t, func() bool {
@@ -355,7 +359,7 @@ func waitForLeaderAndCreateBucket(t *testing.T, httpURL func(int) string, bucket
 			}
 		}
 		return false
-	}, 120*time.Second, 1*time.Second, "no node accepted CreateBucket")
+	}, 240*time.Second, 1*time.Second, "no node accepted CreateBucket")
 	return leader
 }
 
