@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.22.0] — 2026-05-03 — dynamic cluster join and all-node service coverage
+
+### Added
+
+- **cluster**: `grainfs serve --join <raft-addr>` lets new nodes join an existing meta-Raft cluster without a static `--peers` list.
+- **cluster**: node ID peer entries now resolve through meta-Raft membership, so dynamic join groups can route shard, S3, and Iceberg traffic to dialable node addresses.
+- **transport**: reserved `StreamMetaJoin` for the dynamic join admin RPC.
+
+### Changed
+
+- **cluster**: default bucket startup creation is now singleton-only; clustered deployments treat bucket creation as shared metadata instead of having every node race to create it.
+- **e2e**: dynamic join is now the default shared multi-node test harness, while static `--peers` tests are explicitly marked as legacy static topology coverage.
+- **docs**: README and runbook now document `--join` as the normal way to add cluster nodes.
+
+### Fixed
+
+- **cluster**: joined nodes can forward bucket assignment, S3 object operations, and Iceberg catalog writes to the correct meta/data leader before they own local data groups.
+- **cluster**: concurrent join requests for the same node ID are serialized so a second request cannot slip between voter addition and metadata registration with a different address.
+
+### Tests
+
+- **cluster**: added unit coverage for meta join forwarding, address book resolution, forwarding bucket assignment, node-address shard routing, and singleton default bucket startup policy.
+- **e2e**: added dynamic join coverage for S3, Iceberg REST, NFSv4, and NBD across 2-node and 3-node clusters, plus default bucket and joined-node service checks.
+
 ## [0.0.21.0] — 2026-05-02 — harden cluster EC forwarding and shard integrity
 
 ### Added
