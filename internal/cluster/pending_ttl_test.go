@@ -27,6 +27,7 @@ func TestMigrationExecutor_PendingTTL(t *testing.T) {
 	ttl := 50 * time.Millisecond
 	e, cancel := makeTTLExecutor(ttl)
 	defer cancel()
+	defer e.Stop()
 
 	// Register a fake pending entry (simulate Execute() Phase 2 not yet completing).
 	id := "bucket/key/"
@@ -55,6 +56,7 @@ func TestMigrationExecutor_TTLDuringPhase3(t *testing.T) {
 	ttl := 100 * time.Millisecond
 	e, cancel := makeTTLExecutor(ttl)
 	defer cancel()
+	defer e.Stop()
 
 	id := "bucket/key/"
 	entryCtx, entryCancel := context.WithCancel(context.Background())
@@ -77,7 +79,8 @@ func TestMigrationExecutor_TTLDuringPhase3(t *testing.T) {
 
 // TestMigrationExecutor_SweepLoopStopsOnCtxDone: sweepLoop exits cleanly on ctx cancel.
 func TestMigrationExecutor_SweepLoopStopsOnCtxDone(t *testing.T) {
-	_, cancel := makeTTLExecutor(100 * time.Millisecond)
+	e, cancel := makeTTLExecutor(100 * time.Millisecond)
+	defer e.Stop()
 	cancel() // cancel immediately
 
 	// sweepLoop goroutine should exit; no deadlock or panic
@@ -90,6 +93,7 @@ func TestMigrationExecutor_SweepDoesNotCloseCh(t *testing.T) {
 	ttl := 50 * time.Millisecond
 	e, cancel := makeTTLExecutor(ttl)
 	defer cancel()
+	defer e.Stop()
 
 	id := "bucket/key/"
 	_, entryCancel := context.WithCancel(context.Background())

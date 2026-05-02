@@ -72,10 +72,56 @@ func (m *mockMigrationRaft) NodeID() string { return m.nodeID }
 
 // --- MigrationExecutor tests ---
 
+func cleanupMigrationExecutor(t *testing.T, e *MigrationExecutor) *MigrationExecutor {
+	t.Helper()
+	t.Cleanup(e.Stop)
+	return e
+}
+
+func (e *MigrationExecutor) testDoneCount() int {
+	reply := make(chan int, 1)
+	if !e.sendCoord(migrationCoordMsg{kind: migrationCoordDoneCount, reply: reply}) {
+		return 0
+	}
+	return <-reply
+}
+
+func (e *MigrationExecutor) testDoneContains(id string) bool {
+	reply := make(chan bool, 1)
+	if !e.sendCoord(migrationCoordMsg{kind: migrationCoordDoneContains, id: id, reply: reply}) {
+		return false
+	}
+	return <-reply
+}
+
+func (e *MigrationExecutor) testCommittedCount() int {
+	reply := make(chan int, 1)
+	if !e.sendCoord(migrationCoordMsg{kind: migrationCoordCommittedCount, reply: reply}) {
+		return 0
+	}
+	return <-reply
+}
+
+func (e *MigrationExecutor) testPendingContains(id string) bool {
+	reply := make(chan bool, 1)
+	if !e.sendCoord(migrationCoordMsg{kind: migrationCoordPendingContains, id: id, reply: reply}) {
+		return false
+	}
+	return <-reply
+}
+
+func (e *MigrationExecutor) testPendingIDs() []string {
+	reply := make(chan []string, 1)
+	if !e.sendCoord(migrationCoordMsg{kind: migrationCoordPendingIDs, reply: reply}) {
+		return nil
+	}
+	return <-reply
+}
+
 func TestMigrationExecutor_CopiesThenProposeDone(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 6)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 6))
 	node.exec = exec // wire up for immediate commit simulation
 
 	err := exec.Execute(context.Background(), MigrationTask{
@@ -101,7 +147,7 @@ func TestMigrationExecutor_CopiesThenProposeDone(t *testing.T) {
 func TestMigrationExecutor_AbortOnWriteFailure(t *testing.T) {
 	mover := &mockShardMover{writeErr: errors.New("network error")}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 6)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 6))
 	node.exec = exec
 
 	err := exec.Execute(context.Background(), MigrationTask{
@@ -118,7 +164,7 @@ func TestMigrationExecutor_NoDeleteIfCommitTimeout(t *testing.T) {
 	mover := &mockShardMover{}
 	// node that never calls NotifyCommit
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 6)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 6))
 	// don't wire node.exec — commit will never arrive
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -136,7 +182,7 @@ func TestMigrationExecutor_NoDeleteIfCommitTimeout(t *testing.T) {
 func TestMigrationExecutor_IdempotentByVersionID(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 6)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 6))
 	node.exec = exec
 
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c"}
@@ -160,7 +206,7 @@ func TestMigrationExecutor_IdempotentByVersionID(t *testing.T) {
 func TestMigrationExecutor_ConcurrentExecuteSameTask(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 2)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 2))
 	node.exec = exec
 
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c"}
@@ -189,7 +235,7 @@ func TestMigrationExecutor_ConcurrentExecuteSameTask(t *testing.T) {
 func TestMigrationExecutor_NotifyCommitBeforeExecute(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 2)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 2))
 	// Do NOT wire node.exec — we call NotifyCommit manually before Execute
 	// to simulate early FSM commit (e.g., from crash replay or fast leader commit)
 
@@ -212,7 +258,7 @@ func TestMigrationExecutor_NotifyCommitBeforeExecute(t *testing.T) {
 func TestMigrationExecutor_EarlyCommitStillDeletes(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 2)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 2))
 
 	// Raft log replay: CmdMigrationDone is applied before Execute() is called.
 	exec.NotifyCommit("b", "k", "v1")
@@ -229,7 +275,7 @@ func TestMigrationExecutor_EarlyCommitStillDeletes(t *testing.T) {
 // TestMigrationExecutor_NotifyCommit_TwiceIsNoOp verifies calling NotifyCommit
 // twice for the same task does not panic.
 func TestMigrationExecutor_NotifyCommit_TwiceIsNoOp(t *testing.T) {
-	exec := NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1))
 	// Should not panic.
 	exec.NotifyCommit("b", "k", "v1")
 	exec.NotifyCommit("b", "k", "v1")
@@ -238,22 +284,17 @@ func TestMigrationExecutor_NotifyCommit_TwiceIsNoOp(t *testing.T) {
 // TestMigrationExecutor_CommittedMap_Bounded verifies the committed map is reset
 // when it exceeds maxDoneHistory, preventing unbounded memory growth.
 func TestMigrationExecutor_CommittedMap_Bounded(t *testing.T) {
-	exec := NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1)
-	exec.mu.Lock()
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1))
 	for i := range maxDoneHistory + 10 {
-		exec.committed[fmt.Sprintf("b/k/v%d", i)] = struct{}{}
+		exec.NotifyCommit("b", "k", fmt.Sprintf("v%d", i))
 	}
-	// markDone resets when over limit; use same logic for committed.
-	// The map should be bounded after inserts.
-	size := len(exec.committed)
-	exec.mu.Unlock()
-	assert.LessOrEqual(t, size, maxDoneHistory+10, "committed map should not exceed bounds")
+	assert.LessOrEqual(t, exec.testCommittedCount(), maxDoneHistory, "committed map should not exceed bounds")
 }
 
 func TestMigrationExecutor_DeleteFailureMarksTaskDone(t *testing.T) {
 	mover := &mockShardMover{deleteErr: fmt.Errorf("network error")}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 2)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 2))
 	node.exec = exec
 
 	err := exec.Execute(context.Background(), MigrationTask{
@@ -263,21 +304,16 @@ func TestMigrationExecutor_DeleteFailureMarksTaskDone(t *testing.T) {
 	require.NoError(t, err, "delete failure should not surface as Execute error")
 
 	// Task is still marked done (commit was confirmed via Raft)
-	exec.mu.Lock()
-	_, isDone := exec.done["b/k/v1"]
-	exec.mu.Unlock()
-	assert.True(t, isDone, "task should be marked done even if delete fails")
+	assert.True(t, exec.testDoneContains("b/k/v1"), "task should be marked done even if delete fails")
 }
 
 func TestMigrationExecutor_DoneMapBounded(t *testing.T) {
 	// Fill done map beyond maxDoneHistory to verify it is reset (no OOM).
-	exec := NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1)
-	exec.mu.Lock()
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(&mockShardMover{}, &mockMigrationRaft{}, 1))
 	for i := range maxDoneHistory + 10 {
 		exec.markDone(fmt.Sprintf("b/k/v%d", i))
 	}
-	size := len(exec.done)
-	exec.mu.Unlock()
+	size := exec.testDoneCount()
 	// After reset + the 10 entries added post-reset, map must be ≤ maxDoneHistory.
 	assert.LessOrEqual(t, size, maxDoneHistory, "done map must not exceed maxDoneHistory")
 }
@@ -286,7 +322,7 @@ func TestMigrationExecutor_CtxCancelCleansUpPending(t *testing.T) {
 	mover := &mockShardMover{}
 	// node that never calls NotifyCommit
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 1)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 1))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
@@ -295,16 +331,13 @@ func TestMigrationExecutor_CtxCancelCleansUpPending(t *testing.T) {
 		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c",
 	})
 
-	exec.mu.Lock()
-	_, inPending := exec.pending["b/k/v1"]
-	exec.mu.Unlock()
-	assert.False(t, inPending, "cancelled task should be removed from pending map")
+	assert.False(t, exec.testPendingContains("b/k/v1"), "cancelled task should be removed from pending map")
 }
 
 func TestMigrationExecutor_NotifyCommit_Unblocks(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 6)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 6))
 
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c"}
 
@@ -334,7 +367,7 @@ func TestMigrationExecutor_NotifyCommit_Unblocks(t *testing.T) {
 func TestMigrationExecutor_EarlyCommitConcurrentExecute(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	exec := NewMigrationExecutor(mover, node, 2)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 2))
 
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "node-b", DstNode: "node-c"}
 

@@ -1,6 +1,9 @@
 package receipt
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // RoutingCache tracks which peers recently produced which HealReceipts, based
 // on gossip messages each peer broadcasts (rolling window of the last N
@@ -11,54 +14,94 @@ import "sync"
 // from a given node replaces that node's list wholesale — older IDs drop
 // out of the cache naturally without explicit eviction logic.
 //
-// Concurrency: sync.RWMutex — Lookup is the hot path (every dashboard
-// request), Update fires once per gossip tick per peer. An atomic-pointer
-// copy-on-write approach is tracked in TODOS.md (Phase 17 lock-free) but
-// is premature before we measure real Lookup throughput.
+// Concurrency: Lookup is the hot path (every dashboard request) and runs
+// lock-free over an immutable atomic snapshot. Update/Evict are rare gossip
+// events, so they serialize with a writer mutex, copy the small rolling window,
+// and publish the next snapshot with a single atomic Store.
 type RoutingCache struct {
-	mu    sync.RWMutex
-	peers map[string][]string // nodeID → ordered receipt IDs
+	writeMu sync.Mutex
+	snap    atomic.Pointer[routingSnapshot]
+}
+
+type routingSnapshot struct {
+	peers     map[string][]string // nodeID → ordered receipt IDs
+	byReceipt map[string]string   // receiptID → nodeID
 }
 
 // NewRoutingCache returns an empty cache.
 func NewRoutingCache() *RoutingCache {
-	return &RoutingCache{peers: make(map[string][]string)}
+	c := &RoutingCache{}
+	c.snap.Store(&routingSnapshot{
+		peers:     make(map[string][]string),
+		byReceipt: make(map[string]string),
+	})
+	return c
 }
 
 // Update replaces the list of receipt IDs associated with nodeID. The caller
-// is expected to pass a freshly-allocated slice (the cache holds onto the
-// reference without copying). Passing an empty slice clears the node's
-// entries while keeping it in the map.
+// may reuse or mutate ids after Update returns; the cache copies the slice into
+// an immutable snapshot. Passing an empty slice clears the node's entries while
+// keeping it in the map.
 func (c *RoutingCache) Update(nodeID string, ids []string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.peers[nodeID] = ids
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	cur := c.snap.Load()
+	next := cur.clone()
+	if prev := next.peers[nodeID]; len(prev) > 0 {
+		for _, id := range prev {
+			if next.byReceipt[id] == nodeID {
+				delete(next.byReceipt, id)
+			}
+		}
+	}
+	copied := append([]string(nil), ids...)
+	next.peers[nodeID] = copied
+	for _, id := range copied {
+		next.byReceipt[id] = nodeID
+	}
+	c.snap.Store(next)
 }
 
 // Lookup returns the nodeID known to hold receiptID and true, or "", false
 // when no peer has reported it within their rolling window.
 //
-// Scan cost is O(peers × window_size). For the Slice 2 target of ~10 peers
-// × 50 IDs = 500 comparisons per lookup, this stays under a microsecond.
-// If peer count grows, switch to an inverted id→nodeID map (see TODOS.md
-// lock-free refactor).
+// Lookup is O(1), lock-free, and allocation-free.
 func (c *RoutingCache) Lookup(receiptID string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for nodeID, ids := range c.peers {
-		for _, id := range ids {
-			if id == receiptID {
-				return nodeID, true
-			}
-		}
-	}
-	return "", false
+	snap := c.snap.Load()
+	nodeID, ok := snap.byReceipt[receiptID]
+	return nodeID, ok
 }
 
 // Evict removes nodeID and its receipt IDs. Evicting an unknown node is a
 // no-op. Callers use this when a peer leaves the cluster.
 func (c *RoutingCache) Evict(nodeID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.peers, nodeID)
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	cur := c.snap.Load()
+	next := cur.clone()
+	if prev := next.peers[nodeID]; len(prev) > 0 {
+		for _, id := range prev {
+			if next.byReceipt[id] == nodeID {
+				delete(next.byReceipt, id)
+			}
+		}
+	}
+	delete(next.peers, nodeID)
+	c.snap.Store(next)
+}
+
+func (s *routingSnapshot) clone() *routingSnapshot {
+	next := &routingSnapshot{
+		peers:     make(map[string][]string, len(s.peers)),
+		byReceipt: make(map[string]string, len(s.byReceipt)),
+	}
+	for nodeID, ids := range s.peers {
+		next.peers[nodeID] = ids
+	}
+	for receiptID, nodeID := range s.byReceipt {
+		next.byReceipt[receiptID] = nodeID
+	}
+	return next
 }

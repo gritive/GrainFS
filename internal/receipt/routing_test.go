@@ -104,6 +104,33 @@ func TestRoutingCache_Update_EmptyList(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestRoutingCache_UpdateDoesNotRetainCallerSlice(t *testing.T) {
+	c := NewRoutingCache()
+	ids := []string{"rcpt-1", "rcpt-2"}
+
+	c.Update("node-a", ids)
+	ids[0] = "mutated"
+
+	node, ok := c.Lookup("rcpt-1")
+	require.True(t, ok)
+	require.Equal(t, "node-a", node)
+	_, ok = c.Lookup("mutated")
+	require.False(t, ok, "cache snapshots must be immutable after Update returns")
+}
+
+func TestRoutingCache_Lookup_ZeroAllocs(t *testing.T) {
+	c := NewRoutingCache()
+	c.Update("node-a", []string{"rcpt-1", "rcpt-2"})
+
+	allocs := testing.AllocsPerRun(100, func() {
+		node, ok := c.Lookup("rcpt-2")
+		if !ok || node != "node-a" {
+			t.Fatalf("unexpected lookup result: node=%q ok=%v", node, ok)
+		}
+	})
+	require.Zero(t, allocs, "Lookup should be allocation-free")
+}
+
 func TestRoutingCache_Concurrent_ReadersAndWriters(t *testing.T) {
 	// 20 readers + 5 writers hammering the cache. With the read/write lock,
 	// no data race, no panic, every Lookup after the final Update returns the
@@ -154,5 +181,22 @@ func TestRoutingCache_Concurrent_ReadersAndWriters(t *testing.T) {
 		node, ok := c.Lookup(expectedID)
 		require.True(t, ok, "final Update should leave IDs discoverable: %s", expectedID)
 		require.Equal(t, fmt.Sprintf("node-%d", w), node)
+	}
+}
+
+func BenchmarkRoutingCache_Lookup(b *testing.B) {
+	c := NewRoutingCache()
+	ids := make([]string, 50)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("rcpt-%d", i)
+	}
+	c.Update("node-a", ids)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		node, ok := c.Lookup("rcpt-49")
+		if !ok || node != "node-a" {
+			b.Fatalf("unexpected lookup result: node=%q ok=%v", node, ok)
+		}
 	}
 }

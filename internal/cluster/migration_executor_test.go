@@ -16,7 +16,7 @@ func TestMigrationExecutor_StopIdempotent(t *testing.T) {
 	t.Parallel()
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	e := NewMigrationExecutor(mover, node, 1)
+	e := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, 1))
 
 	require.NotPanics(t, func() {
 		e.Stop()
@@ -74,7 +74,7 @@ func (f *fakeRaft) NodeID() string { return "node-0" }
 func TestMigrationExecutor_NxMode_OnlyShardZero(t *testing.T) {
 	t.Parallel()
 	mover := &fakeMover{shards: map[int][]byte{0: []byte("data")}}
-	exec := NewMigrationExecutor(mover, &fakeRaft{}, 3)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, &fakeRaft{}, 3))
 	err := exec.Execute(context.Background(), MigrationTask{
 		Bucket: "bkt", Key: "obj", VersionID: "v1",
 	})
@@ -87,7 +87,7 @@ func TestMigrationExecutor_NxMode_WithShardCounter_Succeeds(t *testing.T) {
 	t.Parallel()
 	mover := &fakeMover{shards: map[int][]byte{0: []byte("data")}}
 	fr := &fakeRaft{}
-	exec := NewMigrationExecutor(mover, fr, 3)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, fr, 3))
 	fr.exec = exec
 	exec.SetShardCounter(func(_, _, _ string) int { return 1 })
 	err := exec.Execute(context.Background(), MigrationTask{
@@ -103,7 +103,7 @@ func TestMigrationExecutor_ECMode_WithShardCounter_AllShards(t *testing.T) {
 	t.Parallel()
 	mover := &fakeMover{shards: map[int][]byte{0: []byte("d0"), 1: []byte("d1"), 2: []byte("p0")}}
 	fr := &fakeRaft{}
-	exec := NewMigrationExecutor(mover, fr, 3)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, fr, 3))
 	fr.exec = exec
 	exec.SetShardCounter(func(_, _, _ string) int { return 3 })
 	err := exec.Execute(context.Background(), MigrationTask{
@@ -119,7 +119,7 @@ func TestMigrationExecutor_ShardCounter_ZeroFallback(t *testing.T) {
 	t.Parallel()
 	mover := &fakeMover{shards: map[int][]byte{0: []byte("data"), 1: []byte("d1"), 2: []byte("p0")}}
 	fr := &fakeRaft{}
-	exec := NewMigrationExecutor(mover, fr, 3)
+	exec := cleanupMigrationExecutor(t, NewMigrationExecutor(mover, fr, 3))
 	fr.exec = exec
 	exec.SetShardCounter(func(_, _, _ string) int { return 0 }) // 0 → fallback to numShards=3
 	err := exec.Execute(context.Background(), MigrationTask{
@@ -134,7 +134,7 @@ func TestMigrationExecutor_ShardCounter_ZeroFallback(t *testing.T) {
 func TestMigrationExecutor_SweepLoopExitsOnStop(t *testing.T) {
 	mover := &mockShardMover{}
 	node := &mockMigrationRaft{nodeID: "node-a"}
-	e := NewMigrationExecutorWithTTL(mover, node, 1, 100*time.Millisecond)
+	e := cleanupMigrationExecutor(t, NewMigrationExecutorWithTTL(mover, node, 1, 100*time.Millisecond))
 
 	ctx := context.Background()
 	e.Start(ctx)

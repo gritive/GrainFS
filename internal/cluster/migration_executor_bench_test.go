@@ -3,16 +3,17 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 // benchMigrationRaft immediately calls NotifyCommit for any proposed task,
 // enabling Execute() to complete without blocking on phase 3.
 type benchMigrationRaft struct {
-	mu   sync.Mutex
-	exec *MigrationExecutor
+	exec atomic.Pointer[MigrationExecutor]
 }
 
 func (m *benchMigrationRaft) Propose(data []byte) error {
@@ -25,9 +26,7 @@ func (m *benchMigrationRaft) Propose(data []byte) error {
 	if err != nil {
 		return nil
 	}
-	m.mu.Lock()
-	exec := m.exec
-	m.mu.Unlock()
+	exec := m.exec.Load()
 	if exec != nil {
 		exec.NotifyCommit(fsm.Bucket, fsm.Key, fsm.VersionID)
 	}
@@ -41,7 +40,9 @@ func BenchmarkMigrationExecutor_Execute(b *testing.B) {
 	mover := &mockShardMover{}
 	node := &benchMigrationRaft{}
 	e := NewMigrationExecutor(mover, node, 1)
-	node.exec = e
+	defer e.Stop()
+	e.logger = zerolog.Nop()
+	node.exec.Store(e)
 
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
@@ -59,20 +60,18 @@ func BenchmarkMigrationExecutor_Execute(b *testing.B) {
 	})
 }
 
-// BenchmarkMigrationExecutor_MutexContention measures lock contention via mutex profile.
-// Run with: go test -bench=BenchmarkMigrationExecutor_MutexContention
+// BenchmarkMigrationExecutor_CoordinationContention measures actor coordination
+// overhead under concurrent Execute calls.
+// Run with: go test -bench=BenchmarkMigrationExecutor_CoordinationContention
 //
-//	-mutexprofile=mutex.prof ./internal/cluster/
-//
-// Then: go tool pprof mutex.prof
-func BenchmarkMigrationExecutor_MutexContention(b *testing.B) {
-	runtime.SetMutexProfileFraction(1)
-	defer runtime.SetMutexProfileFraction(0)
-
+//	./internal/cluster/
+func BenchmarkMigrationExecutor_CoordinationContention(b *testing.B) {
 	mover := &mockShardMover{}
 	node := &benchMigrationRaft{}
 	e := NewMigrationExecutor(mover, node, 1)
-	node.exec = e
+	defer e.Stop()
+	e.logger = zerolog.Nop()
+	node.exec.Store(e)
 
 	var wg sync.WaitGroup
 	concurrency := 32
