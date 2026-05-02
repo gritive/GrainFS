@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.21.0] — 2026-05-02 — harden cluster EC forwarding and shard integrity
+
+### Added
+
+- **cluster**: non-leader `PutObject` and `UploadPart` now stream request bodies to the group leader over QUIC, so large routed writes no longer hit the legacy 5 MiB single-message cap.
+- **cluster**: `--reshard-interval` starts background EC reshard managers for local DataGroups by default, with `0` preserving the opt-out path.
+- **storage**: new cluster EC shard writes use a versioned CRC envelope while legacy raw shards remain readable during rolling upgrades.
+
+### Fixed
+
+- **cluster**: streamed forward rejects now drain request bodies before replying, preventing sender-side QUIC stalls when leadership changes or a node is not a voter.
+- **transport**: streamed body calls cancel QUIC read/write sides when their context expires, so timeout cleanup releases stream state promptly.
+- **docs**: README and ROADMAP now describe the current cluster EC behavior instead of the old N-times replication/future-work wording.
+
+### Tests
+
+- **cluster/transport**: added coverage for forwarded large write streaming, forwarded large read replies, leader preflight, stream backpressure, rejected-body draining, CRC shard encoding, legacy raw fallback, corrupt CRC classification, and reshard manager startup defaults.
+
 ## [0.0.20.0] — 2026-05-02 — cluster-any-node Iceberg table API
 
 ### Fixed
