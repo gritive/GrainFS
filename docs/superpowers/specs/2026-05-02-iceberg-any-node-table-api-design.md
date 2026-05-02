@@ -31,7 +31,8 @@ each node would create divergent catalog state.
 The cluster already has a meta-Raft control plane for membership, shard groups,
 bucket assignments, load snapshots, and rebalance plans. That control plane is
 the right home for Iceberg catalog metadata because table metadata pointers are
-small, cluster-wide state that must be committed through a quorum.
+small, cluster-wide state that must be committed through a quorum. The metadata
+JSON documents themselves remain warehouse objects, not consensus state.
 
 ## Chosen Approach
 
@@ -53,7 +54,8 @@ HTTP /iceberg/*
 This avoids a second Raft group and avoids leader-local Badger state. It also
 keeps existing object storage behavior unchanged: metadata JSON files are still
 written through the GrainFS backend and table pointer changes are committed
-through the catalog.
+through the catalog. Meta-Raft stores the current metadata pointer, not the
+metadata JSON body.
 
 ## Catalog Interface
 
@@ -77,6 +79,10 @@ type Catalog interface {
 
 `Store` implements this interface unchanged. A new cluster implementation,
 `MetaCatalog`, reads from `cluster.MetaFSM` and writes through `cluster.MetaRaft`.
+Because cluster mode stores only the pointer in meta-Raft, `MetaCatalog` also
+gets an object reader for loading the metadata JSON at the current
+`MetadataLocation` when `LoadTable` or `CommitTable` needs to return or validate
+metadata.
 
 `internal/server` should depend on the interface rather than on `*Store`, so
 the same handlers serve local and cluster modes.
@@ -106,13 +112,19 @@ type IcebergNamespaceEntry struct {
 type IcebergTableEntry struct {
     Identifier       icebergcatalog.Identifier
     MetadataLocation string
-    Metadata         json.RawMessage
     Properties       map[string]string
 }
 ```
 
+`Metadata` is deliberately excluded from `IcebergTableEntry`. Metadata JSON can
+grow with table history and snapshots; putting it into meta-Raft would bloat the
+log and every `MetaFSM` snapshot. `LoadTable` returns metadata by reading the
+warehouse object referenced by `MetadataLocation`. `CommitTable` validates
+requirements against that object, writes the next metadata object through the
+GrainFS backend, and commits only the pointer CAS through meta-Raft.
+
 All getters return defensive copies. Snapshot and restore include both maps so
-restart and follower replay preserve catalog state.
+restart and follower replay preserve catalog pointer state.
 
 ## Meta-Raft Commands
 
@@ -138,6 +150,9 @@ Apply rules mirror the existing local store:
 - commit table with stale expected metadata location: returns `ErrCommitFailed`
 - delete table: missing namespace or table returns the existing typed errors
 
+The commands must be deterministic. Request IDs are allowed for waiter
+correlation, but apply logic must not make state decisions based on request ID.
+
 ## Write Result Delivery
 
 Meta-Raft must return exact catalog errors to the HTTP caller. `ProposeWait`
@@ -156,7 +171,9 @@ HTTP handler
 
 The waiter is local to the node that will perform the proposal. If a follower
 forwards the command to the leader, the leader owns the waiter and returns the
-typed result to the follower in the forwarding reply.
+typed result to the follower in the forwarding reply. Followers that apply the
+same committed entry and do not have a waiter for that request ID simply ignore
+the publish event.
 
 Waiters must be bounded by the request context. On timeout or node shutdown,
 the caller returns 503 `ServiceUnavailableException`.
@@ -229,9 +246,14 @@ needed for every read on every node.
 Table creation and commit still write Iceberg metadata JSON objects through the
 existing GrainFS backend before committing the table pointer.
 
-If the metadata object write succeeds but the pointer CAS fails, an orphan
-metadata JSON object can remain. That is acceptable for this pass because the
-table pointer does not move, so catalog correctness is preserved. Cleanup can be
+Cluster mode stores only `MetadataLocation` in meta-Raft. The current metadata
+JSON is read from the warehouse object when a handler needs to load a table or
+validate commit requirements.
+
+If the metadata object write succeeds but the pointer CAS fails, or if forwarding
+to the meta-Raft leader fails after the object write succeeds, an orphan metadata
+JSON object can remain. That is acceptable for this pass because the table
+pointer does not move, so catalog correctness is preserved. Cleanup can be
 handled later by lifecycle or catalog garbage collection.
 
 ## Error Mapping
@@ -276,13 +298,16 @@ Cluster catalog state starts empty unless created through the cluster API.
 - delete non-empty namespace conflict
 - delete empty namespace success
 - snapshot/restore preserves Iceberg catalog maps
+- snapshot/restore stores metadata pointers but not metadata JSON bodies
 
 ### MetaCatalog and Server Unit Tests
 
 - handlers work through the catalog interface
 - local `Store` still satisfies the interface
 - cluster `MetaCatalog` returns the same typed errors as `Store`
+- cluster `MetaCatalog` loads metadata JSON through the warehouse object reader
 - follower write path forwards to a leader mock
+- follower write failure after metadata object write leaves pointer unchanged
 - read path uses local FSM state
 - Iceberg JSON errors remain stable
 
@@ -309,4 +334,3 @@ This is an additive cluster feature:
 - read consistency is documented as local-applied follower reads
 
 No background migration runs in this pass.
-
