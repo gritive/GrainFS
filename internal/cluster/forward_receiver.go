@@ -158,6 +158,9 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 	if int64(len(body)) > DefaultMaxForwardReplyBytes {
 		return statusReply(raftpb.ForwardStatusEntityTooLarge)
 	}
+	if obj.Size != int64(len(body)) {
+		return statusReply(raftpb.ForwardStatusInternal)
+	}
 	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
 }
 

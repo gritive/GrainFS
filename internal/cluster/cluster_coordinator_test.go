@@ -422,6 +422,17 @@ func TestClusterCoordinator_GetObject_Forward(t *testing.T) {
 	require.Equal(t, "g1", d.calls[0].gid)
 }
 
+func TestClusterCoordinator_GetObject_ForwardRejectsSizeMismatch(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
+		&storage.Object{Key: "k", Size: 5, ETag: "etag", ContentType: "text/plain"},
+		"bk", []byte{},
+	)
+
+	_, _, err := c.GetObject("bk", "k")
+	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
+}
+
 func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := bytes.Repeat([]byte("g"), DefaultMaxForwardBodyBytes+1024)
@@ -614,6 +625,17 @@ func TestClusterCoordinator_PutObject_Forward(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
 }
 
+func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := []byte("non-empty-body")
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: 0, ETag: "etag-empty"}, "bk",
+	)
+
+	_, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
+}
+
 // TestClusterCoordinator_PutObject_TooLarge_413 verifies the 5 MB hard cap is
 // enforced BEFORE encoding/forwarding — caller sees ErrEntityTooLarge without
 // any wire activity (recordingDialer recorded no calls).
@@ -637,6 +659,17 @@ func TestClusterCoordinator_UploadPart_Forward(t *testing.T) {
 	require.Equal(t, 7, p.PartNumber)
 	require.Equal(t, "etag-part", p.ETag)
 	require.Equal(t, raftpb.ForwardOpUploadPart, d.calls[0].op)
+}
+
+func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := []byte("part-body")
+	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: 0},
+	)
+
+	_, err := c.UploadPart("bk", "k", "uid", 7, bytes.NewReader(body))
+	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
 // TestClusterCoordinator_UploadPart_5MB_Cap — same enforcement on multipart.
@@ -669,6 +702,25 @@ func TestClusterCoordinator_PutObject_StreamForward_AboveLegacyCap(t *testing.T)
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the object body")
 }
 
+func TestClusterCoordinator_PutObject_StreamDialerSmallBodyUsesSingleMessage(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.forward.WithStreamDialer(d.stream)
+	body := []byte("small-forward-body")
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put"}, "bk",
+	)
+
+	obj, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Empty(t, d.streamCalls)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
+
+	args := raftpb.GetRootAsPutObjectArgs(d.calls[0].args, 0)
+	require.Equal(t, body, args.BodyBytes())
+}
+
 func TestClusterCoordinator_UploadPart_StreamForward_AboveLegacyCap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
@@ -687,4 +739,23 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveLegacyCap(t *testing.T
 
 	args := raftpb.GetRootAsUploadPartArgs(d.streamCalls[0].args, 0)
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
+}
+
+func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.forward.WithStreamDialer(d.stream)
+	body := []byte("small-part-body")
+	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
+	)
+
+	part, err := c.UploadPart("bk", "k", "uid", 1, bytes.NewReader(body))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), part.Size)
+	require.Empty(t, d.streamCalls)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpUploadPart, d.calls[0].op)
+
+	args := raftpb.GetRootAsUploadPartArgs(d.calls[0].args, 0)
+	require.Equal(t, body, args.BodyBytes())
 }
