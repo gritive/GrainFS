@@ -67,7 +67,7 @@
 
 ## Phase 20: Protocol Extensions
 
-- [ ] **Iceberg REST Catalog cluster safety** — 단일 노드 catalog state는 Badger CAS로 동작하고 DuckDB embedded e2e는 `make test-e2e-iceberg`로 검증한다. Multi-peer cluster에서 `/iceberg/*`를 leader/follower 어느 노드에 호출해도 동작하게 하려면 namespace/table metadata pointer를 meta-Raft 명령으로 복제하고 commit CAS를 quorum 경계에서 검증해야 한다. 로컬 Badger를 노드별로 켜는 방식은 split-brain catalog가 되므로 금지.
+- [x] **Iceberg REST Catalog cluster safety** — 단일 노드 catalog state는 Badger CAS로 동작하고 DuckDB embedded e2e는 `make test-e2e-iceberg`로 검증한다. Multi-peer cluster에서 `/iceberg/*`를 leader/follower 어느 노드에 호출해도 동작하게 하려면 namespace/table metadata pointer를 meta-Raft 명령으로 복제하고 commit CAS를 quorum 경계에서 검증해야 한다. 로컬 Badger를 노드별로 켜는 방식은 split-brain catalog가 되므로 금지. **Completed:** v0.0.18.0 (2026-05-02)
 - [ ] Redis 프로토콜 지원 (RESP, Streaming, Pub/Sub 이벤트)
 - [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원
 

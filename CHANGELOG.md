@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.18.0] — 2026-05-02 — cluster-safe Iceberg REST catalog
+
+### Added
+
+- **iceberg**: `/iceberg/*` now works in clustered mode with namespace and table metadata pointers replicated through meta-Raft, so clients can use the table API against cluster nodes instead of relying on node-local catalog state.
+- **cluster**: added meta-Raft Iceberg catalog commands, typed apply results, snapshot/restore support, and follower-to-leader proposal forwarding for catalog writes.
+- **tests**: added coverage for MetaCatalog leader operations, follower forwarding, pointer-only snapshots, typed conflict propagation, commit CAS, delete paths, and server catalog injection.
+
+### Changed
+
+- **server**: Iceberg handlers now depend on a catalog interface, preserving the local Badger catalog for standalone mode while wiring the replicated MetaCatalog in cluster mode.
+- **storage**: table metadata JSON stays in object storage; meta-Raft stores only namespace/table pointers and properties.
+
 ## [0.0.17.0] — 2026-05-02 — flip --quic-mux default to true
 
 ### Changed
