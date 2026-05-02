@@ -28,6 +28,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -294,7 +295,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
 		return fmt.Errorf("create meta dir at %s: %w\n  recovery: check that the parent directory exists and the user has write permission", metaDir, err)
 	}
-	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
+	dbOpts := badgerutil.SmallOptions(metaDir)
 	db, err := badger.Open(dbOpts)
 	if err != nil {
 		return fmt.Errorf("open metadata db at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK), see README#badger-troubleshooting", metaDir, err, metaDir)
@@ -367,11 +368,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 			return fmt.Errorf("mkdir shared raft-log dir: %w", err)
 		}
-		sharedRaftLogDB, err = badger.Open(badger.DefaultOptions(sharedDir).
-			WithLogger(nil).
-			WithSyncWrites(true).
-			WithNumCompactors(2).
-			WithNumVersionsToKeep(1))
+		sharedRaftLogDB, err = badger.Open(badgerutil.RaftLogOptions(sharedDir, true))
 		if err != nil {
 			return fmt.Errorf("open shared raft-log badger at %s: %w", sharedDir, err)
 		}
@@ -1266,7 +1263,7 @@ func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Back
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, nil, fmt.Errorf("create dedup dir: %w", err)
 	}
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)
 	}

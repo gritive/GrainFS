@@ -10,6 +10,7 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -97,7 +98,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		return nil, fmt.Errorf("group %s: mkdir badger: %w", entry.ID, err)
 	}
-	db, err := badger.Open(badger.DefaultOptions(dbDir).WithLogger(nil).WithNumCompactors(2))
+	db, err := badger.Open(badgerutil.SmallOptions(dbDir))
 	if err != nil {
 		return nil, fmt.Errorf("group %s: open badger: %w", entry.ID, err)
 	}
