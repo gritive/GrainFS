@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.0.17.0] — 2026-05-02 — flip --quic-mux default to true
+
+### Changed
+
+- **serve**: `--quic-mux` default flipped from `false` to `true`. Per-group raft RPCs now route through the persistent stream + heartbeat coalescer path by default. ALPN-based fallback to the legacy per-message path remains in place for cross-version cluster bring-up.
+
+### Why
+
+idle-N8 e2e measurement (5 nodes × 8 raft groups, shared raft-log BadgerDB):
+
+| Metric | mux=off | mux=on | Δ |
+|--------|--------:|-------:|---:|
+| CPU samples (30s pprof) | 25.86s | 5.60s | **−78%** |
+| `syscall.rawsyscall` (recvmsg) | 35% | 2% | **−17x** |
+| `runtime.kevent` absolute time | 5.04s | 0.45s | **−91%** |
+| Wall-clock CPU% | 26.0 | 22.9 | −12% |
+| RSS | 278 MB | 484 MB | +74% (frame buffers, handler pool) |
+| Goroutines | 241 | 329 | +37% (pool=4 readers per peer × 4 peers, mostly parked) |
+
+The dominant cost on the legacy path was per-message `OpenStreamSync` + `Close` driving kqueue wake-ups on every raft heartbeat (8 groups × 50ms heartbeat × 4 peers ≈ 640 stream open/close per second). Persistent stream + per-peer heartbeat coalescing collapses that to a small constant.
+
+### Rollout & rollback
+
+- Cluster bring-up: an older binary (no mux ALPN) co-existing with this binary keeps working — newer node falls back to legacy `Call` for that peer until the older node is upgraded. No flag-day required.
+- Roll-back: `--quic-mux=false` on every node restores the legacy path. Wire-format compatible (different ALPN; legacy ALPN still advertised).
+- Tunables: `--quic-mux-pool` (default 4) sizes the per-peer stream pool. `--quic-mux-flush` (default 2ms) is the heartbeat coalescing window.
+
+### Notes
+
+- Meta-raft transport still uses the legacy per-message path; ~4% of cluster RPC traffic. Mux integration deferred until measurement justifies the additional refactor (needs a meta-vs-group discriminator inside the mux frame).
+- Snapshot install paths (`internal/raft/quic_rpc.go`, `internal/raft/meta_transport_quic.go`) intentionally bypass mux — large payloads continue on dedicated per-message streams.
+- load-N8 / load-N16 mux=on validation deferred until host contention + e2e bucket-replication race in `tests/e2e/cluster_perf_profile_test.go:232` are addressed (independent of this change).
+
 ## [0.0.16.1] — 2026-05-02 — fix mux-enabled nil panic on early conn close
 
 ### Fixed
