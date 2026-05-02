@@ -1,6 +1,29 @@
 # Per-Node BadgerDB Consolidation (C2)
 
-**Status:** Draft / Design proposal
+**Status:** **PAUSED** (2026-05-02). C1 + P0b shipped. P3 (FSM state DB consolidation) deferred — codex 13개 이슈로 일시 정지, 그리고 R+H (QUIC stream-reuse, v0.0.16~v0.0.17) 효과로 idle CPU 70% → 3.5%로 떨어져 P3 시급도 낮아짐.
+
+**Shipped:**
+- **C1** (v0.0.13.0): `WithNumCompactors(2)` per-instance reduction. idle goroutines −7%, CPU −4%.
+- **P0a** (v0.0.13.0): load-N32 baseline + scaling cliff 확인 (5 nodes × 32 groups × 2 BadgerDB = 320 instances).
+- **P0b** (v0.0.13.0): shared raft-log DB. idle-N8: goroutines −16%, heap −19%, RSS −25%. `OpenSharedLogStore` + `--shared-badger=true` 기본.
+
+**Paused (P3):**
+- FSM state DB 노드당 1개로 통합. design v2 codex 리뷰에서 13개 이슈 (live snapshot Restore가 FSM 우회, DropPrefix DB-wide stall 등). 추정 11-14일.
+- **재오픈 조건:** (a) FSM state badger가 새 perf 핫스팟으로 떠오르면, (b) 13개 이슈에 대한 mitigation 명확해지면. 그 외에는 v0.1.x에 close.
+
+**Why R+H pushed P3 down the priority list:**
+
+| 시점 | 측정 (idle-N8) | 비고 |
+|------|----------------|------|
+| 원래 baseline (v0.0.12) | CPU 26.4%, gor 307, syscall 70% | C2 design 트리거 |
+| C1 만 (v0.0.13 일부) | CPU 25.4%, gor 285 | 사소한 개선 |
+| C1 + P0b (v0.0.13.0) | CPU 26.0%, gor 241, RSS 278 MB | shared raft-log 효과 |
+| C1 + P0b + R+H (v0.0.17.0) | CPU 22.9%, **syscall 2%**, gor 329 | **− 78% CPU samples** |
+
+R+H가 syscall 합산 70% → 3.5% 잡았기 때문에 idle CPU 봐서 P3로 추가 가능한 절감이 작아짐. 진행해도 가치 있는 다른 수치 (RSS, FD, FSM apply latency) 가 새 핫스팟이 되면 그때 재오픈.
+
+**Original design below.**
+
 **Owner:** TBD
 **Trigger:** PR #128 (`perf/badger-compactor`) ship — C1 cheap-win delivered, but
 idle CPU floor still ~26% per node. C2 is the structural change required to push
