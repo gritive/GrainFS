@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.20.0] — 2026-05-02 — cluster-any-node Iceberg table API
+
+### Fixed
+
+- **iceberg**: DuckDB can now create, insert, read, and drop Iceberg tables through different cluster nodes in the same GrainFS cluster.
+- **cluster**: Iceberg namespace and table reads on followers now route to the meta-Raft leader, so REST catalog clients see fresh metadata after writes.
+- **cluster**: follower-routed object deletes now return the generated delete-marker version ID, fixing DuckDB commit cleanup when a request lands on a non-owner node.
+- **server**: Iceberg transaction commits now reuse the table state committed earlier in the same transaction request, avoiding stale self-conflict checks.
+- **server**: Iceberg snapshot requirement checks now tolerate DuckDB's rounded large JSON snapshot IDs.
+
+### Tests
+
+- **e2e**: added a DuckDB cluster test that creates the warehouse bucket, writes through node 0, appends through node 1, reads and drops through node 2.
+- **server/cluster**: added focused regression coverage for Iceberg auth routing, transaction state reuse, rounded snapshot IDs, and forwarded delete markers.
+
 ## [0.0.19.0] — 2026-05-02 — meta-raft mux integration
 
 ### Added

@@ -405,6 +405,18 @@ func TestClusterCoordinator_DeleteObject_Forward(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpDeleteObject, d.calls[0].op)
 }
 
+func TestClusterCoordinator_DeleteObjectReturningMarker_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpDeleteObject] = buildObjectReply(
+		&storage.Object{Key: "k", VersionID: "delete-marker-1"}, "bk",
+	)
+
+	markerID, err := c.DeleteObjectReturningMarker("bk", "k")
+	require.NoError(t, err)
+	require.Equal(t, "delete-marker-1", markerID)
+	require.Equal(t, raftpb.ForwardOpDeleteObject, d.calls[0].op)
+}
+
 func TestClusterCoordinator_ListObjects_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpListObjects] = buildObjectsReply("bk", []*storage.Object{

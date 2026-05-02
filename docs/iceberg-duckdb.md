@@ -68,11 +68,14 @@ Run the embedded DuckDB e2e with:
 make test-e2e-iceberg
 ```
 
-The test starts GrainFS, creates the warehouse bucket, attaches DuckDB through
-the Iceberg REST Catalog, creates and writes a table, restarts GrainFS, reads
-the table again, then drops the table and namespace through DuckDB.
+The single-node test starts GrainFS, creates the warehouse bucket, attaches
+DuckDB through the Iceberg REST Catalog, creates and writes a table, restarts
+GrainFS, reads the table again, then drops the table and namespace through
+DuckDB.
 
-Cluster safety is covered by unit and server integration tests around
-meta-Raft-backed catalog state, follower-to-leader write forwarding, snapshot
-restore, typed conflict propagation, and stale metadata pointer compare-and-swap
-handling. The embedded DuckDB e2e remains a single-node smoke test.
+Cluster coverage includes a three-node DuckDB e2e that creates the warehouse
+bucket, writes through one node, appends through another node, then reads and
+drops the table through a third node. Unit and server integration tests cover
+meta-Raft-backed catalog state, follower-to-leader write and read forwarding,
+snapshot restore, typed conflict propagation, stale metadata pointer
+compare-and-swap handling, and forwarded delete-marker cleanup.

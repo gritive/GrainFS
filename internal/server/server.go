@@ -331,7 +331,8 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			path == "/api/events" || path == "/api/events/heal/stream" ||
 			path == "/api/eventlog" ||
 			path == "/api/cluster/status" || path == "/api/health" ||
-			path == "/api/cache/status" {
+			path == "/api/cache/status" ||
+			strings.HasPrefix(path, "/iceberg/") {
 			c.Next(ctx)
 			return
 		}

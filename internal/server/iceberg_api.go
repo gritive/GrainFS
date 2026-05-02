@@ -227,7 +227,17 @@ func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) 
 		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid table commit request")
 		return
 	}
-	tbl, ok := s.commitIcebergTable(ctx, c, icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")}, req.Requirements, req.Updates)
+	store, ok := s.requireIceberg(c)
+	if !ok {
+		return
+	}
+	ident := icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")}
+	tbl, err := store.LoadTable(ctx, ident)
+	if err != nil {
+		writeIcebergMappedError(c, err)
+		return
+	}
+	tbl, ok = s.commitIcebergTableFrom(ctx, c, store, tbl, req.Requirements, req.Updates)
 	if !ok {
 		return
 	}
@@ -246,24 +256,33 @@ func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestCon
 		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid transaction commit request")
 		return
 	}
+	store, ok := s.requireIceberg(c)
+	if !ok {
+		return
+	}
+	committed := make(map[string]*icebergcatalog.Table)
 	for _, change := range req.TableChanges {
-		if _, ok := s.commitIcebergTable(ctx, c, change.Identifier, change.Requirements, change.Updates); !ok {
+		key := icebergIdentifierKey(change.Identifier)
+		tbl := committed[key]
+		if tbl == nil {
+			var err error
+			tbl, err = store.LoadTable(ctx, change.Identifier)
+			if err != nil {
+				writeIcebergMappedError(c, err)
+				return
+			}
+		}
+		next, ok := s.commitIcebergTableFrom(ctx, c, store, tbl, change.Requirements, change.Updates)
+		if !ok {
 			return
 		}
+		committed[key] = next
 	}
 	c.JSON(consts.StatusOK, map[string]any{})
 }
 
-func (s *Server) commitIcebergTable(ctx context.Context, c *app.RequestContext, ident icebergcatalog.Identifier, requirements, updates []json.RawMessage) (*icebergcatalog.Table, bool) {
-	store, ok := s.requireIceberg(c)
-	if !ok {
-		return nil, false
-	}
-	tbl, err := store.LoadTable(ctx, ident)
-	if err != nil {
-		writeIcebergMappedError(c, err)
-		return nil, false
-	}
+func (s *Server) commitIcebergTableFrom(ctx context.Context, c *app.RequestContext, store icebergcatalog.Catalog, tbl *icebergcatalog.Table, requirements, updates []json.RawMessage) (*icebergcatalog.Table, bool) {
+	ident := tbl.Identifier
 	if err := validateIcebergRequirements(tbl.Metadata, requirements); err != nil {
 		writeIcebergMappedError(c, err)
 		return nil, false
@@ -288,6 +307,10 @@ func (s *Server) commitIcebergTable(ctx context.Context, c *app.RequestContext, 
 		return nil, false
 	}
 	return committed, true
+}
+
+func icebergIdentifierKey(ident icebergcatalog.Identifier) string {
+	return strings.Join(ident.Namespace, "\x00") + "\x00" + ident.Name
 }
 
 func (s *Server) icebergUnsupported(_ context.Context, c *app.RequestContext) {
@@ -486,7 +509,24 @@ func icebergSnapshotRef(metadata json.RawMessage, ref string) (any, bool, error)
 }
 
 func sameIcebergValue(a, b any) bool {
+	if af, aok := icebergNumberFloat(a); aok {
+		if bf, bok := icebergNumberFloat(b); bok {
+			return af == bf
+		}
+	}
 	return icebergScalarString(a) == icebergScalarString(b)
+}
+
+func icebergNumberFloat(v any) (float64, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		f, err := x.Float64()
+		return f, err == nil
+	case float64:
+		return x, true
+	default:
+		return 0, false
+	}
 }
 
 func icebergScalarString(v any) string {
