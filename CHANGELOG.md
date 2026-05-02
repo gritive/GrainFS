@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.16.0] — 2026-05-02 — QUIC stream-reuse R+H prototype + raft heartbeat tuning
+
+### Added
+
+- **raft**: `RaftConn` (`internal/raft/raft_conn.go`) — persistent QUIC stream pool per peer for raft RPCs, replacing per-message `OpenStreamSync`/`Close`. Frame `[length|OP|EC|corrID|payload]`, bounded handler pool, conn-level corrID pending map, `opStreamInit` visibility handshake.
+- **raft**: `HeartbeatCoalescer` (`internal/raft/heartbeat_coalescer.go`) — per-peer batching of entries-empty `AppendEntries` into `opHeartbeatBatch`; replies fan back to synchronous callers via per-group reply channels. Entries-bearing AE bypasses coalescer.
+- **transport**: ALPN routing — listener advertises both `grainfs-<pskhash>` (legacy) and `grainfs-mux-v1-<pskhash>` (mux). Inbound conns dispatch by negotiated ALPN. PSK preserved.
+- **transport**: `GetOrConnectMux` / `EvictMux` / `SetMuxConnHandler` for mux conn lifecycle.
+- **raft**: `GroupRaftQUICMux.EnableMux(pool, flushWindow)` — opt-in mux mode for per-group raft. Falls back to legacy if mux dial fails.
+- **serve**: `--quic-mux` (default off), `--quic-mux-pool` (default 4), `--quic-mux-flush` (default 2ms), `--raft-heartbeat-interval` (default 200ms), `--raft-election-timeout` (default 1s) flags.
+- **tests**: 23 new unit tests covering RaftConn paths, ALPN routing, HeartbeatCoalescer, and group-mux integration.
+
+### Changed
+
+- **raft**: per-group raft default heartbeat 50ms→200ms, election 150ms→1s. Meta-raft timeouts unchanged.
+
+### Notes
+
+- Mux mode is a measurement prototype, default off until idle-N8 / load-N8 CPU data validates the predicted drop.
+- Meta-raft transport stays on legacy path this PR (~4% of cluster RPC traffic; needs meta-vs-group discriminator inside the mux frame). Follow-up after measurement.
+- Snapshot install paths bypass mux — large payloads continue to use dedicated per-message streams.
+
 ## [0.0.15.0] — 2026-05-02 — DuckDB Iceberg Table API completion
 
 ### Added
