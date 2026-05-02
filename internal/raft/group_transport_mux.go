@@ -126,16 +126,22 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 // handleMuxRequest is registered as the inbound RaftConn.RPCHandler for
 // non-batch messages. It decodes the same `[gidLen|gid|envelope]` payload as
 // the legacy path and dispatches to the right local node + RPC type.
+//
+// The magic groupID metaGroupID ("__meta__") routes to the meta-raft node
+// registered via RegisterMetaNode. Wire format is identical to a regular
+// group call; the gid string itself is the discriminator. Senders use
+// rpcType* (not metaRPC*) constants so the inner switch stays unified —
+// the meta-raft Node has the same HandleRequestVote / HandleAppendEntries
+// methods as a per-group Node.
 func (m *GroupRaftQUICMux) handleMuxRequest(payload []byte) ([]byte, error) {
 	groupID, body, err := extractGroupID(payload)
 	if err != nil {
 		return nil, fmt.Errorf("mux: extract group id: %w", err)
 	}
-	v, ok := m.nodes.Load(groupID)
-	if !ok {
-		return nil, fmt.Errorf("mux: unknown group %s", groupID)
+	node, err := m.lookupNode(groupID)
+	if err != nil {
+		return nil, err
 	}
-	node := v.(*Node)
 
 	rpcType, data, err := decodeRPC(body)
 	if err != nil {
@@ -161,16 +167,39 @@ func (m *GroupRaftQUICMux) handleMuxRequest(payload []byte) ([]byte, error) {
 	}
 }
 
-// dispatchToLocalGroup is invoked per-batch-item on the receiver side.
-// It looks up the local raft Node and invokes HandleAppendEntries directly
-// (no decode of envelope; the args struct is already decoded by
-// decodeHeartbeatBatch).
-func (m *GroupRaftQUICMux) dispatchToLocalGroup(groupID string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+// lookupNode resolves a groupID to a local *Node. metaGroupID routes to the
+// atomic meta-raft pointer; everything else hits the nodes sync.Map. Returns
+// "mux: unknown group <id>" so senders can detect mixed-version peers via
+// the unknown-group sentinel and fall back to the legacy StreamMetaRaft path
+// (codex P1 #6).
+func (m *GroupRaftQUICMux) lookupNode(groupID string) (*Node, error) {
+	if groupID == metaGroupID {
+		if mn := m.metaNode.Load(); mn != nil {
+			return mn, nil
+		}
+		return nil, fmt.Errorf("mux: unknown group %s", groupID)
+	}
 	v, ok := m.nodes.Load(groupID)
 	if !ok {
 		return nil, fmt.Errorf("mux: unknown group %s", groupID)
 	}
-	node := v.(*Node)
+	return v.(*Node), nil
+}
+
+// dispatchToLocalGroup is invoked per-batch-item on the receiver side for
+// coalesced heartbeat batches. It looks up the local raft Node (including
+// metaGroupID -> metaNode, so meta heartbeats riding the shared coalescer
+// route correctly) and invokes HandleAppendEntries directly. No envelope
+// decode; args is already decoded by decodeHeartbeatBatch.
+//
+// codex P0 #1: this path is the SECOND place a __meta__ branch is required.
+// handleMuxRequest covers direct calls; this covers coalesced heartbeats.
+// Missing the branch here = silent meta heartbeat drop.
+func (m *GroupRaftQUICMux) dispatchToLocalGroup(groupID string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	node, err := m.lookupNode(groupID)
+	if err != nil {
+		return nil, err
+	}
 	return node.HandleAppendEntries(args), nil
 }
 

@@ -48,6 +48,9 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if entry.ID == "" {
 		return nil, fmt.Errorf("instantiateLocalGroup: empty group ID")
 	}
+	if err := raft.ValidateGroupID(entry.ID); err != nil {
+		return nil, fmt.Errorf("instantiateLocalGroup: %w", err)
+	}
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("instantiateLocalGroup: empty NodeID")
 	}

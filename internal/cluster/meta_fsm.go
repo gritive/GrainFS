@@ -12,6 +12,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
@@ -300,6 +301,14 @@ func (f *MetaFSM) applyPutShardGroup(data []byte) error {
 	}
 	if entry.ID == "" {
 		return fmt.Errorf("meta_fsm: PutShardGroup: empty group ID")
+	}
+	// Reserved-namespace check. apply runs on log replay too; warn-and-skip
+	// (rather than error-and-crash) so an old log entry containing a name
+	// that became reserved later doesn't poison startup. Proposals are
+	// rejected upstream in MetaRaft.ProposeShardGroup.
+	if err := raft.ValidateGroupID(entry.ID); err != nil {
+		log.Warn().Err(err).Str("group_id", entry.ID).Msg("meta_fsm: PutShardGroup: rejecting reserved group ID; entry will not be applied")
+		return nil
 	}
 	if len(peers) == 0 {
 		return fmt.Errorf("meta_fsm: PutShardGroup: group %q has no peers", entry.ID)

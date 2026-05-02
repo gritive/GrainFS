@@ -203,6 +203,9 @@ func (m *MetaRaft) ProposeBucketAssignment(ctx context.Context, bucket, groupID 
 // ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
 // it is applied to the local FSM.
 func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error {
+	if err := raft.ValidateGroupID(sg.ID); err != nil {
+		return fmt.Errorf("meta_raft: ProposeShardGroup: %w", err)
+	}
 	payload, err := encodeMetaPutShardGroupCmd(sg)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode PutShardGroup: %w", err)

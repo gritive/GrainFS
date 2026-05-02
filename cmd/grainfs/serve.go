@@ -387,6 +387,21 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
 	rpcTransport.SetTransport()
 
+	// GroupRaftQUICMux multiplexes per-group raft RPCs over StreamGroupRaft.
+	// Created BEFORE NewMetaTransportQUICMux so the meta-raft transport can
+	// auto-register its node on the mux at construction time. This closes
+	// the codex P1 #3 startup race: if EnableMux ran before metaNode was
+	// registered, all inbound meta calls would hit "mux: unknown group
+	// __meta__" and meta election would stall.
+	groupRaftMux := raft.NewGroupRaftQUICMux(quicTransport)
+	if quicMuxEnabled {
+		groupRaftMux.EnableMux(quicMuxPoolSize, quicMuxFlushWindow)
+		log.Info().
+			Int("pool", quicMuxPoolSize).
+			Dur("flush", quicMuxFlushWindow).
+			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
+	}
+
 	// Meta-Raft: dedicated control-plane Raft group for cluster membership.
 	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
 		NodeID:  nodeID,
@@ -396,7 +411,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if err != nil {
 		return fmt.Errorf("init meta-raft: %w", err)
 	}
-	metaTransport := cluster.NewMetaTransportQUIC(quicTransport, metaRaft.Node())
+	// Mux-aware constructor: auto-registers metaRaft.Node() on groupRaftMux
+	// under the magic groupID "__meta__" so receiver-side mux dispatch is
+	// wired before any meta heartbeat hits the wire.
+	metaTransport := cluster.NewMetaTransportQUICMux(quicTransport, metaRaft.Node(), groupRaftMux)
 	metaRaft.SetTransport(metaTransport)
 
 	// PR-D: DataGroupManager + Router — created before metaRaft.Start() so the
@@ -563,16 +581,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Must be initialized before any goroutine that passes it to RunApplyLoop.
 	stopApply := make(chan struct{})
 
-	// GroupRaftQUICMux multiplexes per-group raft RPCs over StreamGroupRaft (0x09).
-	// Registered once; each group uses ForGroup(groupID) as its raft transport.
-	groupRaftMux := raft.NewGroupRaftQUICMux(quicTransport)
-	if quicMuxEnabled {
-		groupRaftMux.EnableMux(quicMuxPoolSize, quicMuxFlushWindow)
-		log.Info().
-			Int("pool", quicMuxPoolSize).
-			Dur("flush", quicMuxFlushWindow).
-			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
-	}
+	// groupRaftMux was created earlier (before NewMetaTransportQUICMux) so
+	// metaTransport could auto-register its node onto the mux. Each group
+	// uses ForGroup(groupID) as its raft transport.
 
 	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) {
 		// group-0 is already wired with the shared distBackend.

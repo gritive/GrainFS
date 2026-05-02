@@ -631,7 +631,7 @@ Integration:
 | 2 | P0 | `__meta__` ID reservation 누락 (user config로 `__meta__` group 가능) | `meta_fsm.go` `applyPutShardGroup`, `group_lifecycle.go:48` `instantiateLocalGroup`, `group_transport_quic.go:49` `Register`, propose 경계 4곳에 `validateGroupID(id)` 추가 — `__meta__`/빈 문자열/예약 prefix `__` 거부 |
 | 3 | P1 | startup 순서 — `MetaRaftQUICTransport` :399, `EnableMux` :568 | `serve.go` 재배치: `groupRaftMux` 생성 + `EnableMux` 호출을 `NewMetaRaftQUICTransport` 호출 전으로 이동. `EnableMux` API를 `NewGroupRaftQUICMux` 옵션으로 흡수 검토 |
 | 4 | P1 | meta RPC 500ms timeout이 mux call에서 다 소진되면 legacy fallback도 만료된 ctx | `muxCall`에 별도 `muxAttemptTimeout` (200ms 추천) — 만료 시 fresh ctx 500ms로 legacy fallback |
-| 5 | P1 | **HeartbeatCoalescer reply race** — `flush()`가 `inFlight.Store` 전에 send → 빠른 receiver 응답이 corrID 미등록 상태에서 도착 → 드롭 | **R+H 영역 수정**: `flush()`에서 `corrID` 할당 후 `inFlight.Store` → `SendHeartbeatBatch` 순서로 변경. 별도 PR로 분리 가능 (R+H 자체 fix). 단위 테스트 `TestCoalescer_FastReplyBeforeRegister` 추가 |
+| 5 | P1 | **HeartbeatCoalescer reply race** — `flush()`가 `inFlight.Store` 전에 send → 빠른 receiver 응답이 corrID 미등록 상태에서 도착 → 드롭 | ✅ **DELIVERED in v0.0.18.1 (#140)**. `CoalescerSender` 인터페이스를 `NextHeartbeatCorrID()` + `SendHeartbeatBatchWithCorrID(corrID, payload)`로 split. `flush()`는 alloc → Store → Send 순. send 실패 시 `inFlight.Delete` rollback. 회귀 테스트 `TestCoalescer_FastReplyBeforeRegister` shipped. |
 | 6 | P1 | mixed-version: v0.0.17 receiver가 `__meta__` 받으면 `opResponseError "unknown group"` 반환 → sender는 dial/send 실패만 fallback 인식 | `MetaRaftQUICTransport.muxCall`에서 응답 에러 메시지가 `unknown group __meta__`/`mux: unknown` prefix일 때도 legacy fallback. error sentinel `ErrMuxUnknownGroup` 추가 |
 | 7 | P2 | direct(entries-bearing) mux dispatch 시 meta는 `metaRPC*` 상수 사용 필요 | `handleMuxRequest`의 `__meta__` 분기는 `rpcType*`/`metaRPC*` 둘 다 받도록 별도 switch. **수정**: 단순화 위해 sender 측에서 `__meta__` 경로는 group과 동일하게 `rpcTypeRequestVote/AppendEntries` 상수 사용 (wire에는 magic gid가 분기 신호) — `metaRPC*`는 legacy path 전용 |
 
@@ -722,32 +722,22 @@ Validation 적용 지점 (전부):
 3. `internal/raft/group_transport_quic.go:49` `Register` — defensive, panic + msg.
 4. `internal/cluster/meta_raft.go` `ProposeShardGroup` — proposer 측 거부, error 반환.
 
-### Coalescer race fix (codex P1 #5 — R+H 영역)
+### Coalescer race fix (codex P1 #5 — R+H 영역) — ✅ DELIVERED
 
-**현재 (`heartbeat_coalescer.go`)**:
+**Status**: shipped as **PR #140 / v0.0.18.1** (precursor PR-A, 2026-05-02).
+
+`CoalescerSender` 인터페이스 split:
 ```go
-flush() {
-    corrID := nextCorrID()
-    payload := encodeBatch(items, corrID)
-    sender.SendHeartbeatBatch(payload)  // L166 - send 먼저
-    inFlight.Store(corrID, batch)        // L183 - 등록 나중
+type CoalescerSender interface {
+    NextHeartbeatCorrID() uint64
+    SendHeartbeatBatchWithCorrID(corrID uint64, payload []byte) error
+    PeerAddr() string
 }
 ```
 
-**Fix**:
-```go
-flush() {
-    corrID := nextCorrID()
-    inFlight.Store(corrID, batch)       // 등록 먼저
-    payload := encodeBatch(items, corrID)
-    if err := sender.SendHeartbeatBatch(payload); err != nil {
-        inFlight.Delete(corrID)         // rollback
-        failBatch(batch, err)
-    }
-}
-```
+`flush()` 순서: alloc corrID → build inflightBatch → `inFlight.Store` → `SendHeartbeatBatchWithCorrID`. Send 실패 시 `inFlight.Delete` 후 `failBatch`. 회귀 테스트 `TestCoalescer_FastReplyBeforeRegister`는 fakeSender의 `onSend` 훅으로 mid-send에서 동기 reply dispatch — pre-fix 순서 회귀 시 200ms timeout으로 fail.
 
-**별도 PR 권장** — R+H 잠재 버그, meta-mux와 독립. group raft 200ms/1s timing엔 묻혀있지만 e2e flake 일부 원인일 가능성. 회귀 테스트 `TestCoalescer_FastReplyBeforeRegister` (mock sender가 즉시 dispatchReply 호출) 추가.
+Meta-mux는 이 인터페이스를 그대로 사용 (sender = `*RaftConn`, peer당 1개).
 
 ### Test plan (확장)
 
@@ -768,8 +758,11 @@ internal/raft/group_transport_mux_test.go (확장 ~50 LOC)
   TestGroupMux_RegisterMetaNode_Idempotent
   TestGroupMux_RejectsReservedGroupID                    # codex P0 #2
 
-internal/raft/heartbeat_coalescer_test.go (확장 ~30 LOC)
-  TestCoalescer_FastReplyBeforeRegister                  # codex P1 #5 (R+H race)
+internal/raft/heartbeat_coalescer_test.go
+  TestCoalescer_FastReplyBeforeRegister                  # ✅ shipped in v0.0.18.1 (#140)
+
+internal/raft/meta_transport_mux_test.go (추가 ~20 LOC)
+  TestMetaRaftMux_FastReplyBeforeRegister                # PR-A 패턴 재활용 (onSend hook)
 
 internal/cluster/meta_fsm_test.go (확장 ~20 LOC)
   TestMetaFSM_RejectsReservedGroupID                     # codex P0 #2
@@ -781,9 +774,9 @@ tests/e2e/cluster_perf_profile_test.go (확장)
   GRAINFS_PERF_META_MUX=1 환경 분기 (mux=on + meta-mux on 통합 시나리오)
 ```
 
-**REGRESSION RULE**: `TestMetaRaftMux_SnapshotBypassesMux` + `TestCoalescer_FastReplyBeforeRegister` 둘 다 mandatory.
+**REGRESSION RULE**: `TestMetaRaftMux_SnapshotBypassesMux` mandatory. (`TestCoalescer_FastReplyBeforeRegister` shipped in PR-A.)
 
-### Effort re-estimate (codex 발견 반영)
+### Effort re-estimate (PR-A 머지 후 갱신)
 
 | 영역 | LOC |
 |------|-----|
@@ -791,13 +784,10 @@ tests/e2e/cluster_perf_profile_test.go (확장)
 | `group_transport_mux.go` `__meta__` 분기 (handleMuxRequest + dispatchToLocalGroup) + RegisterMetaNode | ~30 |
 | `validateGroupID` + 4개 호출 지점 | ~30 |
 | `serve.go` startup 순서 재배치 | ~30 |
-| `heartbeat_coalescer.go` reply race fix (별도 PR 가능) | ~40 |
-| 테스트 (위 7개 파일) | ~250 |
-| **총** | **~460 LOC** (원 ~150 추정 대비 +200%) |
+| 테스트 (meta_transport_mux_test + group_transport_mux 확장 + meta_fsm + group_lifecycle + e2e) | ~220 |
+| **총** | **~390 LOC** |
 
-PR 분리 옵션:
-- **PR-A**: Coalescer race fix (R+H 잠재 버그, 독립). ~80 LOC.
-- **PR-B**: Meta-raft mux + reservation. ~380 LOC. PR-A 머지 후.
+R+H Coalescer race fix는 PR-A (#140 / v0.0.18.1)로 이미 shipped — 본 PR은 단일 PR-B로 진행.
 
 ### Risks (meta-specific)
 
@@ -806,7 +796,7 @@ PR 분리 옵션:
 | `__meta__` reservation을 기존 데이터에 적용 시 startup 실패 | apply 단계에서 warning + skip, propose 단계에서만 error |
 | Mixed-version cluster: post-meta-mux sender ↔ v0.0.17 receiver | unknown-group response를 fallback trigger로 인식 (#6) |
 | Mux conn 끊김 + meta election 임박 | mux attempt budget 200ms < heartbeat 150ms 권장 |
-| Coalescer race fix 후 group raft 회귀 | 기존 R+H unit/e2e 테스트 + 신규 `FastReplyBeforeRegister` |
+| Coalescer race fix 후 group raft 회귀 | ✅ R+H unit/e2e 테스트 + `FastReplyBeforeRegister` 모두 PASS in PR-A |
 | `__meta__` reserved prefix가 외부 운영 도구의 group 이름 정책과 충돌 | docs/RUNBOOK 갱신 + ROADMAP user-facing 메모 |
 
 ### NOT in scope (meta-mux PR에서 제외)

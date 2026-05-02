@@ -15,3 +15,12 @@ type MetaTransportQUIC = raft.MetaRaftQUICTransport
 func NewMetaTransportQUIC(tr *transport.QUICTransport, node *raft.Node) *MetaTransportQUIC {
 	return raft.NewMetaRaftQUICTransport(tr, node)
 }
+
+// NewMetaTransportQUICMux is the mux-aware variant. groupMux must already
+// exist; the constructor auto-registers node under the magic groupID
+// "__meta__" so the receiver-side mux dispatch is wired up before
+// EnableMux installs the accept handler. Pass nil groupMux to fall back to
+// legacy-only behavior (equivalent to NewMetaTransportQUIC).
+func NewMetaTransportQUICMux(tr *transport.QUICTransport, node *raft.Node, groupMux *raft.GroupRaftQUICMux) *MetaTransportQUIC {
+	return raft.NewMetaRaftQUICTransportMux(tr, node, groupMux)
+}
