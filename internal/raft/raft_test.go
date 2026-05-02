@@ -39,7 +39,7 @@ type testCluster struct {
 	mu    sync.RWMutex
 }
 
-func newTestCluster(t *testing.T, n int) *testCluster {
+func newTestCluster(t testing.TB, n int) *testCluster {
 	t.Helper()
 
 	ids := make([]string, n)
