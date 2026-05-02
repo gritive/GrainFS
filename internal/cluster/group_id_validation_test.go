@@ -69,6 +69,41 @@ func TestMetaRaft_ProposeShardGroup_RejectsReserved(t *testing.T) {
 	}
 }
 
+// TestMetaFSM_Restore_DropsReservedShardGroups: codex P0 — Restore must
+// mirror applyPutShardGroup's warn-and-skip semantic, otherwise nodes that
+// catch up via snapshot install would carry reserved IDs while peers that
+// replay from log would not. That is silent quorum divergence.
+//
+// We bypass apply (which would itself filter) and inject the reserved ID
+// directly into the FSM state, then take a snapshot, then restore into a
+// fresh FSM and verify the reserved entry is NOT present in the restored
+// state. This simulates the rolling-upgrade path where a pre-v0.0.19
+// snapshot contains a reserved ID.
+func TestMetaFSM_Restore_DropsReservedShardGroups(t *testing.T) {
+	f := NewMetaFSM()
+	// Direct injection — same-package test bypasses apply validation. This
+	// is exactly the situation a pre-v0.0.19 snapshot encodes.
+	f.shardGroups["__meta__"] = ShardGroupEntry{ID: "__meta__", PeerIDs: []string{"n0"}}
+	f.shardGroups["__legacy"] = ShardGroupEntry{ID: "__legacy", PeerIDs: []string{"n0"}}
+	f.shardGroups["group-0"] = ShardGroupEntry{ID: "group-0", PeerIDs: []string{"n0"}}
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(snap))
+
+	// Reserved IDs dropped.
+	got := f2.ShardGroups()
+	gotIDs := make(map[string]bool, len(got))
+	for _, sg := range got {
+		gotIDs[sg.ID] = true
+	}
+	assert.False(t, gotIDs["__meta__"], "Restore must drop __meta__ from pre-v0.0.19 snapshot")
+	assert.False(t, gotIDs["__legacy"], "Restore must drop __-prefixed IDs")
+	assert.True(t, gotIDs["group-0"], "Restore must keep valid IDs")
+}
+
 // TestInstantiateLocalGroup_RejectsReservedID: lifecycle is the last line
 // of defense before raft state is opened on disk. A reserved name here is
 // fatal — the caller (serve.go) terminates the process on error.

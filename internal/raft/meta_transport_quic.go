@@ -88,17 +88,25 @@ func (m *MetaRaftQUICTransport) muxOn() bool {
 }
 
 // isMuxFallbackErr decides whether a mux-path error should fall back to
-// legacy StreamMetaRaft. We treat:
-//   - dial / send / RaftConn.Call errors (mux infrastructure broken or peer
-//     not speaking mux ALPN) as fallback-worthy
-//   - remote "mux: unknown group __meta__" (peer mux-enabled but on a binary
-//     that doesn't yet RegisterMetaNode — codex P1 #6, mixed-version cluster)
-//   - mux-attempt ctx deadline exceeded (budget exhausted; legacy gets fresh
-//     ctx, codex P1 #4)
+// legacy StreamMetaRaft. Whitelist (fallback-worthy):
+//   - ctx deadline exceeded — mux-attempt budget exhausted; legacy gets fresh
+//     ctx (codex P1 #4)
+//   - "mux: unknown group __meta__" remote — peer mux-enabled but on a binary
+//     without RegisterMetaNode (codex P1 #6, mixed-version cluster)
+//   - "raft_conn: connection closed" / "raft_conn: frame exceeds" — mux conn
+//     itself is broken
+//   - dial errors ("dial mux", "no mux handler") — peer doesn't speak mux ALPN
 //
-// All other errors propagate. Genuine RPC failures (peer says term mismatch
-// etc.) are encoded in the reply, not as transport errors, so they don't
-// reach this function.
+// Everything else propagates. Specifically:
+//   - "raft_conn: handler pool overloaded" — peer is signalling backpressure;
+//     legacy fallback would just amplify the load (codex P1 #3)
+//   - "raft_conn: unknown op code" / "unsupported rpc" — protocol mismatch,
+//     not recoverable by retrying on a different transport
+//   - "mux: decode rpc" / "decode reply batch" — corruption, retry won't help
+//   - "remote: handler panic" — peer-side bug; surface to caller
+//
+// Genuine RPC failures (term mismatch, etc.) are encoded inside the reply
+// payload, not surfaced as transport errors, so they don't reach this gate.
 func isMuxFallbackErr(err error) bool {
 	if err == nil {
 		return false
@@ -107,12 +115,25 @@ func isMuxFallbackErr(err error) bool {
 		return true
 	}
 	s := err.Error()
-	if strings.Contains(s, "mux: unknown group") {
+	switch {
+	case strings.Contains(s, "mux: unknown group"):
+		return true
+	case strings.Contains(s, "raft_conn: connection closed"):
+		return true
+	case strings.Contains(s, "raft_conn: frame exceeds"):
+		return true
+	case strings.Contains(s, "no mux handler"):
+		return true
+	case strings.Contains(s, "dial mux"):
+		return true
+	case strings.Contains(s, "open mux streams"):
+		return true
+	case strings.Contains(s, "GetOrConnectMux"):
 		return true
 	}
-	// muxConnFor / RaftConn.Call wrap with their own prefixes; treat any
-	// non-nil mux error as fallback to maximize meta availability.
-	return true
+	// Backpressure & protocol errors propagate so the caller sees the truth
+	// (and so we don't double the load on an overloaded peer).
+	return false
 }
 
 func errIsCtxBudget(err error) bool {
@@ -166,9 +187,17 @@ func (m *MetaRaftQUICTransport) muxRequestVote(ctx context.Context, peer string,
 	if err != nil {
 		return nil, err
 	}
-	_, data, err := decodeRPC(respBytes)
+	rpcType, data, err := decodeRPC(respBytes)
 	if err != nil {
 		return nil, fmt.Errorf("meta mux RequestVote reply: %w", err)
+	}
+	// Defensive: refuse a reply whose envelope type doesn't match what we
+	// asked for. FlatBuffers does not validate union/discriminant alignment
+	// across schemas, so a buggy peer answering RequestVote with an
+	// AppendEntriesReply payload could decode into a plausible vote reply
+	// that silently sets the wrong term. Mirrors the legacy-path check.
+	if rpcType != rpcTypeRequestVoteReply {
+		return nil, fmt.Errorf("meta mux RequestVote: unexpected reply type %s", rpcType)
 	}
 	return decodeRequestVoteReply(data)
 }
@@ -229,9 +258,14 @@ func (m *MetaRaftQUICTransport) muxAppendEntries(ctx context.Context, peer strin
 	if err != nil {
 		return nil, err
 	}
-	_, data, err := decodeRPC(respBytes)
+	rpcType, data, err := decodeRPC(respBytes)
 	if err != nil {
 		return nil, fmt.Errorf("meta mux AppendEntries reply: %w", err)
+	}
+	// Same defensive rpcType check as muxRequestVote — refuse cross-typed
+	// replies so a misbehaving peer cannot poison meta-raft term state.
+	if rpcType != rpcTypeAppendEntriesReply {
+		return nil, fmt.Errorf("meta mux AppendEntries: unexpected reply type %s", rpcType)
 	}
 	return decodeAppendEntriesReply(data)
 }

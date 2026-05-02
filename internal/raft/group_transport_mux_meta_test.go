@@ -122,7 +122,11 @@ func TestGroupMux_Register_PanicsOnReserved(t *testing.T) {
 }
 
 // TestIsMuxFallbackErr verifies the fallback decision matrix that drives
-// MetaRaftQUICTransport's mux-then-legacy retry.
+// MetaRaftQUICTransport's mux-then-legacy retry. Whitelist semantics:
+// fallback ONLY for ctx-deadline / unknown-group / mux infra failure.
+// Backpressure (handler overload), protocol mismatch (unknown op,
+// unsupported rpc), and decode/payload errors must propagate so legacy
+// retry doesn't amplify the load or mask the real problem.
 func TestIsMuxFallbackErr(t *testing.T) {
 	cases := []struct {
 		name string
@@ -130,11 +134,22 @@ func TestIsMuxFallbackErr(t *testing.T) {
 		want bool
 	}{
 		{"nil = no fallback", nil, false},
+		// Whitelisted (fallback-worthy)
 		{"ctx deadline", context.DeadlineExceeded, true},
-		{"unknown group remote", strErr("remote: mux: unknown group __meta__"), true},
-		{"dial fail", strErr("dial mux to peer: connection refused"), true},
-		{"send fail", strErr("raft_conn: connection closed"), true},
 		{"wrapped ctx", strErr("muxConnFor: context deadline exceeded"), true},
+		{"unknown group remote", strErr("remote: mux: unknown group __meta__"), true},
+		{"raft_conn closed", strErr("raft_conn: connection closed"), true},
+		{"frame too big", strErr("raft_conn: frame exceeds MaxFrameSize"), true},
+		{"no mux handler", strErr("dial: no mux handler registered"), true},
+		{"dial mux", strErr("dial mux to peer: connection refused"), true},
+		{"open mux streams", strErr("open mux streams to peer: tls handshake"), true},
+		{"GetOrConnectMux", strErr("GetOrConnectMux: peer rejected"), true},
+		// Propagated (not fallback)
+		{"handler overload", strErr("raft_conn: handler pool overloaded"), false},
+		{"unknown op", strErr("raft_conn: unknown op code"), false},
+		{"remote handler panic", strErr("remote: handler panic: nil pointer"), false},
+		{"remote unsupported rpc", strErr("remote: mux: unsupported rpc Foo"), false},
+		{"decode rpc", strErr("remote: mux: decode rpc: schema mismatch"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

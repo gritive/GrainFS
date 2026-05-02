@@ -300,6 +300,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if quicMuxEnabled && quicMuxFlushWindow > 0 && raftHeartbeatInterval > 0 && quicMuxFlushWindow >= raftHeartbeatInterval {
 		return fmt.Errorf("--quic-mux-flush (%s) must be << --raft-heartbeat-interval (%s)", quicMuxFlushWindow, raftHeartbeatInterval)
 	}
+	// Meta-raft heartbeat is fixed (not user-configurable) and shares the
+	// same coalescer flush window. If the flush window were larger than
+	// the meta heartbeat, meta hb dispatch could be delayed past the meta
+	// election deadline. Cap conservatively at < half of the meta heartbeat.
+	if quicMuxEnabled && quicMuxFlushWindow > 0 && quicMuxFlushWindow*2 >= cluster.MetaRaftHeartbeatInterval {
+		return fmt.Errorf("--quic-mux-flush (%s) must be << meta-raft heartbeat (%s); meta-raft uses a fixed 150ms heartbeat / 750ms election", quicMuxFlushWindow, cluster.MetaRaftHeartbeatInterval)
+	}
 
 	var storeOpts []raft.BadgerLogStoreOption
 	if badgerManagedMode {

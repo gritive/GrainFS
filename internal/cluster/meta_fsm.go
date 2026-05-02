@@ -980,6 +980,15 @@ func (f *MetaFSM) Restore(data []byte) error {
 			ID:      string(sgEntry.Id()),
 			PeerIDs: peers,
 		}
+		// Mirror applyPutShardGroup: drop reserved IDs so log-replay and
+		// snapshot-restore land on the same FSM state. Without this, a node
+		// that joins via snapshot install would carry a reserved ID while a
+		// peer that replayed from log would not — silent quorum divergence.
+		// Pre-v0.0.19 snapshots may still contain such IDs; we skip them.
+		if err := raft.ValidateGroupID(e.ID); err != nil {
+			log.Warn().Err(err).Str("group_id", e.ID).Msg("meta_fsm: Restore: dropping reserved group ID from snapshot")
+			continue
+		}
 		newShardGroups[e.ID] = e
 	}
 
