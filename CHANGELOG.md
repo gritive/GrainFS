@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.22.0] — 2026-05-02 — reduce idle Raft CPU in multi-group clusters
+
+### Fixed
+
+- **raft**: idle data-group Raft nodes now sleep until a proposal arrives instead of waking a 100µs batch timer with no work, cutting 4-node default idle CPU from roughly 19-27% per process to roughly 3.5-4.2% in local profiling.
+
+### Tests
+
+- **raft**: added a regression test that starts many idle batchers and fails if they burn CPU while waiting for proposals.
+
 ## [0.0.21.0] — 2026-05-02 — harden cluster EC forwarding and shard integrity
 
 ### Added

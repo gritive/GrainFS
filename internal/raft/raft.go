@@ -2250,39 +2250,33 @@ func (n *Node) persistState() {
 // It adapts batch size and timeout based on EWMA request rate.
 func (n *Node) batcherLoop() {
 	for {
-		// metrics has its own mutex — no n.mu needed here
+		var pending []proposal
+		select {
+		case <-n.stopCh:
+			n.drainProposalFailures(nil)
+			return
+		case p := <-n.proposalCh:
+			pending = append(pending, p)
+		}
+
+		// metrics has its own mutex — no n.mu needed here. Start the timer only
+		// after the first proposal arrives; otherwise idle Raft groups wake every
+		// 100µs even when there is no work.
 		timeout := n.metrics.batchTimeout()
 		maxBatch := n.metrics.maxBatch()
-
 		timer := time.NewTimer(timeout)
-		var pending []proposal
 
 	collect:
 		for {
 			select {
 			case <-n.stopCh:
-				timer.Stop()
-				for _, p := range pending {
-					select {
-					case p.doneCh <- proposalResult{err: ErrProposalFailed}:
-					default:
-					}
-				}
-				for {
-					select {
-					case p := <-n.proposalCh:
-						select {
-						case p.doneCh <- proposalResult{err: ErrProposalFailed}:
-						default:
-						}
-					default:
-						return
-					}
-				}
+				stopTimer(timer)
+				n.drainProposalFailures(pending)
+				return
 			case p := <-n.proposalCh:
 				pending = append(pending, p)
 				if len(pending) >= maxBatch {
-					timer.Stop()
+					stopTimer(timer)
 					break collect
 				}
 			case <-timer.C:
@@ -2296,6 +2290,35 @@ func (n *Node) batcherLoop() {
 				pending[i] = proposal{}
 			}
 			pending = pending[:0]
+		}
+	}
+}
+
+func stopTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func (n *Node) drainProposalFailures(pending []proposal) {
+	for _, p := range pending {
+		select {
+		case p.doneCh <- proposalResult{err: ErrProposalFailed}:
+		default:
+		}
+	}
+	for {
+		select {
+		case p := <-n.proposalCh:
+			select {
+			case p.doneCh <- proposalResult{err: ErrProposalFailed}:
+			default:
+			}
+		default:
+			return
 		}
 	}
 }

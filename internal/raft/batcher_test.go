@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -267,6 +268,38 @@ func TestBatcher_Shutdown(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("pending proposal not flushed after node.Stop()")
 	}
+}
+
+func TestBatcher_IdleDoesNotSpinTimers(t *testing.T) {
+	const nodes = 96
+
+	before := processCPUTime(t)
+	batchers := make([]*Node, 0, nodes)
+	for i := 0; i < nodes; i++ {
+		cfg := DefaultConfig(fmt.Sprintf("idle-%d", i), nil)
+		n := NewNode(cfg)
+		batchers = append(batchers, n)
+		go n.batcherLoop()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	for _, n := range batchers {
+		n.Stop()
+	}
+	after := processCPUTime(t)
+
+	cpu := after - before
+	require.Less(t, cpu, 50*time.Millisecond,
+		"idle batcher loops used %s CPU without proposals; they should block until work arrives", cpu)
+}
+
+func processCPUTime(t *testing.T) time.Duration {
+	t.Helper()
+	var usage syscall.Rusage
+	require.NoError(t, syscall.Getrusage(syscall.RUSAGE_SELF, &usage))
+	user := time.Duration(usage.Utime.Sec)*time.Second + time.Duration(usage.Utime.Usec)*time.Microsecond
+	sys := time.Duration(usage.Stime.Sec)*time.Second + time.Duration(usage.Stime.Usec)*time.Microsecond
+	return user + sys
 }
 
 // TestBatcher_ReplicationTrigger verifies that flushBatch triggers immediate replication
