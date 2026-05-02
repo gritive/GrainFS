@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.26.0] — 2026-05-03 — stabilize full cluster e2e suite
+
+### Fixed
+
+- **cluster**: routed object writes now reject forwarded replies whose metadata size does not match the transferred body, preventing empty objects from being accepted during leader/bootstrap races.
+- **serve**: EC shard cache wiring now reaches every per-group backend, so repeated large-object reads hit the real shard cache instead of only reporting cache status on group-0.
+- **server**: non-streaming PUT requests now reject mismatched `Content-Length` values instead of committing a truncated body.
+
+### Tests
+
+- **e2e**: full e2e now avoids ephemeral listener ports, waits for bucket write readiness, shuts down spawned processes cleanly, and disables background workers in isolated harnesses.
+- **e2e**: MultiRaft persistence, EC shard-cache active, EC spike, backup, snapshot/PITR, pull-through, migration, erasure, and Jepsen paths now use deterministic readiness checks.
+- **cluster**: added regressions for forwarded body-size mismatches and small-body single-message forwarding.
+
 ## [0.0.25.0] — 2026-05-03 — reduce migration coordination contention
 
 ### Changed
