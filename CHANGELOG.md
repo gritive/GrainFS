@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.16.1] — 2026-05-02 — fix mux-enabled nil panic on early conn close
+
+### Fixed
+
+- **raft**: `GroupRaftQUICMux.muxConnFor` panicked with nil pointer dereference inside `HeartbeatCoalescer.FailAll` when `OpenOutboundStreams` failed. The OnBroken closure dereferenced `ps.hc`, but the coalescer was attached only AFTER stream open succeeded — so `rc.Close()` on the failure path saw `ps.hc == nil`. Caught running load-N8 e2e with `--quic-mux=true` (host under contention, RaftConn open path tripped). Fix: attach the coalescer before `OpenOutboundStreams` and nil-guard the `OnBroken` / `HBReplyHandler` closures. Regression test added.
+
+### Notes
+
+- Mux mode (`--quic-mux=true`) only triggered this on early conn-close failure; default-off deployments are unaffected.
+- Validation measurement (idle-N8) confirms mux delivers ~78% reduction in CPU samples and 17x drop in `syscall.rawsyscall` (recvmsg) versus default-off baseline. Default flip pending clean load-N8 measurement.
+
 ## [0.0.16.0] — 2026-05-02 — QUIC stream-reuse R+H prototype + raft heartbeat tuning
 
 ### Added

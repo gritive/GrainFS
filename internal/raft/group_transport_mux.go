@@ -81,11 +81,17 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 			return HandleBatchOnReceiver(payload, m.dispatchToLocalGroup)
 		},
 		HBReplyHandler: func(corrID uint64, payload []byte) {
-			ps.hc.DispatchReplyBatch(corrID, payload)
+			if ps.hc != nil {
+				ps.hc.DispatchReplyBatch(corrID, payload)
+			}
 		},
 		OnBroken: func(_ *RaftConn, brokenErr error) {
 			ps.broken.Store(true)
-			ps.hc.FailAll(brokenErr)
+			// ps.hc may still be nil if OpenOutboundStreams failed before
+			// the coalescer was attached; guard the call so cleanup is safe.
+			if ps.hc != nil {
+				ps.hc.FailAll(brokenErr)
+			}
 			m.tr.EvictMux(addr, conn)
 			m.muxMu.Lock()
 			if cur := m.muxPeers[addr]; cur == ps {
@@ -94,14 +100,16 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 			m.muxMu.Unlock()
 		},
 	})
+	// Attach the coalescer BEFORE OpenOutboundStreams so OnBroken (which can
+	// fire from rc.Close on stream-open failure) sees a valid ps.hc.
+	ps.rc = rc
+	ps.hc = NewHeartbeatCoalescer(rc, m.muxFlushWindow)
 	if err := rc.OpenOutboundStreams(ctx); err != nil {
 		_ = rc.Close()
 		m.tr.EvictMux(addr, conn)
 		return nil, fmt.Errorf("open mux streams to %s: %w", addr, err)
 	}
 	rc.StartReaders()
-	ps.rc = rc
-	ps.hc = NewHeartbeatCoalescer(rc, m.muxFlushWindow)
 
 	m.muxMu.Lock()
 	if existing, ok := m.muxPeers[addr]; ok && !existing.broken.Load() {
