@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.18.1] — 2026-05-02 — close HeartbeatCoalescer reply race
+
+### Fixed
+
+- **raft**: `HeartbeatCoalescer.flush()` now registers the inflight batch in `inFlight` BEFORE the frame is sent. The previous order (send → store) let a fast receiver reply before the corrID was looked-up-able, so `DispatchReplyBatch` silently dropped the reply and the caller hung until ctx timeout. Group raft 200ms hb / 1s election timing masked it; surfaced as a P1 finding during `/plan-eng-review` for meta-raft mux integration (which would have run on 150/750 timing where this is election-fatal).
+
+### Changed
+
+- **raft**: `CoalescerSender` interface split — `NextHeartbeatCorrID()` and `SendHeartbeatBatchWithCorrID(corrID, payload)` replace `SendHeartbeatBatch(payload) (corrID, err)`. Lets callers reserve the corrID, register inflight, then send. Internal interface only — no external API impact.
+
+### Tests
+
+- **raft**: added `TestCoalescer_FastReplyBeforeRegister`. The `fakeSender` `onSend` hook synchronously dispatches a reply during the wire-side send. With the fix the reply lands on a registered entry; without it the caller would time out, providing a regression guard if the order is ever inverted again.
+
+### Why
+
+The race was found by codex outside-voice during `/plan-eng-review` for the meta-raft mux follow-up (see `docs/architecture/quic-stream-multiplex.md` §Follow-up). Splitting it out as a precursor PR isolates the perf delta of the upcoming meta-mux work and lands the fix on group raft now (where it is a latent bug that may already contribute to e2e flake under host contention).
+
 ## [0.0.18.0] — 2026-05-02 — cluster-safe Iceberg REST catalog
 
 ### Added

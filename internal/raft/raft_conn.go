@@ -283,17 +283,22 @@ func (rc *RaftConn) Notify(payload []byte) error {
 	return rc.sendFrame(rc.pickStream(), opNotify, 0, payload)
 }
 
-// SendHeartbeatBatch issues a heartbeat batch with a fresh corrID.
-// Returns the corrID used so the caller can match the eventual reply.
-func (rc *RaftConn) SendHeartbeatBatch(payload []byte) (uint64, error) {
+// NextHeartbeatCorrID reserves a fresh corrID without sending. Pair with
+// SendHeartbeatBatchWithCorrID. Splitting alloc from send lets the caller
+// register the inflight batch BEFORE the frame can be answered (otherwise a
+// fast receiver can reply before the lookup map has the entry).
+func (rc *RaftConn) NextHeartbeatCorrID() uint64 {
+	return rc.nextID.Add(1)
+}
+
+// SendHeartbeatBatchWithCorrID issues a heartbeat batch with the given corrID.
+// The corrID must come from a prior NextHeartbeatCorrID call on this same
+// RaftConn.
+func (rc *RaftConn) SendHeartbeatBatchWithCorrID(corrID uint64, payload []byte) error {
 	if rc.closed.Load() {
-		return 0, ErrConnClosed
+		return ErrConnClosed
 	}
-	id := rc.nextID.Add(1)
-	if err := rc.sendFrame(rc.pickStream(), opHeartbeatBatch, id, payload); err != nil {
-		return 0, err
-	}
-	return id, nil
+	return rc.sendFrame(rc.pickStream(), opHeartbeatBatch, corrID, payload)
 }
 
 // sendFrame writes one frame on the given stream under sendMu.

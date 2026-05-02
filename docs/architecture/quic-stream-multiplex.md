@@ -14,7 +14,7 @@
 > | Goroutines | 241 | 329 | +37% (pool=4 readers, parked) |
 >
 > **Open follow-ups** (별도 PR):
-> - Meta-raft mux 통합 (~4% 트래픽, group/meta discriminator 필요)
+> - **Meta-raft mux 통합** — plan v1 (post codex 7-finding) 본 문서 §Follow-up: Meta-raft mux integration 참고. 사전 조건: R+H load-N8 mux=on 깨끗한 측정 + R+H 잠재 reply race(#5) 분리 PR 또는 동봉.
 > - load-N8 / load-N16 mux=on 깨끗한 측정 (host contention + e2e bucket race 해결 후)
 > - pool size sweep (1/2/4/8) — RSS +74% 영향 평가 후 default 재조정
 >
@@ -607,16 +607,228 @@ Integration:
 | Cross-version mismatch | ALPN fallback (legacy path 유지) |
 | Pending leak on ctx cancel | `defer pending.Delete()` + select default |
 
+## Follow-up: Meta-raft mux integration
+
+> **Status**: planned (2026-05-02). Plan v1 after `/plan-eng-review` + codex outside voice (7 findings).
+> **Pre-conditions**: R+H load-N8 mux=on clean measurement 완료 + Coalescer reply race(#5) 수정.
+> **Estimated gain**: meta 트래픽 ~4% — modest, 주 가치는 idle path 통일 + R+H 잠재 race 발견.
+
+### Decisions (locked)
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Wire identifier | magic groupID `__meta__` (no wire change) | Wire-compat, 16/17 노드와 함께 굴러감 |
+| Coalescer | meta + group share per-peer HeartbeatCoalescer | 단일 flush window 2ms, frame 1개 추가 절감 |
+| Snapshot install | legacy `tr.Call(StreamMetaRaft)` 그대로 | R+H invariant — 60s timeout, large payload |
+| Receiver dispatch | `__meta__` 분기를 `handleMuxRequest` + `dispatchToLocalGroup` 양쪽에 추가 | codex P0 #1 — heartbeat 경로는 `dispatchToLocalGroup`만 거침 |
+| metaNode 등록 | `NewMetaRaftQUICTransport` 안에서 자동 + EnableMux 분리 | codex P1 #3 — wire 시작 순서 보장 |
+
+### Codex 7-finding resolution
+
+| # | P | Issue | Fix |
+|---|---|-------|-----|
+| 1 | P0 | meta heartbeat이 `dispatchToLocalGroup` 미경유 → unknown group | `dispatchToLocalGroup`에 `__meta__` 분기 추가 |
+| 2 | P0 | `__meta__` ID reservation 누락 (user config로 `__meta__` group 가능) | `meta_fsm.go` `applyPutShardGroup`, `group_lifecycle.go:48` `instantiateLocalGroup`, `group_transport_quic.go:49` `Register`, propose 경계 4곳에 `validateGroupID(id)` 추가 — `__meta__`/빈 문자열/예약 prefix `__` 거부 |
+| 3 | P1 | startup 순서 — `MetaRaftQUICTransport` :399, `EnableMux` :568 | `serve.go` 재배치: `groupRaftMux` 생성 + `EnableMux` 호출을 `NewMetaRaftQUICTransport` 호출 전으로 이동. `EnableMux` API를 `NewGroupRaftQUICMux` 옵션으로 흡수 검토 |
+| 4 | P1 | meta RPC 500ms timeout이 mux call에서 다 소진되면 legacy fallback도 만료된 ctx | `muxCall`에 별도 `muxAttemptTimeout` (200ms 추천) — 만료 시 fresh ctx 500ms로 legacy fallback |
+| 5 | P1 | **HeartbeatCoalescer reply race** — `flush()`가 `inFlight.Store` 전에 send → 빠른 receiver 응답이 corrID 미등록 상태에서 도착 → 드롭 | **R+H 영역 수정**: `flush()`에서 `corrID` 할당 후 `inFlight.Store` → `SendHeartbeatBatch` 순서로 변경. 별도 PR로 분리 가능 (R+H 자체 fix). 단위 테스트 `TestCoalescer_FastReplyBeforeRegister` 추가 |
+| 6 | P1 | mixed-version: v0.0.17 receiver가 `__meta__` 받으면 `opResponseError "unknown group"` 반환 → sender는 dial/send 실패만 fallback 인식 | `MetaRaftQUICTransport.muxCall`에서 응답 에러 메시지가 `unknown group __meta__`/`mux: unknown` prefix일 때도 legacy fallback. error sentinel `ErrMuxUnknownGroup` 추가 |
+| 7 | P2 | direct(entries-bearing) mux dispatch 시 meta는 `metaRPC*` 상수 사용 필요 | `handleMuxRequest`의 `__meta__` 분기는 `rpcType*`/`metaRPC*` 둘 다 받도록 별도 switch. **수정**: 단순화 위해 sender 측에서 `__meta__` 경로는 group과 동일하게 `rpcTypeRequestVote/AppendEntries` 상수 사용 (wire에는 magic gid가 분기 신호) — `metaRPC*`는 legacy path 전용 |
+
+### Wire (변경 없음)
+
+```
+mux frame:  [4B len][1B OP][1B EC][8B corrID][payload]
+payload:    [2B gidLen][gid bytes][raft envelope = encodeRPC(rpcType*, args)]
+                                                       ^
+                                                       gid="__meta__" 도 동일 인코딩
+```
+
+### Sender flow (meta_transport_quic.go)
+
+```
+SendRequestVote / SendAppendEntries:
+  if mux.MuxEnabled() && groupMux registered:
+    muxCtx, cancel = context.WithTimeout(ctx, muxAttemptTimeout=200ms)
+    payload = prefixGroupID("__meta__", encodeRPC(rpcTypeRequestVote, args))
+    resp, err := muxCall(muxCtx, peer, payload)
+    cancel()
+    if err == nil: return decode(resp)
+    if isUnknownGroupErr(err) || isDialErr(err) || ctx.Err() == nil:
+      // fall through to legacy with FRESH ctx
+    else:
+      return nil, err  // genuine RPC error, propagate
+
+  // legacy
+  legacyCtx, cancel = context.WithTimeout(parentCtx, metaRaftRPCTimeout=500ms)
+  defer cancel()
+  return tr.Call(legacyCtx, peer, &Message{Type: StreamMetaRaft, Payload: encodeRPC(metaRPCRequestVote, args)})
+
+SendInstallSnapshot:
+  // unchanged — legacy only
+  return tr.Call(ctx_60s, peer, &Message{Type: StreamMetaRaft, Payload: encodeRPC(metaRPCInstallSnapshot, args)})
+```
+
+### Receiver flow (group_transport_mux.go)
+
+```
+handleMuxRequest(payload):
+  gid, body = extractGroupID(payload)
+  rpcType, data = decodeRPC(body)
+  if gid == metaGroupID:  // "__meta__"
+    metaNode := m.metaNode.Load()
+    if metaNode == nil: return errMetaNotRegistered (→ opResponseError)
+    switch rpcType:
+      case rpcTypeRequestVote: return encodeRPC(rpcTypeRequestVoteReply, metaNode.HandleRequestVote(...))
+      case rpcTypeAppendEntries: return encodeRPC(rpcTypeAppendEntriesReply, metaNode.HandleAppendEntries(...))
+  // existing path
+  node := m.nodes.Load(gid); switch rpcType...
+
+dispatchToLocalGroup(gid, args):
+  if gid == metaGroupID:
+    metaNode := m.metaNode.Load()
+    if metaNode == nil: return nil, errMetaNotRegistered
+    return metaNode.HandleAppendEntries(args), nil
+  // existing path
+  node := m.nodes.Load(gid); return node.HandleAppendEntries(args), nil
+```
+
+### `__meta__` reservation (codex P0 #2)
+
+```go
+// internal/raft/group_transport_quic.go (or new internal/raft/group_id.go)
+const metaGroupID = "__meta__"
+
+// validateGroupID rejects reserved/empty/system-prefixed names.
+// Called from: meta_fsm.applyPutShardGroup, group_lifecycle.instantiateLocalGroup,
+// GroupRaftQUICMux.Register, MetaRaft.ProposeShardGroup.
+func validateGroupID(id string) error {
+    if id == "" {
+        return errors.New("groupID empty")
+    }
+    if id == metaGroupID {
+        return fmt.Errorf("groupID %q is reserved for meta-raft", id)
+    }
+    if strings.HasPrefix(id, "__") {
+        return fmt.Errorf("groupID %q uses reserved prefix '__'", id)
+    }
+    return nil
+}
+```
+
+Validation 적용 지점 (전부):
+1. `internal/cluster/meta_fsm.go` `applyPutShardGroup` — apply 시 거부, log 경고. 기존 데이터에 `__meta__` group 있으면 startup warning + skip.
+2. `internal/cluster/group_lifecycle.go:48` `instantiateLocalGroup` — entry.ID 검증, fatal.
+3. `internal/raft/group_transport_quic.go:49` `Register` — defensive, panic + msg.
+4. `internal/cluster/meta_raft.go` `ProposeShardGroup` — proposer 측 거부, error 반환.
+
+### Coalescer race fix (codex P1 #5 — R+H 영역)
+
+**현재 (`heartbeat_coalescer.go`)**:
+```go
+flush() {
+    corrID := nextCorrID()
+    payload := encodeBatch(items, corrID)
+    sender.SendHeartbeatBatch(payload)  // L166 - send 먼저
+    inFlight.Store(corrID, batch)        // L183 - 등록 나중
+}
+```
+
+**Fix**:
+```go
+flush() {
+    corrID := nextCorrID()
+    inFlight.Store(corrID, batch)       // 등록 먼저
+    payload := encodeBatch(items, corrID)
+    if err := sender.SendHeartbeatBatch(payload); err != nil {
+        inFlight.Delete(corrID)         // rollback
+        failBatch(batch, err)
+    }
+}
+```
+
+**별도 PR 권장** — R+H 잠재 버그, meta-mux와 독립. group raft 200ms/1s timing엔 묻혀있지만 e2e flake 일부 원인일 가능성. 회귀 테스트 `TestCoalescer_FastReplyBeforeRegister` (mock sender가 즉시 dispatchReply 호출) 추가.
+
+### Test plan (확장)
+
+```
+internal/raft/meta_transport_mux_test.go  (~120 LOC)
+  TestMetaRaftMux_RequestVote_Mux
+  TestMetaRaftMux_RequestVote_FallbackOnDial
+  TestMetaRaftMux_RequestVote_FallbackOnUnknownGroup    # codex P1 #6
+  TestMetaRaftMux_AppendEntries_Coalesced
+  TestMetaRaftMux_AppendEntries_Direct                   # entries-bearing
+  TestMetaRaftMux_AppendEntries_FallbackOnTimeout        # codex P1 #4 budget
+  TestMetaRaftMux_SnapshotBypassesMux                    # regression (mandatory)
+
+internal/raft/group_transport_mux_test.go (확장 ~50 LOC)
+  TestGroupMux_DispatchToLocalGroup_Meta                 # codex P0 #1
+  TestGroupMux_HandleMuxRequest_Meta
+  TestGroupMux_MetaNotRegistered_ErrorFrame
+  TestGroupMux_RegisterMetaNode_Idempotent
+  TestGroupMux_RejectsReservedGroupID                    # codex P0 #2
+
+internal/raft/heartbeat_coalescer_test.go (확장 ~30 LOC)
+  TestCoalescer_FastReplyBeforeRegister                  # codex P1 #5 (R+H race)
+
+internal/cluster/meta_fsm_test.go (확장 ~20 LOC)
+  TestMetaFSM_RejectsReservedGroupID                     # codex P0 #2
+
+internal/cluster/group_lifecycle_test.go (확장 ~15 LOC)
+  TestInstantiateLocalGroup_RejectsReservedID            # codex P0 #2
+
+tests/e2e/cluster_perf_profile_test.go (확장)
+  GRAINFS_PERF_META_MUX=1 환경 분기 (mux=on + meta-mux on 통합 시나리오)
+```
+
+**REGRESSION RULE**: `TestMetaRaftMux_SnapshotBypassesMux` + `TestCoalescer_FastReplyBeforeRegister` 둘 다 mandatory.
+
+### Effort re-estimate (codex 발견 반영)
+
+| 영역 | LOC |
+|------|-----|
+| `meta_transport_quic.go` mux/legacy 분기 + muxCall | ~80 |
+| `group_transport_mux.go` `__meta__` 분기 (handleMuxRequest + dispatchToLocalGroup) + RegisterMetaNode | ~30 |
+| `validateGroupID` + 4개 호출 지점 | ~30 |
+| `serve.go` startup 순서 재배치 | ~30 |
+| `heartbeat_coalescer.go` reply race fix (별도 PR 가능) | ~40 |
+| 테스트 (위 7개 파일) | ~250 |
+| **총** | **~460 LOC** (원 ~150 추정 대비 +200%) |
+
+PR 분리 옵션:
+- **PR-A**: Coalescer race fix (R+H 잠재 버그, 독립). ~80 LOC.
+- **PR-B**: Meta-raft mux + reservation. ~380 LOC. PR-A 머지 후.
+
+### Risks (meta-specific)
+
+| Risk | Mitigation |
+|------|-----------|
+| `__meta__` reservation을 기존 데이터에 적용 시 startup 실패 | apply 단계에서 warning + skip, propose 단계에서만 error |
+| Mixed-version cluster: post-meta-mux sender ↔ v0.0.17 receiver | unknown-group response를 fallback trigger로 인식 (#6) |
+| Mux conn 끊김 + meta election 임박 | mux attempt budget 200ms < heartbeat 150ms 권장 |
+| Coalescer race fix 후 group raft 회귀 | 기존 R+H unit/e2e 테스트 + 신규 `FastReplyBeforeRegister` |
+| `__meta__` reserved prefix가 외부 운영 도구의 group 이름 정책과 충돌 | docs/RUNBOOK 갱신 + ROADMAP user-facing 메모 |
+
+### NOT in scope (meta-mux PR에서 제외)
+
+- 새로운 ALPN. 단일 mux ALPN(`grainfs-mux-v1-<psk>`) 그대로.
+- meta-raft heartbeat/election timing 튜닝.
+- InstallSnapshot mux 통합.
+- Per-meta-RPC metric 분리 (group과 같은 카운터로 수집, label로 분리만).
+
+---
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | not run |
-| Codex Review | `/codex review` | Independent 2nd opinion | 2 | issues_open | v1: 11 issues, v2: 9 (3 P0 + 4 P1 + 2 P2). All addressed in v3. |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 6 issues v1, addressed in v2/v3 |
+| Codex Review | `/codex review` | Independent 2nd opinion | 3 | issues_open | v1: 11 → v2: 9 → v3: 0 (R+H, all addressed); follow-up: **7 (2 P0 + 4 P1 + 1 P2)** for meta-mux integration — all reflected in §Follow-up |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | issues_open | R+H v1: 6 issues addressed in v3; meta-mux v1: 2 internal (A1/A2) + 7 codex = 9 total, all reflected in §Follow-up |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | n/a (backend) |
 
-- **CODEX v1**: scope (raft only), bounded handler pool, pending cleanup, nil channel result, nil-handler error, frame-size cap, effort estimate → all addressed in v2/v3
-- **CODEX v2**: ALPN routing, heartbeat sync contract, heartbeat reply, stream pool correlation, meta transport location, snapshot file location, coalescer tick latency, frame payload, flag wiring → all addressed in v3
-- **UNRESOLVED**: 0 (all 7 decision points resolved)
-- **VERDICT**: v3 ready for codex 3rd-pass verification, then implementation
+- **CODEX v1 (R+H)**: scope, bounded handler pool, pending cleanup, nil channel result, nil-handler error, frame-size cap, effort estimate → all addressed in v2/v3
+- **CODEX v2 (R+H)**: ALPN routing, heartbeat sync contract, heartbeat reply, stream pool correlation, meta transport location, snapshot file location, coalescer tick latency, frame payload, flag wiring → all addressed in v3
+- **CODEX v3 (meta-mux follow-up, 2026-05-02)**: dispatchToLocalGroup 누락 (P0 #1), `__meta__` reservation 부재 (P0 #2), startup 순서 (P1 #3), fallback budget 소진 (P1 #4), **HeartbeatCoalescer reply race in R+H** (P1 #5), mixed-version remote error fallback (P1 #6), meta RPC switch 분리 (P2 #7) → all reflected in §Follow-up plan v1
+- **UNRESOLVED**: 0 (all R+H decisions resolved as DELIVERED; meta-mux 9-finding fully reflected, awaits implementation post R+H measurement)
+- **VERDICT**: R+H DELIVERED (v0.0.17). Meta-mux plan v1 ready, pre-conditions: (a) R+H reply race fix PR, (b) load-N8 clean measurement.

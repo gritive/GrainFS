@@ -11,14 +11,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeSender implements CoalescerSender for unit tests, capturing whatever the
-// coalescer hands to SendHeartbeatBatch and exposing it for inspection.
+// fakeSender implements CoalescerSender for unit tests, capturing what the
+// coalescer hands to SendHeartbeatBatchWithCorrID and exposing it for
+// inspection. onSend lets a test hook into the wire-side of a flush so it
+// can simulate a fast receiver replying mid-send (regression coverage for
+// the inFlight.Store-vs-Send ordering bug).
 type fakeSender struct {
 	mu       sync.Mutex
 	sends    []fakeSend
 	sendErr  error
 	nextID   atomic.Uint64
 	peerAddr string
+	onSend   func(corrID uint64, payload []byte)
 }
 
 type fakeSend struct {
@@ -26,17 +30,26 @@ type fakeSend struct {
 	payload []byte
 }
 
-func (f *fakeSender) SendHeartbeatBatch(payload []byte) (uint64, error) {
+func (f *fakeSender) NextHeartbeatCorrID() uint64 {
+	return f.nextID.Add(1)
+}
+
+func (f *fakeSender) SendHeartbeatBatchWithCorrID(corrID uint64, payload []byte) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.sendErr != nil {
-		return 0, f.sendErr
+		err := f.sendErr
+		f.mu.Unlock()
+		return err
 	}
-	id := f.nextID.Add(1)
 	cp := make([]byte, len(payload))
 	copy(cp, payload)
-	f.sends = append(f.sends, fakeSend{corrID: id, payload: cp})
-	return id, nil
+	f.sends = append(f.sends, fakeSend{corrID: corrID, payload: cp})
+	hook := f.onSend
+	f.mu.Unlock()
+	if hook != nil {
+		hook(corrID, cp)
+	}
+	return nil
 }
 
 func (f *fakeSender) PeerAddr() string {
@@ -272,6 +285,53 @@ func TestCoalescer_HandleBatchOnReceiver(t *testing.T) {
 	assert.Equal(t, "g1", replies[1].groupID)
 	require.NotNil(t, replies[1].reply)
 	assert.Equal(t, uint64(12), replies[1].reply.Term)
+}
+
+// TestCoalescer_FastReplyBeforeRegister covers the race where a reply for
+// the corrID arrives before the inflight batch is registered. Pre-fix the
+// coalescer called SendHeartbeatBatch first and only then stored the entry,
+// so DispatchReplyBatch dropped the reply and the caller hung. Post-fix the
+// store happens before send, so even a synchronous in-send dispatch lands
+// on a registered entry. The hook simulates the worst case: the receiver
+// turns the request around inside SendHeartbeatBatchWithCorrID.
+func TestCoalescer_FastReplyBeforeRegister(t *testing.T) {
+	var hc *HeartbeatCoalescer
+	sender := &fakeSender{
+		onSend: func(corrID uint64, payload []byte) {
+			items, err := decodeHeartbeatBatch(payload)
+			if err != nil {
+				return
+			}
+			replies := make([]hbReplyItem, len(items))
+			for i, it := range items {
+				replies[i] = hbReplyItem{
+					groupID: it.groupID,
+					reply:   &AppendEntriesReply{Term: it.args.Term, Success: true},
+				}
+			}
+			replyPayload, err := encodeHeartbeatReplyBatch(replies)
+			if err != nil {
+				return
+			}
+			// Dispatch synchronously from inside the wire-level send. If
+			// flush() registers AFTER calling Send (the buggy order), the
+			// inFlight map will not yet contain corrID and the reply is
+			// silently dropped -> caller times out.
+			hc.DispatchReplyBatch(corrID, replyPayload)
+		},
+	}
+	hc = NewHeartbeatCoalescer(sender, 1*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	reply, err := hc.AppendEntries(ctx, "g0", fakeArgs(7, "leader"))
+	require.NoError(t, err, "reply must be delivered when in-flight is registered before send")
+	require.NotNil(t, reply)
+	assert.True(t, reply.Success)
+	assert.Equal(t, uint64(7), reply.Term)
+
+	require.Len(t, sender.sends, 1)
 }
 
 func TestCoalescer_HandleBatchOnReceiver_DispatchError(t *testing.T) {

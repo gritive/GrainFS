@@ -55,8 +55,14 @@ import (
 const DefaultCoalescerFlushWindow = 2 * time.Millisecond
 
 // CoalescerSender is the subset of *RaftConn the coalescer needs.
+//
+// Reply race: the coalescer must register the inflight batch BEFORE the
+// frame leaves the wire, otherwise a fast receiver can land its reply
+// before DispatchReplyBatch has anything to look up. Splitting corrID
+// allocation from send lets the caller register first.
 type CoalescerSender interface {
-	SendHeartbeatBatch(payload []byte) (corrID uint64, err error)
+	NextHeartbeatCorrID() uint64
+	SendHeartbeatBatchWithCorrID(corrID uint64, payload []byte) error
 	PeerAddr() string
 }
 
@@ -163,14 +169,10 @@ func (hc *HeartbeatCoalescer) flush() {
 		return
 	}
 
-	corrID, err := hc.rc.SendHeartbeatBatch(payload)
-	if err != nil {
-		hc.failBatch(batch, fmt.Errorf("send heartbeat batch: %w", err))
-		return
-	}
-
-	// Register inflight before any other goroutine could observe a reply
-	// for this corrID. Reply dispatch is keyed off this map.
+	// Register inflight BEFORE the frame leaves the wire. A fast receiver
+	// can reply before SendHeartbeatBatchWithCorrID returns, and
+	// DispatchReplyBatch drops corrIDs it cannot find in inFlight.
+	corrID := hc.rc.NextHeartbeatCorrID()
 	infl := &inflightBatch{
 		corrID:  corrID,
 		waiters: make(map[string]chan hbResult, len(batch)),
@@ -181,6 +183,15 @@ func (hc *HeartbeatCoalescer) flush() {
 		infl.waiters[it.groupID] = it.replyCh
 	}
 	hc.inFlight.Store(corrID, infl)
+
+	if err := hc.rc.SendHeartbeatBatchWithCorrID(corrID, payload); err != nil {
+		// Send never reached the wire (or failed mid-write). Reply will not
+		// arrive; rollback so DispatchReplyBatch cannot deliver a stale entry,
+		// then fan the error out to all waiters.
+		hc.inFlight.Delete(corrID)
+		hc.failBatch(batch, fmt.Errorf("send heartbeat batch: %w", err))
+		return
+	}
 }
 
 // FlushNow forces an immediate flush of the pending batch. Used by tests
