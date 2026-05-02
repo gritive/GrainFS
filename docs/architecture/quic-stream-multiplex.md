@@ -1,7 +1,28 @@
 # Raft RPC Persistent Stream + Heartbeat Coalescing (R+H)
 
-> **Status**: Draft v3 (2026-05-02)
-> **Branch**: `perf/quic-stream-reuse`
+> **Status**: **DELIVERED** (2026-05-02). Design v3 shipped as v0.0.16.0 (#135), v0.0.16.1 (#136 nil panic fix), v0.0.17.0 (#137 default ON).
+>
+> **Validation (idle-N8, 5 nodes × 8 raft groups, shared raft-log BadgerDB):**
+>
+> | Metric | mux=off | mux=on | Δ |
+> |--------|--------:|-------:|---:|
+> | CPU samples (30s pprof) | 25.86s | 5.60s | **−78%** |
+> | `syscall.rawsyscall` (recvmsg) | 35% | 2% | **−17x** |
+> | `runtime.kevent` 절대 시간 | 5.04s | 0.45s | **−91%** |
+> | Wall-clock CPU% | 26.0 | 22.9 | −12% |
+> | RSS | 278 MB | 484 MB | +74% (frame buffers) |
+> | Goroutines | 241 | 329 | +37% (pool=4 readers, parked) |
+>
+> **Open follow-ups** (별도 PR):
+> - Meta-raft mux 통합 (~4% 트래픽, group/meta discriminator 필요)
+> - load-N8 / load-N16 mux=on 깨끗한 측정 (host contention + e2e bucket race 해결 후)
+> - pool size sweep (1/2/4/8) — RSS +74% 영향 평가 후 default 재조정
+>
+> ---
+>
+> **Original draft below (2026-05-02 Draft v3, codex 3-pass review).** Kept for the design rationale + decision points (pool=4, ALPN versioning, snapshot bypass invariant). Implementation references match the merged code in `internal/raft/raft_conn.go`, `heartbeat_coalescer.go`, `group_transport_mux.go`.
+
+> **Branch (when designed)**: `perf/quic-stream-reuse` (now merged)
 > **Supersedes**: v2 (codex가 3 P0 + 4 P1 + 2 P2 지적, 모두 본 v3에서 해결)
 > **Trigger**: load-N8 프로파일 — CPU의 70%가 QUIC syscall, 원인은 메시지마다 stream open/close.
 
