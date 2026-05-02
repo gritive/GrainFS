@@ -54,3 +54,15 @@ CREATE TABLE grainfs_iceberg.ns2.t (a INTEGER);
 INSERT INTO grainfs_iceberg.ns2.t VALUES (42);
 SELECT * FROM grainfs_iceberg.ns2.t;
 ```
+
+## E2E Test
+
+Run the embedded DuckDB e2e with:
+
+```sh
+make test-e2e-iceberg
+```
+
+The test starts GrainFS, creates the warehouse bucket, attaches DuckDB through
+the Iceberg REST Catalog, creates and writes a table, restarts GrainFS, reads
+the table again, then drops the table and namespace through DuckDB.

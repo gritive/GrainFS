@@ -106,6 +106,47 @@ func TestIcebergCreateNamespaceAndTableTransactionCommit(t *testing.T) {
 	require.EqualValues(t, 7, metadata.CurrentSnapshotID)
 }
 
+func TestIcebergTableScopedCommitAndDelete(t *testing.T) {
+	base := setupTestServer(t)
+
+	createIcebergWarehouseBucket(t, base)
+	postIcebergJSON(t, base+"/iceberg/v1/namespaces", `{"namespace":["ns2"],"properties":{}}`, http.StatusOK)
+	postIcebergJSON(t, base+"/iceberg/v1/namespaces/ns2/tables", `{
+		"name": "t",
+		"schema": {"type":"struct","fields":[{"name":"a","id":1,"type":"int","required":false}],"schema-id":0},
+		"properties": {"format-version":"2"}
+	}`, http.StatusOK)
+	postIcebergJSON(t, base+"/iceberg/v1/namespaces/ns2/tables/t", `{
+		"requirements":[],
+		"updates":[
+			{"action":"add-snapshot","snapshot":{"snapshot-id":9,"sequence-number":1,"timestamp-ms":1777711820223,"manifest-list":"s3://grainfs-tables/warehouse/ns2/t/metadata/snap-9.avro","summary":{"operation":"overwrite"},"schema-id":0}},
+			{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":9}
+		]
+	}`, http.StatusOK)
+
+	req, err := http.NewRequest(http.MethodDelete, base+"/iceberg/v1/namespaces/ns2", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	require.Equal(t, "NamespaceNotEmptyException", decodeIcebergErrorType(t, resp))
+
+	req, err = http.NewRequest(http.MethodDelete, base+"/iceberg/v1/namespaces/ns2/tables/t", nil)
+	require.NoError(t, err)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	req, err = http.NewRequest(http.MethodDelete, base+"/iceberg/v1/namespaces/ns2", nil)
+	require.NoError(t, err)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
 func TestIcebergTransactionCommitRejectsStaleSnapshotRequirement(t *testing.T) {
 	base := setupTestServer(t)
 
@@ -180,7 +221,7 @@ func TestIcebergUnsupportedBackendReturnsJSON501(t *testing.T) {
 func TestIcebergUnsupportedOperationReturnsJSON(t *testing.T) {
 	base := setupTestServer(t)
 
-	req, err := http.NewRequest(http.MethodDelete, base+"/iceberg/v1/namespaces/ns2", nil)
+	req, err := http.NewRequest(http.MethodPatch, base+"/iceberg/v1/namespaces/ns2", nil)
 	require.NoError(t, err)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)

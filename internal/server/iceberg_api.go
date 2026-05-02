@@ -24,10 +24,13 @@ func (s *Server) registerIcebergAPI(h *server.Hertz) {
 	h.POST("/iceberg/v1/namespaces", s.icebergCreateNamespace)
 	h.GET("/iceberg/v1/namespaces/:namespace", s.icebergLoadNamespace)
 	h.HEAD("/iceberg/v1/namespaces/:namespace", s.icebergHeadNamespace)
+	h.DELETE("/iceberg/v1/namespaces/:namespace", s.icebergDeleteNamespace)
 	h.GET("/iceberg/v1/namespaces/:namespace/tables", s.icebergListTables)
 	h.POST("/iceberg/v1/namespaces/:namespace/tables", s.icebergCreateTable)
 	h.GET("/iceberg/v1/namespaces/:namespace/tables/:table", s.icebergLoadTable)
 	h.HEAD("/iceberg/v1/namespaces/:namespace/tables/:table", s.icebergHeadTable)
+	h.POST("/iceberg/v1/namespaces/:namespace/tables/:table", s.icebergCommitTable)
+	h.DELETE("/iceberg/v1/namespaces/:namespace/tables/:table", s.icebergDeleteTable)
 	h.POST("/iceberg/v1/transactions/commit", s.icebergCommitTransaction)
 	h.Any("/iceberg/*path", s.icebergUnsupported)
 }
@@ -104,6 +107,18 @@ func (s *Server) icebergHeadNamespace(ctx context.Context, c *app.RequestContext
 		return
 	}
 	if _, err := store.LoadNamespace(ctx, []string{c.Param("namespace")}); err != nil {
+		writeIcebergMappedError(c, err)
+		return
+	}
+	c.Status(consts.StatusNoContent)
+}
+
+func (s *Server) icebergDeleteNamespace(ctx context.Context, c *app.RequestContext) {
+	store, ok := s.requireIceberg(c)
+	if !ok {
+		return
+	}
+	if err := store.DeleteNamespace(ctx, []string{c.Param("namespace")}); err != nil {
 		writeIcebergMappedError(c, err)
 		return
 	}
@@ -190,11 +205,36 @@ func (s *Server) icebergHeadTable(ctx context.Context, c *app.RequestContext) {
 	c.Status(consts.StatusNoContent)
 }
 
-func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestContext) {
+func (s *Server) icebergDeleteTable(ctx context.Context, c *app.RequestContext) {
 	store, ok := s.requireIceberg(c)
 	if !ok {
 		return
 	}
+	ident := icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")}
+	if err := store.DeleteTable(ctx, ident); err != nil {
+		writeIcebergMappedError(c, err)
+		return
+	}
+	c.Status(consts.StatusNoContent)
+}
+
+func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) {
+	var req struct {
+		Requirements []json.RawMessage `json:"requirements"`
+		Updates      []json.RawMessage `json:"updates"`
+	}
+	if err := decodeIcebergBody(c.Request.Body(), &req); err != nil {
+		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid table commit request")
+		return
+	}
+	tbl, ok := s.commitIcebergTable(ctx, c, icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")}, req.Requirements, req.Updates)
+	if !ok {
+		return
+	}
+	writeIcebergTable(c, tbl)
+}
+
+func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestContext) {
 	var req struct {
 		TableChanges []struct {
 			Identifier   icebergcatalog.Identifier `json:"identifier"`
@@ -207,35 +247,47 @@ func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestCon
 		return
 	}
 	for _, change := range req.TableChanges {
-		tbl, err := store.LoadTable(ctx, change.Identifier)
-		if err != nil {
-			writeIcebergMappedError(c, err)
-			return
-		}
-		if err := validateIcebergRequirements(tbl.Metadata, change.Requirements); err != nil {
-			writeIcebergMappedError(c, err)
-			return
-		}
-		metadata, err := applyIcebergUpdates(tbl.Metadata, change.Updates)
-		if err != nil {
-			writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid transaction updates")
-			return
-		}
-		nextMetadataLocation := nextIcebergMetadataLocation(tbl.MetadataLocation)
-		if err := s.writeIcebergMetadataObject(nextMetadataLocation, metadata); err != nil {
-			writeIcebergStorageError(c, err)
-			return
-		}
-		if _, err := store.CommitTable(ctx, change.Identifier, icebergcatalog.CommitTableInput{
-			ExpectedMetadataLocation: tbl.MetadataLocation,
-			NewMetadataLocation:      nextMetadataLocation,
-			Metadata:                 metadata,
-		}); err != nil {
-			writeIcebergMappedError(c, err)
+		if _, ok := s.commitIcebergTable(ctx, c, change.Identifier, change.Requirements, change.Updates); !ok {
 			return
 		}
 	}
 	c.JSON(consts.StatusOK, map[string]any{})
+}
+
+func (s *Server) commitIcebergTable(ctx context.Context, c *app.RequestContext, ident icebergcatalog.Identifier, requirements, updates []json.RawMessage) (*icebergcatalog.Table, bool) {
+	store, ok := s.requireIceberg(c)
+	if !ok {
+		return nil, false
+	}
+	tbl, err := store.LoadTable(ctx, ident)
+	if err != nil {
+		writeIcebergMappedError(c, err)
+		return nil, false
+	}
+	if err := validateIcebergRequirements(tbl.Metadata, requirements); err != nil {
+		writeIcebergMappedError(c, err)
+		return nil, false
+	}
+	metadata, err := applyIcebergUpdates(tbl.Metadata, updates)
+	if err != nil {
+		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid transaction updates")
+		return nil, false
+	}
+	nextMetadataLocation := nextIcebergMetadataLocation(tbl.MetadataLocation)
+	if err := s.writeIcebergMetadataObject(nextMetadataLocation, metadata); err != nil {
+		writeIcebergStorageError(c, err)
+		return nil, false
+	}
+	committed, err := store.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+		ExpectedMetadataLocation: tbl.MetadataLocation,
+		NewMetadataLocation:      nextMetadataLocation,
+		Metadata:                 metadata,
+	})
+	if err != nil {
+		writeIcebergMappedError(c, err)
+		return nil, false
+	}
+	return committed, true
 }
 
 func (s *Server) icebergUnsupported(_ context.Context, c *app.RequestContext) {
@@ -260,6 +312,8 @@ func writeIcebergMappedError(c *app.RequestContext, err error) {
 		writeIcebergError(c, consts.StatusNotFound, "NoSuchNamespaceException", "namespace not found")
 	case errors.Is(err, icebergcatalog.ErrNamespaceExists):
 		writeIcebergError(c, consts.StatusConflict, "AlreadyExistsException", "namespace already exists")
+	case errors.Is(err, icebergcatalog.ErrNamespaceNotEmpty):
+		writeIcebergError(c, consts.StatusConflict, "NamespaceNotEmptyException", "namespace is not empty")
 	case errors.Is(err, icebergcatalog.ErrTableNotFound):
 		writeIcebergError(c, consts.StatusNotFound, "NoSuchTableException", "table not found")
 	case errors.Is(err, icebergcatalog.ErrTableExists):

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.15.0] — 2026-05-02 — DuckDB Iceberg Table API completion
+
+### Added
+
+- **server**: DuckDB can now commit table updates through the table-scoped Iceberg REST endpoint and drop tables/namespaces through the REST catalog path.
+- **tests/e2e**: added an embedded DuckDB e2e target that creates, writes, restarts, reads, and drops an Iceberg table against GrainFS.
+- **docs**: documented `make test-e2e-iceberg` so the DuckDB catalog smoke can be rerun without a separate CLI setup.
+
+### Fixed
+
+- **icebergcatalog**: namespace deletion now returns a typed conflict when tables still exist, then succeeds after the table is dropped.
+- **todos**: clarified that multi-peer leader/follower Iceberg API support still requires meta-Raft replicated catalog state, not node-local Badger state.
+
 ## [0.0.14.0] — 2026-05-02 — DuckDB Iceberg REST Catalog
 
 ### Added

@@ -79,6 +79,29 @@ func TestStore_TableCreateLoadAndCommitCAS(t *testing.T) {
 	require.Equal(t, "s3://grainfs-tables/warehouse/default/t/metadata/00001.json", loaded.MetadataLocation)
 }
 
+func TestStore_DeleteTableAndNamespace(t *testing.T) {
+	ctx := context.Background()
+	store, reopen := openTestStore(t)
+	require.NoError(t, store.CreateNamespace(ctx, []string{"default"}, nil))
+
+	ident := Identifier{Namespace: []string{"default"}, Name: "t"}
+	_, err := store.CreateTable(ctx, ident, CreateTableInput{
+		MetadataLocation: "s3://grainfs-tables/warehouse/default/t/metadata/00000.json",
+		Metadata:         json.RawMessage(`{"format-version":2}`),
+	})
+	require.NoError(t, err)
+
+	require.ErrorIs(t, store.DeleteNamespace(ctx, []string{"default"}), ErrNamespaceNotEmpty)
+	require.NoError(t, store.DeleteTable(ctx, ident))
+	store = reopen()
+
+	_, err = store.LoadTable(ctx, ident)
+	require.ErrorIs(t, err, ErrTableNotFound)
+	require.NoError(t, store.DeleteNamespace(ctx, []string{"default"}))
+	_, err = store.LoadNamespace(ctx, []string{"default"})
+	require.ErrorIs(t, err, ErrNamespaceNotFound)
+}
+
 func TestStore_ErrorsAreTyped(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openTestStore(t)
