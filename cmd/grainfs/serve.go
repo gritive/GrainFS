@@ -807,6 +807,18 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	forwardReceiver := cluster.NewForwardReceiver(dgMgr)
 	forwardReceiver.Register(shardSvc)
 
+	metaForwardDialer := func(peer string, payload []byte) ([]byte, error) {
+		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
+		reply, err := quicTransport.Call(ctx, peer, msg)
+		if err != nil {
+			return nil, err
+		}
+		return reply.Payload, nil
+	}
+	metaForwardSender := cluster.NewMetaProposeForwardSender(metaForwardDialer)
+	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
+	router.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
+
 	clusterCoord := cluster.NewClusterCoordinator(
 		distBackend,    // base for cluster-wide ops (CreateBucket, etc.)
 		dgMgr,          // local owned groups (self-leader shortcut)
@@ -945,6 +957,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	if len(peers) == 0 {
 		srvOpts = append(srvOpts, server.WithIcebergCatalogStore(icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")))
+	} else {
+		metaForward := func(ctx context.Context, command []byte) error {
+			targets := peers
+			if leader := metaRaft.Node().LeaderID(); leader != "" {
+				targets = []string{leader}
+			}
+			return metaForwardSender.Send(ctx, targets, command)
+		}
+		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarder(metaRaft, backend, "s3://grainfs-tables/warehouse", metaForward)))
 	}
 	// Propagate S3 auth from --access-key / --secret-key. Previously this
 	// was local-only; cluster mode silently ran without auth regardless of

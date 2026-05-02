@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -300,6 +301,28 @@ func TestMetaRaft_ProposeAbortPlan_CommitToFSM(t *testing.T) {
 
 	require.NoError(t, m.ProposeAbortPlan(ctx, "plan-1", clusterpb.AbortPlanReasonCompleted))
 	assert.Empty(t, m.FSM().ActivePlanID())
+}
+
+func TestMetaRaft_ProposeIcebergCreateNamespace_ReturnsTypedApplyResult(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeIcebergCreateNamespace(ctx, IcebergCreateNamespaceCmd{
+		RequestID: "ns-first",
+		Namespace: []string{"analytics"},
+	}))
+	require.ErrorIs(t, m.ProposeIcebergCreateNamespace(ctx, IcebergCreateNamespaceCmd{
+		RequestID: "ns-duplicate",
+		Namespace: []string{"analytics"},
+	}), icebergcatalog.ErrNamespaceExists)
 }
 
 // TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds verifies that concurrent Join

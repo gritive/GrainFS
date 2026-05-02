@@ -134,8 +134,48 @@ func (rcv *MetaStateSnapshot) ActivePlan(obj *RebalancePlan) *RebalancePlan {
 	return nil
 }
 
+func (rcv *MetaStateSnapshot) IcebergNamespaces(obj *IcebergNamespaceEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) IcebergNamespacesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *MetaStateSnapshot) IcebergTables(obj *IcebergTableEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) IcebergTablesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(7)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -163,6 +203,18 @@ func MetaStateSnapshotStartLoadSnapshotVector(builder *flatbuffers.Builder, numE
 }
 func MetaStateSnapshotAddActivePlan(builder *flatbuffers.Builder, activePlan flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(activePlan), 0)
+}
+func MetaStateSnapshotAddIcebergNamespaces(builder *flatbuffers.Builder, icebergNamespaces flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(icebergNamespaces), 0)
+}
+func MetaStateSnapshotStartIcebergNamespacesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func MetaStateSnapshotAddIcebergTables(builder *flatbuffers.Builder, icebergTables flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(icebergTables), 0)
+}
+func MetaStateSnapshotStartIcebergTablesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

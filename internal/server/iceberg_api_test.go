@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,12 +12,46 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 type noDBProviderBackend struct {
 	storage.Backend
+}
+
+type fakeIcebergCatalog struct {
+	warehouse string
+}
+
+func (f fakeIcebergCatalog) Warehouse() string { return f.warehouse }
+func (f fakeIcebergCatalog) CreateNamespace(context.Context, []string, map[string]string) error {
+	return icebergcatalog.ErrNamespaceExists
+}
+func (f fakeIcebergCatalog) LoadNamespace(context.Context, []string) (map[string]string, error) {
+	return nil, icebergcatalog.ErrNamespaceNotFound
+}
+func (f fakeIcebergCatalog) ListNamespaces(context.Context) ([][]string, error) {
+	return nil, nil
+}
+func (f fakeIcebergCatalog) DeleteNamespace(context.Context, []string) error {
+	return icebergcatalog.ErrNamespaceNotFound
+}
+func (f fakeIcebergCatalog) CreateTable(context.Context, icebergcatalog.Identifier, icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+	return nil, icebergcatalog.ErrTableExists
+}
+func (f fakeIcebergCatalog) LoadTable(context.Context, icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+	return nil, icebergcatalog.ErrTableNotFound
+}
+func (f fakeIcebergCatalog) ListTables(context.Context, []string) ([]icebergcatalog.Identifier, error) {
+	return nil, nil
+}
+func (f fakeIcebergCatalog) DeleteTable(context.Context, icebergcatalog.Identifier) error {
+	return icebergcatalog.ErrTableNotFound
+}
+func (f fakeIcebergCatalog) CommitTable(context.Context, icebergcatalog.Identifier, icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+	return nil, icebergcatalog.ErrCommitFailed
 }
 
 func TestIcebergConfigUsesJSONAndBypassesS3Routes(t *testing.T) {
@@ -34,6 +69,21 @@ func TestIcebergConfigUsesJSONAndBypassesS3Routes(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.Equal(t, "s3://grainfs-tables/warehouse", got.Defaults["warehouse"])
+}
+
+func TestIcebergConfigUsesInjectedCatalogInterface(t *testing.T) {
+	base := setupTestServerWithOptions(t, WithIcebergCatalog(fakeIcebergCatalog{warehouse: "s3://custom/warehouse"}))
+
+	resp, err := http.Get(base + "/iceberg/v1/config?warehouse=warehouse")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var got struct {
+		Defaults map[string]string `json:"defaults"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, "s3://custom/warehouse", got.Defaults["warehouse"])
 }
 
 func TestIcebergConfigFollowsAuthMiddleware(t *testing.T) {
