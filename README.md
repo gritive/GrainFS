@@ -136,6 +136,9 @@ curl http://localhost:9000/api/cluster/balancer/status | jq .
 - [SLI/SLO](docs/SLI_SLO.md)
 - [RecoverCluster drill](docs/recover-cluster.md)
 - [Badger managed mode rollback](docs/badger-managed-mode-rollback.md)
+- [DuckDB Iceberg REST Catalog](docs/iceberg-duckdb.md)
+- [DuckDB Iceberg REST request trace](docs/iceberg-duckdb-request-trace.md)
+- [Iceberg any-node table API design](docs/superpowers/specs/2026-05-02-iceberg-any-node-table-api-design.md)
 
 ## Development
 
