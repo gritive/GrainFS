@@ -159,13 +159,15 @@ func calcBatchTimeout(rate float64) time.Duration {
 func calcMaxBatch(rate float64) int {
 	switch {
 	case rate >= 500:
-		return 128
+		return maxAdaptiveBatchSize
 	case rate >= 100:
 		return 32
 	default:
 		return 4
 	}
 }
+
+const maxAdaptiveBatchSize = 128
 
 // BatchMetricsSnapshot is a point-in-time view of the adaptive batcher state.
 type BatchMetricsSnapshot struct {
@@ -2249,40 +2251,48 @@ func (n *Node) persistState() {
 // batcherLoop collects proposals from proposalCh and flushes them in batches.
 // It adapts batch size and timeout based on EWMA request rate.
 func (n *Node) batcherLoop() {
+	var timer *time.Timer
 	for {
-		// metrics has its own mutex — no n.mu needed here
+		var pendingBuf [maxAdaptiveBatchSize]proposal
+		pending := pendingBuf[:0]
+
+		select {
+		case <-n.stopCh:
+			n.drainFailedProposals(nil)
+			return
+		case p := <-n.proposalCh:
+			pending = append(pending, p)
+		}
+
+		// metrics has its own mutex — no n.mu needed here. Start the timer only
+		// after the first proposal so idle nodes do not poll on batch timeout.
 		timeout := n.metrics.batchTimeout()
 		maxBatch := n.metrics.maxBatch()
+		if maxBatch > len(pendingBuf) {
+			maxBatch = len(pendingBuf)
+		}
+		if len(pending) >= maxBatch {
+			n.flushBatch(pending)
+			clearProposals(pending)
+			continue
+		}
 
-		timer := time.NewTimer(timeout)
-		var pending []proposal
-
+		if timer == nil {
+			timer = time.NewTimer(timeout)
+		} else {
+			timer.Reset(timeout)
+		}
 	collect:
 		for {
 			select {
 			case <-n.stopCh:
-				timer.Stop()
-				for _, p := range pending {
-					select {
-					case p.doneCh <- proposalResult{err: ErrProposalFailed}:
-					default:
-					}
-				}
-				for {
-					select {
-					case p := <-n.proposalCh:
-						select {
-						case p.doneCh <- proposalResult{err: ErrProposalFailed}:
-						default:
-						}
-					default:
-						return
-					}
-				}
+				stopAndDrainTimer(timer)
+				n.drainFailedProposals(pending)
+				return
 			case p := <-n.proposalCh:
 				pending = append(pending, p)
 				if len(pending) >= maxBatch {
-					timer.Stop()
+					stopAndDrainTimer(timer)
 					break collect
 				}
 			case <-timer.C:
@@ -2292,10 +2302,43 @@ func (n *Node) batcherLoop() {
 
 		if len(pending) > 0 {
 			n.flushBatch(pending)
-			for i := range pending {
-				pending[i] = proposal{}
-			}
+			clearProposals(pending)
 			pending = pending[:0]
+		}
+	}
+}
+
+func clearProposals(pending []proposal) {
+	for i := range pending {
+		pending[i] = proposal{}
+	}
+}
+
+func stopAndDrainTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func (n *Node) drainFailedProposals(pending []proposal) {
+	for _, p := range pending {
+		select {
+		case p.doneCh <- proposalResult{err: ErrProposalFailed}:
+		default:
+		}
+	}
+	for {
+		select {
+		case p := <-n.proposalCh:
+			select {
+			case p.doneCh <- proposalResult{err: ErrProposalFailed}:
+			default:
+			}
+		default:
+			return
 		}
 	}
 }

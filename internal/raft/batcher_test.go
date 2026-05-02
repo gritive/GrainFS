@@ -3,6 +3,8 @@ package raft
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -312,6 +314,44 @@ func TestBatcher_ReplicationTrigger(t *testing.T) {
 		return replicateCalls.Load() > 0
 	}, 5*time.Millisecond, 100*time.Microsecond,
 		"replication should be triggered immediately after flush, not wait for heartbeat")
+}
+
+func TestBatcher_IdleDoesNotAllocateTimers(t *testing.T) {
+	oldGCPercent := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(oldGCPercent) })
+
+	node := &Node{
+		stopCh:        make(chan struct{}),
+		proposalCh:    make(chan proposal),
+		replicationCh: make(chan struct{}, 1),
+		metrics:       adaptiveMetrics{alpha: 0.3, lastFlushAt: time.Now()},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		node.batcherLoop()
+	}()
+	t.Cleanup(func() {
+		close(node.stopCh)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("batcherLoop did not stop")
+		}
+	})
+
+	time.Sleep(time.Millisecond)
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	time.Sleep(20 * time.Millisecond)
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocs := after.Mallocs - before.Mallocs
+	require.LessOrEqual(t, allocs, uint64(50),
+		"idle batcher allocated %d objects without proposals", allocs)
 }
 
 // TestAdaptiveMetrics_Transition verifies EWMA threshold transitions and maxBatch/batchTimeout.

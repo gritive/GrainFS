@@ -524,7 +524,7 @@ func writePerfReport(outRoot string, results []*perfResult) error {
 	fmt.Fprintf(&b, "# Cluster Profile — %s\n\n", filepath.Base(outRoot))
 	fmt.Fprintf(&b, "5-node grainfs cluster, idle vs load × N=8 vs N=64.\n\n")
 	fmt.Fprintf(&b, "Notes:\n")
-	fmt.Fprintf(&b, "- `heap (MB)` is `runtime.MemStats.HeapAlloc` — Go가 OS에서 가져온 heap 영역에 할당한 총량. badger SKL/ristretto 등 사전 할당 arena가 포함되어 macOS에서는 working set(RSS)보다 클 수 있음.\n")
+	fmt.Fprintf(&b, "- `heap (MB)` is `runtime.MemStats.HeapAlloc` from `/debug/pprof/heap?debug=1` — Go live heap accounting, not RSS and not the same view as pprof `inuse_space`. Badger SKL/Ristretto arenas can make this much larger than resident memory on macOS.\n")
 	fmt.Fprintf(&b, "- `RSS (MB)` is `ps`-reported resident set size — 실제 물리 메모리에 매핑된 양.\n")
 	fmt.Fprintf(&b, "- Load 시나리오의 워크로드는 `httpURL(leaderIdx)` 단일 노드에 집중 — leader 핫스팟 위주, 분산 부하가 아님을 감안.\n\n")
 	fmt.Fprintf(&b, "## Summary matrix (cluster avg = mean of 5 nodes)\n\n")
