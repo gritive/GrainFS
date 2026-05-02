@@ -44,11 +44,14 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
-	defer cmd.Process.Kill()
+	defer terminateProcess(cmd)
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 10*time.Second)
@@ -60,6 +63,11 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		Bucket: aws.String("backup-test"),
 	})
 	require.NoError(t, err)
+	waitForS3Write(t, client, "backup-test", "__grainfs_e2e_ready", 30*time.Second)
+	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String("backup-test"),
+		Key:    aws.String("__grainfs_e2e_ready"),
+	})
 
 	// Create test objects
 	testData := map[string]string{
@@ -78,8 +86,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	}
 
 	// Stop GrainFS to ensure data is flushed
-	cmd.Process.Kill()
-	cmd.Wait()
+	terminateProcess(cmd)
 	time.Sleep(2 * time.Second)
 
 	// Step 2: Initialize restic repository
@@ -140,11 +147,14 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--port", fmt.Sprintf("%d", restorePort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
 	require.NoError(t, cmd2.Start())
-	defer cmd2.Process.Kill()
+	defer terminateProcess(cmd2)
 
 	restoreEndpoint := fmt.Sprintf("http://127.0.0.1:%d", restorePort)
 	waitForPort(t, restorePort, 10*time.Second)

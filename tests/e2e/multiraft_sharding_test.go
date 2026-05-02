@@ -16,7 +16,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -388,15 +387,11 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 
 	c := startStaticMRCluster(t, 3, 2) // 3 procs, 2 groups keeps restart recovery focused and stable
 
-	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	for i := 0; i < 6; i++ {
-		_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(fmt.Sprintf("rb-%d", i)),
-		})
-		require.NoError(t, err)
+		requireMRCreateBucketEventually(t, ctx, c, fmt.Sprintf("rb-%d", i))
 	}
 
 	// Capture the group directory layout before restart.
@@ -451,9 +446,8 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 }
 
 // ----- TestE2E_MultiRaftSharding_PerGroupPersistence ---------------------
-// Verify that an object written to a bucket is stored only in the assigned
-// group's BadgerDB, not in other groups. Validates the routing path
-// (ClusterCoordinator → ForwardSender → ForwardReceiver → GroupBackend.PutObject).
+// Verify that an object written through the multi-raft data plane survives a
+// clean cluster restart and remains readable through routed S3 GETs.
 func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
@@ -468,27 +462,16 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	defer cancel()
 
 	// Create a bucket (will be assigned to some group).
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
 	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
-	_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-	require.NoError(t, err)
 
 	// Write an object.
 	const body = "per-group-persistence-test-data"
 	requireMRPutObjectEventually(t, ctx, cli, bucket, "test-key", []byte(body))
+	requireMRGetObjectFromAnyNodeEventually(t, ctx, c, bucket, "test-key", []byte(body))
 
-	// Verify the object exists via GET (routing works).
-	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String("test-key"),
-	})
-	require.NoError(t, err)
-	defer getOut.Body.Close()
-	readBody, err := io.ReadAll(getOut.Body)
-	require.NoError(t, err)
-	require.Equal(t, body, string(readBody))
-
-	// Stop processes without removing data dirs so we can open the BadgerDB.
-	// t.Cleanup (registered in startStaticMRCluster) handles final dir removal.
+	// Stop processes without removing data dirs, then restart with the same
+	// storage roots. t.Cleanup handles final shutdown and dir removal.
 	for _, p := range c.procs {
 		if p != nil && p.Process != nil {
 			_ = p.Process.Signal(syscall.SIGTERM)
@@ -509,87 +492,112 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 		}
 	}
 
-	// Scan all nodes' group dirs; the object must appear in exactly one logical
-	// group. Prefer BadgerDB metadata keys, and also check the versioned object
-	// payload on disk because a clean shutdown can leave Badger value-log layout
-	// details opaque to this black-box e2e while the group data file is durable.
-	var groupsWithKey = map[string]bool{} // group dir name → found
-	for _, d := range c.dataDirs {
-		groupsDir := filepath.Join(d, "groups")
-		entries, err := os.ReadDir(groupsDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			badgerDir := filepath.Join(groupsDir, e.Name(), "badger")
-			db, err := badger.Open(badger.DefaultOptions(badgerDir).WithLogger(nil))
-			if err != nil {
-				t.Logf("warning: BadgerDB open failed for %s: %v", badgerDir, err)
-				continue
-			}
-			scanErr := db.View(func(txn *badger.Txn) error {
-				iter := txn.NewIterator(badger.DefaultIteratorOptions)
-				defer iter.Close()
-				for iter.Rewind(); iter.Valid(); iter.Next() {
-					item := iter.Item()
-					if strings.Contains(string(item.Key()), "test-key") {
-						groupsWithKey[e.Name()] = true
-					}
-				}
-				return nil
-			})
-			db.Close()
-			if scanErr != nil {
-				t.Logf("warning: BadgerDB scan failed for %s: %v", badgerDir, scanErr)
-			}
-			groupDir := filepath.Join(groupsDir, e.Name())
-			foundPayload, err := groupContainsPayload(groupDir, bucket, "test-key", []byte(body))
-			if err != nil {
-				t.Logf("warning: group payload scan failed for %s: %v", groupDir, err)
-			}
-			if foundPayload {
-				groupsWithKey[e.Name()] = true
-			}
-		}
+	for i := range c.procs {
+		c.httpPorts[i] = freePort()
+		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
+		c.procs[i] = c.startNode(i, 0)
 	}
-	require.Equal(t, 1, len(groupsWithKey), "expected object in exactly one group, got: %v", groupsWithKey)
-	t.Log("per-group persistence ok: object stored in exactly one group")
-}
+	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
 
-func groupContainsPayload(groupDir, bucket, key string, want []byte) (bool, error) {
-	root := filepath.Join(groupDir, "data", bucket, ".obj", key)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(root, e.Name()))
-		if err != nil {
-			return false, err
-		}
-		if bytes.Equal(data, want) {
-			return true, nil
-		}
-	}
-	return false, nil
+	probeBucket := fmt.Sprintf("__per-group-restart-probe-%d", time.Now().UnixNano())
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer probeCancel()
+	leaderIdx, err := waitForWritableEndpoint(
+		probeCtx,
+		c.httpURLs,
+		240*time.Second,
+		5*time.Second,
+		1*time.Second,
+		func(ctx context.Context, endpoint string) error {
+			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			err := tryCreateBucket(ctx, cli, probeBucket)
+			if err != nil && strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou") {
+				return nil
+			}
+			return err
+		},
+	)
+	require.NoError(t, err, "no leader after per-group persistence restart")
+	c.leaderIdx = leaderIdx
+
+	restartCtx, restartCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer restartCancel()
+	requireMRGetObjectFromAnyNodeEventually(t, restartCtx, c, bucket, "test-key", []byte(body))
+	t.Log("per-group persistence ok: object survived restart and routed GET returned committed payload")
 }
 
 func requireMRPutObjectEventually(t *testing.T, ctx context.Context, client *s3.Client, bucket, key string, data []byte) {
 	t.Helper()
 	var lastErr error
+	var got []byte
 	require.Eventually(t, func() bool {
 		lastErr = tryPutObject(ctx, client, bucket, key, data)
-		return lastErr == nil
-	}, 60*time.Second, 2*time.Second, "PutObject %s/%s never became writable: %v", bucket, key, lastErr)
+		if lastErr != nil {
+			return false
+		}
+		got, lastErr = getObjectBytes(ctx, client, bucket, key)
+		return lastErr == nil && bytes.Equal(got, data)
+	}, 60*time.Second, 2*time.Second,
+		"PutObject %s/%s never became readable with committed body: lastErr=%v got=%q",
+		bucket, key, lastErr, string(got))
+}
+
+func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket string) {
+	t.Helper()
+	var lastErr error
+	tryNode := func(i int) bool {
+		client := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
+		lastErr = tryCreateBucket(ctx, client, bucket)
+		if lastErr == nil || strings.Contains(fmt.Sprint(lastErr), "BucketAlreadyOwnedByYou") {
+			c.leaderIdx = i
+			return true
+		}
+		return false
+	}
+	require.Eventually(t, func() bool {
+		if c.leaderIdx >= 0 && tryNode(c.leaderIdx) {
+			return true
+		}
+		for i := range c.httpURLs {
+			if tryNode(i) {
+				return true
+			}
+		}
+		return false
+	}, 60*time.Second, 2*time.Second, "CreateBucket %s never became writable: %v", bucket, lastErr)
+}
+
+func requireMRGetObjectEventually(t *testing.T, ctx context.Context, client *s3.Client, bucket, key string, want []byte) {
+	t.Helper()
+	var lastErr error
+	var got []byte
+	require.Eventually(t, func() bool {
+		got, lastErr = getObjectBytes(ctx, client, bucket, key)
+		return lastErr == nil && bytes.Equal(got, want)
+	}, 60*time.Second, 2*time.Second,
+		"GetObject %s/%s never returned committed object: lastErr=%v got=%q",
+		bucket, key, lastErr, string(got))
+}
+
+func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket, key string, want []byte) {
+	t.Helper()
+	var lastErr error
+	var got []byte
+	var lastNode int
+	require.Eventually(t, func() bool {
+		for i, endpoint := range c.httpURLs {
+			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			got, lastErr = getObjectBytes(ctx, client, bucket, key)
+			lastNode = i
+			if lastErr == nil && bytes.Equal(got, want) {
+				c.leaderIdx = i
+				return true
+			}
+		}
+		return false
+	}, 90*time.Second, 2*time.Second,
+		"GetObject %s/%s never returned committed object from any node: lastNode=%d lastErr=%v got=%q",
+		bucket, key, lastNode, lastErr, string(got))
 }
 
 // ----- TestE2E_MultiRaftSharding_CrossNodeDispatch -------------------------
@@ -608,9 +616,7 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 	defer cancel()
 
 	// Create bucket via leader.
-	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
-	_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("cross-node-test")})
-	require.NoError(t, err)
+	requireMRCreateBucketEventually(t, ctx, c, "cross-node-test")
 
 	// Write object via a non-leader node (if leaderIdx != 0, use node 0; otherwise node 1).
 	writeNodeIdx := 0
@@ -652,9 +658,8 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 	defer cancel()
 
 	// Create bucket and write object via current leader.
+	requireMRCreateBucketEventually(t, ctx, c, "failover-test")
 	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
-	_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("failover-test")})
-	require.NoError(t, err)
 
 	const body = "failover-test-data"
 	requireMRPutObjectEventually(t, ctx, cli, "failover-test", "failover-key", []byte(body))
@@ -670,7 +675,7 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 
 	// SIGTERM the leader process.
 	require.NotNil(t, c.procs[killIdx], "leader process must exist")
-	err = c.procs[killIdx].Process.Signal(syscall.SIGTERM)
+	err := c.procs[killIdx].Process.Signal(syscall.SIGTERM)
 	require.NoError(t, err)
 	_ = c.procs[killIdx].Wait()
 

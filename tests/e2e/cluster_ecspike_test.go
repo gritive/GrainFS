@@ -27,10 +27,7 @@ type ecspikeNode struct {
 }
 
 func (n *ecspikeNode) kill() {
-	if n.cmd != nil && n.cmd.Process != nil {
-		_ = n.cmd.Process.Kill()
-		_, _ = n.cmd.Process.Wait()
-	}
+	terminateProcess(n.cmd)
 }
 
 // startEcspikeCluster spawns 6 independent grainfs serve processes in local mode
@@ -69,6 +66,9 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 			"--port", fmt.Sprintf("%d", port),
 			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--snapshot-interval", "0",
+			"--scrub-interval", "0",
+			"--lifecycle-interval", "0",
 		}
 		cmd := exec.Command(binary, args...)
 		// Assign before Start so cleanup() can remove dir even if Start fails.
@@ -82,9 +82,27 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 			cleanup()
 			require.NoErrorf(t, err, "start node %d", i)
 		}
-		waitForPort(t, port, 10*time.Second)
+		waitForPort(t, port, 30*time.Second)
 	}
 	return nodes, cleanup
+}
+
+func requireECSpikeBucketsReady(t *testing.T, ctx context.Context, cfg *ecspike.Config, clients map[string]*s3.Client) {
+	t.Helper()
+
+	const readinessKey = "__grainfs_e2e_ready"
+	for _, ep := range cfg.Nodes {
+		client := clients[ep]
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(cfg.Bucket),
+		})
+		require.NoErrorf(t, err, "create bucket on %s", ep)
+		waitForS3Write(t, client, cfg.Bucket, readinessKey, 30*time.Second)
+		_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(cfg.Bucket),
+			Key:    aws.String(readinessKey),
+		})
+	}
 }
 
 // TestECSpike_KillOneNodeStillReadable is the single Stage 2 go/no-go E2E test.
@@ -122,13 +140,7 @@ func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
 		},
 	}
 
-	// Create the ecspike bucket on every node.
-	for _, ep := range endpoints {
-		_, err := clients[ep].CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(cfg.Bucket),
-		})
-		require.NoErrorf(t, err, "create bucket on %s", ep)
-	}
+	requireECSpikeBucketsReady(t, ctx, cfg, clients)
 
 	// Correctness: 10 × 16MB random objects, record SHA256.
 	const objCount = 10
@@ -198,12 +210,7 @@ func measureECSpikeP95(t *testing.T) {
 			return clients[ep]
 		},
 	}
-	for _, ep := range endpoints {
-		_, err := clients[ep].CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(cfg.Bucket),
-		})
-		require.NoErrorf(t, err, "create bucket on %s", ep)
-	}
+	requireECSpikeBucketsReady(t, ctx, cfg, clients)
 
 	const iter = 100
 	const objSize = 16 * 1024 * 1024

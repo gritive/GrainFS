@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +38,8 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port1),
 		"--snapshot-interval", "0", // disable auto-snapshots for determinism
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
@@ -64,12 +65,9 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	}
 
 	for key, content := range testData {
-		_, err = client1.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("persist-test"),
-			Key:    aws.String(key),
-			Body:   strings.NewReader(content),
-		})
-		require.NoError(t, err, "put %s", key)
+		require.Eventually(t, func() bool {
+			return tryPutObject(ctx, client1, "persist-test", key, []byte(content)) == nil
+		}, 30*time.Second, 500*time.Millisecond, "put %s", key)
 	}
 
 	listOut, err := client1.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -79,8 +77,7 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	assert.Len(t, listOut.Contents, len(testData))
 
 	// Stop server and wait for full teardown
-	cmd1.Process.Kill()
-	cmd1.Wait()
+	terminateProcess(cmd1)
 	time.Sleep(200 * time.Millisecond) // let OS release file locks
 
 	// Step 2: Restart on a different port and verify data is intact
@@ -89,6 +86,8 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port2),
 		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
@@ -96,8 +95,7 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	cmd2.Stderr = os.Stderr
 	require.NoError(t, cmd2.Start())
 	defer func() {
-		cmd2.Process.Kill()
-		cmd2.Wait()
+		terminateProcess(cmd2)
 	}()
 
 	endpoint2 := fmt.Sprintf("http://127.0.0.1:%d", port2)
@@ -129,12 +127,9 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	}
 
 	// Verify new writes work after restart
-	_, err = client2.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("persist-test"),
-		Key:    aws.String("post-restart.txt"),
-		Body:   strings.NewReader("new data after restart"),
-	})
-	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return tryPutObject(ctx, client2, "persist-test", "post-restart.txt", []byte("new data after restart")) == nil
+	}, 30*time.Second, 500*time.Millisecond, "put post-restart.txt")
 
 	getOut, err := client2.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("persist-test"),
@@ -157,6 +152,9 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
@@ -164,8 +162,7 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		terminateProcess(cmd)
 	}()
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -178,6 +175,11 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 		Bucket: aws.String("mp-cluster"),
 	})
 	require.NoError(t, err)
+	waitForS3Write(t, client, "mp-cluster", "__grainfs_e2e_ready", 30*time.Second)
+	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String("mp-cluster"),
+		Key:    aws.String("__grainfs_e2e_ready"),
+	})
 
 	// Multipart upload
 	key := "multipart-cluster.bin"

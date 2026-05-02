@@ -57,6 +57,9 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-node EC measurement is too slow for -short mode")
 	}
+	if os.Getenv("GRAINFS_EC_SHARDCACHE_EVAL") != "1" {
+		t.Skip("set GRAINFS_EC_SHARDCACHE_EVAL=1 to run EC shard-cache measurement workload")
+	}
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
@@ -171,13 +174,11 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 	if _, err := rand.Read(largeData); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(largeKey),
-		Body:   bytes.NewReader(largeData),
-	}); err != nil {
-		t.Fatalf("put large: %v", err)
-	}
+	var putErr error
+	require.Eventually(t, func() bool {
+		putErr = tryPutObject(ctx, client, bucketName, largeKey, largeData)
+		return putErr == nil
+	}, 120*time.Second, 2*time.Second, "put large never became writable: %v", putErr)
 
 	// One 1 MB object — fits CachedBackend, repeated GETs should NOT
 	// reach getObjectEC after the first miss.
@@ -460,13 +461,11 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 	if _, err := rand.Read(largeData); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(largeKey),
-		Body:   bytes.NewReader(largeData),
-	}); err != nil {
-		t.Fatalf("put large: %v", err)
-	}
+	var putErr error
+	require.Eventually(t, func() bool {
+		putErr = tryPutObject(ctx, client, bucketName, largeKey, largeData)
+		return putErr == nil
+	}, 120*time.Second, 2*time.Second, "put large never became writable: %v", putErr)
 
 	// Repeated GET ×10 to drive cache hits.
 	for i := 0; i < 10; i++ {
