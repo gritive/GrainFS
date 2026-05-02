@@ -133,6 +133,46 @@ func TestClusterCoordinator_ListBuckets_DelegatesToBase(t *testing.T) {
 	require.Equal(t, []string{"ListBuckets"}, base.calls)
 }
 
+type fakeBucketAssignmentSource struct {
+	fakeShardGroupSource
+	assignments map[string]string
+}
+
+func (f *fakeBucketAssignmentSource) BucketAssignments() map[string]string {
+	out := make(map[string]string, len(f.assignments))
+	for k, v := range f.assignments {
+		out[k] = v
+	}
+	return out
+}
+
+func TestClusterCoordinator_ListBuckets_MergesMetaAssignments(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"local"}}
+	meta := &fakeBucketAssignmentSource{
+		assignments: map[string]string{
+			"default": "group-0",
+			"local":   "group-0",
+		},
+	}
+	c := NewClusterCoordinator(base, nil, nil, meta, "self")
+
+	got, err := c.ListBuckets()
+	require.NoError(t, err)
+	require.Equal(t, []string{"default", "local"}, got)
+	require.Equal(t, []string{"ListBuckets"}, base.calls)
+}
+
+func TestClusterCoordinator_HeadBucket_UsesMetaAssignmentWhenBaseIsEmpty(t *testing.T) {
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	meta := &fakeBucketAssignmentSource{
+		assignments: map[string]string{"default": "group-0"},
+	}
+	c := NewClusterCoordinator(base, nil, nil, meta, "self")
+
+	require.NoError(t, c.HeadBucket("default"))
+	require.Equal(t, []string{"HeadBucket:default"}, base.calls)
+}
+
 func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")
@@ -258,6 +298,25 @@ func TestClusterCoordinator_RouteBucket_SelfIsVoter_NotLeader(t *testing.T) {
 	require.False(t, target.selfIsLeader)
 	// PeersForForward order: non-self first, self last.
 	require.Equal(t, []string{"a", "b", "self"}, target.peers)
+}
+
+func TestClusterCoordinator_RouteBucket_ResolvesNodeIDPeersToAddresses(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-1", []string{"node-a", "self", "node-b"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-b", "10.0.0.2:7001", 0)))
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "self", "10.0.0.3:7001", 0)))
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"node-a", "self", "node-b"})))
+
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithNodeAddressResolver(meta)
+	target, err := c.routeBucket("photos")
+	require.NoError(t, err)
+	require.Equal(t, []string{"10.0.0.1:7001", "10.0.0.2:7001", "10.0.0.3:7001"}, target.peers)
+	require.True(t, target.selfIsVoter)
 }
 
 // --- T6 forward-path test scaffolding ---

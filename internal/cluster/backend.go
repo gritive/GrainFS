@@ -544,12 +544,9 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 		return nil
 	}
 
-	// 팔로워: 리더에게 포워딩
-	// LeaderID()는 raft 노드 ID(예: "mrshard-node-2")를 반환하며 QUIC 주소가 아니다.
-	// QUIC peer 주소를 순서대로 시도해 리더를 찾는다.
-	if b.node.LeaderID() == "" {
-		return raft.ErrNotLeader
-	}
+	// Follower / edge node: forward to configured peers. Dynamic join edge
+	// nodes may not have a top-level data-Raft leader hint yet, but they still
+	// know the seed/join peer address and must try it instead of failing early.
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	peers := b.node.Peers()

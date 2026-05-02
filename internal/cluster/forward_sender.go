@@ -122,6 +122,11 @@ func (s *ForwardSender) Send(
 	ctx context.Context, peers []string, groupID string,
 	op raftpb.ForwardOp, fbsArgs []byte,
 ) ([]byte, error) {
+	if s.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+	}
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
 
 	var redirected bool

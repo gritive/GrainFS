@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -43,6 +44,7 @@ type ClusterCoordinator struct {
 	meta    ShardGroupSource
 	forward *ForwardSender
 	selfID  string
+	addr    NodeAddressBook
 
 	maxBody int64
 }
@@ -76,6 +78,13 @@ func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordin
 	return c
 }
 
+// WithNodeAddressResolver attaches the cluster address book used to translate
+// nodeID PeerIDs into dialable QUIC addresses for runtime forwarding.
+func (c *ClusterCoordinator) WithNodeAddressResolver(book NodeAddressBook) *ClusterCoordinator {
+	c.addr = book
+	return c
+}
+
 // --- Cluster-wide delegations (4 ops) ---
 //
 // These bypass routing entirely. CreateBucket and friends are always served by
@@ -83,7 +92,16 @@ func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordin
 // linearizable across the cluster regardless of which group later owns it.
 
 func (c *ClusterCoordinator) CreateBucket(bucket string) error { return c.base.CreateBucket(bucket) }
-func (c *ClusterCoordinator) HeadBucket(bucket string) error   { return c.base.HeadBucket(bucket) }
+func (c *ClusterCoordinator) HeadBucket(bucket string) error {
+	err := c.base.HeadBucket(bucket)
+	if err == nil {
+		return nil
+	}
+	if c.bucketAssigned(bucket) {
+		return nil
+	}
+	return err
+}
 func (c *ClusterCoordinator) DeleteBucket(bucket string) error {
 	if c.router != nil && c.meta != nil {
 		objects, err := c.ListObjects(bucket, "", 1)
@@ -96,7 +114,40 @@ func (c *ClusterCoordinator) DeleteBucket(bucket string) error {
 	}
 	return c.base.DeleteBucket(bucket)
 }
-func (c *ClusterCoordinator) ListBuckets() ([]string, error) { return c.base.ListBuckets() }
+func (c *ClusterCoordinator) ListBuckets() ([]string, error) {
+	buckets, err := c.base.ListBuckets()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(buckets))
+	for _, bucket := range buckets {
+		seen[bucket] = struct{}{}
+	}
+	if src, ok := c.meta.(interface{ BucketAssignments() map[string]string }); ok {
+		for bucket := range src.BucketAssignments() {
+			seen[bucket] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for bucket := range seen {
+		out = append(out, bucket)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (c *ClusterCoordinator) bucketAssigned(bucket string) bool {
+	if c.router != nil {
+		if _, ok := c.router.ExplicitGroup(bucket); ok {
+			return true
+		}
+	}
+	if src, ok := c.meta.(interface{ BucketAssignments() map[string]string }); ok {
+		_, ok := src.BucketAssignments()[bucket]
+		return ok
+	}
+	return false
+}
 
 func (c *ClusterCoordinator) SetBucketVersioning(bucket, state string) error {
 	type bucketVersioner interface {
@@ -267,9 +318,18 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (*routeTarget, error) {
 	if !ok || len(entry.PeerIDs) == 0 {
 		return nil, ErrUnknownGroup
 	}
+	peerIDs := PeersForForward(entry, c.selfID)
+	peers := peerIDs
+	if c.addr != nil {
+		resolved, err := ResolveNodeAddresses(c.addr, peerIDs)
+		if err != nil {
+			return nil, err
+		}
+		peers = resolved
+	}
 	t := &routeTarget{
 		groupID: entry.ID,
-		peers:   PeersForForward(entry, c.selfID),
+		peers:   peers,
 	}
 	for _, p := range entry.PeerIDs {
 		if p == c.selfID {

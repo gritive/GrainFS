@@ -22,6 +22,7 @@ const (
 	StreamMetaProposeForward  StreamType = 0x0B // Follower → meta-Raft leader Iceberg catalog proposal forwarding
 	StreamMetaCatalogRead     StreamType = 0x0C // Follower → meta-Raft leader Iceberg catalog linearized reads
 	StreamGroupForwardBody    StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
+	StreamMetaJoin            StreamType = 0x0E // New node → meta-Raft leader dynamic join admin RPC
 )
 
 // Message is a framed message sent over a transport stream.

@@ -27,6 +27,7 @@ type ShardService struct {
 	dataDir   string
 	transport *transport.QUICTransport
 	encryptor *encrypt.Encryptor
+	addrBook  NodeAddressBook
 	// directIO bypasses the kernel page cache for shard writes when true.
 	// Linux uses O_DIRECT, macOS uses F_NOCACHE. Default false: enable via
 	// WithDirectIO and the --direct-io flag once measurement on the target
@@ -49,6 +50,12 @@ func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
 // target filesystem (some overlayfs/tmpfs configs reject O_DIRECT).
 func WithDirectIO() ShardServiceOption {
 	return func(s *ShardService) { s.directIO = true }
+}
+
+// WithNodeAddressBook lets shard RPC callers keep nodeID membership lists while
+// dialing the QUIC address stored in MetaFSM.
+func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
+	return func(s *ShardService) { s.addrBook = book }
 }
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
@@ -74,7 +81,23 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 	if s.transport == nil {
 		return nil, fmt.Errorf("shard service: no transport")
 	}
+	var err error
+	peerAddr, err = s.resolvePeerAddress(peerAddr)
+	if err != nil {
+		return nil, err
+	}
 	return s.transport.Call(ctx, peerAddr, msg)
+}
+
+func (s *ShardService) resolvePeerAddress(peer string) (string, error) {
+	if s.addrBook == nil {
+		return peer, nil
+	}
+	addr, ok := ResolveNodeAddress(s.addrBook, peer)
+	if !ok {
+		return "", fmt.Errorf("node %q not found in address book", peer)
+	}
+	return addr, nil
 }
 
 // RegisterHandler registers a per-type stream handler on the transport.
@@ -102,11 +125,15 @@ func (s *ShardService) RegisterBodyHandler(st transport.StreamType, h func(*tran
 // fails at ReadShard(idx>=1) — data remains safe (FSM atomic cancel).
 // Phase 18 Cluster EC will use real shardIdx routing per Reed-Solomon split.
 func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
 	fw := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, peer, fw)
+	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
 	if err != nil {
-		return fmt.Errorf("write shard to %s: %w", peer, err)
+		return fmt.Errorf("write shard to %s: %w", peerAddr, err)
 	}
 
 	rpcType, _, err := unmarshalEnvelope(resp.Payload)
@@ -121,11 +148,15 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 
 // ReadShard fetches a shard from a remote node.
 func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return nil, err
+	}
 	fw := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, peer, fw)
+	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
 	if err != nil {
-		return nil, fmt.Errorf("read shard from %s: %w", peer, err)
+		return nil, fmt.Errorf("read shard from %s: %w", peerAddr, err)
 	}
 
 	rpcType, data, err := unmarshalEnvelope(resp.Payload)
@@ -140,9 +171,13 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 
 // DeleteShards removes all shards for a key from a remote node.
 func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key string) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
 	fw := buildShardEnvelope("DeleteShards", bucket, key, 0, nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	_, err := s.transport.CallFlatBuffer(ctx, peer, fw)
+	_, err = s.transport.CallFlatBuffer(ctx, peerAddr, fw)
 	return err
 }
 
