@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.19.0] — 2026-05-02 — meta-raft mux integration
+
+### Added
+
+- **raft**: meta-raft RPCs now ride the same persistent-stream mux as per-group raft. Sender prefixes payloads with the magic groupID `__meta__`; receiver dispatches via `handleMuxRequest` (direct calls) and `dispatchToLocalGroup` (coalesced heartbeats). Wire-compatible with v0.0.16+ (no frame-format change). Snapshots stay on the legacy StreamMetaRaft path — large-payload + 60s timeout don't fit the per-frame model.
+- **raft**: `NewMetaRaftQUICTransportMux(tr, node, groupMux)` — mux-aware constructor that auto-registers `node` under `__meta__` so receiver-side dispatch is wired before `EnableMux` installs the mux accept handler. Closes the startup race (`MetaRaftQUICTransport` previously had to be created strictly after `EnableMux`).
+- **raft**: `ValidateGroupID` rejects empty IDs, `__meta__`, and the entire `__` prefix. Called at four boundaries: `MetaFSM.applyPutShardGroup` (warn + skip on replay so old logs don't crash startup), `MetaRaft.ProposeShardGroup` (hard error to proposer), `instantiateLocalGroup` (fatal — voter-status fail), `GroupRaftQUICMux.Register` (panic — programming bug if upstream validation skipped).
+
+### Changed
+
+- **raft**: `MetaRaftQUICTransport` mux path uses a 200ms attempt budget; on dial / send / "unknown group" remote / ctx-deadline failure it falls back to legacy `tr.Call(StreamMetaRaft)` with a fresh 500ms ctx. The fresh ctx prevents the original mux-attempt deadline from immediately firing the legacy call too. Mixed-version clusters (v0.0.18.x receivers without `__meta__` registered) take the unknown-group fallback automatically.
+- **serve**: startup order rearranged — `groupRaftMux` is now built and `EnableMux`-d before `NewMetaTransportQUICMux`, replacing the previous late-bind. The meta-raft constructor receives the mux directly and auto-registers.
+
+### Why
+
+`/plan-eng-review` of meta-raft mux integration surfaced 7 codex findings: missing `dispatchToLocalGroup` branch (P0 — silent meta heartbeat drop), `__meta__` ID not reserved (P0 — user config could collide with mux dispatch), startup-order race (P1), legacy-fallback context budget could be exhausted by a half-open mux call (P1), `HeartbeatCoalescer` reply race in R+H itself (P1, shipped separately as v0.0.18.1 / #140), mixed-version peers never recovering from "unknown group" responses (P1), meta RPC constants accidentally aliased with group constants (P2). All seven are addressed in this PR.
+
+### Tests
+
+- **raft**: added `group_id_test.go` (validation rules), `group_transport_mux_meta_test.go` (lookupNode meta path, RegisterMetaNode idempotency, Register panic on reserved IDs, isMuxFallbackErr decision matrix, NewMetaRaftQUICTransportMux auto-register).
+- **cluster**: added `group_id_validation_test.go` (`MetaFSM` warn-and-skip, `ProposeShardGroup` hard error, `instantiateLocalGroup` fatal). Added `meta_raft_mux_e2e_test.go` — three-node meta-raft on the shared mux, leader election + state replication via heartbeat-coalesced AE.
+- All existing raft + cluster + transport tests continue to pass.
+
 ## [0.0.18.1] — 2026-05-02 — close HeartbeatCoalescer reply race
 
 ### Fixed

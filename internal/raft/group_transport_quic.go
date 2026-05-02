@@ -26,6 +26,12 @@ type GroupRaftQUICMux struct {
 	tr    *transport.QUICTransport
 	nodes sync.Map // string(groupID) → *Node
 
+	// metaNode is the meta-raft node registered for the magic groupID
+	// metaGroupID ("__meta__"). Atomic so receiver paths
+	// (handleMuxRequest, dispatchToLocalGroup) can read without locking.
+	// Set via RegisterMetaNode; nil until then.
+	metaNode atomic.Pointer[Node]
+
 	// Mux mode state. Set by EnableMux. When muxEnabled is false, all sends
 	// use the legacy per-message tr.Call path.
 	muxEnabled      atomic.Bool
@@ -46,8 +52,23 @@ func NewGroupRaftQUICMux(tr *transport.QUICTransport) *GroupRaftQUICMux {
 
 // Register associates node with groupID for incoming RPC dispatch. Must be
 // called after InstantiateLocalGroup returns so the node pointer is stable.
+// Panics on reserved or empty groupID — by the time we're here, upstream
+// validation in applyPutShardGroup should have already rejected anything
+// invalid, so reaching this with a bad ID is a programming bug.
 func (m *GroupRaftQUICMux) Register(groupID string, node *Node) {
+	if err := ValidateGroupID(groupID); err != nil {
+		panic(fmt.Sprintf("GroupRaftQUICMux.Register: invalid groupID: %v", err))
+	}
 	m.nodes.Store(groupID, node)
+}
+
+// RegisterMetaNode wires the meta-raft node onto the shared mux. Idempotent;
+// the last registration wins. Called by NewMetaRaftQUICTransport so the
+// receiver-side __meta__ branch has somewhere to dispatch before
+// EnableMux installs the accept handler. Passing nil is treated as
+// deregistration (used by tests during teardown).
+func (m *GroupRaftQUICMux) RegisterMetaNode(node *Node) {
+	m.metaNode.Store(node)
 }
 
 // ForGroup returns a GroupRaftSender for the given group. The returned sender

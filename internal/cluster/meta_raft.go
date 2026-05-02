@@ -15,6 +15,15 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
+// Meta-raft timing is fixed (not driven by --raft-heartbeat-interval, which
+// applies to per-group raft only). Exposed so serve.go can validate that
+// shared infra (e.g., the mux flush window) doesn't blow past the meta
+// heartbeat budget.
+const (
+	MetaRaftHeartbeatInterval = 150 * time.Millisecond
+	MetaRaftElectionTimeout   = 750 * time.Millisecond
+)
+
 // MetaTransport abstracts RPC delivery for the meta-Raft group.
 type MetaTransport interface {
 	SendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
@@ -71,8 +80,8 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	// S3 startup probes, and per-group Raft workers. Give the control plane a
 	// wider election window so local/CI CPU contention does not leave bucket
 	// assignment without a stable leader during multi-process cold starts.
-	nodeCfg.ElectionTimeout = 750 * time.Millisecond
-	nodeCfg.HeartbeatTimeout = 150 * time.Millisecond
+	nodeCfg.ElectionTimeout = MetaRaftElectionTimeout
+	nodeCfg.HeartbeatTimeout = MetaRaftHeartbeatInterval
 	node := raft.NewNode(nodeCfg, store)
 
 	// §4.3 joint state persistence wiring (Sub-project 2 PR-J5).
@@ -203,6 +212,9 @@ func (m *MetaRaft) ProposeBucketAssignment(ctx context.Context, bucket, groupID 
 // ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
 // it is applied to the local FSM.
 func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error {
+	if err := raft.ValidateGroupID(sg.ID); err != nil {
+		return fmt.Errorf("meta_raft: ProposeShardGroup: %w", err)
+	}
 	payload, err := encodeMetaPutShardGroupCmd(sg)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode PutShardGroup: %w", err)

@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/transport"
@@ -14,9 +15,21 @@ const (
 	// could leave the control plane without a leader even after data Raft elected.
 	metaRaftRPCTimeout      = 500 * time.Millisecond
 	metaRaftSnapshotTimeout = 60 * time.Second
+
+	// metaMuxAttemptTimeout caps the mux-path attempt so a half-open mux call
+	// cannot consume the whole legacy budget. Meta election is 750ms; we want
+	// the mux attempt + a fresh-ctx legacy fallback to both fit. 200ms leaves
+	// the 500ms metaRaftRPCTimeout budget intact for fallback.
+	metaMuxAttemptTimeout = 200 * time.Millisecond
 )
 
-// RPC type constants for meta-Raft QUIC transport.
+// RPC type constants for meta-Raft QUIC transport (legacy path).
+//
+// On the mux path the receiver's handleMuxRequest switches on the unified
+// rpcType* (RequestVote / AppendEntries) constants because meta-raft *Node
+// has the same Handle* methods as a per-group Node. The metaRPC* constants
+// stay reserved for the legacy StreamMetaRaft envelope so cross-version
+// peers keep talking to each other.
 const (
 	metaRPCRequestVote          = "MetaRequestVote"
 	metaRPCRequestVoteReply     = "MetaRequestVoteReply"
@@ -26,23 +39,121 @@ const (
 	metaRPCInstallSnapshotReply = "MetaInstallSnapshotReply"
 )
 
-// MetaRaftQUICTransport delivers meta-Raft RPCs over the shared QUIC transport
-// using the dedicated StreamMetaRaft stream type. This avoids interference with
-// the data-plane Raft group that owns StreamControl.
+// MetaRaftQUICTransport delivers meta-Raft RPCs over the shared QUIC transport.
+//
+// Two paths coexist:
+//
+//   - Legacy: tr.Call(StreamMetaRaft, ...) per message. Used when groupMux
+//     is nil, when groupMux.MuxEnabled() is false, or as fallback when the
+//     mux attempt fails (dial / send / "unknown group" from older peer).
+//   - Mux: shared with per-group raft via groupMux. Sender prefixes payload
+//     with the magic groupID metaGroupID; receiver routes through
+//     handleMuxRequest / dispatchToLocalGroup to metaNode.
+//
+// SendInstallSnapshot stays on the legacy path always — the 60s budget +
+// large-payload semantics don't fit the per-message frame model.
 type MetaRaftQUICTransport struct {
-	tr   *transport.QUICTransport
-	node *Node
+	tr       *transport.QUICTransport
+	node     *Node
+	groupMux *GroupRaftQUICMux // nil = legacy-only; set by NewMetaRaftQUICTransportMux.
 }
 
-// NewMetaRaftQUICTransport creates a meta-Raft RPC transport and registers its
-// handler on the QUIC transport. Call SetTransport on the MetaRaft node afterward.
+// NewMetaRaftQUICTransport creates a meta-Raft RPC transport without mux
+// support. Tests and legacy callers use this constructor.
 func NewMetaRaftQUICTransport(tr *transport.QUICTransport, node *Node) *MetaRaftQUICTransport {
 	m := &MetaRaftQUICTransport{tr: tr, node: node}
 	tr.Handle(transport.StreamMetaRaft, m.handleRPC)
 	return m
 }
 
+// NewMetaRaftQUICTransportMux is the mux-aware constructor. It auto-registers
+// node on groupMux so the receiver-side __meta__ branch is wired up before
+// EnableMux installs the mux accept handler. Auto-registration removes a
+// startup-order race: if EnableMux ran before metaNode was registered, all
+// inbound meta calls would hit "mux: unknown group __meta__".
+//
+// groupMux may be nil; in that case behaviour matches the legacy
+// constructor.
+func NewMetaRaftQUICTransportMux(tr *transport.QUICTransport, node *Node, groupMux *GroupRaftQUICMux) *MetaRaftQUICTransport {
+	m := &MetaRaftQUICTransport{tr: tr, node: node, groupMux: groupMux}
+	tr.Handle(transport.StreamMetaRaft, m.handleRPC) // legacy receiver always on for fallback
+	if groupMux != nil {
+		groupMux.RegisterMetaNode(node)
+	}
+	return m
+}
+
+func (m *MetaRaftQUICTransport) muxOn() bool {
+	return m.groupMux != nil && m.groupMux.MuxEnabled()
+}
+
+// isMuxFallbackErr decides whether a mux-path error should fall back to
+// legacy StreamMetaRaft. Whitelist (fallback-worthy):
+//   - ctx deadline exceeded — mux-attempt budget exhausted; legacy gets fresh
+//     ctx (codex P1 #4)
+//   - "mux: unknown group __meta__" remote — peer mux-enabled but on a binary
+//     without RegisterMetaNode (codex P1 #6, mixed-version cluster)
+//   - "raft_conn: connection closed" / "raft_conn: frame exceeds" — mux conn
+//     itself is broken
+//   - dial errors ("dial mux", "no mux handler") — peer doesn't speak mux ALPN
+//
+// Everything else propagates. Specifically:
+//   - "raft_conn: handler pool overloaded" — peer is signalling backpressure;
+//     legacy fallback would just amplify the load (codex P1 #3)
+//   - "raft_conn: unknown op code" / "unsupported rpc" — protocol mismatch,
+//     not recoverable by retrying on a different transport
+//   - "mux: decode rpc" / "decode reply batch" — corruption, retry won't help
+//   - "remote: handler panic" — peer-side bug; surface to caller
+//
+// Genuine RPC failures (term mismatch, etc.) are encoded inside the reply
+// payload, not surfaced as transport errors, so they don't reach this gate.
+func isMuxFallbackErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errIsCtxBudget(err) {
+		return true
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "mux: unknown group"):
+		return true
+	case strings.Contains(s, "raft_conn: connection closed"):
+		return true
+	case strings.Contains(s, "raft_conn: frame exceeds"):
+		return true
+	case strings.Contains(s, "no mux handler"):
+		return true
+	case strings.Contains(s, "dial mux"):
+		return true
+	case strings.Contains(s, "open mux streams"):
+		return true
+	case strings.Contains(s, "GetOrConnectMux"):
+		return true
+	}
+	// Backpressure & protocol errors propagate so the caller sees the truth
+	// (and so we don't double the load on an overloaded peer).
+	return false
+}
+
+func errIsCtxBudget(err error) bool {
+	return err == context.DeadlineExceeded || (err != nil && strings.Contains(err.Error(), "context deadline exceeded"))
+}
+
 func (m *MetaRaftQUICTransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	if m.muxOn() {
+		muxCtx, cancel := context.WithTimeout(context.Background(), metaMuxAttemptTimeout)
+		reply, err := m.muxRequestVote(muxCtx, peer, args)
+		cancel()
+		if err == nil {
+			return reply, nil
+		}
+		if !isMuxFallbackErr(err) {
+			return nil, err
+		}
+		// fall through to legacy with fresh ctx
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), metaRaftRPCTimeout)
 	defer cancel()
 	env, err := encodeRPC(metaRPCRequestVote, args)
@@ -63,7 +174,48 @@ func (m *MetaRaftQUICTransport) SendRequestVote(peer string, args *RequestVoteAr
 	return decodeRequestVoteReply(data)
 }
 
+func (m *MetaRaftQUICTransport) muxRequestVote(ctx context.Context, peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	ps, err := m.groupMux.muxConnFor(ctx, peer)
+	if err != nil {
+		return nil, err
+	}
+	env, err := encodeRPC(rpcTypeRequestVote, args)
+	if err != nil {
+		return nil, err
+	}
+	respBytes, err := ps.rc.Call(ctx, prefixGroupID(metaGroupID, env))
+	if err != nil {
+		return nil, err
+	}
+	rpcType, data, err := decodeRPC(respBytes)
+	if err != nil {
+		return nil, fmt.Errorf("meta mux RequestVote reply: %w", err)
+	}
+	// Defensive: refuse a reply whose envelope type doesn't match what we
+	// asked for. FlatBuffers does not validate union/discriminant alignment
+	// across schemas, so a buggy peer answering RequestVote with an
+	// AppendEntriesReply payload could decode into a plausible vote reply
+	// that silently sets the wrong term. Mirrors the legacy-path check.
+	if rpcType != rpcTypeRequestVoteReply {
+		return nil, fmt.Errorf("meta mux RequestVote: unexpected reply type %s", rpcType)
+	}
+	return decodeRequestVoteReply(data)
+}
+
 func (m *MetaRaftQUICTransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	if m.muxOn() {
+		muxCtx, cancel := context.WithTimeout(context.Background(), metaMuxAttemptTimeout)
+		reply, err := m.muxAppendEntries(muxCtx, peer, args)
+		cancel()
+		if err == nil {
+			return reply, nil
+		}
+		if !isMuxFallbackErr(err) {
+			return nil, err
+		}
+		// fall through to legacy
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), metaRaftRPCTimeout)
 	defer cancel()
 	env, err := encodeRPC(metaRPCAppendEntries, args)
@@ -84,7 +236,44 @@ func (m *MetaRaftQUICTransport) SendAppendEntries(peer string, args *AppendEntri
 	return decodeAppendEntriesReply(data)
 }
 
+func (m *MetaRaftQUICTransport) muxAppendEntries(ctx context.Context, peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	ps, err := m.groupMux.muxConnFor(ctx, peer)
+	if err != nil {
+		return nil, err
+	}
+	// Entries-empty heartbeats ride the shared coalescer; entries-bearing
+	// AE goes direct via RaftConn.Call. Same pattern as GroupRaftSender.
+	if len(args.Entries) == 0 {
+		reply, hcErr := ps.hc.AppendEntries(ctx, metaGroupID, args)
+		if hcErr == nil {
+			return reply, nil
+		}
+		// Fall through to direct mux call on coalescer error (rare).
+	}
+	env, err := encodeRPC(rpcTypeAppendEntries, args)
+	if err != nil {
+		return nil, err
+	}
+	respBytes, err := ps.rc.Call(ctx, prefixGroupID(metaGroupID, env))
+	if err != nil {
+		return nil, err
+	}
+	rpcType, data, err := decodeRPC(respBytes)
+	if err != nil {
+		return nil, fmt.Errorf("meta mux AppendEntries reply: %w", err)
+	}
+	// Same defensive rpcType check as muxRequestVote — refuse cross-typed
+	// replies so a misbehaving peer cannot poison meta-raft term state.
+	if rpcType != rpcTypeAppendEntriesReply {
+		return nil, fmt.Errorf("meta mux AppendEntries: unexpected reply type %s", rpcType)
+	}
+	return decodeAppendEntriesReply(data)
+}
+
 func (m *MetaRaftQUICTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	// Snapshot install bypasses mux unconditionally — large payloads + 60s
+	// timeout don't fit the per-frame mux model, and mixing them in would
+	// break the R+H invariant that the mux only carries small frames.
 	ctx, cancel := context.WithTimeout(context.Background(), metaRaftSnapshotTimeout)
 	defer cancel()
 	env, err := encodeRPC(metaRPCInstallSnapshot, args)
