@@ -130,6 +130,8 @@ func init() {
 	// Rate limit overrides — defaults are production-safe (100/200 ip, 50/100 user).
 	// Benchmarks/dev/upstream-proxied deployments can relax these. 0 disables that layer.
 	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (auto: cluster=false (consensus provides redundancy), single=true; explicit value always wins)")
+	serveCmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with QUIC stream-open cost.")
+	serveCmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
 	serveCmd.Flags().Bool("backend-vfs-fixed-version", true, "use fixed versionID 'current' for __grainfs_vfs_* buckets to bound on-disk usage; disable for legacy multi-version behavior (cluster mode only)")
 	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
 	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
@@ -284,6 +286,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	badgerManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
 	raftLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
+	raftHeartbeatInterval, _ := cmd.Flags().GetDuration("raft-heartbeat-interval")
+	raftElectionTimeout, _ := cmd.Flags().GetDuration("raft-election-timeout")
+	if raftElectionTimeout > 0 && raftHeartbeatInterval > 0 && raftElectionTimeout < 3*raftHeartbeatInterval {
+		return fmt.Errorf("--raft-election-timeout (%s) must be >= 3 * --raft-heartbeat-interval (%s)", raftElectionTimeout, raftHeartbeatInterval)
+	}
 
 	var storeOpts []raft.BadgerLogStoreOption
 	if badgerManagedMode {
@@ -597,6 +604,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				DataShards:   clusterECData,
 				ParityShards: clusterECParity,
 			},
+			ElectionTimeout:  raftElectionTimeout,
+			HeartbeatTimeout: raftHeartbeatInterval,
 		}
 		if sharedRaftLogDB != nil {
 			// Forward managed-mode and any future BadgerLogStoreOption to
