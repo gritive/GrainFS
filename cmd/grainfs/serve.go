@@ -132,6 +132,9 @@ func init() {
 	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (auto: cluster=false (consensus provides redundancy), single=true; explicit value always wins)")
 	serveCmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with QUIC stream-open cost.")
 	serveCmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
+	serveCmd.Flags().Bool("quic-mux", false, "use multiplexed QUIC streams + heartbeat coalescing for per-group raft RPCs (R+H prototype, default off until measurement validates). Falls back to legacy per-message stream-open on peer mismatch.")
+	serveCmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer when --quic-mux=true (avoids HoL with raft pipelining)")
+	serveCmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window when --quic-mux=true (must be << heartbeat-interval)")
 	serveCmd.Flags().Bool("backend-vfs-fixed-version", true, "use fixed versionID 'current' for __grainfs_vfs_* buckets to bound on-disk usage; disable for legacy multi-version behavior (cluster mode only)")
 	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
 	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
@@ -290,6 +293,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	raftElectionTimeout, _ := cmd.Flags().GetDuration("raft-election-timeout")
 	if raftElectionTimeout > 0 && raftHeartbeatInterval > 0 && raftElectionTimeout < 3*raftHeartbeatInterval {
 		return fmt.Errorf("--raft-election-timeout (%s) must be >= 3 * --raft-heartbeat-interval (%s)", raftElectionTimeout, raftHeartbeatInterval)
+	}
+	quicMuxEnabled, _ := cmd.Flags().GetBool("quic-mux")
+	quicMuxPoolSize, _ := cmd.Flags().GetInt("quic-mux-pool")
+	quicMuxFlushWindow, _ := cmd.Flags().GetDuration("quic-mux-flush")
+	if quicMuxEnabled && quicMuxFlushWindow > 0 && raftHeartbeatInterval > 0 && quicMuxFlushWindow >= raftHeartbeatInterval {
+		return fmt.Errorf("--quic-mux-flush (%s) must be << --raft-heartbeat-interval (%s)", quicMuxFlushWindow, raftHeartbeatInterval)
 	}
 
 	var storeOpts []raft.BadgerLogStoreOption
@@ -557,6 +566,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// GroupRaftQUICMux multiplexes per-group raft RPCs over StreamGroupRaft (0x09).
 	// Registered once; each group uses ForGroup(groupID) as its raft transport.
 	groupRaftMux := raft.NewGroupRaftQUICMux(quicTransport)
+	if quicMuxEnabled {
+		groupRaftMux.EnableMux(quicMuxPoolSize, quicMuxFlushWindow)
+		log.Info().
+			Int("pool", quicMuxPoolSize).
+			Dur("flush", quicMuxFlushWindow).
+			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
+	}
 
 	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) {
 		// group-0 is already wired with the shared distBackend.
