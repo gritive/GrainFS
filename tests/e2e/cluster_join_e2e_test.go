@@ -3,12 +3,8 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
-	"syscall"
 	"testing"
 	"time"
 
@@ -17,138 +13,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type dynamicJoinCluster struct {
-	procs     []*exec.Cmd
-	dataDirs  []string
-	httpURLs  []string
-	httpPorts []int
-	raftPorts []int
-	nfsPorts  []int
-	nbdPorts  []int
-	accessKey string
-	secretKey string
-}
-
-func startDynamicJoinCluster(t *testing.T, nodes int) *dynamicJoinCluster {
-	t.Helper()
-	require.GreaterOrEqual(t, nodes, 2)
-
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
-	}
-
-	ports := uniqueFreePorts(nodes * 4)
-	c := &dynamicJoinCluster{
-		procs:     make([]*exec.Cmd, nodes),
-		dataDirs:  make([]string, nodes),
-		httpURLs:  make([]string, nodes),
-		httpPorts: ports[:nodes],
-		raftPorts: ports[nodes : 2*nodes],
-		nfsPorts:  ports[2*nodes : 3*nodes],
-		nbdPorts:  ports[3*nodes : 4*nodes],
-		accessKey: "join-ak",
-		secretKey: "join-sk",
-	}
-	for i := 0; i < nodes; i++ {
-		dir, err := os.MkdirTemp("", fmt.Sprintf("grainfs-join-node-%d-*", i))
-		require.NoError(t, err)
-		c.dataDirs[i] = dir
-		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-	}
-	t.Cleanup(c.Stop)
-
-	c.procs[0] = c.startNode(t, 0)
-	waitForPort(t, c.httpPorts[0], 60*time.Second)
-	time.Sleep(2 * time.Second)
-	for i := 1; i < nodes; i++ {
-		c.procs[i] = c.startNode(t, i)
-		waitForPort(t, c.httpPorts[i], 90*time.Second)
-	}
-	return c
-}
-
-func (c *dynamicJoinCluster) startNode(t *testing.T, i int) *exec.Cmd {
-	t.Helper()
-	logFile, err := os.CreateTemp("", fmt.Sprintf("grainfs-dynamic-join-node-%d-*.log", i))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = logFile.Close()
-		if t.Failed() {
-			t.Logf("dynamic join node %d log saved to %s", i, logFile.Name())
-		} else {
-			_ = os.Remove(logFile.Name())
-		}
-	})
-
-	args := []string{
-		"serve",
-		"--data", c.dataDirs[i],
-		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
-		"--node-id", fmt.Sprintf("n%d", i+1),
-		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", c.raftPorts[i]),
-		"--cluster-key", "E2E-DYNAMIC-JOIN-KEY",
-		"--access-key", c.accessKey,
-		"--secret-key", c.secretKey,
-		"--ec-data", "0",
-		"--ec-parity", "0",
-		"--seed-groups", "1",
-		"--nfs4-port", fmt.Sprintf("%d", c.nfsPorts[i]),
-		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
-		"--snapshot-interval", "0",
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--no-encryption",
-	}
-	if i > 0 {
-		args = append(args, "--join", fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0]))
-	}
-
-	cmd := exec.Command(getBinary(), args...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	require.NoError(t, cmd.Start(), "start dynamic join node %d", i)
-	return cmd
-}
-
-func (c *dynamicJoinCluster) Stop() {
-	for _, p := range c.procs {
-		if p != nil && p.Process != nil {
-			_ = p.Process.Signal(syscall.SIGTERM)
-		}
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for _, p := range c.procs {
-		if p == nil || p.Process == nil {
-			continue
-		}
-		done := make(chan struct{})
-		go func(p *exec.Cmd) {
-			_ = p.Wait()
-			close(done)
-		}(p)
-		select {
-		case <-done:
-		case <-time.After(time.Until(deadline)):
-			_ = p.Process.Kill()
-			<-done
-		}
-	}
-	for _, dir := range c.dataDirs {
-		_ = os.RemoveAll(dir)
-	}
-}
-
 func TestE2E_JoinedNodeEdgeForwardsBeforeDataReady(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	c := startDynamicJoinCluster(t, 2)
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      2,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-DYNAMIC-JOIN-KEY",
+		AccessKey:  "join-ak",
+		SecretKey:  "join-sk",
+		LogPrefix:  "grainfs-dynamic-join",
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	joinClient := ecS3Client(c.httpURLs[1], c.accessKey, c.secretKey)
-	seedClient := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
+	joinClient := c.S3Client(1)
+	seedClient := c.S3Client(0)
 	bucket := "dynamic-join-edge"
 	key := "hello.txt"
 	body := []byte("hello dynamic join")
@@ -176,8 +57,15 @@ func TestE2E_AllServicesAvailableOnJoinedNodes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	c := startDynamicJoinCluster(t, 2)
-	waitForPortsParallel(t, c.nfsPorts, 30*time.Second)
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      2,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-DYNAMIC-JOIN-KEY",
+		AccessKey:  "join-ak",
+		SecretKey:  "join-sk",
+		LogPrefix:  "grainfs-dynamic-join",
+	})
+	waitForPortsParallel(t, c.nfs4Ports, 30*time.Second)
 	waitForPortsParallel(t, c.nbdPorts, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -208,12 +96,19 @@ func TestE2E_DefaultBucketOnlySeedCreates(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	c := startDynamicJoinCluster(t, 2)
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      2,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-DYNAMIC-JOIN-KEY",
+		AccessKey:  "join-ak",
+		SecretKey:  "join-sk",
+		LogPrefix:  "grainfs-dynamic-join",
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	for _, endpoint := range c.httpURLs {
-		client := ecS3Client(endpoint, c.accessKey, c.secretKey)
+	for i, endpoint := range c.httpURLs {
+		client := c.S3Client(i)
 		out, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
 		require.NoError(t, err)
 		var defaults int
