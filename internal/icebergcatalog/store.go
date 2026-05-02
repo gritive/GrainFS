@@ -14,6 +14,7 @@ import (
 var (
 	ErrNamespaceNotFound = errors.New("iceberg namespace not found")
 	ErrNamespaceExists   = errors.New("iceberg namespace already exists")
+	ErrNamespaceNotEmpty = errors.New("iceberg namespace is not empty")
 	ErrTableNotFound     = errors.New("iceberg table not found")
 	ErrTableExists       = errors.New("iceberg table already exists")
 	ErrCommitFailed      = errors.New("iceberg commit failed")
@@ -106,6 +107,26 @@ func (s *Store) ListNamespaces(_ context.Context) ([][]string, error) {
 	return out, err
 }
 
+func (s *Store) DeleteNamespace(_ context.Context, namespace []string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		if _, err := txn.Get(namespaceKey(namespace)); err == badger.ErrKeyNotFound {
+			return ErrNamespaceNotFound
+		} else if err != nil {
+			return err
+		}
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		prefix := tableNamespacePrefix(namespace)
+		it.Seek(prefix)
+		if it.ValidForPrefix(prefix) {
+			return ErrNamespaceNotEmpty
+		}
+		return txn.Delete(namespaceKey(namespace))
+	})
+}
+
 func (s *Store) CreateTable(_ context.Context, ident Identifier, in CreateTableInput) (*Table, error) {
 	rec := tableRecord{
 		Identifier:       cloneIdent(ident),
@@ -179,6 +200,20 @@ func (s *Store) ListTables(_ context.Context, namespace []string) ([]Identifier,
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, err
+}
+
+func (s *Store) DeleteTable(_ context.Context, ident Identifier) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		if _, err := txn.Get(tableKey(ident)); err == badger.ErrKeyNotFound {
+			if _, nsErr := txn.Get(namespaceKey(ident.Namespace)); nsErr == badger.ErrKeyNotFound {
+				return ErrNamespaceNotFound
+			}
+			return ErrTableNotFound
+		} else if err != nil {
+			return err
+		}
+		return txn.Delete(tableKey(ident))
+	})
 }
 
 func (s *Store) CommitTable(_ context.Context, ident Identifier, in CommitTableInput) (*Table, error) {

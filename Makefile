@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd test-fuse-s3-colima bench-fuse-s3-colima
+.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd test-fuse-s3-colima bench-fuse-s3-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
@@ -57,6 +57,9 @@ test-e2e: bin/$(BINARY)
 		echo "=== RUN SINGLE $$test ==="; \
 		GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -p $(E2E_TEST_P) ./tests/e2e/ -parallel $(E2E_TEST_PARALLEL) -run "^$$test$$" -v -count=1 -timeout $(E2E_TEST_TIMEOUT); \
 	done
+
+test-e2e-iceberg: bin/$(BINARY)
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestIcebergDuckDB -v -count=1 -timeout 5m
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
