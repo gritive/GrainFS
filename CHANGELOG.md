@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.13.0] — 2026-05-02 — BadgerDB compactor reduction + shared raft-log prototype
+
+### Added
+
+- **raft**: `OpenSharedLogStore` enables a single per-node BadgerDB to host raft logs for all groups via 4-byte big-endian length-prefixed keys (`group_id` namespace), reducing per-node BadgerDB instances when many raft groups are active.
+- **serve**: `--shared-badger` flag (default `true`) opts into the shared raft-log layout; refuses to start when legacy per-group `groups/*/raft/` directories are present so deployments don't silently lose state.
+- **tests**: prefix-isolation, validation, pathological-groupID, concurrent-open, and restart-persistence unit tests for `OpenSharedLogStore`.
+- **perf**: `tests/e2e/cluster_perf_profile_test.go` harness for 5-node cluster CPU/heap/goroutine measurement across N={8,16,32,64} groups, with idle/load scenarios and per-node stdout capture.
+- **scripts**: `scripts/p0b-auto-measure.sh` — host-aware periodic driver that runs the P0b sweep only when load and foreign processes are below thresholds.
+- **docs**: `docs/architecture/badger-consolidation.md` design doc covering C1 (compactor pool) + C2 (state and raft-log DB consolidation) phases.
+
+### Changed
+
+- **cluster**: per-group state BadgerDB now opens with `WithNumCompactors(2)` (down from default 4) to reduce idle CPU and goroutines from BadgerDB housekeeping.
+
 ## [0.0.12.0] — 2026-05-02 — Raft AppendEntries pipelining
 
 ### Added
