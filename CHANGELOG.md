@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.12.0] — 2026-05-02 — Raft AppendEntries pipelining
+
+### Added
+
+- **raft**: leaders now keep peer-owned AppendEntries replicators for voters and learners, allowing bounded per-peer replication pipelines instead of one in-flight AppendEntries at a time.
+- **raft**: added `MaxAppendEntriesInflight` and `MaxAppendEntriesInflightBytes` controls so operators can bound replication window count and payload memory per peer.
+- **metrics**: added counters for stale AppendEntries replies, conflict resets, full pipeline windows, and snapshot-exclusive replication paths.
+- **benchmarks**: added in-process and QUIC replication window benchmarks for comparing AppendEntries pipeline sizes.
+
+### Fixed
+
+- **raft**: out-of-order AppendEntries replies now advance `matchIndex` only through contiguous acknowledged ranges, preserving leader commit safety while pipelining is enabled.
+- **raft**: conflict and heartbeat failure replies now reset the peer pipeline and backtrack `nextIndex`, keeping learner catch-up and slow-follower recovery moving.
+- **raft**: snapshot install remains exclusive per peer, and snapshot errors clear the exclusive state so normal replication can retry.
+- **tests**: added regression coverage for out-of-order acknowledgements, stale replies, byte budgets, membership reconciliation, heartbeat conflict backtracking, higher-term stepdown, and oversized single-entry byte-budget progress.
+
 ## [0.0.11.1] — 2026-05-02 — E2E cluster readiness hardening
 
 ### Fixed
