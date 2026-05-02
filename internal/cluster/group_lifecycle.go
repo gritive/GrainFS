@@ -61,7 +61,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		return nil, fmt.Errorf("group %s: mkdir badger: %w", entry.ID, err)
 	}
-	db, err := badger.Open(badger.DefaultOptions(dbDir).WithLogger(nil))
+	db, err := badger.Open(badger.DefaultOptions(dbDir).WithLogger(nil).WithNumCompactors(2))
 	if err != nil {
 		return nil, fmt.Errorf("group %s: open badger: %w", entry.ID, err)
 	}

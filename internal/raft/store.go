@@ -111,13 +111,46 @@ func WithManagedMode() BadgerLogStoreOption {
 }
 
 // BadgerLogStore implements LogStore using BadgerDB.
+//
+// When `prefix` is non-empty, the store operates in *shared* mode: it views
+// an externally-managed *badger.DB and prefixes every key with `prefix`. This
+// is the C2 P0b prototype path — multiple groups share one process-level DB.
+// Close() is a no-op for shared stores; the caller closes the DB.
 type BadgerLogStore struct {
 	db          *badger.DB
 	managedMode bool
+	prefix      []byte // non-nil → shared mode; prepended to every key
+	shared      bool   // true → Close() does not close db
 }
 
 // IsManagedMode reports whether this store was opened with managed mode.
 func (s *BadgerLogStore) IsManagedMode() bool { return s.managedMode }
+
+// withPrefix returns prefix||key (or key as-is when prefix is empty).
+func (s *BadgerLogStore) withPrefix(key []byte) []byte {
+	if len(s.prefix) == 0 {
+		return key
+	}
+	out := make([]byte, 0, len(s.prefix)+len(key))
+	out = append(out, s.prefix...)
+	out = append(out, key...)
+	return out
+}
+
+func (s *BadgerLogStore) keyState() []byte        { return s.withPrefix(keyState) }
+func (s *BadgerLogStore) keySnapshot() []byte     { return s.withPrefix(keySnapshot) }
+func (s *BadgerLogStore) keySnapshotMeta() []byte { return s.withPrefix(keySnapshotMeta) }
+func (s *BadgerLogStore) keyManagedMode() []byte  { return s.withPrefix(keyManagedMode) }
+func (s *BadgerLogStore) keyBootstrapped() []byte { return s.withPrefix(keyBootstrapped) }
+func (s *BadgerLogStore) logPrefix() []byte       { return s.withPrefix(prefixLog) }
+
+func (s *BadgerLogStore) logKey(index uint64) []byte {
+	pfx := s.logPrefix()
+	key := make([]byte, len(pfx)+8)
+	copy(key, pfx)
+	binary.BigEndian.PutUint64(key[len(pfx):], index)
+	return key
+}
 
 // NewBadgerLogStore creates a new log store backed by BadgerDB.
 func NewBadgerLogStore(path string, opts ...BadgerLogStoreOption) (*BadgerLogStore, error) {
@@ -125,7 +158,11 @@ func NewBadgerLogStore(path string, opts ...BadgerLogStoreOption) (*BadgerLogSto
 	for _, opt := range opts {
 		opt(s)
 	}
-	dbOpts := badger.DefaultOptions(path).WithLogger(nil).WithSyncWrites(true)
+	dbOpts := badger.DefaultOptions(path).
+		WithLogger(nil).
+		WithSyncWrites(true).
+		WithNumCompactors(2).    // log store: append-mostly, badger 최소값 2 (default 4)
+		WithNumVersionsToKeep(1) // raft index 키가 곧 unique — badger MVCC 불필요
 	db, err := badger.Open(dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger log store: %w", err)
@@ -138,11 +175,59 @@ func NewBadgerLogStore(path string, opts ...BadgerLogStoreOption) (*BadgerLogSto
 	return s, nil
 }
 
+// OpenSharedLogStore returns a BadgerLogStore that views an externally-managed
+// *badger.DB, scoped to keys prefixed by groupID. The caller owns db.Close()
+// — this store's Close() is a no-op. Used by C2 P0b shared raft-log prototype.
+//
+// Prefix encoding: 4-byte big-endian length || groupID. The fixed-width length
+// avoids the wraparound that would occur with a 1-byte length when
+// len(groupID) >= 256, which can cause cross-group prefix collisions and
+// allow LastIndex/TruncateBefore/TruncateAfter on one group to corrupt
+// another. Trailing ':' from the prior 1-byte encoding is dropped — the
+// length prefix is sufficient for unambiguous parsing.
+func OpenSharedLogStore(db *badger.DB, groupID string, opts ...BadgerLogStoreOption) (*BadgerLogStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("OpenSharedLogStore: nil db")
+	}
+	if groupID == "" {
+		return nil, fmt.Errorf("OpenSharedLogStore: empty groupID")
+	}
+	if len(groupID) > 0xFFFFFFFF {
+		return nil, fmt.Errorf("OpenSharedLogStore: groupID length %d exceeds uint32 max", len(groupID))
+	}
+	prefix := make([]byte, 4+len(groupID))
+	binary.BigEndian.PutUint32(prefix[:4], uint32(len(groupID)))
+	copy(prefix[4:], groupID)
+	s := &BadgerLogStore{db: db, prefix: prefix, shared: true}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if err := s.checkManagedMode(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // checkManagedMode writes (first open) or verifies (subsequent opens) the
 // managed-mode flag persisted in the DB. Mismatch returns a clear error.
+//
+// On the shared-DB path (C2 P0b) two goroutines opening the same groupID
+// concurrently can race on the get-then-set, producing badger.ErrConflict.
+// The op is idempotent, so we retry transparently up to a small bound.
 func (s *BadgerLogStore) checkManagedMode() error {
+	const maxRetries = 8
+	for i := 0; i < maxRetries; i++ {
+		err := s.checkManagedModeOnce()
+		if err == nil || !errors.Is(err, badger.ErrConflict) {
+			return err
+		}
+	}
+	return fmt.Errorf("checkManagedMode: badger transaction conflict after %d retries", maxRetries)
+}
+
+func (s *BadgerLogStore) checkManagedModeOnce() error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyManagedMode)
+		item, err := txn.Get(s.keyManagedMode())
 		if err != nil {
 			if !errors.Is(err, badger.ErrKeyNotFound) {
 				return err
@@ -152,7 +237,7 @@ func (s *BadgerLogStore) checkManagedMode() error {
 			if s.managedMode {
 				val = "true"
 			}
-			return txn.Set(keyManagedMode, []byte(val))
+			return txn.Set(s.keyManagedMode(), []byte(val))
 		}
 		return item.Value(func(val []byte) error {
 			stored := string(val) == "true"
@@ -168,13 +253,6 @@ func (s *BadgerLogStore) checkManagedMode() error {
 				"or wipe data/raft/ and restart to enable managed mode")
 		})
 	})
-}
-
-func logKey(index uint64) []byte {
-	key := make([]byte, len(prefixLog)+8)
-	copy(key, prefixLog)
-	binary.BigEndian.PutUint64(key[len(prefixLog):], index)
-	return key
 }
 
 func marshalLogEntry(entry LogEntry) []byte {
@@ -208,7 +286,7 @@ func (s *BadgerLogStore) AppendEntries(entries []LogEntry) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		for _, entry := range entries {
 			data := marshalLogEntry(entry)
-			if err := txn.Set(logKey(entry.Index), data); err != nil {
+			if err := txn.Set(s.logKey(entry.Index), data); err != nil {
 				return err
 			}
 		}
@@ -219,7 +297,7 @@ func (s *BadgerLogStore) AppendEntries(entries []LogEntry) error {
 func (s *BadgerLogStore) GetEntry(index uint64) (*LogEntry, error) {
 	var entry LogEntry
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(logKey(index))
+		item, err := txn.Get(s.logKey(index))
 		if err == badger.ErrKeyNotFound {
 			return fmt.Errorf("entry %d not found", index)
 		}
@@ -242,7 +320,7 @@ func (s *BadgerLogStore) GetEntries(lo, hi uint64) ([]LogEntry, error) {
 	var entries []LogEntry
 	err := s.db.View(func(txn *badger.Txn) error {
 		for idx := lo; idx <= hi; idx++ {
-			item, err := txn.Get(logKey(idx))
+			item, err := txn.Get(s.logKey(idx))
 			if err == badger.ErrKeyNotFound {
 				break
 			}
@@ -266,24 +344,25 @@ func (s *BadgerLogStore) GetEntries(lo, hi uint64) ([]LogEntry, error) {
 
 func (s *BadgerLogStore) LastIndex() (uint64, error) {
 	var lastIdx uint64
+	logPfx := s.logPrefix()
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Reverse = true
-		opts.Prefix = prefixLog
+		opts.Prefix = logPfx
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
 		// Seek to a key past the prefix range
-		seekKey := make([]byte, len(prefixLog)+8)
-		copy(seekKey, prefixLog)
-		for i := len(prefixLog); i < len(seekKey); i++ {
+		seekKey := make([]byte, len(logPfx)+8)
+		copy(seekKey, logPfx)
+		for i := len(logPfx); i < len(seekKey); i++ {
 			seekKey[i] = 0xFF
 		}
 		it.Seek(seekKey)
 
-		if it.ValidForPrefix(prefixLog) {
+		if it.ValidForPrefix(logPfx) {
 			key := it.Item().Key()
-			lastIdx = binary.BigEndian.Uint64(key[len(prefixLog):])
+			lastIdx = binary.BigEndian.Uint64(key[len(logPfx):])
 		}
 		return nil
 	})
@@ -291,14 +370,15 @@ func (s *BadgerLogStore) LastIndex() (uint64, error) {
 }
 
 func (s *BadgerLogStore) TruncateAfter(afterIndex uint64) error {
+	logPfx := s.logPrefix()
 	return s.db.Update(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefixLog
+		opts.Prefix = logPfx
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		startKey := logKey(afterIndex + 1)
-		for it.Seek(startKey); it.ValidForPrefix(prefixLog); it.Next() {
+		startKey := s.logKey(afterIndex + 1)
+		for it.Seek(startKey); it.ValidForPrefix(logPfx); it.Next() {
 			if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
 				return err
 			}
@@ -312,17 +392,18 @@ func (s *BadgerLogStore) TruncateBefore(beforeIndex uint64) error {
 		return nil
 	}
 	const batchSize = 1000
-	endKey := logKey(beforeIndex)
+	logPfx := s.logPrefix()
+	endKey := s.logKey(beforeIndex)
 	for {
 		done := false
 		err := s.db.Update(func(txn *badger.Txn) error {
 			opts := badger.DefaultIteratorOptions
-			opts.Prefix = prefixLog
+			opts.Prefix = logPfx
 			it := txn.NewIterator(opts)
 			defer it.Close()
 
 			count := 0
-			for it.Seek(prefixLog); it.ValidForPrefix(prefixLog); it.Next() {
+			for it.Seek(logPfx); it.ValidForPrefix(logPfx); it.Next() {
 				key := it.Item().Key()
 				if bytes.Compare(key, endKey) >= 0 {
 					done = true
@@ -358,8 +439,9 @@ func (s *BadgerLogStore) SaveState(term uint64, votedFor string) error {
 	pb.RaftStateAddVotedFor(b, votedForOff)
 	root := pb.RaftStateEnd(b)
 	data := fbFinishRPC(b, root)
+	stateKey := s.keyState()
 	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(keyState, data)
+		return txn.Set(stateKey, data)
 	})
 }
 
@@ -367,7 +449,7 @@ func (s *BadgerLogStore) LoadState() (uint64, string, error) {
 	var term uint64
 	var votedFor string
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyState)
+		item, err := txn.Get(s.keyState())
 		if err == badger.ErrKeyNotFound {
 			return nil // fresh node
 		}
@@ -455,18 +537,22 @@ func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 	root := pb.SnapshotMetaEnd(b)
 	meta := fbFinishRPC(b, root)
 
+	metaKey := s.keySnapshotMeta()
+	dataKey := s.keySnapshot()
 	return s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(keySnapshotMeta, meta); err != nil {
+		if err := txn.Set(metaKey, meta); err != nil {
 			return err
 		}
-		return txn.Set(keySnapshot, snap.Data)
+		return txn.Set(dataKey, snap.Data)
 	})
 }
 
 func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 	var snap Snapshot
+	metaKey := s.keySnapshotMeta()
+	dataKey := s.keySnapshot()
 	err := s.db.View(func(txn *badger.Txn) error {
-		metaItem, err := txn.Get(keySnapshotMeta)
+		metaItem, err := txn.Get(metaKey)
 		if err == badger.ErrKeyNotFound {
 			return nil
 		}
@@ -515,7 +601,7 @@ func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 		}); err != nil {
 			return err
 		}
-		dataItem, err := txn.Get(keySnapshot)
+		dataItem, err := txn.Get(dataKey)
 		if err != nil {
 			return err
 		}
@@ -702,7 +788,7 @@ func loadSnapshotFromDB(db *badger.DB) (Snapshot, error) {
 // IsBootstrapped reports whether Bootstrap has been called on this store.
 func (s *BadgerLogStore) IsBootstrapped() (bool, error) {
 	err := s.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(keyBootstrapped)
+		_, err := txn.Get(s.keyBootstrapped())
 		return err
 	})
 	if errors.Is(err, badger.ErrKeyNotFound) {
@@ -717,10 +803,14 @@ func (s *BadgerLogStore) IsBootstrapped() (bool, error) {
 // SaveBootstrapMarker marks this store as bootstrapped.
 func (s *BadgerLogStore) SaveBootstrapMarker() error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(keyBootstrapped, []byte{1})
+		return txn.Set(s.keyBootstrapped(), []byte{1})
 	})
 }
 
 func (s *BadgerLogStore) Close() error {
+	if s.shared {
+		// Shared mode: the caller owns *badger.DB lifecycle.
+		return nil
+	}
 	return s.db.Close()
 }
