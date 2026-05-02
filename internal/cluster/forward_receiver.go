@@ -114,11 +114,16 @@ func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) *transpor
 
 func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transport.Message {
 	da := raftpb.GetRootAsDeleteObjectArgs(args, 0)
-	err := dg.Backend().DeleteObject(string(da.Bucket()), string(da.Key()))
+	bucket := string(da.Bucket())
+	key := string(da.Key())
+	markerID, err := dg.Backend().DeleteObjectReturningMarker(bucket, key)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildOKReply()}
+	return &transport.Message{Payload: buildObjectReply(&storage.Object{
+		Key:       key,
+		VersionID: markerID,
+	}, bucket)}
 }
 
 func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transport.Message {

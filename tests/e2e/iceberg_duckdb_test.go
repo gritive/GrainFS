@@ -46,6 +46,41 @@ SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_e2e.t;
 	runDuckDBIcebergExec(t, server.endpoint, `
 DROP TABLE grainfs_iceberg.ns_e2e.t;
 DROP SCHEMA grainfs_iceberg.ns_e2e;
+	`)
+}
+
+func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DuckDB Iceberg cluster e2e in short mode")
+	}
+
+	cluster := startMRCluster(t, 3, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
+	require.NoError(t, err)
+
+	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[0], cluster.accessKey, cluster.secretKey, `
+CREATE SCHEMA grainfs_iceberg.ns_cluster_e2e;
+CREATE TABLE grainfs_iceberg.ns_cluster_e2e.t (a INTEGER);
+INSERT INTO grainfs_iceberg.ns_cluster_e2e.t VALUES (10), (5);
+SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_cluster_e2e.t;
+`, "15")
+
+	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[1], cluster.accessKey, cluster.secretKey, `
+INSERT INTO grainfs_iceberg.ns_cluster_e2e.t VALUES (7);
+SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_cluster_e2e.t;
+`, "22")
+
+	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[2], cluster.accessKey, cluster.secretKey, `
+SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_cluster_e2e.t;
+`, "22")
+
+	runDuckDBIcebergExecWithCreds(t, cluster.httpURLs[2], cluster.accessKey, cluster.secretKey, `
+DROP TABLE grainfs_iceberg.ns_cluster_e2e.t;
+DROP SCHEMA grainfs_iceberg.ns_cluster_e2e;
 `)
 }
 
@@ -110,6 +145,11 @@ func createE2EBucket(t *testing.T, endpoint, bucket string) {
 
 func runDuckDBIcebergSQL(t *testing.T, endpoint, query, want string) {
 	t.Helper()
+	runDuckDBIcebergSQLWithCreds(t, endpoint, "test", "test", query, want)
+}
+
+func runDuckDBIcebergSQLWithCreds(t *testing.T, endpoint, accessKey, secretKey, query, want string) {
+	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -117,7 +157,7 @@ func runDuckDBIcebergSQL(t *testing.T, endpoint, query, want string) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	rows, err := db.QueryContext(ctx, duckDBIcebergSQL(endpoint, query))
+	rows, err := db.QueryContext(ctx, duckDBIcebergSQL(endpoint, accessKey, secretKey, query))
 	require.NoError(t, err)
 	defer rows.Close()
 
@@ -129,6 +169,11 @@ func runDuckDBIcebergSQL(t *testing.T, endpoint, query, want string) {
 
 func runDuckDBIcebergExec(t *testing.T, endpoint, query string) {
 	t.Helper()
+	runDuckDBIcebergExecWithCreds(t, endpoint, "test", "test", query)
+}
+
+func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey, query string) {
+	t.Helper()
 
 	db, err := sql.Open("duckdb", "")
 	require.NoError(t, err)
@@ -136,11 +181,11 @@ func runDuckDBIcebergExec(t *testing.T, endpoint, query string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	_, err = db.ExecContext(ctx, duckDBIcebergSQL(endpoint, query))
+	_, err = db.ExecContext(ctx, duckDBIcebergSQL(endpoint, accessKey, secretKey, query))
 	require.NoError(t, err)
 }
 
-func duckDBIcebergSQL(endpoint, query string) string {
+func duckDBIcebergSQL(endpoint, accessKey, secretKey, query string) string {
 	endpointHost := strings.TrimPrefix(endpoint, "http://")
 	return fmt.Sprintf(`
 INSTALL httpfs;
@@ -149,8 +194,8 @@ LOAD httpfs;
 LOAD iceberg;
 CREATE OR REPLACE SECRET grainfs_s3 (
 	TYPE s3,
-	KEY_ID 'test',
-	SECRET 'test',
+	KEY_ID '%s',
+	SECRET '%s',
 	REGION 'us-east-1',
 	ENDPOINT '%s',
 	URL_STYLE 'path',
@@ -163,5 +208,5 @@ ATTACH 'grainfs' AS grainfs_iceberg (
 	ACCESS_DELEGATION_MODE 'none'
 );
 %s
-`, endpointHost, endpoint, query)
+`, accessKey, secretKey, endpointHost, endpoint, query)
 }

@@ -406,7 +406,22 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 			return gb.DeleteObjectReturningMarker(bucket, key)
 		}
 	}
-	return "", ErrCoordinatorNoRouter
+	if c.forward == nil {
+		return "", ErrCoordinatorNoRouter
+	}
+	args := buildDeleteObjectArgs(bucket, key)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpDeleteObject, args)
+	if err != nil {
+		return "", err
+	}
+	obj, err := objectFromReply(reply)
+	if err == nil {
+		return obj.VersionID, nil
+	}
+	if errors.Is(err, errInternalReply) {
+		return "", parseReplyStatus(reply)
+	}
+	return "", err
 }
 
 func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) error {

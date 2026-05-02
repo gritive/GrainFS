@@ -836,6 +836,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	metaForwardSender := cluster.NewMetaProposeForwardSender(metaForwardDialer)
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
 	router.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
+	metaReadDialer := func(peer string, payload []byte) ([]byte, error) {
+		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
+		reply, err := quicTransport.Call(ctx, peer, msg)
+		if err != nil {
+			return nil, err
+		}
+		return reply.Payload, nil
+	}
+	metaReadSender := cluster.NewMetaCatalogReadSender(metaReadDialer)
 
 	clusterCoord := cluster.NewClusterCoordinator(
 		distBackend,    // base for cluster-wide ops (CreateBucket, etc.)
@@ -844,6 +853,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
 		raftAddr,       // selfID for leader check
 	).WithForwardSender(forwardSender)
+	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, clusterCoord, "s3://grainfs-tables/warehouse"))
+	router.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 
 	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD, then
 	// wrap it with WAL so routed object mutations are captured for PITR.
@@ -983,7 +994,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			}
 			return metaForwardSender.Send(ctx, targets, command)
 		}
-		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarder(metaRaft, backend, "s3://grainfs-tables/warehouse", metaForward)))
+		metaReadTargets := func() []string {
+			if leader := metaRaft.Node().LeaderID(); leader != "" {
+				return []string{leader}
+			}
+			return peers
+		}
+		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarders(metaRaft, backend, "s3://grainfs-tables/warehouse", metaForward, metaReadSender, metaReadTargets)))
 	}
 	// Propagate S3 auth from --access-key / --secret-key. Previously this
 	// was local-only; cluster mode silently ran without auth regardless of

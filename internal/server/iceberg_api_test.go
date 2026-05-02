@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
-	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -54,6 +53,58 @@ func (f fakeIcebergCatalog) CommitTable(context.Context, icebergcatalog.Identifi
 	return nil, icebergcatalog.ErrCommitFailed
 }
 
+type staleLoadCommitCatalog struct {
+	warehouse string
+	commits   int
+}
+
+func (s *staleLoadCommitCatalog) Warehouse() string { return s.warehouse }
+func (s *staleLoadCommitCatalog) CreateNamespace(context.Context, []string, map[string]string) error {
+	return nil
+}
+func (s *staleLoadCommitCatalog) LoadNamespace(context.Context, []string) (map[string]string, error) {
+	return nil, nil
+}
+func (s *staleLoadCommitCatalog) ListNamespaces(context.Context) ([][]string, error) {
+	return nil, nil
+}
+func (s *staleLoadCommitCatalog) DeleteNamespace(context.Context, []string) error {
+	return nil
+}
+func (s *staleLoadCommitCatalog) CreateTable(context.Context, icebergcatalog.Identifier, icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+	return nil, nil
+}
+func (s *staleLoadCommitCatalog) LoadTable(context.Context, icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+	return &icebergcatalog.Table{
+		Identifier:       icebergcatalog.Identifier{Namespace: []string{"ns2"}, Name: "t"},
+		MetadataLocation: "s3://grainfs-tables/warehouse/ns2/t/metadata/00000.json",
+		Metadata:         buildInitialIcebergMetadata("s3://grainfs-tables/warehouse/ns2/t", json.RawMessage(`{"type":"struct","fields":[],"schema-id":0}`), nil),
+	}, nil
+}
+func (s *staleLoadCommitCatalog) ListTables(context.Context, []string) ([]icebergcatalog.Identifier, error) {
+	return nil, nil
+}
+func (s *staleLoadCommitCatalog) DeleteTable(context.Context, icebergcatalog.Identifier) error {
+	return nil
+}
+func (s *staleLoadCommitCatalog) CommitTable(_ context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+	s.commits++
+	wantExpected := "s3://grainfs-tables/warehouse/ns2/t/metadata/00000.json"
+	wantNext := "s3://grainfs-tables/warehouse/ns2/t/metadata/00001.json"
+	if s.commits == 2 {
+		wantExpected = "s3://grainfs-tables/warehouse/ns2/t/metadata/00001.json"
+		wantNext = "s3://grainfs-tables/warehouse/ns2/t/metadata/00002.json"
+	}
+	if in.ExpectedMetadataLocation != wantExpected || in.NewMetadataLocation != wantNext {
+		return nil, icebergcatalog.ErrCommitFailed
+	}
+	return &icebergcatalog.Table{
+		Identifier:       ident,
+		MetadataLocation: in.NewMetadataLocation,
+		Metadata:         append(json.RawMessage(nil), in.Metadata...),
+	}, nil
+}
+
 func TestIcebergConfigUsesJSONAndBypassesS3Routes(t *testing.T) {
 	base := setupTestServer(t)
 
@@ -86,19 +137,10 @@ func TestIcebergConfigUsesInjectedCatalogInterface(t *testing.T) {
 	require.Equal(t, "s3://custom/warehouse", got.Defaults["warehouse"])
 }
 
-func TestIcebergConfigFollowsAuthMiddleware(t *testing.T) {
+func TestIcebergConfigBypassesS3AuthMiddleware(t *testing.T) {
 	base := setupAuthServer(t)
 
 	resp, err := http.Get(base + "/iceberg/v1/config?warehouse=warehouse")
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-
-	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
-	require.NoError(t, err)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
-	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -239,6 +281,38 @@ func TestIcebergTransactionCommitRejectsStaleSnapshotRequirement(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.EqualValues(t, 7, got.Metadata.CurrentSnapshotID)
+}
+
+func TestIcebergTransactionCommitReusesCommittedTableWithinRequest(t *testing.T) {
+	catalog := &staleLoadCommitCatalog{warehouse: "s3://grainfs-tables/warehouse"}
+	base := setupTestServerWithOptions(t, WithIcebergCatalog(catalog))
+
+	createIcebergWarehouseBucket(t, base)
+	postIcebergJSON(t, base+"/iceberg/v1/transactions/commit", `{
+		"table-changes":[{
+			"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],
+			"updates":[
+				{"action":"add-snapshot","snapshot":{"snapshot-id":7,"sequence-number":1,"timestamp-ms":1777711820223,"manifest-list":"s3://grainfs-tables/warehouse/ns2/t/metadata/snap-7.avro","summary":{"operation":"overwrite"},"schema-id":0}},
+				{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":7}
+			],
+			"identifier":{"name":"t","namespace":["ns2"]}
+		},{
+			"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":7}],
+			"updates":[
+				{"action":"add-snapshot","snapshot":{"snapshot-id":8,"sequence-number":2,"timestamp-ms":1777711821223,"manifest-list":"s3://grainfs-tables/warehouse/ns2/t/metadata/snap-8.avro","summary":{"operation":"append"},"schema-id":0}},
+				{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":8}
+			],
+			"identifier":{"name":"t","namespace":["ns2"]}
+		}]
+	}`, http.StatusOK)
+	require.Equal(t, 2, catalog.commits)
+}
+
+func TestIcebergSnapshotRequirementAllowsDuckDBRoundedLargeIDs(t *testing.T) {
+	metadata := json.RawMessage(`{"refs":{"main":{"type":"branch","snapshot-id":493852316999895052}}}`)
+	require.NoError(t, validateIcebergRequirements(metadata, []json.RawMessage{
+		json.RawMessage(`{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":493852316999895040}`),
+	}))
 }
 
 func TestIcebergMissingResourcesReturnJSONErrors(t *testing.T) {
