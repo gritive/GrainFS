@@ -457,7 +457,7 @@ Key-builder functions in `apply.go`: 9 (`bucketKey`, `bucketPolicyKey`,
 `multipartKey`, `shardPlacementKey`, `pendingMigrationKey`). All return
 `[]byte("rawPrefix:" + suffix)`. None are aware of group identity today.
 
-### Approach: key-builder methods on FSM/DistributedBackend
+### Approach: shared `stateKeyspace` abstraction
 
 Two refactor approaches were considered:
 
@@ -467,44 +467,90 @@ Two refactor approaches were considered:
    changes from `*badger.Txn` to `*prefixedTxn`, badger internals leak
    through (RawIterator, etc.) — invasive across every call site anyway.
 
-**B. Make key builders methods on FSM/DistributedBackend.** Each
-   `objectMetaKey(...)` becomes `f.objectMetaKey(...)` and prepends the
-   group prefix. Iterator prefixes use `f.prefixed(rawPrefix)`. No new
-   abstraction; the diff is mechanical (sed-shape) and visible. Con:
-   more lines changed (every call site touches one identifier). **Recommended.**
+**B (revised after codex review). Introduce a `stateKeyspace` object** that
+   both `FSM` and `DistributedBackend` reference, with three primitives:
+
+   ```go
+   type stateKeyspace struct { prefix []byte }
+   func (ks *stateKeyspace) Key(raw []byte) []byte         // prefix || raw
+   func (ks *stateKeyspace) Prefix(rawPrefix []byte) []byte // for iterators
+   func (ks *stateKeyspace) Strip(fullKey []byte) []byte    // remove prefix
+   ```
+
+   Plus all the semantic builders (`bucketKey`, `objectMetaKey`, ...) become
+   methods on `stateKeyspace` so they auto-prefix. **`backend.go`,
+   `shard_placement.go`, `snapshotable.go`, `scrubbable.go` also need to
+   use this** — they currently do raw literal prefix scans like
+   `it.Seek([]byte("obj:"))` and `string(item.Key())` extraction
+   (e.g. `backend.go:676,748,2020,2036,2490`, `snapshotable.go:24`,
+   `scrubbable.go:73`, `shard_placement.go:91`). Mechanical "free function
+   becomes method" alone misses these and ships cross-group leaks. Every
+   iterator caller must use `ks.Prefix("obj:")` (not `[]byte("obj:")`)
+   and `ks.Strip(item.Key())` (not `string(item.Key())`).
+
+   **Recommended.** Approach A's hidden auto-prefix would make the leaks
+   above silent; B with explicit `ks.Strip` makes prefix-stripping a code
+   review checkpoint.
+
+   Originally framed as "key-builder methods on FSM" — that under-scoped
+   the work; backend.go and the others have raw-literal call sites that
+   wouldn't be caught by renaming free functions to methods.
 
 ### Code shape
 
 ```go
+// internal/cluster/keyspace.go (new file)
+type stateKeyspace struct {
+    prefix []byte // 4-byte BE len(groupID) || groupID; nil for legacy/single-group
+}
+
+// Use the same encoder as P0b BadgerLogStore for consistency:
+//   prefix = binary.BigEndian.PutUint32(uint32(len(groupID))) || groupID
+func newStateKeyspace(groupID string) (*stateKeyspace, error) { /* ... */ }
+
+func (ks *stateKeyspace) Key(raw []byte) []byte                 { /* prefix || raw */ }
+func (ks *stateKeyspace) Prefix(rawPrefix []byte) []byte        { /* prefix || rawPrefix */ }
+func (ks *stateKeyspace) Strip(fullKey []byte) ([]byte, bool)   { /* remove prefix or false */ }
+
+// Semantic builders become methods on the keyspace:
+func (ks *stateKeyspace) BucketKey(b string) []byte             { return ks.Key([]byte("bucket:" + b)) }
+func (ks *stateKeyspace) ObjectMetaKey(b, k string) []byte      { return ks.Key([]byte("obj:" + b + "/" + k)) }
+// ... ObjectMetaKeyV / LatestKey / MultipartKey / ShardPlacementKey / PendingMigrationKey / BucketPolicyKey / BucketVerKey
+
 // apply.go
 type FSM struct {
     db     *badger.DB     // shared across all groups when shared-fsm enabled
-    prefix []byte         // 4-byte BE len(groupID) || groupID; nil for legacy
+    keys   *stateKeyspace // owned, captures group prefix
     rings  *ringStore
     // ...existing fields
 }
 
-func NewFSM(db *badger.DB, opts ...FSMOption) *FSM { /* prefix from opts */ }
-
-func (f *FSM) prefixed(rawKey []byte) []byte {
-    if len(f.prefix) == 0 {
-        return rawKey
-    }
-    out := make([]byte, len(f.prefix)+len(rawKey))
-    copy(out, f.prefix)
-    copy(out[len(f.prefix):], rawKey)
-    return out
-}
-
-// Each free key-builder becomes a method:
-func (f *FSM) bucketKey(b string) []byte    { return f.prefixed([]byte("bucket:" + b)) }
-func (f *FSM) objectMetaKey(b, k string) []byte { return f.prefixed([]byte("obj:" + b + "/" + k)) }
-// ... 7 more
+func NewFSM(db *badger.DB, ks *stateKeyspace) *FSM { /* ks may have empty prefix */ }
 ```
 
-Same shape for `DistributedBackend` (which uses the same set of keys).
-Best to factor the key builders into one place that both FSM and
-DistributedBackend reference, sharing a `prefixedKeys` helper struct.
+`DistributedBackend` holds the same `*stateKeyspace` (passed in via
+`GroupBackendConfig`). Every iterator (15+ in backend.go) becomes:
+
+```go
+// before
+opts.Prefix = []byte("obj:")
+for it.Seek([]byte("obj:")); it.ValidForPrefix([]byte("obj:")); it.Next() {
+    rest := string(item.Key()[len("obj:"):])
+    // ...
+}
+
+// after
+objPfx := f.keys.Prefix([]byte("obj:"))
+opts.Prefix = objPfx
+for it.Seek(objPfx); it.ValidForPrefix(objPfx); it.Next() {
+    rawKey, ok := f.keys.Strip(item.Key())
+    if !ok { continue }
+    rest := string(rawKey[len("obj:"):])
+}
+```
+
+`Strip` returning `bool` makes leak detection observable — callers can
+assert/log when a key arrives without the expected prefix.
 
 ### Snapshot / Restore — the codex hotspot
 
@@ -514,87 +560,187 @@ key in the DB before reloading. **Both are fatal in shared mode** —
 group A's snapshot would include group B state; restoring group A's
 snapshot would wipe every other group on the node.
 
-Required changes:
+Required changes (revised after codex review for restore-order safety
+and snapshot format versioning):
 
 ```go
+// Format header for shared-FSM snapshots. v1 = legacy whole-DB
+// (current pre-P3 format), v2 = group-scoped (P3 and later).
+const (
+    snapshotMagic = "GFSMSNAP"
+    snapshotV2    = uint8(2)
+)
+
 func (f *FSM) Snapshot() ([]byte, error) {
     state := make(map[string][]byte)
     err := f.db.View(func(txn *badger.Txn) error {
         opts := badger.DefaultIteratorOptions
-        opts.Prefix = f.prefix    // scoped iteration
+        ksPrefix := f.keys.Prefix(nil) // group prefix (nil for legacy)
+        opts.Prefix = ksPrefix         // scoped iteration
         it := txn.NewIterator(opts)
         defer it.Close()
-        for it.Rewind(); it.ValidForPrefix(f.prefix); it.Next() {
+        for it.Rewind(); it.ValidForPrefix(ksPrefix); it.Next() {
             item := it.Item()
-            // Strip the group prefix before serialization — snapshot
-            // bytes must be portable across group renames.
-            key := string(item.Key()[len(f.prefix):])
-            // ...
-        }
-        return nil
-    })
-    // ...
-}
-
-func (f *FSM) Restore(data []byte) error {
-    // 1. Drop ONLY this group's prefix
-    if len(f.prefix) > 0 {
-        if err := f.db.DropPrefix(f.prefix); err != nil {
-            return err
-        }
-    } else {
-        // legacy path: keep existing whole-DB drop
-    }
-    // 2. Re-encode keys with prefix on write
-    state, err := unmarshalSnapshotState(data)
-    // ...
-    return f.db.Update(func(txn *badger.Txn) error {
-        for k, v := range state {
-            if err := txn.Set(f.prefixed([]byte(k)), v); err != nil {
+            raw, ok := f.keys.Strip(item.Key())
+            if !ok {
+                continue // defensive: shouldn't happen given prefix scope
+            }
+            // Snapshot bytes are portable across renames — store the
+            // group-relative key, not the encoded one.
+            err := item.Value(func(v []byte) error {
+                state[string(raw)] = append([]byte(nil), v...)
+                return nil
+            })
+            if err != nil {
                 return err
             }
         }
         return nil
     })
+    if err != nil {
+        return nil, err
+    }
+    // marshalSnapshotState v2 emits magic + version + state
+    return marshalSnapshotStateV2(state)
+}
+
+func (f *FSM) Restore(data []byte) error {
+    // 1. Decode + validate FIRST. A corrupt snapshot must not wipe state.
+    state, ver, err := unmarshalSnapshotStateAny(data)
+    if err != nil {
+        return fmt.Errorf("snapshot decode: %w", err)
+    }
+    // 2. Defend against misencoded payloads — keys in state must be
+    //    raw (group-relative). v2 enforces this; v1 (legacy) keys are
+    //    raw by definition. Reject keys that already start with our
+    //    own prefix (would double-prefix on write).
+    for k := range state {
+        if f.keys.HasPrefix([]byte(k)) {
+            return fmt.Errorf("snapshot contains pre-prefixed key %q — refusing to install (suspected migration mismatch)", k)
+        }
+    }
+    // 3. Now safe to drop. Scoped to this group only — see the
+    //    DropPrefix concurrency note below before assuming this is cheap.
+    ksPrefix := f.keys.Prefix(nil)
+    if len(ksPrefix) > 0 {
+        if err := f.db.DropPrefix(ksPrefix); err != nil {
+            return err
+        }
+    } else {
+        // legacy single-group path: existing whole-DB delete loop
+    }
+    // 4. Re-encode keys with prefix on write.
+    return f.db.Update(func(txn *badger.Txn) error {
+        for k, v := range state {
+            if err := txn.Set(f.keys.Key([]byte(k)), v); err != nil {
+                return err
+            }
+        }
+        return nil
+    })
+    _ = ver // future: version-specific replay paths
 }
 ```
 
-`badger.DropPrefix` is a documented API; it walks the LSM and drops
-matching keys atomically. Brief stall during the operation is acceptable
-for the snapshot install path.
+#### `badger.DropPrefix` is NOT group-local in cost
 
-### Group teardown
+Per badger documentation
+([pkg.go.dev/.../badger/v4#DB.DropPrefix](https://pkg.go.dev/github.com/dgraph-io/badger/v4#DB.DropPrefix)),
+DropPrefix is a **DB-wide** operation: it stops accepting new writes,
+stops memtable flushes and compaction, compacts affected levels,
+**then resumes**. Implications for shared-FSM:
 
-`GroupBackend.Close()` currently calls `db.Close()` (backend.go path).
-On shared mode the DB is process-owned; group close becomes:
+- `DropPrefix(groupA)` blocks **every** group's writes for the duration
+  (10s of ms to seconds, scaling with the prefix's data volume).
+- Read latency on other groups can spike during the operation.
+- This is acceptable on snapshot install (rare) and group destruction
+  (rare). It is **not** acceptable as part of routine teardown — see
+  "Group teardown" below.
 
-```go
-// no-op for shared DB (caller owns Close)
-// optional DropPrefix when the group is being PERMANENTLY removed
-//   (not on graceful shutdown)
-```
+Operations that trigger DropPrefix must therefore be:
+- bounded in frequency (per-group, raft-driven only),
+- coordinated with metrics so cluster-wide latency spikes surface,
+- excluded from any hot path.
 
-Same `wrapped` flag approach as P0b's BadgerLogStore.
+### Group teardown — separate "shutdown" from "destroy"
+
+Codex flagged this: bolting `DropPrefix` onto `Close()` makes it impossible
+to distinguish a transient shutdown (process restart, leadership transfer,
+voter swap) from a permanent group removal — the wrong call once means
+data loss across restart.
+
+Two distinct paths:
+
+| operation | trigger | shared-DB behavior |
+|---|---|---|
+| `GroupBackend.Close()` | graceful shutdown, leadership transfer, voter step-down, process exit | no-op for shared DB (process owns Close); raft node stopped |
+| `GroupBackend.DestroyGroupData(ctx)` | meta-Raft commits permanent group removal AND local raft node already stopped | `DropPrefix` after committing intent; idempotent |
+
+`DestroyGroupData` is called only from the data-group plan executor's
+"group permanently removed" code path, never from a shutdown handler.
+The intent must be persisted (e.g., a `<dataDir>/destroyed-groups.log`)
+so a crash mid-DropPrefix can resume on restart without re-evaluating
+"is this group really gone?".
+
+Same explicit pattern as P0b's `BadgerLogStore.Close` no-op for shared
+stores; the new piece is the dedicated `DestroyGroupData` entry point.
 
 ### Migration (legacy → shared)
 
-Same pattern as P0b: at startup, refuse to enable shared-fsm when
-`<dataDir>/groups/*/badger/` directories exist from a pre-P3 deployment.
-Operator must wipe (test cluster) or run an explicit migration tool
-(production — out of scope for prototype).
+Same pattern as P0b but stricter: detect every mixed-layout permutation
+explicitly. A simple "absent dir" check is too loose — partial migrations,
+ungraceful crashes, or operator mistakes can produce mixed states that
+slip through "no per-group dirs, fresh start".
+
+| Layout state | Action |
+|---|---|
+| no `groups/*/badger/`, no `shared-fsm/` | fresh — proceed shared-fsm enabled |
+| no `groups/*/badger/`, `shared-fsm/` exists | continuing previous shared-fsm install — proceed |
+| any `groups/*/badger/`, no `shared-fsm/` | legacy — refuse with `--shared-badger=false` instruction |
+| any `groups/*/badger/`, `shared-fsm/` exists | **mixed** — fail closed, refuse to start (corruption likely; don't guess) |
+| `groups/*/badger/` removed but `groups/<id>/blobs/` lingering | suspicious; require explicit operator confirmation flag (out of scope) |
+
+Group-lifecycle code that eagerly creates `groups/<id>/badger/`
+(`group_lifecycle.go:60`) must be conditional on shared-fsm mode being
+*off* — otherwise the prototype trips its own refusal on first boot.
+
+Note: even in shared-fsm mode, the per-group blob storage at
+`groups/<id>/blobs/` still exists — only the metadata DB moves. Blob
+dir lifecycle stays on the existing per-group ownership model and
+must be audited alongside DB keys for any future "destroy group"
+flow (codex noted this).
 
 ### Test plan (must-pass before merge)
 
+Unit tests:
+
 | test | why |
 |---|---|
-| `TestSharedFSM_PrefixIsolation` | two FSM views over shared DB, all read/write paths stay scoped |
+| `TestSharedFSM_PrefixIsolation` | two FSM views over shared DB, all read/write paths (including backend.go iterators) stay scoped |
+| `TestSharedFSM_PathologicalGroupIDs` | mirror P0b's pathological IDs (>255 chars, colons, NULs, prefix-of-prefix) for FSM keys |
 | `TestSharedFSM_SnapshotPrefixOnly` | group A snapshot serializes only group A keys |
-| `TestSharedFSM_RestoreDoesNotWipeSiblings` | restoring group A leaves group B keys intact |
-| `TestSharedFSM_DropPrefixOnTeardown` | removing group A only drops group A keys |
-| `TestSharedFSM_RestartPersistence` | shared DB close + reopen preserves all groups |
-| `TestE2E_ClusterPerf_SharedFSM_LoadN32` | end-to-end: load-N32 boots cleanly with both shared log + shared FSM (the C2 win) |
+| `TestSharedFSM_RestoreRejectsCorruptBytes` | corrupt snapshot must fail BEFORE any DropPrefix runs (state preserved) |
+| `TestSharedFSM_RestoreRejectsPrefixedKeys` | snapshot containing already-prefixed keys is rejected (suspected migration mismatch) |
+| `TestSharedFSM_RestoreLegacySnapshotIntoShared` | a v1 (whole-DB) snapshot taken pre-P3 restores correctly under v2 group-prefix on a shared FSM |
+| `TestSharedFSM_DestroyGroupData` | `DestroyGroupData(A)` drops only A; B and C unaffected |
+| `TestSharedFSM_RestartPersistence` | shared DB close + reopen preserves all groups + their bootstrap markers |
+| `TestSharedFSM_MigrationRefusal` | every legacy/mixed/fresh layout permutation produces the right pass/fail decision |
 
-The first four are unit; the last two are e2e.
+Concurrency tests (catch the codex-flagged DropPrefix DB-wide stall + races):
+
+| test | why |
+|---|---|
+| `TestSharedFSM_ConcurrentSnapshotAndApply` | `Snapshot(A)` while `Apply(B)` is committing — both succeed, no key bleed |
+| `TestSharedFSM_ConcurrentRestoreAndApply` | `Restore(A)` running while `Apply(B)` writes — B's writes either complete or queue cleanly; no partial-state visible to readers |
+| `TestSharedFSM_ConcurrentDropPrefixAndReadList` | `DropPrefix(A)` while group B does `List` / `Get` / iterator — bounded latency, no false-empty reads |
+| `TestSharedFSM_KillDuringDropPrefix` | subprocess SIGKILL mid-DropPrefix(A) — restart cleans up, B's data intact, A's destruction either completes or restarts safely |
+
+E2E:
+
+| test | why |
+|---|---|
+| `TestE2E_ClusterPerf_SharedFSM_LoadN8` | parity with P0b matrix; no regression on the established win |
+| `TestE2E_ClusterPerf_SharedFSM_LoadN32` | the C2 boot-ceiling lift; cluster forms leader and serves PUTs at N=32 with <1% error rate |
 
 ### Phase ordering
 
@@ -606,22 +752,26 @@ roughly doubles the win.
 If P0b shows shared-log alone is enough, P3 becomes optional /
 deprioritized.
 
-### Estimate (revised from original 5d total)
+### Estimate (revised after codex review of P3 design)
 
 | step | est |
 |---|---|
-| Refactor key builders to methods on FSM (apply.go) | 1d |
-| Refactor key builders for DistributedBackend (backend.go + others) | 1.5d |
-| Snapshot/Restore prefix-scoping + unit tests | 1d |
-| Iterator prefix adjustment (19 sites) | 0.5d |
-| Migration refusal + serve.go wiring + flag | 0.5d |
+| Build `stateKeyspace` abstraction + unit tests | 0.5d |
+| Refactor `FSM` (apply.go, 19 db ops, 9 key builders, 4 iterators) | 1d |
+| Refactor `DistributedBackend` (backend.go, 15 db ops + 5+ raw iterator literals identified by codex) | 2d |
+| Refactor `shard_placement.go` / `snapshotable.go` / `scrubbable.go` raw literal sites | 0.5d |
+| Snapshot/Restore prefix-scoping + format v2 marker + unit tests | 1d |
+| `DestroyGroupData` separation from Close + persisted-intent log | 0.5d |
+| Migration refusal (5 layout permutations) + serve.go wiring + flag | 0.5d |
+| Concurrency tests (Snapshot+Apply / Restore+Apply / DropPrefix+List / kill-mid-drop) | 1d |
 | E2E test (perf matrix on shared-fsm) + bug fixing | 1d |
-| Codex review iteration | 0.5d |
-| **total** | **~6d** |
+| Codex review iteration + cross-model reconciliation | 0.5d |
+| **total** | **~8.5d** |
 
-Plus the original P0b 1.5d (now ~done) → **C2 full ≈ 7-8d** vs original
-5d estimate. The extra time is mostly the refactor breadth and
-Snapshot/Restore safety tests.
+Plus the original P0b 1.5d (now ~done) → **C2 full ≈ 10d** vs original
+5d estimate. The extra time is the refactor breadth (backend.go's
+iterator literals, not just key-builders), the Snapshot/Restore safety
+tests, and the new concurrency suite.
 
 ## References
 
