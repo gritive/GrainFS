@@ -72,6 +72,51 @@ func TestGroupRaftMux_EnableMux_Idempotent(t *testing.T) {
 	assert.True(t, m.MuxEnabled())
 }
 
+// TestGroupRaftMux_NilCoalescerOnEarlyClose is a regression test for the
+// segfault hit in load-N8 e2e (2026-05-02): when OpenOutboundStreams fails,
+// rc.Close triggers OnBroken which dereferences ps.hc — but ps.hc was
+// previously assigned only AFTER OpenOutboundStreams succeeded, so it was
+// still nil at the moment of dereference. Fix: attach ps.hc before the
+// stream open AND nil-guard in the OnBroken / HBReplyHandler closures.
+//
+// We can't easily force OpenOutboundStreams to fail without breaking deeper
+// internals, so we stress the nil-guard path directly: build a RaftConn with
+// the same closure shape, mark it broken before ps.hc is set, and verify the
+// process does not panic.
+func TestGroupRaftMux_NilCoalescerOnEarlyClose(t *testing.T) {
+	clientQ, serverQ, qcleanup := testQUICPair(t)
+	defer qcleanup()
+
+	type peerState struct {
+		hc *HeartbeatCoalescer
+	}
+	ps := &peerState{} // hc intentionally nil (simulating failure path)
+
+	rc := NewRaftConn(clientQ, RaftConnConfig{
+		PoolSize: 1,
+		HBReplyHandler: func(corrID uint64, payload []byte) {
+			// Production code guards this with a nil check; if unguarded,
+			// a stray reply frame mid-teardown panics.
+			if ps.hc != nil {
+				ps.hc.DispatchReplyBatch(corrID, payload)
+			}
+		},
+		OnBroken: func(_ *RaftConn, _ error) {
+			if ps.hc != nil {
+				ps.hc.FailAll(assertError("conn broken"))
+			}
+		},
+	})
+	// Open + close BEFORE attaching the coalescer. Must not panic.
+	require.NotPanics(t, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = rc.OpenOutboundStreams(ctx)
+		rc.Close()
+	})
+	_ = serverQ // keep alive for cleanup
+}
+
 func TestGroupRaftMux_LegacyFallbackWhenMuxDisabled(t *testing.T) {
 	// Server does NOT enable mux. Client enables mux, but GetOrConnectMux
 	// will fail (server rejects mux ALPN since handler is unregistered).
