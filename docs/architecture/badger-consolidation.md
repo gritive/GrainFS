@@ -359,10 +359,11 @@ proven. Compaction-stall risk remains a P0b focus, to be measured directly
 via prototype `load-N16` sustained writes.
 
 P0b spec: minimal `NamespacedLogStore` + per-node-shared `*badger.DB` for
-state and log, behind a `--shared-badger=true` flag (default false). Skip
-migration and full safety; just enough to run `cluster_perf_profile_test`
-matrix end-to-end. Compare: idle-N8/16 goroutines & CPU; load-N8/16 PUT
-error rate; load-N32 (does it boot now?).
+state and log, behind a `--shared-badger` flag (**default true**). Skip
+migration; refuse startup when legacy per-group raft dirs are detected.
+Just enough to run `cluster_perf_profile_test` matrix end-to-end.
+Compare: idle-N8/16 goroutines & CPU; load-N8/16 PUT error rate;
+load-N32 (does it boot now?).
 
 ## P0b — Shared raft-log prototype (code landed, measurements pending)
 
@@ -370,13 +371,21 @@ Code wired in commit `<TBD>`:
 
 - `internal/raft/store.go`: `BadgerLogStore` gains `prefix []byte` + `shared bool`
   fields. New `OpenSharedLogStore(db *badger.DB, groupID string, ...)` constructor
-  views an externally-managed DB with all keys prefixed `varuint(len(groupID))||
-  groupID||':'`. `Close()` is a no-op for shared stores. Existing
+  views an externally-managed DB with all keys prefixed by 4-byte big-endian
+  `len(groupID)` followed by `groupID` (no separator needed — fixed-width
+  length is unambiguous and avoids the wraparound that a 1-byte length would
+  hit at `len(groupID) >= 256`). `checkManagedMode` retries on
+  `badger.ErrConflict` so concurrent same-group opens succeed. `Close()` is
+  a no-op for shared stores; the caller owns DB lifecycle. Existing
   `NewBadgerLogStore` callers see zero behavior change (prefix is empty).
 - `cmd/grainfs/serve.go`: new `--shared-badger` cobra flag (**default true**).
   When enabled, opens one `*badger.DB` at `<dataDir>/shared-raft-log/` with
   the same options as per-group log DBs (`SyncWrites=true`, `NumCompactors=2`,
-  `NumVersionsToKeep=1`).
+  `NumVersionsToKeep=1`). On startup, refuses to proceed when any
+  `<dataDir>/groups/*/raft` directory exists from a pre-P0b deployment —
+  failing closed instead of silently abandoning the legacy raft state.
+  Forwards `--badger-managed-mode` and other `BadgerLogStoreOption`s into
+  every group's `OpenSharedLogStore`.
 - `cmd/grainfs/serve.go`: `InstantiateLocalGroup` call site passes
   `LogStore: raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID)` when shared
   mode is on.

@@ -178,6 +178,13 @@ func NewBadgerLogStore(path string, opts ...BadgerLogStoreOption) (*BadgerLogSto
 // OpenSharedLogStore returns a BadgerLogStore that views an externally-managed
 // *badger.DB, scoped to keys prefixed by groupID. The caller owns db.Close()
 // — this store's Close() is a no-op. Used by C2 P0b shared raft-log prototype.
+//
+// Prefix encoding: 4-byte big-endian length || groupID. The fixed-width length
+// avoids the wraparound that would occur with a 1-byte length when
+// len(groupID) >= 256, which can cause cross-group prefix collisions and
+// allow LastIndex/TruncateBefore/TruncateAfter on one group to corrupt
+// another. Trailing ':' from the prior 1-byte encoding is dropped — the
+// length prefix is sufficient for unambiguous parsing.
 func OpenSharedLogStore(db *badger.DB, groupID string, opts ...BadgerLogStoreOption) (*BadgerLogStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("OpenSharedLogStore: nil db")
@@ -185,12 +192,12 @@ func OpenSharedLogStore(db *badger.DB, groupID string, opts ...BadgerLogStoreOpt
 	if groupID == "" {
 		return nil, fmt.Errorf("OpenSharedLogStore: empty groupID")
 	}
-	// Encode prefix as varuint(len(groupID)) || groupID || ":" — length-prefix
-	// keeps decoding unambiguous regardless of groupID character set.
-	prefix := make([]byte, 0, 1+len(groupID)+1)
-	prefix = append(prefix, byte(len(groupID))) // simple length-prefix; groupIDs <= 255 chars
-	prefix = append(prefix, groupID...)
-	prefix = append(prefix, ':')
+	if len(groupID) > 0xFFFFFFFF {
+		return nil, fmt.Errorf("OpenSharedLogStore: groupID length %d exceeds uint32 max", len(groupID))
+	}
+	prefix := make([]byte, 4+len(groupID))
+	binary.BigEndian.PutUint32(prefix[:4], uint32(len(groupID)))
+	copy(prefix[4:], groupID)
 	s := &BadgerLogStore{db: db, prefix: prefix, shared: true}
 	for _, opt := range opts {
 		opt(s)
@@ -203,7 +210,22 @@ func OpenSharedLogStore(db *badger.DB, groupID string, opts ...BadgerLogStoreOpt
 
 // checkManagedMode writes (first open) or verifies (subsequent opens) the
 // managed-mode flag persisted in the DB. Mismatch returns a clear error.
+//
+// On the shared-DB path (C2 P0b) two goroutines opening the same groupID
+// concurrently can race on the get-then-set, producing badger.ErrConflict.
+// The op is idempotent, so we retry transparently up to a small bound.
 func (s *BadgerLogStore) checkManagedMode() error {
+	const maxRetries = 8
+	for i := 0; i < maxRetries; i++ {
+		err := s.checkManagedModeOnce()
+		if err == nil || !errors.Is(err, badger.ErrConflict) {
+			return err
+		}
+	}
+	return fmt.Errorf("checkManagedMode: badger transaction conflict after %d retries", maxRetries)
+}
+
+func (s *BadgerLogStore) checkManagedModeOnce() error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get(s.keyManagedMode())
 		if err != nil {

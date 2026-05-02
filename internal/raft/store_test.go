@@ -586,3 +586,139 @@ func openSharedDBForTest(t *testing.T, dir string) (*badger.DB, error) {
 		WithNumCompactors(2).
 		WithNumVersionsToKeep(1))
 }
+
+// TestSharedLogStore_PathologicalGroupIDs hits the prefix encoding edges that
+// the friendly-ID test misses: long IDs (>255 chars), embedded colons, and
+// embedded NUL bytes. The 4-byte length prefix must keep all of these
+// non-overlapping.
+func TestSharedLogStore_PathologicalGroupIDs(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openSharedDBForTest(t, dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	cases := []struct {
+		name    string
+		groupID string
+	}{
+		{"colon", "group:with:colons"},
+		{"nul", "group\x00null\x00bytes"},
+		{"long-300", string(make([]byte, 300))},           // > old 1-byte length wraparound boundary
+		{"long-256", string(make([]byte, 256))},           // exactly the old wrap point
+		{"longA-255", "a" + string(make([]byte, 254))},    // fills exactly 255 chars
+		{"prefix-colon-collision", "a:raft:log:00000001"}, // looks like a raw raft log key
+	}
+
+	stores := make([]*BadgerLogStore, len(cases))
+	for i, c := range cases {
+		s, err := OpenSharedLogStore(db, c.groupID)
+		require.NoError(t, err, "OpenSharedLogStore %s", c.name)
+		stores[i] = s
+		// Each store gets a unique log entry at index i+1 with command identifying it.
+		require.NoError(t, s.AppendEntries([]LogEntry{
+			{Term: 1, Index: uint64(i + 1), Command: []byte(c.name)},
+		}))
+		require.NoError(t, s.SaveState(uint64(i+1), c.name))
+	}
+
+	// Each store must see only its own state; LastIndex must equal its own
+	// index, never a sibling's.
+	for i, c := range cases {
+		want := uint64(i + 1)
+		got, err := stores[i].LastIndex()
+		require.NoError(t, err, "%s LastIndex", c.name)
+		assert.Equal(t, want, got, "%s LastIndex must be %d", c.name, want)
+
+		entry, err := stores[i].GetEntry(want)
+		require.NoError(t, err)
+		assert.Equal(t, []byte(c.name), entry.Command, "%s entry command", c.name)
+
+		term, voted, err := stores[i].LoadState()
+		require.NoError(t, err)
+		assert.Equal(t, want, term)
+		assert.Equal(t, c.name, voted)
+	}
+
+	// Cross-check: TruncateAfter on the colon store must not affect long-300 store.
+	colonIdx := 0
+	long300Idx := 2
+	require.NoError(t, stores[colonIdx].TruncateAfter(0))
+	got, err := stores[long300Idx].LastIndex()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(long300Idx+1), got, "long-300 LastIndex must be unaffected by colon-store truncate")
+}
+
+// TestSharedLogStore_ConcurrentOpenSameGroup verifies that two concurrent
+// OpenSharedLogStore calls for the same groupID don't corrupt the
+// managed-mode marker or produce divergent stores. (Production guards
+// against this via the inFlight map in serve.go, but the store itself
+// should also tolerate it gracefully.)
+func TestSharedLogStore_ConcurrentOpenSameGroup(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openSharedDBForTest(t, dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	const groupID = "race-group"
+	const N = 16
+	results := make(chan error, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			s, err := OpenSharedLogStore(db, groupID)
+			if err != nil {
+				results <- err
+				return
+			}
+			// Each opener does a tiny write to validate the store works.
+			results <- s.AppendEntries([]LogEntry{{Term: 1, Index: 1, Command: []byte("x")}})
+		}()
+	}
+	for i := 0; i < N; i++ {
+		assert.NoError(t, <-results, "concurrent open %d", i)
+	}
+}
+
+// TestSharedLogStore_RestartPersistence verifies that closing the shared DB
+// and reopening preserves per-group state. Catches bugs where managed-mode
+// markers or bootstrap markers leak across restarts.
+func TestSharedLogStore_RestartPersistence(t *testing.T) {
+	dir := t.TempDir()
+	db1, err := openSharedDBForTest(t, dir)
+	require.NoError(t, err)
+
+	storeA, err := OpenSharedLogStore(db1, "group-A")
+	require.NoError(t, err)
+	storeB, err := OpenSharedLogStore(db1, "group-B")
+	require.NoError(t, err)
+
+	require.NoError(t, storeA.AppendEntries([]LogEntry{{Term: 7, Index: 42, Command: []byte("A42")}}))
+	require.NoError(t, storeB.AppendEntries([]LogEntry{{Term: 9, Index: 99, Command: []byte("B99")}}))
+	require.NoError(t, storeA.SaveBootstrapMarker())
+	require.NoError(t, storeA.Close())
+	require.NoError(t, storeB.Close())
+	require.NoError(t, db1.Close())
+
+	// Reopen and verify state survives.
+	db2, err := openSharedDBForTest(t, dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { db2.Close() })
+
+	storeA2, err := OpenSharedLogStore(db2, "group-A")
+	require.NoError(t, err)
+	storeB2, err := OpenSharedLogStore(db2, "group-B")
+	require.NoError(t, err)
+
+	gotA, err := storeA2.GetEntry(42)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("A42"), gotA.Command)
+	gotB, err := storeB2.GetEntry(99)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("B99"), gotB.Command)
+
+	bootA, err := storeA2.IsBootstrapped()
+	require.NoError(t, err)
+	assert.True(t, bootA, "A's bootstrap marker must persist")
+	bootB, err := storeB2.IsBootstrapped()
+	require.NoError(t, err)
+	assert.False(t, bootB, "B should still be unbootstrapped")
+}

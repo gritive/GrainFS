@@ -301,6 +301,26 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	sharedBadgerEnabled, _ := cmd.Flags().GetBool("shared-badger")
 	var sharedRaftLogDB *badger.DB
 	if sharedBadgerEnabled {
+		// Refuse to silently abandon legacy per-group raft logs. Existing
+		// deployments that started before P0b have raft state under
+		// <dataDir>/groups/*/raft. Ignoring those and opening a fresh shared
+		// DB would silently reset every group's term/votedFor/log — i.e.,
+		// data loss. Fail with a clear migration message instead.
+		groupsDir := filepath.Join(dataDir, "groups")
+		if entries, _ := os.ReadDir(groupsDir); len(entries) > 0 {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				legacyRaftDir := filepath.Join(groupsDir, e.Name(), "raft")
+				if st, err := os.Stat(legacyRaftDir); err == nil && st.IsDir() {
+					return fmt.Errorf("shared-badger=true incompatible with legacy per-group raft dir %s. "+
+						"This deployment was started before C2 P0b. Use --shared-badger=false to keep "+
+						"per-group raft logs, or wipe %s to start fresh on the new layout (DESTRUCTIVE — "+
+						"only on test clusters or after a full backup)", legacyRaftDir, dataDir)
+				}
+			}
+		}
 		sharedDir := filepath.Join(dataDir, "shared-raft-log")
 		if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 			return fmt.Errorf("mkdir shared raft-log dir: %w", err)
@@ -517,9 +537,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Both call into instantiateOwnedIfNeeded which is idempotent — duplicates
 	// from concurrent paths are no-ops.
 	ownedGroups := struct {
-		mu sync.Mutex
-		m  map[string]*cluster.GroupBackend
-	}{m: make(map[string]*cluster.GroupBackend)}
+		mu       sync.Mutex
+		m        map[string]*cluster.GroupBackend
+		inFlight map[string]bool // entry.ID currently being instantiated; prevents duplicate concurrent OpenSharedLogStore / badger.Open
+	}{m: make(map[string]*cluster.GroupBackend), inFlight: make(map[string]bool)}
 
 	// Shared stop channel for all apply loops (distBackend + per-group).
 	// Must be initialized before any goroutine that passes it to RunApplyLoop.
@@ -552,7 +573,19 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			ownedGroups.mu.Unlock()
 			return // already instantiated
 		}
+		if ownedGroups.inFlight[entry.ID] {
+			ownedGroups.mu.Unlock()
+			return // another goroutine is currently bringing this group up
+		}
+		ownedGroups.inFlight[entry.ID] = true
 		ownedGroups.mu.Unlock()
+		// Make sure inFlight is cleared even if instantiation fails (log.Fatal
+		// below would skip this; that's acceptable since the process is dying).
+		defer func() {
+			ownedGroups.mu.Lock()
+			delete(ownedGroups.inFlight, entry.ID)
+			ownedGroups.mu.Unlock()
+		}()
 
 		glc := cluster.GroupLifecycleConfig{
 			NodeID:    raftAddr, // identity = raftAddr (matches PeerIDs)
@@ -565,7 +598,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			},
 		}
 		if sharedRaftLogDB != nil {
-			ls, lerr := raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID)
+			// Forward managed-mode and any future BadgerLogStoreOption to
+			// the shared store so flags don't get silently dropped on the
+			// shared path.
+			ls, lerr := raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID, storeOpts...)
 			if lerr != nil {
 				log.Fatal().Err(lerr).Str("group_id", entry.ID).Msg("OpenSharedLogStore failed")
 			}
