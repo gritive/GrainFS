@@ -23,7 +23,7 @@
   - PR-D 후속: ForwardReceiver + serve.go wiring + e2e tests (v0.0.7.1 #123) ✅
   - PR-D 후속: Test coverage enhancements (integration tests + self-removal retry) ✅
 
-- [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸)
+- [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸). **Depends on:** Voter set lock-free read / `membershipView` quorum snapshot boundary 완료 후 진행 — PR-F는 quorum/election/ReadIndex가 mixed membership state를 보지 않는다는 전제 위에 올라간다.
 - [ ] Raft leader 쓰기 경로 부하 분산 검토 (batching, pipelining, leader transfer 등)
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
   - BatchingFSM (FSM apply throughput 한계 도달 시)
