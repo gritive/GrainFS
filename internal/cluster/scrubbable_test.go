@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
 // Compile-time proof that DistributedBackend satisfies scrubber.Scrubbable.
@@ -215,7 +216,9 @@ func TestShardPaths_MatchesShardServiceLayout(t *testing.T) {
 	paths := b.ShardPaths("bkt", "key", "01VID", 4)
 	data, err := os.ReadFile(paths[3])
 	require.NoError(t, err, "path from ShardPaths must find the shard on disk")
-	assert.Equal(t, "payload", string(data))
+	decoded, err := eccodec.DecodeShard(data)
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(decoded))
 }
 
 func TestWriteShard_ReadShard_RoundTrip(t *testing.T) {

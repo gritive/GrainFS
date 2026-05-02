@@ -1,12 +1,16 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"sync"
 	"testing"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -162,4 +166,79 @@ func TestForwardSender_ContextCanceled_StopsImmediately(t *testing.T) {
 	_, err := s.Send(ctx, []string{"a"}, "g",
 		raftpb.ForwardOpHeadObject, headObjectArgsBytes(t, "b", "k"))
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestForwardSender_ResolveLeaderPeers_UsesNotLeaderHint(t *testing.T) {
+	var connected []string
+	dialer := func(peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		if peer == "peer-A" {
+			return notLeaderReplyBytes(t, "peer-B"), nil
+		}
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(dialer)
+	peers := s.ResolveLeaderPeers(context.Background(), []string{"peer-A", "peer-C"}, "group-1", "b", "k")
+	require.Equal(t, []string{"peer-B", "peer-A", "peer-C"}, peers)
+	require.Equal(t, []string{"peer-A"}, connected)
+}
+
+func TestForwardSender_ResolveLeaderPeers_TreatsNoSuchKeyAsLeader(t *testing.T) {
+	dialer := func(peer string, payload []byte) ([]byte, error) {
+		return buildSimpleReply(raftpb.ForwardStatusNoSuchKey, ""), nil
+	}
+	s := NewForwardSender(dialer)
+	peers := s.ResolveLeaderPeers(context.Background(), []string{"peer-A", "peer-B"}, "group-1", "missing-b", "missing-k")
+	require.Equal(t, []string{"peer-A", "peer-B"}, peers)
+}
+
+func TestForwardSender_SendStream_NotLeaderWithoutRewindDoesNotRetryBody(t *testing.T) {
+	calls := 0
+	streamDialer := func(peer string, payload []byte, body io.Reader) ([]byte, error) {
+		calls++
+		_, _ = io.Copy(io.Discard, body)
+		return notLeaderReplyBytes(t, "peer-B"), nil
+	}
+	s := NewForwardSender(func(string, []byte) ([]byte, error) {
+		return okReplyBytes(t), nil
+	}).WithStreamDialer(streamDialer)
+
+	body := io.LimitReader(bytes.NewReader([]byte("payload")), int64(len("payload")))
+	reply, err := s.SendStream(context.Background(), []string{"peer-A"}, "g",
+		raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil), body)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+}
+
+func TestForwardSender_SendStream_BackpressureLimit(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	streamDialer := func(peer string, payload []byte, body io.Reader) ([]byte, error) {
+		once.Do(func() { close(started) })
+		<-release
+		_, _ = io.Copy(io.Discard, body)
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(func(string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer).WithMaxForwardStreams(1)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
+			raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil), bytes.NewReader([]byte("first")))
+		done <- err
+	}()
+	<-started
+
+	_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
+		raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k2", "text/plain", nil), bytes.NewReader([]byte("second")))
+	require.ErrorIs(t, err, storage.ErrForwardBackpressure)
+
+	close(release)
+	require.NoError(t, <-done)
 }

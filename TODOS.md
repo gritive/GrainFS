@@ -8,7 +8,7 @@
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
-- [ ] Erasure Coding을 활용한 Bit Rot 방지
+- [x] Erasure Coding을 활용한 Bit Rot 방지 — EC shard 파일에 CRC envelope 적용, legacy raw shard read fallback 유지. **Completed:** v0.0.21.0 (2026-05-02)
 - [ ] **단일 블롭 손상 격리** — *zero ops* — 손상된 블롭 객체만 격리해 read-only로 표시; 동일 볼륨의 다른 객체는 정상 서비스 유지.
 
 ## Phase 17: Scale-Out
@@ -51,7 +51,7 @@
 
 ## Phase 19: Performance
 
-- [ ] **P0: Fix EC shard cache e2e object-size fixture** — `TestE2E_ECShardCacheActive` uploads a 16 MB object through the cluster coordinator, but the existing forwarding path has a 5 MB `DefaultMaxForwardBodyBytes` cap and returns `entity too large`. Noticed during `/ship` on `feat/ae-pipelining`; unrelated to the raft replication diff but blocks clean `go test ./...`.
+- [x] **P0: Fix EC shard cache e2e object-size fixture** — non-leader routed `PutObject`/`UploadPart` now stream bodies over `StreamGroupForwardBody`; routed `GetObject` allows the 16 MiB EC cache fixture within the transport frame guard. **Completed:** v0.0.21.0 (2026-05-02)
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] **EC shard cache 사이즈 튜닝** — 본구현 완료 v0.0.4.42 (E2E 85.7% hit). 운영 telemetry(`grainfs_ec_shard_cache_hit_rate`)로 working set 측정 후 default 256 MB 적정성 검증. 큰 객체 백업 워크로드면 GB 단위까지, 작은 객체 위주면 비활성화 권장.
 - [ ] io_uring

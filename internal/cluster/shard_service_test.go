@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -76,7 +77,10 @@ func TestShardService_NoEncryption(t *testing.T) {
 	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
 	raw, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
-	assert.Equal(t, plaintext, raw, "without encryptor, shard should be stored as plaintext")
+	assert.True(t, eccodec.IsEncodedShard(raw), "new shards should carry CRC envelope")
+	decoded, err := eccodec.DecodeShard(raw)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, decoded, "without encryptor, CRC payload should be plaintext")
 }
 
 func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {
@@ -190,7 +194,9 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	shardPath := filepath.Join(dir2, "shards", "mybucket", "mykey", "shard_0")
 	data, err := os.ReadFile(shardPath)
 	require.NoError(t, err)
-	assert.Equal(t, "shard-data-0", string(data))
+	decoded, err := eccodec.DecodeShard(data)
+	require.NoError(t, err)
+	assert.Equal(t, "shard-data-0", string(decoded))
 
 	// Node1 reads the shard back from Node2
 	got, err := svc1.ReadShard(ctx, tr2.LocalAddr(), "mybucket", "mykey", 0)
@@ -224,7 +230,9 @@ func TestWriteLocalShard_Atomic(t *testing.T) {
 	// Final shard must exist with correct content.
 	got, err := os.ReadFile(shardPath)
 	require.NoError(t, err)
-	assert.Equal(t, data, got)
+	decoded, err := eccodec.DecodeShard(got)
+	require.NoError(t, err)
+	assert.Equal(t, data, decoded)
 
 	// .tmp file must NOT remain after a successful write.
 	_, err = os.Stat(tmpPath)
@@ -260,7 +268,9 @@ func TestWriteLocalShard_OverwritePreservesOriginalOnError(t *testing.T) {
 	// Original shard must be intact — not truncated or corrupted.
 	got, readErr := os.ReadFile(shardPath)
 	require.NoError(t, readErr)
-	assert.Equal(t, original, got, "original shard must survive a failed overwrite")
+	decoded, err := eccodec.DecodeShard(got)
+	require.NoError(t, err)
+	assert.Equal(t, original, decoded, "original shard must survive a failed overwrite")
 }
 
 func TestWriteReadLocalShard_Encrypted_AAD(t *testing.T) {
@@ -283,7 +293,10 @@ func TestWriteReadLocalShard_Encrypted_AAD(t *testing.T) {
 	shardPath := filepath.Join(dir, "shards", "mybucket", "obj/v1", "shard_2")
 	raw, _ := os.ReadFile(shardPath)
 	assert.NotEqual(t, data, raw, "shard on disk must be encrypted")
-	assert.True(t, encrypt.IsEncryptedBlob(raw), "shard must have encrypted magic header")
+	assert.True(t, eccodec.IsEncodedShard(raw), "shard must have CRC envelope")
+	encodedPayload, err := eccodec.DecodeShard(raw)
+	require.NoError(t, err)
+	assert.True(t, encrypt.IsEncryptedBlob(encodedPayload), "CRC payload must be encrypted")
 }
 
 func TestReadLocalShard_DowngradeDetection(t *testing.T) {

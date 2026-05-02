@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -25,6 +26,18 @@ func TestForwardReceiver_UnknownGroup_NotVoter(t *testing.T) {
 	require.NotNil(t, reply)
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusNotVoter, fr.Status())
+}
+
+func TestForwardReceiver_HandleBody_EarlyRejectDrainsBody(t *testing.T) {
+	rcv, _ := setupReceiver(t, "self")
+	payload := encodeForwardPayload("g99", raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil))
+	body := bytes.NewBuffer(bytes.Repeat([]byte("x"), 64*1024))
+
+	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, body)
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotVoter, fr.Status())
+	require.Zero(t, body.Len(), "early streamed-forward rejects must drain body so the sender can finish")
 }
 
 func TestForwardReceiver_NonLeaderVoter_ReturnsHint(t *testing.T) {

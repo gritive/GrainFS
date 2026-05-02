@@ -127,14 +127,16 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - ShardService + StreamRouter QUIC transport ✅ (인프라)
 - Distributed GC: DeleteObject 시 피어 노드 데이터 삭제 ✅
 - Failover: PeerHealth 기반 unhealthy 노드 자동 건너뛰기/재시도 ✅
-- ⚠️ **Cluster mode는 EC가 아닌 N× full-replication**: PutObject가 `WriteShard(..., shardIdx=0, data)`로 전체 객체를 모든 피어에 복제. Reed-Solomon split은 solo 모드에만 적용됨.
-- ⚠️ **Re-replication 미구현**: `ReplicationMonitor`는 정의만 되어있고 production caller 0. Phase 18에서 재설계 예정.
-- ⚠️ **Balancer-triggered migration 비호환**: `migration_executor`는 `shardIdx 0..N-1`을 순회하지만 PutObject가 `shardIdx=0`에만 기록하므로 migration은 로그 에러를 뱉으며 실패 (FSM atomic cancel로 데이터는 안전). Phase 18에서 해결 예정.
+- Cluster EC split/write/read/repair path ✅: 노드 수 기반 EffectiveConfig로 Reed-Solomon shard를 분산 저장하고 placement metadata를 기록.
+- Non-leader large write forwarding ✅: `PutObject`/`UploadPart` body를 QUIC stream으로 전달해 legacy 5 MiB forward cap을 우회.
+- CRC-backed shard envelope ✅: 새 shard write는 CRC envelope로 저장하고 legacy raw shard는 read fallback 유지.
+- ReshardManager production wiring ✅: `--reshard-interval` 기본 24h로 각 local DataGroup leader에서 N×/old-EC/ring placement를 background 변환.
+- ⚠️ **Re-replication 미구현**: `ReplicationMonitor`는 정의만 되어있고 production caller 0. Repair path와 reshard는 동작하지만 상시 replica replenishment는 별도 작업.
 
 **검증:**
 - ShardService QUIC 기반 WriteShard/ReadShard/DeleteShards E2E 테스트 통과 ✅
 - PeerHealth cooldown 기반 자동 복구 테스트 통과 ✅
-- Cluster EC split + 2노드 장애 허용 검증 — **미구현** (Phase 18)
+- Cluster EC split + repair + non-leader routed large write 단위/통합 테스트 통과 ✅
 
 ### Phase 5: Operations & Hardening ✅
 

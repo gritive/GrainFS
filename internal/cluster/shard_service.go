@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage/directio"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -81,6 +83,15 @@ func (s *ShardService) RegisterHandler(st transport.StreamType, h func(*transpor
 		return
 	}
 	s.transport.Handle(st, h)
+}
+
+// RegisterBodyHandler registers a per-type handler whose framed request is
+// followed by raw bytes on the same bidirectional stream.
+func (s *ShardService) RegisterBodyHandler(st transport.StreamType, h func(*transport.Message, io.Reader) *transport.Message) {
+	if s.transport == nil {
+		return
+	}
+	s.transport.HandleBody(st, h)
 }
 
 // WriteShard sends a shard to a remote node for storage.
@@ -320,6 +331,8 @@ func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 // one of an object's shards (self-placement); avoids a loopback RPC.
 // When an encryptor is configured, the shard is AES-256-GCM encrypted before writing.
 // Writes are crash-safe: data goes to a .tmp file, fsync'd, then renamed.
+// New writes use eccodec's CRC envelope around the encrypted-or-plain payload
+// so scrubber reads can detect bit rot while legacy raw shards remain readable.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
 	dir := filepath.Join(s.dataDir, bucket, key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -335,7 +348,7 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 		}
 	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	if err := s.writeShardFile(path, payload); err != nil {
+	if err := s.writeShardFile(path, eccodec.EncodeShard(payload)); err != nil {
 		return err
 	}
 	if d, err := os.Open(dir); err == nil {
@@ -455,9 +468,16 @@ func isUnsupportedDirectIO(err error) bool {
 // (downgrade guard).
 func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
 	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
-	data, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	data := raw
+	if eccodec.IsEncodedShard(raw) {
+		data, err = eccodec.DecodeShard(raw)
+		if err != nil {
+			return nil, err
+		}
 	}
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	if s.encryptor != nil {

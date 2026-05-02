@@ -6,9 +6,6 @@ package cluster
 // ones via RepairShard.
 //
 // Open issues:
-//   - CRC32 footer. ReadShard and WriteShard are plain atomic I/O today;
-//     retrofitting eccodec requires changing every Write/ReadLocalShard caller
-//     (putObjectEC, RepairShard, getObjectEC, the QUIC handlers).
 //   - IterObjectMetas parses versioned `obj:{bucket}/{key}/{versionID}` keys
 //     with a first-slash split, folding the versionID into the key. ScanObjects
 //     sidesteps the issue entirely by iterating `lat:` pointers instead.
@@ -25,6 +22,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
 // acquireShardWriteLock serializes ReadShard/WriteShard on (bucket, key) for
@@ -151,15 +149,22 @@ func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShar
 	return paths
 }
 
-// ReadShard reads a shard at path under a per-object read lock. Cluster
-// shards are raw bytes today (see file-header note on CRC retrofit). When
-// the retrofit lands, this becomes eccodec.ReadShardVerified.
+// ReadShard reads a shard at path under a per-object read lock. New shards use
+// eccodec's CRC envelope. Legacy raw shards from pre-CRC cluster deployments are
+// still readable; they simply cannot provide bit-rot detection until rewritten.
 func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error) {
 	unlock := b.acquireShardReadLock(bucket, key)
 	defer unlock()
-	data, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read shard: %w", err)
+	}
+	data := raw
+	if eccodec.IsEncodedShard(raw) {
+		data, err = eccodec.DecodeShard(raw)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if b.shardSvc != nil {
 		aad := shardAAD(bucket, key, path)
@@ -173,8 +178,8 @@ func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error)
 
 // WriteShard writes data atomically at path under a per-object write lock.
 // The write uses tmp → fsync → rename so a crash mid-repair cannot leave a
-// torn shard. Matches the raw-bytes format produced by WriteLocalShard so
-// the shard written here is readable by the non-scrubber code path.
+// torn shard. New writes are wrapped in eccodec's CRC envelope so scrubber
+// verification can distinguish corrupt shards from missing shards.
 func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) error {
 	unlock := b.acquireShardWriteLock(bucket, key)
 	defer unlock()
@@ -195,7 +200,7 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
-	if _, err := f.Write(payload); err != nil {
+	if _, err := f.Write(eccodec.EncodeShard(payload)); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)

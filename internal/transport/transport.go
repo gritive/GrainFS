@@ -21,6 +21,7 @@ const (
 	StreamReadIndex           StreamType = 0x0A // Follower → leader ReadIndex RPC; response: [8B commitIndex big-endian][4B errLen][errBytes]
 	StreamMetaProposeForward  StreamType = 0x0B // Follower → meta-Raft leader Iceberg catalog proposal forwarding
 	StreamMetaCatalogRead     StreamType = 0x0C // Follower → meta-Raft leader Iceberg catalog linearized reads
+	StreamGroupForwardBody    StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
 )
 
 // Message is a framed message sent over a transport stream.
