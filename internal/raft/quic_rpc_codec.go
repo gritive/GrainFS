@@ -21,6 +21,20 @@ func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	return out
 }
 
+// encodeAppendEntriesArgs serializes just the AppendEntriesArgs FlatBuffer
+// (no RPCMessage envelope). Used by the heartbeat coalescer where the rpc
+// type is implicit (always AppendEntries) and the envelope overhead per
+// batch item is wasteful.
+func encodeAppendEntriesArgs(args *AppendEntriesArgs) ([]byte, error) {
+	return encodeRPCPayload(rpcTypeAppendEntries, args)
+}
+
+// encodeAppendEntriesReply serializes just the AppendEntriesReply FlatBuffer.
+// Mirror of encodeAppendEntriesArgs for batch reply payloads.
+func encodeAppendEntriesReply(reply *AppendEntriesReply) ([]byte, error) {
+	return encodeRPCPayload(rpcTypeAppendEntriesReply, reply)
+}
+
 // encodeRPC serializes an RPC message (type + payload) using FlatBuffers.
 func encodeRPC(rpcType string, msg any) ([]byte, error) {
 	data, err := encodeRPCPayload(rpcType, msg)

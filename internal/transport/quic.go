@@ -23,6 +23,10 @@ import (
 const (
 	quicMaxIdleTimeout  = 10 * time.Second
 	quicKeepAlivePeriod = 3 * time.Second
+	// quicAppErrCode is the application-level error code reported on
+	// graceful CloseWithError. Picked to be non-zero so peers can distinguish
+	// "we rejected your ALPN" from idle-timeout closes.
+	quicAppErrCode = 0x1
 )
 
 // StreamHandler processes an incoming request message and returns a response.
@@ -58,11 +62,19 @@ func (r *StreamRouter) Lookup(st StreamType) (StreamHandler, bool) {
 	return h, ok
 }
 
+// MuxConnHandler is invoked once per accepted mux QUIC connection (ALPN
+// "grainfs-mux-v1-..."). The handler owns the conn lifetime: it must arrange
+// for stream accept/read and conn close. The handler is registered by
+// internal/raft (the only consumer of mux connections); the transport package
+// does not interpret mux frames.
+type MuxConnHandler func(conn *quic.Conn)
+
 // QUICTransport implements Transport using QUIC for node-to-node communication.
 type QUICTransport struct {
 	mu            sync.RWMutex
 	listener      *quic.Listener
-	conns         map[string]*quic.Conn // addr -> connection
+	conns         map[string]*quic.Conn // legacy ALPN: addr -> conn (Send/Call/CallFlatBuffer)
+	muxConns      map[string]*quic.Conn // mux ALPN: addr -> conn (raft RPC, owned by internal/raft)
 	inbox         chan *ReceivedMessage
 	codec         *BinaryCodec
 	tlsConfig     *tls.Config
@@ -72,6 +84,7 @@ type QUICTransport struct {
 	router        *StreamRouter // per-type bidirectional handlers (takes priority)
 	streamHandler StreamHandler // catch-all bidirectional handler (backward compat)
 	psk           string        // pre-shared key for peer authentication (empty = no auth)
+	muxHandler    MuxConnHandler
 }
 
 // NewQUICTransport creates a new QUIC-based transport.
@@ -79,12 +92,13 @@ type QUICTransport struct {
 func NewQUICTransport(psk ...string) *QUICTransport {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &QUICTransport{
-		conns:  make(map[string]*quic.Conn),
-		inbox:  make(chan *ReceivedMessage, 256),
-		codec:  &BinaryCodec{},
-		router: NewStreamRouter(),
-		ctx:    ctx,
-		cancel: cancel,
+		conns:    make(map[string]*quic.Conn),
+		muxConns: make(map[string]*quic.Conn),
+		inbox:    make(chan *ReceivedMessage, 256),
+		codec:    &BinaryCodec{},
+		router:   NewStreamRouter(),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	if len(psk) > 0 {
 		t.psk = psk[0]
@@ -92,7 +106,8 @@ func NewQUICTransport(psk ...string) *QUICTransport {
 	return t
 }
 
-// pskALPN returns the ALPN protocol string, incorporating PSK hash for authentication.
+// pskALPN returns the legacy ALPN protocol string, incorporating PSK hash for authentication.
+// Used by Send / Call / CallFlatBuffer (per-message stream open/close).
 func (t *QUICTransport) pskALPN() string {
 	if t.psk == "" {
 		return "grainfs"
@@ -101,13 +116,39 @@ func (t *QUICTransport) pskALPN() string {
 	return "grainfs-" + hex.EncodeToString(h[:8])
 }
 
+// muxALPN returns the multiplexed-stream ALPN protocol string used by raft RPC
+// connections. Same PSK hash as pskALPN, plus a "-mux-v1" version tag so peers
+// running older binaries fall back cleanly to the legacy ALPN.
+func (t *QUICTransport) muxALPN() string {
+	if t.psk == "" {
+		return "grainfs-mux-v1"
+	}
+	h := sha256.Sum256([]byte(t.psk))
+	return "grainfs-mux-v1-" + hex.EncodeToString(h[:8])
+}
+
+// SetMuxConnHandler registers the callback that owns accepted mux QUIC
+// connections. internal/raft sets this during process startup if --quic-mux is
+// enabled. If unset, mux connections are rejected at accept time.
+func (t *QUICTransport) SetMuxConnHandler(h MuxConnHandler) {
+	t.mu.Lock()
+	t.muxHandler = h
+	t.mu.Unlock()
+}
+
 // Listen starts accepting incoming QUIC connections.
+//
+// The listener advertises both the legacy ALPN ("grainfs-<pskhash>") and the
+// mux ALPN ("grainfs-mux-v1-<pskhash>"). Inbound connections are routed by
+// negotiated ALPN: legacy → handleInboundConnection (existing path);
+// mux → muxHandler (set by internal/raft if --quic-mux is enabled).
 func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
 	tlsConf, err := generateTLSConfig()
 	if err != nil {
 		return fmt.Errorf("generate TLS config: %w", err)
 	}
-	tlsConf.NextProtos = []string{t.pskALPN()}
+	// Mux ALPN listed first so peers preferring mux complete handshake on it.
+	tlsConf.NextProtos = []string{t.muxALPN(), t.pskALPN()}
 	t.tlsConfig = tlsConf
 
 	listener, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
@@ -134,7 +175,26 @@ func (t *QUICTransport) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
-		go t.handleInboundConnection(conn)
+		// Route by negotiated ALPN. Mux connections go to the mux handler
+		// (registered by internal/raft); legacy connections go to the
+		// per-message stream handler. Unknown ALPN is rejected.
+		state := conn.ConnectionState()
+		alpn := state.TLS.NegotiatedProtocol
+		switch {
+		case alpn == t.muxALPN():
+			t.mu.RLock()
+			h := t.muxHandler
+			t.mu.RUnlock()
+			if h == nil {
+				_ = conn.CloseWithError(quicAppErrCode, "mux ALPN unsupported on this peer")
+				continue
+			}
+			go h(conn)
+		case alpn == t.pskALPN():
+			go t.handleInboundConnection(conn)
+		default:
+			_ = conn.CloseWithError(quicAppErrCode, "unknown ALPN: "+alpn)
+		}
 	}
 }
 
@@ -211,6 +271,68 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 	case <-t.ctx.Done():
 	}
 }
+
+// GetOrConnectMux dials (or returns the cached) mux QUIC connection for addr.
+// Used by internal/raft to wrap the conn in a RaftConn for raft RPC traffic.
+// The returned *quic.Conn is owned by the transport; callers must not close it.
+// Eviction is automatic on idle timeout / connection failure.
+func (t *QUICTransport) GetOrConnectMux(ctx context.Context, addr string) (*quic.Conn, error) {
+	t.mu.RLock()
+	conn, ok := t.muxConns[addr]
+	t.mu.RUnlock()
+	if ok {
+		return conn, nil
+	}
+
+	tlsConf := &tls.Config{
+		InsecureSkipVerify: true,
+		// Advertise mux first; if peer is older it falls back to legacy
+		// ALPN — caller (internal/raft) handles that case by evicting and
+		// using the legacy path.
+		NextProtos: []string{t.muxALPN(), t.pskALPN()},
+	}
+	dialed, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
+		KeepAlivePeriod: quicKeepAlivePeriod,
+		MaxIdleTimeout:  quicMaxIdleTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dial mux %s: %w", addr, err)
+	}
+	state := dialed.ConnectionState()
+	if state.TLS.NegotiatedProtocol != t.muxALPN() {
+		// Peer does not support mux; close and report so caller can fall back.
+		negotiated := state.TLS.NegotiatedProtocol
+		_ = dialed.CloseWithError(quicAppErrCode, "peer does not speak mux ALPN")
+		return nil, fmt.Errorf("peer at %s negotiated %q (expected %q)", addr, negotiated, t.muxALPN())
+	}
+
+	t.mu.Lock()
+	if existing, exists := t.muxConns[addr]; exists {
+		t.mu.Unlock()
+		_ = dialed.CloseWithError(quicAppErrCode, "duplicate mux connection")
+		return existing, nil
+	}
+	t.muxConns[addr] = dialed
+	t.mu.Unlock()
+	return dialed, nil
+}
+
+// EvictMux removes the mux connection for addr from the cache. internal/raft
+// calls this when its RaftConn becomes broken so the next dial creates a fresh
+// connection.
+func (t *QUICTransport) EvictMux(addr string, conn *quic.Conn) {
+	t.mu.Lock()
+	if t.muxConns[addr] == conn {
+		delete(t.muxConns, addr)
+	}
+	t.mu.Unlock()
+}
+
+// MuxALPN returns the mux ALPN string for tests / diagnostics.
+func (t *QUICTransport) MuxALPN() string { return t.muxALPN() }
+
+// LegacyALPN returns the legacy ALPN string for tests / diagnostics.
+func (t *QUICTransport) LegacyALPN() string { return t.pskALPN() }
 
 // Connect opens a QUIC connection to a remote peer.
 func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
