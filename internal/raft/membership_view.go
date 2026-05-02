@@ -50,6 +50,9 @@ func (n *Node) publishMembershipViewLocked() {
 	if old != nil {
 		n.drainPendingReadIndex(ErrMembershipChanged)
 	}
+	if n.state == Leader && n.peerReplicatorsActive {
+		n.reconcilePeerReplicatorsLocked(view)
+	}
 }
 
 func (n *Node) membershipViewSnapshot() *membershipView {

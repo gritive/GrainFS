@@ -175,14 +175,16 @@ type BatchMetricsSnapshot struct {
 }
 
 type Config struct {
-	ID               string
-	Peers            []string      // addresses of other nodes
-	ElectionTimeout  time.Duration // base election timeout
-	HeartbeatTimeout time.Duration
-	ManagedMode      bool          // enable periodic Raft log GC via quorum watermark
-	LogGCInterval    time.Duration // how often log GC runs (default 30s)
-	MaxEntriesPerAE  uint64        // 0 = unlimited; default via DefaultConfig = 512
-	TrailingLogs     uint64        // entries to keep after snapshot; default 10240
+	ID                            string
+	Peers                         []string      // addresses of other nodes
+	ElectionTimeout               time.Duration // base election timeout
+	HeartbeatTimeout              time.Duration
+	ManagedMode                   bool          // enable periodic Raft log GC via quorum watermark
+	LogGCInterval                 time.Duration // how often log GC runs (default 30s)
+	MaxEntriesPerAE               uint64        // 0 = unlimited; default via DefaultConfig = 512
+	MaxAppendEntriesInflight      int           // 0 = default 2; per-peer AppendEntries pipeline window
+	MaxAppendEntriesInflightBytes int           // 0 = unlimited; per-peer in-flight AE payload bytes
+	TrailingLogs                  uint64        // entries to keep after snapshot; default 10240
 	// LearnerCatchupThreshold: matchIndex+threshold >= commitIndex 시 watcher가 PromoteToVoter propose.
 	// 0 면 100으로 fallback. AddVoter 자동 learner-first의 promote 트리거.
 	LearnerCatchupThreshold uint64
@@ -194,13 +196,14 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig(id string, peers []string) Config {
 	return Config{
-		ID:                      id,
-		Peers:                   peers,
-		ElectionTimeout:         150 * time.Millisecond,
-		HeartbeatTimeout:        50 * time.Millisecond,
-		MaxEntriesPerAE:         512,
-		TrailingLogs:            10240,
-		LearnerCatchupThreshold: 100,
+		ID:                       id,
+		Peers:                    peers,
+		ElectionTimeout:          150 * time.Millisecond,
+		HeartbeatTimeout:         50 * time.Millisecond,
+		MaxEntriesPerAE:          512,
+		MaxAppendEntriesInflight: 2,
+		TrailingLogs:             10240,
+		LearnerCatchupThreshold:  100,
 	}
 }
 
@@ -347,6 +350,10 @@ type Node struct {
 	proposalCh    chan proposal
 	replicationCh chan struct{}
 	metrics       adaptiveMetrics
+
+	// leader-only AppendEntries replication workers
+	peerReplicators       map[string]*peerReplicator
+	peerReplicatorsActive bool
 
 	// noOpCmd is proposed immediately when a node becomes leader so that
 	// advanceCommitIndex can commit entries from previous terms. Set via
@@ -1266,6 +1273,8 @@ func (n *Node) hasQuorum() bool {
 func (n *Node) runLeader() {
 	defer func() {
 		n.mu.Lock()
+		n.peerReplicatorsActive = false
+		n.stopPeerReplicatorsLocked()
 		n.drainPendingReadIndex(ErrLeadershipLost)
 		n.mu.Unlock()
 	}()
@@ -1280,6 +1289,9 @@ func (n *Node) runLeader() {
 		}()
 	}
 
+	n.mu.Lock()
+	n.peerReplicatorsActive = true
+	n.mu.Unlock()
 	n.replicateToAll()
 
 	ticker := time.NewTicker(n.config.HeartbeatTimeout)
@@ -1328,21 +1340,16 @@ func (n *Node) replicateToAll() {
 		n.mu.Unlock()
 		return
 	}
-	peers := n.config.Peers
-	learners := make([]string, 0, len(n.learnerIDs))
-	for _, pk := range n.learnerIDs {
-		learners = append(learners, pk)
+	view := n.membershipViewSnapshot()
+	n.reconcilePeerReplicatorsLocked(view)
+	replicators := make([]*peerReplicator, 0, len(n.peerReplicators))
+	for _, r := range n.peerReplicators {
+		replicators = append(replicators, r)
 	}
 	n.mu.Unlock()
 
-	for _, peer := range peers {
-		n.wg.Add(1)
-		go func(p string) { defer n.wg.Done(); n.replicateTo(p) }(peer)
-	}
-	// Learners receive log entries for catch-up but do not count toward quorum.
-	for _, peerKey := range learners {
-		n.wg.Add(1)
-		go func(p string) { defer n.wg.Done(); n.replicateTo(p) }(peerKey)
+	for _, r := range replicators {
+		r.wake()
 	}
 }
 
