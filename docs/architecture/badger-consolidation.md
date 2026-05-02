@@ -431,6 +431,198 @@ GRAINFS_PERF=1 GRAINFS_PERF_SHARED_BADGER=1 GRAINFS_PERF_SCENARIO=idle-N8 \
 Then sweep `idle-N8,idle-N16,load-N8,load-N16,load-N32` and update this
 section with the comparison table.
 
+## P3 — FSM state DB consolidation (implementation design)
+
+P0b consolidates the raft-log half. P3 consolidates the **other** half — the
+per-group FSM state badger at `groupDir/badger/` — into a single shared
+`<dataDir>/shared-fsm/` *badger.DB. Goal: 2N+1 → 3 BadgerDB per node total.
+
+### Scope inventory
+
+The per-group state DB is wired into both `FSM` (apply.go) and
+`DistributedBackend` (backend.go); both hold the same `*badger.DB`. Touch
+points cluster-wide:
+
+| file | `db.Update/View` calls | iterators |
+|---|---:|---:|
+| `internal/cluster/apply.go` (FSM) | 19 | 4 |
+| `internal/cluster/backend.go` (DistributedBackend) | 15 | many |
+| `internal/cluster/shard_placement.go` | 7 | — |
+| `internal/cluster/snapshotable.go` | 3 | — |
+| `internal/cluster/scrubbable.go` | 1 | — |
+| **total** | **45** | **19** |
+
+Key-builder functions in `apply.go`: 9 (`bucketKey`, `bucketPolicyKey`,
+`bucketVerKey`, `objectMetaKey`, `objectMetaKeyV`, `latestKey`,
+`multipartKey`, `shardPlacementKey`, `pendingMigrationKey`). All return
+`[]byte("rawPrefix:" + suffix)`. None are aware of group identity today.
+
+### Approach: key-builder methods on FSM/DistributedBackend
+
+Two refactor approaches were considered:
+
+**A. Wrap badger.Txn with auto-prefix.** A `prefixedTxn` type that mirrors
+   the Txn API and applies prefix to every Get/Set/Delete/NewIterator. Pro:
+   call sites unchanged. Con: ~10 wrapper methods, every closure signature
+   changes from `*badger.Txn` to `*prefixedTxn`, badger internals leak
+   through (RawIterator, etc.) — invasive across every call site anyway.
+
+**B. Make key builders methods on FSM/DistributedBackend.** Each
+   `objectMetaKey(...)` becomes `f.objectMetaKey(...)` and prepends the
+   group prefix. Iterator prefixes use `f.prefixed(rawPrefix)`. No new
+   abstraction; the diff is mechanical (sed-shape) and visible. Con:
+   more lines changed (every call site touches one identifier). **Recommended.**
+
+### Code shape
+
+```go
+// apply.go
+type FSM struct {
+    db     *badger.DB     // shared across all groups when shared-fsm enabled
+    prefix []byte         // 4-byte BE len(groupID) || groupID; nil for legacy
+    rings  *ringStore
+    // ...existing fields
+}
+
+func NewFSM(db *badger.DB, opts ...FSMOption) *FSM { /* prefix from opts */ }
+
+func (f *FSM) prefixed(rawKey []byte) []byte {
+    if len(f.prefix) == 0 {
+        return rawKey
+    }
+    out := make([]byte, len(f.prefix)+len(rawKey))
+    copy(out, f.prefix)
+    copy(out[len(f.prefix):], rawKey)
+    return out
+}
+
+// Each free key-builder becomes a method:
+func (f *FSM) bucketKey(b string) []byte    { return f.prefixed([]byte("bucket:" + b)) }
+func (f *FSM) objectMetaKey(b, k string) []byte { return f.prefixed([]byte("obj:" + b + "/" + k)) }
+// ... 7 more
+```
+
+Same shape for `DistributedBackend` (which uses the same set of keys).
+Best to factor the key builders into one place that both FSM and
+DistributedBackend reference, sharing a `prefixedKeys` helper struct.
+
+### Snapshot / Restore — the codex hotspot
+
+`FSM.Snapshot()` (apply.go:660) currently iterates the whole DB
+unconditionally. `FSM.Restore()` (apply.go:683) currently deletes every
+key in the DB before reloading. **Both are fatal in shared mode** —
+group A's snapshot would include group B state; restoring group A's
+snapshot would wipe every other group on the node.
+
+Required changes:
+
+```go
+func (f *FSM) Snapshot() ([]byte, error) {
+    state := make(map[string][]byte)
+    err := f.db.View(func(txn *badger.Txn) error {
+        opts := badger.DefaultIteratorOptions
+        opts.Prefix = f.prefix    // scoped iteration
+        it := txn.NewIterator(opts)
+        defer it.Close()
+        for it.Rewind(); it.ValidForPrefix(f.prefix); it.Next() {
+            item := it.Item()
+            // Strip the group prefix before serialization — snapshot
+            // bytes must be portable across group renames.
+            key := string(item.Key()[len(f.prefix):])
+            // ...
+        }
+        return nil
+    })
+    // ...
+}
+
+func (f *FSM) Restore(data []byte) error {
+    // 1. Drop ONLY this group's prefix
+    if len(f.prefix) > 0 {
+        if err := f.db.DropPrefix(f.prefix); err != nil {
+            return err
+        }
+    } else {
+        // legacy path: keep existing whole-DB drop
+    }
+    // 2. Re-encode keys with prefix on write
+    state, err := unmarshalSnapshotState(data)
+    // ...
+    return f.db.Update(func(txn *badger.Txn) error {
+        for k, v := range state {
+            if err := txn.Set(f.prefixed([]byte(k)), v); err != nil {
+                return err
+            }
+        }
+        return nil
+    })
+}
+```
+
+`badger.DropPrefix` is a documented API; it walks the LSM and drops
+matching keys atomically. Brief stall during the operation is acceptable
+for the snapshot install path.
+
+### Group teardown
+
+`GroupBackend.Close()` currently calls `db.Close()` (backend.go path).
+On shared mode the DB is process-owned; group close becomes:
+
+```go
+// no-op for shared DB (caller owns Close)
+// optional DropPrefix when the group is being PERMANENTLY removed
+//   (not on graceful shutdown)
+```
+
+Same `wrapped` flag approach as P0b's BadgerLogStore.
+
+### Migration (legacy → shared)
+
+Same pattern as P0b: at startup, refuse to enable shared-fsm when
+`<dataDir>/groups/*/badger/` directories exist from a pre-P3 deployment.
+Operator must wipe (test cluster) or run an explicit migration tool
+(production — out of scope for prototype).
+
+### Test plan (must-pass before merge)
+
+| test | why |
+|---|---|
+| `TestSharedFSM_PrefixIsolation` | two FSM views over shared DB, all read/write paths stay scoped |
+| `TestSharedFSM_SnapshotPrefixOnly` | group A snapshot serializes only group A keys |
+| `TestSharedFSM_RestoreDoesNotWipeSiblings` | restoring group A leaves group B keys intact |
+| `TestSharedFSM_DropPrefixOnTeardown` | removing group A only drops group A keys |
+| `TestSharedFSM_RestartPersistence` | shared DB close + reopen preserves all groups |
+| `TestE2E_ClusterPerf_SharedFSM_LoadN32` | end-to-end: load-N32 boots cleanly with both shared log + shared FSM (the C2 win) |
+
+The first four are unit; the last two are e2e.
+
+### Phase ordering
+
+This is C2 P3, sequenced AFTER P0b measurement confirms the shared-log
+direction works. If P0b shows shared-log alone unblocks load-N32 boot
+and reduces idle CPU meaningfully, P3 is the natural follow-up — it
+roughly doubles the win.
+
+If P0b shows shared-log alone is enough, P3 becomes optional /
+deprioritized.
+
+### Estimate (revised from original 5d total)
+
+| step | est |
+|---|---|
+| Refactor key builders to methods on FSM (apply.go) | 1d |
+| Refactor key builders for DistributedBackend (backend.go + others) | 1.5d |
+| Snapshot/Restore prefix-scoping + unit tests | 1d |
+| Iterator prefix adjustment (19 sites) | 0.5d |
+| Migration refusal + serve.go wiring + flag | 0.5d |
+| E2E test (perf matrix on shared-fsm) + bug fixing | 1d |
+| Codex review iteration | 0.5d |
+| **total** | **~6d** |
+
+Plus the original P0b 1.5d (now ~done) → **C2 full ≈ 7-8d** vs original
+5d estimate. The extra time is mostly the refactor breadth and
+Snapshot/Restore safety tests.
+
 ## References
 
 - C1 PR: #128 `perf/badger-compactor` (cheap compactor reduction baseline)
