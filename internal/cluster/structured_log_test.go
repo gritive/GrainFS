@@ -39,47 +39,15 @@ type autoNotifyRaft struct {
 
 func (r *autoNotifyRaft) NodeID() string { return r.nodeID }
 func (r *autoNotifyRaft) Propose(data []byte) error {
-	// Parse the proposal to extract bucket/key/versionID and notify commit.
-	// Simpler: notify for any pending task after a brief yield.
-	go func() {
-		r.exec.mu.Lock()
-		for id := range r.exec.pending {
-			// Parse id = "bucket/key/versionID"
-			r.exec.mu.Unlock()
-			// Use split on "/" — id format is bucket+"/"+key+"/"+versionID
-			// Just close the channel directly by calling NotifyCommit with empty strings
-			// and look for exact id match.
-			_ = id
-			return
-		}
-		r.exec.mu.Unlock()
-	}()
-	// Simpler: unblock by closing all pending channels directly.
-	go func() {
-		r.exec.mu.Lock()
-		ids := make([]string, 0, len(r.exec.pending))
-		for id := range r.exec.pending {
-			ids = append(ids, id)
-		}
-		r.exec.mu.Unlock()
-		for _, id := range ids {
-			// Parse bucket/key/version from id
-			// id = bucket + "/" + key + "/" + versionID
-			// versionID is always "" in these tests
-			// Find last two slashes
-			last := len(id) - 1 // strip trailing "/"
-			mid := 0
-			for i := last - 1; i >= 0; i-- {
-				if id[i] == '/' {
-					mid = i
-					break
-				}
-			}
-			bucket := id[:mid]
-			key := id[mid+1 : last]
-			r.exec.NotifyCommit(bucket, key, "")
-		}
-	}()
+	cmd, err := DecodeCommand(data)
+	if err != nil || cmd.Type != CmdMigrationDone {
+		return nil
+	}
+	done, err := decodeMigrationDoneCmd(cmd.Data)
+	if err != nil {
+		return nil
+	}
+	r.exec.NotifyCommit(done.Bucket, done.Key, done.VersionID)
 	return nil
 }
 
@@ -97,6 +65,7 @@ func makeExecutorWithLogger(buf *bytes.Buffer) *MigrationExecutor {
 func TestStructuredLogging_ComponentField(t *testing.T) {
 	var buf bytes.Buffer
 	e := makeExecutorWithLogger(&buf)
+	t.Cleanup(e.Stop)
 
 	task := MigrationTask{Bucket: "b", Key: "k", SrcNode: "src", DstNode: "dst"}
 	ctx, cancel := context.WithCancel(context.Background())

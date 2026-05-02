@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,14 +42,61 @@ type MigrationRaft interface {
 // Worst case: an already-done migration is re-executed, which is idempotent.
 const maxDoneHistory = 10_000
 
-// ttlEntry tracks a pending migration for TTL-based cancellation.
-// Lock order: mu → pendingMu when both are needed.
-// sweepExpired holds pendingMu and calls cancel() — cancel must NOT acquire mu.
+const migrationCoordChanBuf = 4096
+
+// ttlEntry tracks a pending migration for TTL-based cancellation. Entries are
+// owned by the coordination actor.
 type ttlEntry struct {
 	cancel     func()
 	deadline   time.Time    // when this entry expires; updated on extension
 	proposedAt atomic.Int64 // unix nano; non-zero after Phase 2 (Raft proposal submitted)
 	extended   atomic.Bool  // true after the single deadline extension (Option A)
+}
+
+type pendingMigration struct {
+	ch     chan struct{}
+	closed bool
+}
+
+type migrationCoordKind uint8
+
+const (
+	migrationCoordBegin migrationCoordKind = iota
+	migrationCoordNotifyCommit
+	migrationCoordFinish
+	migrationCoordCleanup
+	migrationCoordMarkDone
+	migrationCoordRegisterTTL
+	migrationCoordRemoveTTL
+	migrationCoordMarkProposed
+	migrationCoordHasPendingTTL
+	migrationCoordSweepExpired
+	migrationCoordDoneCount
+	migrationCoordDoneContains
+	migrationCoordCommittedCount
+	migrationCoordPendingContains
+	migrationCoordPendingIDs
+)
+
+type migrationCoordMsg struct {
+	kind   migrationCoordKind
+	id     string
+	cancel func()
+	reply  any
+}
+
+type migrationBeginResp struct {
+	alreadyDone bool
+	waitCh      chan struct{}
+	earlyCommit bool
+	commitCh    chan struct{}
+}
+
+type migrationCoordState struct {
+	done       map[string]struct{}          // idempotency: taskID → done
+	committed  map[string]struct{}          // early commit arrivals: Raft committed before Execute()
+	pending    map[string]*pendingMigration // commit waiters: taskID → chan
+	ttlPending map[string]*ttlEntry         // TTL-tracked entries: taskID → entry
 }
 
 // MigrationExecutor copies all shards from src→dst, proposes CmdMigrationDone,
@@ -68,23 +114,16 @@ type MigrationExecutor struct {
 	maxWriteRetries int
 	retryBaseDelay  time.Duration
 
-	// mu protects done, committed, pending (commit channels).
-	// Lock order: mu → pendingMu when both are needed.
-	mu        sync.Mutex
-	done      map[string]struct{}      // idempotency: taskID → done
-	committed map[string]struct{}      // early commit arrivals: Raft committed before Execute()
-	pending   map[string]chan struct{} // commit channels: taskID → chan
-
-	// pendingMu protects ttlPending. sweepExpired holds pendingMu and calls cancel(),
-	// which must NOT re-acquire mu.
-	pendingMu  sync.Mutex
-	ttlPending map[string]*ttlEntry // TTL-tracked entries: taskID → entry
-	pendingTTL time.Duration        // 0 = TTL sweep disabled
+	// coordCh is the actor mailbox for all migration coordination state. The
+	// actor owns done/committed/pending/ttlPending exclusively; shard I/O stays
+	// in Execute goroutines so large payloads are not copied through the actor.
+	coordCh    chan migrationCoordMsg
+	pendingTTL time.Duration // 0 = TTL sweep disabled
 
 	// quit is closed by Stop() to terminate the sweep goroutine.
 	// stopOnce ensures double-close panic cannot occur.
 	quit     chan struct{}
-	stopOnce sync.Once
+	stopOnce atomic.Bool
 
 	logger zerolog.Logger
 }
@@ -101,19 +140,18 @@ func NewMigrationExecutorWithTTL(mover ShardMover, node MigrationRaft, numShards
 }
 
 func newExecutor(mover ShardMover, node MigrationRaft, numShards int, ttl time.Duration) *MigrationExecutor {
-	return &MigrationExecutor{
+	e := &MigrationExecutor{
 		mover:          mover,
 		node:           node,
 		numShards:      numShards,
 		retryBaseDelay: 500 * time.Millisecond,
-		done:           make(map[string]struct{}),
-		committed:      make(map[string]struct{}),
-		pending:        make(map[string]chan struct{}),
-		ttlPending:     make(map[string]*ttlEntry),
+		coordCh:        make(chan migrationCoordMsg, migrationCoordChanBuf),
 		pendingTTL:     ttl,
 		quit:           make(chan struct{}),
 		logger:         log.With().Str("component", "migration").Logger(),
 	}
+	go e.runCoordActor()
+	return e
 }
 
 // SetShardCounter installs a per-object shard-count callback. fn receives (bucket,
@@ -139,11 +177,14 @@ func (e *MigrationExecutor) Start(ctx context.Context) {
 
 // Stop gracefully shuts down the background sweep loop. Safe to call multiple times.
 func (e *MigrationExecutor) Stop() {
-	e.stopOnce.Do(func() { close(e.quit) })
+	if e.stopOnce.CompareAndSwap(false, true) {
+		close(e.quit)
+	}
 }
 
 // sweepLoop runs sweepExpired every pendingTTL/2, stopping when ctx or quit is done.
 func (e *MigrationExecutor) sweepLoop(ctx context.Context) {
+	defer e.Stop()
 	ticker := time.NewTicker(e.pendingTTL / 2)
 	defer ticker.Stop()
 	for {
@@ -162,72 +203,31 @@ func (e *MigrationExecutor) sweepLoop(ctx context.Context) {
 // For entries with proposedAt set (Phase 2 done, awaiting Raft commit), the
 // deadline is extended by one TTL window (Option A). A second expiry cancels.
 func (e *MigrationExecutor) sweepExpired() {
-	now := time.Now()
-
-	e.pendingMu.Lock()
-	var toCancel []func()
-	var toDelete []string
-	for id, entry := range e.ttlPending {
-		if now.Before(entry.deadline) {
-			continue // not yet expired
-		}
-		// Entry has expired.
-		if entry.proposedAt.Load() != 0 && !entry.extended.Load() {
-			// Phase 2 complete: extend once instead of cancelling (Option A).
-			entry.deadline = now.Add(e.pendingTTL)
-			entry.extended.Store(true)
-			continue
-		}
-		// Either not proposed yet, or already extended once: cancel.
-		toCancel = append(toCancel, entry.cancel)
-		toDelete = append(toDelete, id)
-	}
-	for _, id := range toDelete {
-		delete(e.ttlPending, id)
-	}
-	e.pendingMu.Unlock()
-
-	for _, cancel := range toCancel {
-		cancel()
-	}
-	if len(toDelete) > 0 {
-		metrics.BalancerMigrationPendingTTLExpiredTotal.Add(float64(len(toDelete)))
-	}
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordSweepExpired})
 }
 
 // registerPending adds an entry to the TTL sweep map with deadline = now + pendingTTL.
 func (e *MigrationExecutor) registerPending(id string, cancel func()) {
-	e.pendingMu.Lock()
-	e.ttlPending[id] = &ttlEntry{
-		cancel:   cancel,
-		deadline: time.Now().Add(e.pendingTTL),
-	}
-	e.pendingMu.Unlock()
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordRegisterTTL, id: id, cancel: cancel})
 }
 
 // removePending removes an entry from the TTL sweep map (called after successful commit).
 func (e *MigrationExecutor) removePending(id string) {
-	e.pendingMu.Lock()
-	delete(e.ttlPending, id)
-	e.pendingMu.Unlock()
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordRemoveTTL, id: id})
 }
 
 // markProposed sets proposedAt for id (called after Phase 2 succeeds).
 func (e *MigrationExecutor) markProposed(id string) {
-	e.pendingMu.Lock()
-	entry, ok := e.ttlPending[id]
-	e.pendingMu.Unlock()
-	if ok {
-		entry.proposedAt.Store(time.Now().UnixNano())
-	}
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordMarkProposed, id: id})
 }
 
 // hasPending reports whether id is in the TTL sweep map.
 func (e *MigrationExecutor) hasPending(id string) bool {
-	e.pendingMu.Lock()
-	_, ok := e.ttlPending[id]
-	e.pendingMu.Unlock()
-	return ok
+	reply := make(chan bool, 1)
+	if !e.sendCoord(migrationCoordMsg{kind: migrationCoordHasPendingTTL, id: id, reply: reply}) {
+		return false
+	}
+	return <-reply
 }
 
 // NotifyCommit is called by the FSM when CmdMigrationDone is applied.
@@ -240,22 +240,13 @@ func (e *MigrationExecutor) hasPending(id string) bool {
 // see an inFlight entry and wait on the (now closed) channel rather than re-copying shards.
 func (e *MigrationExecutor) NotifyCommit(bucket, key, versionID string) {
 	id := bucket + "/" + key + "/" + versionID
-	e.mu.Lock()
-	ch, ok := e.pending[id]
-	if !ok {
-		// FSM applied CmdMigrationDone before Execute registered.
-		// Mark committed so Execute() still runs Phase 4 (DeleteShards).
-		e.markCommitted(id)
-	}
-	e.mu.Unlock()
-	if ok {
-		close(ch)
-	}
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordNotifyCommit, id: id})
 }
 
 // Run processes migration tasks from the channel until ctx is cancelled or ch is closed.
 // Each task is executed concurrently.
 func (e *MigrationExecutor) Run(ctx context.Context, tasks <-chan MigrationTask) {
+	defer e.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -282,34 +273,24 @@ func (e *MigrationExecutor) Run(ctx context.Context, tasks <-chan MigrationTask)
 func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) error {
 	id := task.id()
 
-	e.mu.Lock()
-	if _, already := e.done[id]; already {
-		e.mu.Unlock()
+	begin, err := e.beginExecute(ctx, id)
+	if err != nil {
+		return err
+	}
+	if begin.alreadyDone {
 		return nil
 	}
-	// If a concurrent Execute already registered a pending channel, wait for it instead of overwriting.
-	if existingCh, inFlight := e.pending[id]; inFlight {
-		e.mu.Unlock()
+	if begin.waitCh != nil {
 		select {
-		case <-existingCh:
+		case <-begin.waitCh:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 		return nil
 	}
-	// Check for early commit (NotifyCommit arrived before Execute was called).
-	// In this case Phases 1–3 are already complete; only Phase 4 (delete src) remains.
-	earlyCommit := false
-	if _, ec := e.committed[id]; ec {
-		delete(e.committed, id)
-		earlyCommit = true
-	}
-	// Always register a pending channel — even on earlyCommit — so that a concurrent
-	// Execute that arrives after we release mu (but before markDone) blocks here
-	// instead of falling through to Phase 1 and re-copying already-committed shards.
-	commitCh := make(chan struct{})
-	e.pending[id] = commitCh
-	e.mu.Unlock()
+
+	earlyCommit := begin.earlyCommit
+	commitCh := begin.commitCh
 
 	// Wire TTL cancellation: derive a cancellable context so sweepExpired can abort
 	// a stuck migration by calling cancel(). defer ensures cleanup on all exit paths.
@@ -374,13 +355,7 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 	// Both paths (normal and earlyCommit) delete pending[id] here, so concurrent
 	// Execute calls that arrive between NotifyCommit and markDone see an inFlight
 	// entry (a closed channel) and return nil rather than re-copying shards.
-	e.mu.Lock()
-	e.markDone(id)
-	delete(e.pending, id)
-	e.mu.Unlock()
-	if earlyCommit {
-		close(commitCh)
-	}
+	e.finishPending(id)
 
 	// Phase 4: delete from src — runs whether earlyCommit or normal path.
 	e.logger.Debug().Str("phase", "4").Str("task", id).Msg("migration phase start")
@@ -397,34 +372,14 @@ func (e *MigrationExecutor) Execute(ctx context.Context, task MigrationTask) err
 // cleanupPending removes the pending channel for id (error paths) and closes it
 // so any goroutine waiting on it unblocks and returns rather than leaking.
 func (e *MigrationExecutor) cleanupPending(id string) {
-	e.mu.Lock()
-	ch, ok := e.pending[id]
-	if ok {
-		delete(e.pending, id)
-	}
-	e.mu.Unlock()
-	if ok {
-		close(ch)
-	}
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordCleanup, id: id})
 	e.removePending(id)
 }
 
-// markDone records id as completed. Must be called with mu held.
+// markDone records id as completed through the coordination actor.
 // Resets the map when it exceeds maxDoneHistory to bound memory use.
 func (e *MigrationExecutor) markDone(id string) {
-	if len(e.done) >= maxDoneHistory {
-		e.done = make(map[string]struct{}, maxDoneHistory)
-	}
-	e.done[id] = struct{}{}
-}
-
-// markCommitted records an early Raft commit for id. Must be called with mu held.
-// Resets the map when it exceeds maxDoneHistory to bound memory use.
-func (e *MigrationExecutor) markCommitted(id string) {
-	if len(e.committed) >= maxDoneHistory {
-		e.committed = make(map[string]struct{}, maxDoneHistory)
-	}
-	e.committed[id] = struct{}{}
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordMarkDone, id: id})
 }
 
 func (e *MigrationExecutor) proposeDone(task MigrationTask) error {
@@ -439,4 +394,178 @@ func (e *MigrationExecutor) proposeDone(task MigrationTask) error {
 		return fmt.Errorf("migration: marshal MigrationDoneCmd: %w", err)
 	}
 	return e.node.Propose(outer)
+}
+
+func (e *MigrationExecutor) beginExecute(ctx context.Context, id string) (migrationBeginResp, error) {
+	reply := make(chan migrationBeginResp, 1)
+	msg := migrationCoordMsg{kind: migrationCoordBegin, id: id, reply: reply}
+	select {
+	case e.coordCh <- msg:
+	case <-ctx.Done():
+		return migrationBeginResp{}, ctx.Err()
+	case <-e.quit:
+		return migrationBeginResp{}, context.Canceled
+	}
+	select {
+	case resp := <-reply:
+		return resp, nil
+	case <-ctx.Done():
+		return migrationBeginResp{}, ctx.Err()
+	case <-e.quit:
+		return migrationBeginResp{}, context.Canceled
+	}
+}
+
+func (e *MigrationExecutor) finishPending(id string) {
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordFinish, id: id})
+}
+
+func (e *MigrationExecutor) sendCoord(msg migrationCoordMsg) bool {
+	select {
+	case e.coordCh <- msg:
+		return true
+	case <-e.quit:
+		return false
+	}
+}
+
+func (e *MigrationExecutor) runCoordActor() {
+	st := migrationCoordState{
+		done:       make(map[string]struct{}),
+		committed:  make(map[string]struct{}),
+		pending:    make(map[string]*pendingMigration),
+		ttlPending: make(map[string]*ttlEntry),
+	}
+	for {
+		select {
+		case <-e.quit:
+			st.closeAllPending()
+			return
+		case msg := <-e.coordCh:
+			e.handleCoordMsg(&st, msg)
+		}
+	}
+}
+
+func (e *MigrationExecutor) handleCoordMsg(st *migrationCoordState, msg migrationCoordMsg) {
+	switch msg.kind {
+	case migrationCoordBegin:
+		reply := msg.reply.(chan migrationBeginResp)
+		if _, ok := st.done[msg.id]; ok {
+			reply <- migrationBeginResp{alreadyDone: true}
+			return
+		}
+		if pending, ok := st.pending[msg.id]; ok {
+			reply <- migrationBeginResp{waitCh: pending.ch}
+			return
+		}
+		_, earlyCommit := st.committed[msg.id]
+		if earlyCommit {
+			delete(st.committed, msg.id)
+		}
+		ch := make(chan struct{})
+		st.pending[msg.id] = &pendingMigration{ch: ch}
+		reply <- migrationBeginResp{earlyCommit: earlyCommit, commitCh: ch}
+	case migrationCoordNotifyCommit:
+		if pending, ok := st.pending[msg.id]; ok {
+			pending.close()
+			return
+		}
+		st.markCommitted(msg.id)
+	case migrationCoordFinish:
+		st.markDone(msg.id)
+		if pending, ok := st.pending[msg.id]; ok {
+			pending.close()
+			delete(st.pending, msg.id)
+		}
+	case migrationCoordCleanup:
+		if pending, ok := st.pending[msg.id]; ok {
+			pending.close()
+			delete(st.pending, msg.id)
+		}
+	case migrationCoordMarkDone:
+		st.markDone(msg.id)
+	case migrationCoordRegisterTTL:
+		st.ttlPending[msg.id] = &ttlEntry{
+			cancel:   msg.cancel,
+			deadline: time.Now().Add(e.pendingTTL),
+		}
+	case migrationCoordRemoveTTL:
+		delete(st.ttlPending, msg.id)
+	case migrationCoordMarkProposed:
+		if entry, ok := st.ttlPending[msg.id]; ok {
+			entry.proposedAt.Store(time.Now().UnixNano())
+		}
+	case migrationCoordHasPendingTTL:
+		reply := msg.reply.(chan bool)
+		_, ok := st.ttlPending[msg.id]
+		reply <- ok
+	case migrationCoordSweepExpired:
+		e.sweepExpiredLocked(st)
+	case migrationCoordDoneCount:
+		msg.reply.(chan int) <- len(st.done)
+	case migrationCoordDoneContains:
+		_, ok := st.done[msg.id]
+		msg.reply.(chan bool) <- ok
+	case migrationCoordCommittedCount:
+		msg.reply.(chan int) <- len(st.committed)
+	case migrationCoordPendingContains:
+		_, ok := st.pending[msg.id]
+		msg.reply.(chan bool) <- ok
+	case migrationCoordPendingIDs:
+		ids := make([]string, 0, len(st.pending))
+		for id := range st.pending {
+			ids = append(ids, id)
+		}
+		msg.reply.(chan []string) <- ids
+	}
+}
+
+func (e *MigrationExecutor) sweepExpiredLocked(st *migrationCoordState) {
+	now := time.Now()
+	expired := 0
+	for id, entry := range st.ttlPending {
+		if now.Before(entry.deadline) {
+			continue
+		}
+		if entry.proposedAt.Load() != 0 && !entry.extended.Load() {
+			entry.deadline = now.Add(e.pendingTTL)
+			entry.extended.Store(true)
+			continue
+		}
+		entry.cancel()
+		delete(st.ttlPending, id)
+		expired++
+	}
+	if expired > 0 {
+		metrics.BalancerMigrationPendingTTLExpiredTotal.Add(float64(expired))
+	}
+}
+
+func (st *migrationCoordState) markDone(id string) {
+	if len(st.done) >= maxDoneHistory {
+		st.done = make(map[string]struct{}, maxDoneHistory)
+	}
+	st.done[id] = struct{}{}
+}
+
+func (st *migrationCoordState) markCommitted(id string) {
+	if len(st.committed) >= maxDoneHistory {
+		st.committed = make(map[string]struct{}, maxDoneHistory)
+	}
+	st.committed[id] = struct{}{}
+}
+
+func (st *migrationCoordState) closeAllPending() {
+	for _, pending := range st.pending {
+		pending.close()
+	}
+}
+
+func (p *pendingMigration) close() {
+	if p.closed {
+		return
+	}
+	close(p.ch)
+	p.closed = true
 }

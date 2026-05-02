@@ -67,8 +67,8 @@ func TestBalancerIntegration_ExecutorNotifyLoop(t *testing.T) {
 	// Track delete calls
 	var deletedSrc string
 	mover := &notifyMover{
-		shards:    shards[:],
-		onDelete:  func(peer string) { deletedSrc = peer },
+		shards:   shards[:],
+		onDelete: func(peer string) { deletedSrc = peer },
 	}
 
 	// The raft node auto-calls NotifyCommit on Propose (simulates immediate FSM apply)
@@ -77,7 +77,7 @@ func TestBalancerIntegration_ExecutorNotifyLoop(t *testing.T) {
 		exec.NotifyCommit("bucket", "key", "v1")
 	}}
 
-	exec = NewMigrationExecutor(mover, node, len(shards))
+	exec = cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, len(shards)))
 
 	task := MigrationTask{
 		Bucket:    "bucket",
