@@ -49,6 +49,70 @@ func TestMetaCatalogLoadTableReadsMetadataFromWarehouseObject(t *testing.T) {
 	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", tbl.MetadataLocation)
 }
 
+func TestMetaCatalogLeaderListCommitAndDelete(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+	require.NoError(t, backend.CreateBucket("grainfs-tables"))
+	_, err = backend.PutObject("grainfs-tables", "warehouse/analytics/events/metadata/00000.json", bytes.NewReader([]byte(`{"format-version":2,"current-snapshot-id":1}`)), "application/json")
+	require.NoError(t, err)
+	nextMetadata := []byte(`{"format-version":2,"current-snapshot-id":2}`)
+	_, err = backend.PutObject("grainfs-tables", "warehouse/analytics/events/metadata/00001.json", bytes.NewReader(nextMetadata), "application/json")
+	require.NoError(t, err)
+
+	catalog := NewMetaCatalog(m, backend, "s3://grainfs-tables/warehouse")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, map[string]string{"owner": "eng"}))
+	require.NoError(t, catalog.CreateNamespace(ctx, []string{"staging"}, nil))
+
+	namespaces, err := catalog.ListNamespaces(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, [][]string{{"analytics"}, {"staging"}}, namespaces)
+	props, err := catalog.LoadNamespace(ctx, []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, "eng", props["owner"])
+
+	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
+	_, err = catalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
+		Properties:       map[string]string{"format-version": "2"},
+	})
+	require.NoError(t, err)
+	tables, err := catalog.ListTables(ctx, []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, []icebergcatalog.Identifier{ident}, tables)
+
+	_, err = catalog.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+		ExpectedMetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
+		NewMetadataLocation:      "s3://grainfs-tables/warehouse/analytics/events/metadata/00001.json",
+	})
+	require.NoError(t, err)
+	committed, err := catalog.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00001.json", committed.MetadataLocation)
+	require.JSONEq(t, string(nextMetadata), string(committed.Metadata))
+
+	_, err = catalog.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+		ExpectedMetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
+		NewMetadataLocation:      "s3://grainfs-tables/warehouse/analytics/events/metadata/00002.json",
+	})
+	require.ErrorIs(t, err, icebergcatalog.ErrCommitFailed)
+	require.ErrorIs(t, catalog.DeleteNamespace(ctx, []string{"analytics"}), icebergcatalog.ErrNamespaceNotEmpty)
+	require.NoError(t, catalog.DeleteTable(ctx, ident))
+	_, err = catalog.LoadTable(ctx, ident)
+	require.ErrorIs(t, err, icebergcatalog.ErrTableNotFound)
+	require.NoError(t, catalog.DeleteNamespace(ctx, []string{"analytics"}))
+}
+
 func TestMetaCatalogFollowerWriteUsesForwarderTypedResult(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })

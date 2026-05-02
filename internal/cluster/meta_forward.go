@@ -15,12 +15,11 @@ import (
 type MetaForwardDialer func(peer string, payload []byte) ([]byte, error)
 
 type MetaProposeForwardSender struct {
-	dialer  MetaForwardDialer
-	timeout time.Duration
+	dialer MetaForwardDialer
 }
 
 func NewMetaProposeForwardSender(d MetaForwardDialer) *MetaProposeForwardSender {
-	return &MetaProposeForwardSender{dialer: d, timeout: 10 * time.Second}
+	return &MetaProposeForwardSender{dialer: d}
 }
 
 func (s *MetaProposeForwardSender) Send(ctx context.Context, peers []string, command []byte) error {

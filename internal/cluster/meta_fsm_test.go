@@ -286,6 +286,44 @@ func makeIcebergCreateTableCmd(t *testing.T, requestID string, ident icebergcata
 	return cmd
 }
 
+func makeIcebergDeleteNamespaceCmd(t *testing.T, requestID string, namespace []string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergDeleteNamespaceCmd(IcebergDeleteNamespaceCmd{
+		RequestID: requestID,
+		Namespace: namespace,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergDeleteNamespace, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeIcebergCommitTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier, expected, next string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergCommitTableCmd(IcebergCommitTableCmd{
+		RequestID:                requestID,
+		Identifier:               ident,
+		ExpectedMetadataLocation: expected,
+		NewMetadataLocation:      next,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCommitTable, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeIcebergDeleteTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergDeleteTableCmd(IcebergDeleteTableCmd{
+		RequestID:  requestID,
+		Identifier: ident,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergDeleteTable, data)
+	require.NoError(t, err)
+	return cmd
+}
+
 func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "ns-1", []string{"analytics"}, map[string]string{"owner": "eng"})))
@@ -328,6 +366,47 @@ func TestMetaFSM_IcebergApplyPublishesTypedResultWithoutReturningApplyError(t *t
 
 	require.NoError(t, results["first"])
 	require.ErrorIs(t, results["duplicate"], icebergcatalog.ErrNamespaceExists)
+}
+
+func TestMetaFSM_IcebergCatalog_CommitDeleteAndTypedErrors(t *testing.T) {
+	f := NewMetaFSM()
+	results := make(map[string]error)
+	f.SetOnIcebergApplyResult(func(requestID string, err error) {
+		results[requestID] = err
+	})
+	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
+
+	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "missing-ns-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
+	require.ErrorIs(t, results["missing-ns-table"], icebergcatalog.ErrNamespaceNotFound)
+
+	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "create-ns", []string{"analytics"}, nil)))
+	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "create-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
+	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-ok", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00001.json")))
+	require.NoError(t, results["commit-ok"])
+	table, ok := f.IcebergTable(ident)
+	require.True(t, ok)
+	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
+
+	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-stale", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00002.json")))
+	require.ErrorIs(t, results["commit-stale"], icebergcatalog.ErrCommitFailed)
+	table, ok = f.IcebergTable(ident)
+	require.True(t, ok)
+	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
+
+	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-ns-not-empty", []string{"analytics"})))
+	require.ErrorIs(t, results["delete-ns-not-empty"], icebergcatalog.ErrNamespaceNotEmpty)
+
+	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-table", ident)))
+	require.NoError(t, results["delete-table"])
+	_, ok = f.IcebergTable(ident)
+	require.False(t, ok)
+
+	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-missing-table", ident)))
+	require.ErrorIs(t, results["delete-missing-table"], icebergcatalog.ErrTableNotFound)
+	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-ns", []string{"analytics"})))
+	require.NoError(t, results["delete-ns"])
+	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-missing-ns", []string{"analytics"})))
+	require.ErrorIs(t, results["delete-missing-ns"], icebergcatalog.ErrNamespaceNotFound)
 }
 
 func TestMetaFSM_OnBucketAssigned_CallbackFired(t *testing.T) {
