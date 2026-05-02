@@ -57,6 +57,7 @@ Flags:
       --no-encryption            암호화 비활성화
       --node-id string           노드 ID (클러스터 모드)
       --raft-addr string         Raft 주소 (클러스터 모드)
+      --join string              기존 클러스터의 Raft 주소로 동적 참가
       --peers string             피어 목록 (클러스터 모드)
       --badger-managed-mode      Raft 로그 GC 활성화. 활성화 시 on-disk 포맷 변경; 이후 플래그 없이 재시작 불가
                                  (상세: docs/badger-managed-mode-rollback.md)

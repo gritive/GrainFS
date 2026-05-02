@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -90,7 +91,8 @@ type metaJoinCoordinator interface {
 }
 
 type MetaJoinReceiver struct {
-	meta metaJoinCoordinator
+	meta   metaJoinCoordinator
+	joinMu sync.Mutex
 }
 
 func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
@@ -121,6 +123,8 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 			LeaderAddr: leaderAddr,
 		})
 	}
+	r.joinMu.Lock()
+	defer r.joinMu.Unlock()
 	for _, n := range r.meta.Nodes() {
 		if n.ID == joinReq.NodeID {
 			if n.Address == joinReq.Address {

@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -76,10 +78,62 @@ func TestMetaJoinReceiver_NotLeaderReturnsResolvedHint(t *testing.T) {
 	require.Equal(t, "10.0.0.1:7001", reply.LeaderAddr)
 }
 
+func TestMetaJoinReceiver_SerializesSameNodeIDJoin(t *testing.T) {
+	f := NewMetaFSM()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	coord := &fakeJoinCoordinator{
+		leader:      true,
+		fsm:         f,
+		joinStarted: started,
+		releaseJoin: release,
+		onJoin: func(id, addr string) {
+			require.NoError(t, f.applyCmd(makeAddNodeCmd(t, id, addr, 0)))
+		},
+	}
+	receiver := NewMetaJoinReceiver(coord)
+	payloadA, err := encodeJoinRequest(JoinRequest{NodeID: "node-2", Address: "10.0.0.2:7001"})
+	require.NoError(t, err)
+	payloadB, err := encodeJoinRequest(JoinRequest{NodeID: "node-2", Address: "10.0.0.22:7001"})
+	require.NoError(t, err)
+
+	replyA := make(chan *JoinReply, 1)
+	replyB := make(chan *JoinReply, 1)
+	go func() {
+		resp := receiver.Handle(&transport.Message{Type: transport.StreamMetaJoin, Payload: payloadA})
+		reply, err := decodeJoinReply(resp.Payload)
+		require.NoError(t, err)
+		replyA <- reply
+	}()
+	<-started
+	go func() {
+		resp := receiver.Handle(&transport.Message{Type: transport.StreamMetaJoin, Payload: payloadB})
+		reply, err := decodeJoinReply(resp.Payload)
+		require.NoError(t, err)
+		replyB <- reply
+	}()
+
+	select {
+	case reply := <-replyB:
+		t.Fatalf("second join completed before first join registered membership: %+v", reply)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	require.Equal(t, JoinStatusOK, (<-replyA).Status)
+	require.Equal(t, JoinStatusAddrMismatch, (<-replyB).Status)
+	require.Equal(t, 1, coord.JoinCalls())
+}
+
 type fakeJoinCoordinator struct {
-	leader   bool
-	leaderID string
-	fsm      *MetaFSM
+	leader      bool
+	leaderID    string
+	fsm         *MetaFSM
+	joinStarted chan struct{}
+	releaseJoin chan struct{}
+	onJoin      func(id, addr string)
+	mu          sync.Mutex
+	joinCalls   int
 }
 
 func (f *fakeJoinCoordinator) IsLeader() bool { return f.leader }
@@ -87,8 +141,30 @@ func (f *fakeJoinCoordinator) LeaderID() string {
 	return f.leaderID
 }
 func (f *fakeJoinCoordinator) Join(ctx context.Context, id, addr string) error {
+	f.mu.Lock()
+	f.joinCalls++
+	if f.joinStarted != nil && f.joinCalls == 1 {
+		close(f.joinStarted)
+	}
+	f.mu.Unlock()
+	if f.releaseJoin != nil {
+		select {
+		case <-f.releaseJoin:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if f.onJoin != nil {
+		f.onJoin(id, addr)
+	}
 	return nil
 }
 func (f *fakeJoinCoordinator) Nodes() []MetaNodeEntry {
 	return f.fsm.Nodes()
+}
+
+func (f *fakeJoinCoordinator) JoinCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.joinCalls
 }
