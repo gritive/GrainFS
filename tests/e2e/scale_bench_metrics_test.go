@@ -16,12 +16,13 @@ type procMetrics struct {
 	pid        int
 	rssMB      float64 // resident set size (MB)
 	cpuPct     float64 // ps -o pcpu (%)
-	heapMB     float64 // /debug/pprof heap HeapAlloc (MB)
+	heapMB     float64 // runtime.MemStats.HeapAlloc from /debug/pprof/heap?debug=1 (MB)
 	goroutines int     // /debug/pprof/goroutine count
 }
 
 // fetchPprofHeap 는 /debug/pprof/heap?debug=1 의 텍스트 모드 헤더에서
-// HeapAlloc 값을 추출해 MB로 반환한다.
+// HeapAlloc 값을 추출해 MB로 반환한다. HeapAlloc은 RSS가 아니라 Go live
+// heap 계정값이며, pprof의 inuse_space top과도 같은 표본은 아니다.
 //
 // 헤더 예시: "# HeapAlloc = 12345678"
 func fetchPprofHeap(pprofURL string) (float64, error) {

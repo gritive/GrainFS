@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.23.0] — 2026-05-03 — remove raft idle batcher polling
+
+### Fixed
+
+- **raft**: idle batcher loops now block until the first proposal before arming a timer, removing the 100µs idle polling cycle that showed up as CPU overhead in quiet multi-node clusters.
+- **raft**: batch collection now reuses a single timer and a fixed stack buffer, keeping the hot path allocation-free after the first proposal while preserving the existing lock-free proposal channel flow.
+
+### Changed
+
+- **profiling**: e2e profile reports now label `heap (MB)` as Go `runtime.MemStats.HeapAlloc`, not RSS and not the same view as pprof `inuse_space`.
+
+### Tests
+
+- **raft**: added a regression test proving an idle batcher does not keep allocating timers when no proposals arrive.
+- **cluster**: validated the fix with a real 6-node idle profile run; CPU samples were 2.55% to 4.35% per node over 20s, and batcher timer allocation no longer appeared in CPU or allocation profiles.
+
 ## [0.0.22.0] — 2026-05-03 — dynamic cluster join and all-node service coverage
 
 ### Added
