@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/icebergcatalog"
 )
 
 func makeAddNodeCmd(t *testing.T, id, addr string, role uint8) []byte {
@@ -256,6 +257,156 @@ func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
 	require.Len(t, assignments, 2)
 	assert.Equal(t, "group-0", assignments["photos"])
 	assert.Equal(t, "group-1", assignments["videos"])
+}
+
+func makeIcebergCreateNamespaceCmd(t *testing.T, requestID string, namespace []string, properties map[string]string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergCreateNamespaceCmd(IcebergCreateNamespaceCmd{
+		RequestID:  requestID,
+		Namespace:  namespace,
+		Properties: properties,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateNamespace, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeIcebergCreateTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier, metadataLocation string, properties map[string]string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergCreateTableCmd(IcebergCreateTableCmd{
+		RequestID:        requestID,
+		Identifier:       ident,
+		MetadataLocation: metadataLocation,
+		Properties:       properties,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateTable, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeIcebergDeleteNamespaceCmd(t *testing.T, requestID string, namespace []string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergDeleteNamespaceCmd(IcebergDeleteNamespaceCmd{
+		RequestID: requestID,
+		Namespace: namespace,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergDeleteNamespace, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeIcebergCommitTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier, expected, next string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergCommitTableCmd(IcebergCommitTableCmd{
+		RequestID:                requestID,
+		Identifier:               ident,
+		ExpectedMetadataLocation: expected,
+		NewMetadataLocation:      next,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCommitTable, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeIcebergDeleteTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergDeleteTableCmd(IcebergDeleteTableCmd{
+		RequestID:  requestID,
+		Identifier: ident,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergDeleteTable, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "ns-1", []string{"analytics"}, map[string]string{"owner": "eng"})))
+	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "tbl-1", icebergcatalog.Identifier{
+		Namespace: []string{"analytics"},
+		Name:      "events",
+	}, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", map[string]string{"format-version": "2"})))
+
+	ns, ok := f.IcebergNamespace([]string{"analytics"})
+	require.True(t, ok)
+	require.Equal(t, []string{"analytics"}, ns.Namespace)
+	require.Equal(t, "eng", ns.Properties["owner"])
+
+	tbl, ok := f.IcebergTable(icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	require.True(t, ok)
+	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", tbl.MetadataLocation)
+	require.Equal(t, "2", tbl.Properties["format-version"])
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+	require.NotContains(t, string(snap), "current-snapshot-id", "metadata JSON bodies must not be snapshotted into meta-Raft")
+
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(snap))
+	restored, ok := f2.IcebergTable(icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	require.True(t, ok)
+	require.Equal(t, tbl.MetadataLocation, restored.MetadataLocation)
+	require.Equal(t, tbl.Identifier, restored.Identifier)
+}
+
+func TestMetaFSM_IcebergApplyPublishesTypedResultWithoutReturningApplyError(t *testing.T) {
+	f := NewMetaFSM()
+	results := make(map[string]error)
+	f.SetOnIcebergApplyResult(func(requestID string, err error) {
+		results[requestID] = err
+	})
+
+	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "first", []string{"analytics"}, nil)))
+	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "duplicate", []string{"analytics"}, nil)))
+
+	require.NoError(t, results["first"])
+	require.ErrorIs(t, results["duplicate"], icebergcatalog.ErrNamespaceExists)
+}
+
+func TestMetaFSM_IcebergCatalog_CommitDeleteAndTypedErrors(t *testing.T) {
+	f := NewMetaFSM()
+	results := make(map[string]error)
+	f.SetOnIcebergApplyResult(func(requestID string, err error) {
+		results[requestID] = err
+	})
+	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
+
+	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "missing-ns-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
+	require.ErrorIs(t, results["missing-ns-table"], icebergcatalog.ErrNamespaceNotFound)
+
+	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "create-ns", []string{"analytics"}, nil)))
+	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "create-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
+	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-ok", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00001.json")))
+	require.NoError(t, results["commit-ok"])
+	table, ok := f.IcebergTable(ident)
+	require.True(t, ok)
+	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
+
+	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-stale", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00002.json")))
+	require.ErrorIs(t, results["commit-stale"], icebergcatalog.ErrCommitFailed)
+	table, ok = f.IcebergTable(ident)
+	require.True(t, ok)
+	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
+
+	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-ns-not-empty", []string{"analytics"})))
+	require.ErrorIs(t, results["delete-ns-not-empty"], icebergcatalog.ErrNamespaceNotEmpty)
+
+	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-table", ident)))
+	require.NoError(t, results["delete-table"])
+	_, ok = f.IcebergTable(ident)
+	require.False(t, ok)
+
+	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-missing-table", ident)))
+	require.ErrorIs(t, results["delete-missing-table"], icebergcatalog.ErrTableNotFound)
+	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-ns", []string{"analytics"})))
+	require.NoError(t, results["delete-ns"])
+	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-missing-ns", []string{"analytics"})))
+	require.ErrorIs(t, results["delete-missing-ns"], icebergcatalog.ErrNamespaceNotFound)
 }
 
 func TestMetaFSM_OnBucketAssigned_CallbackFired(t *testing.T) {

@@ -35,12 +35,12 @@ func (s *Server) registerIcebergAPI(h *server.Hertz) {
 	h.Any("/iceberg/*path", s.icebergUnsupported)
 }
 
-func (s *Server) requireIceberg(c *app.RequestContext) (*icebergcatalog.Store, bool) {
-	if s.icebergStore == nil {
+func (s *Server) requireIceberg(c *app.RequestContext) (icebergcatalog.Catalog, bool) {
+	if s.icebergCatalog == nil {
 		writeIcebergError(c, consts.StatusNotImplemented, "NotImplementedException", "Iceberg REST Catalog is only supported for local Badger-backed servers in this release")
 		return nil, false
 	}
-	return s.icebergStore, true
+	return s.icebergCatalog, true
 }
 
 func (s *Server) icebergConfig(_ context.Context, c *app.RequestContext) {
@@ -320,6 +320,8 @@ func writeIcebergMappedError(c *app.RequestContext, err error) {
 		writeIcebergError(c, consts.StatusConflict, "AlreadyExistsException", "table already exists")
 	case errors.Is(err, icebergcatalog.ErrCommitFailed):
 		writeIcebergError(c, consts.StatusConflict, "CommitFailedException", "table metadata pointer changed")
+	case errors.Is(err, icebergcatalog.ErrServiceUnavailable):
+		writeIcebergError(c, consts.StatusServiceUnavailable, "ServiceUnavailableException", "Iceberg catalog service unavailable")
 	default:
 		writeIcebergError(c, consts.StatusInternalServerError, "InternalServerError", err.Error())
 	}

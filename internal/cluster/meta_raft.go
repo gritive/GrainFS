@@ -45,6 +45,9 @@ type MetaRaft struct {
 	lastApplied   atomic.Uint64
 	applyNotifyMu sync.Mutex
 	applyNotify   chan struct{} // closed each time an entry is applied; replaced atomically
+
+	icebergMu      sync.Mutex
+	icebergWaiters map[string]chan error
 }
 
 // NewMetaRaft constructs a MetaRaft from config. The node is not started yet;
@@ -77,14 +80,16 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	snapMgr.SetJointStateRestorer(node.RestoreJointStateFromSnapshot)
 
 	m := &MetaRaft{
-		node:        node,
-		store:       store,
-		snapMgr:     snapMgr,
-		fsm:         fsm,
-		cfg:         cfg,
-		done:        make(chan struct{}),
-		applyNotify: make(chan struct{}),
+		node:           node,
+		store:          store,
+		snapMgr:        snapMgr,
+		fsm:            fsm,
+		cfg:            cfg,
+		done:           make(chan struct{}),
+		applyNotify:    make(chan struct{}),
+		icebergWaiters: make(map[string]chan error),
 	}
+	fsm.SetOnIcebergApplyResult(m.publishIcebergResult)
 
 	if cfg.Transport != nil {
 		m.wireTransport(cfg.Transport)
@@ -265,6 +270,131 @@ func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string, reason c
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
 	return m.waitApplied(ctx, idx)
+}
+
+func (m *MetaRaft) ProposeIcebergCreateNamespace(ctx context.Context, cmd IcebergCreateNamespaceCmd) error {
+	payload, err := encodeMetaIcebergCreateNamespaceCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode IcebergCreateNamespace: %w", err)
+	}
+	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCreateNamespace, payload, cmd.RequestID)
+}
+
+func (m *MetaRaft) ProposeIcebergDeleteNamespace(ctx context.Context, cmd IcebergDeleteNamespaceCmd) error {
+	payload, err := encodeMetaIcebergDeleteNamespaceCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode IcebergDeleteNamespace: %w", err)
+	}
+	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergDeleteNamespace, payload, cmd.RequestID)
+}
+
+func (m *MetaRaft) ProposeIcebergCreateTable(ctx context.Context, cmd IcebergCreateTableCmd) error {
+	payload, err := encodeMetaIcebergCreateTableCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode IcebergCreateTable: %w", err)
+	}
+	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCreateTable, payload, cmd.RequestID)
+}
+
+func (m *MetaRaft) ProposeIcebergCommitTable(ctx context.Context, cmd IcebergCommitTableCmd) error {
+	payload, err := encodeMetaIcebergCommitTableCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode IcebergCommitTable: %w", err)
+	}
+	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCommitTable, payload, cmd.RequestID)
+}
+
+func (m *MetaRaft) ProposeIcebergDeleteTable(ctx context.Context, cmd IcebergDeleteTableCmd) error {
+	payload, err := encodeMetaIcebergDeleteTableCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode IcebergDeleteTable: %w", err)
+	}
+	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID)
+}
+
+func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) error {
+	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
+	requestID, err := icebergRequestID(cmd.Type(), cmd.DataBytes())
+	if err != nil {
+		return err
+	}
+	return m.proposeIcebergCommand(ctx, cmd.Type(), cmd.DataBytes(), requestID)
+}
+
+func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {
+	switch typ {
+	case MetaCmdTypeIcebergCreateNamespace:
+		cmd, err := decodeMetaIcebergCreateNamespaceCmd(payload)
+		return cmd.RequestID, err
+	case MetaCmdTypeIcebergDeleteNamespace:
+		cmd, err := decodeMetaIcebergDeleteNamespaceCmd(payload)
+		return cmd.RequestID, err
+	case MetaCmdTypeIcebergCreateTable:
+		cmd, err := decodeMetaIcebergCreateTableCmd(payload)
+		return cmd.RequestID, err
+	case MetaCmdTypeIcebergCommitTable:
+		cmd, err := decodeMetaIcebergCommitTableCmd(payload)
+		return cmd.RequestID, err
+	case MetaCmdTypeIcebergDeleteTable:
+		cmd, err := decodeMetaIcebergDeleteTableCmd(payload)
+		return cmd.RequestID, err
+	default:
+		return "", fmt.Errorf("meta_raft: non-iceberg command type %s", typ)
+	}
+}
+
+func (m *MetaRaft) proposeIcebergCommand(ctx context.Context, typ MetaCmdType, payload []byte, requestID string) error {
+	if requestID == "" {
+		return fmt.Errorf("meta_raft: iceberg command missing request ID")
+	}
+	waiter := m.registerIcebergWaiter(requestID)
+	defer m.unregisterIcebergWaiter(requestID)
+	data, err := encodeMetaCmd(typ, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	if err := m.waitApplied(ctx, idx); err != nil {
+		return err
+	}
+	select {
+	case err := <-waiter:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.done:
+		return fmt.Errorf("meta_raft: apply loop stopped before iceberg result %q was delivered", requestID)
+	}
+}
+
+func (m *MetaRaft) registerIcebergWaiter(requestID string) chan error {
+	ch := make(chan error, 1)
+	m.icebergMu.Lock()
+	m.icebergWaiters[requestID] = ch
+	m.icebergMu.Unlock()
+	return ch
+}
+
+func (m *MetaRaft) unregisterIcebergWaiter(requestID string) {
+	m.icebergMu.Lock()
+	delete(m.icebergWaiters, requestID)
+	m.icebergMu.Unlock()
+}
+
+func (m *MetaRaft) publishIcebergResult(requestID string, err error) {
+	m.icebergMu.Lock()
+	ch := m.icebergWaiters[requestID]
+	m.icebergMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- err:
+	default:
+	}
 }
 
 // waitApplied blocks until the FSM apply loop has processed the entry at idx.

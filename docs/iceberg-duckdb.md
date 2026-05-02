@@ -2,9 +2,14 @@
 
 GrainFS exposes a minimal Iceberg REST Catalog for DuckDB at `/iceberg/v1`.
 
-This release supports single-node `grainfs serve` only. Multi-peer cluster mode
-returns an Iceberg JSON `NotImplementedException` until catalog state is carried
-through meta-Raft.
+Single-node `grainfs serve` stores catalog namespace and table state in the
+local Badger-backed metadata DB. Multi-peer cluster mode stores namespace and
+table metadata pointers in meta-Raft, so clients can call `/iceberg/*` on leader
+or follower nodes without creating node-local split-brain catalog state.
+
+Table metadata JSON files remain ordinary GrainFS objects under the warehouse
+bucket. Meta-Raft stores only the current namespace/table records and metadata
+locations.
 
 ## Start GrainFS
 
@@ -66,3 +71,8 @@ make test-e2e-iceberg
 The test starts GrainFS, creates the warehouse bucket, attaches DuckDB through
 the Iceberg REST Catalog, creates and writes a table, restarts GrainFS, reads
 the table again, then drops the table and namespace through DuckDB.
+
+Cluster safety is covered by unit and server integration tests around
+meta-Raft-backed catalog state, follower-to-leader write forwarding, snapshot
+restore, typed conflict propagation, and stale metadata pointer compare-and-swap
+handling. The embedded DuckDB e2e remains a single-node smoke test.

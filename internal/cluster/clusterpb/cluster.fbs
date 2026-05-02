@@ -207,7 +207,12 @@ enum MetaCmdType : uint8 {
   PutBucketAssignment  = 5,   // bucket → group_id 영속 매핑 (PR-D)
   SetLoadSnapshot      = 6,   // PR-D: leader 주기적 load commit
   ProposeRebalancePlan = 7,   // PR-D: rebalancer가 plan 제안
-  AbortPlan            = 8    // PR-D: timeout / operator 취소 / 완료 마커
+  AbortPlan            = 8,   // PR-D: timeout / operator 취소 / 완료 마커
+  IcebergCreateNamespace = 9,
+  IcebergDeleteNamespace = 10,
+  IcebergCreateTable = 11,
+  IcebergCommitTable = 12,
+  IcebergDeleteTable = 13
 }
 
 table MetaNodeEntry {
@@ -293,10 +298,58 @@ table MetaAbortPlanCmd {
   reason:AbortPlanReason;
 }
 
+table IcebergNamespaceEntry {
+  namespace:[string];
+  properties:[KeyValue];
+}
+
+table IcebergIdentifier {
+  namespace:[string];
+  name:string;
+}
+
+table IcebergTableEntry {
+  identifier:IcebergIdentifier;
+  metadata_location:string;
+  properties:[KeyValue];
+}
+
+table MetaIcebergCreateNamespaceCmd {
+  request_id:string;
+  namespace:[string];
+  properties:[KeyValue];
+}
+
+table MetaIcebergDeleteNamespaceCmd {
+  request_id:string;
+  namespace:[string];
+}
+
+table MetaIcebergCreateTableCmd {
+  request_id:string;
+  identifier:IcebergIdentifier;
+  metadata_location:string;
+  properties:[KeyValue];
+}
+
+table MetaIcebergCommitTableCmd {
+  request_id:string;
+  identifier:IcebergIdentifier;
+  expected_metadata_location:string;
+  new_metadata_location:string;
+}
+
+table MetaIcebergDeleteTableCmd {
+  request_id:string;
+  identifier:IcebergIdentifier;
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
   shard_groups:[ShardGroupEntry];             // PR-C
   bucket_assignments:[BucketAssignmentEntry]; // PR-D
   load_snapshot:[LoadStatEntry];              // PR-D
   active_plan:RebalancePlan;                  // PR-D; nil = no active plan
+  iceberg_namespaces:[IcebergNamespaceEntry];
+  iceberg_tables:[IcebergTableEntry];
 }

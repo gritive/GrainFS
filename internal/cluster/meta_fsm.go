@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,20 +11,26 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/icebergcatalog"
 )
 
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                 = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode              = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode           = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup        = clusterpb.MetaCmdTypePutShardGroup        // PR-C
-	MetaCmdTypePutBucketAssignment  = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
-	MetaCmdTypeSetLoadSnapshot      = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
-	MetaCmdTypeProposeRebalancePlan = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
-	MetaCmdTypeAbortPlan            = clusterpb.MetaCmdTypeAbortPlan            // PR-D
+	MetaCmdTypeNoOp                   = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode                = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode             = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup          = clusterpb.MetaCmdTypePutShardGroup        // PR-C
+	MetaCmdTypePutBucketAssignment    = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
+	MetaCmdTypeSetLoadSnapshot        = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
+	MetaCmdTypeProposeRebalancePlan   = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
+	MetaCmdTypeAbortPlan              = clusterpb.MetaCmdTypeAbortPlan            // PR-D
+	MetaCmdTypeIcebergCreateNamespace = clusterpb.MetaCmdTypeIcebergCreateNamespace
+	MetaCmdTypeIcebergDeleteNamespace = clusterpb.MetaCmdTypeIcebergDeleteNamespace
+	MetaCmdTypeIcebergCreateTable     = clusterpb.MetaCmdTypeIcebergCreateTable
+	MetaCmdTypeIcebergCommitTable     = clusterpb.MetaCmdTypeIcebergCommitTable
+	MetaCmdTypeIcebergDeleteTable     = clusterpb.MetaCmdTypeIcebergDeleteTable
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -57,6 +65,47 @@ type RebalancePlan struct {
 	CreatedAt time.Time
 }
 
+type IcebergNamespaceEntry struct {
+	Namespace  []string
+	Properties map[string]string
+}
+
+type IcebergTableEntry struct {
+	Identifier       icebergcatalog.Identifier
+	MetadataLocation string
+	Properties       map[string]string
+}
+
+type IcebergCreateNamespaceCmd struct {
+	RequestID  string
+	Namespace  []string
+	Properties map[string]string
+}
+
+type IcebergDeleteNamespaceCmd struct {
+	RequestID string
+	Namespace []string
+}
+
+type IcebergCreateTableCmd struct {
+	RequestID        string
+	Identifier       icebergcatalog.Identifier
+	MetadataLocation string
+	Properties       map[string]string
+}
+
+type IcebergCommitTableCmd struct {
+	RequestID                string
+	Identifier               icebergcatalog.Identifier
+	ExpectedMetadataLocation string
+	NewMetadataLocation      string
+}
+
+type IcebergDeleteTableCmd struct {
+	RequestID  string
+	Identifier icebergcatalog.Identifier
+}
+
 // MetaFSM implements raft.Snapshotter for the meta-Raft group.
 // It holds cluster membership state.
 //
@@ -78,9 +127,12 @@ type MetaFSM struct {
 	bucketAssignments map[string]string          // bucket → group_id (PR-D)
 	loadSnapshot      map[string]LoadStatEntry   // node_id → stats (PR-D)
 	activePlan        *RebalancePlan             // nil = no active plan (PR-D)
-	onBucketAssigned  func(string, string)       // protected by mu; set before Start() (PR-D)
-	onRebalancePlan   func(*RebalancePlan)       // must not block; set before Start() (PR-D)
-	onShardGroupAdded func(ShardGroupEntry)      // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	icebergNamespaces map[string]IcebergNamespaceEntry
+	icebergTables     map[string]IcebergTableEntry
+	onBucketAssigned  func(string, string)  // protected by mu; set before Start() (PR-D)
+	onRebalancePlan   func(*RebalancePlan)  // must not block; set before Start() (PR-D)
+	onShardGroupAdded func(ShardGroupEntry) // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onIcebergResult   func(string, error)   // requestID, typed catalog result; must not block
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -89,6 +141,8 @@ func NewMetaFSM() *MetaFSM {
 		shardGroups:       make(map[string]ShardGroupEntry),
 		bucketAssignments: make(map[string]string),
 		loadSnapshot:      make(map[string]LoadStatEntry),
+		icebergNamespaces: make(map[string]IcebergNamespaceEntry),
+		icebergTables:     make(map[string]IcebergTableEntry),
 	}
 }
 
@@ -131,6 +185,16 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyProposeRebalancePlan(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeAbortPlan:
 		return f.applyAbortPlan(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeIcebergCreateNamespace:
+		return f.applyIcebergCreateNamespace(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeIcebergDeleteNamespace:
+		return f.applyIcebergDeleteNamespace(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeIcebergCreateTable:
+		return f.applyIcebergCreateTable(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeIcebergCommitTable:
+		return f.applyIcebergCommitTable(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeIcebergDeleteTable:
+		return f.applyIcebergDeleteTable(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -421,6 +485,122 @@ func (f *MetaFSM) applyAbortPlan(data []byte) error {
 	return nil
 }
 
+func (f *MetaFSM) applyIcebergCreateNamespace(data []byte) error {
+	c, err := decodeMetaIcebergCreateNamespaceCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: IcebergCreateNamespace: %w", err)
+	}
+	key := icebergNamespaceKey(c.Namespace)
+	var result error
+	f.mu.Lock()
+	if _, ok := f.icebergNamespaces[key]; ok {
+		result = icebergcatalog.ErrNamespaceExists
+	} else {
+		f.icebergNamespaces[key] = IcebergNamespaceEntry{
+			Namespace:  cloneStringSlice(c.Namespace),
+			Properties: cloneStringMap(c.Properties),
+		}
+	}
+	f.mu.Unlock()
+	f.publishIcebergResult(c.RequestID, result)
+	return nil
+}
+
+func (f *MetaFSM) applyIcebergDeleteNamespace(data []byte) error {
+	c, err := decodeMetaIcebergDeleteNamespaceCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: IcebergDeleteNamespace: %w", err)
+	}
+	key := icebergNamespaceKey(c.Namespace)
+	var result error
+	f.mu.Lock()
+	if _, ok := f.icebergNamespaces[key]; !ok {
+		result = icebergcatalog.ErrNamespaceNotFound
+	} else {
+		prefix := key + "\x1f"
+		for tableKey := range f.icebergTables {
+			if strings.HasPrefix(tableKey, prefix) {
+				result = icebergcatalog.ErrNamespaceNotEmpty
+				break
+			}
+		}
+		if result == nil {
+			delete(f.icebergNamespaces, key)
+		}
+	}
+	f.mu.Unlock()
+	f.publishIcebergResult(c.RequestID, result)
+	return nil
+}
+
+func (f *MetaFSM) applyIcebergCreateTable(data []byte) error {
+	c, err := decodeMetaIcebergCreateTableCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: IcebergCreateTable: %w", err)
+	}
+	nsKey := icebergNamespaceKey(c.Identifier.Namespace)
+	tableKey := icebergTableKey(c.Identifier)
+	var result error
+	f.mu.Lock()
+	if _, ok := f.icebergNamespaces[nsKey]; !ok {
+		result = icebergcatalog.ErrNamespaceNotFound
+	} else if _, ok := f.icebergTables[tableKey]; ok {
+		result = icebergcatalog.ErrTableExists
+	} else {
+		f.icebergTables[tableKey] = IcebergTableEntry{
+			Identifier:       cloneIcebergIdent(c.Identifier),
+			MetadataLocation: c.MetadataLocation,
+			Properties:       cloneStringMap(c.Properties),
+		}
+	}
+	f.mu.Unlock()
+	f.publishIcebergResult(c.RequestID, result)
+	return nil
+}
+
+func (f *MetaFSM) applyIcebergCommitTable(data []byte) error {
+	c, err := decodeMetaIcebergCommitTableCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: IcebergCommitTable: %w", err)
+	}
+	tableKey := icebergTableKey(c.Identifier)
+	var result error
+	f.mu.Lock()
+	entry, ok := f.icebergTables[tableKey]
+	if !ok {
+		result = icebergcatalog.ErrTableNotFound
+	} else if entry.MetadataLocation != c.ExpectedMetadataLocation {
+		result = icebergcatalog.ErrCommitFailed
+	} else {
+		entry.MetadataLocation = c.NewMetadataLocation
+		f.icebergTables[tableKey] = entry
+	}
+	f.mu.Unlock()
+	f.publishIcebergResult(c.RequestID, result)
+	return nil
+}
+
+func (f *MetaFSM) applyIcebergDeleteTable(data []byte) error {
+	c, err := decodeMetaIcebergDeleteTableCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: IcebergDeleteTable: %w", err)
+	}
+	nsKey := icebergNamespaceKey(c.Identifier.Namespace)
+	tableKey := icebergTableKey(c.Identifier)
+	var result error
+	f.mu.Lock()
+	if _, ok := f.icebergNamespaces[nsKey]; !ok {
+		result = icebergcatalog.ErrNamespaceNotFound
+	} else if _, ok := f.icebergTables[tableKey]; !ok {
+		result = icebergcatalog.ErrTableNotFound
+	} else {
+		delete(f.icebergTables, tableKey)
+	}
+	f.mu.Unlock()
+	f.publishIcebergResult(c.RequestID, result)
+	return nil
+}
+
 // LoadSnapshot returns a copy of the current per-node load statistics.
 func (f *MetaFSM) LoadSnapshot() map[string]LoadStatEntry {
 	f.mu.RLock()
@@ -480,6 +660,21 @@ func (f *MetaFSM) SetOnBucketAssigned(fn func(bucket, groupID string)) {
 	f.mu.Unlock()
 }
 
+func (f *MetaFSM) SetOnIcebergApplyResult(fn func(requestID string, err error)) {
+	f.mu.Lock()
+	f.onIcebergResult = fn
+	f.mu.Unlock()
+}
+
+func (f *MetaFSM) publishIcebergResult(requestID string, err error) {
+	f.mu.RLock()
+	cb := f.onIcebergResult
+	f.mu.RUnlock()
+	if cb != nil && requestID != "" {
+		cb(requestID, err)
+	}
+}
+
 // BucketAssignments returns a copy of the current bucket→group_id map.
 func (f *MetaFSM) BucketAssignments() map[string]string {
 	f.mu.RLock()
@@ -519,6 +714,61 @@ func (f *MetaFSM) ShardGroup(id string) (ShardGroupEntry, bool) {
 	return ShardGroupEntry{ID: g.ID, PeerIDs: peers}, true
 }
 
+func (f *MetaFSM) IcebergNamespace(namespace []string) (IcebergNamespaceEntry, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	entry, ok := f.icebergNamespaces[icebergNamespaceKey(namespace)]
+	if !ok {
+		return IcebergNamespaceEntry{}, false
+	}
+	return IcebergNamespaceEntry{
+		Namespace:  cloneStringSlice(entry.Namespace),
+		Properties: cloneStringMap(entry.Properties),
+	}, true
+}
+
+func (f *MetaFSM) IcebergNamespaces() []IcebergNamespaceEntry {
+	f.mu.RLock()
+	out := make([]IcebergNamespaceEntry, 0, len(f.icebergNamespaces))
+	for _, entry := range f.icebergNamespaces {
+		out = append(out, IcebergNamespaceEntry{
+			Namespace:  cloneStringSlice(entry.Namespace),
+			Properties: cloneStringMap(entry.Properties),
+		})
+	}
+	f.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return icebergNamespaceKey(out[i].Namespace) < icebergNamespaceKey(out[j].Namespace)
+	})
+	return out
+}
+
+func (f *MetaFSM) IcebergTable(ident icebergcatalog.Identifier) (IcebergTableEntry, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	entry, ok := f.icebergTables[icebergTableKey(ident)]
+	if !ok {
+		return IcebergTableEntry{}, false
+	}
+	return cloneIcebergTableEntry(entry), true
+}
+
+func (f *MetaFSM) IcebergTables(namespace []string) []IcebergTableEntry {
+	prefix := icebergNamespaceKey(namespace) + "\x1f"
+	f.mu.RLock()
+	out := make([]IcebergTableEntry, 0)
+	for key, entry := range f.icebergTables {
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, cloneIcebergTableEntry(entry))
+		}
+	}
+	f.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Identifier.Name < out[j].Identifier.Name
+	})
+	return out
+}
+
 // Snapshot serializes current state as FlatBuffers MetaStateSnapshot.
 func (f *MetaFSM) Snapshot() ([]byte, error) {
 	f.mu.RLock()
@@ -543,6 +793,17 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	if f.activePlan != nil {
 		cp := *f.activePlan
 		activePlanCopy = &cp
+	}
+	icebergNamespaces := make([]IcebergNamespaceEntry, 0, len(f.icebergNamespaces))
+	for _, entry := range f.icebergNamespaces {
+		icebergNamespaces = append(icebergNamespaces, IcebergNamespaceEntry{
+			Namespace:  cloneStringSlice(entry.Namespace),
+			Properties: cloneStringMap(entry.Properties),
+		})
+	}
+	icebergTables := make([]IcebergTableEntry, 0, len(f.icebergTables))
+	for _, entry := range f.icebergTables {
+		icebergTables = append(icebergTables, cloneIcebergTableEntry(entry))
 	}
 	f.mu.RUnlock()
 
@@ -645,6 +906,9 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		activePlanOff = clusterpb.RebalancePlanEnd(b)
 	}
 
+	icebergNamespaceVec := buildIcebergNamespaceEntriesVector(b, icebergNamespaces)
+	icebergTableVec := buildIcebergTableEntriesVector(b, icebergTables)
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
@@ -653,6 +917,8 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	if activePlanCopy != nil {
 		clusterpb.MetaStateSnapshotAddActivePlan(b, activePlanOff)
 	}
+	clusterpb.MetaStateSnapshotAddIcebergNamespaces(b, icebergNamespaceVec)
+	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	return fbFinish(b, root), nil
 }
@@ -746,12 +1012,49 @@ func (f *MetaFSM) Restore(data []byte) error {
 		}
 	}
 
+	newIcebergNamespaces := make(map[string]IcebergNamespaceEntry, snap.IcebergNamespacesLength())
+	var nsFB clusterpb.IcebergNamespaceEntry
+	for i := 0; i < snap.IcebergNamespacesLength(); i++ {
+		if !snap.IcebergNamespaces(&nsFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: iceberg namespace %d decode failed", i)
+		}
+		entry := IcebergNamespaceEntry{
+			Namespace:  readStringVector(nsFB.NamespaceLength(), nsFB.Namespace),
+			Properties: readKeyValueProperties(nsFB.PropertiesLength(), nsFB.Properties),
+		}
+		newIcebergNamespaces[icebergNamespaceKey(entry.Namespace)] = entry
+	}
+
+	newIcebergTables := make(map[string]IcebergTableEntry, snap.IcebergTablesLength())
+	var tableFB clusterpb.IcebergTableEntry
+	for i := 0; i < snap.IcebergTablesLength(); i++ {
+		if !snap.IcebergTables(&tableFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: iceberg table %d decode failed", i)
+		}
+		identFB := tableFB.Identifier(nil)
+		if identFB == nil {
+			return fmt.Errorf("meta_fsm: Restore: iceberg table %d missing identifier", i)
+		}
+		ident := icebergcatalog.Identifier{
+			Namespace: readStringVector(identFB.NamespaceLength(), identFB.Namespace),
+			Name:      string(identFB.Name()),
+		}
+		entry := IcebergTableEntry{
+			Identifier:       ident,
+			MetadataLocation: string(tableFB.MetadataLocation()),
+			Properties:       readKeyValueProperties(tableFB.PropertiesLength(), tableFB.Properties),
+		}
+		newIcebergTables[icebergTableKey(ident)] = entry
+	}
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
 	f.bucketAssignments = newBucketAssignments
 	f.loadSnapshot = newLoadSnapshot
 	f.activePlan = newActivePlan
+	f.icebergNamespaces = newIcebergNamespaces
+	f.icebergTables = newIcebergTables
 	cb := f.onBucketAssigned
 	f.mu.Unlock()
 	if cb != nil {
@@ -813,6 +1116,148 @@ func encodeMetaRemoveNodeCmd(nodeID string) ([]byte, error) {
 	clusterpb.MetaRemoveNodeCmdStart(b)
 	clusterpb.MetaRemoveNodeCmdAddNodeId(b, idOff)
 	return fbFinish(b, clusterpb.MetaRemoveNodeCmdEnd(b)), nil
+}
+
+func encodeMetaIcebergCreateNamespaceCmd(c IcebergCreateNamespaceCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	requestIDOff := b.CreateString(c.RequestID)
+	namespaceVec := buildStringVector(b, c.Namespace, clusterpb.MetaIcebergCreateNamespaceCmdStartNamespaceVector)
+	propsVec := buildKeyValuePropertiesVector(b, c.Properties, clusterpb.MetaIcebergCreateNamespaceCmdStartPropertiesVector)
+	clusterpb.MetaIcebergCreateNamespaceCmdStart(b)
+	clusterpb.MetaIcebergCreateNamespaceCmdAddRequestId(b, requestIDOff)
+	clusterpb.MetaIcebergCreateNamespaceCmdAddNamespace(b, namespaceVec)
+	clusterpb.MetaIcebergCreateNamespaceCmdAddProperties(b, propsVec)
+	return fbFinish(b, clusterpb.MetaIcebergCreateNamespaceCmdEnd(b)), nil
+}
+
+func decodeMetaIcebergCreateNamespaceCmd(data []byte) (IcebergCreateNamespaceCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaIcebergCreateNamespaceCmd {
+		return clusterpb.GetRootAsMetaIcebergCreateNamespaceCmd(d, 0)
+	})
+	if err != nil {
+		return IcebergCreateNamespaceCmd{}, err
+	}
+	return IcebergCreateNamespaceCmd{
+		RequestID:  string(t.RequestId()),
+		Namespace:  readStringVector(t.NamespaceLength(), t.Namespace),
+		Properties: readKeyValueProperties(t.PropertiesLength(), t.Properties),
+	}, nil
+}
+
+func encodeMetaIcebergDeleteNamespaceCmd(c IcebergDeleteNamespaceCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	requestIDOff := b.CreateString(c.RequestID)
+	namespaceVec := buildStringVector(b, c.Namespace, clusterpb.MetaIcebergDeleteNamespaceCmdStartNamespaceVector)
+	clusterpb.MetaIcebergDeleteNamespaceCmdStart(b)
+	clusterpb.MetaIcebergDeleteNamespaceCmdAddRequestId(b, requestIDOff)
+	clusterpb.MetaIcebergDeleteNamespaceCmdAddNamespace(b, namespaceVec)
+	return fbFinish(b, clusterpb.MetaIcebergDeleteNamespaceCmdEnd(b)), nil
+}
+
+func decodeMetaIcebergDeleteNamespaceCmd(data []byte) (IcebergDeleteNamespaceCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaIcebergDeleteNamespaceCmd {
+		return clusterpb.GetRootAsMetaIcebergDeleteNamespaceCmd(d, 0)
+	})
+	if err != nil {
+		return IcebergDeleteNamespaceCmd{}, err
+	}
+	return IcebergDeleteNamespaceCmd{
+		RequestID: string(t.RequestId()),
+		Namespace: readStringVector(t.NamespaceLength(), t.Namespace),
+	}, nil
+}
+
+func encodeMetaIcebergCreateTableCmd(c IcebergCreateTableCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	requestIDOff := b.CreateString(c.RequestID)
+	identOff := buildIcebergIdentifier(b, c.Identifier)
+	locationOff := b.CreateString(c.MetadataLocation)
+	propsVec := buildKeyValuePropertiesVector(b, c.Properties, clusterpb.MetaIcebergCreateTableCmdStartPropertiesVector)
+	clusterpb.MetaIcebergCreateTableCmdStart(b)
+	clusterpb.MetaIcebergCreateTableCmdAddRequestId(b, requestIDOff)
+	clusterpb.MetaIcebergCreateTableCmdAddIdentifier(b, identOff)
+	clusterpb.MetaIcebergCreateTableCmdAddMetadataLocation(b, locationOff)
+	clusterpb.MetaIcebergCreateTableCmdAddProperties(b, propsVec)
+	return fbFinish(b, clusterpb.MetaIcebergCreateTableCmdEnd(b)), nil
+}
+
+func decodeMetaIcebergCreateTableCmd(data []byte) (IcebergCreateTableCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaIcebergCreateTableCmd {
+		return clusterpb.GetRootAsMetaIcebergCreateTableCmd(d, 0)
+	})
+	if err != nil {
+		return IcebergCreateTableCmd{}, err
+	}
+	ident, err := readIcebergIdentifier(t.Identifier(nil))
+	if err != nil {
+		return IcebergCreateTableCmd{}, err
+	}
+	return IcebergCreateTableCmd{
+		RequestID:        string(t.RequestId()),
+		Identifier:       ident,
+		MetadataLocation: string(t.MetadataLocation()),
+		Properties:       readKeyValueProperties(t.PropertiesLength(), t.Properties),
+	}, nil
+}
+
+func encodeMetaIcebergCommitTableCmd(c IcebergCommitTableCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	requestIDOff := b.CreateString(c.RequestID)
+	identOff := buildIcebergIdentifier(b, c.Identifier)
+	expectedOff := b.CreateString(c.ExpectedMetadataLocation)
+	nextOff := b.CreateString(c.NewMetadataLocation)
+	clusterpb.MetaIcebergCommitTableCmdStart(b)
+	clusterpb.MetaIcebergCommitTableCmdAddRequestId(b, requestIDOff)
+	clusterpb.MetaIcebergCommitTableCmdAddIdentifier(b, identOff)
+	clusterpb.MetaIcebergCommitTableCmdAddExpectedMetadataLocation(b, expectedOff)
+	clusterpb.MetaIcebergCommitTableCmdAddNewMetadataLocation(b, nextOff)
+	return fbFinish(b, clusterpb.MetaIcebergCommitTableCmdEnd(b)), nil
+}
+
+func decodeMetaIcebergCommitTableCmd(data []byte) (IcebergCommitTableCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaIcebergCommitTableCmd {
+		return clusterpb.GetRootAsMetaIcebergCommitTableCmd(d, 0)
+	})
+	if err != nil {
+		return IcebergCommitTableCmd{}, err
+	}
+	ident, err := readIcebergIdentifier(t.Identifier(nil))
+	if err != nil {
+		return IcebergCommitTableCmd{}, err
+	}
+	return IcebergCommitTableCmd{
+		RequestID:                string(t.RequestId()),
+		Identifier:               ident,
+		ExpectedMetadataLocation: string(t.ExpectedMetadataLocation()),
+		NewMetadataLocation:      string(t.NewMetadataLocation()),
+	}, nil
+}
+
+func encodeMetaIcebergDeleteTableCmd(c IcebergDeleteTableCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	requestIDOff := b.CreateString(c.RequestID)
+	identOff := buildIcebergIdentifier(b, c.Identifier)
+	clusterpb.MetaIcebergDeleteTableCmdStart(b)
+	clusterpb.MetaIcebergDeleteTableCmdAddRequestId(b, requestIDOff)
+	clusterpb.MetaIcebergDeleteTableCmdAddIdentifier(b, identOff)
+	return fbFinish(b, clusterpb.MetaIcebergDeleteTableCmdEnd(b)), nil
+}
+
+func decodeMetaIcebergDeleteTableCmd(data []byte) (IcebergDeleteTableCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaIcebergDeleteTableCmd {
+		return clusterpb.GetRootAsMetaIcebergDeleteTableCmd(d, 0)
+	})
+	if err != nil {
+		return IcebergDeleteTableCmd{}, err
+	}
+	ident, err := readIcebergIdentifier(t.Identifier(nil))
+	if err != nil {
+		return IcebergDeleteTableCmd{}, err
+	}
+	return IcebergDeleteTableCmd{
+		RequestID:  string(t.RequestId()),
+		Identifier: ident,
+	}, nil
 }
 
 func encodeMetaPutBucketAssignmentCmd(bucket, groupID string) ([]byte, error) {
@@ -901,4 +1346,155 @@ func encodeMetaPutShardGroupCmd(sg ShardGroupEntry) ([]byte, error) {
 	clusterpb.MetaPutShardGroupCmdStart(b)
 	clusterpb.MetaPutShardGroupCmdAddGroup(b, sgOff)
 	return fbFinish(b, clusterpb.MetaPutShardGroupCmdEnd(b)), nil
+}
+
+func icebergNamespaceKey(namespace []string) string {
+	return strings.Join(namespace, "\x1f")
+}
+
+func icebergTableKey(ident icebergcatalog.Identifier) string {
+	return icebergNamespaceKey(ident.Namespace) + "\x1f" + ident.Name
+}
+
+func cloneStringSlice(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneIcebergIdent(in icebergcatalog.Identifier) icebergcatalog.Identifier {
+	return icebergcatalog.Identifier{Namespace: cloneStringSlice(in.Namespace), Name: in.Name}
+}
+
+func cloneIcebergTableEntry(in IcebergTableEntry) IcebergTableEntry {
+	return IcebergTableEntry{
+		Identifier:       cloneIcebergIdent(in.Identifier),
+		MetadataLocation: in.MetadataLocation,
+		Properties:       cloneStringMap(in.Properties),
+	}
+}
+
+func readStringVector(n int, at func(int) []byte) []string {
+	if n == 0 {
+		return nil
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = string(at(i))
+	}
+	return out
+}
+
+func readKeyValueProperties(n int, at func(*clusterpb.KeyValue, int) bool) map[string]string {
+	if n == 0 {
+		return nil
+	}
+	out := make(map[string]string, n)
+	var kv clusterpb.KeyValue
+	for i := 0; i < n; i++ {
+		if at(&kv, i) {
+			out[string(kv.Key())] = string(kv.ValueBytes())
+		}
+	}
+	return out
+}
+
+func sortedPropertyKeys(properties map[string]string) []string {
+	keys := make([]string, 0, len(properties))
+	for key := range properties {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func buildKeyValuePropertiesVector(
+	b *flatbuffers.Builder,
+	properties map[string]string,
+	startVector func(*flatbuffers.Builder, int) flatbuffers.UOffsetT,
+) flatbuffers.UOffsetT {
+	keys := sortedPropertyKeys(properties)
+	offsets := make([]flatbuffers.UOffsetT, len(keys))
+	for i := len(keys) - 1; i >= 0; i-- {
+		keyOff := b.CreateString(keys[i])
+		valueOff := b.CreateByteVector([]byte(properties[keys[i]]))
+		clusterpb.KeyValueStart(b)
+		clusterpb.KeyValueAddKey(b, keyOff)
+		clusterpb.KeyValueAddValue(b, valueOff)
+		offsets[i] = clusterpb.KeyValueEnd(b)
+	}
+	startVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	return b.EndVector(len(offsets))
+}
+
+func buildIcebergIdentifier(b *flatbuffers.Builder, ident icebergcatalog.Identifier) flatbuffers.UOffsetT {
+	namespaceVec := buildStringVector(b, ident.Namespace, clusterpb.IcebergIdentifierStartNamespaceVector)
+	nameOff := b.CreateString(ident.Name)
+	clusterpb.IcebergIdentifierStart(b)
+	clusterpb.IcebergIdentifierAddNamespace(b, namespaceVec)
+	clusterpb.IcebergIdentifierAddName(b, nameOff)
+	return clusterpb.IcebergIdentifierEnd(b)
+}
+
+func readIcebergIdentifier(ident *clusterpb.IcebergIdentifier) (icebergcatalog.Identifier, error) {
+	if ident == nil {
+		return icebergcatalog.Identifier{}, fmt.Errorf("missing iceberg identifier")
+	}
+	return icebergcatalog.Identifier{
+		Namespace: readStringVector(ident.NamespaceLength(), ident.Namespace),
+		Name:      string(ident.Name()),
+	}, nil
+}
+
+func buildIcebergNamespaceEntriesVector(b *flatbuffers.Builder, entries []IcebergNamespaceEntry) flatbuffers.UOffsetT {
+	offsets := make([]flatbuffers.UOffsetT, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		namespaceVec := buildStringVector(b, entries[i].Namespace, clusterpb.IcebergNamespaceEntryStartNamespaceVector)
+		propsVec := buildKeyValuePropertiesVector(b, entries[i].Properties, clusterpb.IcebergNamespaceEntryStartPropertiesVector)
+		clusterpb.IcebergNamespaceEntryStart(b)
+		clusterpb.IcebergNamespaceEntryAddNamespace(b, namespaceVec)
+		clusterpb.IcebergNamespaceEntryAddProperties(b, propsVec)
+		offsets[i] = clusterpb.IcebergNamespaceEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartIcebergNamespacesVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	return b.EndVector(len(offsets))
+}
+
+func buildIcebergTableEntriesVector(b *flatbuffers.Builder, entries []IcebergTableEntry) flatbuffers.UOffsetT {
+	offsets := make([]flatbuffers.UOffsetT, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		identOff := buildIcebergIdentifier(b, entries[i].Identifier)
+		locationOff := b.CreateString(entries[i].MetadataLocation)
+		propsVec := buildKeyValuePropertiesVector(b, entries[i].Properties, clusterpb.IcebergTableEntryStartPropertiesVector)
+		clusterpb.IcebergTableEntryStart(b)
+		clusterpb.IcebergTableEntryAddIdentifier(b, identOff)
+		clusterpb.IcebergTableEntryAddMetadataLocation(b, locationOff)
+		clusterpb.IcebergTableEntryAddProperties(b, propsVec)
+		offsets[i] = clusterpb.IcebergTableEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartIcebergTablesVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	return b.EndVector(len(offsets))
 }

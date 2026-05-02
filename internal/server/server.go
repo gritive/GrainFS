@@ -78,7 +78,7 @@ type Server struct {
 	volMgr         *volume.Manager
 	policyStore    *CompiledPolicyStore
 	lifecycleStore *lifecycle.Store
-	icebergStore   *icebergcatalog.Store
+	icebergCatalog icebergcatalog.Catalog
 	ipLimiter      *RateLimiter
 	userLimiter    *RateLimiter
 	cluster        ClusterInfo       // nil in no-peers mode
@@ -216,14 +216,18 @@ func WithVolumeManager(mgr *volume.Manager) Option {
 	}
 }
 
-// WithIcebergCatalogStore enables the Iceberg REST Catalog API with an
-// explicitly-managed catalog store. Cluster serve paths use this to keep the
-// catalog state on the meta DB instead of trying to infer it from backend
-// decorators.
-func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {
+// WithIcebergCatalog enables the Iceberg REST Catalog API with an
+// explicitly-managed catalog implementation.
+func WithIcebergCatalog(catalog icebergcatalog.Catalog) Option {
 	return func(s *Server) {
-		s.icebergStore = store
+		s.icebergCatalog = catalog
 	}
+}
+
+// WithIcebergCatalogStore enables the Iceberg REST Catalog API with an
+// explicitly-managed local catalog store.
+func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {
+	return WithIcebergCatalog(store)
 }
 
 // New creates a new S3 API server.
@@ -286,9 +290,9 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	if s.volMgr == nil {
 		s.volMgr = volume.NewManager(backend)
 	}
-	if s.icebergStore == nil {
+	if s.icebergCatalog == nil {
 		if dbp, ok := unwrapBackend(backend).(storage.DBProvider); ok {
-			s.icebergStore = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")
+			s.icebergCatalog = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")
 		}
 	}
 	s.registerRoutes(h)

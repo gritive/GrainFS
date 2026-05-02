@@ -7,39 +7,54 @@ import "strconv"
 type MetaCmdType byte
 
 const (
-	MetaCmdTypeNoOp                 MetaCmdType = 0
-	MetaCmdTypeAddNode              MetaCmdType = 1
-	MetaCmdTypeRemoveNode           MetaCmdType = 2
-	MetaCmdTypePutShardGroup        MetaCmdType = 3
-	MetaCmdTypeSetActivePlan        MetaCmdType = 4
-	MetaCmdTypePutBucketAssignment  MetaCmdType = 5
-	MetaCmdTypeSetLoadSnapshot      MetaCmdType = 6
-	MetaCmdTypeProposeRebalancePlan MetaCmdType = 7
-	MetaCmdTypeAbortPlan            MetaCmdType = 8
+	MetaCmdTypeNoOp                   MetaCmdType = 0
+	MetaCmdTypeAddNode                MetaCmdType = 1
+	MetaCmdTypeRemoveNode             MetaCmdType = 2
+	MetaCmdTypePutShardGroup          MetaCmdType = 3
+	MetaCmdTypeSetActivePlan          MetaCmdType = 4
+	MetaCmdTypePutBucketAssignment    MetaCmdType = 5
+	MetaCmdTypeSetLoadSnapshot        MetaCmdType = 6
+	MetaCmdTypeProposeRebalancePlan   MetaCmdType = 7
+	MetaCmdTypeAbortPlan              MetaCmdType = 8
+	MetaCmdTypeIcebergCreateNamespace MetaCmdType = 9
+	MetaCmdTypeIcebergDeleteNamespace MetaCmdType = 10
+	MetaCmdTypeIcebergCreateTable     MetaCmdType = 11
+	MetaCmdTypeIcebergCommitTable     MetaCmdType = 12
+	MetaCmdTypeIcebergDeleteTable     MetaCmdType = 13
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
-	MetaCmdTypeNoOp:                 "NoOp",
-	MetaCmdTypeAddNode:              "AddNode",
-	MetaCmdTypeRemoveNode:           "RemoveNode",
-	MetaCmdTypePutShardGroup:        "PutShardGroup",
-	MetaCmdTypeSetActivePlan:        "SetActivePlan",
-	MetaCmdTypePutBucketAssignment:  "PutBucketAssignment",
-	MetaCmdTypeSetLoadSnapshot:      "SetLoadSnapshot",
-	MetaCmdTypeProposeRebalancePlan: "ProposeRebalancePlan",
-	MetaCmdTypeAbortPlan:            "AbortPlan",
+	MetaCmdTypeNoOp:                   "NoOp",
+	MetaCmdTypeAddNode:                "AddNode",
+	MetaCmdTypeRemoveNode:             "RemoveNode",
+	MetaCmdTypePutShardGroup:          "PutShardGroup",
+	MetaCmdTypeSetActivePlan:          "SetActivePlan",
+	MetaCmdTypePutBucketAssignment:    "PutBucketAssignment",
+	MetaCmdTypeSetLoadSnapshot:        "SetLoadSnapshot",
+	MetaCmdTypeProposeRebalancePlan:   "ProposeRebalancePlan",
+	MetaCmdTypeAbortPlan:              "AbortPlan",
+	MetaCmdTypeIcebergCreateNamespace: "IcebergCreateNamespace",
+	MetaCmdTypeIcebergDeleteNamespace: "IcebergDeleteNamespace",
+	MetaCmdTypeIcebergCreateTable:     "IcebergCreateTable",
+	MetaCmdTypeIcebergCommitTable:     "IcebergCommitTable",
+	MetaCmdTypeIcebergDeleteTable:     "IcebergDeleteTable",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
-	"NoOp":                 MetaCmdTypeNoOp,
-	"AddNode":              MetaCmdTypeAddNode,
-	"RemoveNode":           MetaCmdTypeRemoveNode,
-	"PutShardGroup":        MetaCmdTypePutShardGroup,
-	"SetActivePlan":        MetaCmdTypeSetActivePlan,
-	"PutBucketAssignment":  MetaCmdTypePutBucketAssignment,
-	"SetLoadSnapshot":      MetaCmdTypeSetLoadSnapshot,
-	"ProposeRebalancePlan": MetaCmdTypeProposeRebalancePlan,
-	"AbortPlan":            MetaCmdTypeAbortPlan,
+	"NoOp":                   MetaCmdTypeNoOp,
+	"AddNode":                MetaCmdTypeAddNode,
+	"RemoveNode":             MetaCmdTypeRemoveNode,
+	"PutShardGroup":          MetaCmdTypePutShardGroup,
+	"SetActivePlan":          MetaCmdTypeSetActivePlan,
+	"PutBucketAssignment":    MetaCmdTypePutBucketAssignment,
+	"SetLoadSnapshot":        MetaCmdTypeSetLoadSnapshot,
+	"ProposeRebalancePlan":   MetaCmdTypeProposeRebalancePlan,
+	"AbortPlan":              MetaCmdTypeAbortPlan,
+	"IcebergCreateNamespace": MetaCmdTypeIcebergCreateNamespace,
+	"IcebergDeleteNamespace": MetaCmdTypeIcebergDeleteNamespace,
+	"IcebergCreateTable":     MetaCmdTypeIcebergCreateTable,
+	"IcebergCommitTable":     MetaCmdTypeIcebergCommitTable,
+	"IcebergDeleteTable":     MetaCmdTypeIcebergDeleteTable,
 }
 
 func (v MetaCmdType) String() string {

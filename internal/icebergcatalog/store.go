@@ -12,12 +12,13 @@ import (
 )
 
 var (
-	ErrNamespaceNotFound = errors.New("iceberg namespace not found")
-	ErrNamespaceExists   = errors.New("iceberg namespace already exists")
-	ErrNamespaceNotEmpty = errors.New("iceberg namespace is not empty")
-	ErrTableNotFound     = errors.New("iceberg table not found")
-	ErrTableExists       = errors.New("iceberg table already exists")
-	ErrCommitFailed      = errors.New("iceberg commit failed")
+	ErrNamespaceNotFound  = errors.New("iceberg namespace not found")
+	ErrNamespaceExists    = errors.New("iceberg namespace already exists")
+	ErrNamespaceNotEmpty  = errors.New("iceberg namespace is not empty")
+	ErrTableNotFound      = errors.New("iceberg table not found")
+	ErrTableExists        = errors.New("iceberg table already exists")
+	ErrCommitFailed       = errors.New("iceberg commit failed")
+	ErrServiceUnavailable = errors.New("iceberg catalog service unavailable")
 )
 
 type Identifier struct {
@@ -42,6 +43,19 @@ type CommitTableInput struct {
 	ExpectedMetadataLocation string
 	NewMetadataLocation      string
 	Metadata                 json.RawMessage
+}
+
+type Catalog interface {
+	Warehouse() string
+	CreateNamespace(ctx context.Context, namespace []string, properties map[string]string) error
+	LoadNamespace(ctx context.Context, namespace []string) (map[string]string, error)
+	ListNamespaces(ctx context.Context) ([][]string, error)
+	DeleteNamespace(ctx context.Context, namespace []string) error
+	CreateTable(ctx context.Context, ident Identifier, in CreateTableInput) (*Table, error)
+	LoadTable(ctx context.Context, ident Identifier) (*Table, error)
+	ListTables(ctx context.Context, namespace []string) ([]Identifier, error)
+	DeleteTable(ctx context.Context, ident Identifier) error
+	CommitTable(ctx context.Context, ident Identifier, in CommitTableInput) (*Table, error)
 }
 
 type Store struct {
