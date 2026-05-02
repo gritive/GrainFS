@@ -280,6 +280,7 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 	}
 
 	n.pendingConfChangeIndex = entry.Index
+	n.publishMembershipViewLocked()
 }
 
 // applyJointConfChangeLocked drives the §4.3 state machine.
@@ -357,6 +358,7 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		}
 		n.jointManagedLearners = nil
 	}
+	n.publishMembershipViewLocked()
 }
 
 // peersExcludingSelf returns peerKeys for every entry whose id is not selfID.
@@ -534,4 +536,5 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 	n.removedFromCluster = removed
 	n.jointManagedLearners = managedLearners
 	n.jointLeaveProposed = false // truncation 후 leader watcher가 재평가
+	n.publishMembershipViewLocked()
 }

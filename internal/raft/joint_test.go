@@ -85,17 +85,19 @@ func TestDualQuorum_BothMajoritiesRequired(t *testing.T) {
 	n.jointPhase = JointEntering
 	n.jointOldVoters = []string{"n1", "n2", "n3"}
 	n.jointNewVoters = []string{"n1", "n4", "n5"}
+	n.publishMembershipViewLocked()
 
 	// Old majority OK (n1 self + n2), new minority (only n1 self) → fail.
-	require.False(t, n.dualMajority(map[string]bool{"n2": true}),
+	view := n.membershipViewSnapshot()
+	require.False(t, view.dualMajority(n.id, map[string]bool{"n2": true}),
 		"old majority alone insufficient")
 
 	// New majority OK (n1 self + n4), old minority (only n1 self) → fail.
-	require.False(t, n.dualMajority(map[string]bool{"n4": true}),
+	require.False(t, view.dualMajority(n.id, map[string]bool{"n4": true}),
 		"new majority alone insufficient")
 
 	// Both quorums majority → pass.
-	require.True(t, n.dualMajority(map[string]bool{"n2": true, "n4": true}),
+	require.True(t, view.dualMajority(n.id, map[string]bool{"n2": true, "n4": true}),
 		"both majorities pass")
 }
 
@@ -103,16 +105,18 @@ func TestDualQuorum_SingleModeWhenJointNone(t *testing.T) {
 	n := jointTestNode("n1")
 	n.config.Peers = []string{"n2", "n3"}
 	n.jointPhase = JointNone
+	n.publishMembershipViewLocked()
+	view := n.membershipViewSnapshot()
 
-	// Note: config.Peers excludes self in this codebase. quorumSets returns it as
-	// "current" voter set, with self auto-counted by hasMajorityInSet.
+	// Note: config.Peers excludes self in this codebase. The membership view
+	// returns a voter set including self, and self is auto-counted for quorum.
 	// Single mode: 3-node cluster (self + 2 peers), majority = 2.
 	// Self alone = 1 ack: not enough.
-	require.False(t, n.dualMajority(map[string]bool{}),
+	require.False(t, view.dualMajority(n.id, map[string]bool{}),
 		"single-mode self-only is below majority of 3-node cluster")
 
 	// Self + 1 peer ack = 2 acks: passes majority.
-	require.True(t, n.dualMajority(map[string]bool{"n2": true}),
+	require.True(t, view.dualMajority(n.id, map[string]bool{"n2": true}),
 		"single-mode self + 1 peer is majority")
 }
 
