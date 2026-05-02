@@ -10,6 +10,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
 
@@ -158,11 +159,7 @@ func NewBadgerLogStore(path string, opts ...BadgerLogStoreOption) (*BadgerLogSto
 	for _, opt := range opts {
 		opt(s)
 	}
-	dbOpts := badger.DefaultOptions(path).
-		WithLogger(nil).
-		WithSyncWrites(true).
-		WithNumCompactors(2).    // log store: append-mostly, badger 최소값 2 (default 4)
-		WithNumVersionsToKeep(1) // raft index 키가 곧 unique — badger MVCC 불필요
+	dbOpts := badgerutil.RaftLogOptions(path, true) // raft index 키가 곧 unique — badger MVCC 불필요
 	db, err := badger.Open(dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger log store: %w", err)

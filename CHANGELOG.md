@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.24.0] — 2026-05-03 — reduce multi-node Badger heap overhead
+
+### Changed
+
+- **cluster**: small metadata BadgerDB instances now use a reduced memtable and block-cache budget, cutting the per-node Go heap reserved by 6-node idle clusters by roughly 75-84%.
+- **raft**: raft log stores keep sync-write durability and single-version storage while sharing the smaller Badger options used for metadata-heavy stores.
+- **serve**: metadata, shared raft-log, per-group state, and dedup databases now avoid Badger's large default arena sizing for tiny stores.
+
+### Tests
+
+- **badgerutil**: added option-level coverage proving the smaller Badger profile is applied and raft log durability settings are preserved.
+- **profiling**: validated the fix with a real 6-node cluster profile; `skl.newArena` heap dropped from 1.16-1.91 GiB per node to 218-281 MiB.
+
 ## [0.0.23.0] — 2026-05-03 — remove raft idle batcher polling
 
 ### Fixed
