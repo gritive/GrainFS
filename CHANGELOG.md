@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.25.0] — 2026-05-03 — reduce migration coordination contention
+
+### Changed
+
+- **cluster**: migration coordination state now runs through a single actor, removing the nested mutex state around pending commits, early commits, done tracking, and TTL cancellation while keeping shard payload I/O outside the actor path.
+- **receipt**: gossip routing lookups now use an immutable atomic snapshot with a receipt-to-node index, making dashboard receipt routing lookups O(1), lock-free, and allocation-free.
+
+### Tests
+
+- **cluster**: expanded migration executor coverage for actor lifecycle cleanup, early commit handling, duplicate execute suppression, TTL sweep behavior, and structured logging.
+- **receipt**: added immutable snapshot and allocation regression coverage; `BenchmarkRoutingCache_Lookup` reports `0 B/op` and `0 allocs/op`.
+
 ## [0.0.24.0] — 2026-05-03 — reduce multi-node Badger heap overhead
 
 ### Changed
