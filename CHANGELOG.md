@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.10.0] — 2026-05-02 — Raft membership view hardening
+
+### Changed
+
+- **raft**: quorum, election, ReadIndex, and membership observation paths now read from a single immutable membership snapshot, preventing mixed old/new voter views during joint consensus transitions.
+- **raft**: membership mutations now publish a fresh read view after config changes, joint changes, snapshot restore/install, log rebuild, and commit-time self-removal updates.
+
+### Removed
+
+- **raft**: retired the older mutex-bound quorum helper path so all quorum decisions share one membership-view implementation.
+
+### Fixed
+
+- **tests**: added regression coverage for immutable membership snapshots, no mixed joint state, JointSnapshotState consistency, self-removal republish, captured election membership, CheckQuorum, JointLeave commit advancement, and hot read allocation behavior.
+
 ## [0.0.9.0] — 2026-05-02 — Offline RecoverCluster drill
 
 ### Added
