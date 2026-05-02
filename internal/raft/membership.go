@@ -205,15 +205,19 @@ func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, a
 // state on every node, including caller wakeup on JointLeave commit.
 // MUST be called with n.mu held.
 func (n *Node) applyConfigChangeLocked(entry LogEntry) {
+	changed := false
 	switch entry.Type {
 	case LogEntryConfChange:
-		n.applyConfChangeLocked(entry)
+		changed = n.applyConfChangeLocked(entry)
 	case LogEntryJointConfChange:
-		n.applyJointConfChangeLocked(entry)
+		changed = n.applyJointConfChangeLocked(entry)
+	}
+	if changed {
+		n.publishMembershipViewLocked()
 	}
 }
 
-func (n *Node) applyConfChangeLocked(entry LogEntry) {
+func (n *Node) applyConfChangeLocked(entry LogEntry) bool {
 	cc := decodeConfChange(entry.Command)
 	// peerKey: data-Raft uses QUIC address; meta-Raft uses nodeID.
 	peerKey := cc.ID
@@ -221,6 +225,7 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 		peerKey = cc.Address
 	}
 
+	changed := false
 	switch cc.Op {
 	case ConfChangeAddVoter:
 		alreadyPresent := false
@@ -232,6 +237,7 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 		}
 		if !alreadyPresent {
 			n.config.Peers = append(n.config.Peers, peerKey)
+			changed = true
 			if n.state == Leader {
 				n.nextIndex[peerKey] = n.lastLogIdx() + 1
 				n.matchIndex[peerKey] = 0
@@ -240,24 +246,37 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 
 	case ConfChangeRemoveVoter:
 		peers := make([]string, 0, len(n.config.Peers))
+		found := false
 		for _, p := range n.config.Peers {
 			if p != peerKey {
 				peers = append(peers, p)
+			} else {
+				found = true
 			}
 		}
-		n.config.Peers = peers
-		delete(n.nextIndex, peerKey)
-		delete(n.matchIndex, peerKey)
+		if found {
+			n.config.Peers = peers
+			delete(n.nextIndex, peerKey)
+			delete(n.matchIndex, peerKey)
+			changed = true
+		}
 
 	case ConfChangeAddLearner:
 		if _, exists := n.learnerIDs[cc.ID]; !exists {
 			n.learnerIDs[cc.ID] = peerKey
+			changed = true
 			if n.state == Leader {
 				n.nextIndex[peerKey] = n.lastLogIdx() + 1
 				n.matchIndex[peerKey] = 0
 			}
 		}
 		if cc.ManagedByJoint {
+			if n.jointManagedLearners == nil {
+				n.jointManagedLearners = make(map[string]struct{})
+			}
+			if _, exists := n.jointManagedLearners[cc.ID]; !exists {
+				changed = true
+			}
 			n.jointManagedLearners[cc.ID] = struct{}{}
 		}
 
@@ -267,6 +286,7 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 			break // idempotent: already promoted or not tracked
 		}
 		delete(n.learnerIDs, cc.ID)
+		changed = true
 		alreadyVoter := false
 		for _, p := range n.config.Peers {
 			if p == pk {
@@ -280,7 +300,7 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 	}
 
 	n.pendingConfChangeIndex = entry.Index
-	n.publishMembershipViewLocked()
+	return changed
 }
 
 // applyJointConfChangeLocked drives the §4.3 state machine.
@@ -297,7 +317,7 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) {
 //	JointAbort:
 //	  jointPhase = JointNone, config.Peers restored to C_old from entry payload.
 //	  jointResultCh signaled with ErrJointAborted. No-op if not in JointEntering.
-func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
+func (n *Node) applyJointConfChangeLocked(entry LogEntry) bool {
 	jc := decodeJointConfChange(entry.Command)
 	switch jc.Op {
 	case JointOpEnter:
@@ -310,13 +330,14 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		if n.state == Leader {
 			n.initLeaderStateForNewVoters(jc.OldServers, jc.NewServers)
 		}
+		return true
 
 	case JointOpLeave:
 		if n.jointPhase != JointEntering {
-			return // idempotency guard: JointAbort already resolved this transition
+			return false // idempotency guard: JointAbort already resolved this transition
 		}
 		if n.hasJointAbortAfter(entry.Index) {
-			return // stale JointLeave superseded by a later JointOpAbort
+			return false // stale JointLeave superseded by a later JointOpAbort
 		}
 		// Append-time: §4.4 invariant — config.Peers updates immediately so
 		// quorum decisions on subsequent entries use C_new. config.Peers in
@@ -337,10 +358,11 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 		n.jointEnterIndex = 0
 		n.jointLeaveProposed = false
 		n.jointAbortProposed = false
+		return true
 
 	case JointOpAbort:
 		if n.jointPhase != JointEntering {
-			return // idempotency guard: already resolved
+			return false // idempotency guard: already resolved
 		}
 		// Restore C_old from entry payload — self-contained, safe after snapshot truncation.
 		n.config.Peers = peersExcludingSelf(jc.OldServers, n.id)
@@ -357,8 +379,9 @@ func (n *Node) applyJointConfChangeLocked(entry LogEntry) {
 			delete(n.learnerIDs, id)
 		}
 		n.jointManagedLearners = nil
+		return true
 	}
-	n.publishMembershipViewLocked()
+	return false
 }
 
 // peersExcludingSelf returns peerKeys for every entry whose id is not selfID.
