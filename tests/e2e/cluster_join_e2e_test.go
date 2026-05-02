@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -118,5 +119,68 @@ func TestE2E_DefaultBucketOnlySeedCreates(t *testing.T) {
 			}
 		}
 		require.Equal(t, 1, defaults, "default bucket should exist once as shared cluster metadata at %s", endpoint)
+	}
+}
+
+func TestE2E_DynamicJoinServices_NodeCounts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	for _, nodes := range []int{2, 3} {
+		t.Run(fmt.Sprintf("%d_nodes", nodes), func(t *testing.T) {
+			c := startE2ECluster(t, e2eClusterOptions{
+				Nodes:      nodes,
+				Mode:       ClusterModeDynamicJoin,
+				ClusterKey: fmt.Sprintf("E2E-DYNAMIC-JOIN-MATRIX-%d", nodes),
+				AccessKey:  "join-ak",
+				SecretKey:  "join-sk",
+				LogPrefix:  fmt.Sprintf("grainfs-dynamic-join-%d", nodes),
+			})
+
+			waitForPortsParallel(t, c.httpPorts, 30*time.Second)
+			waitForPortsParallel(t, c.nfs4Ports, 30*time.Second)
+			waitForPortsParallel(t, c.nbdPorts, 30*time.Second)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			bucket := fmt.Sprintf("dynamic-join-services-%d", nodes)
+			require.Eventually(t, func() bool {
+				return tryCreateBucket(ctx, c.S3Client(0), bucket) == nil
+			}, 30*time.Second, 500*time.Millisecond)
+
+			for i := range c.httpURLs {
+				key := fmt.Sprintf("node-%d.txt", i)
+				body := []byte(fmt.Sprintf("node %d through dynamic join", i))
+				require.NoError(t, tryPutObject(ctx, c.S3Client(i), bucket, key, body))
+				got, err := getObjectBytes(ctx, c.S3Client(i), bucket, key)
+				require.NoError(t, err)
+				require.Equal(t, body, got)
+			}
+
+			client := &http.Client{Timeout: 5 * time.Second}
+			namespace := fmt.Sprintf("join_matrix_%d", nodes)
+			reqBody := []byte(fmt.Sprintf(`{"namespace":["%s"],"properties":{"owner":"e2e"}}`, namespace))
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURLs[nodes-1]+"/iceberg/v1/namespaces", bytes.NewReader(reqBody))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			for i, endpoint := range c.httpURLs {
+				req, err = http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/iceberg/v1/namespaces", nil)
+				require.NoError(t, err)
+				resp, err = client.Do(req)
+				require.NoError(t, err)
+				data, err := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				require.NoError(t, err)
+				require.Equal(t, http.StatusOK, resp.StatusCode, "iceberg list namespaces on node %d", i)
+				require.Contains(t, string(data), namespace, "iceberg namespace should be visible on node %d", i)
+			}
+		})
 	}
 }
