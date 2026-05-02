@@ -19,8 +19,9 @@ var errInternalReply = errors.New("forward: internal reply error")
 // Centralizing these in one file means a schema bump touches only 10 callers
 // here rather than scattered routing methods.
 //
-// Convention: every body-bearing arg keeps body bytes inside the FBS payload
-// (5 MB hard cap enforced by ClusterCoordinator before encoding).
+// Convention: legacy body-bearing args keep body bytes inside the FBS payload.
+// Production serve wiring streams PutObject/UploadPart bodies separately on
+// StreamGroupForwardBody.
 
 // --- Args builders (request side) ---
 
@@ -193,8 +194,7 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 	return b.FinishedBytes()
 }
 
-// buildGetObjectReply embeds the read body inside ForwardReply.read_body
-// (≤5 MB by design — server-side enforces).
+// buildGetObjectReply embeds the read body inside ForwardReply.read_body.
 func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte {
 	b := flatbuffers.NewBuilder(128 + len(body))
 	bk := b.CreateString(bucket)

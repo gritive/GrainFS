@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"sync"
@@ -32,19 +33,33 @@ const (
 // StreamHandler processes an incoming request message and returns a response.
 type StreamHandler func(req *Message) *Message
 
+// StreamBodyHandler processes a framed request followed by raw body bytes on
+// the same QUIC stream. The handler must read body before returning a response.
+type StreamBodyHandler func(req *Message, body io.Reader) *Message
+
 // StreamRouter routes incoming messages to different handlers based on StreamType.
 type StreamRouter struct {
-	handlers map[StreamType]StreamHandler
+	handlers     map[StreamType]StreamHandler
+	bodyHandlers map[StreamType]StreamBodyHandler
 }
 
 // NewStreamRouter creates a router that dispatches by StreamType.
 func NewStreamRouter() *StreamRouter {
-	return &StreamRouter{handlers: make(map[StreamType]StreamHandler)}
+	return &StreamRouter{
+		handlers:     make(map[StreamType]StreamHandler),
+		bodyHandlers: make(map[StreamType]StreamBodyHandler),
+	}
 }
 
 // Handle registers a handler for a specific stream type.
 func (r *StreamRouter) Handle(st StreamType, h StreamHandler) {
 	r.handlers[st] = h
+}
+
+// HandleBody registers a handler that receives the framed request payload plus
+// any remaining bytes on the same stream as a streaming body.
+func (r *StreamRouter) HandleBody(st StreamType, h StreamBodyHandler) {
+	r.bodyHandlers[st] = h
 }
 
 // Dispatch finds the handler for the message's stream type and calls it.
@@ -59,6 +74,12 @@ func (r *StreamRouter) Dispatch(req *Message) *Message {
 // Lookup returns the handler for the given stream type, if registered.
 func (r *StreamRouter) Lookup(st StreamType) (StreamHandler, bool) {
 	h, ok := r.handlers[st]
+	return h, ok
+}
+
+// LookupBody returns the streaming body handler for the stream type, if any.
+func (r *StreamRouter) LookupBody(st StreamType) (StreamBodyHandler, bool) {
+	h, ok := r.bodyHandlers[st]
 	return h, ok
 }
 
@@ -247,9 +268,17 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 	// Per-type handler takes priority over catch-all.
 	t.mu.RLock()
 	typeHandler, hasTypeHandler := t.router.Lookup(msg.Type)
+	bodyHandler, hasBodyHandler := t.router.LookupBody(msg.Type)
 	catchAll := t.streamHandler
 	t.mu.RUnlock()
 
+	if hasBodyHandler {
+		resp := bodyHandler(msg, stream)
+		if resp != nil {
+			_ = t.codec.Encode(stream, resp)
+		}
+		return
+	}
 	if hasTypeHandler {
 		resp := typeHandler(msg)
 		if resp != nil {
@@ -414,6 +443,14 @@ func (t *QUICTransport) Handle(st StreamType, h StreamHandler) {
 	t.mu.Unlock()
 }
 
+// HandleBody registers a per-type handler for a request frame followed by raw
+// body bytes on the same bidirectional stream.
+func (t *QUICTransport) HandleBody(st StreamType, h StreamBodyHandler) {
+	t.mu.Lock()
+	t.router.HandleBody(st, h)
+	t.mu.Unlock()
+}
+
 // Call sends a request message and waits for a response (bidirectional stream).
 // Unlike Send, this opens a stream, writes the request, reads the response, and returns it.
 // If the cached connection is stale (idle-timed-out), it is evicted and re-dialled once.
@@ -448,6 +485,56 @@ func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*M
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
 
+	return resp, nil
+}
+
+// CallWithBody sends a framed request, streams body bytes behind it, half-closes
+// the write side, then waits for a framed response from the peer.
+func (t *QUICTransport) CallWithBody(ctx context.Context, addr string, req *Message, body io.Reader) (*Message, error) {
+	conn, err := t.getOrConnect(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.evict(addr, conn)
+		conn, err = t.getOrConnect(ctx, addr)
+		if err != nil {
+			return nil, fmt.Errorf("reconnect to %s: %w", addr, err)
+		}
+		if stream, err = conn.OpenStreamSync(ctx); err != nil {
+			return nil, fmt.Errorf("open stream to %s: %w", addr, err)
+		}
+	}
+	defer stream.Close()
+	cancelDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+			stream.CancelWrite(quic.StreamErrorCode(quicAppErrCode))
+		case <-cancelDone:
+		}
+	}()
+	defer close(cancelDone)
+
+	if err := t.codec.Encode(stream, req); err != nil {
+		return nil, fmt.Errorf("encode request: %w", err)
+	}
+	if body != nil {
+		if _, err := io.Copy(stream, body); err != nil {
+			return nil, fmt.Errorf("stream body to %s: %w", addr, err)
+		}
+	}
+	if err := stream.Close(); err != nil {
+		return nil, fmt.Errorf("close request stream to %s: %w", addr, err)
+	}
+
+	resp, err := t.codec.Decode(stream)
+	if err != nil {
+		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
+	}
 	return resp, nil
 }
 

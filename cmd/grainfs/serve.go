@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -48,6 +49,8 @@ import (
 	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
 
+const defaultReshardInterval = 24 * time.Hour
+
 func init() {
 	serveCmd.Flags().StringP("data", "d", "./data", "data directory")
 	serveCmd.Flags().IntP("port", "p", 9000, "listen port")
@@ -69,6 +72,7 @@ func init() {
 	serveCmd.Flags().Duration("snapshot-interval", 1*time.Hour, "auto-snapshot interval (0 to disable)")
 	serveCmd.Flags().Int("snapshot-retain", 24, "number of auto-snapshots to retain")
 	serveCmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (0 to disable)")
+	serveCmd.Flags().Duration("reshard-interval", defaultReshardInterval, "background EC reshard interval (0 to disable)")
 	serveCmd.Flags().Duration("lifecycle-interval", 1*time.Hour, "lifecycle rule evaluation interval (0 to disable)")
 	serveCmd.Flags().Duration("degraded-check-interval", 30*time.Second, "EC degraded-mode liveness check interval")
 	serveCmd.Flags().String("upstream", "", "upstream S3-compatible endpoint for pull-through caching (e.g. http://minio:9000)")
@@ -820,8 +824,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		return reply.Payload, nil
 	}
+	forwardStreamDialer := func(peer string, payload []byte, body io.Reader) ([]byte, error) {
+		msg := &transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}
+		reply, err := quicTransport.CallWithBody(ctx, peer, msg, body)
+		if err != nil {
+			return nil, err
+		}
+		return reply.Payload, nil
+	}
 
-	forwardSender := cluster.NewForwardSender(forwardDialer)
+	forwardSender := cluster.NewForwardSender(forwardDialer).WithStreamDialer(forwardStreamDialer)
 	forwardReceiver := cluster.NewForwardReceiver(dgMgr)
 	forwardReceiver.Register(shardSvc)
 
@@ -1115,6 +1127,41 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			}
 		}()
 		log.Info().Dur("interval", scrubInterval).Msg("cluster scrubber started")
+	}
+
+	// Background EC resharding is group-local: each locally-owned DataGroup has
+	// its own Raft leader and object metadata DB. Followers skip each pass in
+	// ReshardManager, but we still start one manager per local group so
+	// leadership changes are picked up without serve-level rewiring.
+	reshardInterval, _ := cmd.Flags().GetDuration("reshard-interval")
+	if reshardInterval > 0 {
+		reshardManagers := newReshardManagerRegistry()
+		startReshardManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
+			gb := dg.Backend()
+			leader := gb.RaftNode()
+			if leader == nil {
+				log.Warn().Str("group", dg.ID()).Msg("reshard manager skipped: group has no raft node")
+				return
+			}
+			go cluster.NewReshardManager(gb, leader, reshardInterval).Start(managerCtx)
+		}
+		refreshReshardManagers := func() {
+			reshardManagers.refresh(ctx, dgMgr.All(), startReshardManager)
+		}
+		refreshReshardManagers()
+		go func() {
+			ticker := time.NewTicker(reshardInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					refreshReshardManagers()
+				}
+			}
+		}()
+		log.Info().Dur("interval", reshardInterval).Msg("cluster reshard manager started")
 	}
 
 	// Start the leader-aware worker loop. Only the Raft leader runs the

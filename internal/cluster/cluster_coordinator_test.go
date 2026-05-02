@@ -266,9 +266,11 @@ func TestClusterCoordinator_RouteBucket_SelfIsVoter_NotLeader(t *testing.T) {
 // it and returns a canned reply. The op-specific reply bytes are provided by
 // the caller via replyByOp; missing op → buildErrorReply(Internal).
 type recordingDialer struct {
-	calls      []dialerCall
-	replyByOp  map[raftpb.ForwardOp][]byte
-	defaultErr error
+	calls         []dialerCall
+	streamCalls   []dialerCall
+	replyByOp     map[raftpb.ForwardOp][]byte
+	streamReplyBy map[raftpb.ForwardOp][]byte
+	defaultErr    error
 }
 
 type dialerCall struct {
@@ -297,6 +299,30 @@ func (d *recordingDialer) dial(peer string, payload []byte) ([]byte, error) {
 	return buildSimpleReply(raftpb.ForwardStatusInternal, ""), nil
 }
 
+func (d *recordingDialer) stream(peer string, payload []byte, body io.Reader) ([]byte, error) {
+	if d.defaultErr != nil {
+		return nil, d.defaultErr
+	}
+	gid, op, args, err := decodeForwardPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	argsCopy := make([]byte, len(args))
+	copy(argsCopy, args)
+	d.streamCalls = append(d.streamCalls, dialerCall{peer: peer, op: op, gid: gid, args: argsCopy, rawly: bodyBytes})
+	if reply, ok := d.streamReplyBy[op]; ok {
+		return reply, nil
+	}
+	if reply, ok := d.replyByOp[op]; ok {
+		return reply, nil
+	}
+	return buildSimpleReply(raftpb.ForwardStatusInternal, ""), nil
+}
+
 // setupCoordWithForward builds a coordinator wired to a recording dialer for
 // a single bucket → group mapping. self is NOT a voter so all calls forward.
 func setupCoordWithForward(t *testing.T, bucket, groupID string, peers []string) (*ClusterCoordinator, *recordingDialer) {
@@ -309,7 +335,7 @@ func setupCoordWithForward(t *testing.T, bucket, groupID string, peers []string)
 	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		groupID: {ID: groupID, PeerIDs: peers},
 	}}
-	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}, streamReplyBy: map[raftpb.ForwardOp][]byte{}}
 	sender := NewForwardSender(d.dial)
 	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(sender)
 	return c, d
@@ -335,6 +361,23 @@ func TestClusterCoordinator_GetObject_Forward(t *testing.T) {
 	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpGetObject, d.calls[0].op)
 	require.Equal(t, "g1", d.calls[0].gid)
+}
+
+func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("g"), DefaultMaxForwardBodyBytes+1024)
+	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
+		&storage.Object{Key: "large", Size: int64(len(body)), ETag: "etag-large", ContentType: "application/octet-stream"},
+		"bk", body,
+	)
+
+	rc, obj, err := c.GetObject("bk", "large")
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Equal(t, body, got)
 }
 
 func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
@@ -544,4 +587,45 @@ func TestClusterCoordinator_UploadPart_5MB_Cap(t *testing.T) {
 	_, err := c.UploadPart("bk", "k", "uid", 1, bytes.NewReader(body))
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
+}
+
+func TestClusterCoordinator_PutObject_StreamForward_AboveLegacyCap(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.forward.WithStreamDialer(d.stream)
+	body := bytes.Repeat([]byte("z"), DefaultMaxForwardBodyBytes+1024)
+	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream"}, "bk",
+	)
+
+	obj, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Len(t, d.calls, 1, "streamed PutObject should only use single-message preflight")
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+	require.Len(t, d.streamCalls, 1)
+	require.Equal(t, body, d.streamCalls[0].rawly)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.streamCalls[0].op)
+
+	args := raftpb.GetRootAsPutObjectArgs(d.streamCalls[0].args, 0)
+	require.Zero(t, args.BodyLength(), "stream metadata must not embed the object body")
+}
+
+func TestClusterCoordinator_UploadPart_StreamForward_AboveLegacyCap(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.forward.WithStreamDialer(d.stream)
+	body := bytes.Repeat([]byte("p"), DefaultMaxForwardBodyBytes+1024)
+	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
+	)
+
+	part, err := c.UploadPart("bk", "k", "uid", 1, bytes.NewReader(body))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), part.Size)
+	require.Len(t, d.calls, 1, "streamed UploadPart should only use single-message preflight")
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+	require.Len(t, d.streamCalls, 1)
+	require.Equal(t, body, d.streamCalls[0].rawly)
+
+	args := raftpb.GetRootAsUploadPartArgs(d.streamCalls[0].args, 0)
+	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
 }

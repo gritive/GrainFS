@@ -22,6 +22,7 @@ func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 // The 0x08 stream type is used for intra-cluster forwarding of bucket-scoped operations.
 func (r *ForwardReceiver) Register(shardSvc *ShardService) {
 	shardSvc.RegisterHandler(transport.StreamProposeGroupForward, r.Handle)
+	shardSvc.RegisterBodyHandler(transport.StreamGroupForwardBody, r.HandleBody)
 }
 
 // Handle implements transport.Handler for 0x08 stream.
@@ -71,6 +72,49 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 	}
 }
 
+// HandleBody implements streamed-body forwarding for PutObject and UploadPart.
+// The request payload carries group/op/metadata; body bytes follow the frame on
+// the same QUIC stream and are passed directly into the local GroupBackend.
+func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *transport.Message {
+	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
+	if err != nil {
+		drainForwardBody(body)
+		return errReply(raftpb.ForwardStatusInternal, "")
+	}
+
+	dg := r.groups.Get(groupID)
+	if dg == nil || dg.Backend() == nil {
+		drainForwardBody(body)
+		return errReply(raftpb.ForwardStatusNotVoter, "")
+	}
+
+	node := dg.Backend().RaftNode()
+	if node == nil || !node.IsLeader() {
+		drainForwardBody(body)
+		hint := ""
+		if node != nil {
+			hint = node.LeaderID()
+		}
+		return errReply(raftpb.ForwardStatusNotLeader, hint)
+	}
+
+	switch op {
+	case raftpb.ForwardOpPutObject:
+		return r.handlePutObjectStream(dg, fbsArgs, body)
+	case raftpb.ForwardOpUploadPart:
+		return r.handleUploadPartStream(dg, fbsArgs, body)
+	default:
+		drainForwardBody(body)
+		return errReply(raftpb.ForwardStatusInternal, "")
+	}
+}
+
+func drainForwardBody(body io.Reader) {
+	if body != nil {
+		_, _ = io.Copy(io.Discard, body)
+	}
+}
+
 func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport.Message {
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	body := pa.BodyBytes()
@@ -86,6 +130,20 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 	return &transport.Message{Payload: buildObjectReply(obj, string(pa.Bucket()))}
 }
 
+func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
+	obj, err := dg.Backend().PutObject(
+		string(pa.Bucket()),
+		string(pa.Key()),
+		body,
+		string(pa.ContentType()),
+	)
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, string(pa.Bucket()))}
+}
+
 func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport.Message {
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
 	rc, obj, err := dg.Backend().GetObject(string(ga.Bucket()), string(ga.Key()))
@@ -93,11 +151,11 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 		return statusReply(mapErrorToStatus(err))
 	}
 	defer rc.Close()
-	body, err := io.ReadAll(io.LimitReader(rc, DefaultMaxForwardBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(rc, DefaultMaxForwardReplyBytes+1))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	if int64(len(body)) > DefaultMaxForwardBodyBytes {
+	if int64(len(body)) > DefaultMaxForwardReplyBytes {
 		return statusReply(raftpb.ForwardStatusEntityTooLarge)
 	}
 	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
@@ -170,6 +228,21 @@ func (r *ForwardReceiver) handleUploadPart(dg *DataGroup, args []byte) *transpor
 		string(ua.UploadId()),
 		int(ua.PartNumber()),
 		bytes.NewReader(body),
+	)
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildPartReply(part)}
+}
+
+func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+	ua := raftpb.GetRootAsUploadPartArgs(args, 0)
+	part, err := dg.Backend().UploadPart(
+		string(ua.Bucket()),
+		string(ua.Key()),
+		string(ua.UploadId()),
+		int(ua.PartNumber()),
+		body,
 	)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))

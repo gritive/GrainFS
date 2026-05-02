@@ -10,11 +10,15 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// DefaultMaxForwardBodyBytes is the 5 MB hard cap on PutObject and UploadPart
-// body size enforced by ClusterCoordinator before encoding the FBS args. The
-// cap is the trade-off for the single-message wire model — chunked streaming
-// would have removed it but at the cost of a transport refactor.
+// DefaultMaxForwardBodyBytes is the compatibility cap for legacy single-message
+// forwarding. Production wiring uses streamed body forwarding for PutObject and
+// UploadPart so larger objects do not allocate into the forward frame.
 const DefaultMaxForwardBodyBytes = 5 * 1024 * 1024
+
+// DefaultMaxForwardReplyBytes follows the transport frame guard. Forwarded
+// GetObject still returns one framed response; 16 MiB EC smoke reads fit here
+// without reintroducing the request-body buffering fixed for writes.
+const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 
 // ErrCoordinatorNoRouter is returned when routeBucket is called on a
 // coordinator that was constructed without a router (test/solo-node configs
@@ -43,8 +47,9 @@ type ClusterCoordinator struct {
 	maxBody int64
 }
 
-// NewClusterCoordinator constructs a coordinator with the 5 MB default body
-// cap. groups/router/meta may be nil for tests that exercise only cluster-wide
+// NewClusterCoordinator constructs a coordinator with the legacy 5 MiB
+// single-message body cap. Production wiring installs streamed body forwarding.
+// groups/router/meta may be nil for tests that exercise only cluster-wide
 // delegations; routeBucket returns ErrCoordinatorNoRouter when reached without
 // a router.
 func NewClusterCoordinator(
@@ -305,9 +310,9 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // The wire opcode is one of raftpb.ForwardOp* values; the reply layout is
 // dictated by ForwardReply (see forward_codec.go).
 
-// GetObject reads the object body and metadata. Body is embedded inside the
-// reply (≤5 MB enforced server-side). Returns ErrNoSuchBucket / ErrObjectNotFound
-// for the obvious cases.
+// GetObject reads the object body and metadata. Forwarded body bytes are
+// embedded inside one reply up to DefaultMaxForwardReplyBytes. Returns
+// ErrNoSuchBucket / ErrObjectNotFound for the obvious cases.
 func (c *ClusterCoordinator) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	target, err := c.routeBucket(bucket)
 	if err != nil {
@@ -474,8 +479,8 @@ func (c *ClusterCoordinator) ListObjectVersions(
 }
 
 // WalkObjects buffers ALL matching objects on the server and returns them in
-// one reply (≤5 MB cap on the encoded size). Callers expecting >5 MB worth of
-// keys should use ListObjects with maxKeys pagination instead.
+// one reply. Callers expecting large keysets should use ListObjects with
+// maxKeys pagination instead.
 func (c *ClusterCoordinator) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
 	target, err := c.routeBucket(bucket)
 	if err != nil {
@@ -548,32 +553,39 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(bucket, key, uploadID strin
 	return objectFromReply(reply)
 }
 
-// PutObject buffers the body up to maxBody+1 bytes (5 MB +1 to detect the
-// over-limit case in one read). The full body is embedded inside the FBS args
-// and sent in a single message — chunked streaming would have removed this
-// cap but at the cost of a transport refactor. See design doc §"핵심 단순화".
 func (c *ClusterCoordinator) PutObject(
 	bucket, key string, r io.Reader, contentType string,
 ) (*storage.Object, error) {
-	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
-	}
-
 	target, err := c.routeBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
 	if target.selfIsLeader {
 		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.PutObject(bucket, key, bytes.NewReader(body), contentType)
+			return gb.PutObject(bucket, key, r, contentType)
 		}
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
+	}
+
+	if c.forward.streamDialer != nil {
+		args := buildPutObjectArgs(bucket, key, contentType, nil)
+		ctx := context.TODO()
+		peers := c.forward.ResolveLeaderPeers(ctx, target.peers, target.groupID, bucket, key)
+		reply, err := c.forward.SendStream(ctx, peers, target.groupID, raftpb.ForwardOpPutObject, args, r)
+		if err != nil {
+			return nil, err
+		}
+		return objectFromReply(reply)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > c.maxBody {
+		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildPutObjectArgs(bucket, key, contentType, body)
 	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpPutObject, args)
@@ -583,30 +595,39 @@ func (c *ClusterCoordinator) PutObject(
 	return objectFromReply(reply)
 }
 
-// UploadPart applies the same 5 MB body cap as PutObject. S3 spec allows up to
-// 5 GB per part — clients targeting GrainFS must split larger payloads.
 func (c *ClusterCoordinator) UploadPart(
 	bucket, key, uploadID string, partNumber int, r io.Reader,
 ) (*storage.Part, error) {
-	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
-	}
-
 	target, err := c.routeBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
 	if target.selfIsLeader {
 		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.UploadPart(bucket, key, uploadID, partNumber, bytes.NewReader(body))
+			return gb.UploadPart(bucket, key, uploadID, partNumber, r)
 		}
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
+	}
+
+	if c.forward.streamDialer != nil {
+		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
+		ctx := context.TODO()
+		peers := c.forward.ResolveLeaderPeers(ctx, target.peers, target.groupID, bucket, key)
+		reply, err := c.forward.SendStream(ctx, peers, target.groupID, raftpb.ForwardOpUploadPart, args, r)
+		if err != nil {
+			return nil, err
+		}
+		return partFromReply(reply)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > c.maxBody {
+		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
 	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpUploadPart, args)

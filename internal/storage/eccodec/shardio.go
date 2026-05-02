@@ -1,6 +1,10 @@
 // Package eccodec provides reusable shard I/O primitives shared by
-// every erasure-coded backend. The on-disk format is a payload followed
-// by a 4-byte little-endian CRC32-IEEE footer.
+// every erasure-coded backend. The current on-disk format is:
+//
+//	GFSCRC1\0 <payload> <4-byte little-endian CRC32-IEEE footer>
+//
+// The magic prefix lets cluster-mode readers distinguish a new checksummed
+// shard from legacy raw shard bytes during rolling upgrades.
 //
 // Slice 2 (refactor/unify-storage-paths): eccodec is introduced so Slice 8
 // can drop internal/erasure/ while keeping the footer layout consistent. The
@@ -25,17 +29,49 @@ var ErrCRCMismatch = errors.New("eccodec: CRC mismatch (bit-rot detected)")
 // footerLen is the size of the CRC32 footer appended to every shard.
 const footerLen = 4
 
-// encodeWithCRC appends a 4-byte little-endian CRC32-IEEE footer to data.
-func encodeWithCRC(data []byte) []byte {
-	out := make([]byte, len(data)+footerLen)
-	copy(out, data)
-	binary.LittleEndian.PutUint32(out[len(data):], crc32.ChecksumIEEE(data))
+var shardMagic = []byte("GFSCRC1\x00")
+
+// IsEncodedShard reports whether raw bytes carry the current eccodec magic.
+func IsEncodedShard(raw []byte) bool {
+	if len(raw) < len(shardMagic) {
+		return false
+	}
+	for i := range shardMagic {
+		if raw[i] != shardMagic[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// EncodeShard appends the versioned CRC envelope around payload.
+func EncodeShard(data []byte) []byte {
+	out := make([]byte, len(shardMagic)+len(data)+footerLen)
+	copy(out, shardMagic)
+	copy(out[len(shardMagic):], data)
+	binary.LittleEndian.PutUint32(out[len(shardMagic)+len(data):], crc32.ChecksumIEEE(data))
 	return out
 }
 
-// stripVerifyCRC verifies the footer and returns the payload slice.
+// DecodeShard verifies the envelope/footer and returns the payload slice.
 // Returns ErrCRCMismatch if the shard is truncated or the checksum is wrong.
-func stripVerifyCRC(data []byte) ([]byte, error) {
+func DecodeShard(data []byte) ([]byte, error) {
+	if IsEncodedShard(data) {
+		if len(data) < len(shardMagic)+footerLen {
+			return nil, fmt.Errorf("%w: shard too short (%d bytes)", ErrCRCMismatch, len(data))
+		}
+		payload := data[len(shardMagic) : len(data)-footerLen]
+		stored := binary.LittleEndian.Uint32(data[len(data)-footerLen:])
+		if crc32.ChecksumIEEE(payload) != stored {
+			return nil, ErrCRCMismatch
+		}
+		return payload, nil
+	}
+
+	// Backward compatibility for the older eccodec test-only layout:
+	// <payload><crc32>. Cluster-mode legacy raw fallback intentionally does
+	// not call DecodeShard; it checks IsEncodedShard first and treats no-magic
+	// bytes as legacy raw shards.
 	if len(data) < footerLen {
 		return nil, fmt.Errorf("%w: shard too short (%d bytes)", ErrCRCMismatch, len(data))
 	}
@@ -54,7 +90,7 @@ func WriteShardAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
 	}
-	payload := encodeWithCRC(data)
+	payload := EncodeShard(data)
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -92,5 +128,5 @@ func ReadShardVerified(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return stripVerifyCRC(raw)
+	return DecodeShard(raw)
 }

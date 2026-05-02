@@ -28,7 +28,10 @@ var (
 	// bucket directory doesn't exist on disk.
 	ErrNoSuchBucket = errors.New("no such bucket")
 
-	// ErrEntityTooLarge is returned when a forwarded request body or response
-	// payload exceeds the 5 MB hard cap enforced by ClusterCoordinator.
+	// ErrEntityTooLarge is returned when a request body or response payload is
+	// too large for the selected forwarding path.
 	ErrEntityTooLarge = errors.New("entity too large")
+	// ErrForwardBackpressure is returned when this node is already streaming
+	// the configured maximum number of forwarded write bodies.
+	ErrForwardBackpressure = errors.New("forward stream backpressure")
 )
