@@ -548,7 +548,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	)
 	dgMgr.Add(group0)
 	distBackend.SetRouter(clusterRouter)
-	distBackend.SetBucketAssigner(metaRaft)
 	distBackend.SetShardGroupSource(metaRaft.FSM())
 
 	// PR-D: Rebalancer 배선 — LoadReporter가 meta-Raft FSM에 부하 스냅샷을 커밋하고
@@ -846,6 +845,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return reply.Payload, nil
 	}
 	metaForwardSender := cluster.NewMetaProposeForwardSender(metaForwardDialer)
+	distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
+		return metaForwardSender.Send(ctx, metaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+	}))
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
 	router.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
 	metaReadDialer := func(peer string, payload []byte) ([]byte, error) {
@@ -921,24 +923,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Wiring of OnThreshold + Run() happens after clusterAlerts is built (below)
 	// so the callback can dispatch critical webhooks on transitions.
 
-	// Auto-create "default" bucket on startup. Single-node mode does this
-	// synchronously because the bucket is part of the local ready contract.
-	// Cluster nodes must not block HTTP readiness on a metadata proposal:
-	// during simultaneous cold start, followers can spend the whole retry
-	// window returning "not leader" before the service socket is even open.
-	// Recovered clusters stay read-only until verification, so skip bucket
-	// creation entirely when the recovery write gate is active.
-	if !recoveryReadOnly {
-		if len(peers) == 0 {
-			if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-				return fmt.Errorf("create default bucket: %w", err)
-			}
-		} else {
-			go func() {
-				if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-					log.Warn().Err(err).Msg("default bucket creation failed in background (may already exist)")
-				}
-			}()
+	// Auto-create "default" bucket only for singleton startup. In cluster mode,
+	// bucket creation is a cluster-wide metadata operation and must be driven by
+	// an explicit client/API action, not repeated independently by every node.
+	if shouldCreateDefaultBucketOnStartup(peers, recoveryReadOnly) {
+		if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
+			return fmt.Errorf("create default bucket: %w", err)
 		}
 	}
 
@@ -1000,17 +990,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		srvOpts = append(srvOpts, server.WithIcebergCatalogStore(icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")))
 	} else {
 		metaForward := func(ctx context.Context, command []byte) error {
-			targets := peers
-			if leader := metaRaft.Node().LeaderID(); leader != "" {
-				targets = []string{leader}
-			}
-			return metaForwardSender.Send(ctx, targets, command)
+			return metaForwardSender.Send(ctx, metaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 		}
 		metaReadTargets := func() []string {
-			if leader := metaRaft.Node().LeaderID(); leader != "" {
-				return []string{leader}
-			}
-			return peers
+			return metaProposalTargets(metaRaft.Node().LeaderID(), peers)
 		}
 		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarders(metaRaft, backend, "s3://grainfs-tables/warehouse", metaForward, metaReadSender, metaReadTargets)))
 	}
@@ -1056,6 +1039,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	srvOpts = append(srvOpts, server.WithRaftSnapshotter(distBackend))
 
 	distBackend.RegisterReadIndexHandler()
+	distBackend.RegisterProposeForwardHandler()
 
 	srv := server.New(addr, backend, srvOpts...)
 
@@ -1424,6 +1408,24 @@ func filterEmpty(ss []string) []string {
 		}
 	}
 	return out
+}
+
+func shouldCreateDefaultBucketOnStartup(peers []string, recoveryReadOnly bool) bool {
+	return !recoveryReadOnly && len(peers) == 0
+}
+
+func metaProposalTargets(leader string, peers []string) []string {
+	if leader == "" {
+		return peers
+	}
+	targets := make([]string, 0, len(peers)+1)
+	targets = append(targets, leader)
+	for _, peer := range peers {
+		if peer != leader {
+			targets = append(targets, peer)
+		}
+	}
+	return targets
 }
 
 func createDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, timeout time.Duration) error {

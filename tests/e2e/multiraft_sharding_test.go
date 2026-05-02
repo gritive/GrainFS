@@ -278,6 +278,38 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 	t.Logf("boot ok: %d distinct groups with directories across 5 nodes", len(groupDirs))
 }
 
+// ----- TestE2E_MultiRaftSharding_AllNodeServices ---------------------------
+// Every cluster process must expose its node-local services. S3 writes are
+// cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
+// listeners local to each process.
+func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	c := startMRCluster(t, 3, 2)
+
+	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
+	waitForPortsParallel(t, c.nfs4Ports, 45*time.Second)
+	waitForPortsParallel(t, c.nbdPorts, 45*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	for i, endpoint := range c.httpURLs {
+		client := ecS3Client(endpoint, c.accessKey, c.secretKey)
+		bucket := fmt.Sprintf("all-node-s3-%d", i)
+		var lastErr error
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			lastErr = tryCreateBucket(ctx, client, bucket)
+			if lastErr == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		require.NoErrorf(t, lastErr, "S3 CreateBucket should work through node %d at %s", i, endpoint)
+	}
+}
+
 // ----- TestE2E_MultiRaftSharding_BucketAssignment ---------------------------
 // Verify bucket→group hash assignment is recorded.
 //

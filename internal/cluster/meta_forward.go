@@ -33,7 +33,12 @@ func (s *MetaProposeForwardSender) Send(ctx context.Context, peers []string, com
 			lastErr = err
 			continue
 		}
-		return decodeMetaForwardReply(reply)
+		err = decodeMetaForwardReply(reply)
+		if errors.Is(err, raft.ErrNotLeader) {
+			lastErr = err
+			continue
+		}
+		return err
 	}
 	if lastErr != nil {
 		return fmt.Errorf("%w: %v", icebergcatalog.ErrServiceUnavailable, lastErr)
@@ -56,7 +61,7 @@ func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.M
 	if !r.meta.IsLeader() {
 		err = raft.ErrNotLeader
 	} else {
-		err = r.meta.ProposeIcebergMetaCommand(ctx, req.Payload)
+		err = r.meta.ProposeMetaCommand(ctx, req.Payload)
 	}
 	return &transport.Message{Type: transport.StreamMetaProposeForward, Payload: encodeMetaForwardReply(err)}
 }
@@ -101,6 +106,8 @@ func icebergErrorType(err error) string {
 		return "table-exists"
 	case errors.Is(err, icebergcatalog.ErrCommitFailed):
 		return "commit-failed"
+	case errors.Is(err, raft.ErrNotLeader):
+		return "not-leader"
 	default:
 		return "service-unavailable"
 	}
@@ -120,6 +127,8 @@ func errorFromIcebergType(errorType, message string) error {
 		return icebergcatalog.ErrTableExists
 	case "commit-failed":
 		return icebergcatalog.ErrCommitFailed
+	case "not-leader":
+		return raft.ErrNotLeader
 	default:
 		if message == "" {
 			return icebergcatalog.ErrServiceUnavailable

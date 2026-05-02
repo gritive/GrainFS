@@ -333,6 +333,27 @@ func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) e
 	return m.proposeIcebergCommand(ctx, cmd.Type(), cmd.DataBytes(), requestID)
 }
 
+// ProposeMetaCommand proposes an already-encoded MetaCmd. Iceberg commands use
+// the request waiter path so semantic catalog errors are preserved; other meta
+// commands only need to wait until the entry is applied locally.
+func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
+	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
+	switch cmd.Type() {
+	case MetaCmdTypeIcebergCreateNamespace,
+		MetaCmdTypeIcebergDeleteNamespace,
+		MetaCmdTypeIcebergCreateTable,
+		MetaCmdTypeIcebergCommitTable,
+		MetaCmdTypeIcebergDeleteTable:
+		return m.ProposeIcebergMetaCommand(ctx, data)
+	default:
+		idx, err := m.node.ProposeWait(ctx, data)
+		if err != nil {
+			return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+		}
+		return m.waitApplied(ctx, idx)
+	}
+}
+
 func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {
 	switch typ {
 	case MetaCmdTypeIcebergCreateNamespace:
