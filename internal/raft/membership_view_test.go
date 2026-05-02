@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -18,10 +19,10 @@ func TestMembershipViewPublish_SingleMode(t *testing.T) {
 
 	view := n.membershipViewSnapshot()
 	require.Equal(t, JointNone, view.phase)
-	require.ElementsMatch(t, []string{"n1", "n2", "n3"}, view.current)
-	require.Nil(t, view.old)
-	require.Equal(t, map[string]string{"learner-1": "addr-l1"}, view.learners)
-	require.Equal(t, []string{"managed-1"}, view.managedLearners)
+	require.ElementsMatch(t, []string{"n1", "n2", "n3"}, view.currentVoters)
+	require.Nil(t, view.oldVoters)
+	require.Equal(t, map[string]string{"learner-1": "addr-l1"}, view.learnersByID)
+	require.Equal(t, []string{"managed-1"}, view.managedLearnerIDs)
 	require.False(t, view.removedSelf)
 }
 
@@ -38,10 +39,10 @@ func TestMembershipViewPublish_JointMode(t *testing.T) {
 
 	view := n.membershipViewSnapshot()
 	require.Equal(t, JointEntering, view.phase)
-	require.Equal(t, []string{"n1", "n4", "n5"}, view.current)
-	require.Equal(t, []string{"n1", "n2", "n3"}, view.old)
+	require.Equal(t, []string{"n1", "n4", "n5"}, view.currentVoters)
+	require.Equal(t, []string{"n1", "n2", "n3"}, view.oldVoters)
 	require.Equal(t, uint64(42), view.enterIndex)
-	require.Equal(t, []string{"n4"}, view.managedLearners)
+	require.Equal(t, []string{"n4"}, view.managedLearnerIDs)
 }
 
 func TestMembershipViewPublish_RemovedSelf(t *testing.T) {
@@ -52,7 +53,7 @@ func TestMembershipViewPublish_RemovedSelf(t *testing.T) {
 	n.mu.Unlock()
 
 	view := n.membershipViewSnapshot()
-	require.Equal(t, []string{"n2", "n3"}, view.current)
+	require.Equal(t, []string{"n2", "n3"}, view.currentVoters)
 	require.True(t, view.removedSelf)
 	require.NotContains(t, serverIDs(view.snapshotServers("n1")), "n1")
 }
@@ -70,9 +71,9 @@ func TestMembershipViewImmutableAfterCanonicalMutation(t *testing.T) {
 	n.publishMembershipViewLocked()
 	n.mu.Unlock()
 
-	require.ElementsMatch(t, []string{"n1", "n2", "n3"}, view.current)
-	require.Equal(t, map[string]string{"learner-1": "addr-l1"}, view.learners)
-	require.Empty(t, view.managedLearners)
+	require.ElementsMatch(t, []string{"n1", "n2", "n3"}, view.currentVoters)
+	require.Equal(t, map[string]string{"learner-1": "addr-l1"}, view.learnersByID)
+	require.Empty(t, view.managedLearnerIDs)
 }
 
 func TestMembershipViewDualMajority_NoMixedJointState(t *testing.T) {
@@ -281,6 +282,243 @@ func TestMembershipViewHotReads_DoNotAllocate(t *testing.T) {
 		_ = view.dualMajority("n1", matched)
 	})
 	require.Zero(t, allocs)
+}
+
+func TestApplyConfigChange_NoOpDoesNotRepublishMembershipView(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	ch := make(chan error, 1)
+
+	n.mu.Lock()
+	view := n.membershipViewSnapshot()
+	n.pendingReadIndex = []readIndexWaiter{{
+		commitIndex: n.commitIndex,
+		acked:       make(map[string]bool),
+		ch:          ch,
+		membership:  view,
+	}}
+	n.applyConfigChangeLocked(LogEntry{
+		Index: 10,
+		Term:  1,
+		Type:  LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePayload{
+			Op:      ConfChangeAddVoter,
+			ID:      "n2",
+			Address: "n2",
+		}),
+	})
+	require.Same(t, view, n.membershipViewSnapshot())
+	require.Len(t, n.pendingReadIndex, 1)
+	n.mu.Unlock()
+
+	select {
+	case err := <-ch:
+		t.Fatalf("no-op membership entry drained waiter with %v", err)
+	default:
+	}
+}
+
+func TestReadIndexWaiter_DrainedOnMembershipViewPublish(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	ch := make(chan error, 1)
+
+	n.mu.Lock()
+	n.pendingReadIndex = []readIndexWaiter{{
+		commitIndex: n.commitIndex,
+		acked:       make(map[string]bool),
+		ch:          ch,
+		membership:  n.membershipViewSnapshot(),
+	}}
+	n.applyConfigChangeLocked(LogEntry{
+		Index: 11,
+		Term:  1,
+		Type:  LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePayload{
+			Op:      ConfChangeAddVoter,
+			ID:      "n4",
+			Address: "n4",
+		}),
+	})
+	require.Empty(t, n.pendingReadIndex)
+	n.mu.Unlock()
+
+	require.ErrorIs(t, <-ch, ErrMembershipChanged)
+}
+
+func TestReadIndexWaiter_NotDrainedOnNoOpMembershipEntry(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	ch := make(chan error, 1)
+
+	n.mu.Lock()
+	n.pendingReadIndex = []readIndexWaiter{{
+		commitIndex: n.commitIndex,
+		acked:       make(map[string]bool),
+		ch:          ch,
+		membership:  n.membershipViewSnapshot(),
+	}}
+	n.applyConfigChangeLocked(LogEntry{
+		Index: 12,
+		Term:  1,
+		Type:  LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePayload{
+			Op:      ConfChangeRemoveVoter,
+			ID:      "missing",
+			Address: "missing",
+		}),
+	})
+	require.Len(t, n.pendingReadIndex, 1)
+	n.mu.Unlock()
+
+	select {
+	case err := <-ch:
+		t.Fatalf("no-op membership entry drained waiter with %v", err)
+	default:
+	}
+}
+
+func TestReadIndexWaiter_UsesCapturedMembershipView(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	ch := make(chan error, 1)
+
+	n.mu.Lock()
+	view := n.membershipViewSnapshot()
+	n.pendingReadIndex = []readIndexWaiter{{
+		commitIndex: n.commitIndex,
+		acked:       make(map[string]bool),
+		ch:          ch,
+		membership:  view,
+	}}
+	n.config.Peers = []string{"n4", "n5"}
+	n.tickReadIndexAcks("n2")
+	require.Empty(t, n.pendingReadIndex)
+	n.mu.Unlock()
+
+	require.NoError(t, <-ch)
+}
+
+func TestQuorumMinMatchIndex_UsesSingleMembershipView(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	n.mu.Lock()
+	n.matchIndex = map[string]uint64{
+		"n1": 100,
+		"n2": 80,
+		"n3": 40,
+		"n4": 100,
+		"n5": 100,
+	}
+	n.publishMembershipViewLocked()
+
+	n.config.Peers = []string{"n4", "n5"}
+	require.Equal(t, uint64(80), n.quorumMinMatchIndexLocked())
+	n.mu.Unlock()
+}
+
+func TestHandleInstallSnapshot_PublishesMembershipView(t *testing.T) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2"}})
+
+	reply := n.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "n3",
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  2,
+		Servers: []Server{
+			{ID: "n2", Suffrage: Voter},
+			{ID: "n3", Suffrage: Voter},
+			{ID: "learner-1", Suffrage: NonVoter},
+		},
+	})
+	require.Equal(t, uint64(2), reply.Term)
+
+	view := n.membershipViewSnapshot()
+	require.True(t, view.removedSelf)
+	require.Equal(t, []string{"n2", "n3"}, view.peerVoters)
+	require.Equal(t, []string{"n2", "n3"}, view.currentVoters)
+	require.Equal(t, map[string]string{"learner-1": "learner-1"}, view.learnersByID)
+}
+
+func TestJointMembershipTransition_WithMembershipView(t *testing.T) {
+	cluster := newTestCluster(t, 4)
+	cluster.startAll()
+	leader := cluster.waitForLeader(2 * time.Second)
+	require.NotNil(t, leader)
+
+	var removeID string
+	leader.mu.Lock()
+	for _, peer := range leader.config.Peers {
+		removeID = peer
+		break
+	}
+	leader.mu.Unlock()
+	require.NotEmpty(t, removeID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, leader.ChangeMembership(ctx, nil, []string{removeID}))
+
+	require.Eventually(t, func() bool {
+		view := leader.membershipViewSnapshot()
+		return view.phase == JointNone && !containsPeer(view.currentVoters, removeID)
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func BenchmarkMembershipViewDualMajority_SingleMode(b *testing.B) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3", "n4", "n5"}})
+	view := n.membershipViewSnapshot()
+	acked := map[string]bool{"n2": true, "n3": true}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = view.dualMajority("n1", acked)
+	}
+}
+
+func BenchmarkMembershipViewDualMajority_JointMode(b *testing.B) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	n.mu.Lock()
+	n.jointPhase = JointEntering
+	n.jointOldVoters = []string{"n1", "n2", "n3"}
+	n.jointNewVoters = []string{"n1", "n4", "n5"}
+	n.publishMembershipViewLocked()
+	n.mu.Unlock()
+	view := n.membershipViewSnapshot()
+	acked := map[string]bool{"n2": true, "n4": true}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = view.dualMajority("n1", acked)
+	}
+}
+
+func BenchmarkHasQuorum_WithMembershipView(b *testing.B) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3", "n4", "n5"}})
+	n.checkQuorumAcks = map[string]time.Time{
+		"n2": time.Now(),
+		"n3": time.Now(),
+	}
+
+	b.ReportAllocs()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i := 0; i < b.N; i++ {
+		_ = n.hasQuorum()
+	}
+}
+
+func BenchmarkQuorumMinMatchIndex_WithMembershipView(b *testing.B) {
+	n := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3", "n4", "n5"}})
+	n.matchIndex = map[string]uint64{
+		"n1": 100,
+		"n2": 90,
+		"n3": 80,
+		"n4": 70,
+		"n5": 60,
+	}
+
+	b.ReportAllocs()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i := 0; i < b.N; i++ {
+		_ = n.quorumMinMatchIndexLocked()
+	}
 }
 
 func serverIDs(servers []Server) []string {

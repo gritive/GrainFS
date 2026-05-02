@@ -2,39 +2,54 @@ package raft
 
 import "sort"
 
+// membershipView is the immutable publication boundary for quorum readers.
+//
+// Canonical mutable state under n.mu:
+//
+//	config.Peers, learnerIDs, jointPhase, jointOldVoters, jointNewVoters
+//	                      |
+//	                      v
+//	    publishMembershipViewLocked copies a complete snapshot
+//	                      |
+//	                      v
+//	      lock-free readers observe one coherent membershipView
 type membershipView struct {
-	phase           jointPhase
-	current         []string
-	old             []string
-	peers           []string
-	learners        map[string]string
-	managedLearners []string
-	removedSelf     bool
-	enterIndex      uint64
+	phase             jointPhase
+	currentVoters     []string
+	oldVoters         []string
+	peerVoters        []string
+	learnersByID      map[string]string
+	managedLearnerIDs []string
+	removedSelf       bool
+	enterIndex        uint64
 }
 
 func (n *Node) publishMembershipViewLocked() {
+	old := n.membership.Load()
 	view := &membershipView{
-		phase:           n.jointPhase,
-		peers:           append([]string(nil), n.config.Peers...),
-		learners:        copyStringMap(n.learnerIDs),
-		managedLearners: sortedManagedLearners(n.jointManagedLearners),
-		removedSelf:     n.removedFromCluster,
-		enterIndex:      n.jointEnterIndex,
+		phase:             n.jointPhase,
+		peerVoters:        append([]string(nil), n.config.Peers...),
+		learnersByID:      copyStringMap(n.learnerIDs),
+		managedLearnerIDs: sortedManagedLearners(n.jointManagedLearners),
+		removedSelf:       n.removedFromCluster,
+		enterIndex:        n.jointEnterIndex,
 	}
 	if n.jointPhase == JointEntering {
-		view.current = append([]string(nil), n.jointNewVoters...)
-		view.old = append([]string(nil), n.jointOldVoters...)
+		view.currentVoters = append([]string(nil), n.jointNewVoters...)
+		view.oldVoters = append([]string(nil), n.jointOldVoters...)
 	} else {
 		if n.removedFromCluster {
-			view.current = append([]string(nil), n.config.Peers...)
+			view.currentVoters = append([]string(nil), n.config.Peers...)
 		} else {
-			view.current = make([]string, 0, len(n.config.Peers)+1)
-			view.current = append(view.current, n.id)
-			view.current = append(view.current, n.config.Peers...)
+			view.currentVoters = make([]string, 0, len(n.config.Peers)+1)
+			view.currentVoters = append(view.currentVoters, n.id)
+			view.currentVoters = append(view.currentVoters, n.config.Peers...)
 		}
 	}
 	n.membership.Store(view)
+	if old != nil {
+		n.drainPendingReadIndex(ErrMembershipChanged)
+	}
 }
 
 func (n *Node) membershipViewSnapshot() *membershipView {
@@ -61,23 +76,23 @@ func (view *membershipView) hasMajority(self string, matched map[string]bool, se
 }
 
 func (view *membershipView) dualMajority(self string, matched map[string]bool) bool {
-	if !view.hasMajority(self, matched, view.current) {
+	if !view.hasMajority(self, matched, view.currentVoters) {
 		return false
 	}
-	if view.old != nil && !view.hasMajority(self, matched, view.old) {
+	if view.oldVoters != nil && !view.hasMajority(self, matched, view.oldVoters) {
 		return false
 	}
 	return true
 }
 
 func (view *membershipView) allVotersExcept(self string) []string {
-	seen := make(map[string]struct{}, len(view.current)+len(view.old))
-	for _, id := range view.current {
+	seen := make(map[string]struct{}, len(view.currentVoters)+len(view.oldVoters))
+	for _, id := range view.currentVoters {
 		if id != self {
 			seen[id] = struct{}{}
 		}
 	}
-	for _, id := range view.old {
+	for _, id := range view.oldVoters {
 		if id != self {
 			seen[id] = struct{}{}
 		}
@@ -91,23 +106,23 @@ func (view *membershipView) allVotersExcept(self string) []string {
 
 func (view *membershipView) configuration(self string) Configuration {
 	if view.phase == JointEntering {
-		seen := make(map[string]struct{}, len(view.current)+len(view.old)+len(view.learners))
-		servers := make([]Server, 0, len(view.current)+len(view.old)+len(view.learners))
-		for _, id := range view.old {
+		seen := make(map[string]struct{}, len(view.currentVoters)+len(view.oldVoters)+len(view.learnersByID))
+		servers := make([]Server, 0, len(view.currentVoters)+len(view.oldVoters)+len(view.learnersByID))
+		for _, id := range view.oldVoters {
 			if _, ok := seen[id]; ok {
 				continue
 			}
 			seen[id] = struct{}{}
 			servers = append(servers, Server{ID: id, Suffrage: Voter})
 		}
-		for _, id := range view.current {
+		for _, id := range view.currentVoters {
 			if _, ok := seen[id]; ok {
 				continue
 			}
 			seen[id] = struct{}{}
 			servers = append(servers, Server{ID: id, Suffrage: Voter})
 		}
-		for _, peerKey := range view.learners {
+		for _, peerKey := range view.learnersByID {
 			if _, ok := seen[peerKey]; ok {
 				continue
 			}
@@ -120,14 +135,14 @@ func (view *membershipView) configuration(self string) Configuration {
 }
 
 func (view *membershipView) snapshotServers(self string) []Server {
-	servers := make([]Server, 0, len(view.peers)+1+len(view.learners))
+	servers := make([]Server, 0, len(view.peerVoters)+1+len(view.learnersByID))
 	if !view.removedSelf {
 		servers = append(servers, Server{ID: self, Suffrage: Voter})
 	}
-	for _, peer := range view.peers {
+	for _, peer := range view.peerVoters {
 		servers = append(servers, Server{ID: peer, Suffrage: Voter})
 	}
-	for _, peerKey := range view.learners {
+	for _, peerKey := range view.learnersByID {
 		servers = append(servers, Server{ID: peerKey, Suffrage: NonVoter})
 	}
 	return servers
@@ -135,10 +150,10 @@ func (view *membershipView) snapshotServers(self string) []Server {
 
 func (view *membershipView) jointSnapshotState() (phase int8, oldVoters, newVoters []string, enterIndex uint64, managedLearners []string) {
 	return int8(view.phase),
-		append([]string(nil), view.old...),
-		append([]string(nil), view.current...),
+		append([]string(nil), view.oldVoters...),
+		append([]string(nil), view.currentVoters...),
 		view.enterIndex,
-		append([]string(nil), view.managedLearners...)
+		append([]string(nil), view.managedLearnerIDs...)
 }
 
 func copyStringMap(in map[string]string) map[string]string {
@@ -156,4 +171,40 @@ func sortedManagedLearners(in map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSetEqualSlice(set map[string]struct{}, values []string) bool {
+	if len(set) != len(values) {
+		return false
+	}
+	for _, value := range values {
+		if _, ok := set[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func stringMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
 }

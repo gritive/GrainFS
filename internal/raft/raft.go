@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +23,7 @@ var (
 	ErrJointAborted        = errors.New("raft: joint consensus aborted — config reverted to C_old")
 	ErrNotInJointPhase     = errors.New("raft: ForceAbortJoint called outside JointEntering phase")
 	ErrLeadershipLost      = errors.New("raft: leadership lost during joint consensus")
+	ErrMembershipChanged   = errors.New("raft: membership changed during read index")
 	ErrNodeStopped         = errors.New("raft: node stopped")
 )
 
@@ -646,6 +646,7 @@ func (n *Node) applyLoop() {
 					n.jointResultCh = nil
 				}
 				newPeers := serverPeerKeys(jc.NewServers)
+				wasRemoved := n.removedFromCluster
 				if !containsPeer(newPeers, n.id) {
 					n.removedFromCluster = true
 					if n.state == Leader {
@@ -656,7 +657,9 @@ func (n *Node) applyLoop() {
 				} else {
 					n.removedFromCluster = false
 				}
-				n.publishMembershipViewLocked()
+				if n.removedFromCluster != wasRemoved {
+					n.publishMembershipViewLocked()
+				}
 			case JointOpAbort:
 				if n.jointResultCh != nil {
 					n.jointResultCh <- ErrJointAborted
@@ -752,7 +755,7 @@ func (n *Node) PeerMatchIndex(peerKey string) (uint64, bool) {
 // copy so mutations to the returned slice do not affect the node's state.
 func (n *Node) Peers() []string {
 	view := n.membershipViewSnapshot()
-	return append([]string(nil), view.peers...)
+	return append([]string(nil), view.peerVoters...)
 }
 
 // ApplyCh returns the channel on which committed log entries are delivered.
@@ -793,8 +796,8 @@ func (n *Node) JointPhase() (phase JointPhase, oldVoters []string, newVoters []s
 	view := n.membershipViewSnapshot()
 	phase = JointPhase(view.phase)
 	if view.phase == JointEntering {
-		oldVoters = append([]string(nil), view.old...)
-		newVoters = append([]string(nil), view.current...)
+		oldVoters = append([]string(nil), view.oldVoters...)
+		newVoters = append([]string(nil), view.currentVoters...)
 		enterIndex = view.enterIndex
 	}
 	return phase, oldVoters, newVoters, enterIndex
@@ -807,8 +810,8 @@ type JointPhase = jointPhase
 // LearnerIDs returns a snapshot of the current learner node IDs.
 func (n *Node) LearnerIDs() []string {
 	view := n.membershipViewSnapshot()
-	ids := make([]string, 0, len(view.learners))
-	for id := range view.learners {
+	ids := make([]string, 0, len(view.learnersByID))
+	for id := range view.learnersByID {
 		ids = append(ids, id)
 	}
 	return ids
@@ -829,9 +832,14 @@ func (n *Node) JointSnapshotState() (phase int8, jointOldVoters, jointNewVoters 
 func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	changed := n.jointPhase != jointPhase(phase) ||
+		!stringSlicesEqual(n.jointOldVoters, jointOldVoters) ||
+		!stringSlicesEqual(n.jointNewVoters, jointNewVoters) ||
+		n.jointEnterIndex != jointEnterIndex ||
+		!stringSetEqualSlice(n.jointManagedLearners, managedLearners)
 	n.jointPhase = jointPhase(phase)
-	n.jointOldVoters = jointOldVoters
-	n.jointNewVoters = jointNewVoters
+	n.jointOldVoters = append([]string(nil), jointOldVoters...)
+	n.jointNewVoters = append([]string(nil), jointNewVoters...)
 	n.jointEnterIndex = jointEnterIndex
 	n.jointLeaveProposed = false
 	n.jointAbortProposed = false
@@ -840,7 +848,9 @@ func (n *Node) RestoreJointStateFromSnapshot(phase int8, jointOldVoters, jointNe
 	for _, id := range managedLearners {
 		n.jointManagedLearners[id] = struct{}{}
 	}
-	n.publishMembershipViewLocked()
+	if changed {
+		n.publishMembershipViewLocked()
+	}
 }
 
 // containsServer reports whether servers contains an entry with the given id.
@@ -1240,7 +1250,7 @@ func (n *Node) initLeaderState() {
 // Must be called with n.mu held.
 func (n *Node) hasQuorum() bool {
 	view := n.membershipViewSnapshot()
-	if len(view.current) == 0 {
+	if len(view.currentVoters) == 0 {
 		return true // single-node bootstrap
 	}
 	threshold := time.Now().Add(-3 * n.config.HeartbeatTimeout)
@@ -1550,23 +1560,38 @@ func (n *Node) quorumMinMatchIndexLocked() uint64 {
 		if len(set) == 0 {
 			return 0
 		}
-		vals := make([]uint64, 0, len(set))
+		var stack [9]uint64
+		vals := stack[:0]
+		if len(set) > len(stack) {
+			vals = make([]uint64, 0, len(set))
+		}
 		for _, peer := range set {
 			vals = append(vals, n.matchIndex[peer])
 		}
-		sort.Slice(vals, func(i, j int) bool { return vals[i] > vals[j] })
+		sortUint64Desc(vals)
 		return vals[len(vals)/2]
 	}
 
-	cur := medianMatch(view.current)
-	if view.old == nil {
+	cur := medianMatch(view.currentVoters)
+	if view.oldVoters == nil {
 		return cur
 	}
-	o := medianMatch(view.old)
+	o := medianMatch(view.oldVoters)
 	if cur < o {
 		return cur
 	}
 	return o
+}
+
+func sortUint64Desc(vals []uint64) {
+	for i := 1; i < len(vals); i++ {
+		v := vals[i]
+		j := i - 1
+		for ; j >= 0 && vals[j] < v; j-- {
+			vals[j+1] = vals[j]
+		}
+		vals[j+1] = v
+	}
 }
 
 // maybeRunLogGC truncates the Raft log store up to the quorum watermark when
@@ -2106,8 +2131,13 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	n.signalCommit()
 
 	// Restore cluster config from snapshot using Suffrage-aware helper.
+	membershipChanged := false
 	if len(args.Servers) > 0 {
 		peers, learners := restoreConfigFromServers(args.Servers, n.id)
+		membershipChanged = !stringSlicesEqual(n.config.Peers, peers) ||
+			!stringSlicesEqual(n.initialPeers, peers) ||
+			!stringMapsEqual(n.learnerIDs, learners) ||
+			n.removedFromCluster != !containsServer(args.Servers, n.id)
 		n.config.Peers = peers
 		n.initialPeers = peers
 		n.learnerIDs = learners
@@ -2116,7 +2146,9 @@ func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 		// cluster state; if self is absent, we are an orphan.
 		n.removedFromCluster = !containsServer(args.Servers, n.id)
 	}
-	n.publishMembershipViewLocked()
+	if membershipChanged {
+		n.publishMembershipViewLocked()
+	}
 
 	// Deliver snapshot data via applyCh so the FSM can restore
 	select {

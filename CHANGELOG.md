@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.11.0] — 2026-05-02 — Raft membership view completion
+
+### Changed
+
+- **raft**: membership view snapshots now use explicit voter and learner field names, making single-mode and joint-consensus quorum reads easier to audit.
+- **raft**: config-change application now publishes a new membership view only when membership actually changes, so no-op entries do not disrupt pending ReadIndex work.
+- **raft**: ReadIndex waiters now fail fast when a real membership change publishes, forcing callers to retry against the new quorum view instead of completing on stale membership.
+
+### Fixed
+
+- **raft**: snapshot install, joint-state restore, self-removal, quorum watermark, and read-index paths now share the same coherent membership-view boundary.
+- **tests**: added regression coverage for no-op membership changes, ReadIndex waiter draining, captured ReadIndex membership, snapshot install publication, live joint transitions, and membership-view hot-path benchmarks.
+
 ## [0.0.10.0] — 2026-05-02 — Raft membership view hardening
 
 ### Changed
