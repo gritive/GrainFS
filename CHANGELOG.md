@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.14.0] — 2026-05-02 — DuckDB Iceberg REST Catalog
+
+### Added
+
+- **server**: `/iceberg/v1` now exposes a DuckDB-compatible Iceberg REST Catalog for local single-node GrainFS, including config, namespace, table, and transaction commit endpoints.
+- **icebergcatalog**: added a Badger-backed namespace/table catalog with metadata pointer compare-and-swap so stale table commits fail instead of overwriting current state.
+- **serve**: local `grainfs serve` wires the Iceberg catalog onto the existing meta BadgerDB while multi-peer cluster mode keeps `/iceberg/*` disabled with typed JSON `NotImplementedException` responses.
+- **docs**: added DuckDB attach and smoke-test instructions plus a captured DuckDB 1.5.2 request trace for catalog create flows.
+
+### Fixed
+
+- **server**: `/iceberg/*` now stays on an Iceberg JSON error boundary instead of falling through into S3 XML/object route behavior for unsupported catalog operations.
+- **server**: Iceberg transaction commits now validate snapshot requirements and write metadata JSON versions into the warehouse bucket as ordinary GrainFS objects.
+
 ## [0.0.13.0] — 2026-05-02 — BadgerDB compactor reduction + shared raft-log prototype
 
 ### Added

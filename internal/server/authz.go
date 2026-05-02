@@ -48,7 +48,8 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		path := string(c.URI().Path())
 
 		// Skip non-S3 paths
-		if path == "/" || path == "/metrics" || strings.HasPrefix(path, "/ui/") || strings.HasPrefix(path, "/volumes") {
+		if path == "/" || path == "/metrics" || strings.HasPrefix(path, "/ui/") ||
+			strings.HasPrefix(path, "/volumes") || strings.HasPrefix(path, "/iceberg/") {
 			c.Next(ctx)
 			return
 		}
