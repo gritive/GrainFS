@@ -23,6 +23,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -77,6 +78,7 @@ type Server struct {
 	volMgr         *volume.Manager
 	policyStore    *CompiledPolicyStore
 	lifecycleStore *lifecycle.Store
+	icebergStore   *icebergcatalog.Store
 	ipLimiter      *RateLimiter
 	userLimiter    *RateLimiter
 	cluster        ClusterInfo       // nil in no-peers mode
@@ -214,6 +216,16 @@ func WithVolumeManager(mgr *volume.Manager) Option {
 	}
 }
 
+// WithIcebergCatalogStore enables the Iceberg REST Catalog API with an
+// explicitly-managed catalog store. Cluster serve paths use this to keep the
+// catalog state on the meta DB instead of trying to infer it from backend
+// decorators.
+func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {
+	return func(s *Server) {
+		s.icebergStore = store
+	}
+}
+
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	s := &Server{
@@ -273,6 +285,11 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 
 	if s.volMgr == nil {
 		s.volMgr = volume.NewManager(backend)
+	}
+	if s.icebergStore == nil {
+		if dbp, ok := unwrapBackend(backend).(storage.DBProvider); ok {
+			s.icebergStore = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")
+		}
 	}
 	s.registerRoutes(h)
 	s.hertz = h
@@ -425,6 +442,8 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Dashboard UI
 	h.GET("/ui/", s.serveDashboard)
+
+	s.registerIcebergAPI(h)
 
 	// Service-level: list buckets
 	h.GET("/", s.listBuckets)

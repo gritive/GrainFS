@@ -31,6 +31,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -916,6 +917,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
+	}
+	if len(peers) == 0 {
+		srvOpts = append(srvOpts, server.WithIcebergCatalogStore(icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")))
 	}
 	// Propagate S3 auth from --access-key / --secret-key. Previously this
 	// was local-only; cluster mode silently ran without auth regardless of

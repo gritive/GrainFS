@@ -65,6 +65,7 @@
 
 ## Phase 20: Protocol Extensions
 
+- [ ] **Iceberg REST Catalog cluster safety** — 단일 노드 catalog state는 Badger CAS로 동작한다. Multi-peer cluster에서 `/iceberg/*`를 활성화하려면 namespace/table metadata pointer를 meta-Raft 명령으로 복제하고 commit CAS를 quorum 경계에서 검증해야 한다.
 - [ ] Redis 프로토콜 지원 (RESP, Streaming, Pub/Sub 이벤트)
 - [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원
 
