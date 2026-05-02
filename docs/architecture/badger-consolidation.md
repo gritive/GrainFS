@@ -773,6 +773,132 @@ Plus the original P0b 1.5d (now ~done) → **C2 full ≈ 10d** vs original
 iterator literals, not just key-builders), the Snapshot/Restore safety
 tests, and the new concurrency suite.
 
+### Design v2 second-pass review — open issues
+
+A second codex pass on the v2 design (post-rewrite-of-12-issues) found
+13 more, several architectural. **The design is not yet ready for
+implementation; this section is the working punchlist.**
+
+Architecture:
+
+1. **Live Raft snapshot install bypasses `FSM.Restore`.**
+   `HandleInstallSnapshot` (`internal/raft/raft.go:2087,2121`) wraps the
+   snapshot bytes in a `LogEntryCommand` and pushes it onto `applyCh`;
+   `RunApplyLoop` (`internal/cluster/backend.go:323`) then calls
+   `fsm.Apply(entry.Command)` — not `fsm.Restore`. So the prefix-scoped
+   Restore design above only fixes direct `SnapshotManager.Restore`,
+   not the live follower catch-up path. The Apply path also drops
+   the snapshot send when `applyCh` is full (`raft.go:2121`). Fixing
+   this means either routing snapshot installs through a new code
+   path that calls `Restore`, or making `Apply` prefix-aware for
+   snapshot-typed entries.
+
+2. **Restore is still crash-unsafe.** Validate-first fixes
+   corrupt-input wipe, but `DropPrefix` followed by a separate
+   `Update` is non-atomic. A crash between the two leaves the group
+   empty. Need a staging area + commit marker, or a transactional
+   delete+set strategy. (`docs/architecture/badger-consolidation.md`
+   restore sketch lines 622, 633.)
+
+API and coverage:
+
+3. `Strip` API in this doc is inconsistent: returns `[]byte` once,
+   `([]byte, bool)` elsewhere. `HasPrefix` is referenced but not
+   defined. Pin one signature.
+
+4. `Strip(..., bool)` paired with the example's `if !ok { continue }`
+   silently hides leaks. Replace with a panic-or-error path when the
+   iteration scope guarantees the prefix should be present, plus an
+   explicit "leak counter" metric.
+
+5. **Inventory still incomplete.** Codex pass 2 found additional raw
+   scan / unprefixed-key sites:
+   - `internal/cluster/backend.go:2129` (`WalkObjects` body)
+   - `internal/cluster/backend.go:2141` (`WalkObjects` body)
+   - `internal/cluster/backend.go:729` (`GetBucketVersioning` raw `txn.Get`)
+   - `internal/cluster/snapshotable.go:142,209` (snapshotable restore + blob lookup)
+   - `internal/cluster/scrubbable.go:73` (already known)
+   - `internal/cluster/apply.go:558` (`RecoverPending`)
+   - `internal/cluster/shard_placement.go:160,243` (fallback scans)
+
+6. **Snapshot v2 magic `GFSMSNAP` is not ambiguity-free** vs v1
+   FlatBuffers payload. Low-probability, but a v1 snapshot whose
+   first 8 bytes happen to spell those characters would parse as v2.
+   Use a longer or self-describing framing (e.g., embed FlatBuffer
+   magic + explicit version table).
+
+Concurrency / lifecycle:
+
+7. **DropPrefix won't starve heartbeats but will stall apply.**
+   Heartbeats run from `runLeader`/`replicateToAll`, independent of
+   FSM apply. The real risk is `RunApplyLoop` blocking in
+   `fsm.Apply` while raft `applyLoop` eventually blocks on
+   `applyCh`. Test plan must cover committed-but-not-applied state
+   under DropPrefix, not just leader churn.
+
+8. **Migration table cannot distinguish legitimate continuation
+   from operator-nuked `groups/`.** "No `groups/*/badger`,
+   `shared-fsm` exists → proceed" also accepts orphaned shared
+   metadata after a partial start + manual dir deletion. Need a
+   shared-FSM manifest at `<dataDir>/shared-fsm/manifest.json` with
+   layout version + bootstrapped group IDs.
+
+9. **`group_lifecycle.go` wiring is not solved.**
+   `GroupLifecycleConfig` has no shared-FSM field
+   (`internal/cluster/group_lifecycle.go:21`). `instantiateLocalGroup`
+   always opens `groups/<id>/badger` (line 60). `serve.go` threads
+   shared raft-log via `glc.LogStore` but no shared-FSM equivalent.
+   Plus `GroupBackend.Close` closes the embedded DB
+   (`internal/cluster/group_backend.go:119`) — shared-FSM needs an
+   explicit ownership semantic similar to P0b's `BadgerLogStore.shared`.
+
+10. **`DestroyGroupData` intent persistence failure unspecified.**
+    What happens when meta-Raft has committed permanent removal,
+    local raft is stopped, but the intent log fsync fails? Correct
+    sequence: fail BEFORE `DropPrefix`, retry from durable meta
+    state, use pending/complete markers in the log.
+
+11. **SIGKILL test is not deterministic.** Badger has no
+    "inside DropPrefix" hook. The deterministic substitute is
+    injecting kill points around P3 phases (after intent fsync,
+    before/after `DropPrefix`, before completion marker), not
+    actual SIGKILL during DropPrefix.
+
+Estimate / regression:
+
+12. Estimate 8.5d does not cover live `InstallSnapshot` semantics,
+    restore crash recovery, manifest design, DB ownership wiring,
+    or deterministic fault injection. Realistic: **11-14d**.
+
+13. Doc regressions: unreachable `_ = ver` statement after `return`
+    in the Restore sketch; silent `continue` on `Strip` failure;
+    `DestroyGroupData` priced at 0.5d despite needing durable
+    lifecycle semantics.
+
+### Decision: pause P3 design, run P0b measurement first
+
+Each design pass surfaces deeper architectural issues (live snapshot
+install bypass, restore crash safety, manifest design). Continuing to
+iterate on the design without empirical data is high risk: P3 may not
+be necessary if P0b alone unblocks the load-N32 boot ceiling, or P3's
+real shape may differ depending on what the measurement reveals.
+
+Next step is **not** more design iteration. The next concrete action
+is to run the P0b perf matrix (idle-N8/16, load-N8/16/32) on an idle
+host and measure:
+
+- goroutine count: P0b vs C1-baseline at each scenario
+- per-node CPU: same comparison
+- load-N32 boot status: does shared raft-log alone allow it?
+- workload PUT error rate at each scenario
+
+The result determines whether P3 is the next priority or whether
+something else (e.g., raft tick rate tuning, badger compaction
+parameter tuning, different scaling axis) shows more leverage.
+
+If after measurement P3 is still the right move, address the 13
+issues above before any code lands.
+
 ## References
 
 - C1 PR: #128 `perf/badger-compactor` (cheap compactor reduction baseline)
