@@ -24,7 +24,6 @@
   - PR-D 후속: Test coverage enhancements (integration tests + self-removal retry) ✅
 
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸). **Depends on:** Voter set lock-free read / `membershipView` quorum snapshot boundary 완료 후 진행 — PR-F는 quorum/election/ReadIndex가 mixed membership state를 보지 않는다는 전제 위에 올라간다.
-- [x] Raft leader 쓰기 경로 부하 분산 검토 (batching, pipelining, leader transfer 등) — AppendEntries pipelining shipped. **Completed:** v0.0.12.0 (2026-05-02)
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
   - BatchingFSM (FSM apply throughput 한계 도달 시)
   - Snapshot chunking + Concurrent snapshotting (FSM이 QUIC stream max 근접 시)
@@ -61,13 +60,13 @@
 - [ ] SIMD
 - [ ] **Predictive resource warnings — BadgerDB / goroutine / FD** — *zero ops* — BadgerDB value log 크기, goroutine 수, open FD 추세를 추적하고 임계 도달 전 경고. 디스크 사용률 경고와 동일 패턴(transition-only firing).
 - [ ] **BadgerDB 인스턴스 통합 (P3 — FSM state DB)** — raft-log 통합(P0b)은 v0.0.13.0 출시됨 (`OpenSharedLogStore` + `--shared-badger` 기본 활성). idle-N8 측정에서 goroutines -16%, heap -19%, RSS -25% 확인. 남은 작업: FSM state DB도 노드당 1개로 통합 (P3). 현재 설계 검토에서 13개 이슈 발견 후 일시 정지 (live snapshot Restore가 FSM 우회, DropPrefix DB-wide stall, 추정 11-14일). docs/architecture/badger-consolidation.md 참고. **상태: PAUSED.** R+H (QUIC stream-reuse) 효과로 idle CPU 70%→3.5% 달성, P3 시급도 낮아짐. 재오픈 조건: (a) FSM state badger가 새 핫스팟으로 떠오르면 (b) 13개 이슈 mitigation 명확해지면. 그 외에는 v0.1.x 시점에 close.
-- [ ] **Meta-raft mux 통합** — R+H (v0.0.16~v0.0.17)에서 per-group raft만 mux 적용. meta는 ~4% 트래픽. **wire-compat 결정**: magic groupID `__meta__` 사용(1-byte discriminator 불필요). codex 7-finding 반영 plan: `dispatchToLocalGroup` 분기 + `__meta__` reservation 4곳 + `serve.go` startup 순서 재배치 + fallback budget split + mixed-version remote error → legacy fallback. ~390 LOC (코드 ~170 + 테스트 ~220). 사전조건: R+H load-N8 clean 측정. R+H Coalescer race fix는 v0.0.18.1 (#140)로 shipped. design doc §Follow-up: Meta-raft mux integration 참고.
 - [ ] **R+H 측정 잔여** — load-N8 / load-N16 mux=on 깨끗한 측정. e2e bucket-replication race + macOS host contention 임계 해결 후. pool size sweep (1/2/4/8)로 RSS +74% 영향 평가 후 default 재조정.
+- [ ] **Meta-mux post-deploy 측정** — v0.0.19.0 (#141)로 meta-raft mux 통합 shipped. R+H load-N8 clean baseline 후 meta-mux on/off A/B 측정으로 plan에서 추정한 ~4% 트래픽 감소 실측. 작아서 noise에 묻힐 가능성, host stable 환경 필수. 결과를 `docs/architecture/quic-stream-multiplex.md` §Follow-up에 DELIVERED 헤더로 기록.
+- [ ] **e2e bucket-replication race fix (P0 — perf 측정 블로커)** — `tests/e2e/cluster_perf_profile_test.go:232` load-N16/N32에서 "no such bucket" 가끔 발생. R+H 후속 perf 측정 + meta-mux post-deploy 측정 모두 이 race 안정화 후 진행 가능. 재현/근본원인 분석 + 격리 fix 필요.
 - [ ] control plane, data plane 분리
 
 ## Phase 20: Protocol Extensions
 
-- [x] **Iceberg REST Catalog cluster safety** — 단일 노드 catalog state는 Badger CAS로 동작하고 DuckDB embedded e2e는 `make test-e2e-iceberg`로 검증한다. Multi-peer cluster에서 `/iceberg/*`를 leader/follower 어느 노드에 호출해도 동작하게 하려면 namespace/table metadata pointer를 meta-Raft 명령으로 복제하고 commit CAS를 quorum 경계에서 검증해야 한다. 로컬 Badger를 노드별로 켜는 방식은 split-brain catalog가 되므로 금지. **Completed:** v0.0.18.0 (2026-05-02)
 - [ ] Redis 프로토콜 지원 (RESP, Streaming, Pub/Sub 이벤트)
 - [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원
 
