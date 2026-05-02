@@ -8,7 +8,6 @@
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
-- [x] Erasure Coding을 활용한 Bit Rot 방지 — EC shard 파일에 CRC envelope 적용, legacy raw shard read fallback 유지. **Completed:** v0.0.21.0 (2026-05-02)
 - [ ] **단일 블롭 손상 격리** — *zero ops* — 손상된 블롭 객체만 격리해 read-only로 표시; 동일 볼륨의 다른 객체는 정상 서비스 유지.
 
 ## Phase 17: Scale-Out
@@ -16,24 +15,17 @@
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
-- **Phase 17 — Multi-Raft Data Plane 라우팅 완료 (v0.0.7.0 #117 ~ v0.0.7.1 #123)**
-  - PR-A: ShardGroupAssignment + FSM (v0.0.7.0 #117) ✅
-  - PR-B: Per-Group Raft + BadgerDB (v0.0.7.0 #118) ✅
-  - PR-C: Router + Coordinator scaffold (v0.0.7.0 #119) ✅
-  - PR-D 후속: ForwardReceiver + serve.go wiring + e2e tests (v0.0.7.1 #123) ✅
-  - PR-D 후속: Test coverage enhancements (integration tests + self-removal retry) ✅
 
+- [ ] **PR-D**: ShardGroupEntry.PeerIDs identity를 nodeID로 통일 (현재 raftAddr 혼재). MetaFSM에 NodeID→Address 매핑 + Resolve API. PR-E 선행. Design: [docs/cluster-dynamic-join.md](docs/cluster-dynamic-join.md).
+- [ ] **PR-E**: Cluster dynamic join (1→N sequential bootstrap). `serve --join <leader>` 단일 진입점 + `MetaTransport.SendJoin` admin RPC + `Node.AddVoterCtx` 기반 catch-up 보장 + `MetaRaft.AddShardGroupVoter` add-only voter primitive + balancer가 PendingNodes/ReadyNodes 처리 (voter 보강 + 그룹 동적 확장, N≥3 가드). Design: [docs/cluster-dynamic-join.md](docs/cluster-dynamic-join.md). **Depends on:** PR-D.
+- [ ] **PR-X**: e2e 헬퍼 `tryStartMRCluster` 1→N 시퀀셜 동적화 (`serve` seed → 나머지 `serve --join`) + `--fast-bootstrap` 정적 옵트인 + `TestE2E_TwoNodeAvailabilityTrap`/`TestE2E_DynamicGroupSeeding_1to5` 운영 회귀. **Depends on:** PR-E.
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸). **Depends on:** Voter set lock-free read / `membershipView` quorum snapshot boundary 완료 후 진행 — PR-F는 quorum/election/ReadIndex가 mixed membership state를 보지 않는다는 전제 위에 올라간다.
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
   - BatchingFSM (FSM apply throughput 한계 도달 시)
   - Snapshot chunking + Concurrent snapshotting (FSM이 QUIC stream max 근접 시)
   - Per-PR Prometheus dashboard 갱신 PR
 - [ ] **raft-ehn Tier 3** (별도 브랜치, 각 sub-project는 독립 design + plan + worktree):
-  - **Tier 3-1: Joint consensus + Learner** — Multi-Raft atomic move-replica · multi-server replacement 안전성. Sub-project 1 (Learner-first, v0.0.6.13 #105 + chaos #107) + Sub-project 2 (Joint core, v0.0.6.16~v0.0.6.20 #108~#112) 완료. 남은 작업:
-    - ✅ **후속: Voter set lock-free read** — `n.mu` hold 안 voter set read를 `atomic.Pointer[membershipView]` COW swap으로 분리. raft.go 전반 multi-field invariant 안에서 voter set만 분리하려면 design 필요. **Completed:** v0.0.10.0 (2026-05-02)
-  - **Tier 3-2: RecoverCluster** — 단일 노드 재해 복구 운영 도구 ✅ **Completed:** v0.0.9.0 (2026-05-02)
   - **Tier 3-3: 클라이언트 dedup** — ClientID + RequestID 기반 dedup table, S3 SDK retry 시 중복 PUT 방지
-  - ✅ **Tier 3-4: AE pipelining** — in-flight AppendEntries 1 → N (replication throughput). **Completed:** v0.0.12.0 (2026-05-02)
 - [ ] **§2.x 잔여 항목** (필요 시 design doc 재발굴) — 4-30 §2.3 snapshot servers persistence(#103 v0.0.6.11) 동일 series의 다른 violation 항목이 있었는지 다음 brainstorming session에서 확인.
 - [ ] Migration: NFS virtual overlay
 - [ ] Migration: NBD block proxying
@@ -51,7 +43,6 @@
 
 ## Phase 19: Performance
 
-- [x] **P0: Fix EC shard cache e2e object-size fixture** — non-leader routed `PutObject`/`UploadPart` now stream bodies over `StreamGroupForwardBody`; routed `GetObject` allows the 16 MiB EC cache fixture within the transport frame guard. **Completed:** v0.0.21.0 (2026-05-02)
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] **EC shard cache 사이즈 튜닝** — 본구현 완료 v0.0.4.42 (E2E 85.7% hit). 운영 telemetry(`grainfs_ec_shard_cache_hit_rate`)로 working set 측정 후 default 256 MB 적정성 검증. 큰 객체 백업 워크로드면 GB 단위까지, 작은 객체 위주면 비활성화 권장.
 - [ ] io_uring
