@@ -54,7 +54,7 @@ func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
 		t.Skip("skipping DuckDB Iceberg cluster e2e in short mode")
 	}
 
-	cluster := startMRCluster(t, 3, 2)
+	cluster := startStaticMRCluster(t, 3, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 

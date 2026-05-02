@@ -47,32 +47,32 @@ type mrCluster struct {
 	leaderIdx  int // last-known leader (set during probe)
 }
 
-func startMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
+func startStaticMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
-	// macOS multi-process e2e: freePort() TOCTOU + meta-Raft 5-node election
-	// timing → ~25% transient failure rate per attempt. Retry the whole boot
-	// sequence with fresh ports up to 3x to absorb flakes; a real defect
-	// produces a deterministic failure across all attempts.
+	// Legacy static-peer multi-process e2e: freePort() TOCTOU + meta-Raft
+	// election timing can still produce transient boot failures. Retry the
+	// whole boot sequence with fresh ports up to 3x; a real defect produces a
+	// deterministic failure across all attempts.
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		c, err := tryStartMRCluster(t, numNodes, seedGroups)
+		c, err := tryStartStaticMRCluster(t, numNodes, seedGroups)
 		if err == nil {
 			return c
 		}
 		lastErr = err
-		t.Logf("startMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
+		t.Logf("startStaticMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
 	}
-	t.Fatalf("startMRCluster failed after %d attempts: %v", maxAttempts, lastErr)
+	t.Fatalf("startStaticMRCluster failed after %d attempts: %v", maxAttempts, lastErr)
 	return nil
 }
 
-func tryStartMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster, error) {
+func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster, error) {
 	t.Helper()
 	c := &mrCluster{
 		t:          t,
@@ -108,9 +108,9 @@ func tryStartMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster, erro
 
 	t.Cleanup(c.Stop)
 
-	// All nodes share the full peer list. Bring up an initial quorum first so
-	// meta-Raft can elect once, then add the remaining peers without making all
-	// nodes race through the first election at the same time.
+	// Static peers require every node to know the full peer list. Bring up an
+	// initial quorum first so meta-Raft can elect once, then add remaining peers
+	// without making all nodes race through the first election at the same time.
 	initialNodes := numNodes
 	if numNodes > 1 {
 		initialNodes = numNodes/2 + 1
@@ -262,7 +262,7 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	c := startMRCluster(t, 5, 8)
+	c := startStaticMRCluster(t, 5, 8)
 
 	groupDirs := countGroupDirsAcrossNodes(c)
 
@@ -276,6 +276,38 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 			"group %s expected RF=3 voter dirs, got %d", gid, voterCount)
 	}
 	t.Logf("boot ok: %d distinct groups with directories across 5 nodes", len(groupDirs))
+}
+
+// ----- TestE2E_MultiRaftSharding_AllNodeServices ---------------------------
+// Every cluster process must expose its node-local services. S3 writes are
+// cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
+// listeners local to each process.
+func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	c := startStaticMRCluster(t, 3, 2)
+
+	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
+	waitForPortsParallel(t, c.nfs4Ports, 45*time.Second)
+	waitForPortsParallel(t, c.nbdPorts, 45*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	for i, endpoint := range c.httpURLs {
+		client := ecS3Client(endpoint, c.accessKey, c.secretKey)
+		bucket := fmt.Sprintf("all-node-s3-%d", i)
+		var lastErr error
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			lastErr = tryCreateBucket(ctx, client, bucket)
+			if lastErr == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		require.NoErrorf(t, lastErr, "S3 CreateBucket should work through node %d at %s", i, endpoint)
+	}
 }
 
 // ----- TestE2E_MultiRaftSharding_BucketAssignment ---------------------------
@@ -295,7 +327,7 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
 	// the same forward path with try-each-peer reliability.
 
-	c := startMRCluster(t, 3, 4)
+	c := startStaticMRCluster(t, 3, 4)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -354,7 +386,7 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
 	// leader-probe flakes.
 
-	c := startMRCluster(t, 3, 2) // 3 procs, 2 groups keeps restart recovery focused and stable
+	c := startStaticMRCluster(t, 3, 2) // 3 procs, 2 groups keeps restart recovery focused and stable
 
 	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -431,7 +463,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
 	// groups are group-0 and group-1.
 	const bucket = "persist-group-1"
-	c := startMRCluster(t, 3, 2)
+	c := startStaticMRCluster(t, 3, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -456,7 +488,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	require.Equal(t, body, string(readBody))
 
 	// Stop processes without removing data dirs so we can open the BadgerDB.
-	// t.Cleanup (registered in startMRCluster) handles final dir removal.
+	// t.Cleanup (registered in startStaticMRCluster) handles final dir removal.
 	for _, p := range c.procs {
 		if p != nil && p.Process != nil {
 			_ = p.Process.Signal(syscall.SIGTERM)
@@ -571,7 +603,7 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 
 	// Cross-node routing does not require multiple seeded groups; one RF=3 group
 	// is enough to exercise follower-to-leader forwarding.
-	c := startMRCluster(t, 3, 1)
+	c := startStaticMRCluster(t, 3, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -615,7 +647,7 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 
 	// Failover behavior is independent of group count. Use one group to keep
 	// startup focused on the failover path under test.
-	c := startMRCluster(t, 3, 1)
+	c := startStaticMRCluster(t, 3, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -724,7 +756,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 		t.Skip("NFSv4 server is Linux-only (binds 0.0.0.0)")
 	}
 
-	c := startMRCluster(t, 3, 4)
+	c := startStaticMRCluster(t, 3, 4)
 
 	// Start a grainfs instance with NFSv4 enabled on a dedicated port.
 	// We reuse the same data dir so it sees the same meta-Raft + per-group state.

@@ -122,6 +122,20 @@ func TestShardService_WithEncryptorNil(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
+func TestShardService_ResolvePeerAddress(t *testing.T) {
+	dir := t.TempDir()
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
+	svc := NewShardService(dir, transport.NewQUICTransport(), WithNodeAddressBook(f))
+
+	addr, err := svc.resolvePeerAddress("node-a")
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.1:7001", addr)
+
+	_, err = svc.resolvePeerAddress("node-missing")
+	require.ErrorContains(t, err, `node "node-missing" not found in address book`)
+}
+
 // TestShardService_RPCEncryptedWriteRead verifies that encryption works end-to-end
 // over the QUIC RPC path: write via handleWrite → WriteLocalShard (encrypt) and
 // read back via handleRead → ReadLocalShard (decrypt).

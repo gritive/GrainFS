@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -139,6 +140,7 @@ func init() {
 	serveCmd.Flags().Bool("quic-mux", true, "use multiplexed QUIC streams + heartbeat coalescing for per-group raft RPCs. idle-N8 measurement: 78pct drop in CPU samples, 17x drop in recvmsg syscalls vs legacy per-message path. Falls back to legacy on peer ALPN mismatch (older binaries).")
 	serveCmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer when --quic-mux=true (avoids HoL with raft pipelining)")
 	serveCmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window when --quic-mux=true (must be << heartbeat-interval)")
+	serveCmd.Flags().String("join", "", "join an existing cluster through this leader/follower raft address")
 	serveCmd.Flags().Bool("backend-vfs-fixed-version", true, "use fixed versionID 'current' for __grainfs_vfs_* buckets to bound on-disk usage; disable for legacy multi-version behavior (cluster mode only)")
 	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
 	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
@@ -226,10 +228,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		nodeID = generateNodeID(dataDir)
 		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
 	}
+	raftAddrExplicit := raftAddr != ""
 
 	// strings.Split always yields at least one element — empty input or
 	// trailing commas produce "" entries that waste a gossip tick each.
 	peers := filterEmpty(strings.Split(peersStr, ","))
+	joinAddr, _ := cmd.Flags().GetString("join")
+	joinMode := joinAddr != ""
+	if joinMode {
+		if len(peers) > 0 {
+			return fmt.Errorf("--join cannot be used with --peers")
+		}
+		if raftAddr == "" {
+			return fmt.Errorf("--raft-addr is required when --join is set")
+		}
+		peers = []string{joinAddr}
+	}
 
 	// When no peers are configured, we boot a singleton Raft node on a
 	// loopback port so a single-machine deployment still goes through the
@@ -390,8 +404,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	cfg.ManagedMode = badgerManagedMode
 	cfg.LogGCInterval = raftLogGCInterval
 	node := raft.NewNode(cfg, logStore)
-	if err := node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
-		return fmt.Errorf("raft bootstrap: %w", err)
+	if !joinMode {
+		if err := node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
+			return fmt.Errorf("raft bootstrap: %w", err)
+		}
 	}
 
 	// Wire QUIC transport to Raft RPC layer
@@ -438,8 +454,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		clusterRouter.AssignBucket(bucket, groupID)
 	})
 
-	if err := metaRaft.Bootstrap(); err != nil {
-		return fmt.Errorf("meta-raft bootstrap: %w", err)
+	if !joinMode {
+		if err := metaRaft.Bootstrap(); err != nil {
+			return fmt.Errorf("meta-raft bootstrap: %w", err)
+		}
 	}
 	if err := metaRaft.Start(ctx); err != nil {
 		return fmt.Errorf("meta-raft start: %w", err)
@@ -478,10 +496,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		// Use raft addresses as cluster-wide identity for ShardGroupEntry.PeerIDs —
-		// every node sees the same set, so pickVoters output is reproducible across
-		// processes. nodeID is a local label; raftAddr is globally consistent.
-		clusterPeers := append([]string{raftAddr}, peers...)
+		addNodeCtx, addNodeCancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := metaRaft.ProposeAddNode(addNodeCtx, cluster.MetaNodeEntry{ID: nodeID, Address: raftAddr, Role: 0}); err != nil {
+			log.Debug().Err(err).Str("node_id", nodeID).Str("addr", raftAddr).Msg("seed node metadata propose failed (non-fatal)")
+		}
+		addNodeCancel()
+
+		// Dynamic seed uses nodeID for self. Static bootstrap peers are still
+		// passed as raft addresses because the CLI only has --peers=<addr>,
+		// not peer nodeIDs; the address resolver treats those as legacy IDs.
+		clusterPeers := append([]string{nodeID}, peers...)
 		const replicationFactor = 3
 		for i := 0; i < seedGroups; i++ {
 			groupID := fmt.Sprintf("group-%d", i)
@@ -516,6 +540,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		readamp.Enable()
 		log.Info().Msg("read-amplification simulator enabled — see grainfs_readamp_* counters at /metrics")
 	}
+	shardSvcOpts = append(shardSvcOpts, cluster.WithNodeAddressBook(metaRaft.FSM()))
 	shardSvc := cluster.NewShardService(dataDir, quicTransport, shardSvcOpts...)
 
 	// Set up StreamRouter: Raft RPCs on Control stream, Shard RPCs on Data stream
@@ -548,7 +573,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	)
 	dgMgr.Add(group0)
 	distBackend.SetRouter(clusterRouter)
-	distBackend.SetBucketAssigner(metaRaft)
 	distBackend.SetShardGroupSource(metaRaft.FSM())
 
 	// PR-D: Rebalancer 배선 — LoadReporter가 meta-Raft FSM에 부하 스냅샷을 커밋하고
@@ -560,12 +584,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	)
 	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
 		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
-		go func() {
-			defer execCancel()
-			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
-				log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
-			}
-		}()
+		if !joinMode {
+			go func() {
+				defer execCancel()
+				if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
+					log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
+				}
+			}()
+		}
 	})
 	go rebalancer.Run(ctx)
 
@@ -601,12 +627,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if entry.ID == "group-0" {
 			return
 		}
-		// Only instantiate for groups where we are a voter. PeerIDs use the
-		// cluster-wide raft address as identity (set by the seed loop above);
-		// match against our raftAddr.
+		// Only instantiate for groups where we are a voter. New dynamic groups
+		// use nodeID; legacy/static groups may still contain raftAddr.
 		isVoter := false
 		for _, p := range entry.PeerIDs {
-			if p == raftAddr {
+			if p == nodeID || p == raftAddr {
 				isVoter = true
 				break
 			}
@@ -633,11 +658,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			ownedGroups.mu.Unlock()
 		}()
 
+		groupNodeID := nodeID
+		if !slices.Contains(entry.PeerIDs, nodeID) && slices.Contains(entry.PeerIDs, raftAddr) {
+			groupNodeID = raftAddr
+		}
 		glc := cluster.GroupLifecycleConfig{
-			NodeID:    raftAddr, // identity = raftAddr (matches PeerIDs)
+			NodeID:    groupNodeID,
 			DataDir:   dataDir,
 			ShardSvc:  shardSvc,
 			Transport: groupRaftMux.ForGroup(entry.ID),
+			AddrBook:  metaRaft.FSM(),
 			EC: cluster.ECConfig{
 				DataShards:   clusterECData,
 				ParityShards: clusterECParity,
@@ -846,8 +876,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return reply.Payload, nil
 	}
 	metaForwardSender := cluster.NewMetaProposeForwardSender(metaForwardDialer)
+	distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
+		return metaForwardSender.Send(ctx, metaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+	}))
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
 	router.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
+	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft)
+	router.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
 	metaReadDialer := func(peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
 		reply, err := quicTransport.Call(ctx, peer, msg)
@@ -863,10 +898,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		dgMgr,          // local owned groups (self-leader shortcut)
 		clusterRouter,  // bucket → group lookup
 		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
-		raftAddr,       // selfID for leader check
-	).WithForwardSender(forwardSender)
+		nodeID,         // selfID for leader check
+	).WithForwardSender(forwardSender).WithNodeAddressResolver(metaRaft.FSM())
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, clusterCoord, "s3://grainfs-tables/warehouse"))
 	router.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
+	if joinMode {
+		if err := performMetaJoin(ctx, quicTransport, peers, nodeID, raftAddr); err != nil {
+			return err
+		}
+	}
 
 	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD, then
 	// wrap it with WAL so routed object mutations are captured for PITR.
@@ -921,24 +961,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Wiring of OnThreshold + Run() happens after clusterAlerts is built (below)
 	// so the callback can dispatch critical webhooks on transitions.
 
-	// Auto-create "default" bucket on startup. Single-node mode does this
-	// synchronously because the bucket is part of the local ready contract.
-	// Cluster nodes must not block HTTP readiness on a metadata proposal:
-	// during simultaneous cold start, followers can spend the whole retry
-	// window returning "not leader" before the service socket is even open.
-	// Recovered clusters stay read-only until verification, so skip bucket
-	// creation entirely when the recovery write gate is active.
-	if !recoveryReadOnly {
-		if len(peers) == 0 {
-			if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-				return fmt.Errorf("create default bucket: %w", err)
-			}
-		} else {
-			go func() {
-				if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
-					log.Warn().Err(err).Msg("default bucket creation failed in background (may already exist)")
-				}
-			}()
+	// Auto-create "default" bucket only for singleton startup. In cluster mode,
+	// bucket creation is a cluster-wide metadata operation and must be driven by
+	// an explicit client/API action, not repeated independently by every node.
+	if shouldCreateDefaultBucketOnStartup(peers, recoveryReadOnly) {
+		if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
+			return fmt.Errorf("create default bucket: %w", err)
 		}
 	}
 
@@ -996,21 +1024,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
 	}
-	if len(peers) == 0 {
+	if len(peers) == 0 && !raftAddrExplicit && !joinMode {
 		srvOpts = append(srvOpts, server.WithIcebergCatalogStore(icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")))
 	} else {
 		metaForward := func(ctx context.Context, command []byte) error {
-			targets := peers
-			if leader := metaRaft.Node().LeaderID(); leader != "" {
-				targets = []string{leader}
-			}
-			return metaForwardSender.Send(ctx, targets, command)
+			return metaForwardSender.Send(ctx, metaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 		}
 		metaReadTargets := func() []string {
-			if leader := metaRaft.Node().LeaderID(); leader != "" {
-				return []string{leader}
-			}
-			return peers
+			return metaProposalTargets(metaRaft.Node().LeaderID(), peers)
 		}
 		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarders(metaRaft, backend, "s3://grainfs-tables/warehouse", metaForward, metaReadSender, metaReadTargets)))
 	}
@@ -1052,10 +1073,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		defer dedupDB.Close()
 	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
-	srvOpts = append(srvOpts, server.WithReadIndexer(distBackend))
+	if !joinMode {
+		srvOpts = append(srvOpts, server.WithReadIndexer(distBackend))
+	}
 	srvOpts = append(srvOpts, server.WithRaftSnapshotter(distBackend))
 
 	distBackend.RegisterReadIndexHandler()
+	distBackend.RegisterProposeForwardHandler()
 
 	srv := server.New(addr, backend, srvOpts...)
 
@@ -1424,6 +1448,48 @@ func filterEmpty(ss []string) []string {
 		}
 	}
 	return out
+}
+
+func shouldCreateDefaultBucketOnStartup(peers []string, recoveryReadOnly bool) bool {
+	return !recoveryReadOnly && len(peers) == 0
+}
+
+func metaProposalTargets(leader string, peers []string) []string {
+	if leader == "" {
+		return peers
+	}
+	targets := make([]string, 0, len(peers)+1)
+	targets = append(targets, leader)
+	for _, peer := range peers {
+		if peer != leader {
+			targets = append(targets, peer)
+		}
+	}
+	return targets
+}
+
+func performMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport, peers []string, nodeID, raftAddr string) error {
+	joinCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
+	defer cancel()
+	sender := cluster.NewMetaJoinSender(func(peer string, payload []byte) ([]byte, error) {
+		msg := &transport.Message{Type: transport.StreamMetaJoin, Payload: payload}
+		reply, err := quicTransport.Call(joinCtx, peer, msg)
+		if err != nil {
+			return nil, err
+		}
+		return reply.Payload, nil
+	})
+	reply, err := sender.SendJoin(joinCtx, peers, cluster.JoinRequest{NodeID: nodeID, Address: raftAddr})
+	if err != nil {
+		return fmt.Errorf("meta join: %w", err)
+	}
+	if !reply.Accepted {
+		if reply.Message != "" {
+			return fmt.Errorf("meta join rejected: %s: %s", reply.Status, reply.Message)
+		}
+		return fmt.Errorf("meta join rejected: %s", reply.Status)
+	}
+	return nil
 }
 
 func createDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, timeout time.Duration) error {

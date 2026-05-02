@@ -26,6 +26,7 @@ type GroupLifecycleConfig struct {
 	EC        ECConfig
 	LogStore  raft.LogStore // optional — if nil, BadgerLogStore is created at {groupDir}/raft
 	Transport groupTransport
+	AddrBook  NodeAddressBook
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
@@ -37,6 +38,38 @@ type GroupLifecycleConfig struct {
 type groupTransport interface {
 	RequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
 	AppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error)
+}
+
+type resolvingGroupTransport struct {
+	inner    groupTransport
+	addrBook NodeAddressBook
+}
+
+func (t resolvingGroupTransport) RequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+	addr, err := t.resolve(peer)
+	if err != nil {
+		return nil, err
+	}
+	return t.inner.RequestVote(addr, args)
+}
+
+func (t resolvingGroupTransport) AppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+	addr, err := t.resolve(peer)
+	if err != nil {
+		return nil, err
+	}
+	return t.inner.AppendEntries(addr, args)
+}
+
+func (t resolvingGroupTransport) resolve(peer string) (string, error) {
+	if t.addrBook == nil {
+		return peer, nil
+	}
+	addr, ok := ResolveNodeAddress(t.addrBook, peer)
+	if !ok {
+		return "", fmt.Errorf("group raft transport: resolve peer %q: node not found in address book", peer)
+	}
+	return addr, nil
 }
 
 // instantiateLocalGroup boots BadgerDB + raft.Node + GroupBackend for a group.
@@ -98,7 +131,11 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 
 	node := raft.NewNode(rcfg, logStore)
 	if cfg.Transport != nil {
-		node.SetTransport(cfg.Transport.RequestVote, cfg.Transport.AppendEntries)
+		tr := cfg.Transport
+		if cfg.AddrBook != nil {
+			tr = resolvingGroupTransport{inner: tr, addrBook: cfg.AddrBook}
+		}
+		node.SetTransport(tr.RequestVote, tr.AppendEntries)
 	} else {
 		// Single-node / in-process — RPCs always fail (no peers anyway).
 		node.SetTransport(

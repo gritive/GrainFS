@@ -112,6 +112,12 @@ func (m *MetaRaft) Node() *raft.Node { return m.node }
 // IsLeader reports whether this MetaRaft node is the current cluster leader.
 func (m *MetaRaft) IsLeader() bool { return m.node.IsLeader() }
 
+// LeaderID returns the current meta-Raft leader hint, if known.
+func (m *MetaRaft) LeaderID() string { return m.node.LeaderID() }
+
+// Nodes returns the current meta-FSM member snapshot.
+func (m *MetaRaft) Nodes() []MetaNodeEntry { return m.fsm.Nodes() }
+
 // FSM returns the MetaFSM for callback registration and state inspection.
 // Callers must set callbacks before Start() to avoid a data race with the apply loop.
 func (m *MetaRaft) FSM() *MetaFSM { return m.fsm }
@@ -159,18 +165,19 @@ func (m *MetaRaft) Close() error {
 	return m.store.Close()
 }
 
-// Join adds node with id/addr as a learner, promotes it to voter, and records it
-// in the FSM. The three steps are not atomic: if ProposeAddNode fails after
-// PromoteToVoter succeeds, the node exists in the Raft configuration but not in
-// MetaFSM.Nodes(). Callers must retry or use RemoveVoter to restore consistency.
+// Join adds node with id/addr as a learner, waits for catch-up/promotion via the
+// raft membership API, and records it in the FSM. If FSM registration fails
+// after promotion, best-effort cleanup removes the promoted voter by address.
 func (m *MetaRaft) Join(ctx context.Context, id, addr string) error {
-	if err := m.node.AddLearner(id, addr); err != nil {
-		return fmt.Errorf("meta_raft: AddLearner %s: %w", id, err)
+	if err := m.node.AddVoterCtx(ctx, id, addr); err != nil {
+		_ = m.node.RemoveVoter(addr)
+		return fmt.Errorf("meta_raft: AddVoterCtx %s: %w", id, err)
 	}
-	if err := m.node.PromoteToVoter(id); err != nil {
-		return fmt.Errorf("meta_raft: PromoteToVoter %s: %w", id, err)
+	if err := m.ProposeAddNode(ctx, MetaNodeEntry{ID: id, Address: addr, Role: 0}); err != nil {
+		_ = m.node.RemoveVoter(addr)
+		return err
 	}
-	return m.ProposeAddNode(ctx, MetaNodeEntry{ID: id, Address: addr, Role: 0})
+	return nil
 }
 
 // ProposeAddNode encodes an AddNode command and proposes it to the cluster,
@@ -331,6 +338,27 @@ func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) e
 		return err
 	}
 	return m.proposeIcebergCommand(ctx, cmd.Type(), cmd.DataBytes(), requestID)
+}
+
+// ProposeMetaCommand proposes an already-encoded MetaCmd. Iceberg commands use
+// the request waiter path so semantic catalog errors are preserved; other meta
+// commands only need to wait until the entry is applied locally.
+func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
+	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
+	switch cmd.Type() {
+	case MetaCmdTypeIcebergCreateNamespace,
+		MetaCmdTypeIcebergDeleteNamespace,
+		MetaCmdTypeIcebergCreateTable,
+		MetaCmdTypeIcebergCommitTable,
+		MetaCmdTypeIcebergDeleteTable:
+		return m.ProposeIcebergMetaCommand(ctx, data)
+	default:
+		idx, err := m.node.ProposeWait(ctx, data)
+		if err != nil {
+			return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+		}
+		return m.waitApplied(ctx, idx)
+	}
 }
 
 func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {

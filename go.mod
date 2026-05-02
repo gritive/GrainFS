@@ -9,6 +9,7 @@ require (
 	github.com/aws/smithy-go v1.25.1
 	github.com/cloudwego/hertz v0.10.4
 	github.com/dgraph-io/badger/v4 v4.9.1
+	github.com/duckdb/duckdb-go/v2 v2.10502.0
 	github.com/go-git/go-billy/v5 v5.8.0
 	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/uuid v1.6.0
@@ -58,7 +59,6 @@ require (
 	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10502.0 // indirect
 	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10502.0 // indirect
 	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10502.0 // indirect
-	github.com/duckdb/duckdb-go/v2 v2.10502.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.10.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect

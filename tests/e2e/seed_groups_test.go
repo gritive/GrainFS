@@ -26,7 +26,7 @@ func TestE2E_SeedGroups_Multi(t *testing.T) {
 		seedGroups = 2
 	)
 
-	c := startMRCluster(t, numNodes, seedGroups)
+	c := startStaticMRCluster(t, numNodes, seedGroups)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()

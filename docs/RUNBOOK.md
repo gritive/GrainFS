@@ -152,10 +152,23 @@ grainfs serve \
 
 **Cluster mode:**
 ```bash
+# First node
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
-  --peers $(cat /etc/grainfs/peers.txt | tr '\n' ',') \
+  --node-id node-1 \
+  --raft-addr node-1.example.com:9001 \
+  --access-key $GRAINFS_ACCESS_KEY \
+  --secret-key $GRAINFS_SECRET_KEY \
+  > /var/log/grainfs/production.log 2>&1 &
+
+# Additional nodes join through any existing member's Raft address
+grainfs serve \
+  --data $GRAINFS_DATA_DIR \
+  --port $GRAINFS_PORT \
+  --node-id node-2 \
+  --raft-addr node-2.example.com:9001 \
+  --join node-1.example.com:9001 \
   --access-key $GRAINFS_ACCESS_KEY \
   --secret-key $GRAINFS_SECRET_KEY \
   > /var/log/grainfs/production.log 2>&1 &

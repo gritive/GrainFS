@@ -9,7 +9,24 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/raft"
 )
+
+type recordingGroupTransport struct {
+	votePeers   []string
+	appendPeers []string
+}
+
+func (r *recordingGroupTransport) RequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+	r.votePeers = append(r.votePeers, peer)
+	return &raft.RequestVoteReply{}, nil
+}
+
+func (r *recordingGroupTransport) AppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+	r.appendPeers = append(r.appendPeers, peer)
+	return &raft.AppendEntriesReply{}, nil
+}
 
 func TestInstantiateLocalGroup_Success(t *testing.T) {
 	dir := t.TempDir()
@@ -131,4 +148,19 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 
 	require.Equal(t, "node-b", gb.selfAddr,
 		"selfAddr must equal cfg.NodeID regardless of PeerIDs sort order")
+}
+
+func TestResolvingGroupTransport_ResolvesNodeIDBeforeDial(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
+	inner := &recordingGroupTransport{}
+	tr := resolvingGroupTransport{inner: inner, addrBook: f}
+
+	_, err := tr.RequestVote("node-a", &raft.RequestVoteArgs{})
+	require.NoError(t, err)
+	_, err = tr.AppendEntries("node-a", &raft.AppendEntriesArgs{})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"10.0.0.1:7001"}, inner.votePeers)
+	require.Equal(t, []string{"10.0.0.1:7001"}, inner.appendPeers)
 }

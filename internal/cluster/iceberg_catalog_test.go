@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -152,4 +153,54 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
 	_, ok := leader.FSM().IcebergNamespace([]string{"analytics"})
 	require.True(t, ok)
+}
+
+func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
+	leader := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = leader.Close() })
+	require.NoError(t, leader.Bootstrap())
+	require.NoError(t, leader.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return leader.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	payload, err := encodeMetaPutBucketAssignmentCmd("photos", "group-0")
+	require.NoError(t, err)
+	command, err := encodeMetaCmd(MetaCmdTypePutBucketAssignment, payload)
+	require.NoError(t, err)
+
+	leaderReceiver := NewMetaProposeForwardReceiver(leader)
+	sender := NewMetaProposeForwardSender(func(peer string, payload []byte) ([]byte, error) {
+		if peer == "follower" {
+			return encodeMetaForwardReply(raft.ErrNotLeader), nil
+		}
+		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, sender.Send(ctx, []string{"follower", "leader"}, command))
+	require.Equal(t, "group-0", leader.FSM().BucketAssignments()["photos"])
+}
+
+func TestForwardingBucketAssignerForwardsFromFollower(t *testing.T) {
+	follower := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = follower.Close() })
+
+	var forwarded []byte
+	assigner := NewForwardingBucketAssigner(follower, func(_ context.Context, command []byte) error {
+		forwarded = append([]byte(nil), command...)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, assigner.ProposeBucketAssignment(ctx, "photos", "group-0"))
+
+	cmd := clusterpb.GetRootAsMetaCmd(forwarded, 0)
+	require.Equal(t, MetaCmdTypePutBucketAssignment, cmd.Type())
+	assignment := clusterpb.GetRootAsMetaPutBucketAssignmentCmd(cmd.DataBytes(), 0).Entry(nil)
+	require.NotNil(t, assignment)
+	require.Equal(t, "photos", string(assignment.Bucket()))
+	require.Equal(t, "group-0", string(assignment.GroupId()))
 }
