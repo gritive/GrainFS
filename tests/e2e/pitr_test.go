@@ -20,6 +20,27 @@ type pitrResponse struct {
 	StaleBlobs         []map[string]any `json:"stale_blobs"`
 }
 
+func createPITRSnapshot(t *testing.T, reason string) {
+	t.Helper()
+	var lastErr error
+	var lastStatus int
+	var lastBody string
+	require.Eventually(t, func() bool {
+		resp, err := postJSON(testServerURL+"/admin/snapshots", map[string]string{"reason": reason})
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		defer resp.Body.Close()
+		lastStatus = resp.StatusCode
+		body, _ := io.ReadAll(resp.Body)
+		lastBody = string(body)
+		return resp.StatusCode == http.StatusOK
+	}, 30*time.Second, 500*time.Millisecond,
+		"snapshot should become available after cluster data groups are ready: lastErr=%v status=%d body=%s",
+		lastErr, lastStatus, lastBody)
+}
+
 // TestPITR_WALReplayAddsObjects verifies WAL replay: objects PUT between snapshot
 // and targetTime appear in the PITR result, objects PUT after targetTime do not.
 // Note: ECBackend removes shard files on delete, so this test avoids deletes.
@@ -29,10 +50,7 @@ func TestPITR_WALReplayAddsObjects(t *testing.T) {
 	createBucket(t, bucket)
 
 	// Create snapshot BEFORE putting any objects (empty base)
-	snapResp, err := postJSON(testServerURL+"/admin/snapshots", map[string]string{"reason": "pitr-wal-base"})
-	require.NoError(t, err)
-	defer snapResp.Body.Close()
-	require.Equal(t, http.StatusOK, snapResp.StatusCode)
+	createPITRSnapshot(t, "pitr-wal-base")
 
 	// Put 3 objects AFTER snapshot — WAL records these
 	included := []string{"inc1.txt", "inc2.txt", "inc3.txt"}
@@ -126,10 +144,7 @@ func TestPITR_ExcludesObjectsAddedAfterTarget(t *testing.T) {
 	}
 
 	// Create snapshot
-	snapResp, err := postJSON(testServerURL+"/admin/snapshots", map[string]string{"reason": "pitr-excl-base"})
-	require.NoError(t, err)
-	snapResp.Body.Close()
-	require.Equal(t, http.StatusOK, snapResp.StatusCode)
+	createPITRSnapshot(t, "pitr-excl-base")
 
 	// Record pivot time (after snapshot, before new puts)
 	pivotTime := time.Now().UTC()

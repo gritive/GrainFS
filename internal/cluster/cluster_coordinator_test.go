@@ -337,6 +337,56 @@ func TestClusterCoordinator_GetObject_Forward(t *testing.T) {
 	require.Equal(t, "g1", d.calls[0].gid)
 }
 
+func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	v1, err := c.PutObject("bk", "k", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	v2, err := c.PutObject("bk", "k", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+	require.NotEqual(t, v1.VersionID, v2.VersionID)
+
+	rc, gotV1, err := c.GetObjectVersion("bk", "k", v1.VersionID)
+	require.NoError(t, err)
+	body, err := io.ReadAll(rc)
+	rc.Close()
+	require.NoError(t, err)
+	require.Equal(t, v1.VersionID, gotV1.VersionID)
+	require.Equal(t, "v1", string(body))
+
+	versions, err := c.ListObjectVersions("bk", "", 100)
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	require.Equal(t, v2.VersionID, versions[0].VersionID)
+
+	markerID, err := c.DeleteObjectReturningMarker("bk", "k")
+	require.NoError(t, err)
+	require.NotEmpty(t, markerID)
+
+	versions, err = c.ListObjectVersions("bk", "", 100)
+	require.NoError(t, err)
+	require.Len(t, versions, 3)
+	require.True(t, versions[0].IsDeleteMarker)
+
+	require.NoError(t, c.DeleteObjectVersion("bk", "k", v1.VersionID))
+	versions, err = c.ListObjectVersions("bk", "", 100)
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	for _, v := range versions {
+		require.NotEqual(t, v1.VersionID, v.VersionID)
+	}
+}
+
 func TestClusterCoordinator_HeadObject_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpHeadObject] = buildObjectReply(

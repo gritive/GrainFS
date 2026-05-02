@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.11.1] — 2026-05-02 — E2E cluster readiness hardening
+
+### Fixed
+
+- **tests/e2e**: degraded-mode coverage now starts all peers with the full cluster view, waits for every port, and probes a writable endpoint before killing quorum members.
+- **tests/e2e**: network partition coverage now forces IPv4 loopback through Toxiproxy, creates a valid timeout toxic, and asserts partitioned writes actually fail.
+- **tests/e2e**: multi-node cluster tests now use Raft addresses as node IDs, matching the stricter gossip sender validation introduced on master.
+- **tests/e2e**: EC put/get and topology checks now retry bounded startup data-path readiness races instead of failing on transient unknown-group errors.
+- **tests/e2e**: topology-change coverage now bootstraps an initial quorum before adding the remaining peers, reducing cold-start election races.
+- **tests/e2e**: multi-Raft sharding coverage now bootstraps an initial quorum before adding the remaining peers, matching the stabilized EC topology startup path.
+- **tests/e2e**: multi-Raft write checks now retry transient degraded-mode startup windows before asserting object persistence.
+- **cluster**: zero-valued EC shard settings now keep EC inactive, allowing non-EC cluster tests and operators to disable EC without tripping degraded-mode write suspension.
+- **cmd/grainfs**: NBD startup now retries transient default-volume creation failures while shard groups are still coming online.
+- **tests/e2e**: Docker NBD CoW cleanup now ignores already-removed temporary files after the rollback scenario has passed.
+- **tests/e2e**: volume listing now asserts the volumes it creates instead of depending on asynchronous default NBD volume creation.
+- **tests/e2e**: package-level e2e server startup now waits longer before failing, matching cold-start latency under serialized Docker-heavy runs.
+
 ## [0.0.11.0] — 2026-05-02 — Raft membership view completion
 
 ### Changed

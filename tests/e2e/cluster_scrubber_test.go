@@ -56,9 +56,14 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
+	nfs4Ports := make([]int, numNodes)
+	nbdPorts := make([]int, numNodes)
+	ports := uniqueFreePorts(numNodes * 4)
+	for i := range numNodes {
+		httpPorts[i] = ports[i]
+		raftPorts[i] = ports[numNodes+i]
+		nfs4Ports[i] = ports[2*numNodes+i]
+		nbdPorts[i] = ports[3*numNodes+i]
 	}
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
@@ -91,7 +96,7 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("scrub-node-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -99,8 +104,9 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--seed-groups", "1",
+			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
+			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", scrubInterval,
 			"--lifecycle-interval", "0",
@@ -127,24 +133,30 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 	}
 	time.Sleep(4 * time.Second)
 
-	var client *s3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
-	require.Eventually(t, func() bool {
-		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
-			if err == nil {
-				client = c
-				return true
-			}
-		}
-		return false
-	}, 90*time.Second, 2*time.Second, "no leader ready")
+	endpoints := make([]string, numNodes)
+	for i := range endpoints {
+		endpoints[i] = httpURL(i)
+	}
+
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		endpoints,
+		120*time.Second,
+		5*time.Second,
+		1*time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			c := ecS3Client(endpoint, accessKey, secretKey)
+			return tryCreateBucket(attemptCtx, c, bucketName)
+		},
+	)
+	require.NoError(t, err, "no leader ready")
+	client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
 
 	// PUT a random object large enough to exercise all 5 shards.
 	payload := make([]byte, 256*1024)
-	_, err := rand.Read(payload)
+	_, err = rand.Read(payload)
 	require.NoError(t, err)
 	sum := sha256.Sum256(payload)
 

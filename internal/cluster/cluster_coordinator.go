@@ -93,6 +93,28 @@ func (c *ClusterCoordinator) DeleteBucket(bucket string) error {
 }
 func (c *ClusterCoordinator) ListBuckets() ([]string, error) { return c.base.ListBuckets() }
 
+func (c *ClusterCoordinator) SetBucketVersioning(bucket, state string) error {
+	type bucketVersioner interface {
+		SetBucketVersioning(bucket, state string) error
+	}
+	v, ok := c.base.(bucketVersioner)
+	if !ok {
+		return ErrCoordinatorNoRouter
+	}
+	return v.SetBucketVersioning(bucket, state)
+}
+
+func (c *ClusterCoordinator) GetBucketVersioning(bucket string) (string, error) {
+	type bucketVersioner interface {
+		GetBucketVersioning(bucket string) (string, error)
+	}
+	v, ok := c.base.(bucketVersioner)
+	if !ok {
+		return "", ErrCoordinatorNoRouter
+	}
+	return v.GetBucketVersioning(bucket)
+}
+
 // ListAllObjects implements storage.Snapshotable by enumerating bucket-routed
 // objects across every cluster-wide bucket.
 func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) {
@@ -317,6 +339,21 @@ func (c *ClusterCoordinator) GetObject(bucket, key string) (io.ReadCloser, *stor
 	return io.NopCloser(bytes.NewReader(bodyCopy)), obj, nil
 }
 
+func (c *ClusterCoordinator) GetObjectVersion(
+	bucket, key, versionID string,
+) (io.ReadCloser, *storage.Object, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.GetObjectVersion(bucket, key, versionID)
+		}
+	}
+	return nil, nil, ErrCoordinatorNoRouter
+}
+
 func (c *ClusterCoordinator) HeadObject(bucket, key string) (*storage.Object, error) {
 	target, err := c.routeBucket(bucket)
 	if err != nil {
@@ -359,6 +396,32 @@ func (c *ClusterCoordinator) DeleteObject(bucket, key string) error {
 	return parseReplyStatus(reply)
 }
 
+func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return "", err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.DeleteObjectReturningMarker(bucket, key)
+		}
+	}
+	return "", ErrCoordinatorNoRouter
+}
+
+func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) error {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.DeleteObjectVersion(bucket, key, versionID)
+		}
+	}
+	return ErrCoordinatorNoRouter
+}
+
 func (c *ClusterCoordinator) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
 	target, err := c.routeBucket(bucket)
 	if err != nil {
@@ -378,6 +441,21 @@ func (c *ClusterCoordinator) ListObjects(bucket, prefix string, maxKeys int) ([]
 		return nil, err
 	}
 	return objectsFromReply(reply)
+}
+
+func (c *ClusterCoordinator) ListObjectVersions(
+	bucket, prefix string, maxKeys int,
+) ([]*storage.ObjectVersion, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.ListObjectVersions(bucket, prefix, maxKeys)
+		}
+	}
+	return nil, ErrCoordinatorNoRouter
 }
 
 // WalkObjects buffers ALL matching objects on the server and returns them in

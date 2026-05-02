@@ -152,10 +152,18 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	client2 := newS3Client(restoreEndpoint)
 
 	// Verify all objects are present
-	listOut, err := client2.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String("backup-test"),
-	})
-	require.NoError(t, err, "list objects after restore")
+	var listOut *s3.ListObjectsV2Output
+	require.Eventually(t, func() bool {
+		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		var err error
+		listOut, err = client2.ListObjectsV2(attemptCtx, &s3.ListObjectsV2Input{
+			Bucket: aws.String("backup-test"),
+		}, func(o *s3.Options) {
+			o.RetryMaxAttempts = 1
+		})
+		return err == nil && listOut != nil && len(listOut.Contents) == len(testData)
+	}, 60*time.Second, time.Second, "list objects after restore")
 	require.Len(t, listOut.Contents, len(testData), "all objects should be restored")
 
 	// Verify object contents

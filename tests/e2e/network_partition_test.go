@@ -56,14 +56,17 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	// Start grainfs behind toxiproxy proxy
 	ctx := context.Background()
 
-	// Create proxy: localhost:{proxyPort} -> localhost:{port}
-	proxyURL := fmt.Sprintf("http://localhost:%d/proxies", s.toxiPort)
-	proxyPayload := fmt.Sprintf(`{"name":"grainfs","upstream":"localhost:%d","listen":"127.0.0.1:%d"}`, s.port, s.proxyPort)
+	// Create proxy: 127.0.0.1:{proxyPort} -> 127.0.0.1:{port}. Avoid
+	// localhost here because Toxiproxy may resolve it to ::1 while GrainFS is
+	// only readiness-checked on IPv4 in this e2e harness.
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d/proxies", s.toxiPort)
+	proxyPayload := fmt.Sprintf(`{"name":"grainfs","upstream":"127.0.0.1:%d","listen":"127.0.0.1:%d"}`, s.port, s.proxyPort)
 	req, _ := http.NewRequest("POST", proxyURL, strings.NewReader(proxyPayload))
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	require.NoError(s.T(), err, "create toxiproxy proxy")
+	require.Equal(s.T(), http.StatusCreated, resp.StatusCode, "create toxiproxy proxy")
 	resp.Body.Close()
 
 	// Start grainfs on actual port
@@ -79,9 +82,10 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	defer cmd.Process.Kill()
 
 	waitForPort(s.T(), s.proxyPort, 10*time.Second)
+	waitForPort(s.T(), s.port, 10*time.Second)
 
 	// Create bucket and write data via proxy
-	s3Client := newS3Client(fmt.Sprintf("http://localhost:%d", s.proxyPort))
+	s3Client := newS3Client(fmt.Sprintf("http://127.0.0.1:%d", s.proxyPort))
 	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String("partition-test"),
 	})
@@ -96,26 +100,28 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	require.NoError(s.T(), err)
 
 	// Inject network partition: 100% packet loss
-	toxicURL := fmt.Sprintf("http://localhost:%d/proxies/grainfs/toxics", s.toxiPort)
-	toxicPayload := `{"name":"partition","type":"slow_close","stream":"blocked","toxicity":1.0}`
+	toxicURL := fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics", s.toxiPort)
+	toxicPayload := `{"name":"partition","type":"timeout","stream":"upstream","toxicity":1.0,"attributes":{"timeout":0}}`
 	req, _ = http.NewRequest("POST", toxicURL, strings.NewReader(toxicPayload))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = client.Do(req)
 	require.NoError(s.T(), err)
+	require.Contains(s.T(), []int{http.StatusOK, http.StatusCreated}, resp.StatusCode, "create network partition toxic")
 	resp.Body.Close()
 
 	// Attempt write during partition (should fail or timeout)
 	s.T().Log("Writing during network partition (expected to fail)...")
-	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
+	partitionCtx, cancelPartitionWrite := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelPartitionWrite()
+	_, err = s3Client.PutObject(partitionCtx, &s3.PutObjectInput{
 		Bucket: aws.String("partition-test"),
 		Key:    aws.String("during-partition"),
 		Body:   strings.NewReader("data during partition"),
 	})
-	// Should fail or timeout - this is expected
-	s.T().Logf("Write during partition result (expected error): %v", err)
+	require.Error(s.T(), err, "write during network partition should fail")
 
 	// Remove partition
-	req, _ = http.NewRequest("DELETE", fmt.Sprintf("http://localhost:%d/proxies/grainfs/toxics/partition", s.toxiPort), nil)
+	req, _ = http.NewRequest("DELETE", fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics/partition", s.toxiPort), nil)
 	resp, err = client.Do(req)
 	if err == nil {
 		resp.Body.Close()

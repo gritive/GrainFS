@@ -42,9 +42,14 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
+	nfs4Ports := make([]int, numNodes)
+	nbdPorts := make([]int, numNodes)
+	ports := uniqueFreePorts(numNodes * 4)
+	for i := range numNodes {
+		httpPorts[i] = ports[i]
+		raftPorts[i] = ports[numNodes+i]
+		nfs4Ports[i] = ports[2*numNodes+i]
+		nbdPorts[i] = ports[3*numNodes+i]
 	}
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
@@ -72,7 +77,7 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("deg-node-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -80,13 +85,19 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--seed-groups", "1",
+			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
+			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
+			"--degraded-check-interval", "1s",
 			"--no-encryption",
 		)
+		if testing.Verbose() {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
 		require.NoError(t, cmd.Start(), "start node %d", i)
 		return cmd
 	}
@@ -102,40 +113,41 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	// Stage 1: start 3 nodes to form a stable quorum before adding 4 and 5.
-	for i := 0; i < 3; i++ {
+	// All nodes share the full 5-node peer list. Start the complete peer set
+	// before probing writes so meta-raft does not elect against a partial
+	// bootstrap view and then churn while the last voters join.
+	for i := range numNodes {
 		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
 	}
-	waitForPortsParallel(t, httpPorts[:3], 60*time.Second)
-
-	// Stage 2: bring up remaining 2 nodes.
-	for i := 3; i < numNodes; i++ {
-		procs[i] = startNode(i)
-	}
-	waitForPortsParallel(t, httpPorts[3:], 60*time.Second)
+	waitForPortsParallel(t, httpPorts, 60*time.Second)
+	time.Sleep(4 * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	// Find a leader and create a bucket to confirm the cluster is healthy.
-	var client *s3.Client
-	var leaderIdx int
-	require.Eventually(t, func() bool {
-		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
-			if err == nil {
-				client = c
-				leaderIdx = i
-				return true
-			}
-		}
-		return false
-	}, 30*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
+	endpoints := make([]string, numNodes)
+	for i := range endpoints {
+		endpoints[i] = httpURL(i)
+	}
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		endpoints,
+		180*time.Second,
+		5*time.Second,
+		1*time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			c := ecS3Client(endpoint, accessKey, secretKey)
+			return tryCreateBucket(attemptCtx, c, bucketName)
+		},
+	)
+	require.NoError(t, err, "no leader found or CreateBucket never succeeded")
+	client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
 	t.Logf("degraded test: leader node %d at %s", leaderIdx, httpURL(leaderIdx))
 
 	// Verify normal PUT works before killing nodes.
-	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String("before-kill"),
 		Body:   bytes.NewReader([]byte("healthy")),
@@ -159,8 +171,9 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	t.Logf("degraded test: %d nodes killed, 2 remaining", killed)
 
 	// The monitor fires immediately on start — but since all nodes started
-	// healthy, the immediate fire found live≥MinECNodes (not degraded). The
-	// degraded state will be detected on the next check (≤ 35 s).
+	// healthy, the immediate fire found live≥MinECNodes (not degraded). This
+	// test uses a 1 s monitor interval so the post-kill transition is observed
+	// quickly and does not depend on the production 30 s tick boundary.
 	// Poll the surviving nodes until one returns 503 for a PUT.
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {

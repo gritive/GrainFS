@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,4 +124,57 @@ func TestCheckQuorum_SendError_DoesNotPanic(t *testing.T) {
 	m.checkQuorum() // alert fires; sender returns error
 	assert.Len(t, sender.sent, 1, "alert was attempted")
 	// No panic, monitor continues.
+}
+
+func TestDegradedMonitor_CheckDoesNotShortCircuitOnPeerHealth(t *testing.T) {
+	tracker := alerts.NewDegradedTracker(alerts.DegradedConfig{})
+	defer tracker.Stop()
+
+	nodes := []string{
+		"self",
+		"127.0.0.1:1",
+		"127.0.0.1:2",
+		"127.0.0.1:3",
+		"127.0.0.1:4",
+	}
+	node := raft.NewNode(raft.DefaultConfig("self", nodes[1:]))
+	backend := &DistributedBackend{
+		allNodes:   nodes,
+		selfAddr:   "self",
+		node:       node,
+		ecConfig:   ECConfig{DataShards: 3, ParityShards: 2},
+		peerHealth: NewPeerHealth(nodes[1:], time.Hour),
+	}
+	backend.peerHealth.MarkUnhealthy(nodes[1])
+	backend.peerHealth.MarkUnhealthy(nodes[2])
+	backend.peerHealth.MarkUnhealthy(nodes[3])
+	require.False(t, backend.ECActive(), "precondition: peerHealth has already reduced dynamic liveNodes below MinECNodes")
+
+	m := NewDegradedMonitor(backend, tracker, time.Second)
+	m.check()
+
+	assert.True(t, tracker.Degraded(), "monitor must still probe static configured nodes and enter degraded")
+}
+
+func TestDegradedMonitor_CountLiveNodesHonorsPeerHealth(t *testing.T) {
+	nodes := []string{
+		"self",
+		"127.0.0.1:1",
+		"127.0.0.1:2",
+		"127.0.0.1:3",
+		"127.0.0.1:4",
+	}
+	backend := &DistributedBackend{
+		allNodes:   nodes,
+		selfAddr:   "self",
+		peerHealth: NewPeerHealth(nodes[1:], time.Hour),
+	}
+	backend.peerHealth.MarkUnhealthy(nodes[1])
+	backend.peerHealth.MarkUnhealthy(nodes[2])
+	backend.peerHealth.MarkUnhealthy(nodes[3])
+	backend.peerHealth.MarkUnhealthy(nodes[4])
+
+	m := &DegradedMonitor{backend: backend}
+
+	require.Equal(t, 1, m.countLiveNodes(), "unhealthy peers must not be revived by UDP timeout semantics")
 }

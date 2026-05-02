@@ -105,7 +105,7 @@ lint:
 
 bench: bin/$(BINARY)
 	@echo "Starting GrainFS server for benchmarks..."
-	@./bin/$(BINARY) serve --data /tmp/grainfs-bench --port 9100 --no-encryption --nfs-port 0 & \
+	@./bin/$(BINARY) serve --data /tmp/grainfs-bench --port 9100 --no-encryption --nfs4-port 0 & \
 		SERVER_PID=$$!; \
 		sleep 2; \
 		k6 run benchmarks/s3_bench.js --env BASE_URL=http://localhost:9100; \
@@ -119,7 +119,7 @@ bench-profile: bin/$(BINARY)
 	@echo "Starting GrainFS server with pprof..."
 	@rm -rf /tmp/grainfs-bench-profile && mkdir -p /tmp/grainfs-bench-profile
 	@./bin/$(BINARY) serve --data /tmp/grainfs-bench-profile --port 9100 \
-		--pprof-port 6060 --no-encryption --nfs-port 0 --log-level warn & \
+		--pprof-port 6060 --no-encryption --nfs4-port 0 --log-level warn & \
 		SERVER_PID=$$!; \
 		sleep 2; \
 		echo "Collecting CPU profile during k6 run (30s)..."; \

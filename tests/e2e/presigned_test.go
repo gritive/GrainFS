@@ -110,11 +110,19 @@ func TestPresigned_PUT(t *testing.T) {
 	require.NoError(t, err)
 
 	content := "uploaded via presigned"
-	req, _ := http.NewRequest(http.MethodPut, presigned, strings.NewReader(content))
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var lastErr error
+	var lastStatus int
+	require.Eventually(t, func() bool {
+		req, _ := http.NewRequest(http.MethodPut, presigned, strings.NewReader(content))
+		resp, err := http.DefaultClient.Do(req)
+		lastErr = err
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		lastStatus = resp.StatusCode
+		return resp.StatusCode == http.StatusOK
+	}, 30*time.Second, 500*time.Millisecond, "presigned PUT status=%d err=%v", lastStatus, lastErr)
 
 	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("presign-put"),

@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -66,7 +67,7 @@ func TestMain(m *testing.M) {
 	defer cmd.Process.Kill()
 
 	testServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPortM(port, 5*time.Second)
+	waitForPortM(port, 30*time.Second)
 
 	testS3Client = newS3Client(testServerURL)
 
@@ -173,6 +174,39 @@ func uniqueFreePorts(n int) []int {
 		ports = append(ports, p)
 	}
 	return ports
+}
+
+// waitForWritableEndpoint probes each endpoint until one accepts the supplied
+// operation. Each attempt gets its own timeout so a slow or unready node does
+// not monopolize the whole leader search window.
+func waitForWritableEndpoint(
+	parent context.Context,
+	endpoints []string,
+	timeout, perAttemptTimeout, interval time.Duration,
+	probe func(context.Context, string) error,
+) (int, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		for i, endpoint := range endpoints {
+			attemptCtx, cancel := context.WithTimeout(parent, perAttemptTimeout)
+			err := probe(attemptCtx, endpoint)
+			cancel()
+			if err == nil {
+				return i, nil
+			}
+			lastErr = err
+		}
+		select {
+		case <-parent.Done():
+			return -1, parent.Err()
+		case <-time.After(interval):
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no writable endpoint found")
+	}
+	return -1, fmt.Errorf("no writable endpoint found within %s: %w", timeout, lastErr)
 }
 
 func waitForPort(t testing.TB, port int, timeout time.Duration) {

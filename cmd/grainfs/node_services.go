@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
@@ -61,10 +62,8 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 
 	if nbdPort > 0 {
 		const defaultVolName = "default"
-		if _, err := volMgr.Get(defaultVolName); err != nil {
-			if _, err := volMgr.Create(defaultVolName, nbdVolumeSize); err != nil {
-				log.Warn().Err(err).Msg("default nbd volume create failed")
-			}
+		if err := ensureDefaultNBDVolume(ctx, volMgr, defaultVolName, nbdVolumeSize, 30*time.Second); err != nil {
+			log.Warn().Err(err).Msg("default nbd volume create failed")
 		}
 		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri)
 		if err != nil {
@@ -75,4 +74,33 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 	}
 
 	return svc
+}
+
+func ensureDefaultNBDVolume(ctx context.Context, volMgr *volume.Manager, name string, size int64, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		if _, err := volMgr.Get(name); err == nil {
+			return nil
+		}
+		if _, err := volMgr.Create(name, size); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return lastErr
+			}
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }

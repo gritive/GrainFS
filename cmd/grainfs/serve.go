@@ -69,6 +69,7 @@ func init() {
 	serveCmd.Flags().Int("snapshot-retain", 24, "number of auto-snapshots to retain")
 	serveCmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (0 to disable)")
 	serveCmd.Flags().Duration("lifecycle-interval", 1*time.Hour, "lifecycle rule evaluation interval (0 to disable)")
+	serveCmd.Flags().Duration("degraded-check-interval", 30*time.Second, "EC degraded-mode liveness check interval")
 	serveCmd.Flags().String("upstream", "", "upstream S3-compatible endpoint for pull-through caching (e.g. http://minio:9000)")
 	serveCmd.Flags().String("upstream-access-key", "", "access key for upstream S3 endpoint")
 	serveCmd.Flags().String("upstream-secret-key", "", "secret key for upstream S3 endpoint")
@@ -975,7 +976,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Start the degraded mode monitor — checks live node count vs EC threshold
 	// every 30 s. The first check fires immediately so the server knows its
 	// state before serving any requests.
-	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), 30*time.Second).
+	degradedInterval, _ := cmd.Flags().GetDuration("degraded-check-interval")
+	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), degradedInterval).
 		WithQuorumCheck(node, clusterAlerts)
 	go degradedMon.Run(ctx)
 

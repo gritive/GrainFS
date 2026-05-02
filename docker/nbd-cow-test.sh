@@ -16,7 +16,7 @@ cleanup() {
     echo "Cleaning up..."
     nbd-client -d "$NBD_DEV" 2>/dev/null || true
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
-    rm -rf "$DATA_DIR"
+    rm -rf "$DATA_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -40,7 +40,7 @@ grainfs serve \
     --port "$S3_PORT" \
     --nbd-port "$NBD_PORT" \
     --nbd-volume-size "$NBD_SIZE" \
-    --nfs-port 0 \
+    --nfs4-port 0 \
     --dedup=false &
 SERVER_PID=$!
 
@@ -52,6 +52,22 @@ for i in $(seq 1 30); do
     sleep 1
 done
 echo "OK: HTTP endpoint ready"
+
+echo "Ensuring default volume exists..."
+for i in $(seq 1 30); do
+    status=$(curl -s -o /tmp/grainfs-volume-create.out -w "%{http_code}" \
+        -X PUT "http://127.0.0.1:${S3_PORT}/volumes/default?size=${NBD_SIZE}" || true)
+    if [ "$status" = "201" ] || [ "$status" = "409" ]; then
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "FAIL: default volume not ready within 30s (status=$status)"
+        cat /tmp/grainfs-volume-create.out 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1
+done
+echo "OK: default volume ready"
 
 # Wait for NBD port
 echo "Waiting for NBD port $NBD_PORT..."

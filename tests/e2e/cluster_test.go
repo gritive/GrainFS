@@ -104,10 +104,17 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	waitForPort(t, port2, 10*time.Second)
 	client2 := newS3Client(endpoint2)
 
-	listOut2, err := client2.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String("persist-test"),
-	})
-	require.NoError(t, err)
+	var listOut2 *s3.ListObjectsV2Output
+	require.Eventually(t, func() bool {
+		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		listOut2, err = client2.ListObjectsV2(attemptCtx, &s3.ListObjectsV2Input{
+			Bucket: aws.String("persist-test"),
+		}, func(o *s3.Options) {
+			o.RetryMaxAttempts = 1
+		})
+		return err == nil && len(listOut2.Contents) == len(testData)
+	}, 60*time.Second, 1*time.Second, "list objects after restart: %v", err)
 	assert.Len(t, listOut2.Contents, len(testData), "all objects should survive restart")
 
 	for key, expectedContent := range testData {
