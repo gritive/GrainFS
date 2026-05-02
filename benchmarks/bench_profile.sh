@@ -93,7 +93,7 @@ for i in 0 1 2; do
     --ec-data 2 \
     --ec-parity 1 \
     --no-encryption \
-    --nfs-port 0 \
+    --nfs4-port 0 \
     --nfs4-port 0 \
     --nbd-port 0 \
     --snapshot-interval 0 \

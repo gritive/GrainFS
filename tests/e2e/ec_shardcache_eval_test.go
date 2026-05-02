@@ -37,12 +37,12 @@ import (
 //	                              no production benefit; defer.
 //	rising with size           → working set fits in a reachable budget;
 //	                              build the cache, size it from the curve.
-//	saturated even at 16 MB    → every workload a tiny cache catches;
+//	saturated even at 16 MB   → every workload a tiny cache catches;
 //	                              good return on a small implementation.
 //
 // Workloads (each measured with a fresh tracker reset per node):
 //
-//   - large_repeat: one 16 MB object, GET it 10 times. CachedBackend's
+//   - large_repeat: one 5 MB object, GET it 10 times. CachedBackend's
 //     4 MB-per-object limit forces every GET to bypass cache and re-run
 //     getObjectEC, which reads K shards each time. If the shard cache
 //     would help anywhere, it is here.
@@ -51,7 +51,7 @@ import (
 //     should absorb after the first GET, so the simulator should NOT
 //     see repeats. Validates we are not double-counting.
 //
-//   - many_unique: 20 unique 8 MB objects, GET each once. Worst case:
+//   - many_unique: 20 unique 5 MB objects, GET each once. Worst case:
 //     all cold. Simulator must report 0% hit at every cache size.
 func TestE2E_ECShardCacheEval(t *testing.T) {
 	if testing.Short() {
@@ -103,7 +103,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("ec-cache-eval-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -119,6 +119,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
+			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
@@ -144,25 +145,29 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	var client *s3.Client
-	var leaderURL string
-	require.Eventually(t, func() bool {
-		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
-			if err == nil {
-				client = c
-				leaderURL = httpURL(i)
-				return true
-			}
-		}
-		return false
-	}, 15*time.Second, 500*time.Millisecond, "no leader found")
+	endpoints := make([]string, numNodes)
+	for i := range endpoints {
+		endpoints[i] = httpURL(i)
+	}
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		endpoints,
+		120*time.Second,
+		5*time.Second,
+		time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			c := ecS3Client(endpoint, accessKey, secretKey)
+			return tryCreateBucket(attemptCtx, c, bucketName)
+		},
+	)
+	require.NoError(t, err, "no leader found")
+	client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
+	leaderURL := endpoints[leaderIdx]
 	t.Logf("leader: %s", leaderURL)
 
-	// One 16 MB object — bypasses CachedBackend (4 MB per-obj cap).
-	largeKey := "large-16mb"
-	largeData := make([]byte, 16*1024*1024)
+	// One 5 MB object — bypasses CachedBackend (4 MB per-obj cap).
+	largeKey := "large-5mb"
+	largeData := make([]byte, 5*1024*1024)
 	if _, err := rand.Read(largeData); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -189,14 +194,14 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 		t.Fatalf("put small: %v", err)
 	}
 
-	// 20 unique 8 MB objects — drains the cache every time.
+	// 20 unique 5 MB objects — drains the cache every time.
 	uniqueKeys := make([]string, 20)
-	uniqueData := make([]byte, 8*1024*1024)
+	uniqueData := make([]byte, 5*1024*1024)
 	if _, err := rand.Read(uniqueData); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
 	for i := range uniqueKeys {
-		uniqueKeys[i] = fmt.Sprintf("uniq-%02d-8mb", i)
+		uniqueKeys[i] = fmt.Sprintf("uniq-%02d-5mb", i)
 		if _, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(uniqueKeys[i]),
@@ -295,12 +300,12 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 	}
 
 	// Workload A: large object, repeated GET.
-	t.Run("large_repeat_16mb_x10", func(t *testing.T) {
+	t.Run("large_repeat_5mb_x10", func(t *testing.T) {
 		base := snapshotAll(t)
 		for i := 0; i < 10; i++ {
 			getOnce(t, largeKey)
 		}
-		report(t, "large_16mb × 10 GETs", base)
+		report(t, "large_5mb × 10 GETs", base)
 	})
 
 	// Workload B: small object, repeated GET — CachedBackend absorbs.
@@ -313,12 +318,12 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 	})
 
 	// Workload C: many unique large objects — no recurrence.
-	t.Run("many_unique_8mb_x20", func(t *testing.T) {
+	t.Run("many_unique_5mb_x20", func(t *testing.T) {
 		base := snapshotAll(t)
 		for _, k := range uniqueKeys {
 			getOnce(t, k)
 		}
-		report(t, "20 unique 8mb GETs", base)
+		report(t, "20 unique 5mb GETs", base)
 	})
 }
 
@@ -327,7 +332,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 // predicted. Companion to TestE2E_ECShardCacheEval, which measures the
 // same access patterns with the cache OFF.
 //
-// Workload: 16 MB object, repeated GET ×10. CachedBackend bypasses the
+// Workload: 5 MB object, repeated GET ×10. CachedBackend bypasses the
 // object (4 MB-per-object cap) so every iteration goes through
 // getObjectEC. The first GET fetches K shards and populates the cache;
 // the next 9 should hit on the per-shard pre-pass and short-circuit
@@ -386,7 +391,7 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("ec-cache-active-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -395,17 +400,16 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--block-cache-size=0", // isolate: only EC shard cache active
-			// 256 MB total → 16 MB per-shard budget. Each EC shard for
-			// a 16 MB object at k=2 is ≈8 MB, which exceeds a 4 MB slot
-			// (= 64 MB / 16 shards) and silently drops at Put. 256 MB is
-			// the production default precisely because real EC shards
-			// are MB-sized, not KB-sized like volume blocks.
+			// 256 MB total → 16 MB per-shard budget. A 5 MB object still
+			// bypasses CachedBackend while keeping single PutObject within
+			// the coordinator forwarding limit.
 			"--shard-cache-size=268435456",
 			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
+			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
@@ -431,24 +435,28 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	var client *s3.Client
-	var leaderURL string
-	require.Eventually(t, func() bool {
-		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
-			if err == nil {
-				client = c
-				leaderURL = httpURL(i)
-				return true
-			}
-		}
-		return false
-	}, 15*time.Second, 500*time.Millisecond, "no leader found")
+	endpoints := make([]string, numNodes)
+	for i := range endpoints {
+		endpoints[i] = httpURL(i)
+	}
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		endpoints,
+		120*time.Second,
+		5*time.Second,
+		time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			c := ecS3Client(endpoint, accessKey, secretKey)
+			return tryCreateBucket(attemptCtx, c, bucketName)
+		},
+	)
+	require.NoError(t, err, "no leader found")
+	client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
+	leaderURL := endpoints[leaderIdx]
 	t.Logf("leader: %s", leaderURL)
 
-	largeKey := "large-16mb"
-	largeData := make([]byte, 16*1024*1024)
+	largeKey := "large-5mb"
+	largeData := make([]byte, 5*1024*1024)
 	if _, err := rand.Read(largeData); err != nil {
 		t.Fatalf("rand: %v", err)
 	}

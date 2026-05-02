@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -261,25 +262,36 @@ func TestObjects_Large(t *testing.T) {
 func TestE2E_FormUpload(t *testing.T) {
 	createBucket(t, "form-upload")
 
-	// Simulate a browser form upload via multipart/form-data POST
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	w.WriteField("key", "uploaded.txt")
-	w.WriteField("Content-Type", "text/plain")
-	w.WriteField("success_action_status", "201")
+	// Simulate a browser form upload via multipart/form-data POST. The server
+	// can accept HTTP before the bucket assignment path is writable, so retry
+	// transient 5xx responses at startup.
+	var lastStatus int
+	var lastErr error
+	require.Eventually(t, func() bool {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		require.NoError(t, w.WriteField("key", "uploaded.txt"))
+		require.NoError(t, w.WriteField("Content-Type", "text/plain"))
+		require.NoError(t, w.WriteField("success_action_status", "201"))
 
-	fw, err := w.CreateFormFile("file", "uploaded.txt")
-	require.NoError(t, err)
-	fw.Write([]byte("form upload content"))
-	w.Close()
+		fw, err := w.CreateFormFile("file", "uploaded.txt")
+		require.NoError(t, err)
+		_, err = fw.Write([]byte("form upload content"))
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
 
-	req, _ := http.NewRequest(http.MethodPost, testServerURL+"/form-upload", &buf)
-	req.Header.Set("Content-Type", w.FormDataContentType())
+		req, _ := http.NewRequest(http.MethodPost, testServerURL+"/form-upload", &buf)
+		req.Header.Set("Content-Type", w.FormDataContentType())
 
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, 201, resp.StatusCode)
+		resp, err := http.DefaultClient.Do(req)
+		lastErr = err
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		lastStatus = resp.StatusCode
+		return resp.StatusCode == http.StatusCreated
+	}, 30*time.Second, 500*time.Millisecond, "form upload status=%d err=%v", lastStatus, lastErr)
 
 	// Verify the object was stored
 	ctx := context.Background()

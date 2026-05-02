@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -48,6 +49,36 @@ func postJSON(url string, body interface{}) (*http.Response, error) {
 	return http.Post(url, "application/json", &buf) //nolint:noctx
 }
 
+func createSnapshotE2E(t *testing.T, reason string) snapshotResponse {
+	t.Helper()
+	var snap snapshotResponse
+	var lastErr error
+	var lastStatus int
+	var lastBody string
+	require.Eventually(t, func() bool {
+		resp, err := postJSON(testServerURL+"/admin/snapshots", map[string]string{"reason": reason})
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		defer resp.Body.Close()
+		lastStatus = resp.StatusCode
+		body, _ := io.ReadAll(resp.Body)
+		lastBody = string(body)
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		if err := json.Unmarshal(body, &snap); err != nil {
+			lastErr = err
+			return false
+		}
+		return true
+	}, 30*time.Second, 500*time.Millisecond,
+		"snapshot should become available after cluster data groups are ready: lastErr=%v status=%d body=%s",
+		lastErr, lastStatus, lastBody)
+	return snap
+}
+
 // TestSnapshot_CreateAndRestore is the primary E2E: put objects, snapshot,
 // add extra objects, restore, verify only snapshot-time objects remain.
 // Note: DeleteObject immediately removes blobs, so restore of deleted objects
@@ -69,13 +100,7 @@ func TestSnapshot_CreateAndRestore(t *testing.T) {
 	}
 
 	// POST /admin/snapshots — create snapshot
-	resp, err := postJSON(testServerURL+"/admin/snapshots", map[string]string{"reason": "e2e-test"})
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode, "create snapshot status")
-
-	var snap snapshotResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&snap))
+	snap := createSnapshotE2E(t, "e2e-test")
 	require.NotZero(t, snap.Seq, "snapshot seq must be non-zero")
 	require.NotEmpty(t, snap.Timestamp)
 	require.Positive(t, snap.ObjectCount, "snapshot must contain objects")
@@ -143,10 +168,7 @@ func TestSnapshot_CreateAndRestore(t *testing.T) {
 func TestSnapshot_List(t *testing.T) {
 	// Create 2 snapshots
 	for i := 0; i < 2; i++ {
-		resp, err := postJSON(testServerURL+"/admin/snapshots", map[string]string{"reason": fmt.Sprintf("list-test-%d", i)})
-		require.NoError(t, err)
-		resp.Body.Close()
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		createSnapshotE2E(t, fmt.Sprintf("list-test-%d", i))
 	}
 
 	listResp, err := http.Get(testServerURL + "/admin/snapshots") //nolint:noctx

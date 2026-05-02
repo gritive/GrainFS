@@ -37,7 +37,7 @@ func (c ECConfig) NumShards() int { return c.DataShards + c.ParityShards }
 // IsActive returns true iff the cluster has at least MinECNodes nodes.
 // 1–2 node clusters use N× replication; 3+ always activate proportional EC.
 func (c ECConfig) IsActive(clusterSize int) bool {
-	return clusterSize >= MinECNodes
+	return c.DataShards > 0 && c.ParityShards > 0 && clusterSize >= MinECNodes
 }
 
 // EffectiveConfig returns the ECConfig that should be used for a cluster of n nodes,

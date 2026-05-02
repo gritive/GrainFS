@@ -133,10 +133,12 @@ func (m *DegradedMonitor) checkQuorum() {
 
 func (m *DegradedMonitor) check() {
 	// Guard 1: EC not configured at all (DataShards == 0) — solo deploy.
-	// Guard 2: EC configured but cluster too small to actually erasure-code
-	// (e.g. single node with k=4 m=2). ECActive() handles this — without the
-	// guard we'd false-positive every single-node test that has EC configured.
-	if m.backend.ecConfig.DataShards == 0 || !m.backend.ECActive() {
+	// Guard 2: EC configured but this deployment was never large enough to
+	// actually erasure-code (e.g. single node with k=4 m=2). Use the static
+	// configured node set here, not ECActive()/liveNodes(): liveNodes depends on
+	// peerHealth, and after peer I/O marks nodes unhealthy this monitor must
+	// still be able to enter degraded mode instead of short-circuiting healthy.
+	if m.backend.ecConfig.DataShards == 0 || !m.backend.ecConfig.IsActive(len(m.backend.allNodes)) {
 		m.tracker.Report(false, "", "")
 		return
 	}
@@ -187,6 +189,10 @@ func (m *DegradedMonitor) countLiveNodes() int {
 			// Always count self as live without probing.
 			if a == m.backend.selfAddr {
 				ch <- result{addr: a, alive: true}
+				return
+			}
+			if m.backend.peerHealth != nil && !m.backend.peerHealth.IsHealthy(a) {
+				ch <- result{addr: a, alive: false}
 				return
 			}
 			ch <- result{addr: a, alive: probeUDPPort(a, probeTimeout)}

@@ -21,6 +21,9 @@ func TestECConfig_IsActive(t *testing.T) {
 		{"single node", ECConfig{DataShards: 4, ParityShards: 2}, 1, false},
 		{"two nodes", ECConfig{DataShards: 4, ParityShards: 2}, 2, false},
 		{"larger cluster", ECConfig{DataShards: 4, ParityShards: 2}, 10, true},
+		{"disabled data shards", ECConfig{DataShards: 0, ParityShards: 2}, 3, false},
+		{"disabled parity shards", ECConfig{DataShards: 2, ParityShards: 0}, 3, false},
+		{"disabled zero config", ECConfig{}, 3, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

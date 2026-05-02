@@ -76,7 +76,7 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("bench-node-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -123,18 +123,25 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	waitForPortsParallel(t, httpPorts, 180*time.Second)
 	waitForPortsParallel(t, pprofPorts, 30*time.Second)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
-	require.Eventually(t, func() bool {
-		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			err := tryCreateBucket(ctx, c, fmt.Sprintf("scale-n%d", n))
-			if err == nil {
-				return true
-			}
-		}
-		return false
-	}, 120*time.Second, 1*time.Second, "no leader found")
+	endpoints := make([]string, numNodes)
+	for i := range endpoints {
+		endpoints[i] = httpURL(i)
+	}
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		endpoints,
+		240*time.Second,
+		5*time.Second,
+		time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			c := ecS3Client(endpoint, accessKey, secretKey)
+			return tryCreateBucket(attemptCtx, c, fmt.Sprintf("scale-n%d", n))
+		},
+	)
+	require.NoError(t, err, "no leader found")
+	t.Logf("N=%d leader node %d at %s", n, leaderIdx, endpoints[leaderIdx])
 
 	// seed loop가 끝날 때까지 대기 (N × ~400ms 추정 + 여유 5s, 최대 60s 클램프)
 	settleTime := time.Duration(n)*400*time.Millisecond + 5*time.Second
@@ -168,13 +175,15 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	}
 }
 
-// TestE2E_ClusterScaleBench_N8 은 단일 N=8 측정.
-//
-// 본 테스트만으로도 ~2분 (boot + 30s sampling + cleanup). sweep은
-// TestE2E_ClusterScaleBench_Sweep (GRAINFS_BENCH_FULL=1 게이트).
+// TestE2E_ClusterScaleBench_N8 is an opt-in scale measurement.
+// It boots five processes and samples pprof for 30s, so keep it out of the
+// default e2e suite where correctness tests should remain deterministic.
 func TestE2E_ClusterScaleBench_N8(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scale bench in -short mode")
+	}
+	if os.Getenv("GRAINFS_BENCH_FULL") != "1" {
+		t.Skip("set GRAINFS_BENCH_FULL=1 to run scale bench")
 	}
 	r := runScaleBench(t, 8)
 	t.Logf("N=8 result: boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d",

@@ -45,11 +45,8 @@ func TestVoterMigration_SelfRemovalWithRetry_E2E(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Add 4th node
-	node3 := cl.AddNode("node-3")
-
 	// Build address book and ShardGroupUpdater
-	allIDs := cl.NodeIDs()
+	allIDs := append(cl.NodeIDs(), "node-3")
 	addrBook := addrBookFromChaos(allIDs)
 	sgUpdater := &fakeSGUpdater{}
 	dgMgr := cluster.NewDataGroupManager()
@@ -95,6 +92,11 @@ func TestVoterMigration_SelfRemovalWithRetry_E2E(t *testing.T) {
 	require.Contains(t, []string{"node-0", "node-1", "node-2"}, newLeaderID,
 		"new leader must be a data-raft voter, not meta-raft-only node-3")
 	t.Logf("new leader elected from data-raft voters: %s", newLeaderID)
+
+	// Start the replacement only after leadership has moved. The first
+	// MoveReplica returns before resolving toNode, so node-3 does not need to
+	// participate in the leadership-transfer phase.
+	node3 := cl.AddNode("node-3")
 
 	// Step 3: Create executor on NEW leader with localNodeID == newLeaderID
 	// Re-use the same fromNode (oldLeaderID) - the plan is still valid

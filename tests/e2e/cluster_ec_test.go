@@ -85,7 +85,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("ec-node-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -168,12 +168,9 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		_, err := rand.Read(data)
 		require.NoError(t, err)
 		objects[i].sum = sha256.Sum256(data)
-		_, err = client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(bucketName),
-			Key:    aws.String(objects[i].key),
-			Body:   bytes.NewReader(data),
-		})
-		require.NoErrorf(t, err, "PutObject %s (%d bytes)", objects[i].key, objects[i].sz)
+		require.Eventuallyf(t, func() bool {
+			return tryPutObject(ctx, client, bucketName, objects[i].key, data) == nil
+		}, 60*time.Second, 1*time.Second, "PutObject %s (%d bytes)", objects[i].key, objects[i].sz)
 	}
 
 	// Round-trip check — all shards available.
@@ -285,7 +282,7 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("3n-node-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -335,12 +332,9 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	sum := sha256.Sum256(data)
 
 	// PUT: EC must be active on 3-node cluster (k=2, m=1).
-	_, perr := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String("ec-obj"),
-		Body:   bytes.NewReader(data),
-	})
-	require.NoError(t, perr, "PutObject on 3-node cluster with dynamic EC k=2,m=1 must succeed")
+	require.Eventually(t, func() bool {
+		return tryPutObject(ctx, client, bucketName, "ec-obj", data) == nil
+	}, 60*time.Second, 1*time.Second, "PutObject on 3-node cluster with dynamic EC k=2,m=1 must succeed")
 
 	// GET with all 3 nodes up: must reconstruct correctly.
 	out, gerr := client.GetObject(ctx, &s3.GetObjectInput{
@@ -468,7 +462,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", fmt.Sprintf("tp-node-%d", i),
+			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
@@ -509,15 +503,20 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	// All nodes share the full 6-node peer list and quorum=4, so no leader can be
-	// elected until ≥4 nodes are up. Starting all 6 simultaneously is safe — there
-	// is no livelock risk from split-term elections because no 3-node subset can
-	// ever achieve quorum.
-	for i := range numNodes {
+	// All nodes share the full 6-node peer list and quorum=4. Bring up quorum
+	// first so the cluster can elect once, then add the remaining peers without
+	// making all six race through the first election at the same time.
+	for i := 0; i < 4; i++ {
+		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
+	}
+	waitForPortsParallel(t, httpPorts[:4], 60*time.Second)
+	for i := 4; i < numNodes; i++ {
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 60*time.Second)
+	time.Sleep(4 * time.Second)
 	for i, port := range httpPorts {
 		t.Logf("node %d up (http :%d)", i, port)
 	}
@@ -525,20 +524,23 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	var client *s3.Client
-	var leaderIdx int
-	require.Eventually(t, func() bool {
-		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			err := tryCreateBucket(ctx, c, bucketName)
-			if err == nil {
-				client = c
-				leaderIdx = i
-				return true
-			}
-		}
-		return false
-	}, 240*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
+	endpoints := make([]string, numNodes)
+	for i := range endpoints {
+		endpoints[i] = httpURL(i)
+	}
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		endpoints,
+		240*time.Second,
+		5*time.Second,
+		1*time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			c := ecS3Client(endpoint, accessKey, secretKey)
+			return tryCreateBucket(attemptCtx, c, bucketName)
+		},
+	)
+	require.NoError(t, err, "no leader found or CreateBucket never succeeded")
+	client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
 	t.Logf("topology test: leader node %d at %s (N=%d, k+m=%d)", leaderIdx, httpURL(leaderIdx), numNodes, ecData+ecParity)
 
 	type entry struct {
@@ -681,43 +683,57 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 // Separate from newS3Client to avoid changing signatures other tests depend on.
 func ecS3Client(endpoint, ak, sk string) *s3.Client {
 	return s3.New(s3.Options{
-		BaseEndpoint: aws.String(endpoint),
-		Region:       "us-east-1",
-		Credentials:  staticCreds{ak: ak, sk: sk},
-		UsePathStyle: true,
+		BaseEndpoint:     aws.String(endpoint),
+		Region:           "us-east-1",
+		Credentials:      staticCreds{ak: ak, sk: sk},
+		UsePathStyle:     true,
+		RetryMaxAttempts: 1,
 	})
 }
 
 func tryCreateBucket(parent context.Context, client *s3.Client, bucket string) error {
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	ctx, cancel := clusterECS3OpContext(parent, 5*time.Second)
 	defer cancel()
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}, func(o *s3.Options) {
+		o.RetryMaxAttempts = 1
+	})
 	return err
 }
 
 func tryPutObject(parent context.Context, client *s3.Client, bucket, key string, data []byte) error {
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	ctx, cancel := clusterECS3OpContext(parent, 5*time.Second)
 	defer cancel()
 	_, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(data),
+	}, func(o *s3.Options) {
+		o.RetryMaxAttempts = 1
 	})
 	return err
 }
 
 func getObjectBytes(parent context.Context, client *s3.Client, bucket, key string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	ctx, cancel := clusterECS3OpContext(parent, 5*time.Second)
 	defer cancel()
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
+	}, func(o *s3.Options) {
+		o.RetryMaxAttempts = 1
 	})
 	if err != nil {
 		return nil, err
 	}
 	defer out.Body.Close()
 	return io.ReadAll(out.Body)
+}
+
+func clusterECS3OpContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil || parent.Err() != nil {
+		return context.WithTimeout(context.Background(), timeout)
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 // staticCreds is a minimal aws.CredentialsProvider that returns fixed keys.

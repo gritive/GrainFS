@@ -27,11 +27,23 @@ type cowSnapResp struct {
 func cowCreateVolume(t *testing.T, name string, sizeBytes int64) {
 	t.Helper()
 	url := fmt.Sprintf("%s/volumes/%s?size=%d", testServerURL, name, sizeBytes)
-	req, _ := http.NewRequest(http.MethodPut, url, nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusCreated, resp.StatusCode, "create volume %s", name)
+	var (
+		statusCode int
+		body       []byte
+		err        error
+	)
+	require.Eventually(t, func() bool {
+		req, _ := http.NewRequest(http.MethodPut, url, nil)
+		var resp *http.Response
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		statusCode = resp.StatusCode
+		body, _ = io.ReadAll(resp.Body)
+		return statusCode == http.StatusCreated
+	}, 30*time.Second, 500*time.Millisecond, "create volume %s: status=%d body=%s err=%v", name, statusCode, string(body), err)
 }
 
 func cowDeleteVolume(t *testing.T, name string) {
@@ -162,8 +174,8 @@ func TestCoW_SnapshotRollbackRestoresData(t *testing.T) {
 
 // TestCoW_SnapshotListAndDelete verifies snapshot list/delete operations.
 func TestCoW_SnapshotListAndDelete(t *testing.T) {
-	const volName = "cow-snaplist-vol"
 	const volSize = 4 * 1024 * 1024 // 4MB
+	volName := fmt.Sprintf("cow-snaplist-vol-%d", time.Now().UnixNano())
 
 	cowCreateVolume(t, volName, volSize)
 	t.Cleanup(func() { cowDeleteVolume(t, volName) })
@@ -195,9 +207,9 @@ func TestCoW_SnapshotListAndDelete(t *testing.T) {
 // Note: full block-data independence (write to clone, verify source unchanged)
 // requires NFS access to the cloned volume and is covered in Step 3 (NBD/Docker E2E).
 func TestCoW_CloneLifecycleIndependence(t *testing.T) {
-	const srcName = "cow-clone-src"
-	const dstName = "cow-clone-dst"
 	const volSize = 4 * 1024 * 1024
+	srcName := fmt.Sprintf("cow-clone-src-%d", time.Now().UnixNano())
+	dstName := fmt.Sprintf("cow-clone-dst-%d", time.Now().UnixNano())
 
 	cowCreateVolume(t, srcName, volSize)
 	t.Cleanup(func() { cowDeleteVolume(t, srcName) })
