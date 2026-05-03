@@ -208,6 +208,55 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantSev:    SeverityCritical,
 			wantNext:   "Critical BadgerDB vlog usage",
 		},
+		{
+			name: "badger role open failure blocks startup",
+			facts: []Fact{
+				{
+					CorrelationID: "badger-meta",
+					Type:          FactObserved,
+					Cause:         CauseBadgerOpenFailed,
+					Action:        ActionBlockStartup,
+					Scope:         Scope{Kind: ScopeBadgerRole, BadgerRole: "meta", Path: "/data/meta"},
+					Message:       "open metadata db failed",
+					At:            now,
+				},
+				{
+					CorrelationID: "badger-meta",
+					Type:          FactActionFailed,
+					Cause:         CauseBadgerOpenFailed,
+					Action:        ActionBlockStartup,
+					ErrorCode:     "badger_open_failed",
+					Message:       "manifest missing",
+					At:            now.Add(time.Millisecond),
+				},
+			},
+			wantState:  StateBlocked,
+			wantCause:  CauseBadgerOpenFailed,
+			wantAction: ActionBlockStartup,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityCritical,
+			wantNext:   "Restore the Badger role",
+		},
+		{
+			name: "badger role read only admission is degraded",
+			facts: []Fact{
+				{
+					CorrelationID: "badger-group",
+					Type:          FactDiagnosed,
+					Cause:         CauseBadgerReadOnlyAdmitted,
+					Action:        ActionStartReadOnly,
+					Scope:         Scope{Kind: ScopeBadgerRole, BadgerRole: "group_state", Path: "/data/groups/g/badger"},
+					Message:       "group_state failed; server admitted read-only",
+					At:            now,
+				},
+			},
+			wantState:  StateDiagnosed,
+			wantCause:  CauseBadgerReadOnlyAdmitted,
+			wantAction: ActionStartReadOnly,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityDegraded,
+			wantNext:   "Serve reads only",
+		},
 	}
 
 	for _, tt := range tests {
