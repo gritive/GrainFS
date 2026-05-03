@@ -1,11 +1,14 @@
 package nfs4server
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -162,8 +165,8 @@ func TestSeek_DataWhence(t *testing.T) {
 	require.Equal(t, uint32(len(allOps)), opCount)
 
 	// Skip SEQUENCE result
-	r.ReadUint32() // opCode
-	r.ReadUint32() // opStatus
+	r.ReadUint32()  // opCode
+	r.ReadUint32()  // opStatus
 	r.ReadFixed(16) //nolint:errcheck
 	r.ReadUint32()
 	r.ReadUint32()
@@ -275,6 +278,25 @@ func TestAllocate_NoOp(t *testing.T) {
 	assert.Equal(t, uint32(NFS4_OK), status)
 }
 
+func TestAllocate_UsesTruncateBackend(t *testing.T) {
+	backend := &allocateTruncateBackend{size: 1024}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		currentPath: "/alloc-fast.bin",
+	}
+
+	result := d.opAllocate(buildAllocateArgs42(0, 4096))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	require.Equal(t, 1, backend.truncateCalls)
+	assert.Equal(t, nfs4Bucket, backend.truncateBucket)
+	assert.Equal(t, "alloc-fast.bin", backend.truncateKey)
+	assert.Equal(t, int64(4096), backend.truncateSize)
+	assert.Zero(t, backend.getCalls, "ALLOCATE with Truncatable backend should not read the object")
+	assert.Zero(t, backend.putCalls, "ALLOCATE with Truncatable backend should not rewrite the object")
+}
+
 func TestDeallocate_ZeroRange(t *testing.T) {
 	addr, _ := startTestNFS4Server(t)
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -300,4 +322,69 @@ func TestDeallocate_ZeroRange(t *testing.T) {
 
 	status, _ := parseCompoundReply(t, reply)
 	assert.Equal(t, uint32(NFS4_OK), status)
+}
+
+func buildAllocateArgs42(offset, length uint64) []byte {
+	w := &XDRWriter{}
+	var zero [16]byte
+	w.buf.Write(zero[:]) // stateid
+	w.WriteUint64(offset)
+	w.WriteUint64(length)
+	return w.Bytes()
+}
+
+type allocateTruncateBackend struct {
+	size int64
+
+	getCalls       int
+	putCalls       int
+	truncateCalls  int
+	truncateBucket string
+	truncateKey    string
+	truncateSize   int64
+}
+
+func (b *allocateTruncateBackend) CreateBucket(string) error { return nil }
+func (b *allocateTruncateBackend) HeadBucket(string) error   { return nil }
+func (b *allocateTruncateBackend) DeleteBucket(string) error { return nil }
+func (b *allocateTruncateBackend) ListBuckets() ([]string, error) {
+	return nil, nil
+}
+func (b *allocateTruncateBackend) PutObject(string, string, io.Reader, string) (*storage.Object, error) {
+	b.putCalls++
+	return nil, errors.New("unexpected PutObject")
+}
+func (b *allocateTruncateBackend) GetObject(string, string) (io.ReadCloser, *storage.Object, error) {
+	b.getCalls++
+	return nil, nil, errors.New("unexpected GetObject")
+}
+func (b *allocateTruncateBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+	return &storage.Object{Key: key, Size: b.size}, nil
+}
+func (b *allocateTruncateBackend) DeleteObject(string, string) error { return nil }
+func (b *allocateTruncateBackend) ListObjects(string, string, int) ([]*storage.Object, error) {
+	return nil, nil
+}
+func (b *allocateTruncateBackend) WalkObjects(string, string, func(*storage.Object) error) error {
+	return nil
+}
+func (b *allocateTruncateBackend) CreateMultipartUpload(string, string, string) (*storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (b *allocateTruncateBackend) UploadPart(string, string, string, int, io.Reader) (*storage.Part, error) {
+	return nil, nil
+}
+func (b *allocateTruncateBackend) CompleteMultipartUpload(string, string, string, []storage.Part) (*storage.Object, error) {
+	return nil, nil
+}
+func (b *allocateTruncateBackend) AbortMultipartUpload(string, string, string) error {
+	return nil
+}
+func (b *allocateTruncateBackend) Truncate(bucket, key string, size int64) error {
+	b.truncateCalls++
+	b.truncateBucket = bucket
+	b.truncateKey = key
+	b.truncateSize = size
+	b.size = size
+	return nil
 }
