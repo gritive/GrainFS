@@ -226,7 +226,7 @@ func (c *MetaCatalog) readMetadata(location string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	rc, _, err := c.backend.GetObject(bucket, key)
+	rc, _, err := c.backend.GetObject(context.Background(), bucket, key)
 	if err != nil {
 		return nil, err
 	}

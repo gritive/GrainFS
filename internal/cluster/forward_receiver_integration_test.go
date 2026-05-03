@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"testing"
 
@@ -87,7 +88,7 @@ func TestForwardReceiver_GetObjectVersion_TooLargeReturnsEntityTooLarge(t *testi
 	gb := newTestGroupBackend(t, "g1")
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	obj, err := gb.PutObject("bk", "large", bytes.NewReader(bytes.Repeat([]byte("x"), int(DefaultMaxForwardReplyBytes)+1)), "application/octet-stream")
+	obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(bytes.Repeat([]byte("x"), int(DefaultMaxForwardReplyBytes)+1)), "application/octet-stream")
 	require.NoError(t, err)
 
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
@@ -104,7 +105,7 @@ func TestForwardReceiver_GetObjectVersionRead_StreamsAboveReplyCap(t *testing.T)
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
 	body := bytes.Repeat([]byte("x"), int(DefaultMaxForwardReplyBytes)+1)
-	obj, err := gb.PutObject("bk", "large", bytes.NewReader(body), "application/octet-stream")
+	obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(body), "application/octet-stream")
 	require.NoError(t, err)
 
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
@@ -127,11 +128,11 @@ func TestForwardReceiver_ListObjectVersions_DispatchesToBackend(t *testing.T) {
 	gb := newTestGroupBackend(t, "g1")
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	first, err := gb.PutObject("bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
+	first, err := gb.PutObject(context.Background(), "bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
 	require.NoError(t, err)
-	_, err = gb.PutObject("bk", "k", bytes.NewReader([]byte("v2")), "text/plain")
+	_, err = gb.PutObject(context.Background(), "bk", "k", bytes.NewReader([]byte("v2")), "text/plain")
 	require.NoError(t, err)
-	require.NoError(t, gb.DeleteObject("bk", "k"))
+	require.NoError(t, gb.DeleteObject(context.Background(), "bk", "k"))
 
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjectVersions, buildListObjectVersionsArgs("bk", "k", 100))
 	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
@@ -150,7 +151,7 @@ func TestForwardReceiver_DeleteObjectVersion_DispatchesToBackend(t *testing.T) {
 	gb := newTestGroupBackend(t, "g1")
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	obj, err := gb.PutObject("bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
+	obj, err := gb.PutObject(context.Background(), "bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
 	require.NoError(t, err)
 
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpDeleteObjectVersion, buildDeleteObjectVersionArgs("bk", "k", obj.VersionID))
@@ -167,7 +168,7 @@ func TestForwardReceiver_GetObjectVersion_DispatchesToBackend(t *testing.T) {
 	gb := newTestGroupBackend(t, "g1")
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	obj, err := gb.PutObject("bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
+	obj, err := gb.PutObject(context.Background(), "bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
 	require.NoError(t, err)
 
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "k", obj.VersionID))

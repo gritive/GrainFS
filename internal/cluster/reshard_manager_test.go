@@ -316,7 +316,7 @@ func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
 	data := bytes.Repeat([]byte("grainfs-ec-upgrade-"), 200) // 3800 bytes
 
 	// Create the bucket through Raft so HeadBucket passes.
-	require.NoError(t, backend.CreateBucket(bucket))
+	require.NoError(t, backend.CreateBucket(context.Background(), bucket))
 
 	// Seed object metadata directly into the FSM (no versionID → legacy layout).
 	etag := fmt.Sprintf("%x", md5.Sum(data))
@@ -366,7 +366,7 @@ func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
 	assert.Equal(t, 2, newRec.M)
 
 	// Verify the object is still fully readable after the upgrade.
-	rc, obj, err := backend.GetObject(bucket, key)
+	rc, obj, err := backend.GetObject(context.Background(), bucket, key)
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	defer rc.Close()

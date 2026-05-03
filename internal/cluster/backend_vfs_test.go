@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"sync"
@@ -30,20 +31,20 @@ func TestSetVFSFixedVersionEnabled_toggle(t *testing.T) {
 func TestPutObject_VFSBucket_FixedVersionID(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	bucket := storage.VFSBucketPrefix + "vol1"
-	require.NoError(t, b.CreateBucket(bucket))
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 
 	// First PUT.
-	o1, err := b.PutObject(bucket, "data.bin", strings.NewReader("aaa"), "application/octet-stream")
+	o1, err := b.PutObject(context.Background(), bucket, "data.bin", strings.NewReader("aaa"), "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, "current", o1.VersionID, "VFS bucket PUT must use fixed versionID 'current'")
 
 	// Second PUT to same key.
-	o2, err := b.PutObject(bucket, "data.bin", strings.NewReader("bbbbbb"), "application/octet-stream")
+	o2, err := b.PutObject(context.Background(), bucket, "data.bin", strings.NewReader("bbbbbb"), "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, "current", o2.VersionID)
 
 	// GetObject returns latest data.
-	rc, _, err := b.GetObject(bucket, "data.bin")
+	rc, _, err := b.GetObject(context.Background(), bucket, "data.bin")
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	rc.Close()
@@ -61,7 +62,7 @@ func TestHeadObject_InternalBucketIgnoresLatestPointer(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	bucket := storage.NFS4BucketName
 	key := "hot.bin"
-	require.NoError(t, b.CreateBucket(bucket))
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 
 	currentMeta, err := marshalObjectMeta(objectMeta{
 		Key:          key,
@@ -88,7 +89,7 @@ func TestHeadObject_InternalBucketIgnoresLatestPointer(t *testing.T) {
 		return txn.Set(latestKey(bucket, key), []byte("stale"))
 	}))
 
-	obj, err := b.HeadObject(bucket, key)
+	obj, err := b.HeadObject(context.Background(), bucket, key)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), obj.Size)
 	require.Equal(t, "current", obj.VersionID)
@@ -97,9 +98,9 @@ func TestHeadObject_InternalBucketIgnoresLatestPointer(t *testing.T) {
 func TestWriteAt_InternalBucketDoesNotWriteLatestPointer(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	bucket := storage.NFS4BucketName
-	require.NoError(t, b.CreateBucket(bucket))
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 
-	_, err := b.WriteAt(bucket, "direct.bin", 0, []byte("data"))
+	_, err := b.WriteAt(context.Background(), bucket, "direct.bin", 0, []byte("data"))
 	require.NoError(t, err)
 
 	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
@@ -114,9 +115,9 @@ func TestWriteAt_InternalBucketCachesPathAndSize(t *testing.T) {
 	bucket := storage.NFS4BucketName
 	key := "direct.bin"
 	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
-	require.NoError(t, b.CreateBucket(bucket))
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 
-	obj, err := b.WriteAt(bucket, key, 0, []byte("abcdef"))
+	obj, err := b.WriteAt(context.Background(), bucket, key, 0, []byte("abcdef"))
 	require.NoError(t, err)
 	require.Equal(t, int64(6), obj.Size)
 
@@ -129,21 +130,21 @@ func TestWriteAt_InternalBucketCachesPathAndSize(t *testing.T) {
 	require.True(t, ok, "WriteAt should cache the internal object size")
 	require.Equal(t, int64(6), size)
 
-	obj, err = b.WriteAt(bucket, key, 2, []byte("XY"))
+	obj, err = b.WriteAt(context.Background(), bucket, key, 2, []byte("XY"))
 	require.NoError(t, err)
 	require.Equal(t, int64(6), obj.Size)
 	size, ok = b.internalSizeCache.Load(cacheKey)
 	require.True(t, ok)
 	require.Equal(t, int64(6), size)
 
-	obj, err = b.WriteAt(bucket, key, 10, []byte("z"))
+	obj, err = b.WriteAt(context.Background(), bucket, key, 10, []byte("z"))
 	require.NoError(t, err)
 	require.Equal(t, int64(11), obj.Size)
 	size, ok = b.internalSizeCache.Load(cacheKey)
 	require.True(t, ok)
 	require.Equal(t, int64(11), size)
 
-	require.NoError(t, b.Truncate(bucket, key, 3))
+	require.NoError(t, b.Truncate(context.Background(), bucket, key, 3))
 	size, ok = b.internalSizeCache.Load(cacheKey)
 	require.True(t, ok)
 	require.Equal(t, int64(3), size)
@@ -153,9 +154,9 @@ func TestPutObject_VFSBucket_DisabledTogglesLegacy(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	b.SetVFSFixedVersionEnabled(false)
 	bucket := storage.VFSBucketPrefix + "legacy"
-	require.NoError(t, b.CreateBucket(bucket))
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 
-	o, err := b.PutObject(bucket, "k", strings.NewReader("x"), "application/octet-stream")
+	o, err := b.PutObject(context.Background(), bucket, "k", strings.NewReader("x"), "application/octet-stream")
 	require.NoError(t, err)
 	require.NotEqual(t, "current", o.VersionID, "with toggle off, legacy ULID must be used")
 }
@@ -163,11 +164,11 @@ func TestPutObject_VFSBucket_DisabledTogglesLegacy(t *testing.T) {
 func TestPutObject_NormalBucket_StillUsesULID(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	bucket := "normal-bucket"
-	require.NoError(t, b.CreateBucket(bucket))
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 
-	o1, err := b.PutObject(bucket, "k", strings.NewReader("a"), "application/octet-stream")
+	o1, err := b.PutObject(context.Background(), bucket, "k", strings.NewReader("a"), "application/octet-stream")
 	require.NoError(t, err)
-	o2, err := b.PutObject(bucket, "k", strings.NewReader("b"), "application/octet-stream")
+	o2, err := b.PutObject(context.Background(), bucket, "k", strings.NewReader("b"), "application/octet-stream")
 	require.NoError(t, err)
 	require.NotEqual(t, o1.VersionID, o2.VersionID, "non-VFS buckets must keep multi-version behavior")
 }
@@ -175,7 +176,7 @@ func TestPutObject_NormalBucket_StillUsesULID(t *testing.T) {
 func TestPutObject_VFSBucket_ConcurrentSameKeyAtomicLastWriterWins(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	bucket := storage.VFSBucketPrefix + "concurrent"
-	require.NoError(t, b.CreateBucket(bucket))
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 
 	const writers = 32
 	const payloadKB = 64
@@ -187,7 +188,7 @@ func TestPutObject_VFSBucket_ConcurrentSameKeyAtomicLastWriterWins(t *testing.T)
 		go func() {
 			defer wg.Done()
 			payload := bytes.Repeat([]byte{byte('A' + (i % 26))}, payloadKB*1024)
-			_, err := b.PutObject(bucket, "shared.bin", bytes.NewReader(payload), "application/octet-stream")
+			_, err := b.PutObject(context.Background(), bucket, "shared.bin", bytes.NewReader(payload), "application/octet-stream")
 			if err != nil {
 				errs <- err
 			}
@@ -200,7 +201,7 @@ func TestPutObject_VFSBucket_ConcurrentSameKeyAtomicLastWriterWins(t *testing.T)
 	}
 
 	// Result must be one of the 32 payloads, no torn write.
-	rc, _, err := b.GetObject(bucket, "shared.bin")
+	rc, _, err := b.GetObject(context.Background(), bucket, "shared.bin")
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	rc.Close()

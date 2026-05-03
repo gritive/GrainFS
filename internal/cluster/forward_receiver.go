@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 
@@ -156,9 +157,11 @@ func drainForwardBody(body io.Reader) {
 }
 
 func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	body := pa.BodyBytes()
 	obj, err := dg.Backend().PutObject(
+		ctx,
 		string(pa.Bucket()),
 		string(pa.Key()),
 		bytes.NewReader(body),
@@ -171,8 +174,10 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 }
 
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+	ctx := context.Background()
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	obj, err := dg.Backend().PutObject(
+		ctx,
 		string(pa.Bucket()),
 		string(pa.Key()),
 		body,
@@ -185,8 +190,9 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 }
 
 func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
+	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
-	rc, obj, err := dg.Backend().GetObject(string(ga.Bucket()), string(ga.Key()))
+	rc, obj, err := dg.Backend().GetObject(ctx, string(ga.Bucket()), string(ga.Key()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
 	}
@@ -194,8 +200,9 @@ func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*tran
 }
 
 func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
-	rc, obj, err := dg.Backend().GetObject(string(ga.Bucket()), string(ga.Key()))
+	rc, obj, err := dg.Backend().GetObject(ctx, string(ga.Bucket()), string(ga.Key()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
@@ -243,8 +250,9 @@ func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) *tr
 }
 
 func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	ha := raftpb.GetRootAsHeadObjectArgs(args, 0)
-	obj, err := dg.Backend().HeadObject(string(ha.Bucket()), string(ha.Key()))
+	obj, err := dg.Backend().HeadObject(ctx, string(ha.Bucket()), string(ha.Key()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
@@ -275,8 +283,9 @@ func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) 
 }
 
 func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	la := raftpb.GetRootAsListObjectsArgs(args, 0)
-	objs, err := dg.Backend().ListObjects(string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
+	objs, err := dg.Backend().ListObjects(ctx, string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
@@ -293,9 +302,10 @@ func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) *
 }
 
 func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	wa := raftpb.GetRootAsWalkObjectsArgs(args, 0)
 	var objs []*storage.Object
-	err := dg.Backend().WalkObjects(string(wa.Bucket()), string(wa.Prefix()), func(o *storage.Object) error {
+	err := dg.Backend().WalkObjects(ctx, string(wa.Bucket()), string(wa.Prefix()), func(o *storage.Object) error {
 		objs = append(objs, o)
 		return nil
 	})
@@ -306,8 +316,10 @@ func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) *transpo
 }
 
 func (r *ForwardReceiver) handleCreateMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	ca := raftpb.GetRootAsCreateMultipartUploadArgs(args, 0)
 	upload, err := dg.Backend().CreateMultipartUpload(
+		ctx,
 		string(ca.Bucket()),
 		string(ca.Key()),
 		string(ca.ContentType()),
@@ -319,9 +331,11 @@ func (r *ForwardReceiver) handleCreateMultipartUpload(dg *DataGroup, args []byte
 }
 
 func (r *ForwardReceiver) handleUploadPart(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	ua := raftpb.GetRootAsUploadPartArgs(args, 0)
 	body := ua.BodyBytes()
 	part, err := dg.Backend().UploadPart(
+		ctx,
 		string(ua.Bucket()),
 		string(ua.Key()),
 		string(ua.UploadId()),
@@ -335,8 +349,10 @@ func (r *ForwardReceiver) handleUploadPart(dg *DataGroup, args []byte) *transpor
 }
 
 func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+	ctx := context.Background()
 	ua := raftpb.GetRootAsUploadPartArgs(args, 0)
 	part, err := dg.Backend().UploadPart(
+		ctx,
 		string(ua.Bucket()),
 		string(ua.Key()),
 		string(ua.UploadId()),
@@ -350,6 +366,7 @@ func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, bod
 }
 
 func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	ca := raftpb.GetRootAsCompleteMultipartUploadArgs(args, 0)
 	n := ca.PartsLength()
 	parts := make([]storage.Part, n)
@@ -363,6 +380,7 @@ func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []by
 		}
 	}
 	obj, err := dg.Backend().CompleteMultipartUpload(
+		ctx,
 		string(ca.Bucket()),
 		string(ca.Key()),
 		string(ca.UploadId()),
@@ -375,8 +393,10 @@ func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []by
 }
 
 func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
 	aa := raftpb.GetRootAsAbortMultipartUploadArgs(args, 0)
 	err := dg.Backend().AbortMultipartUpload(
+		ctx,
 		string(aa.Bucket()),
 		string(aa.Key()),
 		string(aa.UploadId()),

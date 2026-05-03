@@ -30,9 +30,9 @@ func newMockTransport() *mockTransport {
 	return &mockTransport{recv: make(chan *transport.ReceivedMessage, 64)}
 }
 
-func (m *mockTransport) Listen(_ context.Context, _ string) error { return nil }
-func (m *mockTransport) Connect(_ context.Context, _ string) error { return nil }
-func (m *mockTransport) Close() error                              { return nil }
+func (m *mockTransport) Listen(_ context.Context, _ string) error   { return nil }
+func (m *mockTransport) Connect(_ context.Context, _ string) error  { return nil }
+func (m *mockTransport) Close() error                               { return nil }
 func (m *mockTransport) Receive() <-chan *transport.ReceivedMessage { return m.recv }
 
 func (m *mockTransport) Send(_ context.Context, addr string, msg *transport.Message) error {

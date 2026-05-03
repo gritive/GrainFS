@@ -12,9 +12,9 @@ func TestValidate_ValidConfig(t *testing.T) {
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{
 			{
-				ID:     "expire-logs",
-				Status: "Enabled",
-				Filter: &Filter{Prefix: "logs/"},
+				ID:         "expire-logs",
+				Status:     "Enabled",
+				Filter:     &Filter{Prefix: "logs/"},
 				Expiration: &Expiration{Days: 30},
 			},
 		},
@@ -73,9 +73,9 @@ func TestXMLRoundTrip(t *testing.T) {
 	original := &LifecycleConfiguration{
 		Rules: []Rule{
 			{
-				ID:     "expire-old",
-				Status: "Enabled",
-				Filter: &Filter{Prefix: "tmp/"},
+				ID:         "expire-old",
+				Status:     "Enabled",
+				Filter:     &Filter{Prefix: "tmp/"},
 				Expiration: &Expiration{Days: 7},
 				NoncurrentVersionExpiration: &NoncurrentVersionExpiration{
 					NoncurrentDays:          14,

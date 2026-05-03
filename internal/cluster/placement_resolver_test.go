@@ -171,7 +171,7 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(raw))
 
-	obj, meta, err := b.headObjectMeta("bkt", "obj")
+	obj, meta, err := b.headObjectMeta(context.Background(), "bkt", "obj")
 	require.NoError(t, err)
 	assert.Equal(t, "obj", obj.Key)
 	assert.Equal(t, int64(123), obj.Size)

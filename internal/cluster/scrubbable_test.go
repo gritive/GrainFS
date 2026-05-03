@@ -81,7 +81,7 @@ func enableECForTest(t *testing.T, b *DistributedBackend, k, m int) {
 func TestScanObjects_EmptyBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	enableECForTest(t, b, 2, 1)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	ch, err := b.ScanObjects("bkt")
 	require.NoError(t, err)
@@ -99,7 +99,7 @@ func TestScanObjects_MissingBucket(t *testing.T) {
 
 func TestScanObjects_ECDisabledReturnsEmpty(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	writeVersionedObjectMeta(t, b, "bkt", "k", "01HZXYZABC", "etag1", 42)
 
 	// EC disabled: no shards to scrub.
@@ -112,7 +112,7 @@ func TestScanObjects_ECDisabledReturnsEmpty(t *testing.T) {
 func TestScanObjects_SingleObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	enableECForTest(t, b, 2, 1)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	writeVersionedObjectMeta(t, b, "bkt", "hello.txt", "01HZXYZABC", "etag-hello", 11)
 
@@ -132,7 +132,7 @@ func TestScanObjects_SingleObject(t *testing.T) {
 func TestScanObjects_MultipleObjectsIncludingSlashKey(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	enableECForTest(t, b, 2, 1)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	// Key containing '/' — lat: iteration must treat this as a single key.
 	writeVersionedObjectMeta(t, b, "bkt", "folder/nested/file.bin", "01A", "etag-a", 100)
@@ -154,7 +154,7 @@ func TestScanObjects_MultipleObjectsIncludingSlashKey(t *testing.T) {
 func TestScanObjects_SkipsTombstones(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	enableECForTest(t, b, 2, 1)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	writeVersionedObjectMeta(t, b, "bkt", "alive", "01A", "etag-alive", 5)
 	writeVersionedObjectMeta(t, b, "bkt", "dead", "01D", deleteMarkerETag, 0)
@@ -169,7 +169,7 @@ func TestScanObjects_SkipsTombstones(t *testing.T) {
 
 func TestObjectExists(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	writeVersionedObjectMeta(t, b, "bkt", "present", "01A", "etag", 10)
 	writeVersionedObjectMeta(t, b, "bkt", "tomb", "01B", deleteMarkerETag, 0)
 

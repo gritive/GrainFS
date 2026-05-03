@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -78,13 +79,13 @@ func TestGroupBackend_ID(t *testing.T) {
 func TestGroupBackend_PutGetRoundTrip(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-rt")
 
-	require.NoError(t, gb.CreateBucket("b1"))
+	require.NoError(t, gb.CreateBucket(context.Background(), "b1"))
 
 	body := []byte("hello-world")
-	_, err := gb.PutObject("b1", "k1", bytes.NewReader(body), "text/plain")
+	_, err := gb.PutObject(context.Background(), "b1", "k1", bytes.NewReader(body), "text/plain")
 	require.NoError(t, err)
 
-	r, _, err := gb.GetObject("b1", "k1")
+	r, _, err := gb.GetObject(context.Background(), "b1", "k1")
 	require.NoError(t, err)
 	defer r.Close()
 
@@ -96,9 +97,9 @@ func TestGroupBackend_PutGetRoundTrip(t *testing.T) {
 func TestGroupBackend_ListBuckets(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-l")
 	for _, b := range []string{"a", "b", "c"} {
-		require.NoError(t, gb.CreateBucket(b))
+		require.NoError(t, gb.CreateBucket(context.Background(), b))
 	}
-	got, err := gb.ListBuckets()
+	got, err := gb.ListBuckets(context.Background())
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"a", "b", "c"}, got)
 	require.NotContains(t, strings.Join(got, ","), "other-group-bucket")

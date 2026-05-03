@@ -17,7 +17,7 @@ import (
 
 func putBytes(t *testing.T, b *DistributedBackend, bucket, key string, data []byte) {
 	t.Helper()
-	_, err := b.PutObject(bucket, key, bytes.NewReader(data), "application/octet-stream")
+	_, err := b.PutObject(context.Background(), bucket, key, bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 }
 
@@ -50,12 +50,12 @@ func TestRing_PutObjectEC_UsesRingVersion(t *testing.T) {
 	assert.Equal(t, RingVersion(1), rv, "ring version should be 1 after init")
 
 	// 버킷 생성 + 오브젝트 PUT
-	require.NoError(t, backend.CreateBucket("bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
 	content := []byte("hello ring ec world")
 	putBytes(t, backend, "bucket", "key", content)
 
 	// GET — RingVersion 기반 경로로 복구 가능해야 함
-	rc, obj, err := backend.GetObject("bucket", "key")
+	rc, obj, err := backend.GetObject(context.Background(), "bucket", "key")
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	defer rc.Close()
@@ -75,11 +75,11 @@ func TestRing_GetObjectFallsBackWhenNoRing(t *testing.T) {
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
 
 	// 링을 초기화하지 않은 상태: PlacementForNodes 경로
-	require.NoError(t, backend.CreateBucket("bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
 	content := []byte("no ring fallback")
 	putBytes(t, backend, "bucket", "key", content)
 
-	rc, obj, err := backend.GetObject("bucket", "key")
+	rc, obj, err := backend.GetObject(context.Background(), "bucket", "key")
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	defer rc.Close()
@@ -110,7 +110,7 @@ func TestRing_ReshardToRing_NoopWhenSameVersion(t *testing.T) {
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
 
 	proposeRing(t, backend, []string{selfAddr})
-	require.NoError(t, backend.CreateBucket("b"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
 	putBytes(t, backend, "b", "k", []byte("data"))
 
 	// ReshardToRing with current ring version should be a no-op

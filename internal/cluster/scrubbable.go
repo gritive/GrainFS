@@ -51,7 +51,7 @@ func (b *DistributedBackend) acquireShardReadLock(bucket, key string) func() {
 // Delete markers (tombstones) and non-EC clusters return no records — EC has
 // no shards to scrub in those cases.
 func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+	if err := b.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, err
 	}
 
@@ -122,7 +122,7 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 // version. Used by the scrubber to avoid repairing shards for an object
 // deleted between scan and verify (Eng Review #9).
 func (b *DistributedBackend) ObjectExists(bucket, key string) (bool, error) {
-	_, err := b.HeadObject(bucket, key)
+	_, err := b.HeadObject(context.Background(), bucket, key)
 	if err == nil {
 		return true, nil
 	}

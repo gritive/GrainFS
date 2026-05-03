@@ -20,7 +20,7 @@ const otelTracerName = "grainfs/scrubber"
 // Scrubbable is the interface ECBackend must implement for scrubbing.
 // Defined here (not in erasure) to invert the dependency.
 type Scrubbable interface {
-	ListBuckets() ([]string, error)
+	ListBuckets(ctx context.Context) ([]string, error)
 	// ScanObjects streams ObjectRecords for EC objects in bucket (DataShards > 0 only).
 	ScanObjects(bucket string) (<-chan ObjectRecord, error)
 	// ObjectExists checks whether the object's metadata still exists.
@@ -236,7 +236,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	ctx, cycleSpan := tr.Start(ctx, "scrub.cycle")
 	defer cycleSpan.End()
 
-	buckets, err := s.backend.ListBuckets()
+	buckets, err := s.backend.ListBuckets(ctx)
 	if err != nil {
 		log.Warn().Err(err).Msg("scrub: list buckets failed")
 		cycleSpan.RecordError(err)

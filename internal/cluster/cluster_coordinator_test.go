@@ -30,52 +30,66 @@ type fakeBackend struct {
 
 func (f *fakeBackend) record(call string) { f.calls = append(f.calls, call) }
 
-func (f *fakeBackend) CreateBucket(bucket string) error {
+func (f *fakeBackend) CreateBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	f.record(fmt.Sprintf("CreateBucket:%s", bucket))
 	return f.createErr
 }
-func (f *fakeBackend) HeadBucket(bucket string) error {
+func (f *fakeBackend) HeadBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	f.record(fmt.Sprintf("HeadBucket:%s", bucket))
 	return f.headErr
 }
-func (f *fakeBackend) DeleteBucket(bucket string) error {
+func (f *fakeBackend) DeleteBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	f.record(fmt.Sprintf("DeleteBucket:%s", bucket))
 	return f.deleteErr
 }
-func (f *fakeBackend) ListBuckets() ([]string, error) {
+func (f *fakeBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	_ = ctx
 	f.record("ListBuckets")
 	return f.listResult, f.listErr
 }
 
 // Bucket-scoped methods — unused in T5; T6 routing tests use a different fake.
-func (f *fakeBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+func (f *fakeBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.PutObject not implemented")
 }
-func (f *fakeBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+func (f *fakeBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	_ = ctx
 	return nil, nil, fmt.Errorf("fakeBackend.GetObject not implemented")
 }
-func (f *fakeBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (f *fakeBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.HeadObject not implemented")
 }
-func (f *fakeBackend) DeleteObject(bucket, key string) error {
+func (f *fakeBackend) DeleteObject(ctx context.Context, bucket, key string) error {
+	_ = ctx
 	return fmt.Errorf("fakeBackend.DeleteObject not implemented")
 }
-func (f *fakeBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+func (f *fakeBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.ListObjects not implemented")
 }
-func (f *fakeBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+func (f *fakeBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	_ = ctx
 	return fmt.Errorf("fakeBackend.WalkObjects not implemented")
 }
-func (f *fakeBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
+func (f *fakeBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
+	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.CreateMultipartUpload not implemented")
 }
-func (f *fakeBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (f *fakeBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.UploadPart not implemented")
 }
-func (f *fakeBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+func (f *fakeBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.CompleteMultipartUpload not implemented")
 }
-func (f *fakeBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
+func (f *fakeBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	_ = ctx
 	return fmt.Errorf("fakeBackend.AbortMultipartUpload not implemented")
 }
 
@@ -85,21 +99,21 @@ func (f *fakeBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
 func TestClusterCoordinator_CreateBucket_DelegatesToBase(t *testing.T) {
 	base := &fakeBackend{}
 	c := NewClusterCoordinator(base, nil, nil, nil, "self")
-	require.NoError(t, c.CreateBucket("bk1"))
+	require.NoError(t, c.CreateBucket(context.Background(), "bk1"))
 	require.Equal(t, []string{"CreateBucket:bk1"}, base.calls)
 }
 
 func TestClusterCoordinator_HeadBucket_DelegatesToBase(t *testing.T) {
 	base := &fakeBackend{}
 	c := NewClusterCoordinator(base, nil, nil, nil, "self")
-	require.NoError(t, c.HeadBucket("bk1"))
+	require.NoError(t, c.HeadBucket(context.Background(), "bk1"))
 	require.Equal(t, []string{"HeadBucket:bk1"}, base.calls)
 }
 
 func TestClusterCoordinator_DeleteBucket_DelegatesToBase(t *testing.T) {
 	base := &fakeBackend{}
 	c := NewClusterCoordinator(base, nil, nil, nil, "self")
-	require.NoError(t, c.DeleteBucket("bk1"))
+	require.NoError(t, c.DeleteBucket(context.Background(), "bk1"))
 	require.Equal(t, []string{"DeleteBucket:bk1"}, base.calls)
 }
 
@@ -119,7 +133,7 @@ func TestClusterCoordinator_DeleteBucket_ChecksRoutedDataGroupBeforeBaseDelete(t
 	}}
 	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(NewForwardSender(d.dial))
 
-	err := c.DeleteBucket("bk1")
+	err := c.DeleteBucket(context.Background(), "bk1")
 	require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
 	require.Empty(t, base.calls)
 	require.Len(t, d.calls, 1)
@@ -129,7 +143,7 @@ func TestClusterCoordinator_DeleteBucket_ChecksRoutedDataGroupBeforeBaseDelete(t
 func TestClusterCoordinator_ListBuckets_DelegatesToBase(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"a", "b"}}
 	c := NewClusterCoordinator(base, nil, nil, nil, "self")
-	got, err := c.ListBuckets()
+	got, err := c.ListBuckets(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []string{"a", "b"}, got)
 	require.Equal(t, []string{"ListBuckets"}, base.calls)
@@ -158,7 +172,7 @@ func TestClusterCoordinator_ListBuckets_MergesMetaAssignments(t *testing.T) {
 	}
 	c := NewClusterCoordinator(base, nil, nil, meta, "self")
 
-	got, err := c.ListBuckets()
+	got, err := c.ListBuckets(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []string{"default", "local"}, got)
 	require.Equal(t, []string{"ListBuckets"}, base.calls)
@@ -171,14 +185,14 @@ func TestClusterCoordinator_HeadBucket_UsesMetaAssignmentWhenBaseIsEmpty(t *test
 	}
 	c := NewClusterCoordinator(base, nil, nil, meta, "self")
 
-	require.NoError(t, c.HeadBucket("default"))
+	require.NoError(t, c.HeadBucket(context.Background(), "default"))
 	require.Equal(t, []string{"HeadBucket:default"}, base.calls)
 }
 
 func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")
-	_, err := gb.PutObject("photos", "a.txt", strings.NewReader("hello"), "text/plain")
+	_, err := gb.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("hello"), "text/plain")
 	require.NoError(t, err)
 
 	mgr := NewDataGroupManager()
@@ -210,9 +224,9 @@ func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) 
 func TestClusterCoordinator_ListAllObjects_PreservesVersionsAndDeleteMarkers(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")
-	v1, err := gb.PutObject("photos", "a.txt", strings.NewReader("v1"), "text/plain")
+	v1, err := gb.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	v2, err := gb.PutObject("photos", "a.txt", strings.NewReader("v2"), "text/plain")
+	v2, err := gb.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("v2"), "text/plain")
 	require.NoError(t, err)
 	markerID, err := gb.DeleteObjectReturningMarker("photos", "a.txt")
 	require.NoError(t, err)
@@ -262,14 +276,14 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, w.Close()) })
 	wrapped := wal.NewBackend(c, w)
 
-	obj, err := wrapped.WriteAt(storage.NFS4BucketName, "fio/file.bin", 4, []byte("data"))
+	obj, err := wrapped.WriteAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 4, []byte("data"))
 	require.NoError(t, err)
 	require.Equal(t, int64(8), obj.Size)
 
-	require.NoError(t, wrapped.Truncate(storage.NFS4BucketName, "fio/file.bin", 6))
+	require.NoError(t, wrapped.Truncate(context.Background(), storage.NFS4BucketName, "fio/file.bin", 6))
 
 	buf := make([]byte, 8)
-	n, err := wrapped.ReadAt(storage.NFS4BucketName, "fio/file.bin", 0, buf)
+	n, err := wrapped.ReadAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 0, buf)
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, 6, n)
 	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
@@ -278,12 +292,12 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")
-	_, err := gb.PutObject("photos", "keep.txt", strings.NewReader("keep"), "text/plain")
+	_, err := gb.PutObject(context.Background(), "photos", "keep.txt", strings.NewReader("keep"), "text/plain")
 	require.NoError(t, err)
-	_, err = gb.PutObject("photos", "extra.txt", strings.NewReader("extra"), "text/plain")
+	_, err = gb.PutObject(context.Background(), "photos", "extra.txt", strings.NewReader("extra"), "text/plain")
 	require.NoError(t, err)
 
-	current, err := gb.ListObjects("photos", "", 100)
+	current, err := gb.ListObjects(context.Background(), "photos", "", 100)
 	require.NoError(t, err)
 	var keep storage.SnapshotObject
 	for _, obj := range current {
@@ -318,7 +332,7 @@ func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) 
 	require.Equal(t, 1, restored)
 	require.Empty(t, stale)
 
-	objs, err := gb.ListObjects("photos", "", 100)
+	objs, err := gb.ListObjects(context.Background(), "photos", "", 100)
 	require.NoError(t, err)
 	require.Len(t, objs, 1)
 	require.Equal(t, "keep.txt", objs[0].Key)
@@ -578,7 +592,7 @@ func TestClusterCoordinator_GetObject_Forward(t *testing.T) {
 		"bk", []byte("hello"),
 	)
 
-	rc, obj, err := c.GetObject("bk", "k")
+	rc, obj, err := c.GetObject(context.Background(), "bk", "k")
 	require.NoError(t, err)
 	require.Equal(t, int64(5), obj.Size)
 	require.Equal(t, "etag", obj.ETag)
@@ -597,7 +611,7 @@ func TestClusterCoordinator_GetObject_ForwardRejectsSizeMismatch(t *testing.T) {
 		"bk", []byte{},
 	)
 
-	_, _, err := c.GetObject("bk", "k")
+	_, _, err := c.GetObject(context.Background(), "bk", "k")
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
@@ -609,7 +623,7 @@ func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
 		"bk", body,
 	)
 
-	rc, obj, err := c.GetObject("bk", "large")
+	rc, obj, err := c.GetObject(context.Background(), "bk", "large")
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	rc.Close()
@@ -628,7 +642,7 @@ func TestClusterCoordinator_GetObject_ForwardUsesReadStream(t *testing.T) {
 	d.readBodyBy[raftpb.ForwardOpGetObject] = body
 	c.forward.WithReadStreamDialer(d.readStream)
 
-	rc, obj, err := c.GetObject("bk", "large")
+	rc, obj, err := c.GetObject(context.Background(), "bk", "large")
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	rc.Close()
@@ -648,7 +662,7 @@ func TestClusterCoordinator_ReadAt_FallbackRejectsNegativeOffset(t *testing.T) {
 	)
 
 	require.NotPanics(t, func() {
-		n, err := c.ReadAt("bk", "k", -1, make([]byte, 2))
+		n, err := c.ReadAt(context.Background(), "bk", "k", -1, make([]byte, 2))
 		require.Zero(t, n)
 		require.Error(t, err)
 	})
@@ -667,9 +681,9 @@ func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	}}
 	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
 
-	v1, err := c.PutObject("bk", "k", strings.NewReader("v1"), "text/plain")
+	v1, err := c.PutObject(context.Background(), "bk", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	v2, err := c.PutObject("bk", "k", strings.NewReader("v2"), "text/plain")
+	v2, err := c.PutObject(context.Background(), "bk", "k", strings.NewReader("v2"), "text/plain")
 	require.NoError(t, err)
 	require.NotEqual(t, v1.VersionID, v2.VersionID)
 
@@ -801,7 +815,7 @@ func TestClusterCoordinator_HeadObject_Forward(t *testing.T) {
 	d.replyByOp[raftpb.ForwardOpHeadObject] = buildObjectReply(
 		&storage.Object{Key: "k", Size: 99, ETag: "etag-x"}, "bk",
 	)
-	obj, err := c.HeadObject("bk", "k")
+	obj, err := c.HeadObject(context.Background(), "bk", "k")
 	require.NoError(t, err)
 	require.Equal(t, int64(99), obj.Size)
 	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
@@ -810,7 +824,7 @@ func TestClusterCoordinator_HeadObject_Forward(t *testing.T) {
 func TestClusterCoordinator_DeleteObject_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpDeleteObject] = buildOKReply()
-	require.NoError(t, c.DeleteObject("bk", "k"))
+	require.NoError(t, c.DeleteObject(context.Background(), "bk", "k"))
 	require.Equal(t, raftpb.ForwardOpDeleteObject, d.calls[0].op)
 }
 
@@ -832,7 +846,7 @@ func TestClusterCoordinator_ListObjects_Forward(t *testing.T) {
 		{Key: "k1", Size: 1},
 		{Key: "k2", Size: 2},
 	})
-	out, err := c.ListObjects("bk", "p/", 100)
+	out, err := c.ListObjects(context.Background(), "bk", "p/", 100)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	require.Equal(t, "k1", out[0].Key)
@@ -845,7 +859,7 @@ func TestClusterCoordinator_WalkObjects_Forward(t *testing.T) {
 		{Key: "a1"}, {Key: "a2"}, {Key: "a3"},
 	})
 	var seen []string
-	require.NoError(t, c.WalkObjects("bk", "a", func(o *storage.Object) error {
+	require.NoError(t, c.WalkObjects(context.Background(), "bk", "a", func(o *storage.Object) error {
 		seen = append(seen, o.Key)
 		return nil
 	}))
@@ -859,7 +873,7 @@ func TestClusterCoordinator_WalkObjects_FnError_Stops(t *testing.T) {
 		{Key: "a1"}, {Key: "a2"},
 	})
 	stopErr := errors.New("stop")
-	err := c.WalkObjects("bk", "a", func(o *storage.Object) error {
+	err := c.WalkObjects(context.Background(), "bk", "a", func(o *storage.Object) error {
 		return stopErr
 	})
 	require.ErrorIs(t, err, stopErr)
@@ -868,7 +882,7 @@ func TestClusterCoordinator_WalkObjects_FnError_Stops(t *testing.T) {
 func TestClusterCoordinator_CreateMultipartUpload_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpCreateMultipartUpload] = buildUploadReply("bk", "k", "upload-1")
-	up, err := c.CreateMultipartUpload("bk", "k", "text/plain")
+	up, err := c.CreateMultipartUpload(context.Background(), "bk", "k", "text/plain")
 	require.NoError(t, err)
 	require.Equal(t, "upload-1", up.UploadID)
 	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
@@ -879,7 +893,7 @@ func TestClusterCoordinator_CompleteMultipartUpload_Forward(t *testing.T) {
 	d.replyByOp[raftpb.ForwardOpCompleteMultipartUpload] = buildObjectReply(
 		&storage.Object{Key: "k", Size: 1024, ETag: "merged-etag"}, "bk",
 	)
-	obj, err := c.CompleteMultipartUpload("bk", "k", "upload-1", []storage.Part{
+	obj, err := c.CompleteMultipartUpload(context.Background(), "bk", "k", "upload-1", []storage.Part{
 		{PartNumber: 1, ETag: "p1"}, {PartNumber: 2, ETag: "p2"},
 	})
 	require.NoError(t, err)
@@ -891,7 +905,7 @@ func TestClusterCoordinator_CompleteMultipartUpload_Forward(t *testing.T) {
 func TestClusterCoordinator_AbortMultipartUpload_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpAbortMultipartUpload] = buildOKReply()
-	require.NoError(t, c.AbortMultipartUpload("bk", "k", "upload-1"))
+	require.NoError(t, c.AbortMultipartUpload(context.Background(), "bk", "k", "upload-1"))
 	require.Equal(t, raftpb.ForwardOpAbortMultipartUpload, d.calls[0].op)
 }
 
@@ -901,7 +915,7 @@ func TestClusterCoordinator_AbortMultipartUpload_Forward(t *testing.T) {
 func TestClusterCoordinator_GetObject_NoSuchBucketStatus(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpGetObject] = buildSimpleReply(raftpb.ForwardStatusNoSuchBucket, "")
-	_, _, err := c.GetObject("bk", "k")
+	_, _, err := c.GetObject(context.Background(), "bk", "k")
 	require.ErrorIs(t, err, storage.ErrNoSuchBucket)
 }
 
@@ -915,7 +929,7 @@ func TestClusterCoordinator_PutObject_Forward(t *testing.T) {
 	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put"}, "bk",
 	)
-	obj, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
 	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
@@ -928,7 +942,7 @@ func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
 		&storage.Object{Key: "k", Size: 0, ETag: "etag-empty"}, "bk",
 	)
 
-	_, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	_, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
@@ -938,7 +952,7 @@ func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
 func TestClusterCoordinator_PutObject_TooLarge_413(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := bytes.Repeat([]byte("x"), 6*1024*1024) // 6 MB, over cap
-	_, err := c.PutObject("bk", "k", bytes.NewReader(body), "")
+	_, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "")
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
 }
@@ -950,7 +964,7 @@ func TestClusterCoordinator_UploadPart_Forward(t *testing.T) {
 	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: int64(len(body))},
 	)
-	p, err := c.UploadPart("bk", "k", "uid", 7, bytes.NewReader(body))
+	p, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, bytes.NewReader(body))
 	require.NoError(t, err)
 	require.Equal(t, 7, p.PartNumber)
 	require.Equal(t, "etag-part", p.ETag)
@@ -964,7 +978,7 @@ func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) 
 		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: 0},
 	)
 
-	_, err := c.UploadPart("bk", "k", "uid", 7, bytes.NewReader(body))
+	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, bytes.NewReader(body))
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
@@ -972,7 +986,7 @@ func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) 
 func TestClusterCoordinator_UploadPart_5MB_Cap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := bytes.Repeat([]byte("x"), 6*1024*1024)
-	_, err := c.UploadPart("bk", "k", "uid", 1, bytes.NewReader(body))
+	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
 }
@@ -985,7 +999,7 @@ func TestClusterCoordinator_PutObject_StreamForward_AboveLegacyCap(t *testing.T)
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream"}, "bk",
 	)
 
-	obj, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
 	require.Len(t, d.calls, 1, "streamed PutObject should only use single-message preflight")
@@ -1006,7 +1020,7 @@ func TestClusterCoordinator_PutObject_StreamDialerSmallBodyUsesSingleMessage(t *
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put"}, "bk",
 	)
 
-	obj, err := c.PutObject("bk", "k", bytes.NewReader(body), "application/octet-stream")
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
 	require.Empty(t, d.streamCalls)
@@ -1025,7 +1039,7 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveLegacyCap(t *testing.T
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
 
-	part, err := c.UploadPart("bk", "k", "uid", 1, bytes.NewReader(body))
+	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), part.Size)
 	require.Len(t, d.calls, 1, "streamed UploadPart should only use single-message preflight")
@@ -1045,7 +1059,7 @@ func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t 
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
 
-	part, err := c.UploadPart("bk", "k", "uid", 1, bytes.NewReader(body))
+	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), part.Size)
 	require.Empty(t, d.streamCalls)
