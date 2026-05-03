@@ -967,7 +967,8 @@ tbody tr:last-child td{border-bottom:none}
       var scope = item.scope || {};
       var name = scope.bucket ? scope.bucket + '/' + (scope.key || '') : (scope.node_id || item.id);
       var proof = item.proof && item.proof.receipt_id ? ' · proof ' + item.proof.receipt_id.slice(0, 8) : '';
-      body.textContent = (item.cause || 'incident') + ' · ' + name + proof + ' · ' + (item.next_action || '');
+      var decision = item.decision ? ' · ' + item.decision : '';
+      body.textContent = incidentCauseLabel(item.cause) + ' · ' + name + proof + decision + ' · ' + (item.next_action || '');
       row.appendChild(state);
       row.appendChild(body);
       table.appendChild(row);
@@ -979,6 +980,14 @@ tbody tr:last-child td{border-bottom:none}
     if (state === 'isolated' || state === 'proof-unavailable') return 'var(--warning)';
     if (state === 'blocked' || state === 'needs-human') return 'var(--danger)';
     return 'var(--text-muted)';
+  }
+
+  function incidentCauseLabel(cause) {
+    if (cause === 'fd_exhaustion_risk') return 'FD exhaustion risk';
+    if (cause === 'missing_shard') return 'Missing shard';
+    if (cause === 'corrupt_shard') return 'Corrupt shard';
+    if (cause === 'corrupt_blob') return 'Corrupt blob';
+    return cause || 'incident';
   }
 
   // ── Blame Mode v1 ──────────────────────────────────────────────────────────

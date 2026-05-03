@@ -67,7 +67,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 
 ## Zero-Ops Incident Checks
 
-Use the incident API after startup, repair drills, or corruption drills to confirm the cluster is not silently degraded.
+Use the incident API after startup, repair drills, corruption drills, or resource warnings to confirm the cluster is not silently degraded.
 
 ```bash
 curl -s http://localhost:9000/api/incidents | jq .
@@ -84,6 +84,16 @@ curl -s -H "Authorization: <sigv4 header>" http://localhost:9000/api/receipts/$R
 ```
 
 If an incident is `proof-unavailable`, check HealReceipt signing and persistence before treating the repair as audit-complete. If an incident is `isolated`, review the named object version and restore or delete it according to the data owner policy; unrelated objects in the bucket should continue serving.
+
+For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.
+
+```bash
+curl -s http://localhost:9000/api/incidents/fd-<node-id> | jq .
+curl -s http://localhost:9000/metrics | grep '^grainfs_fd_'
+lsof -p $(pgrep -n grainfs) | awk '{print $5}' | sort | uniq -c | sort -nr | head
+```
+
+If the incident is `diagnosed`, reduce connection churn or raise the process FD limit before the ETA expires. If it is `blocked`, raise `LimitNOFILE`/`ulimit -n`, check for socket/session leaks, and restart gracefully after draining traffic. The watcher resolves the incident after FD usage stays below the warning threshold for `--fd-recovery-window`.
 
 ---
 
