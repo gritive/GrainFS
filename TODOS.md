@@ -32,6 +32,20 @@
 - [ ] nbd over internet for edge computing (powered by wireguard)
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 
+## Transport Protocol
+
+### Transport protocol version policy before first external release
+
+**What:** 첫 외부 릴리스 전에 QUIC transport message envelope의 versioning, capability negotiation, rolling-upgrade 정책을 확정한다.
+
+**Why:** 이번 architecture hardening 계획은 pre-release 전제라 old frame 호환성을 의도적으로 제외하지만, 릴리스 이후에는 wire format 변경이 운영 중 cluster split이나 요청 decode 실패로 이어질 수 있다.
+
+**Context:** `docs/superpowers/plans/2026-05-03-storage-layer-architecture-hardening.md`의 Task 3는 `Message.ID`/`Message.Status`를 포함하는 새 envelope로 codec을 교체한다. 지금은 동일 버전 cluster 전제라 단순 교체가 맞지만, 첫 릴리스 전에는 ALPN/capability negotiation, protocol version constant, downgrade 거부 에러, rolling-upgrade 테스트 범위를 정해야 한다.
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** Storage layer architecture hardening Task 3
+
 ## Phase 18: FUSE-over-S3 (외부 도구 호환성 보증)
 
 **방침**: 별도 FUSE 바이너리/서버 사이드 마운트를 만들지 않는다. GrainFS는 표준 S3 API만 제공하고, 클라이언트는 rclone / s3fs / goofys 같은 기존 FUSE-over-S3 도구를 그대로 사용한다. 클라이언트 머신에 grainfs 바이너리 설치 불필요.
