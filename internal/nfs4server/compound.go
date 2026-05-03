@@ -372,7 +372,7 @@ func (d *Dispatcher) opGetFH() OpResult {
 
 func (d *Dispatcher) opLookup(data []byte) OpResult {
 	name := string(data)
-	if name == "" || name == "." || name == ".." {
+	if err := validateComponentName(name); err != nil {
 		return OpResult{OpCode: OpLookup, Status: NFS4ERR_INVAL}
 	}
 	childPath := path.Join(d.currentPath, name)
@@ -406,7 +406,7 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	r := NewXDRReader(data)
 	objType, _ := r.ReadUint32()
 	objName, _ := r.ReadString()
-	if objName == "" || objName == "." || objName == ".." {
+	if err := validateComponentName(objName); err != nil {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
 	}
 
@@ -934,6 +934,9 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	shareAccess, _ := r.ReadUint32()
 	openType, _ := r.ReadUint32() // 0=NOCREATE, 1=CREATE
 	fileName, _ := r.ReadString()
+	if err := validateComponentName(fileName); err != nil {
+		return OpResult{OpCode: OpOpen, Status: NFS4ERR_INVAL}
+	}
 
 	childPath := path.Join(d.currentPath, fileName)
 	log.Debug().Str("file", fileName).Str("child", childPath).Uint32("access", shareAccess).Uint32("type", openType).Msg("nfs4: OPEN")
@@ -1149,7 +1152,7 @@ func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
 
 func (d *Dispatcher) opRemove(data []byte) OpResult {
 	name := string(data)
-	if name == "" {
+	if err := validateComponentName(name); err != nil {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_INVAL}
 	}
 	targetPath := path.Join(d.currentPath, name)
@@ -1193,6 +1196,12 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 	}
 	newName, err := r.ReadString()
 	if err != nil {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_INVAL}
+	}
+	if err := validateComponentName(oldName); err != nil {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_INVAL}
+	}
+	if err := validateComponentName(newName); err != nil {
 		return OpResult{OpCode: OpRename, Status: NFS4ERR_INVAL}
 	}
 
