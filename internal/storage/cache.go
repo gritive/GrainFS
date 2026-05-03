@@ -215,6 +215,22 @@ func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset 
 	return ra.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+func (cb *CachedBackend) PreferReadAt(bucket string) bool {
+	type readAtPreference interface {
+		PreferReadAt(bucket string) bool
+	}
+	pref, ok := cb.Backend.(readAtPreference)
+	return ok && pref.PreferReadAt(bucket)
+}
+
+func (cb *CachedBackend) PreferWriteAt(bucket string) bool {
+	type writeAtPreference interface {
+		PreferWriteAt(bucket string) bool
+	}
+	pref, ok := cb.Backend.(writeAtPreference)
+	return ok && pref.PreferWriteAt(bucket)
+}
+
 // Truncate delegates to the inner backend's Truncate if available, then
 // invalidates the cache entry so subsequent reads fetch the updated content.
 func (cb *CachedBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {

@@ -890,6 +890,10 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	return n, nil
 }
 
+func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {
+	return storage.IsInternalBucket(bucket)
+}
+
 func (c *ClusterCoordinator) UploadPart(
 	ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader,
 ) (*storage.Part, error) {

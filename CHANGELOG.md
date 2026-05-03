@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.35.0] — 2026-05-03 — optimize NBD volume IO paths
+
+### Added
+
+- **cluster/NBD**: added cluster-mode NBD microbenchmarks for 4K and 64K writes, batched flushes, and 4K reads through the distributed backend.
+
+### Changed
+
+- **NBD**: 4K and 64K request buffers now reuse size-specific pools, reducing 64K read allocation pressure on the server hot path.
+- **volume**: internal volume reads can use backend-approved `ReadAt` directly into caller buffers, avoiding full-object reads for local and cluster internal buckets.
+- **storage**: cache and WAL wrappers now forward backend read/write IO preferences so fast paths survive wrapper composition.
+
+### Fixed
+
+- **NBD/local volume writes**: full-block internal writes now use the local partial-IO path instead of temp-file `PutObject` replacement, removing the per-block create/rename bottleneck.
+- **cluster safety**: full-block write fast paths are now opt-in, so distributed backends keep using the replicated Raft/commit path instead of bypassing cluster durability semantics.
+
+### Benchmarks
+
+- **local NBD**: 4K writes improved from ~3.50 ms/op to ~38.8 us/op, and 64K writes from ~10.32 ms/op to ~705 us/op in the final standalone benchmark run.
+- **cluster NBD**: added a repeatable baseline for cluster-mode NBD; the final standalone run measured 4K reads at ~24.7 us/op and 64K writes at ~2.69 ms/op.
+
 ## [0.0.34.0] — 2026-05-03 — make storage operations context-aware
 
 ### Added

@@ -106,6 +106,22 @@ func (b *Backend) ReadAt(ctx context.Context, bucket, key string, offset int64, 
 	return ra.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+func (b *Backend) PreferReadAt(bucket string) bool {
+	type readAtPreference interface {
+		PreferReadAt(bucket string) bool
+	}
+	pref, ok := b.Backend.(readAtPreference)
+	return ok && pref.PreferReadAt(bucket)
+}
+
+func (b *Backend) PreferWriteAt(bucket string) bool {
+	type writeAtPreference interface {
+		PreferWriteAt(bucket string) bool
+	}
+	pref, ok := b.Backend.(writeAtPreference)
+	return ok && pref.PreferWriteAt(bucket)
+}
+
 // Truncate is a pass-through for internal bucket size changes used by NFS
 // SETATTR. No WAL entry is written: internal buckets are ephemeral and not
 // subject to PITR replay.

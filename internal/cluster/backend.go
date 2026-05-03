@@ -1105,6 +1105,10 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	return f.ReadAt(buf, offset)
 }
 
+func (b *DistributedBackend) PreferReadAt(bucket string) bool {
+	return storage.IsInternalBucket(bucket)
+}
+
 // Truncate implements the internal-bucket fast path used by NFS SETATTR size.
 // It updates the fixed "current" object and metadata in place, avoiding the
 // full-object read/append/write fallback used by generic object stores.

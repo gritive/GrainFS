@@ -438,6 +438,10 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 	return f.ReadAt(buf, offset)
 }
 
+func (b *LocalBackend) PreferWriteAt(bucket string) bool {
+	return IsInternalBucket(bucket)
+}
+
 // Sync implements storage.Syncable.
 func (b *LocalBackend) Sync(bucket, key string) error {
 	objPath := b.objectPath(bucket, key)
