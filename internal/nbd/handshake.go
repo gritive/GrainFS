@@ -74,6 +74,10 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 
 		optType := binary.BigEndian.Uint32(optHdr[8:12])
 		optLen := binary.BigEndian.Uint32(optHdr[12:16])
+		if optLen > nbdMaxOptionPayloadSize {
+			_ = s.sendOptReply(conn, optType, nbdRepErrInvalid, nil)
+			return handshakeState{}, fmt.Errorf("option payload length %d exceeds max %d", optLen, nbdMaxOptionPayloadSize)
+		}
 
 		var optData []byte
 		if optLen > 0 {
@@ -116,6 +120,12 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 			}
 
 		case nbdOptSetMetaContext:
+			if !state.structuredReplies {
+				if err := s.sendOptReply(conn, optType, nbdRepErrInvalid, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
 			req, err := parseMetaContextRequest(optData)
 			if err != nil {
 				if err := s.sendOptReply(conn, optType, nbdRepErrInvalid, nil); err != nil {
@@ -135,11 +145,43 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 					state.metaContexts = append(state.metaContexts, nbdMetaContext{id: nbdMetaContextBaseAllocID, name: contextName})
 				}
 			}
+			for _, context := range state.metaContexts {
+				if err := s.sendMetaContextReply(conn, optType, context); err != nil {
+					return handshakeState{}, err
+				}
+			}
 			if err := s.sendOptReply(conn, optType, nbdRepAck, nil); err != nil {
 				return handshakeState{}, err
 			}
 
 		case nbdOptListMetaContext:
+			req, err := parseMetaContextRequest(optData)
+			if err != nil {
+				if err := s.sendOptReply(conn, optType, nbdRepErrInvalid, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			if req.name != s.volName {
+				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			if len(req.contexts) == 0 {
+				if err := s.sendMetaContextReply(conn, optType, nbdMetaContext{id: 0, name: "base:allocation"}); err != nil {
+					return handshakeState{}, err
+				}
+			} else {
+				for _, contextName := range req.contexts {
+					if contextName == "base:" || contextName == "base:allocation" {
+						if err := s.sendMetaContextReply(conn, optType, nbdMetaContext{id: 0, name: "base:allocation"}); err != nil {
+							return handshakeState{}, err
+						}
+						break
+					}
+				}
+			}
 			if err := s.sendOptReply(conn, optType, nbdRepAck, nil); err != nil {
 				return handshakeState{}, err
 			}
@@ -224,6 +266,9 @@ func parseMetaContextRequest(payload []byte) (metaContextRequest, error) {
 	pos := 4 + nameLen
 	count := int(binary.BigEndian.Uint32(payload[pos : pos+4]))
 	pos += 4
+	if count > (len(payload)-pos)/4 {
+		return metaContextRequest{}, fmt.Errorf("invalid meta context count: %d", count)
+	}
 	req := metaContextRequest{
 		name:     string(payload[4 : 4+nameLen]),
 		contexts: make([]string, 0, count),
@@ -294,6 +339,13 @@ func (s *Server) sendBlockSizeInfo(conn net.Conn, optType uint32) error {
 	binary.BigEndian.PutUint32(info[6:10], nbdPreferredBlockSize)
 	binary.BigEndian.PutUint32(info[10:14], nbdMaxPayloadSize)
 	return s.sendOptReply(conn, optType, nbdRepInfo, info)
+}
+
+func (s *Server) sendMetaContextReply(conn net.Conn, optType uint32, context nbdMetaContext) error {
+	data := make([]byte, 4+len(context.name))
+	binary.BigEndian.PutUint32(data[0:4], context.id)
+	copy(data[4:], context.name)
+	return s.sendOptReply(conn, optType, nbdRepMetaContext, data)
 }
 
 func (s *Server) handleOptList(conn net.Conn, optType uint32) error {

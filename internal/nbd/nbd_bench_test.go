@@ -110,7 +110,7 @@ func doStructuredHandshake(conn net.Conn, export string, meta bool) error {
 		if _, err := conn.Write(opt); err != nil {
 			return err
 		}
-		if err := drainOptionReply(conn); err != nil {
+		if err := drainOptionRepliesUntilAck(conn); err != nil {
 			return err
 		}
 	}
@@ -152,6 +152,25 @@ func drainOptionReply(conn net.Conn) error {
 		return err
 	}
 	return nil
+}
+
+func drainOptionRepliesUntilAck(conn net.Conn) error {
+	for {
+		hdr := make([]byte, 20)
+		if _, err := readFull(conn, hdr); err != nil {
+			return err
+		}
+		replyType := uint32(hdr[12])<<24 | uint32(hdr[13])<<16 | uint32(hdr[14])<<8 | uint32(hdr[15])
+		length := uint32(hdr[16])<<24 | uint32(hdr[17])<<16 | uint32(hdr[18])<<8 | uint32(hdr[19])
+		if length > 0 {
+			if _, err := readFull(conn, make([]byte, length)); err != nil {
+				return err
+			}
+		}
+		if replyType == nbdRepAck {
+			return nil
+		}
+	}
 }
 
 // sendRead sends an NBD read request and drains the reply (header + data).

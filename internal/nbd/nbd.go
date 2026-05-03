@@ -90,13 +90,14 @@ const (
 	nbdOptExtendedHeaders = uint32(11)
 
 	// Option reply types
-	nbdRepAck        = uint32(1)
-	nbdRepServer     = uint32(2)
-	nbdRepInfo       = uint32(3)
-	nbdRepErrUnsup   = uint32(1 | (1 << 31))
-	nbdRepErrInvalid = uint32(3 | (1 << 31))
-	nbdRepErrUnknown = uint32(6 | (1 << 31))
-	nbdOptReplyMagic = uint64(0x3e889045565a9)
+	nbdRepAck         = uint32(1)
+	nbdRepServer      = uint32(2)
+	nbdRepInfo        = uint32(3)
+	nbdRepMetaContext = uint32(4)
+	nbdRepErrUnsup    = uint32(1 | (1 << 31))
+	nbdRepErrInvalid  = uint32(3 | (1 << 31))
+	nbdRepErrUnknown  = uint32(6 | (1 << 31))
+	nbdOptReplyMagic  = uint64(0x3e889045565a9)
 
 	// Info types
 	nbdInfoExport    = uint16(0)
@@ -118,9 +119,10 @@ const (
 	nbdCmdFlagFastZero = uint16(1 << 4)
 
 	// Size constraints
-	nbdMinBlockSize       = uint32(1)
-	nbdPreferredBlockSize = uint32(volume.DefaultBlockSize)
-	nbdMaxPayloadSize     = uint32(32 * 1024 * 1024)
+	nbdMinBlockSize         = uint32(1)
+	nbdPreferredBlockSize   = uint32(volume.DefaultBlockSize)
+	nbdMaxPayloadSize       = uint32(32 * 1024 * 1024)
+	nbdMaxOptionPayloadSize = uint32(1024 * 1024)
 
 	// Structured and extended protocol values.
 	nbdStructuredReplyMagic   = uint32(0x668e33ef)
@@ -260,7 +262,13 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation, state 
 	}
 
 	if err := validateRequestSize(req); err != nil {
-		return s.sendErrorReply(conn, req.handle[:], nbdErrEINVAL, state)
+		if err := s.sendErrorReply(conn, req.handle[:], nbdErrEINVAL, state); err != nil {
+			return err
+		}
+		if req.typ == nbdCmdWrite {
+			return io.EOF
+		}
+		return nil
 	}
 
 	switch req.typ {

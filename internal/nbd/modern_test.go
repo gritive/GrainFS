@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -255,6 +256,10 @@ func setupBlockStatusNBD(t *testing.T) (net.Conn, *Server) {
 	writeEmptyOption(t, conn, nbdOptStructuredReply)
 	require.Equal(t, nbdRepAck, readOptionReply(t, conn).typ)
 	writeMetaContextOption(t, conn, nbdOptSetMetaContext, "nbd-test", []string{"base:allocation"})
+	meta := readOptionReply(t, conn)
+	require.Equal(t, nbdRepMetaContext, meta.typ)
+	require.Equal(t, nbdMetaContextBaseAllocID, binary.BigEndian.Uint32(meta.payload[0:4]))
+	require.Equal(t, "base:allocation", string(meta.payload[4:]))
 	require.Equal(t, nbdRepAck, readOptionReply(t, conn).typ)
 	writeOptExportName(t, conn, "nbd-test")
 	readExact(t, conn, 134)
@@ -321,11 +326,37 @@ func TestNBDOptInfoBlockSize(t *testing.T) {
 	require.Equal(t, nbdRepAck, ack.typ)
 }
 
+func TestNBDOptionRejectsOversizeBeforeAllocation(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	completeClientFlags(t, client, nbdFlagClientFixedNewstyle)
+
+	hdr := make([]byte, 16)
+	binary.BigEndian.PutUint64(hdr[0:8], nbdOptionMagic)
+	binary.BigEndian.PutUint32(hdr[8:12], nbdOptInfo)
+	binary.BigEndian.PutUint32(hdr[12:16], nbdMaxOptionPayloadSize+1)
+	_, err := client.Write(hdr)
+	require.NoError(t, err)
+
+	rep := readOptionReply(t, client)
+	require.Equal(t, nbdRepErrInvalid, rep.typ)
+}
+
 func TestNBDReadRejectsOversizeBeforeAllocation(t *testing.T) {
 	_, conn := setupNBD(t)
 	sendRawRequest(t, conn, nbdCmdRead, 0, uint64(nbdMaxPayloadSize)+1, nil, 0)
 	reply := readSimpleReply(t, conn)
 	require.Equal(t, nbdErrEINVAL, reply.errCode)
+}
+
+func TestNBDWriteRejectsOversizeAndCloses(t *testing.T) {
+	_, conn := setupNBD(t)
+	sendRawRequest(t, conn, nbdCmdWrite, 0, uint64(nbdMaxPayloadSize)+1, nil, 0)
+	reply := readSimpleReply(t, conn)
+	require.Equal(t, nbdErrEINVAL, reply.errCode)
+
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := io.ReadFull(conn, make([]byte, 1))
+	require.Error(t, err)
 }
 
 func TestNBDFlushOrdersWriteZeroesAndTrim(t *testing.T) {
@@ -381,6 +412,25 @@ func TestNBDBlockStatusConservativeAllocated(t *testing.T) {
 	require.Equal(t, uint32(1), binary.BigEndian.Uint32(chunk.payload[0:4]))
 	require.Equal(t, uint32(4096), binary.BigEndian.Uint32(chunk.payload[4:8]))
 	require.Equal(t, uint32(0), binary.BigEndian.Uint32(chunk.payload[8:12]))
+}
+
+func TestNBDSetMetaContextRequiresStructuredReply(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	completeClientFlags(t, client, nbdFlagClientFixedNewstyle)
+	writeMetaContextOption(t, client, nbdOptSetMetaContext, "nbd-test", []string{"base:allocation"})
+	rep := readOptionReply(t, client)
+	require.Equal(t, nbdRepErrInvalid, rep.typ)
+}
+
+func TestNBDListMetaContextWithZeroQueriesReturnsBaseAllocation(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	completeClientFlags(t, client, nbdFlagClientFixedNewstyle)
+	writeMetaContextOption(t, client, nbdOptListMetaContext, "nbd-test", nil)
+	meta := readOptionReply(t, client)
+	require.Equal(t, nbdRepMetaContext, meta.typ)
+	require.Equal(t, uint32(0), binary.BigEndian.Uint32(meta.payload[0:4]))
+	require.Equal(t, "base:allocation", string(meta.payload[4:]))
+	require.Equal(t, nbdRepAck, readOptionReply(t, client).typ)
 }
 
 func TestNBDExtendedHeadersUnsupportedByDefault(t *testing.T) {
