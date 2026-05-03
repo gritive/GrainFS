@@ -26,6 +26,12 @@ const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 // that should not be reaching the routing path).
 var ErrCoordinatorNoRouter = errors.New("coordinator: router not configured")
 
+// ErrForwardBodySizeMismatch is returned when a forwarded data-plane reply
+// reports success but the returned metadata size does not match the body bytes
+// that crossed the wire. Treating this as success can commit an empty object
+// during transient bootstrap races and make e2e retries impossible.
+var ErrForwardBodySizeMismatch = errors.New("coordinator: forwarded body size mismatch")
+
 // ClusterCoordinator implements storage.Backend by routing bucket-scoped ops
 // to the per-group raft leader and delegating cluster-wide ops to the base
 // (meta-FSM-backed) backend.
@@ -401,6 +407,9 @@ func (c *ClusterCoordinator) GetObject(bucket, key string) (io.ReadCloser, *stor
 	// caller-owned slice before wrapping. obj already deep-copies via accessors.
 	bodyCopy := make([]byte, len(body))
 	copy(bodyCopy, body)
+	if obj.Size != int64(len(bodyCopy)) {
+		return nil, nil, ErrForwardBodySizeMismatch
+	}
 	return io.NopCloser(bytes.NewReader(bodyCopy)), obj, nil
 }
 
@@ -629,7 +638,7 @@ func (c *ClusterCoordinator) PutObject(
 		return nil, ErrCoordinatorNoRouter
 	}
 
-	if c.forward.streamDialer != nil {
+	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
 		args := buildPutObjectArgs(bucket, key, contentType, nil)
 		ctx := context.TODO()
 		peers := c.forward.ResolveLeaderPeers(ctx, target.peers, target.groupID, bucket, key)
@@ -652,7 +661,14 @@ func (c *ClusterCoordinator) PutObject(
 	if err != nil {
 		return nil, err
 	}
-	return objectFromReply(reply)
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	if obj.Size != int64(len(body)) {
+		return nil, ErrForwardBodySizeMismatch
+	}
+	return obj, nil
 }
 
 func (c *ClusterCoordinator) UploadPart(
@@ -671,7 +687,7 @@ func (c *ClusterCoordinator) UploadPart(
 		return nil, ErrCoordinatorNoRouter
 	}
 
-	if c.forward.streamDialer != nil {
+	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
 		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
 		ctx := context.TODO()
 		peers := c.forward.ResolveLeaderPeers(ctx, target.peers, target.groupID, bucket, key)
@@ -694,7 +710,33 @@ func (c *ClusterCoordinator) UploadPart(
 	if err != nil {
 		return nil, err
 	}
-	return partFromReply(reply)
+	part, err := partFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	if part.Size != int64(len(body)) {
+		return nil, ErrForwardBodySizeMismatch
+	}
+	return part, nil
+}
+
+func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return true
+	}
+	cur, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return true
+	}
+	end, err := seeker.Seek(0, io.SeekEnd)
+	if _, seekErr := seeker.Seek(cur, io.SeekStart); err == nil && seekErr != nil {
+		err = seekErr
+	}
+	if err != nil {
+		return true
+	}
+	return end-cur > maxBody
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(bucket, key, uploadID string) error {

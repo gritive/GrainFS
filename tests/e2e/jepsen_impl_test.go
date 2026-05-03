@@ -32,11 +32,14 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
-	defer cmd.Process.Kill()
+	defer terminateProcess(cmd)
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 10*time.Second)
@@ -50,6 +53,7 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 		Bucket: aws.String("jepsen-test"),
 	})
 	require.NoError(t, err)
+	waitForS3Write(t, client, "jepsen-test", "__grainfs_e2e_ready", 30*time.Second)
 
 	// Run Jepsen test: 10 clients, 100 ops each
 	t.Log("Starting concurrent writes with 10 clients...")

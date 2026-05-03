@@ -558,6 +558,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	allNodes := append([]string{raftAddr}, peers...)
 	distBackend.SetShardService(shardSvc, allNodes)
 
+	// EC shard cache (Phase 2 #3 follow-up). Construct it before any per-group
+	// backend can be instantiated so group-1..N receive the same cache wiring
+	// as the legacy group-0 backend.
+	shardCacheSize, _ := cmd.Flags().GetInt64("shard-cache-size")
+	shardCache := shardcache.New(shardCacheSize)
+	distBackend.SetShardCache(shardCache)
+	log.Info().Int64("bytes", shardCacheSize).Msg("ec shard cache configured")
+
 	// Live multi-raft sharding (v0.0.7.0): group-0 keeps using the shared
 	// distBackend (legacy single-backend deployment is the group-0 instance);
 	// groups 1..N-1 get their own per-group BadgerDB+raft via instantiateLocalGroup
@@ -686,6 +694,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err != nil {
 			log.Fatal().Err(err).Str("group_id", entry.ID).Msg("instantiateLocalGroup failed — voter status fatal")
 		}
+		gb.SetShardCache(shardCache)
 		groupRaftMux.Register(entry.ID, gb.RaftNode())
 		dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
 		go gb.RunApplyLoop(stopApply)
@@ -748,16 +757,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	vfsFixed, _ := cmd.Flags().GetBool("backend-vfs-fixed-version")
 	distBackend.SetVFSFixedVersionEnabled(vfsFixed)
 	log.Info().Bool("enabled", vfsFixed).Msg("VFS bucket fixed-versionID configured")
-
-	// EC shard cache (Phase 2 #3 follow-up). Multi-node measurement on
-	// PR #71 showed 90% hit rate on large object repeated GET — the cache
-	// pays for itself any time the same large object is read more than
-	// once before its shards age out. Disabled when --shard-cache-size=0
-	// (used by --measure-read-amp baselines).
-	shardCacheSize, _ := cmd.Flags().GetInt64("shard-cache-size")
-	shardCache := shardcache.New(shardCacheSize)
-	distBackend.SetShardCache(shardCache)
-	log.Info().Int64("bytes", shardCacheSize).Msg("ec shard cache configured")
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)

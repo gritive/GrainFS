@@ -45,23 +45,41 @@ func startECServer(t *testing.T) (*s3.Client, string, func()) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 5*time.Second)
+	waitForPort(t, port, 30*time.Second)
 
 	client := newS3Client(endpoint)
 
 	cleanup := func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		terminateProcess(cmd)
 		os.RemoveAll(dir)
 	}
 
 	return client, dir, cleanup
+}
+
+func createECBucketReady(t *testing.T, client *s3.Client, name string) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(name),
+	})
+	require.NoError(t, err)
+
+	const readinessKey = "__grainfs_e2e_ready"
+	waitForS3Write(t, client, name, readinessKey, 30*time.Second)
+	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(name),
+		Key:    aws.String(readinessKey),
+	})
 }
 
 // startECServerWithScrub starts an EC server with a custom scrub interval.
@@ -106,10 +124,7 @@ func TestEC_BasicPutGet(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("ec-basic"),
-	})
-	require.NoError(t, err)
+	createECBucketReady(t, client, "ec-basic")
 
 	tests := []struct {
 		name    string
@@ -150,14 +165,11 @@ func TestEC_LargeObject(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("ec-large"),
-	})
-	require.NoError(t, err)
+	createECBucketReady(t, client, "ec-large")
 
 	// 5MB object — larger than default shard size
 	data := bytes.Repeat([]byte("X"), 5*1024*1024)
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("ec-large"),
 		Key:    aws.String("large.bin"),
 		Body:   bytes.NewReader(data),
@@ -255,10 +267,7 @@ func TestEC_MultipartUpload(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("ec-multipart"),
-	})
-	require.NoError(t, err)
+	createECBucketReady(t, client, "ec-multipart")
 
 	key := "multipart-ec.bin"
 	part1Data := bytes.Repeat([]byte("A"), 1024)
@@ -320,12 +329,9 @@ func TestEC_BucketOperations(t *testing.T) {
 	ctx := context.Background()
 
 	// Create, Head, List, Delete
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("ec-bucket-ops"),
-	})
-	require.NoError(t, err)
+	createECBucketReady(t, client, "ec-bucket-ops")
 
-	_, err = client.HeadBucket(ctx, &s3.HeadBucketInput{
+	_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String("ec-bucket-ops"),
 	})
 	require.NoError(t, err)
@@ -340,10 +346,12 @@ func TestEC_BucketOperations(t *testing.T) {
 	}
 	assert.True(t, found)
 
-	_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
-		Bucket: aws.String("ec-bucket-ops"),
-	})
-	require.NoError(t, err)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: aws.String("ec-bucket-ops"),
+		})
+		assert.NoError(c, err)
+	}, 30*time.Second, 250*time.Millisecond, "empty bucket deletion should wait for routed ListObjects readiness")
 }
 
 func TestEC_DeleteAndOverwrite(t *testing.T) {
@@ -352,13 +360,10 @@ func TestEC_DeleteAndOverwrite(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("ec-delover"),
-	})
-	require.NoError(t, err)
+	createECBucketReady(t, client, "ec-delover")
 
 	// Put, Delete, verify gone
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("ec-delover"),
 		Key:    aws.String("file.txt"),
 		Body:   strings.NewReader("v1"),

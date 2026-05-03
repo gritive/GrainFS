@@ -312,13 +312,20 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 	// Handle aws-chunked Content-Encoding (used by AWS SDKs for streaming uploads)
 	contentEncoding := string(c.GetHeader("Content-Encoding"))
 	contentSHA := string(c.GetHeader("X-Amz-Content-Sha256"))
-	if contentEncoding == "aws-chunked" || contentSHA == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
+	isAWSChunked := contentEncoding == "aws-chunked" || contentSHA == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+	if isAWSChunked {
 		decoded, err := s3auth.DecodeAWSChunkedBody(rawBody)
 		if err != nil {
 			c.AbortWithMsg(fmt.Sprintf("invalid aws-chunked encoding: %v", err), 400)
 			return
 		}
 		rawBody = decoded
+	} else if expected := c.Request.Header.ContentLength(); expected >= 0 && expected != len(rawBody) {
+		c.AbortWithMsg(
+			fmt.Sprintf("request body size mismatch: content-length=%d actual=%d", expected, len(rawBody)),
+			400,
+		)
+		return
 	}
 
 	body := bytes.NewReader(rawBody)

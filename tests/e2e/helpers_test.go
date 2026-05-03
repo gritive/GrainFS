@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,8 +21,9 @@ import (
 )
 
 var (
-	testServerURL string
-	testS3Client  *s3.Client
+	testServerURL  string
+	testS3Client   *s3.Client
+	freePortCursor uint32 = uint32(time.Now().UnixNano() % 20000)
 )
 
 func TestMain(m *testing.M) {
@@ -39,7 +42,10 @@ func TestMain(m *testing.M) {
 
 	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort())}
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0"}
 
 	// GRAINFS_DEDUP=1 opts into dedup. Default is OFF for the e2e suite because
 	// dedup + snapshots is not implemented in Phase A — CoW E2E tests would
@@ -64,7 +70,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "start server: %v\n", err)
 		os.Exit(1)
 	}
-	defer cmd.Process.Kill()
+	defer terminateProcess(cmd)
 
 	testServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPortM(port, 30*time.Second)
@@ -94,7 +100,7 @@ func TestMain(m *testing.M) {
 		dumpE2EProfiles(pprofPort)
 	}
 
-	cmd.Process.Kill()
+	terminateProcess(cmd)
 	os.Exit(code)
 }
 
@@ -153,13 +159,39 @@ func newS3Client(endpoint string) *s3.Client {
 }
 
 func freePort() int {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		panic(fmt.Sprintf("cannot allocate free port: %v", err))
+	// Avoid the OS ephemeral range for listeners. The cluster e2e tests open
+	// many outbound UDP/QUIC sockets; using :0 for a future UDP listener can
+	// race with an ephemeral source port after the probe socket is closed.
+	for i := 0; i < 25000; i++ {
+		port := 20000 + int(atomic.AddUint32(&freePortCursor, 1)%25000)
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		udp, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			_ = udp.Close()
+			_ = l.Close()
+			return port
+		}
+		_ = l.Close()
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port
+
+	for i := 0; i < 100; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			panic(fmt.Sprintf("cannot allocate free port: %v", err))
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		udp, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			_ = udp.Close()
+			_ = l.Close()
+			return port
+		}
+		_ = l.Close()
+	}
+	panic("cannot allocate port available for both tcp and udp")
 }
 
 func uniqueFreePorts(n int) []int {
@@ -299,6 +331,100 @@ func waitForPortM(port int, timeout time.Duration) {
 	}
 	fmt.Fprintf(os.Stderr, "server did not start on port %d within %v\n", port, timeout)
 	os.Exit(1)
+}
+
+func waitForS3Write(t testing.TB, client *s3.Client, bucket, key string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("ready"),
+		})
+		cancel()
+		if err == nil {
+			return
+		}
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("bucket %s did not become writable within %v: %v", bucket, timeout, lastErr)
+}
+
+func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "grainfs-e2e-isolated-*")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	port := freePort()
+	cmd := exec.Command(getBinary(), "serve",
+		"--data", dir,
+		"--port", fmt.Sprintf("%d", port),
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
+		"--dedup=false",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start isolated server: %v", err)
+	}
+	t.Cleanup(func() { terminateProcess(cmd) })
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+	waitForPort(t, port, 30*time.Second)
+	return url, newS3Client(url)
+}
+
+func createBucketWithClient(t testing.TB, client *s3.Client, name string) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(name),
+	})
+	if err != nil {
+		t.Fatalf("create bucket %s: %v", name, err)
+	}
+	const readinessKey = "__grainfs_e2e_ready"
+	waitForS3Write(t, client, name, readinessKey, 30*time.Second)
+	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(name),
+		Key:    aws.String(readinessKey),
+	})
+
+	t.Cleanup(func() {
+		out, _ := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket: aws.String(name),
+		})
+		if out != nil {
+			for _, obj := range out.Contents {
+				_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+					Bucket: aws.String(name),
+					Key:    obj.Key,
+				})
+			}
+		}
+		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: aws.String(name),
+		})
+	})
+}
+
+func terminateProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil || cmd.ProcessState != nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
 }
 
 // createBucket creates a bucket for testing and returns a cleanup function.

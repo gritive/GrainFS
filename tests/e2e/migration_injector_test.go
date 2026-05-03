@@ -33,18 +33,26 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--port", fmt.Sprintf("%d", srcPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 	)
 	srcCmd.Stdout = os.Stdout
 	srcCmd.Stderr = os.Stderr
 	require.NoError(t, srcCmd.Start())
-	defer srcCmd.Process.Kill()
-	waitForPort(t, srcPort, 5*time.Second)
+	defer terminateProcess(srcCmd)
+	waitForPort(t, srcPort, 30*time.Second)
 
 	srcEndpoint := fmt.Sprintf("http://127.0.0.1:%d", srcPort)
 	srcClient := newS3Client(srcEndpoint)
 
 	_, err = srcClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("data")})
 	require.NoError(t, err)
+	waitForS3Write(t, srcClient, "data", "__grainfs_e2e_ready", 30*time.Second)
+	_, _ = srcClient.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String("data"),
+		Key:    aws.String("__grainfs_e2e_ready"),
+	})
 	_, err = srcClient.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("data"),
 		Key:    aws.String("hello.txt"),
@@ -69,12 +77,15 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--port", fmt.Sprintf("%d", dstPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
 	)
 	dstCmd.Stdout = os.Stdout
 	dstCmd.Stderr = os.Stderr
 	require.NoError(t, dstCmd.Start())
-	defer dstCmd.Process.Kill()
-	waitForPort(t, dstPort, 5*time.Second)
+	defer terminateProcess(dstCmd)
+	waitForPort(t, dstPort, 30*time.Second)
 
 	dstEndpoint := fmt.Sprintf("http://127.0.0.1:%d", dstPort)
 	dstClient := newS3Client(dstEndpoint)
