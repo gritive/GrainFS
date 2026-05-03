@@ -1,6 +1,7 @@
 package nbd
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 	"net"
@@ -318,4 +319,26 @@ func TestNBDOptInfoBlockSize(t *testing.T) {
 	require.Equal(t, uint32(nbdMaxPayloadSize), binary.BigEndian.Uint32(info[10:14]))
 	ack := readOptionReply(t, client)
 	require.Equal(t, nbdRepAck, ack.typ)
+}
+
+func TestNBDReadRejectsOversizeBeforeAllocation(t *testing.T) {
+	_, conn := setupNBD(t)
+	sendRawRequest(t, conn, nbdCmdRead, 0, uint64(nbdMaxPayloadSize)+1, nil, 0)
+	reply := readSimpleReply(t, conn)
+	require.Equal(t, nbdErrEINVAL, reply.errCode)
+}
+
+func TestNBDFlushOrdersWriteZeroesAndTrim(t *testing.T) {
+	_, conn := setupNBD(t)
+	sendWriteConn(t, conn, 0, bytes.Repeat([]byte{0xaa}, 8192))
+
+	sendWriteZeroesConn(t, conn, 0, 4096, 0)
+	require.Equal(t, uint32(0), readSimpleReply(t, conn).errCode)
+
+	sendTrimConn(t, conn, 4096, 4096)
+	require.Equal(t, uint32(0), readSimpleReply(t, conn).errCode)
+
+	sendFlushConn(t, conn)
+	got := sendReadConn(t, conn, 0, 8192)
+	require.Equal(t, make([]byte, 8192), got)
 }

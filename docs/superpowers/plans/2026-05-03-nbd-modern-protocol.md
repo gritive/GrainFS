@@ -333,7 +333,7 @@ git commit -m "feat: support nbd opt info and size constraints"
 - Modify: `internal/nbd/nbd.go`
 - Modify: `internal/nbd/modern_test.go`
 
-- [ ] **Step 1: Write failing size and ordering tests**
+- [x] **Step 1: Write failing size and ordering tests**
 
 Add tests:
 
@@ -356,7 +356,7 @@ func TestNBDFlushOrdersWriteZeroesAndTrim(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests and confirm failure**
+- [x] **Step 2: Run tests and confirm failure**
 
 Run:
 
@@ -366,7 +366,7 @@ go test ./internal/nbd -run 'TestNBDReadRejectsOversizeBeforeAllocation|TestNBDF
 
 Expected: FAIL because oversize validation and `WRITE_ZEROES` are absent.
 
-- [ ] **Step 3: Implement request parsing and pending mutation**
+- [x] **Step 3: Implement request parsing and pending mutation**
 
 Create:
 
@@ -387,7 +387,7 @@ type pendingMutation struct {
 
 Replace `pendingWrite` with `pendingMutation`. Validate `length <= nbdMaxPayloadSize` before calling `getBuf` or volume operations. Keep `TRIM` synchronous for now but treat it as a write-like command in tests.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run:
 
@@ -397,7 +397,7 @@ go test ./internal/nbd -run 'TestNBD.*(Oversize|Flush|WriteRead|Trim|Zeroes)' -c
 
 Expected: PASS for implemented tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/nbd/request.go internal/nbd/nbd.go internal/nbd/modern_test.go

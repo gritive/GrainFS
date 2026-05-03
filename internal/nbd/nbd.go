@@ -24,16 +24,16 @@ type ReadIndexer interface {
 	WaitApplied(ctx context.Context, index uint64) error
 }
 
-// pendingWrite pairs a block key with its deferred Raft commit function.
+// pendingMutation pairs a block key with its deferred Raft commit function.
 // key = offset (exact write-start address), used to group writes to the same block.
-type pendingWrite struct {
+type pendingMutation struct {
 	key uint64
 	fn  func() error
 }
 
 // flushPending runs deferred Raft commits concurrently across distinct block keys
 // but sequentially within each key, preserving per-block write ordering.
-func flushPending(pending []pendingWrite) error {
+func flushPending(pending []pendingMutation) error {
 	groups := make(map[uint64][]func() error, len(pending))
 	for _, pw := range pending {
 		groups[pw.key] = append(groups[pw.key], pw.fn)
@@ -220,7 +220,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	// Command loop — pending accumulates deferred Raft commits for write-back.
-	var pending []pendingWrite
+	var pending []pendingMutation
 	for {
 		if err := s.handleRequest(conn, &pending); err != nil {
 			// Drain remaining deferred commits on disconnect so write-back
@@ -252,24 +252,17 @@ func (s *Server) putBuf(buf []byte) {
 	}
 }
 
-func (s *Server) handleRequest(conn net.Conn, pending *[]pendingWrite) error {
-	var hdr [28]byte
-	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation) error {
+	req, err := readNBDRequest(conn)
+	if err != nil {
 		return err
 	}
 
-	magic := binary.BigEndian.Uint32(hdr[0:4])
-	if magic != nbdRequestMagic {
-		return fmt.Errorf("bad request magic: %x", magic)
+	if err := validateRequestSize(req); err != nil {
+		return s.sendReply(conn, req.handle[:], nbdErrEINVAL, nil)
 	}
 
-	// Standard NBD request: magic(4) + flags(2) + type(2) + handle(8) + offset(8) + length(4)
-	cmdType := uint32(binary.BigEndian.Uint16(hdr[6:8]))
-	handle := hdr[8:16]
-	offset := binary.BigEndian.Uint64(hdr[16:24])
-	length := binary.BigEndian.Uint32(hdr[24:28])
-
-	switch cmdType {
+	switch req.typ {
 	case nbdCmdRead:
 		if ri := s.readIndexer; ri != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -281,28 +274,34 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingWrite) error {
 				cancel2()
 			}
 			if err != nil {
-				return s.sendReply(conn, handle, 1, nil) // EIO
+				return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 			}
 		}
-		buf := s.getBuf(length)
-		_, _ = s.mgr.ReadAt(s.volName, buf, int64(offset))
-		err := s.sendReply(conn, handle, 0, buf)
+		buf := s.getBuf(uint32(req.length))
+		if _, err := s.mgr.ReadAt(s.volName, buf, int64(req.offset)); err != nil && err != io.EOF {
+			s.putBuf(buf)
+			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
+		}
+		err := s.sendReply(conn, req.handle[:], 0, buf)
 		s.putBuf(buf)
 		return err
 
 	case nbdCmdWrite:
-		buf := s.getBuf(length)
+		buf := s.getBuf(uint32(req.length))
 		if _, err := io.ReadFull(conn, buf); err != nil {
 			s.putBuf(buf)
 			return fmt.Errorf("read write data: %w", err)
 		}
 		// Write-back: ack after local disk write; Raft commit deferred to flush.
-		commits, _, _ := s.mgr.WriteAtDeferred(s.volName, buf, int64(offset))
+		commits, _, err := s.mgr.WriteAtDeferred(s.volName, buf, int64(req.offset))
 		s.putBuf(buf)
-		for _, fn := range commits {
-			*pending = append(*pending, pendingWrite{key: offset, fn: fn})
+		if err != nil {
+			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 		}
-		return s.sendReply(conn, handle, 0, nil)
+		for _, fn := range commits {
+			*pending = append(*pending, pendingMutation{key: req.offset, fn: fn})
+		}
+		return s.sendReply(conn, req.handle[:], 0, nil)
 
 	case nbdCmdDisc:
 		return io.EOF
@@ -310,20 +309,59 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingWrite) error {
 	case nbdCmdFlush:
 		if err := flushPending(*pending); err != nil {
 			*pending = (*pending)[:0]
-			return s.sendReply(conn, handle, 5, nil) // EIO
+			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 		}
 		*pending = (*pending)[:0]
-		return s.sendReply(conn, handle, 0, nil)
+		return s.sendReply(conn, req.handle[:], 0, nil)
 
 	case nbdCmdTrim:
-		if err := s.mgr.Discard(s.volName, int64(offset), int64(length)); err != nil {
-			return s.sendReply(conn, handle, 5, nil) // EIO
+		if err := flushPending(*pending); err != nil {
+			*pending = (*pending)[:0]
+			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 		}
-		return s.sendReply(conn, handle, 0, nil)
+		*pending = (*pending)[:0]
+		if err := s.mgr.Discard(s.volName, int64(req.offset), int64(req.length)); err != nil {
+			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
+		}
+		return s.sendReply(conn, req.handle[:], 0, nil)
+
+	case nbdCmdWriteZeroes:
+		if req.flags&nbdCmdFlagFastZero != 0 || req.flags&^nbdCmdFlagNoHole != 0 {
+			return s.sendReply(conn, req.handle[:], nbdErrEINVAL, nil)
+		}
+		if err := s.writeZeroes(req.offset, uint32(req.length), pending); err != nil {
+			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
+		}
+		return s.sendReply(conn, req.handle[:], 0, nil)
 
 	default:
-		return s.sendReply(conn, handle, 22, nil) // EINVAL
+		return s.sendReply(conn, req.handle[:], nbdErrEINVAL, nil)
 	}
+}
+
+func (s *Server) writeZeroes(offset uint64, length uint32, pending *[]pendingMutation) error {
+	if length == 0 {
+		return nil
+	}
+	zeroes := s.getBuf(nbdPoolBufSize)
+	clear(zeroes)
+	defer s.putBuf(zeroes)
+
+	remaining := length
+	pos := offset
+	for remaining > 0 {
+		n := min(remaining, uint32(len(zeroes)))
+		commits, _, err := s.mgr.WriteAtDeferred(s.volName, zeroes[:n], int64(pos))
+		if err != nil {
+			return err
+		}
+		for _, fn := range commits {
+			*pending = append(*pending, pendingMutation{key: pos, fn: fn})
+		}
+		remaining -= n
+		pos += uint64(n)
+	}
+	return nil
 }
 
 func (s *Server) sendReply(conn net.Conn, handle []byte, errCode uint32, data []byte) error {
