@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.27.0] — 2026-05-03 — organize benchmark suite coverage
+
+### Added
+
+- **benchmarks**: single-node and multi-node targets now cover S3 object, Iceberg REST Catalog table API, NFS, and NBD workloads with matching action sequences for comparable runs.
+- **benchmarks**: shared benchmark helpers now handle free ports, readiness waits, Colima checks, bucket/object readiness retries, pprof collection, and default-on encryption behavior.
+- **make**: added direct benchmark targets for cluster S3, Iceberg table API, NFS, and NBD runs.
+
+### Changed
+
+- **benchmarks**: k6 wrappers now expose ramp-up and ramp-down controls, disable request rate limits during local measurements, and keep encryption enabled unless `NO_ENCRYPTION=1` is explicitly set.
+- **benchmarks**: profile wrappers now collect pprof data from the writable target endpoint in clustered S3 and Iceberg runs.
+
+### Fixed
+
+- **serve**: `--rate-limit-*-rps 0` now truly disables per-IP and per-user request limiters, so benchmark scripts can measure storage behavior instead of limiter behavior.
+
+### Tests
+
+- **server**: added regression coverage for zero-RPS rate limit disabling at both limiter and server option levels.
+- **benchmarks**: validated shell syntax for benchmark wrappers and smoke-tested S3 plus Iceberg single-node and cluster benchmark paths.
+
 ## [0.0.26.0] — 2026-05-03 — stabilize full cluster e2e suite
 
 ### Fixed
