@@ -25,6 +25,22 @@ func TestRecord_DisabledIsNoOp(t *testing.T) {
 	}
 }
 
+func TestRecord_DisabledDoesNotInitializeTracker(t *testing.T) {
+	defer resetGlobalState()
+	Disable()
+
+	tr := New(t.Name(), 4)
+	if tr.entries != nil || tr.index != nil || tr.hits != nil || tr.misses != nil {
+		t.Fatalf("New should not initialize storage or counters while disabled")
+	}
+	if got := tr.Record("a"); got {
+		t.Fatalf("disabled tracker should never report hits, got %v", got)
+	}
+	if tr.entries != nil || tr.index != nil || tr.hits != nil || tr.misses != nil {
+		t.Fatalf("disabled Record should not initialize storage or counters")
+	}
+}
+
 func TestRecord_FirstSeenIsMiss(t *testing.T) {
 	defer resetGlobalState()
 	Enable()
