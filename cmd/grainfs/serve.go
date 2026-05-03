@@ -540,13 +540,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
 	}
 
-	// Start QUIC transport for inter-node communication. If the operator
-	// supplied a --cluster-key, use it (this covers both static-peers cluster
-	// mode and the dynamic-join seed node, which has no peers/join yet but
-	// will be joined by others). Otherwise generate an ephemeral cluster
-	// identity so true solo mode (no key, no peers, no join) preserves
-	// zero-config.
-	transportPSK := clusterKey
+	// Start QUIC transport for inter-node communication. Resolution order
+	// (rotation-spec D10):
+	//   1. keys.d/current.key wins over --cluster-key flag if both differ
+	//      (warn emitted; refuse-to-start path explicitly NOT used).
+	//   2. Disk only: use disk silently.
+	//   3. Flag only: use flag, mirror to keys.d/current.key on first boot.
+	//   4. Both empty + cluster mode: refused upstream by ValidateClusterKey.
+	//      Both empty + solo mode: generate ephemeral so zero-config holds.
+	resolvedKey, warn, err := resolveClusterKey(dataDir, clusterKey)
+	if err != nil {
+		return fmt.Errorf("resolve cluster key: %w", err)
+	}
+	if warn != "" {
+		log.Warn().Msg(warn)
+	}
+	transportPSK := resolvedKey
 	if transportPSK == "" {
 		ephemeral, err := generateEphemeralClusterKey()
 		if err != nil {
@@ -1638,6 +1647,37 @@ func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int
 			return 1 // N× 모드: EC 메타 없음
 		}
 		return k + m
+	}
+}
+
+// resolveClusterKey applies the bootstrap conflict resolution rules from
+// the cluster-key-rotation spec D10:
+//   - Disk wins over flag when both present and differ (warn emitted).
+//   - Disk only: use disk silently.
+//   - Flag only: use flag, mirror to disk on first boot.
+//   - Both empty: returns "" (caller decides solo ephemeral path).
+//
+// Returns (resolved, warning_message, error). Warning is non-empty when the
+// caller should log.Warn the operator about a mismatch.
+func resolveClusterKey(dataDir, flagKey string) (string, string, error) {
+	ks := transport.NewKeystore(dataDir)
+	diskKey, diskErr := ks.ReadCurrent()
+	hasDisk := diskErr == nil
+
+	switch {
+	case hasDisk && flagKey != "" && diskKey != flagKey:
+		warn := fmt.Sprintf("--cluster-key flag (%d chars) does not match keys.d/current.key (%d chars); disk wins. Reconcile via `cluster rotate-key` or update flag to match disk.", len(flagKey), len(diskKey))
+		return diskKey, warn, nil
+	case hasDisk:
+		return diskKey, "", nil
+	case flagKey != "":
+		// First boot — mirror to disk so subsequent restarts read from disk.
+		if err := ks.WriteCurrent(flagKey); err != nil {
+			return "", "", fmt.Errorf("mirror flag to keys.d: %w", err)
+		}
+		return flagKey, "", nil
+	default:
+		return "", "", nil
 	}
 }
 
