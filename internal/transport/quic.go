@@ -5,8 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"golang.org/x/crypto/hkdf"
 )
 
 // QUIC connection timeouts.
@@ -912,6 +916,10 @@ func (t *QUICTransport) Close() error {
 }
 
 // generateTLSConfig creates a self-signed TLS config for QUIC.
+//
+// Deprecated: superseded by deriveClusterIdentity + buildClient/ServerTLSConfig.
+// Kept temporarily until all callers migrate (Task A6 in
+// docs/superpowers/plans/2026-05-03-cluster-trust-and-nfs-input-validation-plan.md).
 func generateTLSConfig() (*tls.Config, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -945,4 +953,99 @@ func generateTLSConfig() (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 	}, nil
+}
+
+// deriveClusterIdentity deterministically derives an ECDSA P-256 keypair from
+// psk via HKDF, then issues a self-signed certificate. The keypair (and
+// therefore the SPKI hash) is stable for a given PSK; the certificate
+// signature uses crypto/rand, so cert DER bytes vary per call. This avoids
+// feeding HKDF output into ECDSA signature nonce generation, which would
+// create a footgun if Go runtime semantics change across versions.
+//
+// Returns (cert, spki, err). spki is sha256(RawSubjectPublicKeyInfo).
+func deriveClusterIdentity(psk string) (tls.Certificate, [32]byte, error) {
+	if psk == "" {
+		return tls.Certificate{}, [32]byte{}, ErrEmptyClusterKey
+	}
+
+	// 1) Derive private scalar from psk via HKDF.
+	reader := hkdf.New(sha256.New, []byte(psk), nil, []byte("grainfs-cluster-identity-v1"))
+	priv, err := derivePrivKeyFromHKDF(reader, elliptic.P256())
+	if err != nil {
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("derive cluster keypair: %w", err)
+	}
+
+	// 2) Self-signed cert with crypto/rand for signature.
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "grainfs-cluster"},
+		NotBefore:    time.Unix(0, 0),
+		NotAfter:     time.Unix(0, 0).Add(100 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("create cluster cert: %w", err)
+	}
+
+	// 3) SPKI hash for pinning.
+	parsed, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("parse cluster cert: %w", err)
+	}
+	spki := sha256.Sum256(parsed.RawSubjectPublicKeyInfo)
+
+	return tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  priv,
+		Leaf:        parsed,
+	}, spki, nil
+}
+
+// derivePrivKeyFromHKDF reads scalar bytes from r, reduces modulo curve order N,
+// rejects zero. Re-reads on rejection (HKDF Expand can produce up to
+// 255*HashLen bytes for SHA-256, far more than enough for a few retries).
+func derivePrivKeyFromHKDF(r io.Reader, curve elliptic.Curve) (*ecdsa.PrivateKey, error) {
+	params := curve.Params()
+	N := params.N
+	byteLen := (N.BitLen() + 7) / 8
+	buf := make([]byte, byteLen)
+
+	for attempt := 0; attempt < 8; attempt++ {
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, fmt.Errorf("hkdf expand: %w", err)
+		}
+		k := new(big.Int).SetBytes(buf)
+		k.Mod(k, N)
+		if k.Sign() == 0 {
+			continue
+		}
+		priv := new(ecdsa.PrivateKey)
+		priv.PublicKey.Curve = curve
+		priv.D = k
+		priv.PublicKey.X, priv.PublicKey.Y = curve.ScalarBaseMult(k.Bytes())
+		return priv, nil
+	}
+	return nil, errors.New("hkdf produced 8 consecutive zero scalars (impossible without a broken PSK)")
+}
+
+// pinExpectedSPKI returns a VerifyPeerCertificate callback that accepts only
+// peers whose leaf cert SPKI hash matches `expected`. Used identically on both
+// sides (D5): client verifies server identity, server verifies client identity.
+// Constant-time compare avoids leaking SPKI through timing.
+func pinExpectedSPKI(expected [32]byte) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return errors.New("no peer cert presented")
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return fmt.Errorf("parse peer cert: %w", err)
+		}
+		spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		if subtle.ConstantTimeCompare(spki[:], expected[:]) != 1 {
+			return errors.New("peer cert SPKI does not match cluster identity")
+		}
+		return nil
+	}
 }
