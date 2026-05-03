@@ -355,8 +355,7 @@ ss -s
 # Install Docker
 # (platform-specific commands)
 
-# Use the published image, or build the same image locally from the repo root.
-docker pull ghcr.io/gritive/grainfs:latest
+# Build the image locally from the repo root.
 docker build -t grainfs:latest .
 ```
 
@@ -373,7 +372,7 @@ docker run -d \
   -v grainfs-data:/data \
   -e GRAINFS_ACCESS_KEY=<from-secrets-manager> \
   -e GRAINFS_SECRET_KEY=<from-secrets-manager> \
-  ghcr.io/gritive/grainfs:latest
+  grainfs:latest
 ```
 
 The image default command is `serve --data /data --port 9000 --nfs4-port 0 --nbd-port 0`.

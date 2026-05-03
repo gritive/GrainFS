@@ -6,17 +6,17 @@
 
 - **cluster**: follower-routed object reads now stream large `GET` and `GET ?versionId=...` responses from the bucket owner instead of buffering the full body into a capped forwarded reply.
 - **snapshot/PITR**: versioned bucket restore now preserves historical object versions and delete markers, so operators can recover the same version graph exposed by S3 versioning.
-- **distribution**: root Docker builds, release binaries, and GHCR image publishing now make the documented deployment path usable.
+- **distribution**: root Docker builds now make the documented container build path usable.
 
 ### Changed
 
 - **serve**: split storage, bootstrap, and observability helpers out of `cmd/grainfs/serve.go` so serve wiring is easier to review without changing runtime behavior.
-- **docs**: README and runbook now document release binaries, `ghcr.io/gritive/grainfs`, local Docker builds, and the S3-only non-root default container profile.
+- **docs**: README and runbook now document local Docker builds and the S3-only non-root default container profile.
 
 ### Fixed
 
 - **WAL/PITR**: delete operations now retain delete marker version IDs when available, and PITR replay deletes only the targeted object version for `DeleteObjectVersion`.
-- **release**: multi-arch container builds now use Docker target platform arguments and publish the lowercase GHCR image path with version, latest, and SHA tags.
+- **docker**: multi-arch container builds now use Docker target platform arguments, so local buildx runs produce the target OS/arch binary.
 
 ### Tests
 
