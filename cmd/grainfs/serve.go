@@ -644,6 +644,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		clusterRouter.AssignBucket(bucket, groupID)
 	})
 
+	// 클러스터 키 회전 — RotationWorker가 FSM phase 변경에 반응하여 디스크
+	// I/O와 transport identity swap을 수행 (D16 분리). 콜백은 metaRaft.Start
+	// 전에 등록해야 첫 apply 이벤트를 놓치지 않는다 (race-free).
+	rotationKeystore := transport.NewKeystore(dataDir)
+	rotationWorker := cluster.NewRotationWorker(rotationKeystore, quicTransport, nodeID)
+	metaRaft.FSM().SetOnRotationApplied(func(st cluster.RotationState) {
+		_ = rotationWorker.OnPhaseChange(st)
+	})
+	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can be
+	// validated against the current cluster key (D10).
+	if _, activeSPKI, err := transport.DeriveClusterIdentity(transportPSK); err == nil {
+		metaRaft.FSM().SetRotationSteady(activeSPKI)
+	} else {
+		log.Warn().Err(err).Msg("failed to seed rotation FSM steady state; rotation will be unavailable until next restart")
+	}
+
 	if !joinMode {
 		if err := metaRaft.Bootstrap(); err != nil {
 			return fmt.Errorf("meta-raft bootstrap: %w", err)
