@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/rs/zerolog/log"
@@ -36,6 +37,7 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
@@ -1231,14 +1233,33 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
 					objectKey, versionID = shardKey[:i], shardKey[i+1:]
 				}
+				correlationID := uuid.Must(uuid.NewV7()).String()
+				receiptID := "rcpt-" + correlationID
 				if err := gb.RepairShardLocalWithIncident(monitorCtx, cluster.IncidentRepairRequest{
-					Bucket:    bucket,
-					Key:       objectKey,
-					VersionID: versionID,
-					ShardIdx:  shardIdx,
-					Recorder:  incidentRecorder,
+					Bucket:         bucket,
+					Key:            objectKey,
+					VersionID:      versionID,
+					ShardIdx:       shardIdx,
+					Recorder:       incidentRecorder,
+					CorrelationID:  correlationID,
+					ProofReceiptID: receiptID,
 				}); err != nil {
 					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
+				} else if receiptWiring != nil && receiptWiring.store != nil && receiptWiring.keyStore != nil {
+					r := &receipt.HealReceipt{
+						ReceiptID:     receiptID,
+						Timestamp:     time.Now().UTC(),
+						Object:        receipt.ObjectRef{Bucket: bucket, Key: objectKey, VersionID: versionID},
+						ShardsLost:    []int32{int32(shardIdx)},
+						ShardsRebuilt: []int32{int32(shardIdx)},
+						EventIDs:      []string{correlationID},
+						CorrelationID: correlationID,
+					}
+					if err := receipt.Sign(r, receiptWiring.keyStore); err != nil {
+						log.Warn().Str("correlation_id", correlationID).Err(err).Msg("placement monitor receipt sign failed")
+					} else if err := receiptWiring.store.Put(r); err != nil {
+						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt store failed")
+					}
 				}
 			})
 			go placementMonitor.Start(monitorCtx)
