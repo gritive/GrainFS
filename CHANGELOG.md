@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.30.0] — 2026-05-03 — harden protocol contract gaps
+
+### Added
+
+- **cluster**: forwarded operations now cover object version reads, deletes, and version listing so S3 versioning keeps the same semantics when requests route to remote bucket owners.
+- **iceberg**: singleton-mode startup now migrates legacy Iceberg catalog rows into object-backed metadata and meta-Raft pointers before serving the REST catalog.
+- **cluster**: `grainfs cluster join` now performs the real meta-Raft join path instead of printing a placeholder message.
+
+### Fixed
+
+- **compatibility**: new FlatBuffers forward-reply fields are append-only, preserving existing reply field slots for rolling upgrades.
+- **iceberg**: legacy catalog migration treats both storage missing-bucket sentinels as an empty legacy catalog and remains idempotent after metadata objects already exist.
+
+### Tests
+
+- **cluster/iceberg**: added regressions for remote versioned forwarding, join CLI dispatch, legacy Iceberg export and migration, idempotent migration, and missing-bucket migration startup.
+
 ## [0.0.29.0] — 2026-05-03 — harden protocol layering over distributed object storage
 
 ### Added
