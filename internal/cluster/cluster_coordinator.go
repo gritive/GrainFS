@@ -320,7 +320,13 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 	if c.meta == nil {
 		return routeTarget{}, ErrUnknownGroup
 	}
-	entry, ok := c.meta.ShardGroup(dg.ID())
+	var entry ShardGroupEntry
+	var ok bool
+	if src, fast := c.meta.(shardGroupNoCopySource); fast {
+		entry, ok = src.shardGroupNoCopy(dg.ID())
+	} else {
+		entry, ok = c.meta.ShardGroup(dg.ID())
+	}
 	if !ok || len(entry.PeerIDs) == 0 {
 		return routeTarget{}, ErrUnknownGroup
 	}

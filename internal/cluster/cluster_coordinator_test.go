@@ -398,6 +398,33 @@ func TestClusterCoordinator_RouteBucket_LocalLeaderSkipsPeerResolution(t *testin
 	require.Zero(t, allocs, "local leader route should not allocate")
 }
 
+func TestClusterCoordinator_RouteBucket_MetaFSMLocalLeaderAvoidsShardGroupCopy(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-a", "self", "node-b"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"node-a", "self", "node-b"})))
+	c := NewClusterCoordinator(base, mgr, router, meta, "self")
+
+	target, err := c.routeBucket("photos")
+	require.NoError(t, err)
+	require.True(t, target.selfIsLeader)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		target, err := c.routeBucket("photos")
+		if err != nil {
+			t.Fatalf("routeBucket failed: %v", err)
+		}
+		if !target.selfIsLeader {
+			t.Fatalf("routeBucket lost local leader fast path")
+		}
+	})
+	require.Zero(t, allocs, "MetaFSM local leader route should not copy peer slices")
+}
+
 // --- T6 forward-path test scaffolding ---
 
 // recordingDialer captures every (peer, payload) pair the ForwardSender hands
