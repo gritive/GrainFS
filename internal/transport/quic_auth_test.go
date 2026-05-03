@@ -27,11 +27,11 @@ func TestPSKAlpn_Static(t *testing.T) {
 func TestDeriveClusterIdentity_SPKIDeterministic(t *testing.T) {
 	psk := strings.Repeat("a", 64)
 
-	cert1, spki1, err := deriveClusterIdentity(psk)
+	cert1, spki1, err := DeriveClusterIdentity(psk)
 	if err != nil {
 		t.Fatalf("first derive: %v", err)
 	}
-	cert2, spki2, err := deriveClusterIdentity(psk)
+	cert2, spki2, err := DeriveClusterIdentity(psk)
 	if err != nil {
 		t.Fatalf("second derive: %v", err)
 	}
@@ -61,11 +61,11 @@ func TestDeriveClusterIdentity_DifferentPSKDifferentSPKI(t *testing.T) {
 	pskA := strings.Repeat("a", 64)
 	pskB := strings.Repeat("b", 64)
 
-	_, spkiA, err := deriveClusterIdentity(pskA)
+	_, spkiA, err := DeriveClusterIdentity(pskA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, spkiB, err := deriveClusterIdentity(pskB)
+	_, spkiB, err := DeriveClusterIdentity(pskB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestDeriveClusterIdentity_DifferentPSKDifferentSPKI(t *testing.T) {
 }
 
 func TestDeriveClusterIdentity_RejectsEmpty(t *testing.T) {
-	_, _, err := deriveClusterIdentity("")
+	_, _, err := DeriveClusterIdentity("")
 	if err == nil || err != ErrEmptyClusterKey {
 		t.Fatalf("want ErrEmptyClusterKey, got %v", err)
 	}
@@ -110,7 +110,7 @@ func TestNewQUICTransport_CachesSPKI(t *testing.T) {
 	if spki1 != spki2 {
 		t.Fatal("expectedSPKI mutated unexpectedly")
 	}
-	_, want, _ := deriveClusterIdentity(psk)
+	_, want, _ := DeriveClusterIdentity(psk)
 	if spki1 != want {
 		t.Fatalf("cached SPKI %x != fresh derive %x", spki1, want)
 	}

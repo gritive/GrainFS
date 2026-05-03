@@ -15,6 +15,7 @@ import (
 	"io"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -167,6 +168,21 @@ func (r *StreamRouter) LookupRead(st StreamType) (StreamReadHandler, bool) {
 // does not interpret mux frames.
 type MuxConnHandler func(conn *quic.Conn)
 
+// IdentitySnapshot is the active TLS identity state of a QUICTransport.
+// During steady-state, AcceptSPKIs has one entry. During phases 2/3 of a
+// rolling cluster-key rotation (rotation-spec §5.3), the rotation worker
+// installs a snapshot with two entries (OLD + NEW) so peers presenting
+// either identity are accepted.
+//
+// Snapshots are immutable after Store; concurrent readers may hold the
+// pointer indefinitely. The transport reads the active snapshot per
+// handshake via QUICTransport.identity.Load().
+type IdentitySnapshot struct {
+	AcceptSPKIs [][32]byte      // 1 entry steady, 2 during rotation phase 2/3
+	PresentCert tls.Certificate // active cert this node presents
+	PresentSPKI [32]byte        // SHA256 of PresentCert.RawSubjectPublicKeyInfo
+}
+
 // QUICTransport implements Transport using QUIC for node-to-node communication.
 type QUICTransport struct {
 	mu            sync.RWMutex
@@ -185,9 +201,11 @@ type QUICTransport struct {
 	muxHandler    MuxConnHandler
 	traffic       *TrafficLimiter
 
-	// Cluster identity, computed once at construction. D7=A: stable for the
-	// life of the transport so handshakes don't pay HKDF/ECDSA cost per dial.
+	// Cluster identity at construction. Backward-compat fields retained for
+	// in-process tests that read these directly. New code reads from
+	// identity.Load() instead.
 	identityCert tls.Certificate
+	identity     atomic.Pointer[IdentitySnapshot] // rotation-spec D16: lock-free reload
 	expectedSPKI [32]byte
 }
 
@@ -200,7 +218,7 @@ func NewQUICTransport(psk string) (*QUICTransport, error) {
 		return nil, ErrEmptyClusterKey
 	}
 
-	cert, spki, err := deriveClusterIdentity(psk)
+	cert, spki, err := DeriveClusterIdentity(psk)
 	if err != nil {
 		return nil, fmt.Errorf("derive cluster identity: %w", err)
 	}
@@ -218,7 +236,21 @@ func NewQUICTransport(psk string) (*QUICTransport, error) {
 		identityCert: cert,
 		expectedSPKI: spki,
 	}
+	t.identity.Store(&IdentitySnapshot{
+		AcceptSPKIs: [][32]byte{spki},
+		PresentCert: cert,
+		PresentSPKI: spki,
+	})
 	return t, nil
+}
+
+// SwapIdentity atomically replaces the active identity snapshot. Called by
+// the rotation worker during phase transitions (rotation-spec §5.3 / D16).
+// snap must be non-nil and have at least one AcceptSPKIs entry; the caller
+// is responsible for that invariant. Snapshots are immutable after Store;
+// concurrent readers may hold the pointer indefinitely.
+func (t *QUICTransport) SwapIdentity(snap *IdentitySnapshot) {
+	t.identity.Store(snap)
 }
 
 // MustNewQUICTransport is NewQUICTransport that panics on error. Intended only
@@ -327,12 +359,14 @@ func (t *QUICTransport) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
-		// D5: verify the peer's TLS cert SPKI matches the cluster identity.
-		// quic-go does NOT reliably enforce tls.Config.ClientAuth on its own,
-		// so we re-check here at the application layer. tls.Config still sets
-		// ClientAuth to ensure the cert is requested; the actual gate is here.
+		// D5: verify the peer's TLS cert SPKI matches an accepted cluster
+		// identity. quic-go does NOT reliably enforce tls.Config.ClientAuth
+		// on its own, so we re-check here at the application layer. The
+		// snapshot may contain multiple accepted SPKIs during a rolling key
+		// rotation (rotation-spec phase 2/3).
 		state := conn.ConnectionState()
-		if err := verifyPeerSPKI(state.TLS.PeerCertificates, t.expectedSPKI); err != nil {
+		snap := t.identity.Load()
+		if err := verifyPeerSPKIs(state.TLS.PeerCertificates, snap.AcceptSPKIs); err != nil {
 			// Log details locally; send generic reason on the wire so an
 			// attacker can't distinguish "no auth set up" from "wrong key".
 			log.Warn().Err(err).Str("peer", conn.RemoteAddr().String()).Msg("peer cert rejected")
@@ -373,6 +407,44 @@ func verifyPeerSPKI(certs []*x509.Certificate, expected [32]byte) error {
 		return errors.New("peer cert SPKI does not match cluster identity")
 	}
 	return nil
+}
+
+// verifyPeerSPKIs is the multi-SPKI form used during rotation phases 2/3.
+// Accepts the peer if its leaf cert SPKI matches ANY entry in `accepted`.
+// Constant-time per entry; total cost O(n) for n accepted SPKIs (typically 1-2).
+func verifyPeerSPKIs(certs []*x509.Certificate, accepted [][32]byte) error {
+	if len(certs) == 0 {
+		return errors.New("no peer cert presented")
+	}
+	spki := sha256.Sum256(certs[0].RawSubjectPublicKeyInfo)
+	for _, a := range accepted {
+		if subtle.ConstantTimeCompare(spki[:], a[:]) == 1 {
+			return nil
+		}
+	}
+	return errors.New("peer cert SPKI does not match any accepted cluster identity")
+}
+
+// pinAnyAcceptedSPKI returns a VerifyPeerCertificate callback that accepts any
+// peer cert whose SPKI hash matches one of the accepted SPKIs. Closures over
+// the slice; callers should treat the slice as immutable after passing it in.
+func pinAnyAcceptedSPKI(accepted [][32]byte) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return errors.New("no peer cert presented")
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return fmt.Errorf("parse peer cert: %w", err)
+		}
+		spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		for _, a := range accepted {
+			if subtle.ConstantTimeCompare(spki[:], a[:]) == 1 {
+				return nil
+			}
+		}
+		return errors.New("peer cert SPKI does not match any accepted cluster identity")
+	}
 }
 
 // handleInboundConnection serves an accepted (inbound) QUIC connection.
@@ -976,7 +1048,9 @@ func (t *QUICTransport) Close() error {
 // create a footgun if Go runtime semantics change across versions.
 //
 // Returns (cert, spki, err). spki is sha256(RawSubjectPublicKeyInfo).
-func deriveClusterIdentity(psk string) (tls.Certificate, [32]byte, error) {
+// DeriveClusterIdentity is exported so internal/cluster/rotation_worker.go
+// can recompute SPKIs for FSM verification of operator-distributed key files.
+func DeriveClusterIdentity(psk string) (tls.Certificate, [32]byte, error) {
 	if psk == "" {
 		return tls.Certificate{}, [32]byte{}, ErrEmptyClusterKey
 	}
@@ -1077,28 +1151,31 @@ func pinExpectedSPKI(expected [32]byte) func([][]byte, [][]*x509.Certificate) er
 }
 
 // buildClientTLSConfig returns the TLS config used when this transport DIALS
-// a peer. The dialer presents the cluster identity cert (so the remote
-// server's ClientAuth: RequireAnyClientCert is satisfied) AND verifies the
-// server's cert SPKI matches the expected cluster identity.
+// a peer. The dialer presents the active cluster identity cert AND verifies
+// the server's cert SPKI matches one of the accepted cluster identities.
+// Reads the active snapshot from t.identity.Load() per call so rotation
+// phase transitions take effect on subsequent dials without restart.
 func (t *QUICTransport) buildClientTLSConfig() *tls.Config {
+	snap := t.identity.Load()
 	return &tls.Config{
 		InsecureSkipVerify:    true, // quic-go requires; real check is VerifyPeerCertificate
 		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
-		Certificates:          []tls.Certificate{t.identityCert},
-		VerifyPeerCertificate: pinExpectedSPKI(t.expectedSPKI),
+		Certificates:          []tls.Certificate{snap.PresentCert},
+		VerifyPeerCertificate: pinAnyAcceptedSPKI(snap.AcceptSPKIs),
 	}
 }
 
 // buildServerTLSConfig returns the TLS config used when this transport
 // LISTENS for incoming peers. ClientAuth: RequireAnyClientCert forces dialers
-// to present a cert; VerifyPeerCertificate then pins the cert SPKI to the
-// cluster identity. Without this pairing, server-side identity check is dead
-// code (D5 regression target).
+// to present a cert; VerifyPeerCertificate then pins the cert SPKI to one of
+// the accepted cluster identities. Without this pairing, server-side identity
+// check is dead code (D5 regression target).
 func (t *QUICTransport) buildServerTLSConfig() *tls.Config {
+	snap := t.identity.Load()
 	return &tls.Config{
-		Certificates:          []tls.Certificate{t.identityCert},
+		Certificates:          []tls.Certificate{snap.PresentCert},
 		ClientAuth:            tls.RequireAnyClientCert,
 		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
-		VerifyPeerCertificate: pinExpectedSPKI(t.expectedSPKI),
+		VerifyPeerCertificate: pinAnyAcceptedSPKI(snap.AcceptSPKIs),
 	}
 }
