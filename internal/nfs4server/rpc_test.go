@@ -93,6 +93,30 @@ func TestReadRPCFrame_AllocsBounded(t *testing.T) {
 	assert.LessOrEqual(t, allocs, 3.0, "readRPCFrame single fragment should allocate ≤3")
 }
 
+func TestReadRPCFrameInto_ReusesBuffer(t *testing.T) {
+	payload := []byte("hello rpc payload for buffer reuse")
+	var encoded bytes.Buffer
+	require.NoError(t, writeRPCFrame(&encoded, payload))
+	encodedBytes := encoded.Bytes()
+	reuse := make([]byte, len(payload))
+	var r bytes.Reader
+
+	allocs := testing.AllocsPerRun(100, func() {
+		r.Reset(encodedBytes)
+		got, err := readRPCFrameInto(&r, reuse)
+		if err != nil {
+			t.Fatalf("readRPCFrameInto returned error: %v", err)
+		}
+		if !bytes.Equal(payload, got) {
+			t.Fatalf("payload mismatch: got %q want %q", got, payload)
+		}
+		if &reuse[0] != &got[0] {
+			t.Fatal("readRPCFrameInto did not return the caller-provided buffer")
+		}
+	})
+	assert.LessOrEqual(t, allocs, 1.0, "readRPCFrameInto should reuse caller buffer")
+}
+
 func TestRPCFrame_MultiFragment(t *testing.T) {
 	frag1 := []byte("hello")
 	frag2 := []byte(" world")

@@ -17,7 +17,9 @@ type XDRWriter struct {
 	buf bytes.Buffer
 }
 
-const maxXDRWriterCap = 64 * 1024
+// maxXDRWriterCap keeps NFS READ replies reusable without retaining
+// arbitrarily large buffers in the global writer pool.
+const maxXDRWriterCap = 512 * 1024
 
 var xdrWriterPool = pool.New(func() *XDRWriter { return &XDRWriter{} })
 
@@ -26,12 +28,16 @@ func getXDRWriter() *XDRWriter {
 }
 
 func putXDRWriter(w *XDRWriter) {
+	w.resetForReuse()
+	xdrWriterPool.Put(w)
+}
+
+func (w *XDRWriter) resetForReuse() {
 	if w.buf.Cap() > maxXDRWriterCap {
 		w.buf = bytes.Buffer{}
 	} else {
 		w.buf.Reset()
 	}
-	xdrWriterPool.Put(w)
 }
 
 // xdrWriterBytes transfers ownership of w's backing buffer to the caller and
@@ -71,6 +77,10 @@ func (w *XDRWriter) WriteString(s string) {
 
 func (w *XDRWriter) Bytes() []byte {
 	return w.buf.Bytes()
+}
+
+func (w *XDRWriter) Grow(n int) {
+	w.buf.Grow(n)
 }
 
 // XDRReader reads XDR-encoded values.
@@ -745,16 +755,58 @@ const OpRenew = 30
 
 // encodeCompoundResponseInto writes a COMPOUND4res directly into w (zero extra allocation).
 func encodeCompoundResponseInto(w *XDRWriter, resp *CompoundResponse) {
+	w.Grow(compoundResponseEncodedSize(resp))
 	w.WriteUint32(uint32(resp.Status))
 	w.WriteString(resp.Tag)
 	w.WriteUint32(uint32(len(resp.Results)))
 	for _, result := range resp.Results {
 		w.WriteUint32(uint32(result.OpCode))
 		w.WriteUint32(uint32(result.Status))
-		if result.Data != nil {
-			w.buf.Write(result.Data)
-		}
+		result.writeEncodedDataTo(w)
 	}
+}
+
+func compoundResponseEncodedSize(resp *CompoundResponse) int {
+	n := 4 + opaqueEncodedSize(len(resp.Tag)) + 4
+	for _, result := range resp.Results {
+		n += 8 + result.encodedDataSize()
+	}
+	return n
+}
+
+func (r *OpResult) inlineReadData() bool {
+	return r.OpCode == OpRead && r.Status == NFS4_OK && r.readData != nil
+}
+
+func (r *OpResult) encodedDataSize() int {
+	if r.inlineReadData() {
+		return 4 + opaqueEncodedSize(len(r.readData))
+	}
+	return len(r.Data)
+}
+
+func (r *OpResult) writeEncodedDataTo(w *XDRWriter) {
+	if r.inlineReadData() {
+		w.WriteUint32(boolToUint32(r.readEOF))
+		w.WriteOpaque(r.readData)
+		return
+	}
+	if r.Data != nil {
+		w.buf.Write(r.Data)
+	}
+}
+
+func (r *OpResult) release() {
+	if r.readPoolSize > 0 {
+		opReadAtBufPool.Put(r.readData[:r.readPoolSize])
+	}
+	r.readData = nil
+	r.readEOF = false
+	r.readPoolSize = 0
+}
+
+func opaqueEncodedSize(n int) int {
+	return 4 + n + ((4 - n%4) % 4)
 }
 
 // EncodeCompoundResponse encodes a COMPOUND4res to XDR.

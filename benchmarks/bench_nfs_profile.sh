@@ -24,6 +24,7 @@ PPROF_PORT=$(bench_free_port)
 HOST_IP="192.168.5.2"   # macOS host IP as seen from Colima VM
 MNT="/mnt/grainfs-bench-nfs"
 NFS_VERS="${NFS_VERS:-4.0}"
+NFS_SERVER_WARMUP_SLEEP="${NFS_SERVER_WARMUP_SLEEP:-3}"
 
 PROFILE_DIR="benchmarks/profiles/nfs-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$PROFILE_DIR"
@@ -69,6 +70,8 @@ if ! bench_wait_http_ready "http://127.0.0.1:$HTTP_PORT/" "server" 50 0.2; then
   tail -20 /tmp/grainfs-nfs-bench.log >&2
   exit 1
 fi
+echo "  waiting ${NFS_SERVER_WARMUP_SLEEP}s for raft group leadership..."
+sleep "$NFS_SERVER_WARMUP_SLEEP"
 
 echo ""
 echo "=== mounting NFS inside Colima (vers=$NFS_VERS host=$HOST_IP port=$NFS4_PORT) ==="

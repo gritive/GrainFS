@@ -35,6 +35,14 @@ var compoundRespPool = pool.New(func() *CompoundResponse {
 	return &CompoundResponse{Results: make([]OpResult, 0, maxCompoundOps)}
 })
 
+func putCompoundResponse(resp *CompoundResponse) {
+	for i := range resp.Results {
+		resp.Results[i].release()
+	}
+	resp.Results = resp.Results[:0]
+	compoundRespPool.Put(resp)
+}
+
 var dispatcherPool = pool.New(func() *Dispatcher { return &Dispatcher{} })
 
 func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
@@ -157,9 +165,12 @@ type Op struct {
 }
 
 type OpResult struct {
-	OpCode int
-	Status int
-	Data   []byte
+	OpCode       int
+	Status       int
+	Data         []byte
+	readData     []byte
+	readEOF      bool
+	readPoolSize int
 }
 
 type CompoundRequest struct {
@@ -761,12 +772,9 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 			return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
 		}
 		eof := errors.Is(err, io.EOF) || n < int(count)
-		w := getXDRWriter()
-		w.WriteUint32(boolToUint32(eof))
-		w.WriteOpaque(buf[:n]) // WriteOpaque copies into XDR buf, pool is safe to reuse after
-		result := OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+		result := OpResult{OpCode: OpRead, Status: NFS4_OK, readData: buf[:n], readEOF: eof}
 		if pooled {
-			opReadAtBufPool.Put(buf[:nfsMaxReadBlock])
+			result.readPoolSize = nfsMaxReadBlock
 		}
 		return result
 	}
@@ -836,6 +844,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	eof := (offset + uint64(len(readData))) >= uint64(fileSize)
 
 	w := getXDRWriter()
+	w.Grow(4 + opaqueEncodedSize(len(readData)))
 	w.WriteUint32(boolToUint32(eof))
 	w.WriteOpaque(readData)
 

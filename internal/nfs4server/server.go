@@ -84,7 +84,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.logger.Debug().Str("remote", conn.RemoteAddr().String()).Msg("nfs4: new connection")
 
 	var frameBuf []byte
+	reply := &XDRWriter{}
 	for {
+		reply.resetForReuse()
 		frame, err := readRPCFrameInto(conn, frameBuf)
 		if err != nil {
 			return
@@ -97,7 +99,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			continue
 		}
 
-		w := getXDRWriter()
+		w := reply
 		w.WriteUint32(header.XID)
 		w.WriteUint32(rpcMsgReply)
 		w.WriteUint32(0)        // MSG_ACCEPTED
@@ -116,7 +118,6 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 
 		writeRPCFrame(conn, w.Bytes())
-		putXDRWriter(w)
 	}
 }
 
@@ -148,7 +149,7 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 	resp.Status = NFS4_OK
 	resp.Tag = ""
 	resp.Results = resp.Results[:0]
-	defer compoundRespPool.Put(resp)
+	defer putCompoundResponse(resp)
 
 	d.Dispatch(req, resp)
 
