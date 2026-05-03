@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.38.0] — 2026-05-04 — predict open FD exhaustion before outage
+
+### Added
+
+- **open FD predictive warnings**: GrainFS now samples process file descriptor usage, projects warning/critical threshold arrival, and records transition-only `fd_exhaustion_risk` incidents with operator next actions.
+- **FD metrics**: added Prometheus gauges for open FD count, FD soft limit, used ratio, ETA by threshold, and open FD category breakdown.
+- **FD watcher**: added a Unix FD provider, trend detector, polling watcher, and serve-time flags for thresholds, ETA window, recovery window, interval, and classification cap.
+
+### Changed
+
+- **zero-ops incidents**: resource warnings now use `ProofNotRequired` and resolve through `FactResolved` instead of repair receipt semantics.
+- **dashboard**: incident rendering now shows readable cause labels and decision text for resource warnings without implying repair proof.
+- **TODO tracking**: completed open-FD predictive warning work was removed from `TODOS.md`, leaving BadgerDB/goroutine warning follow-up open.
+
+### Fixed
+
+- **FD watcher resilience**: transient provider, detector, or incident sink errors no longer permanently stop FD monitoring; failed decisions are retried on later polls.
+- **FD category metrics**: category gauges now clear missing categories between samples so stale labels do not keep showing old contributors.
+
+### Tests
+
+- Added reducer, metrics, detector, provider, watcher, serve wiring, dashboard static, and runbook coverage for the FD warning loop.
+- Verified branch-relevant packages and dashboard e2e; full `go test ./...` still exposes pre-existing e2e failures tracked in `TODOS.md`.
+
 ## [0.0.37.0] — 2026-05-04 — add zero-ops incident control loop
 
 ### Added
