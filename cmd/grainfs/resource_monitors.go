@@ -43,7 +43,13 @@ func startFDResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID stri
 	})
 	provider := resourcewatch.NewFDProvider(resourcewatch.FDProviderOptions{ClassificationCap: classificationCap})
 	watcher := resourcewatch.NewWatcher(
-		resourcewatch.WatcherConfig{PollInterval: pollInterval},
+		resourcewatch.WatcherConfig{
+			PollInterval:  pollInterval,
+			ErrorInterval: time.Minute,
+			OnError: func(err error) {
+				log.Warn().Err(err).Msg("fd resource watcher poll failed")
+			},
+		},
 		provider,
 		detector,
 		func(snapshot resourcewatch.FDSnapshot, decision *resourcewatch.Decision) {
@@ -76,8 +82,22 @@ func recordFDMetrics(nodeID string, snapshot resourcewatch.FDSnapshot, decision 
 	if decision != nil && decision.ETA > 0 && decision.Threshold != "" {
 		metrics.FDETASeconds.WithLabelValues(nodeID, decision.Threshold).Set(decision.ETA.Seconds())
 	}
+	for _, category := range fdMetricCategories() {
+		metrics.FDOpenByCategory.WithLabelValues(nodeID, string(category)).Set(0)
+	}
 	for category, count := range snapshot.Categories {
 		metrics.FDOpenByCategory.WithLabelValues(nodeID, string(category)).Set(float64(count))
+	}
+}
+
+func fdMetricCategories() []resourcewatch.FDCategory {
+	return []resourcewatch.FDCategory{
+		resourcewatch.FDCategorySocket,
+		resourcewatch.FDCategoryBadger,
+		resourcewatch.FDCategoryReceiptOrEventStore,
+		resourcewatch.FDCategoryNFSSession,
+		resourcewatch.FDCategoryRegularFile,
+		resourcewatch.FDCategoryUnknown,
 	}
 }
 

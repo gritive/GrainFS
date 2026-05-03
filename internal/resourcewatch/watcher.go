@@ -6,12 +6,16 @@ import (
 )
 
 type WatcherConfig struct {
-	PollInterval time.Duration
+	PollInterval  time.Duration
+	ErrorInterval time.Duration
+	OnError       ErrorSink
 }
 
 type MetricsSink func(FDSnapshot, *Decision)
 
 type DecisionSink func(context.Context, *Decision) error
+
+type ErrorSink func(error)
 
 type Watcher struct {
 	cfg        WatcherConfig
@@ -24,6 +28,9 @@ type Watcher struct {
 func NewWatcher(cfg WatcherConfig, provider FDProvider, detector *Detector, onMetrics MetricsSink, onDecision DecisionSink) *Watcher {
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 10 * time.Second
+	}
+	if cfg.ErrorInterval == 0 {
+		cfg.ErrorInterval = time.Minute
 	}
 	return &Watcher{
 		cfg:        cfg,
@@ -55,9 +62,8 @@ func (w *Watcher) PollOnce(ctx context.Context) error {
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
-	if err := w.PollOnce(ctx); err != nil {
-		return err
-	}
+	var lastError time.Time
+	w.reportError(ctx, w.PollOnce(ctx), &lastError)
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
 
@@ -67,8 +73,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if err := w.PollOnce(ctx); err != nil {
-				return err
+				w.reportError(ctx, err, &lastError)
 			}
 		}
 	}
+}
+
+func (w *Watcher) reportError(ctx context.Context, err error, lastError *time.Time) {
+	if err == nil || ctx.Err() != nil || w.cfg.OnError == nil {
+		return
+	}
+	now := time.Now()
+	if !lastError.IsZero() && now.Sub(*lastError) < w.cfg.ErrorInterval {
+		return
+	}
+	*lastError = now
+	w.cfg.OnError(err)
 }

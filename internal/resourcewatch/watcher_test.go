@@ -28,6 +28,25 @@ func (p *fakeFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
 	return snapshot, nil
 }
 
+type sequenceFDProvider struct {
+	results []fdProviderResult
+	calls   int
+}
+
+type fdProviderResult struct {
+	snapshot FDSnapshot
+	err      error
+}
+
+func (p *sequenceFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
+	if p.calls >= len(p.results) {
+		return p.results[len(p.results)-1].snapshot, p.results[len(p.results)-1].err
+	}
+	result := p.results[p.calls]
+	p.calls++
+	return result.snapshot, result.err
+}
+
 func TestWatcher_PollOnceEmitsMetricsAndDecision(t *testing.T) {
 	start := time.Unix(100, 0).UTC()
 	provider := &fakeFDProvider{snapshots: []FDSnapshot{
@@ -104,4 +123,41 @@ func TestWatcher_RunStopsOnContext(t *testing.T) {
 
 	err := watcher.Run(ctx)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWatcher_RunContinuesAfterTransientProviderError(t *testing.T) {
+	start := time.Unix(100, 0).UTC()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantErr := errors.New("temporary fd read failure")
+	provider := &sequenceFDProvider{results: []fdProviderResult{
+		{err: wantErr},
+		{snapshot: FDSnapshot{Open: 850, Limit: 1000, CollectedAt: start}},
+	}}
+	var observedErrors []error
+	var received *Decision
+	watcher := NewWatcher(
+		WatcherConfig{
+			PollInterval:  time.Millisecond,
+			ErrorInterval: time.Millisecond,
+			OnError: func(err error) {
+				observedErrors = append(observedErrors, err)
+			},
+		},
+		provider,
+		NewDetector(DetectorConfig{WarnRatio: 0.80, CriticalRatio: 0.90, MinSamples: 1}),
+		nil,
+		func(ctx context.Context, decision *Decision) error {
+			received = decision
+			cancel()
+			return nil
+		},
+	)
+
+	err := watcher.Run(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+	require.Len(t, observedErrors, 1)
+	assert.ErrorIs(t, observedErrors[0], wantErr)
+	require.NotNil(t, received)
+	assert.Equal(t, FDLevelWarn, received.Level)
 }

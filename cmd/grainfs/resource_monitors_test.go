@@ -5,11 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 )
 
@@ -114,4 +116,23 @@ func TestRecordFDDecision_RecoveryFixesIncident(t *testing.T) {
 	assert.Equal(t, incident.StateFixed, got.State)
 	assert.Equal(t, incident.SeverityInfo, got.Severity)
 	assert.Equal(t, incident.ProofNotRequired, got.Proof.Status)
+}
+
+func TestRecordFDMetrics_ClearsMissingCategories(t *testing.T) {
+	nodeID := "metric-clear-node"
+	recordFDMetrics(nodeID, resourcewatch.FDSnapshot{
+		Open:       10,
+		Limit:      100,
+		Categories: map[resourcewatch.FDCategory]int{resourcewatch.FDCategorySocket: 7},
+	}, nil)
+	assert.Equal(t, float64(7), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategorySocket))))
+
+	recordFDMetrics(nodeID, resourcewatch.FDSnapshot{
+		Open:       3,
+		Limit:      100,
+		Categories: map[resourcewatch.FDCategory]int{resourcewatch.FDCategoryBadger: 2},
+	}, nil)
+
+	assert.Equal(t, float64(0), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategorySocket))))
+	assert.Equal(t, float64(2), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategoryBadger))))
 }
