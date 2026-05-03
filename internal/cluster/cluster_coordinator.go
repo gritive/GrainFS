@@ -309,33 +309,29 @@ type routeTarget struct {
 // selfIsLeader is true only when self is a voter AND the local GroupBackend's
 // raft.Node currently holds leadership — used by op handlers to skip the wire
 // and call the local backend directly (perf hint, not a correctness gate).
-func (c *ClusterCoordinator) routeBucket(bucket string) (*routeTarget, error) {
+func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 	if c.router == nil {
-		return nil, ErrCoordinatorNoRouter
+		return routeTarget{}, ErrCoordinatorNoRouter
 	}
 	dg, err := c.router.RouteKey(bucket, "")
 	if err != nil || dg == nil {
-		return nil, storage.ErrNoSuchBucket
+		return routeTarget{}, storage.ErrNoSuchBucket
 	}
 	if c.meta == nil {
-		return nil, ErrUnknownGroup
+		return routeTarget{}, ErrUnknownGroup
 	}
-	entry, ok := c.meta.ShardGroup(dg.ID())
+	var entry ShardGroupEntry
+	var ok bool
+	if src, fast := c.meta.(shardGroupNoCopySource); fast {
+		entry, ok = src.shardGroupNoCopy(dg.ID())
+	} else {
+		entry, ok = c.meta.ShardGroup(dg.ID())
+	}
 	if !ok || len(entry.PeerIDs) == 0 {
-		return nil, ErrUnknownGroup
+		return routeTarget{}, ErrUnknownGroup
 	}
-	peerIDs := PeersForForward(entry, c.selfID)
-	peers := peerIDs
-	if c.addr != nil {
-		resolved, err := ResolveNodeAddresses(c.addr, peerIDs)
-		if err != nil {
-			return nil, err
-		}
-		peers = resolved
-	}
-	t := &routeTarget{
+	t := routeTarget{
 		groupID: entry.ID,
-		peers:   peers,
 	}
 	for _, p := range entry.PeerIDs {
 		if p == c.selfID {
@@ -349,6 +345,20 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (*routeTarget, error) {
 			t.selfIsLeader = true
 		}
 	}
+	if t.selfIsLeader {
+		return t, nil
+	}
+
+	peerIDs := PeersForForward(entry, c.selfID)
+	peers := peerIDs
+	if c.addr != nil {
+		resolved, err := ResolveNodeAddresses(c.addr, peerIDs)
+		if err != nil {
+			return routeTarget{}, err
+		}
+		peers = resolved
+	}
+	t.peers = peers
 	return t, nil
 }
 
@@ -704,6 +714,116 @@ func (c *ClusterCoordinator) PutObject(
 		return nil, ErrForwardBodySizeMismatch
 	}
 	return obj, nil
+}
+
+// WriteAt implements the pwrite fast path for routed internal buckets such as
+// NFSv4. WAL exposes WriteAt to NFS, so the coordinator must either pass it to
+// the local group leader or provide a correct routed fallback.
+func (c *ClusterCoordinator) WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.WriteAt(bucket, key, offset, data)
+		}
+	}
+
+	var existing []byte
+	rc, _, err := c.GetObject(bucket, key)
+	if err == nil {
+		existing, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return nil, err
+	}
+
+	end := offset + uint64(len(data))
+	if end < offset {
+		return nil, storage.ErrEntityTooLarge
+	}
+	if uint64(len(existing)) < end {
+		existing = append(existing, make([]byte, end-uint64(len(existing)))...)
+	}
+	copy(existing[offset:], data)
+	return c.PutObject(bucket, key, bytes.NewReader(existing), "application/octet-stream")
+}
+
+// Truncate implements the SETATTR-size fast path for routed internal buckets.
+func (c *ClusterCoordinator) Truncate(bucket, key string, size int64) error {
+	if size < 0 {
+		return storage.ErrEntityTooLarge
+	}
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.Truncate(bucket, key, size)
+		}
+	}
+
+	var existing []byte
+	rc, _, err := c.GetObject(bucket, key)
+	if err == nil {
+		existing, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return err
+	}
+	cur := int64(len(existing))
+	switch {
+	case cur > size:
+		existing = existing[:size]
+	case cur < size:
+		existing = append(existing, make([]byte, size-cur)...)
+	}
+	_, err = c.PutObject(bucket, key, bytes.NewReader(existing), "application/octet-stream")
+	return err
+}
+
+// ReadAt implements the pread fast path for routed internal buckets. Local
+// leaders use the group backend's zero-copy path; non-leaders fall back through
+// regular routed GetObject for correctness.
+func (c *ClusterCoordinator) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+	if offset < 0 {
+		return 0, errors.New("coordinator: negative ReadAt offset")
+	}
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return 0, err
+	}
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb.ReadAt(bucket, key, offset, buf)
+		}
+	}
+
+	rc, _, err := c.GetObject(bucket, key)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return 0, err
+	}
+	if offset >= int64(len(data)) {
+		return 0, io.EOF
+	}
+	n := copy(buf, data[offset:])
+	if n < len(buf) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 func (c *ClusterCoordinator) UploadPart(

@@ -56,17 +56,19 @@ type Tracker struct {
 	name     string
 	capacity int
 
-	mu      sync.Mutex
-	entries *list.List
-	index   map[string]*list.Element
+	initOnce sync.Once
+	mu       sync.Mutex
+	entries  *list.List
+	index    map[string]*list.Element
 
 	hits   prometheus.Counter
 	misses prometheus.Counter
 }
 
 // New builds a tracker with the given name and capacity (in entries).
-// The Prometheus counters are registered eagerly so dashboards can
-// reference them even before traffic arrives.
+// The LRU and Prometheus counters are initialized lazily on the first
+// enabled Record so disabled production paths do not allocate tracker
+// state at startup.
 //
 // Capacity is in entries, not bytes. Caller picks entries as
 // (cache_bytes / typical_block_bytes); for GrainFS the relevant
@@ -78,19 +80,29 @@ func New(name string, capacity int) *Tracker {
 	return &Tracker{
 		name:     name,
 		capacity: capacity,
-		entries:  list.New(),
-		index:    make(map[string]*list.Element, capacity),
-		hits: promauto.NewCounter(prometheus.CounterOpts{
-			Name:        "grainfs_readamp_hits_total",
-			Help:        "Simulated cache hits — how often a key Record-ed had been seen recently and would still be resident under this tracker's capacity.",
-			ConstLabels: prometheus.Labels{"tracker": name},
-		}),
-		misses: promauto.NewCounter(prometheus.CounterOpts{
-			Name:        "grainfs_readamp_misses_total",
-			Help:        "Simulated cache misses — how often a key Record-ed was not in the simulator's resident set under this tracker's capacity.",
-			ConstLabels: prometheus.Labels{"tracker": name},
-		}),
 	}
+}
+
+func (t *Tracker) init() {
+	entries := list.New()
+	index := make(map[string]*list.Element, t.capacity)
+	hits := promauto.NewCounter(prometheus.CounterOpts{
+		Name:        "grainfs_readamp_hits_total",
+		Help:        "Simulated cache hits — how often a key Record-ed had been seen recently and would still be resident under this tracker's capacity.",
+		ConstLabels: prometheus.Labels{"tracker": t.name},
+	})
+	misses := promauto.NewCounter(prometheus.CounterOpts{
+		Name:        "grainfs_readamp_misses_total",
+		Help:        "Simulated cache misses — how often a key Record-ed was not in the simulator's resident set under this tracker's capacity.",
+		ConstLabels: prometheus.Labels{"tracker": t.name},
+	})
+
+	t.mu.Lock()
+	t.entries = entries
+	t.index = index
+	t.hits = hits
+	t.misses = misses
+	t.mu.Unlock()
 }
 
 // Record observes one access for `key`. Returns true when the simulator
@@ -104,6 +116,7 @@ func (t *Tracker) Record(key string) bool {
 	if !enabled.Load() {
 		return false
 	}
+	t.initOnce.Do(t.init)
 	t.mu.Lock()
 	if elem, ok := t.index[key]; ok {
 		t.entries.MoveToFront(elem)
@@ -130,6 +143,10 @@ func (t *Tracker) Record(key string) bool {
 // should record their assertions as deltas, not absolutes.
 func (t *Tracker) Reset() {
 	t.mu.Lock()
+	if t.entries == nil {
+		t.mu.Unlock()
+		return
+	}
 	t.entries.Init()
 	for k := range t.index {
 		delete(t.index, k)
@@ -141,12 +158,20 @@ func (t *Tracker) Reset() {
 // Useful for tests; production reads go through Prometheus scraping.
 func (t *Tracker) Snapshot() (hits, misses uint64, resident int) {
 	t.mu.Lock()
-	resident = t.entries.Len()
+	residentSet := t.entries
+	hitCounter := t.hits
+	missCounter := t.misses
+	if residentSet != nil {
+		resident = residentSet.Len()
+	}
 	t.mu.Unlock()
-	return readCounter(t.hits), readCounter(t.misses), resident
+	return readCounter(hitCounter), readCounter(missCounter), resident
 }
 
 func readCounter(c prometheus.Counter) uint64 {
+	if c == nil {
+		return 0
+	}
 	var m prometheus.Metric = c
 	dto := dtoFromMetric(m)
 	if dto == nil {

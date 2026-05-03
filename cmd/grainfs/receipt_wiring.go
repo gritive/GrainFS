@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/server"
@@ -51,8 +52,12 @@ func openReceiptDB(dataDir string) (*badger.DB, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create receipts dir: %w", err)
 	}
-	opts := badger.DefaultOptions(dir).WithLogger(nil)
+	opts := receiptDBOptions(dir)
 	return badger.Open(opts)
+}
+
+func receiptDBOptions(dir string) badger.Options {
+	return badgerutil.SmallOptions(dir)
 }
 
 // setupLocalReceipt wires the HealReceipt API in no-peers mode: Store + API with

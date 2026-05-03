@@ -723,6 +723,20 @@ func (f *MetaFSM) ShardGroup(id string) (ShardGroupEntry, bool) {
 	return ShardGroupEntry{ID: g.ID, PeerIDs: peers}, true
 }
 
+// shardGroupNoCopy returns a read-only view for package-internal hot paths.
+// MetaFSM shard-group entries replace PeerIDs on update instead of mutating the
+// existing slice, so callers may inspect the returned slice but must not store
+// or modify it.
+func (f *MetaFSM) shardGroupNoCopy(id string) (ShardGroupEntry, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	g, ok := f.shardGroups[id]
+	if !ok {
+		return ShardGroupEntry{}, false
+	}
+	return g, true
+}
+
 func (f *MetaFSM) IcebergNamespace(namespace []string) (IcebergNamespaceEntry, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

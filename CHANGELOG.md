@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.31.0] — 2026-05-03 — reduce NFSv4 allocation hot paths
+
+### Changed
+
+- **NFSv4**: RPC frame reads, XDR response writes, auth-body parsing, SEQUENCE parsing, GETATTR args, READ args, WRITE payload handling, and READ response encoding now reuse buffers or slice existing request data instead of copying on hot paths.
+- **NFSv4**: file metadata sidecars, NFSv4.2 ALLOCATE truncation, and connection-local response buffers now avoid repeat object IO and transient allocations during common file operations.
+- **cluster**: internal NFS object writes now cache object paths, metadata keys, directories, and sizes, and local shard leaders bypass peer resolution and shard-group slice copies.
+- **metrics**: read amplification trackers now initialize lazily so disabled readamp telemetry does not allocate startup state.
+- **benchmarks**: NFS profile scripts now expose protocol-version selection so NFSv4.0, v4.1, and v4.2 bottlenecks can be measured separately.
+- **receipts**: receipt DB wiring now uses small Badger arena defaults to reduce idle memory pressure.
+
+### Fixed
+
+- **cluster**: routed `ReadAt` now rejects negative offsets before slicing fallback buffers, preventing malformed callers from crashing the coordinator path.
+
+### Tests
+
+- **NFSv4/cluster**: added allocation, buffer reuse, metadata cache, RPC auth skip, frame reuse, local routing, WAL `WriteAt`/`ReadAt`, truncation, and negative-offset regressions for the new hot paths.
+
 ## [0.0.30.0] — 2026-05-03 — harden protocol contract gaps
 
 ### Added

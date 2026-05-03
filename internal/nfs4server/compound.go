@@ -35,6 +35,14 @@ var compoundRespPool = pool.New(func() *CompoundResponse {
 	return &CompoundResponse{Results: make([]OpResult, 0, maxCompoundOps)}
 })
 
+func putCompoundResponse(resp *CompoundResponse) {
+	for i := range resp.Results {
+		resp.Results[i].release()
+	}
+	resp.Results = resp.Results[:0]
+	compoundRespPool.Put(resp)
+}
+
 var dispatcherPool = pool.New(func() *Dispatcher { return &Dispatcher{} })
 
 func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
@@ -153,13 +161,16 @@ const nfs4Bucket = storage.NFS4BucketName
 type Op struct {
 	OpCode  int
 	Data    []byte
-	poolKey int // 0=no pool, 8=opArgPool8, 16=opArgPool16
+	poolKey int // 0=no pool, 8/16/32=opArgPool{8,16,32}
 }
 
 type OpResult struct {
-	OpCode int
-	Status int
-	Data   []byte
+	OpCode       int
+	Status       int
+	Data         []byte
+	readData     []byte
+	readEOF      bool
+	readPoolSize int
 }
 
 type CompoundRequest struct {
@@ -220,6 +231,8 @@ func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
 			putOpArg8(op.Data)
 		case 16:
 			putOpArg16(op.Data)
+		case 32:
+			putOpArg32(op.Data)
 		}
 		resp.Results = append(resp.Results, result)
 		if result.Status != NFS4_OK {
@@ -761,12 +774,9 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 			return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
 		}
 		eof := errors.Is(err, io.EOF) || n < int(count)
-		w := getXDRWriter()
-		w.WriteUint32(boolToUint32(eof))
-		w.WriteOpaque(buf[:n]) // WriteOpaque copies into XDR buf, pool is safe to reuse after
-		result := OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+		result := OpResult{OpCode: OpRead, Status: NFS4_OK, readData: buf[:n], readEOF: eof}
 		if pooled {
-			opReadAtBufPool.Put(buf[:nfsMaxReadBlock])
+			result.readPoolSize = nfsMaxReadBlock
 		}
 		return result
 	}
@@ -836,6 +846,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	eof := (offset + uint64(len(readData))) >= uint64(fileSize)
 
 	w := getXDRWriter()
+	w.Grow(4 + opaqueEncodedSize(len(readData)))
 	w.WriteUint32(boolToUint32(eof))
 	w.WriteOpaque(readData)
 
@@ -850,7 +861,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	r := NewXDRReader(data[16:]) // skip stateid (16 bytes)
 	offset, _ := r.ReadUint64()
 	r.ReadUint32() // stable
-	writeData, err := r.ReadOpaque()
+	writeData, err := r.ReadOpaqueView()
 	if err != nil {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 	}
@@ -1337,16 +1348,12 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	if len(data) < 32 {
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_INVAL}
 	}
-	r := NewXDRReader(data)
-	var sidBytes [16]byte
-	io.ReadFull(&r.r, sidBytes[:]) //nolint:errcheck
 	var sid SessionID
-	copy(sid[:], sidBytes[:])
-
-	seqID, _ := r.ReadUint32()
-	slotID, _ := r.ReadUint32()
-	highSlot, _ := r.ReadUint32()
-	cacheThis, _ := r.ReadUint32()
+	copy(sid[:], data[:16])
+	seqID := binary.BigEndian.Uint32(data[16:20])
+	slotID := binary.BigEndian.Uint32(data[20:24])
+	highSlot := binary.BigEndian.Uint32(data[24:28])
+	cacheThis := binary.BigEndian.Uint32(data[28:32])
 
 	sess := d.state.GetSession(sid)
 	if sess == nil {
@@ -1428,15 +1435,27 @@ func metaSidecarKey(key string) string {
 }
 
 func (d *Dispatcher) loadFileMeta(key string) nfsFileMeta {
+	if d.state != nil {
+		if m, ok := d.state.fileMeta.Load(key); ok {
+			return m
+		}
+	}
 	rc, _, err := d.backend.GetObject(nfs4Bucket, metaSidecarKey(key))
 	if err != nil {
-		return nfsFileMeta{Mode: 0644}
+		m := nfsFileMeta{Mode: 0644}
+		if d.state != nil {
+			d.state.fileMeta.Store(key, m)
+		}
+		return m
 	}
 	defer rc.Close()
 	data, _ := io.ReadAll(rc)
 	var m nfsFileMeta
 	if err := json.Unmarshal(data, &m); err != nil || m.Mode == 0 {
 		m.Mode = 0644
+	}
+	if d.state != nil {
+		d.state.fileMeta.Store(key, m)
 	}
 	return m
 }
@@ -1447,6 +1466,9 @@ func (d *Dispatcher) saveFileMeta(key string, m nfsFileMeta) error {
 		return err
 	}
 	_, err = d.backend.PutObject(nfs4Bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
+	if err == nil && d.state != nil {
+		d.state.fileMeta.Store(key, m)
+	}
 	return err
 }
 

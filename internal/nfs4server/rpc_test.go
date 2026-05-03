@@ -93,6 +93,64 @@ func TestReadRPCFrame_AllocsBounded(t *testing.T) {
 	assert.LessOrEqual(t, allocs, 3.0, "readRPCFrame single fragment should allocate ≤3")
 }
 
+func TestReadRPCFrameInto_ReusesBuffer(t *testing.T) {
+	payload := []byte("hello rpc payload for buffer reuse")
+	var encoded bytes.Buffer
+	require.NoError(t, writeRPCFrame(&encoded, payload))
+	encodedBytes := encoded.Bytes()
+	reuse := make([]byte, len(payload))
+	var r bytes.Reader
+
+	allocs := testing.AllocsPerRun(100, func() {
+		r.Reset(encodedBytes)
+		got, err := readRPCFrameInto(&r, reuse)
+		if err != nil {
+			t.Fatalf("readRPCFrameInto returned error: %v", err)
+		}
+		if !bytes.Equal(payload, got) {
+			t.Fatalf("payload mismatch: got %q want %q", got, payload)
+		}
+		if &reuse[0] != &got[0] {
+			t.Fatal("readRPCFrameInto did not return the caller-provided buffer")
+		}
+	})
+	assert.LessOrEqual(t, allocs, 1.0, "readRPCFrameInto should reuse caller buffer")
+}
+
+func TestParseRPCCall_SkipsAuthBodiesWithoutCopying(t *testing.T) {
+	w := getXDRWriter()
+	w.WriteUint32(1234)        // xid
+	w.WriteUint32(rpcMsgCall)  // message type
+	w.WriteUint32(2)           // rpc version
+	w.WriteUint32(rpcProgNFS)  // program
+	w.WriteUint32(rpcVersNFS4) // program version
+	w.WriteUint32(1)           // procedure
+	w.WriteUint32(authNone)    // credential flavor
+	w.WriteOpaque(bytes.Repeat([]byte{'c'}, 64))
+	w.WriteUint32(authNone) // verifier flavor
+	w.WriteOpaque(bytes.Repeat([]byte{'v'}, 32))
+	w.WriteUint32(0xfeedface) // first procedure arg
+	call := append([]byte(nil), w.Bytes()...)
+	putXDRWriter(w)
+
+	header, args, err := ParseRPCCall(call)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1234), header.XID)
+	require.Equal(t, 4, len(args))
+	require.Equal(t, uint32(0xfeedface), binary.BigEndian.Uint32(args))
+
+	allocs := testing.AllocsPerRun(100, func() {
+		header, args, err := ParseRPCCall(call)
+		if err != nil {
+			t.Fatalf("ParseRPCCall returned error: %v", err)
+		}
+		if header.XID != 1234 || len(args) != 4 {
+			t.Fatalf("unexpected ParseRPCCall result: xid=%d args=%d", header.XID, len(args))
+		}
+	})
+	assert.LessOrEqual(t, allocs, 2.0, "ParseRPCCall should skip auth opaque bodies without copying them")
+}
+
 func TestRPCFrame_MultiFragment(t *testing.T) {
 	frag1 := []byte("hello")
 	frag2 := []byte(" world")
