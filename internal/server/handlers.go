@@ -1165,6 +1165,11 @@ func (s *Server) cacheStatus(ctx context.Context, c *app.RequestContext) {
 
 // joinClusterHandler handles POST /api/cluster/join for runtime local→cluster transition.
 func (s *Server) joinClusterHandler(ctx context.Context, c *app.RequestContext) {
+	if resp, blocked := s.mutationGate.BlockResponse("cluster_join"); blocked {
+		body, _ := json.Marshal(resp)
+		c.Data(resp.Status, "application/json", body)
+		return
+	}
 	if s.joinCluster == nil {
 		writeXMLError(c, consts.StatusConflict, "InvalidRequest", "server is already in cluster mode or join not supported")
 		return
