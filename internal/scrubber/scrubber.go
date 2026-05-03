@@ -95,6 +95,10 @@ type ShardRepairer interface {
 	RepairShardLocal(bucket, key, versionID string, shardIdx int) error
 }
 
+type CorruptShardQuarantiner interface {
+	QuarantineCorruptShardLocal(bucket, key, versionID string, shardIdx int, reason string) error
+}
+
 // maxRepairsPerCycle limits repairs per scrub cycle to avoid I/O storms.
 const maxRepairsPerCycle = 100
 
@@ -420,9 +424,22 @@ func (s *BackgroundScrubber) repairOne(ctx context.Context, rec ObjectRecord, st
 		return repaired, nil
 	}
 
-	damaged := append(append([]int{}, status.Missing...), status.Corrupt...)
 	var repaired int64
 	var firstErr error
+	if quarantiner, ok := repairer.(CorruptShardQuarantiner); ok && len(status.Corrupt) > 0 {
+		for _, idx := range status.Corrupt {
+			if err := quarantiner.QuarantineCorruptShardLocal(rec.Bucket, rec.Key, rec.VersionID, idx, "CRC mismatch during scrub verification"); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			repaired++
+		}
+		status.Corrupt = nil
+	}
+
+	damaged := append(append([]int{}, status.Missing...), status.Corrupt...)
 	for _, idx := range damaged {
 		reconstructStart := time.Now()
 		if err := repairer.RepairShardLocal(rec.Bucket, rec.Key, rec.VersionID, idx); err != nil {

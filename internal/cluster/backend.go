@@ -69,24 +69,25 @@ type BucketAssigner interface {
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
 type DistributedBackend struct {
-	root            string
-	db              *badger.DB
-	node            *raft.Node
-	fsm             *FSM
-	logger          zerolog.Logger
-	lastApplied     atomic.Uint64
-	lastAppliedTerm atomic.Uint64
-	snapRequests    chan raftSnapshotRequest
-	onApply         OnApplyFunc
-	snapMgr         *raft.SnapshotManager
-	snapNode        *raft.Node // node for CompactLog after snapshot
-	shardSvc        *ShardService
-	allNodes        []string // all node addresses (including self) for shard placement
-	selfAddr        string   // this node's raft address (matches entries in allNodes)
-	peerHealth      *PeerHealth
-	registry        *Registry                           // cache invalidators (VFS instances)
-	ecConfig        ECConfig                            // Phase 18: erasure coding config (k+m shard parameters)
-	shardLocks      pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+	root             string
+	db               *badger.DB
+	node             *raft.Node
+	fsm              *FSM
+	logger           zerolog.Logger
+	lastApplied      atomic.Uint64
+	lastAppliedTerm  atomic.Uint64
+	snapRequests     chan raftSnapshotRequest
+	onApply          OnApplyFunc
+	snapMgr          *raft.SnapshotManager
+	snapNode         *raft.Node // node for CompactLog after snapshot
+	shardSvc         *ShardService
+	allNodes         []string // all node addresses (including self) for shard placement
+	selfAddr         string   // this node's raft address (matches entries in allNodes)
+	peerHealth       *PeerHealth
+	registry         *Registry                           // cache invalidators (VFS instances)
+	ecConfig         ECConfig                            // Phase 18: erasure coding config (k+m shard parameters)
+	shardLocks       pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+	incidentRecorder IncidentRecorder                    // nil disables zero-ops incident recording
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard
@@ -788,6 +789,11 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, ""); qerr != nil {
+		return nil, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return nil, objectQuarantinedError(bucket, key, q)
+	}
 
 	// Read all data into memory for replication (or EC split).
 	data, err := io.ReadAll(r)
@@ -1313,6 +1319,11 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return nil, nil, objectQuarantinedError(bucket, key, q)
+	}
 	// HeadObject already rejects tombstones with ErrObjectNotFound, so obj here
 	// is a real version. VersionID is non-empty for versioned writes and empty
 	// for legacy log replay.
@@ -1511,6 +1522,10 @@ func (b *DistributedBackend) FSMRef() *FSM { return b.fsm }
 // Lifecycle keys ("lifecycle:{bucket}") share the DB with FSM keys ("obj:", "lat:",
 // "bucket:", etc.); the prefixes are disjoint so they coexist safely.
 func (b *DistributedBackend) FSMDB() *badger.DB { return b.db }
+
+func (b *DistributedBackend) SetIncidentRecorder(rec IncidentRecorder) {
+	b.incidentRecorder = rec
+}
 
 // LiveNodes returns the list of cluster nodes currently considered reachable.
 // This is the public counterpart of the internal liveNodes() method.
@@ -2530,6 +2545,11 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 	}
 	if obj.IsDeleteMarker {
 		return nil, nil, storage.ErrMethodNotAllowed
+	}
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, versionID); qerr != nil {
+		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return nil, nil, objectQuarantinedError(bucket, key, q)
 	}
 	// Prefer the versioned local file; fall back to legacy unversioned path if
 	// the version happens to be the legacy latest (uncommon mid-transition case).

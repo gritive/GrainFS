@@ -53,6 +53,7 @@ The default container command disables NFSv4 and NBD with `--nfs4-port 0 --nbd-p
 | Object Browser     | 웹 UI에서 버킷/오브젝트/볼륨 관리                             |
 | At-rest Encryption | AES-256-GCM, 키 자동 생성                                     |
 | Monitoring         | Prometheus 메트릭 + 대시보드                                  |
+| Zero-Ops Incidents | missing shard repair / corrupt shard quarantine 상태와 proof 표시 |
 
 ## CLI Options
 
@@ -150,6 +151,23 @@ curl http://localhost:9000/api/cluster/balancer/status | jq .
 `active: true`이면 마이그레이션 진행 중. `imbalance_pct`가 5% 미만으로 내려가면 자동 중단.
 
 > 상세 운영 가이드: [docs/operations/balancer.md](docs/operations/balancer.md)
+
+## Zero-Ops Incidents
+
+클러스터 모드에서 GrainFS는 missing shard repair와 CRC corruption quarantine을 incident로 기록한다. 대시보드의 self-healing 영역에서 현재 상태와 다음 조치를 볼 수 있고, API로도 조회할 수 있다.
+
+```bash
+curl http://localhost:9000/api/incidents | jq .
+curl http://localhost:9000/api/incidents/<incident-id> | jq .
+```
+
+HealReceipt proof는 S3 credential이 설정된 배포에서 인증이 필요하다.
+
+```bash
+curl -H 'Authorization: ...' http://localhost:9000/api/receipts/<receipt-id>
+```
+
+Corrupt shard가 감지되면 해당 object version만 quarantine된다. 같은 bucket의 다른 object와 최신 healthy version은 계속 서비스된다.
 
 ## Documentation
 

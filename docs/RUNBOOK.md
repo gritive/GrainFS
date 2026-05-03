@@ -65,6 +65,28 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 
 ---
 
+## Zero-Ops Incident Checks
+
+Use the incident API after startup, repair drills, or corruption drills to confirm the cluster is not silently degraded.
+
+```bash
+curl -s http://localhost:9000/api/incidents | jq .
+```
+
+Expected healthy steady state: an empty list, or only historical incidents in terminal states such as `fixed` or `isolated` with a clear `next_action`.
+
+For a repaired missing shard, verify the incident proof before closing the operational event:
+
+```bash
+INCIDENT_ID=<incident-id>
+RECEIPT_ID=$(curl -s http://localhost:9000/api/incidents/$INCIDENT_ID | jq -r '.proof.receipt_id')
+curl -s -H "Authorization: <sigv4 header>" http://localhost:9000/api/receipts/$RECEIPT_ID | jq .
+```
+
+If an incident is `proof-unavailable`, check HealReceipt signing and persistence before treating the repair as audit-complete. If an incident is `isolated`, review the named object version and restore or delete it according to the data owner policy; unrelated objects in the bucket should continue serving.
+
+---
+
 ## Deployment Procedure
 
 ### Step 1: Create Pre-Deployment Backup

@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -98,10 +100,29 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetBucketVersioning(cmd.Data)
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(cmd.Data)
+	case CmdPutObjectQuarantine:
+		return f.applyPutObjectQuarantine(cmd.Data)
 	default:
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
 	}
+}
+
+func (f *FSM) applyPutObjectQuarantine(data []byte) error {
+	c, err := decodePutObjectQuarantineCmd(data)
+	if err != nil {
+		return err
+	}
+	if c.Bucket == "" || c.Key == "" {
+		return errors.New("quarantine: bucket and key are required")
+	}
+	value, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(quarantineKey(c.Bucket, c.Key, c.VersionID), value)
+	})
 }
 
 func bucketKey(bucket string) []byte          { return []byte("bucket:" + bucket) }

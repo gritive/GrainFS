@@ -46,6 +46,14 @@ table DeleteObjectVersionCmd {
   version_id:string;
 }
 
+table PutObjectQuarantineCmd {
+  bucket:string;
+  key:string;
+  version_id:string;
+  cause:string;
+  reason:string;
+}
+
 table CreateMultipartUploadCmd {
   upload_id:string;
   bucket:string;

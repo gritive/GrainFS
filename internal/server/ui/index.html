@@ -195,6 +195,16 @@ tbody tr:last-child td{border-bottom:none}
     </div>
   </div>
 
+  <div id="incident-section" style="margin-bottom:1.5rem">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
+      <h3 style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-faint);margin:0">Zero-Ops Incidents</h3>
+      <span id="incident-count" class="badge">0</span>
+    </div>
+    <div id="incident-table" role="log" aria-live="polite" style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);font-family:monospace;font-size:0.75rem;min-height:88px;max-height:220px;overflow-y:auto;padding:0.5rem 0.75rem;color:var(--text-muted)">
+      <div id="incident-empty" style="color:var(--text-faint)">No active incidents.</div>
+    </div>
+  </div>
+
   <!-- Blame Mode modal (Phase 16 Week 5 Slice 3) -->
   <div id="blame-modal-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="blame-modal-title">
     <div class="modal" style="width:640px;max-width:95vw;max-height:90vh;overflow-y:auto">
@@ -475,7 +485,7 @@ tbody tr:last-child td{border-bottom:none}
       if (btn.dataset.tab === 'volumes') loadVolumes();
       if (btn.dataset.tab === 'snapshots') loadSnapshots();
       if (btn.dataset.tab === 'events') loadEvents();
-      if (btn.dataset.tab === 'dashboard') { refreshDashboard(); startSSE(); startHealSSE(); pollAlertsStatus(); }
+      if (btn.dataset.tab === 'dashboard') { refreshDashboard(); startSSE(); startHealSSE(); loadIncidents(); pollAlertsStatus(); }
       if (btn.dataset.tab === 'cluster') loadCluster();
     });
   });
@@ -800,6 +810,7 @@ tbody tr:last-child td{border-bottom:none}
         var ev = JSON.parse(e.data);
         recordHealEvent(ev);
         renderHealCard();
+        loadIncidents();
       } catch (_) {}
     });
   }
@@ -922,6 +933,52 @@ tbody tr:last-child td{border-bottom:none}
       }
       tbl.appendChild(row);
     });
+  }
+
+  function loadIncidents() {
+    fetch(baseURL + '/api/incidents?limit=50')
+      .then(function(r) { return r.ok ? r.json() : []; })
+      .then(function(items) { renderIncidents(items || []); })
+      .catch(function() { renderIncidents([]); });
+  }
+
+  function renderIncidents(items) {
+    var count = document.getElementById('incident-count');
+    var table = document.getElementById('incident-table');
+    if (!count || !table) return;
+    count.textContent = String(items.length);
+    table.textContent = '';
+    if (!items.length) {
+      var empty = document.createElement('div');
+      empty.id = 'incident-empty';
+      empty.style.color = 'var(--text-faint)';
+      empty.textContent = 'No active incidents.';
+      table.appendChild(empty);
+      return;
+    }
+    items.forEach(function(item) {
+      var row = document.createElement('div');
+      row.style.cssText = 'padding:0.2rem 0;display:flex;gap:0.5rem;align-items:baseline';
+      var state = document.createElement('span');
+      state.style.cssText = 'font-weight:700;min-width:7rem;color:' + incidentColor(item.state);
+      state.textContent = item.state || 'unknown';
+      var body = document.createElement('span');
+      body.style.flex = '1';
+      var scope = item.scope || {};
+      var name = scope.bucket ? scope.bucket + '/' + (scope.key || '') : (scope.node_id || item.id);
+      var proof = item.proof && item.proof.receipt_id ? ' · proof ' + item.proof.receipt_id.slice(0, 8) : '';
+      body.textContent = (item.cause || 'incident') + ' · ' + name + proof + ' · ' + (item.next_action || '');
+      row.appendChild(state);
+      row.appendChild(body);
+      table.appendChild(row);
+    });
+  }
+
+  function incidentColor(state) {
+    if (state === 'fixed') return 'var(--success)';
+    if (state === 'isolated' || state === 'proof-unavailable') return 'var(--warning)';
+    if (state === 'blocked' || state === 'needs-human') return 'var(--danger)';
+    return 'var(--text-muted)';
   }
 
   // ── Blame Mode v1 ──────────────────────────────────────────────────────────

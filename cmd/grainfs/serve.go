@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/rs/zerolog/log"
@@ -31,9 +32,12 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/incident/badgerstore"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
@@ -1144,6 +1148,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	srvOpts = newSrvOpts
 	defer receiptWiring.Close()
 
+	incidentDB, err := openBadgerSubDB(dataDir, "incident-state")
+	if err != nil {
+		return fmt.Errorf("open incident db: %w", err)
+	}
+	defer incidentDB.Close()
+	incidentStore := badgerstore.New(incidentDB)
+	incidentRecorder := incident.NewRecorder(incidentStore, incident.NewReducer())
+	distBackend.SetIncidentRecorder(incidentRecorder)
+	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
+
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
 	// can reuse the same config store the worker scans. The worker itself
@@ -1210,16 +1224,54 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		placementMonitors := newPlacementMonitorRegistry()
 		startPlacementMonitor := func(monitorCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
+			gb.SetIncidentRecorder(incidentRecorder)
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), scrubInterval)
-			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
-				// shardKey from placement resolution is objectKey+"/"+versionID.
-				// Split on the last "/" so RepairShard can skip LookupLatestVersion.
+			splitShardKey := func(shardKey string) (string, string) {
 				objectKey, versionID := shardKey, ""
 				if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
 					objectKey, versionID = shardKey[:i], shardKey[i+1:]
 				}
-				if err := gb.RepairShardLocal(bucket, objectKey, versionID, shardIdx); err != nil {
+				return objectKey, versionID
+			}
+			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
+				// shardKey from placement resolution is objectKey+"/"+versionID.
+				// Split on the last "/" so RepairShard can skip LookupLatestVersion.
+				objectKey, versionID := splitShardKey(shardKey)
+				correlationID := uuid.Must(uuid.NewV7()).String()
+				receiptID := "rcpt-" + correlationID
+				repairReq := cluster.IncidentRepairRequest{
+					Bucket:        bucket,
+					Key:           objectKey,
+					VersionID:     versionID,
+					ShardIdx:      shardIdx,
+					Recorder:      incidentRecorder,
+					CorrelationID: correlationID,
+				}
+				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
 					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
+				} else if receiptWiring != nil && receiptWiring.store != nil && receiptWiring.keyStore != nil {
+					r := &receipt.HealReceipt{
+						ReceiptID:     receiptID,
+						Timestamp:     time.Now().UTC(),
+						Object:        receipt.ObjectRef{Bucket: bucket, Key: objectKey, VersionID: versionID},
+						ShardsLost:    []int32{int32(shardIdx)},
+						ShardsRebuilt: []int32{int32(shardIdx)},
+						EventIDs:      []string{correlationID},
+						CorrelationID: correlationID,
+					}
+					if err := receipt.Sign(r, receiptWiring.keyStore); err != nil {
+						log.Warn().Str("correlation_id", correlationID).Err(err).Msg("placement monitor receipt sign failed")
+					} else if err := receiptWiring.store.Put(r); err != nil {
+						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt store failed")
+					} else if err := gb.RecordRepairReceiptSigned(context.Background(), repairReq, receiptID); err != nil {
+						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor incident proof update failed")
+					}
+				}
+			})
+			placementMonitor.SetOnCorrupt(func(bucket, shardKey string, shardIdx int, readErr error) {
+				objectKey, versionID := splitShardKey(shardKey)
+				if err := gb.QuarantineCorruptShardLocal(bucket, objectKey, versionID, shardIdx, readErr.Error()); err != nil {
+					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor quarantine failed")
 				}
 			})
 			go placementMonitor.Start(monitorCtx)

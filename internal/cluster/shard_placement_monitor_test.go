@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -249,6 +250,51 @@ func TestShardPlacementMonitor_Scan_NonEnoentError(t *testing.T) {
 	missing, err := monitor.Scan(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, missing, "unreadable (non-ENOENT) shard must not count as missing")
+}
+
+func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	backend := &DistributedBackend{db: db, fsm: fsm}
+	svc, dir := newTestShardService(t)
+
+	const self = "node-A"
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      "b",
+		Key:         "obj",
+		VersionID:   "v1",
+		Size:        10,
+		ContentType: "application/octet-stream",
+		ETag:        "etag",
+		ModTime:     1,
+		ECData:      2,
+		ECParity:    1,
+		NodeIDs:     []string{self, "node-B", "node-C"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(raw))
+	require.NoError(t, svc.WriteLocalShard("b", "obj/v1", 0, []byte("payload")))
+
+	shardPath := dir + "/shards/b/obj/v1/shard_0"
+	f, err := os.OpenFile(shardPath, os.O_RDWR, 0)
+	require.NoError(t, err)
+	_, err = f.Seek(-1, io.SeekEnd)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{0xff})
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+	var reported []string
+	monitor.SetOnCorrupt(func(bucket, key string, shardIdx int, err error) {
+		reported = append(reported, fmtShardRef(bucket, key, shardIdx))
+		require.Error(t, err)
+	})
+
+	missing, err := monitor.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, missing)
+	assert.Equal(t, []string{"b/obj/v1/0"}, reported)
 }
 
 func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
