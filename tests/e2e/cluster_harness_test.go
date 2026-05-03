@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -189,7 +190,25 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		return nil, err
 	}
 	time.Sleep(4 * time.Second)
-	c.leaderIdx = 0
+
+	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	leaderIdx, err := waitForWritableEndpoint(
+		probeCtx,
+		c.httpURLs,
+		180*time.Second,
+		5*time.Second,
+		1*time.Second,
+		func(ctx context.Context, endpoint string) error {
+			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			return tryCreateBucket(ctx, cli, fmt.Sprintf("__e2e-static-leader-probe-%d", time.Now().UnixNano()))
+		},
+	)
+	if err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("no writable endpoint found within timeout: %w", err)
+	}
+	c.leaderIdx = leaderIdx
 	return c, nil
 }
 

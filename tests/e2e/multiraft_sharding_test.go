@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -853,4 +854,86 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	require.Equal(t, nfsBody, string(nfsReadBody))
 
 	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
+}
+
+func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      3,
+		SeedGroups: 4,
+		Mode:       ClusterModeStaticPeers,
+		DisableNFS: true,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
+	if err != nil && !strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou") {
+		require.NoError(t, err)
+	}
+
+	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
+	defer client.Close()
+
+	body := []byte("nbd-through-cluster-coordinator")
+	client.WriteAt(t, 0, body)
+	got := client.ReadAt(t, 0, uint32(len(body)))
+	require.Equal(t, body, got)
+
+	out, err := c.S3Client(1).ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket: aws.String("__grainfs_volumes"),
+		Prefix: aws.String("__vol/default/"),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, out.Contents)
+}
+
+func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      3,
+		SeedGroups: 4,
+		Mode:       ClusterModeStaticPeers,
+		DisableNFS: true,
+		DisableNBD: true,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	require.NoError(t, tryCreateBucket(ctx, c.S3Client(0), "grainfs-tables"))
+
+	req := bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`))
+	resp, err := http.Post(c.httpURLs[1]+"/iceberg/v1/namespaces", "application/json", req)
+	require.NoError(t, err)
+	require.Less(t, resp.StatusCode, 300)
+	require.NoError(t, resp.Body.Close())
+
+	createTableBody := `{
+		"name":"t",
+		"schema":{"type":"struct","schema-id":0,"fields":[]},
+		"properties":{}
+	}`
+	resp, err = http.Post(c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", "application/json", bytes.NewReader([]byte(createTableBody)))
+	require.NoError(t, err)
+	require.Less(t, resp.StatusCode, 300)
+	require.NoError(t, resp.Body.Close())
+
+	loadResp, err := http.Get(c.httpURLs[2] + "/iceberg/v1/namespaces/ns/tables/t")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, loadResp.StatusCode)
+	loadBody, err := io.ReadAll(loadResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, loadResp.Body.Close())
+	require.Contains(t, string(loadBody), `"metadata-location"`)
+	require.Contains(t, string(loadBody), `s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`)
+
+	got, err := getObjectBytes(ctx, c.S3Client(2), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
+	require.NoError(t, err)
+	require.Contains(t, string(got), `"format-version"`)
 }
