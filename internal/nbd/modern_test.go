@@ -362,3 +362,23 @@ func TestNBDWriteZeroesRejectsFastZero(t *testing.T) {
 	reply := readSimpleReply(t, conn)
 	require.NotEqual(t, uint32(0), reply.errCode)
 }
+
+func TestNBDStructuredReadReply(t *testing.T) {
+	client, _ := setupStructuredNBD(t)
+	sendWriteConn(t, client, 0, []byte("abcd"))
+	sendReadRequest(t, client, 0, 4)
+	chunk := readStructuredChunk(t, client)
+	require.Equal(t, nbdReplyTypeOffsetData, chunk.typ)
+	require.Equal(t, nbdReplyFlagDone, chunk.flags)
+	require.Equal(t, []byte("abcd"), chunk.payload[8:])
+}
+
+func TestNBDBlockStatusConservativeAllocated(t *testing.T) {
+	client, _ := setupBlockStatusNBD(t)
+	sendBlockStatusRequest(t, client, 0, 4096)
+	chunk := readStructuredChunk(t, client)
+	require.Equal(t, nbdReplyTypeBlockStatus, chunk.typ)
+	require.Equal(t, uint32(1), binary.BigEndian.Uint32(chunk.payload[0:4]))
+	require.Equal(t, uint32(4096), binary.BigEndian.Uint32(chunk.payload[4:8]))
+	require.Equal(t, uint32(0), binary.BigEndian.Uint32(chunk.payload[8:12]))
+}

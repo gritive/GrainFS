@@ -12,6 +12,27 @@ import (
 // Uses net.Pipe() for in-process benchmarking with no network overhead.
 func setupBenchNBD(b *testing.B) net.Conn {
 	b.Helper()
+	return setupBenchNBDWithHandshake(b, func(conn net.Conn) error {
+		return doHandshake(conn, "vol")
+	})
+}
+
+func setupBenchStructuredNBD(b *testing.B) net.Conn {
+	b.Helper()
+	return setupBenchNBDWithHandshake(b, func(conn net.Conn) error {
+		return doStructuredHandshake(conn, "vol", false)
+	})
+}
+
+func setupBenchBlockStatusNBD(b *testing.B) net.Conn {
+	b.Helper()
+	return setupBenchNBDWithHandshake(b, func(conn net.Conn) error {
+		return doStructuredHandshake(conn, "vol", true)
+	})
+}
+
+func setupBenchNBDWithHandshake(b *testing.B, handshake func(net.Conn) error) net.Conn {
+	b.Helper()
 	dir := b.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	if err != nil {
@@ -26,8 +47,7 @@ func setupBenchNBD(b *testing.B) net.Conn {
 	client, server := net.Pipe()
 	go srv.handleConn(server) //nolint:errcheck
 
-	// Complete NBD handshake (same sequence as nbd_test.go setupNBD)
-	if err := doHandshake(client, "vol"); err != nil {
+	if err := handshake(client); err != nil {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { client.Close() })
@@ -61,6 +81,79 @@ func doHandshake(conn net.Conn, export string) error {
 	return err
 }
 
+func doStructuredHandshake(conn net.Conn, export string, meta bool) error {
+	hdr := make([]byte, 18)
+	if _, err := readFull(conn, hdr); err != nil {
+		return err
+	}
+	cf := [4]byte{}
+	cf[3] = 1
+	if _, err := conn.Write(cf[:]); err != nil {
+		return err
+	}
+	opt := make([]byte, 16)
+	putU64(opt[0:], nbdOptionMagic)
+	putU32(opt[8:], nbdOptStructuredReply)
+	if _, err := conn.Write(opt); err != nil {
+		return err
+	}
+	if err := drainOptionReply(conn); err != nil {
+		return err
+	}
+	if meta {
+		payload := benchMetaContextPayload(export, "base:allocation")
+		opt = make([]byte, 16+len(payload))
+		putU64(opt[0:], nbdOptionMagic)
+		putU32(opt[8:], nbdOptSetMetaContext)
+		putU32(opt[12:], uint32(len(payload)))
+		copy(opt[16:], payload)
+		if _, err := conn.Write(opt); err != nil {
+			return err
+		}
+		if err := drainOptionReply(conn); err != nil {
+			return err
+		}
+	}
+	name := []byte(export)
+	opt = make([]byte, 16+len(name))
+	putU64(opt[0:], nbdOptionMagic)
+	putU32(opt[8:], nbdOptExportName)
+	putU32(opt[12:], uint32(len(name)))
+	copy(opt[16:], name)
+	if _, err := conn.Write(opt); err != nil {
+		return err
+	}
+	resp := make([]byte, 134)
+	_, err := readFull(conn, resp)
+	return err
+}
+
+func benchMetaContextPayload(export, context string) []byte {
+	payload := make([]byte, 4+len(export)+4+4+len(context))
+	putU32(payload[0:], uint32(len(export)))
+	copy(payload[4:], export)
+	pos := 4 + len(export)
+	putU32(payload[pos:], 1)
+	pos += 4
+	putU32(payload[pos:], uint32(len(context)))
+	pos += 4
+	copy(payload[pos:], context)
+	return payload
+}
+
+func drainOptionReply(conn net.Conn) error {
+	hdr := make([]byte, 20)
+	if _, err := readFull(conn, hdr); err != nil {
+		return err
+	}
+	length := uint32(hdr[16])<<24 | uint32(hdr[17])<<16 | uint32(hdr[18])<<8 | uint32(hdr[19])
+	if length > 0 {
+		_, err := readFull(conn, make([]byte, length))
+		return err
+	}
+	return nil
+}
+
 // sendRead sends an NBD read request and drains the reply (header + data).
 func sendRead(conn net.Conn, offset uint64, length uint32, req, reply []byte) error {
 	putU32(req[0:], nbdRequestMagic)
@@ -73,6 +166,35 @@ func sendRead(conn net.Conn, offset uint64, length uint32, req, reply []byte) er
 		return err
 	}
 	_, err := readFull(conn, reply[:16+int(length)])
+	return err
+}
+
+// sendStructuredRead sends an NBD read request and drains one OFFSET_DATA chunk.
+func sendStructuredRead(conn net.Conn, offset uint64, length uint32, req, reply []byte) error {
+	putU32(req[0:], nbdRequestMagic)
+	putU16(req[4:], 0)
+	putU16(req[6:], uint16(nbdCmdRead))
+	putU64(req[8:], 1)
+	putU64(req[16:], offset)
+	putU32(req[24:], length)
+	if _, err := conn.Write(req[:28]); err != nil {
+		return err
+	}
+	_, err := readFull(conn, reply[:20+8+int(length)])
+	return err
+}
+
+func sendBlockStatus(conn net.Conn, offset uint64, length uint32, req, reply []byte) error {
+	putU32(req[0:], nbdRequestMagic)
+	putU16(req[4:], nbdCmdFlagReqOne)
+	putU16(req[6:], uint16(nbdCmdBlockStatus))
+	putU64(req[8:], 1)
+	putU64(req[16:], offset)
+	putU32(req[24:], length)
+	if _, err := conn.Write(req[:28]); err != nil {
+		return err
+	}
+	_, err := readFull(conn, reply[:32])
 	return err
 }
 
@@ -169,6 +291,32 @@ func BenchmarkNBD_WriteZeroes4K(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := sendWriteZeroes(conn, 0, 4096, req, reply); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkNBD_StructuredRead4K(b *testing.B) {
+	conn := setupBenchStructuredNBD(b)
+	req := make([]byte, 28)
+	reply := make([]byte, 20+8+4096)
+	b.SetBytes(4096)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := sendStructuredRead(conn, 0, 4096, req, reply); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkNBD_BlockStatus4K(b *testing.B) {
+	conn := setupBenchBlockStatusNBD(b)
+	req := make([]byte, 28)
+	reply := make([]byte, 32)
+	b.SetBytes(4096)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := sendBlockStatus(conn, 0, 4096, req, reply); err != nil {
 			b.Fatal(err)
 		}
 	}

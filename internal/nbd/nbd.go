@@ -214,7 +214,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	// Newstyle handshake
-	if _, err := s.newstyleHandshake(conn, vol); err != nil {
+	state, err := s.newstyleHandshake(conn, vol)
+	if err != nil {
 		log.Error().Err(err).Msg("nbd: handshake failed")
 		return
 	}
@@ -222,7 +223,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	// Command loop — pending accumulates deferred Raft commits for write-back.
 	var pending []pendingMutation
 	for {
-		if err := s.handleRequest(conn, &pending); err != nil {
+		if err := s.handleRequest(conn, &pending, state); err != nil {
 			// Drain remaining deferred commits on disconnect so write-back
 			// data reaches Raft even without an explicit NBD_CMD_FLUSH.
 			for _, pw := range pending {
@@ -252,14 +253,14 @@ func (s *Server) putBuf(buf []byte) {
 	}
 }
 
-func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation) error {
+func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation, state handshakeState) error {
 	req, err := readNBDRequest(conn)
 	if err != nil {
 		return err
 	}
 
 	if err := validateRequestSize(req); err != nil {
-		return s.sendReply(conn, req.handle[:], nbdErrEINVAL, nil)
+		return s.sendErrorReply(conn, req.handle[:], nbdErrEINVAL, state)
 	}
 
 	switch req.typ {
@@ -274,15 +275,20 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation) error 
 				cancel2()
 			}
 			if err != nil {
-				return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
+				return s.sendErrorReply(conn, req.handle[:], nbdErrEIO, state)
 			}
 		}
 		buf := s.getBuf(uint32(req.length))
 		if _, err := s.mgr.ReadAt(s.volName, buf, int64(req.offset)); err != nil && err != io.EOF {
 			s.putBuf(buf)
-			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
+			return s.sendErrorReply(conn, req.handle[:], nbdErrEIO, state)
 		}
-		err := s.sendReply(conn, req.handle[:], 0, buf)
+		var err error
+		if state.structuredReplies {
+			err = s.sendStructuredRead(conn, req.handle[:], req.offset, buf)
+		} else {
+			err = s.sendReply(conn, req.handle[:], 0, buf)
+		}
 		s.putBuf(buf)
 		return err
 
@@ -334,8 +340,14 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation) error 
 		}
 		return s.sendReply(conn, req.handle[:], 0, nil)
 
+	case nbdCmdBlockStatus:
+		if !state.structuredReplies || !state.hasMetaContext(nbdMetaContextBaseAllocID) || req.flags&^nbdCmdFlagReqOne != 0 {
+			return s.sendErrorReply(conn, req.handle[:], nbdErrEINVAL, state)
+		}
+		return s.sendBlockStatus(conn, req.handle[:], uint32(req.length))
+
 	default:
-		return s.sendReply(conn, req.handle[:], nbdErrEINVAL, nil)
+		return s.sendErrorReply(conn, req.handle[:], nbdErrEINVAL, state)
 	}
 }
 

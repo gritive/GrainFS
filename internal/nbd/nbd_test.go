@@ -247,7 +247,7 @@ func TestNBDReadReturnsErrorWhenReadIndexFails(t *testing.T) {
 	reply := make([]byte, 16)
 	_, err = io.ReadFull(conn, reply)
 	require.NoError(t, err)
-	assert.Equal(t, uint32(1), binary.BigEndian.Uint32(reply[4:8]))
+	assert.Equal(t, nbdErrEIO, binary.BigEndian.Uint32(reply[4:8]))
 	assert.Equal(t, int32(1), ri.readCalls.Load())
 	assert.Equal(t, int32(0), ri.waitCalls.Load())
 }

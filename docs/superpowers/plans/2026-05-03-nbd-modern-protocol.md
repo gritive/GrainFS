@@ -473,7 +473,7 @@ git commit -m "feat: support nbd write zeroes"
 - Modify: `internal/nbd/modern_test.go`
 - Modify: `internal/nbd/nbd_bench_test.go`
 
-- [ ] **Step 1: Write failing structured reply and metadata tests**
+- [x] **Step 1: Write failing structured reply and metadata tests**
 
 Add tests:
 
@@ -499,7 +499,7 @@ func TestNBDBlockStatusConservativeAllocated(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests and confirm failure**
+- [x] **Step 2: Run tests and confirm failure**
 
 Run:
 
@@ -509,11 +509,11 @@ go test ./internal/nbd -run 'TestNBDStructured|TestNBDBlockStatus' -count=1
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement structured replies and metadata contexts**
+- [x] **Step 3: Implement structured replies and metadata contexts**
 
 Add `NBD_OPT_STRUCTURED_REPLY`, `NBD_OPT_LIST_META_CONTEXT`, `NBD_OPT_SET_META_CONTEXT`. Assign context ID `1` to `base:allocation`. Send `NBD_REPLY_TYPE_OFFSET_DATA` for reads in structured mode and `NBD_REPLY_TYPE_BLOCK_STATUS` for conservative allocated extents.
 
-- [ ] **Step 4: Run focused tests and benchmark**
+- [x] **Step 4: Run focused tests and benchmark**
 
 Run:
 
@@ -524,7 +524,7 @@ go test ./internal/nbd -run '^$' -bench 'BenchmarkNBD_(Read4K|StructuredRead4K|B
 
 Expected: PASS and benchmark output reviewed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/nbd/reply.go internal/nbd/handshake.go internal/nbd/nbd.go internal/nbd/modern_test.go internal/nbd/nbd_bench_test.go

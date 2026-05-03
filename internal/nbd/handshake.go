@@ -28,6 +28,11 @@ type optionInfoRequest struct {
 	info []uint16
 }
 
+type metaContextRequest struct {
+	name     string
+	contexts []string
+}
+
 func parseClientFlags(flags uint32) (handshakeState, error) {
 	if unknown := flags &^ nbdKnownClientFlags; unknown != 0 {
 		return handshakeState{}, fmt.Errorf("unknown client flags: 0x%x", unknown)
@@ -104,6 +109,41 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				return handshakeState{}, err
 			}
 
+		case nbdOptStructuredReply:
+			state.structuredReplies = true
+			if err := s.sendOptReply(conn, optType, nbdRepAck, nil); err != nil {
+				return handshakeState{}, err
+			}
+
+		case nbdOptSetMetaContext:
+			req, err := parseMetaContextRequest(optData)
+			if err != nil {
+				if err := s.sendOptReply(conn, optType, nbdRepErrInvalid, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			if req.name != s.volName {
+				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			state.metaContexts = state.metaContexts[:0]
+			for _, contextName := range req.contexts {
+				if contextName == "base:allocation" {
+					state.metaContexts = append(state.metaContexts, nbdMetaContext{id: nbdMetaContextBaseAllocID, name: contextName})
+				}
+			}
+			if err := s.sendOptReply(conn, optType, nbdRepAck, nil); err != nil {
+				return handshakeState{}, err
+			}
+
+		case nbdOptListMetaContext:
+			if err := s.sendOptReply(conn, optType, nbdRepAck, nil); err != nil {
+				return handshakeState{}, err
+			}
+
 		case nbdOptGo:
 			req, err := parseOptionInfoRequest(optData)
 			if err != nil {
@@ -139,6 +179,15 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 	}
 }
 
+func (s handshakeState) hasMetaContext(id uint32) bool {
+	for _, context := range s.metaContexts {
+		if context.id == id {
+			return true
+		}
+	}
+	return false
+}
+
 func parseOptionInfoRequest(payload []byte) (optionInfoRequest, error) {
 	if len(payload) < 6 {
 		return optionInfoRequest{}, fmt.Errorf("short option info payload")
@@ -160,6 +209,39 @@ func parseOptionInfoRequest(payload []byte) (optionInfoRequest, error) {
 	for i := range req.info {
 		req.info[i] = binary.BigEndian.Uint16(payload[pos : pos+2])
 		pos += 2
+	}
+	return req, nil
+}
+
+func parseMetaContextRequest(payload []byte) (metaContextRequest, error) {
+	if len(payload) < 8 {
+		return metaContextRequest{}, fmt.Errorf("short meta context payload")
+	}
+	nameLen := int(binary.BigEndian.Uint32(payload[0:4]))
+	if nameLen > len(payload)-8 {
+		return metaContextRequest{}, fmt.Errorf("invalid meta context name length: %d", nameLen)
+	}
+	pos := 4 + nameLen
+	count := int(binary.BigEndian.Uint32(payload[pos : pos+4]))
+	pos += 4
+	req := metaContextRequest{
+		name:     string(payload[4 : 4+nameLen]),
+		contexts: make([]string, 0, count),
+	}
+	for i := 0; i < count; i++ {
+		if len(payload)-pos < 4 {
+			return metaContextRequest{}, fmt.Errorf("short meta context entry")
+		}
+		contextLen := int(binary.BigEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+		if contextLen > len(payload)-pos {
+			return metaContextRequest{}, fmt.Errorf("invalid meta context length: %d", contextLen)
+		}
+		req.contexts = append(req.contexts, string(payload[pos:pos+contextLen]))
+		pos += contextLen
+	}
+	if pos != len(payload) {
+		return metaContextRequest{}, fmt.Errorf("trailing meta context payload")
 	}
 	return req, nil
 }
