@@ -154,8 +154,28 @@ func (rcv *ForwardReply) Part(obj *ForwardPartMeta) *ForwardPartMeta {
 	return nil
 }
 
+func (rcv *ForwardReply) Versions(obj *ForwardObjectVersionMeta, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *ForwardReply) VersionsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func ForwardReplyStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(8)
 }
 func ForwardReplyAddStatus(builder *flatbuffers.Builder, status ForwardStatus) {
 	builder.PrependInt8Slot(0, int8(status), 0)
@@ -183,6 +203,12 @@ func ForwardReplyAddUpload(builder *flatbuffers.Builder, upload flatbuffers.UOff
 }
 func ForwardReplyAddPart(builder *flatbuffers.Builder, part flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(part), 0)
+}
+func ForwardReplyAddVersions(builder *flatbuffers.Builder, versions flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(versions), 0)
+}
+func ForwardReplyStartVersionsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func ForwardReplyEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

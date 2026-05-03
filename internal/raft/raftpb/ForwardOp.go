@@ -17,6 +17,9 @@ const (
 	ForwardOpUploadPart              ForwardOp = 8
 	ForwardOpCompleteMultipartUpload ForwardOp = 9
 	ForwardOpAbortMultipartUpload    ForwardOp = 10
+	ForwardOpGetObjectVersion        ForwardOp = 11
+	ForwardOpDeleteObjectVersion     ForwardOp = 12
+	ForwardOpListObjectVersions      ForwardOp = 13
 )
 
 var EnumNamesForwardOp = map[ForwardOp]string{
@@ -30,6 +33,9 @@ var EnumNamesForwardOp = map[ForwardOp]string{
 	ForwardOpUploadPart:              "UploadPart",
 	ForwardOpCompleteMultipartUpload: "CompleteMultipartUpload",
 	ForwardOpAbortMultipartUpload:    "AbortMultipartUpload",
+	ForwardOpGetObjectVersion:        "GetObjectVersion",
+	ForwardOpDeleteObjectVersion:     "DeleteObjectVersion",
+	ForwardOpListObjectVersions:      "ListObjectVersions",
 }
 
 var EnumValuesForwardOp = map[string]ForwardOp{
@@ -43,6 +49,9 @@ var EnumValuesForwardOp = map[string]ForwardOp{
 	"UploadPart":              ForwardOpUploadPart,
 	"CompleteMultipartUpload": ForwardOpCompleteMultipartUpload,
 	"AbortMultipartUpload":    ForwardOpAbortMultipartUpload,
+	"GetObjectVersion":        ForwardOpGetObjectVersion,
+	"DeleteObjectVersion":     ForwardOpDeleteObjectVersion,
+	"ListObjectVersions":      ForwardOpListObjectVersions,
 }
 
 func (v ForwardOp) String() string {

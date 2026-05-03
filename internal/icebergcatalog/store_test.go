@@ -79,6 +79,31 @@ func TestStore_TableCreateLoadAndCommitCAS(t *testing.T) {
 	require.Equal(t, "s3://grainfs-tables/warehouse/default/t/metadata/00001.json", loaded.MetadataLocation)
 }
 
+func TestStore_ExportLegacyRowsPreservesNamespaceAndTableData(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	require.NoError(t, store.CreateNamespace(ctx, []string{"analytics"}, map[string]string{"owner": "eng"}))
+	ident := Identifier{Namespace: []string{"analytics"}, Name: "events"}
+	metadata := json.RawMessage(`{"format-version":2,"location":"s3://grainfs-tables/warehouse/analytics/events"}`)
+	_, err := store.CreateTable(ctx, ident, CreateTableInput{
+		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
+		Metadata:         metadata,
+		Properties:       map[string]string{"format-version": "2"},
+	})
+	require.NoError(t, err)
+
+	exported, err := store.ExportLegacyRows(ctx)
+	require.NoError(t, err)
+	require.Len(t, exported.Namespaces, 1)
+	require.Equal(t, []string{"analytics"}, exported.Namespaces[0].Namespace)
+	require.Equal(t, map[string]string{"owner": "eng"}, exported.Namespaces[0].Properties)
+	require.Len(t, exported.Tables, 1)
+	require.Equal(t, ident, exported.Tables[0].Identifier)
+	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", exported.Tables[0].MetadataLocation)
+	require.JSONEq(t, string(metadata), string(exported.Tables[0].Metadata))
+	require.Equal(t, map[string]string{"format-version": "2"}, exported.Tables[0].Properties)
+}
+
 func TestStore_DeleteTableAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store, reopen := openTestStore(t)

@@ -67,6 +67,12 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handleCompleteMultipartUpload(dg, fbsArgs)
 	case raftpb.ForwardOpAbortMultipartUpload:
 		return r.handleAbortMultipartUpload(dg, fbsArgs)
+	case raftpb.ForwardOpGetObjectVersion:
+		return r.handleGetObjectVersion(dg, fbsArgs)
+	case raftpb.ForwardOpDeleteObjectVersion:
+		return r.handleDeleteObjectVersion(dg, fbsArgs)
+	case raftpb.ForwardOpListObjectVersions:
+		return r.handleListObjectVersions(dg, fbsArgs)
 	default:
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
@@ -164,6 +170,26 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
 }
 
+func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) *transport.Message {
+	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
+	rc, obj, err := dg.Backend().GetObjectVersion(string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(io.LimitReader(rc, DefaultMaxForwardReplyBytes+1))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	if int64(len(body)) > DefaultMaxForwardReplyBytes {
+		return statusReply(raftpb.ForwardStatusEntityTooLarge)
+	}
+	if obj.Size != int64(len(body)) {
+		return statusReply(raftpb.ForwardStatusInternal)
+	}
+	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
+}
+
 func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) *transport.Message {
 	ha := raftpb.GetRootAsHeadObjectArgs(args, 0)
 	obj, err := dg.Backend().HeadObject(string(ha.Bucket()), string(ha.Key()))
@@ -187,6 +213,15 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 	}, bucket)}
 }
 
+func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) *transport.Message {
+	da := raftpb.GetRootAsDeleteObjectVersionArgs(args, 0)
+	err := dg.Backend().DeleteObjectVersion(string(da.Bucket()), string(da.Key()), string(da.VersionId()))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildOKReply()}
+}
+
 func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transport.Message {
 	la := raftpb.GetRootAsListObjectsArgs(args, 0)
 	objs, err := dg.Backend().ListObjects(string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
@@ -194,6 +229,15 @@ func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transpo
 		return statusReply(mapErrorToStatus(err))
 	}
 	return &transport.Message{Payload: buildObjectsReply(string(la.Bucket()), objs)}
+}
+
+func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) *transport.Message {
+	la := raftpb.GetRootAsListObjectVersionsArgs(args, 0)
+	versions, err := dg.Backend().ListObjectVersions(string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildObjectVersionsReply(versions)}
 }
 
 func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) *transport.Message {

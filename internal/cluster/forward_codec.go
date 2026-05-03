@@ -51,6 +51,19 @@ func buildGetObjectArgs(bucket, key string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
+	b := flatbuffers.NewBuilder(96)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	vid := b.CreateString(versionID)
+	raftpb.GetObjectVersionArgsStart(b)
+	raftpb.GetObjectVersionArgsAddBucket(b, bk)
+	raftpb.GetObjectVersionArgsAddKey(b, k)
+	raftpb.GetObjectVersionArgsAddVersionId(b, vid)
+	b.Finish(raftpb.GetObjectVersionArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildHeadObjectArgs(bucket, key string) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
@@ -73,6 +86,19 @@ func buildDeleteObjectArgs(bucket, key string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildDeleteObjectVersionArgs(bucket, key, versionID string) []byte {
+	b := flatbuffers.NewBuilder(96)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	vid := b.CreateString(versionID)
+	raftpb.DeleteObjectVersionArgsStart(b)
+	raftpb.DeleteObjectVersionArgsAddBucket(b, bk)
+	raftpb.DeleteObjectVersionArgsAddKey(b, k)
+	raftpb.DeleteObjectVersionArgsAddVersionId(b, vid)
+	b.Finish(raftpb.DeleteObjectVersionArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildListObjectsArgs(bucket, prefix string, maxKeys int32) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
@@ -82,6 +108,18 @@ func buildListObjectsArgs(bucket, prefix string, maxKeys int32) []byte {
 	raftpb.ListObjectsArgsAddPrefix(b, pf)
 	raftpb.ListObjectsArgsAddMaxKeys(b, maxKeys)
 	b.Finish(raftpb.ListObjectsArgsEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32) []byte {
+	b := flatbuffers.NewBuilder(64)
+	bk := b.CreateString(bucket)
+	pf := b.CreateString(prefix)
+	raftpb.ListObjectVersionsArgsStart(b)
+	raftpb.ListObjectVersionsArgsAddBucket(b, bk)
+	raftpb.ListObjectVersionsArgsAddPrefix(b, pf)
+	raftpb.ListObjectVersionsArgsAddMaxKeys(b, maxKeys)
+	b.Finish(raftpb.ListObjectVersionsArgsEnd(b))
 	return b.FinishedBytes()
 }
 
@@ -257,6 +295,37 @@ func buildObjectsReply(bucket string, objs []*storage.Object) []byte {
 	return b.FinishedBytes()
 }
 
+func buildObjectVersionsReply(versions []*storage.ObjectVersion) []byte {
+	b := flatbuffers.NewBuilder(64 + len(versions)*64)
+
+	metas := make([]flatbuffers.UOffsetT, len(versions))
+	for i, v := range versions {
+		k := b.CreateString(v.Key)
+		vid := b.CreateString(v.VersionID)
+		etag := b.CreateString(v.ETag)
+		raftpb.ForwardObjectVersionMetaStart(b)
+		raftpb.ForwardObjectVersionMetaAddKey(b, k)
+		raftpb.ForwardObjectVersionMetaAddVersionId(b, vid)
+		raftpb.ForwardObjectVersionMetaAddIsLatest(b, v.IsLatest)
+		raftpb.ForwardObjectVersionMetaAddIsDeleteMarker(b, v.IsDeleteMarker)
+		raftpb.ForwardObjectVersionMetaAddEtag(b, etag)
+		raftpb.ForwardObjectVersionMetaAddSize(b, v.Size)
+		raftpb.ForwardObjectVersionMetaAddModifiedUnixMs(b, v.LastModified)
+		metas[i] = raftpb.ForwardObjectVersionMetaEnd(b)
+	}
+	raftpb.ForwardReplyStartVersionsVector(b, len(versions))
+	for i := len(metas) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(metas[i])
+	}
+	versionsVec := b.EndVector(len(versions))
+
+	raftpb.ForwardReplyStart(b)
+	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
+	raftpb.ForwardReplyAddVersions(b, versionsVec)
+	b.Finish(raftpb.ForwardReplyEnd(b))
+	return b.FinishedBytes()
+}
+
 // buildUploadReply for CreateMultipartUpload.
 func buildUploadReply(bucket, key, uploadID string) []byte {
 	b := flatbuffers.NewBuilder(64)
@@ -366,6 +435,31 @@ func objectsFromReply(reply []byte) ([]*storage.Object, error) {
 			ContentType:  string(meta.ContentType()),
 			LastModified: meta.ModifiedUnixMs(),
 			VersionID:    string(meta.VersionId()),
+		})
+	}
+	return out, nil
+}
+
+func objectVersionsFromReply(reply []byte) ([]*storage.ObjectVersion, error) {
+	if err := parseReplyStatus(reply); err != nil {
+		return nil, err
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	n := fr.VersionsLength()
+	out := make([]*storage.ObjectVersion, 0, n)
+	var meta raftpb.ForwardObjectVersionMeta
+	for i := 0; i < n; i++ {
+		if !fr.Versions(&meta, i) {
+			continue
+		}
+		out = append(out, &storage.ObjectVersion{
+			Key:            string(meta.Key()),
+			VersionID:      string(meta.VersionId()),
+			IsLatest:       meta.IsLatest(),
+			IsDeleteMarker: meta.IsDeleteMarker(),
+			ETag:           string(meta.Etag()),
+			Size:           meta.Size(),
+			LastModified:   meta.ModifiedUnixMs(),
 		})
 	}
 	return out, nil

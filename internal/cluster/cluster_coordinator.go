@@ -425,7 +425,26 @@ func (c *ClusterCoordinator) GetObjectVersion(
 			return gb.GetObjectVersion(bucket, key, versionID)
 		}
 	}
-	return nil, nil, ErrCoordinatorNoRouter
+	if c.forward == nil {
+		return nil, nil, ErrCoordinatorNoRouter
+	}
+	args := buildGetObjectVersionArgs(bucket, key, versionID)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpGetObjectVersion, args)
+	if err != nil {
+		return nil, nil, err
+	}
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		return nil, nil, err
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	body := fr.ReadBodyBytes()
+	bodyCopy := make([]byte, len(body))
+	copy(bodyCopy, body)
+	if obj.Size != int64(len(bodyCopy)) {
+		return nil, nil, ErrForwardBodySizeMismatch
+	}
+	return io.NopCloser(bytes.NewReader(bodyCopy)), obj, nil
 }
 
 func (c *ClusterCoordinator) HeadObject(bucket, key string) (*storage.Object, error) {
@@ -508,7 +527,15 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 			return gb.DeleteObjectVersion(bucket, key, versionID)
 		}
 	}
-	return ErrCoordinatorNoRouter
+	if c.forward == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildDeleteObjectVersionArgs(bucket, key, versionID)
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpDeleteObjectVersion, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
 }
 
 func (c *ClusterCoordinator) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -544,7 +571,15 @@ func (c *ClusterCoordinator) ListObjectVersions(
 			return gb.ListObjectVersions(bucket, prefix, maxKeys)
 		}
 	}
-	return nil, ErrCoordinatorNoRouter
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildListObjectVersionsArgs(bucket, prefix, int32(maxKeys))
+	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpListObjectVersions, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectVersionsFromReply(reply)
 }
 
 // WalkObjects buffers ALL matching objects on the server and returns them in
