@@ -178,7 +178,7 @@ func (c *ClusterCoordinator) GetBucketVersioning(bucket string) (string, error) 
 }
 
 // ListAllObjects implements storage.Snapshotable by enumerating bucket-routed
-// objects across every cluster-wide bucket.
+// object versions across every cluster-wide bucket.
 func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) {
 	if c.router == nil || c.groups == nil {
 		snap, ok := c.base.(storage.Snapshotable)
@@ -193,22 +193,34 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 	}
 	var out []storage.SnapshotObject
 	for _, bucket := range buckets {
-		if err := c.WalkObjects(bucket, "", func(obj *storage.Object) error {
-			out = append(out, storage.SnapshotObject{
-				Bucket:         bucket,
-				Key:            obj.Key,
-				ETag:           obj.ETag,
-				Size:           obj.Size,
-				ContentType:    obj.ContentType,
-				Modified:       obj.LastModified,
-				VersionID:      obj.VersionID,
-				IsDeleteMarker: obj.IsDeleteMarker,
-				IsLatest:       true,
-				ACL:            obj.ACL,
-			})
-			return nil
-		}); err != nil {
+		versions, err := c.ListObjectVersions(bucket, "", 0)
+		if err != nil {
 			return nil, err
+		}
+		for _, version := range versions {
+			snap := storage.SnapshotObject{
+				Bucket:         bucket,
+				Key:            version.Key,
+				ETag:           version.ETag,
+				Size:           version.Size,
+				Modified:       version.LastModified,
+				VersionID:      version.VersionID,
+				IsDeleteMarker: version.IsDeleteMarker,
+				IsLatest:       version.IsLatest,
+			}
+			if !version.IsDeleteMarker {
+				rc, obj, err := c.GetObjectVersion(bucket, version.Key, version.VersionID)
+				if err != nil {
+					return nil, err
+				}
+				_ = rc.Close()
+				snap.ETag = obj.ETag
+				snap.Size = obj.Size
+				snap.ContentType = obj.ContentType
+				snap.Modified = obj.LastModified
+				snap.ACL = obj.ACL
+			}
+			out = append(out, snap)
 		}
 	}
 	return out, nil
@@ -376,9 +388,9 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // The wire opcode is one of raftpb.ForwardOp* values; the reply layout is
 // dictated by ForwardReply (see forward_codec.go).
 
-// GetObject reads the object body and metadata. Forwarded body bytes are
-// embedded inside one reply up to DefaultMaxForwardReplyBytes. Returns
-// ErrNoSuchBucket / ErrObjectNotFound for the obvious cases.
+// GetObject reads the object body and metadata. Production forwarding streams
+// response body bytes after the metadata reply; legacy tests can still use the
+// single-frame read_body fallback.
 func (c *ClusterCoordinator) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	target, err := c.routeBucket(bucket)
 	if err != nil {
@@ -393,6 +405,9 @@ func (c *ClusterCoordinator) GetObject(bucket, key string) (io.ReadCloser, *stor
 		return nil, nil, ErrCoordinatorNoRouter
 	}
 	args := buildGetObjectArgs(bucket, key)
+	if c.forward.readDialer != nil {
+		return c.forwardReadObject(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpGetObject, args)
+	}
 	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpGetObject, args)
 	if err != nil {
 		return nil, nil, err
@@ -429,6 +444,9 @@ func (c *ClusterCoordinator) GetObjectVersion(
 		return nil, nil, ErrCoordinatorNoRouter
 	}
 	args := buildGetObjectVersionArgs(bucket, key, versionID)
+	if c.forward.readDialer != nil {
+		return c.forwardReadObject(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpGetObjectVersion, args)
+	}
 	reply, err := c.forward.Send(context.TODO(), target.peers, target.groupID, raftpb.ForwardOpGetObjectVersion, args)
 	if err != nil {
 		return nil, nil, err
@@ -445,6 +463,46 @@ func (c *ClusterCoordinator) GetObjectVersion(
 		return nil, nil, ErrForwardBodySizeMismatch
 	}
 	return io.NopCloser(bytes.NewReader(bodyCopy)), obj, nil
+}
+
+func (c *ClusterCoordinator) forwardReadObject(
+	ctx context.Context,
+	peers []string,
+	groupID string,
+	op raftpb.ForwardOp,
+	args []byte,
+) (io.ReadCloser, *storage.Object, error) {
+	reply, body, err := c.forward.SendReadStream(ctx, peers, groupID, op, args)
+	if err != nil {
+		return nil, nil, err
+	}
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		if body != nil {
+			_ = body.Close()
+		}
+		return nil, nil, err
+	}
+	return &forwardReadValidator{rc: body, want: obj.Size}, obj, nil
+}
+
+type forwardReadValidator struct {
+	rc   io.ReadCloser
+	want int64
+	got  int64
+}
+
+func (r *forwardReadValidator) Read(p []byte) (int, error) {
+	n, err := r.rc.Read(p)
+	r.got += int64(n)
+	if err == io.EOF && r.got != r.want {
+		return n, ErrForwardBodySizeMismatch
+	}
+	return n, err
+}
+
+func (r *forwardReadValidator) Close() error {
+	return r.rc.Close()
 }
 
 func (c *ClusterCoordinator) HeadObject(bucket, key string) (*storage.Object, error) {

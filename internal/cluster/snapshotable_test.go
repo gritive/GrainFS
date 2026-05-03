@@ -23,27 +23,32 @@ func TestListAllObjects_EmptyBucket(t *testing.T) {
 	assert.Empty(t, objs)
 }
 
-func TestListAllObjects_SkipsTombstones(t *testing.T) {
+func TestListAllObjects_PreservesVersionHistoryAndDeleteMarkers(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket("tomb"))
 
-	// Write a live object then delete it (creates tombstone).
-	createBlob(t, b, "tomb", "live.txt", "v1")
-	require.NoError(t, b.putMeta("tomb", "live.txt", "v1", "etag-live", 4, "text/plain"))
-
-	createBlob(t, b, "tomb", "dead.txt", "v1")
-	require.NoError(t, b.putMeta("tomb", "dead.txt", "v1", "etag-dead", 4, "text/plain"))
-	require.NoError(t, b.DeleteObject("tomb", "dead.txt"))
+	v1, err := b.PutObject("tomb", "doc.txt", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	v2, err := b.PutObject("tomb", "doc.txt", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+	markerID, err := b.DeleteObjectReturningMarker("tomb", "doc.txt")
+	require.NoError(t, err)
 
 	objs, err := b.ListAllObjects()
 	require.NoError(t, err)
 
-	keys := make([]string, len(objs))
-	for i, o := range objs {
-		keys[i] = o.Key
+	byVersion := make(map[string]storage.SnapshotObject)
+	for _, o := range objs {
+		byVersion[o.VersionID] = o
 	}
-	assert.Contains(t, keys, "live.txt")
-	assert.NotContains(t, keys, "dead.txt")
+	require.Contains(t, byVersion, v1.VersionID)
+	require.Contains(t, byVersion, v2.VersionID)
+	require.Contains(t, byVersion, markerID)
+	assert.False(t, byVersion[v1.VersionID].IsLatest)
+	assert.False(t, byVersion[v2.VersionID].IsLatest)
+	assert.True(t, byVersion[markerID].IsLatest)
+	assert.True(t, byVersion[markerID].IsDeleteMarker)
+	assert.Equal(t, deleteMarkerETag, byVersion[markerID].ETag)
 }
 
 func TestListAllObjects_NoBuckets(t *testing.T) {
@@ -97,6 +102,42 @@ func TestRestoreObjects_RemovesExtraObjects(t *testing.T) {
 	objs, err := b.ListAllObjects()
 	require.NoError(t, err)
 	assert.Empty(t, objs, "all objects outside snapshot should be gone")
+}
+
+func TestRestoreObjects_PreservesVersionHistoryAndDeleteMarkers(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket("hist"))
+
+	v1, err := b.PutObject("hist", "doc.txt", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	v2, err := b.PutObject("hist", "doc.txt", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+	markerID, err := b.DeleteObjectReturningMarker("hist", "doc.txt")
+	require.NoError(t, err)
+
+	snap, err := b.ListAllObjects()
+	require.NoError(t, err)
+
+	v3, err := b.PutObject("hist", "doc.txt", strings.NewReader("v3"), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, b.RestoreBuckets([]storage.SnapshotBucket{{Name: "hist", VersioningState: "Enabled"}}))
+	count, stale, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+	require.Empty(t, stale)
+	require.Equal(t, len(snap), count)
+
+	versions, err := b.ListObjectVersions("hist", "doc.txt", 10)
+	require.NoError(t, err)
+	ids := make(map[string]*storage.ObjectVersion)
+	for _, v := range versions {
+		ids[v.VersionID] = v
+	}
+	require.Contains(t, ids, v1.VersionID)
+	require.Contains(t, ids, v2.VersionID)
+	require.Contains(t, ids, markerID)
+	require.NotContains(t, ids, v3.VersionID)
+	require.True(t, ids[markerID].IsLatest)
+	require.True(t, ids[markerID].IsDeleteMarker)
 }
 
 func TestBlobExists_VersionedPath(t *testing.T) {

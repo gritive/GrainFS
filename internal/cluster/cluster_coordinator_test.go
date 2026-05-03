@@ -206,6 +206,43 @@ func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) 
 	require.NotEmpty(t, objs[0].VersionID)
 }
 
+func TestClusterCoordinator_ListAllObjects_PreservesVersionsAndDeleteMarkers(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb := newTestGroupBackend(t, "group-1")
+	v1, err := gb.PutObject("photos", "a.txt", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	v2, err := gb.PutObject("photos", "a.txt", strings.NewReader("v2"), "text/plain")
+	require.NoError(t, err)
+	markerID, err := gb.DeleteObjectReturningMarker("photos", "a.txt")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	objs, err := c.ListAllObjects()
+	require.NoError(t, err)
+	byVersion := map[string]storage.SnapshotObject{}
+	for _, obj := range objs {
+		byVersion[obj.VersionID] = obj
+	}
+	require.Len(t, byVersion, 3)
+	require.Contains(t, byVersion, v1.VersionID)
+	require.Contains(t, byVersion, v2.VersionID)
+	require.Contains(t, byVersion, markerID)
+	require.False(t, byVersion[v1.VersionID].IsLatest)
+	require.False(t, byVersion[v2.VersionID].IsLatest)
+	require.True(t, byVersion[markerID].IsLatest)
+	require.True(t, byVersion[markerID].IsDeleteMarker)
+	require.Equal(t, "text/plain", byVersion[v1.VersionID].ContentType)
+	require.Equal(t, "text/plain", byVersion[v2.VersionID].ContentType)
+}
+
 func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")
@@ -328,8 +365,11 @@ func TestClusterCoordinator_RouteBucket_ResolvesNodeIDPeersToAddresses(t *testin
 type recordingDialer struct {
 	calls         []dialerCall
 	streamCalls   []dialerCall
+	readCalls     []dialerCall
 	replyByOp     map[raftpb.ForwardOp][]byte
 	streamReplyBy map[raftpb.ForwardOp][]byte
+	readReplyBy   map[raftpb.ForwardOp][]byte
+	readBodyBy    map[raftpb.ForwardOp][]byte
 	defaultErr    error
 }
 
@@ -383,6 +423,23 @@ func (d *recordingDialer) stream(ctx context.Context, peer string, payload []byt
 	return buildSimpleReply(raftpb.ForwardStatusInternal, ""), nil
 }
 
+func (d *recordingDialer) readStream(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
+	if d.defaultErr != nil {
+		return nil, nil, d.defaultErr
+	}
+	gid, op, args, err := decodeForwardPayload(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	argsCopy := make([]byte, len(args))
+	copy(argsCopy, args)
+	d.readCalls = append(d.readCalls, dialerCall{peer: peer, op: op, gid: gid, args: argsCopy, rawly: payload})
+	if reply, ok := d.readReplyBy[op]; ok {
+		return reply, io.NopCloser(bytes.NewReader(d.readBodyBy[op])), nil
+	}
+	return buildSimpleReply(raftpb.ForwardStatusInternal, ""), io.NopCloser(bytes.NewReader(nil)), nil
+}
+
 // setupCoordWithForward builds a coordinator wired to a recording dialer for
 // a single bucket → group mapping. self is NOT a voter so all calls forward.
 func setupCoordWithForward(t *testing.T, bucket, groupID string, peers []string) (*ClusterCoordinator, *recordingDialer) {
@@ -395,7 +452,12 @@ func setupCoordWithForward(t *testing.T, bucket, groupID string, peers []string)
 	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		groupID: {ID: groupID, PeerIDs: peers},
 	}}
-	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}, streamReplyBy: map[raftpb.ForwardOp][]byte{}}
+	d := &recordingDialer{
+		replyByOp:     map[raftpb.ForwardOp][]byte{},
+		streamReplyBy: map[raftpb.ForwardOp][]byte{},
+		readReplyBy:   map[raftpb.ForwardOp][]byte{},
+		readBodyBy:    map[raftpb.ForwardOp][]byte{},
+	}
 	sender := NewForwardSender(d.dial)
 	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(sender)
 	return c, d
@@ -449,6 +511,28 @@ func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
 	require.Equal(t, body, got)
+}
+
+func TestClusterCoordinator_GetObject_ForwardUsesReadStream(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("g"), int(DefaultMaxForwardReplyBytes)+1024)
+	d.readReplyBy[raftpb.ForwardOpGetObject] = buildGetObjectReply(
+		&storage.Object{Key: "large", Size: int64(len(body)), ETag: "etag-large", ContentType: "application/octet-stream"},
+		"bk", nil,
+	)
+	d.readBodyBy[raftpb.ForwardOpGetObject] = body
+	c.forward.WithReadStreamDialer(d.readStream)
+
+	rc, obj, err := c.GetObject("bk", "large")
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Equal(t, body, got)
+	require.Empty(t, d.calls)
+	require.Len(t, d.readCalls, 1)
+	require.Equal(t, raftpb.ForwardOpGetObject, d.readCalls[0].op)
 }
 
 func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
@@ -521,6 +605,28 @@ func TestClusterCoordinator_GetObjectVersion_Forward(t *testing.T) {
 	require.Equal(t, "bk", string(args.Bucket()))
 	require.Equal(t, "k", string(args.Key()))
 	require.Equal(t, "vid-1", string(args.VersionId()))
+}
+
+func TestClusterCoordinator_GetObjectVersion_ForwardUsesReadStream(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("v"), int(DefaultMaxForwardReplyBytes)+1024)
+	d.readReplyBy[raftpb.ForwardOpGetObjectVersion] = buildGetObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-v1", ContentType: "application/octet-stream", VersionID: "vid-1"},
+		"bk", nil,
+	)
+	d.readBodyBy[raftpb.ForwardOpGetObjectVersion] = body
+	c.forward.WithReadStreamDialer(d.readStream)
+
+	rc, obj, err := c.GetObjectVersion("bk", "k", "vid-1")
+	require.NoError(t, err)
+	got, readErr := io.ReadAll(rc)
+	rc.Close()
+	require.NoError(t, readErr)
+	require.Equal(t, "vid-1", obj.VersionID)
+	require.Equal(t, body, got)
+	require.Empty(t, d.calls)
+	require.Len(t, d.readCalls, 1)
+	require.Equal(t, raftpb.ForwardOpGetObjectVersion, d.readCalls[0].op)
 }
 
 func TestClusterCoordinator_DeleteObjectVersion_Forward(t *testing.T) {

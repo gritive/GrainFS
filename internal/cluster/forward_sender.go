@@ -1,11 +1,13 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -35,12 +37,14 @@ var (
 // canned replies.
 type forwardDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 type forwardStreamDialer func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error)
+type forwardReadStreamDialer func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error)
 
 // ForwardSender is the client side of the 0x08 wire. Stateless apart from the
 // dialer + timeout — a single instance is shared across all coordinator calls.
 type ForwardSender struct {
 	dialer       forwardDialer
 	streamDialer forwardStreamDialer
+	readDialer   forwardReadStreamDialer
 	timeout      time.Duration
 	streamSlots  chan struct{}
 }
@@ -59,6 +63,14 @@ func NewForwardSender(d forwardDialer) *ForwardSender {
 // behind it on the same QUIC stream.
 func (s *ForwardSender) WithStreamDialer(d forwardStreamDialer) *ForwardSender {
 	s.streamDialer = d
+	return s
+}
+
+// WithReadStreamDialer enables streamed response forwarding for GetObject and
+// GetObjectVersion. The metadata reply is a ForwardReply frame; object bytes
+// follow as the raw response body on the same QUIC stream.
+func (s *ForwardSender) WithReadStreamDialer(d forwardReadStreamDialer) *ForwardSender {
+	s.readDialer = d
 	return s
 }
 
@@ -266,6 +278,92 @@ func (s *ForwardSender) SendStream(
 		return nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
 	}
 	return nil, ErrNoReachablePeer
+}
+
+func (s *ForwardSender) SendReadStream(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte,
+) ([]byte, io.ReadCloser, error) {
+	if s.readDialer == nil {
+		return nil, nil, ErrNoReachablePeer
+	}
+	select {
+	case s.streamSlots <- struct{}{}:
+	default:
+		return nil, nil, storage.ErrForwardBackpressure
+	}
+	releaseSlot := true
+	defer func() {
+		if releaseSlot {
+			<-s.streamSlots
+		}
+	}()
+
+	if s.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+	}
+
+	payload := encodeForwardPayload(groupID, op, fbsArgs)
+	var redirected bool
+	var lastDialErr error
+	for _, peer := range peers {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		reply, body, err := s.readDialer(ctx, peer, payload)
+		if err != nil {
+			lastDialErr = err
+			continue
+		}
+		if isNotLeaderReply(reply) && !redirected {
+			redirected = true
+			if body != nil {
+				_ = body.Close()
+			}
+			if hint := extractLeaderHint(reply); hint != "" {
+				r2, b2, err2 := s.readDialer(ctx, hint, payload)
+				if err2 == nil {
+					releaseSlot = false
+					return r2, newForwardSlotReadCloser(b2, s.streamSlots), nil
+				}
+			}
+			return reply, io.NopCloser(bytes.NewReader(nil)), nil
+		}
+		releaseSlot = false
+		return reply, newForwardSlotReadCloser(body, s.streamSlots), nil
+	}
+	if lastDialErr != nil {
+		return nil, nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
+	}
+	return nil, nil, ErrNoReachablePeer
+}
+
+type forwardSlotReadCloser struct {
+	rc    io.ReadCloser
+	slots chan struct{}
+	once  sync.Once
+}
+
+func newForwardSlotReadCloser(rc io.ReadCloser, slots chan struct{}) io.ReadCloser {
+	if rc == nil {
+		rc = io.NopCloser(bytes.NewReader(nil))
+	}
+	return &forwardSlotReadCloser{rc: rc, slots: slots}
+}
+
+func (r *forwardSlotReadCloser) Read(p []byte) (int, error) {
+	return r.rc.Read(p)
+}
+
+func (r *forwardSlotReadCloser) Close() error {
+	var err error
+	r.once.Do(func() {
+		err = r.rc.Close()
+		<-r.slots
+	})
+	return err
 }
 
 func canRewindForwardBody(r io.Reader) bool {

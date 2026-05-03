@@ -5,14 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// ListAllObjects implements storage.Snapshotable by enumerating every live
-// (non-tombstone) object across all buckets via the lat: latest-pointer index.
+// ListAllObjects implements storage.Snapshotable by enumerating every
+// versioned object record, including non-latest versions and delete markers.
 func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 	buckets, err := b.ListBuckets()
 	if err != nil {
@@ -21,42 +22,51 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 	var result []storage.SnapshotObject
 	for _, bucket := range buckets {
 		if err := b.db.View(func(txn *badger.Txn) error {
+			latest := make(map[string]string)
 			latPrefix := []byte("lat:" + bucket + "/")
+			latIt := txn.NewIterator(badger.DefaultIteratorOptions)
+			for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
+				key := string(latIt.Item().Key()[len(latPrefix):])
+				_ = latIt.Item().Value(func(v []byte) error {
+					latest[key] = string(v)
+					return nil
+				})
+			}
+			latIt.Close()
+
+			objPrefix := []byte("obj:" + bucket + "/")
 			it := txn.NewIterator(badger.DefaultIteratorOptions)
 			defer it.Close()
-			for it.Seek(latPrefix); it.ValidForPrefix(latPrefix); it.Next() {
-				key := string(it.Item().Key()[len(latPrefix):])
-				var versionID string
-				if err := it.Item().Value(func(v []byte) error {
-					versionID = string(v)
-					return nil
-				}); err != nil || versionID == "" {
+			for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
+				rest := string(it.Item().Key()[len(objPrefix):])
+				slash := strings.LastIndex(rest, "/")
+				if slash < 0 {
 					continue
 				}
-				metaItem, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
-				if err != nil {
+				key := rest[:slash]
+				versionID := rest[slash+1:]
+				if key == "" || versionID == "" {
 					continue
 				}
 				var meta objectMeta
-				if err := metaItem.Value(func(v []byte) error {
+				if err := it.Item().Value(func(v []byte) error {
 					var derr error
 					meta, derr = unmarshalObjectMeta(v)
 					return derr
 				}); err != nil {
 					continue
 				}
-				if meta.ETag == deleteMarkerETag {
-					continue
-				}
 				result = append(result, storage.SnapshotObject{
-					Bucket:      bucket,
-					Key:         key,
-					ETag:        meta.ETag,
-					Size:        meta.Size,
-					ContentType: meta.ContentType,
-					Modified:    meta.LastModified,
-					VersionID:   versionID,
-					IsLatest:    true,
+					Bucket:         bucket,
+					Key:            key,
+					ETag:           meta.ETag,
+					Size:           meta.Size,
+					ContentType:    meta.ContentType,
+					Modified:       meta.LastModified,
+					VersionID:      versionID,
+					IsDeleteMarker: meta.ETag == deleteMarkerETag,
+					IsLatest:       latest[key] == versionID,
+					ACL:            meta.ACL,
 				})
 			}
 			return nil
@@ -118,18 +128,15 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 }
 
 // RestoreObjects implements storage.Snapshotable.
-// It hard-deletes (metadata only) any versioned object whose bucket+key is
-// absent from objects, then re-proposes CmdPutObjectMeta for each snapshot
-// object to reset the latest pointer. Objects whose blob is missing on disk
-// are returned as StaleBlob entries without being restored.
+// It hard-deletes metadata versions absent from the snapshot, then reproposes
+// metadata for every snapshot version. Delete markers do not require blobs.
 func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
-	// Index snapshot objects by bucket+key.
+	// Index snapshot objects by bucket+key+version.
 	want := make(map[string]storage.SnapshotObject, len(objects))
 	for _, o := range objects {
-		want[o.Bucket+"\x00"+o.Key] = o
+		want[o.Bucket+"\x00"+o.Key+"\x00"+o.VersionID] = o
 	}
 
-	// Collect current latest-pointer entries that are absent from the snapshot.
 	type latEntry struct{ bucket, key, versionID string }
 	var toDelete []latEntry
 
@@ -139,16 +146,20 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 	}
 	for _, bucket := range buckets {
 		if err := b.db.View(func(txn *badger.Txn) error {
-			latPrefix := []byte("lat:" + bucket + "/")
+			objPrefix := []byte("obj:" + bucket + "/")
 			it := txn.NewIterator(badger.DefaultIteratorOptions)
 			defer it.Close()
-			for it.Seek(latPrefix); it.ValidForPrefix(latPrefix); it.Next() {
-				key := string(it.Item().Key()[len(latPrefix):])
-				if _, wanted := want[bucket+"\x00"+key]; wanted {
+			for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
+				rest := string(it.Item().Key()[len(objPrefix):])
+				slash := strings.LastIndex(rest, "/")
+				if slash < 0 {
 					continue
 				}
-				var versionID string
-				_ = it.Item().Value(func(v []byte) error { versionID = string(v); return nil })
+				key := rest[:slash]
+				versionID := rest[slash+1:]
+				if _, wanted := want[bucket+"\x00"+key+"\x00"+versionID]; wanted {
+					continue
+				}
 				toDelete = append(toDelete, latEntry{bucket, key, versionID})
 			}
 			return nil
@@ -173,7 +184,7 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 	var stale []storage.StaleBlob
 	var count int
 	for _, snap := range objects {
-		if !b.blobExists(snap.Bucket, snap.Key, snap.VersionID) {
+		if !snap.IsDeleteMarker && !b.blobExists(snap.Bucket, snap.Key, snap.VersionID) {
 			stale = append(stale, storage.StaleBlob{
 				Bucket:       snap.Bucket,
 				Key:          snap.Key,
@@ -181,14 +192,17 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 			})
 			continue
 		}
+		preserveLatest := snap.VersionID != "" && !snap.IsLatest
 		if err := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:      snap.Bucket,
-			Key:         snap.Key,
-			Size:        snap.Size,
-			ContentType: snap.ContentType,
-			ETag:        snap.ETag,
-			ModTime:     snap.Modified,
-			VersionID:   snap.VersionID,
+			Bucket:         snap.Bucket,
+			Key:            snap.Key,
+			Size:           snap.Size,
+			ContentType:    snap.ContentType,
+			ETag:           snap.ETag,
+			ModTime:        snap.Modified,
+			VersionID:      snap.VersionID,
+			PreserveLatest: preserveLatest,
+			IsDeleteMarker: snap.IsDeleteMarker,
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore meta %s/%s: %w", snap.Bucket, snap.Key, err)
 		}

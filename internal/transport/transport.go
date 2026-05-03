@@ -24,6 +24,7 @@ const (
 	StreamMetaCatalogRead     StreamType = 0x0C // Follower → meta-Raft leader Iceberg catalog linearized reads
 	StreamGroupForwardBody    StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
 	StreamMetaJoin            StreamType = 0x0E // New node → meta-Raft leader dynamic join admin RPC
+	StreamGroupForwardRead    StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
 )
 
 type StreamClass byte
@@ -41,7 +42,7 @@ func ClassOf(st StreamType) StreamClass {
 		return StreamClassMeta
 	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft:
 		return StreamClassData
-	case StreamGroupForwardBody:
+	case StreamGroupForwardBody, StreamGroupForwardRead:
 		return StreamClassBulk
 	default:
 		return StreamClassControl

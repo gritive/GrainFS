@@ -158,8 +158,32 @@ func (rcv *PutObjectMetaCmd) NodeIdsLength() int {
 	return 0
 }
 
+func (rcv *PutObjectMetaCmd) PreserveLatest() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutatePreserveLatest(n bool) bool {
+	return rcv._tab.MutateBoolSlot(26, n)
+}
+
+func (rcv *PutObjectMetaCmd) IsDeleteMarker() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateIsDeleteMarker(n bool) bool {
+	return rcv._tab.MutateBoolSlot(28, n)
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(13)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -193,6 +217,12 @@ func PutObjectMetaCmdAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
 }
 func PutObjectMetaCmdAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(nodeIds), 0)
+}
+func PutObjectMetaCmdAddPreserveLatest(builder *flatbuffers.Builder, preserveLatest bool) {
+	builder.PrependBoolSlot(11, preserveLatest, false)
+}
+func PutObjectMetaCmdAddIsDeleteMarker(builder *flatbuffers.Builder, isDeleteMarker bool) {
+	builder.PrependBoolSlot(12, isDeleteMarker, false)
 }
 func PutObjectMetaCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)

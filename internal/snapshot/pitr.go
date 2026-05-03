@@ -40,10 +40,10 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 		return nil, ErrNoSnapshotBefore
 	}
 
-	// Build object map from base snapshot
+	// Build version map from base snapshot.
 	objects := make(map[string]storage.SnapshotObject, len(base.Objects))
 	for _, o := range base.Objects {
-		objects[o.Bucket+"/"+o.Key] = o
+		objects[snapshotObjectKey(o.Bucket, o.Key, o.VersionID)] = o
 	}
 
 	// Replay WAL entries if WAL directory is configured
@@ -52,30 +52,45 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 		walReplayed, err = wal.Replay(m.walDir, base.WALOffset, targetTime, func(e wal.Entry) {
 			switch e.Op {
 			case wal.OpPut:
-				objects[e.Bucket+"/"+e.Key] = storage.SnapshotObject{
+				objects[snapshotObjectKey(e.Bucket, e.Key, e.VersionID)] = storage.SnapshotObject{
 					Bucket:      e.Bucket,
 					Key:         e.Key,
 					ETag:        e.ETag,
 					ContentType: e.ContentType,
 					Size:        e.Size,
 					Modified:    e.Timestamp / 1e9, // ns → s
+					VersionID:   e.VersionID,
+					IsLatest:    true,
 				}
+				clearLatest(objects, e.Bucket, e.Key, e.VersionID)
 			case wal.OpDelete:
-				// Latest-pointer delete (tombstone). PITR resolves the object map to
-				// a single latest state per key, so drop the entry.
-				delete(objects, e.Bucket+"/"+e.Key)
+				if e.VersionID == "" {
+					deleteAllVersions(objects, e.Bucket, e.Key)
+					return
+				}
+				objects[snapshotObjectKey(e.Bucket, e.Key, e.VersionID)] = storage.SnapshotObject{
+					Bucket:         e.Bucket,
+					Key:            e.Key,
+					ETag:           "DEL",
+					VersionID:      e.VersionID,
+					IsDeleteMarker: true,
+					IsLatest:       true,
+				}
+				clearLatest(objects, e.Bucket, e.Key, e.VersionID)
 			case wal.OpDeleteVersion:
-				// Hard delete of a specific version. Only affects the resolved state
-				// when that version is the one currently represented in the map.
-				// Without per-version tracking we approximate by removing the key —
-				// a later PUT within the replay window re-inserts it.
-				delete(objects, e.Bucket+"/"+e.Key)
+				if e.VersionID != "" {
+					delete(objects, snapshotObjectKey(e.Bucket, e.Key, e.VersionID))
+				} else {
+					deleteAllVersions(objects, e.Bucket, e.Key)
+				}
 			}
 		})
 		if err != nil {
 			return nil, fmt.Errorf("wal replay: %w", err)
 		}
 	}
+
+	normalizeLatest(objects)
 
 	// Flatten map to slice
 	finalObjects := make([]storage.SnapshotObject, 0, len(objects))
@@ -94,4 +109,51 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 		StaleBlobs:         stale,
 		BaseSnapshotSeq:    base.Seq,
 	}, nil
+}
+
+func snapshotObjectKey(bucket, key, versionID string) string {
+	return bucket + "\x00" + key + "\x00" + versionID
+}
+
+func clearLatest(objects map[string]storage.SnapshotObject, bucket, key, latestVersionID string) {
+	for k, obj := range objects {
+		if obj.Bucket != bucket || obj.Key != key || obj.VersionID == latestVersionID {
+			continue
+		}
+		obj.IsLatest = false
+		objects[k] = obj
+	}
+}
+
+func deleteAllVersions(objects map[string]storage.SnapshotObject, bucket, key string) {
+	for k, obj := range objects {
+		if obj.Bucket == bucket && obj.Key == key {
+			delete(objects, k)
+		}
+	}
+}
+
+func normalizeLatest(objects map[string]storage.SnapshotObject) {
+	type groupKey struct{ bucket, key string }
+	latestSeen := map[groupKey]bool{}
+	newestKey := map[groupKey]string{}
+	newestVersion := map[groupKey]string{}
+	for mapKey, obj := range objects {
+		g := groupKey{bucket: obj.Bucket, key: obj.Key}
+		if obj.IsLatest {
+			latestSeen[g] = true
+		}
+		if obj.VersionID >= newestVersion[g] {
+			newestVersion[g] = obj.VersionID
+			newestKey[g] = mapKey
+		}
+	}
+	for g, mapKey := range newestKey {
+		if latestSeen[g] {
+			continue
+		}
+		obj := objects[mapKey]
+		obj.IsLatest = true
+		objects[mapKey] = obj
+	}
 }

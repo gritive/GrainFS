@@ -158,11 +158,15 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 	if err != nil {
 		return err
 	}
+	etag := c.ETag
+	if c.IsDeleteMarker {
+		etag = deleteMarkerETag
+	}
 	meta, err := marshalObjectMeta(objectMeta{
 		Key:          c.Key,
 		Size:         c.Size,
 		ContentType:  c.ContentType,
-		ETag:         c.ETag,
+		ETag:         etag,
 		LastModified: c.ModTime,
 		RingVersion:  uint64(c.RingVersion),
 		ECData:       c.ECData,
@@ -173,17 +177,33 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
 	if err := f.db.Update(func(txn *badger.Txn) error {
-		// Dual-write: keep the legacy latest-only key in sync during the transition
-		// so readers that haven't been ported yet still see the object.
-		if err := txn.Set(objectMetaKey(c.Bucket, c.Key), meta); err != nil {
-			return err
-		}
 		// Versioned entries are only written when a VersionID is supplied. Legacy
 		// replay (empty VersionID) gets the single legacy key only.
 		if c.VersionID != "" {
 			if err := txn.Set(objectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
 				return err
 			}
+			if c.PreserveLatest {
+				return nil
+			}
+		}
+		if c.IsDeleteMarker {
+			if c.VersionID != "" {
+				if err := txn.Set(latestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+					return err
+				}
+			}
+			if err := txn.Delete(objectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
+			return nil
+		}
+		// Dual-write: keep the legacy latest-only key in sync during the transition
+		// so readers that haven't been ported yet still see the object.
+		if err := txn.Set(objectMetaKey(c.Bucket, c.Key), meta); err != nil {
+			return err
+		}
+		if c.VersionID != "" {
 			if err := txn.Set(latestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
 				return err
 			}

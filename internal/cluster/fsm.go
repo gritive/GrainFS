@@ -66,6 +66,10 @@ type PutObjectMetaCmd struct {
 	ECData      uint8       // EC k (data shards)
 	ECParity    uint8       // EC m (parity shards)
 	NodeIDs     []string    // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
+	// PreserveLatest writes this version without moving lat:{bucket}/{key}.
+	// Snapshot restore uses it for non-latest versions.
+	PreserveLatest bool
+	IsDeleteMarker bool
 }
 
 // SetRingCmd는 컨시스턴트 해시 링을 FSM에 커밋하는 명령이다.

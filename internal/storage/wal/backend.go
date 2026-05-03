@@ -106,6 +106,16 @@ func (b *Backend) ReadAt(bucket, key string, offset int64, buf []byte) (int, err
 }
 
 func (b *Backend) DeleteObject(bucket, key string) error {
+	if sd, ok := b.Backend.(interface {
+		DeleteObjectReturningMarker(bucket, key string) (string, error)
+	}); ok {
+		markerID, err := sd.DeleteObjectReturningMarker(bucket, key)
+		if err != nil {
+			return err
+		}
+		b.w.AppendAsync(Entry{Op: OpDelete, Bucket: bucket, Key: key, VersionID: markerID})
+		return nil
+	}
 	if err := b.Backend.DeleteObject(bucket, key); err != nil {
 		return err
 	}
@@ -116,6 +126,24 @@ func (b *Backend) DeleteObject(bucket, key string) error {
 	// tombstone or hard-delete semantics on read-paths that walk versions.
 	b.w.AppendAsync(Entry{Op: OpDelete, Bucket: bucket, Key: key})
 	return nil
+}
+
+func (b *Backend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	sd, ok := b.Backend.(interface {
+		DeleteObjectReturningMarker(bucket, key string) (string, error)
+	})
+	if !ok {
+		if err := b.DeleteObject(bucket, key); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	markerID, err := sd.DeleteObjectReturningMarker(bucket, key)
+	if err != nil {
+		return "", err
+	}
+	b.w.AppendAsync(Entry{Op: OpDelete, Bucket: bucket, Key: key, VersionID: markerID})
+	return markerID, nil
 }
 
 func (b *Backend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
