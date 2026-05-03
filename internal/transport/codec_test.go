@@ -32,6 +32,8 @@ func TestBinaryCodec_RoundTrip(t *testing.T) {
 			got, err := codec.Decode(&buf)
 			require.NoError(t, err)
 			require.Equal(t, tt.msg.Type, got.Type)
+			require.Equal(t, tt.msg.ID, got.ID)
+			require.Equal(t, tt.msg.Status, got.Status)
 			require.Equal(t, tt.msg.Payload, got.Payload)
 		})
 	}
@@ -55,6 +57,8 @@ func TestBinaryCodec_MultipleMessages(t *testing.T) {
 		got, err := codec.Decode(&buf)
 		require.NoError(t, err, "message %d", i)
 		require.Equal(t, want.Type, got.Type)
+		require.Equal(t, want.ID, got.ID)
+		require.Equal(t, want.Status, got.Status)
 		require.Equal(t, want.Payload, got.Payload)
 	}
 }
@@ -63,14 +67,16 @@ func TestBinaryCodec_WireFormat(t *testing.T) {
 	codec := &BinaryCodec{}
 	var buf bytes.Buffer
 
-	msg := &Message{Type: StreamControl, Payload: []byte("hi")}
+	msg := &Message{Type: StreamControl, ID: 42, Status: StatusOK, Payload: []byte("hi")}
 	require.NoError(t, codec.Encode(&buf, msg))
 
 	data := buf.Bytes()
-	require.Len(t, data, 7) // 5 header + 2 payload
+	require.Len(t, data, 16) // 14 header + 2 payload
 	require.Equal(t, byte(StreamControl), data[0])
-	require.Equal(t, uint32(2), binary.BigEndian.Uint32(data[1:5]))
-	require.Equal(t, "hi", string(data[5:]))
+	require.Equal(t, uint64(42), binary.BigEndian.Uint64(data[1:9]))
+	require.Equal(t, byte(StatusOK), data[9])
+	require.Equal(t, uint32(2), binary.BigEndian.Uint32(data[10:14]))
+	require.Equal(t, "hi", string(data[14:]))
 }
 
 func TestBinaryCodec_DecodeErrors(t *testing.T) {
@@ -82,8 +88,8 @@ func TestBinaryCodec_DecodeErrors(t *testing.T) {
 	})
 
 	t.Run("truncated payload", func(t *testing.T) {
-		header := [5]byte{byte(StreamControl)}
-		binary.BigEndian.PutUint32(header[1:], 100)
+		header := [headerSize]byte{byte(StreamControl)}
+		binary.BigEndian.PutUint32(header[10:], 100)
 		_, err := codec.Decode(bytes.NewReader(append(header[:], []byte("hi")...)))
 		require.Error(t, err)
 	})
@@ -94,12 +100,30 @@ func TestBinaryCodec_DecodeErrors(t *testing.T) {
 	})
 
 	t.Run("payload exceeds max size", func(t *testing.T) {
-		header := [5]byte{byte(StreamControl)}
-		binary.BigEndian.PutUint32(header[1:], maxPayloadSize+1)
+		header := [headerSize]byte{byte(StreamControl)}
+		binary.BigEndian.PutUint32(header[10:], maxPayloadSize+1)
 		r := io.MultiReader(bytes.NewReader(header[:]), io.LimitReader(zeroReader{}, int64(maxPayloadSize+1)))
 		_, err := codec.Decode(r)
 		require.Error(t, err)
 	})
+}
+
+func TestBinaryCodec_V2RoundTripIncludesIDAndStatus(t *testing.T) {
+	msg := &Message{
+		Type:    StreamMetaRaft,
+		ID:      42,
+		Status:  StatusOK,
+		Payload: []byte("ok"),
+	}
+	var buf bytes.Buffer
+	codec := &BinaryCodec{}
+	require.NoError(t, codec.Encode(&buf, msg))
+	got, err := codec.Decode(&buf)
+	require.NoError(t, err)
+	require.Equal(t, msg.Type, got.Type)
+	require.Equal(t, msg.ID, got.ID)
+	require.Equal(t, msg.Status, got.Status)
+	require.Equal(t, msg.Payload, got.Payload)
 }
 
 type zeroReader struct{}
@@ -122,7 +146,7 @@ func TestBinaryCodec_EncodeWriterTo_AllocsBounded(t *testing.T) {
 		fw := &FlatBuffersWriter{Typ: StreamData, Builder: b}
 		_ = codec.EncodeWriterTo(&buf, fw)
 	})
-	// header [5]byte는 스택 할당. 목표: ≤1
+	// header [14]byte는 스택 할당. 목표: ≤1
 	assert.LessOrEqual(t, allocs, 1.0, "EncodeWriterTo should allocate ≤1")
 }
 
@@ -135,11 +159,13 @@ func TestBinaryCodec_EncodeWriterTo_RoundTrip(t *testing.T) {
 
 	codec := &BinaryCodec{}
 	var buf bytes.Buffer
-	fw := &FlatBuffersWriter{Typ: StreamData, Builder: b}
+	fw := &FlatBuffersWriter{Typ: StreamData, ID: 7, Status: StatusOK, Builder: b}
 	require.NoError(t, codec.EncodeWriterTo(&buf, fw))
 
 	decoded, err := codec.Decode(&buf)
 	require.NoError(t, err)
 	assert.Equal(t, StreamData, decoded.Type)
+	assert.Equal(t, uint64(7), decoded.ID)
+	assert.Equal(t, StatusOK, decoded.Status)
 	assert.Equal(t, payload, decoded.Payload)
 }

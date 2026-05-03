@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"io"
 )
 
@@ -25,11 +26,63 @@ const (
 	StreamMetaJoin            StreamType = 0x0E // New node → meta-Raft leader dynamic join admin RPC
 )
 
+type StreamClass byte
+
+const (
+	StreamClassControl StreamClass = iota
+	StreamClassMeta
+	StreamClassData
+	StreamClassBulk
+)
+
+func ClassOf(st StreamType) StreamClass {
+	switch st {
+	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamMetaJoin, StreamReadIndex:
+		return StreamClassMeta
+	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft:
+		return StreamClassData
+	case StreamGroupForwardBody:
+		return StreamClassBulk
+	default:
+		return StreamClassControl
+	}
+}
+
+type MessageStatus byte
+
+const (
+	StatusOK MessageStatus = iota
+	StatusOverloaded
+	StatusError
+)
+
 // Message is a framed message sent over a transport stream.
-// Wire format: [1 byte StreamType][4 bytes big-endian length][payload]
+// Wire format: [1 byte StreamType][8 bytes request ID][1 byte status][4 bytes big-endian length][payload]
 type Message struct {
 	Type    StreamType
+	ID      uint64
+	Status  MessageStatus
 	Payload []byte
+}
+
+func NewResponse(req *Message, payload []byte) *Message {
+	if req == nil {
+		return &Message{Status: StatusOK, Payload: payload}
+	}
+	return &Message{Type: req.Type, ID: req.ID, Status: StatusOK, Payload: payload}
+}
+
+func NewErrorResponse(req *Message, status MessageStatus, err error) *Message {
+	if status == StatusOK {
+		status = StatusError
+	}
+	if err == nil {
+		err = errors.New("transport error")
+	}
+	if req == nil {
+		return &Message{Status: status, Payload: []byte(err.Error())}
+	}
+	return &Message{Type: req.Type, ID: req.ID, Status: status, Payload: []byte(err.Error())}
 }
 
 // ReceivedMessage wraps a Message with sender information.
