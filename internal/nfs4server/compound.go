@@ -1437,15 +1437,27 @@ func metaSidecarKey(key string) string {
 }
 
 func (d *Dispatcher) loadFileMeta(key string) nfsFileMeta {
+	if d.state != nil {
+		if m, ok := d.state.fileMeta.Load(key); ok {
+			return m
+		}
+	}
 	rc, _, err := d.backend.GetObject(nfs4Bucket, metaSidecarKey(key))
 	if err != nil {
-		return nfsFileMeta{Mode: 0644}
+		m := nfsFileMeta{Mode: 0644}
+		if d.state != nil {
+			d.state.fileMeta.Store(key, m)
+		}
+		return m
 	}
 	defer rc.Close()
 	data, _ := io.ReadAll(rc)
 	var m nfsFileMeta
 	if err := json.Unmarshal(data, &m); err != nil || m.Mode == 0 {
 		m.Mode = 0644
+	}
+	if d.state != nil {
+		d.state.fileMeta.Store(key, m)
 	}
 	return m
 }
@@ -1456,6 +1468,9 @@ func (d *Dispatcher) saveFileMeta(key string, m nfsFileMeta) error {
 		return err
 	}
 	_, err = d.backend.PutObject(nfs4Bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
+	if err == nil && d.state != nil {
+		d.state.fileMeta.Store(key, m)
+	}
 	return err
 }
 
