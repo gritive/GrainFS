@@ -28,6 +28,20 @@ type fakeBackend struct {
 	listErr    error
 }
 
+func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
+	c := NewClusterCoordinator(nil, nil, nil, nil, "node-a").WithSelfPeerAlias("127.0.0.1:9001")
+
+	require.True(t, c.isSelfPeer("node-a"))
+	require.True(t, c.isSelfPeer("127.0.0.1:9001"))
+	require.False(t, c.isSelfPeer("node-b"))
+
+	peers := c.peersForForward(ShardGroupEntry{
+		ID:      "group-1",
+		PeerIDs: []string{"127.0.0.1:9001", "127.0.0.1:9002", "node-a"},
+	})
+	require.Equal(t, []string{"127.0.0.1:9002", "127.0.0.1:9001", "node-a"}, peers)
+}
+
 func (f *fakeBackend) record(call string) { f.calls = append(f.calls, call) }
 
 func (f *fakeBackend) CreateBucket(ctx context.Context, bucket string) error {
@@ -439,12 +453,8 @@ func TestClusterCoordinator_RouteBucket_LocalLeaderSkipsPeerResolution(t *testin
 
 	allocs := testing.AllocsPerRun(100, func() {
 		target, err := c.routeBucket("photos")
-		if err != nil {
-			t.Fatalf("routeBucket failed: %v", err)
-		}
-		if !target.selfIsLeader {
-			t.Fatalf("routeBucket lost local leader fast path")
-		}
+		require.NoError(t, err)
+		require.True(t, target.selfIsLeader, "routeBucket lost local leader fast path")
 	})
 	require.Zero(t, allocs, "local leader route should not allocate")
 }
@@ -466,12 +476,8 @@ func TestClusterCoordinator_RouteBucket_MetaFSMLocalLeaderAvoidsShardGroupCopy(t
 
 	allocs := testing.AllocsPerRun(100, func() {
 		target, err := c.routeBucket("photos")
-		if err != nil {
-			t.Fatalf("routeBucket failed: %v", err)
-		}
-		if !target.selfIsLeader {
-			t.Fatalf("routeBucket lost local leader fast path")
-		}
+		require.NoError(t, err)
+		require.True(t, target.selfIsLeader, "routeBucket lost local leader fast path")
 	})
 	require.Zero(t, allocs, "MetaFSM local leader route should not copy peer slices")
 }

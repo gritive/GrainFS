@@ -122,9 +122,7 @@ func TestE2E_ClusterPerf_All(t *testing.T) {
 			}
 		}
 		scenarios = filtered
-		if len(scenarios) == 0 {
-			t.Fatalf("GRAINFS_PERF_SCENARIO=%q matched no scenarios", filter)
-		}
+		require.NotEmpty(t, scenarios, "GRAINFS_PERF_SCENARIO=%q matched no scenarios", filter)
 	}
 
 	results := make([]*perfResult, 0, len(scenarios))
@@ -377,22 +375,19 @@ func startWorkload(t *testing.T, endpoint, bucket string, out *workloadResult) (
 	// Prewarm: GET 대상 객체 16개 업로드
 	prewarmKeys := make([]string, perfPrewarmObjects)
 	prewarmBuf := make([]byte, perfObjectSize)
-	if _, err := rand.Read(prewarmBuf); err != nil {
-		t.Fatalf("rand prewarm: %v", err)
-	}
+	_, err := rand.Read(prewarmBuf)
+	require.NoError(t, err, "rand prewarm")
 	for i := 0; i < perfPrewarmObjects; i++ {
 		key := fmt.Sprintf("warm/%04d", i)
 		prewarmKeys[i] = key
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		_, err := c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 			Body:   bytes.NewReader(prewarmBuf),
 		})
 		cancel()
-		if err != nil {
-			t.Fatalf("prewarm PUT %s: %v", key, err)
-		}
+		require.NoError(t, err, "prewarm PUT %s", key)
 	}
 	t.Logf("prewarm: %d objects of %dKB seeded", perfPrewarmObjects, perfObjectSize/1024)
 

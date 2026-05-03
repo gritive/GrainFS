@@ -32,8 +32,16 @@ import (
 )
 
 // shardRPCTimeout is the per-shard RPC deadline for remote writes/reads.
-// QUIC max-idle is 10 s; 3 s leaves margin for retries before the stream times out.
-const shardRPCTimeout = 3 * time.Second
+// EC PUTs stream shard bodies during the caller's write path; cold multi-raft
+// startup can legitimately spend more than a few seconds opening and draining
+// QUIC shard streams before the metadata propose completes.
+const shardRPCTimeout = 2 * time.Minute
+
+const (
+	ecShardWriteAttempts = 3
+	ecShardWriteBackoff  = 250 * time.Millisecond
+	ecShardBufferedLimit = 8 * 1024 * 1024
+)
 
 // newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
 // UUIDv7 is k-sortable by millisecond timestamp; ListObjectVersions reverses to DESC.
@@ -1236,7 +1244,8 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 
 	// Fan-out: write all shards in parallel. Write-all consistency.
 	// Total latency = max(per-shard latency) instead of Σ(per-shard latency).
-	// Each remote write gets a 3s deadline so a dead peer fails fast.
+	// Each remote write gets a bounded deadline so a dead peer fails without
+	// letting the object PUT hang forever.
 	g, gctx := errgroup.WithContext(ctx)
 	for i, node := range placement {
 		i, node := i, node
@@ -1342,19 +1351,16 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 	for i, node := range placement {
 		i, node := i, node
 		g.Go(func() error {
-			body, err := shards.OpenShard(i)
-			if err != nil {
-				return fmt.Errorf("open ec shard %d: %w", i, err)
-			}
-			defer body.Close()
-
 			var werr error
 			if node == selfID {
+				body, err := shards.OpenShard(i)
+				if err != nil {
+					return fmt.Errorf("open ec shard %d: %w", i, err)
+				}
+				defer body.Close()
 				werr = b.shardSvc.WriteLocalShardStream(bucket, shardKey, i, body)
 			} else {
-				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
-				defer writeCancel()
-				werr = b.shardSvc.WriteShardStream(writeCtx, node, bucket, shardKey, i, body)
+				werr = b.writeSpooledECShardStream(gctx, shards, i, node, bucket, shardKey)
 				if b.peerHealth != nil {
 					if werr != nil {
 						b.peerHealth.MarkUnhealthy(node)
@@ -1403,6 +1409,49 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		LastModified: now,
 		VersionID:    versionID,
 	}, nil
+}
+
+func (b *DistributedBackend) writeSpooledECShardStream(ctx context.Context, shards *spooledECShards, shardIdx int, node, bucket, shardKey string) error {
+	var lastErr error
+	for attempt := 1; attempt <= ecShardWriteAttempts; attempt++ {
+		body, err := shards.OpenShard(shardIdx)
+		if err != nil {
+			return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
+		}
+
+		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
+		if size, sizeErr := shards.ShardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
+			var data []byte
+			data, err = io.ReadAll(body)
+			if err == nil {
+				err = b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, shardIdx, data)
+			}
+		} else {
+			err = b.shardSvc.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, body)
+		}
+		closeErr := body.Close()
+		writeCancel()
+		if err == nil {
+			if closeErr != nil {
+				return fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
+			}
+			return nil
+		}
+
+		lastErr = err
+		if ctx.Err() != nil || attempt == ecShardWriteAttempts {
+			return lastErr
+		}
+
+		timer := time.NewTimer(time.Duration(attempt) * ecShardWriteBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return lastErr
+		case <-timer.C:
+		}
+	}
+	return lastErr
 }
 
 // deleteShardsAsync는 propose 실패 시 고아 샤드를 백그라운드에서 삭제한다.

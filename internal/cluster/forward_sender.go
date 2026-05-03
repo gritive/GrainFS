@@ -49,11 +49,11 @@ type ForwardSender struct {
 	streamSlots  chan struct{}
 }
 
-// NewForwardSender constructs a sender with default 10 s per-call timeout.
+// NewForwardSender constructs a sender with default 2 minute per-call timeout.
 func NewForwardSender(d forwardDialer) *ForwardSender {
 	return &ForwardSender{
 		dialer:      d,
-		timeout:     10 * time.Second,
+		timeout:     2 * time.Minute,
 		streamSlots: make(chan struct{}, 8),
 	}
 }

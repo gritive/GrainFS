@@ -51,6 +51,67 @@ import (
 
 const defaultReshardInterval = 24 * time.Hour
 
+func startAutoSnapshotterWhenReady(
+	ctx context.Context,
+	dataDir, walDir string,
+	backend storage.Backend,
+	interval time.Duration,
+	retain int,
+	readinessTimeout time.Duration,
+) error {
+	if interval <= 0 {
+		return nil
+	}
+	snapshotable, ok := backend.(storage.Snapshotable)
+	if !ok {
+		log.Debug().Msg("auto-snapshot skipped: backend does not implement Snapshotable")
+		return nil
+	}
+	if err := waitForSnapshotBackendReady(ctx, snapshotable, readinessTimeout); err != nil {
+		return err
+	}
+	objSnapMgr, err := snapshot.NewManager(filepath.Join(dataDir, "snapshots"), snapshotable, walDir)
+	if err != nil {
+		return err
+	}
+	as := snapshot.NewAutoSnapshotter(objSnapMgr, interval, retain)
+	as.Start(ctx)
+	log.Info().Dur("interval", interval).Int("retain", retain).Msg("auto-snapshot enabled")
+	return nil
+}
+
+func waitForSnapshotBackendReady(ctx context.Context, snapshotable storage.Snapshotable, timeout time.Duration) error {
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		if _, err := snapshotable.ListAllObjects(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-readyCtx.Done():
+			return fmt.Errorf("snapshot backend not ready after %s: %w", timeout, lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func ensureShardGroupPlaceholder(dgMgr *cluster.DataGroupManager, entry cluster.ShardGroupEntry) {
+	if entry.ID == "group-0" {
+		return
+	}
+	if existing := dgMgr.Get(entry.ID); existing == nil {
+		dgMgr.Add(cluster.NewDataGroup(entry.ID, entry.PeerIDs))
+	}
+}
+
 func init() {
 	serveCmd.Flags().StringP("data", "d", "./data", "data directory")
 	serveCmd.Flags().IntP("port", "p", 9000, "listen port")
@@ -237,7 +298,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 func seedInitialShardGroups(
 	ctx context.Context,
 	metaRaft *cluster.MetaRaft,
-	nodeID string,
+	selfPeerID string,
 	peers []string,
 	seedGroups int,
 ) error {
@@ -248,16 +309,10 @@ func seedInitialShardGroups(
 		return err
 	}
 
-	clusterPeers := append([]string{nodeID}, peers...)
 	const replicationFactor = 3
 	for i := 0; i < seedGroups; i++ {
 		groupID := fmt.Sprintf("group-%d", i)
-		var voters []string
-		if i == 0 {
-			voters = clusterPeers
-		} else {
-			voters = cluster.PickVoters(groupID, clusterPeers, replicationFactor)
-		}
+		voters := seedShardGroupVoters(selfPeerID, peers, groupID, replicationFactor)
 
 		sgCtx, sgCancel := context.WithTimeout(bootstrapCtx, 5*time.Second)
 		err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
@@ -276,6 +331,14 @@ func seedInitialShardGroups(
 		}
 	}
 	return nil
+}
+
+func seedShardGroupVoters(selfPeerID string, peers []string, groupID string, replicationFactor int) []string {
+	clusterPeers := append([]string{selfPeerID}, peers...)
+	if groupID == "group-0" {
+		return clusterPeers
+	}
+	return cluster.PickVoters(groupID, clusterPeers, replicationFactor)
 }
 
 func waitForMetaRaftLeader(ctx context.Context, metaRaft *cluster.MetaRaft, timeout time.Duration) error {
@@ -495,7 +558,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if err != nil {
 		return fmt.Errorf("init QUIC transport: %w", err)
 	}
-	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 8})
+	// Forwarded S3 PUTs can fan out into EC shard body streams on the bucket
+	// owner. Keep enough bulk capacity for that nested data path while meta and
+	// raft traffic remain independently classed.
+	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 64})
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)
 	}
@@ -606,7 +672,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		addNodeCancel()
 
-		if err := seedInitialShardGroups(ctx, metaRaft, nodeID, peers, seedGroups); err != nil {
+		if err := seedInitialShardGroups(ctx, metaRaft, raftAddr, peers, seedGroups); err != nil {
 			return err
 		}
 		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
@@ -723,6 +789,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if entry.ID == "group-0" {
 			return
 		}
+		ensureShardGroupPlaceholder(dgMgr, entry)
 		// Only instantiate for groups where we are a voter. New dynamic groups
 		// use nodeID; legacy/static groups may still contain raftAddr.
 		isVoter := false
@@ -996,7 +1063,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		clusterRouter,  // bucket → group lookup
 		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
 		nodeID,         // selfID for leader check
-	).WithForwardSender(forwardSender).WithNodeAddressResolver(metaRaft.FSM())
+	).WithForwardSender(forwardSender).WithNodeAddressResolver(metaRaft.FSM()).WithSelfPeerAlias(raftAddr)
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, clusterCoord, "s3://grainfs-tables/warehouse"))
 	router.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 	if joinMode {
@@ -1034,26 +1101,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
 		log.Warn().Str("marker", filepath.Join(dataDir, cluster.RecoverClusterMarkerPath)).Msg("recovered cluster write gate enabled")
 	}
-	// Start auto-snapshotter for object-level PITR snapshots (separate from
-	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
-	// anchored to the object mutation log.
 	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
 	snapRetain, _ := cmd.Flags().GetInt("snapshot-retain")
-	if snapInterval > 0 {
-		if snapshotable, ok := backend.(storage.Snapshotable); ok {
-			snapDir := filepath.Join(dataDir, "snapshots")
-			objSnapMgr, err := snapshot.NewManager(snapDir, snapshotable, walDir)
-			if err != nil {
-				log.Warn().Err(err).Msg("auto-snapshot init failed")
-			} else {
-				as := snapshot.NewAutoSnapshotter(objSnapMgr, snapInterval, snapRetain)
-				as.Start(ctx)
-				log.Info().Dur("interval", snapInterval).Int("retain", snapRetain).Msg("auto-snapshot enabled")
-			}
-		} else {
-			log.Debug().Msg("auto-snapshot skipped: backend does not implement Snapshotable")
-		}
-	}
 
 	// DiskCollector exposes grainfs_disk_used_pct metric. In multi-node mode
 	// the balancer owns its own collector; in singleton mode nothing else
@@ -1070,6 +1119,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
 			return fmt.Errorf("create default bucket: %w", err)
 		}
+	}
+
+	// Start auto-snapshotter for object-level PITR snapshots (separate from
+	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
+	// anchored to the object mutation log. Start only after startup bucket
+	// metadata exists and the routed snapshot enumeration path is usable; data
+	// groups are instantiated asynchronously during boot.
+	if err := startAutoSnapshotterWhenReady(ctx, dataDir, walDir, backend, snapInterval, snapRetain, 30*time.Second); err != nil {
+		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}
 
 	log.Info().Str("component", "server").Str("version", version).
