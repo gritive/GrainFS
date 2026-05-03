@@ -104,9 +104,38 @@ func TestQUIC_Handshake_DifferentPSK_FailsWithSPKI(t *testing.T) {
 	}
 }
 
+// dialAndConfirmHandshake forces a confirmed bidirectional channel to detect
+// whether the server actually accepted the peer. quic-go's TLS handshake can
+// "succeed" at the protocol level even when the server is going to drop the
+// connection due to application-layer cert verification (D5). This helper
+// opens a stream and reads, which surfaces the connection close as an error.
+func dialAndConfirmHandshake(ctx context.Context, addr string, tlsConf *tls.Config) error {
+	conn, err := quic.DialAddr(ctx, addr, tlsConf, defaultQUICConfig())
+	if err != nil {
+		return err
+	}
+	defer conn.CloseWithError(0, "test")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := stream.Write([]byte("ping")); err != nil {
+		return err
+	}
+	// Try a short read — if the server closed the conn for SPKI mismatch we
+	// should see io.EOF or a connection-closed error.
+	buf := make([]byte, 1)
+	if _, err := stream.Read(buf); err != nil {
+		return err
+	}
+	stream.Close()
+	return nil
+}
+
 // REGRESSION (D5=A): server must reject a client that presents no certificate.
-// Without ClientAuth: RequireAnyClientCert, this test passes trivially because
-// the server never asks for a cert. With it, the handshake fails.
+// Without ClientAuth: RequireAnyClientCert, the server never asks for a cert.
+// With it, the handshake fails.
 func TestQUIC_ServerRejectsClientWithNoCert(t *testing.T) {
 	server, err := NewQUICTransport(longPSK("a"))
 	if err != nil {
@@ -126,8 +155,7 @@ func TestQUIC_ServerRejectsClientWithNoCert(t *testing.T) {
 		NextProtos:         []string{"grainfs-mux-v1", "grainfs"},
 		// Certificates: nil — attacker presents no cert
 	}
-	_, err = quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
-	if err == nil {
+	if err := dialAndConfirmHandshake(ctx, server.LocalAddr(), tlsConf); err == nil {
 		t.Fatal("server must reject dialer with no client cert")
 	}
 }
@@ -153,8 +181,7 @@ func TestQUIC_ServerRejectsClientWithWrongCert(t *testing.T) {
 		NextProtos:         []string{"grainfs-mux-v1", "grainfs"},
 		Certificates:       []tls.Certificate{generateRandomTLSCert(t)},
 	}
-	_, err = quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
-	if err == nil {
+	if err := dialAndConfirmHandshake(ctx, server.LocalAddr(), tlsConf); err == nil {
 		t.Fatal("server must reject dialer with non-cluster cert")
 	}
 }
