@@ -199,7 +199,7 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 		}
 	})
 	creds := aws.Credentials{AccessKeyID: accessKey, SecretAccessKey: secretKey}
-	_, receiptStatus := signedGet(t, ctx, signer, creds, endpoints[victimNode]+"/api/receipts?correlation_id="+url.QueryEscape(found.ID))
+	_, receiptStatus := signedGet(t, ctx, signer, creds, endpoints[victimNode]+"/api/receipts/"+url.PathEscape(found.Proof.ReceiptID))
 	require.Equal(t, http.StatusOK, receiptStatus)
 }
 
