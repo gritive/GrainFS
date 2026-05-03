@@ -42,7 +42,10 @@ func (s *Server) putBucketPolicy(c *app.RequestContext, bucket string) {
 	}
 
 	// Update in-memory cache
-	s.policyStore.Set(bucket, body)
+	if err := s.policyStore.Set(bucket, body); err != nil {
+		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 	c.Status(consts.StatusNoContent)
 }
 
@@ -67,7 +70,10 @@ func (s *Server) getBucketPolicy(c *app.RequestContext, bucket string) {
 	}
 
 	// Cache for future requests
-	s.policyStore.Set(bucket, data)
+	if err := s.policyStore.Set(bucket, data); err != nil {
+		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 	c.Data(consts.StatusOK, "application/json", data)
 }
 

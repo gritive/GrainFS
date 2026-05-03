@@ -186,7 +186,7 @@ func buildCanonicalRequest(r *http.Request, signedHeadersStr string) string {
 		if h == "host" {
 			val = r.Host
 		} else {
-			val = r.Header.Get(http.CanonicalHeaderKey(h))
+			val = r.Header.Get(h)
 		}
 		canonicalHeaders.WriteString(h + ":" + strings.TrimSpace(val) + "\n")
 	}
@@ -324,7 +324,7 @@ func buildPresignedCanonicalRequest(r *http.Request, signedHeadersStr string) st
 		if h == "host" {
 			val = r.Host
 		} else {
-			val = r.Header.Get(http.CanonicalHeaderKey(h))
+			val = r.Header.Get(h)
 		}
 		canonicalHeaders.WriteString(h + ":" + strings.TrimSpace(val) + "\n")
 	}

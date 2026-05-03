@@ -11,6 +11,7 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/pool"
@@ -68,7 +69,9 @@ func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardS
 	for _, opt := range opts {
 		opt(s)
 	}
-	os.MkdirAll(s.dataDir, 0o755)
+	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
+		log.Error().Err(err).Str("dir", s.dataDir).Msg("create shard data directory")
+	}
 	return s
 }
 

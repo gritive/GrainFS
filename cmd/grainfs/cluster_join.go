@@ -37,7 +37,11 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--data-dir is required")
 	}
 	if nodeID == "" {
-		nodeID = generateNodeID(dataDir)
+		var err error
+		nodeID, err = generateNodeID(dataDir)
+		if err != nil {
+			return fmt.Errorf("generate node ID: %w", err)
+		}
 	}
 	if raftAddr == "" {
 		return fmt.Errorf("--raft-addr is required to join a cluster (must be reachable by peers)")

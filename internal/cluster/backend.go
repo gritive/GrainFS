@@ -1434,13 +1434,6 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		}
 		versionID = latest
 	}
-	// Placement must be looked up AFTER resolving versionID so shardKey
-	// matches the key written by putObjectEC (key+"/"+versionID).
-	shardKey := key
-	if versionID != "" {
-		shardKey = key + "/" + versionID
-	}
-
 	resolved, lookupErr := b.ResolvePlacement(ctx, bucket, key, b.readPlacementMeta(bucket, key, versionID))
 	if errors.Is(lookupErr, ErrNotEC) {
 		return fmt.Errorf("no placement for %s/%s — object is not EC-managed", bucket, key)
@@ -1449,7 +1442,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		return fmt.Errorf("lookup shard placement: %w", lookupErr)
 	}
 	ecRec := resolved.Record
-	shardKey = resolved.ShardKey
+	shardKey := resolved.ShardKey
 	recCfg := ecRec.ECConfigOrFallback(b.ecConfig)
 	if shardIdx < 0 || shardIdx >= len(ecRec.Nodes) {
 		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(ecRec.Nodes))
@@ -1744,10 +1737,9 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 	// cancel() signals remaining goroutines to abort after k shards received.
 	// resultCh is buffered(len(nodes)) so goroutines never block on send.
 	type shardResult struct {
-		idx       int
-		data      []byte
-		err       error
-		fromCache bool
+		idx  int
+		data []byte
+		err  error
 	}
 
 	// Cache pre-pass: try to satisfy from cache first. A full hit means

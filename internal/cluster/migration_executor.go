@@ -216,18 +216,20 @@ func (e *MigrationExecutor) removePending(id string) {
 	e.sendCoord(migrationCoordMsg{kind: migrationCoordRemoveTTL, id: id})
 }
 
-// markProposed sets proposedAt for id (called after Phase 2 succeeds).
-func (e *MigrationExecutor) markProposed(id string) {
-	e.sendCoord(migrationCoordMsg{kind: migrationCoordMarkProposed, id: id})
-}
-
 // hasPending reports whether id is in the TTL sweep map.
+//
+//nolint:unused // package tests query coordinator state through this method.
 func (e *MigrationExecutor) hasPending(id string) bool {
 	reply := make(chan bool, 1)
 	if !e.sendCoord(migrationCoordMsg{kind: migrationCoordHasPendingTTL, id: id, reply: reply}) {
 		return false
 	}
 	return <-reply
+}
+
+// markProposed sets proposedAt for id (called after Phase 2 succeeds).
+func (e *MigrationExecutor) markProposed(id string) {
+	e.sendCoord(migrationCoordMsg{kind: migrationCoordMarkProposed, id: id})
 }
 
 // NotifyCommit is called by the FSM when CmdMigrationDone is applied.
@@ -378,18 +380,14 @@ func (e *MigrationExecutor) cleanupPending(id string) {
 
 // markDone records id as completed through the coordination actor.
 // Resets the map when it exceeds maxDoneHistory to bound memory use.
+//
+//nolint:unused // package tests drive coordinator state through this method.
 func (e *MigrationExecutor) markDone(id string) {
 	e.sendCoord(migrationCoordMsg{kind: migrationCoordMarkDone, id: id})
 }
 
 func (e *MigrationExecutor) proposeDone(task MigrationTask) error {
-	outer, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
-		Bucket:    task.Bucket,
-		Key:       task.Key,
-		VersionID: task.VersionID,
-		SrcNode:   task.SrcNode,
-		DstNode:   task.DstNode,
-	})
+	outer, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd(task))
 	if err != nil {
 		return fmt.Errorf("migration: marshal MigrationDoneCmd: %w", err)
 	}

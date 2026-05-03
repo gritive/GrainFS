@@ -310,7 +310,11 @@ func waitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, w
 
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
 	if nodeID == "" {
-		nodeID = generateNodeID(dataDir)
+		var err error
+		nodeID, err = generateNodeID(dataDir)
+		if err != nil {
+			return fmt.Errorf("generate node ID: %w", err)
+		}
 		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
 	}
 	raftAddrExplicit := raftAddr != ""

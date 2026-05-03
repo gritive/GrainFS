@@ -329,7 +329,10 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 	// Force rotate to a new blob so compacted entries don't go into the same file
 	bs.mu.Lock()
 	if bs.activeID == blobID {
-		bs.rotate()
+		if err := bs.rotate(); err != nil {
+			bs.mu.Unlock()
+			return nil, err
+		}
 	}
 	bs.mu.Unlock()
 

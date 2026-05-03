@@ -35,6 +35,8 @@ func writeRPCFrame(w io.Writer, payload []byte) error {
 
 // readRPCFrame reads a TCP record-marked RPC frame.
 // Supports fragment reassembly (reads until last-fragment bit is set).
+//
+//nolint:unused // package tests use this allocation-friendly wrapper.
 func readRPCFrame(r io.Reader) ([]byte, error) {
 	return readRPCFrameInto(r, nil)
 }

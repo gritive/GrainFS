@@ -37,7 +37,6 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	quic "github.com/quic-go/quic-go"
 )
@@ -518,13 +517,5 @@ func (rc *RaftConn) Wait(ctx context.Context) error {
 		return ErrConnClosed
 	case <-ctx.Done():
 		return ctx.Err()
-	}
-}
-
-// drainSeconds is a helper used in tests to ensure all readers wind down.
-func (rc *RaftConn) drainSeconds(d time.Duration) {
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) && !rc.closed.Load() {
-		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -2303,7 +2303,6 @@ func (n *Node) batcherLoop() {
 		if len(pending) > 0 {
 			n.flushBatch(pending)
 			clearProposals(pending)
-			pending = pending[:0]
 		}
 	}
 }

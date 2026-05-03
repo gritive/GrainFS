@@ -16,6 +16,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -1014,7 +1015,9 @@ func (s *Server) serveDashboard(ctx context.Context, c *app.RequestContext) {
 	}
 	c.SetContentType("text/html; charset=utf-8")
 	c.SetStatusCode(consts.StatusOK)
-	c.Write(data)
+	if _, err := c.Write(data); err != nil {
+		log.Ctx(ctx).Error().Err(err).Msg("write dashboard response")
+	}
 }
 
 // hertzResponseWriter adapts Hertz RequestContext to http.ResponseWriter for stdlib handlers.
@@ -1044,8 +1047,7 @@ func (w *hertzResponseWriter) Write(data []byte) (int, error) {
 		w.c.SetStatusCode(w.statusCode)
 		w.written = true
 	}
-	w.c.Write(data)
-	return len(data), nil
+	return w.c.Write(data)
 }
 
 func (w *hertzResponseWriter) WriteHeader(statusCode int) {
