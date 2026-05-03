@@ -36,6 +36,10 @@ func writeRPCFrame(w io.Writer, payload []byte) error {
 // readRPCFrame reads a TCP record-marked RPC frame.
 // Supports fragment reassembly (reads until last-fragment bit is set).
 func readRPCFrame(r io.Reader) ([]byte, error) {
+	return readRPCFrameInto(r, nil)
+}
+
+func readRPCFrameInto(r io.Reader, buf []byte) ([]byte, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
@@ -47,8 +51,7 @@ func readRPCFrame(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("RPC frame size %d exceeds max %d", length, maxFrameSize)
 	}
 
-	// 단일 fragment fast-path: make 1회로 직접 읽기
-	result := make([]byte, length)
+	result := resizeFrameBuffer(buf, int(length))
 	if _, err := io.ReadFull(r, result); err != nil {
 		return nil, err
 	}
@@ -68,7 +71,7 @@ func readRPCFrame(r io.Reader) ([]byte, error) {
 			return nil, fmt.Errorf("RPC frame size %d exceeds max %d", length, maxFrameSize)
 		}
 		start := len(result)
-		result = append(result, make([]byte, length)...)
+		result = append(result, make([]byte, int(length))...)
 		if _, err := io.ReadFull(r, result[start:]); err != nil {
 			return nil, err
 		}
@@ -78,4 +81,11 @@ func readRPCFrame(r io.Reader) ([]byte, error) {
 	}
 
 	return result, nil
+}
+
+func resizeFrameBuffer(buf []byte, n int) []byte {
+	if cap(buf) >= n {
+		return buf[:n]
+	}
+	return make([]byte, n)
 }

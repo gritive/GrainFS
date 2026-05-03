@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 	"math"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 const (
@@ -94,6 +96,13 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	// Recheck size inside the lock to avoid TOCTOU: another writer may have
 	// extended the file between an earlier HeadObject and now.
 	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size >= required {
+		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
+	}
+
+	if tr, ok := d.backend.(storage.Truncatable); ok {
+		if err := tr.Truncate(nfs4Bucket, key, required); err != nil {
+			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
+		}
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 

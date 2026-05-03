@@ -105,6 +105,20 @@ func (b *Backend) ReadAt(bucket, key string, offset int64, buf []byte) (int, err
 	return ra.ReadAt(bucket, key, offset, buf)
 }
 
+// Truncate is a pass-through for internal bucket size changes used by NFS
+// SETATTR. No WAL entry is written: internal buckets are ephemeral and not
+// subject to PITR replay.
+func (b *Backend) Truncate(bucket, key string, size int64) error {
+	type truncater interface {
+		Truncate(bucket, key string, size int64) error
+	}
+	tr, ok := b.Backend.(truncater)
+	if !ok {
+		return fmt.Errorf("wal: inner backend does not support Truncate")
+	}
+	return tr.Truncate(bucket, key, size)
+}
+
 func (b *Backend) DeleteObject(bucket, key string) error {
 	if sd, ok := b.Backend.(interface {
 		DeleteObjectReturningMarker(bucket, key string) (string, error)

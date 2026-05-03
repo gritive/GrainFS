@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -54,6 +55,98 @@ func TestPutObject_VFSBucket_FixedVersionID(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, versions, 1, "VFS bucket should never accumulate multiple versions")
 	require.Equal(t, "current", versions[0].VersionID)
+}
+
+func TestHeadObject_InternalBucketIgnoresLatestPointer(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	bucket := storage.NFS4BucketName
+	key := "hot.bin"
+	require.NoError(t, b.CreateBucket(bucket))
+
+	currentMeta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         1,
+		ContentType:  "application/octet-stream",
+		LastModified: 10,
+	})
+	require.NoError(t, err)
+	staleMeta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         99,
+		ContentType:  "application/octet-stream",
+		LastModified: 20,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(objectMetaKey(bucket, key), currentMeta); err != nil {
+			return err
+		}
+		if err := txn.Set(objectMetaKeyV(bucket, key, "stale"), staleMeta); err != nil {
+			return err
+		}
+		return txn.Set(latestKey(bucket, key), []byte("stale"))
+	}))
+
+	obj, err := b.HeadObject(bucket, key)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), obj.Size)
+	require.Equal(t, "current", obj.VersionID)
+}
+
+func TestWriteAt_InternalBucketDoesNotWriteLatestPointer(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	bucket := storage.NFS4BucketName
+	require.NoError(t, b.CreateBucket(bucket))
+
+	_, err := b.WriteAt(bucket, "direct.bin", 0, []byte("data"))
+	require.NoError(t, err)
+
+	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(latestKey(bucket, "direct.bin"))
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+		return nil
+	}))
+}
+
+func TestWriteAt_InternalBucketCachesPathAndSize(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	bucket := storage.NFS4BucketName
+	key := "direct.bin"
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	require.NoError(t, b.CreateBucket(bucket))
+
+	obj, err := b.WriteAt(bucket, key, 0, []byte("abcdef"))
+	require.NoError(t, err)
+	require.Equal(t, int64(6), obj.Size)
+
+	cachedPath, ok := b.internalPathCache.Load(cacheKey)
+	if !ok {
+		t.Fatalf("WriteAt should cache the internal object path")
+	}
+	require.Equal(t, objectMetaKey(bucket, key), cachedPath.(internalObjectPath).metaKey)
+	size, ok := b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok, "WriteAt should cache the internal object size")
+	require.Equal(t, int64(6), size)
+
+	obj, err = b.WriteAt(bucket, key, 2, []byte("XY"))
+	require.NoError(t, err)
+	require.Equal(t, int64(6), obj.Size)
+	size, ok = b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok)
+	require.Equal(t, int64(6), size)
+
+	obj, err = b.WriteAt(bucket, key, 10, []byte("z"))
+	require.NoError(t, err)
+	require.Equal(t, int64(11), obj.Size)
+	size, ok = b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok)
+	require.Equal(t, int64(11), size)
+
+	require.NoError(t, b.Truncate(bucket, key, 3))
+	size, ok = b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok)
+	require.Equal(t, int64(3), size)
 }
 
 func TestPutObject_VFSBucket_DisabledTogglesLegacy(t *testing.T) {

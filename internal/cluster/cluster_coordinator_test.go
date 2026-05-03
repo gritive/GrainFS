@@ -11,6 +11,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -243,6 +244,37 @@ func TestClusterCoordinator_ListAllObjects_PreservesVersionsAndDeleteMarkers(t *
 	require.Equal(t, "text/plain", byVersion[v2.VersionID].ContentType)
 }
 
+func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
+	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
+	gb := newTestGroupBackend(t, "group-1")
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket(storage.NFS4BucketName, "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	w, err := wal.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, w.Close()) })
+	wrapped := wal.NewBackend(c, w)
+
+	obj, err := wrapped.WriteAt(storage.NFS4BucketName, "fio/file.bin", 4, []byte("data"))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), obj.Size)
+
+	require.NoError(t, wrapped.Truncate(storage.NFS4BucketName, "fio/file.bin", 6))
+
+	buf := make([]byte, 8)
+	n, err := wrapped.ReadAt(storage.NFS4BucketName, "fio/file.bin", 0, buf)
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 6, n)
+	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
+}
+
 func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")
@@ -355,6 +387,79 @@ func TestClusterCoordinator_RouteBucket_ResolvesNodeIDPeersToAddresses(t *testin
 	require.NoError(t, err)
 	require.Equal(t, []string{"10.0.0.1:7001", "10.0.0.2:7001", "10.0.0.3:7001"}, target.peers)
 	require.True(t, target.selfIsVoter)
+}
+
+type countingAddressBook struct {
+	calls int
+}
+
+func (b *countingAddressBook) ResolveNodeAddress(idOrAddr string) (string, bool) {
+	b.calls++
+	return idOrAddr, true
+}
+
+func (b *countingAddressBook) Nodes() []MetaNodeEntry {
+	b.calls++
+	return nil
+}
+
+func TestClusterCoordinator_RouteBucket_LocalLeaderSkipsPeerResolution(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-a", "self", "node-b"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"node-a", "self", "node-b"}},
+	}}
+	addr := &countingAddressBook{}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithNodeAddressResolver(addr)
+
+	target, err := c.routeBucket("photos")
+	require.NoError(t, err)
+	require.True(t, target.selfIsVoter)
+	require.True(t, target.selfIsLeader)
+	require.Zero(t, addr.calls, "local leader fast path should not allocate/resolve forward peers")
+	require.Empty(t, target.peers)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		target, err := c.routeBucket("photos")
+		if err != nil {
+			t.Fatalf("routeBucket failed: %v", err)
+		}
+		if !target.selfIsLeader {
+			t.Fatalf("routeBucket lost local leader fast path")
+		}
+	})
+	require.Zero(t, allocs, "local leader route should not allocate")
+}
+
+func TestClusterCoordinator_RouteBucket_MetaFSMLocalLeaderAvoidsShardGroupCopy(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-a", "self", "node-b"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"node-a", "self", "node-b"})))
+	c := NewClusterCoordinator(base, mgr, router, meta, "self")
+
+	target, err := c.routeBucket("photos")
+	require.NoError(t, err)
+	require.True(t, target.selfIsLeader)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		target, err := c.routeBucket("photos")
+		if err != nil {
+			t.Fatalf("routeBucket failed: %v", err)
+		}
+		if !target.selfIsLeader {
+			t.Fatalf("routeBucket lost local leader fast path")
+		}
+	})
+	require.Zero(t, allocs, "MetaFSM local leader route should not copy peer slices")
 }
 
 // --- T6 forward-path test scaffolding ---
@@ -533,6 +638,20 @@ func TestClusterCoordinator_GetObject_ForwardUsesReadStream(t *testing.T) {
 	require.Empty(t, d.calls)
 	require.Len(t, d.readCalls, 1)
 	require.Equal(t, raftpb.ForwardOpGetObject, d.readCalls[0].op)
+}
+
+func TestClusterCoordinator_ReadAt_FallbackRejectsNegativeOffset(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
+		&storage.Object{Key: "k", Size: 5, ETag: "etag", ContentType: "application/octet-stream"},
+		"bk", []byte("hello"),
+	)
+
+	require.NotPanics(t, func() {
+		n, err := c.ReadAt("bk", "k", -1, make([]byte, 2))
+		require.Zero(t, n)
+		require.Error(t, err)
+	})
 }
 
 func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {

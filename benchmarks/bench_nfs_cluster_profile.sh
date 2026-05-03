@@ -14,6 +14,7 @@ bench_require_colima
 HOST_IP="${HOST_IP:-192.168.5.2}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-nfs-cluster-bench}"
 MNT="/mnt/grainfs-bench-nfs-cluster"
+NFS_VERS="${NFS_VERS:-4.0}"
 
 HTTP0=$(bench_free_port); HTTP1=$(bench_free_port); HTTP2=$(bench_free_port)
 RAFT0=$(bench_free_port); RAFT1=$(bench_free_port); RAFT2=$(bench_free_port)
@@ -132,10 +133,10 @@ echo "  leader node-$LEADER_INDEX NFS=:$LEADER_NFS_PORT pprof=:$LEADER_PPROF_POR
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
 echo ""
-echo "=== mounting NFS inside Colima (host=$HOST_IP port=$LEADER_NFS_PORT) ==="
+echo "=== mounting NFS inside Colima (vers=$NFS_VERS host=$HOST_IP port=$LEADER_NFS_PORT) ==="
 bench_colima_ssh sudo mkdir -p "$MNT"
 bench_colima_ssh sudo mount -t nfs4 \
-  -o "vers=4.0,port=$LEADER_NFS_PORT,rsize=131072,wsize=131072,hard,intr" \
+  -o "vers=$NFS_VERS,port=$LEADER_NFS_PORT,rsize=131072,wsize=131072,hard,intr" \
   "${HOST_IP}:/" "$MNT"
 bench_colima_ssh df -h "$MNT" || true
 

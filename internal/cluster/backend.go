@@ -110,6 +110,21 @@ type DistributedBackend struct {
 	// false → legacy behavior (fresh ULID per PUT). Operators can flip via
 	//   --backend-vfs-fixed-version=false to roll back without rebuild.
 	vfsFixedVersion atomic.Bool
+
+	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
+	internalDirCache  sync.Map // map[string]struct{}
+	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
+}
+
+type internalObjectCacheKey struct {
+	bucket string
+	key    string
+}
+
+type internalObjectPath struct {
+	path    string
+	dir     string
+	metaKey []byte
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -1005,12 +1020,20 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 		return nil, fmt.Errorf("WriteAt not supported for user bucket %q", bucket)
 	}
 
-	objPath := b.objectPathV(bucket, key, "current")
-	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	objPath := b.internalObjectPath(bucket, key)
+	if err := b.ensureInternalObjectDir(objPath.dir); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
 
-	f, err := os.OpenFile(objPath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
+	if errors.Is(err, os.ErrNotExist) {
+		b.internalDirCache.Delete(objPath.dir)
+		if derr := b.ensureInternalObjectDir(objPath.dir); derr != nil {
+			return nil, fmt.Errorf("create object dir: %w", derr)
+		}
+		f, err = os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open object: %w", err)
 	}
@@ -1020,11 +1043,19 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 		return nil, fmt.Errorf("pwrite object: %w", err)
 	}
 
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat object: %w", err)
+	newSize := int64(offset) + int64(len(data))
+	if cached, ok := b.internalSizeCache.Load(cacheKey); ok {
+		if size := cached.(int64); size > newSize {
+			newSize = size
+		}
+	} else {
+		fi, err := f.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("stat object: %w", err)
+		}
+		newSize = fi.Size()
 	}
-	newSize := fi.Size()
+	b.internalSizeCache.Store(cacheKey, newSize)
 	now := time.Now().Unix()
 
 	meta, err := marshalObjectMeta(objectMeta{
@@ -1037,13 +1068,7 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 		return nil, fmt.Errorf("marshal object meta: %w", err)
 	}
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
-			return err
-		}
-		if err := txn.Set(objectMetaKeyV(bucket, key, "current"), meta); err != nil {
-			return err
-		}
-		return txn.Set(latestKey(bucket, key), []byte("current"))
+		return txn.Set(objPath.metaKey, meta)
 	}); err != nil {
 		return nil, fmt.Errorf("update object meta: %w", err)
 	}
@@ -1064,12 +1089,44 @@ func (b *DistributedBackend) ReadAt(bucket, key string, offset int64, buf []byte
 	if !storage.IsInternalBucket(bucket) {
 		return 0, fmt.Errorf("ReadAt not supported for user bucket %q", bucket)
 	}
-	f, err := os.Open(b.objectPathV(bucket, key, "current"))
+	f, err := os.Open(b.internalObjectPath(bucket, key).path)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
 	return f.ReadAt(buf, offset)
+}
+
+// Truncate implements the internal-bucket fast path used by NFS SETATTR size.
+// It updates the fixed "current" object and metadata in place, avoiding the
+// full-object read/append/write fallback used by generic object stores.
+func (b *DistributedBackend) Truncate(bucket, key string, size int64) error {
+	if !storage.IsInternalBucket(bucket) {
+		return fmt.Errorf("Truncate not supported for user bucket %q", bucket)
+	}
+	if size < 0 {
+		return fmt.Errorf("truncate: negative size %d", size)
+	}
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	objPath := b.internalObjectPath(bucket, key)
+	if err := os.Truncate(objPath.path, size); err != nil {
+		return fmt.Errorf("truncate object: %w", err)
+	}
+	b.internalSizeCache.Store(cacheKey, size)
+
+	now := time.Now().Unix()
+	meta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         size,
+		ContentType:  "application/octet-stream",
+		LastModified: now,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal object meta: %w", err)
+	}
+	return b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(objPath.metaKey, meta)
+	})
 }
 
 // selectECPlacement decides where each shard for shardKey should land.
@@ -1883,9 +1940,52 @@ func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object
 	var obj storage.Object
 	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {
+		decodeMeta := func(item *badger.Item, versionID string) error {
+			return item.Value(func(val []byte) error {
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				// Tombstone markers aren't observable via HeadObject — callers use
+				// HeadObjectVersion / ListObjectVersions to see them explicitly.
+				if m.ETag == deleteMarkerETag {
+					return storage.ErrObjectNotFound
+				}
+				obj = storage.Object{
+					Key:          m.Key,
+					Size:         m.Size,
+					ContentType:  m.ContentType,
+					ETag:         m.ETag,
+					LastModified: m.LastModified,
+					VersionID:    versionID,
+					ACL:          m.ACL,
+				}
+				placement = PlacementMeta{
+					VersionID:   versionID,
+					RingVersion: RingVersion(m.RingVersion),
+					ECData:      m.ECData,
+					ECParity:    m.ECParity,
+					NodeIDs:     m.NodeIDs,
+				}
+				return nil
+			})
+		}
+
 		// Resolve via latest-version pointer when present so callers see the
 		// most recent version. Falls back to the legacy single-key read when
 		// no lat: pointer exists (e.g., legacy replay).
+		if storage.IsInternalBucket(bucket) {
+			metaKeyBytes := b.internalObjectPath(bucket, key).metaKey
+			item, err := txn.Get(metaKeyBytes)
+			if err == badger.ErrKeyNotFound {
+				return storage.ErrObjectNotFound
+			}
+			if err != nil {
+				return err
+			}
+			return decodeMeta(item, "current")
+		}
+
 		metaKeyBytes := objectMetaKey(bucket, key)
 		versionID := ""
 		if latItem, lerr := txn.Get(latestKey(bucket, key)); lerr == nil {
@@ -1907,34 +2007,7 @@ func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			// Tombstone markers aren't observable via HeadObject — callers use
-			// HeadObjectVersion / ListObjectVersions to see them explicitly.
-			if m.ETag == deleteMarkerETag {
-				return storage.ErrObjectNotFound
-			}
-			obj = storage.Object{
-				Key:          m.Key,
-				Size:         m.Size,
-				ContentType:  m.ContentType,
-				ETag:         m.ETag,
-				LastModified: m.LastModified,
-				VersionID:    versionID,
-				ACL:          m.ACL,
-			}
-			placement = PlacementMeta{
-				VersionID:   versionID,
-				RingVersion: RingVersion(m.RingVersion),
-				ECData:      m.ECData,
-				ECParity:    m.ECParity,
-				NodeIDs:     m.NodeIDs,
-			}
-			return nil
-		})
+		return decodeMeta(item, versionID)
 	})
 	if err != nil {
 		return nil, PlacementMeta{}, err
@@ -2556,6 +2629,28 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 
 func (b *DistributedBackend) bucketDir(bucket string) string {
 	return filepath.Join(b.root, "data", bucket)
+}
+
+func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObjectPath {
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	if cached, ok := b.internalPathCache.Load(cacheKey); ok {
+		return cached.(internalObjectPath)
+	}
+	path := b.objectPathV(bucket, key, "current")
+	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: objectMetaKey(bucket, key)}
+	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
+	return actual.(internalObjectPath)
+}
+
+func (b *DistributedBackend) ensureInternalObjectDir(dir string) error {
+	if _, ok := b.internalDirCache.Load(dir); ok {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	b.internalDirCache.Store(dir, struct{}{})
+	return nil
 }
 
 // objectPath returns the legacy-unversioned local path for a full-object copy.

@@ -23,6 +23,8 @@ NFS4_PORT=$(bench_free_port)
 PPROF_PORT=$(bench_free_port)
 HOST_IP="192.168.5.2"   # macOS host IP as seen from Colima VM
 MNT="/mnt/grainfs-bench-nfs"
+NFS_VERS="${NFS_VERS:-4.0}"
+NFS_SERVER_WARMUP_SLEEP="${NFS_SERVER_WARMUP_SLEEP:-3}"
 
 PROFILE_DIR="benchmarks/profiles/nfs-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$PROFILE_DIR"
@@ -43,6 +45,7 @@ cleanup() {
     done
     kill -9 "$SERVER_PID" 2>/dev/null || true
   fi
+  [[ -f /tmp/grainfs-nfs-bench.log ]] && cp /tmp/grainfs-nfs-bench.log "$PROFILE_DIR/server.log" 2>/dev/null || true
   rm -rf "$DATA_DIR"
 }
 trap cleanup EXIT
@@ -67,12 +70,14 @@ if ! bench_wait_http_ready "http://127.0.0.1:$HTTP_PORT/" "server" 50 0.2; then
   tail -20 /tmp/grainfs-nfs-bench.log >&2
   exit 1
 fi
+echo "  waiting ${NFS_SERVER_WARMUP_SLEEP}s for raft group leadership..."
+sleep "$NFS_SERVER_WARMUP_SLEEP"
 
 echo ""
-echo "=== mounting NFS inside Colima (host=$HOST_IP port=$NFS4_PORT) ==="
+echo "=== mounting NFS inside Colima (vers=$NFS_VERS host=$HOST_IP port=$NFS4_PORT) ==="
 bench_colima_ssh sudo mkdir -p "$MNT"
 bench_colima_ssh sudo mount -t nfs4 \
-  -o "vers=4.0,port=$NFS4_PORT,rsize=131072,wsize=131072,hard,intr" \
+  -o "vers=$NFS_VERS,port=$NFS4_PORT,rsize=131072,wsize=131072,hard,intr" \
   "${HOST_IP}:/" "$MNT"
 
 echo "  mount OK — checking df:"

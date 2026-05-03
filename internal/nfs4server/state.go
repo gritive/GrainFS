@@ -93,6 +93,9 @@ type StateManager struct {
 	// Value type is chan struct{} (buffered 1).
 	writeGates pool.SyncMap[string, chan struct{}]
 
+	// fileMeta caches NFS-specific sidecar metadata by object key.
+	fileMeta pool.SyncMap[string, nfsFileMeta]
+
 	// WriteVerf is the 8-byte write verifier returned in COMMIT responses.
 	// Initialized once with crypto/rand per server instance; changes on restart.
 	WriteVerf [8]byte

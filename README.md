@@ -195,6 +195,8 @@ make bench-nfs-cluster            # multi-node NFS, same fio actions
 ```
 
 S3 object 결과는 `benchmarks/report.json`, Iceberg table API 결과는 `benchmarks/iceberg_table_report.json`에 저장된다.
+NFS 벤치마크는 기본 `NFS_VERS=4.0`으로 마운트하며, `NFS_VERS=4.1 make bench-nfs` 또는
+`NFS_VERS=4.2 make bench-nfs-cluster`처럼 프로토콜 버전별 병목을 분리해서 측정할 수 있다.
 암호화는 기본으로 켜진 상태에서 측정한다. 암호화를 끄고 비교할 때만 `NO_ENCRYPTION=1`을 지정한다.
 
 ### FUSE-over-S3 마운트 (rclone/s3fs/goofys)
