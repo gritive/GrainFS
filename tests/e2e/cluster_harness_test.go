@@ -22,38 +22,40 @@ const (
 )
 
 type e2eClusterOptions struct {
-	Nodes      int
-	SeedGroups int
-	Mode       ClusterMode
-	ClusterKey string
-	AccessKey  string
-	SecretKey  string
-	ECData     int
-	ECParity   int
-	LogPrefix  string
-	DisableNFS bool
-	DisableNBD bool
+	Nodes         int
+	SeedGroups    int
+	Mode          ClusterMode
+	ClusterKey    string
+	AccessKey     string
+	SecretKey     string
+	ECData        int
+	ECParity      int
+	LogPrefix     string
+	ScrubInterval string
+	DisableNFS    bool
+	DisableNBD    bool
 }
 
 type e2eCluster struct {
-	t          *testing.T
-	mode       ClusterMode
-	procs      []*exec.Cmd
-	dataDirs   []string
-	httpPorts  []int
-	raftPorts  []int
-	nfs4Ports  []int
-	nbdPorts   []int
-	httpURLs   []string
-	clusterKey string
-	accessKey  string
-	secretKey  string
-	seedGroups int
-	ecData     int
-	ecParity   int
-	logPrefix  string
-	stopped    bool
-	leaderIdx  int
+	t             *testing.T
+	mode          ClusterMode
+	procs         []*exec.Cmd
+	dataDirs      []string
+	httpPorts     []int
+	raftPorts     []int
+	nfs4Ports     []int
+	nbdPorts      []int
+	httpURLs      []string
+	clusterKey    string
+	accessKey     string
+	secretKey     string
+	seedGroups    int
+	ecData        int
+	ecParity      int
+	logPrefix     string
+	scrubInterval string
+	stopped       bool
+	leaderIdx     int
 }
 
 func startE2ECluster(t *testing.T, opts e2eClusterOptions) *e2eCluster {
@@ -86,6 +88,9 @@ func normalizeE2EClusterOptions(opts e2eClusterOptions) e2eClusterOptions {
 	if opts.LogPrefix == "" {
 		opts.LogPrefix = "grainfs-e2e-cluster"
 	}
+	if opts.ScrubInterval == "" {
+		opts.ScrubInterval = "0"
+	}
 	return opts
 }
 
@@ -97,16 +102,17 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 	}
 
 	c := &e2eCluster{
-		t:          t,
-		mode:       opts.Mode,
-		clusterKey: opts.ClusterKey,
-		accessKey:  opts.AccessKey,
-		secretKey:  opts.SecretKey,
-		seedGroups: opts.SeedGroups,
-		ecData:     opts.ECData,
-		ecParity:   opts.ECParity,
-		logPrefix:  opts.LogPrefix,
-		leaderIdx:  -1,
+		t:             t,
+		mode:          opts.Mode,
+		clusterKey:    opts.ClusterKey,
+		accessKey:     opts.AccessKey,
+		secretKey:     opts.SecretKey,
+		seedGroups:    opts.SeedGroups,
+		ecData:        opts.ECData,
+		ecParity:      opts.ECParity,
+		logPrefix:     opts.LogPrefix,
+		scrubInterval: opts.ScrubInterval,
+		leaderIdx:     -1,
 	}
 	c.procs = make([]*exec.Cmd, opts.Nodes)
 	c.dataDirs = make([]string, opts.Nodes)
@@ -240,7 +246,7 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--snapshot-interval", "0",
-		"--scrub-interval", "0",
+		"--scrub-interval", c.scrubIntervalArg(),
 		"--lifecycle-interval", "0",
 		"--no-encryption",
 	}
@@ -256,6 +262,13 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 	cmd.Stderr = logFile
 	require.NoError(t, cmd.Start(), "start e2e cluster node %d", i)
 	return cmd
+}
+
+func (c *e2eCluster) scrubIntervalArg() string {
+	if c == nil {
+		return "0"
+	}
+	return c.scrubInterval
 }
 
 func (c *e2eCluster) nodeID(i int) string {

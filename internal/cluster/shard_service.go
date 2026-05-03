@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -408,7 +409,7 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 // padded to alignment + truncated; when false the standard buffered path
 // runs unchanged. Errors at any step delete the tmp file before returning.
 func (s *ShardService) writeShardFile(path string, payload []byte) error {
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	if s.directIO {
 		if err := writeDirect(tmp, payload); err == nil {
 			if err := os.Rename(tmp, path); err != nil {
