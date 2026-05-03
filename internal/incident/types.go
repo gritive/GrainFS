@@ -28,9 +28,10 @@ const (
 type Cause string
 
 const (
-	CauseMissingShard Cause = "missing_shard"
-	CauseCorruptShard Cause = "corrupt_shard"
-	CauseCorruptBlob  Cause = "corrupt_blob"
+	CauseMissingShard     Cause = "missing_shard"
+	CauseCorruptShard     Cause = "corrupt_shard"
+	CauseCorruptBlob      Cause = "corrupt_blob"
+	CauseFDExhaustionRisk Cause = "fd_exhaustion_risk"
 )
 
 type Action string
@@ -39,6 +40,7 @@ const (
 	ActionReconstructShard Action = "reconstruct_shard"
 	ActionIsolateObject    Action = "isolate_object"
 	ActionNoopBlocked      Action = "noop_blocked"
+	ActionResourceWarning  Action = "resource_warning"
 )
 
 type ScopeKind string
@@ -98,6 +100,7 @@ const (
 	FactVerified      FactType = "verified"
 	FactReceiptSigned FactType = "receipt_signed"
 	FactIsolated      FactType = "isolated"
+	FactResolved      FactType = "resolved"
 )
 
 type Fact struct {
