@@ -121,6 +121,24 @@ func (m *Manager) putBlkBuf(b []byte) {
 	}
 }
 
+type readAtPreference interface {
+	PreferReadAt(bucket string) bool
+}
+
+type writeAtPreference interface {
+	PreferWriteAt(bucket string) bool
+}
+
+func backendPrefersReadAt(backend storage.Backend, bucket string) bool {
+	pref, ok := backend.(readAtPreference)
+	return ok && pref.PreferReadAt(bucket)
+}
+
+func backendPrefersWriteAt(backend storage.Backend, bucket string) bool {
+	pref, ok := backend.(writeAtPreference)
+	return ok && pref.PreferWriteAt(bucket)
+}
+
 // Create creates a new volume with the given name and size in bytes.
 func (m *Manager) Create(name string, sizeBytes int64) (*Volume, error) {
 	m.mu.Lock()
@@ -304,6 +322,18 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 					clear(p[totalRead+len(src) : totalRead+canRead])
 				} else {
 					copy(p[totalRead:totalRead+canRead], src[:canRead])
+				}
+				totalRead += canRead
+				continue
+			}
+		}
+
+		if m.dedup == nil && m.blocks == nil && backendPrefersReadAt(m.backend, volumeBucketName) {
+			if partial, ok := m.backend.(storage.PartialIO); ok {
+				dst := p[totalRead : totalRead+canRead]
+				n, _ := partial.ReadAt(context.Background(), volumeBucketName, phyKey, blkOff, dst)
+				if n < canRead {
+					clear(dst[n:])
 				}
 				totalRead += canRead
 				continue
@@ -524,15 +554,28 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 		} else {
 			targetKey = blockKey(name, blkNum)
-			var src io.Reader
-			if isFullBlock {
-				src = bytes.NewReader(p[totalWritten : totalWritten+canWrite])
+			if isFullBlock && backendPrefersWriteAt(m.backend, volumeBucketName) {
+				partial, ok := m.backend.(storage.PartialIO)
+				if ok {
+					if _, err := partial.WriteAt(context.Background(), volumeBucketName, targetKey, 0, p[totalWritten:totalWritten+canWrite]); err != nil {
+						m.putBlkBuf(blkData)
+						return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
+					}
+				} else {
+					if _, err := m.backend.PutObject(context.Background(), volumeBucketName, targetKey, bytes.NewReader(p[totalWritten:totalWritten+canWrite]), "application/octet-stream"); err != nil {
+						m.putBlkBuf(blkData)
+						return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
+					}
+				}
 			} else {
-				src = bytes.NewReader(blkData)
-			}
-			if _, err := m.backend.PutObject(context.Background(), volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
-				m.putBlkBuf(blkData)
-				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
+				src := bytes.NewReader(blkData)
+				if isFullBlock {
+					src = bytes.NewReader(p[totalWritten : totalWritten+canWrite])
+				}
+				if _, err := m.backend.PutObject(context.Background(), volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
+					m.putBlkBuf(blkData)
+					return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
+				}
 			}
 		}
 
@@ -585,7 +628,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 // Backends that implement it split the write into a fast local path and a
 // deferred Raft commit. NBD accumulates commitFns and drains them on flush.
 type asyncPutter interface {
-	PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error)
+	PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error)
 }
 
 // WriteAtDeferred is the write-back variant of WriteAt.
@@ -669,7 +712,7 @@ func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() er
 			// PutObjectAsync reads data via io.ReadAll before returning, so blkData
 			// is safe to return to the pool immediately after.
 			blkSrc = bytes.NewReader(blkData)
-			_, commitFn, putErr := ap.PutObjectAsync(volumeBucketName, targetKey, blkSrc, "application/octet-stream")
+			_, commitFn, putErr := ap.PutObjectAsync(context.Background(), volumeBucketName, targetKey, blkSrc, "application/octet-stream")
 			m.putBlkBuf(blkData)
 			if putErr != nil {
 				m.mu.Unlock()
@@ -680,7 +723,26 @@ func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() er
 			continue
 		}
 
-		_, commitFn, putErr := ap.PutObjectAsync(volumeBucketName, targetKey, blkSrc, "application/octet-stream")
+		if isFullBlock && backendPrefersWriteAt(m.backend, volumeBucketName) {
+			partial, ok := m.backend.(storage.PartialIO)
+			if ok {
+				if _, err := partial.WriteAt(context.Background(), volumeBucketName, targetKey, 0, p[totalWritten:totalWritten+canWrite]); err != nil {
+					m.mu.Unlock()
+					return nil, totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
+				}
+			} else {
+				_, commitFn, putErr := ap.PutObjectAsync(context.Background(), volumeBucketName, targetKey, bytes.NewReader(p[totalWritten:totalWritten+canWrite]), "application/octet-stream")
+				if putErr != nil {
+					m.mu.Unlock()
+					return nil, totalWritten, fmt.Errorf("write block %d: %w", blkNum, putErr)
+				}
+				commits = append(commits, commitFn)
+			}
+			totalWritten += canWrite
+			continue
+		}
+
+		_, commitFn, putErr := ap.PutObjectAsync(context.Background(), volumeBucketName, targetKey, blkSrc, "application/octet-stream")
 		if putErr != nil {
 			m.mu.Unlock()
 			return nil, totalWritten, fmt.Errorf("write block %d: %w", blkNum, putErr)
@@ -704,7 +766,7 @@ func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() er
 			vol.AllocatedBlocks = 0
 		}
 		if data, merr := marshalVolume(vol); merr == nil {
-			_, metaCommit, _ := ap.PutObjectAsync(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+			_, metaCommit, _ := ap.PutObjectAsync(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
 			commits = append(commits, metaCommit)
 		}
 	}

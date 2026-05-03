@@ -138,26 +138,31 @@ const (
 	nbdErrEINVAL = uint32(22)
 )
 
-// nbdPoolBufSize is the buffer size that the pool recycles. Matches the
-// default NBD block size (4 KiB) and the most common fio workload size.
-const nbdPoolBufSize = 4096
+// NBD recycles the common request sizes used by block-device clients. 4 KiB
+// matches the volume block size; 64 KiB is a common kernel NBD request size.
+const (
+	nbdPoolBufSize      = 4096
+	nbdLargePoolBufSize = 64 * 1024
+)
 
 // Server serves a single volume over NBD protocol.
 type Server struct {
-	mgr         *volume.Manager
-	volName     string
-	listener    atomic.Pointer[net.Listener]
-	closed      atomic.Bool
-	bufPool     *pool.Pool[[]byte]
-	readIndexer ReadIndexer // nil = no gate (single-node / non-distributed)
+	mgr          *volume.Manager
+	volName      string
+	listener     atomic.Pointer[net.Listener]
+	closed       atomic.Bool
+	bufPool      *pool.Pool[[]byte]
+	largeBufPool *pool.Pool[[]byte]
+	readIndexer  ReadIndexer // nil = no gate (single-node / non-distributed)
 }
 
 // NewServer creates a new NBD server for the named volume.
 func NewServer(mgr *volume.Manager, volName string) *Server {
 	return &Server{
-		mgr:     mgr,
-		volName: volName,
-		bufPool: pool.New(func() []byte { return make([]byte, nbdPoolBufSize) }),
+		mgr:          mgr,
+		volName:      volName,
+		bufPool:      pool.New(func() []byte { return make([]byte, nbdPoolBufSize) }),
+		largeBufPool: pool.New(func() []byte { return make([]byte, nbdLargePoolBufSize) }),
 	}
 }
 
@@ -240,18 +245,23 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-// getBuf returns a buffer of exactly length bytes. Pooled for nbdPoolBufSize.
+// getBuf returns a buffer of exactly length bytes for common pooled sizes.
 func (s *Server) getBuf(length uint32) []byte {
 	if length == nbdPoolBufSize {
 		return s.bufPool.Get()
 	}
+	if length == nbdLargePoolBufSize {
+		return s.largeBufPool.Get()
+	}
 	return make([]byte, length)
 }
 
-// putBuf returns buf to the pool if it was pool-allocated.
+// putBuf returns buf to its pool if it was pool-allocated.
 func (s *Server) putBuf(buf []byte) {
 	if len(buf) == nbdPoolBufSize {
 		s.bufPool.Put(buf)
+	} else if len(buf) == nbdLargePoolBufSize {
+		s.largeBufPool.Put(buf)
 	}
 }
 
