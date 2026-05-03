@@ -112,6 +112,8 @@ Add partial IO as first-class data-group operations:
 - `ForwardOpTruncate`
 - `ForwardOpReadAt`
 
+Wire encoding uses the existing FlatBuffers forward command family. Add typed `WriteAtArgs`, `ReadAtArgs`, `ReadAtReply`, and `TruncateArgs` tables to `internal/raft/raftpb/forward_cmd.fbs`; do not introduce an ad hoc binary frame for partial IO.
+
 `CmdWriteAtObject` records:
 
 - bucket
@@ -228,6 +230,8 @@ The staging namespace is owned by the same data group as the target bucket. It i
 
 `AbortMultipartUpload` deletes part metadata and best-effort deletes internal part objects. `CompleteMultipartUpload` also deletes staging objects after the final object commit succeeds. Cleanup failures are logged and left for startup cleanup or scrubber-style orphan cleanup; they do not turn a successful complete into a user-visible failure.
 
+MPU staging also needs a built-in TTL cleanup policy. The data group should persist enough staging metadata to identify incomplete or orphaned MPU staging objects older than the configured retention window. A background lifecycle worker removes expired staging objects and their stale metadata without exposing them to user bucket lifecycle rules. This is part of P3, not a follow-up, because durable staging without bounded cleanup can leak capacity after crashes or aborted clients.
+
 ### Required Behavior
 
 - MPU parts survive data-group leadership transfer.
@@ -235,6 +239,8 @@ The staging namespace is owned by the same data group as the target bucket. It i
 - Complete fails if any requested part body is missing or unreadable.
 - Final object metadata is not committed when part assembly fails.
 - Abort and successful complete clean up staging objects best-effort.
+- Expired incomplete staging objects are removed by an internal TTL cleanup policy.
+- Internal staging TTL is separate from user bucket lifecycle rules.
 
 ### Tests
 
@@ -244,6 +250,8 @@ The staging namespace is owned by the same data group as the target bucket. It i
 - Restart preserves MPU metadata and part staging objects.
 - Existing S3 MPU ETag and part ordering behavior remains stable.
 - Integration/e2e gate: create MPU and upload at least one part while node A leads the target data group, transfer or kill that leader, complete MPU through node B, then verify final object bytes and that staging namespace entries are no longer user-visible.
+- TTL cleanup test: create stale staging metadata and objects, run the internal cleanup worker, and verify only expired incomplete staging entries are removed.
+- TTL safety test: active MPU parts younger than the retention window and completed final objects are not removed.
 
 ## P4: Behavioral Context Cancellation
 
@@ -363,5 +371,4 @@ Conflict flags: P1, P2, and P3 all touch `internal/cluster/backend.go` and likel
 
 ## Open Decisions
 
-- The exact wire encoding for `ForwardOpReadAt` should mirror existing FlatBuffers forward args and replies rather than introducing a separate ad hoc frame.
-- MPU staging namespace cleanup can start as best-effort synchronous cleanup plus startup orphan scanning; a richer lifecycle policy can be added later if orphan volume becomes measurable.
+None.
