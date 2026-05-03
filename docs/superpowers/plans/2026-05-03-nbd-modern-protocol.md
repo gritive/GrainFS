@@ -600,7 +600,7 @@ git commit -m "feat: add disabled nbd extended header parser"
 - Modify: `Makefile`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write optional interop smoke**
+- [x] **Step 1: Write optional interop smoke**
 
 Create a Go test that skips clearly when `qemu-io`, `qemu-nbd`, or `libnbd` tools are unavailable:
 
@@ -614,7 +614,7 @@ func TestNBDInteropToolsAvailable(t *testing.T) {
 
 Add follow-up tests that start `grainfs serve --nbd-port`, then run qemu/libnbd commands for `OPT_GO`, read/write, zero, and status when the tool supports them.
 
-- [ ] **Step 2: Add Makefile target**
+- [x] **Step 2: Add Makefile target**
 
 Add:
 
@@ -624,7 +624,7 @@ test-nbd-interop: build
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -v -timeout 180s ./tests/nbd_interop/
 ```
 
-- [ ] **Step 3: Update README**
+- [x] **Step 3: Update README**
 
 Document:
 
@@ -634,7 +634,7 @@ make test-nbd-interop
 
 and state that extended headers remain disabled until qemu/libnbd interop passes.
 
-- [ ] **Step 4: Run commands**
+- [x] **Step 4: Run commands**
 
 Run:
 
@@ -645,7 +645,7 @@ go test ./internal/nbd -count=1
 
 Expected: interop test passes or skips with a clear tool-missing message; NBD unit tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/nbd_interop/nbd_interop_test.go Makefile README.md

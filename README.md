@@ -175,6 +175,7 @@ make build          # 바이너리 빌드
 make test           # 전체 테스트
 make test-race      # race detector 포함
 make test-e2e       # E2E 테스트
+make test-nbd-interop # qemu/libnbd 기반 NBD interop smoke
 make lint           # go vet + gofmt 검사
 ```
 
@@ -268,6 +269,14 @@ Linux에서는 Docker Desktop이든 colima든 상관없이 동작한다:
 ```bash
 make test-nbd-docker
 ```
+
+Modern NBD negotiation smoke는 qemu/libnbd 도구가 있을 때 실행한다:
+
+```bash
+make test-nbd-interop
+```
+
+현재 NBD 서버는 fixed newstyle, `OPT_INFO`, `OPT_GO`, `NBD_INFO_BLOCK_SIZE`, `WRITE_ZEROES`, structured read reply, `base:allocation` block status를 지원한다. Extended headers는 parser만 있고 qemu/libnbd interop가 고정될 때까지 기본 협상에서 `NBD_REP_ERR_UNSUP`으로 유지한다.
 
 ## License
 
