@@ -1055,10 +1055,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// metaTransport could auto-register its node onto the mux. Each group
 	// uses ForGroup(groupID) as its raft transport.
 
-	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) {
+	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) error {
 		// group-0 is already wired with the shared distBackend.
 		if entry.ID == "group-0" {
-			return
+			return nil
 		}
 		ensureShardGroupPlaceholder(dgMgr, entry)
 		// Only instantiate for groups where we are a voter. New dynamic groups
@@ -1071,21 +1071,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			}
 		}
 		if !isVoter {
-			return
+			return nil
 		}
 		ownedGroups.mu.Lock()
 		if _, ok := ownedGroups.m[entry.ID]; ok {
 			ownedGroups.mu.Unlock()
-			return // already instantiated
+			return nil // already instantiated
 		}
 		if ownedGroups.inFlight[entry.ID] {
 			ownedGroups.mu.Unlock()
-			return // another goroutine is currently bringing this group up
+			return nil // another goroutine is currently bringing this group up
 		}
 		ownedGroups.inFlight[entry.ID] = true
 		ownedGroups.mu.Unlock()
-		// Make sure inFlight is cleared even if instantiation fails (log.Fatal
-		// below would skip this; that's acceptable since the process is dying).
+		// Make sure inFlight is cleared even if instantiation fails.
 		defer func() {
 			ownedGroups.mu.Lock()
 			delete(ownedGroups.inFlight, entry.ID)
@@ -1115,13 +1114,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			// shared path.
 			ls, lerr := raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID, storeOpts...)
 			if lerr != nil {
-				log.Fatal().Err(lerr).Str("group_id", entry.ID).Msg("OpenSharedLogStore failed")
+				return fmt.Errorf("group %s: open shared log store: %w", entry.ID, lerr)
 			}
 			glc.LogStore = ls
 		}
 		gb, err := cluster.InstantiateLocalGroup(glc, entry)
 		if err != nil {
-			log.Fatal().Err(err).Str("group_id", entry.ID).Msg("instantiateLocalGroup failed — voter status fatal")
+			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
 		}
 		gb.SetShardCache(shardCache)
 		groupRaftMux.Register(entry.ID, gb.RaftNode())
@@ -1131,19 +1130,32 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		ownedGroups.m[entry.ID] = gb
 		ownedGroups.mu.Unlock()
 		log.Info().Str("group_id", entry.ID).Strs("peers", entry.PeerIDs).Msg("instantiateLocalGroup ok")
+		return nil
 	}
 
 	// Cold-start instantiation for entries already in FSM (restart path).
-	// Run async so the apply loop is not blocked by BadgerDB+raft.Node startup.
-	go func() {
-		for _, entry := range metaRaft.FSM().ShardGroups() {
-			instantiateOwnedIfNeeded(entry)
+	// Run synchronously so Badger role failures feed the startup reducer before
+	// the server accepts traffic.
+	for _, entry := range metaRaft.FSM().ShardGroups() {
+		if err := instantiateOwnedIfNeeded(entry); err != nil {
+			recordStartupDecision(badgerrole.Decision{
+				Role:    badgerrole.RoleGroupState,
+				GroupID: entry.ID,
+				Status:  badgerrole.DecisionOpenFailed,
+				Action:  badgerrole.RecoveryActionStartReadOnly,
+				Reason:  err.Error(),
+				Err:     err,
+			})
 		}
-	}()
+	}
 	// Runtime: handle entries replayed/applied after this point (fresh boot path).
 	// Dispatch to goroutine so apply loop is not blocked by BadgerDB+raft.Node startup.
 	metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
-		go instantiateOwnedIfNeeded(entry)
+		go func() {
+			if err := instantiateOwnedIfNeeded(entry); err != nil {
+				log.Error().Err(err).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
+			}
+		}()
 	})
 
 	// Shutdown hook: close all owned groups in parallel with 5s timeout each.

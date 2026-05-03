@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -78,6 +79,25 @@ func TestInstantiateLocalGroup_BadgerOpenFails_ReturnsError(t *testing.T) {
 	entry := ShardGroupEntry{ID: "group-z", PeerIDs: []string{"self"}}
 	_, err := instantiateLocalGroup(cfg, entry)
 	require.Error(t, err)
+}
+
+func TestInstantiateLocalGroup_UsesInjectedBadgerOpen(t *testing.T) {
+	dir := t.TempDir()
+	called := false
+	cfg := GroupLifecycleConfig{
+		NodeID:  "self",
+		DataDir: dir,
+		OpenStateDB: func(groupID, path string) (*badger.DB, error) {
+			called = true
+			require.Equal(t, "group-injected", groupID)
+			return badger.Open(badger.DefaultOptions(path).WithLogger(nil))
+		},
+	}
+
+	gb, err := instantiateLocalGroup(cfg, ShardGroupEntry{ID: "group-injected", PeerIDs: []string{"self"}})
+	require.NoError(t, err)
+	require.True(t, called)
+	require.NoError(t, shutdownLocalGroup(context.Background(), gb, 5*time.Second))
 }
 
 func TestInstantiateLocalGroup_EmptyGroupID(t *testing.T) {
