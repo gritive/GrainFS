@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -296,12 +298,6 @@ func waitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, w
 }
 
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
-	if err := transport.ValidateClusterKey(clusterKey); err != nil {
-		if errors.Is(err, transport.ErrEmptyClusterKey) {
-			return fmt.Errorf("--cluster-key is required in cluster mode (generate with: openssl rand -hex 32)")
-		}
-		log.Warn().Err(err).Msg("--cluster-key is below recommended length")
-	}
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
@@ -313,6 +309,19 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	peers := filterEmpty(strings.Split(peersStr, ","))
 	joinAddr, _ := cmd.Flags().GetString("join")
 	joinMode := joinAddr != ""
+
+	// D6/D7: --cluster-key is required when running in actual cluster mode
+	// (peers > 0 || join != ""). Solo runs through this same function but
+	// does not require a cluster key — runCluster handles both modes.
+	clusterMode := len(peers) > 0 || joinMode
+	if clusterMode {
+		if err := transport.ValidateClusterKey(clusterKey); err != nil {
+			if errors.Is(err, transport.ErrEmptyClusterKey) {
+				return fmt.Errorf("--cluster-key is required in cluster mode (generate with: openssl rand -hex 32)")
+			}
+			log.Warn().Err(err).Msg("--cluster-key is below recommended length")
+		}
+	}
 	if joinMode {
 		if len(peers) > 0 {
 			return fmt.Errorf("--join cannot be used with --peers")
@@ -454,7 +463,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 
 	// Start QUIC transport for inter-node communication.
-	quicTransport, err := transport.NewQUICTransport(clusterKey)
+	// Solo mode (no peers, no join) generates an ephemeral cluster identity
+	// because there are no peers to authenticate with — preserves zero-config.
+	transportPSK := clusterKey
+	if !clusterMode {
+		transportPSK = generateEphemeralClusterKey()
+	}
+	quicTransport, err := transport.NewQUICTransport(transportPSK)
 	if err != nil {
 		return fmt.Errorf("init QUIC transport: %w", err)
 	}
@@ -1493,4 +1508,18 @@ func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int
 		}
 		return k + m
 	}
+}
+
+// generateEphemeralClusterKey returns a random 64-char hex string used as a
+// per-process cluster identity in solo mode. The key never leaves this
+// process (solo has no peers), so its only purpose is to satisfy the
+// transport package's PSK requirement (D6).
+func generateEphemeralClusterKey() string {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand.Read should never fail on supported platforms; if it
+		// does, treat as fatal — we cannot produce a secure ephemeral key.
+		panic(fmt.Sprintf("ephemeral cluster key: %v", err))
+	}
+	return hex.EncodeToString(b[:])
 }
