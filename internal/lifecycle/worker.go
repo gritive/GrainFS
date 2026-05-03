@@ -19,14 +19,14 @@ import (
 // backend type can satisfy both — the worker passes key as prefix with
 // maxKeys=0 (unlimited) and filters to exact-key matches itself.
 type ObjectDeleter interface {
-	DeleteObject(bucket, key string) error
+	DeleteObject(ctx context.Context, bucket, key string) error
 	DeleteObjectVersion(bucket, key, versionID string) error
 	ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error)
 }
 
 // Scrubbable is the subset of scrubber.Scrubbable used by the lifecycle worker.
 type Scrubbable interface {
-	ListBuckets() ([]string, error)
+	ListBuckets(ctx context.Context) ([]string, error)
 	ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error)
 }
 
@@ -108,7 +108,7 @@ func (w *Worker) Stats() Stats {
 
 func (w *Worker) runCycle(ctx context.Context) {
 	now := time.Now()
-	buckets, err := w.backend.ListBuckets()
+	buckets, err := w.backend.ListBuckets(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("lifecycle: list buckets")
 		return
@@ -168,7 +168,7 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 				if err := w.limiter.Wait(ctx); err != nil {
 					return // ctx cancelled
 				}
-				if err := w.deleter.DeleteObject(obj.Bucket, obj.Key); err != nil {
+				if err := w.deleter.DeleteObject(ctx, obj.Bucket, obj.Key); err != nil {
 					log.Error().Str("bucket", obj.Bucket).Str("key", obj.Key).Err(err).Msg("lifecycle: delete object")
 				} else {
 					atomic.AddInt64(&w.stats.Expired, 1)

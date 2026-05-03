@@ -60,7 +60,7 @@ func TestMigrateLegacySingletonIcebergCatalogBackfillsMissingMetadataObject(t *t
 	tbl, err := catalog.LoadTable(ctx, ident)
 	require.NoError(t, err)
 	require.JSONEq(t, string(metadata), string(tbl.Metadata))
-	rc, _, err := backend.GetObject("grainfs-tables", "warehouse/analytics/events/metadata/00000.json")
+	rc, _, err := backend.GetObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00000.json")
 	require.NoError(t, err)
 	body, err := io.ReadAll(rc)
 	rc.Close()
@@ -84,8 +84,8 @@ func TestMigrateLegacySingletonIcebergCatalogSkipsMatchingExistingPointer(t *tes
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
-	require.NoError(t, backend.CreateBucket("grainfs-tables"))
-	_, err = backend.PutObject("grainfs-tables", "warehouse/analytics/events/metadata/00000.json", bytes.NewReader(metadata), "application/json")
+	require.NoError(t, backend.CreateBucket(context.Background(), "grainfs-tables"))
+	_, err = backend.PutObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00000.json", bytes.NewReader(metadata), "application/json")
 	require.NoError(t, err)
 	catalog, _ := newStartedMetaCatalogForMigrationTest(t, backend)
 	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
@@ -113,8 +113,8 @@ func TestMigrateLegacySingletonIcebergCatalogFailsOnConflictingTablePointer(t *t
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
-	require.NoError(t, backend.CreateBucket("grainfs-tables"))
-	_, err = backend.PutObject("grainfs-tables", "warehouse/analytics/events/metadata/00001.json", bytes.NewReader([]byte(`{"format-version":2}`)), "application/json")
+	require.NoError(t, backend.CreateBucket(context.Background(), "grainfs-tables"))
+	_, err = backend.PutObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00001.json", bytes.NewReader([]byte(`{"format-version":2}`)), "application/json")
 	require.NoError(t, err)
 	catalog, _ := newStartedMetaCatalogForMigrationTest(t, backend)
 	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
@@ -145,14 +145,16 @@ type migrationNoSuchBucketBackend struct {
 	body    []byte
 }
 
-func (m *migrationNoSuchBucketBackend) CreateBucket(bucket string) error {
+func (m *migrationNoSuchBucketBackend) CreateBucket(ctx context.Context, bucket string) error {
 	m.created = true
 	return nil
 }
-func (m *migrationNoSuchBucketBackend) HeadBucket(string) error        { return nil }
-func (m *migrationNoSuchBucketBackend) DeleteBucket(string) error      { return nil }
-func (m *migrationNoSuchBucketBackend) ListBuckets() ([]string, error) { return nil, nil }
-func (m *migrationNoSuchBucketBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+func (m *migrationNoSuchBucketBackend) HeadBucket(context.Context, string) error   { return nil }
+func (m *migrationNoSuchBucketBackend) DeleteBucket(context.Context, string) error { return nil }
+func (m *migrationNoSuchBucketBackend) ListBuckets(context.Context) ([]string, error) {
+	return nil, nil
+}
+func (m *migrationNoSuchBucketBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
 	body, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -162,28 +164,30 @@ func (m *migrationNoSuchBucketBackend) PutObject(bucket, key string, r io.Reader
 	m.body = body
 	return &storage.Object{Key: key, Size: int64(len(body)), ContentType: contentType}, nil
 }
-func (m *migrationNoSuchBucketBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+func (m *migrationNoSuchBucketBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	return nil, nil, storage.ErrNoSuchBucket
 }
-func (m *migrationNoSuchBucketBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (m *migrationNoSuchBucketBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
 	return nil, storage.ErrObjectNotFound
 }
-func (m *migrationNoSuchBucketBackend) DeleteObject(bucket, key string) error { return nil }
-func (m *migrationNoSuchBucketBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
-	return nil, nil
-}
-func (m *migrationNoSuchBucketBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+func (m *migrationNoSuchBucketBackend) DeleteObject(ctx context.Context, bucket, key string) error {
 	return nil
 }
-func (m *migrationNoSuchBucketBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
+func (m *migrationNoSuchBucketBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	return nil, nil
+}
+func (m *migrationNoSuchBucketBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	return nil
+}
+func (m *migrationNoSuchBucketBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
 	return nil, fmt.Errorf("unused")
 }
-func (m *migrationNoSuchBucketBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (m *migrationNoSuchBucketBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	return nil, fmt.Errorf("unused")
 }
-func (m *migrationNoSuchBucketBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+func (m *migrationNoSuchBucketBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
 	return nil, fmt.Errorf("unused")
 }
-func (m *migrationNoSuchBucketBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
+func (m *migrationNoSuchBucketBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	return fmt.Errorf("unused")
 }

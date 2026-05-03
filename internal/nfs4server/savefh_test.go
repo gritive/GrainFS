@@ -31,16 +31,16 @@ func buildLookupOp(name string) []byte {
 func buildOpenCreateOp(filename string) []byte {
 	w := &XDRWriter{}
 	w.WriteUint32(uint32(OpOpen))
-	w.WriteUint32(0)          // seqid
-	w.WriteUint32(2)          // OPEN4_SHARE_ACCESS_WRITE
-	w.WriteUint32(0)          // OPEN4_SHARE_DENY_NONE
-	w.WriteUint64(1)          // owner clientid
+	w.WriteUint32(0)         // seqid
+	w.WriteUint32(2)         // OPEN4_SHARE_ACCESS_WRITE
+	w.WriteUint32(0)         // OPEN4_SHARE_DENY_NONE
+	w.WriteUint64(1)         // owner clientid
 	w.WriteString("owner-1") // owner
-	w.WriteUint32(1)          // opentype = OPEN4_CREATE
-	w.WriteUint32(0)          // createmode = UNCHECKED4
-	w.WriteUint32(0)          // fattr bitmap len = 0
-	w.WriteOpaque(nil)        // empty attrvals
-	w.WriteUint32(0)          // claim = CLAIM_NULL
+	w.WriteUint32(1)         // opentype = OPEN4_CREATE
+	w.WriteUint32(0)         // createmode = UNCHECKED4
+	w.WriteUint32(0)         // fattr bitmap len = 0
+	w.WriteOpaque(nil)       // empty attrvals
+	w.WriteUint32(0)         // claim = CLAIM_NULL
 	w.WriteString(filename)
 	return w.Bytes()
 }
@@ -118,18 +118,26 @@ func TestSaveFH_RestoreFH(t *testing.T) {
 	status, r := parseCompoundReply(t, reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
-	r.ReadUint32()                 // opCount
-	r.ReadUint32(); r.ReadUint32() // PUTROOTFH
-	r.ReadUint32(); r.ReadUint32() // OPEN a.txt opcode+status
-	skipOpenResult(r)              // OPEN a.txt result
-	r.ReadUint32(); r.ReadUint32() // GETFH opcode+status
-	fhA, _ := r.ReadOpaque()       // FH of a.txt
-	r.ReadUint32(); r.ReadUint32() // SAVEFH
-	r.ReadUint32(); r.ReadUint32() // PUTROOTFH
-	r.ReadUint32(); r.ReadUint32() // OPEN b.txt opcode+status
-	skipOpenResult(r)              // OPEN b.txt result
-	r.ReadUint32(); r.ReadUint32() // RESTOREFH
-	r.ReadUint32(); r.ReadUint32() // GETFH opcode+status
+	r.ReadUint32() // opCount
+	r.ReadUint32()
+	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32()
+	r.ReadUint32()    // OPEN a.txt opcode+status
+	skipOpenResult(r) // OPEN a.txt result
+	r.ReadUint32()
+	r.ReadUint32()           // GETFH opcode+status
+	fhA, _ := r.ReadOpaque() // FH of a.txt
+	r.ReadUint32()
+	r.ReadUint32() // SAVEFH
+	r.ReadUint32()
+	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32()
+	r.ReadUint32()    // OPEN b.txt opcode+status
+	skipOpenResult(r) // OPEN b.txt result
+	r.ReadUint32()
+	r.ReadUint32() // RESTOREFH
+	r.ReadUint32()
+	r.ReadUint32() // GETFH opcode+status
 	fhAfterRestore, _ := r.ReadOpaque()
 
 	assert.Equal(t, fhA, fhAfterRestore, "RESTOREFH should restore saved FH")
@@ -148,9 +156,10 @@ func TestRestoreFH_WithoutSave(t *testing.T) {
 	)
 	status, r := parseCompoundReply(t, reply)
 	assert.Equal(t, uint32(NFS4ERR_RESTOREFH), status)
-	r.ReadUint32()                 // opCount
-	r.ReadUint32(); r.ReadUint32() // PUTROOTFH
-	r.ReadUint32()                 // RESTOREFH opcode
+	r.ReadUint32() // opCount
+	r.ReadUint32()
+	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32() // RESTOREFH opcode
 	restoreStatus, _ := r.ReadUint32()
 	assert.Equal(t, uint32(NFS4ERR_RESTOREFH), restoreStatus)
 }
@@ -178,19 +187,28 @@ func TestSaveFH_Overwrites(t *testing.T) {
 	status, r := parseCompoundReply(t, reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
-	r.ReadUint32()                 // opCount
-	r.ReadUint32(); r.ReadUint32() // PUTROOTFH
-	r.ReadUint32(); r.ReadUint32() // OPEN x.txt opcode+status
-	skipOpenResult(r)              // OPEN x.txt result
-	r.ReadUint32(); r.ReadUint32() // SAVEFH
-	r.ReadUint32(); r.ReadUint32() // PUTROOTFH
-	r.ReadUint32(); r.ReadUint32() // OPEN y.txt opcode+status
-	skipOpenResult(r)              // OPEN y.txt result
-	r.ReadUint32(); r.ReadUint32() // GETFH opcode+status
-	fhY, _ := r.ReadOpaque()       // y.txt FH
-	r.ReadUint32(); r.ReadUint32() // SAVEFH
-	r.ReadUint32(); r.ReadUint32() // RESTOREFH
-	r.ReadUint32(); r.ReadUint32() // GETFH opcode+status
+	r.ReadUint32() // opCount
+	r.ReadUint32()
+	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32()
+	r.ReadUint32()    // OPEN x.txt opcode+status
+	skipOpenResult(r) // OPEN x.txt result
+	r.ReadUint32()
+	r.ReadUint32() // SAVEFH
+	r.ReadUint32()
+	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32()
+	r.ReadUint32()    // OPEN y.txt opcode+status
+	skipOpenResult(r) // OPEN y.txt result
+	r.ReadUint32()
+	r.ReadUint32()           // GETFH opcode+status
+	fhY, _ := r.ReadOpaque() // y.txt FH
+	r.ReadUint32()
+	r.ReadUint32() // SAVEFH
+	r.ReadUint32()
+	r.ReadUint32() // RESTOREFH
+	r.ReadUint32()
+	r.ReadUint32() // GETFH opcode+status
 	fhAfterRestore, _ := r.ReadOpaque()
 
 	assert.Equal(t, fhY, fhAfterRestore, "SAVEFH should overwrite: RESTOREFH returns last saved FH")

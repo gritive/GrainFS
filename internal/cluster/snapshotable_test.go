@@ -16,7 +16,7 @@ import (
 
 func TestListAllObjects_EmptyBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("empty"))
+	require.NoError(t, b.CreateBucket(context.Background(), "empty"))
 
 	objs, err := b.ListAllObjects()
 	require.NoError(t, err)
@@ -25,11 +25,11 @@ func TestListAllObjects_EmptyBucket(t *testing.T) {
 
 func TestListAllObjects_PreservesVersionHistoryAndDeleteMarkers(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("tomb"))
+	require.NoError(t, b.CreateBucket(context.Background(), "tomb"))
 
-	v1, err := b.PutObject("tomb", "doc.txt", strings.NewReader("v1"), "text/plain")
+	v1, err := b.PutObject(context.Background(), "tomb", "doc.txt", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	v2, err := b.PutObject("tomb", "doc.txt", strings.NewReader("v2"), "text/plain")
+	v2, err := b.PutObject(context.Background(), "tomb", "doc.txt", strings.NewReader("v2"), "text/plain")
 	require.NoError(t, err)
 	markerID, err := b.DeleteObjectReturningMarker("tomb", "doc.txt")
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestListAllObjects_NoBuckets(t *testing.T) {
 
 func TestRestoreObjects_StaleBlob(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("stale"))
+	require.NoError(t, b.CreateBucket(context.Background(), "stale"))
 
 	// Snapshot references an object whose blob does NOT exist on disk.
 	snap := []storage.SnapshotObject{{
@@ -84,7 +84,7 @@ func TestRestoreObjects_StaleBlob(t *testing.T) {
 
 func TestRestoreObjects_RemovesExtraObjects(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("extra"))
+	require.NoError(t, b.CreateBucket(context.Background(), "extra"))
 
 	// Put two objects that are NOT in the snapshot.
 	for i, k := range []string{"extra1.txt", "extra2.txt"} {
@@ -106,11 +106,11 @@ func TestRestoreObjects_RemovesExtraObjects(t *testing.T) {
 
 func TestRestoreObjects_PreservesVersionHistoryAndDeleteMarkers(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("hist"))
+	require.NoError(t, b.CreateBucket(context.Background(), "hist"))
 
-	v1, err := b.PutObject("hist", "doc.txt", strings.NewReader("v1"), "text/plain")
+	v1, err := b.PutObject(context.Background(), "hist", "doc.txt", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	v2, err := b.PutObject("hist", "doc.txt", strings.NewReader("v2"), "text/plain")
+	v2, err := b.PutObject(context.Background(), "hist", "doc.txt", strings.NewReader("v2"), "text/plain")
 	require.NoError(t, err)
 	markerID, err := b.DeleteObjectReturningMarker("hist", "doc.txt")
 	require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestRestoreObjects_PreservesVersionHistoryAndDeleteMarkers(t *testing.T) {
 	snap, err := b.ListAllObjects()
 	require.NoError(t, err)
 
-	v3, err := b.PutObject("hist", "doc.txt", strings.NewReader("v3"), "text/plain")
+	v3, err := b.PutObject(context.Background(), "hist", "doc.txt", strings.NewReader("v3"), "text/plain")
 	require.NoError(t, err)
 	require.NoError(t, b.RestoreBuckets([]storage.SnapshotBucket{{Name: "hist", VersioningState: "Enabled"}}))
 	count, stale, err := b.RestoreObjects(snap)
@@ -152,7 +152,7 @@ func TestBlobExists_VersionedPath(t *testing.T) {
 
 func TestBlobExists_ResolvesEmptyVersionID(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("res"))
+	require.NoError(t, b.CreateBucket(context.Background(), "res"))
 
 	vid := "v-resolved"
 	createBlob(t, b, "res", "obj.bin", vid)

@@ -44,7 +44,7 @@ func createDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, 
 	const maxBackoff = 2 * time.Second
 	var lastErr error
 	for {
-		err := backend.CreateBucket("default")
+		err := backend.CreateBucket(ctx, "default")
 		if err == nil || errors.Is(err, storage.ErrBucketAlreadyExists) {
 			return nil
 		}

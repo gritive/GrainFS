@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -17,18 +18,18 @@ import (
 // matches the version assigned by the FSM.
 func TestWAL_WrapDistributedBackend_PutRecordsVersionID(t *testing.T) {
 	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket("vbucket"))
+	require.NoError(t, dist.CreateBucket(context.Background(), "vbucket"))
 
 	walDir := t.TempDir()
 	w, err := wal.Open(walDir)
 	require.NoError(t, err)
 	backend := wal.NewBackend(dist, w)
 
-	obj1, err := backend.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	obj1, err := backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 	require.NotEmpty(t, obj1.VersionID, "DistributedBackend must assign a VersionID")
 
-	obj2, err := backend.PutObject("vbucket", "k", strings.NewReader("v2-longer"), "text/plain")
+	obj2, err := backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v2-longer"), "text/plain")
 	require.NoError(t, err)
 	require.NotEmpty(t, obj2.VersionID)
 	require.NotEqual(t, obj1.VersionID, obj2.VersionID)
@@ -52,14 +53,14 @@ func TestWAL_WrapDistributedBackend_PutRecordsVersionID(t *testing.T) {
 // delete flows through the WAL wrapper and appears as OpDeleteVersion.
 func TestWAL_WrapDistributedBackend_DeleteObjectVersion(t *testing.T) {
 	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket("vbucket"))
+	require.NoError(t, dist.CreateBucket(context.Background(), "vbucket"))
 
 	walDir := t.TempDir()
 	w, err := wal.Open(walDir)
 	require.NoError(t, err)
 	backend := wal.NewBackend(dist, w)
 
-	obj, err := backend.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	obj, err := backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 
 	// Hard-delete this specific version via the WAL wrapper.
@@ -81,14 +82,14 @@ func TestWAL_WrapDistributedBackend_DeleteObjectVersion(t *testing.T) {
 
 func TestWAL_WrapDistributedBackend_DeleteObjectRecordsMarkerVersionID(t *testing.T) {
 	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket("vbucket"))
+	require.NoError(t, dist.CreateBucket(context.Background(), "vbucket"))
 
 	walDir := t.TempDir()
 	w, err := wal.Open(walDir)
 	require.NoError(t, err)
 	backend := wal.NewBackend(dist, w)
 
-	_, err = backend.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	_, err = backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 	markerID, err := backend.DeleteObjectReturningMarker("vbucket", "k")
 	require.NoError(t, err)
@@ -113,18 +114,18 @@ func TestWAL_WrapDistributedBackend_DeleteObjectRecordsMarkerVersionID(t *testin
 // DistributedBackend holds.
 func TestWAL_WrapDistributedBackend_ReplayProducesSameState(t *testing.T) {
 	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket("b"))
+	require.NoError(t, dist.CreateBucket(context.Background(), "b"))
 
 	walDir := t.TempDir()
 	w, err := wal.Open(walDir)
 	require.NoError(t, err)
 	backend := wal.NewBackend(dist, w)
 
-	_, err = backend.PutObject("b", "a", strings.NewReader("A"), "text/plain")
+	_, err = backend.PutObject(context.Background(), "b", "a", strings.NewReader("A"), "text/plain")
 	require.NoError(t, err)
-	_, err = backend.PutObject("b", "b", strings.NewReader("BB"), "text/plain")
+	_, err = backend.PutObject(context.Background(), "b", "b", strings.NewReader("BB"), "text/plain")
 	require.NoError(t, err)
-	_, err = backend.PutObject("b", "a", strings.NewReader("A-v2"), "text/plain")
+	_, err = backend.PutObject(context.Background(), "b", "a", strings.NewReader("A-v2"), "text/plain")
 	require.NoError(t, err)
 
 	require.NoError(t, w.Flush())
@@ -146,7 +147,7 @@ func TestWAL_WrapDistributedBackend_ReplayProducesSameState(t *testing.T) {
 	require.Len(t, latest, 2)
 
 	// Each replayed key has the newest PUT's VersionID, ETag, and size.
-	rcA, objA, err := dist.GetObject("b", "a")
+	rcA, objA, err := dist.GetObject(context.Background(), "b", "a")
 	require.NoError(t, err)
 	defer rcA.Close()
 	_, _ = io.ReadAll(rcA)

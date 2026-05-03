@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -16,16 +17,16 @@ func BenchmarkGetObject_NoCache(b *testing.B) {
 	}
 	defer backend.Close()
 
-	_ = backend.CreateBucket("bench")
+	_ = backend.CreateBucket(context.Background(), "bench")
 	data := strings.Repeat("x", 4096)
 	for i := 0; i < 100; i++ {
-		backend.PutObject("bench", fmt.Sprintf("key-%d", i), strings.NewReader(data), "text/plain")
+		backend.PutObject(context.Background(), "bench", fmt.Sprintf("key-%d", i), strings.NewReader(data), "text/plain")
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("key-%d", i%100)
-		rc, _, err := backend.GetObject("bench", key)
+		rc, _, err := backend.GetObject(context.Background(), "bench", key)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -45,15 +46,15 @@ func BenchmarkGetObject_Cached(b *testing.B) {
 
 	cached := NewCachedBackend(backend)
 
-	_ = cached.CreateBucket("bench")
+	_ = cached.CreateBucket(context.Background(), "bench")
 	data := strings.Repeat("x", 4096)
 	for i := 0; i < 100; i++ {
-		cached.PutObject("bench", fmt.Sprintf("key-%d", i), strings.NewReader(data), "text/plain")
+		cached.PutObject(context.Background(), "bench", fmt.Sprintf("key-%d", i), strings.NewReader(data), "text/plain")
 	}
 
 	// Warm cache
 	for i := 0; i < 100; i++ {
-		rc, _, _ := cached.GetObject("bench", fmt.Sprintf("key-%d", i))
+		rc, _, _ := cached.GetObject(context.Background(), "bench", fmt.Sprintf("key-%d", i))
 		io.Copy(io.Discard, rc)
 		rc.Close()
 	}
@@ -61,7 +62,7 @@ func BenchmarkGetObject_Cached(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("key-%d", i%100)
-		rc, _, err := cached.GetObject("bench", key)
+		rc, _, err := cached.GetObject(context.Background(), "bench", key)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -79,14 +80,14 @@ func BenchmarkHeadObject_NoCache(b *testing.B) {
 	}
 	defer backend.Close()
 
-	_ = backend.CreateBucket("bench")
+	_ = backend.CreateBucket(context.Background(), "bench")
 	for i := 0; i < 100; i++ {
-		backend.PutObject("bench", fmt.Sprintf("key-%d", i), strings.NewReader("data"), "text/plain")
+		backend.PutObject(context.Background(), "bench", fmt.Sprintf("key-%d", i), strings.NewReader("data"), "text/plain")
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := backend.HeadObject("bench", fmt.Sprintf("key-%d", i%100))
+		_, err := backend.HeadObject(context.Background(), "bench", fmt.Sprintf("key-%d", i%100))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -104,21 +105,21 @@ func BenchmarkHeadObject_Cached(b *testing.B) {
 
 	cached := NewCachedBackend(backend)
 
-	_ = cached.CreateBucket("bench")
+	_ = cached.CreateBucket(context.Background(), "bench")
 	for i := 0; i < 100; i++ {
-		cached.PutObject("bench", fmt.Sprintf("key-%d", i), strings.NewReader("data"), "text/plain")
+		cached.PutObject(context.Background(), "bench", fmt.Sprintf("key-%d", i), strings.NewReader("data"), "text/plain")
 	}
 
 	// Warm cache via GetObject (populates both content and metadata cache)
 	for i := 0; i < 100; i++ {
-		rc, _, _ := cached.GetObject("bench", fmt.Sprintf("key-%d", i))
+		rc, _, _ := cached.GetObject(context.Background(), "bench", fmt.Sprintf("key-%d", i))
 		io.Copy(io.Discard, rc)
 		rc.Close()
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := cached.HeadObject("bench", fmt.Sprintf("key-%d", i%100))
+		_, err := cached.HeadObject(context.Background(), "bench", fmt.Sprintf("key-%d", i%100))
 		if err != nil {
 			b.Fatal(err)
 		}

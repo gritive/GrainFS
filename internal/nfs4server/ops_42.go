@@ -2,6 +2,7 @@ package nfs4server
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"math"
 
@@ -37,7 +38,7 @@ func (d *Dispatcher) opSeek(data []byte) OpResult {
 	key := pathToKey(d.currentPath)
 	var fileSize int64
 	if d.backend != nil {
-		if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil {
+		if info, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key); err == nil {
 			fileSize = info.Size
 		}
 	}
@@ -95,19 +96,19 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 
 	// Recheck size inside the lock to avoid TOCTOU: another writer may have
 	// extended the file between an earlier HeadObject and now.
-	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size >= required {
+	if info, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key); err == nil && info.Size >= required {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
 	if tr, ok := d.backend.(storage.Truncatable); ok {
-		if err := tr.Truncate(nfs4Bucket, key, required); err != nil {
+		if err := tr.Truncate(context.Background(), nfs4Bucket, key, required); err != nil {
 			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 		}
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
 	var existing []byte
-	if body, _, err := d.backend.GetObject(nfs4Bucket, key); err == nil {
+	if body, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, key); err == nil {
 		existing, err = io.ReadAll(body)
 		body.Close()
 		if err != nil {
@@ -117,7 +118,7 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	if int64(len(existing)) < required {
 		existing = append(existing, make([]byte, required-int64(len(existing)))...)
 	}
-	if _, err := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 	}
 	return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
@@ -142,14 +143,14 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
 	}
 
-	if info, err := d.backend.HeadObject(nfs4Bucket, key); err == nil && info.Size > maxObjectBytes {
+	if info, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key); err == nil && info.Size > maxObjectBytes {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_NOTSUPP}
 	}
 
 	release := d.state.LockPath(d.currentPath)
 	defer release()
 
-	body, _, err := d.backend.GetObject(nfs4Bucket, key)
+	body, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
 	}
@@ -172,7 +173,7 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 		copy(current[offset:end], zeros)
 	}
 
-	if _, err := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(current), "application/octet-stream"); err != nil {
+	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(current), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
 	}
 	return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
@@ -202,7 +203,7 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	}
 
 	releaseSrc := d.state.LockPath(d.savedPath)
-	srcBody, _, err := d.backend.GetObject(nfs4Bucket, srcKey)
+	srcBody, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, srcKey)
 	if err != nil {
 		releaseSrc()
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
@@ -217,7 +218,7 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	release := d.state.LockPath(d.currentPath)
 	defer release()
 
-	if _, err := d.backend.PutObject(nfs4Bucket, dstKey, bytes.NewReader(srcData), "application/octet-stream"); err != nil {
+	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, dstKey, bytes.NewReader(srcData), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 	}
 

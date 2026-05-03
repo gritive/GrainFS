@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -88,11 +89,11 @@ func TestIndex_LoadRebuildFromBlobs(t *testing.T) {
 
 	// Write objects (this creates blob files)
 	data1 := []byte("test data 1")
-	_, err = pb.PutObject("bucket1", "key1", bytes.NewReader(data1), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket1", "key1", bytes.NewReader(data1), "text/plain")
 	require.NoError(t, err)
 
 	data2 := []byte("test data 2")
-	_, err = pb.PutObject("bucket2", "key2", bytes.NewReader(data2), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket2", "key2", bytes.NewReader(data2), "text/plain")
 	require.NoError(t, err)
 
 	// Verify objects are in index
@@ -112,13 +113,13 @@ func TestIndex_LoadRebuildFromBlobs(t *testing.T) {
 	assert.NoError(t, err, "LoadIndex should rebuild from blob files")
 
 	// TEST: Verify all objects accessible after rebuild
-	rc1, obj1, err := pb2.GetObject("bucket1", "key1")
+	rc1, obj1, err := pb2.GetObject(context.Background(), "bucket1", "key1")
 	require.NoError(t, err)
 	require.NotNil(t, rc1)
 	defer rc1.Close()
 	assert.Equal(t, "key1", obj1.Key)
 
-	rc2, obj2, err := pb2.GetObject("bucket2", "key2")
+	rc2, obj2, err := pb2.GetObject(context.Background(), "bucket2", "key2")
 	require.NoError(t, err)
 	require.NotNil(t, rc2)
 	defer rc2.Close()
@@ -141,7 +142,7 @@ func TestIndex_RebuildAfterCrash(t *testing.T) {
 	for i := 0; i < objectCount; i++ {
 		key := fmt.Sprintf("key%d", i)
 		data := []byte(fmt.Sprintf("test data %d", i))
-		_, err := pb.PutObject("bucket1", key, bytes.NewReader(data), "text/plain")
+		_, err := pb.PutObject(context.Background(), "bucket1", key, bytes.NewReader(data), "text/plain")
 		require.NoError(t, err)
 	}
 
@@ -167,7 +168,7 @@ func TestIndex_RebuildAfterCrash(t *testing.T) {
 	// TEST: Verify all objects accessible
 	for i := 0; i < objectCount; i++ {
 		key := fmt.Sprintf("key%d", i)
-		rc, obj, err := pb2.GetObject("bucket1", key)
+		rc, obj, err := pb2.GetObject(context.Background(), "bucket1", key)
 		assert.NoError(t, err, "Object %s should be accessible after rebuild", key)
 		assert.NotNil(t, rc)
 		assert.NotNil(t, obj)
@@ -188,7 +189,7 @@ func TestIndex_PersistenceWithRefcounts(t *testing.T) {
 
 	// Write an object
 	data := []byte("test data")
-	_, err = pb.PutObject("bucket1", "key1", bytes.NewReader(data), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket1", "key1", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	// Copy the object (increments refcount)
@@ -226,23 +227,28 @@ type mockBackend struct {
 	storage.Backend
 }
 
-func (m *mockBackend) CreateBucket(bucket string) error {
+func (m *mockBackend) CreateBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	return nil
 }
 
-func (m *mockBackend) HeadBucket(bucket string) error {
+func (m *mockBackend) HeadBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	return nil
 }
 
-func (m *mockBackend) DeleteBucket(bucket string) error {
+func (m *mockBackend) DeleteBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	return nil
 }
 
-func (m *mockBackend) ListBuckets() ([]string, error) {
+func (m *mockBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	_ = ctx
 	return []string{}, nil
 }
 
-func (m *mockBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+func (m *mockBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	_ = ctx
 	return &storage.Object{
 		Key:          key,
 		Size:         0,
@@ -252,23 +258,27 @@ func (m *mockBackend) PutObject(bucket, key string, r io.Reader, contentType str
 	}, nil
 }
 
-func (m *mockBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+func (m *mockBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	_ = ctx
 	return io.NopCloser(bytes.NewReader(nil)), &storage.Object{
 		Key: key,
 	}, nil
 }
 
-func (m *mockBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (m *mockBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	_ = ctx
 	return &storage.Object{
 		Key: key,
 	}, nil
 }
 
-func (m *mockBackend) DeleteObject(bucket, key string) error {
+func (m *mockBackend) DeleteObject(ctx context.Context, bucket, key string) error {
+	_ = ctx
 	return nil
 }
 
-func (m *mockBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+func (m *mockBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	_ = ctx
 	return []*storage.Object{}, nil
 }
 

@@ -2,6 +2,7 @@ package volume
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 
@@ -410,18 +411,18 @@ type listErrBackend struct {
 	storage.Backend
 }
 
-func (b *listErrBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+func (b *listErrBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
 	if prefix != metaPrefix {
 		return nil, fmt.Errorf("injected list error")
 	}
-	return b.Backend.ListObjects(bucket, prefix, maxKeys)
+	return b.Backend.ListObjects(ctx, bucket, prefix, maxKeys)
 }
 
-func (b *listErrBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+func (b *listErrBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
 	if prefix != metaPrefix {
 		return fmt.Errorf("injected list error")
 	}
-	return b.Backend.WalkObjects(bucket, prefix, fn)
+	return b.Backend.WalkObjects(ctx, bucket, prefix, fn)
 }
 
 // --- CoW Snapshot tests ---
@@ -708,7 +709,7 @@ func setupDedupManager(t *testing.T) *Manager {
 func countObjects(t *testing.T, m *Manager, prefix string) int {
 	t.Helper()
 	var count int
-	err := m.backend.WalkObjects(volumeBucketName, prefix, func(_ *storage.Object) error {
+	err := m.backend.WalkObjects(context.Background(), volumeBucketName, prefix, func(_ *storage.Object) error {
 		count++
 		return nil
 	})

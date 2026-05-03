@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math/rand"
@@ -90,13 +91,13 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 	bucket := "ubc-bench"
 	put := func(b Backend, key string, payload []byte) {
 		t.Helper()
-		if _, err := b.PutObject(bucket, key, bytes.NewReader(payload), "application/octet-stream"); err != nil {
+		if _, err := b.PutObject(context.Background(), bucket, key, bytes.NewReader(payload), "application/octet-stream"); err != nil {
 			t.Fatalf("put %s: %v", key, err)
 		}
 	}
 	mustGet := func(b Backend, key string) {
 		t.Helper()
-		rc, _, err := b.GetObject(bucket, key)
+		rc, _, err := b.GetObject(context.Background(), bucket, key)
 		if err != nil {
 			t.Fatalf("get %s: %v", key, err)
 		}
@@ -111,7 +112,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		resetTrackers()
 		base := snap()
 		b := setupBackend(t)
-		if err := b.CreateBucket(bucket); err != nil {
+		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
 		payload := bytes.Repeat([]byte("x"), 4096)
@@ -133,7 +134,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		resetTrackers()
 		base := snap()
 		b := setupBackend(t)
-		if err := b.CreateBucket(bucket); err != nil {
+		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
 		put(b, "hot.txt", []byte("hot payload"))
@@ -152,7 +153,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		resetTrackers()
 		base := snap()
 		b := setupBackend(t)
-		if err := b.CreateBucket(bucket); err != nil {
+		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
 		const n = 800
@@ -178,7 +179,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		resetTrackers()
 		base := snap()
 		b := setupBackend(t)
-		if err := b.CreateBucket(bucket); err != nil {
+		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
 		const n = 200
@@ -203,7 +204,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		resetTrackers()
 		base := snap()
 		b := setupBackend(t)
-		if err := b.CreateBucket(bucket); err != nil {
+		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
 		const n = 500

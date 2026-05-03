@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"sync"
@@ -29,6 +30,11 @@ type CacheStats struct {
 
 // CacheOption configures CachedBackend.
 type CacheOption func(*CachedBackend)
+
+var (
+	_ Backend   = (*CachedBackend)(nil)
+	_ PartialIO = (*CachedBackend)(nil)
+)
 
 // WithMaxCacheBytes sets the total maximum bytes for cached object content.
 func WithMaxCacheBytes(n int64) CacheOption {
@@ -94,7 +100,7 @@ func cacheKey(bucket, key string) string { return bucket + "/" + key }
 
 // GetObject returns a cached reader on hit, or fetches from the underlying
 // backend and caches the content on miss.
-func (cb *CachedBackend) GetObject(bucket, key string) (io.ReadCloser, *Object, error) {
+func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
 	ck := cacheKey(bucket, key)
 
 	// Fast path: cache hit — hold write lock to safely read node data and update LRU
@@ -111,12 +117,12 @@ func (cb *CachedBackend) GetObject(bucket, key string) (io.ReadCloser, *Object, 
 	cb.mu.Unlock()
 
 	// Cache miss: check size before buffering
-	meta, err := cb.Backend.HeadObject(bucket, key)
+	meta, err := cb.Backend.HeadObject(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	rc, obj, err := cb.Backend.GetObject(bucket, key)
+	rc, obj, err := cb.Backend.GetObject(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -141,7 +147,7 @@ func (cb *CachedBackend) GetObject(bucket, key string) (io.ReadCloser, *Object, 
 }
 
 // HeadObject returns cached metadata on hit.
-func (cb *CachedBackend) HeadObject(bucket, key string) (*Object, error) {
+func (cb *CachedBackend) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
 	ck := cacheKey(bucket, key)
 
 	cb.mu.Lock()
@@ -154,47 +160,44 @@ func (cb *CachedBackend) HeadObject(bucket, key string) (*Object, error) {
 	}
 	cb.mu.Unlock()
 
-	return cb.Backend.HeadObject(bucket, key)
+	return cb.Backend.HeadObject(ctx, bucket, key)
 }
 
 // PutObject invalidates the cache entry for the key.
-func (cb *CachedBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*Object, error) {
+func (cb *CachedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
 	cb.invalidate(bucket, key)
-	return cb.Backend.PutObject(bucket, key, r, contentType)
+	return cb.Backend.PutObject(ctx, bucket, key, r, contentType)
 }
 
 // PutObjectAsync delegates to the inner backend's async write-back path if available.
 // The cache entry is invalidated immediately so reads after write don't return stale data.
-func (cb *CachedBackend) PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*Object, func() error, error) {
+func (cb *CachedBackend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, func() error, error) {
 	type asyncPutter interface {
-		PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*Object, func() error, error)
+		PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, func() error, error)
 	}
 	ap, ok := cb.Backend.(asyncPutter)
 	if !ok {
-		obj, err := cb.PutObject(bucket, key, r, contentType)
+		obj, err := cb.PutObject(ctx, bucket, key, r, contentType)
 		return obj, func() error { return nil }, err
 	}
 	cb.invalidate(bucket, key)
-	return ap.PutObjectAsync(bucket, key, r, contentType)
+	return ap.PutObjectAsync(ctx, bucket, key, r, contentType)
 }
 
 // WriteAt delegates to the inner backend's WriteAt if available, then invalidates
 // the cache entry so subsequent reads fetch the updated content.
-func (cb *CachedBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error) {
-	type writeAtter interface {
-		WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error)
-	}
-	wa, ok := cb.Backend.(writeAtter)
+func (cb *CachedBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error) {
+	wa, ok := cb.Backend.(PartialIO)
 	if !ok {
 		return nil, fmt.Errorf("inner backend does not support WriteAt")
 	}
 	cb.invalidate(bucket, key)
-	return wa.WriteAt(bucket, key, offset, data)
+	return wa.WriteAt(ctx, bucket, key, offset, data)
 }
 
 // ReadAt serves pread from the in-memory cache on hit; delegates to inner on miss.
 // For large objects (not cached), bypasses GetObject/Seek overhead entirely.
-func (cb *CachedBackend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	ck := cacheKey(bucket, key)
 	cb.mu.Lock()
 	node, ok := cb.entries[ck]
@@ -205,20 +208,28 @@ func (cb *CachedBackend) ReadAt(bucket, key string, offset int64, buf []byte) (i
 	}
 	cb.mu.Unlock()
 
-	type readAtter interface {
-		ReadAt(bucket, key string, offset int64, buf []byte) (int, error)
-	}
-	ra, ok := cb.Backend.(readAtter)
+	ra, ok := cb.Backend.(PartialIO)
 	if !ok {
 		return 0, fmt.Errorf("inner backend does not support ReadAt")
 	}
-	return ra.ReadAt(bucket, key, offset, buf)
+	return ra.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+// Truncate delegates to the inner backend's Truncate if available, then
+// invalidates the cache entry so subsequent reads fetch the updated content.
+func (cb *CachedBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	tr, ok := cb.Backend.(Truncatable)
+	if !ok {
+		return fmt.Errorf("inner backend does not support Truncate")
+	}
+	cb.invalidate(bucket, key)
+	return tr.Truncate(ctx, bucket, key, size)
 }
 
 // DeleteObject invalidates the cache entry for the key.
-func (cb *CachedBackend) DeleteObject(bucket, key string) error {
+func (cb *CachedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
 	cb.invalidate(bucket, key)
-	return cb.Backend.DeleteObject(bucket, key)
+	return cb.Backend.DeleteObject(ctx, bucket, key)
 }
 
 // DeleteObjectReturningMarker invalidates the cache and delegates to the inner backend.
@@ -231,7 +242,7 @@ func (cb *CachedBackend) DeleteObjectReturningMarker(bucket, key string) (string
 	if vsd, ok := cb.Backend.(versionedSoftDeleter); ok {
 		return vsd.DeleteObjectReturningMarker(bucket, key)
 	}
-	return "", cb.Backend.DeleteObject(bucket, key)
+	return "", cb.Backend.DeleteObject(context.Background(), bucket, key)
 }
 
 // DeleteObjectVersion invalidates the cache entry and hard-deletes the version.
@@ -247,9 +258,9 @@ func (cb *CachedBackend) DeleteObjectVersion(bucket, key, versionID string) erro
 }
 
 // CompleteMultipartUpload invalidates the cache entry for the key.
-func (cb *CachedBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []Part) (*Object, error) {
+func (cb *CachedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
 	cb.invalidate(bucket, key)
-	return cb.Backend.CompleteMultipartUpload(bucket, key, uploadID, parts)
+	return cb.Backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 }
 
 // Close closes the underlying backend (e.g., flushing BadgerDB).

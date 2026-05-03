@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -31,6 +32,12 @@ type LocalBackend struct {
 	root string
 	db   *badger.DB
 }
+
+var (
+	_ Backend     = (*LocalBackend)(nil)
+	_ PartialIO   = (*LocalBackend)(nil)
+	_ Truncatable = (*LocalBackend)(nil)
+)
 
 // DB exposes the underlying BadgerDB for shared use (lifecycle, events).
 func (b *LocalBackend) DB() *badger.DB { return b.db }
@@ -73,7 +80,8 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
 }
 
-func (b *LocalBackend) CreateBucket(bucket string) error {
+func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {
 		bk := b.bucketKey(bucket)
 		_, err := txn.Get(bk)
@@ -91,7 +99,8 @@ func (b *LocalBackend) CreateBucket(bucket string) error {
 	})
 }
 
-func (b *LocalBackend) HeadBucket(bucket string) error {
+func (b *LocalBackend) HeadBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	return b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(b.bucketKey(bucket))
 		if err == badger.ErrKeyNotFound {
@@ -101,7 +110,8 @@ func (b *LocalBackend) HeadBucket(bucket string) error {
 	})
 }
 
-func (b *LocalBackend) DeleteBucket(bucket string) error {
+func (b *LocalBackend) DeleteBucket(ctx context.Context, bucket string) error {
+	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {
 		bk := b.bucketKey(bucket)
 		_, err := txn.Get(bk)
@@ -127,7 +137,8 @@ func (b *LocalBackend) DeleteBucket(bucket string) error {
 	})
 }
 
-func (b *LocalBackend) ListBuckets() ([]string, error) {
+func (b *LocalBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	_ = ctx
 	var buckets []string
 	err := b.db.View(func(txn *badger.Txn) error {
 		prefix := []byte("bucket:")
@@ -147,8 +158,8 @@ func (b *LocalBackend) ListBuckets() ([]string, error) {
 	return buckets, nil
 }
 
-func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*Object, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *LocalBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -251,14 +262,14 @@ func (b *LocalBackend) PutObject(bucket, key string, r io.Reader, contentType st
 	return obj, nil
 }
 
-func (b *LocalBackend) GetObject(bucket, key string) (io.ReadCloser, *Object, error) {
+func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
 	// Backend boundary readamp: every disk-touching GetObject feeds
 	// the simulator. CachedBackend sits in front of us, so callers
 	// that hit the object cache never reach this point. The hit-rate
 	// curve at this tracker therefore answers exactly what UBC would
 	// have caught beyond the existing object cache.
 	readamp.RecordBackendObject(bucket + "/" + key)
-	obj, err := b.HeadObject(bucket, key)
+	obj, err := b.HeadObject(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -271,8 +282,8 @@ func (b *LocalBackend) GetObject(bucket, key string) (io.ReadCloser, *Object, er
 	return f, obj, nil
 }
 
-func (b *LocalBackend) HeadObject(bucket, key string) (*Object, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -337,7 +348,8 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 }
 
 // Truncate implements storage.Truncatable.
-func (b *LocalBackend) Truncate(bucket, key string, size int64) error {
+func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	_ = ctx
 	objPath := b.objectPath(bucket, key)
 	if err := os.Truncate(objPath, size); err != nil {
 		return fmt.Errorf("truncate: %w", err)
@@ -372,7 +384,8 @@ func (b *LocalBackend) Truncate(bucket, key string, size int64) error {
 // first byte produce a sparse hole filled with zeros.
 //
 // This is O(len(data)) — no full-file copy per write.
-func (b *LocalBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*Object, error) {
+func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error) {
+	_ = ctx
 	objPath := b.objectPath(bucket, key)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create dir: %w", err)
@@ -415,7 +428,8 @@ func (b *LocalBackend) WriteAt(bucket, key string, offset uint64, data []byte) (
 }
 
 // ReadAt reads len(buf) bytes from the object at the given offset via pread(2).
-func (b *LocalBackend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	_ = ctx
 	f, err := os.Open(b.objectPath(bucket, key))
 	if err != nil {
 		return 0, err
@@ -435,8 +449,8 @@ func (b *LocalBackend) Sync(bucket, key string) error {
 	return f.Sync()
 }
 
-func (b *LocalBackend) DeleteObject(bucket, key string) error {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) error {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
 
@@ -455,8 +469,8 @@ func (b *LocalBackend) DeleteObject(bucket, key string) error {
 	})
 }
 
-func (b *LocalBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*Object, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *LocalBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*Object, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -494,8 +508,8 @@ func (b *LocalBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*Objec
 	return objects, err
 }
 
-func (b *LocalBackend) WalkObjects(bucket, prefix string, fn func(*Object) error) error {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
 	return b.db.View(func(txn *badger.Txn) error {
@@ -524,13 +538,14 @@ func (b *LocalBackend) WalkObjects(bucket, prefix string, fn func(*Object) error
 
 // CopyObject copies an object by reading the source and writing to the destination.
 func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error) {
-	rc, obj, err := b.GetObject(srcBucket, srcKey)
+	ctx := context.Background()
+	rc, obj, err := b.GetObject(ctx, srcBucket, srcKey)
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
 
-	return b.PutObject(dstBucket, dstKey, rc, obj.ContentType)
+	return b.PutObject(ctx, dstBucket, dstKey, rc, obj.ContentType)
 }
 
 func (b *LocalBackend) policyKey(bucket string) []byte {
@@ -656,9 +671,10 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 
 	var stale []StaleBlob
 	var count int
+	ctx := context.Background()
 	for _, snap := range objects {
 		// Ensure bucket exists
-		if err := b.CreateBucket(snap.Bucket); err != nil && !errors.Is(err, ErrBucketAlreadyExists) {
+		if err := b.CreateBucket(ctx, snap.Bucket); err != nil && !errors.Is(err, ErrBucketAlreadyExists) {
 			return count, stale, fmt.Errorf("ensure bucket %s: %w", snap.Bucket, err)
 		}
 		// Check blob exists on disk

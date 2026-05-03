@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"io"
 )
@@ -11,6 +12,11 @@ type RecoveryWriteGate struct {
 	Backend
 	err error
 }
+
+var (
+	_ Backend     = (*RecoveryWriteGate)(nil)
+	_ Truncatable = (*RecoveryWriteGate)(nil)
+)
 
 type policyBackend interface {
 	GetBucketPolicy(bucket string) ([]byte, error)
@@ -46,22 +52,24 @@ func NewRecoveryWriteGate(inner Backend, err error) *RecoveryWriteGate {
 // multipart create/upload/complete/abort, copy, ACL/policy/versioning setters,
 // truncate, versioned deletes, and snapshot restore helpers. Read/list/head
 // methods delegate through Backend.
-func (g *RecoveryWriteGate) CreateBucket(string) error { return g.err }
-func (g *RecoveryWriteGate) DeleteBucket(string) error { return g.err }
-func (g *RecoveryWriteGate) PutObject(string, string, io.Reader, string) (*Object, error) {
+func (g *RecoveryWriteGate) CreateBucket(context.Context, string) error { return g.err }
+func (g *RecoveryWriteGate) DeleteBucket(context.Context, string) error { return g.err }
+func (g *RecoveryWriteGate) PutObject(context.Context, string, string, io.Reader, string) (*Object, error) {
 	return nil, g.err
 }
-func (g *RecoveryWriteGate) DeleteObject(string, string) error { return g.err }
-func (g *RecoveryWriteGate) CreateMultipartUpload(string, string, string) (*MultipartUpload, error) {
+func (g *RecoveryWriteGate) DeleteObject(context.Context, string, string) error { return g.err }
+func (g *RecoveryWriteGate) CreateMultipartUpload(context.Context, string, string, string) (*MultipartUpload, error) {
 	return nil, g.err
 }
-func (g *RecoveryWriteGate) UploadPart(string, string, string, int, io.Reader) (*Part, error) {
+func (g *RecoveryWriteGate) UploadPart(context.Context, string, string, string, int, io.Reader) (*Part, error) {
 	return nil, g.err
 }
-func (g *RecoveryWriteGate) CompleteMultipartUpload(string, string, string, []Part) (*Object, error) {
+func (g *RecoveryWriteGate) CompleteMultipartUpload(context.Context, string, string, string, []Part) (*Object, error) {
 	return nil, g.err
 }
-func (g *RecoveryWriteGate) AbortMultipartUpload(string, string, string) error { return g.err }
+func (g *RecoveryWriteGate) AbortMultipartUpload(context.Context, string, string, string) error {
+	return g.err
+}
 func (g *RecoveryWriteGate) CopyObject(string, string, string, string) (*Object, error) {
 	return nil, g.err
 }
@@ -69,7 +77,7 @@ func (g *RecoveryWriteGate) SetObjectACL(string, string, uint8) error { return g
 func (g *RecoveryWriteGate) PutObjectWithACL(string, string, io.Reader, string, uint8) (*Object, error) {
 	return nil, g.err
 }
-func (g *RecoveryWriteGate) Truncate(string, string, int64) error { return g.err }
+func (g *RecoveryWriteGate) Truncate(context.Context, string, string, int64) error { return g.err }
 
 func (g *RecoveryWriteGate) GetBucketPolicy(bucket string) ([]byte, error) {
 	pb, ok := g.Backend.(policyBackend)

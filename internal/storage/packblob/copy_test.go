@@ -1,6 +1,7 @@
 package packblob
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -13,10 +14,10 @@ import (
 
 func TestCopyObject_SmallPackedObject(t *testing.T) {
 	pb := newTestPackedBackend(t)
-	require.NoError(t, pb.CreateBucket("src"))
-	require.NoError(t, pb.CreateBucket("dst"))
+	require.NoError(t, pb.CreateBucket(context.Background(), "src"))
+	require.NoError(t, pb.CreateBucket(context.Background(), "dst"))
 
-	_, err := pb.PutObject("src", "original.txt", strings.NewReader("copy me"), "text/plain")
+	_, err := pb.PutObject(context.Background(), "src", "original.txt", strings.NewReader("copy me"), "text/plain")
 	require.NoError(t, err)
 
 	// Copy via Copier interface
@@ -27,7 +28,7 @@ func TestCopyObject_SmallPackedObject(t *testing.T) {
 	assert.Equal(t, int64(7), obj.Size)
 
 	// Read the copy
-	rc, _, err := pb.GetObject("dst", "copy.txt")
+	rc, _, err := pb.GetObject(context.Background(), "dst", "copy.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -37,9 +38,9 @@ func TestCopyObject_SmallPackedObject(t *testing.T) {
 
 func TestCopyObject_RefcountIncremented(t *testing.T) {
 	pb := newTestPackedBackend(t)
-	require.NoError(t, pb.CreateBucket("b"))
+	require.NoError(t, pb.CreateBucket(context.Background(), "b"))
 
-	_, err := pb.PutObject("b", "orig.txt", strings.NewReader("shared data"), "text/plain")
+	_, err := pb.PutObject(context.Background(), "b", "orig.txt", strings.NewReader("shared data"), "text/plain")
 	require.NoError(t, err)
 
 	// Copy
@@ -47,9 +48,9 @@ func TestCopyObject_RefcountIncremented(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete original — copy should still be readable
-	require.NoError(t, pb.DeleteObject("b", "orig.txt"))
+	require.NoError(t, pb.DeleteObject(context.Background(), "b", "orig.txt"))
 
-	rc, _, err := pb.GetObject("b", "copy.txt")
+	rc, _, err := pb.GetObject(context.Background(), "b", "copy.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -59,18 +60,18 @@ func TestCopyObject_RefcountIncremented(t *testing.T) {
 
 func TestCopyObject_LargeObjectFallback(t *testing.T) {
 	pb := newTestPackedBackend(t)
-	require.NoError(t, pb.CreateBucket("b"))
+	require.NoError(t, pb.CreateBucket(context.Background(), "b"))
 
 	// Large object (>= 64KB threshold)
 	largeData := strings.Repeat("L", 65*1024)
-	_, err := pb.PutObject("b", "large.bin", strings.NewReader(largeData), "application/octet-stream")
+	_, err := pb.PutObject(context.Background(), "b", "large.bin", strings.NewReader(largeData), "application/octet-stream")
 	require.NoError(t, err)
 
 	obj, err := pb.CopyObject("b", "large.bin", "b", "large-copy.bin")
 	require.NoError(t, err)
 	assert.Equal(t, int64(65*1024), obj.Size)
 
-	rc, _, err := pb.GetObject("b", "large-copy.bin")
+	rc, _, err := pb.GetObject(context.Background(), "b", "large-copy.bin")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -80,7 +81,7 @@ func TestCopyObject_LargeObjectFallback(t *testing.T) {
 
 func TestCopyObject_SourceNotFound(t *testing.T) {
 	pb := newTestPackedBackend(t)
-	require.NoError(t, pb.CreateBucket("b"))
+	require.NoError(t, pb.CreateBucket(context.Background(), "b"))
 
 	_, err := pb.CopyObject("b", "nonexistent.txt", "b", "copy.txt")
 	assert.Error(t, err)

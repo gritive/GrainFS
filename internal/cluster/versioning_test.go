@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -15,13 +16,13 @@ import (
 // and that the returned Object carries a VersionID.
 func TestVersioning_PutThenGet(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("vbucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "vbucket"))
 
-	obj, err := b.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	obj, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 	assert.NotEmpty(t, obj.VersionID, "PutObject must return a VersionID")
 
-	rc, got, err := b.GetObject("vbucket", "k")
+	rc, got, err := b.GetObject(context.Background(), "vbucket", "k")
 	require.NoError(t, err)
 	defer rc.Close()
 	data, _ := io.ReadAll(rc)
@@ -33,12 +34,12 @@ func TestVersioning_PutThenGet(t *testing.T) {
 // produce two versions listed DESC by VersionID (newest first).
 func TestVersioning_PutTwiceListVersions(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("vbucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "vbucket"))
 
-	o1, err := b.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	o1, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 
-	o2, err := b.PutObject("vbucket", "k", strings.NewReader("v2-longer"), "text/plain")
+	o2, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v2-longer"), "text/plain")
 	require.NoError(t, err)
 
 	versions, err := b.ListObjectVersions("vbucket", "k", 0)
@@ -53,7 +54,7 @@ func TestVersioning_PutTwiceListVersions(t *testing.T) {
 	assert.False(t, versions[0].IsDeleteMarker)
 
 	// Latest GET serves the newer payload.
-	rc, _, err := b.GetObject("vbucket", "k")
+	rc, _, err := b.GetObject(context.Background(), "vbucket", "k")
 	require.NoError(t, err)
 	defer rc.Close()
 	data, _ := io.ReadAll(rc)
@@ -65,15 +66,15 @@ func TestVersioning_PutTwiceListVersions(t *testing.T) {
 // ErrObjectNotFound while prior versions remain addressable.
 func TestVersioning_DeleteCreatesTombstone(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("vbucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "vbucket"))
 
-	_, err := b.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	_, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 
-	require.NoError(t, b.DeleteObject("vbucket", "k"))
+	require.NoError(t, b.DeleteObject(context.Background(), "vbucket", "k"))
 
 	// HeadObject must 404 — delete marker is the latest version.
-	_, err = b.HeadObject("vbucket", "k")
+	_, err = b.HeadObject(context.Background(), "vbucket", "k")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
 
 	versions, err := b.ListObjectVersions("vbucket", "k", 0)
@@ -96,9 +97,9 @@ func TestVersioning_DeleteCreatesTombstone(t *testing.T) {
 // ErrObjectNotFound for a version that doesn't exist.
 func TestVersioning_GetObjectVersionInvalid(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("vbucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "vbucket"))
 
-	_, err := b.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	_, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 
 	_, _, err = b.GetObjectVersion("vbucket", "k", "01ABCDEFGHIJKLMNOPQRSTUVWX")
@@ -109,11 +110,11 @@ func TestVersioning_GetObjectVersionInvalid(t *testing.T) {
 // version removes just that version's metadata and updates latest when needed.
 func TestVersioning_DeleteObjectVersion(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("vbucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "vbucket"))
 
-	o1, err := b.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	o1, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	o2, err := b.PutObject("vbucket", "k", strings.NewReader("v2"), "text/plain")
+	o2, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v2"), "text/plain")
 	require.NoError(t, err)
 
 	// Hard-delete the latest → the prior version becomes the new latest.
@@ -134,16 +135,16 @@ func TestVersioning_DeleteObjectVersion(t *testing.T) {
 // row per base key even when multiple versions exist.
 func TestVersioning_ListObjectsDedupes(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("vbucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "vbucket"))
 
-	_, err := b.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	_, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	_, err = b.PutObject("vbucket", "k", strings.NewReader("v2"), "text/plain")
+	_, err = b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v2"), "text/plain")
 	require.NoError(t, err)
-	_, err = b.PutObject("vbucket", "other", strings.NewReader("o"), "text/plain")
+	_, err = b.PutObject(context.Background(), "vbucket", "other", strings.NewReader("o"), "text/plain")
 	require.NoError(t, err)
 
-	objs, err := b.ListObjects("vbucket", "", 100)
+	objs, err := b.ListObjects(context.Background(), "vbucket", "", 100)
 	require.NoError(t, err)
 	require.Len(t, objs, 2, "expected 2 distinct keys despite 3 versions")
 }
@@ -152,15 +153,15 @@ func TestVersioning_ListObjectsDedupes(t *testing.T) {
 // not appear in ListObjects.
 func TestVersioning_ListObjectsSkipsTombstones(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("vbucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "vbucket"))
 
-	_, err := b.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	_, err := b.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	_, err = b.PutObject("vbucket", "kept", strings.NewReader("k"), "text/plain")
+	_, err = b.PutObject(context.Background(), "vbucket", "kept", strings.NewReader("k"), "text/plain")
 	require.NoError(t, err)
-	require.NoError(t, b.DeleteObject("vbucket", "k"))
+	require.NoError(t, b.DeleteObject(context.Background(), "vbucket", "k"))
 
-	objs, err := b.ListObjects("vbucket", "", 100)
+	objs, err := b.ListObjects(context.Background(), "vbucket", "", 100)
 	require.NoError(t, err)
 	require.Len(t, objs, 1, "tombstoned key should be excluded from ListObjects")
 	assert.Equal(t, "kept", objs[0].Key)

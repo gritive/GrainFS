@@ -11,6 +11,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"testing"
@@ -73,7 +74,7 @@ func TestSelfAddr_DifferentFromRaftNodeID(t *testing.T) {
 // and fell back to N× replication.
 func TestShardPlacementKey_VersionedStorageAndLookup(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	const (
 		key       = "myobject"
@@ -102,7 +103,7 @@ func TestShardPlacementKey_VersionedStorageAndLookup(t *testing.T) {
 // making the first version's shards unretrievable.
 func TestShardPlacementKey_MultiVersionNoCollision(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	const key = "shared-key"
 	v1Nodes := []string{"node-a", "node-b", "node-c"}
@@ -151,7 +152,7 @@ func TestOwnedShards_WithVersionedPlacement(t *testing.T) {
 // This test validates the writtenMu + cleanup() pattern in the parallel version.
 func TestPutObjectEC_ParallelRollback(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 
 	svc := NewShardService(b.root, nil)
@@ -161,11 +162,11 @@ func TestPutObjectEC_ParallelRollback(t *testing.T) {
 	// Single-node cluster: all shards land on self. Write a valid object first
 	// to confirm the path works, then verify rollback behavior is reachable.
 	data := []byte("hello world")
-	obj, err := b.PutObject("bkt", "obj", bytes.NewReader(data), "text/plain")
+	obj, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	// Verify object can be retrieved (sanity check).
-	rc, _, err := b.GetObject("bkt", "obj")
+	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
@@ -183,7 +184,7 @@ func TestGetObjectEC_KofN_CancelsRemainder(t *testing.T) {
 	t.Cleanup(func() { goleak.VerifyNone(t) })
 
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 
 	svc := NewShardService(b.root, nil)
@@ -191,10 +192,10 @@ func TestGetObjectEC_KofN_CancelsRemainder(t *testing.T) {
 	b.SetShardService(svc, allNodes)
 
 	data := []byte("test data for k-of-n")
-	_, err := b.PutObject("bkt", "obj", bytes.NewReader(data), "text/plain")
+	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
-	rc, _, err := b.GetObject("bkt", "obj")
+	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)

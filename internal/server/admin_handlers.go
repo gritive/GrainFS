@@ -22,12 +22,12 @@ type VFSStatRequest struct {
 
 // VFSStatResponse is the response from VFS stat operations.
 type VFSStatResponse struct {
-	Exists   bool   `json:"exists"`
-	Name     string `json:"name,omitempty"`
-	Size     int64  `json:"size,omitempty"`
-	IsDir    bool   `json:"is_dir,omitempty"`
-	ModTime   string `json:"mod_time,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Exists  bool   `json:"exists"`
+	Name    string `json:"name,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+	IsDir   bool   `json:"is_dir,omitempty"`
+	ModTime string `json:"mod_time,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // registerAdminAPI registers admin/debug endpoints for testing and operations.

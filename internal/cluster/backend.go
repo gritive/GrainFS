@@ -587,6 +587,12 @@ func (b *DistributedBackend) GetRegistry() *Registry {
 	return b.registry
 }
 
+var (
+	_ storage.Backend     = (*DistributedBackend)(nil)
+	_ storage.PartialIO   = (*DistributedBackend)(nil)
+	_ storage.Truncatable = (*DistributedBackend)(nil)
+)
+
 // SetBucketAssigner injects the MetaRaft proposer for bucket assignment persistence.
 // Must be called before CreateBucket. Nil disables persistence (single-node legacy mode).
 func (b *DistributedBackend) SetBucketAssigner(a BucketAssigner) { b.assigner = a }
@@ -602,7 +608,7 @@ func (b *DistributedBackend) SetShardGroupSource(s ShardGroupSource) { b.shardGr
 
 // --- Bucket operations ---
 
-func (b *DistributedBackend) CreateBucket(bucket string) error {
+func (b *DistributedBackend) CreateBucket(ctx context.Context, bucket string) error {
 	// Check if already exists (read local)
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(bucketKey(bucket))
@@ -653,15 +659,15 @@ func (b *DistributedBackend) CreateBucket(bucket string) error {
 		if groupID == "" {
 			return fmt.Errorf("create bucket %q: no active groups for assignment", bucket)
 		}
-		if propErr := b.assigner.ProposeBucketAssignment(context.Background(), bucket, groupID); propErr != nil {
+		if propErr := b.assigner.ProposeBucketAssignment(ctx, bucket, groupID); propErr != nil {
 			return fmt.Errorf("propose bucket assignment: %w", propErr)
 		}
 	}
 
-	return b.propose(context.Background(), CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+	return b.propose(ctx, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 }
 
-func (b *DistributedBackend) HeadBucket(bucket string) error {
+func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) error {
 	if b.bypassBucketCheck {
 		return nil
 	}
@@ -674,7 +680,7 @@ func (b *DistributedBackend) HeadBucket(bucket string) error {
 	})
 }
 
-func (b *DistributedBackend) DeleteBucket(bucket string) error {
+func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	// Check existence and emptiness
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(bucketKey(bucket))
@@ -702,18 +708,19 @@ func (b *DistributedBackend) DeleteBucket(bucket string) error {
 		return fmt.Errorf("remove bucket dir: %w", err)
 	}
 
-	return b.propose(context.Background(), CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
+	return b.propose(ctx, CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
 }
 
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the
 // versioning state change through Raft so all cluster nodes apply it atomically.
 func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
+	ctx := context.Background()
 	// Pre-check: verify bucket exists locally before proposing. The FSM also
 	// checks, but propose() does not propagate FSM errors back to the caller.
-	if err := b.HeadBucket(bucket); err != nil {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	return b.propose(context.Background(), CmdSetBucketVersioning, SetBucketVersioningCmd{
+	return b.propose(ctx, CmdSetBucketVersioning, SetBucketVersioningCmd{
 		Bucket: bucket,
 		State:  state,
 	})
@@ -722,11 +729,12 @@ func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
 // SetObjectACL satisfies storage.ACLSetter. Replicates the ACL change through
 // Raft and updates the stored objectMeta on every node.
 func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
+	ctx := context.Background()
 	// Pre-check: verify object exists locally before proposing.
-	if _, err := b.HeadObject(bucket, key); err != nil {
+	if _, err := b.HeadObject(ctx, bucket, key); err != nil {
 		return err
 	}
-	return b.propose(context.Background(), CmdSetObjectACL, SetObjectACLCmd{
+	return b.propose(ctx, CmdSetObjectACL, SetObjectACLCmd{
 		Bucket: bucket,
 		Key:    key,
 		ACL:    acl,
@@ -754,7 +762,7 @@ func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) 
 	return state, err
 }
 
-func (b *DistributedBackend) ListBuckets() ([]string, error) {
+func (b *DistributedBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	var buckets []string
 	err := b.db.View(func(txn *badger.Txn) error {
 		prefix := []byte("bucket:")
@@ -776,8 +784,8 @@ func (b *DistributedBackend) ListBuckets() ([]string, error) {
 
 // --- Object operations ---
 
-func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -802,9 +810,9 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 	}
 
 	if useEC {
-		return b.putObjectEC(bucket, key, versionID, data, contentType)
+		return b.putObjectEC(ctx, bucket, key, versionID, data, contentType)
 	}
-	return b.putObjectNx(bucket, key, versionID, data, contentType)
+	return b.putObjectNx(ctx, bucket, key, versionID, data, contentType)
 }
 
 // putObjectNx is the legacy N× full-replication path. Every peer receives
@@ -819,7 +827,7 @@ func (b *DistributedBackend) PutObject(bucket, key string, r io.Reader, contentT
 // Enable with GRAINFS_VOLUME_TRACE=1.
 var clusterTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
-func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
+func (b *DistributedBackend) putObjectNx(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
 	var tStart, tStage time.Time
 	if clusterTraceEnabled {
 		tStart = time.Now()
@@ -845,7 +853,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 	// ShardService signature stays unchanged for this slice.
 	shardKey := key + "/" + versionID
 	if b.shardSvc != nil {
-		ctx := context.Background()
+
 		for _, peer := range b.liveNodes() {
 			if peer == b.selfAddr {
 				continue
@@ -873,7 +881,7 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 	now := time.Now().Unix()
 
 	// Replicate metadata through Raft
-	err := b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
+	err := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      bucket,
 		Key:         key,
 		Size:        int64(len(data)),
@@ -906,8 +914,8 @@ func (b *DistributedBackend) putObjectNx(bucket, key, versionID string, data []b
 // returns a commitFn that defers the Raft metadata proposal (~2ms).
 // On flush the caller runs all commitFns concurrently so the Raft batcher
 // coalesces them into a single fdatasync.
-func (b *DistributedBackend) PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
 	}
 	data, err := io.ReadAll(r)
@@ -921,15 +929,15 @@ func (b *DistributedBackend) PutObjectAsync(bucket, key string, r io.Reader, con
 		useEC = false
 	}
 	if useEC {
-		obj, err := b.putObjectEC(bucket, key, versionID, data, contentType)
+		obj, err := b.putObjectEC(ctx, bucket, key, versionID, data, contentType)
 		return obj, func() error { return nil }, err
 	}
-	return b.putObjectNxAsync(bucket, key, versionID, data, contentType)
+	return b.putObjectNxAsync(ctx, bucket, key, versionID, data, contentType)
 }
 
 // putObjectNxAsync splits putObjectNx into fast (local write + peer replication)
 // and slow (Raft propose) parts. The caller must invoke commitFn before flush.
-func (b *DistributedBackend) putObjectNxAsync(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, func() error, error) {
+func (b *DistributedBackend) putObjectNxAsync(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, func() error, error) {
 	t0 := time.Now()
 	objPath := b.objectPathV(bucket, key, versionID)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
@@ -942,7 +950,7 @@ func (b *DistributedBackend) putObjectNxAsync(bucket, key, versionID string, dat
 
 	shardKey := key + "/" + versionID
 	if b.shardSvc != nil {
-		ctx := context.Background()
+
 		for _, peer := range b.liveNodes() {
 			if peer == b.selfAddr {
 				continue
@@ -984,7 +992,7 @@ func (b *DistributedBackend) putObjectNxAsync(bucket, key, versionID string, dat
 	}
 	commitFn := func() error {
 		t1 := time.Now()
-		err := b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
+		err := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 			Bucket:      bucket,
 			Key:         key,
 			Size:        int64(len(data)),
@@ -1015,7 +1023,7 @@ func (b *DistributedBackend) putObjectNxAsync(bucket, key, versionID string, dat
 // Constraints: single-node only — no peer replication, no EC. Callers MUST
 // check IsInternalBucket before relying on this; ErrNotSupported is returned
 // for user-facing buckets.
-func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
 	if !storage.IsInternalBucket(bucket) {
 		return nil, fmt.Errorf("WriteAt not supported for user bucket %q", bucket)
 	}
@@ -1085,7 +1093,7 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 // ReadAt implements zero-overhead pread for internal buckets (NFS4/VFS).
 // Bypasses HeadObject, EC path, and shardSvc — directly pread(2) the
 // versioned local file. Only valid for internal buckets with "current" version.
-func (b *DistributedBackend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	if !storage.IsInternalBucket(bucket) {
 		return 0, fmt.Errorf("ReadAt not supported for user bucket %q", bucket)
 	}
@@ -1100,7 +1108,7 @@ func (b *DistributedBackend) ReadAt(bucket, key string, offset int64, buf []byte
 // Truncate implements the internal-bucket fast path used by NFS SETATTR size.
 // It updates the fixed "current" object and metadata in place, avoiding the
 // full-object read/append/write fallback used by generic object stores.
-func (b *DistributedBackend) Truncate(bucket, key string, size int64) error {
+func (b *DistributedBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	if !storage.IsInternalBucket(bucket) {
 		return fmt.Errorf("Truncate not supported for user bucket %q", bucket)
 	}
@@ -1171,8 +1179,7 @@ func selectECPlacement(ring *Ring, ringErr error, cfg ECConfig, liveNodes []stri
 // Placement is derived deterministically from the ring (if available) or
 // via PlacementForNodes (legacy). The RingVersion is stored in object metadata
 // so reads can recompute the same placement without a separate Raft record.
-func (b *DistributedBackend) putObjectEC(bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
-	ctx := context.Background()
+func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
 
 	liveNodes := b.liveNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
@@ -1297,8 +1304,8 @@ func (b *DistributedBackend) deleteShardsAsync(bucket string, placement []string
 	}
 }
 
-func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	obj, placementMeta, err := b.headObjectMeta(bucket, key)
+func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1313,9 +1320,9 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	}
 
 	if b.shardSvc != nil {
-		resolved, rerr := b.ResolvePlacement(context.Background(), bucket, key, placementMeta)
+		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
 		if rerr == nil {
-			data, ecErr := b.getObjectECAtShardKey(context.Background(), bucket, resolved.ShardKey, resolved.Record)
+			data, ecErr := b.getObjectECAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record)
 			if ecErr != nil {
 				return nil, nil, fmt.Errorf("ec reconstruct %s/%s via %s: %w", bucket, key, resolved.Source, ecErr)
 			}
@@ -1341,7 +1348,7 @@ func (b *DistributedBackend) GetObject(bucket, key string) (io.ReadCloser, *stor
 	// Local file not found — try fetching from peer nodes (healthy first, then all).
 	// Peers store under shardKey (key+"/"+versionID) when the write was versioned.
 	if b.shardSvc != nil && os.IsNotExist(err) {
-		ctx := context.Background()
+
 		// Try healthy peers first
 		for _, peer := range b.liveNodes() {
 			if peer == b.selfAddr {
@@ -1528,7 +1535,7 @@ func (b *DistributedBackend) CurrentRingVersion() RingVersion {
 // ring's placement. It reconstructs the object data from the old layout and
 // re-fans it out using putObjectEC (which will use the current ring).
 func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error {
-	obj, placementMeta, err := b.headObjectMeta(bucket, key)
+	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
 	if err != nil {
 		return err
 	}
@@ -1564,7 +1571,7 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 			bucket, key, computedETag, obj.ETag)
 	}
 
-	_, err = b.putObjectEC(bucket, key, obj.VersionID, oldData, obj.ContentType)
+	_, err = b.putObjectEC(ctx, bucket, key, obj.VersionID, oldData, obj.ContentType)
 	return err
 }
 
@@ -1593,14 +1600,14 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	}
 
 	// Snapshot meta before reading data so we can detect concurrent writes.
-	metaBefore, err := b.HeadObject(bucket, key)
+	metaBefore, err := b.HeadObject(ctx, bucket, key)
 	if err != nil {
 		return fmt.Errorf("head before convert: %w", err)
 	}
 
 	// Read the full object via the legacy N× path. GetObject will fall through
 	// to local or peer full-replica fetch because placement is still absent.
-	rc, _, err := b.GetObject(bucket, key)
+	rc, _, err := b.GetObject(ctx, bucket, key)
 	if err != nil {
 		return fmt.Errorf("read for convert: %w", err)
 	}
@@ -1645,7 +1652,7 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	}
 
 	// Re-check meta: did a PUT race us while we were writing shards?
-	metaAfter, err := b.HeadObject(bucket, key)
+	metaAfter, err := b.HeadObject(ctx, bucket, key)
 	if err != nil || metaAfter.ETag != metaBefore.ETag {
 		rollbackShards()
 		return fmt.Errorf("convert aborted: meta changed mid-conversion (etag %q → %q)",
@@ -1927,13 +1934,13 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	return nil
 }
 
-func (b *DistributedBackend) HeadObject(bucket, key string) (*storage.Object, error) {
-	obj, _, err := b.headObjectMeta(bucket, key)
+func (b *DistributedBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	obj, _, err := b.headObjectMeta(ctx, bucket, key)
 	return obj, err
 }
 
-func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object, PlacementMeta, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key string) (*storage.Object, PlacementMeta, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, PlacementMeta{}, err
 	}
 
@@ -2041,7 +2048,7 @@ func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) Pl
 	return meta
 }
 
-func (b *DistributedBackend) DeleteObject(bucket, key string) error {
+func (b *DistributedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
 	_, err := b.DeleteObjectReturningMarker(bucket, key)
 	return err
 }
@@ -2050,7 +2057,8 @@ func (b *DistributedBackend) DeleteObject(bucket, key string) error {
 // tombstone semantics as DeleteObject but returns the delete marker's
 // VersionID so the S3 handler can surface it in the response header.
 func (b *DistributedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return "", err
 	}
 
@@ -2077,8 +2085,8 @@ func (b *DistributedBackend) DeleteObjectReturningMarker(bucket, key string) (st
 	return markerID, nil
 }
 
-func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -2190,8 +2198,8 @@ func (b *DistributedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]
 	return objects, err
 }
 
-func (b *DistributedBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
 	return b.db.View(func(txn *badger.Txn) error {
@@ -2278,8 +2286,8 @@ func (b *DistributedBackend) WalkObjects(bucket, prefix string, fn func(*storage
 
 // --- Multipart operations ---
 
-func (b *DistributedBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -2290,7 +2298,7 @@ func (b *DistributedBackend) CreateMultipartUpload(bucket, key, contentType stri
 
 	now := time.Now().Unix()
 
-	err := b.propose(context.Background(), CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+	err := b.propose(ctx, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID:    uploadID,
 		Bucket:      bucket,
 		Key:         key,
@@ -2311,7 +2319,7 @@ func (b *DistributedBackend) CreateMultipartUpload(bucket, key, contentType stri
 	}, nil
 }
 
-func (b *DistributedBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	// Verify upload exists (read local metadata)
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(multipartKey(uploadID))
@@ -2347,7 +2355,7 @@ func (b *DistributedBackend) UploadPart(bucket, key, uploadID string, partNumber
 	}, nil
 }
 
-func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
 	// Read upload metadata
 	var meta clusterMultipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -2413,7 +2421,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID strin
 	etag := hex.EncodeToString(h.Sum(nil))
 	now := time.Now().Unix()
 
-	err = b.propose(context.Background(), CmdCompleteMultipart, CompleteMultipartCmd{
+	err = b.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
 		Bucket:      bucket,
 		Key:         key,
 		UploadID:    uploadID,
@@ -2439,7 +2447,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(bucket, key, uploadID strin
 	}, nil
 }
 
-func (b *DistributedBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
+func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(multipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
@@ -2453,7 +2461,7 @@ func (b *DistributedBackend) AbortMultipartUpload(bucket, key, uploadID string) 
 
 	os.RemoveAll(b.partDir(uploadID))
 
-	return b.propose(context.Background(), CmdAbortMultipart, AbortMultipartCmd{
+	return b.propose(ctx, CmdAbortMultipart, AbortMultipartCmd{
 		Bucket:   bucket,
 		Key:      key,
 		UploadID: uploadID,
@@ -2465,7 +2473,8 @@ func (b *DistributedBackend) AbortMultipartUpload(bucket, key, uploadID string) 
 // HeadObjectVersion returns metadata for a specific version. Returns
 // storage.ErrObjectNotFound if the version doesn't exist or is a delete marker.
 func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 	var obj storage.Object
@@ -2533,12 +2542,13 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 // DeleteObjectVersion hard-deletes a specific version (no tombstone).
 // Used by lifecycle/scrubber to reclaim expired versions.
 func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) error {
-	if err := b.HeadBucket(bucket); err != nil {
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
 	// Local data cleanup: best-effort (ENOENT is fine — FSM apply is the source of truth).
 	_ = os.Remove(b.objectPathV(bucket, key, versionID))
-	return b.propose(context.Background(), CmdDeleteObjectVersion, DeleteObjectVersionCmd{
+	return b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
 		Bucket:    bucket,
 		Key:       key,
 		VersionID: versionID,
@@ -2550,7 +2560,8 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 // truncated. VersionIDs are UUIDv7 (k-sortable ASC by ms timestamp), so we
 // sort DESC to get newest-first. Matches server.ObjectVersionLister.
 func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 	var versions []*storage.ObjectVersion

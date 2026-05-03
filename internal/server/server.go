@@ -425,7 +425,8 @@ func (s *Server) metricsMiddleware() app.HandlerFunc {
 
 // initMetrics scans existing buckets and objects to set initial gauge values.
 func (s *Server) initMetrics() {
-	buckets, err := s.backend.ListBuckets()
+	ctx := context.Background()
+	buckets, err := s.backend.ListBuckets(ctx)
 	if err != nil {
 		return
 	}
@@ -434,7 +435,7 @@ func (s *Server) initMetrics() {
 	var totalObjects int
 	var totalBytes int64
 	for _, b := range buckets {
-		objects, err := s.backend.ListObjects(b, "", 1000000)
+		objects, err := s.backend.ListObjects(ctx, b, "", 1000000)
 		if err != nil {
 			continue
 		}

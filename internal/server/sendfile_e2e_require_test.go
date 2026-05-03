@@ -25,7 +25,7 @@ func TestE2EZeroCopyDataIntegrity(t *testing.T) {
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err, "Failed to create backend")
 
-	err = backend.CreateBucket("test-bucket")
+	err = backend.CreateBucket(context.Background(), "test-bucket")
 	require.NoError(t, err, "Failed to create bucket")
 
 	// Test various file sizes
@@ -48,11 +48,11 @@ func TestE2EZeroCopyDataIntegrity(t *testing.T) {
 
 			// Upload
 			key := fmt.Sprintf("test-%d", size)
-			_, err := backend.PutObject("test-bucket", key, bytes.NewReader(originalData), "application/octet-stream")
+			_, err := backend.PutObject(context.Background(), "test-bucket", key, bytes.NewReader(originalData), "application/octet-stream")
 			require.NoError(t, err, "Failed to put object")
 
 			// Download
-			rc, _, err := backend.GetObject("test-bucket", key)
+			rc, _, err := backend.GetObject(context.Background(), "test-bucket", key)
 			require.NoError(t, err, "Failed to get object")
 			defer rc.Close()
 
@@ -80,12 +80,12 @@ func TestE2EZeroCopyConcurrentAccess(t *testing.T) {
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err, "Failed to create backend")
 
-	err = backend.CreateBucket("test-bucket")
+	err = backend.CreateBucket(context.Background(), "test-bucket")
 	require.NoError(t, err, "Failed to create bucket")
 
 	// Create test object
 	testData := bytes.Repeat([]byte("C"), 64*1024)
-	_, err = backend.PutObject("test-bucket", "concurrent", bytes.NewReader(testData), "application/octet-stream")
+	_, err = backend.PutObject(context.Background(), "test-bucket", "concurrent", bytes.NewReader(testData), "application/octet-stream")
 	require.NoError(t, err, "Failed to put object")
 
 	// Concurrent access
@@ -94,7 +94,7 @@ func TestE2EZeroCopyConcurrentAccess(t *testing.T) {
 
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
-			rc, _, err := backend.GetObject("test-bucket", "concurrent")
+			rc, _, err := backend.GetObject(context.Background(), "test-bucket", "concurrent")
 			if err != nil {
 				errors <- fmt.Errorf("get object failed: %w", err)
 				return
@@ -135,7 +135,7 @@ func TestE2EZeroCopyMultipleFiles(t *testing.T) {
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err, "Failed to create backend")
 
-	err = backend.CreateBucket("test-bucket")
+	err = backend.CreateBucket(context.Background(), "test-bucket")
 	require.NoError(t, err, "Failed to create bucket")
 
 	// Upload multiple files
@@ -146,7 +146,7 @@ func TestE2EZeroCopyMultipleFiles(t *testing.T) {
 		data := bytes.Repeat([]byte(fmt.Sprintf("%d", i%10)), fileSize)
 		key := fmt.Sprintf("file-%04d", i)
 
-		_, err := backend.PutObject("test-bucket", key, bytes.NewReader(data), "application/octet-stream")
+		_, err := backend.PutObject(context.Background(), "test-bucket", key, bytes.NewReader(data), "application/octet-stream")
 		require.NoError(t, err, "Failed to put file %s", key)
 	}
 
@@ -155,7 +155,7 @@ func TestE2EZeroCopyMultipleFiles(t *testing.T) {
 		key := fmt.Sprintf("file-%04d", i)
 		expectedData := bytes.Repeat([]byte(fmt.Sprintf("%d", i%10)), fileSize)
 
-		rc, _, err := backend.GetObject("test-bucket", key)
+		rc, _, err := backend.GetObject(context.Background(), "test-bucket", key)
 		require.NoError(t, err, "Failed to get file %s", key)
 
 		data, err := io.ReadAll(rc)
@@ -178,17 +178,17 @@ func TestE2EZeroCopyHTTPServer(t *testing.T) {
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err, "Failed to create backend")
 
-	err = backend.CreateBucket("test-bucket")
+	err = backend.CreateBucket(context.Background(), "test-bucket")
 	require.NoError(t, err, "Failed to create bucket")
 
 	// Create test objects (small and large)
-	smallData := bytes.Repeat([]byte("S"), 1*1024)   // 1KB
-	largeData := bytes.Repeat([]byte("L"), 64*1024)  // 64KB
+	smallData := bytes.Repeat([]byte("S"), 1*1024)  // 1KB
+	largeData := bytes.Repeat([]byte("L"), 64*1024) // 64KB
 
-	_, err = backend.PutObject("test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream")
+	_, err = backend.PutObject(context.Background(), "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream")
 	require.NoError(t, err, "Failed to put small object")
 
-	_, err = backend.PutObject("test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
+	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
 	require.NoError(t, err, "Failed to put large object")
 
 	// Start server
@@ -249,12 +249,12 @@ func TestE2EZeroCopyRangeRequest(t *testing.T) {
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
 
-	err = backend.CreateBucket("test-bucket")
+	err = backend.CreateBucket(context.Background(), "test-bucket")
 	require.NoError(t, err)
 
 	// 64KB object so the range is clearly within bounds
 	largeData := bytes.Repeat([]byte("R"), 64*1024)
-	_, err = backend.PutObject("test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
+	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14858", backend)
@@ -307,10 +307,10 @@ func TestE2EZeroCopyRangeEdgeCases(t *testing.T) {
 
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	largeData := bytes.Repeat([]byte("E"), 64*1024)
-	_, err = backend.PutObject("test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
+	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14860", backend)

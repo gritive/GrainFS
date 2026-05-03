@@ -12,6 +12,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"io"
@@ -51,14 +52,14 @@ func TestEC_NoRing_PutGetRoundTrip(t *testing.T) {
 
 	// No ring initialized — RingVersion stays 0.
 	// CmdPutShardPlacement is a no-op — no placement records in FSM.
-	require.NoError(t, backend.CreateBucket("bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
 	content := bytes.Repeat([]byte("hello-ec-no-ring-"), 50) // 850 bytes
 
-	_, err := backend.PutObject("bucket", "key", bytes.NewReader(content), "application/octet-stream")
+	_, err := backend.PutObject(context.Background(), "bucket", "key", bytes.NewReader(content), "application/octet-stream")
 	require.NoError(t, err)
 
 	// GetObject must succeed using NodeIDs stored in object metadata.
-	rc, obj, err := backend.GetObject("bucket", "key")
+	rc, obj, err := backend.GetObject(context.Background(), "bucket", "key")
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	defer rc.Close()
@@ -73,13 +74,13 @@ func TestEC_NoRing_PutGetRoundTrip(t *testing.T) {
 func TestEC_NoRing_LargeObject(t *testing.T) {
 	backend := setupECBackend(t)
 
-	require.NoError(t, backend.CreateBucket("b"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
 	content := bytes.Repeat([]byte("large-ec-object-"), 4096) // 65536 bytes
 
-	_, err := backend.PutObject("b", "big", bytes.NewReader(content), "application/octet-stream")
+	_, err := backend.PutObject(context.Background(), "b", "big", bytes.NewReader(content), "application/octet-stream")
 	require.NoError(t, err)
 
-	rc, obj, err := backend.GetObject("b", "big")
+	rc, obj, err := backend.GetObject(context.Background(), "b", "big")
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	defer rc.Close()
@@ -92,9 +93,9 @@ func TestEC_NoRing_LargeObject(t *testing.T) {
 func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
 	backend := setupECBackend(t)
 
-	require.NoError(t, backend.CreateBucket("b"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
 	content := bytes.Repeat([]byte("repair-metadata-only-"), 64)
-	obj, err := backend.PutObject("b", "obj", bytes.NewReader(content), "application/octet-stream")
+	obj, err := backend.PutObject(context.Background(), "b", "obj", bytes.NewReader(content), "application/octet-stream")
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.VersionID)
 
@@ -103,7 +104,7 @@ func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
 
 	require.NoError(t, backend.RepairShard(t.Context(), "b", "obj", obj.VersionID, 0))
 
-	rc, _, err := backend.GetObject("b", "obj")
+	rc, _, err := backend.GetObject(context.Background(), "b", "obj")
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
@@ -114,7 +115,7 @@ func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
 func TestGetObject_UsesResolvedLegacyBareShardKey(t *testing.T) {
 	backend := setupECBackend(t)
 
-	require.NoError(t, backend.CreateBucket("b"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
 	content := bytes.Repeat([]byte("legacy-bare-placement-"), 64)
 	versionID := "v1"
 	sum := md5.Sum(content)
@@ -141,7 +142,7 @@ func TestGetObject_UsesResolvedLegacyBareShardKey(t *testing.T) {
 		return txn.Set(shardPlacementKey("b", "obj"), encodePlacementValue(rec))
 	}))
 
-	rc, _, err := backend.GetObject("b", "obj")
+	rc, _, err := backend.GetObject(context.Background(), "b", "obj")
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)

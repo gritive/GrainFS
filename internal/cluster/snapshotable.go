@@ -15,7 +15,8 @@ import (
 // ListAllObjects implements storage.Snapshotable by enumerating every
 // versioned object record, including non-latest versions and delete markers.
 func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
-	buckets, err := b.ListBuckets()
+	ctx := context.Background()
+	buckets, err := b.ListBuckets(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +81,7 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 // ListAllBuckets implements storage.BucketSnapshotable by capturing bucket
 // metadata persisted in the cluster FSM.
 func (b *DistributedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
-	buckets, err := b.ListBuckets()
+	buckets, err := b.ListBuckets(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -101,15 +102,16 @@ func (b *DistributedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) 
 // RestoreBuckets implements storage.BucketSnapshotable by recreating buckets
 // and restoring their versioning metadata through Raft proposals.
 func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	ctx := context.Background()
 	for _, bucket := range buckets {
 		if bucket.Name == "" {
 			continue
 		}
-		if err := b.HeadBucket(bucket.Name); err != nil {
+		if err := b.HeadBucket(ctx, bucket.Name); err != nil {
 			if !errors.Is(err, storage.ErrBucketNotFound) {
 				return err
 			}
-			if err := b.propose(context.Background(), CmdCreateBucket, CreateBucketCmd{Bucket: bucket.Name}); err != nil {
+			if err := b.propose(ctx, CmdCreateBucket, CreateBucketCmd{Bucket: bucket.Name}); err != nil {
 				return fmt.Errorf("restore bucket %s: %w", bucket.Name, err)
 			}
 		}
@@ -117,7 +119,7 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 		if state == "" {
 			state = "Unversioned"
 		}
-		if err := b.propose(context.Background(), CmdSetBucketVersioning, SetBucketVersioningCmd{
+		if err := b.propose(ctx, CmdSetBucketVersioning, SetBucketVersioningCmd{
 			Bucket: bucket.Name,
 			State:  state,
 		}); err != nil {
@@ -131,6 +133,7 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 // It hard-deletes metadata versions absent from the snapshot, then reproposes
 // metadata for every snapshot version. Delete markers do not require blobs.
 func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
+	ctx := context.Background()
 	// Index snapshot objects by bucket+key+version.
 	want := make(map[string]storage.SnapshotObject, len(objects))
 	for _, o := range objects {
@@ -140,7 +143,7 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 	type latEntry struct{ bucket, key, versionID string }
 	var toDelete []latEntry
 
-	buckets, err := b.ListBuckets()
+	buckets, err := b.ListBuckets(ctx)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -169,7 +172,6 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 	}
 
 	// Hard-delete metadata for objects absent from the snapshot.
-	ctx := context.Background()
 	for _, d := range toDelete {
 		if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
 			Bucket:    d.bucket,

@@ -36,10 +36,13 @@ func TestCommit_AfterWrite(t *testing.T) {
 	status, r := parseCompoundReply(t, reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
-	r.ReadUint32()                 // opCount
-	r.ReadUint32(); r.ReadUint32() // PUTROOTFH
-	r.ReadUint32(); r.ReadUint32() // LOOKUP
-	r.ReadUint32(); r.ReadUint32() // COMMIT opcode+status
+	r.ReadUint32() // opCount
+	r.ReadUint32()
+	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32()
+	r.ReadUint32() // LOOKUP
+	r.ReadUint32()
+	r.ReadUint32() // COMMIT opcode+status
 	// writeverf4: 8 bytes (two uint32)
 	hi, _ := r.ReadUint32()
 	lo, _ := r.ReadUint32()
@@ -70,9 +73,12 @@ func TestCommit_VerferStable(t *testing.T) {
 		require.NoError(t, err)
 		_, r := parseCompoundReply(t, reply)
 		r.ReadUint32()
-		r.ReadUint32(); r.ReadUint32()
-		r.ReadUint32(); r.ReadUint32()
-		r.ReadUint32(); r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
 		hi, _ := r.ReadUint32()
 		lo, _ := r.ReadUint32()
 		return uint64(hi)<<32 | uint64(lo)

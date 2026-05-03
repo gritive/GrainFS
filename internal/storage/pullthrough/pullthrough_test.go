@@ -2,6 +2,7 @@ package pullthrough_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -42,12 +43,12 @@ func TestPullThrough_GetObject_LocalHit(t *testing.T) {
 	local := newLocalBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{"b/k": "upstream-data"}}
 
-	require.NoError(t, local.CreateBucket("b"))
-	_, err := local.PutObject("b", "k", strings.NewReader("local-data"), "text/plain")
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+	_, err := local.PutObject(context.Background(), "b", "k", strings.NewReader("local-data"), "text/plain")
 	require.NoError(t, err)
 
 	pt := pullthrough.NewBackend(local, upstream)
-	rc, obj, err := pt.GetObject("b", "k")
+	rc, obj, err := pt.GetObject(context.Background(), "b", "k")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -60,10 +61,10 @@ func TestPullThrough_GetObject_FetchFromUpstream(t *testing.T) {
 	local := newLocalBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{"b/img.png": "upstream-bytes"}}
 
-	require.NoError(t, local.CreateBucket("b"))
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	pt := pullthrough.NewBackend(local, upstream)
-	rc, obj, err := pt.GetObject("b", "img.png")
+	rc, obj, err := pt.GetObject(context.Background(), "b", "img.png")
 	require.NoError(t, err, "must fetch from upstream on cache miss")
 	defer rc.Close()
 
@@ -72,7 +73,7 @@ func TestPullThrough_GetObject_FetchFromUpstream(t *testing.T) {
 	assert.NotNil(t, obj)
 
 	// Second call should be a local hit now
-	rc2, _, err := local.GetObject("b", "img.png")
+	rc2, _, err := local.GetObject(context.Background(), "b", "img.png")
 	require.NoError(t, err, "object must be cached locally after pull-through")
 	defer rc2.Close()
 	body2, _ := io.ReadAll(rc2)
@@ -83,10 +84,10 @@ func TestPullThrough_GetObject_NotFound(t *testing.T) {
 	local := newLocalBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{}}
 
-	require.NoError(t, local.CreateBucket("b"))
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	pt := pullthrough.NewBackend(local, upstream)
-	_, _, err := pt.GetObject("b", "missing.txt")
+	_, _, err := pt.GetObject(context.Background(), "b", "missing.txt")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound,
 		"must return ErrObjectNotFound when neither local nor upstream has the object")
 }
@@ -113,7 +114,7 @@ func (u *streamingUpstream) GetObject(bucket, key string) (io.ReadCloser, *stora
 // object in memory before writing locally (OOM risk).
 func TestPullthrough_LargeObject_Streaming(t *testing.T) {
 	local := newLocalBackend(t)
-	require.NoError(t, local.CreateBucket("b"))
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	// 10MB of zeroes via streaming reader (no buffer materialization)
 	const size = 10 * 1024 * 1024
@@ -121,7 +122,7 @@ func TestPullthrough_LargeObject_Streaming(t *testing.T) {
 	upstream := &streamingUpstream{content: content, size: size}
 
 	pt := pullthrough.NewBackend(local, upstream)
-	rc, obj, err := pt.GetObject("b", "big.bin")
+	rc, obj, err := pt.GetObject(context.Background(), "b", "big.bin")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -132,7 +133,7 @@ func TestPullthrough_LargeObject_Streaming(t *testing.T) {
 	assert.Equal(t, int64(size), obj.Size, "object metadata must report full size")
 
 	// Verify the body was cached locally
-	rc2, _, err := local.GetObject("b", "big.bin")
+	rc2, _, err := local.GetObject(context.Background(), "b", "big.bin")
 	require.NoError(t, err, "object must be cached locally after streaming pull")
 	defer rc2.Close()
 	n2, err := io.Copy(io.Discard, rc2)
@@ -145,13 +146,13 @@ func TestPullthrough_LargeObject_Streaming(t *testing.T) {
 // In the naive io.Pipe+Discard approach, the caller would get an empty body.
 func TestPullthrough_CallerReceivesFullBody(t *testing.T) {
 	local := newLocalBackend(t)
-	require.NoError(t, local.CreateBucket("b"))
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := bytes.Repeat([]byte("grainfs"), 1000) // 7000 bytes
 	upstream := &stubUpstream{objects: map[string]string{"b/x": string(payload)}}
 
 	pt := pullthrough.NewBackend(local, upstream)
-	rc, _, err := pt.GetObject("b", "x")
+	rc, _, err := pt.GetObject(context.Background(), "b", "x")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -194,7 +195,7 @@ func (u *errUpstream) GetObject(bucket, key string) (io.ReadCloser, *storage.Obj
 // mid-stream, the caller gets an error and no corrupt entry is left in cache.
 func TestPullthrough_UpstreamErrorMidStream(t *testing.T) {
 	local := newLocalBackend(t)
-	require.NoError(t, local.CreateBucket("b"))
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := bytes.Repeat([]byte("x"), 1000)
 	upstream := &errUpstream{
@@ -203,7 +204,7 @@ func TestPullthrough_UpstreamErrorMidStream(t *testing.T) {
 	}
 
 	pt := pullthrough.NewBackend(local, upstream)
-	rc, _, err := pt.GetObject("b", "bad")
+	rc, _, err := pt.GetObject(context.Background(), "b", "bad")
 	// Must propagate the error (either from pull or post-read)
 	if err == nil {
 		defer rc.Close()
@@ -212,7 +213,7 @@ func TestPullthrough_UpstreamErrorMidStream(t *testing.T) {
 	require.Error(t, err, "upstream error must surface to caller")
 
 	// Local cache must NOT contain a partial entry
-	_, _, err = local.GetObject("b", "bad")
+	_, _, err = local.GetObject(context.Background(), "b", "bad")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound,
 		"partial upstream stream must not create a local cache entry")
 }
@@ -231,14 +232,14 @@ func TestPullThrough_PutObject_GoesToLocal(t *testing.T) {
 	local := newLocalBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{}}
 
-	require.NoError(t, local.CreateBucket("b"))
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	pt := pullthrough.NewBackend(local, upstream)
-	_, err := pt.PutObject("b", "new.txt", strings.NewReader("new"), "text/plain")
+	_, err := pt.PutObject(context.Background(), "b", "new.txt", strings.NewReader("new"), "text/plain")
 	require.NoError(t, err)
 
 	// Must be in local
-	rc, _, err := local.GetObject("b", "new.txt")
+	rc, _, err := local.GetObject(context.Background(), "b", "new.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 	body, _ := io.ReadAll(rc)

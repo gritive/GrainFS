@@ -2,6 +2,7 @@ package nfs4server
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -383,7 +384,7 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 		if len(key) > 0 && key[0] == '/' {
 			key = key[1:]
 		}
-		_, err := d.backend.HeadObject(nfs4Bucket, key)
+		_, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key)
 		exists = err == nil
 	}
 	log.Debug().Str("name", name).Str("child", childPath).Bool("exists", exists).Msg("nfs4: LOOKUP")
@@ -462,7 +463,7 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 		if len(key) > 0 && key[0] == '/' {
 			key = key[1:]
 		}
-		obj, err := d.backend.HeadObject(nfs4Bucket, key)
+		obj, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key)
 		if err == nil {
 			isDir = false
 			fileSize = uint64(obj.Size)
@@ -705,7 +706,7 @@ func (d *Dispatcher) opReadDir(_ []byte) OpResult {
 			prefix += "/"
 		}
 
-		objects, _ := d.backend.ListObjects(nfs4Bucket, prefix, 1000)
+		objects, _ := d.backend.ListObjects(context.Background(), nfs4Bucket, prefix, 1000)
 		cookie := uint64(0)
 		for _, obj := range objects {
 			name := obj.Key
@@ -732,12 +733,6 @@ func (d *Dispatcher) opReadDir(_ []byte) OpResult {
 	return OpResult{OpCode: OpReadDir, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
-// readAtBackend is the zero-overhead partial-read interface.
-// Implementations skip HeadObject, GetObject, and Seek entirely.
-type readAtBackend interface {
-	ReadAt(bucket, key string, offset int64, buf []byte) (int, error)
-}
-
 func (d *Dispatcher) opRead(data []byte) OpResult {
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_SERVERFAULT}
@@ -753,7 +748,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	}
 
 	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
-	if ra, ok := d.backend.(readAtBackend); ok {
+	if ra, ok := d.backend.(storage.PartialIO); ok {
 		var buf []byte
 		var pooled bool
 		if count <= nfsMaxReadBlock {
@@ -763,7 +758,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		} else {
 			buf = make([]byte, count)
 		}
-		n, err := ra.ReadAt(nfs4Bucket, key, int64(offset), buf)
+		n, err := ra.ReadAt(context.Background(), nfs4Bucket, key, int64(offset), buf)
 		if err != nil && !errors.Is(err, io.EOF) {
 			if pooled {
 				opReadAtBufPool.Put(buf[:nfsMaxReadBlock])
@@ -782,7 +777,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	}
 
 	// Slow path: HeadObject + GetObject + Seek (backends without ReadAt).
-	obj, err := d.backend.HeadObject(nfs4Bucket, key)
+	obj, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
 	}
@@ -802,7 +797,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		remainingSize = int64(count)
 	}
 
-	rc, _, err := d.backend.GetObject(nfs4Bucket, key)
+	rc, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_NOENT}
 	}
@@ -882,21 +877,15 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	release := d.state.LockPath(key)
 	defer release()
 
-	// writeAtBackend is the zero-allocation partial-write interface.
-	// LocalBackend (and CachedBackend wrapping it) implement this.
-	type writeAtBackend interface {
-		WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error)
-	}
-
-	if wa, ok := d.backend.(writeAtBackend); ok {
+	if wa, ok := d.backend.(storage.PartialIO); ok {
 		// Fast path: stream prefix+data+suffix via kernel I/O — no heap allocation.
-		if _, err = wa.WriteAt(nfs4Bucket, key, offset, writeData); err != nil {
+		if _, err = wa.WriteAt(context.Background(), nfs4Bucket, key, offset, writeData); err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 		}
 	} else {
 		// Fallback: RMW for backends that don't implement WriteAt.
 		var existingSize uint64
-		if obj, herr := d.backend.HeadObject(nfs4Bucket, key); herr == nil {
+		if obj, herr := d.backend.HeadObject(context.Background(), nfs4Bucket, key); herr == nil {
 			existingSize = uint64(obj.Size)
 		}
 		end := offset + uint64(len(writeData))
@@ -906,10 +895,10 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 
 		if offset == 0 && end >= existingSize {
 			br.Reset(writeData)
-			_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
+			_, err = d.backend.PutObject(context.Background(), nfs4Bucket, key, br, "application/octet-stream")
 		} else {
 			var existing []byte
-			if rc, _, rerr := d.backend.GetObject(nfs4Bucket, key); rerr == nil {
+			if rc, _, rerr := d.backend.GetObject(context.Background(), nfs4Bucket, key); rerr == nil {
 				existing, err = io.ReadAll(rc)
 				rc.Close()
 				if err != nil {
@@ -921,7 +910,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 			}
 			copy(existing[offset:], writeData)
 			br.Reset(existing)
-			_, err = d.backend.PutObject(nfs4Bucket, key, br, "application/octet-stream")
+			_, err = d.backend.PutObject(context.Background(), nfs4Bucket, key, br, "application/octet-stream")
 		}
 		if err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -955,9 +944,9 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 		if len(key) > 0 && key[0] == '/' {
 			key = key[1:]
 		}
-		_, headErr := d.backend.HeadObject(nfs4Bucket, key)
+		_, headErr := d.backend.HeadObject(context.Background(), nfs4Bucket, key)
 		if headErr != nil {
-			if _, putErr := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(nil), "application/octet-stream"); putErr != nil {
+			if _, putErr := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(nil), "application/octet-stream"); putErr != nil {
 				return OpResult{OpCode: OpOpen, Status: NFS4ERR_IO}
 			}
 			log.Debug().Str("key", key).Msg("nfs4: OPEN CREATE created file")
@@ -1049,12 +1038,12 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		release := d.state.LockPath(key)
 		defer release()
 		if tr, ok := d.backend.(storage.Truncatable); ok {
-			if err := tr.Truncate(nfs4Bucket, key, int64(size)); err != nil {
+			if err := tr.Truncate(context.Background(), nfs4Bucket, key, int64(size)); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		} else {
 			var existing []byte
-			if rc, _, err := d.backend.GetObject(nfs4Bucket, key); err == nil {
+			if rc, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, key); err == nil {
 				existing, _ = io.ReadAll(rc)
 				rc.Close()
 			}
@@ -1065,7 +1054,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 			} else if cur < sz {
 				existing = append(existing, make([]byte, sz-cur)...)
 			}
-			if _, err := d.backend.PutObject(nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+			if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		}
@@ -1169,7 +1158,7 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 		key = key[1:]
 	}
 
-	if _, err := d.backend.HeadObject(nfs4Bucket, key); err != nil {
+	if _, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key); err != nil {
 		// May be a directory tracked in state only.
 		if d.state.IsDir(targetPath) {
 			d.state.RemoveDir(targetPath)
@@ -1183,7 +1172,7 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 		}
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_NOENT}
 	}
-	if err := d.backend.DeleteObject(nfs4Bucket, key); err != nil {
+	if err := d.backend.DeleteObject(context.Background(), nfs4Bucket, key); err != nil {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_IO}
 	}
 	d.state.InvalidateFH(targetPath)
@@ -1225,16 +1214,16 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 	}
 
 	// Object store has no rename — read → write new → delete old.
-	rc, _, err := d.backend.GetObject(nfs4Bucket, oldKey)
+	rc, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, oldKey)
 	if err != nil {
 		return OpResult{OpCode: OpRename, Status: NFS4ERR_NOENT}
 	}
-	if _, err := d.backend.PutObject(nfs4Bucket, newKey, rc, "application/octet-stream"); err != nil {
+	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, newKey, rc, "application/octet-stream"); err != nil {
 		rc.Close()
 		return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
 	}
 	rc.Close()
-	d.backend.DeleteObject(nfs4Bucket, oldKey) //nolint:errcheck
+	d.backend.DeleteObject(context.Background(), nfs4Bucket, oldKey) //nolint:errcheck
 
 	d.state.InvalidateFH(oldPath)
 	d.state.GetOrCreateFH(newPath)
@@ -1440,7 +1429,7 @@ func (d *Dispatcher) loadFileMeta(key string) nfsFileMeta {
 			return m
 		}
 	}
-	rc, _, err := d.backend.GetObject(nfs4Bucket, metaSidecarKey(key))
+	rc, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, metaSidecarKey(key))
 	if err != nil {
 		m := nfsFileMeta{Mode: 0644}
 		if d.state != nil {
@@ -1465,7 +1454,7 @@ func (d *Dispatcher) saveFileMeta(key string, m nfsFileMeta) error {
 	if err != nil {
 		return err
 	}
-	_, err = d.backend.PutObject(nfs4Bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
+	_, err = d.backend.PutObject(context.Background(), nfs4Bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
 	if err == nil && d.state != nil {
 		d.state.fileMeta.Store(key, m)
 	}

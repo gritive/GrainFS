@@ -36,7 +36,8 @@ func newMockBackend() *mockBackend {
 	}
 }
 
-func (m *mockBackend) ListBuckets() ([]string, error) {
+func (m *mockBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	_ = ctx
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	buckets := make([]string, 0, len(m.records))
@@ -443,10 +444,10 @@ func TestScrubber_PlainObject_Skipped(t *testing.T) {
 // stubSigningHealthEmitter is an Emitter + SigningHealthChecker + SessionFinalizer
 // that lets tests control signing health and count FinalizeSession calls.
 type stubSigningHealthEmitter struct {
-	signingOK     bool
-	emitted       []scrubber.HealEvent
-	finalized     []string
-	mu            sync.Mutex
+	signingOK bool
+	emitted   []scrubber.HealEvent
+	finalized []string
+	mu        sync.Mutex
 }
 
 func (e *stubSigningHealthEmitter) Emit(ev scrubber.HealEvent) {
@@ -454,7 +455,7 @@ func (e *stubSigningHealthEmitter) Emit(ev scrubber.HealEvent) {
 	defer e.mu.Unlock()
 	e.emitted = append(e.emitted, ev)
 }
-func (e *stubSigningHealthEmitter) SigningHealthy() bool  { return e.signingOK }
+func (e *stubSigningHealthEmitter) SigningHealthy() bool { return e.signingOK }
 func (e *stubSigningHealthEmitter) FinalizeSession(cid string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -522,4 +523,3 @@ func TestScrubber_SigningHealthGate_FinalizeCalledWhenHealthy(t *testing.T) {
 	emitter.mu.Unlock()
 	assert.Equal(t, 1, finalizedCount, "FinalizeSession must be called once after repair succeeds")
 }
-

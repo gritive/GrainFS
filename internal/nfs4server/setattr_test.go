@@ -2,6 +2,7 @@ package nfs4server
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -512,7 +513,7 @@ func TestSetAttr_PersistAfterRestart(t *testing.T) {
 
 	backend1, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
-	require.NoError(t, backend1.CreateBucket(nfs4Bucket))
+	require.NoError(t, backend1.CreateBucket(context.Background(), nfs4Bucket))
 	srv1 := NewServer(backend1)
 
 	ln1, err := net.Listen("tcp", "127.0.0.1:0")

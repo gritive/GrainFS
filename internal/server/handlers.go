@@ -117,8 +117,8 @@ func getKey(c *app.RequestContext) string {
 	return strings.TrimPrefix(key, "/")
 }
 
-func (s *Server) listBuckets(_ context.Context, c *app.RequestContext) {
-	buckets, err := s.backend.ListBuckets()
+func (s *Server) listBuckets(ctx context.Context, c *app.RequestContext) {
+	buckets, err := s.backend.ListBuckets(ctx)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -136,7 +136,7 @@ func (s *Server) listBuckets(_ context.Context, c *app.RequestContext) {
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 
-func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
+func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 
 	// PUT /:bucket?policy — set bucket policy
@@ -147,7 +147,7 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 
 	// PUT /:bucket?lifecycle — set bucket lifecycle configuration
 	if c.QueryArgs().Has("lifecycle") {
-		s.putBucketLifecycle(c, bucket)
+		s.putBucketLifecycle(ctx, c, bucket)
 		return
 	}
 
@@ -157,7 +157,7 @@ func (s *Server) createBucket(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.backend.CreateBucket(bucket); err != nil {
+	if err := s.backend.CreateBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -182,16 +182,16 @@ func unwrapBackend(b storage.Backend) storage.Backend {
 	}
 }
 
-func (s *Server) headBucket(_ context.Context, c *app.RequestContext) {
+func (s *Server) headBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
-	if err := s.backend.HeadBucket(bucket); err != nil {
+	if err := s.backend.HeadBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
 	c.Status(consts.StatusOK)
 }
 
-func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
+func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 
 	// DELETE /:bucket?lifecycle — delete bucket lifecycle configuration
@@ -206,7 +206,7 @@ func (s *Server) deleteBucket(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.backend.DeleteBucket(bucket); err != nil {
+	if err := s.backend.DeleteBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -250,7 +250,7 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 
-	objects, err := s.backend.ListObjects(bucket, prefix, maxKeys)
+	objects, err := s.backend.ListObjects(ctx, bucket, prefix, maxKeys)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -275,7 +275,7 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 
-func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
+func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	if s.isDegraded() {
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
 		return
@@ -288,14 +288,14 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
 	partNumberStr := string(c.QueryArgs().Peek("partNumber"))
 	if uploadID != "" && partNumberStr != "" {
-		s.uploadPart(c, bucket, key, uploadID, partNumberStr)
+		s.uploadPart(ctx, c, bucket, key, uploadID, partNumberStr)
 		return
 	}
 
 	// Check for CopyObject (PUT with x-amz-copy-source header)
 	copySource := string(c.GetHeader("x-amz-copy-source"))
 	if copySource != "" {
-		s.handleCopyObject(c, bucket, key, copySource)
+		s.handleCopyObject(ctx, c, bucket, key, copySource)
 		return
 	}
 
@@ -305,7 +305,7 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 	}
 
 	// Check if object already exists (for overwrite — don't double-count)
-	existing, _ := s.backend.HeadObject(bucket, key)
+	existing, _ := s.backend.HeadObject(ctx, bucket, key)
 
 	rawBody := c.Request.Body()
 
@@ -341,7 +341,7 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 			// Atomic path: store object and ACL in the same transaction.
 			obj, putErr = putter.PutObjectWithACL(bucket, key, body, contentType, uint8(acl))
 		} else {
-			obj, putErr = s.backend.PutObject(bucket, key, body, contentType)
+			obj, putErr = s.backend.PutObject(ctx, bucket, key, body, contentType)
 			if putErr == nil {
 				if setter, ok2 := unwrapBackend(s.backend).(storage.ACLSetter); ok2 {
 					if aclErr := setter.SetObjectACL(bucket, key, uint8(acl)); aclErr != nil {
@@ -352,7 +352,7 @@ func (s *Server) handlePut(_ context.Context, c *app.RequestContext) {
 			}
 		}
 	} else {
-		obj, putErr = s.backend.PutObject(bucket, key, body, contentType)
+		obj, putErr = s.backend.PutObject(ctx, bucket, key, body, contentType)
 	}
 	if putErr != nil {
 		mapError(c, putErr)
@@ -419,7 +419,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 			}
 		}
 	} else {
-		rc, obj, err = s.backend.GetObject(bucket, key)
+		rc, obj, err = s.backend.GetObject(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -619,7 +619,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 		}
 		obj, err = vh.HeadObjectVersion(bucket, key, versionID)
 	} else {
-		obj, err = s.backend.HeadObject(bucket, key)
+		obj, err = s.backend.HeadObject(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -700,7 +700,7 @@ func checkConditionals(c *app.RequestContext, etag string, lastModifiedUnix int6
 	return true
 }
 
-func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
+func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 	if s.isDegraded() {
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
 		return
@@ -725,7 +725,7 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 	}
 
 	// Get size before deleting for metric tracking
-	existing, _ := s.backend.HeadObject(bucket, key)
+	existing, _ := s.backend.HeadObject(ctx, bucket, key)
 
 	// If backend supports versioned soft-delete, use it to get the marker ID.
 	if vsd, ok := findVersionedSoftDeleter(s.backend); ok {
@@ -747,7 +747,7 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.backend.DeleteObject(bucket, key); err != nil {
+	if err := s.backend.DeleteObject(ctx, bucket, key); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -760,7 +760,7 @@ func (s *Server) deleteObject(_ context.Context, c *app.RequestContext) {
 }
 
 // handlePost routes POST requests for multipart upload operations.
-func (s *Server) handlePost(_ context.Context, c *app.RequestContext) {
+func (s *Server) handlePost(ctx context.Context, c *app.RequestContext) {
 	if s.isDegraded() {
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
 		return
@@ -771,21 +771,21 @@ func (s *Server) handlePost(_ context.Context, c *app.RequestContext) {
 
 	// POST /:bucket/:key?uploads -> CreateMultipartUpload
 	if c.QueryArgs().Has("uploads") {
-		s.createMultipartUpload(c, bucket, key)
+		s.createMultipartUpload(ctx, c, bucket, key)
 		return
 	}
 
 	// POST /:bucket/:key?uploadId=xxx -> CompleteMultipartUpload
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
 	if uploadID != "" {
-		s.completeMultipartUpload(c, bucket, key, uploadID)
+		s.completeMultipartUpload(ctx, c, bucket, key, uploadID)
 		return
 	}
 
 	// POST /:bucket with multipart/form-data -> Form-based Upload (POST Policy)
 	ct := string(c.GetHeader("Content-Type"))
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		s.handleFormUpload(c, bucket)
+		s.handleFormUpload(ctx, c, bucket)
 		return
 	}
 
@@ -794,7 +794,7 @@ func (s *Server) handlePost(_ context.Context, c *app.RequestContext) {
 
 // handleFormUpload processes S3 POST form-based uploads (browser direct upload).
 // The form contains: key, Content-Type, policy, X-Amz-Signature, file, etc.
-func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
+func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bucket string) {
 	form, err := c.MultipartForm()
 	if err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedPOSTRequest", "cannot parse multipart form")
@@ -889,7 +889,7 @@ func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
 	}
 	defer file.Close()
 
-	obj, err := s.backend.PutObject(bucket, key, file, contentType)
+	obj, err := s.backend.PutObject(ctx, bucket, key, file, contentType)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -935,13 +935,13 @@ func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
 	}
 }
 
-func (s *Server) createMultipartUpload(c *app.RequestContext, bucket, key string) {
+func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContext, bucket, key string) {
 	contentType := string(c.GetHeader("Content-Type"))
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	upload, err := s.backend.CreateMultipartUpload(bucket, key, contentType)
+	upload, err := s.backend.CreateMultipartUpload(ctx, bucket, key, contentType)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -957,7 +957,7 @@ func (s *Server) createMultipartUpload(c *app.RequestContext, bucket, key string
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 
-func (s *Server) uploadPart(c *app.RequestContext, bucket, key, uploadID, partNumberStr string) {
+func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, key, uploadID, partNumberStr string) {
 	partNumber, err := strconv.Atoi(partNumberStr)
 	if err != nil || partNumber < 1 {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid part number")
@@ -965,7 +965,7 @@ func (s *Server) uploadPart(c *app.RequestContext, bucket, key, uploadID, partNu
 	}
 
 	body := bytes.NewReader(c.Request.Body())
-	part, err := s.backend.UploadPart(bucket, key, uploadID, partNumber, body)
+	part, err := s.backend.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -975,7 +975,7 @@ func (s *Server) uploadPart(c *app.RequestContext, bucket, key, uploadID, partNu
 	c.Status(consts.StatusOK)
 }
 
-func (s *Server) completeMultipartUpload(c *app.RequestContext, bucket, key, uploadID string) {
+func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestContext, bucket, key, uploadID string) {
 	var req completeMultipartUploadRequest
 	if err := xml.Unmarshal(c.Request.Body(), &req); err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedXML", "invalid XML body")
@@ -988,7 +988,7 @@ func (s *Server) completeMultipartUpload(c *app.RequestContext, bucket, key, upl
 		parts[i] = storage.Part{PartNumber: p.PartNumber, ETag: etag}
 	}
 
-	obj, err := s.backend.CompleteMultipartUpload(bucket, key, uploadID, parts)
+	obj, err := s.backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -1006,7 +1006,7 @@ func (s *Server) completeMultipartUpload(c *app.RequestContext, bucket, key, upl
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 
-func (s *Server) serveDashboard(_ context.Context, c *app.RequestContext) {
+func (s *Server) serveDashboard(ctx context.Context, c *app.RequestContext) {
 	data, err := uiHTML.ReadFile("ui/index.html")
 	if err != nil {
 		c.String(consts.StatusInternalServerError, "UI not found")
@@ -1080,7 +1080,7 @@ func toHTTPRequest(c *app.RequestContext) *http.Request {
 	return r
 }
 
-func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
+func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 	status := map[string]any{
 		"mode":                  "local",
 		"split_brain_suspected": false,
@@ -1120,7 +1120,7 @@ func (s *Server) clusterStatus(_ context.Context, c *app.RequestContext) {
 // CachedBackend (object-level) and readamp (simulator) counters live in
 // /metrics; this endpoint is the human-readable summary the dashboard
 // consumes.
-func (s *Server) cacheStatus(_ context.Context, c *app.RequestContext) {
+func (s *Server) cacheStatus(ctx context.Context, c *app.RequestContext) {
 	resp := map[string]any{
 		"block_cache": map[string]any{
 			"enabled": false,
@@ -1166,7 +1166,7 @@ func (s *Server) cacheStatus(_ context.Context, c *app.RequestContext) {
 }
 
 // joinClusterHandler handles POST /api/cluster/join for runtime local→cluster transition.
-func (s *Server) joinClusterHandler(_ context.Context, c *app.RequestContext) {
+func (s *Server) joinClusterHandler(ctx context.Context, c *app.RequestContext) {
 	if s.joinCluster == nil {
 		writeXMLError(c, consts.StatusConflict, "InvalidRequest", "server is already in cluster mode or join not supported")
 		return
@@ -1204,7 +1204,7 @@ func (s *Server) joinClusterHandler(_ context.Context, c *app.RequestContext) {
 }
 
 // handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
-func (s *Server) handleCopyObject(c *app.RequestContext, dstBucket, dstKey, copySource string) {
+func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, dstBucket, dstKey, copySource string) {
 	// Parse copy source: /bucket/key or bucket/key
 	copySource = strings.TrimPrefix(copySource, "/")
 	parts := strings.SplitN(copySource, "/", 2)
@@ -1232,14 +1232,14 @@ func (s *Server) handleCopyObject(c *app.RequestContext, dstBucket, dstKey, copy
 	}
 
 	// Fallback: read source, write to dest
-	rc, obj, err := s.backend.GetObject(srcBucket, srcKey)
+	rc, obj, err := s.backend.GetObject(ctx, srcBucket, srcKey)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
 	defer rc.Close()
 
-	newObj, err := s.backend.PutObject(dstBucket, dstKey, rc, obj.ContentType)
+	newObj, err := s.backend.PutObject(ctx, dstBucket, dstKey, rc, obj.ContentType)
 	if err != nil {
 		mapError(c, err)
 		return

@@ -18,11 +18,11 @@ type flakyVolumeMetaBackend struct {
 	failPuts atomic.Int32
 }
 
-func (b *flakyVolumeMetaBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+func (b *flakyVolumeMetaBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
 	if bucket == "__grainfs_volumes" && key == "__vol/default/meta" && b.failPuts.Add(-1) >= 0 {
 		return nil, storage.ErrNoSuchBucket
 	}
-	return b.Backend.PutObject(bucket, key, r, contentType)
+	return b.Backend.PutObject(ctx, bucket, key, r, contentType)
 }
 
 func TestEnsureDefaultNBDVolumeRetriesTransientCreateFailure(t *testing.T) {

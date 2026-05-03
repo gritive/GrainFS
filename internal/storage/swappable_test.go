@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"io"
 	"strings"
 	"sync"
@@ -17,13 +18,13 @@ func TestSwappableBackend_ForwardsToInner(t *testing.T) {
 
 	sb := NewSwappableBackend(inner)
 
-	require.NoError(t, sb.CreateBucket("test"))
-	require.NoError(t, sb.HeadBucket("test"))
+	require.NoError(t, sb.CreateBucket(context.Background(), "test"))
+	require.NoError(t, sb.HeadBucket(context.Background(), "test"))
 
-	_, err = sb.PutObject("test", "hello.txt", strings.NewReader("hello"), "text/plain")
+	_, err = sb.PutObject(context.Background(), "test", "hello.txt", strings.NewReader("hello"), "text/plain")
 	require.NoError(t, err)
 
-	rc, obj, err := sb.GetObject("test", "hello.txt")
+	rc, obj, err := sb.GetObject(context.Background(), "test", "hello.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -41,24 +42,24 @@ func TestSwappableBackend_SwapChangesBackend(t *testing.T) {
 	sb := NewSwappableBackend(inner1)
 
 	// Create bucket in first backend
-	require.NoError(t, sb.CreateBucket("first"))
+	require.NoError(t, sb.CreateBucket(context.Background(), "first"))
 
 	// Swap to second backend
 	sb.Swap(inner2)
 
 	// Old bucket should not be visible in new backend
-	assert.ErrorIs(t, sb.HeadBucket("first"), ErrBucketNotFound)
+	assert.ErrorIs(t, sb.HeadBucket(context.Background(), "first"), ErrBucketNotFound)
 
 	// Create in new backend
-	require.NoError(t, sb.CreateBucket("second"))
-	require.NoError(t, sb.HeadBucket("second"))
+	require.NoError(t, sb.CreateBucket(context.Background(), "second"))
+	require.NoError(t, sb.HeadBucket(context.Background(), "second"))
 }
 
 func TestSwappableBackend_ConcurrentSwapSafe(t *testing.T) {
 	dir := t.TempDir()
 	inner, _ := NewLocalBackend(dir)
 	sb := NewSwappableBackend(inner)
-	require.NoError(t, sb.CreateBucket("test"))
+	require.NoError(t, sb.CreateBucket(context.Background(), "test"))
 
 	var wg sync.WaitGroup
 	// Concurrent reads while swapping
@@ -67,7 +68,7 @@ func TestSwappableBackend_ConcurrentSwapSafe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				_ = sb.HeadBucket("test")
+				_ = sb.HeadBucket(context.Background(), "test")
 			}
 		}()
 	}

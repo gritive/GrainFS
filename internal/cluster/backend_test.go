@@ -96,25 +96,25 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 func TestDistributedBackend_CreateAndHeadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
-	require.NoError(t, b.CreateBucket("test"))
-	require.NoError(t, b.HeadBucket("test"))
-	assert.ErrorIs(t, b.HeadBucket("nope"), storage.ErrBucketNotFound)
+	require.NoError(t, b.CreateBucket(context.Background(), "test"))
+	require.NoError(t, b.HeadBucket(context.Background(), "test"))
+	assert.ErrorIs(t, b.HeadBucket(context.Background(), "nope"), storage.ErrBucketNotFound)
 }
 
 func TestDistributedBackend_CreateBucketConflict(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
-	require.NoError(t, b.CreateBucket("dup"))
-	assert.ErrorIs(t, b.CreateBucket("dup"), storage.ErrBucketAlreadyExists)
+	require.NoError(t, b.CreateBucket(context.Background(), "dup"))
+	assert.ErrorIs(t, b.CreateBucket(context.Background(), "dup"), storage.ErrBucketAlreadyExists)
 }
 
 func TestDistributedBackend_ListBuckets(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
-	require.NoError(t, b.CreateBucket("alpha"))
-	require.NoError(t, b.CreateBucket("beta"))
+	require.NoError(t, b.CreateBucket(context.Background(), "alpha"))
+	require.NoError(t, b.CreateBucket(context.Background(), "beta"))
 
-	buckets, err := b.ListBuckets()
+	buckets, err := b.ListBuckets(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"alpha", "beta"}, buckets)
 }
@@ -122,37 +122,37 @@ func TestDistributedBackend_ListBuckets(t *testing.T) {
 func TestDistributedBackend_DeleteBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
-	require.NoError(t, b.CreateBucket("del"))
-	require.NoError(t, b.DeleteBucket("del"))
-	assert.ErrorIs(t, b.HeadBucket("del"), storage.ErrBucketNotFound)
+	require.NoError(t, b.CreateBucket(context.Background(), "del"))
+	require.NoError(t, b.DeleteBucket(context.Background(), "del"))
+	assert.ErrorIs(t, b.HeadBucket(context.Background(), "del"), storage.ErrBucketNotFound)
 }
 
 func TestDistributedBackend_DeleteBucketNotFound(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	assert.ErrorIs(t, b.DeleteBucket("nope"), storage.ErrBucketNotFound)
+	assert.ErrorIs(t, b.DeleteBucket(context.Background(), "nope"), storage.ErrBucketNotFound)
 }
 
 func TestDistributedBackend_DeleteBucketNotEmpty(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
-	require.NoError(t, b.CreateBucket("notempty"))
-	_, err := b.PutObject("notempty", "file.txt", strings.NewReader("data"), "text/plain")
+	require.NoError(t, b.CreateBucket(context.Background(), "notempty"))
+	_, err := b.PutObject(context.Background(), "notempty", "file.txt", strings.NewReader("data"), "text/plain")
 	require.NoError(t, err)
 
-	assert.ErrorIs(t, b.DeleteBucket("notempty"), storage.ErrBucketNotEmpty)
+	assert.ErrorIs(t, b.DeleteBucket(context.Background(), "notempty"), storage.ErrBucketNotEmpty)
 }
 
 func TestDistributedBackend_PutAndGetObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	obj, err := b.PutObject("bucket", "hello.txt", strings.NewReader("hello world"), "text/plain")
+	obj, err := b.PutObject(context.Background(), "bucket", "hello.txt", strings.NewReader("hello world"), "text/plain")
 	require.NoError(t, err)
 	assert.Equal(t, int64(11), obj.Size)
 	assert.Equal(t, "text/plain", obj.ContentType)
 	assert.NotEmpty(t, obj.ETag)
 
-	rc, gotObj, err := b.GetObject("bucket", "hello.txt")
+	rc, gotObj, err := b.GetObject(context.Background(), "bucket", "hello.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -165,18 +165,18 @@ func TestDistributedBackend_PutAndGetObject(t *testing.T) {
 func TestDistributedBackend_PutObjectToBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
-	_, err := b.PutObject("nope", "file.txt", strings.NewReader("data"), "text/plain")
+	_, err := b.PutObject(context.Background(), "nope", "file.txt", strings.NewReader("data"), "text/plain")
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
 func TestDistributedBackend_HeadObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.PutObject("bucket", "meta.txt", strings.NewReader("metadata"), "text/plain")
+	_, err := b.PutObject(context.Background(), "bucket", "meta.txt", strings.NewReader("metadata"), "text/plain")
 	require.NoError(t, err)
 
-	obj, err := b.HeadObject("bucket", "meta.txt")
+	obj, err := b.HeadObject(context.Background(), "bucket", "meta.txt")
 	require.NoError(t, err)
 	assert.Equal(t, int64(8), obj.Size)
 	assert.Equal(t, "meta.txt", obj.Key)
@@ -184,87 +184,87 @@ func TestDistributedBackend_HeadObject(t *testing.T) {
 
 func TestDistributedBackend_HeadObjectNotFound(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.HeadObject("bucket", "nope.txt")
+	_, err := b.HeadObject(context.Background(), "bucket", "nope.txt")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
 func TestDistributedBackend_DeleteObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.PutObject("bucket", "del.txt", strings.NewReader("data"), "text/plain")
+	_, err := b.PutObject(context.Background(), "bucket", "del.txt", strings.NewReader("data"), "text/plain")
 	require.NoError(t, err)
 
-	require.NoError(t, b.DeleteObject("bucket", "del.txt"))
+	require.NoError(t, b.DeleteObject(context.Background(), "bucket", "del.txt"))
 
-	_, err = b.HeadObject("bucket", "del.txt")
+	_, err = b.HeadObject(context.Background(), "bucket", "del.txt")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
 func TestDistributedBackend_DeleteObjectBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	assert.ErrorIs(t, b.DeleteObject("nope", "file.txt"), storage.ErrBucketNotFound)
+	assert.ErrorIs(t, b.DeleteObject(context.Background(), "nope", "file.txt"), storage.ErrBucketNotFound)
 }
 
 func TestDistributedBackend_ListObjects(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
 	for _, kv := range []struct{ key, val string }{
 		{"docs/a.txt", "a"},
 		{"docs/b.txt", "b"},
 		{"images/c.png", "c"},
 	} {
-		_, err := b.PutObject("bucket", kv.key, strings.NewReader(kv.val), "text/plain")
+		_, err := b.PutObject(context.Background(), "bucket", kv.key, strings.NewReader(kv.val), "text/plain")
 		require.NoError(t, err)
 	}
 
-	objects, err := b.ListObjects("bucket", "", 100)
+	objects, err := b.ListObjects(context.Background(), "bucket", "", 100)
 	require.NoError(t, err)
 	assert.Len(t, objects, 3)
 
-	objects, err = b.ListObjects("bucket", "docs/", 100)
+	objects, err = b.ListObjects(context.Background(), "bucket", "docs/", 100)
 	require.NoError(t, err)
 	assert.Len(t, objects, 2)
 }
 
 func TestDistributedBackend_ListObjectsMaxKeys(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
 	for i := range 5 {
-		_, err := b.PutObject("bucket", fmt.Sprintf("file%d.txt", i), strings.NewReader("x"), "text/plain")
+		_, err := b.PutObject(context.Background(), "bucket", fmt.Sprintf("file%d.txt", i), strings.NewReader("x"), "text/plain")
 		require.NoError(t, err)
 	}
 
-	objects, err := b.ListObjects("bucket", "", 3)
+	objects, err := b.ListObjects(context.Background(), "bucket", "", 3)
 	require.NoError(t, err)
 	assert.Len(t, objects, 3)
 }
 
 func TestDistributedBackend_ListObjectsBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	_, err := b.ListObjects("nope", "", 100)
+	_, err := b.ListObjects(context.Background(), "nope", "", 100)
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
 func TestDistributedBackend_WalkObjects(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
 	for _, kv := range []struct{ key, val string }{
 		{"docs/a.txt", "a"},
 		{"docs/b.txt", "b"},
 		{"images/c.png", "c"},
 	} {
-		_, err := b.PutObject("bucket", kv.key, strings.NewReader(kv.val), "text/plain")
+		_, err := b.PutObject(context.Background(), "bucket", kv.key, strings.NewReader(kv.val), "text/plain")
 		require.NoError(t, err)
 	}
 
 	var all []*storage.Object
-	err := b.WalkObjects("bucket", "", func(obj *storage.Object) error {
+	err := b.WalkObjects(context.Background(), "bucket", "", func(obj *storage.Object) error {
 		all = append(all, obj)
 		return nil
 	})
@@ -272,7 +272,7 @@ func TestDistributedBackend_WalkObjects(t *testing.T) {
 	assert.Len(t, all, 3)
 
 	var docs []*storage.Object
-	err = b.WalkObjects("bucket", "docs/", func(obj *storage.Object) error {
+	err = b.WalkObjects(context.Background(), "bucket", "docs/", func(obj *storage.Object) error {
 		docs = append(docs, obj)
 		return nil
 	})
@@ -282,22 +282,22 @@ func TestDistributedBackend_WalkObjects(t *testing.T) {
 
 func TestDistributedBackend_WalkObjectsBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	err := b.WalkObjects("nope", "", func(*storage.Object) error { return nil })
+	err := b.WalkObjects(context.Background(), "nope", "", func(*storage.Object) error { return nil })
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
 func TestDistributedBackend_WalkObjectsDeletedSkipped(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.PutObject("bucket", "keep.txt", strings.NewReader("keep"), "text/plain")
+	_, err := b.PutObject(context.Background(), "bucket", "keep.txt", strings.NewReader("keep"), "text/plain")
 	require.NoError(t, err)
-	_, err = b.PutObject("bucket", "gone.txt", strings.NewReader("gone"), "text/plain")
+	_, err = b.PutObject(context.Background(), "bucket", "gone.txt", strings.NewReader("gone"), "text/plain")
 	require.NoError(t, err)
-	require.NoError(t, b.DeleteObject("bucket", "gone.txt"))
+	require.NoError(t, b.DeleteObject(context.Background(), "bucket", "gone.txt"))
 
 	var keys []string
-	err = b.WalkObjects("bucket", "", func(obj *storage.Object) error {
+	err = b.WalkObjects(context.Background(), "bucket", "", func(obj *storage.Object) error {
 		keys = append(keys, obj.Key)
 		return nil
 	})
@@ -307,15 +307,15 @@ func TestDistributedBackend_WalkObjectsDeletedSkipped(t *testing.T) {
 
 func TestDistributedBackend_WalkObjectsVersionedLatestOnly(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.PutObject("bucket", "f.txt", strings.NewReader("v1"), "text/plain")
+	_, err := b.PutObject(context.Background(), "bucket", "f.txt", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
-	_, err = b.PutObject("bucket", "f.txt", strings.NewReader("v2-longer"), "text/plain")
+	_, err = b.PutObject(context.Background(), "bucket", "f.txt", strings.NewReader("v2-longer"), "text/plain")
 	require.NoError(t, err)
 
 	var objs []*storage.Object
-	err = b.WalkObjects("bucket", "", func(obj *storage.Object) error {
+	err = b.WalkObjects(context.Background(), "bucket", "", func(obj *storage.Object) error {
 		objs = append(objs, obj)
 		return nil
 	})
@@ -326,16 +326,16 @@ func TestDistributedBackend_WalkObjectsVersionedLatestOnly(t *testing.T) {
 
 func TestDistributedBackend_WalkObjectsEarlyStop(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
 	for i := range 5 {
-		_, err := b.PutObject("bucket", fmt.Sprintf("f%d.txt", i), strings.NewReader("x"), "text/plain")
+		_, err := b.PutObject(context.Background(), "bucket", fmt.Sprintf("f%d.txt", i), strings.NewReader("x"), "text/plain")
 		require.NoError(t, err)
 	}
 
 	sentinel := fmt.Errorf("stop")
 	count := 0
-	err := b.WalkObjects("bucket", "", func(*storage.Object) error {
+	err := b.WalkObjects(context.Background(), "bucket", "", func(*storage.Object) error {
 		count++
 		if count == 2 {
 			return sentinel
@@ -348,15 +348,15 @@ func TestDistributedBackend_WalkObjectsEarlyStop(t *testing.T) {
 
 func TestDistributedBackend_Overwrite(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.PutObject("bucket", "file.txt", strings.NewReader("v1"), "text/plain")
+	_, err := b.PutObject(context.Background(), "bucket", "file.txt", strings.NewReader("v1"), "text/plain")
 	require.NoError(t, err)
 
-	_, err = b.PutObject("bucket", "file.txt", strings.NewReader("version2"), "text/plain")
+	_, err = b.PutObject(context.Background(), "bucket", "file.txt", strings.NewReader("version2"), "text/plain")
 	require.NoError(t, err)
 
-	rc, obj, err := b.GetObject("bucket", "file.txt")
+	rc, obj, err := b.GetObject(context.Background(), "bucket", "file.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -367,12 +367,12 @@ func TestDistributedBackend_Overwrite(t *testing.T) {
 
 func TestDistributedBackend_NestedKey(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.PutObject("bucket", "a/b/c/deep.txt", strings.NewReader("deep"), "text/plain")
+	_, err := b.PutObject(context.Background(), "bucket", "a/b/c/deep.txt", strings.NewReader("deep"), "text/plain")
 	require.NoError(t, err)
 
-	rc, _, err := b.GetObject("bucket", "a/b/c/deep.txt")
+	rc, _, err := b.GetObject(context.Background(), "bucket", "a/b/c/deep.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -382,31 +382,31 @@ func TestDistributedBackend_NestedKey(t *testing.T) {
 
 func TestDistributedBackend_MultipartComplete(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
 	part1 := bytes.Repeat([]byte("A"), 1024)
 	part2 := bytes.Repeat([]byte("B"), 512)
 
-	upload, err := b.CreateMultipartUpload("bucket", "mp.bin", "application/octet-stream")
+	upload, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
 	require.NotEmpty(t, upload.UploadID)
 
-	p1, err := b.UploadPart("bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(part1))
+	p1, err := b.UploadPart(context.Background(), "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(part1))
 	require.NoError(t, err)
 	assert.Equal(t, 1, p1.PartNumber)
 	assert.Equal(t, int64(1024), p1.Size)
 
-	p2, err := b.UploadPart("bucket", "mp.bin", upload.UploadID, 2, bytes.NewReader(part2))
+	p2, err := b.UploadPart(context.Background(), "bucket", "mp.bin", upload.UploadID, 2, bytes.NewReader(part2))
 	require.NoError(t, err)
 
-	obj, err := b.CompleteMultipartUpload("bucket", "mp.bin", upload.UploadID, []storage.Part{
+	obj, err := b.CompleteMultipartUpload(context.Background(), "bucket", "mp.bin", upload.UploadID, []storage.Part{
 		{PartNumber: p1.PartNumber, ETag: p1.ETag, Size: p1.Size},
 		{PartNumber: p2.PartNumber, ETag: p2.ETag, Size: p2.Size},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1536), obj.Size)
 
-	rc, _, err := b.GetObject("bucket", "mp.bin")
+	rc, _, err := b.GetObject(context.Background(), "bucket", "mp.bin")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -416,37 +416,37 @@ func TestDistributedBackend_MultipartComplete(t *testing.T) {
 
 func TestDistributedBackend_MultipartAbort(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	upload, err := b.CreateMultipartUpload("bucket", "abort.bin", "application/octet-stream")
+	upload, err := b.CreateMultipartUpload(context.Background(), "bucket", "abort.bin", "application/octet-stream")
 	require.NoError(t, err)
 
-	_, err = b.UploadPart("bucket", "abort.bin", upload.UploadID, 1, strings.NewReader("data"))
+	_, err = b.UploadPart(context.Background(), "bucket", "abort.bin", upload.UploadID, 1, strings.NewReader("data"))
 	require.NoError(t, err)
 
-	require.NoError(t, b.AbortMultipartUpload("bucket", "abort.bin", upload.UploadID))
+	require.NoError(t, b.AbortMultipartUpload(context.Background(), "bucket", "abort.bin", upload.UploadID))
 
-	_, err = b.HeadObject("bucket", "abort.bin")
+	_, err = b.HeadObject(context.Background(), "bucket", "abort.bin")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
 func TestDistributedBackend_MultipartBadUploadID(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket("bucket"))
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	_, err := b.UploadPart("bucket", "file.bin", "bad-id", 1, strings.NewReader("data"))
+	_, err := b.UploadPart(context.Background(), "bucket", "file.bin", "bad-id", 1, strings.NewReader("data"))
 	assert.ErrorIs(t, err, storage.ErrUploadNotFound)
 
-	err = b.AbortMultipartUpload("bucket", "file.bin", "bad-id")
+	err = b.AbortMultipartUpload(context.Background(), "bucket", "file.bin", "bad-id")
 	assert.ErrorIs(t, err, storage.ErrUploadNotFound)
 
-	_, err = b.CompleteMultipartUpload("bucket", "file.bin", "bad-id", nil)
+	_, err = b.CompleteMultipartUpload(context.Background(), "bucket", "file.bin", "bad-id", nil)
 	assert.ErrorIs(t, err, storage.ErrUploadNotFound)
 }
 
 func TestDistributedBackend_MultipartBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	_, err := b.CreateMultipartUpload("nope", "file.bin", "application/octet-stream")
+	_, err := b.CreateMultipartUpload(context.Background(), "nope", "file.bin", "application/octet-stream")
 	assert.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
@@ -498,7 +498,7 @@ func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
 
 	// Create 6 buckets (6 Raft entries, exceeding threshold of 5)
 	for i := range 6 {
-		require.NoError(t, backend.CreateBucket(fmt.Sprintf("snap-bucket-%d", i)))
+		require.NoError(t, backend.CreateBucket(context.Background(), fmt.Sprintf("snap-bucket-%d", i)))
 	}
 
 	// Wait for entries to be applied
@@ -541,7 +541,7 @@ func TestDistributedBackend_TriggerRaftSnapshotLeader(t *testing.T) {
 		logStore.Close()
 	})
 
-	require.NoError(t, backend.CreateBucket("manual-snap"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "manual-snap"))
 	require.Eventually(t, func() bool {
 		return backend.lastApplied.Load() > 0
 	}, 3*time.Second, 10*time.Millisecond)
@@ -585,7 +585,7 @@ func TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop(t *testin
 		logStore.Close()
 	})
 
-	require.NoError(t, backend.CreateBucket("before-snapshot"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "before-snapshot"))
 	initialApplied := backend.lastApplied.Load()
 	require.NotZero(t, initialApplied)
 
@@ -608,7 +608,7 @@ func TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop(t *testin
 
 	applyDone := make(chan error, 1)
 	go func() {
-		applyDone <- backend.CreateBucket("during-snapshot")
+		applyDone <- backend.CreateBucket(context.Background(), "during-snapshot")
 	}()
 
 	assert.Never(t, func() bool {
@@ -719,7 +719,7 @@ func (m *mockBucketAssigner) ProposeBucketAssignment(ctx context.Context, bucket
 func TestDistributedBackend_SetBucketAssigner_NilNoPanic(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	b.SetBucketAssigner(nil)
-	require.NoError(t, b.CreateBucket("photos"))
+	require.NoError(t, b.CreateBucket(context.Background(), "photos"))
 }
 
 func TestDistributedBackend_CreateBucket_AssignerWithoutRouter_Errors(t *testing.T) {
@@ -728,7 +728,7 @@ func TestDistributedBackend_CreateBucket_AssignerWithoutRouter_Errors(t *testing
 		return nil
 	}})
 	// router not set → must return an error, not panic
-	err := b.CreateBucket("photos")
+	err := b.CreateBucket(context.Background(), "photos")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "router not configured")
 }
@@ -749,7 +749,7 @@ func TestDistributedBackend_CreateBucket_CallsAssigner(t *testing.T) {
 		return nil
 	}})
 
-	require.NoError(t, b.CreateBucket("photos"))
+	require.NoError(t, b.CreateBucket(context.Background(), "photos"))
 	assert.Equal(t, "photos", calledBucket)
 	assert.Equal(t, "group-0", calledGroup)
 }
@@ -773,7 +773,7 @@ func TestDistributedBackend_CreateBucket_AssignsBeforeStrictRoute(t *testing.T) 
 		return nil
 	}})
 
-	require.NoError(t, b.CreateBucket("photos"))
+	require.NoError(t, b.CreateBucket(context.Background(), "photos"))
 	require.Equal(t, "photos", assignedBucket)
 	require.Equal(t, "group-0", assignedGroup)
 	r.AssignBucket(assignedBucket, assignedGroup)
@@ -794,6 +794,6 @@ func TestDistributedBackend_CreateBucket_RouterError_Propagates(t *testing.T) {
 		return nil
 	}})
 
-	err := b.CreateBucket("photos")
+	err := b.CreateBucket(context.Background(), "photos")
 	require.Error(t, err)
 }

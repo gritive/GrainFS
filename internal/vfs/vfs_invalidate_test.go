@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -77,24 +78,24 @@ type mockBackend struct {
 	data map[string]string
 }
 
-func (m *mockBackend) CreateBucket(bucket string) error {
+func (m *mockBackend) CreateBucket(ctx context.Context, bucket string) error {
 	m.data[bucket] = ""
 	return nil
 }
 
-func (m *mockBackend) HeadBucket(bucket string) error {
+func (m *mockBackend) HeadBucket(ctx context.Context, bucket string) error {
 	if _, ok := m.data[bucket]; ok {
 		return nil
 	}
 	return storage.ErrBucketNotFound
 }
 
-func (m *mockBackend) DeleteBucket(bucket string) error {
+func (m *mockBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	delete(m.data, bucket)
 	return nil
 }
 
-func (m *mockBackend) ListBuckets() ([]string, error) {
+func (m *mockBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	var buckets []string
 	for k := range m.data {
 		if len(k) == 0 || k[len(k)-1] != '/' {
@@ -104,15 +105,15 @@ func (m *mockBackend) ListBuckets() ([]string, error) {
 	return buckets, nil
 }
 
-func (m *mockBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+func (m *mockBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
 	return nil, nil
 }
 
-func (m *mockBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+func (m *mockBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	return nil, nil, nil
 }
 
-func (m *mockBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (m *mockBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
 	fullKey := bucket + "/" + key
 	if _, ok := m.data[fullKey]; ok {
 		return &storage.Object{Key: key, Size: 100}, nil
@@ -120,31 +121,31 @@ func (m *mockBackend) HeadObject(bucket, key string) (*storage.Object, error) {
 	return nil, storage.ErrObjectNotFound
 }
 
-func (m *mockBackend) DeleteObject(bucket, key string) error {
+func (m *mockBackend) DeleteObject(ctx context.Context, bucket, key string) error {
 	delete(m.data, bucket+"/"+key)
 	return nil
 }
 
-func (m *mockBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+func (m *mockBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+func (m *mockBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
 	return errors.New("not implemented")
 }
 
-func (m *mockBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
+func (m *mockBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (m *mockBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+func (m *mockBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
+func (m *mockBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	return errors.New("not implemented")
 }

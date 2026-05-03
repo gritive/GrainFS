@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.34.0] — 2026-05-03 — make storage operations context-aware
+
+### Added
+
+- **cluster/storage**: added a P0 durability architecture plan for context-first storage boundaries before the partial IO, EC overwrite, durable MPU, and behavioral cancellation follow-up slices.
+- **storage**: added `context.Context` to the core `storage.Backend` contract and introduced a context-aware `PartialIO` optional interface for efficient `WriteAt`, `ReadAt`, and `Truncate` paths.
+- **tests**: added wrapper context pass-through coverage and compile-time interface assertions for the main storage and cluster backends.
+
+### Changed
+
+- **storage wrappers**: cache, WAL, swappable, recovery gate, packblob, and pull-through backends now forward caller contexts through the storage boundary.
+- **cluster**: distributed backends, coordinators, forward receivers, scrubber surfaces, lifecycle workers, and migration paths now use context-aware storage calls.
+- **protocols**: S3, NFSv4, VFS, volume, Iceberg, and migration call sites now pass request, service, command, or explicit operation-root contexts to storage.
+
+### Fixed
+
+- **NFSv4**: `READ` and `WRITE` fast paths now detect the new context-aware `storage.PartialIO` interface instead of falling back to full-object read/modify/write.
+- **server**: multipart upload, copy object, browser form upload, lifecycle, and Iceberg metadata helpers now preserve the request context instead of creating fresh background contexts.
+- **migration**: `migrate inject` now propagates command cancellation to destination storage operations.
+- **cache**: cached backends now forward `Truncate` through the partial IO path and invalidate cached object state.
+
+### Tests
+
+- **storage/cluster/server/NFSv4**: verified context boundary compilation, wrapper forwarding, partial IO fast paths, server helper context propagation, and migration command context propagation.
+- **e2e smoke**: verified the built `grainfs` binary with deployment and default-bucket startup smoke tests.
+
 ## [0.0.33.0] — 2026-05-03 — modernize NBD fixed newstyle protocol
 
 ### Added

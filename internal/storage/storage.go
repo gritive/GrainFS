@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"io"
 
@@ -118,32 +119,40 @@ type BucketSnapshotable interface {
 
 // Backend defines the storage operations for GrainFS.
 type Backend interface {
-	CreateBucket(bucket string) error
-	HeadBucket(bucket string) error
-	DeleteBucket(bucket string) error
-	ListBuckets() ([]string, error)
+	CreateBucket(ctx context.Context, bucket string) error
+	HeadBucket(ctx context.Context, bucket string) error
+	DeleteBucket(ctx context.Context, bucket string) error
+	ListBuckets(ctx context.Context) ([]string, error)
 
-	PutObject(bucket, key string, r io.Reader, contentType string) (*Object, error)
-	GetObject(bucket, key string) (io.ReadCloser, *Object, error)
-	HeadObject(bucket, key string) (*Object, error)
-	DeleteObject(bucket, key string) error
-	ListObjects(bucket, prefix string, maxKeys int) ([]*Object, error)
+	PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error)
+	GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error)
+	HeadObject(ctx context.Context, bucket, key string) (*Object, error)
+	DeleteObject(ctx context.Context, bucket, key string) error
+	ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*Object, error)
 	// WalkObjects iterates over all objects with the given prefix, calling fn
 	// for each. Unlike ListObjects, it is not bounded by a maxKeys limit and
 	// uses O(1) memory regardless of object count. fn returning a non-nil error
 	// stops the walk and that error is returned.
-	WalkObjects(bucket, prefix string, fn func(*Object) error) error
+	WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error
 
-	CreateMultipartUpload(bucket, key, contentType string) (*MultipartUpload, error)
-	UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error)
-	CompleteMultipartUpload(bucket, key, uploadID string, parts []Part) (*Object, error)
-	AbortMultipartUpload(bucket, key, uploadID string) error
+	CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*MultipartUpload, error)
+	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error)
+	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
+	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 }
 
 // Truncatable is an optional interface for backends that can efficiently truncate an object.
 // Backends that do not implement this interface fall back to GetObject→slice→PutObject.
 type Truncatable interface {
-	Truncate(bucket, key string, size int64) error
+	Truncate(ctx context.Context, bucket, key string, size int64) error
+}
+
+// PartialIO is an optional interface for backends that can efficiently read and
+// write object ranges without rewriting the full object.
+type PartialIO interface {
+	WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error)
+	ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error)
+	Truncate(ctx context.Context, bucket, key string, size int64) error
 }
 
 // Syncable is an optional interface for backends that can fsync a specific object.

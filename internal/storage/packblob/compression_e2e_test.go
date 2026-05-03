@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"testing"
 
@@ -21,14 +22,14 @@ func TestCompression_E2E_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer pb.Close()
 
-	require.NoError(t, pb.CreateBucket("test"))
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
 
 	// Highly compressible data below threshold → goes into blob
 	data := bytes.Repeat([]byte("hello world "), 500)
-	_, err = pb.PutObject("test", "key1", bytes.NewReader(data), "text/plain")
+	_, err = pb.PutObject(context.Background(), "test", "key1", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
-	rc, obj, err := pb.GetObject("test", "key1")
+	rc, obj, err := pb.GetObject(context.Background(), "test", "key1")
 	require.NoError(t, err)
 	defer rc.Close()
 
@@ -50,14 +51,14 @@ func TestCompression_E2E_LargeObjectPassthrough(t *testing.T) {
 	require.NoError(t, err)
 	defer pb.Close()
 
-	require.NoError(t, pb.CreateBucket("test"))
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
 
 	// Data above threshold → passes through to inner backend (no blob)
 	data := bytes.Repeat([]byte("X"), 128*1024)
-	_, err = pb.PutObject("test", "large", bytes.NewReader(data), "application/octet-stream")
+	_, err = pb.PutObject(context.Background(), "test", "large", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 
-	rc, obj, err := pb.GetObject("test", "large")
+	rc, obj, err := pb.GetObject(context.Background(), "test", "large")
 	require.NoError(t, err)
 	defer rc.Close()
 

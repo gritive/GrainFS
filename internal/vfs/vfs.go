@@ -4,6 +4,7 @@ package vfs
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -98,8 +99,8 @@ var (
 // New creates a new GrainVFS for the given volume name.
 func New(backend storage.Backend, volumeName string, opts ...VFSOption) (*GrainVFS, error) {
 	bucket := storage.VFSBucketPrefix + volumeName
-	_ = backend.CreateBucket(bucket)
-	if err := backend.HeadBucket(bucket); err != nil {
+	_ = backend.CreateBucket(context.Background(), bucket)
+	if err := backend.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, fmt.Errorf("ensure vfs bucket: %w", err)
 	}
 	fs := &GrainVFS{backend: backend, bucket: bucket, root: ""}
@@ -120,8 +121,8 @@ func New(backend storage.Backend, volumeName string, opts ...VFSOption) (*GrainV
 // NewDirect creates a new GrainVFS that uses the bucket name directly (without prefix).
 // This is used for cross-protocol access where VFS needs to access S3 buckets directly.
 func NewDirect(backend storage.Backend, bucketName string, opts ...VFSOption) (*GrainVFS, error) {
-	_ = backend.CreateBucket(bucketName)
-	if err := backend.HeadBucket(bucketName); err != nil {
+	_ = backend.CreateBucket(context.Background(), bucketName)
+	if err := backend.HeadBucket(context.Background(), bucketName); err != nil {
 		return nil, fmt.Errorf("ensure bucket: %w", err)
 	}
 	fs := &GrainVFS{backend: backend, bucket: bucketName, root: ""}
@@ -182,7 +183,7 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 	if flag&os.O_CREATE != 0 {
 		if flag&os.O_TRUNC != 0 {
 			if fs.volMgr != nil {
-				if obj, err := fs.backend.HeadObject(fs.bucket, fp); err == nil {
+				if obj, err := fs.backend.HeadObject(context.Background(), fs.bucket, fp); err == nil {
 					f.oldSize = obj.Size
 				}
 			}
@@ -200,7 +201,7 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 	// Must exist
 	if flag == os.O_RDONLY {
 		// 읽기 전용: rc를 저장해 스트리밍 모드로 진입 (io.ReadAll 버퍼링 없음)
-		rc, _, err := fs.backend.GetObject(fs.bucket, fp)
+		rc, _, err := fs.backend.GetObject(context.Background(), fs.bucket, fp)
 		if err != nil {
 			return nil, os.ErrNotExist
 		}
@@ -247,7 +248,7 @@ func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 	}
 
 	// Check as file
-	obj, err := fs.backend.HeadObject(fs.bucket, fp)
+	obj, err := fs.backend.HeadObject(context.Background(), fs.bucket, fp)
 	if err != nil {
 		return nil, os.ErrNotExist
 	}
@@ -267,7 +268,7 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 	oldFP := fs.fullPath(oldpath)
 	newFP := fs.fullPath(newpath)
 
-	rc, _, err := fs.backend.GetObject(fs.bucket, oldFP)
+	rc, _, err := fs.backend.GetObject(context.Background(), fs.bucket, oldFP)
 	if err != nil {
 		return os.ErrNotExist
 	}
@@ -284,14 +285,14 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 		pw.CloseWithError(copyErr)
 	}()
 
-	_, err = fs.backend.PutObject(fs.bucket, newFP, pr, "application/octet-stream")
+	_, err = fs.backend.PutObject(context.Background(), fs.bucket, newFP, pr, "application/octet-stream")
 	pr.CloseWithError(err)
 	wg.Wait()
 	if err != nil {
 		return fmt.Errorf("write new file: %w", err)
 	}
 
-	if err := fs.backend.DeleteObject(fs.bucket, oldFP); err != nil {
+	if err := fs.backend.DeleteObject(context.Background(), fs.bucket, oldFP); err != nil {
 		return err
 	}
 
@@ -308,14 +309,14 @@ func (fs *GrainVFS) Remove(filename string) error {
 
 	var oldSize int64
 	if fs.volMgr != nil {
-		if obj, err := fs.backend.HeadObject(fs.bucket, fp); err == nil {
+		if obj, err := fs.backend.HeadObject(context.Background(), fs.bucket, fp); err == nil {
 			oldSize = obj.Size
 		}
 	}
 
-	if err := fs.backend.DeleteObject(fs.bucket, fp); err != nil {
+	if err := fs.backend.DeleteObject(context.Background(), fs.bucket, fp); err != nil {
 		// Try as directory marker
-		if err := fs.backend.DeleteObject(fs.bucket, fp+dirMarkerSuffix); err != nil {
+		if err := fs.backend.DeleteObject(context.Background(), fs.bucket, fp+dirMarkerSuffix); err != nil {
 			return err
 		}
 	}
@@ -347,7 +348,7 @@ func (fs *GrainVFS) ReadDir(dirPath string) ([]os.FileInfo, error) {
 		prefix = fp + "/"
 	}
 
-	objs, err := fs.backend.ListObjects(fs.bucket, prefix, 10000)
+	objs, err := fs.backend.ListObjects(context.Background(), fs.bucket, prefix, 10000)
 	if err != nil {
 		return nil, fmt.Errorf("list objects: %w", err)
 	}
@@ -402,7 +403,7 @@ func (fs *GrainVFS) ReadDir(dirPath string) ([]os.FileInfo, error) {
 func (fs *GrainVFS) MkdirAll(dirPath string, perm os.FileMode) error {
 	fp := fs.fullPath(dirPath)
 	marker := fp + dirMarkerSuffix
-	_, err := fs.backend.PutObject(fs.bucket, marker, strings.NewReader(""), "application/x-directory")
+	_, err := fs.backend.PutObject(context.Background(), fs.bucket, marker, strings.NewReader(""), "application/x-directory")
 	return err
 }
 
@@ -458,11 +459,11 @@ func (fs *GrainVFS) isDir(fp string) bool {
 		return true // root is always a directory
 	}
 	// Check for dir marker
-	if _, err := fs.backend.HeadObject(fs.bucket, fp+dirMarkerSuffix); err == nil {
+	if _, err := fs.backend.HeadObject(context.Background(), fs.bucket, fp+dirMarkerSuffix); err == nil {
 		return true
 	}
 	// Check if any objects have this as prefix (implicit directory)
-	objs, err := fs.backend.ListObjects(fs.bucket, fp+"/", 1)
+	objs, err := fs.backend.ListObjects(context.Background(), fs.bucket, fp+"/", 1)
 	if err == nil && len(objs) > 0 {
 		return true
 	}
@@ -501,7 +502,7 @@ type grainFile struct {
 	closed  bool
 	rc      io.ReadCloser // 스트리밍 모드: 읽기 전용 Open 시 설정, Seek/ReadAt/Close 시 해제
 	oldSize int64         // backend size before this write session; 0 = new file or volMgr == nil
-	mu      sync.Mutex   // guards rc and pos for concurrent ReadAt (io.ReaderAt contract)
+	mu      sync.Mutex    // guards rc and pos for concurrent ReadAt (io.ReaderAt contract)
 }
 
 func (f *grainFile) loadExisting() error {
@@ -509,7 +510,7 @@ func (f *grainFile) loadExisting() error {
 		f.rc.Close()
 		f.rc = nil
 	}
-	rc, _, err := f.fs.backend.GetObject(f.fs.bucket, f.path)
+	rc, _, err := f.fs.backend.GetObject(context.Background(), f.fs.bucket, f.path)
 	if err != nil {
 		return os.ErrNotExist
 	}
@@ -668,7 +669,7 @@ func (f *grainFile) Close() error {
 	if f.flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && f.buf != nil {
 		data := f.buf.Bytes()
 		newSize := int64(len(data))
-		_, err := f.fs.backend.PutObject(f.fs.bucket, f.path,
+		_, err := f.fs.backend.PutObject(context.Background(), f.fs.bucket, f.path,
 			bytes.NewReader(data), "application/octet-stream")
 		putBuf(f.buf)
 		f.buf = nil

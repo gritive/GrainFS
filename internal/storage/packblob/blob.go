@@ -21,8 +21,8 @@ type BlobLocation struct {
 // Entry format: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
 // flags bit 0: compressed (zstd)
 const (
-	entryOverhead   = 4 + 1 + 4 + 4 // key_len + flags + data_len + crc32
-	flagCompressed  = byte(0x01)
+	entryOverhead  = 4 + 1 + 4 + 4 // key_len + flags + data_len + crc32
+	flagCompressed = byte(0x01)
 )
 
 // BlobStore manages append-only blob files for packing small objects.
