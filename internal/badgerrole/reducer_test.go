@@ -112,6 +112,16 @@ func TestReduceStartupDecisionsIsDeterministic(t *testing.T) {
 	assert.Equal(t, gotA.DisabledFeatures, gotB.DisabledFeatures)
 }
 
+func TestReduceStartupDecisionsPreservesProbeDurations(t *testing.T) {
+	decisions := []Decision{
+		{Role: RoleMeta, Status: DecisionOK, ProbeDuration: 3},
+	}
+
+	got := ReduceStartupDecisions(DefaultRegistry(), decisions)
+	require.Len(t, got.Decisions, 1)
+	assert.Equal(t, decisions[0].ProbeDuration, got.Decisions[0].ProbeDuration)
+}
+
 func ok(role Role) Decision {
 	return Decision{Role: role, Status: DecisionOK, Action: RecoveryActionNone}
 }

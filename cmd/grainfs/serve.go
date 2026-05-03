@@ -1377,6 +1377,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
 	startupResult := badgerrole.ReduceStartupDecisions(roleRegistry, startupDecisions)
+	for _, decision := range startupResult.Decisions {
+		log.Info().
+			Str("role", string(decision.Role)).
+			Str("group_id", decision.GroupID).
+			Str("status", string(decision.Status)).
+			Dur("probe_duration", decision.ProbeDuration).
+			Msg("badger role startup probe")
+	}
 	startupReadOnly := startupResult.Mode == badgerrole.StartupModeReadOnly
 	if startupResult.Mode == badgerrole.StartupModeBlocked {
 		return fmt.Errorf("badger startup recovery blocked server start: %v", startupResult.BlockedReasons)
