@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/receipt"
@@ -62,7 +63,8 @@ func openBadgerSubDB(dataDir, name string) (*badger.DB, error) {
 // Kept separate from the meta DB so retention GC can run on receipt keys
 // without touching cluster metadata.
 func openReceiptDB(dataDir string) (*badger.DB, error) {
-	return openBadgerSubDB(dataDir, "receipts")
+	db, _, err := badgerrole.OpenRole(badgerrole.DefaultRegistry(), badgerrole.RoleReceipts, badgerrole.PathContext{DataDir: dataDir})
+	return db, err
 }
 
 func receiptDBOptions(dir string) badger.Options {

@@ -10,7 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -30,11 +30,7 @@ func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Back
 	if !dedupEnabled {
 		return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
 	}
-	dir := filepath.Join(dataDir, "dedup")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, nil, nil, fmt.Errorf("create dedup dir: %w", err)
-	}
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
+	db, _, err := badgerrole.OpenRole(badgerrole.DefaultRegistry(), badgerrole.RoleDedup, badgerrole.PathContext{DataDir: dataDir})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)
 	}
