@@ -6,7 +6,7 @@
 
 - **cluster**: follower-routed object reads now stream large `GET` and `GET ?versionId=...` responses from the bucket owner instead of buffering the full body into a capped forwarded reply.
 - **snapshot/PITR**: versioned bucket restore now preserves historical object versions and delete markers, so operators can recover the same version graph exposed by S3 versioning.
-- **distribution**: root Docker builds, GitHub Actions CI, release binaries, and GHCR image publishing now make the documented deployment path usable.
+- **distribution**: root Docker builds, release binaries, and GHCR image publishing now make the documented deployment path usable.
 
 ### Changed
 
