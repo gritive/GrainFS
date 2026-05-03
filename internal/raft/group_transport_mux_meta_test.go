@@ -17,7 +17,7 @@ import (
 // by setupMuxTransportPair tests in the sibling file.
 func newMuxForLookupTests(t *testing.T) *GroupRaftQUICMux {
 	t.Helper()
-	tr := transport.NewQUICTransport("test-meta-lookup")
+	tr := transport.MustNewQUICTransport("test-meta-lookup")
 	t.Cleanup(func() { _ = tr.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -168,7 +168,7 @@ func (s strErr) Error() string { return string(s) }
 // codex P1 #3 startup race — by the time the constructor returns, the
 // receiver-side __meta__ branch is wired up.
 func TestMetaTransport_NewMux_AutoRegisters(t *testing.T) {
-	tr := transport.NewQUICTransport("test-meta-autoreg")
+	tr := transport.MustNewQUICTransport("test-meta-autoreg")
 	defer tr.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -190,7 +190,7 @@ func TestMetaTransport_NewMux_AutoRegisters(t *testing.T) {
 // TestMetaTransport_NewMux_NilGroupMux: passing nil groupMux must not
 // panic and must leave behavior identical to the legacy constructor.
 func TestMetaTransport_NewMux_NilGroupMux(t *testing.T) {
-	tr := transport.NewQUICTransport("test-meta-nil")
+	tr := transport.MustNewQUICTransport("test-meta-nil")
 	defer tr.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

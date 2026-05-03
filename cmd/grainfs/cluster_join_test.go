@@ -52,3 +52,13 @@ func TestRunClusterJoinCallsSharedRealJoinPath(t *testing.T) {
 	require.Equal(t, "join-key", got.clusterKey)
 	require.NotEmpty(t, got.dataDir)
 }
+
+func TestRunClusterJoinNodeReal_EmptyClusterKey_ReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runClusterJoinNodeReal(ctx, "127.0.0.1:7001", t.TempDir(),
+		"join-node", "127.0.0.1:0", "" /* clusterKey */)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--cluster-key is required")
+}

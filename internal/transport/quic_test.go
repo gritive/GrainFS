@@ -18,8 +18,8 @@ import (
 func TestQUICTransport_SendReceive(t *testing.T) {
 	ctx := context.Background()
 
-	node1 := NewQUICTransport()
-	node2 := NewQUICTransport()
+	node1 := MustNewQUICTransport("test-cluster-psk")
+	node2 := MustNewQUICTransport("test-cluster-psk")
 	defer node1.Close()
 	defer node2.Close()
 
@@ -42,8 +42,8 @@ func TestQUICTransport_SendReceive(t *testing.T) {
 func TestQUICTransport_StreamTypeMultiplexing(t *testing.T) {
 	ctx := context.Background()
 
-	sender := NewQUICTransport()
-	receiver := NewQUICTransport()
+	sender := MustNewQUICTransport("test-cluster-psk")
+	receiver := MustNewQUICTransport("test-cluster-psk")
 	defer sender.Close()
 	defer receiver.Close()
 
@@ -81,7 +81,7 @@ func TestQUICTransport_ThreeNodes(t *testing.T) {
 
 	nodes := make([]*QUICTransport, 3)
 	for i := range nodes {
-		nodes[i] = NewQUICTransport()
+		nodes[i] = MustNewQUICTransport("test-cluster-psk")
 		defer nodes[i].Close()
 		require.NoError(t, nodes[i].Listen(ctx, "127.0.0.1:0"))
 	}
@@ -119,8 +119,8 @@ func TestQUICTransport_ThreeNodes(t *testing.T) {
 func TestQUICTransport_ConcurrentSends(t *testing.T) {
 	ctx := context.Background()
 
-	sender := NewQUICTransport()
-	receiver := NewQUICTransport()
+	sender := MustNewQUICTransport("test-cluster-psk")
+	receiver := MustNewQUICTransport("test-cluster-psk")
 	defer sender.Close()
 	defer receiver.Close()
 
@@ -157,8 +157,8 @@ func TestQUICTransport_ConcurrentSends(t *testing.T) {
 func TestQUICTransport_Call(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 
@@ -180,7 +180,7 @@ func TestQUICTransport_Call(t *testing.T) {
 
 func TestQUICTransport_CallUnconnected(t *testing.T) {
 	ctx := context.Background()
-	node := NewQUICTransport()
+	node := MustNewQUICTransport("test-cluster-psk")
 	defer node.Close()
 
 	_, err := node.Call(ctx, "127.0.0.1:99999", &Message{Type: StreamControl, Payload: []byte("ping")})
@@ -190,8 +190,8 @@ func TestQUICTransport_CallUnconnected(t *testing.T) {
 func TestQUICTransport_CallContextDeadlineDoesNotEvictHealthyConnection(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 
@@ -228,8 +228,8 @@ func TestQUICTransport_AllowsBurstRPCStreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 
@@ -288,8 +288,8 @@ func TestQUICTransport_AllowsBurstRPCStreams(t *testing.T) {
 func TestQUICTransport_PSK_MatchingKey(t *testing.T) {
 	ctx := context.Background()
 
-	node1 := NewQUICTransport("secret-key")
-	node2 := NewQUICTransport("secret-key")
+	node1 := MustNewQUICTransport("secret-key")
+	node2 := MustNewQUICTransport("secret-key")
 	defer node1.Close()
 	defer node2.Close()
 
@@ -311,8 +311,8 @@ func TestQUICTransport_PSK_MatchingKey(t *testing.T) {
 func TestQUICTransport_PSK_MismatchRejects(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport("correct-key")
-	client := NewQUICTransport("wrong-key")
+	server := MustNewQUICTransport("correct-key")
+	client := MustNewQUICTransport("wrong-key")
 	defer server.Close()
 	defer client.Close()
 
@@ -326,7 +326,7 @@ func TestQUICTransport_PSK_MismatchRejects(t *testing.T) {
 
 func TestQUICTransport_SendToUnconnected(t *testing.T) {
 	ctx := context.Background()
-	node := NewQUICTransport()
+	node := MustNewQUICTransport("test-cluster-psk")
 	defer node.Close()
 
 	err := node.Send(ctx, "127.0.0.1:99999", &Message{Type: StreamControl, Payload: []byte("hello")})
@@ -336,8 +336,8 @@ func TestQUICTransport_SendToUnconnected(t *testing.T) {
 func TestQUICTransport_StreamIsolation(t *testing.T) {
 	ctx := context.Background()
 
-	node1 := NewQUICTransport()
-	node2 := NewQUICTransport()
+	node1 := MustNewQUICTransport("test-cluster-psk")
+	node2 := MustNewQUICTransport("test-cluster-psk")
 	defer node1.Close()
 	defer node2.Close()
 
@@ -375,8 +375,8 @@ func TestQUICTransport_StreamIsolation(t *testing.T) {
 func TestQUICTransport_CallFlatBuffer(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 
@@ -431,8 +431,8 @@ func TestTrafficLimiter_BulkSaturationDoesNotBlockMeta(t *testing.T) {
 func TestQUICTransport_CallReturnsErrorForNonOKStatus(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 
@@ -452,8 +452,8 @@ func TestQUICTransport_CallReturnsErrorForNonOKStatus(t *testing.T) {
 func TestQUICTransport_InboundBulkSaturationDoesNotBlockMeta(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 
@@ -504,8 +504,8 @@ func TestQUICTransport_InboundBulkSaturationDoesNotBlockMeta(t *testing.T) {
 func TestQUICTransport_CallReadReturnsMetadataAndStreamingBody(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 
@@ -532,8 +532,8 @@ func TestQUICTransport_CallReadReturnsMetadataAndStreamingBody(t *testing.T) {
 func TestQUICTransport_CallReadContextDoesNotCancelReturnedBody(t *testing.T) {
 	ctx := context.Background()
 
-	server := NewQUICTransport()
-	client := NewQUICTransport()
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
 	defer client.Close()
 

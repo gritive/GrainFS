@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -307,6 +309,19 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	peers := filterEmpty(strings.Split(peersStr, ","))
 	joinAddr, _ := cmd.Flags().GetString("join")
 	joinMode := joinAddr != ""
+
+	// D6/D7: --cluster-key is required when running in actual cluster mode
+	// (peers > 0 || join != ""). Solo runs through this same function but
+	// does not require a cluster key — runCluster handles both modes.
+	clusterMode := len(peers) > 0 || joinMode
+	if clusterMode {
+		if err := transport.ValidateClusterKey(clusterKey); err != nil {
+			if errors.Is(err, transport.ErrEmptyClusterKey) {
+				return fmt.Errorf("--cluster-key is required in cluster mode (generate with: openssl rand -hex 32)")
+			}
+			log.Warn().Err(err).Msg("--cluster-key is below recommended length")
+		}
+	}
 	if joinMode {
 		if len(peers) > 0 {
 			return fmt.Errorf("--join cannot be used with --peers")
@@ -447,8 +462,24 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
 	}
 
-	// Start QUIC transport for inter-node communication.
-	quicTransport := transport.NewQUICTransport(clusterKey)
+	// Start QUIC transport for inter-node communication. If the operator
+	// supplied a --cluster-key, use it (this covers both static-peers cluster
+	// mode and the dynamic-join seed node, which has no peers/join yet but
+	// will be joined by others). Otherwise generate an ephemeral cluster
+	// identity so true solo mode (no key, no peers, no join) preserves
+	// zero-config.
+	transportPSK := clusterKey
+	if transportPSK == "" {
+		ephemeral, err := generateEphemeralClusterKey()
+		if err != nil {
+			return fmt.Errorf("init QUIC transport: %w", err)
+		}
+		transportPSK = ephemeral
+	}
+	quicTransport, err := transport.NewQUICTransport(transportPSK)
+	if err != nil {
+		return fmt.Errorf("init QUIC transport: %w", err)
+	}
 	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 8})
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)
@@ -1484,4 +1515,18 @@ func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int
 		}
 		return k + m
 	}
+}
+
+// generateEphemeralClusterKey returns a random 64-char hex string used as a
+// per-process cluster identity in solo mode. The key never leaves this
+// process (solo has no peers), so its only purpose is to satisfy the
+// transport package's PSK requirement (D6). Returns error so a sandboxed
+// or seccomp-restricted environment with no /dev/urandom + no getrandom
+// fails cleanly via runCluster's error path instead of crashing mid-init.
+func generateEphemeralClusterKey() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("ephemeral cluster key: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }

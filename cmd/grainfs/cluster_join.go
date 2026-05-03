@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -52,7 +54,16 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 }
 
 func runClusterJoinNodeReal(ctx context.Context, peerAddr, dataDir, nodeID, raftAddr, clusterKey string) error {
-	quicTransport := transport.NewQUICTransport(clusterKey)
+	if err := transport.ValidateClusterKey(clusterKey); err != nil {
+		if errors.Is(err, transport.ErrEmptyClusterKey) {
+			return fmt.Errorf("--cluster-key is required in cluster mode (generate with: openssl rand -hex 32)")
+		}
+		log.Warn().Err(err).Msg("--cluster-key is below recommended length")
+	}
+	quicTransport, err := transport.NewQUICTransport(clusterKey)
+	if err != nil {
+		return fmt.Errorf("init QUIC transport: %w", err)
+	}
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport: %w", err)
 	}

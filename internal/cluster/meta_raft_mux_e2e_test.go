@@ -46,7 +46,7 @@ func TestMetaRaft_QUICMux_ThreeNodeBootstrap_E2E(t *testing.T) {
 			}
 		}
 
-		tr := transport.NewQUICTransport("meta-mux-e2e-psk")
+		tr := transport.MustNewQUICTransport("meta-mux-e2e-psk")
 		require.NoError(t, tr.Listen(context.Background(), addrs[i]))
 
 		// Mux on every node, before NewMetaTransportQUICMux. The constructor

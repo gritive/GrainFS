@@ -68,7 +68,7 @@ func newQUICBenchCluster(b *testing.B, n int, window int) *quicCluster {
 
 	transports := make([]*transport.QUICTransport, n)
 	for i := range transports {
-		transports[i] = transport.NewQUICTransport()
+		transports[i] = transport.MustNewQUICTransport("test-cluster-psk")
 		if err := transports[i].Listen(ctx, "127.0.0.1:0"); err != nil {
 			b.Fatal(err)
 		}

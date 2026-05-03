@@ -18,7 +18,7 @@ func TestQUICTransport_ALPNRouting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	server := NewQUICTransport("test-psk")
+	server := MustNewQUICTransport("test-psk")
 	defer server.Close()
 
 	var muxCalls atomic.Int64
@@ -35,7 +35,7 @@ func TestQUICTransport_ALPNRouting(t *testing.T) {
 	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
 
 	// Legacy client (Connect uses legacy ALPN).
-	legacyClient := NewQUICTransport("test-psk")
+	legacyClient := MustNewQUICTransport("test-psk")
 	defer legacyClient.Close()
 	require.NoError(t, legacyClient.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, legacyClient.Connect(ctx, server.LocalAddr()))
@@ -51,7 +51,7 @@ func TestQUICTransport_ALPNRouting(t *testing.T) {
 	}
 
 	// Mux client (GetOrConnectMux uses mux ALPN).
-	muxClient := NewQUICTransport("test-psk")
+	muxClient := MustNewQUICTransport("test-psk")
 	defer muxClient.Close()
 	require.NoError(t, muxClient.Listen(ctx, "127.0.0.1:0"))
 
@@ -83,12 +83,12 @@ func TestQUICTransport_MuxRejectedWithoutHandler(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	server := NewQUICTransport("test-psk")
+	server := MustNewQUICTransport("test-psk")
 	defer server.Close()
 	// No SetMuxConnHandler — server does not accept mux.
 	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
 
-	client := NewQUICTransport("test-psk")
+	client := MustNewQUICTransport("test-psk")
 	defer client.Close()
 	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
 
@@ -110,25 +110,9 @@ func TestQUICTransport_MuxRejectedWithoutHandler(t *testing.T) {
 	assert.Error(t, err, "expected stream open to fail after server rejects mux")
 }
 
-// TestQUICTransport_MuxALPNFormat verifies the mux ALPN includes the PSK hash.
-func TestQUICTransport_MuxALPNFormat(t *testing.T) {
-	t1 := NewQUICTransport("psk-A")
-	t2 := NewQUICTransport("psk-B")
-	t3 := NewQUICTransport("")
-
-	// Same PSK → same ALPN.
-	t1b := NewQUICTransport("psk-A")
-	assert.Equal(t, t1.MuxALPN(), t1b.MuxALPN())
-
-	// Different PSK → different ALPN.
-	assert.NotEqual(t, t1.MuxALPN(), t2.MuxALPN())
-
-	// Empty PSK → "grainfs-mux-v1".
-	assert.Equal(t, "grainfs-mux-v1", t3.MuxALPN())
-
-	// Mux ALPN starts with "grainfs-mux-v1-" for non-empty PSK.
-	assert.True(t, len(t1.MuxALPN()) > len("grainfs-mux-v1-"))
-}
+// TestQUICTransport_MuxALPNFormat removed: after T2 (static ALPN), this test
+// asserts behavior that no longer holds. New ALPN behavior is verified by
+// TestPSKAlpn_Static in quic_auth_test.go.
 
 // TestQUICTransport_PSKMismatch_Mux verifies that two transports with different
 // PSKs cannot establish a mux connection (TLS ALPN mismatch).
@@ -136,12 +120,12 @@ func TestQUICTransport_PSKMismatch_Mux(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	server := NewQUICTransport("psk-server")
+	server := MustNewQUICTransport("psk-server")
 	defer server.Close()
 	server.SetMuxConnHandler(func(conn *quic.Conn) {})
 	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
 
-	client := NewQUICTransport("psk-client")
+	client := MustNewQUICTransport("psk-client")
 	defer client.Close()
 	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
 

@@ -6,19 +6,20 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
-	"encoding/pem"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/hkdf"
 )
 
 // QUIC connection timeouts.
@@ -180,26 +181,53 @@ type QUICTransport struct {
 	cancel        context.CancelFunc
 	router        *StreamRouter // per-type bidirectional handlers (takes priority)
 	streamHandler StreamHandler // catch-all bidirectional handler (backward compat)
-	psk           string        // pre-shared key for peer authentication (empty = no auth)
+	psk           string        // pre-shared key for peer authentication
 	muxHandler    MuxConnHandler
 	traffic       *TrafficLimiter
+
+	// Cluster identity, computed once at construction. D7=A: stable for the
+	// life of the transport so handshakes don't pay HKDF/ECDSA cost per dial.
+	identityCert tls.Certificate
+	expectedSPKI [32]byte
 }
 
-// NewQUICTransport creates a new QUIC-based transport.
-// If psk is non-empty, connections are authenticated using the shared key.
-func NewQUICTransport(psk ...string) *QUICTransport {
+// NewQUICTransport constructs a QUIC transport pinned to the cluster identity
+// derived from psk. D6=B: returns error on empty PSK (refuse to start cluster
+// mode); short-but-non-empty PSK proceeds (caller logs warning via
+// ValidateClusterKey).
+func NewQUICTransport(psk string) (*QUICTransport, error) {
+	if psk == "" {
+		return nil, ErrEmptyClusterKey
+	}
+
+	cert, spki, err := deriveClusterIdentity(psk)
+	if err != nil {
+		return nil, fmt.Errorf("derive cluster identity: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &QUICTransport{
-		conns:    make(map[string]*quic.Conn),
-		muxConns: make(map[string]*quic.Conn),
-		inbox:    make(chan *ReceivedMessage, 256),
-		codec:    &BinaryCodec{},
-		router:   NewStreamRouter(),
-		ctx:      ctx,
-		cancel:   cancel,
+		conns:        make(map[string]*quic.Conn),
+		muxConns:     make(map[string]*quic.Conn),
+		inbox:        make(chan *ReceivedMessage, 256),
+		codec:        &BinaryCodec{},
+		router:       NewStreamRouter(),
+		ctx:          ctx,
+		cancel:       cancel,
+		psk:          psk,
+		identityCert: cert,
+		expectedSPKI: spki,
 	}
-	if len(psk) > 0 {
-		t.psk = psk[0]
+	return t, nil
+}
+
+// MustNewQUICTransport is NewQUICTransport that panics on error. Intended only
+// for test setup where a configuration mistake should fail loud and fast. NOT
+// for production code paths — production must surface the error to the operator.
+func MustNewQUICTransport(psk string) *QUICTransport {
+	t, err := NewQUICTransport(psk)
+	if err != nil {
+		panic(fmt.Sprintf("MustNewQUICTransport: %v", err))
 	}
 	return t
 }
@@ -232,25 +260,18 @@ func (t *QUICTransport) acquireInboundTraffic(st StreamType) (func(), error) {
 	}
 }
 
-// pskALPN returns the legacy ALPN protocol string, incorporating PSK hash for authentication.
-// Used by Send / Call / CallFlatBuffer (per-message stream open/close).
+// pskALPN returns the legacy per-message ALPN protocol string. After T2,
+// authentication moved to TLS SPKI pinning (see deriveClusterIdentity); the
+// ALPN string no longer carries any PSK material. Kept as a method (not a
+// constant) so future routing/versioning can be added without API churn.
 func (t *QUICTransport) pskALPN() string {
-	if t.psk == "" {
-		return "grainfs"
-	}
-	h := sha256.Sum256([]byte(t.psk))
-	return "grainfs-" + hex.EncodeToString(h[:8])
+	return "grainfs"
 }
 
-// muxALPN returns the multiplexed-stream ALPN protocol string used by raft RPC
-// connections. Same PSK hash as pskALPN, plus a "-mux-v1" version tag so peers
-// running older binaries fall back cleanly to the legacy ALPN.
+// muxALPN returns the multiplexed-stream ALPN used by raft RPC connections.
+// Same rationale as pskALPN — static, no PSK material in the protocol string.
 func (t *QUICTransport) muxALPN() string {
-	if t.psk == "" {
-		return "grainfs-mux-v1"
-	}
-	h := sha256.Sum256([]byte(t.psk))
-	return "grainfs-mux-v1-" + hex.EncodeToString(h[:8])
+	return "grainfs-mux-v1"
 }
 
 func defaultQUICConfig() *quic.Config {
@@ -272,17 +293,16 @@ func (t *QUICTransport) SetMuxConnHandler(h MuxConnHandler) {
 
 // Listen starts accepting incoming QUIC connections.
 //
-// The listener advertises both the legacy ALPN ("grainfs-<pskhash>") and the
-// mux ALPN ("grainfs-mux-v1-<pskhash>"). Inbound connections are routed by
-// negotiated ALPN: legacy → handleInboundConnection (existing path);
+// The listener advertises both the legacy ALPN ("grainfs") and the mux ALPN
+// ("grainfs-mux-v1"). Inbound connections are routed by negotiated ALPN:
+// legacy → handleInboundConnection (existing path);
 // mux → muxHandler (set by internal/raft if --quic-mux is enabled).
+//
+// Authentication is via SPKI pinning (D5): both client and server present
+// the cluster identity cert; both verify the peer's cert SPKI matches the
+// expected cluster identity.
 func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
-	tlsConf, err := generateTLSConfig()
-	if err != nil {
-		return fmt.Errorf("generate TLS config: %w", err)
-	}
-	// Mux ALPN listed first so peers preferring mux complete handshake on it.
-	tlsConf.NextProtos = []string{t.muxALPN(), t.pskALPN()}
+	tlsConf := t.buildServerTLSConfig()
 	t.tlsConfig = tlsConf
 
 	listener, err := quic.ListenAddr(addr, tlsConf, defaultQUICConfig())
@@ -307,10 +327,21 @@ func (t *QUICTransport) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
+		// D5: verify the peer's TLS cert SPKI matches the cluster identity.
+		// quic-go does NOT reliably enforce tls.Config.ClientAuth on its own,
+		// so we re-check here at the application layer. tls.Config still sets
+		// ClientAuth to ensure the cert is requested; the actual gate is here.
+		state := conn.ConnectionState()
+		if err := verifyPeerSPKI(state.TLS.PeerCertificates, t.expectedSPKI); err != nil {
+			// Log details locally; send generic reason on the wire so an
+			// attacker can't distinguish "no auth set up" from "wrong key".
+			log.Warn().Err(err).Str("peer", conn.RemoteAddr().String()).Msg("peer cert rejected")
+			_ = conn.CloseWithError(quicAppErrCode, "peer cert rejected")
+			continue
+		}
 		// Route by negotiated ALPN. Mux connections go to the mux handler
 		// (registered by internal/raft); legacy connections go to the
 		// per-message stream handler. Unknown ALPN is rejected.
-		state := conn.ConnectionState()
 		alpn := state.TLS.NegotiatedProtocol
 		switch {
 		case alpn == t.muxALPN():
@@ -328,6 +359,20 @@ func (t *QUICTransport) acceptLoop() {
 			_ = conn.CloseWithError(quicAppErrCode, "unknown ALPN: "+alpn)
 		}
 	}
+}
+
+// verifyPeerSPKI checks that the peer presented a cert whose SPKI hash
+// matches `expected`. Used in acceptLoop because quic-go does not honor
+// tls.Config.ClientAuth reliably enough for cluster security to depend on.
+func verifyPeerSPKI(certs []*x509.Certificate, expected [32]byte) error {
+	if len(certs) == 0 {
+		return errors.New("no peer cert presented")
+	}
+	spki := sha256.Sum256(certs[0].RawSubjectPublicKeyInfo)
+	if subtle.ConstantTimeCompare(spki[:], expected[:]) != 1 {
+		return errors.New("peer cert SPKI does not match cluster identity")
+	}
+	return nil
 }
 
 // handleInboundConnection serves an accepted (inbound) QUIC connection.
@@ -462,13 +507,9 @@ func (t *QUICTransport) GetOrConnectMux(ctx context.Context, addr string) (*quic
 		return conn, nil
 	}
 
-	tlsConf := &tls.Config{
-		InsecureSkipVerify: true,
-		// Advertise mux first; if peer is older it falls back to legacy
-		// ALPN — caller (internal/raft) handles that case by evicting and
-		// using the legacy path.
-		NextProtos: []string{t.muxALPN(), t.pskALPN()},
-	}
+	tlsConf := t.buildClientTLSConfig()
+	// Mux ALPN listed first so peers preferring mux complete handshake on it.
+	// buildClientTLSConfig already sets NextProtos in this order.
 	dialed, err := quic.DialAddr(ctx, addr, tlsConf, defaultQUICConfig())
 	if err != nil {
 		return nil, fmt.Errorf("dial mux %s: %w", addr, err)
@@ -518,10 +559,12 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 		return nil
 	}
 
-	tlsConf := &tls.Config{
-		InsecureSkipVerify: true, // self-signed certs; PSK via ALPN provides authentication
-		NextProtos:         []string{t.pskALPN()},
-	}
+	// Legacy Connect path: per-message Send/Call streams. Force the legacy
+	// ALPN so the server routes to handleInboundConnection rather than the
+	// mux handler. Identity is verified via SPKI pinning, same as the mux
+	// dial path.
+	tlsConf := t.buildClientTLSConfig()
+	tlsConf.NextProtos = []string{t.pskALPN()}
 
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, defaultQUICConfig())
 	if err != nil {
@@ -920,38 +963,137 @@ func (t *QUICTransport) Close() error {
 	return nil
 }
 
-// generateTLSConfig creates a self-signed TLS config for QUIC.
-func generateTLSConfig() (*tls.Config, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
+// deriveClusterIdentity deterministically derives an ECDSA P-256 keypair from
+// psk via HKDF, then issues a self-signed certificate. The keypair (and
+// therefore the SPKI hash) is stable for a given PSK; the certificate
+// signature uses crypto/rand, so cert DER bytes vary per call. This avoids
+// feeding HKDF output into ECDSA signature nonce generation, which would
+// create a footgun if Go runtime semantics change across versions.
+//
+// Returns (cert, spki, err). spki is sha256(RawSubjectPublicKeyInfo).
+func deriveClusterIdentity(psk string) (tls.Certificate, [32]byte, error) {
+	if psk == "" {
+		return tls.Certificate{}, [32]byte{}, ErrEmptyClusterKey
 	}
 
+	// 1) Derive keypair from psk via HKDF.
+	// We CANNOT use ecdsa.GenerateKey here: since Go 1.21 it mixes in
+	// fresh crypto/rand for side-channel masking, which breaks the
+	// determinism we need (same psk → same SPKI on every node).
+	// The modular-reduction bias for P-256 is at most 2^-128 (curve order
+	// is within 2^-128 of 2^256), well below any cryptographic threshold.
+	reader := hkdf.New(sha256.New, []byte(psk), nil, []byte("grainfs-cluster-identity-v1"))
+	priv, err := derivePrivKeyFromHKDF(reader, elliptic.P256())
+	if err != nil {
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("derive cluster keypair: %w", err)
+	}
+
+	// 2) Self-signed cert with crypto/rand for signature.
+	// NotBefore predates likely deployment by an hour to tolerate clock
+	// skew; NotAfter is far enough out that operators rotate via PSK
+	// change rather than cert renewal.
+	now := time.Now().UTC()
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+		Subject:      pkix.Name{CommonName: "grainfs-cluster"},
+		NotBefore:    now.Add(-1 * time.Hour),
+		NotAfter:     now.Add(100 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
 	if err != nil {
-		return nil, err
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("create cluster cert: %w", err)
 	}
 
-	keyBytes, err := x509.MarshalECPrivateKey(key)
+	// 3) SPKI hash for pinning.
+	parsed, err := x509.ParseCertificate(certDER)
 	if err != nil {
-		return nil, err
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("parse cluster cert: %w", err)
 	}
+	spki := sha256.Sum256(parsed.RawSubjectPublicKeyInfo)
 
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	return tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  priv,
+		Leaf:        parsed,
+	}, spki, nil
+}
 
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, err
+// derivePrivKeyFromHKDF reads scalar bytes from r, reduces modulo curve order N,
+// rejects zero. Re-reads on rejection (HKDF Expand can produce up to
+// 255*HashLen bytes for SHA-256, far more than enough for a few retries).
+//
+// Note: stdlib's ecdsa.GenerateKey is NOT used because since Go 1.21 it
+// blends crypto/rand into the keypair derivation for side-channel masking,
+// breaking determinism. The modular-reduction bias for P-256 is ≤ 2^-128.
+func derivePrivKeyFromHKDF(r io.Reader, curve elliptic.Curve) (*ecdsa.PrivateKey, error) {
+	params := curve.Params()
+	N := params.N
+	byteLen := (N.BitLen() + 7) / 8
+	buf := make([]byte, byteLen)
+
+	for attempt := 0; attempt < 8; attempt++ {
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, fmt.Errorf("hkdf expand: %w", err)
+		}
+		k := new(big.Int).SetBytes(buf)
+		k.Mod(k, N)
+		if k.Sign() == 0 {
+			continue
+		}
+		priv := new(ecdsa.PrivateKey)
+		priv.PublicKey.Curve = curve
+		priv.D = k
+		priv.PublicKey.X, priv.PublicKey.Y = curve.ScalarBaseMult(k.Bytes())
+		return priv, nil
 	}
+	return nil, errors.New("hkdf produced 8 consecutive zero scalars (impossible without a broken PSK)")
+}
 
+// pinExpectedSPKI returns a VerifyPeerCertificate callback that accepts only
+// peers whose leaf cert SPKI hash matches `expected`. Used identically on both
+// sides (D5): client verifies server identity, server verifies client identity.
+// Constant-time compare avoids leaking SPKI through timing.
+func pinExpectedSPKI(expected [32]byte) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return errors.New("no peer cert presented")
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return fmt.Errorf("parse peer cert: %w", err)
+		}
+		spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		if subtle.ConstantTimeCompare(spki[:], expected[:]) != 1 {
+			return errors.New("peer cert SPKI does not match cluster identity")
+		}
+		return nil
+	}
+}
+
+// buildClientTLSConfig returns the TLS config used when this transport DIALS
+// a peer. The dialer presents the cluster identity cert (so the remote
+// server's ClientAuth: RequireAnyClientCert is satisfied) AND verifies the
+// server's cert SPKI matches the expected cluster identity.
+func (t *QUICTransport) buildClientTLSConfig() *tls.Config {
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}, nil
+		InsecureSkipVerify:    true, // quic-go requires; real check is VerifyPeerCertificate
+		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
+		Certificates:          []tls.Certificate{t.identityCert},
+		VerifyPeerCertificate: pinExpectedSPKI(t.expectedSPKI),
+	}
+}
+
+// buildServerTLSConfig returns the TLS config used when this transport
+// LISTENS for incoming peers. ClientAuth: RequireAnyClientCert forces dialers
+// to present a cert; VerifyPeerCertificate then pins the cert SPKI to the
+// cluster identity. Without this pairing, server-side identity check is dead
+// code (D5 regression target).
+func (t *QUICTransport) buildServerTLSConfig() *tls.Config {
+	return &tls.Config{
+		Certificates:          []tls.Certificate{t.identityCert},
+		ClientAuth:            tls.RequireAnyClientCert,
+		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
+		VerifyPeerCertificate: pinExpectedSPKI(t.expectedSPKI),
+	}
 }

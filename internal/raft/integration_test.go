@@ -24,7 +24,7 @@ func newQUICCluster(t *testing.T, n int) *quicCluster {
 
 	transports := make([]*transport.QUICTransport, n)
 	for i := range transports {
-		transports[i] = transport.NewQUICTransport()
+		transports[i] = transport.MustNewQUICTransport("test-cluster-psk")
 		require.NoError(t, transports[i].Listen(ctx, "127.0.0.1:0"))
 	}
 
@@ -307,7 +307,7 @@ func TestSnapshotPreservesClusterMembership(t *testing.T) {
 
 	transports := make([]*transport.QUICTransport, numNodes)
 	for i := range transports {
-		transports[i] = transport.NewQUICTransport()
+		transports[i] = transport.MustNewQUICTransport("test-cluster-psk")
 		require.NoError(t, transports[i].Listen(ctx, "127.0.0.1:0"))
 	}
 	addrs := make([]string, numNodes)
