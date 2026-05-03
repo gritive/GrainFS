@@ -66,6 +66,7 @@ func TestDashboardHealingCard_HTMLAndStream(t *testing.T) {
 		assert.Contains(t, html, `id="incident-section"`, "Zero-ops incident section missing")
 		assert.Contains(t, html, `id="incident-table"`, "Incident table missing")
 		assert.Contains(t, html, `/api/incidents`, "incident API not wired in JS")
+		assert.Contains(t, html, `FD exhaustion risk`, "FD incident label missing")
 	})
 
 	t.Run("heal SSE endpoint responds with text/event-stream", func(t *testing.T) {
