@@ -120,9 +120,11 @@ func TestWriteAt_InternalBucketCachesPathAndSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(6), obj.Size)
 
-	if _, ok := b.internalPathCache.Load(cacheKey); !ok {
+	cachedPath, ok := b.internalPathCache.Load(cacheKey)
+	if !ok {
 		t.Fatalf("WriteAt should cache the internal object path")
 	}
+	require.Equal(t, objectMetaKey(bucket, key), cachedPath.(internalObjectPath).metaKey)
 	size, ok := b.internalSizeCache.Load(cacheKey)
 	require.True(t, ok, "WriteAt should cache the internal object size")
 	require.Equal(t, int64(6), size)

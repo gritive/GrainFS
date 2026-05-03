@@ -122,8 +122,9 @@ type internalObjectCacheKey struct {
 }
 
 type internalObjectPath struct {
-	path string
-	dir  string
+	path    string
+	dir     string
+	metaKey []byte
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -1067,7 +1068,7 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 		return nil, fmt.Errorf("marshal object meta: %w", err)
 	}
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objectMetaKey(bucket, key), meta)
+		return txn.Set(objPath.metaKey, meta)
 	}); err != nil {
 		return nil, fmt.Errorf("update object meta: %w", err)
 	}
@@ -1124,7 +1125,7 @@ func (b *DistributedBackend) Truncate(bucket, key string, size int64) error {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
 	return b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objectMetaKey(bucket, key), meta)
+		return txn.Set(objPath.metaKey, meta)
 	})
 }
 
@@ -1973,8 +1974,8 @@ func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object
 		// Resolve via latest-version pointer when present so callers see the
 		// most recent version. Falls back to the legacy single-key read when
 		// no lat: pointer exists (e.g., legacy replay).
-		metaKeyBytes := objectMetaKey(bucket, key)
 		if storage.IsInternalBucket(bucket) {
+			metaKeyBytes := b.internalObjectPath(bucket, key).metaKey
 			item, err := txn.Get(metaKeyBytes)
 			if err == badger.ErrKeyNotFound {
 				return storage.ErrObjectNotFound
@@ -1985,6 +1986,7 @@ func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object
 			return decodeMeta(item, "current")
 		}
 
+		metaKeyBytes := objectMetaKey(bucket, key)
 		versionID := ""
 		if latItem, lerr := txn.Get(latestKey(bucket, key)); lerr == nil {
 			_ = latItem.Value(func(v []byte) error {
@@ -2635,7 +2637,7 @@ func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObje
 		return cached.(internalObjectPath)
 	}
 	path := b.objectPathV(bucket, key, "current")
-	candidate := internalObjectPath{path: path, dir: filepath.Dir(path)}
+	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: objectMetaKey(bucket, key)}
 	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
 	return actual.(internalObjectPath)
 }
