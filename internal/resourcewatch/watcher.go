@@ -18,11 +18,12 @@ type DecisionSink func(context.Context, *Decision) error
 type ErrorSink func(error)
 
 type Watcher struct {
-	cfg        WatcherConfig
-	provider   FDProvider
-	detector   *Detector
-	onMetrics  MetricsSink
-	onDecision DecisionSink
+	cfg              WatcherConfig
+	provider         FDProvider
+	detector         *Detector
+	onMetrics        MetricsSink
+	onDecision       DecisionSink
+	pendingDecisions []*Decision
 }
 
 func NewWatcher(cfg WatcherConfig, provider FDProvider, detector *Detector, onMetrics MetricsSink, onDecision DecisionSink) *Watcher {
@@ -53,10 +54,11 @@ func (w *Watcher) PollOnce(ctx context.Context) error {
 	if w.onMetrics != nil {
 		w.onMetrics(snapshot, decision)
 	}
-	if decision != nil && w.onDecision != nil {
-		if err := w.onDecision(ctx, decision); err != nil {
-			return err
-		}
+	if decision != nil {
+		w.pendingDecisions = append(w.pendingDecisions, decision)
+	}
+	if err := w.flushDecisions(ctx); err != nil {
+		return err
 	}
 	return nil
 }
@@ -89,4 +91,18 @@ func (w *Watcher) reportError(ctx context.Context, err error, lastError *time.Ti
 	}
 	*lastError = now
 	w.cfg.OnError(err)
+}
+
+func (w *Watcher) flushDecisions(ctx context.Context) error {
+	if w.onDecision == nil {
+		w.pendingDecisions = nil
+		return nil
+	}
+	for len(w.pendingDecisions) > 0 {
+		if err := w.onDecision(ctx, w.pendingDecisions[0]); err != nil {
+			return err
+		}
+		w.pendingDecisions = w.pendingDecisions[1:]
+	}
+	return nil
 }

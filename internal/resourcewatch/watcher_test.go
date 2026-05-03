@@ -161,3 +161,35 @@ func TestWatcher_RunContinuesAfterTransientProviderError(t *testing.T) {
 	require.NotNil(t, received)
 	assert.Equal(t, FDLevelWarn, received.Level)
 }
+
+func TestWatcher_RetriesDecisionAfterSinkError(t *testing.T) {
+	start := time.Unix(100, 0).UTC()
+	wantErr := errors.New("incident store unavailable")
+	provider := &fakeFDProvider{snapshots: []FDSnapshot{
+		{Open: 850, Limit: 1000, CollectedAt: start},
+		{Open: 860, Limit: 1000, CollectedAt: start.Add(time.Second)},
+	}}
+	var received []*Decision
+	watcher := NewWatcher(
+		WatcherConfig{},
+		provider,
+		NewDetector(DetectorConfig{WarnRatio: 0.80, CriticalRatio: 0.90, MinSamples: 1}),
+		nil,
+		func(ctx context.Context, decision *Decision) error {
+			received = append(received, decision)
+			if len(received) == 1 {
+				return wantErr
+			}
+			return nil
+		},
+	)
+
+	err := watcher.PollOnce(context.Background())
+	assert.ErrorIs(t, err, wantErr)
+	require.Len(t, received, 1)
+	assert.Equal(t, FDLevelWarn, received[0].Level)
+
+	require.NoError(t, watcher.PollOnce(context.Background()))
+	require.Len(t, received, 2)
+	assert.Same(t, received[0], received[1])
+}
