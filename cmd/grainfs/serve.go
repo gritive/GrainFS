@@ -668,6 +668,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if err := metaRaft.Start(ctx); err != nil {
 		return fmt.Errorf("meta-raft start: %w", err)
 	}
+	if err := startRotationSocket(ctx, dataDir, metaRaft); err != nil {
+		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
+	}
 	defer metaRaft.Close()
 
 	// Seed Router with any bucket assignments already persisted in FSM state.
