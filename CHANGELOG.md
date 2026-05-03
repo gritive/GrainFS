@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased] — Cluster Trust Boundary & NFS Input Validation
+
+Closes 2026-05-03 CSO security audit findings #1, #2, #3.
+
+### Breaking
+
+- **`--cluster-key` is now required** in cluster mode (`--peers` 또는 `--join` 지정 시).
+  Solo mode는 영향 없음. 빈 문자열로 cluster mode 시작 시 fail-fast.
+- **Cluster TLS authentication moved from ALPN-baked PSK hash to certificate
+  SPKI pinning.** `--cluster-key`로부터 HKDF + ECDSA P-256으로 결정론적 클러스터
+  identity cert를 도출하고, ALPN protocol 문자열은 정적(`grainfs`,
+  `grainfs-mux-v1`) — TLS ClientHello에 PSK 정보 노출 안 됨. **혼합 버전 클러스터는
+  인증 실패** — 업그레이드 시 모든 노드 동시 재시작.
+- **NFSv4 OPEN/CREATE/REMOVE/RENAME** 이제 빈 문자열, `.`, `..` component name 거부
+  (`NFS4ERR_INVAL`, RFC 7530 §6 준수). 이런 이름으로 probe하던 클라이언트는 이전에
+  undefined behavior 또는 `NFS4ERR_NOENT`를 받았으나 이제 일관되게 `NFS4ERR_INVAL` 받음.
+  Linux kernel client / macOS / busybox 등 주요 NFS 클라이언트로 사전 검증 권장.
+
+### Security
+
+- **Closes HIGH severity finding**: cluster mode가 `--cluster-key` 비어있을 때
+  unauthenticated peer를 더 이상 받지 않음.
+- **Closes MEDIUM severity finding**: cluster TLS 인증이 관찰 가능한 ALPN 채널
+  (truncated 64-bit PSK hash)에서 SPKI pinning(개인키 보유 증명)으로 이동. ALPN은
+  더 이상 PSK material을 carry하지 않음.
+- **Closes MEDIUM severity finding**: NFSv4 component-name 검증이 모든 관련 op에서
+  공유 helper(`validateComponentName`)로 일관되게 적용됨.
+
+### Migration
+
+1. 모든 cluster 노드 정지.
+2. `--cluster-key`가 비어있거나 64 hex chars보다 짧다면:
+   ```
+   openssl rand -hex 32   # 32 random bytes = 64 hex chars (256-bit)
+   ```
+   기존 secret 채널로 모든 노드에 배포.
+3. 모든 노드를 동일한 `--cluster-key`로 재시작.
+
+### Trust Model (변경 없음, 명시적 문서화)
+
+클러스터 identity는 `--cluster-key`로부터 결정론적으로 도출된 단일 공유 TLS
+인증서이다. 모든 노드가 모든 노드를 동일하게 신뢰한다. per-node identity나
+revocation은 없다. `--cluster-key` 누출 시 회전: 새 키 생성 + 모든 노드 재시작
+(rolling rotation은 미지원, RUNBOOK 참조).
+
 ## [0.0.35.0] — 2026-05-03 — optimize NBD volume IO paths
 
 ### Added

@@ -556,3 +556,23 @@ Update deployment log:
 ## Validation Status
 
 This runbook has been validated through [N] deployment drills. See `docs/DRILL_MANUAL.md` for drill procedures and results.
+
+---
+
+## Cluster Key Rotation
+
+`--cluster-key`는 클러스터 TLS identity (cert + SPKI)를 결정론적으로 도출하는 PSK이다.
+다른 키 → 다른 클러스터 identity. 옛 키를 가진 노드는 새 키 노드와 인증 실패한다.
+
+이 릴리스는 무중단(rolling) rotation을 지원하지 않는다. 회전 절차:
+
+1. 새 키 생성:
+   ```
+   openssl rand -hex 32
+   ```
+2. 기존 secret 채널로 모든 노드에 배포한다.
+3. 모든 노드를 정지한다 (S3 / NFS / NBD downtime 발생).
+4. 모든 노드를 새 `--cluster-key`로 재시작한다.
+5. `grainfs cluster status` (또는 동등한 도구)로 모든 peer 재연결 확인.
+
+향후 릴리스에서 온라인 회전을 위한 `grainfs cluster rotate-key` 도구가 추가될 예정 (TODOS 참조).
