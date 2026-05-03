@@ -847,17 +847,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// ClusterCoordinator implements storage.Backend and routes bucket-scoped ops to the
 	// correct group leader via ForwardSender. 0x08 handler (ForwardReceiver) receives
 	// forwarded calls on voter nodes and dispatches to local GroupBackend.
-	forwardDialer := func(peer string, payload []byte) ([]byte, error) {
+	forwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-		reply, err := quicTransport.Call(ctx, peer, msg)
+		reply, err := quicTransport.Call(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
 		return reply.Payload, nil
 	}
-	forwardStreamDialer := func(peer string, payload []byte, body io.Reader) ([]byte, error) {
+	forwardStreamDialer := func(callCtx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}
-		reply, err := quicTransport.CallWithBody(ctx, peer, msg, body)
+		reply, err := quicTransport.CallWithBody(callCtx, peer, msg, body)
 		if err != nil {
 			return nil, err
 		}

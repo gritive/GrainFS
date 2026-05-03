@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -75,7 +76,7 @@ func TestForwardPayload_TruncatedArgs(t *testing.T) {
 // (Codex Gap 3 — production landmine).
 func TestForwardSender_TryEachPeer_FirstDownNextSucceeds(t *testing.T) {
 	var connected []string
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		connected = append(connected, peer)
 		if peer == "down-peer" {
 			return nil, errors.New("connection refused")
@@ -96,7 +97,7 @@ func TestForwardSender_TryEachPeer_FirstDownNextSucceeds(t *testing.T) {
 // leader cache (PR-G+H plan-eng-review issue 1A).
 func TestForwardSender_NotLeaderRedirect_OnceOnly(t *testing.T) {
 	var connected []string
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		connected = append(connected, peer)
 		if peer == "peer-A" {
 			return notLeaderReplyBytes(t, "peer-B"), nil
@@ -119,7 +120,7 @@ func TestForwardSender_NotLeaderRedirect_OnceOnly(t *testing.T) {
 // caller can distinguish "no peer responded" from "peer responded with error".
 // S3 client retry policy depends on this distinction.
 func TestForwardSender_AllPeersDown_ReturnsErrNoReachable(t *testing.T) {
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		return nil, errors.New("connection refused")
 	}
 	s := NewForwardSender(dialer)
@@ -133,7 +134,7 @@ func TestForwardSender_AllPeersDown_ReturnsErrNoReachable(t *testing.T) {
 // when the hint dial also fails, we don't loop forever — we return the original
 // NotLeader reply and let the caller retry from a fresh node.
 func TestForwardSender_NotLeaderHintFails_FallthroughOriginalReply(t *testing.T) {
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		if peer == "peer-A" {
 			return notLeaderReplyBytes(t, "peer-DEAD"), nil
 		}
@@ -158,7 +159,7 @@ func TestForwardSender_NotLeaderHintFails_FallthroughOriginalReply(t *testing.T)
 func TestForwardSender_ContextCanceled_StopsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		t.Fatal("dialer must not be called when ctx already canceled")
 		return nil, nil
 	}
@@ -168,9 +169,28 @@ func TestForwardSender_ContextCanceled_StopsImmediately(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestForwardSender_SendUsesPerCallTimeoutContext(t *testing.T) {
+	started := make(chan struct{})
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	s := NewForwardSender(dialer)
+	s.timeout = 20 * time.Millisecond
+
+	start := time.Now()
+	_, err := s.Send(context.Background(), []string{"slow-peer"}, "g",
+		raftpb.ForwardOpHeadObject, headObjectArgsBytes(t, "b", "k"))
+
+	require.ErrorIs(t, err, ErrNoReachablePeer)
+	require.Less(t, time.Since(start), 200*time.Millisecond)
+	<-started
+}
+
 func TestForwardSender_ResolveLeaderPeers_UsesNotLeaderHint(t *testing.T) {
 	var connected []string
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		connected = append(connected, peer)
 		if peer == "peer-A" {
 			return notLeaderReplyBytes(t, "peer-B"), nil
@@ -184,7 +204,7 @@ func TestForwardSender_ResolveLeaderPeers_UsesNotLeaderHint(t *testing.T) {
 }
 
 func TestForwardSender_ResolveLeaderPeers_TreatsNoSuchKeyAsLeader(t *testing.T) {
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		return buildSimpleReply(raftpb.ForwardStatusNoSuchKey, ""), nil
 	}
 	s := NewForwardSender(dialer)
@@ -194,12 +214,12 @@ func TestForwardSender_ResolveLeaderPeers_TreatsNoSuchKeyAsLeader(t *testing.T) 
 
 func TestForwardSender_SendStream_NotLeaderWithoutRewindDoesNotRetryBody(t *testing.T) {
 	calls := 0
-	streamDialer := func(peer string, payload []byte, body io.Reader) ([]byte, error) {
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
 		calls++
 		_, _ = io.Copy(io.Discard, body)
 		return notLeaderReplyBytes(t, "peer-B"), nil
 	}
-	s := NewForwardSender(func(string, []byte) ([]byte, error) {
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
 		return okReplyBytes(t), nil
 	}).WithStreamDialer(streamDialer)
 
@@ -216,13 +236,13 @@ func TestForwardSender_SendStream_BackpressureLimit(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	streamDialer := func(peer string, payload []byte, body io.Reader) ([]byte, error) {
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
 		once.Do(func() { close(started) })
 		<-release
 		_, _ = io.Copy(io.Discard, body)
 		return okReplyBytes(t), nil
 	}
-	s := NewForwardSender(func(string, []byte) ([]byte, error) {
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
 		t.Fatal("single-message dialer must not be used for streamed body")
 		return nil, nil
 	}).WithStreamDialer(streamDialer).WithMaxForwardStreams(1)
@@ -241,4 +261,26 @@ func TestForwardSender_SendStream_BackpressureLimit(t *testing.T) {
 
 	close(release)
 	require.NoError(t, <-done)
+}
+
+func TestForwardSender_SendStreamUsesPerCallTimeoutContext(t *testing.T) {
+	started := make(chan struct{})
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+	s.timeout = 20 * time.Millisecond
+
+	start := time.Now()
+	_, err := s.SendStream(context.Background(), []string{"slow-peer"}, "g",
+		raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil), bytes.NewReader([]byte("payload")))
+
+	require.ErrorIs(t, err, ErrNoReachablePeer)
+	require.Less(t, time.Since(start), 200*time.Millisecond)
+	<-started
 }

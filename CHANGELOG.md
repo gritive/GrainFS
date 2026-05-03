@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.28.0] — 2026-05-03 — remove clustered S3 QUIC timeout cascade
+
+### Changed
+
+- **transport**: QUIC clients and listeners now use a shared config with a 4096 RPC stream cap, so concurrent cluster fan-out can open burst streams instead of stalling behind the old default limit.
+
+### Fixed
+
+- **cluster**: forwarded S3 operations now pass the per-call request deadline into QUIC calls instead of using the server lifetime context, so slow peers fail fast and the caller can retry normally.
+- **transport**: caller-side `OpenStreamSync` deadline and cancel errors no longer evict healthy shared QUIC connections, preventing one timed-out request from cascading into reconnect churn for the whole node.
+
+### Tests
+
+- **cluster/transport**: added regressions for forwarded single-message and streamed-body timeout propagation, healthy connection reuse after caller deadlines, and burst RPC stream capacity.
+- **benchmarks**: validated the fix with the 5-node S3 workload; the run improved from 84 requests with 22 failures to 298 requests with 0 failures, and PUT p99 dropped from roughly 20s to 28.67ms.
+
 ## [0.0.27.0] — 2026-05-03 — organize benchmark suite coverage
 
 ### Added
