@@ -9,6 +9,7 @@ import (
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/rs/zerolog/log"
 )
 
 type ForwardReceiver struct {
@@ -428,5 +429,6 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	if errors.Is(err, storage.ErrEntityTooLarge) {
 		return raftpb.ForwardStatusEntityTooLarge
 	}
+	log.Warn().Err(err).Msg("forward receiver mapped backend error to internal status")
 	return raftpb.ForwardStatusInternal
 }

@@ -421,13 +421,6 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 		return
 	}
 
-	release, err := t.acquireInboundTraffic(msg.Type)
-	if err != nil {
-		_ = t.writeErrorResponse(stream, msg, StatusOverloaded, err)
-		return
-	}
-	defer release()
-
 	// Per-type handler takes priority over catch-all.
 	t.mu.RLock()
 	typeHandler, hasTypeHandler := t.router.Lookup(msg.Type)
@@ -435,6 +428,18 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 	readHandler, hasReadHandler := t.router.LookupRead(msg.Type)
 	catchAll := t.streamHandler
 	t.mu.RUnlock()
+
+	release, err := t.acquireInboundTraffic(msg.Type)
+	if err != nil {
+		if hasBodyHandler {
+			stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+			stream.CancelWrite(quic.StreamErrorCode(quicAppErrCode))
+			return
+		}
+		_ = t.writeErrorResponse(stream, msg, StatusOverloaded, err)
+		return
+	}
+	defer release()
 
 	if hasBodyHandler {
 		resp := bodyHandler(msg, stream)

@@ -50,6 +50,7 @@ type ClusterCoordinator struct {
 	meta    ShardGroupSource
 	forward *ForwardSender
 	selfID  string
+	selfIDs map[string]struct{}
 	addr    NodeAddressBook
 
 	maxBody int64
@@ -73,6 +74,7 @@ func NewClusterCoordinator(
 		router:  router,
 		meta:    meta,
 		selfID:  selfID,
+		selfIDs: map[string]struct{}{selfID: {}},
 		maxBody: DefaultMaxForwardBodyBytes,
 	}
 }
@@ -89,6 +91,25 @@ func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordin
 func (c *ClusterCoordinator) WithNodeAddressResolver(book NodeAddressBook) *ClusterCoordinator {
 	c.addr = book
 	return c
+}
+
+// WithSelfPeerAlias records an additional peer identifier for this process.
+// Static seed groups historically use raft addresses while dynamic groups can
+// use node IDs; both must be treated as local for self-voter/leader shortcuts.
+func (c *ClusterCoordinator) WithSelfPeerAlias(id string) *ClusterCoordinator {
+	if id == "" {
+		return c
+	}
+	if c.selfIDs == nil {
+		c.selfIDs = map[string]struct{}{c.selfID: {}}
+	}
+	c.selfIDs[id] = struct{}{}
+	return c
+}
+
+func (c *ClusterCoordinator) isSelfPeer(id string) bool {
+	_, ok := c.selfIDs[id]
+	return ok
 }
 
 // --- Cluster-wide delegations (4 ops) ---
@@ -348,7 +369,7 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 		groupID: entry.ID,
 	}
 	for _, p := range entry.PeerIDs {
-		if p == c.selfID {
+		if c.isSelfPeer(p) {
 			t.selfIsVoter = true
 			break
 		}
@@ -363,7 +384,7 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 		return t, nil
 	}
 
-	peerIDs := PeersForForward(entry, c.selfID)
+	peerIDs := c.peersForForward(entry)
 	peers := peerIDs
 	if c.addr != nil {
 		resolved, err := ResolveNodeAddresses(c.addr, peerIDs)
@@ -374,6 +395,19 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 	}
 	t.peers = peers
 	return t, nil
+}
+
+func (c *ClusterCoordinator) peersForForward(entry ShardGroupEntry) []string {
+	out := make([]string, 0, len(entry.PeerIDs))
+	selfPeers := make([]string, 0, 1)
+	for _, p := range entry.PeerIDs {
+		if c.isSelfPeer(p) {
+			selfPeers = append(selfPeers, p)
+			continue
+		}
+		out = append(out, p)
+	}
+	return append(out, selfPeers...)
 }
 
 // localBackend returns the GroupBackend embedded in the named group. Caller

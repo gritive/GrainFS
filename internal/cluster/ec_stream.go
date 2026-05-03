@@ -136,6 +136,14 @@ func (s *spooledECShards) OpenShard(idx int) (io.ReadCloser, error) {
 	}, nil
 }
 
+func (s *spooledECShards) ShardSize(idx int) (int64, error) {
+	info, err := os.Stat(s.paths[idx])
+	if err != nil {
+		return 0, err
+	}
+	return int64(shardHeaderSize) + info.Size(), nil
+}
+
 func (s *spooledECShards) Cleanup() {
 	for _, path := range s.paths {
 		if path != "" {
