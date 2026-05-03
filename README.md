@@ -138,6 +138,7 @@ curl http://localhost:9000/api/cluster/balancer/status | jq .
 - [SLI/SLO](docs/SLI_SLO.md)
 - [RecoverCluster drill](docs/recover-cluster.md)
 - [Badger managed mode rollback](docs/badger-managed-mode-rollback.md)
+- [Protocol layering contract](docs/architecture/protocol-layering.md)
 - [DuckDB Iceberg REST Catalog](docs/iceberg-duckdb.md)
 - [DuckDB Iceberg REST request trace](docs/iceberg-duckdb-request-trace.md)
 - [Iceberg any-node table API design](docs/superpowers/specs/2026-05-02-iceberg-any-node-table-api-design.md)
@@ -166,7 +167,7 @@ make lint           # go vet + gofmt 검사
 make bench                        # single-node S3 object PUT/GET/DELETE
 make bench-cluster                # multi-node S3 object, same k6 actions
 make bench-profile                # multi-node S3 object benchmark + pprof
-make bench-iceberg-table          # single-node Iceberg REST Catalog table API
+make bench-iceberg-table          # single-node Iceberg REST Catalog compatible table API
 make bench-iceberg-table-cluster  # multi-node Iceberg table API, same k6 actions
 make bench-nfs                    # single-node NFS fio profile via Colima
 make bench-nbd                    # single-node NBD fio profile via Colima
