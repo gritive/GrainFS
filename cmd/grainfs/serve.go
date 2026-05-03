@@ -462,11 +462,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
 	}
 
-	// Start QUIC transport for inter-node communication.
-	// Solo mode (no peers, no join) generates an ephemeral cluster identity
-	// because there are no peers to authenticate with — preserves zero-config.
+	// Start QUIC transport for inter-node communication. If the operator
+	// supplied a --cluster-key, use it (this covers both static-peers cluster
+	// mode and the dynamic-join seed node, which has no peers/join yet but
+	// will be joined by others). Otherwise generate an ephemeral cluster
+	// identity so true solo mode (no key, no peers, no join) preserves
+	// zero-config.
 	transportPSK := clusterKey
-	if !clusterMode {
+	if transportPSK == "" {
 		transportPSK = generateEphemeralClusterKey()
 	}
 	quicTransport, err := transport.NewQUICTransport(transportPSK)
