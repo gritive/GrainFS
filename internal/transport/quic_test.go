@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -182,6 +183,104 @@ func TestQUICTransport_CallUnconnected(t *testing.T) {
 
 	_, err := node.Call(ctx, "127.0.0.1:99999", &Message{Type: StreamControl, Payload: []byte("ping")})
 	require.Error(t, err)
+}
+
+func TestQUICTransport_CallContextDeadlineDoesNotEvictHealthyConnection(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	server.SetStreamHandler(func(reqMsg *Message) *Message {
+		return &Message{Type: reqMsg.Type, Payload: []byte("ok")}
+	})
+
+	client.mu.RLock()
+	cached := client.conns[server.LocalAddr()]
+	client.mu.RUnlock()
+	require.NotNil(t, cached)
+
+	expired, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err := client.Call(expired, server.LocalAddr(), &Message{Type: StreamControl, Payload: []byte("late")})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	client.mu.RLock()
+	afterDeadline := client.conns[server.LocalAddr()]
+	client.mu.RUnlock()
+	require.Same(t, cached, afterDeadline, "caller-side timeout must not evict a healthy shared QUIC connection")
+
+	resp, err := client.Call(ctx, server.LocalAddr(), &Message{Type: StreamControl, Payload: []byte("ping")})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", string(resp.Payload))
+}
+
+func TestQUICTransport_AllowsBurstRPCStreams(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	const calls = 150
+	var seen atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+
+	server.SetStreamHandler(func(reqMsg *Message) *Message {
+		seen.Add(1)
+		<-release
+		return &Message{Type: reqMsg.Type, Payload: []byte("ok")}
+	})
+
+	errCh := make(chan error, calls)
+	var wg sync.WaitGroup
+	wg.Add(calls)
+	for i := 0; i < calls; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := client.Call(ctx, server.LocalAddr(), &Message{Type: StreamControl, Payload: []byte("ping")})
+			errCh <- err
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		releaseAll()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		return int(seen.Load()) == calls
+	}, 2*time.Second, 20*time.Millisecond, "all burst RPCs should open streams without waiting for earlier responses")
+
+	releaseAll()
+	<-done
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
 }
 
 func TestQUICTransport_PSK_MatchingKey(t *testing.T) {

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -340,7 +341,7 @@ type dialerCall struct {
 	rawly []byte // raw payload (decoded inside the test if asserting)
 }
 
-func (d *recordingDialer) dial(peer string, payload []byte) ([]byte, error) {
+func (d *recordingDialer) dial(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 	if d.defaultErr != nil {
 		return nil, d.defaultErr
 	}
@@ -358,7 +359,7 @@ func (d *recordingDialer) dial(peer string, payload []byte) ([]byte, error) {
 	return buildSimpleReply(raftpb.ForwardStatusInternal, ""), nil
 }
 
-func (d *recordingDialer) stream(peer string, payload []byte, body io.Reader) ([]byte, error) {
+func (d *recordingDialer) stream(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
 	if d.defaultErr != nil {
 		return nil, d.defaultErr
 	}

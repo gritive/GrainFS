@@ -33,8 +33,8 @@ var (
 // forwardDialer abstracts the QUIC transport for testability. Production wires
 // it to quicTransport.Send (type=StreamProposeGroupForward); tests pass a fake
 // that returns canned replies.
-type forwardDialer func(peer string, payload []byte) ([]byte, error)
-type forwardStreamDialer func(peer string, payload []byte, body io.Reader) ([]byte, error)
+type forwardDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
+type forwardStreamDialer func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error)
 
 // ForwardSender is the client side of the 0x08 wire. Stateless apart from the
 // dialer + timeout — a single instance is shared across all coordinator calls.
@@ -135,7 +135,7 @@ func (s *ForwardSender) Send(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		reply, err := s.dialer(peer, payload)
+		reply, err := s.dialer(ctx, peer, payload)
 		if err != nil {
 			lastDialErr = err
 			continue // try next peer
@@ -143,7 +143,7 @@ func (s *ForwardSender) Send(
 		if isNotLeaderReply(reply) && !redirected {
 			redirected = true
 			if hint := extractLeaderHint(reply); hint != "" {
-				r2, err2 := s.dialer(hint, payload)
+				r2, err2 := s.dialer(ctx, hint, payload)
 				if err2 == nil {
 					return r2, nil
 				}
@@ -172,7 +172,7 @@ func (s *ForwardSender) ResolveLeaderPeers(ctx context.Context, peers []string, 
 		if err := ctx.Err(); err != nil {
 			return peers
 		}
-		reply, err := s.dialer(peer, payload)
+		reply, err := s.dialer(ctx, peer, payload)
 		if err != nil {
 			continue
 		}
@@ -234,7 +234,7 @@ func (s *ForwardSender) SendStream(
 		if err := rewindForwardBody(body); err != nil {
 			return nil, err
 		}
-		reply, err := s.streamDialer(peer, payload, body)
+		reply, err := s.streamDialer(ctx, peer, payload, body)
 		if err != nil {
 			lastDialErr = err
 			if !canRewindForwardBody(body) {
@@ -251,7 +251,7 @@ func (s *ForwardSender) SendStream(
 				if err := rewindForwardBody(body); err != nil {
 					return nil, err
 				}
-				r2, err2 := s.streamDialer(hint, payload, body)
+				r2, err2 := s.streamDialer(ctx, hint, payload, body)
 				if err2 == nil {
 					return r2, nil
 				}

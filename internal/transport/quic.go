@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -24,6 +25,7 @@ import (
 const (
 	quicMaxIdleTimeout  = 10 * time.Second
 	quicKeepAlivePeriod = 3 * time.Second
+	quicMaxRPCStreams   = 4096
 	// quicAppErrCode is the application-level error code reported on
 	// graceful CloseWithError. Picked to be non-zero so peers can distinguish
 	// "we rejected your ALPN" from idle-timeout closes.
@@ -148,6 +150,14 @@ func (t *QUICTransport) muxALPN() string {
 	return "grainfs-mux-v1-" + hex.EncodeToString(h[:8])
 }
 
+func defaultQUICConfig() *quic.Config {
+	return &quic.Config{
+		KeepAlivePeriod:    quicKeepAlivePeriod,
+		MaxIdleTimeout:     quicMaxIdleTimeout,
+		MaxIncomingStreams: quicMaxRPCStreams,
+	}
+}
+
 // SetMuxConnHandler registers the callback that owns accepted mux QUIC
 // connections. internal/raft sets this during process startup if --quic-mux is
 // enabled. If unset, mux connections are rejected at accept time.
@@ -172,9 +182,7 @@ func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
 	tlsConf.NextProtos = []string{t.muxALPN(), t.pskALPN()}
 	t.tlsConfig = tlsConf
 
-	listener, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
-		MaxIdleTimeout: quicMaxIdleTimeout,
-	})
+	listener, err := quic.ListenAddr(addr, tlsConf, defaultQUICConfig())
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -320,10 +328,7 @@ func (t *QUICTransport) GetOrConnectMux(ctx context.Context, addr string) (*quic
 		// using the legacy path.
 		NextProtos: []string{t.muxALPN(), t.pskALPN()},
 	}
-	dialed, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
-		KeepAlivePeriod: quicKeepAlivePeriod,
-		MaxIdleTimeout:  quicMaxIdleTimeout,
-	})
+	dialed, err := quic.DialAddr(ctx, addr, tlsConf, defaultQUICConfig())
 	if err != nil {
 		return nil, fmt.Errorf("dial mux %s: %w", addr, err)
 	}
@@ -377,10 +382,7 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 		NextProtos:         []string{t.pskALPN()},
 	}
 
-	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
-		KeepAlivePeriod: quicKeepAlivePeriod,
-		MaxIdleTimeout:  quicMaxIdleTimeout,
-	})
+	conn, err := quic.DialAddr(ctx, addr, tlsConf, defaultQUICConfig())
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
@@ -462,6 +464,9 @@ func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*M
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		if !shouldEvictOpenStreamError(ctx, err) {
+			return nil, err
+		}
 		// Evict the stale connection and reconnect once before giving up.
 		t.evict(addr, conn)
 		conn, err = t.getOrConnect(ctx, addr)
@@ -498,6 +503,9 @@ func (t *QUICTransport) CallWithBody(ctx context.Context, addr string, req *Mess
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		if !shouldEvictOpenStreamError(ctx, err) {
+			return nil, err
+		}
 		t.evict(addr, conn)
 		conn, err = t.getOrConnect(ctx, addr)
 		if err != nil {
@@ -549,6 +557,9 @@ func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *Fla
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		if !shouldEvictOpenStreamError(ctx, err) {
+			return nil, err
+		}
 		t.evict(addr, conn)
 		conn, err = t.getOrConnect(ctx, addr)
 		if err != nil {
@@ -569,6 +580,16 @@ func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *Fla
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
 	return resp, nil
+}
+
+func shouldEvictOpenStreamError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // evict removes conn from the active connection map if it is still the current entry for addr.
