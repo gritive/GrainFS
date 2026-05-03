@@ -31,6 +31,21 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	cleanup := func() {
 		out.Cleanup()
 	}
+	if sp.Size == 0 {
+		for i := range out.paths {
+			f, err := os.CreateTemp(dir, fmt.Sprintf(".ec-empty-%d-*", i))
+			if err != nil {
+				cleanup()
+				return nil, fmt.Errorf("create empty ec shard: %w", err)
+			}
+			out.paths[i] = f.Name()
+			if err := f.Close(); err != nil {
+				cleanup()
+				return nil, fmt.Errorf("close empty ec shard: %w", err)
+			}
+		}
+		return out, nil
+	}
 
 	dataFiles := make([]*os.File, cfg.DataShards)
 	dataWriters := make([]io.Writer, cfg.DataShards)

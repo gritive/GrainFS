@@ -146,6 +146,9 @@ func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {
 	if origSize < 0 {
 		return nil, fmt.Errorf("no readable shards")
 	}
+	if origSize == 0 {
+		return []byte{}, nil
+	}
 	enc, err := getEncoder(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ec decoder: %w", err)
