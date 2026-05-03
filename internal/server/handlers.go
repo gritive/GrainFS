@@ -147,7 +147,7 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 
 	// PUT /:bucket?lifecycle — set bucket lifecycle configuration
 	if c.QueryArgs().Has("lifecycle") {
-		s.putBucketLifecycle(c, bucket)
+		s.putBucketLifecycle(ctx, c, bucket)
 		return
 	}
 
@@ -288,14 +288,14 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
 	partNumberStr := string(c.QueryArgs().Peek("partNumber"))
 	if uploadID != "" && partNumberStr != "" {
-		s.uploadPart(c, bucket, key, uploadID, partNumberStr)
+		s.uploadPart(ctx, c, bucket, key, uploadID, partNumberStr)
 		return
 	}
 
 	// Check for CopyObject (PUT with x-amz-copy-source header)
 	copySource := string(c.GetHeader("x-amz-copy-source"))
 	if copySource != "" {
-		s.handleCopyObject(c, bucket, key, copySource)
+		s.handleCopyObject(ctx, c, bucket, key, copySource)
 		return
 	}
 
@@ -771,21 +771,21 @@ func (s *Server) handlePost(ctx context.Context, c *app.RequestContext) {
 
 	// POST /:bucket/:key?uploads -> CreateMultipartUpload
 	if c.QueryArgs().Has("uploads") {
-		s.createMultipartUpload(c, bucket, key)
+		s.createMultipartUpload(ctx, c, bucket, key)
 		return
 	}
 
 	// POST /:bucket/:key?uploadId=xxx -> CompleteMultipartUpload
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
 	if uploadID != "" {
-		s.completeMultipartUpload(c, bucket, key, uploadID)
+		s.completeMultipartUpload(ctx, c, bucket, key, uploadID)
 		return
 	}
 
 	// POST /:bucket with multipart/form-data -> Form-based Upload (POST Policy)
 	ct := string(c.GetHeader("Content-Type"))
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		s.handleFormUpload(c, bucket)
+		s.handleFormUpload(ctx, c, bucket)
 		return
 	}
 
@@ -794,8 +794,7 @@ func (s *Server) handlePost(ctx context.Context, c *app.RequestContext) {
 
 // handleFormUpload processes S3 POST form-based uploads (browser direct upload).
 // The form contains: key, Content-Type, policy, X-Amz-Signature, file, etc.
-func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
-	ctx := context.Background()
+func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bucket string) {
 	form, err := c.MultipartForm()
 	if err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedPOSTRequest", "cannot parse multipart form")
@@ -936,8 +935,7 @@ func (s *Server) handleFormUpload(c *app.RequestContext, bucket string) {
 	}
 }
 
-func (s *Server) createMultipartUpload(c *app.RequestContext, bucket, key string) {
-	ctx := context.Background()
+func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContext, bucket, key string) {
 	contentType := string(c.GetHeader("Content-Type"))
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -959,8 +957,7 @@ func (s *Server) createMultipartUpload(c *app.RequestContext, bucket, key string
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 
-func (s *Server) uploadPart(c *app.RequestContext, bucket, key, uploadID, partNumberStr string) {
-	ctx := context.Background()
+func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, key, uploadID, partNumberStr string) {
 	partNumber, err := strconv.Atoi(partNumberStr)
 	if err != nil || partNumber < 1 {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid part number")
@@ -978,8 +975,7 @@ func (s *Server) uploadPart(c *app.RequestContext, bucket, key, uploadID, partNu
 	c.Status(consts.StatusOK)
 }
 
-func (s *Server) completeMultipartUpload(c *app.RequestContext, bucket, key, uploadID string) {
-	ctx := context.Background()
+func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestContext, bucket, key, uploadID string) {
 	var req completeMultipartUploadRequest
 	if err := xml.Unmarshal(c.Request.Body(), &req); err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedXML", "invalid XML body")
@@ -1208,8 +1204,7 @@ func (s *Server) joinClusterHandler(ctx context.Context, c *app.RequestContext) 
 }
 
 // handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
-func (s *Server) handleCopyObject(c *app.RequestContext, dstBucket, dstKey, copySource string) {
-	ctx := context.Background()
+func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, dstBucket, dstKey, copySource string) {
 	// Parse copy source: /bucket/key or bucket/key
 	copySource = strings.TrimPrefix(copySource, "/")
 	parts := strings.SplitN(copySource, "/", 2)

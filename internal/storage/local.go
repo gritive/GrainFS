@@ -33,6 +33,12 @@ type LocalBackend struct {
 	db   *badger.DB
 }
 
+var (
+	_ Backend     = (*LocalBackend)(nil)
+	_ PartialIO   = (*LocalBackend)(nil)
+	_ Truncatable = (*LocalBackend)(nil)
+)
+
 // DB exposes the underlying BadgerDB for shared use (lifecycle, events).
 func (b *LocalBackend) DB() *badger.DB { return b.db }
 

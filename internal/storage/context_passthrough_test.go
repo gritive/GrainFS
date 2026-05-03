@@ -67,6 +67,10 @@ func (b *contextRecorderBackend) AbortMultipartUpload(ctx context.Context, bucke
 	b.ctx = ctx
 	return nil
 }
+func (b *contextRecorderBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	b.ctx = ctx
+	return nil
+}
 
 func TestSwappableBackend_ForwardsContext(t *testing.T) {
 	rec := &contextRecorderBackend{}
@@ -74,6 +78,19 @@ func TestSwappableBackend_ForwardsContext(t *testing.T) {
 	ctx := context.WithValue(context.Background(), testContextKey{}, "caller")
 
 	if _, err := sb.PutObject(ctx, "b", "k", strings.NewReader("x"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if rec.ctx != ctx {
+		t.Fatalf("wrapped backend got %p, want %p", rec.ctx, ctx)
+	}
+}
+
+func TestCachedBackend_TruncateForwardsContext(t *testing.T) {
+	rec := &contextRecorderBackend{}
+	cb := NewCachedBackend(rec)
+	ctx := context.WithValue(context.Background(), testContextKey{}, "caller")
+
+	if err := cb.Truncate(ctx, "b", "k", 3); err != nil {
 		t.Fatal(err)
 	}
 	if rec.ctx != ctx {

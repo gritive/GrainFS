@@ -13,6 +13,8 @@ type SwappableBackend struct {
 	inner atomic.Pointer[Backend]
 }
 
+var _ Backend = (*SwappableBackend)(nil)
+
 // NewSwappableBackend creates a swappable wrapper around the given backend.
 func NewSwappableBackend(b Backend) *SwappableBackend {
 	sb := &SwappableBackend{}

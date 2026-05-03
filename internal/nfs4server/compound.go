@@ -733,12 +733,6 @@ func (d *Dispatcher) opReadDir(_ []byte) OpResult {
 	return OpResult{OpCode: OpReadDir, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
-// readAtBackend is the zero-overhead partial-read interface.
-// Implementations skip HeadObject, GetObject, and Seek entirely.
-type readAtBackend interface {
-	ReadAt(bucket, key string, offset int64, buf []byte) (int, error)
-}
-
 func (d *Dispatcher) opRead(data []byte) OpResult {
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_SERVERFAULT}
@@ -754,7 +748,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	}
 
 	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
-	if ra, ok := d.backend.(readAtBackend); ok {
+	if ra, ok := d.backend.(storage.PartialIO); ok {
 		var buf []byte
 		var pooled bool
 		if count <= nfsMaxReadBlock {
@@ -764,7 +758,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 		} else {
 			buf = make([]byte, count)
 		}
-		n, err := ra.ReadAt(nfs4Bucket, key, int64(offset), buf)
+		n, err := ra.ReadAt(context.Background(), nfs4Bucket, key, int64(offset), buf)
 		if err != nil && !errors.Is(err, io.EOF) {
 			if pooled {
 				opReadAtBufPool.Put(buf[:nfsMaxReadBlock])
@@ -883,15 +877,9 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	release := d.state.LockPath(key)
 	defer release()
 
-	// writeAtBackend is the zero-allocation partial-write interface.
-	// LocalBackend (and CachedBackend wrapping it) implement this.
-	type writeAtBackend interface {
-		WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error)
-	}
-
-	if wa, ok := d.backend.(writeAtBackend); ok {
+	if wa, ok := d.backend.(storage.PartialIO); ok {
 		// Fast path: stream prefix+data+suffix via kernel I/O — no heap allocation.
-		if _, err = wa.WriteAt(nfs4Bucket, key, offset, writeData); err != nil {
+		if _, err = wa.WriteAt(context.Background(), nfs4Bucket, key, offset, writeData); err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 		}
 	} else {

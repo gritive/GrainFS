@@ -53,7 +53,7 @@ func runMigrateInject(cmd *cobra.Command, args []string) error {
 	}
 
 	inj := migration.NewInjector(src, dst, opts...)
-	stats, err := inj.Run()
+	stats, err := inj.RunContext(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}

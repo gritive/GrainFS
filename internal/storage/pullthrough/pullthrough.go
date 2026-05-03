@@ -24,6 +24,8 @@ type Backend struct {
 	upstream Upstream
 }
 
+var _ storage.Backend = (*Backend)(nil)
+
 // NewBackend creates a pull-through caching backend.
 // local: local GrainFS backend that acts as the cache
 // upstream: S3-compatible upstream to pull from on cache miss

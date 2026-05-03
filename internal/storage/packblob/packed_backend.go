@@ -49,6 +49,8 @@ type PackedBackend struct {
 	stopSave chan struct{} // signals the background index-save goroutine to stop
 }
 
+var _ storage.Backend = (*PackedBackend)(nil)
+
 // PackedBackendOptions configures optional behavior for PackedBackend.
 type PackedBackendOptions struct {
 	Compress bool // enable zstd compression for packed (small) objects

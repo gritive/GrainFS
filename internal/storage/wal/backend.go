@@ -17,6 +17,12 @@ type Backend struct {
 	w *WAL
 }
 
+var (
+	_ storage.Backend     = (*Backend)(nil)
+	_ storage.PartialIO   = (*Backend)(nil)
+	_ storage.Truncatable = (*Backend)(nil)
+)
+
 // NewBackend creates a WALBackend wrapping inner.
 func NewBackend(inner storage.Backend, w *WAL) *Backend {
 	return &Backend{Backend: inner, w: w}

@@ -164,7 +164,7 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 		writeIcebergMappedError(c, err)
 		return
 	}
-	if err := s.writeIcebergMetadataObject(metadataLocation, metadata); err != nil {
+	if err := s.writeIcebergMetadataObject(ctx, metadataLocation, metadata); err != nil {
 		writeIcebergStorageError(c, err)
 		return
 	}
@@ -293,7 +293,7 @@ func (s *Server) commitIcebergTableFrom(ctx context.Context, c *app.RequestConte
 		return nil, false
 	}
 	nextMetadataLocation := nextIcebergMetadataLocation(tbl.MetadataLocation)
-	if err := s.writeIcebergMetadataObject(nextMetadataLocation, metadata); err != nil {
+	if err := s.writeIcebergMetadataObject(ctx, nextMetadataLocation, metadata); err != nil {
 		writeIcebergStorageError(c, err)
 		return nil, false
 	}
@@ -588,12 +588,12 @@ func nonNilMap(in map[string]string) map[string]string {
 	return in
 }
 
-func (s *Server) writeIcebergMetadataObject(location string, metadata json.RawMessage) error {
+func (s *Server) writeIcebergMetadataObject(ctx context.Context, location string, metadata json.RawMessage) error {
 	bucket, key, ok := parseS3Location(location)
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	_, err := s.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(metadata), "application/json")
+	_, err := s.backend.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
 	if errors.Is(err, io.EOF) {
 		return nil
 	}

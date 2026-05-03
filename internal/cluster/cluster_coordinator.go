@@ -979,5 +979,8 @@ func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, k
 	return parseReplyStatus(reply)
 }
 
-// Compile-time assertion: ClusterCoordinator implements storage.Backend.
-var _ storage.Backend = (*ClusterCoordinator)(nil)
+var (
+	_ storage.Backend     = (*ClusterCoordinator)(nil)
+	_ storage.PartialIO   = (*ClusterCoordinator)(nil)
+	_ storage.Truncatable = (*ClusterCoordinator)(nil)
+)

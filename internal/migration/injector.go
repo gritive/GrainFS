@@ -58,6 +58,12 @@ func NewInjector(src Source, dst Destination, opts ...Option) *Injector {
 
 // Run executes the migration and returns aggregate stats.
 func (inj *Injector) Run() (Stats, error) {
+	return inj.RunContext(context.Background())
+}
+
+// RunContext executes the migration and propagates cancellation to destination
+// storage operations.
+func (inj *Injector) RunContext(ctx context.Context) (Stats, error) {
 	var stats Stats
 
 	buckets, err := inj.src.ListBuckets()
@@ -66,7 +72,7 @@ func (inj *Injector) Run() (Stats, error) {
 	}
 
 	for _, bucket := range buckets {
-		if err := inj.dst.CreateBucket(context.Background(), bucket); err != nil {
+		if err := inj.dst.CreateBucket(ctx, bucket); err != nil {
 			if !errors.Is(err, storage.ErrBucketAlreadyExists) {
 				log.Warn().Str("bucket", bucket).Err(err).Msg("migration: create bucket failed")
 				stats.Errors++
@@ -83,7 +89,7 @@ func (inj *Injector) Run() (Stats, error) {
 
 		for _, key := range keys {
 			if inj.skipExisting {
-				rc, _, err := inj.dst.GetObject(context.Background(), bucket, key)
+				rc, _, err := inj.dst.GetObject(ctx, bucket, key)
 				if err == nil {
 					rc.Close()
 					stats.Skipped++
@@ -103,7 +109,7 @@ func (inj *Injector) Run() (Stats, error) {
 				ct = obj.ContentType
 			}
 
-			if _, err := inj.dst.PutObject(context.Background(), bucket, key, rc, ct); err != nil {
+			if _, err := inj.dst.PutObject(ctx, bucket, key, rc, ct); err != nil {
 				rc.Close()
 				log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: put object failed")
 				stats.Errors++

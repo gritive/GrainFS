@@ -13,6 +13,11 @@ type RecoveryWriteGate struct {
 	err error
 }
 
+var (
+	_ Backend     = (*RecoveryWriteGate)(nil)
+	_ Truncatable = (*RecoveryWriteGate)(nil)
+)
+
 type policyBackend interface {
 	GetBucketPolicy(bucket string) ([]byte, error)
 	SetBucketPolicy(bucket string, policyJSON []byte) error

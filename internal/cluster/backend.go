@@ -587,6 +587,12 @@ func (b *DistributedBackend) GetRegistry() *Registry {
 	return b.registry
 }
 
+var (
+	_ storage.Backend     = (*DistributedBackend)(nil)
+	_ storage.PartialIO   = (*DistributedBackend)(nil)
+	_ storage.Truncatable = (*DistributedBackend)(nil)
+)
+
 // SetBucketAssigner injects the MetaRaft proposer for bucket assignment persistence.
 // Must be called before CreateBucket. Nil disables persistence (single-node legacy mode).
 func (b *DistributedBackend) SetBucketAssigner(a BucketAssigner) { b.assigner = a }

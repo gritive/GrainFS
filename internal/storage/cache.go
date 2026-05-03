@@ -31,6 +31,11 @@ type CacheStats struct {
 // CacheOption configures CachedBackend.
 type CacheOption func(*CachedBackend)
 
+var (
+	_ Backend   = (*CachedBackend)(nil)
+	_ PartialIO = (*CachedBackend)(nil)
+)
+
 // WithMaxCacheBytes sets the total maximum bytes for cached object content.
 func WithMaxCacheBytes(n int64) CacheOption {
 	return func(cb *CachedBackend) { cb.maxBytes = n }
@@ -208,6 +213,17 @@ func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset 
 		return 0, fmt.Errorf("inner backend does not support ReadAt")
 	}
 	return ra.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+// Truncate delegates to the inner backend's Truncate if available, then
+// invalidates the cache entry so subsequent reads fetch the updated content.
+func (cb *CachedBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	tr, ok := cb.Backend.(Truncatable)
+	if !ok {
+		return fmt.Errorf("inner backend does not support Truncate")
+	}
+	cb.invalidate(bucket, key)
+	return tr.Truncate(ctx, bucket, key, size)
 }
 
 // DeleteObject invalidates the cache entry for the key.
