@@ -344,14 +344,38 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		return []byte(name), 0, err
 
 	case OpGetAttr:
-		bitmapLen, _ := r.ReadUint32()
-		w := getXDRWriter()
-		w.WriteUint32(bitmapLen)
-		for i := uint32(0); i < bitmapLen; i++ {
-			v, _ := r.ReadUint32()
-			w.WriteUint32(v)
+		bitmapLen, err := r.ReadUint32()
+		if err != nil {
+			return nil, 0, err
 		}
-		return xdrWriterBytes(w), 0, nil
+		if bitmapLen > 64 {
+			return nil, 0, fmt.Errorf("GETATTR bitmap too large: %d", bitmapLen)
+		}
+		encodedLen := 4 + int(bitmapLen)*4
+		if encodedLen <= 16 {
+			b := getOpArg16()
+			binary.BigEndian.PutUint32(b[:4], bitmapLen)
+			for i := uint32(0); i < bitmapLen; i++ {
+				v, err := r.ReadUint32()
+				if err != nil {
+					putOpArg16(b)
+					return nil, 0, err
+				}
+				binary.BigEndian.PutUint32(b[4+i*4:8+i*4], v)
+			}
+			return b[:encodedLen], 16, nil
+		}
+
+		data := make([]byte, encodedLen)
+		binary.BigEndian.PutUint32(data[:4], bitmapLen)
+		for i := uint32(0); i < bitmapLen; i++ {
+			v, err := r.ReadUint32()
+			if err != nil {
+				return nil, 0, err
+			}
+			binary.BigEndian.PutUint32(data[4+i*4:8+i*4], v)
+		}
+		return data, 0, nil
 
 	case OpCreate:
 		// CREATE4args: createtype4 objtype + component4 objname + fattr4 createattrs
