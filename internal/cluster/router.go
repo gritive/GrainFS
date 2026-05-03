@@ -28,8 +28,9 @@ func HashAssign(bucket string, groups []string) string {
 // routerSnap is the immutable routing table for Router. COW replacement enables lock-free reads.
 // bucketMap is frozen once published via atomic.Pointer.Store — never mutate in-place; always copy-on-write.
 type routerSnap struct {
-	bucketMap      map[string]string // bucket → group_id (explicit assignments)
-	defaultGroupID string            // fallback group_id for unassigned buckets
+	bucketMap       map[string]string // bucket → group_id (explicit assignments)
+	defaultGroupID  string            // fallback group_id for unassigned buckets
+	requireExplicit bool              // reject unassigned buckets instead of using defaultGroupID
 }
 
 // Router provides bucket-level routing (design doc Layer 1).
@@ -50,7 +51,27 @@ func NewRouter(mgr *DataGroupManager) *Router {
 func (r *Router) SetDefault(groupID string) {
 	for {
 		old := r.snap.Load()
-		newSnap := &routerSnap{bucketMap: old.bucketMap, defaultGroupID: groupID}
+		newSnap := &routerSnap{
+			bucketMap:       old.bucketMap,
+			defaultGroupID:  groupID,
+			requireExplicit: old.requireExplicit,
+		}
+		if r.snap.CompareAndSwap(old, newSnap) {
+			return
+		}
+	}
+}
+
+// SetRequireExplicitAssignments controls whether unassigned buckets can fall
+// back to the default group. Production enables this after bootstrap.
+func (r *Router) SetRequireExplicitAssignments(on bool) {
+	for {
+		old := r.snap.Load()
+		newSnap := &routerSnap{
+			bucketMap:       old.bucketMap,
+			defaultGroupID:  old.defaultGroupID,
+			requireExplicit: on,
+		}
 		if r.snap.CompareAndSwap(old, newSnap) {
 			return
 		}
@@ -66,7 +87,11 @@ func (r *Router) AssignBucket(bucket, groupID string) {
 			newMap[k] = v
 		}
 		newMap[bucket] = groupID
-		newSnap := &routerSnap{bucketMap: newMap, defaultGroupID: old.defaultGroupID}
+		newSnap := &routerSnap{
+			bucketMap:       newMap,
+			defaultGroupID:  old.defaultGroupID,
+			requireExplicit: old.requireExplicit,
+		}
 		if r.snap.CompareAndSwap(old, newSnap) {
 			return
 		}
@@ -88,7 +113,11 @@ func (r *Router) Sync(assignments map[string]string) {
 		for k, v := range assignments {
 			newMap[k] = v
 		}
-		newSnap := &routerSnap{bucketMap: newMap, defaultGroupID: old.defaultGroupID}
+		newSnap := &routerSnap{
+			bucketMap:       newMap,
+			defaultGroupID:  old.defaultGroupID,
+			requireExplicit: old.requireExplicit,
+		}
 		if r.snap.CompareAndSwap(old, newSnap) {
 			return
 		}
@@ -110,6 +139,9 @@ func (r *Router) RouteKey(bucket, _ string) (*DataGroup, error) {
 	snap := r.snap.Load()
 	gid, ok := snap.bucketMap[bucket]
 	if !ok {
+		if snap.requireExplicit {
+			return nil, ErrNoGroup
+		}
 		gid = snap.defaultGroupID
 	}
 	if gid == "" {

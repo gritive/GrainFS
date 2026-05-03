@@ -41,6 +41,30 @@ func TestRouter_RouteKey_NoDefault_ReturnsError(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoGroup)
 }
 
+func TestRouter_StrictModeRejectsUnassignedBucket(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
+	r := NewRouter(mgr)
+	r.SetDefault("group-0")
+	r.SetRequireExplicitAssignments(true)
+
+	_, err := r.RouteKey("unassigned", "key")
+	require.ErrorIs(t, err, ErrNoGroup)
+}
+
+func TestRouter_StrictModeAllowsExplicitBucket(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
+	r := NewRouter(mgr)
+	r.SetDefault("group-0")
+	r.SetRequireExplicitAssignments(true)
+	r.AssignBucket("photos", "group-0")
+
+	g, err := r.RouteKey("photos", "key")
+	require.NoError(t, err)
+	require.Equal(t, "group-0", g.ID())
+}
+
 func TestRouter_RouteKey_KeyIgnored(t *testing.T) {
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroup("group-0", []string{"node-0"}))

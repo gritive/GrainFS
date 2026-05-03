@@ -754,6 +754,35 @@ func TestDistributedBackend_CreateBucket_CallsAssigner(t *testing.T) {
 	assert.Equal(t, "group-0", calledGroup)
 }
 
+func TestDistributedBackend_CreateBucket_AssignsBeforeStrictRoute(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
+	r := NewRouter(mgr)
+	r.SetDefault("group-0")
+	r.SetRequireExplicitAssignments(true)
+
+	b.SetRouter(r)
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-0": {ID: "group-0", PeerIDs: []string{"node-0"}},
+	}})
+	var assignedBucket, assignedGroup string
+	b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
+		assignedBucket = bucket
+		assignedGroup = groupID
+		return nil
+	}})
+
+	require.NoError(t, b.CreateBucket("photos"))
+	require.Equal(t, "photos", assignedBucket)
+	require.Equal(t, "group-0", assignedGroup)
+	r.AssignBucket(assignedBucket, assignedGroup)
+
+	g, err := r.RouteKey("photos", "image.jpg")
+	require.NoError(t, err)
+	require.Equal(t, "group-0", g.ID())
+}
+
 func TestDistributedBackend_CreateBucket_RouterError_Propagates(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
