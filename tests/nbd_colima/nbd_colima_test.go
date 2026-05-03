@@ -16,11 +16,11 @@ import (
 )
 
 var (
-	colimaHostIP  = envOrDefault("HOST_IP", "192.168.5.2")
-	colimaNBDPort = envOrDefault("NBD_PORT", "19810")
+	colimaHostIP   = envOrDefault("HOST_IP", "192.168.5.2")
+	colimaNBDPort  = envOrDefault("NBD_PORT", "19810")
 	colimaHTTPPort = envOrDefault("HTTP_PORT", "19200")
-	nbdVolSize    = envOrDefault("NBD_VOL_SIZE", fmt.Sprintf("%d", 64*1024*1024)) // 64MB
-	nbdDev        = envOrDefault("NBD_DEV", "/dev/nbd0")
+	nbdVolSize     = envOrDefault("NBD_VOL_SIZE", fmt.Sprintf("%d", 64*1024*1024)) // 64MB
+	nbdDev         = envOrDefault("NBD_DEV", "/dev/nbd0")
 )
 
 func envOrDefault(key, def string) string {

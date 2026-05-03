@@ -48,10 +48,10 @@ func TestDispatcher_SendsSlackFormattedJSON(t *testing.T) {
 
 	d := alerts.NewDispatcher(srv.URL, alerts.Options{}, nil)
 	require.NoError(t, d.Send(alerts.Alert{
-		Type:       "raft_quorum_lost",
-		Severity:   alerts.SeverityCritical,
-		Resource:   "cluster-prod",
-		Message:    "Raft cluster lost quorum, 1 of 3 nodes responding",
+		Type:     "raft_quorum_lost",
+		Severity: alerts.SeverityCritical,
+		Resource: "cluster-prod",
+		Message:  "Raft cluster lost quorum, 1 of 3 nodes responding",
 	}))
 
 	mu.Lock()

@@ -13,7 +13,7 @@ import (
 // large enough that startup costs (rclone mount, dir cache warm-up) don't
 // dominate the wall clock.
 const (
-	benchPayloadMB    = 64    // size of the test object in MiB
+	benchPayloadMB    = 64 // size of the test object in MiB
 	benchPayloadBytes = benchPayloadMB << 20
 )
 
@@ -164,7 +164,7 @@ force_path_style = true
 		}
 		b.Cleanup(func() {
 			colimaSSH("rclone", "--config", directCfg, "deletefile", key).Run() //nolint:errcheck
-			colimaSSH("rm", "-f", dstPath).Run()                                 //nolint:errcheck
+			colimaSSH("rm", "-f", dstPath).Run()                                //nolint:errcheck
 		})
 		throughput(b, "direct S3 GET", benchPayloadBytes, func() {
 			out, err := colimaSSH("rclone", "--config", directCfg, "copyto", key, dstPath).CombinedOutput()
