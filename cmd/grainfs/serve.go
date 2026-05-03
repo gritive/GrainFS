@@ -31,6 +31,8 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/incident/badgerstore"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -1144,6 +1146,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	srvOpts = newSrvOpts
 	defer receiptWiring.Close()
 
+	incidentDB, err := openBadgerSubDB(dataDir, "incident-state")
+	if err != nil {
+		return fmt.Errorf("open incident db: %w", err)
+	}
+	defer incidentDB.Close()
+	incidentStore := badgerstore.New(incidentDB)
+	incidentRecorder := incident.NewRecorder(incidentStore, incident.NewReducer())
+	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
+
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
 	// can reuse the same config store the worker scans. The worker itself
@@ -1218,7 +1229,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
 					objectKey, versionID = shardKey[:i], shardKey[i+1:]
 				}
-				if err := gb.RepairShardLocal(bucket, objectKey, versionID, shardIdx); err != nil {
+				if err := gb.RepairShardLocalWithIncident(monitorCtx, cluster.IncidentRepairRequest{
+					Bucket:    bucket,
+					Key:       objectKey,
+					VersionID: versionID,
+					ShardIdx:  shardIdx,
+					Recorder:  incidentRecorder,
+				}); err != nil {
 					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
 				}
 			})

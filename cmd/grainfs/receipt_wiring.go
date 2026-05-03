@@ -44,16 +44,20 @@ func (w *healReceiptWiring) Close() {
 	}
 }
 
+func openBadgerSubDB(dataDir, name string) (*badger.DB, error) {
+	dir := filepath.Join(dataDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create %s dir: %w", name, err)
+	}
+	opts := receiptDBOptions(dir)
+	return badger.Open(opts)
+}
+
 // openReceiptDB opens the dedicated BadgerDB under dataDir/receipts.
 // Kept separate from the meta DB so retention GC can run on receipt keys
 // without touching cluster metadata.
 func openReceiptDB(dataDir string) (*badger.DB, error) {
-	dir := filepath.Join(dataDir, "receipts")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create receipts dir: %w", err)
-	}
-	opts := receiptDBOptions(dir)
-	return badger.Open(opts)
+	return openBadgerSubDB(dataDir, "receipts")
 }
 
 func receiptDBOptions(dir string) badger.Options {
