@@ -794,6 +794,9 @@ func (c *ClusterCoordinator) Truncate(bucket, key string, size int64) error {
 // leaders use the group backend's zero-copy path; non-leaders fall back through
 // regular routed GetObject for correctness.
 func (c *ClusterCoordinator) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
+	if offset < 0 {
+		return 0, errors.New("coordinator: negative ReadAt offset")
+	}
 	target, err := c.routeBucket(bucket)
 	if err != nil {
 		return 0, err

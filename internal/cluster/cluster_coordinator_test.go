@@ -556,6 +556,20 @@ func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
 	require.Equal(t, body, got)
 }
 
+func TestClusterCoordinator_ReadAt_FallbackRejectsNegativeOffset(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
+		&storage.Object{Key: "k", Size: 5, ETag: "etag", ContentType: "application/octet-stream"},
+		"bk", []byte("hello"),
+	)
+
+	require.NotPanics(t, func() {
+		n, err := c.ReadAt("bk", "k", -1, make([]byte, 2))
+		require.Zero(t, n)
+		require.Error(t, err)
+	})
+}
+
 func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestGroupBackend(t, "group-1")
