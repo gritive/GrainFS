@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -87,6 +88,7 @@ type Server struct {
 	evStore        *eventstore.Store // nil if event store not configured
 	alerts         *AlertsState      // nil if alerts not wired
 	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
+	incidentStore  incident.StateStore
 	degradedFlag   atomic.Bool       // true when EC degraded mode is active
 	blockCache     *blockcache.Cache // nil 또는 비활성. /api/cache/status가 노출.
 	shardCache     *shardcache.Cache // nil 또는 비활성. EC shard cache, /api/cache/status에 함께 노출.
@@ -205,6 +207,13 @@ func WithEventStore(store *eventstore.Store) Option {
 func WithReceiptAPI(api *receipt.API) Option {
 	return func(s *Server) {
 		s.receiptAPI = api
+	}
+}
+
+// WithIncidentStore wires the zero-ops incident read API.
+func WithIncidentStore(store incident.StateStore) Option {
+	return func(s *Server) {
+		s.incidentStore = store
 	}
 }
 
@@ -526,6 +535,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Phase 16 Slice 2: heal-receipt audit API (no-op if WithReceiptAPI not set).
 	s.registerReceiptAPI(h)
+
+	// Zero-ops incident API (no-op if WithIncidentStore not set).
+	s.registerIncidentAPI(h)
 
 	// SSE event stream for dashboard
 	hub := s.hub
