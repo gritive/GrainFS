@@ -81,3 +81,37 @@ func TestDeriveClusterIdentity_RejectsEmpty(t *testing.T) {
 		t.Fatalf("want ErrEmptyClusterKey, got %v", err)
 	}
 }
+
+func TestNewQUICTransport_RejectsEmptyPSK(t *testing.T) {
+	_, err := NewQUICTransport("")
+	if err != ErrEmptyClusterKey {
+		t.Fatalf("want ErrEmptyClusterKey, got %v", err)
+	}
+}
+
+func TestNewQUICTransport_AcceptsShortPSK(t *testing.T) {
+	tr, err := NewQUICTransport("short")
+	if err != nil {
+		t.Fatalf("short PSK should not block construction: %v", err)
+	}
+	if tr == nil {
+		t.Fatal("nil transport for short PSK")
+	}
+}
+
+func TestNewQUICTransport_CachesSPKI(t *testing.T) {
+	psk := strings.Repeat("a", 64)
+	tr, err := NewQUICTransport(psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki1 := tr.expectedSPKI
+	spki2 := tr.expectedSPKI
+	if spki1 != spki2 {
+		t.Fatal("expectedSPKI mutated unexpectedly")
+	}
+	_, want, _ := deriveClusterIdentity(psk)
+	if spki1 != want {
+		t.Fatalf("cached SPKI %x != fresh derive %x", spki1, want)
+	}
+}

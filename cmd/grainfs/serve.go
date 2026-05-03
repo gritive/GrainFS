@@ -448,7 +448,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 
 	// Start QUIC transport for inter-node communication.
-	quicTransport := transport.NewQUICTransport(clusterKey)
+	quicTransport, err := transport.NewQUICTransport(clusterKey)
+	if err != nil {
+		return fmt.Errorf("init QUIC transport: %w", err)
+	}
 	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 8})
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)

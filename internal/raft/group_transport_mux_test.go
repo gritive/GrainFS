@@ -37,8 +37,8 @@ func setupMuxTransportPair(t *testing.T) (*GroupRaftQUICMux, *GroupRaftQUICMux, 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	serverTr := transport.NewQUICTransport("test-mux-psk")
-	clientTr := transport.NewQUICTransport("test-mux-psk")
+	serverTr := transport.MustNewQUICTransport("test-mux-psk")
+	clientTr := transport.MustNewQUICTransport("test-mux-psk")
 
 	require.NoError(t, serverTr.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, clientTr.Listen(ctx, "127.0.0.1:0"))
@@ -57,7 +57,7 @@ func setupMuxTransportPair(t *testing.T) (*GroupRaftQUICMux, *GroupRaftQUICMux, 
 }
 
 func TestGroupRaftMux_EnableMux_Idempotent(t *testing.T) {
-	tr := transport.NewQUICTransport("psk")
+	tr := transport.MustNewQUICTransport("psk")
 	defer tr.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -124,9 +124,9 @@ func TestGroupRaftMux_LegacyFallbackWhenMuxDisabled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	serverTr := transport.NewQUICTransport("psk-legacy")
+	serverTr := transport.MustNewQUICTransport("psk-legacy")
 	defer serverTr.Close()
-	clientTr := transport.NewQUICTransport("psk-legacy")
+	clientTr := transport.MustNewQUICTransport("psk-legacy")
 	defer clientTr.Close()
 
 	require.NoError(t, serverTr.Listen(ctx, "127.0.0.1:0"))

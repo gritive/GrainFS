@@ -52,7 +52,10 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 }
 
 func runClusterJoinNodeReal(ctx context.Context, peerAddr, dataDir, nodeID, raftAddr, clusterKey string) error {
-	quicTransport := transport.NewQUICTransport(clusterKey)
+	quicTransport, err := transport.NewQUICTransport(clusterKey)
+	if err != nil {
+		return fmt.Errorf("init QUIC transport: %w", err)
+	}
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport: %w", err)
 	}

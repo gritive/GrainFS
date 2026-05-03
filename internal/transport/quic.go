@@ -182,26 +182,53 @@ type QUICTransport struct {
 	cancel        context.CancelFunc
 	router        *StreamRouter // per-type bidirectional handlers (takes priority)
 	streamHandler StreamHandler // catch-all bidirectional handler (backward compat)
-	psk           string        // pre-shared key for peer authentication (empty = no auth)
+	psk           string        // pre-shared key for peer authentication
 	muxHandler    MuxConnHandler
 	traffic       *TrafficLimiter
+
+	// Cluster identity, computed once at construction. D7=A: stable for the
+	// life of the transport so handshakes don't pay HKDF/ECDSA cost per dial.
+	identityCert tls.Certificate
+	expectedSPKI [32]byte
 }
 
-// NewQUICTransport creates a new QUIC-based transport.
-// If psk is non-empty, connections are authenticated using the shared key.
-func NewQUICTransport(psk ...string) *QUICTransport {
+// NewQUICTransport constructs a QUIC transport pinned to the cluster identity
+// derived from psk. D6=B: returns error on empty PSK (refuse to start cluster
+// mode); short-but-non-empty PSK proceeds (caller logs warning via
+// ValidateClusterKey).
+func NewQUICTransport(psk string) (*QUICTransport, error) {
+	if psk == "" {
+		return nil, ErrEmptyClusterKey
+	}
+
+	cert, spki, err := deriveClusterIdentity(psk)
+	if err != nil {
+		return nil, fmt.Errorf("derive cluster identity: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &QUICTransport{
-		conns:    make(map[string]*quic.Conn),
-		muxConns: make(map[string]*quic.Conn),
-		inbox:    make(chan *ReceivedMessage, 256),
-		codec:    &BinaryCodec{},
-		router:   NewStreamRouter(),
-		ctx:      ctx,
-		cancel:   cancel,
+		conns:        make(map[string]*quic.Conn),
+		muxConns:     make(map[string]*quic.Conn),
+		inbox:        make(chan *ReceivedMessage, 256),
+		codec:        &BinaryCodec{},
+		router:       NewStreamRouter(),
+		ctx:          ctx,
+		cancel:       cancel,
+		psk:          psk,
+		identityCert: cert,
+		expectedSPKI: spki,
 	}
-	if len(psk) > 0 {
-		t.psk = psk[0]
+	return t, nil
+}
+
+// MustNewQUICTransport is NewQUICTransport that panics on error. Intended only
+// for test setup where a configuration mistake should fail loud and fast. NOT
+// for production code paths — production must surface the error to the operator.
+func MustNewQUICTransport(psk string) *QUICTransport {
+	t, err := NewQUICTransport(psk)
+	if err != nil {
+		panic(fmt.Sprintf("MustNewQUICTransport: %v", err))
 	}
 	return t
 }
