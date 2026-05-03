@@ -1037,13 +1037,7 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 		return nil, fmt.Errorf("marshal object meta: %w", err)
 	}
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
-			return err
-		}
-		if err := txn.Set(objectMetaKeyV(bucket, key, "current"), meta); err != nil {
-			return err
-		}
-		return txn.Set(latestKey(bucket, key), []byte("current"))
+		return txn.Set(objectMetaKey(bucket, key), meta)
 	}); err != nil {
 		return nil, fmt.Errorf("update object meta: %w", err)
 	}
@@ -1098,13 +1092,7 @@ func (b *DistributedBackend) Truncate(bucket, key string, size int64) error {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
 	return b.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
-			return err
-		}
-		if err := txn.Set(objectMetaKeyV(bucket, key, "current"), meta); err != nil {
-			return err
-		}
-		return txn.Set(latestKey(bucket, key), []byte("current"))
+		return txn.Set(objectMetaKey(bucket, key), meta)
 	})
 }
 
@@ -1919,10 +1907,52 @@ func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object
 	var obj storage.Object
 	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {
+		decodeMeta := func(item *badger.Item, versionID string) error {
+			return item.Value(func(val []byte) error {
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				// Tombstone markers aren't observable via HeadObject — callers use
+				// HeadObjectVersion / ListObjectVersions to see them explicitly.
+				if m.ETag == deleteMarkerETag {
+					return storage.ErrObjectNotFound
+				}
+				obj = storage.Object{
+					Key:          m.Key,
+					Size:         m.Size,
+					ContentType:  m.ContentType,
+					ETag:         m.ETag,
+					LastModified: m.LastModified,
+					VersionID:    versionID,
+					ACL:          m.ACL,
+				}
+				placement = PlacementMeta{
+					VersionID:   versionID,
+					RingVersion: RingVersion(m.RingVersion),
+					ECData:      m.ECData,
+					ECParity:    m.ECParity,
+					NodeIDs:     m.NodeIDs,
+				}
+				return nil
+			})
+		}
+
 		// Resolve via latest-version pointer when present so callers see the
 		// most recent version. Falls back to the legacy single-key read when
 		// no lat: pointer exists (e.g., legacy replay).
 		metaKeyBytes := objectMetaKey(bucket, key)
+		if storage.IsInternalBucket(bucket) {
+			item, err := txn.Get(metaKeyBytes)
+			if err == badger.ErrKeyNotFound {
+				return storage.ErrObjectNotFound
+			}
+			if err != nil {
+				return err
+			}
+			return decodeMeta(item, "current")
+		}
+
 		versionID := ""
 		if latItem, lerr := txn.Get(latestKey(bucket, key)); lerr == nil {
 			_ = latItem.Value(func(v []byte) error {
@@ -1943,34 +1973,7 @@ func (b *DistributedBackend) headObjectMeta(bucket, key string) (*storage.Object
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			// Tombstone markers aren't observable via HeadObject — callers use
-			// HeadObjectVersion / ListObjectVersions to see them explicitly.
-			if m.ETag == deleteMarkerETag {
-				return storage.ErrObjectNotFound
-			}
-			obj = storage.Object{
-				Key:          m.Key,
-				Size:         m.Size,
-				ContentType:  m.ContentType,
-				ETag:         m.ETag,
-				LastModified: m.LastModified,
-				VersionID:    versionID,
-				ACL:          m.ACL,
-			}
-			placement = PlacementMeta{
-				VersionID:   versionID,
-				RingVersion: RingVersion(m.RingVersion),
-				ECData:      m.ECData,
-				ECParity:    m.ECParity,
-				NodeIDs:     m.NodeIDs,
-			}
-			return nil
-		})
+		return decodeMeta(item, versionID)
 	})
 	if err != nil {
 		return nil, PlacementMeta{}, err

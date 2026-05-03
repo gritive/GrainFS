@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -54,6 +55,58 @@ func TestPutObject_VFSBucket_FixedVersionID(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, versions, 1, "VFS bucket should never accumulate multiple versions")
 	require.Equal(t, "current", versions[0].VersionID)
+}
+
+func TestHeadObject_InternalBucketIgnoresLatestPointer(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	bucket := storage.NFS4BucketName
+	key := "hot.bin"
+	require.NoError(t, b.CreateBucket(bucket))
+
+	currentMeta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         1,
+		ContentType:  "application/octet-stream",
+		LastModified: 10,
+	})
+	require.NoError(t, err)
+	staleMeta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         99,
+		ContentType:  "application/octet-stream",
+		LastModified: 20,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(objectMetaKey(bucket, key), currentMeta); err != nil {
+			return err
+		}
+		if err := txn.Set(objectMetaKeyV(bucket, key, "stale"), staleMeta); err != nil {
+			return err
+		}
+		return txn.Set(latestKey(bucket, key), []byte("stale"))
+	}))
+
+	obj, err := b.HeadObject(bucket, key)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), obj.Size)
+	require.Equal(t, "current", obj.VersionID)
+}
+
+func TestWriteAt_InternalBucketDoesNotWriteLatestPointer(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	bucket := storage.NFS4BucketName
+	require.NoError(t, b.CreateBucket(bucket))
+
+	_, err := b.WriteAt(bucket, "direct.bin", 0, []byte("data"))
+	require.NoError(t, err)
+
+	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(latestKey(bucket, "direct.bin"))
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+		return nil
+	}))
 }
 
 func TestPutObject_VFSBucket_DisabledTogglesLegacy(t *testing.T) {
