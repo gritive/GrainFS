@@ -9,6 +9,7 @@ bin/grainfs
 .gstack/
 *.fbs.stamp
 benchmarks/report.json
+benchmarks/iceberg_table_report.json
 benchmarks/profiles/
 meta/
 /raft/
