@@ -1346,16 +1346,12 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	if len(data) < 32 {
 		return OpResult{OpCode: OpSequence, Status: NFS4ERR_INVAL}
 	}
-	r := NewXDRReader(data)
-	var sidBytes [16]byte
-	io.ReadFull(&r.r, sidBytes[:]) //nolint:errcheck
 	var sid SessionID
-	copy(sid[:], sidBytes[:])
-
-	seqID, _ := r.ReadUint32()
-	slotID, _ := r.ReadUint32()
-	highSlot, _ := r.ReadUint32()
-	cacheThis, _ := r.ReadUint32()
+	copy(sid[:], data[:16])
+	seqID := binary.BigEndian.Uint32(data[16:20])
+	slotID := binary.BigEndian.Uint32(data[20:24])
+	highSlot := binary.BigEndian.Uint32(data[24:28])
+	cacheThis := binary.BigEndian.Uint32(data[28:32])
 
 	sess := d.state.GetSession(sid)
 	if sess == nil {

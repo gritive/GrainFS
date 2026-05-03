@@ -3,6 +3,7 @@
 package nfs4server
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,4 +61,32 @@ func TestCompound_PUTROOTFH_READDIR_AllocsPerRun(t *testing.T) {
 	// PUTROOTFH+READDIR: only unavoidable alloc is ReadDir arg encoding (xdrWriterBytes). Target ≤3.
 	assert.LessOrEqual(t, allocs, 3.0,
 		"COMPOUND PUTROOTFH+READDIR round-trip should allocate ≤3 (got %.1f)", allocs)
+}
+
+func TestOpSequence_AllocsPerRun(t *testing.T) {
+	state := NewStateManager()
+	sid, _ := state.CreateSession(1, ChannelAttrs{MaxRequests: 1})
+	d := &Dispatcher{state: state}
+	data := make([]byte, 32)
+	copy(data[:16], sid[:])
+	binary.BigEndian.PutUint32(data[20:24], 0) // slotid
+	binary.BigEndian.PutUint32(data[24:28], 0) // highest_slotid
+	binary.BigEndian.PutUint32(data[28:32], 0) // cachethis
+
+	seqID := uint32(1)
+	for i := 0; i < 10; i++ {
+		binary.BigEndian.PutUint32(data[16:20], seqID)
+		result := d.opSequence(data)
+		result.release()
+		seqID++
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		binary.BigEndian.PutUint32(data[16:20], seqID)
+		result := d.opSequence(data)
+		result.release()
+		seqID++
+	})
+	assert.LessOrEqual(t, allocs, 1.0,
+		"SEQUENCE should allocate only its response buffer (got %.1f)", allocs)
 }
