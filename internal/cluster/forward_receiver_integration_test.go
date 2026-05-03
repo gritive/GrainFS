@@ -1,10 +1,13 @@
 package cluster
 
 import (
+	"bytes"
+	"io"
 	"testing"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -77,6 +80,83 @@ func TestForwardReceiver_GetObject_DispatchesToBackend(t *testing.T) {
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
 		"GetObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
+
+func TestForwardReceiver_GetObjectVersion_TooLargeReturnsEntityTooLarge(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	obj, err := gb.PutObject("bk", "large", bytes.NewReader(bytes.Repeat([]byte("x"), int(DefaultMaxForwardReplyBytes)+1)), "application/octet-stream")
+	require.NoError(t, err)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusEntityTooLarge, fr.Status())
+}
+
+func TestForwardReceiver_ListObjectVersions_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	first, err := gb.PutObject("bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
+	require.NoError(t, err)
+	_, err = gb.PutObject("bk", "k", bytes.NewReader([]byte("v2")), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, gb.DeleteObject("bk", "k"))
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjectVersions, buildListObjectVersionsArgs("bk", "k", 100))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+
+	versions, err := objectVersionsFromReply(reply.Payload)
+	require.NoError(t, err)
+	require.Len(t, versions, 3)
+	require.True(t, versions[0].IsLatest)
+	require.True(t, versions[0].IsDeleteMarker)
+	require.Equal(t, first.VersionID, versions[2].VersionID)
+}
+
+func TestForwardReceiver_DeleteObjectVersion_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	obj, err := gb.PutObject("bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
+	require.NoError(t, err)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpDeleteObjectVersion, buildDeleteObjectVersionArgs("bk", "k", obj.VersionID))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+	require.NoError(t, parseReplyStatus(reply.Payload))
+
+	_, _, err = gb.GetObjectVersion("bk", "k", obj.VersionID)
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
+func TestForwardReceiver_GetObjectVersion_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	obj, err := gb.PutObject("bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
+	require.NoError(t, err)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "k", obj.VersionID))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+
+	got, err := objectFromReply(reply.Payload)
+	require.NoError(t, err)
+	require.Equal(t, obj.VersionID, got.VersionID)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	body, err := io.ReadAll(bytes.NewReader(fr.ReadBodyBytes()))
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1"), body)
 }
 
 // TestForwardReceiver_HeadObject_DispatchesToBackend verifies HeadObject operation.

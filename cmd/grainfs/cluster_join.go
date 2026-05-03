@@ -15,11 +15,14 @@ var clusterJoinCmd = &cobra.Command{
 	Use:   "join <peer-address>",
 	Short: "Join this node to an existing meta-Raft cluster",
 	Long: `Sends a join request to the given peer address.
-The peer must be the current leader; non-leader peers return ErrNotLeader.
-The local MetaRaft node must have been bootstrapped first (grainfs serve starts it automatically).`,
+If the peer is not the current leader, the command follows the leader hint when
+the peer can provide one. The command starts the local MetaRaft node before
+sending the join request.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runClusterJoin,
 }
+
+var runClusterJoinNode = runClusterJoinNodeReal
 
 func runClusterJoin(cmd *cobra.Command, args []string) error {
 	peerAddr := args[0]
@@ -41,6 +44,14 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	if err := runClusterJoinNode(ctx, peerAddr, dataDir, nodeID, raftAddr, clusterKey); err != nil {
+		return err
+	}
+	fmt.Printf("meta-raft join accepted (node-id: %s)\n", nodeID)
+	return nil
+}
+
+func runClusterJoinNodeReal(ctx context.Context, peerAddr, dataDir, nodeID, raftAddr, clusterKey string) error {
 	quicTransport := transport.NewQUICTransport(clusterKey)
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport: %w", err)
@@ -71,12 +82,7 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 	}
 	defer metaRaft.Close()
 
-	// TODO(PR-E): 현재 로컬 MetaRaft 준비만 완료. 실제 참가는 리더에게
-	// "AddLearner + PromoteToVoter + ProposeAddNode"를 수행하도록 admin RPC
-	// (SendJoin 스트림 타입)를 추가해야 한다. MetaTransport에 JoinRequest
-	// 엔드포인트 추가 및 MetaTransportQUIC 구현은 PR-E scope.
-	fmt.Printf("local meta-raft ready (node-id: %s); leader join via PR-E admin RPC pending\n", nodeID)
-	return nil
+	return performMetaJoin(ctx, quicTransport, []string{peerAddr}, nodeID, raftAddr)
 }
 
 func init() {

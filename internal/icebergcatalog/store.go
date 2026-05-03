@@ -63,6 +63,23 @@ type Store struct {
 	warehouse string
 }
 
+type LegacyExport struct {
+	Namespaces []LegacyNamespace
+	Tables     []LegacyTable
+}
+
+type LegacyNamespace struct {
+	Namespace  []string
+	Properties map[string]string
+}
+
+type LegacyTable struct {
+	Identifier       Identifier
+	MetadataLocation string
+	Metadata         json.RawMessage
+	Properties       map[string]string
+}
+
 func NewStore(db *badger.DB, warehouse string) *Store {
 	return &Store{db: db, warehouse: warehouse}
 }
@@ -118,6 +135,49 @@ func (s *Store) ListNamespaces(_ context.Context) ([][]string, error) {
 		return nil
 	})
 	sort.Slice(out, func(i, j int) bool { return strings.Join(out[i], "\x1f") < strings.Join(out[j], "\x1f") })
+	return out, err
+}
+
+func (s *Store) ExportLegacyRows(_ context.Context) (LegacyExport, error) {
+	var out LegacyExport
+	err := s.db.View(func(txn *badger.Txn) error {
+		nsIt := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer nsIt.Close()
+		for nsIt.Seek(nsPrefix); nsIt.ValidForPrefix(nsPrefix); nsIt.Next() {
+			var rec namespaceRecord
+			if err := nsIt.Item().Value(func(v []byte) error { return json.Unmarshal(v, &rec) }); err != nil {
+				return err
+			}
+			out.Namespaces = append(out.Namespaces, LegacyNamespace{
+				Namespace:  append([]string(nil), rec.Namespace...),
+				Properties: cloneMap(rec.Properties),
+			})
+		}
+
+		tableIt := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer tableIt.Close()
+		for tableIt.Seek(tablePrefix); tableIt.ValidForPrefix(tablePrefix); tableIt.Next() {
+			var rec tableRecord
+			if err := tableIt.Item().Value(func(v []byte) error { return json.Unmarshal(v, &rec) }); err != nil {
+				return err
+			}
+			out.Tables = append(out.Tables, LegacyTable{
+				Identifier:       cloneIdent(rec.Identifier),
+				MetadataLocation: rec.MetadataLocation,
+				Metadata:         cloneJSON(rec.Metadata),
+				Properties:       cloneMap(rec.Properties),
+			})
+		}
+		return nil
+	})
+	sort.Slice(out.Namespaces, func(i, j int) bool {
+		return strings.Join(out.Namespaces[i].Namespace, "\x1f") < strings.Join(out.Namespaces[j].Namespace, "\x1f")
+	})
+	sort.Slice(out.Tables, func(i, j int) bool {
+		left := strings.Join(append(append([]string(nil), out.Tables[i].Identifier.Namespace...), out.Tables[i].Identifier.Name), "\x1f")
+		right := strings.Join(append(append([]string(nil), out.Tables[j].Identifier.Namespace...), out.Tables[j].Identifier.Name), "\x1f")
+		return left < right
+	})
 	return out, err
 }
 

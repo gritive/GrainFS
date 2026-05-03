@@ -501,6 +501,76 @@ func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	}
 }
 
+func TestClusterCoordinator_GetObjectVersion_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpGetObjectVersion] = buildGetObjectReply(
+		&storage.Object{Key: "k", Size: 2, ETag: "etag-v1", ContentType: "text/plain", VersionID: "vid-1"},
+		"bk", []byte("v1"),
+	)
+
+	rc, obj, err := c.GetObjectVersion("bk", "k", "vid-1")
+	require.NoError(t, err)
+	body, readErr := io.ReadAll(rc)
+	rc.Close()
+	require.NoError(t, readErr)
+	require.Equal(t, "vid-1", obj.VersionID)
+	require.Equal(t, []byte("v1"), body)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpGetObjectVersion, d.calls[0].op)
+	args := raftpb.GetRootAsGetObjectVersionArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "k", string(args.Key()))
+	require.Equal(t, "vid-1", string(args.VersionId()))
+}
+
+func TestClusterCoordinator_DeleteObjectVersion_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpDeleteObjectVersion] = buildOKReply()
+
+	require.NoError(t, c.DeleteObjectVersion("bk", "k", "vid-1"))
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpDeleteObjectVersion, d.calls[0].op)
+	args := raftpb.GetRootAsDeleteObjectVersionArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "k", string(args.Key()))
+	require.Equal(t, "vid-1", string(args.VersionId()))
+}
+
+func TestClusterCoordinator_ListObjectVersions_ForwardPreservesVersionFlags(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpListObjectVersions] = buildObjectVersionsReply([]*storage.ObjectVersion{
+		{
+			Key:            "k",
+			VersionID:      "vid-delete",
+			IsLatest:       true,
+			IsDeleteMarker: true,
+			ETag:           "delete-marker",
+			Size:           0,
+			LastModified:   1234,
+		},
+		{
+			Key:          "k",
+			VersionID:    "vid-live",
+			ETag:         "etag-live",
+			Size:         2,
+			LastModified: 1200,
+		},
+	})
+
+	versions, err := c.ListObjectVersions("bk", "k", 100)
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	require.True(t, versions[0].IsLatest)
+	require.True(t, versions[0].IsDeleteMarker)
+	require.False(t, versions[1].IsLatest)
+	require.False(t, versions[1].IsDeleteMarker)
+	require.Equal(t, raftpb.ForwardOpListObjectVersions, d.calls[0].op)
+	args := raftpb.GetRootAsListObjectVersionsArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "k", string(args.Prefix()))
+	require.Equal(t, int32(100), args.MaxKeys())
+}
+
 func TestClusterCoordinator_HeadObject_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpHeadObject] = buildObjectReply(

@@ -1077,7 +1077,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		server.WithDataDir(dataDir),
 	}
 	if len(peers) == 0 && !raftAddrExplicit && !joinMode {
-		srvOpts = append(srvOpts, server.WithIcebergCatalogStore(icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")))
+		legacyStore := icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")
+		metaCatalog := cluster.NewMetaCatalog(metaRaft, backend, "s3://grainfs-tables/warehouse")
+		if err := migrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, backend); err != nil {
+			return fmt.Errorf("migrate singleton Iceberg catalog: %w", err)
+		}
+		srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
 	} else {
 		metaForward := func(ctx context.Context, command []byte) error {
 			return metaForwardSender.Send(ctx, metaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
@@ -1518,30 +1523,6 @@ func metaProposalTargets(leader string, peers []string) []string {
 		}
 	}
 	return targets
-}
-
-func performMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport, peers []string, nodeID, raftAddr string) error {
-	joinCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
-	defer cancel()
-	sender := cluster.NewMetaJoinSender(func(peer string, payload []byte) ([]byte, error) {
-		msg := &transport.Message{Type: transport.StreamMetaJoin, Payload: payload}
-		reply, err := quicTransport.Call(joinCtx, peer, msg)
-		if err != nil {
-			return nil, err
-		}
-		return reply.Payload, nil
-	})
-	reply, err := sender.SendJoin(joinCtx, peers, cluster.JoinRequest{NodeID: nodeID, Address: raftAddr})
-	if err != nil {
-		return fmt.Errorf("meta join: %w", err)
-	}
-	if !reply.Accepted {
-		if reply.Message != "" {
-			return fmt.Errorf("meta join rejected: %s: %s", reply.Status, reply.Message)
-		}
-		return fmt.Errorf("meta join rejected: %s", reply.Status)
-	}
-	return nil
 }
 
 func createDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, timeout time.Duration) error {

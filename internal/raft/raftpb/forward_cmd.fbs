@@ -17,7 +17,10 @@ enum ForwardOp : byte {
   CreateMultipartUpload = 7,
   UploadPart = 8,
   CompleteMultipartUpload = 9,
-  AbortMultipartUpload = 10
+  AbortMultipartUpload = 10,
+  GetObjectVersion = 11,
+  DeleteObjectVersion = 12,
+  ListObjectVersions = 13
 }
 
 table PutObjectArgs {
@@ -32,6 +35,12 @@ table GetObjectArgs {
   key:string;
 }
 
+table GetObjectVersionArgs {
+  bucket:string;
+  key:string;
+  version_id:string;
+}
+
 table HeadObjectArgs {
   bucket:string;
   key:string;
@@ -42,7 +51,19 @@ table DeleteObjectArgs {
   key:string;
 }
 
+table DeleteObjectVersionArgs {
+  bucket:string;
+  key:string;
+  version_id:string;
+}
+
 table ListObjectsArgs {
+  bucket:string;
+  prefix:string;
+  max_keys:int32;
+}
+
+table ListObjectVersionsArgs {
   bucket:string;
   prefix:string;
   max_keys:int32;
@@ -105,6 +126,16 @@ table ForwardObjectMeta {
   version_id:string;
 }
 
+table ForwardObjectVersionMeta {
+  key:string;
+  version_id:string;
+  is_latest:bool;
+  is_delete_marker:bool;
+  etag:string;
+  size:long;
+  modified_unix_ms:long;
+}
+
 table ForwardPartMeta {
   part_number:int32;
   etag:string;
@@ -123,9 +154,10 @@ table ForwardReply {
   // op-specific reply fields (one populated per op):
   object:ForwardObjectMeta;          // PutObject, HeadObject (no body)
   objects:[ForwardObjectMeta];       // ListObjects, WalkObjects
-  read_body:[ubyte];                 // GetObject (≤5 MB)
+  read_body:[ubyte];                 // GetObject/GetObjectVersion (bounded)
   upload:ForwardMultipartUploadMeta; // CreateMultipartUpload
   part:ForwardPartMeta;              // UploadPart
+  versions:[ForwardObjectVersionMeta]; // ListObjectVersions
 }
 
 root_type ForwardReply;
