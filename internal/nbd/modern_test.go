@@ -382,3 +382,20 @@ func TestNBDBlockStatusConservativeAllocated(t *testing.T) {
 	require.Equal(t, uint32(4096), binary.BigEndian.Uint32(chunk.payload[4:8]))
 	require.Equal(t, uint32(0), binary.BigEndian.Uint32(chunk.payload[8:12]))
 }
+
+func TestNBDExtendedHeadersUnsupportedByDefault(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	completeClientFlags(t, client, nbdFlagClientFixedNewstyle)
+	writeEmptyOption(t, client, nbdOptExtendedHeaders)
+	rep := readOptionReply(t, client)
+	require.Equal(t, nbdRepErrUnsup, rep.typ)
+}
+
+func TestNBDExtendedRequestParserRejectsOversizeEffect(t *testing.T) {
+	req := make([]byte, 32)
+	binary.BigEndian.PutUint32(req[0:4], nbdExtendedRequestMagic)
+	binary.BigEndian.PutUint16(req[6:8], uint16(nbdCmdWriteZeroes))
+	binary.BigEndian.PutUint64(req[24:32], uint64(nbdMaxPayloadSize)+1)
+	_, err := parseExtendedRequest(req)
+	require.Error(t, err)
+}

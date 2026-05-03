@@ -539,7 +539,7 @@ git commit -m "feat: support nbd structured replies and block status"
 - Modify: `internal/nbd/handshake.go`
 - Modify: `internal/nbd/modern_test.go`
 
-- [ ] **Step 1: Write failing disabled-advertisement and parser tests**
+- [x] **Step 1: Write failing disabled-advertisement and parser tests**
 
 Add tests:
 
@@ -562,7 +562,7 @@ func TestNBDExtendedRequestParserRejectsOversizeEffect(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests and confirm failure**
+- [x] **Step 2: Run tests and confirm failure**
 
 Run:
 
@@ -572,11 +572,11 @@ go test ./internal/nbd -run 'TestNBDExtended' -count=1
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement parser but keep negotiation unsupported**
+- [x] **Step 3: Implement parser but keep negotiation unsupported**
 
 Add `nbdOptExtendedHeaders = 11`, `nbdExtendedRequestMagic = 0x21e41c71`, and parser validation. Keep `handleOptExtendedHeaders` returning `NBD_REP_ERR_UNSUP` until interop passes.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run:
 
@@ -586,7 +586,7 @@ go test ./internal/nbd -run 'TestNBDExtended|TestNBDStructured|TestNBDOpt' -coun
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/nbd/request.go internal/nbd/reply.go internal/nbd/handshake.go internal/nbd/modern_test.go
