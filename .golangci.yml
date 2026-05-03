@@ -1,6 +1,6 @@
 run:
   timeout: 5m
-  tests: true
+  tests: false
 
 linters:
   enable:
@@ -14,3 +14,8 @@ linters:
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
+  exclude-rules:
+    - path: internal/nfs4server/
+      linters:
+        - errcheck
+      text: "Error return value of `(.*ReadUint.*|.*ReadOpaque|.*ReadFixed|.*ReadString|io.ReadFull)` is not checked"

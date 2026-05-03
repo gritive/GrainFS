@@ -1355,6 +1355,7 @@ func (n *Node) replicateToAll() {
 	}
 }
 
+//nolint:unused // package tests exercise this legacy one-shot replication path.
 func (n *Node) replicateTo(peer string) {
 	n.mu.Lock()
 	if n.state != Leader {

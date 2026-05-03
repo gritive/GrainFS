@@ -51,6 +51,7 @@ func validateRequestSize(req nbdRequest) error {
 	return nil
 }
 
+//nolint:unused // package tests pin extended request parsing for future enablement.
 func parseExtendedRequest(hdr []byte) (nbdRequest, error) {
 	if len(hdr) != 32 {
 		return nbdRequest{}, fmt.Errorf("bad extended request length: %d", len(hdr))
