@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.39.0] — 2026-05-04 — harden validation and stream object memory paths
+
+### Added
+
+- **repository lint baseline**: added `.golangci.yml` and wired `make lint` to run `go vet`, `gofmt`, and the configured `golangci-lint` pass.
+- **PUT spooling and streaming**: added cluster object spooling, streaming local shard writes, streamed peer shard replication, and streamed EC shard generation.
+- **memory regressions**: added allocation coverage for Range GET and cluster PUT, including FD cleanup coverage for streamed shard fan-out.
+
+### Changed
+
+- **Range GET**: large byte ranges now stream through bounded readers instead of allocating the whole response body.
+- **cluster writes**: N× replication and EC writes now preserve ETag, content type, versioning, and shard metadata while avoiding full-body buffering in the hot fan-out path.
+- **lint hygiene**: removed dead receipt/shard helpers, classified test-only helpers, and fixed production unchecked-error/static-analysis findings.
+
+### Fixed
+
+- **rebalance timeout context leak**: join-mode startup no longer creates an unused timeout context.
+- **auto-snapshot e2e readiness**: the focused auto-snapshot test now waits deterministically for routing and snapshot readiness before asserting.
+- **heartbeat coalescer test race**: fake sender assertions now read lock-protected snapshots.
+- **empty EC objects**: streamed EC shard spooling and reconstruction now handle 0-byte objects.
+
+### Tests
+
+- Verified `make lint`.
+- Verified changed packages with `go test ./cmd/grainfs ./internal/server ./internal/cluster ./internal/transport ./internal/storage/eccodec ./internal/nbd ./internal/raft ./internal/raft/chaos -count=1`.
+- Verified focused auto-snapshot e2e with `go test ./tests/e2e -run TestAutoSnapshot_CreatesSnapshotAutomatically -count=1`.
+
 ## [0.0.38.0] — 2026-05-04 — predict open FD exhaustion before outage
 
 ### Added
