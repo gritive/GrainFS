@@ -30,9 +30,9 @@ var (
 	ErrNoReachablePeer = errors.New("forward: no reachable peer")
 )
 
-// forwardDialer abstracts the QUIC transport for testability. Production wires
-// it to quicTransport.Send (type=StreamProposeGroupForward); tests pass a fake
-// that returns canned replies.
+// forwardDialer abstracts the request-response QUIC transport for testability.
+// Production wires it to quicTransport.Call; tests pass a fake that returns
+// canned replies.
 type forwardDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 type forwardStreamDialer func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error)
 
