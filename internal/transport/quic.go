@@ -39,6 +39,62 @@ type StreamHandler func(req *Message) *Message
 // the same QUIC stream. The handler must read body before returning a response.
 type StreamBodyHandler func(req *Message, body io.Reader) *Message
 
+type TrafficLimits struct {
+	Control int
+	Meta    int
+	Data    int
+	Bulk    int
+}
+
+type TrafficLimiter struct {
+	control chan struct{}
+	meta    chan struct{}
+	data    chan struct{}
+	bulk    chan struct{}
+}
+
+func NewTrafficLimiter(l TrafficLimits) *TrafficLimiter {
+	return &TrafficLimiter{
+		control: makeLimit(l.Control),
+		meta:    makeLimit(l.Meta),
+		data:    makeLimit(l.Data),
+		bulk:    makeLimit(l.Bulk),
+	}
+}
+
+func makeLimit(n int) chan struct{} {
+	if n <= 0 {
+		return nil
+	}
+	return make(chan struct{}, n)
+}
+
+func (l *TrafficLimiter) Acquire(ctx context.Context, st StreamType) (func(), error) {
+	if l == nil {
+		return func() {}, nil
+	}
+	var ch chan struct{}
+	switch ClassOf(st) {
+	case StreamClassControl:
+		ch = l.control
+	case StreamClassMeta:
+		ch = l.meta
+	case StreamClassData:
+		ch = l.data
+	case StreamClassBulk:
+		ch = l.bulk
+	}
+	if ch == nil {
+		return func() {}, nil
+	}
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // StreamRouter routes incoming messages to different handlers based on StreamType.
 type StreamRouter struct {
 	handlers     map[StreamType]StreamHandler
@@ -108,6 +164,7 @@ type QUICTransport struct {
 	streamHandler StreamHandler // catch-all bidirectional handler (backward compat)
 	psk           string        // pre-shared key for peer authentication (empty = no auth)
 	muxHandler    MuxConnHandler
+	traffic       *TrafficLimiter
 }
 
 // NewQUICTransport creates a new QUIC-based transport.
@@ -127,6 +184,34 @@ func NewQUICTransport(psk ...string) *QUICTransport {
 		t.psk = psk[0]
 	}
 	return t
+}
+
+func (t *QUICTransport) SetTrafficLimits(l TrafficLimits) {
+	t.mu.Lock()
+	t.traffic = NewTrafficLimiter(l)
+	t.mu.Unlock()
+}
+
+func (t *QUICTransport) acquireTraffic(ctx context.Context, st StreamType) (func(), error) {
+	t.mu.RLock()
+	lim := t.traffic
+	t.mu.RUnlock()
+	if lim == nil {
+		return func() {}, nil
+	}
+	return lim.Acquire(ctx, st)
+}
+
+func (t *QUICTransport) acquireInboundTraffic(st StreamType) (func(), error) {
+	switch ClassOf(st) {
+	case StreamClassData, StreamClassBulk:
+		ctx, cancel := context.WithTimeout(t.ctx, 25*time.Millisecond)
+		release, err := t.acquireTraffic(ctx, st)
+		cancel()
+		return release, err
+	default:
+		return t.acquireTraffic(t.ctx, st)
+	}
 }
 
 // pskALPN returns the legacy ALPN protocol string, incorporating PSK hash for authentication.
@@ -273,6 +358,13 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 		return
 	}
 
+	release, err := t.acquireInboundTraffic(msg.Type)
+	if err != nil {
+		_ = t.writeErrorResponse(stream, msg, StatusOverloaded, err)
+		return
+	}
+	defer release()
+
 	// Per-type handler takes priority over catch-all.
 	t.mu.RLock()
 	typeHandler, hasTypeHandler := t.router.Lookup(msg.Type)
@@ -307,6 +399,20 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 	case t.inbox <- &ReceivedMessage{From: from, Message: msg}:
 	case <-t.ctx.Done():
 	}
+}
+
+func (t *QUICTransport) writeErrorResponse(stream *quic.Stream, req *Message, status MessageStatus, err error) error {
+	return t.codec.Encode(stream, NewErrorResponse(req, status, err))
+}
+
+func checkResponseStatus(addr string, resp *Message) (*Message, error) {
+	if resp == nil {
+		return nil, errors.New("transport: nil response")
+	}
+	if resp.Status == StatusOK {
+		return resp, nil
+	}
+	return nil, fmt.Errorf("transport response from %s status %d: %s", addr, resp.Status, string(resp.Payload))
 }
 
 // GetOrConnectMux dials (or returns the cached) mux QUIC connection for addr.
@@ -403,6 +509,12 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 
 // Send sends a message to a peer. Opens a new stream per message.
 func (t *QUICTransport) Send(ctx context.Context, addr string, msg *Message) error {
+	release, err := t.acquireTraffic(ctx, msg.Type)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	t.mu.RLock()
 	conn, ok := t.conns[addr]
 	t.mu.RUnlock()
@@ -457,6 +569,12 @@ func (t *QUICTransport) HandleBody(st StreamType, h StreamBodyHandler) {
 // Unlike Send, this opens a stream, writes the request, reads the response, and returns it.
 // If the cached connection is stale (idle-timed-out), it is evicted and re-dialled once.
 func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*Message, error) {
+	release, err := t.acquireTraffic(ctx, req.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	conn, err := t.getOrConnect(ctx, addr)
 	if err != nil {
 		return nil, err
@@ -490,12 +608,18 @@ func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*M
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
 
-	return resp, nil
+	return checkResponseStatus(addr, resp)
 }
 
 // CallWithBody sends a framed request, streams body bytes behind it, half-closes
 // the write side, then waits for a framed response from the peer.
 func (t *QUICTransport) CallWithBody(ctx context.Context, addr string, req *Message, body io.Reader) (*Message, error) {
+	release, err := t.acquireTraffic(ctx, req.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	conn, err := t.getOrConnect(ctx, addr)
 	if err != nil {
 		return nil, err
@@ -543,13 +667,19 @@ func (t *QUICTransport) CallWithBody(ctx context.Context, addr string, req *Mess
 	if err != nil {
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
-	return resp, nil
+	return checkResponseStatus(addr, resp)
 }
 
 // CallFlatBuffer sends a FlatBuffers message and waits for a response.
 // Builder must remain alive until this returns; caller is responsible for returning it to pool.
 // Unlike Call, this uses EncodeWriterTo to write directly from Builder.FinishedBytes() — no make+copy.
 func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *FlatBuffersWriter) (*Message, error) {
+	release, err := t.acquireTraffic(ctx, fw.Typ)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	conn, err := t.getOrConnect(ctx, addr)
 	if err != nil {
 		return nil, err
@@ -579,7 +709,7 @@ func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *Fla
 	if err != nil {
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
-	return resp, nil
+	return checkResponseStatus(addr, resp)
 }
 
 func shouldEvictOpenStreamError(ctx context.Context, err error) bool {

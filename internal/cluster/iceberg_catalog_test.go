@@ -190,6 +190,10 @@ func TestForwardingBucketAssignerForwardsFromFollower(t *testing.T) {
 	var forwarded []byte
 	assigner := NewForwardingBucketAssigner(follower, func(_ context.Context, command []byte) error {
 		forwarded = append([]byte(nil), command...)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = follower.FSM().applyCmd(command)
+		}()
 		return nil
 	})
 
@@ -203,4 +207,22 @@ func TestForwardingBucketAssignerForwardsFromFollower(t *testing.T) {
 	require.NotNil(t, assignment)
 	require.Equal(t, "photos", string(assignment.Bucket()))
 	require.Equal(t, "group-0", string(assignment.GroupId()))
+}
+
+func TestForwardingBucketAssignerTimesOutWaitingForLocalApply(t *testing.T) {
+	follower := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = follower.Close() })
+
+	prev := bucketAssignmentLocalApplyTimeout
+	bucketAssignmentLocalApplyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { bucketAssignmentLocalApplyTimeout = prev })
+
+	assigner := NewForwardingBucketAssigner(follower, func(_ context.Context, _ []byte) error {
+		return nil
+	})
+
+	start := time.Now()
+	err := assigner.ProposeBucketAssignment(context.Background(), "photos", "group-0")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), time.Second)
 }

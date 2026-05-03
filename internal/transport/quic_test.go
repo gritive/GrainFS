@@ -1,8 +1,10 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -166,7 +168,7 @@ func TestQUICTransport_Call(t *testing.T) {
 
 	// Server echoes back the payload with "reply:" prefix
 	server.SetStreamHandler(func(reqMsg *Message) *Message {
-		return &Message{Type: reqMsg.Type, Payload: append([]byte("reply:"), reqMsg.Payload...)}
+		return NewResponse(reqMsg, append([]byte("reply:"), reqMsg.Payload...))
 	})
 
 	req := &Message{Type: StreamControl, Payload: []byte("ping")}
@@ -384,7 +386,7 @@ func TestQUICTransport_CallFlatBuffer(t *testing.T) {
 
 	// 서버: 받은 payload를 echo
 	server.SetStreamHandler(func(reqMsg *Message) *Message {
-		return &Message{Type: reqMsg.Type, Payload: append([]byte("echo:"), reqMsg.Payload...)}
+		return NewResponse(reqMsg, append([]byte("echo:"), reqMsg.Payload...))
 	})
 
 	// FlatBuffer 빌드: byte vector 하나
@@ -397,4 +399,103 @@ func TestQUICTransport_CallFlatBuffer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StreamData, resp.Type)
 	assert.Contains(t, string(resp.Payload), "echo:")
+}
+
+func TestStreamClassOf(t *testing.T) {
+	require.Equal(t, StreamClassControl, ClassOf(StreamControl))
+	require.Equal(t, StreamClassMeta, ClassOf(StreamMetaRaft))
+	require.Equal(t, StreamClassMeta, ClassOf(StreamMetaProposeForward))
+	require.Equal(t, StreamClassData, ClassOf(StreamData))
+	require.Equal(t, StreamClassBulk, ClassOf(StreamGroupForwardBody))
+}
+
+func TestTrafficLimiter_BulkSaturationDoesNotBlockMeta(t *testing.T) {
+	lim := NewTrafficLimiter(TrafficLimits{
+		Bulk: 1,
+	})
+	releaseBulk, err := lim.Acquire(context.Background(), StreamGroupForwardBody)
+	require.NoError(t, err)
+	defer releaseBulk()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err = lim.Acquire(ctx, StreamGroupForwardBody)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	releaseMeta, err := lim.Acquire(context.Background(), StreamMetaRaft)
+	require.NoError(t, err)
+	releaseMeta()
+}
+
+func TestQUICTransport_CallReturnsErrorForNonOKStatus(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	server.SetStreamHandler(func(reqMsg *Message) *Message {
+		return NewErrorResponse(reqMsg, StatusOverloaded, fmt.Errorf("busy"))
+	})
+
+	_, err := client.Call(ctx, server.LocalAddr(), &Message{Type: StreamMetaRaft, Payload: []byte("ping")})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "busy")
+}
+
+func TestQUICTransport_InboundBulkSaturationDoesNotBlockMeta(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	server.SetTrafficLimits(TrafficLimits{Bulk: 1})
+	blockBulk := make(chan struct{})
+	enteredBulk := make(chan struct{})
+	var enteredOnce sync.Once
+
+	server.HandleBody(StreamGroupForwardBody, func(req *Message, body io.Reader) *Message {
+		enteredOnce.Do(func() { close(enteredBulk) })
+		<-blockBulk
+		_, _ = io.Copy(io.Discard, body)
+		return NewResponse(req, []byte("bulk-ok"))
+	})
+	server.Handle(StreamMetaRaft, func(req *Message) *Message {
+		return NewResponse(req, []byte("meta-ok"))
+	})
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := client.CallWithBody(ctx, server.LocalAddr(), &Message{Type: StreamGroupForwardBody}, bytes.NewReader([]byte("first")))
+		firstDone <- err
+	}()
+
+	select {
+	case <-enteredBulk:
+	case <-time.After(time.Second):
+		t.Fatal("bulk handler did not start")
+	}
+
+	secondCtx, secondCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer secondCancel()
+	_, err := client.CallWithBody(secondCtx, server.LocalAddr(), &Message{Type: StreamGroupForwardBody}, bytes.NewReader([]byte("second")))
+	require.Error(t, err)
+
+	resp, err := client.Call(ctx, server.LocalAddr(), &Message{Type: StreamMetaRaft, Payload: []byte("meta")})
+	require.NoError(t, err)
+	require.Equal(t, []byte("meta-ok"), resp.Payload)
+
+	close(blockBulk)
+	require.NoError(t, <-firstDone)
 }

@@ -229,6 +229,80 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts, shardEncryptor)
 }
 
+func seedInitialShardGroups(
+	ctx context.Context,
+	metaRaft *cluster.MetaRaft,
+	nodeID string,
+	peers []string,
+	seedGroups int,
+) error {
+	bootstrapCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	if err := waitForMetaRaftLeader(bootstrapCtx, metaRaft, 15*time.Second); err != nil {
+		return err
+	}
+
+	clusterPeers := append([]string{nodeID}, peers...)
+	const replicationFactor = 3
+	for i := 0; i < seedGroups; i++ {
+		groupID := fmt.Sprintf("group-%d", i)
+		var voters []string
+		if i == 0 {
+			voters = clusterPeers
+		} else {
+			voters = cluster.PickVoters(groupID, clusterPeers, replicationFactor)
+		}
+
+		sgCtx, sgCancel := context.WithTimeout(bootstrapCtx, 5*time.Second)
+		err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
+			ID:      groupID,
+			PeerIDs: voters,
+		})
+		sgCancel()
+		if i == 0 && err != nil && metaRaft.IsLeader() {
+			return fmt.Errorf("seed group-0: %w", err)
+		}
+		if err != nil {
+			log.Debug().Str("group", groupID).Err(err).Msg("seed shard group propose failed (non-fatal)")
+		}
+		if err := bootstrapCtx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func waitForMetaRaftLeader(ctx context.Context, metaRaft *cluster.MetaRaft, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if metaRaft.IsLeader() || metaRaft.Node().LeaderID() != "" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("meta-raft leader not visible after %s", timeout)
+}
+
+func waitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, want int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(src.ShardGroups()) >= want {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("only %d/%d shard groups visible after %s", len(src.ShardGroups()), want, timeout)
+}
+
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
@@ -383,6 +457,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	// Start QUIC transport for inter-node communication.
 	quicTransport := transport.NewQUICTransport(clusterKey)
+	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 8})
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)
 	}
@@ -470,9 +545,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Start() returns before replay finishes; onBucketAssigned fires live updates.
 	clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
 
-	// Propose initial shard groups asynchronously (idempotent: ProposeShardGroup is leader-only;
-	// non-leader는 NotLeader 에러를 리턴하고 다음 leader가 take-over).
-	//
 	// Default 0 = auto-derived from cluster size: max(8, (1+len(peers))*4).
 	// Solo(peers=0)=8, 5-node=20, 10-node=40 — 클러스터 확장 시 sharding 헤드룸 확보.
 	// 명시값 ≥1 = 그 값 그대로, <0 = 1로 클램프.
@@ -486,51 +558,25 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	} else if seedGroups < 1 {
 		seedGroups = 1
 	}
-	go func() {
-		// Wait for meta-Raft leader to settle before seeding (single-node: ~150ms;
-		// multi-node: up to election timeout). Without this, the very first
-		// ProposeShardGroup races and fails with NotLeader on cold start.
-		leaderDeadline := time.Now().Add(15 * time.Second)
-		for time.Now().Before(leaderDeadline) {
-			if metaRaft.IsLeader() || metaRaft.Node().LeaderID() != "" {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+	if !joinMode {
+		if err := waitForMetaRaftLeader(ctx, metaRaft, 15*time.Second); err != nil {
+			return err
 		}
-
 		addNodeCtx, addNodeCancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := metaRaft.ProposeAddNode(addNodeCtx, cluster.MetaNodeEntry{ID: nodeID, Address: raftAddr, Role: 0}); err != nil {
 			log.Debug().Err(err).Str("node_id", nodeID).Str("addr", raftAddr).Msg("seed node metadata propose failed (non-fatal)")
 		}
 		addNodeCancel()
 
-		// Dynamic seed uses nodeID for self. Static bootstrap peers are still
-		// passed as raft addresses because the CLI only has --peers=<addr>,
-		// not peer nodeIDs; the address resolver treats those as legacy IDs.
-		clusterPeers := append([]string{nodeID}, peers...)
-		const replicationFactor = 3
-		for i := 0; i < seedGroups; i++ {
-			groupID := fmt.Sprintf("group-%d", i)
-			// group-0 keeps full membership for backward-compat with legacy
-			// single-backend deployment. Groups 1..N-1 use rendezvous-hashed
-			// voter placement (RF=3) for true sharding.
-			var voters []string
-			if i == 0 {
-				voters = clusterPeers
-			} else {
-				voters = cluster.PickVoters(groupID, clusterPeers, replicationFactor)
-			}
-			sgCtx, sgCancel := context.WithTimeout(ctx, 30*time.Second)
-			if err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
-				ID:      groupID,
-				PeerIDs: voters,
-			}); err != nil {
-				// Followers reject with NotLeader; only the leader's seed loop succeeds.
-				log.Debug().Str("group", groupID).Err(err).Msg("seed shard group propose failed (non-fatal)")
-			}
-			sgCancel()
+		if err := seedInitialShardGroups(ctx, metaRaft, nodeID, peers, seedGroups); err != nil {
+			return err
 		}
-	}()
+		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+			return err
+		}
+		clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
+		clusterRouter.SetRequireExplicitAssignments(true)
+	}
 
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
@@ -907,6 +953,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err := performMetaJoin(ctx, quicTransport, peers, nodeID, raftAddr); err != nil {
 			return err
 		}
+		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+			return err
+		}
+		clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
+		clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
 	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD, then

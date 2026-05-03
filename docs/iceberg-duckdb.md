@@ -1,6 +1,7 @@
 # DuckDB Iceberg REST Catalog
 
-GrainFS exposes a minimal Iceberg REST Catalog for DuckDB at `/iceberg/v1`.
+GrainFS exposes an Iceberg REST Catalog compatible table API for DuckDB at
+`/iceberg/v1`.
 
 Single-node `grainfs serve` stores catalog namespace and table state in the
 local Badger-backed metadata DB. Multi-peer cluster mode stores namespace and

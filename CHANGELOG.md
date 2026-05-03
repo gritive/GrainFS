@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.29.0] — 2026-05-03 — harden protocol layering over distributed object storage
+
+### Added
+
+- **architecture**: documented the protocol layering contract that keeps S3, NFSv4, NBD, and Iceberg REST Catalog above the shared distributed object storage backend.
+- **tests**: added NBD and Iceberg cross-protocol e2e coverage proving protocol adapters route through the cluster coordinator, alongside existing S3/NFS paths.
+
+### Changed
+
+- **cluster**: bucket routing now switches to explicit assignment mode after shard-group bootstrap, so protocol traffic only reaches buckets with durable meta-Raft placement.
+- **transport**: QUIC messages now carry request IDs and response status, and bulk forwarded body streams have their own traffic budget so object writes cannot starve meta/control calls.
+- **iceberg**: docs now describe the table surface as Iceberg REST Catalog compatible, with metadata JSON stored as ordinary objects and catalog pointers kept in meta-Raft.
+
+### Fixed
+
+- **cluster**: dynamic join nodes now join meta-Raft before strict routing waits on shard-group visibility, preserving joined-node S3/Iceberg/NFS/NBD service startup.
+- **cluster**: follower-routed bucket creation now waits for local bucket assignment visibility with a bounded timeout before returning, preventing immediate routed writes from seeing a missing bucket or hanging forever.
+
 ## [0.0.28.0] — 2026-05-03 — remove clustered S3 QUIC timeout cascade
 
 ### Changed
