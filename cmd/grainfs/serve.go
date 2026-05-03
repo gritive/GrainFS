@@ -673,15 +673,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		cluster.NewDataGroupPlanExecutor(nodeID, dgMgr, metaRaft.FSM(), metaRaft),
 	)
 	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
-		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
-		if !joinMode {
-			go func() {
-				defer execCancel()
-				if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
-					log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
-				}
-			}()
+		if joinMode {
+			return
 		}
+		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
+		go func() {
+			defer execCancel()
+			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
+				log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
+			}
+		}()
 	})
 	go rebalancer.Run(ctx)
 
