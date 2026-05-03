@@ -4,6 +4,7 @@
 package pullthrough
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -32,8 +33,8 @@ func NewBackend(local storage.Backend, upstream Upstream) *Backend {
 
 // HeadObject returns metadata from the local cache. On miss it pulls via GetObject
 // (since S3Upstream has no HeadObject), caches the body, and returns the metadata.
-func (b *Backend) HeadObject(bucket, key string) (*storage.Object, error) {
-	obj, err := b.Backend.HeadObject(bucket, key)
+func (b *Backend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	obj, err := b.Backend.HeadObject(ctx, bucket, key)
 	if err == nil {
 		return obj, nil
 	}
@@ -42,7 +43,7 @@ func (b *Backend) HeadObject(bucket, key string) (*storage.Object, error) {
 	}
 
 	// Trigger a full GET to populate the cache, then return the metadata.
-	rc, upObj, err := b.GetObject(bucket, key)
+	rc, upObj, err := b.GetObject(ctx, bucket, key)
 	if err != nil {
 		return nil, err
 	}
@@ -63,8 +64,8 @@ func (b *Backend) HeadObject(bucket, key string) (*storage.Object, error) {
 // "best-effort" with log-and-return). Streaming makes cache-or-fail unavoidable
 // because the upstream reader is consumed during PutObject. Callers see a
 // reliable signal when the cache cannot accept data.
-func (b *Backend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	rc, obj, err := b.Backend.GetObject(bucket, key)
+func (b *Backend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	rc, obj, err := b.Backend.GetObject(ctx, bucket, key)
 	if err == nil {
 		return rc, obj, nil
 	}
@@ -86,12 +87,12 @@ func (b *Backend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object,
 
 	// Stream upstream → local cache. If upstream fails mid-stream, PutObject
 	// returns the upstream error and the local backend removes any partial file.
-	if _, err := b.Backend.PutObject(bucket, key, upRC, ct); err != nil {
+	if _, err := b.Backend.PutObject(ctx, bucket, key, upRC, ct); err != nil {
 		return nil, nil, fmt.Errorf("cache upstream object: %w", err)
 	}
 
 	// 2-pass: return a fresh reader from the local cache.
-	return b.Backend.GetObject(bucket, key)
+	return b.Backend.GetObject(ctx, bucket, key)
 }
 
 func isNotFound(err error) bool {

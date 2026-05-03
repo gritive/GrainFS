@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"io"
 	"sync/atomic"
 )
@@ -35,60 +36,60 @@ func (sb *SwappableBackend) Unwrap() Backend {
 	return *sb.inner.Load()
 }
 
-func (sb *SwappableBackend) CreateBucket(bucket string) error {
-	return (*sb.inner.Load()).CreateBucket(bucket)
+func (sb *SwappableBackend) CreateBucket(ctx context.Context, bucket string) error {
+	return (*sb.inner.Load()).CreateBucket(ctx, bucket)
 }
 
-func (sb *SwappableBackend) HeadBucket(bucket string) error {
-	return (*sb.inner.Load()).HeadBucket(bucket)
+func (sb *SwappableBackend) HeadBucket(ctx context.Context, bucket string) error {
+	return (*sb.inner.Load()).HeadBucket(ctx, bucket)
 }
 
-func (sb *SwappableBackend) DeleteBucket(bucket string) error {
-	return (*sb.inner.Load()).DeleteBucket(bucket)
+func (sb *SwappableBackend) DeleteBucket(ctx context.Context, bucket string) error {
+	return (*sb.inner.Load()).DeleteBucket(ctx, bucket)
 }
 
-func (sb *SwappableBackend) ListBuckets() ([]string, error) {
-	return (*sb.inner.Load()).ListBuckets()
+func (sb *SwappableBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	return (*sb.inner.Load()).ListBuckets(ctx)
 }
 
-func (sb *SwappableBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*Object, error) {
-	return (*sb.inner.Load()).PutObject(bucket, key, r, contentType)
+func (sb *SwappableBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
+	return (*sb.inner.Load()).PutObject(ctx, bucket, key, r, contentType)
 }
 
-func (sb *SwappableBackend) GetObject(bucket, key string) (io.ReadCloser, *Object, error) {
-	return (*sb.inner.Load()).GetObject(bucket, key)
+func (sb *SwappableBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
+	return (*sb.inner.Load()).GetObject(ctx, bucket, key)
 }
 
-func (sb *SwappableBackend) HeadObject(bucket, key string) (*Object, error) {
-	return (*sb.inner.Load()).HeadObject(bucket, key)
+func (sb *SwappableBackend) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
+	return (*sb.inner.Load()).HeadObject(ctx, bucket, key)
 }
 
-func (sb *SwappableBackend) DeleteObject(bucket, key string) error {
-	return (*sb.inner.Load()).DeleteObject(bucket, key)
+func (sb *SwappableBackend) DeleteObject(ctx context.Context, bucket, key string) error {
+	return (*sb.inner.Load()).DeleteObject(ctx, bucket, key)
 }
 
-func (sb *SwappableBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*Object, error) {
-	return (*sb.inner.Load()).ListObjects(bucket, prefix, maxKeys)
+func (sb *SwappableBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*Object, error) {
+	return (*sb.inner.Load()).ListObjects(ctx, bucket, prefix, maxKeys)
 }
 
-func (sb *SwappableBackend) WalkObjects(bucket, prefix string, fn func(*Object) error) error {
-	return (*sb.inner.Load()).WalkObjects(bucket, prefix, fn)
+func (sb *SwappableBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error {
+	return (*sb.inner.Load()).WalkObjects(ctx, bucket, prefix, fn)
 }
 
-func (sb *SwappableBackend) CreateMultipartUpload(bucket, key, contentType string) (*MultipartUpload, error) {
-	return (*sb.inner.Load()).CreateMultipartUpload(bucket, key, contentType)
+func (sb *SwappableBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*MultipartUpload, error) {
+	return (*sb.inner.Load()).CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
-func (sb *SwappableBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
-	return (*sb.inner.Load()).UploadPart(bucket, key, uploadID, partNumber, r)
+func (sb *SwappableBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
+	return (*sb.inner.Load()).UploadPart(ctx, bucket, key, uploadID, partNumber, r)
 }
 
-func (sb *SwappableBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []Part) (*Object, error) {
-	return (*sb.inner.Load()).CompleteMultipartUpload(bucket, key, uploadID, parts)
+func (sb *SwappableBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
+	return (*sb.inner.Load()).CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 }
 
-func (sb *SwappableBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
-	return (*sb.inner.Load()).AbortMultipartUpload(bucket, key, uploadID)
+func (sb *SwappableBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	return (*sb.inner.Load()).AbortMultipartUpload(ctx, bucket, key, uploadID)
 }
 
 // ListAllObjects implements Snapshotable by delegating to the inner backend.

@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestCopyObject_RefcountOverflow(t *testing.T) {
 
 	// Write initial object
 	data := []byte("test data for refcount overflow")
-	_, err = pb.PutObject("bucket1", "key1", bytes.NewReader(data), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket1", "key1", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	// Get the index entry and manually set refcount to near max int64
@@ -73,7 +74,7 @@ func TestCopyObject_RefcountAtMaxValue(t *testing.T) {
 
 	// Write initial object
 	data := []byte("test data for refcount at max")
-	_, err = pb.PutObject("bucket1", "key1", bytes.NewReader(data), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket1", "key1", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	// Get the index entry and set refcount to max int64
@@ -111,7 +112,7 @@ func TestCopyObject_NormalRefcountIncrement(t *testing.T) {
 
 	// Write initial object
 	data := []byte("test data for normal refcount")
-	_, err = pb.PutObject("bucket1", "key1", bytes.NewReader(data), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket1", "key1", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	// Copy object (should succeed normally)

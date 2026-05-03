@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -34,8 +35,8 @@ type multipartMeta struct {
 	CreatedAt   int64
 }
 
-func (b *LocalBackend) CreateMultipartUpload(bucket, key, contentType string) (*MultipartUpload, error) {
-	if err := b.HeadBucket(bucket); err != nil {
+func (b *LocalBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*MultipartUpload, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -74,7 +75,8 @@ func (b *LocalBackend) CreateMultipartUpload(bucket, key, contentType string) (*
 	}, nil
 }
 
-func (b *LocalBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
+func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
+	_ = ctx
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(b.multipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
@@ -108,7 +110,8 @@ func (b *LocalBackend) UploadPart(bucket, key, uploadID string, partNumber int, 
 	}, nil
 }
 
-func (b *LocalBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []Part) (*Object, error) {
+func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
+	_ = ctx
 	var meta multipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(b.multipartKey(uploadID))
@@ -199,7 +202,8 @@ func (b *LocalBackend) CompleteMultipartUpload(bucket, key, uploadID string, par
 	return obj, nil
 }
 
-func (b *LocalBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
+func (b *LocalBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	_ = ctx
 	err := b.db.Update(func(txn *badger.Txn) error {
 		mk := b.multipartKey(uploadID)
 		_, err := txn.Get(mk)

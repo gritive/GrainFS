@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -24,27 +25,31 @@ func newMarkerBackend() *markerBackend {
 	return &markerBackend{stored: make(map[string]*storage.Object)}
 }
 
-func (m *markerBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+func (m *markerBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	_ = ctx
 	// Inner backend stores zero-byte markers for packed objects
 	m.stored[bucket+"/"+key] = &storage.Object{Key: key, Size: 0, ContentType: contentType}
 	return m.stored[bucket+"/"+key], nil
 }
 
-func (m *markerBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+func (m *markerBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	_ = ctx
 	if obj, ok := m.stored[bucket+"/"+key]; ok {
 		return io.NopCloser(bytes.NewReader(nil)), obj, nil
 	}
 	return nil, nil, fmt.Errorf("not found: %s/%s", bucket, key)
 }
 
-func (m *markerBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (m *markerBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	_ = ctx
 	if obj, ok := m.stored[bucket+"/"+key]; ok {
 		return obj, nil
 	}
 	return nil, fmt.Errorf("not found: %s/%s", bucket, key)
 }
 
-func (m *markerBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+func (m *markerBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	_ = ctx
 	var result []*storage.Object
 	pfx := bucket + "/" + prefix
 	for ikey, obj := range m.stored {
@@ -68,10 +73,10 @@ func TestPackedBackend_ListObjectsSizeCorrect(t *testing.T) {
 	defer pb.Close()
 
 	content := []byte("hello packed world")
-	_, err = pb.PutObject("bucket", "key1", bytes.NewReader(content), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket", "key1", bytes.NewReader(content), "text/plain")
 	require.NoError(t, err)
 
-	objs, err := pb.ListObjects("bucket", "", 100)
+	objs, err := pb.ListObjects(context.Background(), "bucket", "", 100)
 	require.NoError(t, err)
 	require.Len(t, objs, 1)
 
@@ -92,10 +97,10 @@ func TestPackedBackend_ListObjectsSizeCorrect_WithPrefix(t *testing.T) {
 	defer pb.Close()
 
 	content := []byte("prefixed content")
-	_, err = pb.PutObject("bucket", "pre/key1", bytes.NewReader(content), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket", "pre/key1", bytes.NewReader(content), "text/plain")
 	require.NoError(t, err)
 
-	objs, err := pb.ListObjects("bucket", "pre/", 100)
+	objs, err := pb.ListObjects(context.Background(), "bucket", "pre/", 100)
 	require.NoError(t, err)
 	require.Len(t, objs, 1)
 

@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -28,8 +29,8 @@ func (b *Backend) WALOffset() uint64 { return b.w.CurrentSeq() }
 // Unwrap returns the inner backend for interface chaining.
 func (b *Backend) Unwrap() storage.Backend { return b.Backend }
 
-func (b *Backend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
-	obj, err := b.Backend.PutObject(bucket, key, r, contentType)
+func (b *Backend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	obj, err := b.Backend.PutObject(ctx, bucket, key, r, contentType)
 	if err != nil {
 		return nil, err
 	}
@@ -47,16 +48,16 @@ func (b *Backend) PutObject(bucket, key string, r io.Reader, contentType string)
 
 // PutObjectAsync delegates to the inner backend's write-back path and appends
 // the WAL entry inside the commitFn so PITR records only committed objects.
-func (b *Backend) PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
+func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
 	type asyncPutter interface {
-		PutObjectAsync(bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error)
+		PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error)
 	}
 	ap, ok := b.Backend.(asyncPutter)
 	if !ok {
-		obj, err := b.PutObject(bucket, key, r, contentType)
+		obj, err := b.PutObject(ctx, bucket, key, r, contentType)
 		return obj, func() error { return nil }, err
 	}
-	obj, innerCommit, err := ap.PutObjectAsync(bucket, key, r, contentType)
+	obj, innerCommit, err := ap.PutObjectAsync(ctx, bucket, key, r, contentType)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -81,45 +82,36 @@ func (b *Backend) PutObjectAsync(bucket, key string, r io.Reader, contentType st
 // WriteAt is a pass-through for pwrite-based partial writes on internal
 // buckets (NFS4, VFS). No WAL entry is written: internal buckets are ephemeral
 // and not subject to PITR replay.
-func (b *Backend) WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
-	type writeAtter interface {
-		WriteAt(bucket, key string, offset uint64, data []byte) (*storage.Object, error)
-	}
-	wa, ok := b.Backend.(writeAtter)
+func (b *Backend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	wa, ok := b.Backend.(storage.PartialIO)
 	if !ok {
 		return nil, fmt.Errorf("wal: inner backend does not support WriteAt")
 	}
-	return wa.WriteAt(bucket, key, offset, data)
+	return wa.WriteAt(ctx, bucket, key, offset, data)
 }
 
 // ReadAt is a pass-through for pread-based partial reads on internal buckets.
 // No WAL entry: reads are not mutations.
-func (b *Backend) ReadAt(bucket, key string, offset int64, buf []byte) (int, error) {
-	type readAtter interface {
-		ReadAt(bucket, key string, offset int64, buf []byte) (int, error)
-	}
-	ra, ok := b.Backend.(readAtter)
+func (b *Backend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	ra, ok := b.Backend.(storage.PartialIO)
 	if !ok {
 		return 0, fmt.Errorf("wal: inner backend does not support ReadAt")
 	}
-	return ra.ReadAt(bucket, key, offset, buf)
+	return ra.ReadAt(ctx, bucket, key, offset, buf)
 }
 
 // Truncate is a pass-through for internal bucket size changes used by NFS
 // SETATTR. No WAL entry is written: internal buckets are ephemeral and not
 // subject to PITR replay.
-func (b *Backend) Truncate(bucket, key string, size int64) error {
-	type truncater interface {
-		Truncate(bucket, key string, size int64) error
-	}
-	tr, ok := b.Backend.(truncater)
+func (b *Backend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	tr, ok := b.Backend.(storage.Truncatable)
 	if !ok {
 		return fmt.Errorf("wal: inner backend does not support Truncate")
 	}
-	return tr.Truncate(bucket, key, size)
+	return tr.Truncate(ctx, bucket, key, size)
 }
 
-func (b *Backend) DeleteObject(bucket, key string) error {
+func (b *Backend) DeleteObject(ctx context.Context, bucket, key string) error {
 	if sd, ok := b.Backend.(interface {
 		DeleteObjectReturningMarker(bucket, key string) (string, error)
 	}); ok {
@@ -130,7 +122,7 @@ func (b *Backend) DeleteObject(bucket, key string) error {
 		b.w.AppendAsync(Entry{Op: OpDelete, Bucket: bucket, Key: key, VersionID: markerID})
 		return nil
 	}
-	if err := b.Backend.DeleteObject(bucket, key); err != nil {
+	if err := b.Backend.DeleteObject(ctx, bucket, key); err != nil {
 		return err
 	}
 	// VersionID is unknown at this layer — backends that model deletes as
@@ -147,7 +139,7 @@ func (b *Backend) DeleteObjectReturningMarker(bucket, key string) (string, error
 		DeleteObjectReturningMarker(bucket, key string) (string, error)
 	})
 	if !ok {
-		if err := b.DeleteObject(bucket, key); err != nil {
+		if err := b.DeleteObject(context.Background(), bucket, key); err != nil {
 			return "", err
 		}
 		return "", nil
@@ -160,8 +152,8 @@ func (b *Backend) DeleteObjectReturningMarker(bucket, key string) (string, error
 	return markerID, nil
 }
 
-func (b *Backend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
-	obj, err := b.Backend.CompleteMultipartUpload(bucket, key, uploadID, parts)
+func (b *Backend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	obj, err := b.Backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 	if err != nil {
 		return nil, err
 	}

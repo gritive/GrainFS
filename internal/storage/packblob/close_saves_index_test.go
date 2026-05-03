@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestPackedBackend_CloseCallsSaveIndex(t *testing.T) {
 	pb, err := NewPackedBackend(inner, tmpDir, 1024)
 	require.NoError(t, err)
 
-	_, err = pb.PutObject("bucket", "key1", bytes.NewReader([]byte("hello")), "text/plain")
+	_, err = pb.PutObject(context.Background(), "bucket", "key1", bytes.NewReader([]byte("hello")), "text/plain")
 	require.NoError(t, err)
 
 	// CopyObject increments refcount to 2

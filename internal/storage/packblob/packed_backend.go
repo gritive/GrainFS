@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -179,26 +180,26 @@ func (pb *PackedBackend) LoadIndex() error {
 
 // --- Bucket operations (pass through to inner) ---
 
-func (pb *PackedBackend) CreateBucket(bucket string) error {
-	return pb.inner.CreateBucket(bucket)
+func (pb *PackedBackend) CreateBucket(ctx context.Context, bucket string) error {
+	return pb.inner.CreateBucket(ctx, bucket)
 }
 
-func (pb *PackedBackend) HeadBucket(bucket string) error {
-	return pb.inner.HeadBucket(bucket)
+func (pb *PackedBackend) HeadBucket(ctx context.Context, bucket string) error {
+	return pb.inner.HeadBucket(ctx, bucket)
 }
 
-func (pb *PackedBackend) DeleteBucket(bucket string) error {
-	return pb.inner.DeleteBucket(bucket)
+func (pb *PackedBackend) DeleteBucket(ctx context.Context, bucket string) error {
+	return pb.inner.DeleteBucket(ctx, bucket)
 }
 
-func (pb *PackedBackend) ListBuckets() ([]string, error) {
-	return pb.inner.ListBuckets()
+func (pb *PackedBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	return pb.inner.ListBuckets(ctx)
 }
 
 // --- Object operations ---
 
-func (pb *PackedBackend) PutObject(bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
-	if err := pb.inner.HeadBucket(bucket); err != nil {
+func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	if err := pb.inner.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
@@ -210,7 +211,7 @@ func (pb *PackedBackend) PutObject(bucket, key string, r io.Reader, contentType 
 
 	// Large objects pass through to inner backend
 	if int64(len(data)) >= pb.threshold {
-		return pb.inner.PutObject(bucket, key, bytes.NewReader(data), contentType)
+		return pb.inner.PutObject(ctx, bucket, key, bytes.NewReader(data), contentType)
 	}
 
 	// Small object → pack into blob
@@ -239,7 +240,7 @@ func (pb *PackedBackend) PutObject(bucket, key string, r io.Reader, contentType 
 
 	// Store metadata via inner PutObject (it will create a small marker file)
 	// This keeps the metadata in BadgerDB consistent
-	if _, err := pb.inner.PutObject(bucket, key, bytes.NewReader(nil), contentType); err != nil {
+	if _, err := pb.inner.PutObject(ctx, bucket, key, bytes.NewReader(nil), contentType); err != nil {
 		return nil, fmt.Errorf("sync metadata: %w", err)
 	}
 
@@ -252,7 +253,7 @@ func (pb *PackedBackend) PutObject(bucket, key string, r io.Reader, contentType 
 	}, nil
 }
 
-func (pb *PackedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	ikey := pb.indexKey(bucket, key)
 
 	pb.mu.RLock()
@@ -276,10 +277,10 @@ func (pb *PackedBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.
 	}
 
 	// Fall through to inner backend
-	return pb.inner.GetObject(bucket, key)
+	return pb.inner.GetObject(ctx, bucket, key)
 }
 
-func (pb *PackedBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
 	ikey := pb.indexKey(bucket, key)
 
 	pb.mu.RLock()
@@ -301,10 +302,10 @@ func (pb *PackedBackend) HeadObject(bucket, key string) (*storage.Object, error)
 		}, nil
 	}
 
-	return pb.inner.HeadObject(bucket, key)
+	return pb.inner.HeadObject(ctx, bucket, key)
 }
 
-func (pb *PackedBackend) DeleteObject(bucket, key string) error {
+func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
 	ikey := pb.indexKey(bucket, key)
 
 	pb.mu.Lock()
@@ -314,17 +315,17 @@ func (pb *PackedBackend) DeleteObject(bucket, key string) error {
 		}
 		pb.mu.Unlock()
 		// Also remove from inner backend metadata
-		pb.inner.DeleteObject(bucket, key)
+		pb.inner.DeleteObject(ctx, bucket, key)
 		return nil
 	}
 	pb.mu.Unlock()
 
-	return pb.inner.DeleteObject(bucket, key)
+	return pb.inner.DeleteObject(ctx, bucket, key)
 }
 
-func (pb *PackedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+func (pb *PackedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
 	// Get list from inner backend
-	objects, err := pb.inner.ListObjects(bucket, prefix, maxKeys)
+	objects, err := pb.inner.ListObjects(ctx, bucket, prefix, maxKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +369,7 @@ func (pb *PackedBackend) ListObjects(bucket, prefix string, maxKeys int) ([]*sto
 	return objects, nil
 }
 
-func (pb *PackedBackend) WalkObjects(bucket, prefix string, fn func(*storage.Object) error) error {
+func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
 	// Collect packed-index keys that match so we can fix sizes / emit extras.
 	pb.mu.RLock()
 	pfx := bucket + "/" + prefix
@@ -385,7 +386,7 @@ func (pb *PackedBackend) WalkObjects(bucket, prefix string, fn func(*storage.Obj
 	pb.mu.RUnlock()
 
 	seen := make(map[string]bool)
-	if err := pb.inner.WalkObjects(bucket, prefix, func(obj *storage.Object) error {
+	if err := pb.inner.WalkObjects(ctx, bucket, prefix, func(obj *storage.Object) error {
 		seen[obj.Key] = true
 		if sz, ok := packed[obj.Key]; ok {
 			obj.Size = sz
@@ -412,6 +413,7 @@ func (pb *PackedBackend) WalkObjects(bucket, prefix string, fn func(*storage.Obj
 // CopyObject performs a metadata-only copy for packed objects.
 // For flat-file objects, it falls back to read+write.
 func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*storage.Object, error) {
+	ctx := context.Background()
 	srcIKey := pb.indexKey(srcBucket, srcKey)
 	dstIKey := pb.indexKey(dstBucket, dstKey)
 
@@ -457,29 +459,29 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 	pb.mu.Unlock()
 
 	// Flat file fallback: read source, write to dest
-	rc, obj, err := pb.inner.GetObject(srcBucket, srcKey)
+	rc, obj, err := pb.inner.GetObject(ctx, srcBucket, srcKey)
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
 
-	return pb.PutObject(dstBucket, dstKey, rc, obj.ContentType)
+	return pb.PutObject(ctx, dstBucket, dstKey, rc, obj.ContentType)
 }
 
 // --- Multipart operations (pass through to inner) ---
 
-func (pb *PackedBackend) CreateMultipartUpload(bucket, key, contentType string) (*storage.MultipartUpload, error) {
-	return pb.inner.CreateMultipartUpload(bucket, key, contentType)
+func (pb *PackedBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
+	return pb.inner.CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
-func (pb *PackedBackend) UploadPart(bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
-	return pb.inner.UploadPart(bucket, key, uploadID, partNumber, r)
+func (pb *PackedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+	return pb.inner.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
 }
 
-func (pb *PackedBackend) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
-	return pb.inner.CompleteMultipartUpload(bucket, key, uploadID, parts)
+func (pb *PackedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	return pb.inner.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 }
 
-func (pb *PackedBackend) AbortMultipartUpload(bucket, key, uploadID string) error {
-	return pb.inner.AbortMultipartUpload(bucket, key, uploadID)
+func (pb *PackedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	return pb.inner.AbortMultipartUpload(ctx, bucket, key, uploadID)
 }

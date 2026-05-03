@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -18,10 +19,10 @@ func prepareBenchBackend(b *testing.B, n int) (*LocalBackend, string) {
 	b.Cleanup(func() { backend.Close() })
 
 	const bucket = "bench"
-	require.NoError(b, backend.CreateBucket(bucket))
+	require.NoError(b, backend.CreateBucket(context.Background(), bucket))
 	for i := range n {
 		key := fmt.Sprintf("obj/%06d.bin", i)
-		_, err := backend.PutObject(bucket, key, strings.NewReader("data"), "application/octet-stream")
+		_, err := backend.PutObject(context.Background(), bucket, key, strings.NewReader("data"), "application/octet-stream")
 		require.NoError(b, err)
 	}
 	return backend, bucket
@@ -34,7 +35,7 @@ func BenchmarkWalkObjects(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		count := 0
-		_ = backend.WalkObjects(bucket, "", func(*Object) error {
+		_ = backend.WalkObjects(context.Background(), bucket, "", func(*Object) error {
 			count++
 			return nil
 		})
@@ -49,7 +50,7 @@ func BenchmarkListObjectsLoop(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		objs, _ := backend.ListObjects(bucket, "", walkBenchN)
+		objs, _ := backend.ListObjects(context.Background(), bucket, "", walkBenchN)
 		count := 0
 		for range objs {
 			count++
