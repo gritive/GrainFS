@@ -1076,3 +1076,30 @@ func pinExpectedSPKI(expected [32]byte) func([][]byte, [][]*x509.Certificate) er
 		return nil
 	}
 }
+
+// buildClientTLSConfig returns the TLS config used when this transport DIALS
+// a peer. The dialer presents the cluster identity cert (so the remote
+// server's ClientAuth: RequireAnyClientCert is satisfied) AND verifies the
+// server's cert SPKI matches the expected cluster identity.
+func (t *QUICTransport) buildClientTLSConfig() *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify:    true, // quic-go requires; real check is VerifyPeerCertificate
+		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
+		Certificates:          []tls.Certificate{t.identityCert},
+		VerifyPeerCertificate: pinExpectedSPKI(t.expectedSPKI),
+	}
+}
+
+// buildServerTLSConfig returns the TLS config used when this transport
+// LISTENS for incoming peers. ClientAuth: RequireAnyClientCert forces dialers
+// to present a cert; VerifyPeerCertificate then pins the cert SPKI to the
+// cluster identity. Without this pairing, server-side identity check is dead
+// code (D5 regression target).
+func (t *QUICTransport) buildServerTLSConfig() *tls.Config {
+	return &tls.Config{
+		Certificates:          []tls.Certificate{t.identityCert},
+		ClientAuth:            tls.RequireAnyClientCert,
+		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
+		VerifyPeerCertificate: pinExpectedSPKI(t.expectedSPKI),
+	}
+}
