@@ -5,10 +5,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -232,25 +230,18 @@ func (t *QUICTransport) acquireInboundTraffic(st StreamType) (func(), error) {
 	}
 }
 
-// pskALPN returns the legacy ALPN protocol string, incorporating PSK hash for authentication.
-// Used by Send / Call / CallFlatBuffer (per-message stream open/close).
+// pskALPN returns the legacy per-message ALPN protocol string. After T2,
+// authentication moved to TLS SPKI pinning (see deriveClusterIdentity); the
+// ALPN string no longer carries any PSK material. Kept as a method (not a
+// constant) so future routing/versioning can be added without API churn.
 func (t *QUICTransport) pskALPN() string {
-	if t.psk == "" {
-		return "grainfs"
-	}
-	h := sha256.Sum256([]byte(t.psk))
-	return "grainfs-" + hex.EncodeToString(h[:8])
+	return "grainfs"
 }
 
-// muxALPN returns the multiplexed-stream ALPN protocol string used by raft RPC
-// connections. Same PSK hash as pskALPN, plus a "-mux-v1" version tag so peers
-// running older binaries fall back cleanly to the legacy ALPN.
+// muxALPN returns the multiplexed-stream ALPN used by raft RPC connections.
+// Same rationale as pskALPN — static, no PSK material in the protocol string.
 func (t *QUICTransport) muxALPN() string {
-	if t.psk == "" {
-		return "grainfs-mux-v1"
-	}
-	h := sha256.Sum256([]byte(t.psk))
-	return "grainfs-mux-v1-" + hex.EncodeToString(h[:8])
+	return "grainfs-mux-v1"
 }
 
 func defaultQUICConfig() *quic.Config {
