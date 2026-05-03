@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.33.0] — 2026-05-03 — modernize NBD fixed newstyle protocol
+
+### Added
+
+- **NBD**: fixed newstyle negotiation now supports `OPT_INFO`, `OPT_GO`, `NBD_INFO_BLOCK_SIZE`, structured read replies, `base:allocation` block status, and `WRITE_ZEROES`.
+- **NBD**: extended request headers now have a guarded parser while negotiation remains disabled until qemu/libnbd interop is proven.
+- **tests**: added modern NBD protocol regressions, allocation-aware NBD benchmarks, and an optional qemu/libnbd interop smoke target.
+
+### Changed
+
+- **NBD**: request parsing, reply writing, and handshake state are split into focused protocol helpers while simple replies remain the default for existing Linux `nbd-client` paths.
+- **NBD**: flush handling now orders deferred writes, trims, and zeroing mutations through a shared pending-mutation path.
+
+### Fixed
+
+- **NBD**: rejects unknown client flags, invalid metadata context negotiation, unsupported `FAST_ZERO`, and oversized request or option payloads before unsafe allocation.
+- **NBD**: oversized writes now close the connection after the error reply so unread payload bytes cannot desynchronize the request stream.
+
+### Tests
+
+- **NBD**: covered `NO_ZEROES`, export validation, block-size info, structured replies, block status, zeroing read-back, disabled extended headers, metadata context replies, oversize reads/writes/options, and interop-tool availability.
+
 ## [0.0.32.0] — 2026-05-03 — close protocol contract operational gaps
 
 ### Added
