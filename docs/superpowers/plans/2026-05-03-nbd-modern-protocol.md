@@ -30,7 +30,7 @@
 - Create: `internal/nbd/modern_test.go`
 - Modify: `internal/nbd/nbd.go`
 
-- [ ] **Step 1: Add shared protocol constants**
+- [x] **Step 1: Add shared protocol constants**
 
 Add all constants used by later tasks before writing their focused tests, even if some handlers still return unsupported:
 
@@ -79,7 +79,7 @@ const (
 )
 ```
 
-- [ ] **Step 2: Add raw negotiation and request helpers**
+- [x] **Step 2: Add raw negotiation and request helpers**
 
 Create `internal/nbd/modern_test.go` with these helpers so every later test names an existing helper:
 
@@ -125,7 +125,7 @@ func setupStructuredNBD(t *testing.T) (net.Conn, *Server)
 func setupBlockStatusNBD(t *testing.T) (net.Conn, *Server)
 ```
 
-- [ ] **Step 3: Run scaffold compile check**
+- [x] **Step 3: Run scaffold compile check**
 
 Run:
 
@@ -135,7 +135,7 @@ go test ./internal/nbd -run '^$' -count=1
 
 Expected: PASS after scaffold compiles.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/nbd/modern_test.go internal/nbd/nbd.go

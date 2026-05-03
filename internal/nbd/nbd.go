@@ -66,33 +66,74 @@ const (
 	// Newstyle handshake flags (server)
 	nbdFlagFixedNewstyle = uint16(1 << 0)
 
+	// Newstyle handshake flags (client)
+	nbdFlagClientFixedNewstyle = uint32(1 << 0)
+	nbdFlagClientNoZeroes      = uint32(1 << 1)
+	nbdKnownClientFlags        = nbdFlagClientFixedNewstyle | nbdFlagClientNoZeroes
+
 	// Transmission flags
-	nbdFlagHasFlags  = uint16(1 << 0)
-	nbdFlagSendFlush = uint16(1 << 2)
-	nbdFlagSendTrim  = uint16(1 << 5) // NBD spec: bit 5
+	nbdFlagHasFlags        = uint16(1 << 0)
+	nbdFlagSendFlush       = uint16(1 << 2)
+	nbdFlagSendTrim        = uint16(1 << 5)
+	nbdFlagSendWriteZeroes = uint16(1 << 6)
+	nbdFlagSendDF          = uint16(1 << 7)
 
 	// Option types
-	nbdOptExportName = uint32(1)
-	nbdOptAbort      = uint32(2)
-	nbdOptList       = uint32(3)
-	nbdOptGo         = uint32(7)
+	nbdOptExportName      = uint32(1)
+	nbdOptAbort           = uint32(2)
+	nbdOptList            = uint32(3)
+	nbdOptInfo            = uint32(6)
+	nbdOptGo              = uint32(7)
+	nbdOptStructuredReply = uint32(8)
+	nbdOptListMetaContext = uint32(9)
+	nbdOptSetMetaContext  = uint32(10)
+	nbdOptExtendedHeaders = uint32(11)
 
 	// Option reply types
 	nbdRepAck        = uint32(1)
 	nbdRepServer     = uint32(2)
 	nbdRepInfo       = uint32(3)
 	nbdRepErrUnsup   = uint32(1 | (1 << 31))
+	nbdRepErrInvalid = uint32(3 | (1 << 31))
+	nbdRepErrUnknown = uint32(6 | (1 << 31))
 	nbdOptReplyMagic = uint64(0x3e889045565a9)
 
 	// Info types
-	nbdInfoExport = uint16(0)
+	nbdInfoExport    = uint16(0)
+	nbdInfoBlockSize = uint16(3)
 
 	// Commands
-	nbdCmdRead  = uint32(0)
-	nbdCmdWrite = uint32(1)
-	nbdCmdDisc  = uint32(2)
-	nbdCmdFlush = uint32(3)
-	nbdCmdTrim  = uint32(4)
+	nbdCmdRead        = uint32(0)
+	nbdCmdWrite       = uint32(1)
+	nbdCmdDisc        = uint32(2)
+	nbdCmdFlush       = uint32(3)
+	nbdCmdTrim        = uint32(4)
+	nbdCmdWriteZeroes = uint32(6)
+	nbdCmdBlockStatus = uint32(7)
+
+	// Command flags
+	nbdCmdFlagNoHole   = uint16(1 << 1)
+	nbdCmdFlagDF       = uint16(1 << 2)
+	nbdCmdFlagReqOne   = uint16(1 << 3)
+	nbdCmdFlagFastZero = uint16(1 << 4)
+
+	// Size constraints
+	nbdMinBlockSize       = uint32(1)
+	nbdPreferredBlockSize = uint32(volume.DefaultBlockSize)
+	nbdMaxPayloadSize     = uint32(32 * 1024 * 1024)
+
+	// Structured and extended protocol values.
+	nbdStructuredReplyMagic   = uint32(0x668e33ef)
+	nbdExtendedRequestMagic   = uint32(0x21e41c71)
+	nbdReplyFlagDone          = uint16(1 << 0)
+	nbdReplyTypeOffsetData    = uint16(1)
+	nbdReplyTypeBlockStatus   = uint16(5)
+	nbdReplyTypeError         = uint16(32769)
+	nbdMetaContextBaseAllocID = uint32(1)
+
+	// NBD errno values.
+	nbdErrEIO    = uint32(5)
+	nbdErrEINVAL = uint32(22)
 )
 
 // nbdPoolBufSize is the buffer size that the pool recycles. Matches the
