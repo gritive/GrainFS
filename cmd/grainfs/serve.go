@@ -1153,6 +1153,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	defer incidentDB.Close()
 	incidentStore := badgerstore.New(incidentDB)
 	incidentRecorder := incident.NewRecorder(incidentStore, incident.NewReducer())
+	distBackend.SetIncidentRecorder(incidentRecorder)
 	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
@@ -1221,6 +1222,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		placementMonitors := newPlacementMonitorRegistry()
 		startPlacementMonitor := func(monitorCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
+			gb.SetIncidentRecorder(incidentRecorder)
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), scrubInterval)
 			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
 				// shardKey from placement resolution is objectKey+"/"+versionID.

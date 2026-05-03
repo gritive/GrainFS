@@ -705,9 +705,43 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
+	case CmdPutObjectQuarantine:
+		return encodePutObjectQuarantineCmd(payload.(PutObjectQuarantineCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
+}
+
+func encodePutObjectQuarantineCmd(c PutObjectQuarantineCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	vidOff := b.CreateString(c.VersionID)
+	causeOff := b.CreateString(c.Cause)
+	reasonOff := b.CreateString(c.Reason)
+	clusterpb.PutObjectQuarantineCmdStart(b)
+	clusterpb.PutObjectQuarantineCmdAddBucket(b, bucketOff)
+	clusterpb.PutObjectQuarantineCmdAddKey(b, keyOff)
+	clusterpb.PutObjectQuarantineCmdAddVersionId(b, vidOff)
+	clusterpb.PutObjectQuarantineCmdAddCause(b, causeOff)
+	clusterpb.PutObjectQuarantineCmdAddReason(b, reasonOff)
+	return fbFinish(b, clusterpb.PutObjectQuarantineCmdEnd(b)), nil
+}
+
+func decodePutObjectQuarantineCmd(data []byte) (PutObjectQuarantineCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectQuarantineCmd {
+		return clusterpb.GetRootAsPutObjectQuarantineCmd(d, 0)
+	})
+	if err != nil {
+		return PutObjectQuarantineCmd{}, err
+	}
+	return PutObjectQuarantineCmd{
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+		Cause:     string(t.Cause()),
+		Reason:    string(t.Reason()),
+	}, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {

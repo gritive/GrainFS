@@ -38,6 +38,7 @@ const (
 	CmdSetBucketVersioning CommandType = 15
 	CmdSetObjectACL        CommandType = 16
 	CmdSetRing             CommandType = 17
+	CmdPutObjectQuarantine CommandType = 40
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -91,6 +92,14 @@ type DeleteObjectVersionCmd struct {
 	Bucket    string
 	Key       string
 	VersionID string
+}
+
+type PutObjectQuarantineCmd struct {
+	Bucket    string `json:"bucket"`
+	Key       string `json:"key"`
+	VersionID string `json:"version_id,omitempty"`
+	Cause     string `json:"cause"`
+	Reason    string `json:"reason"`
 }
 
 type CreateMultipartUploadCmd struct {
