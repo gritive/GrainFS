@@ -15,14 +15,13 @@ type IncidentRecorder interface {
 }
 
 type IncidentRepairRequest struct {
-	Bucket         string
-	Key            string
-	VersionID      string
-	ShardIdx       int
-	Recorder       IncidentRecorder
-	CorrelationID  string
-	ProofReceiptID string
-	Now            time.Time
+	Bucket        string
+	Key           string
+	VersionID     string
+	ShardIdx      int
+	Recorder      IncidentRecorder
+	CorrelationID string
+	Now           time.Time
 }
 
 func (b *DistributedBackend) RepairShardLocalWithIncident(ctx context.Context, req IncidentRepairRequest) error {
@@ -67,8 +66,25 @@ func (b *DistributedBackend) RepairShardLocalWithIncident(ctx context.Context, r
 		return err
 	}
 	facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactVerified, At: time.Now().UTC()})
-	if req.ProofReceiptID != "" {
-		facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactReceiptSigned, ReceiptID: req.ProofReceiptID, At: time.Now().UTC()})
+	return recordIncident(ctx, req.Recorder, facts)
+}
+
+func (b *DistributedBackend) RecordRepairReceiptSigned(ctx context.Context, req IncidentRepairRequest, receiptID string) error {
+	if receiptID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	cid := req.CorrelationID
+	if cid == "" {
+		cid = incidentID(req.Bucket, req.Key, req.VersionID, req.ShardIdx, now)
+	}
+	scope := incident.Scope{Kind: incident.ScopeShard, Bucket: req.Bucket, Key: req.Key, VersionID: req.VersionID, ShardID: req.ShardIdx, NodeID: b.NodeID()}
+	facts := []incident.Fact{
+		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseMissingShard, Scope: scope, At: now},
+		{CorrelationID: cid, Type: incident.FactDiagnosed, Cause: incident.CauseMissingShard, Scope: scope, Message: "attempting shard reconstruction from surviving peers", At: now.Add(time.Millisecond)},
+		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionReconstructShard, At: now.Add(2 * time.Millisecond)},
+		{CorrelationID: cid, Type: incident.FactVerified, At: now.Add(3 * time.Millisecond)},
+		{CorrelationID: cid, Type: incident.FactReceiptSigned, ReceiptID: receiptID, At: now.Add(4 * time.Millisecond)},
 	}
 	return recordIncident(ctx, req.Recorder, facts)
 }

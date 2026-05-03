@@ -46,3 +46,17 @@ func TestIncidentRepair_ContextCanceledRecordsBlocked(t *testing.T) {
 	require.NotEmpty(t, rec.facts)
 	assert.Equal(t, "context_canceled", rec.facts[len(rec.facts)-1].ErrorCode)
 }
+
+func TestIncidentRepair_ReceiptSignedRecordedOnlyAfterPersistCallback(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	rec := &recordingIncidentRecorder{}
+	req := IncidentRepairRequest{
+		Bucket: "b", Key: "k", VersionID: "v1", ShardIdx: 0, Recorder: rec, CorrelationID: "cid-repair", Now: time.Unix(100, 0).UTC(),
+	}
+
+	require.NoError(t, b.RecordRepairReceiptSigned(context.Background(), req, "rcpt-cid-repair"))
+	require.NotEmpty(t, rec.facts)
+	assert.Equal(t, incident.FactObserved, rec.facts[0].Type)
+	assert.Equal(t, incident.FactReceiptSigned, rec.facts[len(rec.facts)-1].Type)
+	assert.Equal(t, "rcpt-cid-repair", rec.facts[len(rec.facts)-1].ReceiptID)
+}

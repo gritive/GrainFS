@@ -789,7 +789,7 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key); qerr != nil {
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, ""); qerr != nil {
 		return nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
 		return nil, objectQuarantinedError(bucket, key, q)
@@ -1319,7 +1319,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key); qerr != nil {
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
 		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
 		return nil, nil, objectQuarantinedError(bucket, key, q)
@@ -2545,6 +2545,11 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 	}
 	if obj.IsDeleteMarker {
 		return nil, nil, storage.ErrMethodNotAllowed
+	}
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, versionID); qerr != nil {
+		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return nil, nil, objectQuarantinedError(bucket, key, q)
 	}
 	// Prefer the versioned local file; fall back to legacy unversioned path if
 	// the version happens to be the legacy latest (uncommon mid-transition case).

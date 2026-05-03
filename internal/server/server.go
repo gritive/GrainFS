@@ -349,7 +349,6 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			path == "/api/events" || path == "/api/events/heal/stream" ||
 			path == "/api/eventlog" ||
 			path == "/api/incidents" || strings.HasPrefix(path, "/api/incidents/") ||
-			path == "/api/receipts" || strings.HasPrefix(path, "/api/receipts/") ||
 			path == "/api/cluster/status" || path == "/api/health" ||
 			path == "/api/cache/status" ||
 			strings.HasPrefix(path, "/iceberg/") {

@@ -121,7 +121,7 @@ func (f *FSM) applyPutObjectQuarantine(data []byte) error {
 		return err
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(quarantineKey(c.Bucket, c.Key), value)
+		return txn.Set(quarantineKey(c.Bucket, c.Key, c.VersionID), value)
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -14,16 +15,17 @@ import (
 
 var ErrObjectQuarantined = errors.New("object quarantined")
 
-func quarantineKey(bucket, key string) []byte {
-	return []byte("quarantine:" + bucket + "/" + key)
+func quarantineKey(bucket, key, versionID string) []byte {
+	return []byte("quarantine:" + bucket + "\x00" + key + "\x00" + versionID)
 }
 
-func (b *DistributedBackend) QuarantineObject(ctx context.Context, bucket, key, cause, reason string) error {
+func (b *DistributedBackend) QuarantineObject(ctx context.Context, bucket, key, versionID, cause, reason string) error {
 	return b.propose(ctx, CmdPutObjectQuarantine, PutObjectQuarantineCmd{
-		Bucket: bucket,
-		Key:    key,
-		Cause:  cause,
-		Reason: reason,
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: versionID,
+		Cause:     cause,
+		Reason:    reason,
 	})
 }
 
@@ -42,7 +44,7 @@ func (b *DistributedBackend) QuarantineCorruptShardLocal(bucket, key, versionID 
 		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseCorruptShard, Scope: scope, At: now},
 		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionIsolateObject, At: now.Add(time.Millisecond)},
 	}
-	if err := b.QuarantineObject(context.Background(), bucket, key, string(incident.CauseCorruptShard), reason); err != nil {
+	if err := b.QuarantineObject(context.Background(), bucket, key, versionID, string(incident.CauseCorruptShard), reason); err != nil {
 		facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactActionFailed, Action: incident.ActionIsolateObject, ErrorCode: "quarantine_failed", At: time.Now().UTC()})
 		_ = recordIncident(context.Background(), b.incidentRecorder, facts)
 		return err
@@ -51,19 +53,22 @@ func (b *DistributedBackend) QuarantineCorruptShardLocal(bucket, key, versionID 
 	return recordIncident(context.Background(), b.incidentRecorder, facts)
 }
 
-func (b *DistributedBackend) isObjectQuarantined(bucket, key string) (bool, PutObjectQuarantineCmd, error) {
+func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, PutObjectQuarantineCmd, error) {
 	var out PutObjectQuarantineCmd
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(quarantineKey(bucket, key))
-		if err == badger.ErrKeyNotFound {
-			return nil
+		for _, candidate := range []string{versionID, ""} {
+			item, err := txn.Get(quarantineKey(bucket, key, candidate))
+			if err == badger.ErrKeyNotFound {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			return item.Value(func(v []byte) error {
+				return json.Unmarshal(v, &out)
+			})
 		}
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error {
-			return json.Unmarshal(v, &out)
-		})
+		return nil
 	})
 	if err != nil {
 		return false, out, err
@@ -72,5 +77,9 @@ func (b *DistributedBackend) isObjectQuarantined(bucket, key string) (bool, PutO
 }
 
 func objectQuarantinedError(bucket, key string, q PutObjectQuarantineCmd) error {
-	return fmt.Errorf("%w: %s/%s cause=%s reason=%s", ErrObjectQuarantined, bucket, key, q.Cause, q.Reason)
+	scope := bucket + "/" + key
+	if q.VersionID != "" {
+		scope += "@" + q.VersionID
+	}
+	return fmt.Errorf("%w: %s cause=%s reason=%s", ErrObjectQuarantined, scope, q.Cause, strings.TrimSpace(q.Reason))
 }

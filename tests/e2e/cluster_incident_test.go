@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/logging"
 	"github.com/stretchr/testify/require"
 )
 
@@ -189,10 +191,16 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 		return false
 	}, 30*time.Second, 500*time.Millisecond, "fixed missing-shard incident with signed proof not found")
 
-	receiptResp, err := http.Get(endpoints[victimNode] + "/api/receipts?correlation_id=" + url.QueryEscape(found.ID))
-	require.NoError(t, err)
-	defer receiptResp.Body.Close()
-	require.Equal(t, http.StatusOK, receiptResp.StatusCode)
+	signer := v4.NewSigner(func(o *v4.SignerOptions) {
+		o.DisableURIPathEscaping = true
+		if testing.Verbose() {
+			o.Logger = logging.NewStandardLogger(os.Stderr)
+			o.LogSigning = true
+		}
+	})
+	creds := aws.Credentials{AccessKeyID: accessKey, SecretAccessKey: secretKey}
+	_, receiptStatus := signedGet(t, ctx, signer, creds, endpoints[victimNode]+"/api/receipts?correlation_id="+url.QueryEscape(found.ID))
+	require.Equal(t, http.StatusOK, receiptStatus)
 }
 
 func TestE2E_QuarantineIncident(t *testing.T) {

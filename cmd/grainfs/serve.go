@@ -1235,15 +1235,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				}
 				correlationID := uuid.Must(uuid.NewV7()).String()
 				receiptID := "rcpt-" + correlationID
-				if err := gb.RepairShardLocalWithIncident(monitorCtx, cluster.IncidentRepairRequest{
-					Bucket:         bucket,
-					Key:            objectKey,
-					VersionID:      versionID,
-					ShardIdx:       shardIdx,
-					Recorder:       incidentRecorder,
-					CorrelationID:  correlationID,
-					ProofReceiptID: receiptID,
-				}); err != nil {
+				repairReq := cluster.IncidentRepairRequest{
+					Bucket:        bucket,
+					Key:           objectKey,
+					VersionID:     versionID,
+					ShardIdx:      shardIdx,
+					Recorder:      incidentRecorder,
+					CorrelationID: correlationID,
+				}
+				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
 					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
 				} else if receiptWiring != nil && receiptWiring.store != nil && receiptWiring.keyStore != nil {
 					r := &receipt.HealReceipt{
@@ -1259,6 +1259,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 						log.Warn().Str("correlation_id", correlationID).Err(err).Msg("placement monitor receipt sign failed")
 					} else if err := receiptWiring.store.Put(r); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt store failed")
+					} else if err := gb.RecordRepairReceiptSigned(context.Background(), repairReq, receiptID); err != nil {
+						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor incident proof update failed")
 					}
 				}
 			})
