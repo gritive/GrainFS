@@ -5,6 +5,7 @@ package vfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -190,7 +191,10 @@ func (fs *GrainVFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 			f.buf = getBuf()
 		} else {
 			// Try to load existing
-			f.loadExisting()
+			if err := f.loadExisting(); err != nil && !errors.Is(err, os.ErrNotExist) {
+				putBuf(f.buf)
+				return nil, err
+			}
 			if fs.volMgr != nil && f.buf != nil {
 				f.oldSize = int64(f.buf.Len())
 			}

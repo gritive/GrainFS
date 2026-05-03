@@ -577,13 +577,7 @@ func pendingMigrationKey(bucket, key, versionID string) []byte {
 
 // persistPendingMigration writes a migration task to BadgerDB so it survives a crash.
 func (f *FSM) persistPendingMigration(task MigrationTask) error {
-	val, err := encodeMigrateShardCmd(MigrateShardFSMCmd{
-		Bucket:    task.Bucket,
-		Key:       task.Key,
-		VersionID: task.VersionID,
-		SrcNode:   task.SrcNode,
-		DstNode:   task.DstNode,
-	})
+	val, err := encodeMigrateShardCmd(MigrateShardFSMCmd(task))
 	if err != nil {
 		return fmt.Errorf("fsm: marshal pending migration: %w", err)
 	}
@@ -618,13 +612,7 @@ func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error
 				log.Error().Err(err).Msg("fsm: recover pending migration: decode failed")
 				continue
 			}
-			task := MigrationTask{
-				Bucket:    cmd.Bucket,
-				Key:       cmd.Key,
-				VersionID: cmd.VersionID,
-				SrcNode:   cmd.SrcNode,
-				DstNode:   cmd.DstNode,
-			}
+			task := MigrationTask(cmd)
 			select {
 			case ch <- task:
 			case <-ctx.Done():
@@ -644,13 +632,7 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 	if cmd.Bucket == "" || cmd.Key == "" {
 		return nil
 	}
-	task := MigrationTask{
-		Bucket:    cmd.Bucket,
-		Key:       cmd.Key,
-		VersionID: cmd.VersionID,
-		SrcNode:   cmd.SrcNode,
-		DstNode:   cmd.DstNode,
-	}
+	task := MigrationTask(cmd)
 	f.mu.RLock()
 	ch := f.onMigrateShard
 	f.mu.RUnlock()

@@ -27,6 +27,7 @@ func getXDRWriter() *XDRWriter {
 	return xdrWriterPool.Get()
 }
 
+//nolint:unused // package tests exercise explicit pool return behaviour.
 func putXDRWriter(w *XDRWriter) {
 	w.resetForReuse()
 	xdrWriterPool.Put(w)

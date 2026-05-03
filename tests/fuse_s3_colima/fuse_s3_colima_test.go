@@ -255,8 +255,8 @@ func TestFUSE_S3_Directories(t *testing.T) {
 
 		runColimaSSH(t, "rm", nested+"/greet.txt")
 		// rmdir of S3-prefix dirs is best-effort; ignore failures (some tools leave markers).
-		colimaSSH("rmdir", nested).Run()                //nolint:errcheck
-		colimaSSH("rmdir", mnt+"/d1").Run()             //nolint:errcheck
+		colimaSSH("rmdir", nested).Run()    //nolint:errcheck
+		colimaSSH("rmdir", mnt+"/d1").Run() //nolint:errcheck
 	})
 }
 

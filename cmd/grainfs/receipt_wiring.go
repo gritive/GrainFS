@@ -64,47 +64,6 @@ func receiptDBOptions(dir string) badger.Options {
 	return badgerutil.SmallOptions(dir)
 }
 
-// setupLocalReceipt wires the HealReceipt API in no-peers mode: Store + API with
-// nil routes/querier so lookups are local-only. Returns the updated server
-// options and a wiring handle for teardown.
-func setupLocalReceipt(cmd *cobra.Command, dataDir string, opts []server.Option) ([]server.Option, *healReceiptWiring, error) {
-	enabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
-	if !enabled {
-		return opts, nil, nil
-	}
-	psk, _ := cmd.Flags().GetString("heal-receipt-psk")
-	if psk == "" {
-		psk = "local-no-peers"
-	}
-	retention, _ := cmd.Flags().GetDuration("heal-receipt-retention")
-
-	db, err := openReceiptDB(dataDir)
-	if err != nil {
-		return opts, nil, fmt.Errorf("open receipt db: %w", err)
-	}
-	ks, err := receipt.NewKeyStore(receipt.Key{ID: "local", Secret: []byte(psk)})
-	if err != nil {
-		_ = db.Close()
-		return opts, nil, fmt.Errorf("init receipt keystore: %w", err)
-	}
-	store, err := receipt.NewStore(db, receipt.StoreOptions{
-		Retention:      retention,
-		FlushThreshold: 100,
-		FlushInterval:  50 * time.Millisecond,
-	})
-	if err != nil {
-		_ = db.Close()
-		return opts, nil, fmt.Errorf("create receipt store: %w", err)
-	}
-	api := receipt.NewAPI(store, nil, nil, retention)
-
-	log.Info().Str("component", "receipt").Str("mode", "local").Dur("retention", retention).Msg("heal-receipt API enabled")
-
-	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
-		db: db, store: store, keyStore: ks, api: api,
-	}, nil
-}
-
 // setupClusterReceipt wires the full Slice 2 stack in cluster mode.
 // PSK comes from --heal-receipt-psk if set, else --cluster-key.
 // Registers the StreamReceiptQuery handler on the router and wires the

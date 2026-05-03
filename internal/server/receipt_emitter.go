@@ -196,7 +196,9 @@ func (e *receiptTrackingEmitter) FinalizeSession(correlationID string) {
 	}
 }
 
-// sessionCount returns the number of open sessions (test helper).
+// sessionCount returns the number of open sessions.
+//
+//nolint:unused // package tests inspect actor state through this method.
 func (e *receiptTrackingEmitter) sessionCount() int {
 	reply := make(chan int, 1)
 	select {

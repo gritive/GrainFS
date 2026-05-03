@@ -317,8 +317,7 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 		}
 		pb.mu.Unlock()
 		// Also remove from inner backend metadata
-		pb.inner.DeleteObject(ctx, bucket, key)
-		return nil
+		return pb.inner.DeleteObject(ctx, bucket, key)
 	}
 	pb.mu.Unlock()
 

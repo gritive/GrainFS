@@ -73,10 +73,10 @@ func (c *stitchedCluster) QuerySingle(ctx context.Context, peer, id string) ([]b
 // Query satisfies PeerQuerier: fans out to all peers, first-hit wins.
 func (c *stitchedCluster) Query(ctx context.Context, id string) ([]byte, bool, error) {
 	var (
-		mu      sync.Mutex
-		winner  []byte
-		found   bool
-		wg      sync.WaitGroup
+		mu     sync.Mutex
+		winner []byte
+		found  bool
+		wg     sync.WaitGroup
 	)
 	for _, s := range c.peers {
 		wg.Add(1)

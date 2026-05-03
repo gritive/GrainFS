@@ -118,7 +118,10 @@ func (s *Server) handleConn(conn net.Conn) {
 				Msg("non-compound RPC call")
 		}
 
-		writeRPCFrame(conn, w.Bytes())
+		if err := writeRPCFrame(conn, w.Bytes()); err != nil {
+			s.logger.Debug().Err(err).Msg("nfs: write rpc frame")
+			return
+		}
 	}
 }
 

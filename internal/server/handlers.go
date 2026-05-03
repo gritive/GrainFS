@@ -16,6 +16,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -491,15 +492,11 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		}
 
 		length := end - start + 1
-		data := make([]byte, length)
-		if _, err := io.ReadFull(rc, data); err != nil {
-			mapError(c, err)
-			return
-		}
-
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
 		c.Header("Content-Length", strconv.FormatInt(length, 10))
-		c.Data(consts.StatusPartialContent, obj.ContentType, data)
+		c.Response.SetBodyStream(io.NopCloser(io.LimitReader(rc, length)), int(length))
+		c.Status(consts.StatusPartialContent)
+		rc = nil
 		return
 	}
 
@@ -1014,7 +1011,9 @@ func (s *Server) serveDashboard(ctx context.Context, c *app.RequestContext) {
 	}
 	c.SetContentType("text/html; charset=utf-8")
 	c.SetStatusCode(consts.StatusOK)
-	c.Write(data)
+	if _, err := c.Write(data); err != nil {
+		log.Ctx(ctx).Error().Err(err).Msg("write dashboard response")
+	}
 }
 
 // hertzResponseWriter adapts Hertz RequestContext to http.ResponseWriter for stdlib handlers.
@@ -1044,8 +1043,7 @@ func (w *hertzResponseWriter) Write(data []byte) (int, error) {
 		w.c.SetStatusCode(w.statusCode)
 		w.written = true
 	}
-	w.c.Write(data)
-	return len(data), nil
+	return w.c.Write(data)
 }
 
 func (w *hertzResponseWriter) WriteHeader(statusCode int) {

@@ -310,7 +310,11 @@ func waitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, w
 
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
 	if nodeID == "" {
-		nodeID = generateNodeID(dataDir)
+		var err error
+		nodeID, err = generateNodeID(dataDir)
+		if err != nil {
+			return fmt.Errorf("generate node ID: %w", err)
+		}
 		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
 	}
 	raftAddrExplicit := raftAddr != ""
@@ -629,6 +633,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	router := transport.NewStreamRouter()
 	router.Handle(transport.StreamControl, rpcTransport.Handler())
 	router.Handle(transport.StreamData, shardSvc.HandleRPC())
+	router.HandleBody(transport.StreamShardWriteBody, shardSvc.HandleWriteBody())
 	quicTransport.SetStreamHandler(router.Dispatch)
 
 	node.Start()
@@ -673,15 +678,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		cluster.NewDataGroupPlanExecutor(nodeID, dgMgr, metaRaft.FSM(), metaRaft),
 	)
 	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
-		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
-		if !joinMode {
-			go func() {
-				defer execCancel()
-				if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
-					log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
-				}
-			}()
+		if joinMode {
+			return
 		}
+		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
+		go func() {
+			defer execCancel()
+			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
+				log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
+			}
+		}()
 	})
 	go rebalancer.Run(ctx)
 

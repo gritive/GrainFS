@@ -475,8 +475,15 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			if found {
 				rc, _, readErr := m.backend.GetObject(context.Background(), volumeBucketName, canonical)
 				if readErr == nil {
-					io.ReadFull(rc, blkData)
-					rc.Close()
+					if _, err := io.ReadFull(rc, blkData); err != nil {
+						_ = rc.Close()
+						m.putBlkBuf(blkData)
+						return totalWritten, fmt.Errorf("read block %d: %w", blkNum, err)
+					}
+					if err := rc.Close(); err != nil {
+						m.putBlkBuf(blkData)
+						return totalWritten, fmt.Errorf("close block %d: %w", blkNum, err)
+					}
 				}
 				// Old canonical's content for THIS block is about to be
 				// replaced or the refcount decremented — drop the cache
@@ -495,8 +502,15 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 				rc, _, readErr := m.backend.GetObject(context.Background(), volumeBucketName, oldKey)
 				isNew = readErr != nil
 				if !isNew {
-					io.ReadFull(rc, blkData)
-					rc.Close()
+					if _, err := io.ReadFull(rc, blkData); err != nil {
+						_ = rc.Close()
+						m.putBlkBuf(blkData)
+						return totalWritten, fmt.Errorf("read block %d: %w", blkNum, err)
+					}
+					if err := rc.Close(); err != nil {
+						m.putBlkBuf(blkData)
+						return totalWritten, fmt.Errorf("close block %d: %w", blkNum, err)
+					}
 				}
 			}
 			// In-place / CoW path: oldKey is the previous version of
@@ -842,7 +856,9 @@ func (m *Manager) Discard(name string, off, length int64) error {
 		}
 		data, err := marshalVolume(vol)
 		if err == nil {
-			m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+			if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
+				return fmt.Errorf("persist volume metadata: %w", err)
+			}
 		}
 	}
 	return nil
@@ -1108,7 +1124,7 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 
 	// Build snapshot_map from current live state
 	snapMap := make(map[int64]string)
-	if liveMap == nil || len(liveMap) == 0 {
+	if len(liveMap) == 0 {
 		// No live_map: enumerate default block objects
 		if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
 			blkNum, ok := parseBlockNum(obj.Key)
@@ -1204,7 +1220,7 @@ func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
 		if err := json.Unmarshal(data, &meta); err != nil {
 			return nil
 		}
-		snaps = append(snaps, SnapshotInfo{ID: meta.ID, CreatedAt: meta.CreatedAt, BlockCount: meta.BlockCount})
+		snaps = append(snaps, SnapshotInfo(meta))
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("list snapshots: %w", err)
@@ -1356,7 +1372,7 @@ func (m *Manager) Clone(srcName, dstName string) error {
 		return m.copyObjectFallback(volumeBucketName, srcKey, volumeBucketName, dstKey)
 	}
 
-	if srcLiveMap != nil && len(srcLiveMap) > 0 {
+	if len(srcLiveMap) > 0 {
 		// Case 1: source has a live_map — copy each physical block to default keys in dst
 		for blkNum, srcKey := range srcLiveMap {
 			dstKey := blockKey(dstName, blkNum)

@@ -45,6 +45,7 @@ func (t *inflightTracker) sent(from, to uint64, bytes int) uint64 {
 	return t.generation
 }
 
+//nolint:unused // package tests exercise generation-free ack semantics.
 func (t *inflightTracker) ack(from, to uint64) (bool, uint64) {
 	return t.ackGeneration(t.generation, from, to)
 }

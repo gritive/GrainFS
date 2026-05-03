@@ -106,7 +106,9 @@ func NewStateManager() *StateManager {
 	sm := &StateManager{}
 	sm.nextClientID.Store(1)
 	sm.nextStateID.Store(1)
-	rand.Read(sm.WriteVerf[:])
+	if _, err := rand.Read(sm.WriteVerf[:]); err != nil {
+		panic(err)
+	}
 
 	initial := &fhState{
 		fhToPath: make(map[FileHandle]string),
@@ -239,7 +241,9 @@ func (sm *StateManager) ConfirmClientID(clientID uint64) bool {
 
 func generateFH() FileHandle {
 	var fh FileHandle
-	rand.Read(fh[:])
+	if _, err := rand.Read(fh[:]); err != nil {
+		panic(err)
+	}
 	return fh
 }
 
@@ -260,7 +264,9 @@ func (sm *StateManager) ExchangeID(verifier [8]byte, clientOwnerID []byte) Excha
 // CreateSession creates a NFSv4.1 session for the given clientID.
 func (sm *StateManager) CreateSession(clientID uint64, fore ChannelAttrs) (SessionID, uint32) {
 	var sid SessionID
-	rand.Read(sid[:])
+	if _, err := rand.Read(sid[:]); err != nil {
+		panic(err)
+	}
 
 	maxSlots := fore.MaxRequests
 	if maxSlots == 0 || maxSlots > 16 {

@@ -141,7 +141,6 @@ func (s *ForwardSender) Send(
 	}
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
 
-	var redirected bool
 	var lastDialErr error
 	for _, peer := range peers {
 		if err := ctx.Err(); err != nil {
@@ -152,8 +151,7 @@ func (s *ForwardSender) Send(
 			lastDialErr = err
 			continue // try next peer
 		}
-		if isNotLeaderReply(reply) && !redirected {
-			redirected = true
+		if isNotLeaderReply(reply) {
 			if hint := extractLeaderHint(reply); hint != "" {
 				r2, err2 := s.dialer(ctx, hint, payload)
 				if err2 == nil {
@@ -237,7 +235,6 @@ func (s *ForwardSender) SendStream(
 	}
 
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
-	var redirected bool
 	var lastDialErr error
 	for _, peer := range peers {
 		if err := ctx.Err(); err != nil {
@@ -254,8 +251,7 @@ func (s *ForwardSender) SendStream(
 			}
 			continue
 		}
-		if isNotLeaderReply(reply) && !redirected {
-			redirected = true
+		if isNotLeaderReply(reply) {
 			if !canRewindForwardBody(body) {
 				return reply, nil
 			}
@@ -306,7 +302,6 @@ func (s *ForwardSender) SendReadStream(
 	}
 
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
-	var redirected bool
 	var lastDialErr error
 	for _, peer := range peers {
 		if err := ctx.Err(); err != nil {
@@ -317,8 +312,7 @@ func (s *ForwardSender) SendReadStream(
 			lastDialErr = err
 			continue
 		}
-		if isNotLeaderReply(reply) && !redirected {
-			redirected = true
+		if isNotLeaderReply(reply) {
 			if body != nil {
 				_ = body.Close()
 			}

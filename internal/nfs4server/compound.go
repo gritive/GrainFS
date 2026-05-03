@@ -783,15 +783,13 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	}
 	fileSize := obj.Size
 
-	remainingSize := fileSize
-	if offset < uint64(fileSize) {
-		remainingSize = fileSize - int64(offset)
-	} else {
+	if offset >= uint64(fileSize) {
 		w := getXDRWriter()
 		w.WriteUint32(1) // eof = TRUE
 		w.WriteOpaque(nil)
 		return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 	}
+	remainingSize := fileSize - int64(offset)
 
 	if uint64(remainingSize) > uint64(count) {
 		remainingSize = int64(count)

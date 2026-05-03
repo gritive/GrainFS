@@ -12,6 +12,8 @@ import (
 // Used by GroupBackend's forward path to dispatch a propose to a remote group's
 // raft.Node. Wire is independent of the legacy StreamProposeForward (0x06)
 // payload, which remains a raw propose data byte slice.
+//
+//nolint:unused // package tests pin legacy group-forward wire compatibility.
 func encodeGroupForwardPayload(groupID string, data []byte) []byte {
 	gid := []byte(groupID)
 	out := make([]byte, 4+len(gid)+len(data))
@@ -23,6 +25,8 @@ func encodeGroupForwardPayload(groupID string, data []byte) []byte {
 
 // decodeGroupForwardPayload reverses encodeGroupForwardPayload.
 // Returns groupID and the inner data, or an error on malformed input.
+//
+//nolint:unused // package tests pin legacy group-forward wire compatibility.
 func decodeGroupForwardPayload(payload []byte) (string, []byte, error) {
 	if len(payload) < 4 {
 		return "", nil, fmt.Errorf("groupforward: payload too short: %d bytes", len(payload))

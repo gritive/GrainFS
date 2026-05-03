@@ -72,7 +72,7 @@ func TestParseACLHeader(t *testing.T) {
 		{"private", ACLPrivate},
 		{"public-read", ACLPublicRead},
 		{"public-read-write", ACLPublicReadWrite},
-		{"", ACLPrivate},           // 빈 값 → private
+		{"", ACLPrivate},              // 빈 값 → private
 		{"unknown-value", ACLPrivate}, // 알 수 없는 값 → private fallback
 	}
 

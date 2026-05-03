@@ -32,25 +32,53 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
-	defer cmd.Process.Kill()
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
 
 	waitForPort(t, port, 5*time.Second)
 
-	// Wait for at least 2 auto-snapshots (>1s)
-	time.Sleep(1500 * time.Millisecond)
-
-	// List snapshots via API
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	resp, err := http.Get(endpoint + "/admin/snapshots")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	snapshots := waitForAutoSnapshots(t, endpoint, 2, 10*time.Second)
+	assert.GreaterOrEqual(t, len(snapshots), 2,
+		"at least 2 auto-snapshots should have been created with 500ms interval")
+}
 
-	// Parse snapshot list from JSON object
-	var result struct {
-		Snapshots []map[string]any `json:"snapshots"`
+func waitForAutoSnapshots(t *testing.T, endpoint string, want int, timeout time.Duration) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(endpoint + "/admin/snapshots")
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		var result struct {
+			Snapshots []map[string]any `json:"snapshots"`
+		}
+		if resp.StatusCode == http.StatusOK {
+			err = json.NewDecoder(resp.Body).Decode(&result)
+		} else {
+			err = fmt.Errorf("status %d", resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+
+		if err == nil && len(result.Snapshots) >= want {
+			return result.Snapshots
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("snapshots=%d want=%d", len(result.Snapshots), want)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-	assert.GreaterOrEqual(t, len(result.Snapshots), 2,
-		"at least 2 auto-snapshots should have been created after 1.5s with 500ms interval")
+	t.Fatalf("auto snapshots did not reach %d within %s: %v", want, timeout, lastErr)
+	return nil
 }

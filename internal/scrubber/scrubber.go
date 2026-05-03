@@ -403,7 +403,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 // Returns the count of shards repaired.
 func (s *BackgroundScrubber) repairOne(ctx context.Context, rec ObjectRecord, status ShardStatus, correlationID string, repairer ShardRepairer) (int64, error) {
 	tr := otel.GetTracerProvider().Tracer(otelTracerName)
-	ctx, span := tr.Start(ctx, "scrub.repair")
+	_, span := tr.Start(ctx, "scrub.repair")
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("grainfs.bucket", rec.Bucket),

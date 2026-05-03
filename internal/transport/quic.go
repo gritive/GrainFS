@@ -574,7 +574,7 @@ func (t *QUICTransport) Connect(ctx context.Context, addr string) error {
 	t.mu.Lock()
 	if _, exists = t.conns[addr]; exists {
 		// Another goroutine dialled the same peer concurrently; close the duplicate.
-		conn.CloseWithError(0, "duplicate connection")
+		_ = conn.CloseWithError(0, "duplicate connection")
 		t.mu.Unlock()
 		return nil
 	}
@@ -921,7 +921,7 @@ func (t *QUICTransport) evict(addr string, conn *quic.Conn) {
 	}
 	t.mu.Unlock()
 	if shouldClose {
-		conn.CloseWithError(0, "evicted: stale connection")
+		_ = conn.CloseWithError(0, "evicted: stale connection")
 	}
 }
 
@@ -953,7 +953,7 @@ func (t *QUICTransport) Close() error {
 	defer t.mu.Unlock()
 
 	for addr, conn := range t.conns {
-		conn.CloseWithError(0, "transport closing")
+		_ = conn.CloseWithError(0, "transport closing")
 		delete(t.conns, addr)
 	}
 

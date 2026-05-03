@@ -65,6 +65,8 @@ func (c *ChaosTransport) resolveDelivery(from, to string) (*raft.Node, bool) {
 
 // shouldDeliver returns true if a message from→to should be delivered.
 // Used only in tests for targeted assertions. Wire callbacks use resolveDelivery.
+//
+//nolint:unused // package tests assert partition/drop behaviour directly.
 func (c *ChaosTransport) shouldDeliver(from, to string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

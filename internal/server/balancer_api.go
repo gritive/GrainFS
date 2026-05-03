@@ -59,14 +59,7 @@ func (s *Server) balancerStatusHandler(_ context.Context, c *app.RequestContext)
 	st := s.balancer.Status()
 	nodes := make([]balancerNodeJSON, len(st.Nodes))
 	for i, n := range st.Nodes {
-		nodes[i] = balancerNodeJSON{
-			NodeID:         n.NodeID,
-			DiskUsedPct:    n.DiskUsedPct,
-			DiskAvailBytes: n.DiskAvailBytes,
-			RequestsPerSec: n.RequestsPerSec,
-			JoinedAt:       n.JoinedAt,
-			UpdatedAt:      n.UpdatedAt,
-		}
+		nodes[i] = balancerNodeJSON(n)
 	}
 	c.JSON(consts.StatusOK, balancerStatusResponse{
 		Available:    true,

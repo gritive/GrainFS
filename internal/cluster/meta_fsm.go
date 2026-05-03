@@ -1142,6 +1142,7 @@ func encodeMetaAddNodeCmd(node MetaNodeEntry) ([]byte, error) {
 	return fbFinish(b, clusterpb.MetaAddNodeCmdEnd(b)), nil
 }
 
+//nolint:unused // package tests pin meta-FSM command compatibility.
 func encodeMetaRemoveNodeCmd(nodeID string) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	idOff := b.CreateString(nodeID)

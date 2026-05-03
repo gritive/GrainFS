@@ -68,31 +68,17 @@ func (s *ringStore) decRef(version RingVersion) {
 	}
 }
 
+//nolint:unused // package tests pin ring GC eligibility semantics.
 func (s *ringStore) gcEligible(version RingVersion) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.refCount[version] == 0 && s.current > version
 }
 
-func (s *ringStore) gcRing(version RingVersion) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.rings, version)
-	delete(s.refCount, version)
-}
-
-func (s *ringStore) allVersions() []RingVersion {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	versions := make([]RingVersion, 0, len(s.rings))
-	for v := range s.rings {
-		versions = append(versions, v)
-	}
-	return versions
-}
-
 // encodeRingForDB serializes a Ring for BadgerDB persistence.
 // Format: [version:8][vPerNode:4][len:4][token:4,nodeIDLen:2,nodeID:...]...
+//
+//nolint:unused // package tests pin the on-disk ring encoding contract.
 func encodeRingForDB(r *Ring) ([]byte, error) {
 	size := 8 + 4 + 4
 	for _, vn := range r.VNodes {
@@ -118,6 +104,8 @@ func encodeRingForDB(r *Ring) ([]byte, error) {
 }
 
 // decodeRingFromDB deserializes a Ring from BadgerDB bytes.
+//
+//nolint:unused // package tests pin the on-disk ring encoding contract.
 func decodeRingFromDB(data []byte) (*Ring, error) {
 	if len(data) < 16 {
 		return nil, errors.New("ring data too short")

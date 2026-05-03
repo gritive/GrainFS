@@ -18,7 +18,6 @@ type handshakeState struct {
 	clientFlags       uint32
 	noZeroes          bool
 	structuredReplies bool
-	extendedHeaders   bool
 	exportName        string
 	metaContexts      []nbdMetaContext
 }
