@@ -209,6 +209,41 @@ func TestReadOpArgs_Renew(t *testing.T) {
 	putOpArg8(data)
 }
 
+func TestReadOpArgs_ReadUsesPooledFixedBuffer_NoAllocs(t *testing.T) {
+	w := getXDRWriter()
+	var stateid [16]byte
+	for i := range stateid {
+		stateid[i] = byte(i + 1)
+	}
+	w.buf.Write(stateid[:])
+	w.WriteUint64(0x1020304050607080)
+	w.WriteUint32(4096)
+	raw := append([]byte(nil), w.Bytes()...)
+	putXDRWriter(w)
+
+	r := NewXDRReader(raw)
+	data, pk, err := readOpArgs(r, OpRead)
+	require.NoError(t, err)
+	require.Equal(t, 32, pk)
+	require.Len(t, data, 28)
+	require.Equal(t, raw, data)
+	putOpArg32(data)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		r := newXDRReaderFromPool(raw)
+		data, pk, err := readOpArgs(r, OpRead)
+		putXDRReader(r)
+		if err != nil {
+			t.Fatalf("readOpArgs returned error: %v", err)
+		}
+		if pk != 32 || len(data) != 28 {
+			t.Fatalf("unexpected read arg pool result: pk=%d len=%d", pk, len(data))
+		}
+		putOpArg32(data)
+	})
+	assert.Equal(t, 0.0, allocs, "OpRead args should reuse a fixed buffer")
+}
+
 func TestReadOpArgs_SetAttr(t *testing.T) {
 	// OpSetAttr: stateid(16) + bitmap[2] + attrVals encoded as:
 	// output = stateid(16) + bm0(4) + bm1(4) + attrVals(opaque)

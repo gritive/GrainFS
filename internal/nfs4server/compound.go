@@ -161,7 +161,7 @@ const nfs4Bucket = storage.NFS4BucketName
 type Op struct {
 	OpCode  int
 	Data    []byte
-	poolKey int // 0=no pool, 8=opArgPool8, 16=opArgPool16
+	poolKey int // 0=no pool, 8/16/32=opArgPool{8,16,32}
 }
 
 type OpResult struct {
@@ -231,6 +231,8 @@ func (d *Dispatcher) Dispatch(req *CompoundRequest, resp *CompoundResponse) {
 			putOpArg8(op.Data)
 		case 16:
 			putOpArg16(op.Data)
+		case 32:
+			putOpArg32(op.Data)
 		}
 		resp.Results = append(resp.Results, result)
 		if result.Status != NFS4_OK {

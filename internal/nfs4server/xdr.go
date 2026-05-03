@@ -92,7 +92,7 @@ type XDRReader struct {
 
 var xdrReaderPool = pool.New(func() *XDRReader { return &XDRReader{} })
 
-// opArgPool16/opArgPool8: raw sync.Pool 사용 — generic pool.Pool[*[N]byte]는 Go 1.26.2
+// opArgPool{8,16,32}: raw sync.Pool 사용 — generic pool.Pool[*[N]byte]는 Go 1.26.2
 // 컴파일러 ICE를 트리거한다 (`internal compiler error: bad ptr to array in slice
 // go.shape.*uint8`). `make test`처럼 다수 패키지 + `-cover` 조합으로 병렬 빌드할 때만
 // 재현되며 단독 빌드는 정상. 원인은 fixed-size array pointer (`*[N]byte`)를 generic
@@ -101,12 +101,16 @@ var xdrReaderPool = pool.New(func() *XDRReader { return &XDRReader{} })
 // 이 두 케이스만 raw sync.Pool로 우회한다. Go upstream 수정 시 generic으로 복원 가능.
 var opArgPool16 = sync.Pool{New: func() any { return new([16]byte) }}
 var opArgPool8 = sync.Pool{New: func() any { return new([8]byte) }}
+var opArgPool32 = sync.Pool{New: func() any { return new([32]byte) }}
 
 func getOpArg16() []byte  { return opArgPool16.Get().(*[16]byte)[:] }
 func putOpArg16(b []byte) { opArgPool16.Put((*[16]byte)(b[:16])) }
 
 func getOpArg8() []byte  { return opArgPool8.Get().(*[8]byte)[:] }
 func putOpArg8(b []byte) { opArgPool8.Put((*[8]byte)(b[:8])) }
+
+func getOpArg32() []byte  { return opArgPool32.Get().(*[32]byte)[:] }
+func putOpArg32(b []byte) { opArgPool32.Put((*[32]byte)(b[:32])) }
 
 func NewXDRReader(data []byte) *XDRReader {
 	r := &XDRReader{data: data}
@@ -329,7 +333,7 @@ func ParseCompound(data []byte, req *CompoundRequest) error {
 }
 
 // readOpArgs reads the XDR arguments for a specific op.
-// Returns (data, poolKey, err). poolKey 0=no pool, 8=opArgPool8, 16=opArgPool16.
+// Returns (data, poolKey, err). poolKey 0=no pool, 8/16/32=opArgPool{8,16,32}.
 func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 	switch opCode {
 	case OpPutRootFH, OpGetFH:
@@ -425,15 +429,24 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 
 	case OpRead:
 		// stateid (seqid:4 + other:12) + offset:8 + count:4
-		var buf [16]byte
-		io.ReadFull(&r.r, buf[:]) // stateid
-		offset, _ := r.ReadUint64()
-		count, _ := r.ReadUint32()
-		w := getXDRWriter()
-		w.buf.Write(buf[:])
-		w.WriteUint64(offset)
-		w.WriteUint32(count)
-		return xdrWriterBytes(w), 0, nil
+		b := getOpArg32()
+		if _, err := io.ReadFull(&r.r, b[:16]); err != nil {
+			putOpArg32(b)
+			return nil, 0, err
+		}
+		offset, err := r.ReadUint64()
+		if err != nil {
+			putOpArg32(b)
+			return nil, 0, err
+		}
+		count, err := r.ReadUint32()
+		if err != nil {
+			putOpArg32(b)
+			return nil, 0, err
+		}
+		binary.BigEndian.PutUint64(b[16:24], offset)
+		binary.BigEndian.PutUint32(b[24:28], count)
+		return b[:28], 32, nil
 
 	case OpWrite:
 		argStart := r.Offset()
