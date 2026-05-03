@@ -281,3 +281,21 @@ func writeMetaContextOption(t *testing.T, conn net.Conn, opt uint32, name string
 	}
 	writeOption(t, conn, opt, payload)
 }
+
+func TestNBDHandshakeRejectsUnknownClientFlags(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	readServerHeader(t, client)
+	writeClientFlags(t, client, 1<<31)
+	_, err := readOptionReplyHeader(client)
+	require.Error(t, err)
+}
+
+func TestNBDExportNameHonorsNoZeroes(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	readServerHeader(t, client)
+	writeClientFlags(t, client, nbdFlagClientFixedNewstyle|nbdFlagClientNoZeroes)
+	writeOptExportName(t, client, "nbd-test")
+	reply := readExact(t, client, 10)
+	require.Equal(t, uint64(1024*1024), binary.BigEndian.Uint64(reply[0:8]))
+	require.Equal(t, nbdFlagHasFlags|nbdFlagSendFlush|nbdFlagSendTrim, binary.BigEndian.Uint16(reply[8:10]))
+}

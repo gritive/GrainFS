@@ -150,7 +150,7 @@ git commit -m "test: scaffold nbd modern protocol helpers"
 - Modify: `internal/nbd/nbd.go`
 - Modify: `internal/nbd/nbd_test.go`
 
-- [ ] **Step 1: Write failing client flag tests**
+- [x] **Step 1: Write failing client flag tests**
 
 Add tests to `internal/nbd/modern_test.go`:
 
@@ -174,7 +174,7 @@ func TestNBDExportNameHonorsNoZeroes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests and confirm failure**
+- [x] **Step 2: Run tests and confirm failure**
 
 Run:
 
@@ -184,7 +184,7 @@ go test ./internal/nbd -run 'TestNBDHandshakeRejectsUnknownClientFlags|TestNBDEx
 
 Expected: FAIL because helper functions/constants and `NO_ZEROES` behavior do not exist.
 
-- [ ] **Step 3: Implement handshake state and client flag validation**
+- [x] **Step 3: Implement handshake state and client flag validation**
 
 Create `handshakeState` and constants:
 
@@ -217,7 +217,7 @@ func parseClientFlags(flags uint32) (handshakeState, error) {
 
 Update `newstyleHandshake` to return `(handshakeState, error)` and make `sendExportData` write 10 bytes when `state.noZeroes` is true.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run:
 
@@ -227,7 +227,7 @@ go test ./internal/nbd -run 'TestNBDHandshake|TestNBDHandshakeRejectsUnknownClie
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/nbd/handshake.go internal/nbd/modern_test.go internal/nbd/nbd.go internal/nbd/nbd_test.go
