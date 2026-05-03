@@ -97,6 +97,13 @@ func init() {
 	// between OK/Warn/Critical levels. Defaults match the Phase 1 design (80%/90%).
 	serveCmd.Flags().Float64("disk-warn-threshold", 0.80, "disk used fraction (0-1) at which a 'disk_warn' alert+log fires")
 	serveCmd.Flags().Float64("disk-critical-threshold", 0.90, "disk used fraction (0-1) at which a 'disk_critical' alert+log fires")
+	serveCmd.Flags().Bool("fd-watch-enabled", true, "enable predictive file descriptor exhaustion warnings")
+	serveCmd.Flags().Duration("fd-watch-interval", 10*time.Second, "how often to sample process file descriptor usage")
+	serveCmd.Flags().Float64("fd-warn-threshold", 0.80, "FD used fraction (0-1) at which a warning incident fires")
+	serveCmd.Flags().Float64("fd-critical-threshold", 0.90, "FD used fraction (0-1) at which a critical incident fires")
+	serveCmd.Flags().Duration("fd-eta-window", 30*time.Minute, "positive-trend ETA window for predictive FD warnings")
+	serveCmd.Flags().Duration("fd-recovery-window", time.Minute, "stable below-threshold window before resolving FD incidents")
+	serveCmd.Flags().Int("fd-classification-cap", 512, "max open file descriptors to classify by category per sample")
 	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
 	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
 	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
@@ -1157,6 +1164,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	incidentRecorder := incident.NewRecorder(incidentStore, incident.NewReducer())
 	distBackend.SetIncidentRecorder(incidentRecorder)
 	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
+	startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
