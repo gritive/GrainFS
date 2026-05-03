@@ -239,16 +239,8 @@ func seedInitialShardGroups(
 	bootstrapCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
-	leaderDeadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(leaderDeadline) {
-		if metaRaft.IsLeader() || metaRaft.Node().LeaderID() != "" {
-			break
-		}
-		select {
-		case <-bootstrapCtx.Done():
-			return bootstrapCtx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
+	if err := waitForMetaRaftLeader(bootstrapCtx, metaRaft, 15*time.Second); err != nil {
+		return err
 	}
 
 	clusterPeers := append([]string{nodeID}, peers...)
@@ -279,6 +271,21 @@ func seedInitialShardGroups(
 		}
 	}
 	return nil
+}
+
+func waitForMetaRaftLeader(ctx context.Context, metaRaft *cluster.MetaRaft, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if metaRaft.IsLeader() || metaRaft.Node().LeaderID() != "" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("meta-raft leader not visible after %s", timeout)
 }
 
 func waitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, want int, timeout time.Duration) error {
@@ -551,20 +558,25 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	} else if seedGroups < 1 {
 		seedGroups = 1
 	}
-	addNodeCtx, addNodeCancel := context.WithTimeout(ctx, 10*time.Second)
-	if err := metaRaft.ProposeAddNode(addNodeCtx, cluster.MetaNodeEntry{ID: nodeID, Address: raftAddr, Role: 0}); err != nil {
-		log.Debug().Err(err).Str("node_id", nodeID).Str("addr", raftAddr).Msg("seed node metadata propose failed (non-fatal)")
-	}
-	addNodeCancel()
+	if !joinMode {
+		if err := waitForMetaRaftLeader(ctx, metaRaft, 15*time.Second); err != nil {
+			return err
+		}
+		addNodeCtx, addNodeCancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := metaRaft.ProposeAddNode(addNodeCtx, cluster.MetaNodeEntry{ID: nodeID, Address: raftAddr, Role: 0}); err != nil {
+			log.Debug().Err(err).Str("node_id", nodeID).Str("addr", raftAddr).Msg("seed node metadata propose failed (non-fatal)")
+		}
+		addNodeCancel()
 
-	if err := seedInitialShardGroups(ctx, metaRaft, nodeID, peers, seedGroups); err != nil {
-		return err
+		if err := seedInitialShardGroups(ctx, metaRaft, nodeID, peers, seedGroups); err != nil {
+			return err
+		}
+		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+			return err
+		}
+		clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
+		clusterRouter.SetRequireExplicitAssignments(true)
 	}
-	if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
-		return err
-	}
-	clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
-	clusterRouter.SetRequireExplicitAssignments(true)
 
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
@@ -941,6 +953,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err := performMetaJoin(ctx, quicTransport, peers, nodeID, raftAddr); err != nil {
 			return err
 		}
+		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+			return err
+		}
+		clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
+		clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
 	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD, then

@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // MetaForwardFunc forwards an encoded MetaCmd to the meta-Raft leader.
@@ -35,5 +36,23 @@ func (a *ForwardingBucketAssigner) ProposeBucketAssignment(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("meta bucket assigner: encode MetaCmd: %w", err)
 	}
-	return a.forward(ctx, data)
+	if err := a.forward(ctx, data); err != nil {
+		return err
+	}
+	return waitForLocalBucketAssignment(ctx, a.local, bucket, groupID)
+}
+
+func waitForLocalBucketAssignment(ctx context.Context, local *MetaRaft, bucket, groupID string) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if local.FSM().BucketAssignments()[bucket] == groupID {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }

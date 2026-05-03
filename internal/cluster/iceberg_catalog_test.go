@@ -190,6 +190,10 @@ func TestForwardingBucketAssignerForwardsFromFollower(t *testing.T) {
 	var forwarded []byte
 	assigner := NewForwardingBucketAssigner(follower, func(_ context.Context, command []byte) error {
 		forwarded = append([]byte(nil), command...)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = follower.FSM().applyCmd(command)
+		}()
 		return nil
 	})
 
