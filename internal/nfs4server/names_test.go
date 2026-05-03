@@ -10,9 +10,18 @@ func TestValidateComponentName(t *testing.T) {
 		name    string
 		wantErr bool
 	}{
+		// RFC 7530 §6 illegal:
 		{"", true},
 		{".", true},
 		{"..", true},
+		// Path traversal via component name (caught because '/' is rejected):
+		{"../foo", true},
+		{"foo/bar", true},
+		{"a/b/c", true},
+		{"./foo", true},
+		{"/", true},
+		{"/etc/passwd", true},
+		// Legal:
 		{"foo", false},
 		{"foo.txt", false},
 		{"...trailing", false},

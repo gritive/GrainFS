@@ -470,7 +470,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// zero-config.
 	transportPSK := clusterKey
 	if transportPSK == "" {
-		transportPSK = generateEphemeralClusterKey()
+		ephemeral, err := generateEphemeralClusterKey()
+		if err != nil {
+			return fmt.Errorf("init QUIC transport: %w", err)
+		}
+		transportPSK = ephemeral
 	}
 	quicTransport, err := transport.NewQUICTransport(transportPSK)
 	if err != nil {
@@ -1516,13 +1520,13 @@ func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int
 // generateEphemeralClusterKey returns a random 64-char hex string used as a
 // per-process cluster identity in solo mode. The key never leaves this
 // process (solo has no peers), so its only purpose is to satisfy the
-// transport package's PSK requirement (D6).
-func generateEphemeralClusterKey() string {
+// transport package's PSK requirement (D6). Returns error so a sandboxed
+// or seccomp-restricted environment with no /dev/urandom + no getrandom
+// fails cleanly via runCluster's error path instead of crashing mid-init.
+func generateEphemeralClusterKey() (string, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand.Read should never fail on supported platforms; if it
-		// does, treat as fatal — we cannot produce a secure ephemeral key.
-		panic(fmt.Sprintf("ephemeral cluster key: %v", err))
+		return "", fmt.Errorf("ephemeral cluster key: %w", err)
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }

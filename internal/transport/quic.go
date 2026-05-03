@@ -976,7 +976,12 @@ func deriveClusterIdentity(psk string) (tls.Certificate, [32]byte, error) {
 		return tls.Certificate{}, [32]byte{}, ErrEmptyClusterKey
 	}
 
-	// 1) Derive private scalar from psk via HKDF.
+	// 1) Derive keypair from psk via HKDF.
+	// We CANNOT use ecdsa.GenerateKey here: since Go 1.21 it mixes in
+	// fresh crypto/rand for side-channel masking, which breaks the
+	// determinism we need (same psk → same SPKI on every node).
+	// The modular-reduction bias for P-256 is at most 2^-128 (curve order
+	// is within 2^-128 of 2^256), well below any cryptographic threshold.
 	reader := hkdf.New(sha256.New, []byte(psk), nil, []byte("grainfs-cluster-identity-v1"))
 	priv, err := derivePrivKeyFromHKDF(reader, elliptic.P256())
 	if err != nil {
@@ -984,11 +989,15 @@ func deriveClusterIdentity(psk string) (tls.Certificate, [32]byte, error) {
 	}
 
 	// 2) Self-signed cert with crypto/rand for signature.
+	// NotBefore predates likely deployment by an hour to tolerate clock
+	// skew; NotAfter is far enough out that operators rotate via PSK
+	// change rather than cert renewal.
+	now := time.Now().UTC()
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "grainfs-cluster"},
-		NotBefore:    time.Unix(0, 0),
-		NotAfter:     time.Unix(0, 0).Add(100 * 365 * 24 * time.Hour),
+		NotBefore:    now.Add(-1 * time.Hour),
+		NotAfter:     now.Add(100 * 365 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
@@ -1013,6 +1022,10 @@ func deriveClusterIdentity(psk string) (tls.Certificate, [32]byte, error) {
 // derivePrivKeyFromHKDF reads scalar bytes from r, reduces modulo curve order N,
 // rejects zero. Re-reads on rejection (HKDF Expand can produce up to
 // 255*HashLen bytes for SHA-256, far more than enough for a few retries).
+//
+// Note: stdlib's ecdsa.GenerateKey is NOT used because since Go 1.21 it
+// blends crypto/rand into the keypair derivation for side-channel masking,
+// breaking determinism. The modular-reduction bias for P-256 is ≤ 2^-128.
 func derivePrivKeyFromHKDF(r io.Reader, curve elliptic.Curve) (*ecdsa.PrivateKey, error) {
 	params := curve.Params()
 	N := params.N
