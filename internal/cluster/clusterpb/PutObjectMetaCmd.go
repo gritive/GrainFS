@@ -218,14 +218,14 @@ func PutObjectMetaCmdAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
 func PutObjectMetaCmdAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(nodeIds), 0)
 }
-func PutObjectMetaCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
-}
 func PutObjectMetaCmdAddPreserveLatest(builder *flatbuffers.Builder, preserveLatest bool) {
 	builder.PrependBoolSlot(11, preserveLatest, false)
 }
 func PutObjectMetaCmdAddIsDeleteMarker(builder *flatbuffers.Builder, isDeleteMarker bool) {
 	builder.PrependBoolSlot(12, isDeleteMarker, false)
+}
+func PutObjectMetaCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

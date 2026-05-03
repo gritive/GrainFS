@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -88,13 +89,15 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		_ = leader.Wait()
 	})
 
-	// Wait for leader's QUIC port to be reachable. We don't need HTTP — the
-	// joiner connects to the Raft (UDP/QUIC) port, which is what matters.
+	// Wait for leader's HTTP port to be reachable. The joiner connects to
+	// the Raft (UDP/QUIC) port, but the HTTP listener comes up after the
+	// raft transport is bound — using HTTP as a readiness signal avoids a
+	// `nc` dependency in CI images.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := exec.Command("nc", "-z", "-w", "1", "127.0.0.1", fmt.Sprintf("%d", leaderHTTP)).CombinedOutput()
-		_ = conn
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", leaderHTTP), 1*time.Second)
 		if err == nil {
+			conn.Close()
 			break
 		}
 		time.Sleep(200 * time.Millisecond)

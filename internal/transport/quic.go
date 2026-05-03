@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -332,7 +333,10 @@ func (t *QUICTransport) acceptLoop() {
 		// ClientAuth to ensure the cert is requested; the actual gate is here.
 		state := conn.ConnectionState()
 		if err := verifyPeerSPKI(state.TLS.PeerCertificates, t.expectedSPKI); err != nil {
-			_ = conn.CloseWithError(quicAppErrCode, "peer cert rejected: "+err.Error())
+			// Log details locally; send generic reason on the wire so an
+			// attacker can't distinguish "no auth set up" from "wrong key".
+			log.Warn().Err(err).Str("peer", conn.RemoteAddr().String()).Msg("peer cert rejected")
+			_ = conn.CloseWithError(quicAppErrCode, "peer cert rejected")
 			continue
 		}
 		// Route by negotiated ALPN. Mux connections go to the mux handler
