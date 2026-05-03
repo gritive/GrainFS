@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"testing"
@@ -73,21 +74,21 @@ func TestNFSv4LargeFileRead(t *testing.T) {
 			checksum := calculateChecksum(testData)
 
 			// Create bucket first
-			err := backend.CreateBucket(testBucket)
+			err := backend.CreateBucket(context.Background(), testBucket)
 			if err != nil && err != storage.ErrBucketAlreadyExists {
 				t.Fatalf("failed to create bucket: %v", err)
 			}
 
 			// Upload file via storage backend directly
 			key := "test-largefile.bin"
-			_, err = backend.PutObject(testBucket, key, bytes.NewReader(testData), "application/octet-stream")
+			_, err = backend.PutObject(context.Background(), testBucket, key, bytes.NewReader(testData), "application/octet-stream")
 			if err != nil {
 				t.Fatalf("failed to upload test file: %v", err)
 			}
 
 			// Read via backend (simulating NFSv4 read)
 			start := time.Now()
-			rc, _, err := backend.GetObject(testBucket, key)
+			rc, _, err := backend.GetObject(context.Background(), testBucket, key)
 			if err != nil {
 				t.Fatalf("failed to open file: %v", err)
 			}
@@ -143,7 +144,7 @@ func TestNFSv4LargeFileWrite(t *testing.T) {
 			checksum := calculateChecksum(testData)
 
 			// Create bucket first
-			err := backend.CreateBucket(testBucket)
+			err := backend.CreateBucket(context.Background(), testBucket)
 			if err != nil && err != storage.ErrBucketAlreadyExists {
 				t.Fatalf("failed to create bucket: %v", err)
 			}
@@ -152,7 +153,7 @@ func TestNFSv4LargeFileWrite(t *testing.T) {
 
 			// Write via backend (simulating NFSv4 write)
 			start := time.Now()
-			_, err = backend.PutObject(testBucket, key, bytes.NewReader(testData), "application/octet-stream")
+			_, err = backend.PutObject(context.Background(), testBucket, key, bytes.NewReader(testData), "application/octet-stream")
 			duration := time.Since(start)
 
 			if err != nil {
@@ -160,7 +161,7 @@ func TestNFSv4LargeFileWrite(t *testing.T) {
 			}
 
 			// Verify via direct read
-			rc, _, err := backend.GetObject(testBucket, key)
+			rc, _, err := backend.GetObject(context.Background(), testBucket, key)
 			if err != nil {
 				t.Fatalf("failed to read back file: %v", err)
 			}
@@ -199,7 +200,7 @@ func TestNFSv4ConcurrentLargeFiles(t *testing.T) {
 	defer backend.Close()
 
 	// Create bucket first
-	err = backend.CreateBucket(testBucket)
+	err = backend.CreateBucket(context.Background(), testBucket)
 	if err != nil && err != storage.ErrBucketAlreadyExists {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -217,14 +218,14 @@ func TestNFSv4ConcurrentLargeFiles(t *testing.T) {
 	for i := 0; i < numConcurrent; i++ {
 		go func(idx int) {
 			key := fmt.Sprintf("test-concurrent-%d.bin", idx)
-			_, err := backend.PutObject(testBucket, key, bytes.NewReader(testData), "application/octet-stream")
+			_, err := backend.PutObject(context.Background(), testBucket, key, bytes.NewReader(testData), "application/octet-stream")
 			if err != nil {
 				errors <- err
 				return
 			}
 
 			// Verify
-			rc, _, err := backend.GetObject(testBucket, key)
+			rc, _, err := backend.GetObject(context.Background(), testBucket, key)
 			if err != nil {
 				errors <- err
 				return
@@ -269,7 +270,7 @@ func TestNFSv4BufferPoolNoLeaks(t *testing.T) {
 	defer backend.Close()
 
 	// Create bucket first
-	err = backend.CreateBucket(testBucket)
+	err = backend.CreateBucket(context.Background(), testBucket)
 	if err != nil && err != storage.ErrBucketAlreadyExists {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -286,12 +287,12 @@ func TestNFSv4BufferPoolNoLeaks(t *testing.T) {
 		testData := generateTestData(size)
 		key := fmt.Sprintf("test-leak-%d.bin", i)
 
-		_, err := backend.PutObject(testBucket, key, bytes.NewReader(testData), "application/octet-stream")
+		_, err := backend.PutObject(context.Background(), testBucket, key, bytes.NewReader(testData), "application/octet-stream")
 		if err != nil {
 			t.Fatalf("failed to write file %d: %v", i, err)
 		}
 
-		rc, _, err := backend.GetObject(testBucket, key)
+		rc, _, err := backend.GetObject(context.Background(), testBucket, key)
 		if err != nil {
 			t.Fatalf("failed to read file %d: %v", i, err)
 		}
