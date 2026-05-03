@@ -11,6 +11,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -204,6 +205,37 @@ func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) 
 	}, objs[0])
 	require.NotEmpty(t, objs[0].ETag)
 	require.NotEmpty(t, objs[0].VersionID)
+}
+
+func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
+	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
+	gb := newTestGroupBackend(t, "group-1")
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket(storage.NFS4BucketName, "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	w, err := wal.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, w.Close()) })
+	wrapped := wal.NewBackend(c, w)
+
+	obj, err := wrapped.WriteAt(storage.NFS4BucketName, "fio/file.bin", 4, []byte("data"))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), obj.Size)
+
+	require.NoError(t, wrapped.Truncate(storage.NFS4BucketName, "fio/file.bin", 6))
+
+	buf := make([]byte, 8)
+	n, err := wrapped.ReadAt(storage.NFS4BucketName, "fio/file.bin", 0, buf)
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 6, n)
+	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
 }
 
 func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) {

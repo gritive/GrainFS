@@ -83,11 +83,13 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	s.logger.Debug().Str("remote", conn.RemoteAddr().String()).Msg("nfs4: new connection")
 
+	var frameBuf []byte
 	for {
-		frame, err := readRPCFrame(conn)
+		frame, err := readRPCFrameInto(conn, frameBuf)
 		if err != nil {
 			return
 		}
+		frameBuf = frame
 
 		header, args, err := ParseRPCCall(frame)
 		if err != nil {

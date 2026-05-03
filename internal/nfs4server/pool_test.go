@@ -240,6 +240,26 @@ func TestReadOpArgs_SetAttr(t *testing.T) {
 	_ = data // data returned from pool-less allocation; no putOpArg16
 }
 
+func TestReadOpArgs_WriteReturnsOriginalArgSlice(t *testing.T) {
+	w := getXDRWriter()
+	var stateid [16]byte
+	w.buf.Write(stateid[:])
+	w.WriteUint64(123)
+	w.WriteUint32(2)
+	w.WriteOpaque([]byte("payload"))
+	raw := append([]byte(nil), w.Bytes()...)
+	putXDRWriter(w)
+
+	r := NewXDRReader(raw)
+	data, pk, err := readOpArgs(r, OpWrite)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, pk)
+	assert.Equal(t, raw, data)
+
+	raw[32] = 'P'
+	assert.Equal(t, byte('P'), data[32])
+}
+
 func TestReadOpArgs_UnknownOp(t *testing.T) {
 	// Unknown op code → default case, returns nil/0/nil.
 	r := NewXDRReader(nil)

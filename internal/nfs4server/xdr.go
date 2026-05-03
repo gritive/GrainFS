@@ -34,12 +34,13 @@ func putXDRWriter(w *XDRWriter) {
 	xdrWriterPool.Put(w)
 }
 
-// xdrWriterBytes copies w's contents to a new slice, returns the writer to pool, and returns the slice.
+// xdrWriterBytes transfers ownership of w's backing buffer to the caller and
+// returns the now-empty writer to the pool. The caller must treat the returned
+// slice as immutable.
 func xdrWriterBytes(w *XDRWriter) []byte {
-	src := w.Bytes()
-	out := make([]byte, len(src))
-	copy(out, src)
-	putXDRWriter(w)
+	out := w.Bytes()
+	w.buf = bytes.Buffer{}
+	xdrWriterPool.Put(w)
 	return out
 }
 
@@ -75,6 +76,7 @@ func (w *XDRWriter) Bytes() []byte {
 // XDRReader reads XDR-encoded values.
 type XDRReader struct {
 	r      bytes.Reader
+	data   []byte
 	pooled bool
 }
 
@@ -97,13 +99,14 @@ func getOpArg8() []byte  { return opArgPool8.Get().(*[8]byte)[:] }
 func putOpArg8(b []byte) { opArgPool8.Put((*[8]byte)(b[:8])) }
 
 func NewXDRReader(data []byte) *XDRReader {
-	r := &XDRReader{}
+	r := &XDRReader{data: data}
 	r.r.Reset(data)
 	return r
 }
 
 func newXDRReaderFromPool(data []byte) *XDRReader {
 	r := xdrReaderPool.Get()
+	r.data = data
 	r.r.Reset(data)
 	r.pooled = true
 	return r
@@ -112,6 +115,7 @@ func newXDRReaderFromPool(data []byte) *XDRReader {
 func putXDRReader(r *XDRReader) {
 	if r.pooled {
 		r.pooled = false
+		r.data = nil
 		xdrReaderPool.Put(r)
 	}
 }
@@ -141,6 +145,16 @@ func (r *XDRReader) ReadUint64() (uint64, error) {
 }
 
 func (r *XDRReader) ReadOpaque() ([]byte, error) {
+	data, err := r.ReadOpaqueView()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	return out, nil
+}
+
+func (r *XDRReader) ReadOpaqueView() ([]byte, error) {
 	length, err := r.ReadUint32()
 	if err != nil {
 		return nil, err
@@ -148,24 +162,24 @@ func (r *XDRReader) ReadOpaque() ([]byte, error) {
 	if length > maxFrameSize {
 		return nil, fmt.Errorf("opaque too large: %d", length)
 	}
-	data := make([]byte, length)
-	if length > 0 {
-		if _, err := io.ReadFull(&r.r, data); err != nil {
-			return nil, err
-		}
+	if int(length) > r.r.Len() {
+		return nil, io.ErrUnexpectedEOF
+	}
+	start := r.Offset()
+	end := start + int(length)
+	if _, err := r.r.Seek(int64(length), io.SeekCurrent); err != nil {
+		return nil, err
 	}
 	pad := (4 - int(length)%4) % 4
+	if pad > r.r.Len() {
+		return nil, io.ErrUnexpectedEOF
+	}
 	if pad > 0 {
-		var skip [3]byte
-		n, err := r.r.Read(skip[:pad])
-		if n < pad {
-			if err == nil || err == io.EOF {
-				return nil, io.ErrUnexpectedEOF
-			}
+		if _, err := r.r.Seek(int64(pad), io.SeekCurrent); err != nil {
 			return nil, err
 		}
 	}
-	return data, nil
+	return r.data[start:end], nil
 }
 
 func (r *XDRReader) ReadString() (string, error) {
@@ -187,6 +201,10 @@ func (r *XDRReader) ReadFixed(n int) ([]byte, error) {
 
 func (r *XDRReader) Remaining() int {
 	return int(r.r.Len())
+}
+
+func (r *XDRReader) Offset() int {
+	return len(r.data) - r.r.Len()
 }
 
 // --- ONC RPC ---
@@ -384,17 +402,15 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		return xdrWriterBytes(w), 0, nil
 
 	case OpWrite:
+		argStart := r.Offset()
 		var buf [16]byte
 		io.ReadFull(&r.r, buf[:]) // stateid
-		offset, _ := r.ReadUint64()
-		stable, _ := r.ReadUint32()
-		data, _ := r.ReadOpaque()
-		w := getXDRWriter()
-		w.buf.Write(buf[:])
-		w.WriteUint64(offset)
-		w.WriteUint32(stable)
-		w.WriteOpaque(data)
-		return xdrWriterBytes(w), 0, nil
+		r.ReadUint64()            // offset
+		r.ReadUint32()            // stable
+		if _, err := r.ReadOpaqueView(); err != nil {
+			return nil, 0, err
+		}
+		return r.data[argStart:r.Offset()], 0, nil
 
 	case OpOpen:
 		seqid, _ := r.ReadUint32()

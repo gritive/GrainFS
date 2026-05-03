@@ -1072,6 +1072,42 @@ func (b *DistributedBackend) ReadAt(bucket, key string, offset int64, buf []byte
 	return f.ReadAt(buf, offset)
 }
 
+// Truncate implements the internal-bucket fast path used by NFS SETATTR size.
+// It updates the fixed "current" object and metadata in place, avoiding the
+// full-object read/append/write fallback used by generic object stores.
+func (b *DistributedBackend) Truncate(bucket, key string, size int64) error {
+	if !storage.IsInternalBucket(bucket) {
+		return fmt.Errorf("Truncate not supported for user bucket %q", bucket)
+	}
+	if size < 0 {
+		return fmt.Errorf("truncate: negative size %d", size)
+	}
+	objPath := b.objectPathV(bucket, key, "current")
+	if err := os.Truncate(objPath, size); err != nil {
+		return fmt.Errorf("truncate object: %w", err)
+	}
+
+	now := time.Now().Unix()
+	meta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         size,
+		ContentType:  "application/octet-stream",
+		LastModified: now,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal object meta: %w", err)
+	}
+	return b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
+			return err
+		}
+		if err := txn.Set(objectMetaKeyV(bucket, key, "current"), meta); err != nil {
+			return err
+		}
+		return txn.Set(latestKey(bucket, key), []byte("current"))
+	})
+}
+
 // selectECPlacement decides where each shard for shardKey should land.
 //
 // Preference order:

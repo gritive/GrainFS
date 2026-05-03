@@ -850,7 +850,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	r := NewXDRReader(data[16:]) // skip stateid (16 bytes)
 	offset, _ := r.ReadUint64()
 	r.ReadUint32() // stable
-	writeData, err := r.ReadOpaque()
+	writeData, err := r.ReadOpaqueView()
 	if err != nil {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 	}
