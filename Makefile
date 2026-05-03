@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-cluster bench-profile bench-iceberg-table bench-iceberg-table-cluster build-pgo docker-build test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima
+.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-cluster bench-profile bench-iceberg-table bench-iceberg-table-cluster build-pgo docker-build test-nbd-docker test-nbd-interop update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
@@ -69,6 +69,9 @@ test-nfs4-colima: build
 
 test-nbd-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nbd_colima/
+
+test-nbd-interop: build
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -v -timeout 180s ./tests/nbd_interop/
 
 bench-nbd: build
 	./benchmarks/bench_nbd_profile.sh
