@@ -411,7 +411,7 @@ git commit -m "feat: bound nbd requests and generalize flush mutations"
 - Modify: `internal/nbd/modern_test.go`
 - Modify: `internal/nbd/nbd_bench_test.go`
 
-- [ ] **Step 1: Write failing `WRITE_ZEROES` tests**
+- [x] **Step 1: Write failing `WRITE_ZEROES` tests**
 
 Add tests:
 
@@ -433,7 +433,7 @@ func TestNBDWriteZeroesRejectsFastZero(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests and confirm failure**
+- [x] **Step 2: Run tests and confirm failure**
 
 Run:
 
@@ -443,11 +443,11 @@ go test ./internal/nbd -run 'TestNBDWriteZeroes' -count=1
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement correctness-first zeroing**
+- [x] **Step 3: Implement correctness-first zeroing**
 
 Add `nbdCmdWriteZeroes = uint32(6)` and advertise `nbdFlagSendWriteZeroes`. For the first implementation, write zero chunks using pooled 4 KiB zero buffers through `WriteAtDeferred`. Reject `FAST_ZERO`; accept `NO_HOLE` as a hint with no semantic change.
 
-- [ ] **Step 4: Add and run benchmark**
+- [x] **Step 4: Add and run benchmark**
 
 Add `BenchmarkNBD_WriteZeroes4K` and run:
 
@@ -457,7 +457,7 @@ go test ./internal/nbd -run '^$' -bench 'BenchmarkNBD_(Write4K|WriteZeroes4K)' -
 
 Expected: benchmark completes and allocation deltas are reviewed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/nbd/nbd.go internal/nbd/modern_test.go internal/nbd/nbd_bench_test.go

@@ -298,7 +298,7 @@ func TestNBDExportNameHonorsNoZeroes(t *testing.T) {
 	writeOptExportName(t, client, "nbd-test")
 	reply := readExact(t, client, 10)
 	require.Equal(t, uint64(1024*1024), binary.BigEndian.Uint64(reply[0:8]))
-	require.Equal(t, nbdFlagHasFlags|nbdFlagSendFlush|nbdFlagSendTrim, binary.BigEndian.Uint16(reply[8:10]))
+	require.Equal(t, nbdFlagHasFlags|nbdFlagSendFlush|nbdFlagSendTrim|nbdFlagSendWriteZeroes, binary.BigEndian.Uint16(reply[8:10]))
 }
 
 func TestNBDOptGoValidatesExportName(t *testing.T) {
@@ -341,4 +341,24 @@ func TestNBDFlushOrdersWriteZeroesAndTrim(t *testing.T) {
 	sendFlushConn(t, conn)
 	got := sendReadConn(t, conn, 0, 8192)
 	require.Equal(t, make([]byte, 8192), got)
+}
+
+func TestNBDWriteZeroesReadBack(t *testing.T) {
+	_, conn := setupNBD(t)
+	sendWriteConn(t, conn, 0, bytes.Repeat([]byte{0xcc}, 8192))
+
+	sendWriteZeroesConn(t, conn, 4096, 4096, 0)
+	require.Equal(t, uint32(0), readSimpleReply(t, conn).errCode)
+	sendFlushConn(t, conn)
+
+	got := sendReadConn(t, conn, 0, 8192)
+	require.Equal(t, bytes.Repeat([]byte{0xcc}, 4096), got[:4096])
+	require.Equal(t, make([]byte, 4096), got[4096:])
+}
+
+func TestNBDWriteZeroesRejectsFastZero(t *testing.T) {
+	_, conn := setupNBD(t)
+	sendWriteZeroesConn(t, conn, 0, 4096, nbdCmdFlagFastZero)
+	reply := readSimpleReply(t, conn)
+	require.NotEqual(t, uint32(0), reply.errCode)
 }

@@ -165,7 +165,7 @@ func parseOptionInfoRequest(payload []byte) (optionInfoRequest, error) {
 }
 
 func nbdTransmissionFlags() uint16 {
-	return nbdFlagHasFlags | nbdFlagSendFlush | nbdFlagSendTrim
+	return nbdFlagHasFlags | nbdFlagSendFlush | nbdFlagSendTrim | nbdFlagSendWriteZeroes
 }
 
 func (s *Server) sendExportData(conn net.Conn, vol *volume.Volume, state handshakeState) error {

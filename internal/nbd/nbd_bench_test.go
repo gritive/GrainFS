@@ -92,6 +92,21 @@ func sendWrite(conn net.Conn, offset uint64, data, req, reply []byte) error {
 	return err
 }
 
+// sendWriteZeroes sends an NBD write-zeroes request and drains the reply header.
+func sendWriteZeroes(conn net.Conn, offset uint64, length uint32, req, reply []byte) error {
+	putU32(req[0:], nbdRequestMagic)
+	putU16(req[4:], 0)
+	putU16(req[6:], uint16(nbdCmdWriteZeroes))
+	putU64(req[8:], 1)
+	putU64(req[16:], offset)
+	putU32(req[24:], length)
+	if _, err := conn.Write(req[:28]); err != nil {
+		return err
+	}
+	_, err := readFull(conn, reply[:16])
+	return err
+}
+
 func BenchmarkNBD_Read4K(b *testing.B) {
 	conn := setupBenchNBD(b)
 	req := make([]byte, 28)
@@ -141,6 +156,19 @@ func BenchmarkNBD_Write64K(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := sendWrite(conn, 0, data, req, reply); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkNBD_WriteZeroes4K(b *testing.B) {
+	conn := setupBenchNBD(b)
+	req := make([]byte, 28)
+	reply := make([]byte, 16)
+	b.SetBytes(4096)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := sendWriteZeroes(conn, 0, 4096, req, reply); err != nil {
 			b.Fatal(err)
 		}
 	}
