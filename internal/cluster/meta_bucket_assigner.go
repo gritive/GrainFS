@@ -17,6 +17,8 @@ type ForwardingBucketAssigner struct {
 	forward MetaForwardFunc
 }
 
+var bucketAssignmentLocalApplyTimeout = 10 * time.Second
+
 func NewForwardingBucketAssigner(local *MetaRaft, forward MetaForwardFunc) *ForwardingBucketAssigner {
 	return &ForwardingBucketAssigner{local: local, forward: forward}
 }
@@ -38,6 +40,11 @@ func (a *ForwardingBucketAssigner) ProposeBucketAssignment(ctx context.Context, 
 	}
 	if err := a.forward(ctx, data); err != nil {
 		return err
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, bucketAssignmentLocalApplyTimeout)
+		defer cancel()
 	}
 	return waitForLocalBucketAssignment(ctx, a.local, bucket, groupID)
 }
