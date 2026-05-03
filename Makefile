@@ -120,6 +120,7 @@ clean:
 lint:
 	go vet ./...
 	test -z "$$(gofmt -l .)"
+	golangci-lint run --timeout=5m ./...
 
 bench: bin/$(BINARY)
 	NO_BUILD=1 ./benchmarks/run-baseline.sh
