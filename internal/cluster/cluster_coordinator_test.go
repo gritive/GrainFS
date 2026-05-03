@@ -352,6 +352,52 @@ func TestClusterCoordinator_RouteBucket_ResolvesNodeIDPeersToAddresses(t *testin
 	require.True(t, target.selfIsVoter)
 }
 
+type countingAddressBook struct {
+	calls int
+}
+
+func (b *countingAddressBook) ResolveNodeAddress(idOrAddr string) (string, bool) {
+	b.calls++
+	return idOrAddr, true
+}
+
+func (b *countingAddressBook) Nodes() []MetaNodeEntry {
+	b.calls++
+	return nil
+}
+
+func TestClusterCoordinator_RouteBucket_LocalLeaderSkipsPeerResolution(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-a", "self", "node-b"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"node-a", "self", "node-b"}},
+	}}
+	addr := &countingAddressBook{}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithNodeAddressResolver(addr)
+
+	target, err := c.routeBucket("photos")
+	require.NoError(t, err)
+	require.True(t, target.selfIsVoter)
+	require.True(t, target.selfIsLeader)
+	require.Zero(t, addr.calls, "local leader fast path should not allocate/resolve forward peers")
+	require.Empty(t, target.peers)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		target, err := c.routeBucket("photos")
+		if err != nil {
+			t.Fatalf("routeBucket failed: %v", err)
+		}
+		if !target.selfIsLeader {
+			t.Fatalf("routeBucket lost local leader fast path")
+		}
+	})
+	require.Zero(t, allocs, "local leader route should not allocate")
+}
+
 // --- T6 forward-path test scaffolding ---
 
 // recordingDialer captures every (peer, payload) pair the ForwardSender hands

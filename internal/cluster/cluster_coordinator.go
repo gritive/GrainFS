@@ -309,33 +309,23 @@ type routeTarget struct {
 // selfIsLeader is true only when self is a voter AND the local GroupBackend's
 // raft.Node currently holds leadership — used by op handlers to skip the wire
 // and call the local backend directly (perf hint, not a correctness gate).
-func (c *ClusterCoordinator) routeBucket(bucket string) (*routeTarget, error) {
+func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 	if c.router == nil {
-		return nil, ErrCoordinatorNoRouter
+		return routeTarget{}, ErrCoordinatorNoRouter
 	}
 	dg, err := c.router.RouteKey(bucket, "")
 	if err != nil || dg == nil {
-		return nil, storage.ErrNoSuchBucket
+		return routeTarget{}, storage.ErrNoSuchBucket
 	}
 	if c.meta == nil {
-		return nil, ErrUnknownGroup
+		return routeTarget{}, ErrUnknownGroup
 	}
 	entry, ok := c.meta.ShardGroup(dg.ID())
 	if !ok || len(entry.PeerIDs) == 0 {
-		return nil, ErrUnknownGroup
+		return routeTarget{}, ErrUnknownGroup
 	}
-	peerIDs := PeersForForward(entry, c.selfID)
-	peers := peerIDs
-	if c.addr != nil {
-		resolved, err := ResolveNodeAddresses(c.addr, peerIDs)
-		if err != nil {
-			return nil, err
-		}
-		peers = resolved
-	}
-	t := &routeTarget{
+	t := routeTarget{
 		groupID: entry.ID,
-		peers:   peers,
 	}
 	for _, p := range entry.PeerIDs {
 		if p == c.selfID {
@@ -349,6 +339,20 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (*routeTarget, error) {
 			t.selfIsLeader = true
 		}
 	}
+	if t.selfIsLeader {
+		return t, nil
+	}
+
+	peerIDs := PeersForForward(entry, c.selfID)
+	peers := peerIDs
+	if c.addr != nil {
+		resolved, err := ResolveNodeAddresses(c.addr, peerIDs)
+		if err != nil {
+			return routeTarget{}, err
+		}
+		peers = resolved
+	}
+	t.peers = peers
 	return t, nil
 }
 
