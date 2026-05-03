@@ -355,7 +355,7 @@ ss -s
 # Install Docker
 # (platform-specific commands)
 
-# Build GrainFS Docker image
+# Build the image locally from the repo root.
 docker build -t grainfs:latest .
 ```
 
@@ -369,15 +369,16 @@ docker run -d \
   --name grainfs \
   --restart unless-stopped \
   -p 9000:9000 \
-  -p 9002:9002 \
-  -v grainfs-data:/grainfs/data \
+  -v grainfs-data:/data \
   -e GRAINFS_ACCESS_KEY=<from-secrets-manager> \
   -e GRAINFS_SECRET_KEY=<from-secrets-manager> \
-  grainfs:latest \
-  serve \
-  --data /grainfs/data \
-  --port 9000
+  grainfs:latest
 ```
+
+The image default command is `serve --data /data --port 9000 --nfs4-port 0 --nbd-port 0`.
+It is intentionally S3-only so the non-root container can start without binding privileged
+NFSv4 port 2049 or opening Linux block devices. To expose NFS or NBD, override the command
+and run with the container privileges required by your platform.
 
 **Health check:**
 ```bash

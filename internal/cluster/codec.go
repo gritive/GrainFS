@@ -121,6 +121,12 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if nodeIDsOff != 0 {
 		clusterpb.PutObjectMetaCmdAddNodeIds(b, nodeIDsOff)
 	}
+	if c.PreserveLatest {
+		clusterpb.PutObjectMetaCmdAddPreserveLatest(b, true)
+	}
+	if c.IsDeleteMarker {
+		clusterpb.PutObjectMetaCmdAddIsDeleteMarker(b, true)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -139,17 +145,19 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		}
 	}
 	return PutObjectMetaCmd{
-		Bucket:      string(t.Bucket()),
-		Key:         string(t.Key()),
-		Size:        t.Size(),
-		ContentType: string(t.ContentType()),
-		ETag:        string(t.Etag()),
-		ModTime:     t.ModTime(),
-		VersionID:   string(t.VersionId()),
-		RingVersion: RingVersion(t.RingVersion()),
-		ECData:      t.EcData(),
-		ECParity:    t.EcParity(),
-		NodeIDs:     nodeIDs,
+		Bucket:         string(t.Bucket()),
+		Key:            string(t.Key()),
+		Size:           t.Size(),
+		ContentType:    string(t.ContentType()),
+		ETag:           string(t.Etag()),
+		ModTime:        t.ModTime(),
+		VersionID:      string(t.VersionId()),
+		RingVersion:    RingVersion(t.RingVersion()),
+		ECData:         t.EcData(),
+		ECParity:       t.EcParity(),
+		NodeIDs:        nodeIDs,
+		PreserveLatest: t.PreserveLatest(),
+		IsDeleteMarker: t.IsDeleteMarker(),
 	}, nil
 }
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,15 +19,11 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-
-	"crypto/rand"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -47,8 +41,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
-	"github.com/gritive/GrainFS/internal/volume"
-	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
 
 const defaultReshardInterval = 24 * time.Hour
@@ -909,8 +901,18 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		return reply.Payload, nil
 	}
+	forwardReadStreamDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
+		msg := &transport.Message{Type: transport.StreamGroupForwardRead, Payload: payload}
+		reply, body, err := quicTransport.CallRead(callCtx, peer, msg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return reply.Payload, body, nil
+	}
 
-	forwardSender := cluster.NewForwardSender(forwardDialer).WithStreamDialer(forwardStreamDialer)
+	forwardSender := cluster.NewForwardSender(forwardDialer).
+		WithStreamDialer(forwardStreamDialer).
+		WithReadStreamDialer(forwardReadStreamDialer)
 	forwardReceiver := cluster.NewForwardReceiver(dgMgr)
 	forwardReceiver.Register(shardSvc)
 
@@ -1303,75 +1305,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	return nil
 }
 
-// buildVolumeManager creates the shared volume.Manager for the serve
-// path. When --dedup is set, it opens a dedicated BadgerDB at
-// {dataDir}/dedup/ and returns the manager + DB (caller closes the DB
-// on shutdown). The block cache is constructed here so the same
-// instance is shared with the dashboard endpoint via WithBlockCache.
-func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Backend) (*volume.Manager, *blockcache.Cache, *badger.DB, error) {
-	dedupEnabled, _ := cmd.Flags().GetBool("dedup")
-	cacheSize, _ := cmd.Flags().GetInt64("block-cache-size")
-	cache := blockcache.New(cacheSize)
-	if cacheSize > 0 {
-		log.Info().Int64("bytes", cacheSize).Msg("volume block cache enabled")
-	}
-	opts := volume.ManagerOptions{BlockCache: cache}
-	if !dedupEnabled {
-		return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
-	}
-	dir := filepath.Join(dataDir, "dedup")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, nil, nil, fmt.Errorf("create dedup dir: %w", err)
-	}
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)
-	}
-	opts.DedupIndex = dedup.NewBadgerIndex(db)
-	mgr := volume.NewManagerWithOptions(backend, opts)
-	return mgr, cache, db, nil
-}
-
-// loadOrCreateEncryptionKey loads a key from file or auto-generates one in the data directory.
-// If keyFile is explicitly provided (non-empty) and the file does not exist, an error is returned
-// rather than silently generating a new key — a missing explicit path likely means a mount failure,
-// and generating a new key would make all existing shards permanently unreadable.
-func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, error) {
-	explicitPath := keyFile != ""
-	if !explicitPath {
-		keyFile = filepath.Join(dataDir, "encryption.key")
-	}
-
-	keyData, err := os.ReadFile(keyFile)
-	if err == nil {
-		log.Info().Str("component", "server").Str("key_file", keyFile).Msg("at-rest encryption enabled")
-		return encrypt.NewEncryptor(keyData)
-	}
-
-	if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read key file: %w", err)
-	}
-
-	if explicitPath {
-		return nil, fmt.Errorf("encryption key file not found: %s (mount failure?): %w", keyFile, err)
-	}
-
-	// Auto-generate a new key only for the default path.
-	if err := os.MkdirAll(filepath.Dir(keyFile), 0o755); err != nil {
-		return nil, fmt.Errorf("create key dir: %w", err)
-	}
-	keyData = make([]byte, 32)
-	if _, err := rand.Read(keyData); err != nil {
-		return nil, fmt.Errorf("generate key: %w", err)
-	}
-	if err := os.WriteFile(keyFile, keyData, 0o600); err != nil {
-		return nil, fmt.Errorf("write key file: %w", err)
-	}
-
-	log.Info().Str("component", "server").Str("key_file", keyFile).Msg("at-rest encryption enabled (auto-generated key)")
-	return encrypt.NewEncryptor(keyData)
-}
-
 // raftBalancerAdapter wraps *raft.Node to implement cluster.RaftBalancerNode.
 type raftBalancerAdapter struct {
 	node  *raft.Node
@@ -1490,64 +1423,6 @@ func startBalancer(
 	return balancer, receiver, nil
 }
 
-// createDefaultBucketWithRetry keeps trying the "default" bucket proposal
-// until Raft commits one (quorum reached, leader elected) or the deadline
-// elapses. "ErrBucketAlreadyExists" is success. "not the leader" and
-// transport errors are treated as transient.
-// filterEmpty drops "" entries from the slice. strings.Split(",",",") and
-// strings.Split("",",") both yield elements that would be wasted as peer
-// addresses — gossip sends to "" log a warning every tick.
-func filterEmpty(ss []string) []string {
-	out := ss[:0]
-	for _, s := range ss {
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func shouldCreateDefaultBucketOnStartup(peers []string, recoveryReadOnly bool) bool {
-	return !recoveryReadOnly && len(peers) == 0
-}
-
-func metaProposalTargets(leader string, peers []string) []string {
-	if leader == "" {
-		return peers
-	}
-	targets := make([]string, 0, len(peers)+1)
-	targets = append(targets, leader)
-	for _, peer := range peers {
-		if peer != leader {
-			targets = append(targets, peer)
-		}
-	}
-	return targets
-}
-
-func createDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	backoff := 100 * time.Millisecond
-	const maxBackoff = 2 * time.Second
-	var lastErr error
-	for {
-		err := backend.CreateBucket("default")
-		if err == nil || errors.Is(err, storage.ErrBucketAlreadyExists) {
-			return nil
-		}
-		lastErr = err
-		if time.Now().After(deadline) {
-			return fmt.Errorf("default bucket not created after %s: %w", timeout, lastErr)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-		backoff = min(backoff*2, maxBackoff)
-	}
-}
-
 // balancerInfoAdapter adapts *cluster.BalancerProposer to server.BalancerInfo.
 type balancerInfoAdapter struct {
 	p *cluster.BalancerProposer
@@ -1590,85 +1465,6 @@ func (r *raftClusterInfo) LivePeers() []string {
 		return r.peers
 	}
 	return r.backend.LiveNodes()
-}
-
-// logStartupConfigSnapshot dumps every flag's resolved value at debug level
-// and writes a JSON snapshot to {dataDir}/.last-config.json. On the next
-// start the previous snapshot is compared and any changed key is logged at
-// info level so the operator sees what was reconfigured between restarts.
-//
-// Limited to flag values — there is no live-config-file system in grainfs,
-// so true "drift detection" (file vs runtime) is out of scope until a config
-// file is added (Phase 20). What this catches is unintentional flag changes
-// across restarts, which is the realistic operator failure mode today.
-func logStartupConfigSnapshot(cmd *cobra.Command, addr, dataDir, nodeID, raftAddr string, peers []string) {
-	snapshot := map[string]any{
-		"addr":      addr,
-		"data_dir":  dataDir,
-		"node_id":   nodeID,
-		"raft_addr": raftAddr,
-		"peers":     peers,
-	}
-	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		// Strip secrets from the snapshot — they should never hit a debug
-		// log or an on-disk plaintext file.
-		switch f.Name {
-		case "secret-key", "cluster-key", "alert-webhook-secret", "heal-receipt-psk":
-			if f.Value.String() != "" {
-				snapshot[f.Name] = "<redacted>"
-			}
-			return
-		}
-		snapshot[f.Name] = f.Value.String()
-	})
-
-	log.Debug().Interface("flags", snapshot).Msg("startup config snapshot")
-
-	// Compare against previous snapshot, log diff at info level.
-	snapPath := filepath.Join(dataDir, ".last-config.json")
-	if prev, err := os.ReadFile(snapPath); err == nil {
-		var prevMap map[string]any
-		if err := json.Unmarshal(prev, &prevMap); err == nil {
-			diff := diffSnapshots(prevMap, snapshot)
-			if len(diff) > 0 {
-				log.Info().Interface("changed", diff).Msg("config changed since last startup")
-			}
-		}
-	}
-
-	// Persist current snapshot for next restart's comparison. Failure here
-	// is non-fatal — drift detection is best-effort observability.
-	if data, err := json.MarshalIndent(snapshot, "", "  "); err == nil {
-		if err := os.WriteFile(snapPath, data, 0o600); err != nil {
-			log.Debug().Err(err).Str("path", snapPath).Msg("could not persist startup config snapshot")
-		}
-	}
-}
-
-// diffSnapshots returns a map of key→{prev, curr} for every key whose value
-// changed between snapshots. Keys present in only one side are also reported.
-func diffSnapshots(prev, curr map[string]any) map[string]map[string]any {
-	out := make(map[string]map[string]any)
-	keys := make(map[string]struct{}, len(prev)+len(curr))
-	for k := range prev {
-		keys[k] = struct{}{}
-	}
-	for k := range curr {
-		keys[k] = struct{}{}
-	}
-	sortedKeys := make([]string, 0, len(keys))
-	for k := range keys {
-		sortedKeys = append(sortedKeys, k)
-	}
-	sort.Strings(sortedKeys)
-	for _, k := range sortedKeys {
-		pv, pok := prev[k]
-		cv, cok := curr[k]
-		if !pok || !cok || fmt.Sprintf("%v", pv) != fmt.Sprintf("%v", cv) {
-			out[k] = map[string]any{"prev": pv, "curr": cv}
-		}
-	}
-	return out
 }
 
 // ecShardCounterFor returns a per-object shard-count function for MigrationExecutor.

@@ -23,6 +23,7 @@ func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 func (r *ForwardReceiver) Register(shardSvc *ShardService) {
 	shardSvc.RegisterHandler(transport.StreamProposeGroupForward, r.Handle)
 	shardSvc.RegisterBodyHandler(transport.StreamGroupForwardBody, r.HandleBody)
+	shardSvc.RegisterReadHandler(transport.StreamGroupForwardRead, r.HandleRead)
 }
 
 // Handle implements transport.Handler for 0x08 stream.
@@ -115,6 +116,39 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 	}
 }
 
+// HandleRead implements streamed-response forwarding for GetObject and
+// GetObjectVersion. The returned ForwardReply carries metadata only; object
+// bytes follow as the raw response body on the same QUIC stream.
+func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message, io.ReadCloser) {
+	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
+	if err != nil {
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
+	}
+
+	dg := r.groups.Get(groupID)
+	if dg == nil || dg.Backend() == nil {
+		return errReply(raftpb.ForwardStatusNotVoter, ""), nil
+	}
+
+	node := dg.Backend().RaftNode()
+	if node == nil || !node.IsLeader() {
+		hint := ""
+		if node != nil {
+			hint = node.LeaderID()
+		}
+		return errReply(raftpb.ForwardStatusNotLeader, hint), nil
+	}
+
+	switch op {
+	case raftpb.ForwardOpGetObject:
+		return r.handleGetObjectRead(dg, fbsArgs)
+	case raftpb.ForwardOpGetObjectVersion:
+		return r.handleGetObjectVersionRead(dg, fbsArgs)
+	default:
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
+	}
+}
+
 func drainForwardBody(body io.Reader) {
 	if body != nil {
 		_, _ = io.Copy(io.Discard, body)
@@ -150,6 +184,15 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 	return &transport.Message{Payload: buildObjectReply(obj, string(pa.Bucket()))}
 }
 
+func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
+	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
+	rc, obj, err := dg.Backend().GetObject(string(ga.Bucket()), string(ga.Key()))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err)), nil
+	}
+	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), nil)}, rc
+}
+
 func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport.Message {
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
 	rc, obj, err := dg.Backend().GetObject(string(ga.Bucket()), string(ga.Key()))
@@ -168,6 +211,15 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 		return statusReply(raftpb.ForwardStatusInternal)
 	}
 	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
+}
+
+func (r *ForwardReceiver) handleGetObjectVersionRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
+	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
+	rc, obj, err := dg.Backend().GetObjectVersion(string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err)), nil
+	}
+	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), nil)}, rc
 }
 
 func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) *transport.Message {

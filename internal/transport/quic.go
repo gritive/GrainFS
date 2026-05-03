@@ -39,6 +39,10 @@ type StreamHandler func(req *Message) *Message
 // the same QUIC stream. The handler must read body before returning a response.
 type StreamBodyHandler func(req *Message, body io.Reader) *Message
 
+// StreamReadHandler processes a framed request and returns a framed metadata
+// response followed by a raw response body on the same QUIC stream.
+type StreamReadHandler func(req *Message) (*Message, io.ReadCloser)
+
 type TrafficLimits struct {
 	Control int
 	Meta    int
@@ -99,6 +103,7 @@ func (l *TrafficLimiter) Acquire(ctx context.Context, st StreamType) (func(), er
 type StreamRouter struct {
 	handlers     map[StreamType]StreamHandler
 	bodyHandlers map[StreamType]StreamBodyHandler
+	readHandlers map[StreamType]StreamReadHandler
 }
 
 // NewStreamRouter creates a router that dispatches by StreamType.
@@ -106,6 +111,7 @@ func NewStreamRouter() *StreamRouter {
 	return &StreamRouter{
 		handlers:     make(map[StreamType]StreamHandler),
 		bodyHandlers: make(map[StreamType]StreamBodyHandler),
+		readHandlers: make(map[StreamType]StreamReadHandler),
 	}
 }
 
@@ -118,6 +124,12 @@ func (r *StreamRouter) Handle(st StreamType, h StreamHandler) {
 // any remaining bytes on the same stream as a streaming body.
 func (r *StreamRouter) HandleBody(st StreamType, h StreamBodyHandler) {
 	r.bodyHandlers[st] = h
+}
+
+// HandleRead registers a handler that writes a framed metadata response and
+// then streams any returned body bytes on the same stream.
+func (r *StreamRouter) HandleRead(st StreamType, h StreamReadHandler) {
+	r.readHandlers[st] = h
 }
 
 // Dispatch finds the handler for the message's stream type and calls it.
@@ -138,6 +150,12 @@ func (r *StreamRouter) Lookup(st StreamType) (StreamHandler, bool) {
 // LookupBody returns the streaming body handler for the stream type, if any.
 func (r *StreamRouter) LookupBody(st StreamType) (StreamBodyHandler, bool) {
 	h, ok := r.bodyHandlers[st]
+	return h, ok
+}
+
+// LookupRead returns the streaming read handler for the stream type, if any.
+func (r *StreamRouter) LookupRead(st StreamType) (StreamReadHandler, bool) {
+	h, ok := r.readHandlers[st]
 	return h, ok
 }
 
@@ -369,6 +387,7 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 	t.mu.RLock()
 	typeHandler, hasTypeHandler := t.router.Lookup(msg.Type)
 	bodyHandler, hasBodyHandler := t.router.LookupBody(msg.Type)
+	readHandler, hasReadHandler := t.router.LookupRead(msg.Type)
 	catchAll := t.streamHandler
 	t.mu.RUnlock()
 
@@ -376,6 +395,22 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 		resp := bodyHandler(msg, stream)
 		if resp != nil {
 			_ = t.codec.Encode(stream, resp)
+		}
+		return
+	}
+	if hasReadHandler {
+		resp, body := readHandler(msg)
+		if resp != nil {
+			if err := t.codec.Encode(stream, resp); err != nil {
+				if body != nil {
+					_ = body.Close()
+				}
+				return
+			}
+		}
+		if body != nil {
+			defer body.Close()
+			_, _ = io.Copy(stream, body)
 		}
 		return
 	}
@@ -565,6 +600,14 @@ func (t *QUICTransport) HandleBody(st StreamType, h StreamBodyHandler) {
 	t.mu.Unlock()
 }
 
+// HandleRead registers a per-type handler for a request frame that returns a
+// framed metadata response followed by raw response body bytes.
+func (t *QUICTransport) HandleRead(st StreamType, h StreamReadHandler) {
+	t.mu.Lock()
+	t.router.HandleRead(st, h)
+	t.mu.Unlock()
+}
+
 // Call sends a request message and waits for a response (bidirectional stream).
 // Unlike Send, this opens a stream, writes the request, reads the response, and returns it.
 // If the cached connection is stale (idle-timed-out), it is evicted and re-dialled once.
@@ -668,6 +711,108 @@ func (t *QUICTransport) CallWithBody(ctx context.Context, addr string, req *Mess
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
 	return checkResponseStatus(addr, resp)
+}
+
+type quicReadCloser struct {
+	stream  *quic.Stream
+	release func()
+	once    sync.Once
+}
+
+func (r *quicReadCloser) Read(p []byte) (int, error) {
+	return r.stream.Read(p)
+}
+
+func (r *quicReadCloser) Close() error {
+	var err error
+	r.once.Do(func() {
+		r.stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+		err = r.stream.Close()
+		r.release()
+	})
+	return err
+}
+
+// CallRead sends a framed request, reads a framed metadata response, then
+// returns the remaining stream bytes as the response body. The caller must
+// close the returned body to release traffic-limiter capacity.
+func (t *QUICTransport) CallRead(ctx context.Context, addr string, req *Message) (*Message, io.ReadCloser, error) {
+	release, err := t.acquireTraffic(ctx, req.Type)
+	if err != nil {
+		return nil, nil, err
+	}
+	released := false
+	releaseOnce := func() {
+		if !released {
+			released = true
+			release()
+		}
+	}
+	defer func() {
+		if !released && err != nil {
+			releaseOnce()
+		}
+	}()
+
+	conn, err := t.getOrConnect(ctx, addr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		if !shouldEvictOpenStreamError(ctx, err) {
+			return nil, nil, err
+		}
+		t.evict(addr, conn)
+		conn, err = t.getOrConnect(ctx, addr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reconnect to %s: %w", addr, err)
+		}
+		if stream, err = conn.OpenStreamSync(ctx); err != nil {
+			return nil, nil, fmt.Errorf("open stream to %s: %w", addr, err)
+		}
+	}
+
+	cancelDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+			stream.CancelWrite(quic.StreamErrorCode(quicAppErrCode))
+		case <-cancelDone:
+		}
+	}()
+
+	closeStreamOnError := true
+	defer func() {
+		if closeStreamOnError {
+			close(cancelDone)
+			stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+			_ = stream.Close()
+		}
+	}()
+
+	if err = t.codec.Encode(stream, req); err != nil {
+		return nil, nil, fmt.Errorf("encode request: %w", err)
+	}
+
+	resp, err := t.codec.Decode(stream)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode response from %s: %w", addr, err)
+	}
+	resp, err = checkResponseStatus(addr, resp)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	close(cancelDone)
+	closeStreamOnError = false
+	rc := &quicReadCloser{
+		stream:  stream,
+		release: releaseOnce,
+	}
+	return resp, rc, nil
 }
 
 // CallFlatBuffer sends a FlatBuffers message and waits for a response.

@@ -98,6 +98,30 @@ func TestForwardReceiver_GetObjectVersion_TooLargeReturnsEntityTooLarge(t *testi
 	require.Equal(t, raftpb.ForwardStatusEntityTooLarge, fr.Status())
 }
 
+func TestForwardReceiver_GetObjectVersionRead_StreamsAboveReplyCap(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	body := bytes.Repeat([]byte("x"), int(DefaultMaxForwardReplyBytes)+1)
+	obj, err := gb.PutObject("bk", "large", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
+	reply, streamBody := rcv.HandleRead(&transport.Message{Type: transport.StreamGroupForwardRead, Payload: payload})
+	require.NotNil(t, reply)
+	require.NotNil(t, streamBody)
+	defer streamBody.Close()
+
+	gotObj, err := objectFromReply(reply.Payload)
+	require.NoError(t, err)
+	require.Equal(t, obj.VersionID, gotObj.VersionID)
+	require.Equal(t, int64(len(body)), gotObj.Size)
+	got, err := io.ReadAll(streamBody)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
+}
+
 func TestForwardReceiver_ListObjectVersions_DispatchesToBackend(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
 	gb := newTestGroupBackend(t, "g1")

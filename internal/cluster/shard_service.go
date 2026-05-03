@@ -117,6 +117,15 @@ func (s *ShardService) RegisterBodyHandler(st transport.StreamType, h func(*tran
 	s.transport.HandleBody(st, h)
 }
 
+// RegisterReadHandler registers a per-type handler whose framed response is
+// followed by raw bytes on the same bidirectional stream.
+func (s *ShardService) RegisterReadHandler(st transport.StreamType, h func(*transport.Message) (*transport.Message, io.ReadCloser)) {
+	if s.transport == nil {
+		return
+	}
+	s.transport.HandleRead(st, h)
+}
+
 // WriteShard sends a shard to a remote node for storage.
 //
 // NOTE: In cluster mode, PutObject calls this with shardIdx=0 and the full object

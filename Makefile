@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-cluster bench-profile bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima
+.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-cluster bench-profile bench-iceberg-table bench-iceberg-table-cluster build-pgo docker-build test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
@@ -19,6 +19,9 @@ bin/$(BINARY): $(GO_SRC) $(FBS_STAMPS)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
 
 build: bin/$(BINARY)
+
+docker-build:
+	docker build --build-arg VERSION=$(VERSION) -t grainfs:$(VERSION) .
 
 # build-pgo: compile with Profile-Guided Optimization using a previously collected
 # pprof CPU profile (from `make bench-profile`). Typically 5-15% faster on hot paths.

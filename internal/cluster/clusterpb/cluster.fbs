@@ -28,6 +28,8 @@ table PutObjectMetaCmd {
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
+  preserve_latest:bool = false;
+  is_delete_marker:bool = false;
 }
 
 table DeleteObjectCmd {

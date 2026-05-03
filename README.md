@@ -21,6 +21,25 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 서버 시작 시 `default` 버킷이 자동 생성된다. 브라우저에서 `http://localhost:9000/ui/` 로 Object Browser 접근 가능.
 
+## Distribution
+
+GrainFS includes a root Dockerfile for local container builds.
+
+```bash
+# Local container build from the repository root
+make docker-build
+
+# Run the S3-only container profile
+docker run --rm \
+  -p 9000:9000 \
+  -v grainfs-data:/data \
+  -e GRAINFS_ACCESS_KEY=<access-key> \
+  -e GRAINFS_SECRET_KEY=<secret-key> \
+  grainfs:$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+```
+
+The default container command disables NFSv4 and NBD with `--nfs4-port 0 --nbd-port 0`, so it runs as a non-root user without privileged ports or Linux block-device access. Opt into NFSv4/NBD explicitly when the container runtime grants the required privileges.
+
 ## Features
 
 | 기능               | 설명                                                          |

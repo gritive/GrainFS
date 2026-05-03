@@ -79,6 +79,34 @@ func TestWAL_WrapDistributedBackend_DeleteObjectVersion(t *testing.T) {
 	assert.Equal(t, obj.VersionID, entries[1].VersionID)
 }
 
+func TestWAL_WrapDistributedBackend_DeleteObjectRecordsMarkerVersionID(t *testing.T) {
+	dist := newTestDistributedBackend(t)
+	require.NoError(t, dist.CreateBucket("vbucket"))
+
+	walDir := t.TempDir()
+	w, err := wal.Open(walDir)
+	require.NoError(t, err)
+	backend := wal.NewBackend(dist, w)
+
+	_, err = backend.PutObject("vbucket", "k", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	markerID, err := backend.DeleteObjectReturningMarker("vbucket", "k")
+	require.NoError(t, err)
+	require.NotEmpty(t, markerID)
+
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	var entries []wal.Entry
+	_, err = wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
+		entries = append(entries, e)
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "Put + delete marker")
+	assert.Equal(t, wal.OpDelete, entries[1].Op)
+	assert.Equal(t, markerID, entries[1].VersionID)
+}
+
 // TestWAL_WrapDistributedBackend_ReplayProducesSameState verifies end-to-end
 // that the WAL captures enough to rebuild the logical object state: PUT two
 // versions, replay the WAL, and confirm the final "latest" state matches what

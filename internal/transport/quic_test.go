@@ -407,6 +407,7 @@ func TestStreamClassOf(t *testing.T) {
 	require.Equal(t, StreamClassMeta, ClassOf(StreamMetaProposeForward))
 	require.Equal(t, StreamClassData, ClassOf(StreamData))
 	require.Equal(t, StreamClassBulk, ClassOf(StreamGroupForwardBody))
+	require.Equal(t, StreamClassBulk, ClassOf(StreamGroupForwardRead))
 }
 
 func TestTrafficLimiter_BulkSaturationDoesNotBlockMeta(t *testing.T) {
@@ -498,4 +499,61 @@ func TestQUICTransport_InboundBulkSaturationDoesNotBlockMeta(t *testing.T) {
 
 	close(blockBulk)
 	require.NoError(t, <-firstDone)
+}
+
+func TestQUICTransport_CallReadReturnsMetadataAndStreamingBody(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	body := bytes.Repeat([]byte("r"), 2*1024*1024)
+	server.HandleRead(StreamGroupForwardRead, func(req *Message) (*Message, io.ReadCloser) {
+		require.Equal(t, []byte("read-object"), req.Payload)
+		return NewResponse(req, []byte("meta")), io.NopCloser(bytes.NewReader(body))
+	})
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	resp, rc, err := client.CallRead(ctx, server.LocalAddr(), &Message{Type: StreamGroupForwardRead, Payload: []byte("read-object")})
+	require.NoError(t, err)
+	defer rc.Close()
+	require.Equal(t, []byte("meta"), resp.Payload)
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
+}
+
+func TestQUICTransport_CallReadContextDoesNotCancelReturnedBody(t *testing.T) {
+	ctx := context.Background()
+
+	server := NewQUICTransport()
+	client := NewQUICTransport()
+	defer server.Close()
+	defer client.Close()
+
+	body := bytes.Repeat([]byte("r"), 64*1024)
+	server.HandleRead(StreamGroupForwardRead, func(req *Message) (*Message, io.ReadCloser) {
+		return NewResponse(req, []byte("meta")), io.NopCloser(bytes.NewReader(body))
+	})
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	callCtx, cancel := context.WithCancel(ctx)
+	resp, rc, err := client.CallRead(callCtx, server.LocalAddr(), &Message{Type: StreamGroupForwardRead})
+	require.NoError(t, err)
+	require.Equal(t, []byte("meta"), resp.Payload)
+	cancel()
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
 }
