@@ -1,5 +1,41 @@
 # Changelog
 
+## [Unreleased] — online cluster-key rotation
+
+### Added
+
+- **online cluster-key rotation** (`grainfs cluster rotate-key {begin,status,abort}`):
+  S3/NFS/NBD downtime 없이 PSK 교체. Localhost-only Unix socket
+  (`$DATA/rotate.sock`, mode 0600) 으로만 명령 수신 — 네트워크 노출 없음.
+  Operator-distributed `keys.d/next.key` SPKI 를 raft 합의 명령과 대조 검증
+  후 transport identity swap. Leader-driven 4-phase 자동 진행
+  (steady→begun→switched→steady-on-NEW), 5초 phase grace, 30분 global
+  timeout 자동 abort. Phase-2 abort 는 OLD 롤백, phase-3 abort 는 D18 spec
+  대로 NEW forward-roll.
+- **transport keystore** (`internal/transport/keystore.go`): `keys.d/{current,next,previous}.key`
+  슬롯 매니저. Atomic write + fsync, O_NOFOLLOW, mode 0700/0600.
+- **multi-SPKI accept set**: `transport.IdentitySnapshot` + `atomic.Pointer`
+  로 lock-free identity reload. 회전 중 OLD/NEW 모두 accept, present 만 전환.
+- **PSK bootstrap conflict resolution** (D10): `keys.d/current.key` 가
+  `--cluster-key` 플래그와 다르면 디스크가 이김 (warn 출력). 플래그 단독이면
+  최초 부트시 디스크에 미러링.
+- **cluster-key 회전 RUNBOOK**: `docs/RUNBOOK.md#cluster-key-rotation` —
+  online 절차, abort 동작, offline fallback.
+
+### Changed
+
+- **MetaFSM**: 4 신규 명령 (RotateKeyBegin/Switch/Drop/Abort) 디스패치.
+  결정론적 RotationFSM (D16 분리) + onRotationApplied 콜백으로 side-effects 트리거.
+- **MetaRaft.Start**: leader-only auto-progress goroutine 추가.
+
+### Tests
+
+- 단위: RotationFSM (9), RotationWorker (6), rotation codec round-trip (3),
+  MetaFSM end-to-end apply (1), receipt rotation audit (1).
+- E2E: `tests/e2e/cluster_rotate_key_test.go` — solo status smoke + full
+  4-phase happy-path with auto-progress 검증 (`keys.d/current.key` = NEW,
+  `keys.d/previous.key` = OLD).
+
 ## [0.0.40.0] — 2026-05-04 — stabilize e2e startup routing
 
 ### Changed

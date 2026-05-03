@@ -596,15 +596,64 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
 `--cluster-key`는 클러스터 TLS identity (cert + SPKI)를 결정론적으로 도출하는 PSK이다.
 다른 키 → 다른 클러스터 identity. 옛 키를 가진 노드는 새 키 노드와 인증 실패한다.
 
-이 릴리스는 무중단(rolling) rotation을 지원하지 않는다. 회전 절차:
+**v0.0.39 부터 무중단(rolling) rotation 지원.** S3/NFS/NBD downtime 없이 PSK를
+교체할 수 있다. CLI는 meta-raft leader의 localhost-only Unix socket
+(`$DATA/rotate.sock`, mode 0600)을 통해 명령을 전송한다.
 
-1. 새 키 생성:
-   ```
-   openssl rand -hex 32
-   ```
-2. 기존 secret 채널로 모든 노드에 배포한다.
-3. 모든 노드를 정지한다 (S3 / NFS / NBD downtime 발생).
-4. 모든 노드를 새 `--cluster-key`로 재시작한다.
-5. `grainfs cluster status` (또는 동등한 도구)로 모든 peer 재연결 확인.
+### Online rotation (권장)
 
-향후 릴리스에서 온라인 회전을 위한 `grainfs cluster rotate-key` 도구가 추가될 예정 (TODOS 참조).
+전제: 모든 노드가 v0.0.39+ 이며 정상 작동 중. Leader 식별: `grainfs cluster status`.
+
+1. **새 키 생성** (또는 자동):
+   ```
+   openssl rand -hex 32  # 32-byte PSK = 64 hex chars
+   ```
+
+2. **Leader 노드에서 회전 시작**:
+   ```
+   ./grainfs cluster rotate-key begin --new-key=<64-hex> --data=/path/to/data
+   # 또는 자동 생성:
+   ./grainfs cluster rotate-key begin --generate --data=/path/to/data
+   ```
+   출력에 `rotation_id`, `OLD SPKI`, `NEW SPKI` 표시. CLI는 즉시 반환되며
+   클러스터가 background에서 자동으로 phase 1→2→3→steady 진행.
+
+3. **진행 상황 모니터링**:
+   ```
+   ./grainfs cluster rotate-key status --data=/path/to/data
+   ```
+   - phase=2 (begun): accept set에 NEW 추가, 여전히 OLD 제시
+   - phase=3 (switched): 활성 cert를 NEW로 전환, OLD는 accept 유지
+   - phase=1 (steady): NEW가 활성, OLD는 `keys.d/previous.key` 보관
+
+   각 phase 사이 5초 grace로 워커가 디스크 I/O + transport identity swap
+   완료. 정상 진행 시 ~10–15초 내 완료.
+
+4. **모든 노드의 영구 설정에 새 키 반영** — 다음 재시작 시에도 새 키가
+   유지되도록 환경변수, 시스템d 유닛, `--cluster-key` 플래그를 업데이트한다.
+   디스크의 `keys.d/current.key`는 회전 직후 자동으로 NEW로 갱신되므로 플래그 없이
+   재시작해도 회전 후 NEW를 사용한다 (D10 — disk wins).
+
+5. **검증**: `grainfs cluster status` 로 모든 peer 정상, `grainfs cluster
+   rotate-key status` 로 phase=1 (steady) 확인.
+
+### 회전 중 실패 처리
+
+- **운영자 취소**:
+  ```
+  ./grainfs cluster rotate-key abort --reason=<설명> --data=/path/to/data
+  ```
+  - phase 2에서 abort: OLD로 롤백 (NEW 폐기)
+  - phase 3에서 abort: NEW로 forward-roll (일부 peer가 이미 NEW를 제시 중이라
+    revert가 안전하지 않음 — D18)
+
+- **Global timeout**: 회전이 30분을 초과하면 leader가 자동으로 abort 발행.
+
+- **Down peer**: 한 노드가 회전 중 응답하지 않으면 raft commit 자체가 진행되지
+  않아 phase가 멈춘다. 해당 노드를 복구하거나 클러스터에서 제거한 뒤 재개.
+
+### Offline fallback (모든 노드가 v0.0.39 미만일 때)
+
+1. 모든 노드 정지 (S3/NFS/NBD downtime 발생).
+2. 모든 노드를 새 `--cluster-key`로 재시작.
+3. `grainfs cluster status`로 peer 재연결 확인.
