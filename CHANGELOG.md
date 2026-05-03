@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Cluster Trust Boundary & NFS Input Validation
+## [0.0.36.0] — 2026-05-03 — cluster trust boundary + NFS input validation
 
 Closes 2026-05-03 CSO security audit findings #1, #2, #3.
 
