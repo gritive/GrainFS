@@ -163,10 +163,19 @@ make lint           # go vet + gofmt 검사
 [k6](https://k6.io/) 설치 후:
 
 ```bash
-make bench
+make bench                        # single-node S3 object PUT/GET/DELETE
+make bench-cluster                # multi-node S3 object, same k6 actions
+make bench-profile                # multi-node S3 object benchmark + pprof
+make bench-iceberg-table          # single-node Iceberg REST Catalog table API
+make bench-iceberg-table-cluster  # multi-node Iceberg table API, same k6 actions
+make bench-nfs                    # single-node NFS fio profile via Colima
+make bench-nbd                    # single-node NBD fio profile via Colima
+make bench-nbd-cluster            # multi-node NBD, same fio actions
+make bench-nfs-cluster            # multi-node NFS, same fio actions
 ```
 
-S3 PUT/GET/DELETE throughput과 P50/P99 지연을 측정한다. 결과는 `benchmarks/report.json`에 저장.
+S3 object 결과는 `benchmarks/report.json`, Iceberg table API 결과는 `benchmarks/iceberg_table_report.json`에 저장된다.
+암호화는 기본으로 켜진 상태에서 측정한다. 암호화를 끄고 비교할 때만 `NO_ENCRYPTION=1`을 지정한다.
 
 ### FUSE-over-S3 마운트 (rclone/s3fs/goofys)
 

@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-profile build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd test-fuse-s3-colima bench-fuse-s3-colima
+.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint bench bench-cluster bench-profile bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-docker update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
@@ -70,6 +70,15 @@ test-nbd-colima: build
 bench-nbd: build
 	./benchmarks/bench_nbd_profile.sh
 
+bench-nbd-cluster: build
+	./benchmarks/bench_nbd_cluster_profile.sh
+
+bench-nfs: build
+	./benchmarks/bench_nfs_profile.sh
+
+bench-nfs-cluster: build
+	./benchmarks/bench_nfs_cluster_profile.sh
+
 # FUSE-over-S3 e2e: macOS host runs grainfs serve, Colima Linux VM mounts via
 # rclone mount and exercises common filesystem operations. Verifies that
 # GrainFS's S3 API works with standard FUSE-over-S3 client tooling.
@@ -107,40 +116,22 @@ lint:
 	test -z "$$(gofmt -l .)"
 
 bench: bin/$(BINARY)
-	@echo "Starting GrainFS server for benchmarks..."
-	@./bin/$(BINARY) serve --data /tmp/grainfs-bench --port 9100 --no-encryption --nfs4-port 0 & \
-		SERVER_PID=$$!; \
-		sleep 2; \
-		k6 run benchmarks/s3_bench.js --env BASE_URL=http://localhost:9100; \
-		kill $$SERVER_PID 2>/dev/null; \
-		rm -rf /tmp/grainfs-bench
+	NO_BUILD=1 ./benchmarks/run-baseline.sh
+
+bench-cluster: bin/$(BINARY)
+	NO_BUILD=1 ./benchmarks/bench_cluster.sh
 
 # bench-profile: run k6 load test while collecting pprof profiles.
 # CPU profile is collected concurrently with k6 (captures real load).
 # Results in /tmp/grainfs-bench-*.out
 bench-profile: bin/$(BINARY)
-	@echo "Starting GrainFS server with pprof..."
-	@rm -rf /tmp/grainfs-bench-profile && mkdir -p /tmp/grainfs-bench-profile
-	@./bin/$(BINARY) serve --data /tmp/grainfs-bench-profile --port 9100 \
-		--pprof-port 6060 --no-encryption --nfs4-port 0 --log-level warn & \
-		SERVER_PID=$$!; \
-		sleep 2; \
-		echo "Collecting CPU profile during k6 run (30s)..."; \
-		curl -sf "http://127.0.0.1:6060/debug/pprof/profile?seconds=30" -o /tmp/grainfs-bench-cpu.out & \
-		CPU_PID=$$!; \
-		k6 run benchmarks/s3_bench.js --env BASE_URL=http://localhost:9100; \
-		wait $$CPU_PID && echo "pprof saved: /tmp/grainfs-bench-cpu.out"; \
-		for p in mutex allocs heap goroutine; do \
-			curl -sf "http://127.0.0.1:6060/debug/pprof/$$p" -o /tmp/grainfs-bench-$$p.out \
-				&& echo "pprof saved: /tmp/grainfs-bench-$$p.out"; \
-		done; \
-		kill $$SERVER_PID 2>/dev/null; \
-		rm -rf /tmp/grainfs-bench-profile; \
-		echo ""; \
-		echo "Analyse:"; \
-		echo "  go tool pprof -top /tmp/grainfs-bench-cpu.out    # CPU hotspots"; \
-		echo "  go tool pprof -top /tmp/grainfs-bench-mutex.out  # lock contention"; \
-		echo "  go tool pprof -top /tmp/grainfs-bench-allocs.out # alloc hotspots"
+	NO_BUILD=1 PROFILE=1 ./benchmarks/bench_profile.sh
+
+bench-iceberg-table: build
+	./benchmarks/bench_iceberg_table.sh
+
+bench-iceberg-table-cluster: build
+	./benchmarks/bench_iceberg_table_cluster.sh
 
 NBD_PPROF_DIR ?= $(HOME)/tmp/grainfs-nbd-pprof
 

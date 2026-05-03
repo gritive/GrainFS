@@ -112,6 +112,15 @@ func WithAuth(creds []s3auth.Credentials) Option {
 	}
 }
 
+// WithRateLimits configures per-IP and per-user request limits. A non-positive
+// rps disables the corresponding limiter.
+func WithRateLimits(ipRPS float64, ipBurst int, userRPS float64, userBurst int) Option {
+	return func(s *Server) {
+		s.ipLimiter = NewRateLimiter(ipRPS, ipBurst, 100000)
+		s.userLimiter = NewRateLimiter(userRPS, userBurst, 100000)
+	}
+}
+
 // WithBlockCache wires the volume block cache so /api/cache/status can
 // expose its hits/misses/resident bytes for the dashboard.
 func WithBlockCache(c *blockcache.Cache) Option {

@@ -11,23 +11,16 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+cd "$REPO_ROOT"
+
 BINARY="${1:-./bin/grainfs}"
-if [[ ! -x "$BINARY" ]]; then
-  echo "binary not found: $BINARY  (run: make build)" >&2
-  exit 1
-fi
+bench_require_binary "$BINARY"
+bench_require_colima
 
-if ! colima status >/dev/null 2>&1; then
-  echo "colima not running — start with: colima start" >&2
-  exit 1
-fi
-
-free_port() {
-  python3 -c "import socket; s=socket.socket(); s.bind(('',0)); p=s.getsockname()[1]; s.close(); print(p)"
-}
-
-HTTP_PORT=$(free_port)
-NBD_PORT=$(free_port)
+HTTP_PORT=$(bench_free_port)
+NBD_PORT=$(bench_free_port)
 HOST_IP="192.168.5.2"
 NBD_DEV="/dev/nbd0"
 VOL_SIZE=$((32 * 1024 * 1024))   # 32MB — 작은 볼륨으로 측정 빠르게
@@ -35,12 +28,10 @@ DATA_DIR=$(mktemp -d)
 SERVER_PID=""
 LOG_FILE=$(mktemp /tmp/grainfs-nbd-trace-XXXXXX)
 
-colima_ssh() { colima ssh -- "$@"; }
-
 cleanup() {
   echo ""
   echo "=== cleanup ==="
-  colima_ssh sudo nbd-client -d "$NBD_DEV" 2>/dev/null || true
+  bench_colima_ssh sudo nbd-client -d "$NBD_DEV" 2>/dev/null || true
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
   fi
@@ -62,6 +53,9 @@ GRAINFS_VOLUME_TRACE=1 "$BINARY" serve \
   --nbd-port "$NBD_PORT" \
   --nbd-volume-size "$VOL_SIZE" \
   --nfs4-port 0 \
+  $(bench_encryption_args) \
+  --rate-limit-ip-rps 0 \
+  --rate-limit-user-rps 0 \
   2>&1 | tee "$LOG_FILE" &
 SERVER_PID=$!
 echo "GrainFS PID=$SERVER_PID"
@@ -79,14 +73,14 @@ done
 
 echo ""
 echo "--- Connecting nbd-client in Colima ---"
-colima_ssh sudo modprobe nbd max_part=0 2>/dev/null || true
-colima_ssh sudo nbd-client -d "$NBD_DEV" 2>/dev/null || true
-colima_ssh sudo nbd-client "$HOST_IP" "$NBD_PORT" "$NBD_DEV" -b 4096 -N default
+bench_colima_ssh sudo modprobe nbd max_part=0 2>/dev/null || true
+bench_colima_ssh sudo nbd-client -d "$NBD_DEV" 2>/dev/null || true
+bench_colima_ssh sudo nbd-client "$HOST_IP" "$NBD_PORT" "$NBD_DEV" -b 4096 -N default
 echo "OK: nbd-client connected"
 
 echo ""
 echo "--- fio: seq-write-4K (5s, 200 blocks) ---"
-colima_ssh sudo fio \
+bench_colima_ssh sudo fio \
   --name=trace-write \
   --filename="$NBD_DEV" \
   --size=4m \

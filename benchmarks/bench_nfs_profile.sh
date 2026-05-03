@@ -10,24 +10,17 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+cd "$REPO_ROOT"
+
 BINARY="${1:-./bin/grainfs}"
-if [[ ! -x "$BINARY" ]]; then
-  echo "binary not found: $BINARY  (run: make build)" >&2
-  exit 1
-fi
+bench_require_binary "$BINARY"
+bench_require_colima
 
-if ! colima status >/dev/null 2>&1; then
-  echo "colima not running — start with: colima start" >&2
-  exit 1
-fi
-
-free_port() {
-  python3 -c "import socket; s=socket.socket(); s.bind(('',0)); p=s.getsockname()[1]; s.close(); print(p)"
-}
-
-HTTP_PORT=$(free_port)
-NFS4_PORT=$(free_port)
-PPROF_PORT=$(free_port)
+HTTP_PORT=$(bench_free_port)
+NFS4_PORT=$(bench_free_port)
+PPROF_PORT=$(bench_free_port)
 HOST_IP="192.168.5.2"   # macOS host IP as seen from Colima VM
 MNT="/mnt/grainfs-bench-nfs"
 
@@ -38,8 +31,8 @@ DATA_DIR=$(mktemp -d "grainfs-nfs-bench-XXXX" -p /tmp)
 
 cleanup() {
   echo "=== cleanup ==="
-  colima ssh -- sudo umount -l "$MNT" 2>/dev/null || true
-  colima ssh -- sudo rmdir "$MNT" 2>/dev/null || true
+  bench_colima_ssh sudo umount -l "$MNT" 2>/dev/null || true
+  bench_colima_ssh sudo rmdir "$MNT" 2>/dev/null || true
   [[ -n "${PPROF_PID:-}" ]] && kill "$PPROF_PID" 2>/dev/null || true
   if [[ -n "${SERVER_PID:-}" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -60,23 +53,16 @@ echo "=== starting grainfs (HTTP=:$HTTP_PORT, NFS4=:$NFS4_PORT, pprof=:$PPROF_PO
   --port "$HTTP_PORT" \
   --nfs4-port "$NFS4_PORT" \
   --nbd-port 0 \
-  --no-encryption \
+  $(bench_encryption_args) \
   --pprof-port "$PPROF_PORT" \
+  --rate-limit-ip-rps 0 \
+  --rate-limit-user-rps 0 \
   --log-level warn \
   > /tmp/grainfs-nfs-bench.log 2>&1 &
 SERVER_PID=$!
 
 echo "  server PID: $SERVER_PID"
-echo "  waiting for HTTP health (up to 10s)..."
-for _ in $(seq 1 50); do
-  if curl -sf "http://127.0.0.1:$HTTP_PORT/" >/dev/null 2>&1; then
-    echo "  server ready"
-    break
-  fi
-  sleep 0.2
-done
-
-if ! curl -sf "http://127.0.0.1:$HTTP_PORT/" >/dev/null 2>&1; then
+if ! bench_wait_http_ready "http://127.0.0.1:$HTTP_PORT/" "server" 50 0.2; then
   echo "server did not become healthy:" >&2
   tail -20 /tmp/grainfs-nfs-bench.log >&2
   exit 1
@@ -84,13 +70,13 @@ fi
 
 echo ""
 echo "=== mounting NFS inside Colima (host=$HOST_IP port=$NFS4_PORT) ==="
-colima ssh -- sudo mkdir -p "$MNT"
-colima ssh -- sudo mount -t nfs4 \
+bench_colima_ssh sudo mkdir -p "$MNT"
+bench_colima_ssh sudo mount -t nfs4 \
   -o "vers=4.0,port=$NFS4_PORT,rsize=131072,wsize=131072,hard,intr" \
   "${HOST_IP}:/" "$MNT"
 
 echo "  mount OK — checking df:"
-colima ssh -- df -h "$MNT" || true
+bench_colima_ssh df -h "$MNT" || true
 
 echo ""
 echo "=== collecting heap baseline (pre-benchmark) ==="
@@ -115,7 +101,7 @@ PPROF_PID=$!
 FIO_RESULT="$PROFILE_DIR/fio_output.json"
 FIO_LOG="$PROFILE_DIR/fio_output.txt"
 
-colima ssh -- bash -s <<SCRIPT 2>&1 | tee "$FIO_LOG"
+bench_colima_ssh bash -s <<SCRIPT 2>&1 | tee "$FIO_LOG"
 set -e
 BENCH_DIR="${MNT}/fio-bench-\$(date +%s)"
 sudo mkdir -p "\$BENCH_DIR"
@@ -172,16 +158,7 @@ wait "$PPROF_PID" 2>/dev/null || true
 
 echo ""
 echo "=== collecting post-benchmark profiles ==="
-curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/heap" \
-  -o "$PROFILE_DIR/heap_post.pb.gz" && echo "  heap_post.pb.gz saved"
-curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/goroutine?debug=1" \
-  -o "$PROFILE_DIR/goroutine.txt" && echo "  goroutine.txt saved"
-curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/mutex" \
-  -o "$PROFILE_DIR/mutex.pb.gz" && echo "  mutex.pb.gz saved"
-curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/block" \
-  -o "$PROFILE_DIR/block.pb.gz" && echo "  block.pb.gz saved"
-curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/allocs" \
-  -o "$PROFILE_DIR/allocs.pb.gz" && echo "  allocs.pb.gz saved"
+bench_collect_pprof "$PPROF_PORT" "$PROFILE_DIR" heap goroutine mutex block allocs
 
 echo ""
 echo "=== profile files saved to $PROFILE_DIR ==="

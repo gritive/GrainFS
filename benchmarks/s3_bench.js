@@ -21,6 +21,8 @@ const REGION = 'us-east-1';
 const SERVICE = 's3';
 const MAX_VUS = parseInt(__ENV.MAX_VUS || '10');
 const BENCH_DURATION = __ENV.DURATION || '30s';
+const RAMP_UP = __ENV.RAMP_UP || '10s';
+const RAMP_DOWN = __ENV.RAMP_DOWN || '5s';
 const OBJECT_SIZE_KB = parseInt(__ENV.OBJECT_SIZE_KB || '64');
 
 // Custom metrics
@@ -45,9 +47,9 @@ export const options = {
       executor: 'ramping-vus',
       startVUs: 1,
       stages: [
-        { duration: '10s', target: MAX_VUS },
+        { duration: RAMP_UP, target: MAX_VUS },
         { duration: BENCH_DURATION, target: MAX_VUS },
-        { duration: '5s', target: 0 },
+        { duration: RAMP_DOWN, target: 0 },
       ],
       exec: 'mixedWorkload',
       startTime: '2s',
@@ -147,7 +149,10 @@ function sign(method, url, body, addContentType) {
 
 export function setupBucket() {
   const url = `${BASE}/${BUCKET}`;
-  const res = http.put(url, null, { headers: sign('PUT', url, '', false) });
+  const res = http.put(url, null, {
+    headers: sign('PUT', url, '', false),
+    responseCallback: http.expectedStatuses(200, 409),
+  });
   check(res, { 'bucket ready': (r) => r.status === 200 || r.status === 409 });
 }
 

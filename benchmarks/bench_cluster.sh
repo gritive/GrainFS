@@ -21,26 +21,29 @@
 #   노드3: S3=9102  Raft=19102
 #
 # 리더 포트는 Raft 선출 후 /api/cluster/status로 자동 감지한다.
-# PROFILE=1이면 리더 노드에 --pprof-port를 열고 벤치마크와 동시에 CPU 프로파일을
-# 수집한 뒤 go tool pprof 요약을 출력한다.
+# PROFILE=1이면 각 노드에 --pprof-port를 열고, 실제 writable target 노드에서
+# CPU/heap 프로파일을 수집한 뒤 go tool pprof 요약을 출력한다.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+cd "$REPO_ROOT"
 
 BINARY="${BINARY:-./bin/grainfs}"
 K6="${K6:-k6}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-bench}"
 DURATION="${DURATION:-30s}"
-VUS="${VUS:-20}"
+RAMP_UP="${RAMP_UP:-10s}"
+RAMP_DOWN="${RAMP_DOWN:-5s}"
+VUS="${VUS:-${MAX_VUS:-20}}"
 SIZE_KB="${SIZE_KB:-64}"
 PROFILE="${PROFILE:-0}"
 PPROF_PORT="${PPROF_PORT:-6060}"
-SCRIPT="$(dirname "$0")/s3_bench.js"
+SCRIPT="$BENCHMARKS_DIR/s3_bench.js"
 
 # ── 의존성 확인 ────────────────────────────────────────────────────────────────
-if ! command -v "$K6" &>/dev/null; then
-  echo "[error] k6 not found. Install: brew install k6" >&2
-  exit 1
-fi
+bench_require_command "$K6" "brew install k6"
 
 # ── 빌드 ───────────────────────────────────────────────────────────────────────
 if [[ "${NO_BUILD:-0}" != "1" ]]; then
@@ -67,7 +70,7 @@ fi
 
 # ── 노드 시작 헬퍼 ────────────────────────────────────────────────────────────
 PIDS=()
-# 리더 확정 후 pprof를 여기에 붙일 수 있도록 포트 기록
+# 리더 상태 출력용 pprof 포트 기록
 LEADER_PPROF_PORT=""
 
 start_node() {
@@ -84,9 +87,13 @@ start_node() {
     --raft-addr "127.0.0.1:${raft_port}" \
     --peers "$peers" \
     --cluster-key "bench-local-key" \
-    --no-encryption \
+    $(bench_encryption_args) \
     --ec-data 2 \
     --ec-parity 1 \
+    --nfs4-port 0 \
+    --nbd-port 0 \
+    --rate-limit-ip-rps 0 \
+    --rate-limit-user-rps 0 \
     $extra \
     >"$logfile" 2>&1 &
 
@@ -163,14 +170,33 @@ else
   echo "[bench] cluster ready — leader on port ${LEADER_PORT}"
 fi
 
-# ── 버킷 생성 ────────────────────────────────────────────────────────────────
-echo "[bench] creating bucket 'bench' on leader…"
-curl -sf -X PUT "http://127.0.0.1:${LEADER_PORT}/bench" >/dev/null 2>&1 || true
+TARGET_PORT=""
+TARGET_PPROF_PORT=""
+for _ in $(seq 1 60); do
+  for port_idx in 0 1 2; do
+    port=$((9100 + port_idx))
+    if BENCH_QUIET=1 bench_create_bucket_retry "http://127.0.0.1:${port}" "bench" 1 0.1 &&
+      BENCH_QUIET=1 bench_put_object_retry "http://127.0.0.1:${port}" "bench" ".bench-ready" 1 0.1; then
+      TARGET_PORT="$port"
+      TARGET_PPROF_PORT=$((PPROF_PORT + port_idx))
+      break 2
+    fi
+  done
+  sleep 0.5
+done
+
+if [[ -z "$TARGET_PORT" ]]; then
+  echo "[error] no writable S3 endpoint found" >&2
+  tail -30 "$BENCH_DIR"/n*.log >&2
+  exit 1
+fi
+echo "[bench] writable target on port ${TARGET_PORT}"
+sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
 # ── 프로파일: 벤치마크 전 heap 수집 ─────────────────────────────────────────
 if [[ "$PROFILE" == "1" ]]; then
   echo "[pprof] collecting pre-benchmark heap…"
-  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/heap" \
+  curl -sf "http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/heap" \
     -o "$PROFILE_DIR/heap_pre.pb.gz" && echo "[pprof] heap_pre.pb.gz saved" || true
 fi
 
@@ -178,9 +204,9 @@ fi
 echo ""
 echo "=================================================================="
 echo "  GrainFS 3-node cluster benchmark"
-echo "  target : http://127.0.0.1:${LEADER_PORT}  (leader)"
+echo "  target : http://127.0.0.1:${TARGET_PORT}"
 echo "  vus    : ${VUS}  duration: ${DURATION}  object: ${SIZE_KB}KB"
-[[ "$PROFILE" == "1" ]] && echo "  pprof  : http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/"
+[[ "$PROFILE" == "1" ]] && echo "  pprof  : http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/"
 echo "=================================================================="
 echo ""
 
@@ -193,17 +219,19 @@ if [[ "$PROFILE" == "1" ]]; then
   (
     sleep 5
     echo "[pprof] collecting ${CPU_SEC}s CPU profile…"
-    curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/profile?seconds=${CPU_SEC}" \
+    curl -sf "http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/profile?seconds=${CPU_SEC}" \
       -o "$PROFILE_DIR/cpu.pb.gz" && echo "[pprof] cpu.pb.gz saved" || echo "[pprof] CPU profile failed"
   ) &
   PPROF_BG_PID=$!
 fi
 
 "$K6" run "$SCRIPT" \
-  --env BASE_URL="http://127.0.0.1:${LEADER_PORT}" \
+  --env BASE_URL="http://127.0.0.1:${TARGET_PORT}" \
   --env BUCKET="bench" \
   --env OBJECT_SIZE_KB="$SIZE_KB" \
   --env DURATION="$DURATION" \
+  --env RAMP_UP="$RAMP_UP" \
+  --env RAMP_DOWN="$RAMP_DOWN" \
   --env MAX_VUS="$VUS" \
   "$@" || K6_EXIT=$?
 
@@ -214,16 +242,7 @@ fi
 if [[ "$PROFILE" == "1" ]]; then
   echo ""
   echo "[pprof] collecting post-benchmark profiles…"
-  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/heap" \
-    -o "$PROFILE_DIR/heap_post.pb.gz"   && echo "[pprof] heap_post.pb.gz"  || true
-  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/allocs" \
-    -o "$PROFILE_DIR/allocs.pb.gz"      && echo "[pprof] allocs.pb.gz"     || true
-  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/goroutine?debug=1" \
-    -o "$PROFILE_DIR/goroutine.txt"     && echo "[pprof] goroutine.txt"    || true
-  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/mutex" \
-    -o "$PROFILE_DIR/mutex.pb.gz"       && echo "[pprof] mutex.pb.gz"      || true
-  curl -sf "http://127.0.0.1:${LEADER_PPROF_PORT}/debug/pprof/block" \
-    -o "$PROFILE_DIR/block.pb.gz"       && echo "[pprof] block.pb.gz"      || true
+  bench_collect_pprof "$TARGET_PPROF_PORT" "$PROFILE_DIR" heap allocs goroutine mutex block
 
   echo ""
   echo "=================================================================="
@@ -235,7 +254,10 @@ if [[ "$PROFILE" == "1" ]]; then
   echo "=================================================================="
   echo "  pprof: heap (post-benchmark) top-10"
   echo "=================================================================="
-  go tool pprof -top -nodecount=10 "$PROFILE_DIR/heap_post.pb.gz" 2>/dev/null || echo "  (heap analysis failed)"
+  go tool pprof -top -nodecount=10 "$PROFILE_DIR/heap.pb.gz" 2>/dev/null || echo "  (heap analysis failed)"
+
+  cp "$PROFILE_DIR/cpu.pb.gz" /tmp/grainfs-bench-cpu.out 2>/dev/null || true
+  echo "  PGO profile: /tmp/grainfs-bench-cpu.out"
 
   echo ""
   echo "[pprof] all profiles saved to $PROFILE_DIR/"
