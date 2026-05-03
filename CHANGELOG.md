@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.40.0] — 2026-05-04 — stabilize e2e startup routing
+
+### Changed
+
+- **snapshot startup**: PITR auto-snapshot now waits for routed backend enumeration to become ready before starting the snapshot loop.
+- **static shard seeding**: seed groups now use the same peer identity form as group raft, and the coordinator treats both node ID and raft address as local self aliases.
+- **EC perf writes**: small spooled EC shards now use framed shard RPCs, while larger shards retain streaming writes with longer deadlines and retry.
+- **QUIC bulk streams**: body-stream overload now cancels unread streams instead of risking sender-side body-copy stalls, and default bulk capacity now covers forwarded PUT plus EC fan-out.
+
+### Fixed
+
+- **remote shard routing**: non-local shard groups are registered as placeholders so bucket routing can forward to remote voters instead of failing with missing local groups.
+- **TODO cleanup**: removed completed e2e TODO entries, including the EC-on `load-N16` perf follow-up after stabilizing it.
+
+### Tests
+
+- Added readiness, remote placeholder, seed voter identity, and self-alias coverage.
+- Verified `go test ./cmd/grainfs ./internal/cluster ./internal/snapshot`.
+- Verified focused auto-snapshot e2e with `go test ./tests/e2e -run TestAutoSnapshot_CreatesSnapshotAutomatically -count=1 -v`.
+- Verified EC-on perf e2e with `GRAINFS_PERF=1 GRAINFS_PERF_SCENARIO=load-N16 go test ./tests/e2e -run TestE2E_ClusterPerf_All -count=1 -v`.
+
 ## [0.0.39.0] — 2026-05-04 — harden validation and stream object memory paths
 
 ### Added
