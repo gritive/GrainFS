@@ -110,6 +110,20 @@ type DistributedBackend struct {
 	// false → legacy behavior (fresh ULID per PUT). Operators can flip via
 	//   --backend-vfs-fixed-version=false to roll back without rebuild.
 	vfsFixedVersion atomic.Bool
+
+	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
+	internalDirCache  sync.Map // map[string]struct{}
+	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
+}
+
+type internalObjectCacheKey struct {
+	bucket string
+	key    string
+}
+
+type internalObjectPath struct {
+	path string
+	dir  string
 }
 
 // NewDistributedBackend creates a new distributed storage backend.
@@ -1005,12 +1019,20 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 		return nil, fmt.Errorf("WriteAt not supported for user bucket %q", bucket)
 	}
 
-	objPath := b.objectPathV(bucket, key, "current")
-	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	objPath := b.internalObjectPath(bucket, key)
+	if err := b.ensureInternalObjectDir(objPath.dir); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
 
-	f, err := os.OpenFile(objPath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
+	if errors.Is(err, os.ErrNotExist) {
+		b.internalDirCache.Delete(objPath.dir)
+		if derr := b.ensureInternalObjectDir(objPath.dir); derr != nil {
+			return nil, fmt.Errorf("create object dir: %w", derr)
+		}
+		f, err = os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open object: %w", err)
 	}
@@ -1020,11 +1042,19 @@ func (b *DistributedBackend) WriteAt(bucket, key string, offset uint64, data []b
 		return nil, fmt.Errorf("pwrite object: %w", err)
 	}
 
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat object: %w", err)
+	newSize := int64(offset) + int64(len(data))
+	if cached, ok := b.internalSizeCache.Load(cacheKey); ok {
+		if size := cached.(int64); size > newSize {
+			newSize = size
+		}
+	} else {
+		fi, err := f.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("stat object: %w", err)
+		}
+		newSize = fi.Size()
 	}
-	newSize := fi.Size()
+	b.internalSizeCache.Store(cacheKey, newSize)
 	now := time.Now().Unix()
 
 	meta, err := marshalObjectMeta(objectMeta{
@@ -1058,7 +1088,7 @@ func (b *DistributedBackend) ReadAt(bucket, key string, offset int64, buf []byte
 	if !storage.IsInternalBucket(bucket) {
 		return 0, fmt.Errorf("ReadAt not supported for user bucket %q", bucket)
 	}
-	f, err := os.Open(b.objectPathV(bucket, key, "current"))
+	f, err := os.Open(b.internalObjectPath(bucket, key).path)
 	if err != nil {
 		return 0, err
 	}
@@ -1076,10 +1106,12 @@ func (b *DistributedBackend) Truncate(bucket, key string, size int64) error {
 	if size < 0 {
 		return fmt.Errorf("truncate: negative size %d", size)
 	}
-	objPath := b.objectPathV(bucket, key, "current")
-	if err := os.Truncate(objPath, size); err != nil {
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	objPath := b.internalObjectPath(bucket, key)
+	if err := os.Truncate(objPath.path, size); err != nil {
 		return fmt.Errorf("truncate object: %w", err)
 	}
+	b.internalSizeCache.Store(cacheKey, size)
 
 	now := time.Now().Unix()
 	meta, err := marshalObjectMeta(objectMeta{
@@ -2595,6 +2627,28 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 
 func (b *DistributedBackend) bucketDir(bucket string) string {
 	return filepath.Join(b.root, "data", bucket)
+}
+
+func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObjectPath {
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	if cached, ok := b.internalPathCache.Load(cacheKey); ok {
+		return cached.(internalObjectPath)
+	}
+	path := b.objectPathV(bucket, key, "current")
+	candidate := internalObjectPath{path: path, dir: filepath.Dir(path)}
+	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
+	return actual.(internalObjectPath)
+}
+
+func (b *DistributedBackend) ensureInternalObjectDir(dir string) error {
+	if _, ok := b.internalDirCache.Load(dir); ok {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	b.internalDirCache.Store(dir, struct{}{})
+	return nil
 }
 
 // objectPath returns the legacy-unversioned local path for a full-object copy.

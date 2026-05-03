@@ -109,6 +109,44 @@ func TestWriteAt_InternalBucketDoesNotWriteLatestPointer(t *testing.T) {
 	}))
 }
 
+func TestWriteAt_InternalBucketCachesPathAndSize(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	bucket := storage.NFS4BucketName
+	key := "direct.bin"
+	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
+	require.NoError(t, b.CreateBucket(bucket))
+
+	obj, err := b.WriteAt(bucket, key, 0, []byte("abcdef"))
+	require.NoError(t, err)
+	require.Equal(t, int64(6), obj.Size)
+
+	if _, ok := b.internalPathCache.Load(cacheKey); !ok {
+		t.Fatalf("WriteAt should cache the internal object path")
+	}
+	size, ok := b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok, "WriteAt should cache the internal object size")
+	require.Equal(t, int64(6), size)
+
+	obj, err = b.WriteAt(bucket, key, 2, []byte("XY"))
+	require.NoError(t, err)
+	require.Equal(t, int64(6), obj.Size)
+	size, ok = b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok)
+	require.Equal(t, int64(6), size)
+
+	obj, err = b.WriteAt(bucket, key, 10, []byte("z"))
+	require.NoError(t, err)
+	require.Equal(t, int64(11), obj.Size)
+	size, ok = b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok)
+	require.Equal(t, int64(11), size)
+
+	require.NoError(t, b.Truncate(bucket, key, 3))
+	size, ok = b.internalSizeCache.Load(cacheKey)
+	require.True(t, ok)
+	require.Equal(t, int64(3), size)
+}
+
 func TestPutObject_VFSBucket_DisabledTogglesLegacy(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	b.SetVFSFixedVersionEnabled(false)
