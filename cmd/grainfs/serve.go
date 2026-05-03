@@ -28,6 +28,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -633,6 +634,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	metaDir := filepath.Join(dataDir, "meta")
 	raftDir := filepath.Join(dataDir, "raft")
+	roleRegistry := badgerrole.DefaultRegistry()
+	startupDecisions := make([]badgerrole.Decision, 0, 8)
+	recordStartupDecision := func(decision badgerrole.Decision) {
+		startupDecisions = append(startupDecisions, decision)
+	}
 
 	// Auto-migrate BEFORE any filesystem or lock side effects. If Raft dir
 	// doesn't exist but meta dir holds an existing local BadgerDB, convert
@@ -674,8 +680,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	metaVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryMeta, db)
 	defer resourcewatch.DeregisterDB(metaVlogEntry)
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
-	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
-		return err
+	recordStartupDecision(badgerrole.ProbeWritable(db, badgerrole.RoleMeta, "", metaDir))
+	if startupDecisions[len(startupDecisions)-1].Status != badgerrole.DecisionOK {
+		return server.PreflightBadger(db, metaDir, nil)
 	}
 
 	badgerManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
@@ -712,6 +719,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		raftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, logStore.DB())
 		defer resourcewatch.DeregisterDB(raftLogVlogEntry)
 	}
+	recordStartupDecision(badgerrole.Decision{
+		Role:   badgerrole.RoleMetaRaftLog,
+		Path:   raftDir,
+		Status: badgerrole.DecisionOK,
+		Action: badgerrole.RecoveryActionNone,
+	})
 
 	// C2 P0b prototype: optionally open one shared raft-log BadgerDB so all
 	// data groups share a single instance instead of opening their own. Reduces
@@ -751,6 +764,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		defer sharedRaftLogDB.Close()
 		sharedRaftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, sharedRaftLogDB)
 		defer resourcewatch.DeregisterDB(sharedRaftLogVlogEntry)
+		recordStartupDecision(badgerrole.Decision{
+			Role:   badgerrole.RoleSharedRaftLog,
+			Path:   sharedDir,
+			Status: badgerrole.DecisionOK,
+			Action: badgerrole.RecoveryActionNone,
+		})
 		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
 	}
 
@@ -1345,12 +1364,23 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		backend = pullthrough.NewBackend(backend, up)
 		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
-	recoveryReadOnly := false
+	startupResult := badgerrole.ReduceStartupDecisions(roleRegistry, startupDecisions)
+	startupReadOnly := startupResult.Mode == badgerrole.StartupModeReadOnly
+	if startupResult.Mode == badgerrole.StartupModeBlocked {
+		return fmt.Errorf("badger startup recovery blocked server start: %v", startupResult.BlockedReasons)
+	}
+	recoveryReadOnly := startupReadOnly
+	if startupReadOnly {
+		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		log.Warn().Strs("reasons", startupResult.ReadOnlyReasons).Msg("badger startup recovery read-only gate enabled")
+	}
 	if marker, err := cluster.LoadRecoverClusterMarker(dataDir); err != nil {
 		return fmt.Errorf("load recovery marker: %w", err)
 	} else if marker != nil && !marker.Writable {
 		recoveryReadOnly = true
-		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		if !startupReadOnly {
+			backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		}
 		log.Warn().Str("marker", filepath.Join(dataDir, cluster.RecoverClusterMarkerPath)).Msg("recovered cluster write gate enabled")
 	}
 	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
@@ -1514,6 +1544,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	distBackend.RegisterReadIndexHandler()
 	distBackend.RegisterProposeForwardHandler()
+
+	mutationGate := server.NewMutationGate(nil)
+	if recoveryReadOnly {
+		mutationGate.SetBlocked(storage.ErrRecoveryWriteDisabled)
+	}
+	srvOpts = append(srvOpts, server.WithMutationGate(mutationGate))
 
 	srv := server.New(addr, backend, srvOpts...)
 
