@@ -23,6 +23,11 @@ type handshakeState struct {
 	metaContexts      []nbdMetaContext
 }
 
+type optionInfoRequest struct {
+	name string
+	info []uint16
+}
+
 func parseClientFlags(flags uint32) (handshakeState, error) {
 	if unknown := flags &^ nbdKnownClientFlags; unknown != 0 {
 		return handshakeState{}, fmt.Errorf("unknown client flags: 0x%x", unknown)
@@ -78,8 +83,46 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 			state.exportName = string(optData)
 			return state, s.sendExportData(conn, vol, state)
 
+		case nbdOptInfo:
+			req, err := parseOptionInfoRequest(optData)
+			if err != nil {
+				if err := s.sendOptReply(conn, optType, nbdRepErrInvalid, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			if req.name != s.volName {
+				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			if err := s.sendInfoReplies(conn, vol, optType, req.info); err != nil {
+				return handshakeState{}, err
+			}
+			if err := s.sendOptReply(conn, optType, nbdRepAck, nil); err != nil {
+				return handshakeState{}, err
+			}
+
 		case nbdOptGo:
-			return state, s.handleOptGo(conn, vol, optType)
+			req, err := parseOptionInfoRequest(optData)
+			if err != nil {
+				if err := s.sendOptReply(conn, optType, nbdRepErrInvalid, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			if req.name != s.volName {
+				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
+					return handshakeState{}, err
+				}
+				continue
+			}
+			state.exportName = req.name
+			if err := s.sendInfoReplies(conn, vol, optType, req.info); err != nil {
+				return handshakeState{}, err
+			}
+			return state, s.sendOptReply(conn, optType, nbdRepAck, nil)
 
 		case nbdOptList:
 			if err := s.handleOptList(conn, optType); err != nil {
@@ -94,6 +137,31 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 			_ = s.sendOptReply(conn, optType, nbdRepErrUnsup, nil)
 		}
 	}
+}
+
+func parseOptionInfoRequest(payload []byte) (optionInfoRequest, error) {
+	if len(payload) < 6 {
+		return optionInfoRequest{}, fmt.Errorf("short option info payload")
+	}
+	nameLen := int(binary.BigEndian.Uint32(payload[0:4]))
+	if nameLen > len(payload)-6 {
+		return optionInfoRequest{}, fmt.Errorf("invalid option info name length: %d", nameLen)
+	}
+	pos := 4 + nameLen
+	infoCount := int(binary.BigEndian.Uint16(payload[pos : pos+2]))
+	pos += 2
+	if len(payload)-pos != infoCount*2 {
+		return optionInfoRequest{}, fmt.Errorf("invalid option info count: %d", infoCount)
+	}
+	req := optionInfoRequest{
+		name: string(payload[4 : 4+nameLen]),
+		info: make([]uint16, infoCount),
+	}
+	for i := range req.info {
+		req.info[i] = binary.BigEndian.Uint16(payload[pos : pos+2])
+		pos += 2
+	}
+	return req, nil
 }
 
 func nbdTransmissionFlags() uint16 {
@@ -112,15 +180,38 @@ func (s *Server) sendExportData(conn net.Conn, vol *volume.Volume, state handsha
 	return err
 }
 
-func (s *Server) handleOptGo(conn net.Conn, vol *volume.Volume, optType uint32) error {
+func (s *Server) sendInfoReplies(conn net.Conn, vol *volume.Volume, optType uint32, requested []uint16) error {
+	if err := s.sendExportInfo(conn, vol, optType); err != nil {
+		return err
+	}
+	for _, infoType := range requested {
+		switch infoType {
+		case nbdInfoExport:
+			continue
+		case nbdInfoBlockSize:
+			if err := s.sendBlockSizeInfo(conn, optType); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) sendExportInfo(conn net.Conn, vol *volume.Volume, optType uint32) error {
 	info := make([]byte, 12)
 	binary.BigEndian.PutUint16(info[0:2], nbdInfoExport)
 	binary.BigEndian.PutUint64(info[2:10], uint64(vol.Size))
 	binary.BigEndian.PutUint16(info[10:12], nbdTransmissionFlags())
-	if err := s.sendOptReply(conn, optType, nbdRepInfo, info); err != nil {
-		return err
-	}
-	return s.sendOptReply(conn, optType, nbdRepAck, nil)
+	return s.sendOptReply(conn, optType, nbdRepInfo, info)
+}
+
+func (s *Server) sendBlockSizeInfo(conn net.Conn, optType uint32) error {
+	info := make([]byte, 14)
+	binary.BigEndian.PutUint16(info[0:2], nbdInfoBlockSize)
+	binary.BigEndian.PutUint32(info[2:6], nbdMinBlockSize)
+	binary.BigEndian.PutUint32(info[6:10], nbdPreferredBlockSize)
+	binary.BigEndian.PutUint32(info[10:14], nbdMaxPayloadSize)
+	return s.sendOptReply(conn, optType, nbdRepInfo, info)
 }
 
 func (s *Server) handleOptList(conn net.Conn, optType uint32) error {

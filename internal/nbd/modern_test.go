@@ -299,3 +299,23 @@ func TestNBDExportNameHonorsNoZeroes(t *testing.T) {
 	require.Equal(t, uint64(1024*1024), binary.BigEndian.Uint64(reply[0:8]))
 	require.Equal(t, nbdFlagHasFlags|nbdFlagSendFlush|nbdFlagSendTrim, binary.BigEndian.Uint16(reply[8:10]))
 }
+
+func TestNBDOptGoValidatesExportName(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	completeClientFlags(t, client, nbdFlagClientFixedNewstyle)
+	writeOptGo(t, client, "missing", []uint16{nbdInfoExport})
+	rep := readOptionReply(t, client)
+	require.Equal(t, nbdRepErrUnknown, rep.typ)
+}
+
+func TestNBDOptInfoBlockSize(t *testing.T) {
+	client, _ := setupRawNBDConn(t)
+	completeClientFlags(t, client, nbdFlagClientFixedNewstyle)
+	writeOptInfo(t, client, "nbd-test", []uint16{nbdInfoBlockSize})
+	info := readInfoReply(t, client, nbdInfoBlockSize)
+	require.Equal(t, uint32(1), binary.BigEndian.Uint32(info[2:6]))
+	require.Equal(t, uint32(4096), binary.BigEndian.Uint32(info[6:10]))
+	require.Equal(t, uint32(nbdMaxPayloadSize), binary.BigEndian.Uint32(info[10:14]))
+	ack := readOptionReply(t, client)
+	require.Equal(t, nbdRepAck, ack.typ)
+}
