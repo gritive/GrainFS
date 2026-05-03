@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.37.0] — 2026-05-04 — add zero-ops incident control loop
+
+### Added
+
+- **zero-ops incidents**: missing shard repairs and corruption isolation now produce durable incidents with state, severity, scope, proof status, and next action.
+- **incident API**: added `/api/incidents` and `/api/incidents/:id` for dashboard and operator tooling.
+- **dashboard**: added a self-healing incident table that surfaces fixed, isolated, blocked, and proof-unavailable states.
+- **incident store**: added a Badger-backed current-state store plus reducer, recorder, and reconciler components.
+
+### Changed
+
+- **cluster repair**: missing-shard repairs now record incident transitions and only attach signed proof after the HealReceipt is signed and persisted.
+- **corruption handling**: corrupt shards now quarantine the affected object version instead of attempting unsafe repair.
+- **placement monitor**: CRC mismatch detection now routes corrupt local shards into quarantine incidents instead of only logging the read error.
+
+### Fixed
+
+- **receipt API security**: `/api/receipts` remains behind S3 SigV4 auth when credentials are configured.
+- **quarantine scope**: object quarantine keys include `versionID`, so isolating one bad version does not block newer versions or unrelated objects.
+- **e2e receipt verification**: missing-shard incident tests now fetch the signed proof by receipt ID, matching receipt routing semantics.
+
+### Tests
+
+- Added reducer, recorder, reconciler, Badger store, incident API, incident repair, quarantine, placement-monitor corruption, dashboard, and multi-node e2e coverage.
+- Verified signed receipt access, unauthenticated receipt rejection, missing-shard repair proof, corruption quarantine, and dashboard incident rendering.
+
 ## [0.0.36.0] — 2026-05-03 — cluster trust boundary + NFS input validation
 
 Closes 2026-05-03 CSO security audit findings #1, #2, #3.
