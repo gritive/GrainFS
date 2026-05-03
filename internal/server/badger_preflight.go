@@ -5,15 +5,10 @@ import (
 	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
-
-// preflightSentinel is the key written and read back during the Badger
-// preflight to confirm the DB is operational. Stored under a reserved
-// "_sys:preflight" prefix that no production code path uses.
-var preflightSentinel = []byte("_sys:preflight")
 
 // PreflightBadger runs a minimal write→read→delete cycle against db to
 // confirm the database is healthy enough for grainfs to take traffic.
@@ -34,27 +29,10 @@ func PreflightBadger(db *badger.DB, dbDir string, emit scrubber.Emitter) error {
 		emit = scrubber.NoopEmitter{}
 	}
 
-	if err := db.Update(func(txn *badger.Txn) error {
-		return txn.Set(preflightSentinel, []byte("ok"))
-	}); err != nil {
+	decision := badgerrole.ProbeWritable(db, badgerrole.RoleMeta, "", dbDir)
+	if decision.Status != badgerrole.DecisionOK {
 		emitPreflight(emit, "write_failed", scrubber.OutcomeFailed)
-		return wrapPreflight(err, dbDir, "write")
-	}
-
-	if err := db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(preflightSentinel)
-		return err
-	}); err != nil {
-		emitPreflight(emit, "read_failed", scrubber.OutcomeFailed)
-		return wrapPreflight(err, dbDir, "read")
-	}
-
-	if err := db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(preflightSentinel)
-	}); err != nil {
-		// Cleanup failure is non-fatal — the sentinel will live on as a
-		// few bytes that operators can ignore. Log it but don't refuse boot.
-		log.Warn().Err(err).Str("dir", dbDir).Msg("preflight cleanup failed (non-fatal)")
+		return wrapPreflight(decision.Err, dbDir, "write")
 	}
 
 	emitPreflight(emit, "ok", scrubber.OutcomeSuccess)
