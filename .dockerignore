@@ -1,0 +1,13 @@
+.git
+.github
+.worktrees
+bin
+coverage.out
+dist
+data
+storage
+tmp
+*.log
+*.prof
+*.test
+docs/superpowers
