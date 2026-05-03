@@ -8,14 +8,13 @@ Branch: master
 Fix three architecture gaps found after the protocol-layering hardening work:
 
 1. Versioned object operations must route through the same multi-Raft forwarding path as ordinary object operations.
-2. Singleton Iceberg catalog wiring must use meta-Raft catalog pointers, matching the cluster-mode contract.
+2. Singleton Iceberg catalog wiring must use meta-Raft catalog pointers, matching the cluster-mode contract, and migrate existing singleton local catalog rows into that path.
 3. `grainfs cluster join` must perform the real meta-join RPC instead of acting as a placeholder.
 
 The common theme is contract consistency. Public protocol adapters should not behave differently depending on which node receives the request or whether the server started as a singleton.
 
 ## Not In Scope
 
-- Migrating existing singleton Iceberg catalog rows from the old local `icebergcatalog.Store` into meta-Raft.
 - Streaming remote `GetObject` responses beyond the current forwarded reply cap.
 - Changing bucket-to-group assignment semantics.
 - Reworking dynamic group rebalancing or joint consensus.
@@ -74,7 +73,19 @@ Add request helpers for:
 - bucket + key + version ID
 - bucket + prefix + max keys
 
-Add reply helpers for object-version lists. Object body replies should follow the existing `GetObject` reply pattern and validate that metadata size matches returned body bytes.
+Add reply helpers for object-version lists. This must use a distinct
+`ForwardObjectVersionMeta` table and `ForwardReply.versions` vector, not the
+existing `ForwardObjectMeta`, because `storage.ObjectVersion` needs
+`is_latest` and `is_delete_marker` fields. Remote `ListObjectVersions` must not
+infer those fields from ETag or ordering.
+
+Object body replies should follow the existing `GetObject` reply pattern and
+validate that metadata size matches returned body bytes. Remote
+`GetObjectVersion` intentionally inherits the current forwarded read cap
+(`DefaultMaxForwardReplyBytes`, currently 64 MiB). If the version body exceeds
+that cap, the receiver must return the existing entity-too-large status rather
+than truncating or allocating an unbounded reply. Streaming remote reads remain
+out of scope for this PR.
 
 ### Error Handling
 
@@ -95,7 +106,27 @@ Change singleton server wiring to use `cluster.MetaCatalog` as well. The singlet
 
 The Iceberg metadata JSON files remain normal objects under the warehouse bucket. Only catalog pointers move through meta-Raft.
 
-Existing old local Iceberg catalog data is not migrated in this PR. That is a compatibility follow-up because it needs explicit source detection, conflict handling, and rollback behavior.
+### Legacy Singleton Migration
+
+Existing old singleton Iceberg catalog rows must be migrated in this PR. On singleton startup, before serving Iceberg traffic with `MetaCatalog`, run a compatibility migration from the old local `icebergcatalog.Store` keys in the same Badger database into meta-Raft.
+
+The migration should:
+
+- export legacy namespace records and table records through a new `icebergcatalog.Store` export API, instead of duplicating private Badger key formats outside the package
+- propose namespaces first, then table pointers, through the same meta-Raft Iceberg commands used by `MetaCatalog`
+- preserve namespace properties, table identifiers, table metadata locations, and table properties
+- backfill the warehouse metadata object from the legacy table `Metadata` JSON when `MetadataLocation` does not already resolve through the configured backend
+- leave old local Store keys in place after a successful migration; they become unused once singleton wiring switches to `MetaCatalog`
+
+Idempotency rules:
+
+- if the target meta-Raft namespace already exists with the same properties, skip it
+- if the target meta-Raft namespace exists with different properties, keep the existing meta-Raft value and log a warning; namespace properties are not enough to justify startup failure
+- if the target meta-Raft table already exists with the same metadata location and properties, skip it
+- if the target meta-Raft table already exists with a different metadata location, fail startup with a clear conflict error
+- if a table metadata object is missing and the legacy Store has empty metadata JSON, fail startup; otherwise write the legacy JSON to the parsed `s3://bucket/key` location before proposing the table
+
+The migration must be retry-safe. Re-running startup after a partial migration should either skip already-applied entries or continue from the next missing entry without duplicating tables.
 
 ## Cluster Join CLI
 
@@ -120,6 +151,10 @@ The CLI should keep its current flags:
 On success it prints a concise accepted/already-member message. On rejection it exits non-zero with the join status and message.
 
 Implementation should reuse the same join sender behavior used by `serve --join`; do not create a second join protocol.
+Extract the existing `performMetaJoin` flow into a shared `cmd/grainfs` helper
+used by both `serve --join` and `grainfs cluster join`. Do not copy the logic
+into `cluster_join.go`; timeout, leader-hint handling, and rejection errors
+should have one implementation.
 
 ## Tests
 
@@ -128,21 +163,44 @@ Unit tests:
 - `ClusterCoordinator.GetObjectVersion` forwards when self is not the group leader.
 - `ClusterCoordinator.DeleteObjectVersion` forwards when self is not the group leader.
 - `ClusterCoordinator.ListObjectVersions` forwards when self is not the group leader.
+- Remote `GetObjectVersion` returns the existing entity-too-large error when
+  the version body exceeds the forwarded reply cap.
 - `ForwardReceiver` dispatches the three versioned operations.
-- `grainfs cluster join` uses the real meta-join path, or the join helper is extracted enough to test without launching a full server.
+- `icebergcatalog.Store` export returns legacy namespaces and tables with
+  metadata locations, metadata JSON, and properties intact.
+- The singleton Iceberg migration backfills a missing warehouse metadata object
+  from legacy table JSON before proposing the meta-Raft table pointer.
+- The singleton Iceberg migration is idempotent for already-migrated matching
+  namespaces and tables, and fails fast on conflicting table metadata
+  locations.
+- `grainfs cluster join` has a command-level test proving `runClusterJoin`
+  calls the shared real join path through an injected seam or dialer. Testing
+  only the shared helper is not enough because the original regression lives in
+  the command wiring.
 
 E2E or targeted integration tests:
 
 - Create a versioned bucket and object through one node, then read, list, and delete versions through a different node.
-- Create and load an Iceberg table in singleton mode and verify the server uses the `MetaCatalog` path.
+- Create an Iceberg table through the old local Store fixture, restart singleton
+  with the new wiring, and verify the table loads through `MetaCatalog`.
 
 ## Failure Modes
 
 - A forwarded version lookup targets a follower: the receiver returns `NotLeader` with a hint; the sender retries once.
 - A bucket assignment exists but the group is not locally instantiated yet: routing returns an existing group but forwarding can return not-voter or unreachable; the caller sees the existing storage/forwarding error rather than silent success.
 - Singleton Iceberg meta-Raft has no leader yet during startup: catalog requests fail as unavailable until meta-Raft elects, matching cluster behavior.
+- Legacy singleton migration finds a table pointer conflict in meta-Raft:
+  startup fails instead of silently choosing either pointer.
+- Legacy singleton migration finds missing warehouse metadata and no legacy JSON:
+  startup fails because the new `MetaCatalog` could not load that table.
 - Join command contacts a follower: `MetaJoinSender` follows the leader hint when present.
 
 ## Follow-Up Work
 
-Migrate old singleton local Iceberg catalog data from `icebergcatalog.Store` into meta-Raft. This should be a separate compatibility task with detection, idempotency, and rollback notes.
+- Streaming remote `GetObject` and `GetObjectVersion` responses beyond the current forwarded reply cap.
+
+## GSTACK REVIEW REPORT
+
+| Review | Skill | Scope | Runs | Verdict | Notes |
+| --- | --- | --- | ---: | --- | --- |
+| Eng Review | `/plan-eng-review` | Architecture, data flow, edge cases, tests | 1 | CLEAR | 5 issues found and amended: distinct version metadata wire schema, shared join implementation, command-level join test, forwarded read cap behavior, legacy Iceberg migration with metadata backfill. |
