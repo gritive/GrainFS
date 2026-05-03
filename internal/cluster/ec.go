@@ -176,6 +176,8 @@ func (w *writeBuffer) Write(p []byte) (int, error) {
 // local shard of an EC-encoded object. The path is distinct from the object
 // path so we can keep old N×-replicated full-object files coexisting during
 // migration (Slice 5).
+//
+//nolint:unused // package tests pin shard path compatibility.
 func shardFilePath(dataRoot, bucket, key string, shardIdx int) string {
 	return filepath.Join(dataRoot, "ec-shards", bucket, key, fmt.Sprintf("shard_%d", shardIdx))
 }

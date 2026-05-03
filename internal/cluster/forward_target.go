@@ -20,6 +20,8 @@ type shardGroupNoCopySource interface {
 
 // shardGroupSource is the unexported alias used by lookupForwardTarget. Older
 // callers can keep the unexported type; new code uses ShardGroupSource.
+//
+//nolint:unused // package tests pin legacy forwarding metadata behaviour.
 type shardGroupSource = ShardGroupSource
 
 // lookupForwardTarget returns the first peer of the given group as the forward
@@ -28,6 +30,8 @@ type shardGroupSource = ShardGroupSource
 //
 // We deliberately do NOT cache last-known leaders — cold path 1 RTT loss is
 // acceptable, and hot path is local-voter (no forward at all).
+//
+//nolint:unused // package tests pin legacy forwarding metadata behaviour.
 func lookupForwardTarget(src shardGroupSource, groupID string) (string, error) {
 	entry, ok := src.ShardGroup(groupID)
 	if !ok || len(entry.PeerIDs) == 0 {

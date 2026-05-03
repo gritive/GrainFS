@@ -279,33 +279,6 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 	}
 }
 
-// marshalEnvelope serializes an RPCMessage as FlatBuffers.
-// Uses a pooled builder; the returned slice is an owned copy safe after the builder is Reset.
-func marshalEnvelope(msgType string, innerData []byte) []byte {
-	b := shardBuilderPool.Get()
-	defer func() {
-		b.Reset()
-		shardBuilderPool.Put(b)
-	}()
-
-	typeOff := b.CreateString(msgType)
-	var dataOff flatbuffers.UOffsetT
-	if len(innerData) > 0 {
-		dataOff = b.CreateByteVector(innerData)
-	}
-	pb.RPCMessageStart(b)
-	pb.RPCMessageAddType(b, typeOff)
-	if len(innerData) > 0 {
-		pb.RPCMessageAddData(b, dataOff)
-	}
-	root := pb.RPCMessageEnd(b)
-	b.Finish(root)
-	raw := b.FinishedBytes()
-	out := make([]byte, len(raw))
-	copy(out, raw)
-	return out
-}
-
 // marshalResponseDirect serializes an RPCMessage without pool-and-copy.
 // The returned bytes reference the builder's internal buffer; safe as long as the
 // owning *Message is alive (GC keeps the backing array live via the slice header).

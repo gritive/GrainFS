@@ -31,29 +31,6 @@ func (r PlacementRecord) ECConfigOrFallback(def ECConfig) ECConfig {
 	return ECConfig{DataShards: r.K, ParityShards: r.M}
 }
 
-// applyPutShardPlacement persists the shard placement record to BadgerDB.
-func (f *FSM) applyPutShardPlacement(data []byte) error {
-	c, err := decodePutShardPlacementCmd(data)
-	if err != nil {
-		return err
-	}
-	val := encodePlacementValue(PlacementRecord{Nodes: c.NodeIDs, K: c.K, M: c.M})
-	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(shardPlacementKey(c.Bucket, c.Key), val)
-	})
-}
-
-// applyDeleteShardPlacement removes the shard placement record for an object.
-func (f *FSM) applyDeleteShardPlacement(data []byte) error {
-	c, err := decodeDeleteShardPlacementCmd(data)
-	if err != nil {
-		return err
-	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(shardPlacementKey(c.Bucket, c.Key))
-	})
-}
-
 // ObjectMetaRef is the tuple IterObjectMetas yields for each object.
 type ObjectMetaRef struct {
 	Bucket      string
@@ -332,6 +309,8 @@ func (f *FSM) LookupShardPlacement(bucket, key string) (PlacementRecord, error) 
 
 // encodePlacementValue serializes a PlacementRecord.
 // Format: <uvarint k> <uvarint m> <uvarint count> <uvarint len> <bytes>...
+//
+//nolint:unused // package tests seed placement metadata directly.
 func encodePlacementValue(rec PlacementRecord) []byte {
 	var buf bytes.Buffer
 	var tmp [binary.MaxVarintLen64]byte

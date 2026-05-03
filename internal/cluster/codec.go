@@ -768,6 +768,7 @@ func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.PutShardPlacementCmdEnd(b)), nil
 }
 
+//nolint:unused // package tests pin command wire compatibility.
 func decodePutShardPlacementCmd(data []byte) (PutShardPlacementCmd, error) {
 	t, err := fbSafe(data, func(d []byte) *clusterpb.PutShardPlacementCmd {
 		return clusterpb.GetRootAsPutShardPlacementCmd(d, 0)
@@ -799,6 +800,7 @@ func encodeDeleteShardPlacementCmd(c DeleteShardPlacementCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.DeleteShardPlacementCmdEnd(b)), nil
 }
 
+//nolint:unused // package tests pin command wire compatibility.
 func decodeDeleteShardPlacementCmd(data []byte) (DeleteShardPlacementCmd, error) {
 	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteShardPlacementCmd {
 		return clusterpb.GetRootAsDeleteShardPlacementCmd(d, 0)

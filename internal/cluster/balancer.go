@@ -246,6 +246,8 @@ func (p *BalancerProposer) syncCB(peers []NodeStats) {
 
 // getCB returns the circuitBreaker for nodeID, or nil if not found.
 // Used for testing only — must be called from the actor goroutine (or single-threaded tests).
+//
+//nolint:unused // package tests inspect breaker state through this helper.
 func (p *BalancerProposer) getCB(nodeID string) *circuitBreaker {
 	return p.cbs[nodeID]
 }
@@ -526,6 +528,8 @@ func (p *BalancerProposer) proposeMigration(src, dst string) {
 }
 
 // selectLightestPeer returns the nodeID with the lowest DiskUsedPct, excluding self.
+//
+//nolint:unused // package tests pin peer-selection behaviour.
 func selectLightestPeer(store *NodeStatsStore, selfID string) (string, bool) {
 	all := store.GetAll()
 	var best string
