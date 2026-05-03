@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -448,6 +449,31 @@ func TestMetricsEndpointReturnsPlainText(t *testing.T) {
 	assert.Contains(t, text, "grainfs_buckets_total", "should contain buckets_total metric as text")
 	assert.Contains(t, text, "grainfs_objects_total", "should contain objects_total metric as text")
 	assert.Contains(t, text, "grainfs_storage_bytes_total", "should contain storage_bytes_total metric as text")
+}
+
+func TestMetrics_ExposesFDGaugeNames(t *testing.T) {
+	metrics.FDOpen.WithLabelValues("test-node").Set(10)
+	metrics.FDLimit.WithLabelValues("test-node").Set(100)
+	metrics.FDUsedRatio.WithLabelValues("test-node").Set(0.10)
+	metrics.FDETASeconds.WithLabelValues("test-node", "critical").Set(300)
+	metrics.FDOpenByCategory.WithLabelValues("test-node", "socket").Set(4)
+
+	base := setupTestServer(t)
+	resp, err := http.Get(base + "/metrics")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	text := string(body)
+	assert.Contains(t, text, "grainfs_fd_open")
+	assert.Contains(t, text, "grainfs_fd_limit")
+	assert.Contains(t, text, "grainfs_fd_used_ratio")
+	assert.Contains(t, text, "grainfs_fd_eta_seconds")
+	assert.Contains(t, text, "grainfs_fd_open_by_category")
+	assert.NotContains(t, text, "grainfs_fd_open_total")
+	assert.NotContains(t, text, "grainfs_fd_category_open_total")
 }
 
 func TestMetricsUpdateOnCRUD(t *testing.T) {

@@ -175,6 +175,36 @@ var (
 		Help: "Local disk usage percentage (0–100) as seen by each node.",
 	}, []string{"node_id"})
 
+	// FDOpen tracks current open file descriptors per node.
+	FDOpen = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_fd_open",
+		Help: "Current number of open file descriptors for this process.",
+	}, []string{"node_id"})
+
+	// FDLimit tracks the current RLIMIT_NOFILE soft limit per node.
+	FDLimit = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_fd_limit",
+		Help: "Current process file descriptor soft limit.",
+	}, []string{"node_id"})
+
+	// FDUsedRatio tracks open file descriptors divided by the FD soft limit.
+	FDUsedRatio = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_fd_used_ratio",
+		Help: "Current open file descriptor usage ratio, from 0 to 1.",
+	}, []string{"node_id"})
+
+	// FDETASeconds estimates time until an FD threshold is reached.
+	FDETASeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_fd_eta_seconds",
+		Help: "Estimated seconds until the named file descriptor threshold is reached; -1 means no positive trend.",
+	}, []string{"node_id", "threshold"})
+
+	// FDOpenByCategory tracks best-effort open FD classification per node.
+	FDOpenByCategory = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_fd_open_by_category",
+		Help: "Best-effort current open file descriptors by bounded category.",
+	}, []string{"node_id", "category"})
+
 	// Balancer metrics.
 
 	BalancerGossipTotal = promauto.NewCounter(prometheus.CounterOpts{
