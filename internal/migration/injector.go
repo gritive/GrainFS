@@ -2,6 +2,7 @@
 package migration
 
 import (
+	"context"
 	"errors"
 	"io"
 
@@ -26,9 +27,9 @@ type Stats struct {
 
 // Destination is the minimal interface required for a migration destination.
 type Destination interface {
-	CreateBucket(bucket string) error
-	PutObject(bucket, key string, body io.Reader, ct string) (*storage.Object, error)
-	GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error)
+	CreateBucket(ctx context.Context, bucket string) error
+	PutObject(ctx context.Context, bucket, key string, body io.Reader, ct string) (*storage.Object, error)
+	GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error)
 }
 
 // Injector copies objects from a source into a destination backend.
@@ -65,7 +66,7 @@ func (inj *Injector) Run() (Stats, error) {
 	}
 
 	for _, bucket := range buckets {
-		if err := inj.dst.CreateBucket(bucket); err != nil {
+		if err := inj.dst.CreateBucket(context.Background(), bucket); err != nil {
 			if !errors.Is(err, storage.ErrBucketAlreadyExists) {
 				log.Warn().Str("bucket", bucket).Err(err).Msg("migration: create bucket failed")
 				stats.Errors++
@@ -82,7 +83,7 @@ func (inj *Injector) Run() (Stats, error) {
 
 		for _, key := range keys {
 			if inj.skipExisting {
-				rc, _, err := inj.dst.GetObject(bucket, key)
+				rc, _, err := inj.dst.GetObject(context.Background(), bucket, key)
 				if err == nil {
 					rc.Close()
 					stats.Skipped++
@@ -102,7 +103,7 @@ func (inj *Injector) Run() (Stats, error) {
 				ct = obj.ContentType
 			}
 
-			if _, err := inj.dst.PutObject(bucket, key, rc, ct); err != nil {
+			if _, err := inj.dst.PutObject(context.Background(), bucket, key, rc, ct); err != nil {
 				rc.Close()
 				log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: put object failed")
 				stats.Errors++

@@ -20,7 +20,7 @@ func TestGetObject_ContentLengthHeader(t *testing.T) {
 	tmpDir := t.TempDir()
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	cases := []struct {
 		name string
@@ -35,7 +35,7 @@ func TestGetObject_ContentLengthHeader(t *testing.T) {
 
 	for _, tc := range cases {
 		data := bytes.Repeat([]byte("Z"), tc.size)
-		_, err := backend.PutObject("test-bucket", tc.name, bytes.NewReader(data), "application/octet-stream")
+		_, err := backend.PutObject(context.Background(), "test-bucket", tc.name, bytes.NewReader(data), "application/octet-stream")
 		require.NoError(t, err)
 	}
 

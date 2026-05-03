@@ -3,6 +3,7 @@ package volume
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,7 +131,7 @@ func (m *Manager) Create(name string, sizeBytes int64) (*Volume, error) {
 	}
 
 	// Check if volume already exists
-	if _, _, err := m.backend.GetObject(volumeBucketName, metaKey(name)); err == nil {
+	if _, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(name)); err == nil {
 		return nil, fmt.Errorf("volume %q already exists", name)
 	}
 
@@ -146,7 +147,7 @@ func (m *Manager) Create(name string, sizeBytes int64) (*Volume, error) {
 		return nil, fmt.Errorf("marshal volume metadata: %w", err)
 	}
 
-	if _, err := m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
+	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return nil, fmt.Errorf("store volume metadata: %w", err)
 	}
 
@@ -174,7 +175,7 @@ func (m *Manager) Delete(name string) error {
 	defer m.mu.Unlock()
 
 	// Verify volume exists
-	if _, _, err := m.backend.GetObject(volumeBucketName, metaKey(name)); err != nil {
+	if _, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(name)); err != nil {
 		return fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
 
@@ -186,17 +187,17 @@ func (m *Manager) Delete(name string) error {
 			return fmt.Errorf("dedup delete volume: %w", err)
 		}
 		for _, key := range toDelete {
-			m.backend.DeleteObject(volumeBucketName, key) //nolint:errcheck
+			m.backend.DeleteObject(context.Background(), volumeBucketName, key) //nolint:errcheck
 		}
 	} else {
-		_ = m.backend.WalkObjects(volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
-			_ = m.backend.DeleteObject(volumeBucketName, obj.Key)
+		_ = m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
+			_ = m.backend.DeleteObject(context.Background(), volumeBucketName, obj.Key)
 			return nil
 		})
 	}
 
 	// Delete metadata
-	if err := m.backend.DeleteObject(volumeBucketName, metaKey(name)); err != nil {
+	if err := m.backend.DeleteObject(context.Background(), volumeBucketName, metaKey(name)); err != nil {
 		return err
 	}
 	delete(m.volumes, name)
@@ -208,11 +209,11 @@ func (m *Manager) List() ([]*Volume, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := m.backend.HeadBucket(volumeBucketName); err != nil {
+	if err := m.backend.HeadBucket(context.Background(), volumeBucketName); err != nil {
 		return nil, nil // no volumes bucket yet
 	}
 
-	objs, err := m.backend.ListObjects(volumeBucketName, metaPrefix, 10000)
+	objs, err := m.backend.ListObjects(context.Background(), volumeBucketName, metaPrefix, 10000)
 	if err != nil {
 		return nil, fmt.Errorf("list volume metadata: %w", err)
 	}
@@ -222,7 +223,7 @@ func (m *Manager) List() ([]*Volume, error) {
 		if !strings.HasSuffix(obj.Key, "/meta") {
 			continue
 		}
-		rc, _, err := m.backend.GetObject(volumeBucketName, obj.Key)
+		rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, obj.Key)
 		if err != nil {
 			continue
 		}
@@ -311,7 +312,7 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 
 		// Cache miss: use pool buffer, then copy to output.
 		blkData := m.getBlkBuf(vol.BlockSize)
-		rc, _, err := m.backend.GetObject(volumeBucketName, phyKey)
+		rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, phyKey)
 		if err != nil {
 			// Block doesn't exist = zeros; blkData is already cleared by getBlkBuf.
 		} else {
@@ -375,7 +376,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 					existErr = fmt.Errorf("not found")
 				}
 			} else {
-				_, existErr = m.backend.HeadObject(volumeBucketName, physicalKey(name, blkNum, liveMap))
+				_, existErr = m.backend.HeadObject(context.Background(), volumeBucketName, physicalKey(name, blkNum, liveMap))
 			}
 			if existErr != nil {
 				newBlocksNeeded++
@@ -442,7 +443,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 				return totalWritten, fmt.Errorf("read dedup block %d: %w", blkNum, rErr)
 			}
 			if found {
-				rc, _, readErr := m.backend.GetObject(volumeBucketName, canonical)
+				rc, _, readErr := m.backend.GetObject(context.Background(), volumeBucketName, canonical)
 				if readErr == nil {
 					io.ReadFull(rc, blkData)
 					rc.Close()
@@ -458,10 +459,10 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			oldKey = physicalKey(name, blkNum, liveMap)
 			if isFullBlock {
 				// Existence check only — skip the data read.
-				_, headErr := m.backend.HeadObject(volumeBucketName, oldKey)
+				_, headErr := m.backend.HeadObject(context.Background(), volumeBucketName, oldKey)
 				isNew = headErr != nil
 			} else {
-				rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
+				rc, _, readErr := m.backend.GetObject(context.Background(), volumeBucketName, oldKey)
 				isNew = readErr != nil
 				if !isNew {
 					io.ReadFull(rc, blkData)
@@ -493,22 +494,22 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			}
 			targetKey = res.Canonical
 			if res.IsNew {
-				if _, err := m.backend.PutObject(volumeBucketName, targetKey,
+				if _, err := m.backend.PutObject(context.Background(), volumeBucketName, targetKey,
 					bytes.NewReader(blkData), "application/octet-stream"); err != nil {
 					m.putBlkBuf(blkData)
 					return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 				}
 			}
 			if res.ToDelete != "" {
-				m.backend.DeleteObject(volumeBucketName, res.ToDelete) //nolint:errcheck
-				newBlocks--                                            // freed one unique S3 object (refcount → 0)
+				m.backend.DeleteObject(context.Background(), volumeBucketName, res.ToDelete) //nolint:errcheck
+				newBlocks--                                                                  // freed one unique S3 object (refcount → 0)
 			}
 			if res.IsNew {
 				newBlocks++ // created one new unique S3 object
 			}
 		} else if useCow {
 			targetKey = cowBlockKey(name, blkNum)
-			if _, err := m.backend.PutObject(volumeBucketName, targetKey,
+			if _, err := m.backend.PutObject(context.Background(), volumeBucketName, targetKey,
 				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
 				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
@@ -516,7 +517,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			// CoW: delete old physical object (PackedBackend decrements ref; deletes at ref=0)
 			if oldKey != targetKey {
 				if !isNew {
-					m.backend.DeleteObject(volumeBucketName, oldKey) //nolint:errcheck
+					m.backend.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
 				}
 				liveMap[blkNum] = targetKey
 				liveMapDirty = true
@@ -529,7 +530,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 			} else {
 				src = bytes.NewReader(blkData)
 			}
-			if _, err := m.backend.PutObject(volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
+			if _, err := m.backend.PutObject(context.Background(), volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
 				m.putBlkBuf(blkData)
 				return totalWritten, fmt.Errorf("write block %d: %w", blkNum, err)
 			}
@@ -572,7 +573,7 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		}
 		data, err := marshalVolume(vol)
 		if err == nil {
-			m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf") //nolint:errcheck
+			m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf") //nolint:errcheck
 		}
 		// vol은 캐시 포인터이므로 캐시도 이미 갱신됨
 	}
@@ -650,14 +651,14 @@ func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() er
 
 		var blkSrc io.Reader
 		if isFullBlock {
-			_, headErr := m.backend.HeadObject(volumeBucketName, oldKey)
+			_, headErr := m.backend.HeadObject(context.Background(), volumeBucketName, oldKey)
 			if headErr != nil {
 				newBlocks++
 			}
 			blkSrc = bytes.NewReader(p[totalWritten : totalWritten+canWrite])
 		} else {
 			blkData := m.getBlkBuf(vol.BlockSize)
-			rc, _, readErr := m.backend.GetObject(volumeBucketName, oldKey)
+			rc, _, readErr := m.backend.GetObject(context.Background(), volumeBucketName, oldKey)
 			if readErr != nil {
 				newBlocks++
 			} else {
@@ -749,12 +750,12 @@ func (m *Manager) Discard(name string, off, length int64) error {
 			invalidations = append(invalidations, objectKey)
 			if shouldDelete {
 				freed++
-				m.backend.DeleteObject(volumeBucketName, objectKey) //nolint:errcheck
+				m.backend.DeleteObject(context.Background(), volumeBucketName, objectKey) //nolint:errcheck
 			}
 		} else {
 			key := physicalKey(name, blkNum, liveMap)
 			invalidations = append(invalidations, key)
-			if err := m.backend.DeleteObject(volumeBucketName, key); err == nil {
+			if err := m.backend.DeleteObject(context.Background(), volumeBucketName, key); err == nil {
 				freed++
 				if liveMap != nil {
 					delete(liveMap, blkNum)
@@ -779,7 +780,7 @@ func (m *Manager) Discard(name string, off, length int64) error {
 		}
 		data, err := marshalVolume(vol)
 		if err == nil {
-			m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+			m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
 		}
 	}
 	return nil
@@ -813,7 +814,7 @@ func (m *Manager) RecordFreedBytes(name string, n int64) error {
 	if err != nil {
 		return err
 	}
-	m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf") //nolint:errcheck
+	m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf") //nolint:errcheck
 	return nil
 }
 
@@ -830,7 +831,7 @@ func (m *Manager) Recalculate(name string) (int64, int64, error) {
 	}
 
 	var after int64
-	if err := m.backend.WalkObjects(volumeBucketName, blockPrefix(name), func(_ *storage.Object) error {
+	if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(_ *storage.Object) error {
 		after++
 		return nil
 	}); err != nil {
@@ -847,7 +848,7 @@ func (m *Manager) Recalculate(name string) (int64, int64, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("marshal volume metadata: %w", err)
 	}
-	if _, err := m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
+	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return 0, 0, fmt.Errorf("store volume metadata: %w", err)
 	}
 	return before, after, nil
@@ -859,7 +860,7 @@ func (m *Manager) getVolUnlocked(name string) (*Volume, error) {
 	if vol, ok := m.volumes[name]; ok {
 		return vol, nil
 	}
-	rc, _, err := m.backend.GetObject(volumeBucketName, metaKey(name))
+	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(name))
 	if err != nil {
 		return nil, fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
@@ -891,8 +892,8 @@ func blockPrefix(name string) string {
 }
 
 func (m *Manager) ensureBucket() error {
-	_ = m.backend.CreateBucket(volumeBucketName)
-	return m.backend.HeadBucket(volumeBucketName)
+	_ = m.backend.CreateBucket(context.Background(), volumeBucketName)
+	return m.backend.HeadBucket(context.Background(), volumeBucketName)
 }
 
 // --- live_map helpers ---
@@ -958,7 +959,7 @@ func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 		m.liveMaps[name] = nil
 		return nil, nil
 	}
-	rc, _, err := m.backend.GetObject(volumeBucketName, liveMapKey(name))
+	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, liveMapKey(name))
 	if err != nil {
 		// No live_map object yet (fresh volume or fresh snapshot)
 		lm := make(map[int64]string)
@@ -980,7 +981,7 @@ func (m *Manager) persistLiveMapUnlocked(name string, lm map[int64]string) error
 	if err := serializeLiveMap(lm, &buf); err != nil {
 		return err
 	}
-	_, err := m.backend.PutObject(volumeBucketName, liveMapKey(name), &buf, "text/plain")
+	_, err := m.backend.PutObject(context.Background(), volumeBucketName, liveMapKey(name), &buf, "text/plain")
 	return err
 }
 
@@ -1047,7 +1048,7 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	snapMap := make(map[int64]string)
 	if liveMap == nil || len(liveMap) == 0 {
 		// No live_map: enumerate default block objects
-		if err := m.backend.WalkObjects(volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
+		if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
 			blkNum, ok := parseBlockNum(obj.Key)
 			if ok {
 				snapMap[blkNum] = obj.Key
@@ -1083,7 +1084,7 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	if err := serializeLiveMap(snapMap, &mapBuf); err != nil {
 		return "", fmt.Errorf("serialize snapshot map: %w", err)
 	}
-	if _, err := m.backend.PutObject(volumeBucketName, snapMapKey(name, snapID), &mapBuf, "text/plain"); err != nil {
+	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, snapMapKey(name, snapID), &mapBuf, "text/plain"); err != nil {
 		return "", fmt.Errorf("store snapshot map: %w", err)
 	}
 
@@ -1093,7 +1094,7 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal snapshot meta: %w", err)
 	}
-	if _, err := m.backend.PutObject(volumeBucketName, snapMetaKey(name, snapID), bytes.NewReader(metaData), "application/json"); err != nil {
+	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, snapMetaKey(name, snapID), bytes.NewReader(metaData), "application/json"); err != nil {
 		return "", fmt.Errorf("store snapshot meta: %w", err)
 	}
 
@@ -1103,7 +1104,7 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal volume: %w", err)
 	}
-	if _, err := m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
+	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return "", fmt.Errorf("persist volume meta: %w", err)
 	}
 
@@ -1124,11 +1125,11 @@ func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
 
 	prefix := snapPrefix(name)
 	var snaps []SnapshotInfo
-	if err := m.backend.WalkObjects(volumeBucketName, prefix, func(obj *storage.Object) error {
+	if err := m.backend.WalkObjects(context.Background(), volumeBucketName, prefix, func(obj *storage.Object) error {
 		if !strings.HasSuffix(obj.Key, "/meta") {
 			return nil
 		}
-		rc, _, err := m.backend.GetObject(volumeBucketName, obj.Key)
+		rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, obj.Key)
 		if err != nil {
 			return nil
 		}
@@ -1160,7 +1161,7 @@ func (m *Manager) DeleteSnapshot(name, snapID string) error {
 	}
 
 	// Load snapshot map to find blocks to delete
-	rc, _, err := m.backend.GetObject(volumeBucketName, snapMapKey(name, snapID))
+	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))
 	if err != nil {
 		return fmt.Errorf("snapshot %q not found for volume %q", snapID, name)
 	}
@@ -1172,10 +1173,10 @@ func (m *Manager) DeleteSnapshot(name, snapID string) error {
 
 	// Delete snapshot block objects (PackedBackend decrements ref; actual delete at ref=0)
 	for _, key := range snapMap {
-		m.backend.DeleteObject(volumeBucketName, key) //nolint:errcheck
+		m.backend.DeleteObject(context.Background(), volumeBucketName, key) //nolint:errcheck
 	}
-	m.backend.DeleteObject(volumeBucketName, snapMapKey(name, snapID))  //nolint:errcheck
-	m.backend.DeleteObject(volumeBucketName, snapMetaKey(name, snapID)) //nolint:errcheck
+	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))  //nolint:errcheck
+	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMetaKey(name, snapID)) //nolint:errcheck
 
 	// Decrement snapshot_count and persist
 	if vol.SnapshotCount > 0 {
@@ -1184,7 +1185,7 @@ func (m *Manager) DeleteSnapshot(name, snapID string) error {
 
 	if vol.SnapshotCount == 0 {
 		// All snapshots gone — delete live_map and reset to default-key mode
-		m.backend.DeleteObject(volumeBucketName, liveMapKey(name)) //nolint:errcheck
+		m.backend.DeleteObject(context.Background(), volumeBucketName, liveMapKey(name)) //nolint:errcheck
 		delete(m.liveMaps, name)
 	}
 
@@ -1192,7 +1193,7 @@ func (m *Manager) DeleteSnapshot(name, snapID string) error {
 	if err != nil {
 		return fmt.Errorf("marshal volume: %w", err)
 	}
-	_, err = m.backend.PutObject(volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
+	_, err = m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
 	return err
 }
 
@@ -1206,7 +1207,7 @@ func (m *Manager) Rollback(name, snapID string) error {
 	}
 
 	// Load snapshot map
-	rc, _, err := m.backend.GetObject(volumeBucketName, snapMapKey(name, snapID))
+	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))
 	if err != nil {
 		return fmt.Errorf("snapshot %q not found for volume %q", snapID, name)
 	}
@@ -1243,7 +1244,7 @@ func (m *Manager) Rollback(name, snapID string) error {
 
 		// Delete the old live physical object
 		if oldKey, ok := liveMap[blkNum]; ok && oldKey != "" {
-			m.backend.DeleteObject(volumeBucketName, oldKey) //nolint:errcheck
+			m.backend.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
 		}
 		liveMap[blkNum] = newKey
 	}
@@ -1251,7 +1252,7 @@ func (m *Manager) Rollback(name, snapID string) error {
 	// Also delete any live blocks NOT in the snapshot (they shouldn't be read after rollback)
 	for blkNum, oldKey := range liveMap {
 		if _, inSnap := snapMap[blkNum]; !inSnap {
-			m.backend.DeleteObject(volumeBucketName, oldKey) //nolint:errcheck
+			m.backend.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
 			delete(liveMap, blkNum)
 		}
 	}
@@ -1274,7 +1275,7 @@ func (m *Manager) Clone(srcName, dstName string) error {
 	}
 
 	// Fail if dst already exists
-	if _, _, err := m.backend.GetObject(volumeBucketName, metaKey(dstName)); err == nil {
+	if _, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(dstName)); err == nil {
 		return fmt.Errorf("volume %q already exists", dstName)
 	}
 
@@ -1303,7 +1304,7 @@ func (m *Manager) Clone(srcName, dstName string) error {
 		}
 	} else {
 		// Case 2: no live_map — enumerate default blk_N objects
-		if err := m.backend.WalkObjects(volumeBucketName, blockPrefix(srcName), func(obj *storage.Object) error {
+		if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(srcName), func(obj *storage.Object) error {
 			blkNum, ok := parseBlockNum(obj.Key)
 			if !ok {
 				return nil
@@ -1327,7 +1328,7 @@ func (m *Manager) Clone(srcName, dstName string) error {
 	if err != nil {
 		return fmt.Errorf("marshal dst volume: %w", err)
 	}
-	if _, err := m.backend.PutObject(volumeBucketName, metaKey(dstName), bytes.NewReader(data), "application/protobuf"); err != nil {
+	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(dstName), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return fmt.Errorf("store dst volume meta: %w", err)
 	}
 
@@ -1338,7 +1339,7 @@ func (m *Manager) Clone(srcName, dstName string) error {
 
 // copyObjectFallback copies by reading source and writing to destination.
 func (m *Manager) copyObjectFallback(srcBucket, srcKey, dstBucket, dstKey string) error {
-	rc, obj, err := m.backend.GetObject(srcBucket, srcKey)
+	rc, obj, err := m.backend.GetObject(context.Background(), srcBucket, srcKey)
 	if err != nil {
 		return err
 	}
@@ -1347,7 +1348,7 @@ func (m *Manager) copyObjectFallback(srcBucket, srcKey, dstBucket, dstKey string
 	if obj != nil && obj.ContentType != "" {
 		ct = obj.ContentType
 	}
-	_, err = m.backend.PutObject(dstBucket, dstKey, rc, ct)
+	_, err = m.backend.PutObject(context.Background(), dstBucket, dstKey, rc, ct)
 	return err
 }
 

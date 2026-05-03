@@ -593,7 +593,7 @@ func (s *Server) writeIcebergMetadataObject(location string, metadata json.RawMe
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	_, err := s.backend.PutObject(bucket, key, bytes.NewReader(metadata), "application/json")
+	_, err := s.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(metadata), "application/json")
 	if errors.Is(err, io.EOF) {
 		return nil
 	}

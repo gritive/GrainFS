@@ -124,14 +124,14 @@ func findVersionDeleter(b storage.Backend) (ObjectVersionDeleter, bool) {
 
 // listVersionsResult is the S3 XML response for GET /<bucket>?versions.
 type listVersionsResult struct {
-	XMLName       xml.Name              `xml:"ListVersionsResult"`
-	Xmlns         string                `xml:"xmlns,attr,omitempty"`
-	Name          string                `xml:"Name"`
-	Prefix        string                `xml:"Prefix"`
-	MaxKeys       int                   `xml:"MaxKeys"`
-	IsTruncated   bool                  `xml:"IsTruncated"`
-	Versions      []versionEntry        `xml:"Version"`
-	DeleteMarkers []deleteMarkerEntry   `xml:"DeleteMarker"`
+	XMLName       xml.Name            `xml:"ListVersionsResult"`
+	Xmlns         string              `xml:"xmlns,attr,omitempty"`
+	Name          string              `xml:"Name"`
+	Prefix        string              `xml:"Prefix"`
+	MaxKeys       int                 `xml:"MaxKeys"`
+	IsTruncated   bool                `xml:"IsTruncated"`
+	Versions      []versionEntry      `xml:"Version"`
+	DeleteMarkers []deleteMarkerEntry `xml:"DeleteMarker"`
 }
 
 type versionEntry struct {

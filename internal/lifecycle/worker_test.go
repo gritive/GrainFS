@@ -21,7 +21,10 @@ type mockBackend struct {
 	objects map[string][]scrubber.ObjectRecord
 }
 
-func (m *mockBackend) ListBuckets() ([]string, error) { return m.buckets, nil }
+func (m *mockBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	_ = ctx
+	return m.buckets, nil
+}
 
 func (m *mockBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
 	recs := append([]scrubber.ObjectRecord(nil), m.objects[bucket]...)
@@ -42,7 +45,8 @@ type mockDeleter struct {
 	versions        map[string][]*storage.ObjectVersion // "bucket/key" → versions
 }
 
-func (m *mockDeleter) DeleteObject(bucket, key string) error {
+func (m *mockDeleter) DeleteObject(ctx context.Context, bucket, key string) error {
+	_ = ctx
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deleted = append(m.deleted, bucket+"/"+key)

@@ -1,6 +1,7 @@
 package migration_test
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -69,13 +70,13 @@ func TestInjector_CopiesAllObjects(t *testing.T) {
 	assert.Equal(t, 0, stats.Errors)
 
 	// Verify objects in destination
-	rc, _, err := dst.GetObject("bucket1", "file.txt")
+	rc, _, err := dst.GetObject(context.Background(), "bucket1", "file.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 	body, _ := io.ReadAll(rc)
 	assert.Equal(t, "hello", string(body))
 
-	rc2, _, err := dst.GetObject("bucket1", "img/photo.jpg")
+	rc2, _, err := dst.GetObject(context.Background(), "bucket1", "img/photo.jpg")
 	require.NoError(t, err)
 	defer rc2.Close()
 	body2, _ := io.ReadAll(rc2)
@@ -90,8 +91,8 @@ func TestInjector_SkipsExistingObjects(t *testing.T) {
 		},
 	}
 	dst := newLocalBackend(t)
-	require.NoError(t, dst.CreateBucket("b"))
-	_, err := dst.PutObject("b", "existing.txt", strings.NewReader("dst"), "text/plain")
+	require.NoError(t, dst.CreateBucket(context.Background(), "b"))
+	_, err := dst.PutObject(context.Background(), "b", "existing.txt", strings.NewReader("dst"), "text/plain")
 	require.NoError(t, err)
 
 	inj := migration.NewInjector(src, dst, migration.WithSkipExisting(true))
@@ -101,7 +102,7 @@ func TestInjector_SkipsExistingObjects(t *testing.T) {
 	assert.Equal(t, 1, stats.Skipped)
 
 	// Destination content must remain unchanged
-	rc, _, err := dst.GetObject("b", "existing.txt")
+	rc, _, err := dst.GetObject(context.Background(), "b", "existing.txt")
 	require.NoError(t, err)
 	defer rc.Close()
 	body, _ := io.ReadAll(rc)
@@ -127,7 +128,7 @@ func TestInjector_MultipleBuckets(t *testing.T) {
 		{"alpha", "a.txt", "aaa"},
 		{"beta", "b.txt", "bbb"},
 	} {
-		rc, _, err := dst.GetObject(tc.bucket, tc.key)
+		rc, _, err := dst.GetObject(context.Background(), tc.bucket, tc.key)
 		require.NoError(t, err, tc.key)
 		b, _ := io.ReadAll(rc)
 		rc.Close()

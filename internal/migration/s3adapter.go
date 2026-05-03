@@ -98,8 +98,8 @@ func NewS3Destination(endpoint, accessKey, secretKey string) *S3Destination {
 	return &S3Destination{client: newS3Client(endpoint, accessKey, secretKey)}
 }
 
-func (d *S3Destination) CreateBucket(bucket string) error {
-	_, err := d.client.CreateBucket(context.Background(), &s3.CreateBucketInput{
+func (d *S3Destination) CreateBucket(ctx context.Context, bucket string) error {
+	_, err := d.client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucket),
 	})
 	if err != nil {
@@ -112,7 +112,7 @@ func (d *S3Destination) CreateBucket(bucket string) error {
 	return nil
 }
 
-func (d *S3Destination) PutObject(bucket, key string, body io.Reader, ct string) (*storage.Object, error) {
+func (d *S3Destination) PutObject(ctx context.Context, bucket, key string, body io.Reader, ct string) (*storage.Object, error) {
 	// S3 SDK requires a seekable body for payload hash computation.
 	data, err := io.ReadAll(body)
 	if err != nil {
@@ -126,15 +126,15 @@ func (d *S3Destination) PutObject(bucket, key string, body io.Reader, ct string)
 	if ct != "" {
 		input.ContentType = aws.String(ct)
 	}
-	_, err = d.client.PutObject(context.Background(), input)
+	_, err = d.client.PutObject(ctx, input)
 	if err != nil {
 		return nil, err
 	}
 	return &storage.Object{Key: key, Size: int64(len(data))}, nil
 }
 
-func (d *S3Destination) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	out, err := d.client.GetObject(context.Background(), &s3.GetObjectInput{
+func (d *S3Destination) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})

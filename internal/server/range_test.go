@@ -23,10 +23,10 @@ func TestGetObject_IfNoneMatch(t *testing.T) {
 
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("X"), 1024)
-	obj, err := backend.PutObject("test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
+	obj, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14859", backend)
@@ -81,10 +81,10 @@ func TestGetObject_IfModifiedSince(t *testing.T) {
 
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("Y"), 512)
-	_, err = backend.PutObject("test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
+	_, err = backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14861", backend)
@@ -127,10 +127,10 @@ func TestGetObject_IfMatch(t *testing.T) {
 
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("M"), 512)
-	obj, err := backend.PutObject("test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
+	obj, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14862", backend)
@@ -171,10 +171,10 @@ func TestHeadObject_ConditionalHeaders(t *testing.T) {
 
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("H"), 256)
-	obj, err := backend.PutObject("test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
+	obj, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14863", backend)
@@ -200,11 +200,11 @@ func TestParseByteRange(t *testing.T) {
 	const size = int64(65536)
 
 	tests := []struct {
-		name        string
-		header      string
-		wantStart   int64
-		wantEnd     int64
-		wantOK      bool
+		name      string
+		header    string
+		wantStart int64
+		wantEnd   int64
+		wantOK    bool
 	}{
 		{"basic range", "bytes=0-1023", 0, 1023, true},
 		{"mid range", "bytes=1024-2047", 1024, 2047, true},
@@ -214,7 +214,7 @@ func TestParseByteRange(t *testing.T) {
 		{"clamped end", "bytes=0-99999", 0, size - 1, true},
 		{"last byte", "bytes=65535-65535", 65535, 65535, true},
 		{"start at end", "bytes=65536-", 0, 0, false},   // start >= size
-		{"reversed range", "bytes=100-50", 0, 0, false},  // end < start
+		{"reversed range", "bytes=100-50", 0, 0, false}, // end < start
 		{"invalid format", "bytes=abc", 0, 0, false},
 		{"no bytes prefix", "tokens=0-100", 0, 0, false},
 		{"suffix zero", "bytes=-0", 0, 0, false},

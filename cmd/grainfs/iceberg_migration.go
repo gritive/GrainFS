@@ -80,7 +80,7 @@ func ensureIcebergMetadataObject(ctx context.Context, backend storage.Backend, l
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	rc, _, err := backend.GetObject(bucket, key)
+	rc, _, err := backend.GetObject(ctx, bucket, key)
 	if err == nil {
 		_, _ = io.Copy(io.Discard, rc)
 		return rc.Close()
@@ -92,14 +92,14 @@ func ensureIcebergMetadataObject(ctx context.Context, backend storage.Backend, l
 		return fmt.Errorf("legacy metadata JSON is empty for %s", location)
 	}
 	if errors.Is(err, storage.ErrBucketNotFound) || errors.Is(err, storage.ErrNoSuchBucket) {
-		if createErr := backend.CreateBucket(bucket); createErr != nil && !errors.Is(createErr, storage.ErrBucketAlreadyExists) {
+		if createErr := backend.CreateBucket(ctx, bucket); createErr != nil && !errors.Is(createErr, storage.ErrBucketAlreadyExists) {
 			return createErr
 		}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
-	_, err = backend.PutObject(bucket, key, bytes.NewReader(metadata), "application/json")
+	_, err = backend.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
 	return err
 }
 

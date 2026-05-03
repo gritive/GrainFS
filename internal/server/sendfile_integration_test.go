@@ -25,19 +25,19 @@ func TestSendfileIntegration(t *testing.T) {
 	}
 
 	// Create test bucket
-	if err := backend.CreateBucket("test-bucket"); err != nil {
+	if err := backend.CreateBucket(context.Background(), "test-bucket"); err != nil {
 		t.Fatalf("Failed to create bucket: %v", err)
 	}
 
 	// Create small object (<16KB) - should use standard path
 	smallData := bytes.Repeat([]byte("A"), 1024) // 1KB
-	if _, err := backend.PutObject("test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream"); err != nil {
+	if _, err := backend.PutObject(context.Background(), "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream"); err != nil {
 		t.Fatalf("Failed to put small object: %v", err)
 	}
 
 	// Create large object (>16KB) - should use sendfile
 	largeData := bytes.Repeat([]byte("B"), 32*1024) // 32KB
-	if _, err := backend.PutObject("test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream"); err != nil {
+	if _, err := backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream"); err != nil {
 		t.Fatalf("Failed to put large object: %v", err)
 	}
 
@@ -47,7 +47,7 @@ func TestSendfileIntegration(t *testing.T) {
 
 	// Test small object
 	t.Run("SmallObject", func(t *testing.T) {
-		rc, obj, err := backend.GetObject("test-bucket", "small")
+		rc, obj, err := backend.GetObject(context.Background(), "test-bucket", "small")
 		if err != nil {
 			t.Fatalf("Failed to get small object: %v", err)
 		}
@@ -70,7 +70,7 @@ func TestSendfileIntegration(t *testing.T) {
 
 	// Test large object
 	t.Run("LargeObject", func(t *testing.T) {
-		rc, obj, err := backend.GetObject("test-bucket", "large")
+		rc, obj, err := backend.GetObject(context.Background(), "test-bucket", "large")
 		if err != nil {
 			t.Fatalf("Failed to get large object: %v", err)
 		}

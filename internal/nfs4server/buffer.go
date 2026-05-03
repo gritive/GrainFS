@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	bufferSmall  = 32 * 1024  // 32KB
-	bufferMedium = 256 * 1024 // 256KB
+	bufferSmall  = 32 * 1024       // 32KB
+	bufferMedium = 256 * 1024      // 256KB
 	bufferLarge  = 1 * 1024 * 1024 // 1MB
 )
 

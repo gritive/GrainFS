@@ -22,18 +22,18 @@ type errorBackend struct {
 	headErr error
 }
 
-func (e *errorBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+func (e *errorBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
 	if e.getErr != nil {
 		return nil, nil, e.getErr
 	}
-	return e.Backend.GetObject(bucket, key)
+	return e.Backend.GetObject(ctx, bucket, key)
 }
 
-func (e *errorBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (e *errorBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
 	if e.headErr != nil {
 		return nil, e.headErr
 	}
-	return e.Backend.HeadObject(bucket, key)
+	return e.Backend.HeadObject(ctx, bucket, key)
 }
 
 // TestGetObject_BackendError tests that a backend GetObject error returns 500
@@ -41,10 +41,10 @@ func TestGetObject_BackendError(t *testing.T) {
 	tmpDir := t.TempDir()
 	real, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, real.CreateBucket("test-bucket"))
+	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("X"), 1024)
-	_, err = real.PutObject("test-bucket", "file.bin", bytes.NewReader(data), "application/octet-stream")
+	_, err = real.PutObject(context.Background(), "test-bucket", "file.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14870", &errorBackend{Backend: real, getErr: errors.New("disk failure")})
@@ -64,9 +64,9 @@ func TestHeadObject_BackendError(t *testing.T) {
 	tmpDir := t.TempDir()
 	real, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, real.CreateBucket("test-bucket"))
+	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
-	_, err = real.PutObject("test-bucket", "file.bin", bytes.NewReader([]byte("hello")), "text/plain")
+	_, err = real.PutObject(context.Background(), "test-bucket", "file.bin", bytes.NewReader([]byte("hello")), "text/plain")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14871", &errorBackend{Backend: real, headErr: errors.New("disk failure")})
@@ -88,11 +88,11 @@ func TestGetObject_SmallFilePartialReadReturns500(t *testing.T) {
 	tmpDir := t.TempDir()
 	real, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, real.CreateBucket("test-bucket"))
+	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
 	// 8KB: below the 16KB zero-copy threshold → uses io.ReadAll path
 	data := bytes.Repeat([]byte("S"), 8*1024)
-	_, err = real.PutObject("test-bucket", "small.bin", bytes.NewReader(data), "application/octet-stream")
+	_, err = real.PutObject(context.Background(), "test-bucket", "small.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14872", &partialErrorBackend{Backend: real, failAfter: 512})
@@ -116,11 +116,11 @@ func TestGetObject_LargeFilePartialReadTruncates(t *testing.T) {
 	tmpDir := t.TempDir()
 	real, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, real.CreateBucket("test-bucket"))
+	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
 	// 64KB: above the 16KB threshold → uses SetBodyStream (zero-copy)
 	data := bytes.Repeat([]byte("L"), 64*1024)
-	_, err = real.PutObject("test-bucket", "large.bin", bytes.NewReader(data), "application/octet-stream")
+	_, err = real.PutObject(context.Background(), "test-bucket", "large.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14873", &partialErrorBackend{Backend: real, failAfter: 1024})
@@ -145,7 +145,7 @@ func TestColdDataIntegrity(t *testing.T) {
 	tmpDir := t.TempDir()
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	s := New("127.0.0.1:14874", backend)
 	go func() { s.Run() }()
@@ -164,7 +164,7 @@ func TestColdDataIntegrity(t *testing.T) {
 			key := byteLabel(size)
 			original := bytes.Repeat([]byte{byte(size & 0xff)}, size)
 
-			_, err := backend.PutObject("test-bucket", key, bytes.NewReader(original), "application/octet-stream")
+			_, err := backend.PutObject(context.Background(), "test-bucket", key, bytes.NewReader(original), "application/octet-stream")
 			require.NoError(t, err)
 
 			resp, err := http.Get("http://127.0.0.1:14874/test-bucket/" + key)
@@ -186,8 +186,8 @@ type partialErrorBackend struct {
 	failAfter int
 }
 
-func (p *partialErrorBackend) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	rc, obj, err := p.Backend.GetObject(bucket, key)
+func (p *partialErrorBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	rc, obj, err := p.Backend.GetObject(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
 	}

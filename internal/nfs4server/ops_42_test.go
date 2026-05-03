@@ -1,6 +1,7 @@
 package nfs4server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -344,43 +345,43 @@ type allocateTruncateBackend struct {
 	truncateSize   int64
 }
 
-func (b *allocateTruncateBackend) CreateBucket(string) error { return nil }
-func (b *allocateTruncateBackend) HeadBucket(string) error   { return nil }
-func (b *allocateTruncateBackend) DeleteBucket(string) error { return nil }
-func (b *allocateTruncateBackend) ListBuckets() ([]string, error) {
+func (b *allocateTruncateBackend) CreateBucket(context.Context, string) error { return nil }
+func (b *allocateTruncateBackend) HeadBucket(context.Context, string) error   { return nil }
+func (b *allocateTruncateBackend) DeleteBucket(context.Context, string) error { return nil }
+func (b *allocateTruncateBackend) ListBuckets(context.Context) ([]string, error) {
 	return nil, nil
 }
-func (b *allocateTruncateBackend) PutObject(string, string, io.Reader, string) (*storage.Object, error) {
+func (b *allocateTruncateBackend) PutObject(context.Context, string, string, io.Reader, string) (*storage.Object, error) {
 	b.putCalls++
 	return nil, errors.New("unexpected PutObject")
 }
-func (b *allocateTruncateBackend) GetObject(string, string) (io.ReadCloser, *storage.Object, error) {
+func (b *allocateTruncateBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
 	b.getCalls++
 	return nil, nil, errors.New("unexpected GetObject")
 }
-func (b *allocateTruncateBackend) HeadObject(bucket, key string) (*storage.Object, error) {
+func (b *allocateTruncateBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
 	return &storage.Object{Key: key, Size: b.size}, nil
 }
-func (b *allocateTruncateBackend) DeleteObject(string, string) error { return nil }
-func (b *allocateTruncateBackend) ListObjects(string, string, int) ([]*storage.Object, error) {
+func (b *allocateTruncateBackend) DeleteObject(context.Context, string, string) error { return nil }
+func (b *allocateTruncateBackend) ListObjects(context.Context, string, string, int) ([]*storage.Object, error) {
 	return nil, nil
 }
-func (b *allocateTruncateBackend) WalkObjects(string, string, func(*storage.Object) error) error {
+func (b *allocateTruncateBackend) WalkObjects(context.Context, string, string, func(*storage.Object) error) error {
 	return nil
 }
-func (b *allocateTruncateBackend) CreateMultipartUpload(string, string, string) (*storage.MultipartUpload, error) {
+func (b *allocateTruncateBackend) CreateMultipartUpload(context.Context, string, string, string) (*storage.MultipartUpload, error) {
 	return nil, nil
 }
-func (b *allocateTruncateBackend) UploadPart(string, string, string, int, io.Reader) (*storage.Part, error) {
+func (b *allocateTruncateBackend) UploadPart(context.Context, string, string, string, int, io.Reader) (*storage.Part, error) {
 	return nil, nil
 }
-func (b *allocateTruncateBackend) CompleteMultipartUpload(string, string, string, []storage.Part) (*storage.Object, error) {
+func (b *allocateTruncateBackend) CompleteMultipartUpload(context.Context, string, string, string, []storage.Part) (*storage.Object, error) {
 	return nil, nil
 }
-func (b *allocateTruncateBackend) AbortMultipartUpload(string, string, string) error {
+func (b *allocateTruncateBackend) AbortMultipartUpload(context.Context, string, string, string) error {
 	return nil
 }
-func (b *allocateTruncateBackend) Truncate(bucket, key string, size int64) error {
+func (b *allocateTruncateBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	b.truncateCalls++
 	b.truncateBucket = bucket
 	b.truncateKey = key

@@ -1,6 +1,7 @@
 package nfs4server
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ func startTestNFS4Server(t *testing.T) (string, *Server) {
 	require.NoError(t, err)
 
 	// Create the NFS4 bucket
-	require.NoError(t, backend.CreateBucket(nfs4Bucket))
+	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
 
 	srv := NewServer(backend)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -52,16 +53,16 @@ func TestE2E_NullProcedure(t *testing.T) {
 
 	// Build NULL RPC call (procedure 0)
 	w := &XDRWriter{}
-	w.WriteUint32(1)          // XID
-	w.WriteUint32(rpcMsgCall) // CALL
-	w.WriteUint32(2)          // RPC version
-	w.WriteUint32(rpcProgNFS) // program
+	w.WriteUint32(1)           // XID
+	w.WriteUint32(rpcMsgCall)  // CALL
+	w.WriteUint32(2)           // RPC version
+	w.WriteUint32(rpcProgNFS)  // program
 	w.WriteUint32(rpcVersNFS4) // version
-	w.WriteUint32(0)          // procedure = NULL
-	w.WriteUint32(authNone)   // cred flavor
-	w.WriteUint32(0)          // cred body len
-	w.WriteUint32(authNone)   // verf flavor
-	w.WriteUint32(0)          // verf body len
+	w.WriteUint32(0)           // procedure = NULL
+	w.WriteUint32(authNone)    // cred flavor
+	w.WriteUint32(0)           // cred body len
+	w.WriteUint32(authNone)    // verf flavor
+	w.WriteUint32(0)           // verf body len
 
 	require.NoError(t, writeRPCFrame(conn, w.Bytes()))
 
@@ -85,20 +86,20 @@ func TestE2E_CompoundPutRootFH_GetFH(t *testing.T) {
 
 	// Build COMPOUND: PUTROOTFH + GETFH
 	compound := &XDRWriter{}
-	compound.WriteString("")  // tag
-	compound.WriteUint32(0)   // minor version
-	compound.WriteUint32(2)   // 2 ops
+	compound.WriteString("") // tag
+	compound.WriteUint32(0)  // minor version
+	compound.WriteUint32(2)  // 2 ops
 	compound.WriteUint32(uint32(OpPutRootFH))
 	compound.WriteUint32(uint32(OpGetFH))
 
 	// Wrap in RPC call
 	rpc := &XDRWriter{}
-	rpc.WriteUint32(2)           // XID
+	rpc.WriteUint32(2) // XID
 	rpc.WriteUint32(rpcMsgCall)
-	rpc.WriteUint32(2)           // RPC version
+	rpc.WriteUint32(2) // RPC version
 	rpc.WriteUint32(rpcProgNFS)
 	rpc.WriteUint32(rpcVersNFS4)
-	rpc.WriteUint32(1)           // procedure = COMPOUND
+	rpc.WriteUint32(1) // procedure = COMPOUND
 	rpc.WriteUint32(authNone)
 	rpc.WriteUint32(0)
 	rpc.WriteUint32(authNone)
@@ -158,17 +159,17 @@ func TestE2E_CompoundSetClientID(t *testing.T) {
 
 	// Build COMPOUND: SETCLIENTID
 	compound := &XDRWriter{}
-	compound.WriteString("")  // tag
-	compound.WriteUint32(0)   // minor version
-	compound.WriteUint32(1)   // 1 op
+	compound.WriteString("") // tag
+	compound.WriteUint32(0)  // minor version
+	compound.WriteUint32(1)  // 1 op
 	compound.WriteUint32(uint32(OpSetClientID))
 	// args: verifier(8) + id(opaque) + callback(program+netid+addr) + callback_ident
-	compound.WriteUint64(12345) // verifier
-	compound.WriteString("test-client") // id
-	compound.WriteUint32(0)    // cb_program
-	compound.WriteString("tcp") // netid
+	compound.WriteUint64(12345)           // verifier
+	compound.WriteString("test-client")   // id
+	compound.WriteUint32(0)               // cb_program
+	compound.WriteString("tcp")           // netid
 	compound.WriteString("127.0.0.1.0.0") // addr
-	compound.WriteUint32(0)    // callback_ident
+	compound.WriteUint32(0)               // callback_ident
 
 	rpc := &XDRWriter{}
 	rpc.WriteUint32(3)
@@ -213,25 +214,25 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 
 	// Step 1: PUTROOTFH + OPEN(CREATE) "test.txt" + WRITE + CLOSE
 	compound := &XDRWriter{}
-	compound.WriteString("")  // tag
-	compound.WriteUint32(0)   // minor version
-	compound.WriteUint32(4)   // 4 ops: PUTROOTFH, OPEN, WRITE, CLOSE
+	compound.WriteString("") // tag
+	compound.WriteUint32(0)  // minor version
+	compound.WriteUint32(4)  // 4 ops: PUTROOTFH, OPEN, WRITE, CLOSE
 
 	// PUTROOTFH
 	compound.WriteUint32(uint32(OpPutRootFH))
 
 	// OPEN (CREATE)
 	compound.WriteUint32(uint32(OpOpen))
-	compound.WriteUint32(0)  // seqid
-	compound.WriteUint32(2)  // OPEN4_SHARE_ACCESS_WRITE
-	compound.WriteUint32(0)  // OPEN4_SHARE_DENY_NONE
-	compound.WriteUint64(1)  // owner clientid
-	compound.WriteString("owner-1") // owner
-	compound.WriteUint32(1)  // opentype = OPEN4_CREATE
-	compound.WriteUint32(0)  // createmode = UNCHECKED4
-	compound.WriteUint32(0)  // fattr bitmap len = 0
-	compound.WriteOpaque(nil) // empty attrvals
-	compound.WriteUint32(0)  // claim = CLAIM_NULL
+	compound.WriteUint32(0)          // seqid
+	compound.WriteUint32(2)          // OPEN4_SHARE_ACCESS_WRITE
+	compound.WriteUint32(0)          // OPEN4_SHARE_DENY_NONE
+	compound.WriteUint64(1)          // owner clientid
+	compound.WriteString("owner-1")  // owner
+	compound.WriteUint32(1)          // opentype = OPEN4_CREATE
+	compound.WriteUint32(0)          // createmode = UNCHECKED4
+	compound.WriteUint32(0)          // fattr bitmap len = 0
+	compound.WriteOpaque(nil)        // empty attrvals
+	compound.WriteUint32(0)          // claim = CLAIM_NULL
 	compound.WriteString("test.txt") // filename
 
 	// WRITE
@@ -247,7 +248,9 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 	// CLOSE
 	compound.WriteUint32(uint32(OpClose))
 	compound.WriteUint32(0) // seqid
-	compound.WriteUint32(0); compound.WriteUint64(0); compound.WriteUint32(0) // stateid
+	compound.WriteUint32(0)
+	compound.WriteUint64(0)
+	compound.WriteUint32(0) // stateid
 
 	rpc := buildRPCCallFrame(4, compound.Bytes())
 	require.NoError(t, writeRPCFrame(conn, rpc))
@@ -257,7 +260,11 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 
 	r := NewXDRReader(reply)
 	r.ReadUint32() // XID
-	r.ReadUint32(); r.ReadUint32(); r.ReadUint32(); r.ReadOpaque(); r.ReadUint32() // RPC header
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadOpaque()
+	r.ReadUint32() // RPC header
 
 	status, _ := r.ReadUint32()
 	assert.Equal(t, uint32(NFS4_OK), status, "write compound should succeed")
@@ -274,8 +281,10 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 	compound2.WriteString("test.txt")
 
 	compound2.WriteUint32(uint32(OpRead))
-	compound2.WriteUint32(0); compound2.WriteUint64(0); compound2.WriteUint32(0) // stateid
-	compound2.WriteUint64(0) // offset
+	compound2.WriteUint32(0)
+	compound2.WriteUint64(0)
+	compound2.WriteUint32(0)    // stateid
+	compound2.WriteUint64(0)    // offset
 	compound2.WriteUint32(1024) // count
 
 	rpc2 := buildRPCCallFrame(5, compound2.Bytes())
@@ -286,7 +295,11 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 
 	r2 := NewXDRReader(reply2)
 	r2.ReadUint32() // XID
-	r2.ReadUint32(); r2.ReadUint32(); r2.ReadUint32(); r2.ReadOpaque(); r2.ReadUint32() // RPC header
+	r2.ReadUint32()
+	r2.ReadUint32()
+	r2.ReadUint32()
+	r2.ReadOpaque()
+	r2.ReadUint32() // RPC header
 
 	status2, _ := r2.ReadUint32()
 	assert.Equal(t, uint32(NFS4_OK), status2, "read compound should succeed")
@@ -296,9 +309,11 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 	assert.Equal(t, uint32(3), opCount)
 
 	// Skip PUTROOTFH result
-	r2.ReadUint32(); r2.ReadUint32()
+	r2.ReadUint32()
+	r2.ReadUint32()
 	// Skip LOOKUP result
-	r2.ReadUint32(); r2.ReadUint32()
+	r2.ReadUint32()
+	r2.ReadUint32()
 	// READ result
 	readOpCode, _ := r2.ReadUint32()
 	assert.Equal(t, uint32(OpRead), readOpCode)

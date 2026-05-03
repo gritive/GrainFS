@@ -19,10 +19,10 @@ func TestGetObject_IfUnmodifiedSince(t *testing.T) {
 
 	backend, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket("test-bucket"))
+	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("U"), 512)
-	_, err = backend.PutObject("test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
+	_, err = backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14876", backend)

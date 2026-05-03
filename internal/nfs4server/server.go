@@ -1,6 +1,7 @@
 package nfs4server
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sync"
@@ -28,8 +29,8 @@ func NewServer(backend storage.Backend) *Server {
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 	}
-	if err := backend.HeadBucket(nfs4Bucket); err != nil {
-		if err := backend.CreateBucket(nfs4Bucket); err != nil {
+	if err := backend.HeadBucket(context.Background(), nfs4Bucket); err != nil {
+		if err := backend.CreateBucket(context.Background(), nfs4Bucket); err != nil {
 			s.logger.Warn().Err(err).Str("bucket", nfs4Bucket).Msg("nfs4: could not create storage bucket")
 		}
 	}

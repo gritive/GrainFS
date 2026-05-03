@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/xml"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -18,7 +19,7 @@ func (s *Server) putBucketLifecycle(c *app.RequestContext, bucket string) {
 		return
 	}
 
-	if err := s.backend.HeadBucket(bucket); err != nil {
+	if err := s.backend.HeadBucket(context.Background(), bucket); err != nil {
 		mapError(c, err)
 		return
 	}
