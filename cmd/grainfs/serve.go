@@ -1153,7 +1153,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
 		go func() {
 			if err := instantiateOwnedIfNeeded(entry); err != nil {
-				log.Error().Err(err).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
+				log.Error().Err(handleRuntimeGroupInstantiationError(entry.ID, err)).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
 			}
 		}()
 	})
@@ -2127,4 +2127,11 @@ func generateEphemeralClusterKey() (string, error) {
 		return "", fmt.Errorf("ephemeral cluster key: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+func handleRuntimeGroupInstantiationError(groupID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("runtime group %s instantiation failed: %w", groupID, err)
 }
