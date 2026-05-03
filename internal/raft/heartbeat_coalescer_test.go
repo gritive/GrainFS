@@ -59,12 +59,12 @@ func (f *fakeSender) PeerAddr() string {
 	return f.peerAddr
 }
 
-func (f *fakeSender) lastSend(t *testing.T) fakeSend {
-	t.Helper()
+func (f *fakeSender) sendsSnapshot() []fakeSend {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	require.NotEmpty(t, f.sends, "no sends recorded")
-	return f.sends[len(f.sends)-1]
+	out := make([]fakeSend, len(f.sends))
+	copy(out, f.sends)
+	return out
 }
 
 // fakeArgs returns a minimal entries-empty AE args for tests.
@@ -105,8 +105,9 @@ func TestCoalescer_BatchFlush_AllReplies(t *testing.T) {
 	// our batch and sending back a reply batch.
 	time.Sleep(80 * time.Millisecond)
 
-	require.Len(t, sender.sends, 1, "expected exactly one batch send")
-	send := sender.sends[0]
+	sends := sender.sendsSnapshot()
+	require.Len(t, sends, 1, "expected exactly one batch send")
+	send := sends[0]
 
 	items, err := decodeHeartbeatBatch(send.payload)
 	require.NoError(t, err)
@@ -204,8 +205,9 @@ func TestCoalescer_PartialReply(t *testing.T) {
 		}(i)
 	}
 	time.Sleep(60 * time.Millisecond)
-	require.Len(t, sender.sends, 1)
-	items, _ := decodeHeartbeatBatch(sender.sends[0].payload)
+	sends := sender.sendsSnapshot()
+	require.Len(t, sends, 1)
+	items, _ := decodeHeartbeatBatch(sends[0].payload)
 	require.Len(t, items, N)
 
 	// Reply only for the first item in the batch (whichever was enqueued first).
@@ -213,7 +215,7 @@ func TestCoalescer_PartialReply(t *testing.T) {
 		{groupID: items[0].groupID, reply: &AppendEntriesReply{Term: 1, Success: true}},
 	}
 	replyPayload, _ := encodeHeartbeatReplyBatch(replies)
-	hc.DispatchReplyBatch(sender.sends[0].corrID, replyPayload)
+	hc.DispatchReplyBatch(sends[0].corrID, replyPayload)
 
 	// Map groupID → result chan so we don't depend on enqueue order.
 	bygid := map[string]chan hbResult{
