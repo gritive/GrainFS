@@ -196,6 +196,11 @@ func (r *XDRReader) ReadOpaqueView() ([]byte, error) {
 	return r.data[start:end], nil
 }
 
+func (r *XDRReader) SkipOpaque() error {
+	_, err := r.ReadOpaqueView()
+	return err
+}
+
 func (r *XDRReader) ReadString() (string, error) {
 	data, err := r.ReadOpaque()
 	if err != nil {
@@ -260,11 +265,15 @@ func ParseRPCCall(data []byte) (*RPCCallHeader, []byte, error) {
 
 	// Skip auth credentials (flavor + body)
 	r.ReadUint32() // cred flavor
-	r.ReadOpaque() // cred body
+	if err := r.SkipOpaque(); err != nil {
+		return nil, nil, err
+	}
 
 	// Skip verifier (flavor + body)
 	r.ReadUint32() // verf flavor
-	r.ReadOpaque() // verf body
+	if err := r.SkipOpaque(); err != nil {
+		return nil, nil, err
+	}
 
 	// Remaining data is the procedure args
 	remaining := r.Remaining()
