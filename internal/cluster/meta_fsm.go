@@ -32,6 +32,10 @@ const (
 	MetaCmdTypeIcebergCreateTable     = clusterpb.MetaCmdTypeIcebergCreateTable
 	MetaCmdTypeIcebergCommitTable     = clusterpb.MetaCmdTypeIcebergCommitTable
 	MetaCmdTypeIcebergDeleteTable     = clusterpb.MetaCmdTypeIcebergDeleteTable
+	MetaCmdTypeRotateKeyBegin         = clusterpb.MetaCmdTypeRotateKeyBegin
+	MetaCmdTypeRotateKeySwitch        = clusterpb.MetaCmdTypeRotateKeySwitch
+	MetaCmdTypeRotateKeyDrop          = clusterpb.MetaCmdTypeRotateKeyDrop
+	MetaCmdTypeRotateKeyAbort         = clusterpb.MetaCmdTypeRotateKeyAbort
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -134,6 +138,11 @@ type MetaFSM struct {
 	onRebalancePlan   func(*RebalancePlan)  // must not block; set before Start() (PR-D)
 	onShardGroupAdded func(ShardGroupEntry) // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
 	onIcebergResult   func(string, error)   // requestID, typed catalog result; must not block
+
+	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
+	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
+	rotation          *RotationFSM
+	onRotationApplied func(RotationState) // 매 phase 변경 commit 후 호출; nil 이면 no-op
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -144,7 +153,27 @@ func NewMetaFSM() *MetaFSM {
 		loadSnapshot:      make(map[string]LoadStatEntry),
 		icebergNamespaces: make(map[string]IcebergNamespaceEntry),
 		icebergTables:     make(map[string]IcebergTableEntry),
+		rotation:          NewRotationFSM(),
 	}
+}
+
+// Rotation returns the rotation sub-FSM. State is decoupled from the rest of
+// MetaFSM and has its own RWMutex; callers can read snapshots concurrently.
+func (f *MetaFSM) Rotation() *RotationFSM { return f.rotation }
+
+// SetOnRotationApplied wires a side-effect callback fired after each rotation
+// command commits. Called from the FSM apply goroutine; the callback runs disk
+// I/O and transport identity swaps. Set before MetaRaft.Start().
+func (f *MetaFSM) SetOnRotationApplied(fn func(RotationState)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onRotationApplied = fn
+}
+
+// SetRotationSteady seeds the rotation FSM with the active SPKI on startup.
+// Called by meta_raft initialization once the local PSK has been resolved.
+func (f *MetaFSM) SetRotationSteady(activeSPKI [32]byte) {
+	f.rotation.SetSteady(activeSPKI)
 }
 
 // applyCmd decodes a MetaCmd FlatBuffers envelope and mutates state.
@@ -196,6 +225,14 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyIcebergCommitTable(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeIcebergDeleteTable:
 		return f.applyIcebergDeleteTable(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRotateKeyBegin:
+		return f.applyRotateKeyBegin(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRotateKeySwitch:
+		return f.applyRotateKeySwitch(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRotateKeyDrop:
+		return f.applyRotateKeyDrop(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRotateKeyAbort:
+		return f.applyRotateKeyAbort(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -608,6 +645,77 @@ func (f *MetaFSM) applyIcebergDeleteTable(data []byte) error {
 	f.mu.Unlock()
 	f.publishIcebergResult(c.RequestID, result)
 	return nil
+}
+
+// applyRotateKeyBegin commits phase 1 → 2 transition. The rotation FSM
+// validates capabilities, idempotency, and phase preconditions; on success
+// the side-effect callback is invoked with the new state so the worker can
+// load keys.d/next.key, verify SPKI, and swap the transport accept set.
+func (f *MetaFSM) applyRotateKeyBegin(data []byte) error {
+	c, err := decodeMetaRotateKeyBeginCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: RotateKeyBegin: %w", err)
+	}
+	if err := f.rotation.Apply(c); err != nil {
+		// FSM rejected (capability missing, conflicting rotation in progress).
+		// Log but do not crash apply loop — followers must converge with leader.
+		log.Warn().Err(err).Msg("meta_fsm: RotateKeyBegin rejected by rotation FSM")
+		return nil
+	}
+	f.fireRotationApplied()
+	return nil
+}
+
+func (f *MetaFSM) applyRotateKeySwitch(data []byte) error {
+	c, err := decodeMetaRotateKeySwitchCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: RotateKeySwitch: %w", err)
+	}
+	if err := f.rotation.Apply(c); err != nil {
+		log.Warn().Err(err).Msg("meta_fsm: RotateKeySwitch rejected by rotation FSM")
+		return nil
+	}
+	f.fireRotationApplied()
+	return nil
+}
+
+func (f *MetaFSM) applyRotateKeyDrop(data []byte) error {
+	c, err := decodeMetaRotateKeyDropCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: RotateKeyDrop: %w", err)
+	}
+	if err := f.rotation.Apply(c); err != nil {
+		log.Warn().Err(err).Msg("meta_fsm: RotateKeyDrop rejected by rotation FSM")
+		return nil
+	}
+	f.fireRotationApplied()
+	return nil
+}
+
+func (f *MetaFSM) applyRotateKeyAbort(data []byte) error {
+	c, err := decodeMetaRotateKeyAbortCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: RotateKeyAbort: %w", err)
+	}
+	if err := f.rotation.Apply(c); err != nil {
+		log.Warn().Err(err).Msg("meta_fsm: RotateKeyAbort rejected by rotation FSM")
+		return nil
+	}
+	f.fireRotationApplied()
+	return nil
+}
+
+// fireRotationApplied snapshots state and invokes the callback outside any
+// FSM lock. The callback (RotationWorker.OnPhaseChange) does disk I/O and
+// transport mutation — must not run under MetaFSM.mu.
+func (f *MetaFSM) fireRotationApplied() {
+	f.mu.RLock()
+	cb := f.onRotationApplied
+	f.mu.RUnlock()
+	if cb == nil {
+		return
+	}
+	cb(f.rotation.State())
 }
 
 // LoadSnapshot returns a copy of the current per-node load statistics.

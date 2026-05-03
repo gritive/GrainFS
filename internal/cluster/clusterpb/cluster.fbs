@@ -222,7 +222,11 @@ enum MetaCmdType : uint8 {
   IcebergDeleteNamespace = 10,
   IcebergCreateTable = 11,
   IcebergCommitTable = 12,
-  IcebergDeleteTable = 13
+  IcebergDeleteTable = 13,
+  RotateKeyBegin     = 14,  // 클러스터 키 회전: phase 1 → 2 (operator-distributed next.key SPKI 합의)
+  RotateKeySwitch    = 15,  // 회전 phase 2 → 3 (active 인증서를 NEW로 전환)
+  RotateKeyDrop      = 16,  // 회전 phase 3 → steady-on-NEW (OLD 폐기, previous.key grace 시작)
+  RotateKeyAbort     = 17   // phase 2: 롤백, phase 3: forward-roll (D18)
 }
 
 table MetaNodeEntry {
@@ -352,6 +356,30 @@ table MetaIcebergCommitTableCmd {
 table MetaIcebergDeleteTableCmd {
   request_id:string;
   identifier:IcebergIdentifier;
+}
+
+// 클러스터 키 회전 — 4-phase rolling state machine.
+// PSK는 raft 로그에 절대 기록하지 않는다. 페이로드는 SPKI 해시(공개) 및 식별자만 운반.
+table MetaRotateKeyBeginCmd {
+  rotation_id:[ubyte];          // 16-byte epoch ID (UUID v7 권장)
+  expected_new_spki:[ubyte];    // 32-byte SHA256(SPKI). peer는 keys.d/next.key에서 같은 값을 도출해야 진행
+  audit_new_spki_hash:[ubyte];  // 32-byte audit only (SHA256(SPKI), NOT SHA256(PSK)) — D20
+  started_by:string;            // 회전을 시작한 raft 노드 ID (informational)
+  capabilities:uint32;          // CapRotationV1=1<<0; FSM이 게이트로 사용 — D9
+}
+
+table MetaRotateKeySwitchCmd {
+  rotation_id:[ubyte];
+}
+
+table MetaRotateKeyDropCmd {
+  rotation_id:[ubyte];
+  grace_until:int64;            // unix nanos; previous.key 삭제 deadline
+}
+
+table MetaRotateKeyAbortCmd {
+  rotation_id:[ubyte];
+  reason:string;                // "operator" 등
 }
 
 table MetaStateSnapshot {
