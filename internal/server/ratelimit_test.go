@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,25 @@ func TestRateLimiter_RejectOverLimit(t *testing.T) {
 	assert.True(t, rl.Allow("192.168.1.1"))
 	// Second request immediately should be rejected
 	assert.False(t, rl.Allow("192.168.1.1"))
+}
+
+func TestRateLimiter_DisabledWhenRPSIsZero(t *testing.T) {
+	rl := NewRateLimiter(0, 1, 100)
+	for range 1000 {
+		require.True(t, rl.Allow("192.168.1.1"))
+	}
+}
+
+func TestWithRateLimits_DisablesServerLimitersWhenRPSIsZero(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	srv := New("127.0.0.1:0", backend, WithRateLimits(0, 1, 0, 1))
+	for range 1000 {
+		require.True(t, srv.ipLimiter.Allow("192.168.1.1"))
+		require.True(t, srv.userLimiter.Allow("bench-user"))
+	}
 }
 
 func TestRateLimiter_IsolateKeys(t *testing.T) {

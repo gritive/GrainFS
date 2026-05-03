@@ -39,6 +39,10 @@ func NewRateLimiter(rps float64, burst, maxEntries int) *RateLimiter {
 
 // Allow checks if the key is within rate limits.
 func (rl *RateLimiter) Allow(key string) bool {
+	if rl.rateLimit <= 0 {
+		return true
+	}
+
 	rl.mu.Lock()
 	e, ok := rl.limiters[key]
 	if !ok {

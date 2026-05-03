@@ -176,6 +176,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	} else {
 		log.Warn().Msg("S3 authentication disabled — set --access-key and --secret-key for production")
 	}
+	ipRPS, _ := cmd.Flags().GetFloat64("rate-limit-ip-rps")
+	ipBurst, _ := cmd.Flags().GetInt("rate-limit-ip-burst")
+	userRPS, _ := cmd.Flags().GetFloat64("rate-limit-user-rps")
+	userBurst, _ := cmd.Flags().GetInt("rate-limit-user-burst")
+	authOpts = append(authOpts, server.WithRateLimits(ipRPS, ipBurst, userRPS, userBurst))
 
 	noEncryption, _ := cmd.Flags().GetBool("no-encryption")
 	var shardEncryptor *encrypt.Encryptor
