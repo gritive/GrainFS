@@ -1226,13 +1226,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			gb := dg.Backend()
 			gb.SetIncidentRecorder(incidentRecorder)
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), scrubInterval)
-			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
-				// shardKey from placement resolution is objectKey+"/"+versionID.
-				// Split on the last "/" so RepairShard can skip LookupLatestVersion.
+			splitShardKey := func(shardKey string) (string, string) {
 				objectKey, versionID := shardKey, ""
 				if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
 					objectKey, versionID = shardKey[:i], shardKey[i+1:]
 				}
+				return objectKey, versionID
+			}
+			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
+				// shardKey from placement resolution is objectKey+"/"+versionID.
+				// Split on the last "/" so RepairShard can skip LookupLatestVersion.
+				objectKey, versionID := splitShardKey(shardKey)
 				correlationID := uuid.Must(uuid.NewV7()).String()
 				receiptID := "rcpt-" + correlationID
 				repairReq := cluster.IncidentRepairRequest{
@@ -1262,6 +1266,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 					} else if err := gb.RecordRepairReceiptSigned(context.Background(), repairReq, receiptID); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor incident proof update failed")
 					}
+				}
+			})
+			placementMonitor.SetOnCorrupt(func(bucket, shardKey string, shardIdx int, readErr error) {
+				objectKey, versionID := splitShardKey(shardKey)
+				if err := gb.QuarantineCorruptShardLocal(bucket, objectKey, versionID, shardIdx, readErr.Error()); err != nil {
+					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor quarantine failed")
 				}
 			})
 			go placementMonitor.Start(monitorCtx)
