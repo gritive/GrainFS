@@ -657,7 +657,7 @@ git commit -m "test: add nbd modern interop smoke"
 **Files:**
 - No new files unless verification finds a defect.
 
-- [ ] **Step 1: Run package tests**
+- [x] **Step 1: Run package tests**
 
 ```bash
 go test ./internal/nbd ./internal/volume -count=1
@@ -665,7 +665,7 @@ go test ./internal/nbd ./internal/volume -count=1
 
 Expected: PASS.
 
-- [ ] **Step 2: Run NBD benchmarks with allocation output**
+- [x] **Step 2: Run NBD benchmarks with allocation output**
 
 ```bash
 go test ./internal/nbd -run '^$' -bench 'BenchmarkNBD_' -benchmem -count=1
@@ -673,7 +673,7 @@ go test ./internal/nbd -run '^$' -bench 'BenchmarkNBD_' -benchmem -count=1
 
 Expected: benchmark output present; no unexplained steady-state allocation regression.
 
-- [ ] **Step 3: Run interop target**
+- [x] **Step 3: Run interop target**
 
 ```bash
 make test-nbd-interop
@@ -681,7 +681,7 @@ make test-nbd-interop
 
 Expected: PASS or clear SKIP for missing qemu/libnbd tooling.
 
-- [ ] **Step 4: Run build and diff checks**
+- [x] **Step 4: Run build and diff checks**
 
 ```bash
 go build -o bin/grainfs ./cmd/grainfs
@@ -690,7 +690,7 @@ git diff --check
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit final docs/test adjustments if any**
+- [x] **Step 5: Commit final docs/test adjustments if any**
 
 If any verification-driven docs or test tweaks were needed:
 
