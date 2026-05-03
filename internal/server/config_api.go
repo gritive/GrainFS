@@ -26,6 +26,9 @@ func (s *Server) registerConfigAPI(h *server.Hertz) {
 }
 
 func (s *Server) patchConfigHandler(_ context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "config_patch") {
+		return
+	}
 	var req configPatchRequest
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid JSON"})

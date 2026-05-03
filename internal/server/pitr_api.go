@@ -25,6 +25,9 @@ func (s *Server) registerPITRAPI(h *server.Hertz) {
 // Body: {"to": "2026-04-17T10:00:00Z"}
 // Response: {"restored_objects": N, "wal_entries_replayed": M, "stale_blobs": [...]}
 func (s *Server) pitrRestoreHandler(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "pitr_restore") {
+		return
+	}
 	var req struct {
 		To string `json:"to"`
 	}

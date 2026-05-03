@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -607,6 +609,19 @@ func TestPutBucketPolicy_InvalidJSON(t *testing.T) {
 
 // --- Volume handler integration tests ---
 
+func TestMutationGateAllowsIncidentReads(t *testing.T) {
+	st := &incidentStoreStub{list: []incident.IncidentState{{ID: "cid", State: incident.StateObserved, UpdatedAt: time.Unix(100, 0).UTC()}}}
+	base := setupTestServerWithOptions(t,
+		WithIncidentStore(st),
+		WithMutationGate(NewMutationGate(errors.New("recovery read-only"))),
+	)
+
+	resp, err := http.Get(base + "/api/incidents?limit=10")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
 
 // --- Dashboard tests ---
 

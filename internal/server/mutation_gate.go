@@ -3,6 +3,9 @@ package server
 import (
 	"errors"
 	"sync/atomic"
+
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
 var ErrMutationDisabled = errors.New("mutations are disabled by startup recovery mode")
@@ -58,4 +61,12 @@ func (g *MutationGate) BlockResponse(operation string) (MutationGateResponse, bo
 		Message:   err.Error(),
 		Operation: operation,
 	}, true
+}
+
+func (s *Server) blockIfMutationDisabled(c *app.RequestContext, operation string) bool {
+	if resp, blocked := s.mutationGate.BlockResponse(operation); blocked {
+		c.JSON(consts.StatusServiceUnavailable, resp)
+		return true
+	}
+	return false
 }
