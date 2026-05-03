@@ -296,6 +296,12 @@ func waitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, w
 }
 
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
+	if err := transport.ValidateClusterKey(clusterKey); err != nil {
+		if errors.Is(err, transport.ErrEmptyClusterKey) {
+			return fmt.Errorf("--cluster-key is required in cluster mode (generate with: openssl rand -hex 32)")
+		}
+		log.Warn().Err(err).Msg("--cluster-key is below recommended length")
+	}
 	if nodeID == "" {
 		nodeID = generateNodeID(dataDir)
 		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
