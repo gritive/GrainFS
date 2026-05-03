@@ -159,6 +159,31 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 	return nil
 }
 
+// WriteShardStream sends shard bytes to a remote node without buffering the
+// shard into the request envelope.
+func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	fw := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	req := &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
+	resp, err := s.transport.CallWithBody(ctx, peerAddr, req, body)
+	if err != nil {
+		return fmt.Errorf("stream shard to %s: %w", peerAddr, err)
+	}
+
+	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		return fmt.Errorf("unmarshal response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote error from %s", peer)
+	}
+	return nil
+}
+
 // ReadShard fetches a shard from a remote node.
 func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
 	peerAddr, err := s.resolvePeerAddress(peer)
@@ -349,6 +374,27 @@ func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 	return s.okResponse(nil)
 }
 
+// HandleWriteBody returns the streamed shard write handler for StreamRouter.
+func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *transport.Message {
+	return func(req *transport.Message, body io.Reader) *transport.Message {
+		rpcType, srData, err := unmarshalEnvelope(req.Payload)
+		if err != nil {
+			return s.errorResponse("unmarshal request: " + err.Error())
+		}
+		if rpcType != "WriteShard" {
+			return s.errorResponse("unexpected shard body RPC: " + rpcType)
+		}
+		sr, err := unmarshalShardRequest(srData)
+		if err != nil {
+			return s.errorResponse("decode request: " + err.Error())
+		}
+		if err := s.WriteLocalShardStream(sr.Bucket, sr.Key, int(sr.ShardIdx), body); err != nil {
+			return s.errorResponse(err.Error())
+		}
+		return s.okResponse(nil)
+	}
+}
+
 // EncryptPayload encrypts data with AAD if an encryptor is configured.
 // Used by DistributedBackend.WriteShard (scrubber path).
 func (s *ShardService) EncryptPayload(data, aad []byte) ([]byte, error) {
@@ -402,6 +448,31 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		d.Close()
+	}
+	return nil
+}
+
+// WriteLocalShardStream stores a shard from body without buffering plaintext
+// when encryption is disabled.
+func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
+	if s.encryptor != nil {
+		data, err := io.ReadAll(body)
+		if err != nil {
+			return fmt.Errorf("read shard body: %w", err)
+		}
+		return s.WriteLocalShard(bucket, key, shardIdx, data)
+	}
+	dir := filepath.Join(s.dataDir, bucket, key)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create shard dir: %w", err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
+	if err := eccodec.WriteShardStreamAtomic(path, body); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }

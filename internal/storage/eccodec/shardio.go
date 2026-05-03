@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -117,6 +118,55 @@ func WriteShardAtomic(path string, data []byte) error {
 	if dir, err := os.Open(filepath.Dir(path)); err == nil {
 		_ = dir.Sync()
 		dir.Close()
+	}
+	return nil
+}
+
+// WriteShardStreamAtomic writes an encoded shard from r without buffering the
+// full payload in memory.
+func WriteShardStreamAtomic(path string, r io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir shard dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create tmp shard: %w", err)
+	}
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if _, err := f.Write(shardMagic); err != nil {
+		cleanup()
+		return fmt.Errorf("write shard magic: %w", err)
+	}
+	h := crc32.NewIEEE()
+	if _, err := io.Copy(io.MultiWriter(f, h), r); err != nil {
+		cleanup()
+		return fmt.Errorf("write shard payload: %w", err)
+	}
+	var footer [footerLen]byte
+	binary.LittleEndian.PutUint32(footer[:], h.Sum32())
+	if _, err := f.Write(footer[:]); err != nil {
+		cleanup()
+		return fmt.Errorf("write shard footer: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync tmp shard: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close tmp shard: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename shard: %w", err)
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return nil
 }

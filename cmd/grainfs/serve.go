@@ -633,6 +633,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	router := transport.NewStreamRouter()
 	router.Handle(transport.StreamControl, rpcTransport.Handler())
 	router.Handle(transport.StreamData, shardSvc.HandleRPC())
+	router.HandleBody(transport.StreamShardWriteBody, shardSvc.HandleWriteBody())
 	quicTransport.SetStreamHandler(router.Dispatch)
 
 	node.Start()

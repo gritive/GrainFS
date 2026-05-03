@@ -63,6 +63,38 @@ func (s *spooledObject) Cleanup() {
 	_ = os.Remove(s.Path)
 }
 
+func writeFileAtomicFromReader(path string, r io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create object dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".object-*")
+	if err != nil {
+		return fmt.Errorf("create tmp object: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if _, err := io.Copy(tmp, r); err != nil {
+		cleanup()
+		return fmt.Errorf("write tmp object: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync tmp object: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close tmp object: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename object: %w", err)
+	}
+	return nil
+}
+
 func (b *DistributedBackend) spoolDir() string {
 	return filepath.Join(b.root, "tmp", "put-spool")
 }

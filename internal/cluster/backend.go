@@ -795,11 +795,11 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 		return nil, objectQuarantinedError(bucket, key, q)
 	}
 
-	// Read all data into memory for replication (or EC split).
-	data, err := io.ReadAll(r)
+	sp, err := spoolObject(ctx, b.spoolDir(), r, shouldHashBucket(bucket))
 	if err != nil {
-		return nil, fmt.Errorf("read object data: %w", err)
+		return nil, err
 	}
+	defer sp.Cleanup()
 
 	// VFS internal buckets ("__grainfs_vfs_*") are owned exclusively by the
 	// VFS layer; multi-versioning has no meaning there and accumulates disk
@@ -816,9 +816,18 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	}
 
 	if useEC {
+		rc, err := sp.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open spooled object: %w", err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read spooled object: %w", err)
+		}
 		return b.putObjectEC(ctx, bucket, key, versionID, data, contentType)
 	}
-	return b.putObjectNx(ctx, bucket, key, versionID, data, contentType)
+	return b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, contentType)
 }
 
 // putObjectNx is the legacy N× full-replication path. Every peer receives
@@ -915,6 +924,87 @@ func (b *DistributedBackend) putObjectNx(ctx context.Context, bucket, key, versi
 	}, nil
 }
 
+func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
+	var tStart, tStage time.Time
+	if clusterTraceEnabled {
+		tStart = time.Now()
+		tStage = tStart
+	}
+
+	objPath := b.objectPathV(bucket, key, versionID)
+	rc, err := sp.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open spooled object: %w", err)
+	}
+	if err := writeFileAtomicFromReader(objPath, rc); err != nil {
+		_ = rc.Close()
+		return nil, fmt.Errorf("write object: %w", err)
+	}
+	if err := rc.Close(); err != nil {
+		return nil, fmt.Errorf("close spooled object: %w", err)
+	}
+
+	if clusterTraceEnabled {
+		log.Debug().Dur("write_file_atomic", time.Since(tStage)).Str("bucket", bucket).Int64("bytes", sp.Size).Msg("putObjectNx trace")
+		tStage = time.Now()
+	}
+
+	shardKey := key + "/" + versionID
+	if b.shardSvc != nil {
+		for _, peer := range b.liveNodes() {
+			if peer == b.selfAddr {
+				continue
+			}
+			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+				b.logger.Debug().Str("peer", peer).Msg("skipping unhealthy peer for replication")
+				continue
+			}
+			body, err := sp.Open()
+			if err != nil {
+				return nil, fmt.Errorf("open spooled object for replication: %w", err)
+			}
+			err = b.shardSvc.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
+			_ = body.Close()
+			if err != nil {
+				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
+				if b.peerHealth != nil {
+					b.peerHealth.MarkUnhealthy(peer)
+				}
+			} else if b.peerHealth != nil {
+				b.peerHealth.MarkHealthy(peer)
+			}
+		}
+	}
+
+	now := time.Now().Unix()
+	err = b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      bucket,
+		Key:         key,
+		Size:        sp.Size,
+		ContentType: contentType,
+		ETag:        sp.ETag,
+		ModTime:     now,
+		VersionID:   versionID,
+	})
+	if err != nil {
+		os.Remove(objPath)
+		return nil, err
+	}
+
+	if clusterTraceEnabled {
+		log.Debug().Dur("raft_propose", time.Since(tStage)).Dur("total", time.Since(tStart)).Str("bucket", bucket).Msg("putObjectNx trace")
+	}
+
+	return &storage.Object{
+		Key:          key,
+		Size:         sp.Size,
+		ContentType:  contentType,
+		ETag:         sp.ETag,
+		LastModified: now,
+		VersionID:    versionID,
+	}, nil
+}
+
 // PutObjectAsync is the write-back variant of PutObject.
 // It writes data locally and replicates to peers (fast path ~0.3ms), then
 // returns a commitFn that defers the Raft metadata proposal (~2ms).
@@ -924,10 +1014,16 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
 	}
-	data, err := io.ReadAll(r)
+	sp, err := spoolObject(ctx, b.spoolDir(), r, shouldHashBucket(bucket))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read object data: %w", err)
+		return nil, nil, err
 	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			sp.Cleanup()
+		}
+	}()
 	versionID := newVersionID()
 	useEC := b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil
 	if storage.IsVFSBucket(bucket) && b.vfsFixedVersion.Load() {
@@ -935,10 +1031,27 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 		useEC = false
 	}
 	if useEC {
+		rc, err := sp.Open()
+		if err != nil {
+			return nil, nil, fmt.Errorf("open spooled object: %w", err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			return nil, nil, fmt.Errorf("read spooled object: %w", err)
+		}
 		obj, err := b.putObjectEC(ctx, bucket, key, versionID, data, contentType)
 		return obj, func() error { return nil }, err
 	}
-	return b.putObjectNxAsync(ctx, bucket, key, versionID, data, contentType)
+	obj, commit, err := b.putObjectNxSpooledAsync(ctx, bucket, key, versionID, sp, contentType)
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup = false
+	return obj, func() error {
+		defer sp.Cleanup()
+		return commit()
+	}, nil
 }
 
 // putObjectNxAsync splits putObjectNx into fast (local write + peer replication)
@@ -1004,6 +1117,89 @@ func (b *DistributedBackend) putObjectNxAsync(ctx context.Context, bucket, key, 
 			Size:        int64(len(data)),
 			ContentType: contentType,
 			ETag:        etag,
+			ModTime:     now,
+			VersionID:   versionID,
+		})
+		if err != nil {
+			os.Remove(objPath)
+			return err
+		}
+		if os.Getenv("GRAINFS_VOLUME_TRACE") == "1" {
+			b.logger.Debug().
+				Str("bucket", bucket).Str("key", key).
+				Dur("raft_propose", time.Since(t1)).
+				Msg("putObjectNxAsync commit trace")
+		}
+		return nil
+	}
+	return obj, commitFn, nil
+}
+
+func (b *DistributedBackend) putObjectNxSpooledAsync(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, func() error, error) {
+	t0 := time.Now()
+	objPath := b.objectPathV(bucket, key, versionID)
+	rc, err := sp.Open()
+	if err != nil {
+		return nil, nil, fmt.Errorf("open spooled object: %w", err)
+	}
+	if err := writeFileAtomicFromReader(objPath, rc); err != nil {
+		_ = rc.Close()
+		return nil, nil, fmt.Errorf("write object: %w", err)
+	}
+	if err := rc.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close spooled object: %w", err)
+	}
+	wfaDur := time.Since(t0)
+
+	shardKey := key + "/" + versionID
+	if b.shardSvc != nil {
+		for _, peer := range b.liveNodes() {
+			if peer == b.selfAddr {
+				continue
+			}
+			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+				continue
+			}
+			body, err := sp.Open()
+			if err != nil {
+				return nil, nil, fmt.Errorf("open spooled object for replication: %w", err)
+			}
+			err = b.shardSvc.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
+			_ = body.Close()
+			if err != nil {
+				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
+				if b.peerHealth != nil {
+					b.peerHealth.MarkUnhealthy(peer)
+				}
+			} else if b.peerHealth != nil {
+				b.peerHealth.MarkHealthy(peer)
+			}
+		}
+	}
+
+	now := time.Now().Unix()
+	obj := &storage.Object{
+		Key:          key,
+		Size:         sp.Size,
+		ContentType:  contentType,
+		ETag:         sp.ETag,
+		LastModified: now,
+		VersionID:    versionID,
+	}
+	if os.Getenv("GRAINFS_VOLUME_TRACE") == "1" {
+		b.logger.Debug().
+			Str("bucket", bucket).Str("key", key).
+			Dur("write_file_atomic", wfaDur).
+			Msg("putObjectNxAsync trace")
+	}
+	commitFn := func() error {
+		t1 := time.Now()
+		err := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+			Bucket:      bucket,
+			Key:         key,
+			Size:        sp.Size,
+			ContentType: contentType,
+			ETag:        sp.ETag,
 			ModTime:     now,
 			VersionID:   versionID,
 		})
