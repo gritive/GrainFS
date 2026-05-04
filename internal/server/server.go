@@ -496,18 +496,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	// Balancer health API
 	s.registerBalancerAPI(h)
 
-	// Volume management API
-	volumes := h.Group("/volumes")
-	volumes.GET("/", s.listVolumes)
-	volumes.PUT("/:name", s.createVolume)
-	volumes.GET("/:name", s.getVolume)
-	volumes.DELETE("/:name", s.deleteVolume)
-	volumes.POST("/:name/recalculate", s.recalculateVolume)
-	volumes.POST("/clone", s.cloneVolume)
-	volumes.POST("/:name/snapshots", s.createSnapshot)
-	volumes.GET("/:name/snapshots", s.listSnapshots)
-	volumes.DELETE("/:name/snapshots/:snap_id", s.deleteSnapshot)
-	volumes.POST("/:name/snapshots/:snap_id/rollback", s.rollbackVolume)
+	// Volume management endpoints removed from the data plane in Phase B.
+	// The CLI (`grainfs volume *`) talks to the admin Unix socket; the web UI
+	// uses /ui/api/volumes/* on this same Hertz instance, registered separately.
 
 	// Snapshot management API
 	s.registerSnapshotAPI(h)
