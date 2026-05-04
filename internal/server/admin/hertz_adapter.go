@@ -26,6 +26,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerVolume(g, d)
 	registerSnapshot(g, d)
 	registerScrub(g, d)
+	registerCluster(g, d)
 	registerDashboard(g, d)
 }
 
@@ -38,8 +39,13 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 	registerVolume(g, d)
 	registerSnapshot(g, d)
 	registerScrub(g, d)
+	registerCluster(g, d)
 	// Dashboard token endpoints are intentionally NOT mounted on /ui/api —
 	// they live only on the local admin Unix socket.
+}
+
+func registerCluster(g router, d *Deps) {
+	g.GET("/cluster/peers", wrapZero(d, ListClusterPeers))
 }
 
 func registerVolume(g router, d *Deps) {

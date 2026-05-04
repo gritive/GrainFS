@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.43.4] — 2026-05-05 — Peer health observability
+
+### Added
+
+- **Prometheus metrics**:
+  - `grainfs_peer_unhealthy{peer}` — Gauge, `1` while a peer is in
+    `PeerHealth` cooldown, `0` otherwise. Alert on `> 0`.
+  - `grainfs_replication_skipped_total{peer,bucket}` — Counter, increments
+    every time `putObjectNxSpooled` skips a peer because it is unhealthy.
+    Rate `> 0` means the cluster is operating with reduced replication
+    factor.
+- **Admin endpoint** `GET /v1/cluster/peers` — returns `{ peers: [{id,
+  healthy, last_failure, cooldown_remaining_ms}, ...] }`. Available on the
+  Unix-socket admin server and `/ui/api/cluster/peers`. Empty list (200
+  OK) when peer health is not wired (single-node).
+- **Transition logs** at `warn` level in `putObjectNxSpooled` /
+  `putObjectNxSpooledAsync` when a peer transitions healthy→unhealthy and
+  `info` level on the recovery transition. One log per transition, not per
+  skip — counter carries the rate signal.
+- `PeerHealth.MarkUnhealthy` / `MarkHealthy` now return `bool` indicating
+  whether the call caused a state transition. `PeerHealth.Snapshot()`
+  returns the current view of every tracked peer.
+
+### Notes
+
+- Behavior unchanged: cooldown is still 10 s, single-strike still moves
+  the peer to "skip" mode. This release closes the visibility gap so
+  operators see silent under-replication immediately. The next follow-up
+  ("PeerHealth one-strike-out — consecutive-failures threshold") is a
+  separate policy decision tracked in `TODOS.md`.
+
 ## [0.0.43.3] — 2026-05-05 — N×replication actually replicates
 
 ### Fixed

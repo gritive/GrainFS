@@ -355,4 +355,22 @@ var (
 		Name: "grainfs_raft_snapshot_last_size_bytes",
 		Help: "Size in bytes of the last successfully operator-triggered Raft snapshot.",
 	})
+
+	// PeerUnhealthy is 1 while a peer sits in PeerHealth's cooldown window
+	// (recent transport / replication failure), 0 otherwise. Operators alert
+	// on `grainfs_peer_unhealthy > 0` to catch silent N×replication
+	// degradation.
+	PeerUnhealthy = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_peer_unhealthy",
+		Help: "1 if a peer is currently in PeerHealth cooldown, 0 otherwise.",
+	}, []string{"peer"})
+
+	// ReplicationSkippedTotal counts every N×replication peer-write that was
+	// skipped because PeerHealth marked the peer unhealthy. Counts events,
+	// not bytes; rate > 0 means the cluster is operating with reduced
+	// replication factor.
+	ReplicationSkippedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_replication_skipped_total",
+		Help: "Total replication writes skipped due to unhealthy peer.",
+	}, []string{"peer", "bucket"})
 )

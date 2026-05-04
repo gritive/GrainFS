@@ -22,15 +22,37 @@ type DirectorAPI interface {
 	ApplyFromFSM(entry scrubber.ScrubTriggerEntry)
 }
 
+// PeerHealthAPI is the slim interface admin handlers need from the cluster
+// peer-health tracker. Implemented by an adapter around *cluster.PeerHealth
+// in serve.go; defined here in admin types to avoid pulling cluster into the
+// admin handler tests.
+type PeerHealthAPI interface {
+	Snapshot() []ClusterPeerInfo
+}
+
+// ClusterPeerInfo is the JSON form of one peer's health state.
+type ClusterPeerInfo struct {
+	ID                  string `json:"id"`
+	Healthy             bool   `json:"healthy"`
+	LastFailure         string `json:"last_failure,omitempty"` // RFC3339Nano, empty when healthy
+	CooldownRemainingMs int64  `json:"cooldown_remaining_ms"`
+}
+
+// ListClusterPeersResp aggregates peer health for GET /v1/cluster/peers.
+type ListClusterPeersResp struct {
+	Peers []ClusterPeerInfo `json:"peers"`
+}
+
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
 type Deps struct {
-	Manager   *volume.Manager
-	Incident  incident.StateStore // List(ctx, limit) — optional, nil OK
-	Director  DirectorAPI         // optional; nil disables scrub admin endpoints
-	Token     *dashboard.TokenStore
-	PublicURL string // e.g. "https://node1:9000"; empty means use localhost fallback
-	NodeID    string
+	Manager    *volume.Manager
+	Incident   incident.StateStore // List(ctx, limit) — optional, nil OK
+	Director   DirectorAPI         // optional; nil disables scrub admin endpoints
+	PeerHealth PeerHealthAPI       // optional; nil disables cluster peer admin endpoints
+	Token      *dashboard.TokenStore
+	PublicURL  string // e.g. "https://node1:9000"; empty means use localhost fallback
+	NodeID     string
 }
 
 // Error is the domain error type returned by admin handlers. The HTTP adapter
