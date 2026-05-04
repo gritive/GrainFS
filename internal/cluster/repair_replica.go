@@ -25,27 +25,51 @@ import (
 // Single-node clusters (no shardSvc) are unsupported — there is no peer to
 // pull from. Coverage: integration test in scrubber_volume_integration_test.go
 // (Task 13 of the Volume Scrub plan).
+// peerReader is the minimal interface RepairReplica needs to fetch a candidate
+// replica from another node. Satisfied by *ShardService. Extracted so that
+// repairReplicaWith can be unit-tested without standing up a real QUIC stream
+// service or raft cluster.
+type peerReader interface {
+	ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error)
+}
+
 func (b *DistributedBackend) RepairReplica(ctx context.Context, bucket, key string) error {
 	obj, _, err := b.headObjectMeta(ctx, bucket, key)
 	if err != nil {
 		return fmt.Errorf("repair replica head: %w", err)
 	}
-	versionID := obj.VersionID
-	if versionID == "" {
-		versionID = "current"
+	return b.repairReplicaWith(ctx, b.shardSvc, bucket, key, obj.VersionID, obj.ETag)
+}
+
+// repairReplicaWith runs the orchestration that RepairReplica wraps after the
+// HEAD lookup. Split out so unit tests can exercise the full guard +
+// peer-iteration + MD5 verify + write path without hitting BadgerDB or QUIC.
+//
+// Strategy:
+//  1. iterate b.liveNodes() with peerHealth priority (healthy first)
+//  2. reader.ReadShard(peer, bucket, shardKey, 0) — shardKey = key+"/"+versionID
+//     (matches the shape used by replicating writes in putObjectNxSpooled)
+//  3. compute MD5; require match against expectedETag
+//  4. atomic write (tmp + fsync + rename) to objectPathV(bucket, key, versionID)
+//  5. error if no peer returned matching bytes
+//
+// Single-node clusters (reader == nil) are unsupported — there is no peer to
+// pull from. Coverage: unit tests in repair_replica_test.go + integration via
+// tests/e2e/volume_scrub_multinode_test.go.
+func (b *DistributedBackend) repairReplicaWith(ctx context.Context, reader peerReader, bucket, key, versionID, expectedETag string) error {
+	if reader == nil {
+		return fmt.Errorf("repair replica: no shard service (single-node mode)")
 	}
-	expectedETag := obj.ETag
 	if expectedETag == "" {
 		return fmt.Errorf("repair replica: missing expected ETag for %s/%s", bucket, key)
 	}
-	if b.shardSvc == nil {
-		return fmt.Errorf("repair replica: no shard service (single-node mode)")
+	if versionID == "" {
+		versionID = "current"
 	}
 	shardKey := key + "/" + versionID
 
 	peers := b.liveNodes()
 	tried := 0
-	// Healthy peers first.
 	for _, peer := range peers {
 		if peer == b.selfAddr {
 			continue
@@ -53,12 +77,11 @@ func (b *DistributedBackend) RepairReplica(ctx context.Context, bucket, key stri
 		if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
 			continue
 		}
-		if data, ok := b.tryRepairFromPeer(ctx, peer, bucket, shardKey, expectedETag); ok {
+		if data, ok := b.tryRepairFromPeer(ctx, reader, peer, bucket, shardKey, expectedETag); ok {
 			return b.writeRepairedReplica(bucket, key, versionID, data)
 		}
 		tried++
 	}
-	// Fallback: unhealthy peers (they may have recovered).
 	for _, peer := range peers {
 		if peer == b.selfAddr {
 			continue
@@ -66,7 +89,7 @@ func (b *DistributedBackend) RepairReplica(ctx context.Context, bucket, key stri
 		if b.peerHealth != nil && b.peerHealth.IsHealthy(peer) {
 			continue
 		}
-		if data, ok := b.tryRepairFromPeer(ctx, peer, bucket, shardKey, expectedETag); ok {
+		if data, ok := b.tryRepairFromPeer(ctx, reader, peer, bucket, shardKey, expectedETag); ok {
 			return b.writeRepairedReplica(bucket, key, versionID, data)
 		}
 		tried++
@@ -74,8 +97,8 @@ func (b *DistributedBackend) RepairReplica(ctx context.Context, bucket, key stri
 	return fmt.Errorf("repair replica %s/%s: no peer returned matching bytes (tried %d)", bucket, key, tried)
 }
 
-func (b *DistributedBackend) tryRepairFromPeer(ctx context.Context, peer, bucket, shardKey, expectedETag string) ([]byte, bool) {
-	data, err := b.shardSvc.ReadShard(ctx, peer, bucket, shardKey, 0)
+func (b *DistributedBackend) tryRepairFromPeer(ctx context.Context, reader peerReader, peer, bucket, shardKey, expectedETag string) ([]byte, bool) {
+	data, err := reader.ReadShard(ctx, peer, bucket, shardKey, 0)
 	if err != nil || data == nil {
 		if b.peerHealth != nil && err != nil {
 			b.peerHealth.MarkUnhealthy(peer)
