@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.0.43.3] — 2026-05-05 — N×replication actually replicates
+
+### Fixed
+
+- **Critical correctness fix.** `cmd/grainfs/serve.go:747` registered the
+  `StreamShardWriteBody` body handler on a local `StreamRouter` instead of
+  the `*QUICTransport` instance's internal router. The catch-all
+  `SetStreamHandler(router.Dispatch)` only proxies non-body messages, so
+  every `StreamShardWriteBody` arriving at a peer fell through to the
+  inbox-fallback path: server closed the stream without responding, sender
+  saw `decode response: read header: EOF`, peerHealth marked the peer
+  unhealthy, and `putObjectNxSpooled` silently skipped replication on
+  every subsequent write (debug-level log only).
+- **Net effect before this fix:** every `__grainfs_volumes` (and other
+  N×replication) write produced a single replica on the bucket's group
+  leader. A single disk failure on the leader was unrecoverable. Operators
+  saw at most one "data replication failed" warning per peer per cooldown
+  window — subsequent skips were invisible.
+- One-line fix: replace `router.HandleBody(...)` with
+  `quicTransport.HandleBody(...)` so the handler lives on
+  `t.router.bodyHandlers`, where `handleStream` actually looks. Other
+  body-stream registrations (`StreamGroupForwardBody`,
+  `StreamGroupForwardRead`) already used this path correctly via
+  `shardSvc.RegisterBodyHandler`.
+
+### Added
+
+- `TestE2E_VolumeScrub_MultiNodeRepair` — 3-node cluster, write a volume
+  block, scan all nodes' on-disk replicas (data/.obj path for the leader,
+  shards/ path for peers), truncate one replica, trigger scrub, expect
+  `Detected=1 Repaired=1` via peer-pull. Pre-fix: only the leader has a
+  copy → `holders=1` assertion fails. Post-fix: 3 holders, repair works.
+
+### Notes
+
+- The new test inserts a 12s sleep after `volume create` so peerHealth's
+  10s cooldown clears before the block write. Tracked as follow-up
+  ("PeerHealth one-strike-out") in TODOS § Cluster Replication Reliability;
+  not a problem this PR introduces, just newly visible without the
+  shard-stream EOF masking it.
+
 ## [0.0.43.2] — 2026-05-05 — Scrub admin trigger works at --scrub-interval=0
 
 ### Fixed
