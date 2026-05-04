@@ -127,14 +127,13 @@ type BackgroundScrubber struct {
 	mu           sync.RWMutex
 	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
 
-	// Additive Volume-style sources. The EC fields above are unchanged. When
-	// any source is registered, Start launches a Live ticker (re-using s.interval)
-	// and an optional Full ticker (volumeFullInterval); each calls SourceRunOnce
-	// against every registered source/verifier. Future EC migration onto this
-	// interface is a follow-up — not part of this PR.
-	sources            map[string]BlockSource
-	verifiers          map[string]BlockVerifier
-	volumeFullInterval time.Duration
+	// Replication-source registry. EC scrub keeps using the legacy runOnce
+	// path above; replication sources (volume blocks today, future internal
+	// buckets tomorrow) ride the same interval ticker via SourceRunOnce.
+	// Live vs full scope is a property of the BlockSource implementation;
+	// the scrubber asks for ScopeFull and lets the source decide.
+	sources   map[string]BlockSource
+	verifiers map[string]BlockVerifier
 }
 
 // ScrubStats is a snapshot of scrubbing statistics.
@@ -221,9 +220,9 @@ func (s *BackgroundScrubber) SetInterval(d time.Duration) {
 	}
 }
 
-// RegisterSource attaches a Volume-style BlockSource/BlockVerifier pair. Must
-// be called before Start. EC scrubbing is unaffected — the legacy runOnce path
-// keeps using backend/verifier/repairer directly.
+// RegisterSource attaches a BlockSource/BlockVerifier pair for replication
+// scrub. Must be called before Start. EC scrubbing is unaffected — the
+// legacy runOnce path keeps using backend/verifier/repairer directly.
 func (s *BackgroundScrubber) RegisterSource(name string, src BlockSource, ver BlockVerifier) {
 	if s.sources == nil {
 		s.sources = map[string]BlockSource{}
@@ -231,13 +230,6 @@ func (s *BackgroundScrubber) RegisterSource(name string, src BlockSource, ver Bl
 	}
 	s.sources[name] = src
 	s.verifiers[name] = ver
-}
-
-// SetVolumeFullInterval configures the optional full-scope ticker for Volume
-// sources. 0 disables the ticker (live ticker keeps running). Must be called
-// before Start.
-func (s *BackgroundScrubber) SetVolumeFullInterval(d time.Duration) {
-	s.volumeFullInterval = d
 }
 
 // Start launches the background scrub loop; returns immediately.
@@ -259,13 +251,10 @@ func (s *BackgroundScrubber) Start(ctx context.Context) {
 	if len(s.sources) == 0 {
 		return
 	}
-	go s.sourceTickerLoop(ctx, s.interval, ScopeLive)
-	if s.volumeFullInterval > 0 {
-		go s.sourceTickerLoop(ctx, s.volumeFullInterval, ScopeFull)
-	}
+	go s.sourceTickerLoop(ctx, s.interval)
 }
 
-func (s *BackgroundScrubber) sourceTickerLoop(ctx context.Context, d time.Duration, scope ScrubScope) {
+func (s *BackgroundScrubber) sourceTickerLoop(ctx context.Context, d time.Duration) {
 	t := time.NewTicker(d)
 	defer t.Stop()
 	for {
@@ -273,12 +262,12 @@ func (s *BackgroundScrubber) sourceTickerLoop(ctx context.Context, d time.Durati
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.SourceRunOnce(ctx, scope)
+			s.SourceRunOnce(ctx, ScopeFull)
 		}
 	}
 }
 
-// SourceRunOnce iterates every registered Volume-style source at the given
+// SourceRunOnce iterates every registered replication source at the given
 // scope. Public for direct invocation by Director (CLI trigger path) and for
 // tests. EC verification is independent — see runOnce.
 func (s *BackgroundScrubber) SourceRunOnce(ctx context.Context, scope ScrubScope) {

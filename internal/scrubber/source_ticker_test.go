@@ -44,31 +44,10 @@ func (noopScrubbable) ShardPaths(bucket, key, vid string, n int) []string     { 
 func (noopScrubbable) ReadShard(bucket, key, path string) ([]byte, error)     { return nil, nil }
 func (noopScrubbable) WriteShard(bucket, key, path string, data []byte) error { return nil }
 
-func TestBackgroundScrubber_VolumeDualTicker(t *testing.T) {
+func TestBackgroundScrubber_SourceTickerFires(t *testing.T) {
 	bg := New(noopScrubbable{}, 50*time.Millisecond)
-	vol := &countingSource{name: "volume"}
-	bg.RegisterSource("volume", vol, noopVerifier{})
-	bg.SetVolumeFullInterval(200 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
-	defer cancel()
-	bg.Start(ctx)
-	<-ctx.Done()
-	// Drain a moment in case the last tick is in flight.
-	time.Sleep(20 * time.Millisecond)
-
-	// Live ticker fires ~6× in 350ms (50ms interval).
-	// Full ticker fires ~1× at 200ms.
-	// Both feed the volume source — call count should clearly exceed live-only.
-	require.GreaterOrEqual(t, int(vol.calls.Load()), 4,
-		"volume source should be hit by both live and full tickers")
-}
-
-func TestBackgroundScrubber_VolumeFullDisabled(t *testing.T) {
-	bg := New(noopScrubbable{}, 50*time.Millisecond)
-	vol := &countingSource{name: "volume"}
-	bg.RegisterSource("volume", vol, noopVerifier{})
-	bg.SetVolumeFullInterval(0) // disabled
+	src := &countingSource{name: "replication"}
+	bg.RegisterSource("replication", src, noopVerifier{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
@@ -76,7 +55,19 @@ func TestBackgroundScrubber_VolumeFullDisabled(t *testing.T) {
 	<-ctx.Done()
 	time.Sleep(20 * time.Millisecond)
 
-	// Only live ticker fires; lastScope must always be ScopeLive.
-	require.Equal(t, int32(ScopeLive), vol.lastScope.Load())
-	require.Greater(t, int(vol.calls.Load()), 0)
+	require.Greater(t, int(src.calls.Load()), 0,
+		"replication source should be invoked by the background ticker")
+	require.Equal(t, int32(ScopeFull), src.lastScope.Load(),
+		"background ticker calls source with ScopeFull")
+}
+
+func TestBackgroundScrubber_NoSourceRegistered(t *testing.T) {
+	bg := New(noopScrubbable{}, 50*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	// No RegisterSource call — Start must not panic and the EC ticker must
+	// run on its own.
+	bg.Start(ctx)
+	<-ctx.Done()
 }

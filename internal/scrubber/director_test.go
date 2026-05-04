@@ -31,7 +31,7 @@ func (r *recordingIncident) count() int {
 
 func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
-	d.Register("volume", &countingSource{name: "volume"}, noopVerifier{})
+	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
 	req := TriggerReq{Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_", Scope: ScopeFull}
 	id1, created1 := d.Trigger(req)
 	require.NotEmpty(t, id1)
@@ -42,9 +42,9 @@ func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 }
 
 func TestDirector_ApplyFromFSM_Nonblocking(t *testing.T) {
-	src := &countingSource{name: "volume"}
+	src := &countingSource{name: "replication"}
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 1})
-	d.Register("volume", src, noopVerifier{})
+	d.Register("replication", src, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 	for i := 0; i < 5; i++ {
