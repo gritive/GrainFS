@@ -80,6 +80,14 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
 }
 
+// OpenLocalReplica returns a ReadCloser for the locally-stored copy of an
+// object. It does NOT fall back to peers (there are none in solo mode) and
+// returns os.ErrNotExist when the file is missing — the contract scrubber
+// verifiers rely on.
+func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
+	return os.Open(b.objectPath(bucket, key))
+}
+
 func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
 	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {

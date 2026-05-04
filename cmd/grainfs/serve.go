@@ -49,6 +49,7 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 const defaultReshardInterval = 24 * time.Hour
@@ -1373,6 +1374,26 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if scrubInterval > 0 {
 		sc := scrubber.New(distBackend, scrubInterval)
 		sc.SetEmitter(activeEmitter)
+
+		// --- Object-layer replication scrub (volume blocks today; future
+		// internal-bucket replication objects plug in the same way).
+		opener := scrubber.LocalOpener(distBackend.OpenLocalReplica)
+		replSource := scrubber.NewReplicationObjectSource("replication", volume.VolumeBucketName, volume.MetaPrefix, distBackend)
+		replVerifier := scrubber.NewReplicationVerifier(opener, distBackend)
+		sc.RegisterSource("replication", replSource, replVerifier)
+
+		// Director owns CLI-triggered sessions + (later) cluster-broadcast
+		// trigger. Same source registration keeps periodic scrub and
+		// on-demand sessions consistent.
+		director := scrubber.NewDirector(scrubber.DirectorOpts{
+			Incident:  incidentRecorder,
+			QueueSize: 64,
+			NodeID:    nodeID,
+		})
+		director.Register("replication", replSource, replVerifier)
+		director.Start(ctx)
+		adminDeps.Director = director
+
 		sc.Start(ctx)
 
 		placementMonitors := newPlacementMonitorRegistry()

@@ -2882,6 +2882,17 @@ func (b *DistributedBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
 }
 
+// OpenLocalReplica returns a ReadCloser for the locally-stored copy of a
+// non-EC (replicated) object. It does NOT fall back to peers — that path
+// belongs to RepairReplica. For internal buckets the file lives at
+// objectPathV(bucket, key, "current"); for legacy unversioned buckets the
+// caller should use objectPath. Volume blocks are internal, so "current"
+// is the right version to look up; if the metadata says otherwise the
+// caller should use a more specific path resolution.
+func (b *DistributedBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
+	return os.Open(b.objectPathV(bucket, key, "current"))
+}
+
 // objectPathV returns the version-addressable local path for a full-object copy
 // in the N× path: {root}/data/{bucket}/.obj/{key}/{versionID}.
 //
