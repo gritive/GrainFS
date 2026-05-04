@@ -59,11 +59,7 @@ func blockKeyName(blockNum int) string {
 }
 
 // TestE2E_VolumeScrub_HealthyNoop — clean scrub on a freshly-written volume
-// reports zero detections.
-//
-// Dedup is disabled because dedup mode stores blocks under content-addressed
-// versioned keys (blk_NNN_v<UUID>). Live scrub of dedup volumes requires
-// per-block routing through dedup.Index — tracked as a follow-up.
+// reports zero detections. Replication-only path (dedup off).
 func TestE2E_VolumeScrub_HealthyNoop(t *testing.T) {
 	dataDir, _, _ := startTestServer(t, "--dedup=false")
 
@@ -76,6 +72,24 @@ func TestE2E_VolumeScrub_HealthyNoop(t *testing.T) {
 	require.Equal(t, 0, code, out)
 	require.Contains(t, out, "Repaired=0", "no corruption => Repaired=0; got:\n%s", out)
 	require.Contains(t, out, "Detected=0")
+}
+
+// TestE2E_VolumeScrub_HealthyNoop_Dedup — same shape with dedup enabled.
+// Pins the source/verifier behavior under content-addressed keys
+// (blk_NNN_v<UUID>); regression guard since v0.0.43 shipped without
+// dedup-mode coverage.
+func TestE2E_VolumeScrub_HealthyNoop_Dedup(t *testing.T) {
+	dataDir, _, _ := startTestServer(t, "--dedup=true")
+
+	out, code := runCLI(t, dataDir, "volume", "create", "vsd1", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dataDir, "volume", "write-at", "vsd1", "--offset", "0", "--content", "hello")
+	require.Equal(t, 0, code, out)
+
+	out, code = runCLI(t, dataDir, "volume", "scrub", "vsd1")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "Repaired=0", "no corruption => Repaired=0; got:\n%s", out)
+	require.Contains(t, out, "Detected=0", "no corruption => Detected=0; got:\n%s", out)
 }
 
 // TestE2E_VolumeScrub_DryRunDetectsCorruption — truncating a block on disk
@@ -101,6 +115,30 @@ func TestE2E_VolumeScrub_DryRunDetectsCorruption(t *testing.T) {
 	require.Equal(t, int64(1), fi.Size(), "dry-run must leave the local file untouched")
 }
 
+// TestE2E_VolumeScrub_DryRunDetectsCorruption_Dedup — same as the base test
+// but with dedup enabled, exercising verifier MD5 against the canonical
+// _v<UUID> block on disk.
+func TestE2E_VolumeScrub_DryRunDetectsCorruption_Dedup(t *testing.T) {
+	dataDir, _, _ := startTestServer(t, "--dedup=true")
+
+	out, code := runCLI(t, dataDir, "volume", "create", "vsd2", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dataDir, "volume", "write-at", "vsd2", "--offset", "0", "--content", "abcd1234")
+	require.Equal(t, 0, code, out)
+
+	blockPath := findVolumeBlockOnDisk(t, dataDir, "vsd2", 0)
+	require.NoError(t, os.Truncate(blockPath, 1), "truncate %s", blockPath)
+
+	out, code = runCLI(t, dataDir, "volume", "scrub", "vsd2", "--dry-run")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "Detected=1", "corrupt block must be detected; got:\n%s", out)
+	require.Contains(t, out, "Repaired=0", "dry-run must not repair; got:\n%s", out)
+
+	fi, err := os.Stat(blockPath)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), fi.Size(), "dry-run must leave the local file untouched")
+}
+
 // TestE2E_VolumeScrub_SingleNodeRepairUnrepairable — single-node cluster has
 // no peer to pull from, so a real scrub records the corruption but cannot
 // repair it. Multi-node repair is covered when the cluster broadcast E2E
@@ -117,6 +155,27 @@ func TestE2E_VolumeScrub_SingleNodeRepairUnrepairable(t *testing.T) {
 	require.NoError(t, os.Truncate(blockPath, 1))
 
 	out, code = runCLI(t, dataDir, "volume", "scrub", "vs3")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "Detected=1")
+	require.Contains(t, out, "Unrepairable=1", "single node has no peer => repair fails; got:\n%s", out)
+}
+
+// TestE2E_VolumeScrub_SingleNodeRepairUnrepairable_Dedup — same shape with
+// dedup enabled. Exercises RepairReplica's HEAD/peer-pull path against
+// canonical _v<UUID> keys; on a single-node cluster the peer pool is empty
+// so repair must report Unrepairable rather than crash.
+func TestE2E_VolumeScrub_SingleNodeRepairUnrepairable_Dedup(t *testing.T) {
+	dataDir, _, _ := startTestServer(t, "--dedup=true")
+
+	out, code := runCLI(t, dataDir, "volume", "create", "vsd3", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dataDir, "volume", "write-at", "vsd3", "--offset", "0", "--content", "QWERTY")
+	require.Equal(t, 0, code, out)
+
+	blockPath := findVolumeBlockOnDisk(t, dataDir, "vsd3", 0)
+	require.NoError(t, os.Truncate(blockPath, 1))
+
+	out, code = runCLI(t, dataDir, "volume", "scrub", "vsd3")
 	require.Equal(t, 0, code, out)
 	require.Contains(t, out, "Detected=1")
 	require.Contains(t, out, "Unrepairable=1", "single node has no peer => repair fails; got:\n%s", out)
