@@ -49,9 +49,17 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 const defaultReshardInterval = 24 * time.Hour
+
+// replicaRepairerFunc adapts a function to scrubber.ReplicaRepairer.
+type replicaRepairerFunc func(ctx context.Context, bucket, key string) error
+
+func (f replicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key string) error {
+	return f(ctx, bucket, key)
+}
 
 func startAutoSnapshotterWhenReady(
 	ctx context.Context,
@@ -1373,6 +1381,50 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if scrubInterval > 0 {
 		sc := scrubber.New(distBackend, scrubInterval)
 		sc.SetEmitter(activeEmitter)
+
+		// --- Object-layer replication scrub (volume blocks today; future
+		// internal-bucket replication objects plug in the same way).
+		// All three plumbings (walk, opener, repair) route through the local
+		// data-group that owns the bucket — single-node serve still sits inside
+		// a multi-raft group structure, so the volume bucket's files live under
+		// {dataDir}/groups/<gid>/ rather than the bare distBackend root.
+		groupBackendForBucket := func(bucket string) *cluster.DistributedBackend {
+			dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
+			if !ok || dg == nil || dg.Backend() == nil {
+				return nil
+			}
+			return dg.Backend().DistributedBackend
+		}
+		opener := scrubber.LocalOpener(func(bucket, key string) (io.ReadCloser, error) {
+			gb := groupBackendForBucket(bucket)
+			if gb == nil {
+				return nil, fmt.Errorf("scrub opener: no local group for %s", bucket)
+			}
+			return gb.OpenLocalReplica(bucket, key)
+		})
+		repairer := scrubber.ReplicaRepairer(replicaRepairerFunc(func(rctx context.Context, bucket, key string) error {
+			gb := groupBackendForBucket(bucket)
+			if gb == nil {
+				return fmt.Errorf("scrub repair: no local group for %s", bucket)
+			}
+			return gb.RepairReplica(rctx, bucket, key)
+		}))
+		replSource := scrubber.NewReplicationObjectSource("replication", volume.VolumeBucketName, volume.MetaPrefix, backend)
+		replVerifier := scrubber.NewReplicationVerifier(opener, repairer)
+		sc.RegisterSource("replication", replSource, replVerifier)
+
+		// Director owns CLI-triggered sessions + (later) cluster-broadcast
+		// trigger. Same source registration keeps periodic scrub and
+		// on-demand sessions consistent.
+		director := scrubber.NewDirector(scrubber.DirectorOpts{
+			Incident:  incidentRecorder,
+			QueueSize: 64,
+			NodeID:    nodeID,
+		})
+		director.Register("replication", replSource, replVerifier)
+		director.Start(ctx)
+		adminDeps.Director = director
+
 		sc.Start(ctx)
 
 		placementMonitors := newPlacementMonitorRegistry()

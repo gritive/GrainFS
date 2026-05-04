@@ -126,6 +126,14 @@ type BackgroundScrubber struct {
 	// without blocking each other.
 	mu           sync.RWMutex
 	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
+
+	// Replication-source registry. EC scrub keeps using the legacy runOnce
+	// path above; replication sources (volume blocks today, future internal
+	// buckets tomorrow) ride the same interval ticker via SourceRunOnce.
+	// Live vs full scope is a property of the BlockSource implementation;
+	// the scrubber asks for ScopeFull and lets the source decide.
+	sources   map[string]BlockSource
+	verifiers map[string]BlockVerifier
 }
 
 // ScrubStats is a snapshot of scrubbing statistics.
@@ -212,6 +220,18 @@ func (s *BackgroundScrubber) SetInterval(d time.Duration) {
 	}
 }
 
+// RegisterSource attaches a BlockSource/BlockVerifier pair for replication
+// scrub. Must be called before Start. EC scrubbing is unaffected — the
+// legacy runOnce path keeps using backend/verifier/repairer directly.
+func (s *BackgroundScrubber) RegisterSource(name string, src BlockSource, ver BlockVerifier) {
+	if s.sources == nil {
+		s.sources = map[string]BlockSource{}
+		s.verifiers = map[string]BlockVerifier{}
+	}
+	s.sources[name] = src
+	s.verifiers[name] = ver
+}
+
 // Start launches the background scrub loop; returns immediately.
 func (s *BackgroundScrubber) Start(ctx context.Context) {
 	go func() {
@@ -228,6 +248,60 @@ func (s *BackgroundScrubber) Start(ctx context.Context) {
 			}
 		}
 	}()
+	if len(s.sources) == 0 {
+		return
+	}
+	go s.sourceTickerLoop(ctx, s.interval)
+}
+
+func (s *BackgroundScrubber) sourceTickerLoop(ctx context.Context, d time.Duration) {
+	t := time.NewTicker(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.SourceRunOnce(ctx, ScopeFull)
+		}
+	}
+}
+
+// SourceRunOnce iterates every registered replication source at the given
+// scope. Public for direct invocation by Director (CLI trigger path) and for
+// tests. EC verification is independent — see runOnce.
+func (s *BackgroundScrubber) SourceRunOnce(ctx context.Context, scope ScrubScope) {
+	for name, src := range s.sources {
+		ver := s.verifiers[name]
+		ch, err := src.Iter(ctx, scope, "")
+		if err != nil {
+			log.Warn().Str("source", name).Err(err).Msg("scrub: source iter failed")
+			continue
+		}
+		for blk := range ch {
+			select {
+			case <-ctx.Done():
+				for range ch { //nolint:revive // drain producer on cancel
+				}
+				return
+			default:
+			}
+			if err := s.limiter.Wait(ctx); err != nil {
+				return
+			}
+			st, vErr := ver.Verify(ctx, blk)
+			if vErr != nil {
+				log.Warn().Str("source", name).Str("key", blk.Key).Err(vErr).Msg("scrub: verify failed")
+				continue
+			}
+			if st.IsHealthy() {
+				continue
+			}
+			if rerr := ver.Repair(ctx, blk); rerr != nil {
+				log.Error().Str("source", name).Str("key", blk.Key).Err(rerr).Msg("scrub: repair failed")
+			}
+		}
+	}
 }
 
 // RunOnce is exported for testing.

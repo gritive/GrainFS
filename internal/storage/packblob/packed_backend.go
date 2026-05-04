@@ -223,11 +223,8 @@ func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io
 		return nil, fmt.Errorf("blob append: %w", err)
 	}
 
-	var etag string
-	if !storage.IsInternalBucket(bucket) {
-		h := md5.Sum(data)
-		etag = hex.EncodeToString(h[:])
-	}
+	h := md5.Sum(data)
+	etag := hex.EncodeToString(h[:])
 	now := time.Now().Unix()
 
 	pb.mu.Lock()

@@ -80,6 +80,14 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
 }
 
+// OpenLocalReplica returns a ReadCloser for the locally-stored copy of an
+// object. It does NOT fall back to peers (there are none in solo mode) and
+// returns os.ErrNotExist when the file is missing — the contract scrubber
+// verifiers rely on.
+func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
+	return os.Open(b.objectPath(bucket, key))
+}
+
 func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
 	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {
@@ -197,14 +205,7 @@ func (b *LocalBackend) PutObject(ctx context.Context, bucket, key string, r io.R
 		etag string
 		cerr error
 	)
-	if IsInternalBucket(bucket) {
-		size, cerr = io.Copy(tmp, r)
-		tmp.Close()
-		if cerr != nil {
-			cleanupTmp()
-			return nil, fmt.Errorf("write object: %w", cerr)
-		}
-	} else {
+	{
 		h := md5Pool.Get()
 		h.Reset()
 		w := io.MultiWriter(tmp, h)
@@ -408,11 +409,47 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	}
 	size := fi.Size()
 
+	// ETag = MD5(file). Required as the corruption-detection oracle for
+	// Volume scrub (which writes via this fast path with offset=0). For
+	// partial writes (offset>0 or len(data)<size) we re-read the file so
+	// the stored ETag matches on-disk bytes. NFS4 partial writes pay an
+	// extra read here; tracked in TODOS.md (Storage Hashing 성능 검토).
+	var etag string
+	if offset == 0 && int64(len(data)) == size {
+		h := md5Pool.Get()
+		h.Reset()
+		_, _ = h.Write(data)
+		etag = hex.EncodeToString(h.Sum(nil))
+		md5Pool.Put(h)
+	} else {
+		h := md5Pool.Get()
+		h.Reset()
+		buf := make([]byte, 64*1024)
+		var off int64
+		for off < size {
+			n, rerr := f.ReadAt(buf, off)
+			if n > 0 {
+				_, _ = h.Write(buf[:n])
+				off += int64(n)
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				md5Pool.Put(h)
+				return nil, fmt.Errorf("md5 readback: %w", rerr)
+			}
+		}
+		etag = hex.EncodeToString(h.Sum(nil))
+		md5Pool.Put(h)
+	}
+
 	now := time.Now().Unix()
 	obj := &Object{
 		Key:          key,
 		Size:         size,
 		ContentType:  "application/octet-stream",
+		ETag:         etag,
 		LastModified: now,
 	}
 	meta, err := marshalObject(obj)
