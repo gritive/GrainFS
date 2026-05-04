@@ -24,6 +24,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -227,6 +228,13 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 		}
 	}
 	b.peerHealth = NewPeerHealth(peers, 10*time.Second)
+}
+
+// PeerHealth returns the backend's peer-health tracker, or nil if SetShardService
+// has not been called yet. Exposed so admin endpoints can surface peer state to
+// operators without reaching into private fields.
+func (b *DistributedBackend) PeerHealth() *PeerHealth {
+	return b.peerHealth
 }
 
 // liveNodes returns the current cluster node list for placement decisions.
@@ -865,7 +873,8 @@ func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key
 				continue
 			}
 			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
-				b.logger.Debug().Str("peer", peer).Msg("skipping unhealthy peer for replication")
+				metrics.ReplicationSkippedTotal.WithLabelValues(peer, bucket).Inc()
+				b.logger.Debug().Str("peer", peer).Str("bucket", bucket).Msg("skipping unhealthy peer for replication")
 				continue
 			}
 			body, err := sp.Open()
@@ -876,11 +885,13 @@ func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key
 			_ = body.Close()
 			if err != nil {
 				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
-				if b.peerHealth != nil {
-					b.peerHealth.MarkUnhealthy(peer)
+				if b.peerHealth != nil && b.peerHealth.MarkUnhealthy(peer) {
+					b.logger.Warn().Str("peer", peer).Dur("cooldown", b.peerHealth.cooldown).Msg("peer transitioned to unhealthy; subsequent replication writes will skip until cooldown expires")
 				}
 			} else if b.peerHealth != nil {
-				b.peerHealth.MarkHealthy(peer)
+				if b.peerHealth.MarkHealthy(peer) {
+					b.logger.Info().Str("peer", peer).Msg("peer recovered to healthy")
+				}
 			}
 		}
 	}
@@ -977,6 +988,7 @@ func (b *DistributedBackend) putObjectNxSpooledAsync(ctx context.Context, bucket
 				continue
 			}
 			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+				metrics.ReplicationSkippedTotal.WithLabelValues(peer, bucket).Inc()
 				continue
 			}
 			body, err := sp.Open()
@@ -987,11 +999,13 @@ func (b *DistributedBackend) putObjectNxSpooledAsync(ctx context.Context, bucket
 			_ = body.Close()
 			if err != nil {
 				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
-				if b.peerHealth != nil {
-					b.peerHealth.MarkUnhealthy(peer)
+				if b.peerHealth != nil && b.peerHealth.MarkUnhealthy(peer) {
+					b.logger.Warn().Str("peer", peer).Dur("cooldown", b.peerHealth.cooldown).Msg("peer transitioned to unhealthy; subsequent replication writes will skip until cooldown expires")
 				}
 			} else if b.peerHealth != nil {
-				b.peerHealth.MarkHealthy(peer)
+				if b.peerHealth.MarkHealthy(peer) {
+					b.logger.Info().Str("peer", peer).Msg("peer recovered to healthy")
+				}
 			}
 		}
 	}

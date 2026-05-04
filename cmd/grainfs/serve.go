@@ -54,6 +54,37 @@ import (
 
 const defaultReshardInterval = 24 * time.Hour
 
+// peerHealthAdapter implements admin.PeerHealthAPI on top of *cluster.DistributedBackend.
+// Converts cluster.PeerHealthEntry to the JSON-friendly admin.ClusterPeerInfo so
+// the admin handler stays decoupled from the cluster package.
+type peerHealthAdapter struct {
+	backend *cluster.DistributedBackend
+}
+
+func (a peerHealthAdapter) Snapshot() []admin.ClusterPeerInfo {
+	if a.backend == nil {
+		return nil
+	}
+	ph := a.backend.PeerHealth()
+	if ph == nil {
+		return nil
+	}
+	src := ph.Snapshot()
+	out := make([]admin.ClusterPeerInfo, 0, len(src))
+	for _, e := range src {
+		info := admin.ClusterPeerInfo{
+			ID:                  e.ID,
+			Healthy:             e.Healthy,
+			CooldownRemainingMs: e.CooldownRemainingMs,
+		}
+		if e.LastFailure != nil {
+			info.LastFailure = e.LastFailure.UTC().Format(time.RFC3339Nano)
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
 // replicaRepairerFunc adapts a function to scrubber.ReplicaRepairer.
 type replicaRepairerFunc func(ctx context.Context, bucket, key string) error
 
@@ -1320,10 +1351,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	publicURL, _ := cmd.Flags().GetString("public-url")
 	adminDeps := &admin.Deps{
-		Manager:   srv.VolumeManager(),
-		Token:     tokenStore,
-		PublicURL: publicURL,
-		NodeID:    nodeID,
+		Manager:    srv.VolumeManager(),
+		Token:      tokenStore,
+		PublicURL:  publicURL,
+		NodeID:     nodeID,
+		PeerHealth: peerHealthAdapter{distBackend},
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
