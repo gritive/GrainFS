@@ -32,6 +32,15 @@ const (
 	metaPrefix       = "__vol/"
 )
 
+// VolumeBucketName is the storage backend bucket where all volume metadata and
+// blocks are stored. Exported for callers that need to construct backend keys
+// (e.g. admin handlers correlating incidents to a volume).
+const VolumeBucketName = volumeBucketName
+
+// BlockKeyPrefix returns the key prefix under which a volume's data blocks are
+// stored within VolumeBucketName.
+func BlockKeyPrefix(name string) string { return blockPrefix(name) }
+
 // Volume represents a virtual block device backed by object storage.
 type Volume struct {
 	Name            string
