@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.43.1] — 2026-05-05 — Dedup-mode scrub regression coverage
+
+### Notes
+
+- `__grainfs_volumes` scrub already worked under `--dedup=true` in v0.0.43.0;
+  the original "dedup-mode incompatibility" follow-up was a misdiagnosis
+  carried over from an intermediate group-routing bug (since fixed). No code
+  change needed — test additions confirm the existing behavior.
+
+### Added
+
+- E2E variants `*_Dedup` for `HealthyNoop`, `DryRunDetectsCorruption`, and
+  `SingleNodeRepairUnrepairable`. Pin source walk + verifier MD5 + repair
+  attempt against canonical `_v<UUID>` keys so a future dedup-mode regression
+  is caught by CI.
+
+### Removed
+
+- TODOS entry **"Volume scrub — dedup 모드 호환"** — closed by the regression
+  tests above.
+
 ## [0.0.43.0] — 2026-05-04 — Object-layer replication scrub
 
 ### Added
