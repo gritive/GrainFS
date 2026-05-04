@@ -119,6 +119,4 @@
 
 ## Cluster Replication Reliability
 
-- [ ] **PeerHealth one-strike-out — consecutive-failures threshold** — *정합성 정책 결정* — v0.0.43.4 에서 observability (Gauge + Counter + admin endpoint + transition log) 까지는 wired. 남은 결정: 1회 실패로 즉시 unhealthy 마킹할지, N consecutive failures 까지 tolerate 할지. 후자는 transient hiccup 에 더 forgiving 하지만 진짜 죽은 peer 검출이 늦어짐. 운영 데이터 (Prometheus rate 추적 ≥ 1주) 후 적정 threshold 결정 권장. 결정 시 `tests/e2e/volume_scrub_multinode_test.go` 의 12s cooldown 우회 sleep 도 제거 가능.
-
-- [ ] **기존 NBD multi-raft test 가 byte-level cross-node replica 미검증** — *test coverage gap* — `tests/e2e/multiraft_sharding_test.go:859` `TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator` 가 NBD write 후 다른 노드의 S3 ListObjects 로 검증 — 그러나 ListObjects 는 raft-replicated metadata 만 보면 됨. byte-level 데이터가 정말 multi-node 에 복제됐는지는 검증 안 함. **개선:** (a) 모든 노드의 dataDir 를 walk 해서 실제 file 존재 카운트 검증 추가, (b) 별도 byte-level replication coverage test 로 분리.
+- [ ] **PeerHealth one-strike-out — consecutive-failures threshold** — *정합성 정책 결정* — v0.0.43.4 에서 observability (Gauge + Counter + admin endpoint + transition log) 까지는 wired. 남은 결정: 1회 실패로 즉시 unhealthy 마킹할지, N consecutive failures 까지 tolerate 할지. 후자는 transient hiccup 에 더 forgiving 하지만 진짜 죽은 peer 검출이 늦어짐. 운영 데이터 (Prometheus rate 추적 ≥ 1주) 후 적정 threshold 결정 권장. 결정 시 `tests/e2e/volume_scrub_multinode_test.go` 와 `tests/e2e/nbd_multinode_replication_test.go` 의 12s cooldown 우회 sleep 도 제거 가능.
