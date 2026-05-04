@@ -49,6 +49,8 @@ func registerVolume(g router, d *Deps) {
 	g.POST("/volumes/:name/resize", wrapNameBody[ResizeReq, ResizeResp](d, ResizeVolume))
 	g.POST("/volumes/:name/recalculate", wrapName(d, RecalculateVolume))
 	g.POST("/volumes/clone", wrapBodyNoOut[CloneReq](d, CloneVolume))
+	g.POST("/volumes/:name/write-at", wrapBody[WriteAtVolumeReq, WriteAtVolumeResp](d, WriteAtVolume))
+	g.POST("/volumes/:name/read-at", wrapBody[ReadAtVolumeReq, ReadAtVolumeResp](d, ReadAtVolume))
 }
 
 func registerSnapshot(g router, d *Deps) {

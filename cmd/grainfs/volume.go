@@ -104,6 +104,22 @@ var volumeRollbackCmd = &cobra.Command{
 	RunE:    runVolumeRollback,
 }
 
+var volumeWriteAtCmd = &cobra.Command{
+	Use:     "write-at <name>",
+	Short:   "Write bytes at a volume offset (debug/test helper)",
+	Args:    cobra.ExactArgs(1),
+	Example: `  grainfs volume write-at v1 --offset 0 --content 'hello'`,
+	RunE:    runVolumeWriteAt,
+}
+
+var volumeReadAtCmd = &cobra.Command{
+	Use:     "read-at <name>",
+	Short:   "Read bytes from a volume offset (debug/test helper)",
+	Args:    cobra.ExactArgs(1),
+	Example: `  grainfs volume read-at v1 --offset 0 --length 32`,
+	RunE:    runVolumeReadAt,
+}
+
 var snapshotCmd = &cobra.Command{
 	Use:   "snapshot",
 	Short: "Volume snapshot management",
@@ -138,6 +154,7 @@ func init() {
 		volumeListCmd, volumeCreateCmd, volumeInfoCmd, volumeStatCmd,
 		volumeDeleteCmd, volumeResizeCmd, volumeRecalculateCmd, volumeCloneCmd,
 		volumeRollbackCmd, snapshotCreateCmd, snapshotListCmd, snapshotDeleteCmd,
+		volumeWriteAtCmd, volumeReadAtCmd,
 	} {
 		c.Flags().String("endpoint", "", "admin endpoint (default: auto-discover from --data or grainfs.toml)")
 		c.Flags().String("data", "", "data directory for admin socket auto-discovery")
@@ -148,12 +165,16 @@ func init() {
 	volumeCreateCmd.Flags().String("size", "", "volume size (1G/1Gi/100M/raw bytes)")
 	volumeResizeCmd.Flags().String("size", "", "new size (must be >= current)")
 	volumeDeleteCmd.Flags().Bool("force", false, "cascade-delete all snapshots")
+	volumeWriteAtCmd.Flags().Int64("offset", 0, "byte offset")
+	volumeWriteAtCmd.Flags().String("content", "", "bytes to write (string)")
+	volumeReadAtCmd.Flags().Int64("offset", 0, "byte offset")
+	volumeReadAtCmd.Flags().Int64("length", 0, "bytes to read (1..64MiB)")
 
 	snapshotCmd.AddCommand(snapshotCreateCmd, snapshotListCmd, snapshotDeleteCmd)
 	volumeCmd.AddCommand(
 		volumeListCmd, volumeCreateCmd, volumeInfoCmd, volumeStatCmd,
 		volumeDeleteCmd, volumeResizeCmd, volumeRecalculateCmd,
-		volumeCloneCmd, volumeRollbackCmd, snapshotCmd,
+		volumeCloneCmd, volumeRollbackCmd, volumeWriteAtCmd, volumeReadAtCmd, snapshotCmd,
 	)
 	rootCmd.AddCommand(volumeCmd)
 }
@@ -489,6 +510,48 @@ func runSnapshotList(cmd *cobra.Command, args []string) error {
 	for _, s := range snaps {
 		fmt.Printf("%-40s  %-30s  %d\n", s.ID, s.CreatedAt, s.BlockCount)
 	}
+	return nil
+}
+
+func runVolumeWriteAt(cmd *cobra.Command, args []string) error {
+	offset, _ := cmd.Flags().GetInt64("offset")
+	dataStr, _ := cmd.Flags().GetString("content")
+	c, err := adminClientFromCmd(cmd)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"name": args[0], "offset": offset, "data": []byte(dataStr)}
+	var resp struct {
+		Bytes int64 `json:"bytes"`
+	}
+	if err := c.post("/v1/volumes/"+url.PathEscape(args[0])+"/write-at", body, &resp); err != nil {
+		return err
+	}
+	if jsonOut(cmd) {
+		return printJSON(resp)
+	}
+	fmt.Printf("wrote %d bytes to %q at offset %d\n", resp.Bytes, args[0], offset)
+	return nil
+}
+
+func runVolumeReadAt(cmd *cobra.Command, args []string) error {
+	offset, _ := cmd.Flags().GetInt64("offset")
+	length, _ := cmd.Flags().GetInt64("length")
+	c, err := adminClientFromCmd(cmd)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"name": args[0], "offset": offset, "length": length}
+	var resp struct {
+		Data []byte `json:"data"`
+	}
+	if err := c.post("/v1/volumes/"+url.PathEscape(args[0])+"/read-at", body, &resp); err != nil {
+		return err
+	}
+	if jsonOut(cmd) {
+		return printJSON(resp)
+	}
+	os.Stdout.Write(resp.Data)
 	return nil
 }
 

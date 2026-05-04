@@ -42,6 +42,30 @@ func NewUnsupported(msg string, details any) *Error {
 	return &Error{Code: "unsupported", Message: msg, Details: details}
 }
 
+// WriteAtVolumeReq is the JSON body for WriteAtVolume.
+type WriteAtVolumeReq struct {
+	Name   string `json:"name"`
+	Offset int64  `json:"offset"`
+	Data   []byte `json:"data"` // base64-encoded in JSON
+}
+
+// WriteAtVolumeResp reports how many bytes were written.
+type WriteAtVolumeResp struct {
+	Bytes int64 `json:"bytes"`
+}
+
+// ReadAtVolumeReq is the JSON body for ReadAtVolume.
+type ReadAtVolumeReq struct {
+	Name   string `json:"name"`
+	Offset int64  `json:"offset"`
+	Length int64  `json:"length"`
+}
+
+// ReadAtVolumeResp carries the read bytes.
+type ReadAtVolumeResp struct {
+	Data []byte `json:"data"`
+}
+
 // VolumeInfo is the JSON representation of a volume in admin responses.
 type VolumeInfo struct {
 	Name            string `json:"name"`
