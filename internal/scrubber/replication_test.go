@@ -132,3 +132,22 @@ func (f *fakeRepairer) RepairReplica(ctx context.Context, bucket, key string) er
 	f.calls = append(f.calls, bucket+"/"+key)
 	return nil
 }
+
+// TestReplicationVerifier_LegacyETagSkipped — blocks written before the
+// MD5-oracle restoration have ExpectedETag="". The verifier must report
+// Skipped (not Corrupt) so the first-deploy of this code does not mass-flag
+// every legacy block as corrupt.
+func TestReplicationVerifier_LegacyETagSkipped(t *testing.T) {
+	b, root := setupBackend(t)
+	v := NewReplicationVerifier(localOpener(root), &fakeRepairer{})
+	_ = b
+	st, err := v.Verify(context.Background(), Block{
+		Bucket:       "__grainfs_volumes",
+		Key:          "__vol/legacy/blk_000000000000",
+		ExpectedETag: "",
+	})
+	require.NoError(t, err)
+	require.True(t, st.Skipped, "empty-ETag legacy block must be Skipped, got %+v", st)
+	require.False(t, st.Corrupt)
+	require.False(t, st.Healthy)
+}

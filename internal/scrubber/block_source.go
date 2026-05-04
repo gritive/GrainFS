@@ -29,6 +29,10 @@ type BlockStatus struct {
 	Healthy bool
 	Missing bool
 	Corrupt bool
+	// Skipped marks blocks the verifier cannot evaluate (e.g. legacy data
+	// without an ETag oracle). Skipped is neither healthy nor a finding —
+	// the Director leaves them out of detect/repair counts.
+	Skipped bool
 	Detail  string
 }
 

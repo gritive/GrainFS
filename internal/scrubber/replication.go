@@ -100,6 +100,13 @@ func NewReplicationVerifier(open LocalOpener, rep ReplicaRepairer) *ReplicationV
 }
 
 func (v *ReplicationVerifier) Verify(ctx context.Context, b Block) (BlockStatus, error) {
+	// Legacy data written before the MD5-oracle restoration carries an empty
+	// ETag. Reporting it Corrupt would mass-flag every old block on first
+	// deploy and exhaust the repair queue with peers that share the same
+	// gap. Mark Skipped so the operator sees the gap without a false alarm.
+	if b.ExpectedETag == "" {
+		return BlockStatus{Skipped: true, Detail: "no ETag oracle (legacy block)"}, nil
+	}
 	rc, err := v.open(b.Bucket, b.Key)
 	if err != nil {
 		if os.IsNotExist(err) {

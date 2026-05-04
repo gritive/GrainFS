@@ -208,6 +208,10 @@ func (d *Director) runSession(ctx context.Context, sess *Session) {
 			sess.Stats.Healthy++
 			continue
 		}
+		if st.Skipped {
+			sess.Stats.Skipped++
+			continue
+		}
 		sess.Stats.Detected++
 		corrID := blk.Bucket + "/" + blk.Key + "/" + sess.ID
 		scope := incident.Scope{
