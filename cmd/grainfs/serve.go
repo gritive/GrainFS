@@ -1331,6 +1331,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if err != nil {
 		return fmt.Errorf("admin server: %w", err)
 	}
+	// Best-effort fallback: ensures the socket is unlinked even if the explicit
+	// shutdown path is bypassed (e.g. early return). The explicit shutdown
+	// sequence below stops admin BEFORE the data plane drains so operator
+	// commands cannot land on a half-shutdown server (spec A5).
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1517,21 +1521,28 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	<-ctx.Done()
 	log.Info().Str("component", "server").Msg("graceful shutdown started")
 
-	// 1. Drain in-flight HTTP requests
+	// 1. Stop admin Unix socket FIRST so operator commands fail fast with
+	// "connection refused" instead of landing on a server that's draining.
+	// Spec A5: admin-first, data-plane-second.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
+	if err := adminSrv.Stop(shutdownCtx); err != nil {
+		log.Warn().Err(err).Msg("admin server shutdown error")
+	}
+
+	// 2. Drain in-flight HTTP requests on the data plane.
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Warn().Err(err).Msg("http server shutdown error")
 	}
 
-	// 2. Transfer Raft leadership before stopping
+	// 3. Transfer Raft leadership before stopping
 	if err := node.TransferLeadership(); err != nil {
 		log.Debug().Err(err).Msg("leadership transfer skipped")
 	} else {
 		log.Info().Str("component", "raft").Msg("leadership transferred")
 	}
 
-	// 3. Stop Raft apply loop
+	// 4. Stop Raft apply loop
 	close(stopApply)
 
 	log.Info().Str("component", "server").Msg("server stopped")

@@ -70,8 +70,15 @@ func (s *TokenStore) rotateLocked() (string, error) {
 		return "", fmt.Errorf("rand: %w", err)
 	}
 	tok := hex.EncodeToString(buf)
-	if err := os.WriteFile(s.path, []byte(tok), 0o600); err != nil {
-		return "", fmt.Errorf("write token: %w", err)
+	// Write atomically: temp file with mode 0600 + Rename. A crash mid-write
+	// leaves the previous token intact rather than producing a half-written file.
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(tok), 0o600); err != nil {
+		return "", fmt.Errorf("write token tmp: %w", err)
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("rename token: %w", err)
 	}
 	s.val = tok
 	return tok, nil

@@ -6,12 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -269,23 +267,3 @@ func callUI(t *testing.T, port int, token string) int {
 	return resp.StatusCode
 }
 
-// --- Helpers shared with other e2e tests ---
-
-func freePortStart(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
-}
-
-// avoid duplicate decl with existing freePort/getBinary helpers
-var _ = freePortStart
-
-// containsAdminSock provides a quick boolean for parsing CLI output that lists
-// the dashboard token path.
-func containsAdminSock(s string) bool {
-	return strings.Contains(s, "admin.sock")
-}
-
-var _ = containsAdminSock
