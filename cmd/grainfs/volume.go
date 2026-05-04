@@ -699,7 +699,7 @@ func followScrubSession(cmd *cobra.Command, c *adminClient, sessionID string) er
 			}
 			if info.Status == "done" || info.Status == "cancelled" {
 				fmt.Printf("%s. Checked=%d Healthy=%d Detected=%d Repaired=%d Unrepairable=%d\n",
-					strings.Title(info.Status), info.Checked, info.Healthy, info.Detected, info.Repaired, info.Unrepairable)
+					capitalize(info.Status), info.Checked, info.Healthy, info.Detected, info.Repaired, info.Unrepairable)
 				return nil
 			}
 		}
@@ -747,6 +747,13 @@ func runVolumeScrubList(cmd *cobra.Command, args []string) error {
 			j.SessionID, j.Status, j.Scope, j.Checked, j.Detected, j.Repaired)
 	}
 	return nil
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 func runVolumeScrubCancel(cmd *cobra.Command, args []string) error {

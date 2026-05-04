@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,7 +24,7 @@ type Director struct {
 	mu        sync.Mutex
 	sources   map[string]BlockSource
 	verifiers map[string]BlockVerifier
-	sessions  map[string]*Session
+	sessions  map[string]*liveSession
 	dedup     map[string]string
 	queue     chan triggerReq
 	incident  IncidentRecorder
@@ -31,6 +32,9 @@ type Director struct {
 	nodeID    string
 }
 
+// Session is the public snapshot of a scrub session as returned by
+// Director.Sessions / GetSession. Counters are plain int64 because the
+// snapshot is taken under d.mu — writers use the atomic-backed liveSession.
 type Session struct {
 	ID        string
 	Bucket    string
@@ -50,6 +54,53 @@ type SessionStats struct {
 	Repaired     int64
 	Unrepairable int64
 	Skipped      int64
+}
+
+// liveSession is the in-flight session state. Counter mutations happen on
+// the atomic fields without holding d.mu; readers (Sessions, GetSession)
+// snapshot via load() into a public Session copy.
+type liveSession struct {
+	id        string
+	bucket    string
+	keyPrefix string
+	scope     ScrubScope
+	dryRun    bool
+	startedAt time.Time
+	doneAt    atomic.Int64 // unix nanos; 0 = not done
+	status    atomic.Value // string: "running" | "done" | "cancelled"
+
+	checked      atomic.Int64
+	healthy      atomic.Int64
+	detected     atomic.Int64
+	repaired     atomic.Int64
+	unrepairable atomic.Int64
+	skipped      atomic.Int64
+}
+
+func (s *liveSession) snapshot() Session {
+	out := Session{
+		ID:        s.id,
+		Bucket:    s.bucket,
+		KeyPrefix: s.keyPrefix,
+		Scope:     s.scope,
+		DryRun:    s.dryRun,
+		StartedAt: s.startedAt,
+		Stats: SessionStats{
+			Checked:      s.checked.Load(),
+			Healthy:      s.healthy.Load(),
+			Detected:     s.detected.Load(),
+			Repaired:     s.repaired.Load(),
+			Unrepairable: s.unrepairable.Load(),
+			Skipped:      s.skipped.Load(),
+		},
+	}
+	if v := s.status.Load(); v != nil {
+		out.Status = v.(string)
+	}
+	if t := s.doneAt.Load(); t != 0 {
+		out.DoneAt = time.Unix(0, t)
+	}
+	return out
 }
 
 type TriggerReq struct {
@@ -76,7 +127,7 @@ type DirectorOpts struct {
 }
 
 type triggerReq struct {
-	sess *Session
+	sess *liveSession
 }
 
 func NewDirector(opts DirectorOpts) *Director {
@@ -86,7 +137,7 @@ func NewDirector(opts DirectorOpts) *Director {
 	return &Director{
 		sources:   map[string]BlockSource{},
 		verifiers: map[string]BlockVerifier{},
-		sessions:  map[string]*Session{},
+		sessions:  map[string]*liveSession{},
 		dedup:     map[string]string{},
 		queue:     make(chan triggerReq, opts.QueueSize),
 		incident:  opts.Incident,
@@ -109,25 +160,30 @@ func (d *Director) Trigger(req TriggerReq) (string, bool) {
 	if existing, ok := d.dedup[dk]; ok {
 		return existing, false
 	}
-	sess := &Session{
-		ID:        uuid.NewString(),
-		Bucket:    req.Bucket,
-		KeyPrefix: req.KeyPrefix,
-		Scope:     req.Scope,
-		DryRun:    req.DryRun,
-		StartedAt: time.Now(),
-		Status:    "running",
-	}
-	d.sessions[sess.ID] = sess
-	d.dedup[dk] = sess.ID
+	sess := newLiveSession(uuid.NewString(), req.Bucket, req.KeyPrefix, req.Scope, req.DryRun, time.Now())
+	d.sessions[sess.id] = sess
+	d.dedup[dk] = sess.id
 	select {
 	case d.queue <- triggerReq{sess: sess}:
 	default:
 		delete(d.dedup, dk)
-		delete(d.sessions, sess.ID)
+		delete(d.sessions, sess.id)
 		return "", false
 	}
-	return sess.ID, true
+	return sess.id, true
+}
+
+func newLiveSession(id, bucket, keyPrefix string, scope ScrubScope, dryRun bool, startedAt time.Time) *liveSession {
+	s := &liveSession{
+		id:        id,
+		bucket:    bucket,
+		keyPrefix: keyPrefix,
+		scope:     scope,
+		dryRun:    dryRun,
+		startedAt: startedAt,
+	}
+	s.status.Store("running")
+	return s
 }
 
 func (d *Director) ApplyFromFSM(entry ScrubTriggerEntry) {
@@ -136,15 +192,7 @@ func (d *Director) ApplyFromFSM(entry ScrubTriggerEntry) {
 		d.mu.Unlock()
 		return
 	}
-	sess := &Session{
-		ID:        entry.SessionID,
-		Bucket:    entry.Bucket,
-		KeyPrefix: entry.KeyPrefix,
-		Scope:     entry.Scope,
-		DryRun:    entry.DryRun,
-		StartedAt: time.Unix(entry.RequestedAt, 0),
-		Status:    "running",
-	}
+	sess := newLiveSession(entry.SessionID, entry.Bucket, entry.KeyPrefix, entry.Scope, entry.DryRun, time.Unix(entry.RequestedAt, 0))
 	d.sessions[entry.SessionID] = sess
 	d.mu.Unlock()
 	select {
@@ -173,24 +221,25 @@ func (d *Director) workerLoop(ctx context.Context) {
 	}
 }
 
-func (d *Director) runSession(ctx context.Context, sess *Session) {
-	srcName := d.routeSource(sess.Bucket)
+func (d *Director) runSession(ctx context.Context, sess *liveSession) {
+	srcName := d.routeSource(sess.bucket)
 	d.mu.Lock()
 	src := d.sources[srcName]
 	ver := d.verifiers[srcName]
 	d.mu.Unlock()
 	if src == nil || ver == nil {
-		log.Warn().Str("session_id", sess.ID).Str("source", srcName).Msg("scrub director: no source registered")
+		log.Warn().Str("session_id", sess.id).Str("source", srcName).Msg("scrub director: no source registered")
 		d.markDone(sess)
 		return
 	}
-	ch, err := src.Iter(ctx, sess.Scope, sess.KeyPrefix)
+	ch, err := src.Iter(ctx, sess.scope, sess.keyPrefix)
 	if err != nil {
 		log.Warn().Err(err).Msg("scrub director: source iter failed")
 		d.markDone(sess)
 		return
 	}
 	for blk := range ch {
+		// Cancellation: ctx OR explicit CancelSession.
 		select {
 		case <-ctx.Done():
 			for range ch {
@@ -198,22 +247,28 @@ func (d *Director) runSession(ctx context.Context, sess *Session) {
 			return
 		default:
 		}
-		sess.Stats.Checked++
+		if v := sess.status.Load(); v != nil && v.(string) == "cancelled" {
+			for range ch {
+			}
+			d.markDone(sess) // marks DoneAt; preserves "cancelled" status
+			return
+		}
+		sess.checked.Add(1)
 		st, vErr := ver.Verify(ctx, blk)
 		if vErr != nil {
 			log.Warn().Err(vErr).Str("key", blk.Key).Msg("scrub: verify failed")
 			continue
 		}
 		if st.Healthy {
-			sess.Stats.Healthy++
+			sess.healthy.Add(1)
 			continue
 		}
 		if st.Skipped {
-			sess.Stats.Skipped++
+			sess.skipped.Add(1)
 			continue
 		}
-		sess.Stats.Detected++
-		corrID := blk.Bucket + "/" + blk.Key + "/" + sess.ID
+		sess.detected.Add(1)
+		corrID := blk.Bucket + "/" + blk.Key + "/" + sess.id
 		scope := incident.Scope{
 			Kind:   incident.ScopeObject,
 			Bucket: blk.Bucket,
@@ -229,7 +284,7 @@ func (d *Director) runSession(ctx context.Context, sess *Session) {
 			Message:       st.Detail,
 			At:            now,
 		}}
-		if sess.DryRun {
+		if sess.dryRun {
 			if d.incident != nil {
 				_ = d.incident.Record(ctx, facts)
 			}
@@ -243,7 +298,7 @@ func (d *Director) runSession(ctx context.Context, sess *Session) {
 			At:            now,
 		})
 		if rerr := ver.Repair(ctx, blk); rerr != nil {
-			sess.Stats.Unrepairable++
+			sess.unrepairable.Add(1)
 			facts = append(facts, incident.Fact{
 				CorrelationID: corrID,
 				Type:          incident.FactActionFailed,
@@ -257,7 +312,7 @@ func (d *Director) runSession(ctx context.Context, sess *Session) {
 			}
 			continue
 		}
-		sess.Stats.Repaired++
+		sess.repaired.Add(1)
 		facts = append(facts, incident.Fact{
 			CorrelationID: corrID,
 			Type:          incident.FactVerified,
@@ -276,13 +331,12 @@ func (d *Director) runSession(ctx context.Context, sess *Session) {
 	d.markDone(sess)
 }
 
-func (d *Director) markDone(sess *Session) {
-	d.mu.Lock()
-	sess.DoneAt = time.Now()
-	if sess.Status == "running" {
-		sess.Status = "done"
+func (d *Director) markDone(sess *liveSession) {
+	sess.doneAt.Store(time.Now().UnixNano())
+	// Only flip "running" → "done"; leave "cancelled" intact.
+	if v := sess.status.Load(); v == nil || v.(string) == "running" {
+		sess.status.CompareAndSwap(v, "done")
 	}
-	d.mu.Unlock()
 }
 
 // routeSource maps a bucket to a registered source name. Replication-stored
@@ -298,32 +352,39 @@ func (d *Director) routeSource(bucket string) string {
 
 func (d *Director) Sessions() []Session {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	out := make([]Session, 0, len(d.sessions))
+	live := make([]*liveSession, 0, len(d.sessions))
 	for _, s := range d.sessions {
-		out = append(out, *s)
+		live = append(live, s)
+	}
+	d.mu.Unlock()
+	out := make([]Session, 0, len(live))
+	for _, s := range live {
+		out = append(out, s.snapshot())
 	}
 	return out
 }
 
 func (d *Director) GetSession(id string) (Session, bool) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	s, ok := d.sessions[id]
+	d.mu.Unlock()
 	if !ok {
 		return Session{}, false
 	}
-	return *s, true
+	return s.snapshot(), true
 }
 
+// CancelSession marks a session cancelled. The running worker observes the
+// flag at the next block boundary in runSession and stops emitting work.
+// Already-issued Verify/Repair calls run to completion.
 func (d *Director) CancelSession(id string) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	s, ok := d.sessions[id]
+	d.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("session %q not found", id)
 	}
-	s.Status = "cancelled"
+	s.status.Store("cancelled")
 	return nil
 }
 
