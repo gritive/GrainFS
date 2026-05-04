@@ -29,6 +29,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -41,6 +42,7 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
@@ -115,6 +117,9 @@ func ensureShardGroupPlaceholder(dgMgr *cluster.DataGroupManager, entry cluster.
 func init() {
 	serveCmd.Flags().StringP("data", "d", "./data", "data directory")
 	serveCmd.Flags().IntP("port", "p", 9000, "listen port")
+	serveCmd.Flags().String("admin-socket", "", "admin Unix socket path (default <data>/admin.sock)")
+	serveCmd.Flags().String("admin-group", "", "OS group name for admin socket chown (default: caller's primary group)")
+	serveCmd.Flags().String("public-url", "", "public dashboard base URL (e.g. https://node1:9000); defaults to localhost in `grainfs dashboard` output")
 	serveCmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
@@ -1290,6 +1295,47 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	distBackend.RegisterProposeForwardHandler()
 
 	srv := server.New(addr, backend, srvOpts...)
+
+	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
+	// Open the dashboard auth token (creates <data>/dashboard.token mode 0600
+	// on first run). Install the middleware on /ui/* and register /ui/api/*
+	// admin routes BEFORE the data-plane Hertz starts serving.
+	tokenStore, err := dashboard.Open(filepath.Join(dataDir, "dashboard.token"))
+	if err != nil {
+		return fmt.Errorf("dashboard token: %w", err)
+	}
+	publicURL, _ := cmd.Flags().GetString("public-url")
+	adminDeps := &admin.Deps{
+		Manager:   srv.VolumeManager(),
+		Token:     tokenStore,
+		PublicURL: publicURL,
+		NodeID:    nodeID,
+	}
+	dataHertz := srv.HertzEngine()
+	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
+	admin.RegisterUI(dataHertz, adminDeps)
+
+	// Open the admin Unix socket. Operator commands (`grainfs volume *`, `grainfs
+	// dashboard`) reach this socket; permissions are governed by the file mode
+	// (0660) and optional --admin-group chown.
+	adminSocket, _ := cmd.Flags().GetString("admin-socket")
+	if adminSocket == "" {
+		adminSocket = filepath.Join(dataDir, "admin.sock")
+	}
+	adminGroup, _ := cmd.Flags().GetString("admin-group")
+	adminSrv, err := admin.Start(admin.Config{
+		SocketPath: adminSocket,
+		Group:      adminGroup,
+		Deps:       adminDeps,
+	})
+	if err != nil {
+		return fmt.Errorf("admin server: %w", err)
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = adminSrv.Stop(stopCtx)
+	}()
 
 	// receiptWiring.keyStore may be nil when heal-receipt is disabled — in that
 	// case NewReceiptTrackingEmitter degrades to a pass-through (signing unhealthy).

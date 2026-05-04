@@ -331,6 +331,15 @@ func (s *Server) Run() error {
 	return s.hertz.Run()
 }
 
+// HertzEngine exposes the underlying Hertz instance so callers (serve.go) can
+// install additional middleware and routes (e.g. /ui/api/* admin endpoints,
+// dashboard token auth) before Run is called. Must be invoked before Run.
+func (s *Server) HertzEngine() *server.Hertz { return s.hertz }
+
+// VolumeManager exposes the volume manager so callers can construct admin.Deps
+// without round-tripping through New options.
+func (s *Server) VolumeManager() *volume.Manager { return s.volMgr }
+
 // Shutdown gracefully shuts down the server, draining in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.hertz.Shutdown(ctx)
