@@ -21,6 +21,10 @@ const (
 	MetaCmdTypeIcebergCreateTable     MetaCmdType = 11
 	MetaCmdTypeIcebergCommitTable     MetaCmdType = 12
 	MetaCmdTypeIcebergDeleteTable     MetaCmdType = 13
+	MetaCmdTypeRotateKeyBegin         MetaCmdType = 14
+	MetaCmdTypeRotateKeySwitch        MetaCmdType = 15
+	MetaCmdTypeRotateKeyDrop          MetaCmdType = 16
+	MetaCmdTypeRotateKeyAbort         MetaCmdType = 17
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -38,6 +42,10 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeIcebergCreateTable:     "IcebergCreateTable",
 	MetaCmdTypeIcebergCommitTable:     "IcebergCommitTable",
 	MetaCmdTypeIcebergDeleteTable:     "IcebergDeleteTable",
+	MetaCmdTypeRotateKeyBegin:         "RotateKeyBegin",
+	MetaCmdTypeRotateKeySwitch:        "RotateKeySwitch",
+	MetaCmdTypeRotateKeyDrop:          "RotateKeyDrop",
+	MetaCmdTypeRotateKeyAbort:         "RotateKeyAbort",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -55,6 +63,10 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"IcebergCreateTable":     MetaCmdTypeIcebergCreateTable,
 	"IcebergCommitTable":     MetaCmdTypeIcebergCommitTable,
 	"IcebergDeleteTable":     MetaCmdTypeIcebergDeleteTable,
+	"RotateKeyBegin":         MetaCmdTypeRotateKeyBegin,
+	"RotateKeySwitch":        MetaCmdTypeRotateKeySwitch,
+	"RotateKeyDrop":          MetaCmdTypeRotateKeyDrop,
+	"RotateKeyAbort":         MetaCmdTypeRotateKeyAbort,
 }
 
 func (v MetaCmdType) String() string {

@@ -149,6 +149,7 @@ func (m *MetaRaft) Start(ctx context.Context) error {
 	m.cancel = cancel
 	m.node.Start()
 	go m.runApplyLoop(ctx)
+	go m.runRotationAutoProgress(ctx)
 	return nil
 }
 

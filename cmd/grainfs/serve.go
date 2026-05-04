@@ -540,13 +540,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
 	}
 
-	// Start QUIC transport for inter-node communication. If the operator
-	// supplied a --cluster-key, use it (this covers both static-peers cluster
-	// mode and the dynamic-join seed node, which has no peers/join yet but
-	// will be joined by others). Otherwise generate an ephemeral cluster
-	// identity so true solo mode (no key, no peers, no join) preserves
-	// zero-config.
-	transportPSK := clusterKey
+	// Start QUIC transport for inter-node communication. Resolution order
+	// (rotation-spec D10):
+	//   1. keys.d/current.key wins over --cluster-key flag if both differ
+	//      (warn emitted; refuse-to-start path explicitly NOT used).
+	//   2. Disk only: use disk silently.
+	//   3. Flag only: use flag, mirror to keys.d/current.key on first boot.
+	//   4. Both empty + cluster mode: refused upstream by ValidateClusterKey.
+	//      Both empty + solo mode: generate ephemeral so zero-config holds.
+	resolvedKey, warn, err := resolveClusterKey(dataDir, clusterKey)
+	if err != nil {
+		return fmt.Errorf("resolve cluster key: %w", err)
+	}
+	if warn != "" {
+		log.Warn().Msg(warn)
+	}
+	transportPSK := resolvedKey
 	if transportPSK == "" {
 		ephemeral, err := generateEphemeralClusterKey()
 		if err != nil {
@@ -635,6 +644,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		clusterRouter.AssignBucket(bucket, groupID)
 	})
 
+	// 클러스터 키 회전 — RotationWorker가 FSM phase 변경에 반응하여 디스크
+	// I/O와 transport identity swap을 수행 (D16 분리). 콜백은 metaRaft.Start
+	// 전에 등록해야 첫 apply 이벤트를 놓치지 않는다 (race-free).
+	rotationKeystore := transport.NewKeystore(dataDir)
+	rotationWorker := cluster.NewRotationWorker(rotationKeystore, quicTransport, nodeID)
+	metaRaft.FSM().SetOnRotationApplied(func(st cluster.RotationState) {
+		_ = rotationWorker.OnPhaseChange(st)
+	})
+	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can be
+	// validated against the current cluster key (D10).
+	if _, activeSPKI, err := transport.DeriveClusterIdentity(transportPSK); err == nil {
+		metaRaft.FSM().SetRotationSteady(activeSPKI)
+	} else {
+		log.Warn().Err(err).Msg("failed to seed rotation FSM steady state; rotation will be unavailable until next restart")
+	}
+
 	if !joinMode {
 		if err := metaRaft.Bootstrap(); err != nil {
 			return fmt.Errorf("meta-raft bootstrap: %w", err)
@@ -642,6 +667,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	if err := metaRaft.Start(ctx); err != nil {
 		return fmt.Errorf("meta-raft start: %w", err)
+	}
+	// previous.key cleanup goroutine — deletes keys.d/previous.key after
+	// RotationPreviousGrace expires. Runs on all nodes (FSM state is
+	// identical via raft); each node deletes its own local file.
+	metaRaft.StartPreviousKeyCleanup(ctx, rotationKeystore)
+	if err := startRotationSocket(ctx, dataDir, metaRaft); err != nil {
+		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 	}
 	defer metaRaft.Close()
 
@@ -1638,6 +1670,37 @@ func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int
 			return 1 // N× 모드: EC 메타 없음
 		}
 		return k + m
+	}
+}
+
+// resolveClusterKey applies the bootstrap conflict resolution rules from
+// the cluster-key-rotation spec D10:
+//   - Disk wins over flag when both present and differ (warn emitted).
+//   - Disk only: use disk silently.
+//   - Flag only: use flag, mirror to disk on first boot.
+//   - Both empty: returns "" (caller decides solo ephemeral path).
+//
+// Returns (resolved, warning_message, error). Warning is non-empty when the
+// caller should log.Warn the operator about a mismatch.
+func resolveClusterKey(dataDir, flagKey string) (string, string, error) {
+	ks := transport.NewKeystore(dataDir)
+	diskKey, diskErr := ks.ReadCurrent()
+	hasDisk := diskErr == nil
+
+	switch {
+	case hasDisk && flagKey != "" && diskKey != flagKey:
+		warn := fmt.Sprintf("--cluster-key flag (%d chars) does not match keys.d/current.key (%d chars); disk wins. Reconcile via `cluster rotate-key` or update flag to match disk.", len(flagKey), len(diskKey))
+		return diskKey, warn, nil
+	case hasDisk:
+		return diskKey, "", nil
+	case flagKey != "":
+		// First boot — mirror to disk so subsequent restarts read from disk.
+		if err := ks.WriteCurrent(flagKey); err != nil {
+			return "", "", fmt.Errorf("mirror flag to keys.d: %w", err)
+		}
+		return flagKey, "", nil
+	default:
+		return "", "", nil
 	}
 }
 
