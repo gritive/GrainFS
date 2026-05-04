@@ -228,7 +228,33 @@ func (m *Manager) Resize(name string, newSize int64) error {
 func (m *Manager) Delete(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.deleteUnlocked(name)
+}
 
+// DeleteWithSnapshots deletes the volume and all its snapshots atomically under
+// a single mutex acquisition. Used by `grainfs volume delete --force`. Use Delete
+// when no snapshots are expected; this returns the same error as Delete if the
+// volume has no snapshots.
+func (m *Manager) DeleteWithSnapshots(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, err := m.getVolUnlocked(name); err != nil {
+		return err
+	}
+	snaps, err := m.listSnapshotsUnlocked(name)
+	if err != nil {
+		return fmt.Errorf("list snapshots: %w", err)
+	}
+	for _, s := range snaps {
+		if err := m.deleteSnapshotUnlocked(name, s.ID); err != nil {
+			return fmt.Errorf("delete snapshot %s: %w", s.ID, err)
+		}
+	}
+	return m.deleteUnlocked(name)
+}
+
+func (m *Manager) deleteUnlocked(name string) error {
 	// Verify volume exists
 	if _, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(name)); err != nil {
 		return fmt.Errorf("volume %q: %w", name, ErrNotFound)
@@ -236,7 +262,6 @@ func (m *Manager) Delete(name string) error {
 
 	// Delete all block objects, respecting dedup refcounts.
 	if m.dedup != nil {
-		// Dedup path: BadgerDB tracks all block mappings; release refcounts atomically.
 		toDelete, err := m.dedup.DeleteVolume(name)
 		if err != nil {
 			return fmt.Errorf("dedup delete volume: %w", err)
@@ -251,11 +276,11 @@ func (m *Manager) Delete(name string) error {
 		})
 	}
 
-	// Delete metadata
 	if err := m.backend.DeleteObject(context.Background(), volumeBucketName, metaKey(name)); err != nil {
 		return err
 	}
 	delete(m.volumes, name)
+	delete(m.liveMaps, name)
 	return nil
 }
 
@@ -1233,7 +1258,10 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.listSnapshotsUnlocked(name)
+}
 
+func (m *Manager) listSnapshotsUnlocked(name string) ([]SnapshotInfo, error) {
 	if _, err := m.getVolUnlocked(name); err != nil {
 		return nil, err
 	}
@@ -1269,13 +1297,15 @@ func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
 func (m *Manager) DeleteSnapshot(name, snapID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.deleteSnapshotUnlocked(name, snapID)
+}
 
+func (m *Manager) deleteSnapshotUnlocked(name, snapID string) error {
 	vol, err := m.getVolUnlocked(name)
 	if err != nil {
 		return err
 	}
 
-	// Load snapshot map to find blocks to delete
 	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))
 	if err != nil {
 		return fmt.Errorf("snapshot %q not found for volume %q", snapID, name)
@@ -1286,20 +1316,17 @@ func (m *Manager) DeleteSnapshot(name, snapID string) error {
 		return fmt.Errorf("parse snapshot map: %w", err)
 	}
 
-	// Delete snapshot block objects (PackedBackend decrements ref; actual delete at ref=0)
 	for _, key := range snapMap {
 		m.backend.DeleteObject(context.Background(), volumeBucketName, key) //nolint:errcheck
 	}
 	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))  //nolint:errcheck
 	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMetaKey(name, snapID)) //nolint:errcheck
 
-	// Decrement snapshot_count and persist
 	if vol.SnapshotCount > 0 {
 		vol.SnapshotCount--
 	}
 
 	if vol.SnapshotCount == 0 {
-		// All snapshots gone — delete live_map and reset to default-key mode
 		m.backend.DeleteObject(context.Background(), volumeBucketName, liveMapKey(name)) //nolint:errcheck
 		delete(m.liveMaps, name)
 	}
