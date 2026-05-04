@@ -668,6 +668,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if err := metaRaft.Start(ctx); err != nil {
 		return fmt.Errorf("meta-raft start: %w", err)
 	}
+	// previous.key cleanup goroutine — deletes keys.d/previous.key after
+	// RotationPreviousGrace expires. Runs on all nodes (FSM state is
+	// identical via raft); each node deletes its own local file.
+	metaRaft.StartPreviousKeyCleanup(ctx, rotationKeystore)
 	if err := startRotationSocket(ctx, dataDir, metaRaft); err != nil {
 		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 	}

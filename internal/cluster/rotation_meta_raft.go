@@ -112,6 +112,11 @@ func (m *MetaRaft) runRotationAutoProgress(ctx context.Context) {
 		lastRotationID [16]byte
 		lastPhase      = -1
 		phaseEnteredAt time.Time
+		// abortAttemptedFor avoids spamming raft with abort proposals every
+		// second when the previous one failed (e.g., raft lag). One attempt
+		// per global-timeout per rotation is plenty; the next leader (or next
+		// rotation) gets a fresh shot.
+		abortAttemptedFor [16]byte
 	)
 	for {
 		select {
@@ -138,8 +143,12 @@ func (m *MetaRaft) runRotationAutoProgress(ctx context.Context) {
 		if st.Phase == PhaseSteady {
 			continue
 		}
-		// Global timeout check.
+		// Global timeout check. Only attempt abort once per rotation_id.
 		if now.Sub(phaseEnteredAt) > RotationGlobalTimeout {
+			if abortAttemptedFor == st.RotationID {
+				continue
+			}
+			abortAttemptedFor = st.RotationID
 			log.Warn().Hex("rotation_id", st.RotationID[:]).
 				Int("phase", st.Phase).
 				Msg("meta_raft: rotation global timeout exceeded; aborting")
@@ -150,7 +159,7 @@ func (m *MetaRaft) runRotationAutoProgress(ctx context.Context) {
 			})
 			cancel()
 			if err != nil {
-				log.Error().Err(err).Msg("meta_raft: rotation auto-abort failed")
+				log.Error().Err(err).Msg("meta_raft: rotation auto-abort failed; will not retry until rotation_id changes")
 			}
 			continue
 		}
@@ -178,6 +187,60 @@ func (m *MetaRaft) runRotationAutoProgress(ctx context.Context) {
 		}
 		cancel()
 	}
+}
+
+// PreviousKeyDeleter abstracts the keystore call so the cleanup goroutine can
+// be tested without a real on-disk keystore. *transport.Keystore satisfies it.
+type PreviousKeyDeleter interface {
+	DeletePrevious() error
+}
+
+// runPreviousKeyCleanup deletes keys.d/previous.key when the FSM-recorded
+// GraceUntil timestamp has passed. Runs on every node (not just leader); the
+// FSM state is identical across peers and the deletion is local-disk only.
+//
+// Tick interval is 1 minute — much coarser than RotationPhaseGrace because
+// previous.key grace is on the order of an hour. Per-deletion attempts are
+// guarded by lastDeletedFor so we don't try the same delete every minute.
+func (m *MetaRaft) runPreviousKeyCleanup(ctx context.Context, ks PreviousKeyDeleter) {
+	if ks == nil {
+		return
+	}
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+	var lastDeletedFor int64 // GraceUntil value we've already acted on
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.done:
+			return
+		case <-tick.C:
+		}
+		st := m.fsm.rotation.State()
+		if st.GraceUntil == 0 || st.GraceUntil == lastDeletedFor {
+			continue
+		}
+		if time.Now().UnixNano() < st.GraceUntil {
+			continue
+		}
+		if err := ks.DeletePrevious(); err != nil {
+			log.Warn().Err(err).Int64("grace_until", st.GraceUntil).
+				Msg("meta_raft: failed to delete previous.key after grace expiry; will retry next tick")
+			continue
+		}
+		lastDeletedFor = st.GraceUntil
+		log.Info().Int64("grace_until", st.GraceUntil).
+			Msg("meta_raft: deleted keys.d/previous.key after grace expiry")
+	}
+}
+
+// StartPreviousKeyCleanup wires the cleanup goroutine. Must be called after
+// Start() has set up m.done. Separate from Start() so callers (serve.go) can
+// inject the keystore without forcing rotation_meta_raft.go to depend on
+// transport package.
+func (m *MetaRaft) StartPreviousKeyCleanup(ctx context.Context, ks PreviousKeyDeleter) {
+	go m.runPreviousKeyCleanup(ctx, ks)
 }
 
 // 컴파일 타임에 clusterpb 의존성이 다른 상수와 정렬되어 있는지 확인.

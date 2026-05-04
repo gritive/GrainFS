@@ -604,19 +604,41 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
 
 전제: 모든 노드가 v0.0.39+ 이며 정상 작동 중. Leader 식별: `grainfs cluster status`.
 
-1. **새 키 생성** (또는 자동):
+> ⚠ **다중 노드 클러스터 필수 절차**: 회전은 모든 peer가 새 PSK를 자신의
+> `keys.d/next.key`로 가지고 있을 때만 정상 동작한다. CLI는 leader의 디스크에만
+> 키를 쓰므로, 절차 1~2 단계에서 **반드시 모든 peer에게 같은 PSK 파일을 미리
+> 배포해야 한다**. 미배포 시 leader는 phase를 자동 진행하지만 follower 워커들은
+> ENOENT로 실패하고 transport identity 전환이 일어나지 않아 cluster network
+> split 발생. (Plan C ack 모델: raft commit이 묵시적 ack — peer 적용 실패는
+> leader가 감지하지 못함.)
+
+1. **새 키 생성**:
    ```
-   openssl rand -hex 32  # 32-byte PSK = 64 hex chars
+   openssl rand -hex 32 > /tmp/grainfs-new-psk  # 32-byte PSK = 64 hex chars
    ```
 
-2. **Leader 노드에서 회전 시작**:
+2. **모든 peer 노드에 새 PSK 배포** (leader 포함):
+   ```bash
+   # 각 peer에 대해 — secure channel (ssh / ansible / vault) 사용
+   for HOST in node1 node2 node3; do
+     ssh "$HOST" "umask 077 && mkdir -p /path/to/data/keys.d && cat > /path/to/data/keys.d/next.key" < /tmp/grainfs-new-psk
+     ssh "$HOST" "chmod 600 /path/to/data/keys.d/next.key"
+   done
    ```
-   ./grainfs cluster rotate-key begin --new-key=<64-hex> --data=/path/to/data
-   # 또는 자동 생성:
-   ./grainfs cluster rotate-key begin --generate --data=/path/to/data
+   각 노드의 `<DATA>/keys.d/next.key` 파일에 동일한 64자 hex PSK가 쓰여 있어야
+   함. 파일 내용은 hex 문자열 + 줄바꿈. 권한 0600.
+
+3. **Leader 노드에서 회전 시작**:
+   ```
+   # leader의 keys.d/next.key는 이미 있어야 함 — 없으면 CLI가 자동으로 생성
+   ./grainfs cluster rotate-key begin --new-key=$(cat /tmp/grainfs-new-psk) --data=/path/to/data
    ```
    출력에 `rotation_id`, `OLD SPKI`, `NEW SPKI` 표시. CLI는 즉시 반환되며
    클러스터가 background에서 자동으로 phase 1→2→3→steady 진행.
+
+   **회전 중 follower의 `next.key`가 없거나 SPKI 불일치이면 해당 follower는
+   transport를 swap하지 못한다.** 다른 노드와 통신 단절. 즉시 `abort` 수행 후
+   2단계 재배포.
 
 3. **진행 상황 모니터링**:
    ```

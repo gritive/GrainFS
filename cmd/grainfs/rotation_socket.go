@@ -132,6 +132,14 @@ func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluste
 	if !metaRaft.IsLeader() {
 		return rotationSocketResponse{Error: "rotate-key begin must be issued on the meta-raft leader (current leader: " + metaRaft.LeaderID() + ")"}
 	}
+	// Refuse if a rotation is already in progress. Without this guard a
+	// repeated begin would (1) overwrite keys.d/next.key with the new PSK,
+	// (2) hit FSM rejection ("rotation already in progress"), (3) hit the
+	// rollback path below and DeleteNext — which would destroy the in-flight
+	// rotation's key on the leader and break Switch (cluster network split).
+	if st := metaRaft.RotationState(); st.Phase != cluster.PhaseSteady {
+		return rotationSocketResponse{Error: fmt.Sprintf("rotation already in progress (rotation_id=%x, phase=%d); abort first", st.RotationID, st.Phase)}
+	}
 	if len(newKey) != 64 {
 		return rotationSocketResponse{Error: fmt.Sprintf("new_key must be 64 hex chars (32 bytes), got %d", len(newKey))}
 	}
@@ -162,7 +170,10 @@ func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluste
 	defer cancel()
 	if err := metaRaft.ProposeRotateKeyBegin(propCtx, cmd); err != nil {
 		// Roll back the next.key write so a retry isn't blocked by stale state.
-		_ = ks.DeleteNext()
+		// Log on cleanup failure so a stuck file is visible.
+		if delErr := ks.DeleteNext(); delErr != nil {
+			log.Warn().Err(delErr).Msg("rotate-key begin: failed to roll back next.key after propose error; manual cleanup may be required")
+		}
 		return rotationSocketResponse{Error: fmt.Sprintf("ProposeRotateKeyBegin: %v", err)}
 	}
 	st := metaRaft.RotationState()

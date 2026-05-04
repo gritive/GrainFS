@@ -12,6 +12,11 @@
   (steady→begun→switched→steady-on-NEW), 5초 phase grace, 30분 global
   timeout 자동 abort. Phase-2 abort 는 OLD 롤백, phase-3 abort 는 D18 spec
   대로 NEW forward-roll.
+  > **다중 노드 사용 시 필독**: 운영자는 회전 시작 전에 새 PSK 파일을
+  > **모든 peer 의 `<DATA>/keys.d/next.key` 에 직접 배포**해야 한다. CLI 는
+  > leader 디스크에만 쓰며, follower 워커는 자기 디스크의 `next.key` 를
+  > 읽는다. 미배포 시 cluster network split. 자세한 절차는
+  > `docs/RUNBOOK.md#online-rotation-권장`.
 - **transport keystore** (`internal/transport/keystore.go`): `keys.d/{current,next,previous}.key`
   슬롯 매니저. Atomic write + fsync, O_NOFOLLOW, mode 0700/0600.
 - **multi-SPKI accept set**: `transport.IdentitySnapshot` + `atomic.Pointer`
