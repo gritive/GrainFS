@@ -100,7 +100,6 @@
 - [ ] **`volume mv / rename`** — 볼륨 이름 변경. live_map/snapshot key prefix 마이그레이션 필요.
 - [ ] **incident store scope index** — `internal/incident/badgerstore/store.go` 의 `List(ctx, limit)` 외에 `ListByScope(ctx, kind, id, limit)` 추가. volume scrub follow-up 에서 status 응답이 v1 에 `List(500) + 메모리 필터` 로 시작. 운영에서 incident 누적이 수만건+ 가 되어 status 응답이 100ms 초과하면 secondary index(`scope:<kind>:<id>:<-ts>:<id>`) 도입.
 - [ ] **`ScanObjects(bucket, keyPrefix)` 로 시그니처 확장** — `internal/cluster/scrubbable.go` 의 `ScanObjects` 가 `lat:` 인덱스 전체를 iterate. volume scrub follow-up 에서 BackgroundScrubber 를 사용하는 경로가 생기면 prefix-bounded scan 으로 비용 감소.
-- [ ] **`RepairReplica` 단위 테스트** — `internal/cluster/repair_replica.go` 는 v0.0.43 volume scrub PR 에서 통합 테스트 (3-node `scrubber_volume_integration_test.go`) 만 커버. 단위 테스트는 `*ShardService` 가 concrete 라 mock 불가능 — backend 의 shardSvc 를 작은 인터페이스 (`peerReader { ReadShard(...) }`) 로 추출하면 white-box 테스트 가능. 회귀 보호 레벨 향상 + 통합 테스트 시간 절감 효과.
 - [ ] **EC scrub 을 `BlockSource` 인터페이스로 마이그레이션** — v0.0.43 volume scrub PR 에서 `BackgroundScrubber` 의 EC `runOnce` 경로는 변경 안 함 — Volume 만 신규 `BlockSource` 인터페이스 사용. EC 도 동일 인터페이스로 마이그레이션하면 (a) source registration API 통일 (b) Director.Trigger 가 EC 도 라우팅 가능 (현재는 volume 만 trigger 가능). 운영 데이터 후 우선순위 조정.
 
 ## Storage Hashing 성능 검토
