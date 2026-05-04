@@ -8,10 +8,19 @@
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
+- [ ] multi tenancy
+- [ ] quota
+- [ ] IAM
+- [ ] hot/cold auto tiering
+- [ ] io 기반 auto rebalancing
+- [ ] iceberg: 카탈로그 상태 점검
+- [ ] iceberg: 메타데이터 정합성 검증
+- [ ] 정기 복구 리허설
 
 ## Phase 17: Scale-Out
 
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
+- [ ] **BadgerDB pre-server recovery journal** — *zero ops* — `<data>/.recovery/` 아래에 incident-state DB가 열리기 전 발생한 Badger role decision을 원자적 JSONL/manifest로 남긴다. 현재 Badger role-scoped recovery 첫 slice는 pre-server failure를 stderr-only로 수용한다. 이후 `internal/badgerrole` decision struct가 안정되면 fsync+rename 규칙으로 durable journal을 추가해 startup-blocking failure도 재시작 후 incident/API/UI에서 추적 가능하게 만든다. **Depends on:** Badger role decision structs.
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
 
@@ -80,3 +89,15 @@
 
 - [ ] **One-command bootstrap** — *zero config* — `grainfs init` 하나로 cluster key, encryption key, 기본 credential, volume 생성 + 필요 파일 권한 설정
 - [ ] **Hot reload drift detection** — *zero ops* — config 파일 시스템 도입 후, 런타임 reload 시 디스크 config와 메모리 상태 불일치 감지 + 명확한 에러. config 파일 시스템 자체가 선행 조건.
+
+## Volume CLI follow-ups (Phase B 이후)
+
+`docs/superpowers/specs/2026-05-04-volume-cli-management-design.md` Phase B(라이프사이클 + 변경/진단)가 shipped 된 이후 단계. 각 항목은 server 모듈 부재 — 별도 spec/plan 필요.
+
+- [ ] **`volume export / import`** — 볼륨 + 스냅샷 체인 백업/복구. server 측 export stream(블록 + live_map + meta) 필요. 키 회전, EC 파라미터, 스냅샷 정합성 고려.
+- [ ] **`volume policy`** — 볼륨별 PoolQuota / dedup on/off / encryption key id / EC k+m 파라미터 조회·변경. 현재 `ManagerOptions`는 Manager 단위라 per-volume override 모델 선행 필요.
+- [ ] **`volume attach / detach`** — NBD 노출 토글. 현재 NBD는 serve 시작 시 정적 바인딩만, 런타임 attach/detach 미지원.
+- [ ] **`volume mv / rename`** — 볼륨 이름 변경. live_map/snapshot key prefix 마이그레이션 필요.
+- [ ] **`volume scrub` 명령 (Phase B 에서 분리됨)** — 별도 spec 필요. 근본 원인: `__grainfs_volumes` 가 internal bucket 이라 `internal/cluster/backend.go:821` 에서 `useEC=false` 강제 → volume 블록은 EC 가 아니라 N×replication 으로 저장 → `lat:` 인덱스 미등록 → 기존 `BackgroundScrubber` 가 스캔 못함. **별도 설계 방향:** Manager 측 `Scrub(name)` 직접 구현 — live_map 순회 + 블록 GetObject + checksum 검증, 손상 시 `cluster.DistributedBackend` NX repair 경로 호출. cluster-wide trigger 는 meta-raft `ScrubTrigger` entry 패턴 (원래 spec A4=C 결정 재사용 가능).
+- [ ] **incident store scope index** — `internal/incident/badgerstore/store.go` 의 `List(ctx, limit)` 외에 `ListByScope(ctx, kind, id, limit)` 추가. volume scrub follow-up 에서 status 응답이 v1 에 `List(500) + 메모리 필터` 로 시작. 운영에서 incident 누적이 수만건+ 가 되어 status 응답이 100ms 초과하면 secondary index(`scope:<kind>:<id>:<-ts>:<id>`) 도입.
+- [ ] **`ScanObjects(bucket, keyPrefix)` 로 시그니처 확장** — `internal/cluster/scrubbable.go` 의 `ScanObjects` 가 `lat:` 인덱스 전체를 iterate. volume scrub follow-up 에서 BackgroundScrubber 를 사용하는 경로가 생기면 prefix-bounded scan 으로 비용 감소.

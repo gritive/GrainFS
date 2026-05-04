@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.42.0] — 2026-05-04 — Volume CLI Phase B (admin socket + dashboard token)
+
+### Added
+
+- **Volume management CLI** (operator-facing) — `grainfs volume {list, create, info,
+  stat, delete, resize, recalculate, clone, rollback}` plus
+  `grainfs volume snapshot {create, list, delete}`. All commands run against the
+  admin Unix socket and route through `volume.Manager` directly. Examples are
+  embedded in `--help` output.
+- **`grainfs volume resize`** (grow only) — `Manager.Resize` 추가. Shrink 거부 +
+  clone hint, equal size no-op.
+- **`grainfs volume delete --force`** — atomic cascade through new
+  `Manager.DeleteWithSnapshots`. Without `--force`, conflict error includes the
+  three most recent snapshots and the cascade command.
+- **`grainfs dashboard`** — issues a single shared auth token URL for the web
+  dashboard. Token persisted at `<data>/dashboard.token` (mode 0600). Use
+  `--rotate` to invalidate. Fragment-based handoff so the token never reaches
+  server logs.
+- **Admin Unix socket** (`<data>/admin.sock`, mode 0660) — local operator entry
+  point. File permission = authentication. Optional `--admin-group <name>` for
+  shared access. `--public-url` controls the dashboard URL prefix.
+- **`/ui/api/*` data-plane routes** — same admin handlers, gated by the
+  dashboard token middleware on `/ui/*` and `/ui/api/*`.
+
+### Changed
+
+- **Data-plane `/volumes/*` routes removed.** Volume management lives on the
+  admin Unix socket (CLI) and `/ui/api/volumes/*` (web UI). Pre-release scope —
+  no shim. Web UI fetches updated to the new path with `Authorization: Bearer`
+  header.
+
+### Deferred
+
+- **`volume scrub` 명령** — Phase B 범위에서 분리. 근본 원인: `__grainfs_volumes`
+  가 internal bucket 으로 분류되어 `internal/cluster/backend.go` 가 EC 인코딩을
+  비활성화 — volume 블록은 `lat:` 인덱스에 등록되지 않아 기존
+  `BackgroundScrubber` 가 스캔하지 못한다. 별도 spec 필요 (Manager 측 verify +
+  NX-replica repair, meta-raft cluster-wide trigger). follow-up 은 `TODOS.md`
+  의 "Volume CLI follow-ups" 참고.
+
 ## [0.0.41.0] — 2026-05-04 — online cluster-key rotation
 
 ### Added
