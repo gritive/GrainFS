@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — online cluster-key rotation
+## [0.0.41.0] — 2026-05-04 — online cluster-key rotation
 
 ### Added
 
