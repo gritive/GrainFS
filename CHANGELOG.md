@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.43.2] — 2026-05-05 — Scrub admin trigger works at --scrub-interval=0
+
+### Fixed
+
+- `cmd/grainfs/serve.go` — Director wiring (admin-trigger `volume scrub`)
+  was incorrectly gated on `--scrub-interval > 0`. Operators who disabled
+  periodic scrub lost the on-demand CLI as a side-effect ("scrub director
+  not configured" error). Director + shared replication source/verifier
+  are now wired unconditionally; only the periodic ticker + placement
+  monitor still require a positive interval.
+
+### Added
+
+- E2E regression `TestE2E_VolumeScrub_AdminTriggerWorksAtZeroInterval`
+  pins the fix: spin up a server with `--scrub-interval=0`, trigger
+  `volume scrub`, expect success rather than the "not configured" error.
+
 ## [0.0.43.1] — 2026-05-05 — Dedup-mode scrub regression coverage
 
 ### Notes

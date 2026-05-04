@@ -181,6 +181,25 @@ func TestE2E_VolumeScrub_SingleNodeRepairUnrepairable_Dedup(t *testing.T) {
 	require.Contains(t, out, "Unrepairable=1", "single node has no peer => repair fails; got:\n%s", out)
 }
 
+// TestE2E_VolumeScrub_AdminTriggerWorksAtZeroInterval — regression guard
+// for the Director-wiring fix. With --scrub-interval=0 the periodic scrub is
+// disabled, but the admin trigger (`grainfs volume scrub <name>`) must still
+// work. Pre-fix it returned "scrub director not configured".
+func TestE2E_VolumeScrub_AdminTriggerWorksAtZeroInterval(t *testing.T) {
+	dataDir, _, _ := startTestServer(t, "--dedup=false", "--scrub-interval=0")
+
+	out, code := runCLI(t, dataDir, "volume", "create", "vsi0", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dataDir, "volume", "write-at", "vsi0", "--offset", "0", "--content", "x")
+	require.Equal(t, 0, code, out)
+
+	out, code = runCLI(t, dataDir, "volume", "scrub", "vsi0")
+	require.Equal(t, 0, code, out)
+	require.NotContains(t, out, "scrub director not configured", "interval=0 must not disable admin trigger; got:\n%s", out)
+	require.Contains(t, out, "Detected=0", "healthy volume scrub should detect nothing; got:\n%s", out)
+	require.Contains(t, out, "Repaired=0")
+}
+
 // TestE2E_VolumeScrub_StatusListCancel — exercise the auxiliary subcommands
 // against a known-good session.
 func TestE2E_VolumeScrub_StatusListCancel(t *testing.T) {
