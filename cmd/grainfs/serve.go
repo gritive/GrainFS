@@ -1377,54 +1377,56 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// ShardPlacementMonitor detects locally-missing shards between full
 	// scrub cycles; its onMissing callback calls RepairShardLocal which
 	// resolves the latest version and pulls survivor shards from peers.
+	// --- Object-layer replication scrub shared infrastructure.
+	// Wired unconditionally so the admin-trigger Director works even when
+	// periodic scrub is disabled (--scrub-interval=0). Periodic scrub +
+	// placement monitor still require a positive interval.
+	//
+	// All three plumbings (walk, opener, repair) route through the local
+	// data-group that owns the bucket — single-node serve still sits inside
+	// a multi-raft group structure, so the volume bucket's files live under
+	// {dataDir}/groups/<gid>/ rather than the bare distBackend root.
+	groupBackendForBucket := func(bucket string) *cluster.DistributedBackend {
+		dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
+		if !ok || dg == nil || dg.Backend() == nil {
+			return nil
+		}
+		return dg.Backend().DistributedBackend
+	}
+	opener := scrubber.LocalOpener(func(bucket, key string) (io.ReadCloser, error) {
+		gb := groupBackendForBucket(bucket)
+		if gb == nil {
+			return nil, fmt.Errorf("scrub opener: no local group for %s", bucket)
+		}
+		return gb.OpenLocalReplica(bucket, key)
+	})
+	repairer := scrubber.ReplicaRepairer(replicaRepairerFunc(func(rctx context.Context, bucket, key string) error {
+		gb := groupBackendForBucket(bucket)
+		if gb == nil {
+			return fmt.Errorf("scrub repair: no local group for %s", bucket)
+		}
+		return gb.RepairReplica(rctx, bucket, key)
+	}))
+	replSource := scrubber.NewReplicationObjectSource("replication", volume.VolumeBucketName, volume.MetaPrefix, backend)
+	replVerifier := scrubber.NewReplicationVerifier(opener, repairer)
+
+	// Director owns CLI-triggered sessions + (later) cluster-broadcast
+	// trigger. Independent of periodic scrub interval — operators must be
+	// able to run `grainfs volume scrub <name>` even with --scrub-interval=0.
+	director := scrubber.NewDirector(scrubber.DirectorOpts{
+		Incident:  incidentRecorder,
+		QueueSize: 64,
+		NodeID:    nodeID,
+	})
+	director.Register("replication", replSource, replVerifier)
+	director.Start(ctx)
+	adminDeps.Director = director
+
 	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
 	if scrubInterval > 0 {
 		sc := scrubber.New(distBackend, scrubInterval)
 		sc.SetEmitter(activeEmitter)
-
-		// --- Object-layer replication scrub (volume blocks today; future
-		// internal-bucket replication objects plug in the same way).
-		// All three plumbings (walk, opener, repair) route through the local
-		// data-group that owns the bucket — single-node serve still sits inside
-		// a multi-raft group structure, so the volume bucket's files live under
-		// {dataDir}/groups/<gid>/ rather than the bare distBackend root.
-		groupBackendForBucket := func(bucket string) *cluster.DistributedBackend {
-			dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
-			if !ok || dg == nil || dg.Backend() == nil {
-				return nil
-			}
-			return dg.Backend().DistributedBackend
-		}
-		opener := scrubber.LocalOpener(func(bucket, key string) (io.ReadCloser, error) {
-			gb := groupBackendForBucket(bucket)
-			if gb == nil {
-				return nil, fmt.Errorf("scrub opener: no local group for %s", bucket)
-			}
-			return gb.OpenLocalReplica(bucket, key)
-		})
-		repairer := scrubber.ReplicaRepairer(replicaRepairerFunc(func(rctx context.Context, bucket, key string) error {
-			gb := groupBackendForBucket(bucket)
-			if gb == nil {
-				return fmt.Errorf("scrub repair: no local group for %s", bucket)
-			}
-			return gb.RepairReplica(rctx, bucket, key)
-		}))
-		replSource := scrubber.NewReplicationObjectSource("replication", volume.VolumeBucketName, volume.MetaPrefix, backend)
-		replVerifier := scrubber.NewReplicationVerifier(opener, repairer)
 		sc.RegisterSource("replication", replSource, replVerifier)
-
-		// Director owns CLI-triggered sessions + (later) cluster-broadcast
-		// trigger. Same source registration keeps periodic scrub and
-		// on-demand sessions consistent.
-		director := scrubber.NewDirector(scrubber.DirectorOpts{
-			Incident:  incidentRecorder,
-			QueueSize: 64,
-			NodeID:    nodeID,
-		})
-		director.Register("replication", replSource, replVerifier)
-		director.Start(ctx)
-		adminDeps.Director = director
-
 		sc.Start(ctx)
 
 		placementMonitors := newPlacementMonitorRegistry()
