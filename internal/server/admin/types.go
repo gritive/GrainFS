@@ -7,14 +7,27 @@ package admin
 import (
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/volume"
 )
+
+// DirectorAPI is the slim interface admin handlers need from the scrub
+// director. Implemented by *scrubber.Director; defined here so handler
+// tests can substitute a mock.
+type DirectorAPI interface {
+	Trigger(req scrubber.TriggerReq) (string, bool)
+	Sessions() []scrubber.Session
+	GetSession(id string) (scrubber.Session, bool)
+	CancelSession(id string) error
+	ApplyFromFSM(entry scrubber.ScrubTriggerEntry)
+}
 
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
 type Deps struct {
 	Manager   *volume.Manager
 	Incident  incident.StateStore // List(ctx, limit) — optional, nil OK
+	Director  DirectorAPI         // optional; nil disables scrub admin endpoints
 	Token     *dashboard.TokenStore
 	PublicURL string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID    string
@@ -64,6 +77,42 @@ type ReadAtVolumeReq struct {
 // ReadAtVolumeResp carries the read bytes.
 type ReadAtVolumeResp struct {
 	Data []byte `json:"data"`
+}
+
+// ScrubVolumeReq triggers a scrub session over a single volume's blocks.
+type ScrubVolumeReq struct {
+	Name   string `json:"name"`
+	Scope  string `json:"scope,omitempty"`   // "full" (default) | "live"
+	DryRun bool   `json:"dry_run,omitempty"` // observe-only: detect, no repair
+}
+
+// ScrubVolumeResp identifies the resulting session.
+type ScrubVolumeResp struct {
+	SessionID string `json:"session_id"`
+	Created   bool   `json:"created"` // false = duplicate request, returned existing session
+}
+
+// ScrubJobInfo is the JSON form of one Director session.
+type ScrubJobInfo struct {
+	SessionID    string `json:"session_id"`
+	Bucket       string `json:"bucket"`
+	KeyPrefix    string `json:"key_prefix"`
+	Scope        string `json:"scope"`
+	DryRun       bool   `json:"dry_run"`
+	Status       string `json:"status"` // running | done | cancelled
+	StartedAt    int64  `json:"started_at"`
+	DoneAt       int64  `json:"done_at,omitempty"`
+	Checked      int64  `json:"checked"`
+	Healthy      int64  `json:"healthy"`
+	Detected     int64  `json:"detected"`
+	Repaired     int64  `json:"repaired"`
+	Unrepairable int64  `json:"unrepairable"`
+	Skipped      int64  `json:"skipped"`
+}
+
+// ListScrubJobsResp aggregates the active session list.
+type ListScrubJobsResp struct {
+	Jobs []ScrubJobInfo `json:"jobs"`
 }
 
 // VolumeInfo is the JSON representation of a volume in admin responses.

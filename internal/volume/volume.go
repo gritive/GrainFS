@@ -41,6 +41,11 @@ const VolumeBucketName = volumeBucketName
 // stored within VolumeBucketName.
 func BlockKeyPrefix(name string) string { return blockPrefix(name) }
 
+// MetaPrefix is the shared key prefix for every volume's metadata and blocks
+// inside VolumeBucketName. Useful as the walk root for cross-volume operations
+// (e.g. scrub).
+const MetaPrefix = metaPrefix
+
 // Volume represents a virtual block device backed by object storage.
 type Volume struct {
 	Name            string

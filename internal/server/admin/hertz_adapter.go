@@ -25,6 +25,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	g := h.Group("/v1")
 	registerVolume(g, d)
 	registerSnapshot(g, d)
+	registerScrub(g, d)
 	registerDashboard(g, d)
 }
 
@@ -36,6 +37,7 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 	g := h.Group("/ui/api")
 	registerVolume(g, d)
 	registerSnapshot(g, d)
+	registerScrub(g, d)
 	// Dashboard token endpoints are intentionally NOT mounted on /ui/api —
 	// they live only on the local admin Unix socket.
 }
@@ -58,6 +60,56 @@ func registerSnapshot(g router, d *Deps) {
 	g.GET("/volumes/:name/snapshots", wrapName(d, ListSnapshots))
 	g.DELETE("/volumes/:name/snapshots/:snap", deleteSnapshotHandler(d))
 	g.POST("/volumes/:name/snapshots/:snap/rollback", rollbackHandler(d))
+}
+
+func registerScrub(g router, d *Deps) {
+	g.POST("/volumes/:name/scrub", scrubVolumeHandler(d))
+	g.GET("/scrub/jobs", wrapZero(d, ListScrubJobs))
+	g.GET("/scrub/jobs/:id", scrubJobByIDHandler(d, GetScrubJob))
+	g.DELETE("/scrub/jobs/:id", scrubJobCancelHandler(d))
+}
+
+func scrubVolumeHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var req ScrubVolumeReq
+		body := c.Request.Body()
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
+				return
+			}
+		}
+		req.Name = c.Param("name")
+		resp, err := ScrubVolume(ctx, d, req)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		writeOK(c, consts.StatusCreated, resp)
+	}
+}
+
+func scrubJobByIDHandler(d *Deps, fn func(context.Context, *Deps, string) (ScrubJobInfo, error)) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		id := c.Param("id")
+		resp, err := fn(ctx, d, id)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		writeOK(c, consts.StatusOK, resp)
+	}
+}
+
+func scrubJobCancelHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		id := c.Param("id")
+		if err := CancelScrubJob(ctx, d, id); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.SetStatusCode(consts.StatusNoContent)
+	}
 }
 
 func registerDashboard(g router, d *Deps) {
