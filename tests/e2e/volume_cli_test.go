@@ -69,12 +69,38 @@ func startTestServerOnPort(t *testing.T, port int, extraArgs ...string) (dataDir
 	for time.Now().Before(deadline) {
 		info, err := os.Stat(sock)
 		if err == nil && info.Mode()&os.ModeSocket != 0 {
-			return dir, httpPort, stop
+			break
 		}
 		time.Sleep(50 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("admin.sock not ready at %s", sock)
+		}
 	}
-	t.Fatalf("admin.sock not ready at %s", sock)
+	// Wait for the volume bucket's data group to elect a leader. Without
+	// leadership, Manager.List forwards through the cluster coordinator and
+	// fails with "forward: no reachable peer" on a single-node cluster.
+	waitForVolumeReady(t, dir, 30*time.Second)
 	return dir, httpPort, stop
+}
+
+// waitForVolumeReady retries `volume list` until it returns 0 (cluster ready
+// to serve volume bucket queries) or the deadline expires.
+func waitForVolumeReady(t *testing.T, dataDir string, timeout time.Duration) {
+	t.Helper()
+	binary, err := filepath.Abs(getBinary())
+	require.NoError(t, err)
+	deadline := time.Now().Add(timeout)
+	var lastOut string
+	for time.Now().Before(deadline) {
+		cmd := exec.Command(binary, "volume", "list", "--data", dataDir)
+		out, err := cmd.CombinedOutput()
+		lastOut = string(out)
+		if err == nil {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("volume bucket never became ready within %v: last output:\n%s", timeout, lastOut)
 }
 
 func runCLI(t *testing.T, dataDir string, args ...string) (stdout string, exitCode int) {
@@ -108,10 +134,10 @@ func containsFlag(args []string, flag string) bool {
 func TestE2E_VolumeCLI_FullLifecycle(t *testing.T) {
 	dataDir, _, _ := startTestServer(t)
 
-	// 1. list (empty)
+	// 1. list — server may or may not have a "default" volume from NBD wiring.
+	// Just confirm it returns 0 (cluster ready and admin reachable).
 	out, code := runCLI(t, dataDir, "volume", "list")
 	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "(no volumes)")
 
 	// 2. create
 	out, code = runCLI(t, dataDir, "volume", "create", "v1", "--size", "1Mi")
@@ -177,12 +203,17 @@ func TestE2E_VolumeCLI_AutoDiscoveryFailureMessage(t *testing.T) {
 }
 
 func TestE2E_VolumeCLI_NoVolumesViaDataPlane(t *testing.T) {
-	// Regression: data-plane /volumes/* must be removed (Phase B A6).
+	// Regression: data-plane /volumes/* admin endpoints must be removed (A6).
+	// /volumes/ now falls through to the S3 bucket handler (it matches
+	// /:bucket/), so it should NOT return JSON shaped like admin output.
+	// We assert the response is not the admin "{"volumes":[...]}" shape.
 	_, port, _ := startTestServer(t)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/volumes/", port))
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.NotContains(t, string(body), `"volumes":`,
+		"data plane should no longer expose the admin volumes endpoint")
 }
 
 func TestE2E_Dashboard_TokenURLAndRotate(t *testing.T) {
