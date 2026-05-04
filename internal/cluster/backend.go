@@ -1087,10 +1087,20 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 	b.internalSizeCache.Store(cacheKey, newSize)
 	now := time.Now().Unix()
 
+	// ETag = MD5(file). Required as the corruption-detection oracle for
+	// volume scrub on cluster nodes. Mirrors LocalBackend.WriteAt: when the
+	// write covers the entire file we can hash the in-memory buffer; for
+	// partial writes (NFS4 SETATTR/WRITE) we re-read.
+	etag, herr := writeAtETag(f, data, offset, newSize)
+	if herr != nil {
+		return nil, fmt.Errorf("md5 object: %w", herr)
+	}
+
 	meta, err := marshalObjectMeta(objectMeta{
 		Key:          key,
 		Size:         newSize,
 		ContentType:  "application/octet-stream",
+		ETag:         etag,
 		LastModified: now,
 	})
 	if err != nil {
@@ -1106,9 +1116,37 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 		Key:          key,
 		Size:         newSize,
 		ContentType:  "application/octet-stream",
+		ETag:         etag,
 		LastModified: now,
 		VersionID:    "current",
 	}, nil
+}
+
+// writeAtETag computes the MD5 ETag for an object after a partial-write
+// update. When the write covered the whole file (offset 0 + len matches),
+// MD5(data) is the answer; otherwise the file is re-read.
+func writeAtETag(f *os.File, data []byte, offset uint64, size int64) (string, error) {
+	if offset == 0 && int64(len(data)) == size {
+		h := md5.Sum(data)
+		return hex.EncodeToString(h[:]), nil
+	}
+	h := md5.New()
+	buf := make([]byte, 64*1024)
+	var off int64
+	for off < size {
+		n, rerr := f.ReadAt(buf, off)
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+			off += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", rerr
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ReadAt implements zero-overhead pread for internal buckets (NFS4/VFS).

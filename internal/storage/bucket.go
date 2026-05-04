@@ -18,8 +18,11 @@ func IsVFSBucket(bucket string) bool {
 }
 
 // internalBucketPrefix is the common prefix for all GrainFS-internal buckets.
-// Internal buckets never expose ETag to S3 clients, so MD5 hashing during
-// PutObject can be skipped.
+// Internal buckets are not exposed through the S3 API, but ETag is still
+// computed and stored — it is the corruption-detection oracle relied on by
+// scrub paths (volume scrub, future EC migration). Treat internal-bucket
+// classification as a routing/access concern only, never as a hash-skip
+// shortcut. See TODOS.md "Hash 정책 분기 가드".
 const internalBucketPrefix = "__grainfs_"
 
 // IsInternalBucket reports whether bucket is an internal GrainFS bucket.
