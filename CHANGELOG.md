@@ -1,5 +1,77 @@
 # Changelog
 
+## [0.0.43.0] — 2026-05-04 — Object-layer replication scrub
+
+### Added
+
+- **`grainfs volume scrub <name>` CLI** — operator entry point for non-EC
+  volume bit-rot detection and peer-pull repair. Flags: `--scope=full|live`,
+  `--dry-run`, `--detach`. Subcommands: `scrub status <id>`,
+  `scrub list`, `scrub cancel <id>`.
+- **Admin scrub endpoints** (Unix socket + `/ui/api`):
+  `POST /v1/volumes/:name/scrub`, `GET /v1/scrub/jobs`,
+  `GET /v1/scrub/jobs/:id`, `DELETE /v1/scrub/jobs/:id`.
+- **`scrubber.Director`** owns scrub session lifecycle (Trigger dedup +
+  `ApplyFromFSM` non-blocking enqueue + per-block incident.Fact emission).
+  `incidentRecorder` is wired in cluster scrub block of `serve.go` so
+  detection/repair flows into the existing incident store.
+- **`scrubber.ReplicationObjectSource` / `ReplicationVerifier`** — generic,
+  bucket-prefix-driven replication scrub primitives. `BlockSource` /
+  `BlockVerifier` interfaces are bucket-agnostic; volume blocks are the first
+  wiring, future internal-bucket replication objects (NFS, future iceberg
+  metadata, etc.) plug in the same way.
+- **`cluster.DistributedBackend.RepairReplica(bucket, key)`** — pulls a
+  healthy peer copy and atomically rewrites the local replica when scrub
+  detects corruption or a missing replica.
+- **`OpenLocalReplica(bucket, key)`** on both `LocalBackend` and
+  `DistributedBackend`. Used by the verifier to MD5 the local-only file
+  without falling back to peers (peer recovery is the repair path's job).
+- **Admin volume `write-at` / `read-at`** helpers (used by e2e tests as the
+  block ingress / readback path; also useful for forensic block inspection).
+
+### Changed
+
+- **MD5 oracle restored across all internal buckets.** Three sites previously
+  skipped MD5 for `IsInternalBucket(bucket)` as a hot-path shortcut, leaving
+  every internal bucket (volume blocks, NFS objects, future packed blobs)
+  without a corruption-detection oracle. Now hashed everywhere:
+  - `LocalBackend.PutObject` / `LocalBackend.WriteAt`
+  - `cluster.spool.shouldHashBucket`
+  - `cluster.DistributedBackend.WriteAt`
+  - `storage/packblob/PackedBackend.PutObject`
+- **`storage/bucket.go` doc** rewritten — internal classification is a
+  routing concern, never a hash-skip shortcut. Future BLAKE3 / xxhash3 swap
+  is queued in `TODOS.md` "Storage Hashing 성능 검토".
+- **Volume Manager no longer owns scrub.** The previous incarnation lived in
+  `internal/volume/scrubber.go`; layered architecture says the object
+  storage layer must guarantee integrity so upper layers (NFS, NBD, S3,
+  Iceberg, Volume) can trust it. The implementation moved to
+  `internal/scrubber/replication.go` and `volume.Manager` no longer carries
+  scrub responsibility.
+- **`BackgroundScrubber`** simplified to a single replication-source ticker
+  (the previous live/full dual-ticker had no functional difference because
+  the generic source treats both scopes identically). Re-introduction
+  conditions are documented in `TODOS.md`.
+
+### Deferred (TODOS.md)
+
+- Volume scrub cluster-broadcast via `MetaFSM ScrubTrigger` entries — the
+  meta-FSM uses FlatBuffers schemas (not gob), so the schema work is split
+  out. Operators trigger one node at a time until that lands.
+- Volume scrub for dedup-mode volumes — dedup keys are `blk_<NNN>_v<UUID>`
+  and need an index reverse-lookup. v0.0.43 e2e tests run with `--dedup=false`.
+- Multi-node corruption-repair E2E — single-node E2E is shipped here;
+  3-node repair test follows.
+- `RepairReplica` unit test — `*ShardService` must be extracted to a
+  `peerReader` interface first.
+- EC silent shard-corruption audit — current EC scrub may be missing a shard
+  checksum oracle. Independent gap that affects all EC data, not specific
+  to this PR.
+- `__grainfs_volumes` EC migration — replication is forced today (a coarse
+  internal-bucket guard); future PR can narrow the guard to VFS-only and
+  migrate existing replication blocks.
+- Per-source Prometheus metrics (`grainfs_scrub_*` counters/gauges).
+
 ## [0.0.42.0] — 2026-05-04 — Volume CLI Phase B (admin socket + dashboard token)
 
 ### Added
