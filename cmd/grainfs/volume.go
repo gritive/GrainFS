@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -149,12 +150,54 @@ var snapshotDeleteCmd = &cobra.Command{
 	RunE:    runSnapshotDelete,
 }
 
+var volumeScrubCmd = &cobra.Command{
+	Use:   "scrub <name>",
+	Short: "Scrub a volume — detect and repair silent corruption",
+	Long: `Scrub verifies every block of the named volume by reading the local copy
+and comparing its MD5 against the stored ETag. Corrupt or missing blocks
+are repaired by pulling a healthy peer replica.
+
+Default scope is full (every block including snapshot-only). Use --scope=live
+to limit to currently-live blocks. --dry-run records detection without
+repair. --detach returns immediately after triggering instead of following
+session progress.`,
+	Example: `  grainfs volume scrub myvol
+  grainfs volume scrub myvol --dry-run
+  grainfs volume scrub myvol --scope=live --detach`,
+	Args: cobra.ExactArgs(1),
+	RunE: runVolumeScrub,
+}
+
+var volumeScrubStatusCmd = &cobra.Command{
+	Use:     "status <session_id>",
+	Short:   "Show status of a scrub session",
+	Args:    cobra.ExactArgs(1),
+	Example: `  grainfs volume scrub status 0192e8a4-...`,
+	RunE:    runVolumeScrubStatus,
+}
+
+var volumeScrubListCmd = &cobra.Command{
+	Use:     "list",
+	Short:   "List active and recent scrub sessions",
+	Example: `  grainfs volume scrub list`,
+	RunE:    runVolumeScrubList,
+}
+
+var volumeScrubCancelCmd = &cobra.Command{
+	Use:     "cancel <session_id>",
+	Short:   "Cancel a running scrub session",
+	Args:    cobra.ExactArgs(1),
+	Example: `  grainfs volume scrub cancel 0192e8a4-...`,
+	RunE:    runVolumeScrubCancel,
+}
+
 func init() {
 	for _, c := range []*cobra.Command{
 		volumeListCmd, volumeCreateCmd, volumeInfoCmd, volumeStatCmd,
 		volumeDeleteCmd, volumeResizeCmd, volumeRecalculateCmd, volumeCloneCmd,
 		volumeRollbackCmd, snapshotCreateCmd, snapshotListCmd, snapshotDeleteCmd,
 		volumeWriteAtCmd, volumeReadAtCmd,
+		volumeScrubCmd, volumeScrubStatusCmd, volumeScrubListCmd, volumeScrubCancelCmd,
 	} {
 		c.Flags().String("endpoint", "", "admin endpoint (default: auto-discover from --data or grainfs.toml)")
 		c.Flags().String("data", "", "data directory for admin socket auto-discovery")
@@ -169,12 +212,17 @@ func init() {
 	volumeWriteAtCmd.Flags().String("content", "", "bytes to write (string)")
 	volumeReadAtCmd.Flags().Int64("offset", 0, "byte offset")
 	volumeReadAtCmd.Flags().Int64("length", 0, "bytes to read (1..64MiB)")
+	volumeScrubCmd.Flags().String("scope", "full", "scrub scope: full (snapshot chain) or live")
+	volumeScrubCmd.Flags().Bool("dry-run", false, "detect-only, do not repair")
+	volumeScrubCmd.Flags().Bool("detach", false, "trigger and exit; do not follow session progress")
 
 	snapshotCmd.AddCommand(snapshotCreateCmd, snapshotListCmd, snapshotDeleteCmd)
+	volumeScrubCmd.AddCommand(volumeScrubStatusCmd, volumeScrubListCmd, volumeScrubCancelCmd)
 	volumeCmd.AddCommand(
 		volumeListCmd, volumeCreateCmd, volumeInfoCmd, volumeStatCmd,
 		volumeDeleteCmd, volumeResizeCmd, volumeRecalculateCmd,
-		volumeCloneCmd, volumeRollbackCmd, volumeWriteAtCmd, volumeReadAtCmd, snapshotCmd,
+		volumeCloneCmd, volumeRollbackCmd, volumeWriteAtCmd, volumeReadAtCmd,
+		volumeScrubCmd, snapshotCmd,
 	)
 	rootCmd.AddCommand(volumeCmd)
 }
@@ -566,6 +614,151 @@ func runSnapshotDelete(cmd *cobra.Command, args []string) error {
 	}
 	if !jsonOut(cmd) {
 		fmt.Printf("snapshot %q deleted from %q\n", args[1], args[0])
+	}
+	return nil
+}
+
+// --- scrub ---
+
+type scrubTriggerReq struct {
+	Name   string `json:"name"`
+	Scope  string `json:"scope,omitempty"`
+	DryRun bool   `json:"dry_run,omitempty"`
+}
+
+type scrubTriggerResp struct {
+	SessionID string `json:"session_id"`
+	Created   bool   `json:"created"`
+}
+
+type scrubJobInfo struct {
+	SessionID    string `json:"session_id"`
+	Bucket       string `json:"bucket"`
+	KeyPrefix    string `json:"key_prefix"`
+	Scope        string `json:"scope"`
+	DryRun       bool   `json:"dry_run"`
+	Status       string `json:"status"`
+	StartedAt    int64  `json:"started_at"`
+	DoneAt       int64  `json:"done_at,omitempty"`
+	Checked      int64  `json:"checked"`
+	Healthy      int64  `json:"healthy"`
+	Detected     int64  `json:"detected"`
+	Repaired     int64  `json:"repaired"`
+	Unrepairable int64  `json:"unrepairable"`
+	Skipped      int64  `json:"skipped"`
+}
+
+type scrubJobListResp struct {
+	Jobs []scrubJobInfo `json:"jobs"`
+}
+
+func runVolumeScrub(cmd *cobra.Command, args []string) error {
+	c, err := adminClientFromCmd(cmd)
+	if err != nil {
+		return err
+	}
+	scope, _ := cmd.Flags().GetString("scope")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	detach, _ := cmd.Flags().GetBool("detach")
+	name := args[0]
+
+	var resp scrubTriggerResp
+	body := scrubTriggerReq{Name: name, Scope: scope, DryRun: dryRun}
+	path := fmt.Sprintf("/v1/volumes/%s/scrub", url.PathEscape(name))
+	if err := c.post(path, body, &resp); err != nil {
+		return err
+	}
+	if jsonOut(cmd) {
+		return printJSON(resp)
+	}
+	created := "reused"
+	if resp.Created {
+		created = "created"
+	}
+	fmt.Printf("Triggered scrub: session=%s scope=%s dry_run=%t (%s)\n",
+		resp.SessionID, scope, dryRun, created)
+	if detach {
+		return nil
+	}
+	return followScrubSession(cmd, c, resp.SessionID)
+}
+
+func followScrubSession(cmd *cobra.Command, c *adminClient, sessionID string) error {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	ctx := cmd.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("Follow stopped — session %s continues. Run `grainfs volume scrub status %s` to check.\n", sessionID, sessionID)
+			return nil
+		case <-t.C:
+			var info scrubJobInfo
+			if err := c.get("/v1/scrub/jobs/"+url.PathEscape(sessionID), &info); err != nil {
+				return err
+			}
+			if info.Status == "done" || info.Status == "cancelled" {
+				fmt.Printf("%s. Checked=%d Healthy=%d Detected=%d Repaired=%d Unrepairable=%d\n",
+					strings.Title(info.Status), info.Checked, info.Healthy, info.Detected, info.Repaired, info.Unrepairable)
+				return nil
+			}
+		}
+	}
+}
+
+func runVolumeScrubStatus(cmd *cobra.Command, args []string) error {
+	c, err := adminClientFromCmd(cmd)
+	if err != nil {
+		return err
+	}
+	var info scrubJobInfo
+	if err := c.get("/v1/scrub/jobs/"+url.PathEscape(args[0]), &info); err != nil {
+		return err
+	}
+	if jsonOut(cmd) {
+		return printJSON(info)
+	}
+	fmt.Printf("Session: %s\nStatus:  %s\nScope:   %s\nDryRun:  %t\nBucket:  %s\nPrefix:  %s\nChecked: %d  Healthy: %d  Detected: %d  Repaired: %d  Unrepairable: %d\n",
+		info.SessionID, info.Status, info.Scope, info.DryRun,
+		info.Bucket, info.KeyPrefix,
+		info.Checked, info.Healthy, info.Detected, info.Repaired, info.Unrepairable)
+	return nil
+}
+
+func runVolumeScrubList(cmd *cobra.Command, args []string) error {
+	c, err := adminClientFromCmd(cmd)
+	if err != nil {
+		return err
+	}
+	var resp scrubJobListResp
+	if err := c.get("/v1/scrub/jobs", &resp); err != nil {
+		return err
+	}
+	if jsonOut(cmd) {
+		return printJSON(resp)
+	}
+	if len(resp.Jobs) == 0 {
+		fmt.Println("(no scrub sessions)")
+		return nil
+	}
+	fmt.Printf("%-38s  %-10s  %-6s  %-9s  %-9s  %-9s\n", "SESSION", "STATUS", "SCOPE", "CHECKED", "DETECTED", "REPAIRED")
+	for _, j := range resp.Jobs {
+		fmt.Printf("%-38s  %-10s  %-6s  %9d  %9d  %9d\n",
+			j.SessionID, j.Status, j.Scope, j.Checked, j.Detected, j.Repaired)
+	}
+	return nil
+}
+
+func runVolumeScrubCancel(cmd *cobra.Command, args []string) error {
+	c, err := adminClientFromCmd(cmd)
+	if err != nil {
+		return err
+	}
+	if err := c.delete("/v1/scrub/jobs/"+url.PathEscape(args[0]), nil); err != nil {
+		return err
+	}
+	if !jsonOut(cmd) {
+		fmt.Printf("Cancelled %s\n", args[0])
 	}
 	return nil
 }
