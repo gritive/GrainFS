@@ -187,6 +187,43 @@ func (m *Manager) Get(name string) (*Volume, error) {
 	return &cp, nil
 }
 
+// Resize changes the logical size of a volume. Grow only — shrink is rejected
+// with ErrShrinkNotSupported. Sparse layout means backend blocks are unaffected
+// and snapshots/live_map remain valid for any new size >= old size. On persist
+// failure the in-memory size is rolled back so memory and disk stay consistent.
+func (m *Manager) Resize(name string, newSize int64) error {
+	if newSize <= 0 {
+		return fmt.Errorf("size %d: %w", newSize, ErrInvalidSize)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	vol, err := m.getVolUnlocked(name)
+	if err != nil {
+		return err
+	}
+	if newSize < vol.Size {
+		return fmt.Errorf("current=%d new=%d: %w", vol.Size, newSize, ErrShrinkNotSupported)
+	}
+	if newSize == vol.Size {
+		return nil // no-op
+	}
+
+	oldSize := vol.Size
+	vol.Size = newSize
+
+	data, err := marshalVolume(vol)
+	if err != nil {
+		vol.Size = oldSize
+		return fmt.Errorf("marshal volume: %w", err)
+	}
+	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
+		vol.Size = oldSize
+		return fmt.Errorf("persist volume meta: %w", err)
+	}
+	return nil
+}
+
 // Delete deletes a volume and all its blocks.
 func (m *Manager) Delete(name string) error {
 	m.mu.Lock()
