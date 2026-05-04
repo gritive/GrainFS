@@ -744,8 +744,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	router := transport.NewStreamRouter()
 	router.Handle(transport.StreamControl, rpcTransport.Handler())
 	router.Handle(transport.StreamData, shardSvc.HandleRPC())
-	router.HandleBody(transport.StreamShardWriteBody, shardSvc.HandleWriteBody())
 	quicTransport.SetStreamHandler(router.Dispatch)
+	// Body handler must register on QUICTransport's internal router; the
+	// catch-all (router.Dispatch) only sees per-message handlers and cannot
+	// consume body streams. Pre-fix, every StreamShardWriteBody fell through
+	// to the catch-all → returned nil → stream closed without response →
+	// caller saw "decode response: read header: EOF" → N×replication produced
+	// only the leader's local copy.
+	quicTransport.HandleBody(transport.StreamShardWriteBody, shardSvc.HandleWriteBody())
 
 	node.Start()
 	defer node.Stop()
