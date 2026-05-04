@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 type spooledObject struct {
@@ -99,8 +97,13 @@ func (b *DistributedBackend) spoolDir() string {
 	return filepath.Join(b.root, "tmp", "put-spool")
 }
 
+// shouldHashBucket reports whether spool writes should compute MD5 for the
+// bucket. Always true: hash is the corruption-detection oracle for both EC
+// scrub and volume scrub. Future BLAKE3/xxhash3 swap is tracked in TODOS.md
+// (Storage Hashing 성능 검토).
 func shouldHashBucket(bucket string) bool {
-	return !storage.IsInternalBucket(bucket)
+	_ = bucket
+	return true
 }
 
 type readerWithContext struct {

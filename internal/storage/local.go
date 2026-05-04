@@ -197,14 +197,7 @@ func (b *LocalBackend) PutObject(ctx context.Context, bucket, key string, r io.R
 		etag string
 		cerr error
 	)
-	if IsInternalBucket(bucket) {
-		size, cerr = io.Copy(tmp, r)
-		tmp.Close()
-		if cerr != nil {
-			cleanupTmp()
-			return nil, fmt.Errorf("write object: %w", cerr)
-		}
-	} else {
+	{
 		h := md5Pool.Get()
 		h.Reset()
 		w := io.MultiWriter(tmp, h)
@@ -408,11 +401,47 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	}
 	size := fi.Size()
 
+	// ETag = MD5(file). Required as the corruption-detection oracle for
+	// Volume scrub (which writes via this fast path with offset=0). For
+	// partial writes (offset>0 or len(data)<size) we re-read the file so
+	// the stored ETag matches on-disk bytes. NFS4 partial writes pay an
+	// extra read here; tracked in TODOS.md (Storage Hashing 성능 검토).
+	var etag string
+	if offset == 0 && int64(len(data)) == size {
+		h := md5Pool.Get()
+		h.Reset()
+		_, _ = h.Write(data)
+		etag = hex.EncodeToString(h.Sum(nil))
+		md5Pool.Put(h)
+	} else {
+		h := md5Pool.Get()
+		h.Reset()
+		buf := make([]byte, 64*1024)
+		var off int64
+		for off < size {
+			n, rerr := f.ReadAt(buf, off)
+			if n > 0 {
+				_, _ = h.Write(buf[:n])
+				off += int64(n)
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				md5Pool.Put(h)
+				return nil, fmt.Errorf("md5 readback: %w", rerr)
+			}
+		}
+		etag = hex.EncodeToString(h.Sum(nil))
+		md5Pool.Put(h)
+	}
+
 	now := time.Now().Unix()
 	obj := &Object{
 		Key:          key,
 		Size:         size,
 		ContentType:  "application/octet-stream",
+		ETag:         etag,
 		LastModified: now,
 	}
 	meta, err := marshalObject(obj)
