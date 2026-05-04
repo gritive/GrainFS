@@ -424,6 +424,37 @@ tbody tr:last-child td{border-bottom:none}
   var currentBucket = null;
   var startTime = Date.now();
 
+  // Dashboard token handoff: pull from URL fragment (#token=...) on first load,
+  // store in localStorage, then strip from URL so it never leaks via window.title
+  // or the browser history. All subsequent fetches send it as Authorization: Bearer.
+  (function() {
+    var m = location.hash.match(/[#&]token=([^&]+)/);
+    if (m) {
+      try { localStorage.setItem('grainfs_token', decodeURIComponent(m[1])); } catch(e) {}
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  })();
+  var GRAINFS_TOKEN = (function() {
+    try { return localStorage.getItem('grainfs_token') || ''; } catch(e) { return ''; }
+  })();
+  function authHeaders(extra) {
+    var h = extra || {};
+    if (GRAINFS_TOKEN) h['Authorization'] = 'Bearer ' + GRAINFS_TOKEN;
+    return h;
+  }
+  function fetchAuth(url, opts) {
+    opts = opts || {};
+    opts.headers = authHeaders(opts.headers || {});
+    return fetch(url, opts).then(function(r) {
+      if (r.status === 401) {
+        document.body.innerHTML = '<div style="padding:2rem;font-family:monospace">' +
+          '<p>세션 만료. 호스트에서 <code>grainfs dashboard</code> 를 다시 실행하고 새 URL 을 여세요.</p></div>';
+        throw new Error('unauthorized');
+      }
+      return r;
+    });
+  }
+
   // Helpers
   function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.textContent; }
 
@@ -668,7 +699,8 @@ tbody tr:last-child td{border-bottom:none}
 
   // Volumes
   function loadVolumes() {
-    fetch(baseURL + '/volumes/').then(function(r) { return r.json(); }).then(function(vols) {
+    fetchAuth(baseURL + '/ui/api/volumes').then(function(r) { return r.json(); }).then(function(payload) {
+      var vols = (payload && payload.volumes) ? payload.volumes : [];
       var tbody = document.getElementById('volume-list');
       clearChildren(tbody);
 
@@ -700,10 +732,10 @@ tbody tr:last-child td{border-bottom:none}
     var unit = parseInt(document.getElementById('vol-size-unit').value);
     var size = Math.round(sizeVal * unit);
     if (!name || !size) return;
-    fetch(baseURL + '/volumes/' + encodeURIComponent(name), {
-      method: 'PUT',
+    fetchAuth(baseURL + '/ui/api/volumes', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ size: size })
+      body: JSON.stringify({ name: name, size: size })
     }).then(function() {
       closeModal('modal-volume');
       document.getElementById('vol-name-input').value = '';
@@ -712,7 +744,7 @@ tbody tr:last-child td{border-bottom:none}
   }
 
   function deleteVolume(name) {
-    fetch(baseURL + '/volumes/' + encodeURIComponent(name), { method: 'DELETE' }).then(function() { loadVolumes(); });
+    fetchAuth(baseURL + '/ui/api/volumes/' + encodeURIComponent(name), { method: 'DELETE' }).then(function() { loadVolumes(); });
   }
 
   // Dashboard
