@@ -16,7 +16,7 @@ type countingSource struct {
 }
 
 func (c *countingSource) Name() string { return c.name }
-func (c *countingSource) Iter(ctx context.Context, scope ScrubScope, keyPrefix string) (<-chan Block, error) {
+func (c *countingSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error) {
 	c.calls.Add(1)
 	c.lastScope.Store(int32(scope))
 	ch := make(chan Block)

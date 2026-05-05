@@ -232,7 +232,7 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession) {
 		d.markDone(sess)
 		return
 	}
-	ch, err := src.Iter(ctx, sess.scope, sess.keyPrefix)
+	ch, err := src.Iter(ctx, sess.scope, sess.bucket, sess.keyPrefix)
 	if err != nil {
 		log.Warn().Err(err).Msg("scrub director: source iter failed")
 		d.markDone(sess)

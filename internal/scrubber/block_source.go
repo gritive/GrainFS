@@ -39,15 +39,16 @@ type BlockStatus struct {
 // IsHealthy returns true when the block matched its expected metadata.
 func (s BlockStatus) IsHealthy() bool { return s.Healthy }
 
-// BlockSource produces Blocks for verification. keyPrefix=="" iterates the
-// full source (background); a non-empty prefix narrows to a single subject
-// (e.g. CLI scrub of one volume). Implementations MUST honor ctx cancellation
-// and close the returned channel when iteration completes or the context
-// is canceled. Readers MUST drain the channel after canceling so the
-// producer goroutine can exit cleanly.
+// BlockSource produces Blocks for verification. bucket selects the target
+// domain; keyPrefix=="" iterates the entire bucket, a non-empty value narrows
+// to a sub-prefix (e.g. CLI scrub of one volume). When bucket=="" the source
+// falls back to its constructor-bound bucket (background path). Implementations
+// MUST honor ctx cancellation and close the returned channel when iteration
+// completes or the context is canceled. Readers MUST drain the channel after
+// canceling so the producer goroutine can exit cleanly.
 type BlockSource interface {
 	Name() string
-	Iter(ctx context.Context, scope ScrubScope, keyPrefix string) (<-chan Block, error)
+	Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error)
 }
 
 // BlockVerifier checks a Block's local copy and (optionally) repairs it.

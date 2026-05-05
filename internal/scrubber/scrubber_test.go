@@ -523,3 +523,11 @@ func TestScrubber_SigningHealthGate_FinalizeCalledWhenHealthy(t *testing.T) {
 	emitter.mu.Unlock()
 	assert.Equal(t, 1, finalizedCount, "FinalizeSession must be called once after repair succeeds")
 }
+
+func TestBackgroundScrubber_Getters_ExposeInternals(t *testing.T) {
+	m := newMockBackend()
+	s := scrubber.New(m, time.Hour)
+	require.NotNil(t, s.Verifier(), "Verifier() must return the configured ShardVerifier")
+	require.NotNil(t, s.Limiter(), "Limiter() must return the configured rate limiter")
+	require.NotNil(t, s.Emitter(), "Emitter() must return the configured emitter (default NoopEmitter)")
+}
