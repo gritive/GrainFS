@@ -45,6 +45,8 @@ type mrCluster struct {
 	accessKey  string
 	secretKey  string
 	leaderIdx  int // last-known leader (set during probe)
+	seedGroups int // seed group count from initial boot; reused on restart so the
+	// node binary does not auto-derive a higher count and re-propose unseeded groups.
 }
 
 func startStaticMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
@@ -79,6 +81,7 @@ func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster
 		clusterKey: "E2E-MR-SHARDING-KEY",
 		accessKey:  "mr-ak",
 		secretKey:  "mr-sk",
+		seedGroups: seedGroups,
 	}
 	c.httpPorts = make([]int, numNodes)
 	c.raftPorts = make([]int, numNodes)
@@ -408,10 +411,12 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	}
 
 	// Restart with the same data dirs and fresh HTTP ports (avoid TCP TIME_WAIT).
+	// Pass the original seedGroups so the node binary does not auto-derive a
+	// higher count and re-propose groups beyond what was originally seeded.
 	for i := range c.procs {
 		c.httpPorts[i] = freePort()
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-		c.procs[i] = c.startNode(i, 0)
+		c.procs[i] = c.startNode(i, c.seedGroups)
 	}
 	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
 
@@ -496,7 +501,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	for i := range c.procs {
 		c.httpPorts[i] = freePort()
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-		c.procs[i] = c.startNode(i, 0)
+		c.procs[i] = c.startNode(i, c.seedGroups)
 	}
 	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
 

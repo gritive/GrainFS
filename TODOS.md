@@ -65,7 +65,6 @@
 
 ## Phase 19: Performance
 
-- [ ] **P0: multi-raft restart recovery e2e timeout** — `/ship` on `feature/fd-predictive-warning` found `tests/e2e.TestE2E_MultiRaftSharding_RestartRecovery` timing out after 10m while waiting for restart-recovery test ports. This branch does not modify `tests/e2e/multiraft_sharding_test.go` or the multiraft startup/recovery path; investigate host contention, leaked e2e servers, or restart port readiness separately.
 - [ ] go-billy: Direct File I/O; O_DIRECT
 - [ ] **EC shard cache 사이즈 튜닝** — 본구현 완료 v0.0.4.42 (E2E 85.7% hit). 운영 telemetry(`grainfs_ec_shard_cache_hit_rate`)로 working set 측정 후 default 256 MB 적정성 검증. 큰 객체 백업 워크로드면 GB 단위까지, 작은 객체 위주면 비활성화 권장.
 - [ ] io_uring
