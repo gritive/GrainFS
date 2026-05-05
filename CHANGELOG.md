@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.0.48.0] — 2026-05-06 — Badger role-scoped startup recovery
+
+### Added
+
+- **Badger role registry and startup reducer** — metadata, raft-log,
+  group-state, receipt, dedup, volume-catalog, and incident-state DBs now
+  have explicit role criticality, paths, feature flags, and deterministic
+  startup decisions.
+- **Role probes and quarantine transaction helpers** — Badger role opens now
+  return structured decisions, writable probes classify read-only admission,
+  and quarantine moves role directories through explicit staging instead of
+  ad hoc path handling.
+- **Recovery read-only gates** — restart-time group Badger failures can admit
+  the server in read-only mode; storage writes and non-storage mutating APIs
+  return recovery errors while read paths remain available.
+- **Optional role disablement** — receipt, dedup, and incident-state DB open
+  failures now disable only their feature path instead of aborting startup.
+
+### Fixed
+
+- **Failed corruption isolation incidents now stay visible** — failed object
+  isolation transitions to a human-actionable state instead of looking like a
+  normal completed repair.
+- **Optional incident-state disable no longer passes typed nil recorders** —
+  scrub and repair wiring now receive real nil interfaces when the incident
+  API is disabled, avoiding a panic on later incident emission.
+- **Default bucket creation skips recovery read-only startup** so a degraded
+  server does not immediately perform a write during recovery admission.
+
+### Changed
+
+- **Cluster startup now reduces Badger decisions before accepting traffic** —
+  cold-start group instantiation runs synchronously enough to classify startup
+  health, while runtime group failures log without killing the process.
+- **Badger preflight uses the shared role probe path** so cluster and local
+  startup diagnostics follow the same control-loop vocabulary.
+- **Dependencies refreshed** — fsnotify, grpc, and genproto are updated to the
+  latest branch baseline used by this release.
+
+### Tests
+
+- Added unit coverage for role registry resolution, open failure actions,
+  startup reducer modes, probe classification, quarantine transactions,
+  mutation gates, incident reducer Badger causes, and group lifecycle injection.
+- Added integration and e2e coverage for Badger role startup recovery,
+  recovery read-only default-bucket behavior, optional role disablement, typed
+  nil incident recorder wiring, and cluster missing-shard repair with receipts.
+
 ## [0.0.47.0] — 2026-05-05 — EC scrub trigger — admin/CLI + cluster-wide aggregation (PR4)
 
 ### Added
