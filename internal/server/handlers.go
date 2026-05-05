@@ -121,7 +121,7 @@ func getKey(c *app.RequestContext) string {
 }
 
 func (s *Server) listBuckets(ctx context.Context, c *app.RequestContext) {
-	buckets, err := s.backend.ListBuckets(ctx)
+	buckets, err := s.ops.ListBuckets(ctx)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -160,7 +160,7 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.backend.CreateBucket(ctx, bucket); err != nil {
+	if err := s.ops.CreateBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -187,7 +187,7 @@ func unwrapBackend(b storage.Backend) storage.Backend {
 
 func (s *Server) headBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
-	if err := s.backend.HeadBucket(ctx, bucket); err != nil {
+	if err := s.ops.HeadBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -209,7 +209,7 @@ func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.backend.DeleteBucket(ctx, bucket); err != nil {
+	if err := s.ops.DeleteBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}

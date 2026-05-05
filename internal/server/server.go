@@ -510,7 +510,7 @@ func (s *Server) metricsMiddleware() app.HandlerFunc {
 // initMetrics scans existing buckets and objects to set initial gauge values.
 func (s *Server) initMetrics() {
 	ctx := context.Background()
-	buckets, err := s.backend.ListBuckets(ctx)
+	buckets, err := s.ops.ListBuckets(ctx)
 	if err != nil {
 		return
 	}

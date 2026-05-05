@@ -97,6 +97,25 @@ func TestOperationsObjectReadsDelegateToBackend(t *testing.T) {
 	}, backend.calls)
 }
 
+func TestOperationsBucketsDelegateToBackend(t *testing.T) {
+	backend := &recordingBucketBackend{}
+	ops := NewOperations(backend)
+
+	require.NoError(t, ops.CreateBucket(context.Background(), "b"))
+	require.NoError(t, ops.HeadBucket(context.Background(), "b"))
+	require.NoError(t, ops.DeleteBucket(context.Background(), "b"))
+
+	buckets, err := ops.ListBuckets(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"b"}, buckets)
+	require.Equal(t, []string{
+		"create:b",
+		"head:b",
+		"delete:b",
+		"list",
+	}, backend.calls)
+}
+
 func TestOperationsMultipartDelegatesToBackend(t *testing.T) {
 	backend := &recordingMultipartBackend{}
 	ops := NewOperations(backend)
@@ -154,6 +173,31 @@ func (b *recordingObjectReadBackend) HeadObject(_ context.Context, bucket, key s
 func (b *recordingObjectReadBackend) ListObjects(_ context.Context, bucket, prefix string, maxKeys int) ([]*Object, error) {
 	b.calls = append(b.calls, "list:"+bucket+":"+prefix+":"+strconv.Itoa(maxKeys))
 	return []*Object{{Key: "listed"}}, nil
+}
+
+type recordingBucketBackend struct {
+	basicBackend
+	calls []string
+}
+
+func (b *recordingBucketBackend) CreateBucket(_ context.Context, bucket string) error {
+	b.calls = append(b.calls, "create:"+bucket)
+	return nil
+}
+
+func (b *recordingBucketBackend) HeadBucket(_ context.Context, bucket string) error {
+	b.calls = append(b.calls, "head:"+bucket)
+	return nil
+}
+
+func (b *recordingBucketBackend) DeleteBucket(_ context.Context, bucket string) error {
+	b.calls = append(b.calls, "delete:"+bucket)
+	return nil
+}
+
+func (b *recordingBucketBackend) ListBuckets(_ context.Context) ([]string, error) {
+	b.calls = append(b.calls, "list")
+	return []string{"b"}, nil
 }
 
 type recordingMultipartBackend struct {
