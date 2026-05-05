@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.51.1] — 2026-05-06 — E2E data directory cleanup
+
+### Fixed
+
+- Fixed the shared e2e `TestMain` server data directory cleanup path. The
+  previous `defer os.RemoveAll(...)` never ran because `TestMain` exits through
+  `os.Exit`, so `grainfs-e2e-go-*` directories accumulated after each test
+  process.
+
+### Tests
+
+- `make test-e2e`
+- `GRAINFS_BINARY="$(pwd)/bin/grainfs" go test ./tests/e2e -run '^TestBuckets_Create$' -count=1 -timeout 60s`
+
 ## [0.0.51.0] — 2026-05-06 — Storage operations facade
 
 ### Added
