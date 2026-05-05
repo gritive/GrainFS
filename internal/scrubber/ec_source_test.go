@@ -94,7 +94,7 @@ func TestECScrubSource_Iter_HappyPath(t *testing.T) {
 		{Bucket: "b", Key: "k1", DataShards: 2, ParityShards: 1, VersionID: "v1", ETag: "e1"},
 		{Bucket: "b", Key: "k2", DataShards: 2, ParityShards: 1, VersionID: "v2", ETag: "e2"},
 	}
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	require.Equal(t, "ec", src.Name())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -121,7 +121,7 @@ func TestECScrubSource_Iter_KeyPrefixFilter(t *testing.T) {
 		{Bucket: "b", Key: "match/b", DataShards: 2, ParityShards: 1, VersionID: "v2"},
 		{Bucket: "b", Key: "other/c", DataShards: 2, ParityShards: 1, VersionID: "v3"},
 	}
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ch, err := src.Iter(ctx, scrubber.ScopeFull, "b", "match/")
@@ -140,7 +140,7 @@ func TestECScrubSource_Iter_ScopeLiveEqualsFull(t *testing.T) {
 	m.records["b"] = []scrubber.ObjectRecord{
 		{Bucket: "b", Key: "k1", DataShards: 2, ParityShards: 1, VersionID: "v1"},
 	}
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	chFull, err := src.Iter(ctx, scrubber.ScopeFull, "b", "")
@@ -160,7 +160,7 @@ func TestECScrubSource_Iter_ScopeLiveEqualsFull(t *testing.T) {
 
 func TestECScrubSource_Iter_EmptyBucket(t *testing.T) {
 	m := newMockBackend()
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	ch, err := src.Iter(context.Background(), scrubber.ScopeFull, "", "")
 	require.NoError(t, err)
 	var got []scrubber.Block
@@ -177,7 +177,7 @@ func TestECScrubSource_Iter_DroppedObjectsSkipped(t *testing.T) {
 		{Bucket: "b", Key: "dead", DataShards: 2, ParityShards: 1, VersionID: "v2"},
 	}
 	m.deletedObjects["b/dead"] = true
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	ch, err := src.Iter(context.Background(), scrubber.ScopeFull, "b", "")
 	require.NoError(t, err)
 	var keys []string
@@ -194,7 +194,7 @@ func TestECScrubSource_Iter_ContextCancelMidWalk(t *testing.T) {
 			Bucket: "b", Key: fmt.Sprintf("k%02d", i), DataShards: 2, ParityShards: 1, VersionID: "v",
 		})
 	}
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	ctx, cancel := context.WithCancel(context.Background())
 	ch, err := src.Iter(ctx, scrubber.ScopeFull, "b", "")
 	require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestECScrubSource_Iter_ShardOwnerFilter(t *testing.T) {
 	}
 	o.ownedByKey["b/owned"] = []int{0}
 
-	src := scrubber.NewECScrubSource(o, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(o), "node-A")
 	ch, err := src.Iter(context.Background(), scrubber.ScopeFull, "b", "")
 	require.NoError(t, err)
 	var keys []string
@@ -240,7 +240,7 @@ func TestECScrubVerifier_Verify_Healthy(t *testing.T) {
 	m.storeShards("b", "k", [][]byte{[]byte("s0"), []byte("s1"), []byte("s2")})
 
 	bs := scrubber.New(m, time.Hour)
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	src.PrimeForTest("b", "k", "v", rec)
 	ver := scrubber.NewECScrubVerifier(m, bs.Verifier(), bs.Limiter(), bs.Emitter(), "node-A", src)
 
@@ -258,7 +258,7 @@ func TestECScrubVerifier_Verify_MissingShard(t *testing.T) {
 	bs := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
 	em := &recorderEmitter{}
 	bs.SetEmitter(em)
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	src.PrimeForTest("b", "k", "v", rec)
 	ver := scrubber.NewECScrubVerifier(m, bs.Verifier(), bs.Limiter(), bs.Emitter(), "node-A", src)
 
@@ -278,7 +278,7 @@ func TestECScrubVerifier_Verify_SigningDownSkips(t *testing.T) {
 	bs := scrubber.New(m, time.Hour)
 	em := &signingFlagEmitter{healthy: false}
 	bs.SetEmitter(em)
-	src := scrubber.NewECScrubSource(m, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
 	src.PrimeForTest("b", "k", "v", rec)
 	ver := scrubber.NewECScrubVerifier(m, bs.Verifier(), bs.Limiter(), bs.Emitter(), "node-A", src)
 
@@ -298,7 +298,7 @@ func TestECScrubVerifier_Repair_FullPipeline(t *testing.T) {
 	bs := scrubber.New(o, time.Hour, scrubber.WithNoRetry())
 	em := &finalizingEmitter{}
 	bs.SetEmitter(em)
-	src := scrubber.NewECScrubSource(o, "node-A")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(o), "node-A")
 	src.PrimeForTest("b", "k", "v", rec)
 	ver := scrubber.NewECScrubVerifier(o, bs.Verifier(), bs.Limiter(), bs.Emitter(), "node-A", src)
 
@@ -317,4 +317,48 @@ func TestECScrubVerifier_Repair_FullPipeline(t *testing.T) {
 	assert.GreaterOrEqual(t, em.countByPhase(scrubber.PhaseWrite), 1)
 	assert.GreaterOrEqual(t, em.countByPhase(scrubber.PhaseVerify), 1)
 	assert.NotEmpty(t, em.finalized, "FinalizeSession invoked with correlation IDs")
+}
+
+func TestECScrubSource_Iter_ResolverReturnsFalse_EmptyChannel(t *testing.T) {
+	src := scrubber.NewECScrubSource(func(string) (scrubber.Scrubbable, bool) { return nil, false }, "node-A")
+	ch, err := src.Iter(context.Background(), scrubber.ScopeFull, "any-bucket", "")
+	require.NoError(t, err)
+	_, open := <-ch
+	require.False(t, open, "channel must close immediately when resolver yields false")
+}
+
+func TestECScrubSource_Iter_DifferentBucketsResolveToDifferentBackends(t *testing.T) {
+	backendA := newMockBackend()
+	backendA.records["a"] = []scrubber.ObjectRecord{
+		{Bucket: "a", Key: "ka", DataShards: 2, ParityShards: 1, VersionID: "va", ETag: "ea"},
+	}
+	backendB := newMockBackend()
+	backendB.records["b"] = []scrubber.ObjectRecord{
+		{Bucket: "b", Key: "kb", DataShards: 2, ParityShards: 1, VersionID: "vb", ETag: "eb"},
+	}
+	resolve := func(bucket string) (scrubber.Scrubbable, bool) {
+		switch bucket {
+		case "a":
+			return backendA, true
+		case "b":
+			return backendB, true
+		}
+		return nil, false
+	}
+	src := scrubber.NewECScrubSource(resolve, "node-A")
+
+	ch, err := src.Iter(context.Background(), scrubber.ScopeFull, "a", "")
+	require.NoError(t, err)
+	var got []scrubber.Block
+	for blk := range ch {
+		got = append(got, blk)
+	}
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].Bucket)
+	assert.Equal(t, "ka", got[0].Key)
+
+	ch2, err := src.Iter(context.Background(), scrubber.ScopeFull, "c", "")
+	require.NoError(t, err)
+	_, open := <-ch2
+	require.False(t, open, "unmapped bucket must yield empty channel")
 }
