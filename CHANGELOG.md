@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.51.1] — 2026-05-06 — E2E data directory cleanup
+## [0.0.52.1] — 2026-05-06 — E2E data directory cleanup
 
 ### Fixed
 
@@ -13,6 +13,23 @@
 
 - `make test-e2e`
 - `GRAINFS_BINARY="$(pwd)/bin/grainfs" go test ./tests/e2e -run '^TestBuckets_Create$' -count=1 -timeout 60s`
+
+## [0.0.52.0] — 2026-05-06 — Shard group peer identity
+
+### Changed
+
+- **Shard group peer identity** — new shard group seeding now resolves known
+  peer addresses to stable node IDs before writing membership, while preserving
+  dialable address aliases for static peers whose node IDs are not known during
+  bootstrap.
+- **Local peer matching** — centralized shard group local-peer matching and
+  forward ordering behind `ShardGroupPeerSet`, so coordinator routing and group
+  lifecycle wiring share the same node ID / legacy address compatibility rules.
+
+### Tests
+
+- Added focused coverage for node ID preference, legacy address aliases,
+  forwarding order, and static peer fallback during shard group seeding.
 
 ## [0.0.51.0] — 2026-05-06 — Storage operations facade
 
