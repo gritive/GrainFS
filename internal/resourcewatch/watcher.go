@@ -11,7 +11,7 @@ type WatcherConfig struct {
 	OnError       ErrorSink
 }
 
-type MetricsSink func(FDSnapshot, *Decision)
+type MetricsSink func(Sample, *Decision)
 
 type DecisionSink func(context.Context, *Decision) error
 
@@ -19,14 +19,14 @@ type ErrorSink func(error)
 
 type Watcher struct {
 	cfg              WatcherConfig
-	provider         FDProvider
+	provider         Provider
 	detector         *Detector
 	onMetrics        MetricsSink
 	onDecision       DecisionSink
 	pendingDecisions []*Decision
 }
 
-func NewWatcher(cfg WatcherConfig, provider FDProvider, detector *Detector, onMetrics MetricsSink, onDecision DecisionSink) *Watcher {
+func NewWatcher(cfg WatcherConfig, provider Provider, detector *Detector, onMetrics MetricsSink, onDecision DecisionSink) *Watcher {
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 10 * time.Second
 	}

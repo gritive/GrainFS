@@ -9,8 +9,8 @@ import (
 
 type Detector struct {
 	cfg           DetectorConfig
-	samples       []FDSnapshot
-	lastLevel     FDLevel
+	samples       []Sample
+	lastLevel     Level
 	recoverySince time.Time
 }
 
@@ -36,22 +36,22 @@ func NewDetector(cfg DetectorConfig) *Detector {
 	if cfg.ClassificationCap == 0 {
 		cfg.ClassificationCap = 512
 	}
-	return &Detector{cfg: cfg, lastLevel: FDLevelOK}
+	return &Detector{cfg: cfg, lastLevel: LevelOK}
 }
 
-func (d *Detector) Observe(sample FDSnapshot) (*Decision, error) {
+func (d *Detector) Observe(sample Sample) (*Decision, error) {
 	if sample.Limit <= 0 || sample.Open < 0 || sample.Open > sample.Limit || sample.CollectedAt.IsZero() {
-		return nil, ErrInvalidFDSample
+		return nil, ErrInvalidSample
 	}
 
 	d.samples = append(d.samples, sample)
 	if len(d.samples) > d.cfg.MaxSamples {
-		d.samples = append([]FDSnapshot(nil), d.samples[len(d.samples)-d.cfg.MaxSamples:]...)
+		d.samples = append([]Sample(nil), d.samples[len(d.samples)-d.cfg.MaxSamples:]...)
 	}
 
 	ratio := float64(sample.Open) / float64(sample.Limit)
 	level := d.currentLevel(ratio)
-	if level == FDLevelOK && d.lastLevel != FDLevelOK {
+	if level == LevelOK && d.lastLevel != LevelOK {
 		if d.recoverySince.IsZero() {
 			d.recoverySince = sample.CollectedAt
 			return nil, nil
@@ -59,11 +59,11 @@ func (d *Detector) Observe(sample FDSnapshot) (*Decision, error) {
 		if sample.CollectedAt.Sub(d.recoverySince) < d.cfg.RecoveryWindow {
 			return nil, nil
 		}
-		d.lastLevel = FDLevelOK
-		return d.decision(sample, FDLevelOK, "recovered", 0), nil
+		d.lastLevel = LevelOK
+		return d.decision(sample, LevelOK, "recovered", 0), nil
 	}
 
-	if level != FDLevelOK {
+	if level != LevelOK {
 		d.recoverySince = time.Time{}
 		if level != d.lastLevel {
 			d.lastLevel = level
@@ -73,25 +73,25 @@ func (d *Detector) Observe(sample FDSnapshot) (*Decision, error) {
 	}
 
 	eta, threshold := d.projectedETA(sample)
-	if eta > 0 && eta <= d.cfg.ETAWindow && d.lastLevel == FDLevelOK {
-		d.lastLevel = FDLevelWarn
-		return d.decision(sample, FDLevelWarn, threshold, eta), nil
+	if eta > 0 && eta <= d.cfg.ETAWindow && d.lastLevel == LevelOK {
+		d.lastLevel = LevelWarn
+		return d.decision(sample, LevelWarn, threshold, eta), nil
 	}
 	return nil, nil
 }
 
-func (d *Detector) currentLevel(ratio float64) FDLevel {
+func (d *Detector) currentLevel(ratio float64) Level {
 	switch {
 	case ratio >= d.cfg.CriticalRatio:
-		return FDLevelCritical
+		return LevelCritical
 	case ratio >= d.cfg.WarnRatio:
-		return FDLevelWarn
+		return LevelWarn
 	default:
-		return FDLevelOK
+		return LevelOK
 	}
 }
 
-func (d *Detector) projectedETA(sample FDSnapshot) (time.Duration, string) {
+func (d *Detector) projectedETA(sample Sample) (time.Duration, string) {
 	if len(d.samples) < d.cfg.MinSamples {
 		return 0, ""
 	}
@@ -121,16 +121,16 @@ func (d *Detector) projectedETA(sample FDSnapshot) (time.Duration, string) {
 	return time.Duration(remaining/slope) * time.Second, threshold
 }
 
-func (d *Detector) decision(sample FDSnapshot, level FDLevel, threshold string, eta time.Duration) *Decision {
+func (d *Detector) decision(sample Sample, level Level, threshold string, eta time.Duration) *Decision {
 	ratio := float64(sample.Open) / float64(sample.Limit)
-	categories := map[FDCategory]int{}
+	categories := map[Category]int{}
 	for category, count := range sample.Categories {
 		categories[category] = count
 	}
 
 	message := fmt.Sprintf("FD usage %.1f%% (%d/%d)", ratio*100, sample.Open, sample.Limit)
 	switch {
-	case level == FDLevelOK:
+	case level == LevelOK:
 		message = fmt.Sprintf("%s recovered below warning threshold", message)
 	case eta > 0:
 		message = fmt.Sprintf("%s projected to cross %s threshold in %s", message, threshold, eta.Round(time.Second))
@@ -152,9 +152,9 @@ func (d *Detector) decision(sample FDSnapshot, level FDLevel, threshold string, 
 	}
 }
 
-func formatCategories(categories map[FDCategory]int) string {
+func formatCategories(categories map[Category]int) string {
 	type pair struct {
-		category FDCategory
+		category Category
 		count    int
 	}
 	pairs := make([]pair, 0, len(categories))

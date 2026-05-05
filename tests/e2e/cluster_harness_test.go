@@ -137,7 +137,12 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 			c.nbdPorts[i] = ports[3*opts.Nodes+i]
 		}
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-		dir, err := os.MkdirTemp("", fmt.Sprintf("%s-node-%d-*", opts.LogPrefix, i))
+		// Use /tmp explicitly: on macOS, $TMPDIR resolves to a long
+		// /var/folders/tt/<random>/T/ path that, combined with a long
+		// LogPrefix and per-test suffix, can push the resulting admin.sock
+		// path past the 104-byte sun_path limit (macOS) and fail bind with
+		// "invalid argument". /tmp is short on every platform we run.
+		dir, err := os.MkdirTemp("/tmp", fmt.Sprintf("ge-%d-*", i))
 		if err != nil {
 			c.Stop()
 			return nil, err

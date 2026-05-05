@@ -28,7 +28,7 @@ func TestClassifyFDTarget(t *testing.T) {
 	tests := []struct {
 		name   string
 		target string
-		want   FDCategory
+		want   Category
 	}{
 		{name: "socket", target: "socket:[12345]", want: FDCategorySocket},
 		{name: "badger", target: "/tmp/grainfs/000001.sst", want: FDCategoryBadger},
