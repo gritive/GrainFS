@@ -8,6 +8,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/resourcewatch"
 )
 
 // GroupBackend is the per-group data plane: BadgerDB + raft.Node + ShardService
@@ -23,8 +24,9 @@ import (
 type GroupBackend struct {
 	*DistributedBackend
 	groupID   string
-	logStore  raft.LogStore // owned: closed on GroupBackend.Close (nil if wrapped)
-	wrapped   bool          // true → Close is no-op (caller owns lifecycle)
+	logStore  raft.LogStore               // owned: closed on GroupBackend.Close (nil if wrapped)
+	vlogEntry *resourcewatch.RegisteredDB // owned: deregistered on Close (nil if wrapped)
+	wrapped   bool                        // true → Close is no-op (caller owns lifecycle)
 	closed    atomic.Bool
 	closeOnce sync.Once
 }
@@ -33,14 +35,15 @@ type GroupBackend struct {
 // owned by the GroupBackend after construction (Close releases DB and Node;
 // ShardSvc is shared across groups and not closed here).
 type GroupBackendConfig struct {
-	ID       string
-	Root     string
-	DB       *badger.DB
-	Node     *raft.Node
-	LogStore raft.LogStore // optional — owned by GroupBackend (closed on Close)
-	ShardSvc *ShardService // may be nil for in-process / single-node tests
-	PeerIDs  []string      // EC node pool = group voter set
-	EC       ECConfig
+	ID        string
+	Root      string
+	DB        *badger.DB
+	Node      *raft.Node
+	LogStore  raft.LogStore               // optional — owned by GroupBackend (closed on Close)
+	VlogEntry *resourcewatch.RegisteredDB // optional — owned by GroupBackend (deregistered on Close)
+	ShardSvc  *ShardService               // may be nil for in-process / single-node tests
+	PeerIDs   []string                    // EC node pool = group voter set
+	EC        ECConfig
 }
 
 // WrapDistributedBackend wraps an EXISTING DistributedBackend as a GroupBackend.
@@ -92,6 +95,7 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 		DistributedBackend: dist,
 		groupID:            cfg.ID,
 		logStore:           cfg.LogStore,
+		vlogEntry:          cfg.VlogEntry,
 	}, nil
 }
 
@@ -121,6 +125,9 @@ func (g *GroupBackend) Close() error {
 			if cErr := g.logStore.Close(); cErr != nil && err == nil {
 				err = cErr
 			}
+		}
+		if g.vlogEntry != nil {
+			resourcewatch.DeregisterDB(g.vlogEntry)
 		}
 	})
 	return err
