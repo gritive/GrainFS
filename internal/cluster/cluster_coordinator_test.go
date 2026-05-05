@@ -8,7 +8,10 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
+	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/wal"
@@ -152,6 +155,119 @@ func TestClusterCoordinator_DeleteBucket_ChecksRoutedDataGroupBeforeBaseDelete(t
 	require.Empty(t, base.calls)
 	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpListObjects, d.calls[0].op)
+}
+
+func TestClusterCoordinator_DeleteBucket_UsesLocalSingletonGroupBeforeForward(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("empty-bucket", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial))
+
+	require.NoError(t, c.DeleteBucket(context.Background(), "empty-bucket"))
+	require.Equal(t, []string{"DeleteBucket:empty-bucket"}, base.calls)
+	require.Empty(t, d.calls)
+}
+
+func TestClusterCoordinator_PutObject_WaitsForLocalSingletonLeaderBeforeForward(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		gb.RaftNode().Start()
+	}()
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("write-bucket", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	obj, err := c.PutObject(ctx, "write-bucket", "key", strings.NewReader("body"), "text/plain")
+	require.NoError(t, err)
+	require.Equal(t, int64(4), obj.Size)
+	require.Empty(t, d.calls)
+}
+
+func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "key",
+		Size:         4,
+		ContentType:  "text/plain",
+		ETag:         "etag",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("read-bucket"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("read-bucket", "key"), metaBytes)
+	}))
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("read-bucket", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial))
+
+	obj, err := c.HeadObject(context.Background(), "read-bucket", "key")
+	require.NoError(t, err)
+	require.Equal(t, int64(4), obj.Size)
+	require.Empty(t, d.calls)
+}
+
+func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBackend {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
+	require.NoError(t, err)
+	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
+	require.NoError(t, err)
+	node := raft.NewNode(raft.DefaultConfig(nodeID, nil), logStore)
+	node.SetTransport(
+		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+	)
+	gb, err := NewGroupBackend(GroupBackendConfig{
+		ID:      groupID,
+		Root:    dir,
+		DB:      db,
+		Node:    node,
+		PeerIDs: []string{nodeID},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, gb.Close())
+		require.NoError(t, logStore.Close())
+	})
+	return gb
 }
 
 func TestClusterCoordinator_ListBuckets_DelegatesToBase(t *testing.T) {

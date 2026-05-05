@@ -6,96 +6,69 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // cowSnapResp mirrors the snapshot response from POST /volumes/:name/snapshots.
 type cowSnapResp struct {
-	ID         string    `json:"id"`
-	CreatedAt  time.Time `json:"created_at"`
-	BlockCount int64     `json:"block_count"`
+	ID         string `json:"id"`
+	CreatedAt  string `json:"created_at"`
+	BlockCount int64  `json:"block_count"`
 }
 
-func cowCreateVolume(t *testing.T, name string, sizeBytes int64) {
+func cowCreateVolume(t *testing.T, dataDir, name string, sizeBytes int64) {
 	t.Helper()
-	url := fmt.Sprintf("%s/volumes/%s?size=%d", testServerURL, name, sizeBytes)
 	var (
-		statusCode int
-		body       []byte
-		err        error
+		out  string
+		code int
 	)
 	require.Eventually(t, func() bool {
-		req, _ := http.NewRequest(http.MethodPut, url, nil)
-		var resp *http.Response
-		resp, err = http.DefaultClient.Do(req)
-		if err != nil {
-			return false
-		}
-		defer resp.Body.Close()
-		statusCode = resp.StatusCode
-		body, _ = io.ReadAll(resp.Body)
-		return statusCode == http.StatusCreated
-	}, 30*time.Second, 500*time.Millisecond, "create volume %s: status=%d body=%s err=%v", name, statusCode, string(body), err)
+		out, code = runCLI(t, dataDir, "volume", "create", name, "--size", fmt.Sprintf("%d", sizeBytes))
+		return code == 0
+	}, 30*time.Second, 500*time.Millisecond, "create volume %s: code=%d output=%s", name, code, out)
 }
 
-func cowDeleteVolume(t *testing.T, name string) {
+func cowDeleteVolume(t *testing.T, dataDir, name string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodDelete, testServerURL+"/volumes/"+name, nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	out, code := runCLI(t, dataDir, "volume", "delete", name, "--force")
+	require.Equal(t, 0, code, out)
 }
 
-func cowCreateSnapshot(t *testing.T, volName string) string {
+func cowCreateSnapshot(t *testing.T, dataDir, volName string) string {
 	t.Helper()
-	resp, err := http.Post(testServerURL+"/volumes/"+volName+"/snapshots", "application/json", nil) //nolint:noctx
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusCreated, resp.StatusCode, "create snapshot for %s", volName)
-
+	out, code := runCLI(t, dataDir, "volume", "snapshot", "create", volName, "--json")
+	require.Equal(t, 0, code, out)
 	var snap cowSnapResp
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&snap))
+	require.NoError(t, json.Unmarshal([]byte(out), &snap))
 	require.NotEmpty(t, snap.ID, "snapshot ID must be non-empty")
 	return snap.ID
 }
 
-func cowRollback(t *testing.T, volName, snapID string) {
+func cowRollback(t *testing.T, dataDir, volName, snapID string) {
 	t.Helper()
-	url := fmt.Sprintf("%s/volumes/%s/snapshots/%s/rollback", testServerURL, volName, snapID)
-	resp, err := http.Post(url, "application/json", nil) //nolint:noctx
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode, "rollback %s → %s", volName, snapID)
+	out, code := runCLI(t, dataDir, "volume", "rollback", volName, snapID)
+	require.Equal(t, 0, code, out)
 }
 
-func cowListSnapshots(t *testing.T, volName string) []cowSnapResp {
+func cowListSnapshots(t *testing.T, dataDir, volName string) []cowSnapResp {
 	t.Helper()
-	resp, err := http.Get(testServerURL + "/volumes/" + volName + "/snapshots") //nolint:noctx
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
+	out, code := runCLI(t, dataDir, "volume", "snapshot", "list", volName, "--json")
+	require.Equal(t, 0, code, out)
 	var snaps []cowSnapResp
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&snaps))
+	require.NoError(t, json.Unmarshal([]byte(out), &snaps))
 	return snaps
 }
 
-func cowDeleteSnapshot(t *testing.T, volName, snapID string) {
+func cowDeleteSnapshot(t *testing.T, dataDir, volName, snapID string) {
 	t.Helper()
-	url := fmt.Sprintf("%s/volumes/%s/snapshots/%s", testServerURL, volName, snapID)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	out, code := runCLI(t, dataDir, "volume", "snapshot", "delete", volName, snapID)
+	require.Equal(t, 0, code, out)
 }
 
 // nfsWriteFile writes content to the "default" bucket via S3, simulating an NFS write.
@@ -151,7 +124,7 @@ func TestCoW_SnapshotRollbackRestoresData(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Create snapshot of the "default" volume.
-	snapID := cowCreateSnapshot(t, "default")
+	snapID := cowCreateSnapshot(t, testServerDataDir, "default")
 
 	// Overwrite with modified content.
 	nfsWriteFile(t, filePath, modified)
@@ -163,12 +136,12 @@ func TestCoW_SnapshotRollbackRestoresData(t *testing.T) {
 		"before rollback: expected modified content, got %q", got)
 
 	// Roll back.
-	cowRollback(t, "default", snapID)
+	cowRollback(t, testServerDataDir, "default", snapID)
 	time.Sleep(1200 * time.Millisecond) // wait out the 1s NFS stat cache
 
 	// After rollback, file should contain original content.
 	got = nfsReadFile(t, filePath)
-	assert.True(t, bytes.Contains(got, original),
+	require.True(t, bytes.Contains(got, original),
 		"after rollback: expected original content %q, got %q", original, got)
 }
 
@@ -177,27 +150,27 @@ func TestCoW_SnapshotListAndDelete(t *testing.T) {
 	const volSize = 4 * 1024 * 1024 // 4MB
 	volName := fmt.Sprintf("cow-snaplist-vol-%d", time.Now().UnixNano())
 
-	cowCreateVolume(t, volName, volSize)
-	t.Cleanup(func() { cowDeleteVolume(t, volName) })
+	cowCreateVolume(t, testServerDataDir, volName, volSize)
+	t.Cleanup(func() { cowDeleteVolume(t, testServerDataDir, volName) })
 
 	// Create 3 snapshots.
 	var ids []string
 	for i := 0; i < 3; i++ {
-		ids = append(ids, cowCreateSnapshot(t, volName))
+		ids = append(ids, cowCreateSnapshot(t, testServerDataDir, volName))
 	}
 
-	snaps := cowListSnapshots(t, volName)
+	snaps := cowListSnapshots(t, testServerDataDir, volName)
 	require.Len(t, snaps, 3, "expected 3 snapshots after creation")
 
 	// Delete one snapshot.
-	cowDeleteSnapshot(t, volName, ids[1])
+	cowDeleteSnapshot(t, testServerDataDir, volName, ids[1])
 
-	snaps = cowListSnapshots(t, volName)
-	assert.Len(t, snaps, 2, "expected 2 snapshots after deleting one")
+	snaps = cowListSnapshots(t, testServerDataDir, volName)
+	require.Len(t, snaps, 2, "expected 2 snapshots after deleting one")
 
 	// Verify the deleted snapshot is gone.
 	for _, s := range snaps {
-		assert.NotEqual(t, ids[1], s.ID, "deleted snapshot must not appear in list")
+		require.NotEqual(t, ids[1], s.ID, "deleted snapshot must not appear in list")
 	}
 }
 
@@ -211,25 +184,24 @@ func TestCoW_CloneLifecycleIndependence(t *testing.T) {
 	srcName := fmt.Sprintf("cow-clone-src-%d", time.Now().UnixNano())
 	dstName := fmt.Sprintf("cow-clone-dst-%d", time.Now().UnixNano())
 
-	cowCreateVolume(t, srcName, volSize)
-	t.Cleanup(func() { cowDeleteVolume(t, srcName) })
+	cowCreateVolume(t, testServerDataDir, srcName, volSize)
+	srcDeleted := false
+	t.Cleanup(func() {
+		if !srcDeleted {
+			cowDeleteVolume(t, testServerDataDir, srcName)
+		}
+	})
 
 	// Clone src → dst.
-	body := fmt.Sprintf(`{"src":%q,"dst":%q}`, srcName, dstName)
-	resp, err := http.Post(testServerURL+"/volumes/clone", "application/json", //nolint:noctx
-		bytes.NewBufferString(body))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusCreated, resp.StatusCode, "clone %s → %s", srcName, dstName)
+	out, code := runCLI(t, testServerDataDir, "volume", "clone", srcName, dstName)
+	require.Equal(t, 0, code, out)
 
 	// Delete source; clone must still be accessible.
-	cowDeleteVolume(t, srcName)
-	resp2, err := http.Get(testServerURL + "/volumes/" + dstName) //nolint:noctx
-	require.NoError(t, err)
-	defer resp2.Body.Close()
-	assert.Equal(t, http.StatusOK, resp2.StatusCode,
-		"clone must survive deletion of its source")
+	cowDeleteVolume(t, testServerDataDir, srcName)
+	srcDeleted = true
+	out, code = runCLI(t, testServerDataDir, "volume", "info", dstName)
+	require.Equal(t, 0, code, "clone must survive deletion of its source: %s", out)
 
 	// Clean up.
-	t.Cleanup(func() { cowDeleteVolume(t, dstName) })
+	t.Cleanup(func() { cowDeleteVolume(t, testServerDataDir, dstName) })
 }

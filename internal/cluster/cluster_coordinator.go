@@ -25,6 +25,9 @@ const DefaultMaxForwardBodyBytes = 5 * 1024 * 1024
 // without reintroducing the request-body buffering fixed for writes.
 const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 
+const defaultSelfOnlyLeaderWait = 5 * time.Second
+const defaultFollowerReadWait = 250 * time.Millisecond
+
 // ErrCoordinatorNoRouter is returned when routeBucket is called on a
 // coordinator that was constructed without a router (test/solo-node configs
 // that should not be reaching the routing path).
@@ -333,10 +336,11 @@ func (c *ClusterCoordinator) RestoreBuckets(buckets []storage.SnapshotBucket) er
 // call: which group owns the bucket, peers in attempt order, and whether
 // self can short-circuit the wire.
 type routeTarget struct {
-	groupID      string
-	peers        []string
-	selfIsLeader bool
-	selfIsVoter  bool
+	groupID         string
+	peers           []string
+	selfIsLeader    bool
+	selfIsVoter     bool
+	selfIsOnlyVoter bool
 }
 
 // routeBucket resolves bucket → group → peer list for the bucket-scoped ops in
@@ -378,6 +382,7 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 			break
 		}
 	}
+	t.selfIsOnlyVoter = t.selfIsVoter && len(entry.PeerIDs) == 1
 	if t.selfIsVoter && c.groups != nil {
 		if dg2 := c.groups.Get(entry.ID); dg2 != nil && dg2.Backend() != nil &&
 			dg2.Backend().RaftNode() != nil && dg2.Backend().RaftNode().IsLeader() {
@@ -399,6 +404,74 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 	}
 	t.peers = peers
 	return t, nil
+}
+
+func (t routeTarget) canReadLocal() bool {
+	return t.selfIsLeader || t.selfIsOnlyVoter
+}
+
+func (c *ClusterCoordinator) localReadBackend(ctx context.Context, target routeTarget) (*GroupBackend, bool, error) {
+	if target.canReadLocal() {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb, true, nil
+		}
+		return nil, false, nil
+	}
+	if !target.selfIsVoter {
+		return nil, false, nil
+	}
+	gb := c.localBackend(target.groupID)
+	if gb == nil || gb.RaftNode() == nil {
+		return nil, false, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, defaultFollowerReadWait)
+	defer cancel()
+	idx, err := gb.ReadIndex(readCtx)
+	if err != nil {
+		return nil, false, nil
+	}
+	if err := gb.WaitApplied(readCtx, idx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			if ctx.Err() == nil {
+				return nil, false, nil
+			}
+		}
+		return nil, false, err
+	}
+	return gb, true, nil
+}
+
+func (c *ClusterCoordinator) localWriteBackend(ctx context.Context, target routeTarget) (*GroupBackend, bool, error) {
+	if target.selfIsLeader {
+		if gb := c.localBackend(target.groupID); gb != nil {
+			return gb, true, nil
+		}
+		return nil, false, nil
+	}
+	if !target.selfIsOnlyVoter {
+		return nil, false, nil
+	}
+	gb := c.localBackend(target.groupID)
+	if gb == nil || gb.RaftNode() == nil {
+		return nil, false, nil
+	}
+	if gb.RaftNode().IsLeader() {
+		return gb, true, nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, defaultSelfOnlyLeaderWait)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			return nil, true, waitCtx.Err()
+		case <-ticker.C:
+			if gb.RaftNode().IsLeader() {
+				return gb, true, nil
+			}
+		}
+	}
 }
 
 func (c *ClusterCoordinator) peersForForward(entry ShardGroupEntry) []string {
@@ -446,10 +519,11 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.GetObject(ctx, bucket, key)
+	if gb, ok, err := c.localReadBackend(ctx, target); ok {
+		if err != nil {
+			return nil, nil, err
 		}
+		return gb.GetObject(ctx, bucket, key)
 	}
 	if c.forward == nil {
 		return nil, nil, ErrCoordinatorNoRouter
@@ -486,10 +560,11 @@ func (c *ClusterCoordinator) GetObjectVersion(
 	if err != nil {
 		return nil, nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.GetObjectVersion(bucket, key, versionID)
+	if gb, ok, err := c.localReadBackend(ctx, target); ok {
+		if err != nil {
+			return nil, nil, err
 		}
+		return gb.GetObjectVersion(bucket, key, versionID)
 	}
 	if c.forward == nil {
 		return nil, nil, ErrCoordinatorNoRouter
@@ -561,10 +636,11 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.HeadObject(ctx, bucket, key)
+	if gb, ok, err := c.localReadBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.HeadObject(ctx, bucket, key)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -582,10 +658,11 @@ func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key strin
 	if err != nil {
 		return err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.DeleteObject(ctx, bucket, key)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return err
 		}
+		return gb.DeleteObject(ctx, bucket, key)
 	}
 	if c.forward == nil {
 		return ErrCoordinatorNoRouter
@@ -604,10 +681,11 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 	if err != nil {
 		return "", err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.DeleteObjectReturningMarker(bucket, key)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return "", err
 		}
+		return gb.DeleteObjectReturningMarker(bucket, key)
 	}
 	if c.forward == nil {
 		return "", ErrCoordinatorNoRouter
@@ -633,10 +711,11 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 	if err != nil {
 		return err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.DeleteObjectVersion(bucket, key, versionID)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return err
 		}
+		return gb.DeleteObjectVersion(bucket, key, versionID)
 	}
 	if c.forward == nil {
 		return ErrCoordinatorNoRouter
@@ -654,10 +733,11 @@ func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix str
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.ListObjects(ctx, bucket, prefix, maxKeys)
+	if gb, ok, err := c.localReadBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.ListObjects(ctx, bucket, prefix, maxKeys)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -678,10 +758,11 @@ func (c *ClusterCoordinator) ListObjectVersions(
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.ListObjectVersions(bucket, prefix, maxKeys)
+	if gb, ok, err := c.localReadBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.ListObjectVersions(bucket, prefix, maxKeys)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -702,10 +783,11 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 	if err != nil {
 		return err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.WalkObjects(ctx, bucket, prefix, fn)
+	if gb, ok, err := c.localReadBackend(ctx, target); ok {
+		if err != nil {
+			return err
 		}
+		return gb.WalkObjects(ctx, bucket, prefix, fn)
 	}
 	if c.forward == nil {
 		return ErrCoordinatorNoRouter
@@ -732,10 +814,11 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.CreateMultipartUpload(ctx, bucket, key, contentType)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.CreateMultipartUpload(ctx, bucket, key, contentType)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -753,10 +836,11 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -776,10 +860,11 @@ func (c *ClusterCoordinator) PutObject(
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.PutObject(ctx, bucket, key, r, contentType)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.PutObject(ctx, bucket, key, r, contentType)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -826,10 +911,11 @@ func (c *ClusterCoordinator) WriteAt(ctx context.Context, bucket, key string, of
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.WriteAt(ctx, bucket, key, offset, data)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.WriteAt(ctx, bucket, key, offset, data)
 	}
 
 	var existing []byte
@@ -864,10 +950,11 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 	if err != nil {
 		return err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.Truncate(ctx, bucket, key, size)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return err
 		}
+		return gb.Truncate(ctx, bucket, key, size)
 	}
 
 	var existing []byte
@@ -903,10 +990,11 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	if err != nil {
 		return 0, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.ReadAt(ctx, bucket, key, offset, buf)
+	if gb, ok, err := c.localReadBackend(ctx, target); ok {
+		if err != nil {
+			return 0, err
 		}
+		return gb.ReadAt(ctx, bucket, key, offset, buf)
 	}
 
 	rc, _, err := c.GetObject(ctx, bucket, key)
@@ -939,10 +1027,11 @@ func (c *ClusterCoordinator) UploadPart(
 	if err != nil {
 		return nil, err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
 		}
+		return gb.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -1005,10 +1094,11 @@ func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, k
 	if err != nil {
 		return err
 	}
-	if target.selfIsLeader {
-		if gb := c.localBackend(target.groupID); gb != nil {
-			return gb.AbortMultipartUpload(ctx, bucket, key, uploadID)
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return err
 		}
+		return gb.AbortMultipartUpload(ctx, bucket, key, uploadID)
 	}
 	if c.forward == nil {
 		return ErrCoordinatorNoRouter

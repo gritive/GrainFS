@@ -37,14 +37,13 @@ const probeTimeout = 200 * time.Millisecond
 // to satisfy the EC data shard threshold and reports degraded state via the
 // alerts tracker.
 //
-// The first check fires immediately on Start so the server knows its state
-// without waiting for the first 30 s tick.
+// The first check waits for the first interval tick. This avoids turning
+// normal rolling startup into a sticky degraded state while peers are still
+// binding their QUIC sockets.
 //
-// Node liveness is determined by probing each peer's QUIC/Raft address via
-// UDP: a "connection refused" reply means the port is closed (node dead),
-// while a timeout means the UDP socket is open (node alive — QUIC won't
-// respond to garbage but accepts the packet). This avoids relying on
-// PeerHealth which is only updated during actual shard I/O.
+// Node liveness is determined by a real QUIC shard-service ping when the
+// backend has a shard service. Unit tests and partially-wired backends fall
+// back to a UDP probe.
 type DegradedMonitor struct {
 	backend  *DistributedBackend
 	tracker  *alerts.DegradedTracker
@@ -89,10 +88,6 @@ func (m *DegradedMonitor) WithQuorumCheck(node RaftStateProvider, sender AlertSe
 // Run starts the monitor loop. It blocks until ctx is cancelled.
 // Call in a goroutine.
 func (m *DegradedMonitor) Run(ctx context.Context) {
-	// Fire immediately, then every interval.
-	m.check()
-	m.checkQuorum()
-
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 	for {
@@ -162,16 +157,15 @@ func (m *DegradedMonitor) check() {
 	}
 }
 
-// countLiveNodes probes all configured nodes via UDP and returns the count of
-// nodes whose QUIC port is open (alive). A node is considered dead if its port
-// returns ICMP "connection refused" within probeTimeout; a timeout means the
-// UDP socket is accepting traffic (QUIC does not respond to garbage bytes).
+// countLiveNodes probes all configured nodes and returns the count of nodes
+// that can accept a QUIC shard-service RPC. A UDP fallback remains for unit
+// tests and partially-wired backends.
 //
 // As a side-effect, dead peer addresses are marked unhealthy in peerHealth so
 // that clusterStatus's down_nodes computation (via liveNodes/LivePeers) stays
-// accurate. We only mark dead peers, never call MarkHealthy — the existing
-// 10 s cooldown in PeerHealth handles recovery so we don't override signals
-// from shard I/O.
+// accurate. PeerHealth is only used after probing, not as a short-circuit:
+// startup shard I/O can mark a not-yet-ready peer unhealthy, so the existing
+// cooldown must expire before an ambiguous UDP timeout is counted live again.
 func (m *DegradedMonitor) countLiveNodes() int {
 	nodes := m.backend.allNodes
 	if len(nodes) == 0 {
@@ -191,24 +185,33 @@ func (m *DegradedMonitor) countLiveNodes() int {
 				ch <- result{addr: a, alive: true}
 				return
 			}
-			if m.backend.peerHealth != nil && !m.backend.peerHealth.IsHealthy(a) {
-				ch <- result{addr: a, alive: false}
-				return
-			}
-			ch <- result{addr: a, alive: probeUDPPort(a, probeTimeout)}
+			ch <- result{addr: a, alive: m.probePeer(a)}
 		}(addr)
 	}
 
 	live := 0
 	for range nodes {
 		r := <-ch
-		if r.alive {
+		alive := r.alive
+		if alive && r.addr != m.backend.selfAddr && m.backend.peerHealth != nil && !m.backend.peerHealth.IsHealthy(r.addr) {
+			alive = false
+		}
+		if alive {
 			live++
 		} else if m.backend.peerHealth != nil {
 			m.backend.peerHealth.MarkUnhealthy(r.addr)
 		}
 	}
 	return live
+}
+
+func (m *DegradedMonitor) probePeer(addr string) bool {
+	if m.backend.shardSvc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		return m.backend.shardSvc.Ping(ctx, addr) == nil
+	}
+	return probeUDPPort(addr, probeTimeout)
 }
 
 // probeUDPPort checks whether a UDP port is open by sending a single byte and

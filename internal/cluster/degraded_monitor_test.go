@@ -2,11 +2,10 @@ package cluster
 
 import (
 	"errors"
+	"github.com/stretchr/testify/require"
+	"net"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -55,8 +54,8 @@ func TestCheckQuorum_LeaderPresent_NoAlert(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		m.checkQuorum()
 	}
-	assert.Empty(t, sender.sent, "no alert should fire when leader is known")
-	assert.Equal(t, 0, m.quorumLostTicks)
+	require.Empty(t, sender.sent, "no alert should fire when leader is known")
+	require.Equal(t, 0, m.quorumLostTicks)
 }
 
 func TestCheckQuorum_LeaderState_NoAlert(t *testing.T) {
@@ -68,7 +67,7 @@ func TestCheckQuorum_LeaderState_NoAlert(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		m.checkQuorum()
 	}
-	assert.Empty(t, sender.sent)
+	require.Empty(t, sender.sent)
 }
 
 func TestCheckQuorum_FiresAfterThreshold(t *testing.T) {
@@ -77,20 +76,20 @@ func TestCheckQuorum_FiresAfterThreshold(t *testing.T) {
 	m := newQuorumMonitor(t, st, sender)
 
 	m.checkQuorum() // tick 1 — counter 1, no alert yet
-	assert.Empty(t, sender.sent, "first tick must not alert")
-	assert.Equal(t, 1, m.quorumLostTicks)
+	require.Empty(t, sender.sent, "first tick must not alert")
+	require.Equal(t, 1, m.quorumLostTicks)
 
 	m.checkQuorum() // tick 2 — counter 2 == threshold, alert fires
 	require.Len(t, sender.sent, 1, "alert must fire on threshold tick")
-	assert.Equal(t, "raft_quorum_lost", sender.sent[0].Type)
-	assert.Equal(t, alerts.SeverityCritical, sender.sent[0].Severity)
-	assert.Equal(t, "cluster", sender.sent[0].Resource)
-	assert.Contains(t, sender.sent[0].Message, "quorum likely lost")
+	require.Equal(t, "raft_quorum_lost", sender.sent[0].Type)
+	require.Equal(t, alerts.SeverityCritical, sender.sent[0].Severity)
+	require.Equal(t, "cluster", sender.sent[0].Resource)
+	require.Contains(t, sender.sent[0].Message, "quorum likely lost")
 
 	// Subsequent ticks must not re-alert (would spam on every check).
 	m.checkQuorum()
 	m.checkQuorum()
-	assert.Len(t, sender.sent, 1, "alert must not repeat")
+	require.Len(t, sender.sent, 1, "alert must not repeat")
 }
 
 func TestCheckQuorum_LeaderRecovers_CounterResets(t *testing.T) {
@@ -99,20 +98,20 @@ func TestCheckQuorum_LeaderRecovers_CounterResets(t *testing.T) {
 	m := newQuorumMonitor(t, st, sender)
 
 	m.checkQuorum() // 1
-	assert.Equal(t, 1, m.quorumLostTicks)
+	require.Equal(t, 1, m.quorumLostTicks)
 
 	// Leader appears.
 	st.leaderID = "node-1"
 	m.checkQuorum()
-	assert.Equal(t, 0, m.quorumLostTicks, "counter must reset when leader returns")
-	assert.Empty(t, sender.sent)
+	require.Equal(t, 0, m.quorumLostTicks, "counter must reset when leader returns")
+	require.Empty(t, sender.sent)
 
 	// Leader gone again — must restart counting from 0, not retain prior count.
 	st.leaderID = ""
 	m.checkQuorum() // 1
-	assert.Empty(t, sender.sent, "must not alert on tick 1 after recovery")
+	require.Empty(t, sender.sent, "must not alert on tick 1 after recovery")
 	m.checkQuorum() // 2 → alert
-	assert.Len(t, sender.sent, 1)
+	require.Len(t, sender.sent, 1)
 }
 
 func TestCheckQuorum_SendError_DoesNotPanic(t *testing.T) {
@@ -122,7 +121,7 @@ func TestCheckQuorum_SendError_DoesNotPanic(t *testing.T) {
 
 	m.checkQuorum()
 	m.checkQuorum() // alert fires; sender returns error
-	assert.Len(t, sender.sent, 1, "alert was attempted")
+	require.Len(t, sender.sent, 1, "alert was attempted")
 	// No panic, monitor continues.
 }
 
@@ -148,15 +147,45 @@ func TestDegradedMonitor_CheckDoesNotShortCircuitOnPeerHealth(t *testing.T) {
 	backend.peerHealth.MarkUnhealthy(nodes[1])
 	backend.peerHealth.MarkUnhealthy(nodes[2])
 	backend.peerHealth.MarkUnhealthy(nodes[3])
-	require.False(t, backend.ECActive(), "precondition: peerHealth has already reduced dynamic liveNodes below MinECNodes")
+	require.Less(t, len(backend.liveNodes()), MinECNodes, "precondition: peerHealth has reduced dynamic liveNodes below MinECNodes")
 
 	m := NewDegradedMonitor(backend, tracker, time.Second)
 	m.check()
 
-	assert.True(t, tracker.Degraded(), "monitor must still probe static configured nodes and enter degraded")
+	require.True(t, tracker.Degraded(), "monitor must still probe static configured nodes and enter degraded")
 }
 
-func TestDegradedMonitor_CountLiveNodesHonorsPeerHealth(t *testing.T) {
+func TestDegradedMonitor_CountLiveNodesProbesPeerHealthUnhealthyNodes(t *testing.T) {
+	listeners := make([]net.PacketConn, 0, 4)
+	nodes := []string{"self"}
+	for range 4 {
+		conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		listeners = append(listeners, conn)
+		nodes = append(nodes, conn.LocalAddr().String())
+	}
+	t.Cleanup(func() {
+		for _, conn := range listeners {
+			require.NoError(t, conn.Close())
+		}
+	})
+
+	backend := &DistributedBackend{
+		allNodes:   nodes,
+		selfAddr:   "self",
+		peerHealth: NewPeerHealth(nodes[1:], time.Nanosecond),
+	}
+	for _, node := range nodes[1:] {
+		backend.peerHealth.MarkUnhealthy(node)
+	}
+	time.Sleep(time.Millisecond)
+
+	m := &DegradedMonitor{backend: backend}
+
+	require.Equal(t, len(nodes), m.countLiveNodes(), "monitor liveness must probe peers instead of trusting transient peerHealth")
+}
+
+func TestDegradedMonitor_CountLiveNodesMarksClosedPortsUnhealthy(t *testing.T) {
 	nodes := []string{
 		"self",
 		"127.0.0.1:1",
@@ -176,5 +205,5 @@ func TestDegradedMonitor_CountLiveNodesHonorsPeerHealth(t *testing.T) {
 
 	m := &DegradedMonitor{backend: backend}
 
-	require.Equal(t, 1, m.countLiveNodes(), "unhealthy peers must not be revived by UDP timeout semantics")
+	require.Equal(t, 1, m.countLiveNodes(), "closed peer ports must be counted dead")
 }

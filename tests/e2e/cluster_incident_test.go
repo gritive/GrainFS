@@ -5,13 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,11 +52,6 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-node e2e in -short mode")
 	}
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s - run `make build` first", binary)
-	}
-
 	const (
 		clusterKey = "E2E-CLUSTER-INCIDENT-KEY"
 		accessKey  = "incident-ak"
@@ -70,81 +63,22 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 		ecParity   = 1
 	)
 
-	httpPorts, raftPorts, nfs4Ports, nbdPorts := make([]int, numNodes), make([]int, numNodes), make([]int, numNodes), make([]int, numNodes)
-	ports := uniqueFreePorts(numNodes * 4)
-	for i := range numNodes {
-		httpPorts[i] = ports[i]
-		raftPorts[i] = ports[numNodes+i]
-		nfs4Ports[i] = ports[2*numNodes+i]
-		nbdPorts[i] = ports[3*numNodes+i]
-	}
-	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
-	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j != i {
-				out = append(out, raftAddr(j))
-			}
-		}
-		return strings.Join(out, ",")
-	}
-
-	dataDirs := make([]string, numNodes)
-	for i := range dataDirs {
-		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-incident-%d-*", i))
-		require.NoError(t, err)
-		dataDirs[i] = d
-		t.Cleanup(func() { _ = os.RemoveAll(d) })
-	}
-
-	procs := make([]*exec.Cmd, numNodes)
-	for i := range numNodes {
-		cmd := exec.Command(binary, "serve",
-			"--data", dataDirs[i],
-			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", raftAddr(i),
-			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
-			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--seed-groups", "1",
-			"--nfs4-port", "0",
-			"--nbd-port", "0",
-			"--snapshot-interval", "0",
-			"--scrub-interval", "2s",
-			"--lifecycle-interval", "0",
-			"--no-encryption",
-		)
-		if testing.Verbose() {
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-		}
-		require.NoError(t, cmd.Start(), "start node %d", i)
-		procs[i] = cmd
-	}
-	t.Cleanup(func() {
-		for _, p := range procs {
-			if p != nil && p.Process != nil {
-				_ = p.Process.Kill()
-				_, _ = p.Process.Wait()
-			}
-		}
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:         numNodes,
+		Mode:          ClusterModeStaticPeers,
+		ClusterKey:    clusterKey,
+		AccessKey:     accessKey,
+		SecretKey:     secretKey,
+		ECData:        ecData,
+		ECParity:      ecParity,
+		LogPrefix:     "grainfs-incident",
+		ScrubInterval: "2s",
+		DisableNFS:    true,
+		DisableNBD:    true,
 	})
-	for i := range procs {
-		waitForPort(t, httpPorts[i], 60*time.Second)
-	}
-	time.Sleep(4 * time.Second)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
-	endpoints := make([]string, numNodes)
-	for i := range endpoints {
-		endpoints[i] = httpURL(i)
-	}
+	endpoints := c.httpURLs
 	leaderIdx, err := waitForWritableEndpoint(ctx, endpoints, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
 		return tryCreateBucket(attemptCtx, ecS3Client(endpoint, accessKey, secretKey), bucketName)
 	})
@@ -160,7 +94,7 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 	var victimNode int
 	var victimShard string
 	for i := range numNodes {
-		root := filepath.Join(dataDirs[i], "shards", bucketName, keyName)
+		root := filepath.Join(c.dataDirs[i], "shards", bucketName, keyName)
 		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, _ error) error {
 			if d != nil && !d.IsDir() && filepath.Base(p) == "shard_0" {
 				victimNode, victimShard = i, p

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -54,13 +55,17 @@ func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
 		t.Skip("skipping DuckDB Iceberg cluster e2e in short mode")
 	}
 
-	cluster := startStaticMRCluster(t, 3, 2)
+	cluster := startStaticMRClusterWithOptions(t, 3, 1, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
 	require.NoError(t, err)
+	requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
 
 	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[0], cluster.accessKey, cluster.secretKey, `
 CREATE SCHEMA grainfs_iceberg.ns_cluster_e2e;
@@ -84,6 +89,43 @@ DROP SCHEMA grainfs_iceberg.ns_cluster_e2e;
 `)
 }
 
+func requireIcebergClusterS3Ready(t *testing.T, cluster *mrCluster, bucket string) {
+	t.Helper()
+
+	const key = "__iceberg_cluster_readiness"
+	const body = "ready"
+	writer := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := writer.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   strings.NewReader(body),
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		for _, endpoint := range cluster.httpURLs {
+			readCtx, readCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			out, err := ecS3Client(endpoint, cluster.accessKey, cluster.secretKey).GetObject(readCtx, &s3.GetObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			})
+			if err != nil {
+				readCancel()
+				return false
+			}
+			got, err := io.ReadAll(out.Body)
+			_ = out.Body.Close()
+			readCancel()
+			if err != nil || string(got) != body {
+				return false
+			}
+		}
+		return true
+	}, 45*time.Second, 500*time.Millisecond)
+}
+
 type icebergE2EServer struct {
 	endpoint string
 	stop     func()
@@ -97,8 +139,10 @@ func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int) icebergE2
 		"--data", dataDir,
 		"--port", fmt.Sprintf("%d", port),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--dedup=false",
+		"--seed-groups", "1",
+		"--nfs4-port", "0",
+		"--nbd-port", "0",
 		"--no-encryption",
 		"--snapshot-interval", "0",
 		"--lifecycle-interval", "0",

@@ -55,6 +55,10 @@ func (b *DistributedBackend) RepairShardLocalWithIncident(ctx context.Context, r
 	)
 	err := b.RepairShard(ctx, req.Bucket, req.Key, req.VersionID, req.ShardIdx)
 	if err != nil {
+		if b.localRepairTargetReadable(ctx, req.Bucket, req.Key, req.VersionID, req.ShardIdx) {
+			facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactVerified, At: time.Now().UTC()})
+			return recordIncident(ctx, req.Recorder, facts)
+		}
 		code := "repair_failed"
 		if errors.Is(err, context.Canceled) {
 			code = "context_canceled"
@@ -67,6 +71,28 @@ func (b *DistributedBackend) RepairShardLocalWithIncident(ctx context.Context, r
 	}
 	facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactVerified, At: time.Now().UTC()})
 	return recordIncident(ctx, req.Recorder, facts)
+}
+
+func (b *DistributedBackend) localRepairTargetReadable(ctx context.Context, bucket, key, versionID string, shardIdx int) bool {
+	if b.shardSvc == nil {
+		return false
+	}
+	if versionID == "" {
+		latest, err := b.fsm.LookupLatestVersion(bucket, key)
+		if err != nil {
+			return false
+		}
+		versionID = latest
+	}
+	resolved, err := b.ResolvePlacement(ctx, bucket, key, b.readPlacementMeta(bucket, key, versionID))
+	if err != nil || shardIdx < 0 || shardIdx >= len(resolved.Record.Nodes) {
+		return false
+	}
+	if resolved.Record.Nodes[shardIdx] != b.selfAddr {
+		return false
+	}
+	_, err = b.shardSvc.ReadLocalShard(bucket, resolved.ShardKey, shardIdx)
+	return err == nil
 }
 
 func (b *DistributedBackend) RecordRepairReceiptSigned(ctx context.Context, req IncidentRepairRequest, receiptID string) error {

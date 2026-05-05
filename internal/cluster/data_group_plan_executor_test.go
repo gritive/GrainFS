@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -158,15 +157,15 @@ func TestMoveReplica_HappyPath(t *testing.T) {
 	// PR-K2: single ChangeMembership call replaces the 5-step sequence.
 	require.Equal(t, 1, fakeNode.changeMembershipCalls)
 	require.Len(t, fakeNode.lastAdds, 1)
-	assert.Equal(t, "node-3", fakeNode.lastAdds[0].ID)
-	assert.Equal(t, "10.0.0.3:9003", fakeNode.lastAdds[0].Address)
-	assert.Equal(t, raft.Voter, fakeNode.lastAdds[0].Suffrage)
-	assert.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
+	require.Equal(t, "node-3", fakeNode.lastAdds[0].ID)
+	require.Equal(t, "10.0.0.3:9003", fakeNode.lastAdds[0].Address)
+	require.Equal(t, raft.Voter, fakeNode.lastAdds[0].Suffrage)
+	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
 
 	require.Len(t, sgUpdater.proposed, 1)
-	assert.Equal(t, "group-0", sgUpdater.proposed[0].ID)
-	assert.Contains(t, sgUpdater.proposed[0].PeerIDs, "node-3")
-	assert.NotContains(t, sgUpdater.proposed[0].PeerIDs, "node-0")
+	require.Equal(t, "group-0", sgUpdater.proposed[0].ID)
+	require.Contains(t, sgUpdater.proposed[0].PeerIDs, "node-3")
+	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "node-0")
 }
 
 func TestMoveReplica_NotLeader(t *testing.T) {
@@ -251,6 +250,9 @@ func TestMoveReplica_SelfRemoval_TransfersLeadership(t *testing.T) {
 	fakeNode := &fakeRaftNode{
 		isLeader:  true,
 		committed: 5,
+		matchIndexes: map[string]uint64{
+			"10.0.0.1:9001": 5,
+		},
 		transferFn: func() error {
 			transferred = true
 			return nil
@@ -258,6 +260,8 @@ func TestMoveReplica_SelfRemoval_TransfersLeadership(t *testing.T) {
 	}
 	nodes := []cluster.MetaNodeEntry{
 		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+		{ID: "node-2", Address: "10.0.0.2:9002"},
 		{ID: "node-3", Address: "10.0.0.3:9003"},
 	}
 	addrBook := &fakeAddrBook{nodes: nodes}
@@ -265,12 +269,47 @@ func TestMoveReplica_SelfRemoval_TransfersLeadership(t *testing.T) {
 	dgMgr := cluster.NewDataGroupManager()
 	exec := cluster.NewDataGroupPlanExecutorForTest("node-0", dgMgr, addrBook, sgUpdater,
 		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
-	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0", []string{"node-0"}, nil))
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0", []string{"node-0", "node-1", "node-2"}, nil))
 
 	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
 	require.ErrorIs(t, err, cluster.ErrLeadershipTransferred,
 		"self-removal must return ErrLeadershipTransferred")
 	require.True(t, transferred, "TransferLeadership must be called before returning")
+	require.Equal(t, 0, fakeNode.changeMembershipCalls, "ChangeMembership must not be called")
+	require.Empty(t, sgUpdater.proposed, "ProposeShardGroup must not be called")
+}
+
+func TestMoveReplica_SelfRemovalRequiresCaughtUpTransferTarget(t *testing.T) {
+	transferred := false
+	fakeNode := &fakeRaftNode{
+		isLeader:     true,
+		committed:    5,
+		matchIndexes: map[string]uint64{"10.0.0.1:9001": 4, "10.0.0.2:9002": 4},
+		transferFn: func() error {
+			transferred = true
+			return nil
+		},
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+		{ID: "node-2", Address: "10.0.0.2:9002"},
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
+	addrBook := &fakeAddrBook{nodes: nodes}
+	sgUpdater := &fakeSGUpdater{}
+	dgMgr := cluster.NewDataGroupManager()
+	exec := cluster.NewDataGroupPlanExecutorForTest("node-0", dgMgr, addrBook, sgUpdater,
+		func(_ *cluster.DataGroup) cluster.DataRaftNode { return fakeNode })
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0", []string{"node-0", "node-1", "node-2"}, nil))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := exec.MoveReplica(ctx, "group-0", "node-0", "node-3")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "no caught-up voter available for leadership transfer")
+	require.False(t, transferred, "TransferLeadership must not run without a caught-up voter")
 	require.Equal(t, 0, fakeNode.changeMembershipCalls, "ChangeMembership must not be called")
 	require.Empty(t, sgUpdater.proposed, "ProposeShardGroup must not be called")
 }

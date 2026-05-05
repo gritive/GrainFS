@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -40,15 +39,41 @@ func TestStartupRecovery_DeletesOldTmpFiles(t *testing.T) {
 	res, err := RunStartupRecovery(context.Background(), root, cap)
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, res.OrphanTmpRemoved, "old .tmp must be removed, fresh must be kept")
+	require.Equal(t, 1, res.OrphanTmpRemoved, "old .tmp must be removed, fresh must be kept")
 	_, statErr := os.Stat(old)
-	assert.True(t, os.IsNotExist(statErr), "old .tmp file should be gone")
+	require.True(t, os.IsNotExist(statErr), "old .tmp file should be gone")
 	_, statErr = os.Stat(fresh)
-	assert.NoError(t, statErr, "fresh .tmp file must be preserved (in-flight write protection)")
+	require.NoError(t, statErr, "fresh .tmp file must be preserved (in-flight write protection)")
 
 	require.NotEmpty(t, cap.events)
-	assert.Equal(t, scrubber.PhaseStartup, cap.events[0].Phase)
-	assert.Equal(t, "orphan_tmp", cap.events[0].ErrCode)
+	require.Equal(t, scrubber.PhaseStartup, cap.events[0].Phase)
+	require.Equal(t, "orphan_tmp", cap.events[0].ErrCode)
+}
+
+func TestStartupRecovery_SkipsRaftBadgerInternalDirs(t *testing.T) {
+	root := t.TempDir()
+	past := time.Now().Add(-30 * time.Minute)
+
+	oldShardTmp := filepath.Join(root, "shards", "b", "k", "0.tmp")
+	require.NoError(t, os.MkdirAll(filepath.Dir(oldShardTmp), 0o755))
+	require.NoError(t, os.WriteFile(oldShardTmp, []byte("partial"), 0o644))
+	require.NoError(t, os.Chtimes(oldShardTmp, past, past))
+
+	for _, p := range []string{
+		filepath.Join(root, "groups", "group-1", "raft", "000001.sst.tmp"),
+		filepath.Join(root, "shared-raft-log", "000002.sst.tmp"),
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte("badger-internal"), 0o644))
+		require.NoError(t, os.Chtimes(p, past, past))
+	}
+
+	res, err := RunStartupRecovery(context.Background(), root, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.OrphanTmpRemoved)
+	require.NoFileExists(t, oldShardTmp)
+	require.FileExists(t, filepath.Join(root, "groups", "group-1", "raft", "000001.sst.tmp"))
+	require.FileExists(t, filepath.Join(root, "shared-raft-log", "000002.sst.tmp"))
 }
 
 func TestStartupRecovery_DeletesOldMultipartParts(t *testing.T) {
@@ -68,21 +93,21 @@ func TestStartupRecovery_DeletesOldMultipartParts(t *testing.T) {
 	res, err := RunStartupRecovery(context.Background(), root, cap)
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, res.OrphanMultipartRemoved)
+	require.Equal(t, 1, res.OrphanMultipartRemoved)
 	_, statErr := os.Stat(oldUpload)
-	assert.True(t, os.IsNotExist(statErr), "abandoned upload dir should be gone")
+	require.True(t, os.IsNotExist(statErr), "abandoned upload dir should be gone")
 	_, statErr = os.Stat(freshUpload)
-	assert.NoError(t, statErr, "active upload must survive")
+	require.NoError(t, statErr, "active upload must survive")
 
 	require.NotEmpty(t, cap.events)
 	hasMultipart := false
 	for _, e := range cap.events {
 		if e.ErrCode == "orphan_multipart" {
 			hasMultipart = true
-			assert.Equal(t, scrubber.PhaseStartup, e.Phase)
+			require.Equal(t, scrubber.PhaseStartup, e.Phase)
 		}
 	}
-	assert.True(t, hasMultipart, "expected an orphan_multipart HealEvent")
+	require.True(t, hasMultipart, "expected an orphan_multipart HealEvent")
 }
 
 func TestStartupRecovery_NothingToCleanEmitsNoEvents(t *testing.T) {
@@ -94,8 +119,8 @@ func TestStartupRecovery_NothingToCleanEmitsNoEvents(t *testing.T) {
 	cap := &captureSrvEmitter{}
 	res, err := RunStartupRecovery(context.Background(), root, cap)
 	require.NoError(t, err)
-	assert.Equal(t, 0, res.OrphanTmpRemoved+res.OrphanMultipartRemoved)
-	assert.Empty(t, cap.events, "clean restart must not emit per-action HealEvents")
+	require.Equal(t, 0, res.OrphanTmpRemoved+res.OrphanMultipartRemoved)
+	require.Empty(t, cap.events, "clean restart must not emit per-action HealEvents")
 }
 
 func TestStartupRecovery_MissingDataRoot(t *testing.T) {
@@ -104,8 +129,8 @@ func TestStartupRecovery_MissingDataRoot(t *testing.T) {
 	cap := &captureSrvEmitter{}
 	res, err := RunStartupRecovery(context.Background(), "/nonexistent/grainfs/data", cap)
 	require.NoError(t, err)
-	assert.Equal(t, 0, res.OrphanTmpRemoved)
-	assert.Equal(t, 0, res.OrphanMultipartRemoved)
+	require.Equal(t, 0, res.OrphanTmpRemoved)
+	require.Equal(t, 0, res.OrphanMultipartRemoved)
 }
 
 func TestStartupRecovery_NilEmitterIsSafe(t *testing.T) {
@@ -134,5 +159,5 @@ func TestStartupRecovery_ContextCancelStops(t *testing.T) {
 	cancel()
 
 	_, err := RunStartupRecovery(ctx, root, nil)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 }

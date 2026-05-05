@@ -15,7 +15,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,6 +92,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--secret-key", secretKey,
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
+			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
@@ -183,7 +183,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		got, err := io.ReadAll(out.Body)
 		_ = out.Body.Close()
 		require.NoError(t, err)
-		assert.Equalf(t, obj.sum, sha256.Sum256(got),
+		require.Equalf(t, obj.sum, sha256.Sum256(got),
 			"sha256 mismatch for %s (len=%d)", obj.key, len(got))
 	}
 	t.Logf("cluster EC: %d/%d objects round-tripped with all shards present", len(objects), len(objects))
@@ -202,18 +202,25 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	// peerHealth marks the node unhealthy.
 	for _, obj := range objects {
 		obj := obj
-		require.Eventually(t, func() bool {
+		var lastErr error
+		require.Eventuallyf(t, func() bool {
 			out, err := client.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String(obj.key),
 			})
 			if err != nil {
+				lastErr = err
 				return false
 			}
 			got, _ := io.ReadAll(out.Body)
 			_ = out.Body.Close()
-			return sha256.Sum256(got) == obj.sum
-		}, 15*time.Second, 1*time.Second, "GetObject %s after node kill", obj.key)
+			if sha256.Sum256(got) != obj.sum {
+				lastErr = fmt.Errorf("sha256 mismatch len=%d", len(got))
+				return false
+			}
+			lastErr = nil
+			return true
+		}, 45*time.Second, 1*time.Second, "GetObject %s after node kill: %v", obj.key, &lastErr)
 	}
 	t.Logf("cluster EC: %d/%d objects reconstructed after single-node failure", len(objects), len(objects))
 }
@@ -347,6 +354,35 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	require.NoError(t, rerr)
 	require.Equal(t, sum, sha256.Sum256(got), "data integrity check with all 3 nodes")
 
+	// The post-failure assertion specifically depends on nodes 0 and 1. Wait
+	// until both planned survivors can see the EC metadata and read the object
+	// before killing node 2; a single successful GET through client does not
+	// prove every survivor has applied the committed object metadata yet.
+	require.Eventually(t, func() bool {
+		for i := 0; i < numNodes-1; i++ {
+			c := ecS3Client(httpURL(i), accessKey, secretKey)
+			out2, err2 := c.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String("ec-obj"),
+			})
+			if err2 != nil {
+				t.Logf("node %d pre-kill GetObject err: %v", i, err2)
+				return false
+			}
+			data2, err2 := io.ReadAll(out2.Body)
+			_ = out2.Body.Close()
+			if err2 != nil {
+				t.Logf("node %d pre-kill body read err: %v", i, err2)
+				return false
+			}
+			if gotSum := sha256.Sum256(data2); gotSum != sum {
+				t.Logf("node %d pre-kill sha256 mismatch: got %x want %x", i, gotSum, sum)
+				return false
+			}
+		}
+		return true
+	}, 60*time.Second, 1*time.Second, "surviving nodes must see EC object before node kill")
+
 	// Kill the last node (index 2). With k=2 data shards remaining on nodes 0
 	// and 1, getObjectEC can reconstruct using at most one dead-peer fetch
 	// (bounded by 3s per-shard timeout).
@@ -381,7 +417,7 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		}
 		return false
 	}, 30*time.Second, 1*time.Second, "GET must succeed with 2 surviving nodes (k=2 threshold)")
-	assert.Equal(t, sum, sha256.Sum256(gotAfterKill), "data integrity with 1 node down")
+	require.Equal(t, sum, sha256.Sum256(gotAfterKill), "data integrity with 1 node down")
 	t.Logf("3-node EC dynamic: k=2,m=1 verified — 1 node killed, GET reconstructed from 2 shards")
 }
 
@@ -607,8 +643,10 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	// to time out before the remaining shards are fetched.
 	for _, obj := range preObjects {
 		obj := obj
+		deadline := time.Now().Add(60 * time.Second)
 		var lastGetErr error
-		require.Eventually(t, func() bool {
+		ok := false
+		for time.Now().Before(deadline) {
 			for j := 0; j < numNodes; j++ {
 				if procs[j] == nil {
 					continue
@@ -622,12 +660,21 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 				if sha256.Sum256(got) == obj.sum {
 					client = c
 					lastGetErr = nil
-					return true
+					ok = true
+					break
 				}
 				lastGetErr = fmt.Errorf("node %d %s: sha256 mismatch", j, httpURL(j))
 			}
-			return false
-		}, 60*time.Second, 1*time.Second, "post-topology GetObject %s (FSM placement must be immutable), last error: %v", obj.key, lastGetErr)
+			if ok {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		if ok {
+			continue
+		}
+		require.Failf(t, "post-topology GetObject failed",
+			"%s (FSM placement must be immutable), last error: %v", obj.key, lastGetErr)
 	}
 	t.Logf("topology test: %d pre-topology objects reconstructed after node kill (placement immutable)", len(preObjects))
 
@@ -674,7 +721,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		require.NoErrorf(t, err, "post-topology GetObject %s", obj.key)
 		got, _ := io.ReadAll(out.Body)
 		_ = out.Body.Close()
-		assert.Equalf(t, obj.sum, sha256.Sum256(got), "sha256 mismatch post-topology %s", obj.key)
+		require.Equalf(t, obj.sum, sha256.Sum256(got), "sha256 mismatch post-topology %s", obj.key)
 	}
 	t.Logf("topology test: %d post-topology objects written+verified via cluster EC (ECActive=true with N=5)", len(postObjects))
 }

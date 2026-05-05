@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/transport"
@@ -16,6 +15,17 @@ type quicCluster struct {
 	nodes      []*Node
 	transports []*transport.QUICTransport
 	rpcs       []*QUICRPCTransport
+}
+
+func requireQUICConnect(t *testing.T, tr *transport.QUICTransport, addr string) {
+	t.Helper()
+
+	var lastErr error
+	require.Eventually(t, func() bool {
+		lastErr = tr.Connect(context.Background(), addr)
+		return lastErr == nil
+	}, 10*time.Second, 100*time.Millisecond, "connect to %s: %v", addr, lastErr)
+	require.NoError(t, lastErr)
 }
 
 func newQUICCluster(t *testing.T, n int) *quicCluster {
@@ -54,7 +64,7 @@ func newQUICCluster(t *testing.T, n int) *quicCluster {
 	for i := range transports {
 		for j := range transports {
 			if i != j {
-				require.NoError(t, transports[i].Connect(ctx, addrs[j]))
+				requireQUICConnect(t, transports[i], addrs[j])
 			}
 		}
 	}
@@ -116,7 +126,7 @@ func TestIntegration_ThreeNodeQUIC_ElectsLeader(t *testing.T) {
 			leaderCount++
 		}
 	}
-	assert.Equal(t, 1, leaderCount, "exactly one leader")
+	require.Equal(t, 1, leaderCount, "exactly one leader")
 }
 
 func TestIntegration_ThreeNodeQUIC_FollowersKnowLeader(t *testing.T) {
@@ -132,8 +142,8 @@ func TestIntegration_ThreeNodeQUIC_FollowersKnowLeader(t *testing.T) {
 		if n.ID() == leader.ID() {
 			continue
 		}
-		assert.Equal(t, Follower, n.State(), "node %s should be follower", n.ID())
-		assert.Equal(t, leader.ID(), n.LeaderID(), "node %s should know leader", n.ID())
+		require.Equal(t, Follower, n.State(), "node %s should be follower", n.ID())
+		require.Equal(t, leader.ID(), n.LeaderID(), "node %s should know leader", n.ID())
 	}
 }
 
@@ -153,7 +163,7 @@ func TestIntegration_ThreeNodeQUIC_Propose_Replicate(t *testing.T) {
 		n.mu.Lock()
 		logLen := len(n.log)
 		n.mu.Unlock()
-		assert.GreaterOrEqual(t, logLen, 2, "node %s should have >= 2 entries", n.ID())
+		require.GreaterOrEqual(t, logLen, 2, "node %s should have >= 2 entries", n.ID())
 	}
 }
 
@@ -175,7 +185,7 @@ func TestIntegration_ThreeNodeQUIC_LeaderFailover(t *testing.T) {
 	for leader2 == nil {
 		select {
 		case <-deadline:
-			t.Fatal("no new leader elected after failover")
+			require.Fail(t, "no new leader elected after failover")
 		default:
 			for _, n := range cluster.nodes {
 				if n.ID() != leader1ID && n.State() == Leader {
@@ -186,7 +196,7 @@ func TestIntegration_ThreeNodeQUIC_LeaderFailover(t *testing.T) {
 		}
 	}
 
-	assert.NotEqual(t, leader1ID, leader2.ID())
+	require.NotEqual(t, leader1ID, leader2.ID())
 	require.NoError(t, leader2.Propose([]byte("after-failover")))
 
 	time.Sleep(500 * time.Millisecond)
@@ -198,7 +208,7 @@ func TestIntegration_ThreeNodeQUIC_LeaderFailover(t *testing.T) {
 		n.mu.Lock()
 		logLen := len(n.log)
 		n.mu.Unlock()
-		assert.GreaterOrEqual(t, logLen, 2, "surviving node %s should have >= 2 entries", n.ID())
+		require.GreaterOrEqual(t, logLen, 2, "surviving node %s should have >= 2 entries", n.ID())
 	}
 }
 
@@ -224,23 +234,23 @@ func TestIntegration_PersistenceAndRecovery(t *testing.T) {
 
 	lastIdx, err := store2.LastIndex()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(3), lastIdx)
+	require.Equal(t, uint64(3), lastIdx)
 
 	term, votedFor, err := store2.LoadState()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(2), term)
-	assert.Equal(t, "node-B", votedFor)
+	require.Equal(t, uint64(2), term)
+	require.Equal(t, "node-B", votedFor)
 
 	snap2, err := store2.LoadSnapshot()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(2), snap2.Index)
-	assert.Equal(t, uint64(1), snap2.Term)
-	assert.Equal(t, `{"x":1}`, string(snap2.Data))
+	require.Equal(t, uint64(2), snap2.Index)
+	require.Equal(t, uint64(1), snap2.Term)
+	require.Equal(t, `{"x":1}`, string(snap2.Data))
 
 	for _, want := range entries {
 		got, err := store2.GetEntry(want.Index)
 		require.NoError(t, err)
-		assert.Equal(t, string(want.Command), string(got.Command))
+		require.Equal(t, string(want.Command), string(got.Command))
 	}
 }
 
@@ -274,14 +284,14 @@ func TestRestoreFromStore_LoadsSnapshotServers(t *testing.T) {
 	for _, s := range cfg2.Servers {
 		ids[s.ID] = true
 	}
-	assert.True(t, ids["node-2"], "node-2 must be restored from snapshot")
-	assert.True(t, ids["node-3"], "node-3 must be restored from snapshot")
-	assert.True(t, ids["node-1"], "self (node-1) must be in configuration")
+	require.True(t, ids["node-2"], "node-2 must be restored from snapshot")
+	require.True(t, ids["node-3"], "node-3 must be restored from snapshot")
+	require.True(t, ids["node-1"], "self (node-1) must be in configuration")
 
 	node.mu.Lock()
-	assert.Equal(t, uint64(10), node.lastApplied, "lastApplied must match snapshot index")
-	assert.Equal(t, uint64(10), node.commitIndex, "commitIndex must match snapshot index")
-	assert.Equal(t, uint64(2), node.currentTerm, "term must be restored from snapshot")
+	require.Equal(t, uint64(10), node.lastApplied, "lastApplied must match snapshot index")
+	require.Equal(t, uint64(10), node.commitIndex, "commitIndex must match snapshot index")
+	require.Equal(t, uint64(2), node.currentTerm, "term must be restored from snapshot")
 	node.mu.Unlock()
 }
 
@@ -335,7 +345,7 @@ func TestSnapshotPreservesClusterMembership(t *testing.T) {
 	for i := range transports {
 		for j := range transports {
 			if i != j {
-				require.NoError(t, transports[i].Connect(ctx, addrs[j]))
+				requireQUICConnect(t, transports[i], addrs[j])
 			}
 		}
 	}
@@ -431,7 +441,7 @@ func TestSnapshotPreservesClusterMembership(t *testing.T) {
 		peerIDs[s.ID] = true
 	}
 	for _, addr := range allOtherPeers {
-		assert.True(t, peerIDs[addr], "restarted follower must know peer %s from snapshot", addr)
+		require.True(t, peerIDs[addr], "restarted follower must know peer %s from snapshot", addr)
 	}
 }
 
@@ -459,12 +469,12 @@ func TestRestoreFromStore_LegacySnapshot(t *testing.T) {
 	defer node.mu.Unlock()
 
 	// Snapshot watermark must be applied even for legacy snapshots.
-	assert.Equal(t, uint64(7), node.lastApplied, "lastApplied must match snapshot index")
-	assert.Equal(t, uint64(7), node.commitIndex, "commitIndex must match snapshot index")
-	assert.Equal(t, uint64(3), node.currentTerm, "term must be restored from snapshot")
+	require.Equal(t, uint64(7), node.lastApplied, "lastApplied must match snapshot index")
+	require.Equal(t, uint64(7), node.commitIndex, "commitIndex must match snapshot index")
+	require.Equal(t, uint64(3), node.currentTerm, "term must be restored from snapshot")
 
 	// Best-effort fallback: config falls back to initialPeers (no membership data in snapshot).
-	assert.ElementsMatch(t, []string{"node-2", "node-3"}, node.config.Peers,
+	require.ElementsMatch(t, []string{"node-2", "node-3"}, node.config.Peers,
 		"legacy snapshot must fall back to initialPeers")
 }
 
@@ -646,7 +656,7 @@ func TestManagedLearner_LogReplay_RestoresGuard(t *testing.T) {
 	case p := <-node.proposalCh:
 		cc := decodeConfChange(p.command)
 		if cc.Op == ConfChangePromote && cc.ID == "managed-lrn" {
-			t.Fatal("Guard 2 must block auto-promote for managed learner after restart")
+			require.Fail(t, "Guard 2 must block auto-promote for managed learner after restart")
 		}
 	default:
 		// correct: no promote proposal
@@ -720,7 +730,7 @@ func TestChangeMembership_ReturnsErrJointAborted(t *testing.T) {
 		require.ErrorIs(t, err, ErrJointAborted,
 			"ChangeMembership must return ErrJointAborted after ForceAbortJoint")
 	case <-time.After(2 * time.Second):
-		t.Fatal("ChangeMembership did not return")
+		require.Fail(t, "ChangeMembership did not return")
 	}
 
 	// Config reverted to C_old.

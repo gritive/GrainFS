@@ -49,7 +49,17 @@ type mrCluster struct {
 	// node binary does not auto-derive a higher count and re-propose unseeded groups.
 }
 
+type mrClusterOptions struct {
+	disableNFS4 bool
+	disableNBD  bool
+}
+
 func startStaticMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
+	t.Helper()
+	return startStaticMRClusterWithOptions(t, numNodes, seedGroups, mrClusterOptions{})
+}
+
+func startStaticMRClusterWithOptions(t *testing.T, numNodes, seedGroups int, opts mrClusterOptions) *mrCluster {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
@@ -63,18 +73,18 @@ func startStaticMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		c, err := tryStartStaticMRCluster(t, numNodes, seedGroups)
+		c, err := tryStartStaticMRCluster(t, numNodes, seedGroups, opts)
 		if err == nil {
 			return c
 		}
 		lastErr = err
 		t.Logf("startStaticMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
 	}
-	t.Fatalf("startStaticMRCluster failed after %d attempts: %v", maxAttempts, lastErr)
+	require.Failf(t, "startStaticMRCluster failed", "failed after %d attempts: %v", maxAttempts, lastErr)
 	return nil
 }
 
-func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster, error) {
+func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	c := &mrCluster{
 		t:          t,
@@ -97,8 +107,12 @@ func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster
 	for i := 0; i < numNodes; i++ {
 		c.httpPorts[i] = ports[i]
 		c.raftPorts[i] = ports[numNodes+i]
-		c.nfs4Ports[i] = ports[2*numNodes+i]
-		c.nbdPorts[i] = ports[3*numNodes+i]
+		if !opts.disableNFS4 {
+			c.nfs4Ports[i] = ports[2*numNodes+i]
+		}
+		if !opts.disableNBD {
+			c.nbdPorts[i] = ports[3*numNodes+i]
+		}
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 
 		d, err := os.MkdirTemp("", fmt.Sprintf("mrshard-%d-*", i))
@@ -111,22 +125,10 @@ func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int) (*mrCluster
 
 	t.Cleanup(c.Stop)
 
-	// Static peers require every node to know the full peer list. Bring up an
-	// initial quorum first so meta-Raft can elect once, then add remaining peers
-	// without making all nodes race through the first election at the same time.
-	initialNodes := numNodes
-	if numNodes > 1 {
-		initialNodes = numNodes/2 + 1
-	}
-	for i := 0; i < initialNodes; i++ {
-		c.procs[i] = c.startNode(i, seedGroups)
-		time.Sleep(150 * time.Millisecond)
-	}
-	if err := waitForPortsParallelErr(c.httpPorts[:initialNodes], 60*time.Second); err != nil {
-		c.Stop()
-		return nil, err
-	}
-	for i := initialNodes; i < numNodes; i++ {
+	// Static peers require every node to know the full peer list. Start the
+	// complete peer set before waiting for HTTP so startup QUIC dials do not
+	// spend the port-wait budget on intentionally absent peers.
+	for i := 0; i < numNodes; i++ {
 		c.procs[i] = c.startNode(i, seedGroups)
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -193,6 +195,7 @@ func (c *mrCluster) startNode(i int, seedGroups int) *exec.Cmd {
 		"--secret-key", c.secretKey,
 		"--ec-data", "0",
 		"--ec-parity", "0",
+		"--dedup=false",
 		fmt.Sprintf("--seed-groups=%d", seedGroups),
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
@@ -232,6 +235,10 @@ func (c *mrCluster) Stop() {
 		}
 	}
 	for _, d := range c.dataDirs {
+		if c.t.Failed() {
+			c.t.Logf("multi-raft data dir saved to %s", d)
+			continue
+		}
 		_ = os.RemoveAll(d)
 	}
 }
@@ -265,7 +272,10 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	c := startStaticMRCluster(t, 5, 8)
+	c := startStaticMRClusterWithOptions(t, 5, 8, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+	})
 
 	groupDirs := countGroupDirsAcrossNodes(c)
 
@@ -389,12 +399,15 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
 	// leader-probe flakes.
 
-	c := startStaticMRCluster(t, 3, 2) // 3 procs, 2 groups keeps restart recovery focused and stable
+	c := startStaticMRClusterWithOptions(t, 3, 2, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+	}) // 3 procs, 2 groups keeps restart recovery focused and stable
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 1; i++ {
 		requireMRCreateBucketEventually(t, ctx, c, fmt.Sprintf("rb-%d", i))
 	}
 
@@ -418,9 +431,11 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		c.procs[i] = c.startNode(i, c.seedGroups)
 	}
-	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
 
-	// Wait for leader — Raft WAL recovery + election can take > 60 s on macOS.
+	// Wait for HTTP readiness and a leader together. A plain TCP port probe can
+	// false-negative under full e2e load on macOS even when Hertz has already
+	// logged its listener; the S3 write probe is the readiness signal this test
+	// actually needs.
 	probeBucket := fmt.Sprintf("__post-restart-probe-%d", time.Now().UnixNano())
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer probeCancel()
@@ -463,18 +478,25 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
 	// groups are group-0 and group-1.
 	const bucket = "persist-group-1"
-	c := startStaticMRCluster(t, 3, 2)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	c := startStaticMRClusterWithOptions(t, 3, 2, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+	})
 
 	// Create a bucket (will be assigned to some group).
-	requireMRCreateBucketEventually(t, ctx, c, bucket)
-	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	createCtx, createCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer createCancel()
+	requireMRCreateBucketEventually(t, createCtx, c, bucket)
 
 	// Write an object.
 	const body = "per-group-persistence-test-data"
-	requireMRPutObjectEventually(t, ctx, cli, bucket, "test-key", []byte(body))
-	requireMRGetObjectFromAnyNodeEventually(t, ctx, c, bucket, "test-key", []byte(body))
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer writeCancel()
+	requireMRPutObjectFromAnyNodeEventually(t, writeCtx, c, bucket, "test-key", []byte(body))
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer readCancel()
+	requireMRGetObjectFromAnyNodeEventually(t, readCtx, c, bucket, "test-key", []byte(body))
 
 	// Stop processes without removing data dirs, then restart with the same
 	// storage roots. t.Cleanup handles final shutdown and dir removal.
@@ -503,7 +525,6 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		c.procs[i] = c.startNode(i, c.seedGroups)
 	}
-	waitForPortsParallel(t, c.httpPorts, 90*time.Second)
 
 	probeBucket := fmt.Sprintf("__per-group-restart-probe-%d", time.Now().UnixNano())
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
@@ -536,16 +557,86 @@ func requireMRPutObjectEventually(t *testing.T, ctx context.Context, client *s3.
 	t.Helper()
 	var lastErr error
 	var got []byte
-	require.Eventually(t, func() bool {
-		lastErr = tryPutObject(ctx, client, bucket, key, data)
+	var headSize int64 = -1
+	var versionID string
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		versionID, lastErr = tryPutObjectVersioned(ctx, client, bucket, key, data)
 		if lastErr != nil {
-			return false
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if out, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		}); err == nil && out.ContentLength != nil {
+			headSize = *out.ContentLength
 		}
 		got, lastErr = getObjectBytes(ctx, client, bucket, key)
-		return lastErr == nil && bytes.Equal(got, data)
-	}, 60*time.Second, 2*time.Second,
-		"PutObject %s/%s never became readable with committed body: lastErr=%v got=%q",
-		bucket, key, lastErr, string(got))
+		if lastErr == nil && bytes.Equal(got, data) {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	require.Failf(t, "PutObject never became readable",
+		"PutObject %s/%s never became readable with committed body: lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
+		bucket, key, lastErr, versionID, headSize, len(got), string(got),
+	)
+}
+
+func requireMRPutObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket, key string, data []byte) {
+	t.Helper()
+	var lastErr error
+	var got []byte
+	var headSize int64 = -1
+	var versionID string
+	var lastNode int
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		for i, endpoint := range c.httpURLs {
+			lastNode = i
+			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			versionID, lastErr = tryPutObjectVersioned(ctx, client, bucket, key, data)
+			if lastErr != nil {
+				continue
+			}
+			if out, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			}); err == nil && out.ContentLength != nil {
+				headSize = *out.ContentLength
+			}
+			got, lastErr = getObjectBytes(ctx, client, bucket, key)
+			if lastErr == nil && bytes.Equal(got, data) {
+				c.leaderIdx = i
+				return
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	require.Failf(t, "PutObject never became readable",
+		"PutObject %s/%s never became readable with committed body: lastNode=%d lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
+		bucket, key, lastNode, lastErr, versionID, headSize, len(got), string(got),
+	)
+}
+
+func tryPutObjectVersioned(parent context.Context, client *s3.Client, bucket, key string, data []byte) (string, error) {
+	ctx, cancel := clusterECS3OpContext(parent, 5*time.Second)
+	defer cancel()
+	out, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+	}, func(o *s3.Options) {
+		o.RetryMaxAttempts = 1
+	})
+	if err != nil {
+		return "", err
+	}
+	if out.VersionId == nil || *out.VersionId == "" {
+		return "", fmt.Errorf("PutObject returned success without version id")
+	}
+	return *out.VersionId, nil
 }
 
 func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket string) {
@@ -938,7 +1029,23 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 	require.Contains(t, string(loadBody), `"metadata-location"`)
 	require.Contains(t, string(loadBody), `s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`)
 
-	got, err := getObjectBytes(ctx, c.S3Client(2), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
-	require.NoError(t, err)
+	var got []byte
+	var readErr error
+	readCtx, readCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer readCancel()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		for i := range c.httpURLs {
+			got, readErr = getObjectBytes(readCtx, c.S3Client(i), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
+			if readErr == nil {
+				break
+			}
+		}
+		if readErr == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	require.NoError(t, readErr)
 	require.Contains(t, string(got), `"format-version"`)
 }

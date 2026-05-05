@@ -18,13 +18,19 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/stretchr/testify/require"
 )
 
 var (
-	testServerURL  string
-	testS3Client   *s3.Client
-	freePortCursor uint32 = uint32(time.Now().UnixNano() % 20000)
+	testServerURL     string
+	testServerDataDir string
+	testS3Client      *s3.Client
+	freePortCursor    uint32 = initialFreePortCursor()
 )
+
+func initialFreePortCursor() uint32 {
+	return uint32((time.Now().UnixNano() + int64(os.Getpid()*7919)) % 25000)
+}
 
 func TestMain(m *testing.M) {
 	binary := os.Getenv("GRAINFS_BINARY")
@@ -39,6 +45,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	defer os.RemoveAll(dir)
+	testServerDataDir = dir
 
 	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
@@ -163,7 +170,7 @@ func freePort() int {
 	// many outbound UDP/QUIC sockets; using :0 for a future UDP listener can
 	// race with an ephemeral source port after the probe socket is closed.
 	for i := 0; i < 25000; i++ {
-		port := 20000 + int(atomic.AddUint32(&freePortCursor, 1)%25000)
+		port := 20000 + int(atomic.AddUint32(&freePortCursor, 7919)%25000)
 		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue
@@ -252,11 +259,11 @@ func waitForPort(t testing.TB, port int, timeout time.Duration) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("server did not start on port %d within %v", port, timeout)
+	require.Failf(t, "server did not start", "server did not start on port %d within %v", port, timeout)
 }
 
 // waitForPortsParallel waits for all ports to become available concurrently.
-// Unlike waitForPort, this does not call t.Fatalf from a goroutine.
+// Unlike waitForPort, this does not fail from a goroutine.
 func waitForPortsParallel(t testing.TB, ports []int, timeout time.Duration) {
 	t.Helper()
 	var wg sync.WaitGroup
@@ -351,15 +358,13 @@ func waitForS3Write(t testing.TB, client *s3.Client, bucket, key string, timeout
 		lastErr = err
 		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatalf("bucket %s did not become writable within %v: %v", bucket, timeout, lastErr)
+	require.Failf(t, "bucket did not become writable", "bucket %s did not become writable within %v: %v", bucket, timeout, lastErr)
 }
 
 func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-e2e-isolated-*")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
+	require.NoError(t, err, "mkdtemp")
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	port := freePort()
@@ -375,9 +380,7 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start isolated server: %v", err)
-	}
+	require.NoError(t, cmd.Start(), "start isolated server")
 	t.Cleanup(func() { terminateProcess(cmd) })
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -391,9 +394,7 @@ func createBucketWithClient(t testing.TB, client *s3.Client, name string) {
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(name),
 	})
-	if err != nil {
-		t.Fatalf("create bucket %s: %v", name, err)
-	}
+	require.NoError(t, err, "create bucket %s", name)
 	const readinessKey = "__grainfs_e2e_ready"
 	waitForS3Write(t, client, name, readinessKey, 30*time.Second)
 	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -434,9 +435,7 @@ func createBucket(t *testing.T, name string) {
 	_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(name),
 	})
-	if err != nil {
-		t.Fatalf("create bucket %s: %v", name, err)
-	}
+	require.NoError(t, err, "create bucket %s", name)
 
 	t.Cleanup(func() {
 		// delete all objects first

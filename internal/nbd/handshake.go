@@ -32,6 +32,10 @@ type metaContextRequest struct {
 	contexts []string
 }
 
+func (s *Server) exportNameMatches(name string) bool {
+	return name == "" || name == s.volName
+}
+
 func parseClientFlags(flags uint32) (handshakeState, error) {
 	if unknown := flags &^ nbdKnownClientFlags; unknown != 0 {
 		return handshakeState{}, fmt.Errorf("unknown client flags: 0x%x", unknown)
@@ -88,7 +92,10 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 
 		switch optType {
 		case nbdOptExportName:
-			state.exportName = string(optData)
+			if !s.exportNameMatches(string(optData)) {
+				return handshakeState{}, fmt.Errorf("unknown export: %q", string(optData))
+			}
+			state.exportName = s.volName
 			return state, s.sendExportData(conn, vol, state)
 
 		case nbdOptInfo:
@@ -99,7 +106,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if req.name != s.volName {
+			if !s.exportNameMatches(req.name) {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}
@@ -132,7 +139,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if req.name != s.volName {
+			if !s.exportNameMatches(req.name) {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}
@@ -161,7 +168,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if req.name != s.volName {
+			if !s.exportNameMatches(req.name) {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}
@@ -193,13 +200,13 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if req.name != s.volName {
+			if !s.exportNameMatches(req.name) {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}
 				continue
 			}
-			state.exportName = req.name
+			state.exportName = s.volName
 			if err := s.sendInfoReplies(conn, vol, optType, req.info); err != nil {
 				return handshakeState{}, err
 			}

@@ -127,6 +127,27 @@ func (c *Cache) shardFor(key string) *shard {
 	return c.shards[h.Sum32()&(numShards-1)]
 }
 
+// Peek returns a cached shard without updating hit/miss counters. It still
+// refreshes LRU state because the caller is actively considering the shard.
+// getObjectEC uses this to decide whether K cached shards are enough before
+// recording misses for shards it will not actually read.
+func (c *Cache) Peek(key string) ([]byte, bool) {
+	if c.capacityBytes <= 0 {
+		return nil, false
+	}
+	s := c.shardFor(key)
+	s.mu.Lock()
+	elem, ok := s.entries[key]
+	if !ok {
+		s.mu.Unlock()
+		return nil, false
+	}
+	s.lru.MoveToFront(elem)
+	data := elem.Value.(*entry).data
+	s.mu.Unlock()
+	return data, true
+}
+
 // Get returns (data, true) on hit, (nil, false) on miss. Returned
 // slice is the cached buffer — callers MUST treat as read-only.
 // getObjectEC immediately passes shards[i] into ECReconstruct, which

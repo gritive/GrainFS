@@ -59,8 +59,12 @@ type shardWriter interface {
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
 }
 
+type shardBufferedWriter interface {
+	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
+}
+
 // writeSpooledReplicaShardStream writes a spooled object as a non-EC replica
-// to a peer, with bounded retry on transient WriteShardStream errors.
+// to a peer, with bounded retry on transient shard write errors.
 //
 // Why retry: the inline pattern (one shot → MarkUnhealthy on any error) made
 // cold-start QUIC handshake races flap peers into 10s cooldown for the rest
@@ -77,7 +81,15 @@ func (b *DistributedBackend) writeSpooledReplicaShardStream(ctx context.Context,
 		if err != nil {
 			return fmt.Errorf("open spooled object for replication: %w", err)
 		}
-		err = writer.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
+		if bw, ok := writer.(shardBufferedWriter); ok && sp.Size <= ecShardBufferedLimit {
+			var data []byte
+			data, err = io.ReadAll(body)
+			if err == nil {
+				err = bw.WriteShard(ctx, peer, bucket, shardKey, 0, data)
+			}
+		} else {
+			err = writer.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
+		}
 		_ = body.Close()
 		if err == nil {
 			return nil
@@ -312,6 +324,40 @@ func (b *DistributedBackend) liveNodes() []string {
 		}
 	}
 	return b.allNodes
+}
+
+// clusterNodes returns the configured membership without peer-health filtering.
+// EC write activation and placement must be based on membership: transient
+// startup probes can mark peers unhealthy before their services are ready, but
+// silently falling back to N× for user writes would make later EC reads fail.
+func (b *DistributedBackend) clusterNodes() []string {
+	if b.node != nil {
+		if peers := b.node.Peers(); len(peers) > 0 {
+			nodes := make([]string, 0, len(peers)+1)
+			if b.selfAddr != "" {
+				nodes = append(nodes, b.selfAddr)
+			}
+			nodes = append(nodes, peers...)
+			sort.Strings(nodes)
+			return nodes
+		}
+	}
+	return append([]string(nil), b.allNodes...)
+}
+
+// ecWriteNodes returns the node set used for new EC object placement.
+//
+// Prefer health-filtered live membership when it can still form an EC stripe:
+// after a real node failure, new writes must avoid the dead node and place
+// shards across the surviving nodes. If health-filtering drops below the EC
+// activation threshold, fall back to configured membership so transient startup
+// peerHealth misses do not silently downgrade user writes to N-way replication.
+func (b *DistributedBackend) ecWriteNodes() []string {
+	nodes := b.liveNodes()
+	if b.ecConfig.IsActive(len(nodes)) {
+		return nodes
+	}
+	return b.clusterNodes()
 }
 
 // SetSnapshotManager configures automatic snapshot creation after N applied entries.
@@ -878,7 +924,7 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	// buckets: a fixed versionID combined with EC's RingVersion-keyed shard
 	// placement would leak stale shards on ring topology changes.
 	versionID := newVersionID()
-	useEC := b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil
+	useEC := b.ecConfig.IsActive(len(b.ecWriteNodes())) && b.shardSvc != nil
 	if storage.IsInternalBucket(bucket) && b.vfsFixedVersion.Load() {
 		versionID = "current"
 		useEC = false
@@ -993,7 +1039,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 		}
 	}()
 	versionID := newVersionID()
-	useEC := b.ecConfig.IsActive(len(b.liveNodes())) && b.shardSvc != nil
+	useEC := b.ecConfig.IsActive(len(b.ecWriteNodes())) && b.shardSvc != nil
 	if storage.IsVFSBucket(bucket) && b.vfsFixedVersion.Load() {
 		versionID = "current"
 		useEC = false
@@ -1301,7 +1347,7 @@ func selectECPlacement(ring *Ring, ringErr error, cfg ECConfig, liveNodes []stri
 // so reads can recompute the same placement without a separate Raft record.
 func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
 
-	liveNodes := b.liveNodes()
+	liveNodes := b.ecWriteNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
 	shards, err := ECSplit(effectiveCfg, data)
 	if err != nil {
@@ -1410,7 +1456,7 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
-	liveNodes := b.liveNodes()
+	liveNodes := b.ecWriteNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
 
 	shardKey := key + "/" + versionID
@@ -1600,20 +1646,29 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	}
 
 	// Try the version-addressable local path first (new writers), then the
-	// legacy unversioned path (pre-versioning replay).
+	// legacy unversioned path (pre-versioning replay). A stale or partial
+	// local file must not satisfy metadata that names a larger object; under
+	// MultiRaft follower reads that would otherwise surface as a successful
+	// GET with an empty body.
+	var localErr error
 	if obj.VersionID != "" {
-		if f, oerr := os.Open(b.objectPathV(bucket, key, obj.VersionID)); oerr == nil {
+		if f, oerr := b.openObjectIfSizeMatches(b.objectPathV(bucket, key, obj.VersionID), obj); oerr == nil {
 			return f, obj, nil
+		} else if !os.IsNotExist(oerr) {
+			localErr = oerr
 		}
 	}
-	f, err := os.Open(b.objectPath(bucket, key))
+	f, err := b.openObjectIfSizeMatches(b.objectPath(bucket, key), obj)
 	if err == nil {
 		return f, obj, nil
+	}
+	if !os.IsNotExist(err) {
+		localErr = err
 	}
 
 	// Local file not found — try fetching from peer nodes (healthy first, then all).
 	// Peers store under shardKey (key+"/"+versionID) when the write was versioned.
-	if b.shardSvc != nil && os.IsNotExist(err) {
+	if b.shardSvc != nil {
 
 		// Try healthy peers first
 		for _, peer := range b.liveNodes() {
@@ -1636,7 +1691,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 		}
 		// Fallback: try unhealthy peers (they may have recovered)
 		if b.peerHealth != nil {
-			for _, peer := range b.liveNodes() {
+			for _, peer := range b.clusterNodes() {
 				if peer == b.selfAddr {
 					continue
 				}
@@ -1652,7 +1707,27 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 		}
 	}
 
+	if localErr != nil {
+		return nil, nil, fmt.Errorf("open object: %w", localErr)
+	}
 	return nil, nil, fmt.Errorf("open object: %w", err)
+}
+
+func (b *DistributedBackend) openObjectIfSizeMatches(path string, obj *storage.Object) (*os.File, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if st.Size() != obj.Size {
+		_ = f.Close()
+		return nil, fmt.Errorf("local object size mismatch for %s: metadata=%d file=%d", path, obj.Size, st.Size())
+	}
+	return f, nil
 }
 
 // RepairShard rebuilds a single missing shard by reading the other shards from
@@ -1777,12 +1852,12 @@ func (b *DistributedBackend) LiveNodes() []string { return b.liveNodes() }
 
 // ECActive reports whether Phase 18 cluster EC will be applied to the next
 // PutObject call (EC enabled + enough nodes for k+m split).
-func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.liveNodes())) }
+func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.ecWriteNodes())) }
 
 // EffectiveECConfig returns the ECConfig proportionally scaled to the current
 // cluster size. Used by ReshardManager to determine the target k,m for upgrades.
 func (b *DistributedBackend) EffectiveECConfig() ECConfig {
-	return EffectiveConfig(len(b.liveNodes()), b.ecConfig)
+	return EffectiveConfig(len(b.ecWriteNodes()), b.ecConfig)
 }
 
 // CurrentRingVersion returns the version of the current ring (0 if none).
@@ -1811,7 +1886,7 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 		return nil // already up to date
 	}
 
-	cfg := EffectiveConfig(len(b.liveNodes()), b.ecConfig)
+	cfg := EffectiveConfig(len(b.ecWriteNodes()), b.ecConfig)
 
 	placementMeta.RingVersion = oldRingVer
 	if placementMeta.ECData == 0 {
@@ -1848,7 +1923,7 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 // commit overwrite both the N× copy and (post-commit) the EC shards, so the
 // last writer wins per normal PUT semantics.
 func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
-	liveNodes := b.liveNodes()
+	liveNodes := b.ecWriteNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
 	if !effectiveCfg.IsActive(len(liveNodes)) || b.shardSvc == nil {
 		return fmt.Errorf("ec not active: cluster_size=%d shard_svc=%v",
@@ -2000,15 +2075,37 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 	available := 0
 	cached := make([]bool, len(rec.Nodes))
 	if b.shardCache != nil {
+		cachedIdx := make([]int, 0, len(rec.Nodes))
 		for i := range rec.Nodes {
-			// readamp records every read intent (cache + miss) so the
-			// simulator hit-rate curve stays comparable to runs that
-			// disable the real cache.
-			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-			if data, ok := b.shardCache.Get(shardCacheKey(bucket, shardKey, i)); ok {
+			if data, ok := b.shardCache.Peek(shardCacheKey(bucket, shardKey, i)); ok {
 				shards[i] = data
 				cached[i] = true
+				cachedIdx = append(cachedIdx, i)
 				available++
+			}
+		}
+		if available >= recCfg.DataShards {
+			for _, i := range cachedIdx[:recCfg.DataShards] {
+				// Record hits only for the K shards used by this EC read.
+				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
+				_, _ = b.shardCache.Get(shardCacheKey(bucket, shardKey, i))
+			}
+			return ECReconstruct(recCfg, shards)
+		}
+		for _, i := range cachedIdx {
+			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
+			_, _ = b.shardCache.Get(shardCacheKey(bucket, shardKey, i))
+		}
+		for i := range rec.Nodes {
+			if !cached[i] {
+				// A cache miss means this request will fall through to
+				// ReadShard / ReadLocalShard for that shard.
+				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
+				if data, ok := b.shardCache.Get(shardCacheKey(bucket, shardKey, i)); ok {
+					shards[i] = data
+					cached[i] = true
+					available++
+				}
 				if available == recCfg.DataShards {
 					return ECReconstruct(recCfg, shards)
 				}
@@ -2040,10 +2137,6 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 			if node == selfID {
 				data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
 			} else {
-				if b.peerHealth != nil && !b.peerHealth.IsHealthy(node) {
-					resultCh <- shardResult{idx: i, err: fmt.Errorf("node %s unhealthy", node)}
-					return
-				}
 				shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
 				defer shardCancel()
 				data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
@@ -2063,17 +2156,9 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 		}()
 	}
 
-	// We drain ALL dispatched responses, not just the first k. The
-	// extra m responses no longer block reconstruction — cancel()
-	// already signaled them to abort — but any that already received
-	// bytes before cancel arrived populate the cache. Without this the
-	// next read would always miss the m-th shard slot, ceiling the
-	// real hit rate at k/(k+m). With it, repeat reads of the same
-	// object hit fully and skip the fan-out entirely.
-	for r := 0; r < dispatched; r++ {
-		res := <-resultCh
+	applyShardResult := func(res shardResult) bool {
 		if res.err != nil || res.data == nil {
-			continue
+			return false
 		}
 		if available < recCfg.DataShards {
 			shards[res.idx] = res.data
@@ -2082,8 +2167,31 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 			b.shardCache.Put(shardCacheKey(bucket, shardKey, res.idx), res.data)
 		}
 		available++
-		if available == recCfg.DataShards {
-			cancel() // signal remaining in-flight goroutines to abort
+		return true
+	}
+
+	drainReady := func() {
+		for {
+			select {
+			case res := <-resultCh:
+				applyShardResult(res)
+			default:
+				return
+			}
+		}
+	}
+
+	// Read until k shards are available, then return immediately. Continuing
+	// to wait for every dispatched shard defeats EC availability after a node
+	// failure because one dead peer can hold the whole GET until its RPC
+	// deadline. resultCh is buffered(len(nodes)), so late goroutines can still
+	// send after this function returns.
+	for r := 0; r < dispatched; r++ {
+		res := <-resultCh
+		if applyShardResult(res) && available == recCfg.DataShards {
+			cancel()
+			drainReady()
+			return ECReconstruct(recCfg, shards)
 		}
 	}
 	if available < recCfg.DataShards {
@@ -2110,7 +2218,7 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	}
 
 	// Re-encode with new config.
-	liveNodes := b.liveNodes()
+	liveNodes := b.ecWriteNodes()
 	newShards, err := ECSplit(newCfg, data)
 	if err != nil {
 		return fmt.Errorf("upgrade re-split: %w", err)

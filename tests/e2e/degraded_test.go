@@ -20,7 +20,8 @@ import (
 // once the degraded monitor detects the shortage (≤ 30 s).
 //
 // The degraded condition: liveCount(2) < MinECNodes(3) → degraded=true.
-// The monitor fires immediately on start and then every 30 s.
+	// The monitor waits for the first interval tick to avoid startup false
+	// positives, then checks at the configured interval.
 func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping degraded-mode e2e in -short mode")
@@ -42,14 +43,10 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
-	ports := uniqueFreePorts(numNodes * 4)
+	ports := uniqueFreePorts(numNodes * 2)
 	for i := range numNodes {
 		httpPorts[i] = ports[i]
 		raftPorts[i] = ports[numNodes+i]
-		nfs4Ports[i] = ports[2*numNodes+i]
-		nbdPorts[i] = ports[3*numNodes+i]
 	}
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
@@ -86,8 +83,8 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--seed-groups", "1",
-			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
+				"--nfs4-port", "0",
+				"--nbd-port", "0",
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
@@ -195,5 +192,5 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			}
 		}
 		return false
-	}, 60*time.Second, 500*time.Millisecond, "expected writes to be blocked (503) after degraded")
-}
+		}, 120*time.Second, 500*time.Millisecond, "expected writes to be blocked (503) after degraded")
+	}

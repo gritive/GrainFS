@@ -1042,9 +1042,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Both call into instantiateOwnedIfNeeded which is idempotent — duplicates
 	// from concurrent paths are no-ops.
 	ownedGroups := struct {
-		mu       sync.Mutex
-		m        map[string]*cluster.GroupBackend
-		inFlight map[string]bool // entry.ID currently being instantiated; prevents duplicate concurrent OpenSharedLogStore / badger.Open
+		mu           sync.Mutex
+		wg           sync.WaitGroup
+		m            map[string]*cluster.GroupBackend
+		inFlight     map[string]bool // entry.ID currently being instantiated; prevents duplicate concurrent OpenSharedLogStore / badger.Open
+		shuttingDown bool
 	}{m: make(map[string]*cluster.GroupBackend), inFlight: make(map[string]bool)}
 
 	// Shared stop channel for all apply loops (distBackend + per-group).
@@ -1074,6 +1076,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			return nil
 		}
 		ownedGroups.mu.Lock()
+		if ownedGroups.shuttingDown {
+			ownedGroups.mu.Unlock()
+			return nil
+		}
 		if _, ok := ownedGroups.m[entry.ID]; ok {
 			ownedGroups.mu.Unlock()
 			return nil // already instantiated
@@ -1133,6 +1139,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return nil
 	}
 
+	scheduleOwnedInstantiation := func(entry cluster.ShardGroupEntry) {
+		ownedGroups.mu.Lock()
+		if ownedGroups.shuttingDown {
+			ownedGroups.mu.Unlock()
+			return
+		}
+		ownedGroups.wg.Add(1)
+		ownedGroups.mu.Unlock()
+		go func() {
+			defer ownedGroups.wg.Done()
+			if err := instantiateOwnedIfNeeded(entry); err != nil {
+				log.Error().Err(handleRuntimeGroupInstantiationError(entry.ID, err)).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
+			}
+		}()
+	}
+
 	// Cold-start instantiation for entries already in FSM (restart path).
 	// Run synchronously so Badger role failures feed the startup reducer before
 	// the server accepts traffic.
@@ -1151,15 +1173,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Runtime: handle entries replayed/applied after this point (fresh boot path).
 	// Dispatch to goroutine so apply loop is not blocked by BadgerDB+raft.Node startup.
 	metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
-		go func() {
-			if err := instantiateOwnedIfNeeded(entry); err != nil {
-				log.Error().Err(handleRuntimeGroupInstantiationError(entry.ID, err)).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
-			}
-		}()
+		scheduleOwnedInstantiation(entry)
 	})
 
 	// Shutdown hook: close all owned groups in parallel with 5s timeout each.
 	defer func() {
+		metaRaft.FSM().SetOnShardGroupAdded(nil)
+		ownedGroups.mu.Lock()
+		ownedGroups.shuttingDown = true
+		ownedGroups.mu.Unlock()
+		ownedGroups.wg.Wait()
+
 		ownedGroups.mu.Lock()
 		toClose := make([]*cluster.GroupBackend, 0, len(ownedGroups.m))
 		for _, gb := range ownedGroups.m {
@@ -1788,6 +1812,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 						log.Warn().Str("correlation_id", correlationID).Err(err).Msg("placement monitor receipt sign failed")
 					} else if err := receiptWiring.store.Put(r); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt store failed")
+					} else if err := receiptWiring.store.Flush(); err != nil {
+						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt flush failed")
 					} else if err := gb.RecordRepairReceiptSigned(context.Background(), repairReq, receiptID); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor incident proof update failed")
 					}
