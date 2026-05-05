@@ -108,6 +108,8 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusRequestEntityTooLarge, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size")
 	case errors.Is(err, storage.ErrForwardBackpressure):
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "too many forwarded upload streams in flight")
+	case errors.Is(err, storage.ErrUnsupportedOperation):
+		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", err.Error())
 	default:
 		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
 	}
@@ -338,20 +340,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	)
 	if aclHeader != "" {
 		acl := s3auth.ParseACLHeader(aclHeader)
-		if putter, ok := unwrapBackend(s.backend).(storage.AtomicACLPutter); ok {
-			// Atomic path: store object and ACL in the same transaction.
-			obj, putErr = putter.PutObjectWithACL(bucket, key, body, contentType, uint8(acl))
-		} else {
-			obj, putErr = s.backend.PutObject(ctx, bucket, key, body, contentType)
-			if putErr == nil {
-				if setter, ok2 := unwrapBackend(s.backend).(storage.ACLSetter); ok2 {
-					if aclErr := setter.SetObjectACL(bucket, key, uint8(acl)); aclErr != nil {
-						mapError(c, aclErr)
-						return
-					}
-				}
-			}
-		}
+		obj, putErr = s.ops.PutObjectWithACL(ctx, bucket, key, body, contentType, uint8(acl))
 	} else {
 		obj, putErr = s.backend.PutObject(ctx, bucket, key, body, contentType)
 	}
@@ -375,11 +364,6 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	c.Status(consts.StatusOK)
 }
 
-// VersionedGetter is an optional interface for backends supporting retrieval by versionId.
-type VersionedGetter interface {
-	GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error)
-}
-
 func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if ri := s.readIndexer; ri != nil {
 		readIdx, err := ri.ReadIndex(ctx)
@@ -401,24 +385,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	var err error
 
 	if versionID != "" {
-		if vg, ok := s.backend.(VersionedGetter); ok {
-			rc, obj, err = vg.GetObjectVersion(bucket, key, versionID)
-		} else {
-			// Walk unwrappers
-			b := s.backend
-			for b != nil {
-				if vg, ok := b.(VersionedGetter); ok {
-					rc, obj, err = vg.GetObjectVersion(bucket, key, versionID)
-					break
-				}
-				u, ok := b.(unwrapper)
-				if !ok {
-					writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versionId not supported by this backend")
-					return
-				}
-				b = u.Unwrap()
-			}
-		}
+		rc, obj, err = s.ops.GetObjectVersion(bucket, key, versionID)
 	} else {
 		rc, obj, err = s.backend.GetObject(ctx, bucket, key)
 	}
@@ -571,25 +538,6 @@ func parseByteRange(rangeHeader string, size int64) (int64, int64, bool) {
 	return start, end, true
 }
 
-// VersionedHeader is an optional interface for backends supporting HEAD by versionId.
-type VersionedHeader interface {
-	HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error)
-}
-
-func findVersionedHeader(b storage.Backend) (VersionedHeader, bool) {
-	for b != nil {
-		if v, ok := b.(VersionedHeader); ok {
-			return v, true
-		}
-		u, ok := b.(unwrapper)
-		if !ok {
-			break
-		}
-		b = u.Unwrap()
-	}
-	return nil, false
-}
-
 func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	if ri := s.readIndexer; ri != nil {
 		readIdx, err := ri.ReadIndex(ctx)
@@ -609,12 +557,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	var obj *storage.Object
 	var err error
 	if versionID != "" {
-		vh, ok := findVersionedHeader(s.backend)
-		if !ok {
-			writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versionId not supported by this backend")
-			return
-		}
-		obj, err = vh.HeadObjectVersion(bucket, key, versionID)
+		obj, err = s.ops.HeadObjectVersion(bucket, key, versionID)
 	} else {
 		obj, err = s.backend.HeadObject(ctx, bucket, key)
 	}
@@ -708,12 +651,7 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 
 	// DELETE /:bucket/:key?versionId=<id> — hard-delete specific version
 	if versionID := string(c.QueryArgs().Peek("versionId")); versionID != "" {
-		vd, ok := findVersionDeleter(s.backend)
-		if !ok {
-			writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versionId delete not supported by this backend")
-			return
-		}
-		if err := vd.DeleteObjectVersion(bucket, key, versionID); err != nil {
+		if err := s.ops.DeleteObjectVersion(bucket, key, versionID); err != nil {
 			mapError(c, err)
 			return
 		}
@@ -724,29 +662,14 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 	// Get size before deleting for metric tracking
 	existing, _ := s.backend.HeadObject(ctx, bucket, key)
 
-	// If backend supports versioned soft-delete, use it to get the marker ID.
-	if vsd, ok := findVersionedSoftDeleter(s.backend); ok {
-		markerID, err := vsd.DeleteObjectReturningMarker(bucket, key)
-		if err != nil {
-			mapError(c, err)
-			return
-		}
-		if markerID != "" {
-			c.Header("x-amz-delete-marker", "true")
-			c.Header("x-amz-version-id", markerID)
-		}
-		metrics.ObjectsTotal.Dec()
-		if existing != nil {
-			metrics.StorageBytesTotal.Add(float64(-existing.Size))
-		}
-		s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDelete, Bucket: bucket, Key: key})
-		c.Status(consts.StatusNoContent)
-		return
-	}
-
-	if err := s.backend.DeleteObject(ctx, bucket, key); err != nil {
+	markerID, err := s.ops.DeleteObjectReturningMarker(ctx, bucket, key)
+	if err != nil {
 		mapError(c, err)
 		return
+	}
+	if markerID != "" {
+		c.Header("x-amz-delete-marker", "true")
+		c.Header("x-amz-version-id", markerID)
 	}
 	metrics.ObjectsTotal.Dec()
 	if existing != nil {
@@ -1217,41 +1140,28 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 	}
 	srcBucket, srcKey := parts[0], parts[1]
 
-	// Try optimized copy if backend supports it
-	if copier, ok := s.backend.(storage.Copier); ok {
-		obj, err := copier.CopyObject(srcBucket, srcKey, dstBucket, dstKey)
-		if err != nil {
-			mapError(c, err)
-			return
-		}
+	var acl *uint8
+	if aclHeader := string(c.GetHeader("x-amz-acl")); aclHeader != "" {
+		parsed := uint8(s3auth.ParseACLHeader(aclHeader))
+		acl = &parsed
+	}
+	result, err := s.ops.CopyObject(ctx, storage.CopyObjectRequest{
+		SourceBucket:      srcBucket,
+		SourceKey:         srcKey,
+		DestinationBucket: dstBucket,
+		DestinationKey:    dstKey,
+		ACL:               acl,
+	})
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	obj := result.Object
 
-		result := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	response := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult>
   <ETag>"%s"</ETag>
   <LastModified>%s</LastModified>
 </CopyObjectResult>`, obj.ETag, time.Unix(obj.LastModified, 0).UTC().Format(time.RFC3339))
-		c.Data(consts.StatusOK, "application/xml", []byte(result))
-		return
-	}
-
-	// Fallback: read source, write to dest
-	rc, obj, err := s.backend.GetObject(ctx, srcBucket, srcKey)
-	if err != nil {
-		mapError(c, err)
-		return
-	}
-	defer rc.Close()
-
-	newObj, err := s.backend.PutObject(ctx, dstBucket, dstKey, rc, obj.ContentType)
-	if err != nil {
-		mapError(c, err)
-		return
-	}
-
-	result := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<CopyObjectResult>
-  <ETag>"%s"</ETag>
-  <LastModified>%s</LastModified>
-</CopyObjectResult>`, newObj.ETag, time.Unix(newObj.LastModified, 0).UTC().Format(time.RFC3339))
-	c.Data(consts.StatusOK, "application/xml", []byte(result))
+	c.Data(consts.StatusOK, "application/xml", []byte(response))
 }

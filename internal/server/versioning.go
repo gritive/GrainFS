@@ -8,8 +8,6 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // versioningConfiguration is the S3 XML body for GET/PUT ?versioning.
@@ -19,34 +17,8 @@ type versioningConfiguration struct {
 	Status  string   `xml:"Status"`
 }
 
-// BucketVersioner is implemented by backends that support bucket versioning.
-type BucketVersioner interface {
-	SetBucketVersioning(bucket, state string) error
-	GetBucketVersioning(bucket string) (string, error)
-}
-
-func findBucketVersioner(b storage.Backend) (BucketVersioner, bool) {
-	for b != nil {
-		if v, ok := b.(BucketVersioner); ok {
-			return v, true
-		}
-		u, ok := b.(unwrapper)
-		if !ok {
-			break
-		}
-		b = u.Unwrap()
-	}
-	return nil, false
-}
-
 // putBucketVersioning handles PUT /<bucket>?versioning.
 func (s *Server) putBucketVersioning(c *app.RequestContext, bucket string) {
-	v, ok := findBucketVersioner(s.backend)
-	if !ok {
-		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versioning not supported by this backend")
-		return
-	}
-
 	var vc versioningConfiguration
 	if err := xml.Unmarshal(c.Request.Body(), &vc); err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedXML", "invalid versioning configuration XML")
@@ -57,69 +29,11 @@ func (s *Server) putBucketVersioning(c *app.RequestContext, bucket string) {
 		return
 	}
 
-	if err := v.SetBucketVersioning(bucket, vc.Status); err != nil {
+	if err := s.ops.SetBucketVersioning(bucket, vc.Status); err != nil {
 		mapError(c, err)
 		return
 	}
 	c.Status(consts.StatusOK)
-}
-
-// ObjectVersionLister is implemented by backends that support listing object versions.
-type ObjectVersionLister interface {
-	ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error)
-}
-
-func findObjectVersionLister(b storage.Backend) (ObjectVersionLister, bool) {
-	for b != nil {
-		if v, ok := b.(ObjectVersionLister); ok {
-			return v, true
-		}
-		u, ok := b.(unwrapper)
-		if !ok {
-			break
-		}
-		b = u.Unwrap()
-	}
-	return nil, false
-}
-
-// ObjectVersionDeleter is an optional interface for backends supporting hard-delete of a specific version.
-type ObjectVersionDeleter interface {
-	DeleteObjectVersion(bucket, key, versionId string) error
-}
-
-// VersionedSoftDeleter is an optional interface for backends that return delete-marker metadata
-// when performing a soft-delete on a versioning-enabled bucket.
-type VersionedSoftDeleter interface {
-	DeleteObjectReturningMarker(bucket, key string) (markerID string, err error)
-}
-
-func findVersionedSoftDeleter(b storage.Backend) (VersionedSoftDeleter, bool) {
-	for b != nil {
-		if v, ok := b.(VersionedSoftDeleter); ok {
-			return v, true
-		}
-		u, ok := b.(unwrapper)
-		if !ok {
-			break
-		}
-		b = u.Unwrap()
-	}
-	return nil, false
-}
-
-func findVersionDeleter(b storage.Backend) (ObjectVersionDeleter, bool) {
-	for b != nil {
-		if v, ok := b.(ObjectVersionDeleter); ok {
-			return v, true
-		}
-		u, ok := b.(unwrapper)
-		if !ok {
-			break
-		}
-		b = u.Unwrap()
-	}
-	return nil, false
 }
 
 // listVersionsResult is the S3 XML response for GET /<bucket>?versions.
@@ -152,16 +66,10 @@ type deleteMarkerEntry struct {
 
 // listObjectVersions handles GET /<bucket>?versions.
 func (s *Server) listObjectVersions(_ context.Context, c *app.RequestContext, bucket string) {
-	lister, ok := findObjectVersionLister(s.backend)
-	if !ok {
-		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versioning not supported by this backend")
-		return
-	}
-
 	prefix := string(c.QueryArgs().Peek("prefix"))
 	maxKeys := 1000
 
-	vs, err := lister.ListObjectVersions(bucket, prefix, maxKeys)
+	vs, err := s.ops.ListObjectVersions(bucket, prefix, maxKeys)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -203,13 +111,7 @@ func (s *Server) listObjectVersions(_ context.Context, c *app.RequestContext, bu
 
 // getBucketVersioning handles GET /<bucket>?versioning.
 func (s *Server) getBucketVersioning(_ context.Context, c *app.RequestContext, bucket string) {
-	v, ok := findBucketVersioner(s.backend)
-	if !ok {
-		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "versioning not supported by this backend")
-		return
-	}
-
-	state, err := v.GetBucketVersioning(bucket)
+	state, err := s.ops.GetBucketVersioning(bucket)
 	if err != nil {
 		mapError(c, err)
 		return

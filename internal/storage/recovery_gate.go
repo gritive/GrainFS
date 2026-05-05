@@ -18,29 +18,6 @@ var (
 	_ Truncatable = (*RecoveryWriteGate)(nil)
 )
 
-type policyBackend interface {
-	GetBucketPolicy(bucket string) ([]byte, error)
-	SetBucketPolicy(bucket string, policyJSON []byte) error
-	DeleteBucketPolicy(bucket string) error
-}
-
-type bucketVersioner interface {
-	SetBucketVersioning(bucket, state string) error
-	GetBucketVersioning(bucket string) (string, error)
-}
-
-type versionedGetter interface {
-	GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error)
-}
-
-type versionedHeader interface {
-	HeadObjectVersion(bucket, key, versionID string) (*Object, error)
-}
-
-type objectVersionLister interface {
-	ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error)
-}
-
 func NewRecoveryWriteGate(inner Backend, err error) *RecoveryWriteGate {
 	if err == nil {
 		err = ErrRecoveryWriteDisabled
@@ -80,7 +57,7 @@ func (g *RecoveryWriteGate) PutObjectWithACL(string, string, io.Reader, string, 
 func (g *RecoveryWriteGate) Truncate(context.Context, string, string, int64) error { return g.err }
 
 func (g *RecoveryWriteGate) GetBucketPolicy(bucket string) ([]byte, error) {
-	pb, ok := g.Backend.(policyBackend)
+	pb, ok := g.Backend.(PolicyBackend)
 	if !ok {
 		return nil, ErrSnapshotNotSupported
 	}
@@ -91,7 +68,7 @@ func (g *RecoveryWriteGate) SetBucketPolicy(string, []byte) error { return g.err
 func (g *RecoveryWriteGate) DeleteBucketPolicy(string) error      { return g.err }
 
 func (g *RecoveryWriteGate) GetBucketVersioning(bucket string) (string, error) {
-	v, ok := g.Backend.(bucketVersioner)
+	v, ok := g.Backend.(BucketVersioner)
 	if !ok {
 		return "", ErrSnapshotNotSupported
 	}
@@ -101,7 +78,7 @@ func (g *RecoveryWriteGate) GetBucketVersioning(bucket string) (string, error) {
 func (g *RecoveryWriteGate) SetBucketVersioning(string, string) error { return g.err }
 
 func (g *RecoveryWriteGate) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
-	v, ok := g.Backend.(versionedGetter)
+	v, ok := g.Backend.(VersionedGetter)
 	if !ok {
 		return nil, nil, ErrSnapshotNotSupported
 	}
@@ -109,7 +86,7 @@ func (g *RecoveryWriteGate) GetObjectVersion(bucket, key, versionID string) (io.
 }
 
 func (g *RecoveryWriteGate) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
-	v, ok := g.Backend.(versionedHeader)
+	v, ok := g.Backend.(VersionedHeader)
 	if !ok {
 		return nil, ErrSnapshotNotSupported
 	}
@@ -117,7 +94,7 @@ func (g *RecoveryWriteGate) HeadObjectVersion(bucket, key, versionID string) (*O
 }
 
 func (g *RecoveryWriteGate) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
-	v, ok := g.Backend.(objectVersionLister)
+	v, ok := g.Backend.(ObjectVersionLister)
 	if !ok {
 		return nil, ErrSnapshotNotSupported
 	}

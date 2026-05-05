@@ -68,6 +68,7 @@ type RaftSnapshotter interface {
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend        storage.Backend
+	ops            *storage.Operations
 	readIndexer    ReadIndexer // nil = no gate (single-node)
 	raftSnapshots  RaftSnapshotter
 	dataDir        string
@@ -99,6 +100,36 @@ type Server struct {
 	eventCh       chan eventstore.Event
 	eventDone     chan struct{}
 	eventStopOnce sync.Once
+}
+
+type ServerStorage struct {
+	Ops           *storage.Operations
+	VolumeBackend storage.Backend
+	Snapshotable  storage.Snapshotable
+	DBProvider    storage.DBProvider
+}
+
+func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
+	return ServerStorage{
+		Ops:           storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
+		VolumeBackend: backend,
+		Snapshotable:  storageSnapshotable(backend),
+		DBProvider:    storageDBProvider(backend),
+	}
+}
+
+func storageSnapshotable(backend storage.Backend) storage.Snapshotable {
+	if snap, ok := backend.(storage.Snapshotable); ok {
+		return snap
+	}
+	return nil
+}
+
+func storageDBProvider(backend storage.Backend) storage.DBProvider {
+	if dbp, ok := unwrapBackend(backend).(storage.DBProvider); ok {
+		return dbp
+	}
+	return nil
 }
 
 // broadcastLoggerOnce guards the global zerolog.Logger setup so it is wired
@@ -257,10 +288,25 @@ func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {
 
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
+	policyStore := NewCompiledPolicyStore()
+	return NewWithServerStorage(addr, backend, NewServerStorage(backend, policyStore), policyStore, opts...)
+}
+
+func NewWithServerStorage(addr string, backend storage.Backend, ss ServerStorage, policyStore *CompiledPolicyStore, opts ...Option) *Server {
+	if policyStore == nil {
+		policyStore = NewCompiledPolicyStore()
+	}
+	if ss.Ops == nil {
+		ss.Ops = storage.NewOperations(backend, storage.WithPolicyStore(policyStore))
+	}
+	if ss.VolumeBackend == nil {
+		ss.VolumeBackend = backend
+	}
 	s := &Server{
 		backend:     backend,
+		ops:         ss.Ops,
 		hub:         NewHub(),
-		policyStore: NewCompiledPolicyStore(),
+		policyStore: policyStore,
 		ipLimiter:   NewRateLimiter(100, 200, 100000), // 100 req/sec per IP, burst 200, max 100K entries
 		userLimiter: NewRateLimiter(50, 100, 100000),  // 50 req/sec per user, burst 100
 	}
@@ -289,7 +335,7 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 
 	// Initialize snapshot manager once (avoids per-request allocation and concurrent seq collisions).
 	if s.dataDir != "" {
-		if snap, ok := s.backend.(storage.Snapshotable); ok {
+		if snap := ss.Snapshotable; snap != nil {
 			dir := filepath.Join(s.dataDir, "snapshots")
 			walDir := filepath.Join(s.dataDir, "wal")
 			if mgr, err := snapshot.NewManager(dir, snap, walDir); err == nil {
@@ -316,10 +362,10 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	h.Use(s.authzMiddleware())
 
 	if s.volMgr == nil {
-		s.volMgr = volume.NewManager(backend)
+		s.volMgr = volume.NewManager(ss.VolumeBackend)
 	}
 	if s.icebergCatalog == nil {
-		if dbp, ok := unwrapBackend(backend).(storage.DBProvider); ok {
+		if dbp := ss.DBProvider; dbp != nil {
 			s.icebergCatalog = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")
 		}
 	}
