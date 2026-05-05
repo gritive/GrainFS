@@ -6,36 +6,32 @@ import (
 	"time"
 )
 
-var ErrInvalidFDSample = errors.New("resourcewatch: invalid fd sample")
+var ErrInvalidSample = errors.New("resourcewatch: invalid sample")
 
-type FDCategory string
+// Category labels resource-specific subdivisions (e.g. FD socket vs badger,
+// vlog raft vs incident). Opaque to Detector — used for diagnosis only.
+type Category string
 
-const (
-	FDCategorySocket              FDCategory = "socket"
-	FDCategoryBadger              FDCategory = "badger"
-	FDCategoryReceiptOrEventStore FDCategory = "receipt_or_event_store"
-	FDCategoryNFSSession          FDCategory = "nfs_session"
-	FDCategoryRegularFile         FDCategory = "regular_file"
-	FDCategoryUnknown             FDCategory = "unknown"
-)
-
-type FDSnapshot struct {
+// Sample is one observation of an arbitrary resource: how much is in use vs
+// the configured soft cap. Categories optional; nil OK.
+type Sample struct {
 	Open        int
 	Limit       int
-	Categories  map[FDCategory]int
+	Categories  map[Category]int
 	CollectedAt time.Time
 }
 
-type FDProvider interface {
-	Snapshot(ctx context.Context) (FDSnapshot, error)
+// Provider produces Samples. Implementations must be safe for concurrent use.
+type Provider interface {
+	Snapshot(ctx context.Context) (Sample, error)
 }
 
-type FDLevel string
+type Level string
 
 const (
-	FDLevelOK       FDLevel = "ok"
-	FDLevelWarn     FDLevel = "warn"
-	FDLevelCritical FDLevel = "critical"
+	LevelOK       Level = "ok"
+	LevelWarn     Level = "warn"
+	LevelCritical Level = "critical"
 )
 
 type DetectorConfig struct {
@@ -49,11 +45,11 @@ type DetectorConfig struct {
 }
 
 type Decision struct {
-	Level      FDLevel
+	Level      Level
 	Threshold  string
 	Ratio      float64
 	ETA        time.Duration
 	Message    string
-	Snapshot   FDSnapshot
-	Categories map[FDCategory]int
+	Snapshot   Sample
+	Categories map[Category]int
 }

@@ -38,22 +38,22 @@ func NewFDProvider(opts FDProviderOptions) *ProcessFDProvider {
 	return &ProcessFDProvider{dir: dir, classificationCap: opts.ClassificationCap}
 }
 
-func (p *ProcessFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
+func (p *ProcessFDProvider) Snapshot(ctx context.Context) (Sample, error) {
 	select {
 	case <-ctx.Done():
-		return FDSnapshot{}, ctx.Err()
+		return Sample{}, ctx.Err()
 	default:
 	}
 
 	limit, err := currentFDLimit()
 	if err != nil {
-		return FDSnapshot{}, err
+		return Sample{}, err
 	}
 	names, readDir, err := readFDNames(p.dir, limit)
 	if err != nil {
-		return FDSnapshot{}, err
+		return Sample{}, err
 	}
-	categories := make(map[FDCategory]int)
+	categories := make(map[Category]int)
 	for i, name := range names {
 		if i >= p.classificationCap {
 			break
@@ -66,7 +66,7 @@ func (p *ProcessFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
 		categories[classifyFDTarget(target)]++
 	}
 
-	return FDSnapshot{
+	return Sample{
 		Open:        len(names),
 		Limit:       limit,
 		Categories:  categories,
@@ -121,7 +121,7 @@ func currentFDLimit() (int, error) {
 	return int(lim.Cur), nil
 }
 
-func classifyFDTarget(target string) FDCategory {
+func classifyFDTarget(target string) Category {
 	lower := strings.ToLower(target)
 	switch {
 	case strings.Contains(lower, "socket:") || strings.Contains(lower, "sock"):

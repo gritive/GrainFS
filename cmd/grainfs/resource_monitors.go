@@ -52,7 +52,7 @@ func startFDResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID stri
 		},
 		provider,
 		detector,
-		func(snapshot resourcewatch.FDSnapshot, decision *resourcewatch.Decision) {
+		func(snapshot resourcewatch.Sample, decision *resourcewatch.Decision) {
 			recordFDMetrics(nodeID, snapshot, decision)
 		},
 		func(ctx context.Context, decision *resourcewatch.Decision) error {
@@ -71,7 +71,7 @@ func startFDResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID stri
 	log.Info().Dur("interval", pollInterval).Float64("warn_ratio", warnRatio).Float64("critical_ratio", criticalRatio).Msg("fd resource watcher started")
 }
 
-func recordFDMetrics(nodeID string, snapshot resourcewatch.FDSnapshot, decision *resourcewatch.Decision) {
+func recordFDMetrics(nodeID string, snapshot resourcewatch.Sample, decision *resourcewatch.Decision) {
 	metrics.FDOpen.WithLabelValues(nodeID).Set(float64(snapshot.Open))
 	metrics.FDLimit.WithLabelValues(nodeID).Set(float64(snapshot.Limit))
 	if snapshot.Limit > 0 {
@@ -90,8 +90,8 @@ func recordFDMetrics(nodeID string, snapshot resourcewatch.FDSnapshot, decision 
 	}
 }
 
-func fdMetricCategories() []resourcewatch.FDCategory {
-	return []resourcewatch.FDCategory{
+func fdMetricCategories() []resourcewatch.Category {
+	return []resourcewatch.Category{
 		resourcewatch.FDCategorySocket,
 		resourcewatch.FDCategoryBadger,
 		resourcewatch.FDCategoryReceiptOrEventStore,
@@ -118,14 +118,14 @@ func recordFDDecision(ctx context.Context, recorder *incident.Recorder, nodeID s
 		At:            at,
 	}}
 	switch decision.Level {
-	case resourcewatch.FDLevelOK:
+	case resourcewatch.LevelOK:
 		facts = append(facts, incident.Fact{
 			CorrelationID: fdIncidentID(nodeID),
 			Type:          incident.FactResolved,
 			Message:       decision.Message,
 			At:            at,
 		})
-	case resourcewatch.FDLevelWarn:
+	case resourcewatch.LevelWarn:
 		facts = append(facts, incident.Fact{
 			CorrelationID: fdIncidentID(nodeID),
 			Type:          incident.FactDiagnosed,
@@ -133,7 +133,7 @@ func recordFDDecision(ctx context.Context, recorder *incident.Recorder, nodeID s
 			Message:       decision.Message,
 			At:            at,
 		})
-	case resourcewatch.FDLevelCritical:
+	case resourcewatch.LevelCritical:
 		facts = append(facts, incident.Fact{
 			CorrelationID: fdIncidentID(nodeID),
 			Type:          incident.FactDiagnosed,
@@ -153,11 +153,11 @@ func recordFDDecision(ctx context.Context, recorder *incident.Recorder, nodeID s
 }
 
 func sendFDAlert(nodeID string, clusterAlerts *server.AlertsState, decision *resourcewatch.Decision) {
-	if clusterAlerts == nil || decision == nil || decision.Level == resourcewatch.FDLevelOK {
+	if clusterAlerts == nil || decision == nil || decision.Level == resourcewatch.LevelOK {
 		return
 	}
 	severity := alerts.SeverityWarning
-	if decision.Level == resourcewatch.FDLevelCritical {
+	if decision.Level == resourcewatch.LevelCritical {
 		severity = alerts.SeverityCritical
 	}
 	log.Warn().Str("level", string(decision.Level)).Float64("ratio", decision.Ratio).Msg(decision.Message)

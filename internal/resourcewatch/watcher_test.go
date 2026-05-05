@@ -11,14 +11,14 @@ import (
 )
 
 type fakeFDProvider struct {
-	snapshots []FDSnapshot
+	snapshots []Sample
 	err       error
 	calls     int
 }
 
-func (p *fakeFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
+func (p *fakeFDProvider) Snapshot(ctx context.Context) (Sample, error) {
 	if p.err != nil {
-		return FDSnapshot{}, p.err
+		return Sample{}, p.err
 	}
 	if p.calls >= len(p.snapshots) {
 		return p.snapshots[len(p.snapshots)-1], nil
@@ -34,11 +34,11 @@ type sequenceFDProvider struct {
 }
 
 type fdProviderResult struct {
-	snapshot FDSnapshot
+	snapshot Sample
 	err      error
 }
 
-func (p *sequenceFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
+func (p *sequenceFDProvider) Snapshot(ctx context.Context) (Sample, error) {
 	if p.calls >= len(p.results) {
 		return p.results[len(p.results)-1].snapshot, p.results[len(p.results)-1].err
 	}
@@ -49,17 +49,17 @@ func (p *sequenceFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
 
 func TestWatcher_PollOnceEmitsMetricsAndDecision(t *testing.T) {
 	start := time.Unix(100, 0).UTC()
-	provider := &fakeFDProvider{snapshots: []FDSnapshot{
-		{Open: 850, Limit: 1000, CollectedAt: start, Categories: map[FDCategory]int{FDCategorySocket: 800}},
+	provider := &fakeFDProvider{snapshots: []Sample{
+		{Open: 850, Limit: 1000, CollectedAt: start, Categories: map[Category]int{FDCategorySocket: 800}},
 	}}
-	var metricsSnapshot FDSnapshot
+	var metricsSnapshot Sample
 	var metricsDecision *Decision
 	var received *Decision
 	watcher := NewWatcher(
 		WatcherConfig{},
 		provider,
 		NewDetector(DetectorConfig{WarnRatio: 0.80, CriticalRatio: 0.90, MinSamples: 1}),
-		func(snapshot FDSnapshot, decision *Decision) {
+		func(snapshot Sample, decision *Decision) {
 			metricsSnapshot = snapshot
 			metricsDecision = decision
 		},
@@ -71,20 +71,20 @@ func TestWatcher_PollOnceEmitsMetricsAndDecision(t *testing.T) {
 
 	require.NoError(t, watcher.PollOnce(context.Background()))
 	require.NotNil(t, received)
-	assert.Equal(t, FDLevelWarn, received.Level)
+	assert.Equal(t, LevelWarn, received.Level)
 	assert.Equal(t, 850, metricsSnapshot.Open)
 	assert.Same(t, received, metricsDecision)
 }
 
 func TestWatcher_SuppressesNilDecision(t *testing.T) {
 	start := time.Unix(100, 0).UTC()
-	provider := &fakeFDProvider{snapshots: []FDSnapshot{{Open: 100, Limit: 1000, CollectedAt: start}}}
+	provider := &fakeFDProvider{snapshots: []Sample{{Open: 100, Limit: 1000, CollectedAt: start}}}
 	called := false
 	watcher := NewWatcher(
 		WatcherConfig{},
 		provider,
 		NewDetector(DetectorConfig{WarnRatio: 0.80, CriticalRatio: 0.90, MinSamples: 1}),
-		func(snapshot FDSnapshot, decision *Decision) {},
+		func(snapshot Sample, decision *Decision) {},
 		func(ctx context.Context, decision *Decision) error {
 			called = true
 			return nil
@@ -115,7 +115,7 @@ func TestWatcher_RunStopsOnContext(t *testing.T) {
 	start := time.Unix(100, 0).UTC()
 	watcher := NewWatcher(
 		WatcherConfig{PollInterval: time.Millisecond},
-		&fakeFDProvider{snapshots: []FDSnapshot{{Open: 100, Limit: 1000, CollectedAt: start}}},
+		&fakeFDProvider{snapshots: []Sample{{Open: 100, Limit: 1000, CollectedAt: start}}},
 		NewDetector(DetectorConfig{}),
 		nil,
 		nil,
@@ -132,7 +132,7 @@ func TestWatcher_RunContinuesAfterTransientProviderError(t *testing.T) {
 	wantErr := errors.New("temporary fd read failure")
 	provider := &sequenceFDProvider{results: []fdProviderResult{
 		{err: wantErr},
-		{snapshot: FDSnapshot{Open: 850, Limit: 1000, CollectedAt: start}},
+		{snapshot: Sample{Open: 850, Limit: 1000, CollectedAt: start}},
 	}}
 	var observedErrors []error
 	var received *Decision
@@ -159,13 +159,13 @@ func TestWatcher_RunContinuesAfterTransientProviderError(t *testing.T) {
 	require.Len(t, observedErrors, 1)
 	assert.ErrorIs(t, observedErrors[0], wantErr)
 	require.NotNil(t, received)
-	assert.Equal(t, FDLevelWarn, received.Level)
+	assert.Equal(t, LevelWarn, received.Level)
 }
 
 func TestWatcher_RetriesDecisionAfterSinkError(t *testing.T) {
 	start := time.Unix(100, 0).UTC()
 	wantErr := errors.New("incident store unavailable")
-	provider := &fakeFDProvider{snapshots: []FDSnapshot{
+	provider := &fakeFDProvider{snapshots: []Sample{
 		{Open: 850, Limit: 1000, CollectedAt: start},
 		{Open: 860, Limit: 1000, CollectedAt: start.Add(time.Second)},
 	}}
@@ -187,7 +187,7 @@ func TestWatcher_RetriesDecisionAfterSinkError(t *testing.T) {
 	err := watcher.PollOnce(context.Background())
 	assert.ErrorIs(t, err, wantErr)
 	require.Len(t, received, 1)
-	assert.Equal(t, FDLevelWarn, received[0].Level)
+	assert.Equal(t, LevelWarn, received[0].Level)
 
 	require.NoError(t, watcher.PollOnce(context.Background()))
 	require.Len(t, received, 2)

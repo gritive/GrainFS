@@ -20,6 +20,6 @@ func NewFDProvider(opts FDProviderOptions) *ProcessFDProvider {
 	return &ProcessFDProvider{}
 }
 
-func (p *ProcessFDProvider) Snapshot(ctx context.Context) (FDSnapshot, error) {
-	return FDSnapshot{}, ErrFDProviderUnsupported
+func (p *ProcessFDProvider) Snapshot(ctx context.Context) (Sample, error) {
+	return Sample{}, ErrFDProviderUnsupported
 }

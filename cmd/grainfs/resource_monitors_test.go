@@ -60,11 +60,11 @@ func TestRecordFDDecision_WarnCreatesDiagnosedIncident(t *testing.T) {
 	store := newTestIncidentStore()
 	recorder := incident.NewRecorder(store, incident.NewReducer())
 	decision := &resourcewatch.Decision{
-		Level:     resourcewatch.FDLevelWarn,
+		Level:     resourcewatch.LevelWarn,
 		Threshold: "warn",
 		Ratio:     0.85,
 		Message:   "FD usage 85.0% crossed warn threshold; top categories: socket=10",
-		Snapshot:  resourcewatch.FDSnapshot{Open: 850, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
+		Snapshot:  resourcewatch.Sample{Open: 850, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
 	}
 
 	require.NoError(t, recordFDDecision(ctx, recorder, "node-1", decision))
@@ -83,11 +83,11 @@ func TestRecordFDDecision_CriticalBlocksIncident(t *testing.T) {
 	store := newTestIncidentStore()
 	recorder := incident.NewRecorder(store, incident.NewReducer())
 	decision := &resourcewatch.Decision{
-		Level:     resourcewatch.FDLevelCritical,
+		Level:     resourcewatch.LevelCritical,
 		Threshold: "critical",
 		Ratio:     0.93,
 		Message:   "FD usage 93.0% crossed critical threshold",
-		Snapshot:  resourcewatch.FDSnapshot{Open: 930, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
+		Snapshot:  resourcewatch.Sample{Open: 930, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
 	}
 
 	require.NoError(t, recordFDDecision(ctx, recorder, "node-1", decision))
@@ -104,9 +104,9 @@ func TestRecordFDDecision_RecoveryFixesIncident(t *testing.T) {
 	store := newTestIncidentStore()
 	recorder := incident.NewRecorder(store, incident.NewReducer())
 	decision := &resourcewatch.Decision{
-		Level:    resourcewatch.FDLevelOK,
+		Level:    resourcewatch.LevelOK,
 		Message:  "FD usage recovered below warning threshold",
-		Snapshot: resourcewatch.FDSnapshot{Open: 500, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
+		Snapshot: resourcewatch.Sample{Open: 500, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
 	}
 
 	require.NoError(t, recordFDDecision(ctx, recorder, "node-1", decision))
@@ -120,17 +120,17 @@ func TestRecordFDDecision_RecoveryFixesIncident(t *testing.T) {
 
 func TestRecordFDMetrics_ClearsMissingCategories(t *testing.T) {
 	nodeID := "metric-clear-node"
-	recordFDMetrics(nodeID, resourcewatch.FDSnapshot{
+	recordFDMetrics(nodeID, resourcewatch.Sample{
 		Open:       10,
 		Limit:      100,
-		Categories: map[resourcewatch.FDCategory]int{resourcewatch.FDCategorySocket: 7},
+		Categories: map[resourcewatch.Category]int{resourcewatch.FDCategorySocket: 7},
 	}, nil)
 	assert.Equal(t, float64(7), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategorySocket))))
 
-	recordFDMetrics(nodeID, resourcewatch.FDSnapshot{
+	recordFDMetrics(nodeID, resourcewatch.Sample{
 		Open:       3,
 		Limit:      100,
-		Categories: map[resourcewatch.FDCategory]int{resourcewatch.FDCategoryBadger: 2},
+		Categories: map[resourcewatch.Category]int{resourcewatch.FDCategoryBadger: 2},
 	}, nil)
 
 	assert.Equal(t, float64(0), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategorySocket))))
