@@ -1292,10 +1292,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// consistency across nodes.
 	cachedBackend := storage.NewCachedBackend(inner)
 
-	// Wire OnApply callback: invalidate cache + update metrics on committed entries
-	distBackend.SetOnApply(func(cmdType cluster.CommandType, bucket, key string) {
-		cachedBackend.InvalidateKey(bucket, key)
-	})
+	distBackend.RegisterCacheInvalidator("s3-cache", cluster.CacheInvalidatorFunc(cachedBackend.InvalidateKey))
 
 	go distBackend.RunApplyLoop(stopApply)
 

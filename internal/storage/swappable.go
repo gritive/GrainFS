@@ -11,6 +11,7 @@ import (
 // and safe for concurrent use.
 type SwappableBackend struct {
 	inner atomic.Pointer[Backend]
+	gen   atomic.Uint64
 }
 
 var _ Backend = (*SwappableBackend)(nil)
@@ -26,11 +27,17 @@ func NewSwappableBackend(b Backend) *SwappableBackend {
 // backend will complete normally; new requests will use the new backend.
 func (sb *SwappableBackend) Swap(b Backend) {
 	sb.inner.Store(&b)
+	sb.gen.Add(1)
 }
 
 // Inner returns the current inner backend.
 func (sb *SwappableBackend) Inner() Backend {
 	return *sb.inner.Load()
+}
+
+// Generation changes every time the inner backend is swapped.
+func (sb *SwappableBackend) Generation() uint64 {
+	return sb.gen.Load()
 }
 
 // Unwrap returns the current inner backend for interface delegation.

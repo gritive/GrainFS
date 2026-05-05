@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type testInvalidator struct {
@@ -58,6 +59,31 @@ func TestRegistry_InvalidateAll_CallsAllInvalidators(t *testing.T) {
 	assert.Len(t, inv2.calls, 1)
 }
 
+func TestRegistry_Unregister_RemovesInvalidator(t *testing.T) {
+	r := NewRegistry()
+	inv := &testInvalidator{}
+	r.Register("vol1", inv)
+	r.Unregister("vol1")
+
+	r.InvalidateAll("mybkt", "mykey")
+
+	assert.Empty(t, inv.calls)
+	assert.Nil(t, r.GetInvalidator("vol1"))
+}
+
+func TestCacheInvalidatorFunc_Invalidates(t *testing.T) {
+	var gotBucket, gotKey string
+	inv := CacheInvalidatorFunc(func(bucket, key string) {
+		gotBucket = bucket
+		gotKey = key
+	})
+
+	inv.Invalidate("mybkt", "mykey")
+
+	assert.Equal(t, "mybkt", gotBucket)
+	assert.Equal(t, "mykey", gotKey)
+}
+
 func TestRegistry_InvalidateAll_EmptyRegistry(t *testing.T) {
 	r := NewRegistry()
 	// Should not panic and should be a no-op.
@@ -99,4 +125,54 @@ func TestRegistry_GetInvalidator_ConcurrentRegister(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestDistributedBackend_RegisterCacheInvalidator_NotifiedOnApply(t *testing.T) {
+	backend := &DistributedBackend{registry: NewRegistry()}
+	inv := &testInvalidator{}
+	backend.RegisterCacheInvalidator("s3-cache", inv)
+
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
+	require.NoError(t, err)
+
+	backend.notifyOnApply(raw)
+
+	assert.Equal(t, []string{"mybkt/mykey"}, inv.calls)
+}
+
+func TestDistributedBackend_UnregisterCacheInvalidator_RemovesInvalidator(t *testing.T) {
+	backend := &DistributedBackend{registry: NewRegistry()}
+	inv := &testInvalidator{}
+	backend.RegisterCacheInvalidator("s3-cache", inv)
+	backend.UnregisterCacheInvalidator("s3-cache")
+
+	raw, err := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "mybkt", Key: "mykey"})
+	require.NoError(t, err)
+
+	backend.notifyOnApply(raw)
+
+	assert.Empty(t, inv.calls)
+}
+
+func TestDistributedBackend_NotifyOnApply_CallsLegacyCallbackAfterRegistry(t *testing.T) {
+	backend := &DistributedBackend{registry: NewRegistry()}
+	var mu sync.Mutex
+	var calls []string
+	backend.RegisterCacheInvalidator("s3-cache", CacheInvalidatorFunc(func(bucket, key string) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, "registry:"+bucket+"/"+key)
+	}))
+	backend.SetOnApply(func(cmdType CommandType, bucket, key string) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, "legacy:"+bucket+"/"+key)
+	})
+
+	raw, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{Bucket: "mybkt", Key: "mykey"})
+	require.NoError(t, err)
+
+	backend.notifyOnApply(raw)
+
+	assert.Equal(t, []string{"registry:mybkt/mykey", "legacy:mybkt/mykey"}, calls)
 }

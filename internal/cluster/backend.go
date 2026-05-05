@@ -443,7 +443,17 @@ func (b *DistributedBackend) RaftSnapshotStatus() (raft.SnapshotStatus, error) {
 	return b.snapMgr.Status()
 }
 
-// SetOnApply sets the callback invoked after each FSM apply.
+// RegisterCacheInvalidator adds a cache invalidator for committed object mutations.
+func (b *DistributedBackend) RegisterCacheInvalidator(id string, inv CacheInvalidator) {
+	b.registry.Register(id, inv)
+}
+
+// UnregisterCacheInvalidator removes a previously registered cache invalidator.
+func (b *DistributedBackend) UnregisterCacheInvalidator(id string) {
+	b.registry.Unregister(id)
+}
+
+// SetOnApply sets the legacy callback invoked after each FSM apply.
 // Must be called before RunApplyLoop.
 func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
 	b.onApply = fn
@@ -465,10 +475,8 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			b.lastApplied.Store(entry.Index)
 			b.lastAppliedTerm.Store(entry.Term)
 
-			// Notify cache/metrics callback
-			if b.onApply != nil {
-				b.notifyOnApply(entry.Command)
-			}
+			// Notify cache invalidators and legacy metrics callback.
+			b.notifyOnApply(entry.Command)
 
 			// Check if snapshot should be taken
 			if b.snapMgr != nil {
@@ -483,7 +491,7 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 	}
 }
 
-// notifyOnApply extracts bucket/key from a committed command and calls the callback.
+// notifyOnApply extracts bucket/key from a committed command and invalidates caches.
 func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	cmd, err := DecodeCommand(raw)
 	if err != nil {
