@@ -204,6 +204,9 @@ func (s *Server) alertsStatus(_ context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) alertsResend(_ context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "alerts_resend") {
+		return
+	}
 	s.alerts.mu.Lock()
 	last := s.alerts.lastFailed
 	s.alerts.mu.Unlock()

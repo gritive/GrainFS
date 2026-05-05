@@ -14,6 +14,9 @@ const maxLifecycleBodyBytes = 64 * 1024 // 64 KiB — enough for any reasonable 
 
 // putBucketLifecycle handles PUT /{bucket}?lifecycle.
 func (s *Server) putBucketLifecycle(ctx context.Context, c *app.RequestContext, bucket string) {
+	if s.blockIfMutationDisabled(c, "bucket_lifecycle_put") {
+		return
+	}
 	if s.lifecycleStore == nil {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "lifecycle not configured")
 		return
@@ -74,6 +77,9 @@ func (s *Server) getBucketLifecycle(c *app.RequestContext, bucket string) {
 
 // deleteBucketLifecycle handles DELETE /{bucket}?lifecycle.
 func (s *Server) deleteBucketLifecycle(c *app.RequestContext, bucket string) {
+	if s.blockIfMutationDisabled(c, "bucket_lifecycle_delete") {
+		return
+	}
 	if s.lifecycleStore == nil {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "lifecycle not configured")
 		return

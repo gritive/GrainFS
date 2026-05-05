@@ -78,6 +78,20 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantNext:   "Review the object",
 		},
 		{
+			name: "corruption isolation failure needs human",
+			facts: []Fact{
+				{CorrelationID: "cid-4b", Type: FactObserved, Cause: CauseCorruptShard, Scope: Scope{Kind: ScopeObject, Bucket: "b", Key: "bad.bin", VersionID: "v1"}, At: now},
+				{CorrelationID: "cid-4b", Type: FactActionStarted, Action: ActionIsolateObject, At: now.Add(time.Millisecond)},
+				{CorrelationID: "cid-4b", Type: FactActionFailed, Action: ActionIsolateObject, ErrorCode: "quarantine_failed", At: now.Add(2 * time.Millisecond)},
+			},
+			wantState:  StateNeedsHuman,
+			wantCause:  CauseCorruptShard,
+			wantAction: ActionIsolateObject,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityCritical,
+			wantNext:   "Review the object",
+		},
+		{
 			name: "fd warning diagnosed with operator next action",
 			facts: []Fact{
 				{CorrelationID: "fd-node-1", Type: FactObserved, Cause: CauseFDExhaustionRisk, Scope: Scope{Kind: ScopeNode, NodeID: "node-1"}, Message: "open FD usage is 72.4% of limit 1024", At: now},
@@ -207,6 +221,55 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantProof:  ProofNotRequired,
 			wantSev:    SeverityCritical,
 			wantNext:   "Critical BadgerDB vlog usage",
+		},
+		{
+			name: "badger role open failure blocks startup",
+			facts: []Fact{
+				{
+					CorrelationID: "badger-meta",
+					Type:          FactObserved,
+					Cause:         CauseBadgerOpenFailed,
+					Action:        ActionBlockStartup,
+					Scope:         Scope{Kind: ScopeBadgerRole, BadgerRole: "meta", Path: "/data/meta"},
+					Message:       "open metadata db failed",
+					At:            now,
+				},
+				{
+					CorrelationID: "badger-meta",
+					Type:          FactActionFailed,
+					Cause:         CauseBadgerOpenFailed,
+					Action:        ActionBlockStartup,
+					ErrorCode:     "badger_open_failed",
+					Message:       "manifest missing",
+					At:            now.Add(time.Millisecond),
+				},
+			},
+			wantState:  StateBlocked,
+			wantCause:  CauseBadgerOpenFailed,
+			wantAction: ActionBlockStartup,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityCritical,
+			wantNext:   "Restore the Badger role",
+		},
+		{
+			name: "badger role read only admission is degraded",
+			facts: []Fact{
+				{
+					CorrelationID: "badger-group",
+					Type:          FactDiagnosed,
+					Cause:         CauseBadgerReadOnlyAdmitted,
+					Action:        ActionStartReadOnly,
+					Scope:         Scope{Kind: ScopeBadgerRole, BadgerRole: "group_state", Path: "/data/groups/g/badger"},
+					Message:       "group_state failed; server admitted read-only",
+					At:            now,
+				},
+			},
+			wantState:  StateDiagnosed,
+			wantCause:  CauseBadgerReadOnlyAdmitted,
+			wantAction: ActionStartReadOnly,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityDegraded,
+			wantNext:   "Serve reads only",
 		},
 	}
 

@@ -37,6 +37,9 @@ func (s *Server) raftSnapshotStatusHandler(_ context.Context, c *app.RequestCont
 }
 
 func (s *Server) raftSnapshotTriggerHandler(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "raft_snapshot_trigger") {
+		return
+	}
 	if s.raftSnapshots == nil {
 		c.JSON(consts.StatusServiceUnavailable, apiError("raft snapshot unavailable", "server is not running with a Raft snapshot manager"))
 		return

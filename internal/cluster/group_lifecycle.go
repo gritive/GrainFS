@@ -21,14 +21,19 @@ import (
 var errShutdownTimeout = errors.New("group lifecycle: shutdown timed out")
 
 // GroupLifecycleConfig collects the wiring needed to instantiate a local group.
+type OpenGroupStateDBFunc func(groupID, path string) (*badger.DB, error)
+type OpenGroupLogStoreFunc func(groupID, path string) (raft.LogStore, error)
+
 type GroupLifecycleConfig struct {
-	NodeID    string
-	DataDir   string
-	ShardSvc  *ShardService // may be nil for in-process / single-node tests
-	EC        ECConfig
-	LogStore  raft.LogStore // optional — if nil, BadgerLogStore is created at {groupDir}/raft
-	Transport groupTransport
-	AddrBook  NodeAddressBook
+	NodeID       string
+	DataDir      string
+	ShardSvc     *ShardService // may be nil for in-process / single-node tests
+	EC           ECConfig
+	LogStore     raft.LogStore // optional — if nil, BadgerLogStore is created at {groupDir}/raft
+	OpenStateDB  OpenGroupStateDBFunc
+	OpenLogStore OpenGroupLogStoreFunc
+	Transport    groupTransport
+	AddrBook     NodeAddressBook
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
@@ -99,7 +104,13 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		return nil, fmt.Errorf("group %s: mkdir badger: %w", entry.ID, err)
 	}
-	db, err := badger.Open(badgerutil.SmallOptions(dbDir))
+	openStateDB := cfg.OpenStateDB
+	if openStateDB == nil {
+		openStateDB = func(_ string, path string) (*badger.DB, error) {
+			return badger.Open(badgerutil.SmallOptions(path))
+		}
+	}
+	db, err := openStateDB(entry.ID, dbDir)
 	if err != nil {
 		return nil, fmt.Errorf("group %s: open badger: %w", entry.ID, err)
 	}
@@ -124,7 +135,13 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	logStore := cfg.LogStore
 	if logStore == nil {
 		raftDir := filepath.Join(groupDir, "raft")
-		ls, lerr := raft.NewBadgerLogStore(raftDir)
+		openLogStore := cfg.OpenLogStore
+		if openLogStore == nil {
+			openLogStore = func(_ string, path string) (raft.LogStore, error) {
+				return raft.NewBadgerLogStore(path)
+			}
+		}
+		ls, lerr := openLogStore(entry.ID, raftDir)
 		if lerr != nil {
 			resourcewatch.DeregisterDB(groupVlogEntry)
 			_ = db.Close()

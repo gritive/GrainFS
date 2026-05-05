@@ -53,7 +53,7 @@ The default container command disables NFSv4 and NBD with `--nfs4-port 0 --nbd-p
 | Object Browser     | 웹 UI에서 버킷/오브젝트/볼륨 관리                             |
 | At-rest Encryption | AES-256-GCM, 키 자동 생성                                     |
 | Monitoring         | Prometheus 메트릭 + 대시보드                                  |
-| Zero-Ops Incidents | missing shard repair / corrupt shard quarantine 상태와 proof 표시 |
+| Zero-Ops Incidents | missing shard repair / corrupt shard quarantine / Badger startup recovery 상태와 proof 표시 |
 
 ## CLI Options
 
@@ -154,7 +154,7 @@ curl http://localhost:9000/api/cluster/balancer/status | jq .
 
 ## Zero-Ops Incidents
 
-클러스터 모드에서 GrainFS는 missing shard repair, CRC corruption quarantine, open FD exhaustion risk를 incident로 기록한다. 대시보드의 self-healing 영역에서 현재 상태와 다음 조치를 볼 수 있고, API로도 조회할 수 있다.
+클러스터 모드에서 GrainFS는 missing shard repair, CRC corruption quarantine, open FD exhaustion risk, Badger startup recovery를 incident/recovery 상태로 기록한다. 대시보드의 self-healing 영역에서 현재 상태와 다음 조치를 볼 수 있고, API로도 조회할 수 있다.
 
 ```bash
 curl http://localhost:9000/api/incidents | jq .
@@ -167,9 +167,11 @@ HealReceipt proof는 S3 credential이 설정된 배포에서 인증이 필요하
 curl -H 'Authorization: ...' http://localhost:9000/api/receipts/<receipt-id>
 ```
 
-Corrupt shard가 감지되면 해당 object version만 quarantine된다. 같은 bucket의 다른 object와 최신 healthy version은 계속 서비스된다.
+Corrupt shard가 감지되면 해당 object version만 quarantine된다. 같은 bucket의 다른 object와 최신 healthy version은 계속 서비스된다. Isolation 자체가 실패하면 incident는 `needs-human` 상태로 남아 운영자가 복원 또는 삭제를 결정할 수 있게 한다.
 
 Open FD 경고는 기본 활성화되어 있으며 현재 FD 사용률, 임계 도달 ETA, 상위 FD category를 함께 기록한다. `fd_exhaustion_risk`가 `blocked`이면 `LimitNOFILE`/`ulimit -n` 상향, socket/session leak 확인, graceful restart 중 하나를 실행해야 한다.
+
+Badger role startup recovery는 metadata, raft-log, group-state, receipt, dedup, volume-catalog, incident-state DB를 역할별로 판정한다. 필수 역할 실패는 시작을 막고, group-state 실패는 읽기 전용으로 시작해 storage writes와 mutating admin APIs에 `RecoveryReadOnly` 503을 반환하며, optional receipt/dedup/incident-state 실패는 해당 feature만 비활성화한다.
 
 ## Documentation
 

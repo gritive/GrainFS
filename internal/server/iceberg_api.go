@@ -68,6 +68,9 @@ func (s *Server) icebergListNamespaces(ctx context.Context, c *app.RequestContex
 }
 
 func (s *Server) icebergCreateNamespace(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
 	store, ok := s.requireIceberg(c)
 	if !ok {
 		return
@@ -114,6 +117,9 @@ func (s *Server) icebergHeadNamespace(ctx context.Context, c *app.RequestContext
 }
 
 func (s *Server) icebergDeleteNamespace(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
 	store, ok := s.requireIceberg(c)
 	if !ok {
 		return
@@ -139,6 +145,9 @@ func (s *Server) icebergListTables(ctx context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
 	store, ok := s.requireIceberg(c)
 	if !ok {
 		return
@@ -206,6 +215,9 @@ func (s *Server) icebergHeadTable(ctx context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) icebergDeleteTable(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
 	store, ok := s.requireIceberg(c)
 	if !ok {
 		return
@@ -219,6 +231,9 @@ func (s *Server) icebergDeleteTable(ctx context.Context, c *app.RequestContext) 
 }
 
 func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
 	var req struct {
 		Requirements []json.RawMessage `json:"requirements"`
 		Updates      []json.RawMessage `json:"updates"`
@@ -245,6 +260,9 @@ func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) 
 }
 
 func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
 	var req struct {
 		TableChanges []struct {
 			Identifier   icebergcatalog.Identifier `json:"identifier"`

@@ -28,6 +28,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -633,6 +634,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	metaDir := filepath.Join(dataDir, "meta")
 	raftDir := filepath.Join(dataDir, "raft")
+	roleRegistry := badgerrole.DefaultRegistry()
+	startupDecisions := make([]badgerrole.Decision, 0, 8)
+	recordStartupDecision := func(decision badgerrole.Decision) {
+		startupDecisions = append(startupDecisions, decision)
+	}
 
 	// Auto-migrate BEFORE any filesystem or lock side effects. If Raft dir
 	// doesn't exist but meta dir holds an existing local BadgerDB, convert
@@ -674,8 +680,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	metaVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryMeta, db)
 	defer resourcewatch.DeregisterDB(metaVlogEntry)
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
-	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
-		return err
+	recordStartupDecision(badgerrole.ProbeWritable(db, badgerrole.RoleMeta, "", metaDir))
+	if startupDecisions[len(startupDecisions)-1].Status != badgerrole.DecisionOK {
+		return server.PreflightBadger(db, metaDir, nil)
 	}
 
 	badgerManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
@@ -712,6 +719,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		raftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, logStore.DB())
 		defer resourcewatch.DeregisterDB(raftLogVlogEntry)
 	}
+	recordStartupDecision(badgerrole.Decision{
+		Role:   badgerrole.RoleMetaRaftLog,
+		Path:   raftDir,
+		Status: badgerrole.DecisionOK,
+		Action: badgerrole.RecoveryActionNone,
+	})
 
 	// C2 P0b prototype: optionally open one shared raft-log BadgerDB so all
 	// data groups share a single instance instead of opening their own. Reduces
@@ -751,6 +764,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		defer sharedRaftLogDB.Close()
 		sharedRaftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, sharedRaftLogDB)
 		defer resourcewatch.DeregisterDB(sharedRaftLogVlogEntry)
+		recordStartupDecision(badgerrole.Decision{
+			Role:   badgerrole.RoleSharedRaftLog,
+			Path:   sharedDir,
+			Status: badgerrole.DecisionOK,
+			Action: badgerrole.RecoveryActionNone,
+		})
 		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
 	}
 
@@ -1036,10 +1055,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// metaTransport could auto-register its node onto the mux. Each group
 	// uses ForGroup(groupID) as its raft transport.
 
-	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) {
+	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) error {
 		// group-0 is already wired with the shared distBackend.
 		if entry.ID == "group-0" {
-			return
+			return nil
 		}
 		ensureShardGroupPlaceholder(dgMgr, entry)
 		// Only instantiate for groups where we are a voter. New dynamic groups
@@ -1052,21 +1071,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			}
 		}
 		if !isVoter {
-			return
+			return nil
 		}
 		ownedGroups.mu.Lock()
 		if _, ok := ownedGroups.m[entry.ID]; ok {
 			ownedGroups.mu.Unlock()
-			return // already instantiated
+			return nil // already instantiated
 		}
 		if ownedGroups.inFlight[entry.ID] {
 			ownedGroups.mu.Unlock()
-			return // another goroutine is currently bringing this group up
+			return nil // another goroutine is currently bringing this group up
 		}
 		ownedGroups.inFlight[entry.ID] = true
 		ownedGroups.mu.Unlock()
-		// Make sure inFlight is cleared even if instantiation fails (log.Fatal
-		// below would skip this; that's acceptable since the process is dying).
+		// Make sure inFlight is cleared even if instantiation fails.
 		defer func() {
 			ownedGroups.mu.Lock()
 			delete(ownedGroups.inFlight, entry.ID)
@@ -1096,13 +1114,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			// shared path.
 			ls, lerr := raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID, storeOpts...)
 			if lerr != nil {
-				log.Fatal().Err(lerr).Str("group_id", entry.ID).Msg("OpenSharedLogStore failed")
+				return fmt.Errorf("group %s: open shared log store: %w", entry.ID, lerr)
 			}
 			glc.LogStore = ls
 		}
 		gb, err := cluster.InstantiateLocalGroup(glc, entry)
 		if err != nil {
-			log.Fatal().Err(err).Str("group_id", entry.ID).Msg("instantiateLocalGroup failed — voter status fatal")
+			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
 		}
 		gb.SetShardCache(shardCache)
 		groupRaftMux.Register(entry.ID, gb.RaftNode())
@@ -1112,19 +1130,32 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		ownedGroups.m[entry.ID] = gb
 		ownedGroups.mu.Unlock()
 		log.Info().Str("group_id", entry.ID).Strs("peers", entry.PeerIDs).Msg("instantiateLocalGroup ok")
+		return nil
 	}
 
 	// Cold-start instantiation for entries already in FSM (restart path).
-	// Run async so the apply loop is not blocked by BadgerDB+raft.Node startup.
-	go func() {
-		for _, entry := range metaRaft.FSM().ShardGroups() {
-			instantiateOwnedIfNeeded(entry)
+	// Run synchronously so Badger role failures feed the startup reducer before
+	// the server accepts traffic.
+	for _, entry := range metaRaft.FSM().ShardGroups() {
+		if err := instantiateOwnedIfNeeded(entry); err != nil {
+			recordStartupDecision(badgerrole.Decision{
+				Role:    badgerrole.RoleGroupState,
+				GroupID: entry.ID,
+				Status:  badgerrole.DecisionOpenFailed,
+				Action:  badgerrole.RecoveryActionStartReadOnly,
+				Reason:  err.Error(),
+				Err:     err,
+			})
 		}
-	}()
+	}
 	// Runtime: handle entries replayed/applied after this point (fresh boot path).
 	// Dispatch to goroutine so apply loop is not blocked by BadgerDB+raft.Node startup.
 	metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
-		go instantiateOwnedIfNeeded(entry)
+		go func() {
+			if err := instantiateOwnedIfNeeded(entry); err != nil {
+				log.Error().Err(handleRuntimeGroupInstantiationError(entry.ID, err)).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
+			}
+		}()
 	})
 
 	// Shutdown hook: close all owned groups in parallel with 5s timeout each.
@@ -1345,12 +1376,31 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		backend = pullthrough.NewBackend(backend, up)
 		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
 	}
-	recoveryReadOnly := false
+	startupResult := badgerrole.ReduceStartupDecisions(roleRegistry, startupDecisions)
+	for _, decision := range startupResult.Decisions {
+		log.Info().
+			Str("role", string(decision.Role)).
+			Str("group_id", decision.GroupID).
+			Str("status", string(decision.Status)).
+			Dur("probe_duration", decision.ProbeDuration).
+			Msg("badger role startup probe")
+	}
+	startupReadOnly := startupResult.Mode == badgerrole.StartupModeReadOnly
+	if startupResult.Mode == badgerrole.StartupModeBlocked {
+		return fmt.Errorf("badger startup recovery blocked server start: %v", startupResult.BlockedReasons)
+	}
+	recoveryReadOnly := startupReadOnly
+	if startupReadOnly {
+		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		log.Warn().Strs("reasons", startupResult.ReadOnlyReasons).Msg("badger startup recovery read-only gate enabled")
+	}
 	if marker, err := cluster.LoadRecoverClusterMarker(dataDir); err != nil {
 		return fmt.Errorf("load recovery marker: %w", err)
 	} else if marker != nil && !marker.Writable {
 		recoveryReadOnly = true
-		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		if !startupReadOnly {
+			backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
+		}
 		log.Warn().Str("marker", filepath.Join(dataDir, cluster.RecoverClusterMarkerPath)).Msg("recovered cluster write gate enabled")
 	}
 	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
@@ -1471,20 +1521,27 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	srvOpts = newSrvOpts
 	defer receiptWiring.Close()
 
-	incidentDB, err := openBadgerSubDB(dataDir, "incident-state")
+	var incidentRecorder *incident.Recorder
+	incidentDB, incidentDecision, err := badgerrole.OpenRole(roleRegistry, badgerrole.RoleIncidentState, badgerrole.PathContext{DataDir: dataDir})
 	if err != nil {
-		return fmt.Errorf("open incident db: %w", err)
+		if feature, ok := optionalRoleDisabled(roleRegistry, incidentDecision); ok {
+			logOptionalRoleDisabled(badgerrole.RoleIncidentState, feature, err)
+		} else {
+			return fmt.Errorf("open incident db: %w", err)
+		}
+	} else {
+		defer incidentDB.Close()
+		incidentVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryIncident, incidentDB)
+		defer resourcewatch.DeregisterDB(incidentVlogEntry)
+		incidentStore := badgerstore.New(incidentDB)
+		incidentRecorder = incident.NewRecorder(incidentStore, incident.NewReducer())
+		distBackend.SetIncidentRecorder(incidentRecorder)
+		srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
+		startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
+		startGoroutineResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
+		startVlogResourceMonitor(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
 	}
-	defer incidentDB.Close()
-	incidentVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryIncident, incidentDB)
-	defer resourcewatch.DeregisterDB(incidentVlogEntry)
-	incidentStore := badgerstore.New(incidentDB)
-	incidentRecorder := incident.NewRecorder(incidentStore, incident.NewReducer())
-	distBackend.SetIncidentRecorder(incidentRecorder)
-	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
-	startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
-	startGoroutineResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
-	startVlogResourceMonitor(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
+	clusterIncidentRecorder, scrubberIncidentRecorder := incidentRecorderInterfaces(incidentRecorder)
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
@@ -1514,6 +1571,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	distBackend.RegisterReadIndexHandler()
 	distBackend.RegisterProposeForwardHandler()
+
+	mutationGate := server.NewMutationGate(nil)
+	if recoveryReadOnly {
+		mutationGate.SetBlocked(storage.ErrRecoveryWriteDisabled)
+	}
+	srvOpts = append(srvOpts, server.WithMutationGate(mutationGate))
 
 	srv := server.New(addr, backend, srvOpts...)
 
@@ -1629,7 +1692,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// trigger. Independent of periodic scrub interval — operators must be
 	// able to run `grainfs volume scrub <name>` even with --scrub-interval=0.
 	director := scrubber.NewDirector(scrubber.DirectorOpts{
-		Incident:  incidentRecorder,
+		Incident:  scrubberIncidentRecorder,
 		QueueSize: 64,
 		NodeID:    nodeID,
 	})
@@ -1684,7 +1747,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		placementMonitors := newPlacementMonitorRegistry()
 		startPlacementMonitor := func(monitorCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
-			gb.SetIncidentRecorder(incidentRecorder)
+			if clusterIncidentRecorder != nil {
+				gb.SetIncidentRecorder(clusterIncidentRecorder)
+			}
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), scrubInterval)
 			splitShardKey := func(shardKey string) (string, string) {
 				objectKey, versionID := shardKey, ""
@@ -1704,7 +1769,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 					Key:           objectKey,
 					VersionID:     versionID,
 					ShardIdx:      shardIdx,
-					Recorder:      incidentRecorder,
+					Recorder:      clusterIncidentRecorder,
 					CorrelationID: correlationID,
 				}
 				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
@@ -2079,4 +2144,11 @@ func generateEphemeralClusterKey() (string, error) {
 		return "", fmt.Errorf("ephemeral cluster key: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+func handleRuntimeGroupInstantiationError(groupID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("runtime group %s instantiation failed: %w", groupID, err)
 }

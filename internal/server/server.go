@@ -89,6 +89,7 @@ type Server struct {
 	alerts         *AlertsState      // nil if alerts not wired
 	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
 	incidentStore  incident.StateStore
+	mutationGate   *MutationGate
 	degradedFlag   atomic.Bool       // true when EC degraded mode is active
 	blockCache     *blockcache.Cache // nil 또는 비활성. /api/cache/status가 노출.
 	shardCache     *shardcache.Cache // nil 또는 비활성. EC shard cache, /api/cache/status에 함께 노출.
@@ -217,6 +218,12 @@ func WithIncidentStore(store incident.StateStore) Option {
 	}
 }
 
+func WithMutationGate(gate *MutationGate) Option {
+	return func(s *Server) {
+		s.mutationGate = gate
+	}
+}
+
 // WithAlerts attaches an AlertsState (Phase 16 Week 4) so the server can
 // expose /api/admin/alerts/{status,resend} and let other components push
 // fault/healthy reports through s.Alerts().Tracker().
@@ -259,6 +266,9 @@ func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.mutationGate == nil {
+		s.mutationGate = NewMutationGate(nil)
 	}
 
 	// Wire degradedFlag into the AlertsState tracker so it stays in sync with

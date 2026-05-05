@@ -3,14 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/receipt"
@@ -49,20 +48,11 @@ func (w *healReceiptWiring) Close() {
 	}
 }
 
-func openBadgerSubDB(dataDir, name string) (*badger.DB, error) {
-	dir := filepath.Join(dataDir, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create %s dir: %w", name, err)
-	}
-	opts := receiptDBOptions(dir)
-	return badger.Open(opts)
-}
-
 // openReceiptDB opens the dedicated BadgerDB under dataDir/receipts.
 // Kept separate from the meta DB so retention GC can run on receipt keys
 // without touching cluster metadata.
-func openReceiptDB(dataDir string) (*badger.DB, error) {
-	return openBadgerSubDB(dataDir, "receipts")
+func openReceiptDB(dataDir string) (*badger.DB, badgerrole.Decision, error) {
+	return badgerrole.OpenRole(badgerrole.DefaultRegistry(), badgerrole.RoleReceipts, badgerrole.PathContext{DataDir: dataDir})
 }
 
 func receiptDBOptions(dir string) badger.Options {
@@ -106,8 +96,12 @@ func setupClusterReceipt(
 	gossipInterval, _ := cmd.Flags().GetDuration("heal-receipt-gossip-interval")
 	windowSize, _ := cmd.Flags().GetInt("heal-receipt-window")
 
-	db, err := openReceiptDB(dataDir)
+	db, decision, err := openReceiptDB(dataDir)
 	if err != nil {
+		if feature, ok := optionalRoleDisabled(badgerrole.DefaultRegistry(), decision); ok {
+			logOptionalRoleDisabled(badgerrole.RoleReceipts, feature, err)
+			return opts, nil, nil
+		}
 		return opts, nil, fmt.Errorf("open receipt db: %w", err)
 	}
 	vlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryReceipts, db)
