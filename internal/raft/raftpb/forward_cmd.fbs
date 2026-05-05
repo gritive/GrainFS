@@ -20,7 +20,34 @@ enum ForwardOp : byte {
   AbortMultipartUpload = 10,
   GetObjectVersion = 11,
   DeleteObjectVersion = 12,
-  ListObjectVersions = 13
+  ListObjectVersions = 13,
+  ScrubSessionStat = 14
+}
+
+table ScrubSessionStatArgs {
+  session_id:string;
+}
+
+// ScrubSessionStatReply is per-peer scrub session stat for cluster-wide
+// aggregation in admin GET /v1/scrub/jobs/<id>. found=false when this peer
+// has no session for the given ID (expected on nodes where the resolver
+// returned (nil, false)).
+table ScrubSessionStatReply {
+  found:bool;
+  bucket:string;
+  key_prefix:string;
+  scope:int;
+  dry_run:bool;
+  status:string;       // running | done | cancelled
+  started_at:long;
+  done_at:long;        // 0 if running
+  checked:long;
+  healthy:long;
+  detected:long;
+  repaired:long;
+  unrepairable:long;
+  skipped:long;
+  owned_here:bool;     // this peer actually walked a group's DB (Stats.Checked > 0)
 }
 
 table PutObjectArgs {
@@ -158,6 +185,7 @@ table ForwardReply {
   upload:ForwardMultipartUploadMeta; // CreateMultipartUpload
   part:ForwardPartMeta;              // UploadPart
   versions:[ForwardObjectVersionMeta]; // ListObjectVersions
+  scrub_session:ScrubSessionStatReply; // ScrubSessionStat
 }
 
 root_type ForwardReply;

@@ -174,8 +174,21 @@ func (rcv *ForwardReply) VersionsLength() int {
 	return 0
 }
 
+func (rcv *ForwardReply) ScrubSession(obj *ScrubSessionStatReply) *ScrubSessionStatReply {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(ScrubSessionStatReply)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
 func ForwardReplyStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func ForwardReplyAddStatus(builder *flatbuffers.Builder, status ForwardStatus) {
 	builder.PrependInt8Slot(0, int8(status), 0)
@@ -209,6 +222,9 @@ func ForwardReplyAddVersions(builder *flatbuffers.Builder, versions flatbuffers.
 }
 func ForwardReplyStartVersionsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func ForwardReplyAddScrubSession(builder *flatbuffers.Builder, scrubSession flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(scrubSession), 0)
 }
 func ForwardReplyEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
