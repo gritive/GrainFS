@@ -342,7 +342,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		acl := s3auth.ParseACLHeader(aclHeader)
 		obj, putErr = s.ops.PutObjectWithACL(ctx, bucket, key, body, contentType, uint8(acl))
 	} else {
-		obj, putErr = s.backend.PutObject(ctx, bucket, key, body, contentType)
+		obj, putErr = s.ops.PutObject(ctx, bucket, key, body, contentType)
 	}
 	if putErr != nil {
 		mapError(c, putErr)
@@ -809,7 +809,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	defer file.Close()
 
-	obj, err := s.backend.PutObject(ctx, bucket, key, file, contentType)
+	obj, err := s.ops.PutObject(ctx, bucket, key, file, contentType)
 	if err != nil {
 		mapError(c, err)
 		return

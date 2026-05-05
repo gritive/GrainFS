@@ -58,6 +58,31 @@ func TestOperationsRefreshesPlanAfterNestedSwappableBackendSwap(t *testing.T) {
 	require.Equal(t, []string{"setacl:b/k:7"}, backend.calls)
 }
 
+func TestOperationsPutObjectDelegatesToBackend(t *testing.T) {
+	backend := &recordingPutBackend{}
+	ops := NewOperations(backend)
+
+	obj, err := ops.PutObject(context.Background(), "b", "k", strings.NewReader("data"), "text/plain")
+
+	require.NoError(t, err)
+	require.Equal(t, "put", obj.ETag)
+	require.Equal(t, "b/k:text/plain:data", backend.putCall)
+}
+
+type recordingPutBackend struct {
+	basicBackend
+	putCall string
+}
+
+func (b *recordingPutBackend) PutObject(_ context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	b.putCall = bucket + "/" + key + ":" + contentType + ":" + string(data)
+	return &Object{Key: key, ETag: "put", Size: int64(len(data)), ContentType: contentType}, nil
+}
+
 type dynamicACLBackend struct {
 	basicBackend
 	calls []string
