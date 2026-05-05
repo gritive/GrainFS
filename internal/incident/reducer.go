@@ -175,6 +175,17 @@ func nextActionForFailure(cause Cause, code string) string {
 			return "Inspect goroutine pprof dump for unexpected blocked or leaking goroutines on this node."
 		}
 	}
+	if cause == CauseVlogPressure {
+		switch code {
+		case "vlog_critical":
+			return "Critical BadgerDB vlog usage: inspect breakdown endpoint to find dominant category, run vlog GC manually if ticker is throttled, expand disk capacity or trim retention before vlog crowds out blob storage."
+		default:
+			return "Investigate which BadgerDB category dominates vlog (admin breakdown endpoint), tune RunValueLogGC discardRatio, or expand disk."
+		}
+	}
+	if cause == CauseBadgerGCFailed {
+		return "BadgerDB vlog GC failing: inspect logs for the affected category, check disk space and file permissions; persistent failure prevents vlog reclaim."
+	}
 	switch code {
 	case "insufficient_survivors":
 		return "Restore a peer or recover from backup before retrying repair."

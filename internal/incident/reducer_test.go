@@ -183,7 +183,7 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantNext:   "RegisterDB",
 		},
 		{
-			name: "badger gc failed blocks with pprof-equivalent guidance",
+			name: "badger gc failed blocks with vlog reclaim guidance",
 			facts: []Fact{
 				{CorrelationID: "gc-node-1", Type: FactObserved, Cause: CauseBadgerGCFailed, Scope: Scope{Kind: ScopeNode, NodeID: "node-1"}, At: now},
 				{CorrelationID: "gc-node-1", Type: FactActionFailed, Cause: CauseBadgerGCFailed, ErrorCode: "gc_failed", Message: "RunValueLogGC failed 3 times", At: now.Add(time.Millisecond)},
@@ -193,7 +193,20 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantAction: "",
 			wantProof:  ProofNotRequired,
 			wantSev:    SeverityCritical,
-			wantNext:   "Inspect repair logs",
+			wantNext:   "vlog reclaim",
+		},
+		{
+			name: "vlog critical failure blocks with breakdown guidance",
+			facts: []Fact{
+				{CorrelationID: "vlog-node-2", Type: FactObserved, Cause: CauseVlogPressure, Scope: Scope{Kind: ScopeNode, NodeID: "node-2"}, At: now},
+				{CorrelationID: "vlog-node-2", Type: FactActionFailed, Cause: CauseVlogPressure, Action: ActionResourceWarning, ErrorCode: "vlog_critical", Message: "vlog ratio 0.71/0.70", At: now.Add(time.Millisecond)},
+			},
+			wantState:  StateBlocked,
+			wantCause:  CauseVlogPressure,
+			wantAction: ActionResourceWarning,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityCritical,
+			wantNext:   "Critical BadgerDB vlog usage",
 		},
 	}
 

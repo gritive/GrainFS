@@ -319,7 +319,7 @@ func TestRecordBadgerGCFailedIncident_FiresOnce(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, incident.CauseBadgerGCFailed, got.Cause)
 	assert.Equal(t, incident.StateBlocked, got.State)
-	assert.Contains(t, got.NextAction, "Inspect repair logs")
+	assert.Contains(t, got.NextAction, "vlog reclaim")
 }
 
 func TestRecordSmokeUnderPopulatedIncident_FiresWithLiveList(t *testing.T) {
