@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.48.2] — 2026-05-06 — Volume CLI flag dedup
+
+### Changed
+
+- **`grainfs volume` 공통 flag 통합** — 18개 서브커맨드(list/create/info/stat/
+  delete/resize/recalculate/clone/rollback/write-at/read-at/snapshot {create,
+  list,delete}/scrub {trigger,status,list,cancel})에 반복 등록되던
+  `--endpoint`/`--data`/`--json`/`--bytes`/`--raw` 5개 flag를
+  `volumeCmd.PersistentFlags()`로 일괄 이동. Cobra가 자식 명령에 자동
+  상속하므로 사용자 입력은 그대로 동작하고, `volume {sub} --help` 출력에서
+  공통 flag가 Global Flags 섹션에 묶여 가독성이 향상된다.
+
 ## [0.0.48.1] — 2026-05-06 — Multi-raft restart e2e timeout fix
 
 ### Fixed
