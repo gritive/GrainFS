@@ -156,6 +156,45 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantSev:    SeverityInfo,
 			wantNext:   "No action needed.",
 		},
+		{
+			name: "vlog pressure warning diagnosed with breakdown next action",
+			facts: []Fact{
+				{CorrelationID: "vlog-node-1", Type: FactObserved, Cause: CauseVlogPressure, Scope: Scope{Kind: ScopeNode, NodeID: "node-1"}, Message: "vlog ratio 0.41/0.40", At: now},
+				{CorrelationID: "vlog-node-1", Type: FactDiagnosed, Cause: CauseVlogPressure, Message: "vlog ratio 0.41/0.40", At: now.Add(time.Millisecond)},
+			},
+			wantState:  StateDiagnosed,
+			wantCause:  CauseVlogPressure,
+			wantAction: ActionResourceWarning,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityWarning,
+			wantNext:   "BadgerDB category",
+		},
+		{
+			name: "registry under-populated diagnosed",
+			facts: []Fact{
+				{CorrelationID: "smoke-node-1", Type: FactObserved, Cause: CauseRegistryUnderPopulated, Scope: Scope{Kind: ScopeNode, NodeID: "node-1"}, At: now},
+				{CorrelationID: "smoke-node-1", Type: FactDiagnosed, Cause: CauseRegistryUnderPopulated, Message: "vlog smoke detected unregistered DB dirs", At: now.Add(time.Millisecond)},
+			},
+			wantState:  StateDiagnosed,
+			wantCause:  CauseRegistryUnderPopulated,
+			wantAction: ActionResourceWarning,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityWarning,
+			wantNext:   "RegisterDB",
+		},
+		{
+			name: "badger gc failed blocks with pprof-equivalent guidance",
+			facts: []Fact{
+				{CorrelationID: "gc-node-1", Type: FactObserved, Cause: CauseBadgerGCFailed, Scope: Scope{Kind: ScopeNode, NodeID: "node-1"}, At: now},
+				{CorrelationID: "gc-node-1", Type: FactActionFailed, Cause: CauseBadgerGCFailed, ErrorCode: "gc_failed", Message: "RunValueLogGC failed 3 times", At: now.Add(time.Millisecond)},
+			},
+			wantState:  StateBlocked,
+			wantCause:  CauseBadgerGCFailed,
+			wantAction: "",
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityCritical,
+			wantNext:   "Inspect repair logs",
+		},
 	}
 
 	for _, tt := range tests {
