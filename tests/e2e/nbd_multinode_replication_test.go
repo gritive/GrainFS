@@ -39,12 +39,9 @@ func TestE2E_NBDMultiNode_ByteLevelReplication(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Cold-start: peer connections may not be fully warm. Wait past the 10s
-	// peerHealth cooldown so the NBD-driven block write replicates cleanly
-	// on first try (mirrors TestE2E_VolumeScrub_MultiNodeRepair).
-	t.Log("waiting 12s for peer connections to warm up")
-	time.Sleep(12 * time.Second)
-
+	// Cold-start QUIC handshake races used to flap peers into cooldown on first
+	// write. Absorbed product-side by writeSpooledReplicaShardStream's bounded
+	// retry (3 attempts, 100ms backoff) — no test-side sleep needed.
 	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
 	defer client.Close()
 
