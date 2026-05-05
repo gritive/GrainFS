@@ -127,6 +127,16 @@ type BadgerLogStore struct {
 // IsManagedMode reports whether this store was opened with managed mode.
 func (s *BadgerLogStore) IsManagedMode() bool { return s.managedMode }
 
+// DB returns the underlying BadgerDB handle. Used by callers that need to
+// register the DB with resourcewatch (vlog watcher) — only meaningful for
+// non-shared stores; shared stores return the externally-managed handle.
+func (s *BadgerLogStore) DB() *badger.DB { return s.db }
+
+// IsShared reports whether this store wraps an externally-managed DB. Callers
+// MUST NOT register a shared store's DB — it is owned and registered by the
+// caller that created it.
+func (s *BadgerLogStore) IsShared() bool { return s.shared }
+
 // withPrefix returns prefix||key (or key as-is when prefix is empty).
 func (s *BadgerLogStore) withPrefix(key []byte) []byte {
 	if len(s.prefix) == 0 {

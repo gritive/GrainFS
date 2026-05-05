@@ -50,6 +50,14 @@ func (Reducer) Reduce(facts []Fact) (IncidentState, error) {
 				state.Action = ActionResourceWarning
 				state.NextAction = "Capture goroutine pprof dump and inspect for blocked or leaking goroutines on this node."
 			}
+			if state.Cause == CauseVlogPressure {
+				state.Action = ActionResourceWarning
+				state.NextAction = "Investigate which BadgerDB category dominates vlog (admin breakdown endpoint), tune RunValueLogGC discardRatio, or expand disk."
+			}
+			if state.Cause == CauseRegistryUnderPopulated {
+				state.Action = ActionResourceWarning
+				state.NextAction = "vlog smoke detected unregistered DB dirs; verify all production badger.Open call sites call resourcewatch.RegisterDB."
+			}
 		case FactActionStarted:
 			state.State = StateActing
 			state.Action = fact.Action
@@ -83,7 +91,7 @@ func (Reducer) Reduce(facts []Fact) (IncidentState, error) {
 			if fact.Action != "" {
 				state.Action = fact.Action
 			}
-			if state.Action == "" && (state.Cause == CauseFDExhaustionRisk || state.Cause == CauseGoroutineRunaway) {
+			if state.Action == "" && (state.Cause == CauseFDExhaustionRisk || state.Cause == CauseGoroutineRunaway || state.Cause == CauseVlogPressure || state.Cause == CauseRegistryUnderPopulated) {
 				state.Action = ActionResourceWarning
 			}
 			state.Severity = SeverityInfo
@@ -114,7 +122,7 @@ func defaultStateFor(first Fact) IncidentState {
 		ObservedAt: first.At,
 		UpdatedAt:  first.At,
 	}
-	if first.Cause == CauseFDExhaustionRisk || first.Cause == CauseGoroutineRunaway {
+	if first.Cause == CauseFDExhaustionRisk || first.Cause == CauseGoroutineRunaway || first.Cause == CauseVlogPressure || first.Cause == CauseRegistryUnderPopulated {
 		state.Action = ActionResourceWarning
 	}
 	return state
@@ -126,6 +134,12 @@ func defaultNextAction(cause Cause) string {
 		return "Inspect connection growth and open file usage on this node."
 	case CauseGoroutineRunaway:
 		return "Capture goroutine pprof dump and inspect for blocked or leaking goroutines on this node."
+	case CauseVlogPressure:
+		return "Investigate which BadgerDB category dominates vlog (admin breakdown endpoint), tune RunValueLogGC discardRatio, or expand disk."
+	case CauseBadgerGCFailed:
+		return "BadgerDB vlog GC failing: inspect logs for the affected category, check disk space and file permissions; persistent failure prevents vlog reclaim."
+	case CauseRegistryUnderPopulated:
+		return "vlog smoke detected unregistered DB dirs; verify all production badger.Open call sites call resourcewatch.RegisterDB."
 	default:
 		return "Watch for automatic repair."
 	}
@@ -160,6 +174,17 @@ func nextActionForFailure(cause Cause, code string) string {
 		default:
 			return "Inspect goroutine pprof dump for unexpected blocked or leaking goroutines on this node."
 		}
+	}
+	if cause == CauseVlogPressure {
+		switch code {
+		case "vlog_critical":
+			return "Critical BadgerDB vlog usage: inspect breakdown endpoint to find dominant category, run vlog GC manually if ticker is throttled, expand disk capacity or trim retention before vlog crowds out blob storage."
+		default:
+			return "Investigate which BadgerDB category dominates vlog (admin breakdown endpoint), tune RunValueLogGC discardRatio, or expand disk."
+		}
+	}
+	if cause == CauseBadgerGCFailed {
+		return "BadgerDB vlog GC failing: inspect logs for the affected category, check disk space and file permissions; persistent failure prevents vlog reclaim."
 	}
 	switch code {
 	case "insufficient_survivors":

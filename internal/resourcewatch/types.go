@@ -42,6 +42,9 @@ type DetectorConfig struct {
 	MinSamples        int
 	MaxSamples        int
 	ClassificationCap int
+	// ResourceLabel prefixes Decision.Message (e.g. "FD", "vlog", "goroutine").
+	// Empty falls back to "resource" — historical default was "FD" hardcoded.
+	ResourceLabel string
 }
 
 type Decision struct {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/resourcewatch"
 )
 
 // errShutdownTimeout signals snapshot/close did not finish within the configured
@@ -102,6 +103,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if err != nil {
 		return nil, fmt.Errorf("group %s: open badger: %w", entry.ID, err)
 	}
+	groupVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryGroupRaft, db)
 
 	// peers = all PeerIDs except self
 	peers := make([]string, 0, len(entry.PeerIDs))
@@ -124,6 +126,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 		raftDir := filepath.Join(groupDir, "raft")
 		ls, lerr := raft.NewBadgerLogStore(raftDir)
 		if lerr != nil {
+			resourcewatch.DeregisterDB(groupVlogEntry)
 			_ = db.Close()
 			return nil, fmt.Errorf("group %s: open raft log store: %w", entry.ID, lerr)
 		}
@@ -161,17 +164,19 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	}
 
 	gb, err := NewGroupBackend(GroupBackendConfig{
-		ID:       entry.ID,
-		Root:     groupDir,
-		DB:       db,
-		Node:     node,
-		LogStore: logStore,
-		ShardSvc: cfg.ShardSvc,
-		PeerIDs:  peerIDsSelfFirst,
-		EC:       cfg.EC,
+		ID:        entry.ID,
+		Root:      groupDir,
+		DB:        db,
+		Node:      node,
+		LogStore:  logStore,
+		VlogEntry: groupVlogEntry,
+		ShardSvc:  cfg.ShardSvc,
+		PeerIDs:   peerIDsSelfFirst,
+		EC:        cfg.EC,
 	})
 	if err != nil {
 		node.Close()
+		resourcewatch.DeregisterDB(groupVlogEntry)
 		_ = db.Close()
 		return nil, fmt.Errorf("group %s: NewGroupBackend: %w", entry.ID, err)
 	}

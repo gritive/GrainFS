@@ -28,11 +28,14 @@ const (
 type Cause string
 
 const (
-	CauseMissingShard     Cause = "missing_shard"
-	CauseCorruptShard     Cause = "corrupt_shard"
-	CauseCorruptBlob      Cause = "corrupt_blob"
-	CauseFDExhaustionRisk Cause = "fd_exhaustion_risk"
-	CauseGoroutineRunaway Cause = "goroutine_runaway"
+	CauseMissingShard           Cause = "missing_shard"
+	CauseCorruptShard           Cause = "corrupt_shard"
+	CauseCorruptBlob            Cause = "corrupt_blob"
+	CauseFDExhaustionRisk       Cause = "fd_exhaustion_risk"
+	CauseGoroutineRunaway       Cause = "goroutine_runaway"
+	CauseVlogPressure           Cause = "vlog_pressure"
+	CauseBadgerGCFailed         Cause = "badger_gc_failed"
+	CauseRegistryUnderPopulated Cause = "registry_under_populated"
 )
 
 type Action string

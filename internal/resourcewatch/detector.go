@@ -36,6 +36,9 @@ func NewDetector(cfg DetectorConfig) *Detector {
 	if cfg.ClassificationCap == 0 {
 		cfg.ClassificationCap = 512
 	}
+	if cfg.ResourceLabel == "" {
+		cfg.ResourceLabel = "resource"
+	}
 	return &Detector{cfg: cfg, lastLevel: LevelOK}
 }
 
@@ -128,7 +131,7 @@ func (d *Detector) decision(sample Sample, level Level, threshold string, eta ti
 		categories[category] = count
 	}
 
-	message := fmt.Sprintf("FD usage %.1f%% (%d/%d)", ratio*100, sample.Open, sample.Limit)
+	message := fmt.Sprintf("%s usage %.1f%% (%d/%d)", d.cfg.ResourceLabel, ratio*100, sample.Open, sample.Limit)
 	switch {
 	case level == LevelOK:
 		message = fmt.Sprintf("%s recovered below warning threshold", message)

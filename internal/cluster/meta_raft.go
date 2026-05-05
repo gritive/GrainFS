@@ -13,6 +13,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/resourcewatch"
 )
 
 // Meta-raft timing is fixed (not driven by --raft-heartbeat-interval, which
@@ -41,13 +42,14 @@ type MetaRaftConfig struct {
 
 // MetaRaft wraps a raft.Node dedicated to cluster control-plane operations.
 type MetaRaft struct {
-	node    *raft.Node
-	store   *raft.BadgerLogStore
-	snapMgr *raft.SnapshotManager
-	fsm     *MetaFSM
-	cfg     MetaRaftConfig
-	cancel  context.CancelFunc
-	done    chan struct{}
+	node      *raft.Node
+	store     *raft.BadgerLogStore
+	vlogEntry *resourcewatch.RegisteredDB
+	snapMgr   *raft.SnapshotManager
+	fsm       *MetaFSM
+	cfg       MetaRaftConfig
+	cancel    context.CancelFunc
+	done      chan struct{}
 
 	// lastApplied is read atomically from waitApplied (hot path).
 	// applyNotifyMu protects applyNotify channel swaps only.
@@ -67,6 +69,10 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	store, err := raft.NewBadgerLogStore(storePath)
 	if err != nil {
 		return nil, fmt.Errorf("meta_raft: open store: %w", err)
+	}
+	var vlogEntry *resourcewatch.RegisteredDB
+	if !store.IsShared() && store.DB() != nil {
+		vlogEntry = resourcewatch.RegisterDB(resourcewatch.DBCategoryMeta, store.DB())
 	}
 
 	fsm := NewMetaFSM()
@@ -91,6 +97,7 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	m := &MetaRaft{
 		node:           node,
 		store:          store,
+		vlogEntry:      vlogEntry,
 		snapMgr:        snapMgr,
 		fsm:            fsm,
 		cfg:            cfg,
@@ -162,6 +169,9 @@ func (m *MetaRaft) Close() error {
 		<-m.done
 	} else {
 		m.node.Close()
+	}
+	if m.vlogEntry != nil {
+		resourcewatch.DeregisterDB(m.vlogEntry)
 	}
 	return m.store.Close()
 }

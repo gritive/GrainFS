@@ -39,6 +39,7 @@ import (
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/receipt"
+	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
@@ -218,6 +219,16 @@ func init() {
 	serveCmd.Flags().Duration("goroutine-poll-interval", 30*time.Second, "polling interval for goroutine count sampling")
 	serveCmd.Flags().Duration("goroutine-eta-window", 30*time.Minute, "ETA projection window for predictive goroutine warnings")
 	serveCmd.Flags().Duration("goroutine-recovery-window", time.Minute, "minimum time below warn threshold before transitioning to ok")
+	serveCmd.Flags().Bool("vlog-watch-enabled", true, "enable BadgerDB vlog watcher (PR2)")
+	serveCmd.Flags().Float64("vlog-warn-ratio", 0.4, "vlog/disk ratio that fires warn (transition-only)")
+	serveCmd.Flags().Float64("vlog-critical-ratio", 0.7, "vlog/disk ratio that fires critical")
+	serveCmd.Flags().Duration("vlog-poll-interval", 60*time.Second, "vlog watcher sampling cadence")
+	serveCmd.Flags().Duration("vlog-eta-window", 30*time.Minute, "ETA projection window for vlog warnings")
+	serveCmd.Flags().Duration("vlog-recovery-window", 5*time.Minute, "minimum time below warn ratio before transitioning to ok")
+	serveCmd.Flags().Duration("badger-gc-interval", 5*time.Minute, "BadgerDB vlog GC ticker cadence")
+	serveCmd.Flags().Bool("badger-gc-disable", false, "disable BadgerDB vlog GC ticker (debug only)")
+	serveCmd.Flags().Int32("badger-gc-fail-threshold", 3, "consecutive RunValueLogGC failures before incident")
+	serveCmd.Flags().Bool("strict-vlog-registry", false, "fatal on vlog registry smoke mismatch (e2e: true)")
 	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
 	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
 	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
@@ -518,6 +529,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("open metadata db at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK), see README#badger-troubleshooting", metaDir, err, metaDir)
 	}
 	defer db.Close()
+	metaVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryMeta, db)
+	defer resourcewatch.DeregisterDB(metaVlogEntry)
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
 	if err := server.PreflightBadger(db, metaDir, nil); err != nil {
 		return err
@@ -553,6 +566,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", raftDir, err, raftDir)
 	}
 	defer logStore.Close()
+	if !logStore.IsShared() && logStore.DB() != nil {
+		raftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, logStore.DB())
+		defer resourcewatch.DeregisterDB(raftLogVlogEntry)
+	}
 
 	// C2 P0b prototype: optionally open one shared raft-log BadgerDB so all
 	// data groups share a single instance instead of opening their own. Reduces
@@ -590,6 +607,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			return fmt.Errorf("open shared raft-log badger at %s: %w", sharedDir, err)
 		}
 		defer sharedRaftLogDB.Close()
+		sharedRaftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, sharedRaftLogDB)
+		defer resourcewatch.DeregisterDB(sharedRaftLogVlogEntry)
 		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
 	}
 
@@ -1315,12 +1334,15 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("open incident db: %w", err)
 	}
 	defer incidentDB.Close()
+	incidentVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryIncident, incidentDB)
+	defer resourcewatch.DeregisterDB(incidentVlogEntry)
 	incidentStore := badgerstore.New(incidentDB)
 	incidentRecorder := incident.NewRecorder(incidentStore, incident.NewReducer())
 	distBackend.SetIncidentRecorder(incidentRecorder)
 	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
 	startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
 	startGoroutineResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
+	startVlogResourceMonitor(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
@@ -1339,6 +1361,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	if dedupDB != nil {
 		defer dedupDB.Close()
+		dedupVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryDedup, dedupDB)
+		defer resourcewatch.DeregisterDB(dedupVlogEntry)
 	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
 	if !joinMode {
