@@ -76,6 +76,7 @@ func registerSnapshot(g router, d *Deps) {
 
 func registerScrub(g router, d *Deps) {
 	g.POST("/volumes/:name/scrub", scrubVolumeHandler(d))
+	g.POST("/scrub", wrapBody[ScrubReq, ScrubResp](d, TriggerScrub))
 	g.GET("/scrub/jobs", wrapZero(d, ListScrubJobs))
 	g.GET("/scrub/jobs/:id", scrubJobByIDHandler(d, GetScrubJob))
 	g.DELETE("/scrub/jobs/:id", scrubJobCancelHandler(d))

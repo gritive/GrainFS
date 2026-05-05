@@ -23,6 +23,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"golang.org/x/time/rate"
 
 	"github.com/rs/zerolog/log"
 
@@ -92,6 +93,71 @@ type replicaRepairerFunc func(ctx context.Context, bucket, key string) error
 
 func (f replicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key string) error {
 	return f(ctx, bucket, key)
+}
+
+// scrubProposerAdapter implements admin.ScrubProposer over MetaRaft. The
+// adapter does a leader-side dedup pre-check so duplicate triggers don't
+// consume a fresh raft entry per call.
+type scrubProposerAdapter struct {
+	metaRaft *cluster.MetaRaft
+	director *scrubber.Director
+	nodeID   string
+}
+
+func (a *scrubProposerAdapter) Propose(ctx context.Context, req scrubber.TriggerReq) (scrubber.ScrubTriggerEntry, bool, error) {
+	if existing, ok := a.director.LookupDedup(req); ok {
+		return existing, false, nil
+	}
+	entry := scrubber.ScrubTriggerEntry{
+		SessionID:        uuid.NewString(),
+		Bucket:           req.Bucket,
+		KeyPrefix:        req.KeyPrefix,
+		Scope:            req.Scope,
+		DryRun:           req.DryRun,
+		RequestedAt:      time.Now().Unix(),
+		OriginatorNodeID: a.nodeID,
+	}
+	return entry, true, a.metaRaft.ProposeScrubTrigger(ctx, entry)
+}
+
+// scrubAggregatorAdapter implements admin.ScrubAggregator over
+// ClusterCoordinator's per-peer fan-out RPC.
+type scrubAggregatorAdapter struct {
+	coord *cluster.ClusterCoordinator
+}
+
+func (a *scrubAggregatorAdapter) Peers(ctx context.Context, sessionID string) ([]admin.ScrubJobInfo, []string, error) {
+	if a.coord == nil {
+		return nil, nil, nil
+	}
+	stats, failures, err := a.coord.ScrubSessionStat(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	infos := make([]admin.ScrubJobInfo, 0, len(stats))
+	for _, s := range stats {
+		scope := "full"
+		if s.Scope == int32(scrubber.ScopeLive) {
+			scope = "live"
+		}
+		infos = append(infos, admin.ScrubJobInfo{
+			Bucket:       s.Bucket,
+			KeyPrefix:    s.KeyPrefix,
+			Scope:        scope,
+			DryRun:       s.DryRun,
+			Status:       s.Status,
+			StartedAt:    s.StartedAt,
+			DoneAt:       s.DoneAt,
+			Checked:      s.Checked,
+			Healthy:      s.Healthy,
+			Detected:     s.Detected,
+			Repaired:     s.Repaired,
+			Unrepairable: s.Unrepairable,
+			Skipped:      s.Skipped,
+			OwnedHere:    s.OwnedHere,
+		})
+	}
+	return infos, failures, nil
 }
 
 // vlogBreakdownAdapter implements admin.VlogBreakdownAPI for the
@@ -1568,8 +1634,45 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		NodeID:    nodeID,
 	})
 	director.Register("replication", replSource, replVerifier)
+
+	// PR4: EC scrub source via per-bucket group resolver. The resolver maps
+	// bucket → DataGroup → GroupBackend (which embeds *DistributedBackend so
+	// it implements scrubber.Scrubbable). When the bucket lives on a peer-
+	// owned group, the resolver returns (nil, false) and Iter closes an
+	// empty channel; the FSM-replicated trigger ensures the owning peer's
+	// Director runs the actual scrub.
+	ecResolver := func(bucket string) (scrubber.Scrubbable, bool) {
+		dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
+		if !ok || dg == nil {
+			return nil, false
+		}
+		gb := dg.Backend()
+		if gb == nil {
+			return nil, false
+		}
+		return gb, true
+	}
+	ecSource := scrubber.NewECScrubSource(ecResolver, nodeID)
+	ecScrubVerifier := scrubber.NewShardVerifier(distBackend)
+	ecScrubLimiter := rate.NewLimiter(rate.Limit(100), 100)
+	ecVerifier := scrubber.NewECScrubVerifier(distBackend, ecScrubVerifier, ecScrubLimiter, activeEmitter, nodeID, ecSource)
+	director.Register("ec", ecSource, ecVerifier)
+
+	// PR4: cluster-wide scrub trigger via meta-raft. Each node's MetaFSM
+	// fires onScrubTrigger when MetaScrubTriggerCmd applies; Director.ApplyFromFSM
+	// creates a session for the same SessionID and runs the source with the
+	// resolver above.
+	if metaRaft != nil {
+		metaRaft.FSM().SetOnScrubTrigger(func(entry scrubber.ScrubTriggerEntry) {
+			director.ApplyFromFSM(entry)
+		})
+	}
+	forwardReceiver.WithScrubSessionLookup(director)
+
 	director.Start(ctx)
 	adminDeps.Director = director
+	adminDeps.ScrubProposer = &scrubProposerAdapter{metaRaft: metaRaft, director: director, nodeID: nodeID}
+	adminDeps.ScrubAggregator = &scrubAggregatorAdapter{coord: clusterCoord}
 
 	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
 	if scrubInterval > 0 {

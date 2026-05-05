@@ -59,3 +59,21 @@ func TestDirector_ApplyFromFSM_Nonblocking(t *testing.T) {
 		return src.calls.Load() >= 1
 	}, 2*time.Second, 50*time.Millisecond)
 }
+
+func TestDirector_LookupDedup_Hit(t *testing.T) {
+	d := NewDirector(DirectorOpts{NodeID: "n1"})
+	id, created := d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
+	require.NotEmpty(t, id)
+	require.True(t, created)
+
+	got, ok := d.LookupDedup(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
+	require.True(t, ok)
+	require.Equal(t, id, got.SessionID)
+	require.Equal(t, "b1", got.Bucket)
+}
+
+func TestDirector_LookupDedup_Miss(t *testing.T) {
+	d := NewDirector(DirectorOpts{NodeID: "n1"})
+	_, ok := d.LookupDedup(TriggerReq{Bucket: "ghost", Scope: ScopeFull})
+	require.False(t, ok)
+}

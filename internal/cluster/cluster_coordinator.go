@@ -6,6 +6,10 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"sync"
+	"time"
+
+	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -1022,3 +1026,155 @@ var (
 	_ storage.PartialIO   = (*ClusterCoordinator)(nil)
 	_ storage.Truncatable = (*ClusterCoordinator)(nil)
 )
+
+// ScrubPeerStat is the cluster-package-local snapshot of one peer's scrub
+// session state. Returned by ScrubSessionStat fan-out; serve.go's adapter
+// converts to admin.ScrubJobInfo so cluster does not import admin.
+type ScrubPeerStat struct {
+	Bucket       string
+	KeyPrefix    string
+	Scope        int32 // 0=full, 1=live (matches scrubber.ScrubScope)
+	DryRun       bool
+	Status       string
+	StartedAt    int64
+	DoneAt       int64
+	Checked      int64
+	Healthy      int64
+	Detected     int64
+	Repaired     int64
+	Unrepairable int64
+	Skipped      int64
+	OwnedHere    bool
+}
+
+// ScrubSessionStat fans out a ScrubSessionStat RPC to every peer in the
+// cluster (excluding self), aggregating per-peer scrub stats for cluster-wide
+// admin GET /v1/scrub/jobs/<id>. Each peer call has a 5s timeout; failures
+// are returned as the second slice so admin can flag partial=true.
+func (c *ClusterCoordinator) ScrubSessionStat(ctx context.Context, sessionID string) ([]ScrubPeerStat, []string, error) {
+	if c.forward == nil || c.addr == nil {
+		return nil, nil, nil
+	}
+	nodes := c.addr.Nodes()
+	if len(nodes) <= 1 {
+		return nil, nil, nil
+	}
+	args := buildScrubSessionStatArgs(sessionID)
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		infos    []ScrubPeerStat
+		failures []string
+	)
+	for _, n := range nodes {
+		if c.isSelfPeer(n.ID) {
+			continue
+		}
+		wg.Add(1)
+		go func(node MetaNodeEntry) {
+			defer wg.Done()
+			peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			reply, err := c.forward.Send(peerCtx, []string{node.Address}, "", raftpb.ForwardOpScrubSessionStat, args)
+			if err != nil {
+				mu.Lock()
+				failures = append(failures, node.ID)
+				mu.Unlock()
+				return
+			}
+			info, ok := decodeScrubSessionStatReply(reply)
+			if !ok {
+				mu.Lock()
+				failures = append(failures, node.ID)
+				mu.Unlock()
+				return
+			}
+			if !info.found {
+				return
+			}
+			mu.Lock()
+			infos = append(infos, info.toPeerStat())
+			mu.Unlock()
+		}(n)
+	}
+	wg.Wait()
+	return infos, failures, nil
+}
+
+func buildScrubSessionStatArgs(sessionID string) []byte {
+	b := flatbuffers.NewBuilder(64)
+	sidOff := b.CreateString(sessionID)
+	raftpb.ScrubSessionStatArgsStart(b)
+	raftpb.ScrubSessionStatArgsAddSessionId(b, sidOff)
+	b.Finish(raftpb.ScrubSessionStatArgsEnd(b))
+	return b.FinishedBytes()
+}
+
+type scrubSessionStatDecoded struct {
+	found        bool
+	bucket       string
+	keyPrefix    string
+	scope        int32
+	dryRun       bool
+	status       string
+	startedAt    int64
+	doneAt       int64
+	checked      int64
+	healthy      int64
+	detected     int64
+	repaired     int64
+	unrepairable int64
+	skipped      int64
+	ownedHere    bool
+}
+
+func (d scrubSessionStatDecoded) toPeerStat() ScrubPeerStat {
+	return ScrubPeerStat{
+		Bucket:       d.bucket,
+		KeyPrefix:    d.keyPrefix,
+		Scope:        d.scope,
+		DryRun:       d.dryRun,
+		Status:       d.status,
+		StartedAt:    d.startedAt,
+		DoneAt:       d.doneAt,
+		Checked:      d.checked,
+		Healthy:      d.healthy,
+		Detected:     d.detected,
+		Repaired:     d.repaired,
+		Unrepairable: d.unrepairable,
+		Skipped:      d.skipped,
+		OwnedHere:    d.ownedHere,
+	}
+}
+
+func decodeScrubSessionStatReply(reply []byte) (scrubSessionStatDecoded, bool) {
+	if len(reply) == 0 {
+		return scrubSessionStatDecoded{}, false
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	if fr == nil || fr.Status() != raftpb.ForwardStatusOK {
+		return scrubSessionStatDecoded{}, false
+	}
+	ss := fr.ScrubSession(nil)
+	if ss == nil {
+		return scrubSessionStatDecoded{}, false
+	}
+	return scrubSessionStatDecoded{
+		found:        ss.Found(),
+		bucket:       string(ss.Bucket()),
+		keyPrefix:    string(ss.KeyPrefix()),
+		scope:        ss.Scope(),
+		dryRun:       ss.DryRun(),
+		status:       string(ss.Status()),
+		startedAt:    ss.StartedAt(),
+		doneAt:       ss.DoneAt(),
+		checked:      ss.Checked(),
+		healthy:      ss.Healthy(),
+		detected:     ss.Detected(),
+		repaired:     ss.Repaired(),
+		unrepairable: ss.Unrepairable(),
+		skipped:      ss.Skipped(),
+		ownedHere:    ss.OwnedHere(),
+	}, true
+}

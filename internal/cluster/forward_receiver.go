@@ -5,19 +5,45 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 
+	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/rs/zerolog/log"
 )
 
+// ScrubSessionLookup is the slim contract ForwardReceiver needs to answer
+// ForwardOpScrubSessionStat without pulling the whole scrubber.Director
+// surface into the cluster package.
+type ScrubSessionLookup interface {
+	GetSession(id string) (scrubber.Session, bool)
+}
+
 type ForwardReceiver struct {
 	groups *DataGroupManager
+	// scrubLookup is wired via WithScrubSessionLookup; reads happen on every
+	// inbound forward and writes only at startup, but we use atomic.Pointer
+	// so -race is clean even if rewiring ever lands.
+	scrubLookup atomic.Pointer[ScrubSessionLookup]
 }
 
 func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 	return &ForwardReceiver{groups: groups}
+}
+
+// WithScrubSessionLookup wires the per-node Director session lookup so the
+// receiver can answer ForwardOpScrubSessionStat. nil = lookup disabled →
+// peer scrub-stat queries return found=false.
+func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *ForwardReceiver {
+	if lookup == nil {
+		r.scrubLookup.Store(nil)
+		return r
+	}
+	r.scrubLookup.Store(&lookup)
+	return r
 }
 
 // Register installs this ForwardReceiver as the handler for StreamProposeGroupForward (0x08) on shardSvc.
@@ -33,6 +59,13 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
 	if err != nil {
 		return errReply(raftpb.ForwardStatusInternal, "")
+	}
+
+	// ScrubSessionStat is node-scoped (Director-scoped), not group-scoped.
+	// It bypasses the DataGroup lookup + leader gate that the rest of the
+	// forwarding ops require.
+	if op == raftpb.ForwardOpScrubSessionStat {
+		return r.handleScrubSessionStat(fbsArgs)
 	}
 
 	dg := r.groups.Get(groupID)
@@ -431,4 +464,51 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	}
 	log.Warn().Err(err).Msg("forward receiver mapped backend error to internal status")
 	return raftpb.ForwardStatusInternal
+}
+
+func (r *ForwardReceiver) handleScrubSessionStat(fbsArgs []byte) *transport.Message {
+	if len(fbsArgs) == 0 {
+		return errReply(raftpb.ForwardStatusInternal, "")
+	}
+	args := raftpb.GetRootAsScrubSessionStatArgs(fbsArgs, 0)
+	sessionID := string(args.SessionId())
+	var sess scrubber.Session
+	found := false
+	if lookupPtr := r.scrubLookup.Load(); lookupPtr != nil && sessionID != "" {
+		sess, found = (*lookupPtr).GetSession(sessionID)
+	}
+	return buildScrubSessionStatReply(found, sess)
+}
+
+func buildScrubSessionStatReply(found bool, sess scrubber.Session) *transport.Message {
+	b := flatbuffers.NewBuilder(256)
+	bktOff := b.CreateString(sess.Bucket)
+	pfxOff := b.CreateString(sess.KeyPrefix)
+	statusOff := b.CreateString(sess.Status)
+
+	raftpb.ScrubSessionStatReplyStart(b)
+	raftpb.ScrubSessionStatReplyAddFound(b, found)
+	raftpb.ScrubSessionStatReplyAddBucket(b, bktOff)
+	raftpb.ScrubSessionStatReplyAddKeyPrefix(b, pfxOff)
+	raftpb.ScrubSessionStatReplyAddScope(b, int32(sess.Scope))
+	raftpb.ScrubSessionStatReplyAddDryRun(b, sess.DryRun)
+	raftpb.ScrubSessionStatReplyAddStatus(b, statusOff)
+	raftpb.ScrubSessionStatReplyAddStartedAt(b, sess.StartedAt.Unix())
+	if !sess.DoneAt.IsZero() {
+		raftpb.ScrubSessionStatReplyAddDoneAt(b, sess.DoneAt.Unix())
+	}
+	raftpb.ScrubSessionStatReplyAddChecked(b, sess.Stats.Checked)
+	raftpb.ScrubSessionStatReplyAddHealthy(b, sess.Stats.Healthy)
+	raftpb.ScrubSessionStatReplyAddDetected(b, sess.Stats.Detected)
+	raftpb.ScrubSessionStatReplyAddRepaired(b, sess.Stats.Repaired)
+	raftpb.ScrubSessionStatReplyAddUnrepairable(b, sess.Stats.Unrepairable)
+	raftpb.ScrubSessionStatReplyAddSkipped(b, sess.Stats.Skipped)
+	raftpb.ScrubSessionStatReplyAddOwnedHere(b, found && sess.Stats.Checked > 0)
+	scrubReplyOff := raftpb.ScrubSessionStatReplyEnd(b)
+
+	raftpb.ForwardReplyStart(b)
+	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
+	raftpb.ForwardReplyAddScrubSession(b, scrubReplyOff)
+	b.Finish(raftpb.ForwardReplyEnd(b))
+	return &transport.Message{Type: transport.StreamProposeGroupForward, Payload: b.FinishedBytes()}
 }

@@ -153,6 +153,30 @@ func (d *Director) Register(name string, src BlockSource, ver BlockVerifier) {
 	d.verifiers[name] = ver
 }
 
+// LookupDedup returns the in-flight ScrubTriggerEntry for a request key, or
+// (zero, false) if no session matches. Used by admin handlers to short-circuit
+// duplicate triggers before raft propose so we do not consume two raft entries
+// for the same logical scrub.
+func (d *Director) LookupDedup(req TriggerReq) (ScrubTriggerEntry, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	id, ok := d.dedup[dedupKey(req)]
+	if !ok {
+		return ScrubTriggerEntry{}, false
+	}
+	sess, ok := d.sessions[id]
+	if !ok {
+		return ScrubTriggerEntry{}, false
+	}
+	return ScrubTriggerEntry{
+		SessionID: sess.id,
+		Bucket:    sess.bucket,
+		KeyPrefix: sess.keyPrefix,
+		Scope:     sess.scope,
+		DryRun:    sess.dryRun,
+	}, true
+}
+
 func (d *Director) Trigger(req TriggerReq) (string, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -192,8 +216,19 @@ func (d *Director) ApplyFromFSM(entry ScrubTriggerEntry) {
 		d.mu.Unlock()
 		return
 	}
-	sess := newLiveSession(entry.SessionID, entry.Bucket, entry.KeyPrefix, entry.Scope, entry.DryRun, time.Unix(entry.RequestedAt, 0))
+	startedAt := time.Now()
+	if entry.RequestedAt != 0 {
+		startedAt = time.Unix(entry.RequestedAt, 0)
+	}
+	sess := newLiveSession(entry.SessionID, entry.Bucket, entry.KeyPrefix, entry.Scope, entry.DryRun, startedAt)
 	d.sessions[entry.SessionID] = sess
+	// Populate dedup so a re-trigger of the same (bucket, prefix, scope, dryRun)
+	// short-circuits via LookupDedup (admin handler avoids burning a raft entry
+	// per duplicate request).
+	dk := dedupKey(TriggerReq{Bucket: entry.Bucket, KeyPrefix: entry.KeyPrefix, Scope: entry.Scope, DryRun: entry.DryRun})
+	if _, ok := d.dedup[dk]; !ok {
+		d.dedup[dk] = entry.SessionID
+	}
 	d.mu.Unlock()
 	select {
 	case d.queue <- triggerReq{sess: sess}:

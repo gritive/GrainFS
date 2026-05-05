@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
+	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
 // Meta-raft timing is fixed (not driven by --raft-heartbeat-interval, which
@@ -274,6 +275,27 @@ func (m *MetaRaft) ProposeRebalancePlan(ctx context.Context, plan RebalancePlan)
 		return fmt.Errorf("meta_raft: encode ProposeRebalancePlan: %w", err)
 	}
 	data, err := encodeMetaCmd(MetaCmdTypeProposeRebalancePlan, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
+// ProposeScrubTrigger encodes a ScrubTrigger command and proposes it to the
+// cluster, blocking until the entry is applied to the local FSM. Each node's
+// onScrubTrigger callback (wired to Director.ApplyFromFSM) creates a session
+// for the same SessionID; the resolver then walks the bucket's group's
+// BadgerDB if locally owned, empty channel otherwise.
+func (m *MetaRaft) ProposeScrubTrigger(ctx context.Context, entry scrubber.ScrubTriggerEntry) error {
+	payload, err := encodeMetaScrubTriggerCmd(entry)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode ScrubTrigger: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypeScrubTrigger, payload)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}

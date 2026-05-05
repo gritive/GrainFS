@@ -21,16 +21,30 @@ import (
 // without re-querying the backend. Cache entries are removed by the verifier
 // after Verify (healthy/skipped path) or Repair (non-healthy path).
 type ECScrubSource struct {
-	backend Scrubbable
+	resolve GroupResolver
 	nodeID  string
 	cache   sync.Map // recordKey → ObjectRecord
 }
 
+// GroupResolver returns the Scrubbable for a bucket if the bucket lives on a
+// locally-owned group, or (nil, false) when it lives on a peer-owned group.
+// Multi-raft clusters route per-bucket to the right group's BadgerDB; a peer-
+// owned bucket means this node's scrub closes an empty channel (the peer's
+// Director.ApplyFromFSM picks up the same SessionID and walks its own DB).
+type GroupResolver func(bucket string) (Scrubbable, bool)
+
+// SingleBackendResolver returns a GroupResolver that always yields backend.
+// Used by tests and any single-backend deployment that has no per-bucket
+// routing.
+func SingleBackendResolver(backend Scrubbable) GroupResolver {
+	return func(string) (Scrubbable, bool) { return backend, true }
+}
+
 // NewECScrubSource constructs an EC adapter. Director routes to it via
 // routeSource("<bucket>") → "ec" (anything not internal-replicated). nodeID
-// enables ShardOwner filtering when the backend implements ShardOwner.
-func NewECScrubSource(backend Scrubbable, nodeID string) *ECScrubSource {
-	return &ECScrubSource{backend: backend, nodeID: nodeID}
+// enables ShardOwner filtering when the resolved backend implements ShardOwner.
+func NewECScrubSource(resolve GroupResolver, nodeID string) *ECScrubSource {
+	return &ECScrubSource{resolve: resolve, nodeID: nodeID}
 }
 
 // Name returns the registry name "ec" — matches Director.routeSource.
@@ -69,7 +83,12 @@ func (s *ECScrubSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyP
 		close(out)
 		return out, nil
 	}
-	objCh, err := s.backend.ScanObjects(bucket)
+	backend, owned := s.resolve(bucket)
+	if !owned || backend == nil {
+		close(out)
+		return out, nil
+	}
+	objCh, err := backend.ScanObjects(bucket)
 	if err != nil {
 		close(out)
 		return out, err
@@ -80,10 +99,10 @@ func (s *ECScrubSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyP
 			if keyPrefix != "" && !strings.HasPrefix(rec.Key, keyPrefix) {
 				continue
 			}
-			if exists, eerr := s.backend.ObjectExists(rec.Bucket, rec.Key); eerr != nil || !exists {
+			if exists, eerr := backend.ObjectExists(rec.Bucket, rec.Key); eerr != nil || !exists {
 				continue
 			}
-			if owner, ok := s.backend.(ShardOwner); ok {
+			if owner, ok := backend.(ShardOwner); ok {
 				idx := owner.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, s.nodeID)
 				if len(idx) == 0 {
 					continue

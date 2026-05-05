@@ -5,6 +5,8 @@
 package admin
 
 import (
+	"context"
+
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -43,6 +45,38 @@ type ListClusterPeersResp struct {
 	Peers []ClusterPeerInfo `json:"peers"`
 }
 
+// ScrubProposer is the slim interface admin handlers need to publish a
+// cluster-wide scrub trigger via raft. Implemented by an adapter in serve.go
+// that wires MetaRaft.ProposeScrubTrigger. created=false signals a dedup hit
+// (LookupDedup matched a still-tracked session); the SessionID belongs to
+// the pre-existing session so polling continues to work for the original
+// trigger.
+type ScrubProposer interface {
+	Propose(ctx context.Context, req scrubber.TriggerReq) (entry scrubber.ScrubTriggerEntry, created bool, err error)
+}
+
+// ScrubAggregator returns per-peer ScrubJobInfo (excluding local) for a given
+// SessionID, plus the list of peer node IDs whose RPC failed/timed out. nil
+// disables cluster-wide aggregation; GET /v1/scrub/jobs/<id> returns
+// local-only stats in that case.
+type ScrubAggregator interface {
+	Peers(ctx context.Context, sessionID string) ([]ScrubJobInfo, []string, error)
+}
+
+// ScrubReq is the JSON body for POST /v1/scrub.
+type ScrubReq struct {
+	Bucket    string `json:"bucket"`
+	KeyPrefix string `json:"key_prefix,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	DryRun    bool   `json:"dry_run,omitempty"`
+}
+
+// ScrubResp identifies the resulting cluster-wide session.
+type ScrubResp struct {
+	SessionID string `json:"session_id"`
+	Created   bool   `json:"created"`
+}
+
 // VlogBreakdownAPI is the slim interface admin handlers need to surface the
 // vlog watcher's per-category state. Implemented by an adapter in serve.go
 // over *resourcewatch.Registry + VlogProvider; defined here so handler tests
@@ -79,14 +113,16 @@ type VlogSmokeReport struct {
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
 type Deps struct {
-	Manager       *volume.Manager
-	Incident      incident.StateStore // List(ctx, limit) — optional, nil OK
-	Director      DirectorAPI         // optional; nil disables scrub admin endpoints
-	PeerHealth    PeerHealthAPI       // optional; nil disables cluster peer admin endpoints
-	VlogBreakdown VlogBreakdownAPI    // optional; nil disables vlog breakdown endpoint
-	Token         *dashboard.TokenStore
-	PublicURL     string // e.g. "https://node1:9000"; empty means use localhost fallback
-	NodeID        string
+	Manager         *volume.Manager
+	Incident        incident.StateStore // List(ctx, limit) — optional, nil OK
+	Director        DirectorAPI         // optional; nil disables scrub admin endpoints
+	PeerHealth      PeerHealthAPI       // optional; nil disables cluster peer admin endpoints
+	VlogBreakdown   VlogBreakdownAPI    // optional; nil disables vlog breakdown endpoint
+	ScrubProposer   ScrubProposer       // optional; nil disables POST /v1/scrub
+	ScrubAggregator ScrubAggregator     // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
+	Token           *dashboard.TokenStore
+	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
+	NodeID          string
 }
 
 // Error is the domain error type returned by admin handlers. The HTTP adapter
@@ -148,22 +184,28 @@ type ScrubVolumeResp struct {
 	Created   bool   `json:"created"` // false = duplicate request, returned existing session
 }
 
-// ScrubJobInfo is the JSON form of one Director session.
+// ScrubJobInfo is the JSON form of one Director session. When returned by the
+// cluster-wide GET /v1/scrub/jobs/<id> handler, counters are summed across
+// all reachable peers; Partial flags peer RPC failures so the operator can
+// distinguish "everyone agrees done" from "we got most peers, one timed out".
 type ScrubJobInfo struct {
-	SessionID    string `json:"session_id"`
-	Bucket       string `json:"bucket"`
-	KeyPrefix    string `json:"key_prefix"`
-	Scope        string `json:"scope"`
-	DryRun       bool   `json:"dry_run"`
-	Status       string `json:"status"` // running | done | cancelled
-	StartedAt    int64  `json:"started_at"`
-	DoneAt       int64  `json:"done_at,omitempty"`
-	Checked      int64  `json:"checked"`
-	Healthy      int64  `json:"healthy"`
-	Detected     int64  `json:"detected"`
-	Repaired     int64  `json:"repaired"`
-	Unrepairable int64  `json:"unrepairable"`
-	Skipped      int64  `json:"skipped"`
+	SessionID    string   `json:"session_id"`
+	Bucket       string   `json:"bucket"`
+	KeyPrefix    string   `json:"key_prefix"`
+	Scope        string   `json:"scope"`
+	DryRun       bool     `json:"dry_run"`
+	Status       string   `json:"status"` // running | done | cancelled
+	StartedAt    int64    `json:"started_at"`
+	DoneAt       int64    `json:"done_at,omitempty"`
+	Checked      int64    `json:"checked"`
+	Healthy      int64    `json:"healthy"`
+	Detected     int64    `json:"detected"`
+	Repaired     int64    `json:"repaired"`
+	Unrepairable int64    `json:"unrepairable"`
+	Skipped      int64    `json:"skipped"`
+	OwnedHere    bool     `json:"owned_here"`              // this node ran the scrub (vs. only forwarded the trigger)
+	Partial      bool     `json:"partial,omitempty"`       // any peer RPC timed out / failed
+	PeerFailures []string `json:"peer_failures,omitempty"` // peer node IDs that did not respond
 }
 
 // ListScrubJobsResp aggregates the active session list.

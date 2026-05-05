@@ -226,7 +226,8 @@ enum MetaCmdType : uint8 {
   RotateKeyBegin     = 14,  // 클러스터 키 회전: phase 1 → 2 (operator-distributed next.key SPKI 합의)
   RotateKeySwitch    = 15,  // 회전 phase 2 → 3 (active 인증서를 NEW로 전환)
   RotateKeyDrop      = 16,  // 회전 phase 3 → steady-on-NEW (OLD 폐기, previous.key grace 시작)
-  RotateKeyAbort     = 17   // phase 2: 롤백, phase 3: forward-roll (D18)
+  RotateKeyAbort     = 17,  // phase 2: 롤백, phase 3: forward-roll (D18)
+  ScrubTrigger      = 18    // EC scrub cluster-wide trigger (PR4 — replicates to all nodes' Director.ApplyFromFSM)
 }
 
 table MetaNodeEntry {
@@ -390,4 +391,19 @@ table MetaStateSnapshot {
   active_plan:RebalancePlan;                  // PR-D; nil = no active plan
   iceberg_namespaces:[IcebergNamespaceEntry];
   iceberg_tables:[IcebergTableEntry];
+}
+
+// PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's
+// Director.ApplyFromFSM creates a session for session_id; the resolver then
+// walks the bucket's group's BadgerDB if locally owned, empty channel
+// otherwise. requested_at carries unix seconds for 1h TTL filter (skips replay
+// of ancient triggers when a fresh node joins).
+table MetaScrubTriggerCmd {
+  session_id:string;
+  bucket:string;
+  key_prefix:string;
+  scope:int;                    // 0 = full, 1 = live (matches scrubber.ScrubScope)
+  dry_run:bool;
+  requested_at:long;            // unix seconds
+  originator_node_id:string;
 }
