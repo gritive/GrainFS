@@ -52,16 +52,81 @@ func ListScrubJobs(ctx context.Context, d *Deps) (ListScrubJobsResp, error) {
 	return out, nil
 }
 
-// GetScrubJob returns one session by id.
+// TriggerScrub publishes a cluster-wide scrub trigger via raft. Each node's
+// onScrubTrigger callback creates a session for the same SessionID; the
+// resolver then walks the bucket's group's BadgerDB if locally owned. The
+// operator polls GET /v1/scrub/jobs/<id> for aggregated stats.
+func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error) {
+	if d.ScrubProposer == nil {
+		return ScrubResp{}, NewInternal("scrub proposer not configured")
+	}
+	if req.Bucket == "" {
+		return ScrubResp{}, NewInvalid("bucket required")
+	}
+	scope := scrubber.ScopeFull
+	switch strings.ToLower(req.Scope) {
+	case "", "full":
+		scope = scrubber.ScopeFull
+	case "live":
+		scope = scrubber.ScopeLive
+	default:
+		return ScrubResp{}, NewInvalid("scope must be 'full' or 'live'")
+	}
+	entry, err := d.ScrubProposer.Propose(ctx, scrubber.TriggerReq{
+		Bucket: req.Bucket, KeyPrefix: req.KeyPrefix, Scope: scope, DryRun: req.DryRun,
+	})
+	if err != nil {
+		return ScrubResp{}, NewInternal("propose scrub: " + err.Error())
+	}
+	return ScrubResp{SessionID: entry.SessionID, Created: true}, nil
+}
+
+// GetScrubJob returns one session by id, aggregated across cluster peers when
+// d.ScrubAggregator is wired. Counters are summed; Partial=true and
+// PeerFailures populated when any peer RPC failed/timed out.
 func GetScrubJob(ctx context.Context, d *Deps, sessionID string) (ScrubJobInfo, error) {
 	if d.Director == nil {
 		return ScrubJobInfo{}, NewNotFound("scrub director not configured")
 	}
-	s, ok := d.Director.GetSession(sessionID)
-	if !ok {
+	local, hasLocal := d.Director.GetSession(sessionID)
+
+	var peerInfos []ScrubJobInfo
+	var peerFailures []string
+	if d.ScrubAggregator != nil {
+		var err error
+		peerInfos, peerFailures, err = d.ScrubAggregator.Peers(ctx, sessionID)
+		if err != nil {
+			return ScrubJobInfo{}, NewInternal("aggregate peers: " + err.Error())
+		}
+	}
+	if !hasLocal && len(peerInfos) == 0 {
 		return ScrubJobInfo{}, NewNotFound("session not found")
 	}
-	return sessionToInfo(s), nil
+
+	out := sessionToInfo(local)
+	out.OwnedHere = hasLocal && local.Stats.Checked > 0
+	for _, p := range peerInfos {
+		out.Checked += p.Checked
+		out.Healthy += p.Healthy
+		out.Detected += p.Detected
+		out.Repaired += p.Repaired
+		out.Unrepairable += p.Unrepairable
+		out.Skipped += p.Skipped
+		if p.Status == "running" {
+			out.Status = "running"
+		}
+		if p.OwnedHere && (out.Bucket == "" || out.Bucket == "—") {
+			out.Bucket = p.Bucket
+			out.KeyPrefix = p.KeyPrefix
+			out.Scope = p.Scope
+			out.DryRun = p.DryRun
+		}
+	}
+	if len(peerFailures) > 0 {
+		out.Partial = true
+		out.PeerFailures = peerFailures
+	}
+	return out, nil
 }
 
 // CancelScrubJob marks a running session as cancelled. Best-effort: in-flight
