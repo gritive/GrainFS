@@ -100,6 +100,9 @@ func GetScrubJob(ctx context.Context, d *Deps, sessionID string) (ScrubJobInfo, 
 		}
 	}
 	if !hasLocal && len(peerInfos) == 0 {
+		if len(peerFailures) > 0 {
+			return ScrubJobInfo{}, NewInternal("all peers unreachable: " + strings.Join(peerFailures, ","))
+		}
 		return ScrubJobInfo{}, NewNotFound("session not found")
 	}
 
@@ -120,6 +123,14 @@ func GetScrubJob(ctx context.Context, d *Deps, sessionID string) (ScrubJobInfo, 
 			out.KeyPrefix = p.KeyPrefix
 			out.Scope = p.Scope
 			out.DryRun = p.DryRun
+		}
+	}
+	if out.Status == "" {
+		for _, p := range peerInfos {
+			if p.Status != "" {
+				out.Status = p.Status
+				break
+			}
 		}
 	}
 	if len(peerFailures) > 0 {

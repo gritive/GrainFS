@@ -12,7 +12,6 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
-	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -1028,11 +1027,31 @@ var (
 	_ storage.Truncatable = (*ClusterCoordinator)(nil)
 )
 
+// ScrubPeerStat is the cluster-package-local snapshot of one peer's scrub
+// session state. Returned by ScrubSessionStat fan-out; serve.go's adapter
+// converts to admin.ScrubJobInfo so cluster does not import admin.
+type ScrubPeerStat struct {
+	Bucket       string
+	KeyPrefix    string
+	Scope        int32 // 0=full, 1=live (matches scrubber.ScrubScope)
+	DryRun       bool
+	Status       string
+	StartedAt    int64
+	DoneAt       int64
+	Checked      int64
+	Healthy      int64
+	Detected     int64
+	Repaired     int64
+	Unrepairable int64
+	Skipped      int64
+	OwnedHere    bool
+}
+
 // ScrubSessionStat fans out a ScrubSessionStat RPC to every peer in the
 // cluster (excluding self), aggregating per-peer scrub stats for cluster-wide
 // admin GET /v1/scrub/jobs/<id>. Each peer call has a 5s timeout; failures
 // are returned as the second slice so admin can flag partial=true.
-func (c *ClusterCoordinator) ScrubSessionStat(ctx context.Context, sessionID string) ([]admin.ScrubJobInfo, []string, error) {
+func (c *ClusterCoordinator) ScrubSessionStat(ctx context.Context, sessionID string) ([]ScrubPeerStat, []string, error) {
 	if c.forward == nil || c.addr == nil {
 		return nil, nil, nil
 	}
@@ -1045,7 +1064,7 @@ func (c *ClusterCoordinator) ScrubSessionStat(ctx context.Context, sessionID str
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
-		infos    []admin.ScrubJobInfo
+		infos    []ScrubPeerStat
 		failures []string
 	)
 	for _, n := range nodes {
@@ -1075,7 +1094,7 @@ func (c *ClusterCoordinator) ScrubSessionStat(ctx context.Context, sessionID str
 				return
 			}
 			mu.Lock()
-			infos = append(infos, info.toJobInfo())
+			infos = append(infos, info.toPeerStat())
 			mu.Unlock()
 		}(n)
 	}
@@ -1110,15 +1129,11 @@ type scrubSessionStatDecoded struct {
 	ownedHere    bool
 }
 
-func (d scrubSessionStatDecoded) toJobInfo() admin.ScrubJobInfo {
-	scope := "full"
-	if d.scope == 1 {
-		scope = "live"
-	}
-	return admin.ScrubJobInfo{
+func (d scrubSessionStatDecoded) toPeerStat() ScrubPeerStat {
+	return ScrubPeerStat{
 		Bucket:       d.bucket,
 		KeyPrefix:    d.keyPrefix,
-		Scope:        scope,
+		Scope:        d.scope,
 		DryRun:       d.dryRun,
 		Status:       d.status,
 		StartedAt:    d.startedAt,

@@ -130,7 +130,34 @@ func (a *scrubAggregatorAdapter) Peers(ctx context.Context, sessionID string) ([
 	if a.coord == nil {
 		return nil, nil, nil
 	}
-	return a.coord.ScrubSessionStat(ctx, sessionID)
+	stats, failures, err := a.coord.ScrubSessionStat(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	infos := make([]admin.ScrubJobInfo, 0, len(stats))
+	for _, s := range stats {
+		scope := "full"
+		if s.Scope == int32(scrubber.ScopeLive) {
+			scope = "live"
+		}
+		infos = append(infos, admin.ScrubJobInfo{
+			Bucket:       s.Bucket,
+			KeyPrefix:    s.KeyPrefix,
+			Scope:        scope,
+			DryRun:       s.DryRun,
+			Status:       s.Status,
+			StartedAt:    s.StartedAt,
+			DoneAt:       s.DoneAt,
+			Checked:      s.Checked,
+			Healthy:      s.Healthy,
+			Detected:     s.Detected,
+			Repaired:     s.Repaired,
+			Unrepairable: s.Unrepairable,
+			Skipped:      s.Skipped,
+			OwnedHere:    s.OwnedHere,
+		})
+	}
+	return infos, failures, nil
 }
 
 // vlogBreakdownAdapter implements admin.VlogBreakdownAPI for the

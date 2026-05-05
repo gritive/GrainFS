@@ -135,15 +135,3 @@ func TestE2E_ECScrubTrigger_DedupHit_ReturnsExistingSession(t *testing.T) {
 	require.False(t, secondResp["created"].(bool), "second call: dedup hit must return Created=false")
 	require.Equal(t, firstID, secondResp["session_id"].(string), "dedup must return same SessionID")
 }
-
-func asFloat(v any) float64 {
-	switch x := v.(type) {
-	case float64:
-		return x
-	case int64:
-		return float64(x)
-	case int:
-		return float64(x)
-	}
-	return 0
-}

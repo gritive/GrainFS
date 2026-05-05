@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -22,8 +23,11 @@ type ScrubSessionLookup interface {
 }
 
 type ForwardReceiver struct {
-	groups      *DataGroupManager
-	scrubLookup ScrubSessionLookup
+	groups *DataGroupManager
+	// scrubLookup is wired via WithScrubSessionLookup; reads happen on every
+	// inbound forward and writes only at startup, but we use atomic.Pointer
+	// so -race is clean even if rewiring ever lands.
+	scrubLookup atomic.Pointer[ScrubSessionLookup]
 }
 
 func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
@@ -34,7 +38,11 @@ func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 // receiver can answer ForwardOpScrubSessionStat. nil = lookup disabled →
 // peer scrub-stat queries return found=false.
 func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *ForwardReceiver {
-	r.scrubLookup = lookup
+	if lookup == nil {
+		r.scrubLookup.Store(nil)
+		return r
+	}
+	r.scrubLookup.Store(&lookup)
 	return r
 }
 
@@ -466,8 +474,8 @@ func (r *ForwardReceiver) handleScrubSessionStat(fbsArgs []byte) *transport.Mess
 	sessionID := string(args.SessionId())
 	var sess scrubber.Session
 	found := false
-	if r.scrubLookup != nil && sessionID != "" {
-		sess, found = r.scrubLookup.GetSession(sessionID)
+	if lookupPtr := r.scrubLookup.Load(); lookupPtr != nil && sessionID != "" {
+		sess, found = (*lookupPtr).GetSession(sessionID)
 	}
 	return buildScrubSessionStatReply(found, sess)
 }
