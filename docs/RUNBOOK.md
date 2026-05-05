@@ -83,7 +83,7 @@ RECEIPT_ID=$(curl -s http://localhost:9000/api/incidents/$INCIDENT_ID | jq -r '.
 curl -s -H "Authorization: <sigv4 header>" http://localhost:9000/api/receipts/$RECEIPT_ID | jq .
 ```
 
-If an incident is `proof-unavailable`, check HealReceipt signing and persistence before treating the repair as audit-complete. If an incident is `isolated`, review the named object version and restore or delete it according to the data owner policy; unrelated objects in the bucket should continue serving.
+If an incident is `proof-unavailable`, check HealReceipt signing and persistence before treating the repair as audit-complete. If an incident is `isolated`, review the named object version and restore or delete it according to the data owner policy; unrelated objects in the bucket should continue serving. If a corruption incident is `needs-human`, the automatic isolation action failed; restore the object from a clean copy or delete the quarantined version before closing the event.
 
 For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.
 
@@ -94,6 +94,17 @@ lsof -p $(pgrep -n grainfs) | awk '{print $5}' | sort | uniq -c | sort -nr | hea
 ```
 
 If the incident is `diagnosed`, reduce connection churn or raise the process FD limit before the ETA expires. If it is `blocked`, raise `LimitNOFILE`/`ulimit -n`, check for socket/session leaks, and restart gracefully after draining traffic. The watcher resolves the incident after FD usage stays below the warning threshold for `--fd-recovery-window`.
+
+For Badger startup recovery, inspect the role and action first:
+
+```bash
+curl -s http://localhost:9000/api/incidents | jq '.[] | select(.cause | startswith("badger_"))'
+grep -E "badger role startup probe|badger startup recovery|optional badger role disabled" /var/log/grainfs/production.log
+```
+
+- `badger_startup_blocked` or `badger_open_failed` with `block_startup`: restore the named Badger role from a clean snapshot, or fix the disk, lock, or permission error before retrying startup.
+- `badger_read_only_admitted` or log message `badger startup recovery read-only gate enabled`: read paths remain available, but storage writes and mutating admin APIs return HTTP 503 with code `RecoveryReadOnly`. Repair or restore the failed group-state role, then restart and verify normal writes.
+- `disable_feature`: the server started without the optional role. Receipts, dedup, or incident-state behavior may be unavailable until the role directory is repaired and the process restarts.
 
 ---
 
