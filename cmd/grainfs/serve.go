@@ -1320,6 +1320,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	distBackend.SetIncidentRecorder(incidentRecorder)
 	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
 	startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
+	startGoroutineResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
