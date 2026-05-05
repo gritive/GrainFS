@@ -249,12 +249,14 @@ func printJSON(v any) error {
 // --- Runners ---
 
 type volumeJSON struct {
-	Name            string `json:"name"`
-	Size            int64  `json:"size"`
-	BlockSize       int    `json:"block_size"`
-	AllocatedBlocks int64  `json:"allocated_blocks"`
-	AllocatedBytes  int64  `json:"allocated_bytes"`
-	SnapshotCount   int32  `json:"snapshot_count"`
+	Name            string   `json:"name"`
+	Size            int64    `json:"size"`
+	BlockSize       int      `json:"block_size"`
+	AllocatedBlocks int64    `json:"allocated_blocks"`
+	AllocatedBytes  int64    `json:"allocated_bytes"`
+	SnapshotCount   int32    `json:"snapshot_count"`
+	Health          string   `json:"health"`
+	HealthReasons   []string `json:"health_reasons"`
 }
 
 func runVolumeList(cmd *cobra.Command, args []string) error {
@@ -272,17 +274,24 @@ func runVolumeList(cmd *cobra.Command, args []string) error {
 		return printJSON(resp)
 	}
 	raw := rawBytes(cmd)
-	fmt.Printf("%-20s  %12s  %12s  %8s  %s\n", "NAME", "SIZE", "ALLOCATED", "BLOCK", "SNAPS")
+	fmt.Printf("%-20s  %12s  %12s  %9s  %s\n", "NAME", "SIZE", "ALLOCATED", "SNAPSHOTS", "HEALTH")
 	if len(resp.Volumes) == 0 {
 		fmt.Println("(no volumes)")
 		return nil
 	}
 	for _, v := range resp.Volumes {
-		fmt.Printf("%-20s  %12s  %12s  %8s  %d\n",
+		fmt.Printf("%-20s  %12s  %12s  %9d  %s\n",
 			v.Name, formatBytes(v.Size, raw), formatBytes(v.AllocatedBytes, raw),
-			formatBytes(int64(v.BlockSize), raw), v.SnapshotCount)
+			v.SnapshotCount, formatVolumeHealth(v.Health))
 	}
 	return nil
+}
+
+func formatVolumeHealth(health string) string {
+	if health == "" {
+		return "ok"
+	}
+	return health
 }
 
 func runVolumeCreate(cmd *cobra.Command, args []string) error {
@@ -329,6 +338,10 @@ func runVolumeInfo(cmd *cobra.Command, args []string) error {
 	fmt.Printf("allocated_bytes:  %s\n", formatBytes(resp.AllocatedBytes, raw))
 	fmt.Printf("allocated_blocks: %d\n", resp.AllocatedBlocks)
 	fmt.Printf("snapshot_count:   %d\n", resp.SnapshotCount)
+	fmt.Printf("health:           %s\n", formatVolumeHealth(resp.Health))
+	if len(resp.HealthReasons) > 0 {
+		fmt.Printf("health_reasons:   %s\n", strings.Join(resp.HealthReasons, ","))
+	}
 	return nil
 }
 
@@ -352,6 +365,10 @@ func runVolumeStat(cmd *cobra.Command, args []string) error {
 	fmt.Printf("size:             %s\n", formatBytes(resp.Volume.Size, raw))
 	fmt.Printf("allocated:        %s\n", formatBytes(resp.Volume.AllocatedBytes, raw))
 	fmt.Printf("snapshots:        %d\n", resp.Volume.SnapshotCount)
+	fmt.Printf("health:           %s\n", formatVolumeHealth(resp.Volume.Health))
+	if len(resp.Volume.HealthReasons) > 0 {
+		fmt.Printf("health_reasons:   %s\n", strings.Join(resp.Volume.HealthReasons, ","))
+	}
 	if len(resp.RecentIncidents) > 0 {
 		fmt.Printf("recent incidents: %d\n", len(resp.RecentIncidents))
 	}

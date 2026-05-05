@@ -215,12 +215,14 @@ type ListScrubJobsResp struct {
 
 // VolumeInfo is the JSON representation of a volume in admin responses.
 type VolumeInfo struct {
-	Name            string `json:"name"`
-	Size            int64  `json:"size"`
-	BlockSize       int    `json:"block_size"`
-	AllocatedBlocks int64  `json:"allocated_blocks"`
-	AllocatedBytes  int64  `json:"allocated_bytes"`
-	SnapshotCount   int32  `json:"snapshot_count"`
+	Name            string   `json:"name"`
+	Size            int64    `json:"size"`
+	BlockSize       int      `json:"block_size"`
+	AllocatedBlocks int64    `json:"allocated_blocks"`
+	AllocatedBytes  int64    `json:"allocated_bytes"`
+	SnapshotCount   int32    `json:"snapshot_count"`
+	Health          string   `json:"health"`
+	HealthReasons   []string `json:"health_reasons"`
 }
 
 func toVolumeInfo(v *volume.Volume) VolumeInfo {
@@ -231,5 +233,7 @@ func toVolumeInfo(v *volume.Volume) VolumeInfo {
 		AllocatedBlocks: v.AllocatedBlocks,
 		AllocatedBytes:  v.AllocatedBytes(),
 		SnapshotCount:   v.SnapshotCount,
+		Health:          "ok",
+		HealthReasons:   []string{},
 	}
 }

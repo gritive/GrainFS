@@ -166,6 +166,56 @@ func TestE2E_VolumeCLI_FullLifecycle(t *testing.T) {
 	require.Equal(t, 0, code, out)
 }
 
+func TestE2E_VolumeCLI_ListIncludesHealth(t *testing.T) {
+	dataDir, _, _ := startTestServer(t)
+
+	out, code := runCLI(t, dataDir, "volume", "create", "vhealth", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+
+	out, code = runCLI(t, dataDir, "volume", "list")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "HEALTH")
+	require.Contains(t, out, "vhealth")
+	require.Contains(t, out, "ok")
+}
+
+func TestE2E_VolumeCLI_ListJSONIncludesHealthReasons(t *testing.T) {
+	dataDir, _, _ := startTestServer(t)
+
+	out, code := runCLI(t, dataDir, "volume", "create", "vjsonhealth", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+
+	out, code = runCLI(t, dataDir, "volume", "list", "--json")
+	require.Equal(t, 0, code, out)
+	var raw map[string][]map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &raw))
+	var resp struct {
+		Volumes []struct {
+			Name          string   `json:"name"`
+			Health        string   `json:"health"`
+			HealthReasons []string `json:"health_reasons"`
+		} `json:"volumes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &resp))
+	for _, v := range resp.Volumes {
+		if v.Name == "vjsonhealth" {
+			require.Equal(t, "ok", v.Health)
+			require.Empty(t, v.HealthReasons)
+			foundRaw := false
+			for _, rawVolume := range raw["volumes"] {
+				if rawVolume["name"] == "vjsonhealth" {
+					foundRaw = true
+					require.Contains(t, rawVolume, "health_reasons")
+					require.IsType(t, []any{}, rawVolume["health_reasons"])
+				}
+			}
+			require.True(t, foundRaw, "raw volume vjsonhealth not found")
+			return
+		}
+	}
+	require.Failf(t, "volume not found", "volume vjsonhealth not found in list response: %s", out)
+}
+
 func TestE2E_VolumeCLI_ShrinkRejected(t *testing.T) {
 	dataDir, _, _ := startTestServer(t)
 
@@ -266,4 +316,3 @@ func callUI(t *testing.T, port int, token string) int {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
 }
-

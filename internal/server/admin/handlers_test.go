@@ -5,13 +5,28 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/dashboard"
+	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 	"github.com/stretchr/testify/require"
 )
+
+type listOnlyIncidentStore struct {
+	states []incident.IncidentState
+	err    error
+}
+
+func (s listOnlyIncidentStore) Put(context.Context, incident.IncidentState) error { return nil }
+func (s listOnlyIncidentStore) Get(context.Context, string) (incident.IncidentState, bool, error) {
+	return incident.IncidentState{}, false, nil
+}
+func (s listOnlyIncidentStore) List(context.Context, int) ([]incident.IncidentState, error) {
+	return s.states, s.err
+}
 
 func newDeps(t *testing.T) *admin.Deps {
 	t.Helper()
@@ -46,6 +61,91 @@ func TestCreateVolume_HappyPath(t *testing.T) {
 	if v.Name != "v1" || v.Size != 1<<20 {
 		t.Fatalf("unexpected info %+v", v)
 	}
+}
+
+func TestListVolumes_HealthOKWhenIncidentStoreHasNoMatchingIncidents(t *testing.T) {
+	d := newDeps(t)
+	d.Incident = listOnlyIncidentStore{}
+	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
+	require.NoError(t, err)
+
+	resp, err := admin.ListVolumes(context.Background(), d)
+	require.NoError(t, err)
+	require.Len(t, resp.Volumes, 1)
+	require.Equal(t, "ok", resp.Volumes[0].Health)
+	require.Empty(t, resp.Volumes[0].HealthReasons)
+}
+
+func TestListVolumes_HealthCriticalForUnfixedVolumeIncident(t *testing.T) {
+	d := newDeps(t)
+	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
+	require.NoError(t, err)
+	d.Incident = listOnlyIncidentStore{states: []incident.IncidentState{{
+		ID:        "inc-1",
+		State:     incident.StateBlocked,
+		Severity:  incident.SeverityCritical,
+		Cause:     incident.CauseCorruptBlob,
+		Scope:     incident.Scope{Bucket: volume.VolumeBucketName, Key: volume.BlockKeyPrefix("v1") + "0000000000000000"},
+		UpdatedAt: time.Now(),
+	}}}
+
+	resp, err := admin.ListVolumes(context.Background(), d)
+	require.NoError(t, err)
+	require.Len(t, resp.Volumes, 1)
+	require.Equal(t, "critical", resp.Volumes[0].Health)
+	require.Equal(t, []string{"recent_incident"}, resp.Volumes[0].HealthReasons)
+}
+
+func TestGetVolume_HealthMatchesListForUnfixedVolumeIncident(t *testing.T) {
+	d := newDeps(t)
+	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
+	require.NoError(t, err)
+	d.Incident = listOnlyIncidentStore{states: []incident.IncidentState{{
+		ID:        "inc-1",
+		State:     incident.StateBlocked,
+		Severity:  incident.SeverityCritical,
+		Cause:     incident.CauseCorruptBlob,
+		Scope:     incident.Scope{Bucket: volume.VolumeBucketName, Key: volume.BlockKeyPrefix("v1") + "0000000000000000"},
+		UpdatedAt: time.Now(),
+	}}}
+
+	resp, err := admin.GetVolume(context.Background(), d, "v1")
+	require.NoError(t, err)
+	require.Equal(t, "critical", resp.Health)
+	require.Equal(t, []string{"recent_incident"}, resp.HealthReasons)
+}
+
+func TestStatVolume_HealthCriticalForUnfixedVolumeIncident(t *testing.T) {
+	d := newDeps(t)
+	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
+	require.NoError(t, err)
+	d.Incident = listOnlyIncidentStore{states: []incident.IncidentState{{
+		ID:        "inc-1",
+		State:     incident.StateBlocked,
+		Severity:  incident.SeverityCritical,
+		Cause:     incident.CauseCorruptBlob,
+		Scope:     incident.Scope{Bucket: volume.VolumeBucketName, Key: volume.BlockKeyPrefix("v1") + "0000000000000000"},
+		UpdatedAt: time.Now(),
+	}}}
+
+	resp, err := admin.StatVolume(context.Background(), d, "v1")
+	require.NoError(t, err)
+	require.Equal(t, "critical", resp.Volume.Health)
+	require.Equal(t, []string{"recent_incident"}, resp.Volume.HealthReasons)
+	require.Len(t, resp.RecentIncidents, 1)
+}
+
+func TestListVolumes_HealthUnknownWhenIncidentLookupFails(t *testing.T) {
+	d := newDeps(t)
+	d.Incident = listOnlyIncidentStore{err: errors.New("incident db unavailable")}
+	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
+	require.NoError(t, err)
+
+	resp, err := admin.ListVolumes(context.Background(), d)
+	require.NoError(t, err)
+	require.Len(t, resp.Volumes, 1)
+	require.Equal(t, "unknown", resp.Volumes[0].Health)
+	require.Equal(t, []string{"incident_lookup_failed"}, resp.Volumes[0].HealthReasons)
 }
 
 func TestCreateVolume_DuplicateConflict(t *testing.T) {

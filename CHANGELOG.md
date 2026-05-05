@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.50.0] — 2026-05-06 — Volume health CLI
+
+### Added
+
+- **Volume health in admin responses and CLI output** — `grainfs volume list`
+  now includes a `HEALTH` column, and `volume info` / `volume stat` show the
+  same health summary. JSON output now includes stable `health` and
+  `health_reasons` fields so scripts can distinguish `ok`, `warning`,
+  `critical`, and `unknown` volumes without parsing human text.
+- **Incident-backed volume health reasons** — volume health now derives from
+  recent volume-scoped incidents, reports unresolved critical incidents as
+  `critical`, and reports incident-store lookup failures as `unknown` with
+  `incident_lookup_failed`.
+- **Storage operations facade design docs** — added the architecture proposal
+  and implementation plan for moving optional storage capability probing behind
+  a `storage.Operations` facade.
+
+### Fixed
+
+- **Consistent health across `list`, `info`, and `stat`** — single-volume
+  metadata now uses the same incident-backed health calculation as list/stat,
+  so a damaged volume cannot appear healthy in `volume info`.
+
 ## [0.0.49.3] — 2026-05-06 — Predictive vlog watcher e2e leak-fire coverage
 
 ### Added
