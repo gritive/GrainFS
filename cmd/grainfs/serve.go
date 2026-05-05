@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -91,6 +92,80 @@ type replicaRepairerFunc func(ctx context.Context, bucket, key string) error
 
 func (f replicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key string) error {
 	return f(ctx, bucket, key)
+}
+
+// vlogBreakdownAdapter implements admin.VlogBreakdownAPI for the
+// `GET /v1/resource/vlog/breakdown` endpoint. It re-runs registry smoke on
+// every call (operator-initiated, low QPS) so callers see fresh stale/live
+// state rather than the stale 60s-startup snapshot.
+type vlogBreakdownAdapter struct {
+	registry *resourcewatch.Registry
+	provider *resourcewatch.VlogProvider
+	dataDir  string
+	warn     float64
+	critical float64
+}
+
+func newVlogBreakdownAdapter(cmd *cobra.Command, dataDir string) admin.VlogBreakdownAPI {
+	if !vlogWatchEnabled(cmd) {
+		return nil
+	}
+	warn, _ := cmd.Flags().GetFloat64("vlog-warn-ratio")
+	critical, _ := cmd.Flags().GetFloat64("vlog-critical-ratio")
+	return &vlogBreakdownAdapter{
+		registry: resourcewatch.Default,
+		provider: resourcewatch.NewVlogProvider(resourcewatch.VlogProviderOptions{DataDir: dataDir}),
+		dataDir:  dataDir,
+		warn:     warn,
+		critical: critical,
+	}
+}
+
+func (a *vlogBreakdownAdapter) Breakdown() (admin.VlogBreakdownResp, error) {
+	sample, err := a.provider.Snapshot(context.Background())
+	if err != nil {
+		return admin.VlogBreakdownResp{}, fmt.Errorf("vlog snapshot: %w", err)
+	}
+	cats := make([]admin.VlogCategoryBytes, 0, len(sample.Categories))
+	for k, v := range sample.Categories {
+		cats = append(cats, admin.VlogCategoryBytes{Category: string(k), VlogBytes: int64(v)})
+	}
+	sort.Slice(cats, func(i, j int) bool { return cats[i].VlogBytes > cats[j].VlogBytes })
+
+	gcFails := make(map[string]int32)
+	for _, e := range a.registry.Snapshot() {
+		gcFails[string(e.Category)] = e.ConsecutiveGCFailures()
+	}
+
+	smoke, _ := resourcewatch.VerifyVlogRegistry(a.dataDir, a.registry, false)
+	live, stale := smoke.Live, smoke.Stale
+	if live == nil {
+		live = []string{}
+	}
+	if stale == nil {
+		stale = []string{}
+	}
+
+	var ratio float64
+	if sample.Limit > 0 {
+		ratio = float64(sample.Open) / float64(sample.Limit)
+	}
+	level := "ok"
+	switch {
+	case ratio >= a.critical:
+		level = "critical"
+	case ratio >= a.warn:
+		level = "warn"
+	}
+	return admin.VlogBreakdownResp{
+		TotalVlogBytes: int64(sample.Open),
+		LimitBytes:     int64(sample.Limit),
+		Ratio:          ratio,
+		Level:          level,
+		Categories:     cats,
+		GCFailures:     gcFails,
+		SmokeReport:    admin.VlogSmokeReport{Live: live, Stale: stale},
+	}, nil
 }
 
 func startAutoSnapshotterWhenReady(
@@ -229,6 +304,7 @@ func init() {
 	serveCmd.Flags().Bool("badger-gc-disable", false, "disable BadgerDB vlog GC ticker (debug only)")
 	serveCmd.Flags().Int32("badger-gc-fail-threshold", 3, "consecutive RunValueLogGC failures before incident")
 	serveCmd.Flags().Bool("strict-vlog-registry", false, "fatal on vlog registry smoke mismatch (e2e: true)")
+	serveCmd.Flags().Duration("vlog-smoke-defer", 60*time.Second, "delay before vlog registry startup smoke runs")
 	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
 	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
 	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
@@ -1385,11 +1461,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	publicURL, _ := cmd.Flags().GetString("public-url")
 	adminDeps := &admin.Deps{
-		Manager:    srv.VolumeManager(),
-		Token:      tokenStore,
-		PublicURL:  publicURL,
-		NodeID:     nodeID,
-		PeerHealth: peerHealthAdapter{distBackend},
+		Manager:       srv.VolumeManager(),
+		Token:         tokenStore,
+		PublicURL:     publicURL,
+		NodeID:        nodeID,
+		PeerHealth:    peerHealthAdapter{distBackend},
+		VlogBreakdown: newVlogBreakdownAdapter(cmd, dataDir),
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))

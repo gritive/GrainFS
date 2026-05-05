@@ -331,6 +331,22 @@ func vlogWatchEnabled(cmd *cobra.Command) bool {
 	return enabled
 }
 
+// gcMetricsRecorder bridges resourcewatch GC ticks to Prometheus counters,
+// labeled by node + category. Stateless — safe for concurrent calls.
+type gcMetricsRecorder struct{ nodeID string }
+
+func (r gcMetricsRecorder) IncRuns(cat resourcewatch.Category) {
+	metrics.BadgerGCRunsTotal.WithLabelValues(r.nodeID, string(cat)).Inc()
+}
+
+func (r gcMetricsRecorder) IncFailures(cat resourcewatch.Category) {
+	metrics.BadgerGCFailuresTotal.WithLabelValues(r.nodeID, string(cat)).Inc()
+}
+
+func (r gcMetricsRecorder) SetConsecutive(cat resourcewatch.Category, n float64) {
+	metrics.BadgerGCConsecutiveFailures.WithLabelValues(r.nodeID, string(cat)).Set(n)
+}
+
 func startVlogResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID, dataDir string, recorder *incident.Recorder, clusterAlerts *server.AlertsState) {
 	if !vlogWatchEnabled(cmd) {
 		return
@@ -345,6 +361,7 @@ func startVlogResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID, d
 	gcDisable, _ := cmd.Flags().GetBool("badger-gc-disable")
 	gcFailThreshold, _ := cmd.Flags().GetInt32("badger-gc-fail-threshold")
 	strict, _ := cmd.Flags().GetBool("strict-vlog-registry")
+	smokeDefer, _ := cmd.Flags().GetDuration("vlog-smoke-defer")
 
 	if warnRatio <= 0 || criticalRatio <= 0 || warnRatio >= criticalRatio || criticalRatio >= 1.0 {
 		log.Warn().Float64("warn", warnRatio).Float64("critical", criticalRatio).Msg("vlog watcher: invalid ratios, disabled")
@@ -388,15 +405,22 @@ func startVlogResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID, d
 		}
 	}()
 
-	// Perf #1: deferred 60s smoke so async-loaded group-raft DBs can register.
+	// Perf #1: deferred smoke so async-loaded group-raft DBs can register.
+	// Default 60s; e2e tests pass a lower value via --vlog-smoke-defer.
+	if smokeDefer <= 0 {
+		smokeDefer = 60 * time.Second
+	}
 	go func() {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(60 * time.Second):
+		case <-time.After(smokeDefer):
 		}
 		report, err := resourcewatch.VerifyVlogRegistry(dataDir, nil, strict)
 		if err != nil {
+			if strict {
+				log.Fatal().Err(err).Msg("vlog registry smoke verification failed (strict mode)")
+			}
 			log.Warn().Err(err).Msg("vlog registry smoke verification error")
 		}
 		if len(report.Live) > 0 {
@@ -409,6 +433,7 @@ func startVlogResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID, d
 		go resourcewatch.RunGCTicker(ctx, resourcewatch.GCTickerConfig{
 			Interval:      gcInterval,
 			FailThreshold: gcFailThreshold,
+			Metrics:       gcMetricsRecorder{nodeID: nodeID},
 			OnFailIncident: func(cat resourcewatch.Category, err error) {
 				recordBadgerGCFailedIncident(ctx, recorder, nodeID, cat, err)
 				if clusterAlerts != nil {

@@ -34,6 +34,10 @@ type e2eClusterOptions struct {
 	ScrubInterval string
 	DisableNFS    bool
 	DisableNBD    bool
+	// ExtraArgs is appended verbatim to every node's `grainfs serve` cmdline.
+	// Use for per-test flag tweaks (e.g. `--vlog-warn-ratio=0.001`,
+	// `--badger-gc-disable=true`) so the harness stays generic.
+	ExtraArgs []string
 }
 
 type e2eCluster struct {
@@ -54,6 +58,7 @@ type e2eCluster struct {
 	ecParity      int
 	logPrefix     string
 	scrubInterval string
+	extraArgs     []string
 	stopped       bool
 	leaderIdx     int
 }
@@ -112,6 +117,7 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 		ecParity:      opts.ECParity,
 		logPrefix:     opts.LogPrefix,
 		scrubInterval: opts.ScrubInterval,
+		extraArgs:     append([]string(nil), opts.ExtraArgs...),
 		leaderIdx:     -1,
 	}
 	c.procs = make([]*exec.Cmd, opts.Nodes)
@@ -261,6 +267,7 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 	if c.mode == ClusterModeStaticPeers {
 		args = append(args, "--peers", c.staticPeersFor(i))
 	}
+	args = append(args, c.extraArgs...)
 
 	cmd := exec.Command(getBinary(), args...)
 	cmd.Stdout = logFile

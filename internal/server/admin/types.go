@@ -43,16 +43,50 @@ type ListClusterPeersResp struct {
 	Peers []ClusterPeerInfo `json:"peers"`
 }
 
+// VlogBreakdownAPI is the slim interface admin handlers need to surface the
+// vlog watcher's per-category state. Implemented by an adapter in serve.go
+// over *resourcewatch.Registry + VlogProvider; defined here so handler tests
+// can substitute a mock.
+type VlogBreakdownAPI interface {
+	Breakdown() (VlogBreakdownResp, error)
+}
+
+// VlogBreakdownResp is the JSON body of GET /v1/resource/vlog/breakdown.
+type VlogBreakdownResp struct {
+	TotalVlogBytes int64               `json:"total_vlog_bytes"`
+	LimitBytes     int64               `json:"limit_bytes"`
+	Ratio          float64             `json:"ratio"`
+	Level          string              `json:"level"` // "ok" | "warn" | "critical"
+	Categories     []VlogCategoryBytes `json:"categories"`
+	GCFailures     map[string]int32    `json:"consecutive_gc_failures_per_category"`
+	SmokeReport    VlogSmokeReport     `json:"smoke_report"`
+}
+
+// VlogCategoryBytes is one line item of the breakdown, sorted descending by
+// VlogBytes by the adapter.
+type VlogCategoryBytes struct {
+	Category  string `json:"category"`
+	VlogBytes int64  `json:"vlog_bytes"`
+}
+
+// VlogSmokeReport mirrors resourcewatch.SmokeReport on the wire so admin
+// stays decoupled from the resourcewatch package types.
+type VlogSmokeReport struct {
+	Live  []string `json:"live"`
+	Stale []string `json:"stale"`
+}
+
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
 type Deps struct {
-	Manager    *volume.Manager
-	Incident   incident.StateStore // List(ctx, limit) — optional, nil OK
-	Director   DirectorAPI         // optional; nil disables scrub admin endpoints
-	PeerHealth PeerHealthAPI       // optional; nil disables cluster peer admin endpoints
-	Token      *dashboard.TokenStore
-	PublicURL  string // e.g. "https://node1:9000"; empty means use localhost fallback
-	NodeID     string
+	Manager       *volume.Manager
+	Incident      incident.StateStore // List(ctx, limit) — optional, nil OK
+	Director      DirectorAPI         // optional; nil disables scrub admin endpoints
+	PeerHealth    PeerHealthAPI       // optional; nil disables cluster peer admin endpoints
+	VlogBreakdown VlogBreakdownAPI    // optional; nil disables vlog breakdown endpoint
+	Token         *dashboard.TokenStore
+	PublicURL     string // e.g. "https://node1:9000"; empty means use localhost fallback
+	NodeID        string
 }
 
 // Error is the domain error type returned by admin handlers. The HTTP adapter
