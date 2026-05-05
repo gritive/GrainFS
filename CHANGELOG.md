@@ -23,6 +23,27 @@
   metadata now uses the same incident-backed health calculation as list/stat,
   so a damaged volume cannot appear healthy in `volume info`.
 
+## [0.0.49.3] — 2026-05-06 — Predictive vlog watcher e2e leak-fire coverage
+
+### Added
+
+- `--badger-value-threshold` (hidden serve flag, test-only) installs a
+  process-wide `WithValueThreshold` override so even small metadata writes
+  spill into the value log. Defaults to 0 (Badger's 1 MiB default).
+- `internal/badgerutil.SetValueThresholdOverride` exposes the same hook to
+  test harnesses that open Badger via `SmallOptions` / `RaftLogOptions`.
+
+### Tests
+
+- New `TestE2E_VlogWatcher_FiresOnLeak` boots a single-node cluster with the
+  flag and a near-zero `--vlog-warn-ratio`, exercises a small S3 PUT workload,
+  and waits for the predictive watcher to record a `vlog_pressure` incident.
+  This closes the (g) follow-up from the predictive resource watcher TODO —
+  end-to-end "fires on leak" was previously only proven by unit tests because
+  the default 1 MiB value threshold kept e2e vlog file sizes at zero.
+- The existing `TestE2E_VlogWatcher_MetricsLive` comment was updated to point
+  at the new test for the leak-fire assertion.
+
 ## [0.0.49.2] — 2026-05-06 — Predictive watcher cold-start suppression
 
 ### Fixed

@@ -372,6 +372,8 @@ func init() {
 	serveCmd.Flags().Int32("badger-gc-fail-threshold", 3, "consecutive RunValueLogGC failures before incident")
 	serveCmd.Flags().Bool("strict-vlog-registry", false, "fatal on vlog registry smoke mismatch (e2e: true)")
 	serveCmd.Flags().Duration("vlog-smoke-defer", 60*time.Second, "delay before vlog registry startup smoke runs")
+	serveCmd.Flags().Int64("badger-value-threshold", 0, "force BadgerDB ValueThreshold (bytes) so values above this size spill to vlog; 0 keeps Badger default (1 MiB). Test-only.")
+	_ = serveCmd.Flags().MarkHidden("badger-value-threshold")
 	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
 	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
 	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
@@ -433,6 +435,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data")
 	port, _ := cmd.Flags().GetInt("port")
 	peersStr, _ := cmd.Flags().GetString("peers")
+
+	if vt, _ := cmd.Flags().GetInt64("badger-value-threshold"); vt > 0 {
+		badgerutil.SetValueThresholdOverride(vt)
+	}
 
 	addr := fmt.Sprintf(":%d", port)
 
