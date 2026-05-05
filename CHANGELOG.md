@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.48.1] — 2026-05-06 — Multi-raft restart e2e timeout fix
+
+### Fixed
+
+- **TestE2E_MultiRaftSharding_RestartRecovery / PerGroupPersistence** — The
+  tests passed `0` as `seedGroups` when restarting nodes, which made the
+  serve binary auto-derive `0 → max(8, (1+peers)*4) = 12` for a 3-node
+  cluster. Each restart re-proposed 10 unseeded shard groups and waited
+  for them via `waitForShardGroupCount(12, 30s)`, pushing cumulative
+  test time past the 600s budget under macOS host contention. The
+  test now caches the original `seedGroups` on `mrCluster` and reuses
+  it on restart so WAL replay alone satisfies the wait. With the fix
+  both tests run in ~32s instead of timing out.
+
+### Changed
+
+- **`E2E_TEST_TIMEOUT` default 600s → 900s** — gives 300s headroom for
+  long-running multi-raft and predictive-warning tests under host load.
+
 ## [0.0.48.0] — 2026-05-06 — Badger role-scoped startup recovery
 
 ### Added

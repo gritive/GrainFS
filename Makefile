@@ -11,7 +11,7 @@ FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
-E2E_TEST_TIMEOUT ?= 600s
+E2E_TEST_TIMEOUT ?= 900s
 E2E_TEST_PARALLEL ?= 1
 E2E_TEST_P ?= 1
 
