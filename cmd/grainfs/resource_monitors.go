@@ -40,6 +40,7 @@ func startFDResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID stri
 		MinSamples:        2,
 		MaxSamples:        20,
 		ClassificationCap: classificationCap,
+		ResourceLabel:     "FD",
 	})
 	provider := resourcewatch.NewFDProvider(resourcewatch.FDProviderOptions{ClassificationCap: classificationCap})
 	watcher := resourcewatch.NewWatcher(
@@ -204,6 +205,7 @@ func startGoroutineResourceMonitor(ctx context.Context, cmd *cobra.Command, node
 		RecoveryWindow: recoveryWindow,
 		MinSamples:     2,
 		MaxSamples:     20,
+		ResourceLabel:  "goroutine",
 	})
 	provider := resourcewatch.NewGoroutineProvider(resourcewatch.GoroutineProviderOptions{Limit: criticalCount})
 	watcher := resourcewatch.NewWatcher(
@@ -356,6 +358,7 @@ func startVlogResourceMonitor(ctx context.Context, cmd *cobra.Command, nodeID, d
 		RecoveryWindow: recoveryWindow,
 		MinSamples:     2,
 		MaxSamples:     20,
+		ResourceLabel:  "vlog",
 	})
 	provider := resourcewatch.NewVlogProvider(resourcewatch.VlogProviderOptions{DataDir: dataDir})
 	watcher := resourcewatch.NewWatcher(
