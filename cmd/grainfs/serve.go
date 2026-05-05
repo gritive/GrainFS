@@ -209,6 +209,15 @@ func init() {
 	serveCmd.Flags().Duration("fd-eta-window", 30*time.Minute, "positive-trend ETA window for predictive FD warnings")
 	serveCmd.Flags().Duration("fd-recovery-window", time.Minute, "stable below-threshold window before resolving FD incidents")
 	serveCmd.Flags().Int("fd-classification-cap", 512, "max open file descriptors to classify by category per sample")
+	// Predictive goroutine warnings — same Detector pattern as FD watcher.
+	// Defaults measurement-justified: 3-node cluster idle baseline ~200
+	// goroutines/node, so 5000 warn (~25× idle) and 20000 critical (~100×).
+	serveCmd.Flags().Bool("goroutine-watch-enabled", true, "enable predictive goroutine count warnings")
+	serveCmd.Flags().Int("goroutine-warn", 5000, "goroutine count that triggers warn-level alert (transition-only firing)")
+	serveCmd.Flags().Int("goroutine-critical", 20000, "goroutine count that triggers critical-level alert")
+	serveCmd.Flags().Duration("goroutine-poll-interval", 30*time.Second, "polling interval for goroutine count sampling")
+	serveCmd.Flags().Duration("goroutine-eta-window", 30*time.Minute, "ETA projection window for predictive goroutine warnings")
+	serveCmd.Flags().Duration("goroutine-recovery-window", time.Minute, "minimum time below warn threshold before transitioning to ok")
 	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
 	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
 	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
