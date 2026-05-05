@@ -287,7 +287,7 @@ func (s *BackgroundScrubber) sourceTickerLoop(ctx context.Context, d time.Durati
 func (s *BackgroundScrubber) SourceRunOnce(ctx context.Context, scope ScrubScope) {
 	for name, src := range s.sources {
 		ver := s.verifiers[name]
-		ch, err := src.Iter(ctx, scope, "")
+		ch, err := src.Iter(ctx, scope, "", "")
 		if err != nil {
 			log.Warn().Str("source", name).Err(err).Msg("scrub: source iter failed")
 			continue

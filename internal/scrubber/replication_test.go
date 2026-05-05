@@ -49,7 +49,7 @@ func TestReplicationObjectSource_WalksBucketPrefix(t *testing.T) {
 	require.Equal(t, "replication", src.Name())
 
 	collect := func(prefix string) []string {
-		ch, err := src.Iter(context.Background(), ScopeFull, prefix)
+		ch, err := src.Iter(context.Background(), ScopeFull, "", prefix)
 		require.NoError(t, err)
 		var keys []string
 		for blk := range ch {
@@ -72,7 +72,7 @@ func TestReplicationVerifier_HealthyCorruptMissing(t *testing.T) {
 	putObject(t, b, bucket, key, []byte("DDDD"))
 
 	src := NewReplicationObjectSource("replication", bucket, "__vol/", b)
-	ch, err := src.Iter(context.Background(), ScopeFull, "")
+	ch, err := src.Iter(context.Background(), ScopeFull, "", "")
 	require.NoError(t, err)
 	var blocks []Block
 	for blk := range ch {
@@ -111,7 +111,7 @@ func TestReplicationVerifier_ETagIsObjectMD5(t *testing.T) {
 	putObject(t, b, bucket, key, []byte("hello"))
 
 	src := NewReplicationObjectSource("replication", bucket, "__vol/", b)
-	ch, _ := src.Iter(context.Background(), ScopeFull, "")
+	ch, _ := src.Iter(context.Background(), ScopeFull, "", "")
 	var blocks []Block
 	for blk := range ch {
 		blocks = append(blocks, blk)

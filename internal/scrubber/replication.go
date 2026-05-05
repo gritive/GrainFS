@@ -45,8 +45,12 @@ func NewReplicationObjectSource(name, bucket, prefix string, walker ObjectWalker
 
 func (s *ReplicationObjectSource) Name() string { return s.sourceName }
 
-func (s *ReplicationObjectSource) Iter(ctx context.Context, scope ScrubScope, keyPrefix string) (<-chan Block, error) {
+func (s *ReplicationObjectSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error) {
 	_ = scope
+	walkBucket := s.bucket
+	if bucket != "" {
+		walkBucket = bucket
+	}
 	walkPrefix := s.prefix
 	if keyPrefix != "" {
 		walkPrefix = keyPrefix
@@ -54,12 +58,12 @@ func (s *ReplicationObjectSource) Iter(ctx context.Context, scope ScrubScope, ke
 	out := make(chan Block, 64)
 	go func() {
 		defer close(out)
-		_ = s.walker.WalkObjects(ctx, s.bucket, walkPrefix, func(obj *storage.Object) error {
+		_ = s.walker.WalkObjects(ctx, walkBucket, walkPrefix, func(obj *storage.Object) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case out <- Block{
-				Bucket:       s.bucket,
+				Bucket:       walkBucket,
 				Key:          obj.Key,
 				VersionID:    "current",
 				ExpectedETag: obj.ETag,
