@@ -20,6 +20,7 @@ import (
 
 // Compile-time proof that DistributedBackend satisfies scrubber.Scrubbable.
 var _ scrubber.Scrubbable = (*DistributedBackend)(nil)
+var _ scrubber.ShardIntegrityReader = (*DistributedBackend)(nil)
 
 // writeVersionedObjectMeta seeds the FSM with a versioned object metadata
 // entry plus its `lat:` pointer, mirroring what applyPutObjectMeta writes.
@@ -232,6 +233,37 @@ func TestWriteShard_ReadShard_RoundTrip(t *testing.T) {
 	got, err := b.ReadShard("bkt", "k", path)
 	require.NoError(t, err)
 	assert.True(t, bytes.Equal(payload, got), "round-trip mismatch")
+}
+
+func TestReadShardIntegrity_EncodedVerified(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shard_0")
+
+	payload := []byte("encoded-payload")
+	require.NoError(t, b.WriteShard("bkt", "k", path, payload))
+
+	got, err := b.ReadShardIntegrity("bkt", "k", path)
+	require.NoError(t, err)
+	assert.Equal(t, scrubber.ShardIntegrityVerified, got.Status)
+	assert.Equal(t, payload, got.Payload)
+}
+
+func TestReadShardIntegrity_LegacyRawUnverifiedButReadShardCompatible(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shard_0")
+	payload := []byte("legacy-raw-payload")
+	require.NoError(t, os.WriteFile(path, payload, 0o600))
+
+	got, err := b.ReadShardIntegrity("bkt", "k", path)
+	require.NoError(t, err)
+	assert.Equal(t, scrubber.ShardIntegrityUnverifiedLegacy, got.Status)
+	assert.Equal(t, payload, got.Payload)
+
+	compat, err := b.ReadShard("bkt", "k", path)
+	require.NoError(t, err)
+	assert.Equal(t, payload, compat)
 }
 
 func TestWriteShard_AtomicOverwrite(t *testing.T) {
