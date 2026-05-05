@@ -44,7 +44,12 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "mkdtemp: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(dir)
+	cleanupDataDir := func() error {
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("cleanup data dir %s: %w", dir, err)
+		}
+		return nil
+	}
 	testServerDataDir = dir
 
 	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
@@ -75,12 +80,21 @@ func TestMain(m *testing.M) {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "start server: %v\n", err)
+		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
+			fmt.Fprintln(os.Stderr, cleanupErr)
+		}
 		os.Exit(1)
 	}
-	defer terminateProcess(cmd)
 
 	testServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPortM(port, 30*time.Second)
+	if err := waitForPortM(port, 30*time.Second); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		terminateProcess(cmd)
+		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
+			fmt.Fprintln(os.Stderr, cleanupErr)
+		}
+		os.Exit(1)
+	}
 
 	testS3Client = newS3Client(testServerURL)
 
@@ -108,6 +122,12 @@ func TestMain(m *testing.M) {
 	}
 
 	terminateProcess(cmd)
+	if err := cleanupDataDir(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		if code == 0 {
+			code = 1
+		}
+	}
 	os.Exit(code)
 }
 
@@ -326,18 +346,17 @@ func waitForPortsParallelErr(ports []int, timeout time.Duration) error {
 }
 
 // waitForPortM is the TestMain variant of waitForPort — no *testing.T available there.
-func waitForPortM(port int, timeout time.Duration) {
+func waitForPortM(port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
 		if err == nil {
 			conn.Close()
-			return
+			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	fmt.Fprintf(os.Stderr, "server did not start on port %d within %v\n", port, timeout)
-	os.Exit(1)
+	return fmt.Errorf("server did not start on port %d within %v", port, timeout)
 }
 
 func waitForS3Write(t testing.TB, client *s3.Client, bucket, key string, timeout time.Duration) {
