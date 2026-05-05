@@ -30,8 +30,13 @@ func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Back
 	if !dedupEnabled {
 		return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
 	}
-	db, _, err := badgerrole.OpenRole(badgerrole.DefaultRegistry(), badgerrole.RoleDedup, badgerrole.PathContext{DataDir: dataDir})
+	reg := badgerrole.DefaultRegistry()
+	db, decision, err := badgerrole.OpenRole(reg, badgerrole.RoleDedup, badgerrole.PathContext{DataDir: dataDir})
 	if err != nil {
+		if feature, ok := optionalRoleDisabled(reg, decision); ok {
+			logOptionalRoleDisabled(badgerrole.RoleDedup, feature, err)
+			return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
+		}
 		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)
 	}
 	opts.DedupIndex = dedup.NewBadgerIndex(db)

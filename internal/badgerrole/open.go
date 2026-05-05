@@ -19,11 +19,11 @@ func OpenRole(reg Registry, role Role, ctx PathContext) (*badger.DB, Decision, e
 	}
 	path, err := reg.ResolvePath(role, ctx)
 	if err != nil {
-		return nil, Decision{Role: role, GroupID: ctx.GroupID, Status: DecisionOpenFailed, Action: RecoveryActionBlockStart, Reason: err.Error(), Err: err}, err
+		return nil, Decision{Role: role, GroupID: ctx.GroupID, Status: DecisionOpenFailed, Action: actionFor(spec), Reason: err.Error(), Err: err}, err
 	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		wrapped := fmt.Errorf("create %s dir: %w", role, err)
-		return nil, Decision{Role: role, GroupID: ctx.GroupID, Path: path, Status: DecisionOpenFailed, Action: RecoveryActionBlockStart, Reason: wrapped.Error(), Err: wrapped}, wrapped
+		return nil, Decision{Role: role, GroupID: ctx.GroupID, Path: path, Status: DecisionOpenFailed, Action: actionFor(spec), Reason: wrapped.Error(), Err: wrapped}, wrapped
 	}
 
 	opts := badgerutil.SmallOptions(path)
@@ -33,8 +33,19 @@ func OpenRole(reg Registry, role Role, ctx PathContext) (*badger.DB, Decision, e
 	db, err := badger.Open(opts)
 	if err != nil {
 		wrapped := fmt.Errorf("open %s badger at %s: %w", role, path, err)
-		return nil, Decision{Role: role, GroupID: ctx.GroupID, Path: path, Status: DecisionOpenFailed, Action: RecoveryActionBlockStart, Reason: wrapped.Error(), Err: wrapped, ProbeDuration: time.Since(start)}, wrapped
+		return nil, Decision{Role: role, GroupID: ctx.GroupID, Path: path, Status: DecisionOpenFailed, Action: actionFor(spec), Reason: wrapped.Error(), Err: wrapped, ProbeDuration: time.Since(start)}, wrapped
 	}
 
 	return db, Decision{Role: role, GroupID: ctx.GroupID, Path: path, Status: DecisionOK, Action: RecoveryActionNone, ProbeDuration: time.Since(start)}, nil
+}
+
+func actionFor(spec RoleSpec) RecoveryAction {
+	switch spec.Criticality {
+	case CriticalityOptional:
+		return RecoveryActionDisableFeature
+	case CriticalityReadOnly:
+		return RecoveryActionStartReadOnly
+	default:
+		return RecoveryActionBlockStart
+	}
 }

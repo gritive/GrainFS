@@ -1521,20 +1521,27 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	srvOpts = newSrvOpts
 	defer receiptWiring.Close()
 
-	incidentDB, err := openBadgerSubDB(dataDir, "incident-state")
+	var incidentRecorder *incident.Recorder
+	incidentDB, incidentDecision, err := badgerrole.OpenRole(roleRegistry, badgerrole.RoleIncidentState, badgerrole.PathContext{DataDir: dataDir})
 	if err != nil {
-		return fmt.Errorf("open incident db: %w", err)
+		if feature, ok := optionalRoleDisabled(roleRegistry, incidentDecision); ok {
+			logOptionalRoleDisabled(badgerrole.RoleIncidentState, feature, err)
+		} else {
+			return fmt.Errorf("open incident db: %w", err)
+		}
+	} else {
+		defer incidentDB.Close()
+		incidentVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryIncident, incidentDB)
+		defer resourcewatch.DeregisterDB(incidentVlogEntry)
+		incidentStore := badgerstore.New(incidentDB)
+		incidentRecorder = incident.NewRecorder(incidentStore, incident.NewReducer())
+		distBackend.SetIncidentRecorder(incidentRecorder)
+		srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
+		startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
+		startGoroutineResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
+		startVlogResourceMonitor(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
 	}
-	defer incidentDB.Close()
-	incidentVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryIncident, incidentDB)
-	defer resourcewatch.DeregisterDB(incidentVlogEntry)
-	incidentStore := badgerstore.New(incidentDB)
-	incidentRecorder := incident.NewRecorder(incidentStore, incident.NewReducer())
-	distBackend.SetIncidentRecorder(incidentRecorder)
-	srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
-	startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
-	startGoroutineResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
-	startVlogResourceMonitor(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
+	clusterIncidentRecorder, scrubberIncidentRecorder := incidentRecorderInterfaces(incidentRecorder)
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
@@ -1685,7 +1692,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// trigger. Independent of periodic scrub interval — operators must be
 	// able to run `grainfs volume scrub <name>` even with --scrub-interval=0.
 	director := scrubber.NewDirector(scrubber.DirectorOpts{
-		Incident:  incidentRecorder,
+		Incident:  scrubberIncidentRecorder,
 		QueueSize: 64,
 		NodeID:    nodeID,
 	})
@@ -1740,7 +1747,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		placementMonitors := newPlacementMonitorRegistry()
 		startPlacementMonitor := func(monitorCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
-			gb.SetIncidentRecorder(incidentRecorder)
+			if clusterIncidentRecorder != nil {
+				gb.SetIncidentRecorder(clusterIncidentRecorder)
+			}
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), scrubInterval)
 			splitShardKey := func(shardKey string) (string, string) {
 				objectKey, versionID := shardKey, ""
@@ -1760,7 +1769,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 					Key:           objectKey,
 					VersionID:     versionID,
 					ShardIdx:      shardIdx,
-					Recorder:      incidentRecorder,
+					Recorder:      clusterIncidentRecorder,
 					CorrelationID: correlationID,
 				}
 				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
