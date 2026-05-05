@@ -51,14 +51,14 @@ var ErrForwardBodySizeMismatch = errors.New("coordinator: forwarded body size mi
 //   - forward : ForwardSender     (0x08 wire dialer; nil disables forwarding)
 //   - selfID  : this node's ID    (drives self-leader and self-voter checks)
 type ClusterCoordinator struct {
-	base    storage.Backend
-	groups  *DataGroupManager
-	router  *Router
-	meta    ShardGroupSource
-	forward *ForwardSender
-	selfID  string
-	selfIDs map[string]struct{}
-	addr    NodeAddressBook
+	base        storage.Backend
+	groups      *DataGroupManager
+	router      *Router
+	meta        ShardGroupSource
+	forward     *ForwardSender
+	selfID      string
+	selfAliases []string
+	addr        NodeAddressBook
 
 	maxBody int64
 }
@@ -81,7 +81,6 @@ func NewClusterCoordinator(
 		router:  router,
 		meta:    meta,
 		selfID:  selfID,
-		selfIDs: map[string]struct{}{selfID: {}},
 		maxBody: DefaultMaxForwardBodyBytes,
 	}
 }
@@ -107,15 +106,12 @@ func (c *ClusterCoordinator) WithSelfPeerAlias(id string) *ClusterCoordinator {
 	if id == "" {
 		return c
 	}
-	if c.selfIDs == nil {
-		c.selfIDs = map[string]struct{}{c.selfID: {}}
-	}
-	c.selfIDs[id] = struct{}{}
+	c.selfAliases = append(c.selfAliases, id)
 	return c
 }
 
-func (c *ClusterCoordinator) isSelfPeer(id string) bool {
-	_, ok := c.selfIDs[id]
+func (c *ClusterCoordinator) matchSelfPeer(id string) bool {
+	_, ok := NewShardGroupPeerSet(ShardGroupEntry{PeerIDs: []string{id}}).MatchLocal(c.selfID, c.selfAliases...)
 	return ok
 }
 
@@ -376,12 +372,7 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 	t := routeTarget{
 		groupID: entry.ID,
 	}
-	for _, p := range entry.PeerIDs {
-		if c.isSelfPeer(p) {
-			t.selfIsVoter = true
-			break
-		}
-	}
+	_, t.selfIsVoter = NewShardGroupPeerSet(entry).MatchLocal(c.selfID, c.selfAliases...)
 	t.selfIsOnlyVoter = t.selfIsVoter && len(entry.PeerIDs) == 1
 	if t.selfIsVoter && c.groups != nil {
 		if dg2 := c.groups.Get(entry.ID); dg2 != nil && dg2.Backend() != nil &&
@@ -475,16 +466,7 @@ func (c *ClusterCoordinator) localWriteBackend(ctx context.Context, target route
 }
 
 func (c *ClusterCoordinator) peersForForward(entry ShardGroupEntry) []string {
-	out := make([]string, 0, len(entry.PeerIDs))
-	selfPeers := make([]string, 0, 1)
-	for _, p := range entry.PeerIDs {
-		if c.isSelfPeer(p) {
-			selfPeers = append(selfPeers, p)
-			continue
-		}
-		out = append(out, p)
-	}
-	return append(out, selfPeers...)
+	return NewShardGroupPeerSet(entry).ForwardOrder(c.selfID, c.selfAliases...)
 }
 
 // localBackend returns the GroupBackend embedded in the named group. Caller
@@ -1158,7 +1140,7 @@ func (c *ClusterCoordinator) ScrubSessionStat(ctx context.Context, sessionID str
 		failures []string
 	)
 	for _, n := range nodes {
-		if c.isSelfPeer(n.ID) {
+		if c.matchSelfPeer(n.ID) {
 			continue
 		}
 		wg.Add(1)

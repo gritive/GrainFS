@@ -74,19 +74,36 @@ func TestShardGroupPlaceholderDoesNotReplaceExistingGroup(t *testing.T) {
 
 func TestSeedShardGroupVotersUsesConsistentPeerIDs(t *testing.T) {
 	peers := []string{"127.0.0.1:20008", "127.0.0.1:20011", "127.0.0.1:20014"}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-a", Address: "127.0.0.1:20005"},
+		{ID: "node-b", Address: "127.0.0.1:20008"},
+		{ID: "node-c", Address: "127.0.0.1:20011"},
+		{ID: "node-d", Address: "127.0.0.1:20014"},
+	}
 
-	group0 := seedShardGroupVoters("127.0.0.1:20005", peers, "group-0", 3)
+	group0 := seedShardGroupVoters("node-a", "127.0.0.1:20005", peers, nodes, "group-0", 3)
 	require.Equal(t, []string{
-		"127.0.0.1:20005",
-		"127.0.0.1:20008",
-		"127.0.0.1:20011",
-		"127.0.0.1:20014",
+		"node-a",
+		"node-b",
+		"node-c",
+		"node-d",
 	}, group0)
 
-	groupN := seedShardGroupVoters("127.0.0.1:20005", peers, "group-7", 3)
+	groupN := seedShardGroupVoters("node-a", "127.0.0.1:20005", peers, nodes, "group-7", 3)
 	require.Len(t, groupN, 3)
 	for _, peer := range groupN {
-		require.Contains(t, append([]string{"127.0.0.1:20005"}, peers...), peer)
+		require.Contains(t, []string{"node-a", "node-b", "node-c", "node-d"}, peer)
 		require.NotContains(t, peer, "perf-load-N16")
 	}
+}
+
+func TestSeedShardGroupPeerIDsKeepsUnknownStaticPeersAsAliases(t *testing.T) {
+	got := seedShardGroupPeerIDs("node-a", "127.0.0.1:20005", []string{
+		"127.0.0.1:20008",
+		"127.0.0.1:20011",
+	}, []cluster.MetaNodeEntry{
+		{ID: "node-b", Address: "127.0.0.1:20008"},
+	})
+
+	require.Equal(t, []string{"node-a", "node-b", "127.0.0.1:20011"}, got)
 }
