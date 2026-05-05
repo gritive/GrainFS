@@ -18,6 +18,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // leadershipSource is the minimum surface the manager needs from a Raft node.
@@ -50,11 +51,11 @@ type LifecycleManager struct {
 func (m *LifecycleManager) Store() *lifecycle.Store { return m.store }
 
 // NewLifecycleManager wires a lifecycle worker over the given DistributedBackend.
-// The worker's Store uses the shared FSM BadgerDB, and the DistributedBackend
-// itself is the ObjectDeleter (it already satisfies the interface after Slice 1).
+// The worker's Store uses the shared FSM BadgerDB, and storage.Operations owns
+// lifecycle object mutations so optional capability ordering stays in one place.
 func NewLifecycleManager(backend *DistributedBackend, interval time.Duration) *LifecycleManager {
 	store := lifecycle.NewStore(backend.FSMDB())
-	worker := lifecycle.NewWorker(store, backend, backend, interval)
+	worker := lifecycle.NewWorker(store, backend, storage.NewOperations(backend), interval)
 	return &LifecycleManager{
 		leadership: backend.node,
 		store:      store,

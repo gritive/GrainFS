@@ -53,6 +53,11 @@ func (o *Operations) DeleteObjectVersion(bucket, key, versionID string) error {
 	return plan.objectVersionDeleter.DeleteObjectVersion(bucket, key, versionID)
 }
 
+func (o *Operations) DeleteObject(ctx context.Context, bucket, key string) error {
+	_, err := o.DeleteObjectReturningMarker(ctx, bucket, key)
+	return err
+}
+
 func (o *Operations) DeleteObjectReturningMarker(ctx context.Context, bucket, key string) (string, error) {
 	plan := o.planForCall()
 	if plan.versionedSoftDeleter != nil {
