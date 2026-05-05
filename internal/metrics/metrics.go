@@ -229,6 +229,54 @@ var (
 		Help: "Estimated seconds until the named goroutine threshold is reached; -1 means no positive trend.",
 	}, []string{"node_id", "threshold"})
 
+	// VlogBytes tracks aggregate vlog bytes across all registered BadgerDB instances.
+	VlogBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_vlog_bytes",
+		Help: "Aggregate BadgerDB vlog bytes across all registered DB instances.",
+	}, []string{"node_id"})
+
+	// VlogBytesByCategory exposes per-category vlog breakdown.
+	VlogBytesByCategory = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_vlog_bytes_by_category",
+		Help: "BadgerDB vlog bytes grouped by category (meta, group-raft, incident, ...).",
+	}, []string{"node_id", "category"})
+
+	// VlogLimitBytes is the configured ratio denominator (Bavail + vlog).
+	VlogLimitBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_vlog_limit_bytes",
+		Help: "vlog ratio denominator: Bavail (statfs) + current vlog bytes.",
+	}, []string{"node_id"})
+
+	// VlogUsedRatio is the watcher's primary fire signal (vlog / limit).
+	VlogUsedRatio = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_vlog_used_ratio",
+		Help: "Current vlog usage ratio; warn fires above --vlog-warn-ratio.",
+	}, []string{"node_id"})
+
+	// VlogETASeconds estimates time until a vlog threshold is reached.
+	VlogETASeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_vlog_eta_seconds",
+		Help: "Estimated seconds until the named vlog threshold is reached; -1 means no positive trend.",
+	}, []string{"node_id", "threshold"})
+
+	// BadgerGCRunsTotal counts vlog GC tick invocations per DB category.
+	BadgerGCRunsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_badger_gc_runs_total",
+		Help: "Total RunValueLogGC invocations per category.",
+	}, []string{"node_id", "category"})
+
+	// BadgerGCFailuresTotal counts vlog GC tick failures (excludes ErrNoRewrite).
+	BadgerGCFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_badger_gc_failures_total",
+		Help: "Total RunValueLogGC failures per category (excludes ErrNoRewrite).",
+	}, []string{"node_id", "category"})
+
+	// BadgerGCConsecutiveFailures exposes the live retry counter per category.
+	BadgerGCConsecutiveFailures = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_badger_gc_consecutive_failures",
+		Help: "Current consecutive RunValueLogGC failures per category; resets on ErrNoRewrite.",
+	}, []string{"node_id", "category"})
+
 	// Balancer metrics.
 
 	BalancerGossipTotal = promauto.NewCounter(prometheus.CounterOpts{
