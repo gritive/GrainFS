@@ -206,6 +206,20 @@ func (s *BackgroundScrubber) SetEmitter(e Emitter) {
 	s.repairer = NewRepairEngine(s.backend, WithRepairEmitter(e))
 }
 
+// Verifier returns the ShardVerifier owned by this scrubber. Exposed so
+// out-of-loop adapters (e.g. ECScrubVerifier in ec_source.go) reuse the
+// same verify behavior as the background runOnce path.
+func (s *BackgroundScrubber) Verifier() *ShardVerifier { return s.verifier }
+
+// Limiter returns the I/O rate limiter (default 100 ops/sec). Exposed so
+// adapters share the same global I/O budget as the background ticker.
+func (s *BackgroundScrubber) Limiter() *rate.Limiter { return s.limiter }
+
+// Emitter returns the current event emitter. Exposed so adapters emit
+// HealEvents through the same audit pipeline as runOnce, preserving
+// HealReceipt symmetry between background and CLI-trigger sessions.
+func (s *BackgroundScrubber) Emitter() Emitter { return s.emitter }
+
 // SetInterval changes the scrub interval at runtime without restarting.
 func (s *BackgroundScrubber) SetInterval(d time.Duration) {
 	select {
