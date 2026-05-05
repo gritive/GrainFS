@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -511,7 +510,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 func seedInitialShardGroups(
 	ctx context.Context,
 	metaRaft *cluster.MetaRaft,
-	selfPeerID string,
+	selfNodeID string,
+	selfAddr string,
 	peers []string,
 	seedGroups int,
 ) error {
@@ -525,7 +525,7 @@ func seedInitialShardGroups(
 	const replicationFactor = 3
 	for i := 0; i < seedGroups; i++ {
 		groupID := fmt.Sprintf("group-%d", i)
-		voters := seedShardGroupVoters(selfPeerID, peers, groupID, replicationFactor)
+		voters := seedShardGroupVoters(selfNodeID, selfAddr, peers, metaRaft.FSM().Nodes(), groupID, replicationFactor)
 
 		sgCtx, sgCancel := context.WithTimeout(bootstrapCtx, 5*time.Second)
 		err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
@@ -546,12 +546,49 @@ func seedInitialShardGroups(
 	return nil
 }
 
-func seedShardGroupVoters(selfPeerID string, peers []string, groupID string, replicationFactor int) []string {
-	clusterPeers := append([]string{selfPeerID}, peers...)
+func seedShardGroupVoters(
+	selfNodeID string,
+	selfAddr string,
+	peers []string,
+	nodes []cluster.MetaNodeEntry,
+	groupID string,
+	replicationFactor int,
+) []string {
+	clusterPeers := seedShardGroupPeerIDs(selfNodeID, selfAddr, peers, nodes)
 	if groupID == "group-0" {
 		return clusterPeers
 	}
 	return cluster.PickVoters(groupID, clusterPeers, replicationFactor)
+}
+
+func seedShardGroupPeerIDs(selfNodeID string, selfAddr string, peers []string, nodes []cluster.MetaNodeEntry) []string {
+	byAddress := make(map[string]string, len(nodes)+1)
+	if selfAddr != "" && selfNodeID != "" {
+		byAddress[selfAddr] = selfNodeID
+	}
+	for _, node := range nodes {
+		if node.Address != "" && node.ID != "" {
+			byAddress[node.Address] = node.ID
+		}
+	}
+
+	out := make([]string, 0, 1+len(peers))
+	if selfNodeID != "" {
+		out = append(out, selfNodeID)
+	} else {
+		out = append(out, selfAddr)
+	}
+	for _, peer := range peers {
+		if id, ok := byAddress[peer]; ok {
+			out = append(out, id)
+			continue
+		}
+		// Static --peers clusters may not know every remote node ID during the
+		// first bootstrap pass. Keep the dialable address as a legacy alias; the
+		// address-book seam resolves stable node IDs once they are registered.
+		out = append(out, peer)
+	}
+	return out
 }
 
 func waitForMetaRaftLeader(ctx context.Context, metaRaft *cluster.MetaRaft, timeout time.Duration) error {
@@ -943,7 +980,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		addNodeCancel()
 
-		if err := seedInitialShardGroups(ctx, metaRaft, raftAddr, peers, seedGroups); err != nil {
+		if err := seedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups); err != nil {
 			return err
 		}
 		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
@@ -1006,7 +1043,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
 	group0 := cluster.NewDataGroupWithBackend(
 		"group-0",
-		append([]string{nodeID}, peers...),
+		seedShardGroupVoters(nodeID, raftAddr, peers, metaRaft.FSM().Nodes(), "group-0", 3),
 		group0Backend,
 	)
 	dgMgr.Add(group0)
@@ -1069,15 +1106,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			return nil
 		}
 		ensureShardGroupPlaceholder(dgMgr, entry)
-		// Only instantiate for groups where we are a voter. New dynamic groups
-		// use nodeID; legacy/static groups may still contain raftAddr.
-		isVoter := false
-		for _, p := range entry.PeerIDs {
-			if p == nodeID || p == raftAddr {
-				isVoter = true
-				break
-			}
-		}
+		// Only instantiate for groups where we are a voter. Shard groups should
+		// store node IDs; raftAddr remains a local alias for legacy/static
+		// entries written before that invariant existed.
+		groupNodeID, isVoter := cluster.NewShardGroupPeerSet(entry).MatchLocal(nodeID, raftAddr)
 		if !isVoter {
 			return nil
 		}
@@ -1103,10 +1135,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			ownedGroups.mu.Unlock()
 		}()
 
-		groupNodeID := nodeID
-		if !slices.Contains(entry.PeerIDs, nodeID) && slices.Contains(entry.PeerIDs, raftAddr) {
-			groupNodeID = raftAddr
-		}
 		glc := cluster.GroupLifecycleConfig{
 			NodeID:    groupNodeID,
 			DataDir:   dataDir,

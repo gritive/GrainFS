@@ -48,17 +48,5 @@ func lookupForwardTarget(src shardGroupSource, groupID string) (string, error) {
 // If selfID is not in the group's peer list, the original order is returned
 // unchanged. Caller (ClusterCoordinator) feeds the result to ForwardSender.Send.
 func PeersForForward(entry ShardGroupEntry, selfID string) []string {
-	out := make([]string, 0, len(entry.PeerIDs))
-	var selfFound bool
-	for _, p := range entry.PeerIDs {
-		if p == selfID {
-			selfFound = true
-			continue
-		}
-		out = append(out, p)
-	}
-	if selfFound {
-		out = append(out, selfID)
-	}
-	return out
+	return NewShardGroupPeerSet(entry).ForwardOrder(selfID)
 }

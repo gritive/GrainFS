@@ -34,9 +34,9 @@ type fakeBackend struct {
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
 	c := NewClusterCoordinator(nil, nil, nil, nil, "node-a").WithSelfPeerAlias("127.0.0.1:9001")
 
-	require.True(t, c.isSelfPeer("node-a"))
-	require.True(t, c.isSelfPeer("127.0.0.1:9001"))
-	require.False(t, c.isSelfPeer("node-b"))
+	require.True(t, c.matchSelfPeer("node-a"))
+	require.True(t, c.matchSelfPeer("127.0.0.1:9001"))
+	require.False(t, c.matchSelfPeer("node-b"))
 
 	peers := c.peersForForward(ShardGroupEntry{
 		ID:      "group-1",
