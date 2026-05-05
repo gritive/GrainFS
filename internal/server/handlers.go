@@ -253,7 +253,7 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 
-	objects, err := s.backend.ListObjects(ctx, bucket, prefix, maxKeys)
+	objects, err := s.ops.ListObjects(ctx, bucket, prefix, maxKeys)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -308,7 +308,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Check if object already exists (for overwrite — don't double-count)
-	existing, _ := s.backend.HeadObject(ctx, bucket, key)
+	existing, _ := s.ops.HeadObject(ctx, bucket, key)
 
 	rawBody := c.Request.Body()
 
@@ -387,7 +387,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		rc, obj, err = s.ops.GetObjectVersion(bucket, key, versionID)
 	} else {
-		rc, obj, err = s.backend.GetObject(ctx, bucket, key)
+		rc, obj, err = s.ops.GetObject(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -559,7 +559,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		obj, err = s.ops.HeadObjectVersion(bucket, key, versionID)
 	} else {
-		obj, err = s.backend.HeadObject(ctx, bucket, key)
+		obj, err = s.ops.HeadObject(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -660,7 +660,7 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Get size before deleting for metric tracking
-	existing, _ := s.backend.HeadObject(ctx, bucket, key)
+	existing, _ := s.ops.HeadObject(ctx, bucket, key)
 
 	markerID, err := s.ops.DeleteObjectReturningMarker(ctx, bucket, key)
 	if err != nil {

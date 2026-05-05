@@ -70,6 +70,33 @@ func TestOperationsPutObjectDelegatesToBackend(t *testing.T) {
 	require.Equal(t, "b/k:text/plain:data", backend.putCall)
 }
 
+func TestOperationsObjectReadsDelegateToBackend(t *testing.T) {
+	backend := &recordingObjectReadBackend{}
+	ops := NewOperations(backend)
+
+	rc, obj, err := ops.GetObject(context.Background(), "b", "k")
+	require.NoError(t, err)
+	require.Equal(t, "get", obj.ETag)
+	data, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Equal(t, "body", string(data))
+
+	obj, err = ops.HeadObject(context.Background(), "b", "k")
+	require.NoError(t, err)
+	require.Equal(t, "head", obj.ETag)
+
+	objects, err := ops.ListObjects(context.Background(), "b", "pre", 3)
+	require.NoError(t, err)
+	require.Len(t, objects, 1)
+	require.Equal(t, "listed", objects[0].Key)
+	require.Equal(t, []string{
+		"get:b/k",
+		"head:b/k",
+		"list:b:pre:3",
+	}, backend.calls)
+}
+
 func TestOperationsMultipartDelegatesToBackend(t *testing.T) {
 	backend := &recordingMultipartBackend{}
 	ops := NewOperations(backend)
@@ -107,6 +134,26 @@ func (b *recordingPutBackend) PutObject(_ context.Context, bucket, key string, r
 	}
 	b.putCall = bucket + "/" + key + ":" + contentType + ":" + string(data)
 	return &Object{Key: key, ETag: "put", Size: int64(len(data)), ContentType: contentType}, nil
+}
+
+type recordingObjectReadBackend struct {
+	basicBackend
+	calls []string
+}
+
+func (b *recordingObjectReadBackend) GetObject(_ context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
+	b.calls = append(b.calls, "get:"+bucket+"/"+key)
+	return io.NopCloser(strings.NewReader("body")), &Object{Key: key, ETag: "get"}, nil
+}
+
+func (b *recordingObjectReadBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
+	b.calls = append(b.calls, "head:"+bucket+"/"+key)
+	return &Object{Key: key, ETag: "head"}, nil
+}
+
+func (b *recordingObjectReadBackend) ListObjects(_ context.Context, bucket, prefix string, maxKeys int) ([]*Object, error) {
+	b.calls = append(b.calls, "list:"+bucket+":"+prefix+":"+strconv.Itoa(maxKeys))
+	return []*Object{{Key: "listed"}}, nil
 }
 
 type recordingMultipartBackend struct {

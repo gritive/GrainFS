@@ -519,7 +519,7 @@ func (s *Server) initMetrics() {
 	var totalObjects int
 	var totalBytes int64
 	for _, b := range buckets {
-		objects, err := s.backend.ListObjects(ctx, b, "", 1000000)
+		objects, err := s.ops.ListObjects(ctx, b, "", 1000000)
 		if err != nil {
 			continue
 		}
