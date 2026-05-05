@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.51.0] — 2026-05-06 — Storage operations facade
+
+### Added
+
+- **Storage operations facade** — added `storage.Operations` as the server
+  request-handler entry point for optional storage capabilities, with typed
+  unsupported-operation errors and operation families for ACL, CopyObject,
+  bucket policy, and object versioning.
+- **Server storage composition** — added explicit `ServerStorage` wiring so
+  handlers use the facade while snapshot, volume, DB, and authorization
+  dependencies stay visible at construction boundaries.
+- **Dedicated bucket policy package** — moved bucket policy parsing, compiled
+  authorization, tests, and benchmarks into `internal/policy`, leaving server
+  aliases as compatibility shims during the migration.
+
+### Fixed
+
+- **CopyObject through cache decorators** — kept the optimized copy path behind
+  the facade's outer-first capability lookup so cache invalidation and recovery
+  gates remain in the request path.
+- **ACL rollback reporting** — failed ACL writes now surface a rollback failure
+  when the newly written object does not report a version ID, instead of
+  implying cleanup happened.
+
+### Tests
+
+- Added focused `internal/storage` facade contract coverage for unsupported
+  operations, ACL rollback, CopyObject fallback streaming, bucket policy cache
+  synchronization, versioned operations, and decorator ordering.
+- Added `internal/server` storage wiring coverage and moved policy unit tests
+  and benchmarks to `internal/policy`.
+
 ## [0.0.50.0] — 2026-05-06 — Volume health CLI
 
 ### Added
