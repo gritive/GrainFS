@@ -449,6 +449,9 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			correlationID := newCorrelationID()
 			s.emitDetect(rec, status, correlationID)
 
+			if len(status.Unverified) > 0 {
+				metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc").Add(float64(len(status.Unverified)))
+			}
 			if len(status.Missing) == 0 && len(status.Corrupt) == 0 && len(status.Unverified) > 0 {
 				continue
 			}

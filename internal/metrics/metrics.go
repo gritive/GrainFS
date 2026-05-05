@@ -169,6 +169,13 @@ var (
 		Help: "Total plain objects skipped because max_migrations_per_cycle was reached.",
 	})
 
+	// ECScrubUnverifiedShardsTotal counts EC shards that were readable but
+	// could not be integrity-verified because they lack a CRC oracle.
+	ECScrubUnverifiedShardsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_ec_scrub_unverified_shards_total",
+		Help: "Total EC shards skipped by scrub because no integrity oracle was available.",
+	}, []string{"reason"})
+
 	// DiskUsedPct tracks local disk usage percentage per node.
 	DiskUsedPct = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "grainfs_disk_used_pct",

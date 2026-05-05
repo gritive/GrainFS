@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // ECScrubSource adapts the EC scrub Scrubbable interface to the BlockSource
@@ -179,6 +181,9 @@ func (v *ECScrubVerifier) Verify(ctx context.Context, blk Block) (BlockStatus, e
 	correlationID := newCorrelationID()
 	v.correlationByBlock.Store(recordKey(blk.Bucket, blk.Key, blk.VersionID), correlationID)
 	emitDetectEvents(v.emitter, rec, status, correlationID)
+	if len(status.Unverified) > 0 {
+		metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc").Add(float64(len(status.Unverified)))
+	}
 	if len(status.Missing) == 0 && len(status.Corrupt) == 0 && len(status.Unverified) > 0 {
 		v.src.deleteRecord(blk.Bucket, blk.Key, blk.VersionID)
 		return BlockStatus{Skipped: true, Detail: legacyNoCRCDetail(status.Unverified)}, nil

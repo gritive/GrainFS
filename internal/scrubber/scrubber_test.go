@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/klauspost/reedsolomon"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
@@ -432,7 +434,9 @@ func TestBackgroundScrubber_RunOnce_UnverifiedLegacyShardSkippedNoRepair(t *test
 
 	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
 	s.SetEmitter(em)
+	start := testutil.ToFloat64(metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc"))
 	s.RunOnce(context.Background())
+	assert.Equal(t, start+1, testutil.ToFloat64(metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc")))
 
 	stats := s.Stats()
 	assert.EqualValues(t, 1, stats.ObjectsChecked)
