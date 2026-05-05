@@ -99,8 +99,8 @@
 - [ ] **`volume attach / detach`** — NBD 노출 토글. 현재 NBD는 serve 시작 시 정적 바인딩만, 런타임 attach/detach 미지원.
 - [ ] **`volume mv / rename`** — 볼륨 이름 변경. live_map/snapshot key prefix 마이그레이션 필요.
 - [ ] **incident store scope index** — `internal/incident/badgerstore/store.go` 의 `List(ctx, limit)` 외에 `ListByScope(ctx, kind, id, limit)` 추가. volume scrub follow-up 에서 status 응답이 v1 에 `List(500) + 메모리 필터` 로 시작. 운영에서 incident 누적이 수만건+ 가 되어 status 응답이 100ms 초과하면 secondary index(`scope:<kind>:<id>:<-ts>:<id>`) 도입.
-- [ ] **`ScanObjects(bucket, keyPrefix)` 로 시그니처 확장** — `internal/cluster/scrubbable.go` 의 `ScanObjects` 가 `lat:` 인덱스 전체를 iterate. volume scrub follow-up 에서 BackgroundScrubber 를 사용하는 경로가 생기면 prefix-bounded scan 으로 비용 감소.
-- [ ] **EC scrub 을 `BlockSource` 인터페이스로 마이그레이션** — v0.0.43 volume scrub PR 에서 `BackgroundScrubber` 의 EC `runOnce` 경로는 변경 안 함 — Volume 만 신규 `BlockSource` 인터페이스 사용. EC 도 동일 인터페이스로 마이그레이션하면 (a) source registration API 통일 (b) Director.Trigger 가 EC 도 라우팅 가능 (현재는 volume 만 trigger 가능). 운영 데이터 후 우선순위 조정.
+- [ ] **`ScanObjects(bucket, keyPrefix)` 로 시그니처 확장** *(deferred — wait for concrete caller)* — `internal/cluster/scrubbable.go` 의 `ScanObjects` 가 `lat:` 인덱스 전체 iterate. 현재 caller 둘 (`scrubber/scrubber.go`, `lifecycle/worker.go`) 모두 bucket 전체 walk 가 필요. prefix-bounded API 를 미리 추가하면 dead surface — YAGNI. **Re-open trigger:** 아래 "EC scrub BlockSource 마이그레이션" 항목 설계 시 placement key 또는 shard prefix 단위 scan 이 자연스럽게 요구되거나, lifecycle rule 이 prefix-scoped 로 확장될 때 함께 1-line signature 확장 + 기존 callers `""` 적응. 그때 확장이 더 정직 — 실 use case 에 맞춘 prefix shape 결정 가능 (e.g. raw key prefix vs placement key prefix vs ring-bucket prefix).
+- [ ] **EC scrub 을 `BlockSource` 인터페이스로 마이그레이션** — v0.0.43 volume scrub PR 에서 `BackgroundScrubber` 의 EC `runOnce` 경로는 변경 안 함 — Volume 만 신규 `BlockSource` 인터페이스 사용. EC 도 동일 인터페이스로 마이그레이션하면 (a) source registration API 통일 (b) Director.Trigger 가 EC 도 라우팅 가능 (현재는 volume 만 trigger 가능). 운영 데이터 후 우선순위 조정. **이 작업이 ScanObjects prefix 확장의 자연스러운 trigger 가 될 가능성** — EC source 가 placement key 단위 walk 면 prefix 파라미터가 그제서야 의미 가짐.
 
 ## Storage Hashing 성능 검토
 
