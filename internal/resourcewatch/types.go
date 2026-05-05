@@ -35,12 +35,17 @@ const (
 )
 
 type DetectorConfig struct {
-	WarnRatio         float64
-	CriticalRatio     float64
-	ETAWindow         time.Duration
-	RecoveryWindow    time.Duration
-	MinSamples        int
-	MaxSamples        int
+	WarnRatio      float64
+	CriticalRatio  float64
+	ETAWindow      time.Duration
+	RecoveryWindow time.Duration
+	MinSamples     int
+	MaxSamples     int
+	// MinETAElapsed gates predictive ETA fire until the oldest retained
+	// sample is at least this old. Suppresses cold-start over-eager fire
+	// where startup transients (0 → steady) inflate the slope estimate.
+	// Level-based fires (ratio >= WarnRatio/CriticalRatio) are unaffected.
+	MinETAElapsed     time.Duration
 	ClassificationCap int
 	// ResourceLabel prefixes Decision.Message (e.g. "FD", "vlog", "goroutine").
 	// Empty falls back to "resource" — historical default was "FD" hardcoded.

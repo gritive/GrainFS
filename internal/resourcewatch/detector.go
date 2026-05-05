@@ -33,6 +33,9 @@ func NewDetector(cfg DetectorConfig) *Detector {
 	if cfg.MaxSamples == 0 {
 		cfg.MaxSamples = 20
 	}
+	if cfg.MinETAElapsed == 0 {
+		cfg.MinETAElapsed = 5 * time.Minute
+	}
 	if cfg.ClassificationCap == 0 {
 		cfg.ClassificationCap = 512
 	}
@@ -102,6 +105,9 @@ func (d *Detector) projectedETA(sample Sample) (time.Duration, string) {
 	first := d.samples[0]
 	elapsed := sample.CollectedAt.Sub(first.CollectedAt)
 	if elapsed <= 0 || sample.Open <= first.Open {
+		return 0, ""
+	}
+	if elapsed < d.cfg.MinETAElapsed {
 		return 0, ""
 	}
 

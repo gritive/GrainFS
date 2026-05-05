@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.49.2] — 2026-05-06 — Predictive watcher cold-start suppression
+
+### Fixed
+
+- **Resource watcher (FD/goroutine/vlog) cold-start over-eager fire** —
+  `Detector.projectedETA` computed slope from the very first observed
+  sample to the current one. The startup transient (0 → steady-state)
+  inflated the slope and drove the predicted ETA below the ETAWindow
+  within seconds, so all three watchers fired a `WARN`-level
+  `ResourceUsagePredicted` on the second poll even when steady state
+  was nowhere near the warn ratio. The new `DetectorConfig.MinETAElapsed`
+  (default 5min) gates predictive fire until the oldest retained sample
+  is old enough for the slope estimate to be meaningful. Level-based
+  fires (ratio ≥ warn/critical) are unaffected — real threshold
+  breaches still fire immediately.
+
 ## [0.0.49.1] — 2026-05-06 — full e2e stabilization after master rebase
 
 ### Fixed

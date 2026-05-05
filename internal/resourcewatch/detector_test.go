@@ -71,6 +71,47 @@ func TestDetector_ResolvesAfterStableRecoveryWindow(t *testing.T) {
 	assert.Equal(t, LevelOK, decision.Level)
 }
 
+func TestDetector_SuppressesETAWhenElapsedBelowMinETAElapsed(t *testing.T) {
+	// Cold-start scenario: process boots empty, then a startup spike pushes
+	// the first poll-to-poll slope through the roof. Without MinETAElapsed
+	// the detector fires WARN immediately because (250-5)/10s = 24.5/s,
+	// projecting WarnRatio breach within minutes.
+	start := time.Unix(100, 0).UTC()
+	d := NewDetector(DetectorConfig{
+		WarnRatio:      0.50,
+		CriticalRatio:  0.90,
+		ETAWindow:      30 * time.Minute,
+		RecoveryWindow: time.Minute,
+		MinSamples:     2,
+		MinETAElapsed:  5 * time.Minute,
+		ResourceLabel:  "goroutine",
+	})
+	decision, err := d.Observe(Sample{Open: 5, Limit: 10000, CollectedAt: start})
+	require.NoError(t, err)
+	require.Nil(t, decision)
+	decision, err = d.Observe(Sample{Open: 250, Limit: 10000, CollectedAt: start.Add(10 * time.Second)})
+	require.NoError(t, err)
+	assert.Nil(t, decision, "must not fire ETA WARN during cold-start window")
+}
+
+func TestDetector_PredictsETAOnceMinETAElapsedSatisfied(t *testing.T) {
+	start := time.Unix(100, 0).UTC()
+	d := NewDetector(DetectorConfig{
+		WarnRatio:      0.80,
+		CriticalRatio:  0.90,
+		ETAWindow:      30 * time.Minute,
+		RecoveryWindow: time.Minute,
+		MinSamples:     2,
+		MinETAElapsed:  5 * time.Minute,
+	})
+	_, err := d.Observe(Sample{Open: 600, Limit: 1000, CollectedAt: start})
+	require.NoError(t, err)
+	decision, err := d.Observe(Sample{Open: 700, Limit: 1000, CollectedAt: start.Add(10 * time.Minute)})
+	require.NoError(t, err)
+	require.NotNil(t, decision)
+	assert.Equal(t, LevelWarn, decision.Level)
+}
+
 func TestDetector_RejectsInvalidSamples(t *testing.T) {
 	d := NewDetector(DetectorConfig{WarnRatio: 0.80, CriticalRatio: 0.90, ETAWindow: 30 * time.Minute, RecoveryWindow: time.Minute, MinSamples: 1})
 	_, err := d.Observe(Sample{Open: 10, Limit: 0, CollectedAt: time.Unix(100, 0)})
