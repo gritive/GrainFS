@@ -7,6 +7,8 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgerrole"
 )
 
 func TestPreflightBadger_HealthyDB(t *testing.T) {
@@ -23,7 +25,7 @@ func TestPreflightBadger_HealthyDB(t *testing.T) {
 
 	// Sentinel must be cleaned up on success.
 	err = db.View(func(txn *badger.Txn) error {
-		_, e := txn.Get(preflightSentinel)
+		_, e := txn.Get(badgerrole.PreflightSentinelKey())
 		return e
 	})
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)

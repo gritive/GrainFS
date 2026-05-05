@@ -58,6 +58,15 @@ func (Reducer) Reduce(facts []Fact) (IncidentState, error) {
 				state.Action = ActionResourceWarning
 				state.NextAction = "vlog smoke detected unregistered DB dirs; verify all production badger.Open call sites call resourcewatch.RegisterDB."
 			}
+			if isBadgerCause(state.Cause) {
+				if fact.Action != "" {
+					state.Action = fact.Action
+				}
+				state.NextAction = defaultBadgerNextAction(state.Cause)
+				if state.Cause == CauseBadgerReadOnlyAdmitted {
+					state.Severity = SeverityDegraded
+				}
+			}
 		case FactActionStarted:
 			state.State = StateActing
 			state.Action = fact.Action
@@ -68,6 +77,10 @@ func (Reducer) Reduce(facts []Fact) (IncidentState, error) {
 			state.Proof = Proof{Status: ProofNotRequired}
 			state.NextAction = nextActionForFailure(state.Cause, fact.ErrorCode)
 			state.CompletedAt = fact.At
+			if (state.Cause == CauseCorruptShard || state.Cause == CauseCorruptBlob) && fact.Action == ActionIsolateObject {
+				state.State = StateNeedsHuman
+				state.NextAction = "Review the object, restore from a clean copy, or delete the quarantined version."
+			}
 		case FactVerified:
 			sawVerified = true
 			state.State = StateVerifying
@@ -124,6 +137,16 @@ func defaultStateFor(first Fact) IncidentState {
 	}
 	if first.Cause == CauseFDExhaustionRisk || first.Cause == CauseGoroutineRunaway || first.Cause == CauseVlogPressure || first.Cause == CauseRegistryUnderPopulated {
 		state.Action = ActionResourceWarning
+	}
+	if isBadgerCause(first.Cause) {
+		state.Action = first.Action
+		if state.Action == "" {
+			state.Action = ActionBlockStartup
+		}
+		state.NextAction = defaultBadgerNextAction(first.Cause)
+		if first.Cause == CauseBadgerReadOnlyAdmitted {
+			state.Severity = SeverityDegraded
+		}
 	}
 	return state
 }
@@ -186,6 +209,9 @@ func nextActionForFailure(cause Cause, code string) string {
 	if cause == CauseBadgerGCFailed {
 		return "BadgerDB vlog GC failing: inspect logs for the affected category, check disk space and file permissions; persistent failure prevents vlog reclaim."
 	}
+	if isBadgerCause(cause) {
+		return defaultBadgerNextAction(cause)
+	}
 	switch code {
 	case "insufficient_survivors":
 		return "Restore a peer or recover from backup before retrying repair."
@@ -193,5 +219,23 @@ func nextActionForFailure(cause Cause, code string) string {
 		return "Repair was canceled; retry after the node is stable."
 	default:
 		return "Inspect repair logs and retry after the cause is fixed."
+	}
+}
+
+func isBadgerCause(cause Cause) bool {
+	switch cause {
+	case CauseBadgerOpenFailed, CauseBadgerPreflightFailed, CauseBadgerReadOnlyAdmitted, CauseBadgerStartupBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
+func defaultBadgerNextAction(cause Cause) string {
+	switch cause {
+	case CauseBadgerReadOnlyAdmitted:
+		return "Serve reads only until the failed Badger role is repaired or restored."
+	default:
+		return "Restore the Badger role from a clean snapshot or fix the underlying disk/lock problem before retrying startup."
 	}
 }

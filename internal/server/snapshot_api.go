@@ -38,6 +38,9 @@ func (s *Server) snapshotManager() (*snapshot.Manager, error) {
 
 // POST /admin/snapshots
 func (s *Server) createSnapshotHandler(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "snapshot_create") {
+		return
+	}
 	mgr, err := s.snapshotManager()
 	if err != nil {
 		c.JSON(consts.StatusInternalServerError, apiError("snapshot unavailable", err.Error()))
@@ -109,6 +112,9 @@ func (s *Server) listSnapshotsHandler(ctx context.Context, c *app.RequestContext
 
 // POST /admin/snapshots/:seq/restore
 func (s *Server) restoreSnapshotHandler(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "snapshot_restore") {
+		return
+	}
 	seqStr := c.Param("seq")
 	seq, err := strconv.ParseUint(seqStr, 10, 64)
 	if err != nil {
@@ -147,6 +153,9 @@ func (s *Server) restoreSnapshotHandler(ctx context.Context, c *app.RequestConte
 
 // DELETE /admin/snapshots/:seq
 func (s *Server) deleteSnapshotHandler(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "snapshot_delete") {
+		return
+	}
 	seqStr := c.Param("seq")
 	seq, err := strconv.ParseUint(seqStr, 10, 64)
 	if err != nil {

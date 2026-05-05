@@ -36,6 +36,10 @@ const (
 	CauseVlogPressure           Cause = "vlog_pressure"
 	CauseBadgerGCFailed         Cause = "badger_gc_failed"
 	CauseRegistryUnderPopulated Cause = "registry_under_populated"
+	CauseBadgerOpenFailed       Cause = "badger_open_failed"
+	CauseBadgerPreflightFailed  Cause = "badger_preflight_failed"
+	CauseBadgerReadOnlyAdmitted Cause = "badger_read_only_admitted"
+	CauseBadgerStartupBlocked   Cause = "badger_startup_blocked"
 )
 
 type Action string
@@ -45,24 +49,30 @@ const (
 	ActionIsolateObject    Action = "isolate_object"
 	ActionNoopBlocked      Action = "noop_blocked"
 	ActionResourceWarning  Action = "resource_warning"
+	ActionBlockStartup     Action = "block_startup"
+	ActionStartReadOnly    Action = "start_read_only"
+	ActionDisableFeature   Action = "disable_feature"
 )
 
 type ScopeKind string
 
 const (
-	ScopeShard  ScopeKind = "shard"
-	ScopeObject ScopeKind = "object"
-	ScopeBucket ScopeKind = "bucket"
-	ScopeNode   ScopeKind = "node"
+	ScopeShard      ScopeKind = "shard"
+	ScopeObject     ScopeKind = "object"
+	ScopeBucket     ScopeKind = "bucket"
+	ScopeNode       ScopeKind = "node"
+	ScopeBadgerRole ScopeKind = "badger_role"
 )
 
 type Scope struct {
-	Kind      ScopeKind `json:"kind"`
-	Bucket    string    `json:"bucket,omitempty"`
-	Key       string    `json:"key,omitempty"`
-	VersionID string    `json:"version_id,omitempty"`
-	ShardID   int       `json:"shard_id,omitempty"`
-	NodeID    string    `json:"node_id,omitempty"`
+	Kind       ScopeKind `json:"kind"`
+	Bucket     string    `json:"bucket,omitempty"`
+	Key        string    `json:"key,omitempty"`
+	VersionID  string    `json:"version_id,omitempty"`
+	ShardID    int       `json:"shard_id,omitempty"`
+	NodeID     string    `json:"node_id,omitempty"`
+	BadgerRole string    `json:"badger_role,omitempty"`
+	Path       string    `json:"path,omitempty"`
 }
 
 type ProofStatus string

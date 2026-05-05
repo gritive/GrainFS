@@ -24,6 +24,12 @@ func TestShouldCreateDefaultBucketOnStartup(t *testing.T) {
 	}
 }
 
+func TestStartupModeReadOnlySkipsDefaultBucket(t *testing.T) {
+	if got := shouldCreateDefaultBucketOnStartup(nil, true); got {
+		t.Fatalf("read-only recovery startup must not create default bucket")
+	}
+}
+
 func TestMetaProposalTargetsPreferLeaderAndFallbackToPeers(t *testing.T) {
 	got := metaProposalTargets("node-2", []string{"node-1", "node-2", "node-3"})
 	want := []string{"node-2", "node-1", "node-3"}
