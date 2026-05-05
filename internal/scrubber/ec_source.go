@@ -183,10 +183,13 @@ func (v *ECScrubVerifier) Verify(ctx context.Context, blk Block) (BlockStatus, e
 	emitDetectEvents(v.emitter, rec, status, correlationID)
 	if len(status.Unverified) > 0 {
 		metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc").Add(float64(len(status.Unverified)))
-	}
-	if len(status.Missing) == 0 && len(status.Corrupt) == 0 && len(status.Unverified) > 0 {
 		v.src.deleteRecord(blk.Bucket, blk.Key, blk.VersionID)
-		return BlockStatus{Skipped: true, Detail: legacyNoCRCDetail(status.Unverified)}, nil
+		return BlockStatus{
+			Missing: len(status.Missing) > 0,
+			Corrupt: len(status.Corrupt) > 0,
+			Skipped: true,
+			Detail:  legacyNoCRCRepairSkippedDetail(status),
+		}, nil
 	}
 	out := BlockStatus{Detail: fmt.Sprintf("missing=%d corrupt=%d", len(status.Missing), len(status.Corrupt))}
 	if len(status.Missing) > 0 {

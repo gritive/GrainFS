@@ -43,7 +43,7 @@ type HealEvent struct {
 	BytesRepaired int64       `json:"bytes_repaired,omitempty"`
 	DurationMs    uint32      `json:"duration_ms,omitempty"`
 	Outcome       HealOutcome `json:"outcome"`
-	ErrCode       string      `json:"err_code,omitempty"`       // only when Outcome == failed
+	ErrCode       string      `json:"err_code,omitempty"`       // machine-readable failed/skipped reason
 	CorrelationID string      `json:"correlation_id,omitempty"` // groups events from one repair session
 }
 

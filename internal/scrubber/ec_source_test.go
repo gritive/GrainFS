@@ -306,6 +306,33 @@ func TestECScrubVerifier_Verify_UnverifiedLegacyShardSkipped(t *testing.T) {
 	assert.EqualValues(t, 1, events[0].ShardID)
 }
 
+func TestECScrubVerifier_Verify_MissingWithUnverifiedLegacyShardSkipped(t *testing.T) {
+	m := newIntegrityMockBackend()
+	rec := scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1, VersionID: "v"}
+	m.records["b"] = []scrubber.ObjectRecord{rec}
+	m.storeShards("b", "k", [][]byte{nil, []byte("s1"), []byte("s2")})
+	m.status["b/k/1"] = scrubber.ShardIntegrityUnverifiedLegacy
+
+	bs := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
+	em := &recorderEmitter{}
+	bs.SetEmitter(em)
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(m), "node-A")
+	src.PrimeForTest("b", "k", "v", rec)
+	ver := scrubber.NewECScrubVerifier(m, bs.Verifier(), bs.Limiter(), bs.Emitter(), "node-A", src)
+
+	st, err := ver.Verify(context.Background(), scrubber.Block{Bucket: "b", Key: "k", VersionID: "v"})
+	require.NoError(t, err)
+	require.True(t, st.Skipped, "mixed missing+unverified must not proceed to repair")
+	assert.True(t, st.Missing)
+	assert.Contains(t, st.Detail, "missing=1")
+	assert.Contains(t, st.Detail, "legacy shard without CRC oracle")
+
+	events := em.snapshot()
+	require.Len(t, events, 2)
+	assert.Equal(t, "missing", events[0].ErrCode)
+	assert.Equal(t, "legacy_no_crc", events[1].ErrCode)
+}
+
 func TestECScrubVerifier_Verify_SigningDownSkips(t *testing.T) {
 	m := newMockBackend()
 	rec := scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1, VersionID: "v"}

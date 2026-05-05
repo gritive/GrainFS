@@ -457,6 +457,29 @@ func TestBackgroundScrubber_RunOnce_UnverifiedLegacyShardSkippedNoRepair(t *test
 	assert.EqualValues(t, 1, skipped[0].ShardID)
 }
 
+func TestBackgroundScrubber_RunOnce_MissingWithUnverifiedLegacyShardSkipsRepair(t *testing.T) {
+	m := newIntegrityMockBackend()
+	rec := scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1}
+	m.records["b"] = []scrubber.ObjectRecord{rec}
+	m.storeShards("b", "k", [][]byte{nil, []byte("s1"), []byte("s2")})
+	m.status["b/k/1"] = scrubber.ShardIntegrityUnverifiedLegacy
+	em := &captureEmitter{}
+
+	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
+	s.SetEmitter(em)
+	s.RunOnce(context.Background())
+
+	stats := s.Stats()
+	assert.EqualValues(t, 1, stats.ObjectsChecked)
+	assert.EqualValues(t, 1, stats.ShardErrors, "missing shard remains a detected shard error")
+	assert.EqualValues(t, 0, stats.Repaired, "repair must not run with unverified survivor shards")
+	assert.Equal(t, 0, m.writes, "missing shard must not be reconstructed from unverified input")
+
+	last := s.LastStatus("b", "k")
+	assert.Equal(t, []int{0}, last.Missing)
+	assert.Equal(t, []int{1}, last.Unverified)
+}
+
 func TestBackgroundScrubber_StopsOnContextCancel(t *testing.T) {
 	m := newMockBackend()
 	s := scrubber.New(m, 10*time.Millisecond)

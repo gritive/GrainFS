@@ -459,6 +459,12 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			errCount := int64(len(status.Missing) + len(status.Corrupt))
 			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
 			s.stats.ShardErrors += errCount
+			if len(status.Unverified) > 0 {
+				ev := newRepairEvent(PhaseReconstruct, OutcomeSkipped, rec, correlationID)
+				ev.ErrCode = "legacy_no_crc"
+				s.emitter.Emit(ev)
+				continue
+			}
 
 			// Per-cycle repair cap (Eng Review #5)
 			if repairCount >= maxRepairsPerCycle {
@@ -638,6 +644,11 @@ func (s *BackgroundScrubber) Stats() ScrubStats {
 
 func legacyNoCRCDetail(indices []int) string {
 	return fmt.Sprintf("legacy shard without CRC oracle: shards %v", indices)
+}
+
+func legacyNoCRCRepairSkippedDetail(status ShardStatus) string {
+	return fmt.Sprintf("%s; repair skipped because missing=%d corrupt=%d cannot be safely reconstructed",
+		legacyNoCRCDetail(status.Unverified), len(status.Missing), len(status.Corrupt))
 }
 
 func emitDetectEvents(emitter Emitter, rec ObjectRecord, status ShardStatus, correlationID string) {
