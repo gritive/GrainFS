@@ -192,19 +192,13 @@ var volumeScrubCancelCmd = &cobra.Command{
 }
 
 func init() {
-	for _, c := range []*cobra.Command{
-		volumeListCmd, volumeCreateCmd, volumeInfoCmd, volumeStatCmd,
-		volumeDeleteCmd, volumeResizeCmd, volumeRecalculateCmd, volumeCloneCmd,
-		volumeRollbackCmd, snapshotCreateCmd, snapshotListCmd, snapshotDeleteCmd,
-		volumeWriteAtCmd, volumeReadAtCmd,
-		volumeScrubCmd, volumeScrubStatusCmd, volumeScrubListCmd, volumeScrubCancelCmd,
-	} {
-		c.Flags().String("endpoint", "", "admin endpoint (default: auto-discover from --data or grainfs.toml)")
-		c.Flags().String("data", "", "data directory for admin socket auto-discovery")
-		c.Flags().Bool("json", false, "JSON output for scripting")
-		c.Flags().Bool("bytes", false, "show sizes as raw byte counts (alias: --raw)")
-		c.Flags().Bool("raw", false, "alias for --bytes")
-	}
+	pf := volumeCmd.PersistentFlags()
+	pf.String("endpoint", "", "admin endpoint (default: auto-discover from --data or grainfs.toml)")
+	pf.String("data", "", "data directory for admin socket auto-discovery")
+	pf.Bool("json", false, "JSON output for scripting")
+	pf.Bool("bytes", false, "show sizes as raw byte counts (alias: --raw)")
+	pf.Bool("raw", false, "alias for --bytes")
+
 	volumeCreateCmd.Flags().String("size", "", "volume size (1G/1Gi/100M/raw bytes)")
 	volumeResizeCmd.Flags().String("size", "", "new size (must be >= current)")
 	volumeDeleteCmd.Flags().Bool("force", false, "cascade-delete all snapshots")
