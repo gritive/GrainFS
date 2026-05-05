@@ -32,6 +32,7 @@ const (
 	CauseCorruptShard     Cause = "corrupt_shard"
 	CauseCorruptBlob      Cause = "corrupt_blob"
 	CauseFDExhaustionRisk Cause = "fd_exhaustion_risk"
+	CauseGoroutineRunaway Cause = "goroutine_runaway"
 )
 
 type Action string

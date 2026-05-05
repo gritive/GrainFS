@@ -117,6 +117,45 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantSev:    SeverityInfo,
 			wantNext:   "No action needed.",
 		},
+		{
+			name: "goroutine warning diagnosed with operator next action",
+			facts: []Fact{
+				{CorrelationID: "goroutine-node-1", Type: FactObserved, Cause: CauseGoroutineRunaway, Scope: Scope{Kind: ScopeNode, NodeID: "node-1"}, Message: "goroutines 6000/20000 crossed warn threshold", At: now},
+				{CorrelationID: "goroutine-node-1", Type: FactDiagnosed, Cause: CauseGoroutineRunaway, Message: "goroutines 6000/20000 crossed warn threshold", At: now.Add(time.Millisecond)},
+			},
+			wantState:  StateDiagnosed,
+			wantCause:  CauseGoroutineRunaway,
+			wantAction: ActionResourceWarning,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityWarning,
+			wantNext:   "pprof",
+		},
+		{
+			name: "goroutine critical failure blocks with pprof guidance",
+			facts: []Fact{
+				{CorrelationID: "goroutine-node-2", Type: FactObserved, Cause: CauseGoroutineRunaway, Scope: Scope{Kind: ScopeNode, NodeID: "node-2"}, At: now},
+				{CorrelationID: "goroutine-node-2", Type: FactActionFailed, Cause: CauseGoroutineRunaway, Action: ActionResourceWarning, ErrorCode: "goroutine_critical", Message: "goroutines 22000/20000 crossed critical threshold", At: now.Add(time.Millisecond)},
+			},
+			wantState:  StateBlocked,
+			wantCause:  CauseGoroutineRunaway,
+			wantAction: ActionResourceWarning,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityCritical,
+			wantNext:   "Critical goroutine count",
+		},
+		{
+			name: "goroutine recovery resolves as fixed without receipt",
+			facts: []Fact{
+				{CorrelationID: "goroutine-node-3", Type: FactObserved, Cause: CauseGoroutineRunaway, Scope: Scope{Kind: ScopeNode, NodeID: "node-3"}, At: now},
+				{CorrelationID: "goroutine-node-3", Type: FactResolved, Cause: CauseGoroutineRunaway, Message: "goroutines recovered below warn threshold", At: now.Add(time.Millisecond)},
+			},
+			wantState:  StateFixed,
+			wantCause:  CauseGoroutineRunaway,
+			wantAction: ActionResourceWarning,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityInfo,
+			wantNext:   "No action needed.",
+		},
 	}
 
 	for _, tt := range tests {

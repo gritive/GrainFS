@@ -46,6 +46,10 @@ func (Reducer) Reduce(facts []Fact) (IncidentState, error) {
 				state.Action = ActionResourceWarning
 				state.NextAction = "Inspect connection growth and NFS sessions on this node; raise LimitNOFILE if expected."
 			}
+			if state.Cause == CauseGoroutineRunaway {
+				state.Action = ActionResourceWarning
+				state.NextAction = "Capture goroutine pprof dump and inspect for blocked or leaking goroutines on this node."
+			}
 		case FactActionStarted:
 			state.State = StateActing
 			state.Action = fact.Action
@@ -79,7 +83,7 @@ func (Reducer) Reduce(facts []Fact) (IncidentState, error) {
 			if fact.Action != "" {
 				state.Action = fact.Action
 			}
-			if state.Action == "" && state.Cause == CauseFDExhaustionRisk {
+			if state.Action == "" && (state.Cause == CauseFDExhaustionRisk || state.Cause == CauseGoroutineRunaway) {
 				state.Action = ActionResourceWarning
 			}
 			state.Severity = SeverityInfo
@@ -110,7 +114,7 @@ func defaultStateFor(first Fact) IncidentState {
 		ObservedAt: first.At,
 		UpdatedAt:  first.At,
 	}
-	if first.Cause == CauseFDExhaustionRisk {
+	if first.Cause == CauseFDExhaustionRisk || first.Cause == CauseGoroutineRunaway {
 		state.Action = ActionResourceWarning
 	}
 	return state
@@ -120,6 +124,8 @@ func defaultNextAction(cause Cause) string {
 	switch cause {
 	case CauseFDExhaustionRisk:
 		return "Inspect connection growth and open file usage on this node."
+	case CauseGoroutineRunaway:
+		return "Capture goroutine pprof dump and inspect for blocked or leaking goroutines on this node."
 	default:
 		return "Watch for automatic repair."
 	}
@@ -145,6 +151,14 @@ func nextActionForFailure(cause Cause, code string) string {
 			return "Raise LimitNOFILE or reduce connection/file pressure on this node before continuing normal operation."
 		default:
 			return "Inspect open file usage on this node and reduce the source of FD growth."
+		}
+	}
+	if cause == CauseGoroutineRunaway {
+		switch code {
+		case "goroutine_critical":
+			return "Critical goroutine count: capture pprof goroutine dump immediately and isolate the leaking subsystem (likely candidates: NFSv4 sessions, NBD connections, raft transport, scrub/replication workers)."
+		default:
+			return "Inspect goroutine pprof dump for unexpected blocked or leaking goroutines on this node."
 		}
 	}
 	switch code {
