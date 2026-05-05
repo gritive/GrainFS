@@ -153,6 +153,30 @@ func (d *Director) Register(name string, src BlockSource, ver BlockVerifier) {
 	d.verifiers[name] = ver
 }
 
+// LookupDedup returns the in-flight ScrubTriggerEntry for a request key, or
+// (zero, false) if no session matches. Used by admin handlers to short-circuit
+// duplicate triggers before raft propose so we do not consume two raft entries
+// for the same logical scrub.
+func (d *Director) LookupDedup(req TriggerReq) (ScrubTriggerEntry, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	id, ok := d.dedup[dedupKey(req)]
+	if !ok {
+		return ScrubTriggerEntry{}, false
+	}
+	sess, ok := d.sessions[id]
+	if !ok {
+		return ScrubTriggerEntry{}, false
+	}
+	return ScrubTriggerEntry{
+		SessionID: sess.id,
+		Bucket:    sess.bucket,
+		KeyPrefix: sess.keyPrefix,
+		Scope:     sess.scope,
+		DryRun:    sess.dryRun,
+	}, true
+}
+
 func (d *Director) Trigger(req TriggerReq) (string, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
