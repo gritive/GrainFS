@@ -566,6 +566,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", raftDir, err, raftDir)
 	}
 	defer logStore.Close()
+	if !logStore.IsShared() && logStore.DB() != nil {
+		raftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, logStore.DB())
+		defer resourcewatch.DeregisterDB(raftLogVlogEntry)
+	}
 
 	// C2 P0b prototype: optionally open one shared raft-log BadgerDB so all
 	// data groups share a single instance instead of opening their own. Reduces
