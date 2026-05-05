@@ -42,7 +42,60 @@ const (
 	ecShardWriteAttempts = 3
 	ecShardWriteBackoff  = 250 * time.Millisecond
 	ecShardBufferedLimit = 8 * 1024 * 1024
+
+	// N×replication peer fan-out retry. Tighter than EC because the payload
+	// path is a simple stream copy (no Reed-Solomon reconstruction) and the
+	// failure mode we're absorbing is transient: cold-start QUIC handshake
+	// race (~50ms), brief peer GC pause, single-packet network blip. Worst-
+	// case added latency on permanent failure: 100ms + 200ms = 300ms.
+	replicaWriteAttempts = 3
+	replicaWriteBackoff  = 100 * time.Millisecond
 )
+
+// shardWriter is the minimal interface writeSpooledReplicaShardStream needs.
+// Satisfied by *ShardService. Extracted so the retry helper can be unit-tested
+// without standing up a real QUIC stream service.
+type shardWriter interface {
+	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
+}
+
+// writeSpooledReplicaShardStream writes a spooled object as a non-EC replica
+// to a peer, with bounded retry on transient WriteShardStream errors.
+//
+// Why retry: the inline pattern (one shot → MarkUnhealthy on any error) made
+// cold-start QUIC handshake races flap peers into 10s cooldown for the rest
+// of the warmup window, dropping replication factor for blocks written during
+// that window. With retry, transient hiccups are absorbed without quarantining
+// the peer; only persistent failures still trigger MarkUnhealthy.
+//
+// sp.Open returns a fresh *os.File each call, so the body can be re-opened
+// per attempt without repositioning a single reader.
+func (b *DistributedBackend) writeSpooledReplicaShardStream(ctx context.Context, writer shardWriter, peer, bucket, shardKey string, sp *spooledObject) error {
+	var lastErr error
+	for attempt := 1; attempt <= replicaWriteAttempts; attempt++ {
+		body, err := sp.Open()
+		if err != nil {
+			return fmt.Errorf("open spooled object for replication: %w", err)
+		}
+		err = writer.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
+		_ = body.Close()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || attempt == replicaWriteAttempts {
+			return lastErr
+		}
+		timer := time.NewTimer(time.Duration(attempt) * replicaWriteBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return lastErr
+		case <-timer.C:
+		}
+	}
+	return lastErr
+}
 
 // newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
 // UUIDv7 is k-sortable by millisecond timestamp; ListObjectVersions reverses to DESC.
@@ -877,14 +930,9 @@ func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key
 				b.logger.Debug().Str("peer", peer).Str("bucket", bucket).Msg("skipping unhealthy peer for replication")
 				continue
 			}
-			body, err := sp.Open()
+			err := b.writeSpooledReplicaShardStream(ctx, b.shardSvc, peer, bucket, shardKey, sp)
 			if err != nil {
-				return nil, fmt.Errorf("open spooled object for replication: %w", err)
-			}
-			err = b.shardSvc.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
-			_ = body.Close()
-			if err != nil {
-				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
+				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed (after retry)")
 				if b.peerHealth != nil && b.peerHealth.MarkUnhealthy(peer) {
 					b.logger.Warn().Str("peer", peer).Dur("cooldown", b.peerHealth.cooldown).Msg("peer transitioned to unhealthy; subsequent replication writes will skip until cooldown expires")
 				}
@@ -991,14 +1039,9 @@ func (b *DistributedBackend) putObjectNxSpooledAsync(ctx context.Context, bucket
 				metrics.ReplicationSkippedTotal.WithLabelValues(peer, bucket).Inc()
 				continue
 			}
-			body, err := sp.Open()
+			err := b.writeSpooledReplicaShardStream(ctx, b.shardSvc, peer, bucket, shardKey, sp)
 			if err != nil {
-				return nil, nil, fmt.Errorf("open spooled object for replication: %w", err)
-			}
-			err = b.shardSvc.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
-			_ = body.Close()
-			if err != nil {
-				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed")
+				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed (after retry)")
 				if b.peerHealth != nil && b.peerHealth.MarkUnhealthy(peer) {
 					b.logger.Warn().Str("peer", peer).Dur("cooldown", b.peerHealth.cooldown).Msg("peer transitioned to unhealthy; subsequent replication writes will skip until cooldown expires")
 				}
