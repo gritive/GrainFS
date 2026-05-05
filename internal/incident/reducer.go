@@ -77,6 +77,10 @@ func (Reducer) Reduce(facts []Fact) (IncidentState, error) {
 			state.Proof = Proof{Status: ProofNotRequired}
 			state.NextAction = nextActionForFailure(state.Cause, fact.ErrorCode)
 			state.CompletedAt = fact.At
+			if (state.Cause == CauseCorruptShard || state.Cause == CauseCorruptBlob) && fact.Action == ActionIsolateObject {
+				state.State = StateNeedsHuman
+				state.NextAction = "Review the object, restore from a clean copy, or delete the quarantined version."
+			}
 		case FactVerified:
 			sawVerified = true
 			state.State = StateVerifying

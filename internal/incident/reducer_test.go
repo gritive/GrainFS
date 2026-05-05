@@ -78,6 +78,20 @@ func TestReducer_ReducesIncidentFamilies(t *testing.T) {
 			wantNext:   "Review the object",
 		},
 		{
+			name: "corruption isolation failure needs human",
+			facts: []Fact{
+				{CorrelationID: "cid-4b", Type: FactObserved, Cause: CauseCorruptShard, Scope: Scope{Kind: ScopeObject, Bucket: "b", Key: "bad.bin", VersionID: "v1"}, At: now},
+				{CorrelationID: "cid-4b", Type: FactActionStarted, Action: ActionIsolateObject, At: now.Add(time.Millisecond)},
+				{CorrelationID: "cid-4b", Type: FactActionFailed, Action: ActionIsolateObject, ErrorCode: "quarantine_failed", At: now.Add(2 * time.Millisecond)},
+			},
+			wantState:  StateNeedsHuman,
+			wantCause:  CauseCorruptShard,
+			wantAction: ActionIsolateObject,
+			wantProof:  ProofNotRequired,
+			wantSev:    SeverityCritical,
+			wantNext:   "Review the object",
+		},
+		{
 			name: "fd warning diagnosed with operator next action",
 			facts: []Fact{
 				{CorrelationID: "fd-node-1", Type: FactObserved, Cause: CauseFDExhaustionRisk, Scope: Scope{Kind: ScopeNode, NodeID: "node-1"}, Message: "open FD usage is 72.4% of limit 1024", At: now},
