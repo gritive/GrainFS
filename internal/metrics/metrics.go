@@ -205,6 +205,30 @@ var (
 		Help: "Best-effort current open file descriptors by bounded category.",
 	}, []string{"node_id", "category"})
 
+	// GoroutineCount tracks runtime.NumGoroutine() per node.
+	GoroutineCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_goroutine_count",
+		Help: "Current number of running goroutines on this node.",
+	}, []string{"node_id"})
+
+	// GoroutineLimit tracks the configured goroutine critical threshold per node.
+	GoroutineLimit = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_goroutine_limit",
+		Help: "Configured critical goroutine count threshold (--goroutine-critical).",
+	}, []string{"node_id"})
+
+	// GoroutineUsedRatio tracks goroutine count divided by the critical limit.
+	GoroutineUsedRatio = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_goroutine_used_ratio",
+		Help: "Current goroutine usage ratio (count / critical-limit), from 0 to 1+.",
+	}, []string{"node_id"})
+
+	// GoroutineETASeconds estimates time until a goroutine threshold is reached.
+	GoroutineETASeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_goroutine_eta_seconds",
+		Help: "Estimated seconds until the named goroutine threshold is reached; -1 means no positive trend.",
+	}, []string{"node_id", "threshold"})
+
 	// Balancer metrics.
 
 	BalancerGossipTotal = promauto.NewCounter(prometheus.CounterOpts{
