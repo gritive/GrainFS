@@ -318,6 +318,44 @@ grainfs serve \
 
 ---
 
+## Membership Operations (Day-2)
+
+### Evicting a permanently-dead node
+
+When a cluster node fails irrecoverably (hardware loss, corrupted disk past recovery), remove it from the meta-Raft voter set so quorum math reflects the surviving members. Run **on the leader node** — the endpoint is localhost-only.
+
+1. Identify the dead voter's raft address. `cluster peers` lists the current metaRaft voter set; cross-reference with `cluster status` (or the operator's external monitoring) to identify which one is the dead node:
+
+   ```bash
+   grainfs cluster peers
+   #   ID                ROLE      STATE
+   #   127.0.0.1:19102   follower  alive
+   #   127.0.0.1:19103   follower  alive
+   # (self omitted from peers; ROLE/STATE columns reflect membership only —
+   #  active liveness wiring is tracked under TODOS.md "PR-D unification")
+
+   grainfs cluster status --format text   # shows leader_id separately
+   ```
+
+2. Pre-flight check is automatic. If removal would drop the post-removal voter count below quorum, the command refuses unless `--force`:
+
+   ```bash
+   grainfs cluster remove-peer 127.0.0.1:19103 --yes
+   ```
+
+3. Verify the voter set shrank and an audit event was recorded:
+
+   ```bash
+   grainfs cluster peers
+   grainfs cluster events --type cluster-remove-peer --since 1h
+   ```
+
+**`--force` semantics**: bypasses pre-flight only — does not bypass the engine. Use when the operator has independently confirmed the peer is permanently lost and the joint-consensus commit can still progress (e.g., 3-of-5 alive removing 1 dead). For clusters that have already lost quorum, `recover cluster` (offline snapshot recovery) is the right tool, not `remove-peer --force`.
+
+**Removing the leader**: safe — the engine commits the joint Cnew, then the leader steps down via commit-time wakeup and a new leader is elected from the remaining voters. Operator does not need a separate `transfer-leader` step.
+
+---
+
 ## Monitoring Setup
 
 ### Prometheus Alerts

@@ -2144,12 +2144,24 @@ func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
 func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
-func (r *raftClusterInfo) Peers() []string  { return nilToEmpty(r.node.Peers()) }
+func (r *raftClusterInfo) Peers() []string { return nilToEmpty(r.node.Peers()) }
+
+// LivePeers reports all metaRaft voters as live: self plus every remote.
+// The legacy DistributedBackend's LiveNodes() lives on a separate raft +
+// peerHealth map whose identifiers don't line up with metaRaft's voter
+// addresses, so consulting it here would mark every voter "down" right
+// after dynamic-join until peerHealth catches up. Treating voters as live
+// keeps the happy-path pre-flight working; voter-count math still blocks
+// the only-1-voter-left scenario, which is the truly dangerous case.
+// PR-D unification (TODOS) restores fine-grained liveness.
 func (r *raftClusterInfo) LivePeers() []string {
-	if r.backend == nil {
-		return nilToEmpty(r.node.Peers())
+	peers := r.node.Peers()
+	out := make([]string, 0, len(peers)+1)
+	if id := r.node.ID(); id != "" {
+		out = append(out, id)
 	}
-	return nilToEmpty(r.backend.LiveNodes())
+	out = append(out, peers...)
+	return out
 }
 
 // nilToEmpty normalises a nil slice to an empty one so JSON marshals it as

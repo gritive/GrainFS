@@ -142,7 +142,7 @@ func TestRemovePeer_HappyPath(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	mem := &fakeMembership{}
@@ -160,7 +160,7 @@ func TestRemovePeer_PeerNotInCluster_Returns404(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	mem := &fakeMembership{}
@@ -249,7 +249,7 @@ func TestRemovePeer_NoMembershipController_Returns503(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	h := setupRemovePeerServer(t, ci, nil) // membership controller not wired
@@ -263,7 +263,7 @@ func TestRemovePeer_MutationGateBlocks(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	mem := &fakeMembership{}
@@ -282,7 +282,7 @@ func TestRemovePeer_EnginePropagatesError(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	mem := &fakeMembership{err: errors.New("conf change in progress")}
@@ -298,7 +298,7 @@ func TestRemovePeer_MalformedBody_Returns400(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	mem := &fakeMembership{}
@@ -315,7 +315,7 @@ func TestRemovePeer_EmptyID_Returns400(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	mem := &fakeMembership{}
@@ -331,7 +331,7 @@ func TestRemovePeer_HappyPath_EmitsAuditEvent(t *testing.T) {
 		nodeID:    "n1",
 		state:     "Leader",
 		leaderID:  "n1",
-		peers:     []string{"n2", "n3"},     // remote-only (semantics of cluster.Peers)
+		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
 	}
 	mem := &fakeMembership{}
