@@ -153,28 +153,45 @@ func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShar
 // ReadShard reads a shard at path under a per-object read lock. New shards use
 // eccodec's CRC envelope. Legacy raw shards from pre-CRC cluster deployments are
 // still readable; they simply cannot provide bit-rot detection until rewritten.
-func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error) {
+func (b *DistributedBackend) readShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
 	unlock := b.acquireShardReadLock(bucket, key)
 	defer unlock()
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read shard: %w", err)
+		return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: %w", err)
 	}
+	status := scrubber.ShardIntegrityUnverifiedLegacy
 	data := raw
 	if eccodec.IsEncodedShard(raw) {
 		data, err = eccodec.DecodeShard(raw)
 		if err != nil {
-			return nil, err
+			return scrubber.ShardIntegrityResult{}, err
 		}
+		status = scrubber.ShardIntegrityVerified
 	}
 	if b.shardSvc != nil {
 		aad := shardAAD(bucket, key, path)
 		data, err = b.shardSvc.DecryptPayload(data, aad)
 		if err != nil {
-			return nil, err
+			return scrubber.ShardIntegrityResult{}, err
 		}
 	}
-	return data, nil
+	return scrubber.ShardIntegrityResult{Payload: data, Status: status}, nil
+}
+
+func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error) {
+	res, err := b.readShardIntegrity(bucket, key, path)
+	if err != nil {
+		return nil, err
+	}
+	return res.Payload, nil
+}
+
+// ReadShardIntegrity reads a shard and reports whether the bytes had a CRC
+// integrity oracle. It is used by EC scrub so legacy raw shards are reported as
+// unverified instead of healthy.
+func (b *DistributedBackend) ReadShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
+	return b.readShardIntegrity(bucket, key, path)
 }
 
 // WriteShard writes data atomically at path under a per-object write lock.

@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.49.0] — 2026-05-06 — EC scrub legacy shard safety
+
+### Added
+
+- **EC scrub now distinguishes verified shards from legacy raw shards** — scrub
+  can tell when a readable EC shard has no CRC envelope, records it as
+  unverified, and keeps it out of the healthy path.
+- **Unverified legacy shard telemetry** — operators can track
+  `grainfs_ec_scrub_unverified_shards_total{reason="legacy_no_crc"}` to decide
+  whether a legacy shard rewrite or migration is worth running.
+
+### Fixed
+
+- **Legacy raw EC shards no longer trigger unsafe repair or rewrite** —
+  unverified-only cases are skipped, and mixed missing/corrupt plus unverified
+  cases do not reconstruct from bytes that lack an integrity oracle.
+- **EC scrub detect events now report skipped legacy shards** with
+  `err_code="legacy_no_crc"` so dashboards can separate CRC-backed corruption
+  from pre-envelope legacy data.
+
+### Changed
+
+- **`ReadShard` remains backward-compatible for legacy raw bytes** while the
+  scrub-only `ReadShardIntegrity` path exposes whether the bytes were actually
+  CRC verified.
+- **Legacy raw shard rewrite stays as explicit follow-up work** so production
+  telemetry can drive whether migration is needed.
+
 ## [0.0.48.2] — 2026-05-06 — Volume CLI flag dedup
 
 ### Changed

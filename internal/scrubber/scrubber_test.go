@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/klauspost/reedsolomon"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
@@ -25,6 +27,7 @@ type mockBackend struct {
 	shardErr       map[string]error                   // path → forced read error
 	records        map[string][]scrubber.ObjectRecord // bucket → records
 	deletedObjects map[string]bool                    // "bucket/key" → deleted mid-scan
+	writes         int
 }
 
 func newMockBackend() *mockBackend {
@@ -105,6 +108,7 @@ func (m *mockBackend) ReadShard(bucket, key, path string) ([]byte, error) {
 func (m *mockBackend) WriteShard(bucket, key, path string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.writes++
 	m.shards[path] = data
 	return nil
 }
@@ -182,6 +186,59 @@ func TestShardVerifier_CorruptShard(t *testing.T) {
 	assert.False(t, status.IsHealthy())
 	assert.Empty(t, status.Missing)
 	assert.Contains(t, status.Corrupt, 3)
+}
+
+type integrityMockBackend struct {
+	*mockBackend
+	status map[string]scrubber.ShardIntegrityStatus
+	reads  map[string]int
+}
+
+func newIntegrityMockBackend() *integrityMockBackend {
+	return &integrityMockBackend{
+		mockBackend: newMockBackend(),
+		status:      make(map[string]scrubber.ShardIntegrityStatus),
+		reads:       make(map[string]int),
+	}
+}
+
+func (m *integrityMockBackend) ReadShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
+	m.mu.Lock()
+	m.reads[path]++
+	m.mu.Unlock()
+	data, err := m.ReadShard(bucket, key, path)
+	if err != nil {
+		return scrubber.ShardIntegrityResult{}, err
+	}
+	st, ok := m.status[path]
+	if !ok {
+		st = scrubber.ShardIntegrityVerified
+	}
+	return scrubber.ShardIntegrityResult{Payload: data, Status: st}, nil
+}
+
+func TestShardVerifier_UnverifiedLegacyShard(t *testing.T) {
+	m := newIntegrityMockBackend()
+	m.storeShards("b", "k", [][]byte{
+		[]byte("d0"), []byte("d1"), []byte("p0"),
+	})
+	m.status["b/k/1"] = scrubber.ShardIntegrityUnverifiedLegacy
+
+	v := scrubber.NewShardVerifier(m, scrubber.WithVerifyRetryDelay(0))
+	status := v.Verify(scrubber.ObjectRecord{
+		Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1,
+	})
+
+	require.False(t, status.IsHealthy())
+	assert.Empty(t, status.Missing)
+	assert.Empty(t, status.Corrupt)
+	assert.Equal(t, []int{1}, status.Unverified)
+	assert.Equal(t, 1, m.reads["b/k/1"], "legacy raw format is stable and must not be retried")
+}
+
+func TestShardStatus_IsHealthyFalseWhenUnverified(t *testing.T) {
+	assert.False(t, scrubber.ShardStatus{Unverified: []int{0}}.IsHealthy())
+	assert.True(t, scrubber.ShardStatus{}.IsHealthy())
 }
 
 // ----------------------------------------------------------------------------
@@ -365,6 +422,62 @@ func TestBackgroundScrubber_RunOnce(t *testing.T) {
 	assert.EqualValues(t, 1, stats.ShardErrors)
 	assert.EqualValues(t, 1, stats.Repaired)
 	assert.EqualValues(t, 0, stats.Unrepairable)
+}
+
+func TestBackgroundScrubber_RunOnce_UnverifiedLegacyShardSkippedNoRepair(t *testing.T) {
+	m := newIntegrityMockBackend()
+	rec := scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1}
+	m.records["b"] = []scrubber.ObjectRecord{rec}
+	m.storeShards("b", "k", [][]byte{[]byte("s0"), []byte("s1"), []byte("s2")})
+	m.status["b/k/1"] = scrubber.ShardIntegrityUnverifiedLegacy
+	em := &captureEmitter{}
+
+	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
+	s.SetEmitter(em)
+	start := testutil.ToFloat64(metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc"))
+	s.RunOnce(context.Background())
+	assert.Equal(t, start+1, testutil.ToFloat64(metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc")))
+
+	stats := s.Stats()
+	assert.EqualValues(t, 1, stats.ObjectsChecked)
+	assert.EqualValues(t, 0, stats.ShardErrors, "unverified is skipped, not a shard error")
+	assert.Equal(t, 0, m.writes, "legacy raw shard must not be repaired or rewritten")
+
+	last := s.LastStatus("b", "k")
+	assert.Equal(t, []int{1}, last.Unverified)
+
+	var skipped []scrubber.HealEvent
+	for _, ev := range em.Snapshot() {
+		if ev.Phase == scrubber.PhaseDetect && ev.Outcome == scrubber.OutcomeSkipped {
+			skipped = append(skipped, ev)
+		}
+	}
+	require.Len(t, skipped, 1)
+	assert.Equal(t, "legacy_no_crc", skipped[0].ErrCode)
+	assert.EqualValues(t, 1, skipped[0].ShardID)
+}
+
+func TestBackgroundScrubber_RunOnce_MissingWithUnverifiedLegacyShardSkipsRepair(t *testing.T) {
+	m := newIntegrityMockBackend()
+	rec := scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1}
+	m.records["b"] = []scrubber.ObjectRecord{rec}
+	m.storeShards("b", "k", [][]byte{nil, []byte("s1"), []byte("s2")})
+	m.status["b/k/1"] = scrubber.ShardIntegrityUnverifiedLegacy
+	em := &captureEmitter{}
+
+	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
+	s.SetEmitter(em)
+	s.RunOnce(context.Background())
+
+	stats := s.Stats()
+	assert.EqualValues(t, 1, stats.ObjectsChecked)
+	assert.EqualValues(t, 1, stats.ShardErrors, "missing shard remains a detected shard error")
+	assert.EqualValues(t, 0, stats.Repaired, "repair must not run with unverified survivor shards")
+	assert.Equal(t, 0, m.writes, "missing shard must not be reconstructed from unverified input")
+
+	last := s.LastStatus("b", "k")
+	assert.Equal(t, []int{0}, last.Missing)
+	assert.Equal(t, []int{1}, last.Unverified)
 }
 
 func TestBackgroundScrubber_StopsOnContextCancel(t *testing.T) {

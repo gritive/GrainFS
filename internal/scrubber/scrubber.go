@@ -2,6 +2,7 @@ package scrubber
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,29 @@ type Scrubbable interface {
 	// WriteShard encrypts and atomically writes a shard with a CRC32 footer.
 	// bucket+key are used for locking (Lock).
 	WriteShard(bucket, key, path string, data []byte) error
+}
+
+// ShardIntegrityStatus describes whether a shard read had an integrity oracle.
+type ShardIntegrityStatus int
+
+const (
+	// ShardIntegrityVerified means the shard carried a CRC envelope and matched it.
+	ShardIntegrityVerified ShardIntegrityStatus = iota
+	// ShardIntegrityUnverifiedLegacy means the shard was readable legacy raw bytes
+	// with no CRC envelope, so scrub cannot prove bit-level integrity.
+	ShardIntegrityUnverifiedLegacy
+)
+
+// ShardIntegrityResult is the scrub-only read result for one shard.
+type ShardIntegrityResult struct {
+	Payload []byte
+	Status  ShardIntegrityStatus
+}
+
+// ShardIntegrityReader is an optional Scrubbable extension for backends that
+// can distinguish CRC-verified shards from readable legacy raw shards.
+type ShardIntegrityReader interface {
+	ReadShardIntegrity(bucket, key, path string) (ShardIntegrityResult, error)
 }
 
 // ObjectRecord carries metadata needed for scrubbing.
@@ -421,13 +445,26 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 				continue
 			}
 
-			errCount := int64(len(status.Missing) + len(status.Corrupt))
-			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
-			s.stats.ShardErrors += errCount
-
 			// Group every event for this object's repair under one correlation ID.
 			correlationID := newCorrelationID()
 			s.emitDetect(rec, status, correlationID)
+
+			if len(status.Unverified) > 0 {
+				metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc").Add(float64(len(status.Unverified)))
+			}
+			if len(status.Missing) == 0 && len(status.Corrupt) == 0 && len(status.Unverified) > 0 {
+				continue
+			}
+
+			errCount := int64(len(status.Missing) + len(status.Corrupt))
+			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
+			s.stats.ShardErrors += errCount
+			if len(status.Unverified) > 0 {
+				ev := newRepairEvent(PhaseReconstruct, OutcomeSkipped, rec, correlationID)
+				ev.ErrCode = "legacy_no_crc"
+				s.emitter.Emit(ev)
+				continue
+			}
 
 			// Per-cycle repair cap (Eng Review #5)
 			if repairCount >= maxRepairsPerCycle {
@@ -605,20 +642,38 @@ func (s *BackgroundScrubber) Stats() ScrubStats {
 	return ScrubStats{}
 }
 
-// emitDetect publishes one detect HealEvent per missing/corrupt shard so the
-// dashboard can show what triggered a repair before reconstruct/write events
-// arrive.
-func (s *BackgroundScrubber) emitDetect(rec ObjectRecord, status ShardStatus, correlationID string) {
+func legacyNoCRCDetail(indices []int) string {
+	return fmt.Sprintf("legacy shard without CRC oracle: shards %v", indices)
+}
+
+func legacyNoCRCRepairSkippedDetail(status ShardStatus) string {
+	return fmt.Sprintf("%s; repair skipped because missing=%d corrupt=%d cannot be safely reconstructed",
+		legacyNoCRCDetail(status.Unverified), len(status.Missing), len(status.Corrupt))
+}
+
+func emitDetectEvents(emitter Emitter, rec ObjectRecord, status ShardStatus, correlationID string) {
 	for _, idx := range status.Missing {
 		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
 		ev.ShardID = int32(idx)
 		ev.ErrCode = "missing"
-		s.emitter.Emit(ev)
+		emitter.Emit(ev)
 	}
 	for _, idx := range status.Corrupt {
 		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
 		ev.ShardID = int32(idx)
 		ev.ErrCode = "corrupt"
-		s.emitter.Emit(ev)
+		emitter.Emit(ev)
 	}
+	for _, idx := range status.Unverified {
+		ev := newRepairEvent(PhaseDetect, OutcomeSkipped, rec, correlationID)
+		ev.ShardID = int32(idx)
+		ev.ErrCode = "legacy_no_crc"
+		emitter.Emit(ev)
+	}
+}
+
+// emitDetect publishes one detect HealEvent per missing/corrupt/unverified
+// shard so the dashboard can show what triggered repair or skip decisions.
+func (s *BackgroundScrubber) emitDetect(rec ObjectRecord, status ShardStatus, correlationID string) {
+	emitDetectEvents(s.emitter, rec, status, correlationID)
 }

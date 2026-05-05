@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // ECScrubSource adapts the EC scrub Scrubbable interface to the BlockSource
@@ -178,17 +180,16 @@ func (v *ECScrubVerifier) Verify(ctx context.Context, blk Block) (BlockStatus, e
 	}
 	correlationID := newCorrelationID()
 	v.correlationByBlock.Store(recordKey(blk.Bucket, blk.Key, blk.VersionID), correlationID)
-	for _, idx := range status.Missing {
-		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
-		ev.ShardID = int32(idx)
-		ev.ErrCode = "missing"
-		v.emitter.Emit(ev)
-	}
-	for _, idx := range status.Corrupt {
-		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
-		ev.ShardID = int32(idx)
-		ev.ErrCode = "corrupt"
-		v.emitter.Emit(ev)
+	emitDetectEvents(v.emitter, rec, status, correlationID)
+	if len(status.Unverified) > 0 {
+		metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc").Add(float64(len(status.Unverified)))
+		v.src.deleteRecord(blk.Bucket, blk.Key, blk.VersionID)
+		return BlockStatus{
+			Missing: len(status.Missing) > 0,
+			Corrupt: len(status.Corrupt) > 0,
+			Skipped: true,
+			Detail:  legacyNoCRCRepairSkippedDetail(status),
+		}, nil
 	}
 	out := BlockStatus{Detail: fmt.Sprintf("missing=%d corrupt=%d", len(status.Missing), len(status.Corrupt))}
 	if len(status.Missing) > 0 {

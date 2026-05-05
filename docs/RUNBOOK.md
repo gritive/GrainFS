@@ -85,6 +85,14 @@ curl -s -H "Authorization: <sigv4 header>" http://localhost:9000/api/receipts/$R
 
 If an incident is `proof-unavailable`, check HealReceipt signing and persistence before treating the repair as audit-complete. If an incident is `isolated`, review the named object version and restore or delete it according to the data owner policy; unrelated objects in the bucket should continue serving. If a corruption incident is `needs-human`, the automatic isolation action failed; restore the object from a clean copy or delete the quarantined version before closing the event.
 
+For EC scrub skips caused by legacy raw shards without CRC envelopes, watch the unverified-shard counter before deciding whether to run a rewrite or migration:
+
+```bash
+curl -s http://localhost:9000/metrics | grep '^grainfs_ec_scrub_unverified_shards_total'
+```
+
+If `reason="legacy_no_crc"` is non-zero, scrub can read the shard bytes but cannot prove bit-level integrity. Treat those shards as migration candidates, not healthy repaired data.
+
 For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.
 
 ```bash
