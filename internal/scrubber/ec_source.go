@@ -178,17 +178,10 @@ func (v *ECScrubVerifier) Verify(ctx context.Context, blk Block) (BlockStatus, e
 	}
 	correlationID := newCorrelationID()
 	v.correlationByBlock.Store(recordKey(blk.Bucket, blk.Key, blk.VersionID), correlationID)
-	for _, idx := range status.Missing {
-		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
-		ev.ShardID = int32(idx)
-		ev.ErrCode = "missing"
-		v.emitter.Emit(ev)
-	}
-	for _, idx := range status.Corrupt {
-		ev := newRepairEvent(PhaseDetect, OutcomeFailed, rec, correlationID)
-		ev.ShardID = int32(idx)
-		ev.ErrCode = "corrupt"
-		v.emitter.Emit(ev)
+	emitDetectEvents(v.emitter, rec, status, correlationID)
+	if len(status.Missing) == 0 && len(status.Corrupt) == 0 && len(status.Unverified) > 0 {
+		v.src.deleteRecord(blk.Bucket, blk.Key, blk.VersionID)
+		return BlockStatus{Skipped: true, Detail: legacyNoCRCDetail(status.Unverified)}, nil
 	}
 	out := BlockStatus{Detail: fmt.Sprintf("missing=%d corrupt=%d", len(status.Missing), len(status.Corrupt))}
 	if len(status.Missing) > 0 {

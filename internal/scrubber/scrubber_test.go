@@ -25,6 +25,7 @@ type mockBackend struct {
 	shardErr       map[string]error                   // path → forced read error
 	records        map[string][]scrubber.ObjectRecord // bucket → records
 	deletedObjects map[string]bool                    // "bucket/key" → deleted mid-scan
+	writes         int
 }
 
 func newMockBackend() *mockBackend {
@@ -105,6 +106,7 @@ func (m *mockBackend) ReadShard(bucket, key, path string) ([]byte, error) {
 func (m *mockBackend) WriteShard(bucket, key, path string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.writes++
 	m.shards[path] = data
 	return nil
 }
@@ -418,6 +420,37 @@ func TestBackgroundScrubber_RunOnce(t *testing.T) {
 	assert.EqualValues(t, 1, stats.ShardErrors)
 	assert.EqualValues(t, 1, stats.Repaired)
 	assert.EqualValues(t, 0, stats.Unrepairable)
+}
+
+func TestBackgroundScrubber_RunOnce_UnverifiedLegacyShardSkippedNoRepair(t *testing.T) {
+	m := newIntegrityMockBackend()
+	rec := scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1}
+	m.records["b"] = []scrubber.ObjectRecord{rec}
+	m.storeShards("b", "k", [][]byte{[]byte("s0"), []byte("s1"), []byte("s2")})
+	m.status["b/k/1"] = scrubber.ShardIntegrityUnverifiedLegacy
+	em := &captureEmitter{}
+
+	s := scrubber.New(m, time.Hour, scrubber.WithNoRetry())
+	s.SetEmitter(em)
+	s.RunOnce(context.Background())
+
+	stats := s.Stats()
+	assert.EqualValues(t, 1, stats.ObjectsChecked)
+	assert.EqualValues(t, 0, stats.ShardErrors, "unverified is skipped, not a shard error")
+	assert.Equal(t, 0, m.writes, "legacy raw shard must not be repaired or rewritten")
+
+	last := s.LastStatus("b", "k")
+	assert.Equal(t, []int{1}, last.Unverified)
+
+	var skipped []scrubber.HealEvent
+	for _, ev := range em.Snapshot() {
+		if ev.Phase == scrubber.PhaseDetect && ev.Outcome == scrubber.OutcomeSkipped {
+			skipped = append(skipped, ev)
+		}
+	}
+	require.Len(t, skipped, 1)
+	assert.Equal(t, "legacy_no_crc", skipped[0].ErrCode)
+	assert.EqualValues(t, 1, skipped[0].ShardID)
 }
 
 func TestBackgroundScrubber_StopsOnContextCancel(t *testing.T) {
