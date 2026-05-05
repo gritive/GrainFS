@@ -51,10 +51,9 @@ func scrapeMetric(t *testing.T, endpoint, name, labelSubstr string) float64 {
 // TestE2E_VlogWatcher_MetricsLive verifies the watcher loop is running:
 // statfs-derived limit is non-zero, the used-ratio gauge appears in the
 // metrics endpoint, and every registered DB category has its own
-// vlog_bytes_by_category sample. The "fires on leak" assertion is covered by
-// unit tests (resource_monitors_test.go) — at e2e scope we cannot make
-// BadgerDB's vlog grow on-demand because the default valueThreshold (1 MiB)
-// keeps small metadata in the LSM, leaving vlog file size at ~0.
+// vlog_bytes_by_category sample. The end-to-end "fires on leak" assertion
+// lives in TestE2E_VlogWatcher_FiresOnLeak, which forces vlog growth via
+// --badger-value-threshold.
 func TestE2E_VlogWatcher_MetricsLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping vlog watcher e2e in -short mode")
@@ -232,6 +231,75 @@ func TestE2E_VlogWatcher_SustainedWriteNoStarvation(t *testing.T) {
 		}, 10*time.Second, 200*time.Millisecond,
 			"GC runs counter must advance for category=%s within 10s", cat)
 	}
+}
+
+// TestE2E_VlogWatcher_FiresOnLeak verifies the predictive vlog watcher emits a
+// vlog_pressure incident once observed vlog usage crosses --vlog-warn-ratio.
+// The existing MetricsLive test only proves the watcher loop runs and gauges
+// publish; it cannot prove "fires on leak" because BadgerDB's default
+// valueThreshold (1 MiB) keeps small metadata in the LSM, leaving vlog file
+// growth at zero from a workload point of view.
+//
+// To force a deterministic fire end-to-end:
+//   - --badger-value-threshold=64 spills any meaningful Set into the value log,
+//     so even modest cluster writes produce vlog file allocations.
+//   - --vlog-warn-ratio=1e-7 makes "any meaningful vlog allocation" enough to
+//     cross the warn threshold once Badger's internal size metric publishes.
+//
+// Badger refreshes its disk-usage gauge on a 1-minute ticker (db.updateSize
+// in badger v4), so the assertion has to wait > 60s for the first publish.
+// Level-based fires (ratio ≥ warnRatio) are not gated by MinETAElapsed, so the
+// cold-start suppression window does not affect this path.
+func TestE2E_VlogWatcher_FiresOnLeak(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping vlog leak-fire e2e in -short mode")
+	}
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      1,
+		ECData:     1,
+		ECParity:   0,
+		LogPrefix:  "vlog-leak",
+		DisableNFS: true,
+		DisableNBD: true,
+		ExtraArgs: []string{
+			"--badger-value-threshold=64",
+			"--vlog-warn-ratio=0.0000001",
+			"--vlog-critical-ratio=0.5",
+			"--vlog-poll-interval=500ms",
+			"--vlog-eta-window=2s",
+			"--vlog-recovery-window=2s",
+			"--vlog-smoke-defer=2s",
+			"--rate-limit-ip-rps=0",
+			"--rate-limit-user-rps=0",
+		},
+	})
+
+	require.Eventually(t, func() bool {
+		return scrapeMetric(t, c.httpURLs[0], "grainfs_vlog_limit_bytes", "") > 0
+	}, 8*time.Second, 200*time.Millisecond, "watcher must be running")
+
+	ctx := context.Background()
+	cli := c.S3Client(0)
+	require.NoError(t, tryCreateBucket(ctx, cli, "vlog-leak"))
+	payload := make([]byte, 4096)
+	_, _ = rand.Read(payload)
+	for i := 0; i < 50; i++ {
+		require.NoError(t, tryPutObject(ctx, cli, "vlog-leak", fmt.Sprintf("k-%d", i), payload))
+	}
+
+	// Badger's db.Size() metric is refreshed by an internal 1-minute ticker.
+	// Allow up to 90s for: (a) ticker to publish vlog file sizes, (b) the
+	// next watcher poll to read it, (c) a Decision to fire and the recorder
+	// to persist the incident.
+	require.Eventually(t, func() bool {
+		for _, inc := range fetchIncidentsSafe(t, c.httpURLs[0]) {
+			if inc.Cause == "vlog_pressure" {
+				return true
+			}
+		}
+		return false
+	}, 90*time.Second, 1*time.Second,
+		"watcher must record a vlog_pressure incident once vlog crosses warn ratio")
 }
 
 // fetchIncidentsSafe is fetchIncidents that returns nil instead of failing
