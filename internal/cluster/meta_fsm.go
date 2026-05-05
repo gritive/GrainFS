@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
@@ -134,10 +135,11 @@ type MetaFSM struct {
 	activePlan        *RebalancePlan             // nil = no active plan (PR-D)
 	icebergNamespaces map[string]IcebergNamespaceEntry
 	icebergTables     map[string]IcebergTableEntry
-	onBucketAssigned  func(string, string)  // protected by mu; set before Start() (PR-D)
-	onRebalancePlan   func(*RebalancePlan)  // must not block; set before Start() (PR-D)
-	onShardGroupAdded func(ShardGroupEntry) // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
-	onIcebergResult   func(string, error)   // requestID, typed catalog result; must not block
+	onBucketAssigned  func(string, string)             // protected by mu; set before Start() (PR-D)
+	onRebalancePlan   func(*RebalancePlan)             // must not block; set before Start() (PR-D)
+	onShardGroupAdded func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onIcebergResult   func(string, error)              // requestID, typed catalog result; must not block
+	onScrubTrigger    func(scrubber.ScrubTriggerEntry) // PR4: cluster-wide scrub trigger applied; must not block
 
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
@@ -233,6 +235,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyRotateKeyDrop(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRotateKeyAbort:
 		return f.applyRotateKeyAbort(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeScrubTrigger:
+		return f.applyScrubTrigger(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -790,6 +794,70 @@ func (f *MetaFSM) publishIcebergResult(requestID string, err error) {
 	if cb != nil && requestID != "" {
 		cb(requestID, err)
 	}
+}
+
+// SetOnScrubTrigger registers a callback fired when a non-stale
+// MetaScrubTriggerCmd is applied. Stale entries (requested_at > scrubTriggerMaxAge
+// ago) are skipped with a log line so fresh nodes joining via raft replay do
+// not re-run ancient scrubs. Must not block — the callback runs on the apply
+// loop.
+func (f *MetaFSM) SetOnScrubTrigger(fn func(scrubber.ScrubTriggerEntry)) {
+	f.mu.Lock()
+	f.onScrubTrigger = fn
+	f.mu.Unlock()
+}
+
+// scrubTriggerMaxAge bounds how old a replayed trigger may be before it's
+// silently dropped. Triggers within this window apply normally on every node.
+const scrubTriggerMaxAge = 1 * time.Hour
+
+func (f *MetaFSM) applyScrubTrigger(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: applyScrubTrigger: empty payload")
+	}
+	var (
+		c      *clusterpb.MetaScrubTriggerCmd
+		decErr error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				decErr = fmt.Errorf("meta_fsm: invalid MetaScrubTriggerCmd flatbuffer: %v", r)
+			}
+		}()
+		c = clusterpb.GetRootAsMetaScrubTriggerCmd(data, 0)
+	}()
+	if decErr != nil {
+		return decErr
+	}
+	if c == nil {
+		return fmt.Errorf("meta_fsm: applyScrubTrigger: nil cmd")
+	}
+	requestedAt := time.Unix(c.RequestedAt(), 0)
+	if time.Since(requestedAt) > scrubTriggerMaxAge {
+		log.Warn().
+			Str("session_id", string(c.SessionId())).
+			Str("bucket", string(c.Bucket())).
+			Time("requested_at", requestedAt).
+			Msg("meta_fsm: applyScrubTrigger skipping stale entry (>1h old)")
+		return nil
+	}
+	f.mu.RLock()
+	cb := f.onScrubTrigger
+	f.mu.RUnlock()
+	if cb == nil {
+		return nil
+	}
+	cb(scrubber.ScrubTriggerEntry{
+		SessionID:        string(c.SessionId()),
+		Bucket:           string(c.Bucket()),
+		KeyPrefix:        string(c.KeyPrefix()),
+		Scope:            scrubber.ScrubScope(c.Scope()),
+		DryRun:           c.DryRun(),
+		RequestedAt:      c.RequestedAt(),
+		OriginatorNodeID: string(c.OriginatorNodeId()),
+	})
+	return nil
 }
 
 // BucketAssignments returns a copy of the current bucket→group_id map.
