@@ -18,7 +18,6 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go/logging"
 	"github.com/dgraph-io/badger/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/receipt"
@@ -120,8 +119,11 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 			"--secret-key", secretKey,
 			"--heal-receipt-window=1",
 			"--heal-receipt-gossip-interval=1s",
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--ec-data", "2",
+			"--ec-parity", "1",
+			"--seed-groups", "1",
+			"--nfs4-port", "0",
+			"--nbd-port", "0",
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
@@ -164,19 +166,19 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 	t.Run("LocalHit_QueryANodeForItsOwnReceipt", func(t *testing.T) {
 		body, status := signedGet(t, ctx, signer, creds, httpURL(0)+"/api/receipts/"+idLocalA)
 		require.Equal(t, http.StatusOK, status, "node A should answer locally for its own receipt; body=%s", body)
-		assert.Contains(t, string(body), idLocalA)
+		require.Contains(t, string(body), idLocalA)
 	})
 
 	t.Run("RoutingCacheHit_QueryBForReceiptOnCThatWasGossiped", func(t *testing.T) {
 		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCHot)
 		require.Equal(t, http.StatusOK, status, "node B should route via gossip cache to C; body=%s", body)
-		assert.Contains(t, string(body), idCHot)
+		require.Contains(t, string(body), idCHot)
 	})
 
 	t.Run("BroadcastFallback_QueryBForReceiptOnCOutsideGossipWindow", func(t *testing.T) {
 		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCOld)
 		require.Equal(t, http.StatusOK, status, "node B should find receipt via broadcast fan-out; body=%s", body)
-		assert.Contains(t, string(body), idCOld)
+		require.Contains(t, string(body), idCOld)
 	})
 
 	t.Run("NotFound_UnknownReceiptReturns404", func(t *testing.T) {
@@ -188,7 +190,7 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 		resp, err := http.Get(httpURL(0) + "/api/receipts/" + idLocalA)
 		require.NoError(t, err)
 		defer resp.Body.Close()
-		assert.Equal(t, http.StatusForbidden, resp.StatusCode, "unsigned request must be rejected")
+		require.Equal(t, http.StatusForbidden, resp.StatusCode, "unsigned request must be rejected")
 	})
 }
 

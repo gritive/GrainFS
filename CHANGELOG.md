@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.49.1] — 2026-05-06 — full e2e stabilization after master rebase
+
+### Fixed
+
+- Stabilized full e2e startup after rebasing on `origin/master` by spreading
+  port allocation across test processes and retrying cluster startup with fresh
+  ports on bind/start races.
+- Updated CoW and volume e2e coverage to use the admin-socket CLI volume
+  surface after the data-plane `/volumes/*` API removal.
+- Updated Docker NBD, NBD CoW, and NBD dedup scripts to manage volumes through
+  `grainfs volume ... --data`, matching the current control-plane contract.
+- Hardened data-group self-removal migration so leadership transfer waits for a
+  caught-up voter and caller retry handles short post-transfer leadership churn.
+- Made QUIC raft integration setup retry transient full-mesh connection races
+  instead of failing on one idle-timeout dial.
+
+### Tests
+
+- `make test`
+- `make test-e2e` completed once across NFS/NBD/Iceberg/EC coverage; NFSv4
+  smoke was skipped on macOS as Linux-only. A final post-fix rerun was started
+  and intentionally stopped at the user's request to ship the current work.
+
 ## [0.0.49.0] — 2026-05-06 — EC scrub legacy shard safety
 
 ### Added
@@ -106,7 +129,6 @@
 - Added integration and e2e coverage for Badger role startup recovery,
   recovery read-only default-bucket behavior, optional role disablement, typed
   nil incident recorder wiring, and cluster missing-shard repair with receipts.
-
 ## [0.0.47.0] — 2026-05-05 — EC scrub trigger — admin/CLI + cluster-wide aggregation (PR4)
 
 ### Added

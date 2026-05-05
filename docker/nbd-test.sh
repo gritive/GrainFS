@@ -88,13 +88,14 @@ echo "OK: S3 endpoint ready (PID=$SERVER_PID)"
 
 echo "Ensuring default volume exists..."
 for i in $(seq 1 30); do
-    status=$(curl -s -o /tmp/grainfs-volume-create.out -w "%{http_code}" \
-        -X PUT "http://127.0.0.1:${S3_PORT}/volumes/default?size=${NBD_SIZE}" || true)
-    if [ "$status" = "201" ] || [ "$status" = "409" ]; then
+    if grainfs volume info default --data "$DATA_DIR" >/tmp/grainfs-volume-create.out 2>&1; then
+        break
+    fi
+    if grainfs volume create default --size "$NBD_SIZE" --data "$DATA_DIR" >/tmp/grainfs-volume-create.out 2>&1; then
         break
     fi
     if [ "$i" -eq 30 ]; then
-        echo "FAIL: default volume not ready within 30s (status=$status)"
+        echo "FAIL: default volume not ready within 30s"
         cat /tmp/grainfs-volume-create.out 2>/dev/null || true
         exit 1
     fi

@@ -117,6 +117,9 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 	// Self-removal guard: if this node is being removed, transfer leadership first
 	// so the new leader can retry the migration.
 	if fromNode == e.localNodeID {
+		if err := e.waitForLeadershipTransferTarget(ctx, dg, node, fromNode); err != nil {
+			return err
+		}
 		if err := node.TransferLeadership(); err != nil {
 			return fmt.Errorf("data_group_executor: TransferLeadership: %w", err)
 		}
@@ -163,6 +166,66 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 
 	e.dgMgr.Add(NewDataGroupWithBackend(groupID, newPeers, dg.Backend()))
 	return nil
+}
+
+func (e *DataGroupPlanExecutor) waitForLeadershipTransferTarget(
+	ctx context.Context,
+	dg *DataGroup,
+	node dataRaftNode,
+	fromNode string,
+) error {
+	peerIDs := dg.PeerIDs()
+	hasTarget := false
+	for _, peerID := range peerIDs {
+		if peerID != fromNode {
+			hasTarget = true
+			break
+		}
+	}
+	if !hasTarget {
+		return nil
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		committed := node.CommittedIndex()
+		for _, peerID := range peerIDs {
+			if peerID == fromNode {
+				continue
+			}
+			if e.peerCaughtUp(node, peerID, committed) {
+				return nil
+			}
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("data_group_executor: no caught-up voter available for leadership transfer from %q: %w",
+				fromNode, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (e *DataGroupPlanExecutor) peerCaughtUp(node dataRaftNode, peerID string, committed uint64) bool {
+	peerKey := peerID
+	if addr, err := e.resolveAddr(peerID); err == nil && addr != "" {
+		peerKey = addr
+	}
+	if match, ok := node.PeerMatchIndex(peerKey); ok && match >= committed {
+		return true
+	}
+	if peerKey != peerID {
+		if match, ok := node.PeerMatchIndex(peerID); ok && match >= committed {
+			return true
+		}
+	}
+	return false
 }
 
 // compile-time check: *raft.Node must satisfy dataRaftNode.

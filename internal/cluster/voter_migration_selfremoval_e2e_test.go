@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -98,37 +97,51 @@ func TestVoterMigration_SelfRemovalWithRetry_E2E(t *testing.T) {
 	// participate in the leadership-transfer phase.
 	node3 := cl.AddNode("node-3")
 
-	// Step 3: Create executor on NEW leader with localNodeID == newLeaderID
-	// Re-use the same fromNode (oldLeaderID) - the plan is still valid
-	newExec := cluster.NewDataGroupPlanExecutorForTest(
-		newLeaderID, dgMgr, addrBook, sgUpdater,
-		func(dg *cluster.DataGroup) cluster.DataRaftNode {
-			return &raftNodeAdapter{n: newLeader}
-		},
-	)
+	// Step 3: Retry MoveReplica on the current NEW leader. Leadership transfer
+	// can briefly churn after TimeoutNow, so model the caller retry loop instead
+	// of assuming the first observed leader remains leader until ChangeMembership.
+	require.Eventually(t, func() bool {
+		for _, id := range []string{"node-0", "node-1", "node-2"} {
+			if id == oldLeaderID {
+				continue
+			}
+			candidate := cl.NodeByID(id)
+			if candidate == nil || !candidate.IsLeader() {
+				continue
+			}
+			newLeader = candidate
+			newLeaderID = candidate.ID()
 
-	// Step 4: Retry MoveReplica on NEW leader
-	// fromNode = oldLeaderID (no longer leader), toNode = node-3
-	err = newExec.MoveReplica(ctx, "group-0", oldLeaderID, "node-3")
+			newExec := cluster.NewDataGroupPlanExecutorForTest(
+				newLeaderID, dgMgr, addrBook, sgUpdater,
+				func(dg *cluster.DataGroup) cluster.DataRaftNode {
+					return &raftNodeAdapter{n: candidate}
+				},
+			)
+			err = newExec.MoveReplica(ctx, "group-0", oldLeaderID, "node-3")
+			return err == nil
+		}
+		return false
+	}, 10*time.Second, 50*time.Millisecond, "retry on new leader must succeed")
 	require.NoError(t, err, "retry on new leader must succeed")
 
-	// Step 5: Verify MetaFSM updated with new membership
+	// Step 4: Verify MetaFSM updated with new membership
 	require.Len(t, sgUpdater.proposed, 1)
-	assert.Equal(t, "group-0", sgUpdater.proposed[0].ID)
-	assert.Contains(t, sgUpdater.proposed[0].PeerIDs, "node-3")
-	assert.NotContains(t, sgUpdater.proposed[0].PeerIDs, oldLeaderID,
+	require.Equal(t, "group-0", sgUpdater.proposed[0].ID)
+	require.Contains(t, sgUpdater.proposed[0].PeerIDs, "node-3")
+	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, oldLeaderID,
 		"old leader must be removed from group membership")
 
-	// Step 6: Verify node-3 caught up with new leader
-	assert.Eventually(t, func() bool {
+	// Step 5: Verify node-3 caught up with new leader
+	require.Eventually(t, func() bool {
 		return node3.CommittedIndex() == newLeader.CommittedIndex()
 	}, 5*time.Second, 50*time.Millisecond, "node-3 must catch up to new leader commit index")
 
-	// Step 7: Verify local DataGroupManager updated
+	// Step 6: Verify local DataGroupManager updated
 	dg := dgMgr.Get("group-0")
 	require.NotNil(t, dg)
-	assert.Contains(t, dg.PeerIDs(), "node-3")
-	assert.NotContains(t, dg.PeerIDs(), oldLeaderID)
+	require.Contains(t, dg.PeerIDs(), "node-3")
+	require.NotContains(t, dg.PeerIDs(), oldLeaderID)
 
 	t.Logf("self-removal with retry ok: old leader %s handed off leadership, new leader %s completed migration",
 		oldLeaderID, newLeaderID)

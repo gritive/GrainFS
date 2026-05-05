@@ -93,6 +93,23 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 	return s.transport.Call(ctx, peerAddr, msg)
 }
 
+// Ping verifies that the peer's QUIC shard service can accept a bidirectional
+// RPC. The handler returns an application-level error for the synthetic RPC
+// type, but a transport-level response still proves the peer process is alive.
+func (s *ShardService) Ping(ctx context.Context, peer string) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	fw := buildShardEnvelope("Ping", "_grainfs_health", "_ping", 0, nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	_, err = s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	return err
+}
+
 func (s *ShardService) resolvePeerAddress(peer string) (string, error) {
 	if s.addrBook == nil {
 		return peer, nil
@@ -142,6 +159,9 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 	if err != nil {
 		return err
 	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
 	fw := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
 	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
@@ -165,6 +185,9 @@ func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key s
 	peerAddr, err := s.resolvePeerAddress(peer)
 	if err != nil {
 		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
 	}
 	fw := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
@@ -190,6 +213,9 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 	if err != nil {
 		return nil, err
 	}
+	if s.transport == nil {
+		return nil, fmt.Errorf("shard service: no transport")
+	}
 	fw := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
 	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
@@ -212,6 +238,9 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 	peerAddr, err := s.resolvePeerAddress(peer)
 	if err != nil {
 		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
 	}
 	fw := buildShardEnvelope("DeleteShards", bucket, key, 0, nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()

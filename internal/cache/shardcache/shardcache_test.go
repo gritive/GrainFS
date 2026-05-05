@@ -5,30 +5,42 @@ import (
 	"hash/fnv"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestGet_DisabledReturnsMiss(t *testing.T) {
 	c := New(0)
 	c.Put("a", []byte("data"))
 	if _, ok := c.Get("a"); ok {
-		t.Fatal("disabled cache must always miss")
+		require.Fail(t, "disabled cache must always miss")
 	}
 	s := c.Stats()
-	if s.Hits != 0 || s.Misses != 0 {
-		t.Fatalf("disabled cache should not record stats, got %+v", s)
-	}
+	require.Zero(t, s.Hits, "disabled cache should not record hits")
+	require.Zero(t, s.Misses, "disabled cache should not record misses")
 }
 
 func TestPutGet_RoundTrip(t *testing.T) {
 	c := New(1024)
 	c.Put("bucket/key/v1/0", []byte("shard-0-bytes"))
 	got, ok := c.Get("bucket/key/v1/0")
-	if !ok {
-		t.Fatal("expected hit")
-	}
-	if string(got) != "shard-0-bytes" {
-		t.Fatalf("want shard-0-bytes, got %q", string(got))
-	}
+	require.True(t, ok, "expected hit")
+	require.Equal(t, "shard-0-bytes", string(got))
+}
+
+func TestPeek_DoesNotRecordHitOrMiss(t *testing.T) {
+	c := New(1024)
+	c.Put("bucket/key/v1/0", []byte("shard-0-bytes"))
+
+	got, ok := c.Peek("bucket/key/v1/0")
+	require.True(t, ok)
+	require.Equal(t, "shard-0-bytes", string(got))
+	_, ok = c.Peek("bucket/key/v1/1")
+	require.False(t, ok)
+
+	stats := c.Stats()
+	require.Zero(t, stats.Hits)
+	require.Zero(t, stats.Misses)
 }
 
 func TestPut_CopiesPayload(t *testing.T) {
@@ -39,9 +51,7 @@ func TestPut_CopiesPayload(t *testing.T) {
 	c.Put("k", src)
 	src[0] = 'X'
 	got, _ := c.Get("k")
-	if string(got) != "original" {
-		t.Fatalf("cache aliased caller buffer: got %q", string(got))
-	}
+	require.Equal(t, "original", string(got), "cache must not alias caller buffer")
 }
 
 func shardIndex(key string) int {
@@ -62,9 +72,7 @@ func keysOnSameShard(t *testing.T, n int) []string {
 			keys = append(keys, k)
 		}
 	}
-	if len(keys) < n {
-		t.Fatalf("only found %d collisions in 100k tries; need %d", len(keys), n)
-	}
+	require.GreaterOrEqualf(t, len(keys), n, "only found %d collisions in 100k tries; need %d", len(keys), n)
 	return keys
 }
 
@@ -75,18 +83,16 @@ func TestPut_LRUEvicts(t *testing.T) {
 	c.Put(keys[1], []byte("BBBB"))
 	c.Put(keys[2], []byte("CCCC"))
 	if _, ok := c.Get(keys[0]); ok {
-		t.Fatalf("%s should have been evicted", keys[0])
+		require.Failf(t, "entry should have been evicted", "%s should have been evicted", keys[0])
 	}
 	if _, ok := c.Get(keys[1]); !ok {
-		t.Fatalf("%s should still be resident", keys[1])
+		require.Failf(t, "entry should still be resident", "%s should still be resident", keys[1])
 	}
 	if _, ok := c.Get(keys[2]); !ok {
-		t.Fatalf("%s should still be resident", keys[2])
+		require.Failf(t, "entry should still be resident", "%s should still be resident", keys[2])
 	}
 	s := c.Stats()
-	if s.Evictions != 1 {
-		t.Fatalf("expected 1 eviction, got %d", s.Evictions)
-	}
+	require.Equal(t, uint64(1), s.Evictions)
 }
 
 func TestPut_RefreshOnRepeat(t *testing.T) {
@@ -96,12 +102,10 @@ func TestPut_RefreshOnRepeat(t *testing.T) {
 	c.Put(keys[1], []byte("BBBB"))
 	c.Put(keys[0], []byte("ZZZZ"))
 	got, _ := c.Get(keys[0])
-	if string(got) != "AAAA" {
-		t.Fatalf("re-Put should not replace data without Invalidate, got %q", string(got))
-	}
+	require.Equal(t, "AAAA", string(got), "re-Put should not replace data without Invalidate")
 	c.Put(keys[2], []byte("CCCC"))
 	if _, ok := c.Get(keys[1]); ok {
-		t.Fatalf("%s should have been evicted (keys[0] refreshed via re-Put)", keys[1])
+		require.Failf(t, "entry should have been evicted", "%s should have been evicted (keys[0] refreshed via re-Put)", keys[1])
 	}
 }
 
@@ -111,10 +115,10 @@ func TestPut_OversizedPayloadSkipped(t *testing.T) {
 	c.Put(keys[0], []byte("AAAA"))
 	c.Put(keys[1], []byte("payload-too-large-to-fit-in-8-bytes"))
 	if _, ok := c.Get(keys[0]); !ok {
-		t.Fatal("oversized Put evicted unrelated entry")
+		require.Fail(t, "oversized Put evicted unrelated entry")
 	}
 	if _, ok := c.Get(keys[1]); ok {
-		t.Fatal("oversized payload should not be cached")
+		require.Fail(t, "oversized payload should not be cached")
 	}
 }
 
@@ -123,11 +127,9 @@ func TestInvalidate_RemovesEntry(t *testing.T) {
 	c.Put("a", []byte("AAAA"))
 	c.Invalidate("a")
 	if _, ok := c.Get("a"); ok {
-		t.Fatal("Invalidate did not remove entry")
+		require.Fail(t, "Invalidate did not remove entry")
 	}
-	if c.Stats().ResidentByte != 0 {
-		t.Fatalf("resident bytes should be 0 after invalidate, got %d", c.Stats().ResidentByte)
-	}
+	require.Zero(t, c.Stats().ResidentByte, "resident bytes should be 0 after invalidate")
 }
 
 func TestInvalidate_NoOpOnMissing(t *testing.T) {
@@ -164,7 +166,6 @@ func TestConcurrent_GetPutInvalidate(t *testing.T) {
 	}
 	wg.Wait()
 	s := c.Stats()
-	if s.ResidentByte < 0 || s.ResidentByte > s.CapacityByte {
-		t.Fatalf("resident bytes %d out of [0,%d]", s.ResidentByte, s.CapacityByte)
-	}
+	require.GreaterOrEqual(t, s.ResidentByte, int64(0))
+	require.LessOrEqual(t, s.ResidentByte, s.CapacityByte)
 }

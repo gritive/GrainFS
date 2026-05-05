@@ -65,10 +65,20 @@ type e2eCluster struct {
 
 func startE2ECluster(t *testing.T, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
-	c, err := tryStartE2ECluster(t, normalizeE2EClusterOptions(opts))
-	require.NoError(t, err)
-	t.Cleanup(c.Stop)
-	return c
+	opts = normalizeE2EClusterOptions(opts)
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		c, err := tryStartE2ECluster(t, opts)
+		if err == nil {
+			t.Cleanup(c.Stop)
+			return c
+		}
+		lastErr = err
+		t.Logf("e2e cluster start attempt %d failed: %v", attempt, err)
+		time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+	}
+	require.NoError(t, lastErr)
+	return nil
 }
 
 func normalizeE2EClusterOptions(opts e2eClusterOptions) e2eClusterOptions {
@@ -251,8 +261,7 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 		"--cluster-key", c.clusterKey,
 		"--access-key", c.accessKey,
 		"--secret-key", c.secretKey,
-		"--ec-data", fmt.Sprintf("%d", c.ecData),
-		"--ec-parity", fmt.Sprintf("%d", c.ecParity),
+		"--dedup=false",
 		"--seed-groups", fmt.Sprintf("%d", c.seedGroups),
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
@@ -260,6 +269,12 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 		"--scrub-interval", c.scrubIntervalArg(),
 		"--lifecycle-interval", "0",
 		"--no-encryption",
+	}
+	if c.ecData > 0 || c.ecParity > 0 {
+		args = append(args,
+			"--ec-data", fmt.Sprintf("%d", c.ecData),
+			"--ec-parity", fmt.Sprintf("%d", c.ecParity),
+		)
 	}
 	if c.mode == ClusterModeDynamicJoin && i > 0 {
 		args = append(args, "--join", c.raftAddr(0))
