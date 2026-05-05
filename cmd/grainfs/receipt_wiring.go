@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/receipt"
+	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -23,6 +24,7 @@ import (
 // gossipSender) are nil in no-peers mode.
 type healReceiptWiring struct {
 	db           *badger.DB
+	vlogEntry    *resourcewatch.RegisteredDB
 	store        *receipt.Store
 	keyStore     *receipt.KeyStore
 	api          *receipt.API
@@ -35,6 +37,9 @@ type healReceiptWiring struct {
 func (w *healReceiptWiring) Close() {
 	if w == nil {
 		return
+	}
+	if w.vlogEntry != nil {
+		resourcewatch.DeregisterDB(w.vlogEntry)
 	}
 	if w.store != nil {
 		_ = w.store.Close()
@@ -105,11 +110,13 @@ func setupClusterReceipt(
 	if err != nil {
 		return opts, nil, fmt.Errorf("open receipt db: %w", err)
 	}
+	vlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryReceipts, db)
 
 	// KeyStore is constructed here to validate the PSK at boot; the scrubber
 	// (Slice 3) consumes it via receiptTrackingEmitter to sign receipts.
 	ks, err := receipt.NewKeyStore(receipt.Key{ID: "cluster", Secret: []byte(psk)})
 	if err != nil {
+		resourcewatch.DeregisterDB(vlogEntry)
 		_ = db.Close()
 		return opts, nil, fmt.Errorf("init receipt keystore: %w", err)
 	}
@@ -120,6 +127,7 @@ func setupClusterReceipt(
 		FlushInterval:  50 * time.Millisecond,
 	})
 	if err != nil {
+		resourcewatch.DeregisterDB(vlogEntry)
 		_ = db.Close()
 		return opts, nil, fmt.Errorf("create receipt store: %w", err)
 	}
@@ -148,6 +156,7 @@ func setupClusterReceipt(
 
 	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
 		db:           db,
+		vlogEntry:    vlogEntry,
 		store:        store,
 		keyStore:     ks,
 		api:          api,
