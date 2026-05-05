@@ -37,6 +37,7 @@ const (
 	MetaCmdTypeRotateKeySwitch        = clusterpb.MetaCmdTypeRotateKeySwitch
 	MetaCmdTypeRotateKeyDrop          = clusterpb.MetaCmdTypeRotateKeyDrop
 	MetaCmdTypeRotateKeyAbort         = clusterpb.MetaCmdTypeRotateKeyAbort
+	MetaCmdTypeScrubTrigger           = clusterpb.MetaCmdTypeScrubTrigger // PR4
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -1522,6 +1523,23 @@ func encodeMetaProposeRebalancePlanCmd(plan RebalancePlan) ([]byte, error) {
 	clusterpb.MetaProposeRebalancePlanCmdStart(b)
 	clusterpb.MetaProposeRebalancePlanCmdAddPlan(b, planOff)
 	return fbFinish(b, clusterpb.MetaProposeRebalancePlanCmdEnd(b)), nil
+}
+
+func encodeMetaScrubTriggerCmd(entry scrubber.ScrubTriggerEntry) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	sidOff := b.CreateString(entry.SessionID)
+	bktOff := b.CreateString(entry.Bucket)
+	pfxOff := b.CreateString(entry.KeyPrefix)
+	nodeOff := b.CreateString(entry.OriginatorNodeID)
+	clusterpb.MetaScrubTriggerCmdStart(b)
+	clusterpb.MetaScrubTriggerCmdAddSessionId(b, sidOff)
+	clusterpb.MetaScrubTriggerCmdAddBucket(b, bktOff)
+	clusterpb.MetaScrubTriggerCmdAddKeyPrefix(b, pfxOff)
+	clusterpb.MetaScrubTriggerCmdAddScope(b, int32(entry.Scope))
+	clusterpb.MetaScrubTriggerCmdAddDryRun(b, entry.DryRun)
+	clusterpb.MetaScrubTriggerCmdAddRequestedAt(b, entry.RequestedAt)
+	clusterpb.MetaScrubTriggerCmdAddOriginatorNodeId(b, nodeOff)
+	return fbFinish(b, clusterpb.MetaScrubTriggerCmdEnd(b)), nil
 }
 
 func encodeMetaAbortPlanCmd(planID string, reason clusterpb.AbortPlanReason) ([]byte, error) {
