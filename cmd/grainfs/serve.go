@@ -1539,7 +1539,12 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	})
 	go diskCollector.Run(ctx)
 	srvOpts := []server.Option{
-		server.WithClusterInfo(&raftClusterInfo{node: node, peers: peers, backend: distBackend}),
+		// cluster status / remove-peer must reflect *meta-raft* membership —
+		// that is the cluster-wide membership ledger that `serve --join`
+		// updates via performMetaJoin. The node initialised at line 872 is a
+		// legacy per-process raft instance whose Peers() never grows on join.
+		server.WithClusterInfo(&raftClusterInfo{node: metaRaft.Node(), peers: peers, backend: distBackend}),
+		server.WithClusterMembership(&raftMembership{node: metaRaft.Node()}),
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
@@ -2124,6 +2129,11 @@ func (a *balancerInfoAdapter) Status() server.BalancerStatusResult {
 }
 
 // raftClusterInfo adapts raft.Node to server.ClusterInfo interface.
+//
+// Peers() / LivePeers() always read from the running raft.Node so dynamic-join
+// clusters reflect membership changes (joins, removes) the moment they commit.
+// The peers field is preserved for compatibility with callers that still pass
+// the bootstrap list, but it is not consulted on the read path.
 type raftClusterInfo struct {
 	node    *raft.Node
 	peers   []string
@@ -2134,12 +2144,31 @@ func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
 func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
-func (r *raftClusterInfo) Peers() []string  { return r.peers }
+func (r *raftClusterInfo) Peers() []string  { return nilToEmpty(r.node.Peers()) }
 func (r *raftClusterInfo) LivePeers() []string {
 	if r.backend == nil {
-		return r.peers
+		return nilToEmpty(r.node.Peers())
 	}
-	return r.backend.LiveNodes()
+	return nilToEmpty(r.backend.LiveNodes())
+}
+
+// nilToEmpty normalises a nil slice to an empty one so JSON marshals it as
+// "[]" instead of "null". The cluster status CLI assertion path treats
+// missing keys and null identically — keep the wire shape stable.
+func nilToEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// raftMembership adapts raft.Node to server.ClusterMembership for the
+// remove-peer endpoint. Joint consensus (§4.3) is used so the change is
+// atomic and the engine handles leader self-removal via commit-time wakeup.
+type raftMembership struct{ node *raft.Node }
+
+func (r *raftMembership) RemoveVoter(ctx context.Context, id string) error {
+	return r.node.ChangeMembership(ctx, nil, []string{id})
 }
 
 // ecShardCounterFor returns a per-object shard-count function for MigrationExecutor.

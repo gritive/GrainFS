@@ -1129,6 +1129,116 @@ func (s *Server) joinClusterHandler(ctx context.Context, c *app.RequestContext) 
 	c.Data(consts.StatusOK, "application/json", resp)
 }
 
+// removePeerHandler handles POST /api/cluster/remove-peer. Removes the named
+// voter from the Raft configuration via joint consensus. Pre-flight refuses
+// the request when removal would drop live voters below the post-removal
+// quorum, unless force=true. Errors:
+//   - 400 malformed body or empty id
+//   - 404 id is not a current voter
+//   - 409 receiver is not the leader (response carries leader_id) or pre-flight blocks
+//   - 503 membership controller unwired or mutation gate engaged
+//   - 500 engine returned an error
+func (s *Server) removePeerHandler(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "cluster_remove_peer") {
+		return
+	}
+	if s.membership == nil {
+		c.JSON(consts.StatusServiceUnavailable, map[string]string{
+			"error": "membership controller not configured",
+		})
+		return
+	}
+	if s.cluster == nil {
+		c.JSON(consts.StatusServiceUnavailable, map[string]string{
+			"error": "node is not in cluster mode",
+		})
+		return
+	}
+
+	var req struct {
+		ID    string `json:"id"`
+		Force bool   `json:"force"`
+	}
+	body, _ := c.Body()
+	if err := json.Unmarshal(body, &req); err != nil {
+		c.JSON(consts.StatusBadRequest, map[string]string{"error": "malformed JSON body"})
+		return
+	}
+	if req.ID == "" {
+		c.JSON(consts.StatusBadRequest, map[string]string{"error": "id is required"})
+		return
+	}
+
+	if s.cluster.State() != "Leader" {
+		c.JSON(consts.StatusConflict, map[string]any{
+			"error":     "not leader",
+			"leader_id": s.cluster.LeaderID(),
+		})
+		return
+	}
+
+	peers := s.cluster.Peers()
+	inCluster := false
+	for _, p := range peers {
+		if p == req.ID {
+			inCluster = true
+			break
+		}
+	}
+	if !inCluster {
+		c.JSON(consts.StatusNotFound, map[string]any{
+			"error": "peer not in cluster",
+			"id":    req.ID,
+		})
+		return
+	}
+
+	if !req.Force {
+		// Peers() excludes self → total voters = len(peers) + 1. The target
+		// is in peers (checked above), so votersAfter = total - 1 = len(peers).
+		// LivePeers() includes self (always alive from its own perspective).
+		votersAfter := len(peers)
+		newQuorum := votersAfter/2 + 1
+		if newQuorum < 1 {
+			newQuorum = 1
+		}
+		live := s.cluster.LivePeers()
+		aliveAfter := 0
+		for _, p := range live {
+			if p == req.ID {
+				continue
+			}
+			aliveAfter++
+		}
+		if aliveAfter < newQuorum {
+			c.JSON(consts.StatusConflict, map[string]any{
+				"error":        "quorum would break",
+				"voters_after": votersAfter,
+				"alive_after":  aliveAfter,
+				"new_quorum":   newQuorum,
+				"hint":         "rerun with force=true to override",
+			})
+			return
+		}
+	}
+
+	if err := s.membership.RemoveVoter(ctx, req.ID); err != nil {
+		c.JSON(consts.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	s.emitEvent(eventstore.Event{
+		Type:   eventstore.EventTypeSystem,
+		Action: eventstore.EventActionClusterRemovePeer,
+		Metadata: map[string]any{
+			"removed_id": req.ID,
+			"force":      req.Force,
+		},
+	})
+
+	c.JSON(consts.StatusOK, map[string]string{"status": "removed", "id": req.ID})
+}
+
 // handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
 func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, dstBucket, dstKey, copySource string) {
 	// Parse copy source: /bucket/key or bucket/key
