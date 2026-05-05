@@ -98,24 +98,33 @@ func TestCancelScrubJob_DelegatesToDirector(t *testing.T) {
 }
 
 type mockScrubProposer struct {
-	gotReq scrubber.TriggerReq
-	entry  scrubber.ScrubTriggerEntry
-	err    error
+	gotReq  scrubber.TriggerReq
+	entry   scrubber.ScrubTriggerEntry
+	created bool
+	err     error
 }
 
-func (m *mockScrubProposer) Propose(_ context.Context, req scrubber.TriggerReq) (scrubber.ScrubTriggerEntry, error) {
+func (m *mockScrubProposer) Propose(_ context.Context, req scrubber.TriggerReq) (scrubber.ScrubTriggerEntry, bool, error) {
 	m.gotReq = req
-	return m.entry, m.err
+	return m.entry, m.created, m.err
 }
 
 func TestTriggerScrub_HappyPath(t *testing.T) {
-	p := &mockScrubProposer{entry: scrubber.ScrubTriggerEntry{SessionID: "sid-1"}}
+	p := &mockScrubProposer{entry: scrubber.ScrubTriggerEntry{SessionID: "sid-1"}, created: true}
 	resp, err := TriggerScrub(context.Background(), &Deps{ScrubProposer: p}, ScrubReq{Bucket: "ec1", Scope: "full"})
 	require.NoError(t, err)
 	require.Equal(t, "sid-1", resp.SessionID)
 	require.True(t, resp.Created)
 	require.Equal(t, "ec1", p.gotReq.Bucket)
 	require.Equal(t, scrubber.ScopeFull, p.gotReq.Scope)
+}
+
+func TestTriggerScrub_DedupHitReturnsExistingSession(t *testing.T) {
+	p := &mockScrubProposer{entry: scrubber.ScrubTriggerEntry{SessionID: "existing-1"}, created: false}
+	resp, err := TriggerScrub(context.Background(), &Deps{ScrubProposer: p}, ScrubReq{Bucket: "ec1"})
+	require.NoError(t, err)
+	require.Equal(t, "existing-1", resp.SessionID)
+	require.False(t, resp.Created, "dedup hit must report Created=false")
 }
 
 func TestTriggerScrub_BucketRequired(t *testing.T) {

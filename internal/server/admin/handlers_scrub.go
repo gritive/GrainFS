@@ -72,13 +72,13 @@ func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error)
 	default:
 		return ScrubResp{}, NewInvalid("scope must be 'full' or 'live'")
 	}
-	entry, err := d.ScrubProposer.Propose(ctx, scrubber.TriggerReq{
+	entry, created, err := d.ScrubProposer.Propose(ctx, scrubber.TriggerReq{
 		Bucket: req.Bucket, KeyPrefix: req.KeyPrefix, Scope: scope, DryRun: req.DryRun,
 	})
 	if err != nil {
 		return ScrubResp{}, NewInternal("propose scrub: " + err.Error())
 	}
-	return ScrubResp{SessionID: entry.SessionID, Created: true}, nil
+	return ScrubResp{SessionID: entry.SessionID, Created: created}, nil
 }
 
 // GetScrubJob returns one session by id, aggregated across cluster peers when

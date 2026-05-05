@@ -47,10 +47,12 @@ type ListClusterPeersResp struct {
 
 // ScrubProposer is the slim interface admin handlers need to publish a
 // cluster-wide scrub trigger via raft. Implemented by an adapter in serve.go
-// that wires MetaRaft.ProposeScrubTrigger; defined here so handler tests can
-// substitute a mock.
+// that wires MetaRaft.ProposeScrubTrigger. created=false signals a dedup hit
+// (LookupDedup matched a still-tracked session); the SessionID belongs to
+// the pre-existing session so polling continues to work for the original
+// trigger.
 type ScrubProposer interface {
-	Propose(ctx context.Context, req scrubber.TriggerReq) (scrubber.ScrubTriggerEntry, error)
+	Propose(ctx context.Context, req scrubber.TriggerReq) (entry scrubber.ScrubTriggerEntry, created bool, err error)
 }
 
 // ScrubAggregator returns per-peer ScrubJobInfo (excluding local) for a given

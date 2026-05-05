@@ -216,8 +216,19 @@ func (d *Director) ApplyFromFSM(entry ScrubTriggerEntry) {
 		d.mu.Unlock()
 		return
 	}
-	sess := newLiveSession(entry.SessionID, entry.Bucket, entry.KeyPrefix, entry.Scope, entry.DryRun, time.Unix(entry.RequestedAt, 0))
+	startedAt := time.Now()
+	if entry.RequestedAt != 0 {
+		startedAt = time.Unix(entry.RequestedAt, 0)
+	}
+	sess := newLiveSession(entry.SessionID, entry.Bucket, entry.KeyPrefix, entry.Scope, entry.DryRun, startedAt)
 	d.sessions[entry.SessionID] = sess
+	// Populate dedup so a re-trigger of the same (bucket, prefix, scope, dryRun)
+	// short-circuits via LookupDedup (admin handler avoids burning a raft entry
+	// per duplicate request).
+	dk := dedupKey(TriggerReq{Bucket: entry.Bucket, KeyPrefix: entry.KeyPrefix, Scope: entry.Scope, DryRun: entry.DryRun})
+	if _, ok := d.dedup[dk]; !ok {
+		d.dedup[dk] = entry.SessionID
+	}
 	d.mu.Unlock()
 	select {
 	case d.queue <- triggerReq{sess: sess}:
