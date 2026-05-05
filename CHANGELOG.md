@@ -1,5 +1,125 @@
 # Changelog
 
+## [0.0.47.0] — 2026-05-05 — EC scrub trigger — admin/CLI + cluster-wide aggregation (PR4)
+
+### Added
+
+- **Admin endpoint `POST /v1/scrub`** — body `{bucket, key_prefix?, scope?, dry_run?}`,
+  publishes a cluster-wide trigger via meta-raft (`MetaCmdTypeScrubTrigger`).
+  Each node's `Director.ApplyFromFSM` creates a session for the same
+  `SessionID`; the EC source resolver routes per-bucket to the right
+  group's BadgerDB or returns an empty channel on peer-owned groups.
+- **`GET /v1/scrub/jobs/<id>` cluster-wide aggregation** — fans out
+  `ForwardOpScrubSessionStat` to every peer in parallel with 5s per-peer
+  timeout. Aggregated `ScrubJobInfo` gains `OwnedHere bool`,
+  `Partial bool`, `PeerFailures []string` so operators can distinguish
+  "everyone agrees done" from "we got most peers, one timed out".
+- **CLI `grainfs scrub <bucket>`** with `--prefix / --scope / --dry-run /
+  --detach`. Without `--detach` follows the session via
+  `followScrubSession` (shared with `grainfs volume scrub`).
+- **`Director.LookupDedup`** — exported helper used by admin
+  `ScrubProposer` to short-circuit duplicate triggers before raft propose.
+  `ApplyFromFSM` now populates the dedup map so the leader-side check
+  works for raft-applied entries.
+- **`MetaScrubTriggerCmd`** with 1h TTL filter on apply — fresh nodes
+  joining via raft log replay don't re-run ancient scrubs.
+
+### Architecture
+
+- `ECScrubSource` constructor takes
+  `GroupResolver func(bucket) (Scrubbable, bool)` instead of a single
+  backend. `SingleBackendResolver` shim preserves single-node / test
+  ergonomics. scrubber package stays cluster-clean (no cluster import).
+- `admin.ScrubProposer` and `admin.ScrubAggregator` interfaces follow
+  the `PeerHealthAPI` / `VlogBreakdownAPI` patterns; `serve.go` wires
+  `scrubProposerAdapter` (over `MetaRaft.ProposeScrubTrigger`) and
+  `scrubAggregatorAdapter` (over `ClusterCoordinator.ScrubSessionStat`).
+- `ForwardReceiver.WithScrubSessionLookup` exposes the local Director's
+  `GetSession` to peer RPCs without pulling the full Director surface
+  into the cluster package. `ForwardOpScrubSessionStat` is the first
+  cluster-wide forward op that bypasses the per-group leader gate
+  (read-only + node-scoped).
+
+### Tests
+
+- Unit: 11 existing `ec_source_test.go` tests adapted via
+  `SingleBackendResolver`; +2 resolver-specific (false → empty channel,
+  per-bucket routing). +2 `Director.LookupDedup` (hit/miss). +4
+  `MetaFSM.applyScrubTrigger` (recent / stale / no-callback / empty
+  payload). +6 admin `TriggerScrub` + `GetScrubJob` aggregation.
+- E2E: `ec_scrub_trigger_e2e_test.go` covers `FlowsThroughCluster`
+  (3-node EC 2+1, trigger reaches done with bucket round-trip via
+  aggregator) and `DedupHit_ReturnsExistingSession` (identical body
+  twice → same `SessionID`, `created=false`).
+
+### Deferred (re-open triggers in TODOS.md)
+
+- **Group rebalance race during in-flight scrub** — pre-existing in
+  `BackgroundScrubber` path; resolver routes correctly but does not
+  detect/cancel mid-walk. Telemetry-driven re-open.
+
+## [0.0.46.0] — 2026-05-05 — vlog admin breakdown + GC metric wiring + e2e (PR3)
+
+### Added
+
+- **`GET /v1/resource/vlog/breakdown`** — per-category vlog bytes
+  (sorted desc), consecutive GC failure counters, on-demand registry
+  smoke report, computed warn/critical level. Operators answer "which
+  BadgerDB category dominates vlog right now?" without reading raw
+  metrics.
+- **`--vlog-smoke-defer` flag** (default 60s) so e2e tests can shrink
+  the smoke window without baking process exits into a 70+s wait.
+- **4 vlog watcher e2e tests** — `MetricsLive`, `GCTickerRecovers`,
+  `StrictFatalOnMissing`, `NoStarvation`. Cluster harness gains a
+  generic `ExtraArgs` knob for per-test flag tweaks.
+
+### Fixed
+
+- `grainfs_badger_gc_runs_total` / `grainfs_badger_gc_failures_total` /
+  `grainfs_badger_gc_consecutive_failures` were declared in PR2
+  (v0.0.45.0) but never incremented. PR3 wires `GCMetricsRecorder`
+  interface on `GCTickerConfig` (keeps resourcewatch metrics-free)
+  bridged to Prometheus from `cmd/grainfs`.
+- `--strict-vlog-registry` was dead — PR2 swallowed the strict-mode
+  error to a `log.Warn`. Now `log.Fatal` so smoke failures actually
+  exit the process as the help text claims.
+
+## [0.0.45.0] — 2026-05-05 — BadgerDB vlog watcher (PR2)
+
+### Added
+
+- **vlog resource watcher** (`internal/resourcewatch/`) — generic
+  `*Registry` + `Default` singleton + DI; `VlogProvider` sums
+  `db.Size()` across categories + statfs-derived ratio; GC ticker
+  (5min sequential, snapshot-then-unlock + max-iter cap 8 +
+  transition-only fire); startup smoke (60s deferred, mtime stale/live
+  classification).
+- **Categories registered**: meta, shared-raft-log, group-raft,
+  incident, receipts, dedup, storage. Default warn ratio 0.4,
+  critical 0.7.
+- **8 metrics**: `grainfs_vlog_bytes`,
+  `grainfs_vlog_bytes_by_category`, `grainfs_vlog_limit_bytes`,
+  `grainfs_vlog_used_ratio`, `grainfs_vlog_eta_seconds`,
+  `grainfs_badger_gc_runs_total`, `grainfs_badger_gc_failures_total`,
+  `grainfs_badger_gc_consecutive_failures` (last three start firing
+  in PR3).
+- **3 incident causes**: `vlog_pressure`, `badger_gc_failed`,
+  `registry_under_populated`.
+
+## [0.0.44.0] — 2026-05-05 — goroutine predictive warnings + generic refactor (PR1)
+
+### Added
+
+- **goroutine resource watcher** — fires warn/critical on goroutine
+  count crossing thresholds (default 5000 / 20000 from baseline ~200).
+  Generic resource watcher framework
+  (`Sample / Provider / Level / Category / DetectorConfig / Decision`)
+  used by this PR and by PR2 vlog watcher.
+- **Generic `Detector` with `ResourceLabel`** — fixes the latent bug
+  where vlog watcher's decision message would say
+  "FD usage 18.1% (...)" with vlog categories because the label was
+  hardcoded "FD".
+
 ## [0.0.43.4] — 2026-05-05 — Peer health observability
 
 ### Added
