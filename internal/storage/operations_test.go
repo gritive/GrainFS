@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,6 +70,31 @@ func TestOperationsPutObjectDelegatesToBackend(t *testing.T) {
 	require.Equal(t, "b/k:text/plain:data", backend.putCall)
 }
 
+func TestOperationsMultipartDelegatesToBackend(t *testing.T) {
+	backend := &recordingMultipartBackend{}
+	ops := NewOperations(backend)
+
+	upload, err := ops.CreateMultipartUpload(context.Background(), "b", "k", "text/plain")
+	require.NoError(t, err)
+	require.Equal(t, "u1", upload.UploadID)
+
+	part, err := ops.UploadPart(context.Background(), "b", "k", "u1", 2, strings.NewReader("part"))
+	require.NoError(t, err)
+	require.Equal(t, 2, part.PartNumber)
+
+	obj, err := ops.CompleteMultipartUpload(context.Background(), "b", "k", "u1", []Part{*part})
+	require.NoError(t, err)
+	require.Equal(t, "complete", obj.ETag)
+
+	require.NoError(t, ops.AbortMultipartUpload(context.Background(), "b", "k", "u2"))
+	require.Equal(t, []string{
+		"create:b/k:text/plain",
+		"upload:b/k:u1:2:part",
+		"complete:b/k:u1:1",
+		"abort:b/k:u2",
+	}, backend.calls)
+}
+
 type recordingPutBackend struct {
 	basicBackend
 	putCall string
@@ -81,6 +107,44 @@ func (b *recordingPutBackend) PutObject(_ context.Context, bucket, key string, r
 	}
 	b.putCall = bucket + "/" + key + ":" + contentType + ":" + string(data)
 	return &Object{Key: key, ETag: "put", Size: int64(len(data)), ContentType: contentType}, nil
+}
+
+type recordingMultipartBackend struct {
+	basicBackend
+	calls []string
+}
+
+func (b *recordingMultipartBackend) CreateMultipartUpload(_ context.Context, bucket, key, contentType string) (*MultipartUpload, error) {
+	b.calls = append(b.calls, "create:"+bucket+"/"+key+":"+contentType)
+	return &MultipartUpload{UploadID: "u1", Bucket: bucket, Key: key, ContentType: contentType}, nil
+}
+
+func (b *recordingMultipartBackend) UploadPart(
+	_ context.Context,
+	bucket, key, uploadID string,
+	partNumber int,
+	r io.Reader,
+) (*Part, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	b.calls = append(b.calls, "upload:"+bucket+"/"+key+":"+uploadID+":"+strconv.Itoa(partNumber)+":"+string(data))
+	return &Part{PartNumber: partNumber, ETag: "part"}, nil
+}
+
+func (b *recordingMultipartBackend) CompleteMultipartUpload(
+	_ context.Context,
+	bucket, key, uploadID string,
+	parts []Part,
+) (*Object, error) {
+	b.calls = append(b.calls, "complete:"+bucket+"/"+key+":"+uploadID+":"+strconv.Itoa(len(parts)))
+	return &Object{Key: key, ETag: "complete"}, nil
+}
+
+func (b *recordingMultipartBackend) AbortMultipartUpload(_ context.Context, bucket, key, uploadID string) error {
+	b.calls = append(b.calls, "abort:"+bucket+"/"+key+":"+uploadID)
+	return nil
 }
 
 type dynamicACLBackend struct {

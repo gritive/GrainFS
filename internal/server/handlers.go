@@ -861,7 +861,7 @@ func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContex
 		contentType = "application/octet-stream"
 	}
 
-	upload, err := s.backend.CreateMultipartUpload(ctx, bucket, key, contentType)
+	upload, err := s.ops.CreateMultipartUpload(ctx, bucket, key, contentType)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -885,7 +885,7 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 	}
 
 	body := bytes.NewReader(c.Request.Body())
-	part, err := s.backend.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
+	part, err := s.ops.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -908,7 +908,7 @@ func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestCont
 		parts[i] = storage.Part{PartNumber: p.PartNumber, ETag: etag}
 	}
 
-	obj, err := s.backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
+	obj, err := s.ops.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 	if err != nil {
 		mapError(c, err)
 		return
