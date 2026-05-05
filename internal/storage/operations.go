@@ -32,6 +32,8 @@ type Operations struct {
 	policyStore *policy.CompiledPolicyStore
 }
 
+var _ Backend = (*Operations)(nil)
+
 type operationsPlan struct {
 	atomicACLPutter            AtomicACLPutter
 	aclSetter                  ACLSetter

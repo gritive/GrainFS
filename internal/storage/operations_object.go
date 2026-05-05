@@ -20,3 +20,7 @@ func (o *Operations) HeadObject(ctx context.Context, bucket, key string) (*Objec
 func (o *Operations) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*Object, error) {
 	return o.backend.ListObjects(ctx, bucket, prefix, maxKeys)
 }
+
+func (o *Operations) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error {
+	return o.backend.WalkObjects(ctx, bucket, prefix, fn)
+}

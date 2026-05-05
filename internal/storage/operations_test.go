@@ -90,10 +90,19 @@ func TestOperationsObjectReadsDelegateToBackend(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objects, 1)
 	require.Equal(t, "listed", objects[0].Key)
+
+	var walked []string
+	err = ops.WalkObjects(context.Background(), "b", "walk", func(obj *Object) error {
+		walked = append(walked, obj.Key)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"walked"}, walked)
 	require.Equal(t, []string{
 		"get:b/k",
 		"head:b/k",
 		"list:b:pre:3",
+		"walk:b:walk",
 	}, backend.calls)
 }
 
@@ -173,6 +182,11 @@ func (b *recordingObjectReadBackend) HeadObject(_ context.Context, bucket, key s
 func (b *recordingObjectReadBackend) ListObjects(_ context.Context, bucket, prefix string, maxKeys int) ([]*Object, error) {
 	b.calls = append(b.calls, "list:"+bucket+":"+prefix+":"+strconv.Itoa(maxKeys))
 	return []*Object{{Key: "listed"}}, nil
+}
+
+func (b *recordingObjectReadBackend) WalkObjects(_ context.Context, bucket, prefix string, fn func(*Object) error) error {
+	b.calls = append(b.calls, "walk:"+bucket+":"+prefix)
+	return fn(&Object{Key: "walked"})
 }
 
 type recordingBucketBackend struct {
