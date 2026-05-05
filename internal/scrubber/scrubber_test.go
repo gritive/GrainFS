@@ -184,6 +184,59 @@ func TestShardVerifier_CorruptShard(t *testing.T) {
 	assert.Contains(t, status.Corrupt, 3)
 }
 
+type integrityMockBackend struct {
+	*mockBackend
+	status map[string]scrubber.ShardIntegrityStatus
+	reads  map[string]int
+}
+
+func newIntegrityMockBackend() *integrityMockBackend {
+	return &integrityMockBackend{
+		mockBackend: newMockBackend(),
+		status:      make(map[string]scrubber.ShardIntegrityStatus),
+		reads:       make(map[string]int),
+	}
+}
+
+func (m *integrityMockBackend) ReadShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
+	m.mu.Lock()
+	m.reads[path]++
+	m.mu.Unlock()
+	data, err := m.ReadShard(bucket, key, path)
+	if err != nil {
+		return scrubber.ShardIntegrityResult{}, err
+	}
+	st, ok := m.status[path]
+	if !ok {
+		st = scrubber.ShardIntegrityVerified
+	}
+	return scrubber.ShardIntegrityResult{Payload: data, Status: st}, nil
+}
+
+func TestShardVerifier_UnverifiedLegacyShard(t *testing.T) {
+	m := newIntegrityMockBackend()
+	m.storeShards("b", "k", [][]byte{
+		[]byte("d0"), []byte("d1"), []byte("p0"),
+	})
+	m.status["b/k/1"] = scrubber.ShardIntegrityUnverifiedLegacy
+
+	v := scrubber.NewShardVerifier(m, scrubber.WithVerifyRetryDelay(0))
+	status := v.Verify(scrubber.ObjectRecord{
+		Bucket: "b", Key: "k", DataShards: 2, ParityShards: 1,
+	})
+
+	require.False(t, status.IsHealthy())
+	assert.Empty(t, status.Missing)
+	assert.Empty(t, status.Corrupt)
+	assert.Equal(t, []int{1}, status.Unverified)
+	assert.Equal(t, 1, m.reads["b/k/1"], "legacy raw format is stable and must not be retried")
+}
+
+func TestShardStatus_IsHealthyFalseWhenUnverified(t *testing.T) {
+	assert.False(t, scrubber.ShardStatus{Unverified: []int{0}}.IsHealthy())
+	assert.True(t, scrubber.ShardStatus{}.IsHealthy())
+}
+
 // ----------------------------------------------------------------------------
 // RepairEngine tests
 // ----------------------------------------------------------------------------

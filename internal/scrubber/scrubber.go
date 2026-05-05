@@ -36,6 +36,29 @@ type Scrubbable interface {
 	WriteShard(bucket, key, path string, data []byte) error
 }
 
+// ShardIntegrityStatus describes whether a shard read had an integrity oracle.
+type ShardIntegrityStatus int
+
+const (
+	// ShardIntegrityVerified means the shard carried a CRC envelope and matched it.
+	ShardIntegrityVerified ShardIntegrityStatus = iota
+	// ShardIntegrityUnverifiedLegacy means the shard was readable legacy raw bytes
+	// with no CRC envelope, so scrub cannot prove bit-level integrity.
+	ShardIntegrityUnverifiedLegacy
+)
+
+// ShardIntegrityResult is the scrub-only read result for one shard.
+type ShardIntegrityResult struct {
+	Payload []byte
+	Status  ShardIntegrityStatus
+}
+
+// ShardIntegrityReader is an optional Scrubbable extension for backends that
+// can distinguish CRC-verified shards from readable legacy raw shards.
+type ShardIntegrityReader interface {
+	ReadShardIntegrity(bucket, key, path string) (ShardIntegrityResult, error)
+}
+
 // ObjectRecord carries metadata needed for scrubbing.
 type ObjectRecord struct {
 	Bucket         string

@@ -8,15 +8,16 @@ import (
 
 // ShardStatus describes the health of an EC object's shards.
 type ShardStatus struct {
-	Bucket  string
-	Key     string
-	Missing []int // shard indices that are absent
-	Corrupt []int // shard indices with bad CRC or read errors (bit-rot)
+	Bucket     string
+	Key        string
+	Missing    []int // shard indices that are absent
+	Corrupt    []int // shard indices with bad CRC or read errors (bit-rot)
+	Unverified []int // shard indices that are readable but lack an integrity oracle
 }
 
-// IsHealthy reports whether all shards are present and valid.
+// IsHealthy reports whether all shards are present and integrity-verified.
 func (s ShardStatus) IsHealthy() bool {
-	return len(s.Missing)+len(s.Corrupt) == 0
+	return len(s.Missing)+len(s.Corrupt)+len(s.Unverified) == 0
 }
 
 // ShardVerifier checks shard existence and CRC32 integrity.
@@ -69,6 +70,22 @@ func (v *ShardVerifier) check(rec ObjectRecord, indices []int) ShardStatus {
 	status := ShardStatus{Bucket: rec.Bucket, Key: rec.Key}
 	check := func(i int) {
 		if i < 0 || i >= len(paths) {
+			return
+		}
+		if reader, ok := v.backend.(ShardIntegrityReader); ok {
+			res, err := reader.ReadShardIntegrity(rec.Bucket, rec.Key, paths[i])
+			if err == nil {
+				if res.Status == ShardIntegrityUnverifiedLegacy {
+					status.Unverified = append(status.Unverified, i)
+				}
+				return
+			}
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				status.Missing = append(status.Missing, i)
+			default:
+				status.Corrupt = append(status.Corrupt, i)
+			}
 			return
 		}
 		_, err := v.backend.ReadShard(rec.Bucket, rec.Key, paths[i])
