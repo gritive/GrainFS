@@ -159,3 +159,52 @@ for normal operation and address-to-nodeID for legacy compatibility. Code that
 normalizes shard group peers should preserve whether a peer came from legacy
 address resolution or remained unresolved so observe paths and mutation guards
 can make different decisions.
+
+### Cluster Peer Liveness Snapshot
+
+The cluster peer liveness snapshot is the operator-facing view of cluster peer
+identity and liveness. It composes existing signals rather than probing the
+network on read paths.
+
+Rows use `PeerID` as their primary identity. For resolved peers, `PeerID` is
+the node ID. For unresolved legacy peers, `PeerID` is the legacy raft address so
+operators can still see and act on the row that blocks membership mutation.
+
+The snapshot separates identity state from liveness state. Identity state says
+whether the row is self, resolved, or unresolved legacy. Liveness state says
+whether the row is configured, recently observed live, in health cooldown, or
+failed a probe. The snapshot should include a short reason string so callers do
+not infer meaning from display labels.
+
+The snapshot module is a pure composer. It consumes metaRaft voter membership,
+the address book, peer health state, and optional recent probe results. Active
+probing belongs to a separate monitor because status and admin read paths must
+not perform network I/O just to render cluster state.
+
+When signals disagree, identity resolution comes first. Unresolved legacy rows
+remain `unresolved_legacy` with reason `identity_unresolved` rather than
+claiming live or down state. For resolved rows, recent probe success wins over
+recent probe failure, recent probe failure wins over peer-health cooldown, and
+peer-health cooldown wins over the configured fallback. Rows with no liveness
+signal remain `configured`.
+
+The deep module lives in `internal/cluster` as a pure function that builds a
+snapshot from explicit inputs. The snapshot includes the local node as a row
+with identity state `self`. Compatibility adapters may omit self when filling
+legacy wire fields such as `peers`, but the module's own interface represents
+the whole membership view.
+
+The cluster status wire response keeps legacy fields while adding a full
+`peer_snapshot` row list. Legacy fields such as `peers`, `peer_addrs`,
+`peer_states`, and `down_nodes` are derived from the snapshot rather than
+recomputed by handlers. `down_nodes` means peers with an explicit negative
+liveness signal, such as health cooldown or probe failure. Merely configured
+peers with no liveness evidence are not reported as down.
+
+Display policy and membership-mutation policy intentionally differ. Display
+policy reports explicit negative signals as down. Membership-mutation policy is
+stricter: only self and rows with positive `live` evidence count as alive for
+quorum safety, configured-without-evidence rows are unknown, and unresolved
+legacy rows block membership mutation. The generic predicates for these
+policies live next to the snapshot module in `internal/cluster`; admin command
+packages use those predicates rather than re-deriving policy from strings.

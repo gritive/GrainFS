@@ -18,6 +18,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -1048,31 +1049,93 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 		status["state"] = s.cluster.State()
 		status["term"] = s.cluster.Term()
 		status["leader_id"] = s.cluster.LeaderID()
-		status["peers"] = s.cluster.Peers()
-		if peerAddrs, ok := s.cluster.(clusterPeerAddrs); ok {
-			status["peer_addrs"] = peerAddrs.PeerAddrs()
+		var rows []cluster.PeerLivenessRow
+		if peerSnapshot, ok := s.cluster.(clusterPeerSnapshot); ok {
+			rows = peerSnapshot.PeerSnapshot()
 		}
-		if peerStates, ok := s.cluster.(clusterPeerStates); ok {
-			status["peer_states"] = peerStates.PeerStates()
-		}
-
-		// Compute down nodes: configured peers minus live peers.
-		livePeers := s.cluster.LivePeers()
-		liveSet := make(map[string]struct{}, len(livePeers))
-		for _, p := range livePeers {
-			liveSet[p] = struct{}{}
-		}
-		var downNodes []string
-		for _, p := range s.cluster.Peers() {
-			if _, ok := liveSet[p]; !ok {
-				downNodes = append(downNodes, p)
+		if rows != nil {
+			status["peer_snapshot"] = rows
+			status["peers"] = legacyPeersFromSnapshot(rows)
+			status["peer_addrs"] = legacyPeerAddrsFromSnapshot(rows)
+			status["peer_states"] = legacyPeerStatesFromSnapshot(rows)
+			status["down_nodes"] = legacyDownNodesFromSnapshot(rows)
+		} else {
+			status["peers"] = s.cluster.Peers()
+			if peerAddrs, ok := s.cluster.(clusterPeerAddrs); ok {
+				status["peer_addrs"] = peerAddrs.PeerAddrs()
 			}
+			if peerStates, ok := s.cluster.(clusterPeerStates); ok {
+				status["peer_states"] = peerStates.PeerStates()
+			}
+
+			// Compute down nodes: configured peers minus live peers.
+			livePeers := s.cluster.LivePeers()
+			liveSet := make(map[string]struct{}, len(livePeers))
+			for _, p := range livePeers {
+				liveSet[p] = struct{}{}
+			}
+			var downNodes []string
+			for _, p := range s.cluster.Peers() {
+				if _, ok := liveSet[p]; !ok {
+					downNodes = append(downNodes, p)
+				}
+			}
+			status["down_nodes"] = downNodes
 		}
-		status["down_nodes"] = downNodes
 	}
 
 	data, _ := json.Marshal(status)
 	c.Data(consts.StatusOK, "application/json", data)
+}
+
+func legacyPeersFromSnapshot(rows []cluster.PeerLivenessRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.IdentityState == cluster.PeerIdentitySelf {
+			continue
+		}
+		out = append(out, row.PeerID)
+	}
+	return out
+}
+
+func legacyPeerAddrsFromSnapshot(rows []cluster.PeerLivenessRow) map[string]string {
+	out := make(map[string]string)
+	for _, row := range rows {
+		if row.IdentityState == cluster.PeerIdentitySelf || row.RaftAddr == "" {
+			continue
+		}
+		out[row.PeerID] = row.RaftAddr
+	}
+	return out
+}
+
+func legacyPeerStatesFromSnapshot(rows []cluster.PeerLivenessRow) map[string]string {
+	out := make(map[string]string)
+	for _, row := range rows {
+		if row.IdentityState == cluster.PeerIdentitySelf {
+			continue
+		}
+		if row.IdentityState == cluster.PeerIdentityUnresolvedLegacy {
+			out[row.PeerID] = string(cluster.PeerIdentityUnresolvedLegacy)
+			continue
+		}
+		out[row.PeerID] = string(row.LivenessState)
+	}
+	return out
+}
+
+func legacyDownNodesFromSnapshot(rows []cluster.PeerLivenessRow) []string {
+	out := make([]string, 0)
+	for _, row := range rows {
+		if row.IdentityState == cluster.PeerIdentitySelf || row.IdentityState == cluster.PeerIdentityUnresolvedLegacy {
+			continue
+		}
+		if cluster.IsExplicitlyDown(row) {
+			out = append(out, row.PeerID)
+		}
+	}
+	return out
 }
 
 // cacheStatus handles GET /api/cache/status. Reports the volume block

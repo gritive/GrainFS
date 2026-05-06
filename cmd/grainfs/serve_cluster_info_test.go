@@ -33,6 +33,22 @@ func TestRaftClusterInfo_SurfacesUnresolvedLegacyPeerState(t *testing.T) {
 	require.Equal(t, map[string]string{"10.0.0.9:7001": "unresolved_legacy"}, info.PeerStates())
 }
 
+func TestRaftClusterInfo_BuildsPeerSnapshot(t *testing.T) {
+	node := raft.NewNode(raft.DefaultConfig("node-0", []string{"10.0.0.1:7001", "10.0.0.9:7001"}))
+	info := &raftClusterInfo{
+		node: node,
+		addrBook: fakeClusterInfoAddressBook{nodes: []cluster.MetaNodeEntry{
+			{ID: "node-1", Address: "10.0.0.1:7001"},
+		}},
+	}
+
+	require.Equal(t, []cluster.PeerLivenessRow{
+		{PeerID: "node-0", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive, Reason: "self"},
+		{PeerID: "node-1", RaftAddr: "10.0.0.1:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessConfigured, Reason: "configured"},
+		{PeerID: "10.0.0.9:7001", RaftAddr: "10.0.0.9:7001", IdentityState: cluster.PeerIdentityUnresolvedLegacy, LivenessState: cluster.PeerLivenessConfigured, Reason: "identity_unresolved"},
+	}, info.PeerSnapshot())
+}
+
 type fakeClusterInfoAddressBook struct {
 	nodes []cluster.MetaNodeEntry
 }

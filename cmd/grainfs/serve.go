@@ -2017,6 +2017,14 @@ func (r *raftClusterInfo) PeerStates() map[string]string {
 	return out
 }
 
+func (r *raftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
+	return cluster.BuildPeerLivenessSnapshot(cluster.PeerLivenessInput{
+		SelfID:      r.node.ID(),
+		Voters:      r.node.Peers(),
+		AddressBook: r.addrBook,
+	})
+}
+
 func (r *raftClusterInfo) normalizePeerIDs(peers []string) []string {
 	if len(peers) == 0 {
 		return nil

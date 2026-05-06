@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -33,6 +34,7 @@ type fakeClusterInfo struct {
 	livePeers  []string
 	peerAddrs  map[string]string
 	peerStates map[string]string
+	snapshot   []cluster.PeerLivenessRow
 }
 
 func (f *fakeClusterInfo) NodeID() string      { return f.nodeID }
@@ -54,6 +56,9 @@ func (f *fakeClusterInfo) PeerStates() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+func (f *fakeClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
+	return append([]cluster.PeerLivenessRow(nil), f.snapshot...)
 }
 
 // fakeMembership records calls and returns a configured error.
@@ -192,6 +197,44 @@ func TestClusterStatus_IncludesPeerStates(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.Equal(t, map[string]any{"10.0.0.9:7001": "unresolved_legacy"}, got["peer_states"])
+}
+
+func TestClusterStatus_DerivesLegacyPeerFieldsFromSnapshot(t *testing.T) {
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		leaderID: "n1",
+		peers:    []string{"stale-peer"},
+		peerAddrs: map[string]string{
+			"stale-peer": "stale-addr",
+		},
+		peerStates: map[string]string{
+			"stale-peer": "down",
+		},
+		livePeers: []string{"n1", "stale-peer"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive, Reason: "self"},
+			{PeerID: "n2", RaftAddr: "10.0.0.2:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessConfigured, Reason: "configured"},
+			{PeerID: "n3", RaftAddr: "10.0.0.3:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessHealthCooldown, Reason: "peer_health_cooldown"},
+			{PeerID: "10.0.0.9:7001", RaftAddr: "10.0.0.9:7001", IdentityState: cluster.PeerIdentityUnresolvedLegacy, LivenessState: cluster.PeerLivenessConfigured, Reason: "identity_unresolved"},
+		},
+	}, nil)
+
+	resp, err := http.Get(h.baseURL + "/api/cluster/status")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, []any{"n2", "n3", "10.0.0.9:7001"}, got["peers"])
+	require.Equal(t, map[string]any{"n2": "10.0.0.2:7001", "n3": "10.0.0.3:7001", "10.0.0.9:7001": "10.0.0.9:7001"}, got["peer_addrs"])
+	require.Equal(t, map[string]any{"n2": "configured", "n3": "health_cooldown", "10.0.0.9:7001": "unresolved_legacy"}, got["peer_states"])
+	require.Equal(t, []any{"n3"}, got["down_nodes"], "configured and unresolved legacy rows are not display-down")
+
+	snapshot, ok := got["peer_snapshot"].([]any)
+	require.True(t, ok)
+	require.Len(t, snapshot, 4, "peer_snapshot includes self")
 }
 
 func TestRemovePeer_HappyPath(t *testing.T) {

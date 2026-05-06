@@ -324,23 +324,21 @@ grainfs serve \
 
 When a cluster node fails irrecoverably (hardware loss, corrupted disk past recovery), remove it from the meta-Raft voter set so quorum math reflects the surviving members. Run **on the leader node** — the endpoint is localhost-only.
 
-1. Identify the dead voter's raft address. `cluster peers` lists the current metaRaft voter set; cross-reference with `cluster status` (or the operator's external monitoring) to identify which one is the dead node:
+1. Identify the dead voter. `cluster peers` lists the current metaRaft voter set; cross-reference with `cluster status` (or the operator's external monitoring) to identify which one is the dead node. Normal rows use node IDs. Legacy raft-address rows that cannot be resolved are shown as `unresolved_legacy` so operators can still see the row that blocks membership mutation:
 
    ```bash
    grainfs cluster peers
-   #   ID                ROLE      STATE
-   #   127.0.0.1:19102   follower  alive
-   #   127.0.0.1:19103   follower  alive
-   # (self omitted from peers; ROLE/STATE columns reflect membership only —
-   #  active liveness wiring is tracked under TODOS.md "PR-D unification")
+   #   NODE_ID          RAFT_ADDR          ROLE      STATE
+   #   node-2           127.0.0.1:19102    follower  configured
+   #   127.0.0.1:19103  127.0.0.1:19103    follower  unresolved_legacy
 
-   grainfs cluster status --format text   # shows leader_id separately
+   grainfs cluster status --format json   # includes peer_snapshot
    ```
 
 2. Pre-flight check is automatic. If removal would drop the post-removal voter count below quorum, the command refuses unless `--force`:
 
    ```bash
-   grainfs cluster remove-peer 127.0.0.1:19103 --yes
+   grainfs cluster remove-peer node-2 --yes
    ```
 
 3. Verify the voter set shrank and an audit event was recorded:
