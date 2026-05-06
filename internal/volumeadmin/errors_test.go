@@ -2,9 +2,18 @@ package volumeadmin
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestErrorUnwrap(t *testing.T) {
+	cause := errors.New("underlying")
+	e := &Error{Code: "transient", Message: "wrapped", cause: cause}
+	if !errors.Is(e, cause) {
+		t.Errorf("errors.Is should see through Unwrap")
+	}
+}
 
 func TestErrorImplementsError(t *testing.T) {
 	tests := []struct {

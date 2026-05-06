@@ -15,6 +15,10 @@ type Error struct {
 	Message string         `json:"error"`
 	Details map[string]any `json:"details,omitempty"`
 	Status  int            `json:"-"`
+
+	// cause carries the wrapped transport-level error (e.g. context.Canceled)
+	// so errors.Is / errors.As can still see through the typed envelope.
+	cause error `json:"-"`
 }
 
 // Error implements error. Returns Message if set, otherwise Code.
@@ -24,6 +28,11 @@ func (e *Error) Error() string {
 	}
 	return e.Code
 }
+
+// Unwrap exposes a wrapped underlying error so callers can use errors.Is /
+// errors.As to inspect e.g. context.Canceled / context.DeadlineExceeded
+// while still receiving a typed *Error envelope.
+func (e *Error) Unwrap() error { return e.cause }
 
 // IsCode reports whether err is a *Error with the given code. Convenience
 // over errors.As when callers only need the Code branch.

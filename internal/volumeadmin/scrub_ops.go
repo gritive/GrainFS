@@ -53,17 +53,13 @@ func FollowScrubSession(ctx context.Context, c *Client, w io.Writer, sessionID s
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Fprintf(w,
-				"Follow stopped — session %s continues. Run `grainfs volume scrub status %s` to check.\n",
-				sessionID, sessionID)
+			printFollowStopped(w, sessionID)
 			return nil
 		case <-t.C:
 			info, err := c.GetScrubJob(ctx, sessionID)
 			if err != nil {
 				if ctx.Err() != nil {
-					fmt.Fprintf(w,
-						"Follow stopped — session %s continues. Run `grainfs volume scrub status %s` to check.\n",
-						sessionID, sessionID)
+					printFollowStopped(w, sessionID)
 					return nil
 				}
 				return err
@@ -76,6 +72,14 @@ func FollowScrubSession(ctx context.Context, c *Client, w io.Writer, sessionID s
 			}
 		}
 	}
+}
+
+// printFollowStopped emits the "follow stopped, session continues" hint that
+// graceful ctx-cancel paths share.
+func printFollowStopped(w io.Writer, sessionID string) {
+	fmt.Fprintf(w,
+		"Follow stopped — session %s continues. Run `grainfs volume scrub status %s` to check.\n",
+		sessionID, sessionID)
 }
 
 // RunScrubStatus runs `grainfs volume scrub status`.

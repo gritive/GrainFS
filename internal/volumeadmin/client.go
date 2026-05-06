@@ -107,9 +107,15 @@ func (c *Client) Do(ctx context.Context, method, path string, in any, out any) e
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// Map well-known transport-level conditions to the typed *Error
+		// envelope so callers can errors.As(err, &*Error) without losing
+		// the underlying cause (Unwrap exposes context.Canceled etc).
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return &Error{Code: "transient", Message: "admin request cancelled: " + err.Error(), cause: err}
+		}
 		var ne *net.OpError
 		if errors.As(err, &ne) {
-			return &Error{Code: "transient", Message: "admin server unreachable: " + err.Error(), Status: 0}
+			return &Error{Code: "transient", Message: "admin server unreachable: " + err.Error(), cause: err}
 		}
 		return err
 	}

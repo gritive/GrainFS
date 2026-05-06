@@ -302,3 +302,26 @@ func TestClient_TransientOnDial(t *testing.T) {
 		t.Errorf("code=%q want transient", e.Code)
 	}
 }
+
+func TestClient_TransientOnContextCancel(t *testing.T) {
+	// Server sleeps long enough that ctx-cancel always wins.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	c := NewClientForURL(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+	_, err := c.ListVolumes(ctx)
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("want *Error envelope, got %T (%v)", err, err)
+	}
+	if e.Code != "transient" {
+		t.Errorf("code=%q want transient", e.Code)
+	}
+	// Unwrap must still expose the underlying context error.
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false; want true (Unwrap broken)")
+	}
+}
