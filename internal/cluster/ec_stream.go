@@ -11,6 +11,11 @@ import (
 	"github.com/klauspost/reedsolomon"
 )
 
+const (
+	defaultECStreamBlockSize = 4 << 20
+	minECStreamBlockSize     = 64 << 10
+)
+
 type spooledECShards struct {
 	paths    []string
 	origSize int64
@@ -20,7 +25,11 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create ec spool dir: %w", err)
 	}
-	enc, err := reedsolomon.NewStream(cfg.DataShards, cfg.ParityShards)
+	enc, err := reedsolomon.NewStream(
+		cfg.DataShards,
+		cfg.ParityShards,
+		reedsolomon.WithStreamBlockSize(ecStreamBlockSize(cfg, sp.Size)),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("ec stream encoder: %w", err)
 	}
@@ -122,6 +131,20 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		}
 	}
 	return out, nil
+}
+
+func ecStreamBlockSize(cfg ECConfig, objectSize int64) int {
+	if objectSize <= 0 || cfg.DataShards <= 0 {
+		return minECStreamBlockSize
+	}
+	perDataShard := (objectSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
+	if perDataShard < minECStreamBlockSize {
+		return minECStreamBlockSize
+	}
+	if perDataShard > defaultECStreamBlockSize {
+		return defaultECStreamBlockSize
+	}
+	return int(perDataShard)
 }
 
 func (s *spooledECShards) OpenShard(idx int) (io.ReadCloser, error) {

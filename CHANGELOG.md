@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.58.1] — 2026-05-06 — EC stream memory tuning
+
+### Changed
+
+- Cluster EC PUT now sizes Reed-Solomon stream blocks from the object size
+  instead of retaining the library's default 4 MiB block buffers for small
+  objects, sharply reducing post-benchmark heap use on small-object workloads.
+
+### Tests
+
+- Added EC stream block-size coverage for minimum, proportional, and capped
+  sizing behavior.
+
 ## [0.0.58.0] — 2026-05-06 — Admin API wire type SOT
 
 ### Changed
