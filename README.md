@@ -45,7 +45,7 @@ The default container command disables NFSv4 and NBD with `--nfs4-port 0 --nbd-p
 | 기능               | 설명                                                          |
 | ------------------ | ------------------------------------------------------------- |
 | S3 API             | PUT, GET, HEAD, DELETE, LIST, Multipart Upload, Presigned URL |
-| Erasure Coding     | Solo: Reed-Solomon 4+2 / Cluster: 노드 수 기반 EC + CRC shard envelope |
+| Erasure Coding     | Solo: Reed-Solomon 4+2 / Cluster: 노드 수 기반 EC + shard integrity envelope |
 | QUIC Transport     | quic-go 기반 멀티플렉싱, TLS 1.3 내장                         |
 | Custom Raft        | QUIC 위 합의, 리더 선출/로그 복제/스냅샷                      |
 | 단일 노드 → Cluster     | 무중단 클러스터 전환                                          |

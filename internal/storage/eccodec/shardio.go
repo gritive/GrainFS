@@ -14,6 +14,7 @@
 package eccodec
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 // ErrCRCMismatch is returned when the CRC footer does not match the payload,
@@ -31,6 +34,16 @@ var ErrCRCMismatch = errors.New("eccodec: CRC mismatch (bit-rot detected)")
 const footerLen = 4
 
 var shardMagic = []byte("GFSCRC1\x00")
+var encryptedShardMagic = []byte("GFSENC2\x00")
+
+const (
+	DefaultEncryptedChunkSize = 1 << 20
+	maxEncryptedChunkSize     = DefaultEncryptedChunkSize
+	encryptedNoncePrefixLen   = 8
+	encryptedNonceLen         = 12
+	encryptedHeaderLen        = 8 + 4 + encryptedNoncePrefixLen
+	encryptedChunkHeaderLen   = 8
+)
 
 // IsEncodedShard reports whether raw bytes carry the current eccodec magic.
 func IsEncodedShard(raw []byte) bool {
@@ -43,6 +56,194 @@ func IsEncodedShard(raw []byte) bool {
 		}
 	}
 	return true
+}
+
+func IsEncryptedShard(raw []byte) bool {
+	if len(raw) < len(encryptedShardMagic) {
+		return false
+	}
+	for i := range encryptedShardMagic {
+		if raw[i] != encryptedShardMagic[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
+	if enc == nil {
+		return fmt.Errorf("encrypted shard encode requires encryptor")
+	}
+	if chunkSize <= 0 {
+		chunkSize = DefaultEncryptedChunkSize
+	}
+	if chunkSize > maxEncryptedChunkSize {
+		return fmt.Errorf("encrypted shard chunk size too large: %d", chunkSize)
+	}
+
+	var noncePrefix [encryptedNoncePrefixLen]byte
+	if _, err := io.ReadFull(rand.Reader, noncePrefix[:]); err != nil {
+		return fmt.Errorf("generate nonce prefix: %w", err)
+	}
+
+	var header [encryptedHeaderLen]byte
+	copy(header[:], encryptedShardMagic)
+	binary.LittleEndian.PutUint32(header[len(encryptedShardMagic):], uint32(chunkSize))
+	copy(header[len(encryptedShardMagic)+4:], noncePrefix[:])
+	if _, err := w.Write(header[:]); err != nil {
+		return fmt.Errorf("write encrypted shard header: %w", err)
+	}
+
+	plain := make([]byte, chunkSize)
+	chunkIdx := uint32(0)
+	for {
+		n, readErr := io.ReadFull(r, plain)
+		if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read shard chunk: %w", readErr)
+		}
+		if n == 0 && errors.Is(readErr, io.EOF) {
+			return nil
+		}
+
+		nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
+		aad := encryptedChunkAAD(aadBase, chunkIdx)
+		ciphertext, err := enc.SealWithNonceAAD(make([]byte, 0, n+enc.AEADOverhead()), nonce[:], plain[:n], aad)
+		if err != nil {
+			return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
+		}
+
+		var chunkHeader [encryptedChunkHeaderLen]byte
+		binary.LittleEndian.PutUint32(chunkHeader[0:4], uint32(n))
+		binary.LittleEndian.PutUint32(chunkHeader[4:8], uint32(len(ciphertext)))
+		if _, err := w.Write(chunkHeader[:]); err != nil {
+			return fmt.Errorf("write shard chunk header: %w", err)
+		}
+		if _, err := w.Write(ciphertext); err != nil {
+			return fmt.Errorf("write shard chunk: %w", err)
+		}
+
+		chunkIdx++
+		if chunkIdx == 0 {
+			return fmt.Errorf("encrypted shard has too many chunks")
+		}
+		if errors.Is(readErr, io.ErrUnexpectedEOF) || errors.Is(readErr, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadBase []byte) error {
+	if enc == nil {
+		return fmt.Errorf("encrypted shard decode requires encryptor")
+	}
+	var header [encryptedHeaderLen]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return fmt.Errorf("read encrypted shard header: %w", err)
+	}
+	if !IsEncryptedShard(header[:]) {
+		return fmt.Errorf("not an encrypted shard")
+	}
+	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
+	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
+		return fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
+	}
+	var noncePrefix [encryptedNoncePrefixLen]byte
+	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
+
+	chunkIdx := uint32(0)
+	for {
+		var chunkHeader [encryptedChunkHeaderLen]byte
+		if _, err := io.ReadFull(r, chunkHeader[:]); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("read encrypted shard chunk header: %w", err)
+		}
+		plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
+		cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
+		if plainLen > chunkSize {
+			return fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", chunkIdx, plainLen, chunkSize)
+		}
+		if cipherLen < plainLen || cipherLen > plainLen+uint32(enc.AEADOverhead()) {
+			return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", chunkIdx, cipherLen, plainLen)
+		}
+
+		ciphertext := make([]byte, cipherLen)
+		if _, err := io.ReadFull(r, ciphertext); err != nil {
+			return fmt.Errorf("read encrypted shard chunk: %w", err)
+		}
+		nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
+		aad := encryptedChunkAAD(aadBase, chunkIdx)
+		plaintext, err := enc.OpenWithNonceAAD(make([]byte, 0, plainLen), nonce[:], ciphertext, aad)
+		if err != nil {
+			return fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+		}
+		if uint32(len(plaintext)) != plainLen {
+			return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+		}
+		if _, err := w.Write(plaintext); err != nil {
+			return fmt.Errorf("write decrypted shard chunk: %w", err)
+		}
+		chunkIdx++
+		if chunkIdx == 0 {
+			return fmt.Errorf("encrypted shard has too many chunks")
+		}
+	}
+}
+
+// WriteEncryptedShardStreamAtomic writes a chunked encrypted shard from r
+// using the same tmp + sync + rename recipe as WriteShardStreamAtomic.
+func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir shard dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create tmp shard: %w", err)
+	}
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if err := EncodeEncryptedShard(f, r, enc, aadBase, chunkSize); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync tmp shard: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close tmp shard: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename shard: %w", err)
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
+}
+
+func encryptedChunkNonce(prefix [encryptedNoncePrefixLen]byte, chunkIdx uint32) [encryptedNonceLen]byte {
+	var nonce [encryptedNonceLen]byte
+	copy(nonce[:], prefix[:])
+	binary.BigEndian.PutUint32(nonce[encryptedNoncePrefixLen:], chunkIdx)
+	return nonce
+}
+
+func encryptedChunkAAD(base []byte, chunkIdx uint32) []byte {
+	aad := make([]byte, 0, len(encryptedShardMagic)+len(base)+4)
+	aad = append(aad, encryptedShardMagic...)
+	aad = append(aad, base...)
+	var idx [4]byte
+	binary.BigEndian.PutUint32(idx[:], chunkIdx)
+	aad = append(aad, idx[:]...)
+	return aad
 }
 
 // EncodeShard appends the versioned CRC envelope around payload.

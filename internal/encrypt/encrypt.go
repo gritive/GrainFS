@@ -113,3 +113,31 @@ func (e *Encryptor) DecryptWithAAD(data, aad []byte) ([]byte, error) {
 	}
 	return plaintext, nil
 }
+
+// SealWithNonceAAD encrypts plaintext with a caller-provided nonce and AAD.
+// Callers must guarantee nonce uniqueness for a given key.
+func (e *Encryptor) SealWithNonceAAD(dst, nonce, plaintext, aad []byte) ([]byte, error) {
+	if len(nonce) != e.aead.NonceSize() {
+		return nil, fmt.Errorf("nonce must be %d bytes, got %d", e.aead.NonceSize(), len(nonce))
+	}
+	return e.aead.Seal(dst, nonce, plaintext, aad), nil
+}
+
+// OpenWithNonceAAD decrypts ciphertext with a caller-provided nonce and AAD.
+func (e *Encryptor) OpenWithNonceAAD(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	if len(nonce) != e.aead.NonceSize() {
+		return nil, fmt.Errorf("nonce must be %d bytes, got %d", e.aead.NonceSize(), len(nonce))
+	}
+	plaintext, err := e.aead.Open(dst, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt: %w", err)
+	}
+	if plaintext == nil {
+		plaintext = []byte{}
+	}
+	return plaintext, nil
+}
+
+func (e *Encryptor) AEADOverhead() int {
+	return e.aead.Overhead()
+}
