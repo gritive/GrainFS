@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.76.0] - 2026-05-07
+
+### Changed
+
+- Cluster startup now assembles incident recording, heal-receipt wiring, and
+  volume manager resources through focused `serveruntime` runtime setup
+  helpers, keeping `serve` wiring thinner while preserving the same server
+  options and recorder behavior.
+- Incident, receipt, and dedup Badger resources now have idempotent runtime
+  close paths that deregister resourcewatch entries before closing their
+  databases.
+- Heal-receipt shutdown now cancels and waits for the gossip sender before
+  closing the receipt store, preventing background receipt reads after the
+  Badger DB has closed.
+
+### Added
+
+- Added runtime setup coverage for incident optional-role fallback, receipt
+  disabled and PSK-required startup paths, dedup resourcewatch cleanup, and
+  canceled volume setup.
+
 ## [0.0.75.0] - 2026-05-07
 
 ### Added
