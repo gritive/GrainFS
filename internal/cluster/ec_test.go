@@ -171,12 +171,27 @@ func TestShardFilePath_Structure(t *testing.T) {
 
 func BenchmarkECSplit(b *testing.B) {
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
-	data := make([]byte, 1<<20) // 1 MiB
-	_, err := rand.Read(data)
-	require.NoError(b, err)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		_, _ = ECSplit(cfg, data)
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"64KiB", 64 << 10},
+		{"1MiB", 1 << 20},
+		{"16MiB", 16 << 20},
+		{"64MiB", 64 << 20},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			data := make([]byte, tc.size)
+			_, err := rand.Read(data)
+			require.NoError(b, err)
+			b.SetBytes(int64(len(data)))
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _ = ECSplit(cfg, data)
+			}
+		})
 	}
 }
