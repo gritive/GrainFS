@@ -401,6 +401,34 @@ func TestQUICTransport_CallFlatBuffer(t *testing.T) {
 	assert.Contains(t, string(resp.Payload), "echo:")
 }
 
+func TestQUICTransport_CallFlatBuffer_ReleasesStreamCredit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	server.SetStreamHandler(func(reqMsg *Message) *Message {
+		return NewResponse(reqMsg, []byte("ok"))
+	})
+
+	for i := 0; i < quicMaxRPCStreams+16; i++ {
+		b := flatbuffers.NewBuilder(32)
+		off := b.CreateByteVector([]byte("x"))
+		b.Finish(off)
+
+		resp, err := client.CallFlatBuffer(ctx, server.LocalAddr(), &FlatBuffersWriter{Typ: StreamData, Builder: b})
+		require.NoError(t, err, "iteration %d", i)
+		require.Equal(t, []byte("ok"), resp.Payload)
+	}
+}
+
 func TestStreamClassOf(t *testing.T) {
 	require.Equal(t, StreamClassControl, ClassOf(StreamControl))
 	require.Equal(t, StreamClassMeta, ClassOf(StreamMetaRaft))

@@ -252,3 +252,27 @@ func TestGetObjectEC_MultiWindowRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
+
+func TestDistributedBackend_ReadAt_UserBucketECDataShards(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
+
+	svc := NewShardService(b.root, nil)
+	allNodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
+	b.SetShardService(svc, allNodes)
+
+	data := make([]byte, 2*1024*1024+333)
+	for i := range data {
+		data[i] = byte((i * 17) % 251)
+	}
+	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+
+	buf := make([]byte, 96*1024)
+	const offset = int64(512*1024 - 17)
+	n, err := b.ReadAt(context.Background(), "bkt", "obj", offset, buf)
+	require.NoError(t, err)
+	require.Equal(t, len(buf), n)
+	require.Equal(t, data[offset:int(offset)+len(buf)], buf)
+}

@@ -6,6 +6,7 @@
 #   NODE_COUNT=2 PROFILE=1 SIZE_KB=65536 VUS=1 DURATION=30s ./benchmarks/bench_topology_get_profile.sh
 #   NODE_COUNT=3 PROFILE=1 SIZE_KB=65536 VUS=1 DURATION=30s ./benchmarks/bench_topology_get_profile.sh
 #   NODE_COUNT=6 PROFILE=1 SIZE_KB=65536 VUS=1 DURATION=30s ./benchmarks/bench_topology_get_profile.sh
+#   NODE_COUNT=6 RANGE_BYTES=65536 RANGE_MODE=random VUS=8 DURATION=30s ./benchmarks/bench_topology_get_profile.sh
 
 set -euo pipefail
 
@@ -28,10 +29,13 @@ GRACEFUL_STOP="${GRACEFUL_STOP:-5s}"
 VUS="${VUS:-${MAX_VUS:-1}}"
 SIZE_KB="${SIZE_KB:-65536}"
 OBJECT_COUNT="${OBJECT_COUNT:-4}"
+RANGE_BYTES="${RANGE_BYTES:-0}"
+RANGE_MODE="${RANGE_MODE:-sequential}"
 SETUP_TIMEOUT="${SETUP_TIMEOUT:-5m}"
 PRELOAD_IN_SHELL="${PRELOAD_IN_SHELL:-1}"
 PROFILE="${PROFILE:-1}"
 PROFILE_ALL_NODES="${PROFILE_ALL_NODES:-0}"
+REQUESTED_TARGET_IDX="${TARGET_IDX:-}"
 EC_DATA="${EC_DATA:-4}"
 EC_PARITY="${EC_PARITY:-2}"
 BUCKET="${BUCKET:-bench}"
@@ -62,7 +66,7 @@ done
 
 PROFILE_DIR=""
 if [[ "$PROFILE" == "1" ]]; then
-  PROFILE_DIR="benchmarks/profiles/topology-get-n${NODE_COUNT}-$(date +%Y%m%d-%H%M%S)"
+  PROFILE_DIR="benchmarks/profiles/topology-get-n${NODE_COUNT}-r${RANGE_BYTES}-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$PROFILE_DIR"
   if [[ "$PROFILE_ALL_NODES" == "1" ]]; then
     for idx in $(seq 1 "$NODE_COUNT"); do
@@ -189,7 +193,19 @@ fi
 
 TARGET_PORT=""
 TARGET_IDX=""
-if [[ "$NODE_COUNT" -ge 2 ]]; then
+if [[ -n "$REQUESTED_TARGET_IDX" ]]; then
+  if (( REQUESTED_TARGET_IDX < 1 || REQUESTED_TARGET_IDX > NODE_COUNT )); then
+    echo "[error] TARGET_IDX=${REQUESTED_TARGET_IDX} outside node range 1..${NODE_COUNT}" >&2
+    exit 1
+  fi
+  TARGET_IDX="$REQUESTED_TARGET_IDX"
+  TARGET_PORT="$(port_for_idx "$TARGET_IDX")"
+  if ! bench_create_bucket_retry "http://127.0.0.1:${TARGET_PORT}" "$BUCKET" 120 0.5 ||
+    ! bench_put_object_retry "http://127.0.0.1:${TARGET_PORT}" "$BUCKET" ".bench-ready" 120 0.5; then
+    TARGET_PORT=""
+    TARGET_IDX=""
+  fi
+elif [[ "$NODE_COUNT" -ge 2 ]]; then
   TARGET_PORT="$LEADER_PORT"
   TARGET_IDX=$((TARGET_PORT - BASE_PORT + 1))
   if ! bench_create_bucket_retry "http://127.0.0.1:${TARGET_PORT}" "$BUCKET" 120 0.5 ||
@@ -292,6 +308,11 @@ echo "  GrainFS GET-only topology benchmark"
 echo "  nodes  : ${NODE_COUNT}"
 echo "  target : http://127.0.0.1:${TARGET_PORT}"
 echo "  object : ${SIZE_KB}KB x ${OBJECT_COUNT}"
+if [[ "$RANGE_BYTES" -gt 0 ]]; then
+  echo "  range  : ${RANGE_BYTES}B (${RANGE_MODE})"
+else
+  echo "  range  : full object"
+fi
 echo "  vus    : ${VUS}  duration: ${DURATION}"
 if [[ "$NODE_COUNT" -ge 3 ]]; then
   echo "  ec     : target ${EC_DATA}+${EC_PARITY} (effective scales by node count)"
@@ -336,6 +357,8 @@ fi
   --env BUCKET="$BUCKET" \
   --env OBJECT_SIZE_KB="$SIZE_KB" \
   --env OBJECT_COUNT="$OBJECT_COUNT" \
+  --env RANGE_BYTES="$RANGE_BYTES" \
+  --env RANGE_MODE="$RANGE_MODE" \
   --env SETUP_TIMEOUT="$SETUP_TIMEOUT" \
   --env PRELOADED="$PRELOADED" \
   --env DURATION="$DURATION" \

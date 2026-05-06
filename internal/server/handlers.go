@@ -415,6 +415,13 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	key := getKey(c)
 
 	versionID := string(c.QueryArgs().Peek("versionId"))
+	rangeHeader := string(c.GetHeader("Range"))
+	if versionID == "" && rangeHeader != "" {
+		if s.getObjectRangeReadAt(ctx, c, bucket, key, rangeHeader) {
+			return
+		}
+	}
+
 	var rc io.ReadCloser
 	var obj *storage.Object
 	var err error
@@ -471,7 +478,6 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Handle Range requests: must use standard path (sendfile transfers entire file)
-	rangeHeader := string(c.GetHeader("Range"))
 	if rangeHeader != "" {
 		start, end, ok := parseByteRange(rangeHeader, obj.Size)
 		if !ok {
@@ -516,6 +522,118 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		}
 		c.Data(consts.StatusOK, obj.ContentType, data)
 	}
+}
+
+type objectReadAtBackend interface {
+	ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error)
+}
+
+type readAtRangeReader struct {
+	ctx           context.Context
+	backend       objectReadAtBackend
+	bucket, key    string
+	offset, length int64
+	pos            int64
+	buf            []byte
+	bufPos         int
+	bufEnd         int
+}
+
+func (r *readAtRangeReader) Read(p []byte) (int, error) {
+	if r.pos >= r.length {
+		return 0, io.EOF
+	}
+	if r.bufPos >= r.bufEnd {
+		if r.buf == nil {
+			const maxRangeReadAtChunk = 1 << 20
+			size := r.length
+			if size > maxRangeReadAtChunk {
+				size = maxRangeReadAtChunk
+			}
+			r.buf = make([]byte, int(size))
+		}
+		want := len(r.buf)
+		if remaining := r.length - r.pos; int64(want) > remaining {
+			want = int(remaining)
+		}
+		n, err := r.backend.ReadAt(r.ctx, r.bucket, r.key, r.offset+r.pos, r.buf[:want])
+		if n > 0 {
+			r.bufPos = 0
+			r.bufEnd = n
+		}
+		if err != nil && n == 0 {
+			return 0, err
+		}
+		if n == 0 {
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, r.buf[r.bufPos:r.bufEnd])
+	r.bufPos += n
+	r.pos += int64(n)
+	return n, nil
+}
+
+func (r *readAtRangeReader) Close() error { return nil }
+
+func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext, bucket, key, rangeHeader string) bool {
+	reader, ok := s.backend.(objectReadAtBackend)
+	if !ok {
+		return false
+	}
+
+	obj, err := s.ops.HeadObject(ctx, bucket, key)
+	if err != nil {
+		mapError(c, err)
+		return true
+	}
+
+	etag := fmt.Sprintf("\"%s\"", obj.ETag)
+	c.Header("Content-Type", obj.ContentType)
+	c.Header("ETag", etag)
+	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
+	c.Header("Accept-Ranges", "bytes")
+	if obj.VersionID != "" {
+		c.Header("X-Amz-Version-Id", obj.VersionID)
+	}
+	if s.verifier != nil {
+		c.Header("Cache-Control", "private, no-store")
+	} else {
+		c.Header("Cache-Control", "public, max-age=3600")
+	}
+
+	if s.verifier != nil {
+		accessKey := AccessKeyFromContext(ctx)
+		if !s3auth.IsAuthorizedByACL(s3auth.ACLGrant(obj.ACL), accessKey, s3auth.GetObject) {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+			return true
+		}
+	}
+	if !checkConditionals(c, etag, obj.LastModified) {
+		return true
+	}
+
+	start, end, ok := parseByteRange(rangeHeader, obj.Size)
+	if !ok {
+		c.Status(consts.StatusRequestedRangeNotSatisfiable)
+		c.Header("Content-Range", fmt.Sprintf("bytes */%d", obj.Size))
+		return true
+	}
+
+	length := end - start + 1
+	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionGet, Bucket: bucket, Key: key, Size: obj.Size})
+	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
+	c.Header("Content-Length", strconv.FormatInt(length, 10))
+	c.Response.SetBodyStream(&readAtRangeReader{
+		ctx:     ctx,
+		backend: reader,
+		bucket:  bucket,
+		key:     key,
+		offset:  start,
+		length:  length,
+	}, int(length))
+	c.Status(consts.StatusPartialContent)
+	return true
 }
 
 // parseByteRange parses a "bytes=start-end" Range header.
