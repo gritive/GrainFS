@@ -316,10 +316,37 @@ func (r *RaftClusterInfo) PeerStates() map[string]string {
 
 func (r *RaftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
 	return cluster.BuildPeerLivenessSnapshot(cluster.PeerLivenessInput{
-		SelfID:      r.node.ID(),
-		Voters:      r.node.Peers(),
-		AddressBook: r.addrBook,
+		SelfID:       r.node.ID(),
+		Voters:       r.node.Peers(),
+		AddressBook:  r.addrBook,
+		ProbeResults: freshReplicationProbeResults(r.node.PeerReplicationEvidence(), r.addrBook, time.Now(), 3*cluster.MetaRaftElectionTimeout),
 	})
+}
+
+func freshReplicationProbeResults(evidence []raft.PeerReplicationEvidence, addrBook cluster.NodeAddressBook, now time.Time, freshness time.Duration) []cluster.PeerProbeResult {
+	if freshness <= 0 {
+		return nil
+	}
+	out := make([]cluster.PeerProbeResult, 0, len(evidence))
+	for _, e := range evidence {
+		if e.PeerID == "" || e.LastAppendSuccess.IsZero() {
+			continue
+		}
+		if now.Sub(e.LastAppendSuccess) > freshness {
+			continue
+		}
+		peerID := e.PeerID
+		if resolved := cluster.ResolveShardGroupPeer(addrBook, e.PeerID); resolved.NodeID != "" {
+			peerID = resolved.NodeID
+		}
+		out = append(out, cluster.PeerProbeResult{
+			PeerID:     peerID,
+			Live:       true,
+			ObservedAt: e.LastAppendSuccess,
+			Reason:     "raft_append_success",
+		})
+	}
+	return out
 }
 
 func (r *RaftClusterInfo) BucketAssignments() map[string]string {

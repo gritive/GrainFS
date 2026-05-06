@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -245,6 +246,13 @@ type AppendEntriesReply struct {
 	ConflictIndex uint64 // first index of ConflictTerm; 0 = not set
 }
 
+// PeerReplicationEvidence is leader-side evidence that AppendEntries recently
+// succeeded for a peer.
+type PeerReplicationEvidence struct {
+	PeerID            string
+	LastAppendSuccess time.Time
+}
+
 // Node is a single Raft consensus node.
 type Node struct {
 	mu sync.Mutex
@@ -322,6 +330,10 @@ type Node struct {
 	// CheckQuorum: per-peer time of last AppendEntries reply (leader only)
 	checkQuorumAcks map[string]time.Time
 
+	// leader-side positive liveness evidence: per-peer time of last successful
+	// AppendEntries reply.
+	peerAppendSuccess map[string]time.Time
+
 	// leaderTransfer is set by HandleTimeoutNow to signal runCandidate that
 	// this election is a leader-transfer; RequestVote must bypass stickiness on receivers.
 	leaderTransfer bool
@@ -387,6 +399,7 @@ func NewNode(config Config, store ...LogStore) *Node {
 		learnerPromoteCh:     make(map[string]chan struct{}),
 		jointManagedLearners: make(map[string]struct{}),
 		checkQuorumAcks:      make(map[string]time.Time),
+		peerAppendSuccess:    make(map[string]time.Time),
 		applyCh:              make(chan LogEntry, 64),
 		stopCh:               make(chan struct{}),
 		resetCh:              make(chan struct{}, 1),
@@ -758,6 +771,25 @@ func (n *Node) PeerMatchIndex(peerKey string) (uint64, bool) {
 	defer n.mu.Unlock()
 	idx, ok := n.matchIndex[peerKey]
 	return idx, ok
+}
+
+// PeerReplicationEvidence returns leader-side positive liveness evidence for
+// peers that have recently acknowledged AppendEntries.
+func (n *Node) PeerReplicationEvidence() []PeerReplicationEvidence {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.state != Leader {
+		return nil
+	}
+	out := make([]PeerReplicationEvidence, 0, len(n.peerAppendSuccess))
+	for peerID, lastSuccess := range n.peerAppendSuccess {
+		out = append(out, PeerReplicationEvidence{
+			PeerID:            peerID,
+			LastAppendSuccess: lastSuccess,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PeerID < out[j].PeerID })
+	return out
 }
 
 // Peers returns a snapshot of the current peer list. The caller receives a
@@ -1224,6 +1256,7 @@ func (n *Node) runCandidate() {
 func (n *Node) initLeaderState() {
 	nextIdx := n.lastLogIdx() + 1
 	now := time.Now()
+	n.peerAppendSuccess = make(map[string]time.Time)
 	for _, peer := range n.config.Peers {
 		n.nextIndex[peer] = nextIdx
 		n.matchIndex[peer] = 0
