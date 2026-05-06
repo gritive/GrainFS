@@ -132,7 +132,7 @@ func TestOperationsDeleteObjectWithResultStillDeletesWhenPreviousMissing(t *test
 	require.Equal(t, []string{"head:b/k", "delete-marker:b/k"}, backend.calls)
 }
 
-func TestOperationsCopyObjectWithResultReportsDestinationPreviousSummary(t *testing.T) {
+func TestOperationsCopyObjectReportsDestinationPreviousSummary(t *testing.T) {
 	backend := &mutationResultBackend{
 		source:     &Object{Key: "src", Size: 7, ETag: "src-etag", ContentType: "text/plain", LastModified: 100},
 		sourceBody: "payload",
@@ -140,7 +140,7 @@ func TestOperationsCopyObjectWithResultReportsDestinationPreviousSummary(t *test
 	}
 	ops := NewOperations(backend)
 
-	result, err := ops.CopyObjectWithResult(context.Background(), CopyObjectRequest{
+	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
 		Source:      ObjectRef{Bucket: "src-bucket", Key: "src"},
 		Destination: ObjectRef{Bucket: "dst-bucket", Key: "dst"},
 	})
@@ -161,7 +161,7 @@ func TestOperationsCopyObjectWithResultReportsDestinationPreviousSummary(t *test
 	}, backend.calls)
 }
 
-func TestOperationsCopyObjectWithResultFailsBeforeWriteWhenDestinationPreviousReadFails(t *testing.T) {
+func TestOperationsCopyObjectFailsBeforeWriteWhenDestinationPreviousReadFails(t *testing.T) {
 	readErr := errors.New("destination head failed")
 	backend := &mutationResultBackend{
 		source:      &Object{Key: "src", Size: 7, ETag: "src-etag", ContentType: "text/plain", LastModified: 100},
@@ -170,7 +170,7 @@ func TestOperationsCopyObjectWithResultFailsBeforeWriteWhenDestinationPreviousRe
 	}
 	ops := NewOperations(backend)
 
-	_, err := ops.CopyObjectWithResult(context.Background(), CopyObjectRequest{
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
 		Source:      ObjectRef{Bucket: "src-bucket", Key: "src"},
 		Destination: ObjectRef{Bucket: "dst-bucket", Key: "dst"},
 	})

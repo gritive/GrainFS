@@ -20,7 +20,7 @@ const (
 	CopyMetadataReplace CopyMetadataDirective = "REPLACE"
 )
 
-type CopySourceConditions struct {
+type CopyPreconditions struct {
 	IfMatch           string
 	IfNoneMatch       string
 	IfModifiedSince   *time.Time
@@ -28,18 +28,13 @@ type CopySourceConditions struct {
 }
 
 type CopyObjectRequest struct {
-	SourceBucket      string
-	SourceKey         string
-	DestinationBucket string
-	DestinationKey    string
-	ACL               *uint8 // legacy fields above are normalized into Source/Destination.
-
 	Source            ObjectRef
 	Destination       ObjectRef
 	MetadataDirective CopyMetadataDirective
 	ContentType       string
 	UserMetadata      map[string]string
-	Conditions        CopySourceConditions
+	Preconditions     CopyPreconditions
+	ACL               *uint8
 }
 
 type CopyObjectResult struct {
@@ -47,26 +42,26 @@ type CopyObjectResult struct {
 	Previous PreviousObject
 }
 
-type CopyObjectAdapterRequest struct {
+type CopyObjectAccelerationRequest struct {
 	SourceRef      ObjectRef
 	DestinationRef ObjectRef
 	SourceObject   *Object
 	ContentType    string
 }
 
-type CopyObjectAdapter interface {
-	CopyObjectWithRequest(ctx context.Context, req CopyObjectAdapterRequest) (*Object, error)
+type copyObjectAccelerator interface {
+	CopyObjectWithRequest(ctx context.Context, req CopyObjectAccelerationRequest) (*Object, error)
 }
 
 func (o *Operations) CopyObject(ctx context.Context, req CopyObjectRequest) (*CopyObjectResult, error) {
-	return o.copyObject(ctx, req, false)
+	return o.copyObject(ctx, req)
 }
 
 func (o *Operations) CopyObjectWithResult(ctx context.Context, req CopyObjectRequest) (*CopyObjectResult, error) {
-	return o.copyObject(ctx, req, true)
+	return o.CopyObject(ctx, req)
 }
 
-func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, includePrevious bool) (*CopyObjectResult, error) {
+func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*CopyObjectResult, error) {
 	req = normalizeCopyObjectRequest(req)
 	plan := o.planForCall()
 
@@ -83,19 +78,15 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, incl
 	if err := validateCopyObjectRequest(req); err != nil {
 		return nil, err
 	}
-	if err := evaluateCopySourceConditions(srcObj, req.Conditions); err != nil {
+	if err := evaluateCopyPreconditions(srcObj, req.Preconditions); err != nil {
 		return nil, err
 	}
 	if isSameDestinationNoop(req) {
 		return nil, InvalidCopySourceError{Reason: CopySourceSameAsDestinationNoop}
 	}
-	var previous PreviousObject
-	if includePrevious {
-		var err error
-		previous, err = o.previousObject(ctx, req.Destination.Bucket, req.Destination.Key)
-		if err != nil {
-			return nil, err
-		}
+	previous, err := o.previousObject(ctx, req.Destination.Bucket, req.Destination.Key)
+	if err != nil {
+		return nil, err
 	}
 
 	contentType := srcObj.ContentType
@@ -103,8 +94,8 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, incl
 		contentType = req.ContentType
 	}
 
-	if req.ACL == nil && canUseCopyObjectAdapter(req) && plan.copyObjectAdapter != nil {
-		obj, err := plan.copyObjectAdapter.CopyObjectWithRequest(ctx, CopyObjectAdapterRequest{
+	if req.ACL == nil && canUseCopyObjectAccelerator(req) && plan.copyObjectAccelerator != nil {
+		obj, err := plan.copyObjectAccelerator.CopyObjectWithRequest(ctx, CopyObjectAccelerationRequest{
 			SourceRef:      req.Source,
 			DestinationRef: req.Destination,
 			SourceObject:   srcObj,
@@ -162,12 +153,6 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, incl
 }
 
 func normalizeCopyObjectRequest(req CopyObjectRequest) CopyObjectRequest {
-	if req.Source.Bucket == "" && req.Source.Key == "" {
-		req.Source = ObjectRef{Bucket: req.SourceBucket, Key: req.SourceKey}
-	}
-	if req.Destination.Bucket == "" && req.Destination.Key == "" {
-		req.Destination = ObjectRef{Bucket: req.DestinationBucket, Key: req.DestinationKey}
-	}
 	if req.MetadataDirective == "" {
 		req.MetadataDirective = CopyMetadataCopy
 	}
@@ -206,7 +191,7 @@ func validateCopyObjectRequest(req CopyObjectRequest) error {
 	}
 }
 
-func evaluateCopySourceConditions(src *Object, cond CopySourceConditions) error {
+func evaluateCopyPreconditions(src *Object, cond CopyPreconditions) error {
 	etag := normalizeCopyETag(src.ETag)
 	if cond.IfMatch != "" {
 		want, ok := normalizeCopyConditionETag(cond.IfMatch)
@@ -270,13 +255,13 @@ func canUseSimpleCopier(req CopyObjectRequest) bool {
 		req.ContentType == "" &&
 		req.ACL == nil &&
 		len(req.UserMetadata) == 0 &&
-		req.Conditions.IfMatch == "" &&
-		req.Conditions.IfNoneMatch == "" &&
-		req.Conditions.IfModifiedSince == nil &&
-		req.Conditions.IfUnmodifiedSince == nil
+		req.Preconditions.IfMatch == "" &&
+		req.Preconditions.IfNoneMatch == "" &&
+		req.Preconditions.IfModifiedSince == nil &&
+		req.Preconditions.IfUnmodifiedSince == nil
 }
 
-func canUseCopyObjectAdapter(req CopyObjectRequest) bool {
+func canUseCopyObjectAccelerator(req CopyObjectRequest) bool {
 	return req.Source.VersionID == "" &&
 		req.ACL == nil &&
 		len(req.UserMetadata) == 0

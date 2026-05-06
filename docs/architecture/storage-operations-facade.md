@@ -121,9 +121,10 @@ Examples:
   CopyObject semantics, including metadata directive, copy-source
   preconditions, ACL/versioned source behavior, and delete-marker source
   handling. `storage.Copier` remains a lower-level optimization adapter for
-  simple metadata-only copies, while `CopyObjectAdapter` carries the
-  request-shaped fields needed by backends such as packed blobs. Optimized
-  adapter paths and stream-copy fallback must produce the same
+  simple metadata-only copies, while the facade's private copy acceleration
+  path carries the already-validated request-shaped fields needed by backends
+  such as packed blobs. Optimized adapter paths and stream-copy fallback must
+  produce the same
   externally-observable result.
 - `DeleteObjectVersion`: no generic fallback; unsupported if no safe adapter is
   found.

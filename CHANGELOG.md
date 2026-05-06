@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.61.0] - 2026-05-06
+
+### Changed
+
+- CopyObject now always returns destination previous-object facts from the
+  storage operations facade, so overwrite accounting no longer depends on a
+  separate result-specific method.
+- CopyObject requests now use typed source, destination, and precondition
+  fields throughout the facade and handler adapter instead of legacy bucket/key
+  compatibility fields.
+- Optimized copy support is now documented and wired as a private acceleration
+  path behind the facade, keeping S3 CopyObject semantics in
+  `storage.Operations`.
+
+### Removed
+
+- Removed the completed CopyObject semantics TODO after the facade now owns
+  source validation, preconditions, metadata directive handling, and result
+  facts.
+
+### Docs
+
+- Added an ADR and context vocabulary for CopyObject semantics ownership and
+  updated the storage operations architecture notes to match the private
+  acceleration path.
+
 ## [0.0.59.0] - 2026-05-06
 
 ### Changed

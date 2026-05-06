@@ -48,6 +48,29 @@ If reading previous-object facts returns not-found, the mutation proceeds with
 `Previous.Exists=false`. Any other previous-object read error fails the
 operation before mutation.
 
+### CopyObject Semantics
+
+CopyObject semantics belong to the storage operations facade, not to HTTP
+handlers or backend copy primitives. Handlers translate raw HTTP fields such as
+`x-amz-copy-source`, metadata directive headers, and copy-source conditional
+headers into typed storage requests. The facade owns source validation,
+precondition evaluation, delete-marker rejection, destination previous-object
+facts, fast-path eligibility, and result normalization.
+
+The facade validates the copy source with `HeadObject` or `HeadObjectVersion`
+before opening the source body. Missing source, explicit delete-marker source,
+and failed source preconditions are distinct outcomes so protocol adapters can
+map them without string matching.
+
+Optimized copy adapters are acceleration paths behind the facade. They receive
+already validated source and destination facts and must not decide S3
+CopyObject semantics. The storage backend interface remains a primitive storage
+interface; copy semantics are exposed through `Operations.CopyObject`.
+
+Metadata directive handling is intentionally narrow until the object metadata
+model grows. `COPY` preserves source `ContentType`, and `REPLACE` uses the
+request `ContentType`; arbitrary user metadata remains unsupported.
+
 ### Admin API Wire Schema
 
 `internal/adminapi` is the single source of truth for admin HTTP JSON body

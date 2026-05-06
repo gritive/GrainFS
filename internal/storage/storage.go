@@ -65,9 +65,9 @@ type ObjectVersion struct {
 	Size           int64
 }
 
-// Copier is an optional interface for backends that support metadata-only copy.
-// Backends implement this via type assertion; the HTTP handler falls back to
-// read+write if the backend does not implement Copier.
+// Copier is an optional primitive for backends that support metadata-only copy.
+// Operations.CopyObject validates CopyObject semantics before using this
+// acceleration path, and falls back to read+write when it is unavailable.
 type Copier interface {
 	CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error)
 }
