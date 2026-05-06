@@ -1,13 +1,17 @@
 package serveruntime
 
 import (
+	"context"
 	"fmt"
+	"sync"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
+	"github.com/gritive/GrainFS/internal/resourcewatch"
+	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 	"github.com/gritive/GrainFS/internal/volume/dedup"
@@ -18,6 +22,56 @@ import (
 type VolumeManagerOptions struct {
 	DedupEnabled   bool
 	BlockCacheSize int64
+}
+
+type VolumeRuntimeOptions struct {
+	VolumeManagerOptions
+	DataDir string
+	Backend storage.Backend
+}
+
+type VolumeRuntime struct {
+	Manager       *volume.Manager
+	BlockCache    *blockcache.Cache
+	ServerOptions []server.Option
+	closeOnce     sync.Once
+	closeFn       func() error
+	closeErr      error
+}
+
+func (r *VolumeRuntime) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.closeOnce.Do(func() {
+		if r.closeFn != nil {
+			r.closeErr = r.closeFn()
+		}
+	})
+	return r.closeErr
+}
+
+func SetupVolumeRuntime(ctx context.Context, opts VolumeRuntimeOptions) (*VolumeRuntime, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	mgr, cache, dedupDB, err := BuildVolumeManager(opts.VolumeManagerOptions, opts.DataDir, opts.Backend)
+	if err != nil {
+		return nil, err
+	}
+	runtime := &VolumeRuntime{
+		Manager:       mgr,
+		BlockCache:    cache,
+		ServerOptions: []server.Option{server.WithVolumeManager(mgr), server.WithBlockCache(cache)},
+	}
+	if dedupDB != nil {
+		dedupEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryDedup, dedupDB)
+		runtime.closeFn = func() error {
+			resourcewatch.DeregisterDB(dedupEntry)
+			return dedupDB.Close()
+		}
+	}
+	return runtime, nil
 }
 
 // BuildVolumeManager creates the shared volume.Manager for the serve path.

@@ -32,13 +32,10 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
-	"github.com/gritive/GrainFS/internal/incident"
-	"github.com/gritive/GrainFS/internal/incident/badgerstore"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/receipt"
-	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -1227,38 +1224,26 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 	srvOpts = newSrvOpts
 	defer receiptWiring.Close()
 
-	var incidentRecorder *incident.Recorder
-	incidentDB, incidentDecision, err := badgerrole.OpenRole(roleRegistry, badgerrole.RoleIncidentState, badgerrole.PathContext{DataDir: dataDir})
+	incidentRuntime, err := serveruntime.SetupIncidentRuntime(ctx, serveruntime.IncidentRuntimeOptions{
+		RoleRegistry:          roleRegistry,
+		DataDir:               dataDir,
+		NodeID:                nodeID,
+		IncidentRecorderSink:  distBackend,
+		Alerts:                clusterAlerts,
+		FDWatchEnabled:        cfg.FDWatchEnabled,
+		FDOpts:                cfg.FDOpts,
+		GoroutineWatchEnabled: cfg.GoroutineWatchEnabled,
+		GoroutineOpts:         cfg.GoroutineOpts,
+		VlogWatchEnabled:      cfg.VlogWatchEnabled,
+		VlogOpts:              cfg.VlogResourceGuardOpts,
+	})
 	if err != nil {
-		if feature, ok := serveruntime.OptionalRoleDisabled(roleRegistry, incidentDecision); ok {
-			serveruntime.LogOptionalRoleDisabled(badgerrole.RoleIncidentState, feature, err)
-		} else {
-			return fmt.Errorf("open incident db: %w", err)
-		}
-	} else {
-		defer incidentDB.Close()
-		incidentVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryIncident, incidentDB)
-		defer resourcewatch.DeregisterDB(incidentVlogEntry)
-		incidentStore := badgerstore.New(incidentDB)
-		incidentRecorder = incident.NewRecorder(incidentStore, incident.NewReducer())
-		distBackend.SetIncidentRecorder(incidentRecorder)
-		srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
-		guardDeps := resourceguard.Deps{
-			NodeID:   nodeID,
-			Alerts:   clusterAlerts,
-			Recorder: incidentRecorder,
-		}
-		if cfg.FDWatchEnabled {
-			resourceguard.StartFD(ctx, cfg.FDOpts, guardDeps)
-		}
-		if cfg.GoroutineWatchEnabled {
-			resourceguard.StartGoroutine(ctx, cfg.GoroutineOpts, guardDeps)
-		}
-		if cfg.VlogWatchEnabled {
-			resourceguard.StartVlog(ctx, cfg.VlogResourceGuardOpts, guardDeps)
-		}
+		return err
 	}
-	clusterIncidentRecorder, scrubberIncidentRecorder := serveruntime.IncidentRecorderInterfaces(incidentRecorder)
+	defer incidentRuntime.Close()
+	srvOpts = append(srvOpts, incidentRuntime.ServerOptions...)
+	clusterIncidentRecorder := incidentRuntime.ClusterRecorder
+	scrubberIncidentRecorder := incidentRuntime.ScrubberRecorder
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
@@ -1270,16 +1255,20 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 		srvOpts = append(srvOpts, server.WithLifecycleStore(lifecycleMgr.Store()))
 	}
 
-	volMgr, blockCache, dedupDB, err := serveruntime.BuildVolumeManager(serveruntime.VolumeManagerOptions{DedupEnabled: cfg.DedupEnabled, BlockCacheSize: cfg.BlockCacheSize}, dataDir, backend)
+	volumeRuntime, err := serveruntime.SetupVolumeRuntime(ctx, serveruntime.VolumeRuntimeOptions{
+		VolumeManagerOptions: serveruntime.VolumeManagerOptions{
+			DedupEnabled:   cfg.DedupEnabled,
+			BlockCacheSize: cfg.BlockCacheSize,
+		},
+		DataDir: dataDir,
+		Backend: backend,
+	})
 	if err != nil {
 		return fmt.Errorf("volume manager: %w", err)
 	}
-	if dedupDB != nil {
-		defer dedupDB.Close()
-		dedupVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryDedup, dedupDB)
-		defer resourcewatch.DeregisterDB(dedupVlogEntry)
-	}
-	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(shardCache))
+	defer volumeRuntime.Close()
+	srvOpts = append(srvOpts, volumeRuntime.ServerOptions...)
+	srvOpts = append(srvOpts, server.WithShardCache(shardCache))
 	if !joinMode {
 		srvOpts = append(srvOpts, server.WithReadIndexer(distBackend))
 	}
@@ -1601,7 +1590,7 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 	// are now wired in cluster mode too, not just local. Formerly local-only
 	// because runCluster never called the NFS/NBD wiring. Scrubber/lifecycle
 	// remain local-specific pending ECBackend→cluster integration (A.2).
-	nodeSvc := serveruntime.StartNodeServices(ctx, backend, volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.NBDVolumeSize, distBackend)
+	nodeSvc := serveruntime.StartNodeServices(ctx, backend, volumeRuntime.Manager, cfg.NFS4Port, cfg.NBDPort, cfg.NBDVolumeSize, distBackend)
 	defer nodeSvc.Close()
 
 	<-ctx.Done()
