@@ -156,6 +156,28 @@ func TestECReconstructStreamReader_SmallReadsRoundTrip(t *testing.T) {
 	assert.Equal(t, data, got.Bytes())
 }
 
+func TestECReconstructStreamReader_MultiWindowRoundTrip(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := make([]byte, 5*1024*1024+123)
+	_, err := rand.Read(data)
+	require.NoError(t, err)
+
+	shards, err := ECSplit(cfg, data)
+	require.NoError(t, err)
+	readers := make([]io.Reader, len(shards))
+	for i := 0; i < cfg.DataShards; i++ {
+		readers[i] = bytes.NewReader(shards[i])
+	}
+
+	r, err := newECReconstructStreamReader(cfg, readers)
+	require.NoError(t, err)
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, len(data), len(got))
+	assert.True(t, bytes.Equal(data, got), "multi-window stream reader output mismatch")
+}
+
 func TestECReconstruct_MissingParityShard(t *testing.T) {
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	data := make([]byte, 1024)

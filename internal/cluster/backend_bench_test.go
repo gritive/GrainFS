@@ -49,9 +49,7 @@ func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				_, err := bk.PutObject(context.Background(), "bench", "key", bytes.NewReader(data), "application/octet-stream")
-				if err != nil {
-					b.Fatal(err)
-				}
+				require.NoError(b, err)
 			}
 		})
 	}
@@ -83,9 +81,7 @@ func BenchmarkGetObjectEC(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				rc, _, err := bk.GetObject(context.Background(), "bench", "readkey")
-				if err != nil {
-					b.Fatal(err)
-				}
+				require.NoError(b, err)
 				_, _ = io.Copy(io.Discard, rc)
 				rc.Close()
 			}
