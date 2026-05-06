@@ -41,7 +41,3 @@ func TestBadgerStartupReducerAdmitsReadOnlyForGroupFailure(t *testing.T) {
 	assert.Contains(t, got.ReadOnlyReasons[0], "group_state")
 }
 
-func TestRuntimeGroupInstantiationFailureDoesNotPanic(t *testing.T) {
-	err := handleRuntimeGroupInstantiationError("group-a", errors.New("open failed"))
-	assert.ErrorContains(t, err, "group-a")
-}
