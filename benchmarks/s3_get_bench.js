@@ -21,6 +21,7 @@ const GRACEFUL_STOP = __ENV.GRACEFUL_STOP || '5s';
 const OBJECT_SIZE_KB = parseInt(__ENV.OBJECT_SIZE_KB || '65536');
 const OBJECT_COUNT = parseInt(__ENV.OBJECT_COUNT || '4');
 const SLEEP_SECONDS = parseFloat(__ENV.SLEEP_SECONDS || '0');
+const SETUP_TIMEOUT = __ENV.SETUP_TIMEOUT || '5m';
 
 const getLatency = new Trend('grainfs_get_latency', true);
 const getOps = new Counter('grainfs_get_ops');
@@ -28,6 +29,7 @@ const getSuccess = new Rate('grainfs_get_success');
 
 export const options = {
   discardResponseBodies: true,
+  setupTimeout: SETUP_TIMEOUT,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   scenarios: {
     get_workload: {
