@@ -973,27 +973,35 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		return gb.ReadAt(ctx, bucket, key, offset, buf)
 	}
 
-	rc, _, err := c.GetObject(ctx, bucket, key)
+	if c.forward == nil {
+		return 0, ErrCoordinatorNoRouter
+	}
+	if c.forward.readDialer == nil {
+		rc, _, err := c.GetObject(ctx, bucket, key)
+		if err != nil {
+			return 0, err
+		}
+		defer rc.Close()
+		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			return 0, err
+		}
+		return io.ReadFull(rc, buf)
+	}
+
+	args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
+	reply, body, err := c.forward.SendReadStream(ctx, target.peers, target.groupID, raftpb.ForwardOpReadAt, args)
 	if err != nil {
 		return 0, err
 	}
-	defer rc.Close()
-	data, err := io.ReadAll(rc)
-	if err != nil {
+	defer body.Close()
+	if err := parseReplyStatus(reply); err != nil {
 		return 0, err
 	}
-	if offset >= int64(len(data)) {
-		return 0, io.EOF
-	}
-	n := copy(buf, data[offset:])
-	if n < len(buf) {
-		return n, io.EOF
-	}
-	return n, nil
+	return io.ReadFull(body, buf)
 }
 
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {
-	return storage.IsInternalBucket(bucket)
+	return true
 }
 
 func (c *ClusterCoordinator) UploadPart(

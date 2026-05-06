@@ -179,6 +179,8 @@ func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message
 		return r.handleGetObjectRead(dg, fbsArgs)
 	case raftpb.ForwardOpGetObjectVersion:
 		return r.handleGetObjectVersionRead(dg, fbsArgs)
+	case raftpb.ForwardOpReadAt:
+		return r.handleReadAtRead(dg, fbsArgs)
 	default:
 		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
@@ -232,6 +234,48 @@ func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*tran
 	}
 	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), nil)}, rc
 }
+
+func (r *ForwardReceiver) handleReadAtRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
+	ra := raftpb.GetRootAsReadAtArgs(args, 0)
+	length := ra.Length()
+	if ra.Offset() < 0 || length < 0 {
+		return statusReply(raftpb.ForwardStatusInternal), nil
+	}
+	body := &backendReadAtStream{
+		ctx:     context.Background(),
+		backend: dg.Backend(),
+		bucket:  string(ra.Bucket()),
+		key:     string(ra.Key()),
+		offset:  ra.Offset(),
+		length:  length,
+	}
+	return &transport.Message{Payload: buildOKReply()}, body
+}
+
+type backendReadAtStream struct {
+	ctx            context.Context
+	backend        *GroupBackend
+	bucket, key    string
+	offset, length int64
+	pos            int64
+}
+
+func (r *backendReadAtStream) Read(p []byte) (int, error) {
+	if r.pos >= r.length {
+		return 0, io.EOF
+	}
+	if remaining := r.length - r.pos; int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	n, err := r.backend.ReadAt(r.ctx, r.bucket, r.key, r.offset+r.pos, p)
+	r.pos += int64(n)
+	if err != nil && n > 0 && r.pos >= r.length {
+		return n, nil
+	}
+	return n, err
+}
+
+func (r *backendReadAtStream) Close() error { return nil }
 
 func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport.Message {
 	ctx := context.Background()

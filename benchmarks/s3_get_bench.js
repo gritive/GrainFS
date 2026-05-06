@@ -19,13 +19,17 @@ const RAMP_DOWN = __ENV.RAMP_DOWN || '1s';
 const GRACEFUL_RAMP_DOWN = __ENV.GRACEFUL_RAMP_DOWN || '2s';
 const GRACEFUL_STOP = __ENV.GRACEFUL_STOP || '5s';
 const OBJECT_SIZE_KB = parseInt(__ENV.OBJECT_SIZE_KB || '65536');
+const OBJECT_SIZE_BYTES = OBJECT_SIZE_KB * 1024;
 const OBJECT_COUNT = parseInt(__ENV.OBJECT_COUNT || '4');
+const RANGE_BYTES = parseInt(__ENV.RANGE_BYTES || '0');
+const RANGE_MODE = __ENV.RANGE_MODE || (RANGE_BYTES > 0 ? 'sequential' : 'full');
 const SLEEP_SECONDS = parseFloat(__ENV.SLEEP_SECONDS || '0');
 const SETUP_TIMEOUT = __ENV.SETUP_TIMEOUT || '5m';
 const PRELOADED = (__ENV.PRELOADED || '0') === '1';
 
 const getLatency = new Trend('grainfs_get_latency', true);
 const getOps = new Counter('grainfs_get_ops');
+const getBytes = new Counter('grainfs_get_bytes');
 const getSuccess = new Rate('grainfs_get_success');
 
 export const options = {
@@ -131,6 +135,31 @@ function payloadOfSize(size) {
   return out;
 }
 
+function rangeHeader() {
+  if (RANGE_BYTES <= 0 || RANGE_BYTES >= OBJECT_SIZE_BYTES) {
+    return '';
+  }
+
+  const maxStart = OBJECT_SIZE_BYTES - RANGE_BYTES;
+  let start = 0;
+  if (RANGE_MODE === 'random') {
+    start = Math.floor(Math.random() * (maxStart + 1));
+  } else if (RANGE_MODE === 'sequential') {
+    start = ((__VU - 1) + __ITER) * RANGE_BYTES;
+    start = start % (maxStart + 1);
+  }
+
+  const end = start + RANGE_BYTES - 1;
+  return `bytes=${start}-${end}`;
+}
+
+function expectedBodyBytes() {
+  if (RANGE_BYTES <= 0 || RANGE_BYTES >= OBJECT_SIZE_BYTES) {
+    return OBJECT_SIZE_BYTES;
+  }
+  return RANGE_BYTES;
+}
+
 export function setup() {
   if (PRELOADED) {
     const keys = [];
@@ -167,18 +196,24 @@ export function getWorkload(data) {
   const keys = data.keys;
   const key = keys[(__VU + __ITER) % keys.length];
   const getUrl = `${BASE}/${BUCKET}/${key}`;
+  const headers = sign('GET', getUrl, '', false);
+  const range = rangeHeader();
+  if (range) {
+    headers.Range = range;
+  }
   const res = http.get(getUrl, {
-    headers: sign('GET', getUrl, '', false),
-    responseCallback: http.expectedStatuses(200),
+    headers,
+    responseCallback: http.expectedStatuses(range ? 206 : 200),
     timeout: '120s',
   });
-  const ok = res.status === 200;
+  const ok = range ? res.status === 206 : res.status === 200;
   getSuccess.add(ok);
   if (ok) {
     getLatency.add(res.timings.duration);
     getOps.add(1);
+    getBytes.add(expectedBodyBytes());
   } else if (__ITER < 3) {
-    console.log(`GET failed: status=${res.status} key=${key}`);
+    console.log(`GET failed: status=${res.status} key=${key} range=${range || 'full'}`);
   }
   check(res, { 'get ok': () => ok });
   if (SLEEP_SECONDS > 0) {
@@ -189,15 +224,20 @@ export function getWorkload(data) {
 export function handleSummary(data) {
   const latency = data.metrics.grainfs_get_latency;
   const ops = data.metrics.grainfs_get_ops;
+  const bytes = data.metrics.grainfs_get_bytes;
   const success = data.metrics.grainfs_get_success;
   const report = {
     timestamp: new Date().toISOString(),
     topology: __ENV.TOPOLOGY || '',
     object_size_kb: OBJECT_SIZE_KB,
     object_count: OBJECT_COUNT,
+    range_bytes: RANGE_BYTES,
+    range_mode: RANGE_MODE,
     vus: MAX_VUS,
     get: {
       ops: ops ? ops.values.count : 0,
+      bytes: bytes ? bytes.values.count : 0,
+      bytes_per_sec: bytes ? bytes.values.rate.toFixed(2) : '0.00',
       success_rate: success ? success.values.rate : 0,
       p50_ms: latency ? (latency.values.med ?? latency.values['p(50)'] ?? 0).toFixed(2) : '0.00',
       p95_ms: latency ? (latency.values['p(95)'] ?? 0).toFixed(2) : '0.00',
@@ -212,7 +252,8 @@ export function handleSummary(data) {
   let out = '\n=== GrainFS GET-only Benchmark Report ===\n';
   out += `Topology: ${report.topology}\n`;
   out += `Object: ${report.object_size_kb}KB x ${report.object_count}\n`;
-  out += `GET: ${report.get.ops} ok ops | success: ${report.get.success_rate} | P50: ${report.get.p50_ms}ms | P95: ${report.get.p95_ms}ms | P99: ${report.get.p99_ms}ms | Avg: ${report.get.avg_ms}ms | Max: ${report.get.max_ms}ms\n`;
+  out += `Range: ${report.range_bytes > 0 ? `${report.range_bytes}B ${report.range_mode}` : 'full'}\n`;
+  out += `GET: ${report.get.ops} ok ops | ${report.get.bytes_per_sec} B/s | success: ${report.get.success_rate} | P50: ${report.get.p50_ms}ms | P95: ${report.get.p95_ms}ms | P99: ${report.get.p99_ms}ms | Avg: ${report.get.avg_ms}ms | Max: ${report.get.max_ms}ms\n`;
   out += `Failed rate: ${report.http_req_failed}\n`;
   out += '\nFull report: benchmarks/get_report.json\n';
 

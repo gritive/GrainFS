@@ -108,6 +108,20 @@ func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
 	require.ErrorIs(t, err, eccodec.ErrCRCMismatch)
 }
 
+func TestShardService_ReadLocalShardAt_EncodedShard(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+
+	plaintext := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	buf := make([]byte, 8)
+	n, err := svc.ReadLocalShardAt("bkt", "obj", 0, 10, buf)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, "abcdefgh", string(buf))
+}
+
 // TestShardService_NoEncryption verifies plaintext storage when no encryptor is set.
 func TestShardService_NoEncryption(t *testing.T) {
 	dir := t.TempDir()
@@ -259,6 +273,36 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
+}
+
+func TestShardService_ReadShardRangeStream_EncodedShard(t *testing.T) {
+	ctx := context.Background()
+
+	tr1 := transport.MustNewQUICTransport("test-cluster-psk")
+	tr2 := transport.MustNewQUICTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1)
+	svc2 := NewShardService(dir2, tr2)
+	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
+	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
+
+	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 1024)
+	require.NoError(t, svc1.WriteShardStream(ctx, tr2.LocalAddr(), "bkt", "key", 0, bytes.NewReader(plaintext)))
+
+	r, err := svc1.ReadShardRangeStream(ctx, tr2.LocalAddr(), "bkt", "key", 0, 10, 8192)
+	require.NoError(t, err)
+	defer r.Close()
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.Equal(t, plaintext[10:10+8192], got)
 }
 
 func TestShardService_RPCWriteReadDelete(t *testing.T) {

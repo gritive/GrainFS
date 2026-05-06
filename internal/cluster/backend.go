@@ -1260,23 +1260,70 @@ func writeAtETag(f *os.File, data []byte, offset uint64, size int64) (string, er
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// ReadAt implements zero-overhead pread for internal buckets (NFS4/VFS).
-// Bypasses HeadObject, EC path, and shardSvc — directly pread(2) the
-// versioned local file. Only valid for internal buckets with "current" version.
+// ReadAt implements partial object reads. Internal buckets use the historical
+// direct pread path. EC user buckets read only the data shard segments that
+// overlap the requested byte range when those data shards are available.
 func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
-	if !storage.IsInternalBucket(bucket) {
-		return 0, fmt.Errorf("ReadAt not supported for user bucket %q", bucket)
+	if offset < 0 {
+		return 0, fmt.Errorf("ReadAt negative offset %d", offset)
 	}
-	f, err := os.Open(b.internalObjectPath(bucket, key).path)
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	if storage.IsInternalBucket(bucket) {
+		f, err := os.Open(b.internalObjectPath(bucket, key).path)
+		if err != nil {
+			return 0, err
+		}
+		defer f.Close()
+		return f.ReadAt(buf, offset)
+	}
+
+	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
-	return f.ReadAt(buf, offset)
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+		return 0, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return 0, objectQuarantinedError(bucket, key, q)
+	}
+	if offset >= obj.Size {
+		return 0, io.EOF
+	}
+	if max := obj.Size - offset; int64(len(buf)) > max {
+		buf = buf[:max]
+	}
+
+	if b.shardSvc != nil {
+		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
+		if rerr == nil {
+			n, ecErr := b.readObjectECAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record, obj.Size, offset, buf)
+			if ecErr == nil {
+				return n, nil
+			}
+			return b.readAtViaGetObject(ctx, bucket, key, offset, buf)
+		}
+		if !errors.Is(rerr, ErrNotEC) {
+			return 0, fmt.Errorf("resolve placement for %s/%s: %w", bucket, key, rerr)
+		}
+	}
+
+	if obj.VersionID != "" {
+		if f, oerr := b.openObjectIfSizeMatches(b.objectPathV(bucket, key, obj.VersionID), obj); oerr == nil {
+			defer f.Close()
+			return f.ReadAt(buf, offset)
+		}
+	}
+	if f, oerr := b.openObjectIfSizeMatches(b.objectPath(bucket, key), obj); oerr == nil {
+		defer f.Close()
+		return f.ReadAt(buf, offset)
+	}
+	return b.readAtViaGetObject(ctx, bucket, key, offset, buf)
 }
 
 func (b *DistributedBackend) PreferReadAt(bucket string) bool {
-	return storage.IsInternalBucket(bucket)
+	return true
 }
 
 // Truncate implements the internal-bucket fast path used by NFS SETATTR size.
@@ -2091,6 +2138,94 @@ func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bu
 		closeECShardReaders(shards)
 		return err
 	}}, nil
+}
+
+func (b *DistributedBackend) readObjectECAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64, offset int64, buf []byte) (int, error) {
+	recCfg := rec.ECConfigOrFallback(b.ecConfig)
+	if len(rec.Nodes) != recCfg.NumShards() {
+		return 0, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
+	}
+	if b.shardSvc == nil {
+		return 0, fmt.Errorf("shard service unavailable")
+	}
+	if recCfg.DataShards <= 0 {
+		return 0, fmt.Errorf("ec readat: invalid data shard count %d", recCfg.DataShards)
+	}
+
+	dataShardSize := (objectSize + int64(recCfg.DataShards) - 1) / int64(recCfg.DataShards)
+	if dataShardSize <= 0 {
+		return 0, io.EOF
+	}
+
+	done := 0
+	for done < len(buf) {
+		global := offset + int64(done)
+		if global >= objectSize {
+			if done > 0 {
+				return done, nil
+			}
+			return 0, io.EOF
+		}
+		shardIdx := int(global / dataShardSize)
+		if shardIdx >= recCfg.DataShards {
+			return done, io.EOF
+		}
+		shardOffset := global - int64(shardIdx)*dataShardSize
+		want := len(buf) - done
+		if maxInShard := dataShardSize - shardOffset; int64(want) > maxInShard {
+			want = int(maxInShard)
+		}
+		if maxInObject := objectSize - global; int64(want) > maxInObject {
+			want = int(maxInObject)
+		}
+
+		n, err := b.readECDataShardAt(ctx, bucket, shardKey, rec.Nodes[shardIdx], shardIdx, shardOffset, buf[done:done+want])
+		done += n
+		if err != nil {
+			if done > 0 && errors.Is(err, io.EOF) {
+				return done, nil
+			}
+			return done, err
+		}
+		if n != want {
+			return done, io.ErrUnexpectedEOF
+		}
+	}
+	return done, nil
+}
+
+func (b *DistributedBackend) readECDataShardAt(ctx context.Context, bucket, shardKey, node string, shardIdx int, shardOffset int64, buf []byte) (int, error) {
+	readamp.RecordECShard(shardCacheKey(bucket, shardKey, shardIdx))
+	if node == b.selfAddr {
+		return b.shardSvc.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
+	}
+
+	shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
+	defer shardCancel()
+	r, err := b.shardSvc.ReadShardRangeStream(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
+	if err != nil {
+		if b.peerHealth != nil {
+			b.peerHealth.MarkUnhealthy(node)
+		}
+		return 0, err
+	}
+	defer r.Close()
+	if b.peerHealth != nil {
+		b.peerHealth.MarkHealthy(node)
+	}
+	return io.ReadFull(r, buf)
+}
+
+func (b *DistributedBackend) readAtViaGetObject(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	rc, _, err := b.GetObject(ctx, bucket, key)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+		return 0, err
+	}
+	return io.ReadFull(rc, buf)
 }
 
 func (b *DistributedBackend) hasLocalECDataShard(rec PlacementRecord, cfg ECConfig) bool {

@@ -51,6 +51,19 @@ func buildGetObjectArgs(bucket, key string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildReadAtArgs(bucket, key string, offset, length int64) []byte {
+	b := flatbuffers.NewBuilder(80)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	raftpb.ReadAtArgsStart(b)
+	raftpb.ReadAtArgsAddBucket(b, bk)
+	raftpb.ReadAtArgsAddKey(b, k)
+	raftpb.ReadAtArgsAddOffset(b, offset)
+	raftpb.ReadAtArgsAddLength(b, length)
+	b.Finish(raftpb.ReadAtArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
