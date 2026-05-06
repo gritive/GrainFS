@@ -159,6 +159,76 @@ func TestPeerReplicator_HeartbeatConflictBacktracksNextIndex(t *testing.T) {
 	require.Equal(t, uint64(1), r.sendNextIndex)
 }
 
+func TestPeerReplicator_RecordsAppendEntriesSuccessEvidence(t *testing.T) {
+	n := NewNode(Config{ID: "leader", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 2
+	r := newPeerReplicator(n, "follower")
+	n.mu.Unlock()
+
+	before := time.Now()
+	again := r.applyResult(replicationResult{
+		term:      2,
+		heartbeat: true,
+		success:   true,
+		from:      1,
+	})
+	require.False(t, again)
+
+	evidence := n.PeerReplicationEvidence()
+	require.Len(t, evidence, 1)
+	require.Equal(t, "follower", evidence[0].PeerID)
+	require.False(t, evidence[0].LastAppendSuccess.Before(before))
+}
+
+func TestPeerReplicator_RecordsEntriesSuccessEvidence(t *testing.T) {
+	n := NewNode(Config{ID: "leader", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Leader
+	n.currentTerm = 2
+	r := newPeerReplicator(n, "follower")
+	generation := r.tracker.sent(1, 2, 10)
+	n.mu.Unlock()
+
+	before := time.Now()
+	again := r.applyResult(replicationResult{
+		term:       2,
+		success:    true,
+		from:       1,
+		to:         2,
+		generation: generation,
+	})
+	require.True(t, again)
+
+	evidence := n.PeerReplicationEvidence()
+	require.Len(t, evidence, 1)
+	require.Equal(t, "follower", evidence[0].PeerID)
+	require.False(t, evidence[0].LastAppendSuccess.Before(before))
+}
+
+func TestPeerReplicationEvidence_ReturnsOnlyForLeader(t *testing.T) {
+	n := NewNode(Config{ID: "node", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Follower
+	n.currentTerm = 2
+	n.peerAppendSuccess["follower"] = time.Now()
+	n.mu.Unlock()
+
+	require.Empty(t, n.PeerReplicationEvidence())
+}
+
+func TestInitLeaderStateClearsPriorTermReplicationEvidence(t *testing.T) {
+	n := NewNode(Config{ID: "node", Peers: []string{"follower"}})
+	n.mu.Lock()
+	n.state = Leader
+	n.peerAppendSuccess["follower"] = time.Now()
+	n.initLeaderState()
+	n.mu.Unlock()
+
+	require.Empty(t, n.PeerReplicationEvidence())
+}
+
 func TestPeerReplicator_ByteBudgetAllowsSingleOversizedEntry(t *testing.T) {
 	n := NewNode(Config{
 		ID:                            "leader",

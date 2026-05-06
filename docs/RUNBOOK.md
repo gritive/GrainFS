@@ -335,7 +335,7 @@ When a cluster node fails irrecoverably (hardware loss, corrupted disk past reco
    grainfs cluster status --format json   # includes peer_snapshot
    ```
 
-2. Pre-flight check is automatic. The server uses the peer snapshot membership-mutation policy: `self` and explicit `live` rows count as alive, while `configured` rows are treated as unknown until a real metaRaft health/probe signal marks them live. If removal would drop the post-removal voter count below quorum, or another unresolved legacy row makes identity ambiguous, the command refuses unless `--force`:
+2. Pre-flight check is automatic. The server uses the peer snapshot membership-mutation policy: `self` and rows with fresh successful metaRaft AppendEntries evidence count as `live`, while `configured` rows are treated as unknown. Failed heartbeats alone do not make a peer display-down for this policy. If removal would drop the post-removal voter count below quorum, or another unresolved legacy row makes identity ambiguous, the command refuses unless `--force`:
 
    ```bash
    grainfs cluster remove-peer node-2 --yes
