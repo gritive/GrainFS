@@ -6,6 +6,20 @@
 
 ### 기타
 
+- [ ] **clusteradmin BaseOptions retro-fit** — `internal/clusteradmin/operations.go` 의
+  `RemovePeerOptions / PeersOptions / EventsOptions` 가 `Endpoint/Stdout/Stderr/...`
+  공통 필드를 인라인 반복함. `volumeadmin.BaseOptions` 와 같은 임베드 패턴으로
+  맞춰 비대칭 해소. 별 PR 권장.
+- [ ] **serve.go cmd-thin** — `cmd/grainfs/serve.go` (~2255줄, runCluster 1370줄)
+  에서 raft+storage+server+monitors 와이어링을 `internal/serveapp/` (가칭) 같은
+  새 패키지로 분리. cobra 진입은 thin wrapper만 남게. 별 grilling 라운드 필요.
+- [ ] **resource_monitors.go 패키지 이전** — `cmd/grainfs/resource_monitors.go`
+  (~655줄)의 `start*ResourceMonitor` 함수들은 cobra runner가 아니라 runCluster
+  goroutine 부트스트랩. `internal/resourceguard/` 같은 server-side 패키지로 이동.
+- [ ] **wire types를 internal/grainfsapi/ 로 추출** — `internal/server/admin/types.go`
+  의 `VolumeInfo / ScrubJobInfo / Error` 등을 client(volumeadmin) 와 SOT 통일.
+  현재는 양쪽 패키지가 동형 struct를 따로 선언 → 서버 필드 추가 시 client가
+  drop 하던 ScrubJobInfo 사례 재발 위험.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
 - [ ] multi tenancy

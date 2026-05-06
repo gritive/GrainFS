@@ -47,15 +47,15 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}
 	var resp dashboardResp
 	if rotate {
-		err = c.post("/v1/dashboard/token/rotate", nil, &resp)
+		err = c.Post(cmd.Context(), "/v1/dashboard/token/rotate", nil, &resp)
 	} else {
-		err = c.get("/v1/dashboard/token", &resp)
+		err = c.Get(cmd.Context(), "/v1/dashboard/token", &resp)
 	}
 	if err != nil {
 		return err
 	}
 	if jsonOut(cmd) {
-		return printJSON(resp)
+		return printJSON(cmd, resp)
 	}
 	if rotate {
 		fmt.Println("Token rotated. Existing browser sessions will see 401 on next request.")

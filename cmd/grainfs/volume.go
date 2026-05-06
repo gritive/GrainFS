@@ -1,15 +1,21 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
-	"net/url"
-	"os"
-	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gritive/GrainFS/internal/volumeadmin"
 )
+
+// errSizeRequired is returned when --size is missing from create/resize.
+var errSizeRequired = errors.New("--size required")
+
+// invalidSizeErr wraps a parse error with the conventional "invalid --size:" prefix.
+func invalidSizeErr(err error) error {
+	return fmt.Errorf("invalid --size: %w", err)
+}
 
 // --- Cobra command tree ---
 
@@ -221,562 +227,183 @@ func init() {
 	rootCmd.AddCommand(volumeCmd)
 }
 
-// --- Helpers ---
-
-func adminClientFromCmd(cmd *cobra.Command) (*adminClient, error) {
+// baseOptionsFromCmd reads the persistent flags every volume runner shares
+// and packs them into a volumeadmin.BaseOptions.
+func baseOptionsFromCmd(cmd *cobra.Command) volumeadmin.BaseOptions {
 	endpoint, _ := cmd.Flags().GetString("endpoint")
-	dataFlag, _ := cmd.Flags().GetString("data")
-	return newAdminClient(endpoint, dataFlag)
+	dataDir, _ := cmd.Flags().GetString("data")
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	rawA, _ := cmd.Flags().GetBool("bytes")
+	rawB, _ := cmd.Flags().GetBool("raw")
+	return volumeadmin.BaseOptions{
+		Endpoint: endpoint,
+		DataDir:  dataDir,
+		JSONOut:  jsonOut,
+		RawBytes: rawA || rawB,
+		Stdout:   cmd.OutOrStdout(),
+		Stderr:   cmd.ErrOrStderr(),
+	}
 }
 
-func jsonOut(cmd *cobra.Command) bool {
-	v, _ := cmd.Flags().GetBool("json")
-	return v
-}
-
-func rawBytes(cmd *cobra.Command) bool {
-	a, _ := cmd.Flags().GetBool("bytes")
-	b, _ := cmd.Flags().GetBool("raw")
-	return a || b
-}
-
-func printJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
-
-// --- Runners ---
-
-type volumeJSON struct {
-	Name            string   `json:"name"`
-	Size            int64    `json:"size"`
-	BlockSize       int      `json:"block_size"`
-	AllocatedBlocks int64    `json:"allocated_blocks"`
-	AllocatedBytes  int64    `json:"allocated_bytes"`
-	SnapshotCount   int32    `json:"snapshot_count"`
-	Health          string   `json:"health"`
-	HealthReasons   []string `json:"health_reasons"`
-}
+// --- Runners (thin: parse flags, build options, delegate) ---
 
 func runVolumeList(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var resp struct {
-		Volumes []volumeJSON `json:"volumes"`
-	}
-	if err := c.get("/v1/volumes", &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	raw := rawBytes(cmd)
-	fmt.Printf("%-20s  %12s  %12s  %9s  %s\n", "NAME", "SIZE", "ALLOCATED", "SNAPSHOTS", "HEALTH")
-	if len(resp.Volumes) == 0 {
-		fmt.Println("(no volumes)")
-		return nil
-	}
-	for _, v := range resp.Volumes {
-		fmt.Printf("%-20s  %12s  %12s  %9d  %s\n",
-			v.Name, formatBytes(v.Size, raw), formatBytes(v.AllocatedBytes, raw),
-			v.SnapshotCount, formatVolumeHealth(v.Health))
-	}
-	return nil
-}
-
-func formatVolumeHealth(health string) string {
-	if health == "" {
-		return "ok"
-	}
-	return health
+	return volumeadmin.RunList(cmd.Context(), volumeadmin.ListOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+	})
 }
 
 func runVolumeCreate(cmd *cobra.Command, args []string) error {
 	sizeStr, _ := cmd.Flags().GetString("size")
 	if sizeStr == "" {
-		return fmt.Errorf("--size required")
+		return errSizeRequired
 	}
-	sz, err := parseSize(sizeStr)
+	sz, err := volumeadmin.ParseSize(sizeStr)
 	if err != nil {
-		return fmt.Errorf("invalid --size: %w", err)
+		return invalidSizeErr(err)
 	}
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	body := map[string]any{"name": args[0], "size": sz}
-	var resp volumeJSON
-	if err := c.post("/v1/volumes", body, &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	fmt.Printf("created %q (size=%s, block=%d)\n", resp.Name, formatBytes(resp.Size, false), resp.BlockSize)
-	return nil
+	return volumeadmin.RunCreate(cmd.Context(), volumeadmin.CreateOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+		Size:        sz,
+	})
 }
 
 func runVolumeInfo(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var resp volumeJSON
-	if err := c.get("/v1/volumes/"+url.PathEscape(args[0]), &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	raw := rawBytes(cmd)
-	fmt.Printf("name:             %s\n", resp.Name)
-	fmt.Printf("size:             %s\n", formatBytes(resp.Size, raw))
-	fmt.Printf("block_size:       %s\n", formatBytes(int64(resp.BlockSize), raw))
-	fmt.Printf("allocated_bytes:  %s\n", formatBytes(resp.AllocatedBytes, raw))
-	fmt.Printf("allocated_blocks: %d\n", resp.AllocatedBlocks)
-	fmt.Printf("snapshot_count:   %d\n", resp.SnapshotCount)
-	fmt.Printf("health:           %s\n", formatVolumeHealth(resp.Health))
-	if len(resp.HealthReasons) > 0 {
-		fmt.Printf("health_reasons:   %s\n", strings.Join(resp.HealthReasons, ","))
-	}
-	return nil
+	return volumeadmin.RunInfo(cmd.Context(), volumeadmin.InfoOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+	})
 }
 
 func runVolumeStat(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var resp struct {
-		Volume          volumeJSON       `json:"volume"`
-		RecentIncidents []map[string]any `json:"recent_incidents"`
-	}
-	if err := c.get("/v1/volumes/"+url.PathEscape(args[0])+"/stat", &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	raw := rawBytes(cmd)
-	fmt.Printf("volume:           %s\n", resp.Volume.Name)
-	fmt.Printf("size:             %s\n", formatBytes(resp.Volume.Size, raw))
-	fmt.Printf("allocated:        %s\n", formatBytes(resp.Volume.AllocatedBytes, raw))
-	fmt.Printf("snapshots:        %d\n", resp.Volume.SnapshotCount)
-	fmt.Printf("health:           %s\n", formatVolumeHealth(resp.Volume.Health))
-	if len(resp.Volume.HealthReasons) > 0 {
-		fmt.Printf("health_reasons:   %s\n", strings.Join(resp.Volume.HealthReasons, ","))
-	}
-	if len(resp.RecentIncidents) > 0 {
-		fmt.Printf("recent incidents: %d\n", len(resp.RecentIncidents))
-	}
-	return nil
+	return volumeadmin.RunStat(cmd.Context(), volumeadmin.StatOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+	})
 }
 
 func runVolumeDelete(cmd *cobra.Command, args []string) error {
 	force, _ := cmd.Flags().GetBool("force")
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	path := "/v1/volumes/" + url.PathEscape(args[0])
-	if force {
-		path += "?force=true"
-	}
-	var resp struct {
-		Deleted bool `json:"deleted"`
-	}
-	err = c.delete(path, &resp)
-	if cerr, ok := err.(*cliError); ok && cerr.Code == "conflict" && !jsonOut(cmd) {
-		printDeleteConflict(cerr)
-		return cerr
-	}
-	if err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	fmt.Printf("deleted %q\n", args[0])
-	return nil
-}
-
-func printDeleteConflict(cerr *cliError) {
-	fmt.Fprintf(os.Stderr, "%s\n", cerr.Message)
-	if cerr.Details == nil {
-		return
-	}
-	if recent, ok := cerr.Details["recent"].([]any); ok && len(recent) > 0 {
-		fmt.Fprintln(os.Stderr, "  Recent snapshots:")
-		for _, r := range recent {
-			if s, ok := r.(map[string]any); ok {
-				fmt.Fprintf(os.Stderr, "    %v  %v  blocks=%v\n", s["id"], s["created_at"], s["block_count"])
-			}
-		}
-	}
-	if cmdStr, ok := cerr.Details["cascade_command"].(string); ok {
-		fmt.Fprintf(os.Stderr, "  Cascade:  %s\n", cmdStr)
-	}
-	if cmdStr, ok := cerr.Details["list_command"].(string); ok {
-		fmt.Fprintf(os.Stderr, "  Or list:  %s\n", cmdStr)
-	}
+	return volumeadmin.RunDelete(cmd.Context(), volumeadmin.DeleteOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+		Force:       force,
+	})
 }
 
 func runVolumeResize(cmd *cobra.Command, args []string) error {
 	sizeStr, _ := cmd.Flags().GetString("size")
 	if sizeStr == "" {
-		return fmt.Errorf("--size required")
+		return errSizeRequired
 	}
-	sz, err := parseSize(sizeStr)
+	sz, err := volumeadmin.ParseSize(sizeStr)
 	if err != nil {
-		return fmt.Errorf("invalid --size: %w", err)
+		return invalidSizeErr(err)
 	}
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var resp struct {
-		Name    string `json:"name"`
-		OldSize int64  `json:"old_size"`
-		NewSize int64  `json:"new_size"`
-		Changed bool   `json:"changed"`
-	}
-	err = c.post("/v1/volumes/"+url.PathEscape(args[0])+"/resize", map[string]any{"size": sz}, &resp)
-	if cerr, ok := err.(*cliError); ok && cerr.Code == "unsupported" && !jsonOut(cmd) {
-		fmt.Fprintln(os.Stderr, cerr.Message)
-		if cerr.Details != nil {
-			if hint, ok := cerr.Details["hint"].(string); ok {
-				fmt.Fprintf(os.Stderr, "  Hint:  %s\n", hint)
-			}
-			if cmdStr, ok := cerr.Details["clone_command"].(string); ok {
-				fmt.Fprintf(os.Stderr, "  Try:   %s\n", cmdStr)
-			}
-		}
-		return cerr
-	}
-	if err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	if !resp.Changed {
-		fmt.Printf("no change (size already %s)\n", formatBytes(resp.NewSize, false))
-		return nil
-	}
-	fmt.Printf("resized %q: %s → %s\n", resp.Name,
-		formatBytes(resp.OldSize, false), formatBytes(resp.NewSize, false))
-	return nil
+	return volumeadmin.RunResize(cmd.Context(), volumeadmin.ResizeOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+		Size:        sz,
+	})
 }
 
 func runVolumeRecalculate(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var resp struct {
-		Volume string `json:"volume"`
-		Before int64  `json:"before"`
-		After  int64  `json:"after"`
-		Fixed  bool   `json:"fixed"`
-	}
-	if err := c.post("/v1/volumes/"+url.PathEscape(args[0])+"/recalculate", nil, &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	status := "no change"
-	if resp.Fixed {
-		status = "fixed"
-	}
-	fmt.Printf("recalculated %q: %d → %d (%s)\n", resp.Volume, resp.Before, resp.After, status)
-	return nil
+	return volumeadmin.RunRecalculate(cmd.Context(), volumeadmin.RecalculateOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+	})
 }
 
 func runVolumeClone(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	if err := c.post("/v1/volumes/clone", map[string]any{"src": args[0], "dst": args[1]}, nil); err != nil {
-		return err
-	}
-	if !jsonOut(cmd) {
-		fmt.Printf("cloned %q → %q\n", args[0], args[1])
-	}
-	return nil
+	return volumeadmin.RunClone(cmd.Context(), volumeadmin.CloneOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Src:         args[0],
+		Dst:         args[1],
+	})
 }
 
 func runVolumeRollback(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	path := fmt.Sprintf("/v1/volumes/%s/snapshots/%s/rollback", url.PathEscape(args[0]), url.PathEscape(args[1]))
-	if err := c.post(path, nil, nil); err != nil {
-		return err
-	}
-	if !jsonOut(cmd) {
-		fmt.Printf("rolled back %q to snapshot %q\n", args[0], args[1])
-	}
-	return nil
-}
-
-func runSnapshotCreate(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var resp struct {
-		ID         string `json:"id"`
-		BlockCount int64  `json:"block_count"`
-	}
-	if err := c.post("/v1/volumes/"+url.PathEscape(args[0])+"/snapshots", nil, &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	fmt.Printf("snapshot %q created (blocks: %d)\n", resp.ID, resp.BlockCount)
-	return nil
-}
-
-func runSnapshotList(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var snaps []struct {
-		ID         string `json:"id"`
-		CreatedAt  string `json:"created_at"`
-		BlockCount int64  `json:"block_count"`
-	}
-	if err := c.get("/v1/volumes/"+url.PathEscape(args[0])+"/snapshots", &snaps); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(snaps)
-	}
-	if len(snaps) == 0 {
-		fmt.Println("no snapshots")
-		return nil
-	}
-	fmt.Printf("%-40s  %-30s  %s\n", "ID", "CREATED AT", "BLOCKS")
-	fmt.Println(strings.Repeat("-", 80))
-	for _, s := range snaps {
-		fmt.Printf("%-40s  %-30s  %d\n", s.ID, s.CreatedAt, s.BlockCount)
-	}
-	return nil
+	return volumeadmin.RunRollback(cmd.Context(), volumeadmin.RollbackOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+		SnapshotID:  args[1],
+	})
 }
 
 func runVolumeWriteAt(cmd *cobra.Command, args []string) error {
 	offset, _ := cmd.Flags().GetInt64("offset")
-	dataStr, _ := cmd.Flags().GetString("content")
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	body := map[string]any{"name": args[0], "offset": offset, "data": []byte(dataStr)}
-	var resp struct {
-		Bytes int64 `json:"bytes"`
-	}
-	if err := c.post("/v1/volumes/"+url.PathEscape(args[0])+"/write-at", body, &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	fmt.Printf("wrote %d bytes to %q at offset %d\n", resp.Bytes, args[0], offset)
-	return nil
+	content, _ := cmd.Flags().GetString("content")
+	return volumeadmin.RunWriteAt(cmd.Context(), volumeadmin.WriteAtOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+		Offset:      offset,
+		Content:     []byte(content),
+	})
 }
 
 func runVolumeReadAt(cmd *cobra.Command, args []string) error {
 	offset, _ := cmd.Flags().GetInt64("offset")
 	length, _ := cmd.Flags().GetInt64("length")
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	body := map[string]any{"name": args[0], "offset": offset, "length": length}
-	var resp struct {
-		Data []byte `json:"data"`
-	}
-	if err := c.post("/v1/volumes/"+url.PathEscape(args[0])+"/read-at", body, &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	os.Stdout.Write(resp.Data)
-	return nil
+	return volumeadmin.RunReadAt(cmd.Context(), volumeadmin.ReadAtOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+		Offset:      offset,
+		Length:      length,
+	})
+}
+
+func runSnapshotCreate(cmd *cobra.Command, args []string) error {
+	return volumeadmin.RunSnapshotCreate(cmd.Context(), volumeadmin.SnapshotCreateOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Volume:      args[0],
+	})
+}
+
+func runSnapshotList(cmd *cobra.Command, args []string) error {
+	return volumeadmin.RunSnapshotList(cmd.Context(), volumeadmin.SnapshotListOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Volume:      args[0],
+	})
 }
 
 func runSnapshotDelete(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	path := fmt.Sprintf("/v1/volumes/%s/snapshots/%s", url.PathEscape(args[0]), url.PathEscape(args[1]))
-	if err := c.delete(path, nil); err != nil {
-		return err
-	}
-	if !jsonOut(cmd) {
-		fmt.Printf("snapshot %q deleted from %q\n", args[1], args[0])
-	}
-	return nil
-}
-
-// --- scrub ---
-
-type scrubTriggerReq struct {
-	Name   string `json:"name"`
-	Scope  string `json:"scope,omitempty"`
-	DryRun bool   `json:"dry_run,omitempty"`
-}
-
-type scrubTriggerResp struct {
-	SessionID string `json:"session_id"`
-	Created   bool   `json:"created"`
-}
-
-type scrubJobInfo struct {
-	SessionID    string `json:"session_id"`
-	Bucket       string `json:"bucket"`
-	KeyPrefix    string `json:"key_prefix"`
-	Scope        string `json:"scope"`
-	DryRun       bool   `json:"dry_run"`
-	Status       string `json:"status"`
-	StartedAt    int64  `json:"started_at"`
-	DoneAt       int64  `json:"done_at,omitempty"`
-	Checked      int64  `json:"checked"`
-	Healthy      int64  `json:"healthy"`
-	Detected     int64  `json:"detected"`
-	Repaired     int64  `json:"repaired"`
-	Unrepairable int64  `json:"unrepairable"`
-	Skipped      int64  `json:"skipped"`
-}
-
-type scrubJobListResp struct {
-	Jobs []scrubJobInfo `json:"jobs"`
+	return volumeadmin.RunSnapshotDelete(cmd.Context(), volumeadmin.SnapshotDeleteOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Volume:      args[0],
+		SnapshotID:  args[1],
+	})
 }
 
 func runVolumeScrub(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
 	scope, _ := cmd.Flags().GetString("scope")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	detach, _ := cmd.Flags().GetBool("detach")
-	name := args[0]
-
-	var resp scrubTriggerResp
-	body := scrubTriggerReq{Name: name, Scope: scope, DryRun: dryRun}
-	path := fmt.Sprintf("/v1/volumes/%s/scrub", url.PathEscape(name))
-	if err := c.post(path, body, &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	created := "reused"
-	if resp.Created {
-		created = "created"
-	}
-	fmt.Printf("Triggered scrub: session=%s scope=%s dry_run=%t (%s)\n",
-		resp.SessionID, scope, dryRun, created)
-	if detach {
-		return nil
-	}
-	return followScrubSession(cmd, c, resp.SessionID)
-}
-
-func followScrubSession(cmd *cobra.Command, c *adminClient, sessionID string) error {
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
-	ctx := cmd.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Printf("Follow stopped — session %s continues. Run `grainfs volume scrub status %s` to check.\n", sessionID, sessionID)
-			return nil
-		case <-t.C:
-			var info scrubJobInfo
-			if err := c.get("/v1/scrub/jobs/"+url.PathEscape(sessionID), &info); err != nil {
-				return err
-			}
-			if info.Status == "done" || info.Status == "cancelled" {
-				fmt.Printf("%s. Checked=%d Healthy=%d Detected=%d Repaired=%d Unrepairable=%d\n",
-					capitalize(info.Status), info.Checked, info.Healthy, info.Detected, info.Repaired, info.Unrepairable)
-				return nil
-			}
-		}
-	}
+	return volumeadmin.RunScrub(cmd.Context(), volumeadmin.ScrubOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		Name:        args[0],
+		Scope:       scope,
+		DryRun:      dryRun,
+		Detach:      detach,
+	})
 }
 
 func runVolumeScrubStatus(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var info scrubJobInfo
-	if err := c.get("/v1/scrub/jobs/"+url.PathEscape(args[0]), &info); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(info)
-	}
-	fmt.Printf("Session: %s\nStatus:  %s\nScope:   %s\nDryRun:  %t\nBucket:  %s\nPrefix:  %s\nChecked: %d  Healthy: %d  Detected: %d  Repaired: %d  Unrepairable: %d\n",
-		info.SessionID, info.Status, info.Scope, info.DryRun,
-		info.Bucket, info.KeyPrefix,
-		info.Checked, info.Healthy, info.Detected, info.Repaired, info.Unrepairable)
-	return nil
+	return volumeadmin.RunScrubStatus(cmd.Context(), volumeadmin.ScrubStatusOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		SessionID:   args[0],
+	})
 }
 
 func runVolumeScrubList(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	var resp scrubJobListResp
-	if err := c.get("/v1/scrub/jobs", &resp); err != nil {
-		return err
-	}
-	if jsonOut(cmd) {
-		return printJSON(resp)
-	}
-	if len(resp.Jobs) == 0 {
-		fmt.Println("(no scrub sessions)")
-		return nil
-	}
-	fmt.Printf("%-38s  %-10s  %-6s  %-9s  %-9s  %-9s\n", "SESSION", "STATUS", "SCOPE", "CHECKED", "DETECTED", "REPAIRED")
-	for _, j := range resp.Jobs {
-		fmt.Printf("%-38s  %-10s  %-6s  %9d  %9d  %9d\n",
-			j.SessionID, j.Status, j.Scope, j.Checked, j.Detected, j.Repaired)
-	}
-	return nil
-}
-
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
+	return volumeadmin.RunScrubList(cmd.Context(), volumeadmin.ScrubListOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+	})
 }
 
 func runVolumeScrubCancel(cmd *cobra.Command, args []string) error {
-	c, err := adminClientFromCmd(cmd)
-	if err != nil {
-		return err
-	}
-	if err := c.delete("/v1/scrub/jobs/"+url.PathEscape(args[0]), nil); err != nil {
-		return err
-	}
-	if !jsonOut(cmd) {
-		fmt.Printf("Cancelled %s\n", args[0])
-	}
-	return nil
+	return volumeadmin.RunScrubCancel(cmd.Context(), volumeadmin.ScrubCancelOptions{
+		BaseOptions: baseOptionsFromCmd(cmd),
+		SessionID:   args[0],
+	})
 }
