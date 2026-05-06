@@ -19,13 +19,15 @@ func TestClient_Status_ParsesCanonicalShape(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/cluster/status", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"mode":       "cluster",
-			"node_id":    "n1",
-			"state":      "Leader",
-			"term":       7,
-			"leader_id":  "n1",
-			"peers":      []string{"n1", "n2", "n3"},
-			"down_nodes": []string{"n3"},
+			"mode":        "cluster",
+			"node_id":     "n1",
+			"state":       "Leader",
+			"term":        7,
+			"leader_id":   "n1",
+			"peers":       []string{"n1", "n2", "n3"},
+			"down_nodes":  []string{"n3"},
+			"peer_addrs":  map[string]string{"n2": "10.0.0.2:7001"},
+			"peer_states": map[string]string{"n2": "configured"},
 		})
 	}))
 	defer srv.Close()
@@ -37,6 +39,8 @@ func TestClient_Status_ParsesCanonicalShape(t *testing.T) {
 	assert.Equal(t, "Leader", s.State)
 	assert.Equal(t, []string{"n1", "n2", "n3"}, s.Peers)
 	assert.Equal(t, []string{"n3"}, s.DownNodes)
+	assert.Equal(t, map[string]string{"n2": "10.0.0.2:7001"}, s.PeerAddrs)
+	assert.Equal(t, map[string]string{"n2": "configured"}, s.PeerStates)
 }
 
 func TestClient_RemovePeer_HappyPath_PostsExpectedBody(t *testing.T) {

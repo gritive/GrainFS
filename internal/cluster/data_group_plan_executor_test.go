@@ -220,6 +220,23 @@ func TestMoveReplica_FromNodeNotInGroup(t *testing.T) {
 	require.Contains(t, err.Error(), "not a voter")
 }
 
+func TestMoveReplica_BlocksUnresolvedLegacyPeer(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-3", Address: "10.0.0.3:9003"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0", "10.0.0.9:9009"}, nil))
+
+	err := exec.MoveReplica(context.Background(), "group-0", "node-0", "node-3")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unresolved legacy peer")
+	require.Equal(t, 0, fakeNode.changeMembershipCalls)
+	require.Empty(t, sgUpdater.proposed)
+}
+
 func TestMoveReplica_ProposeShardGroupError_Propagates(t *testing.T) {
 	sgErr := errors.New("meta-raft: not leader")
 	fakeNode := &fakeRaftNode{isLeader: true, committed: 5, autoCatchup: true}

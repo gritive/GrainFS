@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.67.0] - 2026-05-06
+
+### Changed
+
+- Cluster peer identity now presents node IDs as the canonical shard-group
+  runtime view, while legacy raft addresses are resolved through the MetaFSM
+  address book when possible.
+- `grainfs cluster peers` now shows node ID first, raft address as supporting
+  detail, and `configured` / `unresolved_legacy` / `down` state instead of
+  presenting configured peers as fake live peers.
+- Cluster status responses include optional `peer_addrs` and `peer_states`
+  maps so admin clients can show identity and legacy-resolution state without
+  guessing from raft addresses.
+- Data-group replica moves now block when the group still contains an
+  unresolved legacy raft-address peer, preventing membership mutation until the
+  node mapping is restored.
+- PR-D identity decisions are recorded in `CONTEXT.md` and ADR 0003 so dynamic
+  join, remove-peer, and later peer-health work share the same nodeID model.
+
+### Tests
+
+- Added coverage for reverse address-book lookup, MetaFSM legacy peer
+  normalization, shard-group peer resolution, unresolved legacy mutation
+  blocking, cluster status `peer_addrs` / `peer_states`, and CLI peer table
+  rendering.
+
+
 ## [0.0.66.0] - 2026-05-06
 
 ### Added

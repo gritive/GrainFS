@@ -24,6 +24,15 @@ func TestResolveNodeAddress_AllowsLegacyAddressPeerIDs(t *testing.T) {
 	require.Equal(t, "10.0.0.1:7001", addr)
 }
 
+func TestResolveNodeIDByAddress_ReverseResolvesLegacyPeerID(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-1", "10.0.0.1:7001", 0)))
+
+	nodeID, ok := ResolveNodeIDByAddress(f, "10.0.0.1:7001")
+	require.True(t, ok)
+	require.Equal(t, "node-1", nodeID)
+}
+
 func TestResolveNodeAddresses_MissingNodeIDIsExplicit(t *testing.T) {
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-1", "10.0.0.1:7001", 0)))

@@ -108,6 +108,17 @@ func TestMetaFSM_Apply_PutShardGroup(t *testing.T) {
 	assert.Equal(t, []string{"node-0", "node-1"}, groups[0].PeerIDs)
 }
 
+func TestMetaFSM_ShardGroups_NormalizesLegacyPeerAddresses(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-0", "10.0.0.1:7001", 0)))
+	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-1", "10.0.0.2:7001", 0)))
+	require.NoError(t, f.applyCmd(makePutShardGroupCmd(t, "group-0", []string{"10.0.0.1:7001", "node-1"})))
+
+	groups := f.ShardGroups()
+	require.Len(t, groups, 1)
+	assert.Equal(t, []string{"node-0", "node-1"}, groups[0].PeerIDs)
+}
+
 // TestMetaFSM_OnShardGroupAdded_FiresOnApply verifies the callback registered
 // via SetOnShardGroupAdded receives every applied PutShardGroup entry with
 // independently allocated PeerIDs (so the callback can keep references safely).
@@ -141,6 +152,20 @@ func TestMetaFSM_OnShardGroupAdded_FiresOnApply(t *testing.T) {
 			assert.Equal(t, "a", g.PeerIDs[0], "FSM state must be insulated from callback mutation")
 		}
 	}
+}
+
+func TestMetaFSM_OnShardGroupAdded_NormalizesLegacyPeerAddresses(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-0", "10.0.0.1:7001", 0)))
+
+	var got ShardGroupEntry
+	f.SetOnShardGroupAdded(func(e ShardGroupEntry) {
+		got = e
+	})
+
+	require.NoError(t, f.applyCmd(makePutShardGroupCmd(t, "group-0", []string{"10.0.0.1:7001"})))
+
+	assert.Equal(t, []string{"node-0"}, got.PeerIDs)
 }
 
 // TestMetaFSM_OnShardGroupAdded_AsyncCallbackDoesNotBlockApply verifies that

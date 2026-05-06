@@ -357,12 +357,11 @@ func (f *MetaFSM) applyPutShardGroup(data []byte) error {
 	}
 	f.mu.Lock()
 	f.shardGroups[entry.ID] = entry
+	cbPeers := f.normalizeShardGroupPeersLocked(entry.PeerIDs)
 	cb := f.onShardGroupAdded
 	f.mu.Unlock()
 	if cb != nil {
 		// Defensive copy of peers — callback may keep references.
-		cbPeers := make([]string, len(entry.PeerIDs))
-		copy(cbPeers, entry.PeerIDs)
 		cb(ShardGroupEntry{ID: entry.ID, PeerIDs: cbPeers})
 	}
 	return nil
@@ -878,8 +877,7 @@ func (f *MetaFSM) ShardGroups() []ShardGroupEntry {
 	f.mu.RLock()
 	out := make([]ShardGroupEntry, 0, len(f.shardGroups))
 	for _, sg := range f.shardGroups {
-		peers := make([]string, len(sg.PeerIDs))
-		copy(peers, sg.PeerIDs)
+		peers := f.normalizeShardGroupPeersLocked(sg.PeerIDs)
 		out = append(out, ShardGroupEntry{ID: sg.ID, PeerIDs: peers})
 	}
 	f.mu.RUnlock()
@@ -895,23 +893,28 @@ func (f *MetaFSM) ShardGroup(id string) (ShardGroupEntry, bool) {
 	if !ok {
 		return ShardGroupEntry{}, false
 	}
-	peers := make([]string, len(g.PeerIDs))
-	copy(peers, g.PeerIDs)
+	peers := f.normalizeShardGroupPeersLocked(g.PeerIDs)
 	return ShardGroupEntry{ID: g.ID, PeerIDs: peers}, true
 }
 
-// shardGroupNoCopy returns a read-only view for package-internal hot paths.
-// MetaFSM shard-group entries replace PeerIDs on update instead of mutating the
-// existing slice, so callers may inspect the returned slice but must not store
-// or modify it.
-func (f *MetaFSM) shardGroupNoCopy(id string) (ShardGroupEntry, bool) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	g, ok := f.shardGroups[id]
-	if !ok {
-		return ShardGroupEntry{}, false
+func (f *MetaFSM) normalizeShardGroupPeersLocked(peers []string) []string {
+	out := make([]string, len(peers))
+	for i, peer := range peers {
+		out[i] = peer
+		if nodeID, ok := f.resolveNodeIDByAddressLocked(peer); ok {
+			out[i] = nodeID
+		}
 	}
-	return g, true
+	return out
+}
+
+func (f *MetaFSM) resolveNodeIDByAddressLocked(addr string) (string, bool) {
+	for _, node := range f.nodes {
+		if addr == node.Address && node.ID != "" {
+			return node.ID, true
+		}
+	}
+	return "", false
 }
 
 func (f *MetaFSM) IcebergNamespace(namespace []string) (IcebergNamespaceEntry, bool) {

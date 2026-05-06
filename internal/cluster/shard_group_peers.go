@@ -1,11 +1,21 @@
 package cluster
 
+import "net"
+
 // ShardGroupPeerSet centralizes the identity rules for ShardGroupEntry.PeerIDs.
 // New entries should store node IDs. Legacy/static entries may still store
 // raft addresses, so callers pass local aliases until old metadata naturally
 // ages out.
 type ShardGroupPeerSet struct {
 	peers []string
+}
+
+type ResolvedShardGroupPeer struct {
+	Input      string
+	NodeID     string
+	RaftAddr   string
+	Legacy     bool
+	Unresolved bool
 }
 
 // NewShardGroupPeerSet returns a peer identity view for a shard group entry.
@@ -56,4 +66,41 @@ func (s ShardGroupPeerSet) ForwardOrder(localID string, aliases ...string) []str
 		out = append(out, peer)
 	}
 	return append(out, local...)
+}
+
+func ResolveShardGroupPeers(book NodeAddressBook, entry ShardGroupEntry) []ResolvedShardGroupPeer {
+	out := make([]ResolvedShardGroupPeer, 0, len(entry.PeerIDs))
+	for _, peer := range entry.PeerIDs {
+		out = append(out, ResolveShardGroupPeer(book, peer))
+	}
+	return out
+}
+
+func ResolveShardGroupPeer(book NodeAddressBook, peer string) ResolvedShardGroupPeer {
+	resolved := ResolvedShardGroupPeer{Input: peer}
+	if book == nil {
+		resolved.NodeID = peer
+		return resolved
+	}
+	for _, node := range book.Nodes() {
+		if node.ID == peer {
+			resolved.NodeID = node.ID
+			resolved.RaftAddr = node.Address
+			return resolved
+		}
+	}
+	if nodeID, ok := ResolveNodeIDByAddress(book, peer); ok {
+		resolved.NodeID = nodeID
+		resolved.RaftAddr = peer
+		resolved.Legacy = true
+		return resolved
+	}
+	if _, _, err := net.SplitHostPort(peer); err == nil {
+		resolved.RaftAddr = peer
+		resolved.Legacy = true
+		resolved.Unresolved = true
+		return resolved
+	}
+	resolved.NodeID = peer
+	return resolved
 }

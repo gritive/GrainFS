@@ -14,10 +14,6 @@ type ShardGroupSource interface {
 	ShardGroups() []ShardGroupEntry
 }
 
-type shardGroupNoCopySource interface {
-	shardGroupNoCopy(id string) (ShardGroupEntry, bool)
-}
-
 // shardGroupSource is the unexported alias used by lookupForwardTarget. Older
 // callers can keep the unexported type; new code uses ShardGroupSource.
 //

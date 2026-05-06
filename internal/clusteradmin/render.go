@@ -13,13 +13,14 @@ import (
 // that want a non-table format (JSON / structured logging) reuse the same
 // derivation logic.
 type PeerRow struct {
-	ID    string
-	Role  string // "leader" | "follower"
-	State string // "alive" | "down"
+	ID       string
+	RaftAddr string
+	Role     string // "leader" | "follower"
+	State    string // "configured" | "down" | "unresolved_legacy"
 }
 
 // PeersFromStatus derives the rendered peer list from a Status, filtering
-// down_nodes into State and tagging the leader.
+// down_nodes and peer_states into State and tagging the leader.
 func PeersFromStatus(s *Status) []PeerRow {
 	peers := append([]string(nil), s.Peers...)
 	sort.Strings(peers)
@@ -29,12 +30,15 @@ func PeersFromStatus(s *Status) []PeerRow {
 	}
 	out := make([]PeerRow, 0, len(peers))
 	for _, p := range peers {
-		row := PeerRow{ID: p, Role: "follower", State: "alive"}
+		row := PeerRow{ID: p, RaftAddr: s.PeerAddrs[p], Role: "follower", State: "configured"}
 		if p == s.LeaderID {
 			row.Role = "leader"
 		}
 		if _, isDown := down[p]; isDown {
 			row.State = "down"
+		}
+		if state := s.PeerStates[p]; state != "" {
+			row.State = state
 		}
 		out = append(out, row)
 	}
@@ -44,9 +48,9 @@ func PeersFromStatus(s *Status) []PeerRow {
 // RenderPeersTable writes a tab-aligned peer table to w.
 func RenderPeersTable(w io.Writer, rows []PeerRow) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tROLE\tSTATE")
+	fmt.Fprintln(tw, "NODE_ID\tRAFT_ADDR\tROLE\tSTATE")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", r.ID, r.Role, r.State)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.ID, r.RaftAddr, r.Role, r.State)
 	}
 	return tw.Flush()
 }

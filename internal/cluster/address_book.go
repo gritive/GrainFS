@@ -11,6 +11,13 @@ type NodeAddressResolver interface {
 	ResolveNodeAddress(idOrAddr string) (string, bool)
 }
 
+// NodeIDByAddressResolver resolves a legacy raft address back to its canonical
+// cluster node ID. This is only for read-time compatibility with older
+// shard-group metadata that stored addresses in PeerIDs.
+type NodeIDByAddressResolver interface {
+	ResolveNodeIDByAddress(addr string) (string, bool)
+}
+
 // ResolveNodeAddress resolves nodeID to a dialable address while preserving
 // backward compatibility for legacy shard-group PeerIDs that already stored
 // raft addresses.
@@ -52,6 +59,26 @@ func ResolveNodeAddresses(book NodeAddressBook, peers []string) ([]string, error
 	return out, nil
 }
 
+// ResolveNodeIDByAddress reverse-resolves a legacy raft address to a node ID.
+func ResolveNodeIDByAddress(book NodeAddressBook, addr string) (string, bool) {
+	if addr == "" {
+		return "", false
+	}
+	if r, ok := book.(NodeIDByAddressResolver); ok {
+		if nodeID, ok := r.ResolveNodeIDByAddress(addr); ok {
+			return nodeID, true
+		}
+	}
+	if book != nil {
+		for _, n := range book.Nodes() {
+			if n.Address == addr && n.ID != "" {
+				return n.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
 // ResolveNodeAddress resolves idOrAddr against the FSM's node map.
 func (f *MetaFSM) ResolveNodeAddress(idOrAddr string) (string, bool) {
 	if idOrAddr == "" {
@@ -68,6 +95,22 @@ func (f *MetaFSM) ResolveNodeAddress(idOrAddr string) (string, bool) {
 	}
 	if _, _, err := net.SplitHostPort(idOrAddr); err == nil {
 		return idOrAddr, true
+	}
+	return "", false
+}
+
+// ResolveNodeIDByAddress resolves a legacy raft address against the FSM's node
+// map.
+func (f *MetaFSM) ResolveNodeIDByAddress(addr string) (string, bool) {
+	if addr == "" {
+		return "", false
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	for _, n := range f.nodes {
+		if n.Address == addr && n.ID != "" {
+			return n.ID, true
+		}
 	}
 	return "", false
 }

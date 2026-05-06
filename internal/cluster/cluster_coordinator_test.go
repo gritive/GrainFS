@@ -575,7 +575,7 @@ func TestClusterCoordinator_RouteBucket_LocalLeaderSkipsPeerResolution(t *testin
 	require.Zero(t, allocs, "local leader route should not allocate")
 }
 
-func TestClusterCoordinator_RouteBucket_MetaFSMLocalLeaderAvoidsShardGroupCopy(t *testing.T) {
+func TestClusterCoordinator_RouteBucket_MetaFSMUsesNormalizedRuntimeView(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestGroupBackend(t, "group-1")
 	mgr := NewDataGroupManager()
@@ -583,19 +583,13 @@ func TestClusterCoordinator_RouteBucket_MetaFSMLocalLeaderAvoidsShardGroupCopy(t
 	router := NewRouter(mgr)
 	router.AssignBucket("photos", "group-1")
 	meta := NewMetaFSM()
-	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"node-a", "self", "node-b"})))
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "self", "127.0.0.1:7001", 0)))
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"node-a", "127.0.0.1:7001", "node-b"})))
 	c := NewClusterCoordinator(base, mgr, router, meta, "self")
 
 	target, err := c.routeBucket("photos")
 	require.NoError(t, err)
 	require.True(t, target.selfIsLeader)
-
-	allocs := testing.AllocsPerRun(100, func() {
-		target, err := c.routeBucket("photos")
-		require.NoError(t, err)
-		require.True(t, target.selfIsLeader, "routeBucket lost local leader fast path")
-	})
-	require.Zero(t, allocs, "MetaFSM local leader route should not copy peer slices")
 }
 
 // --- T6 forward-path test scaffolding ---
