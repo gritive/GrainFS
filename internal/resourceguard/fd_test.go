@@ -1,0 +1,97 @@
+package resourceguard
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/resourcewatch"
+)
+
+func TestRecordFDDecision_WarnCreatesDiagnosedIncident(t *testing.T) {
+	ctx := context.Background()
+	store := newTestIncidentStore()
+	recorder := incident.NewRecorder(store, incident.NewReducer())
+	decision := &resourcewatch.Decision{
+		Level:     resourcewatch.LevelWarn,
+		Threshold: "warn",
+		Ratio:     0.85,
+		Message:   "FD usage 85.0% crossed warn threshold; top categories: socket=10",
+		Snapshot:  resourcewatch.Sample{Open: 850, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
+	}
+
+	require.NoError(t, recordFDDecision(ctx, recorder, "node-1", decision))
+	got, ok, err := store.Get(ctx, fdIncidentID("node-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, incident.StateDiagnosed, got.State)
+	assert.Equal(t, incident.SeverityWarning, got.Severity)
+	assert.Equal(t, incident.ActionResourceWarning, got.Action)
+	assert.Contains(t, got.Decision, "85.0%")
+	assert.Equal(t, "node-1", got.Scope.NodeID)
+}
+
+func TestRecordFDDecision_CriticalBlocksIncident(t *testing.T) {
+	ctx := context.Background()
+	store := newTestIncidentStore()
+	recorder := incident.NewRecorder(store, incident.NewReducer())
+	decision := &resourcewatch.Decision{
+		Level:     resourcewatch.LevelCritical,
+		Threshold: "critical",
+		Ratio:     0.93,
+		Message:   "FD usage 93.0% crossed critical threshold",
+		Snapshot:  resourcewatch.Sample{Open: 930, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
+	}
+
+	require.NoError(t, recordFDDecision(ctx, recorder, "node-1", decision))
+	got, ok, err := store.Get(ctx, fdIncidentID("node-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, incident.StateBlocked, got.State)
+	assert.Equal(t, incident.SeverityCritical, got.Severity)
+	assert.Contains(t, got.NextAction, "LimitNOFILE")
+}
+
+func TestRecordFDDecision_RecoveryFixesIncident(t *testing.T) {
+	ctx := context.Background()
+	store := newTestIncidentStore()
+	recorder := incident.NewRecorder(store, incident.NewReducer())
+	decision := &resourcewatch.Decision{
+		Level:    resourcewatch.LevelOK,
+		Message:  "FD usage recovered below warning threshold",
+		Snapshot: resourcewatch.Sample{Open: 500, Limit: 1000, CollectedAt: time.Unix(100, 0).UTC()},
+	}
+
+	require.NoError(t, recordFDDecision(ctx, recorder, "node-1", decision))
+	got, ok, err := store.Get(ctx, fdIncidentID("node-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, incident.StateFixed, got.State)
+	assert.Equal(t, incident.SeverityInfo, got.Severity)
+	assert.Equal(t, incident.ProofNotRequired, got.Proof.Status)
+}
+
+func TestRecordFDMetrics_ClearsMissingCategories(t *testing.T) {
+	nodeID := "metric-clear-node"
+	recordFDMetrics(nodeID, resourcewatch.Sample{
+		Open:       10,
+		Limit:      100,
+		Categories: map[resourcewatch.Category]int{resourcewatch.FDCategorySocket: 7},
+	}, nil)
+	assert.Equal(t, float64(7), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategorySocket))))
+
+	recordFDMetrics(nodeID, resourcewatch.Sample{
+		Open:       3,
+		Limit:      100,
+		Categories: map[resourcewatch.Category]int{resourcewatch.FDCategoryBadger: 2},
+	}, nil)
+
+	assert.Equal(t, float64(0), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategorySocket))))
+	assert.Equal(t, float64(2), testutil.ToFloat64(metrics.FDOpenByCategory.WithLabelValues(nodeID, string(resourcewatch.FDCategoryBadger))))
+}
