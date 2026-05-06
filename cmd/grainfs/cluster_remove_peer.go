@@ -1,11 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"context"
-	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -39,51 +34,19 @@ dead peer when ChangeMembership can still commit).`,
 }
 
 func runClusterRemovePeer(cmd *cobra.Command, args []string) error {
-	id := args[0]
 	endpoint, _ := cmd.Flags().GetString("endpoint")
 	force, _ := cmd.Flags().GetBool("force")
 	assumeYes, _ := cmd.Flags().GetBool("yes")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 
-	client := clusteradmin.NewClient(endpoint)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	status, err := client.Status(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch cluster status: %w", err)
-	}
-	if status.Mode != "cluster" {
-		return fmt.Errorf("node is not in cluster mode (mode=%q); remove-peer requires a Raft cluster", status.Mode)
-	}
-	if !clusteradmin.Contains(status.Peers, id) {
-		return fmt.Errorf("peer %q is not a current voter; current peers: %s", id, strings.Join(status.Peers, ", "))
-	}
-	if status.State != "Leader" {
-		return fmt.Errorf("connected node is not the leader (state=%s); rerun on leader %q", status.State, status.LeaderID)
-	}
-
-	live := clusteradmin.LivePeersFromStatus(status.Peers, status.DownNodes, status.NodeID)
-	pre := clusteradmin.Check(status.Peers, live, id)
-
-	fmt.Fprintf(cmd.ErrOrStderr(), "Removing %s from cluster:\n  %s\n", id, pre.Summary())
-	if pre.WouldBlock && !force {
-		return fmt.Errorf("pre-flight: alive_after (%d) < new_quorum (%d); rerun with --force to override",
-			pre.AliveAfter, pre.NewQuorum)
-	}
-
-	if !assumeYes {
-		fmt.Fprint(cmd.ErrOrStderr(), "Proceed? [y/N]: ")
-		ans, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-		ans = strings.TrimSpace(strings.ToLower(ans))
-		if ans != "y" && ans != "yes" {
-			return errors.New("aborted")
-		}
-	}
-
-	if err := client.RemovePeer(ctx, id, force); err != nil {
-		return err
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "removed %s\n", id)
-	return nil
+	return clusteradmin.RemovePeer(cmd.Context(), clusteradmin.RemovePeerOptions{
+		Endpoint:  endpoint,
+		ID:        args[0],
+		Force:     force,
+		AssumeYes: assumeYes,
+		Timeout:   timeout,
+		Stdout:    cmd.OutOrStdout(),
+		Stderr:    cmd.ErrOrStderr(),
+		Stdin:     cmd.InOrStdin(),
+	})
 }

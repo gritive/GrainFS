@@ -1,9 +1,6 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,25 +25,12 @@ func runClusterPeers(cmd *cobra.Command, _ []string) error {
 	format, _ := cmd.Flags().GetString("format")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 
-	client := clusteradmin.NewClient(endpoint)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	status, err := client.Status(ctx)
-	if err != nil {
-		return err
-	}
-
-	if format == "json" {
-		raw, _ := json.MarshalIndent(status, "", "  ")
-		fmt.Fprintln(cmd.OutOrStdout(), string(raw))
-		return nil
-	}
-	if status.Mode != "cluster" {
-		fmt.Fprintf(cmd.OutOrStdout(), "mode: %s (no peers)\n", status.Mode)
-		return nil
-	}
-	return clusteradmin.RenderPeersTable(cmd.OutOrStdout(), clusteradmin.PeersFromStatus(status))
+	return clusteradmin.Peers(cmd.Context(), clusteradmin.PeersOptions{
+		Endpoint: endpoint,
+		Format:   format,
+		Timeout:  timeout,
+		Stdout:   cmd.OutOrStdout(),
+	})
 }
 
 func clusterEventsCmd() *cobra.Command {
@@ -72,20 +56,13 @@ func runClusterEvents(cmd *cobra.Command, _ []string) error {
 	format, _ := cmd.Flags().GetString("format")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 
-	client := clusteradmin.NewClient(endpoint)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	events, err := client.EventLog(ctx, since, limit)
-	if err != nil {
-		return err
-	}
-	events = clusteradmin.FilterEventsByAction(events, types)
-
-	if format == "json" {
-		raw, _ := json.MarshalIndent(events, "", "  ")
-		fmt.Fprintln(cmd.OutOrStdout(), string(raw))
-		return nil
-	}
-	return clusteradmin.RenderEventsTable(cmd.OutOrStdout(), events)
+	return clusteradmin.Events(cmd.Context(), clusteradmin.EventsOptions{
+		Endpoint:    endpoint,
+		Since:       since,
+		Limit:       limit,
+		TypeFilters: types,
+		Format:      format,
+		Timeout:     timeout,
+		Stdout:      cmd.OutOrStdout(),
+	})
 }

@@ -11,17 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Thin invocation tests for the peers/events cobra wrappers. Rendering and
-// filtering rules live in internal/clusteradmin and are tested there.
+// Thin invocation tests for peers/events cobra wrappers. Rendering, filtering,
+// and orchestration are tested in internal/clusteradmin.
 
-func TestCmdPeers_HitsStatusAndRenders(t *testing.T) {
+func TestCmdPeers_FlagsReachPackage(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/cluster/status", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"mode":       "cluster",
-			"leader_id":  "n1",
-			"peers":      []string{"n1", "n2", "n3"},
-			"down_nodes": []string{"n3"},
+			"mode":  "cluster",
+			"peers": []string{"n2"},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -33,11 +31,10 @@ func TestCmdPeers_HitsStatusAndRenders(t *testing.T) {
 	cmd.SetErr(out)
 	cmd.SetArgs([]string{"--endpoint", srv.URL})
 	require.NoError(t, cmd.Execute())
-	assert.Contains(t, out.String(), "leader")
-	assert.Contains(t, out.String(), "down")
+	assert.NotEmpty(t, out.String(), "cobra wrapper must emit the package's rendered output")
 }
 
-func TestCmdEvents_HitsEventLogAndRenders(t *testing.T) {
+func TestCmdEvents_FlagsReachPackage(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/eventlog", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
@@ -53,5 +50,5 @@ func TestCmdEvents_HitsEventLogAndRenders(t *testing.T) {
 	cmd.SetErr(out)
 	cmd.SetArgs([]string{"--endpoint", srv.URL})
 	require.NoError(t, cmd.Execute())
-	assert.Contains(t, out.String(), "cluster-remove-peer")
+	assert.Contains(t, out.String(), "cluster-remove-peer", "package's rendered output must reach stdout")
 }
