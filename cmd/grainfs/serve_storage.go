@@ -6,44 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/cobra"
 
-	"github.com/gritive/GrainFS/internal/badgerrole"
-	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/serveruntime"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume"
-	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
-
-// buildVolumeManager creates the shared volume.Manager for the serve path.
-func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Backend) (*volume.Manager, *blockcache.Cache, *badger.DB, error) {
-	dedupEnabled, _ := cmd.Flags().GetBool("dedup")
-	cacheSize, _ := cmd.Flags().GetInt64("block-cache-size")
-	cache := blockcache.New(cacheSize)
-	if cacheSize > 0 {
-		log.Info().Int64("bytes", cacheSize).Msg("volume block cache enabled")
-	}
-	opts := volume.ManagerOptions{BlockCache: cache}
-	if !dedupEnabled {
-		return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
-	}
-	reg := badgerrole.DefaultRegistry()
-	db, decision, err := badgerrole.OpenRole(reg, badgerrole.RoleDedup, badgerrole.PathContext{DataDir: dataDir})
-	if err != nil {
-		if feature, ok := serveruntime.OptionalRoleDisabled(reg, decision); ok {
-			serveruntime.LogOptionalRoleDisabled(badgerrole.RoleDedup, feature, err)
-			return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
-		}
-		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)
-	}
-	opts.DedupIndex = dedup.NewBadgerIndex(db)
-	mgr := volume.NewManagerWithOptions(backend, opts)
-	return mgr, cache, db, nil
-}
 
 // loadOrCreateEncryptionKey loads a key from file or auto-generates one in the
 // data directory. An explicitly provided missing key path is treated as an

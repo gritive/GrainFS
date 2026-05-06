@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"os"
@@ -6,8 +6,9 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
 func TestReceiptDBOptionsUseSmallBadgerArenas(t *testing.T) {
