@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,6 +49,19 @@ func TestOperationsPutObjectWithACLPinsSwappableBackendAcrossFallback(t *testing
 	require.NoError(t, err)
 	require.Equal(t, []string{"put:b/k", "setacl:b/k:7"}, oldBackend.calls)
 	require.Empty(t, newBackend.calls)
+}
+
+func TestOperationsPutObjectWithACLDoesNotBypassOuterPutWrapperForInnerAtomicAdapter(t *testing.T) {
+	inner := &atomicAndFallbackACLBackend{}
+	outer := &putSideEffectWrapper{Backend: inner}
+	ops := NewOperations(outer)
+
+	obj, err := ops.PutObjectWithACL(context.Background(), "b", "k", strings.NewReader("data"), "text/plain", 7)
+
+	require.NoError(t, err)
+	require.Equal(t, "outer-put", obj.ETag)
+	require.Equal(t, []string{"outer-put:b/k"}, outer.calls)
+	require.Equal(t, []string{"setacl:b/k:7"}, inner.calls)
 }
 
 func TestOperationsPutObjectWithACLRollsBackNewVersionWhenSetACLFails(t *testing.T) {
@@ -118,6 +132,38 @@ type atomicACLBackend struct {
 func (b *atomicACLBackend) PutObjectWithACL(bucket, key string, _ io.Reader, _ string, acl uint8) (*Object, error) {
 	b.calls = append(b.calls, "atomic:"+bucket+"/"+key+":"+string(rune('0'+acl)))
 	return &Object{Key: key, ETag: "atomic", ACL: acl}, nil
+}
+
+type atomicAndFallbackACLBackend struct {
+	atomicACLBackend
+}
+
+func (b *atomicAndFallbackACLBackend) PutObject(_ context.Context, _ string, key string, _ io.Reader, _ string) (*Object, error) {
+	return &Object{Key: key, ETag: "outer-put", VersionID: "v1"}, nil
+}
+
+func (b *atomicAndFallbackACLBackend) SetObjectACL(bucket, key string, acl uint8) error {
+	b.calls = append(b.calls, "setacl:"+bucket+"/"+key+":"+strconv.Itoa(int(acl)))
+	return nil
+}
+
+func (b *atomicAndFallbackACLBackend) DeleteObjectVersion(bucket, key, versionID string) error {
+	b.calls = append(b.calls, "deleteversion:"+bucket+"/"+key+":"+versionID)
+	return nil
+}
+
+type putSideEffectWrapper struct {
+	Backend
+	calls []string
+}
+
+func (w *putSideEffectWrapper) Unwrap() Backend {
+	return w.Backend
+}
+
+func (w *putSideEffectWrapper) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
+	w.calls = append(w.calls, "outer-put:"+bucket+"/"+key)
+	return w.Backend.PutObject(ctx, bucket, key, r, contentType)
 }
 
 type aclFallbackBackend struct {
