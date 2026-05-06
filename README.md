@@ -125,6 +125,26 @@ grainfs recover cluster verify \
 
 상세 절차: [docs/recover-cluster.md](docs/recover-cluster.md)
 
+### Cluster Membership 조작
+
+운영 중인 메타-Raft 클러스터의 멤버십을 CLI로 조회/변경한다. 모든 명령은 노드에 SSH 접속해 `--endpoint http://127.0.0.1:9000`로 실행해야 한다 (admin endpoint는 localhost-only).
+
+```bash
+# 현재 voter / liveness 표
+grainfs cluster peers
+
+# 최근 클러스터 이벤트 (cluster-join, cluster-remove-peer 등 필터)
+grainfs cluster events --type cluster-remove-peer --since 24h
+
+# 죽은 노드 축출 (정족수 손실 없음 → pre-flight 통과)
+grainfs cluster remove-peer 127.0.0.1:19102 --yes
+
+# 정족수 손실을 감수하는 강제 제거 (재해 복구 직전 단계)
+grainfs cluster remove-peer 127.0.0.1:19102 --force --yes
+```
+
+`<id>`는 현재 `cluster status` / `cluster peers`가 표시하는 voter 식별자(현 시점 raft 주소)를 그대로 넘긴다. Joint consensus(§4.3) 경로로 atomic 제거가 commit되며, 리더 본인을 제거하면 commit-time wakeup 후 follower로 강등되고 새 리더가 선출된다.
+
 ## 클러스터 Balancer
 
 클러스터 모드에서 노드 간 디스크 불균형이 20% 이상이면 자동으로 샤드를 이동한다.

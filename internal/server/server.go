@@ -48,6 +48,16 @@ type ClusterInfo interface {
 	LivePeers() []string
 }
 
+// ClusterMembership performs Raft membership mutations. nil-safe: when the
+// server runs in local mode the field is unset and the remove-peer endpoint
+// returns 503.
+type ClusterMembership interface {
+	// RemoveVoter removes the named peer from the voting configuration via
+	// joint consensus (§4.3). Blocks until the joint Cnew commits or ctx
+	// expires. Returns an error if not leader or the engine refuses.
+	RemoveVoter(ctx context.Context, id string) error
+}
+
 // JoinClusterFunc handles the runtime local-to-cluster transition.
 // The serve layer provides this callback when starting in no-peers mode.
 type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
@@ -84,6 +94,7 @@ type Server struct {
 	ipLimiter      *RateLimiter
 	userLimiter    *RateLimiter
 	cluster        ClusterInfo       // nil in no-peers mode
+	membership     ClusterMembership // nil = remove-peer endpoint returns 503
 	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
 	balancer       BalancerInfo      // nil if balancer not enabled
 	evStore        *eventstore.Store // nil if event store not configured
@@ -177,6 +188,15 @@ func WithShardCache(c *shardcache.Cache) Option {
 func WithClusterInfo(ci ClusterInfo) Option {
 	return func(s *Server) {
 		s.cluster = ci
+	}
+}
+
+// WithClusterMembership wires the Raft membership controller so the
+// remove-peer endpoint can mutate cluster configuration. Leave unset to
+// disable the endpoint (returns 503).
+func WithClusterMembership(m ClusterMembership) Option {
+	return func(s *Server) {
+		s.membership = m
 	}
 }
 
@@ -423,7 +443,8 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			path == "/api/events" || path == "/api/events/heal/stream" ||
 			path == "/api/eventlog" ||
 			path == "/api/incidents" || strings.HasPrefix(path, "/api/incidents/") ||
-			path == "/api/cluster/status" || path == "/api/health" ||
+			path == "/api/cluster/status" || path == "/api/cluster/remove-peer" ||
+			path == "/api/health" ||
 			path == "/api/cache/status" ||
 			strings.HasPrefix(path, "/iceberg/") {
 			c.Next(ctx)
@@ -566,6 +587,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/cluster/status", s.clusterStatus)
 	h.GET("/api/cache/status", s.cacheStatus)
 	h.POST("/api/cluster/join", s.joinClusterHandler)
+	h.POST("/api/cluster/remove-peer", localhostOnly(), s.removePeerHandler)
 
 	// Balancer health API
 	s.registerBalancerAPI(h)

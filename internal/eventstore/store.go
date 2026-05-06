@@ -18,11 +18,12 @@ const (
 	EventActionCreateBucket = "create-bucket"
 	EventActionDeleteBucket = "delete-bucket"
 
-	EventActionSnapshotCreate  = "snapshot-create"
-	EventActionSnapshotRestore = "snapshot-restore"
-	EventActionSnapshotDelete  = "snapshot-delete"
-	EventActionClusterJoin     = "cluster-join"
-	EventActionScrubComplete   = "scrub-complete"
+	EventActionSnapshotCreate    = "snapshot-create"
+	EventActionSnapshotRestore   = "snapshot-restore"
+	EventActionSnapshotDelete    = "snapshot-delete"
+	EventActionClusterJoin       = "cluster-join"
+	EventActionClusterRemovePeer = "cluster-remove-peer"
+	EventActionScrubComplete     = "scrub-complete"
 
 	keyPrefix = "ev:"
 	ttl       = 7 * 24 * time.Hour
