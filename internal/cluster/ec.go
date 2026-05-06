@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
 	"path/filepath"
 )
@@ -125,8 +126,51 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
 // ECReconstruct assembles the original data from at least k of k+m shards.
 // Missing shards are represented by nil entries. Returns the original bytes.
 func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {
+	origSize, bodies, err := ecReconstructBodies(cfg, shards)
+	if err != nil {
+		return nil, err
+	}
+	if origSize == 0 {
+		return []byte{}, nil
+	}
+	var buf writeBuffer
+	buf.b = make([]byte, 0, origSize)
+	if err := ecReconstructBodiesTo(&buf, cfg, origSize, bodies); err != nil {
+		return nil, err
+	}
+	return buf.b, nil
+}
+
+// ECReconstructTo assembles the original data from at least k of k+m shards and
+// writes it to w without allocating a full output buffer.
+func ECReconstructTo(w io.Writer, cfg ECConfig, shards [][]byte) error {
+	origSize, bodies, err := ecReconstructBodies(cfg, shards)
+	if err != nil {
+		return err
+	}
+	if origSize == 0 {
+		return nil
+	}
+	return ecReconstructBodiesTo(w, cfg, origSize, bodies)
+}
+
+func ecReconstructBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies [][]byte) error {
+	enc, err := getEncoder(cfg)
+	if err != nil {
+		return fmt.Errorf("ec decoder: %w", err)
+	}
+	if err := enc.ReconstructData(bodies); err != nil {
+		return fmt.Errorf("ec reconstruct: %w", err)
+	}
+	if err := enc.Join(w, bodies, int(origSize)); err != nil {
+		return fmt.Errorf("ec join: %w", err)
+	}
+	return nil
+}
+
+func ecReconstructBodies(cfg ECConfig, shards [][]byte) (int64, [][]byte, error) {
 	if len(shards) != cfg.NumShards() {
-		return nil, fmt.Errorf("shard count mismatch: got %d, want %d", len(shards), cfg.NumShards())
+		return 0, nil, fmt.Errorf("shard count mismatch: got %d, want %d", len(shards), cfg.NumShards())
 	}
 	var origSize int64 = -1
 	bodies := make([][]byte, len(shards))
@@ -144,24 +188,9 @@ func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {
 		bodies[i] = body
 	}
 	if origSize < 0 {
-		return nil, fmt.Errorf("no readable shards")
+		return 0, nil, fmt.Errorf("no readable shards")
 	}
-	if origSize == 0 {
-		return []byte{}, nil
-	}
-	enc, err := getEncoder(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("ec decoder: %w", err)
-	}
-	if err := enc.ReconstructData(bodies); err != nil {
-		return nil, fmt.Errorf("ec reconstruct: %w", err)
-	}
-	var buf writeBuffer
-	buf.b = make([]byte, 0, origSize)
-	if err := enc.Join(&buf, bodies, int(origSize)); err != nil {
-		return nil, fmt.Errorf("ec join: %w", err)
-	}
-	return buf.b, nil
+	return origSize, bodies, nil
 }
 
 // writeBuffer is an io.Writer that appends to an internal slice — used to

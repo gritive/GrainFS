@@ -90,6 +90,20 @@ func TestECSplit_Reconstruct_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestECReconstructTo_WritesRoundTrip(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := make([]byte, 12345)
+	_, err := rand.Read(data)
+	require.NoError(t, err)
+
+	shards, err := ECSplit(cfg, data)
+	require.NoError(t, err)
+
+	var got bytes.Buffer
+	require.NoError(t, ECReconstructTo(&got, cfg, shards))
+	assert.Equal(t, data, got.Bytes())
+}
+
 func TestECReconstruct_MissingParityShard(t *testing.T) {
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	data := make([]byte, 1024)

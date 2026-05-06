@@ -1642,11 +1642,11 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if b.shardSvc != nil {
 		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
 		if rerr == nil {
-			data, ecErr := b.getObjectECAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record)
+			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record)
 			if ecErr != nil {
 				return nil, nil, fmt.Errorf("ec reconstruct %s/%s via %s: %w", bucket, key, resolved.Source, ecErr)
 			}
-			return io.NopCloser(bytes.NewReader(data)), obj, nil
+			return rc, obj, nil
 		}
 		if !errors.Is(rerr, ErrNotEC) {
 			return nil, nil, fmt.Errorf("resolve placement for %s/%s: %w", bucket, key, rerr)
@@ -2063,9 +2063,33 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 }
 
 func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) ([]byte, error) {
+	recCfg, shards, err := b.getObjectECShardsAtShardKey(ctx, bucket, shardKey, rec)
+	if err != nil {
+		return nil, err
+	}
+	return ECReconstruct(recCfg, shards)
+}
+
+func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (io.ReadCloser, error) {
+	recCfg, shards, err := b.getObjectECShardsAtShardKey(ctx, bucket, shardKey, rec)
+	if err != nil {
+		return nil, err
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		if err := ECReconstructTo(pw, recCfg, shards); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+	return pr, nil
+}
+
+func (b *DistributedBackend) getObjectECShardsAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, [][]byte, error) {
 	recCfg := rec.ECConfigOrFallback(b.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
-		return nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
+		return ECConfig{}, nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
 	}
 	// k-of-n fast path: when the K data shards are local, read them first. If
 	// they are all available, the read avoids pulling parity shards into
@@ -2100,7 +2124,7 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
 				_, _ = b.shardCache.Get(shardCacheKey(bucket, shardKey, i))
 			}
-			return ECReconstruct(recCfg, shards)
+			return recCfg, shards, nil
 		}
 		for _, i := range cachedIdx {
 			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
@@ -2117,7 +2141,7 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 					available++
 				}
 				if available == recCfg.DataShards {
-					return ECReconstruct(recCfg, shards)
+					return recCfg, shards, nil
 				}
 			}
 		}
@@ -2224,15 +2248,15 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 		}
 		fetchShards(allIdx, true)
 		if available < recCfg.DataShards {
-			return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+			return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
 				available, len(rec.Nodes), recCfg.DataShards)
 		}
-		return ECReconstruct(recCfg, shards)
+		return recCfg, shards, nil
 	}
 
 	fetchShards(dataIdx, false)
 	if available >= recCfg.DataShards {
-		return ECReconstruct(recCfg, shards)
+		return recCfg, shards, nil
 	}
 
 	parityIdx := make([]int, 0, recCfg.ParityShards)
@@ -2241,10 +2265,10 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 	}
 	fetchShards(parityIdx, true)
 	if available < recCfg.DataShards {
-		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+		return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
 			available, len(rec.Nodes), recCfg.DataShards)
 	}
-	return ECReconstruct(recCfg, shards)
+	return recCfg, shards, nil
 }
 
 // upgradeObjectEC re-encodes an EC object from oldRec's (k1,m1) to newCfg's (k2,m2).
