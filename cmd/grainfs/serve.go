@@ -275,7 +275,7 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 	clusterKey := cfg.ClusterKey
 	authOpts := cfg.AuthOpts
 	encryptor := cfg.Encryptor
-	peers := append([]string(nil), cfg.Peers...)
+	peers := cfg.Peers
 	joinMode := cfg.JoinMode
 	raftAddrExplicit := cfg.RaftAddrExplicit
 
