@@ -1597,9 +1597,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		incidentRecorder = incident.NewRecorder(incidentStore, incident.NewReducer())
 		distBackend.SetIncidentRecorder(incidentRecorder)
 		srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
-		startFDResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
-		startGoroutineResourceMonitor(ctx, cmd, nodeID, incidentRecorder, clusterAlerts)
-		startVlogResourceMonitor(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
+		startResourceGuards(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
 	}
 	clusterIncidentRecorder, scrubberIncidentRecorder := incidentRecorderInterfaces(incidentRecorder)
 

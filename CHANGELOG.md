@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.63.0] — 2026-05-06 — Resource monitors thin-cmd refactor
+
+### Changed
+
+- FD / goroutine / vlog 리소스 모니터의 watcher 부트스트랩, incident 기록,
+  cluster alert 송출, prometheus metrics 갱신 로직을
+  `internal/resourceguard/` 패키지로 이주. `cmd/grainfs/resource_monitors.go`
+  (655줄) 가 사라지고, cmd 쪽에는 cobra flag → Options struct 어댑터와
+  단일 진입 함수 `startResourceGuards(...)` 만 남음
+  (`cmd/grainfs/resource_guard_helpers.go`).
+- `serve.go` runCluster 의 watcher 시작 3줄이 단일 호출 한 줄로 축소. 새
+  패키지는 `internal/server` 를 import 하지 않으며 alerts/incident 의존을
+  슬림 인터페이스(`AlertsSender`, `IncidentRecorder`)로 노출해 테스트 시
+  fake 주입이 직관적.
+
+### Tests
+
+- `internal/resourceguard/{fd,goroutine,vlog}_test.go` 에 16개 비즈니스 로직
+  테스트 이주(decision warn/critical/recovery, metrics 게이지, badger GC
+  failed incident, smoke under-populated incident, vlog top-3 breakdown).
+  cmd 쪽에는 cobra flag-wiring 검증 4개만 잔류 (`*WatchFlagDefault`,
+  `*WatchEnabledHelper`).
+
 ## [0.0.62.0] - 2026-05-06
 
 ### Added
