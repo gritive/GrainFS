@@ -1363,7 +1363,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		// that is the cluster-wide membership ledger that `serve --join`
 		// updates via performMetaJoin. The node initialised at line 872 is a
 		// legacy per-process raft instance whose Peers() never grows on join.
-		server.WithClusterInfo(&raftClusterInfo{node: metaRaft.Node(), peers: peers, backend: distBackend}),
+		server.WithClusterInfo(&raftClusterInfo{node: metaRaft.Node(), peers: peers, backend: distBackend, addrBook: metaRaft.FSM()}),
 		server.WithClusterMembership(&raftMembership{node: metaRaft.Node()}),
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
@@ -1953,16 +1953,19 @@ func (a *balancerInfoAdapter) Status() server.BalancerStatusResult {
 // The peers field is preserved for compatibility with callers that still pass
 // the bootstrap list, but it is not consulted on the read path.
 type raftClusterInfo struct {
-	node    *raft.Node
-	peers   []string
-	backend *cluster.DistributedBackend
+	node     *raft.Node
+	peers    []string
+	backend  *cluster.DistributedBackend
+	addrBook cluster.NodeAddressBook
 }
 
 func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
 func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
-func (r *raftClusterInfo) Peers() []string  { return nilToEmpty(r.node.Peers()) }
+func (r *raftClusterInfo) Peers() []string {
+	return nilToEmpty(r.normalizePeerIDs(r.node.Peers()))
+}
 
 // LivePeers reports all metaRaft voters as live: self plus every remote.
 // The legacy DistributedBackend's LiveNodes() lives on a separate raft +
@@ -1971,14 +1974,65 @@ func (r *raftClusterInfo) Peers() []string  { return nilToEmpty(r.node.Peers()) 
 // after dynamic-join until peerHealth catches up. Treating voters as live
 // keeps the happy-path pre-flight working; voter-count math still blocks
 // the only-1-voter-left scenario, which is the truly dangerous case.
-// PR-D unification (TODOS) restores fine-grained liveness.
+// PR-D unifies peer identity so this fallback no longer mixes node IDs and
+// raft addresses. Fine-grained liveness remains a later peer-health signal.
 func (r *raftClusterInfo) LivePeers() []string {
-	peers := r.node.Peers()
+	peers := r.normalizePeerIDs(r.node.Peers())
 	out := make([]string, 0, len(peers)+1)
 	if id := r.node.ID(); id != "" {
 		out = append(out, id)
 	}
 	out = append(out, peers...)
+	return out
+}
+
+func (r *raftClusterInfo) PeerAddrs() map[string]string {
+	out := make(map[string]string)
+	if r.addrBook == nil {
+		return out
+	}
+	for _, peer := range r.node.Peers() {
+		resolved := cluster.ResolveShardGroupPeer(r.addrBook, peer)
+		if resolved.NodeID != "" && resolved.RaftAddr != "" {
+			out[resolved.NodeID] = resolved.RaftAddr
+		}
+	}
+	return out
+}
+
+func (r *raftClusterInfo) PeerStates() map[string]string {
+	out := make(map[string]string)
+	for _, peer := range r.node.Peers() {
+		resolved := cluster.ResolveShardGroupPeer(r.addrBook, peer)
+		id := resolved.NodeID
+		if id == "" {
+			id = peer
+		}
+		if resolved.Unresolved {
+			out[id] = "unresolved_legacy"
+			continue
+		}
+		out[id] = "configured"
+	}
+	return out
+}
+
+func (r *raftClusterInfo) normalizePeerIDs(peers []string) []string {
+	if len(peers) == 0 {
+		return nil
+	}
+	if r.addrBook == nil {
+		out := make([]string, len(peers))
+		copy(out, peers)
+		return out
+	}
+	out := make([]string, len(peers))
+	for i, peer := range peers {
+		out[i] = cluster.ResolveShardGroupPeer(r.addrBook, peer).NodeID
+		if out[i] == "" {
+			out[i] = peer
+		}
+	}
 	return out
 }
 

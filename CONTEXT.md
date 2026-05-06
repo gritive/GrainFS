@@ -89,3 +89,54 @@ Shard group peer identity is the node identifier stored in
 metadata resolves known peer addresses to stable node IDs before writing group
 membership; raft addresses are tolerated only as legacy/static aliases that
 must be resolved at the cluster address book seam.
+
+The MetaFSM address book is the canonical source for resolving node identity to
+raft address. Runtime join, remove, observe, and data-group wiring paths should
+cross an explicit nodeID-to-address resolution seam instead of storing raft
+addresses as peer identity.
+
+Legacy raft addresses already stored in shard group peer metadata are accepted
+only as read-time compatibility input. Runtime membership views normalize peers
+to node IDs when the address book can reverse-resolve the address. New shard
+group entries and membership changes are nodeID-only. Legacy peers that cannot
+be resolved remain observable as unresolved legacy peers instead of being
+silently rewritten or treated as healthy node identities.
+
+Unresolved legacy peers degrade read and observe paths but block membership
+mutation. Existing raft-group attach may continue through the stored raft
+address when possible, and admin status should surface the unresolved peer
+state. Operations that add, remove, rebalance, or dynamically join data-group
+voters must fail until the node mapping is restored or an explicit migration
+resolves the legacy identity.
+
+The address book lifecycle is add/update-only for the node identity unification
+step. Static bootstrap and future dynamic join upsert nodeID-to-address
+mappings, and raft address changes update the same node ID. Removing a peer
+does not delete its address book entry; deletion and garbage collection are
+separate operator lifecycle concerns because historical group metadata may
+still need the mapping for interpretation.
+
+Node identity and node liveness are separate signals. The address book is an
+identity registry: it says which raft address belongs, or belonged, to a node
+ID. Peer health is the liveness signal: it says whether that node is currently
+reachable and safe for operational decisions. Identity normalization must not
+claim that address book presence means a peer is live; true metaRaft liveness
+monitoring remains a separate follow-up.
+
+Cluster peer observation should present node ID as the primary peer identity
+and raft address as resolved supporting detail. Role calculations compare node
+IDs to node IDs. Until a real peer-health source exists, status language should
+describe identity resolution state, such as configured or unresolved legacy,
+rather than implying live/down liveness.
+
+Existing shard group metadata is not automatically backfilled or rewritten as
+part of identity unification. Historical entries remain as written; the
+MetaFSM read/apply boundary normalizes them into node-ID runtime views when
+possible, and all new membership writes use node IDs. Explicit migration
+reports or rewrite commands are separate operational tooling.
+
+The identity resolution boundary has two explicit directions: nodeID-to-address
+for normal operation and address-to-nodeID for legacy compatibility. Code that
+normalizes shard group peers should preserve whether a peer came from legacy
+address resolution or remained unresolved so observe paths and mutation guards
+can make different decisions.

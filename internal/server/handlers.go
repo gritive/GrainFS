@@ -1049,6 +1049,12 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 		status["term"] = s.cluster.Term()
 		status["leader_id"] = s.cluster.LeaderID()
 		status["peers"] = s.cluster.Peers()
+		if peerAddrs, ok := s.cluster.(clusterPeerAddrs); ok {
+			status["peer_addrs"] = peerAddrs.PeerAddrs()
+		}
+		if peerStates, ok := s.cluster.(clusterPeerStates); ok {
+			status["peer_states"] = peerStates.PeerStates()
+		}
 
 		// Compute down nodes: configured peers minus live peers.
 		livePeers := s.cluster.LivePeers()

@@ -108,6 +108,12 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
 	}
 
+	for _, peer := range ResolveShardGroupPeers(e.addrBook, ShardGroupEntry{ID: groupID, PeerIDs: dg.PeerIDs()}) {
+		if peer.Unresolved {
+			return fmt.Errorf("data_group_executor: group %q has unresolved legacy peer %q", groupID, peer.Input)
+		}
+	}
+
 	// Pre-flight: fromNode must be a current voter so we don't accidentally
 	// evict an unrelated node if the rebalancer has a stale plan.
 	if !slices.Contains(dg.PeerIDs(), fromNode) {

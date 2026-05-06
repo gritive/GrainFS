@@ -25,12 +25,14 @@ import (
 // fakeClusterInfo is a static stand-in for the raft adapter. Set fields
 // directly per test case.
 type fakeClusterInfo struct {
-	nodeID    string
-	state     string
-	term      uint64
-	leaderID  string
-	peers     []string
-	livePeers []string
+	nodeID     string
+	state      string
+	term       uint64
+	leaderID   string
+	peers      []string
+	livePeers  []string
+	peerAddrs  map[string]string
+	peerStates map[string]string
 }
 
 func (f *fakeClusterInfo) NodeID() string      { return f.nodeID }
@@ -39,6 +41,20 @@ func (f *fakeClusterInfo) Term() uint64        { return f.term }
 func (f *fakeClusterInfo) LeaderID() string    { return f.leaderID }
 func (f *fakeClusterInfo) Peers() []string     { return f.peers }
 func (f *fakeClusterInfo) LivePeers() []string { return f.livePeers }
+func (f *fakeClusterInfo) PeerAddrs() map[string]string {
+	out := make(map[string]string, len(f.peerAddrs))
+	for k, v := range f.peerAddrs {
+		out[k] = v
+	}
+	return out
+}
+func (f *fakeClusterInfo) PeerStates() map[string]string {
+	out := make(map[string]string, len(f.peerStates))
+	for k, v := range f.peerStates {
+		out[k] = v
+	}
+	return out
+}
 
 // fakeMembership records calls and returns a configured error.
 type fakeMembership struct {
@@ -136,6 +152,46 @@ func postRemovePeer(t *testing.T, base, id string, force bool) (int, map[string]
 		_ = json.Unmarshal(raw, &out)
 	}
 	return resp.StatusCode, out
+}
+
+func TestClusterStatus_IncludesPeerAddresses(t *testing.T) {
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:    "n1",
+		state:     "Leader",
+		leaderID:  "n1",
+		peers:     []string{"n2"},
+		livePeers: []string{"n1", "n2"},
+		peerAddrs: map[string]string{"n2": "10.0.0.2:7001"},
+	}, nil)
+
+	resp, err := http.Get(h.baseURL + "/api/cluster/status")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, map[string]any{"n2": "10.0.0.2:7001"}, got["peer_addrs"])
+}
+
+func TestClusterStatus_IncludesPeerStates(t *testing.T) {
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:     "n1",
+		state:      "Leader",
+		leaderID:   "n1",
+		peers:      []string{"10.0.0.9:7001"},
+		livePeers:  []string{"n1", "10.0.0.9:7001"},
+		peerStates: map[string]string{"10.0.0.9:7001": "unresolved_legacy"},
+	}, nil)
+
+	resp, err := http.Get(h.baseURL + "/api/cluster/status")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, map[string]any{"10.0.0.9:7001": "unresolved_legacy"}, got["peer_states"])
 }
 
 func TestRemovePeer_HappyPath(t *testing.T) {

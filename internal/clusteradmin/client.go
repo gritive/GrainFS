@@ -37,13 +37,15 @@ func NewClient(endpoint string) *Client {
 // not present (e.g. local mode) decode to zero values; callers should branch
 // on Mode.
 type Status struct {
-	Mode      string   `json:"mode"`
-	NodeID    string   `json:"node_id,omitempty"`
-	State     string   `json:"state,omitempty"`
-	Term      uint64   `json:"term,omitempty"`
-	LeaderID  string   `json:"leader_id,omitempty"`
-	Peers     []string `json:"peers,omitempty"`
-	DownNodes []string `json:"down_nodes,omitempty"`
+	Mode       string            `json:"mode"`
+	NodeID     string            `json:"node_id,omitempty"`
+	State      string            `json:"state,omitempty"`
+	Term       uint64            `json:"term,omitempty"`
+	LeaderID   string            `json:"leader_id,omitempty"`
+	Peers      []string          `json:"peers,omitempty"`
+	DownNodes  []string          `json:"down_nodes,omitempty"`
+	PeerAddrs  map[string]string `json:"peer_addrs,omitempty"`
+	PeerStates map[string]string `json:"peer_states,omitempty"`
 }
 
 // Event mirrors eventstore.Event without importing the server package, which
