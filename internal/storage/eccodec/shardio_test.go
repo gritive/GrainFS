@@ -1,11 +1,14 @@
 package eccodec
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,4 +101,59 @@ func TestWriteShard_AtomicOnCrash(t *testing.T) {
 	for _, e := range entries {
 		assert.NotContains(t, e.Name(), ".tmp", "leftover tmp file: %s", e.Name())
 	}
+}
+
+func TestEncryptedShardStream_RoundTripMultiChunk(t *testing.T) {
+	enc := testEncryptor(t)
+	data := bytes.Repeat([]byte("encrypted-shard-payload-"), 256)
+	aad := []byte("v2/bucket/key/3")
+
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, 1024))
+	require.True(t, IsEncryptedShard(encoded.Bytes()))
+
+	var got bytes.Buffer
+	require.NoError(t, DecodeEncryptedShard(&got, bytes.NewReader(encoded.Bytes()), enc, aad))
+	assert.Equal(t, data, got.Bytes())
+}
+
+func TestEncryptedShardStream_WrongAADFails(t *testing.T) {
+	enc := testEncryptor(t)
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("payload")), enc, []byte("aad-a"), 1024))
+
+	var got bytes.Buffer
+	err := DecodeEncryptedShard(&got, bytes.NewReader(encoded.Bytes()), enc, []byte("aad-b"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypt")
+}
+
+func TestEncryptedShardStream_TamperDetected(t *testing.T) {
+	enc := testEncryptor(t)
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(bytes.Repeat([]byte("x"), 2048)), enc, []byte("aad"), 1024))
+
+	raw := encoded.Bytes()
+	raw[len(raw)-1] ^= 0xff
+	err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw), enc, []byte("aad"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypt")
+}
+
+func TestEncryptedShardStream_TruncatedChunkFails(t *testing.T) {
+	enc := testEncryptor(t)
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(bytes.Repeat([]byte("x"), 2048)), enc, []byte("aad"), 1024))
+
+	raw := encoded.Bytes()
+	err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw[:len(raw)-8]), enc, []byte("aad"))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, io.ErrUnexpectedEOF), "want ErrUnexpectedEOF, got %v", err)
+}
+
+func testEncryptor(t *testing.T) *encrypt.Encryptor {
+	t.Helper()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	require.NoError(t, err)
+	return enc
 }
