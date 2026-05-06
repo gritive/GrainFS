@@ -59,6 +59,23 @@ func TestSetupVolumeRuntimeDisablesOptionalDedupRole(t *testing.T) {
 	require.NoError(t, runtime.Close())
 }
 
+func TestSetupVolumeRuntimeReturnsContextErrorBeforeOpeningResources(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	defer backend.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	runtime, err := SetupVolumeRuntime(ctx, VolumeRuntimeOptions{
+		VolumeManagerOptions: VolumeManagerOptions{DedupEnabled: true},
+		DataDir:              t.TempDir(),
+		Backend:              backend,
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, runtime)
+}
+
 func countRegisteredDBs(category resourcewatch.Category) int {
 	count := 0
 	for _, entry := range resourcewatch.Default.Snapshot() {

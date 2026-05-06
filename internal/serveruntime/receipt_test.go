@@ -78,3 +78,47 @@ func TestSetupReceiptRuntimeDisabledReturnsEmptyRuntime(t *testing.T) {
 	require.Nil(t, runtime.KeyStore())
 	require.NoError(t, runtime.Close())
 }
+
+func TestSetupReceiptRuntimeRequiresPSKWhenPeersConfigured(t *testing.T) {
+	runtime, err := SetupReceiptRuntime(context.Background(), ReceiptRuntimeOptions{
+		Options: ReceiptOptions{
+			Enabled:        true,
+			Retention:      time.Hour,
+			GossipInterval: time.Hour,
+			WindowSize:     1,
+		},
+		DataDir: t.TempDir(),
+		NodeID:  "node-a",
+		Peers:   []string{"node-b"},
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires a PSK")
+	require.NotNil(t, runtime)
+	require.Empty(t, runtime.ServerOptions)
+	require.Nil(t, runtime.Store())
+	require.NoError(t, runtime.Close())
+}
+
+func TestSetupReceiptRuntimeDisablesOptionalReceiptRole(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(dataFile, []byte("x"), 0o644))
+
+	runtime, err := SetupReceiptRuntime(context.Background(), ReceiptRuntimeOptions{
+		Options: ReceiptOptions{
+			Enabled:        true,
+			Retention:      time.Hour,
+			GossipInterval: time.Hour,
+			WindowSize:     1,
+		},
+		DataDir: dataFile,
+		NodeID:  "node-a",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, runtime)
+	require.Empty(t, runtime.ServerOptions)
+	require.Nil(t, runtime.Store())
+	require.Nil(t, runtime.KeyStore())
+	require.NoError(t, runtime.Close())
+}
