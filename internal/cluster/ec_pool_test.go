@@ -62,3 +62,33 @@ func TestECReconstructStreamTo_AllocBytesBounded(t *testing.T) {
 		t.Errorf("ECReconstructStreamTo allocates %d B/op (want ≤256KiB)", allocedBytes)
 	}
 }
+
+func TestECReconstructStreamTo_MissingDataShardAllocBytesBounded(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := make([]byte, 16*1024*1024)
+	shards, err := ECSplit(cfg, data)
+	require.NoError(t, err)
+
+	run := func() error {
+		readers := make([]io.Reader, len(shards))
+		for i := range shards {
+			if i == 0 {
+				continue
+			}
+			readers[i] = bytes.NewReader(shards[i])
+		}
+		return ECReconstructStreamTo(io.Discard, cfg, readers)
+	}
+
+	require.NoError(t, run())
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			require.NoError(b, run())
+		}
+	})
+	allocedBytes := res.AllocedBytesPerOp()
+	t.Logf("ECReconstructStreamTo missing data shard alloc bytes: %d", allocedBytes)
+	if allocedBytes > 12*1024*1024 {
+		t.Errorf("ECReconstructStreamTo missing data shard allocates %d B/op (want ≤12MiB)", allocedBytes)
+	}
+}

@@ -194,11 +194,22 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 			close:  closeReader,
 		}, nil
 	}
-	dataReaders, err := ecReconstructStreamDataReaders(cfg, bodies)
-	if err != nil {
-		return nil, err
+	if ecStreamHasAllDataShards(cfg, bodies) {
+		dataReaders, err := ecReconstructStreamDataReaders(cfg, bodies)
+		if err != nil {
+			return nil, err
+		}
+		return &ecReconstructStreamReader{reader: io.LimitReader(io.MultiReader(dataReaders...), origSize)}, nil
 	}
-	return &ecReconstructStreamReader{reader: io.LimitReader(io.MultiReader(dataReaders...), origSize)}, nil
+	pr, pw := io.Pipe()
+	go func() {
+		if err := ecReconstructMissingDataStreamTo(pw, cfg, origSize, bodies); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+	return &ecReconstructStreamReader{reader: pr, close: pr.Close}, nil
 }
 
 type ecReconstructStreamReader struct {
@@ -313,7 +324,13 @@ func ecReconstructStreamBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodi
 	if err != nil {
 		return err
 	}
-	if _, err := io.CopyN(w, io.MultiReader(dataReaders...), origSize); err != nil {
+	if dataReaders != nil {
+		if _, err := io.CopyN(w, io.MultiReader(dataReaders...), origSize); err != nil {
+			return fmt.Errorf("ec join: %w", err)
+		}
+		return nil
+	}
+	if err := ecReconstructMissingDataStreamTo(w, cfg, origSize, bodies); err != nil {
 		return fmt.Errorf("ec join: %w", err)
 	}
 	return nil
@@ -332,32 +349,68 @@ func ecReconstructStreamDataReaders(cfg ECConfig, bodies []io.Reader) ([]io.Read
 	if !missingData {
 		return dataReaders, nil
 	}
+	return nil, nil
+}
 
-	shards := make([][]byte, len(bodies))
-	for i, body := range bodies {
-		if body == nil {
-			continue
-		}
-		data, err := io.ReadAll(body)
-		if err != nil {
-			return nil, fmt.Errorf("read ec shard %d body: %w", i, err)
-		}
-		shards[i] = data
-	}
+func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader) error {
 	enc, err := getEncoder(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("ec decoder: %w", err)
+		return fmt.Errorf("ec decoder: %w", err)
 	}
-	if err := enc.ReconstructData(shards); err != nil {
-		return nil, fmt.Errorf("ec reconstruct: %w", err)
+	shardBodySize := (origSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
+	windowSize := int64(defaultECStreamBlockSize)
+	if shardBodySize < windowSize {
+		windowSize = shardBodySize
 	}
-	for i := 0; i < cfg.DataShards; i++ {
-		if shards[i] == nil {
-			return nil, fmt.Errorf("ec reconstruct: data shard %d unavailable", i)
+	if windowSize <= 0 {
+		return nil
+	}
+	windows := make([][]byte, len(bodies))
+	windowBufs := make([][]byte, len(bodies))
+	for i, r := range bodies {
+		if r != nil {
+			windowBufs[i] = make([]byte, windowSize)
 		}
-		dataReaders[i] = bytes.NewReader(shards[i])
 	}
-	return dataReaders, nil
+	remainingShard := shardBodySize
+	remainingOutput := origSize
+	for remainingShard > 0 {
+		n := windowSize
+		if remainingShard < n {
+			n = remainingShard
+		}
+		for i := range windows {
+			windows[i] = nil
+		}
+		for i, r := range bodies {
+			if r == nil {
+				continue
+			}
+			buf := windowBufs[i][:n]
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return fmt.Errorf("read ec shard %d window: %w", i, err)
+			}
+			windows[i] = buf
+		}
+		if err := enc.ReconstructData(windows); err != nil {
+			return fmt.Errorf("ec reconstruct: %w", err)
+		}
+		for i := 0; i < cfg.DataShards && remainingOutput > 0; i++ {
+			if windows[i] == nil {
+				return fmt.Errorf("ec reconstruct: data shard %d unavailable", i)
+			}
+			toWrite := int64(len(windows[i]))
+			if remainingOutput < toWrite {
+				toWrite = remainingOutput
+			}
+			if _, err := w.Write(windows[i][:toWrite]); err != nil {
+				return err
+			}
+			remainingOutput -= toWrite
+		}
+		remainingShard -= n
+	}
+	return nil
 }
 
 func ecReconstructBodies(cfg ECConfig, shards [][]byte) (int64, [][]byte, error) {
