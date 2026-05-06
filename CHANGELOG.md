@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.64.0] — 2026-05-06 — Serveruntime helpers extraction (cmd-thin PR0)
+
+### Changed
+
+- 자체 의존성이 적은 cluster bootstrap 헬퍼 12개를 `cmd/grainfs/serve.go`
+  에서 신규 `internal/serveruntime/` 패키지로 분리:
+  - `ResolveClusterKey`, `GenerateEphemeralClusterKey` (cluster-key D10 해소)
+  - `SeedInitialShardGroups`, `SeedShardGroupVoters` (group seeding)
+  - `WaitForMetaRaftLeader`, `WaitForShardGroupCount` (bootstrap polling)
+  - `StartAutoSnapshotterWhenReady` (+ private `waitForSnapshotBackendReady`)
+  - `EnsureShardGroupPlaceholder`, `ECShardCounterFor`,
+    `HandleRuntimeGroupInstantiationError`
+- 새 패키지는 cobra 의존 0; runCluster 본체 이주(PR1)의 토대.
+- `serve.go` 2250 → 2002 줄로 248줄 슬림.
+
+### Tests
+
+- `internal/serveruntime/{clusterkey,seed,helpers,snapshot}_test.go`
+  에 13개 단위 테스트 신설. cmd/grainfs 의 중복 테스트
+  (`serve_keystore_bootstrap_test.go`, `serve_snapshot_test.go`) 삭제;
+  badger role 회복 테스트의 instantiation-error 케이스도 동일.
+
 ## [0.0.63.0] — 2026-05-06 — Resource monitors thin-cmd refactor
 
 ### Changed

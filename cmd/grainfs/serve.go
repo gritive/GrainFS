@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -46,7 +44,7 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
-	"github.com/gritive/GrainFS/internal/snapshot"
+	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
@@ -232,67 +230,6 @@ func (a *vlogBreakdownAdapter) Breakdown() (admin.VlogBreakdownResp, error) {
 		GCFailures:     gcFails,
 		SmokeReport:    admin.VlogSmokeReport{Live: live, Stale: stale},
 	}, nil
-}
-
-func startAutoSnapshotterWhenReady(
-	ctx context.Context,
-	dataDir, walDir string,
-	backend storage.Backend,
-	interval time.Duration,
-	retain int,
-	readinessTimeout time.Duration,
-) error {
-	if interval <= 0 {
-		return nil
-	}
-	snapshotable, ok := backend.(storage.Snapshotable)
-	if !ok {
-		log.Debug().Msg("auto-snapshot skipped: backend does not implement Snapshotable")
-		return nil
-	}
-	if err := waitForSnapshotBackendReady(ctx, snapshotable, readinessTimeout); err != nil {
-		return err
-	}
-	objSnapMgr, err := snapshot.NewManager(filepath.Join(dataDir, "snapshots"), snapshotable, walDir)
-	if err != nil {
-		return err
-	}
-	as := snapshot.NewAutoSnapshotter(objSnapMgr, interval, retain)
-	as.Start(ctx)
-	log.Info().Dur("interval", interval).Int("retain", retain).Msg("auto-snapshot enabled")
-	return nil
-}
-
-func waitForSnapshotBackendReady(ctx context.Context, snapshotable storage.Snapshotable, timeout time.Duration) error {
-	readyCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		if _, err := snapshotable.ListAllObjects(); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-
-		select {
-		case <-readyCtx.Done():
-			return fmt.Errorf("snapshot backend not ready after %s: %w", timeout, lastErr)
-		case <-ticker.C:
-		}
-	}
-}
-
-func ensureShardGroupPlaceholder(dgMgr *cluster.DataGroupManager, entry cluster.ShardGroupEntry) {
-	if entry.ID == "group-0" {
-		return
-	}
-	if existing := dgMgr.Get(entry.ID); existing == nil {
-		dgMgr.Add(cluster.NewDataGroup(entry.ID, entry.PeerIDs))
-	}
 }
 
 func init() {
@@ -507,120 +444,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts, shardEncryptor)
 }
 
-func seedInitialShardGroups(
-	ctx context.Context,
-	metaRaft *cluster.MetaRaft,
-	selfNodeID string,
-	selfAddr string,
-	peers []string,
-	seedGroups int,
-) error {
-	bootstrapCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-
-	if err := waitForMetaRaftLeader(bootstrapCtx, metaRaft, 15*time.Second); err != nil {
-		return err
-	}
-
-	const replicationFactor = 3
-	for i := 0; i < seedGroups; i++ {
-		groupID := fmt.Sprintf("group-%d", i)
-		voters := seedShardGroupVoters(selfNodeID, selfAddr, peers, metaRaft.FSM().Nodes(), groupID, replicationFactor)
-
-		sgCtx, sgCancel := context.WithTimeout(bootstrapCtx, 5*time.Second)
-		err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{
-			ID:      groupID,
-			PeerIDs: voters,
-		})
-		sgCancel()
-		if i == 0 && err != nil && metaRaft.IsLeader() {
-			return fmt.Errorf("seed group-0: %w", err)
-		}
-		if err != nil {
-			log.Debug().Str("group", groupID).Err(err).Msg("seed shard group propose failed (non-fatal)")
-		}
-		if err := bootstrapCtx.Err(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func seedShardGroupVoters(
-	selfNodeID string,
-	selfAddr string,
-	peers []string,
-	nodes []cluster.MetaNodeEntry,
-	groupID string,
-	replicationFactor int,
-) []string {
-	clusterPeers := seedShardGroupPeerIDs(selfNodeID, selfAddr, peers, nodes)
-	if groupID == "group-0" {
-		return clusterPeers
-	}
-	return cluster.PickVoters(groupID, clusterPeers, replicationFactor)
-}
-
-func seedShardGroupPeerIDs(selfNodeID string, selfAddr string, peers []string, nodes []cluster.MetaNodeEntry) []string {
-	byAddress := make(map[string]string, len(nodes)+1)
-	if selfAddr != "" && selfNodeID != "" {
-		byAddress[selfAddr] = selfNodeID
-	}
-	for _, node := range nodes {
-		if node.Address != "" && node.ID != "" {
-			byAddress[node.Address] = node.ID
-		}
-	}
-
-	out := make([]string, 0, 1+len(peers))
-	if selfNodeID != "" {
-		out = append(out, selfNodeID)
-	} else {
-		out = append(out, selfAddr)
-	}
-	for _, peer := range peers {
-		if id, ok := byAddress[peer]; ok {
-			out = append(out, id)
-			continue
-		}
-		// Static --peers clusters may not know every remote node ID during the
-		// first bootstrap pass. Keep the dialable address as a legacy alias; the
-		// address-book seam resolves stable node IDs once they are registered.
-		out = append(out, peer)
-	}
-	return out
-}
-
-func waitForMetaRaftLeader(ctx context.Context, metaRaft *cluster.MetaRaft, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if metaRaft.IsLeader() || metaRaft.Node().LeaderID() != "" {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	return fmt.Errorf("meta-raft leader not visible after %s", timeout)
-}
-
-func waitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, want int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if len(src.ShardGroups()) >= want {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	return fmt.Errorf("only %d/%d shard groups visible after %s", len(src.ShardGroups()), want, timeout)
-}
-
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
 	if nodeID == "" {
 		var err error
@@ -824,7 +647,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	//   3. Flag only: use flag, mirror to keys.d/current.key on first boot.
 	//   4. Both empty + cluster mode: refused upstream by ValidateClusterKey.
 	//      Both empty + solo mode: generate ephemeral so zero-config holds.
-	resolvedKey, warn, err := resolveClusterKey(dataDir, clusterKey)
+	resolvedKey, warn, err := serveruntime.ResolveClusterKey(dataDir, clusterKey)
 	if err != nil {
 		return fmt.Errorf("resolve cluster key: %w", err)
 	}
@@ -833,7 +656,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	transportPSK := resolvedKey
 	if transportPSK == "" {
-		ephemeral, err := generateEphemeralClusterKey()
+		ephemeral, err := serveruntime.GenerateEphemeralClusterKey()
 		if err != nil {
 			return fmt.Errorf("init QUIC transport: %w", err)
 		}
@@ -971,7 +794,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		seedGroups = 1
 	}
 	if !joinMode {
-		if err := waitForMetaRaftLeader(ctx, metaRaft, 15*time.Second); err != nil {
+		if err := serveruntime.WaitForMetaRaftLeader(ctx, metaRaft, 15*time.Second); err != nil {
 			return err
 		}
 		addNodeCtx, addNodeCancel := context.WithTimeout(ctx, 10*time.Second)
@@ -980,10 +803,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		addNodeCancel()
 
-		if err := seedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups); err != nil {
+		if err := serveruntime.SeedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups); err != nil {
 			return err
 		}
-		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+		if err := serveruntime.WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
 			return err
 		}
 		clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
@@ -1043,7 +866,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
 	group0 := cluster.NewDataGroupWithBackend(
 		"group-0",
-		seedShardGroupVoters(nodeID, raftAddr, peers, metaRaft.FSM().Nodes(), "group-0", 3),
+		serveruntime.SeedShardGroupVoters(nodeID, raftAddr, peers, metaRaft.FSM().Nodes(), "group-0", 3),
 		group0Backend,
 	)
 	dgMgr.Add(group0)
@@ -1105,7 +928,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if entry.ID == "group-0" {
 			return nil
 		}
-		ensureShardGroupPlaceholder(dgMgr, entry)
+		serveruntime.EnsureShardGroupPlaceholder(dgMgr, entry)
 		// Only instantiate for groups where we are a voter. Shard groups should
 		// store node IDs; raftAddr remains a local alias for legacy/static
 		// entries written before that invariant existed.
@@ -1184,7 +1007,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		go func() {
 			defer ownedGroups.wg.Done()
 			if err := instantiateOwnedIfNeeded(entry); err != nil {
-				log.Error().Err(handleRuntimeGroupInstantiationError(entry.ID, err)).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
+				log.Error().Err(serveruntime.HandleRuntimeGroupInstantiationError(entry.ID, err)).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
 			}
 		}()
 	}
@@ -1408,7 +1231,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if err := performMetaJoin(ctx, quicTransport, peers, nodeID, raftAddr); err != nil {
 			return err
 		}
-		if err := waitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+		if err := serveruntime.WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
 			return err
 		}
 		clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
@@ -1483,7 +1306,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// anchored to the object mutation log. Start only after startup bucket
 	// metadata exists and the routed snapshot enumeration path is usable; data
 	// groups are instantiated asynchronously during boot.
-	if err := startAutoSnapshotterWhenReady(ctx, dataDir, walDir, backend, snapInterval, snapRetain, 30*time.Second); err != nil {
+	if err := serveruntime.StartAutoSnapshotterWhenReady(ctx, dataDir, walDir, backend, snapInterval, snapRetain, 30*time.Second); err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}
 
@@ -2049,7 +1872,7 @@ func startBalancer(
 	if migMaxRetries > 0 {
 		exec.SetMaxWriteRetries(migMaxRetries)
 	}
-	exec.SetShardCounter(ecShardCounterFor(fsm))
+	exec.SetShardCounter(serveruntime.ECShardCounterFor(fsm))
 	exec.Start(ctx)
 
 	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
@@ -2139,7 +1962,7 @@ func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
 func (r *raftClusterInfo) State() string    { return r.node.State().String() }
 func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
 func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
-func (r *raftClusterInfo) Peers() []string { return nilToEmpty(r.node.Peers()) }
+func (r *raftClusterInfo) Peers() []string  { return nilToEmpty(r.node.Peers()) }
 
 // LivePeers reports all metaRaft voters as live: self plus every remote.
 // The legacy DistributedBackend's LiveNodes() lives on a separate raft +
@@ -2176,75 +1999,4 @@ type raftMembership struct{ node *raft.Node }
 
 func (r *raftMembership) RemoveVoter(ctx context.Context, id string) error {
 	return r.node.ChangeMembership(ctx, nil, []string{id})
-}
-
-// ecShardCounterFor returns a per-object shard-count function for MigrationExecutor.
-// Returns 1 for N× objects (no EC metadata) and k+m for EC objects.
-func ecShardCounterFor(fsm *cluster.FSM) func(bucket, key, versionID string) int {
-	return func(bucket, key, versionID string) int {
-		k, m, err := fsm.LookupObjectECShards(bucket, key, versionID)
-		if err != nil {
-			// Return 0 so Execute falls back to numShards (cluster-wide k+m).
-			// Returning 1 would copy only shard 0 then delete all k+m source shards — data loss.
-			log.Warn().Err(err).Str("bucket", bucket).Str("key", key).Str("version", versionID).
-				Msg("LookupObjectECShards failed, using numShards fallback")
-			return 0
-		}
-		if k == 0 {
-			return 1 // N× 모드: EC 메타 없음
-		}
-		return k + m
-	}
-}
-
-// resolveClusterKey applies the bootstrap conflict resolution rules from
-// the cluster-key-rotation spec D10:
-//   - Disk wins over flag when both present and differ (warn emitted).
-//   - Disk only: use disk silently.
-//   - Flag only: use flag, mirror to disk on first boot.
-//   - Both empty: returns "" (caller decides solo ephemeral path).
-//
-// Returns (resolved, warning_message, error). Warning is non-empty when the
-// caller should log.Warn the operator about a mismatch.
-func resolveClusterKey(dataDir, flagKey string) (string, string, error) {
-	ks := transport.NewKeystore(dataDir)
-	diskKey, diskErr := ks.ReadCurrent()
-	hasDisk := diskErr == nil
-
-	switch {
-	case hasDisk && flagKey != "" && diskKey != flagKey:
-		warn := fmt.Sprintf("--cluster-key flag (%d chars) does not match keys.d/current.key (%d chars); disk wins. Reconcile via `cluster rotate-key` or update flag to match disk.", len(flagKey), len(diskKey))
-		return diskKey, warn, nil
-	case hasDisk:
-		return diskKey, "", nil
-	case flagKey != "":
-		// First boot — mirror to disk so subsequent restarts read from disk.
-		if err := ks.WriteCurrent(flagKey); err != nil {
-			return "", "", fmt.Errorf("mirror flag to keys.d: %w", err)
-		}
-		return flagKey, "", nil
-	default:
-		return "", "", nil
-	}
-}
-
-// generateEphemeralClusterKey returns a random 64-char hex string used as a
-// per-process cluster identity in solo mode. The key never leaves this
-// process (solo has no peers), so its only purpose is to satisfy the
-// transport package's PSK requirement (D6). Returns error so a sandboxed
-// or seccomp-restricted environment with no /dev/urandom + no getrandom
-// fails cleanly via runCluster's error path instead of crashing mid-init.
-func generateEphemeralClusterKey() (string, error) {
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("ephemeral cluster key: %w", err)
-	}
-	return hex.EncodeToString(b[:]), nil
-}
-
-func handleRuntimeGroupInstantiationError(groupID string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("runtime group %s instantiation failed: %w", groupID, err)
 }
