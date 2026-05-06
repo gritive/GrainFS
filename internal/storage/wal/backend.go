@@ -85,6 +85,57 @@ func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.R
 	return obj, commitFn, nil
 }
 
+func (b *Backend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*storage.Object, error) {
+	type atomicACLPutter interface {
+		PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*storage.Object, error)
+	}
+	if ap, ok := b.Backend.(atomicACLPutter); ok {
+		obj, err := ap.PutObjectWithACL(bucket, key, r, contentType, acl)
+		if err != nil {
+			return nil, err
+		}
+		b.w.AppendAsync(Entry{
+			Op:          OpPut,
+			Bucket:      bucket,
+			Key:         key,
+			ETag:        obj.ETag,
+			ContentType: obj.ContentType,
+			Size:        obj.Size,
+			VersionID:   obj.VersionID,
+		})
+		return obj, nil
+	}
+
+	type aclSetter interface {
+		SetObjectACL(bucket, key string, acl uint8) error
+	}
+	setter, ok := b.Backend.(aclSetter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithACL", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	obj, err := b.PutObject(context.Background(), bucket, key, r, contentType)
+	if err != nil {
+		return nil, err
+	}
+	if err := setter.SetObjectACL(bucket, key, acl); err != nil {
+		if obj == nil || obj.VersionID == "" {
+			return nil, fmt.Errorf("%w: acl error: %v; rollback error: missing version id",
+				storage.UnsupportedOperationError{Op: "PutObjectWithACL", Reason: storage.UnsupportedReasonRollbackFailed},
+				err,
+			)
+		}
+		if rollbackErr := b.DeleteObjectVersion(bucket, key, obj.VersionID); rollbackErr != nil {
+			return nil, fmt.Errorf("%w: acl error: %v; rollback error: %v",
+				storage.UnsupportedOperationError{Op: "PutObjectWithACL", Reason: storage.UnsupportedReasonRollbackFailed},
+				err,
+				rollbackErr,
+			)
+		}
+		return nil, err
+	}
+	return obj, nil
+}
+
 // WriteAt is a pass-through for pwrite-based partial writes on internal
 // buckets (NFS4, VFS). No WAL entry is written: internal buckets are ephemeral
 // and not subject to PITR replay.

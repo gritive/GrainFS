@@ -32,6 +32,24 @@ func TestOperationsPutObjectWithACLFallsBackToPutThenSetACL(t *testing.T) {
 	require.Equal(t, []string{"put:b/k", "setacl:b/k:7"}, backend.calls)
 }
 
+func TestOperationsPutObjectWithACLPinsSwappableBackendAcrossFallback(t *testing.T) {
+	var swappable *SwappableBackend
+	newBackend := &aclFallbackBackend{}
+	oldBackend := &aclFallbackBackend{
+		beforePut: func() {
+			swappable.Swap(newBackend)
+		},
+	}
+	swappable = NewSwappableBackend(oldBackend)
+	ops := NewOperations(NewCachedBackend(swappable))
+
+	_, err := ops.PutObjectWithACL(context.Background(), "b", "k", strings.NewReader("data"), "text/plain", 7)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"put:b/k", "setacl:b/k:7"}, oldBackend.calls)
+	require.Empty(t, newBackend.calls)
+}
+
 func TestOperationsPutObjectWithACLRollsBackNewVersionWhenSetACLFails(t *testing.T) {
 	setErr := errors.New("set acl failed")
 	backend := &aclFallbackBackend{setACLErr: setErr}
@@ -109,9 +127,13 @@ type aclFallbackBackend struct {
 	deleteVersionErr  error
 	putObjectVersion  string
 	putObjectResponse *Object
+	beforePut         func()
 }
 
 func (b *aclFallbackBackend) PutObject(_ context.Context, bucket, key string, _ io.Reader, _ string) (*Object, error) {
+	if b.beforePut != nil {
+		b.beforePut()
+	}
 	b.calls = append(b.calls, "put:"+bucket+"/"+key)
 	if b.putObjectResponse != nil {
 		return b.putObjectResponse, nil

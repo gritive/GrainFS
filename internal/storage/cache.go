@@ -163,10 +163,24 @@ func (cb *CachedBackend) HeadObject(ctx context.Context, bucket, key string) (*O
 	return cb.Backend.HeadObject(ctx, bucket, key)
 }
 
+func (cb *CachedBackend) SetObjectACL(bucket, key string, acl uint8) error {
+	cb.invalidate(bucket, key)
+	setter, ok := cb.Backend.(ACLSetter)
+	if !ok {
+		return UnsupportedOperationError{Op: "SetObjectACL", Reason: UnsupportedReasonNoAdapter}
+	}
+	return setter.SetObjectACL(bucket, key, acl)
+}
+
 // PutObject invalidates the cache entry for the key.
 func (cb *CachedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
 	cb.invalidate(bucket, key)
 	return cb.Backend.PutObject(ctx, bucket, key, r, contentType)
+}
+
+func (cb *CachedBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
+	cb.invalidate(bucket, key)
+	return putObjectWithACLOnBackend(context.Background(), cb.Backend, bucket, key, r, contentType, acl)
 }
 
 // PutObjectAsync delegates to the inner backend's async write-back path if available.

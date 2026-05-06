@@ -65,12 +65,26 @@ func (sb *SwappableBackend) PutObject(ctx context.Context, bucket, key string, r
 	return (*sb.inner.Load()).PutObject(ctx, bucket, key, r, contentType)
 }
 
+func (sb *SwappableBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
+	inner := *sb.inner.Load()
+	return putObjectWithACLOnBackend(context.Background(), inner, bucket, key, r, contentType, acl)
+}
+
 func (sb *SwappableBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
 	return (*sb.inner.Load()).GetObject(ctx, bucket, key)
 }
 
 func (sb *SwappableBackend) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
 	return (*sb.inner.Load()).HeadObject(ctx, bucket, key)
+}
+
+func (sb *SwappableBackend) SetObjectACL(bucket, key string, acl uint8) error {
+	inner := *sb.inner.Load()
+	setter, ok := inner.(ACLSetter)
+	if !ok {
+		return UnsupportedOperationError{Op: "SetObjectACL", Reason: UnsupportedReasonNoAdapter}
+	}
+	return setter.SetObjectACL(bucket, key, acl)
 }
 
 func (sb *SwappableBackend) DeleteObject(ctx context.Context, bucket, key string) error {
