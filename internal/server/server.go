@@ -22,6 +22,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
@@ -54,6 +55,10 @@ type clusterPeerAddrs interface {
 
 type clusterPeerStates interface {
 	PeerStates() map[string]string
+}
+
+type clusterPeerSnapshot interface {
+	PeerSnapshot() []cluster.PeerLivenessRow
 }
 
 // ClusterMembership performs Raft membership mutations. nil-safe: when the
