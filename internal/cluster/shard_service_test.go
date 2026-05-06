@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,6 +64,48 @@ func TestShardService_Encryption(t *testing.T) {
 	got, err := svc.ReadLocalShard("bkt", "obj", 0)
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, got)
+}
+
+func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+
+	plaintext := bytes.Repeat([]byte("secret shard data"), 8192)
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	r, err := svc.OpenLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	defer r.Close()
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
+func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+
+	plaintext := bytes.Repeat([]byte("plain shard data"), 8192)
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	raw[len(raw)-1] ^= 0xff
+	require.NoError(t, os.WriteFile(rawPath, raw, 0o644))
+
+	r, err := svc.OpenLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	defer r.Close()
+
+	buf := make([]byte, len(plaintext))
+	_, err = io.ReadFull(r, buf)
+	require.ErrorIs(t, err, eccodec.ErrCRCMismatch)
 }
 
 // TestShardService_NoEncryption verifies plaintext storage when no encryptor is set.

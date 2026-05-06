@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -620,6 +621,55 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
 	}
 	return data, nil
+}
+
+// OpenLocalShard opens a local shard as plaintext. New chunked encrypted shards
+// are decrypted chunk-by-chunk; compatibility formats fall back to ReadLocalShard.
+func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error) {
+	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	br := bufio.NewReader(f)
+	prefix, peekErr := br.Peek(8)
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
+	if peekErr == nil && eccodec.IsEncryptedShard(prefix) {
+		if s.encryptor == nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		}
+		r, err := eccodec.NewEncryptedShardReader(br, s.encryptor, aad)
+		if err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("decrypt shard: %w", err)
+		}
+		return &multiReadCloser{Reader: r, close: f.Close}, nil
+	}
+	if peekErr == nil && eccodec.IsEncodedShard(prefix) && s.encryptor == nil {
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		payloadLen := info.Size() - 8 - 4
+		if payloadLen < 0 {
+			_ = f.Close()
+			return nil, eccodec.ErrCRCMismatch
+		}
+		if _, err := br.Discard(8); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		r := eccodec.NewSizedShardReader(br, payloadLen)
+		return &multiReadCloser{Reader: r, close: f.Close}, nil
+	}
+	_ = f.Close()
+	data, err := s.ReadLocalShard(bucket, key, shardIdx)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // DeleteLocalShards removes every shard for key on the local node (all indices).

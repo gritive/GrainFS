@@ -68,6 +68,47 @@ func TestReadShard_FooterFlipDetected(t *testing.T) {
 	require.ErrorIs(t, err, ErrCRCMismatch)
 }
 
+func TestShardReader_FooterFlipDetected(t *testing.T) {
+	raw := EncodeShard([]byte("payload"))
+	raw[len(raw)-1] ^= 0xff
+
+	r, err := NewShardReader(bytes.NewReader(raw))
+	require.NoError(t, err)
+	_, err = io.ReadAll(r)
+	require.ErrorIs(t, err, ErrCRCMismatch)
+}
+
+func TestShardReader_RoundTripMultiRead(t *testing.T) {
+	data := bytes.Repeat([]byte("payload-"), 8192)
+	r, err := NewShardReader(bytes.NewReader(EncodeShard(data)))
+	require.NoError(t, err)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
+}
+
+func TestSizedShardReader_RoundTrip(t *testing.T) {
+	data := bytes.Repeat([]byte("payload-"), 8192)
+	raw := EncodeShard(data)
+	r := NewSizedShardReader(bytes.NewReader(raw[len(shardMagic):]), int64(len(data)))
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
+}
+
+func TestSizedShardReader_FooterFlipDetectedOnExactRead(t *testing.T) {
+	data := bytes.Repeat([]byte("payload-"), 8192)
+	raw := EncodeShard(data)
+	raw[len(raw)-1] ^= 0xff
+	r := NewSizedShardReader(bytes.NewReader(raw[len(shardMagic):]), int64(len(data)))
+
+	buf := make([]byte, len(data))
+	_, err := io.ReadFull(r, buf)
+	require.ErrorIs(t, err, ErrCRCMismatch)
+}
+
 func TestReadShard_TruncatedDetected(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "shard_0")
@@ -116,6 +157,21 @@ func TestEncryptedShardStream_RoundTripMultiChunk(t *testing.T) {
 	var got bytes.Buffer
 	require.NoError(t, DecodeEncryptedShard(&got, bytes.NewReader(encoded.Bytes()), enc, aad))
 	assert.Equal(t, data, got.Bytes())
+}
+
+func TestEncryptedShardReader_RoundTripMultiChunk(t *testing.T) {
+	enc := testEncryptor(t)
+	data := bytes.Repeat([]byte("encrypted-shard-payload-"), 256)
+	aad := []byte("v2/bucket/key/3")
+
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, 1024))
+
+	r, err := NewEncryptedShardReader(bytes.NewReader(encoded.Bytes()), enc, aad)
+	require.NoError(t, err)
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
 }
 
 func TestEncryptedShardStream_WrongAADFails(t *testing.T) {

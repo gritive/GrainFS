@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"crypto/rand"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -102,6 +103,26 @@ func TestECReconstructTo_WritesRoundTrip(t *testing.T) {
 	var got bytes.Buffer
 	require.NoError(t, ECReconstructTo(&got, cfg, shards))
 	assert.Equal(t, data, got.Bytes())
+}
+
+func TestECReconstructStreamTo_MissingDataShard(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := bytes.Repeat([]byte("stream-window-"), 8192)
+
+	shards, err := ECSplit(cfg, data)
+	require.NoError(t, err)
+
+	readers := make([]io.Reader, len(shards))
+	for i := range shards {
+		if i == 1 {
+			continue
+		}
+		readers[i] = bytes.NewReader(shards[i])
+	}
+
+	var got bytes.Buffer
+	require.NoError(t, ECReconstructStreamTo(&got, cfg, readers))
+	require.Equal(t, data, got.Bytes())
 }
 
 func TestECReconstruct_MissingParityShard(t *testing.T) {
