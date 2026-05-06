@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -631,22 +630,26 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 	if err != nil {
 		return nil, err
 	}
-	br := bufio.NewReader(f)
-	prefix, peekErr := br.Peek(8)
+	var prefix [8]byte
+	_, peekErr := io.ReadFull(f, prefix[:])
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
-	if peekErr == nil && eccodec.IsEncryptedShard(prefix) {
+	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
 		if s.encryptor == nil {
 			_ = f.Close()
 			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
 		}
-		r, err := eccodec.NewEncryptedShardReader(br, s.encryptor, aad)
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		r, err := eccodec.NewEncryptedShardReader(f, s.encryptor, aad)
 		if err != nil {
 			_ = f.Close()
 			return nil, fmt.Errorf("decrypt shard: %w", err)
 		}
 		return &multiReadCloser{Reader: r, close: f.Close}, nil
 	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix) && s.encryptor == nil {
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
 		info, err := f.Stat()
 		if err != nil {
 			_ = f.Close()
@@ -657,11 +660,7 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 			_ = f.Close()
 			return nil, eccodec.ErrCRCMismatch
 		}
-		if _, err := br.Discard(8); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		r := eccodec.NewSizedShardReader(br, payloadLen)
+		r := eccodec.NewSizedShardReader(f, payloadLen)
 		return &multiReadCloser{Reader: r, close: f.Close}, nil
 	}
 	_ = f.Close()
