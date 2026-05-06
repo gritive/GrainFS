@@ -1,13 +1,9 @@
 package main
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
-	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/resourceguard"
-	"github.com/gritive/GrainFS/internal/server"
 )
 
 func fdWatchEnabled(cmd *cobra.Command) bool {
@@ -80,24 +76,5 @@ func vlogOptionsFromCmd(cmd *cobra.Command, dataDir string) resourceguard.VlogOp
 		GCFailThreshold: gcFailThreshold,
 		StrictRegistry:  strict,
 		SmokeDefer:      smokeDefer,
-	}
-}
-
-// startResourceGuards reads watcher flags and dispatches to internal/resourceguard.
-// Each monitor is independently enable-gated; disabled ones are silently skipped.
-func startResourceGuards(ctx context.Context, cmd *cobra.Command, nodeID, dataDir string, recorder *incident.Recorder, clusterAlerts *server.AlertsState) {
-	deps := resourceguard.Deps{
-		NodeID:   nodeID,
-		Alerts:   clusterAlerts,
-		Recorder: recorder,
-	}
-	if fdWatchEnabled(cmd) {
-		resourceguard.StartFD(ctx, fdOptionsFromCmd(cmd), deps)
-	}
-	if goroutineWatchEnabled(cmd) {
-		resourceguard.StartGoroutine(ctx, goroutineOptionsFromCmd(cmd), deps)
-	}
-	if vlogWatchEnabled(cmd) {
-		resourceguard.StartVlog(ctx, vlogOptionsFromCmd(cmd, dataDir), deps)
 	}
 }
