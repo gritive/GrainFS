@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gritive/GrainFS/internal/volumeadmin"
 )
 
 // scrubBucketReq mirrors admin.ScrubReq for CLI → admin POST /v1/scrub.
@@ -45,23 +47,23 @@ func runBucketScrub(cmd *cobra.Command, args []string) error {
 	detach, _ := cmd.Flags().GetBool("detach")
 
 	body := scrubBucketReq{Bucket: bucket, KeyPrefix: prefix, Scope: scope, DryRun: dryRun}
-	var resp scrubTriggerResp
-	if err := c.post("/v1/scrub", body, &resp); err != nil {
+	var resp volumeadmin.ScrubTriggerResp
+	if err := c.Post(cmd.Context(), "/v1/scrub", body, &resp); err != nil {
 		return err
 	}
 	if jsonOut(cmd) {
-		return printJSON(resp)
+		return printJSON(cmd, resp)
 	}
 	created := "reused"
 	if resp.Created {
 		created = "created"
 	}
-	fmt.Printf("Triggered scrub: bucket=%s session=%s scope=%s dry_run=%t (%s)\n",
+	fmt.Fprintf(cmd.OutOrStdout(), "Triggered scrub: bucket=%s session=%s scope=%s dry_run=%t (%s)\n",
 		bucket, resp.SessionID, scope, dryRun, created)
 	if detach {
 		return nil
 	}
-	return followScrubSession(cmd, c, resp.SessionID)
+	return volumeadmin.FollowScrubSession(cmd.Context(), c, cmd.OutOrStdout(), resp.SessionID, 0)
 }
 
 func init() {

@@ -21,6 +21,35 @@
   replacement, delete-marker rejection, wrapper ordering, and packed copy
   readability after source deletion.
 
+## [0.0.55.0] — 2026-05-06 — Volume CLI thin-cmd refactor
+
+### Changed
+
+- `grainfs volume` 명령군의 비즈니스 로직(HTTP, 에러 detail 포맷팅, 출력
+  렌더링, 폴링 루프)을 `internal/volumeadmin/` 패키지로 이주. cmd/grainfs/
+  쪽은 cobra 정의 + flag 파싱 + 옵션 빌드 + Run* 호출만 남는 thin wrapper로
+  단순화. 테스트가 가능한 표면이 cmd 외부로 이동.
+- `cmd/grainfs/admin_client.go`, `cmd/grainfs/format.go`, 그리고
+  `cmd/grainfs/format_test.go` 가 사라지고 동등한 코드는
+  `internal/volumeadmin/` 의 Client / format.go / discover.go 로 이주.
+- `dashboard`, `scrub` (bucket) 명령은 새 `volumeadmin.Client` 의 공개
+  HTTP primitives(`Get`/`Post`/`Delete`)와 `FollowScrubSession` 을 통해
+  같은 admin 연결 인프라를 공유. 기능 변화 없음.
+
+### Fixed
+
+- `grainfs volume scrub status` 가 서버의 partial-peer-failure 정보(
+  `OwnedHere`/`Partial`/`PeerFailures` 필드)를 조용히 떨어뜨리던 문제 수정.
+  partial 인 세션은 `Partial: yes (peer failures: ...)` 줄로 표시.
+
+### Tests
+
+- `internal/volumeadmin/` 에 단위 테스트 신설: errors_test.go (typed detail
+  helpers + 포맷터), format_test.go (parseSize/formatBytes 이주), client_test.go
+  (httptest 기반 14 케이스), volume_ops_test.go (18 케이스),
+  snapshot_ops_test.go (4 케이스), scrub_ops_test.go (8 케이스, follow loop
+  의 정상 종료·ctx 취소 graceful exit 포함). 총 ~60 단위 테스트.
+
 ## [0.0.54.0] — 2026-05-06 — Storage operations facade hardening
 
 ### Changed

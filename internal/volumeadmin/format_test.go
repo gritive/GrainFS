@@ -1,4 +1,4 @@
-package main
+package volumeadmin
 
 import "testing"
 
@@ -18,9 +18,9 @@ func TestFormatBytes(t *testing.T) {
 		{-1, false, "n/a"},
 	}
 	for _, tc := range tests {
-		got := formatBytes(tc.in, tc.raw)
+		got := FormatBytes(tc.in, tc.raw)
 		if got != tc.want {
-			t.Errorf("formatBytes(%d, %v) = %q, want %q", tc.in, tc.raw, got, tc.want)
+			t.Errorf("FormatBytes(%d, %v) = %q, want %q", tc.in, tc.raw, got, tc.want)
 		}
 	}
 }
@@ -42,22 +42,40 @@ func TestParseSize(t *testing.T) {
 		{"100M", 100 * (1 << 20), false},
 		{"", 0, true},
 		{"abc", 0, true},
-		{"1Z", 0, true}, // no Z suffix
+		{"1Z", 0, true},
 	}
 	for _, tc := range tests {
-		got, err := parseSize(tc.in)
+		got, err := ParseSize(tc.in)
 		if tc.wantErr {
 			if err == nil {
-				t.Errorf("parseSize(%q) succeeded, want error", tc.in)
+				t.Errorf("ParseSize(%q) succeeded, want error", tc.in)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("parseSize(%q) err = %v", tc.in, err)
+			t.Errorf("ParseSize(%q) err = %v", tc.in, err)
 			continue
 		}
 		if got != tc.want {
-			t.Errorf("parseSize(%q) = %d, want %d", tc.in, got, tc.want)
+			t.Errorf("ParseSize(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestFormatVolumeHealth(t *testing.T) {
+	if got := FormatVolumeHealth(""); got != "ok" {
+		t.Errorf("empty → %q want \"ok\"", got)
+	}
+	if got := FormatVolumeHealth("degraded"); got != "degraded" {
+		t.Errorf("degraded → %q", got)
+	}
+}
+
+func TestCapitalize(t *testing.T) {
+	cases := map[string]string{"": "", "done": "Done", "ok": "Ok", "X": "X"}
+	for in, want := range cases {
+		if got := Capitalize(in); got != want {
+			t.Errorf("Capitalize(%q) = %q want %q", in, got, want)
 		}
 	}
 }
