@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
@@ -28,16 +27,13 @@ func TestOptionalRoleDisabledRecognizesIncidentAPI(t *testing.T) {
 }
 
 func TestBuildVolumeManagerDisablesDedupWhenOptionalRoleCannotOpen(t *testing.T) {
-	cmd := &cobra.Command{Use: "serve"}
-	cmd.Flags().Bool("dedup", true, "")
-	cmd.Flags().Int64("block-cache-size", 0, "")
 	dataFile := filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(dataFile, []byte("x"), 0o644))
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
 	defer backend.Close()
 
-	mgr, cache, dedupDB, err := buildVolumeManager(cmd, dataFile, backend)
+	mgr, cache, dedupDB, err := serveruntime.BuildVolumeManager(serveruntime.VolumeManagerOptions{DedupEnabled: true}, dataFile, backend)
 
 	require.NoError(t, err)
 	require.NotNil(t, mgr)
@@ -46,21 +42,20 @@ func TestBuildVolumeManagerDisablesDedupWhenOptionalRoleCannotOpen(t *testing.T)
 }
 
 func TestSetupClusterReceiptDisablesOptionalRoleWhenDBCannotOpen(t *testing.T) {
-	cmd := &cobra.Command{Use: "serve"}
-	cmd.Flags().Bool("heal-receipt-enabled", true, "")
-	cmd.Flags().String("heal-receipt-psk", "test-psk", "")
-	cmd.Flags().Duration("heal-receipt-retention", time.Hour, "")
-	cmd.Flags().Duration("heal-receipt-gossip-interval", time.Hour, "")
-	cmd.Flags().Int("heal-receipt-window", 1, "")
 	dataFile := filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(dataFile, []byte("x"), 0o644))
 
-	opts, wiring, err := setupClusterReceipt(
+	opts, wiring, err := serveruntime.SetupClusterReceipt(
 		context.Background(),
-		cmd,
+		serveruntime.ReceiptOptions{
+			Enabled:        true,
+			PSK:            "test-psk",
+			Retention:      time.Hour,
+			GossipInterval: time.Hour,
+			WindowSize:     1,
+		},
 		dataFile,
 		"node-a",
-		"",
 		nil,
 		nil,
 		nil,
