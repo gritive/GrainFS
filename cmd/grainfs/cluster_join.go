@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -38,7 +39,7 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 	}
 	if nodeID == "" {
 		var err error
-		nodeID, err = generateNodeID(dataDir)
+		nodeID, err = serveruntime.GenerateNodeID(dataDir)
 		if err != nil {
 			return fmt.Errorf("generate node ID: %w", err)
 		}
@@ -97,7 +98,7 @@ func runClusterJoinNodeReal(ctx context.Context, peerAddr, dataDir, nodeID, raft
 	}
 	defer metaRaft.Close()
 
-	return performMetaJoin(ctx, quicTransport, []string{peerAddr}, nodeID, raftAddr)
+	return serveruntime.PerformMetaJoin(ctx, quicTransport, []string{peerAddr}, nodeID, raftAddr)
 }
 
 func init() {
