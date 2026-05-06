@@ -182,6 +182,8 @@ type encryptedShardReader struct {
 	noncePrefix [encryptedNoncePrefixLen]byte
 	chunkIdx    uint32
 	plain       []byte
+	plainBuf    []byte
+	cipherBuf   []byte
 	done        bool
 }
 
@@ -218,19 +220,26 @@ func (r *encryptedShardReader) loadChunk() error {
 			return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", r.chunkIdx, cipherLen, plainLen)
 		}
 
-		ciphertext := make([]byte, cipherLen)
+		if cap(r.cipherBuf) < int(cipherLen) {
+			r.cipherBuf = make([]byte, cipherLen)
+		}
+		ciphertext := r.cipherBuf[:cipherLen]
 		if _, err := io.ReadFull(r.r, ciphertext); err != nil {
 			return fmt.Errorf("read encrypted shard chunk: %w", err)
 		}
 		nonce := encryptedChunkNonce(r.noncePrefix, r.chunkIdx)
 		aad := encryptedChunkAAD(r.aadBase, r.chunkIdx)
-		plaintext, err := r.enc.OpenWithNonceAAD(make([]byte, 0, plainLen), nonce[:], ciphertext, aad)
+		if cap(r.plainBuf) < int(plainLen) {
+			r.plainBuf = make([]byte, 0, plainLen)
+		}
+		plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
 		if err != nil {
 			return fmt.Errorf("decrypt shard chunk %d: %w", r.chunkIdx, err)
 		}
 		if uint32(len(plaintext)) != plainLen {
 			return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", r.chunkIdx, len(plaintext), plainLen)
 		}
+		r.plainBuf = plaintext[:0]
 		r.plain = plaintext
 		r.chunkIdx++
 		if r.chunkIdx == 0 {
