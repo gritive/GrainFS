@@ -3,7 +3,10 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -194,6 +197,12 @@ func BenchmarkGetObjectEC_LocalDataShardRead(b *testing.B) {
 					require.NoError(b, readLocalECDataShardsParallelPooledOrdered(bk, "bench", resolved.ShardKey, recCfg, &pool))
 				}
 			})
+			b.Run("parallel_raw_no_crc", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					require.NoError(b, readLocalECDataShardsParallelRawNoCRC(bk, "bench", resolved.ShardKey, recCfg))
+				}
+			})
 		})
 	}
 }
@@ -349,4 +358,39 @@ func readLocalECDataShardsParallelPooledOrdered(bk *DistributedBackend, bucket, 
 		pool.Put(data)
 	}
 	return nil
+}
+
+func readLocalECDataShardsParallelRawNoCRC(bk *DistributedBackend, bucket, shardKey string, cfg ECConfig) error {
+	var g errgroup.Group
+	for i := 0; i < cfg.DataShards; i++ {
+		shardIdx := i
+		g.Go(func() error {
+			path := filepath.Join(bk.shardSvc.dataDir, bucket, shardKey, fmt.Sprintf("shard_%d", shardIdx))
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			info, statErr := f.Stat()
+			if statErr != nil {
+				_ = f.Close()
+				return statErr
+			}
+			payloadLen := info.Size() - 8 - 4
+			if payloadLen < 0 {
+				_ = f.Close()
+				return io.ErrUnexpectedEOF
+			}
+			if _, err := f.Seek(8, io.SeekStart); err != nil {
+				_ = f.Close()
+				return err
+			}
+			_, copyErr := io.CopyN(io.Discard, f, payloadLen)
+			closeErr := f.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			return closeErr
+		})
+	}
+	return g.Wait()
 }
