@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.69.0] - 2026-05-06
+
+### Added
+
+- Cluster status responses now include `peer_snapshot`, an operator-facing
+  view that separates peer identity state from liveness state.
+- Cluster peer liveness policy now lives in `internal/cluster` as a pure
+  snapshot composer with predicates for display-down and membership-mutation
+  decisions.
+
+### Changed
+
+- `/api/cluster/status` now derives `peers`, `peer_addrs`, `peer_states`, and
+  `down_nodes` from the peer snapshot when the cluster adapter exposes it.
+- MetaRaft cluster status now includes the local node as `self`, resolved
+  voters as node IDs with raft addresses, and unresolved legacy raft-address
+  voters as explicit compatibility rows.
+
+### Fixed
+
+- Conflicting same-peer probe results now preserve the snapshot contract:
+  probe success wins over probe failure, independent of input order.
+
+### Tests
+
+- Added coverage for snapshot identity/liveness composition, policy
+  predicates, probe-priority conflicts, cluster status legacy-field derivation,
+  and the `grainfs serve` cluster status adapter.
+
 ## [0.0.68.0] - 2026-05-06
 
 ### Changed
