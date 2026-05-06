@@ -7,6 +7,7 @@ package admin
 import (
 	"context"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -32,18 +33,8 @@ type PeerHealthAPI interface {
 	Snapshot() []ClusterPeerInfo
 }
 
-// ClusterPeerInfo is the JSON form of one peer's health state.
-type ClusterPeerInfo struct {
-	ID                  string `json:"id"`
-	Healthy             bool   `json:"healthy"`
-	LastFailure         string `json:"last_failure,omitempty"` // RFC3339Nano, empty when healthy
-	CooldownRemainingMs int64  `json:"cooldown_remaining_ms"`
-}
-
-// ListClusterPeersResp aggregates peer health for GET /v1/cluster/peers.
-type ListClusterPeersResp struct {
-	Peers []ClusterPeerInfo `json:"peers"`
-}
+type ClusterPeerInfo = adminapi.ClusterPeerInfo
+type ListClusterPeersResp = adminapi.ListClusterPeersResp
 
 // ScrubProposer is the slim interface admin handlers need to publish a
 // cluster-wide scrub trigger via raft. Implemented by an adapter in serve.go
@@ -63,19 +54,8 @@ type ScrubAggregator interface {
 	Peers(ctx context.Context, sessionID string) ([]ScrubJobInfo, []string, error)
 }
 
-// ScrubReq is the JSON body for POST /v1/scrub.
-type ScrubReq struct {
-	Bucket    string `json:"bucket"`
-	KeyPrefix string `json:"key_prefix,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-	DryRun    bool   `json:"dry_run,omitempty"`
-}
-
-// ScrubResp identifies the resulting cluster-wide session.
-type ScrubResp struct {
-	SessionID string `json:"session_id"`
-	Created   bool   `json:"created"`
-}
+type ScrubReq = adminapi.ScrubReq
+type ScrubResp = adminapi.ScrubResp
 
 // VlogBreakdownAPI is the slim interface admin handlers need to surface the
 // vlog watcher's per-category state. Implemented by an adapter in serve.go
@@ -85,30 +65,9 @@ type VlogBreakdownAPI interface {
 	Breakdown() (VlogBreakdownResp, error)
 }
 
-// VlogBreakdownResp is the JSON body of GET /v1/resource/vlog/breakdown.
-type VlogBreakdownResp struct {
-	TotalVlogBytes int64               `json:"total_vlog_bytes"`
-	LimitBytes     int64               `json:"limit_bytes"`
-	Ratio          float64             `json:"ratio"`
-	Level          string              `json:"level"` // "ok" | "warn" | "critical"
-	Categories     []VlogCategoryBytes `json:"categories"`
-	GCFailures     map[string]int32    `json:"consecutive_gc_failures_per_category"`
-	SmokeReport    VlogSmokeReport     `json:"smoke_report"`
-}
-
-// VlogCategoryBytes is one line item of the breakdown, sorted descending by
-// VlogBytes by the adapter.
-type VlogCategoryBytes struct {
-	Category  string `json:"category"`
-	VlogBytes int64  `json:"vlog_bytes"`
-}
-
-// VlogSmokeReport mirrors resourcewatch.SmokeReport on the wire so admin
-// stays decoupled from the resourcewatch package types.
-type VlogSmokeReport struct {
-	Live  []string `json:"live"`
-	Stale []string `json:"stale"`
-}
+type VlogBreakdownResp = adminapi.VlogBreakdownResp
+type VlogCategoryBytes = adminapi.VlogCategoryBytes
+type VlogSmokeReport = adminapi.VlogSmokeReport
 
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
@@ -125,105 +84,27 @@ type Deps struct {
 	NodeID          string
 }
 
-// Error is the domain error type returned by admin handlers. The HTTP adapter
-// maps Code to status code and serializes Message + Details into the response
-// body. Code values are: "not_found" / "conflict" / "invalid" / "unsupported"
-// / "unauthorized" / "internal".
-type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"error"`
-	Details any    `json:"details,omitempty"`
-}
-
-func (e *Error) Error() string { return e.Message }
+type Error = adminapi.Error
 
 func NewNotFound(msg string) *Error { return &Error{Code: "not_found", Message: msg} }
 func NewInvalid(msg string) *Error  { return &Error{Code: "invalid", Message: msg} }
 func NewInternal(msg string) *Error { return &Error{Code: "internal", Message: msg} }
-func NewConflict(msg string, details any) *Error {
+func NewConflict(msg string, details map[string]any) *Error {
 	return &Error{Code: "conflict", Message: msg, Details: details}
 }
-func NewUnsupported(msg string, details any) *Error {
+func NewUnsupported(msg string, details map[string]any) *Error {
 	return &Error{Code: "unsupported", Message: msg, Details: details}
 }
 
-// WriteAtVolumeReq is the JSON body for WriteAtVolume.
-type WriteAtVolumeReq struct {
-	Name   string `json:"name"`
-	Offset int64  `json:"offset"`
-	Data   []byte `json:"data"` // base64-encoded in JSON
-}
-
-// WriteAtVolumeResp reports how many bytes were written.
-type WriteAtVolumeResp struct {
-	Bytes int64 `json:"bytes"`
-}
-
-// ReadAtVolumeReq is the JSON body for ReadAtVolume.
-type ReadAtVolumeReq struct {
-	Name   string `json:"name"`
-	Offset int64  `json:"offset"`
-	Length int64  `json:"length"`
-}
-
-// ReadAtVolumeResp carries the read bytes.
-type ReadAtVolumeResp struct {
-	Data []byte `json:"data"`
-}
-
-// ScrubVolumeReq triggers a scrub session over a single volume's blocks.
-type ScrubVolumeReq struct {
-	Name   string `json:"name"`
-	Scope  string `json:"scope,omitempty"`   // "full" (default) | "live"
-	DryRun bool   `json:"dry_run,omitempty"` // observe-only: detect, no repair
-}
-
-// ScrubVolumeResp identifies the resulting session.
-type ScrubVolumeResp struct {
-	SessionID string `json:"session_id"`
-	Created   bool   `json:"created"` // false = duplicate request, returned existing session
-}
-
-// ScrubJobInfo is the JSON form of one Director session. When returned by the
-// cluster-wide GET /v1/scrub/jobs/<id> handler, counters are summed across
-// all reachable peers; Partial flags peer RPC failures so the operator can
-// distinguish "everyone agrees done" from "we got most peers, one timed out".
-type ScrubJobInfo struct {
-	SessionID    string   `json:"session_id"`
-	Bucket       string   `json:"bucket"`
-	KeyPrefix    string   `json:"key_prefix"`
-	Scope        string   `json:"scope"`
-	DryRun       bool     `json:"dry_run"`
-	Status       string   `json:"status"` // running | done | cancelled
-	StartedAt    int64    `json:"started_at"`
-	DoneAt       int64    `json:"done_at,omitempty"`
-	Checked      int64    `json:"checked"`
-	Healthy      int64    `json:"healthy"`
-	Detected     int64    `json:"detected"`
-	Repaired     int64    `json:"repaired"`
-	Unrepairable int64    `json:"unrepairable"`
-	Skipped      int64    `json:"skipped"`
-	OwnedHere    bool     `json:"owned_here"`              // this node ran the scrub (vs. only forwarded the trigger)
-	Partial      bool     `json:"partial,omitempty"`       // any peer RPC timed out / failed
-	PeerFailures []string `json:"peer_failures,omitempty"` // peer node IDs that did not respond
-}
-
-// ListScrubJobsResp aggregates the active session list.
-type ListScrubJobsResp struct {
-	Jobs []ScrubJobInfo `json:"jobs"`
-}
-
-// VolumeInfo is the JSON representation of a volume in admin responses.
-type VolumeInfo struct {
-	Name            string   `json:"name"`
-	Size            int64    `json:"size"`
-	BlockSize       int      `json:"block_size"`
-	AllocatedBlocks int64    `json:"allocated_blocks"`
-	AllocatedBytes  int64    `json:"allocated_bytes"`
-	SnapshotCount   int32    `json:"snapshot_count"`
-	Health          string   `json:"health"`
-	HealthReasons   []string `json:"health_reasons"`
-}
+type WriteAtVolumeReq = adminapi.WriteAtVolumeReq
+type WriteAtVolumeResp = adminapi.WriteAtVolumeResp
+type ReadAtVolumeReq = adminapi.ReadAtVolumeReq
+type ReadAtVolumeResp = adminapi.ReadAtVolumeResp
+type ScrubVolumeReq = adminapi.ScrubVolumeReq
+type ScrubVolumeResp = adminapi.ScrubVolumeResp
+type ScrubJobInfo = adminapi.ScrubJobInfo
+type ListScrubJobsResp = adminapi.ListScrubJobsResp
+type VolumeInfo = adminapi.VolumeInfo
 
 func toVolumeInfo(v *volume.Volume) VolumeInfo {
 	return VolumeInfo{
