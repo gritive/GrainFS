@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
@@ -203,6 +204,34 @@ func BenchmarkGetObjectEC_LocalDataShardRead(b *testing.B) {
 					require.NoError(b, readLocalECDataShardsParallelRawNoCRC(bk, "bench", resolved.ShardKey, recCfg))
 				}
 			})
+			b.Run("parallel_reuse_open_crc", func(b *testing.B) {
+				files, payloadLen, err := openLocalECDataShardFiles(bk, "bench", resolved.ShardKey, recCfg)
+				require.NoError(b, err)
+				b.Cleanup(func() {
+					for _, f := range files {
+						_ = f.Close()
+					}
+				})
+
+				b.ReportAllocs()
+				for b.Loop() {
+					require.NoError(b, readLocalECDataShardsParallelReuseOpenCRC(files, payloadLen))
+				}
+			})
+			b.Run("parallel_reuse_open_raw_no_crc", func(b *testing.B) {
+				files, payloadLen, err := openLocalECDataShardFiles(bk, "bench", resolved.ShardKey, recCfg)
+				require.NoError(b, err)
+				b.Cleanup(func() {
+					for _, f := range files {
+						_ = f.Close()
+					}
+				})
+
+				b.ReportAllocs()
+				for b.Loop() {
+					require.NoError(b, readLocalECDataShardsParallelReuseOpenRawNoCRC(files, payloadLen))
+				}
+			})
 		})
 	}
 }
@@ -390,6 +419,73 @@ func readLocalECDataShardsParallelRawNoCRC(bk *DistributedBackend, bucket, shard
 				return copyErr
 			}
 			return closeErr
+		})
+	}
+	return g.Wait()
+}
+
+func openLocalECDataShardFiles(bk *DistributedBackend, bucket, shardKey string, cfg ECConfig) ([]*os.File, int64, error) {
+	files := make([]*os.File, 0, cfg.DataShards)
+	var payloadLen int64 = -1
+	for i := 0; i < cfg.DataShards; i++ {
+		path := filepath.Join(bk.shardSvc.dataDir, bucket, shardKey, fmt.Sprintf("shard_%d", i))
+		f, err := os.Open(path)
+		if err != nil {
+			for _, f := range files {
+				_ = f.Close()
+			}
+			return nil, 0, err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			for _, f := range files {
+				_ = f.Close()
+			}
+			return nil, 0, err
+		}
+		shardPayloadLen := info.Size() - 8 - 4
+		if shardPayloadLen < 0 {
+			_ = f.Close()
+			for _, f := range files {
+				_ = f.Close()
+			}
+			return nil, 0, io.ErrUnexpectedEOF
+		}
+		if payloadLen < 0 {
+			payloadLen = shardPayloadLen
+		}
+		files = append(files, f)
+	}
+	return files, payloadLen, nil
+}
+
+func readLocalECDataShardsParallelReuseOpenCRC(files []*os.File, payloadLen int64) error {
+	var g errgroup.Group
+	for _, f := range files {
+		file := f
+		g.Go(func() error {
+			if _, err := file.Seek(8, io.SeekStart); err != nil {
+				return err
+			}
+			r := eccodec.NewSizedShardReader(file, payloadLen)
+			_, err := io.Copy(io.Discard, r)
+			return err
+		})
+	}
+	return g.Wait()
+}
+
+func readLocalECDataShardsParallelReuseOpenRawNoCRC(files []*os.File, payloadLen int64) error {
+	var g errgroup.Group
+	for _, f := range files {
+		file := f
+		g.Go(func() error {
+			if _, err := file.Seek(8, io.SeekStart); err != nil {
+				return err
+			}
+			_, err := io.CopyN(io.Discard, file, payloadLen)
+			return err
 		})
 	}
 	return g.Wait()
