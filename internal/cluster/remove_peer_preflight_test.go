@@ -58,6 +58,23 @@ func TestEvaluateRemovePeerPreflight_ExplicitDownDoesNotCountAsAlive(t *testing.
 	require.Equal(t, 1, result.AliveAfter)
 }
 
+func TestEvaluateRemovePeerPreflight_IgnoresSnapshotRowsOutsideVoterSet(t *testing.T) {
+	result := EvaluateRemovePeerPreflight(RemovePeerPreflightInput{
+		TargetID: "n3",
+		Voters:   []string{"n2", "n3"},
+		Snapshot: []PeerLivenessRow{
+			{PeerID: "n1", IdentityState: PeerIdentitySelf, LivenessState: PeerLivenessLive},
+			{PeerID: "n2", IdentityState: PeerIdentityResolved, LivenessState: PeerLivenessConfigured},
+			{PeerID: "n3", IdentityState: PeerIdentityResolved, LivenessState: PeerLivenessLive},
+			{PeerID: "n4", IdentityState: PeerIdentityResolved, LivenessState: PeerLivenessLive},
+		},
+	})
+
+	require.False(t, result.Allowed)
+	require.Equal(t, RemovePeerPreflightQuorumWouldBreak, result.Reason)
+	require.Equal(t, 1, result.AliveAfter)
+}
+
 func TestEvaluateRemovePeerPreflight_UnresolvedLegacyBlocksOtherRemoval(t *testing.T) {
 	result := EvaluateRemovePeerPreflight(RemovePeerPreflightInput{
 		TargetID: "n2",

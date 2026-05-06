@@ -49,8 +49,9 @@ func EvaluateRemovePeerPreflight(input RemovePeerPreflightInput) RemovePeerPrefl
 		return result
 	}
 
+	eligible := removePeerEligibleAliveRows(input.TargetID, input.Voters)
 	for _, row := range input.Snapshot {
-		if row.PeerID == input.TargetID {
+		if !eligible(row) {
 			continue
 		}
 		if IsAliveForMembershipMutation(row) {
@@ -78,4 +79,23 @@ func removePeerTargetInCluster(target string, voters []string, snapshot []PeerLi
 		}
 	}
 	return false
+}
+
+func removePeerEligibleAliveRows(target string, voters []string) func(PeerLivenessRow) bool {
+	voterSet := make(map[string]struct{}, len(voters))
+	for _, voter := range voters {
+		if voter != target {
+			voterSet[voter] = struct{}{}
+		}
+	}
+	return func(row PeerLivenessRow) bool {
+		if row.PeerID == target {
+			return false
+		}
+		if row.IdentityState == PeerIdentitySelf {
+			return true
+		}
+		_, ok := voterSet[row.PeerID]
+		return ok
+	}
 }
