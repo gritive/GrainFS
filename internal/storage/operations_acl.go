@@ -47,7 +47,11 @@ func (o *Operations) PutObjectWithACLResult(ctx context.Context, bucket, key str
 	if err != nil {
 		return nil, err
 	}
-	return &PutObjectResult{Object: obj, Previous: previous}, nil
+	facts, err := mutationObjectFacts("PutObjectWithACL", obj)
+	if err != nil {
+		return nil, err
+	}
+	return &PutObjectResult{Object: facts, Previous: previous}, nil
 }
 
 func putObjectWithACLOnBackend(ctx context.Context, backend Backend, bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {

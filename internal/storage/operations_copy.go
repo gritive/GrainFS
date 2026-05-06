@@ -43,7 +43,7 @@ type CopyObjectRequest struct {
 }
 
 type CopyObjectResult struct {
-	Object   *Object
+	Object   ObjectFacts
 	Previous PreviousObject
 }
 
@@ -113,7 +113,11 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, incl
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: obj, Previous: previous}, nil
+		facts, err := mutationObjectFacts("CopyObject", obj)
+		if err != nil {
+			return nil, err
+		}
+		return &CopyObjectResult{Object: facts, Previous: previous}, nil
 	}
 
 	if req.ACL == nil && canUseSimpleCopier(req) && plan.copier != nil {
@@ -121,7 +125,11 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, incl
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: obj, Previous: previous}, nil
+		facts, err := mutationObjectFacts("CopyObject", obj)
+		if err != nil {
+			return nil, err
+		}
+		return &CopyObjectResult{Object: facts, Previous: previous}, nil
 	}
 
 	rc, _, err := o.openCopySource(ctx, plan, req.Source)
@@ -135,14 +143,22 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, incl
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: obj, Previous: previous}, nil
+		facts, err := mutationObjectFacts("CopyObject", obj)
+		if err != nil {
+			return nil, err
+		}
+		return &CopyObjectResult{Object: facts, Previous: previous}, nil
 	}
 
 	obj, err := o.backend.PutObject(ctx, req.Destination.Bucket, req.Destination.Key, rc, contentType)
 	if err != nil {
 		return nil, err
 	}
-	return &CopyObjectResult{Object: obj, Previous: previous}, nil
+	facts, err := mutationObjectFacts("CopyObject", obj)
+	if err != nil {
+		return nil, err
+	}
+	return &CopyObjectResult{Object: facts, Previous: previous}, nil
 }
 
 func normalizeCopyObjectRequest(req CopyObjectRequest) CopyObjectRequest {

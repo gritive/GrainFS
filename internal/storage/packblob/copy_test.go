@@ -66,14 +66,13 @@ func TestOperationsCopyObjectUsesPackedAdapterAndReplaceContentType(t *testing.T
 	require.NoError(t, err)
 
 	ops := storage.NewOperations(pb)
-	result, err := ops.CopyObject(context.Background(), storage.CopyObjectRequest{
+	_, err = ops.CopyObject(context.Background(), storage.CopyObjectRequest{
 		Source:            storage.ObjectRef{Bucket: "b", Key: "orig.txt"},
 		Destination:       storage.ObjectRef{Bucket: "b", Key: "copy.txt"},
 		MetadataDirective: storage.CopyMetadataReplace,
 		ContentType:       "application/json",
 	})
 	require.NoError(t, err)
-	require.Equal(t, "application/json", result.Object.ContentType)
 
 	require.NoError(t, pb.DeleteObject(context.Background(), "b", "orig.txt"))
 	rc, obj, err := pb.GetObject(context.Background(), "b", "copy.txt")

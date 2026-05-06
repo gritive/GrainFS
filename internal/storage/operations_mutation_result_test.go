@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -49,6 +50,86 @@ func TestOperationsPutObjectWithResultFailsBeforeMutationWhenPreviousReadFails(t
 
 	require.ErrorIs(t, err, readErr)
 	require.Equal(t, []string{"head:b/k"}, backend.calls)
+}
+
+func TestOperationsPutObjectWithResultRejectsInvalidReturnedMetadata(t *testing.T) {
+	backend := &mutationResultBackend{returnObject: &Object{Key: "k", Size: -1, ETag: "new"}}
+	ops := NewOperations(backend)
+
+	_, err := ops.PutObjectWithResult(context.Background(), "b", "k", strings.NewReader("new"), "text/plain")
+
+	var invalid InvalidMutationResultError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, "PutObject", invalid.Op)
+	require.Equal(t, "size", invalid.Field)
+	require.Equal(t, []string{"head:b/k", "put:b/k:text/plain:new"}, backend.calls)
+}
+
+func TestOperationsPutObjectWithResultFailsBeforeMutationWhenPreviousMetadataInvalid(t *testing.T) {
+	backend := &mutationResultBackend{previous: &Object{Key: "k", Size: -1, ETag: "old"}}
+	ops := NewOperations(backend)
+
+	_, err := ops.PutObjectWithResult(context.Background(), "b", "k", strings.NewReader("new"), "text/plain")
+
+	var invalid InvalidMutationResultError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, "HeadObject", invalid.Op)
+	require.Equal(t, "size", invalid.Field)
+	require.Equal(t, []string{"head:b/k"}, backend.calls)
+}
+
+func TestOperationsCompleteMultipartUploadWithResultReturnsPreviousSummary(t *testing.T) {
+	backend := &mutationResultBackend{
+		previous: &Object{Key: "k", Size: 12, ETag: "old", VersionID: "v1"},
+	}
+	ops := NewOperations(backend)
+
+	result, err := ops.CompleteMultipartUploadWithResult(context.Background(), "b", "k", "upload-1", []Part{{PartNumber: 1, ETag: "p1"}})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(33), result.Object.Size)
+	require.Equal(t, "complete", result.Object.ETag)
+	require.Equal(t, PreviousObject{
+		Exists:    true,
+		Size:      12,
+		ETag:      "old",
+		VersionID: "v1",
+	}, result.Previous)
+	require.Equal(t, []string{"head:b/k", "complete:b/k:upload-1:1"}, backend.calls)
+}
+
+func TestOperationsDeleteObjectWithResultUsesDeleteMarkerAndPreviousSummary(t *testing.T) {
+	backend := &mutationResultBackend{
+		previous: &Object{Key: "k", Size: 12, ETag: "old", VersionID: "v1"},
+		markerID: "marker-1",
+	}
+	ops := NewOperations(backend)
+
+	result, err := ops.DeleteObjectWithResult(context.Background(), "b", "k")
+
+	require.NoError(t, err)
+	require.True(t, result.Deleted.DeleteMarker)
+	require.Equal(t, "marker-1", result.Deleted.VersionID)
+	require.Equal(t, PreviousObject{
+		Exists:    true,
+		Size:      12,
+		ETag:      "old",
+		VersionID: "v1",
+	}, result.Previous)
+	require.Equal(t, []string{"head:b/k", "delete-marker:b/k"}, backend.calls)
+}
+
+func TestOperationsDeleteObjectWithResultStillDeletesWhenPreviousMissing(t *testing.T) {
+	backend := &mutationResultBackend{previousErr: ErrObjectNotFound, markerID: "marker-1"}
+	ops := NewOperations(backend)
+
+	result, err := ops.DeleteObjectWithResult(context.Background(), "b", "k")
+
+	require.NoError(t, err)
+	require.False(t, result.Previous.Exists)
+	require.True(t, result.Deleted.DeleteMarker)
+	require.Equal(t, "marker-1", result.Deleted.VersionID)
+	require.Equal(t, []string{"head:b/k", "delete-marker:b/k"}, backend.calls)
 }
 
 func TestOperationsCopyObjectWithResultReportsDestinationPreviousSummary(t *testing.T) {
@@ -100,11 +181,13 @@ func TestOperationsCopyObjectWithResultFailsBeforeWriteWhenDestinationPreviousRe
 
 type mutationResultBackend struct {
 	basicBackend
-	calls       []string
-	source      *Object
-	sourceBody  string
-	previous    *Object
-	previousErr error
+	calls        []string
+	source       *Object
+	sourceBody   string
+	previous     *Object
+	previousErr  error
+	returnObject *Object
+	markerID     string
 }
 
 func (b *mutationResultBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
@@ -138,5 +221,22 @@ func (b *mutationResultBackend) PutObject(_ context.Context, bucket, key string,
 		return nil, err
 	}
 	b.calls = append(b.calls, "put:"+bucket+"/"+key+":"+contentType+":"+string(data))
+	if b.returnObject != nil {
+		return cloneObject(b.returnObject), nil
+	}
 	return &Object{Key: key, Size: int64(len(data)), ETag: "new", ContentType: contentType, VersionID: "new-version"}, nil
+}
+
+func (b *mutationResultBackend) CompleteMultipartUpload(
+	_ context.Context,
+	bucket, key, uploadID string,
+	parts []Part,
+) (*Object, error) {
+	b.calls = append(b.calls, "complete:"+bucket+"/"+key+":"+uploadID+":"+strconv.Itoa(len(parts)))
+	return &Object{Key: key, Size: 33, ETag: "complete", VersionID: "complete-version"}, nil
+}
+
+func (b *mutationResultBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	b.calls = append(b.calls, "delete-marker:"+bucket+"/"+key)
+	return b.markerID, nil
 }

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.59.0] - 2026-05-06
+
+### Changed
+
+- Object write and delete metrics now use storage operation results for PUT,
+  CopyObject, browser form upload, multipart complete, and delete, avoiding
+  overwrite and repeated-delete drift.
+- Browser form upload and multipart complete responses now include
+  `X-Amz-Version-Id` headers when the storage mutation returns a version ID.
+- Mutation result APIs now return normalized object facts and reject invalid
+  mutation metadata before handlers emit metrics or responses.
+
+### Tests
+
+- Added storage operation coverage for multipart/delete mutation results and
+  invalid mutation metadata handling.
+- Added pure server metric delta tests for write overwrite and delete cases.
+
 ## [0.0.58.1] — 2026-05-06 — EC stream memory tuning
 
 ### Changed

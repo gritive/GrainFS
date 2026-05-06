@@ -352,7 +352,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 	obj := result.Object
 
-	recordObjectMutationMetrics(result.Previous, obj.Size)
+	recordObjectWriteMetrics(result.Previous, obj.Size)
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	if obj.VersionID != "" {
@@ -362,13 +362,40 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	c.Status(consts.StatusOK)
 }
 
-func recordObjectMutationMetrics(previous storage.PreviousObject, newSize int64) {
+type objectMetricDelta struct {
+	objects int64
+	bytes   int64
+}
+
+func objectWriteMetricDelta(previous storage.PreviousObject, newSize int64) objectMetricDelta {
 	if previous.Exists {
-		metrics.StorageBytesTotal.Add(float64(-previous.Size))
-	} else {
-		metrics.ObjectsTotal.Inc()
+		return objectMetricDelta{bytes: -previous.Size + newSize}
 	}
-	metrics.StorageBytesTotal.Add(float64(newSize))
+	return objectMetricDelta{objects: 1, bytes: newSize}
+}
+
+func objectDeleteMetricDelta(previous storage.PreviousObject) objectMetricDelta {
+	if !previous.Exists {
+		return objectMetricDelta{}
+	}
+	return objectMetricDelta{objects: -1, bytes: -previous.Size}
+}
+
+func applyObjectMetricDelta(delta objectMetricDelta) {
+	if delta.objects != 0 {
+		metrics.ObjectsTotal.Add(float64(delta.objects))
+	}
+	if delta.bytes != 0 {
+		metrics.StorageBytesTotal.Add(float64(delta.bytes))
+	}
+}
+
+func recordObjectWriteMetrics(previous storage.PreviousObject, newSize int64) {
+	applyObjectMetricDelta(objectWriteMetricDelta(previous, newSize))
+}
+
+func recordObjectDeleteMetrics(previous storage.PreviousObject) {
+	applyObjectMetricDelta(objectDeleteMetricDelta(previous))
 }
 
 func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
@@ -666,22 +693,16 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Get size before deleting for metric tracking
-	existing, _ := s.ops.HeadObject(ctx, bucket, key)
-
-	markerID, err := s.ops.DeleteObjectReturningMarker(ctx, bucket, key)
+	result, err := s.ops.DeleteObjectWithResult(ctx, bucket, key)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
-	if markerID != "" {
+	if result.Deleted.DeleteMarker {
 		c.Header("x-amz-delete-marker", "true")
-		c.Header("x-amz-version-id", markerID)
+		c.Header("x-amz-version-id", result.Deleted.VersionID)
 	}
-	metrics.ObjectsTotal.Dec()
-	if existing != nil {
-		metrics.StorageBytesTotal.Add(float64(-existing.Size))
-	}
+	recordObjectDeleteMetrics(result.Previous)
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDelete, Bucket: bucket, Key: key})
 	c.Status(consts.StatusNoContent)
 }
@@ -816,15 +837,18 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	defer file.Close()
 
-	obj, err := s.ops.PutObject(ctx, bucket, key, file, contentType)
+	result, err := s.ops.PutObjectWithResult(ctx, bucket, key, file, contentType)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
+	obj := result.Object
 
-	metrics.ObjectsTotal.Inc()
-	metrics.StorageBytesTotal.Add(float64(obj.Size))
+	recordObjectWriteMetrics(result.Previous, obj.Size)
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
+	if obj.VersionID != "" {
+		c.Header("X-Amz-Version-Id", obj.VersionID)
+	}
 
 	// Respond with 204 or redirect if success_action_redirect is set
 	if redirectURL := form.Value["success_action_redirect"]; len(redirectURL) > 0 && redirectURL[0] != "" {
@@ -915,21 +939,24 @@ func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestCont
 		parts[i] = storage.Part{PartNumber: p.PartNumber, ETag: etag}
 	}
 
-	obj, err := s.ops.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
+	result, err := s.ops.CompleteMultipartUploadWithResult(ctx, bucket, key, uploadID, parts)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
-	metrics.ObjectsTotal.Inc()
-	metrics.StorageBytesTotal.Add(float64(obj.Size))
+	obj := result.Object
+	recordObjectWriteMetrics(result.Previous, obj.Size)
+	if obj.VersionID != "" {
+		c.Header("X-Amz-Version-Id", obj.VersionID)
+	}
 
-	result := completeMultipartUploadResult{
+	response := completeMultipartUploadResult{
 		Xmlns:  "http://s3.amazonaws.com/doc/2006-03-01/",
 		Bucket: bucket,
 		Key:    key,
 		ETag:   fmt.Sprintf("\"%s\"", obj.ETag),
 	}
-	data, _ := xml.Marshal(result)
+	data, _ := xml.Marshal(response)
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 
@@ -1294,7 +1321,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		return
 	}
 	obj := result.Object
-	recordObjectMutationMetrics(result.Previous, obj.Size)
+	recordObjectWriteMetrics(result.Previous, obj.Size)
 
 	response := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult>
