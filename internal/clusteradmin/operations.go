@@ -28,6 +28,11 @@ type RemovePeerOptions struct {
 	Stdin  io.Reader
 }
 
+// errInvalidTimeout reports a non-positive Timeout. Returned eagerly so the
+// caller sees a clear message instead of a "context deadline exceeded" from
+// context.WithTimeout(0).
+var errInvalidTimeout = errors.New("timeout must be positive")
+
 // RemovePeer drives the full operator workflow for removing a meta-Raft
 // voter:
 //
@@ -41,6 +46,9 @@ type RemovePeerOptions struct {
 func RemovePeer(ctx context.Context, opts RemovePeerOptions) error {
 	if opts.Stdout == nil || opts.Stderr == nil {
 		return errors.New("clusteradmin.RemovePeer: Stdout and Stderr are required")
+	}
+	if opts.Timeout <= 0 {
+		return errInvalidTimeout
 	}
 	client := NewClient(opts.Endpoint)
 	callCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
@@ -104,6 +112,9 @@ func Peers(ctx context.Context, opts PeersOptions) error {
 	if opts.Stdout == nil {
 		return errors.New("clusteradmin.Peers: Stdout is required")
 	}
+	if opts.Timeout <= 0 {
+		return errInvalidTimeout
+	}
 	client := NewClient(opts.Endpoint)
 	callCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
@@ -141,6 +152,9 @@ type EventsOptions struct {
 func Events(ctx context.Context, opts EventsOptions) error {
 	if opts.Stdout == nil {
 		return errors.New("clusteradmin.Events: Stdout is required")
+	}
+	if opts.Timeout <= 0 {
+		return errInvalidTimeout
 	}
 	client := NewClient(opts.Endpoint)
 	callCtx, cancel := context.WithTimeout(ctx, opts.Timeout)

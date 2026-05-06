@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -291,6 +292,27 @@ func TestRemovePeer_EnginePropagatesError(t *testing.T) {
 	status, body := postRemovePeer(t, h.baseURL, "n3", false)
 	assert.Equal(t, http.StatusInternalServerError, status, "engine error must surface, body=%v", body)
 	assert.Contains(t, fmt.Sprintf("%v", body["error"]), "conf change")
+}
+
+// TestRemovePeer_EngineErrNotLeaderRemapsTo409 — leadership can change between
+// the up-front state check and the engine call (the leader steps down or the
+// network partitions). The engine returns raft.ErrNotLeader; the handler must
+// surface that as the same 409 + leader_id shape as the up-front check so the
+// CLI client doesn't see two different error shapes for the same condition.
+func TestRemovePeer_EngineErrNotLeaderRemapsTo409(t *testing.T) {
+	ci := &fakeClusterInfo{
+		nodeID:    "n1",
+		state:     "Leader",
+		leaderID:  "n1",
+		peers:     []string{"n2", "n3"},
+		livePeers: []string{"n1", "n2", "n3"},
+	}
+	mem := &fakeMembership{err: raft.ErrNotLeader}
+	h := setupRemovePeerServer(t, ci, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "n3", false)
+	assert.Equal(t, http.StatusConflict, status, "ErrNotLeader from engine must remap to 409, body=%v", body)
+	assert.Equal(t, "n1", body["leader_id"], "leader_id must accompany the 409 so the CLI can redirect")
 }
 
 func TestRemovePeer_MalformedBody_Returns400(t *testing.T) {

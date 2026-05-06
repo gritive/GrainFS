@@ -20,6 +20,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -1223,6 +1224,16 @@ func (s *Server) removePeerHandler(ctx context.Context, c *app.RequestContext) {
 	}
 
 	if err := s.membership.RemoveVoter(ctx, req.ID); err != nil {
+		// Leadership can change between the pre-flight check and the engine
+		// call. Surface that as 409 + leader_id so the CLI sees the same
+		// shape as the up-front "not leader" check and can redirect.
+		if errors.Is(err, raft.ErrNotLeader) {
+			c.JSON(consts.StatusConflict, map[string]any{
+				"error":     "not leader",
+				"leader_id": s.cluster.LeaderID(),
+			})
+			return
+		}
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"syscall"
@@ -151,6 +150,3 @@ func containsString(xs []string, s string) bool {
 	}
 	return false
 }
-
-// keep fmt referenced even if Logf gets removed during refactor.
-var _ = fmt.Sprintf

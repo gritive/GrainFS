@@ -82,6 +82,20 @@ func TestRemovePeer_HappyPath(t *testing.T) {
 	assert.Equal(t, int32(1), stub.removeCalls.Load())
 }
 
+func TestRemovePeer_NonPositiveTimeoutRefused(t *testing.T) {
+	for _, d := range []time.Duration{0, -1 * time.Second} {
+		err := RemovePeer(context.Background(), RemovePeerOptions{
+			Endpoint: "http://127.0.0.1:1",
+			ID:       "n3",
+			Timeout:  d,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		})
+		require.Error(t, err, "timeout=%s must be rejected", d)
+		assert.Contains(t, err.Error(), "timeout must be positive")
+	}
+}
+
 func TestRemovePeer_LocalModeRefusedBeforeNetwork(t *testing.T) {
 	stub := &stubServer{statusBody: map[string]any{"mode": "local"}}
 	srv := httptest.NewServer(stub.handler())
