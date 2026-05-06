@@ -1,7 +1,11 @@
 package cluster
 
 import (
+	"bytes"
+	"io"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestECSplit_AllocsBounded(t *testing.T) {
@@ -30,5 +34,61 @@ func TestECReconstruct_AllocsBounded(t *testing.T) {
 	t.Logf("ECReconstruct allocs after pool: %.0f", allocs)
 	if allocs > 12 {
 		t.Errorf("ECReconstruct allocates %.0f times (want ≤12, baseline was 48)", allocs)
+	}
+}
+
+func TestECReconstructStreamTo_AllocBytesBounded(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := make([]byte, 4*1024*1024)
+	shards, _ := ECSplit(cfg, data)
+
+	run := func() error {
+		readers := make([]io.Reader, len(shards))
+		for i := 0; i < cfg.DataShards; i++ {
+			readers[i] = bytes.NewReader(shards[i])
+		}
+		return ECReconstructStreamTo(io.Discard, cfg, readers)
+	}
+
+	require.NoError(t, run())
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			require.NoError(b, run())
+		}
+	})
+	allocedBytes := res.AllocedBytesPerOp()
+	t.Logf("ECReconstructStreamTo alloc bytes after pool: %d", allocedBytes)
+	if allocedBytes > 256*1024 {
+		t.Errorf("ECReconstructStreamTo allocates %d B/op (want ≤256KiB)", allocedBytes)
+	}
+}
+
+func TestECReconstructStreamTo_MissingDataShardAllocBytesBounded(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := make([]byte, 16*1024*1024)
+	shards, err := ECSplit(cfg, data)
+	require.NoError(t, err)
+
+	run := func() error {
+		readers := make([]io.Reader, len(shards))
+		for i := range shards {
+			if i == 0 {
+				continue
+			}
+			readers[i] = bytes.NewReader(shards[i])
+		}
+		return ECReconstructStreamTo(io.Discard, cfg, readers)
+	}
+
+	require.NoError(t, run())
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			require.NoError(b, run())
+		}
+	})
+	allocedBytes := res.AllocedBytesPerOp()
+	t.Logf("ECReconstructStreamTo missing data shard alloc bytes: %d", allocedBytes)
+	if allocedBytes > 12*1024*1024 {
+		t.Errorf("ECReconstructStreamTo missing data shard allocates %d B/op (want ≤12MiB)", allocedBytes)
 	}
 }

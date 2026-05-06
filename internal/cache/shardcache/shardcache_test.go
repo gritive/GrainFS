@@ -122,6 +122,14 @@ func TestPut_OversizedPayloadSkipped(t *testing.T) {
 	}
 }
 
+func TestCanStore_MatchesPerShardBudget(t *testing.T) {
+	c := New(numShards * 8)
+
+	require.True(t, c.CanStore("k", 8))
+	require.False(t, c.CanStore("k", 9))
+	require.False(t, New(0).CanStore("k", 1))
+}
+
 func TestInvalidate_RemovesEntry(t *testing.T) {
 	c := New(64)
 	c.Put("a", []byte("AAAA"))

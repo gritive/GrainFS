@@ -322,6 +322,26 @@ func (r *RaftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
 	})
 }
 
+func (r *RaftClusterInfo) BucketAssignments() map[string]string {
+	src, ok := r.addrBook.(interface {
+		BucketAssignments() map[string]string
+	})
+	if !ok {
+		return nil
+	}
+	return src.BucketAssignments()
+}
+
+func (r *RaftClusterInfo) ShardGroups() []cluster.ShardGroupEntry {
+	src, ok := r.addrBook.(interface {
+		ShardGroups() []cluster.ShardGroupEntry
+	})
+	if !ok {
+		return nil
+	}
+	return src.ShardGroups()
+}
+
 func (r *RaftClusterInfo) normalizePeerIDs(peers []string) []string {
 	if len(peers) == 0 {
 		return nil

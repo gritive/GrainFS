@@ -127,6 +127,15 @@ func (c *Cache) shardFor(key string) *shard {
 	return c.shards[h.Sum32()&(numShards-1)]
 }
 
+// CanStore reports whether a payload of byteLen bytes could fit in the
+// per-shard budget for key. Put uses the same rule to skip oversized payloads.
+func (c *Cache) CanStore(key string, byteLen int64) bool {
+	if c.capacityBytes <= 0 || byteLen < 0 {
+		return false
+	}
+	return byteLen <= c.shardFor(key).capacityBytes
+}
+
 // Peek returns a cached shard without updating hit/miss counters. It still
 // refreshes LRU state because the caller is actively considering the shard.
 // getObjectEC uses this to decide whether K cached shards are enough before

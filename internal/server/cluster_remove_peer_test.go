@@ -61,6 +61,31 @@ func (f *fakeClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
 	return append([]cluster.PeerLivenessRow(nil), f.snapshot...)
 }
 
+type fakeTopologyClusterInfo struct {
+	*fakeClusterInfo
+	assignments map[string]string
+	groups      []cluster.ShardGroupEntry
+}
+
+func (f *fakeTopologyClusterInfo) BucketAssignments() map[string]string {
+	out := make(map[string]string, len(f.assignments))
+	for k, v := range f.assignments {
+		out[k] = v
+	}
+	return out
+}
+
+func (f *fakeTopologyClusterInfo) ShardGroups() []cluster.ShardGroupEntry {
+	out := make([]cluster.ShardGroupEntry, 0, len(f.groups))
+	for _, group := range f.groups {
+		out = append(out, cluster.ShardGroupEntry{
+			ID:      group.ID,
+			PeerIDs: append([]string(nil), group.PeerIDs...),
+		})
+	}
+	return out
+}
+
 // fakeMembership records calls and returns a configured error.
 type fakeMembership struct {
 	mu       sync.Mutex
@@ -91,13 +116,13 @@ func (f *fakeMembership) called() []string {
 
 type removePeerHarness struct {
 	baseURL string
-	ci      *fakeClusterInfo
+	ci      ClusterInfo
 	mem     *fakeMembership
 	gate    *MutationGate
 	events  *eventstore.Store
 }
 
-func setupRemovePeerServer(t *testing.T, ci *fakeClusterInfo, mem ClusterMembership) *removePeerHarness {
+func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) *removePeerHarness {
 	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
@@ -157,6 +182,41 @@ func postRemovePeer(t *testing.T, base, id string, force bool) (int, map[string]
 		_ = json.Unmarshal(raw, &out)
 	}
 	return resp.StatusCode, out
+}
+
+func TestClusterStatusIncludesBucketTopology(t *testing.T) {
+	ci := &fakeTopologyClusterInfo{
+		fakeClusterInfo: &fakeClusterInfo{
+			nodeID:    "node-1",
+			state:     "Leader",
+			leaderID:  "node-1",
+			peers:     []string{"node-2"},
+			livePeers: []string{"node-2"},
+		},
+		assignments: map[string]string{"bench": "group-7"},
+		groups: []cluster.ShardGroupEntry{
+			{ID: "group-7", PeerIDs: []string{"node-1", "node-2", "node-3"}},
+		},
+	}
+	h := setupRemovePeerServer(t, ci, nil)
+
+	resp, err := http.Get(h.baseURL + "/api/cluster/status")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		BucketAssignments map[string]string `json:"bucket_assignments"`
+		ShardGroups       []struct {
+			ID      string   `json:"id"`
+			PeerIDs []string `json:"peer_ids"`
+		} `json:"shard_groups"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, map[string]string{"bench": "group-7"}, body.BucketAssignments)
+	require.Len(t, body.ShardGroups, 1)
+	require.Equal(t, "group-7", body.ShardGroups[0].ID)
+	require.Equal(t, []string{"node-1", "node-2", "node-3"}, body.ShardGroups[0].PeerIDs)
 }
 
 func TestClusterStatus_IncludesPeerAddresses(t *testing.T) {
