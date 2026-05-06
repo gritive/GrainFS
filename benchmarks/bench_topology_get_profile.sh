@@ -31,6 +31,7 @@ OBJECT_COUNT="${OBJECT_COUNT:-4}"
 SETUP_TIMEOUT="${SETUP_TIMEOUT:-5m}"
 PRELOAD_IN_SHELL="${PRELOAD_IN_SHELL:-1}"
 PROFILE="${PROFILE:-1}"
+PROFILE_ALL_NODES="${PROFILE_ALL_NODES:-0}"
 EC_DATA="${EC_DATA:-4}"
 EC_PARITY="${EC_PARITY:-2}"
 BUCKET="${BUCKET:-bench}"
@@ -63,6 +64,11 @@ PROFILE_DIR=""
 if [[ "$PROFILE" == "1" ]]; then
   PROFILE_DIR="benchmarks/profiles/topology-get-n${NODE_COUNT}-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$PROFILE_DIR"
+  if [[ "$PROFILE_ALL_NODES" == "1" ]]; then
+    for idx in $(seq 1 "$NODE_COUNT"); do
+      mkdir -p "$PROFILE_DIR/node${idx}"
+    done
+  fi
   echo "[bench] pprof profile dir: $PROFILE_DIR"
 fi
 
@@ -241,6 +247,15 @@ fi
 if [[ "$PROFILE" == "1" ]]; then
   curl -sf "http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/heap" \
     -o "$PROFILE_DIR/heap_pre.pb.gz" && echo "[pprof] heap_pre.pb.gz saved" || true
+  if [[ "$PROFILE_ALL_NODES" == "1" ]]; then
+    cp "$PROFILE_DIR/heap_pre.pb.gz" "$PROFILE_DIR/node${TARGET_IDX}/heap_pre.pb.gz" 2>/dev/null || true
+    for idx in $(seq 1 "$NODE_COUNT"); do
+      [[ "$idx" == "$TARGET_IDX" ]] && continue
+      node_pprof_port="$(pprof_port_for_idx "$idx")"
+      curl -sf "http://127.0.0.1:${node_pprof_port}/debug/pprof/heap" \
+        -o "$PROFILE_DIR/node${idx}/heap_pre.pb.gz" && echo "[pprof] node${idx}/heap_pre.pb.gz saved" || true
+    done
+  fi
 fi
 
 echo ""
@@ -255,22 +270,37 @@ if [[ "$NODE_COUNT" -ge 3 ]]; then
 else
   echo "  ec     : inactive for <3 nodes"
 fi
-[[ "$PROFILE" == "1" ]] && echo "  pprof  : http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/"
+if [[ "$PROFILE" == "1" ]]; then
+  echo "  pprof  : http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/"
+  [[ "$PROFILE_ALL_NODES" == "1" ]] && echo "  pprof  : all nodes enabled"
+fi
 echo "=================================================================="
 echo ""
 
-PPROF_BG_PID=""
+PPROF_BG_PIDS=()
 if [[ "$PROFILE" == "1" ]]; then
   duration_sec="${DURATION//[^0-9]/}"
   [[ -z "$duration_sec" ]] && duration_sec=30
   cpu_sec=$(( duration_sec > 10 ? duration_sec - 5 : duration_sec ))
-  (
-    sleep 5
-    echo "[pprof] collecting ${cpu_sec}s CPU profile..."
-    curl -sf "http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/profile?seconds=${cpu_sec}" \
-      -o "$PROFILE_DIR/cpu.pb.gz" && echo "[pprof] cpu.pb.gz saved" || echo "[pprof] CPU profile failed"
-  ) &
-  PPROF_BG_PID=$!
+  collect_cpu_profile() {
+    local idx="$1"
+    local port="$2"
+    local out="$3"
+    (
+      sleep 5
+      echo "[pprof] collecting node${idx} ${cpu_sec}s CPU profile..."
+      curl -sf "http://127.0.0.1:${port}/debug/pprof/profile?seconds=${cpu_sec}" \
+        -o "$out" && echo "[pprof] node${idx} cpu.pb.gz saved" || echo "[pprof] node${idx} CPU profile failed"
+    ) &
+    PPROF_BG_PIDS+=($!)
+  }
+  if [[ "$PROFILE_ALL_NODES" == "1" ]]; then
+    for idx in $(seq 1 "$NODE_COUNT"); do
+      collect_cpu_profile "$idx" "$(pprof_port_for_idx "$idx")" "$PROFILE_DIR/node${idx}/cpu.pb.gz"
+    done
+  else
+    collect_cpu_profile "$TARGET_IDX" "$TARGET_PPROF_PORT" "$PROFILE_DIR/cpu.pb.gz"
+  fi
 fi
 
 "$K6" run "$SCRIPT" \
@@ -289,12 +319,29 @@ fi
   --env TOPOLOGY="nodes=${NODE_COUNT}" \
   "$@" || K6_EXIT=$?
 
-[[ -n "$PPROF_BG_PID" ]] && wait "$PPROF_BG_PID" 2>/dev/null || true
+for pid in "${PPROF_BG_PIDS[@]}"; do
+  wait "$pid" 2>/dev/null || true
+done
+if [[ "$PROFILE" == "1" && "$PROFILE_ALL_NODES" == "1" ]]; then
+  cp "$PROFILE_DIR/node${TARGET_IDX}/cpu.pb.gz" "$PROFILE_DIR/cpu.pb.gz" 2>/dev/null || true
+fi
 
 if [[ "$PROFILE" == "1" ]]; then
   echo ""
   echo "[pprof] collecting post-benchmark profiles..."
   bench_collect_pprof "$TARGET_PPROF_PORT" "$PROFILE_DIR" heap allocs goroutine mutex block
+  if [[ "$PROFILE_ALL_NODES" == "1" ]]; then
+    cp "$PROFILE_DIR/heap.pb.gz" "$PROFILE_DIR/node${TARGET_IDX}/heap.pb.gz" 2>/dev/null || true
+    cp "$PROFILE_DIR/allocs.pb.gz" "$PROFILE_DIR/node${TARGET_IDX}/allocs.pb.gz" 2>/dev/null || true
+    cp "$PROFILE_DIR/goroutine.txt" "$PROFILE_DIR/node${TARGET_IDX}/goroutine.txt" 2>/dev/null || true
+    cp "$PROFILE_DIR/mutex.pb.gz" "$PROFILE_DIR/node${TARGET_IDX}/mutex.pb.gz" 2>/dev/null || true
+    cp "$PROFILE_DIR/block.pb.gz" "$PROFILE_DIR/node${TARGET_IDX}/block.pb.gz" 2>/dev/null || true
+    for idx in $(seq 1 "$NODE_COUNT"); do
+      [[ "$idx" == "$TARGET_IDX" ]] && continue
+      node_pprof_port="$(pprof_port_for_idx "$idx")"
+      bench_collect_pprof "$node_pprof_port" "$PROFILE_DIR/node${idx}" heap allocs goroutine mutex block
+    done
+  fi
 
   cp benchmarks/get_report.json "$PROFILE_DIR/get_report.json" 2>/dev/null || true
 
