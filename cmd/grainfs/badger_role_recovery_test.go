@@ -40,4 +40,3 @@ func TestBadgerStartupReducerAdmitsReadOnlyForGroupFailure(t *testing.T) {
 	assert.Equal(t, badgerrole.StartupModeReadOnly, got.Mode)
 	assert.Contains(t, got.ReadOnlyReasons[0], "group_state")
 }
-

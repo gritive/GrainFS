@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 	"github.com/gritive/GrainFS/internal/volume/dedup"
@@ -33,8 +34,8 @@ func buildVolumeManager(cmd *cobra.Command, dataDir string, backend storage.Back
 	reg := badgerrole.DefaultRegistry()
 	db, decision, err := badgerrole.OpenRole(reg, badgerrole.RoleDedup, badgerrole.PathContext{DataDir: dataDir})
 	if err != nil {
-		if feature, ok := optionalRoleDisabled(reg, decision); ok {
-			logOptionalRoleDisabled(badgerrole.RoleDedup, feature, err)
+		if feature, ok := serveruntime.OptionalRoleDisabled(reg, decision); ok {
+			serveruntime.LogOptionalRoleDisabled(badgerrole.RoleDedup, feature, err)
 			return volume.NewManagerWithOptions(backend, opts), cache, nil, nil
 		}
 		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)

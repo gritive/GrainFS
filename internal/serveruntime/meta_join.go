@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"context"
@@ -9,7 +9,10 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-func performMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport, peers []string, nodeID, raftAddr string) error {
+// PerformMetaJoin issues the StreamMetaJoin RPC to each peer in turn until
+// one accepts the join. Used by --join-mode bootstrap so a fresh node can
+// register itself with the meta-raft leader without operator intervention.
+func PerformMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport, peers []string, nodeID, raftAddr string) error {
 	joinCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
 	defer cancel()
 	sender := cluster.NewMetaJoinSender(func(peer string, payload []byte) ([]byte, error) {

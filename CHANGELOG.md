@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.65.0] - 2026-05-06
+## [0.0.66.0] - 2026-05-06
 
 ### Added
 
@@ -26,6 +26,34 @@
 - Added stream reconstruction coverage for missing data shards, encrypted shard
   reader round-trips, CRC reader footer mismatch detection, and ShardService
   plaintext stream behavior.
+
+## [0.0.65.0] — 2026-05-06 — Serveruntime helpers expansion (cmd-thin PR1a)
+
+### Changed
+
+- 9개 cobra-free 헬퍼 파일을 `cmd/grainfs/` 에서 `internal/serveruntime/`
+  로 이주: `serve_bootstrap.go`, `nodeid.go`, `meta_join.go`,
+  `iceberg_migration.go`, `optional_badger_role.go`,
+  `incident_recorder_wiring.go`, `placement_monitor_registry.go`,
+  `reshard_manager_registry.go`, `rotation_socket.go`.
+- 새로 export된 심볼: `FilterEmpty`, `ShouldCreateDefaultBucketOnStartup`,
+  `MetaProposalTargets`, `CreateDefaultBucketWithRetry`, `GenerateNodeID`,
+  `PerformMetaJoin`, `MigrateLegacySingletonIcebergCatalog`,
+  `EnsureIcebergMetadataObject`, `OptionalRoleDisabled`,
+  `LogOptionalRoleDisabled`, `IncidentRecorderInterfaces`,
+  `PlacementMonitorRegistry`, `ReshardManagerRegistry`,
+  `StartRotationSocket`, `RotationSocketRequest`,
+  `RotationSocketResponse`, `RotationSocketName`.
+- cmd-side 호출 사이트 (`serve.go`, `cluster_join.go`,
+  `cluster_rotate_key.go`, `serve_storage.go`, `receipt_wiring.go`) 와
+  관련 테스트 파일을 `serveruntime.X` 호출로 갱신.
+- 9개 cmd 파일 삭제 (총 -593 라인). cmd-thin PR1 본체(`runCluster`
+  본체 이주)의 의존 그래프가 단축됨.
+
+### Tests
+
+- 기존 cmd 단위 테스트를 패키지 호출로 갱신 (동등 커버리지 유지).
+  serveruntime 패키지의 단위 테스트 모두 통과.
 
 ## [0.0.64.0] — 2026-05-06 — Serveruntime helpers extraction (cmd-thin PR0)
 

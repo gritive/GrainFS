@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -55,7 +56,7 @@ func TestMigrateLegacySingletonIcebergCatalogBackfillsMissingMetadataObject(t *t
 	t.Cleanup(func() { backend.Close() })
 	catalog, _ := newStartedMetaCatalogForMigrationTest(t, backend)
 
-	require.NoError(t, migrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend))
+	require.NoError(t, serveruntime.MigrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend))
 
 	tbl, err := catalog.LoadTable(ctx, ident)
 	require.NoError(t, err)
@@ -95,8 +96,8 @@ func TestMigrateLegacySingletonIcebergCatalogSkipsMatchingExistingPointer(t *tes
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, migrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend))
-	require.NoError(t, migrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend))
+	require.NoError(t, serveruntime.MigrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend))
+	require.NoError(t, serveruntime.MigrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend))
 }
 
 func TestMigrateLegacySingletonIcebergCatalogFailsOnConflictingTablePointer(t *testing.T) {
@@ -123,14 +124,14 @@ func TestMigrateLegacySingletonIcebergCatalogFailsOnConflictingTablePointer(t *t
 	})
 	require.NoError(t, err)
 
-	err = migrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend)
+	err = serveruntime.MigrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend)
 	require.ErrorContains(t, err, "conflicting legacy Iceberg table pointer")
 }
 
 func TestEnsureIcebergMetadataObjectTreatsNoSuchBucketAsMissingBucket(t *testing.T) {
 	backend := &migrationNoSuchBucketBackend{}
 
-	err := ensureIcebergMetadataObject(context.Background(), backend, "s3://grainfs-tables/warehouse/ns/t/metadata/00000.json", []byte(`{"format-version":2}`))
+	err := serveruntime.EnsureIcebergMetadataObject(context.Background(), backend, "s3://grainfs-tables/warehouse/ns/t/metadata/00000.json", []byte(`{"format-version":2}`))
 	require.NoError(t, err)
 	require.True(t, backend.created)
 	require.Equal(t, "grainfs-tables", backend.bucket)
