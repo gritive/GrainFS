@@ -737,6 +737,151 @@ func TestPutObject_Overwrite(t *testing.T) {
 	assert.Equal(t, "second", string(got))
 }
 
+func TestCopyObjectParsesEncodedSourceVersionAndReplacesContentType(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/src", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodPut, base+"/dst", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/src/dir%20one/file.txt", strings.NewReader("copy me"))
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/dst/copied.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/src/dir%20one/file.txt?versionId=v1")
+	req.Header.Set("x-amz-metadata-directive", "REPLACE")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
+	require.Contains(t, string(body), "NotImplemented")
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/dst/copied.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/src/dir%20one/file.txt")
+	req.Header.Set("x-amz-metadata-directive", "REPLACE")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodHead, base+"/dst/copied.txt", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+}
+
+func TestCopyObjectUnsupportedUserMetadataReturnsNotImplemented(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/src.txt", strings.NewReader("data"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/dst.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/b/src.txt")
+	req.Header.Set("x-amz-metadata-directive", "REPLACE")
+	req.Header.Set("x-amz-meta-owner", "me")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
+	require.Contains(t, string(body), "NotImplemented")
+}
+
+func TestCopyObjectIfNoneMatchReturnsPreconditionFailed(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/src.txt", strings.NewReader("data"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	etag := resp.Header.Get("ETag")
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/dst.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/b/src.txt")
+	req.Header.Set("x-amz-copy-source-if-none-match", etag)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Equal(t, http.StatusPreconditionFailed, resp.StatusCode)
+	require.Contains(t, string(body), "PreconditionFailed")
+}
+
+func TestCopyObjectInvalidMetadataDirectiveReturnsInvalidArgument(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/src.txt", strings.NewReader("data"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/dst.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/b/src.txt")
+	req.Header.Set("x-amz-metadata-directive", "MOVE")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, string(body), "InvalidArgument")
+}
+
+func TestCopyObjectInvalidConditionalDateReturnsInvalidArgument(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/src.txt", strings.NewReader("data"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/dst.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/b/src.txt")
+	req.Header.Set("x-amz-copy-source-if-modified-since", "not-a-date")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, string(body), "InvalidArgument")
+}
+
 func TestDeleteObject_NonExistent(t *testing.T) {
 	base := setupTestServer(t)
 

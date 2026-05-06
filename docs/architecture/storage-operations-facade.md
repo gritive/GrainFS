@@ -117,14 +117,14 @@ Examples:
   fails after `PutObject` succeeds, the facade must attempt rollback by
   hard-deleting the newly-created version. If hard-delete is unavailable, return
   an explicit rollback failure.
-- `CopyObject`: implement complete S3 CopyObject semantics in this slice,
-  including metadata directive, ACL/versioning behavior, and delete-marker
-  source handling. Add a request-shaped facade method such as
-  `Operations.CopyObject(ctx, CopyObjectRequest)`. Keep the existing
-  `storage.Copier` as a lower-level optimization adapter for simple
-  metadata-only copies so volume and packed-blob internals are not forced to
-  understand S3 API semantics. The optimized adapter path and stream-copy
-  fallback must produce the same externally-observable result.
+- `CopyObject`: `Operations.CopyObject(ctx, CopyObjectRequest)` owns S3
+  CopyObject semantics, including metadata directive, copy-source
+  preconditions, ACL/versioned source behavior, and delete-marker source
+  handling. `storage.Copier` remains a lower-level optimization adapter for
+  simple metadata-only copies, while `CopyObjectAdapter` carries the
+  request-shaped fields needed by backends such as packed blobs. Optimized
+  adapter paths and stream-copy fallback must produce the same
+  externally-observable result.
 - `DeleteObjectVersion`: no generic fallback; unsupported if no safe adapter is
   found.
 - `DeleteObjectReturningMarker`: may fall back to `DeleteObject` with an empty
@@ -220,10 +220,12 @@ Focused tests should cover decorated backend stacks:
 - ACL rollback tests cover atomic path, fallback success, set-ACL failure with
   hard-delete rollback success, set-ACL failure with unsupported rollback, and
   recovery gate active.
-- CopyObject facade tests cover metadata directive, ACL, versioning, and
-  delete-marker source behavior across optimized and fallback paths.
-- CopyObject server integration tests cover request header parsing, response
-  headers/XML, version headers, ACL headers, and delete-marker response mapping.
+- CopyObject facade tests cover metadata directive, preconditions, ACL,
+  versioned source restore, delete-marker source behavior, same-source no-op
+  rejection, and wrapper ordering across optimized and fallback paths.
+- CopyObject server integration tests cover encoded source parsing,
+  `versionId`, metadata directive validation, source conditional headers,
+  unsupported user metadata, and response XML.
 - Policy parser, compiler, cache, and benchmarks move with the code into
   `internal/policy`; server keeps HTTP bucket-policy integration tests.
 - Server constructor tests cover `ServerStorage` wiring for volume manager,

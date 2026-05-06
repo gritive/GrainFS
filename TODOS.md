@@ -6,6 +6,33 @@
 
 ### 기타
 
+- [ ] **Storage operations mutation bookkeeping** — `handlePut`, browser form upload,
+  multipart complete, delete path 의 metrics 계산이 mutation 전 `HeadObject` 로
+  이전 객체 크기를 따로 읽는다. 후속에서 `storage.Operations` 에 result 반환
+  helper 를 추가해 이 bookkeeping 을 facade 안으로 모은다. 단, `Operations` 가
+  `storage.Backend` 를 계속 만족해야 하므로 기존 `PutObject`,
+  `CompleteMultipartUpload`, `DeleteObjectReturningMarker` 시그니처는 유지하고
+  별도 메서드 (`PutObjectWithResult`, `CompleteMultipartUploadWithResult`,
+  `DeleteObjectWithResult`, 필요 시 `PutObjectWithACLResult`) 로 추가한다. 이전
+  WIP branch `refactor/storage-operations-mutation-bookkeeping` 는 이 아이디어의
+  초안이었지만 PR #193 이후에는 그대로 머지하면 Backend interface 를 깨므로
+  폐기하고 이 TODO 에서 재설계한다.
+- [ ] **Storage operations CopyObject semantics** — `storage.Operations.CopyObject`
+  를 S3 CopyObject 의미의 test surface 로 deepen 한다. Handler 는
+  `x-amz-copy-source` 를 URL decode + query parse 해서 `ObjectRef{Bucket, Key,
+  VersionID}` 로 넘기고, raw HTTP header text 는 facade 로 넘기지 않는다.
+  `CopyObjectRequest` 는 metadata directive, source 조건
+  (`IfMatch`/`IfNoneMatch`/modified-since 계열), ACL override 를 protocol-neutral
+  type 으로 담는다. `Operations.CopyObject` 는 항상 source `HeadObject` /
+  `HeadObjectVersion` 을 먼저 수행해 delete-marker, precondition, metadata
+  directive, fast-path eligibility 를 body open 전에 결정한다. Optimized
+  `storage.Copier` 는 semantics-free entry point 가 아니라 `Operations` 가 검증한
+  뒤 쓰는 private acceleration path 로 제한한다. 1차 slice 는 user metadata 전체
+  확장 대신 현재 object model 의 `ContentType` 까지만 명확히 처리한다.
+  Precondition 실패는 `storage.ErrPreconditionFailed` + typed error 로, explicit
+  delete-marker version copy 는 `InvalidCopySourceError` 로 모델링한다. 이번 slice
+  에서는 destination previous-object bookkeeping 을 넣지 않고, 위 mutation
+  bookkeeping TODO 에서 `CopyObjectWithResult` 포함 여부를 함께 재검토한다.
 - [ ] **volumeadmin: 30s http.Client.Timeout 제거** — `internal/volumeadmin/client.go`
   의 `http.Client{Timeout: 30 * time.Second}` 가 `BaseOptions.Timeout > 30s` 를
   override 함. ctx-기반 cancellation 으로 충분하니 client timeout 제거하고 ctx

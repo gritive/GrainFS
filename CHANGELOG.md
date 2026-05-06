@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.56.0] — 2026-05-06 — CopyObject semantics
+
+### Changed
+
+- S3 CopyObject now honors encoded copy sources, source version IDs, metadata
+  replacement for content type, and copy-source conditional headers before
+  opening the source body.
+- Storage copy operations now validate delete-marker sources, unsupported user
+  metadata, unsupported ETag selectors, and same-object no-op copies with
+  explicit storage errors that map cleanly to S3 responses.
+- Packed object copies can now use a metadata-only adapter path while preserving
+  content type metadata and avoiding wrapper bypasses around cache, WAL, and
+  recovery write gates.
+
+### Tests
+
+- Added focused server, storage operation, and packed-backend coverage for
+  CopyObject condition evaluation, versioned restore behavior, metadata
+  replacement, delete-marker rejection, wrapper ordering, and packed copy
+  readability after source deletion.
+
 ## [0.0.55.0] — 2026-05-06 — Volume CLI thin-cmd refactor
 
 ### Changed
