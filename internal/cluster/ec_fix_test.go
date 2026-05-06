@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -194,6 +196,30 @@ func TestGetObjectEC_KofN_CancelsRemainder(t *testing.T) {
 	data := []byte("test data for k-of-n")
 	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
+
+	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+}
+
+func TestGetObjectEC_MissingDataShardUsesParity(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
+
+	svc := NewShardService(b.root, nil)
+	allNodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
+	b.SetShardService(svc, allNodes)
+
+	data := bytes.Repeat([]byte("data-shard-fallback-"), 1024)
+	obj, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "text/plain")
+	require.NoError(t, err)
+
+	shardKey := "obj/" + obj.VersionID
+	require.NoError(t, os.Remove(filepath.Join(b.shardSvc.dataDir, "bkt", shardKey, "shard_0")))
 
 	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
 	require.NoError(t, err)
