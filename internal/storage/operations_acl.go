@@ -38,6 +38,18 @@ func (o *Operations) PutObjectWithACL(ctx context.Context, bucket, key string, r
 	return obj, nil
 }
 
+func (o *Operations) PutObjectWithACLResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, acl uint8) (*PutObjectResult, error) {
+	previous, err := o.previousObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := o.PutObjectWithACL(ctx, bucket, key, r, contentType, acl)
+	if err != nil {
+		return nil, err
+	}
+	return &PutObjectResult{Object: obj, Previous: previous}, nil
+}
+
 func putObjectWithACLOnBackend(ctx context.Context, backend Backend, bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
 	if atomic, ok := backend.(AtomicACLPutter); ok {
 		return atomic.PutObjectWithACL(bucket, key, r, contentType, acl)

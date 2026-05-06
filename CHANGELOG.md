@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.57.0] — 2026-05-06 — Storage mutation result bookkeeping
+
+### Changed
+
+- S3 PUT and CopyObject handlers now receive mutation results from
+  `storage.Operations`, so previous-object accounting stays inside the storage
+  facade instead of being pre-read by HTTP handlers.
+- CopyObject overwrite metrics now use destination previous-object facts from
+  the facade while preserving the legacy `CopyObject` method's existing read
+  behavior for callers that do not request mutation bookkeeping.
+
+### Tests
+
+- Added facade-level coverage for previous-object summaries, missing
+  destinations, and previous-read failures before mutation.
+- Added HTTP metrics coverage for CopyObject overwrites so object count and byte
+  totals do not double-count overwritten destinations.
+
 ## [0.0.56.0] — 2026-05-06 — CopyObject semantics
 
 ### Changed
