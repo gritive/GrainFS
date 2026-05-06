@@ -26,6 +26,34 @@
   blocking, cluster status `peer_addrs` / `peer_states`, and CLI peer table
   rendering.
 
+
+## [0.0.66.0] - 2026-05-06
+
+### Added
+
+- EC GET can now reconstruct from local shard streams instead of first loading
+  full shard bodies into memory.
+- Local shard reads now expose a plaintext stream API for chunked encrypted
+  shards and CRC-protected shards.
+
+### Changed
+
+- EC GET reconstruction now works in bounded 1 MiB windows, lowering 64 MiB
+  local EC GET allocation from roughly 67 MiB/op to about 4.2 MiB/op.
+- CRC-protected shard reads now verify the footer while streaming, so EC GET
+  keeps the integrity check without re-buffering the whole shard.
+
+### Fixed
+
+- CRC footer corruption is now detected even when a caller reads exactly the
+  payload length from a sized shard stream.
+
+### Tests
+
+- Added stream reconstruction coverage for missing data shards, encrypted shard
+  reader round-trips, CRC reader footer mismatch detection, and ShardService
+  plaintext stream behavior.
+
 ## [0.0.65.0] — 2026-05-06 — Serveruntime helpers expansion (cmd-thin PR1a)
 
 ### Changed

@@ -154,6 +154,20 @@ func ECReconstructTo(w io.Writer, cfg ECConfig, shards [][]byte) error {
 	return ecReconstructBodiesTo(w, cfg, origSize, bodies)
 }
 
+// ECReconstructStreamTo assembles the original data from shard streams and
+// writes it to w without holding full shard bodies in memory. Missing shards
+// are represented by nil readers.
+func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error {
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
+	if err != nil {
+		return err
+	}
+	if origSize == 0 {
+		return nil
+	}
+	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
+}
+
 func ecReconstructBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies [][]byte) error {
 	enc, err := getEncoder(cfg)
 	if err != nil {
@@ -164,6 +178,67 @@ func ecReconstructBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies [][
 	}
 	if err := enc.Join(w, bodies, int(origSize)); err != nil {
 		return fmt.Errorf("ec join: %w", err)
+	}
+	return nil
+}
+
+func ecReconstructStreamBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader) error {
+	enc, err := getEncoder(cfg)
+	if err != nil {
+		return fmt.Errorf("ec decoder: %w", err)
+	}
+	shardBodySize := (origSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
+	windowSize := int64(defaultECStreamBlockSize)
+	if shardBodySize < windowSize {
+		windowSize = shardBodySize
+	}
+	if windowSize <= 0 {
+		return nil
+	}
+	windows := make([][]byte, len(bodies))
+	windowBufs := make([][]byte, len(bodies))
+	for i, r := range bodies {
+		if r != nil {
+			windowBufs[i] = make([]byte, windowSize)
+		}
+	}
+	remainingShard := shardBodySize
+	remainingOutput := origSize
+	for remainingShard > 0 {
+		n := windowSize
+		if remainingShard < n {
+			n = remainingShard
+		}
+		for i := range windows {
+			windows[i] = nil
+		}
+		for i, r := range bodies {
+			if r == nil {
+				continue
+			}
+			buf := windowBufs[i][:n]
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return fmt.Errorf("read ec shard %d window: %w", i, err)
+			}
+			windows[i] = buf
+		}
+		if err := enc.ReconstructData(windows); err != nil {
+			return fmt.Errorf("ec reconstruct: %w", err)
+		}
+		for i := 0; i < cfg.DataShards && remainingOutput > 0; i++ {
+			if windows[i] == nil {
+				return fmt.Errorf("ec reconstruct: data shard %d unavailable", i)
+			}
+			toWrite := int64(len(windows[i]))
+			if remainingOutput < toWrite {
+				toWrite = remainingOutput
+			}
+			if _, err := w.Write(windows[i][:toWrite]); err != nil {
+				return fmt.Errorf("ec join: %w", err)
+			}
+			remainingOutput -= toWrite
+		}
+		remainingShard -= n
 	}
 	return nil
 }
@@ -186,6 +261,34 @@ func ecReconstructBodies(cfg ECConfig, shards [][]byte) (int64, [][]byte, error)
 			origSize = size
 		}
 		bodies[i] = body
+	}
+	if origSize < 0 {
+		return 0, nil, fmt.Errorf("no readable shards")
+	}
+	return origSize, bodies, nil
+}
+
+func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Reader, error) {
+	if len(shards) != cfg.NumShards() {
+		return 0, nil, fmt.Errorf("shard count mismatch: got %d, want %d", len(shards), cfg.NumShards())
+	}
+	var origSize int64 = -1
+	bodies := make([]io.Reader, len(shards))
+	for i, r := range shards {
+		if r == nil {
+			continue
+		}
+		var header [shardHeaderSize]byte
+		if _, err := io.ReadFull(r, header[:]); err != nil {
+			return 0, nil, fmt.Errorf("read shard %d header: %w", i, err)
+		}
+		size := int64(binary.BigEndian.Uint64(header[:]))
+		if origSize < 0 {
+			origSize = size
+		} else if size != origSize {
+			return 0, nil, fmt.Errorf("shard %d original size mismatch: got %d, want %d", i, size, origSize)
+		}
+		bodies[i] = r
 	}
 	if origSize < 0 {
 		return 0, nil, fmt.Errorf("no readable shards")
