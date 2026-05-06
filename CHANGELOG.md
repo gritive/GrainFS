@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.74.0] - 2026-05-07
+
+### Added
+
+- `cluster status` / `cluster peers` can now mark remote metaRaft voters as
+  `live` when the leader has fresh successful AppendEntries evidence for that
+  peer, giving remove-peer preflight a real positive liveness source.
+- Added regression coverage for heartbeat and entries-bearing AppendEntries
+  success evidence, leader-only evidence exposure, leader epoch reset behavior,
+  freshness filtering, and raft-address to node-ID evidence normalization.
+
+### Changed
+
+- Remove-peer membership safety now treats fresh leader-side metaRaft
+  replication evidence as the positive liveness signal while keeping stale,
+  missing, and follower-side evidence conservative as `configured`.
+- Operator docs now distinguish positive metaRaft liveness evidence from the
+  still-deferred negative dead-peer detection policy.
+
+### Fixed
+
+- New leader epochs now clear prior-term replication evidence so stale
+  successful AppendEntries timestamps cannot briefly mark remote voters live
+  after a leadership change.
+
 ## [0.0.73.0] - 2026-05-07
 
 ### Changed
