@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.0.53.0] — 2026-05-06 — Cluster membership CLI
+
+### Added
+
+- **`grainfs cluster remove-peer <id>`** — operator can now evict a meta-Raft
+  voter via §4.3 joint consensus. Pre-flight refuses the request when removal
+  would drop live voters below the post-removal quorum; `--force` bypasses the
+  pre-flight when ChangeMembership can still commit (e.g., evicting a
+  permanently-dead peer). `--yes` skips the confirmation prompt for CI use.
+  Endpoint is admin-restricted to localhost — run on the leader node.
+- **`grainfs cluster peers`** — tab-aligned voter list (id, role, alive/down)
+  with `--format=text|json`. Reuses `/api/cluster/status`, no new endpoint.
+- **`grainfs cluster events`** — recent cluster audit events from
+  `/api/eventlog` with `--since`, `--limit`, and client-side `--type` filter
+  (e.g. `--type cluster-remove-peer,cluster-join`).
+- New `cluster-remove-peer` audit event surfaces every membership change in
+  `cluster events` and the `/api/eventlog` JSON.
+
+### Changed
+
+- `cluster.Peers()` / `cluster.LivePeers()` now read from the meta-Raft node
+  rather than the legacy per-process raft, so `cluster status` and
+  `cluster peers` reflect the current voter set after dynamic-join updates.
+- `cluster.LivePeers()` reports all meta-Raft voters as alive until PR-D
+  unifies node-id/raft-addr identifiers; pre-flight quorum math still blocks
+  the only-1-voter-left case via voter count.
+- `/api/cluster/remove-peer` joins `/api/cluster/status` and `/api/eventlog`
+  on the auth-bypass list (gated by `localhostOnly` + `mutationGate`).
+
+### Fixed
+
+- `removePeerHandler` remaps `raft.ErrNotLeader` (engine returns it when
+  leadership changed mid-call) to `409 + leader_id`, matching the up-front
+  check's shape so the CLI sees one consistent error contract.
+- `clusteradmin.RemovePeer/Peers/Events` reject `Timeout <= 0` with a clear
+  error rather than producing a confusing `context deadline exceeded`.
+
+### Tests
+
+- `make test`
+- `go test ./tests/e2e/ -run TestE2E_ClusterRemovePeer_DeadFollower` (3-node
+  dynamic-join cluster, kill follower, happy-path remove-peer, audit event
+  verified)
+- `go test ./tests/e2e/ -run "TestClusterStatusCLI|TestE2E_JoinedNode|TestE2E_AllServicesAvailable"` (no regressions)
+
 ## [0.0.52.1] — 2026-05-06 — E2E data directory cleanup
 
 ### Fixed

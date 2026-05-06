@@ -70,5 +70,8 @@ func init() {
 	clusterCmd.AddCommand(clusterStatusCmd)
 	clusterCmd.AddCommand(planShowCmd())
 	clusterCmd.AddCommand(rebalanceCmd())
+	clusterCmd.AddCommand(clusterRemovePeerCmd())
+	clusterCmd.AddCommand(clusterPeersCmd())
+	clusterCmd.AddCommand(clusterEventsCmd())
 	rootCmd.AddCommand(clusterCmd)
 }
