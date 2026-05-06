@@ -220,6 +220,47 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
+func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
+	ctx := context.Background()
+
+	key := bytes.Repeat([]byte("e"), 32)
+	enc1, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+	enc2, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	tr1 := transport.MustNewQUICTransport("test-cluster-psk")
+	tr2 := transport.MustNewQUICTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1, WithEncryptor(enc1))
+	svc2 := NewShardService(dir2, tr2, WithEncryptor(enc2))
+	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
+	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
+
+	plaintext := bytes.Repeat([]byte("encrypted rpc shard"), 128*1024)
+	require.NoError(t, svc1.WriteShardStream(ctx, tr2.LocalAddr(), "bkt", "key", 0, bytes.NewReader(plaintext)))
+
+	rawPath := filepath.Join(dir2, "shards", "bkt", "key", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), string(plaintext[:64]))
+
+	r, err := svc1.ReadShardStream(ctx, tr2.LocalAddr(), "bkt", "key", 0)
+	require.NoError(t, err)
+	defer r.Close()
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
 func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	ctx := context.Background()
 

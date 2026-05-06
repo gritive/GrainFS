@@ -1082,10 +1082,30 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 			}
 			status["down_nodes"] = downNodes
 		}
+		if assignments, ok := s.cluster.(clusterBucketAssignments); ok {
+			status["bucket_assignments"] = assignments.BucketAssignments()
+		}
+		if groups, ok := s.cluster.(clusterShardGroups); ok {
+			status["shard_groups"] = clusterStatusShardGroups(groups.ShardGroups())
+		}
 	}
 
 	data, _ := json.Marshal(status)
 	c.Data(consts.StatusOK, "application/json", data)
+}
+
+type clusterStatusShardGroup struct {
+	ID      string   `json:"id"`
+	PeerIDs []string `json:"peer_ids"`
+}
+
+func clusterStatusShardGroups(groups []cluster.ShardGroupEntry) []clusterStatusShardGroup {
+	out := make([]clusterStatusShardGroup, 0, len(groups))
+	for _, group := range groups {
+		peers := append([]string(nil), group.PeerIDs...)
+		out = append(out, clusterStatusShardGroup{ID: group.ID, PeerIDs: peers})
+	}
+	return out
 }
 
 func legacyPeersFromSnapshot(rows []cluster.PeerLivenessRow) []string {

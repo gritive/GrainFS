@@ -1,9 +1,4 @@
-package main
-
-// node_services.go wires the universal "node services" (NFSv4, NBD)
-// onto any storage.Backend. Both the legacy local dispatch and cluster mode
-// call startNodeServices so NFSv4/NBD are available regardless of which
-// storage topology the operator picked.
+package serveruntime
 
 import (
 	"context"
@@ -11,7 +6,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
@@ -19,15 +13,16 @@ import (
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
-// nodeServices tracks started services so they can be cleanly torn down on
-// shutdown. Zero value is valid — fields are populated as services start.
-type nodeServices struct {
+// NodeServices tracks started services so they can be cleanly torn down
+// on shutdown. Zero value is valid — fields are populated as services
+// start.
+type NodeServices struct {
 	nfs4Srv *nfs4server.Server
 	nbdSrv  *nbd.Server
 }
 
 // Close shuts down any started services. Safe to call on the zero value.
-func (n *nodeServices) Close() {
+func (n *NodeServices) Close() {
 	if n.nbdSrv != nil {
 		if err := n.nbdSrv.Close(); err != nil {
 			log.Warn().Err(err).Msg("nbd server close error")
@@ -36,19 +31,14 @@ func (n *nodeServices) Close() {
 	// nfs4Srv exposes no Close; relies on context cancellation.
 }
 
-// startNodeServices spawns NFSv4 and NBD servers if their respective
-// ports are > 0. Returns the handle for shutdown and nil on success.
-//
-// Args:
-//   - backend: the storage backend NFSv4 should mount.
-//   - volMgr: shared volume.Manager (may have dedup enabled); used by NBD.
-//   - nfs4Port, nbdPort: 0 disables the service.
-//   - nbdVolumeSize: default volume size when the NBD worker auto-creates it.
-//   - ri: optional ReadIndexer for linearizable NBD reads; nil = no gate.
-func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.Backend,
+// StartNodeServices spawns NFSv4 and NBD servers if their respective ports
+// are > 0. Returns the handle for shutdown. nbdVolumeSize is the default
+// volume size when the NBD worker auto-creates the "default" volume; ri
+// is an optional ReadIndexer for linearizable NBD reads (nil = no gate).
+func StartNodeServices(ctx context.Context, backend storage.Backend,
 	volMgr *volume.Manager, nfs4Port, nbdPort int, nbdVolumeSize int64, ri nbd.ReadIndexer,
-) *nodeServices {
-	svc := &nodeServices{}
+) *NodeServices {
+	svc := &NodeServices{}
 
 	if nfs4Port > 0 {
 		svc.nfs4Srv = nfs4server.NewServer(backend)
@@ -62,7 +52,7 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 
 	if nbdPort > 0 {
 		const defaultVolName = "default"
-		if err := ensureDefaultNBDVolume(ctx, volMgr, defaultVolName, nbdVolumeSize, 30*time.Second); err != nil {
+		if err := EnsureDefaultNBDVolume(ctx, volMgr, defaultVolName, nbdVolumeSize, 30*time.Second); err != nil {
 			log.Warn().Err(err).Msg("default nbd volume create failed")
 		}
 		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri)
@@ -76,7 +66,7 @@ func startNodeServices(ctx context.Context, cmd *cobra.Command, backend storage.
 	return svc
 }
 
-func ensureDefaultNBDVolume(ctx context.Context, volMgr *volume.Manager, name string, size int64, timeout time.Duration) error {
+func EnsureDefaultNBDVolume(ctx context.Context, volMgr *volume.Manager, name string, size int64, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -103,4 +93,18 @@ func ensureDefaultNBDVolume(ctx context.Context, volMgr *volume.Manager, name st
 		case <-ticker.C:
 		}
 	}
+}
+
+func startNBDServer(mgr *volume.Manager, volName string, port int, ri nbd.ReadIndexer) (*nbd.Server, error) {
+	srv := nbd.NewServer(mgr, volName)
+	if ri != nil {
+		srv.SetReadIndexer(ri)
+	}
+	go func() {
+		addr := fmt.Sprintf(":%d", port)
+		if err := srv.ListenAndServe(addr); err != nil {
+			log.Error().Err(err).Msg("nbd server error")
+		}
+	}()
+	return srv, nil
 }

@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.0.71.0] - 2026-05-06
+
+### Added
+
+- Added a real multi-node topology GET benchmark that starts GrainFS servers,
+  preloads large S3 objects, records bucket-to-shard-group topology, and can
+  collect pprof profiles from every node.
+- Added a GET-only k6 workload and matrix runner for comparing 1, 2, 3, and 6
+  node behavior under the same large-object read workload.
+
+### Changed
+
+- EC GET now streams remote shard bodies over QUIC instead of loading complete
+  remote shards into memory before reconstruction.
+- Oversized EC GETs now bypass the shard cache when the per-shard payload cannot
+  fit in the configured cache budget, preserving streaming behavior for large
+  objects.
+- EC read reconstruction now avoids data-shard prefetch on nodes that do not own
+  a local data shard, while retaining the faster local prefetch path where it
+  helps.
+- Encrypted shard reads now reuse chunk decode buffers, reducing repeated
+  allocation pressure during large EC GETs.
+
+### Fixed
+
+- EC GET streaming now applies to small shard groups as well as full-width EC
+  groups, improving the benchmarked 3-voter topology path.
+- EC missing-data-shard reconstruction now stays windowed instead of reading
+  all available shard bodies into memory during parity recovery.
+
+### Tests
+
+- Added EC streaming, remote shard stream, encrypted shard stream, shard cache
+  sizing, topology status, and allocation-bound regression coverage for the new
+  GET paths.
+
+## [0.0.70.0] — 2026-05-06 — Serveruntime adapters + cobra-coupled helpers (cmd-thin PR1b)
+
+### Changed
+
+- 7 어댑터 (peerHealth, scrubProposer, scrubAggregator, vlogBreakdown,
+  balancerInfo, raftClusterInfo, raftMembership) + replicaRepairerFunc 를
+  `internal/serveruntime/adapters.go` 로 이주. 공개 ctor 노출.
+- cobra-coupled 헬퍼 4개 — `setupClusterReceipt`, `buildVolumeManager`,
+  `startBalancer`, `startNodeServices` — Options struct 어댑터 패턴으로
+  `internal/serveruntime/{receipt,volume_manager,balancer,node_services}.go`
+  로 이주. cmd 측은 cobra 플래그를 읽어 Options 빌더 → serveruntime 호출.
+- `HealReceiptWiring` 의 store/keyStore 를 공개 메서드 (`Store()`,
+  `KeyStore()`) 로 노출.
+- `serve.go` 2064 → 1669 줄 (-395). cmd-thin PR2 (runCluster 본체) 의
+  의존 그래프가 어댑터·옵션 전무 상태로 단축됨.
+
+### Tests
+
+- 기존 cmd 단위 테스트를 패키지 호출 + Options 빌드로 갱신.
+- `receipt_wiring_test.go` → `serveruntime/receipt_test.go` 으로 이동
+  (private receiptDBOptions / openReceiptDB 접근).
+
 ## [0.0.69.0] - 2026-05-06
 
 ### Added

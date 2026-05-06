@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,183 +53,6 @@ import (
 )
 
 const defaultReshardInterval = 24 * time.Hour
-
-// peerHealthAdapter implements admin.PeerHealthAPI on top of *cluster.DistributedBackend.
-// Converts cluster.PeerHealthEntry to the JSON-friendly admin.ClusterPeerInfo so
-// the admin handler stays decoupled from the cluster package.
-type peerHealthAdapter struct {
-	backend *cluster.DistributedBackend
-}
-
-func (a peerHealthAdapter) Snapshot() []admin.ClusterPeerInfo {
-	if a.backend == nil {
-		return nil
-	}
-	ph := a.backend.PeerHealth()
-	if ph == nil {
-		return nil
-	}
-	src := ph.Snapshot()
-	out := make([]admin.ClusterPeerInfo, 0, len(src))
-	for _, e := range src {
-		info := admin.ClusterPeerInfo{
-			ID:                  e.ID,
-			Healthy:             e.Healthy,
-			CooldownRemainingMs: e.CooldownRemainingMs,
-		}
-		if e.LastFailure != nil {
-			info.LastFailure = e.LastFailure.UTC().Format(time.RFC3339Nano)
-		}
-		out = append(out, info)
-	}
-	return out
-}
-
-// replicaRepairerFunc adapts a function to scrubber.ReplicaRepairer.
-type replicaRepairerFunc func(ctx context.Context, bucket, key string) error
-
-func (f replicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key string) error {
-	return f(ctx, bucket, key)
-}
-
-// scrubProposerAdapter implements admin.ScrubProposer over MetaRaft. The
-// adapter does a leader-side dedup pre-check so duplicate triggers don't
-// consume a fresh raft entry per call.
-type scrubProposerAdapter struct {
-	metaRaft *cluster.MetaRaft
-	director *scrubber.Director
-	nodeID   string
-}
-
-func (a *scrubProposerAdapter) Propose(ctx context.Context, req scrubber.TriggerReq) (scrubber.ScrubTriggerEntry, bool, error) {
-	if existing, ok := a.director.LookupDedup(req); ok {
-		return existing, false, nil
-	}
-	entry := scrubber.ScrubTriggerEntry{
-		SessionID:        uuid.NewString(),
-		Bucket:           req.Bucket,
-		KeyPrefix:        req.KeyPrefix,
-		Scope:            req.Scope,
-		DryRun:           req.DryRun,
-		RequestedAt:      time.Now().Unix(),
-		OriginatorNodeID: a.nodeID,
-	}
-	return entry, true, a.metaRaft.ProposeScrubTrigger(ctx, entry)
-}
-
-// scrubAggregatorAdapter implements admin.ScrubAggregator over
-// ClusterCoordinator's per-peer fan-out RPC.
-type scrubAggregatorAdapter struct {
-	coord *cluster.ClusterCoordinator
-}
-
-func (a *scrubAggregatorAdapter) Peers(ctx context.Context, sessionID string) ([]admin.ScrubJobInfo, []string, error) {
-	if a.coord == nil {
-		return nil, nil, nil
-	}
-	stats, failures, err := a.coord.ScrubSessionStat(ctx, sessionID)
-	if err != nil {
-		return nil, nil, err
-	}
-	infos := make([]admin.ScrubJobInfo, 0, len(stats))
-	for _, s := range stats {
-		scope := "full"
-		if s.Scope == int32(scrubber.ScopeLive) {
-			scope = "live"
-		}
-		infos = append(infos, admin.ScrubJobInfo{
-			Bucket:       s.Bucket,
-			KeyPrefix:    s.KeyPrefix,
-			Scope:        scope,
-			DryRun:       s.DryRun,
-			Status:       s.Status,
-			StartedAt:    s.StartedAt,
-			DoneAt:       s.DoneAt,
-			Checked:      s.Checked,
-			Healthy:      s.Healthy,
-			Detected:     s.Detected,
-			Repaired:     s.Repaired,
-			Unrepairable: s.Unrepairable,
-			Skipped:      s.Skipped,
-			OwnedHere:    s.OwnedHere,
-		})
-	}
-	return infos, failures, nil
-}
-
-// vlogBreakdownAdapter implements admin.VlogBreakdownAPI for the
-// `GET /v1/resource/vlog/breakdown` endpoint. It re-runs registry smoke on
-// every call (operator-initiated, low QPS) so callers see fresh stale/live
-// state rather than the stale 60s-startup snapshot.
-type vlogBreakdownAdapter struct {
-	registry *resourcewatch.Registry
-	provider *resourcewatch.VlogProvider
-	dataDir  string
-	warn     float64
-	critical float64
-}
-
-func newVlogBreakdownAdapter(cmd *cobra.Command, dataDir string) admin.VlogBreakdownAPI {
-	if !vlogWatchEnabled(cmd) {
-		return nil
-	}
-	warn, _ := cmd.Flags().GetFloat64("vlog-warn-ratio")
-	critical, _ := cmd.Flags().GetFloat64("vlog-critical-ratio")
-	return &vlogBreakdownAdapter{
-		registry: resourcewatch.Default,
-		provider: resourcewatch.NewVlogProvider(resourcewatch.VlogProviderOptions{DataDir: dataDir}),
-		dataDir:  dataDir,
-		warn:     warn,
-		critical: critical,
-	}
-}
-
-func (a *vlogBreakdownAdapter) Breakdown() (admin.VlogBreakdownResp, error) {
-	sample, err := a.provider.Snapshot(context.Background())
-	if err != nil {
-		return admin.VlogBreakdownResp{}, fmt.Errorf("vlog snapshot: %w", err)
-	}
-	cats := make([]admin.VlogCategoryBytes, 0, len(sample.Categories))
-	for k, v := range sample.Categories {
-		cats = append(cats, admin.VlogCategoryBytes{Category: string(k), VlogBytes: int64(v)})
-	}
-	sort.Slice(cats, func(i, j int) bool { return cats[i].VlogBytes > cats[j].VlogBytes })
-
-	gcFails := make(map[string]int32)
-	for _, e := range a.registry.Snapshot() {
-		gcFails[string(e.Category)] = e.ConsecutiveGCFailures()
-	}
-
-	smoke, _ := resourcewatch.VerifyVlogRegistry(a.dataDir, a.registry, false)
-	live, stale := smoke.Live, smoke.Stale
-	if live == nil {
-		live = []string{}
-	}
-	if stale == nil {
-		stale = []string{}
-	}
-
-	var ratio float64
-	if sample.Limit > 0 {
-		ratio = float64(sample.Open) / float64(sample.Limit)
-	}
-	level := "ok"
-	switch {
-	case ratio >= a.critical:
-		level = "critical"
-	case ratio >= a.warn:
-		level = "warn"
-	}
-	return admin.VlogBreakdownResp{
-		TotalVlogBytes: int64(sample.Open),
-		LimitBytes:     int64(sample.Limit),
-		Ratio:          ratio,
-		Level:          level,
-		Categories:     cats,
-		GCFailures:     gcFails,
-		SmokeReport:    admin.VlogSmokeReport{Live: live, Stale: stale},
-	}, nil
-}
 
 func init() {
 	serveCmd.Flags().StringP("data", "d", "./data", "data directory")
@@ -838,6 +660,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// caller saw "decode response: read header: EOF" → N×replication produced
 	// only the leader's local copy.
 	quicTransport.HandleBody(transport.StreamShardWriteBody, shardSvc.HandleWriteBody())
+	quicTransport.HandleRead(transport.StreamShardReadBody, shardSvc.HandleReadBody())
 
 	node.Start()
 	defer node.Stop()
@@ -1128,8 +951,27 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		statsStore := cluster.NewNodeStatsStore(3 * bGossipInterval)
 		ecData, _ := cmd.Flags().GetInt("ec-data")
 		ecParity, _ := cmd.Flags().GetInt("ec-parity")
+		bTriggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
+		bStopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
+		bMigrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
+		bTenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
+		bWarmup, _ := cmd.Flags().GetDuration("balancer-warmup-timeout")
+		bCBThreshold, _ := cmd.Flags().GetFloat64("balancer-cb-threshold")
+		bMigMaxRetries, _ := cmd.Flags().GetInt("balancer-migration-max-retries")
+		bMigPendingTTL, _ := cmd.Flags().GetDuration("balancer-migration-pending-ttl")
+		bopts := serveruntime.BalancerOptions{
+			GossipInterval:      bGossipInterval,
+			WarmupTimeout:       bWarmup,
+			ImbalanceTriggerPct: bTriggerPct,
+			ImbalanceStopPct:    bStopPct,
+			MigrationRate:       bMigrationRate,
+			LeaderTenureMin:     bTenureMin,
+			CBThreshold:         bCBThreshold,
+			MigrationMaxRetries: bMigMaxRetries,
+			MigrationPendingTTL: bMigPendingTTL,
+		}
 		var err error
-		balancerProposer, gossipReceiver, err = startBalancer(ctx, cmd, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
+		balancerProposer, gossipReceiver, err = serveruntime.StartBalancer(ctx, bopts, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
 		if err != nil {
 			log.Warn().Err(err).Msg("balancer start failed")
 		}
@@ -1363,8 +1205,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		// that is the cluster-wide membership ledger that `serve --join`
 		// updates via performMetaJoin. The node initialised at line 872 is a
 		// legacy per-process raft instance whose Peers() never grows on join.
-		server.WithClusterInfo(&raftClusterInfo{node: metaRaft.Node(), peers: peers, backend: distBackend, addrBook: metaRaft.FSM()}),
-		server.WithClusterMembership(&raftMembership{node: metaRaft.Node()}),
+		server.WithClusterInfo(serveruntime.NewRaftClusterInfo(metaRaft.Node(), peers, distBackend, metaRaft.FSM())),
+		server.WithClusterMembership(serveruntime.NewRaftMembership(metaRaft.Node())),
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
@@ -1390,12 +1232,27 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// the flags.
 	srvOpts = append(srvOpts, authOpts...)
 	if balancerProposer != nil {
-		srvOpts = append(srvOpts, server.WithBalancerInfo(&balancerInfoAdapter{p: balancerProposer}))
+		srvOpts = append(srvOpts, server.WithBalancerInfo(serveruntime.NewBalancerInfoAdapter(balancerProposer)))
 	}
 
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip + broadcast fallback.
-	newSrvOpts, receiptWiring, err := setupClusterReceipt(
-		ctx, cmd, dataDir, nodeID, clusterKey, peers,
+	rcptEnabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
+	rcptPSK, _ := cmd.Flags().GetString("heal-receipt-psk")
+	if rcptPSK == "" {
+		rcptPSK = clusterKey
+	}
+	rcptRetention, _ := cmd.Flags().GetDuration("heal-receipt-retention")
+	rcptGossipInterval, _ := cmd.Flags().GetDuration("heal-receipt-gossip-interval")
+	rcptWindow, _ := cmd.Flags().GetInt("heal-receipt-window")
+	rcptOpts := serveruntime.ReceiptOptions{
+		Enabled:        rcptEnabled,
+		PSK:            rcptPSK,
+		Retention:      rcptRetention,
+		GossipInterval: rcptGossipInterval,
+		WindowSize:     rcptWindow,
+	}
+	newSrvOpts, receiptWiring, err := serveruntime.SetupClusterReceipt(
+		ctx, rcptOpts, dataDir, nodeID, peers,
 		quicTransport, router, gossipReceiver, srvOpts,
 	)
 	if err != nil {
@@ -1435,7 +1292,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		srvOpts = append(srvOpts, server.WithLifecycleStore(lifecycleMgr.Store()))
 	}
 
-	volMgr, blockCache, dedupDB, err := buildVolumeManager(cmd, dataDir, backend)
+	dedupEnabled, _ := cmd.Flags().GetBool("dedup")
+	blockCacheSize, _ := cmd.Flags().GetInt64("block-cache-size")
+	volMgr, blockCache, dedupDB, err := serveruntime.BuildVolumeManager(serveruntime.VolumeManagerOptions{DedupEnabled: dedupEnabled, BlockCacheSize: blockCacheSize}, dataDir, backend)
 	if err != nil {
 		return fmt.Errorf("volume manager: %w", err)
 	}
@@ -1470,13 +1329,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return fmt.Errorf("dashboard token: %w", err)
 	}
 	publicURL, _ := cmd.Flags().GetString("public-url")
+	vlogWarn, _ := cmd.Flags().GetFloat64("vlog-warn-ratio")
+	vlogCritical, _ := cmd.Flags().GetFloat64("vlog-critical-ratio")
 	adminDeps := &admin.Deps{
-		Manager:       srv.VolumeManager(),
-		Token:         tokenStore,
-		PublicURL:     publicURL,
-		NodeID:        nodeID,
-		PeerHealth:    peerHealthAdapter{distBackend},
-		VlogBreakdown: newVlogBreakdownAdapter(cmd, dataDir),
+		Manager:    srv.VolumeManager(),
+		Token:      tokenStore,
+		PublicURL:  publicURL,
+		NodeID:     nodeID,
+		PeerHealth: serveruntime.NewPeerHealthAdapter(distBackend),
+		VlogBreakdown: serveruntime.NewVlogBreakdownAdapter(serveruntime.VlogBreakdownOptions{
+			Enabled:       vlogWatchEnabled(cmd),
+			DataDir:       dataDir,
+			WarnRatio:     vlogWarn,
+			CriticalRatio: vlogCritical,
+		}),
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
@@ -1511,8 +1377,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// receiptWiring.keyStore may be nil when heal-receipt is disabled — in that
 	// case NewReceiptTrackingEmitter degrades to a pass-through (signing unhealthy).
 	var activeEmitter scrubber.Emitter = srv.HealEmitter()
-	if receiptWiring != nil && receiptWiring.store != nil {
-		rte := server.NewReceiptTrackingEmitter(srv.HealEmitter(), receiptWiring.store, receiptWiring.keyStore)
+	if receiptWiring != nil && receiptWiring.Store() != nil {
+		rte := server.NewReceiptTrackingEmitter(srv.HealEmitter(), receiptWiring.Store(), receiptWiring.KeyStore())
 		defer rte.Close()
 		activeEmitter = rte
 	}
@@ -1559,7 +1425,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		return gb.OpenLocalReplica(bucket, key)
 	})
-	repairer := scrubber.ReplicaRepairer(replicaRepairerFunc(func(rctx context.Context, bucket, key string) error {
+	repairer := scrubber.ReplicaRepairer(serveruntime.ReplicaRepairerFunc(func(rctx context.Context, bucket, key string) error {
 		gb := groupBackendForBucket(bucket)
 		if gb == nil {
 			return fmt.Errorf("scrub repair: no local group for %s", bucket)
@@ -1615,8 +1481,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	director.Start(ctx)
 	adminDeps.Director = director
-	adminDeps.ScrubProposer = &scrubProposerAdapter{metaRaft: metaRaft, director: director, nodeID: nodeID}
-	adminDeps.ScrubAggregator = &scrubAggregatorAdapter{coord: clusterCoord}
+	adminDeps.ScrubProposer = serveruntime.NewScrubProposerAdapter(metaRaft, director, nodeID)
+	adminDeps.ScrubAggregator = serveruntime.NewScrubAggregatorAdapter(clusterCoord)
 
 	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
 	if scrubInterval > 0 {
@@ -1655,7 +1521,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				}
 				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
 					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
-				} else if receiptWiring != nil && receiptWiring.store != nil && receiptWiring.keyStore != nil {
+				} else if receiptWiring != nil && receiptWiring.Store() != nil && receiptWiring.KeyStore() != nil {
 					r := &receipt.HealReceipt{
 						ReceiptID:     receiptID,
 						Timestamp:     time.Now().UTC(),
@@ -1665,11 +1531,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 						EventIDs:      []string{correlationID},
 						CorrelationID: correlationID,
 					}
-					if err := receipt.Sign(r, receiptWiring.keyStore); err != nil {
+					if err := receipt.Sign(r, receiptWiring.KeyStore()); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Err(err).Msg("placement monitor receipt sign failed")
-					} else if err := receiptWiring.store.Put(r); err != nil {
+					} else if err := receiptWiring.Store().Put(r); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt store failed")
-					} else if err := receiptWiring.store.Flush(); err != nil {
+					} else if err := receiptWiring.Store().Flush(); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt flush failed")
 					} else if err := gb.RecordRepairReceiptSigned(context.Background(), repairReq, receiptID); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor incident proof update failed")
@@ -1769,7 +1635,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
 	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
 	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
-	nodeSvc := startNodeServices(ctx, cmd, backend, volMgr, nfs4Port, nbdPort, nbdVolumeSize, distBackend)
+	nodeSvc := serveruntime.StartNodeServices(ctx, backend, volMgr, nfs4Port, nbdPort, nbdVolumeSize, distBackend)
 	defer nodeSvc.Close()
 
 	<-ctx.Done()
@@ -1801,264 +1667,4 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	log.Info().Str("component", "server").Msg("server stopped")
 	return nil
-}
-
-// raftBalancerAdapter wraps *raft.Node to implement cluster.RaftBalancerNode.
-type raftBalancerAdapter struct {
-	node  *raft.Node
-	peers []string // Raft peer addresses (node IDs for balancer purposes)
-}
-
-func (a *raftBalancerAdapter) Propose(data []byte) error { return a.node.Propose(data) }
-func (a *raftBalancerAdapter) IsLeader() bool            { return a.node.State() == raft.Leader }
-func (a *raftBalancerAdapter) NodeID() string            { return a.node.ID() }
-func (a *raftBalancerAdapter) PeerIDs() []string         { return a.peers }
-func (a *raftBalancerAdapter) TransferLeadership() error { return a.node.TransferLeadership() }
-
-// startBalancer wires and launches the BalancerProposer, GossipSender, GossipReceiver,
-// MigrationExecutor and migration task channel, then replays any persisted pending tasks.
-// Returns the GossipReceiver so the caller can wire additional StreamType consumers
-// (e.g. Phase 16 Slice 2 receipt gossip) onto the same receiver.
-func startBalancer(
-	ctx context.Context,
-	cmd *cobra.Command,
-	nodeID, dataDir string,
-	statsStore *cluster.NodeStatsStore,
-	node *raft.Node,
-	peers []string,
-	fsm *cluster.FSM,
-	quicTransport transport.Transport,
-	shardSvc *cluster.ShardService,
-	numShards int,
-) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
-	gossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
-	triggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
-	stopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
-	migrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
-	tenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
-	warmupTimeout, _ := cmd.Flags().GetDuration("balancer-warmup-timeout")
-	cbThreshold, _ := cmd.Flags().GetFloat64("balancer-cb-threshold")
-	if cbThreshold < 0 || cbThreshold > 1 {
-		return nil, nil, fmt.Errorf("balancer-cb-threshold must be in [0, 1], got %g", cbThreshold)
-	}
-	migMaxRetries, _ := cmd.Flags().GetInt("balancer-migration-max-retries")
-	migPendingTTL, _ := cmd.Flags().GetDuration("balancer-migration-pending-ttl")
-
-	def := cluster.DefaultBalancerConfig()
-	cfg := cluster.BalancerConfig{
-		GossipInterval:      gossipInterval,
-		WarmupTimeout:       warmupTimeout,
-		ImbalanceTriggerPct: triggerPct,
-		ImbalanceStopPct:    stopPct,
-		MigrationRate:       migrationRate,
-		LeaderTenureMin:     tenureMin,
-		LeaderLoadThreshold: def.LeaderLoadThreshold,
-		GracePeriod:         def.GracePeriod,
-		PeerSeenWindow:      def.PeerSeenWindow,
-		CBThreshold:         cbThreshold,
-		MigrationMaxRetries: migMaxRetries,
-		MigrationPendingTTL: migPendingTTL,
-	}
-
-	adapter := &raftBalancerAdapter{node: node, peers: peers}
-	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, cfg)
-
-	balancer.SetObjectPicker(cluster.NewLocalObjectPicker(filepath.Join(dataDir, "shards")))
-
-	// Migration task channel (buffered to absorb bursts).
-	taskCh := make(chan cluster.MigrationTask, 256)
-
-	exec := cluster.NewMigrationExecutorWithTTL(shardSvc, adapter, numShards, migPendingTTL)
-	if migMaxRetries > 0 {
-		exec.SetMaxWriteRetries(migMaxRetries)
-	}
-	exec.SetShardCounter(serveruntime.ECShardCounterFor(fsm))
-	exec.Start(ctx)
-
-	// Wire FSM hooks: migration proposals → channel, Raft commit → executor,
-	// balancer → release inflight slot on done.
-	fsm.SetMigrationHooks(taskCh, exec, balancer)
-
-	// Gossip: broadcast local stats + receive from peers.
-	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval)
-	receiver := cluster.NewGossipReceiver(quicTransport, statsStore)
-
-	go sender.Run(ctx)
-	go receiver.Run(ctx)
-	// Start executor before RecoverPending so the channel consumer is ready.
-	go exec.Run(ctx, taskCh)
-	go balancer.Run(ctx)
-
-	// Seed local node stats so GossipSender can broadcast immediately.
-	statsStore.Set(cluster.NodeStats{
-		NodeID:   nodeID,
-		JoinedAt: time.Now(),
-	})
-
-	// Start DiskCollector: reads local disk stats and updates the store every gossip interval.
-	// GRAINFS_TEST_DISK_PCT overrides the real syscall for integration testing.
-	collector := cluster.NewDiskCollector(nodeID, dataDir, statsStore, gossipInterval)
-	if testPctStr := os.Getenv("GRAINFS_TEST_DISK_PCT"); testPctStr != "" {
-		var testPct float64
-		if _, err := fmt.Sscanf(testPctStr, "%f", &testPct); err != nil {
-			return nil, nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: invalid value %q: %w", testPctStr, err)
-		}
-		if testPct < 0 || testPct > 100 {
-			return nil, nil, fmt.Errorf("GRAINFS_TEST_DISK_PCT: value %v out of range [0,100]", testPct)
-		}
-		log.Warn().Float64("pct", testPct).Msg("GRAINFS_TEST_DISK_PCT active — real disk stats overridden")
-		collector.SetStatFunc(func(string) (float64, uint64) { return testPct, 0 })
-	}
-	go collector.Run(ctx)
-
-	// Replay any tasks that were persisted during a previous channel-full event.
-	if err := fsm.RecoverPending(ctx, taskCh); err != nil {
-		log.Warn().Err(err).Msg("balancer: recover pending failed")
-	}
-
-	log.Info().Str("component", "balancer").
-		Dur("gossip_interval", gossipInterval).Float64("trigger_pct", triggerPct).Float64("stop_pct", stopPct).Msg("balancer started")
-	return balancer, receiver, nil
-}
-
-// balancerInfoAdapter adapts *cluster.BalancerProposer to server.BalancerInfo.
-type balancerInfoAdapter struct {
-	p *cluster.BalancerProposer
-}
-
-func (a *balancerInfoAdapter) Status() server.BalancerStatusResult {
-	st := a.p.Status()
-	nodes := make([]server.BalancerNodeInfo, len(st.Nodes))
-	for i, n := range st.Nodes {
-		nodes[i] = server.BalancerNodeInfo{
-			NodeID:         n.NodeID,
-			DiskUsedPct:    n.DiskUsedPct,
-			DiskAvailBytes: n.DiskAvailBytes,
-			RequestsPerSec: n.RequestsPerSec,
-			JoinedAt:       n.JoinedAt,
-			UpdatedAt:      n.UpdatedAt,
-		}
-	}
-	return server.BalancerStatusResult{
-		Active:       st.Active,
-		ImbalancePct: st.ImbalancePct,
-		Nodes:        nodes,
-	}
-}
-
-// raftClusterInfo adapts raft.Node to server.ClusterInfo interface.
-//
-// Peers() / LivePeers() always read from the running raft.Node so dynamic-join
-// clusters reflect membership changes (joins, removes) the moment they commit.
-// The peers field is preserved for compatibility with callers that still pass
-// the bootstrap list, but it is not consulted on the read path.
-type raftClusterInfo struct {
-	node     *raft.Node
-	peers    []string
-	backend  *cluster.DistributedBackend
-	addrBook cluster.NodeAddressBook
-}
-
-func (r *raftClusterInfo) NodeID() string   { return r.node.ID() }
-func (r *raftClusterInfo) State() string    { return r.node.State().String() }
-func (r *raftClusterInfo) Term() uint64     { return r.node.Term() }
-func (r *raftClusterInfo) LeaderID() string { return r.node.LeaderID() }
-func (r *raftClusterInfo) Peers() []string {
-	return nilToEmpty(r.normalizePeerIDs(r.node.Peers()))
-}
-
-// LivePeers reports all metaRaft voters as live: self plus every remote.
-// The legacy DistributedBackend's LiveNodes() lives on a separate raft +
-// peerHealth map whose identifiers don't line up with metaRaft's voter
-// addresses, so consulting it here would mark every voter "down" right
-// after dynamic-join until peerHealth catches up. Treating voters as live
-// keeps the happy-path pre-flight working; voter-count math still blocks
-// the only-1-voter-left scenario, which is the truly dangerous case.
-// PR-D unifies peer identity so this fallback no longer mixes node IDs and
-// raft addresses. Fine-grained liveness remains a later peer-health signal.
-func (r *raftClusterInfo) LivePeers() []string {
-	peers := r.normalizePeerIDs(r.node.Peers())
-	out := make([]string, 0, len(peers)+1)
-	if id := r.node.ID(); id != "" {
-		out = append(out, id)
-	}
-	out = append(out, peers...)
-	return out
-}
-
-func (r *raftClusterInfo) PeerAddrs() map[string]string {
-	out := make(map[string]string)
-	if r.addrBook == nil {
-		return out
-	}
-	for _, peer := range r.node.Peers() {
-		resolved := cluster.ResolveShardGroupPeer(r.addrBook, peer)
-		if resolved.NodeID != "" && resolved.RaftAddr != "" {
-			out[resolved.NodeID] = resolved.RaftAddr
-		}
-	}
-	return out
-}
-
-func (r *raftClusterInfo) PeerStates() map[string]string {
-	out := make(map[string]string)
-	for _, peer := range r.node.Peers() {
-		resolved := cluster.ResolveShardGroupPeer(r.addrBook, peer)
-		id := resolved.NodeID
-		if id == "" {
-			id = peer
-		}
-		if resolved.Unresolved {
-			out[id] = "unresolved_legacy"
-			continue
-		}
-		out[id] = "configured"
-	}
-	return out
-}
-
-func (r *raftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
-	return cluster.BuildPeerLivenessSnapshot(cluster.PeerLivenessInput{
-		SelfID:      r.node.ID(),
-		Voters:      r.node.Peers(),
-		AddressBook: r.addrBook,
-	})
-}
-
-func (r *raftClusterInfo) normalizePeerIDs(peers []string) []string {
-	if len(peers) == 0 {
-		return nil
-	}
-	if r.addrBook == nil {
-		out := make([]string, len(peers))
-		copy(out, peers)
-		return out
-	}
-	out := make([]string, len(peers))
-	for i, peer := range peers {
-		out[i] = cluster.ResolveShardGroupPeer(r.addrBook, peer).NodeID
-		if out[i] == "" {
-			out[i] = peer
-		}
-	}
-	return out
-}
-
-// nilToEmpty normalises a nil slice to an empty one so JSON marshals it as
-// "[]" instead of "null". The cluster status CLI assertion path treats
-// missing keys and null identically — keep the wire shape stable.
-func nilToEmpty(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
-}
-
-// raftMembership adapts raft.Node to server.ClusterMembership for the
-// remove-peer endpoint. Joint consensus (§4.3) is used so the change is
-// atomic and the engine handles leader self-removal via commit-time wakeup.
-type raftMembership struct{ node *raft.Node }
-
-func (r *raftMembership) RemoveVoter(ctx context.Context, id string) error {
-	return r.node.ChangeMembership(ctx, nil, []string{id})
 }

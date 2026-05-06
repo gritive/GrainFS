@@ -61,6 +61,14 @@ type clusterPeerSnapshot interface {
 	PeerSnapshot() []cluster.PeerLivenessRow
 }
 
+type clusterBucketAssignments interface {
+	BucketAssignments() map[string]string
+}
+
+type clusterShardGroups interface {
+	ShardGroups() []cluster.ShardGroupEntry
+}
+
 // ClusterMembership performs Raft membership mutations. nil-safe: when the
 // server runs in local mode the field is unset and the remove-peer endpoint
 // returns 503.

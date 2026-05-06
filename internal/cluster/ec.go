@@ -6,12 +6,16 @@ package cluster
 // N distinct nodes.
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"math"
 	"path/filepath"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Default EC parameters for 4+2 Reed-Solomon. Exposed so serve flags
@@ -19,6 +23,9 @@ import (
 const (
 	DefaultDataShards   = 4
 	DefaultParityShards = 2
+	// maxECPooledReadObjectSize caps the all-data-present read prefetch path so
+	// large object GETs keep the previous streaming memory profile.
+	maxECPooledReadObjectSize = 128 << 20
 	// MinECNodes is the minimum cluster size at which EC activates.
 	// Clusters of 1–2 nodes use N× replication; 3+ always use proportional EC.
 	MinECNodes = 3
@@ -168,6 +175,136 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
 }
 
+func newECReconstructStreamReader(cfg ECConfig, shards []io.Reader) (*ecReconstructStreamReader, error) {
+	return newECReconstructStreamReaderWithPrefetch(cfg, shards, true)
+}
+
+func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, allowPooledDataShardRead bool) (*ecReconstructStreamReader, error) {
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
+	if err != nil {
+		return nil, err
+	}
+	if allowPooledDataShardRead && origSize <= maxECPooledReadObjectSize && ecStreamHasAllDataShards(cfg, bodies) {
+		reader, closeReader, err := newECPooledDataShardReader(cfg, origSize, bodies)
+		if err != nil {
+			return nil, err
+		}
+		return &ecReconstructStreamReader{
+			reader: io.LimitReader(reader, origSize),
+			close:  closeReader,
+		}, nil
+	}
+	if ecStreamHasAllDataShards(cfg, bodies) {
+		dataReaders, err := ecReconstructStreamDataReaders(cfg, bodies)
+		if err != nil {
+			return nil, err
+		}
+		return &ecReconstructStreamReader{reader: io.LimitReader(io.MultiReader(dataReaders...), origSize)}, nil
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		if err := ecReconstructMissingDataStreamTo(pw, cfg, origSize, bodies); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+	return &ecReconstructStreamReader{reader: pr, close: pr.Close}, nil
+}
+
+type ecReconstructStreamReader struct {
+	reader io.Reader
+	close  func() error
+	closed bool
+}
+
+func (r *ecReconstructStreamReader) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *ecReconstructStreamReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	if r.close != nil {
+		return r.close()
+	}
+	return nil
+}
+
+func ecStreamHasAllDataShards(cfg ECConfig, bodies []io.Reader) bool {
+	if len(bodies) < cfg.DataShards {
+		return false
+	}
+	for i := 0; i < cfg.DataShards; i++ {
+		if bodies[i] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+var ecDataShardBufferPool sync.Pool
+
+func getECDataShardBuffer(size int) []byte {
+	if v := ecDataShardBufferPool.Get(); v != nil {
+		buf := v.([]byte)
+		if cap(buf) >= size {
+			return buf[:size]
+		}
+	}
+	return make([]byte, size)
+}
+
+func putECDataShardBuffer(buf []byte) {
+	if buf != nil {
+		ecDataShardBufferPool.Put(buf[:cap(buf)])
+	}
+}
+
+func newECPooledDataShardReader(cfg ECConfig, origSize int64, bodies []io.Reader) (io.Reader, func() error, error) {
+	if origSize == 0 {
+		return bytes.NewReader(nil), nil, nil
+	}
+	bodyLen := int((origSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards))
+	buffers := make([][]byte, cfg.DataShards)
+	var g errgroup.Group
+	for i := 0; i < cfg.DataShards; i++ {
+		shardIdx := i
+		g.Go(func() error {
+			buf := getECDataShardBuffer(bodyLen)
+			if _, err := io.ReadFull(bodies[shardIdx], buf); err != nil {
+				putECDataShardBuffer(buf)
+				return fmt.Errorf("read ec data shard %d body: %w", shardIdx, err)
+			}
+			buffers[shardIdx] = buf
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		for _, buf := range buffers {
+			putECDataShardBuffer(buf)
+		}
+		return nil, nil, err
+	}
+
+	orderedReaders := make([]io.Reader, cfg.DataShards)
+	for i, buf := range buffers {
+		orderedReaders[i] = bytes.NewReader(buf[:bodyLen])
+	}
+	var closeOnce sync.Once
+	closeReader := func() error {
+		closeOnce.Do(func() {
+			for _, buf := range buffers {
+				putECDataShardBuffer(buf)
+			}
+		})
+		return nil
+	}
+	return io.MultiReader(orderedReaders...), closeReader, nil
+}
+
 func ecReconstructBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies [][]byte) error {
 	enc, err := getEncoder(cfg)
 	if err != nil {
@@ -183,6 +320,39 @@ func ecReconstructBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies [][
 }
 
 func ecReconstructStreamBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader) error {
+	dataReaders, err := ecReconstructStreamDataReaders(cfg, bodies)
+	if err != nil {
+		return err
+	}
+	if dataReaders != nil {
+		if _, err := io.CopyN(w, io.MultiReader(dataReaders...), origSize); err != nil {
+			return fmt.Errorf("ec join: %w", err)
+		}
+		return nil
+	}
+	if err := ecReconstructMissingDataStreamTo(w, cfg, origSize, bodies); err != nil {
+		return fmt.Errorf("ec join: %w", err)
+	}
+	return nil
+}
+
+func ecReconstructStreamDataReaders(cfg ECConfig, bodies []io.Reader) ([]io.Reader, error) {
+	dataReaders := make([]io.Reader, cfg.DataShards)
+	missingData := false
+	for i := 0; i < cfg.DataShards; i++ {
+		if bodies[i] == nil {
+			missingData = true
+			continue
+		}
+		dataReaders[i] = bodies[i]
+	}
+	if !missingData {
+		return dataReaders, nil
+	}
+	return nil, nil
+}
+
+func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader) error {
 	enc, err := getEncoder(cfg)
 	if err != nil {
 		return fmt.Errorf("ec decoder: %w", err)
@@ -234,7 +404,7 @@ func ecReconstructStreamBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodi
 				toWrite = remainingOutput
 			}
 			if _, err := w.Write(windows[i][:toWrite]); err != nil {
-				return fmt.Errorf("ec join: %w", err)
+				return err
 			}
 			remainingOutput -= toWrite
 		}

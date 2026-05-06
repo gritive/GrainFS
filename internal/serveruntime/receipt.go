@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
@@ -15,14 +14,22 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
-	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// healReceiptWiring bundles the Phase 16 Slice 2 components so the caller can
-// defer a single teardown. Cluster-only fields (routingCache, broadcaster,
-// gossipSender) are nil in no-peers mode.
-type healReceiptWiring struct {
+// ReceiptOptions captures the cobra-flag-derived knobs for SetupClusterReceipt.
+type ReceiptOptions struct {
+	Enabled        bool
+	PSK            string
+	Retention      time.Duration
+	GossipInterval time.Duration
+	WindowSize     int
+}
+
+// HealReceiptWiring bundles the Phase 16 Slice 2 components so the caller
+// can defer a single teardown. Cluster-only fields (RoutingCache,
+// Broadcaster, GossipSender) are nil in no-peers mode.
+type HealReceiptWiring struct {
 	db           *badger.DB
 	vlogEntry    *resourcewatch.RegisteredDB
 	store        *receipt.Store
@@ -33,8 +40,25 @@ type healReceiptWiring struct {
 	gossipSender *cluster.ReceiptGossipSender
 }
 
+// Store exposes the receipt store for callers that need to record entries
+// directly (e.g. the placement-monitor receipt path inside runCluster).
+func (w *HealReceiptWiring) Store() *receipt.Store {
+	if w == nil {
+		return nil
+	}
+	return w.store
+}
+
+// KeyStore exposes the receipt keystore for sign callers.
+func (w *HealReceiptWiring) KeyStore() *receipt.KeyStore {
+	if w == nil {
+		return nil
+	}
+	return w.keyStore
+}
+
 // Close releases resources. Safe on a nil receiver.
-func (w *healReceiptWiring) Close() {
+func (w *HealReceiptWiring) Close() {
 	if w == nil {
 		return
 	}
@@ -56,100 +80,90 @@ func openReceiptDB(dataDir string) (*badger.DB, badgerrole.Decision, error) {
 	return badgerrole.OpenRole(badgerrole.DefaultRegistry(), badgerrole.RoleReceipts, badgerrole.PathContext{DataDir: dataDir})
 }
 
+// receiptDBOptions exposes the small-options preset for callers that want
+// a per-test receipt DB without going through OpenRole.
 func receiptDBOptions(dir string) badger.Options {
 	return badgerutil.SmallOptions(dir)
 }
 
-// setupClusterReceipt wires the full Slice 2 stack in cluster mode.
-// PSK comes from --heal-receipt-psk if set, else --cluster-key.
-// Registers the StreamReceiptQuery handler on the router and wires the
-// routing cache into the gossip receiver. Starts the gossip broadcast
-// goroutine bound to ctx.
-func setupClusterReceipt(
+// SetupClusterReceipt wires the full Slice 2 stack in cluster mode.
+// PSK comes from opts.PSK if set; callers usually pass --heal-receipt-psk
+// when set, otherwise --cluster-key. Registers the StreamReceiptQuery
+// handler on the router and wires the routing cache into the gossip
+// receiver. Starts the gossip broadcast goroutine bound to ctx.
+func SetupClusterReceipt(
 	ctx context.Context,
-	cmd *cobra.Command,
-	dataDir, nodeID, clusterKey string,
+	opts ReceiptOptions,
+	dataDir, nodeID string,
 	peers []string,
 	quicTransport *transport.QUICTransport,
 	router *transport.StreamRouter,
 	gossipReceiver *cluster.GossipReceiver,
-	opts []server.Option,
-) ([]server.Option, *healReceiptWiring, error) {
-	enabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
-	if !enabled {
-		return opts, nil, nil
+	srvOpts []server.Option,
+) ([]server.Option, *HealReceiptWiring, error) {
+	if !opts.Enabled {
+		return srvOpts, nil, nil
 	}
-	psk, _ := cmd.Flags().GetString("heal-receipt-psk")
-	if psk == "" {
-		psk = clusterKey
-	}
+	psk := opts.PSK
 	// PSK is only required when there are peers — it signs the cross-node
 	// StreamReceiptQuery payload. Singletons have no peer to authenticate
 	// against, so we fall back to a fixed local-only sentinel. Once the
-	// operator adds peers they must supply --cluster-key (validated below).
+	// operator adds peers they must supply a PSK upstream.
 	if psk == "" {
 		if len(peers) > 0 {
-			return opts, nil, fmt.Errorf("heal-receipt requires a PSK: set --heal-receipt-psk or --cluster-key")
+			return srvOpts, nil, fmt.Errorf("heal-receipt requires a PSK: set --heal-receipt-psk or --cluster-key")
 		}
 		psk = "local-no-peers"
 	}
-	retention, _ := cmd.Flags().GetDuration("heal-receipt-retention")
-	gossipInterval, _ := cmd.Flags().GetDuration("heal-receipt-gossip-interval")
-	windowSize, _ := cmd.Flags().GetInt("heal-receipt-window")
 
 	db, decision, err := openReceiptDB(dataDir)
 	if err != nil {
-		if feature, ok := serveruntime.OptionalRoleDisabled(badgerrole.DefaultRegistry(), decision); ok {
-			serveruntime.LogOptionalRoleDisabled(badgerrole.RoleReceipts, feature, err)
-			return opts, nil, nil
+		if feature, ok := OptionalRoleDisabled(badgerrole.DefaultRegistry(), decision); ok {
+			LogOptionalRoleDisabled(badgerrole.RoleReceipts, feature, err)
+			return srvOpts, nil, nil
 		}
-		return opts, nil, fmt.Errorf("open receipt db: %w", err)
+		return srvOpts, nil, fmt.Errorf("open receipt db: %w", err)
 	}
 	vlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryReceipts, db)
 
-	// KeyStore is constructed here to validate the PSK at boot; the scrubber
-	// (Slice 3) consumes it via receiptTrackingEmitter to sign receipts.
 	ks, err := receipt.NewKeyStore(receipt.Key{ID: "cluster", Secret: []byte(psk)})
 	if err != nil {
 		resourcewatch.DeregisterDB(vlogEntry)
 		_ = db.Close()
-		return opts, nil, fmt.Errorf("init receipt keystore: %w", err)
+		return srvOpts, nil, fmt.Errorf("init receipt keystore: %w", err)
 	}
 
 	store, err := receipt.NewStore(db, receipt.StoreOptions{
-		Retention:      retention,
+		Retention:      opts.Retention,
 		FlushThreshold: 100,
 		FlushInterval:  50 * time.Millisecond,
 	})
 	if err != nil {
 		resourcewatch.DeregisterDB(vlogEntry)
 		_ = db.Close()
-		return opts, nil, fmt.Errorf("create receipt store: %w", err)
+		return srvOpts, nil, fmt.Errorf("create receipt store: %w", err)
 	}
 
 	routingCache := receipt.NewRoutingCache()
 	broadcaster := cluster.NewReceiptBroadcaster(quicTransport, peers, 3*time.Second)
 	broadcaster.SetMetrics(receipt.BroadcastMetrics{})
 	gossipSender := cluster.NewReceiptGossipSender(
-		nodeID, peers, quicTransport, store, gossipInterval, windowSize,
+		nodeID, peers, quicTransport, store, opts.GossipInterval, opts.WindowSize,
 	)
 
-	// Wire gossip → cache so peer receipt IDs land here.
 	if gossipReceiver != nil {
 		gossipReceiver.SetReceiptCache(routingCache)
 	}
-	// Register the StreamReceiptQuery handler so peers can resolve our
-	// local receipts via broadcast fallback.
 	router.Handle(transport.StreamReceiptQuery, cluster.NewReceiptQueryHandler(store))
 
 	go gossipSender.Run(ctx)
 
-	api := receipt.NewAPI(store, routingCache, broadcaster, retention)
+	api := receipt.NewAPI(store, routingCache, broadcaster, opts.Retention)
 
 	log.Info().Str("component", "receipt").Str("mode", "cluster").
-		Dur("retention", retention).Dur("gossip_interval", gossipInterval).Int("window", windowSize).Msg("heal-receipt API enabled")
+		Dur("retention", opts.Retention).Dur("gossip_interval", opts.GossipInterval).Int("window", opts.WindowSize).Msg("heal-receipt API enabled")
 
-	return append(opts, server.WithReceiptAPI(api)), &healReceiptWiring{
+	return append(srvOpts, server.WithReceiptAPI(api)), &HealReceiptWiring{
 		db:           db,
 		vlogEntry:    vlogEntry,
 		store:        store,

@@ -228,3 +228,27 @@ func TestGetObjectEC_MissingDataShardUsesParity(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
+
+func TestGetObjectEC_MultiWindowRoundTrip(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
+
+	svc := NewShardService(b.root, nil)
+	allNodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
+	b.SetShardService(svc, allNodes)
+
+	data := make([]byte, 5*1024*1024+123)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+
+	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+}

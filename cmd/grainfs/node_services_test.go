@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -35,7 +36,7 @@ func TestEnsureDefaultNBDVolumeRetriesTransientCreateFailure(t *testing.T) {
 	backend.failPuts.Store(1)
 	mgr := volume.NewManager(backend)
 
-	err = ensureDefaultNBDVolume(context.Background(), mgr, "default", 4096, 2*time.Second)
+	err = serveruntime.EnsureDefaultNBDVolume(context.Background(), mgr, "default", 4096, 2*time.Second)
 	require.NoError(t, err)
 
 	vol, err := mgr.Get("default")
