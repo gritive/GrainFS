@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.0.74.0] - 2026-05-07
+
+### Added
+
+- `cluster status` / `cluster peers` can now mark remote metaRaft voters as
+  `live` when the leader has fresh successful AppendEntries evidence for that
+  peer, giving remove-peer preflight a real positive liveness source.
+- Added regression coverage for heartbeat and entries-bearing AppendEntries
+  success evidence, leader-only evidence exposure, leader epoch reset behavior,
+  freshness filtering, and raft-address to node-ID evidence normalization.
+
+### Changed
+
+- Remove-peer membership safety now treats fresh leader-side metaRaft
+  replication evidence as the positive liveness signal while keeping stale,
+  missing, and follower-side evidence conservative as `configured`.
+- Operator docs now distinguish positive metaRaft liveness evidence from the
+  still-deferred negative dead-peer detection policy.
+
+### Fixed
+
+- New leader epochs now clear prior-term replication evidence so stale
+  successful AppendEntries timestamps cannot briefly mark remote voters live
+  after a leadership change.
+
+## [0.0.73.0] - 2026-05-07
+
+### Changed
+
+- `cmd/grainfs/serve.go` now hoists every cobra flag read into a flat
+  `clusterConfig` struct via `buildClusterConfig` before calling `runCluster`.
+  The body itself reads only `cfg.X`, no `cmd.Flags().Get*`. This keeps the
+  cobra surface exclusively in `runServe` and prepares the body for relocation
+  to `internal/serveruntime.Run` in a follow-up PR.
+- Resource-guard wiring (FD/goroutine/vlog watchers) is now triggered inline
+  with pre-built `resourceguard.{FD,Goroutine,Vlog}Options`; the cobra-coupled
+  `startResourceGuards` helper has been removed.
+- Startup config snapshot is built once via `cmd.Flags().VisitAll` (with the
+  same secret redaction set) and rendered through a cobra-free
+  `logStartupConfigSnapshotFromMap`; `serve_observability.go` is folded into
+  `serve_config.go`.
+
+## [0.0.72.0] - 2026-05-06
+
+### Added
+
+- `cluster remove-peer` now evaluates membership safety from the peer liveness
+  snapshot when that Interface is available.
+- Added focused remove-peer preflight coverage for configured peers, live peers,
+  explicit down states, unresolved legacy voters, missing targets, force
+  overrides, and snapshot rows outside the current voter set.
+
+### Changed
+
+- Remove-peer preflight now treats `configured` remote voters as unknown rather
+  than alive, while still counting `self` and explicitly live resolved voters.
+- The server keeps the legacy `LivePeers()` preflight only as a compatibility
+  fallback when a cluster Adapter has no peer snapshot.
+
+### Fixed
+
+- Remove-peer preflight no longer lets unrelated live snapshot rows inflate the
+  post-removal quorum calculation.
+
 ## [0.0.71.0] - 2026-05-06
 
 ### Added

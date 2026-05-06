@@ -38,6 +38,7 @@ import (
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/receipt"
+	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -192,7 +193,6 @@ var serveCmd = &cobra.Command{
 func runServe(cmd *cobra.Command, args []string) error {
 	dataDir, _ := cmd.Flags().GetString("data")
 	port, _ := cmd.Flags().GetInt("port")
-	peersStr, _ := cmd.Flags().GetString("peers")
 
 	if vt, _ := cmd.Flags().GetInt64("badger-value-threshold"); vt > 0 {
 		badgerutil.SetValueThresholdOverride(vt)
@@ -263,10 +263,22 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	return runCluster(ctx, cmd, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey, authOpts, shardEncryptor)
+	cfg := buildClusterConfig(cmd, addr, dataDir, nodeID, raftAddr, clusterKey, authOpts, shardEncryptor)
+	return runCluster(ctx, cfg)
 }
 
-func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
+func runCluster(ctx context.Context, cfg clusterConfig) error {
+	addr := cfg.Addr
+	dataDir := cfg.DataDir
+	nodeID := cfg.NodeID
+	raftAddr := cfg.RaftAddr
+	clusterKey := cfg.ClusterKey
+	authOpts := cfg.AuthOpts
+	encryptor := cfg.Encryptor
+	peers := cfg.Peers
+	joinMode := cfg.JoinMode
+	raftAddrExplicit := cfg.RaftAddrExplicit
+
 	if nodeID == "" {
 		var err error
 		nodeID, err = serveruntime.GenerateNodeID(dataDir)
@@ -275,13 +287,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
 	}
-	raftAddrExplicit := raftAddr != ""
-
-	// strings.Split always yields at least one element — empty input or
-	// trailing commas produce "" entries that waste a gossip tick each.
-	peers := serveruntime.FilterEmpty(strings.Split(peersStr, ","))
-	joinAddr, _ := cmd.Flags().GetString("join")
-	joinMode := joinAddr != ""
 
 	// D6/D7: --cluster-key is required when running in actual cluster mode
 	// (peers > 0 || join != ""). Solo runs through this same function but
@@ -302,7 +307,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		if raftAddr == "" {
 			return fmt.Errorf("--raft-addr is required when --join is set")
 		}
-		peers = []string{joinAddr}
+		peers = []string{cfg.JoinAddr}
 	}
 
 	// When no peers are configured, we boot a singleton Raft node on a
@@ -373,29 +378,22 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		return server.PreflightBadger(db, metaDir, nil)
 	}
 
-	badgerManagedMode, _ := cmd.Flags().GetBool("badger-managed-mode")
-	raftLogGCInterval, _ := cmd.Flags().GetDuration("raft-log-gc-interval")
-	raftHeartbeatInterval, _ := cmd.Flags().GetDuration("raft-heartbeat-interval")
-	raftElectionTimeout, _ := cmd.Flags().GetDuration("raft-election-timeout")
-	if raftElectionTimeout > 0 && raftHeartbeatInterval > 0 && raftElectionTimeout < 3*raftHeartbeatInterval {
-		return fmt.Errorf("--raft-election-timeout (%s) must be >= 3 * --raft-heartbeat-interval (%s)", raftElectionTimeout, raftHeartbeatInterval)
+	if cfg.RaftElectionTimeout > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.RaftElectionTimeout < 3*cfg.RaftHeartbeatInterval {
+		return fmt.Errorf("--raft-election-timeout (%s) must be >= 3 * --raft-heartbeat-interval (%s)", cfg.RaftElectionTimeout, cfg.RaftHeartbeatInterval)
 	}
-	quicMuxEnabled, _ := cmd.Flags().GetBool("quic-mux")
-	quicMuxPoolSize, _ := cmd.Flags().GetInt("quic-mux-pool")
-	quicMuxFlushWindow, _ := cmd.Flags().GetDuration("quic-mux-flush")
-	if quicMuxEnabled && quicMuxFlushWindow > 0 && raftHeartbeatInterval > 0 && quicMuxFlushWindow >= raftHeartbeatInterval {
-		return fmt.Errorf("--quic-mux-flush (%s) must be << --raft-heartbeat-interval (%s)", quicMuxFlushWindow, raftHeartbeatInterval)
+	if cfg.QUICMuxEnabled && cfg.QUICMuxFlushWindow > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.QUICMuxFlushWindow >= cfg.RaftHeartbeatInterval {
+		return fmt.Errorf("--quic-mux-flush (%s) must be << --raft-heartbeat-interval (%s)", cfg.QUICMuxFlushWindow, cfg.RaftHeartbeatInterval)
 	}
 	// Meta-raft heartbeat is fixed (not user-configurable) and shares the
 	// same coalescer flush window. If the flush window were larger than
 	// the meta heartbeat, meta hb dispatch could be delayed past the meta
 	// election deadline. Cap conservatively at < half of the meta heartbeat.
-	if quicMuxEnabled && quicMuxFlushWindow > 0 && quicMuxFlushWindow*2 >= cluster.MetaRaftHeartbeatInterval {
-		return fmt.Errorf("--quic-mux-flush (%s) must be << meta-raft heartbeat (%s); meta-raft uses a fixed 150ms heartbeat / 750ms election", quicMuxFlushWindow, cluster.MetaRaftHeartbeatInterval)
+	if cfg.QUICMuxEnabled && cfg.QUICMuxFlushWindow > 0 && cfg.QUICMuxFlushWindow*2 >= cluster.MetaRaftHeartbeatInterval {
+		return fmt.Errorf("--quic-mux-flush (%s) must be << meta-raft heartbeat (%s); meta-raft uses a fixed 150ms heartbeat / 750ms election", cfg.QUICMuxFlushWindow, cluster.MetaRaftHeartbeatInterval)
 	}
 
 	var storeOpts []raft.BadgerLogStoreOption
-	if badgerManagedMode {
+	if cfg.BadgerManagedMode {
 		storeOpts = append(storeOpts, raft.WithManagedMode())
 	}
 	logStore, err := raft.NewBadgerLogStore(raftDir, storeOpts...)
@@ -418,9 +416,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// data groups share a single instance instead of opening their own. Reduces
 	// process-level BadgerDB instance count from (2N+1) → (2+1) for the log
 	// half. FSM state DB consolidation deferred to full C2.
-	sharedBadgerEnabled, _ := cmd.Flags().GetBool("shared-badger")
 	var sharedRaftLogDB *badger.DB
-	if sharedBadgerEnabled {
+	if cfg.SharedBadgerEnabled {
 		// Refuse to silently abandon legacy per-group raft logs. Existing
 		// deployments that started before P0b have raft state under
 		// <dataDir>/groups/*/raft. Ignoring those and opening a fresh shared
@@ -511,10 +508,10 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 	}
 
-	cfg := raft.DefaultConfig(nodeID, peers)
-	cfg.ManagedMode = badgerManagedMode
-	cfg.LogGCInterval = raftLogGCInterval
-	node := raft.NewNode(cfg, logStore)
+	raftCfg := raft.DefaultConfig(nodeID, peers)
+	raftCfg.ManagedMode = cfg.BadgerManagedMode
+	raftCfg.LogGCInterval = cfg.RaftLogGCInterval
+	node := raft.NewNode(raftCfg, logStore)
 	if !joinMode {
 		if err := node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
 			return fmt.Errorf("raft bootstrap: %w", err)
@@ -532,11 +529,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// registered, all inbound meta calls would hit "mux: unknown group
 	// __meta__" and meta election would stall.
 	groupRaftMux := raft.NewGroupRaftQUICMux(quicTransport)
-	if quicMuxEnabled {
-		groupRaftMux.EnableMux(quicMuxPoolSize, quicMuxFlushWindow)
+	if cfg.QUICMuxEnabled {
+		groupRaftMux.EnableMux(cfg.QUICMuxPoolSize, cfg.QUICMuxFlushWindow)
 		log.Info().
-			Int("pool", quicMuxPoolSize).
-			Dur("flush", quicMuxFlushWindow).
+			Int("pool", cfg.QUICMuxPoolSize).
+			Dur("flush", cfg.QUICMuxFlushWindow).
 			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
 	}
 
@@ -605,7 +602,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Default 0 = auto-derived from cluster size: max(8, (1+len(peers))*4).
 	// Solo(peers=0)=8, 5-node=20, 10-node=40 — 클러스터 확장 시 sharding 헤드룸 확보.
 	// 명시값 ≥1 = 그 값 그대로, <0 = 1로 클램프.
-	seedGroups, _ := cmd.Flags().GetInt("seed-groups")
+	seedGroups := cfg.SeedGroups
 	if seedGroups == 0 {
 		clusterSize := 1 + len(peers)
 		seedGroups = clusterSize * 4
@@ -637,11 +634,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	// Create ShardService for distributed data replication
 	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
-	if directIO, _ := cmd.Flags().GetBool("direct-io"); directIO {
+	if cfg.DirectIO {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
 		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
 	}
-	if measureReadAmp, _ := cmd.Flags().GetBool("measure-read-amp"); measureReadAmp {
+	if cfg.MeasureReadAmp {
 		readamp.Enable()
 		log.Info().Msg("read-amplification simulator enabled — see grainfs_readamp_* counters at /metrics")
 	}
@@ -677,10 +674,9 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// EC shard cache (Phase 2 #3 follow-up). Construct it before any per-group
 	// backend can be instantiated so group-1..N receive the same cache wiring
 	// as the legacy group-0 backend.
-	shardCacheSize, _ := cmd.Flags().GetInt64("shard-cache-size")
-	shardCache := shardcache.New(shardCacheSize)
+	shardCache := shardcache.New(cfg.ShardCacheSize)
 	distBackend.SetShardCache(shardCache)
-	log.Info().Int64("bytes", shardCacheSize).Msg("ec shard cache configured")
+	log.Info().Int64("bytes", cfg.ShardCacheSize).Msg("ec shard cache configured")
 
 	// Live multi-raft sharding (v0.0.7.0): group-0 keeps using the shared
 	// distBackend (legacy single-backend deployment is the group-0 instance);
@@ -717,9 +713,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	})
 	go rebalancer.Run(ctx)
 
-	// EC config read early — instantiateLocalGroup needs it for per-group EC.
-	clusterECData, _ := cmd.Flags().GetInt("ec-data")
-	clusterECParity, _ := cmd.Flags().GetInt("ec-parity")
+	// EC config — instantiateLocalGroup needs it for per-group EC.
 
 	// Live multi-raft sharding (v0.0.7.0): instantiate per-group raft.Node +
 	// BadgerDB + GroupBackend for each group this node is a voter of. group-0
@@ -788,11 +782,11 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			Transport: groupRaftMux.ForGroup(entry.ID),
 			AddrBook:  metaRaft.FSM(),
 			EC: cluster.ECConfig{
-				DataShards:   clusterECData,
-				ParityShards: clusterECParity,
+				DataShards:   cfg.ECData,
+				ParityShards: cfg.ECParity,
 			},
-			ElectionTimeout:  raftElectionTimeout,
-			HeartbeatTimeout: raftHeartbeatInterval,
+			ElectionTimeout:  cfg.RaftElectionTimeout,
+			HeartbeatTimeout: cfg.RaftHeartbeatInterval,
 		}
 		if sharedRaftLogDB != nil {
 			// Forward managed-mode and any future BadgerLogStoreOption to
@@ -889,19 +883,18 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	go loadReporter.Run(ctx)
 
 	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
-	// 1-2 nodes always use N× replication. (clusterECData/Parity read above for instantiateOwned.)
+	// 1-2 nodes always use N× replication.
 	distBackend.SetECConfig(cluster.ECConfig{
-		DataShards:   clusterECData,
-		ParityShards: clusterECParity,
+		DataShards:   cfg.ECData,
+		ParityShards: cfg.ECParity,
 	})
-	log.Info().Int("k", clusterECData).Int("m", clusterECParity).
+	log.Info().Int("k", cfg.ECData).Int("m", cfg.ECParity).
 		Bool("active", len(allNodes) >= cluster.MinECNodes).
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
 
 	// VFS bucket fixed-versionID toggle (rollback path for the write-amp fix).
-	vfsFixed, _ := cmd.Flags().GetBool("backend-vfs-fixed-version")
-	distBackend.SetVFSFixedVersionEnabled(vfsFixed)
-	log.Info().Bool("enabled", vfsFixed).Msg("VFS bucket fixed-versionID configured")
+	distBackend.SetVFSFixedVersionEnabled(cfg.VFSFixed)
+	log.Info().Bool("enabled", cfg.VFSFixed).Msg("VFS bucket fixed-versionID configured")
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)
@@ -923,15 +916,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	var inner storage.Backend = distBackend
 
 	// Pack small objects into blob files when --pack-threshold is set.
-	packThreshold, _ := cmd.Flags().GetInt("pack-threshold")
-	if packThreshold > 0 {
+	if cfg.PackThreshold > 0 {
 		blobDir := filepath.Join(dataDir, "blobs")
-		pb, err := packblob.NewPackedBackend(inner, blobDir, int64(packThreshold))
+		pb, err := packblob.NewPackedBackend(inner, blobDir, int64(cfg.PackThreshold))
 		if err != nil {
 			return fmt.Errorf("failed to initialize packed blob: %w", err)
 		}
 		inner = pb
-		log.Info().Int("threshold", packThreshold).Msg("packed blob storage enabled")
+		log.Info().Int("threshold", cfg.PackThreshold).Msg("packed blob storage enabled")
 	}
 
 	// Wrap with LRU read cache. Raft FSM-based invalidation ensures cache
@@ -945,33 +937,21 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Start balancer if enabled (cluster mode only).
 	var balancerProposer *cluster.BalancerProposer
 	var gossipReceiver *cluster.GossipReceiver
-	balancerEnabled, _ := cmd.Flags().GetBool("balancer-enabled")
-	if balancerEnabled {
-		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
-		statsStore := cluster.NewNodeStatsStore(3 * bGossipInterval)
-		ecData, _ := cmd.Flags().GetInt("ec-data")
-		ecParity, _ := cmd.Flags().GetInt("ec-parity")
-		bTriggerPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
-		bStopPct, _ := cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
-		bMigrationRate, _ := cmd.Flags().GetInt("balancer-migration-rate")
-		bTenureMin, _ := cmd.Flags().GetDuration("balancer-leader-tenure-min")
-		bWarmup, _ := cmd.Flags().GetDuration("balancer-warmup-timeout")
-		bCBThreshold, _ := cmd.Flags().GetFloat64("balancer-cb-threshold")
-		bMigMaxRetries, _ := cmd.Flags().GetInt("balancer-migration-max-retries")
-		bMigPendingTTL, _ := cmd.Flags().GetDuration("balancer-migration-pending-ttl")
+	if cfg.BalancerEnabled {
+		statsStore := cluster.NewNodeStatsStore(3 * cfg.BalancerGossipInterval)
 		bopts := serveruntime.BalancerOptions{
-			GossipInterval:      bGossipInterval,
-			WarmupTimeout:       bWarmup,
-			ImbalanceTriggerPct: bTriggerPct,
-			ImbalanceStopPct:    bStopPct,
-			MigrationRate:       bMigrationRate,
-			LeaderTenureMin:     bTenureMin,
-			CBThreshold:         bCBThreshold,
-			MigrationMaxRetries: bMigMaxRetries,
-			MigrationPendingTTL: bMigPendingTTL,
+			GossipInterval:      cfg.BalancerGossipInterval,
+			WarmupTimeout:       cfg.BalancerWarmupTimeout,
+			ImbalanceTriggerPct: cfg.BalancerImbalanceTriggerPct,
+			ImbalanceStopPct:    cfg.BalancerImbalanceStopPct,
+			MigrationRate:       cfg.BalancerMigrationRate,
+			LeaderTenureMin:     cfg.BalancerLeaderTenureMin,
+			CBThreshold:         cfg.BalancerCBThreshold,
+			MigrationMaxRetries: cfg.BalancerMigrationMaxRetries,
+			MigrationPendingTTL: cfg.BalancerMigrationPendingTTL,
 		}
 		var err error
-		balancerProposer, gossipReceiver, err = serveruntime.StartBalancer(ctx, bopts, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, ecData+ecParity)
+		balancerProposer, gossipReceiver, err = serveruntime.StartBalancer(ctx, bopts, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, cfg.ECData+cfg.ECParity)
 		if err != nil {
 			log.Warn().Err(err).Msg("balancer start failed")
 		}
@@ -983,10 +963,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// channel — competing readers would deliver each message to only one.
 	// When balancer is off but heal-receipt is on, create a bare receiver;
 	// its NodeStatsStore is unused in this path but required by the ctor.
-	healReceiptEnabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
-	if gossipReceiver == nil && healReceiptEnabled {
-		bGossipInterval, _ := cmd.Flags().GetDuration("balancer-gossip-interval")
-		standaloneStats := cluster.NewNodeStatsStore(3 * bGossipInterval)
+	if gossipReceiver == nil && cfg.HealReceiptEnabled {
+		standaloneStats := cluster.NewNodeStatsStore(3 * cfg.BalancerGossipInterval)
 		gossipReceiver = cluster.NewGossipReceiver(quicTransport, standaloneStats)
 		go gossipReceiver.Run(ctx)
 		log.Info().Str("component", "gossip").Msg("gossip receiver started (receipt-only, balancer disabled)")
@@ -1086,15 +1064,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 
 	// Wrap with pull-through cache if upstream is configured.
-	if upstreamEndpoint, _ := cmd.Flags().GetString("upstream"); upstreamEndpoint != "" {
-		upstreamAccessKey, _ := cmd.Flags().GetString("upstream-access-key")
-		upstreamSecretKey, _ := cmd.Flags().GetString("upstream-secret-key")
-		up, err := pullthrough.NewS3Upstream(upstreamEndpoint, upstreamAccessKey, upstreamSecretKey)
+	if cfg.UpstreamEndpoint != "" {
+		up, err := pullthrough.NewS3Upstream(cfg.UpstreamEndpoint, cfg.UpstreamAccessKey, cfg.UpstreamSecretKey)
 		if err != nil {
 			return fmt.Errorf("init upstream: %w", err)
 		}
 		backend = pullthrough.NewBackend(backend, up)
-		log.Info().Str("upstream", upstreamEndpoint).Msg("pull-through cache enabled")
+		log.Info().Str("upstream", cfg.UpstreamEndpoint).Msg("pull-through cache enabled")
 	}
 	startupResult := badgerrole.ReduceStartupDecisions(roleRegistry, startupDecisions)
 	for _, decision := range startupResult.Decisions {
@@ -1123,8 +1099,6 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		log.Warn().Str("marker", filepath.Join(dataDir, cluster.RecoverClusterMarkerPath)).Msg("recovered cluster write gate enabled")
 	}
-	snapInterval, _ := cmd.Flags().GetDuration("snapshot-interval")
-	snapRetain, _ := cmd.Flags().GetInt("snapshot-retain")
 
 	// DiskCollector exposes grainfs_disk_used_pct metric. In multi-node mode
 	// the balancer owns its own collector; in singleton mode nothing else
@@ -1148,7 +1122,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// anchored to the object mutation log. Start only after startup bucket
 	// metadata exists and the routed snapshot enumeration path is usable; data
 	// groups are instantiated asynchronously during boot.
-	if err := serveruntime.StartAutoSnapshotterWhenReady(ctx, dataDir, walDir, backend, snapInterval, snapRetain, 30*time.Second); err != nil {
+	if err := serveruntime.StartAutoSnapshotterWhenReady(ctx, dataDir, walDir, backend, cfg.SnapInterval, cfg.SnapRetain, 30*time.Second); err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}
 
@@ -1159,18 +1133,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Startup config snapshot — debug-level log of every flag-derived runtime
 	// value. Useful for diffing against a known-good config when an operator
 	// is comparing two installs or troubleshooting drift after a restart.
-	logStartupConfigSnapshot(cmd, addr, dataDir, nodeID, raftAddr, peers)
+	logStartupConfigSnapshotFromMap(cfg.FlagsSnapshot, addr, dataDir, nodeID, raftAddr, peers)
 
-	clusterAlertWebhook, _ := cmd.Flags().GetString("alert-webhook")
-	clusterAlertSecret, _ := cmd.Flags().GetString("alert-webhook-secret")
-	clusterAlerts := server.NewAlertsState(clusterAlertWebhook, alerts.Options{Secret: clusterAlertSecret}, alerts.DegradedConfig{})
+	clusterAlerts := server.NewAlertsState(cfg.AlertWebhook, alerts.Options{Secret: cfg.AlertSecret}, alerts.DegradedConfig{})
 
 	// Wire predictive disk warnings into the collector now that clusterAlerts
 	// exists. Thresholds are taken as fractions on the flag (more natural for
 	// operators) but DiskCollector works in percent.
-	diskWarnFrac, _ := cmd.Flags().GetFloat64("disk-warn-threshold")
-	diskCritFrac, _ := cmd.Flags().GetFloat64("disk-critical-threshold")
-	diskCollector.SetThresholds(diskWarnFrac*100, diskCritFrac*100)
+	diskCollector.SetThresholds(cfg.DiskWarnFrac*100, cfg.DiskCritFrac*100)
 	diskCollector.SetOnThreshold(func(level cluster.DiskThresholdLevel, pct float64, availBytes uint64) {
 		// Webhook send may block on retries — dispatch in a goroutine so the
 		// collect loop is never delayed.
@@ -1236,20 +1206,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip + broadcast fallback.
-	rcptEnabled, _ := cmd.Flags().GetBool("heal-receipt-enabled")
-	rcptPSK, _ := cmd.Flags().GetString("heal-receipt-psk")
+	rcptPSK := cfg.HealReceiptPSK
 	if rcptPSK == "" {
 		rcptPSK = clusterKey
 	}
-	rcptRetention, _ := cmd.Flags().GetDuration("heal-receipt-retention")
-	rcptGossipInterval, _ := cmd.Flags().GetDuration("heal-receipt-gossip-interval")
-	rcptWindow, _ := cmd.Flags().GetInt("heal-receipt-window")
 	rcptOpts := serveruntime.ReceiptOptions{
-		Enabled:        rcptEnabled,
+		Enabled:        cfg.HealReceiptEnabled,
 		PSK:            rcptPSK,
-		Retention:      rcptRetention,
-		GossipInterval: rcptGossipInterval,
-		WindowSize:     rcptWindow,
+		Retention:      cfg.HealReceiptRetention,
+		GossipInterval: cfg.HealReceiptGossipInterval,
+		WindowSize:     cfg.HealReceiptWindow,
 	}
 	newSrvOpts, receiptWiring, err := serveruntime.SetupClusterReceipt(
 		ctx, rcptOpts, dataDir, nodeID, peers,
@@ -1277,7 +1243,20 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		incidentRecorder = incident.NewRecorder(incidentStore, incident.NewReducer())
 		distBackend.SetIncidentRecorder(incidentRecorder)
 		srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
-		startResourceGuards(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
+		guardDeps := resourceguard.Deps{
+			NodeID:   nodeID,
+			Alerts:   clusterAlerts,
+			Recorder: incidentRecorder,
+		}
+		if cfg.FDWatchEnabled {
+			resourceguard.StartFD(ctx, cfg.FDOpts, guardDeps)
+		}
+		if cfg.GoroutineWatchEnabled {
+			resourceguard.StartGoroutine(ctx, cfg.GoroutineOpts, guardDeps)
+		}
+		if cfg.VlogWatchEnabled {
+			resourceguard.StartVlog(ctx, cfg.VlogResourceGuardOpts, guardDeps)
+		}
 	}
 	clusterIncidentRecorder, scrubberIncidentRecorder := serveruntime.IncidentRecorderInterfaces(incidentRecorder)
 
@@ -1285,16 +1264,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
 	// can reuse the same config store the worker scans. The worker itself
 	// runs leader-only — see LifecycleManager.Run.
-	lifecycleInterval, _ := cmd.Flags().GetDuration("lifecycle-interval")
 	var lifecycleMgr *cluster.LifecycleManager
-	if lifecycleInterval > 0 {
-		lifecycleMgr = cluster.NewLifecycleManager(distBackend, lifecycleInterval)
+	if cfg.LifecycleInterval > 0 {
+		lifecycleMgr = cluster.NewLifecycleManager(distBackend, cfg.LifecycleInterval)
 		srvOpts = append(srvOpts, server.WithLifecycleStore(lifecycleMgr.Store()))
 	}
 
-	dedupEnabled, _ := cmd.Flags().GetBool("dedup")
-	blockCacheSize, _ := cmd.Flags().GetInt64("block-cache-size")
-	volMgr, blockCache, dedupDB, err := serveruntime.BuildVolumeManager(serveruntime.VolumeManagerOptions{DedupEnabled: dedupEnabled, BlockCacheSize: blockCacheSize}, dataDir, backend)
+	volMgr, blockCache, dedupDB, err := serveruntime.BuildVolumeManager(serveruntime.VolumeManagerOptions{DedupEnabled: cfg.DedupEnabled, BlockCacheSize: cfg.BlockCacheSize}, dataDir, backend)
 	if err != nil {
 		return fmt.Errorf("volume manager: %w", err)
 	}
@@ -1328,20 +1304,17 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if err != nil {
 		return fmt.Errorf("dashboard token: %w", err)
 	}
-	publicURL, _ := cmd.Flags().GetString("public-url")
-	vlogWarn, _ := cmd.Flags().GetFloat64("vlog-warn-ratio")
-	vlogCritical, _ := cmd.Flags().GetFloat64("vlog-critical-ratio")
 	adminDeps := &admin.Deps{
 		Manager:    srv.VolumeManager(),
 		Token:      tokenStore,
-		PublicURL:  publicURL,
+		PublicURL:  cfg.PublicURL,
 		NodeID:     nodeID,
 		PeerHealth: serveruntime.NewPeerHealthAdapter(distBackend),
 		VlogBreakdown: serveruntime.NewVlogBreakdownAdapter(serveruntime.VlogBreakdownOptions{
-			Enabled:       vlogWatchEnabled(cmd),
+			Enabled:       cfg.VlogWatchEnabled,
 			DataDir:       dataDir,
-			WarnRatio:     vlogWarn,
-			CriticalRatio: vlogCritical,
+			WarnRatio:     cfg.VlogWarnRatio,
+			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
 	}
 	dataHertz := srv.HertzEngine()
@@ -1351,14 +1324,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Open the admin Unix socket. Operator commands (`grainfs volume *`, `grainfs
 	// dashboard`) reach this socket; permissions are governed by the file mode
 	// (0660) and optional --admin-group chown.
-	adminSocket, _ := cmd.Flags().GetString("admin-socket")
+	adminSocket := cfg.AdminSocket
 	if adminSocket == "" {
 		adminSocket = filepath.Join(dataDir, "admin.sock")
 	}
-	adminGroup, _ := cmd.Flags().GetString("admin-group")
 	adminSrv, err := admin.Start(admin.Config{
 		SocketPath: adminSocket,
-		Group:      adminGroup,
+		Group:      cfg.AdminGroup,
 		Deps:       adminDeps,
 	})
 	if err != nil {
@@ -1484,9 +1456,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	adminDeps.ScrubProposer = serveruntime.NewScrubProposerAdapter(metaRaft, director, nodeID)
 	adminDeps.ScrubAggregator = serveruntime.NewScrubAggregatorAdapter(clusterCoord)
 
-	scrubInterval, _ := cmd.Flags().GetDuration("scrub-interval")
-	if scrubInterval > 0 {
-		sc := scrubber.New(distBackend, scrubInterval)
+	if cfg.ScrubInterval > 0 {
+		sc := scrubber.New(distBackend, cfg.ScrubInterval)
 		sc.SetEmitter(activeEmitter)
 		sc.RegisterSource("replication", replSource, replVerifier)
 		sc.Start(ctx)
@@ -1497,7 +1468,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			if clusterIncidentRecorder != nil {
 				gb.SetIncidentRecorder(clusterIncidentRecorder)
 			}
-			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), scrubInterval)
+			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), cfg.ScrubInterval)
 			splitShardKey := func(shardKey string) (string, string) {
 				objectKey, versionID := shardKey, ""
 				if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
@@ -1555,7 +1526,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		}
 		refreshPlacementMonitors()
 		go func() {
-			ticker := time.NewTicker(scrubInterval)
+			ticker := time.NewTicker(cfg.ScrubInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -1566,15 +1537,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				}
 			}
 		}()
-		log.Info().Dur("interval", scrubInterval).Msg("cluster scrubber started")
+		log.Info().Dur("interval", cfg.ScrubInterval).Msg("cluster scrubber started")
 	}
 
 	// Background EC resharding is group-local: each locally-owned DataGroup has
 	// its own Raft leader and object metadata DB. Followers skip each pass in
 	// ReshardManager, but we still start one manager per local group so
 	// leadership changes are picked up without serve-level rewiring.
-	reshardInterval, _ := cmd.Flags().GetDuration("reshard-interval")
-	if reshardInterval > 0 {
+	if cfg.ReshardInterval > 0 {
 		reshardManagers := serveruntime.NewReshardManagerRegistry()
 		startReshardManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
@@ -1583,14 +1553,14 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				log.Warn().Str("group", dg.ID()).Msg("reshard manager skipped: group has no raft node")
 				return
 			}
-			go cluster.NewReshardManager(gb, leader, reshardInterval).Start(managerCtx)
+			go cluster.NewReshardManager(gb, leader, cfg.ReshardInterval).Start(managerCtx)
 		}
 		refreshReshardManagers := func() {
 			reshardManagers.Refresh(ctx, dgMgr.All(), startReshardManager)
 		}
 		refreshReshardManagers()
 		go func() {
-			ticker := time.NewTicker(reshardInterval)
+			ticker := time.NewTicker(cfg.ReshardInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -1601,7 +1571,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 				}
 			}
 		}()
-		log.Info().Dur("interval", reshardInterval).Msg("cluster reshard manager started")
+		log.Info().Dur("interval", cfg.ReshardInterval).Msg("cluster reshard manager started")
 	}
 
 	// Start the leader-aware worker loop. Only the Raft leader runs the
@@ -1610,14 +1580,13 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// starts/stops the worker on leadership transitions.
 	if lifecycleMgr != nil {
 		go lifecycleMgr.Run(ctx)
-		log.Info().Dur("interval", lifecycleInterval).Msg("cluster lifecycle manager started")
+		log.Info().Dur("interval", cfg.LifecycleInterval).Msg("cluster lifecycle manager started")
 	}
 
 	// Start the degraded mode monitor — checks live node count vs EC threshold
 	// every 30 s. The first check fires immediately so the server knows its
 	// state before serving any requests.
-	degradedInterval, _ := cmd.Flags().GetDuration("degraded-check-interval")
-	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), degradedInterval).
+	degradedMon := cluster.NewDegradedMonitor(distBackend, clusterAlerts.Tracker(), cfg.DegradedInterval).
 		WithQuorumCheck(node, clusterAlerts)
 	go degradedMon.Run(ctx)
 
@@ -1632,10 +1601,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// are now wired in cluster mode too, not just local. Formerly local-only
 	// because runCluster never called the NFS/NBD wiring. Scrubber/lifecycle
 	// remain local-specific pending ECBackend→cluster integration (A.2).
-	nfs4Port, _ := cmd.Flags().GetInt("nfs4-port")
-	nbdPort, _ := cmd.Flags().GetInt("nbd-port")
-	nbdVolumeSize, _ := cmd.Flags().GetInt64("nbd-volume-size")
-	nodeSvc := serveruntime.StartNodeServices(ctx, backend, volMgr, nfs4Port, nbdPort, nbdVolumeSize, distBackend)
+	nodeSvc := serveruntime.StartNodeServices(ctx, backend, volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.NBDVolumeSize, distBackend)
 	defer nodeSvc.Close()
 
 	<-ctx.Done()

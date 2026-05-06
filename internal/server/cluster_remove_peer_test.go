@@ -404,6 +404,98 @@ func TestRemovePeer_ForceBypassesPreflight(t *testing.T) {
 	assert.Equal(t, []string{"n2"}, mem.called())
 }
 
+func TestClusterRemovePeer_UsesSnapshotPreflightForConfiguredUnknown(t *testing.T) {
+	mem := &fakeMembership{}
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		leaderID: "n1",
+		peers:    []string{"n2", "n3"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "n2", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessConfigured},
+			{PeerID: "n3", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive},
+		},
+	}, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "n3", false)
+
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "quorum would break", body["error"])
+	require.Equal(t, float64(2), body["voters_after"])
+	require.Equal(t, float64(1), body["alive_after"])
+	require.Equal(t, float64(2), body["new_quorum"])
+	require.Empty(t, mem.called())
+}
+
+func TestClusterRemovePeer_BlocksOnUnresolvedLegacyUnlessTarget(t *testing.T) {
+	mem := &fakeMembership{}
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		leaderID: "n1",
+		peers:    []string{"n2", "10.0.0.9:7001"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "n2", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "10.0.0.9:7001", IdentityState: cluster.PeerIdentityUnresolvedLegacy, LivenessState: cluster.PeerLivenessConfigured},
+		},
+	}, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "n2", false)
+
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "membership identity unresolved", body["error"])
+	require.Equal(t, []any{"10.0.0.9:7001"}, body["blocking_peers"])
+	require.Empty(t, mem.called())
+}
+
+func TestClusterRemovePeer_AllowsUnresolvedLegacyTarget(t *testing.T) {
+	mem := &fakeMembership{}
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		leaderID: "n1",
+		peers:    []string{"n2", "10.0.0.9:7001"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "n2", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "10.0.0.9:7001", IdentityState: cluster.PeerIdentityUnresolvedLegacy, LivenessState: cluster.PeerLivenessConfigured},
+		},
+	}, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "10.0.0.9:7001", false)
+
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "removed", body["status"])
+	require.Equal(t, []string{"10.0.0.9:7001"}, mem.called())
+}
+
+func TestClusterRemovePeer_ForceBypassesSnapshotSafetyButNotMissingTarget(t *testing.T) {
+	mem := &fakeMembership{}
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		leaderID: "n1",
+		peers:    []string{"n2", "n3"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "n2", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessConfigured},
+			{PeerID: "n3", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive},
+		},
+	}, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "n3", true)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "removed", body["status"])
+	require.Equal(t, []string{"n3"}, mem.called())
+
+	status, body = postRemovePeer(t, h.baseURL, "n9", true)
+	require.Equal(t, http.StatusNotFound, status)
+	require.Equal(t, "peer not in cluster", body["error"])
+	require.Equal(t, []string{"n3"}, mem.called())
+}
+
 func TestRemovePeer_NoMembershipController_Returns503(t *testing.T) {
 	ci := &fakeClusterInfo{
 		nodeID:    "n1",
