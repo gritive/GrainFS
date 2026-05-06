@@ -9,6 +9,25 @@ storage actions instead of probing optional backend capabilities directly. It
 owns storage side-effect ordering such as cache invalidation, WAL recording,
 recovery write gating, and fallback behavior across decorated backends.
 
+### Storage Decorator Capability Plan
+
+The storage decorator capability plan is the storage operations facade's
+internal plan for discovering optional storage capabilities across a decorated
+backend stack, then executing them while preserving wrapper side effects and
+fallback ordering.
+
+The plan is not a public extension interface and does not widen the primitive
+storage backend interface. Its purpose is to keep capability probing, wrapper
+ordering, and fallback rules inside the facade so callers do not reach through
+decorated backends directly.
+
+For ACL object writes, the plan preserves the ordering contract: cache
+invalidation happens before the mutation can be observed, WAL recording happens
+only after a successful mutation, atomic ACL put adapters are preferred when
+available without bypassing outer mutation side-effect wrappers, put-then-set
+fallback rolls back the newly-created version on ACL failure, and recovery
+write gates are not used as rollback deleters.
+
 ### Mutation Result
 
 A mutation result is the storage-facing outcome of a write operation, including

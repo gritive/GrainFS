@@ -7,35 +7,7 @@ import (
 )
 
 func (o *Operations) PutObjectWithACL(ctx context.Context, bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
-	plan := o.planForCall()
-	if plan.atomicACLPutter != nil {
-		return plan.atomicACLPutter.PutObjectWithACL(bucket, key, r, contentType, acl)
-	}
-	if plan.aclSetter == nil {
-		return nil, UnsupportedOperationError{Op: "PutObjectWithACL", Reason: UnsupportedReasonNoAdapter}
-	}
-
-	obj, err := o.backend.PutObject(ctx, bucket, key, r, contentType)
-	if err != nil {
-		return nil, err
-	}
-	if err := plan.aclSetter.SetObjectACL(bucket, key, acl); err != nil {
-		if obj == nil || obj.VersionID == "" {
-			return nil, fmt.Errorf("%w: acl error: %v; rollback error: missing version id",
-				UnsupportedOperationError{Op: "PutObjectWithACL", Reason: UnsupportedReasonRollbackFailed},
-				err,
-			)
-		}
-		if rollbackErr := rollbackPutObjectWithACL(plan, bucket, key, obj.VersionID); rollbackErr != nil {
-			return nil, fmt.Errorf("%w: acl error: %v; rollback error: %v",
-				UnsupportedOperationError{Op: "PutObjectWithACL", Reason: UnsupportedReasonRollbackFailed},
-				err,
-				rollbackErr,
-			)
-		}
-		return nil, err
-	}
-	return obj, nil
+	return executePutObjectWithACL(ctx, o.backend, bucket, key, r, contentType, acl)
 }
 
 func (o *Operations) PutObjectWithACLResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, acl uint8) (*PutObjectResult, error) {
@@ -99,11 +71,4 @@ func (o *Operations) SetObjectACL(bucket, key string, acl uint8) error {
 		return UnsupportedOperationError{Op: "SetObjectACL", Reason: UnsupportedReasonNoAdapter}
 	}
 	return plan.aclSetter.SetObjectACL(bucket, key, acl)
-}
-
-func rollbackPutObjectWithACL(plan operationsPlan, bucket, key, versionID string) error {
-	if plan.deleteObjectVersionForUndo == nil {
-		return UnsupportedOperationError{Op: "PutObjectWithACL", Reason: UnsupportedReasonRollbackFailed}
-	}
-	return plan.deleteObjectVersionForUndo.DeleteObjectVersion(bucket, key, versionID)
 }

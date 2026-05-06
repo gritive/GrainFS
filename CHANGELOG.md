@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.68.0] - 2026-05-06
+
+### Changed
+
+- Storage ACL writes now use an internal decorator capability plan so optional
+  ACL adapters are discovered without bypassing outer storage wrapper side
+  effects such as cache invalidation and WAL ordering.
+- Documented the storage decorator capability plan as the owner for ACL
+  capability probing, fallback ordering, and rollback selection across
+  decorated backends.
+
+### Tests
+
+- Added regression coverage proving `PutObjectWithACL` falls back through the
+  outer `PutObject` wrapper when an inner decorated backend also exposes an
+  atomic ACL adapter.
+
 ## [0.0.67.0] - 2026-05-06
 
 ### Changed
