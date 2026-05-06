@@ -9,9 +9,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// BenchmarkPutObjectEC measures EC write latency (sequential vs parallel after Phase 1).
-// Single-node: all writes go to WriteLocalShard, so delta is minimal.
-// Multi-node (real deployment): parallel writes reduce latency from Σ(shard) to max(shard).
+func newECBenchmarkBackend(b *testing.B) *DistributedBackend {
+	b.Helper()
+
+	bk := newTestDistributedBackend(b)
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	bk.SetECConfig(cfg)
+
+	svc := NewShardService(bk.root, nil)
+	allNodes := make([]string, cfg.NumShards())
+	for i := range allNodes {
+		allNodes[i] = bk.selfAddr
+	}
+	bk.SetShardService(svc, allNodes)
+	require.True(b, bk.ECActive(), "benchmark setup must exercise the EC path")
+	return bk
+}
+
+// BenchmarkPutObjectEC measures the local EC write path with a full 4+2 stripe.
 func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 	cases := []struct {
 		name string
@@ -25,13 +40,8 @@ func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			bk := newTestDistributedBackend(b)
+			bk := newECBenchmarkBackend(b)
 			require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
-			bk.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
-
-			svc := NewShardService(bk.root, nil)
-			allNodes := []string{bk.selfAddr}
-			bk.SetShardService(svc, allNodes)
 
 			data := make([]byte, tc.size)
 			b.SetBytes(int64(len(data)))
@@ -61,13 +71,8 @@ func BenchmarkGetObjectEC(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			bk := newTestDistributedBackend(b)
+			bk := newECBenchmarkBackend(b)
 			require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
-			bk.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
-
-			svc := NewShardService(bk.root, nil)
-			allNodes := []string{bk.selfAddr}
-			bk.SetShardService(svc, allNodes)
 
 			data := make([]byte, tc.size)
 			_, err := bk.PutObject(context.Background(), "bench", "readkey", bytes.NewReader(data), "application/octet-stream")
