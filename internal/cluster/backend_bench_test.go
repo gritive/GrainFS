@@ -125,7 +125,7 @@ func BenchmarkGetObjectEC_DirectReconstruct(b *testing.B) {
 				require.NoError(b, err)
 				resolved, err := bk.ResolvePlacement(context.Background(), "bench", "readkey", placementMeta)
 				require.NoError(b, err)
-				recCfg, shards, err := bk.getObjectECShardReadersAtShardKey(context.Background(), "bench", resolved.ShardKey, resolved.Record)
+				recCfg, shards, err := bk.getObjectECShardReadersAtShardKey(context.Background(), "bench", resolved.ShardKey, resolved.Record, int64(len(data)))
 				require.NoError(b, err)
 				readers := make([]io.Reader, len(shards))
 				for i, shard := range shards {

@@ -1642,7 +1642,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if b.shardSvc != nil {
 		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
 		if rerr == nil {
-			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record)
+			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record, obj.Size)
 			if ecErr != nil {
 				return nil, nil, fmt.Errorf("ec reconstruct %s/%s via %s: %w", bucket, key, resolved.Source, ecErr)
 			}
@@ -2070,8 +2070,8 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 	return ECReconstruct(recCfg, shards)
 }
 
-func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (io.ReadCloser, error) {
-	recCfg, shards, err := b.getObjectECShardReadersAtShardKey(ctx, bucket, shardKey, rec)
+func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (io.ReadCloser, error) {
+	recCfg, shards, err := b.getObjectECShardReadersAtShardKey(ctx, bucket, shardKey, rec, objectSize)
 	if err != nil {
 		return nil, err
 	}
@@ -2093,7 +2093,7 @@ func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bu
 	}}, nil
 }
 
-func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, []io.ReadCloser, error) {
+func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (ECConfig, []io.ReadCloser, error) {
 	recCfg := rec.ECConfigOrFallback(b.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
 		return ECConfig{}, nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
@@ -2102,7 +2102,7 @@ func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Conte
 		return ECConfig{}, nil, fmt.Errorf("shard service unavailable")
 	}
 
-	if b.shardCache != nil && b.shardCache.Stats().CapacityByte > 0 {
+	if b.ecShardCacheCanStore(bucket, shardKey, recCfg, objectSize) {
 		return b.getObjectECBufferedShardReadersAtShardKey(ctx, bucket, shardKey, rec)
 	}
 	uniqueNodes := make(map[string]struct{}, len(rec.Nodes))
@@ -2168,6 +2168,20 @@ func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Conte
 			available, len(rec.Nodes), recCfg.DataShards)
 	}
 	return recCfg, shards, nil
+}
+
+func (b *DistributedBackend) ecShardCacheCanStore(bucket, shardKey string, cfg ECConfig, objectSize int64) bool {
+	if b.shardCache == nil || b.shardCache.Stats().CapacityByte <= 0 || cfg.DataShards <= 0 || objectSize < 0 {
+		return false
+	}
+	perDataShard := (objectSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
+	shardSize := int64(shardHeaderSize) + perDataShard
+	for i := 0; i < cfg.NumShards(); i++ {
+		if !b.shardCache.CanStore(shardCacheKey(bucket, shardKey, i), shardSize) {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *DistributedBackend) getObjectECBufferedShardReadersAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, []io.ReadCloser, error) {
