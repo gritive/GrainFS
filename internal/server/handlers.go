@@ -1280,48 +1280,57 @@ func (s *Server) removePeerHandler(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	peers := s.cluster.Peers()
-	inCluster := false
-	for _, p := range peers {
-		if p == req.ID {
-			inCluster = true
-			break
-		}
-	}
-	if !inCluster {
-		c.JSON(consts.StatusNotFound, map[string]any{
-			"error": "peer not in cluster",
-			"id":    req.ID,
-		})
-		return
-	}
-
-	if !req.Force {
-		// Peers() excludes self → total voters = len(peers) + 1. The target
-		// is in peers (checked above), so votersAfter = total - 1 = len(peers).
-		// LivePeers() includes self (always alive from its own perspective).
-		votersAfter := len(peers)
-		newQuorum := votersAfter/2 + 1
-		if newQuorum < 1 {
-			newQuorum = 1
-		}
-		live := s.cluster.LivePeers()
-		aliveAfter := 0
-		for _, p := range live {
-			if p == req.ID {
-				continue
+	if result, ok := s.evaluateRemovePeerPreflight(req.ID); ok {
+		if !result.Allowed {
+			if result.Reason == cluster.RemovePeerPreflightNotInCluster || !req.Force {
+				writeRemovePeerPreflightFailure(c, result, req.ID)
+				return
 			}
-			aliveAfter++
 		}
-		if aliveAfter < newQuorum {
-			c.JSON(consts.StatusConflict, map[string]any{
-				"error":        "quorum would break",
-				"voters_after": votersAfter,
-				"alive_after":  aliveAfter,
-				"new_quorum":   newQuorum,
-				"hint":         "rerun with force=true to override",
+	} else {
+		peers := s.cluster.Peers()
+		inCluster := false
+		for _, p := range peers {
+			if p == req.ID {
+				inCluster = true
+				break
+			}
+		}
+		if !inCluster {
+			c.JSON(consts.StatusNotFound, map[string]any{
+				"error": "peer not in cluster",
+				"id":    req.ID,
 			})
 			return
+		}
+
+		if !req.Force {
+			// Peers() excludes self → total voters = len(peers) + 1. The target
+			// is in peers (checked above), so votersAfter = total - 1 = len(peers).
+			// LivePeers() includes self (always alive from its own perspective).
+			votersAfter := len(peers)
+			newQuorum := votersAfter/2 + 1
+			if newQuorum < 1 {
+				newQuorum = 1
+			}
+			live := s.cluster.LivePeers()
+			aliveAfter := 0
+			for _, p := range live {
+				if p == req.ID {
+					continue
+				}
+				aliveAfter++
+			}
+			if aliveAfter < newQuorum {
+				c.JSON(consts.StatusConflict, map[string]any{
+					"error":        "quorum would break",
+					"voters_after": votersAfter,
+					"alive_after":  aliveAfter,
+					"new_quorum":   newQuorum,
+					"hint":         "rerun with force=true to override",
+				})
+				return
+			}
 		}
 	}
 
@@ -1350,6 +1359,46 @@ func (s *Server) removePeerHandler(ctx context.Context, c *app.RequestContext) {
 	})
 
 	c.JSON(consts.StatusOK, map[string]string{"status": "removed", "id": req.ID})
+}
+
+func (s *Server) evaluateRemovePeerPreflight(id string) (cluster.RemovePeerPreflightResult, bool) {
+	peerSnapshot, ok := s.cluster.(clusterPeerSnapshot)
+	if !ok {
+		return cluster.RemovePeerPreflightResult{}, false
+	}
+	snapshot := peerSnapshot.PeerSnapshot()
+	if len(snapshot) == 0 {
+		return cluster.RemovePeerPreflightResult{}, false
+	}
+	return cluster.EvaluateRemovePeerPreflight(cluster.RemovePeerPreflightInput{
+		TargetID: id,
+		Voters:   s.cluster.Peers(),
+		Snapshot: snapshot,
+	}), true
+}
+
+func writeRemovePeerPreflightFailure(c *app.RequestContext, result cluster.RemovePeerPreflightResult, id string) {
+	switch result.Reason {
+	case cluster.RemovePeerPreflightNotInCluster:
+		c.JSON(consts.StatusNotFound, map[string]any{
+			"error": "peer not in cluster",
+			"id":    id,
+		})
+	case cluster.RemovePeerPreflightIdentityUnresolved:
+		c.JSON(consts.StatusConflict, map[string]any{
+			"error":          "membership identity unresolved",
+			"blocking_peers": result.BlockingPeers,
+			"hint":           "remove the unresolved legacy peer first or restore its node ID mapping",
+		})
+	default:
+		c.JSON(consts.StatusConflict, map[string]any{
+			"error":        "quorum would break",
+			"voters_after": result.VotersAfter,
+			"alive_after":  result.AliveAfter,
+			"new_quorum":   result.NewQuorum,
+			"hint":         "rerun with force=true to override",
+		})
+	}
 }
 
 // handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
