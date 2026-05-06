@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"hash/crc32"
 	"io"
 	"os"
@@ -133,61 +134,109 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 }
 
 func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadBase []byte) error {
+	er, err := NewEncryptedShardReader(r, enc, aadBase)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(w, er); err != nil {
+		return fmt.Errorf("write decrypted shard chunk: %w", err)
+	}
+	return nil
+}
+
+// NewEncryptedShardReader returns a reader that decrypts a GFSENC2 shard one
+// chunk at a time. The encrypted header is consumed before the reader is
+// returned; chunk authentication failures are reported by Read.
+func NewEncryptedShardReader(r io.Reader, enc *encrypt.Encryptor, aadBase []byte) (io.Reader, error) {
 	if enc == nil {
-		return fmt.Errorf("encrypted shard decode requires encryptor")
+		return nil, fmt.Errorf("encrypted shard decode requires encryptor")
 	}
 	var header [encryptedHeaderLen]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return fmt.Errorf("read encrypted shard header: %w", err)
+		return nil, fmt.Errorf("read encrypted shard header: %w", err)
 	}
 	if !IsEncryptedShard(header[:]) {
-		return fmt.Errorf("not an encrypted shard")
+		return nil, fmt.Errorf("not an encrypted shard")
 	}
 	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
 	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
-		return fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
+		return nil, fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
 	}
 	var noncePrefix [encryptedNoncePrefixLen]byte
 	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
 
-	chunkIdx := uint32(0)
+	return &encryptedShardReader{
+		r:           r,
+		enc:         enc,
+		aadBase:     aadBase,
+		chunkSize:   chunkSize,
+		noncePrefix: noncePrefix,
+	}, nil
+}
+
+type encryptedShardReader struct {
+	r           io.Reader
+	enc         *encrypt.Encryptor
+	aadBase     []byte
+	chunkSize   uint32
+	noncePrefix [encryptedNoncePrefixLen]byte
+	chunkIdx    uint32
+	plain       []byte
+	done        bool
+}
+
+func (r *encryptedShardReader) Read(p []byte) (int, error) {
+	for len(r.plain) == 0 && !r.done {
+		if err := r.loadChunk(); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.plain) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.plain)
+	r.plain = r.plain[n:]
+	return n, nil
+}
+
+func (r *encryptedShardReader) loadChunk() error {
 	for {
 		var chunkHeader [encryptedChunkHeaderLen]byte
-		if _, err := io.ReadFull(r, chunkHeader[:]); err != nil {
+		if _, err := io.ReadFull(r.r, chunkHeader[:]); err != nil {
 			if errors.Is(err, io.EOF) {
+				r.done = true
 				return nil
 			}
 			return fmt.Errorf("read encrypted shard chunk header: %w", err)
 		}
 		plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
 		cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
-		if plainLen > chunkSize {
-			return fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", chunkIdx, plainLen, chunkSize)
+		if plainLen > r.chunkSize {
+			return fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", r.chunkIdx, plainLen, r.chunkSize)
 		}
-		if cipherLen < plainLen || cipherLen > plainLen+uint32(enc.AEADOverhead()) {
-			return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", chunkIdx, cipherLen, plainLen)
+		if cipherLen < plainLen || cipherLen > plainLen+uint32(r.enc.AEADOverhead()) {
+			return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", r.chunkIdx, cipherLen, plainLen)
 		}
 
 		ciphertext := make([]byte, cipherLen)
-		if _, err := io.ReadFull(r, ciphertext); err != nil {
+		if _, err := io.ReadFull(r.r, ciphertext); err != nil {
 			return fmt.Errorf("read encrypted shard chunk: %w", err)
 		}
-		nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
-		aad := encryptedChunkAAD(aadBase, chunkIdx)
-		plaintext, err := enc.OpenWithNonceAAD(make([]byte, 0, plainLen), nonce[:], ciphertext, aad)
+		nonce := encryptedChunkNonce(r.noncePrefix, r.chunkIdx)
+		aad := encryptedChunkAAD(r.aadBase, r.chunkIdx)
+		plaintext, err := r.enc.OpenWithNonceAAD(make([]byte, 0, plainLen), nonce[:], ciphertext, aad)
 		if err != nil {
-			return fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+			return fmt.Errorf("decrypt shard chunk %d: %w", r.chunkIdx, err)
 		}
 		if uint32(len(plaintext)) != plainLen {
-			return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+			return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", r.chunkIdx, len(plaintext), plainLen)
 		}
-		if _, err := w.Write(plaintext); err != nil {
-			return fmt.Errorf("write decrypted shard chunk: %w", err)
-		}
-		chunkIdx++
-		if chunkIdx == 0 {
+		r.plain = plaintext
+		r.chunkIdx++
+		if r.chunkIdx == 0 {
 			return fmt.Errorf("encrypted shard has too many chunks")
 		}
+		return nil
 	}
 }
 
@@ -283,6 +332,140 @@ func DecodeShard(data []byte) ([]byte, error) {
 		return nil, ErrCRCMismatch
 	}
 	return payload, nil
+}
+
+// NewShardReader returns a reader for a GFSCRC1 shard payload. It streams the
+// payload while retaining only the trailing CRC footer needed for verification.
+func NewShardReader(r io.Reader) (io.Reader, error) {
+	var magic [8]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return nil, fmt.Errorf("%w: shard too short", ErrCRCMismatch)
+	}
+	if !IsEncodedShard(magic[:]) {
+		return nil, fmt.Errorf("not an encoded shard")
+	}
+	return &verifiedShardReader{
+		r:    r,
+		hash: crc32.NewIEEE(),
+		buf:  make([]byte, 32<<10),
+	}, nil
+}
+
+type verifiedShardReader struct {
+	r       io.Reader
+	hash    hash.Hash32
+	buf     []byte
+	pending []byte
+	tail    []byte
+	done    bool
+}
+
+func (r *verifiedShardReader) Read(p []byte) (int, error) {
+	for len(r.pending) == 0 && !r.done {
+		if err := r.readMore(); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.pending) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
+func (r *verifiedShardReader) readMore() error {
+	n, err := r.r.Read(r.buf)
+	if n > 0 {
+		r.tail = append(r.tail, r.buf[:n]...)
+		if len(r.tail) > footerLen {
+			payloadLen := len(r.tail) - footerLen
+			r.pending = append(r.pending, r.tail[:payloadLen]...)
+			_, _ = r.hash.Write(r.tail[:payloadLen])
+			copy(r.tail, r.tail[payloadLen:])
+			r.tail = r.tail[:footerLen]
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
+	r.done = true
+	if len(r.tail) < footerLen {
+		return fmt.Errorf("%w: shard too short", ErrCRCMismatch)
+	}
+	stored := binary.LittleEndian.Uint32(r.tail)
+	if r.hash.Sum32() != stored {
+		return ErrCRCMismatch
+	}
+	return nil
+}
+
+// NewSizedShardReader returns a CRC-verifying payload reader for callers that
+// have already consumed the GFSCRC1 magic and know the payload length.
+func NewSizedShardReader(r io.Reader, payloadLen int64) io.Reader {
+	return &sizedShardReader{
+		r:         r,
+		remaining: payloadLen,
+		hash:      crc32.NewIEEE(),
+	}
+}
+
+type sizedShardReader struct {
+	r         io.Reader
+	remaining int64
+	hash      hash.Hash32
+	verified  bool
+}
+
+func (r *sizedShardReader) Read(p []byte) (int, error) {
+	if r.remaining > 0 {
+		finalRead := int64(len(p)) >= r.remaining
+		if int64(len(p)) > r.remaining {
+			p = p[:r.remaining]
+		}
+		n, err := r.r.Read(p)
+		if n > 0 {
+			_, _ = r.hash.Write(p[:n])
+			r.remaining -= int64(n)
+		}
+		if err != nil && (!errors.Is(err, io.EOF) || r.remaining > 0) {
+			return n, err
+		}
+		if finalRead && r.remaining == 0 {
+			if err := r.verifyFooter(); err != nil {
+				return 0, err
+			}
+		}
+		if n > 0 {
+			return n, nil
+		}
+		return 0, io.ErrUnexpectedEOF
+	}
+	if r.verified {
+		return 0, io.EOF
+	}
+	if err := r.verifyFooter(); err != nil {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (r *sizedShardReader) verifyFooter() error {
+	if r.verified {
+		return nil
+	}
+	var footer [footerLen]byte
+	if _, err := io.ReadFull(r.r, footer[:]); err != nil {
+		return fmt.Errorf("%w: shard too short", ErrCRCMismatch)
+	}
+	if r.hash.Sum32() != binary.LittleEndian.Uint32(footer[:]) {
+		return ErrCRCMismatch
+	}
+	r.verified = true
+	return nil
 }
 
 // WriteShardAtomic writes data (with CRC32 footer) to path using the
