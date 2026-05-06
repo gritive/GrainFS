@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.72.0] - 2026-05-06
+
+### Added
+
+- `cluster remove-peer` now evaluates membership safety from the peer liveness
+  snapshot when that Interface is available.
+- Added focused remove-peer preflight coverage for configured peers, live peers,
+  explicit down states, unresolved legacy voters, missing targets, force
+  overrides, and snapshot rows outside the current voter set.
+
+### Changed
+
+- Remove-peer preflight now treats `configured` remote voters as unknown rather
+  than alive, while still counting `self` and explicitly live resolved voters.
+- The server keeps the legacy `LivePeers()` preflight only as a compatibility
+  fallback when a cluster Adapter has no peer snapshot.
+
+### Fixed
+
+- Remove-peer preflight no longer lets unrelated live snapshot rows inflate the
+  post-removal quorum calculation.
+
 ## [0.0.71.0] - 2026-05-06
 
 ### Added
