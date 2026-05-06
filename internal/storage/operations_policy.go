@@ -1,8 +1,9 @@
 package storage
 
 func (o *Operations) SetBucketPolicy(bucket string, policyJSON []byte) error {
-	if o.plan.policyBackend != nil {
-		if err := o.plan.policyBackend.SetBucketPolicy(bucket, policyJSON); err != nil {
+	plan := o.planForCall()
+	if plan.policyBackend != nil {
+		if err := plan.policyBackend.SetBucketPolicy(bucket, policyJSON); err != nil {
 			return err
 		}
 	} else if o.policyStore == nil {
@@ -20,10 +21,11 @@ func (o *Operations) GetBucketPolicy(bucket string) ([]byte, error) {
 			return raw, nil
 		}
 	}
-	if o.plan.policyBackend == nil {
+	plan := o.planForCall()
+	if plan.policyBackend == nil {
 		return nil, UnsupportedOperationError{Op: "GetBucketPolicy", Reason: UnsupportedReasonNoAdapter}
 	}
-	data, err := o.plan.policyBackend.GetBucketPolicy(bucket)
+	data, err := plan.policyBackend.GetBucketPolicy(bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -36,8 +38,9 @@ func (o *Operations) GetBucketPolicy(bucket string) ([]byte, error) {
 }
 
 func (o *Operations) DeleteBucketPolicy(bucket string) error {
-	if o.plan.policyBackend != nil {
-		if err := o.plan.policyBackend.DeleteBucketPolicy(bucket); err != nil {
+	plan := o.planForCall()
+	if plan.policyBackend != nil {
+		if err := plan.policyBackend.DeleteBucketPolicy(bucket); err != nil {
 			return err
 		}
 	} else if o.policyStore == nil {

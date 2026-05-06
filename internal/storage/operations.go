@@ -2,6 +2,7 @@ package storage
 
 import (
 	"io"
+	"sync"
 
 	"github.com/gritive/GrainFS/internal/policy"
 )
@@ -26,8 +27,12 @@ import (
 type Operations struct {
 	backend     Backend
 	plan        operationsPlan
+	planMu      sync.RWMutex
+	planGen     []uint64
 	policyStore *policy.CompiledPolicyStore
 }
+
+var _ Backend = (*Operations)(nil)
 
 type operationsPlan struct {
 	atomicACLPutter            AtomicACLPutter
@@ -86,6 +91,7 @@ func NewOperations(backend Backend, opts ...OperationsOption) *Operations {
 	o := &Operations{
 		backend: backend,
 		plan:    buildOperationsPlan(backend),
+		planGen: collectOperationsPlanGeneration(backend),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -163,6 +169,54 @@ func buildOperationsPlan(backend Backend) operationsPlan {
 		}
 	}
 	return p
+}
+
+type operationPlanGeneration interface {
+	Generation() uint64
+}
+
+func (o *Operations) planForCall() operationsPlan {
+	current := collectOperationsPlanGeneration(o.backend)
+
+	o.planMu.RLock()
+	if equalGenerationSnapshot(o.planGen, current) {
+		plan := o.plan
+		o.planMu.RUnlock()
+		return plan
+	}
+	o.planMu.RUnlock()
+
+	o.planMu.Lock()
+	defer o.planMu.Unlock()
+
+	current = collectOperationsPlanGeneration(o.backend)
+	if !equalGenerationSnapshot(o.planGen, current) {
+		o.plan = buildOperationsPlan(o.backend)
+		o.planGen = current
+	}
+	return o.plan
+}
+
+func collectOperationsPlanGeneration(backend Backend) []uint64 {
+	var gen []uint64
+	for b := backend; b != nil; b = unwrapOperationBackend(b) {
+		if marker, ok := b.(operationPlanGeneration); ok {
+			gen = append(gen, marker.Generation())
+		}
+	}
+	return gen
+}
+
+func equalGenerationSnapshot(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func unwrapOperationBackend(backend Backend) Backend {

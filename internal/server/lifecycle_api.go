@@ -22,7 +22,7 @@ func (s *Server) putBucketLifecycle(ctx context.Context, c *app.RequestContext, 
 		return
 	}
 
-	if err := s.backend.HeadBucket(ctx, bucket); err != nil {
+	if err := s.ops.HeadBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}

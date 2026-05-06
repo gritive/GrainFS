@@ -15,8 +15,9 @@ type CopyObjectResult struct {
 }
 
 func (o *Operations) CopyObject(ctx context.Context, req CopyObjectRequest) (*CopyObjectResult, error) {
-	if req.ACL == nil && o.plan.copier != nil {
-		obj, err := o.plan.copier.CopyObject(req.SourceBucket, req.SourceKey, req.DestinationBucket, req.DestinationKey)
+	plan := o.planForCall()
+	if req.ACL == nil && plan.copier != nil {
+		obj, err := plan.copier.CopyObject(req.SourceBucket, req.SourceKey, req.DestinationBucket, req.DestinationKey)
 		if err != nil {
 			return nil, err
 		}

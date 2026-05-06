@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.54.0] — 2026-05-06 — Storage operations facade hardening
+
+### Changed
+
+- Server bucket, object, multipart, lifecycle, and Iceberg metadata storage paths
+  now route through `storage.Operations`, keeping optional backend behavior,
+  fallback ordering, cache invalidation, and recovery write gating behind one
+  facade.
+- `storage.Operations` now satisfies the full `storage.Backend` interface,
+  including bucket, object, multipart, delete, and walk operations, so upper
+  layers can depend on the facade without retaining a separate raw-backend path.
+- Server construction now carries the canonical backend through `ServerStorage`,
+  keeping handler backend selection aligned with the provided operations facade.
+
+### Fixed
+
+- Cache invalidation now uses registered apply-loop invalidators, so committed
+  object mutations can notify S3 cache consumers without depending on the legacy
+  single `SetOnApply` hook.
+- ACL writes through cached, swappable, and WAL-wrapped backends now stay within
+  the correct wrapper ordering without locks, preserving cache invalidation and
+  WAL recording while avoiding mixed-backend fallback writes during swaps.
+
+### Tests
+
+- Added focused coverage for cache invalidator registration, storage operation
+  delegation, swappable plan refresh, ACL fallback rollback, lifecycle mutation
+  routing, and server storage construction.
+
 ## [0.0.53.0] — 2026-05-06 — Cluster membership CLI
 
 ### Added

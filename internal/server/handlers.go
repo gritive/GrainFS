@@ -122,7 +122,7 @@ func getKey(c *app.RequestContext) string {
 }
 
 func (s *Server) listBuckets(ctx context.Context, c *app.RequestContext) {
-	buckets, err := s.backend.ListBuckets(ctx)
+	buckets, err := s.ops.ListBuckets(ctx)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -161,7 +161,7 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.backend.CreateBucket(ctx, bucket); err != nil {
+	if err := s.ops.CreateBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -188,7 +188,7 @@ func unwrapBackend(b storage.Backend) storage.Backend {
 
 func (s *Server) headBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
-	if err := s.backend.HeadBucket(ctx, bucket); err != nil {
+	if err := s.ops.HeadBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -210,7 +210,7 @@ func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.backend.DeleteBucket(ctx, bucket); err != nil {
+	if err := s.ops.DeleteBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -254,7 +254,7 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 
-	objects, err := s.backend.ListObjects(ctx, bucket, prefix, maxKeys)
+	objects, err := s.ops.ListObjects(ctx, bucket, prefix, maxKeys)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -309,7 +309,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Check if object already exists (for overwrite — don't double-count)
-	existing, _ := s.backend.HeadObject(ctx, bucket, key)
+	existing, _ := s.ops.HeadObject(ctx, bucket, key)
 
 	rawBody := c.Request.Body()
 
@@ -343,7 +343,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		acl := s3auth.ParseACLHeader(aclHeader)
 		obj, putErr = s.ops.PutObjectWithACL(ctx, bucket, key, body, contentType, uint8(acl))
 	} else {
-		obj, putErr = s.backend.PutObject(ctx, bucket, key, body, contentType)
+		obj, putErr = s.ops.PutObject(ctx, bucket, key, body, contentType)
 	}
 	if putErr != nil {
 		mapError(c, putErr)
@@ -388,7 +388,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		rc, obj, err = s.ops.GetObjectVersion(bucket, key, versionID)
 	} else {
-		rc, obj, err = s.backend.GetObject(ctx, bucket, key)
+		rc, obj, err = s.ops.GetObject(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -560,7 +560,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		obj, err = s.ops.HeadObjectVersion(bucket, key, versionID)
 	} else {
-		obj, err = s.backend.HeadObject(ctx, bucket, key)
+		obj, err = s.ops.HeadObject(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -661,7 +661,7 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Get size before deleting for metric tracking
-	existing, _ := s.backend.HeadObject(ctx, bucket, key)
+	existing, _ := s.ops.HeadObject(ctx, bucket, key)
 
 	markerID, err := s.ops.DeleteObjectReturningMarker(ctx, bucket, key)
 	if err != nil {
@@ -810,7 +810,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	defer file.Close()
 
-	obj, err := s.backend.PutObject(ctx, bucket, key, file, contentType)
+	obj, err := s.ops.PutObject(ctx, bucket, key, file, contentType)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -862,7 +862,7 @@ func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContex
 		contentType = "application/octet-stream"
 	}
 
-	upload, err := s.backend.CreateMultipartUpload(ctx, bucket, key, contentType)
+	upload, err := s.ops.CreateMultipartUpload(ctx, bucket, key, contentType)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -886,7 +886,7 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 	}
 
 	body := bytes.NewReader(c.Request.Body())
-	part, err := s.backend.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
+	part, err := s.ops.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -909,7 +909,7 @@ func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestCont
 		parts[i] = storage.Part{PartNumber: p.PartNumber, ETag: etag}
 	}
 
-	obj, err := s.backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
+	obj, err := s.ops.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 	if err != nil {
 		mapError(c, err)
 		return

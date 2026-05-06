@@ -115,6 +115,7 @@ type Server struct {
 
 type ServerStorage struct {
 	Ops           *storage.Operations
+	Backend       storage.Backend
 	VolumeBackend storage.Backend
 	Snapshotable  storage.Snapshotable
 	DBProvider    storage.DBProvider
@@ -123,6 +124,7 @@ type ServerStorage struct {
 func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
 	return ServerStorage{
 		Ops:           storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
+		Backend:       backend,
 		VolumeBackend: backend,
 		Snapshotable:  storageSnapshotable(backend),
 		DBProvider:    storageDBProvider(backend),
@@ -309,12 +311,19 @@ func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	policyStore := NewCompiledPolicyStore()
-	return NewWithServerStorage(addr, backend, NewServerStorage(backend, policyStore), policyStore, opts...)
+	return NewWithServerStorage(addr, NewServerStorage(backend, policyStore), policyStore, opts...)
 }
 
-func NewWithServerStorage(addr string, backend storage.Backend, ss ServerStorage, policyStore *CompiledPolicyStore, opts ...Option) *Server {
+func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPolicyStore, opts ...Option) *Server {
 	if policyStore == nil {
 		policyStore = NewCompiledPolicyStore()
+	}
+	backend := ss.Backend
+	if backend == nil && ss.Ops != nil {
+		backend = ss.Ops.Backend()
+	}
+	if backend == nil {
+		backend = ss.VolumeBackend
 	}
 	if ss.Ops == nil {
 		ss.Ops = storage.NewOperations(backend, storage.WithPolicyStore(policyStore))
@@ -522,7 +531,7 @@ func (s *Server) metricsMiddleware() app.HandlerFunc {
 // initMetrics scans existing buckets and objects to set initial gauge values.
 func (s *Server) initMetrics() {
 	ctx := context.Background()
-	buckets, err := s.backend.ListBuckets(ctx)
+	buckets, err := s.ops.ListBuckets(ctx)
 	if err != nil {
 		return
 	}
@@ -531,7 +540,7 @@ func (s *Server) initMetrics() {
 	var totalObjects int
 	var totalBytes int64
 	for _, b := range buckets {
-		objects, err := s.backend.ListObjects(ctx, b, "", 1000000)
+		objects, err := s.ops.ListObjects(ctx, b, "", 1000000)
 		if err != nil {
 			continue
 		}

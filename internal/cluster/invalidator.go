@@ -22,6 +22,12 @@ type CacheInvalidator interface {
 	Invalidate(bucket, key string)
 }
 
+type CacheInvalidatorFunc func(bucket, key string)
+
+func (f CacheInvalidatorFunc) Invalidate(bucket, key string) {
+	f(bucket, key)
+}
+
 // Registry manages cache invalidators across all protocols.
 // Used by DistributedBackend to broadcast invalidation events.
 type Registry struct {
@@ -41,6 +47,14 @@ func (r *Registry) Register(volumeID string, invalidator CacheInvalidator) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.invalidators[volumeID] = invalidator
+	r.updateSizeMetric()
+}
+
+// Unregister removes a cache invalidator by ID.
+func (r *Registry) Unregister(volumeID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.invalidators, volumeID)
 	r.updateSizeMetric()
 }
 

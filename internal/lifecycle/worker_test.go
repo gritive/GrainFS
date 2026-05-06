@@ -75,6 +75,60 @@ func newWorker(store *Store, backend *mockBackend, deleter *mockDeleter) *Worker
 	}
 }
 
+var _ ObjectDeleter = (*storage.Operations)(nil)
+
+func TestWorker_UsesStorageOperationsForMutations(t *testing.T) {
+	db := newTestDB(t)
+	store := NewStore(db)
+	require.NoError(t, store.Put("bucket", &LifecycleConfiguration{
+		Rules: []Rule{{
+			ID:         "expire-1",
+			Status:     "Enabled",
+			Expiration: &Expiration{Days: 1},
+		}},
+	}))
+
+	oldTime := time.Now().Add(-2 * 24 * time.Hour).Unix()
+	scanner := &mockBackend{
+		buckets: []string{"bucket"},
+		objects: map[string][]scrubber.ObjectRecord{
+			"bucket": {{Bucket: "bucket", Key: "obj", LastModified: oldTime}},
+		},
+	}
+	mutations := &operationsLifecycleBackend{}
+	w := &Worker{
+		store:   store,
+		backend: scanner,
+		deleter: storage.NewOperations(mutations),
+		limiter: rate.NewLimiter(rate.Inf, 0),
+	}
+
+	w.runCycle(context.Background())
+
+	assert.Equal(t, []string{"bucket/obj"}, mutations.deleted)
+}
+
+type operationsLifecycleBackend struct {
+	storage.Backend
+	deleted         []string
+	deletedVersions []string
+	versions        []*storage.ObjectVersion
+}
+
+func (b *operationsLifecycleBackend) DeleteObject(_ context.Context, bucket, key string) error {
+	b.deleted = append(b.deleted, bucket+"/"+key)
+	return nil
+}
+
+func (b *operationsLifecycleBackend) DeleteObjectVersion(bucket, key, versionID string) error {
+	b.deletedVersions = append(b.deletedVersions, bucket+"/"+key+"/"+versionID)
+	return nil
+}
+
+func (b *operationsLifecycleBackend) ListObjectVersions(bucket, prefix string, _ int) ([]*storage.ObjectVersion, error) {
+	return b.versions, nil
+}
+
 // TestWorker_ExpiresOldObject verifies that an object older than Expiration.Days
 // triggers DeleteObject.
 func TestWorker_ExpiresOldObject(t *testing.T) {
