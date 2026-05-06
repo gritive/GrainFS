@@ -3,16 +3,11 @@ package admin
 import (
 	"context"
 	"fmt"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
-// DashboardTokenResp describes the dashboard URL + token to display to the operator.
-type DashboardTokenResp struct {
-	URL          string `json:"url"`
-	Host         string `json:"host"`
-	Token        string `json:"token"`
-	Path         string `json:"path"`
-	PublicURLSet bool   `json:"public_url_set"`
-}
+type DashboardTokenResp = adminapi.DashboardTokenResp
 
 func GetDashboardToken(ctx context.Context, d *Deps) (DashboardTokenResp, error) {
 	if d.Token == nil {

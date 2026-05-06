@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
 // Client talks to the GrainFS admin Hertz server. The endpoint is either a
@@ -129,10 +131,15 @@ func (c *Client) Do(ctx context.Context, method, path string, in any, out any) e
 		}
 		return nil
 	}
+	var wire adminapi.Error
 	cerr := &Error{Status: resp.StatusCode}
-	if err := json.Unmarshal(respBody, cerr); err != nil || cerr.Code == "" {
+	if err := json.Unmarshal(respBody, &wire); err != nil || wire.Code == "" {
 		cerr.Code = "internal"
 		cerr.Message = string(respBody)
+	} else {
+		cerr.Code = wire.Code
+		cerr.Message = wire.Message
+		cerr.Details = wire.Details
 	}
 	return cerr
 }

@@ -4,18 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
-// SnapshotInfo mirrors volume.SnapshotInfo for JSON output.
-type SnapshotInfo = volume.SnapshotInfo
-
-// CreateSnapshotResp is returned by CreateSnapshot.
-type CreateSnapshotResp struct {
-	ID         string `json:"id"`
-	BlockCount int64  `json:"block_count"`
-}
+type SnapshotInfo = adminapi.SnapshotInfo
+type CreateSnapshotResp = adminapi.CreateSnapshotResp
 
 func CreateSnapshot(ctx context.Context, d *Deps, name string) (CreateSnapshotResp, error) {
 	id, err := d.Manager.CreateSnapshot(name)
@@ -44,7 +40,19 @@ func ListSnapshots(ctx context.Context, d *Deps, name string) ([]SnapshotInfo, e
 	if err != nil {
 		return nil, NewInternal(err.Error())
 	}
-	return snaps, nil
+	out := make([]SnapshotInfo, len(snaps))
+	for i, snap := range snaps {
+		out[i] = snapshotToInfo(snap)
+	}
+	return out, nil
+}
+
+func snapshotToInfo(s volume.SnapshotInfo) SnapshotInfo {
+	return SnapshotInfo{
+		ID:         s.ID,
+		CreatedAt:  s.CreatedAt.UTC().Format(time.RFC3339Nano),
+		BlockCount: s.BlockCount,
+	}
 }
 
 func DeleteSnapshot(ctx context.Context, d *Deps, name, snapID string) error {
@@ -68,13 +76,7 @@ func RollbackVolume(ctx context.Context, d *Deps, name, snapID string) error {
 	return nil
 }
 
-// RecalculateResp is returned by RecalculateVolume.
-type RecalculateResp struct {
-	Volume string `json:"volume"`
-	Before int64  `json:"before"`
-	After  int64  `json:"after"`
-	Fixed  bool   `json:"fixed"`
-}
+type RecalculateResp = adminapi.RecalculateResp
 
 func RecalculateVolume(ctx context.Context, d *Deps, name string) (RecalculateResp, error) {
 	before, after, err := d.Manager.Recalculate(name)
@@ -87,11 +89,7 @@ func RecalculateVolume(ctx context.Context, d *Deps, name string) (RecalculateRe
 	return RecalculateResp{Volume: name, Before: before, After: after, Fixed: before != after}, nil
 }
 
-// CloneReq is the JSON body for CloneVolume.
-type CloneReq struct {
-	Src string `json:"src"`
-	Dst string `json:"dst"`
-}
+type CloneReq = adminapi.CloneReq
 
 func CloneVolume(ctx context.Context, d *Deps, req CloneReq) error {
 	if req.Src == "" || req.Dst == "" {

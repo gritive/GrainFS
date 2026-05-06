@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.58.0] — 2026-05-06 — Admin API wire type SOT
+
+### Changed
+
+- Admin HTTP JSON schema types now live in `internal/adminapi`, with
+  `internal/server/admin` and `internal/volumeadmin` using aliases to the same
+  wire definitions instead of maintaining parallel structs.
+- Volume snapshot list responses now use the same explicit `created_at` and
+  `block_count` JSON shape consumed by the volume admin client.
+
+### Tests
+
+- Added `internal/adminapi` JSON shape and round-trip coverage for scrub,
+  volume, and snapshot wire payloads.
+
 ## [0.0.57.0] — 2026-05-06 — Storage mutation result bookkeeping
 
 ### Changed

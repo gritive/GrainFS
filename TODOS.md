@@ -53,10 +53,6 @@
 - [ ] **resource_monitors.go 패키지 이전** — `cmd/grainfs/resource_monitors.go`
   (~655줄)의 `start*ResourceMonitor` 함수들은 cobra runner가 아니라 runCluster
   goroutine 부트스트랩. `internal/resourceguard/` 같은 server-side 패키지로 이동.
-- [ ] **wire types를 internal/grainfsapi/ 로 추출** — `internal/server/admin/types.go`
-  의 `VolumeInfo / ScrubJobInfo / Error` 등을 client(volumeadmin) 와 SOT 통일.
-  현재는 양쪽 패키지가 동형 struct를 따로 선언 → 서버 필드 추가 시 client가
-  drop 하던 ScrubJobInfo 사례 재발 위험.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
 - [ ] multi tenancy

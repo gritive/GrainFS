@@ -43,6 +43,17 @@ If reading previous-object facts returns not-found, the mutation proceeds with
 `Previous.Exists=false`. Any other previous-object read error fails the
 operation before mutation.
 
+### Admin API Wire Schema
+
+`internal/adminapi` is the single source of truth for admin HTTP JSON body
+types. Server admin handlers and the `volumeadmin` client package use aliases
+to those wire types so response fields such as scrub peer failure details and
+volume snapshot metadata cannot drift between producer and consumer packages.
+
+Runtime concerns stay outside `adminapi`: handler dependencies, CLI options,
+HTTP transport behavior, typed client errors, and server domain models remain
+in their owning packages.
+
 ### Shard Group Peer Identity
 
 Shard group peer identity is the node identifier stored in
