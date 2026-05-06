@@ -1301,7 +1301,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-metadata-directive")
 		return
 	}
-	conditions, ok := copySourceConditions(c)
+	preconditions, ok := copyPreconditions(c)
 	if !ok {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid copy source condition date")
 		return
@@ -1313,9 +1313,9 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		MetadataDirective: directive,
 		ContentType:       string(c.GetHeader("Content-Type")),
 		UserMetadata:      copyUserMetadata(c),
-		Conditions:        conditions,
+		Preconditions:     preconditions,
 	}
-	result, err := s.ops.CopyObjectWithResult(ctx, req)
+	result, err := s.ops.CopyObject(ctx, req)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -1374,16 +1374,16 @@ func copyUserMetadata(c *app.RequestContext) map[string]string {
 	return metadata
 }
 
-func copySourceConditions(c *app.RequestContext) (storage.CopySourceConditions, bool) {
+func copyPreconditions(c *app.RequestContext) (storage.CopyPreconditions, bool) {
 	modifiedSince, ok := parseOptionalHTTPTime(string(c.GetHeader("x-amz-copy-source-if-modified-since")))
 	if !ok {
-		return storage.CopySourceConditions{}, false
+		return storage.CopyPreconditions{}, false
 	}
 	unmodifiedSince, ok := parseOptionalHTTPTime(string(c.GetHeader("x-amz-copy-source-if-unmodified-since")))
 	if !ok {
-		return storage.CopySourceConditions{}, false
+		return storage.CopyPreconditions{}, false
 	}
-	return storage.CopySourceConditions{
+	return storage.CopyPreconditions{
 		IfMatch:           string(c.GetHeader("x-amz-copy-source-if-match")),
 		IfNoneMatch:       string(c.GetHeader("x-amz-copy-source-if-none-match")),
 		IfModifiedSince:   modifiedSince,
