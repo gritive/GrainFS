@@ -307,10 +307,28 @@ func TestWriteReadLocalShard_Encrypted_AAD(t *testing.T) {
 	shardPath := filepath.Join(dir, "shards", "mybucket", "obj/v1", "shard_2")
 	raw, _ := os.ReadFile(shardPath)
 	assert.NotEqual(t, data, raw, "shard on disk must be encrypted")
-	assert.True(t, eccodec.IsEncodedShard(raw), "shard must have CRC envelope")
-	encodedPayload, err := eccodec.DecodeShard(raw)
+	assert.True(t, eccodec.IsEncryptedShard(raw), "shard must use chunked encrypted envelope")
+}
+
+func TestWriteLocalShardStream_EncryptedUsesChunkedEnvelope(t *testing.T) {
+	key := make([]byte, 32)
+	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
-	assert.True(t, encrypt.IsEncryptedBlob(encodedPayload), "CRC payload must be encrypted")
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+
+	data := bytes.Repeat([]byte("stream-secret-"), 8192)
+	require.NoError(t, svc.WriteLocalShardStream("b", "k", 1, bytes.NewReader(data)))
+
+	shardPath := filepath.Join(dir, "shards", "b", "k", "shard_1")
+	raw, err := os.ReadFile(shardPath)
+	require.NoError(t, err)
+	require.True(t, eccodec.IsEncryptedShard(raw), "streamed encrypted shard must use chunked envelope")
+
+	got, err := svc.ReadLocalShard("b", "k", 1)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
 }
 
 func TestReadLocalShard_DowngradeDetection(t *testing.T) {

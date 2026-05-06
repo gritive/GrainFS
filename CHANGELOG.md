@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.60.0] — 2026-05-06 — Resource monitors thin-cmd refactor
+## [0.0.63.0] — 2026-05-06 — Resource monitors thin-cmd refactor
 
 ### Changed
 
@@ -22,6 +22,67 @@
   failed incident, smoke under-populated incident, vlog top-3 breakdown).
   cmd 쪽에는 cobra flag-wiring 검증 4개만 잔류 (`*WatchFlagDefault`,
   `*WatchEnabledHelper`).
+
+## [0.0.62.0] - 2026-05-06
+
+### Added
+
+- EC benchmark coverage now measures split, PUT, and GET behavior across 64 KiB,
+  1 MiB, 16 MiB, and 64 MiB objects, making object-size memory regressions
+  visible before ship.
+- Encrypted EC shards now use a chunked AEAD envelope for new writes, so large
+  encrypted shard writes can stream to disk instead of buffering plaintext.
+
+### Changed
+
+- EC GET now avoids local parity reads when all data shards are local, reducing
+  read amplification on the common healthy path while still falling back to
+  parity when a data shard is missing.
+- EC GET reconstruction now writes through a reader pipeline instead of
+  allocating the full reconstructed object before returning it.
+- EC stream encoding now uses smaller Reed-Solomon stream blocks to reduce
+  retained heap after large-object PUT workloads.
+- Shard documentation now describes the generic integrity envelope instead of
+  assuming every EC shard uses the legacy CRC-only format.
+
+### Fixed
+
+- Chunked encrypted shard decoding now rejects oversized chunk-size headers
+  before allocation, so corrupted shard metadata cannot force an unexpectedly
+  large read allocation.
+
+### Tests
+
+- Added encrypted shard round-trip, wrong-AAD, tamper, truncation, and oversized
+  header coverage.
+- Added EC reconstruction streaming and missing-data-shard parity fallback
+  coverage.
+
+## [0.0.61.0] - 2026-05-06
+
+### Changed
+
+- CopyObject now always returns destination previous-object facts from the
+  storage operations facade, so overwrite accounting no longer depends on a
+  separate result-specific method.
+- CopyObject requests now use typed source, destination, and precondition
+  fields throughout the facade and handler adapter instead of legacy bucket/key
+  compatibility fields.
+- Optimized copy support is now documented and wired as a private acceleration
+  path behind the facade, keeping S3 CopyObject semantics in
+  `storage.Operations`.
+
+### Removed
+
+- Removed the completed CopyObject semantics TODO after the facade now owns
+  source validation, preconditions, metadata directive handling, and result
+  facts.
+
+### Docs
+
+- Added an ADR and context vocabulary for CopyObject semantics ownership and
+  updated the storage operations architecture notes to match the private
+  acceleration path.
 
 ## [0.0.59.0] - 2026-05-06
 

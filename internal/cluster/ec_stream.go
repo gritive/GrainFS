@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultECStreamBlockSize = 4 << 20
+	defaultECStreamBlockSize = 1 << 20
 	minECStreamBlockSize     = 64 << 10
 )
 

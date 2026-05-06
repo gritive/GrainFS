@@ -6,22 +6,6 @@
 
 ### 기타
 
-- [ ] **Storage operations CopyObject semantics** — `storage.Operations.CopyObject`
-  를 S3 CopyObject 의미의 test surface 로 deepen 한다. Handler 는
-  `x-amz-copy-source` 를 URL decode + query parse 해서 `ObjectRef{Bucket, Key,
-  VersionID}` 로 넘기고, raw HTTP header text 는 facade 로 넘기지 않는다.
-  `CopyObjectRequest` 는 metadata directive, source 조건
-  (`IfMatch`/`IfNoneMatch`/modified-since 계열), ACL override 를 protocol-neutral
-  type 으로 담는다. `Operations.CopyObject` 는 항상 source `HeadObject` /
-  `HeadObjectVersion` 을 먼저 수행해 delete-marker, precondition, metadata
-  directive, fast-path eligibility 를 body open 전에 결정한다. Optimized
-  `storage.Copier` 는 semantics-free entry point 가 아니라 `Operations` 가 검증한
-  뒤 쓰는 private acceleration path 로 제한한다. 1차 slice 는 user metadata 전체
-  확장 대신 현재 object model 의 `ContentType` 까지만 명확히 처리한다.
-  Precondition 실패는 `storage.ErrPreconditionFailed` + typed error 로, explicit
-  delete-marker version copy 는 `InvalidCopySourceError` 로 모델링한다. 이번 slice
-  에서는 destination previous-object bookkeeping 을 넣지 않고, 위 mutation
-  bookkeeping TODO 에서 `CopyObjectWithResult` 포함 여부를 함께 재검토한다.
 - [ ] **volumeadmin: 30s http.Client.Timeout 제거** — `internal/volumeadmin/client.go`
   의 `http.Client{Timeout: 30 * time.Second}` 가 `BaseOptions.Timeout > 30s` 를
   override 함. ctx-기반 cancellation 으로 충분하니 client timeout 제거하고 ctx

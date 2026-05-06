@@ -16,15 +16,13 @@ func TestOperationsCopyObjectUsesOptimizedCopierWithoutACLOverride(t *testing.T)
 	ops := NewOperations(backend)
 
 	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
-		SourceBucket:      "src",
-		SourceKey:         "k",
-		DestinationBucket: "dst",
-		DestinationKey:    "k2",
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
 	})
 
 	require.NoError(t, err)
 	require.Equal(t, "copied", result.Object.ETag)
-	require.Equal(t, []string{"head:src/k", "copy:src/k:dst/k2"}, backend.calls)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2", "copy:src/k:dst/k2"}, backend.calls)
 }
 
 func TestOperationsCopyObjectFallsBackStreamingAndPreservesContentType(t *testing.T) {
@@ -32,15 +30,13 @@ func TestOperationsCopyObjectFallsBackStreamingAndPreservesContentType(t *testin
 	ops := NewOperations(backend)
 
 	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
-		SourceBucket:      "src",
-		SourceKey:         "k",
-		DestinationBucket: "dst",
-		DestinationKey:    "k2",
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
 	})
 
 	require.NoError(t, err)
 	require.Equal(t, "fallback", result.Object.ETag)
-	require.Equal(t, []string{"head:src/k", "get:src/k", "put:dst/k2:text/plain:data"}, backend.calls)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "put:dst/k2:text/plain:data"}, backend.calls)
 }
 
 func TestOperationsCopyObjectWithACLUsesACLWritePath(t *testing.T) {
@@ -49,16 +45,14 @@ func TestOperationsCopyObjectWithACLUsesACLWritePath(t *testing.T) {
 	acl := uint8(7)
 
 	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
-		SourceBucket:      "src",
-		SourceKey:         "k",
-		DestinationBucket: "dst",
-		DestinationKey:    "k2",
-		ACL:               &acl,
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+		ACL:         &acl,
 	})
 
 	require.NoError(t, err)
 	require.Equal(t, "fallback-acl", result.Object.ETag)
-	require.Equal(t, []string{"head:src/k", "get:src/k", "putacl:dst/k2:text/plain:7:data"}, backend.calls)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "putacl:dst/k2:text/plain:7:data"}, backend.calls)
 }
 
 func TestOperationsCopyObjectDoesNotBypassCachedBackendInvalidation(t *testing.T) {
@@ -82,10 +76,8 @@ func TestOperationsCopyObjectDoesNotBypassCachedBackendInvalidation(t *testing.T
 	require.Equal(t, "old", string(oldData))
 
 	_, err = ops.CopyObject(context.Background(), CopyObjectRequest{
-		SourceBucket:      "b",
-		SourceKey:         "src",
-		DestinationBucket: "b",
-		DestinationKey:    "dst",
+		Source:      ObjectRef{Bucket: "b", Key: "src"},
+		Destination: ObjectRef{Bucket: "b", Key: "dst"},
 	})
 	require.NoError(t, err)
 
@@ -112,7 +104,7 @@ func TestOperationsCopyObjectHeadsSourceBeforeOpeningBodyAndAppliesReplaceConten
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, []string{"head:src/k", "get:src/k", "put:dst/k2:application/json:data"}, backend.calls)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "put:dst/k2:application/json:data"}, backend.calls)
 }
 
 func TestOperationsCopyObjectEvaluatesSourcePreconditionsBeforeBodyOpen(t *testing.T) {
@@ -125,7 +117,7 @@ func TestOperationsCopyObjectEvaluatesSourcePreconditionsBeforeBodyOpen(t *testi
 	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
 		Source:      ObjectRef{Bucket: "src", Key: "k"},
 		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
-		Conditions: CopySourceConditions{
+		Preconditions: CopyPreconditions{
 			IfMatch:           `"abc123"`,
 			IfUnmodifiedSince: ptrTime(time.Date(2026, 5, 6, 12, 0, 1, 0, time.UTC)),
 			IfNoneMatch:       `"abc123"`,
@@ -148,9 +140,9 @@ func TestOperationsCopyObjectRejectsUnsupportedETagConditionSelector(t *testing.
 	ops := NewOperations(backend)
 
 	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
-		Source:      ObjectRef{Bucket: "src", Key: "k"},
-		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
-		Conditions:  CopySourceConditions{IfMatch: `W/"abc123"`},
+		Source:        ObjectRef{Bucket: "src", Key: "k"},
+		Destination:   ObjectRef{Bucket: "dst", Key: "k2"},
+		Preconditions: CopyPreconditions{IfMatch: `W/"abc123"`},
 	})
 
 	var invalid InvalidCopySourceError
@@ -193,7 +185,7 @@ func TestOperationsCopyObjectRejectsSameDestinationNoopButAllowsExplicitVersionR
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, []string{"headversion:b/k:v1", "getversion:b/k:v1", "put:b/k:text/plain:data"}, backend.calls)
+	require.Equal(t, []string{"headversion:b/k:v1", "head:b/k", "getversion:b/k:v1", "put:b/k:text/plain:data"}, backend.calls)
 }
 
 func TestOperationsCopyObjectRejectsExplicitDeleteMarkerSource(t *testing.T) {
@@ -229,7 +221,7 @@ func TestOperationsCopyObjectDoesNotBypassRecoveryWriteGateForInnerAdapter(t *te
 	})
 
 	require.ErrorIs(t, err, gateErr)
-	require.Equal(t, []string{"head:src/k"}, inner.calls)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2"}, inner.calls)
 }
 
 func TestOperationsCopyObjectDoesNotBypassMutatingWrapperForInnerAdapter(t *testing.T) {
@@ -248,7 +240,7 @@ func TestOperationsCopyObjectDoesNotBypassMutatingWrapperForInnerAdapter(t *test
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, []string{"head:src/k", "get:src/k", "wrapper-put:dst/k2", "put:dst/k2:text/plain:data"}, inner.calls)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "wrapper-put:dst/k2", "put:dst/k2:text/plain:data"}, inner.calls)
 }
 
 type copyBackend struct {
@@ -374,7 +366,7 @@ type adapterCopyBackend struct {
 	semanticCopyBackend
 }
 
-func (b *adapterCopyBackend) CopyObjectWithRequest(_ context.Context, _ CopyObjectAdapterRequest) (*Object, error) {
+func (b *adapterCopyBackend) CopyObjectWithRequest(_ context.Context, _ CopyObjectAccelerationRequest) (*Object, error) {
 	b.calls = append(b.calls, "adapter")
 	return &Object{Key: "k2", ETag: "adapter"}, nil
 }

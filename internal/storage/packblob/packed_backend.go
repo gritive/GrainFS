@@ -50,7 +50,9 @@ type PackedBackend struct {
 }
 
 var _ storage.Backend = (*PackedBackend)(nil)
-var _ storage.CopyObjectAdapter = (*PackedBackend)(nil)
+var _ interface {
+	CopyObjectWithRequest(context.Context, storage.CopyObjectAccelerationRequest) (*storage.Object, error)
+} = (*PackedBackend)(nil)
 
 // PackedBackendOptions configures optional behavior for PackedBackend.
 type PackedBackendOptions struct {
@@ -429,7 +431,7 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 	if err != nil {
 		return nil, err
 	}
-	return pb.CopyObjectWithRequest(ctx, storage.CopyObjectAdapterRequest{
+	return pb.CopyObjectWithRequest(ctx, storage.CopyObjectAccelerationRequest{
 		SourceRef:      storage.ObjectRef{Bucket: srcBucket, Key: srcKey},
 		DestinationRef: storage.ObjectRef{Bucket: dstBucket, Key: dstKey},
 		SourceObject:   srcObj,
@@ -437,7 +439,7 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 	})
 }
 
-func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.CopyObjectAdapterRequest) (*storage.Object, error) {
+func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.CopyObjectAccelerationRequest) (*storage.Object, error) {
 	srcBucket, srcKey := req.SourceRef.Bucket, req.SourceRef.Key
 	dstBucket, dstKey := req.DestinationRef.Bucket, req.DestinationRef.Key
 	srcIKey := pb.indexKey(srcBucket, srcKey)

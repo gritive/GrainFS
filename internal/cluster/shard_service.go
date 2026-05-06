@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -427,25 +428,23 @@ func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 // one of an object's shards (self-placement); avoids a loopback RPC.
 // When an encryptor is configured, the shard is AES-256-GCM encrypted before writing.
 // Writes are crash-safe: data goes to a .tmp file, fsync'd, then renamed.
-// New writes use eccodec's CRC envelope around the encrypted-or-plain payload
-// so scrubber reads can detect bit rot while legacy raw shards remain readable.
+// New encrypted writes use eccodec's chunked AEAD envelope. Plain writes keep
+// the CRC envelope while that compatibility path remains available.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
 	dir := filepath.Join(s.dataDir, bucket, key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create shard dir: %w", err)
 	}
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
-	payload := data
-	if s.encryptor != nil {
-		var err error
-		payload, err = s.encryptor.EncryptWithAAD(data, aad)
-		if err != nil {
-			return fmt.Errorf("encrypt shard: %w", err)
-		}
-	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	if err := s.writeShardFile(path, eccodec.EncodeShard(payload)); err != nil {
-		return err
+	if s.encryptor != nil {
+		if err := eccodec.WriteEncryptedShardStreamAtomic(path, bytes.NewReader(data), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+			return err
+		}
+	} else {
+		if err := s.writeShardFile(path, eccodec.EncodeShard(data)); err != nil {
+			return err
+		}
 	}
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
@@ -454,23 +453,22 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 	return nil
 }
 
-// WriteLocalShardStream stores a shard from body without buffering plaintext
-// when encryption is disabled.
+// WriteLocalShardStream stores a shard from body without buffering plaintext.
 func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
-	if s.encryptor != nil {
-		data, err := io.ReadAll(body)
-		if err != nil {
-			return fmt.Errorf("read shard body: %w", err)
-		}
-		return s.WriteLocalShard(bucket, key, shardIdx, data)
-	}
 	dir := filepath.Join(s.dataDir, bucket, key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create shard dir: %w", err)
 	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	if err := eccodec.WriteShardStreamAtomic(path, body); err != nil {
-		return err
+	if s.encryptor != nil {
+		aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
+		if err := eccodec.WriteEncryptedShardStreamAtomic(path, body, s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+			return err
+		}
+	} else {
+		if err := eccodec.WriteShardStreamAtomic(path, body); err != nil {
+			return err
+		}
 	}
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
@@ -594,13 +592,23 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 		return nil, err
 	}
 	data := raw
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
+	if eccodec.IsEncryptedShard(raw) {
+		if s.encryptor == nil {
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		}
+		var decoded bytes.Buffer
+		if err := eccodec.DecodeEncryptedShard(&decoded, bytes.NewReader(raw), s.encryptor, aad); err != nil {
+			return nil, fmt.Errorf("decrypt shard: %w", err)
+		}
+		return decoded.Bytes(), nil
+	}
 	if eccodec.IsEncodedShard(raw) {
 		data, err = eccodec.DecodeShard(raw)
 		if err != nil {
 			return nil, err
 		}
 	}
-	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	if s.encryptor != nil {
 		data, err = s.encryptor.DecryptWithAAD(data, aad)
 		if err != nil {

@@ -1642,11 +1642,11 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if b.shardSvc != nil {
 		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
 		if rerr == nil {
-			data, ecErr := b.getObjectECAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record)
+			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record)
 			if ecErr != nil {
 				return nil, nil, fmt.Errorf("ec reconstruct %s/%s via %s: %w", bucket, key, resolved.Source, ecErr)
 			}
-			return io.NopCloser(bytes.NewReader(data)), obj, nil
+			return rc, obj, nil
 		}
 		if !errors.Is(rerr, ErrNotEC) {
 			return nil, nil, fmt.Errorf("resolve placement for %s/%s: %w", bucket, key, rerr)
@@ -2063,13 +2063,39 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 }
 
 func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) ([]byte, error) {
+	recCfg, shards, err := b.getObjectECShardsAtShardKey(ctx, bucket, shardKey, rec)
+	if err != nil {
+		return nil, err
+	}
+	return ECReconstruct(recCfg, shards)
+}
+
+func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (io.ReadCloser, error) {
+	recCfg, shards, err := b.getObjectECShardsAtShardKey(ctx, bucket, shardKey, rec)
+	if err != nil {
+		return nil, err
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		if err := ECReconstructTo(pw, recCfg, shards); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+	return pr, nil
+}
+
+func (b *DistributedBackend) getObjectECShardsAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, [][]byte, error) {
 	recCfg := rec.ECConfigOrFallback(b.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
-		return nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
+		return ECConfig{}, nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
 	}
-	// k-of-n fast path: read all shards in parallel, stop once k succeed.
-	// cancel() signals remaining goroutines to abort after k shards received.
-	// resultCh is buffered(len(nodes)) so goroutines never block on send.
+	// k-of-n fast path: when the K data shards are local, read them first. If
+	// they are all available, the read avoids pulling parity shards into
+	// memory. When remote data shards are involved, keep the original full
+	// parallel k-of-n fan-out so one slow data peer cannot hold the GET until
+	// its RPC deadline while parity shards sit idle.
 	type shardResult struct {
 		idx  int
 		data []byte
@@ -2098,7 +2124,7 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
 				_, _ = b.shardCache.Get(shardCacheKey(bucket, shardKey, i))
 			}
-			return ECReconstruct(recCfg, shards)
+			return recCfg, shards, nil
 		}
 		for _, i := range cachedIdx {
 			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
@@ -2115,54 +2141,13 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 					available++
 				}
 				if available == recCfg.DataShards {
-					return ECReconstruct(recCfg, shards)
+					return recCfg, shards, nil
 				}
 			}
 		}
 	}
-
-	readCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	selfID := b.selfAddr
-	dispatched := 0
-	resultCh := make(chan shardResult, len(rec.Nodes))
-	for i, node := range rec.Nodes {
-		if cached[i] {
-			continue
-		}
-		i, node := i, node
-		// readamp recording was done in the cache pre-pass when the
-		// cache is enabled; keep parity for the disabled path so the
-		// readamp histogram covers every fetch attempt.
-		if b.shardCache == nil {
-			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-		}
-		dispatched++
-		go func() {
-			var data []byte
-			var err error
-			if node == selfID {
-				data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
-			} else {
-				shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
-				defer shardCancel()
-				data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
-				if b.peerHealth != nil {
-					if err != nil {
-						if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
-							// k-of-n early exit cancelled this shard — not a peer failure
-						} else {
-							b.peerHealth.MarkUnhealthy(node)
-						}
-					} else {
-						b.peerHealth.MarkHealthy(node)
-					}
-				}
-			}
-			resultCh <- shardResult{idx: i, data: data, err: err}
-		}()
-	}
 
 	applyShardResult := func(res shardResult) bool {
 		if res.err != nil || res.data == nil {
@@ -2178,35 +2163,112 @@ func (b *DistributedBackend) getObjectECAtShardKey(ctx context.Context, bucket, 
 		return true
 	}
 
-	drainReady := func() {
-		for {
-			select {
-			case res := <-resultCh:
-				applyShardResult(res)
-			default:
+	fetchShards := func(indices []int, stopAtK bool) {
+		if len(indices) == 0 || available >= recCfg.DataShards {
+			return
+		}
+		readCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		resultCh := make(chan shardResult, len(indices))
+		dispatched := 0
+		for _, i := range indices {
+			if cached[i] || shards[i] != nil {
+				continue
+			}
+			i, node := i, rec.Nodes[i]
+			// readamp recording was done in the cache pre-pass when the
+			// cache is enabled; keep parity for the disabled path so the
+			// readamp histogram covers every fetch attempt.
+			if b.shardCache == nil {
+				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
+			}
+			dispatched++
+			go func() {
+				var data []byte
+				var err error
+				if node == selfID {
+					data, err = b.shardSvc.ReadLocalShard(bucket, shardKey, i)
+				} else {
+					shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
+					defer shardCancel()
+					data, err = b.shardSvc.ReadShard(shardCtx, node, bucket, shardKey, i)
+					if b.peerHealth != nil {
+						if err != nil {
+							if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
+								// k-of-n early exit cancelled this shard — not a peer failure.
+							} else {
+								b.peerHealth.MarkUnhealthy(node)
+							}
+						} else {
+							b.peerHealth.MarkHealthy(node)
+						}
+					}
+				}
+				resultCh <- shardResult{idx: i, data: data, err: err}
+			}()
+		}
+		if dispatched == 0 {
+			return
+		}
+
+		drainReady := func() {
+			for {
+				select {
+				case res := <-resultCh:
+					applyShardResult(res)
+				default:
+					return
+				}
+			}
+		}
+
+		for r := 0; r < dispatched; r++ {
+			res := <-resultCh
+			if applyShardResult(res) && stopAtK && available == recCfg.DataShards {
+				cancel()
+				drainReady()
 				return
 			}
 		}
 	}
 
-	// Read until k shards are available, then return immediately. Continuing
-	// to wait for every dispatched shard defeats EC availability after a node
-	// failure because one dead peer can hold the whole GET until its RPC
-	// deadline. resultCh is buffered(len(nodes)), so late goroutines can still
-	// send after this function returns.
-	for r := 0; r < dispatched; r++ {
-		res := <-resultCh
-		if applyShardResult(res) && available == recCfg.DataShards {
-			cancel()
-			drainReady()
-			return ECReconstruct(recCfg, shards)
+	dataIdx := make([]int, 0, recCfg.DataShards)
+	localDataFastPath := true
+	for i := 0; i < recCfg.DataShards; i++ {
+		dataIdx = append(dataIdx, i)
+		if !cached[i] && rec.Nodes[i] != selfID {
+			localDataFastPath = false
 		}
 	}
+	if !localDataFastPath {
+		allIdx := make([]int, 0, len(rec.Nodes))
+		for i := range rec.Nodes {
+			allIdx = append(allIdx, i)
+		}
+		fetchShards(allIdx, true)
+		if available < recCfg.DataShards {
+			return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+				available, len(rec.Nodes), recCfg.DataShards)
+		}
+		return recCfg, shards, nil
+	}
+
+	fetchShards(dataIdx, false)
+	if available >= recCfg.DataShards {
+		return recCfg, shards, nil
+	}
+
+	parityIdx := make([]int, 0, recCfg.ParityShards)
+	for i := recCfg.DataShards; i < len(rec.Nodes); i++ {
+		parityIdx = append(parityIdx, i)
+	}
+	fetchShards(parityIdx, true)
 	if available < recCfg.DataShards {
-		return nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+		return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
 			available, len(rec.Nodes), recCfg.DataShards)
 	}
-	return ECReconstruct(recCfg, shards)
+	return recCfg, shards, nil
 }
 
 // upgradeObjectEC re-encodes an EC object from oldRec's (k1,m1) to newCfg's (k2,m2).

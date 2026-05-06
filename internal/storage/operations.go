@@ -37,7 +37,7 @@ var _ Backend = (*Operations)(nil)
 type operationsPlan struct {
 	atomicACLPutter            AtomicACLPutter
 	aclSetter                  ACLSetter
-	copyObjectAdapter          CopyObjectAdapter
+	copyObjectAccelerator      copyObjectAccelerator
 	copier                     Copier
 	bucketVersioner            BucketVersioner
 	versionedGetter            VersionedGetter
@@ -119,9 +119,9 @@ func buildOperationsPlan(backend Backend) operationsPlan {
 				p.aclSetter = v
 			}
 		}
-		if p.copyObjectAdapter == nil && !copyMustUseOuterFallback {
-			if v, ok := b.(CopyObjectAdapter); ok {
-				p.copyObjectAdapter = v
+		if p.copyObjectAccelerator == nil && !copyMustUseOuterFallback {
+			if v, ok := b.(copyObjectAccelerator); ok {
+				p.copyObjectAccelerator = v
 				copyMustUseOuterFallback = true
 			}
 		}
