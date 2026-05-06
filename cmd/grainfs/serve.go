@@ -447,7 +447,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, raftAddr, peersStr, clusterKey string, authOpts []server.Option, encryptor *encrypt.Encryptor) error {
 	if nodeID == "" {
 		var err error
-		nodeID, err = generateNodeID(dataDir)
+		nodeID, err = serveruntime.GenerateNodeID(dataDir)
 		if err != nil {
 			return fmt.Errorf("generate node ID: %w", err)
 		}
@@ -457,7 +457,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 
 	// strings.Split always yields at least one element — empty input or
 	// trailing commas produce "" entries that waste a gossip tick each.
-	peers := filterEmpty(strings.Split(peersStr, ","))
+	peers := serveruntime.FilterEmpty(strings.Split(peersStr, ","))
 	joinAddr, _ := cmd.Flags().GetString("join")
 	joinMode := joinAddr != ""
 
@@ -771,7 +771,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// RotationPreviousGrace expires. Runs on all nodes (FSM state is
 	// identical via raft); each node deletes its own local file.
 	metaRaft.StartPreviousKeyCleanup(ctx, rotationKeystore)
-	if err := startRotationSocket(ctx, dataDir, metaRaft); err != nil {
+	if err := serveruntime.StartRotationSocket(ctx, dataDir, metaRaft); err != nil {
 		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 	}
 	defer metaRaft.Close()
@@ -1202,7 +1202,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	}
 	metaForwardSender := cluster.NewMetaProposeForwardSender(metaForwardDialer)
 	distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
-		return metaForwardSender.Send(ctx, metaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+		return metaForwardSender.Send(ctx, serveruntime.MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	}))
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
 	router.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
@@ -1228,7 +1228,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, clusterCoord, "s3://grainfs-tables/warehouse"))
 	router.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 	if joinMode {
-		if err := performMetaJoin(ctx, quicTransport, peers, nodeID, raftAddr); err != nil {
+		if err := serveruntime.PerformMetaJoin(ctx, quicTransport, peers, nodeID, raftAddr); err != nil {
 			return err
 		}
 		if err := serveruntime.WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
@@ -1295,8 +1295,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// Auto-create "default" bucket only for singleton startup. In cluster mode,
 	// bucket creation is a cluster-wide metadata operation and must be driven by
 	// an explicit client/API action, not repeated independently by every node.
-	if shouldCreateDefaultBucketOnStartup(peers, recoveryReadOnly) {
-		if err := createDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
+	if serveruntime.ShouldCreateDefaultBucketOnStartup(peers, recoveryReadOnly) {
+		if err := serveruntime.CreateDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
 			return fmt.Errorf("create default bucket: %w", err)
 		}
 	}
@@ -1372,16 +1372,16 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	if len(peers) == 0 && !raftAddrExplicit && !joinMode {
 		legacyStore := icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")
 		metaCatalog := cluster.NewMetaCatalog(metaRaft, backend, "s3://grainfs-tables/warehouse")
-		if err := migrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, backend); err != nil {
+		if err := serveruntime.MigrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, backend); err != nil {
 			return fmt.Errorf("migrate singleton Iceberg catalog: %w", err)
 		}
 		srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
 	} else {
 		metaForward := func(ctx context.Context, command []byte) error {
-			return metaForwardSender.Send(ctx, metaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+			return metaForwardSender.Send(ctx, serveruntime.MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 		}
 		metaReadTargets := func() []string {
-			return metaProposalTargets(metaRaft.Node().LeaderID(), peers)
+			return serveruntime.MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
 		}
 		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarders(metaRaft, backend, "s3://grainfs-tables/warehouse", metaForward, metaReadSender, metaReadTargets)))
 	}
@@ -1407,8 +1407,8 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	var incidentRecorder *incident.Recorder
 	incidentDB, incidentDecision, err := badgerrole.OpenRole(roleRegistry, badgerrole.RoleIncidentState, badgerrole.PathContext{DataDir: dataDir})
 	if err != nil {
-		if feature, ok := optionalRoleDisabled(roleRegistry, incidentDecision); ok {
-			logOptionalRoleDisabled(badgerrole.RoleIncidentState, feature, err)
+		if feature, ok := serveruntime.OptionalRoleDisabled(roleRegistry, incidentDecision); ok {
+			serveruntime.LogOptionalRoleDisabled(badgerrole.RoleIncidentState, feature, err)
 		} else {
 			return fmt.Errorf("open incident db: %w", err)
 		}
@@ -1422,7 +1422,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
 		startResourceGuards(ctx, cmd, nodeID, dataDir, incidentRecorder, clusterAlerts)
 	}
-	clusterIncidentRecorder, scrubberIncidentRecorder := incidentRecorderInterfaces(incidentRecorder)
+	clusterIncidentRecorder, scrubberIncidentRecorder := serveruntime.IncidentRecorderInterfaces(incidentRecorder)
 
 	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
 	// Construct the manager before srv.New so the S3 PutBucketLifecycle API
@@ -1625,7 +1625,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 		sc.RegisterSource("replication", replSource, replVerifier)
 		sc.Start(ctx)
 
-		placementMonitors := newPlacementMonitorRegistry()
+		placementMonitors := serveruntime.NewPlacementMonitorRegistry()
 		startPlacementMonitor := func(monitorCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
 			if clusterIncidentRecorder != nil {
@@ -1685,7 +1685,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			go placementMonitor.Start(monitorCtx)
 		}
 		refreshPlacementMonitors := func() {
-			placementMonitors.refresh(ctx, dgMgr.All(), startPlacementMonitor)
+			placementMonitors.Refresh(ctx, dgMgr.All(), startPlacementMonitor)
 		}
 		refreshPlacementMonitors()
 		go func() {
@@ -1709,7 +1709,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// leadership changes are picked up without serve-level rewiring.
 	reshardInterval, _ := cmd.Flags().GetDuration("reshard-interval")
 	if reshardInterval > 0 {
-		reshardManagers := newReshardManagerRegistry()
+		reshardManagers := serveruntime.NewReshardManagerRegistry()
 		startReshardManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
 			leader := gb.RaftNode()
@@ -1720,7 +1720,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 			go cluster.NewReshardManager(gb, leader, reshardInterval).Start(managerCtx)
 		}
 		refreshReshardManagers := func() {
-			reshardManagers.refresh(ctx, dgMgr.All(), startReshardManager)
+			reshardManagers.Refresh(ctx, dgMgr.All(), startReshardManager)
 		}
 		refreshReshardManagers()
 		go func() {

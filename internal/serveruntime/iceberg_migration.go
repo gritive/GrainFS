@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"bytes"
@@ -15,7 +15,12 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func migrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergcatalog.Store, catalog icebergcatalog.Catalog, backend storage.Backend) error {
+// MigrateLegacySingletonIcebergCatalog walks the legacy local-mode Iceberg
+// catalog Store and reproduces every namespace + table in the meta-raft-
+// backed Catalog. Used during the v0.0.7.x cluster-mode migration so
+// existing Iceberg tables remain reachable after the catalog moves into
+// raft. No-op when either side is nil or the legacy export is empty.
+func MigrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergcatalog.Store, catalog icebergcatalog.Catalog, backend storage.Backend) error {
 	if legacy == nil || catalog == nil || backend == nil {
 		return nil
 	}
@@ -56,7 +61,7 @@ func migrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergca
 			}
 			continue
 		case errors.Is(err, icebergcatalog.ErrTableNotFound), errors.Is(err, storage.ErrObjectNotFound), errors.Is(err, storage.ErrBucketNotFound), errors.Is(err, storage.ErrNoSuchBucket):
-			if err := ensureIcebergMetadataObject(ctx, backend, tbl.MetadataLocation, tbl.Metadata); err != nil {
+			if err := EnsureIcebergMetadataObject(ctx, backend, tbl.MetadataLocation, tbl.Metadata); err != nil {
 				return fmt.Errorf("backfill legacy Iceberg metadata for %v: %w", tbl.Identifier, err)
 			}
 			_, err := catalog.CreateTable(ctx, tbl.Identifier, icebergcatalog.CreateTableInput{
@@ -75,7 +80,7 @@ func migrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergca
 	return nil
 }
 
-func ensureIcebergMetadataObject(ctx context.Context, backend storage.Backend, location string, metadata []byte) error {
+func EnsureIcebergMetadataObject(ctx context.Context, backend storage.Backend, location string, metadata []byte) error {
 	bucket, key, ok := parseIcebergS3LocationForMigration(location)
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
 func init() {
@@ -70,7 +72,7 @@ func clusterRotateKeyBegin() *cobra.Command {
 				fmt.Printf("Generated new PSK: %s\n", newKey)
 				fmt.Println("Save this securely — you must distribute it to all peers' configs.")
 			}
-			resp, err := submitRotation(dataDir, rotationSocketRequest{Action: "begin", NewKey: newKey})
+			resp, err := submitRotation(dataDir, serveruntime.RotationSocketRequest{Action: "begin", NewKey: newKey})
 			if err != nil {
 				return err
 			}
@@ -95,7 +97,7 @@ func clusterRotateKeyStatus() *cobra.Command {
 		Short: "Show current rotation state",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dataDir, _ := cmd.Flags().GetString("data")
-			resp, err := submitRotation(dataDir, rotationSocketRequest{Action: "status"})
+			resp, err := submitRotation(dataDir, serveruntime.RotationSocketRequest{Action: "status"})
 			if err != nil {
 				return err
 			}
@@ -125,7 +127,7 @@ func clusterRotateKeyAbort() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dataDir, _ := cmd.Flags().GetString("data")
 			reason, _ := cmd.Flags().GetString("reason")
-			resp, err := submitRotation(dataDir, rotationSocketRequest{Action: "abort", Reason: reason})
+			resp, err := submitRotation(dataDir, serveruntime.RotationSocketRequest{Action: "abort", Reason: reason})
 			if err != nil {
 				return err
 			}
@@ -140,20 +142,20 @@ func clusterRotateKeyAbort() *cobra.Command {
 	return c
 }
 
-func submitRotation(dataDir string, req rotationSocketRequest) (rotationSocketResponse, error) {
-	sock := filepath.Join(dataDir, rotationSocketName)
+func submitRotation(dataDir string, req serveruntime.RotationSocketRequest) (serveruntime.RotationSocketResponse, error) {
+	sock := filepath.Join(dataDir, serveruntime.RotationSocketName)
 	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
-		return rotationSocketResponse{}, fmt.Errorf("dial %s: %w", sock, err)
+		return serveruntime.RotationSocketResponse{}, fmt.Errorf("dial %s: %w", sock, err)
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(45 * time.Second))
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return rotationSocketResponse{}, fmt.Errorf("encode request: %w", err)
+		return serveruntime.RotationSocketResponse{}, fmt.Errorf("encode request: %w", err)
 	}
-	var resp rotationSocketResponse
+	var resp serveruntime.RotationSocketResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return rotationSocketResponse{}, fmt.Errorf("decode response: %w", err)
+		return serveruntime.RotationSocketResponse{}, fmt.Errorf("decode response: %w", err)
 	}
 	return resp, nil
 }

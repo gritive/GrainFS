@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -98,8 +99,8 @@ func setupClusterReceipt(
 
 	db, decision, err := openReceiptDB(dataDir)
 	if err != nil {
-		if feature, ok := optionalRoleDisabled(badgerrole.DefaultRegistry(), decision); ok {
-			logOptionalRoleDisabled(badgerrole.RoleReceipts, feature, err)
+		if feature, ok := serveruntime.OptionalRoleDisabled(badgerrole.DefaultRegistry(), decision); ok {
+			serveruntime.LogOptionalRoleDisabled(badgerrole.RoleReceipts, feature, err)
 			return opts, nil, nil
 		}
 		return opts, nil, fmt.Errorf("open receipt db: %w", err)

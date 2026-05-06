@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"context"
@@ -13,16 +13,20 @@ type reshardManagerEntry struct {
 	seen    bool
 }
 
-type reshardManagerRegistry struct {
+// ReshardManagerRegistry mirrors PlacementMonitorRegistry but for the
+// per-group ReshardManager goroutines. Same start/replace/cancel semantics.
+type ReshardManagerRegistry struct {
 	mu      sync.Mutex
 	entries map[string]reshardManagerEntry
 }
 
-func newReshardManagerRegistry() *reshardManagerRegistry {
-	return &reshardManagerRegistry{entries: make(map[string]reshardManagerEntry)}
+// NewReshardManagerRegistry returns an empty registry.
+func NewReshardManagerRegistry() *ReshardManagerRegistry {
+	return &ReshardManagerRegistry{entries: make(map[string]reshardManagerEntry)}
 }
 
-func (r *reshardManagerRegistry) refresh(parent context.Context, groups []*cluster.DataGroup, start func(context.Context, *cluster.DataGroup)) {
+// Refresh reconciles the registry against the current set of groups.
+func (r *ReshardManagerRegistry) Refresh(parent context.Context, groups []*cluster.DataGroup, start func(context.Context, *cluster.DataGroup)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

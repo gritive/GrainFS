@@ -11,11 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestOptionalRoleDisabledRecognizesIncidentAPI(t *testing.T) {
-	feature, ok := optionalRoleDisabled(badgerrole.DefaultRegistry(), badgerrole.Decision{
+	feature, ok := serveruntime.OptionalRoleDisabled(badgerrole.DefaultRegistry(), badgerrole.Decision{
 		Role:   badgerrole.RoleIncidentState,
 		Status: badgerrole.DecisionOpenFailed,
 		Action: badgerrole.RecoveryActionDisableFeature,
