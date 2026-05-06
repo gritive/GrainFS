@@ -190,6 +190,44 @@ func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	}
 }
 
+// WriteEncryptedShardStreamAtomic writes a chunked encrypted shard from r
+// using the same tmp + sync + rename recipe as WriteShardStreamAtomic.
+func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir shard dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create tmp shard: %w", err)
+	}
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if err := EncodeEncryptedShard(f, r, enc, aadBase, chunkSize); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync tmp shard: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close tmp shard: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename shard: %w", err)
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
+}
+
 func encryptedChunkNonce(prefix [encryptedNoncePrefixLen]byte, chunkIdx uint32) [encryptedNonceLen]byte {
 	var nonce [encryptedNonceLen]byte
 	copy(nonce[:], prefix[:])
