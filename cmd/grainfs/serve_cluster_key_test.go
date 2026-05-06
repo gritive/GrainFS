@@ -35,13 +35,8 @@ func TestRunCluster_EmptyClusterKey_ReturnsError(t *testing.T) {
 	defer cancel()
 
 	cmd := newClusterTestCmd("")
-	err := runCluster(
-		ctx, cmd,
-		":9000", t.TempDir(), "node1", "127.0.0.1:0",
-		"127.0.0.1:7001,127.0.0.1:7002",
-		"", // clusterKey
-		nil, nil,
-	)
+	cfg := buildClusterConfig(cmd, ":9000", t.TempDir(), "node1", "127.0.0.1:0", "", nil, nil)
+	err := runCluster(ctx, cfg)
 
 	if err == nil {
 		t.Fatal("expected error for empty clusterKey")

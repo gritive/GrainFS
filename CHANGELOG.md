@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.73.0] - 2026-05-07
+
+### Changed
+
+- `cmd/grainfs/serve.go` now hoists every cobra flag read into a flat
+  `clusterConfig` struct via `buildClusterConfig` before calling `runCluster`.
+  The body itself reads only `cfg.X`, no `cmd.Flags().Get*`. This keeps the
+  cobra surface exclusively in `runServe` and prepares the body for relocation
+  to `internal/serveruntime.Run` in a follow-up PR.
+- Resource-guard wiring (FD/goroutine/vlog watchers) is now triggered inline
+  with pre-built `resourceguard.{FD,Goroutine,Vlog}Options`; the cobra-coupled
+  `startResourceGuards` helper has been removed.
+- Startup config snapshot is built once via `cmd.Flags().VisitAll` (with the
+  same secret redaction set) and rendered through a cobra-free
+  `logStartupConfigSnapshotFromMap`; `serve_observability.go` is folded into
+  `serve_config.go`.
+
 ## [0.0.72.0] - 2026-05-06
 
 ### Added
