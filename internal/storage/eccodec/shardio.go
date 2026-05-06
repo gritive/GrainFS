@@ -38,6 +38,7 @@ var encryptedShardMagic = []byte("GFSENC2\x00")
 
 const (
 	DefaultEncryptedChunkSize = 1 << 20
+	maxEncryptedChunkSize     = DefaultEncryptedChunkSize
 	encryptedNoncePrefixLen   = 8
 	encryptedNonceLen         = 12
 	encryptedHeaderLen        = 8 + 4 + encryptedNoncePrefixLen
@@ -76,7 +77,7 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	if chunkSize <= 0 {
 		chunkSize = DefaultEncryptedChunkSize
 	}
-	if chunkSize > mathMaxInt32 {
+	if chunkSize > maxEncryptedChunkSize {
 		return fmt.Errorf("encrypted shard chunk size too large: %d", chunkSize)
 	}
 
@@ -143,7 +144,7 @@ func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 		return fmt.Errorf("not an encrypted shard")
 	}
 	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
-	if chunkSize == 0 || chunkSize > uint32(mathMaxInt32) {
+	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
 		return fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
 	}
 	var noncePrefix [encryptedNoncePrefixLen]byte
@@ -244,8 +245,6 @@ func encryptedChunkAAD(base []byte, chunkIdx uint32) []byte {
 	aad = append(aad, idx[:]...)
 	return aad
 }
-
-const mathMaxInt32 = int(^uint32(0) >> 1)
 
 // EncodeShard appends the versioned CRC envelope around payload.
 func EncodeShard(data []byte) []byte {

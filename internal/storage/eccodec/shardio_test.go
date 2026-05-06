@@ -2,6 +2,7 @@ package eccodec
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -149,6 +150,19 @@ func TestEncryptedShardStream_TruncatedChunkFails(t *testing.T) {
 	err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw[:len(raw)-8]), enc, []byte("aad"))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, io.ErrUnexpectedEOF), "want ErrUnexpectedEOF, got %v", err)
+}
+
+func TestEncryptedShardStream_RejectsOversizedChunkHeader(t *testing.T) {
+	enc := testEncryptor(t)
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("payload")), enc, []byte("aad"), 1024))
+
+	raw := append([]byte(nil), encoded.Bytes()...)
+	binary.LittleEndian.PutUint32(raw[len(encryptedShardMagic):], uint32(maxEncryptedChunkSize+1))
+
+	err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw), enc, []byte("aad"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid encrypted shard chunk size")
 }
 
 func testEncryptor(t *testing.T) *encrypt.Encryptor {
