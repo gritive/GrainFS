@@ -137,13 +137,13 @@ grainfs cluster peers
 grainfs cluster events --type cluster-remove-peer --since 24h
 
 # 죽은 노드 축출 (정족수 손실 없음 → pre-flight 통과)
-grainfs cluster remove-peer 127.0.0.1:19102 --yes
+grainfs cluster remove-peer node-2 --yes
 
 # 정족수 손실을 감수하는 강제 제거 (재해 복구 직전 단계)
-grainfs cluster remove-peer 127.0.0.1:19102 --force --yes
+grainfs cluster remove-peer node-2 --force --yes
 ```
 
-`<id>`는 현재 `cluster status` / `cluster peers`가 표시하는 voter 식별자(현 시점 raft 주소)를 그대로 넘긴다. Joint consensus(§4.3) 경로로 atomic 제거가 commit되며, 리더 본인을 제거하면 commit-time wakeup 후 follower로 강등되고 새 리더가 선출된다.
+`<id>`는 현재 `cluster status` / `cluster peers`가 표시하는 voter 식별자를 그대로 넘긴다. 정상 경로는 node ID이며, legacy metadata가 아직 raft address로만 남아 있으면 그 주소가 `unresolved_legacy` row로 표시된다. `cluster status`는 `peer_snapshot`에서 identity state와 liveness state를 분리해 보여주고, 기존 `peers` / `peer_addrs` / `peer_states` / `down_nodes` 필드는 호환성을 위해 같은 snapshot에서 파생된다. Joint consensus(§4.3) 경로로 atomic 제거가 commit되며, 리더 본인을 제거하면 commit-time wakeup 후 follower로 강등되고 새 리더가 선출된다.
 
 ## 클러스터 Balancer
 
