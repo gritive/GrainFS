@@ -1214,15 +1214,20 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 		GossipInterval: cfg.HealReceiptGossipInterval,
 		WindowSize:     cfg.HealReceiptWindow,
 	}
-	newSrvOpts, receiptWiring, err := serveruntime.SetupClusterReceipt(
-		ctx, rcptOpts, dataDir, nodeID, peers,
-		quicTransport, router, gossipReceiver, srvOpts,
-	)
+	receiptRuntime, err := serveruntime.SetupReceiptRuntime(ctx, serveruntime.ReceiptRuntimeOptions{
+		Options:        rcptOpts,
+		DataDir:        dataDir,
+		NodeID:         nodeID,
+		Peers:          peers,
+		QUICTransport:  quicTransport,
+		Router:         router,
+		GossipReceiver: gossipReceiver,
+	})
 	if err != nil {
 		return fmt.Errorf("heal-receipt wiring: %w", err)
 	}
-	srvOpts = newSrvOpts
-	defer receiptWiring.Close()
+	defer receiptRuntime.Close()
+	srvOpts = append(srvOpts, receiptRuntime.ServerOptions...)
 
 	incidentRuntime, err := serveruntime.SetupIncidentRuntime(ctx, serveruntime.IncidentRuntimeOptions{
 		RoleRegistry:          roleRegistry,
@@ -1335,11 +1340,11 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 		_ = adminSrv.Stop(stopCtx)
 	}()
 
-	// receiptWiring.keyStore may be nil when heal-receipt is disabled — in that
+	// receiptRuntime.keyStore may be nil when heal-receipt is disabled — in that
 	// case NewReceiptTrackingEmitter degrades to a pass-through (signing unhealthy).
 	var activeEmitter scrubber.Emitter = srv.HealEmitter()
-	if receiptWiring != nil && receiptWiring.Store() != nil {
-		rte := server.NewReceiptTrackingEmitter(srv.HealEmitter(), receiptWiring.Store(), receiptWiring.KeyStore())
+	if receiptRuntime != nil && receiptRuntime.Store() != nil {
+		rte := server.NewReceiptTrackingEmitter(srv.HealEmitter(), receiptRuntime.Store(), receiptRuntime.KeyStore())
 		defer rte.Close()
 		activeEmitter = rte
 	}
@@ -1481,7 +1486,7 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 				}
 				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
 					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
-				} else if receiptWiring != nil && receiptWiring.Store() != nil && receiptWiring.KeyStore() != nil {
+				} else if receiptRuntime != nil && receiptRuntime.Store() != nil && receiptRuntime.KeyStore() != nil {
 					r := &receipt.HealReceipt{
 						ReceiptID:     receiptID,
 						Timestamp:     time.Now().UTC(),
@@ -1491,11 +1496,11 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 						EventIDs:      []string{correlationID},
 						CorrelationID: correlationID,
 					}
-					if err := receipt.Sign(r, receiptWiring.KeyStore()); err != nil {
+					if err := receipt.Sign(r, receiptRuntime.KeyStore()); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Err(err).Msg("placement monitor receipt sign failed")
-					} else if err := receiptWiring.Store().Put(r); err != nil {
+					} else if err := receiptRuntime.Store().Put(r); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt store failed")
-					} else if err := receiptWiring.Store().Flush(); err != nil {
+					} else if err := receiptRuntime.Store().Flush(); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor receipt flush failed")
 					} else if err := gb.RecordRepairReceiptSigned(context.Background(), repairReq, receiptID); err != nil {
 						log.Warn().Str("correlation_id", correlationID).Str("receipt_id", receiptID).Err(err).Msg("placement monitor incident proof update failed")
