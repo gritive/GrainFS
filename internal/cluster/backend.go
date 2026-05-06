@@ -2081,7 +2081,7 @@ func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bu
 			readers[i] = shard
 		}
 	}
-	r, err := newECReconstructStreamReader(recCfg, readers)
+	r, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, b.hasLocalECDataShard(rec, recCfg))
 	if err != nil {
 		closeECShardReaders(shards)
 		return nil, err
@@ -2091,6 +2091,15 @@ func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bu
 		closeECShardReaders(shards)
 		return err
 	}}, nil
+}
+
+func (b *DistributedBackend) hasLocalECDataShard(rec PlacementRecord, cfg ECConfig) bool {
+	for i := 0; i < cfg.DataShards && i < len(rec.Nodes); i++ {
+		if rec.Nodes[i] == b.selfAddr {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (ECConfig, []io.ReadCloser, error) {

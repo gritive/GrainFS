@@ -178,6 +178,21 @@ func TestECReconstructStreamReader_MultiWindowRoundTrip(t *testing.T) {
 	assert.True(t, bytes.Equal(data, got), "multi-window stream reader output mismatch")
 }
 
+func TestDistributedBackend_HasLocalECDataShard(t *testing.T) {
+	b := &DistributedBackend{selfAddr: "self"}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+
+	require.True(t, b.hasLocalECDataShard(PlacementRecord{
+		Nodes: []string{"remote-a", "self", "remote-b"},
+	}, cfg))
+	require.False(t, b.hasLocalECDataShard(PlacementRecord{
+		Nodes: []string{"remote-a", "remote-b", "self"},
+	}, cfg))
+	require.False(t, b.hasLocalECDataShard(PlacementRecord{
+		Nodes: []string{"remote-a", "remote-b", "remote-c"},
+	}, cfg))
+}
+
 func TestECReconstruct_MissingParityShard(t *testing.T) {
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	data := make([]byte, 1024)

@@ -176,11 +176,15 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 }
 
 func newECReconstructStreamReader(cfg ECConfig, shards []io.Reader) (*ecReconstructStreamReader, error) {
+	return newECReconstructStreamReaderWithPrefetch(cfg, shards, true)
+}
+
+func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, allowPooledDataShardRead bool) (*ecReconstructStreamReader, error) {
 	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
 	if err != nil {
 		return nil, err
 	}
-	if origSize <= maxECPooledReadObjectSize && ecStreamHasAllDataShards(cfg, bodies) {
+	if allowPooledDataShardRead && origSize <= maxECPooledReadObjectSize && ecStreamHasAllDataShards(cfg, bodies) {
 		reader, closeReader, err := newECPooledDataShardReader(cfg, origSize, bodies)
 		if err != nil {
 			return nil, err
