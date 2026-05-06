@@ -3,7 +3,9 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -230,6 +232,25 @@ func BenchmarkGetObjectEC_LocalDataShardRead(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
 					require.NoError(b, readLocalECDataShardsParallelReuseOpenRawNoCRC(files, payloadLen))
+				}
+			})
+			b.Run("parallel_reuse_open_direct_crc", func(b *testing.B) {
+				files, payloadLen, err := openLocalECDataShardFiles(bk, "bench", resolved.ShardKey, recCfg)
+				require.NoError(b, err)
+				b.Cleanup(func() {
+					for _, f := range files {
+						_ = f.Close()
+					}
+				})
+				pool := sync.Pool{
+					New: func() any {
+						return make([]byte, payloadLen)
+					},
+				}
+
+				b.ReportAllocs()
+				for b.Loop() {
+					require.NoError(b, readLocalECDataShardsParallelReuseOpenDirectCRC(files, payloadLen, &pool))
 				}
 			})
 		})
@@ -486,6 +507,35 @@ func readLocalECDataShardsParallelReuseOpenRawNoCRC(files []*os.File, payloadLen
 			}
 			_, err := io.CopyN(io.Discard, file, payloadLen)
 			return err
+		})
+	}
+	return g.Wait()
+}
+
+func readLocalECDataShardsParallelReuseOpenDirectCRC(files []*os.File, payloadLen int64, pool *sync.Pool) error {
+	var g errgroup.Group
+	for _, f := range files {
+		file := f
+		g.Go(func() error {
+			buf := pool.Get().([]byte)
+			if int64(len(buf)) != payloadLen {
+				buf = buf[:payloadLen]
+			}
+			if _, err := file.ReadAt(buf, 8); err != nil {
+				pool.Put(buf)
+				return err
+			}
+			var footer [4]byte
+			if _, err := file.ReadAt(footer[:], 8+payloadLen); err != nil {
+				pool.Put(buf)
+				return err
+			}
+			if crc32.ChecksumIEEE(buf) != binary.LittleEndian.Uint32(footer[:]) {
+				pool.Put(buf)
+				return eccodec.ErrCRCMismatch
+			}
+			pool.Put(buf)
+			return nil
 		})
 	}
 	return g.Wait()
