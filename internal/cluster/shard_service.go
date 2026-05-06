@@ -25,6 +25,8 @@ import (
 
 var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(512) })
 
+const maxShardRangeReplyBytes = 1 << 20
+
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
@@ -235,6 +237,53 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 	return data, nil
 }
 
+// ReadShardRange fetches a bounded byte range from a remote shard in one RPC.
+func (s *ShardService) ReadShardRange(ctx context.Context, peer, bucket, key string, shardIdx int, offset int64, length int64) ([]byte, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("negative shard offset %d", offset)
+	}
+	if length < 0 {
+		return nil, fmt.Errorf("negative shard length %d", length)
+	}
+	if length > maxShardRangeReplyBytes {
+		return nil, fmt.Errorf("shard range length %d exceeds max %d", length, maxShardRangeReplyBytes)
+	}
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return nil, err
+	}
+	if s.transport == nil {
+		return nil, fmt.Errorf("shard service: no transport")
+	}
+	var rangePayload [16]byte
+	binary.BigEndian.PutUint64(rangePayload[0:8], uint64(offset))
+	binary.BigEndian.PutUint64(rangePayload[8:16], uint64(length))
+	fw := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:])
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	if err != nil {
+		return nil, fmt.Errorf("read shard range from %s: %w", peerAddr, err)
+	}
+
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	if rpcType == "Error" {
+		if len(data) > 0 {
+			return nil, fmt.Errorf("remote error from %s: %s", peer, string(data))
+		}
+		return nil, fmt.Errorf("remote error from %s", peer)
+	}
+	if rpcType != "OK" {
+		return nil, fmt.Errorf("unexpected shard range response from %s: %s", peer, rpcType)
+	}
+	if int64(len(data)) != length {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data, nil
+}
+
 // ReadShardStream fetches a remote shard as a plaintext stream.
 func (s *ShardService) ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error) {
 	peerAddr, err := s.resolvePeerAddress(peer)
@@ -389,6 +438,8 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 		return s.handleWrite(sr)
 	case "ReadShard":
 		return s.handleRead(sr)
+	case "ReadShardRange":
+		return s.handleReadRange(sr)
 	case "DeleteShards":
 		return s.handleDelete(sr)
 	default:
@@ -462,6 +513,29 @@ func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
+}
+
+func (s *ShardService) handleReadRange(sr *shardRequest) *transport.Message {
+	if len(sr.Data) != 16 {
+		return s.errorResponse("invalid shard range payload")
+	}
+	offset := int64(binary.BigEndian.Uint64(sr.Data[0:8]))
+	length := int64(binary.BigEndian.Uint64(sr.Data[8:16]))
+	if offset < 0 || length < 0 {
+		return s.errorResponse("invalid shard range")
+	}
+	if length > maxShardRangeReplyBytes {
+		return s.errorResponse(fmt.Sprintf("shard range length %d exceeds max %d", length, maxShardRangeReplyBytes))
+	}
+	buf := make([]byte, int(length))
+	n, err := s.ReadLocalShardAt(sr.Bucket, sr.Key, int(sr.ShardIdx), offset, buf)
+	if err != nil && n != len(buf) {
+		return s.errorResponse(err.Error())
+	}
+	if n != len(buf) {
+		return s.errorResponse(io.ErrUnexpectedEOF.Error())
+	}
+	return s.okResponse(buf)
 }
 
 // HandleWriteBody returns the streamed shard write handler for StreamRouter.

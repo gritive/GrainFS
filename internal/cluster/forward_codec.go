@@ -273,6 +273,16 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	return b.FinishedBytes()
 }
 
+func buildReadAtReply(body []byte) []byte {
+	b := flatbuffers.NewBuilder(64 + len(body))
+	bodyOff := b.CreateByteVector(body)
+	raftpb.ForwardReplyStart(b)
+	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
+	raftpb.ForwardReplyAddReadBody(b, bodyOff)
+	b.Finish(raftpb.ForwardReplyEnd(b))
+	return b.FinishedBytes()
+}
+
 // buildObjectsReply packs a list of *storage.Object into ForwardReply.objects
 // — used by ListObjects and WalkObjects.
 func buildObjectsReply(bucket string, objs []*storage.Object) []byte {

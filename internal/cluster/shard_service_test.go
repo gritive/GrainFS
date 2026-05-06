@@ -305,6 +305,31 @@ func TestShardService_ReadShardRangeStream_EncodedShard(t *testing.T) {
 	require.Equal(t, plaintext[10:10+8192], got)
 }
 
+func TestShardService_ReadShardRange_EncodedShard(t *testing.T) {
+	ctx := context.Background()
+
+	tr1 := transport.MustNewQUICTransport("test-cluster-psk")
+	tr2 := transport.MustNewQUICTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1)
+	svc2 := NewShardService(dir2, tr2)
+	tr2.SetStreamHandler(svc2.HandleRPC())
+
+	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 1024)
+	require.NoError(t, svc1.WriteShard(ctx, tr2.LocalAddr(), "bkt", "key", 0, plaintext))
+
+	got, err := svc1.ReadShardRange(ctx, tr2.LocalAddr(), "bkt", "key", 0, 10, 8192)
+	require.NoError(t, err)
+	require.Equal(t, plaintext[10:10+8192], got)
+}
+
 func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	ctx := context.Background()
 

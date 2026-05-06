@@ -2202,6 +2202,23 @@ func (b *DistributedBackend) readECDataShardAt(ctx context.Context, bucket, shar
 
 	shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
 	defer shardCancel()
+	if len(buf) <= maxShardRangeReplyBytes {
+		data, err := b.shardSvc.ReadShardRange(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
+		if err != nil {
+			if b.peerHealth != nil {
+				b.peerHealth.MarkUnhealthy(node)
+			}
+			return 0, err
+		}
+		if b.peerHealth != nil {
+			b.peerHealth.MarkHealthy(node)
+		}
+		n := copy(buf, data)
+		if n != len(buf) || n != len(data) {
+			return n, io.ErrUnexpectedEOF
+		}
+		return n, nil
+	}
 	r, err := b.shardSvc.ReadShardRangeStream(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
 	if err != nil {
 		if b.peerHealth != nil {

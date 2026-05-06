@@ -87,6 +87,8 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handlePutObject(dg, fbsArgs)
 	case raftpb.ForwardOpGetObject:
 		return r.handleGetObject(dg, fbsArgs)
+	case raftpb.ForwardOpReadAt:
+		return r.handleReadAt(dg, fbsArgs)
 	case raftpb.ForwardOpHeadObject:
 		return r.handleHeadObject(dg, fbsArgs)
 	case raftpb.ForwardOpDeleteObject:
@@ -250,6 +252,23 @@ func (r *ForwardReceiver) handleReadAtRead(dg *DataGroup, args []byte) (*transpo
 		length:  length,
 	}
 	return &transport.Message{Payload: buildOKReply()}, body
+}
+
+func (r *ForwardReceiver) handleReadAt(dg *DataGroup, args []byte) *transport.Message {
+	ra := raftpb.GetRootAsReadAtArgs(args, 0)
+	length := ra.Length()
+	if ra.Offset() < 0 || length < 0 || length > DefaultMaxForwardReplyBytes {
+		return statusReply(raftpb.ForwardStatusInternal)
+	}
+	buf := make([]byte, int(length))
+	n, err := dg.Backend().ReadAt(context.Background(), string(ra.Bucket()), string(ra.Key()), ra.Offset(), buf)
+	if err != nil && !(n > 0 && int64(n) == length) {
+		return statusReply(mapErrorToStatus(err))
+	}
+	if int64(n) != length {
+		return statusReply(raftpb.ForwardStatusInternal)
+	}
+	return &transport.Message{Payload: buildReadAtReply(buf)}
 }
 
 type backendReadAtStream struct {

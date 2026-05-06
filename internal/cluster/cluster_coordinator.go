@@ -989,6 +989,23 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	}
 
 	args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
+	if int64(len(buf)) <= c.maxBody {
+		reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpReadAt, args)
+		if err != nil {
+			return 0, err
+		}
+		if err := parseReplyStatus(reply); err != nil {
+			return 0, err
+		}
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
+		body := fr.ReadBodyBytes()
+		n := copy(buf, body)
+		if n != len(buf) || n != len(body) {
+			return n, ErrForwardBodySizeMismatch
+		}
+		return n, nil
+	}
+
 	reply, body, err := c.forward.SendReadStream(ctx, target.peers, target.groupID, raftpb.ForwardOpReadAt, args)
 	if err != nil {
 		return 0, err
