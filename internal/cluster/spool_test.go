@@ -88,3 +88,11 @@ func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got)
 }
+
+func TestECStreamBlockSizeScalesWithObjectSize(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+
+	require.Equal(t, 64<<10, ecStreamBlockSize(cfg, 64<<10))
+	require.Equal(t, 1<<20, ecStreamBlockSize(cfg, 2<<20))
+	require.Equal(t, 4<<20, ecStreamBlockSize(cfg, 64<<20))
+}
