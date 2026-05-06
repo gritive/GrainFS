@@ -2026,6 +2026,26 @@ func (r *raftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
 	})
 }
 
+func (r *raftClusterInfo) BucketAssignments() map[string]string {
+	src, ok := r.addrBook.(interface {
+		BucketAssignments() map[string]string
+	})
+	if !ok {
+		return nil
+	}
+	return src.BucketAssignments()
+}
+
+func (r *raftClusterInfo) ShardGroups() []cluster.ShardGroupEntry {
+	src, ok := r.addrBook.(interface {
+		ShardGroups() []cluster.ShardGroupEntry
+	})
+	if !ok {
+		return nil
+	}
+	return src.ShardGroups()
+}
+
 func (r *raftClusterInfo) normalizePeerIDs(peers []string) []string {
 	if len(peers) == 0 {
 		return nil

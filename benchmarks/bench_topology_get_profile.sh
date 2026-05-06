@@ -244,6 +244,34 @@ PY
   PRELOADED="1"
 fi
 
+STATUS_JSON="$BENCH_DIR/topology.json"
+if status=$(curl -sf "http://127.0.0.1:${TARGET_PORT}/api/cluster/status" 2>/dev/null); then
+  printf '%s\n' "$status" >"$STATUS_JSON"
+  python3 - "$STATUS_JSON" "$BUCKET" <<'PY'
+import json
+import sys
+
+path, bucket = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as f:
+    status = json.load(f)
+
+assignments = status.get("bucket_assignments") or {}
+groups = {g.get("id"): g for g in status.get("shard_groups") or []}
+group_id = assignments.get(bucket)
+if not group_id:
+    print(f"[bench] topology bucket={bucket} group=<unassigned> topology_json={path}")
+    sys.exit(0)
+
+peers = groups.get(group_id, {}).get("peer_ids") or []
+print(
+    f"[bench] topology bucket={bucket} group={group_id} "
+    f"voters={len(peers)} peer_ids={','.join(peers)} topology_json={path}"
+)
+PY
+else
+  echo "[bench] topology status unavailable from :${TARGET_PORT}"
+fi
+
 if [[ "$PROFILE" == "1" ]]; then
   curl -sf "http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/heap" \
     -o "$PROFILE_DIR/heap_pre.pb.gz" && echo "[pprof] heap_pre.pb.gz saved" || true
