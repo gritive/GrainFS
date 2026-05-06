@@ -51,6 +51,19 @@ func buildGetObjectArgs(bucket, key string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildReadAtArgs(bucket, key string, offset, length int64) []byte {
+	b := flatbuffers.NewBuilder(80)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	raftpb.ReadAtArgsStart(b)
+	raftpb.ReadAtArgsAddBucket(b, bk)
+	raftpb.ReadAtArgsAddKey(b, k)
+	raftpb.ReadAtArgsAddOffset(b, offset)
+	raftpb.ReadAtArgsAddLength(b, length)
+	b.Finish(raftpb.ReadAtArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
@@ -255,6 +268,16 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	raftpb.ForwardReplyStart(b)
 	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
 	raftpb.ForwardReplyAddObject(b, metaOff)
+	raftpb.ForwardReplyAddReadBody(b, bodyOff)
+	b.Finish(raftpb.ForwardReplyEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildReadAtReply(body []byte) []byte {
+	b := flatbuffers.NewBuilder(64 + len(body))
+	bodyOff := b.CreateByteVector(body)
+	raftpb.ForwardReplyStart(b)
+	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
 	raftpb.ForwardReplyAddReadBody(b, bodyOff)
 	b.Finish(raftpb.ForwardReplyEnd(b))
 	return b.FinishedBytes()

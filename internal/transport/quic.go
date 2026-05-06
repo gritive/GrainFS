@@ -758,12 +758,18 @@ func (t *QUICTransport) Call(ctx context.Context, addr string, req *Message) (*M
 			return nil, fmt.Errorf("open stream to %s: %w", addr, err)
 		}
 	}
-	defer stream.Close()
 
 	// Write request (length-prefixed, so server knows the boundary)
 	if err := t.codec.Encode(stream, req); err != nil {
+		stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+		_ = stream.Close()
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
+	if err := stream.Close(); err != nil {
+		stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+		return nil, fmt.Errorf("close request stream to %s: %w", addr, err)
+	}
+	defer stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
 
 	// Read response
 	resp, err := t.codec.Decode(stream)
@@ -916,6 +922,9 @@ func (t *QUICTransport) CallRead(ctx context.Context, addr string, req *Message)
 	if err = t.codec.Encode(stream, req); err != nil {
 		return nil, nil, fmt.Errorf("encode request: %w", err)
 	}
+	if err = stream.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close request stream to %s: %w", addr, err)
+	}
 
 	resp, err := t.codec.Decode(stream)
 	if err != nil {
@@ -964,11 +973,17 @@ func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *Fla
 			return nil, fmt.Errorf("open stream to %s: %w", addr, err)
 		}
 	}
-	defer stream.Close()
 
 	if err := t.codec.EncodeWriterTo(stream, fw); err != nil {
+		stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+		_ = stream.Close()
 		return nil, fmt.Errorf("encode flatbuffer: %w", err)
 	}
+	if err := stream.Close(); err != nil {
+		stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
+		return nil, fmt.Errorf("close flatbuffer request stream to %s: %w", addr, err)
+	}
+	defer stream.CancelRead(quic.StreamErrorCode(quicAppErrCode))
 
 	resp, err := t.codec.Decode(stream)
 	if err != nil {

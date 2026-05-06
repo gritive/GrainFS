@@ -784,6 +784,26 @@ func TestClusterCoordinator_ReadAt_FallbackRejectsNegativeOffset(t *testing.T) {
 	})
 }
 
+func TestClusterCoordinator_ReadAt_ForwardSmallRangeUsesSingleFrame(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := []byte("abcdef")
+	d.replyByOp[raftpb.ForwardOpReadAt] = buildReadAtReply(body)
+	c.forward.WithReadStreamDialer(d.readStream)
+
+	buf := make([]byte, len(body))
+	n, err := c.ReadAt(context.Background(), "bk", "k", 10, buf)
+
+	require.NoError(t, err)
+	require.Equal(t, len(body), n)
+	require.Equal(t, body, buf)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpReadAt, d.calls[0].op)
+	require.Empty(t, d.readCalls)
+	args := raftpb.GetRootAsReadAtArgs(d.calls[0].args, 0)
+	require.Equal(t, int64(10), args.Offset())
+	require.Equal(t, int64(len(body)), args.Length())
+}
+
 func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestGroupBackend(t, "group-1")
