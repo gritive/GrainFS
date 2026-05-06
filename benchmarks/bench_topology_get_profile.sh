@@ -29,6 +29,7 @@ VUS="${VUS:-${MAX_VUS:-1}}"
 SIZE_KB="${SIZE_KB:-65536}"
 OBJECT_COUNT="${OBJECT_COUNT:-4}"
 SETUP_TIMEOUT="${SETUP_TIMEOUT:-5m}"
+PRELOAD_IN_SHELL="${PRELOAD_IN_SHELL:-1}"
 PROFILE="${PROFILE:-1}"
 EC_DATA="${EC_DATA:-4}"
 EC_PARITY="${EC_PARITY:-2}"
@@ -209,6 +210,34 @@ fi
 TARGET_PPROF_PORT="$(pprof_port_for_idx "$TARGET_IDX")"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
+PRELOADED="0"
+if [[ "$PRELOAD_IN_SHELL" == "1" ]]; then
+  payload="$BENCH_DIR/payload-${SIZE_KB}kb.bin"
+  echo "[bench] preloading ${OBJECT_COUNT} object(s) of ${SIZE_KB}KB via curl..."
+  python3 - "$payload" "$SIZE_KB" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+size = int(sys.argv[2]) * 1024
+chunk = b"0123456789abcdef" * 4096
+with path.open("wb") as f:
+    remaining = size
+    while remaining > 0:
+        n = min(len(chunk), remaining)
+        f.write(chunk[:n])
+        remaining -= n
+PY
+  for i in $(seq 0 $((OBJECT_COUNT - 1))); do
+    key="get-only-${SIZE_KB}kb-${i}"
+    curl -sf -X PUT \
+      -H 'Content-Type: application/octet-stream' \
+      --data-binary "@${payload}" \
+      "http://127.0.0.1:${TARGET_PORT}/${BUCKET}/${key}" >/dev/null
+  done
+  PRELOADED="1"
+fi
+
 if [[ "$PROFILE" == "1" ]]; then
   curl -sf "http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/heap" \
     -o "$PROFILE_DIR/heap_pre.pb.gz" && echo "[pprof] heap_pre.pb.gz saved" || true
@@ -250,6 +279,7 @@ fi
   --env OBJECT_SIZE_KB="$SIZE_KB" \
   --env OBJECT_COUNT="$OBJECT_COUNT" \
   --env SETUP_TIMEOUT="$SETUP_TIMEOUT" \
+  --env PRELOADED="$PRELOADED" \
   --env DURATION="$DURATION" \
   --env RAMP_UP="$RAMP_UP" \
   --env RAMP_DOWN="$RAMP_DOWN" \

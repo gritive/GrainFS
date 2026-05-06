@@ -22,6 +22,7 @@ const OBJECT_SIZE_KB = parseInt(__ENV.OBJECT_SIZE_KB || '65536');
 const OBJECT_COUNT = parseInt(__ENV.OBJECT_COUNT || '4');
 const SLEEP_SECONDS = parseFloat(__ENV.SLEEP_SECONDS || '0');
 const SETUP_TIMEOUT = __ENV.SETUP_TIMEOUT || '5m';
+const PRELOADED = (__ENV.PRELOADED || '0') === '1';
 
 const getLatency = new Trend('grainfs_get_latency', true);
 const getOps = new Counter('grainfs_get_ops');
@@ -131,6 +132,14 @@ function payloadOfSize(size) {
 }
 
 export function setup() {
+  if (PRELOADED) {
+    const keys = [];
+    for (let i = 0; i < OBJECT_COUNT; i++) {
+      keys.push(`get-only-${OBJECT_SIZE_KB}kb-${i}`);
+    }
+    return { keys };
+  }
+
   const bucketUrl = `${BASE}/${BUCKET}`;
   const bucketRes = http.put(bucketUrl, null, {
     headers: sign('PUT', bucketUrl, '', false),
