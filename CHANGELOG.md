@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.75.0] - 2026-05-07
+
+### Added
+
+- Topology GET benchmarks can now measure full-object and byte-range GETs
+  across multiple range sizes, range modes, VU counts, and explicit target
+  nodes, making shard-local and remote-heavy EC read paths measurable.
+- Added regression coverage for S3 Range GET `ReadAt` usage, EC user-bucket
+  partial reads, group-forward `ReadAt`, remote shard range reads, and QUIC
+  RPC stream-credit reuse.
+
+### Changed
+
+- S3 Range GET now prefers backend `ReadAt` before opening full object bodies,
+  so EC user buckets read only the data shard segments that overlap the
+  requested range.
+- EC range reads now use direct local shard `ReadAt`, bounded remote shard
+  range RPCs, and bounded group-forward `ReadAt` responses for small ranges,
+  avoiding full object reconstruction on common random-read workloads.
+- QUIC request/response calls now half-close the request write side after
+  sending the frame, so repeated range reads release bidirectional stream
+  credit instead of stalling at the connection stream limit.
+
+### Fixed
+
+- Fixed the 6-node VUS=8 Range GET stall where the workload stopped around
+  1356 completed operations after exhausting QUIC stream credit. The same
+  benchmark now completes with 5836 successful operations, zero failures, and
+  zero interrupted iterations.
+
 ## [0.0.74.0] - 2026-05-07
 
 ### Added
