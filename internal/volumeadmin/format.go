@@ -1,4 +1,4 @@
-package main
+package volumeadmin
 
 import (
 	"fmt"
@@ -6,10 +6,9 @@ import (
 	"strings"
 )
 
-// formatBytes returns "1.0 GiB", "500.0 MiB" etc using IEC binary units.
-// raw=true returns the integer string. n<0 returns "n/a" (used for untracked
-// allocation counters).
-func formatBytes(n int64, raw bool) string {
+// FormatBytes returns "1.0 GiB", "500.0 MiB" etc using IEC binary units.
+// raw=true returns the integer string. n<0 returns "n/a".
+func FormatBytes(n int64, raw bool) string {
 	if raw {
 		return strconv.FormatInt(n, 10)
 	}
@@ -29,10 +28,10 @@ func formatBytes(n int64, raw bool) string {
 	return fmt.Sprintf("%.1f %s", f, units[i])
 }
 
-// parseSize accepts "1G", "1Gi", "100M", "1024", etc and returns bytes.
+// ParseSize accepts "1G", "1Gi", "100M", "1024", etc and returns bytes.
 // Suffixes (case-insensitive): K/Ki=1024, M/Mi=1024^2, G/Gi=1024^3,
 // T/Ti=1024^4, P/Pi=1024^5. No suffix means raw bytes.
-func parseSize(s string) (int64, error) {
+func ParseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, fmt.Errorf("empty")
@@ -69,4 +68,23 @@ func parseSize(s string) (int64, error) {
 		return 0, fmt.Errorf("parse size: %w", err)
 	}
 	return n * mult, nil
+}
+
+// FormatVolumeHealth returns "ok" for an empty health string, otherwise the
+// health verbatim. Pulled out of the runners so callers can apply it without
+// duplicating the empty-string check.
+func FormatVolumeHealth(health string) string {
+	if health == "" {
+		return "ok"
+	}
+	return health
+}
+
+// Capitalize returns s with its first byte upper-cased. Used by scrub status
+// output ("Done. ..." vs "done. ...").
+func Capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
