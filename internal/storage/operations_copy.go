@@ -43,7 +43,8 @@ type CopyObjectRequest struct {
 }
 
 type CopyObjectResult struct {
-	Object *Object
+	Object   *Object
+	Previous PreviousObject
 }
 
 type CopyObjectAdapterRequest struct {
@@ -58,6 +59,14 @@ type CopyObjectAdapter interface {
 }
 
 func (o *Operations) CopyObject(ctx context.Context, req CopyObjectRequest) (*CopyObjectResult, error) {
+	return o.copyObject(ctx, req, false)
+}
+
+func (o *Operations) CopyObjectWithResult(ctx context.Context, req CopyObjectRequest) (*CopyObjectResult, error) {
+	return o.copyObject(ctx, req, true)
+}
+
+func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest, includePrevious bool) (*CopyObjectResult, error) {
 	req = normalizeCopyObjectRequest(req)
 	plan := o.planForCall()
 
@@ -80,6 +89,14 @@ func (o *Operations) CopyObject(ctx context.Context, req CopyObjectRequest) (*Co
 	if isSameDestinationNoop(req) {
 		return nil, InvalidCopySourceError{Reason: CopySourceSameAsDestinationNoop}
 	}
+	var previous PreviousObject
+	if includePrevious {
+		var err error
+		previous, err = o.previousObject(ctx, req.Destination.Bucket, req.Destination.Key)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	contentType := srcObj.ContentType
 	if req.MetadataDirective == CopyMetadataReplace {
@@ -96,7 +113,7 @@ func (o *Operations) CopyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: obj}, nil
+		return &CopyObjectResult{Object: obj, Previous: previous}, nil
 	}
 
 	if req.ACL == nil && canUseSimpleCopier(req) && plan.copier != nil {
@@ -104,7 +121,7 @@ func (o *Operations) CopyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: obj}, nil
+		return &CopyObjectResult{Object: obj, Previous: previous}, nil
 	}
 
 	rc, _, err := o.openCopySource(ctx, plan, req.Source)
@@ -118,14 +135,14 @@ func (o *Operations) CopyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: obj}, nil
+		return &CopyObjectResult{Object: obj, Previous: previous}, nil
 	}
 
 	obj, err := o.backend.PutObject(ctx, req.Destination.Bucket, req.Destination.Key, rc, contentType)
 	if err != nil {
 		return nil, err
 	}
-	return &CopyObjectResult{Object: obj}, nil
+	return &CopyObjectResult{Object: obj, Previous: previous}, nil
 }
 
 func normalizeCopyObjectRequest(req CopyObjectRequest) CopyObjectRequest {

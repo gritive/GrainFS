@@ -312,9 +312,6 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		contentType = "application/octet-stream"
 	}
 
-	// Check if object already exists (for overwrite — don't double-count)
-	existing, _ := s.ops.HeadObject(ctx, bucket, key)
-
 	rawBody := c.Request.Body()
 
 	// Handle aws-chunked Content-Encoding (used by AWS SDKs for streaming uploads)
@@ -340,26 +337,22 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	aclHeader := string(c.GetHeader("x-amz-acl"))
 
 	var (
-		obj    *storage.Object
+		result *storage.PutObjectResult
 		putErr error
 	)
 	if aclHeader != "" {
 		acl := s3auth.ParseACLHeader(aclHeader)
-		obj, putErr = s.ops.PutObjectWithACL(ctx, bucket, key, body, contentType, uint8(acl))
+		result, putErr = s.ops.PutObjectWithACLResult(ctx, bucket, key, body, contentType, uint8(acl))
 	} else {
-		obj, putErr = s.ops.PutObject(ctx, bucket, key, body, contentType)
+		result, putErr = s.ops.PutObjectWithResult(ctx, bucket, key, body, contentType)
 	}
 	if putErr != nil {
 		mapError(c, putErr)
 		return
 	}
+	obj := result.Object
 
-	if existing == nil {
-		metrics.ObjectsTotal.Inc()
-	} else {
-		metrics.StorageBytesTotal.Add(float64(-existing.Size))
-	}
-	metrics.StorageBytesTotal.Add(float64(obj.Size))
+	recordObjectMutationMetrics(result.Previous, obj.Size)
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	if obj.VersionID != "" {
@@ -367,6 +360,15 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
 	c.Status(consts.StatusOK)
+}
+
+func recordObjectMutationMetrics(previous storage.PreviousObject, newSize int64) {
+	if previous.Exists {
+		metrics.StorageBytesTotal.Add(float64(-previous.Size))
+	} else {
+		metrics.ObjectsTotal.Inc()
+	}
+	metrics.StorageBytesTotal.Add(float64(newSize))
 }
 
 func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
@@ -1286,12 +1288,13 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		UserMetadata:      copyUserMetadata(c),
 		Conditions:        conditions,
 	}
-	result, err := s.ops.CopyObject(ctx, req)
+	result, err := s.ops.CopyObjectWithResult(ctx, req)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
 	obj := result.Object
+	recordObjectMutationMetrics(result.Previous, obj.Size)
 
 	response := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult>

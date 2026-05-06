@@ -533,6 +533,61 @@ func TestMetricsUpdateOnCRUD(t *testing.T) {
 	assert.Equal(t, "0", parseMetric(m, "grainfs_buckets_total"), "after delete bucket")
 }
 
+func TestMetricsUpdateOnCopyObjectOverwrite(t *testing.T) {
+	base := setupTestServer(t)
+
+	parseMetric := func(body, name string) string {
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, name+" ") {
+				return strings.TrimPrefix(line, name+" ")
+			}
+		}
+		return ""
+	}
+
+	getMetrics := func() string {
+		resp, err := http.Get(base + "/metrics")
+		require.NoError(t, err, "GET /metrics")
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err, "read metrics")
+		require.NoError(t, resp.Body.Close())
+		return string(body)
+	}
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/test-bucket", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "create bucket")
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/test-bucket/src.txt", strings.NewReader("abc"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err, "put source")
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/test-bucket/dst.txt", strings.NewReader("123456"))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err, "put destination")
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	m := getMetrics()
+	require.Equal(t, "2", parseMetric(m, "grainfs_objects_total"), "objects before copy overwrite")
+	require.Equal(t, "9", parseMetric(m, "grainfs_storage_bytes_total"), "bytes before copy overwrite")
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/test-bucket/dst.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/test-bucket/src.txt")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err, "copy over destination")
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	m = getMetrics()
+	assert.Equal(t, "2", parseMetric(m, "grainfs_objects_total"), "copy overwrite must not double-count objects")
+	assert.Equal(t, "6", parseMetric(m, "grainfs_storage_bytes_total"), "copy overwrite must subtract previous destination size")
+}
+
 // --- Policy handler integration tests ---
 
 func TestPutGetDeleteBucketPolicy(t *testing.T) {
