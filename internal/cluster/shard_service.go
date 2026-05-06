@@ -234,6 +234,45 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 	return data, nil
 }
 
+// ReadShardStream fetches a remote shard as a plaintext stream.
+func (s *ShardService) ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error) {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return nil, err
+	}
+	if s.transport == nil {
+		return nil, fmt.Errorf("shard service: no transport")
+	}
+	fw := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
+	payload := append([]byte(nil), fw.Builder.FinishedBytes()...)
+	fw.Builder.Reset()
+	shardBuilderPool.Put(fw.Builder)
+
+	req := &transport.Message{Type: transport.StreamShardReadBody, Payload: payload}
+	resp, body, err := s.transport.CallRead(ctx, peerAddr, req)
+	if err != nil {
+		return nil, fmt.Errorf("stream shard from %s: %w", peerAddr, err)
+	}
+
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		_ = body.Close()
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	if rpcType == "Error" {
+		_ = body.Close()
+		if len(data) > 0 {
+			return nil, fmt.Errorf("remote error from %s: %s", peer, string(data))
+		}
+		return nil, fmt.Errorf("remote error from %s", peer)
+	}
+	if rpcType != "OK" {
+		_ = body.Close()
+		return nil, fmt.Errorf("unexpected shard stream response from %s: %s", peer, rpcType)
+	}
+	return body, nil
+}
+
 // DeleteShards removes all shards for a key from a remote node.
 func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key string) error {
 	peerAddr, err := s.resolvePeerAddress(peer)
@@ -395,6 +434,28 @@ func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *tr
 			return s.errorResponse(err.Error())
 		}
 		return s.okResponse(nil)
+	}
+}
+
+// HandleReadBody returns the streamed shard read handler for StreamRouter.
+func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Message, io.ReadCloser) {
+	return func(req *transport.Message) (*transport.Message, io.ReadCloser) {
+		rpcType, srData, err := unmarshalEnvelope(req.Payload)
+		if err != nil {
+			return s.errorResponse("unmarshal request: " + err.Error()), nil
+		}
+		if rpcType != "ReadShard" {
+			return s.errorResponse("unexpected shard read RPC: " + rpcType), nil
+		}
+		sr, err := unmarshalShardRequest(srData)
+		if err != nil {
+			return s.errorResponse("decode request: " + err.Error()), nil
+		}
+		r, err := s.OpenLocalShard(sr.Bucket, sr.Key, int(sr.ShardIdx))
+		if err != nil {
+			return s.errorResponse(err.Error()), nil
+		}
+		return s.okResponse(nil), r
 	}
 }
 

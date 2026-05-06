@@ -2102,14 +2102,18 @@ func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Conte
 		return ECConfig{}, nil, fmt.Errorf("shard service unavailable")
 	}
 
-	allLocal := true
-	for _, node := range rec.Nodes {
-		if node != b.selfAddr {
-			allLocal = false
-			break
-		}
+	if b.shardCache != nil && b.shardCache.Stats().CapacityByte > 0 {
+		return b.getObjectECBufferedShardReadersAtShardKey(ctx, bucket, shardKey, rec)
 	}
-	if !allLocal || b.shardCache != nil {
+	uniqueNodes := make(map[string]struct{}, len(rec.Nodes))
+	for _, node := range rec.Nodes {
+		uniqueNodes[node] = struct{}{}
+	}
+	// E2E topology data: 3 physical nodes regress when remote shard reads are
+	// consumed as streams, so keep the existing parallel buffered k-of-n fetch
+	// there. At 6 physical nodes, streaming removes the target-side full-shard
+	// response buffering shown in pprof alloc_space.
+	if len(uniqueNodes) < 6 {
 		return b.getObjectECBufferedShardReadersAtShardKey(ctx, bucket, shardKey, rec)
 	}
 
@@ -2117,11 +2121,34 @@ func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Conte
 	available := 0
 	openShard := func(i int) bool {
 		readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-		r, err := b.shardSvc.OpenLocalShard(bucket, shardKey, i)
+		node := rec.Nodes[i]
+		if node == b.selfAddr {
+			r, err := b.shardSvc.OpenLocalShard(bucket, shardKey, i)
+			if err != nil {
+				return false
+			}
+			shards[i] = r
+			available++
+			return true
+		}
+
+		shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
+		r, err := b.shardSvc.ReadShardStream(shardCtx, node, bucket, shardKey, i)
 		if err != nil {
+			shardCancel()
+			if b.peerHealth != nil {
+				b.peerHealth.MarkUnhealthy(node)
+			}
 			return false
 		}
-		shards[i] = r
+		if b.peerHealth != nil {
+			b.peerHealth.MarkHealthy(node)
+		}
+		shards[i] = &multiReadCloser{Reader: r, close: func() error {
+			err := r.Close()
+			shardCancel()
+			return err
+		}}
 		available++
 		return true
 	}

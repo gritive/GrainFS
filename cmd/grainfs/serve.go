@@ -838,6 +838,7 @@ func runCluster(ctx context.Context, cmd *cobra.Command, addr, dataDir, nodeID, 
 	// caller saw "decode response: read header: EOF" → N×replication produced
 	// only the leader's local copy.
 	quicTransport.HandleBody(transport.StreamShardWriteBody, shardSvc.HandleWriteBody())
+	quicTransport.HandleRead(transport.StreamShardReadBody, shardSvc.HandleReadBody())
 
 	node.Start()
 	defer node.Stop()
