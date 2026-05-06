@@ -65,3 +65,31 @@ func (o *Operations) DeleteObjectReturningMarker(ctx context.Context, bucket, ke
 	}
 	return "", o.backend.DeleteObject(ctx, bucket, key)
 }
+
+type DeleteFacts struct {
+	DeleteMarker bool
+	VersionID    string
+}
+
+type DeleteObjectResult struct {
+	Deleted  DeleteFacts
+	Previous PreviousObject
+}
+
+func (o *Operations) DeleteObjectWithResult(ctx context.Context, bucket, key string) (*DeleteObjectResult, error) {
+	previous, err := o.previousObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	markerID, err := o.DeleteObjectReturningMarker(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	return &DeleteObjectResult{
+		Deleted: DeleteFacts{
+			DeleteMarker: markerID != "",
+			VersionID:    markerID,
+		},
+		Previous: previous,
+	}, nil
+}

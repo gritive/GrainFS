@@ -104,7 +104,7 @@ func TestOperationsCopyObjectHeadsSourceBeforeOpeningBodyAndAppliesReplaceConten
 	}
 	ops := NewOperations(backend)
 
-	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
 		Source:            ObjectRef{Bucket: "src", Key: "k"},
 		Destination:       ObjectRef{Bucket: "dst", Key: "k2"},
 		MetadataDirective: CopyMetadataReplace,
@@ -112,7 +112,6 @@ func TestOperationsCopyObjectHeadsSourceBeforeOpeningBodyAndAppliesReplaceConten
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, "application/json", result.Object.ContentType)
 	require.Equal(t, []string{"head:src/k", "get:src/k", "put:dst/k2:application/json:data"}, backend.calls)
 }
 

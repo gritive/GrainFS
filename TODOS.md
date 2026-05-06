@@ -6,17 +6,6 @@
 
 ### 기타
 
-- [ ] **Storage operations mutation bookkeeping** — `handlePut`, browser form upload,
-  multipart complete, delete path 의 metrics 계산이 mutation 전 `HeadObject` 로
-  이전 객체 크기를 따로 읽는다. 후속에서 `storage.Operations` 에 result 반환
-  helper 를 추가해 이 bookkeeping 을 facade 안으로 모은다. 단, `Operations` 가
-  `storage.Backend` 를 계속 만족해야 하므로 기존 `PutObject`,
-  `CompleteMultipartUpload`, `DeleteObjectReturningMarker` 시그니처는 유지하고
-  별도 메서드 (`PutObjectWithResult`, `CompleteMultipartUploadWithResult`,
-  `DeleteObjectWithResult`, 필요 시 `PutObjectWithACLResult`) 로 추가한다. 이전
-  WIP branch `refactor/storage-operations-mutation-bookkeeping` 는 이 아이디어의
-  초안이었지만 PR #193 이후에는 그대로 머지하면 Backend interface 를 깨므로
-  폐기하고 이 TODO 에서 재설계한다.
 - [ ] **Storage operations CopyObject semantics** — `storage.Operations.CopyObject`
   를 S3 CopyObject 의미의 test surface 로 deepen 한다. Handler 는
   `x-amz-copy-source` 를 URL decode + query parse 해서 `ObjectRef{Bucket, Key,

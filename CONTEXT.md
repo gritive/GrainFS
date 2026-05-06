@@ -17,6 +17,11 @@ invalidation, or protocol responses. Mutation result methods belong on the
 storage operations facade so callers do not perform their own pre-mutation
 bookkeeping around decorated backends.
 
+The new object state is exposed as object facts, not as a storage object handle:
+size, ETag, version identity, and last-modified time. Result normalization
+rejects nil objects, negative sizes, and empty ETags for newly written objects
+so handlers do not emit responses or metrics from invalid mutation metadata.
+
 Previous-object facts are a summary, not a leaked historical object. They state
 whether a previous object existed and the stable fields needed for accounting,
 such as size, ETag, and version identity.
