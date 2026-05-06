@@ -50,6 +50,7 @@ type PackedBackend struct {
 }
 
 var _ storage.Backend = (*PackedBackend)(nil)
+var _ storage.CopyObjectAdapter = (*PackedBackend)(nil)
 
 // PackedBackendOptions configures optional behavior for PackedBackend.
 type PackedBackendOptions struct {
@@ -266,9 +267,15 @@ func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 		}
 
 		h := md5.Sum(data)
+		meta, _ := pb.inner.HeadObject(ctx, bucket, key)
+		contentType := ""
+		if meta != nil {
+			contentType = meta.ContentType
+		}
 		obj := &storage.Object{
 			Key:          key,
 			Size:         int64(len(data)),
+			ContentType:  contentType,
 			ETag:         hex.EncodeToString(h[:]),
 			LastModified: time.Now().Unix(),
 		}
@@ -293,9 +300,15 @@ func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*s
 		}
 
 		h := md5.Sum(data)
+		meta, _ := pb.inner.HeadObject(ctx, bucket, key)
+		contentType := ""
+		if meta != nil {
+			contentType = meta.ContentType
+		}
 		return &storage.Object{
 			Key:          key,
 			Size:         int64(len(data)),
+			ContentType:  contentType,
 			ETag:         hex.EncodeToString(h[:]),
 			LastModified: time.Now().Unix(),
 		}, nil
@@ -412,6 +425,21 @@ func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string,
 // For flat-file objects, it falls back to read+write.
 func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*storage.Object, error) {
 	ctx := context.Background()
+	srcObj, err := pb.HeadObject(ctx, srcBucket, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	return pb.CopyObjectWithRequest(ctx, storage.CopyObjectAdapterRequest{
+		SourceRef:      storage.ObjectRef{Bucket: srcBucket, Key: srcKey},
+		DestinationRef: storage.ObjectRef{Bucket: dstBucket, Key: dstKey},
+		SourceObject:   srcObj,
+		ContentType:    srcObj.ContentType,
+	})
+}
+
+func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.CopyObjectAdapterRequest) (*storage.Object, error) {
+	srcBucket, srcKey := req.SourceRef.Bucket, req.SourceRef.Key
+	dstBucket, dstKey := req.DestinationRef.Bucket, req.DestinationRef.Key
 	srcIKey := pb.indexKey(srcBucket, srcKey)
 	dstIKey := pb.indexKey(dstBucket, dstKey)
 
@@ -436,20 +464,41 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 		pb.mu.Lock()
 		// Re-check after read: source may have been deleted while we were reading.
 		srcEntry, stillPacked := pb.index[srcIKey]
-		if !stillPacked || srcEntry.Refcount.Load() <= 0 {
+		if !stillPacked || srcEntry.Refcount.Load() <= 0 || srcEntry.Location != loc {
 			pb.mu.Unlock()
-			return nil, fmt.Errorf("source object deleted during copy")
+			return nil, fmt.Errorf("source object changed during copy")
 		}
 		srcEntry.Refcount.Add(1)
+		oldDst := pb.index[dstIKey]
+		if oldDst != nil {
+			oldDst.Refcount.Add(-1)
+		}
 		dst := &indexEntry{Location: loc}
 		dst.Refcount.Store(1)
+		dst.OriginalSize = srcEntry.OriginalSize
 		pb.index[dstIKey] = dst
 		pb.mu.Unlock()
+
+		if _, err := pb.inner.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(nil), req.ContentType); err != nil {
+			pb.mu.Lock()
+			if cur, ok := pb.index[dstIKey]; ok && cur == dst {
+				if oldDst != nil {
+					oldDst.Refcount.Add(1)
+					pb.index[dstIKey] = oldDst
+				} else {
+					delete(pb.index, dstIKey)
+				}
+				srcEntry.Refcount.Add(-1)
+			}
+			pb.mu.Unlock()
+			return nil, fmt.Errorf("sync copy metadata: %w", err)
+		}
 
 		h := md5.Sum(data)
 		return &storage.Object{
 			Key:          dstKey,
 			Size:         int64(len(data)),
+			ContentType:  req.ContentType,
 			ETag:         hex.EncodeToString(h[:]),
 			LastModified: time.Now().Unix(),
 		}, nil
@@ -463,7 +512,11 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 	}
 	defer rc.Close()
 
-	return pb.PutObject(ctx, dstBucket, dstKey, rc, obj.ContentType)
+	contentType := req.ContentType
+	if contentType == "" && obj != nil {
+		contentType = obj.ContentType
+	}
+	return pb.PutObject(ctx, dstBucket, dstKey, rc, contentType)
 }
 
 // --- Multipart operations (pass through to inner) ---

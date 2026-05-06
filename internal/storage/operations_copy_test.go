@@ -2,9 +2,11 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +24,7 @@ func TestOperationsCopyObjectUsesOptimizedCopierWithoutACLOverride(t *testing.T)
 
 	require.NoError(t, err)
 	require.Equal(t, "copied", result.Object.ETag)
-	require.Equal(t, []string{"copy:src/k:dst/k2"}, backend.calls)
+	require.Equal(t, []string{"head:src/k", "copy:src/k:dst/k2"}, backend.calls)
 }
 
 func TestOperationsCopyObjectFallsBackStreamingAndPreservesContentType(t *testing.T) {
@@ -38,7 +40,7 @@ func TestOperationsCopyObjectFallsBackStreamingAndPreservesContentType(t *testin
 
 	require.NoError(t, err)
 	require.Equal(t, "fallback", result.Object.ETag)
-	require.Equal(t, []string{"get:src/k", "put:dst/k2:text/plain:data"}, backend.calls)
+	require.Equal(t, []string{"head:src/k", "get:src/k", "put:dst/k2:text/plain:data"}, backend.calls)
 }
 
 func TestOperationsCopyObjectWithACLUsesACLWritePath(t *testing.T) {
@@ -56,7 +58,7 @@ func TestOperationsCopyObjectWithACLUsesACLWritePath(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "fallback-acl", result.Object.ETag)
-	require.Equal(t, []string{"get:src/k", "putacl:dst/k2:text/plain:7:data"}, backend.calls)
+	require.Equal(t, []string{"head:src/k", "get:src/k", "putacl:dst/k2:text/plain:7:data"}, backend.calls)
 }
 
 func TestOperationsCopyObjectDoesNotBypassCachedBackendInvalidation(t *testing.T) {
@@ -95,6 +97,161 @@ func TestOperationsCopyObjectDoesNotBypassCachedBackendInvalidation(t *testing.T
 	require.Equal(t, "new", string(newData))
 }
 
+func TestOperationsCopyObjectHeadsSourceBeforeOpeningBodyAndAppliesReplaceContentType(t *testing.T) {
+	backend := &semanticCopyBackend{
+		head: &Object{Key: "k", ContentType: "text/plain", ETag: "src-etag", LastModified: 100},
+		body: "data",
+	}
+	ops := NewOperations(backend)
+
+	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:            ObjectRef{Bucket: "src", Key: "k"},
+		Destination:       ObjectRef{Bucket: "dst", Key: "k2"},
+		MetadataDirective: CopyMetadataReplace,
+		ContentType:       "application/json",
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "application/json", result.Object.ContentType)
+	require.Equal(t, []string{"head:src/k", "get:src/k", "put:dst/k2:application/json:data"}, backend.calls)
+}
+
+func TestOperationsCopyObjectEvaluatesSourcePreconditionsBeforeBodyOpen(t *testing.T) {
+	backend := &semanticCopyBackend{
+		head: &Object{Key: "k", ETag: "abc123", LastModified: time.Date(2026, 5, 6, 12, 0, 1, 900, time.UTC).Unix()},
+		body: "data",
+	}
+	ops := NewOperations(backend)
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+		Conditions: CopySourceConditions{
+			IfMatch:           `"abc123"`,
+			IfUnmodifiedSince: ptrTime(time.Date(2026, 5, 6, 12, 0, 1, 0, time.UTC)),
+			IfNoneMatch:       `"abc123"`,
+		},
+	})
+
+	require.ErrorIs(t, err, ErrPreconditionFailed)
+	var typed PreconditionFailedError
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, "CopyObject", typed.Op)
+	require.Equal(t, CopyConditionIfNoneMatch, typed.Condition)
+	require.Equal(t, []string{"head:src/k"}, backend.calls)
+}
+
+func TestOperationsCopyObjectRejectsUnsupportedETagConditionSelector(t *testing.T) {
+	backend := &semanticCopyBackend{
+		head: &Object{Key: "k", ETag: "abc123", LastModified: 100},
+		body: "data",
+	}
+	ops := NewOperations(backend)
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+		Conditions:  CopySourceConditions{IfMatch: `W/"abc123"`},
+	})
+
+	var invalid InvalidCopySourceError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, CopySourceUnsupportedETagSelector, invalid.Reason)
+	require.Equal(t, []string{"head:src/k"}, backend.calls)
+}
+
+func TestOperationsCopyObjectRejectsUnsupportedUserMetadata(t *testing.T) {
+	backend := &semanticCopyBackend{head: &Object{Key: "k", ETag: "etag", LastModified: 100}}
+	ops := NewOperations(backend)
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:            ObjectRef{Bucket: "src", Key: "k"},
+		Destination:       ObjectRef{Bucket: "dst", Key: "k2"},
+		MetadataDirective: CopyMetadataReplace,
+		UserMetadata:      map[string]string{"x-amz-meta-owner": "me"},
+	})
+
+	requireUnsupportedOp(t, err, "CopyObject", UnsupportedReasonMetadataUnsupported)
+	require.Equal(t, []string{"head:src/k"}, backend.calls)
+}
+
+func TestOperationsCopyObjectRejectsSameDestinationNoopButAllowsExplicitVersionRestore(t *testing.T) {
+	backend := &semanticCopyBackend{head: &Object{Key: "k", ETag: "etag", ContentType: "text/plain", LastModified: 100}, body: "data"}
+	ops := NewOperations(backend)
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "b", Key: "k"},
+		Destination: ObjectRef{Bucket: "b", Key: "k"},
+	})
+	var invalid InvalidCopySourceError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, CopySourceSameAsDestinationNoop, invalid.Reason)
+
+	backend.calls = nil
+	_, err = ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "b", Key: "k", VersionID: "v1"},
+		Destination: ObjectRef{Bucket: "b", Key: "k"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"headversion:b/k:v1", "getversion:b/k:v1", "put:b/k:text/plain:data"}, backend.calls)
+}
+
+func TestOperationsCopyObjectRejectsExplicitDeleteMarkerSource(t *testing.T) {
+	backend := &semanticCopyBackend{
+		headVersion: &Object{Key: "k", VersionID: "dm1", IsDeleteMarker: true, LastModified: 100},
+	}
+	ops := NewOperations(backend)
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "b", Key: "k", VersionID: "dm1"},
+		Destination: ObjectRef{Bucket: "b", Key: "copy"},
+	})
+
+	var invalid InvalidCopySourceError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, CopySourceIsDeleteMarker, invalid.Reason)
+	require.Equal(t, []string{"headversion:b/k:dm1"}, backend.calls)
+}
+
+func TestOperationsCopyObjectDoesNotBypassRecoveryWriteGateForInnerAdapter(t *testing.T) {
+	inner := &adapterCopyBackend{
+		semanticCopyBackend: semanticCopyBackend{
+			head: &Object{Key: "k", ETag: "etag", ContentType: "text/plain", LastModified: 100},
+			body: "data",
+		},
+	}
+	gateErr := errors.New("writes blocked")
+	ops := NewOperations(NewRecoveryWriteGate(inner, gateErr))
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+	})
+
+	require.ErrorIs(t, err, gateErr)
+	require.Equal(t, []string{"head:src/k"}, inner.calls)
+}
+
+func TestOperationsCopyObjectDoesNotBypassMutatingWrapperForInnerAdapter(t *testing.T) {
+	inner := &adapterCopyBackend{
+		semanticCopyBackend: semanticCopyBackend{
+			head: &Object{Key: "k", ETag: "etag", ContentType: "text/plain", LastModified: 100},
+			body: "data",
+		},
+	}
+	wrapper := &copySideEffectWrapper{inner: inner}
+	ops := NewOperations(wrapper)
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"head:src/k", "get:src/k", "wrapper-put:dst/k2", "put:dst/k2:text/plain:data"}, inner.calls)
+}
+
 type copyBackend struct {
 	Backend
 	calls []string
@@ -105,9 +262,19 @@ func (b *copyBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*
 	return &Object{Key: dstKey, ETag: "copied"}, nil
 }
 
+func (b *copyBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
+	b.calls = append(b.calls, "head:"+bucket+"/"+key)
+	return &Object{Key: key, ContentType: "text/plain", ETag: "src-etag", LastModified: 100}, nil
+}
+
 type copyFallbackBackend struct {
 	Backend
 	calls []string
+}
+
+func (b *copyFallbackBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
+	b.calls = append(b.calls, "head:"+bucket+"/"+key)
+	return &Object{Key: key, ContentType: "text/plain", ETag: "src-etag", LastModified: 100}, nil
 }
 
 func (b *copyFallbackBackend) GetObject(_ context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
@@ -131,4 +298,106 @@ func (b *copyFallbackBackend) PutObjectWithACL(bucket, key string, r io.Reader, 
 	}
 	b.calls = append(b.calls, "putacl:"+bucket+"/"+key+":"+contentType+":"+string(rune('0'+acl))+":"+string(data))
 	return &Object{Key: key, ETag: "fallback-acl", ACL: acl}, nil
+}
+
+type semanticCopyBackend struct {
+	Backend
+	calls       []string
+	head        *Object
+	headVersion *Object
+	body        string
+}
+
+func (b *semanticCopyBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
+	b.calls = append(b.calls, "head:"+bucket+"/"+key)
+	if b.head == nil {
+		return nil, ErrObjectNotFound
+	}
+	return cloneObject(b.head), nil
+}
+
+func (b *semanticCopyBackend) GetObject(_ context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
+	b.calls = append(b.calls, "get:"+bucket+"/"+key)
+	if b.head == nil {
+		return nil, nil, ErrObjectNotFound
+	}
+	return io.NopCloser(strings.NewReader(b.body)), cloneObject(b.head), nil
+}
+
+func (b *semanticCopyBackend) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+	b.calls = append(b.calls, "headversion:"+bucket+"/"+key+":"+versionID)
+	if b.headVersion != nil {
+		return cloneObject(b.headVersion), nil
+	}
+	if b.head == nil {
+		return nil, ErrObjectNotFound
+	}
+	obj := cloneObject(b.head)
+	obj.VersionID = versionID
+	return obj, nil
+}
+
+func (b *semanticCopyBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+	b.calls = append(b.calls, "getversion:"+bucket+"/"+key+":"+versionID)
+	if b.headVersion != nil {
+		return io.NopCloser(strings.NewReader(b.body)), cloneObject(b.headVersion), nil
+	}
+	if b.head == nil {
+		return nil, nil, ErrObjectNotFound
+	}
+	obj := cloneObject(b.head)
+	obj.VersionID = versionID
+	return io.NopCloser(strings.NewReader(b.body)), obj, nil
+}
+
+func (b *semanticCopyBackend) PutObject(_ context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	b.calls = append(b.calls, "put:"+bucket+"/"+key+":"+contentType+":"+string(data))
+	return &Object{Key: key, ContentType: contentType, ETag: "dst-etag", LastModified: 200}, nil
+}
+
+func cloneObject(obj *Object) *Object {
+	if obj == nil {
+		return nil
+	}
+	cp := *obj
+	return &cp
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
+}
+
+type adapterCopyBackend struct {
+	semanticCopyBackend
+}
+
+func (b *adapterCopyBackend) CopyObjectWithRequest(_ context.Context, _ CopyObjectAdapterRequest) (*Object, error) {
+	b.calls = append(b.calls, "adapter")
+	return &Object{Key: "k2", ETag: "adapter"}, nil
+}
+
+type copySideEffectWrapper struct {
+	Backend
+	inner *adapterCopyBackend
+}
+
+func (w *copySideEffectWrapper) Unwrap() Backend {
+	return w.inner
+}
+
+func (w *copySideEffectWrapper) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
+	return w.inner.HeadObject(ctx, bucket, key)
+}
+
+func (w *copySideEffectWrapper) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
+	return w.inner.GetObject(ctx, bucket, key)
+}
+
+func (w *copySideEffectWrapper) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
+	w.inner.calls = append(w.inner.calls, "wrapper-put:"+bucket+"/"+key)
+	return w.inner.PutObject(ctx, bucket, key, r, contentType)
 }

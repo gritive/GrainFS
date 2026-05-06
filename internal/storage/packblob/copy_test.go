@@ -58,6 +58,34 @@ func TestCopyObject_RefcountIncremented(t *testing.T) {
 	assert.Equal(t, "shared data", string(data))
 }
 
+func TestOperationsCopyObjectUsesPackedAdapterAndReplaceContentType(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "b"))
+
+	_, err := pb.PutObject(context.Background(), "b", "orig.txt", strings.NewReader("shared data"), "text/plain")
+	require.NoError(t, err)
+
+	ops := storage.NewOperations(pb)
+	result, err := ops.CopyObject(context.Background(), storage.CopyObjectRequest{
+		Source:            storage.ObjectRef{Bucket: "b", Key: "orig.txt"},
+		Destination:       storage.ObjectRef{Bucket: "b", Key: "copy.txt"},
+		MetadataDirective: storage.CopyMetadataReplace,
+		ContentType:       "application/json",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "application/json", result.Object.ContentType)
+
+	require.NoError(t, pb.DeleteObject(context.Background(), "b", "orig.txt"))
+	rc, obj, err := pb.GetObject(context.Background(), "b", "copy.txt")
+	require.NoError(t, err)
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	require.NoError(t, err)
+
+	require.Equal(t, "shared data", string(data))
+	require.Equal(t, "application/json", obj.ContentType)
+}
+
 func TestCopyObject_LargeObjectFallback(t *testing.T) {
 	pb := newTestPackedBackend(t)
 	require.NoError(t, pb.CreateBucket(context.Background(), "b"))

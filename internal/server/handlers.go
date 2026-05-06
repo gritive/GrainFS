@@ -95,6 +95,10 @@ func writeXMLError(c *app.RequestContext, status int, code, message string) {
 
 func mapError(c *app.RequestContext, err error) {
 	switch {
+	case errors.Is(err, storage.ErrPreconditionFailed):
+		writeXMLError(c, consts.StatusPreconditionFailed, "PreconditionFailed", err.Error())
+	case errors.Is(err, storage.ErrInvalidCopySource):
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
 	case errors.Is(err, storage.ErrBucketNotFound):
 		writeXMLError(c, consts.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
 	case errors.Is(err, storage.ErrBucketAlreadyExists):
@@ -1252,27 +1256,37 @@ func (s *Server) removePeerHandler(ctx context.Context, c *app.RequestContext) {
 
 // handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
 func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, dstBucket, dstKey, copySource string) {
-	// Parse copy source: /bucket/key or bucket/key
-	copySource = strings.TrimPrefix(copySource, "/")
-	parts := strings.SplitN(copySource, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	src, ok := parseCopySource(copySource)
+	if !ok {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-copy-source format")
 		return
 	}
-	srcBucket, srcKey := parts[0], parts[1]
 
 	var acl *uint8
 	if aclHeader := string(c.GetHeader("x-amz-acl")); aclHeader != "" {
 		parsed := uint8(s3auth.ParseACLHeader(aclHeader))
 		acl = &parsed
 	}
-	result, err := s.ops.CopyObject(ctx, storage.CopyObjectRequest{
-		SourceBucket:      srcBucket,
-		SourceKey:         srcKey,
-		DestinationBucket: dstBucket,
-		DestinationKey:    dstKey,
+	directive, ok := parseCopyMetadataDirective(string(c.GetHeader("x-amz-metadata-directive")))
+	if !ok {
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-metadata-directive")
+		return
+	}
+	conditions, ok := copySourceConditions(c)
+	if !ok {
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid copy source condition date")
+		return
+	}
+	req := storage.CopyObjectRequest{
+		Source:            src,
+		Destination:       storage.ObjectRef{Bucket: dstBucket, Key: dstKey},
 		ACL:               acl,
-	})
+		MetadataDirective: directive,
+		ContentType:       string(c.GetHeader("Content-Type")),
+		UserMetadata:      copyUserMetadata(c),
+		Conditions:        conditions,
+	}
+	result, err := s.ops.CopyObject(ctx, req)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -1285,4 +1299,76 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
   <LastModified>%s</LastModified>
 </CopyObjectResult>`, obj.ETag, time.Unix(obj.LastModified, 0).UTC().Format(time.RFC3339))
 	c.Data(consts.StatusOK, "application/xml", []byte(response))
+}
+
+func parseCopySource(raw string) (storage.ObjectRef, bool) {
+	raw = strings.TrimPrefix(raw, "/")
+	u, err := url.Parse(raw)
+	if err != nil {
+		return storage.ObjectRef{}, false
+	}
+	path, err := url.PathUnescape(u.Path)
+	if err != nil {
+		return storage.ObjectRef{}, false
+	}
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return storage.ObjectRef{}, false
+	}
+	return storage.ObjectRef{Bucket: parts[0], Key: parts[1], VersionID: u.Query().Get("versionId")}, true
+}
+
+func parseCopyMetadataDirective(raw string) (storage.CopyMetadataDirective, bool) {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "", string(storage.CopyMetadataCopy):
+		return storage.CopyMetadataCopy, true
+	case string(storage.CopyMetadataReplace):
+		return storage.CopyMetadataReplace, true
+	default:
+		return "", false
+	}
+}
+
+func copyUserMetadata(c *app.RequestContext) map[string]string {
+	var metadata map[string]string
+	c.Request.Header.VisitAll(func(k, v []byte) {
+		key := strings.ToLower(string(k))
+		if !strings.HasPrefix(key, "x-amz-meta-") {
+			return
+		}
+		if metadata == nil {
+			metadata = make(map[string]string)
+		}
+		metadata[key] = string(v)
+	})
+	return metadata
+}
+
+func copySourceConditions(c *app.RequestContext) (storage.CopySourceConditions, bool) {
+	modifiedSince, ok := parseOptionalHTTPTime(string(c.GetHeader("x-amz-copy-source-if-modified-since")))
+	if !ok {
+		return storage.CopySourceConditions{}, false
+	}
+	unmodifiedSince, ok := parseOptionalHTTPTime(string(c.GetHeader("x-amz-copy-source-if-unmodified-since")))
+	if !ok {
+		return storage.CopySourceConditions{}, false
+	}
+	return storage.CopySourceConditions{
+		IfMatch:           string(c.GetHeader("x-amz-copy-source-if-match")),
+		IfNoneMatch:       string(c.GetHeader("x-amz-copy-source-if-none-match")),
+		IfModifiedSince:   modifiedSince,
+		IfUnmodifiedSince: unmodifiedSince,
+	}, true
+}
+
+func parseOptionalHTTPTime(raw string) (*time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, true
+	}
+	t, err := http.ParseTime(raw)
+	if err != nil {
+		return nil, false
+	}
+	return &t, true
 }
