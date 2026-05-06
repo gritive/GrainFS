@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.55.0] — 2026-05-06 — CopyObject semantics
+## [0.0.56.0] — 2026-05-06 — CopyObject semantics
 
 ### Changed
 
