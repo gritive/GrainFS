@@ -2075,22 +2075,22 @@ func (b *DistributedBackend) getObjectECReaderAtShardKey(ctx context.Context, bu
 	if err != nil {
 		return nil, err
 	}
-	pr, pw := io.Pipe()
-	go func() {
-		defer closeECShardReaders(shards)
-		readers := make([]io.Reader, len(shards))
-		for i, shard := range shards {
-			if shard != nil {
-				readers[i] = shard
-			}
+	readers := make([]io.Reader, len(shards))
+	for i, shard := range shards {
+		if shard != nil {
+			readers[i] = shard
 		}
-		if err := ECReconstructStreamTo(pw, recCfg, readers); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		_ = pw.Close()
-	}()
-	return pr, nil
+	}
+	r, err := newECReconstructStreamReader(recCfg, readers)
+	if err != nil {
+		closeECShardReaders(shards)
+		return nil, err
+	}
+	return &multiReadCloser{Reader: r, close: func() error {
+		err := r.Close()
+		closeECShardReaders(shards)
+		return err
+	}}, nil
 }
 
 func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, []io.ReadCloser, error) {

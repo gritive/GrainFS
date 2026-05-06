@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"io"
 	"testing"
 
@@ -123,6 +124,36 @@ func TestECReconstructStreamTo_MissingDataShard(t *testing.T) {
 	var got bytes.Buffer
 	require.NoError(t, ECReconstructStreamTo(&got, cfg, readers))
 	require.Equal(t, data, got.Bytes())
+}
+
+func TestECReconstructStreamReader_SmallReadsRoundTrip(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	data := make([]byte, 12345)
+	_, err := rand.Read(data)
+	require.NoError(t, err)
+
+	shards, err := ECSplit(cfg, data)
+	require.NoError(t, err)
+	readers := make([]io.Reader, len(shards))
+	for i := 0; i < cfg.DataShards; i++ {
+		readers[i] = bytes.NewReader(shards[i])
+	}
+
+	r, err := newECReconstructStreamReader(cfg, readers)
+	require.NoError(t, err)
+	var got bytes.Buffer
+	buf := make([]byte, 7)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			got.Write(buf[:n])
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		require.NoError(t, readErr)
+	}
+	assert.Equal(t, data, got.Bytes())
 }
 
 func TestECReconstruct_MissingParityShard(t *testing.T) {

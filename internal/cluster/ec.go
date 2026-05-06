@@ -13,6 +13,8 @@ import (
 	"math"
 	"path/filepath"
 
+	"github.com/klauspost/reedsolomon"
+
 	"github.com/gritive/GrainFS/internal/pool"
 )
 
@@ -172,6 +174,157 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 		return nil
 	}
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
+}
+
+func newECReconstructStreamReader(cfg ECConfig, shards []io.Reader) (*ecReconstructStreamReader, error) {
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
+	if err != nil {
+		return nil, err
+	}
+	enc, err := getEncoder(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("ec decoder: %w", err)
+	}
+	r := &ecReconstructStreamReader{
+		cfg:             cfg,
+		enc:             enc,
+		bodies:          bodies,
+		shardBodySize:   (origSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards),
+		remainingOutput: origSize,
+	}
+	r.windowSize = int64(defaultECStreamBlockSize)
+	if r.shardBodySize < r.windowSize {
+		r.windowSize = r.shardBodySize
+	}
+	if r.windowSize <= 0 {
+		r.done = true
+		return r, nil
+	}
+	r.remainingShard = r.shardBodySize
+	r.windows = make([][]byte, len(bodies))
+	r.windowBufs = make([][]byte, len(bodies))
+	for i, body := range bodies {
+		if body == nil {
+			continue
+		}
+		if r.windowSize == defaultECStreamBlockSize {
+			r.windowBufs[i] = ecStreamWindowPool.Get()
+			continue
+		}
+		r.windowBufs[i] = make([]byte, r.windowSize)
+	}
+	return r, nil
+}
+
+type ecReconstructStreamReader struct {
+	cfg             ECConfig
+	enc             reedsolomon.Encoder
+	bodies          []io.Reader
+	windows         [][]byte
+	windowBufs      [][]byte
+	shardBodySize   int64
+	windowSize      int64
+	remainingShard  int64
+	remainingOutput int64
+	dataIdx         int
+	current         []byte
+	windowReady     bool
+	done            bool
+	closed          bool
+}
+
+func (r *ecReconstructStreamReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for len(r.current) == 0 {
+		if r.done {
+			return 0, io.EOF
+		}
+		if !r.advanceOutputSlice() {
+			if err := r.loadWindow(); err != nil {
+				if err == io.EOF {
+					r.done = true
+				}
+				return 0, err
+			}
+		}
+	}
+	n := copy(p, r.current)
+	r.current = r.current[n:]
+	return n, nil
+}
+
+func (r *ecReconstructStreamReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	if r.windowSize == defaultECStreamBlockSize {
+		for i := range r.windowBufs {
+			if r.windowBufs[i] != nil {
+				ecStreamWindowPool.Put(r.windowBufs[i][:defaultECStreamBlockSize])
+				r.windowBufs[i] = nil
+			}
+		}
+	}
+	return nil
+}
+
+func (r *ecReconstructStreamReader) advanceOutputSlice() bool {
+	if !r.windowReady {
+		return false
+	}
+	for r.dataIdx < r.cfg.DataShards && r.remainingOutput > 0 {
+		if r.windows[r.dataIdx] == nil {
+			r.done = true
+			return false
+		}
+		toRead := int64(len(r.windows[r.dataIdx]))
+		if r.remainingOutput < toRead {
+			toRead = r.remainingOutput
+		}
+		r.current = r.windows[r.dataIdx][:toRead]
+		r.remainingOutput -= toRead
+		r.dataIdx++
+		return true
+	}
+	if r.remainingOutput == 0 {
+		r.done = true
+		return false
+	}
+	r.windowReady = false
+	return false
+}
+
+func (r *ecReconstructStreamReader) loadWindow() error {
+	if r.remainingShard <= 0 {
+		return io.EOF
+	}
+	n := r.windowSize
+	if r.remainingShard < n {
+		n = r.remainingShard
+	}
+	for i := range r.windows {
+		r.windows[i] = nil
+	}
+	for i, body := range r.bodies {
+		if body == nil {
+			continue
+		}
+		buf := r.windowBufs[i][:n]
+		if _, err := io.ReadFull(body, buf); err != nil {
+			return fmt.Errorf("read ec shard %d window: %w", i, err)
+		}
+		r.windows[i] = buf
+	}
+	if err := r.enc.ReconstructData(r.windows); err != nil {
+		return fmt.Errorf("ec reconstruct: %w", err)
+	}
+	r.remainingShard -= n
+	r.dataIdx = 0
+	r.windowReady = true
+	return nil
 }
 
 func ecReconstructBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodies [][]byte) error {
