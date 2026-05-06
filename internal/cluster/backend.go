@@ -2105,18 +2105,6 @@ func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Conte
 	if b.ecShardCacheCanStore(bucket, shardKey, recCfg, objectSize) {
 		return b.getObjectECBufferedShardReadersAtShardKey(ctx, bucket, shardKey, rec)
 	}
-	uniqueNodes := make(map[string]struct{}, len(rec.Nodes))
-	for _, node := range rec.Nodes {
-		uniqueNodes[node] = struct{}{}
-	}
-	// E2E topology data: 3 physical nodes regress when remote shard reads are
-	// consumed as streams, so keep the existing parallel buffered k-of-n fetch
-	// there. At 6 physical nodes, streaming removes the target-side full-shard
-	// response buffering shown in pprof alloc_space.
-	if len(uniqueNodes) < 6 {
-		return b.getObjectECBufferedShardReadersAtShardKey(ctx, bucket, shardKey, rec)
-	}
-
 	shards := make([]io.ReadCloser, len(rec.Nodes))
 	available := 0
 	openShard := func(i int) bool {
