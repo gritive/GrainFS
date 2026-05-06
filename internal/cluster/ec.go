@@ -12,7 +12,13 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+
+	"github.com/gritive/GrainFS/internal/pool"
 )
+
+var ecStreamWindowPool = pool.New(func() []byte {
+	return make([]byte, defaultECStreamBlockSize)
+})
 
 // Default EC parameters for 4+2 Reed-Solomon. Exposed so serve flags
 // and tests share a single source of truth.
@@ -199,8 +205,21 @@ func ecReconstructStreamBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodi
 	windowBufs := make([][]byte, len(bodies))
 	for i, r := range bodies {
 		if r != nil {
-			windowBufs[i] = make([]byte, windowSize)
+			if windowSize == defaultECStreamBlockSize {
+				windowBufs[i] = ecStreamWindowPool.Get()
+			} else {
+				windowBufs[i] = make([]byte, windowSize)
+			}
 		}
+	}
+	if windowSize == defaultECStreamBlockSize {
+		defer func() {
+			for i := range windowBufs {
+				if windowBufs[i] != nil {
+					ecStreamWindowPool.Put(windowBufs[i][:defaultECStreamBlockSize])
+				}
+			}
+		}()
 	}
 	remainingShard := shardBodySize
 	remainingOutput := origSize
