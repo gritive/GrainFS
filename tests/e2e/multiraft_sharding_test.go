@@ -169,7 +169,7 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 	require.NoError(t, err, "create multi-raft node log file")
 	t.Cleanup(func() {
 		_ = logFile.Close()
-		if t.Failed() {
+		if t.Failed() && keepE2EArtifacts() {
 			t.Logf("multi-raft node %d log saved to %s", i, logFile.Name())
 		} else {
 			_ = os.Remove(logFile.Name())
@@ -229,7 +229,7 @@ func (c *mrCluster) Stop() {
 		}
 	}
 	for _, d := range c.dataDirs {
-		if c.t.Failed() {
+		if c.t.Failed() && keepE2EArtifacts() {
 			c.t.Logf("multi-raft data dir saved to %s", d)
 			continue
 		}
