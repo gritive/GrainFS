@@ -44,6 +44,7 @@ func TestClassifyObjectLayout(t *testing.T) {
 	require.Equal(t, LayoutCurrent, ClassifyObjectLayout(ObjectIndexEntry{PlacementGroupID: "group-1", ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"}}, group, RepairSignals{}))
 	require.Equal(t, LayoutDowngradeSkipped, ClassifyObjectLayout(ObjectIndexEntry{PlacementGroupID: "group-1", ECData: 6, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"}}, group, RepairSignals{}))
 	require.Equal(t, LayoutRepairNeeded, ClassifyObjectLayout(ObjectIndexEntry{PlacementGroupID: "group-1", ECData: 4, ECParity: 2}, group, RepairSignals{}))
+	require.Equal(t, LayoutRepairNeeded, ClassifyObjectLayout(ObjectIndexEntry{PlacementGroupID: "group-1", ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3"}}, group, RepairSignals{}))
 	require.Equal(t, LayoutRepairNeeded, ClassifyObjectLayout(ObjectIndexEntry{PlacementGroupID: "group-1", ECData: 4, ECParity: 2, NodeIDs: []string{"missing"}}, group, RepairSignals{}))
 	require.Equal(t, LayoutUnknown, ClassifyObjectLayout(ObjectIndexEntry{PlacementGroupID: "missing", ECData: 4, ECParity: 2, NodeIDs: []string{"n1"}}, ShardGroupEntry{}, RepairSignals{}))
 }

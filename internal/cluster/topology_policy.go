@@ -95,6 +95,9 @@ func ClassifyObjectLayout(entry ObjectIndexEntry, group ShardGroupEntry, signals
 		return LayoutRepairNeeded
 	}
 	actual := ECConfig{DataShards: int(entry.ECData), ParityShards: int(entry.ECParity)}
+	if len(entry.NodeIDs) != actual.NumShards() {
+		return LayoutRepairNeeded
+	}
 	desired := DesiredECConfigForGroup(group)
 	comparison := CompareECProfile(actual, desired)
 	if comparison == ProfileHigher {
