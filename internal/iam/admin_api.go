@@ -135,6 +135,17 @@ func (a *AdminAPI) HandleSAList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// SAGetResponse is the wire shape for GET /admin/iam/sa/{id}. Mirrors
+// SAListItem field naming so list and detail outputs stay parseable by
+// the same client.
+type SAGetResponse struct {
+	SAID        string    `json:"sa_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	CreatedBy   string    `json:"created_by,omitempty"`
+}
+
 func (a *AdminAPI) HandleSAGet(w http.ResponseWriter, r *http.Request, saID string) {
 	sa, ok := a.store.LookupSA(saID)
 	if !ok {
@@ -142,7 +153,13 @@ func (a *AdminAPI) HandleSAGet(w http.ResponseWriter, r *http.Request, saID stri
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(sa)
+	_ = json.NewEncoder(w).Encode(SAGetResponse{
+		SAID:        sa.ID,
+		Name:        sa.Name,
+		Description: sa.Description,
+		CreatedAt:   sa.CreatedAt,
+		CreatedBy:   sa.CreatedBy,
+	})
 }
 
 func (a *AdminAPI) HandleSADelete(w http.ResponseWriter, r *http.Request, saID string) {

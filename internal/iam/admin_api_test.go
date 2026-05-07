@@ -91,6 +91,13 @@ func TestAdminAPI_GetSA(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
+	var resp SAGetResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.SAID != "sa-x" || resp.Name != "carol" {
+		t.Errorf("got %+v", resp)
+	}
 }
 
 func TestAdminAPI_GetSA_NotFound(t *testing.T) {
