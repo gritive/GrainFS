@@ -183,8 +183,7 @@ func runClusterPlacement(ctx context.Context, client *clusteradmin.Client, bucke
 		sort.Strings(buckets)
 		for _, b := range buckets {
 			g := s.BucketAssignments[b]
-			peers := lookupGroupPeers(s.ShardGroups, g)
-			fmt.Fprintf(w, "  %-12s %-10s %s\n", b, g, strings.Join(peers, ", "))
+			fmt.Fprintf(w, "  %-12s %-10s %s\n", b, g, renderGroupPeers(s.ShardGroups, g))
 		}
 		return nil
 	}
@@ -193,10 +192,21 @@ func runClusterPlacement(ctx context.Context, client *clusteradmin.Client, bucke
 		fmt.Fprintf(w, "bucket %q not assigned to any group\n", bucket)
 		return nil
 	}
-	peers := lookupGroupPeers(s.ShardGroups, g)
 	fmt.Fprintln(w, "BUCKET       GROUP      PEERS")
-	fmt.Fprintf(w, "  %-12s %-10s %s\n", bucket, g, strings.Join(peers, ", "))
+	fmt.Fprintf(w, "  %-12s %-10s %s\n", bucket, g, renderGroupPeers(s.ShardGroups, g))
 	return nil
+}
+
+// renderGroupPeers formats the peer list for a shard group, falling back
+// to "(unknown group)" when the bucket assignment references a group ID
+// that isn't present in shard_groups (e.g. stale assignment after a
+// shard-group GC). Avoids silently emitting an empty trailing column.
+func renderGroupPeers(groups []clusteradmin.ShardGroup, id string) string {
+	peers := lookupGroupPeers(groups, id)
+	if peers == nil {
+		return "(unknown group)"
+	}
+	return strings.Join(peers, ", ")
 }
 
 func lookupGroupPeers(groups []clusteradmin.ShardGroup, id string) []string {

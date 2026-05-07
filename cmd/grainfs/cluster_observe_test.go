@@ -187,6 +187,27 @@ func TestRunClusterPlacement_UnknownBucket(t *testing.T) {
 	assert.Contains(t, stdout.String(), "not assigned")
 }
 
+// TestRunClusterPlacement_UnknownGroupFallback ensures a bucket whose
+// assignment references a group ID that is missing from shard_groups
+// renders "(unknown group)" instead of an empty trailing column.
+func TestRunClusterPlacement_UnknownGroupFallback(t *testing.T) {
+	payload := `{
+		"mode":"cluster",
+		"shard_groups":[{"id":"group-0","peer_ids":["n1","n2","n3"]}],
+		"bucket_assignments":{"orphan":"group-99"}
+	}`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	})
+	sock := startObserveUDSStub(t, mux)
+
+	client := clusteradmin.NewClient(sock)
+	var stdout bytes.Buffer
+	require.NoError(t, runClusterPlacement(context.Background(), client, "", "text", &stdout))
+	assert.Contains(t, stdout.String(), "(unknown group)")
+}
+
 func TestRunClusterPlacement_LocalMode(t *testing.T) {
 	payload := `{"mode":"local"}`
 	mux := http.NewServeMux()

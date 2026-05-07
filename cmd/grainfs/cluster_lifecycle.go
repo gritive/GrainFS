@@ -61,9 +61,18 @@ func runClusterTransferLeader(ctx context.Context, client *clusteradmin.Client, 
 	}
 	deadline := time.Now().Add(timeout)
 	fmt.Fprintf(w, "waiting for leader change (timeout %s)...\n", timeout)
+	var lastStatusErr error
 	for time.Now().Before(deadline) {
 		s, err := client.Status(ctx)
-		if err == nil && s.LeaderID != "" && s.LeaderID != res.OldLeader && s.Term > res.Term {
+		switch {
+		case err != nil:
+			// Surface the first error so a persistent connectivity loss is
+			// visible to the operator instead of silently spinning to timeout.
+			if lastStatusErr == nil {
+				fmt.Fprintf(w, "status poll error (will keep retrying): %v\n", err)
+			}
+			lastStatusErr = err
+		case s.LeaderID != "" && s.LeaderID != res.OldLeader && s.Term > res.Term:
 			fmt.Fprintf(w, "new leader: %s (term %d)\n", s.LeaderID, s.Term)
 			return nil
 		}
@@ -72,6 +81,9 @@ func runClusterTransferLeader(ctx context.Context, client *clusteradmin.Client, 
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
+	}
+	if lastStatusErr != nil {
+		return fmt.Errorf("timed out waiting for leader change (last status error: %w)", lastStatusErr)
 	}
 	return errors.New("timed out waiting for leader change")
 }
@@ -140,11 +152,20 @@ func runClusterDrain(ctx context.Context, client *clusteradmin.Client, id string
 		oldTerm := s.Term
 		var newLeader string
 		var newTerm uint64
+		var lastStatusErr error
 		for time.Now().Before(deadline) {
 			ns, sErr := client.Status(ctx)
-			if sErr == nil && ns.LeaderID != "" && ns.LeaderID != id && ns.Term > oldTerm {
+			switch {
+			case sErr != nil:
+				if lastStatusErr == nil {
+					fmt.Fprintf(w, "status poll error (will keep retrying): %v\n", sErr)
+				}
+				lastStatusErr = sErr
+			case ns.LeaderID != "" && ns.LeaderID != id && ns.Term > oldTerm:
 				newLeader = ns.LeaderID
 				newTerm = ns.Term
+			}
+			if newLeader != "" {
 				break
 			}
 			select {
@@ -154,6 +175,9 @@ func runClusterDrain(ctx context.Context, client *clusteradmin.Client, id string
 			}
 		}
 		if newLeader == "" {
+			if lastStatusErr != nil {
+				return fmt.Errorf("timed out waiting for leader change after transfer (last status error: %w)", lastStatusErr)
+			}
 			return errors.New("timed out waiting for leader change after transfer")
 		}
 		fmt.Fprintf(w, "leadership transferred to %s (term %d)\n", newLeader, newTerm)

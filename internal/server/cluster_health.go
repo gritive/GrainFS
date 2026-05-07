@@ -101,15 +101,20 @@ func (s *Server) deriveHealth() Health {
 // mapPeerHealthRows translates internal PeerLivenessRow into the wire
 // PeerHealthRow shape. State mapping:
 //
-//	PeerIdentitySelf                          → "self"
-//	PeerLivenessLive                          → "live"
-//	PeerLivenessHealthCooldown                → "cooldown"
-//	PeerLivenessProbeFailed                   → "down"
-//	other (Configured / UnresolvedLegacy etc) → "configured"
+//	PeerIdentitySelf                  → "self"
+//	PeerLivenessLive                  → "live"
+//	PeerLivenessHealthCooldown        → "cooldown"
+//	PeerLivenessProbeFailed           → "down"
+//	PeerLivenessConfigured            → "configured"
+//	(any future state added upstream) → string(r.LivenessState)
+//
+// The fall-through preserves the raw internal name so a new state isn't
+// silently rendered as "configured" — operators see something unfamiliar
+// and can investigate, and deriveIssues can match on it later if needed.
 func mapPeerHealthRows(rows []cluster.PeerLivenessRow) []PeerHealthRow {
 	out := make([]PeerHealthRow, 0, len(rows))
 	for _, r := range rows {
-		state := "configured"
+		var state string
 		switch {
 		case r.IdentityState == cluster.PeerIdentitySelf:
 			state = "self"
@@ -119,6 +124,10 @@ func mapPeerHealthRows(rows []cluster.PeerLivenessRow) []PeerHealthRow {
 			state = "cooldown"
 		case r.LivenessState == cluster.PeerLivenessProbeFailed:
 			state = "down"
+		case r.LivenessState == cluster.PeerLivenessConfigured:
+			state = "configured"
+		default:
+			state = string(r.LivenessState)
 		}
 		out = append(out, PeerHealthRow{
 			PeerID:   r.PeerID,
