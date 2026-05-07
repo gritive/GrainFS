@@ -95,6 +95,8 @@ these values are part of automatic profile selection.
 ## Tests And Benchmarks
 
 Tests and benchmarks must stop passing EC profile flags to `grainfs serve`.
+The shared e2e harness must also reject removed EC flags in `ExtraArgs` so
+future tests fail before spawning a subprocess with an unknown public flag.
 
 Tests that need a specific public profile should express that through node
 count:
@@ -129,6 +131,7 @@ reshard code still need the stored profile to interpret existing objects.
   placement group's voter count.
 - The auto profile table above is covered by unit tests.
 - E2E harnesses and benchmark scripts no longer pass removed EC flags.
+- E2E harness validation rejects `--ec-data` and `--ec-parity` in `ExtraArgs`.
 - README documents automatic EC selection and the three-node production
   minimum.
 
