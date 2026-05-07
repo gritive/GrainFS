@@ -33,3 +33,10 @@ func TestClusterRebalanceRemoved(t *testing.T) {
 	assert.NotContains(t, clusterSubcommandNames(), "rebalance",
 		"cluster rebalance stub removed; reintroduce when real local FSM read lands")
 }
+
+func TestClusterJoinMovedToRoot(t *testing.T) {
+	assert.NotContains(t, clusterSubcommandNames(), "join",
+		"cluster join was moved to root as 'grainfs join' (bootstrap convention)")
+	assert.Contains(t, rootSubcommandNames(), "join",
+		"join must be registered at root alongside serve / migrate / doctor / recover")
+}

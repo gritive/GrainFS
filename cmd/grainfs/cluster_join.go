@@ -16,11 +16,15 @@ import (
 
 var clusterJoinCmd = &cobra.Command{
 	Use:   "join <peer-address>",
-	Short: "Join this node to an existing meta-Raft cluster",
-	Long: `Sends a join request to the given peer address.
-If the peer is not the current leader, the command follows the leader hint when
-the peer can provide one. The command starts the local MetaRaft node before
-sending the join request.`,
+	Short: "Join this node to an existing meta-Raft cluster (offline bootstrap)",
+	Long: `Join an existing GrainFS cluster as a new node.
+
+This is an offline bootstrap operation: it starts the local MetaRaft node,
+sends a join request to the given peer address, then exits. After joining,
+run 'grainfs serve' to start serving on this node.
+
+If the peer is not the current leader, the command follows the leader hint
+when the peer can provide one.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runClusterJoin,
 }
@@ -106,5 +110,5 @@ func init() {
 	clusterJoinCmd.Flags().String("node-id", "", "node ID (auto-generated from data-dir if empty)")
 	clusterJoinCmd.Flags().String("raft-addr", "", "local Raft address reachable by peers (required)")
 	clusterJoinCmd.Flags().String("cluster-key", "", "shared cluster encryption key")
-	clusterCmd.AddCommand(clusterJoinCmd)
+	rootCmd.AddCommand(clusterJoinCmd)
 }
