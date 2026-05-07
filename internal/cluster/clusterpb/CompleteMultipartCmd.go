@@ -113,8 +113,57 @@ func (rcv *CompleteMultipartCmd) VersionId() []byte {
 	return nil
 }
 
+func (rcv *CompleteMultipartCmd) PlacementGroupId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *CompleteMultipartCmd) EcData() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartCmd) MutateEcData(n byte) bool {
+	return rcv._tab.MutateByteSlot(22, n)
+}
+
+func (rcv *CompleteMultipartCmd) EcParity() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartCmd) MutateEcParity(n byte) bool {
+	return rcv._tab.MutateByteSlot(24, n)
+}
+
+func (rcv *CompleteMultipartCmd) NodeIds(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *CompleteMultipartCmd) NodeIdsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func CompleteMultipartCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(12)
 }
 func CompleteMultipartCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -139,6 +188,21 @@ func CompleteMultipartCmdAddModTime(builder *flatbuffers.Builder, modTime int64)
 }
 func CompleteMultipartCmdAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(versionId), 0)
+}
+func CompleteMultipartCmdAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(placementGroupId), 0)
+}
+func CompleteMultipartCmdAddEcData(builder *flatbuffers.Builder, ecData byte) {
+	builder.PrependByteSlot(9, ecData, 0)
+}
+func CompleteMultipartCmdAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
+	builder.PrependByteSlot(10, ecParity, 0)
+}
+func CompleteMultipartCmdAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(nodeIds), 0)
+}
+func CompleteMultipartCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func CompleteMultipartCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

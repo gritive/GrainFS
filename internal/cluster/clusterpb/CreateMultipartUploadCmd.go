@@ -85,8 +85,16 @@ func (rcv *CreateMultipartUploadCmd) MutateCreatedAt(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
+func (rcv *CreateMultipartUploadCmd) PlacementGroupId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func CreateMultipartUploadCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func CreateMultipartUploadCmdAddUploadId(builder *flatbuffers.Builder, uploadId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(uploadId), 0)
@@ -102,6 +110,9 @@ func CreateMultipartUploadCmdAddContentType(builder *flatbuffers.Builder, conten
 }
 func CreateMultipartUploadCmdAddCreatedAt(builder *flatbuffers.Builder, createdAt int64) {
 	builder.PrependInt64Slot(4, createdAt, 0)
+}
+func CreateMultipartUploadCmdAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(placementGroupId), 0)
 }
 func CreateMultipartUploadCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

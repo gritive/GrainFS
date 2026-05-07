@@ -25,12 +25,13 @@ func TestEncodeDecodeCommand_CreateBucket(t *testing.T) {
 
 func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 	orig := PutObjectMetaCmd{
-		Bucket:      "test-bucket",
-		Key:         "photos/sunset.jpg",
-		Size:        1048576,
-		ContentType: "image/jpeg",
-		ETag:        "d41d8cd98f00b204e9800998ecf8427e",
-		ModTime:     1700000000,
+		Bucket:           "test-bucket",
+		Key:              "photos/sunset.jpg",
+		Size:             1048576,
+		ContentType:      "image/jpeg",
+		ETag:             "d41d8cd98f00b204e9800998ecf8427e",
+		ModTime:          1700000000,
+		PlacementGroupID: "group-2",
 	}
 
 	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
@@ -48,17 +49,22 @@ func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 	assert.Equal(t, "image/jpeg", decoded.ContentType)
 	assert.Equal(t, "d41d8cd98f00b204e9800998ecf8427e", decoded.ETag)
 	assert.Equal(t, int64(1700000000), decoded.ModTime)
+	assert.Equal(t, "group-2", decoded.PlacementGroupID)
 }
 
 func TestEncodeDecodeCommand_CompleteMultipart(t *testing.T) {
 	orig := CompleteMultipartCmd{
-		Bucket:      "uploads",
-		Key:         "video.mp4",
-		UploadID:    "upload-abc-123",
-		Size:        5242880,
-		ContentType: "video/mp4",
-		ETag:        "abc123def456",
-		ModTime:     1700001000,
+		Bucket:           "uploads",
+		Key:              "video.mp4",
+		UploadID:         "upload-abc-123",
+		Size:             5242880,
+		ContentType:      "video/mp4",
+		ETag:             "abc123def456",
+		ModTime:          1700001000,
+		PlacementGroupID: "group-3",
+		ECData:           2,
+		ECParity:         1,
+		NodeIDs:          []string{"n1", "n2", "n3"},
 	}
 
 	encoded, err := EncodeCommand(CmdCompleteMultipart, orig)
@@ -77,15 +83,20 @@ func TestEncodeDecodeCommand_CompleteMultipart(t *testing.T) {
 	assert.Equal(t, "video/mp4", decoded.ContentType)
 	assert.Equal(t, "abc123def456", decoded.ETag)
 	assert.Equal(t, int64(1700001000), decoded.ModTime)
+	assert.Equal(t, "group-3", decoded.PlacementGroupID)
+	assert.Equal(t, uint8(2), decoded.ECData)
+	assert.Equal(t, uint8(1), decoded.ECParity)
+	assert.Equal(t, []string{"n1", "n2", "n3"}, decoded.NodeIDs)
 }
 
 func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	orig := objectMeta{
-		Key:          "docs/readme.md",
-		Size:         4096,
-		ContentType:  "text/markdown",
-		ETag:         "etag-xyz",
-		LastModified: 1700002000,
+		Key:              "docs/readme.md",
+		Size:             4096,
+		ContentType:      "text/markdown",
+		ETag:             "etag-xyz",
+		LastModified:     1700002000,
+		PlacementGroupID: "group-2",
 	}
 
 	data, err := marshalObjectMeta(orig)
@@ -99,6 +110,7 @@ func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	assert.Equal(t, orig.ContentType, decoded.ContentType)
 	assert.Equal(t, orig.ETag, decoded.ETag)
 	assert.Equal(t, orig.LastModified, decoded.LastModified)
+	assert.Equal(t, orig.PlacementGroupID, decoded.PlacementGroupID)
 }
 
 func TestSnapshotStateCodecRoundTrip(t *testing.T) {
@@ -122,7 +134,8 @@ func TestSnapshotStateCodecRoundTrip(t *testing.T) {
 
 func TestClusterMultipartMetaCodecRoundTrip(t *testing.T) {
 	orig := clusterMultipartMeta{
-		ContentType: "application/octet-stream",
+		ContentType:      "application/octet-stream",
+		PlacementGroupID: "group-5",
 	}
 
 	data, err := marshalClusterMultipartMeta(orig)
@@ -132,6 +145,7 @@ func TestClusterMultipartMetaCodecRoundTrip(t *testing.T) {
 	decoded, err := unmarshalClusterMultipartMeta(data)
 	require.NoError(t, err)
 	assert.Equal(t, "application/octet-stream", decoded.ContentType)
+	assert.Equal(t, "group-5", decoded.PlacementGroupID)
 }
 
 func TestEncodeDecodeCommand_DeleteBucket(t *testing.T) {
@@ -169,6 +183,7 @@ func TestEncodeDecodeCommand_CreateMultipartUpload(t *testing.T) {
 	orig := CreateMultipartUploadCmd{
 		UploadID: "mpu-123", Bucket: "b", Key: "big.bin",
 		ContentType: "application/octet-stream", CreatedAt: 1700000000,
+		PlacementGroupID: "group-4",
 	}
 
 	encoded, err := EncodeCommand(CmdCreateMultipartUpload, orig)
@@ -185,6 +200,7 @@ func TestEncodeDecodeCommand_CreateMultipartUpload(t *testing.T) {
 	assert.Equal(t, "big.bin", decoded.Key)
 	assert.Equal(t, "application/octet-stream", decoded.ContentType)
 	assert.Equal(t, int64(1700000000), decoded.CreatedAt)
+	assert.Equal(t, "group-4", decoded.PlacementGroupID)
 }
 
 func TestEncodeDecodeCommand_AbortMultipart(t *testing.T) {

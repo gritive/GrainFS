@@ -24,12 +24,15 @@ type objectMeta struct {
 	ECData       uint8    // EC k (data shards)
 	ECParity     uint8    // EC m (parity shards)
 	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
+	// PlacementGroupID is the data Raft group that owns this object version.
+	PlacementGroupID string
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
 // as stored in BadgerDB.
 type clusterMultipartMeta struct {
-	ContentType string
+	ContentType      string
+	PlacementGroupID string
 }
 
 // --- helpers ---
@@ -103,6 +106,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	ctOff := b.CreateString(c.ContentType)
 	etagOff := b.CreateString(c.ETag)
 	vidOff := b.CreateString(c.VersionID)
+	pgOff := b.CreateString(c.PlacementGroupID)
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(c.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
@@ -127,6 +131,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.IsDeleteMarker {
 		clusterpb.PutObjectMetaCmdAddIsDeleteMarker(b, true)
 	}
+	clusterpb.PutObjectMetaCmdAddPlacementGroupId(b, pgOff)
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -145,19 +150,20 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		}
 	}
 	return PutObjectMetaCmd{
-		Bucket:         string(t.Bucket()),
-		Key:            string(t.Key()),
-		Size:           t.Size(),
-		ContentType:    string(t.ContentType()),
-		ETag:           string(t.Etag()),
-		ModTime:        t.ModTime(),
-		VersionID:      string(t.VersionId()),
-		RingVersion:    RingVersion(t.RingVersion()),
-		ECData:         t.EcData(),
-		ECParity:       t.EcParity(),
-		NodeIDs:        nodeIDs,
-		PreserveLatest: t.PreserveLatest(),
-		IsDeleteMarker: t.IsDeleteMarker(),
+		Bucket:           string(t.Bucket()),
+		Key:              string(t.Key()),
+		Size:             t.Size(),
+		ContentType:      string(t.ContentType()),
+		ETag:             string(t.Etag()),
+		ModTime:          t.ModTime(),
+		VersionID:        string(t.VersionId()),
+		RingVersion:      RingVersion(t.RingVersion()),
+		ECData:           t.EcData(),
+		ECParity:         t.EcParity(),
+		NodeIDs:          nodeIDs,
+		PlacementGroupID: string(t.PlacementGroupId()),
+		PreserveLatest:   t.PreserveLatest(),
+		IsDeleteMarker:   t.IsDeleteMarker(),
 	}, nil
 }
 
@@ -219,12 +225,14 @@ func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) 
 	bucketOff := b.CreateString(c.Bucket)
 	keyOff := b.CreateString(c.Key)
 	ctOff := b.CreateString(c.ContentType)
+	pgOff := b.CreateString(c.PlacementGroupID)
 	clusterpb.CreateMultipartUploadCmdStart(b)
 	clusterpb.CreateMultipartUploadCmdAddUploadId(b, uidOff)
 	clusterpb.CreateMultipartUploadCmdAddBucket(b, bucketOff)
 	clusterpb.CreateMultipartUploadCmdAddKey(b, keyOff)
 	clusterpb.CreateMultipartUploadCmdAddContentType(b, ctOff)
 	clusterpb.CreateMultipartUploadCmdAddCreatedAt(b, c.CreatedAt)
+	clusterpb.CreateMultipartUploadCmdAddPlacementGroupId(b, pgOff)
 	return fbFinish(b, clusterpb.CreateMultipartUploadCmdEnd(b)), nil
 }
 
@@ -236,11 +244,12 @@ func decodeCreateMultipartUploadCmd(data []byte) (CreateMultipartUploadCmd, erro
 		return CreateMultipartUploadCmd{}, err
 	}
 	return CreateMultipartUploadCmd{
-		UploadID:    string(t.UploadId()),
-		Bucket:      string(t.Bucket()),
-		Key:         string(t.Key()),
-		ContentType: string(t.ContentType()),
-		CreatedAt:   t.CreatedAt(),
+		UploadID:         string(t.UploadId()),
+		Bucket:           string(t.Bucket()),
+		Key:              string(t.Key()),
+		ContentType:      string(t.ContentType()),
+		CreatedAt:        t.CreatedAt(),
+		PlacementGroupID: string(t.PlacementGroupId()),
 	}, nil
 }
 
@@ -252,6 +261,11 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	ctOff := b.CreateString(c.ContentType)
 	etagOff := b.CreateString(c.ETag)
 	vidOff := b.CreateString(c.VersionID)
+	pgOff := b.CreateString(c.PlacementGroupID)
+	var nodeIDsOff flatbuffers.UOffsetT
+	if len(c.NodeIDs) > 0 {
+		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.CompleteMultipartCmdStartNodeIdsVector)
+	}
 	clusterpb.CompleteMultipartCmdStart(b)
 	clusterpb.CompleteMultipartCmdAddBucket(b, bucketOff)
 	clusterpb.CompleteMultipartCmdAddKey(b, keyOff)
@@ -261,6 +275,12 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	clusterpb.CompleteMultipartCmdAddEtag(b, etagOff)
 	clusterpb.CompleteMultipartCmdAddModTime(b, c.ModTime)
 	clusterpb.CompleteMultipartCmdAddVersionId(b, vidOff)
+	clusterpb.CompleteMultipartCmdAddPlacementGroupId(b, pgOff)
+	clusterpb.CompleteMultipartCmdAddEcData(b, c.ECData)
+	clusterpb.CompleteMultipartCmdAddEcParity(b, c.ECParity)
+	if nodeIDsOff != 0 {
+		clusterpb.CompleteMultipartCmdAddNodeIds(b, nodeIDsOff)
+	}
 	return fbFinish(b, clusterpb.CompleteMultipartCmdEnd(b)), nil
 }
 
@@ -271,15 +291,26 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 	if err != nil {
 		return CompleteMultipartCmd{}, err
 	}
+	var nodeIDs []string
+	if n := t.NodeIdsLength(); n > 0 {
+		nodeIDs = make([]string, n)
+		for i := range nodeIDs {
+			nodeIDs[i] = string(t.NodeIds(i))
+		}
+	}
 	return CompleteMultipartCmd{
-		Bucket:      string(t.Bucket()),
-		Key:         string(t.Key()),
-		UploadID:    string(t.UploadId()),
-		Size:        t.Size(),
-		ContentType: string(t.ContentType()),
-		ETag:        string(t.Etag()),
-		ModTime:     t.ModTime(),
-		VersionID:   string(t.VersionId()),
+		Bucket:           string(t.Bucket()),
+		Key:              string(t.Key()),
+		UploadID:         string(t.UploadId()),
+		Size:             t.Size(),
+		ContentType:      string(t.ContentType()),
+		ETag:             string(t.Etag()),
+		ModTime:          t.ModTime(),
+		VersionID:        string(t.VersionId()),
+		PlacementGroupID: string(t.PlacementGroupId()),
+		ECData:           t.EcData(),
+		ECParity:         t.EcParity(),
+		NodeIDs:          nodeIDs,
 	}, nil
 }
 
@@ -374,6 +405,7 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 	etagOff := b.CreateString(m.ETag)
+	pgOff := b.CreateString(m.PlacementGroupID)
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(m.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, m.NodeIDs, clusterpb.ObjectMetaStartNodeIdsVector)
@@ -391,6 +423,7 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	if nodeIDsOff != 0 {
 		clusterpb.ObjectMetaAddNodeIds(b, nodeIDsOff)
 	}
+	clusterpb.ObjectMetaAddPlacementGroupId(b, pgOff)
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -409,16 +442,17 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		}
 	}
 	return objectMeta{
-		Key:          string(t.Key()),
-		Size:         t.Size(),
-		ContentType:  string(t.ContentType()),
-		ETag:         string(t.Etag()),
-		LastModified: t.LastModified(),
-		ACL:          t.Acl(),
-		RingVersion:  t.RingVersion(),
-		ECData:       t.EcData(),
-		ECParity:     t.EcParity(),
-		NodeIDs:      nodeIDs,
+		Key:              string(t.Key()),
+		Size:             t.Size(),
+		ContentType:      string(t.ContentType()),
+		ETag:             string(t.Etag()),
+		LastModified:     t.LastModified(),
+		ACL:              t.Acl(),
+		RingVersion:      t.RingVersion(),
+		ECData:           t.EcData(),
+		ECParity:         t.EcParity(),
+		NodeIDs:          nodeIDs,
+		PlacementGroupID: string(t.PlacementGroupId()),
 	}, nil
 }
 
@@ -491,8 +525,10 @@ func unmarshalSnapshotState(data []byte) (result map[string][]byte, err error) {
 func marshalClusterMultipartMeta(m clusterMultipartMeta) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	ctOff := b.CreateString(m.ContentType)
+	pgOff := b.CreateString(m.PlacementGroupID)
 	clusterpb.MultipartMetaStart(b)
 	clusterpb.MultipartMetaAddContentType(b, ctOff)
+	clusterpb.MultipartMetaAddPlacementGroupId(b, pgOff)
 	return fbFinish(b, clusterpb.MultipartMetaEnd(b)), nil
 }
 
@@ -503,7 +539,10 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 	if err != nil {
 		return clusterMultipartMeta{}, fmt.Errorf("unmarshal MultipartMeta: %w", err)
 	}
-	return clusterMultipartMeta{ContentType: string(t.ContentType())}, nil
+	return clusterMultipartMeta{
+		ContentType:      string(t.ContentType()),
+		PlacementGroupID: string(t.PlacementGroupId()),
+	}, nil
 }
 
 // --- MigrateShard / MigrationDone codec ---

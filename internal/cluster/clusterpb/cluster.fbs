@@ -30,6 +30,7 @@ table PutObjectMetaCmd {
   node_ids:[string];
   preserve_latest:bool = false;
   is_delete_marker:bool = false;
+  placement_group_id:string;
 }
 
 table DeleteObjectCmd {
@@ -60,6 +61,7 @@ table CreateMultipartUploadCmd {
   key:string;
   content_type:string;
   created_at:int64;
+  placement_group_id:string;
 }
 
 table CompleteMultipartCmd {
@@ -71,6 +73,10 @@ table CompleteMultipartCmd {
   etag:string;
   mod_time:int64;
   version_id:string;
+  placement_group_id:string;
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  node_ids:[string];
 }
 
 table AbortMultipartCmd {
@@ -99,6 +105,7 @@ table ObjectMeta {
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
+  placement_group_id:string;
 }
 
 table SetBucketVersioningCmd {
@@ -123,6 +130,7 @@ table SnapshotState {
 
 table MultipartMeta {
   content_type:string;
+  placement_group_id:string;
 }
 
 table NodeStatsMsg {
@@ -227,7 +235,8 @@ enum MetaCmdType : uint8 {
   RotateKeySwitch    = 15,  // 회전 phase 2 → 3 (active 인증서를 NEW로 전환)
   RotateKeyDrop      = 16,  // 회전 phase 3 → steady-on-NEW (OLD 폐기, previous.key grace 시작)
   RotateKeyAbort     = 17,  // phase 2: 롤백, phase 3: forward-roll (D18)
-  ScrubTrigger      = 18    // EC scrub cluster-wide trigger (PR4 — replicates to all nodes' Director.ApplyFromFSM)
+  ScrubTrigger      = 18,   // EC scrub cluster-wide trigger (PR4 — replicates to all nodes' Director.ApplyFromFSM)
+  PutObjectIndex    = 19
 }
 
 table MetaNodeEntry {
@@ -270,6 +279,26 @@ table BucketAssignmentEntry {
 // PR-D: PutBucketAssignment 커맨드
 table MetaPutBucketAssignmentCmd {
   entry:BucketAssignmentEntry;
+}
+
+table MetaObjectIndexEntry {
+  bucket:string;
+  key:string;
+  version_id:string;
+  placement_group_id:string;
+  size:int64;
+  content_type:string;
+  etag:string;
+  mod_time:int64;
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  node_ids:[string];
+  is_delete_marker:bool = false;
+}
+
+table MetaPutObjectIndexCmd {
+  entry:MetaObjectIndexEntry;
+  preserve_latest:bool = false;
 }
 
 // PR-D: 노드별 부하 스냅샷
@@ -391,6 +420,7 @@ table MetaStateSnapshot {
   active_plan:RebalancePlan;                  // PR-D; nil = no active plan
   iceberg_namespaces:[IcebergNamespaceEntry];
   iceberg_tables:[IcebergTableEntry];
+  object_index:[MetaObjectIndexEntry];
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

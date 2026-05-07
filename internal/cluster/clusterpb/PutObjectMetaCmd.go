@@ -182,8 +182,16 @@ func (rcv *PutObjectMetaCmd) MutateIsDeleteMarker(n bool) bool {
 	return rcv._tab.MutateBoolSlot(28, n)
 }
 
+func (rcv *PutObjectMetaCmd) PlacementGroupId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(13)
+	builder.StartObject(14)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -226,6 +234,9 @@ func PutObjectMetaCmdAddPreserveLatest(builder *flatbuffers.Builder, preserveLat
 }
 func PutObjectMetaCmdAddIsDeleteMarker(builder *flatbuffers.Builder, isDeleteMarker bool) {
 	builder.PrependBoolSlot(12, isDeleteMarker, false)
+}
+func PutObjectMetaCmdAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(placementGroupId), 0)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
