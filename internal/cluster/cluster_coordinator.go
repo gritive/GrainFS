@@ -489,6 +489,7 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 	if c.indexWriter == nil {
 		return nil
 	}
+	ecConfig := objectIndexECConfigForGroup(group)
 	entry := ObjectIndexEntry{
 		Bucket:           bucket,
 		Key:              key,
@@ -498,12 +499,16 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 		ContentType:      obj.ContentType,
 		ETag:             obj.ETag,
 		ModTime:          obj.LastModified,
-		ECData:           uint8(c.ecConfig.DataShards),
-		ECParity:         uint8(c.ecConfig.ParityShards),
+		ECData:           uint8(ecConfig.DataShards),
+		ECParity:         uint8(ecConfig.ParityShards),
 		NodeIDs:          cloneStringSlice(group.PeerIDs),
 		IsDeleteMarker:   isDeleteMarker,
 	}
 	return c.indexWriter.ProposeObjectIndex(ctx, entry, false)
+}
+
+func objectIndexECConfigForGroup(group ShardGroupEntry) ECConfig {
+	return AutoECConfigForClusterSize(len(group.PeerIDs))
 }
 
 func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
