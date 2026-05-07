@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.90.0] - 2026-05-08 — Cluster Day-2 Operations CLI (Phase 1)
+
+### Added
+
+- **`grainfs cluster transfer-leader`** — Trigger immediate leadership transfer
+  to another voter (raft picks the best peer by matchIndex). Use before
+  stopping the leader for graceful node maintenance. `--wait` polls status
+  until the new leader is confirmed.
+- **`grainfs cluster drain <id>`** — Composite: transfer-leader (if target is
+  the leader) + remove-peer. Progressive feedback on partial failures (A2-a):
+  transfer fail leaves the voter set unchanged; transfer-ok-but-remove-fail
+  prints next-step guidance. Self-drain is supported (admin socket may close
+  after removal — explicit `--yes` required for leader drain).
+- **`grainfs cluster health`** — Aggregated health view: quorum verdict,
+  per-peer state, and a server-side derived `issues[]` list (single source
+  of truth — same rules the dashboard renders).
+- **`grainfs cluster placement [bucket]`** — Human-readable shard groups +
+  bucket assignments. Reuses existing `cluster status` data; no new server
+  route. Optional bucket arg filters to a single row.
+- **`grainfs cluster balancer status`** — Per-node disk/load stats from the
+  balancer. Mirror of the existing dashboard `/api/cluster/balancer/status`
+  on the admin UDS, exposed under `cluster balancer` subgroup.
+- `internal/server/cluster_health.go` — `Health/QuorumInfo/PeerHealthRow`
+  types + `deriveHealth/deriveIssues` (5 rules, table-driven).
+- `internal/clusteradmin.{TransferLeader,Health,BalancerStatus}` methods +
+  `TransferLeaderError` typed error following `RemovePeerError` pattern.
+
+### Notes
+
+- **Scope: metaRaft only.** Per-data-group leader transfer/drain (multi-raft
+  scope), target-aware transfer, persistent drain state, and balancer trigger
+  CLI are deferred to a follow-up spec — see `TODOS.md` "Cluster Day-2
+  Operations".
+- No breaking changes. v0.0.89.0's command surface is preserved.
+
 ## [0.0.89.0] - 2026-05-07 — cluster CLI uses admin UDS, output unified
 
 ### BREAKING CHANGES
