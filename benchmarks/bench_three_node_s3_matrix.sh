@@ -35,6 +35,15 @@ if [[ "$NODE_COUNT" != "3" ]]; then
   exit 1
 fi
 
+cleanup_matrix() {
+  if [[ "${KEEP_BENCH_ARTIFACTS:-0}" != "1" ]]; then
+    rm -rf "$BENCH_BASE_DIR"
+  else
+    echo "[matrix] bench data dir saved to $BENCH_BASE_DIR"
+  fi
+}
+trap cleanup_matrix EXIT
+
 mkdir -p "$PROFILE_ROOT"
 
 matrix_summary="$PROFILE_ROOT/matrix-summary.md"
