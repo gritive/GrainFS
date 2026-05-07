@@ -184,15 +184,16 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		etag = deleteMarkerETag
 	}
 	meta, err := marshalObjectMeta(objectMeta{
-		Key:          c.Key,
-		Size:         c.Size,
-		ContentType:  c.ContentType,
-		ETag:         etag,
-		LastModified: c.ModTime,
-		RingVersion:  uint64(c.RingVersion),
-		ECData:       c.ECData,
-		ECParity:     c.ECParity,
-		NodeIDs:      c.NodeIDs,
+		Key:              c.Key,
+		Size:             c.Size,
+		ContentType:      c.ContentType,
+		ETag:             etag,
+		LastModified:     c.ModTime,
+		RingVersion:      uint64(c.RingVersion),
+		ECData:           c.ECData,
+		ECParity:         c.ECParity,
+		NodeIDs:          c.NodeIDs,
+		PlacementGroupID: c.PlacementGroupID,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
@@ -417,7 +418,8 @@ func (f *FSM) applyCreateMultipartUpload(data []byte) error {
 		return err
 	}
 	meta, err := marshalClusterMultipartMeta(clusterMultipartMeta{
-		ContentType: c.ContentType,
+		ContentType:      c.ContentType,
+		PlacementGroupID: c.PlacementGroupID,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal multipart meta: %w", err)
@@ -433,11 +435,15 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 		return err
 	}
 	objMeta, err := marshalObjectMeta(objectMeta{
-		Key:          c.Key,
-		Size:         c.Size,
-		ContentType:  c.ContentType,
-		ETag:         c.ETag,
-		LastModified: c.ModTime,
+		Key:              c.Key,
+		Size:             c.Size,
+		ContentType:      c.ContentType,
+		ETag:             c.ETag,
+		LastModified:     c.ModTime,
+		ECData:           c.ECData,
+		ECParity:         c.ECParity,
+		NodeIDs:          c.NodeIDs,
+		PlacementGroupID: c.PlacementGroupID,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)

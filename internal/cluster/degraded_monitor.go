@@ -140,18 +140,15 @@ func (m *DegradedMonitor) check() {
 
 	liveCount := m.countLiveNodes()
 
-	// Degraded when the cluster can no longer form an EC stripe:
-	//   • fewer than MinECNodes live → EffectiveConfig returns zero-value
-	//   • fewer than the effective DataShards needed for the current size
-	degraded := liveCount < MinECNodes
-	if !degraded {
-		threshold := EffectiveConfig(liveCount, m.backend.ecConfig).DataShards
-		degraded = liveCount < threshold
-	}
+	// Degraded when the cluster can no longer place the configured EC stripe.
+	// For the 1+0 single-node profile this threshold is 1: it has no redundancy,
+	// but it still uses the EC object pipeline.
+	minRequired := m.backend.ecConfig.NumShards()
+	degraded := liveCount < minRequired
 
 	if degraded {
 		m.tracker.Report(true, "ec_insufficient_nodes",
-			fmt.Sprintf("live=%d min_required=%d", liveCount, MinECNodes))
+			fmt.Sprintf("live=%d min_required=%d", liveCount, minRequired))
 	} else {
 		m.tracker.Report(false, "", "")
 	}

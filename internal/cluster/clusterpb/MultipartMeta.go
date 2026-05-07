@@ -49,11 +49,22 @@ func (rcv *MultipartMeta) ContentType() []byte {
 	return nil
 }
 
+func (rcv *MultipartMeta) PlacementGroupId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func MultipartMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(1)
+	builder.StartObject(2)
 }
 func MultipartMetaAddContentType(builder *flatbuffers.Builder, contentType flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(contentType), 0)
+}
+func MultipartMetaAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(placementGroupId), 0)
 }
 func MultipartMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

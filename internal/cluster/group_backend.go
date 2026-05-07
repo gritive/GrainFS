@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 
@@ -9,6 +11,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // GroupBackend is the per-group data plane: BadgerDB + raft.Node + ShardService
@@ -86,7 +89,7 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 	if cfg.ShardSvc != nil {
 		dist.SetShardService(cfg.ShardSvc, cfg.PeerIDs)
 	}
-	// EC config is per-group; activates only when len(PeerIDs) >= MinECNodes.
+	// EC config is per-group; invalid profiles fail fast against the group's peers.
 	dist.SetECConfig(cfg.EC)
 	// Bucket existence is trusted from the router; per-group DB has no bucket keys.
 	dist.bypassBucketCheck = true
@@ -101,6 +104,32 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 
 // ID returns the group ID.
 func (g *GroupBackend) ID() string { return g.groupID }
+
+func (g *GroupBackend) placementContext(ctx context.Context) context.Context {
+	if _, ok := PlacementGroupFromContext(ctx); ok {
+		return ctx
+	}
+	if g.shardSvc == nil {
+		return ctx
+	}
+	return ContextWithPlacementGroup(ctx, g.groupID)
+}
+
+func (g *GroupBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	return g.DistributedBackend.PutObject(g.placementContext(ctx), bucket, key, r, contentType)
+}
+
+func (g *GroupBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
+	return g.DistributedBackend.CreateMultipartUpload(g.placementContext(ctx), bucket, key, contentType)
+}
+
+func (g *GroupBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+	return g.DistributedBackend.UploadPart(g.placementContext(ctx), bucket, key, uploadID, partNumber, r)
+}
+
+func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	return g.DistributedBackend.CompleteMultipartUpload(g.placementContext(ctx), bucket, key, uploadID, parts)
+}
 
 // RaftNode returns the underlying raft.Node — used by DataGroupPlanExecutor for
 // AddVoter/RemoveVoter membership operations.

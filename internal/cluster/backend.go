@@ -179,13 +179,6 @@ type DistributedBackend struct {
 	// invariant 5), so the per-group DB need not duplicate the META-DB check.
 	bypassBucketCheck bool
 
-	// vfsFixedVersion controls VFS-internal-bucket behavior:
-	// true (default) → PutObject for "__grainfs_vfs_*" uses fixed versionID
-	//   "current" so on-disk usage stays bounded to one copy per key.
-	// false → legacy behavior (fresh ULID per PUT). Operators can flip via
-	//   --backend-vfs-fixed-version=false to roll back without rebuild.
-	vfsFixedVersion atomic.Bool
-
 	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
 	internalDirCache  sync.Map // map[string]struct{}
 	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
@@ -225,19 +218,7 @@ func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*Distri
 		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
 	}
-	b.vfsFixedVersion.Store(true) // default on; toggle via --backend-vfs-fixed-version=false
 	return b, nil
-}
-
-// SetVFSFixedVersionEnabled toggles the fixed-versionID behavior for
-// __grainfs_vfs_* buckets. See vfsFixedVersion field comment.
-func (b *DistributedBackend) SetVFSFixedVersionEnabled(on bool) {
-	b.vfsFixedVersion.Store(on)
-}
-
-// VFSFixedVersionEnabled reports the current toggle state.
-func (b *DistributedBackend) VFSFixedVersionEnabled() bool {
-	return b.vfsFixedVersion.Load()
 }
 
 // SetShardCache configures the EC shard cache. Pass a cache built with
@@ -267,8 +248,8 @@ func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShar
 }
 
 // SetECConfig configures erasure-coding shard parameters (k, m) for
-// PutObject/GetObject. Phase 18. Call before serving traffic. EC activates
-// whenever the cluster has at least MinECNodes nodes.
+// PutObject/GetObject. Call before serving traffic. The configured profile must
+// fit the active write node set; invalid profiles make EC writes fail fast.
 func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 	b.ecConfig = cfg
 }
@@ -924,24 +905,14 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	}
 	defer sp.Cleanup()
 
-	// VFS internal buckets ("__grainfs_vfs_*") are owned exclusively by the
-	// VFS layer; multi-versioning has no meaning there and accumulates disk
-	// usage proportional to NFS WRITE RPC count (see docs/superpowers/specs/
-	// 2026-04-28-vfs-write-amp-design.md). Use a fixed versionID so the on-
-	// disk path is overwritten in place. EC is also disabled for these
-	// buckets: a fixed versionID combined with EC's RingVersion-keyed shard
-	// placement would leak stale shards on ring topology changes.
 	versionID := newVersionID()
-	useEC := b.ecConfig.IsActive(len(b.ecWriteNodes())) && b.shardSvc != nil
-	if storage.IsInternalBucket(bucket) && b.vfsFixedVersion.Load() {
-		versionID = "current"
-		useEC = false
+	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
+		if _, ok := PlacementGroupFromContext(ctx); !ok && b.shardSvc == nil {
+			return b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, contentType)
+		}
+		return nil, fmt.Errorf("put object: EC storage is required")
 	}
-
-	if useEC {
-		return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
-	}
-	return b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, contentType)
+	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
 }
 
 // clusterTraceEnabled activates per-stage putObjectNx latency logging.
@@ -1047,24 +1018,22 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 		}
 	}()
 	versionID := newVersionID()
-	useEC := b.ecConfig.IsActive(len(b.ecWriteNodes())) && b.shardSvc != nil
-	if storage.IsVFSBucket(bucket) && b.vfsFixedVersion.Load() {
-		versionID = "current"
-		useEC = false
+	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
+		if _, ok := PlacementGroupFromContext(ctx); !ok && b.shardSvc == nil {
+			obj, commit, err := b.putObjectNxSpooledAsync(ctx, bucket, key, versionID, sp, contentType)
+			if err != nil {
+				return nil, nil, err
+			}
+			cleanup = false
+			return obj, func() error {
+				defer sp.Cleanup()
+				return commit()
+			}, nil
+		}
+		return nil, nil, fmt.Errorf("put object async: EC storage is required")
 	}
-	if useEC {
-		obj, err := b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
-		return obj, func() error { return nil }, err
-	}
-	obj, commit, err := b.putObjectNxSpooledAsync(ctx, bucket, key, versionID, sp, contentType)
-	if err != nil {
-		return nil, nil, err
-	}
-	cleanup = false
-	return obj, func() error {
-		defer sp.Cleanup()
-		return commit()
-	}, nil
+	obj, err := b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
+	return obj, func() error { return nil }, err
 }
 
 func (b *DistributedBackend) putObjectNxSpooledAsync(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, func() error, error) {
@@ -1511,8 +1480,21 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
+	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	if !ok {
+		if b.bypassBucketCheck {
+			return nil, fmt.Errorf("putObjectEC: missing placement_group_id")
+		}
+		placementGroupID = "group-0"
+	}
 	liveNodes := b.ecWriteNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
+		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
+	}
+	if effectiveCfg.NumShards() == 0 {
+		return nil, fmt.Errorf("putObjectEC: EC profile cannot place on %d nodes", len(liveNodes))
+	}
 
 	shardKey := key + "/" + versionID
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
@@ -1581,17 +1563,18 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 
 	now := time.Now().Unix()
 	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      bucket,
-		Key:         key,
-		Size:        sp.Size,
-		ContentType: contentType,
-		ETag:        sp.ETag,
-		ModTime:     now,
-		VersionID:   versionID,
-		RingVersion: ringVer,
-		ECData:      uint8(effectiveCfg.DataShards),
-		ECParity:    uint8(effectiveCfg.ParityShards),
-		NodeIDs:     placement,
+		Bucket:           bucket,
+		Key:              key,
+		Size:             sp.Size,
+		ContentType:      contentType,
+		ETag:             sp.ETag,
+		ModTime:          now,
+		VersionID:        versionID,
+		PlacementGroupID: placementGroupID,
+		RingVersion:      ringVer,
+		ECData:           uint8(effectiveCfg.DataShards),
+		ECParity:         uint8(effectiveCfg.ParityShards),
+		NodeIDs:          placement,
 	}); merr != nil {
 		go b.deleteShardsAsync(bucket, placement, shardKey)
 		return nil, merr
@@ -3006,13 +2989,18 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 	}
 
 	now := time.Now().Unix()
+	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	if !ok && b.shardSvc != nil {
+		return nil, fmt.Errorf("create multipart: missing placement_group_id")
+	}
 
 	err := b.propose(ctx, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID:    uploadID,
-		Bucket:      bucket,
-		Key:         key,
-		ContentType: contentType,
-		CreatedAt:   now,
+		UploadID:         uploadID,
+		Bucket:           bucket,
+		Key:              key,
+		ContentType:      contentType,
+		CreatedAt:        now,
+		PlacementGroupID: placementGroupID,
 	})
 	if err != nil {
 		os.RemoveAll(b.partDir(uploadID))
@@ -3087,73 +3075,69 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	if err != nil {
 		return nil, err
 	}
+	if meta.PlacementGroupID != "" {
+		ctx = ContextWithPlacementGroup(ctx, meta.PlacementGroupID)
+	}
 
-	// Sort parts and assemble locally
+	// Sort parts and assemble into a spooled object before the mandatory EC write.
 	sort.Slice(parts, func(i, j int) bool {
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
 
 	versionID := newVersionID()
-	objPath := b.objectPathV(bucket, key, versionID)
-	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create object dir: %w", err)
+	if err := os.MkdirAll(b.spoolDir(), 0o755); err != nil {
+		return nil, fmt.Errorf("create spool dir: %w", err)
 	}
-
-	out, err := os.Create(objPath)
+	out, err := os.CreateTemp(b.spoolDir(), ".multipart-spool-*")
 	if err != nil {
-		return nil, fmt.Errorf("create final object: %w", err)
+		return nil, fmt.Errorf("create multipart spool: %w", err)
 	}
+	sp := &spooledObject{Path: out.Name()}
+	defer sp.Cleanup()
 
 	h := md5.New()
 	mw := io.MultiWriter(out, h)
-	var totalSize int64
 
 	for _, p := range parts {
 		partFile := b.partPath(uploadID, p.PartNumber)
 		f, err := os.Open(partFile)
 		if err != nil {
 			out.Close()
-			os.Remove(objPath)
 			return nil, fmt.Errorf("open part %d: %w", p.PartNumber, err)
 		}
 		n, err := io.Copy(mw, f)
 		f.Close()
 		if err != nil {
 			out.Close()
-			os.Remove(objPath)
 			return nil, fmt.Errorf("copy part %d: %w", p.PartNumber, err)
 		}
-		totalSize += n
+		sp.Size += n
 	}
-	out.Close()
+	if err := out.Close(); err != nil {
+		return nil, err
+	}
+	sp.ETag = hex.EncodeToString(h.Sum(nil))
 
-	etag := hex.EncodeToString(h.Sum(nil))
-	now := time.Now().Unix()
-
-	err = b.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket:      bucket,
-		Key:         key,
-		UploadID:    uploadID,
-		Size:        totalSize,
-		ContentType: meta.ContentType,
-		ETag:        etag,
-		ModTime:     now,
-		VersionID:   versionID,
-	})
+	var obj *storage.Object
+	if b.ecConfig.NumShards() > 0 && b.shardSvc != nil {
+		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
+	} else if _, ok := PlacementGroupFromContext(ctx); !ok && b.shardSvc == nil {
+		obj, err = b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
+	} else {
+		err = fmt.Errorf("complete multipart: EC storage is required")
+	}
 	if err != nil {
 		return nil, err
 	}
-
+	if err := b.propose(ctx, CmdAbortMultipart, AbortMultipartCmd{
+		Bucket:   bucket,
+		Key:      key,
+		UploadID: uploadID,
+	}); err != nil {
+		return nil, err
+	}
 	os.RemoveAll(b.partDir(uploadID))
-
-	return &storage.Object{
-		Key:          key,
-		Size:         totalSize,
-		ContentType:  meta.ContentType,
-		ETag:         etag,
-		LastModified: now,
-		VersionID:    versionID,
-	}, nil
+	return obj, nil
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

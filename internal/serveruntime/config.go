@@ -54,7 +54,7 @@ type Config struct {
 	ShardCacheSize int64
 	ECData         int
 	ECParity       int
-	VFSFixed       bool
+	ECExplicit     bool
 	PackThreshold  int
 
 	// Balancer

@@ -266,6 +266,132 @@ func TestMetaFSM_Apply_PutBucketAssignment_Overwrite(t *testing.T) {
 	assert.Equal(t, "group-1", assignments["photos"])
 }
 
+func makePutObjectIndexCmd(t *testing.T, entry ObjectIndexEntry, preserveLatest bool) []byte {
+	t.Helper()
+	data, err := encodeMetaPutObjectIndexCmd(entry, preserveLatest)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypePutObjectIndex, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func makeDeleteObjectIndexCmd(t *testing.T, bucket, key, versionID string) []byte {
+	t.Helper()
+	data, err := encodeMetaDeleteObjectIndexCmd(bucket, key, versionID)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeDeleteObjectIndex, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+func TestMetaFSM_ObjectIndexPutLatestAndVersion(t *testing.T) {
+	f := NewMetaFSM()
+	entry := ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v1",
+		PlacementGroupID: "group-2",
+		Size:             5,
+		ETag:             "etag",
+		ECData:           1,
+		ECParity:         0,
+		NodeIDs:          []string{"n1"},
+	}
+	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, entry, false)))
+
+	latest, ok := f.ObjectIndexLatest("b", "k")
+	require.True(t, ok)
+	require.Equal(t, "group-2", latest.PlacementGroupID)
+	require.Equal(t, []string{"n1"}, latest.NodeIDs)
+
+	ver, ok := f.ObjectIndexVersion("b", "k", "v1")
+	require.True(t, ok)
+	require.Equal(t, latest, ver)
+}
+
+func TestMetaFSM_ObjectIndexRejectsEmptyPlacementGroupID(t *testing.T) {
+	f := NewMetaFSM()
+	entry := ObjectIndexEntry{Bucket: "b", Key: "k", VersionID: "v1"}
+	err := f.applyCmd(makePutObjectIndexCmd(t, entry, false))
+	require.ErrorContains(t, err, "empty placement_group_id")
+}
+
+func TestMetaFSM_ObjectIndexDeleteMarkerLatest(t *testing.T) {
+	f := NewMetaFSM()
+	entry := ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "del1",
+		PlacementGroupID: "group-2",
+		IsDeleteMarker:   true,
+	}
+	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, entry, false)))
+	latest, ok := f.ObjectIndexLatest("b", "k")
+	require.True(t, ok)
+	require.True(t, latest.IsDeleteMarker)
+}
+
+func TestMetaFSM_ObjectIndexPreserveLatest(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "group-1",
+	}, false)))
+	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v0", PlacementGroupID: "group-2",
+	}, true)))
+
+	latest, ok := f.ObjectIndexLatest("b", "k")
+	require.True(t, ok)
+	require.Equal(t, "v1", latest.VersionID)
+
+	older, ok := f.ObjectIndexVersion("b", "k", "v0")
+	require.True(t, ok)
+	require.Equal(t, "group-2", older.PlacementGroupID)
+}
+
+func TestMetaFSM_ObjectIndexDeleteVersionRecomputesLatest(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "group-1", ModTime: 10,
+	}, false)))
+	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v2", PlacementGroupID: "group-2", ModTime: 20,
+	}, false)))
+
+	require.NoError(t, f.applyCmd(makeDeleteObjectIndexCmd(t, "b", "k", "v2")))
+
+	_, ok := f.ObjectIndexVersion("b", "k", "v2")
+	require.False(t, ok)
+	latest, ok := f.ObjectIndexLatest("b", "k")
+	require.True(t, ok)
+	require.Equal(t, "v1", latest.VersionID)
+
+	require.NoError(t, f.applyCmd(makeDeleteObjectIndexCmd(t, "b", "k", "v1")))
+	_, ok = f.ObjectIndexLatest("b", "k")
+	require.False(t, ok)
+}
+
+func TestMetaFSM_ObjectIndexSnapshotRestore(t *testing.T) {
+	f := NewMetaFSM()
+	entry := ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v1",
+		PlacementGroupID: "group-2",
+		Size:             5,
+		ContentType:      "text/plain",
+		ETag:             "etag",
+		ModTime:          123,
+		ECData:           2,
+		ECParity:         1,
+		NodeIDs:          []string{"n1", "n2", "n3"},
+	}
+	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, entry, false)))
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(snap))
+
+	latest, ok := f2.ObjectIndexLatest("b", "k")
+	require.True(t, ok)
+	require.Equal(t, entry, latest)
+}
+
 func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0")))

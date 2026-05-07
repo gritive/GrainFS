@@ -292,6 +292,29 @@ func (f *fakeBucketAssignmentSource) BucketAssignments() map[string]string {
 	return out
 }
 
+type noopObjectIndexProposer struct{}
+
+func (noopObjectIndexProposer) ProposeObjectIndex(context.Context, ObjectIndexEntry, bool) error {
+	return nil
+}
+
+func (noopObjectIndexProposer) ProposeDeleteObjectIndex(context.Context, string, string, string) error {
+	return nil
+}
+
+type recordingObjectIndexProposer struct {
+	deleted []string
+}
+
+func (r *recordingObjectIndexProposer) ProposeObjectIndex(context.Context, ObjectIndexEntry, bool) error {
+	return nil
+}
+
+func (r *recordingObjectIndexProposer) ProposeDeleteObjectIndex(_ context.Context, bucket, key, versionID string) error {
+	r.deleted = append(r.deleted, bucket+"/"+key+"/"+versionID)
+	return nil
+}
+
 func TestClusterCoordinator_ListBuckets_MergesMetaAssignments(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"local"}}
 	meta := &fakeBucketAssignmentSource{
@@ -317,6 +340,106 @@ func TestClusterCoordinator_HeadBucket_UsesMetaAssignmentWhenBaseIsEmpty(t *test
 
 	require.NoError(t, c.HeadBucket(context.Background(), "default"))
 	require.Equal(t, []string{"HeadBucket:default"}, base.calls)
+}
+
+func TestClusterCoordinator_ListObjects_UsesObjectIndexAcrossPlacementGroups(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb1 := newTestGroupBackend(t, "group-1")
+	gb2 := newTestGroupBackend(t, "group-2")
+	a, err := gb1.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("a"), "text/plain")
+	require.NoError(t, err)
+	b, err := gb2.PutObject(context.Background(), "photos", "b.txt", strings.NewReader("bb"), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb1))
+	mgr.Add(NewDataGroupWithBackend("group-2", []string{"test-node"}, gb2))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-2", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket: "photos", Key: "a.txt", VersionID: a.VersionID,
+		PlacementGroupID: "group-1", Size: a.Size, ContentType: a.ContentType,
+		ETag: a.ETag, ModTime: a.LastModified,
+	}, false)))
+	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket: "photos", Key: "b.txt", VersionID: b.VersionID,
+		PlacementGroupID: "group-2", Size: b.Size, ContentType: b.ContentType,
+		ETag: b.ETag, ModTime: b.LastModified,
+	}, false)))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	objs, err := c.ListObjects(context.Background(), "photos", "", 100)
+	require.NoError(t, err)
+	require.Equal(t, []string{"a.txt", "b.txt"}, []string{objs[0].Key, objs[1].Key})
+
+	var walked []string
+	require.NoError(t, c.WalkObjects(context.Background(), "photos", "", func(obj *storage.Object) error {
+		walked = append(walked, obj.Key)
+		return nil
+	}))
+	require.Equal(t, []string{"a.txt", "b.txt"}, walked)
+
+	versions, err := c.ListObjectVersions("photos", "", 100)
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	require.Equal(t, []string{"a.txt", "b.txt"}, []string{versions[0].Key, versions[1].Key})
+}
+
+func TestClusterCoordinator_DeleteObjectVersion_RemovesObjectIndex(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb := newTestGroupBackend(t, "group-1")
+	obj, err := gb.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("a"), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket: "photos", Key: "a.txt", VersionID: obj.VersionID,
+		PlacementGroupID: "group-1", Size: obj.Size, ContentType: obj.ContentType,
+		ETag: obj.ETag, ModTime: obj.LastModified,
+	}, false)))
+	proposer := &recordingObjectIndexProposer{}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithObjectIndexProposer(proposer)
+
+	require.NoError(t, c.DeleteObjectVersion("photos", "a.txt", obj.VersionID))
+	require.Equal(t, []string{"photos/a.txt/" + obj.VersionID}, proposer.deleted)
+}
+
+func TestClusterCoordinator_FindObjectIndexOrphans_ScansGroupLocalObjects(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "photos"))
+	obj, err := gb.PutObject(context.Background(), "photos", "orphan.txt", strings.NewReader("body"), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	issues, err := c.FindObjectIndexOrphans(context.Background())
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	require.Equal(t, ObjectIndexIssueOrphan, issues[0].Kind)
+	require.Equal(t, "photos", issues[0].Bucket)
+	require.Equal(t, "orphan.txt", issues[0].Key)
+	require.Equal(t, obj.VersionID, issues[0].VersionID)
 }
 
 func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) {
@@ -529,6 +652,23 @@ func TestClusterCoordinator_RouteBucket_ResolvesNodeIDPeersToAddresses(t *testin
 	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithNodeAddressResolver(meta)
 	target, err := c.routeBucket("photos")
 	require.NoError(t, err)
+	require.Equal(t, []string{"10.0.0.1:7001", "10.0.0.2:7001", "10.0.0.3:7001"}, target.peers)
+	require.True(t, target.selfIsVoter)
+}
+
+func TestClusterCoordinator_RouteGroup_ResolvesNodeIDPeersToAddresses(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-b", "10.0.0.2:7001", 0)))
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "self", "10.0.0.3:7001", 0)))
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-2", []string{"node-a", "self", "node-b"})))
+
+	c := NewClusterCoordinator(base, mgr, nil, meta, "self").WithNodeAddressResolver(meta)
+	target, err := c.routeGroup("group-2")
+	require.NoError(t, err)
+	require.Equal(t, "group-2", target.groupID)
 	require.Equal(t, []string{"10.0.0.1:7001", "10.0.0.2:7001", "10.0.0.3:7001"}, target.peers)
 	require.True(t, target.selfIsVoter)
 }

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"math"
 	"path/filepath"
 	"sync"
 
@@ -26,9 +25,6 @@ const (
 	// maxECPooledReadObjectSize caps the all-data-present read prefetch path so
 	// large object GETs keep the previous streaming memory profile.
 	maxECPooledReadObjectSize = 128 << 20
-	// MinECNodes is the minimum cluster size at which EC activates.
-	// Clusters of 1–2 nodes use N× replication; 3+ always use proportional EC.
-	MinECNodes = 3
 )
 
 // ECConfig controls cluster erasure coding behavior.
@@ -42,28 +38,48 @@ type ECConfig struct {
 // NumShards returns k+m.
 func (c ECConfig) NumShards() int { return c.DataShards + c.ParityShards }
 
-// IsActive returns true iff the cluster has at least MinECNodes nodes.
-// 1–2 node clusters use N× replication; 3+ always activate proportional EC.
+// IsActive returns true when cfg can place every shard on the supplied node set.
+// A 1+0 profile is active on one node: it uses the EC pipeline without
+// redundancy, which keeps cluster object storage on one code path.
 func (c ECConfig) IsActive(clusterSize int) bool {
-	return c.DataShards > 0 && c.ParityShards > 0 && clusterSize >= MinECNodes
+	return c.DataShards > 0 && c.ParityShards >= 0 && c.NumShards() > 0 && clusterSize >= c.NumShards()
 }
 
-// EffectiveConfig returns the ECConfig that should be used for a cluster of n nodes,
-// proportionally scaling k and m from the target config. For n < MinECNodes it returns
-// a zero-value config. For n >= target.NumShards() it returns target as-is.
-// Formula: m_eff = max(1, round(n × m_target / (k_target+m_target))), k_eff = n - m_eff.
+// AutoECConfigForClusterSize returns the zero-config EC profile for a cluster
+// size. Explicit operator-supplied profiles do not use this helper; they are
+// validated with IsActive and fail fast when too wide for the current group.
+func AutoECConfigForClusterSize(nodes int) ECConfig {
+	switch {
+	case nodes <= 0:
+		return ECConfig{}
+	case nodes == 1:
+		return ECConfig{DataShards: 1, ParityShards: 0}
+	case nodes == 2:
+		return ECConfig{DataShards: 1, ParityShards: 1}
+	case nodes == 3:
+		return ECConfig{DataShards: 2, ParityShards: 1}
+	case nodes == 4:
+		return ECConfig{DataShards: 2, ParityShards: 2}
+	case nodes == 5:
+		return ECConfig{DataShards: 3, ParityShards: 2}
+	default:
+		return ECConfig{DataShards: DefaultDataShards, ParityShards: DefaultParityShards}
+	}
+}
+
+func (c ECConfig) Redundant() bool {
+	return c.ParityShards > 0
+}
+
+// EffectiveConfig returns the ECConfig that should be used for a cluster of n
+// nodes. It now treats target as an already-selected profile: explicit profiles
+// fail when too wide, while auto-selected profiles are produced by
+// AutoECConfigForClusterSize before SetECConfig.
 func EffectiveConfig(n int, target ECConfig) ECConfig {
-	if n < MinECNodes {
+	if !target.IsActive(n) {
 		return ECConfig{}
 	}
-	if n >= target.NumShards() {
-		return target
-	}
-	mEff := int(math.Round(float64(n) * float64(target.ParityShards) / float64(target.NumShards())))
-	if mEff < 1 {
-		mEff = 1
-	}
-	return ECConfig{DataShards: n - mEff, ParityShards: mEff}
+	return target
 }
 
 // Placement returns the node index (into the ordered node slice) that holds

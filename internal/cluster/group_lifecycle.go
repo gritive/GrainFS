@@ -131,6 +131,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if cfg.HeartbeatTimeout > 0 {
 		rcfg.HeartbeatTimeout = cfg.HeartbeatTimeout
 	}
+	rcfg.ElectionPriorityKey = entry.ID
 
 	logStore := cfg.LogStore
 	if logStore == nil {
