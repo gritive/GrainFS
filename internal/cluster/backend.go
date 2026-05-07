@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -38,10 +39,12 @@ import (
 // QUIC shard streams before the metadata propose completes.
 const shardRPCTimeout = 2 * time.Minute
 
+const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
+
 const (
 	ecShardWriteAttempts = 3
 	ecShardWriteBackoff  = 250 * time.Millisecond
-	ecShardBufferedLimit = 8 * 1024 * 1024
+	ecShardBufferedLimit = 256 * 1024
 
 	// N×replication peer fan-out retry. Tighter than EC because the payload
 	// path is a simple stream copy (no Reed-Solomon reconstruction) and the
@@ -579,7 +582,11 @@ func (b *DistributedBackend) forwardReadIndex(ctx context.Context, leaderAddr st
 	idx := binary.BigEndian.Uint64(resp.Payload[0:8])
 	errLen := binary.BigEndian.Uint32(resp.Payload[8:12])
 	if errLen > 0 && len(resp.Payload) >= 12+int(errLen) {
-		return 0, fmt.Errorf("forwardReadIndex: leader: %s", string(resp.Payload[12:12+int(errLen)]))
+		msg := string(resp.Payload[12 : 12+int(errLen)])
+		if msg == raft.ErrNotLeader.Error() {
+			return 0, raft.ErrNotLeader
+		}
+		return 0, fmt.Errorf("forwardReadIndex: leader: %s", msg)
 	}
 	return idx, nil
 }
@@ -612,27 +619,42 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 // On the leader it confirms leadership via heartbeat quorum.
 // On a follower it forwards to the leader via StreamReadIndex QUIC RPC.
 func (b *DistributedBackend) ReadIndex(ctx context.Context) (uint64, error) {
-	idx, err := b.node.ReadIndex(ctx)
-	if err == nil {
-		return idx, nil
-	}
-	if !errors.Is(err, raft.ErrNotLeader) {
-		return 0, err
-	}
-	// follower: forward to leader
-	peers := b.node.Peers()
-	if len(peers) == 0 {
-		return 0, raft.ErrNotLeader
-	}
 	var lastErr error
-	for _, peer := range peers {
-		var ci uint64
-		ci, lastErr = b.forwardReadIndex(ctx, peer)
-		if lastErr == nil {
-			return ci, nil
+	for {
+		idx, err := b.node.ReadIndex(ctx)
+		if err == nil {
+			return idx, nil
+		}
+		if !errors.Is(err, raft.ErrNotLeader) {
+			return 0, err
+		}
+
+		peers := b.node.Peers()
+		if len(peers) == 0 {
+			return 0, raft.ErrNotLeader
+		}
+		lastErr = err
+		for _, peer := range peers {
+			var ci uint64
+			ci, lastErr = b.forwardReadIndex(ctx, peer)
+			if lastErr == nil {
+				return ci, nil
+			}
+			if !errors.Is(lastErr, raft.ErrNotLeader) {
+				return 0, lastErr
+			}
+		}
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastErr != nil {
+				return 0, lastErr
+			}
+			return 0, ctx.Err()
+		case <-timer.C:
 		}
 	}
-	return 0, lastErr
 }
 
 // WaitApplied blocks until the node's FSM has applied at least index or ctx is done.
@@ -890,22 +912,36 @@ func (b *DistributedBackend) ListBuckets(ctx context.Context) ([]string, error) 
 // --- Object operations ---
 
 func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	stageStart := time.Now()
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
+	observePutStage("distributed", "head_bucket", stageStart)
+
+	stageStart = time.Now()
 	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, ""); qerr != nil {
 		return nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
 		return nil, objectQuarantinedError(bucket, key, q)
 	}
+	observePutStage("distributed", "quarantine_check", stageStart)
 
+	versionID := newVersionID()
+	if b.ecConfig.NumShards() != 0 && b.shardSvc != nil {
+		obj, handled, err := b.tryPutObjectSingleLocalShardInMemory(ctx, bucket, key, versionID, r, contentType)
+		if handled || err != nil {
+			return obj, err
+		}
+	}
+
+	stageStart = time.Now()
 	sp, err := spoolObject(ctx, b.spoolDir(), r, shouldHashBucket(bucket))
 	if err != nil {
 		return nil, err
 	}
+	observePutStage("distributed", "spool_object", stageStart)
 	defer sp.Cleanup()
 
-	versionID := newVersionID()
 	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
 		if _, ok := PlacementGroupFromContext(ctx); !ok && b.shardSvc == nil {
 			return b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, contentType)
@@ -913,6 +949,82 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 		return nil, fmt.Errorf("put object: EC storage is required")
 	}
 	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
+}
+
+func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
+	ctx context.Context,
+	bucket, key, versionID string,
+	r io.Reader,
+	contentType string,
+) (*storage.Object, bool, error) {
+	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	if !ok {
+		if b.bypassBucketCheck {
+			return nil, false, nil
+		}
+		placementGroupID = "group-0"
+	}
+	liveNodes := b.ecWriteNodes()
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
+		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
+	}
+	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
+		return nil, false, nil
+	}
+
+	shardKey := key + "/" + versionID
+	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
+	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	if len(placement) != 1 || placement[0] != b.selfAddr {
+		return nil, false, nil
+	}
+
+	stageStart := time.Now()
+	body, size, ok := sizedReaderAtSection(r, maxSingleLocalShardMemoryFastPathBytes)
+	if !ok {
+		return nil, false, nil
+	}
+	observePutStage("ec_single_memory", "read_body", stageStart)
+
+	sp := &spooledObject{
+		Size: size,
+	}
+	h := md5.New()
+	obj, err := b.putObjectSingleLocalShardFromReader(
+		ctx,
+		bucket,
+		key,
+		versionID,
+		placementGroupID,
+		ringVer,
+		placement,
+		sp,
+		body,
+		contentType,
+		"ec_single_memory",
+		h,
+	)
+	return obj, true, err
+}
+
+type sizedReaderAt interface {
+	io.ReaderAt
+	Len() int
+	Size() int64
+}
+
+func sizedReaderAtSection(r io.Reader, maxBytes int64) (io.Reader, int64, bool) {
+	sr, ok := r.(sizedReaderAt)
+	if !ok {
+		return nil, 0, false
+	}
+	remaining := int64(sr.Len())
+	if remaining < 0 || remaining > maxBytes {
+		return nil, 0, false
+	}
+	offset := sr.Size() - remaining
+	return io.NewSectionReader(sr, offset, remaining), remaining, true
 }
 
 // clusterTraceEnabled activates per-stage putObjectNx latency logging.
@@ -927,6 +1039,7 @@ func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key
 	}
 
 	objPath := b.objectPathV(bucket, key, versionID)
+	stageStart := time.Now()
 	rc, err := sp.Open()
 	if err != nil {
 		return nil, fmt.Errorf("open spooled object: %w", err)
@@ -938,6 +1051,7 @@ func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key
 	if err := rc.Close(); err != nil {
 		return nil, fmt.Errorf("close spooled object: %w", err)
 	}
+	observePutStage("nx", "write_file_atomic", stageStart)
 
 	if clusterTraceEnabled {
 		log.Debug().Dur("write_file_atomic", time.Since(tStage)).Str("bucket", bucket).Int64("bytes", sp.Size).Msg("putObjectNx trace")
@@ -970,6 +1084,7 @@ func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key
 	}
 
 	now := time.Now().Unix()
+	stageStart = time.Now()
 	err = b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      bucket,
 		Key:         key,
@@ -983,6 +1098,7 @@ func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key
 		os.Remove(objPath)
 		return nil, err
 	}
+	observePutStage("nx", "propose_meta", stageStart)
 
 	if clusterTraceEnabled {
 		log.Debug().Dur("raft_propose", time.Since(tStage)).Dur("total", time.Since(tStart)).Str("bucket", bucket).Msg("putObjectNx trace")
@@ -1480,6 +1596,7 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
+	stageStart := time.Now()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
 		if b.bypassBucketCheck {
@@ -1503,14 +1620,21 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
 	}
+	observePutStage("ec", "placement", stageStart)
 
+	selfID := b.selfAddr
+	if effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
+		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType)
+	}
+
+	stageStart = time.Now()
 	shards, err := spoolECShards(ctx, effectiveCfg, b.ecSpoolDir(), sp)
 	if err != nil {
 		return nil, err
 	}
+	observePutStage("ec", "spool_shards", stageStart)
 	defer shards.Cleanup()
 
-	selfID := b.selfAddr
 	var (
 		writtenMu sync.Mutex
 		written   []string
@@ -1525,10 +1649,12 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		}
 	}
 
+	stageStart = time.Now()
 	g, gctx := errgroup.WithContext(ctx)
 	for i, node := range placement {
 		i, node := i, node
 		g.Go(func() error {
+			shardStageStart := time.Now()
 			var werr error
 			if node == selfID {
 				body, err := shards.OpenShard(i)
@@ -1537,8 +1663,10 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 				}
 				defer body.Close()
 				werr = b.shardSvc.WriteLocalShardStream(bucket, shardKey, i, body)
+				observePutStage("ec_write_shard", "local", shardStageStart)
 			} else {
 				werr = b.writeSpooledECShardStream(gctx, shards, i, node, bucket, shardKey)
+				observePutStage("ec_write_shard", "remote", shardStageStart)
 				if b.peerHealth != nil {
 					if werr != nil {
 						b.peerHealth.MarkUnhealthy(node)
@@ -1560,8 +1688,10 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		cleanup()
 		return nil, err
 	}
+	observePutStage("ec", "write_shards", stageStart)
 
 	now := time.Now().Unix()
+	stageStart = time.Now()
 	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:           bucket,
 		Key:              key,
@@ -1579,6 +1709,104 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		go b.deleteShardsAsync(bucket, placement, shardKey)
 		return nil, merr
 	}
+	observePutStage("ec", "propose_meta", stageStart)
+
+	return &storage.Object{
+		Key:          key,
+		Size:         sp.Size,
+		ContentType:  contentType,
+		ETag:         sp.ETag,
+		LastModified: now,
+		VersionID:    versionID,
+	}, nil
+}
+
+func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
+	ctx context.Context,
+	bucket, key, versionID, placementGroupID string,
+	ringVer RingVersion,
+	placement []string,
+	sp *spooledObject,
+	contentType string,
+) (*storage.Object, error) {
+	shardKey := key + "/" + versionID
+	stageStart := time.Now()
+	body, err := sp.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open single shard body: %w", err)
+	}
+	obj, writeErr := b.putObjectSingleLocalShardFromReader(
+		ctx,
+		bucket,
+		key,
+		versionID,
+		placementGroupID,
+		ringVer,
+		placement,
+		sp,
+		body,
+		contentType,
+		"ec_single",
+		nil,
+	)
+	closeErr := body.Close()
+	if writeErr != nil {
+		return nil, writeErr
+	}
+	if closeErr != nil {
+		_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
+		return nil, fmt.Errorf("close single shard body: %w", closeErr)
+	}
+	observePutStage("ec_single", "total_with_open_close", stageStart)
+	return obj, nil
+}
+
+func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
+	ctx context.Context,
+	bucket, key, versionID, placementGroupID string,
+	ringVer RingVersion,
+	placement []string,
+	sp *spooledObject,
+	body io.Reader,
+	contentType string,
+	metricPath string,
+	bodyHash hash.Hash,
+) (*storage.Object, error) {
+	shardKey := key + "/" + versionID
+	stageStart := time.Now()
+	header := encodeShardHeader(sp.Size)
+	if bodyHash != nil {
+		body = io.TeeReader(body, bodyHash)
+	}
+	shardBody := io.MultiReader(bytes.NewReader(header[:]), body)
+	if err := b.shardSvc.WriteLocalShardStream(bucket, shardKey, 0, shardBody); err != nil {
+		return nil, fmt.Errorf("write single local shard: %w", err)
+	}
+	observePutStage(metricPath, "write_local_shard", stageStart)
+	if bodyHash != nil {
+		sp.ETag = hex.EncodeToString(bodyHash.Sum(nil))
+	}
+
+	now := time.Now().Unix()
+	stageStart = time.Now()
+	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:           bucket,
+		Key:              key,
+		Size:             sp.Size,
+		ContentType:      contentType,
+		ETag:             sp.ETag,
+		ModTime:          now,
+		VersionID:        versionID,
+		PlacementGroupID: placementGroupID,
+		RingVersion:      ringVer,
+		ECData:           1,
+		ECParity:         0,
+		NodeIDs:          placement,
+	}); merr != nil {
+		_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
+		return nil, merr
+	}
+	observePutStage("ec_single", "propose_meta", stageStart)
 
 	return &storage.Object{
 		Key:          key,

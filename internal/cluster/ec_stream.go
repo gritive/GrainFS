@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/klauspost/reedsolomon"
 )
@@ -22,6 +23,7 @@ type spooledECShards struct {
 }
 
 func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObject) (*spooledECShards, error) {
+	stageStart := time.Now()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create ec spool dir: %w", err)
 	}
@@ -68,7 +70,9 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		dataFiles[i] = f
 		dataWriters[i] = f
 	}
+	observePutStage("ec_spool_shards", "create_data_files", stageStart)
 
+	stageStart = time.Now()
 	src, err := sp.Open()
 	if err != nil {
 		cleanup()
@@ -83,13 +87,17 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		cleanup()
 		return nil, fmt.Errorf("close spooled object: %w", err)
 	}
+	observePutStage("ec_spool_shards", "split", stageStart)
+	stageStart = time.Now()
 	for _, f := range dataFiles {
 		if err := f.Close(); err != nil {
 			cleanup()
 			return nil, fmt.Errorf("close ec data shard: %w", err)
 		}
 	}
+	observePutStage("ec_spool_shards", "close_data_files", stageStart)
 
+	stageStart = time.Now()
 	dataReaders := make([]io.Reader, cfg.DataShards)
 	dataReadFiles := make([]*os.File, cfg.DataShards)
 	for i, path := range out.paths[:cfg.DataShards] {
@@ -120,16 +128,21 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		parityFiles[i] = f
 		parityWriters[i] = f
 	}
+	observePutStage("ec_spool_shards", "open_data_create_parity", stageStart)
+	stageStart = time.Now()
 	if err := enc.Encode(dataReaders, parityWriters); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("ec encode stream: %w", err)
 	}
+	observePutStage("ec_spool_shards", "encode", stageStart)
+	stageStart = time.Now()
 	for _, f := range parityFiles {
 		if err := f.Close(); err != nil {
 			cleanup()
 			return nil, fmt.Errorf("close ec parity shard: %w", err)
 		}
 	}
+	observePutStage("ec_spool_shards", "close_parity_files", stageStart)
 	return out, nil
 }
 

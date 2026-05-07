@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/quic-go/quic-go"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/hkdf"
@@ -25,14 +26,25 @@ import (
 
 // QUIC connection timeouts.
 const (
-	quicMaxIdleTimeout  = 10 * time.Second
-	quicKeepAlivePeriod = 3 * time.Second
-	quicMaxRPCStreams   = 4096
+	quicMaxIdleTimeout         = 10 * time.Second
+	quicKeepAlivePeriod        = 3 * time.Second
+	quicMaxRPCStreams          = 4096
+	quicStreamCopyBufferSize   = 256 << 10
+	quicInitialReceiveWindow   = 16 << 20
+	quicMaxStreamReceiveWindow = 32 << 20
+	quicMaxConnReceiveWindow   = 256 << 20
 	// quicAppErrCode is the application-level error code reported on
 	// graceful CloseWithError. Picked to be non-zero so peers can distinguish
 	// "we rejected your ALPN" from idle-timeout closes.
 	quicAppErrCode = 0x1
 )
+
+var quicStreamCopyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, quicStreamCopyBufferSize)
+		return &buf
+	},
+}
 
 // StreamHandler processes an incoming request message and returns a response.
 type StreamHandler func(req *Message) *Message
@@ -308,9 +320,13 @@ func (t *QUICTransport) muxALPN() string {
 
 func defaultQUICConfig() *quic.Config {
 	return &quic.Config{
-		KeepAlivePeriod:    quicKeepAlivePeriod,
-		MaxIdleTimeout:     quicMaxIdleTimeout,
-		MaxIncomingStreams: quicMaxRPCStreams,
+		KeepAlivePeriod:                quicKeepAlivePeriod,
+		MaxIdleTimeout:                 quicMaxIdleTimeout,
+		InitialStreamReceiveWindow:     quicInitialReceiveWindow,
+		MaxStreamReceiveWindow:         quicMaxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: quicInitialReceiveWindow,
+		MaxConnectionReceiveWindow:     quicMaxConnReceiveWindow,
+		MaxIncomingStreams:             quicMaxRPCStreams,
 	}
 }
 
@@ -532,7 +548,7 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 		}
 		if body != nil {
 			defer body.Close()
-			_, _ = io.Copy(stream, body)
+			_, _ = copyQUICStream(stream, body)
 		}
 		return
 	}
@@ -820,23 +836,46 @@ func (t *QUICTransport) CallWithBody(ctx context.Context, addr string, req *Mess
 	}()
 	defer close(cancelDone)
 
+	stageStart := time.Now()
 	if err := t.codec.Encode(stream, req); err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
+	observeQUICBodyStage(req.Type, "encode_request", stageStart)
 	if body != nil {
-		if _, err := io.Copy(stream, body); err != nil {
+		stageStart = time.Now()
+		if _, err := copyQUICStream(stream, body); err != nil {
 			return nil, fmt.Errorf("stream body to %s: %w", addr, err)
 		}
+		observeQUICBodyStage(req.Type, "copy_body", stageStart)
 	}
+	stageStart = time.Now()
 	if err := stream.Close(); err != nil {
 		return nil, fmt.Errorf("close request stream to %s: %w", addr, err)
 	}
+	observeQUICBodyStage(req.Type, "close_write", stageStart)
 
+	stageStart = time.Now()
 	resp, err := t.codec.Decode(stream)
 	if err != nil {
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
+	observeQUICBodyStage(req.Type, "decode_response", stageStart)
 	return checkResponseStatus(addr, resp)
+}
+
+func copyQUICStream(dst io.Writer, src io.Reader) (int64, error) {
+	bufp := quicStreamCopyBufferPool.Get().(*[]byte)
+	n, err := io.CopyBuffer(dst, src, *bufp)
+	clear(*bufp)
+	quicStreamCopyBufferPool.Put(bufp)
+	return n, err
+}
+
+func observeQUICBodyStage(st StreamType, stage string, start time.Time) {
+	if st != StreamShardWriteBody {
+		return
+	}
+	metrics.ObjectPutStageDuration.WithLabelValues("quic_body", stage).Observe(time.Since(start).Seconds())
 }
 
 type quicReadCloser struct {
