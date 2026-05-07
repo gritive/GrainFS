@@ -109,6 +109,21 @@ count:
 Internal unit or integration tests may still call `SetECConfig` directly when
 they need to validate low-level behavior independent of CLI startup.
 
+Required test coverage:
+
+- `internal/cluster/ec_test.go`: cover the complete auto profile table,
+  including `7 -> 5+2` and `8+ -> 6+2`.
+- `cmd/grainfs`: assert `serveCmd.Flags().Lookup("ec-data")` and
+  `serveCmd.Flags().Lookup("ec-parity")` are nil.
+- `internal/cluster/cluster_coordinator_test.go`: regression-test that object
+  index writes derive `ECData` and `ECParity` from the selected placement
+  group's voter count, even when the coordinator's local EC config differs.
+- `tests/e2e/cluster_harness_test.go`: assert `ExtraArgs` rejects `--ec-data`
+  and `--ec-parity` before spawning any subprocess.
+- Repository scan verification: `rg -- '--ec-data|--ec-parity' README.md
+  benchmarks tests/e2e cmd/grainfs` should only return intentional historical
+  changelog/spec references, not runnable CLI arguments.
+
 Benchmark scripts should remove `EC_DATA` and `EC_PARITY` startup arguments.
 When a benchmark requires a specific EC width, it should set `NODE_COUNT`
 instead.
