@@ -294,6 +294,7 @@ table MetaObjectIndexEntry {
   ec_parity:uint8 = 0;
   node_ids:[string];
   is_delete_marker:bool = false;
+  is_latest:bool = false;
 }
 
 table MetaPutObjectIndexCmd {

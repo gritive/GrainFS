@@ -235,6 +235,34 @@ func TestMetaRaft_ProposeBucketAssignment_CallbackFired(t *testing.T) {
 	assert.Equal(t, "group-1", cbGroup)
 }
 
+func TestMetaRaft_ProposeObjectIndex_CommitToFSM(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	entry := ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v1",
+		PlacementGroupID: "group-2",
+		Size:             7,
+		ETag:             "etag",
+		ECData:           2,
+		ECParity:         1,
+		NodeIDs:          []string{"n1", "n2", "n3"},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeObjectIndex(ctx, entry, false))
+
+	got, ok := m.FSM().ObjectIndexLatest("b", "k")
+	require.True(t, ok)
+	require.Equal(t, entry, got)
+}
+
 func TestMetaRaft_ProposeLoadSnapshot_CommitToFSM(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })

@@ -166,8 +166,20 @@ func (rcv *MetaObjectIndexEntry) MutateIsDeleteMarker(n bool) bool {
 	return rcv._tab.MutateBoolSlot(26, n)
 }
 
+func (rcv *MetaObjectIndexEntry) IsLatest() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *MetaObjectIndexEntry) MutateIsLatest(n bool) bool {
+	return rcv._tab.MutateBoolSlot(28, n)
+}
+
 func MetaObjectIndexEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(12)
+	builder.StartObject(13)
 }
 func MetaObjectIndexEntryAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -207,6 +219,9 @@ func MetaObjectIndexEntryStartNodeIdsVector(builder *flatbuffers.Builder, numEle
 }
 func MetaObjectIndexEntryAddIsDeleteMarker(builder *flatbuffers.Builder, isDeleteMarker bool) {
 	builder.PrependBoolSlot(11, isDeleteMarker, false)
+}
+func MetaObjectIndexEntryAddIsLatest(builder *flatbuffers.Builder, isLatest bool) {
+	builder.PrependBoolSlot(12, isLatest, false)
 }
 func MetaObjectIndexEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

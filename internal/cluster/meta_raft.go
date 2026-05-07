@@ -228,6 +228,24 @@ func (m *MetaRaft) ProposeBucketAssignment(ctx context.Context, bucket, groupID 
 	return m.waitApplied(ctx, idx)
 }
 
+// ProposeObjectIndex encodes a PutObjectIndex command and proposes it to the
+// meta-Raft group, blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntry, preserveLatest bool) error {
+	payload, err := encodeMetaPutObjectIndexCmd(entry, preserveLatest)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode PutObjectIndex: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypePutObjectIndex, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
 // ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
 // it is applied to the local FSM.
 func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error {
