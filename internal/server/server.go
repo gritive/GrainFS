@@ -213,6 +213,15 @@ func WithIAMStore(store *iam.Store) Option {
 	}
 }
 
+// WithIAMAudit wires an AuditLogger that emits IAM authz allow/deny
+// decisions. Without this, audit calls are no-ops (iamAudit stays nil)
+// and authz decisions are not recorded — fine for tests, not for prod.
+func WithIAMAudit(audit *iam.AuditLogger) Option {
+	return func(s *Server) {
+		s.iamAudit = audit
+	}
+}
+
 // WithBlockCache wires the volume block cache so /api/cache/status can
 // expose its hits/misses/resident bytes for the dashboard.
 func WithBlockCache(c *blockcache.Cache) Option {

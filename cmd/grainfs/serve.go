@@ -188,6 +188,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		server.WithVerifier(verifier),
 		server.WithIAMStore(iamStore),
 	}
+	// IAM audit logger emits authz allow/deny events via zerolog. Always
+	// wired in production; tests can override or omit by using a different
+	// option set.
+	auditLogger := iam.NewAuditLogger(iam.NewLogAuditEmitter())
+	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
 
 	noEncryption, _ := cmd.Flags().GetBool("no-encryption")
 	var shardEncryptor *encrypt.Encryptor
