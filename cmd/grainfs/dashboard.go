@@ -25,9 +25,8 @@ command again to get a new URL).`,
 
 func init() {
 	dashboardCmd.Flags().Bool("rotate", false, "rotate the dashboard auth token")
-	dashboardCmd.Flags().String("endpoint", "", "admin endpoint (default: auto-discover)")
-	dashboardCmd.Flags().String("data", "", "data directory for admin socket auto-discovery")
 	dashboardCmd.Flags().Bool("json", false, "JSON output for scripting")
+	registerAdminEndpointFlag(dashboardCmd)
 	registerAdminTimeoutFlag(dashboardCmd)
 	rootCmd.AddCommand(dashboardCmd)
 }

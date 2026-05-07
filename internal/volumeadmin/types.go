@@ -34,7 +34,6 @@ type ListScrubJobsResp = adminapi.ListScrubJobsResp
 // connect, how to render output, and where to write.
 type BaseOptions struct {
 	Endpoint string
-	DataDir  string
 	Timeout  time.Duration
 
 	JSONOut  bool

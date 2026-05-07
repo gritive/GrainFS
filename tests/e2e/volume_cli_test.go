@@ -90,7 +90,7 @@ func waitForVolumeReady(t *testing.T, dataDir string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	var lastOut string
 	for time.Now().Before(deadline) {
-		cmd := exec.Command(binary, "volume", "list", "--data", dataDir)
+		cmd := exec.Command(binary, "volume", "list", "--endpoint", filepath.Join(dataDir, "admin.sock"))
 		out, err := cmd.CombinedOutput()
 		lastOut = string(out)
 		if err == nil {
@@ -104,8 +104,8 @@ func waitForVolumeReady(t *testing.T, dataDir string, timeout time.Duration) {
 func runCLI(t *testing.T, dataDir string, args ...string) (stdout string, exitCode int) {
 	t.Helper()
 	full := append([]string{}, args...)
-	if !containsFlag(full, "--data") && !containsFlag(full, "--endpoint") {
-		full = append(full, "--data", dataDir)
+	if !containsFlag(full, "--endpoint") {
+		full = append(full, "--endpoint", filepath.Join(dataDir, "admin.sock"))
 	}
 	cmd := exec.Command(getBinary(), full...)
 	out, err := cmd.CombinedOutput()
@@ -234,8 +234,8 @@ func TestE2E_VolumeCLI_NotFound(t *testing.T) {
 }
 
 func TestE2E_VolumeCLI_AutoDiscoveryFailureMessage(t *testing.T) {
-	// Run CLI without --data, no GRAINFS_DATA, no grainfs.toml in cwd.
-	t.Setenv("GRAINFS_DATA", "")
+	// Run CLI without --endpoint, no $GRAINFS_ENDPOINT, no grainfs.toml in cwd.
+	t.Setenv("GRAINFS_ENDPOINT", "")
 	cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
 	require.NoError(t, err)
 	defer os.RemoveAll(cwd)
@@ -246,7 +246,7 @@ func TestE2E_VolumeCLI_AutoDiscoveryFailureMessage(t *testing.T) {
 	cmd.Dir = cwd
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err)
-	require.Contains(t, string(out), "admin socket not found")
+	require.Contains(t, string(out), "admin endpoint not configured")
 	require.Contains(t, string(out), "Hint")
 }
 

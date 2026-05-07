@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.0.82.0] - 2026-05-07 — admin CLI: `--data` 제거하고 `--endpoint`로 통합
+
+### Changed (BREAKING)
+
+- **admin CLI에서 `--data` 플래그 제거.** `grainfs volume *`, `grainfs dashboard`,
+  `grainfs scrub` 은 이제 `--endpoint <admin-sock-path>` 만 받습니다. admin CLI가
+  data 디렉토리의 내부 구조(`<data>/admin.sock`)를 가정하던 결합을 끊어, 미래에
+  소켓 위치·이름이 바뀌어도 CLI가 깨지지 않습니다.
+- **endpoint 해석 우선순위 단순화:** `--endpoint` flag → `$GRAINFS_ENDPOINT` env →
+  fail-fast. 기존 `$GRAINFS_DATA` env와 `grainfs.toml`의 `data_dir` 자동탐색은
+  모두 삭제됐습니다(실제로 grainfs.toml을 읽는 production 코드 경로는 없었음).
+- `volumeadmin.NewClient(endpoint, dataFlag)` → `NewClient(endpoint)`.
+  `BaseOptions.DataDir` 필드 삭제.
+
+### Added
+
+- `volumeadmin.ResolveEndpoint(flagVal)` 단일 진입점 + 단위 테스트 4건.
+- `cmd/grainfs/admin_helpers.go::registerAdminEndpointFlag` 공유 helper로
+  `volume`/`dashboard`/`scrub` 세 그룹이 같은 방식으로 `--endpoint`를 등록.
+  `scrub` 은 기존에 플래그 등록이 누락돼 있던 것을 함께 수정.
+- `serve` 시작 시 admin endpoint 안내 로그
+  (`admin endpoint path=... hint="export GRAINFS_ENDPOINT=..."`). 경로에 공백이
+  있어도 셸에 그대로 복사 가능하도록 `%q`로 인용.
+
+### Migration
+
+기존 `grainfs volume list --data ./tmp` 형태의 사용자는 다음 중 하나로 전환:
+
+```sh
+# 매번 명시
+grainfs volume list --endpoint ./tmp/admin.sock
+
+# 또는 한 번 export
+export GRAINFS_ENDPOINT=./tmp/admin.sock
+grainfs volume list
+```
+
+`grainfs serve`가 시작 시 정확한 경로를 stderr에 출력하므로 그대로 복사하면 됩니다.
+
 ## [0.0.81.0] - 2026-05-07 — data-group forwarding dispatch policy
 
 ### Changed
