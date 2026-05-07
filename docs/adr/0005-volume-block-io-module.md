@@ -1,4 +1,4 @@
-# ADR 0004: Volume Block I/O Belongs Behind a Private Module
+# ADR 0005: Volume Block I/O Belongs Behind a Private Module
 
 ## Status
 

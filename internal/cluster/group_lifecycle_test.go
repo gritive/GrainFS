@@ -170,6 +170,21 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 		"selfAddr must equal cfg.NodeID regardless of PeerIDs sort order")
 }
 
+func TestInstantiateLocalGroup_UsesGroupIDAsElectionPriorityKey(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GroupLifecycleConfig{NodeID: "node-b", DataDir: dir}
+	entry := ShardGroupEntry{
+		ID:      "group-priority",
+		PeerIDs: []string{"node-a", "node-b", "node-c"},
+	}
+
+	gb, err := instantiateLocalGroup(cfg, entry)
+	require.NoError(t, err)
+	defer shutdownLocalGroup(context.Background(), gb, 5*time.Second) //nolint:errcheck
+
+	require.Equal(t, "group-priority", gb.RaftNode().ElectionPriorityKey())
+}
+
 func TestResolvingGroupTransport_ResolvesNodeIDBeforeDial(t *testing.T) {
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))

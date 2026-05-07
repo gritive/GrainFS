@@ -154,8 +154,16 @@ func (rcv *ObjectMeta) NodeIdsLength() int {
 	return 0
 }
 
+func (rcv *ObjectMeta) PlacementGroupId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func ObjectMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(10)
+	builder.StartObject(11)
 }
 func ObjectMetaAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -189,6 +197,9 @@ func ObjectMetaAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOff
 }
 func ObjectMetaStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func ObjectMetaAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(placementGroupId), 0)
 }
 func ObjectMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -194,6 +196,10 @@ type Config struct {
 	// JointAbortTimeout: JointEnter 커밋 후 이 시간이 지나도 JointLeave가 커밋되지 않으면
 	// 자동으로 JointOpAbort를 propose한다. 0이면 비활성 (기본값).
 	JointAbortTimeout time.Duration
+	// ElectionPriorityKey deterministically splits the election timeout window
+	// across voters for this key. Data groups set this to their group ID so
+	// independent groups prefer different initial leaders without moving data.
+	ElectionPriorityKey string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -756,6 +762,11 @@ func (n *Node) ID() string {
 	return n.id
 }
 
+// ElectionPriorityKey returns the configured election priority key, if any.
+func (n *Node) ElectionPriorityKey() string {
+	return n.config.ElectionPriorityKey
+}
+
 // CommittedIndex returns the current commitIndex. Safe to call concurrently.
 func (n *Node) CommittedIndex() uint64 {
 	n.mu.Lock()
@@ -1020,8 +1031,50 @@ func (n *Node) drainJointResultLocked(err error) {
 
 func (n *Node) randomElectionTimeout() time.Duration {
 	base := n.config.ElectionTimeout
+	rank, total := n.electionPriorityRank()
+	if n.config.ElectionPriorityKey != "" && total > 1 {
+		slot := base / time.Duration(total)
+		if slot > 0 {
+			jitter := time.Duration(rand.Int63n(int64(slot)))
+			return base + time.Duration(rank)*slot + jitter
+		}
+	}
 	jitter := time.Duration(rand.Int63n(int64(base)))
 	return base + jitter
+}
+
+func (n *Node) electionPriorityRank() (rank int, total int) {
+	if n.config.ElectionPriorityKey == "" {
+		return 0, 1
+	}
+	members := append([]string(nil), n.membershipViewSnapshot().currentVoters...)
+	sort.Strings(members)
+	if len(members) <= 1 {
+		return 0, len(members)
+	}
+	type ranked struct {
+		id    string
+		score [32]byte
+	}
+	items := make([]ranked, 0, len(members))
+	for _, id := range members {
+		items = append(items, ranked{
+			id:    id,
+			score: sha256.Sum256([]byte(n.config.ElectionPriorityKey + "/" + id)),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if cmp := bytes.Compare(items[i].score[:], items[j].score[:]); cmp != 0 {
+			return cmp < 0
+		}
+		return items[i].id < items[j].id
+	})
+	for i, item := range items {
+		if item.id == n.config.ID {
+			return i, len(items)
+		}
+	}
+	return len(items) - 1, len(items)
 }
 
 func (n *Node) runFollower() {

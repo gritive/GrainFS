@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.87.0] - 2026-05-07 — volume block I/O policy private module
+## [0.0.88.0] - 2026-05-07 — volume block I/O policy private module
 
 ### Changed
 
@@ -9,7 +9,7 @@
   public lock, metadata, and live-map orchestration, while block merge rules,
   cache behavior, quota checks, dedup/live-map mutation, and allocation deltas
   live behind one focused implementation.
-- `Volume Block I/O` is now recorded in `CONTEXT.md` and ADR 0004 so future
+- `Volume Block I/O` is now recorded in `CONTEXT.md` and ADR 0005 so future
   architecture work has a stable name for this seam.
 
 ### Tests
@@ -18,6 +18,46 @@
   write allocation results, and live-map discard side effects.
 - Existing volume, dedup, quota, discard, and block-cache behavior tests continue
   to cover the public `Manager` semantics.
+
+## [0.0.87.0] - 2026-05-07 — hot bucket object placement
+
+### Added
+
+- Hot buckets can now spread new object writes across normal EC-capable data
+  groups using object-level placement instead of pinning all object traffic to
+  the bucket assignment group.
+- Meta-Raft now stores a global object index with placement group, version, EC
+  profile, node list, and delete-marker metadata so object reads, deletes,
+  version reads, multipart completion, copy-through-write, Range `ReadAt`,
+  `ListObjects`, `ListObjectVersions`, and `WalkObjects` can route from the
+  object index.
+- Cluster status and the topology GET benchmark now expose object placement
+  distribution so operators can see whether a hot bucket is spreading across
+  placement groups.
+- ADR 0004 records the object-level placement decision and the dual-write
+  reconcile model.
+
+### Changed
+
+- Cluster object writes now require the EC pipeline when running through
+  placement groups, and explicit EC profiles fail fast when the selected group
+  cannot fit `k+m` shards.
+- Data-group Raft elections now use a group-specific priority key so seeded
+  placement groups prefer different initial leaders instead of letting startup
+  timing concentrate group leadership on one node.
+- Zero-config EC now scales from active cluster size, including the single-node
+  `1+0` profile and progressively wider profiles for larger clusters.
+- VFS/internal bucket fixed-version special-casing is removed from the cluster
+  object write path as part of the EC-only placement model.
+
+### Fixed
+
+- LIST-style reads now enumerate from the object index, so objects written into
+  different placement groups within the same bucket are visible together.
+- Hard `DeleteObjectVersion` now removes the corresponding meta object-index
+  row and recomputes the latest pointer.
+- Object-index orphan detection scans group-local metadata directly, so it can
+  still find data-group objects that are missing from the global index.
 
 ## [0.0.86.0] - 2026-05-07 — cluster remove-peer/peer-liveness 안전 강화 (#215에서 분리)
 

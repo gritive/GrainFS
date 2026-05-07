@@ -23,6 +23,7 @@ func SeedInitialShardGroups(
 	selfAddr string,
 	peers []string,
 	seedGroups int,
+	normalGroupVoters int,
 ) error {
 	bootstrapCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -31,10 +32,13 @@ func SeedInitialShardGroups(
 		return err
 	}
 
-	const replicationFactor = 3
 	for i := 0; i < seedGroups; i++ {
 		groupID := fmt.Sprintf("group-%d", i)
-		voters := SeedShardGroupVoters(selfNodeID, selfAddr, peers, metaRaft.FSM().Nodes(), groupID, replicationFactor)
+		voterCount := normalGroupVoters
+		if voterCount < 1 {
+			voterCount = 1
+		}
+		voters := SeedShardGroupVoters(selfNodeID, selfAddr, peers, metaRaft.FSM().Nodes(), groupID, voterCount)
 
 		sgCtx, sgCancel := context.WithTimeout(bootstrapCtx, 5*time.Second)
 		err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{

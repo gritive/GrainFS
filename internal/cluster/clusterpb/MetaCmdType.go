@@ -26,6 +26,8 @@ const (
 	MetaCmdTypeRotateKeyDrop          MetaCmdType = 16
 	MetaCmdTypeRotateKeyAbort         MetaCmdType = 17
 	MetaCmdTypeScrubTrigger           MetaCmdType = 18
+	MetaCmdTypePutObjectIndex         MetaCmdType = 19
+	MetaCmdTypeDeleteObjectIndex      MetaCmdType = 20
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -48,6 +50,8 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeRotateKeyDrop:          "RotateKeyDrop",
 	MetaCmdTypeRotateKeyAbort:         "RotateKeyAbort",
 	MetaCmdTypeScrubTrigger:           "ScrubTrigger",
+	MetaCmdTypePutObjectIndex:         "PutObjectIndex",
+	MetaCmdTypeDeleteObjectIndex:      "DeleteObjectIndex",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -70,6 +74,8 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"RotateKeyDrop":          MetaCmdTypeRotateKeyDrop,
 	"RotateKeyAbort":         MetaCmdTypeRotateKeyAbort,
 	"ScrubTrigger":           MetaCmdTypeScrubTrigger,
+	"PutObjectIndex":         MetaCmdTypePutObjectIndex,
+	"DeleteObjectIndex":      MetaCmdTypeDeleteObjectIndex,
 }
 
 func (v MetaCmdType) String() string {

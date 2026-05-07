@@ -38,6 +38,8 @@ const (
 	MetaCmdTypeRotateKeyDrop          = clusterpb.MetaCmdTypeRotateKeyDrop
 	MetaCmdTypeRotateKeyAbort         = clusterpb.MetaCmdTypeRotateKeyAbort
 	MetaCmdTypeScrubTrigger           = clusterpb.MetaCmdTypeScrubTrigger // PR4
+	MetaCmdTypePutObjectIndex         = clusterpb.MetaCmdTypePutObjectIndex
+	MetaCmdTypeDeleteObjectIndex      = clusterpb.MetaCmdTypeDeleteObjectIndex
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -61,6 +63,28 @@ type LoadStatEntry struct {
 	DiskAvailBytes uint64
 	RequestsPerSec float64
 	UpdatedAt      time.Time
+}
+
+// ObjectIndexEntry is the meta-Raft global object index row used to route an
+// object version to its owning data Raft group before touching group-local FSMs.
+type ObjectIndexEntry struct {
+	Bucket           string
+	Key              string
+	VersionID        string
+	PlacementGroupID string
+	Size             int64
+	ContentType      string
+	ETag             string
+	ModTime          int64
+	ECData           uint8
+	ECParity         uint8
+	NodeIDs          []string
+	IsDeleteMarker   bool
+}
+
+type ObjectIndexSummary struct {
+	Bucket               string         `json:"bucket,omitempty"`
+	PlacementGroupCounts map[string]int `json:"placement_group_counts"`
 }
 
 // RebalancePlan describes a single voter migration between data Raft group nodes.
@@ -132,8 +156,10 @@ type MetaFSM struct {
 	nodes             map[string]MetaNodeEntry
 	shardGroups       map[string]ShardGroupEntry // key = group ID
 	bucketAssignments map[string]string          // bucket → group_id (PR-D)
-	loadSnapshot      map[string]LoadStatEntry   // node_id → stats (PR-D)
-	activePlan        *RebalancePlan             // nil = no active plan (PR-D)
+	objectIndex       map[string]ObjectIndexEntry
+	objectLatest      map[string]string
+	loadSnapshot      map[string]LoadStatEntry // node_id → stats (PR-D)
+	activePlan        *RebalancePlan           // nil = no active plan (PR-D)
 	icebergNamespaces map[string]IcebergNamespaceEntry
 	icebergTables     map[string]IcebergTableEntry
 	onBucketAssigned  func(string, string)             // protected by mu; set before Start() (PR-D)
@@ -153,6 +179,8 @@ func NewMetaFSM() *MetaFSM {
 		nodes:             make(map[string]MetaNodeEntry),
 		shardGroups:       make(map[string]ShardGroupEntry),
 		bucketAssignments: make(map[string]string),
+		objectIndex:       make(map[string]ObjectIndexEntry),
+		objectLatest:      make(map[string]string),
 		loadSnapshot:      make(map[string]LoadStatEntry),
 		icebergNamespaces: make(map[string]IcebergNamespaceEntry),
 		icebergTables:     make(map[string]IcebergTableEntry),
@@ -212,6 +240,10 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyPutShardGroup(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutBucketAssignment:
 		return f.applyPutBucketAssignment(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePutObjectIndex:
+		return f.applyPutObjectIndex(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDeleteObjectIndex:
+		return f.applyDeleteObjectIndex(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeSetLoadSnapshot:
 		return f.applySetLoadSnapshot(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeProposeRebalancePlan:
@@ -408,6 +440,89 @@ func (f *MetaFSM) applyPutBucketAssignment(data []byte) error {
 	if cb != nil {
 		cb(bucket, groupID)
 	}
+	return nil
+}
+
+type metaPutObjectIndexCmd struct {
+	Entry          ObjectIndexEntry
+	PreserveLatest bool
+}
+
+type objectIndexSnapshotEntry struct {
+	ObjectIndexEntry
+	IsLatest bool
+}
+
+func objectIndexLatestKey(bucket, key string) string {
+	return bucket + "\x00" + key
+}
+
+func objectIndexVersionKey(bucket, key, versionID string) string {
+	return bucket + "\x00" + key + "\x00" + versionID
+}
+
+func (f *MetaFSM) applyPutObjectIndex(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: PutObjectIndex: empty payload")
+	}
+	c, err := decodeMetaPutObjectIndexCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PutObjectIndex: %w", err)
+	}
+	e := c.Entry
+	if e.Bucket == "" || e.Key == "" || e.VersionID == "" {
+		return fmt.Errorf("meta_fsm: PutObjectIndex: empty bucket/key/version")
+	}
+	if e.PlacementGroupID == "" {
+		return fmt.Errorf("meta_fsm: PutObjectIndex: empty placement_group_id")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	vkey := objectIndexVersionKey(e.Bucket, e.Key, e.VersionID)
+	f.objectIndex[vkey] = cloneObjectIndexEntry(e)
+	if !c.PreserveLatest {
+		f.objectLatest[objectIndexLatestKey(e.Bucket, e.Key)] = e.VersionID
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyDeleteObjectIndex(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: DeleteObjectIndex: empty payload")
+	}
+	bucket, key, versionID, err := decodeMetaDeleteObjectIndexCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: DeleteObjectIndex: %w", err)
+	}
+	if bucket == "" || key == "" || versionID == "" {
+		return fmt.Errorf("meta_fsm: DeleteObjectIndex: empty bucket/key/version")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objectIndex, objectIndexVersionKey(bucket, key, versionID))
+	lkey := objectIndexLatestKey(bucket, key)
+	if f.objectLatest[lkey] != versionID {
+		return nil
+	}
+
+	var latest ObjectIndexEntry
+	found := false
+	for _, entry := range f.objectIndex {
+		if entry.Bucket != bucket || entry.Key != key {
+			continue
+		}
+		if !found || entry.ModTime > latest.ModTime || (entry.ModTime == latest.ModTime && entry.VersionID > latest.VersionID) {
+			latest = entry
+			found = true
+		}
+	}
+	if !found {
+		delete(f.objectLatest, lkey)
+		return nil
+	}
+	f.objectLatest[lkey] = latest.VersionID
 	return nil
 }
 
@@ -871,6 +986,92 @@ func (f *MetaFSM) BucketAssignments() map[string]string {
 	return out
 }
 
+func (f *MetaFSM) ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	versionID, ok := f.objectLatest[objectIndexLatestKey(bucket, key)]
+	if !ok {
+		return ObjectIndexEntry{}, false
+	}
+	entry, ok := f.objectIndex[objectIndexVersionKey(bucket, key, versionID)]
+	if !ok {
+		return ObjectIndexEntry{}, false
+	}
+	return cloneObjectIndexEntry(entry), true
+}
+
+func (f *MetaFSM) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	entry, ok := f.objectIndex[objectIndexVersionKey(bucket, key, versionID)]
+	if !ok {
+		return ObjectIndexEntry{}, false
+	}
+	return cloneObjectIndexEntry(entry), true
+}
+
+func (f *MetaFSM) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	entries := make([]ObjectIndexEntry, 0)
+	for lkey, versionID := range f.objectLatest {
+		parts := strings.SplitN(lkey, "\x00", 2)
+		if len(parts) != 2 || parts[0] != bucket || !strings.HasPrefix(parts[1], prefix) {
+			continue
+		}
+		entry, ok := f.objectIndex[objectIndexVersionKey(bucket, parts[1], versionID)]
+		if !ok || entry.IsDeleteMarker {
+			continue
+		}
+		entries = append(entries, cloneObjectIndexEntry(entry))
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Key < entries[j].Key
+	})
+	if maxKeys > 0 && len(entries) > maxKeys {
+		entries = entries[:maxKeys]
+	}
+	return entries
+}
+
+func (f *MetaFSM) ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	entries := make([]ObjectIndexEntry, 0)
+	for _, entry := range f.objectIndex {
+		if entry.Bucket != bucket || !strings.HasPrefix(entry.Key, prefix) {
+			continue
+		}
+		entries = append(entries, cloneObjectIndexEntry(entry))
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Key != entries[j].Key {
+			return entries[i].Key < entries[j].Key
+		}
+		return entries[i].VersionID > entries[j].VersionID
+	})
+	if maxKeys > 0 && len(entries) > maxKeys {
+		entries = entries[:maxKeys]
+	}
+	return entries
+}
+
+func (f *MetaFSM) ObjectIndexSummary(bucket string) ObjectIndexSummary {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	counts := make(map[string]int)
+	for _, entry := range f.objectIndex {
+		if bucket != "" && entry.Bucket != bucket {
+			continue
+		}
+		counts[entry.PlacementGroupID]++
+	}
+	return ObjectIndexSummary{
+		Bucket:               bucket,
+		PlacementGroupCounts: counts,
+	}
+}
+
 // ShardGroups returns a deep copy of current shard groups.
 // PeerIDs slices are copied so callers cannot mutate FSM state.
 func (f *MetaFSM) ShardGroups() []ShardGroupEntry {
@@ -987,6 +1188,14 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	buckets := make([]bucketKV, 0, len(f.bucketAssignments))
 	for bucket, groupID := range f.bucketAssignments {
 		buckets = append(buckets, bucketKV{bucket, groupID})
+	}
+	objectEntries := make([]objectIndexSnapshotEntry, 0, len(f.objectIndex))
+	for _, entry := range f.objectIndex {
+		latestVersionID := f.objectLatest[objectIndexLatestKey(entry.Bucket, entry.Key)]
+		objectEntries = append(objectEntries, objectIndexSnapshotEntry{
+			ObjectIndexEntry: cloneObjectIndexEntry(entry),
+			IsLatest:         latestVersionID == entry.VersionID,
+		})
 	}
 	lsEntries := make([]LoadStatEntry, 0, len(f.loadSnapshot))
 	for _, v := range f.loadSnapshot {
@@ -1111,6 +1320,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 
 	icebergNamespaceVec := buildIcebergNamespaceEntriesVector(b, icebergNamespaces)
 	icebergTableVec := buildIcebergTableEntriesVector(b, icebergTables)
+	objectIndexVec := buildMetaObjectIndexEntriesVector(b, objectEntries)
 
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
@@ -1122,6 +1332,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	clusterpb.MetaStateSnapshotAddIcebergNamespaces(b, icebergNamespaceVec)
 	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
+	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	return fbFinish(b, root), nil
 }
@@ -1259,10 +1470,27 @@ func (f *MetaFSM) Restore(data []byte) error {
 		newIcebergTables[icebergTableKey(ident)] = entry
 	}
 
+	newObjectIndex := make(map[string]ObjectIndexEntry, snap.ObjectIndexLength())
+	newObjectLatest := make(map[string]string)
+	var objFB clusterpb.MetaObjectIndexEntry
+	for i := 0; i < snap.ObjectIndexLength(); i++ {
+		if !snap.ObjectIndex(&objFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: object index %d decode failed", i)
+		}
+		entry := readMetaObjectIndexEntry(&objFB)
+		vkey := objectIndexVersionKey(entry.Bucket, entry.Key, entry.VersionID)
+		newObjectIndex[vkey] = entry
+		if objFB.IsLatest() {
+			newObjectLatest[objectIndexLatestKey(entry.Bucket, entry.Key)] = entry.VersionID
+		}
+	}
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
 	f.bucketAssignments = newBucketAssignments
+	f.objectIndex = newObjectIndex
+	f.objectLatest = newObjectLatest
 	f.loadSnapshot = newLoadSnapshot
 	f.activePlan = newActivePlan
 	f.icebergNamespaces = newIcebergNamespaces
@@ -1486,6 +1714,124 @@ func encodeMetaPutBucketAssignmentCmd(bucket, groupID string) ([]byte, error) {
 	return fbFinish(b, clusterpb.MetaPutBucketAssignmentCmdEnd(b)), nil
 }
 
+func encodeMetaPutObjectIndexCmd(entry ObjectIndexEntry, preserveLatest bool) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	entryOff := buildMetaObjectIndexEntry(b, objectIndexSnapshotEntry{ObjectIndexEntry: entry})
+	clusterpb.MetaPutObjectIndexCmdStart(b)
+	clusterpb.MetaPutObjectIndexCmdAddEntry(b, entryOff)
+	if preserveLatest {
+		clusterpb.MetaPutObjectIndexCmdAddPreserveLatest(b, true)
+	}
+	return fbFinish(b, clusterpb.MetaPutObjectIndexCmdEnd(b)), nil
+}
+
+func decodeMetaPutObjectIndexCmd(data []byte) (metaPutObjectIndexCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaPutObjectIndexCmd {
+		return clusterpb.GetRootAsMetaPutObjectIndexCmd(d, 0)
+	})
+	if err != nil {
+		return metaPutObjectIndexCmd{}, err
+	}
+	entry := t.Entry(nil)
+	if entry == nil {
+		return metaPutObjectIndexCmd{}, fmt.Errorf("nil entry")
+	}
+	return metaPutObjectIndexCmd{
+		Entry:          readMetaObjectIndexEntry(entry),
+		PreserveLatest: t.PreserveLatest(),
+	}, nil
+}
+
+func encodeMetaDeleteObjectIndexCmd(bucket, key, versionID string) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(bucket)
+	keyOff := b.CreateString(key)
+	versionOff := b.CreateString(versionID)
+	clusterpb.MetaDeleteObjectIndexCmdStart(b)
+	clusterpb.MetaDeleteObjectIndexCmdAddBucket(b, bucketOff)
+	clusterpb.MetaDeleteObjectIndexCmdAddKey(b, keyOff)
+	clusterpb.MetaDeleteObjectIndexCmdAddVersionId(b, versionOff)
+	return fbFinish(b, clusterpb.MetaDeleteObjectIndexCmdEnd(b)), nil
+}
+
+func decodeMetaDeleteObjectIndexCmd(data []byte) (bucket, key, versionID string, err error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaDeleteObjectIndexCmd {
+		return clusterpb.GetRootAsMetaDeleteObjectIndexCmd(d, 0)
+	})
+	if err != nil {
+		return "", "", "", err
+	}
+	return string(t.Bucket()), string(t.Key()), string(t.VersionId()), nil
+}
+
+func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshotEntry) flatbuffers.UOffsetT {
+	e := entry.ObjectIndexEntry
+	bucketOff := b.CreateString(e.Bucket)
+	keyOff := b.CreateString(e.Key)
+	versionOff := b.CreateString(e.VersionID)
+	groupOff := b.CreateString(e.PlacementGroupID)
+	contentTypeOff := b.CreateString(e.ContentType)
+	etagOff := b.CreateString(e.ETag)
+	var nodeIDsOff flatbuffers.UOffsetT
+	if len(e.NodeIDs) > 0 {
+		nodeIDsOff = buildStringVector(b, e.NodeIDs, clusterpb.MetaObjectIndexEntryStartNodeIdsVector)
+	}
+	clusterpb.MetaObjectIndexEntryStart(b)
+	clusterpb.MetaObjectIndexEntryAddBucket(b, bucketOff)
+	clusterpb.MetaObjectIndexEntryAddKey(b, keyOff)
+	clusterpb.MetaObjectIndexEntryAddVersionId(b, versionOff)
+	clusterpb.MetaObjectIndexEntryAddPlacementGroupId(b, groupOff)
+	clusterpb.MetaObjectIndexEntryAddSize(b, e.Size)
+	clusterpb.MetaObjectIndexEntryAddContentType(b, contentTypeOff)
+	clusterpb.MetaObjectIndexEntryAddEtag(b, etagOff)
+	clusterpb.MetaObjectIndexEntryAddModTime(b, e.ModTime)
+	clusterpb.MetaObjectIndexEntryAddEcData(b, e.ECData)
+	clusterpb.MetaObjectIndexEntryAddEcParity(b, e.ECParity)
+	if nodeIDsOff != 0 {
+		clusterpb.MetaObjectIndexEntryAddNodeIds(b, nodeIDsOff)
+	}
+	if e.IsDeleteMarker {
+		clusterpb.MetaObjectIndexEntryAddIsDeleteMarker(b, true)
+	}
+	if entry.IsLatest {
+		clusterpb.MetaObjectIndexEntryAddIsLatest(b, true)
+	}
+	return clusterpb.MetaObjectIndexEntryEnd(b)
+}
+
+func buildMetaObjectIndexEntriesVector(b *flatbuffers.Builder, entries []objectIndexSnapshotEntry) flatbuffers.UOffsetT {
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i].ObjectIndexEntry, entries[j].ObjectIndexEntry
+		return objectIndexVersionKey(a.Bucket, a.Key, a.VersionID) < objectIndexVersionKey(b.Bucket, b.Key, b.VersionID)
+	})
+	offsets := make([]flatbuffers.UOffsetT, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		offsets[i] = buildMetaObjectIndexEntry(b, entries[i])
+	}
+	clusterpb.MetaStateSnapshotStartObjectIndexVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	return b.EndVector(len(offsets))
+}
+
+func readMetaObjectIndexEntry(entry *clusterpb.MetaObjectIndexEntry) ObjectIndexEntry {
+	return ObjectIndexEntry{
+		Bucket:           string(entry.Bucket()),
+		Key:              string(entry.Key()),
+		VersionID:        string(entry.VersionId()),
+		PlacementGroupID: string(entry.PlacementGroupId()),
+		Size:             entry.Size(),
+		ContentType:      string(entry.ContentType()),
+		ETag:             string(entry.Etag()),
+		ModTime:          entry.ModTime(),
+		ECData:           entry.EcData(),
+		ECParity:         entry.EcParity(),
+		NodeIDs:          readStringVector(entry.NodeIdsLength(), entry.NodeIds),
+		IsDeleteMarker:   entry.IsDeleteMarker(),
+	}
+}
+
 func encodeMetaSetLoadSnapshotCmd(entries []LoadStatEntry) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	entryOffs := make([]flatbuffers.UOffsetT, len(entries))
@@ -1604,6 +1950,11 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func cloneObjectIndexEntry(in ObjectIndexEntry) ObjectIndexEntry {
+	in.NodeIDs = cloneStringSlice(in.NodeIDs)
+	return in
 }
 
 func cloneIcebergIdent(in icebergcatalog.Identifier) icebergcatalog.Identifier {

@@ -19,18 +19,38 @@ func TestECConfig_IsActive(t *testing.T) {
 		want        bool
 	}{
 		{"enough nodes (k+m)", ECConfig{DataShards: 4, ParityShards: 2}, 6, true},
-		{"minimum cluster size (3)", ECConfig{DataShards: 4, ParityShards: 2}, 3, true},
+		{"not enough nodes for explicit 4+2", ECConfig{DataShards: 4, ParityShards: 2}, 3, false},
 		{"single node", ECConfig{DataShards: 4, ParityShards: 2}, 1, false},
 		{"two nodes", ECConfig{DataShards: 4, ParityShards: 2}, 2, false},
 		{"larger cluster", ECConfig{DataShards: 4, ParityShards: 2}, 10, true},
 		{"disabled data shards", ECConfig{DataShards: 0, ParityShards: 2}, 3, false},
-		{"disabled parity shards", ECConfig{DataShards: 2, ParityShards: 0}, 3, false},
+		{"one plus zero single node", ECConfig{DataShards: 1, ParityShards: 0}, 1, true},
+		{"one plus zero no nodes", ECConfig{DataShards: 1, ParityShards: 0}, 0, false},
 		{"disabled zero config", ECConfig{}, 3, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.cfg.IsActive(tc.clusterSize))
 		})
+	}
+}
+
+func TestAutoECConfigForClusterSize(t *testing.T) {
+	tests := []struct {
+		nodes int
+		want  ECConfig
+	}{
+		{0, ECConfig{}},
+		{1, ECConfig{DataShards: 1, ParityShards: 0}},
+		{2, ECConfig{DataShards: 1, ParityShards: 1}},
+		{3, ECConfig{DataShards: 2, ParityShards: 1}},
+		{4, ECConfig{DataShards: 2, ParityShards: 2}},
+		{5, ECConfig{DataShards: 3, ParityShards: 2}},
+		{6, ECConfig{DataShards: 4, ParityShards: 2}},
+		{9, ECConfig{DataShards: 4, ParityShards: 2}},
+	}
+	for _, tt := range tests {
+		require.Equal(t, tt.want, AutoECConfigForClusterSize(tt.nodes))
 	}
 }
 

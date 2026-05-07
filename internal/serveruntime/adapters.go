@@ -377,6 +377,16 @@ func (r *RaftClusterInfo) ShardGroups() []cluster.ShardGroupEntry {
 	return src.ShardGroups()
 }
 
+func (r *RaftClusterInfo) ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary {
+	src, ok := r.addrBook.(interface {
+		ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary
+	})
+	if !ok {
+		return cluster.ObjectIndexSummary{Bucket: bucket, PlacementGroupCounts: map[string]int{}}
+	}
+	return src.ObjectIndexSummary(bucket)
+}
+
 func (r *RaftClusterInfo) normalizePeerIDs(peers []string) []string {
 	if len(peers) == 0 {
 		return nil

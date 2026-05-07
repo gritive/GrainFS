@@ -392,6 +392,19 @@ func Run(ctx context.Context, cfg Config) error {
 	} else if seedGroups < 1 {
 		seedGroups = 1
 	}
+	clusterSize := 1 + len(peers)
+	effectiveEC := cluster.AutoECConfigForClusterSize(clusterSize)
+	if cfg.ECExplicit {
+		effectiveEC = cluster.ECConfig{DataShards: cfg.ECData, ParityShards: cfg.ECParity}
+		if !effectiveEC.IsActive(clusterSize) {
+			return fmt.Errorf("explicit EC profile %d+%d requires %d nodes, cluster has %d",
+				cfg.ECData, cfg.ECParity, effectiveEC.NumShards(), clusterSize)
+		}
+	}
+	if !effectiveEC.IsActive(clusterSize) {
+		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)
+	}
+	normalGroupVoters := effectiveEC.NumShards()
 	if !joinMode {
 		if err := WaitForMetaRaftLeader(ctx, metaRaft, 15*time.Second); err != nil {
 			return err
@@ -402,7 +415,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		addNodeCancel()
 
-		if err := SeedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups); err != nil {
+		if err := SeedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups, normalGroupVoters); err != nil {
 			return err
 		}
 		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
@@ -556,15 +569,12 @@ func Run(ctx context.Context, cfg Config) error {
 		}()
 
 		glc := cluster.GroupLifecycleConfig{
-			NodeID:    groupNodeID,
-			DataDir:   dataDir,
-			ShardSvc:  shardSvc,
-			Transport: groupRaftMux.ForGroup(entry.ID),
-			AddrBook:  metaRaft.FSM(),
-			EC: cluster.ECConfig{
-				DataShards:   cfg.ECData,
-				ParityShards: cfg.ECParity,
-			},
+			NodeID:           groupNodeID,
+			DataDir:          dataDir,
+			ShardSvc:         shardSvc,
+			Transport:        groupRaftMux.ForGroup(entry.ID),
+			AddrBook:         metaRaft.FSM(),
+			EC:               effectiveEC,
 			ElectionTimeout:  cfg.RaftElectionTimeout,
 			HeartbeatTimeout: cfg.RaftHeartbeatInterval,
 		}
@@ -662,19 +672,15 @@ func Run(ctx context.Context, cfg Config) error {
 	loadReporter := cluster.NewLoadReporter(nodeID, loadReporterStore, metaRaft, cluster.DefaultLoadReportInterval)
 	go loadReporter.Run(ctx)
 
-	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
-	// 1-2 nodes always use N× replication.
-	distBackend.SetECConfig(cluster.ECConfig{
-		DataShards:   cfg.ECData,
-		ParityShards: cfg.ECParity,
-	})
-	log.Info().Int("k", cfg.ECData).Int("m", cfg.ECParity).
-		Bool("active", len(allNodes) >= cluster.MinECNodes).
+	distBackend.SetECConfig(effectiveEC)
+	log.Info().
+		Bool("explicit", cfg.ECExplicit).
+		Int("configured_k", cfg.ECData).
+		Int("configured_m", cfg.ECParity).
+		Int("effective_k", effectiveEC.DataShards).
+		Int("effective_m", effectiveEC.ParityShards).
+		Bool("active", effectiveEC.IsActive(len(allNodes))).
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
-
-	// VFS bucket fixed-versionID toggle (rollback path for the write-amp fix).
-	distBackend.SetVFSFixedVersionEnabled(cfg.VFSFixed)
-	log.Info().Bool("enabled", cfg.VFSFixed).Msg("VFS bucket fixed-versionID configured")
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)
@@ -731,7 +737,7 @@ func Run(ctx context.Context, cfg Config) error {
 			MigrationPendingTTL: cfg.BalancerMigrationPendingTTL,
 		}
 		var err error
-		balancerProposer, gossipReceiver, err = StartBalancer(ctx, bopts, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, cfg.ECData+cfg.ECParity)
+		balancerProposer, gossipReceiver, err = StartBalancer(ctx, bopts, nodeID, dataDir, statsStore, node, peers, fsm, quicTransport, shardSvc, effectiveEC.NumShards())
 		if err != nil {
 			log.Warn().Err(err).Msg("balancer start failed")
 		}
@@ -824,7 +830,11 @@ func Run(ctx context.Context, cfg Config) error {
 		clusterRouter,  // bucket → group lookup
 		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
 		nodeID,         // selfID for leader check
-	).WithForwardSender(forwardSender).WithNodeAddressResolver(metaRaft.FSM()).WithSelfPeerAlias(raftAddr)
+	).WithForwardSender(forwardSender).
+		WithNodeAddressResolver(metaRaft.FSM()).
+		WithSelfPeerAlias(raftAddr).
+		WithECConfig(effectiveEC).
+		WithObjectIndexProposer(metaRaft)
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, clusterCoord, "s3://grainfs-tables/warehouse"))
 	router.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 	if joinMode {

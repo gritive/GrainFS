@@ -1642,6 +1642,61 @@ func TestBootstrap_NilStoreNoOp(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestRandomElectionTimeout_WithPriorityKeySplitsMemberSlots(t *testing.T) {
+	base := 90 * time.Millisecond
+	members := []string{"node-a", "node-b", "node-c"}
+	seenRanks := make(map[int]bool)
+
+	for _, id := range members {
+		peers := make([]string, 0, len(members)-1)
+		for _, member := range members {
+			if member != id {
+				peers = append(peers, member)
+			}
+		}
+		cfg := DefaultConfig(id, peers)
+		cfg.ElectionTimeout = base
+		cfg.ElectionPriorityKey = "group-7"
+		node := NewNode(cfg)
+
+		rank, total := node.electionPriorityRank()
+		require.Equal(t, len(members), total)
+		seenRanks[rank] = true
+
+		timeout := node.randomElectionTimeout()
+		slot := base / time.Duration(total)
+		require.GreaterOrEqual(t, timeout, base+time.Duration(rank)*slot)
+		require.Less(t, timeout, base+time.Duration(rank+1)*slot)
+	}
+
+	require.Len(t, seenRanks, len(members), "each voter must occupy a unique election priority slot")
+}
+
+func TestElectionPriority_PreferredNodeVariesByGroup(t *testing.T) {
+	members := []string{"node-a", "node-b", "node-c"}
+	preferred := make(map[string]bool)
+
+	for _, groupID := range []string{"group-1", "group-2", "group-3", "group-4", "group-5", "group-6"} {
+		for _, id := range members {
+			peers := make([]string, 0, len(members)-1)
+			for _, member := range members {
+				if member != id {
+					peers = append(peers, member)
+				}
+			}
+			cfg := DefaultConfig(id, peers)
+			cfg.ElectionPriorityKey = groupID
+			node := NewNode(cfg)
+			rank, _ := node.electionPriorityRank()
+			if rank == 0 {
+				preferred[id] = true
+			}
+		}
+	}
+
+	require.GreaterOrEqual(t, len(preferred), 2, "group-specific priority should not prefer one fixed node")
+}
+
 // TestObserver_FailedHeartbeat verifies that EventFailedHeartbeat fires when
 // replicateTo cannot send AppendEntries to a peer.
 func TestObserver_FailedHeartbeat(t *testing.T) {

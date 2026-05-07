@@ -69,6 +69,10 @@ type clusterShardGroups interface {
 	ShardGroups() []cluster.ShardGroupEntry
 }
 
+type clusterObjectIndexSummary interface {
+	ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary
+}
+
 // ClusterMembership performs Raft membership mutations. nil-safe: when the
 // server runs in local mode the field is unset and the remove-peer endpoint
 // returns 503.

@@ -1,11 +1,10 @@
 package cluster
 
-// Phase 18 Cluster EC — Slice 5: background N×→EC re-placement.
+// Phase 18 Cluster EC — Slice 5: background legacy→EC re-placement.
 //
-// When a cluster grows past MinECNodes (3), existing objects stored via the
-// legacy N× path need to be converted to EC placement. The ReshardManager
-// runs on the Raft leader and walks object metadata, converting any object
-// without a placement record.
+// Existing objects stored without EC placement metadata need to be converted to
+// EC placement. The ReshardManager runs on the Raft leader and walks object
+// metadata, converting any object without a placement record.
 //
 // Leader-only: since ConvertObjectToEC proposes through Raft, only the leader
 // can propose without a redirect. Followers skip the scan to avoid wasted work.
