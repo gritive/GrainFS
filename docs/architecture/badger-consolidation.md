@@ -58,7 +58,7 @@ Per raft group, GrainFS opens **2** BadgerDB instances:
 | `internal/cluster/group_lifecycle.go:64` (`groupDir/badger`) | FSM application state | no |
 | `internal/raft/store.go:128` (`groupDir/raft`, via `NewBadgerLogStore`) | raft WAL + state + snapshot | **yes** |
 
-Per-process counts at default `--seed-groups=8`:
+Per-process counts at the automatic 1-node minimum of 8 groups:
 
 ```
 8 groups × 2 BadgerDB instances = 16 group-level BadgerDB
@@ -67,9 +67,9 @@ Per-process counts at default `--seed-groups=8`:
 × 5 nodes = 85 BadgerDB cluster-wide
 ```
 
-At default `--seed-groups`, larger clusters seed even more. The current `--seed-groups=N`
-policy (`max(8, cluster_size×4)`) means the scaling is linear with cluster size, and
-goroutine count is super-linear when cluster_size > 2.
+With the zero-config policy (`max(8, cluster_size×4)`), larger clusters seed even
+more. The scaling is linear with cluster size, and goroutine count is super-linear
+when cluster_size > 2.
 
 ## Why C1 alone isn't enough
 

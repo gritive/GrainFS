@@ -118,7 +118,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "2",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
@@ -402,7 +401,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "2",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)

@@ -36,7 +36,6 @@ PRELOAD_IN_SHELL="${PRELOAD_IN_SHELL:-1}"
 PROFILE="${PROFILE:-1}"
 PROFILE_ALL_NODES="${PROFILE_ALL_NODES:-0}"
 REQUESTED_TARGET_IDX="${TARGET_IDX:-}"
-SEED_GROUPS="${SEED_GROUPS:-0}"
 REQUIRE_GROUP_VOTERS="${REQUIRE_GROUP_VOTERS:-0}"
 BUCKET="${BUCKET:-bench}"
 SCRIPT="$BENCHMARKS_DIR/s3_get_bench.js"
@@ -128,7 +127,6 @@ start_node() {
       --raft-addr "127.0.0.1:${raft_port}"
       --peers "$(peers_for_idx "$idx")"
       --cluster-key "bench-topology-key"
-      --seed-groups "$SEED_GROUPS"
     )
   fi
 
@@ -346,7 +344,7 @@ else
 fi
 echo "  vus    : ${VUS}  duration: ${DURATION}"
 echo "  ec     : auto profile from NODE_COUNT / assigned group voters"
-echo "  groups : seed=${SEED_GROUPS} require_voters=${REQUIRE_GROUP_VOTERS}"
+echo "  groups : auto seed count, require_voters=${REQUIRE_GROUP_VOTERS}"
 if [[ "$PROFILE" == "1" ]]; then
   echo "  pprof  : http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/"
   [[ "$PROFILE_ALL_NODES" == "1" ]] && echo "  pprof  : all nodes enabled"

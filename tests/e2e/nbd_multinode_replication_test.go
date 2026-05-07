@@ -27,7 +27,6 @@ func TestE2E_NBDMultiNode_ByteLevelReplication(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
-		SeedGroups: 3,
 		Mode:       ClusterModeStaticPeers,
 		DisableNFS: true,
 	})

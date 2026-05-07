@@ -32,6 +32,7 @@ func newClusterTestCmd(clusterKey string) *cobra.Command {
 func TestServeCmd_RemovesManualECFlags(t *testing.T) {
 	require.Nil(t, serveCmd.Flags().Lookup("ec-data"))
 	require.Nil(t, serveCmd.Flags().Lookup("ec-parity"))
+	require.Nil(t, serveCmd.Flags().Lookup("seed-groups"))
 }
 
 // TestRunCluster_EmptyClusterKey_ReturnsError verifies the cluster-key guard

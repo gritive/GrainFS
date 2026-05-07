@@ -95,7 +95,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "2",
 			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
@@ -243,7 +242,6 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      numNodes,
 		Mode:       ClusterModeStaticPeers,
-		SeedGroups: 2,
 		ClusterKey: clusterKey,
 		AccessKey:  accessKey,
 		SecretKey:  secretKey,
@@ -447,7 +445,6 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "2",
 			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile

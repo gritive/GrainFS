@@ -46,7 +46,6 @@ type Config struct {
 	QUICMuxPoolSize       int
 	QUICMuxFlushWindow    time.Duration
 	SharedBadgerEnabled   bool
-	SeedGroups            int
 
 	// Storage / EC
 	DirectIO       bool
