@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,8 +28,10 @@ func clusterRotateKeyCmd() *cobra.Command {
   status  — print the current rotation state
   abort   — cancel an in-flight rotation (leader only)
 
-Communication uses a Unix domain socket at $DATA/rotate.sock with mode 0600,
-so only the operator on the local node can issue rotation commands.
+Communication uses a Unix domain socket bound by the running server with mode
+0600, so only the operator on the local node can issue rotation commands. Pass
+the socket path via --endpoint (e.g. --endpoint ./tmp/rotate.sock); the server
+logs the path on startup ("rotate endpoint").
 
 Workflow (online rolling, zero-downtime):
   1. Generate or supply a new 32-byte PSK (64 hex chars).
@@ -48,7 +50,8 @@ Failures roll back automatically:
   - global timeout (30 min): auto-abort`,
 	}
 	c.AddCommand(clusterRotateKeyBegin(), clusterRotateKeyStatus(), clusterRotateKeyAbort())
-	c.PersistentFlags().String("data", "./tmp", "GrainFS data directory (must contain rotate.sock)")
+	c.PersistentFlags().String("endpoint", "",
+		"rotation Unix socket path (required, e.g. ./tmp/rotate.sock)")
 	return c
 }
 
@@ -57,7 +60,7 @@ func clusterRotateKeyBegin() *cobra.Command {
 		Use:   "begin",
 		Short: "Start a new rotation with the supplied PSK",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dataDir, _ := cmd.Flags().GetString("data")
+			endpoint, _ := cmd.Flags().GetString("endpoint")
 			newKey, _ := cmd.Flags().GetString("new-key")
 			if newKey == "" {
 				gen, _ := cmd.Flags().GetBool("generate")
@@ -72,7 +75,7 @@ func clusterRotateKeyBegin() *cobra.Command {
 				fmt.Printf("Generated new PSK: %s\n", newKey)
 				fmt.Println("Save this securely — you must distribute it to all peers' configs.")
 			}
-			resp, err := submitRotation(dataDir, serveruntime.RotationSocketRequest{Action: "begin", NewKey: newKey})
+			resp, err := submitRotation(endpoint, serveruntime.RotationSocketRequest{Action: "begin", NewKey: newKey})
 			if err != nil {
 				return err
 			}
@@ -96,8 +99,8 @@ func clusterRotateKeyStatus() *cobra.Command {
 		Use:   "status",
 		Short: "Show current rotation state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dataDir, _ := cmd.Flags().GetString("data")
-			resp, err := submitRotation(dataDir, serveruntime.RotationSocketRequest{Action: "status"})
+			endpoint, _ := cmd.Flags().GetString("endpoint")
+			resp, err := submitRotation(endpoint, serveruntime.RotationSocketRequest{Action: "status"})
 			if err != nil {
 				return err
 			}
@@ -125,9 +128,9 @@ func clusterRotateKeyAbort() *cobra.Command {
 		Use:   "abort",
 		Short: "Cancel an in-flight rotation",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dataDir, _ := cmd.Flags().GetString("data")
+			endpoint, _ := cmd.Flags().GetString("endpoint")
 			reason, _ := cmd.Flags().GetString("reason")
-			resp, err := submitRotation(dataDir, serveruntime.RotationSocketRequest{Action: "abort", Reason: reason})
+			resp, err := submitRotation(endpoint, serveruntime.RotationSocketRequest{Action: "abort", Reason: reason})
 			if err != nil {
 				return err
 			}
@@ -142,8 +145,12 @@ func clusterRotateKeyAbort() *cobra.Command {
 	return c
 }
 
-func submitRotation(dataDir string, req serveruntime.RotationSocketRequest) (serveruntime.RotationSocketResponse, error) {
-	sock := filepath.Join(dataDir, serveruntime.RotationSocketName)
+func submitRotation(endpoint string, req serveruntime.RotationSocketRequest) (serveruntime.RotationSocketResponse, error) {
+	sock := strings.TrimSpace(endpoint)
+	if sock == "" {
+		return serveruntime.RotationSocketResponse{}, fmt.Errorf("rotate endpoint not configured.\n" +
+			"  Hint:  grainfs cluster rotate-key <begin|status|abort> --endpoint <data-dir>/rotate.sock")
+	}
 	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
 		return serveruntime.RotationSocketResponse{}, fmt.Errorf("dial %s: %w", sock, err)

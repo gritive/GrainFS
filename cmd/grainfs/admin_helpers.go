@@ -49,11 +49,10 @@ func applyAdminTimeout(ctx context.Context, cmd *cobra.Command) (context.Context
 
 // registerAdminEndpointFlag adds --endpoint to cmd's PersistentFlags so every
 // admin subcommand below it inherits a single shared resolver. The value is a
-// bare UDS path (e.g. ./tmp/admin.sock); when unset, resolution falls back to
-// $GRAINFS_ENDPOINT.
+// bare UDS path (e.g. ./tmp/admin.sock); when unset, resolution fails fast.
 func registerAdminEndpointFlag(cmd *cobra.Command) {
 	cmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (default: $GRAINFS_ENDPOINT)")
+		"admin Unix socket path (required, e.g. ./tmp/admin.sock)")
 }
 
 // adminClientFromCmd reads --endpoint and returns a configured admin client.

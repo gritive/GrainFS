@@ -5,9 +5,7 @@ import (
 	"testing"
 )
 
-func TestResolveEndpoint_FlagWins(t *testing.T) {
-	t.Setenv("GRAINFS_ENDPOINT", "/from/env/admin.sock")
-
+func TestResolveEndpoint_Flag(t *testing.T) {
 	got, err := ResolveEndpoint("/from/flag/admin.sock")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -17,36 +15,23 @@ func TestResolveEndpoint_FlagWins(t *testing.T) {
 	}
 }
 
-func TestResolveEndpoint_EnvWhenFlagEmpty(t *testing.T) {
-	t.Setenv("GRAINFS_ENDPOINT", "/from/env/admin.sock")
-
-	got, err := ResolveEndpoint("")
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if got != "/from/env/admin.sock" {
-		t.Errorf("got %q, want env value", got)
-	}
-}
-
 func TestResolveEndpoint_FailFastWithHint(t *testing.T) {
-	t.Setenv("GRAINFS_ENDPOINT", "")
-
 	_, err := ResolveEndpoint("")
 	if err == nil {
 		t.Fatal("want error")
 	}
 	msg := err.Error()
-	for _, want := range []string{"admin endpoint not configured", "--endpoint", "GRAINFS_ENDPOINT"} {
+	for _, want := range []string{"admin endpoint not configured", "--endpoint"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error missing %q: %s", want, msg)
 		}
 	}
+	if strings.Contains(msg, "GRAINFS_ENDPOINT") {
+		t.Errorf("hint should not mention env var: %s", msg)
+	}
 }
 
 func TestResolveEndpoint_TrimsWhitespace(t *testing.T) {
-	t.Setenv("GRAINFS_ENDPOINT", "")
-
 	got, err := ResolveEndpoint("  /trim/admin.sock  ")
 	if err != nil {
 		t.Fatalf("err: %v", err)

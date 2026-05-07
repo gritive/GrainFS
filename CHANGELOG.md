@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.84.0] - 2026-05-07 — `cluster rotate-key`도 `--endpoint`로 통합 + env fallback 제거
+
+### Changed (BREAKING)
+
+- **`cluster rotate-key`의 `--data` 제거, `--endpoint` 도입.** 기존
+  `grainfs cluster rotate-key {begin,status,abort} --data ./tmp` 형태는 더 이상
+  동작하지 않으며 `--endpoint ./tmp/rotate.sock` 으로 socket 경로를 직접
+  넘겨야 합니다. CLI가 `<data>/rotate.sock` 내부 구조에 의존하던 layering leak
+  제거.
+- **endpoint env fallback 제거.** admin/rotate 양쪽 모두 `--endpoint` flag만
+  지원하고 `$GRAINFS_ENDPOINT` fallback은 삭제됐습니다. rotate-key는 일회성/사고
+  대응용이라 env 편의 가치가 작고, 두 socket이 다른 파일이므로 단일 env가
+  의미 없음. admin은 일관성 차원으로 같이 정리. 명령줄에 socket path가
+  항상 보이게 되어 사고 시 추적성도 개선.
+
+### Changed
+
+- `serve` 시작 로그에서 rotate socket 출력 shape을 admin과 통일.
+  `rotation socket listening` 한 줄 → `rotate endpoint path=... hint="--endpoint <path>"`
+  형태로 변경되어 두 endpoint를 동일한 grep 패턴으로 추적 가능.
+- `volumeadmin.ResolveEndpoint`는 flag → fail-fast로 단순화. 기존 env 분기 삭제,
+  hint 메시지에서 `GRAINFS_ENDPOINT` 언급 제거.
+
+### Migration
+
+```sh
+# Before
+grainfs cluster rotate-key status --data ./tmp
+
+# After
+grainfs cluster rotate-key status --endpoint ./tmp/rotate.sock
+```
+
+admin CLI도 동일하게 `export GRAINFS_ENDPOINT=...` 형태가 더 이상 통하지
+않으므로 매번 `--endpoint <path>`로 명시. `grainfs serve`가 시작 시 두 endpoint
+경로를 모두 출력하므로 그대로 복사하면 됩니다.
+
 ## [0.0.82.0] - 2026-05-07 — admin CLI: `--data` 제거하고 `--endpoint`로 통합
 
 ### Changed (BREAKING)

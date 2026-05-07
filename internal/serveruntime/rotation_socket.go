@@ -58,7 +58,9 @@ func StartRotationSocket(ctx context.Context, dataDir string, metaRaft *cluster.
 		ln.Close()
 		return fmt.Errorf("rotate.sock: chmod: %w", err)
 	}
-	log.Info().Str("socket", sockPath).Msg("rotation socket listening")
+	log.Info().Str("path", sockPath).
+		Str("hint", fmt.Sprintf("--endpoint %q", sockPath)).
+		Msg("rotate endpoint")
 
 	go func() {
 		<-ctx.Done()
