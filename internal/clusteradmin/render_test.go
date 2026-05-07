@@ -23,10 +23,23 @@ func TestPeersFromStatus_TagsLeaderAndDown(t *testing.T) {
 	assert.Equal(t, "n1", rows[0].ID)
 	assert.Equal(t, "10.0.0.1:7001", rows[0].RaftAddr)
 	assert.Equal(t, "leader", rows[0].Role)
-	assert.Equal(t, "configured", rows[0].State)
+	assert.Equal(t, "unknown_configured", rows[0].State)
 	assert.Equal(t, "n3", rows[2].ID)
 	assert.Equal(t, "follower", rows[2].Role)
 	assert.Equal(t, "down", rows[2].State)
+}
+
+func TestPeersFromStatus_RendersConfiguredAsUnknown(t *testing.T) {
+	s := &Status{
+		Mode:       "cluster",
+		Peers:      []string{"n2"},
+		PeerStates: map[string]string{"n2": "configured"},
+	}
+
+	rows := PeersFromStatus(s)
+
+	require.Len(t, rows, 1)
+	assert.Equal(t, "unknown_configured", rows[0].State)
 }
 
 func TestPeersFromStatus_UsesExplicitPeerState(t *testing.T) {

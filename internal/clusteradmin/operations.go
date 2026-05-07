@@ -9,6 +9,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // RemovePeerOptions carries the inputs the operator-facing remove-peer
@@ -70,13 +72,25 @@ func RemovePeer(ctx context.Context, opts RemovePeerOptions) error {
 			status.State, status.LeaderID)
 	}
 
-	live := LivePeersFromStatus(status.Peers, status.DownNodes, status.NodeID)
-	pre := Check(status.Peers, live, opts.ID)
+	result, ok := removePeerPreflightFromStatus(status, opts.ID)
+	if !ok {
+		return errors.New("pre-flight: peer snapshot unavailable; cluster liveness snapshot is required before membership mutation")
+	}
 
-	fmt.Fprintf(opts.Stderr, "Removing %s from cluster:\n  %s\n", opts.ID, pre.Summary())
-	if pre.WouldBlock && !opts.Force {
-		return fmt.Errorf("pre-flight: alive_after (%d) < new_quorum (%d); rerun with --force to override",
-			pre.AliveAfter, pre.NewQuorum)
+	fmt.Fprintf(opts.Stderr, "Removing %s from cluster:\n  %s\n", opts.ID, removePeerPreflightSummary(result))
+	if !result.Allowed {
+		switch result.Reason {
+		case cluster.RemovePeerPreflightQuorumWouldBreak:
+			if !opts.Force {
+				return fmt.Errorf("pre-flight: alive_after (%d) < new_quorum (%d); rerun with --force to override",
+					result.AliveAfter, result.NewQuorum)
+			}
+		case cluster.RemovePeerPreflightIdentityUnresolved:
+			return fmt.Errorf("pre-flight: identity unresolved; remove blocking peers first: %s",
+				strings.Join(result.BlockingPeers, ", "))
+		default:
+			return fmt.Errorf("pre-flight: %s", result.Reason)
+		}
 	}
 
 	if !opts.AssumeYes {
@@ -96,6 +110,22 @@ func RemovePeer(ctx context.Context, opts RemovePeerOptions) error {
 	}
 	fmt.Fprintf(opts.Stdout, "removed %s\n", opts.ID)
 	return nil
+}
+
+func removePeerPreflightFromStatus(status *Status, target string) (cluster.RemovePeerPreflightResult, bool) {
+	if len(status.PeerSnapshot) == 0 {
+		return cluster.RemovePeerPreflightResult{}, false
+	}
+	return cluster.EvaluateRemovePeerPreflight(cluster.RemovePeerPreflightInput{
+		TargetID: target,
+		Voters:   status.Peers,
+		Snapshot: status.PeerSnapshot,
+	}), true
+}
+
+func removePeerPreflightSummary(result cluster.RemovePeerPreflightResult) string {
+	return fmt.Sprintf("voters: %d -> %d   alive_after: %d   new_quorum: %d",
+		result.VotersAfter+1, result.VotersAfter, result.AliveAfter, result.NewQuorum)
 }
 
 // PeersOptions describes how the peers listing should be fetched and rendered.

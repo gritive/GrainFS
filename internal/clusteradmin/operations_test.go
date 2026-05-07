@@ -52,6 +52,34 @@ func (s *stubServer) handler() http.Handler {
 	return mux
 }
 
+func testPeerSnapshot(rows ...map[string]any) []map[string]any {
+	return rows
+}
+
+func testLivePeer(id string) map[string]any {
+	state := "resolved"
+	reason := "raft_append_success"
+	if id == "n1" {
+		state = "self"
+		reason = "self"
+	}
+	return map[string]any{
+		"peer_id":        id,
+		"identity_state": state,
+		"liveness_state": "live",
+		"reason":         reason,
+	}
+}
+
+func testDownPeer(id string) map[string]any {
+	return map[string]any{
+		"peer_id":        id,
+		"identity_state": "resolved",
+		"liveness_state": "health_cooldown",
+		"reason":         "peer_health_cooldown",
+	}
+}
+
 func TestRemovePeer_HappyPath(t *testing.T) {
 	stub := &stubServer{
 		statusBody: map[string]any{
@@ -60,6 +88,11 @@ func TestRemovePeer_HappyPath(t *testing.T) {
 			"state":     "Leader",
 			"leader_id": "n1",
 			"peers":     []string{"n2", "n3"},
+			"peer_snapshot": testPeerSnapshot(
+				testLivePeer("n1"),
+				testLivePeer("n2"),
+				testLivePeer("n3"),
+			),
 		},
 		removeBody: map[string]any{"status": "removed", "id": "n3"},
 	}
@@ -173,6 +206,11 @@ func TestRemovePeer_PreflightBlocksWithoutForce(t *testing.T) {
 			"leader_id":  "n1",
 			"peers":      []string{"n2", "n3"},
 			"down_nodes": []string{"n3"}, // n3 dead → removing n2 leaves only self alive
+			"peer_snapshot": testPeerSnapshot(
+				testLivePeer("n1"),
+				testLivePeer("n2"),
+				testDownPeer("n3"),
+			),
 		},
 	}
 	srv := httptest.NewServer(stub.handler())
@@ -191,6 +229,71 @@ func TestRemovePeer_PreflightBlocksWithoutForce(t *testing.T) {
 	assert.Equal(t, int32(0), stub.removeCalls.Load())
 }
 
+func TestRemovePeer_ConfiguredPeerDoesNotCountAsAlive(t *testing.T) {
+	stub := &stubServer{
+		statusBody: map[string]any{
+			"mode":      "cluster",
+			"node_id":   "n1",
+			"state":     "Leader",
+			"leader_id": "n1",
+			"peers":     []string{"n2", "n3"},
+			"peer_snapshot": []map[string]any{
+				{"peer_id": "n1", "identity_state": "self", "liveness_state": "live"},
+				{"peer_id": "n2", "identity_state": "resolved", "liveness_state": "configured"},
+				{"peer_id": "n3", "identity_state": "resolved", "liveness_state": "live"},
+			},
+		},
+	}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	err := RemovePeer(context.Background(), RemovePeerOptions{
+		Endpoint:  srv.URL,
+		ID:        "n3",
+		AssumeYes: true,
+		Timeout:   5 * time.Second,
+		Stdout:    &bytes.Buffer{},
+		Stderr:    &bytes.Buffer{},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "alive_after")
+	assert.Equal(t, int32(0), stub.removeCalls.Load())
+}
+
+func TestRemovePeer_ForceDoesNotBypassUnresolvedLegacyBlocker(t *testing.T) {
+	stub := &stubServer{
+		statusBody: map[string]any{
+			"mode":      "cluster",
+			"node_id":   "n1",
+			"state":     "Leader",
+			"leader_id": "n1",
+			"peers":     []string{"n2", "10.0.0.9:7001"},
+			"peer_snapshot": []map[string]any{
+				{"peer_id": "n1", "identity_state": "self", "liveness_state": "live"},
+				{"peer_id": "n2", "identity_state": "resolved", "liveness_state": "live"},
+				{"peer_id": "10.0.0.9:7001", "identity_state": "unresolved_legacy", "liveness_state": "configured"},
+			},
+		},
+	}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	err := RemovePeer(context.Background(), RemovePeerOptions{
+		Endpoint:  srv.URL,
+		ID:        "n2",
+		Force:     true,
+		AssumeYes: true,
+		Timeout:   5 * time.Second,
+		Stdout:    &bytes.Buffer{},
+		Stderr:    &bytes.Buffer{},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity unresolved")
+	assert.Equal(t, int32(0), stub.removeCalls.Load())
+}
+
 func TestRemovePeer_ForcePropagatesToServer(t *testing.T) {
 	stub := &stubServer{
 		statusBody: map[string]any{
@@ -200,6 +303,11 @@ func TestRemovePeer_ForcePropagatesToServer(t *testing.T) {
 			"leader_id":  "n1",
 			"peers":      []string{"n2", "n3"},
 			"down_nodes": []string{"n3"},
+			"peer_snapshot": testPeerSnapshot(
+				testLivePeer("n1"),
+				testLivePeer("n2"),
+				testDownPeer("n3"),
+			),
 		},
 		removeBody: map[string]any{"status": "removed", "id": "n2"},
 	}
@@ -228,6 +336,11 @@ func TestRemovePeer_PromptYesProceedsBlankAborts(t *testing.T) {
 			"state":     "Leader",
 			"leader_id": "n1",
 			"peers":     []string{"n2", "n3"},
+			"peer_snapshot": testPeerSnapshot(
+				testLivePeer("n1"),
+				testLivePeer("n2"),
+				testLivePeer("n3"),
+			),
 		},
 		removeBody: map[string]any{"status": "removed", "id": "n3"},
 	}
@@ -268,6 +381,11 @@ func TestRemovePeer_ServerErrorSurfaced(t *testing.T) {
 			"state":     "Leader",
 			"leader_id": "n1",
 			"peers":     []string{"n2", "n3"},
+			"peer_snapshot": testPeerSnapshot(
+				testLivePeer("n1"),
+				testLivePeer("n2"),
+				testLivePeer("n3"),
+			),
 		},
 		removeCode: http.StatusInternalServerError,
 		removeBody: map[string]any{"error": "conf change in progress"},

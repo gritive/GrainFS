@@ -529,8 +529,8 @@ type objectReadAtBackend interface {
 }
 
 type readAtRangeReader struct {
-	ctx           context.Context
-	backend       objectReadAtBackend
+	ctx            context.Context
+	backend        objectReadAtBackend
 	bucket, key    string
 	offset, length int64
 	pos            int64
@@ -1420,56 +1420,14 @@ func (s *Server) removePeerHandler(ctx context.Context, c *app.RequestContext) {
 
 	if result, ok := s.evaluateRemovePeerPreflight(req.ID); ok {
 		if !result.Allowed {
-			if result.Reason == cluster.RemovePeerPreflightNotInCluster || !req.Force {
+			if result.Reason != cluster.RemovePeerPreflightQuorumWouldBreak || !req.Force {
 				writeRemovePeerPreflightFailure(c, result, req.ID)
 				return
 			}
 		}
 	} else {
-		peers := s.cluster.Peers()
-		inCluster := false
-		for _, p := range peers {
-			if p == req.ID {
-				inCluster = true
-				break
-			}
-		}
-		if !inCluster {
-			c.JSON(consts.StatusNotFound, map[string]any{
-				"error": "peer not in cluster",
-				"id":    req.ID,
-			})
-			return
-		}
-
-		if !req.Force {
-			// Peers() excludes self → total voters = len(peers) + 1. The target
-			// is in peers (checked above), so votersAfter = total - 1 = len(peers).
-			// LivePeers() includes self (always alive from its own perspective).
-			votersAfter := len(peers)
-			newQuorum := votersAfter/2 + 1
-			if newQuorum < 1 {
-				newQuorum = 1
-			}
-			live := s.cluster.LivePeers()
-			aliveAfter := 0
-			for _, p := range live {
-				if p == req.ID {
-					continue
-				}
-				aliveAfter++
-			}
-			if aliveAfter < newQuorum {
-				c.JSON(consts.StatusConflict, map[string]any{
-					"error":        "quorum would break",
-					"voters_after": votersAfter,
-					"alive_after":  aliveAfter,
-					"new_quorum":   newQuorum,
-					"hint":         "rerun with force=true to override",
-				})
-				return
-			}
-		}
+		writeRemovePeerSnapshotUnavailable(c)
+		return
 	}
 
 	if err := s.membership.RemoveVoter(ctx, req.ID); err != nil {
@@ -1513,6 +1471,13 @@ func (s *Server) evaluateRemovePeerPreflight(id string) (cluster.RemovePeerPrefl
 		Voters:   s.cluster.Peers(),
 		Snapshot: snapshot,
 	}), true
+}
+
+func writeRemovePeerSnapshotUnavailable(c *app.RequestContext) {
+	c.JSON(consts.StatusConflict, map[string]string{
+		"error": "peer snapshot unavailable",
+		"hint":  "cluster liveness snapshot is required before membership mutation",
+	})
 }
 
 func writeRemovePeerPreflightFailure(c *app.RequestContext, result cluster.RemovePeerPreflightResult, id string) {

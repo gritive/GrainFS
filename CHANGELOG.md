@@ -14,6 +14,9 @@
 - Heal-receipt shutdown now cancels and waits for the gossip sender before
   closing the receipt store, preventing background receipt reads after the
   Badger DB has closed.
+- `cluster remove-peer` now refuses membership mutation when peer liveness
+  snapshot data is unavailable, and `cluster peers` renders configured peers as
+  unknown rather than healthy.
 
 ### Added
 
@@ -107,8 +110,8 @@
 
 - Remove-peer preflight now treats `configured` remote voters as unknown rather
   than alive, while still counting `self` and explicitly live resolved voters.
-- The server keeps the legacy `LivePeers()` preflight only as a compatibility
-  fallback when a cluster Adapter has no peer snapshot.
+- Remove-peer now refuses membership mutation when a cluster Adapter has no peer
+  snapshot, rather than falling back to legacy `LivePeers()` quorum math.
 
 ### Fixed
 
