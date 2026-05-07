@@ -248,6 +248,8 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		AccessKey:  accessKey,
 		SecretKey:  secretKey,
 		LogPrefix:  "cluster-ec-3node",
+		DisableNFS: true,
+		DisableNBD: true,
 	})
 
 	var client *s3.Client
@@ -271,7 +273,14 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 
 	// PUT: EC must be active on 3-node cluster (k=2, m=1).
 	require.Eventually(t, func() bool {
-		return tryPutObject(ctx, client, bucketName, "ec-obj", data) == nil
+		for i := 0; i < numNodes; i++ {
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			if tryPutObject(ctx, candidate, bucketName, "ec-obj", data) == nil {
+				client = candidate
+				return true
+			}
+		}
+		return false
 	}, 60*time.Second, 1*time.Second, "PutObject on 3-node cluster with dynamic EC k=2,m=1 must succeed")
 
 	// GET with all 3 nodes up: must reconstruct correctly.
