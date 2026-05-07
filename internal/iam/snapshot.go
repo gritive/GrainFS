@@ -2,6 +2,7 @@ package iam
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -18,6 +19,7 @@ import (
 //	[u32 N_keys] [N_keys × (u32 len, FB KeyCreatePayload)]   // SecretKeyEnc only, never plaintext
 //	[u32 N_grants] [N_grants × (u32 len, FB GrantPutPayload)]
 //	[u32 N_wildcards] [N_wildcards × (u32 len, FB GrantWildcardPutPayload)]
+//	[u32 N_revoked] [N_revoked × (u32 len, raw access_key bytes)]
 //
 // All sizes are little-endian u32. Each FB blob is independently parseable.
 const snapshotVersion uint8 = 1
@@ -75,6 +77,22 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 	}
 	for saID, role := range st.wildcards {
 		if err := writeBlob(w, buildGrantWildcardPutPayload(Grant{SAID: saID, Role: role})); err != nil {
+			return err
+		}
+	}
+
+	// Revoked AKs section — preserve revocation across restore.
+	revokedAKs := make([]string, 0)
+	for ak, k := range st.keysByAK {
+		if k.Status == KeyStatusRevoked {
+			revokedAKs = append(revokedAKs, ak)
+		}
+	}
+	if err := writeUint32(w, uint32(len(revokedAKs))); err != nil {
+		return err
+	}
+	for _, ak := range revokedAKs {
+		if err := writeBlob(w, []byte(ak)); err != nil {
 			return err
 		}
 	}
@@ -148,6 +166,24 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		if err := ap.ApplyGrantWildcardPut(blob); err != nil {
 			return err
 		}
+	}
+
+	nR, err := readUint32(r)
+	if err != nil {
+		// Older snapshots without the revoked section: io.EOF means zero bytes
+		// read (end of stream), which is acceptable. Any other error is real.
+		if errors.Is(err, io.EOF) {
+			nR = 0
+		} else {
+			return err
+		}
+	}
+	for i := uint32(0); i < nR; i++ {
+		blob, err := readBlob(r)
+		if err != nil {
+			return err
+		}
+		dst.applyKeyRevoke(string(blob))
 	}
 
 	if hdr[1] == 1 {

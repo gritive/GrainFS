@@ -85,3 +85,37 @@ func TestSnapshot_EmptyStoreRoundtrip(t *testing.T) {
 		t.Fatal("authEnabled flipped on empty snapshot")
 	}
 }
+
+func TestSnapshot_RevokedKeyStatusPreserved(t *testing.T) {
+	enc := newTestEncryptor(t)
+	src := NewStore()
+	wrapped, _ := WrapSecret(enc, "sa-1", "secret")
+	src.applySACreate(ServiceAccount{ID: "sa-1"})
+	src.applyKeyCreate(AccessKey{
+		AccessKey: "AK-LIVE", SAID: "sa-1", SecretKey: "secret",
+		SecretKeyEnc: wrapped, Status: KeyStatusActive,
+	})
+	src.applyKeyCreate(AccessKey{
+		AccessKey: "AK-REVOKED", SAID: "sa-1", SecretKey: "secret",
+		SecretKeyEnc: wrapped, Status: KeyStatusActive,
+	})
+	src.applyKeyRevoke("AK-REVOKED")
+
+	var buf bytes.Buffer
+	if err := WriteSnapshot(&buf, src); err != nil {
+		t.Fatalf("WriteSnapshot: %v", err)
+	}
+	dst := NewStore()
+	if err := ReadSnapshot(&buf, dst, enc); err != nil {
+		t.Fatalf("ReadSnapshot: %v", err)
+	}
+
+	// Live key still resolves.
+	if _, ok := dst.LookupKey("AK-LIVE"); !ok {
+		t.Fatal("LookupKey miss for live key after restore")
+	}
+	// Revoked key MUST NOT resolve.
+	if _, ok := dst.LookupKey("AK-REVOKED"); ok {
+		t.Fatal("LookupKey hit for revoked key after restore — Status not preserved")
+	}
+}
