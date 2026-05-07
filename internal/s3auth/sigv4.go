@@ -87,8 +87,8 @@ func (v *Verifier) Verify(r *http.Request) (string, error) {
 	region := credParts[2]
 	service := credParts[3]
 
-	secretKey, ok := v.creds[accessKey]
-	if !ok {
+	secretKey := v.LookupSecret(accessKey)
+	if secretKey == "" {
 		return "", fmt.Errorf("unknown access key: %s", accessKey)
 	}
 
@@ -149,8 +149,8 @@ func (v *Verifier) verifyPresigned(r *http.Request) (string, error) {
 	region := credParts[2]
 	service := credParts[3]
 
-	secretKey, ok := v.creds[accessKey]
-	if !ok {
+	secretKey := v.LookupSecret(accessKey)
+	if secretKey == "" {
 		return "", fmt.Errorf("unknown access key: %s", accessKey)
 	}
 

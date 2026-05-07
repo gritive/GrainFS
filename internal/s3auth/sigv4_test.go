@@ -147,3 +147,46 @@ func TestVerifyPresignedURLWrongSignature(t *testing.T) {
 	_, err = v.Verify(req)
 	assert.Error(t, err, "expected error for wrong signature")
 }
+
+// TestVerify_SecretLookupFallback exercises the IAM-backed path: empty
+// static creds + a SecretLookup function that resolves the access_key
+// must authenticate. Regression guard for the bug where Verify and
+// verifyPresigned read v.creds directly and ignored SecretLookup,
+// breaking every IAM-issued SA key.
+func TestVerify_SecretLookupFallback(t *testing.T) {
+	v := NewVerifier(nil)
+	v.SecretLookup = func(ak string) (string, bool) {
+		if ak == "AKID-IAM" {
+			return "SECRET-IAM", true
+		}
+		return "", false
+	}
+
+	t.Run("header_signed", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, "http://localhost:9000/b", nil)
+		req.Host = "localhost:9000"
+		SignRequest(req, "AKID-IAM", "SECRET-IAM", "us-east-1")
+		got, err := v.Verify(req)
+		require.NoError(t, err)
+		assert.Equal(t, "AKID-IAM", got)
+	})
+
+	t.Run("presigned", func(t *testing.T) {
+		presigned, err := PresignURL(http.MethodGet, "http://localhost:9000/b/k",
+			"AKID-IAM", "SECRET-IAM", "us-east-1", 3600)
+		require.NoError(t, err)
+		req, _ := http.NewRequest(http.MethodGet, presigned, nil)
+		req.Host = "localhost:9000"
+		got, err := v.Verify(req)
+		require.NoError(t, err)
+		assert.Equal(t, "AKID-IAM", got)
+	})
+
+	t.Run("unknown_key_still_rejected", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, "http://localhost:9000/b", nil)
+		req.Host = "localhost:9000"
+		SignRequest(req, "AKID-OTHER", "SECRET-OTHER", "us-east-1")
+		_, err := v.Verify(req)
+		assert.Error(t, err)
+	})
+}
