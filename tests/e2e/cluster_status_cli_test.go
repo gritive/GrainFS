@@ -3,6 +3,7 @@ package e2e
 import (
 	"encoding/json"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,11 +14,16 @@ import (
 // the cluster state for a no-peers (singleton) server. After the
 // unification, all servers run DistributedBackend so mode is always "cluster";
 // singletons are distinguished by peers=0.
+//
+// The cluster CLI uses the admin Unix socket (mode 0660 + admin-group)
+// since v0.0.89; HTTP /api/cluster/status remains for the dashboard.
 func TestClusterStatusCLI_NoPeers(t *testing.T) {
 	binary := getBinary()
+	sock := filepath.Join(testServerDataDir, "admin.sock")
 
-	out, err := exec.Command(binary, "cluster", "status",
-		"--endpoint", testServerURL,
+	out, err := exec.Command(binary, "cluster",
+		"--endpoint", sock,
+		"status", "--format", "json",
 	).Output()
 	require.NoError(t, err, "cluster status command must succeed")
 
@@ -30,13 +36,14 @@ func TestClusterStatusCLI_NoPeers(t *testing.T) {
 }
 
 // TestClusterStatusCLI_HumanReadable verifies default human-readable output
-// when --json is not specified.
+// (--format text). Default for cluster is text since v0.0.89.
 func TestClusterStatusCLI_HumanReadable(t *testing.T) {
 	binary := getBinary()
+	sock := filepath.Join(testServerDataDir, "admin.sock")
 
-	out, err := exec.Command(binary, "cluster", "status",
-		"--endpoint", testServerURL,
-		"--format", "text",
+	out, err := exec.Command(binary, "cluster",
+		"--endpoint", sock,
+		"status", "--format", "text",
 	).Output()
 	require.NoError(t, err, "cluster status command must succeed")
 
