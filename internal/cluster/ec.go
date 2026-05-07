@@ -17,11 +17,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Default EC parameters for 4+2 Reed-Solomon. Exposed so serve flags
-// and tests share a single source of truth.
 const (
-	DefaultDataShards   = 4
-	DefaultParityShards = 2
+	// MaxAutoDataShards caps zero-config data shard fan-out. Parity remains
+	// fixed at two for normal clusters; larger durability policies belong in a
+	// future expert/archival policy, not the startup CLI.
+	MaxAutoDataShards = 6
+	AutoParityShards  = 2
 	// maxECPooledReadObjectSize caps the all-data-present read prefetch path so
 	// large object GETs keep the previous streaming memory profile.
 	maxECPooledReadObjectSize = 128 << 20
@@ -46,8 +47,7 @@ func (c ECConfig) IsActive(clusterSize int) bool {
 }
 
 // AutoECConfigForClusterSize returns the zero-config EC profile for a cluster
-// size. Explicit operator-supplied profiles do not use this helper; they are
-// validated with IsActive and fail fast when too wide for the current group.
+// size. Operators do not provide k/m at startup; node count selects the profile.
 func AutoECConfigForClusterSize(nodes int) ECConfig {
 	switch {
 	case nodes <= 0:
@@ -58,12 +58,12 @@ func AutoECConfigForClusterSize(nodes int) ECConfig {
 		return ECConfig{DataShards: 1, ParityShards: 1}
 	case nodes == 3:
 		return ECConfig{DataShards: 2, ParityShards: 1}
-	case nodes == 4:
-		return ECConfig{DataShards: 2, ParityShards: 2}
-	case nodes == 5:
-		return ECConfig{DataShards: 3, ParityShards: 2}
 	default:
-		return ECConfig{DataShards: DefaultDataShards, ParityShards: DefaultParityShards}
+		data := nodes - AutoParityShards
+		if data > MaxAutoDataShards {
+			data = MaxAutoDataShards
+		}
+		return ECConfig{DataShards: data, ParityShards: AutoParityShards}
 	}
 }
 
@@ -71,10 +71,9 @@ func (c ECConfig) Redundant() bool {
 	return c.ParityShards > 0
 }
 
-// EffectiveConfig returns the ECConfig that should be used for a cluster of n
-// nodes. It now treats target as an already-selected profile: explicit profiles
-// fail when too wide, while auto-selected profiles are produced by
-// AutoECConfigForClusterSize before SetECConfig.
+// EffectiveConfig returns target when it fits the supplied node set. Startup
+// passes an auto-selected target; tests may still inject explicit configs with
+// SetECConfig to exercise low-level EC behavior.
 func EffectiveConfig(n int, target ECConfig) ECConfig {
 	if !target.IsActive(n) {
 		return ECConfig{}
