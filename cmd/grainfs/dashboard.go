@@ -28,6 +28,7 @@ func init() {
 	dashboardCmd.Flags().String("endpoint", "", "admin endpoint (default: auto-discover)")
 	dashboardCmd.Flags().String("data", "", "data directory for admin socket auto-discovery")
 	dashboardCmd.Flags().Bool("json", false, "JSON output for scripting")
+	registerAdminTimeoutFlag(dashboardCmd)
 	rootCmd.AddCommand(dashboardCmd)
 }
 
@@ -45,11 +46,13 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := applyAdminTimeout(cmd.Context(), cmd)
+	defer cancel()
 	var resp dashboardResp
 	if rotate {
-		err = c.Post(cmd.Context(), "/v1/dashboard/token/rotate", nil, &resp)
+		err = c.Post(ctx, "/v1/dashboard/token/rotate", nil, &resp)
 	} else {
-		err = c.Get(cmd.Context(), "/v1/dashboard/token", &resp)
+		err = c.Get(ctx, "/v1/dashboard/token", &resp)
 	}
 	if err != nil {
 		return err

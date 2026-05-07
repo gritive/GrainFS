@@ -308,6 +308,23 @@ func TestClient_Do_MalformedJSONOn2xx(t *testing.T) {
 	}
 }
 
+func TestNewClientForURL_NoHTTPClientTimeoutCap(t *testing.T) {
+	c := NewClientForURL("http://example.com")
+	if c.httpClient.Timeout != 0 {
+		t.Errorf("httpClient.Timeout = %v, want 0 (no cap, ctx-based only)", c.httpClient.Timeout)
+	}
+}
+
+func TestNewClient_NoHTTPClientTimeoutCap_HTTPEndpoint(t *testing.T) {
+	c, err := NewClient("http://example.com:9000", "")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if c.httpClient.Timeout != 0 {
+		t.Errorf("httpClient.Timeout = %v, want 0 (ctx-based only)", c.httpClient.Timeout)
+	}
+}
+
 func TestClient_TransientOnDial(t *testing.T) {
 	c := NewClientForURL("http://127.0.0.1:1") // refused
 	_, err := c.ListVolumes(context.Background())

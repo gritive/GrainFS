@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.80.0] - 2026-05-07 — admin CLI: 30s `http.Client.Timeout` 제거 + `--timeout` 플래그
+
+### Fixed
+
+- `volumeadmin.NewClient`/`NewClientForURL`의 `http.Client.Timeout: 30s` cap이
+  `BaseOptions.Timeout > 30s` 설정을 silent하게 truncate하던 버그 해소.
+  client에는 timeout cap이 없고 ctx로만 통제됩니다.
+
+### Added
+
+- 모든 admin CLI 명령(`grainfs volume *`, `grainfs dashboard`, `grainfs scrub`)에
+  `--timeout` flag 추가. unset이면 30s default(이전 hardcoded 값 보존),
+  `--timeout 5m`로 연장, `--timeout 0`으로 uncapped 가능. cobra `Duration` 타입.
+- `cmd/grainfs/admin_helpers.go`: `DefaultAdminTimeout` const,
+  `registerAdminTimeoutFlag`, `adminTimeoutFromCmd`, `applyAdminTimeout` 헬퍼 추가.
+  비-volume admin runner(dashboard, bucket scrub)도 동일 timeout 정책 적용.
+
+### Changed
+
+- **Timeout semantic shift (per-request → per-command).** 이전에는
+  `http.Client.Timeout: 30s`가 매 요청마다 적용돼 `volume scrub`/`scrub` follow
+  loop는 무한 실행됐습니다. 새 default(30s)는 ctx 기반이라 명령 전체에 적용됩니다.
+  분~시간 단위 follow가 필요하면 `--timeout 5m` 또는 `--timeout 0`(uncapped)을
+  명시하세요. `--detach`로 trigger만 하고 빠지는 사용 패턴은 영향 없음.
+
+### Tests
+
+- `TestNewClientForURL_NoHTTPClientTimeoutCap` /
+  `TestNewClient_NoHTTPClientTimeoutCap_HTTPEndpoint` —
+  client에 Timeout cap이 없음을 deterministic 검증.
+
 ## [0.0.79.0] - 2026-05-07 — volumeadmin: gap 단위 테스트 4건 추가
 
 ### Tests
