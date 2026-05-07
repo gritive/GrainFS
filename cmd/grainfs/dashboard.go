@@ -72,8 +72,7 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	if !resp.PublicURLSet {
 		fmt.Fprintln(os.Stderr, "warning: --public-url not set; using listen address.")
-		fmt.Fprintln(os.Stderr, "         원격 접근 시 운영자 호스트명을 --public-url 로 지정하거나,")
-		fmt.Fprintln(os.Stderr, "         grainfs.toml 의 public_url 에 설정.")
+		fmt.Fprintln(os.Stderr, "         원격 접근 시 운영자 호스트명을 --public-url 로 지정.")
 		fmt.Fprintln(os.Stderr)
 	}
 	if !rotate {
