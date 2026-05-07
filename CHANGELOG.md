@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.94.0] - 2026-05-08 — topology durability hardening
+
+### Added
+
+- Object writes fall back to bucket and router-resolved data groups when
+  EC placement selection finds no candidate, so internal-bucket and
+  bootstrap clusters keep accepting writes without an EC-capable group.
+- ObjectIndex entries record only the actual k+m shard targets, and
+  `ClassifyObjectLayout` flags entries whose NodeIDs length disagrees
+  with the recorded EC profile so the scrubber can re-place them.
+
+### Changed
+
+- Forwarded PUT receivers now run with the placement group entry in
+  context, so the receiving voter applies the same topology-derived EC
+  profile as the origin.
+- New writes fail with S3 503 while a configured placement target is
+  unavailable instead of silently downshifting to a narrower EC profile;
+  e2e expectations updated to match this contract.
+
+### Fixed
+
+- ReadIndex retries the remaining voters on transport errors instead of
+  short-circuiting on the first failure, so killed-peer scenarios
+  converge instead of bubbling out before the leader cycle.
+- Remove-peer resolves canonical node IDs back to raft addresses before
+  invoking joint consensus, so dead-follower removal works whether the
+  meta-Raft engine remembers the peer by node ID or address.
+
 ## [0.0.93.0] - 2026-05-08 — encrypted EC bottleneck tuning
 
 ### Added
