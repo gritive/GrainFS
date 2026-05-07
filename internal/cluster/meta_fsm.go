@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -180,6 +181,11 @@ type MetaFSM struct {
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
 	rotation          *RotationFSM
 	onRotationApplied func(RotationState) // 매 phase 변경 commit 후 호출; nil 이면 no-op
+
+	// IAM sub-FSM — wired after construction via SetIAM (Phase 1). iamStore is
+	// always non-nil (default empty); iamApplier is nil until SetIAM is called.
+	iamStore   *iam.Store
+	iamApplier *iam.Applier
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -193,8 +199,22 @@ func NewMetaFSM() *MetaFSM {
 		icebergNamespaces: make(map[string]IcebergNamespaceEntry),
 		icebergTables:     make(map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
+		iamStore:          iam.NewStore(),
 	}
 }
+
+// SetIAM wires the IAM Applier into the MetaFSM. Must be called before the
+// raft log starts replaying; set alongside the Encryptor used to decrypt
+// secret_key_enc payloads. iamApplier nil = IAM commands return "not configured".
+func (f *MetaFSM) SetIAM(store *iam.Store, applier *iam.Applier) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.iamStore = store
+	f.iamApplier = applier
+}
+
+// IAMStore returns the IAM Store for read access (auth checks, bootstrap shim).
+func (f *MetaFSM) IAMStore() *iam.Store { return f.iamStore }
 
 // Rotation returns the rotation sub-FSM. State is decoupled from the rest of
 // MetaFSM and has its own RWMutex; callers can read snapshots concurrently.
@@ -278,10 +298,35 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyRotateKeyAbort(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeScrubTrigger:
 		return f.applyScrubTrigger(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeIAMSACreate:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplySACreate)
+	case clusterpb.MetaCmdTypeIAMSADelete:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplySADelete)
+	case clusterpb.MetaCmdTypeIAMKeyCreate:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyCreate)
+	case clusterpb.MetaCmdTypeIAMKeyRevoke:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyRevoke)
+	case clusterpb.MetaCmdTypeIAMGrantPut:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantPut)
+	case clusterpb.MetaCmdTypeIAMGrantDelete:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantDelete)
+	case clusterpb.MetaCmdTypeIAMGrantWildcardPut:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardPut)
+	case clusterpb.MetaCmdTypeIAMAuthEnable:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyAuthEnable)
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
 	}
+}
+
+// applyIAM dispatches an IAM command to the configured iam.Applier. Returns
+// an error if IAM was not wired (Phase 1: IAM defaults nil, set via SetIAM).
+func (f *MetaFSM) applyIAM(payload []byte, fn func(*iam.Applier, []byte) error) error {
+	if f.iamApplier == nil {
+		return fmt.Errorf("meta_fsm: IAM applier not configured")
+	}
+	return fn(f.iamApplier, payload)
 }
 
 func (f *MetaFSM) applyAddNode(data []byte) error {
