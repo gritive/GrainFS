@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.76.0] - 2026-05-07
+## [0.0.77.0] - 2026-05-07
 
 ### Changed
 
@@ -25,6 +25,30 @@
 - Added runtime setup coverage for incident optional-role fallback, receipt
   disabled and PSK-required startup paths, dedup resourcewatch cleanup, and
   canceled volume setup.
+
+## [0.0.76.0] - 2026-05-07
+
+### Added
+
+- Topology GET profiling now reports the assigned shard-group voter count and
+  can fail fast when a benchmark expected a full-width group but the bucket
+  hashed to a smaller group, making load-distribution measurements explicit.
+
+### Changed
+
+- Encrypted shard range reads now decrypt only the requested encrypted chunk
+  instead of discarding plaintext from earlier chunks, improving random and
+  shard-local Range GET behavior.
+- S3 Range GET streaming now reuses its 1 MiB backend `ReadAt` buffer, reducing
+  allocation pressure on large Range GET workloads.
+- Remote shard range single-frame replies are capped at 64 KiB so larger ranges
+  stay on the streaming path instead of building oversized in-memory replies.
+
+### Fixed
+
+- Documented the measured hot-bucket placement issue where bucket-level routing
+  can concentrate 6-node traffic onto a 3-voter shard group, preserving the
+  next load-distribution fix target.
 
 ## [0.0.75.0] - 2026-05-07
 

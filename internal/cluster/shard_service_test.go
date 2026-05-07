@@ -122,6 +122,25 @@ func TestShardService_ReadLocalShardAt_EncodedShard(t *testing.T) {
 	require.Equal(t, "abcdefgh", string(buf))
 }
 
+func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 192*1024)
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	offset := int64(eccodec.DefaultEncryptedChunkSize + 12345)
+	buf := make([]byte, 4096)
+	n, err := svc.ReadLocalShardAt("bkt", "obj", 0, offset, buf)
+	require.NoError(t, err)
+	require.Equal(t, len(buf), n)
+	require.Equal(t, plaintext[offset:offset+int64(len(buf))], buf)
+}
+
 // TestShardService_NoEncryption verifies plaintext storage when no encryptor is set.
 func TestShardService_NoEncryption(t *testing.T) {
 	dir := t.TempDir()
@@ -328,6 +347,31 @@ func TestShardService_ReadShardRange_EncodedShard(t *testing.T) {
 	got, err := svc1.ReadShardRange(ctx, tr2.LocalAddr(), "bkt", "key", 0, 10, 8192)
 	require.NoError(t, err)
 	require.Equal(t, plaintext[10:10+8192], got)
+}
+
+func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
+	ctx := context.Background()
+
+	tr1 := transport.MustNewQUICTransport("test-cluster-psk")
+	tr2 := transport.MustNewQUICTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1)
+	svc2 := NewShardService(dir2, tr2)
+	tr2.SetStreamHandler(svc2.HandleRPC())
+
+	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 4096)
+	require.NoError(t, svc1.WriteShard(ctx, tr2.LocalAddr(), "bkt", "key", 0, plaintext))
+
+	_, err := svc1.ReadShardRange(ctx, tr2.LocalAddr(), "bkt", "key", 0, 0, 64*1024+1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds max")
 }
 
 func TestShardService_RPCWriteReadDelete(t *testing.T) {

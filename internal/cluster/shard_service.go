@@ -25,7 +25,7 @@ import (
 
 var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(512) })
 
-const maxShardRangeReplyBytes = 1 << 20
+const maxShardRangeReplyBytes = 64 << 10
 
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
@@ -880,6 +880,17 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 
 	var prefix [8]byte
 	_, peekErr := io.ReadFull(f, prefix[:])
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
+	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
+		if s.encryptor == nil {
+			return 0, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		}
+		r, err := eccodec.NewEncryptedShardRangeReader(f, s.encryptor, aad, offset, int64(len(buf)))
+		if err != nil {
+			return 0, fmt.Errorf("decrypt shard range: %w", err)
+		}
+		return io.ReadFull(r, buf)
+	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
 		info, err := f.Stat()
 		if err != nil {
@@ -925,6 +936,19 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 
 	var prefix [8]byte
 	_, peekErr := io.ReadFull(f, prefix[:])
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
+	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
+		if s.encryptor == nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		}
+		r, err := eccodec.NewEncryptedShardRangeReader(f, s.encryptor, aad, offset, length)
+		if err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("decrypt shard range: %w", err)
+		}
+		return &multiReadCloser{Reader: r, close: f.Close}, nil
+	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
 		info, err := f.Stat()
 		if err != nil {

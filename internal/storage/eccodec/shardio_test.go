@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -174,6 +175,31 @@ func TestEncryptedShardReader_RoundTripMultiChunk(t *testing.T) {
 	assert.Equal(t, data, got)
 }
 
+func TestEncryptedShardRangeReader_DoesNotReadSkippedChunks(t *testing.T) {
+	enc := testEncryptor(t)
+	data := bytes.Repeat([]byte("0123456789abcdef"), 512)
+	aad := []byte("v2/bucket/key/3")
+	const chunkSize = 1024
+
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, chunkSize))
+
+	offset := int64(3*chunkSize + 17)
+	length := int64(193)
+	firstChunkCipherOffset := int64(encryptedHeaderLen) + 3*int64(encryptedChunkHeaderLen+chunkSize+enc.AEADOverhead())
+	spy := &rangeGuardReaderAt{
+		data:              encoded.Bytes(),
+		allowBeforeData:   encryptedHeaderLen,
+		minDataReadOffset: firstChunkCipherOffset,
+	}
+
+	r, err := NewEncryptedShardRangeReader(spy, enc, aad, offset, length)
+	require.NoError(t, err)
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, data[offset:offset+length], got)
+}
+
 func TestEncryptedShardStream_WrongAADFails(t *testing.T) {
 	enc := testEncryptor(t)
 	var encoded bytes.Buffer
@@ -226,4 +252,24 @@ func testEncryptor(t *testing.T) *encrypt.Encryptor {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
 	require.NoError(t, err)
 	return enc
+}
+
+type rangeGuardReaderAt struct {
+	data              []byte
+	allowBeforeData   int64
+	minDataReadOffset int64
+}
+
+func (r *rangeGuardReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= r.allowBeforeData && off < r.minDataReadOffset {
+		return 0, fmt.Errorf("unexpected read before target chunk: off=%d min=%d", off, r.minDataReadOffset)
+	}
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
 }

@@ -38,6 +38,8 @@ PROFILE_ALL_NODES="${PROFILE_ALL_NODES:-0}"
 REQUESTED_TARGET_IDX="${TARGET_IDX:-}"
 EC_DATA="${EC_DATA:-4}"
 EC_PARITY="${EC_PARITY:-2}"
+SEED_GROUPS="${SEED_GROUPS:-0}"
+REQUIRE_GROUP_VOTERS="${REQUIRE_GROUP_VOTERS:-0}"
 BUCKET="${BUCKET:-bench}"
 SCRIPT="$BENCHMARKS_DIR/s3_get_bench.js"
 
@@ -132,6 +134,7 @@ start_node() {
       --cluster-key "bench-topology-key"
       --ec-data "$EC_DATA"
       --ec-parity "$EC_PARITY"
+      --seed-groups "$SEED_GROUPS"
     )
   fi
 
@@ -232,6 +235,30 @@ fi
 TARGET_PPROF_PORT="$(pprof_port_for_idx "$TARGET_IDX")"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
+debug_setup_http() {
+  local label="$1"
+  local method="$2"
+  local url="$3"
+  local body="${4:-}"
+  local out="$BENCH_DIR/setup-${label}.body"
+  local code
+  if [[ -n "$body" ]]; then
+    code=$(curl -sS -o "$out" -w "%{http_code}" -X "$method" --data "$body" "$url" 2>"$BENCH_DIR/setup-${label}.err" || true)
+  else
+    code=$(curl -sS -o "$out" -w "%{http_code}" -X "$method" "$url" 2>"$BENCH_DIR/setup-${label}.err" || true)
+  fi
+  echo "[bench] setup ${label}: ${method} ${url} -> ${code}"
+  if [[ "$code" != "200" && "$code" != "204" && "$code" != "409" ]]; then
+    sed 's/^/[bench] setup body: /' "$out" | head -20 || true
+    sed 's/^/[bench] setup curl: /' "$BENCH_DIR/setup-${label}.err" | head -20 || true
+  fi
+}
+
+if [[ "${DEBUG_SETUP:-0}" == "1" ]]; then
+  debug_setup_http "bucket" PUT "http://127.0.0.1:${TARGET_PORT}/${BUCKET}"
+  debug_setup_http "ready" PUT "http://127.0.0.1:${TARGET_PORT}/${BUCKET}/.bench-ready" "ready"
+fi
+
 PRELOADED="0"
 if [[ "$PRELOAD_IN_SHELL" == "1" ]]; then
   payload="$BENCH_DIR/payload-${SIZE_KB}kb.bin"
@@ -263,11 +290,11 @@ fi
 STATUS_JSON="$BENCH_DIR/topology.json"
 if status=$(curl -sf "http://127.0.0.1:${TARGET_PORT}/api/cluster/status" 2>/dev/null); then
   printf '%s\n' "$status" >"$STATUS_JSON"
-  python3 - "$STATUS_JSON" "$BUCKET" <<'PY'
+  python3 - "$STATUS_JSON" "$BUCKET" "$REQUIRE_GROUP_VOTERS" <<'PY'
 import json
 import sys
 
-path, bucket = sys.argv[1], sys.argv[2]
+path, bucket, require_group_voters = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(path, "r", encoding="utf-8") as f:
     status = json.load(f)
 
@@ -283,6 +310,13 @@ print(
     f"[bench] topology bucket={bucket} group={group_id} "
     f"voters={len(peers)} peer_ids={','.join(peers)} topology_json={path}"
 )
+if require_group_voters > 0 and len(peers) < require_group_voters:
+    print(
+        f"[error] bucket={bucket} assigned to {group_id} with {len(peers)} voter(s); "
+        f"REQUIRE_GROUP_VOTERS={require_group_voters}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 PY
 else
   echo "[bench] topology status unavailable from :${TARGET_PORT}"
@@ -315,10 +349,11 @@ else
 fi
 echo "  vus    : ${VUS}  duration: ${DURATION}"
 if [[ "$NODE_COUNT" -ge 3 ]]; then
-  echo "  ec     : target ${EC_DATA}+${EC_PARITY} (effective scales by node count)"
+  echo "  ec     : target ${EC_DATA}+${EC_PARITY} (effective scales by assigned group voters)"
 else
   echo "  ec     : inactive for <3 nodes"
 fi
+echo "  groups : seed=${SEED_GROUPS} require_voters=${REQUIRE_GROUP_VOTERS}"
 if [[ "$PROFILE" == "1" ]]; then
   echo "  pprof  : http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/"
   [[ "$PROFILE_ALL_NODES" == "1" ]] && echo "  pprof  : all nodes enabled"
