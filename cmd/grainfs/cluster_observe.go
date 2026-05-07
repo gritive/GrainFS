@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"time"
 
@@ -114,86 +113,61 @@ func runClusterHealth(ctx context.Context, client *clusteradmin.Client, format s
 
 func clusterPlacementCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "placement [bucket]",
-		Short: "Show shard groups and bucket assignments",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "placement [bucket] [key]",
+		Short: "Show object placement summary and detail",
+		Args:  cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := clusterClientFromCmd(cmd)
 			if err != nil {
 				return err
 			}
 			bucket := ""
-			if len(args) == 1 {
+			key := ""
+			if len(args) >= 1 {
 				bucket = args[0]
 			}
+			if len(args) == 2 {
+				key = args[1]
+			}
 			format, _ := cmd.Flags().GetString("format")
-			return runClusterPlacement(cmd.Context(), client, bucket, format, cmd.OutOrStdout())
+			return runClusterPlacement(cmd.Context(), client, bucket, key, format, cmd.OutOrStdout())
 		},
 	}
 	return cmd
 }
 
-// runClusterPlacement reuses the cluster status endpoint — no new server
-// route. It renders shard groups + bucket assignments as a human-readable
-// view; an optional bucket arg filters to a single row.
-func runClusterPlacement(ctx context.Context, client *clusteradmin.Client, bucket, format string, w io.Writer) error {
-	s, err := client.Status(ctx)
+func runClusterPlacement(ctx context.Context, client *clusteradmin.Client, bucket, key, format string, w io.Writer) error {
+	report, err := client.Placement(ctx, clusteradmin.PlacementOptions{Bucket: bucket, Key: key, Limit: 100})
 	if err != nil {
 		return err
 	}
 	if format == "json" {
-		out := struct {
-			Mode              string                    `json:"mode"`
-			ShardGroups       []clusteradmin.ShardGroup `json:"shard_groups,omitempty"`
-			BucketAssignments map[string]string         `json:"bucket_assignments,omitempty"`
-			Bucket            string                    `json:"bucket,omitempty"`
-		}{
-			Mode:              s.Mode,
-			ShardGroups:       s.ShardGroups,
-			BucketAssignments: s.BucketAssignments,
-			Bucket:            bucket,
-		}
-		return printJSONIndented(w, out)
+		return printJSONIndented(w, report)
 	}
-	if s.Mode == "local" {
-		fmt.Fprintln(w, "single-node mode — no shard groups")
+	fmt.Fprintf(w, "Desired policy: %s\n", report.DesiredPolicyBasis)
+	fmt.Fprintf(w, "Objects: %d\n", report.ObjectCount)
+	fmt.Fprintf(w, "Bytes: %d\n", report.Bytes)
+	fmt.Fprintf(w, "Pending upgrade: %d\n", report.PendingUpgradeCount)
+	fmt.Fprintf(w, "Downgrade skipped: %d\n", report.DowngradeSkippedCount)
+	fmt.Fprintf(w, "Unknown: %d\n", report.UnknownLayoutCount)
+	fmt.Fprintf(w, "Repair needed: %d\n", report.RepairNeededCount)
+	if bucket != "" {
+		fmt.Fprintf(w, "Bucket: %s\n", bucket)
+	}
+	if key != "" {
+		fmt.Fprintf(w, "Key: %s\n", key)
+	}
+	if len(report.Details) == 0 {
 		return nil
 	}
-	if len(s.ShardGroups) == 0 && len(s.BucketAssignments) == 0 {
-		fmt.Fprintln(w, "no shard groups configured")
-		return nil
+	fmt.Fprintln(w, "\nDETAIL")
+	fmt.Fprintln(w, "  BUCKET       KEY          VERSION      GROUP       ACTUAL  DESIRED  STATE              NODES")
+	for _, row := range report.Details {
+		actual := fmt.Sprintf("%d+%d", row.ActualECData, row.ActualECParity)
+		desired := fmt.Sprintf("%d+%d", row.DesiredECData, row.DesiredECParity)
+		fmt.Fprintf(w, "  %-12s %-12s %-12s %-11s %-7s %-8s %-18s %s\n",
+			row.Bucket, row.Key, row.VersionID, row.PlacementGroupID, actual, desired, row.LayoutState, strings.Join(row.NodeIDs, ", "))
 	}
-	if bucket == "" {
-		fmt.Fprintln(w, "SHARD GROUPS")
-		fmt.Fprintln(w, "  ID         PEERS")
-		for _, sg := range s.ShardGroups {
-			fmt.Fprintf(w, "  %-10s %s\n", sg.ID, strings.Join(sg.PeerIDs, ", "))
-		}
-		fmt.Fprintln(w, "\nBUCKET ASSIGNMENTS")
-		if len(s.BucketAssignments) == 0 {
-			fmt.Fprintln(w, "  (none)")
-			return nil
-		}
-		fmt.Fprintln(w, "  BUCKET       GROUP      PEERS")
-		// Sorted iteration for deterministic output.
-		buckets := make([]string, 0, len(s.BucketAssignments))
-		for b := range s.BucketAssignments {
-			buckets = append(buckets, b)
-		}
-		sort.Strings(buckets)
-		for _, b := range buckets {
-			g := s.BucketAssignments[b]
-			fmt.Fprintf(w, "  %-12s %-10s %s\n", b, g, renderGroupPeers(s.ShardGroups, g))
-		}
-		return nil
-	}
-	g, ok := s.BucketAssignments[bucket]
-	if !ok {
-		fmt.Fprintf(w, "bucket %q not assigned to any group\n", bucket)
-		return nil
-	}
-	fmt.Fprintln(w, "BUCKET       GROUP      PEERS")
-	fmt.Fprintf(w, "  %-12s %-10s %s\n", bucket, g, renderGroupPeers(s.ShardGroups, g))
 	return nil
 }
 

@@ -13,6 +13,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,6 +85,40 @@ type ShardGroup struct {
 	PeerIDs []string `json:"peer_ids"`
 }
 
+type PlacementOptions struct {
+	Bucket string
+	Key    string
+	Limit  int
+}
+
+type PlacementReport struct {
+	DesiredPolicyBasis    string                 `json:"desired_policy_basis"`
+	Bucket                string                 `json:"bucket,omitempty"`
+	Key                   string                 `json:"key,omitempty"`
+	ObjectCount           int                    `json:"object_count"`
+	Bytes                 int64                  `json:"bytes"`
+	ActualProfileCounts   map[string]int         `json:"actual_profile_counts"`
+	PendingUpgradeCount   int                    `json:"pending_upgrade_count"`
+	DowngradeSkippedCount int                    `json:"downgrade_skipped_count"`
+	UnknownLayoutCount    int                    `json:"unknown_layout_count"`
+	RepairNeededCount     int                    `json:"repair_needed_count"`
+	Details               []PlacementReportEntry `json:"details,omitempty"`
+}
+
+type PlacementReportEntry struct {
+	Bucket           string   `json:"bucket"`
+	Key              string   `json:"key"`
+	VersionID        string   `json:"version_id"`
+	PlacementGroupID string   `json:"placement_group_id"`
+	ActualECData     uint8    `json:"actual_ec_data"`
+	ActualECParity   uint8    `json:"actual_ec_parity"`
+	DesiredECData    int      `json:"desired_ec_data"`
+	DesiredECParity  int      `json:"desired_ec_parity"`
+	LayoutState      string   `json:"layout_state"`
+	NodeIDs          []string `json:"node_ids,omitempty"`
+	Size             int64    `json:"size"`
+}
+
 // Event mirrors eventstore.Event without importing the server package, which
 // would cycle internal/server -> internal/clusteradmin -> cmd back into
 // internal/server through wiring.
@@ -138,6 +174,32 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 // For text output, prefer Status() which returns a typed struct.
 func (c *Client) StatusRaw(ctx context.Context) ([]byte, error) {
 	return c.getJSON(ctx, "/v1/cluster/status")
+}
+
+func (c *Client) Placement(ctx context.Context, opts PlacementOptions) (*PlacementReport, error) {
+	q := url.Values{}
+	if opts.Bucket != "" {
+		q.Set("bucket", opts.Bucket)
+	}
+	if opts.Key != "" {
+		q.Set("key", opts.Key)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	path := "/v1/cluster/placement"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	body, err := c.getJSON(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	var report PlacementReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		return nil, fmt.Errorf("parse placement report: %w", err)
+	}
+	return &report, nil
 }
 
 // RemovePeer issues POST /v1/cluster/remove-peer. On non-2xx responses the

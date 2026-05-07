@@ -46,6 +46,25 @@ func TestClient_Status_ParsesCanonicalShape(t *testing.T) {
 	assert.Equal(t, map[string]string{"n2": "configured"}, s.PeerStates)
 }
 
+func TestClientPlacementReport(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/cluster/placement", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "photos", r.URL.Query().Get("bucket"))
+		require.Equal(t, "cat.jpg", r.URL.Query().Get("key"))
+		require.Equal(t, "25", r.URL.Query().Get("limit"))
+		_, _ = w.Write([]byte(`{"desired_policy_basis":"group_voter_count","bucket":"photos","key":"cat.jpg","object_count":1,"actual_profile_counts":{"4+2":1},"details":[{"bucket":"photos","key":"cat.jpg","version_id":"v1","placement_group_id":"group-1","actual_ec_data":4,"actual_ec_parity":2,"desired_ec_data":4,"desired_ec_parity":2,"layout_state":"current","node_ids":["n1","n2"],"size":12}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	report, err := client.Placement(context.Background(), PlacementOptions{Bucket: "photos", Key: "cat.jpg", Limit: 25})
+	require.NoError(t, err)
+	require.Equal(t, "group_voter_count", report.DesiredPolicyBasis)
+	require.Equal(t, 1, report.ObjectCount)
+	require.Equal(t, "current", report.Details[0].LayoutState)
+}
+
 func TestClient_RemovePeer_HappyPath_PostsExpectedBody(t *testing.T) {
 	var calls atomic.Int32
 	var lastBody atomic.Value
