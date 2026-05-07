@@ -1,5 +1,20 @@
 # GrainFS
 
+## Commands
+
+```bash
+make build              # bin/grainfs 빌드
+make test               # unit 테스트 (tests/e2e 제외)
+make test-race          # race detector 포함
+make test-e2e           # E2E (binary 필요, 자동 빌드)
+make test-nbd-docker    # NBD 테스트 (Linux 컨테이너)
+make test-nfs4-colima   # NFSv4 테스트 (colima VM)
+make lint               # golangci-lint
+make fbs                # FlatBuffers (.fbs → .go) 재생성
+```
+
+Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
+
 ## Codebase Review
 
 ### 기술 스택
@@ -17,7 +32,8 @@
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
 - 단일 바이너리: S3 + NFSv4 + NBD + Web UI를 하나로 제공
 - 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(QUIC/Raft)
-- internal 하위 패키지: badgerrole, cluster, encrypt, erasure, incident, metadata, metrics, nbd, raft, receipt, s3auth, server, storage, transport, vfs, volume
+- internal 하위 패키지: cluster, raft, transport(QUIC), storage, vfs, volume, server, s3auth, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot
+- FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### 보안 규칙
 - S3 인증: access-key/secret-key 플래그로 HMAC-SHA256 서명 검증
@@ -51,10 +67,18 @@
 - S3 인증: `--access-key` / `--secret-key` 플래그 (미설정 시 인증 없음)
 
 ### 제품 스펙
+- CONTEXT.md: 도메인 용어/현재 상태 (루트, 13KB)
 - ROADMAP.md: 개발 로드맵 및 Phase별 기능 정의
 - README.md: Quick Start 및 CLI 옵션
+- docs/adr/: 아키텍처 결정 기록
 - docs/recover-cluster.md: RecoverCluster offline 재해 복구 절차
 - docs/RUNBOOK.md, docs/DRILL_MANUAL.md, docs/SLI_SLO.md: 운영/드릴/SLO 문서
+
+### 테스트 레이아웃
+- `tests/e2e/`: 일반 E2E (Go test)
+- `tests/nbd_interop/`: NBD interop (Linux 필요)
+- `tests/nbd_colima/`, `tests/nfs4_colima/`, `tests/fuse_s3_colima/`: colima VM, 빌드 태그 `colima` 필수
+- NBD unit 테스트는 Docker 안에서 (메모리: "NBD Docker 실행")
 
 ## Coding Behavior Guidelines
 
@@ -139,5 +163,6 @@ Key routing rules:
 - Design system, brand → invoke design-consultation
 - Visual audit, design polish → invoke design-review
 - Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
+- Save progress, checkpoint → invoke context-save
+- Resume, restore → invoke context-restore
 - Code quality, health check → invoke health
