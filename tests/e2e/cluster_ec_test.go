@@ -15,6 +15,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,8 +42,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		secretKey  = "ec-sk"
 		bucketName = "ec-test"
 		numNodes   = 5
-		ecData     = 3
-		ecParity   = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -90,15 +89,12 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
@@ -226,8 +222,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 }
 
 // TestE2E_ClusterEC_3Node_ActiveKM21 verifies dynamic EC activation on a 3-node
-// cluster with target 4+2 config. With n=3 and MinECNodes=3, EffectiveConfig
-// produces k=2, m=1 (m_eff=round(3×2/6)=1, k_eff=2). EC must be active:
+// cluster. The zero-config profile for 3 nodes is k=2, m=1. EC must be active:
 // - PUT stores 3 shards (k+m=3) distributed across all nodes.
 // - GET reconstructs correctly from 2 available shards (k=2 minimum).
 // - Killing one node (1 out of 3) leaves k=2 shards: GET must still succeed.
@@ -236,98 +231,34 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-node e2e in -short mode")
 	}
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
-	}
-
 	const (
 		clusterKey = "E2E-EC-3NODE-KEY"
 		accessKey  = "3n-ak"
 		secretKey  = "3n-sk"
 		bucketName = "3n-test"
 		numNodes   = 3
-		// Target 4+2; EffectiveConfig(3, 4+2) → k=2, m=1.
-		ecData   = 4
-		ecParity = 2
 	)
 
-	httpPorts := make([]int, numNodes)
-	raftPorts := make([]int, numNodes)
-	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
-	ports := uniqueFreePorts(numNodes * 4)
-	for i := range numNodes {
-		httpPorts[i] = ports[i*4]
-		raftPorts[i] = ports[i*4+1]
-		nfs4Ports[i] = ports[i*4+2]
-		nbdPorts[i] = ports[i*4+3]
-	}
-	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
-	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
-
-	dataDirs := make([]string, numNodes)
-	for i := range dataDirs {
-		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-3node-%d-*", i))
-		require.NoError(t, err)
-		dataDirs[i] = d
-		t.Cleanup(func() { _ = os.RemoveAll(d) })
-	}
-
-	procs := make([]*exec.Cmd, numNodes)
-	for i := 0; i < numNodes; i++ {
-		cmd := exec.Command(binary, "serve",
-			"--data", dataDirs[i],
-			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", raftAddr(i),
-			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
-			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
-			"--snapshot-interval", "0",
-			"--scrub-interval", "0",
-			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
-			"--no-encryption",
-		)
-		require.NoError(t, cmd.Start(), "start node %d", i)
-		procs[i] = cmd
-	}
-	t.Cleanup(func() {
-		for _, p := range procs {
-			if p != nil && p.Process != nil {
-				_ = p.Process.Kill()
-				_, _ = p.Process.Wait()
-			}
-		}
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      numNodes,
+		Mode:       ClusterModeStaticPeers,
+		ClusterKey: clusterKey,
+		AccessKey:  accessKey,
+		SecretKey:  secretKey,
+		LogPrefix:  "cluster-ec-3node",
+		DisableNFS: true,
+		DisableNBD: true,
 	})
-
-	waitForPortsParallel(t, httpPorts, 60*time.Second)
 
 	var client *s3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			err := tryCreateBucket(ctx, c, bucketName)
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			err := tryCreateBucket(ctx, candidate, bucketName)
 			if err == nil {
-				client = c
+				client = candidate
 				return true
 			}
 		}
@@ -340,7 +271,14 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 
 	// PUT: EC must be active on 3-node cluster (k=2, m=1).
 	require.Eventually(t, func() bool {
-		return tryPutObject(ctx, client, bucketName, "ec-obj", data) == nil
+		for i := 0; i < numNodes; i++ {
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			if tryPutObject(ctx, candidate, bucketName, "ec-obj", data) == nil {
+				client = candidate
+				return true
+			}
+		}
+		return false
 	}, 60*time.Second, 1*time.Second, "PutObject on 3-node cluster with dynamic EC k=2,m=1 must succeed")
 
 	// GET with all 3 nodes up: must reconstruct correctly.
@@ -360,8 +298,8 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	// prove every survivor has applied the committed object metadata yet.
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes-1; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			out2, err2 := c.GetObject(ctx, &s3.GetObjectInput{
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			out2, err2 := candidate.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String("ec-obj"),
 			})
@@ -387,9 +325,9 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	// and 1, getObjectEC can reconstruct using at most one dead-peer fetch
 	// (bounded by 3s per-shard timeout).
 	victim := numNodes - 1
-	_ = procs[victim].Process.Kill()
-	_, _ = procs[victim].Process.Wait()
-	procs[victim] = nil
+	_ = c.procs[victim].Process.Kill()
+	_, _ = c.procs[victim].Process.Wait()
+	c.procs[victim] = nil
 	t.Logf("killed node %d; expecting GET to succeed with 2 remaining shards (k=2)", victim)
 
 	// Poll until the surviving nodes serve the object. No fixed sleep —
@@ -399,8 +337,8 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	var gotAfterKill []byte
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes-1; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			out2, err2 := c.GetObject(ctx, &s3.GetObjectInput{
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			out2, err2 := candidate.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String("ec-obj"),
 			})
@@ -447,10 +385,8 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		accessKey  = "tp-ak"
 		secretKey  = "tp-sk"
 		bucketName = "topo-test"
-		// 6 nodes, k+m=5: killing one leaves 5 nodes → ECActive stays true.
+		// 6 nodes use auto 4+2; object groups with 5 voters record auto 3+2.
 		numNodes = 6
-		ecData   = 3
-		ecParity = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -504,14 +440,11 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
@@ -577,7 +510,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	)
 	require.NoError(t, err, "no leader found or CreateBucket never succeeded")
 	client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
-	t.Logf("topology test: leader node %d at %s (N=%d, k+m=%d)", leaderIdx, httpURL(leaderIdx), numNodes, ecData+ecParity)
+	t.Logf("topology test: leader node %d at %s (N=%d, auto EC width=%d)", leaderIdx, httpURL(leaderIdx), numNodes, cluster.AutoECConfigForClusterSize(numNodes).NumShards())
 
 	type entry struct {
 		key string

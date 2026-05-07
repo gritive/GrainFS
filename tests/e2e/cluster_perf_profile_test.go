@@ -40,7 +40,7 @@ import (
 
 type perfScenario struct {
 	name     string // ex: "load-N64"
-	n        int    // seed-groups
+	n        int    // historical scenario size label
 	withLoad bool   // S3 PUT/GET 워크로드 동작
 }
 
@@ -200,7 +200,6 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 			"--cluster-key", perfClusterKey,
 			"--access-key", perfAccessKey,
 			"--secret-key", perfSecretKey,
-			fmt.Sprintf("--seed-groups=%d", sc.n),
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
 			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--nbd-port", fmt.Sprintf("%d", freePort()),

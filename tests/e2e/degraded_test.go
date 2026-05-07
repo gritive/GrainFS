@@ -37,8 +37,6 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 		secretKey  = "deg-sk"
 		bucketName = "degraded-test"
 		numNodes   = 5
-		ecData     = 3
-		ecParity   = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -80,9 +78,6 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--seed-groups", "1",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 			"--snapshot-interval", "0",

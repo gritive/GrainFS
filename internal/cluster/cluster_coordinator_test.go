@@ -303,16 +303,44 @@ func (noopObjectIndexProposer) ProposeDeleteObjectIndex(context.Context, string,
 }
 
 type recordingObjectIndexProposer struct {
+	entries []ObjectIndexEntry
 	deleted []string
 }
 
-func (r *recordingObjectIndexProposer) ProposeObjectIndex(context.Context, ObjectIndexEntry, bool) error {
+func (r *recordingObjectIndexProposer) ProposeObjectIndex(_ context.Context, entry ObjectIndexEntry, _ bool) error {
+	r.entries = append(r.entries, entry)
 	return nil
 }
 
 func (r *recordingObjectIndexProposer) ProposeDeleteObjectIndex(_ context.Context, bucket, key, versionID string) error {
 	r.deleted = append(r.deleted, bucket+"/"+key+"/"+versionID)
 	return nil
+}
+
+func TestClusterCoordinator_CommitObjectIndexUsesPlacementGroupECProfile(t *testing.T) {
+	proposer := &recordingObjectIndexProposer{}
+	c := NewClusterCoordinator(nil, nil, nil, nil, "self").
+		WithECConfig(ECConfig{DataShards: 4, ParityShards: 2}).
+		WithObjectIndexProposer(proposer)
+	obj := &storage.Object{
+		Key:          "photo.jpg",
+		Size:         12,
+		ContentType:  "image/jpeg",
+		ETag:         "etag",
+		LastModified: 100,
+		VersionID:    "v1",
+	}
+	group := ShardGroupEntry{
+		ID:      "group-5",
+		PeerIDs: []string{"n1", "n2", "n3", "n4", "n5"},
+	}
+
+	require.NoError(t, c.commitObjectIndex(context.Background(), "photos", "photo.jpg", obj, group, false))
+
+	require.Len(t, proposer.entries, 1)
+	require.Equal(t, uint8(3), proposer.entries[0].ECData)
+	require.Equal(t, uint8(2), proposer.entries[0].ECParity)
+	require.Equal(t, group.PeerIDs, proposer.entries[0].NodeIDs)
 }
 
 func TestClusterCoordinator_ListBuckets_MergesMetaAssignments(t *testing.T) {

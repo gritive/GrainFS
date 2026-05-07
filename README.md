@@ -45,7 +45,7 @@ The default container command disables NFSv4 and NBD with `--nfs4-port 0 --nbd-p
 | 기능               | 설명                                                          |
 | ------------------ | ------------------------------------------------------------- |
 | S3 API             | PUT, GET, HEAD, DELETE, LIST, Multipart Upload, Presigned URL |
-| Erasure Coding     | Solo: Reed-Solomon 4+2 / Cluster: 노드 수 기반 EC + shard integrity envelope |
+| Erasure Coding     | 노드 수 기반 zero-config EC + shard integrity envelope |
 | QUIC Transport     | quic-go 기반 멀티플렉싱, TLS 1.3 내장                         |
 | Custom Raft        | QUIC 위 합의, 리더 선출/로그 복제/스냅샷                      |
 | 단일 노드 → Cluster     | 무중단 클러스터 전환                                          |
@@ -67,8 +67,6 @@ Flags:
       --nfs4-port int            NFS v4.0 포트 (default 2049, 0=비활성)
       --nbd-port int             NBD 포트 (default 0=비활성, Linux only)
       --nbd-volume-size int      기본 NBD 볼륨 크기 바이트 (default 1073741824 = 1GB)
-      --ec-data int              목표 데이터 샤드 수 k (default 4, 클러스터는 노드 수에 맞춰 EffectiveConfig 적용)
-      --ec-parity int            목표 패리티 샤드 수 m (default 2, 클러스터는 노드 수에 맞춰 EffectiveConfig 적용)
       --scrub-interval duration  EC shard scrub 주기 (default 24h, 0=비활성)
       --reshard-interval duration EC background reshard 주기 (default 24h, 0=비활성)
       --access-key string        S3 인증 Access Key
@@ -98,6 +96,21 @@ Flags:
       --balancer-migration-max-retries int  shard write 최대 재시도 횟수 (default 3)
       --balancer-migration-pending-ttl duration 좀비 마이그레이션 자동 취소 TTL (default 5m)
 ```
+
+### Zero-Config EC Profile
+
+`grainfs serve`는 EC `k/m`을 CLI에서 받지 않고 노드 수로 자동 선택한다. 운영 배포는 3노드 이상을 권장한다. 1노드와 2노드는 개발, 복구, 또는 3노드 배포로 가는 중간 단계로 취급한다.
+
+| 노드 수 | EC profile |
+| --- | --- |
+| 1 | 1+0 |
+| 2 | 1+1 |
+| 3 | 2+1 |
+| 4 | 2+2 |
+| 5 | 3+2 |
+| 6 | 4+2 |
+| 7 | 5+2 |
+| 8+ | 6+2 |
 
 ### Recovery Commands
 

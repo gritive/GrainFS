@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.92.0] - 2026-05-08 — zero-config cluster topology
+
+### Changed
+
+- `grainfs serve` now derives object EC profiles from cluster size instead of
+  requiring operators to pick shard counts. The automatic table is: 1 node
+  `1+0`, 2 nodes `1+1`, 3 nodes `2+1`, 4 nodes `2+2`, 5 nodes `3+2`,
+  6 nodes `4+2`, 7 nodes `5+2`, and 8+ nodes `6+2`.
+- Placement group seeding is now automatic from cluster size using
+  `max(8, clusterSize * 4)`, so bootstrap topology no longer depends on a
+  manual group-count flag.
+- Object index metadata now records the EC profile from the selected placement
+  group voter count, so reads and repairs use the profile that was actually
+  written.
+- Cluster e2e tests and benchmark scripts now express EC and placement behavior
+  through node count instead of manual topology flags.
+
+### Removed
+
+- Removed public `grainfs serve --ec-data`, `--ec-parity`, and `--seed-groups`
+  options. Use node count to select the zero-config EC and placement-group
+  policies.
+
+### Fixed
+
+- Stabilized the 3-node EC e2e startup path by using the shared static-peers
+  harness and probing writable endpoints before asserting the `2+1` profile and
+  single-node failure recovery.
+
 ## [0.0.91.0] - 2026-05-08 — Cluster Day-2 Operations CLI (Phase 1)
 
 ### Added

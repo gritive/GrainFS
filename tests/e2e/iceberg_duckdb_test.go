@@ -55,7 +55,7 @@ func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
 		t.Skip("skipping DuckDB Iceberg cluster e2e in short mode")
 	}
 
-	cluster := startStaticMRClusterWithOptions(t, 3, 1, mrClusterOptions{
+	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
 	})
@@ -140,7 +140,6 @@ func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int) icebergE2
 		"--port", fmt.Sprintf("%d", port),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 		"--dedup=false",
-		"--seed-groups", "1",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--no-encryption",

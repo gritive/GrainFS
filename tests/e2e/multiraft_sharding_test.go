@@ -45,8 +45,6 @@ type mrCluster struct {
 	accessKey  string
 	secretKey  string
 	leaderIdx  int // last-known leader (set during probe)
-	seedGroups int // seed group count from initial boot; reused on restart so the
-	// node binary does not auto-derive a higher count and re-propose unseeded groups.
 }
 
 type mrClusterOptions struct {
@@ -54,12 +52,12 @@ type mrClusterOptions struct {
 	disableNBD  bool
 }
 
-func startStaticMRCluster(t *testing.T, numNodes, seedGroups int) *mrCluster {
+func startStaticMRCluster(t *testing.T, numNodes int) *mrCluster {
 	t.Helper()
-	return startStaticMRClusterWithOptions(t, numNodes, seedGroups, mrClusterOptions{})
+	return startStaticMRClusterWithOptions(t, numNodes, mrClusterOptions{})
 }
 
-func startStaticMRClusterWithOptions(t *testing.T, numNodes, seedGroups int, opts mrClusterOptions) *mrCluster {
+func startStaticMRClusterWithOptions(t *testing.T, numNodes int, opts mrClusterOptions) *mrCluster {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
@@ -73,7 +71,7 @@ func startStaticMRClusterWithOptions(t *testing.T, numNodes, seedGroups int, opt
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		c, err := tryStartStaticMRCluster(t, numNodes, seedGroups, opts)
+		c, err := tryStartStaticMRCluster(t, numNodes, opts)
 		if err == nil {
 			return c
 		}
@@ -84,14 +82,13 @@ func startStaticMRClusterWithOptions(t *testing.T, numNodes, seedGroups int, opt
 	return nil
 }
 
-func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int, opts mrClusterOptions) (*mrCluster, error) {
+func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	c := &mrCluster{
 		t:          t,
 		clusterKey: "E2E-MR-SHARDING-KEY",
 		accessKey:  "mr-ak",
 		secretKey:  "mr-sk",
-		seedGroups: seedGroups,
 	}
 	c.httpPorts = make([]int, numNodes)
 	c.raftPorts = make([]int, numNodes)
@@ -129,7 +126,7 @@ func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int, opts mrClus
 	// complete peer set before waiting for HTTP so startup QUIC dials do not
 	// spend the port-wait budget on intentionally absent peers.
 	for i := 0; i < numNodes; i++ {
-		c.procs[i] = c.startNode(i, seedGroups)
+		c.procs[i] = c.startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
 	if err := waitForPortsParallelErr(c.httpPorts, 60*time.Second); err != nil {
@@ -158,12 +155,12 @@ func tryStartStaticMRCluster(t *testing.T, numNodes, seedGroups int, opts mrClus
 	}
 	c.leaderIdx = leaderIdx
 
-	// Allow seed loop to complete (proposes seedGroups × ProposeShardGroup).
+	// Allow the automatic seed loop to complete before exercising routing.
 	time.Sleep(8 * time.Second)
 	return c, nil
 }
 
-func (c *mrCluster) startNode(i int, seedGroups int) *exec.Cmd {
+func (c *mrCluster) startNode(i int) *exec.Cmd {
 	t := c.t
 	t.Helper()
 	binary := getBinary()
@@ -193,10 +190,7 @@ func (c *mrCluster) startNode(i int, seedGroups int) *exec.Cmd {
 		"--cluster-key", c.clusterKey,
 		"--access-key", c.accessKey,
 		"--secret-key", c.secretKey,
-		"--ec-data", "0",
-		"--ec-parity", "0",
 		"--dedup=false",
-		fmt.Sprintf("--seed-groups=%d", seedGroups),
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--snapshot-interval", "0",
@@ -264,7 +258,7 @@ func countGroupDirsAcrossNodes(c *mrCluster) map[string]int {
 }
 
 // ----- TestE2E_MultiRaftSharding_Boot --------------------------------------
-// Verify 5-process boot with --seed-groups=8 results in:
+// Verify 5-process boot with automatic seed groups results in:
 //   - All processes alive
 //   - Per-group directories created on voter nodes (groups/group-{N}/{badger,raft})
 //   - Each group has the expected number of voters (RF=3 for groups 1..7)
@@ -272,7 +266,7 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	c := startStaticMRClusterWithOptions(t, 5, 8, mrClusterOptions{
+	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
 	})
@@ -299,7 +293,7 @@ func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	c := startStaticMRCluster(t, 3, 2)
+	c := startStaticMRCluster(t, 3)
 
 	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
 	waitForPortsParallel(t, c.nfs4Ports, 45*time.Second)
@@ -340,7 +334,7 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
 	// the same forward path with try-each-peer reliability.
 
-	c := startStaticMRCluster(t, 3, 4)
+	c := startStaticMRCluster(t, 3)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -399,7 +393,7 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
 	// leader-probe flakes.
 
-	c := startStaticMRClusterWithOptions(t, 3, 2, mrClusterOptions{
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
 	}) // 3 procs, 2 groups keeps restart recovery focused and stable
@@ -424,12 +418,10 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	}
 
 	// Restart with the same data dirs and fresh HTTP ports (avoid TCP TIME_WAIT).
-	// Pass the original seedGroups so the node binary does not auto-derive a
-	// higher count and re-propose groups beyond what was originally seeded.
 	for i := range c.procs {
 		c.httpPorts[i] = freePort()
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-		c.procs[i] = c.startNode(i, c.seedGroups)
+		c.procs[i] = c.startNode(i)
 	}
 
 	// Wait for HTTP readiness and a leader together. A plain TCP port probe can
@@ -478,7 +470,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
 	// groups are group-0 and group-1.
 	const bucket = "persist-group-1"
-	c := startStaticMRClusterWithOptions(t, 3, 2, mrClusterOptions{
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
 	})
@@ -523,7 +515,7 @@ func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
 	for i := range c.procs {
 		c.httpPorts[i] = freePort()
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-		c.procs[i] = c.startNode(i, c.seedGroups)
+		c.procs[i] = c.startNode(i)
 	}
 
 	probeBucket := fmt.Sprintf("__per-group-restart-probe-%d", time.Now().UnixNano())
@@ -708,7 +700,7 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 
 	// Cross-node routing does not require multiple seeded groups; one RF=3 group
 	// is enough to exercise follower-to-leader forwarding.
-	c := startStaticMRCluster(t, 3, 1)
+	c := startStaticMRCluster(t, 3)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -750,7 +742,7 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 
 	// Failover behavior is independent of group count. Use one group to keep
 	// startup focused on the failover path under test.
-	c := startStaticMRCluster(t, 3, 1)
+	c := startStaticMRCluster(t, 3)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -858,7 +850,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 		t.Skip("NFSv4 server is Linux-only (binds 0.0.0.0)")
 	}
 
-	c := startStaticMRCluster(t, 3, 4)
+	c := startStaticMRCluster(t, 3)
 
 	// Start a grainfs instance with NFSv4 enabled on a dedicated port.
 	// We reuse the same data dir so it sees the same meta-Raft + per-group state.
@@ -959,7 +951,6 @@ func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
-		SeedGroups: 4,
 		Mode:       ClusterModeStaticPeers,
 		DisableNFS: true,
 	})
@@ -994,7 +985,6 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
-		SeedGroups: 4,
 		Mode:       ClusterModeStaticPeers,
 		DisableNFS: true,
 		DisableNBD: true,

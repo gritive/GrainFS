@@ -47,7 +47,10 @@ func TestAutoECConfigForClusterSize(t *testing.T) {
 		{4, ECConfig{DataShards: 2, ParityShards: 2}},
 		{5, ECConfig{DataShards: 3, ParityShards: 2}},
 		{6, ECConfig{DataShards: 4, ParityShards: 2}},
-		{9, ECConfig{DataShards: 4, ParityShards: 2}},
+		{7, ECConfig{DataShards: 5, ParityShards: 2}},
+		{8, ECConfig{DataShards: 6, ParityShards: 2}},
+		{9, ECConfig{DataShards: 6, ParityShards: 2}},
+		{32, ECConfig{DataShards: 6, ParityShards: 2}},
 	}
 	for _, tt := range tests {
 		require.Equal(t, tt.want, AutoECConfigForClusterSize(tt.nodes))

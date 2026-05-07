@@ -20,7 +20,8 @@ type scaleBenchResult struct {
 	elections int         // 30s idle 동안 election count (현재 미수집, 0 placeholder)
 }
 
-// runScaleBench 는 5 process를 boot, --seed-groups=N 로 시드, 30s idle 측정 후 종료.
+// runScaleBench boots 5 processes with automatic placement groups, measures
+// 30s idle resource usage, then exits.
 func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	t.Helper()
 	binary := getBinary()
@@ -82,7 +83,6 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--seed-groups=%d", n),
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),

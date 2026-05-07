@@ -71,8 +71,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 		secretKey  = "ec-eval-sk"
 		bucketName = "ec-shardcache-eval"
 		numNodes   = 3
-		ecData     = 2
-		ecParity   = 1
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -112,8 +110,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--measure-read-amp", // ← the whole point of this test
 			"--block-cache-size=0",
 			"--shard-cache-size=0", // simulator-only baseline; real cache off
@@ -122,7 +118,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
@@ -357,8 +352,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 		secretKey  = "ec-active-sk"
 		bucketName = "ec-shardcache-active"
 		numNodes   = 3
-		ecData     = 2
-		ecParity   = 1
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -398,8 +391,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--block-cache-size=0", // isolate: only EC shard cache active
 			// 256 MB total → 16 MB per-shard budget. A 5 MB object still
 			// bypasses CachedBackend while keeping single PutObject within
@@ -410,7 +401,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)

@@ -48,14 +48,10 @@ func buildClusterConfig(
 	cfg.QUICMuxPoolSize, _ = cmd.Flags().GetInt("quic-mux-pool")
 	cfg.QUICMuxFlushWindow, _ = cmd.Flags().GetDuration("quic-mux-flush")
 	cfg.SharedBadgerEnabled, _ = cmd.Flags().GetBool("shared-badger")
-	cfg.SeedGroups, _ = cmd.Flags().GetInt("seed-groups")
 
 	cfg.DirectIO, _ = cmd.Flags().GetBool("direct-io")
 	cfg.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")
 	cfg.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
-	cfg.ECData, _ = cmd.Flags().GetInt("ec-data")
-	cfg.ECParity, _ = cmd.Flags().GetInt("ec-parity")
-	cfg.ECExplicit = cmd.Flags().Changed("ec-data") || cmd.Flags().Changed("ec-parity")
 	cfg.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")
 
 	cfg.BalancerEnabled, _ = cmd.Flags().GetBool("balancer-enabled")

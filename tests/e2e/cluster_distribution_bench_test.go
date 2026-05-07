@@ -43,7 +43,6 @@ const (
 
 type distributionScenario struct {
 	name    string
-	n       int
 	ingress distributionIngress
 	mix     distributionMix
 }
@@ -107,24 +106,16 @@ func TestE2E_ClusterDistributionBench(t *testing.T) {
 	t.Logf("distribution output dir: %s", outRoot)
 
 	scenarios := []distributionScenario{
-		{name: "single-write-N8", n: 8, ingress: distributionIngressSingle, mix: distributionMixWriteHeavy},
-		{name: "single-read-N8", n: 8, ingress: distributionIngressSingle, mix: distributionMixReadHeavy},
-		{name: "rr-write-N8", n: 8, ingress: distributionIngressRoundRobin, mix: distributionMixWriteHeavy},
-		{name: "rr-read-N8", n: 8, ingress: distributionIngressRoundRobin, mix: distributionMixReadHeavy},
-		{name: "single-write-N16", n: 16, ingress: distributionIngressSingle, mix: distributionMixWriteHeavy},
-		{name: "single-read-N16", n: 16, ingress: distributionIngressSingle, mix: distributionMixReadHeavy},
-		{name: "rr-write-N16", n: 16, ingress: distributionIngressRoundRobin, mix: distributionMixWriteHeavy},
-		{name: "rr-read-N16", n: 16, ingress: distributionIngressRoundRobin, mix: distributionMixReadHeavy},
-		{name: "single-write-N32", n: 32, ingress: distributionIngressSingle, mix: distributionMixWriteHeavy},
-		{name: "single-read-N32", n: 32, ingress: distributionIngressSingle, mix: distributionMixReadHeavy},
-		{name: "rr-write-N32", n: 32, ingress: distributionIngressRoundRobin, mix: distributionMixWriteHeavy},
-		{name: "rr-read-N32", n: 32, ingress: distributionIngressRoundRobin, mix: distributionMixReadHeavy},
+		{name: "single-write", ingress: distributionIngressSingle, mix: distributionMixWriteHeavy},
+		{name: "single-read", ingress: distributionIngressSingle, mix: distributionMixReadHeavy},
+		{name: "rr-write", ingress: distributionIngressRoundRobin, mix: distributionMixWriteHeavy},
+		{name: "rr-read", ingress: distributionIngressRoundRobin, mix: distributionMixReadHeavy},
 	}
 	scenarios = filterDistributionScenarios(t, scenarios)
 
 	results := make([]*distributionResult, 0, len(scenarios))
 	for _, sc := range scenarios {
-		t.Logf("===== %s (n=%d ingress=%s mix=%s) =====", sc.name, sc.n, sc.ingress, sc.mix)
+		t.Logf("===== %s (ingress=%s mix=%s) =====", sc.name, sc.ingress, sc.mix)
 		r := runDistributionScenario(t, sc, outRoot)
 		results = append(results, r)
 		t.Logf("[%s] boot=%ds CPU max/median=%.2f puts=%d/%d gets=%d/%d p99_put=%.1fms p99_get=%.1fms",
@@ -170,13 +161,10 @@ func runDistributionScenario(t *testing.T, sc distributionScenario, outRoot stri
 	bootStart := time.Now()
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:       distributionNodes,
-		SeedGroups:  sc.n,
 		Mode:        ClusterModeStaticPeers,
 		ClusterKey:  distributionClusterKey,
 		AccessKey:   distributionAccessKey,
 		SecretKey:   distributionSecretKey,
-		ECData:      2,
-		ECParity:    1,
 		LogPrefix:   "grainfs-distribution",
 		DisableNFS:  true,
 		DisableNBD:  true,
@@ -189,7 +177,7 @@ func runDistributionScenario(t *testing.T, sc distributionScenario, outRoot stri
 
 	bucket := fmt.Sprintf("dist-%s", strings.ToLower(strings.ReplaceAll(sc.name, "_", "-")))
 	leaderIdx := ensureDistributionBucket(t, c, bucket)
-	settleTime := time.Duration(sc.n)*400*time.Millisecond + 5*time.Second
+	settleTime := time.Duration(distributionNodes*4)*400*time.Millisecond + 5*time.Second
 	if settleTime > 60*time.Second {
 		settleTime = 60 * time.Second
 	}
@@ -510,8 +498,8 @@ func writeDistributionReport(outRoot string, results []*distributionResult) erro
 	fmt.Fprintf(&b, "# Cluster Distribution Benchmark\n\n")
 	fmt.Fprintf(&b, "Output: `%s`\n\n", outRoot)
 	fmt.Fprintf(&b, "## Summary\n\n")
-	fmt.Fprintf(&b, "| scenario | N | ingress | mix | boot | CPU max/median | RSS max/median | PUT ok/err | GET ok/err | PUT p99 ms | GET p99 ms | tput MB/s |\n")
-	fmt.Fprintf(&b, "|---------|---:|---------|-----|-----:|---------------:|---------------:|-----------:|-----------:|-----------:|-----------:|----------:|\n")
+	fmt.Fprintf(&b, "| scenario | ingress | mix | boot | CPU max/median | RSS max/median | PUT ok/err | GET ok/err | PUT p99 ms | GET p99 ms | tput MB/s |\n")
+	fmt.Fprintf(&b, "|---------|---------|-----|-----:|---------------:|---------------:|-----------:|-----------:|-----------:|-----------:|----------:|\n")
 	for _, r := range results {
 		writeDistributionSummaryRow(&b, r)
 	}
@@ -527,9 +515,8 @@ func writeDistributionSummaryRow(b *strings.Builder, r *distributionResult) {
 	if r.workload.durationSec > 0 {
 		tput = float64(r.workload.bytesPut+r.workload.bytesGet) / r.workload.durationSec / 1024 / 1024
 	}
-	fmt.Fprintf(b, "| %s | %d | %s | %s | %ds | %.2f | %.2f | %d/%d | %d/%d | %.1f | %.1f | %.1f |\n",
+	fmt.Fprintf(b, "| %s | %s | %s | %ds | %.2f | %.2f | %d/%d | %d/%d | %.1f | %.1f | %.1f |\n",
 		r.scenario.name,
-		r.scenario.n,
 		r.scenario.ingress,
 		r.scenario.mix,
 		r.bootSec,
@@ -546,7 +533,6 @@ func writeDistributionSummaryRow(b *strings.Builder, r *distributionResult) {
 
 func writeDistributionResult(b *strings.Builder, r *distributionResult, includeAllCPU bool) {
 	fmt.Fprintf(b, "# %s\n\n", r.scenario.name)
-	fmt.Fprintf(b, "- N: %d\n", r.scenario.n)
 	fmt.Fprintf(b, "- ingress: %s\n", r.scenario.ingress)
 	fmt.Fprintf(b, "- mix: %s\n", r.scenario.mix)
 	fmt.Fprintf(b, "- boot: %ds\n", r.bootSec)

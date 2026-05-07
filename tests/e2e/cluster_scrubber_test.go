@@ -50,8 +50,6 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 		bucketName = "sc-bucket"
 		keyName    = "sc-obj"
 		numNodes   = 3
-		ecData     = 2
-		ecParity   = 1
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -102,9 +100,6 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
-			"--seed-groups", "1",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",

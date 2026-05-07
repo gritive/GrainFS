@@ -379,28 +379,14 @@ func Run(ctx context.Context, cfg Config) error {
 	// Start() returns before replay finishes; onBucketAssigned fires live updates.
 	clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
 
-	// Default 0 = auto-derived from cluster size: max(8, (1+len(peers))*4).
-	// Solo(peers=0)=8, 5-node=20, 10-node=40 — 클러스터 확장 시 sharding 헤드룸 확보.
-	// 명시값 ≥1 = 그 값 그대로, <0 = 1로 클램프.
-	seedGroups := cfg.SeedGroups
-	if seedGroups == 0 {
-		clusterSize := 1 + len(peers)
-		seedGroups = clusterSize * 4
-		if seedGroups < 8 {
-			seedGroups = 8
-		}
-	} else if seedGroups < 1 {
-		seedGroups = 1
-	}
 	clusterSize := 1 + len(peers)
-	effectiveEC := cluster.AutoECConfigForClusterSize(clusterSize)
-	if cfg.ECExplicit {
-		effectiveEC = cluster.ECConfig{DataShards: cfg.ECData, ParityShards: cfg.ECParity}
-		if !effectiveEC.IsActive(clusterSize) {
-			return fmt.Errorf("explicit EC profile %d+%d requires %d nodes, cluster has %d",
-				cfg.ECData, cfg.ECParity, effectiveEC.NumShards(), clusterSize)
-		}
+	// Seed data groups from cluster size only. Operators no longer choose this:
+	// group count is placement headroom, not a durability policy.
+	seedGroups := clusterSize * 4
+	if seedGroups < 8 {
+		seedGroups = 8
 	}
+	effectiveEC := cluster.AutoECConfigForClusterSize(clusterSize)
 	if !effectiveEC.IsActive(clusterSize) {
 		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)
 	}
@@ -674,9 +660,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	distBackend.SetECConfig(effectiveEC)
 	log.Info().
-		Bool("explicit", cfg.ECExplicit).
-		Int("configured_k", cfg.ECData).
-		Int("configured_m", cfg.ECParity).
+		Str("mode", "auto").
 		Int("effective_k", effectiveEC.DataShards).
 		Int("effective_m", effectiveEC.ParityShards).
 		Bool("active", effectiveEC.IsActive(len(allNodes))).

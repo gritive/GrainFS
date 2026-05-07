@@ -42,29 +42,47 @@ func TestE2E_ECScrubTrigger_FlowsThroughCluster(t *testing.T) {
 		t.Skip("skipping ec scrub trigger e2e in -short mode")
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes: 3, ECData: 2, ECParity: 1, LogPrefix: "ec-scrub-trigger",
+		Nodes: 3, Mode: ClusterModeStaticPeers, LogPrefix: "ec-scrub-trigger",
 		DisableNFS: true, DisableNBD: true,
 	})
 
-	cli := c.S3Client(0)
 	ctx := context.Background()
 	const bucket = "ec-test"
-	require.NoError(t, tryCreateBucket(ctx, cli, bucket))
+	_, err := waitForWritableEndpoint(ctx, c.httpURLs, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
+		return tryCreateBucket(attemptCtx, ecS3Client(endpoint, c.accessKey, c.secretKey), bucket)
+	})
+	require.NoError(t, err)
 	for i := 0; i < 5; i++ {
 		payload := bytes.Repeat([]byte{byte('a' + i)}, 4096)
-		require.NoError(t, tryPutObject(ctx, cli, bucket, fmt.Sprintf("k-%d", i), payload))
+		key := fmt.Sprintf("k-%d", i)
+		_, err := waitForWritableEndpoint(ctx, c.httpURLs, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
+			return tryPutObject(attemptCtx, ecS3Client(endpoint, c.accessKey, c.secretKey), bucket, key, payload)
+		})
+		require.NoError(t, err)
 	}
 
 	// Give the cluster a moment to settle EC placement before triggering.
 	time.Sleep(2 * time.Second)
 
-	httpCli := adminUnixHTTPClient(filepath.Join(c.dataDirs[0], "admin.sock"))
-
 	body, _ := json.Marshal(map[string]any{"bucket": bucket, "scope": "full"})
-	resp, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
-	require.NoError(t, err)
-	require.True(t, resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK,
-		"POST /v1/scrub returned %d", resp.StatusCode)
+	var httpCli *http.Client
+	var resp *http.Response
+	require.Eventually(t, func() bool {
+		for _, dir := range c.dataDirs {
+			candidate := adminUnixHTTPClient(filepath.Join(dir, "admin.sock"))
+			r, postErr := candidate.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
+			if postErr != nil {
+				continue
+			}
+			if r.StatusCode == http.StatusCreated || r.StatusCode == http.StatusOK {
+				httpCli = candidate
+				resp = r
+				return true
+			}
+			r.Body.Close()
+		}
+		return false
+	}, 30*time.Second, 500*time.Millisecond, "POST /v1/scrub must reach the meta-Raft leader")
 	var sr map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&sr))
 	resp.Body.Close()
@@ -112,7 +130,7 @@ func TestE2E_ECScrubTrigger_DedupHit_ReturnsExistingSession(t *testing.T) {
 		t.Skip("skipping ec scrub dedup e2e in -short mode")
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes: 1, ECData: 1, ECParity: 0, LogPrefix: "ec-scrub-dedup",
+		Nodes: 1, LogPrefix: "ec-scrub-dedup",
 		DisableNFS: true, DisableNBD: true,
 	})
 	httpCli := adminUnixHTTPClient(filepath.Join(c.dataDirs[0], "admin.sock"))

@@ -88,8 +88,6 @@ start_node() {
     --peers "$peers" \
     --cluster-key "bench-local-key" \
     $(bench_encryption_args) \
-    --ec-data 2 \
-    --ec-parity 1 \
     --nfs4-port 0 \
     --nbd-port 0 \
     $extra \
