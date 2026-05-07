@@ -12,9 +12,16 @@
   맞춰 비대칭 해소. 별 PR 권장.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
-- [ ] multi tenancy
-- [ ] quota
-- [ ] IAM
+- [ ] **IAM Foundation (ServiceAccount + Bucket Grants)** — design APPROVED
+  (`docs/superpowers/specs/2026-05-08-iam-foundation-design.md`). multi-team 사내 공유
+  클러스터 타겟. ServiceAccount-only principal + (SA, Bucket, Role∈{Read,Write,Admin})
+  grant 테이블. AWS IAM JSON policy 안 함. meta-Raft state + lock-free in-memory.
+  기존 `--access-key/--secret-key` flag는 bootstrap shim으로 유지 (default SA + wildcard
+  grant). 6주 base / 8주 expected. **다른 IAM-의존 작업의 선행조건** —
+  `multi tenancy`, `quota`, bucket-level migration policy 모두 이 foundation 위에 올라감.
+- [ ] **multi tenancy** — IAM Foundation 위에 namespace/account 격리. v1 IAM이 충분히
+  소화하면 별도 PR 불필요할 수도. IAM ship 후 재평가.
+- [ ] **quota** — SA/team 단위 용량 제한. IAM의 SA identity 위에 quota state 추가. **Depends on:** IAM Foundation.
 - [ ] hot/cold auto tiering
 - [ ] io 기반 auto rebalancing
 - [ ] iceberg: 카탈로그 상태 점검
@@ -40,6 +47,18 @@
 - [ ] **§2.x 잔여 항목** (필요 시 design doc 재발굴) — 4-30 §2.3 snapshot servers persistence(#103 v0.0.6.11) 동일 series의 다른 violation 항목이 있었는지 다음 brainstorming session에서 확인.
 - [ ] Migration: NFS virtual overlay
 - [ ] Migration: NBD block proxying
+- [ ] **Migration: bucket-level server-side injection** — 현재 `grainfs migrate inject`는
+  외부에서 도는 stateless CLI (전체 객체 메모리 로드, 단일 고루틴, 재개/메타데이터/체크섬 부재).
+  대신 GrainFS 버킷에 migration 정책을 붙이는 모델로 재설계: (1) `import` (한 번만 끌어오기),
+  (2) `mirror` (지속 복제), (3) `pull-through` (요청 시 lazy fetch + cache — cutover 전
+  GrainFS를 cache 레이어로 시범 운영 가능). 상태는 BadgerDB(`migration:<bucket>:cursor|job`),
+  Raft로 워커 leader election (중복 pull 방지), admin API + dashboard로 진행률/오류/ETA
+  노출. 스트리밍 PUT, 워커 풀, retry/backoff, ETag·user-metadata·tag 보존 기본.
+  업계 참고: AWS S3 Replication, MinIO `mc replicate`, Ceph RGW Multisite. **선행:**
+  spec 작성 (S3 native vs admin API, BadgerDB 스키마, Raft 통합, 기존 `inject` CLI
+  운명: 제거 vs 새 API thin wrapper). **Depends on:** IAM Foundation (버킷 owner SA가
+  자기 source credential을 등록할 수 있어야 함), lifecycle/policy 시스템과의 상호작용
+  정리.
 - [ ] nbd over internet for edge computing (powered by wireguard)
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 
@@ -134,17 +153,16 @@
 
 ## Cluster Day-2 Operations
 
-v0.0.90.0 Phase 1 은 metaRaft 한정으로 5 commands (transfer-leader / drain / health / placement / balancer status) 를 제공한다. 아래 항목은 의도적으로 deferred — 별도 spec 으로 분리.
+`docs/superpowers/specs/2026-05-07-cluster-day2-ops-design.md` (예정) Phase 1 (metaRaft 한정 5명령: transfer-leader, drain, health, placement, balancer status) 이후 단계. Phase 1 PR이 명시적으로 metaRaft scope로 제한했기 때문에 아래 항목은 후속 spec 필요.
 
-- [ ] **Per-data-group leader transfer / drain (multi-raft scope)** — 현재 transfer-leader / drain 은 metaRaft 만 대상. 운영자가 노드를 "graceful upgrade" 할 때 진짜 필요한 것은 그 노드가 leader 인 모든 raft group (meta + 자기 ShardGroup) 에서 leadership 을 옮기는 것. 단일 명령으로 모든 그룹 정리 + 진행률 표시 (`drained 3/3 raft groups`). **Re-open trigger:** Phase 2 multi-raft 운영 시나리오가 production 에서 빈도 ≥1/주 발생, 또는 zero-downtime upgrade 절차 명시 요청.
+- [ ] **Per-data-group leader transfer / drain (multi-raft scope)** — Phase 1 의 `cluster transfer-leader` / `cluster drain`은 metaRaft에만 동작. 운영 시나리오 "node-N 무중단 업그레이드"는 node-N이 leader인 모든 raft 그룹(metaRaft + 데이터 그룹들)에서 leadership을 옮겨야 진정한 graceful — 안 그러면 데이터 그룹 leader가 동시에 사라져 election 폭주. **설계 쟁점:** (a) per-group fan-out (모든 그룹 순회 vs 병렬), (b) ordering (metaRaft 먼저 vs 마지막), (c) partial failure (일부 그룹은 transfer 성공, 일부는 timeout) 처리 정책, (d) drain의 경우 데이터 그룹에서 voter 제거는 ChangeMembership joint consensus 필요 + EC quorum 영향 평가. **Depends on:** Cluster Day-2 Operations Phase 1 shipped + 운영 데이터로 multi-raft transfer 필요성 측정. **Re-open trigger:** node 점검 시 데이터 그룹 election 폭주가 운영 incident로 관찰되거나, "graceful node maintenance" 요구가 명시적으로 들어올 때.
 
-- [ ] **Target-aware `cluster transfer-leader <id>`** — 현재는 raft 가 자동으로 `matchIndex` 가장 큰 peer 를 선택. 운영자가 specific peer 로 옮기고 싶을 때 (e.g. AZ rebalancing, 의도적 leader pinning) 가 없음. raft.Node.TransferLeadership 에 target arg 추가 + CLI flag `--to <id>`. **Re-open trigger:** 운영자가 명시적 leader pinning 요청, 또는 다중 AZ 토폴로지에서 leader 위치가 latency 영향.
+- [ ] **Target-aware transfer-leader (특정 노드 leader 지정)** — 현재 `node.TransferLeadership()`은 matchIndex 가장 높은 peer를 자동 선택. 운영자가 "node-2를 leader로 만들어"식 명시 지정은 미지원. Raft 자체 구현(`internal/raft/raft.go`)에 `TimeoutNow(target)` API 확장 필요. 흔한 시나리오는 아니지만 (가장 빠른 디스크 가진 노드를 leader로 두는 등 placement 제어), 필요해지면 별도 PR. **Re-open trigger:** placement-aware leader 정책 (예: 특정 zone/region의 노드를 우선 leader로) 운영 요구.
 
-- [ ] **Persistent drain state (data plane redirect)** — 현재 drain 은 voter 제거까지만. 그러나 drain 직전 short window 에 들어온 in-flight write 는 drained 노드에 도달할 수 있다 (cache, NFS handle). drain 시작과 동시에 "이 노드는 traffic 받지 마" flag (gossip + admin) 를 세팅해 다른 노드들이 redirect 하도록. **Re-open trigger:** drain 후 short-window write loss / mis-route 가 production 에서 관측됨.
+- [ ] **Persistent drain state (data plane traffic redirect)** — Phase 1의 `cluster drain`은 composite (transfer + remove-peer)이라 점검 후 복귀가 catch-up 부담. 진짜 "잠시만 빠진다"는 metaFSM에 drain state 기록 + balancer/scheduler/read/write 경로가 인지해서 traffic만 redirect (voter 유지). 구현 비용 큼 (여러 서브시스템 인지 추가). **Depends on:** Cluster Day-2 Operations Phase 1, 짧은 점검 시 catch-up 부담이 운영 painfully 측정. **Re-open trigger:** 운영자가 "잠시 traffic만 빼고 voter는 유지"를 명시 요구하거나 drain된 노드 재가입 catch-up time이 SLO 침해.
 
-- [ ] **Cluster balancer trigger CLI** — 현재 `balancer status` 만 제공. 운영자가 즉시 rebalance 트리거하고 싶을 때 (e.g. capacity migration 전) 가 없음. POST `/v1/cluster/balancer/trigger` + CLI `cluster balancer trigger`. **Re-open trigger:** 운영자가 manual rebalance 요청 / dashboard 에서 인입.
+- [ ] **Cluster balancer trigger CLI** — 현재 balancer는 자동 스케줄링. 수동 trigger CLI(`cluster balancer trigger`)는 server-side balancer trigger API 신규 필요 (Propose path). 기본 자동 동작이 충분하면 rare. **Re-open trigger:** placement skew 진단 후 즉시 rebalance 요구가 자동 스케줄 주기 대비 빈번해질 때.
 
-- [ ] **`cluster add-voter <addr>` (leader-side)** — 현재 join 은 follower 가 leader 에게 push (grainfs join). 반대 방향 (leader 에서 explicit `add-voter`) 은 없음. recovery 시나리오 (split-brain, manual repair) 에서 유용. **Re-open trigger:** 재해 복구 절차에서 leader-side add-voter 가 필요해질 때, 또는 `recover-cluster` 워크플로 통합.
+- [ ] **`cluster add-voter <addr>` (leader-side add)** — 현재 신규 노드는 자기 자신이 `grainfs join`. leader-side에서 명시 추가하는 패턴은 일반적으로 add-voter primitive 노출. 현재 `meta_raft.AddVoterCtx + ProposeAddNode` building block 존재. YAGNI로 Phase 1에서 drop. **Re-open trigger:** 다중 노드 일괄 추가 admin script 패턴이 흔해지거나, 새 노드의 cluster-key 배포 자동화에서 leader-side 추가가 더 자연스러울 때.
 
-- [ ] **Health: data-group raft progress integration** — 현재 health 는 metaRaft quorum 만 보고. 데이터 그룹의 raft progress (per-group lag, 리더, voter set) 는 미포함. health 응답 확장 + 렌더링 업데이트. **Re-open trigger:** Phase 2 multi-raft 운영 / data-group level liveness 가 SLO 에 포함될 때.
-
+- [ ] **Cluster health 데이터 그룹 raft progress 통합** — Phase 1의 `cluster health`는 metaRaft 진단 중심. 데이터 그룹별 leader/term/lag 통합 표시는 Phase 2. 시나리오 "왜 일부 group만 느리지" 진단에 필요. **Depends on:** Cluster Day-2 Operations Phase 1. **Re-open trigger:** 데이터 그룹 단위 진단이 운영자 흔한 질문이 되거나 placement skew 분석 PR이 들어올 때.
