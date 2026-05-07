@@ -95,6 +95,17 @@ func buildGrantDelete(t *testing.T, saID, bucket string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildGrantWildcardDelete(t *testing.T, saID string) []byte {
+	t.Helper()
+	b := flatbuffers.NewBuilder(32)
+	saOff := b.CreateString(saID)
+	iampb.GrantWildcardDeletePayloadStart(b)
+	iampb.GrantWildcardDeletePayloadAddSaId(b, saOff)
+	end := iampb.GrantWildcardDeletePayloadEnd(b)
+	b.Finish(end)
+	return b.FinishedBytes()
+}
+
 func buildGrantWildcardPut(t *testing.T, saID string, role Role, ts time.Time) []byte {
 	t.Helper()
 	b := flatbuffers.NewBuilder(64)
@@ -241,6 +252,35 @@ func TestApplier_GrantWildcardPut(t *testing.T) {
 	}
 	if got := s.LookupGrant("sa-default", "any-bucket"); got != RoleAdmin {
 		t.Fatalf("wildcard fallback = %v, want RoleAdmin", got)
+	}
+}
+
+func TestApplier_GrantWildcardDelete_RoundTrip(t *testing.T) {
+	s := NewStore()
+	ap := NewApplier(s, newTestEncryptor(t))
+	if err := ap.ApplyGrantWildcardPut(buildGrantWildcardPut(t, "sa-default", RoleAdmin, time.Unix(1, 0))); err != nil {
+		t.Fatalf("ApplyGrantWildcardPut: %v", err)
+	}
+	if got := s.LookupGrant("sa-default", "any-bucket"); got != RoleAdmin {
+		t.Fatalf("pre-delete fallback = %v, want RoleAdmin", got)
+	}
+	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, "sa-default")); err != nil {
+		t.Fatalf("ApplyGrantWildcardDelete: %v", err)
+	}
+	if got := s.LookupGrant("sa-default", "any-bucket"); got != RoleNone {
+		t.Fatalf("post-delete = %v, want RoleNone", got)
+	}
+	// Idempotent on missing entry.
+	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, "sa-default")); err != nil {
+		t.Fatalf("second ApplyGrantWildcardDelete: %v", err)
+	}
+}
+
+func TestApplier_GrantWildcardDelete_EmptySAID(t *testing.T) {
+	s := NewStore()
+	ap := NewApplier(s, newTestEncryptor(t))
+	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, "")); err == nil {
+		t.Fatal("expected error for empty sa_id, got nil")
 	}
 }
 

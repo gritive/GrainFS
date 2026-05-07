@@ -305,6 +305,92 @@ func TestAdminAPI_GrantDelete(t *testing.T) {
 	}
 }
 
+func TestAdminAPI_GrantDelete_WildcardRoutesToWildcardProposer(t *testing.T) {
+	store := NewStore()
+	store.applyGrantWildcardPut(Grant{SAID: "sa-1", Role: RoleAdmin})
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "bk", Role: RoleRead})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	body, _ := json.Marshal(GrantDeleteRequest{SAID: "sa-1", Bucket: WildcardBucket})
+	req := httptest.NewRequest("DELETE", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantDelete(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if !p.calledGrantWildcardDelete("sa-1") {
+		t.Errorf("ProposeGrantWildcardDelete not called; calls=%v", p.calls)
+	}
+	if p.calledGrantDelete("sa-1", WildcardBucket) {
+		t.Errorf("wildcard route must not fall through to ProposeGrantDelete")
+	}
+}
+
+func TestAdminAPI_GrantDelete_WildcardOnDefaultSA_NoExplicitGrants_409(t *testing.T) {
+	store := NewStore()
+	store.applyGrantWildcardPut(Grant{SAID: DefaultSAID, Role: RoleAdmin})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	body, _ := json.Marshal(GrantDeleteRequest{SAID: DefaultSAID, Bucket: WildcardBucket})
+	req := httptest.NewRequest("DELETE", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantDelete(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body=%s", w.Code, w.Body.String())
+	}
+	if p.calledGrantWildcardDelete(DefaultSAID) {
+		t.Errorf("guard must block ProposeGrantWildcardDelete; calls=%v", p.calls)
+	}
+	if p.calledGrantDelete(DefaultSAID, WildcardBucket) {
+		t.Errorf("guard must block any propose; calls=%v", p.calls)
+	}
+}
+
+func TestAdminAPI_GrantDelete_WildcardOnDefaultSA_WithExplicitGrants_204(t *testing.T) {
+	store := NewStore()
+	store.applyGrantWildcardPut(Grant{SAID: DefaultSAID, Role: RoleAdmin})
+	store.applyGrantPut(Grant{SAID: DefaultSAID, Bucket: "owned", Role: RoleAdmin})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	body, _ := json.Marshal(GrantDeleteRequest{SAID: DefaultSAID, Bucket: WildcardBucket})
+	req := httptest.NewRequest("DELETE", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantDelete(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204, body=%s", w.Code, w.Body.String())
+	}
+	if !p.calledGrantWildcardDelete(DefaultSAID) {
+		t.Errorf("ProposeGrantWildcardDelete not called; calls=%v", p.calls)
+	}
+}
+
+func TestAdminAPI_GrantDelete_WildcardOnNonDefaultSA_204(t *testing.T) {
+	store := NewStore()
+	// Non-default SA with wildcard (shouldn't normally happen per P3, but
+	// the guard is moot here so removal is allowed unconditionally).
+	store.applyGrantWildcardPut(Grant{SAID: "sa-x", Role: RoleAdmin})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	body, _ := json.Marshal(GrantDeleteRequest{SAID: "sa-x", Bucket: WildcardBucket})
+	req := httptest.NewRequest("DELETE", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantDelete(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204, body=%s", w.Code, w.Body.String())
+	}
+	if !p.calledGrantWildcardDelete("sa-x") {
+		t.Errorf("ProposeGrantWildcardDelete not called; calls=%v", p.calls)
+	}
+}
+
 func TestAdminAPI_GrantList_All(t *testing.T) {
 	store := NewStore()
 	store.applySACreate(ServiceAccount{ID: "sa-1"})
