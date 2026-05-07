@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.86.0] - 2026-05-07 — cluster remove-peer/peer-liveness 안전 강화 (#215에서 분리)
+
+### Fixed
+
+- **`cluster remove-peer`는 peer liveness snapshot이 없으면 거절.** 기존
+  legacy `LivePeers()` quorum math fallback은 `configured`/`live`/unresolved
+  legacy identity 상태를 구분하지 못해 안전하지 않았음. snapshot interface
+  부재 시 membership mutation은 무조건 차단. CLI preflight도 같은 snapshot
+  모델로 일원화돼 `configured` peer가 alive로 카운트되지 않음.
+- **`--force`는 quorum break override로만 동작.** target이 cluster
+  membership view에 없거나 unresolved legacy identity인 경우는 force가
+  bypass하지 않음. 운영자 실수로 잘못된 target에 force가 통하던 경로 차단.
+- **`cluster peers` render에서 configured peer는 `unknown_configured`로
+  표시.** 과거에는 healthy처럼 보였음. 운영자 인지 정확도 개선.
+- **self identity 부재 시 peer liveness snapshot은 nil 반환.** meta-Raft가
+  자기 노드 identity를 아직 모르면 snapshot 자체를 만들지 않아 부정확한
+  membership 결정을 사전에 차단. meta-Raft liveness freshness window는
+  `cluster` 패키지에서 명시적으로 명명되고 `serveruntime` Adapter에서 사용.
+
+### 출처
+
+원래 #215(v0.0.77.0 refactor)의 일부로 묶여 있던 두 커밋
+(`0f6e4a9`, `ccdf411`)을 cherry-pick. #215의 runtime assembly refactor
+부분은 이번 세션의 #224/#225/#226로 인해 base가 크게 어긋나 별건으로 미룸.
+
 ## [0.0.85.0] - 2026-05-07 — `dashboard` warning 메시지에서 grainfs.toml orphan 안내 제거
 
 ### Fixed

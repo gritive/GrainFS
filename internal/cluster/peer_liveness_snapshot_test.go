@@ -48,6 +48,14 @@ func TestBuildPeerLivenessSnapshot_ComposesIdentityAndLivenessSignals(t *testing
 	}, rows)
 }
 
+func TestBuildPeerLivenessSnapshot_EmptySelfIDReturnsNil(t *testing.T) {
+	rows := BuildPeerLivenessSnapshot(PeerLivenessInput{
+		Voters: []string{"n2"},
+	})
+
+	require.Nil(t, rows)
+}
+
 func TestPeerLivenessPredicates(t *testing.T) {
 	require.True(t, IsExplicitlyDown(PeerLivenessRow{LivenessState: PeerLivenessHealthCooldown}))
 	require.True(t, IsExplicitlyDown(PeerLivenessRow{LivenessState: PeerLivenessProbeFailed}))
