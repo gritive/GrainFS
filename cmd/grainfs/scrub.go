@@ -32,6 +32,7 @@ func newScrubCmd() *cobra.Command {
 	cmd.Flags().String("scope", "full", "scope: full | live")
 	cmd.Flags().Bool("dry-run", false, "observe only, no repair")
 	cmd.Flags().Bool("detach", false, "don't follow, return immediately")
+	registerAdminEndpointFlag(cmd)
 	registerAdminTimeoutFlag(cmd)
 	return cmd
 }

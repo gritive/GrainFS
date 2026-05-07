@@ -316,7 +316,7 @@ func TestNewClientForURL_NoHTTPClientTimeoutCap(t *testing.T) {
 }
 
 func TestNewClient_NoHTTPClientTimeoutCap_HTTPEndpoint(t *testing.T) {
-	c, err := NewClient("http://example.com:9000", "")
+	c, err := NewClient("http://example.com:9000")
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

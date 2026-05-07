@@ -1126,6 +1126,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("admin server: %w", err)
 	}
+	log.Info().Str("path", adminSocket).
+		Str("hint", fmt.Sprintf("export GRAINFS_ENDPOINT=%q or pass --endpoint %q", adminSocket, adminSocket)).
+		Msg("admin endpoint")
 	// Best-effort fallback: ensures the socket is unlinked even if the explicit
 	// shutdown path is bypassed (e.g. early return). The explicit shutdown
 	// sequence below stops admin BEFORE the data plane drains so operator

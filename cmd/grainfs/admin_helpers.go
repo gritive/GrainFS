@@ -47,13 +47,21 @@ func applyAdminTimeout(ctx context.Context, cmd *cobra.Command) (context.Context
 	return context.WithTimeout(ctx, d)
 }
 
-// adminClientFromCmd reads the per-command --endpoint and --data flags and
-// returns a configured admin client. Used by non-volume admin CLI commands
-// (dashboard, bucket scrub) that share the same connection mechanics.
+// registerAdminEndpointFlag adds --endpoint to cmd's PersistentFlags so every
+// admin subcommand below it inherits a single shared resolver. The value is a
+// bare UDS path (e.g. ./tmp/admin.sock); when unset, resolution falls back to
+// $GRAINFS_ENDPOINT.
+func registerAdminEndpointFlag(cmd *cobra.Command) {
+	cmd.PersistentFlags().String("endpoint", "",
+		"admin Unix socket path (default: $GRAINFS_ENDPOINT)")
+}
+
+// adminClientFromCmd reads --endpoint and returns a configured admin client.
+// Used by admin CLI commands (volume, dashboard, bucket scrub) that share the
+// same connection mechanics.
 func adminClientFromCmd(cmd *cobra.Command) (*volumeadmin.Client, error) {
 	endpoint, _ := cmd.Flags().GetString("endpoint")
-	dataDir, _ := cmd.Flags().GetString("data")
-	return volumeadmin.NewClient(endpoint, dataDir)
+	return volumeadmin.NewClient(endpoint)
 }
 
 // jsonOut reports whether the --json flag is set on cmd (or any parent). It

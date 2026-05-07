@@ -10,15 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
-// Client talks to the GrainFS admin Hertz server. The endpoint is either a
-// "unix:<path>" URL (talks to <data>/admin.sock, default) or a regular
-// "http://host:port" URL (used by tests).
+// Client talks to the GrainFS admin Hertz server. The endpoint is a UDS path
+// (production; admin server is UDS-only) or an http(s):// URL (test injection).
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
@@ -26,38 +24,35 @@ type Client struct {
 
 // NewClient resolves the endpoint and returns a ready-to-use client.
 //
-// endpoint precedence: explicit endpoint arg > GRAINFS_ENDPOINT env >
-// auto-discover. Auto-discover sources (in order): dataFlag, $GRAINFS_DATA,
-// ./grainfs.toml.
-func NewClient(endpoint, dataFlag string) (*Client, error) {
-	ep := endpoint
-	if ep == "" {
-		ep = os.Getenv("GRAINFS_ENDPOINT")
+// The endpoint argument is the raw value of --endpoint (may be empty); the
+// final endpoint is determined by ResolveEndpoint, walking flag → env.
+//
+// Transport dispatch on the resolved value:
+//   - http(s)://...  — HTTP client (test injection only)
+//   - unix:<path>    — UDS dialer (legacy form, still accepted)
+//   - <bare path>    — UDS dialer (CLI-facing form)
+func NewClient(endpoint string) (*Client, error) {
+	ep, err := ResolveEndpoint(endpoint)
+	if err != nil {
+		return nil, err
 	}
-	if ep == "" {
-		var err error
-		ep, err = AutoDiscoverSocket(dataFlag)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if strings.HasPrefix(ep, "unix:") {
-		sock := strings.TrimPrefix(ep, "unix:")
+	if strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") {
 		return &Client{
-			httpClient: &http.Client{
-				Transport: &http.Transport{
-					DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-						var d net.Dialer
-						return d.DialContext(ctx, "unix", sock)
-					},
-				},
-			},
-			baseURL: "http://unix",
+			httpClient: &http.Client{},
+			baseURL:    strings.TrimRight(ep, "/"),
 		}, nil
 	}
+	sock := strings.TrimPrefix(ep, "unix:")
 	return &Client{
-		httpClient: &http.Client{},
-		baseURL:    strings.TrimRight(ep, "/"),
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", sock)
+				},
+			},
+		},
+		baseURL: "http://unix",
 	}, nil
 }
 
