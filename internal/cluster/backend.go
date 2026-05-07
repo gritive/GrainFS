@@ -1763,6 +1763,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	stageStart = time.Now()
 	shards, err := ECSplit(cfg, data)
 	clear(data)
+	data = nil
 	if err != nil {
 		return nil, true, err
 	}
