@@ -21,7 +21,8 @@ enum ForwardOp : byte {
   GetObjectVersion = 11,
   DeleteObjectVersion = 12,
   ListObjectVersions = 13,
-  ScrubSessionStat = 14
+  ScrubSessionStat = 14,
+  ReadAt = 15
 }
 
 table ScrubSessionStatArgs {
@@ -60,6 +61,13 @@ table PutObjectArgs {
 table GetObjectArgs {
   bucket:string;
   key:string;
+}
+
+table ReadAtArgs {
+  bucket:string;
+  key:string;
+  offset:long;
+  length:long;
 }
 
 table GetObjectVersionArgs {

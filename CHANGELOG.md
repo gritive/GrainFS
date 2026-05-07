@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.74.0] - 2026-05-07 — Cluster runtime relocated to serveruntime.Run (cmd-thin PR2b)
+## [0.0.77.0] - 2026-05-07 — Cluster runtime relocated to serveruntime.Run (cmd-thin PR2b)
 
 ### Changed
 
@@ -27,6 +27,61 @@
 - `make test-e2e` shows zero new failures vs master. `TestE2E_ClusterRemovePeer_DeadFollower`
   was failing on master(20b7c72) before this PR with the same symptom and
   remains failing — pre-existing, unrelated.
+
+## [0.0.75.0] - 2026-05-07
+
+### Added
+
+- Topology GET benchmarks can now measure full-object and byte-range GETs
+  across multiple range sizes, range modes, VU counts, and explicit target
+  nodes, making shard-local and remote-heavy EC read paths measurable.
+- Added regression coverage for S3 Range GET `ReadAt` usage, EC user-bucket
+  partial reads, group-forward `ReadAt`, remote shard range reads, and QUIC
+  RPC stream-credit reuse.
+
+### Changed
+
+- S3 Range GET now prefers backend `ReadAt` before opening full object bodies,
+  so EC user buckets read only the data shard segments that overlap the
+  requested range.
+- EC range reads now use direct local shard `ReadAt`, bounded remote shard
+  range RPCs, and bounded group-forward `ReadAt` responses for small ranges,
+  avoiding full object reconstruction on common random-read workloads.
+- QUIC request/response calls now half-close the request write side after
+  sending the frame, so repeated range reads release bidirectional stream
+  credit instead of stalling at the connection stream limit.
+
+### Fixed
+
+- Fixed the 6-node VUS=8 Range GET stall where the workload stopped around
+  1356 completed operations after exhausting QUIC stream credit. The same
+  benchmark now completes with 5836 successful operations, zero failures, and
+  zero interrupted iterations.
+
+## [0.0.74.0] - 2026-05-07
+
+### Added
+
+- `cluster status` / `cluster peers` can now mark remote metaRaft voters as
+  `live` when the leader has fresh successful AppendEntries evidence for that
+  peer, giving remove-peer preflight a real positive liveness source.
+- Added regression coverage for heartbeat and entries-bearing AppendEntries
+  success evidence, leader-only evidence exposure, leader epoch reset behavior,
+  freshness filtering, and raft-address to node-ID evidence normalization.
+
+### Changed
+
+- Remove-peer membership safety now treats fresh leader-side metaRaft
+  replication evidence as the positive liveness signal while keeping stale,
+  missing, and follower-side evidence conservative as `configured`.
+- Operator docs now distinguish positive metaRaft liveness evidence from the
+  still-deferred negative dead-peer detection policy.
+
+### Fixed
+
+- New leader epochs now clear prior-term replication evidence so stale
+  successful AppendEntries timestamps cannot briefly mark remote voters live
+  after a leadership change.
 
 ## [0.0.73.0] - 2026-05-07
 

@@ -327,7 +327,8 @@ func (r *peerReplicator) applyResult(res replicationResult) bool {
 		return false
 	}
 
-	n.checkQuorumAcks[r.peer] = time.Now()
+	now := time.Now()
+	n.checkQuorumAcks[r.peer] = now
 	if res.snapshot {
 		r.snapshotting = false
 		n.nextIndex[r.peer] = res.snapshotIndex + 1
@@ -339,6 +340,7 @@ func (r *peerReplicator) applyResult(res replicationResult) bool {
 	}
 	if res.heartbeat {
 		if res.success {
+			n.peerAppendSuccess[r.peer] = now
 			n.tickReadIndexAcks(r.peer)
 			return false
 		}
@@ -354,6 +356,7 @@ func (r *peerReplicator) applyResult(res replicationResult) bool {
 		return true
 	}
 	if res.success {
+		n.peerAppendSuccess[r.peer] = now
 		advanced, match := r.tracker.ackGeneration(res.generation, res.from, res.to)
 		n.tickReadIndexAcks(r.peer)
 		if !advanced {

@@ -123,6 +123,27 @@ func TestForwardReceiver_GetObjectVersionRead_StreamsAboveReplyCap(t *testing.T)
 	require.Equal(t, body, got)
 }
 
+func TestForwardReceiver_ReadAtRead_StreamsOnlyRequestedRange(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	body := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 1024)
+	_, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "large", 10, 8192))
+	reply, streamBody := rcv.HandleRead(&transport.Message{Type: transport.StreamGroupForwardRead, Payload: payload})
+	require.NotNil(t, reply)
+	require.NotNil(t, streamBody)
+	defer streamBody.Close()
+	require.NoError(t, parseReplyStatus(reply.Payload))
+
+	got, err := io.ReadAll(streamBody)
+	require.NoError(t, err)
+	require.Equal(t, body[10:10+8192], got)
+}
+
 func TestForwardReceiver_ListObjectVersions_DispatchesToBackend(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
 	gb := newTestGroupBackend(t, "g1")

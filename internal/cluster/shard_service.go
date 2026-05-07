@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +24,8 @@ import (
 )
 
 var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(512) })
+
+const maxShardRangeReplyBytes = 1 << 20
 
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
@@ -234,6 +237,53 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 	return data, nil
 }
 
+// ReadShardRange fetches a bounded byte range from a remote shard in one RPC.
+func (s *ShardService) ReadShardRange(ctx context.Context, peer, bucket, key string, shardIdx int, offset int64, length int64) ([]byte, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("negative shard offset %d", offset)
+	}
+	if length < 0 {
+		return nil, fmt.Errorf("negative shard length %d", length)
+	}
+	if length > maxShardRangeReplyBytes {
+		return nil, fmt.Errorf("shard range length %d exceeds max %d", length, maxShardRangeReplyBytes)
+	}
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return nil, err
+	}
+	if s.transport == nil {
+		return nil, fmt.Errorf("shard service: no transport")
+	}
+	var rangePayload [16]byte
+	binary.BigEndian.PutUint64(rangePayload[0:8], uint64(offset))
+	binary.BigEndian.PutUint64(rangePayload[8:16], uint64(length))
+	fw := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:])
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	if err != nil {
+		return nil, fmt.Errorf("read shard range from %s: %w", peerAddr, err)
+	}
+
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	if rpcType == "Error" {
+		if len(data) > 0 {
+			return nil, fmt.Errorf("remote error from %s: %s", peer, string(data))
+		}
+		return nil, fmt.Errorf("remote error from %s", peer)
+	}
+	if rpcType != "OK" {
+		return nil, fmt.Errorf("unexpected shard range response from %s: %s", peer, rpcType)
+	}
+	if int64(len(data)) != length {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data, nil
+}
+
 // ReadShardStream fetches a remote shard as a plaintext stream.
 func (s *ShardService) ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error) {
 	peerAddr, err := s.resolvePeerAddress(peer)
@@ -269,6 +319,53 @@ func (s *ShardService) ReadShardStream(ctx context.Context, peer, bucket, key st
 	if rpcType != "OK" {
 		_ = body.Close()
 		return nil, fmt.Errorf("unexpected shard stream response from %s: %s", peer, rpcType)
+	}
+	return body, nil
+}
+
+func (s *ShardService) ReadShardRangeStream(ctx context.Context, peer, bucket, key string, shardIdx int, offset int64, length int64) (io.ReadCloser, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("negative shard offset %d", offset)
+	}
+	if length < 0 {
+		return nil, fmt.Errorf("negative shard length %d", length)
+	}
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return nil, err
+	}
+	if s.transport == nil {
+		return nil, fmt.Errorf("shard service: no transport")
+	}
+	var rangePayload [16]byte
+	binary.BigEndian.PutUint64(rangePayload[0:8], uint64(offset))
+	binary.BigEndian.PutUint64(rangePayload[8:16], uint64(length))
+	fw := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:])
+	payload := append([]byte(nil), fw.Builder.FinishedBytes()...)
+	fw.Builder.Reset()
+	shardBuilderPool.Put(fw.Builder)
+
+	req := &transport.Message{Type: transport.StreamShardReadBody, Payload: payload}
+	resp, body, err := s.transport.CallRead(ctx, peerAddr, req)
+	if err != nil {
+		return nil, fmt.Errorf("stream shard range from %s: %w", peerAddr, err)
+	}
+
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		_ = body.Close()
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	if rpcType == "Error" {
+		_ = body.Close()
+		if len(data) > 0 {
+			return nil, fmt.Errorf("remote error from %s: %s", peer, string(data))
+		}
+		return nil, fmt.Errorf("remote error from %s", peer)
+	}
+	if rpcType != "OK" {
+		_ = body.Close()
+		return nil, fmt.Errorf("unexpected shard range stream response from %s: %s", peer, rpcType)
 	}
 	return body, nil
 }
@@ -341,6 +438,8 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 		return s.handleWrite(sr)
 	case "ReadShard":
 		return s.handleRead(sr)
+	case "ReadShardRange":
+		return s.handleReadRange(sr)
 	case "DeleteShards":
 		return s.handleDelete(sr)
 	default:
@@ -416,6 +515,29 @@ func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 	return s.okResponse(nil)
 }
 
+func (s *ShardService) handleReadRange(sr *shardRequest) *transport.Message {
+	if len(sr.Data) != 16 {
+		return s.errorResponse("invalid shard range payload")
+	}
+	offset := int64(binary.BigEndian.Uint64(sr.Data[0:8]))
+	length := int64(binary.BigEndian.Uint64(sr.Data[8:16]))
+	if offset < 0 || length < 0 {
+		return s.errorResponse("invalid shard range")
+	}
+	if length > maxShardRangeReplyBytes {
+		return s.errorResponse(fmt.Sprintf("shard range length %d exceeds max %d", length, maxShardRangeReplyBytes))
+	}
+	buf := make([]byte, int(length))
+	n, err := s.ReadLocalShardAt(sr.Bucket, sr.Key, int(sr.ShardIdx), offset, buf)
+	if err != nil && n != len(buf) {
+		return s.errorResponse(err.Error())
+	}
+	if n != len(buf) {
+		return s.errorResponse(io.ErrUnexpectedEOF.Error())
+	}
+	return s.okResponse(buf)
+}
+
 // HandleWriteBody returns the streamed shard write handler for StreamRouter.
 func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *transport.Message {
 	return func(req *transport.Message, body io.Reader) *transport.Message {
@@ -444,14 +566,24 @@ func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Mes
 		if err != nil {
 			return s.errorResponse("unmarshal request: " + err.Error()), nil
 		}
-		if rpcType != "ReadShard" {
+		if rpcType != "ReadShard" && rpcType != "ReadShardRange" {
 			return s.errorResponse("unexpected shard read RPC: " + rpcType), nil
 		}
 		sr, err := unmarshalShardRequest(srData)
 		if err != nil {
 			return s.errorResponse("decode request: " + err.Error()), nil
 		}
-		r, err := s.OpenLocalShard(sr.Bucket, sr.Key, int(sr.ShardIdx))
+		var r io.ReadCloser
+		if rpcType == "ReadShardRange" {
+			if len(sr.Data) != 16 {
+				return s.errorResponse("invalid shard range payload"), nil
+			}
+			offset := int64(binary.BigEndian.Uint64(sr.Data[0:8]))
+			length := int64(binary.BigEndian.Uint64(sr.Data[8:16]))
+			r, err = s.OpenLocalShardRange(sr.Bucket, sr.Key, int(sr.ShardIdx), offset, length)
+		} else {
+			r, err = s.OpenLocalShard(sr.Bucket, sr.Key, int(sr.ShardIdx))
+		}
 		if err != nil {
 			return s.errorResponse(err.Error()), nil
 		}
@@ -730,6 +862,124 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 		return nil, err
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset int64, buf []byte) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("negative shard offset %d", offset)
+	}
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	var prefix [8]byte
+	_, peekErr := io.ReadFull(f, prefix[:])
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
+		info, err := f.Stat()
+		if err != nil {
+			return 0, err
+		}
+		payloadLen := info.Size() - 8 - 4
+		if payloadLen < 0 {
+			return 0, eccodec.ErrCRCMismatch
+		}
+		if offset >= payloadLen {
+			return 0, io.EOF
+		}
+		if max := payloadLen - offset; int64(len(buf)) > max {
+			buf = buf[:max]
+		}
+		return f.ReadAt(buf, 8+offset)
+	}
+	r, err := s.OpenLocalShard(bucket, key, shardIdx)
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	if offset > 0 {
+		if _, err := io.CopyN(io.Discard, r, offset); err != nil {
+			return 0, err
+		}
+	}
+	return io.ReadFull(r, buf)
+}
+
+func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, offset int64, length int64) (io.ReadCloser, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("negative shard offset %d", offset)
+	}
+	if length < 0 {
+		return nil, fmt.Errorf("negative shard length %d", length)
+	}
+	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var prefix [8]byte
+	_, peekErr := io.ReadFull(f, prefix[:])
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		payloadLen := info.Size() - 8 - 4
+		if payloadLen < 0 {
+			_ = f.Close()
+			return nil, eccodec.ErrCRCMismatch
+		}
+		if offset >= payloadLen {
+			_ = f.Close()
+			return nil, io.EOF
+		}
+		if max := payloadLen - offset; length > max {
+			length = max
+		}
+		return &multiReadCloser{Reader: io.NewSectionReader(f, 8+offset, length), close: f.Close}, nil
+	}
+	_ = f.Close()
+
+	r, err := s.OpenLocalShard(bucket, key, shardIdx)
+	if err != nil {
+		return nil, err
+	}
+	if offset == 0 {
+		return &multiReadCloser{Reader: io.LimitReader(r, length), close: r.Close}, nil
+	}
+	return &multiReadCloser{Reader: &skipThenLimitReader{r: r, skip: offset, limit: length}, close: r.Close}, nil
+}
+
+type skipThenLimitReader struct {
+	r       io.Reader
+	skip    int64
+	limit   int64
+	skipped bool
+}
+
+func (r *skipThenLimitReader) Read(p []byte) (int, error) {
+	if !r.skipped {
+		if _, err := io.CopyN(io.Discard, r.r, r.skip); err != nil {
+			return 0, err
+		}
+		r.skipped = true
+	}
+	if r.limit <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.limit {
+		p = p[:r.limit]
+	}
+	n, err := r.r.Read(p)
+	r.limit -= int64(n)
+	return n, err
 }
 
 // DeleteLocalShards removes every shard for key on the local node (all indices).

@@ -181,6 +181,25 @@ the address book, peer health state, and optional recent probe results. Active
 probing belongs to a separate monitor because status and admin read paths must
 not perform network I/O just to render cluster state.
 
+For metaRaft voters, positive liveness evidence means recent successful Raft
+replication from the local node to that peer. The evidence source belongs inside
+the Raft node implementation, because heartbeat and AppendEntries outcomes are
+Raft timing facts. Runtime adapters translate that evidence into snapshot probe
+results; the snapshot module does not subscribe to Raft events or maintain its
+own liveness map.
+
+Recent metaRaft replication evidence is fresh for three metaRaft election
+timeouts. A resolved remote voter with fresh successful AppendEntries evidence
+is `live`; a resolved remote voter with no fresh success evidence remains
+`configured`. Failed heartbeats alone do not make a peer `probe_failed` for
+membership-mutation policy because false-positive liveness is more dangerous
+than conservative unknown state.
+
+Follower nodes do not infer remote voter liveness from leader hints or inbound
+Raft traffic. Followers report themselves as `live` and leave remote voters
+`configured` unless they have their own explicit evidence source. Leader-side
+replication evidence is the authoritative source for remove-peer preflight.
+
 When signals disagree, identity resolution comes first. Unresolved legacy rows
 remain `unresolved_legacy` with reason `identity_unresolved` rather than
 claiming live or down state. For resolved rows, recent probe success wins over
