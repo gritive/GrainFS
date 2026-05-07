@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -18,24 +19,48 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
-// Client speaks to a single grainfs server's admin endpoints. Endpoint is
-// expected to point at the local node (the membership endpoint is
-// localhost-only); HTTPClient is reused across calls.
+// Client speaks to a single grainfs server's admin endpoints.
+//
+// Production CLI callers pass a UDS path (e.g. "<data-dir>/admin.sock"); the
+// client dispatches on prefix:
+//   - bare path        — UDS dialer (CLI-facing form)
+//   - "unix:<path>"    — UDS dialer (legacy form)
+//   - "http(s)://..."  — direct HTTP dial (test injection)
+//
+// HTTP routes are /v1/cluster/* on the admin UDS server. The legacy
+// dashboard routes /api/cluster/* on the data-plane HTTP server are not
+// touched by this client.
 type Client struct {
-	Endpoint   string
-	HTTPClient *http.Client
+	httpClient *http.Client
+	baseURL    string
+	sockPath   string // populated for UDS transport; "" for HTTP transport
 }
 
-// NewClient constructs a Client that trims trailing slashes on the endpoint
-// and uses a per-call context for timeouts.
+// NewClient constructs a Client honoring the endpoint scheme. See Client doc.
 func NewClient(endpoint string) *Client {
+	ep := strings.TrimSpace(endpoint)
+	if strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") {
+		return &Client{
+			httpClient: &http.Client{},
+			baseURL:    strings.TrimRight(ep, "/"),
+		}
+	}
+	sock := strings.TrimPrefix(ep, "unix:")
 	return &Client{
-		Endpoint:   strings.TrimRight(endpoint, "/"),
-		HTTPClient: http.DefaultClient,
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", sock)
+				},
+			},
+		},
+		baseURL:  "http://unix",
+		sockPath: sock,
 	}
 }
 
-// Status mirrors the JSON shape returned by /api/cluster/status. Fields
+// Status mirrors the JSON shape returned by /v1/cluster/status. Fields
 // not present (e.g. local mode) decode to zero values; callers should branch
 // on Mode.
 type Status struct {
@@ -91,10 +116,10 @@ func (e *RemovePeerError) Error() string {
 	return "server: " + e.Message
 }
 
-// Status fetches /api/cluster/status. ctx controls the deadline; pass a
+// Status fetches /v1/cluster/status. ctx controls the deadline; pass a
 // context.WithTimeout to bound the call.
 func (c *Client) Status(ctx context.Context) (*Status, error) {
-	body, err := c.getJSON(ctx, "/api/cluster/status")
+	body, err := c.getJSON(ctx, "/v1/cluster/status")
 	if err != nil {
 		return nil, err
 	}
@@ -105,19 +130,29 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 	return &s, nil
 }
 
-// RemovePeer issues POST /api/cluster/remove-peer. On non-2xx responses the
+// StatusRaw fetches /v1/cluster/status and returns the response body
+// unchanged. Use this for `cluster status --format json` to preserve
+// forward-compatibility: new server fields (not yet in the typed Status
+// struct) round-trip without loss.
+//
+// For text output, prefer Status() which returns a typed struct.
+func (c *Client) StatusRaw(ctx context.Context) ([]byte, error) {
+	return c.getJSON(ctx, "/v1/cluster/status")
+}
+
+// RemovePeer issues POST /v1/cluster/remove-peer. On non-2xx responses the
 // returned error is *RemovePeerError so callers can branch on status code
 // and surface server-supplied context.
 func (c *Client) RemovePeer(ctx context.Context, id string, force bool) error {
 	body, _ := json.Marshal(map[string]any{"id": id, "force": force})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint+"/api/cluster/remove-peer", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/cluster/remove-peer", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return wrapDialError(err, c.sockPath)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
@@ -145,17 +180,17 @@ func (c *Client) RemovePeer(ctx context.Context, id string, force bool) error {
 	return rpe
 }
 
-// EventLog fetches /api/eventlog with the given since (lookback duration)
-// and limit. The server endpoint is localhost-only.
+// EventLog fetches /v1/cluster/eventlog with the given since (lookback
+// duration) and limit. The server endpoint is gated by UDS file mode.
 func (c *Client) EventLog(ctx context.Context, since time.Duration, limit int) ([]Event, error) {
-	url := fmt.Sprintf("%s/api/eventlog?since=%d&limit=%d", c.Endpoint, int64(since.Seconds()), limit)
+	url := fmt.Sprintf("%s/v1/cluster/eventlog?since=%d&limit=%d", c.baseURL, int64(since.Seconds()), limit)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("connect: %w", err)
+		return nil, wrapDialError(err, c.sockPath)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
@@ -173,13 +208,13 @@ func (c *Client) EventLog(ctx context.Context, since time.Duration, limit int) (
 }
 
 func (c *Client) getJSON(ctx context.Context, path string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("connect to %s: %w", c.Endpoint, err)
+		return nil, wrapDialError(err, c.sockPath)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)

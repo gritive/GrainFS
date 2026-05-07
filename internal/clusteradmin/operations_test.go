@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubServer fakes /api/cluster/status, /api/cluster/remove-peer, and
-// /api/eventlog so RemovePeer/Peers/Events can be exercised end-to-end
+// stubServer fakes /v1/cluster/status, /v1/cluster/remove-peer, and
+// /v1/cluster/eventlog so RemovePeer/Peers/Events can be exercised end-to-end
 // without a running grainfs.
 type stubServer struct {
 	statusBody  map[string]any
@@ -30,10 +30,10 @@ type stubServer struct {
 
 func (s *stubServer) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(s.statusBody)
 	})
-	mux.HandleFunc("/api/cluster/remove-peer", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/remove-peer", func(w http.ResponseWriter, r *http.Request) {
 		s.removeCalls.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		parsed := map[string]any{}
@@ -46,7 +46,7 @@ func (s *stubServer) handler() http.Handler {
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(s.removeBody)
 	})
-	mux.HandleFunc("/api/eventlog", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/eventlog", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(s.eventsBody)
 	})
 	return mux
