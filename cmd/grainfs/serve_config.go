@@ -1,136 +1,18 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
-// clusterConfig is a flat snapshot of every flag and pre-resolved input that
-// runCluster needs, captured once in runServe so the body itself reads no
-// cobra state. PR2b will lift this struct into internal/serveruntime.Config.
-type clusterConfig struct {
-	// Network / identity
-	Addr             string
-	DataDir          string
-	NodeID           string
-	RaftAddr         string
-	RaftAddrExplicit bool
-	ClusterKey       string
-	JoinAddr         string
-	JoinMode         bool
-	Peers            []string
-
-	// Pre-built per Q9 of the cmd-thin grill
-	AuthOpts  []server.Option
-	Encryptor *encrypt.Encryptor
-
-	// Raft tuning
-	BadgerManagedMode     bool
-	RaftLogGCInterval     time.Duration
-	RaftHeartbeatInterval time.Duration
-	RaftElectionTimeout   time.Duration
-	QUICMuxEnabled        bool
-	QUICMuxPoolSize       int
-	QUICMuxFlushWindow    time.Duration
-	SharedBadgerEnabled   bool
-	SeedGroups            int
-
-	// Storage / EC
-	DirectIO       bool
-	MeasureReadAmp bool
-	ShardCacheSize int64
-	ECData         int
-	ECParity       int
-	VFSFixed       bool
-	PackThreshold  int
-
-	// Balancer
-	BalancerEnabled             bool
-	BalancerGossipInterval      time.Duration
-	BalancerImbalanceTriggerPct float64
-	BalancerImbalanceStopPct    float64
-	BalancerMigrationRate       int
-	BalancerLeaderTenureMin     time.Duration
-	BalancerWarmupTimeout       time.Duration
-	BalancerCBThreshold         float64
-	BalancerMigrationMaxRetries int
-	BalancerMigrationPendingTTL time.Duration
-
-	// Heal receipts
-	HealReceiptEnabled        bool
-	HealReceiptPSK            string
-	HealReceiptRetention      time.Duration
-	HealReceiptGossipInterval time.Duration
-	HealReceiptWindow         int
-
-	// Backend chain
-	UpstreamEndpoint  string
-	UpstreamAccessKey string
-	UpstreamSecretKey string
-
-	// Snapshots (object PITR)
-	SnapInterval time.Duration
-	SnapRetain   int
-
-	// Alerts
-	AlertWebhook string
-	AlertSecret  string
-	DiskWarnFrac float64
-	DiskCritFrac float64
-
-	// Lifecycle / dedup / cache
-	LifecycleInterval time.Duration
-	DedupEnabled      bool
-	BlockCacheSize    int64
-
-	// Dashboard / vlog
-	PublicURL         string
-	VlogWarnRatio     float64
-	VlogCriticalRatio float64
-
-	// Admin socket
-	AdminSocket string
-	AdminGroup  string
-
-	// Scrub / reshard / degraded
-	ScrubInterval    time.Duration
-	ReshardInterval  time.Duration
-	DegradedInterval time.Duration
-
-	// Node services
-	NFS4Port      int
-	NBDPort       int
-	NBDVolumeSize int64
-
-	// Resource guards (pre-resolved from cobra; runCluster body reads only these)
-	FDWatchEnabled        bool
-	FDOpts                resourceguard.FDOptions
-	GoroutineWatchEnabled bool
-	GoroutineOpts         resourceguard.GoroutineOptions
-	VlogWatchEnabled      bool
-	VlogResourceGuardOpts resourceguard.VlogOptions
-
-	// Startup snapshot map (built once via cmd.Flags().VisitAll with secrets redacted)
-	FlagsSnapshot map[string]string
-}
-
-// buildClusterConfig captures every cobra-derived input runCluster needs.
-// All cmd.Flags().Get* calls live here so the runCluster body is cobra-free
-// (preparation for PR2b which moves the body to internal/serveruntime.Run).
+// buildClusterConfig captures every cobra-derived input serveruntime.Run needs.
+// All cmd.Flags().Get* calls live here so the Run body is cobra-free.
 //
 // Pre-resolved arguments (addr, dataDir, nodeID, raftAddr, clusterKey,
 // authOpts, encryptor) are still produced by runServe — they sit upstream
@@ -140,8 +22,9 @@ func buildClusterConfig(
 	addr, dataDir, nodeID, raftAddr, clusterKey string,
 	authOpts []server.Option,
 	encryptor *encrypt.Encryptor,
-) clusterConfig {
-	cfg := clusterConfig{
+) serveruntime.Config {
+	cfg := serveruntime.Config{
+		Version:          version,
 		Addr:             addr,
 		DataDir:          dataDir,
 		NodeID:           nodeID,
@@ -235,8 +118,8 @@ func buildClusterConfig(
 	return cfg
 }
 
-// collectFlagsSnapshot walks every cobra flag once and produces the same
-// map[string]string logStartupConfigSnapshot used to write before PR2a.
+// collectFlagsSnapshot walks every cobra flag once and produces the
+// map[string]string consumed by serveruntime.LogStartupConfigSnapshot.
 // Secret-bearing flags (secret-key, cluster-key, alert-webhook-secret,
 // heal-receipt-psk) are redacted at the source so neither the structured log
 // nor the on-disk snapshot ever sees the raw value.
@@ -253,71 +136,4 @@ func collectFlagsSnapshot(cmd *cobra.Command) map[string]string {
 		snap[f.Name] = f.Value.String()
 	})
 	return snap
-}
-
-// logStartupConfigSnapshotFromMap is the cobra-free counterpart of the
-// original logStartupConfigSnapshot. It accepts a pre-redacted snapshot map
-// (built upstream by collectFlagsSnapshot) plus the resolved-at-runtime
-// fields (addr/dataDir/nodeID/raftAddr/peers) that aren't cobra-derived.
-//
-// PR2b will lift this verbatim into internal/serveruntime.
-func logStartupConfigSnapshotFromMap(
-	flagsSnap map[string]string,
-	addr, dataDir, nodeID, raftAddr string,
-	peers []string,
-) {
-	snapshot := make(map[string]any, len(flagsSnap)+5)
-	snapshot["addr"] = addr
-	snapshot["data_dir"] = dataDir
-	snapshot["node_id"] = nodeID
-	snapshot["raft_addr"] = raftAddr
-	snapshot["peers"] = peers
-	for k, v := range flagsSnap {
-		snapshot[k] = v
-	}
-
-	log.Debug().Interface("flags", snapshot).Msg("startup config snapshot")
-
-	snapPath := filepath.Join(dataDir, ".last-config.json")
-	if prev, err := os.ReadFile(snapPath); err == nil {
-		var prevMap map[string]any
-		if err := json.Unmarshal(prev, &prevMap); err == nil {
-			diff := diffSnapshots(prevMap, snapshot)
-			if len(diff) > 0 {
-				log.Info().Interface("changed", diff).Msg("config changed since last startup")
-			}
-		}
-	}
-
-	if data, err := json.MarshalIndent(snapshot, "", "  "); err == nil {
-		if err := os.WriteFile(snapPath, data, 0o600); err != nil {
-			log.Debug().Err(err).Str("path", snapPath).Msg("could not persist startup config snapshot")
-		}
-	}
-}
-
-// diffSnapshots returns keys whose values differ between two snapshots,
-// preserving the previous on-disk emit format used by the changed-flags log.
-func diffSnapshots(prev, curr map[string]any) map[string]map[string]any {
-	out := make(map[string]map[string]any)
-	keys := make(map[string]struct{}, len(prev)+len(curr))
-	for k := range prev {
-		keys[k] = struct{}{}
-	}
-	for k := range curr {
-		keys[k] = struct{}{}
-	}
-	sortedKeys := make([]string, 0, len(keys))
-	for k := range keys {
-		sortedKeys = append(sortedKeys, k)
-	}
-	sort.Strings(sortedKeys)
-	for _, k := range sortedKeys {
-		pv, pok := prev[k]
-		cv, cok := curr[k]
-		if !pok || !cok || fmt.Sprintf("%v", pv) != fmt.Sprintf("%v", cv) {
-			out[k] = map[string]any{"prev": pv, "curr": cv}
-		}
-	}
-	return out
 }
