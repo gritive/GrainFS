@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,7 +62,11 @@ func TestMain(m *testing.M) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
-		"--lifecycle-interval", "0"}
+		"--lifecycle-interval", "0",
+		// IAM bootstrap: e2e S3 client signs as test/test, so seed the
+		// default SA + wildcard Admin grant from these flags.
+		"--access-key", "test",
+		"--secret-key", "test"}
 
 	// GRAINFS_DEDUP=1 opts into dedup. Default is OFF for the e2e suite because
 	// dedup + snapshots is not implemented in Phase A — CoW E2E tests would
@@ -101,6 +106,17 @@ func TestMain(m *testing.M) {
 	}
 
 	testS3Client = newS3Client(testServerURL)
+
+	// Bootstrap shim is async (post-Start goroutine); poll HeadBucket until
+	// the IAM verifier accepts test/test creds (404=auth ready, 401=not yet).
+	if err := waitForIAMReady(testS3Client, 30*time.Second); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		terminateProcess(cmd)
+		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
+			fmt.Fprintln(os.Stderr, cleanupErr)
+		}
+		os.Exit(1)
+	}
 
 	// Start CPU profile concurrently so it captures actual test load.
 	var cpuProfileDone <-chan struct{}
@@ -400,6 +416,12 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--dedup=false",
+		// Phase 2 IAM: the verifier is always installed, so unauthenticated
+		// requests get rejected. The default e2e S3 client signs with
+		// "test"/"test"; passing those as flags bootstraps a default SA with
+		// wildcard Admin grant so existing tests keep passing.
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -408,7 +430,40 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
-	return url, newS3Client(url)
+	cli := newS3Client(url)
+	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
+	return url, cli
+}
+
+// waitForIAMReady polls HeadBucket against a probe bucket name until the IAM
+// bootstrap shim has registered the static test/test credentials. The shim
+// runs in a goroutine after the data port opens, so the brief gap between
+// "port up" and "auth ready" must be absorbed here. Returns nil once any
+// auth-ready response (200 or 404 for a non-existent bucket) is observed,
+// or the latest error on timeout.
+func waitForIAMReady(cli *s3.Client, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := cli.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String("__bootstrap_probe__")})
+		cancel()
+		if err == nil {
+			return nil
+		}
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.ErrorCode() {
+			case "NotFound", "NoSuchBucket":
+				return nil
+			}
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("IAM bootstrap not ready within %v: %w", timeout, lastErr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func createBucketWithClient(t testing.TB, client *s3.Client, name string) {
