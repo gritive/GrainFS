@@ -4,7 +4,7 @@
 # Examples:
 #   PROFILE=1 ./benchmarks/bench_two_node_s3_profile.sh
 #   NODE_COUNT=3 PROFILE=1 ./benchmarks/bench_two_node_s3_profile.sh
-#   NODE_COUNT=3 INGRESS_LIST=round-robin MIX_LIST=write-heavy ./benchmarks/bench_two_node_s3_profile.sh
+#   NODE_COUNT=3 INGRESS_LIST=round-robin MIX_LIST=pure-put,put-heavy,mixed ./benchmarks/bench_two_node_s3_profile.sh
 #   SERVER_ARGS="--shard-cache-size 0" DURATION=15s CONCURRENCY_LIST=32 ./benchmarks/bench_two_node_s3_profile.sh
 
 set -euo pipefail
@@ -24,7 +24,7 @@ GRACEFUL_RAMP_DOWN="${GRACEFUL_RAMP_DOWN:-2s}"
 GRACEFUL_STOP="${GRACEFUL_STOP:-5s}"
 CONCURRENCY_LIST="${CONCURRENCY_LIST:-32}"
 INGRESS_LIST="${INGRESS_LIST:-single,round-robin}"
-MIX_LIST="${MIX_LIST:-write-heavy,read-heavy}"
+MIX_LIST="${MIX_LIST:-put-heavy,read-heavy}"
 SIZE_KB="${SIZE_KB:-4096}"
 OBJECT_COUNT="${OBJECT_COUNT:-16}"
 PROFILE="${PROFILE:-1}"
@@ -353,8 +353,14 @@ for vus in "${CONCURRENCY_VALUES[@]}"; do
   for ingress in "${INGRESS_VALUES[@]}"; do
     for mix in "${MIX_VALUES[@]}"; do
       case "$mix" in
-        write-heavy)
+        pure-put)
+          run_scenario "$ingress" "$mix" 100 "$vus" || FAIL=1
+          ;;
+        put-heavy|write-heavy)
           run_scenario "$ingress" "$mix" 90 "$vus" || FAIL=1
+          ;;
+        mixed)
+          run_scenario "$ingress" "$mix" 50 "$vus" || FAIL=1
           ;;
         read-heavy)
           run_scenario "$ingress" "$mix" 10 "$vus" || FAIL=1

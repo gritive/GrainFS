@@ -200,23 +200,36 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		obj := obj
 		var lastErr error
 		require.Eventuallyf(t, func() bool {
-			out, err := client.GetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String(bucketName),
-				Key:    aws.String(obj.key),
-			})
-			if err != nil {
-				lastErr = err
-				return false
+			for i := 0; i < numNodes; i++ {
+				if i == victim {
+					continue
+				}
+				candidate := ecS3Client(httpURL(i), accessKey, secretKey)
+				out, err := candidate.GetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String(bucketName),
+					Key:    aws.String(obj.key),
+				})
+				if err != nil {
+					lastErr = fmt.Errorf("node %d: %w", i, err)
+					continue
+				}
+				got, readErr := io.ReadAll(out.Body)
+				_ = out.Body.Close()
+				if readErr != nil {
+					lastErr = fmt.Errorf("node %d body: %w", i, readErr)
+					continue
+				}
+				if sha256.Sum256(got) != obj.sum {
+					lastErr = fmt.Errorf("node %d sha256 mismatch len=%d", i, len(got))
+					continue
+				}
+				client = candidate
+				lastErr = nil
+				return true
 			}
-			got, _ := io.ReadAll(out.Body)
-			_ = out.Body.Close()
-			if sha256.Sum256(got) != obj.sum {
-				lastErr = fmt.Errorf("sha256 mismatch len=%d", len(got))
-				return false
-			}
-			lastErr = nil
-			return true
-		}, 45*time.Second, 1*time.Second, "GetObject %s after node kill: %v", obj.key, &lastErr)
+			t.Logf("GetObject %s after node kill failed on all surviving nodes: %v", obj.key, lastErr)
+			return false
+		}, 45*time.Second, 1*time.Second, "GetObject %s after node kill", obj.key)
 	}
 	t.Logf("cluster EC: %d/%d objects reconstructed after single-node failure", len(objects), len(objects))
 }

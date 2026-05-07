@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.93.0] - 2026-05-08 — encrypted EC bottleneck tuning
+
+### Added
+
+- Added a 3-node encrypted S3 benchmark matrix for one-at-a-time bottleneck
+  sweeps across object size, concurrency, ingress, and PUT/read mix.
+- Extended the S3 profile benchmark with `pure-put`, `put-heavy`, and `mixed`
+  workload mixes, while keeping encryption mandatory for this benchmark path.
+
+### Changed
+
+- Small encrypted EC PUTs now split shards in memory for objects up to 16 MiB,
+  avoiding the extra EC shard spool while preserving bounded memory use.
+- Small redundant EC GETs now use the buffered k-of-n reader path, so one dead
+  data-shard peer does not hold the read before parity can be used.
+- e2e artifacts are cleaned by default, with `GRAINFS_E2E_KEEP_ARTIFACTS=1` as
+  the opt-in path for retaining failing logs and data directories.
+
+### Fixed
+
+- The 3-node benchmark matrix removes its temporary data directory by default,
+  with `KEEP_BENCH_ARTIFACTS=1` available for profiling/debug sessions.
+- The 5-node EC e2e recovery check now probes surviving endpoints after a node
+  kill instead of pinning reads to a client that may still forward ReadIndex to
+  the failed node.
+
 ## [0.0.92.0] - 2026-05-08 — zero-config cluster topology
 
 ### Changed
