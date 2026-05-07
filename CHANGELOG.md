@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.74.0] - 2026-05-07 — Cluster runtime relocated to serveruntime.Run (cmd-thin PR2b)
+
+### Changed
+
+- The 1366-line `runCluster` body is moved verbatim from `cmd/grainfs/serve.go`
+  into `internal/serveruntime/run.go` as `Run(ctx, Config)`. PR2a had already
+  hoisted every `cmd.Flags().Get*` into `clusterConfig`, so the body itself
+  was cobra-free and the move is mechanical.
+- `clusterConfig` becomes the exported `serveruntime.Config`; a new
+  `Version string` field replaces the body's prior dependency on
+  `cmd/grainfs`'s package-level `version` var.
+- `logStartupConfigSnapshotFromMap` + `diffSnapshots` move to
+  `internal/serveruntime/config.go` as `LogStartupConfigSnapshot` (exported)
+  + unexported `diffSnapshots`.
+- `cmd/grainfs/serve.go` shrinks 1636 → 238 lines. `runServe` now ends with
+  `return serveruntime.Run(ctx, cfg)`. `buildClusterConfig` and
+  `collectFlagsSnapshot` stay in cmd/grainfs because they read cobra.
+- `serve_cluster_key_test.go` updated to call `serveruntime.Run` — the
+  cluster-key guard moved with the body, so the test still validates the
+  same code path.
+
+### Tests
+
+- cmd/grainfs + serveruntime unit tests pass.
+- `make test-e2e` shows zero new failures vs master. `TestE2E_ClusterRemovePeer_DeadFollower`
+  was failing on master(20b7c72) before this PR with the same symptom and
+  remains failing — pre-existing, unrelated.
+
 ## [0.0.73.0] - 2026-05-07
 
 ### Changed

@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
 func newClusterTestCmd(clusterKey string) *cobra.Command {
@@ -28,15 +30,15 @@ func newClusterTestCmd(clusterKey string) *cobra.Command {
 	return cmd
 }
 
-// TestRunCluster_EmptyClusterKey_ReturnsError verifies the runCluster guard
-// added in A7. The function must refuse to start when --cluster-key is empty.
+// TestRunCluster_EmptyClusterKey_ReturnsError verifies the cluster-key guard
+// added in A7. serveruntime.Run must refuse to start when --cluster-key is empty.
 func TestRunCluster_EmptyClusterKey_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	cmd := newClusterTestCmd("")
 	cfg := buildClusterConfig(cmd, ":9000", t.TempDir(), "node1", "127.0.0.1:0", "", nil, nil)
-	err := runCluster(ctx, cfg)
+	err := serveruntime.Run(ctx, cfg)
 
 	if err == nil {
 		t.Fatal("expected error for empty clusterKey")
