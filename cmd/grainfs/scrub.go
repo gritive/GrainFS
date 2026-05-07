@@ -32,6 +32,7 @@ func newScrubCmd() *cobra.Command {
 	cmd.Flags().String("scope", "full", "scope: full | live")
 	cmd.Flags().Bool("dry-run", false, "observe only, no repair")
 	cmd.Flags().Bool("detach", false, "don't follow, return immediately")
+	registerAdminTimeoutFlag(cmd)
 	return cmd
 }
 
@@ -46,9 +47,12 @@ func runBucketScrub(cmd *cobra.Command, args []string) error {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	detach, _ := cmd.Flags().GetBool("detach")
 
+	ctx, cancel := applyAdminTimeout(cmd.Context(), cmd)
+	defer cancel()
+
 	body := scrubBucketReq{Bucket: bucket, KeyPrefix: prefix, Scope: scope, DryRun: dryRun}
 	var resp volumeadmin.ScrubTriggerResp
-	if err := c.Post(cmd.Context(), "/v1/scrub", body, &resp); err != nil {
+	if err := c.Post(ctx, "/v1/scrub", body, &resp); err != nil {
 		return err
 	}
 	if jsonOut(cmd) {
@@ -63,7 +67,7 @@ func runBucketScrub(cmd *cobra.Command, args []string) error {
 	if detach {
 		return nil
 	}
-	return volumeadmin.FollowScrubSession(cmd.Context(), c, cmd.OutOrStdout(), resp.SessionID, 0)
+	return volumeadmin.FollowScrubSession(ctx, c, cmd.OutOrStdout(), resp.SessionID, 0)
 }
 
 func init() {

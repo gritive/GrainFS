@@ -207,6 +207,7 @@ func init() {
 	pf.Bool("json", false, "JSON output for scripting")
 	pf.Bool("bytes", false, "show sizes as raw byte counts (alias: --raw)")
 	pf.Bool("raw", false, "alias for --bytes")
+	registerAdminTimeoutFlag(volumeCmd)
 
 	volumeCreateCmd.Flags().String("size", "", `volume size — binary "1Gi"/"100Mi" (1024^n) or decimal "1GB"/"100MB" (1000^n); bare "1G"/"1M" rejected as ambiguous`)
 	volumeResizeCmd.Flags().String("size", "", `new size (must be >= current); same units as create`)
@@ -243,6 +244,7 @@ func baseOptionsFromCmd(cmd *cobra.Command) volumeadmin.BaseOptions {
 		DataDir:  dataDir,
 		JSONOut:  jsonOut,
 		RawBytes: rawA || rawB,
+		Timeout:  adminTimeoutFromCmd(cmd),
 		Stdout:   cmd.OutOrStdout(),
 		Stderr:   cmd.ErrOrStderr(),
 	}
