@@ -1,11 +1,15 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -294,4 +298,74 @@ func TestIAM_E2E_ET3_PresignedURL_RevokedKey_401(t *testing.T) {
 		t.Fatalf("presigned GET after revoke: status=%d body=%q; want 401/403",
 			resp2.StatusCode, string(got))
 	}
+}
+
+// TestIAM_E2E_SC8_NoPlaintextSecretOnDisk asserts the at-rest invariant:
+// after creating an SA and forcing a healthy spread of FSM apply ticks,
+// the SA's plaintext secret_key must not appear anywhere under the data
+// directory. The plaintext lives only in-memory; persisted form is
+// AES-256-GCM ciphertext.
+func TestIAM_E2E_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
+	srv := startIAMTestServer(t)
+	defer srv.Stop()
+
+	alice := iamCreateSA(t, srv.AdminSock, "alice-sc8")
+	iamWaitKeyReady(t, srv.S3URL, alice.AccessKey, alice.SecretKey, 10*time.Second)
+
+	// Drive enough mixed I/O to flush badger LSM and ensure the IAM FSM
+	// has applied through several tick cycles. No public "force snapshot"
+	// API exists; quantity replaces explicit flush.
+	const bucket = "bucket-sc8"
+	iamGrantPut(t, srv.AdminSock, alice.SAID, bucket, "Admin")
+
+	cli := s3ClientFor(srv.S3URL, alice.AccessKey, alice.SecretKey)
+	ctx := context.Background()
+	if _, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		t.Fatalf("alice CreateBucket: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		if _, err := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(fmt.Sprintf("k-%d", i)),
+			Body:   strings.NewReader(fmt.Sprintf("payload-%d", i)),
+		}); err != nil {
+			t.Fatalf("alice Put %d: %v", i, err)
+		}
+	}
+
+	// Generate enough Raft writes to force several apply/commit cycles.
+	for i := 0; i < 30; i++ {
+		iamCreateSA(t, srv.AdminSock, fmt.Sprintf("filler-%d", i))
+	}
+
+	hits := grepDataDir(t, srv.DataDir, alice.SecretKey)
+	if len(hits) > 0 {
+		t.Fatalf("alice.SecretKey appears in data dir: %v", hits)
+	}
+}
+
+// grepDataDir scans every regular file under root for needle. Returns the
+// matching paths (one per file). Sequential scan is fine for e2e: the
+// data dir is small (test scope, single-node).
+func grepDataDir(t *testing.T, root, needle string) []string {
+	t.Helper()
+	var hits []string
+	needleBytes := []byte(needle)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil // unreadable (e.g. socket) — skip
+		}
+		if bytes.Contains(b, needleBytes) {
+			hits = append(hits, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return hits
 }
