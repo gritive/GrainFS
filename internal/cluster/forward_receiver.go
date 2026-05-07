@@ -206,8 +206,18 @@ func drainForwardBody(body io.Reader) {
 	}
 }
 
+func contextForForwardedGroup(ctx context.Context, dg *DataGroup) context.Context {
+	if dg == nil {
+		return ctx
+	}
+	return ContextWithPlacementGroupEntry(ctx, ShardGroupEntry{
+		ID:      dg.ID(),
+		PeerIDs: dg.PeerIDs(),
+	})
+}
+
 func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport.Message {
-	ctx := context.Background()
+	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	body := pa.BodyBytes()
 	obj, err := dg.Backend().PutObject(
@@ -224,7 +234,7 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 }
 
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
-	ctx := context.Background()
+	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	obj, err := dg.Backend().PutObject(
 		ctx,

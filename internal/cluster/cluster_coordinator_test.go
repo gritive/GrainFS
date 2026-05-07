@@ -343,6 +343,31 @@ func TestClusterCoordinator_CommitObjectIndexUsesPlacementGroupECProfile(t *test
 	require.Equal(t, group.PeerIDs, proposer.entries[0].NodeIDs)
 }
 
+func TestClusterCoordinator_CommitObjectIndexRecordsActualShardTargets(t *testing.T) {
+	proposer := &recordingObjectIndexProposer{}
+	c := NewClusterCoordinator(nil, nil, nil, nil, "self").
+		WithObjectIndexProposer(proposer)
+	obj := &storage.Object{
+		Key:          "large-group.bin",
+		Size:         12,
+		ContentType:  "application/octet-stream",
+		ETag:         "etag",
+		LastModified: 100,
+		VersionID:    "v1",
+	}
+	group := ShardGroupEntry{
+		ID:      "group-9",
+		PeerIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"},
+	}
+
+	require.NoError(t, c.commitObjectIndex(context.Background(), "photos", "large-group.bin", obj, group, false))
+
+	require.Len(t, proposer.entries, 1)
+	require.Equal(t, uint8(6), proposer.entries[0].ECData)
+	require.Equal(t, uint8(2), proposer.entries[0].ECParity)
+	require.Equal(t, group.PeerIDs[:8], proposer.entries[0].NodeIDs)
+}
+
 func TestClusterCoordinator_ListBuckets_MergesMetaAssignments(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"local"}}
 	meta := &fakeBucketAssignmentSource{

@@ -19,7 +19,7 @@ func TestSelectObjectPlacementGroup_ExcludesGroup0(t *testing.T) {
 
 func TestSelectObjectPlacementGroup_FiltersECIncapableGroups(t *testing.T) {
 	groups := []ShardGroupEntry{
-		{ID: "group-1", PeerIDs: []string{"n1", "n2"}},
+		{ID: "group-1"},
 		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
 	got, err := SelectObjectPlacementGroup("b", "k", groups, ECConfig{DataShards: 2, ParityShards: 1})
@@ -27,9 +27,17 @@ func TestSelectObjectPlacementGroup_FiltersECIncapableGroups(t *testing.T) {
 	require.Equal(t, "group-2", got.ID)
 }
 
+func TestSelectObjectPlacementGroup_FallsBackToGroup0WhenNoDataGroupsExist(t *testing.T) {
+	got, err := SelectObjectPlacementGroup("b", "k", []ShardGroupEntry{
+		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
+	}, ECConfig{DataShards: 2, ParityShards: 1})
+	require.NoError(t, err)
+	require.Equal(t, "group-0", got.ID)
+}
+
 func TestSelectObjectPlacementGroup_NoCandidate(t *testing.T) {
 	_, err := SelectObjectPlacementGroup("b", "k", []ShardGroupEntry{
-		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-1"},
 	}, ECConfig{DataShards: 2, ParityShards: 1})
 	require.ErrorContains(t, err, "no EC-capable object placement group")
 }
