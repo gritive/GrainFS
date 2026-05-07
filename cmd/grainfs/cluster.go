@@ -71,5 +71,11 @@ func init() {
 	clusterCmd.AddCommand(clusterRemovePeerCmd())
 	clusterCmd.AddCommand(clusterPeersCmd())
 	clusterCmd.AddCommand(clusterEventsCmd())
+	// Day-2 ops (Phase 1, metaRaft scope):
+	clusterCmd.AddCommand(clusterTransferLeaderCmd)
+	clusterCmd.AddCommand(clusterDrainCmd)
+	clusterCmd.AddCommand(clusterHealthCmd())
+	clusterCmd.AddCommand(clusterPlacementCmd())
+	clusterCmd.AddCommand(clusterBalancerCmd)
 	rootCmd.AddCommand(clusterCmd)
 }
