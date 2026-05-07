@@ -121,7 +121,11 @@ type Server struct {
 	iamStore *iam.Store
 	// iamAudit logs IAM authz decisions. nil-safe: RecordAllow/RecordDeny
 	// are no-ops when this is nil. Wired by WithIAMAudit (Task 17).
-	iamAudit       *iam.AuditLogger
+	iamAudit *iam.AuditLogger
+	// iamProposer issues IAM mutations through Raft (P5). nil before the
+	// meta-FSM is ready or in anonymous mode; CreateBucket falls back to
+	// no-op auto-grant when nil.
+	iamProposer    iam.Proposer
 	hertz          *server.Hertz
 	hub            *Hub
 	volMgr         *volume.Manager
@@ -220,6 +224,22 @@ func WithIAMAudit(audit *iam.AuditLogger) Option {
 	return func(s *Server) {
 		s.iamAudit = audit
 	}
+}
+
+// WithIAMProposer wires the IAM proposer used for P5 auto-grants on
+// CreateBucket. nil leaves auto-grants disabled (existing behavior).
+func WithIAMProposer(p iam.Proposer) Option {
+	return func(s *Server) {
+		s.iamProposer = p
+	}
+}
+
+// SetIAMProposer installs the IAM proposer after construction. Mirrors
+// the meta-FSM SetIAM lazy wiring pattern: the meta-Raft proposer is
+// not available until after metaRaft.Start(), but srv must already be
+// constructed to register admin routes. Safe to call once during boot.
+func (s *Server) SetIAMProposer(p iam.Proposer) {
+	s.iamProposer = p
 }
 
 // WithBlockCache wires the volume block cache so /api/cache/status can

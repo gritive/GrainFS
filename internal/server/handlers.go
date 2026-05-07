@@ -21,6 +21,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -174,9 +175,35 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	metrics.BucketsTotal.Inc()
+	s.issueCreatorGrant(ctx, bucket)
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionCreateBucket, Bucket: bucket})
 	c.Header("Location", "/"+bucket)
 	c.Status(consts.StatusOK)
+}
+
+// issueCreatorGrant issues an explicit Admin grant to the request principal
+// on the newly-created bucket (P5). Best-effort: if the proposer is not
+// wired (e.g., anonymous mode, pre-bootstrap window) or the propose fails,
+// the bucket is still created — the grant can be re-issued via admin API.
+func (s *Server) issueCreatorGrant(ctx context.Context, bucket string) {
+	if s.iamProposer == nil {
+		return
+	}
+	principal := iam.PrincipalFromContext(ctx)
+	if principal == "" {
+		return
+	}
+	g := iam.Grant{
+		SAID:      principal,
+		Bucket:    bucket,
+		Role:      iam.RoleAdmin,
+		CreatedAt: time.Now().UTC(),
+		CreatedBy: principal,
+	}
+	if err := s.iamProposer.ProposeGrantPut(ctx, g); err != nil {
+		log.Warn().Err(err).Str("sa", principal).Str("bucket", bucket).
+			Msg("iam: failed to issue creator grant; bucket created without explicit grant")
+	}
 }
 
 // unwrapBackend returns the innermost backend, unwrapping decorators like CachedBackend.

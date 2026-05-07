@@ -422,9 +422,10 @@ func Run(ctx context.Context, cfg Config) error {
 	// shim uses. Only when IAM dependencies are wired — same gate as the
 	// bootstrap shim, minus the credential flag check.
 	var iamAdminAPI *iam.AdminAPI
+	var iamProposer *iam.MetaProposer
 	if cfg.IAMStore != nil && cfg.IAMApplier != nil && cfg.Encryptor != nil {
-		proposer := &iam.MetaProposer{Propose: metaRaft.Propose}
-		iamAdminAPI = iam.NewAdminAPI(cfg.IAMStore, proposer, cfg.Encryptor)
+		iamProposer = &iam.MetaProposer{Propose: metaRaft.Propose}
+		iamAdminAPI = iam.NewAdminAPI(cfg.IAMStore, iamProposer, cfg.Encryptor)
 	}
 
 	// Seed Router with any bucket assignments already persisted in FSM state.
@@ -1129,6 +1130,12 @@ func Run(ctx context.Context, cfg Config) error {
 	srvOpts = append(srvOpts, server.WithMutationGate(mutationGate))
 
 	srv := server.New(addr, backend, srvOpts...)
+
+	// P5: wire IAM proposer so CreateBucket auto-issues an Admin grant to
+	// the creator SA. nil-safe when iamProposer was not built above.
+	if iamProposer != nil {
+		srv.SetIAMProposer(iamProposer)
+	}
 
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	// Open the dashboard auth token (creates <data>/dashboard.token mode 0600
