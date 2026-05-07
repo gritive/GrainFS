@@ -20,6 +20,24 @@ func (f *fakeProposer) calledSADelete(saID string) bool {
 	return false
 }
 
+func (f *fakeProposer) calledKeyCreate(ak string) bool {
+	for _, c := range f.calls {
+		if c == "KeyCreate:"+ak {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeProposer) calledKeyRevoke(ak string) bool {
+	for _, c := range f.calls {
+		if c == "KeyRevoke:"+ak {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeProposer) ProposeSACreate(ctx context.Context, sa ServiceAccount) error {
 	f.calls = append(f.calls, "SACreate:"+sa.ID)
 	return nil

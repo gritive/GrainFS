@@ -156,6 +156,70 @@ func (a *AdminAPI) HandleSADelete(w http.ResponseWriter, r *http.Request, saID s
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// KeyCreateRequest is the JSON body for POST /admin/iam/sa/{id}/key.
+// Empty body is allowed; ExpiresAt nil = never.
+type KeyCreateRequest struct {
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// KeyCreateResponse returns the rotated key with one-time plaintext secret.
+type KeyCreateResponse struct {
+	AccessKey string     `json:"access_key"`
+	SecretKey string     `json:"secret_key"`
+	SAID      string     `json:"sa_id"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+func (a *AdminAPI) HandleKeyCreate(w http.ResponseWriter, r *http.Request, saID string) {
+	if _, ok := a.store.LookupSA(saID); !ok {
+		http.Error(w, "SA not found", http.StatusNotFound)
+		return
+	}
+	var req KeyCreateRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // empty body OK
+	}
+
+	accessKey, secretKey := genCredentialPair()
+	wrapped, err := WrapSecret(a.enc, saID, secretKey)
+	if err != nil {
+		http.Error(w, "wrap: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	k := AccessKey{
+		AccessKey:    accessKey,
+		SecretKey:    secretKey,
+		SecretKeyEnc: wrapped,
+		SAID:         saID,
+		Status:       KeyStatusActive,
+		CreatedAt:    time.Now().UTC(),
+		ExpiresAt:    req.ExpiresAt,
+	}
+	if err := a.proposer.ProposeKeyCreate(r.Context(), k); err != nil {
+		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(KeyCreateResponse{
+		AccessKey: accessKey, SecretKey: secretKey,
+		SAID: saID, CreatedAt: k.CreatedAt, ExpiresAt: k.ExpiresAt,
+	})
+}
+
+func (a *AdminAPI) HandleKeyRevoke(w http.ResponseWriter, r *http.Request, saID, accessKey string) {
+	k, ok := a.store.LookupKey(accessKey)
+	if !ok || k.SAID != saID {
+		http.Error(w, "key not found", http.StatusNotFound)
+		return
+	}
+	if err := a.proposer.ProposeKeyRevoke(r.Context(), accessKey); err != nil {
+		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // genCredentialPair returns a (access_key, secret_key) pair. AKGF prefix
 // distinguishes from AWS "AKIA*" so users don't confuse origins.
 func genCredentialPair() (string, string) {

@@ -132,3 +132,86 @@ func TestAdminAPI_DeleteSA_NotFound(t *testing.T) {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
+
+func TestAdminAPI_KeyCreate(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	req := httptest.NewRequest("POST", "/admin/iam/sa/sa-1/key", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	api.HandleKeyCreate(w, req, "sa-1")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp KeyCreateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.AccessKey == "" || resp.SecretKey == "" {
+		t.Fatal("missing AK/SK")
+	}
+	if resp.SAID != "sa-1" {
+		t.Errorf("SAID = %q", resp.SAID)
+	}
+	if !p.calledKeyCreate(resp.AccessKey) {
+		t.Errorf("ProposeKeyCreate not called for %s", resp.AccessKey)
+	}
+}
+
+func TestAdminAPI_KeyCreate_SAMissing(t *testing.T) {
+	api := NewAdminAPI(NewStore(), newFakeProposer(), newTestEncryptor(t))
+	req := httptest.NewRequest("POST", "/admin/iam/sa/missing/key", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	api.HandleKeyCreate(w, req, "missing")
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestAdminAPI_KeyRevoke(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1"})
+	store.applyKeyCreate(AccessKey{AccessKey: "AK-X", SAID: "sa-1", Status: KeyStatusActive})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	req := httptest.NewRequest("DELETE", "/admin/iam/sa/sa-1/key/AK-X", nil)
+	w := httptest.NewRecorder()
+	api.HandleKeyRevoke(w, req, "sa-1", "AK-X")
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if !p.calledKeyRevoke("AK-X") {
+		t.Errorf("ProposeKeyRevoke not called")
+	}
+}
+
+func TestAdminAPI_KeyRevoke_NotFound(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1"})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+	req := httptest.NewRequest("DELETE", "/admin/iam/sa/sa-1/key/AK-MISSING", nil)
+	w := httptest.NewRecorder()
+	api.HandleKeyRevoke(w, req, "sa-1", "AK-MISSING")
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestAdminAPI_KeyRevoke_WrongSA(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1"})
+	store.applySACreate(ServiceAccount{ID: "sa-2"})
+	store.applyKeyCreate(AccessKey{AccessKey: "AK-X", SAID: "sa-1", Status: KeyStatusActive})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+	req := httptest.NewRequest("DELETE", "/admin/iam/sa/sa-2/key/AK-X", nil)
+	w := httptest.NewRecorder()
+	api.HandleKeyRevoke(w, req, "sa-2", "AK-X")
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for cross-SA revoke", w.Code)
+	}
+}
