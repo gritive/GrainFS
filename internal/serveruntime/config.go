@@ -52,9 +52,6 @@ type Config struct {
 	DirectIO       bool
 	MeasureReadAmp bool
 	ShardCacheSize int64
-	ECData         int
-	ECParity       int
-	ECExplicit     bool
 	PackThreshold  int
 
 	// Balancer

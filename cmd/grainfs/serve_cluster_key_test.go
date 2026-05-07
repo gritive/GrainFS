@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/serveruntime"
 )
@@ -22,12 +23,15 @@ func newClusterTestCmd(clusterKey string) *cobra.Command {
 	cmd.Flags().Int("nbd-port", 0, "")
 	cmd.Flags().Bool("no-encryption", true, "")
 	cmd.Flags().String("encryption-key-file", "", "")
-	cmd.Flags().Int("ec-data", 4, "")
-	cmd.Flags().Int("ec-parity", 2, "")
 	cmd.Flags().String("upstream", "", "")
 	cmd.Flags().Bool("heal-receipt-enabled", false, "")
 	cmd.Flags().String("heal-receipt-psk", "", "")
 	return cmd
+}
+
+func TestServeCmd_RemovesManualECFlags(t *testing.T) {
+	require.Nil(t, serveCmd.Flags().Lookup("ec-data"))
+	require.Nil(t, serveCmd.Flags().Lookup("ec-parity"))
 }
 
 // TestRunCluster_EmptyClusterKey_ReturnsError verifies the cluster-key guard

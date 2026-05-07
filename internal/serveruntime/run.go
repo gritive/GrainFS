@@ -394,13 +394,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	clusterSize := 1 + len(peers)
 	effectiveEC := cluster.AutoECConfigForClusterSize(clusterSize)
-	if cfg.ECExplicit {
-		effectiveEC = cluster.ECConfig{DataShards: cfg.ECData, ParityShards: cfg.ECParity}
-		if !effectiveEC.IsActive(clusterSize) {
-			return fmt.Errorf("explicit EC profile %d+%d requires %d nodes, cluster has %d",
-				cfg.ECData, cfg.ECParity, effectiveEC.NumShards(), clusterSize)
-		}
-	}
 	if !effectiveEC.IsActive(clusterSize) {
 		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)
 	}
@@ -674,9 +667,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	distBackend.SetECConfig(effectiveEC)
 	log.Info().
-		Bool("explicit", cfg.ECExplicit).
-		Int("configured_k", cfg.ECData).
-		Int("configured_m", cfg.ECParity).
+		Str("mode", "auto").
 		Int("effective_k", effectiveEC.DataShards).
 		Int("effective_m", effectiveEC.ParityShards).
 		Bool("active", effectiveEC.IsActive(len(allNodes))).
