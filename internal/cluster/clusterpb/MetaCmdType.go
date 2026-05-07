@@ -28,6 +28,14 @@ const (
 	MetaCmdTypeScrubTrigger           MetaCmdType = 18
 	MetaCmdTypePutObjectIndex         MetaCmdType = 19
 	MetaCmdTypeDeleteObjectIndex      MetaCmdType = 20
+	MetaCmdTypeIAMSACreate            MetaCmdType = 21
+	MetaCmdTypeIAMSADelete            MetaCmdType = 22
+	MetaCmdTypeIAMKeyCreate           MetaCmdType = 23
+	MetaCmdTypeIAMKeyRevoke           MetaCmdType = 24
+	MetaCmdTypeIAMGrantPut            MetaCmdType = 25
+	MetaCmdTypeIAMGrantDelete         MetaCmdType = 26
+	MetaCmdTypeIAMGrantWildcardPut    MetaCmdType = 27
+	MetaCmdTypeIAMAuthEnable          MetaCmdType = 28
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -52,6 +60,14 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeScrubTrigger:           "ScrubTrigger",
 	MetaCmdTypePutObjectIndex:         "PutObjectIndex",
 	MetaCmdTypeDeleteObjectIndex:      "DeleteObjectIndex",
+	MetaCmdTypeIAMSACreate:            "IAMSACreate",
+	MetaCmdTypeIAMSADelete:            "IAMSADelete",
+	MetaCmdTypeIAMKeyCreate:           "IAMKeyCreate",
+	MetaCmdTypeIAMKeyRevoke:           "IAMKeyRevoke",
+	MetaCmdTypeIAMGrantPut:            "IAMGrantPut",
+	MetaCmdTypeIAMGrantDelete:         "IAMGrantDelete",
+	MetaCmdTypeIAMGrantWildcardPut:    "IAMGrantWildcardPut",
+	MetaCmdTypeIAMAuthEnable:          "IAMAuthEnable",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -76,6 +92,14 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"ScrubTrigger":           MetaCmdTypeScrubTrigger,
 	"PutObjectIndex":         MetaCmdTypePutObjectIndex,
 	"DeleteObjectIndex":      MetaCmdTypeDeleteObjectIndex,
+	"IAMSACreate":            MetaCmdTypeIAMSACreate,
+	"IAMSADelete":            MetaCmdTypeIAMSADelete,
+	"IAMKeyCreate":           MetaCmdTypeIAMKeyCreate,
+	"IAMKeyRevoke":           MetaCmdTypeIAMKeyRevoke,
+	"IAMGrantPut":            MetaCmdTypeIAMGrantPut,
+	"IAMGrantDelete":         MetaCmdTypeIAMGrantDelete,
+	"IAMGrantWildcardPut":    MetaCmdTypeIAMGrantWildcardPut,
+	"IAMAuthEnable":          MetaCmdTypeIAMAuthEnable,
 }
 
 func (v MetaCmdType) String() string {

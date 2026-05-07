@@ -40,6 +40,14 @@ const (
 	MetaCmdTypeScrubTrigger           = clusterpb.MetaCmdTypeScrubTrigger // PR4
 	MetaCmdTypePutObjectIndex         = clusterpb.MetaCmdTypePutObjectIndex
 	MetaCmdTypeDeleteObjectIndex      = clusterpb.MetaCmdTypeDeleteObjectIndex
+	MetaCmdTypeIAMSACreate            = clusterpb.MetaCmdTypeIAMSACreate
+	MetaCmdTypeIAMSADelete            = clusterpb.MetaCmdTypeIAMSADelete
+	MetaCmdTypeIAMKeyCreate           = clusterpb.MetaCmdTypeIAMKeyCreate
+	MetaCmdTypeIAMKeyRevoke           = clusterpb.MetaCmdTypeIAMKeyRevoke
+	MetaCmdTypeIAMGrantPut            = clusterpb.MetaCmdTypeIAMGrantPut
+	MetaCmdTypeIAMGrantDelete         = clusterpb.MetaCmdTypeIAMGrantDelete
+	MetaCmdTypeIAMGrantWildcardPut    = clusterpb.MetaCmdTypeIAMGrantWildcardPut
+	MetaCmdTypeIAMAuthEnable          = clusterpb.MetaCmdTypeIAMAuthEnable
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
