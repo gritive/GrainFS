@@ -243,3 +243,15 @@ Forward operation metadata owns transport-shape policy for bucket operations:
 whether an operation is frame-only, body-streamed, or read-streamed, and
 whether it mutates data. FlatBuffers encoding, reply parsing, retry policy,
 leader-hint dialing, and storage semantics remain in their existing modules.
+
+### Volume Block I/O
+
+Volume block I/O is the volume-layer path that turns logical byte-range reads,
+writes, deferred writes, and discards into physical block object reads, writes,
+cache invalidations, and allocation-accounting changes.
+
+The first deepening scope owns block I/O planning, block merge rules, dedup and
+direct-block write selection, block cache read/write behavior, pool quota
+checks, and `AllocatedBlocks` accounting. Snapshot, clone, and rollback remain
+separate callers for the first slice, though they may reuse the same result
+shape later.

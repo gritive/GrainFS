@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.88.0] - 2026-05-07 — volume block I/O policy private module
+
+### Changed
+
+- Volume byte-range reads, writes, deferred writes, and discards now delegate
+  block-level policy to a private `internal/volume` module. `Manager` keeps the
+  public lock, metadata, and live-map orchestration, while block merge rules,
+  cache behavior, quota checks, dedup/live-map mutation, and allocation deltas
+  live behind one focused implementation.
+- `Volume Block I/O` is now recorded in `CONTEXT.md` and ADR 0005 so future
+  architecture work has a stable name for this seam.
+
+### Tests
+
+- Added private block I/O tests for cache-hit read metering, direct full-block
+  write allocation results, and live-map discard side effects.
+- Existing volume, dedup, quota, discard, and block-cache behavior tests continue
+  to cover the public `Manager` semantics.
+
 ## [0.0.87.0] - 2026-05-07 — hot bucket object placement
 
 ### Added
