@@ -236,7 +236,8 @@ enum MetaCmdType : uint8 {
   RotateKeyDrop      = 16,  // 회전 phase 3 → steady-on-NEW (OLD 폐기, previous.key grace 시작)
   RotateKeyAbort     = 17,  // phase 2: 롤백, phase 3: forward-roll (D18)
   ScrubTrigger      = 18,   // EC scrub cluster-wide trigger (PR4 — replicates to all nodes' Director.ApplyFromFSM)
-  PutObjectIndex    = 19
+  PutObjectIndex    = 19,
+  DeleteObjectIndex = 20
 }
 
 table MetaNodeEntry {
@@ -300,6 +301,12 @@ table MetaObjectIndexEntry {
 table MetaPutObjectIndexCmd {
   entry:MetaObjectIndexEntry;
   preserve_latest:bool = false;
+}
+
+table MetaDeleteObjectIndexCmd {
+  bucket:string;
+  key:string;
+  version_id:string;
 }
 
 // PR-D: 노드별 부하 스냅샷

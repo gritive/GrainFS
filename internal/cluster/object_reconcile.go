@@ -67,30 +67,40 @@ func (c *ClusterCoordinator) FindObjectIndexOrphans(ctx context.Context) ([]Obje
 	if !ok {
 		return nil, ErrObjectIndexRequired
 	}
-	objects, err := c.ListAllObjects()
-	if err != nil {
-		return nil, err
-	}
 	issues := make([]ObjectIndexIssue, 0)
-	for _, obj := range objects {
-		if obj.IsDeleteMarker {
+	if c.groups == nil {
+		return issues, nil
+	}
+	for _, dg := range c.groups.All() {
+		gb := dg.Backend()
+		if gb == nil {
 			continue
 		}
-		if _, ok := src.ObjectIndexVersion(obj.Bucket, obj.Key, obj.VersionID); ok {
-			continue
+		objects, err := gb.ListAllObjects()
+		if err != nil {
+			return nil, err
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		for _, obj := range objects {
+			if obj.IsDeleteMarker {
+				continue
+			}
+			if _, ok := src.ObjectIndexVersion(obj.Bucket, obj.Key, obj.VersionID); ok {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			issues = append(issues, ObjectIndexIssue{
+				Kind:             ObjectIndexIssueOrphan,
+				Bucket:           obj.Bucket,
+				Key:              obj.Key,
+				VersionID:        obj.VersionID,
+				PlacementGroupID: dg.ID(),
+				Reason:           "data-group object has no global object-index row",
+			})
 		}
-		issues = append(issues, ObjectIndexIssue{
-			Kind:      ObjectIndexIssueOrphan,
-			Bucket:    obj.Bucket,
-			Key:       obj.Key,
-			VersionID: obj.VersionID,
-			Reason:    "data-group object has no global object-index row",
-		})
 	}
 	return issues, nil
 }

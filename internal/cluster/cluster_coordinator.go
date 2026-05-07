@@ -72,8 +72,14 @@ type objectIndexSource interface {
 	ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool)
 }
 
+type objectIndexListSource interface {
+	ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
+	ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
+}
+
 type objectIndexProposer interface {
 	ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntry, preserveLatest bool) error
+	ProposeDeleteObjectIndex(ctx context.Context, bucket, key, versionID string) error
 }
 
 // NewClusterCoordinator constructs a coordinator with the legacy 5 MiB
@@ -500,6 +506,37 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 	return c.indexWriter.ProposeObjectIndex(ctx, entry, false)
 }
 
+func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
+	return &storage.Object{
+		Key:          entry.Key,
+		Size:         entry.Size,
+		ContentType:  entry.ContentType,
+		ETag:         entry.ETag,
+		LastModified: entry.ModTime,
+		VersionID:    entry.VersionID,
+	}
+}
+
+func objectIndexEntryToVersion(entry ObjectIndexEntry, isLatest bool) *storage.ObjectVersion {
+	return &storage.ObjectVersion{
+		Key:            entry.Key,
+		VersionID:      entry.VersionID,
+		IsLatest:       isLatest,
+		IsDeleteMarker: entry.IsDeleteMarker,
+		LastModified:   entry.ModTime,
+		ETag:           entry.ETag,
+		Size:           entry.Size,
+	}
+}
+
+func (c *ClusterCoordinator) objectIndexListSource() (objectIndexListSource, bool) {
+	if c.indexWriter == nil {
+		return nil, false
+	}
+	src, ok := c.meta.(objectIndexListSource)
+	return src, ok
+}
+
 func (t routeTarget) canReadLocal() bool {
 	return t.selfIsLeader || t.selfIsOnlyVoter
 }
@@ -794,7 +831,13 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 		if err != nil {
 			return err
 		}
-		return gb.DeleteObjectVersion(bucket, key, versionID)
+		if err := gb.DeleteObjectVersion(bucket, key, versionID); err != nil {
+			return err
+		}
+		if c.indexWriter != nil {
+			return c.indexWriter.ProposeDeleteObjectIndex(ctx, bucket, key, versionID)
+		}
+		return nil
 	}
 	if c.forward == nil {
 		return ErrCoordinatorNoRouter
@@ -804,10 +847,27 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 	if err != nil {
 		return err
 	}
-	return parseReplyStatus(reply)
+	if err := parseReplyStatus(reply); err != nil {
+		return err
+	}
+	if c.indexWriter != nil {
+		return c.indexWriter.ProposeDeleteObjectIndex(ctx, bucket, key, versionID)
+	}
+	return nil
 }
 
 func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	if src, ok := c.objectIndexListSource(); ok {
+		if err := c.HeadBucket(ctx, bucket); err != nil {
+			return nil, err
+		}
+		entries := src.ObjectIndexLatestEntries(bucket, prefix, maxKeys)
+		objects := make([]*storage.Object, 0, len(entries))
+		for _, entry := range entries {
+			objects = append(objects, objectIndexEntryToObject(entry))
+		}
+		return objects, nil
+	}
 	target, err := c.routeBucket(bucket)
 	if err != nil {
 		return nil, err
@@ -833,6 +893,23 @@ func (c *ClusterCoordinator) ListObjectVersions(
 	bucket, prefix string, maxKeys int,
 ) ([]*storage.ObjectVersion, error) {
 	ctx := context.Background()
+	if src, ok := c.objectIndexListSource(); ok {
+		if err := c.HeadBucket(ctx, bucket); err != nil {
+			return nil, err
+		}
+		latestSrc, _ := c.meta.(objectIndexSource)
+		entries := src.ObjectIndexVersionEntries(bucket, prefix, maxKeys)
+		versions := make([]*storage.ObjectVersion, 0, len(entries))
+		for _, entry := range entries {
+			isLatest := false
+			if latestSrc != nil {
+				latest, ok := latestSrc.ObjectIndexLatest(entry.Bucket, entry.Key)
+				isLatest = ok && latest.VersionID == entry.VersionID
+			}
+			versions = append(versions, objectIndexEntryToVersion(entry, isLatest))
+		}
+		return versions, nil
+	}
 	target, err := c.routeBucket(bucket)
 	if err != nil {
 		return nil, err
@@ -858,6 +935,18 @@ func (c *ClusterCoordinator) ListObjectVersions(
 // one reply. Callers expecting large keysets should use ListObjects with
 // maxKeys pagination instead.
 func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	if src, ok := c.objectIndexListSource(); ok {
+		if err := c.HeadBucket(ctx, bucket); err != nil {
+			return err
+		}
+		entries := src.ObjectIndexLatestEntries(bucket, prefix, 0)
+		for _, entry := range entries {
+			if err := fn(objectIndexEntryToObject(entry)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	target, err := c.routeBucket(bucket)
 	if err != nil {
 		return err

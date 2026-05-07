@@ -12,14 +12,15 @@ larger cluster with enough nodes and EC shards to spread the traffic.
 
 ## Decision
 
-Bucket lifecycle and LIST-style operations remain bucket-routed. Object data
-operations route through a meta-Raft global object index:
+Bucket lifecycle remains bucket-routed. Object data operations and LIST-style
+object enumeration route through a meta-Raft global object index:
 
 - New object writes select `placement_group_id` from normal EC-capable data
   groups by hashing `bucket + "/" + key`.
 - `group-0` is excluded from normal object placement.
 - Reads, versioned reads, deletes, multipart completion, copy-through-write,
-  and Range `ReadAt` use the object index for data routing.
+  Range `ReadAt`, `ListObjects`, `ListObjectVersions`, and `WalkObjects` use
+  the object index for object routing/enumeration.
 - Cluster object storage uses the EC pipeline. If no EC profile is explicit,
   runtime chooses an effective profile from cluster size.
 - Explicit EC profiles fail fast when the current placement group is too small.

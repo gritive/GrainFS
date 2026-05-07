@@ -39,6 +39,7 @@ const (
 	MetaCmdTypeRotateKeyAbort         = clusterpb.MetaCmdTypeRotateKeyAbort
 	MetaCmdTypeScrubTrigger           = clusterpb.MetaCmdTypeScrubTrigger // PR4
 	MetaCmdTypePutObjectIndex         = clusterpb.MetaCmdTypePutObjectIndex
+	MetaCmdTypeDeleteObjectIndex      = clusterpb.MetaCmdTypeDeleteObjectIndex
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -241,6 +242,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyPutBucketAssignment(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutObjectIndex:
 		return f.applyPutObjectIndex(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDeleteObjectIndex:
+		return f.applyDeleteObjectIndex(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeSetLoadSnapshot:
 		return f.applySetLoadSnapshot(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeProposeRebalancePlan:
@@ -481,6 +484,45 @@ func (f *MetaFSM) applyPutObjectIndex(data []byte) error {
 	if !c.PreserveLatest {
 		f.objectLatest[objectIndexLatestKey(e.Bucket, e.Key)] = e.VersionID
 	}
+	return nil
+}
+
+func (f *MetaFSM) applyDeleteObjectIndex(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: DeleteObjectIndex: empty payload")
+	}
+	bucket, key, versionID, err := decodeMetaDeleteObjectIndexCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: DeleteObjectIndex: %w", err)
+	}
+	if bucket == "" || key == "" || versionID == "" {
+		return fmt.Errorf("meta_fsm: DeleteObjectIndex: empty bucket/key/version")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objectIndex, objectIndexVersionKey(bucket, key, versionID))
+	lkey := objectIndexLatestKey(bucket, key)
+	if f.objectLatest[lkey] != versionID {
+		return nil
+	}
+
+	var latest ObjectIndexEntry
+	found := false
+	for _, entry := range f.objectIndex {
+		if entry.Bucket != bucket || entry.Key != key {
+			continue
+		}
+		if !found || entry.ModTime > latest.ModTime || (entry.ModTime == latest.ModTime && entry.VersionID > latest.VersionID) {
+			latest = entry
+			found = true
+		}
+	}
+	if !found {
+		delete(f.objectLatest, lkey)
+		return nil
+	}
+	f.objectLatest[lkey] = latest.VersionID
 	return nil
 }
 
@@ -966,6 +1008,52 @@ func (f *MetaFSM) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndex
 		return ObjectIndexEntry{}, false
 	}
 	return cloneObjectIndexEntry(entry), true
+}
+
+func (f *MetaFSM) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	entries := make([]ObjectIndexEntry, 0)
+	for lkey, versionID := range f.objectLatest {
+		parts := strings.SplitN(lkey, "\x00", 2)
+		if len(parts) != 2 || parts[0] != bucket || !strings.HasPrefix(parts[1], prefix) {
+			continue
+		}
+		entry, ok := f.objectIndex[objectIndexVersionKey(bucket, parts[1], versionID)]
+		if !ok || entry.IsDeleteMarker {
+			continue
+		}
+		entries = append(entries, cloneObjectIndexEntry(entry))
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Key < entries[j].Key
+	})
+	if maxKeys > 0 && len(entries) > maxKeys {
+		entries = entries[:maxKeys]
+	}
+	return entries
+}
+
+func (f *MetaFSM) ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	entries := make([]ObjectIndexEntry, 0)
+	for _, entry := range f.objectIndex {
+		if entry.Bucket != bucket || !strings.HasPrefix(entry.Key, prefix) {
+			continue
+		}
+		entries = append(entries, cloneObjectIndexEntry(entry))
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Key != entries[j].Key {
+			return entries[i].Key < entries[j].Key
+		}
+		return entries[i].VersionID > entries[j].VersionID
+	})
+	if maxKeys > 0 && len(entries) > maxKeys {
+		entries = entries[:maxKeys]
+	}
+	return entries
 }
 
 func (f *MetaFSM) ObjectIndexSummary(bucket string) ObjectIndexSummary {
@@ -1652,6 +1740,28 @@ func decodeMetaPutObjectIndexCmd(data []byte) (metaPutObjectIndexCmd, error) {
 		Entry:          readMetaObjectIndexEntry(entry),
 		PreserveLatest: t.PreserveLatest(),
 	}, nil
+}
+
+func encodeMetaDeleteObjectIndexCmd(bucket, key, versionID string) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(bucket)
+	keyOff := b.CreateString(key)
+	versionOff := b.CreateString(versionID)
+	clusterpb.MetaDeleteObjectIndexCmdStart(b)
+	clusterpb.MetaDeleteObjectIndexCmdAddBucket(b, bucketOff)
+	clusterpb.MetaDeleteObjectIndexCmdAddKey(b, keyOff)
+	clusterpb.MetaDeleteObjectIndexCmdAddVersionId(b, versionOff)
+	return fbFinish(b, clusterpb.MetaDeleteObjectIndexCmdEnd(b)), nil
+}
+
+func decodeMetaDeleteObjectIndexCmd(data []byte) (bucket, key, versionID string, err error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaDeleteObjectIndexCmd {
+		return clusterpb.GetRootAsMetaDeleteObjectIndexCmd(d, 0)
+	})
+	if err != nil {
+		return "", "", "", err
+	}
+	return string(t.Bucket()), string(t.Key()), string(t.VersionId()), nil
 }
 
 func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshotEntry) flatbuffers.UOffsetT {

@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 )
@@ -52,13 +51,12 @@ func NewClient(endpoint, dataFlag string) (*Client, error) {
 						return d.DialContext(ctx, "unix", sock)
 					},
 				},
-				Timeout: 30 * time.Second,
 			},
 			baseURL: "http://unix",
 		}, nil
 	}
 	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{},
 		baseURL:    strings.TrimRight(ep, "/"),
 	}, nil
 }
@@ -67,7 +65,7 @@ func NewClient(endpoint, dataFlag string) (*Client, error) {
 // no auto-discovery. Used by tests against httptest.Server.
 func NewClientForURL(rawurl string) *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{},
 		baseURL:    strings.TrimRight(rawurl, "/"),
 	}
 }

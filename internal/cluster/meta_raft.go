@@ -246,6 +246,24 @@ func (m *MetaRaft) ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntr
 	return m.waitApplied(ctx, idx)
 }
 
+// ProposeDeleteObjectIndex removes one object-index version row and updates
+// the key's latest pointer in the meta-Raft FSM.
+func (m *MetaRaft) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, versionID string) error {
+	payload, err := encodeMetaDeleteObjectIndexCmd(bucket, key, versionID)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode DeleteObjectIndex: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypeDeleteObjectIndex, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
 // ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
 // it is applied to the local FSM.
 func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error {
