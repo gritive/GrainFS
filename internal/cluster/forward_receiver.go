@@ -67,6 +67,9 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 	if op == raftpb.ForwardOpScrubSessionStat {
 		return r.handleScrubSessionStat(fbsArgs)
 	}
+	if _, ok := lookupBucketForwardOpSpec(op); !ok {
+		return errReply(raftpb.ForwardStatusInternal, "")
+	}
 
 	dg := r.groups.Get(groupID)
 	if dg == nil || dg.Backend() == nil {
@@ -125,6 +128,11 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 		drainForwardBody(body)
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
+	spec, ok := lookupBucketForwardOpSpec(op)
+	if !ok || !spec.allowedOn(forwardBodyStream) {
+		drainForwardBody(body)
+		return errReply(raftpb.ForwardStatusInternal, "")
+	}
 
 	dg := r.groups.Get(groupID)
 	if dg == nil || dg.Backend() == nil {
@@ -159,6 +167,10 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message, io.ReadCloser) {
 	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
 	if err != nil {
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
+	}
+	spec, ok := lookupBucketForwardOpSpec(op)
+	if !ok || !spec.allowedOn(forwardReadStream) {
 		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
 
