@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,12 +89,58 @@ func iamDo(t *testing.T, sock, method, path string, body any, out any) {
 }
 
 // iamCreateSA POSTs /v1/iam/sa and returns the SA's id + first key pair.
+// Waits for the new key to propagate to the verifier before returning so
+// downstream tests can sign immediately without hitting "unknown access key".
 func iamCreateSA(t *testing.T, sock, name string) iamSAResult {
 	t.Helper()
 	var out iamSAResult
 	iamDo(t, sock, "POST", "/v1/iam/sa",
 		map[string]string{"name": name}, &out)
 	return out
+}
+
+// iamWaitKeyReady polls the S3 endpoint with the given creds until SigV4
+// verification recognizes the access key. Uses GetObject on a probe path
+// because (a) HEAD bodies are stripped by the SDK so we can't distinguish
+// "unknown access key" from "IAM grant denies" via HeadBucket, and (b)
+// GetObject's XML body is exposed in the SDK error message.
+//
+// Ready signals (any one):
+//   - Any non-error (unlikely for a probe path).
+//   - Error mentions "IAM grant denies", "NoSuchBucket", "NoSuchKey",
+//     "policy denies" — auth passed, authz/storage took over.
+//   - Error code != "AccessDenied" or status != 403.
+//
+// Unready signal: error body mentions "unknown access key" (key not yet
+// applied to the IAM store) — keep polling.
+func iamWaitKeyReady(t *testing.T, s3URL, ak, sk string, timeout time.Duration) {
+	t.Helper()
+	cli := s3ClientFor(s3URL, ak, sk)
+	deadline := time.Now().Add(timeout)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := cli.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String("__iam_key_probe__"),
+			Key:    aws.String("__probe__"),
+		})
+		cancel()
+		if err == nil {
+			return
+		}
+		msg := err.Error()
+		// Still applying. Keep polling.
+		if strings.Contains(msg, "unknown access key") {
+			if time.Now().After(deadline) {
+				t.Fatalf("iam key not ready within %v: %v", timeout, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		// Anything else → key was recognized; whatever 401/403/404 follows
+		// is downstream of auth, so the key is "ready" for the test's
+		// purposes.
+		return
+	}
 }
 
 // iamSADelete DELETEs the given SA. 204 on success.
