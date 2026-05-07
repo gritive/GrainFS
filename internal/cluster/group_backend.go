@@ -86,7 +86,7 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 	if cfg.ShardSvc != nil {
 		dist.SetShardService(cfg.ShardSvc, cfg.PeerIDs)
 	}
-	// EC config is per-group; activates only when len(PeerIDs) >= MinECNodes.
+	// EC config is per-group; invalid profiles fail fast against the group's peers.
 	dist.SetECConfig(cfg.EC)
 	// Bucket existence is trusted from the router; per-group DB has no bucket keys.
 	dist.bypassBucketCheck = true

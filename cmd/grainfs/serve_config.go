@@ -55,6 +55,7 @@ type clusterConfig struct {
 	ShardCacheSize int64
 	ECData         int
 	ECParity       int
+	ECExplicit     bool
 	VFSFixed       bool
 	PackThreshold  int
 
@@ -172,6 +173,7 @@ func buildClusterConfig(
 	cfg.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
 	cfg.ECData, _ = cmd.Flags().GetInt("ec-data")
 	cfg.ECParity, _ = cmd.Flags().GetInt("ec-parity")
+	cfg.ECExplicit = cmd.Flags().Changed("ec-data") || cmd.Flags().Changed("ec-parity")
 	cfg.VFSFixed, _ = cmd.Flags().GetBool("backend-vfs-fixed-version")
 	cfg.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")
 

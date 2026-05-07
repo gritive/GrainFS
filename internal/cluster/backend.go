@@ -267,8 +267,8 @@ func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShar
 }
 
 // SetECConfig configures erasure-coding shard parameters (k, m) for
-// PutObject/GetObject. Phase 18. Call before serving traffic. EC activates
-// whenever the cluster has at least MinECNodes nodes.
+// PutObject/GetObject. Call before serving traffic. The configured profile must
+// fit the active write node set; invalid profiles make EC writes fail fast.
 func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 	b.ecConfig = cfg
 }

@@ -65,8 +65,8 @@ func init() {
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
-	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "target max data shards k; actual k scales with node count (EffectiveConfig, 3+ nodes)")
-	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "target max parity shards m; actual m=max(1,round(n×m/(k+m)))")
+	serveCmd.Flags().Int("ec-data", cluster.DefaultDataShards, "explicit EC data shards k; when unset, selected from cluster size")
+	serveCmd.Flags().Int("ec-parity", cluster.DefaultParityShards, "explicit EC parity shards m; when unset, selected from cluster size")
 	serveCmd.Flags().Int("seed-groups", 0, "number of data groups to seed at bootstrap (0 = auto: max(8, (cluster_size)*4) — covers future cluster expansion)")
 	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
 	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
@@ -612,6 +612,19 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 	} else if seedGroups < 1 {
 		seedGroups = 1
 	}
+	clusterSize := 1 + len(peers)
+	effectiveEC := cluster.AutoECConfigForClusterSize(clusterSize)
+	if cfg.ECExplicit {
+		effectiveEC = cluster.ECConfig{DataShards: cfg.ECData, ParityShards: cfg.ECParity}
+		if !effectiveEC.IsActive(clusterSize) {
+			return fmt.Errorf("explicit EC profile %d+%d requires %d nodes, cluster has %d",
+				cfg.ECData, cfg.ECParity, effectiveEC.NumShards(), clusterSize)
+		}
+	}
+	if !effectiveEC.IsActive(clusterSize) {
+		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)
+	}
+	normalGroupVoters := effectiveEC.NumShards()
 	if !joinMode {
 		if err := serveruntime.WaitForMetaRaftLeader(ctx, metaRaft, 15*time.Second); err != nil {
 			return err
@@ -622,7 +635,7 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 		}
 		addNodeCancel()
 
-		if err := serveruntime.SeedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups); err != nil {
+		if err := serveruntime.SeedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups, normalGroupVoters); err != nil {
 			return err
 		}
 		if err := serveruntime.WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
@@ -776,15 +789,12 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 		}()
 
 		glc := cluster.GroupLifecycleConfig{
-			NodeID:    groupNodeID,
-			DataDir:   dataDir,
-			ShardSvc:  shardSvc,
-			Transport: groupRaftMux.ForGroup(entry.ID),
-			AddrBook:  metaRaft.FSM(),
-			EC: cluster.ECConfig{
-				DataShards:   cfg.ECData,
-				ParityShards: cfg.ECParity,
-			},
+			NodeID:           groupNodeID,
+			DataDir:          dataDir,
+			ShardSvc:         shardSvc,
+			Transport:        groupRaftMux.ForGroup(entry.ID),
+			AddrBook:         metaRaft.FSM(),
+			EC:               effectiveEC,
 			ElectionTimeout:  cfg.RaftElectionTimeout,
 			HeartbeatTimeout: cfg.RaftHeartbeatInterval,
 		}
@@ -882,15 +892,19 @@ func runCluster(ctx context.Context, cfg clusterConfig) error {
 	loadReporter := cluster.NewLoadReporter(nodeID, loadReporterStore, metaRaft, cluster.DefaultLoadReportInterval)
 	go loadReporter.Run(ctx)
 
-	// Phase 18 Cluster EC: activates at MinECNodes=3+ nodes with proportional k,m.
-	// 1-2 nodes always use N× replication.
-	distBackend.SetECConfig(cluster.ECConfig{
-		DataShards:   cfg.ECData,
-		ParityShards: cfg.ECParity,
-	})
-	log.Info().Int("k", cfg.ECData).Int("m", cfg.ECParity).
-		Bool("active", len(allNodes) >= cluster.MinECNodes).
-		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
+	// Cluster EC is mandatory for object storage. Zero-config clusters derive
+	// the effective profile from cluster size; explicit profiles fail fast
+	// earlier when the cluster cannot satisfy k+m.
+	distBackend.SetECConfig(effectiveEC)
+	log.Info().
+		Bool("explicit", cfg.ECExplicit).
+		Int("configured_k", cfg.ECData).
+		Int("configured_m", cfg.ECParity).
+		Int("effective_k", effectiveEC.DataShards).
+		Int("effective_m", effectiveEC.ParityShards).
+		Bool("redundant", effectiveEC.Redundant()).
+		Int("cluster_size", len(allNodes)).
+		Msg("cluster EC configured")
 
 	// VFS bucket fixed-versionID toggle (rollback path for the write-amp fix).
 	distBackend.SetVFSFixedVersionEnabled(cfg.VFSFixed)

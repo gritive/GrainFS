@@ -147,7 +147,7 @@ func TestDegradedMonitor_CheckDoesNotShortCircuitOnPeerHealth(t *testing.T) {
 	backend.peerHealth.MarkUnhealthy(nodes[1])
 	backend.peerHealth.MarkUnhealthy(nodes[2])
 	backend.peerHealth.MarkUnhealthy(nodes[3])
-	require.Less(t, len(backend.liveNodes()), MinECNodes, "precondition: peerHealth has reduced dynamic liveNodes below MinECNodes")
+	require.Less(t, len(backend.liveNodes()), backend.ecConfig.NumShards(), "precondition: peerHealth has reduced dynamic liveNodes below configured EC width")
 
 	m := NewDegradedMonitor(backend, tracker, time.Second)
 	m.check()
