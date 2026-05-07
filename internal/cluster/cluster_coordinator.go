@@ -988,7 +988,7 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 		return nil, err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = ContextWithPlacementGroupEntry(ctx, group)
 	}
 	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
 		if err != nil {
@@ -1017,7 +1017,7 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = ContextWithPlacementGroupEntry(ctx, group)
 	}
 	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
 		if err != nil {
@@ -1052,7 +1052,7 @@ func (c *ClusterCoordinator) PutObject(
 		return nil, err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = ContextWithPlacementGroupEntry(ctx, group)
 	}
 	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
 		if err != nil {
