@@ -28,6 +28,10 @@ var (
 	freePortCursor    uint32 = initialFreePortCursor()
 )
 
+func keepE2EArtifacts() bool {
+	return os.Getenv("GRAINFS_E2E_KEEP_ARTIFACTS") == "1"
+}
+
 func initialFreePortCursor() uint32 {
 	return uint32((time.Now().UnixNano() + int64(os.Getpid()*7919)) % 25000)
 }

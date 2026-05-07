@@ -273,7 +273,7 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = logFile.Close()
-		if t.Failed() {
+		if t.Failed() && keepE2EArtifacts() {
 			t.Logf("e2e cluster node %d log saved to %s", i, logFile.Name())
 		} else {
 			_ = os.Remove(logFile.Name())
