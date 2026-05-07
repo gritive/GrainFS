@@ -107,6 +107,13 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 // ID returns the group ID.
 func (g *GroupBackend) ID() string { return g.groupID }
 
+func (g *GroupBackend) ShardGroup(id string) (ShardGroupEntry, bool) {
+	if id != g.groupID || len(g.peerIDs) == 0 {
+		return ShardGroupEntry{}, false
+	}
+	return ShardGroupEntry{ID: g.groupID, PeerIDs: cloneStringSlice(g.peerIDs)}, true
+}
+
 func (g *GroupBackend) placementContext(ctx context.Context) context.Context {
 	if _, ok := PlacementGroupEntryFromContext(ctx); ok {
 		return ctx

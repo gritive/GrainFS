@@ -42,6 +42,8 @@ type ObjectMetaRef struct {
 	ECData      uint8
 	ECParity    uint8
 	NodeIDs     []string
+	// PlacementGroupID is the data raft group that owns this object version.
+	PlacementGroupID string
 }
 
 // IterObjectMetas iterates every logical object's metadata, invoking fn
@@ -115,6 +117,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				ref.ECData = m.ECData
 				ref.ECParity = m.ECParity
 				ref.NodeIDs = m.NodeIDs
+				ref.PlacementGroupID = m.PlacementGroupID
 				return nil
 			}); verr != nil {
 				itLat.Close()
@@ -185,6 +188,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				ref.ECData = m.ECData
 				ref.ECParity = m.ECParity
 				ref.NodeIDs = m.NodeIDs
+				ref.PlacementGroupID = m.PlacementGroupID
 				return nil
 			})
 			if verr != nil {

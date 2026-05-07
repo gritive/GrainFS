@@ -21,11 +21,15 @@ func (l *fakeLeader) IsLeader() bool { return l.leader }
 // fakeConverter replaces DistributedBackend for reshard manager unit tests.
 // It tracks which (bucket,key) pairs were converted/upgraded and can simulate errors.
 type fakeConverter struct {
-	fsm       *FSM
-	active    bool
-	converted []string
-	upgraded  []string
-	failOn    map[string]error
+	fsm                *FSM
+	active             bool
+	converted          []string
+	upgraded           []string
+	failOn             map[string]error
+	shardGroups        map[string]ShardGroupEntry
+	lastUpgradeCfg     ECConfig
+	currentRingVersion RingVersion
+	reshardToRingCalls int
 }
 
 func (c *fakeConverter) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
@@ -49,16 +53,22 @@ func (c *fakeConverter) ECActive() bool { return c.active }
 func (c *fakeConverter) EffectiveECConfig() ECConfig {
 	return ECConfig{DataShards: 4, ParityShards: 2}
 }
-func (c *fakeConverter) upgradeObjectEC(_ context.Context, bucket, key string, _ PlacementRecord, _ ECConfig) error {
+func (c *fakeConverter) upgradeObjectEC(_ context.Context, bucket, key string, _ PlacementRecord, cfg ECConfig) error {
 	c.upgraded = append(c.upgraded, bucket+"/"+key)
+	c.lastUpgradeCfg = cfg
 	return nil
 }
-func (c *fakeConverter) CurrentRingVersion() RingVersion { return 0 }
+func (c *fakeConverter) CurrentRingVersion() RingVersion { return c.currentRingVersion }
 func (c *fakeConverter) ReshardToRing(_ context.Context, _, _ string, _ RingVersion) error {
+	c.reshardToRingCalls++
 	return nil
 }
 func (c *fakeConverter) ResolvePlacement(ctx context.Context, bucket, key string, meta PlacementMeta) (ResolvedPlacement, error) {
 	return (&DistributedBackend{db: c.fsm.db, fsm: c.fsm}).ResolvePlacement(ctx, bucket, key, meta)
+}
+func (c *fakeConverter) ShardGroup(id string) (ShardGroupEntry, bool) {
+	g, ok := c.shardGroups[id]
+	return g, ok
 }
 
 // seedObjectMeta writes an object metadata record directly without going
@@ -79,6 +89,18 @@ func seedObjectMetaEC(t *testing.T, fsm *FSM, bucket, key, etag string, size int
 		Bucket: bucket, Key: key, Size: size,
 		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
 		ECData: k, ECParity: m, NodeIDs: nodes,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(raw))
+}
+
+func seedObjectMetaECInGroup(t *testing.T, fsm *FSM, bucket, key, etag string, size int64, groupID string, k, m uint8, nodes []string) {
+	t.Helper()
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: bucket, Key: key, Size: size,
+		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
+		PlacementGroupID: groupID,
+		ECData:           k, ECParity: m, NodeIDs: nodes,
 	})
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(raw))
@@ -237,6 +259,55 @@ func TestReshardManager_Run_UpgradesECObjects_OnKMismatch(t *testing.T) {
 	assert.Equal(t, 0, errs)
 	assert.ElementsMatch(t, []string{"bkt/nx-obj", "bkt/ec-obj"}, conv.converted)
 	assert.Empty(t, conv.upgraded)
+}
+
+func TestReshardManager_Run_UsesObjectPlacementGroupDesiredProfile(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	seedObjectMetaECInGroup(t, fsm, "bkt", "obj", "e1", 10, "group-1", 2, 1, []string{"n1", "n2", "n3"})
+
+	conv := &fakeConverter{
+		fsm:    fsm,
+		active: true,
+		shardGroups: map[string]ShardGroupEntry{
+			"group-1": {ID: "group-1", PeerIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"}},
+		},
+	}
+	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
+	cv, skip, errs := mgr.Run(context.Background())
+
+	require.Equal(t, 1, cv)
+	require.Equal(t, 0, skip)
+	require.Equal(t, 0, errs)
+	require.Equal(t, []string{"bkt/obj"}, conv.upgraded)
+	require.Equal(t, ECConfig{DataShards: 4, ParityShards: 2}, conv.lastUpgradeCfg)
+}
+
+func TestReshardManager_Run_DoesNotRunRingReshard(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	seedObjectMetaEC(t, fsm, "bkt", "obj", "e1", 10, 4, 2, []string{"n1", "n2", "n3", "n4", "n5", "n6"})
+
+	conv := &fakeConverter{fsm: fsm, active: true, currentRingVersion: 2}
+	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
+	_, _, _ = mgr.Run(context.Background())
+
+	require.Zero(t, conv.reshardToRingCalls)
+}
+
+func TestReshardManager_Run_HonorsMaxObjects(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db)
+	for i := 0; i < 3; i++ {
+		seedObjectMeta(t, fsm, "bkt", fmt.Sprintf("obj-%d", i), "e", 10)
+	}
+
+	conv := &fakeConverter{fsm: fsm, active: true}
+	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
+	mgr.maxObjectsPerRun = 2
+	cv, _, _ := mgr.Run(context.Background())
+
+	require.Equal(t, 2, cv)
 }
 
 // CmdPutShardPlacement is a no-op; ec-obj has no placement → treated as N× → converted.
