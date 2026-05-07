@@ -344,6 +344,57 @@ func TestIAM_E2E_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
 	}
 }
 
+// TestIAM_E2E_ET5_StickyAuth_ClusterRestart asserts the auth_enabled sticky
+// bit and the bootstrap credentials survive a full process restart against
+// the same data dir. The second start passes NO --access-key/--secret-key
+// flags, so the IAM state must rehydrate from the persisted snapshot/raft
+// log: encryption.key on disk decrypts SecretKeyEnc, the SigV4 verifier
+// accepts the original bootstrap key pair, and anonymous traffic is still
+// rejected.
+func TestIAM_E2E_ET5_StickyAuth_ClusterRestart(t *testing.T) {
+	h := startIAMTestServerWithRestart(t)
+
+	// First boot: bootstrap creds must already work; sticky bit is on.
+	cli := h.Client()
+	ctx := context.Background()
+	_, err := cli.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String("__et5_probe1__"),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if !errors.As(err, &apiErr) ||
+			(apiErr.ErrorCode() != "NotFound" && apiErr.ErrorCode() != "NoSuchBucket") {
+			t.Fatalf("bootstrap creds rejected on first boot: %v", err)
+		}
+	}
+
+	h.Stop(t)
+
+	// Restart with NO --access-key flag: the bootstrap shim is a no-op on a
+	// non-empty store, so the durable IAM state alone must keep auth on and
+	// the original bootstrap creds valid.
+	h.Start(t)
+
+	cli2 := h.Client()
+	_, err = cli2.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String("__et5_probe2__"),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if !errors.As(err, &apiErr) ||
+			(apiErr.ErrorCode() != "NotFound" && apiErr.ErrorCode() != "NoSuchBucket") {
+			t.Fatalf("bootstrap creds rejected after restart: %v", err)
+		}
+	}
+
+	// Anonymous / bogus creds must still be rejected — sticky bit on.
+	bogus := s3ClientFor(h.S3URL, "AKBOGUSAKBOGUSAK", "skBogusSecretKeyForTestThirty")
+	_, err = bogus.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err == nil {
+		t.Fatal("bogus creds accepted after restart — sticky bit not enforced")
+	}
+}
+
 // grepDataDir scans every regular file under root for needle. Returns the
 // matching paths (one per file). Sequential scan is fine for e2e: the
 // data dir is small (test scope, single-node).

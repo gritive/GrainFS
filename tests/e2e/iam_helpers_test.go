@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -257,6 +258,130 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 		Client:      cli,
 	}
 }
+
+// iamTestServerHandle is a server with explicit lifecycle control. Unlike
+// iamTestServer, the data dir + bootstrap creds + ports persist across
+// Stop()/Start() cycles, so cluster-restart scenarios (sticky bits, IAM
+// state durability) can be exercised in-process.
+type iamTestServerHandle struct {
+	DataDir     string
+	S3URL       string
+	AdminSock   string
+	BootstrapAK string
+	BootstrapSK string
+	s3Port      int
+	nfsPort     int
+	nbdPort     int
+	cmd         *exec.Cmd
+	cli         *s3.Client
+	// firstStart tracks whether we've spawned the binary at least once.
+	// First Start passes --access-key/--secret-key (bootstraps IAM).
+	// Subsequent Start calls omit them — the persisted IAM store should
+	// self-rehydrate.
+	firstStart bool
+}
+
+// startIAMTestServerWithRestart spawns the server but returns a handle whose
+// Stop()/Start() preserves the data dir. Bootstrap creds remain valid across
+// restarts because they're durably persisted in the IAM store.
+func startIAMTestServerWithRestart(t *testing.T) *iamTestServerHandle {
+	t.Helper()
+
+	var nonce [6]byte
+	_, _ = rand.Read(nonce[:])
+	tag := hex.EncodeToString(nonce[:])
+	bootAK := "iamtest" + tag
+	bootSK := "iamtest" + tag + "-secret"
+
+	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-restart-*")
+	require.NoError(t, err, "mkdtemp")
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	h := &iamTestServerHandle{
+		DataDir:     dir,
+		AdminSock:   filepath.Join(dir, "admin.sock"),
+		BootstrapAK: bootAK,
+		BootstrapSK: bootSK,
+		s3Port:      freePort(),
+		nfsPort:     freePort(),
+		nbdPort:     freePort(),
+	}
+	h.S3URL = fmt.Sprintf("http://127.0.0.1:%d", h.s3Port)
+	t.Cleanup(func() {
+		if h.cmd != nil && h.cmd.ProcessState == nil {
+			terminateProcess(h.cmd)
+		}
+	})
+
+	h.Start(t)
+	return h
+}
+
+// Start (re)spawns the server bound to the persisted data dir + ports and
+// waits until the IAM verifier accepts the bootstrap creds. On the first
+// call --access-key/--secret-key are supplied; subsequent calls omit them
+// (the bootstrap shim no-ops on a non-empty store, so the persisted state
+// must rehydrate the bootstrap creds via snapshot/raft replay).
+func (h *iamTestServerHandle) Start(t *testing.T) {
+	t.Helper()
+
+	args := []string{"serve",
+		"--data", h.DataDir,
+		"--port", fmt.Sprintf("%d", h.s3Port),
+		"--nfs4-port", fmt.Sprintf("%d", h.nfsPort),
+		"--nbd-port", fmt.Sprintf("%d", h.nbdPort),
+		"--snapshot-interval", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
+		"--dedup=false",
+	}
+	if !h.firstStart {
+		args = append(args,
+			"--access-key", h.BootstrapAK,
+			"--secret-key", h.BootstrapSK,
+		)
+	}
+
+	cmd := exec.Command(getBinary(), args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start(), "start IAM e2e server")
+	h.cmd = cmd
+
+	waitForPort(t, h.s3Port, 30*time.Second)
+	cli := s3ClientFor(h.S3URL, h.BootstrapAK, h.BootstrapSK)
+	h.cli = cli
+	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
+	h.firstStart = true
+}
+
+// Stop sends SIGTERM and waits for the process to exit, giving Raft and
+// BadgerDB time to flush state cleanly. terminateProcess is SIGKILL-based
+// and would skip the orderly shutdown path needed by ET5.
+func (h *iamTestServerHandle) Stop(t *testing.T) {
+	t.Helper()
+	if h.cmd == nil || h.cmd.Process == nil {
+		return
+	}
+	if h.cmd.ProcessState != nil {
+		return
+	}
+	_ = h.cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan error, 1)
+	go func() { done <- h.cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Logf("server did not exit on SIGTERM in 20s; falling back to SIGKILL")
+		_ = h.cmd.Process.Kill()
+		<-done
+	}
+	h.cmd = nil
+}
+
+// Client returns the S3 client bound to the bootstrap creds. Re-built on
+// each Start so callers should call this after every Start.
+func (h *iamTestServerHandle) Client() *s3.Client { return h.cli }
 
 // s3ClientFor builds an aws-sdk-go-v2 S3 client signing with custom static
 // creds. Mirrors newS3Client (test/test) but takes the credentials so each
