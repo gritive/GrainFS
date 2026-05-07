@@ -322,30 +322,36 @@ grainfs serve \
 
 ### Evicting a permanently-dead node
 
-When a cluster node fails irrecoverably (hardware loss, corrupted disk past recovery), remove it from the meta-Raft voter set so quorum math reflects the surviving members. Run **on the leader node** — the endpoint is localhost-only.
+When a cluster node fails irrecoverably (hardware loss, corrupted disk past recovery), remove it from the meta-Raft voter set so quorum math reflects the surviving members. Run **on the leader node** — the endpoint is the admin Unix socket (mode 0660 + admin-group) at `<data-dir>/admin.sock`.
+
+The examples below assume the socket path is exported once for the procedure:
+
+```bash
+export ENDPOINT=/var/run/grainfs/admin.sock   # or <data-dir>/admin.sock
+```
 
 1. Identify the dead voter. `cluster peers` lists the current metaRaft voter set; cross-reference with `cluster status` (or the operator's external monitoring) to identify which one is the dead node. Normal rows use node IDs. Legacy raft-address rows that cannot be resolved are shown as `unresolved_legacy` so operators can still see the row that blocks membership mutation:
 
    ```bash
-   grainfs cluster peers
+   grainfs cluster --endpoint $ENDPOINT peers
    #   NODE_ID          RAFT_ADDR          ROLE      STATE
    #   node-2           127.0.0.1:19102    follower  configured
    #   127.0.0.1:19103  127.0.0.1:19103    follower  unresolved_legacy
 
-   grainfs cluster status --format json   # includes peer_snapshot
+   grainfs cluster --endpoint $ENDPOINT status --format json   # includes peer_snapshot
    ```
 
 2. Pre-flight check is automatic. The server uses the peer snapshot membership-mutation policy: `self` and rows with fresh successful metaRaft AppendEntries evidence count as `live`, while `configured` rows are treated as unknown. Failed heartbeats alone do not make a peer display-down for this policy. If removal would drop the post-removal voter count below quorum, or another unresolved legacy row makes identity ambiguous, the command refuses unless `--force`:
 
    ```bash
-   grainfs cluster remove-peer node-2 --yes
+   grainfs cluster --endpoint $ENDPOINT remove-peer node-2 --yes
    ```
 
 3. Verify the voter set shrank and an audit event was recorded:
 
    ```bash
-   grainfs cluster peers
-   grainfs cluster events --type cluster-remove-peer --since 1h
+   grainfs cluster --endpoint $ENDPOINT peers
+   grainfs cluster --endpoint $ENDPOINT events --type cluster-remove-peer --since 1h
    ```
 
 **`--force` semantics**: bypasses pre-flight only — does not bypass the engine. Use when the operator has independently confirmed the peer is permanently lost and the joint-consensus commit can still progress (e.g., 3-of-5 alive removing 1 dead). For clusters that have already lost quorum, `recover cluster` (offline snapshot recovery) is the right tool, not `remove-peer --force`.
@@ -657,7 +663,8 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
 
 ### Online rotation (권장)
 
-전제: 모든 노드가 v0.0.39+ 이며 정상 작동 중. Leader 식별: `grainfs cluster status`.
+전제: 모든 노드가 v0.0.39+ 이며 정상 작동 중. Leader 식별:
+`grainfs cluster --endpoint <data-dir>/admin.sock status`.
 
 > ⚠ **다중 노드 클러스터 필수 절차**: 회전은 모든 peer가 새 PSK를 자신의
 > `keys.d/next.key`로 가지고 있을 때만 정상 동작한다. CLI는 leader의 디스크에만
@@ -711,8 +718,9 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
    디스크의 `keys.d/current.key`는 회전 직후 자동으로 NEW로 갱신되므로 플래그 없이
    재시작해도 회전 후 NEW를 사용한다 (D10 — disk wins).
 
-5. **검증**: `grainfs cluster status` 로 모든 peer 정상, `grainfs cluster
-   rotate-key status` 로 phase=1 (steady) 확인.
+5. **검증**: `grainfs cluster --endpoint <data-dir>/admin.sock status` 로 모든
+   peer 정상, `grainfs cluster rotate-key status --endpoint <data-dir>/rotate.sock`
+   으로 phase=1 (steady) 확인.
 
 ### 회전 중 실패 처리
 
@@ -733,4 +741,4 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
 
 1. 모든 노드 정지 (S3/NFS/NBD downtime 발생).
 2. 모든 노드를 새 `--cluster-key`로 재시작.
-3. `grainfs cluster status`로 peer 재연결 확인.
+3. `grainfs cluster --endpoint <data-dir>/admin.sock status`로 peer 재연결 확인.

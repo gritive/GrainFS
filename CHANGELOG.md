@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.0.89.0] - 2026-05-07 — cluster CLI uses admin UDS, output unified
+
+### BREAKING CHANGES
+
+- **`grainfs cluster {status,peers,events,remove-peer}` now requires
+  `--endpoint <data-dir>/admin.sock`** (UDS). Previous default
+  `http://127.0.0.1:9000` removed. HTTP `/api/cluster/*` and `/api/eventlog`
+  remain available for the dashboard (web UI). Migration:
+  ```
+  Old: grainfs cluster status --endpoint http://127.0.0.1:9000
+  New: grainfs cluster --endpoint <data-dir>/admin.sock status
+  ```
+- **`grainfs cluster join` moved to `grainfs join`**. Aligns with bootstrap
+  convention (`serve`, `migrate`, `doctor`, `recover` all live at root).
+  Migration:
+  ```
+  Old: grainfs cluster join <peer-addr> --data-dir <data> --raft-addr <addr>
+  New: grainfs join <peer-addr> --data-dir <data> --raft-addr <addr>
+  ```
+- **`grainfs cluster status` default format changed from `json` to `text`.**
+  Pipe consumers must add `--format json` explicitly. Format flag is now
+  unified as a persistent flag on `clusterCmd`, `volumeCmd`, and `dashboardCmd`.
+- **Output flags unified on `--format text|json`.** Dropped `--json`,
+  `--raw` (alias of `--bytes`) on `volume`, `dashboard`, `doctor`. `--bytes`
+  is retained on `volume` for raw byte rendering inside text output.
+  Migration:
+  ```
+  Old: grainfs volume list --json
+  New: grainfs volume list --format json
+  ```
+
+### Removed
+
+- **`grainfs cluster plan-show`** and **`grainfs cluster rebalance`** —
+  stub commands introduced in PR-D, deferred to multi-raft work that moved
+  to other milestones. `loadFSMFromStore` was a no-op. Will be reintroduced
+  when real local FSM read lands.
+
+### Added
+
+- `RegisterClusterAdminUDS` mounts `/v1/cluster/{status,remove-peer,eventlog}`
+  on the admin Unix socket. Single handler source: same `*server.Server`
+  methods serve both HTTP `/api/cluster/*` (dashboard) and UDS
+  `/v1/cluster/*` (CLI).
+- `clusteradmin.NewClient` now dispatches on prefix: bare path / `unix:` →
+  UDS dialer, `http(s)://` → direct HTTP. Matches `volumeadmin` pattern.
+- `clusteradmin.StatusRaw` returns the raw response body for forward-compat
+  JSON output.
+- `clusteradmin` gains `RotateKey{Status,Begin,Abort}` methods. The
+  `rotate.sock` listener was migrated from line-delimited JSON to Hertz
+  HTTP (`/v1/rotate-key/{status,begin,abort}`); socket file mode stays
+  `0600` so PSK material remains owner-only and out of admin-group reach.
+- `--endpoint` shows actionable errors on dial failure
+  (ENOENT / ECONNREFUSED / EACCES) and on `http://` input ("admin endpoint
+  must be a UDS socket path").
+- ADR 0006: CLI uses admin UDS, dashboard uses HTTP.
+
+### Changed
+
+- Translated remaining Korean Example blocks in `cluster remove-peer`,
+  `volume`, and `dashboard` cmd help to English for consistency.
+
 ## [0.0.88.0] - 2026-05-07 — volume block I/O policy private module
 
 ### Changed

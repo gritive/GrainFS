@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,7 +20,7 @@ import (
 
 func TestClient_Status_ParsesCanonicalShape(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/cluster/status", r.URL.Path)
+		require.Equal(t, "/v1/cluster/status", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"mode":        "cluster",
 			"node_id":     "n1",
@@ -123,9 +126,90 @@ func TestClient_RemovePeer_ContextCancelled(t *testing.T) {
 	require.Error(t, err, "context deadline must surface")
 }
 
+func TestClient_NewClient_BarePathDispatchesToUDS(t *testing.T) {
+	c := NewClient("/tmp/some/admin.sock")
+	require.Equal(t, "http://unix", c.baseURL)
+	require.Equal(t, "/tmp/some/admin.sock", c.sockPath)
+	require.NotNil(t, c.httpClient.Transport)
+}
+
+func TestClient_NewClient_UnixPrefixDispatchesToUDS(t *testing.T) {
+	c := NewClient("unix:/tmp/admin.sock")
+	require.Equal(t, "http://unix", c.baseURL)
+	require.Equal(t, "/tmp/admin.sock", c.sockPath)
+}
+
+func TestClient_NewClient_HTTPDispatchesDirect(t *testing.T) {
+	c := NewClient("http://127.0.0.1:9000/")
+	require.Equal(t, "http://127.0.0.1:9000", c.baseURL, "trailing slash trimmed")
+	require.Empty(t, c.sockPath, "HTTP transport carries no sockPath")
+}
+
+func TestClient_NewClient_HTTPSDispatchesDirect(t *testing.T) {
+	c := NewClient("https://example.com")
+	require.Equal(t, "https://example.com", c.baseURL)
+	require.Empty(t, c.sockPath)
+}
+
+// TestClient_UDSDial_RoundTrip verifies end-to-end UDS dial via NewClient
+// with a bare path. The handler responds to /v1/cluster/status with
+// mode="local"; the client must Status() successfully.
+func TestClient_UDSDial_RoundTrip(t *testing.T) {
+	d, err := os.MkdirTemp("/tmp", "ca-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	sock := filepath.Join(d, "admin.sock")
+
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"mode": "local"})
+	})
+	go http.Serve(ln, mux) //nolint:errcheck
+	t.Cleanup(func() { _ = ln.Close() })
+
+	c := NewClient(sock)
+	s, err := c.Status(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "local", s.Mode)
+}
+
+// TestClient_StatusRaw_ForwardCompat verifies that StatusRaw returns the
+// server response body byte-for-byte. New fields not in the typed Status
+// struct are preserved.
+func TestClient_StatusRaw_ForwardCompat(t *testing.T) {
+	payload := `{"mode":"cluster","node_id":"n1","future_field":{"x":42}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/cluster/status", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	raw, err := c.StatusRaw(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, payload, string(raw))
+}
+
+func TestClient_StatusRaw_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		_, _ = w.Write([]byte(`{"error":"degraded"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	_, err := c.StatusRaw(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "503")
+}
+
 func TestClient_EventLog_ParsesArray(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/eventlog", r.URL.Path)
+		require.Equal(t, "/v1/cluster/eventlog", r.URL.Path)
 		// Server expects since/limit query params.
 		assert.NotEmpty(t, r.URL.Query().Get("since"))
 		assert.NotEmpty(t, r.URL.Query().Get("limit"))

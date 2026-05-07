@@ -63,12 +63,11 @@ func adminClientFromCmd(cmd *cobra.Command) (*volumeadmin.Client, error) {
 	return volumeadmin.NewClient(endpoint)
 }
 
-// jsonOut reports whether the --json flag is set on cmd (or any parent). It
-// matches the volume-CLI convention so the bucket-scrub and dashboard
-// commands stay user-visible-consistent.
+// jsonOut reports whether the caller wants JSON output. Single source of
+// truth: --format=json. Unified across cluster/volume/dashboard CLIs.
 func jsonOut(cmd *cobra.Command) bool {
-	v, _ := cmd.Flags().GetBool("json")
-	return v
+	f, _ := cmd.Flags().GetString("format")
+	return f == "json"
 }
 
 // printJSON pretty-prints v as JSON to cmd's stdout.

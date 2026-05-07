@@ -35,7 +35,7 @@ func createVolumeWithSizeEventually(t *testing.T, name, size string) volumeResp 
 	var out string
 	var code int
 	require.Eventually(t, func() bool {
-		out, code = runCLI(t, testServerDataDir, "volume", "create", name, "--size", size, "--json")
+		out, code = runCLI(t, testServerDataDir, "volume", "create", name, "--size", size, "--format", "json")
 		return code == 0
 	}, 30*time.Second, 500*time.Millisecond, "create volume %s: code=%d output=%s", name, code, out)
 
@@ -47,7 +47,7 @@ func createVolumeWithSizeEventually(t *testing.T, name, size string) volumeResp 
 
 func getVolume(t *testing.T, name string) (volumeResp, int, string) {
 	t.Helper()
-	out, code := runCLI(t, testServerDataDir, "volume", "info", name, "--json")
+	out, code := runCLI(t, testServerDataDir, "volume", "info", name, "--format", "json")
 	if code != 0 {
 		return volumeResp{}, code, out
 	}
@@ -58,7 +58,7 @@ func getVolume(t *testing.T, name string) (volumeResp, int, string) {
 
 func listVolumes(t *testing.T) []volumeResp {
 	t.Helper()
-	out, code := runCLI(t, testServerDataDir, "volume", "list", "--json")
+	out, code := runCLI(t, testServerDataDir, "volume", "list", "--format", "json")
 	require.Equal(t, 0, code, out)
 	var list volumeListResp
 	require.NoError(t, json.Unmarshal([]byte(out), &list))
@@ -67,7 +67,7 @@ func listVolumes(t *testing.T) []volumeResp {
 
 func deleteVolume(t *testing.T, name string) {
 	t.Helper()
-	out, code := runCLI(t, testServerDataDir, "volume", "delete", name, "--force", "--json")
+	out, code := runCLI(t, testServerDataDir, "volume", "delete", name, "--force", "--format", "json")
 	require.Equal(t, 0, code, out)
 	var resp struct {
 		Deleted bool `json:"deleted"`
@@ -81,7 +81,7 @@ func deleteVolumeEventually(t *testing.T, name string) {
 	var out string
 	var code int
 	require.Eventually(t, func() bool {
-		out, code = runCLI(t, testServerDataDir, "volume", "delete", name, "--force", "--json")
+		out, code = runCLI(t, testServerDataDir, "volume", "delete", name, "--force", "--format", "json")
 		return code == 0
 	}, 30*time.Second, 500*time.Millisecond, "delete volume %s: code=%d output=%s", name, code, out)
 }

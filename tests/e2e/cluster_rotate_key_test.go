@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,23 +161,42 @@ type rotationCLIResp struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// runRotateKeyCLI is a thin wrapper that talks to rotate.sock directly with
-// JSON; we'd use the CLI binary but parsing its human-readable output is more
-// brittle than just hitting the socket.
+// runRotateKeyCLI is a thin wrapper that talks to rotate.sock via HTTP/UDS
+// (Hertz handlers); we'd use the CLI binary but parsing its human-readable
+// output is more brittle than just hitting the socket.
 func runRotateKeyCLI(t *testing.T, dataDir, action string, extra ...func(map[string]any)) rotationCLIResp {
 	t.Helper()
-	conn, err := net.DialTimeout("unix", filepath.Join(dataDir, "rotate.sock"), 5*time.Second)
-	require.NoError(t, err)
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(45 * time.Second))
-	req := map[string]any{"action": action}
-	for _, f := range extra {
-		f(req)
+	sock := filepath.Join(dataDir, "rotate.sock")
+	cli := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 45 * time.Second,
 	}
-	require.NoError(t, json.NewEncoder(conn).Encode(req))
-	var resp rotationCLIResp
-	require.NoError(t, json.NewDecoder(conn).Decode(&resp))
-	return resp
+
+	var resp *http.Response
+	var err error
+	switch action {
+	case "status":
+		resp, err = cli.Get("http://unix/v1/rotate-key/status")
+	case "begin", "abort":
+		body := map[string]any{}
+		for _, f := range extra {
+			f(body)
+		}
+		buf, _ := json.Marshal(body)
+		resp, err = cli.Post("http://unix/v1/rotate-key/"+action, "application/json", bytes.NewReader(buf))
+	default:
+		t.Fatalf("unknown rotate-key action %q", action)
+	}
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	var out rotationCLIResp
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return out
 }
 
 // runRotateKeyCLIBeginGenerate uses the actual CLI binary so we exercise the

@@ -20,6 +20,11 @@ type Config struct {
 	SocketPath string // e.g. "<data>/admin.sock"
 	Group      string // OS group name for chown; empty = caller's primary group
 	Deps       *Deps
+	// ExtraRoutes, if non-nil, is invoked after RegisterAdmin to wire
+	// additional Hertz routes onto the admin UDS server. Used by the data
+	// plane to expose cluster status/eventlog/remove-peer at /v1/cluster/*
+	// without lifting *server.Server's deep dependencies into Deps.
+	ExtraRoutes func(h *server.Hertz)
 }
 
 // Server owns the admin Hertz instance + Unix listener.
@@ -83,6 +88,9 @@ func Start(cfg Config) (*Server, error) {
 		server.WithHostPorts(""),
 	)
 	RegisterAdmin(h, cfg.Deps)
+	if cfg.ExtraRoutes != nil {
+		cfg.ExtraRoutes(h)
+	}
 
 	s := &Server{cfg: cfg, h: h, socket: ln, done: make(chan error, 1)}
 	go func() {

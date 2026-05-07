@@ -127,23 +127,25 @@ grainfs recover cluster verify \
 
 ### Cluster Membership 조작
 
-운영 중인 메타-Raft 클러스터의 멤버십을 CLI로 조회/변경한다. 모든 명령은 노드에 SSH 접속해 `--endpoint http://127.0.0.1:9000`로 실행해야 한다 (admin endpoint는 localhost-only).
+운영 중인 메타-Raft 클러스터의 멤버십을 CLI로 조회/변경한다. 모든 명령은 노드에 SSH 접속해 admin Unix socket(`<data-dir>/admin.sock`, mode 0660 + admin-group)으로 실행한다.
 
 ```bash
+ENDPOINT=/var/run/grainfs/admin.sock   # or <data-dir>/admin.sock
+
 # 현재 voter / liveness 표
-grainfs cluster peers
+grainfs cluster --endpoint $ENDPOINT peers
 
 # 최근 클러스터 이벤트 (cluster-join, cluster-remove-peer 등 필터)
-grainfs cluster events --type cluster-remove-peer --since 24h
+grainfs cluster --endpoint $ENDPOINT events --type cluster-remove-peer --since 24h
 
 # 죽은 노드 축출 (정족수 손실 없음 → pre-flight 통과)
-grainfs cluster remove-peer node-2 --yes
+grainfs cluster --endpoint $ENDPOINT remove-peer node-2 --yes
 
 # 정족수 손실을 감수하는 강제 제거 (재해 복구 직전 단계)
-grainfs cluster remove-peer node-2 --force --yes
+grainfs cluster --endpoint $ENDPOINT remove-peer node-2 --force --yes
 ```
 
-`<id>`는 현재 `cluster status` / `cluster peers`가 표시하는 voter 식별자를 그대로 넘긴다. 정상 경로는 node ID이며, legacy metadata가 아직 raft address로만 남아 있으면 그 주소가 `unresolved_legacy` row로 표시된다. `cluster status`는 `peer_snapshot`에서 identity state와 liveness state를 분리해 보여주고, 기존 `peers` / `peer_addrs` / `peer_states` / `down_nodes` 필드는 호환성을 위해 같은 snapshot에서 파생된다. `remove-peer` pre-flight는 snapshot의 membership-mutation policy를 사용하므로 `self`와 최근 successful metaRaft AppendEntries evidence가 있는 명시적 `live` row만 alive로 세고, `configured` row는 아직 fresh liveness evidence가 없는 unknown으로 취급한다. Joint consensus(§4.3) 경로로 atomic 제거가 commit되며, 리더 본인을 제거하면 commit-time wakeup 후 follower로 강등되고 새 리더가 선출된다.
+`<id>`는 현재 `cluster --endpoint $ENDPOINT status` / `cluster --endpoint $ENDPOINT peers`가 표시하는 voter 식별자를 그대로 넘긴다. 정상 경로는 node ID이며, legacy metadata가 아직 raft address로만 남아 있으면 그 주소가 `unresolved_legacy` row로 표시된다. `cluster status`는 `peer_snapshot`에서 identity state와 liveness state를 분리해 보여주고, 기존 `peers` / `peer_addrs` / `peer_states` / `down_nodes` 필드는 호환성을 위해 같은 snapshot에서 파생된다. `remove-peer` pre-flight는 snapshot의 membership-mutation policy를 사용하므로 `self`와 최근 successful metaRaft AppendEntries evidence가 있는 명시적 `live` row만 alive로 세고, `configured` row는 아직 fresh liveness evidence가 없는 unknown으로 취급한다. Joint consensus(§4.3) 경로로 atomic 제거가 commit되며, 리더 본인을 제거하면 commit-time wakeup 후 follower로 강등되고 새 리더가 선출된다.
 
 ## 클러스터 Balancer
 

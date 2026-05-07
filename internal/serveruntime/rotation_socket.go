@@ -5,13 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
+	hzserver "github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/network/standard"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
@@ -21,18 +23,26 @@ import (
 
 // 회전 명령 socket — D19 enforces localhost-only via Unix domain socket
 // permissions (0600, owner-only). 외부 네트워크에 절대 노출되지 않으므로
-// PSK 누설 위험 없이 새 키를 운반할 수 있다.
-// RotationSocketName is the path component (relative to dataDir) where the
-// localhost-only rotation Unix domain socket is bound.
+// PSK 누설 위험 없이 새 키를 운반할 수 있다. The transport is HTTP/Hertz on
+// a dedicated UDS so the CLI shares one HTTP client with cluster admin
+// while keeping the stricter file-mode boundary (0600 vs admin.sock 0660).
 const RotationSocketName = "rotate.sock"
 
-type RotationSocketRequest struct {
-	Action string `json:"action"`
-	NewKey string `json:"new_key,omitempty"`
-	Reason string `json:"reason,omitempty"`
+// RotationBeginRequest is the JSON body for POST /v1/rotate-key/begin.
+type RotationBeginRequest struct {
+	NewKey string `json:"new_key"`
 }
 
-type RotationSocketResponse struct {
+// RotationAbortRequest is the JSON body for POST /v1/rotate-key/abort.
+type RotationAbortRequest struct {
+	Reason string `json:"reason"`
+}
+
+// RotationStatusResponse is returned by all three rotate-key endpoints.
+// Error is non-empty when the server rejects the request; the HTTP status
+// code is 200 in all cases (matches the line-delimited socket's prior
+// contract — clients branch on Error string).
+type RotationStatusResponse struct {
 	Phase      int    `json:"phase"`
 	RotationID string `json:"rotation_id,omitempty"`
 	OldSPKI    string `json:"old_spki,omitempty"`
@@ -62,57 +72,54 @@ func StartRotationSocket(ctx context.Context, dataDir string, metaRaft *cluster.
 		Str("hint", fmt.Sprintf("--endpoint %q", sockPath)).
 		Msg("rotate endpoint")
 
+	h := hzserver.New(
+		hzserver.WithListener(ln),
+		hzserver.WithTransport(standard.NewTransporter),
+		hzserver.WithHostPorts(""),
+	)
+	registerRotationRoutes(h, dataDir, metaRaft)
+
 	go func() {
-		<-ctx.Done()
-		ln.Close()
-		_ = os.Remove(sockPath)
+		_ = h.Run()
 	}()
 
 	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					return
-				}
-				log.Warn().Err(err).Msg("rotate.sock: accept error")
-				continue
-			}
-			go handleRotationConn(ctx, conn, dataDir, metaRaft)
-		}
+		<-ctx.Done()
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = h.Shutdown(stopCtx)
+		_ = os.Remove(sockPath)
 	}()
 	return nil
 }
 
-func handleRotationConn(ctx context.Context, conn net.Conn, dataDir string, metaRaft *cluster.MetaRaft) {
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(40 * time.Second))
-
-	var req RotationSocketRequest
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
-		writeRotResp(conn, RotationSocketResponse{Error: fmt.Sprintf("decode: %v", err)})
-		return
-	}
-	resp := dispatchRotationRequest(ctx, req, dataDir, metaRaft)
-	writeRotResp(conn, resp)
+func registerRotationRoutes(h *hzserver.Hertz, dataDir string, metaRaft *cluster.MetaRaft) {
+	g := h.Group("/v1/rotate-key")
+	g.GET("/status", func(c context.Context, ctx *app.RequestContext) {
+		resp := rotationStatusResp(metaRaft)
+		ctx.JSON(200, resp)
+	})
+	g.POST("/begin", func(c context.Context, ctx *app.RequestContext) {
+		var req RotationBeginRequest
+		if err := json.Unmarshal(ctx.Request.Body(), &req); err != nil {
+			ctx.JSON(200, RotationStatusResponse{Error: fmt.Sprintf("decode: %v", err)})
+			return
+		}
+		ctx.JSON(200, rotationBegin(c, req.NewKey, dataDir, metaRaft))
+	})
+	g.POST("/abort", func(c context.Context, ctx *app.RequestContext) {
+		var req RotationAbortRequest
+		if err := json.Unmarshal(ctx.Request.Body(), &req); err != nil {
+			ctx.JSON(200, RotationStatusResponse{Error: fmt.Sprintf("decode: %v", err)})
+			return
+		}
+		ctx.JSON(200, rotationAbort(c, req.Reason, metaRaft))
+	})
 }
 
-func dispatchRotationRequest(ctx context.Context, req RotationSocketRequest, dataDir string, metaRaft *cluster.MetaRaft) RotationSocketResponse {
-	switch req.Action {
-	case "status":
-		return rotationStatusResp(metaRaft)
-	case "begin":
-		return rotationBegin(ctx, req.NewKey, dataDir, metaRaft)
-	case "abort":
-		return rotationAbort(ctx, req.Reason, metaRaft)
-	default:
-		return RotationSocketResponse{Error: fmt.Sprintf("unknown action %q", req.Action)}
-	}
-}
-
-func rotationStatusResp(metaRaft *cluster.MetaRaft) RotationSocketResponse {
+func rotationStatusResp(metaRaft *cluster.MetaRaft) RotationStatusResponse {
 	st := metaRaft.RotationState()
-	out := RotationSocketResponse{Phase: st.Phase}
+	out := RotationStatusResponse{Phase: st.Phase}
 	if st.RotationID != ([16]byte{}) {
 		out.RotationID = hex.EncodeToString(st.RotationID[:])
 	}
@@ -125,31 +132,26 @@ func rotationStatusResp(metaRaft *cluster.MetaRaft) RotationSocketResponse {
 	return out
 }
 
-func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluster.MetaRaft) RotationSocketResponse {
+func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluster.MetaRaft) RotationStatusResponse {
 	if !metaRaft.IsLeader() {
-		return RotationSocketResponse{Error: "rotate-key begin must be issued on the meta-raft leader (current leader: " + metaRaft.LeaderID() + ")"}
+		return RotationStatusResponse{Error: "rotate-key begin must be issued on the meta-raft leader (current leader: " + metaRaft.LeaderID() + ")"}
 	}
-	// Refuse if a rotation is already in progress. Without this guard a
-	// repeated begin would (1) overwrite keys.d/next.key with the new PSK,
-	// (2) hit FSM rejection ("rotation already in progress"), (3) hit the
-	// rollback path below and DeleteNext — which would destroy the in-flight
-	// rotation's key on the leader and break Switch (cluster network split).
 	if st := metaRaft.RotationState(); st.Phase != cluster.PhaseSteady {
-		return RotationSocketResponse{Error: fmt.Sprintf("rotation already in progress (rotation_id=%x, phase=%d); abort first", st.RotationID, st.Phase)}
+		return RotationStatusResponse{Error: fmt.Sprintf("rotation already in progress (rotation_id=%x, phase=%d); abort first", st.RotationID, st.Phase)}
 	}
 	if len(newKey) != 64 {
-		return RotationSocketResponse{Error: fmt.Sprintf("new_key must be 64 hex chars (32 bytes), got %d", len(newKey))}
+		return RotationStatusResponse{Error: fmt.Sprintf("new_key must be 64 hex chars (32 bytes), got %d", len(newKey))}
 	}
 	if _, err := hex.DecodeString(newKey); err != nil {
-		return RotationSocketResponse{Error: fmt.Sprintf("new_key not valid hex: %v", err)}
+		return RotationStatusResponse{Error: fmt.Sprintf("new_key not valid hex: %v", err)}
 	}
 	_, newSPKI, err := transport.DeriveClusterIdentity(newKey)
 	if err != nil {
-		return RotationSocketResponse{Error: fmt.Sprintf("derive identity: %v", err)}
+		return RotationStatusResponse{Error: fmt.Sprintf("derive identity: %v", err)}
 	}
 	ks := transport.NewKeystore(dataDir)
 	if err := ks.WriteNext(newKey); err != nil {
-		return RotationSocketResponse{Error: fmt.Sprintf("write next.key: %v", err)}
+		return RotationStatusResponse{Error: fmt.Sprintf("write next.key: %v", err)}
 	}
 	rotID := uuid.New()
 	auditHash := sha256.Sum256(newSPKI[:])
@@ -166,10 +168,10 @@ func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluste
 		if delErr := ks.DeleteNext(); delErr != nil {
 			log.Warn().Err(delErr).Msg("rotate-key begin: failed to roll back next.key after propose error; manual cleanup may be required")
 		}
-		return RotationSocketResponse{Error: fmt.Sprintf("ProposeRotateKeyBegin: %v", err)}
+		return RotationStatusResponse{Error: fmt.Sprintf("ProposeRotateKeyBegin: %v", err)}
 	}
 	st := metaRaft.RotationState()
-	return RotationSocketResponse{
+	return RotationStatusResponse{
 		Phase:      st.Phase,
 		RotationID: hex.EncodeToString(cmd.RotationID[:]),
 		OldSPKI:    hex.EncodeToString(st.OldSPKI[:]),
@@ -177,13 +179,13 @@ func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluste
 	}
 }
 
-func rotationAbort(ctx context.Context, reason string, metaRaft *cluster.MetaRaft) RotationSocketResponse {
+func rotationAbort(ctx context.Context, reason string, metaRaft *cluster.MetaRaft) RotationStatusResponse {
 	if !metaRaft.IsLeader() {
-		return RotationSocketResponse{Error: "rotate-key abort must be issued on the meta-raft leader (current leader: " + metaRaft.LeaderID() + ")"}
+		return RotationStatusResponse{Error: "rotate-key abort must be issued on the meta-raft leader (current leader: " + metaRaft.LeaderID() + ")"}
 	}
 	st := metaRaft.RotationState()
 	if st.Phase == cluster.PhaseSteady {
-		return RotationSocketResponse{Error: "no rotation in progress"}
+		return RotationStatusResponse{Error: "no rotation in progress"}
 	}
 	if reason == "" {
 		reason = "operator"
@@ -192,12 +194,8 @@ func rotationAbort(ctx context.Context, reason string, metaRaft *cluster.MetaRaf
 	propCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if err := metaRaft.ProposeRotateKeyAbort(propCtx, cmd); err != nil {
-		return RotationSocketResponse{Error: fmt.Sprintf("ProposeRotateKeyAbort: %v", err)}
+		return RotationStatusResponse{Error: fmt.Sprintf("ProposeRotateKeyAbort: %v", err)}
 	}
 	final := metaRaft.RotationState()
-	return RotationSocketResponse{Phase: final.Phase}
-}
-
-func writeRotResp(conn net.Conn, resp RotationSocketResponse) {
-	_ = json.NewEncoder(conn).Encode(resp)
+	return RotationStatusResponse{Phase: final.Phase}
 }

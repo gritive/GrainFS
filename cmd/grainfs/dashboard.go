@@ -15,17 +15,17 @@ token via the URL fragment and stores it in localStorage; subsequent fetches
 include it as Authorization: Bearer. Use --rotate to invalidate the existing
 token (existing browser sessions will see 401 and the operator runs this
 command again to get a new URL).`,
-	Example: `  # 토큰 발급 또는 기존 토큰 표시
+	Example: `  # Issue a new token, or print the existing one
   grainfs dashboard
 
-  # 토큰 폐기 후 재발급
+  # Rotate the token (invalidate previous, issue a new one)
   grainfs dashboard --rotate`,
 	RunE: runDashboard,
 }
 
 func init() {
 	dashboardCmd.Flags().Bool("rotate", false, "rotate the dashboard auth token")
-	dashboardCmd.Flags().Bool("json", false, "JSON output for scripting")
+	dashboardCmd.Flags().String("format", "text", "Output format: text or json")
 	registerAdminEndpointFlag(dashboardCmd)
 	registerAdminTimeoutFlag(dashboardCmd)
 	rootCmd.AddCommand(dashboardCmd)
@@ -72,11 +72,11 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	if !resp.PublicURLSet {
 		fmt.Fprintln(os.Stderr, "warning: --public-url not set; using listen address.")
-		fmt.Fprintln(os.Stderr, "         원격 접근 시 운영자 호스트명을 --public-url 로 지정.")
+		fmt.Fprintln(os.Stderr, "         For remote access, set --public-url to the operator-facing hostname.")
 		fmt.Fprintln(os.Stderr)
 	}
 	if !rotate {
-		fmt.Println("브라우저에서 위 URL 을 열어 사용하세요. 토큰은 fragment 로 전달되므로 서버 로그에 남지 않습니다.")
+		fmt.Println("Open the URL above in your browser. The token is passed in the URL fragment so it never appears in server logs.")
 	}
 	return nil
 }

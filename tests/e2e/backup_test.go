@@ -115,7 +115,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 
 	// Step 4: Verify backup was created
 	t.Log("Step 4: Verifying backup...")
-	snapshotsCmd := exec.Command("restic", "snapshots", "--json")
+	snapshotsCmd := exec.Command("restic", "snapshots", "--format", "json")
 	output, err := snapshotsCmd.Output()
 	require.NoError(t, err, "list snapshots")
 	require.Contains(t, string(output), "paths", "snapshot should contain paths")

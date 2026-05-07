@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
+	hzserver "github.com/cloudwego/hertz/pkg/app/server"
+
 	"github.com/gritive/GrainFS/internal/server/admin"
 )
 
@@ -146,6 +149,94 @@ func TestServer_ServesListVolumesOverUnixSocket(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestServer_ExtraRoutesNilSafe(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "a.sock")
+
+	s, err := admin.Start(admin.Config{
+		SocketPath: sock,
+		Deps:       newServerDeps(t, dir),
+		// ExtraRoutes intentionally nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+
+	// Default route still works.
+	cli := unixHTTPClient(sock)
+	resp, err := cli.Get("http://unix/v1/volumes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestServer_ExtraRoutesCalledAfterRegisterAdmin(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "a.sock")
+
+	called := false
+	extra := func(h *hzserver.Hertz) {
+		called = true
+		// Register a probe route.
+		h.GET("/v1/test/extra", func(c context.Context, ctx *app.RequestContext) {
+			ctx.String(200, "ok")
+		})
+	}
+
+	s, err := admin.Start(admin.Config{
+		SocketPath:  sock,
+		Deps:        newServerDeps(t, dir),
+		ExtraRoutes: extra,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+
+	if !called {
+		t.Fatal("ExtraRoutes was not invoked")
+	}
+
+	cli := unixHTTPClient(sock)
+
+	// Both default route and extra route respond.
+	resp, err := cli.Get("http://unix/v1/volumes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/volumes status = %d", resp.StatusCode)
+	}
+
+	resp, err = cli.Get("http://unix/v1/test/extra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/test/extra status = %d", resp.StatusCode)
+	}
+}
+
+// unixHTTPClient returns an http.Client that dials a Unix socket.
+func unixHTTPClient(sock string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
 	}
 }
 

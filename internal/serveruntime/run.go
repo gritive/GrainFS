@@ -1119,9 +1119,10 @@ func Run(ctx context.Context, cfg Config) error {
 		adminSocket = filepath.Join(dataDir, "admin.sock")
 	}
 	adminSrv, err := admin.Start(admin.Config{
-		SocketPath: adminSocket,
-		Group:      cfg.AdminGroup,
-		Deps:       adminDeps,
+		SocketPath:  adminSocket,
+		Group:       cfg.AdminGroup,
+		Deps:        adminDeps,
+		ExtraRoutes: srv.RegisterClusterAdminUDS,
 	})
 	if err != nil {
 		return fmt.Errorf("admin server: %w", err)

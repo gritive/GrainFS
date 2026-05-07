@@ -20,8 +20,8 @@ import (
 // once the degraded monitor detects the shortage (≤ 30 s).
 //
 // The degraded condition: liveCount(2) < MinECNodes(3) → degraded=true.
-	// The monitor waits for the first interval tick to avoid startup false
-	// positives, then checks at the configured interval.
+// The monitor waits for the first interval tick to avoid startup false
+// positives, then checks at the configured interval.
 func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping degraded-mode e2e in -short mode")
@@ -83,8 +83,8 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			fmt.Sprintf("--ec-data=%d", ecData),
 			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--seed-groups", "1",
-				"--nfs4-port", "0",
-				"--nbd-port", "0",
+			"--nfs4-port", "0",
+			"--nbd-port", "0",
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
@@ -192,5 +192,5 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			}
 		}
 		return false
-		}, 120*time.Second, 500*time.Millisecond, "expected writes to be blocked (503) after degraded")
-	}
+	}, 120*time.Second, 500*time.Millisecond, "expected writes to be blocked (503) after degraded")
+}

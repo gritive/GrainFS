@@ -1,12 +1,13 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gritive/GrainFS/internal/clusteradmin"
 )
 
 var clusterCmd = &cobra.Command{
@@ -18,58 +19,55 @@ var clusterStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show cluster status (leader, term, peers)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		endpoint, _ := cmd.Flags().GetString("endpoint")
+		client, err := clusterClientFromCmd(cmd)
+		if err != nil {
+			return err
+		}
 		format, _ := cmd.Flags().GetString("format")
-
-		resp, err := http.Get(endpoint + "/api/cluster/status")
-		if err != nil {
-			return fmt.Errorf("connect to %s: %w", endpoint, err)
-		}
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("read response: %w", err)
-		}
-
-		if format == "text" {
-			var status map[string]any
-			if err := json.Unmarshal(body, &status); err != nil {
-				return fmt.Errorf("parse response: %w", err)
-			}
-			printClusterStatus(status)
-			return nil
-		}
-
-		// JSON output (default for scripting)
-		fmt.Println(string(body))
-		return nil
+		return runClusterStatus(cmd.Context(), client, format, cmd.OutOrStdout())
 	},
 }
 
-func printClusterStatus(s map[string]any) {
-	mode, _ := s["mode"].(string)
-	fmt.Printf("mode:      %s\n", mode)
-	if mode == "cluster" {
-		fmt.Printf("node_id:   %v\n", s["node_id"])
-		fmt.Printf("state:     %v\n", s["state"])
-		fmt.Printf("term:      %v\n", s["term"])
-		fmt.Printf("leader_id: %v\n", s["leader_id"])
-		if peers, ok := s["peers"].([]any); ok {
-			fmt.Printf("peers:     %d\n", len(peers))
-			for _, p := range peers {
-				fmt.Printf("  - %v\n", p)
-			}
+// runClusterStatus is the testable core: format=="json" returns raw JSON
+// (forward-compat), other values use typed Status.
+func runClusterStatus(ctx context.Context, client *clusteradmin.Client, format string, w io.Writer) error {
+	if format == "json" {
+		raw, err := client.StatusRaw(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(w, string(raw))
+		return nil
+	}
+	s, err := client.Status(ctx)
+	if err != nil {
+		return err
+	}
+	printClusterStatus(w, s)
+	return nil
+}
+
+func printClusterStatus(w io.Writer, s *clusteradmin.Status) {
+	fmt.Fprintf(w, "mode:      %s\n", s.Mode)
+	if s.Mode == "cluster" {
+		fmt.Fprintf(w, "node_id:   %s\n", s.NodeID)
+		fmt.Fprintf(w, "state:     %s\n", s.State)
+		fmt.Fprintf(w, "term:      %d\n", s.Term)
+		fmt.Fprintf(w, "leader_id: %s\n", s.LeaderID)
+		fmt.Fprintf(w, "peers:     %d\n", len(s.Peers))
+		for _, p := range s.Peers {
+			fmt.Fprintf(w, "  - %s\n", p)
 		}
 	}
 }
 
 func init() {
-	clusterStatusCmd.Flags().String("endpoint", "http://127.0.0.1:9000", "GrainFS server endpoint")
-	clusterStatusCmd.Flags().String("format", "json", "Output format: json or text")
+	clusterCmd.PersistentFlags().String("endpoint", "",
+		"admin Unix socket path (required, e.g. ./tmp/admin.sock)")
+	clusterCmd.PersistentFlags().String("format", "text",
+		"Output format: text or json (status/peers/events; ignored elsewhere)")
+
 	clusterCmd.AddCommand(clusterStatusCmd)
-	clusterCmd.AddCommand(planShowCmd())
-	clusterCmd.AddCommand(rebalanceCmd())
 	clusterCmd.AddCommand(clusterRemovePeerCmd())
 	clusterCmd.AddCommand(clusterPeersCmd())
 	clusterCmd.AddCommand(clusterEventsCmd())
