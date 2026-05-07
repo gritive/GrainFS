@@ -17,6 +17,8 @@
 - `cluster remove-peer` now refuses membership mutation when peer liveness
   snapshot data is unavailable, and `cluster peers` renders configured peers as
   unknown rather than healthy.
+- Peer liveness snapshots now require a stable self identity before reporting
+  any rows, and meta-Raft freshness uses a named liveness window.
 
 ### Added
 
