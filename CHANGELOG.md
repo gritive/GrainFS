@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.83.0] - 2026-05-07 — hot bucket object placement
+## [0.0.87.0] - 2026-05-07 — hot bucket object placement
 
 ### Added
 
@@ -39,6 +39,78 @@
   row and recomputes the latest pointer.
 - Object-index orphan detection scans group-local metadata directly, so it can
   still find data-group objects that are missing from the global index.
+
+## [0.0.86.0] - 2026-05-07 — cluster remove-peer/peer-liveness 안전 강화 (#215에서 분리)
+
+### Fixed
+
+- **`cluster remove-peer`는 peer liveness snapshot이 없으면 거절.** 기존
+  legacy `LivePeers()` quorum math fallback은 `configured`/`live`/unresolved
+  legacy identity 상태를 구분하지 못해 안전하지 않았음. snapshot interface
+  부재 시 membership mutation은 무조건 차단. CLI preflight도 같은 snapshot
+  모델로 일원화돼 `configured` peer가 alive로 카운트되지 않음.
+- **`--force`는 quorum break override로만 동작.** target이 cluster
+  membership view에 없거나 unresolved legacy identity인 경우는 force가
+  bypass하지 않음. 운영자 실수로 잘못된 target에 force가 통하던 경로 차단.
+- **`cluster peers` render에서 configured peer는 `unknown_configured`로
+  표시.** 과거에는 healthy처럼 보였음. 운영자 인지 정확도 개선.
+- **self identity 부재 시 peer liveness snapshot은 nil 반환.** meta-Raft가
+  자기 노드 identity를 아직 모르면 snapshot 자체를 만들지 않아 부정확한
+  membership 결정을 사전에 차단. meta-Raft liveness freshness window는
+  `cluster` 패키지에서 명시적으로 명명되고 `serveruntime` Adapter에서 사용.
+
+### 출처
+
+원래 #215(v0.0.77.0 refactor)의 일부로 묶여 있던 두 커밋
+(`0f6e4a9`, `ccdf411`)을 cherry-pick. #215의 runtime assembly refactor
+부분은 이번 세션의 #224/#225/#226로 인해 base가 크게 어긋나 별건으로 미룸.
+
+## [0.0.85.0] - 2026-05-07 — `dashboard` warning 메시지에서 grainfs.toml orphan 안내 제거
+
+### Fixed
+
+- `grainfs dashboard` 가 `--public-url` 미설정 시 출력하던 warning에 "또는
+  `grainfs.toml`의 `public_url`에 설정"이라는 안내가 있었으나, repo에 TOML
+  리더가 없어 동작하지 않는 silent-failure trap이었음. 안내 1줄 삭제 +
+  앞 줄의 `지정하거나,` → `지정.`로 정리. v0.0.82.0/v0.0.84.0의 "explicit
+  flag-only" 결정과 정합성 회복.
+
+## [0.0.84.0] - 2026-05-07 — `cluster rotate-key`도 `--endpoint`로 통합 + env fallback 제거
+
+### Changed (BREAKING)
+
+- **`cluster rotate-key`의 `--data` 제거, `--endpoint` 도입.** 기존
+  `grainfs cluster rotate-key {begin,status,abort} --data ./tmp` 형태는 더 이상
+  동작하지 않으며 `--endpoint ./tmp/rotate.sock` 으로 socket 경로를 직접
+  넘겨야 합니다. CLI가 `<data>/rotate.sock` 내부 구조에 의존하던 layering leak
+  제거.
+- **endpoint env fallback 제거.** admin/rotate 양쪽 모두 `--endpoint` flag만
+  지원하고 `$GRAINFS_ENDPOINT` fallback은 삭제됐습니다. rotate-key는 일회성/사고
+  대응용이라 env 편의 가치가 작고, 두 socket이 다른 파일이므로 단일 env가
+  의미 없음. admin은 일관성 차원으로 같이 정리. 명령줄에 socket path가
+  항상 보이게 되어 사고 시 추적성도 개선.
+
+### Changed
+
+- `serve` 시작 로그에서 rotate socket 출력 shape을 admin과 통일.
+  `rotation socket listening` 한 줄 → `rotate endpoint path=... hint="--endpoint <path>"`
+  형태로 변경되어 두 endpoint를 동일한 grep 패턴으로 추적 가능.
+- `volumeadmin.ResolveEndpoint`는 flag → fail-fast로 단순화. 기존 env 분기 삭제,
+  hint 메시지에서 `GRAINFS_ENDPOINT` 언급 제거.
+
+### Migration
+
+```sh
+# Before
+grainfs cluster rotate-key status --data ./tmp
+
+# After
+grainfs cluster rotate-key status --endpoint ./tmp/rotate.sock
+```
+
+admin CLI도 동일하게 `export GRAINFS_ENDPOINT=...` 형태가 더 이상 통하지
+않으므로 매번 `--endpoint <path>`로 명시. `grainfs serve`가 시작 시 두 endpoint
+경로를 모두 출력하므로 그대로 복사하면 됩니다.
 
 ## [0.0.82.0] - 2026-05-07 — admin CLI: `--data` 제거하고 `--endpoint`로 통합
 

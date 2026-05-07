@@ -16,11 +16,13 @@ type PeerRow struct {
 	ID       string
 	RaftAddr string
 	Role     string // "leader" | "follower"
-	State    string // "configured" | "down" | "unresolved_legacy"
+	State    string // "unknown_configured" | "down" | "unresolved_legacy"
 }
 
 // PeersFromStatus derives the rendered peer list from a Status, filtering
-// down_nodes and peer_states into State and tagging the leader.
+// down_nodes and peer_states into State and tagging the leader. The wire
+// state "configured" is rendered as unknown_configured so operators do not
+// read identity resolution as fresh liveness.
 func PeersFromStatus(s *Status) []PeerRow {
 	peers := append([]string(nil), s.Peers...)
 	sort.Strings(peers)
@@ -30,7 +32,7 @@ func PeersFromStatus(s *Status) []PeerRow {
 	}
 	out := make([]PeerRow, 0, len(peers))
 	for _, p := range peers {
-		row := PeerRow{ID: p, RaftAddr: s.PeerAddrs[p], Role: "follower", State: "configured"}
+		row := PeerRow{ID: p, RaftAddr: s.PeerAddrs[p], Role: "follower", State: renderPeerState("configured")}
 		if p == s.LeaderID {
 			row.Role = "leader"
 		}
@@ -38,11 +40,18 @@ func PeersFromStatus(s *Status) []PeerRow {
 			row.State = "down"
 		}
 		if state := s.PeerStates[p]; state != "" {
-			row.State = state
+			row.State = renderPeerState(state)
 		}
 		out = append(out, row)
 	}
 	return out
+}
+
+func renderPeerState(state string) string {
+	if state == "configured" {
+		return "unknown_configured"
+	}
+	return state
 }
 
 // RenderPeersTable writes a tab-aligned peer table to w.

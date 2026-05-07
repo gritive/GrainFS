@@ -37,6 +37,38 @@ type stubRemoveServer struct {
 	lastBody    atomic.Value // map[string]any
 }
 
+func removePeerLiveSnapshot(ids ...string) []map[string]any {
+	rows := make([]map[string]any, 0, len(ids))
+	for i, id := range ids {
+		identity := "resolved"
+		reason := "raft_append_success"
+		if i == 0 {
+			identity = "self"
+			reason = "self"
+		}
+		rows = append(rows, map[string]any{
+			"peer_id":        id,
+			"identity_state": identity,
+			"liveness_state": "live",
+			"reason":         reason,
+		})
+	}
+	return rows
+}
+
+func removePeerSnapshotWithCooldown(self string, livePeers []string, cooldownPeers ...string) []map[string]any {
+	rows := removePeerLiveSnapshot(append([]string{self}, livePeers...)...)
+	for _, id := range cooldownPeers {
+		rows = append(rows, map[string]any{
+			"peer_id":        id,
+			"identity_state": "resolved",
+			"liveness_state": "health_cooldown",
+			"reason":         "peer_health_cooldown",
+		})
+	}
+	return rows
+}
+
 func (s *stubRemoveServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/cluster/status", func(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +93,11 @@ func TestCmdRemovePeer_FlagsReachOptions(t *testing.T) {
 			"state":     "Leader",
 			"leader_id": "n1",
 			"peers":     []string{"n2", "n3"},
+			"peer_snapshot": removePeerLiveSnapshot(
+				"n1",
+				"n2",
+				"n3",
+			),
 		},
 		removeBody: map[string]any{"status": "removed", "id": "n3"},
 	}
@@ -86,6 +123,11 @@ func TestCmdRemovePeer_ForceFlagPropagates(t *testing.T) {
 			"leader_id":  "n1",
 			"peers":      []string{"n2", "n3"},
 			"down_nodes": []string{"n3"},
+			"peer_snapshot": removePeerSnapshotWithCooldown(
+				"n1",
+				[]string{"n2"},
+				"n3",
+			),
 		},
 		removeBody: map[string]any{"status": "removed", "id": "n2"},
 	}

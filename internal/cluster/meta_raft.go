@@ -22,8 +22,9 @@ import (
 // shared infra (e.g., the mux flush window) doesn't blow past the meta
 // heartbeat budget.
 const (
-	MetaRaftHeartbeatInterval = 150 * time.Millisecond
-	MetaRaftElectionTimeout   = 750 * time.Millisecond
+	MetaRaftHeartbeatInterval       = 150 * time.Millisecond
+	MetaRaftElectionTimeout         = 750 * time.Millisecond
+	MetaRaftLivenessFreshnessWindow = 3 * MetaRaftElectionTimeout
 )
 
 // MetaTransport abstracts RPC delivery for the meta-Raft group.

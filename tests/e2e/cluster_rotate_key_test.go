@@ -184,7 +184,7 @@ func runRotateKeyCLI(t *testing.T, dataDir, action string, extra ...func(map[str
 // rotation started and the response carried the expected fields.
 func runRotateKeyCLIBeginGenerate(t *testing.T, dataDir string) rotationCLIResp {
 	t.Helper()
-	cmd := exec.Command(getBinary(), "cluster", "rotate-key", "begin", "--generate", "--data", dataDir)
+	cmd := exec.Command(getBinary(), "cluster", "rotate-key", "begin", "--generate", "--endpoint", filepath.Join(dataDir, "rotate.sock"))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

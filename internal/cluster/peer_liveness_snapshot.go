@@ -43,15 +43,16 @@ type PeerLivenessRow struct {
 }
 
 func BuildPeerLivenessSnapshot(input PeerLivenessInput) []PeerLivenessRow {
-	rows := make([]PeerLivenessRow, 0, len(input.Voters)+1)
-	if input.SelfID != "" {
-		rows = append(rows, PeerLivenessRow{
-			PeerID:        input.SelfID,
-			IdentityState: PeerIdentitySelf,
-			LivenessState: PeerLivenessLive,
-			Reason:        "self",
-		})
+	if input.SelfID == "" {
+		return nil
 	}
+	rows := make([]PeerLivenessRow, 0, len(input.Voters)+1)
+	rows = append(rows, PeerLivenessRow{
+		PeerID:        input.SelfID,
+		IdentityState: PeerIdentitySelf,
+		LivenessState: PeerLivenessLive,
+		Reason:        "self",
+	})
 
 	health := peerHealthByID(input.PeerHealth)
 	probes := peerProbeByID(input.ProbeResults)

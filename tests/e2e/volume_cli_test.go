@@ -234,8 +234,7 @@ func TestE2E_VolumeCLI_NotFound(t *testing.T) {
 }
 
 func TestE2E_VolumeCLI_AutoDiscoveryFailureMessage(t *testing.T) {
-	// Run CLI without --endpoint, no $GRAINFS_ENDPOINT, no grainfs.toml in cwd.
-	t.Setenv("GRAINFS_ENDPOINT", "")
+	// Run CLI without --endpoint to verify the actionable failure message.
 	cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
 	require.NoError(t, err)
 	defer os.RemoveAll(cwd)
