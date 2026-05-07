@@ -15,9 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -86,6 +89,26 @@ type recordingRaftSnapshotter struct {
 	result       raft.SnapshotResult
 	triggerErr   error
 	statusErr    error
+}
+
+func TestMapError_PlacementTargetsUnavailable(t *testing.T) {
+	c := app.NewContext(0)
+	err := &cluster.ErrInsufficientPlacementTargets{
+		Operation:     "PutObject",
+		GroupID:       "group-1",
+		Desired:       cluster.ECConfig{DataShards: 2, ParityShards: 1},
+		Configured:    []string{"n1", "n2", "n3"},
+		Unavailable:   []string{"n3"},
+		FailureReason: "shard write failed",
+	}
+
+	mapError(c, err)
+
+	require.Equal(t, consts.StatusServiceUnavailable, c.Response.StatusCode())
+	var got s3Error
+	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
+	assert.Equal(t, "ServiceUnavailable", got.Code)
+	assert.Contains(t, got.Message, "group-1")
 }
 
 func (r *recordingRaftSnapshotter) TriggerRaftSnapshot(context.Context) (raft.SnapshotResult, error) {

@@ -115,6 +115,8 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusRequestEntityTooLarge, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size")
 	case errors.Is(err, storage.ErrForwardBackpressure):
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "too many forwarded upload streams in flight")
+	case errors.Is(err, cluster.ErrPlacementTargetsUnavailable):
+		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
 	case errors.Is(err, storage.ErrUnsupportedOperation):
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", err.Error())
 	default:

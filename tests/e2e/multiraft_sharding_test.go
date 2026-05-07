@@ -730,6 +730,47 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 	t.Log("cross-node dispatch ok: non-voter PUT forwarded to leader and persisted")
 }
 
+func TestE2E_MultiRaftSharding_MissingPlacementTargetReturns503(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	const bucket = "missing-placement-target"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+
+	killIdx := 0
+	if killIdx == c.leaderIdx {
+		killIdx = 1
+	}
+	require.NotNil(t, c.procs[killIdx], "target process must exist")
+	t.Logf("killing placement target node %d at %s", killIdx, c.httpURLs[killIdx])
+	require.NoError(t, c.procs[killIdx].Process.Signal(syscall.SIGTERM))
+	_ = c.procs[killIdx].Wait()
+	c.procs[killIdx] = nil
+
+	client := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	require.Eventually(t, func() bool {
+		putCtx, cancelPut := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelPut()
+		_, err := client.PutObject(putCtx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("after-target-loss"),
+			Body:   bytes.NewReader([]byte("should-return-503")),
+		}, func(o *s3.Options) {
+			o.RetryMaxAttempts = 1
+		})
+		if err == nil {
+			return false
+		}
+		errStr := err.Error()
+		return strings.Contains(errStr, "503") || strings.Contains(errStr, "ServiceUnavailable")
+	}, 45*time.Second, time.Second, "expected missing topology placement target to surface as S3 503")
+}
+
 // ----- TestE2E_MultiRaftSharding_GroupLeaderFailover ------------------------
 // Simulate leader crash (SIGTERM) for a group and verify another voter takes
 // over, then PUT/GET continue to work. Validates Raft election + FSM
