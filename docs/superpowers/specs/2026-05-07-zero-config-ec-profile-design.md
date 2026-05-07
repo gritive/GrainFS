@@ -149,6 +149,9 @@ reshard code still need the stored profile to interpret existing objects.
 - E2E harness validation rejects `--ec-data` and `--ec-parity` in `ExtraArgs`.
 - README documents automatic EC selection and the three-node production
   minimum.
+- Performance gate: run an 8-node zero-config benchmark that exercises the new
+  `6+2` profile and compare PUT and Range GET p95/p99 against the latest 6-node
+  `4+2` baseline before shipping.
 
 ## Out Of Scope
 
