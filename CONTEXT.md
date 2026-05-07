@@ -227,3 +227,19 @@ quorum safety, configured-without-evidence rows are unknown, and unresolved
 legacy rows block membership mutation. The generic predicates for these
 policies live next to the snapshot module in `internal/cluster`; admin command
 packages use those predicates rather than re-deriving policy from strings.
+
+### Data Group Bucket Forwarding
+
+Data group bucket forwarding is the runtime path that routes bucket-scoped
+object and multipart operations from a non-owning or non-leading node to the
+data Raft group that owns the bucket.
+
+The forwarding module is scoped to data-group bucket operations. Node-scoped
+queries such as scrub session status are intentionally outside this concept
+because they do not route through bucket ownership, data-group lookup, or
+leader gating.
+
+Forward operation metadata owns transport-shape policy for bucket operations:
+whether an operation is frame-only, body-streamed, or read-streamed, and
+whether it mutates data. FlatBuffers encoding, reply parsing, retry policy,
+leader-hint dialing, and storage semantics remain in their existing modules.
