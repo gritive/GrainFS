@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -528,15 +529,25 @@ type objectReadAtBackend interface {
 	ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error)
 }
 
+const maxRangeReadAtChunk = 1 << 20
+
+var readAtRangeBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, maxRangeReadAtChunk)
+		return &buf
+	},
+}
+
 type readAtRangeReader struct {
-	ctx           context.Context
-	backend       objectReadAtBackend
+	ctx            context.Context
+	backend        objectReadAtBackend
 	bucket, key    string
 	offset, length int64
 	pos            int64
 	buf            []byte
 	bufPos         int
 	bufEnd         int
+	pooled         bool
 }
 
 func (r *readAtRangeReader) Read(p []byte) (int, error) {
@@ -545,12 +556,17 @@ func (r *readAtRangeReader) Read(p []byte) (int, error) {
 	}
 	if r.bufPos >= r.bufEnd {
 		if r.buf == nil {
-			const maxRangeReadAtChunk = 1 << 20
 			size := r.length
 			if size > maxRangeReadAtChunk {
 				size = maxRangeReadAtChunk
 			}
-			r.buf = make([]byte, int(size))
+			if size == maxRangeReadAtChunk {
+				bufp := readAtRangeBufferPool.Get().(*[]byte)
+				r.buf = (*bufp)[:maxRangeReadAtChunk]
+				r.pooled = true
+			} else {
+				r.buf = make([]byte, int(size))
+			}
 		}
 		want := len(r.buf)
 		if remaining := r.length - r.pos; int64(want) > remaining {
@@ -574,7 +590,17 @@ func (r *readAtRangeReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (r *readAtRangeReader) Close() error { return nil }
+func (r *readAtRangeReader) Close() error {
+	if r.pooled && r.buf != nil {
+		buf := r.buf[:maxRangeReadAtChunk]
+		readAtRangeBufferPool.Put(&buf)
+	}
+	r.buf = nil
+	r.bufPos = 0
+	r.bufEnd = 0
+	r.pooled = false
+	return nil
+}
 
 func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext, bucket, key, rangeHeader string) bool {
 	reader, ok := s.backend.(objectReadAtBackend)
