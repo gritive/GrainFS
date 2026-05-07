@@ -256,6 +256,7 @@ func TestE2E_VlogWatcher_FiresOnLeak(t *testing.T) {
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
+		SeedGroups: 2,
 		ECData:     1,
 		ECParity:   0,
 		LogPrefix:  "vlog-leak",
@@ -269,8 +270,6 @@ func TestE2E_VlogWatcher_FiresOnLeak(t *testing.T) {
 			"--vlog-eta-window=2s",
 			"--vlog-recovery-window=2s",
 			"--vlog-smoke-defer=2s",
-			"--rate-limit-ip-rps=0",
-			"--rate-limit-user-rps=0",
 		},
 	})
 

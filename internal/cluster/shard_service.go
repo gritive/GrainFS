@@ -541,6 +541,7 @@ func (s *ShardService) handleReadRange(sr *shardRequest) *transport.Message {
 // HandleWriteBody returns the streamed shard write handler for StreamRouter.
 func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *transport.Message {
 	return func(req *transport.Message, body io.Reader) *transport.Message {
+		stageStart := time.Now()
 		rpcType, srData, err := unmarshalEnvelope(req.Payload)
 		if err != nil {
 			return s.errorResponse("unmarshal request: " + err.Error())
@@ -552,9 +553,12 @@ func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *tr
 		if err != nil {
 			return s.errorResponse("decode request: " + err.Error())
 		}
+		observePutStage("shard_stream_server", "parse_request", stageStart)
+		stageStart = time.Now()
 		if err := s.WriteLocalShardStream(sr.Bucket, sr.Key, int(sr.ShardIdx), body); err != nil {
 			return s.errorResponse(err.Error())
 		}
+		observePutStage("shard_stream_server", "write_local", stageStart)
 		return s.okResponse(nil)
 	}
 }
@@ -630,14 +634,19 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 	}
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
+	dirSynced := false
 	if s.encryptor != nil {
 		if err := eccodec.WriteEncryptedShardStreamAtomic(path, bytes.NewReader(data), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
 			return err
 		}
+		dirSynced = true
 	} else {
 		if err := s.writeShardFile(path, eccodec.EncodeShard(data)); err != nil {
 			return err
 		}
+	}
+	if dirSynced {
+		return nil
 	}
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
@@ -663,10 +672,8 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 			return err
 		}
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
+	// The streaming atomic writers already fsync the parent directory after
+	// rename, so there is no second ShardService-level directory sync here.
 	return nil
 }
 

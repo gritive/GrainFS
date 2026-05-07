@@ -33,6 +33,14 @@ var (
 		Buckets: prometheus.DefBuckets,
 	})
 
+	// ObjectPutStageDuration measures fixed-stage PUT latency in the storage
+	// path. Labels are deliberately low-cardinality: path and stage only.
+	ObjectPutStageDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "grainfs_object_put_stage_duration_seconds",
+		Help:    "Duration of fixed stages in the object PUT path.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"path", "stage"})
+
 	// StorageBytesTotal tracks total bytes stored.
 	StorageBytesTotal = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_storage_bytes_total",

@@ -23,8 +23,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // ErrCRCMismatch is returned when the CRC footer does not match the payload,
@@ -36,6 +39,17 @@ const footerLen = 4
 
 var shardMagic = []byte("GFSCRC1\x00")
 var encryptedShardMagic = []byte("GFSENC2\x00")
+
+var (
+	encryptedPlainChunkPool = sync.Pool{New: func() any {
+		b := make([]byte, DefaultEncryptedChunkSize)
+		return &b
+	}}
+	encryptedCipherChunkPool = sync.Pool{New: func() any {
+		b := make([]byte, 0, DefaultEncryptedChunkSize+32)
+		return &b
+	}}
+)
 
 const (
 	DefaultEncryptedChunkSize = 1 << 20
@@ -95,9 +109,31 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 		return fmt.Errorf("write encrypted shard header: %w", err)
 	}
 
-	plain := make([]byte, chunkSize)
+	plainPtr := encryptedPlainChunkPool.Get().(*[]byte)
+	plain := *plainPtr
+	if cap(plain) < chunkSize {
+		plain = make([]byte, chunkSize)
+	}
+	plain = plain[:chunkSize]
+	defer func() {
+		clear(plain)
+		*plainPtr = plain
+		encryptedPlainChunkPool.Put(plainPtr)
+	}()
+
+	cipherPtr := encryptedCipherChunkPool.Get().(*[]byte)
+	cipherBuf := *cipherPtr
+	if cap(cipherBuf) < chunkSize+enc.AEADOverhead() {
+		cipherBuf = make([]byte, 0, chunkSize+enc.AEADOverhead())
+	}
+	defer func() {
+		*cipherPtr = cipherBuf[:0]
+		encryptedCipherChunkPool.Put(cipherPtr)
+	}()
+
 	chunkIdx := uint32(0)
 	for {
+		stageStart := time.Now()
 		n, readErr := io.ReadFull(r, plain)
 		if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("read shard chunk: %w", readErr)
@@ -105,23 +141,28 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 		if n == 0 && errors.Is(readErr, io.EOF) {
 			return nil
 		}
+		observeEncryptedShardStage("read_chunk", stageStart)
 
 		nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
 		aad := encryptedChunkAAD(aadBase, chunkIdx)
-		ciphertext, err := enc.SealWithNonceAAD(make([]byte, 0, n+enc.AEADOverhead()), nonce[:], plain[:n], aad)
+		stageStart = time.Now()
+		ciphertext, err := enc.SealWithNonceAAD(cipherBuf[:0], nonce[:], plain[:n], aad)
 		if err != nil {
 			return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
 		}
+		observeEncryptedShardStage("seal_chunk", stageStart)
 
 		var chunkHeader [encryptedChunkHeaderLen]byte
 		binary.LittleEndian.PutUint32(chunkHeader[0:4], uint32(n))
 		binary.LittleEndian.PutUint32(chunkHeader[4:8], uint32(len(ciphertext)))
+		stageStart = time.Now()
 		if _, err := w.Write(chunkHeader[:]); err != nil {
 			return fmt.Errorf("write shard chunk header: %w", err)
 		}
 		if _, err := w.Write(ciphertext); err != nil {
 			return fmt.Errorf("write shard chunk: %w", err)
 		}
+		observeEncryptedShardStage("write_chunk", stageStart)
 
 		chunkIdx++
 		if chunkIdx == 0 {
@@ -378,6 +419,7 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 // WriteEncryptedShardStreamAtomic writes a chunked encrypted shard from r
 // using the same tmp + sync + rename recipe as WriteShardStreamAtomic.
 func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
+	stageStart := time.Now()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
 	}
@@ -386,31 +428,46 @@ func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encr
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
+	observeEncryptedShardStage("open_tmp", stageStart)
 	cleanup := func() {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 	}
+	stageStart = time.Now()
 	if err := EncodeEncryptedShard(f, r, enc, aadBase, chunkSize); err != nil {
 		cleanup()
 		return err
 	}
+	observeEncryptedShardStage("encode_stream", stageStart)
+	stageStart = time.Now()
 	if err := f.Sync(); err != nil {
 		cleanup()
 		return fmt.Errorf("sync tmp shard: %w", err)
 	}
+	observeEncryptedShardStage("sync_tmp", stageStart)
+	stageStart = time.Now()
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close tmp shard: %w", err)
 	}
+	observeEncryptedShardStage("close_tmp", stageStart)
+	stageStart = time.Now()
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename shard: %w", err)
 	}
+	observeEncryptedShardStage("rename", stageStart)
+	stageStart = time.Now()
 	if dir, err := os.Open(filepath.Dir(path)); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()
 	}
+	observeEncryptedShardStage("sync_dir", stageStart)
 	return nil
+}
+
+func observeEncryptedShardStage(stage string, start time.Time) {
+	metrics.ObjectPutStageDuration.WithLabelValues("encrypted_shard", stage).Observe(time.Since(start).Seconds())
 }
 
 func encryptedChunkNonce(prefix [encryptedNoncePrefixLen]byte, chunkIdx uint32) [encryptedNonceLen]byte {

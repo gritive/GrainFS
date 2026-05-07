@@ -78,8 +78,6 @@ SERVE_ARGS=(
   --nfs4-port 0
   --dedup=false
   $(bench_encryption_args)
-  --rate-limit-ip-rps 0
-  --rate-limit-user-rps 0
 )
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
   SERVE_ARGS+=(--pprof-port "$PPROF_PORT")

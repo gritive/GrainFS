@@ -150,6 +150,8 @@ bench_collect_pprof() {
   local out_dir="$2"
   shift 2
 
+  mkdir -p "$out_dir"
+
   local prefix="${BENCH_PPROF_PREFIX:-}"
   local profile endpoint out
   for profile in "$@"; do

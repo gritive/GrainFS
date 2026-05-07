@@ -34,6 +34,7 @@ type e2eClusterOptions struct {
 	ScrubInterval string
 	DisableNFS    bool
 	DisableNBD    bool
+	EnablePprof   bool
 	// ExtraArgs is appended verbatim to every node's `grainfs serve` cmdline.
 	// Use for per-test flag tweaks (e.g. `--vlog-warn-ratio=0.001`,
 	// `--badger-gc-disable=true`) so the harness stays generic.
@@ -49,6 +50,7 @@ type e2eCluster struct {
 	raftPorts     []int
 	nfs4Ports     []int
 	nbdPorts      []int
+	pprofPorts    []int
 	httpURLs      []string
 	clusterKey    string
 	accessKey     string
@@ -136,9 +138,14 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 	c.raftPorts = make([]int, opts.Nodes)
 	c.nfs4Ports = make([]int, opts.Nodes)
 	c.nbdPorts = make([]int, opts.Nodes)
+	c.pprofPorts = make([]int, opts.Nodes)
 	c.httpURLs = make([]string, opts.Nodes)
 
-	ports := uniqueFreePorts(opts.Nodes * 4)
+	portCount := opts.Nodes * 4
+	if opts.EnablePprof {
+		portCount += opts.Nodes
+	}
+	ports := uniqueFreePorts(portCount)
 	for i := 0; i < opts.Nodes; i++ {
 		c.httpPorts[i] = ports[i]
 		c.raftPorts[i] = ports[opts.Nodes+i]
@@ -151,6 +158,9 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 			c.nbdPorts[i] = 0
 		} else {
 			c.nbdPorts[i] = ports[3*opts.Nodes+i]
+		}
+		if opts.EnablePprof {
+			c.pprofPorts[i] = ports[4*opts.Nodes+i]
 		}
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		// Use /tmp explicitly: on macOS, $TMPDIR resolves to a long
@@ -275,6 +285,9 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 			"--ec-data", fmt.Sprintf("%d", c.ecData),
 			"--ec-parity", fmt.Sprintf("%d", c.ecParity),
 		)
+	}
+	if c.pprofPorts[i] != 0 {
+		args = append(args, "--pprof-port", fmt.Sprintf("%d", c.pprofPorts[i]))
 	}
 	if c.mode == ClusterModeDynamicJoin && i > 0 {
 		args = append(args, "--join", c.raftAddr(0))

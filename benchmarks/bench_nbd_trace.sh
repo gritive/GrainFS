@@ -54,8 +54,6 @@ GRAINFS_VOLUME_TRACE=1 "$BINARY" serve \
   --nbd-volume-size "$VOL_SIZE" \
   --nfs4-port 0 \
   $(bench_encryption_args) \
-  --rate-limit-ip-rps 0 \
-  --rate-limit-user-rps 0 \
   2>&1 | tee "$LOG_FILE" &
 SERVER_PID=$!
 echo "GrainFS PID=$SERVER_PID"

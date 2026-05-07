@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.0.90.0] - 2026-05-08 — distributed S3 write path benchmarked and tuned
+
+### Added
+
+- Added single-node and multi-node S3 mixed workload benchmark scripts with
+  round-robin ingress, per-node request/RSS summaries, pprof capture, and
+  fixed-stage PUT latency metrics for EC shard writes.
+- Added PUT-stage Prometheus histograms for distributed object writes,
+  encrypted shard writes, shard-stream server work, and QUIC body streaming.
+
+### Changed
+
+- Improved distributed EC PUT throughput by streaming remote shard writes for
+  benchmark-sized shards, increasing QUIC receive windows, and pooling copy
+  buffers in spool, encrypted shard, and QUIC stream paths.
+- Kept benchmark encryption mandatory: the S3 cluster benchmark rejects
+  `NO_ENCRYPTION=1`, and node logs confirm at-rest encryption plus active EC.
+- Reduced EC spool pressure by sizing Reed-Solomon stream blocks to the object
+  shard size instead of retaining the larger library default.
+
+### Fixed
+
+- Fixed forwarded data-group writes when Raft leader hints are node IDs instead
+  of dialable QUIC addresses.
+- Fixed forwarded read streams sharing write-forward backpressure slots, which
+  could make reads block behind concurrent streamed PUT forwards.
+- Fixed follower object-index proposals by forwarding meta-Raft object index
+  mutations through the meta leader.
+- Fixed pprof profile collection for benchmark runs by creating the output
+  directory before fetching heap, allocs, goroutine, mutex, and block profiles.
+- Fixed an e2e vlog watcher setup that wrote EC objects without seeding a normal
+  EC-capable placement group.
+
+### Removed
+
+- Removed the built-in S3 request rate limiter and its `serve --rate-limit-*`
+  flags so storage benchmarks and production request handling no longer pass
+  through that middleware.
+
 ## [0.0.89.0] - 2026-05-07 — cluster CLI uses admin UDS, output unified
 
 ### BREAKING CHANGES
