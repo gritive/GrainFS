@@ -86,6 +86,53 @@ func (f *fakeTopologyClusterInfo) ShardGroups() []cluster.ShardGroupEntry {
 	return out
 }
 
+type fakeClusterInfoWithoutSnapshot struct {
+	nodeID    string
+	state     string
+	term      uint64
+	leaderID  string
+	peers     []string
+	livePeers []string
+}
+
+func (f *fakeClusterInfoWithoutSnapshot) NodeID() string      { return f.nodeID }
+func (f *fakeClusterInfoWithoutSnapshot) State() string       { return f.state }
+func (f *fakeClusterInfoWithoutSnapshot) Term() uint64        { return f.term }
+func (f *fakeClusterInfoWithoutSnapshot) LeaderID() string    { return f.leaderID }
+func (f *fakeClusterInfoWithoutSnapshot) Peers() []string     { return f.peers }
+func (f *fakeClusterInfoWithoutSnapshot) LivePeers() []string { return f.livePeers }
+
+func liveMetaSnapshot(ids ...string) []cluster.PeerLivenessRow {
+	rows := make([]cluster.PeerLivenessRow, 0, len(ids))
+	for i, id := range ids {
+		row := cluster.PeerLivenessRow{
+			PeerID:        id,
+			IdentityState: cluster.PeerIdentityResolved,
+			LivenessState: cluster.PeerLivenessLive,
+			Reason:        "raft_append_success",
+		}
+		if i == 0 {
+			row.IdentityState = cluster.PeerIdentitySelf
+			row.Reason = "self"
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func snapshotWithCooldown(self string, livePeers []string, cooldownPeers ...string) []cluster.PeerLivenessRow {
+	rows := liveMetaSnapshot(append([]string{self}, livePeers...)...)
+	for _, id := range cooldownPeers {
+		rows = append(rows, cluster.PeerLivenessRow{
+			PeerID:        id,
+			IdentityState: cluster.PeerIdentityResolved,
+			LivenessState: cluster.PeerLivenessHealthCooldown,
+			Reason:        "peer_health_cooldown",
+		})
+	}
+	return rows
+}
+
 // fakeMembership records calls and returns a configured error.
 type fakeMembership struct {
 	mu       sync.Mutex
@@ -304,6 +351,7 @@ func TestRemovePeer_HappyPath(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -322,6 +370,7 @@ func TestRemovePeer_PeerNotInCluster_Returns404(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -357,6 +406,7 @@ func TestRemovePeer_PreflightQuorumBlock(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},
 		livePeers: []string{"n1", "n2"}, // n3 dead
+		snapshot:  snapshotWithCooldown("n1", []string{"n2"}, "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -376,6 +426,7 @@ func TestRemovePeer_PreflightAllowsRemovingDeadPeer(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},
 		livePeers: []string{"n1", "n2"}, // n3 dead
+		snapshot:  snapshotWithCooldown("n1", []string{"n2"}, "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -393,6 +444,7 @@ func TestRemovePeer_ForceBypassesPreflight(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},
 		livePeers: []string{"n1", "n2"}, // n3 dead
+		snapshot:  snapshotWithCooldown("n1", []string{"n2"}, "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -450,6 +502,28 @@ func TestClusterRemovePeer_BlocksOnUnresolvedLegacyUnlessTarget(t *testing.T) {
 	require.Empty(t, mem.called())
 }
 
+func TestClusterRemovePeer_ForceDoesNotBypassUnresolvedLegacyBlocker(t *testing.T) {
+	mem := &fakeMembership{}
+	h := setupRemovePeerServer(t, &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		leaderID: "n1",
+		peers:    []string{"n2", "10.0.0.9:7001"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "n2", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "10.0.0.9:7001", IdentityState: cluster.PeerIdentityUnresolvedLegacy, LivenessState: cluster.PeerLivenessConfigured},
+		},
+	}, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "n2", true)
+
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "membership identity unresolved", body["error"])
+	require.Equal(t, []any{"10.0.0.9:7001"}, body["blocking_peers"])
+	require.Empty(t, mem.called())
+}
+
 func TestClusterRemovePeer_AllowsUnresolvedLegacyTarget(t *testing.T) {
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, &fakeClusterInfo{
@@ -496,6 +570,24 @@ func TestClusterRemovePeer_ForceBypassesSnapshotSafetyButNotMissingTarget(t *tes
 	require.Equal(t, []string{"n3"}, mem.called())
 }
 
+func TestClusterRemovePeer_BlocksWhenSnapshotUnavailable(t *testing.T) {
+	mem := &fakeMembership{}
+	h := setupRemovePeerServer(t, &fakeClusterInfoWithoutSnapshot{
+		nodeID:    "n1",
+		state:     "Leader",
+		leaderID:  "n1",
+		peers:     []string{"n2", "n3"},
+		livePeers: []string{"n1", "n2", "n3"},
+	}, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "n3", true)
+
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "peer snapshot unavailable", body["error"])
+	require.Equal(t, "cluster liveness snapshot is required before membership mutation", body["hint"])
+	require.Empty(t, mem.called())
+}
+
 func TestRemovePeer_NoMembershipController_Returns503(t *testing.T) {
 	ci := &fakeClusterInfo{
 		nodeID:    "n1",
@@ -503,6 +595,7 @@ func TestRemovePeer_NoMembershipController_Returns503(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	h := setupRemovePeerServer(t, ci, nil) // membership controller not wired
 
@@ -517,6 +610,7 @@ func TestRemovePeer_MutationGateBlocks(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -536,6 +630,7 @@ func TestRemovePeer_EnginePropagatesError(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{err: errors.New("conf change in progress")}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -557,6 +652,7 @@ func TestRemovePeer_EngineErrNotLeaderRemapsTo409(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},
 		livePeers: []string{"n1", "n2", "n3"},
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{err: raft.ErrNotLeader}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -573,6 +669,7 @@ func TestRemovePeer_MalformedBody_Returns400(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -590,6 +687,7 @@ func TestRemovePeer_EmptyID_Returns400(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)
@@ -606,6 +704,7 @@ func TestRemovePeer_HappyPath_EmitsAuditEvent(t *testing.T) {
 		leaderID:  "n1",
 		peers:     []string{"n2", "n3"},       // remote-only (semantics of cluster.Peers)
 		livePeers: []string{"n1", "n2", "n3"}, // includes self per backend.LiveNodes
+		snapshot:  liveMetaSnapshot("n1", "n2", "n3"),
 	}
 	mem := &fakeMembership{}
 	h := setupRemovePeerServer(t, ci, mem)

@@ -96,8 +96,9 @@ The handler remains responsible for:
 should not override structural failures such as the target not being in the
 cluster membership view.
 
-If the cluster object has no snapshot Interface, the existing legacy
-`LivePeers()` preflight can remain as a compatibility fallback.
+If the cluster object has no snapshot Interface, membership mutation is refused.
+Legacy `LivePeers()` quorum math is not a safe fallback because it cannot
+distinguish `configured`, `live`, and unresolved legacy identity states.
 
 ## Tests
 

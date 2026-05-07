@@ -257,6 +257,10 @@ type RaftClusterInfo struct {
 	addrBook cluster.NodeAddressBook
 }
 
+type peerReplicationEvidenceSource interface {
+	PeerReplicationEvidence() []raft.PeerReplicationEvidence
+}
+
 func NewRaftClusterInfo(node *raft.Node, peers []string, backend *cluster.DistributedBackend, addrBook cluster.NodeAddressBook) *RaftClusterInfo {
 	return &RaftClusterInfo{node: node, peers: peers, backend: backend, addrBook: addrBook}
 }
@@ -315,11 +319,15 @@ func (r *RaftClusterInfo) PeerStates() map[string]string {
 }
 
 func (r *RaftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
+	var evidence []raft.PeerReplicationEvidence
+	if source, ok := any(r.node).(peerReplicationEvidenceSource); ok {
+		evidence = source.PeerReplicationEvidence()
+	}
 	return cluster.BuildPeerLivenessSnapshot(cluster.PeerLivenessInput{
 		SelfID:       r.node.ID(),
 		Voters:       r.node.Peers(),
 		AddressBook:  r.addrBook,
-		ProbeResults: freshReplicationProbeResults(r.node.PeerReplicationEvidence(), r.addrBook, time.Now(), 3*cluster.MetaRaftElectionTimeout),
+		ProbeResults: freshReplicationProbeResults(evidence, r.addrBook, time.Now(), 3*cluster.MetaRaftElectionTimeout),
 	})
 }
 
