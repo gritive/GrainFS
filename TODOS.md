@@ -20,12 +20,6 @@
   `RemovePeerOptions / PeersOptions / EventsOptions` 가 `Endpoint/Stdout/Stderr/...`
   공통 필드를 인라인 반복함. `volumeadmin.BaseOptions` 와 같은 임베드 패턴으로
   맞춰 비대칭 해소. 별 PR 권장.
-- [ ] **serve.go cmd-thin** — `cmd/grainfs/serve.go` (~2255줄, runCluster 1370줄)
-  에서 raft+storage+server+monitors 와이어링을 `internal/serveapp/` (가칭) 같은
-  새 패키지로 분리. cobra 진입은 thin wrapper만 남게. 별 grilling 라운드 필요.
-- [ ] **resource_monitors.go 패키지 이전** — `cmd/grainfs/resource_monitors.go`
-  (~655줄)의 `start*ResourceMonitor` 함수들은 cobra runner가 아니라 runCluster
-  goroutine 부트스트랩. `internal/resourceguard/` 같은 server-side 패키지로 이동.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
 - [ ] multi tenancy
@@ -145,4 +139,3 @@
 
 - [ ] **`cluster remove-peer` negative liveness signal — metaRaft down detection** — positive signal은 successful metaRaft AppendEntries evidence로 해결한다. `/api/cluster/status` 의 `peer_snapshot` 은 leader-side fresh replication evidence가 있는 remote voter를 `live` 로 표시하고, remove-peer preflight 는 그 row를 alive 로 센다. 남은 단순화: failed heartbeat만으로는 `probe_failed` 를 만들지 않으므로 dead-peer를 자동으로 **detect하지 않음** → 운영자가 외부 신호 (모니터링/SSH 접속 실패) 로 죽음을 확인한 뒤 명시 호출하거나 `force=true` 로 override 해야 한다. **후속 작업:** 운영 데이터 기반으로 negative metaRaft probe/health monitor를 별도 설계한다. 이때 `cluster peers` STATE 컬럼이 진짜 down을 반영하고, failure threshold / cooldown / follower display policy를 다시 grill한다. **Re-open trigger:** 운영자가 자동 dead-peer detection 을 요구하거나 metaRaft negative liveness 설계를 시작할 때.
 
-- [ ] **cmd-thin refactor — `serve.go`/`volume.go`/`resource_monitors.go` 등 큰 cmd 파일도 동일 패턴으로 정리** — `cluster-membership-cli` 라운드에서 cluster CLI 3개를 cmd-는-flag-파싱-만 / 비즈니스-로직-은-`internal/clusteradmin` 으로 분리하는 패턴을 확립함 (`refactor(cluster-cli): orchestration into clusteradmin package, cmd thinned` 커밋 참조). 동일 처리가 필요한 큰 cmd 파일들: `serve.go` (2255줄, `runCluster` 단일 함수가 1300줄), `volume.go` (782줄), `resource_monitors.go` (655줄), `cluster_rotate_key.go` (172줄), `recover.go` (182줄) 등. **별도 브랜치 (`cmd-thin-refactor`) 필수** — 회귀 영향이 모든 e2e 에 걸려 있고 패키지 경계 결정 (`internal/runtime` vs `internal/serve` vs domain-별 분리?) 자체가 grilling 한 라운드 사이즈. **선행 작업:** (a) serve.go 에 인라인된 adapter/helper 들이 어떤 도메인에 속하는지 분류, (b) wiring 라이프사이클 (start/stop ordering, ctx cancel propagation) 을 깨지 않는 패키지 경계 결정. **Re-open trigger:** cluster CLI refactor 결과를 본 뒤 이 패턴이 안정 검증되면 다음 라운드로 들어감.
