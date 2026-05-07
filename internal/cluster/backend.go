@@ -645,9 +645,9 @@ func (b *DistributedBackend) ReadIndex(ctx context.Context) (uint64, error) {
 			if lastErr == nil {
 				return ci, nil
 			}
-			if !errors.Is(lastErr, raft.ErrNotLeader) {
-				return 0, lastErr
-			}
+			// A stale leader hint or killed peer can fail with a transport error.
+			// Try the rest of the voter set before waiting for the next local
+			// ReadIndex/leader-observation cycle.
 		}
 		timer := time.NewTimer(5 * time.Millisecond)
 		select {
