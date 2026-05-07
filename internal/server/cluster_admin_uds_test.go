@@ -57,6 +57,24 @@ func TestRegisterClusterAdminUDS_RoutesRespond(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
+// TestRegisterClusterAdminUDS_Health_LocalMode verifies the health route
+// returns 200 with mode=local when cluster is unwired.
+func TestRegisterClusterAdminUDS_Health_LocalMode(t *testing.T) {
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServer(t, sock)
+
+	resp, err := cli.Get("http://unix/v1/cluster/health")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+	var h map[string]any
+	require.NoError(t, json.Unmarshal(body, &h))
+	require.Equal(t, "local", h["mode"])
+	_, ok := h["quorum"].(map[string]any)
+	require.True(t, ok, "quorum object expected: %v", h)
+}
+
 // TestRegisterClusterAdminUDS_TransferLeader_NoCluster verifies that with
 // cluster=nil the route returns 503 (cluster mode not configured).
 func TestRegisterClusterAdminUDS_TransferLeader_NoCluster(t *testing.T) {
