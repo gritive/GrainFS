@@ -100,7 +100,7 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			"--seed-groups", "1",
+			"--seed-groups", "2",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",

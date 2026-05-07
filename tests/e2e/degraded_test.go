@@ -78,7 +78,7 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			"--seed-groups", "1",
+			"--seed-groups", "2",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 			"--snapshot-interval", "0",

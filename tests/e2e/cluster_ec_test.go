@@ -95,7 +95,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
+			"--seed-groups", "2",
 			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
@@ -293,7 +293,7 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
+			"--seed-groups", "2",
 			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
@@ -498,7 +498,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--seed-groups", "1",
+			"--seed-groups", "2",
 			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
