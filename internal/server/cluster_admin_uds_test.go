@@ -39,6 +39,17 @@ func TestRegisterClusterAdminUDS_RoutesRespond(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &status))
 	require.Equal(t, "local", status["mode"])
 
+	// /v1/cluster/placement (cluster=nil -> empty report)
+	resp, err = cli.Get("http://unix/v1/cluster/placement?bucket=b&limit=10")
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode, "placement body: %s", body)
+	var placement map[string]any
+	require.NoError(t, json.Unmarshal(body, &placement))
+	require.Equal(t, "group_voter_count", placement["desired_policy_basis"])
+	require.Equal(t, "b", placement["bucket"])
+
 	// /v1/cluster/eventlog (evStore=nil → empty array)
 	resp, err = cli.Get("http://unix/v1/cluster/eventlog")
 	require.NoError(t, err)

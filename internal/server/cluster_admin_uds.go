@@ -10,6 +10,7 @@ import (
 //
 // Routes registered:
 //   - GET  /v1/cluster/status      → clusterStatus
+//   - GET  /v1/cluster/placement   → clusterPlacement
 //   - POST /v1/cluster/remove-peer → removePeerHandler
 //   - GET  /v1/cluster/eventlog    → queryEventLog
 //
@@ -22,6 +23,7 @@ import (
 func (s *Server) RegisterClusterAdminUDS(h *server.Hertz) {
 	g := h.Group("/v1/cluster")
 	g.GET("/status", s.clusterStatus)
+	g.GET("/placement", s.clusterPlacement)
 	g.POST("/remove-peer", s.removePeerHandler)
 	g.GET("/eventlog", s.queryEventLog)
 	g.POST("/transfer-leader", s.transferLeaderHandler)

@@ -387,6 +387,21 @@ func (r *RaftClusterInfo) ObjectIndexSummary(bucket string) cluster.ObjectIndexS
 	return src.ObjectIndexSummary(bucket)
 }
 
+func (r *RaftClusterInfo) PlacementReport(bucket, key string, maxRows int) cluster.PlacementReport {
+	src, ok := r.addrBook.(interface {
+		PlacementReport(bucket, key string, maxRows int) cluster.PlacementReport
+	})
+	if !ok {
+		return cluster.PlacementReport{
+			DesiredPolicyBasis:  "group_voter_count",
+			Bucket:              bucket,
+			Key:                 key,
+			ActualProfileCounts: map[string]int{},
+		}
+	}
+	return src.PlacementReport(bucket, key, maxRows)
+}
+
 func (r *RaftClusterInfo) normalizePeerIDs(peers []string) []string {
 	if len(peers) == 0 {
 		return nil
