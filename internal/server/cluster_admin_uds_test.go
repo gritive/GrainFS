@@ -57,6 +57,23 @@ func TestRegisterClusterAdminUDS_RoutesRespond(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
+// TestRegisterClusterAdminUDS_BalancerStatus_NoBalancer verifies that
+// balancer route mirrored on the admin UDS returns 200 with available=false
+// when no balancer is wired (matches existing /api/cluster/balancer/status).
+func TestRegisterClusterAdminUDS_BalancerStatus_NoBalancer(t *testing.T) {
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServer(t, sock)
+
+	resp, err := cli.Get("http://unix/v1/cluster/balancer/status")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+	var b map[string]any
+	require.NoError(t, json.Unmarshal(body, &b))
+	require.Equal(t, false, b["available"])
+}
+
 // TestRegisterClusterAdminUDS_Health_LocalMode verifies the health route
 // returns 200 with mode=local when cluster is unwired.
 func TestRegisterClusterAdminUDS_Health_LocalMode(t *testing.T) {

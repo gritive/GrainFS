@@ -26,4 +26,5 @@ func (s *Server) RegisterClusterAdminUDS(h *server.Hertz) {
 	g.GET("/eventlog", s.queryEventLog)
 	g.POST("/transfer-leader", s.transferLeaderHandler)
 	g.GET("/health", s.clusterHealth)
+	g.GET("/balancer/status", s.balancerStatusHandler)
 }
