@@ -8,10 +8,10 @@ import (
 	"os"
 )
 
-// clientFor returns a Client honoring opts.Endpoint with auto-discovery
-// fallback against opts.DataDir.
+// clientFor returns a Client honoring opts.Endpoint via ResolveEndpoint
+// (flag → env).
 func clientFor(opts BaseOptions) (*Client, error) {
-	return NewClient(opts.Endpoint, opts.DataDir)
+	return NewClient(opts.Endpoint)
 }
 
 // withTimeout wraps ctx with opts.Timeout if positive.

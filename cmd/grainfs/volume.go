@@ -202,11 +202,10 @@ var volumeScrubCancelCmd = &cobra.Command{
 
 func init() {
 	pf := volumeCmd.PersistentFlags()
-	pf.String("endpoint", "", "admin endpoint (default: auto-discover from --data or grainfs.toml)")
-	pf.String("data", "", "data directory for admin socket auto-discovery")
 	pf.Bool("json", false, "JSON output for scripting")
 	pf.Bool("bytes", false, "show sizes as raw byte counts (alias: --raw)")
 	pf.Bool("raw", false, "alias for --bytes")
+	registerAdminEndpointFlag(volumeCmd)
 	registerAdminTimeoutFlag(volumeCmd)
 
 	volumeCreateCmd.Flags().String("size", "", `volume size — binary "1Gi"/"100Mi" (1024^n) or decimal "1GB"/"100MB" (1000^n); bare "1G"/"1M" rejected as ambiguous`)
@@ -235,13 +234,11 @@ func init() {
 // and packs them into a volumeadmin.BaseOptions.
 func baseOptionsFromCmd(cmd *cobra.Command) volumeadmin.BaseOptions {
 	endpoint, _ := cmd.Flags().GetString("endpoint")
-	dataDir, _ := cmd.Flags().GetString("data")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	rawA, _ := cmd.Flags().GetBool("bytes")
 	rawB, _ := cmd.Flags().GetBool("raw")
 	return volumeadmin.BaseOptions{
 		Endpoint: endpoint,
-		DataDir:  dataDir,
 		JSONOut:  jsonOut,
 		RawBytes: rawA || rawB,
 		Timeout:  adminTimeoutFromCmd(cmd),
