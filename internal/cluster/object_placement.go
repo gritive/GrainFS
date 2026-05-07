@@ -17,21 +17,32 @@ func ValidatePlacementGroupID(groupID string) error {
 }
 
 // SelectObjectPlacementGroup chooses the normal data group for a new object.
-// group-0 stays reserved for legacy/system paths and is excluded from normal
-// hot-bucket object placement.
+// group-0 stays reserved for legacy/system paths when normal data groups are
+// present, but remains the fallback for bootstrap clusters that only have the
+// legacy group.
 func SelectObjectPlacementGroup(bucket, key string, groups []ShardGroupEntry, cfg ECConfig) (ShardGroupEntry, error) {
 	candidates := make([]ShardGroupEntry, 0, len(groups))
+	legacyCandidates := make([]ShardGroupEntry, 0, 1)
 	for _, group := range groups {
-		if group.ID == "" || group.ID == "group-0" {
+		if group.ID == "" {
 			continue
 		}
-		if !cfg.IsActive(len(group.PeerIDs)) {
+		desired := DesiredECConfigForGroup(group)
+		if !desired.IsActive(len(group.PeerIDs)) {
 			continue
 		}
-		candidates = append(candidates, ShardGroupEntry{
+		candidate := ShardGroupEntry{
 			ID:      group.ID,
 			PeerIDs: cloneStringSlice(group.PeerIDs),
-		})
+		}
+		if group.ID == "group-0" {
+			legacyCandidates = append(legacyCandidates, candidate)
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 && len(legacyCandidates) > 0 {
+		candidates = legacyCandidates
 	}
 	if len(candidates) == 0 {
 		return ShardGroupEntry{}, fmt.Errorf("no EC-capable object placement group")
@@ -52,12 +63,34 @@ func hashObjectPlacementKey(bucket, key string) uint64 {
 }
 
 type placementGroupContextKey struct{}
+type placementGroupEntryContextKey struct{}
 
 func ContextWithPlacementGroup(ctx context.Context, groupID string) context.Context {
 	return context.WithValue(ctx, placementGroupContextKey{}, groupID)
 }
 
+func ContextWithPlacementGroupEntry(ctx context.Context, group ShardGroupEntry) context.Context {
+	cloned := ShardGroupEntry{
+		ID:      group.ID,
+		PeerIDs: cloneStringSlice(group.PeerIDs),
+	}
+	ctx = context.WithValue(ctx, placementGroupEntryContextKey{}, cloned)
+	return context.WithValue(ctx, placementGroupContextKey{}, cloned.ID)
+}
+
 func PlacementGroupFromContext(ctx context.Context) (string, bool) {
+	if entry, ok := PlacementGroupEntryFromContext(ctx); ok {
+		return entry.ID, true
+	}
 	groupID, ok := ctx.Value(placementGroupContextKey{}).(string)
 	return groupID, ok && groupID != ""
+}
+
+func PlacementGroupEntryFromContext(ctx context.Context) (ShardGroupEntry, bool) {
+	entry, ok := ctx.Value(placementGroupEntryContextKey{}).(ShardGroupEntry)
+	if !ok || entry.ID == "" {
+		return ShardGroupEntry{}, false
+	}
+	entry.PeerIDs = cloneStringSlice(entry.PeerIDs)
+	return entry, true
 }

@@ -125,99 +125,56 @@ func TestRunClusterHealth_TextWithIssues(t *testing.T) {
 }
 
 func TestRunClusterPlacement_Full(t *testing.T) {
-	payload := `{
-		"mode":"cluster",
-		"shard_groups":[
-			{"id":"group-0","peer_ids":["n1","n2","n3"]},
-			{"id":"group-1","peer_ids":["n2","n3","n4"]}
-		],
-		"bucket_assignments":{"default":"group-0","bench":"group-1"}
-	}`
+	payload := `{"desired_policy_basis":"group_voter_count","object_count":2,"bytes":30,"actual_profile_counts":{"2+1":1,"4+2":1},"pending_upgrade_count":1,"details":[{"bucket":"bench","key":"a","version_id":"v1","placement_group_id":"group-1","actual_ec_data":2,"actual_ec_parity":1,"desired_ec_data":4,"desired_ec_parity":2,"layout_state":"pending-upgrade","node_ids":["n1","n2","n3"],"size":10}]}`
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/placement", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(payload))
 	})
 	sock := startObserveUDSStub(t, mux)
 
 	client := clusteradmin.NewClient(sock)
 	var stdout bytes.Buffer
-	require.NoError(t, runClusterPlacement(context.Background(), client, "", "text", &stdout))
+	require.NoError(t, runClusterPlacement(context.Background(), client, "", "", "text", &stdout))
 	out := stdout.String()
-	assert.Contains(t, out, "SHARD GROUPS")
-	assert.Contains(t, out, "group-0")
-	assert.Contains(t, out, "group-1")
-	assert.Contains(t, out, "BUCKET ASSIGNMENTS")
-	assert.Contains(t, out, "default")
+	assert.Contains(t, out, "Desired policy: group_voter_count")
+	assert.Contains(t, out, "Objects: 2")
+	assert.Contains(t, out, "Pending upgrade: 1")
+	assert.Contains(t, out, "DETAIL")
 	assert.Contains(t, out, "bench")
+	assert.Contains(t, out, "group-1")
+	assert.Contains(t, out, "pending-upgrade")
 }
 
 func TestRunClusterPlacement_SpecificBucket(t *testing.T) {
-	payload := `{
-		"mode":"cluster",
-		"shard_groups":[{"id":"group-1","peer_ids":["n2","n3","n4"]}],
-		"bucket_assignments":{"bench":"group-1"}
-	}`
+	payload := `{"desired_policy_basis":"group_voter_count","bucket":"bench","object_count":1,"actual_profile_counts":{"4+2":1},"details":[{"bucket":"bench","key":"k","version_id":"v1","placement_group_id":"group-1","actual_ec_data":4,"actual_ec_parity":2,"desired_ec_data":4,"desired_ec_parity":2,"layout_state":"current","node_ids":["n2","n3","n4"],"size":10}]}`
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/placement", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "bench", r.URL.Query().Get("bucket"))
 		_, _ = w.Write([]byte(payload))
 	})
 	sock := startObserveUDSStub(t, mux)
 
 	client := clusteradmin.NewClient(sock)
 	var stdout bytes.Buffer
-	require.NoError(t, runClusterPlacement(context.Background(), client, "bench", "text", &stdout))
+	require.NoError(t, runClusterPlacement(context.Background(), client, "bench", "", "text", &stdout))
 	out := stdout.String()
 	assert.Contains(t, out, "bench")
 	assert.Contains(t, out, "group-1")
 	assert.Contains(t, out, "n2, n3, n4")
-	assert.NotContains(t, out, "SHARD GROUPS", "specific bucket query suppresses full table")
+	assert.Contains(t, out, "current")
 }
 
-func TestRunClusterPlacement_UnknownBucket(t *testing.T) {
-	payload := `{"mode":"cluster","bucket_assignments":{"default":"group-0"}}`
+func TestRunClusterPlacement_JSON(t *testing.T) {
+	payload := `{"desired_policy_basis":"group_voter_count","bucket":"bench","object_count":0,"actual_profile_counts":{}}`
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/placement", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(payload))
 	})
 	sock := startObserveUDSStub(t, mux)
 
 	client := clusteradmin.NewClient(sock)
 	var stdout bytes.Buffer
-	require.NoError(t, runClusterPlacement(context.Background(), client, "missing", "text", &stdout))
-	assert.Contains(t, stdout.String(), "not assigned")
-}
-
-// TestRunClusterPlacement_UnknownGroupFallback ensures a bucket whose
-// assignment references a group ID that is missing from shard_groups
-// renders "(unknown group)" instead of an empty trailing column.
-func TestRunClusterPlacement_UnknownGroupFallback(t *testing.T) {
-	payload := `{
-		"mode":"cluster",
-		"shard_groups":[{"id":"group-0","peer_ids":["n1","n2","n3"]}],
-		"bucket_assignments":{"orphan":"group-99"}
-	}`
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(payload))
-	})
-	sock := startObserveUDSStub(t, mux)
-
-	client := clusteradmin.NewClient(sock)
-	var stdout bytes.Buffer
-	require.NoError(t, runClusterPlacement(context.Background(), client, "", "text", &stdout))
-	assert.Contains(t, stdout.String(), "(unknown group)")
-}
-
-func TestRunClusterPlacement_LocalMode(t *testing.T) {
-	payload := `{"mode":"local"}`
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(payload))
-	})
-	sock := startObserveUDSStub(t, mux)
-
-	client := clusteradmin.NewClient(sock)
-	var stdout bytes.Buffer
-	require.NoError(t, runClusterPlacement(context.Background(), client, "", "text", &stdout))
-	assert.Contains(t, stdout.String(), "single-node mode")
+	require.NoError(t, runClusterPlacement(context.Background(), client, "bench", "", "json", &stdout))
+	assert.Contains(t, stdout.String(), `"desired_policy_basis": "group_voter_count"`)
+	assert.Contains(t, stdout.String(), `"bucket": "bench"`)
 }

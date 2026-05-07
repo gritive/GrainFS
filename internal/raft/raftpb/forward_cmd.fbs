@@ -148,6 +148,7 @@ enum ForwardStatus : byte {
   NoSuchBucket = 3,
   NoSuchKey = 4,
   EntityTooLarge = 5,
+  InsufficientPlacementTargets = 6,
   Internal = 99
 }
 

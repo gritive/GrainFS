@@ -645,9 +645,9 @@ func (b *DistributedBackend) ReadIndex(ctx context.Context) (uint64, error) {
 			if lastErr == nil {
 				return ci, nil
 			}
-			if !errors.Is(lastErr, raft.ErrNotLeader) {
-				return 0, lastErr
-			}
+			// A stale leader hint or killed peer can fail with a transport error.
+			// Try the rest of the voter set before waiting for the next local
+			// ReadIndex/leader-observation cycle.
 		}
 		timer := time.NewTimer(5 * time.Millisecond)
 		select {
@@ -974,13 +974,20 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
-	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
-		return nil, false, nil
-	}
-
 	shardKey := key + "/" + versionID
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
 	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+		placementGroupID = group.ID
+		effectiveCfg = cfg
+		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+		ringVer = 0
+	} else if PlacementGroupHasFullEntry(ctx) {
+		return nil, false, err
+	}
+	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
+		return nil, false, nil
+	}
 	if len(placement) != 1 || placement[0] != b.selfAddr {
 		return nil, false, nil
 	}
@@ -1482,6 +1489,44 @@ func selectECPlacement(ring *Ring, ringErr error, cfg ECConfig, liveNodes []stri
 	return PlacementForNodes(cfg, liveNodes, shardKey), 0
 }
 
+func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
+	group, ok := PlacementGroupEntryFromContext(ctx)
+	if !ok {
+		groupID, _ := PlacementGroupFromContext(ctx)
+		return ShardGroupEntry{}, ECConfig{}, &ErrInsufficientPlacementTargets{
+			Operation:     operation,
+			GroupID:       groupID,
+			FailureReason: "full placement group not present in write context",
+		}
+	}
+	cfg := DesiredECConfigForGroup(group)
+	if cfg.NumShards() == 0 {
+		return ShardGroupEntry{}, ECConfig{}, &ErrInsufficientPlacementTargets{
+			Operation:     operation,
+			GroupID:       group.ID,
+			Configured:    cloneStringSlice(group.PeerIDs),
+			FailureReason: "placement group has no zero-config EC profile",
+		}
+	}
+	if len(group.PeerIDs) < cfg.NumShards() {
+		return ShardGroupEntry{}, ECConfig{}, &ErrInsufficientPlacementTargets{
+			Operation:     operation,
+			GroupID:       group.ID,
+			Desired:       cfg,
+			Configured:    cloneStringSlice(group.PeerIDs),
+			Unavailable:   cloneStringSlice(group.PeerIDs),
+			FailureReason: "configured placement group is narrower than desired profile",
+		}
+	}
+	group.PeerIDs = cloneStringSlice(group.PeerIDs)
+	return group, cfg, nil
+}
+
+func PlacementGroupHasFullEntry(ctx context.Context) bool {
+	_, ok := PlacementGroupEntryFromContext(ctx)
+	return ok
+}
+
 // putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into
 // cfg.NumShards() shards, fan-out each to its placed node (self or peer),
 // then commit metadata (with RingVersion) through Raft.
@@ -1621,6 +1666,16 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 	shardKey := key + "/" + versionID
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
 	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	topologyWrite := false
+	topologyGroup := ShardGroupEntry{}
+	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+		topologyWrite = true
+		topologyGroup = group
+		placementGroupID = group.ID
+		effectiveCfg = cfg
+		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+		ringVer = 0
+	}
 	if len(placement) != effectiveCfg.NumShards() {
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
@@ -1688,6 +1743,16 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 				}
 			}
 			if werr != nil {
+				if topologyWrite {
+					return &ErrInsufficientPlacementTargets{
+						Operation:     "put_object",
+						GroupID:       topologyGroup.ID,
+						Desired:       effectiveCfg,
+						Configured:    cloneStringSlice(topologyGroup.PeerIDs),
+						Unavailable:   []string{node},
+						FailureReason: fmt.Sprintf("ec write shard %d failed: %v", i, werr),
+					}
+				}
 				return fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
 			}
 			writtenMu.Lock()
@@ -3516,7 +3581,17 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, err
 	}
 	if meta.PlacementGroupID != "" {
-		ctx = ContextWithPlacementGroup(ctx, meta.PlacementGroupID)
+		var ctxErr error
+		ctx, ctxErr = contextForMultipartComplete(ctx, meta, func(id string) (ShardGroupEntry, bool) {
+			group, ok := PlacementGroupEntryFromContext(ctx)
+			if !ok || group.ID != id {
+				return ShardGroupEntry{}, false
+			}
+			return group, true
+		})
+		if ctxErr != nil {
+			return nil, ctxErr
+		}
 	}
 
 	// Sort parts and assemble into a spooled object before the mandatory EC write.
@@ -3578,6 +3653,28 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	}
 	os.RemoveAll(b.partDir(uploadID))
 	return obj, nil
+}
+
+func contextForMultipartComplete(
+	ctx context.Context,
+	meta clusterMultipartMeta,
+	lookup func(string) (ShardGroupEntry, bool),
+) (context.Context, error) {
+	if meta.PlacementGroupID == "" {
+		return ctx, nil
+	}
+	if group, ok := PlacementGroupEntryFromContext(ctx); ok && group.ID == meta.PlacementGroupID {
+		return ctx, nil
+	}
+	group, ok := lookup(meta.PlacementGroupID)
+	if !ok {
+		return ctx, &ErrInsufficientPlacementTargets{
+			Operation:     "complete_multipart",
+			GroupID:       meta.PlacementGroupID,
+			FailureReason: "multipart placement group is missing",
+		}
+	}
+	return ContextWithPlacementGroupEntry(ctx, group), nil
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

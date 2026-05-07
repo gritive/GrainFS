@@ -1072,6 +1072,35 @@ func (f *MetaFSM) ObjectIndexSummary(bucket string) ObjectIndexSummary {
 	}
 }
 
+func (f *MetaFSM) PlacementReport(bucket, key string, maxRows int) PlacementReport {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	groups := make(map[string]ShardGroupEntry, len(f.shardGroups))
+	for id, sg := range f.shardGroups {
+		groups[id] = ShardGroupEntry{ID: sg.ID, PeerIDs: f.normalizeShardGroupPeersLocked(sg.PeerIDs)}
+	}
+
+	entries := make([]ObjectIndexEntry, 0)
+	for _, entry := range f.objectIndex {
+		if bucket != "" && entry.Bucket != bucket {
+			continue
+		}
+		if key != "" && entry.Key != key {
+			continue
+		}
+		if entry.IsDeleteMarker {
+			continue
+		}
+		entries = append(entries, cloneObjectIndexEntry(entry))
+	}
+	return BuildPlacementReport(entries, groups, PlacementReportOptions{
+		Bucket:  bucket,
+		Key:     key,
+		MaxRows: maxRows,
+	})
+}
+
 // ShardGroups returns a deep copy of current shard groups.
 // PeerIDs slices are copied so callers cannot mutate FSM state.
 func (f *MetaFSM) ShardGroups() []ShardGroupEntry {

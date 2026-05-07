@@ -7,33 +7,36 @@ import "strconv"
 type ForwardStatus int8
 
 const (
-	ForwardStatusOK             ForwardStatus = 0
-	ForwardStatusNotLeader      ForwardStatus = 1
-	ForwardStatusNotVoter       ForwardStatus = 2
-	ForwardStatusNoSuchBucket   ForwardStatus = 3
-	ForwardStatusNoSuchKey      ForwardStatus = 4
-	ForwardStatusEntityTooLarge ForwardStatus = 5
-	ForwardStatusInternal       ForwardStatus = 99
+	ForwardStatusOK                           ForwardStatus = 0
+	ForwardStatusNotLeader                    ForwardStatus = 1
+	ForwardStatusNotVoter                     ForwardStatus = 2
+	ForwardStatusNoSuchBucket                 ForwardStatus = 3
+	ForwardStatusNoSuchKey                    ForwardStatus = 4
+	ForwardStatusEntityTooLarge               ForwardStatus = 5
+	ForwardStatusInsufficientPlacementTargets ForwardStatus = 6
+	ForwardStatusInternal                     ForwardStatus = 99
 )
 
 var EnumNamesForwardStatus = map[ForwardStatus]string{
-	ForwardStatusOK:             "OK",
-	ForwardStatusNotLeader:      "NotLeader",
-	ForwardStatusNotVoter:       "NotVoter",
-	ForwardStatusNoSuchBucket:   "NoSuchBucket",
-	ForwardStatusNoSuchKey:      "NoSuchKey",
-	ForwardStatusEntityTooLarge: "EntityTooLarge",
-	ForwardStatusInternal:       "Internal",
+	ForwardStatusOK:                           "OK",
+	ForwardStatusNotLeader:                    "NotLeader",
+	ForwardStatusNotVoter:                     "NotVoter",
+	ForwardStatusNoSuchBucket:                 "NoSuchBucket",
+	ForwardStatusNoSuchKey:                    "NoSuchKey",
+	ForwardStatusEntityTooLarge:               "EntityTooLarge",
+	ForwardStatusInsufficientPlacementTargets: "InsufficientPlacementTargets",
+	ForwardStatusInternal:                     "Internal",
 }
 
 var EnumValuesForwardStatus = map[string]ForwardStatus{
-	"OK":             ForwardStatusOK,
-	"NotLeader":      ForwardStatusNotLeader,
-	"NotVoter":       ForwardStatusNotVoter,
-	"NoSuchBucket":   ForwardStatusNoSuchBucket,
-	"NoSuchKey":      ForwardStatusNoSuchKey,
-	"EntityTooLarge": ForwardStatusEntityTooLarge,
-	"Internal":       ForwardStatusInternal,
+	"OK":                           ForwardStatusOK,
+	"NotLeader":                    ForwardStatusNotLeader,
+	"NotVoter":                     ForwardStatusNotVoter,
+	"NoSuchBucket":                 ForwardStatusNoSuchBucket,
+	"NoSuchKey":                    ForwardStatusNoSuchKey,
+	"EntityTooLarge":               ForwardStatusEntityTooLarge,
+	"InsufficientPlacementTargets": ForwardStatusInsufficientPlacementTargets,
+	"Internal":                     ForwardStatusInternal,
 }
 
 func (v ForwardStatus) String() string {

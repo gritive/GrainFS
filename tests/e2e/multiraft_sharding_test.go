@@ -17,6 +17,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/stretchr/testify/require"
 )
 
@@ -261,7 +262,7 @@ func countGroupDirsAcrossNodes(c *mrCluster) map[string]int {
 // Verify 5-process boot with automatic seed groups results in:
 //   - All processes alive
 //   - Per-group directories created on voter nodes (groups/group-{N}/{badger,raft})
-//   - Each group has the expected number of voters (RF=3 for groups 1..7)
+//   - Each group has the expected number of voters for the auto EC profile
 func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
@@ -273,14 +274,15 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 
 	groupDirs := countGroupDirsAcrossNodes(c)
 
-	// Groups 1..7 use RF=3 (rendezvous-hashed voter placement).
-	// Group 0 keeps full membership (5 voters in 5-node cluster) — legacy compat.
+	// Groups 1..7 use the auto EC width for the cluster size.
+	// Group 0 keeps full membership (5 voters in 5-node cluster) for legacy compat.
+	wantVoters := cluster.AutoECConfigForClusterSize(5).NumShards()
 	for i := 1; i <= 7; i++ {
 		gid := fmt.Sprintf("group-%d", i)
 		voterCount, ok := groupDirs[gid]
 		require.True(t, ok, "group %s must have at least one voter directory", gid)
-		require.Equal(t, 3, voterCount,
-			"group %s expected RF=3 voter dirs, got %d", gid, voterCount)
+		require.Equal(t, wantVoters, voterCount,
+			"group %s expected %d voter dirs, got %d", gid, wantVoters, voterCount)
 	}
 	t.Logf("boot ok: %d distinct groups with directories across 5 nodes", len(groupDirs))
 }
@@ -728,6 +730,71 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, body, string(readBody))
 	t.Log("cross-node dispatch ok: non-voter PUT forwarded to leader and persisted")
+}
+
+func TestE2E_TopologyDurability_FullTargetWriteGuard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	const bucket = "missing-placement-target"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+
+	leaderClient := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	const existingKey = "before-target-loss"
+	const existingBody = "still-readable-after-one-target-loss"
+	requireMRPutObjectEventually(t, ctx, leaderClient, bucket, existingKey, []byte(existingBody))
+
+	killIdx := 0
+	if killIdx == c.leaderIdx {
+		killIdx = 1
+	}
+	forwardIdx := 0
+	for forwardIdx == c.leaderIdx || forwardIdx == killIdx {
+		forwardIdx++
+	}
+	require.NotNil(t, c.procs[killIdx], "target process must exist")
+	t.Logf("killing placement target node %d at %s", killIdx, c.httpURLs[killIdx])
+	require.NoError(t, c.procs[killIdx].Process.Signal(syscall.SIGTERM))
+	_ = c.procs[killIdx].Wait()
+	c.procs[killIdx] = nil
+
+	readOut, err := ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey).GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(existingKey),
+	})
+	require.NoError(t, err, "existing object must remain readable with k live shards")
+	defer readOut.Body.Close()
+	readBody, err := io.ReadAll(readOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, existingBody, string(readBody))
+
+	requireS3PutEventually503(t, ctx, leaderClient, bucket, "leader-after-target-loss")
+	requireS3PutEventually503(t, ctx, ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey), bucket, "forwarded-after-target-loss")
+}
+
+func requireS3PutEventually503(t *testing.T, ctx context.Context, client *s3.Client, bucket, key string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		putCtx, cancelPut := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelPut()
+		_, err := client.PutObject(putCtx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader([]byte("should-return-503")),
+		}, func(o *s3.Options) {
+			o.RetryMaxAttempts = 1
+		})
+		if err == nil {
+			return false
+		}
+		errStr := err.Error()
+		return strings.Contains(errStr, "503") || strings.Contains(errStr, "ServiceUnavailable")
+	}, 45*time.Second, time.Second, "expected missing topology placement target to surface as S3 503")
 }
 
 // ----- TestE2E_MultiRaftSharding_GroupLeaderFailover ------------------------

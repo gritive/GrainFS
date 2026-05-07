@@ -574,10 +574,11 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 	t.Logf("topology test: %d pre-topology objects written+verified via cluster EC", len(preObjects))
 
-	// Topology change: kill one non-leader node (N=6 → N=5).
-	// 5 remaining nodes >= k+m=5 → ECActive stays true.
+	// Target loss: kill one non-leader node. Topology-derived durability uses
+	// the placement group's configured voter set, not the live-node count, so
+	// new writes must fail while the group still names the missing target.
 	victim := (leaderIdx + 1) % numNodes
-	t.Logf("topology test: killing node %d (N=6 → N=5, ECActive remains true)", victim)
+	t.Logf("topology test: killing node %d (configured placement target becomes unavailable)", victim)
 	_ = procs[victim].Process.Kill()
 	_, _ = procs[victim].Process.Wait()
 	procs[victim] = nil
@@ -624,52 +625,16 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 	t.Logf("topology test: %d pre-topology objects reconstructed after node kill (placement immutable)", len(preObjects))
 
-	// New objects after topology change: liveNodes() = 5 ≥ k+m=5 → ECActive=true.
-	// Shards distributed across the 5 remaining nodes.
-	// After a node kill, the staged 3+3 join may have shifted Raft leadership away
-	// from leaderIdx. Iterate all live nodes on each retry; the first to accept a
-	// write is the current leader. No fixed sleep — Raft stabilises after a
-	// short election window.
-	postObjects := []entry{
-		{"post-obj-x", [32]byte{}},
-		{"post-obj-y", [32]byte{}},
+	// New objects after target loss must not silently downshift to a narrower
+	// EC profile. Operators need a clear 503 until topology repair/removal
+	// updates the placement group.
+	for j := 0; j < numNodes; j++ {
+		if procs[j] == nil {
+			continue
+		}
+		requireS3PutEventually503(t, ctx, ecS3Client(httpURL(j), accessKey, secretKey), bucketName, fmt.Sprintf("post-target-loss-%d", j))
 	}
-	for i := range postObjects {
-		data := make([]byte, 32*1024)
-		_, err := rand.Read(data)
-		require.NoError(t, err)
-		postObjects[i].sum = sha256.Sum256(data)
-		putData := append([]byte(nil), data...)
-		objKey := postObjects[i].key
-		var lastPutErr error
-		require.Eventually(t, func() bool {
-			for j := 0; j < numNodes; j++ {
-				if procs[j] == nil {
-					continue
-				}
-				c := ecS3Client(httpURL(j), accessKey, secretKey)
-				putErr := tryPutObject(ctx, c, bucketName, objKey, putData)
-				if putErr == nil {
-					client = c // track current leader for GETs below
-					lastPutErr = nil
-					return true
-				}
-				lastPutErr = fmt.Errorf("node %d %s: %w", j, httpURL(j), putErr)
-			}
-			return false
-		}, 120*time.Second, 500*time.Millisecond, "post-topology PutObject %s (EC must still be active), last error: %v", objKey, lastPutErr)
-	}
-	for _, obj := range postObjects {
-		out, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bucketName),
-			Key:    aws.String(obj.key),
-		})
-		require.NoErrorf(t, err, "post-topology GetObject %s", obj.key)
-		got, _ := io.ReadAll(out.Body)
-		_ = out.Body.Close()
-		require.Equalf(t, obj.sum, sha256.Sum256(got), "sha256 mismatch post-topology %s", obj.key)
-	}
-	t.Logf("topology test: %d post-topology objects written+verified via cluster EC (ECActive=true with N=5)", len(postObjects))
+	t.Logf("topology test: new writes returned 503 while configured placement target was unavailable")
 }
 
 // ecS3Client returns an S3 client using the given access/secret credentials.

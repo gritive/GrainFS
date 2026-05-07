@@ -24,10 +24,10 @@ func TestClusterPlacementCLI_NoPlacement(t *testing.T) {
 	require.NoError(t, err, "placement command must succeed")
 
 	output := string(out)
-	// Either "single-node mode" (mode=local) or "no shard groups configured"
-	// is acceptable depending on harness mode.
+	// Either the fallback text or the topology-derived placement report is
+	// acceptable depending on harness mode.
 	hasFallback := false
-	for _, want := range []string{"single-node mode", "no shard groups configured", "SHARD GROUPS"} {
+	for _, want := range []string{"single-node mode", "no shard groups configured", "SHARD GROUPS", "Desired policy:"} {
 		if strings.Contains(output, want) {
 			hasFallback = true
 			break
@@ -53,6 +53,7 @@ func TestClusterPlacementCLI_UnknownBucket(t *testing.T) {
 	assert.True(t,
 		strings.Contains(output, "not assigned") ||
 			strings.Contains(output, "single-node mode") ||
-			strings.Contains(output, "no shard groups configured"),
+			strings.Contains(output, "no shard groups configured") ||
+			strings.Contains(output, "Bucket: no-such-bucket"),
 		"expected not-assigned or fallback; got: %q", output)
 }

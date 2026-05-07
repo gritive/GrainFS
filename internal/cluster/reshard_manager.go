@@ -50,12 +50,20 @@ type Converter interface {
 	ResolvePlacement(ctx context.Context, bucket, key string, meta PlacementMeta) (ResolvedPlacement, error)
 }
 
+type reshardShardGroupLookup interface {
+	ShardGroup(id string) (ShardGroupEntry, bool)
+}
+
+var errReshardObjectBudget = errors.New("reshard object budget reached")
+
 // ReshardManager walks objects and triggers conversion from N× to EC.
 type ReshardManager struct {
 	backend  Converter
 	leader   Leader
 	interval time.Duration
 	logger   zerolog.Logger
+
+	maxObjectsPerRun int
 
 	totalConverted atomic.Uint64
 	totalSkipped   atomic.Uint64
@@ -95,12 +103,19 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 		return 0, 0, 0
 	}
 
-	currentCfg := m.backend.EffectiveECConfig()
 	var refs []ObjectMetaRef
+	limitReached := false
 	err := fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
+		if m.maxObjectsPerRun > 0 && len(refs) >= m.maxObjectsPerRun {
+			limitReached = true
+			return errReshardObjectBudget
+		}
 		refs = append(refs, ref)
 		return nil
 	})
+	if errors.Is(err, errReshardObjectBudget) {
+		err = nil
+	}
 	if err != nil {
 		m.logger.Warn().Err(err).Msg("reshard: iter failed")
 		return 0, 0, 1
@@ -108,6 +123,9 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 
 	for _, ref := range refs {
 		if ctx.Err() != nil {
+			break
+		}
+		if m.leader != nil && !m.leader.IsLeader() {
 			break
 		}
 		resolved, lookupErr := m.backend.ResolvePlacement(ctx, ref.Bucket, ref.Key, PlacementMeta{
@@ -137,23 +155,27 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 			continue
 		}
 		ecRec := resolved.Record
-		// Already EC. Check if stored k,m matches current effective config (EC→EC upgrade).
 		recK, recM := ecRec.K, ecRec.M
 		if recK == 0 {
-			// Legacy record without stored k,m; use current effective config as baseline.
-			recK, recM = currentCfg.DataShards, currentCfg.ParityShards
+			legacyCfg := m.backend.EffectiveECConfig()
+			recK, recM = legacyCfg.DataShards, legacyCfg.ParityShards
 		}
-		if recK == currentCfg.DataShards && recM == currentCfg.ParityShards {
+		desiredCfg, ok := m.desiredConfigForRef(ref)
+		if !ok || desiredCfg.NumShards() == 0 {
 			skipped++
 			continue
 		}
-		// k,m mismatch: cluster grew, upgrade this object's EC encoding.
-		if uerr := m.backend.upgradeObjectEC(ctx, ref.Bucket, ref.Key, ecRec, currentCfg); uerr != nil {
+		comparison := CompareECProfile(ECConfig{DataShards: recK, ParityShards: recM}, desiredCfg)
+		if comparison == ProfileEqual || comparison == ProfileHigher || comparison == ProfileUnknown {
+			skipped++
+			continue
+		}
+		if uerr := m.backend.upgradeObjectEC(ctx, ref.Bucket, ref.Key, ecRec, desiredCfg); uerr != nil {
 			errs++
 			m.totalErrors.Add(1)
 			m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).
 				Int("old_k", recK).Int("old_m", recM).
-				Int("new_k", currentCfg.DataShards).Int("new_m", currentCfg.ParityShards).
+				Int("new_k", desiredCfg.DataShards).Int("new_m", desiredCfg.ParityShards).
 				Err(uerr).Msg("reshard: EC upgrade failed")
 			continue
 		}
@@ -161,33 +183,11 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 		m.totalConverted.Add(1)
 		m.logger.Info().Str("bucket", ref.Bucket).Str("key", ref.Key).
 			Int("old_k", recK).Int("old_m", recM).
-			Int("new_k", currentCfg.DataShards).Int("new_m", currentCfg.ParityShards).
+			Int("new_k", desiredCfg.DataShards).Int("new_m", desiredCfg.ParityShards).
 			Msg("reshard: upgraded EC encoding")
 	}
-	// 링 리샤드 패스: RingVersion < currentRingVersion인 오브젝트를 현재 링으로 리샤드
-	currentRingVer := m.backend.CurrentRingVersion()
-	if currentRingVer > 0 {
-		for _, ref := range refs {
-			if ctx.Err() != nil {
-				break
-			}
-			if ref.RingVersion >= currentRingVer {
-				skipped++
-				continue
-			}
-			if err := m.backend.ReshardToRing(ctx, ref.Bucket, ref.Key, ref.RingVersion); err != nil {
-				errs++
-				m.totalErrors.Add(1)
-				m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).
-					Uint64("ring_ver", uint64(ref.RingVersion)).Err(err).Msg("reshard: ring-based reshard failed")
-				continue
-			}
-			converted++
-			m.totalConverted.Add(1)
-			m.logger.Info().Str("bucket", ref.Bucket).Str("key", ref.Key).
-				Uint64("old_ring", uint64(ref.RingVersion)).Uint64("new_ring", uint64(currentRingVer)).
-				Msg("reshard: resharded to new ring")
-		}
+	if limitReached {
+		m.logger.Debug().Int("max_objects", m.maxObjectsPerRun).Msg("reshard: pass stopped at object budget")
 	}
 	m.totalSkipped.Add(uint64(skipped))
 
@@ -195,6 +195,21 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 		m.logger.Info().Int("converted", converted).Int("skipped", skipped).Int("errors", errs).Msg("reshard: pass complete")
 	}
 	return converted, skipped, errs
+}
+
+func (m *ReshardManager) desiredConfigForRef(ref ObjectMetaRef) (ECConfig, bool) {
+	if ref.PlacementGroupID != "" {
+		lookup, ok := m.backend.(reshardShardGroupLookup)
+		if !ok {
+			return ECConfig{}, false
+		}
+		group, ok := lookup.ShardGroup(ref.PlacementGroupID)
+		if !ok {
+			return ECConfig{}, false
+		}
+		return DesiredECConfigForGroup(group), true
+	}
+	return m.backend.EffectiveECConfig(), true
 }
 
 // Start runs Run in a loop until ctx is cancelled.

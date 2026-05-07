@@ -73,6 +73,10 @@ type clusterObjectIndexSummary interface {
 	ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary
 }
 
+type clusterPlacementReporter interface {
+	PlacementReport(bucket, key string, maxRows int) cluster.PlacementReport
+}
+
 // ClusterMembership performs Raft membership mutations. nil-safe: when the
 // server runs in local mode the field is unset and the remove-peer endpoint
 // returns 503.
@@ -596,6 +600,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Cluster API (available in both local and cluster mode)
 	h.GET("/api/cluster/status", s.clusterStatus)
+	h.GET("/api/cluster/placement", s.clusterPlacement)
 	h.GET("/api/cache/status", s.cacheStatus)
 	h.POST("/api/cluster/join", s.joinClusterHandler)
 	h.POST("/api/cluster/remove-peer", localhostOnly(), s.removePeerHandler)

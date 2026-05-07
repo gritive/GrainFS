@@ -406,6 +406,11 @@ func parseReplyStatus(reply []byte) error {
 		return storage.ErrObjectNotFound
 	case raftpb.ForwardStatusEntityTooLarge:
 		return storage.ErrEntityTooLarge
+	case raftpb.ForwardStatusInsufficientPlacementTargets:
+		return &ErrInsufficientPlacementTargets{
+			Operation:     "forwarded_write",
+			FailureReason: "remote group reported insufficient placement targets",
+		}
 	case raftpb.ForwardStatusNotLeader:
 		// Should not reach caller — ForwardSender retries on hint.
 		return ErrNoReachablePeer

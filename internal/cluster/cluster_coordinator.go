@@ -427,6 +427,39 @@ func (c *ClusterCoordinator) routeGroup(groupID string) (routeTarget, error) {
 	return t, nil
 }
 
+func (c *ClusterCoordinator) routeDataGroupSnapshot(group ShardGroupEntry) (routeTarget, error) {
+	if err := ValidatePlacementGroupID(group.ID); err != nil {
+		return routeTarget{}, err
+	}
+	if len(group.PeerIDs) == 0 {
+		return routeTarget{}, ErrUnknownGroup
+	}
+	t := routeTarget{
+		groupID: group.ID,
+	}
+	_, t.selfIsVoter = NewShardGroupPeerSet(group).MatchLocal(c.selfID, c.selfAliases...)
+	t.selfIsOnlyVoter = t.selfIsVoter && len(group.PeerIDs) == 1
+	if t.selfIsVoter && c.groups != nil {
+		if dg := c.groups.Get(group.ID); dg != nil && dg.Backend() != nil &&
+			dg.Backend().RaftNode() != nil && dg.Backend().RaftNode().IsLeader() {
+			t.selfIsLeader = true
+		}
+	}
+	if t.selfIsLeader {
+		return t, nil
+	}
+	peers := NewShardGroupPeerSet(group).ForwardOrder(c.selfID, c.selfAliases...)
+	if c.addr != nil {
+		resolved, err := ResolveNodeAddresses(c.addr, peers)
+		if err != nil {
+			return routeTarget{}, err
+		}
+		peers = resolved
+	}
+	t.peers = peers
+	return t, nil
+}
+
 func (c *ClusterCoordinator) routeObjectLatest(bucket, key string) (routeTarget, ObjectIndexEntry, error) {
 	src, ok := c.meta.(objectIndexSource)
 	if !ok {
@@ -473,12 +506,32 @@ func (c *ClusterCoordinator) routeObjectWrite(bucket, key string) (routeTarget, 
 	if c.meta == nil {
 		return routeTarget{}, ShardGroupEntry{}, ErrCoordinatorNoRouter
 	}
+	if storage.IsInternalBucket(bucket) {
+		target, err := c.routeBucket(bucket)
+		return target, ShardGroupEntry{ID: target.groupID}, err
+	}
 	if c.indexWriter == nil && c.ecConfig.NumShards() == 0 {
 		target, err := c.routeBucket(bucket)
 		return target, ShardGroupEntry{ID: target.groupID}, err
 	}
 	group, err := SelectObjectPlacementGroup(bucket, key, c.meta.ShardGroups(), c.ecConfig)
 	if err != nil {
+		target, routeErr := c.routeBucket(bucket)
+		if routeErr == nil {
+			group, ok := c.meta.ShardGroup(target.groupID)
+			if ok {
+				return target, group, nil
+			}
+		}
+		if c.router != nil {
+			if dg, dgErr := c.router.RouteKey(bucket, ""); dgErr == nil && dg != nil {
+				group := ShardGroupEntry{ID: dg.ID(), PeerIDs: cloneStringSlice(dg.PeerIDs())}
+				target, targetErr := c.routeDataGroupSnapshot(group)
+				if targetErr == nil {
+					return target, group, nil
+				}
+			}
+		}
 		return routeTarget{}, ShardGroupEntry{}, err
 	}
 	target, err := c.routeGroup(group.ID)
@@ -501,7 +554,7 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 		ModTime:          obj.LastModified,
 		ECData:           uint8(ecConfig.DataShards),
 		ECParity:         uint8(ecConfig.ParityShards),
-		NodeIDs:          cloneStringSlice(group.PeerIDs),
+		NodeIDs:          objectIndexNodeIDsForGroup(group, ecConfig),
 		IsDeleteMarker:   isDeleteMarker,
 	}
 	return c.indexWriter.ProposeObjectIndex(ctx, entry, false)
@@ -509,6 +562,21 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 
 func objectIndexECConfigForGroup(group ShardGroupEntry) ECConfig {
 	return AutoECConfigForClusterSize(len(group.PeerIDs))
+}
+
+func objectIndexNodeIDsForGroup(group ShardGroupEntry, cfg ECConfig) []string {
+	n := cfg.NumShards()
+	if n > 0 && len(group.PeerIDs) >= n {
+		return cloneStringSlice(group.PeerIDs[:n])
+	}
+	return cloneStringSlice(group.PeerIDs)
+}
+
+func contextWithObjectWritePlacement(ctx context.Context, group ShardGroupEntry) context.Context {
+	if len(group.PeerIDs) == 0 {
+		return ContextWithPlacementGroup(ctx, group.ID)
+	}
+	return ContextWithPlacementGroupEntry(ctx, group)
 }
 
 func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
@@ -988,7 +1056,7 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 		return nil, err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
 	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
 		if err != nil {
@@ -1017,7 +1085,7 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
 	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
 		if err != nil {
@@ -1052,7 +1120,7 @@ func (c *ClusterCoordinator) PutObject(
 		return nil, err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
 	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
 		if err != nil {

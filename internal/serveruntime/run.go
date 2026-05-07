@@ -958,7 +958,7 @@ func Run(ctx context.Context, cfg Config) error {
 		// updates via performMetaJoin. The node initialised at line 872 is a
 		// legacy per-process raft instance whose Peers() never grows on join.
 		server.WithClusterInfo(NewRaftClusterInfo(metaRaft.Node(), peers, distBackend, metaRaft.FSM())),
-		server.WithClusterMembership(NewRaftMembership(metaRaft.Node())),
+		server.WithClusterMembership(NewRaftMembership(metaRaft.Node(), metaRaft.FSM())),
 		server.WithEventStore(eventstore.New(db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),

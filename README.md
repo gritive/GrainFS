@@ -112,6 +112,19 @@ Flags:
 | 7 | 5+2 |
 | 8+ | 6+2 |
 
+Object writes derive their desired EC profile from the selected placement
+group's configured voters. Temporary target loss does not lower durability; the
+write fails with S3 `503 ServiceUnavailable` until all required targets are
+writable. Operators can inspect actual-vs-desired layouts with:
+
+```bash
+grainfs cluster --endpoint <data-dir>/admin.sock placement
+grainfs cluster --endpoint <data-dir>/admin.sock placement <bucket> <key> --format json
+```
+
+The same report is available from the admin socket at `/v1/cluster/placement`
+and from the HTTP admin API at `/api/cluster/placement`.
+
 ### Recovery Commands
 
 ```bash

@@ -115,6 +115,8 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusRequestEntityTooLarge, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size")
 	case errors.Is(err, storage.ErrForwardBackpressure):
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "too many forwarded upload streams in flight")
+	case errors.Is(err, cluster.ErrPlacementTargetsUnavailable):
+		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
 	case errors.Is(err, storage.ErrUnsupportedOperation):
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", err.Error())
 	default:
@@ -1239,6 +1241,40 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 
 	data, _ := json.Marshal(status)
 	c.Data(consts.StatusOK, "application/json", data)
+}
+
+func (s *Server) clusterPlacement(ctx context.Context, c *app.RequestContext) {
+	bucket := string(c.QueryArgs().Peek("bucket"))
+	key := string(c.QueryArgs().Peek("key"))
+	limit := 100
+	if raw := string(c.QueryArgs().Peek("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = n
+	}
+	if key != "" && bucket == "" {
+		c.JSON(consts.StatusBadRequest, map[string]string{"error": "key filter requires bucket"})
+		return
+	}
+	empty := cluster.PlacementReport{
+		DesiredPolicyBasis:  "group_voter_count",
+		Bucket:              bucket,
+		Key:                 key,
+		ActualProfileCounts: map[string]int{},
+	}
+	if s.cluster == nil {
+		c.JSON(consts.StatusOK, empty)
+		return
+	}
+	reporter, ok := s.cluster.(clusterPlacementReporter)
+	if !ok {
+		c.JSON(consts.StatusOK, empty)
+		return
+	}
+	c.JSON(consts.StatusOK, reporter.PlacementReport(bucket, key, limit))
 }
 
 type clusterStatusShardGroup struct {
