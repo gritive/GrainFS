@@ -38,6 +38,24 @@ func (f *fakeProposer) calledKeyRevoke(ak string) bool {
 	return false
 }
 
+func (f *fakeProposer) calledGrantPut(saID, bucket string) bool {
+	for _, c := range f.calls {
+		if c == "GrantPut:"+saID+":"+bucket {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeProposer) calledGrantDelete(saID, bucket string) bool {
+	for _, c := range f.calls {
+		if c == "GrantDelete:"+saID+":"+bucket {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeProposer) ProposeSACreate(ctx context.Context, sa ServiceAccount) error {
 	f.calls = append(f.calls, "SACreate:"+sa.ID)
 	return nil

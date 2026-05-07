@@ -215,3 +215,138 @@ func TestAdminAPI_KeyRevoke_WrongSA(t *testing.T) {
 		t.Errorf("status = %d, want 404 for cross-SA revoke", w.Code)
 	}
 }
+
+func TestAdminAPI_GrantPut(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1"})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	body, _ := json.Marshal(GrantPutRequest{SAID: "sa-1", Bucket: "bk-1", Role: "Write"})
+	req := httptest.NewRequest("PUT", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantPut(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if !p.calledGrantPut("sa-1", "bk-1") {
+		t.Errorf("ProposeGrantPut not called")
+	}
+}
+
+func TestAdminAPI_GrantPut_RejectWildcard(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1"})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+	body, _ := json.Marshal(GrantPutRequest{SAID: "sa-1", Bucket: WildcardBucket, Role: "Read"})
+	req := httptest.NewRequest("PUT", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantPut(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestAdminAPI_GrantPut_BadRole(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1"})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+	body, _ := json.Marshal(GrantPutRequest{SAID: "sa-1", Bucket: "b", Role: "Owner"})
+	req := httptest.NewRequest("PUT", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantPut(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestAdminAPI_GrantPut_SAMissing(t *testing.T) {
+	api := NewAdminAPI(NewStore(), newFakeProposer(), newTestEncryptor(t))
+	body, _ := json.Marshal(GrantPutRequest{SAID: "missing", Bucket: "b", Role: "Read"})
+	req := httptest.NewRequest("PUT", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantPut(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestAdminAPI_GrantPut_MissingFields(t *testing.T) {
+	api := NewAdminAPI(NewStore(), newFakeProposer(), newTestEncryptor(t))
+	body, _ := json.Marshal(GrantPutRequest{SAID: "sa-1"})
+	req := httptest.NewRequest("PUT", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantPut(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestAdminAPI_GrantDelete(t *testing.T) {
+	p := newFakeProposer()
+	api := NewAdminAPI(NewStore(), p, newTestEncryptor(t))
+	body, _ := json.Marshal(GrantDeleteRequest{SAID: "sa-1", Bucket: "bk-1"})
+	req := httptest.NewRequest("DELETE", "/admin/iam/grant", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleGrantDelete(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if !p.calledGrantDelete("sa-1", "bk-1") {
+		t.Errorf("ProposeGrantDelete not called")
+	}
+}
+
+func TestAdminAPI_GrantList_All(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1"})
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "b1", Role: RoleRead})
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "b2", Role: RoleWrite})
+	store.applyGrantWildcardPut(Grant{SAID: "sa-1", Role: RoleAdmin})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+
+	req := httptest.NewRequest("GET", "/admin/iam/grant", nil)
+	w := httptest.NewRecorder()
+	api.HandleGrantList(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var items []GrantListItem
+	_ = json.Unmarshal(w.Body.Bytes(), &items)
+	if len(items) != 3 {
+		t.Errorf("len = %d, want 3 (b1, b2, *), got %v", len(items), items)
+	}
+}
+
+func TestAdminAPI_GrantList_FilterBySA(t *testing.T) {
+	store := NewStore()
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "b1", Role: RoleRead})
+	store.applyGrantPut(Grant{SAID: "sa-2", Bucket: "b1", Role: RoleWrite})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+	req := httptest.NewRequest("GET", "/admin/iam/grant?sa=sa-1", nil)
+	w := httptest.NewRecorder()
+	api.HandleGrantList(w, req)
+	var items []GrantListItem
+	_ = json.Unmarshal(w.Body.Bytes(), &items)
+	if len(items) != 1 || items[0].SAID != "sa-1" {
+		t.Errorf("filter sa=sa-1: got %v", items)
+	}
+}
+
+func TestAdminAPI_GrantList_FilterByBucket(t *testing.T) {
+	store := NewStore()
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "b1", Role: RoleRead})
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "b2", Role: RoleRead})
+	store.applyGrantWildcardPut(Grant{SAID: "sa-1", Role: RoleAdmin})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+	req := httptest.NewRequest("GET", "/admin/iam/grant?bucket=b1", nil)
+	w := httptest.NewRecorder()
+	api.HandleGrantList(w, req)
+	var items []GrantListItem
+	_ = json.Unmarshal(w.Body.Bytes(), &items)
+	// bucket filter excludes wildcards (per plan: "bucketFilter == \"\" loop wildcards")
+	if len(items) != 1 || items[0].Bucket != "b1" {
+		t.Errorf("filter bucket=b1: got %v", items)
+	}
+}

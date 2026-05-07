@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -218,6 +219,115 @@ func (a *AdminAPI) HandleKeyRevoke(w http.ResponseWriter, r *http.Request, saID,
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type GrantPutRequest struct {
+	SAID   string `json:"sa_id"`
+	Bucket string `json:"bucket"`
+	Role   string `json:"role"`
+}
+
+type GrantDeleteRequest struct {
+	SAID   string `json:"sa_id"`
+	Bucket string `json:"bucket"`
+}
+
+type GrantListItem struct {
+	SAID   string `json:"sa_id"`
+	Bucket string `json:"bucket"`
+	Role   string `json:"role"`
+}
+
+func (a *AdminAPI) HandleGrantPut(w http.ResponseWriter, r *http.Request) {
+	var req GrantPutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.SAID == "" || req.Bucket == "" || req.Role == "" {
+		http.Error(w, "sa_id, bucket, role required", http.StatusBadRequest)
+		return
+	}
+	if req.Bucket == WildcardBucket {
+		// P3 guard — wildcard grants are reserved for the bootstrap default SA.
+		http.Error(w, "wildcard grant is reserved for bootstrap default SA only", http.StatusForbidden)
+		return
+	}
+	role, err := parseRoleString(req.Role)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, ok := a.store.LookupSA(req.SAID); !ok {
+		http.Error(w, "SA not found", http.StatusNotFound)
+		return
+	}
+	g := Grant{
+		SAID: req.SAID, Bucket: req.Bucket, Role: role,
+		CreatedAt: time.Now().UTC(),
+		CreatedBy: PrincipalFromContext(r.Context()),
+	}
+	if err := a.proposer.ProposeGrantPut(r.Context(), g); err != nil {
+		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *AdminAPI) HandleGrantDelete(w http.ResponseWriter, r *http.Request) {
+	var req GrantDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := a.proposer.ProposeGrantDelete(r.Context(), req.SAID, req.Bucket); err != nil {
+		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleGrantList serves both ?sa= and ?bucket= filters. Linear scan over the
+// in-memory state — sub-ms up to ~1000 SAs per design doc.
+func (a *AdminAPI) HandleGrantList(w http.ResponseWriter, r *http.Request) {
+	saFilter := r.URL.Query().Get("sa")
+	bucketFilter := r.URL.Query().Get("bucket")
+	st := a.store.snapshot()
+	out := make([]GrantListItem, 0)
+	for saID, per := range st.grants {
+		if saFilter != "" && saFilter != saID {
+			continue
+		}
+		for bucket, role := range per {
+			if bucketFilter != "" && bucketFilter != bucket {
+				continue
+			}
+			out = append(out, GrantListItem{SAID: saID, Bucket: bucket, Role: role.String()})
+		}
+	}
+	if bucketFilter == "" {
+		for saID, role := range st.wildcards {
+			if saFilter != "" && saFilter != saID {
+				continue
+			}
+			out = append(out, GrantListItem{SAID: saID, Bucket: WildcardBucket, Role: role.String()})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func parseRoleString(s string) (Role, error) {
+	switch s {
+	case "Read":
+		return RoleRead, nil
+	case "Write":
+		return RoleWrite, nil
+	case "Admin":
+		return RoleAdmin, nil
+	default:
+		return RoleNone, fmt.Errorf("invalid role %q (want Read|Write|Admin)", s)
+	}
 }
 
 // genCredentialPair returns a (access_key, secret_key) pair. AKGF prefix
