@@ -27,13 +27,13 @@ var volumeCmd = &cobra.Command{
 var volumeListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all volumes",
-	Example: `  # 기본 표 형식
+	Example: `  # Default tabular output
   grainfs volume list
 
-  # JSON 출력 (스크립팅용)
+  # JSON output (for scripting)
   grainfs volume list --json
 
-  # 원시 바이트 단위 (raw int)
+  # Raw byte values (no IEC suffixes)
   grainfs volume list --bytes`,
 	RunE: runVolumeList,
 }
@@ -42,13 +42,13 @@ var volumeCreateCmd = &cobra.Command{
 	Use:   "create <name>",
 	Short: "Create a new volume",
 	Args:  cobra.ExactArgs(1),
-	Example: `  # 1 GiB 볼륨 생성 (binary 1024^3)
+	Example: `  # Create a 1 GiB volume (binary, 1024^3)
   grainfs volume create v1 --size 1Gi
 
-  # 1 GB 볼륨 생성 (decimal 1000^3)
+  # Create a 1 GB volume (decimal, 1000^3)
   grainfs volume create v2 --size 1GB
 
-  # 절대 바이트 지정
+  # Specify the size in bytes
   grainfs volume create v3 --size 1073741824`,
 	RunE: runVolumeCreate,
 }
@@ -73,10 +73,10 @@ var volumeDeleteCmd = &cobra.Command{
 	Use:   "delete <name>",
 	Short: "Delete a volume (refuses if snapshots exist; --force cascades)",
 	Args:  cobra.ExactArgs(1),
-	Example: `  # snapshot 없는 볼륨 삭제
+	Example: `  # Delete a volume that has no snapshots
   grainfs volume delete v1
 
-  # snapshot까지 일괄 삭제
+  # Cascade-delete the volume and all its snapshots
   grainfs volume delete v1 --force`,
 	RunE: runVolumeDelete,
 }
@@ -85,7 +85,7 @@ var volumeResizeCmd = &cobra.Command{
 	Use:   "resize <name>",
 	Short: "Resize a volume (grow only — shrink is rejected)",
 	Args:  cobra.ExactArgs(1),
-	Example: `  # 2 GiB로 늘림
+	Example: `  # Grow to 2 GiB
   grainfs volume resize v1 --size 2Gi`,
 	RunE: runVolumeResize,
 }
