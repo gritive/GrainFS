@@ -521,6 +521,25 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		}
 		// Propagate identity to downstream handlers
 		ctx = WithAccessKey(ctx, accessKey)
+
+		// Resolve IAM principal when IAM is wired. Empty principal in
+		// context means anonymous (legacy WithAuth) or pre-bootstrap
+		// flag-mode (IAM still empty); both are valid.
+		if s.iamStore != nil {
+			saID, ok := iam.ResolveSA(s.iamStore, accessKey)
+			if !ok && s.iamStore.AuthEnabled() {
+				// Sticky auth_enabled is on but the SigV4-verified key is
+				// not (or no longer) in IAM — e.g. revoked between Verify
+				// and Resolve, or a flag-mode static credential that was
+				// not bootstrapped. Fail closed.
+				writeXMLError(c, consts.StatusUnauthorized, "InvalidAccessKeyId", "")
+				c.Abort()
+				return
+			}
+			if ok {
+				ctx = iam.WithPrincipal(ctx, saID)
+			}
+		}
 		c.Next(ctx)
 	}
 }
