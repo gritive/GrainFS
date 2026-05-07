@@ -1,0 +1,66 @@
+// internal/iam/iampb/iam.fbs — IAM payload schema for cluster-internal RPC.
+// Used as the body of MetaCmd entries for IAM state mutations.
+
+namespace iampb;
+
+enum Role : ubyte {
+  None  = 0,
+  Read  = 1,
+  Write = 2,
+  Admin = 3,
+}
+
+enum KeyStatus : ubyte {
+  Active  = 1,
+  Revoked = 2,
+}
+
+table SACreatePayload {
+  sa_id:        string;
+  name:         string;
+  description:  string;
+  created_at_unix_ns: int64;
+  created_by:   string;
+}
+
+table SADeletePayload {
+  sa_id: string;
+}
+
+table KeyCreatePayload {
+  access_key:        string;
+  secret_key_enc:    [ubyte]; // AES-256-GCM ciphertext, AAD = sa_id
+  sa_id:             string;
+  created_at_unix_ns: int64;
+  expires_at_unix_ns: int64;  // 0 = never
+}
+
+table KeyRevokePayload {
+  access_key: string;
+}
+
+table GrantPutPayload {
+  sa_id:      string;
+  bucket:     string;
+  role:       Role;
+  created_at_unix_ns: int64;
+  created_by: string;
+}
+
+table GrantDeletePayload {
+  sa_id:  string;
+  bucket: string;
+}
+
+table GrantWildcardPutPayload {
+  sa_id:      string;
+  role:       Role;
+  created_at_unix_ns: int64;
+  created_by: string;
+}
+
+table AuthEnablePayload {
+  // no fields — presence in raft log marks the sticky transition.
+}
+
+root_type SACreatePayload;
