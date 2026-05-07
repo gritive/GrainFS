@@ -49,6 +49,7 @@ const (
 	MetaCmdTypeIAMGrantDelete         = clusterpb.MetaCmdTypeIAMGrantDelete
 	MetaCmdTypeIAMGrantWildcardPut    = clusterpb.MetaCmdTypeIAMGrantWildcardPut
 	MetaCmdTypeIAMAuthEnable          = clusterpb.MetaCmdTypeIAMAuthEnable
+	MetaCmdTypeIAMGrantWildcardDelete = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -312,6 +313,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantDelete)
 	case clusterpb.MetaCmdTypeIAMGrantWildcardPut:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardPut)
+	case clusterpb.MetaCmdTypeIAMGrantWildcardDelete:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardDelete)
 	case clusterpb.MetaCmdTypeIAMAuthEnable:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyAuthEnable)
 	default:

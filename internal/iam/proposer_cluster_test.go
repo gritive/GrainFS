@@ -30,6 +30,7 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 	_ = p.ProposeGrantPut(ctx, Grant{SAID: "sa-1", Bucket: "b", Role: RoleRead})
 	_ = p.ProposeGrantDelete(ctx, "sa-1", "b")
 	_ = p.ProposeGrantWildcardPut(ctx, Grant{SAID: "sa-1", Role: RoleAdmin})
+	_ = p.ProposeGrantWildcardDelete(ctx, "sa-1")
 	_ = p.ProposeAuthEnable(ctx)
 
 	want := []clusterpb.MetaCmdType{
@@ -40,6 +41,7 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 		clusterpb.MetaCmdTypeIAMGrantPut,
 		clusterpb.MetaCmdTypeIAMGrantDelete,
 		clusterpb.MetaCmdTypeIAMGrantWildcardPut,
+		clusterpb.MetaCmdTypeIAMGrantWildcardDelete,
 		clusterpb.MetaCmdTypeIAMAuthEnable,
 	}
 	// AuthEnable always captured (even though payload may be small)

@@ -25,6 +25,7 @@ type Proposer interface {
 	ProposeGrantPut(ctx context.Context, g Grant) error
 	ProposeGrantDelete(ctx context.Context, saID, bucket string) error
 	ProposeGrantWildcardPut(ctx context.Context, g Grant) error
+	ProposeGrantWildcardDelete(ctx context.Context, saID string) error
 	ProposeAuthEnable(ctx context.Context) error
 }
 

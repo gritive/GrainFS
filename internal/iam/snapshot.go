@@ -271,6 +271,15 @@ func buildKeyRevokePayload(accessKey string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildGrantWildcardDeletePayload(saID string) []byte {
+	b := flatbuffers.NewBuilder(32)
+	saOff := b.CreateString(saID)
+	iampb.GrantWildcardDeletePayloadStart(b)
+	iampb.GrantWildcardDeletePayloadAddSaId(b, saOff)
+	b.Finish(iampb.GrantWildcardDeletePayloadEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildGrantDeletePayload(saID, bucket string) []byte {
 	b := flatbuffers.NewBuilder(64)
 	saOff := b.CreateString(saID)

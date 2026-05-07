@@ -56,6 +56,15 @@ func (f *fakeProposer) calledGrantDelete(saID, bucket string) bool {
 	return false
 }
 
+func (f *fakeProposer) calledGrantWildcardDelete(saID string) bool {
+	for _, c := range f.calls {
+		if c == "GrantWildcardDelete:"+saID {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeProposer) ProposeSACreate(ctx context.Context, sa ServiceAccount) error {
 	f.calls = append(f.calls, "SACreate:"+sa.ID)
 	return nil
@@ -82,6 +91,10 @@ func (f *fakeProposer) ProposeGrantDelete(ctx context.Context, saID, bucket stri
 }
 func (f *fakeProposer) ProposeGrantWildcardPut(ctx context.Context, g Grant) error {
 	f.calls = append(f.calls, "GrantWildcard:"+g.SAID)
+	return nil
+}
+func (f *fakeProposer) ProposeGrantWildcardDelete(ctx context.Context, saID string) error {
+	f.calls = append(f.calls, "GrantWildcardDelete:"+saID)
 	return nil
 }
 func (f *fakeProposer) ProposeAuthEnable(ctx context.Context) error {

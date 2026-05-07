@@ -75,6 +75,17 @@ func (s *Store) LookupGrant(saID, bucket string) Role {
 	return RoleNone
 }
 
+// NumExplicitGrants returns the number of per-bucket (non-wildcard) grants
+// currently held by saID. Used by admin guards that need to reason about
+// access loss before mutating wildcard grants.
+func (s *Store) NumExplicitGrants(saID string) int {
+	st := s.snapshot()
+	if per, ok := st.grants[saID]; ok {
+		return len(per)
+	}
+	return 0
+}
+
 // LookupSA returns the ServiceAccount metadata or (nil, false).
 func (s *Store) LookupSA(saID string) (*ServiceAccount, bool) {
 	st := s.snapshot()

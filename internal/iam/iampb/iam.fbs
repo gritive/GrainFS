@@ -59,6 +59,10 @@ table GrantWildcardPutPayload {
   created_by: string;
 }
 
+table GrantWildcardDeletePayload {
+  sa_id: string;
+}
+
 table AuthEnablePayload {
   // no fields — presence in raft log marks the sticky transition.
 }

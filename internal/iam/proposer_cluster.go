@@ -47,6 +47,10 @@ func (m *MetaProposer) ProposeGrantWildcardPut(ctx context.Context, g Grant) err
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMGrantWildcardPut, buildGrantWildcardPutPayload(g))
 }
 
+func (m *MetaProposer) ProposeGrantWildcardDelete(ctx context.Context, saID string) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMGrantWildcardDelete, buildGrantWildcardDeletePayload(saID))
+}
+
 func (m *MetaProposer) ProposeAuthEnable(ctx context.Context) error {
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMAuthEnable, buildAuthEnablePayload())
 }

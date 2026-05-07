@@ -36,6 +36,7 @@ const (
 	MetaCmdTypeIAMGrantDelete         MetaCmdType = 26
 	MetaCmdTypeIAMGrantWildcardPut    MetaCmdType = 27
 	MetaCmdTypeIAMAuthEnable          MetaCmdType = 28
+	MetaCmdTypeIAMGrantWildcardDelete MetaCmdType = 29
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -68,6 +69,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeIAMGrantDelete:         "IAMGrantDelete",
 	MetaCmdTypeIAMGrantWildcardPut:    "IAMGrantWildcardPut",
 	MetaCmdTypeIAMAuthEnable:          "IAMAuthEnable",
+	MetaCmdTypeIAMGrantWildcardDelete: "IAMGrantWildcardDelete",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -100,6 +102,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"IAMGrantDelete":         MetaCmdTypeIAMGrantDelete,
 	"IAMGrantWildcardPut":    MetaCmdTypeIAMGrantWildcardPut,
 	"IAMAuthEnable":          MetaCmdTypeIAMAuthEnable,
+	"IAMGrantWildcardDelete": MetaCmdTypeIAMGrantWildcardDelete,
 }
 
 func (v MetaCmdType) String() string {

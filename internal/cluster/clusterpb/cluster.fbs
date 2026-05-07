@@ -246,6 +246,7 @@ enum MetaCmdType : uint8 {
   IAMGrantDelete        = 26, // IAM: Grant remove
   IAMGrantWildcardPut   = 27, // IAM: Wildcard grant (bootstrap default SA only)
   IAMAuthEnable         = 28, // IAM: sticky auth_enabled bit transition
+  IAMGrantWildcardDelete = 29, // IAM: Wildcard grant remove (admin-only)
 }
 
 table MetaNodeEntry {

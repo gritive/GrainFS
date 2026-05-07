@@ -145,6 +145,18 @@ func (a *Applier) ApplyGrantWildcardPut(payload []byte) error {
 	return nil
 }
 
+// ApplyGrantWildcardDelete removes the wildcard grant for the given SA.
+// Idempotent on missing entries.
+func (a *Applier) ApplyGrantWildcardDelete(payload []byte) error {
+	p := iampb.GetRootAsGrantWildcardDeletePayload(payload, 0)
+	saID := string(p.SaId())
+	if saID == "" {
+		return fmt.Errorf("iam: GrantWildcardDelete missing sa_id")
+	}
+	a.store.applyGrantWildcardDelete(saID)
+	return nil
+}
+
 // ApplyAuthEnable flips the sticky auth_enabled bit. Idempotent.
 // Payload has no fields; presence in the raft log is the signal.
 func (a *Applier) ApplyAuthEnable(_ []byte) error {

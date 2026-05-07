@@ -297,6 +297,27 @@ func (a *AdminAPI) HandleGrantDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.SAID == "" || req.Bucket == "" {
+		http.Error(w, "sa_id and bucket required", http.StatusBadRequest)
+		return
+	}
+	if req.Bucket == WildcardBucket {
+		// Footgun guard: refuse if removing this would leave sa-default with
+		// zero grants while auth_enabled is sticky-on. Operators who want to
+		// downgrade sa-default to per-bucket access must FIRST issue at least
+		// one explicit grant (e.g., via CreateBucket or admin grant put), then
+		// remove the wildcard.
+		if req.SAID == DefaultSAID && a.store.NumExplicitGrants(req.SAID) == 0 {
+			http.Error(w, "refusing to remove wildcard from sa-default with no explicit grants — issue at least one explicit grant first to avoid lockout", http.StatusConflict)
+			return
+		}
+		if err := a.proposer.ProposeGrantWildcardDelete(r.Context(), req.SAID); err != nil {
+			http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if err := a.proposer.ProposeGrantDelete(r.Context(), req.SAID, req.Bucket); err != nil {
 		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
 		return
