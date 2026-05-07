@@ -64,6 +64,11 @@ group voter expansion. If dynamic join has not yet made a node part of an object
 write group, that node must not widen the group's EC profile. Dynamic voter
 expansion remains a separate lifecycle problem.
 
+Object index metadata must record the EC profile derived from the selected
+placement group's write-node set, not from the coordinator process's local peer
+view. This keeps any-node writes safe when an edge node routes a PUT to a data
+group whose voter set is wider than the edge node's local `peers` list.
+
 Startup logs and status output should show the effective profile, not a
 configured profile:
 
@@ -120,6 +125,8 @@ reshard code still need the stored profile to interpret existing objects.
 
 - `grainfs serve --help` no longer shows `--ec-data` or `--ec-parity`.
 - Server startup always uses `AutoECConfigForClusterSize`.
+- Object index writes store `ECData` and `ECParity` derived from the selected
+  placement group's voter count.
 - The auto profile table above is covered by unit tests.
 - E2E harnesses and benchmark scripts no longer pass removed EC flags.
 - README documents automatic EC selection and the three-node production
