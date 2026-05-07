@@ -9,6 +9,17 @@ type fakeProposer struct {
 	calls []string
 }
 
+func newFakeProposer() *fakeProposer { return &fakeProposer{} }
+
+func (f *fakeProposer) calledSADelete(saID string) bool {
+	for _, c := range f.calls {
+		if c == "SADelete:"+saID {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeProposer) ProposeSACreate(ctx context.Context, sa ServiceAccount) error {
 	f.calls = append(f.calls, "SACreate:"+sa.ID)
 	return nil
