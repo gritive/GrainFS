@@ -42,11 +42,14 @@ var volumeCreateCmd = &cobra.Command{
 	Use:   "create <name>",
 	Short: "Create a new volume",
 	Args:  cobra.ExactArgs(1),
-	Example: `  # 1 GiB 볼륨 생성
-  grainfs volume create v1 --size 1G
+	Example: `  # 1 GiB 볼륨 생성 (binary 1024^3)
+  grainfs volume create v1 --size 1Gi
+
+  # 1 GB 볼륨 생성 (decimal 1000^3)
+  grainfs volume create v2 --size 1GB
 
   # 절대 바이트 지정
-  grainfs volume create v2 --size 1073741824`,
+  grainfs volume create v3 --size 1073741824`,
 	RunE: runVolumeCreate,
 }
 
@@ -83,7 +86,7 @@ var volumeResizeCmd = &cobra.Command{
 	Short: "Resize a volume (grow only — shrink is rejected)",
 	Args:  cobra.ExactArgs(1),
 	Example: `  # 2 GiB로 늘림
-  grainfs volume resize v1 --size 2G`,
+  grainfs volume resize v1 --size 2Gi`,
 	RunE: runVolumeResize,
 }
 
@@ -205,8 +208,8 @@ func init() {
 	pf.Bool("bytes", false, "show sizes as raw byte counts (alias: --raw)")
 	pf.Bool("raw", false, "alias for --bytes")
 
-	volumeCreateCmd.Flags().String("size", "", "volume size (1G/1Gi/100M/raw bytes)")
-	volumeResizeCmd.Flags().String("size", "", "new size (must be >= current)")
+	volumeCreateCmd.Flags().String("size", "", `volume size — binary "1Gi"/"100Mi" (1024^n) or decimal "1GB"/"100MB" (1000^n); bare "1G"/"1M" rejected as ambiguous`)
+	volumeResizeCmd.Flags().String("size", "", `new size (must be >= current); same units as create`)
 	volumeDeleteCmd.Flags().Bool("force", false, "cascade-delete all snapshots")
 	volumeWriteAtCmd.Flags().Int64("offset", 0, "byte offset")
 	volumeWriteAtCmd.Flags().String("content", "", "bytes to write (string)")
