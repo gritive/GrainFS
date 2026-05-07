@@ -118,7 +118,10 @@ type Server struct {
 	// iamStore is the cluster IAM state container. Used by the auth/authz
 	// middlewares to resolve principals and check grants. nil in anonymous
 	// mode; set via WithIAMStore.
-	iamStore       *iam.Store
+	iamStore *iam.Store
+	// iamAudit logs IAM authz decisions. nil-safe: RecordAllow/RecordDeny
+	// are no-ops when this is nil. Wired by WithIAMAudit (Task 17).
+	iamAudit       *iam.AuditLogger
 	hertz          *server.Hertz
 	hub            *Hub
 	volMgr         *volume.Manager
