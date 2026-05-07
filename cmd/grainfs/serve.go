@@ -243,5 +243,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
 	cfg := buildClusterConfig(cmd, addr, dataDir, nodeID, raftAddr, clusterKey, authOpts, shardEncryptor, iamStore, iamApplier)
+	cfg.BootstrapAccessKey = accessKey
+	cfg.BootstrapSecretKey = secretKey
 	return serveruntime.Run(ctx, cfg)
 }

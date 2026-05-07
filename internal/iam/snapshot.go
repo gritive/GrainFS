@@ -253,6 +253,42 @@ func buildGrantWildcardPutPayload(g Grant) []byte {
 	return b.FinishedBytes()
 }
 
+func buildSADeletePayload(saID string) []byte {
+	b := flatbuffers.NewBuilder(32)
+	idOff := b.CreateString(saID)
+	iampb.SADeletePayloadStart(b)
+	iampb.SADeletePayloadAddSaId(b, idOff)
+	b.Finish(iampb.SADeletePayloadEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildKeyRevokePayload(accessKey string) []byte {
+	b := flatbuffers.NewBuilder(32)
+	akOff := b.CreateString(accessKey)
+	iampb.KeyRevokePayloadStart(b)
+	iampb.KeyRevokePayloadAddAccessKey(b, akOff)
+	b.Finish(iampb.KeyRevokePayloadEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildGrantDeletePayload(saID, bucket string) []byte {
+	b := flatbuffers.NewBuilder(64)
+	saOff := b.CreateString(saID)
+	bkOff := b.CreateString(bucket)
+	iampb.GrantDeletePayloadStart(b)
+	iampb.GrantDeletePayloadAddSaId(b, saOff)
+	iampb.GrantDeletePayloadAddBucket(b, bkOff)
+	b.Finish(iampb.GrantDeletePayloadEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildAuthEnablePayload() []byte {
+	b := flatbuffers.NewBuilder(8)
+	iampb.AuthEnablePayloadStart(b)
+	b.Finish(iampb.AuthEnablePayloadEnd(b))
+	return b.FinishedBytes()
+}
+
 func writeUint32(w io.Writer, v uint32) error {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], v)

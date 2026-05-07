@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
@@ -336,6 +337,15 @@ func Run(ctx context.Context, cfg Config) error {
 	// SetIAM is nil-safe for iamApplier (--no-encryption mode).
 	if cfg.IAMStore != nil && cfg.IAMApplier != nil {
 		metaRaft.FSM().SetIAM(cfg.IAMStore, cfg.IAMApplier)
+	}
+
+	// Phase 2 IAM bootstrap: propose default SA+key+grant+AuthEnable so
+	// --access-key/--secret-key continues to work after IAM is wired.
+	if cfg.IAMStore != nil && cfg.IAMApplier != nil && cfg.BootstrapAccessKey != "" && cfg.BootstrapSecretKey != "" && cfg.Encryptor != nil {
+		proposer := &iam.MetaProposer{Propose: metaRaft.Propose}
+		if err := iam.Bootstrap(ctx, cfg.IAMStore, proposer, cfg.BootstrapAccessKey, cfg.BootstrapSecretKey, metaRaft.IsLeader(), cfg.Encryptor); err != nil {
+			return fmt.Errorf("iam bootstrap: %w", err)
+		}
 	}
 
 	// PR-D: DataGroupManager + Router — created before metaRaft.Start() so the
