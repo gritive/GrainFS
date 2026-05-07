@@ -1,5 +1,73 @@
 # Changelog
 
+## [0.0.81.0] - 2026-05-07 — hot bucket object placement
+
+### Added
+
+- Hot buckets can now spread new object writes across normal EC-capable data
+  groups using object-level placement instead of pinning all object traffic to
+  the bucket assignment group.
+- Meta-Raft now stores a global object index with placement group, version, EC
+  profile, node list, and delete-marker metadata so object reads, deletes,
+  version reads, multipart completion, copy-through-write, Range `ReadAt`,
+  `ListObjects`, `ListObjectVersions`, and `WalkObjects` can route from the
+  object index.
+- Cluster status and the topology GET benchmark now expose object placement
+  distribution so operators can see whether a hot bucket is spreading across
+  placement groups.
+- ADR 0004 records the object-level placement decision and the dual-write
+  reconcile model.
+
+### Changed
+
+- Cluster object writes now require the EC pipeline when running through
+  placement groups, and explicit EC profiles fail fast when the selected group
+  cannot fit `k+m` shards.
+- Zero-config EC now scales from active cluster size, including the single-node
+  `1+0` profile and progressively wider profiles for larger clusters.
+- VFS/internal bucket fixed-version special-casing is removed from the cluster
+  object write path as part of the EC-only placement model.
+
+### Fixed
+
+- LIST-style reads now enumerate from the object index, so objects written into
+  different placement groups within the same bucket are visible together.
+- Hard `DeleteObjectVersion` now removes the corresponding meta object-index
+  row and recomputes the latest pointer.
+- Object-index orphan detection scans group-local metadata directly, so it can
+  still find data-group objects that are missing from the global index.
+
+## [0.0.80.0] - 2026-05-07 — admin CLI: 30s `http.Client.Timeout` 제거 + `--timeout` 플래그
+
+### Fixed
+
+- `volumeadmin.NewClient`/`NewClientForURL`의 `http.Client.Timeout: 30s` cap이
+  `BaseOptions.Timeout > 30s` 설정을 silent하게 truncate하던 버그 해소.
+  client에는 timeout cap이 없고 ctx로만 통제됩니다.
+
+### Added
+
+- 모든 admin CLI 명령(`grainfs volume *`, `grainfs dashboard`, `grainfs scrub`)에
+  `--timeout` flag 추가. unset이면 30s default(이전 hardcoded 값 보존),
+  `--timeout 5m`로 연장, `--timeout 0`으로 uncapped 가능. cobra `Duration` 타입.
+- `cmd/grainfs/admin_helpers.go`: `DefaultAdminTimeout` const,
+  `registerAdminTimeoutFlag`, `adminTimeoutFromCmd`, `applyAdminTimeout` 헬퍼 추가.
+  비-volume admin runner(dashboard, bucket scrub)도 동일 timeout 정책 적용.
+
+### Changed
+
+- **Timeout semantic shift (per-request → per-command).** 이전에는
+  `http.Client.Timeout: 30s`가 매 요청마다 적용돼 `volume scrub`/`scrub` follow
+  loop는 무한 실행됐습니다. 새 default(30s)는 ctx 기반이라 명령 전체에 적용됩니다.
+  분~시간 단위 follow가 필요하면 `--timeout 5m` 또는 `--timeout 0`(uncapped)을
+  명시하세요. `--detach`로 trigger만 하고 빠지는 사용 패턴은 영향 없음.
+
+### Tests
+
+- `TestNewClientForURL_NoHTTPClientTimeoutCap` /
+  `TestNewClient_NoHTTPClientTimeoutCap_HTTPEndpoint` —
+  client에 Timeout cap이 없음을 deterministic 검증.
+
 ## [0.0.79.0] - 2026-05-07 — volumeadmin: gap 단위 테스트 4건 추가
 
 ### Tests
