@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.79.0] - 2026-05-07 — volumeadmin: gap 단위 테스트 4건 추가
+
+### Tests
+
+- `withTimeout`이 `BaseOptions.Timeout > 0`이면 ctx에 deadline을 붙이고,
+  `Timeout == 0`이면 parent ctx를 그대로 통과시키는지 deterministic 검증.
+- `Client.Do`가 2xx 응답에 깨진 JSON body를 받으면 `decode response: ...`
+  에러를 반환하는지 검증.
+- `FollowScrubSession`이 비-ctx 네트워크 에러(서버 500)를 graceful-stop으로
+  swallow하지 않고 그대로 bubble up하는지 검증.
+- `AutoDiscoverSocket`이 `dataFlag` 인자로 받은 디렉터리에서 실제 unix
+  socket을 찾아 `unix:<path>`로 반환하는 happy path 검증 (신규
+  `discover_test.go`).
+- TODO에 적힌 "WriteAt content base64 round-trip"은 기존
+  `TestClient_WriteAt_ReadAt`가 이미 round-trip을 검증하고, 와이어 base64
+  인코딩은 stdlib `encoding/json`의 `[]byte` 동작이라 우리 코드 회귀
+  가능성이 0이라 제외했습니다.
+
+## [0.0.78.0] - 2026-05-07 — volumeadmin: ParseSize Kubernetes 단위 컨벤션
+
+### Breaking
+
+- `grainfs volume create/resize --size`가 bare `K`/`M`/`G`/`T`/`P` 단독 표기를
+  ambiguous로 거부합니다. binary는 `Ki`/`Mi`/`Gi`/`Ti`/`Pi` (또는 `KiB` 등 = 1024^n),
+  decimal은 `KB`/`MB`/`GB`/`TB`/`PB` (= 1000^n)로 명시해야 합니다. 기존
+  `--size 1G` 자동화는 `--size 1Gi` 또는 `--size 1GB`로 갱신이 필요합니다.
+
+### Fixed
+
+- `--size 1KB`가 silent fail (`ParseInt("1K") error`) 하던 버그 해소. SI decimal
+  표기 (KB/MB/GB/TB/PB)가 정식 지원됩니다.
+
+### Changed
+
+- `volume create/resize` 명령 도움말과 예시가 새 단위 컨벤션을 반영합니다
+  (`1Gi` binary, `1GB` decimal).
+
 ## [0.0.77.0] - 2026-05-07 — Cluster runtime relocated to serveruntime.Run (cmd-thin PR2b)
 
 ### Changed

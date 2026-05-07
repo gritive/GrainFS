@@ -28,33 +28,63 @@ func FormatBytes(n int64, raw bool) string {
 	return fmt.Sprintf("%.1f %s", f, units[i])
 }
 
-// ParseSize accepts "1G", "1Gi", "100M", "1024", etc and returns bytes.
-// Suffixes (case-insensitive): K/Ki=1024, M/Mi=1024^2, G/Gi=1024^3,
-// T/Ti=1024^4, P/Pi=1024^5. No suffix means raw bytes.
+// ParseSize parses a size string and returns bytes. Suffixes are
+// case-insensitive and follow Kubernetes convention: binary units use the
+// "i" infix (Ki/Mi/Gi/Ti/Pi or KiB/MiB/GiB/TiB/PiB) and equal 1024^n; SI
+// decimal units use the "B" suffix (KB/MB/GB/TB/PB) and equal 1000^n. A
+// bare "B" means bytes; no suffix also means bytes. Bare K/M/G/T/P are
+// rejected as ambiguous — callers must pick the binary or decimal form.
 func ParseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, fmt.Errorf("empty")
 	}
-	mult := int64(1)
 	upper := strings.ToUpper(s)
-	for _, u := range []struct {
-		suf string
-		m   int64
+
+	const (
+		ki = int64(1) << 10
+		mi = int64(1) << 20
+		gi = int64(1) << 30
+		ti = int64(1) << 40
+		pi = int64(1) << 50
+
+		kSI = int64(1_000)
+		mSI = int64(1_000_000)
+		gSI = int64(1_000_000_000)
+		tSI = int64(1_000_000_000_000)
+		pSI = int64(1_000_000_000_000_000)
+	)
+
+	units := []struct {
+		suf       string
+		m         int64
+		ambiguous bool
 	}{
-		{"PIB", 1 << 50}, {"PI", 1 << 50}, {"P", 1 << 50},
-		{"TIB", 1 << 40}, {"TI", 1 << 40}, {"T", 1 << 40},
-		{"GIB", 1 << 30}, {"GI", 1 << 30}, {"G", 1 << 30},
-		{"MIB", 1 << 20}, {"MI", 1 << 20}, {"M", 1 << 20},
-		{"KIB", 1 << 10}, {"KI", 1 << 10}, {"K", 1 << 10},
-		{"B", 1},
-	} {
-		if strings.HasSuffix(upper, u.suf) {
-			s = s[:len(s)-len(u.suf)]
-			mult = u.m
-			break
-		}
+		// binary IEC, longest first (KiB before Ki before K).
+		{"PIB", pi, false}, {"TIB", ti, false}, {"GIB", gi, false}, {"MIB", mi, false}, {"KIB", ki, false},
+		{"PI", pi, false}, {"TI", ti, false}, {"GI", gi, false}, {"MI", mi, false}, {"KI", ki, false},
+		// SI decimal — must come before bare-letter ambiguous match
+		// because "1KB" must hit KB, not K.
+		{"PB", pSI, false}, {"TB", tSI, false}, {"GB", gSI, false}, {"MB", mSI, false}, {"KB", kSI, false},
+		// bare letters are ambiguous (1024 vs 1000).
+		{"P", 0, true}, {"T", 0, true}, {"G", 0, true}, {"M", 0, true}, {"K", 0, true},
+		// "B" alone means bytes.
+		{"B", 1, false},
 	}
+
+	mult := int64(1)
+	for _, u := range units {
+		if !strings.HasSuffix(upper, u.suf) {
+			continue
+		}
+		if u.ambiguous {
+			return 0, fmt.Errorf("unit %q is ambiguous; use %siB (1024) or %sB (1000)", u.suf, u.suf, u.suf)
+		}
+		s = s[:len(s)-len(u.suf)]
+		mult = u.m
+		break
+	}
+
 	s = strings.TrimSpace(s)
 	if strings.Contains(s, ".") {
 		f, err := strconv.ParseFloat(s, 64)

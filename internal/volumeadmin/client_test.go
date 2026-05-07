@@ -291,6 +291,23 @@ func TestClient_NewClientForURL_TrimsSlash(t *testing.T) {
 	}
 }
 
+func TestClient_Do_MalformedJSONOn2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{not json"))
+	}))
+	defer srv.Close()
+	c := NewClientForURL(srv.URL)
+	_, err := c.ListVolumes(context.Background())
+	if err == nil {
+		t.Fatal("expected decode error, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode response") {
+		t.Errorf("err=%q, want substring %q", err.Error(), "decode response")
+	}
+}
+
 func TestClient_TransientOnDial(t *testing.T) {
 	c := NewClientForURL("http://127.0.0.1:1") // refused
 	_, err := c.ListVolumes(context.Background())

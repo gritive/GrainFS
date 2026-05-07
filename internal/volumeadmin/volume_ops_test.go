@@ -6,7 +6,33 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestWithTimeout_PropagatesDeadline(t *testing.T) {
+	ctx, cancel := withTimeout(context.Background(), BaseOptions{Timeout: 250 * time.Millisecond})
+	defer cancel()
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatalf("expected deadline to be set when Timeout > 0")
+	}
+	remaining := time.Until(dl)
+	if remaining <= 0 || remaining > 250*time.Millisecond {
+		t.Errorf("deadline remaining=%v, want in (0, 250ms]", remaining)
+	}
+}
+
+func TestWithTimeout_ZeroLeavesContextUnchanged(t *testing.T) {
+	parent := context.Background()
+	ctx, cancel := withTimeout(parent, BaseOptions{Timeout: 0})
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Errorf("expected no deadline when Timeout == 0")
+	}
+	if ctx != parent {
+		t.Errorf("expected parent ctx to pass through unchanged")
+	}
+}
 
 // optsForServer builds BaseOptions targeting srv.URL with capture buffers.
 func optsForServer(srv *httptest.Server) (BaseOptions, *bytes.Buffer, *bytes.Buffer) {

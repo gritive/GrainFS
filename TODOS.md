@@ -10,12 +10,6 @@
   의 `http.Client{Timeout: 30 * time.Second}` 가 `BaseOptions.Timeout > 30s` 를
   override 함. ctx-기반 cancellation 으로 충분하니 client timeout 제거하고 ctx
   하나로 통일. (pre-existing pattern, 이번 라운드는 surface만 옮김)
-- [ ] **volumeadmin: ParseSize "1KB" silent fail** — `format.go` 의 suffix
-  매칭 순서가 "B" 를 먼저 매치해서 "1KB" → ParseInt("1K") 에러. "1K" / "1KiB"
-  는 동작. pre-existing. KB 같은 SI 표기 정식 지원 또는 명시적 reject.
-- [ ] **volumeadmin 추가 단위 테스트** — withTimeout deadline 전파 / Do() malformed
-  JSON 응답 / FollowScrubSession 비-ctx 네트워크 에러 / AutoDiscoverSocket 실제
-  unix-socket 디스커버리 happy path / WriteAt content base64 round-trip.
 - [ ] **clusteradmin BaseOptions retro-fit** — `internal/clusteradmin/operations.go` 의
   `RemovePeerOptions / PeersOptions / EventsOptions` 가 `Endpoint/Stdout/Stderr/...`
   공통 필드를 인라인 반복함. `volumeadmin.BaseOptions` 와 같은 임베드 패턴으로
