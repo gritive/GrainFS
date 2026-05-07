@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.0.77.0] - 2026-05-07 — Cluster runtime relocated to serveruntime.Run (cmd-thin PR2b)
+
+### Changed
+
+- The 1366-line `runCluster` body is moved verbatim from `cmd/grainfs/serve.go`
+  into `internal/serveruntime/run.go` as `Run(ctx, Config)`. PR2a had already
+  hoisted every `cmd.Flags().Get*` into `clusterConfig`, so the body itself
+  was cobra-free and the move is mechanical.
+- `clusterConfig` becomes the exported `serveruntime.Config`; a new
+  `Version string` field replaces the body's prior dependency on
+  `cmd/grainfs`'s package-level `version` var.
+- `logStartupConfigSnapshotFromMap` + `diffSnapshots` move to
+  `internal/serveruntime/config.go` as `LogStartupConfigSnapshot` (exported)
+  + unexported `diffSnapshots`.
+- `cmd/grainfs/serve.go` shrinks 1636 → 238 lines. `runServe` now ends with
+  `return serveruntime.Run(ctx, cfg)`. `buildClusterConfig` and
+  `collectFlagsSnapshot` stay in cmd/grainfs because they read cobra.
+- `serve_cluster_key_test.go` updated to call `serveruntime.Run` — the
+  cluster-key guard moved with the body, so the test still validates the
+  same code path.
+
+### Tests
+
+- cmd/grainfs + serveruntime unit tests pass.
+- `make test-e2e` shows zero new failures vs master. `TestE2E_ClusterRemovePeer_DeadFollower`
+  was failing on master(20b7c72) before this PR with the same symptom and
+  remains failing — pre-existing, unrelated.
+
+## [0.0.76.0] - 2026-05-07
+
+### Added
+
+- Topology GET profiling now reports the assigned shard-group voter count and
+  can fail fast when a benchmark expected a full-width group but the bucket
+  hashed to a smaller group, making load-distribution measurements explicit.
+
+### Changed
+
+- Encrypted shard range reads now decrypt only the requested encrypted chunk
+  instead of discarding plaintext from earlier chunks, improving random and
+  shard-local Range GET behavior.
+- S3 Range GET streaming now reuses its 1 MiB backend `ReadAt` buffer, reducing
+  allocation pressure on large Range GET workloads.
+- Remote shard range single-frame replies are capped at 64 KiB so larger ranges
+  stay on the streaming path instead of building oversized in-memory replies.
+
+### Fixed
+
+- Documented the measured hot-bucket placement issue where bucket-level routing
+  can concentrate 6-node traffic onto a 3-voter shard group, preserving the
+  next load-distribution fix target.
+
 ## [0.0.75.0] - 2026-05-07
 
 ### Added

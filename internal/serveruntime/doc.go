@@ -1,6 +1,5 @@
-// Package serveruntime hosts cobra-free helpers used by the grainfs serve
-// command's cluster bootstrap path. It is a staging package: small,
-// self-contained pieces have been peeled off cmd/grainfs/serve.go so they
-// can be unit-tested in isolation. Future work moves the runCluster body
-// itself into this package as a single Run(ctx, cfg) entry point.
+// Package serveruntime hosts the cobra-free server runtime for the grainfs
+// serve command. The cluster bootstrap path lives entirely here as
+// Run(ctx, Config); cmd/grainfs is reduced to flag registration plus a thin
+// runServe that builds Config and dispatches to Run.
 package serveruntime
