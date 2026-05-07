@@ -7,7 +7,9 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-func newTestEncryptor(t *testing.T) *encrypt.Encryptor {
+// newTestEncryptor builds a deterministic Encryptor for tests AND
+// benchmarks. testing.TB so bench_test.go can reuse it.
+func newTestEncryptor(t testing.TB) *encrypt.Encryptor {
 	t.Helper()
 	key := bytes.Repeat([]byte{0xab}, 32)
 	enc, err := encrypt.NewEncryptor(key)
