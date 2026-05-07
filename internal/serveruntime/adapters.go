@@ -327,7 +327,7 @@ func (r *RaftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
 		SelfID:       r.node.ID(),
 		Voters:       r.node.Peers(),
 		AddressBook:  r.addrBook,
-		ProbeResults: freshReplicationProbeResults(evidence, r.addrBook, time.Now(), 3*cluster.MetaRaftElectionTimeout),
+		ProbeResults: freshReplicationProbeResults(evidence, r.addrBook, time.Now(), cluster.MetaRaftLivenessFreshnessWindow),
 	})
 }
 
