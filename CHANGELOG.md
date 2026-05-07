@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.78.0] - 2026-05-07 — volumeadmin: ParseSize Kubernetes 단위 컨벤션
+
+### Breaking
+
+- `grainfs volume create/resize --size`가 bare `K`/`M`/`G`/`T`/`P` 단독 표기를
+  ambiguous로 거부합니다. binary는 `Ki`/`Mi`/`Gi`/`Ti`/`Pi` (또는 `KiB` 등 = 1024^n),
+  decimal은 `KB`/`MB`/`GB`/`TB`/`PB` (= 1000^n)로 명시해야 합니다. 기존
+  `--size 1G` 자동화는 `--size 1Gi` 또는 `--size 1GB`로 갱신이 필요합니다.
+
+### Fixed
+
+- `--size 1KB`가 silent fail (`ParseInt("1K") error`) 하던 버그 해소. SI decimal
+  표기 (KB/MB/GB/TB/PB)가 정식 지원됩니다.
+
+### Changed
+
+- `volume create/resize` 명령 도움말과 예시가 새 단위 컨벤션을 반영합니다
+  (`1Gi` binary, `1GB` decimal).
+
 ## [0.0.77.0] - 2026-05-07 — Cluster runtime relocated to serveruntime.Run (cmd-thin PR2b)
 
 ### Changed

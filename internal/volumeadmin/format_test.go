@@ -31,15 +31,50 @@ func TestParseSize(t *testing.T) {
 		want    int64
 		wantErr bool
 	}{
+		// bare bytes
+		{"0", 0, false},
 		{"1024", 1024, false},
-		{"1K", 1024, false},
-		{"1Ki", 1024, false},
-		{"1KiB", 1024, false},
-		{"1M", 1 << 20, false},
-		{"1G", 1 << 30, false},
+		{"1024B", 1024, false},
+		{"1b", 1, false},
+
+		// IEC binary (Ki/Mi/Gi/Ti/Pi and KiB/MiB/...)
+		{"1Ki", 1 << 10, false},
+		{"1KiB", 1 << 10, false},
+		{"1Mi", 1 << 20, false},
+		{"1MiB", 1 << 20, false},
 		{"1Gi", 1 << 30, false},
-		{"1.5G", 1610612736, false},
-		{"100M", 100 * (1 << 20), false},
+		{"1GiB", 1 << 30, false},
+		{"1Ti", 1 << 40, false},
+		{"1Pi", 1 << 50, false},
+		{"1.5Gi", 1_610_612_736, false},
+		{"100Mi", 100 * (1 << 20), false},
+
+		// SI decimal (KB/MB/GB/TB/PB)
+		{"1KB", 1_000, false},
+		{"1MB", 1_000_000, false},
+		{"1GB", 1_000_000_000, false},
+		{"1TB", 1_000_000_000_000, false},
+		{"1PB", 1_000_000_000_000_000, false},
+		{"1.5GB", 1_500_000_000, false},
+		{"500MB", 500_000_000, false},
+
+		// case-insensitive
+		{"1gib", 1 << 30, false},
+		{"1KIB", 1 << 10, false},
+		{"1gb", 1_000_000_000, false},
+		{"1kb", 1_000, false},
+
+		// ambiguous bare K/M/G/T/P → reject (Kubernetes convention split)
+		{"1K", 0, true},
+		{"1M", 0, true},
+		{"1G", 0, true},
+		{"1T", 0, true},
+		{"1P", 0, true},
+		{"1k", 0, true},
+		{"1g", 0, true},
+		{"1.5G", 0, true},
+
+		// errors
 		{"", 0, true},
 		{"abc", 0, true},
 		{"1Z", 0, true},
