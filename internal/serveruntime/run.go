@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
@@ -415,6 +416,15 @@ func Run(ctx context.Context, cfg Config) error {
 				}
 			}
 		}()
+	}
+
+	// Build the AdminAPI wired against the same MetaProposer the bootstrap
+	// shim uses. Only when IAM dependencies are wired — same gate as the
+	// bootstrap shim, minus the credential flag check.
+	var iamAdminAPI *iam.AdminAPI
+	if cfg.IAMStore != nil && cfg.IAMApplier != nil && cfg.Encryptor != nil {
+		proposer := &iam.MetaProposer{Propose: metaRaft.Propose}
+		iamAdminAPI = iam.NewAdminAPI(cfg.IAMStore, proposer, cfg.Encryptor)
 	}
 
 	// Seed Router with any bucket assignments already persisted in FSM state.
@@ -1153,10 +1163,15 @@ func Run(ctx context.Context, cfg Config) error {
 		adminSocket = filepath.Join(dataDir, "admin.sock")
 	}
 	adminSrv, err := admin.Start(admin.Config{
-		SocketPath:  adminSocket,
-		Group:       cfg.AdminGroup,
-		Deps:        adminDeps,
-		ExtraRoutes: srv.RegisterClusterAdminUDS,
+		SocketPath: adminSocket,
+		Group:      cfg.AdminGroup,
+		Deps:       adminDeps,
+		ExtraRoutes: func(h *hzserver.Hertz) {
+			srv.RegisterClusterAdminUDS(h)
+			if iamAdminAPI != nil {
+				RegisterIAMAdminRoutes(h, iamAdminAPI)
+			}
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("admin server: %w", err)
