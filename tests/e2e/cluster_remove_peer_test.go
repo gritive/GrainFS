@@ -45,10 +45,9 @@ func TestE2E_ClusterRemovePeer_DeadFollower(t *testing.T) {
 		}
 	}
 	require.GreaterOrEqual(t, followerIdx, 0)
-	// metaRaft tracks peers by raft address until PR-D unifies on node-id.
-	// remove-peer takes whatever identifier is in /api/cluster/status.peers,
-	// so e2e here uses raft address to match the current source of truth.
-	deadID := c.raftAddr(followerIdx)
+	// /api/cluster/status.peers reports node IDs, and remove-peer accepts the
+	// same identifier.
+	deadID := c.nodeID(followerIdx)
 	leaderURL := c.httpURLs[leaderIdx]
 
 	// Wait for the dynamic-join membership to settle. Leader's Peers() excludes

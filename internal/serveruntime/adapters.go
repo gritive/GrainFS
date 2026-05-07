@@ -430,16 +430,35 @@ func nilToEmpty(s []string) []string {
 	return s
 }
 
-// RaftMembership adapts raft.Node to server.ClusterMembership for the
-// remove-peer endpoint. Joint consensus (§4.3) is used so the change is
-// atomic and the engine handles leader self-removal via commit-time
-// wakeup.
-type RaftMembership struct{ node *raft.Node }
+type raftMembershipNode interface {
+	ID() string
+	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
+}
 
-func NewRaftMembership(node *raft.Node) *RaftMembership {
-	return &RaftMembership{node: node}
+// RaftMembership adapts raft.Node to server.ClusterMembership for the
+// remove-peer endpoint. Public cluster status exposes canonical node IDs, while
+// legacy Raft peer keys may still be raft addresses after learner promotion.
+// The adapter resolves remote node IDs back to the engine's peer key before
+// invoking joint consensus (§4.3).
+type RaftMembership struct {
+	node     raftMembershipNode
+	addrBook cluster.NodeAddressBook
+}
+
+func NewRaftMembership(node *raft.Node, addrBook cluster.NodeAddressBook) *RaftMembership {
+	return &RaftMembership{node: node, addrBook: addrBook}
 }
 
 func (r *RaftMembership) RemoveVoter(ctx context.Context, id string) error {
-	return r.node.ChangeMembership(ctx, nil, []string{id})
+	return r.node.ChangeMembership(ctx, nil, []string{r.removePeerKey(id)})
+}
+
+func (r *RaftMembership) removePeerKey(id string) string {
+	if id == "" || r.node == nil || id == r.node.ID() {
+		return id
+	}
+	if addr, ok := cluster.ResolveNodeAddress(r.addrBook, id); ok {
+		return addr
+	}
+	return id
 }

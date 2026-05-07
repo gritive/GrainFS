@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -47,10 +48,50 @@ func TestFreshReplicationProbeResultsNormalizesRaftAddressEvidenceToNodeID(t *te
 	}, got)
 }
 
+func TestRaftMembershipRemoveVoterResolvesRemoteNodeIDToRaftAddress(t *testing.T) {
+	node := &fakeMembershipNode{id: "n1"}
+	membership := &RaftMembership{
+		node: node,
+		addrBook: fakeAddressBook{nodes: []cluster.MetaNodeEntry{
+			{ID: "n2", Address: "10.0.0.2:7001"},
+		}},
+	}
+
+	require.NoError(t, membership.RemoveVoter(context.Background(), "n2"))
+
+	require.Equal(t, [][]string{{"10.0.0.2:7001"}}, node.removes)
+}
+
+func TestRaftMembershipRemoveVoterKeepsSelfNodeID(t *testing.T) {
+	node := &fakeMembershipNode{id: "n1"}
+	membership := &RaftMembership{
+		node: node,
+		addrBook: fakeAddressBook{nodes: []cluster.MetaNodeEntry{
+			{ID: "n1", Address: "10.0.0.1:7001"},
+		}},
+	}
+
+	require.NoError(t, membership.RemoveVoter(context.Background(), "n1"))
+
+	require.Equal(t, [][]string{{"n1"}}, node.removes)
+}
+
 type fakeAddressBook struct {
 	nodes []cluster.MetaNodeEntry
 }
 
 func (f fakeAddressBook) Nodes() []cluster.MetaNodeEntry {
 	return f.nodes
+}
+
+type fakeMembershipNode struct {
+	id      string
+	removes [][]string
+}
+
+func (f *fakeMembershipNode) ID() string { return f.id }
+
+func (f *fakeMembershipNode) ChangeMembership(_ context.Context, _ []raft.ServerEntry, removes []string) error {
+	f.removes = append(f.removes, append([]string(nil), removes...))
+	return nil
 }
