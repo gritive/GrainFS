@@ -1,6 +1,10 @@
 package iam
 
-import "time"
+import (
+	"time"
+
+	"github.com/gritive/GrainFS/internal/s3auth"
+)
 
 // Role is the 3-tier permission level for a (SA, Bucket) grant.
 type Role uint8
@@ -73,4 +77,24 @@ type Grant struct {
 	Role      Role
 	CreatedAt time.Time
 	CreatedBy string // sa_id of creator
+}
+
+// RoleAllows reports whether `role` permits `action` on the target bucket.
+// Bucket-lifecycle operations (CreateBucket, DeleteBucket) require Admin.
+// Object writes (PutObject, DeleteObject, CopyObject) require Write or
+// higher. Reads (GetObject, HeadObject, ListBucket, ListMultipartUploads)
+// require Read or higher. UnknownAction always denies.
+func RoleAllows(role Role, action s3auth.S3Action) bool {
+	switch action {
+	case s3auth.GetObject, s3auth.HeadObject, s3auth.ListBucket, s3auth.ListMultipartUploads:
+		return role >= RoleRead
+	case s3auth.PutObject, s3auth.DeleteObject, s3auth.CopyObject:
+		return role >= RoleWrite
+	case s3auth.CreateBucket, s3auth.DeleteBucket:
+		return role >= RoleAdmin
+	case s3auth.UnknownAction:
+		return false
+	default:
+		return false
+	}
 }
