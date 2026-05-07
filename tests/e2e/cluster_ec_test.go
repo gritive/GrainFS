@@ -232,11 +232,6 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-node e2e in -short mode")
 	}
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
-	}
-
 	const (
 		clusterKey = "E2E-EC-3NODE-KEY"
 		accessKey  = "3n-ak"
@@ -245,80 +240,25 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		numNodes   = 3
 	)
 
-	httpPorts := make([]int, numNodes)
-	raftPorts := make([]int, numNodes)
-	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
-	ports := uniqueFreePorts(numNodes * 4)
-	for i := range numNodes {
-		httpPorts[i] = ports[i*4]
-		raftPorts[i] = ports[i*4+1]
-		nfs4Ports[i] = ports[i*4+2]
-		nbdPorts[i] = ports[i*4+3]
-	}
-	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
-	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
-
-	dataDirs := make([]string, numNodes)
-	for i := range dataDirs {
-		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-3node-%d-*", i))
-		require.NoError(t, err)
-		dataDirs[i] = d
-		t.Cleanup(func() { _ = os.RemoveAll(d) })
-	}
-
-	procs := make([]*exec.Cmd, numNodes)
-	for i := 0; i < numNodes; i++ {
-		cmd := exec.Command(binary, "serve",
-			"--data", dataDirs[i],
-			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", raftAddr(i),
-			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
-			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
-			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
-			"--snapshot-interval", "0",
-			"--scrub-interval", "0",
-			"--lifecycle-interval", "0",
-			"--seed-groups", "2",
-			"--no-encryption",
-		)
-		require.NoError(t, cmd.Start(), "start node %d", i)
-		procs[i] = cmd
-	}
-	t.Cleanup(func() {
-		for _, p := range procs {
-			if p != nil && p.Process != nil {
-				_ = p.Process.Kill()
-				_, _ = p.Process.Wait()
-			}
-		}
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      numNodes,
+		Mode:       ClusterModeStaticPeers,
+		SeedGroups: 2,
+		ClusterKey: clusterKey,
+		AccessKey:  accessKey,
+		SecretKey:  secretKey,
+		LogPrefix:  "cluster-ec-3node",
 	})
-
-	waitForPortsParallel(t, httpPorts, 60*time.Second)
 
 	var client *s3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			err := tryCreateBucket(ctx, c, bucketName)
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			err := tryCreateBucket(ctx, candidate, bucketName)
 			if err == nil {
-				client = c
+				client = candidate
 				return true
 			}
 		}
@@ -351,8 +291,8 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	// prove every survivor has applied the committed object metadata yet.
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes-1; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			out2, err2 := c.GetObject(ctx, &s3.GetObjectInput{
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			out2, err2 := candidate.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String("ec-obj"),
 			})
@@ -378,9 +318,9 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	// and 1, getObjectEC can reconstruct using at most one dead-peer fetch
 	// (bounded by 3s per-shard timeout).
 	victim := numNodes - 1
-	_ = procs[victim].Process.Kill()
-	_, _ = procs[victim].Process.Wait()
-	procs[victim] = nil
+	_ = c.procs[victim].Process.Kill()
+	_, _ = c.procs[victim].Process.Wait()
+	c.procs[victim] = nil
 	t.Logf("killed node %d; expecting GET to succeed with 2 remaining shards (k=2)", victim)
 
 	// Poll until the surviving nodes serve the object. No fixed sleep —
@@ -390,8 +330,8 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	var gotAfterKill []byte
 	require.Eventually(t, func() bool {
 		for i := 0; i < numNodes-1; i++ {
-			c := ecS3Client(httpURL(i), accessKey, secretKey)
-			out2, err2 := c.GetObject(ctx, &s3.GetObjectInput{
+			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
+			out2, err2 := candidate.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String("ec-obj"),
 			})
