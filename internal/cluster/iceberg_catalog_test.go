@@ -226,3 +226,37 @@ func TestForwardingBucketAssignerTimesOutWaitingForLocalApply(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, time.Since(start), time.Second)
 }
+
+func TestForwardingObjectIndexProposerForwardsFromFollower(t *testing.T) {
+	follower := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = follower.Close() })
+
+	entry := ObjectIndexEntry{
+		Bucket:           "photos",
+		Key:              "img.jpg",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Size:             42,
+		ETag:             "etag",
+	}
+
+	var forwarded []byte
+	proposer := NewForwardingObjectIndexProposer(follower, func(_ context.Context, command []byte) error {
+		forwarded = append([]byte(nil), command...)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = follower.FSM().applyCmd(command)
+		}()
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, proposer.ProposeObjectIndex(ctx, entry, false))
+
+	cmd := clusterpb.GetRootAsMetaCmd(forwarded, 0)
+	require.Equal(t, MetaCmdTypePutObjectIndex, cmd.Type())
+	got, ok := follower.FSM().ObjectIndexVersion("photos", "img.jpg", "v1")
+	require.True(t, ok)
+	require.Equal(t, "group-1", got.PlacementGroupID)
+}

@@ -794,7 +794,13 @@ func Run(ctx context.Context, cfg Config) error {
 
 	forwardSender := cluster.NewForwardSender(forwardDialer).
 		WithStreamDialer(forwardStreamDialer).
-		WithReadStreamDialer(forwardReadStreamDialer)
+		WithReadStreamDialer(forwardReadStreamDialer).
+		WithLeaderHintResolver(func(hint string) string {
+			if addr, ok := cluster.ResolveNodeAddress(metaRaft.FSM(), hint); ok {
+				return addr
+			}
+			return hint
+		})
 	forwardReceiver := cluster.NewForwardReceiver(dgMgr)
 	forwardReceiver.Register(shardSvc)
 
@@ -834,7 +840,9 @@ func Run(ctx context.Context, cfg Config) error {
 		WithNodeAddressResolver(metaRaft.FSM()).
 		WithSelfPeerAlias(raftAddr).
 		WithECConfig(effectiveEC).
-		WithObjectIndexProposer(metaRaft)
+		WithObjectIndexProposer(cluster.NewForwardingObjectIndexProposer(metaRaft, func(ctx context.Context, command []byte) error {
+			return metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+		}))
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, clusterCoord, "s3://grainfs-tables/warehouse"))
 	router.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 	if joinMode {
