@@ -31,7 +31,7 @@ var volumeListCmd = &cobra.Command{
   grainfs volume list
 
   # JSON output (for scripting)
-  grainfs volume list --json
+  grainfs volume list --format json
 
   # Raw byte values (no IEC suffixes)
   grainfs volume list --bytes`,
@@ -202,9 +202,8 @@ var volumeScrubCancelCmd = &cobra.Command{
 
 func init() {
 	pf := volumeCmd.PersistentFlags()
-	pf.Bool("json", false, "JSON output for scripting")
-	pf.Bool("bytes", false, "show sizes as raw byte counts (alias: --raw)")
-	pf.Bool("raw", false, "alias for --bytes")
+	pf.String("format", "text", "Output format: text or json (json always uses raw bytes)")
+	pf.Bool("bytes", false, "in text format, show sizes as raw byte counts instead of IEC suffixes")
 	registerAdminEndpointFlag(volumeCmd)
 	registerAdminTimeoutFlag(volumeCmd)
 
@@ -231,16 +230,17 @@ func init() {
 }
 
 // baseOptionsFromCmd reads the persistent flags every volume runner shares
-// and packs them into a volumeadmin.BaseOptions.
+// and packs them into a volumeadmin.BaseOptions. Format contract since
+// v0.0.89: --format=text uses IEC suffixes by default, --bytes overrides
+// text mode to show raw bytes; --format=json always uses raw bytes.
 func baseOptionsFromCmd(cmd *cobra.Command) volumeadmin.BaseOptions {
 	endpoint, _ := cmd.Flags().GetString("endpoint")
-	jsonOut, _ := cmd.Flags().GetBool("json")
-	rawA, _ := cmd.Flags().GetBool("bytes")
-	rawB, _ := cmd.Flags().GetBool("raw")
+	asJSON := jsonOut(cmd)
+	bytesFlag, _ := cmd.Flags().GetBool("bytes")
 	return volumeadmin.BaseOptions{
 		Endpoint: endpoint,
-		JSONOut:  jsonOut,
-		RawBytes: rawA || rawB,
+		JSONOut:  asJSON,
+		RawBytes: asJSON || bytesFlag,
 		Timeout:  adminTimeoutFromCmd(cmd),
 		Stdout:   cmd.OutOrStdout(),
 		Stderr:   cmd.ErrOrStderr(),

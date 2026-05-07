@@ -185,7 +185,7 @@ func TestE2E_VolumeCLI_ListJSONIncludesHealthReasons(t *testing.T) {
 	out, code := runCLI(t, dataDir, "volume", "create", "vjsonhealth", "--size", "1Mi")
 	require.Equal(t, 0, code, out)
 
-	out, code = runCLI(t, dataDir, "volume", "list", "--json")
+	out, code = runCLI(t, dataDir, "volume", "list", "--format", "json")
 	require.Equal(t, 0, code, out)
 	var raw map[string][]map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &raw))
@@ -271,7 +271,7 @@ func TestE2E_Dashboard_TokenURLAndRotate(t *testing.T) {
 	require.Equal(t, publicPort, port)
 
 	// Get token via CLI.
-	out1, code := runCLI(t, dataDir, "dashboard", "--json")
+	out1, code := runCLI(t, dataDir, "dashboard", "--format", "json")
 	require.Equal(t, 0, code, out1)
 	var resp1 struct {
 		Token string `json:"token"`
@@ -288,7 +288,7 @@ func TestE2E_Dashboard_TokenURLAndRotate(t *testing.T) {
 	require.True(t, callUI(t, port, "") == http.StatusUnauthorized)
 
 	// Rotate.
-	out2, code := runCLI(t, dataDir, "dashboard", "--rotate", "--json")
+	out2, code := runCLI(t, dataDir, "dashboard", "--rotate", "--format", "json")
 	require.Equal(t, 0, code, out2)
 	var resp2 struct {
 		Token string `json:"token"`

@@ -42,7 +42,7 @@ func cowDeleteVolume(t *testing.T, dataDir, name string) {
 
 func cowCreateSnapshot(t *testing.T, dataDir, volName string) string {
 	t.Helper()
-	out, code := runCLI(t, dataDir, "volume", "snapshot", "create", volName, "--json")
+	out, code := runCLI(t, dataDir, "volume", "snapshot", "create", volName, "--format", "json")
 	require.Equal(t, 0, code, out)
 	var snap cowSnapResp
 	require.NoError(t, json.Unmarshal([]byte(out), &snap))
@@ -58,7 +58,7 @@ func cowRollback(t *testing.T, dataDir, volName, snapID string) {
 
 func cowListSnapshots(t *testing.T, dataDir, volName string) []cowSnapResp {
 	t.Helper()
-	out, code := runCLI(t, dataDir, "volume", "snapshot", "list", volName, "--json")
+	out, code := runCLI(t, dataDir, "volume", "snapshot", "list", volName, "--format", "json")
 	require.Equal(t, 0, code, out)
 	var snaps []cowSnapResp
 	require.NoError(t, json.Unmarshal([]byte(out), &snaps))

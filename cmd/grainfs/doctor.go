@@ -27,7 +27,7 @@ Exit codes:
   2 - Failures detected`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dataDir, _ := cmd.Flags().GetString("data")
-		outputJSON, _ := cmd.Flags().GetBool("json")
+		outputJSON := jsonOut(cmd)
 
 		doctor := cluster.NewDoctor(dataDir)
 		report, err := doctor.Run()
@@ -80,6 +80,6 @@ Exit codes:
 
 func init() {
 	doctorCmd.Flags().String("data", "./data", "GrainFS data directory")
-	doctorCmd.Flags().Bool("json", false, "Output as JSON")
+	doctorCmd.Flags().String("format", "text", "Output format: text or json")
 	rootCmd.AddCommand(doctorCmd)
 }

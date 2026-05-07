@@ -26,9 +26,11 @@ CLI와 dashboard의 endpoint scheme을 명확히 분리한다.
   `removePeerHandler`, `queryEventLog`)는 한 번만 정의하고, admin UDS
   Hertz에 `RegisterClusterAdminUDS`로 등록한다. HTTP `/api/...`와 UDS
   `/v1/cluster/...`가 동일 메서드를 가리킨다.
-- **rotate-key는 별도 socket 유지** — `cluster rotate-key`의 rotate.sock
-  은 line-delimited JSON 프로토콜(non-Hertz)이라 admin.sock와 합치는 데
-  추가 작업이 필요. 본 ADR에서는 분리 유지하고 향후 별도 ADR로 검토.
+- **rotate-key는 별도 socket + Hertz 프로토콜로 통일** — `cluster rotate-key`의
+  `rotate.sock`은 mode 0600(owner-only)을 유지하지만 line-delimited JSON
+  프로토콜에서 Hertz HTTP(`/v1/rotate-key/{status,begin,abort}`)로 마이그레이션.
+  admin.sock(0660+group)과 별도 소켓은 유지 — PSK material을 admin-group의 다른
+  운영자가 보지 못하도록 격리하는 보안 경계.
 
 ## Consequences
 
@@ -45,7 +47,7 @@ CLI와 dashboard의 endpoint scheme을 명확히 분리한다.
 - `cluster join` 루트 이동도 동시 적용(별도 결정이지만 같은 릴리스).
 
 **Out of scope**:
-- rotate.sock의 admin.sock 통합.
+- rotate.sock과 admin.sock의 단일 socket 통합 (보안 경계 유지를 위해 의도적 분리).
 - HTTP `/api/cluster/*` 라우트 제거 (dashboard 의존).
 
 ## References
