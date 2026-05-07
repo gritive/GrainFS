@@ -17,6 +17,18 @@ func setupReceiver(t *testing.T, selfID string) (*ForwardReceiver, *DataGroupMan
 	return rcv, mgr
 }
 
+func TestMapErrorToStatus_InsufficientPlacementTargets(t *testing.T) {
+	err := &ErrInsufficientPlacementTargets{
+		Operation:     "put_object",
+		GroupID:       "group-1",
+		Desired:       ECConfig{DataShards: 4, ParityShards: 2},
+		Configured:    []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+		Unavailable:   []string{"n6"},
+		FailureReason: "not writeable",
+	}
+	require.Equal(t, raftpb.ForwardStatusInsufficientPlacementTargets, mapErrorToStatus(err))
+}
+
 // Tests
 
 func TestForwardReceiver_UnknownGroup_NotVoter(t *testing.T) {

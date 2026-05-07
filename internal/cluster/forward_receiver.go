@@ -537,6 +537,9 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	if errors.Is(err, storage.ErrEntityTooLarge) {
 		return raftpb.ForwardStatusEntityTooLarge
 	}
+	if errors.Is(err, ErrPlacementTargetsUnavailable) {
+		return raftpb.ForwardStatusInsufficientPlacementTargets
+	}
 	log.Warn().Err(err).Msg("forward receiver mapped backend error to internal status")
 	return raftpb.ForwardStatusInternal
 }

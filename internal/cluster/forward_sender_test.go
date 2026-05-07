@@ -38,6 +38,12 @@ func notLeaderReplyBytes(t *testing.T, hint string) []byte {
 	return buildSimpleReply(raftpb.ForwardStatusNotLeader, hint)
 }
 
+func TestParseReplyStatus_InsufficientPlacementTargets(t *testing.T) {
+	err := parseReplyStatus(buildSimpleReply(raftpb.ForwardStatusInsufficientPlacementTargets, ""))
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
+}
+
 // TestForwardPayload_HeaderRoundtrip verifies encode/decode roundtrip — the
 // payload format is the contract between sender and receiver. A regression
 // here breaks every routing op.
