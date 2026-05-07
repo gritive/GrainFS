@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.81.0] - 2026-05-07 — admin CLI: `--data` 제거하고 `--endpoint`로 통합
+## [0.0.82.0] - 2026-05-07 — admin CLI: `--data` 제거하고 `--endpoint`로 통합
 
 ### Changed (BREAKING)
 
@@ -38,6 +38,23 @@ grainfs volume list
 ```
 
 `grainfs serve`가 시작 시 정확한 경로를 stderr에 출력하므로 그대로 복사하면 됩니다.
+
+## [0.0.81.0] - 2026-05-07 — data-group forwarding dispatch policy
+
+### Changed
+
+- Bucket-scoped forwarding operations now have one internal metadata table for
+  transport shape: frame-only, body-streamed, or read-streamed. Node-scoped
+  scrub session status stays outside bucket forwarding.
+- Forward receivers reject body/read stream kind mismatches before group lookup,
+  while the frame handler keeps the existing legacy-compatible path.
+
+### Tests
+
+- Added metadata coverage for every bucket forwarding op and explicit exclusion
+  of scrub session status.
+- Added receiver stream gating tests for invalid body/read dispatch and valid
+  stream paths reaching group lookup.
 
 ## [0.0.80.0] - 2026-05-07 — admin CLI: 30s `http.Client.Timeout` 제거 + `--timeout` 플래그
 
