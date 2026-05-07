@@ -59,8 +59,6 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 		bucketName = "incident-bucket"
 		keyName    = "incident-obj"
 		numNodes   = 3
-		ecData     = 2
-		ecParity   = 1
 	)
 
 	c := startE2ECluster(t, e2eClusterOptions{
@@ -69,8 +67,6 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 		ClusterKey:    clusterKey,
 		AccessKey:     accessKey,
 		SecretKey:     secretKey,
-		ECData:        ecData,
-		ECParity:      ecParity,
 		LogPrefix:     "grainfs-incident",
 		ScrubInterval: "2s",
 		DisableNFS:    true,
@@ -159,8 +155,6 @@ func TestE2E_QuarantineIncident(t *testing.T) {
 		ClusterKey:    clusterKey,
 		AccessKey:     accessKey,
 		SecretKey:     secretKey,
-		ECData:        2,
-		ECParity:      1,
 		LogPrefix:     "grainfs-quarantine-incident",
 		ScrubInterval: "2s",
 		DisableNFS:    true,

@@ -193,8 +193,6 @@ func (c *mrCluster) startNode(i int, seedGroups int) *exec.Cmd {
 		"--cluster-key", c.clusterKey,
 		"--access-key", c.accessKey,
 		"--secret-key", c.secretKey,
-		"--ec-data", "0",
-		"--ec-parity", "0",
 		"--dedup=false",
 		fmt.Sprintf("--seed-groups=%d", seedGroups),
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),

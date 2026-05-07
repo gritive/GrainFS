@@ -60,8 +60,6 @@ func TestE2E_VlogWatcher_MetricsLive(t *testing.T) {
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
-		ECData:     1,
-		ECParity:   0,
 		LogPrefix:  "vlog-live",
 		DisableNFS: true,
 		DisableNBD: true,
@@ -100,8 +98,6 @@ func TestE2E_GCTicker_RecoversAfterDeletion(t *testing.T) {
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
-		ECData:     1,
-		ECParity:   0,
 		LogPrefix:  "vlog-gc",
 		DisableNFS: true,
 		DisableNBD: true,
@@ -134,8 +130,6 @@ func TestE2E_StrictVlogRegistry_FatalOnMissing(t *testing.T) {
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
-		ECData:     1,
-		ECParity:   0,
 		LogPrefix:  "vlog-strict",
 		DisableNFS: true,
 		DisableNBD: true,
@@ -196,8 +190,6 @@ func TestE2E_VlogWatcher_SustainedWriteNoStarvation(t *testing.T) {
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
-		ECData:     1,
-		ECParity:   1,
 		LogPrefix:  "vlog-nostarve",
 		DisableNFS: true,
 		DisableNBD: true,
@@ -256,9 +248,6 @@ func TestE2E_VlogWatcher_FiresOnLeak(t *testing.T) {
 	}
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
-		SeedGroups: 2,
-		ECData:     1,
-		ECParity:   0,
 		LogPrefix:  "vlog-leak",
 		DisableNFS: true,
 		DisableNBD: true,

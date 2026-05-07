@@ -28,8 +28,6 @@ type e2eClusterOptions struct {
 	ClusterKey    string
 	AccessKey     string
 	SecretKey     string
-	ECData        int
-	ECParity      int
 	LogPrefix     string
 	ScrubInterval string
 	DisableNFS    bool
@@ -56,8 +54,6 @@ type e2eCluster struct {
 	accessKey     string
 	secretKey     string
 	seedGroups    int
-	ecData        int
-	ecParity      int
 	logPrefix     string
 	scrubInterval string
 	extraArgs     []string
@@ -84,6 +80,7 @@ func startE2ECluster(t *testing.T, opts e2eClusterOptions) *e2eCluster {
 }
 
 func normalizeE2EClusterOptions(opts e2eClusterOptions) e2eClusterOptions {
+	rejectRemovedECExtraArgs(opts.ExtraArgs)
 	if opts.Nodes == 0 {
 		opts.Nodes = 2
 	}
@@ -111,6 +108,34 @@ func normalizeE2EClusterOptions(opts e2eClusterOptions) e2eClusterOptions {
 	return opts
 }
 
+func rejectRemovedECExtraArgs(args []string) {
+	for _, arg := range args {
+		if arg == "--ec-data" || strings.HasPrefix(arg, "--ec-data=") ||
+			arg == "--ec-parity" || strings.HasPrefix(arg, "--ec-parity=") {
+			panic(fmt.Sprintf("removed EC profile flag %q: use Nodes to select the zero-config profile", arg))
+		}
+	}
+}
+
+func TestNormalizeE2EClusterOptionsRejectsRemovedECFlags(t *testing.T) {
+	for _, arg := range []string{"--ec-data=2", "--ec-data", "--ec-parity=1", "--ec-parity"} {
+		t.Run(arg, func(t *testing.T) {
+			require.PanicsWithValue(t,
+				fmt.Sprintf("removed EC profile flag %q: use Nodes to select the zero-config profile", arg),
+				func() {
+					normalizeE2EClusterOptions(e2eClusterOptions{ExtraArgs: []string{arg}})
+				})
+		})
+	}
+}
+
+func TestNormalizeE2EClusterOptionsAllowsNonECExtraArgs(t *testing.T) {
+	opts := normalizeE2EClusterOptions(e2eClusterOptions{
+		ExtraArgs: []string{"--vlog-warn-ratio=0.001"},
+	})
+	require.Equal(t, []string{"--vlog-warn-ratio=0.001"}, opts.ExtraArgs)
+}
+
 func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, error) {
 	t.Helper()
 	binary := getBinary()
@@ -125,8 +150,6 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 		accessKey:     opts.AccessKey,
 		secretKey:     opts.SecretKey,
 		seedGroups:    opts.SeedGroups,
-		ecData:        opts.ECData,
-		ecParity:      opts.ECParity,
 		logPrefix:     opts.LogPrefix,
 		scrubInterval: opts.ScrubInterval,
 		extraArgs:     append([]string(nil), opts.ExtraArgs...),
@@ -279,12 +302,6 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 		"--scrub-interval", c.scrubIntervalArg(),
 		"--lifecycle-interval", "0",
 		"--no-encryption",
-	}
-	if c.ecData > 0 || c.ecParity > 0 {
-		args = append(args,
-			"--ec-data", fmt.Sprintf("%d", c.ecData),
-			"--ec-parity", fmt.Sprintf("%d", c.ecParity),
-		)
 	}
 	if c.pprofPorts[i] != 0 {
 		args = append(args, "--pprof-port", fmt.Sprintf("%d", c.pprofPorts[i]))

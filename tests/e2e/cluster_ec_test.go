@@ -15,6 +15,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,8 +42,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		secretKey  = "ec-sk"
 		bucketName = "ec-test"
 		numNodes   = 5
-		ecData     = 3
-		ecParity   = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -90,8 +89,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
@@ -226,8 +223,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 }
 
 // TestE2E_ClusterEC_3Node_ActiveKM21 verifies dynamic EC activation on a 3-node
-// cluster with target 4+2 config. With n=3 and MinECNodes=3, EffectiveConfig
-// produces k=2, m=1 (m_eff=round(3×2/6)=1, k_eff=2). EC must be active:
+// cluster. The zero-config profile for 3 nodes is k=2, m=1. EC must be active:
 // - PUT stores 3 shards (k+m=3) distributed across all nodes.
 // - GET reconstructs correctly from 2 available shards (k=2 minimum).
 // - Killing one node (1 out of 3) leaves k=2 shards: GET must still succeed.
@@ -247,9 +243,6 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		secretKey  = "3n-sk"
 		bucketName = "3n-test"
 		numNodes   = 3
-		// Target 4+2; EffectiveConfig(3, 4+2) → k=2, m=1.
-		ecData   = 4
-		ecParity = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -295,8 +288,6 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
@@ -447,10 +438,8 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		accessKey  = "tp-ak"
 		secretKey  = "tp-sk"
 		bucketName = "topo-test"
-		// 6 nodes, k+m=5: killing one leaves 5 nodes → ECActive stays true.
+		// 6 nodes use auto 4+2; object groups with 5 voters record auto 3+2.
 		numNodes = 6
-		ecData   = 3
-		ecParity = 2
 	)
 
 	httpPorts := make([]int, numNodes)
@@ -504,8 +493,6 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--cluster-key", clusterKey,
 			"--access-key", accessKey,
 			"--secret-key", secretKey,
-			fmt.Sprintf("--ec-data=%d", ecData),
-			fmt.Sprintf("--ec-parity=%d", ecParity),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
@@ -577,7 +564,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	)
 	require.NoError(t, err, "no leader found or CreateBucket never succeeded")
 	client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
-	t.Logf("topology test: leader node %d at %s (N=%d, k+m=%d)", leaderIdx, httpURL(leaderIdx), numNodes, ecData+ecParity)
+	t.Logf("topology test: leader node %d at %s (N=%d, auto EC width=%d)", leaderIdx, httpURL(leaderIdx), numNodes, cluster.AutoECConfigForClusterSize(numNodes).NumShards())
 
 	type entry struct {
 		key string
