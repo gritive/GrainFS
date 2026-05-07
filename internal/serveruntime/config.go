@@ -55,7 +55,6 @@ type Config struct {
 	ECData         int
 	ECParity       int
 	ECExplicit     bool
-	VFSFixed       bool
 	PackThreshold  int
 
 	// Balancer

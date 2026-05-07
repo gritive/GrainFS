@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"sort"
@@ -48,4 +49,15 @@ func hashObjectPlacementKey(bucket, key string) uint64 {
 	_, _ = h.Write([]byte("/"))
 	_, _ = h.Write([]byte(key))
 	return h.Sum64()
+}
+
+type placementGroupContextKey struct{}
+
+func ContextWithPlacementGroup(ctx context.Context, groupID string) context.Context {
+	return context.WithValue(ctx, placementGroupContextKey{}, groupID)
+}
+
+func PlacementGroupFromContext(ctx context.Context) (string, bool) {
+	groupID, ok := ctx.Value(placementGroupContextKey{}).(string)
+	return groupID, ok && groupID != ""
 }

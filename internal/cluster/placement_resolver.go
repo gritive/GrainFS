@@ -114,9 +114,6 @@ func placementConfig(meta PlacementMeta) (ECConfig, error) {
 	if meta.ECData == 0 {
 		return ECConfig{}, errors.New("ECData is zero")
 	}
-	if meta.ECParity == 0 {
-		return ECConfig{}, errors.New("ECParity is zero")
-	}
 	cfg := ECConfig{DataShards: int(meta.ECData), ParityShards: int(meta.ECParity)}
 	if cfg.ParityShards < 0 || cfg.NumShards() <= 0 {
 		return ECConfig{}, fmt.Errorf("invalid EC config k=%d m=%d", cfg.DataShards, cfg.ParityShards)

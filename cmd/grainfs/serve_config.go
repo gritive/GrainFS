@@ -56,7 +56,6 @@ func buildClusterConfig(
 	cfg.ECData, _ = cmd.Flags().GetInt("ec-data")
 	cfg.ECParity, _ = cmd.Flags().GetInt("ec-parity")
 	cfg.ECExplicit = cmd.Flags().Changed("ec-data") || cmd.Flags().Changed("ec-parity")
-	cfg.VFSFixed, _ = cmd.Flags().GetBool("backend-vfs-fixed-version")
 	cfg.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")
 
 	cfg.BalancerEnabled, _ = cmd.Flags().GetBool("balancer-enabled")

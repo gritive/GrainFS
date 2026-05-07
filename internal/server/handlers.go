@@ -1232,6 +1232,9 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 		if groups, ok := s.cluster.(clusterShardGroups); ok {
 			status["shard_groups"] = clusterStatusShardGroups(groups.ShardGroups())
 		}
+		if index, ok := s.cluster.(clusterObjectIndexSummary); ok {
+			status["object_index_summary"] = index.ObjectIndexSummary(string(c.QueryArgs().Peek("bucket")))
+		}
 	}
 
 	data, _ := json.Marshal(status)

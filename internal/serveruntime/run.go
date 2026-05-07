@@ -682,10 +682,6 @@ func Run(ctx context.Context, cfg Config) error {
 		Bool("active", effectiveEC.IsActive(len(allNodes))).
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
 
-	// VFS bucket fixed-versionID toggle (rollback path for the write-amp fix).
-	distBackend.SetVFSFixedVersionEnabled(cfg.VFSFixed)
-	log.Info().Bool("enabled", cfg.VFSFixed).Msg("VFS bucket fixed-versionID configured")
-
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)
 	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 10000})
@@ -834,7 +830,11 @@ func Run(ctx context.Context, cfg Config) error {
 		clusterRouter,  // bucket → group lookup
 		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
 		nodeID,         // selfID for leader check
-	).WithForwardSender(forwardSender).WithNodeAddressResolver(metaRaft.FSM()).WithSelfPeerAlias(raftAddr)
+	).WithForwardSender(forwardSender).
+		WithNodeAddressResolver(metaRaft.FSM()).
+		WithSelfPeerAlias(raftAddr).
+		WithECConfig(effectiveEC).
+		WithObjectIndexProposer(metaRaft)
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, clusterCoord, "s3://grainfs-tables/warehouse"))
 	router.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 	if joinMode {

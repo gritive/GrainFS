@@ -36,8 +36,8 @@ PRELOAD_IN_SHELL="${PRELOAD_IN_SHELL:-1}"
 PROFILE="${PROFILE:-1}"
 PROFILE_ALL_NODES="${PROFILE_ALL_NODES:-0}"
 REQUESTED_TARGET_IDX="${TARGET_IDX:-}"
-EC_DATA="${EC_DATA:-4}"
-EC_PARITY="${EC_PARITY:-2}"
+EC_DATA="${EC_DATA:-}"
+EC_PARITY="${EC_PARITY:-}"
 SEED_GROUPS="${SEED_GROUPS:-0}"
 REQUIRE_GROUP_VOTERS="${REQUIRE_GROUP_VOTERS:-0}"
 BUCKET="${BUCKET:-bench}"
@@ -132,10 +132,15 @@ start_node() {
       --raft-addr "127.0.0.1:${raft_port}"
       --peers "$(peers_for_idx "$idx")"
       --cluster-key "bench-topology-key"
-      --ec-data "$EC_DATA"
-      --ec-parity "$EC_PARITY"
       --seed-groups "$SEED_GROUPS"
     )
+    if [[ -n "$EC_DATA" || -n "$EC_PARITY" ]]; then
+      if [[ -z "$EC_DATA" || -z "$EC_PARITY" ]]; then
+        echo "[error] EC_DATA and EC_PARITY must be set together" >&2
+        exit 1
+      fi
+      args+=(--ec-data "$EC_DATA" --ec-parity "$EC_PARITY")
+    fi
   fi
 
   if [[ "$PROFILE" == "1" ]]; then
@@ -288,7 +293,7 @@ PY
 fi
 
 STATUS_JSON="$BENCH_DIR/topology.json"
-if status=$(curl -sf "http://127.0.0.1:${TARGET_PORT}/api/cluster/status" 2>/dev/null); then
+if status=$(curl -sf "http://127.0.0.1:${TARGET_PORT}/api/cluster/status?bucket=${BUCKET}" 2>/dev/null); then
   printf '%s\n' "$status" >"$STATUS_JSON"
   python3 - "$STATUS_JSON" "$BUCKET" "$REQUIRE_GROUP_VOTERS" <<'PY'
 import json
@@ -300,7 +305,9 @@ with open(path, "r", encoding="utf-8") as f:
 
 assignments = status.get("bucket_assignments") or {}
 groups = {g.get("id"): g for g in status.get("shard_groups") or []}
+object_summary = status.get("object_index_summary") or {}
 group_id = assignments.get(bucket)
+placement_counts = object_summary.get("placement_group_counts") or {}
 if not group_id:
     print(f"[bench] topology bucket={bucket} group=<unassigned> topology_json={path}")
     sys.exit(0)
@@ -308,7 +315,8 @@ if not group_id:
 peers = groups.get(group_id, {}).get("peer_ids") or []
 print(
     f"[bench] topology bucket={bucket} group={group_id} "
-    f"voters={len(peers)} peer_ids={','.join(peers)} topology_json={path}"
+    f"voters={len(peers)} peer_ids={','.join(peers)} "
+    f"placement_group_counts={placement_counts} topology_json={path}"
 )
 if require_group_voters > 0 and len(peers) < require_group_voters:
     print(

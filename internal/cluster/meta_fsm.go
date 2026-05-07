@@ -81,6 +81,11 @@ type ObjectIndexEntry struct {
 	IsDeleteMarker   bool
 }
 
+type ObjectIndexSummary struct {
+	Bucket               string         `json:"bucket,omitempty"`
+	PlacementGroupCounts map[string]int `json:"placement_group_counts"`
+}
+
 // RebalancePlan describes a single voter migration between data Raft group nodes.
 type RebalancePlan struct {
 	PlanID    string
@@ -961,6 +966,22 @@ func (f *MetaFSM) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndex
 		return ObjectIndexEntry{}, false
 	}
 	return cloneObjectIndexEntry(entry), true
+}
+
+func (f *MetaFSM) ObjectIndexSummary(bucket string) ObjectIndexSummary {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	counts := make(map[string]int)
+	for _, entry := range f.objectIndex {
+		if bucket != "" && entry.Bucket != bucket {
+			continue
+		}
+		counts[entry.PlacementGroupID]++
+	}
+	return ObjectIndexSummary{
+		Bucket:               bucket,
+		PlacementGroupCounts: counts,
+	}
 }
 
 // ShardGroups returns a deep copy of current shard groups.
