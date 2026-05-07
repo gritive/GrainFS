@@ -45,6 +45,16 @@ func TestClusterRebalanceRemoved(t *testing.T) {
 		"cluster rebalance stub removed; reintroduce when real local FSM read lands")
 }
 
+func TestClusterCmd_Day2OpsRegistered(t *testing.T) {
+	expected := []string{
+		"transfer-leader", "drain", "health", "placement", "balancer",
+	}
+	names := clusterSubcommandNames()
+	for _, want := range expected {
+		assert.Contains(t, names, want, "cluster %s must be registered", want)
+	}
+}
+
 func TestClusterJoinMovedToRoot(t *testing.T) {
 	assert.NotContains(t, clusterSubcommandNames(), "join",
 		"cluster join was moved to root as 'grainfs join' (bootstrap convention)")

@@ -226,3 +226,106 @@ func TestClient_EventLog_ParsesArray(t *testing.T) {
 	assert.Equal(t, "cluster-remove-peer", events[0].Action)
 	assert.Equal(t, "n3", events[0].Metadata["removed_id"])
 }
+
+func TestClient_TransferLeader_Happy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/cluster/transfer-leader", r.URL.Path)
+		require.Equal(t, http.MethodPost, r.Method)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"old_leader": "n1",
+			"term":       8,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	res, err := c.TransferLeader(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "n1", res.OldLeader)
+	require.Equal(t, uint64(8), res.Term)
+}
+
+func TestClient_TransferLeader_NotLeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":     "not leader",
+			"leader_id": "n2",
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	_, err := c.TransferLeader(context.Background())
+	require.Error(t, err)
+	var tle *TransferLeaderError
+	require.True(t, errors.As(err, &tle))
+	require.Equal(t, http.StatusConflict, tle.StatusCode)
+	require.Equal(t, "n2", tle.LeaderID)
+	require.False(t, tle.Retry)
+}
+
+func TestClient_TransferLeader_Race(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":     "leadership changed during transfer",
+			"leader_id": "n3",
+			"retry":     true,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	_, err := c.TransferLeader(context.Background())
+	var tle *TransferLeaderError
+	require.True(t, errors.As(err, &tle))
+	require.True(t, tle.Retry)
+	require.Equal(t, "n3", tle.LeaderID)
+}
+
+func TestClient_Health_TypedParse(t *testing.T) {
+	payload := `{
+		"mode":"cluster","degraded":false,"leader_id":"n1","term":7,
+		"quorum":{"voters_total":3,"alive_count":3,"required":2,"healthy":true},
+		"peers":[{"peer_id":"n1","state":"self"},{"peer_id":"n2","state":"live"}],
+		"issues":[]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/cluster/health", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	h, err := c.Health(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "cluster", h.Mode)
+	require.True(t, h.Quorum.Healthy)
+	require.Equal(t, 2, len(h.Peers))
+	require.Equal(t, "self", h.Peers[0].State)
+}
+
+func TestClient_BalancerStatus_TypedParse(t *testing.T) {
+	payload := `{
+		"available":true,"active":true,"imbalance_pct":3.4,
+		"nodes":[
+			{"node_id":"n1","disk_used_pct":84.0,"disk_avail_bytes":107374182400,"requests_per_sec":42}
+		]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/cluster/balancer/status", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	b, err := c.BalancerStatus(context.Background())
+	require.NoError(t, err)
+	require.True(t, b.Available)
+	require.True(t, b.Active)
+	require.Equal(t, 1, len(b.Nodes))
+	require.Equal(t, "n1", b.Nodes[0].NodeID)
+}

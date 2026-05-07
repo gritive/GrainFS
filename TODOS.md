@@ -132,3 +132,19 @@
 
 - [ ] **`cluster remove-peer` negative liveness signal — metaRaft down detection** — positive signal은 successful metaRaft AppendEntries evidence로 해결한다. `/api/cluster/status` 의 `peer_snapshot` 은 leader-side fresh replication evidence가 있는 remote voter를 `live` 로 표시하고, remove-peer preflight 는 그 row를 alive 로 센다. 남은 단순화: failed heartbeat만으로는 `probe_failed` 를 만들지 않으므로 dead-peer를 자동으로 **detect하지 않음** → 운영자가 외부 신호 (모니터링/SSH 접속 실패) 로 죽음을 확인한 뒤 명시 호출하거나 `force=true` 로 override 해야 한다. **후속 작업:** 운영 데이터 기반으로 negative metaRaft probe/health monitor를 별도 설계한다. 이때 `cluster peers` STATE 컬럼이 진짜 down을 반영하고, failure threshold / cooldown / follower display policy를 다시 grill한다. **Re-open trigger:** 운영자가 자동 dead-peer detection 을 요구하거나 metaRaft negative liveness 설계를 시작할 때.
 
+## Cluster Day-2 Operations
+
+v0.0.90.0 Phase 1 은 metaRaft 한정으로 5 commands (transfer-leader / drain / health / placement / balancer status) 를 제공한다. 아래 항목은 의도적으로 deferred — 별도 spec 으로 분리.
+
+- [ ] **Per-data-group leader transfer / drain (multi-raft scope)** — 현재 transfer-leader / drain 은 metaRaft 만 대상. 운영자가 노드를 "graceful upgrade" 할 때 진짜 필요한 것은 그 노드가 leader 인 모든 raft group (meta + 자기 ShardGroup) 에서 leadership 을 옮기는 것. 단일 명령으로 모든 그룹 정리 + 진행률 표시 (`drained 3/3 raft groups`). **Re-open trigger:** Phase 2 multi-raft 운영 시나리오가 production 에서 빈도 ≥1/주 발생, 또는 zero-downtime upgrade 절차 명시 요청.
+
+- [ ] **Target-aware `cluster transfer-leader <id>`** — 현재는 raft 가 자동으로 `matchIndex` 가장 큰 peer 를 선택. 운영자가 specific peer 로 옮기고 싶을 때 (e.g. AZ rebalancing, 의도적 leader pinning) 가 없음. raft.Node.TransferLeadership 에 target arg 추가 + CLI flag `--to <id>`. **Re-open trigger:** 운영자가 명시적 leader pinning 요청, 또는 다중 AZ 토폴로지에서 leader 위치가 latency 영향.
+
+- [ ] **Persistent drain state (data plane redirect)** — 현재 drain 은 voter 제거까지만. 그러나 drain 직전 short window 에 들어온 in-flight write 는 drained 노드에 도달할 수 있다 (cache, NFS handle). drain 시작과 동시에 "이 노드는 traffic 받지 마" flag (gossip + admin) 를 세팅해 다른 노드들이 redirect 하도록. **Re-open trigger:** drain 후 short-window write loss / mis-route 가 production 에서 관측됨.
+
+- [ ] **Cluster balancer trigger CLI** — 현재 `balancer status` 만 제공. 운영자가 즉시 rebalance 트리거하고 싶을 때 (e.g. capacity migration 전) 가 없음. POST `/v1/cluster/balancer/trigger` + CLI `cluster balancer trigger`. **Re-open trigger:** 운영자가 manual rebalance 요청 / dashboard 에서 인입.
+
+- [ ] **`cluster add-voter <addr>` (leader-side)** — 현재 join 은 follower 가 leader 에게 push (grainfs join). 반대 방향 (leader 에서 explicit `add-voter`) 은 없음. recovery 시나리오 (split-brain, manual repair) 에서 유용. **Re-open trigger:** 재해 복구 절차에서 leader-side add-voter 가 필요해질 때, 또는 `recover-cluster` 워크플로 통합.
+
+- [ ] **Health: data-group raft progress integration** — 현재 health 는 metaRaft quorum 만 보고. 데이터 그룹의 raft progress (per-group lag, 리더, voter set) 는 미포함. health 응답 확장 + 렌더링 업데이트. **Re-open trigger:** Phase 2 multi-raft 운영 / data-group level liveness 가 SLO 에 포함될 때.
+
