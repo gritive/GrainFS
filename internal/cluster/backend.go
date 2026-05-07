@@ -2683,6 +2683,9 @@ func (b *DistributedBackend) getObjectECShardReadersAtShardKey(ctx context.Conte
 		return ECConfig{}, nil, fmt.Errorf("shard service unavailable")
 	}
 
+	if recCfg.Redundant() && objectSize >= 0 && objectSize <= maxECPooledReadObjectSize {
+		return b.getObjectECBufferedShardReadersAtShardKey(ctx, bucket, shardKey, rec)
+	}
 	if b.ecShardCacheCanStore(bucket, shardKey, recCfg, objectSize) {
 		return b.getObjectECBufferedShardReadersAtShardKey(ctx, bucket, shardKey, rec)
 	}
