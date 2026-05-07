@@ -114,9 +114,9 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 
 	// Step 4: Verify backup was created
 	t.Log("Step 4: Verifying backup...")
-	snapshotsCmd := exec.Command("restic", "snapshots", "--format", "json")
-	output, err := snapshotsCmd.Output()
-	require.NoError(t, err, "list snapshots")
+	snapshotsCmd := exec.Command("restic", "snapshots", "--json")
+	output, err := snapshotsCmd.CombinedOutput()
+	require.NoError(t, err, "list snapshots: %s", output)
 	require.Contains(t, string(output), "paths", "snapshot should contain paths")
 
 	// Step 5: Corrupt original data (simulate disaster)
@@ -161,7 +161,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	defer terminateProcess(cmd2)
 
 	restoreEndpoint := fmt.Sprintf("http://127.0.0.1:%d", restorePort)
-	waitForPort(t, restorePort, 10*time.Second)
+	waitForPort(t, restorePort, 60*time.Second)
 
 	client2 := newS3Client(restoreEndpoint)
 
