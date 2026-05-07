@@ -395,67 +395,99 @@ func TestIAM_E2E_ET5_StickyAuth_ClusterRestart(t *testing.T) {
 	}
 }
 
-// TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA verifies the *first
-// half* of ET6: the P5 auto-grant hook (commit 6b02af2) issues an explicit
-// (sa-default, bucket, Admin) grant on every CreateBucket, in addition to
-// the bootstrap wildcard. The explicit grant is the durable per-bucket
-// claim that survives any future wildcard cleanup.
+// TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA exercises the full ET6
+// flow now that the Phase-5c admin gap is closed (HandleGrantDelete routes
+// bucket="*" to ProposeGrantWildcardDelete, gated by a footgun guard that
+// requires at least one explicit grant on sa-default).
 //
-// The second half — actually removing the wildcard via admin API and
-// observing that only the explicit grant remains — is NOT testable in
-// Phase 5: there is no admin route to remove a wildcard grant.
-//
-//	HandleGrantDelete → ProposeGrantDelete → applyGrantDelete only touches
-//	the per-bucket `grants` map; the bootstrap default SA's wildcard lives
-//	in the separate `wildcards` map and is unreachable from the admin API.
-//	HandleGrantDelete with bucket="*" is a silent no-op today.
-//
-// Tracked as a Phase 5c gap (see design doc Status block). Fix sketch:
-// add ProposeGrantWildcardDelete + route HandleGrantDelete with
-// bucket=="*" to it.
+//  1. CreateBucket as default SA → P5 hook auto-issues the explicit
+//     (sa-default, et6-bucket, Admin) grant alongside the bootstrap wildcard.
+//  2. DELETE /v1/iam/grant {sa: sa-default, bucket: "*"} succeeds (guard
+//     passes because the explicit grant exists).
+//  3. After commit propagates, the wildcard is gone but the explicit grant
+//     keeps default SA functional on its owned bucket.
+//  4. Default SA is denied on a bucket owned by a different SA, proving
+//     wildcard-bypass authorization no longer applies.
 func TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA(t *testing.T) {
 	srv := startIAMTestServer(t)
 	defer srv.Stop()
 
 	defCli := s3ClientFor(srv.S3URL, srv.BootstrapAK, srv.BootstrapSK)
-	const bucket = "et6-bucket"
 	ctx := context.Background()
-	if _, err := defCli.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String(bucket),
-	}); err != nil {
-		t.Fatalf("default CreateBucket: %v", err)
+	const bucket = "et6-bucket"
+	if _, err := defCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
 	}
 
-	// Both grants must coexist: explicit (sa-default, et6-bucket, Admin)
-	// auto-issued by the P5 hook AND the wildcard from bootstrap.
-	grants := iamListGrants(t, srv.AdminSock, "sa-default", "")
-	var foundExplicit, foundWildcard bool
-	for _, g := range grants {
-		if g.Bucket == bucket && g.Role == "Admin" {
-			foundExplicit = true
+	// Wait for the explicit grant to land in IAM (P5 auto-issues it).
+	deadline := time.Now().Add(5 * time.Second)
+	haveExplicit := false
+	for time.Now().Before(deadline) {
+		grants := iamListGrants(t, srv.AdminSock, "sa-default", "")
+		for _, g := range grants {
+			if g.Bucket == bucket && g.Role == "Admin" {
+				haveExplicit = true
+				break
+			}
 		}
-		if g.Bucket == "*" && g.Role == "Admin" {
-			foundWildcard = true
+		if haveExplicit {
+			break
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if !foundExplicit {
-		t.Fatalf("expected explicit (sa-default, %s, Admin) grant; got %+v", bucket, grants)
-	}
-	if !foundWildcard {
-		t.Fatalf("expected wildcard grant; got %+v", grants)
+	if !haveExplicit {
+		t.Fatal("explicit (sa-default, et6-bucket, Admin) grant did not land within 5s")
 	}
 
-	// Default SA can write into the owned bucket — exercises the (auto)
-	// explicit grant path. (With wildcard still present this is also
-	// allowed via wildcard; once the Phase 5c API gap is closed and the
-	// wildcard is removable, this assertion proves the explicit grant
-	// holds independently. For now it's a baseline regression guard.)
+	// Remove the wildcard grant. Must succeed: explicit grant on et6-bucket exists.
+	iamGrantDelete(t, srv.AdminSock, "sa-default", "*")
+
+	// Wait for the wildcard removal to commit + propagate.
+	deadline = time.Now().Add(5 * time.Second)
+	wildcardGone := false
+	for time.Now().Before(deadline) {
+		grants := iamListGrants(t, srv.AdminSock, "sa-default", "")
+		hasWildcard := false
+		for _, g := range grants {
+			if g.Bucket == "*" {
+				hasWildcard = true
+				break
+			}
+		}
+		if !hasWildcard {
+			wildcardGone = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !wildcardGone {
+		t.Fatal("wildcard grant still present 5s after delete")
+	}
+
+	// Default SA still works on owned bucket via explicit grant.
 	if _, err := defCli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String("k"),
+		Key:    aws.String("after-wildcard-removal"),
 		Body:   bytes.NewReader([]byte("v")),
 	}); err != nil {
-		t.Fatalf("PutObject on owned bucket: %v", err)
+		t.Fatalf("PutObject after wildcard removal: %v", err)
+	}
+
+	// Default SA is denied on a bucket where it has no explicit grant.
+	// Use a separate SA to create+own the other-bucket so default has no grant on it.
+	other := iamCreateSA(t, srv.AdminSock, "other-sa")
+	iamGrantPut(t, srv.AdminSock, other.SAID, "other-bucket", "Admin")
+	iamWaitKeyReady(t, srv.S3URL, other.AccessKey, other.SecretKey, 10*time.Second)
+	otherCli := s3ClientFor(srv.S3URL, other.AccessKey, other.SecretKey)
+	if _, err := otherCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("other-bucket")}); err != nil {
+		t.Fatalf("other CreateBucket: %v", err)
+	}
+
+	if _, err := defCli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("other-bucket"),
+		Key:    aws.String("k"),
+	}); err == nil {
+		t.Fatal("default SA still has access to other-sa's bucket after wildcard removal; expected 403")
 	}
 }
 

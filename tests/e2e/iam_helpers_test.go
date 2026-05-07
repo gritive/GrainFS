@@ -157,6 +157,14 @@ func iamGrantPut(t *testing.T, sock, saID, bucket, role string) {
 		map[string]string{"sa_id": saID, "bucket": bucket, "role": role}, nil)
 }
 
+// iamGrantDelete removes the grant for (saID, bucket). Pass "*" as bucket
+// to remove the wildcard grant via the Phase-5c HandleGrantDelete route.
+func iamGrantDelete(t *testing.T, sock, saID, bucket string) {
+	t.Helper()
+	iamDo(t, sock, "DELETE", "/v1/iam/grant",
+		map[string]string{"sa_id": saID, "bucket": bucket}, nil)
+}
+
 // iamKeyRevoke marks the given access_key revoked.
 func iamKeyRevoke(t *testing.T, sock, saID, accessKey string) {
 	t.Helper()
