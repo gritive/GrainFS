@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// startUDSStubServer brings up a stub HTTP server bound to a Unix socket.
+// Returns the socket path; cleanup is registered via t.Cleanup. CLI tests
+// use this so the clusterEndpointFromCmd validation (which rejects http://)
+// receives a UDS path rather than an httptest URL.
+func startUDSStubServer(t *testing.T, h http.Handler) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "rp-")
+	require.NoError(t, err)
+	sock := filepath.Join(d, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	go http.Serve(ln, h) //nolint:errcheck
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = os.RemoveAll(d)
+	})
+	return sock
+}
+
 // Thin invocation tests: orchestration logic lives in internal/clusteradmin
 // and is tested there. These tests only verify the cobra command wires
 // flags + std streams through to clusteradmin.RemovePeer.
@@ -21,6 +42,10 @@ import (
 func runRemovePeer(t *testing.T, base string, args []string, stdin string) (string, error) {
 	t.Helper()
 	cmd := clusterRemovePeerCmd()
+	// In production --endpoint is a PersistentFlag on clusterCmd; here we
+	// register it locally so the standalone subcommand sees the flag value
+	// during the test.
+	cmd.Flags().String("endpoint", "", "")
 	out := &bytes.Buffer{}
 	cmd.SetOut(out)
 	cmd.SetErr(out)
@@ -71,10 +96,10 @@ func removePeerSnapshotWithCooldown(self string, livePeers []string, cooldownPee
 
 func (s *stubRemoveServer) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(s.statusBody)
 	})
-	mux.HandleFunc("/api/cluster/remove-peer", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/cluster/remove-peer", func(w http.ResponseWriter, r *http.Request) {
 		s.removeCalls.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		parsed := map[string]any{}
@@ -101,10 +126,9 @@ func TestCmdRemovePeer_FlagsReachOptions(t *testing.T) {
 		},
 		removeBody: map[string]any{"status": "removed", "id": "n3"},
 	}
-	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
+	sock := startUDSStubServer(t, stub.handler())
 
-	out, err := runRemovePeer(t, srv.URL, []string{"n3", "--yes"}, "")
+	out, err := runRemovePeer(t, sock, []string{"n3", "--yes"}, "")
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "removed n3")
 	assert.Equal(t, int32(1), stub.removeCalls.Load(), "POST must reach the server")
@@ -131,10 +155,9 @@ func TestCmdRemovePeer_ForceFlagPropagates(t *testing.T) {
 		},
 		removeBody: map[string]any{"status": "removed", "id": "n2"},
 	}
-	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
+	sock := startUDSStubServer(t, stub.handler())
 
-	_, err := runRemovePeer(t, srv.URL, []string{"n2", "--force", "--yes"}, "")
+	_, err := runRemovePeer(t, sock, []string{"n2", "--force", "--yes"}, "")
 	require.NoError(t, err)
 	body := stub.lastBody.Load().(map[string]any)
 	assert.Equal(t, true, body["force"])

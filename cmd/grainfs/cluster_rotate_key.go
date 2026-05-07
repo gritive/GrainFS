@@ -51,7 +51,8 @@ Failures roll back automatically:
 	}
 	c.AddCommand(clusterRotateKeyBegin(), clusterRotateKeyStatus(), clusterRotateKeyAbort())
 	c.PersistentFlags().String("endpoint", "",
-		"rotation Unix socket path (required, e.g. ./tmp/rotate.sock)")
+		"rotate-key socket path (NOT admin.sock; default <data-dir>/rotate.sock); "+
+			"server logs the path on startup as \"rotate endpoint\"")
 	return c
 }
 
