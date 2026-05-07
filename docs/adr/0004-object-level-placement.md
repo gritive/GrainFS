@@ -18,6 +18,9 @@ object enumeration route through a meta-Raft global object index:
 - New object writes select `placement_group_id` from normal EC-capable data
   groups by hashing `bucket + "/" + key`.
 - `group-0` is excluded from normal object placement.
+- Data-group Raft elections use the group ID as a deterministic priority key,
+  splitting each election timeout window across voters so independent placement
+  groups prefer different initial leaders.
 - Reads, versioned reads, deletes, multipart completion, copy-through-write,
   Range `ReadAt`, `ListObjects`, `ListObjectVersions`, and `WalkObjects` use
   the object index for object routing/enumeration.

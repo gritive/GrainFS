@@ -23,6 +23,9 @@
 - Cluster object writes now require the EC pipeline when running through
   placement groups, and explicit EC profiles fail fast when the selected group
   cannot fit `k+m` shards.
+- Data-group Raft elections now use a group-specific priority key so seeded
+  placement groups prefer different initial leaders instead of letting startup
+  timing concentrate group leadership on one node.
 - Zero-config EC now scales from active cluster size, including the single-node
   `1+0` profile and progressively wider profiles for larger clusters.
 - VFS/internal bucket fixed-version special-casing is removed from the cluster
