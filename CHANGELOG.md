@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.85.0] - 2026-05-07 — `dashboard` warning 메시지에서 grainfs.toml orphan 안내 제거
+
+### Fixed
+
+- `grainfs dashboard` 가 `--public-url` 미설정 시 출력하던 warning에 "또는
+  `grainfs.toml`의 `public_url`에 설정"이라는 안내가 있었으나, repo에 TOML
+  리더가 없어 동작하지 않는 silent-failure trap이었음. 안내 1줄 삭제 +
+  앞 줄의 `지정하거나,` → `지정.`로 정리. v0.0.82.0/v0.0.84.0의 "explicit
+  flag-only" 결정과 정합성 회복.
+
 ## [0.0.84.0] - 2026-05-07 — `cluster rotate-key`도 `--endpoint`로 통합 + env fallback 제거
 
 ### Changed (BREAKING)
