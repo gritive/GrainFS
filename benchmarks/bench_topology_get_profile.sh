@@ -119,8 +119,6 @@ start_node() {
     --port "$s3_port"
     --nfs4-port 0
     --nbd-port 0
-    --rate-limit-ip-rps 0
-    --rate-limit-user-rps 0
   )
 
   while IFS= read -r arg; do

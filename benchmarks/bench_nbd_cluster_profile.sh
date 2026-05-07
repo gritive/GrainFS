@@ -99,8 +99,6 @@ for i in 0 1 2; do
     --snapshot-interval 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
-    --rate-limit-ip-rps 0 \
-    --rate-limit-user-rps 0 \
     --dedup=false \
     --log-level warn \
     > "$BENCH_DIR/n$i.log" 2>&1 &

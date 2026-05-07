@@ -8,7 +8,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
+
+const spoolCopyBufferSize = 1 << 20
+
+var spoolCopyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, spoolCopyBufferSize)
+		return &buf
+	},
+}
 
 type spooledObject struct {
 	Path string
@@ -17,6 +28,7 @@ type spooledObject struct {
 }
 
 func spoolObject(ctx context.Context, dir string, r io.Reader, hash bool) (*spooledObject, error) {
+	stageStart := time.Now()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
 	}
@@ -24,6 +36,7 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, hash bool) (*spoo
 	if err != nil {
 		return nil, fmt.Errorf("create spool file: %w", err)
 	}
+	observePutStage("spool_object", "create_temp", stageStart)
 	path := tmp.Name()
 	cleanup := func() {
 		_ = tmp.Close()
@@ -35,21 +48,30 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, hash bool) (*spoo
 		etag string
 	)
 	reader := readerWithContext{ctx: ctx, r: r}
+	bufp := spoolCopyBufferPool.Get().(*[]byte)
+	defer func() {
+		clear(*bufp)
+		spoolCopyBufferPool.Put(bufp)
+	}()
+	stageStart = time.Now()
 	if hash {
 		h := md5.New()
-		size, err = io.Copy(tmp, io.TeeReader(reader, h))
+		size, err = io.CopyBuffer(tmp, io.TeeReader(reader, h), *bufp)
 		etag = hex.EncodeToString(h.Sum(nil))
 	} else {
-		size, err = io.Copy(tmp, reader)
+		size, err = io.CopyBuffer(tmp, reader, *bufp)
 	}
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("spool object: %w", err)
 	}
+	observePutStage("spool_object", "copy_hash", stageStart)
+	stageStart = time.Now()
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(path)
 		return nil, fmt.Errorf("close spool file: %w", err)
 	}
+	observePutStage("spool_object", "close", stageStart)
 	return &spooledObject{Path: path, Size: size, ETag: etag}, nil
 }
 
@@ -62,6 +84,7 @@ func (s *spooledObject) Cleanup() {
 }
 
 func writeFileAtomicFromReader(path string, r io.Reader) error {
+	stageStart := time.Now()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create object dir: %w", err)
 	}
@@ -69,27 +92,40 @@ func writeFileAtomicFromReader(path string, r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("create tmp object: %w", err)
 	}
+	observePutStage("write_file_atomic", "create_temp", stageStart)
 	tmpPath := tmp.Name()
 	cleanup := func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 	}
-	if _, err := io.Copy(tmp, r); err != nil {
+	stageStart = time.Now()
+	bufp := spoolCopyBufferPool.Get().(*[]byte)
+	_, err = io.CopyBuffer(tmp, r, *bufp)
+	clear(*bufp)
+	spoolCopyBufferPool.Put(bufp)
+	if err != nil {
 		cleanup()
 		return fmt.Errorf("write tmp object: %w", err)
 	}
+	observePutStage("write_file_atomic", "copy", stageStart)
+	stageStart = time.Now()
 	if err := tmp.Sync(); err != nil {
 		cleanup()
 		return fmt.Errorf("sync tmp object: %w", err)
 	}
+	observePutStage("write_file_atomic", "sync", stageStart)
+	stageStart = time.Now()
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close tmp object: %w", err)
 	}
+	observePutStage("write_file_atomic", "close", stageStart)
+	stageStart = time.Now()
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename object: %w", err)
 	}
+	observePutStage("write_file_atomic", "rename", stageStart)
 	return nil
 }
 

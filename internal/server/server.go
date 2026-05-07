@@ -116,8 +116,6 @@ type Server struct {
 	policyStore    *CompiledPolicyStore
 	lifecycleStore *lifecycle.Store
 	icebergCatalog icebergcatalog.Catalog
-	ipLimiter      *RateLimiter
-	userLimiter    *RateLimiter
 	cluster        ClusterInfo       // nil in no-peers mode
 	membership     ClusterMembership // nil = remove-peer endpoint returns 503
 	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
@@ -181,15 +179,6 @@ type Option func(*Server)
 func WithAuth(creds []s3auth.Credentials) Option {
 	return func(s *Server) {
 		s.verifier = s3auth.NewCachingVerifier(s3auth.NewVerifier(creds), 4096, 5*time.Minute)
-	}
-}
-
-// WithRateLimits configures per-IP and per-user request limits. A non-positive
-// rps disables the corresponding limiter.
-func WithRateLimits(ipRPS float64, ipBurst int, userRPS float64, userBurst int) Option {
-	return func(s *Server) {
-		s.ipLimiter = NewRateLimiter(ipRPS, ipBurst, 100000)
-		s.userLimiter = NewRateLimiter(userRPS, userBurst, 100000)
 	}
 }
 
@@ -361,8 +350,6 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		ops:         ss.Ops,
 		hub:         NewHub(),
 		policyStore: policyStore,
-		ipLimiter:   NewRateLimiter(100, 200, 100000), // 100 req/sec per IP, burst 200, max 100K entries
-		userLimiter: NewRateLimiter(50, 100, 100000),  // 50 req/sec per user, burst 100
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -403,16 +390,15 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 	h := server.Default(
 		server.WithHostPorts(addr),
 		server.WithMaxRequestBodySize(512*1024*1024), // 512MB max body
+		server.WithMaxKeepBodySize(0),
 	)
 
 	h.Use(s.metricsMiddleware())
-	h.Use(s.ipRateLimitMiddleware())
 
 	if s.verifier != nil {
 		h.Use(s.authMiddleware())
 	}
 
-	h.Use(s.userRateLimitMiddleware())
 	h.Use(s.authzMiddleware())
 
 	if s.volMgr == nil {

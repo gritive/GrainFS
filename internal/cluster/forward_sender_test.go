@@ -200,7 +200,52 @@ func TestForwardSender_ResolveLeaderPeers_UsesNotLeaderHint(t *testing.T) {
 	s := NewForwardSender(dialer)
 	peers := s.ResolveLeaderPeers(context.Background(), []string{"peer-A", "peer-C"}, "group-1", "b", "k")
 	require.Equal(t, []string{"peer-B", "peer-A", "peer-C"}, peers)
-	require.Equal(t, []string{"peer-A"}, connected)
+	require.Equal(t, []string{"peer-A", "peer-B"}, connected)
+}
+
+func TestForwardSender_ResolveLeaderPeers_SkipsUnreachableHint(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		switch peer {
+		case "peer-A":
+			return notLeaderReplyBytes(t, "node-id-only"), nil
+		case "node-id-only":
+			return nil, errors.New("not a dialable address")
+		case "peer-C":
+			return buildSimpleReply(raftpb.ForwardStatusNoSuchKey, ""), nil
+		default:
+			return nil, errors.New("unexpected peer")
+		}
+	}
+	s := NewForwardSender(dialer)
+	peers := s.ResolveLeaderPeers(context.Background(), []string{"peer-A", "peer-C"}, "group-1", "b", "k")
+	require.Equal(t, []string{"peer-C", "peer-A"}, peers)
+	require.Equal(t, []string{"peer-A", "node-id-only", "peer-C"}, connected)
+}
+
+func TestForwardSender_ResolveLeaderPeers_ResolvesNodeIDHint(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		switch peer {
+		case "peer-A":
+			return notLeaderReplyBytes(t, "node-C"), nil
+		case "10.0.0.3:7000":
+			return buildSimpleReply(raftpb.ForwardStatusNoSuchKey, ""), nil
+		default:
+			return nil, errors.New("unexpected peer")
+		}
+	}
+	s := NewForwardSender(dialer).WithLeaderHintResolver(func(hint string) string {
+		if hint == "node-C" {
+			return "10.0.0.3:7000"
+		}
+		return hint
+	})
+	peers := s.ResolveLeaderPeers(context.Background(), []string{"peer-A", "peer-B"}, "group-1", "b", "k")
+	require.Equal(t, []string{"10.0.0.3:7000", "peer-A", "peer-B"}, peers)
+	require.Equal(t, []string{"peer-A", "10.0.0.3:7000"}, connected)
 }
 
 func TestForwardSender_ResolveLeaderPeers_TreatsNoSuchKeyAsLeader(t *testing.T) {
@@ -258,6 +303,44 @@ func TestForwardSender_SendStream_BackpressureLimit(t *testing.T) {
 	_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
 		raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k2", "text/plain", nil), bytes.NewReader([]byte("second")))
 	require.ErrorIs(t, err, storage.ErrForwardBackpressure)
+
+	close(release)
+	require.NoError(t, <-done)
+}
+
+func TestForwardSender_SendReadStreamUsesSeparateSlotPool(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		once.Do(func() { close(started) })
+		<-release
+		_, _ = io.Copy(io.Discard, body)
+		return okReplyBytes(t), nil
+	}
+	readDialer := func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
+		return okReplyBytes(t), io.NopCloser(bytes.NewReader([]byte("body"))), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		return okReplyBytes(t), nil
+	}).WithStreamDialer(streamDialer).
+		WithReadStreamDialer(readDialer).
+		WithMaxForwardStreams(1).
+		WithMaxForwardReadStreams(1)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
+			raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil), bytes.NewReader([]byte("first")))
+		done <- err
+	}()
+	<-started
+
+	reply, rc, err := s.SendReadStream(context.Background(), []string{"peer-a"}, "g",
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+	require.NoError(t, rc.Close())
 
 	close(release)
 	require.NoError(t, <-done)

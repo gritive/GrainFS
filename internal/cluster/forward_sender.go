@@ -42,11 +42,13 @@ type forwardReadStreamDialer func(ctx context.Context, peer string, payload []by
 // ForwardSender is the client side of the 0x08 wire. Stateless apart from the
 // dialer + timeout — a single instance is shared across all coordinator calls.
 type ForwardSender struct {
-	dialer       forwardDialer
-	streamDialer forwardStreamDialer
-	readDialer   forwardReadStreamDialer
-	timeout      time.Duration
-	streamSlots  chan struct{}
+	dialer             forwardDialer
+	streamDialer       forwardStreamDialer
+	readDialer         forwardReadStreamDialer
+	leaderHintResolver func(string) string
+	timeout            time.Duration
+	streamSlots        chan struct{}
+	readSlots          chan struct{}
 }
 
 // NewForwardSender constructs a sender with default 2 minute per-call timeout.
@@ -55,6 +57,7 @@ func NewForwardSender(d forwardDialer) *ForwardSender {
 		dialer:      d,
 		timeout:     2 * time.Minute,
 		streamSlots: make(chan struct{}, 8),
+		readSlots:   make(chan struct{}, 64),
 	}
 }
 
@@ -74,12 +77,25 @@ func (s *ForwardSender) WithReadStreamDialer(d forwardReadStreamDialer) *Forward
 	return s
 }
 
+func (s *ForwardSender) WithLeaderHintResolver(resolve func(string) string) *ForwardSender {
+	s.leaderHintResolver = resolve
+	return s
+}
+
 // WithMaxForwardStreams overrides the concurrent streamed-body forward limit.
 func (s *ForwardSender) WithMaxForwardStreams(n int) *ForwardSender {
 	if n < 1 {
 		n = 1
 	}
 	s.streamSlots = make(chan struct{}, n)
+	return s
+}
+
+func (s *ForwardSender) WithMaxForwardReadStreams(n int) *ForwardSender {
+	if n < 1 {
+		n = 1
+	}
+	s.readSlots = make(chan struct{}, n)
 	return s
 }
 
@@ -152,7 +168,7 @@ func (s *ForwardSender) Send(
 			continue // try next peer
 		}
 		if isNotLeaderReply(reply) {
-			if hint := extractLeaderHint(reply); hint != "" {
+			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 				r2, err2 := s.dialer(ctx, hint, payload)
 				if err2 == nil {
 					return r2, nil
@@ -187,8 +203,11 @@ func (s *ForwardSender) ResolveLeaderPeers(ctx context.Context, peers []string, 
 			continue
 		}
 		if isNotLeaderReply(reply) {
-			if hint := extractLeaderHint(reply); hint != "" {
-				return preferForwardPeer(peers, hint)
+			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
+				hintReply, hintErr := s.dialer(ctx, hint, payload)
+				if hintErr == nil && !isNotLeaderReply(hintReply) {
+					return preferForwardPeer(peers, hint)
+				}
 			}
 			continue
 		}
@@ -255,7 +274,7 @@ func (s *ForwardSender) SendStream(
 			if !canRewindForwardBody(body) {
 				return reply, nil
 			}
-			if hint := extractLeaderHint(reply); hint != "" {
+			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 				if err := rewindForwardBody(body); err != nil {
 					return nil, err
 				}
@@ -283,15 +302,19 @@ func (s *ForwardSender) SendReadStream(
 	if s.readDialer == nil {
 		return nil, nil, ErrNoReachablePeer
 	}
+	readSlots := s.readSlots
+	if readSlots == nil {
+		readSlots = s.streamSlots
+	}
 	select {
-	case s.streamSlots <- struct{}{}:
+	case readSlots <- struct{}{}:
 	default:
 		return nil, nil, storage.ErrForwardBackpressure
 	}
 	releaseSlot := true
 	defer func() {
 		if releaseSlot {
-			<-s.streamSlots
+			<-readSlots
 		}
 	}()
 
@@ -316,17 +339,17 @@ func (s *ForwardSender) SendReadStream(
 			if body != nil {
 				_ = body.Close()
 			}
-			if hint := extractLeaderHint(reply); hint != "" {
+			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 				r2, b2, err2 := s.readDialer(ctx, hint, payload)
 				if err2 == nil {
 					releaseSlot = false
-					return r2, newForwardSlotReadCloser(b2, s.streamSlots), nil
+					return r2, newForwardSlotReadCloser(b2, readSlots), nil
 				}
 			}
 			return reply, io.NopCloser(bytes.NewReader(nil)), nil
 		}
 		releaseSlot = false
-		return reply, newForwardSlotReadCloser(body, s.streamSlots), nil
+		return reply, newForwardSlotReadCloser(body, readSlots), nil
 	}
 	if lastDialErr != nil {
 		return nil, nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
@@ -389,6 +412,17 @@ func extractLeaderHint(reply []byte) string {
 	}
 	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	return string(fr.LeaderHint())
+}
+
+func (s *ForwardSender) resolveLeaderHint(hint string) string {
+	if hint == "" || s == nil || s.leaderHintResolver == nil {
+		return hint
+	}
+	resolved := s.leaderHintResolver(hint)
+	if resolved == "" {
+		return hint
+	}
+	return resolved
 }
 
 // buildSimpleReply is a tiny helper to construct status-only replies (NotLeader

@@ -137,8 +137,6 @@ func init() {
 	serveCmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
 	serveCmd.Flags().Bool("dedup", true, "enable block-level deduplication (BadgerDB index at {data}/dedup/)")
 	serveCmd.Flags().Bool("shared-badger", true, "share one raft-log BadgerDB across all groups (C2). Reduces per-process instance count when many groups are seeded. Disable with --shared-badger=false only for legacy per-group dirs.")
-	// Rate limit overrides — defaults are production-safe (100/200 ip, 50/100 user).
-	// Benchmarks/dev/upstream-proxied deployments can relax these. 0 disables that layer.
 	serveCmd.Flags().Bool("raft-log-fsync", true, "fsync the Raft log store on every append (auto: cluster=false (consensus provides redundancy), single=true; explicit value always wins)")
 	serveCmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with QUIC stream-open cost.")
 	serveCmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
@@ -146,10 +144,6 @@ func init() {
 	serveCmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer when --quic-mux=true (avoids HoL with raft pipelining)")
 	serveCmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window when --quic-mux=true (must be << heartbeat-interval)")
 	serveCmd.Flags().String("join", "", "join an existing cluster through this leader/follower raft address")
-	serveCmd.Flags().Float64("rate-limit-ip-rps", 100, "per-source-IP rate limit in requests/sec (0 disables)")
-	serveCmd.Flags().Int("rate-limit-ip-burst", 200, "per-source-IP rate limit burst size")
-	serveCmd.Flags().Float64("rate-limit-user-rps", 50, "per-authenticated-user rate limit in requests/sec (0 disables)")
-	serveCmd.Flags().Int("rate-limit-user-burst", 100, "per-authenticated-user rate limit burst size")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -182,12 +176,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	} else {
 		log.Warn().Msg("S3 authentication disabled — set --access-key and --secret-key for production")
 	}
-	ipRPS, _ := cmd.Flags().GetFloat64("rate-limit-ip-rps")
-	ipBurst, _ := cmd.Flags().GetInt("rate-limit-ip-burst")
-	userRPS, _ := cmd.Flags().GetFloat64("rate-limit-user-rps")
-	userBurst, _ := cmd.Flags().GetInt("rate-limit-user-burst")
-	authOpts = append(authOpts, server.WithRateLimits(ipRPS, ipBurst, userRPS, userBurst))
-
 	noEncryption, _ := cmd.Flags().GetBool("no-encryption")
 	var shardEncryptor *encrypt.Encryptor
 	if !noEncryption {

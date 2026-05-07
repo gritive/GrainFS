@@ -48,8 +48,6 @@ SERVE_ARGS=(
   $(bench_encryption_args)
   --snapshot-interval 0
   --lifecycle-interval 0
-  --rate-limit-ip-rps 0
-  --rate-limit-user-rps 0
   --log-level warn
 )
 
