@@ -3369,7 +3369,17 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, err
 	}
 	if meta.PlacementGroupID != "" {
-		ctx = ContextWithPlacementGroup(ctx, meta.PlacementGroupID)
+		var ctxErr error
+		ctx, ctxErr = contextForMultipartComplete(ctx, meta, func(id string) (ShardGroupEntry, bool) {
+			group, ok := PlacementGroupEntryFromContext(ctx)
+			if !ok || group.ID != id {
+				return ShardGroupEntry{}, false
+			}
+			return group, true
+		})
+		if ctxErr != nil {
+			return nil, ctxErr
+		}
 	}
 
 	// Sort parts and assemble into a spooled object before the mandatory EC write.
@@ -3431,6 +3441,28 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	}
 	os.RemoveAll(b.partDir(uploadID))
 	return obj, nil
+}
+
+func contextForMultipartComplete(
+	ctx context.Context,
+	meta clusterMultipartMeta,
+	lookup func(string) (ShardGroupEntry, bool),
+) (context.Context, error) {
+	if meta.PlacementGroupID == "" {
+		return ctx, nil
+	}
+	if group, ok := PlacementGroupEntryFromContext(ctx); ok && group.ID == meta.PlacementGroupID {
+		return ctx, nil
+	}
+	group, ok := lookup(meta.PlacementGroupID)
+	if !ok {
+		return ctx, &ErrInsufficientPlacementTargets{
+			Operation:     "complete_multipart",
+			GroupID:       meta.PlacementGroupID,
+			FailureReason: "multipart placement group is missing",
+		}
+	}
+	return ContextWithPlacementGroupEntry(ctx, group), nil
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
