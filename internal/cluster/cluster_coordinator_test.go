@@ -533,6 +533,23 @@ func TestClusterCoordinator_RouteBucket_ResolvesNodeIDPeersToAddresses(t *testin
 	require.True(t, target.selfIsVoter)
 }
 
+func TestClusterCoordinator_RouteGroup_ResolvesNodeIDPeersToAddresses(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-b", "10.0.0.2:7001", 0)))
+	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "self", "10.0.0.3:7001", 0)))
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-2", []string{"node-a", "self", "node-b"})))
+
+	c := NewClusterCoordinator(base, mgr, nil, meta, "self").WithNodeAddressResolver(meta)
+	target, err := c.routeGroup("group-2")
+	require.NoError(t, err)
+	require.Equal(t, "group-2", target.groupID)
+	require.Equal(t, []string{"10.0.0.1:7001", "10.0.0.2:7001", "10.0.0.3:7001"}, target.peers)
+	require.True(t, target.selfIsVoter)
+}
+
 type countingAddressBook struct {
 	calls int
 }

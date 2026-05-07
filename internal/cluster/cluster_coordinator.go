@@ -356,10 +356,17 @@ func (c *ClusterCoordinator) routeBucket(bucket string) (routeTarget, error) {
 	if err != nil || dg == nil {
 		return routeTarget{}, storage.ErrNoSuchBucket
 	}
+	return c.routeGroup(dg.ID())
+}
+
+func (c *ClusterCoordinator) routeGroup(groupID string) (routeTarget, error) {
+	if err := ValidatePlacementGroupID(groupID); err != nil {
+		return routeTarget{}, err
+	}
 	if c.meta == nil {
 		return routeTarget{}, ErrUnknownGroup
 	}
-	entry, ok := c.meta.ShardGroup(dg.ID())
+	entry, ok := c.meta.ShardGroup(groupID)
 	if !ok || len(entry.PeerIDs) == 0 {
 		return routeTarget{}, ErrUnknownGroup
 	}
