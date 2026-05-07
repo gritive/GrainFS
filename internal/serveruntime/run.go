@@ -339,15 +339,6 @@ func Run(ctx context.Context, cfg Config) error {
 		metaRaft.FSM().SetIAM(cfg.IAMStore, cfg.IAMApplier)
 	}
 
-	// Phase 2 IAM bootstrap: propose default SA+key+grant+AuthEnable so
-	// --access-key/--secret-key continues to work after IAM is wired.
-	if cfg.IAMStore != nil && cfg.IAMApplier != nil && cfg.BootstrapAccessKey != "" && cfg.BootstrapSecretKey != "" && cfg.Encryptor != nil {
-		proposer := &iam.MetaProposer{Propose: metaRaft.Propose}
-		if err := iam.Bootstrap(ctx, cfg.IAMStore, proposer, cfg.BootstrapAccessKey, cfg.BootstrapSecretKey, metaRaft.IsLeader(), cfg.Encryptor); err != nil {
-			return fmt.Errorf("iam bootstrap: %w", err)
-		}
-	}
-
 	// PR-D: DataGroupManager + Router — created before metaRaft.Start() so the
 	// OnBucketAssigned callback is registered before the apply loop starts (race-free).
 	dgMgr := cluster.NewDataGroupManager()
@@ -390,6 +381,41 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 	}
 	defer metaRaft.Close()
+
+	// Bootstrap shim: --access-key/--secret-key flag → default SA + wildcard
+	// + AuthEnable. Runs in a goroutine because IsLeader() is only meaningful
+	// AFTER Start. Polls for leader (with timeout); the elected leader fires
+	// the proposes once, the FSM Applier idempotently de-dupes follower
+	// replays. Multi-node clusters: every node spawns this goroutine, only
+	// the leader's call propagates state — others time out and exit.
+	if cfg.IAMStore != nil && cfg.IAMApplier != nil &&
+		cfg.BootstrapAccessKey != "" && cfg.BootstrapSecretKey != "" &&
+		cfg.Encryptor != nil {
+		go func() {
+			deadline := time.Now().Add(30 * time.Second)
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				if metaRaft.IsLeader() {
+					proposer := &iam.MetaProposer{Propose: metaRaft.Propose}
+					if err := iam.Bootstrap(ctx, cfg.IAMStore, proposer,
+						cfg.BootstrapAccessKey, cfg.BootstrapSecretKey,
+						true, cfg.Encryptor); err != nil {
+						log.Warn().Err(err).Msg("iam bootstrap shim failed")
+					}
+					return
+				}
+				if time.Now().After(deadline) {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
 
 	// Seed Router with any bucket assignments already persisted in FSM state.
 	// Start() returns before replay finishes; onBucketAssigned fires live updates.
