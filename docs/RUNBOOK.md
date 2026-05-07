@@ -686,7 +686,7 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
 3. **Leader 노드에서 회전 시작**:
    ```
    # leader의 keys.d/next.key는 이미 있어야 함 — 없으면 CLI가 자동으로 생성
-   ./grainfs cluster rotate-key begin --new-key=$(cat /tmp/grainfs-new-psk) --data=/path/to/data
+   ./grainfs cluster rotate-key begin --new-key=$(cat /tmp/grainfs-new-psk) --endpoint=/path/to/data/rotate.sock
    ```
    출력에 `rotation_id`, `OLD SPKI`, `NEW SPKI` 표시. CLI는 즉시 반환되며
    클러스터가 background에서 자동으로 phase 1→2→3→steady 진행.
@@ -697,7 +697,7 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
 
 3. **진행 상황 모니터링**:
    ```
-   ./grainfs cluster rotate-key status --data=/path/to/data
+   ./grainfs cluster rotate-key status --endpoint=/path/to/data/rotate.sock
    ```
    - phase=2 (begun): accept set에 NEW 추가, 여전히 OLD 제시
    - phase=3 (switched): 활성 cert를 NEW로 전환, OLD는 accept 유지
@@ -718,7 +718,7 @@ This runbook has been validated through [N] deployment drills. See `docs/DRILL_M
 
 - **운영자 취소**:
   ```
-  ./grainfs cluster rotate-key abort --reason=<설명> --data=/path/to/data
+  ./grainfs cluster rotate-key abort --reason=<설명> --endpoint=/path/to/data/rotate.sock
   ```
   - phase 2에서 abort: OLD로 롤백 (NEW 폐기)
   - phase 3에서 abort: NEW로 forward-roll (일부 peer가 이미 NEW를 제시 중이라
