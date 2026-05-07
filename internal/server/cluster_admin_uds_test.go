@@ -15,6 +15,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/network/standard"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // TestRegisterClusterAdminUDS_RoutesRespond verifies that all three routes
@@ -55,6 +57,113 @@ func TestRegisterClusterAdminUDS_RoutesRespond(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
+// TestRegisterClusterAdminUDS_TransferLeader_NoCluster verifies that with
+// cluster=nil the route returns 503 (cluster mode not configured).
+func TestRegisterClusterAdminUDS_TransferLeader_NoCluster(t *testing.T) {
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServer(t, sock)
+
+	resp, err := cli.Post("http://unix/v1/cluster/transfer-leader", "application/json",
+		bytes.NewReader([]byte(`{}`)))
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// TestRegisterClusterAdminUDS_TransferLeader_NotLeader verifies 409 +
+// leader_id when the node is not currently the leader.
+func TestRegisterClusterAdminUDS_TransferLeader_NotLeader(t *testing.T) {
+	s := &Server{cluster: &fakeTransferLeader{
+		fakeClusterInfo: &fakeClusterInfo{leaderID: "node-2", nodeID: "node-1"},
+		isLeader:        false,
+	}}
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServerWithSrv(t, sock, s)
+
+	resp, err := cli.Post("http://unix/v1/cluster/transfer-leader", "application/json",
+		bytes.NewReader([]byte(`{}`)))
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Equal(t, "node-2", parsed["leader_id"])
+}
+
+// TestRegisterClusterAdminUDS_TransferLeader_NoPeers verifies 503 when
+// the leader has no peers (single-node cluster).
+func TestRegisterClusterAdminUDS_TransferLeader_NoPeers(t *testing.T) {
+	s := &Server{cluster: &fakeTransferLeader{
+		fakeClusterInfo: &fakeClusterInfo{leaderID: "node-1", nodeID: "node-1", term: 5},
+		isLeader:        true,
+		err:             raft.ErrNoPeers,
+	}}
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServerWithSrv(t, sock, s)
+
+	resp, err := cli.Post("http://unix/v1/cluster/transfer-leader", "application/json",
+		bytes.NewReader([]byte(`{}`)))
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// TestRegisterClusterAdminUDS_TransferLeader_Race verifies 409 + retry=true
+// when raft.ErrNotLeader is returned (race during transfer).
+func TestRegisterClusterAdminUDS_TransferLeader_Race(t *testing.T) {
+	s := &Server{cluster: &fakeTransferLeader{
+		fakeClusterInfo: &fakeClusterInfo{leaderID: "node-3", nodeID: "node-1", term: 5},
+		isLeader:        true,
+		err:             raft.ErrNotLeader,
+	}}
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServerWithSrv(t, sock, s)
+
+	resp, err := cli.Post("http://unix/v1/cluster/transfer-leader", "application/json",
+		bytes.NewReader([]byte(`{}`)))
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Equal(t, true, parsed["retry"])
+}
+
+// TestRegisterClusterAdminUDS_TransferLeader_Happy verifies 200 + payload.
+func TestRegisterClusterAdminUDS_TransferLeader_Happy(t *testing.T) {
+	s := &Server{cluster: &fakeTransferLeader{
+		fakeClusterInfo: &fakeClusterInfo{leaderID: "node-1", nodeID: "node-1", term: 8},
+		isLeader:        true,
+	}}
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServerWithSrv(t, sock, s)
+
+	resp, err := cli.Post("http://unix/v1/cluster/transfer-leader", "application/json",
+		bytes.NewReader([]byte(`{}`)))
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Equal(t, "node-1", parsed["old_leader"])
+	require.Equal(t, float64(8), parsed["term"])
+}
+
+// fakeTransferLeader composes fakeClusterInfo and adds the optional
+// IsLeader/TransferLeadership methods so the handler can detect and
+// invoke them via clusterTransferLeader interface.
+type fakeTransferLeader struct {
+	*fakeClusterInfo
+	isLeader bool
+	err      error
+}
+
+func (f *fakeTransferLeader) IsLeader() bool            { return f.isLeader }
+func (f *fakeTransferLeader) TransferLeadership() error { return f.err }
+
 // TestRegisterClusterAdminUDS_NoLocalhostOnly verifies the UDS routes
 // don't apply localhostOnly() middleware. If it were applied,
 // remove-peer would return 403; we expect 503 (membership unwired)
@@ -76,6 +185,14 @@ func TestRegisterClusterAdminUDS_NoLocalhostOnly(t *testing.T) {
 // the given UDS path with RegisterClusterAdminUDS wired. Returns an
 // http.Client that dials the socket. The server is shut down at test end.
 func startUDSAdminTestServer(t *testing.T, sock string) *http.Client {
+	return startUDSAdminTestServerWithSrv(t, sock, &Server{})
+}
+
+// startUDSAdminTestServerWithSrv is like startUDSAdminTestServer but
+// allows callers to inject a *Server populated with custom fields
+// (e.g., a fake cluster) so handler logic that branches on s.cluster
+// can be exercised end-to-end through the UDS routes.
+func startUDSAdminTestServerWithSrv(t *testing.T, sock string, s *Server) *http.Client {
 	t.Helper()
 
 	ln, err := net.Listen("unix", sock)
@@ -86,7 +203,6 @@ func startUDSAdminTestServer(t *testing.T, sock string) *http.Client {
 		server.WithTransport(standard.NewTransporter),
 		server.WithHostPorts(""),
 	)
-	s := &Server{}
 	s.RegisterClusterAdminUDS(h)
 
 	go h.Spin() //nolint:errcheck
