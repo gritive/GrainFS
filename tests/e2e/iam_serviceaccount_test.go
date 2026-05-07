@@ -395,6 +395,70 @@ func TestIAM_E2E_ET5_StickyAuth_ClusterRestart(t *testing.T) {
 	}
 }
 
+// TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA verifies the *first
+// half* of ET6: the P5 auto-grant hook (commit 6b02af2) issues an explicit
+// (sa-default, bucket, Admin) grant on every CreateBucket, in addition to
+// the bootstrap wildcard. The explicit grant is the durable per-bucket
+// claim that survives any future wildcard cleanup.
+//
+// The second half — actually removing the wildcard via admin API and
+// observing that only the explicit grant remains — is NOT testable in
+// Phase 5: there is no admin route to remove a wildcard grant.
+//
+//	HandleGrantDelete → ProposeGrantDelete → applyGrantDelete only touches
+//	the per-bucket `grants` map; the bootstrap default SA's wildcard lives
+//	in the separate `wildcards` map and is unreachable from the admin API.
+//	HandleGrantDelete with bucket="*" is a silent no-op today.
+//
+// Tracked as a Phase 5c gap (see design doc Status block). Fix sketch:
+// add ProposeGrantWildcardDelete + route HandleGrantDelete with
+// bucket=="*" to it.
+func TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA(t *testing.T) {
+	srv := startIAMTestServer(t)
+	defer srv.Stop()
+
+	defCli := s3ClientFor(srv.S3URL, srv.BootstrapAK, srv.BootstrapSK)
+	const bucket = "et6-bucket"
+	ctx := context.Background()
+	if _, err := defCli.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(bucket),
+	}); err != nil {
+		t.Fatalf("default CreateBucket: %v", err)
+	}
+
+	// Both grants must coexist: explicit (sa-default, et6-bucket, Admin)
+	// auto-issued by the P5 hook AND the wildcard from bootstrap.
+	grants := iamListGrants(t, srv.AdminSock, "sa-default", "")
+	var foundExplicit, foundWildcard bool
+	for _, g := range grants {
+		if g.Bucket == bucket && g.Role == "Admin" {
+			foundExplicit = true
+		}
+		if g.Bucket == "*" && g.Role == "Admin" {
+			foundWildcard = true
+		}
+	}
+	if !foundExplicit {
+		t.Fatalf("expected explicit (sa-default, %s, Admin) grant; got %+v", bucket, grants)
+	}
+	if !foundWildcard {
+		t.Fatalf("expected wildcard grant; got %+v", grants)
+	}
+
+	// Default SA can write into the owned bucket — exercises the (auto)
+	// explicit grant path. (With wildcard still present this is also
+	// allowed via wildcard; once the Phase 5c API gap is closed and the
+	// wildcard is removable, this assertion proves the explicit grant
+	// holds independently. For now it's a baseline regression guard.)
+	if _, err := defCli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("k"),
+		Body:   bytes.NewReader([]byte("v")),
+	}); err != nil {
+		t.Fatalf("PutObject on owned bucket: %v", err)
+	}
+}
+
 // grepDataDir scans every regular file under root for needle. Returns the
 // matching paths (one per file). Sequential scan is fine for e2e: the
 // data dir is small (test scope, single-node).
