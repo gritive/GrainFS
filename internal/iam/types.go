@@ -5,6 +5,8 @@ import "time"
 // Role is the 3-tier permission level for a (SA, Bucket) grant.
 type Role uint8
 
+// Role values, ordered by increasing privilege. RoleNone (zero value) is
+// "no permission" and is the default for any unset map lookup.
 const (
 	RoleNone  Role = 0
 	RoleRead  Role = 1
@@ -28,6 +30,8 @@ func (r Role) String() string {
 // KeyStatus represents whether an AccessKey is usable for SigV4 verification.
 type KeyStatus uint8
 
+// KeyStatus values. The zero value is intentionally not used so a
+// missing/uninitialized status fails closed (LookupKey rejects).
 const (
 	KeyStatusActive  KeyStatus = 1
 	KeyStatusRevoked KeyStatus = 2
