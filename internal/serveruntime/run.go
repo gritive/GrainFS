@@ -332,6 +332,12 @@ func Run(ctx context.Context, cfg Config) error {
 	metaTransport := cluster.NewMetaTransportQUICMux(quicTransport, metaRaft.Node(), groupRaftMux)
 	metaRaft.SetTransport(metaTransport)
 
+	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.
+	// SetIAM is nil-safe for iamApplier (--no-encryption mode).
+	if cfg.IAMStore != nil && cfg.IAMApplier != nil {
+		metaRaft.FSM().SetIAM(cfg.IAMStore, cfg.IAMApplier)
+	}
+
 	// PR-D: DataGroupManager + Router — created before metaRaft.Start() so the
 	// OnBucketAssigned callback is registered before the apply loop starts (race-free).
 	dgMgr := cluster.NewDataGroupManager()

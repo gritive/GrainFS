@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/server"
 )
@@ -36,6 +37,12 @@ type Config struct {
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts  []server.Option
 	Encryptor *encrypt.Encryptor
+
+	// IAM (Phase 2): store + applier for cluster IAM state. Both nil in
+	// fully unwired (test/legacy) configurations; cmd/grainfs/serve.go
+	// always provides them in production.
+	IAMStore   *iam.Store
+	IAMApplier *iam.Applier
 
 	// Raft tuning
 	BadgerManagedMode     bool

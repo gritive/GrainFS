@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -106,14 +107,18 @@ type RaftSnapshotter interface {
 
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
-	backend        storage.Backend
-	ops            *storage.Operations
-	readIndexer    ReadIndexer // nil = no gate (single-node)
-	raftSnapshots  RaftSnapshotter
-	dataDir        string
-	snapMgr        *snapshot.Manager
-	scrubber       *scrubber.BackgroundScrubber // nil if not using ECBackend
-	verifier       *s3auth.CachingVerifier
+	backend       storage.Backend
+	ops           *storage.Operations
+	readIndexer   ReadIndexer // nil = no gate (single-node)
+	raftSnapshots RaftSnapshotter
+	dataDir       string
+	snapMgr       *snapshot.Manager
+	scrubber      *scrubber.BackgroundScrubber // nil if not using ECBackend
+	verifier      *s3auth.CachingVerifier
+	// iamStore is the cluster IAM state container. Used by the auth/authz
+	// middlewares to resolve principals and check grants. nil in anonymous
+	// mode; set via WithIAMStore.
+	iamStore       *iam.Store
 	hertz          *server.Hertz
 	hub            *Hub
 	volMgr         *volume.Manager
@@ -183,6 +188,25 @@ type Option func(*Server)
 func WithAuth(creds []s3auth.Credentials) Option {
 	return func(s *Server) {
 		s.verifier = s3auth.NewCachingVerifier(s3auth.NewVerifier(creds), 4096, 5*time.Minute)
+	}
+}
+
+// WithVerifier installs a pre-built CachingVerifier as the auth source.
+// Use this when the verifier needs to be constructed with both static
+// creds and an IAM SecretLookup (cmd/grainfs/serve.go); for plain static
+// creds, prefer WithAuth.
+func WithVerifier(v *s3auth.CachingVerifier) Option {
+	return func(s *Server) {
+		s.verifier = v
+	}
+}
+
+// WithIAMStore wires the cluster IAM state container so middlewares can
+// resolve principals and check grants. Without this, Server runs in
+// anonymous mode regardless of verifier state.
+func WithIAMStore(store *iam.Store) Option {
+	return func(s *Server) {
+		s.iamStore = store
 	}
 }
 
