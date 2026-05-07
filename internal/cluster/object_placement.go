@@ -52,12 +52,34 @@ func hashObjectPlacementKey(bucket, key string) uint64 {
 }
 
 type placementGroupContextKey struct{}
+type placementGroupEntryContextKey struct{}
 
 func ContextWithPlacementGroup(ctx context.Context, groupID string) context.Context {
 	return context.WithValue(ctx, placementGroupContextKey{}, groupID)
 }
 
+func ContextWithPlacementGroupEntry(ctx context.Context, group ShardGroupEntry) context.Context {
+	cloned := ShardGroupEntry{
+		ID:      group.ID,
+		PeerIDs: cloneStringSlice(group.PeerIDs),
+	}
+	ctx = context.WithValue(ctx, placementGroupEntryContextKey{}, cloned)
+	return context.WithValue(ctx, placementGroupContextKey{}, cloned.ID)
+}
+
 func PlacementGroupFromContext(ctx context.Context) (string, bool) {
+	if entry, ok := PlacementGroupEntryFromContext(ctx); ok {
+		return entry.ID, true
+	}
 	groupID, ok := ctx.Value(placementGroupContextKey{}).(string)
 	return groupID, ok && groupID != ""
+}
+
+func PlacementGroupEntryFromContext(ctx context.Context) (ShardGroupEntry, bool) {
+	entry, ok := ctx.Value(placementGroupEntryContextKey{}).(ShardGroupEntry)
+	if !ok || entry.ID == "" {
+		return ShardGroupEntry{}, false
+	}
+	entry.PeerIDs = cloneStringSlice(entry.PeerIDs)
+	return entry, true
 }

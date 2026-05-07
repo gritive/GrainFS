@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -50,4 +51,23 @@ func TestSelectObjectPlacementGroup_Deterministic(t *testing.T) {
 func TestValidatePlacementGroupIDRejectsEmpty(t *testing.T) {
 	require.ErrorContains(t, ValidatePlacementGroupID(""), "empty placement_group_id")
 	require.NoError(t, ValidatePlacementGroupID("group-1"))
+}
+
+func TestPlacementContextCarriesShardGroup(t *testing.T) {
+	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
+	ctx := ContextWithPlacementGroupEntry(context.Background(), group)
+
+	got, ok := PlacementGroupEntryFromContext(ctx)
+	require.True(t, ok)
+	require.Equal(t, "group-1", got.ID)
+	require.Equal(t, []string{"n1", "n2", "n3"}, got.PeerIDs)
+
+	group.PeerIDs[0] = "mutated"
+	got, ok = PlacementGroupEntryFromContext(ctx)
+	require.True(t, ok)
+	require.Equal(t, []string{"n1", "n2", "n3"}, got.PeerIDs)
+
+	groupID, ok := PlacementGroupFromContext(ctx)
+	require.True(t, ok)
+	require.Equal(t, "group-1", groupID)
 }

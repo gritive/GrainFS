@@ -27,6 +27,7 @@ import (
 type GroupBackend struct {
 	*DistributedBackend
 	groupID   string
+	peerIDs   []string
 	logStore  raft.LogStore               // owned: closed on GroupBackend.Close (nil if wrapped)
 	vlogEntry *resourcewatch.RegisteredDB // owned: deregistered on Close (nil if wrapped)
 	wrapped   bool                        // true → Close is no-op (caller owns lifecycle)
@@ -97,6 +98,7 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 	return &GroupBackend{
 		DistributedBackend: dist,
 		groupID:            cfg.ID,
+		peerIDs:            cloneStringSlice(cfg.PeerIDs),
 		logStore:           cfg.LogStore,
 		vlogEntry:          cfg.VlogEntry,
 	}, nil
@@ -106,11 +108,20 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 func (g *GroupBackend) ID() string { return g.groupID }
 
 func (g *GroupBackend) placementContext(ctx context.Context) context.Context {
+	if _, ok := PlacementGroupEntryFromContext(ctx); ok {
+		return ctx
+	}
 	if _, ok := PlacementGroupFromContext(ctx); ok {
 		return ctx
 	}
 	if g.shardSvc == nil {
 		return ctx
+	}
+	if len(g.peerIDs) > 0 {
+		return ContextWithPlacementGroupEntry(ctx, ShardGroupEntry{
+			ID:      g.groupID,
+			PeerIDs: g.peerIDs,
+		})
 	}
 	return ContextWithPlacementGroup(ctx, g.groupID)
 }
