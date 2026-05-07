@@ -207,6 +207,124 @@ func (c *Client) EventLog(ctx context.Context, since time.Duration, limit int) (
 	return out, nil
 }
 
+// TransferLeaderResult mirrors the 200 response of /v1/cluster/transfer-leader.
+type TransferLeaderResult struct {
+	OldLeader  string `json:"old_leader"`
+	Term       uint64 `json:"term"`
+	TargetHint string `json:"target_hint,omitempty"`
+}
+
+// TransferLeader issues POST /v1/cluster/transfer-leader. On non-2xx the
+// returned error is *TransferLeaderError so callers can branch on Retry.
+func (c *Client) TransferLeader(ctx context.Context) (*TransferLeaderResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/v1/cluster/transfer-leader", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, wrapDialError(err, c.sockPath)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusOK {
+		var out TransferLeaderResult
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, fmt.Errorf("parse transfer-leader: %w", err)
+		}
+		return &out, nil
+	}
+	parsed := map[string]any{}
+	_ = json.Unmarshal(raw, &parsed)
+	tle := &TransferLeaderError{StatusCode: resp.StatusCode}
+	if msg, ok := parsed["error"].(string); ok && msg != "" {
+		tle.Message = msg
+	} else {
+		tle.Message = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+	if leader, ok := parsed["leader_id"].(string); ok {
+		tle.LeaderID = leader
+	}
+	if retry, ok := parsed["retry"].(bool); ok {
+		tle.Retry = retry
+	}
+	return nil, tle
+}
+
+// Health mirrors GET /v1/cluster/health response. Server-side derivation
+// of Issues so the dashboard and CLI render the same diagnostics.
+type Health struct {
+	Mode     string          `json:"mode"`
+	Degraded bool            `json:"degraded"`
+	LeaderID string          `json:"leader_id,omitempty"`
+	Term     uint64          `json:"term,omitempty"`
+	Quorum   QuorumInfo      `json:"quorum"`
+	Peers    []PeerHealthRow `json:"peers,omitempty"`
+	Issues   []string        `json:"issues,omitempty"`
+}
+
+type QuorumInfo struct {
+	VotersTotal int  `json:"voters_total"`
+	AliveCount  int  `json:"alive_count"`
+	Required    int  `json:"required"`
+	Healthy     bool `json:"healthy"`
+}
+
+type PeerHealthRow struct {
+	PeerID   string `json:"peer_id"`
+	State    string `json:"state"`
+	RaftAddr string `json:"raft_addr,omitempty"`
+}
+
+// Health fetches GET /v1/cluster/health (typed parse).
+func (c *Client) Health(ctx context.Context) (*Health, error) {
+	body, err := c.getJSON(ctx, "/v1/cluster/health")
+	if err != nil {
+		return nil, err
+	}
+	var h Health
+	if err := json.Unmarshal(body, &h); err != nil {
+		return nil, fmt.Errorf("parse health: %w", err)
+	}
+	return &h, nil
+}
+
+// BalancerStatus mirrors the JSON shape produced by
+// /v1/cluster/balancer/status (snake_case fields per balancer_api.go).
+type BalancerStatus struct {
+	Available    bool                 `json:"available"`
+	Active       bool                 `json:"active"`
+	ImbalancePct float64              `json:"imbalance_pct"`
+	Nodes        []BalancerNodeStatus `json:"nodes"`
+}
+
+type BalancerNodeStatus struct {
+	NodeID         string  `json:"node_id"`
+	DiskUsedPct    float64 `json:"disk_used_pct"`
+	DiskAvailBytes uint64  `json:"disk_avail_bytes"`
+	RequestsPerSec float64 `json:"requests_per_sec"`
+	JoinedAt       string  `json:"joined_at,omitempty"`
+	UpdatedAt      string  `json:"updated_at,omitempty"`
+}
+
+// BalancerStatus fetches GET /v1/cluster/balancer/status (typed parse).
+func (c *Client) BalancerStatus(ctx context.Context) (*BalancerStatus, error) {
+	body, err := c.getJSON(ctx, "/v1/cluster/balancer/status")
+	if err != nil {
+		return nil, err
+	}
+	var b BalancerStatus
+	if err := json.Unmarshal(body, &b); err != nil {
+		return nil, fmt.Errorf("parse balancer status: %w", err)
+	}
+	return &b, nil
+}
+
 func (c *Client) getJSON(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
