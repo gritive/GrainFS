@@ -93,8 +93,6 @@ for i in 0 1 2; do
     --raft-addr "$(raft_addr "$i")" \
     --peers "$(peers_for "$i")" \
     --cluster-key "bench-iceberg-cluster-key" \
-    --ec-data 2 \
-    --ec-parity 1 \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port 0 \

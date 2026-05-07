@@ -36,8 +36,6 @@ PRELOAD_IN_SHELL="${PRELOAD_IN_SHELL:-1}"
 PROFILE="${PROFILE:-1}"
 PROFILE_ALL_NODES="${PROFILE_ALL_NODES:-0}"
 REQUESTED_TARGET_IDX="${TARGET_IDX:-}"
-EC_DATA="${EC_DATA:-}"
-EC_PARITY="${EC_PARITY:-}"
 SEED_GROUPS="${SEED_GROUPS:-0}"
 REQUIRE_GROUP_VOTERS="${REQUIRE_GROUP_VOTERS:-0}"
 BUCKET="${BUCKET:-bench}"
@@ -132,13 +130,6 @@ start_node() {
       --cluster-key "bench-topology-key"
       --seed-groups "$SEED_GROUPS"
     )
-    if [[ -n "$EC_DATA" || -n "$EC_PARITY" ]]; then
-      if [[ -z "$EC_DATA" || -z "$EC_PARITY" ]]; then
-        echo "[error] EC_DATA and EC_PARITY must be set together" >&2
-        exit 1
-      fi
-      args+=(--ec-data "$EC_DATA" --ec-parity "$EC_PARITY")
-    fi
   fi
 
   if [[ "$PROFILE" == "1" ]]; then
@@ -354,11 +345,7 @@ else
   echo "  range  : full object"
 fi
 echo "  vus    : ${VUS}  duration: ${DURATION}"
-if [[ "$NODE_COUNT" -ge 3 ]]; then
-  echo "  ec     : target ${EC_DATA}+${EC_PARITY} (effective scales by assigned group voters)"
-else
-  echo "  ec     : inactive for <3 nodes"
-fi
+echo "  ec     : auto profile from NODE_COUNT / assigned group voters"
 echo "  groups : seed=${SEED_GROUPS} require_voters=${REQUIRE_GROUP_VOTERS}"
 if [[ "$PROFILE" == "1" ]]; then
   echo "  pprof  : http://127.0.0.1:${TARGET_PPROF_PORT}/debug/pprof/"
