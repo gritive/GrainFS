@@ -10,9 +10,6 @@
   의 `http.Client{Timeout: 30 * time.Second}` 가 `BaseOptions.Timeout > 30s` 를
   override 함. ctx-기반 cancellation 으로 충분하니 client timeout 제거하고 ctx
   하나로 통일. (pre-existing pattern, 이번 라운드는 surface만 옮김)
-- [ ] **volumeadmin 추가 단위 테스트** — withTimeout deadline 전파 / Do() malformed
-  JSON 응답 / FollowScrubSession 비-ctx 네트워크 에러 / AutoDiscoverSocket 실제
-  unix-socket 디스커버리 happy path / WriteAt content base64 round-trip.
 - [ ] **clusteradmin BaseOptions retro-fit** — `internal/clusteradmin/operations.go` 의
   `RemovePeerOptions / PeersOptions / EventsOptions` 가 `Endpoint/Stdout/Stderr/...`
   공통 필드를 인라인 반복함. `volumeadmin.BaseOptions` 와 같은 임베드 패턴으로
