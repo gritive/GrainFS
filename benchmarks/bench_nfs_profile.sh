@@ -58,8 +58,6 @@ echo "=== starting grainfs (HTTP=:$HTTP_PORT, NFS4=:$NFS4_PORT, pprof=:$PPROF_PO
   --nbd-port 0 \
   $(bench_encryption_args) \
   --pprof-port "$PPROF_PORT" \
-  --rate-limit-ip-rps 0 \
-  --rate-limit-user-rps 0 \
   --log-level warn \
   > /tmp/grainfs-nfs-bench.log 2>&1 &
 SERVER_PID=$!

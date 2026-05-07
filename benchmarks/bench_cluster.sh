@@ -92,8 +92,6 @@ start_node() {
     --ec-parity 1 \
     --nfs4-port 0 \
     --nbd-port 0 \
-    --rate-limit-ip-rps 0 \
-    --rate-limit-user-rps 0 \
     $extra \
     >"$logfile" 2>&1 &
 

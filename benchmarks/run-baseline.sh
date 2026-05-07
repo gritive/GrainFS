@@ -43,8 +43,6 @@ echo "Starting GrainFS (data dir: $DATA_DIR)..."
   --nfs4-port 0 \
   --nbd-port 0 \
   $(bench_encryption_args) \
-  --rate-limit-ip-rps 0 \
-  --rate-limit-user-rps 0 \
   > /dev/null 2>&1 &
 
 GRAINFS_PID=$!
