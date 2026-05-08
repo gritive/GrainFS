@@ -1,5 +1,85 @@
 # Changelog
 
+## [0.0.98.0] - 2026-05-08 — IAM Foundation (ServiceAccount + AccessKey + Grant)
+
+### Added
+
+- IAM model with cluster-wide ServiceAccount, AccessKey, and Grant primitives
+  replacing the single `--access-key/--secret-key` flag. State lives in
+  `internal/iam.Store` behind `atomic.Pointer[iamState]` for lock-free reads;
+  writes serialize through the cluster meta-Raft FSM via `MetaCmdType` 21-29.
+- Three-tier role model (Read / Write / Admin) with explicit-overrides-wildcard
+  semantics. Bucket grants gate every S3 op; bucket policies are evaluated as
+  a serial second layer.
+- AES-256-GCM secret_key wrapping with AAD bound to the owning sa_id. Plaintext
+  secret_key never lands on disk; replay across SAs fails the AAD check.
+- Bootstrap shim: when `--access-key/--secret-key` are set on first start, the
+  leader proposes a default SA (`sa-default`) + wildcard Admin grant + sticky
+  `auth_enabled` bit. Idempotent on completeness check (SA + key + wildcard +
+  AuthEnable all present); a partial failure on any node retries the missing
+  step on the next bootstrap pass.
+- Sticky `auth_enabled` bit. Once any SA is registered the bit stays on
+  permanently; deleting all SAs does not regress to anonymous mode.
+- Admin HTTP API on the admin Unix socket at `/v1/iam/*`: SA CRUD, AccessKey
+  rotate/revoke, Grant put/delete/list with `?sa=`/`?bucket=` filters.
+  Wildcard-grant deletion routes through a dedicated FSM command and refuses
+  to remove the last grant from `sa-default` (lockout guard enforced at the
+  apply layer for race-freeness).
+- `grainfs iam {sa,key,grant}` CLI subcommands following the existing
+  `grainfs cluster --endpoint <data-dir>/admin.sock` pattern.
+- `CreateBucket` auto-issues an explicit Admin grant to the creating SA so
+  per-bucket access survives wildcard grant removal.
+- Audit logger with pluggable emitter; default backend is zerolog
+  `event=iam_audit` with allow/deny + reason fields.
+- IAM state persisted in MetaFSM raft snapshots as a length-prefixed trailer
+  with magic bytes after the FlatBuffer root. Multi-team clusters survive
+  raft log compaction without losing SAs/keys/grants/sticky bit; legacy
+  snapshots without the trailer restore unchanged.
+
+### Changed
+
+- S3 SigV4 verifier consults `SecretLookup` after the static credentials
+  map, so admin-API-issued SA keys actually authenticate. Pre-fix only the
+  bootstrap default SA worked because it was double-injected into static
+  creds.
+- `?policy` bucket-policy CRUD requests now flow through IAM authz with
+  three new S3Action values (GetBucketPolicy / PutBucketPolicy /
+  DeleteBucketPolicy). PUT/DELETE require Admin on the bucket; GET requires
+  Read or higher. Pre-fix any signed SA could read, modify, or delete any
+  bucket's policy.
+- Bucket-policy Layer 2 carve-out for the new BucketPolicy actions: a
+  deny-all policy must remain removable by an IAM-Admin so IAM is the
+  authoritative gate.
+- `HandleSACreate` surfaces a `Warning` field in the response when
+  `ProposeAuthEnable` fails after the SA is created, instead of silently
+  swallowing the error and returning a misleading "success" while the
+  sticky bit stays off.
+
+### Performance
+
+- IAM hot-path measured at p50=167ns / p99=542ns for `ResolveSA + CheckAccess`
+  (target was p99 < 1ms — 1800× headroom on Apple M3).
+- IAM apply-path measured at p50=126µs / p99=529µs for `ApplySACreate` at
+  1k-SA scale (target was p99 < 5ms — 9× headroom).
+- Performance budgets are enforced as bench-time assertions in
+  `internal/iam/bench_test.go` so regressions land as test failures.
+
+### Documentation
+
+- New ADR `docs/adr/0007-iam-foundation.md`.
+- README and CONTEXT.md gain IAM sections covering the three auth modes,
+  CLI usage, and the sticky `auth_enabled` invariant.
+
+### Out of scope (deferred)
+
+- Multipart-upload cascade on SA delete (Tasks 26-28 + ET4). Lifecycle
+  reaper handles abandoned parts; matches standard S3 semantics.
+- Typed `internal/iamadmin/` CLI client. The inline `iamRequest` helper
+  in `cmd/grainfs/iam.go` covers the single consumer; extract when a
+  second consumer (web admin UI, automation) appears.
+
+
+
 ## [0.0.97.0] - 2026-05-08 — volume health replica/EC layout signals
 
 ### Added
