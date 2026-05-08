@@ -36,7 +36,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### 보안 규칙
-- S3 인증: access-key/secret-key 플래그로 HMAC-SHA256 서명 검증
+- S3 인증: admin UDS로 부트스트랩한 SA의 access_key/secret_key로 HMAC-SHA256 서명 검증
 - At-rest Encryption: AES-256-GCM (기본 활성)
 - 시크릿은 환경변수 또는 파일 경로로만 전달
 - 하드코딩 금지
@@ -64,7 +64,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 | NBD        | `localhost:{nbd-port}`                         | Linux only, `nbd-client`  |
 
 ### 테스트 계정
-- S3 인증: `--access-key` / `--secret-key` 플래그 (미설정 시 인증 없음)
+- S3 인증: admin UDS 통해 부트스트랩한 SA의 access_key/secret_key (`grainfs iam sa create admin --endpoint <data>/admin.sock`)
 
 ### 제품 스펙
 - CONTEXT.md: 도메인 용어/현재 상태 (루트, 13KB)

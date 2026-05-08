@@ -247,14 +247,17 @@ leader-hint dialing, and storage semantics remain in their existing modules.
 ### IAM (ServiceAccount + AccessKey + Grant)
 
 `internal/iam/` is the cluster IAM domain: it owns the ServiceAccount /
-AccessKey / Grant model that replaces the single-credential
-`--access-key/--secret-key` flag. State lives in `iam.Store` as a
-COW-projected `iamState` snapshot (`atomic.Pointer[iamState]` for
-lock-free reads, mu-serialized writers); the canonical write path is the
-cluster meta-Raft FSM. `MetaCmdType` 21..28 carry IAM payloads
+AccessKey / Grant model. As of v0.0.107.0 the legacy single-credential
+`--access-key/--secret-key` flag is gone; bootstrap routes exclusively
+through the admin UDS (`grainfs iam sa create admin --endpoint
+<data>/admin.sock`). State lives in `iam.Store` as a COW-projected
+`iamState` snapshot (`atomic.Pointer[iamState]` for lock-free reads,
+mu-serialized writers); the canonical write path is the cluster
+meta-Raft FSM. `MetaCmdType` 21..28 carry per-record IAM payloads
 (SACreate, SADelete, KeyCreate, KeyRevoke, GrantPut, GrantDelete,
-GrantWildcardPut, AuthEnable). Each payload is a FlatBuffers blob in
-`internal/iam/iampb/`.
+GrantWildcardPut), and `MetaCmdType` 31 (`IAMInitFirstSA`) carries the
+composite `InitFirstSAPayload` for atomic first-SA bootstrap. Each
+payload is a FlatBuffers blob in `internal/iam/iampb/`.
 
 Secret_key persistence uses AES-256-GCM via `internal/encrypt.Encryptor`
 with the SA id as additional-authenticated-data, so a stolen ciphertext
@@ -269,13 +272,17 @@ matches, the auth middleware calls `iam.ResolveSA` to attach the
 principal sa_id to the request context. The authz middleware then
 serially evaluates IAM grants and bucket policies — both must allow.
 
-Bootstrap shim: when `--access-key/--secret-key` flags are set and the
-IAM store is empty at startup, the leader proposes a default SA
-(`sa-default`) plus a wildcard Admin grant plus AuthEnable, so legacy
-flag-mode clusters keep working with zero operator action. Once any SA
-is registered the sticky `auth_enabled` bit flips on permanently — even
-if every SA is later deleted, the cluster does not regress to anonymous.
-Admin endpoints live on the admin UDS at `/v1/iam/*`; the CLI
+Bootstrap path: a fresh cluster starts with an empty IAM store and
+authzMiddleware always-on, so all S3 traffic returns 401 until an
+operator calls `POST /v1/iam/sa` over the admin UDS. The first SA on an
+empty store dispatches to `IAMInitFirstSA`, which atomically commits
+the SA + AccessKey + wildcard Admin grant via a single FSM Apply. The
+race guard is a fixed `DefaultSAID = "sa-default"`: concurrent
+proposes collapse via FSM idempotent skip, and the losing operator
+receives `409 Conflict` from the admin API. Subsequent SA creates take
+the regular per-record path with no auto-grant. The sticky
+`auth_enabled` bit was removed in v0.0.107.0; there is no anonymous
+mode. Admin endpoints live on the admin UDS at `/v1/iam/*`; the CLI
 (`grainfs iam ...`) talks to that socket via the same `--endpoint`
 contract as `grainfs cluster`.
 
