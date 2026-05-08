@@ -49,6 +49,8 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -154,6 +156,8 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
