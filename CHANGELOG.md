@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.116.0] - 2026-05-08 — raft v2 M2 PR 11: crash recovery wiring
+
+### Added
+
+- `StableStore` interface and `memStableStore` in `internal/raft/v2/stablestore.go`:
+  persists `HardState` (currentTerm + votedFor) across restarts to satisfy Raft
+  §5.4.1 safety invariant.
+- `badgerStableStore` in `internal/raft/v2/stablestore_badger.go`: durable
+  `StableStore` backed by BadgerDB. Encoding is binary (8B term + 4B votedForLen +
+  votedFor bytes), not JSON. Single key per Raft group under a caller-supplied prefix.
+- `Config.LogStore` and `Config.StableStore` fields: opt-in persistent stores.
+  Both default to in-memory; supplying both enables full crash recovery. Pairing a
+  persistent `LogStore` with an in-memory `StableStore` violates §5.4.1 — documented,
+  not enforced.
+- `Node.stable` field wired through `NewNode`.
+- `persistHardState()` helper in `actor.go`: called synchronously before any reply
+  that exposes the new term or vote to peers. Covers `becomeFollower`, `becomeCandidate`,
+  vote-grant in `handleRequestVote`, and term-step-down in `handleRequestVote` and
+  `handleAppendEntries` (both the Leader and non-Leader inline paths).
+- `stablestore_test.go`: factory-pattern tests for `memStableStore` and
+  `badgerStableStore` (first-open-returns-zero, round-trip, overwrite, persist-across-reopen).
+- `recovery_test.go`: four end-to-end recovery scenarios — fresh start, log replay from
+  badger, HardState persisted across election vote (§5.4.1), restarted node is Follower.
+
+### Changed
+
+- `NewNode` signature changed from `*Node` to `(*Node, error)` to surface I/O errors
+  when loading `HardState` from a persistent `StableStore` on restart.
+- Single-voter bootstrap in `actor.run()` only advances `currentTerm` to 1 when it is
+  currently 0 (fresh start); on restart the persisted term is preserved unchanged.
+- All `NewNode` call sites updated across test files.
+
 ## [0.0.115.0] - 2026-05-08 — raft v2 M2 PR 10: BadgerDB LogStore implementation
 
 ### Added

@@ -247,6 +247,14 @@ func (s *badgerLogStore) Append(entries []LogEntry) error {
 	if err != nil {
 		return err
 	}
+	// Power-loss durability — see Raft §5.3. The actor reports AE Success to
+	// the leader only after Append returns; if the entry isn't on disk, the
+	// leader's matchIndex would advance against a follower whose log regresses
+	// on restart. badger.DefaultOptions has SyncWrites=false; explicit Sync()
+	// guarantees durability regardless of caller's DB options.
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("badgerLogStore: Append sync: %w", err)
+	}
 	s.lastIdx.Store(entries[len(entries)-1].Index)
 	return nil
 }
@@ -308,6 +316,9 @@ func (s *badgerLogStore) TruncateAfter(idx uint64) error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("badgerLogStore: TruncateAfter sync: %w", err)
 	}
 	s.lastIdx.Store(idx)
 	return nil

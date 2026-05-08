@@ -90,6 +90,26 @@ type proposalResult struct {
 	err   error
 }
 
+// persistHardState saves the current currentTerm and votedFor to stable storage.
+// It is a no-op if the HardState is unchanged from the last save (avoids
+// redundant fsyncs on the happy path — e.g. becomeFollower followed by
+// handleRequestVote in the same tick at the same term/vote). Storage failures
+// are unrecoverable — a node that cannot persist its vote/term cannot safely
+// participate in Raft.
+func (n *Node) persistHardState() {
+	hs := HardState{
+		CurrentTerm: n.st.currentTerm,
+		VotedFor:    n.st.votedFor,
+	}
+	if hs == n.lastPersistedHS {
+		return
+	}
+	if err := n.stable.SaveHardState(hs); err != nil {
+		panic("raftv2: SaveHardState: " + err.Error())
+	}
+	n.lastPersistedHS = hs
+}
+
 // run is the actor goroutine. It is the sole writer of actorState and the
 // sole publisher of readState. All state transitions flow through this loop.
 func (n *Node) run() {
@@ -115,7 +135,12 @@ func (n *Node) run() {
 	// Nodes start as Follower and rely on the election timer firing.
 	// Convention follows v1's "Peers excludes self" (internal/raft/raft.go:184).
 	if len(n.cfg.Peers) == 0 {
-		n.st.currentTerm = 1
+		// Only advance currentTerm to 1 if we haven't already been here
+		// (recovery case: persisted currentTerm >= 1 means we were Leader before).
+		if n.st.currentTerm < 1 {
+			n.st.currentTerm = 1
+			n.persistHardState()
+		}
 		n.st.state = Leader
 		n.st.leaderID = n.cfg.ID
 		n.publish()
@@ -198,6 +223,9 @@ func (n *Node) handleRequestVote(cmd command) {
 			n.st.state = Follower
 			n.st.votedFor = ""
 			n.st.leaderID = ""
+			// Persist before publishing: the new term must survive a crash before
+			// we expose it to peers (reply.Term = currentTerm below).
+			n.persistHardState()
 			n.publish()
 		}
 		reply.Term = n.st.currentTerm
@@ -208,6 +236,9 @@ func (n *Node) handleRequestVote(cmd command) {
 	if (n.st.votedFor == "" || n.st.votedFor == args.CandidateID) &&
 		n.st.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		n.st.votedFor = args.CandidateID
+		// Persist before sending the reply — the vote must be durable before the
+		// candidate learns it was granted. §5.4.1 safety depends on this order.
+		n.persistHardState()
 		n.publish()
 		reply.VoteGranted = true
 		// Mirror v1's signalReset (raft.go:1807): granting a vote counts as
@@ -265,6 +296,9 @@ func (n *Node) handleAppendEntries(cmd command) {
 		} else {
 			n.st.currentTerm = args.Term
 			n.st.votedFor = ""
+			// Persist before proceeding — the new term must survive a crash
+			// before we send a reply that carries it (reply.Term = currentTerm).
+			n.persistHardState()
 		}
 	}
 
@@ -510,6 +544,10 @@ func (n *Node) becomeCandidate() {
 	n.st.votedFor = n.st.id
 	n.st.leaderID = ""
 	n.st.votesGranted = 1 // self-vote
+	// Persist before broadcasting: peers must see a durable self-vote before
+	// we send RequestVote RPCs. A crash after dispatch but before persist
+	// would let us re-enter the same term without the self-vote, violating §5.4.1.
+	n.persistHardState()
 	n.publish()
 	n.resetElectionTimer()
 
@@ -626,6 +664,9 @@ func (n *Node) becomeFollower(term uint64) {
 	n.st.matchIndex = nil
 	n.st.nextIndex = nil
 	n.st.proposeWaiters = nil
+	// Persist before publishing so external observers never see a term that has
+	// not yet survived a crash.
+	n.persistHardState()
 	n.publish()
 	n.resetElectionTimer()
 }
