@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.117.0] - 2026-05-08 — authz PostLoad helper (single seam for handler ACL re-checks)
+
+### Refactored
+
+- `internal/server/authz.go` gains two helper methods on `*Server`:
+  - `mustAuthorize(ctx, c, bucket, key, action) (denied bool)` — PreLoad
+    authz for cross-bucket reads (CopyObject source). Builds the
+    `PermCheckInput`, calls `s.authz.Decide` at `PhasePreLoad`, writes a
+    403 `AccessDenied` XML response on deny, and returns `denied`.
+  - `mustAuthorizePostLoad(ctx, c, bucket, key, action, aclByte) (denied bool)`
+    — PostLoad authz once an object's metadata is loaded. Same shape but
+    converts `obj.ACL` (`uint8`) to `s3auth.ACLGrant` internally and
+    evaluates `PhasePostLoad`.
+- 5 mutation-adjacent call sites in `internal/server/handlers.go` migrate
+  from inline `s.authz.Decide(...) + writeXMLError(...) + return` (8 lines
+  each) to the helper's 3-line `if s.mustAuthorizePostLoad(...) { return }`
+  pattern:
+  - `handleGetObject` (PostLoad, GetObject + obj.ACL)
+  - `handleGetObjectRange` (PostLoad, GetObject + obj.ACL, returns `true`
+    to caller)
+  - `handleHeadObject` (PostLoad, HeadObject + obj.ACL)
+  - `handleCopyObject` source PreLoad (no ACL yet)
+  - `handleCopyObject` source PostLoad (after `srcObj.ACL` loaded)
+
+Behavior preserved: same `Decide` call, same 403 response, same XML body
+(`AccessDenied` / "Access Denied"). Net delta: −37 lines in handlers.go,
++38 lines (helpers + tests) in authz.go / authz_helper_test.go.
+
+### Why
+
+Continuation of the deepening that produced #254 (MutationBroker). Same
+single-seam pattern: scattered `Decide + writeXMLError + return` triplets
+collapse into one method per phase. The interface stays the same — only
+the call site shrinks — and `s3auth.ACLGrant(obj.ACL)` boilerplate moves
+inside the helper. Future PostLoad sites get the helper for free.
+
 ## [0.0.116.0] - 2026-05-08 — raft v2 M2 PR 11: crash recovery wiring
 
 ### Added

@@ -537,13 +537,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		}
 	}()
 
-	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
-		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
-		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
-		Action:    s3auth.GetObject,
-		ObjectACL: s3auth.ACLGrant(obj.ACL),
-	}, s3auth.PhasePostLoad).Allow {
-		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+	if s.mustAuthorizePostLoad(ctx, c, bucket, key, s3auth.GetObject, obj.ACL) {
 		return
 	}
 
@@ -716,13 +710,7 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 		c.Header("Cache-Control", "public, max-age=3600")
 	}
 
-	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
-		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
-		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
-		Action:    s3auth.GetObject,
-		ObjectACL: s3auth.ACLGrant(obj.ACL),
-	}, s3auth.PhasePostLoad).Allow {
-		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+	if s.mustAuthorizePostLoad(ctx, c, bucket, key, s3auth.GetObject, obj.ACL) {
 		return true
 	}
 	if !checkConditionals(c, etag, obj.LastModified) {
@@ -843,13 +831,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
-		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
-		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
-		Action:    s3auth.HeadObject,
-		ObjectACL: s3auth.ACLGrant(obj.ACL),
-	}, s3auth.PhasePostLoad).Allow {
-		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+	if s.mustAuthorizePostLoad(ctx, c, bucket, key, s3auth.HeadObject, obj.ACL) {
 		return
 	}
 
@@ -1756,13 +1738,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 	// authorization chain — pre-load (IAM + bucket policy) before we touch
 	// storage so an unauthorized caller cannot probe object existence via
 	// HeadObject, then post-load (ACL) after the source object is loaded.
-	srcInput := s3auth.PermCheckInput{
-		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
-		Resource:  s3auth.ResourceRef{Bucket: src.Bucket, Key: src.Key},
-		Action:    s3auth.GetObject,
-	}
-	if !s.authz.Decide(ctx, srcInput, s3auth.PhasePreLoad).Allow {
-		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+	if s.mustAuthorize(ctx, c, src.Bucket, src.Key, s3auth.GetObject) {
 		return
 	}
 	srcObj, srcErr := s.ops.HeadObject(ctx, src.Bucket, src.Key)
@@ -1770,9 +1746,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		mapError(c, srcErr)
 		return
 	}
-	srcInput.ObjectACL = s3auth.ACLGrant(srcObj.ACL)
-	if !s.authz.Decide(ctx, srcInput, s3auth.PhasePostLoad).Allow {
-		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+	if s.mustAuthorizePostLoad(ctx, c, src.Bucket, src.Key, s3auth.GetObject, srcObj.ACL) {
 		return
 	}
 

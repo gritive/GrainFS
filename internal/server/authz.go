@@ -131,3 +131,40 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		c.Next(ctx)
 	}
 }
+
+// mustAuthorize evaluates the request at PhasePreLoad. On deny it writes an
+// AccessDenied XML response and reports denied=true so the caller can return
+// immediately. Used by handlers that need a cross-bucket pre-load check (e.g.,
+// CopyObject source bucket); the request's primary bucket is already gated by
+// authzMiddleware before any handler runs.
+func (s *Server) mustAuthorize(ctx context.Context, c *app.RequestContext, bucket, key string, action s3auth.S3Action) (denied bool) {
+	in := s3auth.PermCheckInput{
+		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
+		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+		Action:    action,
+	}
+	if s.authz.Decide(ctx, in, s3auth.PhasePreLoad).Allow {
+		return false
+	}
+	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+	return true
+}
+
+// mustAuthorizePostLoad evaluates the request at PhasePostLoad with the target
+// object's ACL. On deny it writes an AccessDenied XML response and reports
+// denied=true so the caller can return immediately. Handlers call this after
+// loading the object's metadata; the same request was already pre-load gated
+// by authzMiddleware (or, for cross-bucket reads, by mustAuthorize).
+func (s *Server) mustAuthorizePostLoad(ctx context.Context, c *app.RequestContext, bucket, key string, action s3auth.S3Action, aclByte uint8) (denied bool) {
+	in := s3auth.PermCheckInput{
+		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
+		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+		Action:    action,
+		ObjectACL: s3auth.ACLGrant(aclByte),
+	}
+	if s.authz.Decide(ctx, in, s3auth.PhasePostLoad).Allow {
+		return false
+	}
+	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+	return true
+}
