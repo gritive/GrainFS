@@ -73,10 +73,18 @@ func NewIAMResolver(store *iam.Store) *IAMResolver {
 func (r *IAMResolver) Resolve(bucket string) (Upstream, bool) {
 	rec, ok := r.store.LookupBucketUpstream(bucket)
 	if !ok {
-		// No live record — drop any stale cache entry and signal miss.
-		r.mu.Lock()
-		delete(r.cache, bucket)
-		r.mu.Unlock()
+		// Probe with RLock first — most cache-miss-no-upstream calls have
+		// nothing to delete, so we avoid writer-lock contention on the common
+		// "bucket has no upstream" path. Only take the writer lock when a
+		// stale entry actually needs to be evicted.
+		r.mu.RLock()
+		_, hadEntry := r.cache[bucket]
+		r.mu.RUnlock()
+		if hadEntry {
+			r.mu.Lock()
+			delete(r.cache, bucket)
+			r.mu.Unlock()
+		}
 		return nil, false
 	}
 
