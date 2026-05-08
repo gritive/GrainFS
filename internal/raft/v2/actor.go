@@ -69,14 +69,24 @@ type command struct {
 	// can detect stale replies from a previous leader term (leader churn scenario:
 	// step-down → re-election → old goroutine returns with stale term → must not
 	// clear the fresh peerInFlight entry allocated by the new leader term).
+	// hbRoundID captures n.st.leaderRound at dispatch time so the leader can
+	// advance peerLastRound[peer] for ReadIndex linearizability confirmation
+	// (Raft §6.4). Gated on (state==Leader && same term) — same as peerInFlight —
+	// so a stale goroutine from a previous leader term cannot satisfy a fresh
+	// ReadIndex with old evidence.
 	hbPeer          string
 	hbTerm          uint64
 	hbDispatchTerm  uint64
+	hbRoundID       uint64
 	hbSuccess       bool
 	hbMatchAfter    uint64
 	hbConflictTerm  uint64
 	hbConflictIndex uint64
 	hbErr           error
+
+	// ReadIndex payload (kind == cmdReadIndex). riReply receives the barrier
+	// index after a heartbeat round confirms leadership at the current term.
+	riReply chan readIndexResult
 }
 
 type cmdKind int
@@ -87,6 +97,7 @@ const (
 	cmdAppendEntries
 	cmdVoteReply
 	cmdHeartbeatReply
+	cmdReadIndex
 )
 
 // proposalResult is delivered to ProposeWait callers when their entry commits
@@ -94,6 +105,23 @@ const (
 type proposalResult struct {
 	index uint64
 	err   error
+}
+
+// readIndexResult is delivered to ReadIndex callers once the heartbeat round
+// confirms leadership (or step-down/cancel rejects the request).
+type readIndexResult struct {
+	index uint64
+	err   error
+}
+
+// readIndexReq is a queued ReadIndex request awaiting majority confirmation
+// of the heartbeat round identified by minPeerRound. Tracked under actorState
+// (single-goroutine access). FIFO order preserved by tryFlushReadIndex.
+type readIndexReq struct {
+	barrier      uint64 // commitIndex captured at request time
+	term         uint64 // currentTerm at request time
+	minPeerRound uint64 // peers must have peerLastRound >= this for confirmation
+	reply        chan readIndexResult
 }
 
 // persistHardState saves the current currentTerm and votedFor to stable storage.
@@ -120,7 +148,9 @@ func (n *Node) persistHardState() {
 // sole publisher of readState. All state transitions flow through this loop.
 func (n *Node) run() {
 	defer close(n.doneCh)
-	defer close(n.applyCh) // safe: actor is the sole sender; closing signals consumers.
+	// Close applyInCh on exit so applyLoop knows to drain its buffer and shut
+	// down. applyLoop owns close(applyCh) — see Node.Stop lifecycle docs.
+	defer close(n.applyInCh)
 	defer func() {
 		// Tear down timers from the actor goroutine to avoid racing concurrent
 		// Resets. Drain non-blockingly; the timer may already be drained.
@@ -190,6 +220,8 @@ func (n *Node) handle(cmd command) {
 		n.handleVoteReply(cmd)
 	case cmdHeartbeatReply:
 		n.handleHeartbeatReply(cmd)
+	case cmdReadIndex:
+		n.handleReadIndex(cmd)
 	}
 }
 
@@ -391,25 +423,30 @@ func (n *Node) handleAppendEntries(cmd command) {
 	}
 }
 
-// applyCommitted advances commitIndex from oldCommit to newCommit, sending
-// each newly-committed entry on applyCh and resolving any matching
-// proposeWaiters. Caller is the actor goroutine. Both leader and follower
-// reuse this path; the only difference is that leaders also have waiters to
-// drain, while followers (proposeWaiters always nil for non-Leader) skip.
+// applyCommitted advances commitIndex from oldCommit to newCommit, enqueueing
+// each newly-committed entry on applyInCh (forwarded by applyLoop to applyCh)
+// and resolving any matching proposeWaiters. Caller is the actor goroutine.
+// Both leader and follower reuse this path; the only difference is that
+// leaders also have waiters to drain, while followers (proposeWaiters always
+// nil for non-Leader) skip.
+//
+// applyInCh is buffered (applyInChBuffer) and drained aggressively by applyLoop
+// into an unbounded in-goroutine buffer. The actor's send is therefore
+// effectively non-blocking under normal operation: a slow FSM consumer wedges
+// only the applyLoop goroutine, never the actor — so RPC handling and election
+// timers remain responsive even when applyCh back-pressures.
 //
 // commitIndex is advanced per-entry inside the loop so that a Stop mid-iteration
-// leaves commitIndex at the last fully-delivered entry (not rolled back). Entries
+// leaves commitIndex at the last fully-enqueued entry (not rolled back). Entries
 // that didn't get through will be re-delivered on restart via the next leader's
-// AE (LeaderCommit > local commitIndex triggers replay). The leader's view of
-// our matchIndex is unaffected: matchIndex already advanced via prior successful
-// replies, so quorum math remains correct.
+// AE (LeaderCommit > local commitIndex triggers replay).
 func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
 	for i := oldCommit + 1; i <= newCommit; i++ {
 		entry := n.mustEntry(i)
 		select {
-		case n.applyCh <- entry:
+		case n.applyInCh <- entry:
 		case <-n.stopCh:
-			// Stop won the race. commitIndex stays at the last fully-delivered
+			// Stop won the race. commitIndex stays at the last fully-enqueued
 			// entry's index (set by the previous iteration via the per-entry
 			// advance below). Entries that didn't get through will be
 			// re-delivered after restart via the next leader's AE — leader's
@@ -424,9 +461,61 @@ func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
 			default:
 			}
 		}
-		// Advance commitIndex after each successful delivery so Stop mid-iteration
-		// leaves commitIndex at the last fully-delivered entry.
+		// Advance commitIndex after each successful enqueue so Stop mid-iteration
+		// leaves commitIndex at the last fully-enqueued entry.
 		n.st.commitIndex = i
+	}
+}
+
+// applyLoop is the FSM-feeder goroutine. It receives committed entries from
+// applyInCh into an unbounded in-goroutine buffer, then forwards them to
+// applyCh in FIFO order. When the FSM consumer is slow, the buffer grows
+// (memory cost) but the actor is unaffected — applyInCh's receive branch is
+// always selectable.
+//
+// Shutdown: actor closes applyInCh on exit; applyLoop sees the channel closed,
+// best-effort drains its buffer to applyCh, then closes applyCh and signals
+// applyDoneCh. A second close-of-stopCh during that drain (rare; Stop is
+// idempotent) escapes the inner send so the goroutine can't deadlock if the
+// FSM consumer is gone.
+func (n *Node) applyLoop() {
+	defer close(n.applyDoneCh)
+	defer close(n.applyCh)
+
+	var buf []LogEntry
+	for {
+		var outCh chan<- LogEntry
+		var first LogEntry
+		if len(buf) > 0 {
+			outCh = n.applyCh
+			first = buf[0]
+		}
+		select {
+		case e, ok := <-n.applyInCh:
+			if !ok {
+				// Actor exited; flush remaining buffer.
+				for _, ent := range buf {
+					select {
+					case n.applyCh <- ent:
+					case <-n.stopCh:
+						return
+					}
+				}
+				return
+			}
+			buf = append(buf, e)
+		case outCh <- first:
+			// Slide window down. Zero the popped slot so the LogEntry's
+			// Command []byte can be GC'd before buf empties (otherwise the
+			// underlying array retains the slice header). When buf empties,
+			// set to nil so the GC can also reclaim the array.
+			var zero LogEntry
+			buf[0] = zero
+			buf = buf[1:]
+			if len(buf) == 0 {
+				buf = nil
+			}
+		}
 	}
 }
 
@@ -494,7 +583,7 @@ func (n *Node) handlePropose(cmd command) {
 		}
 		args := n.buildAppendEntriesArgs(peer)
 		n.st.peerInFlight[peer] = true
-		go n.dispatchAppendEntries(peer, args)
+		go n.dispatchAppendEntries(peer, args, n.st.leaderRound)
 	}
 }
 
@@ -601,9 +690,18 @@ func (n *Node) becomeLeader() {
 	n.st.matchIndex = make(map[string]uint64, len(n.cfg.Peers))
 	n.st.nextIndex = make(map[string]uint64, len(n.cfg.Peers))
 	n.st.peerInFlight = make(map[string]bool, len(n.cfg.Peers))
+	// Reset ReadIndex tracking for this term — peerLastRound from any prior
+	// term must NOT pre-satisfy a fresh ReadIndex (load-bearing for §6.4
+	// linearizability). leaderRound restarts at 0, so a queued req from a
+	// prior term that still references its old minPeerRound (>0) cannot match
+	// even if peerLastRound were stale; we nil both anyway as defense in depth.
+	n.st.leaderRound = 0
+	n.st.peerLastRound = make(map[string]uint64, len(n.cfg.Peers))
+	n.st.readIndexQueue = nil
 	for _, peer := range n.cfg.Peers {
 		n.st.matchIndex[peer] = 0
 		n.st.nextIndex[peer] = last + 1
+		n.st.peerLastRound[peer] = 0
 	}
 
 	n.publish()
@@ -654,6 +752,18 @@ func (n *Node) stepDownToFollower(term uint64) {
 			}
 			delete(n.st.proposeWaiters, idx)
 		}
+		// Drain any queued ReadIndex requests with ErrProposalFailed — they
+		// queued under our (now-defunct) Leader term and the new leader will
+		// have its own commit history, so the barrier we captured no longer
+		// reflects a state we can serve linearizably. reply is cap-1 buffered
+		// and at-most-one send per req, so blocking is safe and matches the
+		// inline-reply paths in handleReadIndex / tryFlushReadIndex.
+		for _, req := range n.st.readIndexQueue {
+			req.reply <- readIndexResult{err: ErrProposalFailed}
+		}
+		n.st.readIndexQueue = nil
+		n.st.peerLastRound = nil
+		n.st.leaderRound = 0
 		n.st.matchIndex = nil
 		n.st.nextIndex = nil
 		n.st.proposeWaiters = nil
@@ -688,6 +798,9 @@ func (n *Node) becomeFollower(term uint64) {
 // accumulation when the transport is slow or partitioned — without the gate,
 // every heartbeat tick would spawn a new goroutine while old ones block on the
 // dead transport.
+//
+// Each dispatch carries the current leaderRound as hbRoundID so handleHeartbeatReply
+// can advance peerLastRound for ReadIndex linearizability confirmation.
 func (n *Node) broadcastHeartbeat() {
 	for _, peer := range n.cfg.Peers {
 		if n.st.peerInFlight[peer] {
@@ -695,7 +808,7 @@ func (n *Node) broadcastHeartbeat() {
 		}
 		args := n.buildAppendEntriesArgs(peer)
 		n.st.peerInFlight[peer] = true
-		go n.dispatchAppendEntries(peer, args)
+		go n.dispatchAppendEntries(peer, args, n.st.leaderRound)
 	}
 }
 
@@ -766,13 +879,19 @@ func (n *Node) sendRequestVote(peer string, args *RequestVoteArgs) {
 // args so the actor's reply handler can advance matchIndex without rebuilding
 // the per-peer view. Select-on-stopCh prevents goroutine leaks when the
 // actor exits while a transport call is in flight.
-func (n *Node) dispatchAppendEntries(peer string, args *AppendEntriesArgs) {
+//
+// roundID is the leaderRound at dispatch time, reported back via cmd.hbRoundID
+// for ReadIndex linearizability confirmation. The actor's stale-reply gate
+// (term match) ensures rounds from a previous leader term cannot satisfy a
+// fresh request.
+func (n *Node) dispatchAppendEntries(peer string, args *AppendEntriesArgs, roundID uint64) {
 	matchAfter := args.PrevLogIndex + uint64(len(args.Entries))
 	c := command{
 		kind:           cmdHeartbeatReply,
 		hbPeer:         peer,
 		hbMatchAfter:   matchAfter,
 		hbDispatchTerm: args.Term,
+		hbRoundID:      roundID,
 	}
 	t := n.loadTransport()
 	if t == nil {
@@ -860,7 +979,14 @@ func (n *Node) handleHeartbeatReply(cmd command) {
 			n.st.matchIndex[cmd.hbPeer] = cmd.hbMatchAfter
 		}
 		n.st.nextIndex[cmd.hbPeer] = n.st.matchIndex[cmd.hbPeer] + 1
+		// Advance peerLastRound for ReadIndex confirmation (Raft §6.4). Same
+		// term gate as above ensures stale-term replies cannot pre-satisfy a
+		// fresh ReadIndex.
+		if n.st.peerLastRound != nil && cmd.hbRoundID > n.st.peerLastRound[cmd.hbPeer] {
+			n.st.peerLastRound[cmd.hbPeer] = cmd.hbRoundID
+		}
 		n.maybeAdvanceCommitIndex()
+		n.tryFlushReadIndex()
 		return
 	}
 
@@ -991,4 +1117,74 @@ func (n *Node) resetElectionTimer() {
 func (n *Node) hasMajority(votes int) bool {
 	total := len(n.cfg.Peers) + 1
 	return votes >= total/2+1
+}
+
+// handleReadIndex processes a queued ReadIndex request (Raft §6.4). The
+// linearizability protocol:
+//
+//  1. Capture barrier = commitIndex (the highest definitely-applied state).
+//  2. Bump leaderRound and dispatch a fresh heartbeat round; majority confirmation
+//     proves we are still leader for the request's term (no later term has
+//     deposed us yet from the perspective of those peers).
+//  3. Queue the request; tryFlushReadIndex reaps it once peerLastRound is
+//     advanced for a majority of peers.
+//
+// Single-voter shortcut: with no peers, leadership is implicit at every commit
+// (self-quorum), so we reply inline with the current commitIndex. Same caller
+// contract as the multi-voter path: caller awaits FSM lastApplied >= barrier
+// before serving the read.
+func (n *Node) handleReadIndex(cmd command) {
+	if n.st.state != Leader {
+		cmd.riReply <- readIndexResult{err: ErrNotLeader}
+		return
+	}
+	if len(n.cfg.Peers) == 0 {
+		cmd.riReply <- readIndexResult{index: n.st.commitIndex}
+		return
+	}
+	n.st.leaderRound++
+	n.st.readIndexQueue = append(n.st.readIndexQueue, readIndexReq{
+		barrier:      n.st.commitIndex,
+		term:         n.st.currentTerm,
+		minPeerRound: n.st.leaderRound,
+		reply:        cmd.riReply,
+	})
+	// Force an immediate heartbeat broadcast so the new round reaches idle
+	// peers without waiting for the next 50ms tick. Peers currently in flight
+	// (peerInFlight[peer] == true) are skipped — their next AE will carry
+	// the bumped round once the in-flight reply returns and the gate clears.
+	// SLA: idle-peer-majority case is bounded by RTT; in-flight-peer-majority
+	// case is bounded by heartbeatTimeout + RTT.
+	n.broadcastHeartbeat()
+}
+
+// tryFlushReadIndex reaps queued ReadIndex requests whose minPeerRound has
+// been confirmed by a majority of voters (self counts as confirmed at any
+// round). Called from handleHeartbeatReply on a successful AE reply that
+// advanced peerLastRound. Stale-term entries are reaped with ErrProposalFailed
+// — though stepDownToFollower already drains on transition, this guards
+// against logical errors and is cheap.
+func (n *Node) tryFlushReadIndex() {
+	if len(n.st.readIndexQueue) == 0 {
+		return
+	}
+	out := n.st.readIndexQueue[:0]
+	for _, req := range n.st.readIndexQueue {
+		if req.term != n.st.currentTerm {
+			req.reply <- readIndexResult{err: ErrProposalFailed}
+			continue
+		}
+		count := 1 // self
+		for _, peer := range n.cfg.Peers {
+			if n.st.peerLastRound[peer] >= req.minPeerRound {
+				count++
+			}
+		}
+		if n.hasMajority(count) {
+			req.reply <- readIndexResult{index: req.barrier}
+			continue
+		}
+		out = append(out, req)
+	}
+	n.st.readIndexQueue = out
 }
