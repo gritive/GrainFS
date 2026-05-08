@@ -434,13 +434,12 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 	obj := result.Object
 
-	recordObjectWriteMetrics(result.Previous, obj.Size)
+	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
 	c.Status(consts.StatusOK)
 }
 
@@ -1093,8 +1092,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	obj := result.Object
 
-	recordObjectWriteMetrics(result.Previous, obj.Size)
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
+	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
@@ -1269,7 +1267,7 @@ func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestCont
 		return
 	}
 	obj := result.Object
-	recordObjectWriteMetrics(result.Previous, obj.Size)
+	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}

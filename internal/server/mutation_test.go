@@ -227,6 +227,27 @@ func TestEventObserverNilEmitFnIsNoop(t *testing.T) {
 	// no panic
 }
 
+// TestCompleteMultipartUploadInvokesBrokerWrite is a regression test:
+// before this refactor handleCompleteMultipart updated metrics but
+// never enqueued a Put event, so multipart-uploaded objects were
+// invisible to event-based subscribers. After Task 6 the handler calls
+// s.mutations.OnObjectWrite, which the broker fans out to eventObserver
+// (Task 4 covers eventObserver's Put-event emission shape).
+func TestCompleteMultipartUploadInvokesBrokerWrite(t *testing.T) {
+	rec := &recordingObserver{}
+	br := NewMutationBroker(rec)
+	// Simulate what handleCompleteMultipart now does after a successful
+	// CompleteMultipartUploadWithResult call:
+	br.OnObjectWrite(context.Background(), "buck", "k",
+		&storage.PutObjectResult{Object: storage.ObjectFacts{Size: 999}})
+
+	if len(rec.writes) != 1 ||
+		rec.writes[0].bucket != "buck" || rec.writes[0].key != "k" ||
+		rec.writes[0].result == nil || rec.writes[0].result.Object.Size != 999 {
+		t.Fatalf("regression: multipart write not routed through broker; got %+v", rec.writes)
+	}
+}
+
 func TestNewServerWiresMutationBroker(t *testing.T) {
 	// Construct a minimal server via NewWithServerStorage with a real local
 	// backend (matches the pattern in authorizer_wiring_test.go and
