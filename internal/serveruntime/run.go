@@ -7,7 +7,6 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
@@ -18,14 +17,12 @@ import (
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/badgerrole"
-	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
-	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/resourceguard"
@@ -50,7 +47,6 @@ func Run(ctx context.Context, cfg Config) error {
 	dataDir := cfg.DataDir
 	clusterKey := cfg.ClusterKey
 	authOpts := cfg.AuthOpts
-	encryptor := cfg.Encryptor
 	raftAddrExplicit := cfg.RaftAddrExplicit
 
 	// PR 1+2 (boot decomposition milestone, see docs/superpowers/specs/
@@ -90,8 +86,6 @@ func Run(ctx context.Context, cfg Config) error {
 	roleRegistry := state.roleRegistry
 	db := state.db
 	logStore := state.logStore
-	sharedRaftLogDB := state.sharedRaftLogDB
-	storeOpts := state.storeOpts
 	startupDecisions := state.startupDecisions
 	recordStartupDecision := func(decision badgerrole.Decision) {
 		state.startupDecisions = append(state.startupDecisions, decision)
@@ -114,7 +108,6 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	quicTransport := state.quicTransport
-	groupRaftMux := state.groupRaftMux
 	raftAddr = state.raftAddr // bootQUICTransport may have resolved 127.0.0.1:0 → bound port
 
 	raftCfg := raft.DefaultConfig(nodeID, peers)
@@ -126,10 +119,12 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("raft bootstrap: %w", err)
 		}
 	}
+	state.node = node
 
 	// Wire QUIC transport to Raft RPC layer
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
 	rpcTransport.SetTransport()
+	state.rpcTransport = rpcTransport
 
 	// PR 4 raft phases. Order matters: callbacks (DataGroupRouter,
 	// RotationAndAdminAPI) MUST register on metaRaft.FSM() BEFORE
@@ -153,292 +148,39 @@ func Run(ctx context.Context, cfg Config) error {
 	iamAdminAPI := state.iamAdminAPI
 	iamProposer := state.iamProposer
 
-	clusterSize := 1 + len(peers)
 	// Seed data groups from cluster size only. Operators no longer choose this:
-	// group count is placement headroom, not a durability policy.
+	// group count is placement headroom, not a durability policy. Computed
+	// here (not in the storage phase) because the join-mode reconnect path
+	// downstream re-uses seedGroups when waiting for shard group commits.
+	clusterSize := 1 + len(peers)
 	seedGroups := clusterSize * 4
 	if seedGroups < 8 {
 		seedGroups = 8
 	}
-	effectiveEC := cluster.AutoECConfigForClusterSize(clusterSize)
-	if !effectiveEC.IsActive(clusterSize) {
-		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)
+
+	// PR 5 storage runtime phases. Order matters:
+	//  1. bootShardService — completes cluster bootstrap (non-join), seeds
+	//     groups, builds ShardService. Captures effectiveEC.
+	//  2. bootStreamRouter — wires QUIC stream multiplexer (Control/Data),
+	//     registers shard body handlers, starts the data-plane raft node.
+	//  3. bootOwnedGroupsAndEC — wires distBackend, group-0 wrapper, shard
+	//     cache, rebalancer, per-group multi-raft cold-start + runtime
+	//     instantiation, LoadReporter, EC config; registers shutdown hook.
+	if err := bootShardService(ctx, state); err != nil {
+		return err
 	}
-	normalGroupVoters := effectiveEC.NumShards()
-	if !joinMode {
-		if err := WaitForMetaRaftLeader(ctx, metaRaft, 15*time.Second); err != nil {
-			return err
-		}
-		addNodeCtx, addNodeCancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := metaRaft.ProposeAddNode(addNodeCtx, cluster.MetaNodeEntry{ID: nodeID, Address: raftAddr, Role: 0}); err != nil {
-			log.Debug().Err(err).Str("node_id", nodeID).Str("addr", raftAddr).Msg("seed node metadata propose failed (non-fatal)")
-		}
-		addNodeCancel()
-
-		if err := SeedInitialShardGroups(ctx, metaRaft, nodeID, raftAddr, peers, seedGroups, normalGroupVoters); err != nil {
-			return err
-		}
-		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
-			return err
-		}
-		clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
-		clusterRouter.SetRequireExplicitAssignments(true)
+	if err := bootStreamRouter(state); err != nil {
+		return err
 	}
-
-	// Create ShardService for distributed data replication
-	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(encryptor)}
-	if cfg.DirectIO {
-		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
-		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
+	if err := bootOwnedGroupsAndEC(ctx, state, recordStartupDecision); err != nil {
+		return err
 	}
-	if cfg.MeasureReadAmp {
-		readamp.Enable()
-		log.Info().Msg("read-amplification simulator enabled — see grainfs_readamp_* counters at /metrics")
-	}
-	shardSvcOpts = append(shardSvcOpts, cluster.WithNodeAddressBook(metaRaft.FSM()))
-	shardSvc := cluster.NewShardService(dataDir, quicTransport, shardSvcOpts...)
-
-	// Set up StreamRouter: Raft RPCs on Control stream, Shard RPCs on Data stream
-	router := transport.NewStreamRouter()
-	router.Handle(transport.StreamControl, rpcTransport.Handler())
-	router.Handle(transport.StreamData, shardSvc.HandleRPC())
-	quicTransport.SetStreamHandler(router.Dispatch)
-	// Body handler must register on QUICTransport's internal router; the
-	// catch-all (router.Dispatch) only sees per-message handlers and cannot
-	// consume body streams. Pre-fix, every StreamShardWriteBody fell through
-	// to the catch-all → returned nil → stream closed without response →
-	// caller saw "decode response: read header: EOF" → N×replication produced
-	// only the leader's local copy.
-	quicTransport.HandleBody(transport.StreamShardWriteBody, shardSvc.HandleWriteBody())
-	quicTransport.HandleRead(transport.StreamShardReadBody, shardSvc.HandleReadBody())
-
-	node.Start()
-	state.AddCleanup(func() { node.Stop() })
-
-	distBackend, err := cluster.NewDistributedBackend(dataDir, db, node)
-	if err != nil {
-		return fmt.Errorf("failed to initialize distributed storage: %w", err)
-	}
-
-	// Wire shard service for distributed fan-out replication
-	allNodes := append([]string{raftAddr}, peers...)
-	distBackend.SetShardService(shardSvc, allNodes)
-
-	// EC shard cache (Phase 2 #3 follow-up). Construct it before any per-group
-	// backend can be instantiated so group-1..N receive the same cache wiring
-	// as the legacy group-0 backend.
-	shardCache := shardcache.New(cfg.ShardCacheSize)
-	distBackend.SetShardCache(shardCache)
-	log.Info().Int64("bytes", cfg.ShardCacheSize).Msg("ec shard cache configured")
-
-	// Live multi-raft sharding (v0.0.7.0): group-0 keeps using the shared
-	// distBackend (legacy single-backend deployment is the group-0 instance);
-	// groups 1..N-1 get their own per-group BadgerDB+raft via instantiateLocalGroup
-	// when this node is a voter (see ownedGroups loop below).
-	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
-	group0 := cluster.NewDataGroupWithBackend(
-		"group-0",
-		SeedShardGroupVoters(nodeID, raftAddr, peers, metaRaft.FSM().Nodes(), "group-0", 3),
-		group0Backend,
-	)
-	dgMgr.Add(group0)
-	distBackend.SetRouter(clusterRouter)
-	distBackend.SetShardGroupSource(metaRaft.FSM())
-
-	// PR-D: Rebalancer 배선 — LoadReporter가 meta-Raft FSM에 부하 스냅샷을 커밋하고
-	// Rebalancer가 leader에서 주기적으로 평가해 RebalancePlan을 제안·실행한다.
-	rebalancerCfg := cluster.DefaultRebalancerConfig()
-	rebalancer := cluster.NewRebalancer(nodeID, metaRaft, dgMgr, rebalancerCfg)
-	rebalancer.SetGroupRebalancer(
-		cluster.NewDataGroupPlanExecutor(nodeID, dgMgr, metaRaft.FSM(), metaRaft),
-	)
-	metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
-		if joinMode {
-			return
-		}
-		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
-		go func() {
-			defer execCancel()
-			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
-				log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
-			}
-		}()
-	})
-	go rebalancer.Run(ctx)
-
-	// EC config — instantiateLocalGroup needs it for per-group EC.
-
-	// Live multi-raft sharding (v0.0.7.0): instantiate per-group raft.Node +
-	// BadgerDB + GroupBackend for each group this node is a voter of. group-0
-	// is already wired with the shared distBackend (legacy compat).
-	//
-	// Two paths cover all entries:
-	//   1. Iterate ShardGroups() once for entries already in FSM.
-	//   2. SetOnShardGroupAdded for entries replayed/applied later.
-	// Both call into instantiateOwnedIfNeeded which is idempotent — duplicates
-	// from concurrent paths are no-ops.
-	ownedGroups := struct {
-		mu           sync.Mutex
-		wg           sync.WaitGroup
-		m            map[string]*cluster.GroupBackend
-		inFlight     map[string]bool // entry.ID currently being instantiated; prevents duplicate concurrent OpenSharedLogStore / badger.Open
-		shuttingDown bool
-	}{m: make(map[string]*cluster.GroupBackend), inFlight: make(map[string]bool)}
-
-	// Shared stop channel for all apply loops (distBackend + per-group).
-	// Must be initialized before any goroutine that passes it to RunApplyLoop.
-	stopApply := make(chan struct{})
-
-	// groupRaftMux was created earlier (before NewMetaTransportQUICMux) so
-	// metaTransport could auto-register its node onto the mux. Each group
-	// uses ForGroup(groupID) as its raft transport.
-
-	instantiateOwnedIfNeeded := func(entry cluster.ShardGroupEntry) error {
-		// group-0 is already wired with the shared distBackend.
-		if entry.ID == "group-0" {
-			return nil
-		}
-		EnsureShardGroupPlaceholder(dgMgr, entry)
-		// Only instantiate for groups where we are a voter. Shard groups should
-		// store node IDs; raftAddr remains a local alias for legacy/static
-		// entries written before that invariant existed.
-		groupNodeID, isVoter := cluster.NewShardGroupPeerSet(entry).MatchLocal(nodeID, raftAddr)
-		if !isVoter {
-			return nil
-		}
-		ownedGroups.mu.Lock()
-		if ownedGroups.shuttingDown {
-			ownedGroups.mu.Unlock()
-			return nil
-		}
-		if _, ok := ownedGroups.m[entry.ID]; ok {
-			ownedGroups.mu.Unlock()
-			return nil // already instantiated
-		}
-		if ownedGroups.inFlight[entry.ID] {
-			ownedGroups.mu.Unlock()
-			return nil // another goroutine is currently bringing this group up
-		}
-		ownedGroups.inFlight[entry.ID] = true
-		ownedGroups.mu.Unlock()
-		// Make sure inFlight is cleared even if instantiation fails.
-		defer func() {
-			ownedGroups.mu.Lock()
-			delete(ownedGroups.inFlight, entry.ID)
-			ownedGroups.mu.Unlock()
-		}()
-
-		glc := cluster.GroupLifecycleConfig{
-			NodeID:           groupNodeID,
-			DataDir:          dataDir,
-			ShardSvc:         shardSvc,
-			Transport:        groupRaftMux.ForGroup(entry.ID),
-			AddrBook:         metaRaft.FSM(),
-			EC:               effectiveEC,
-			ElectionTimeout:  cfg.RaftElectionTimeout,
-			HeartbeatTimeout: cfg.RaftHeartbeatInterval,
-		}
-		if sharedRaftLogDB != nil {
-			// Forward managed-mode and any future BadgerLogStoreOption to
-			// the shared store so flags don't get silently dropped on the
-			// shared path.
-			ls, lerr := raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID, storeOpts...)
-			if lerr != nil {
-				return fmt.Errorf("group %s: open shared log store: %w", entry.ID, lerr)
-			}
-			glc.LogStore = ls
-		}
-		gb, err := cluster.InstantiateLocalGroup(glc, entry)
-		if err != nil {
-			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
-		}
-		gb.SetShardCache(shardCache)
-		groupRaftMux.Register(entry.ID, gb.RaftNode())
-		dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
-		go gb.RunApplyLoop(stopApply)
-		ownedGroups.mu.Lock()
-		ownedGroups.m[entry.ID] = gb
-		ownedGroups.mu.Unlock()
-		log.Info().Str("group_id", entry.ID).Strs("peers", entry.PeerIDs).Msg("instantiateLocalGroup ok")
-		return nil
-	}
-
-	scheduleOwnedInstantiation := func(entry cluster.ShardGroupEntry) {
-		ownedGroups.mu.Lock()
-		if ownedGroups.shuttingDown {
-			ownedGroups.mu.Unlock()
-			return
-		}
-		ownedGroups.wg.Add(1)
-		ownedGroups.mu.Unlock()
-		go func() {
-			defer ownedGroups.wg.Done()
-			if err := instantiateOwnedIfNeeded(entry); err != nil {
-				log.Error().Err(HandleRuntimeGroupInstantiationError(entry.ID, err)).Str("group_id", entry.ID).Msg("runtime data group instantiation failed")
-			}
-		}()
-	}
-
-	// Cold-start instantiation for entries already in FSM (restart path).
-	// Run synchronously so Badger role failures feed the startup reducer before
-	// the server accepts traffic.
-	for _, entry := range metaRaft.FSM().ShardGroups() {
-		if err := instantiateOwnedIfNeeded(entry); err != nil {
-			recordStartupDecision(badgerrole.Decision{
-				Role:    badgerrole.RoleGroupState,
-				GroupID: entry.ID,
-				Status:  badgerrole.DecisionOpenFailed,
-				Action:  badgerrole.RecoveryActionStartReadOnly,
-				Reason:  err.Error(),
-				Err:     err,
-			})
-		}
-	}
-	// Runtime: handle entries replayed/applied after this point (fresh boot path).
-	// Dispatch to goroutine so apply loop is not blocked by BadgerDB+raft.Node startup.
-	metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
-		scheduleOwnedInstantiation(entry)
-	})
-
-	// Shutdown hook: close all owned groups in parallel with 5s timeout each.
-	state.AddCleanup(func() {
-		metaRaft.FSM().SetOnShardGroupAdded(nil)
-		ownedGroups.mu.Lock()
-		ownedGroups.shuttingDown = true
-		ownedGroups.mu.Unlock()
-		ownedGroups.wg.Wait()
-
-		ownedGroups.mu.Lock()
-		toClose := make([]*cluster.GroupBackend, 0, len(ownedGroups.m))
-		for _, gb := range ownedGroups.m {
-			toClose = append(toClose, gb)
-		}
-		ownedGroups.mu.Unlock()
-		var wg sync.WaitGroup
-		for _, gb := range toClose {
-			wg.Add(1)
-			go func(gb *cluster.GroupBackend) {
-				defer wg.Done()
-				if err := cluster.ShutdownLocalGroup(context.Background(), gb, 5*time.Second); err != nil {
-					log.Warn().Err(err).Str("group_id", gb.ID()).Msg("shutdownLocalGroup")
-				}
-			}(gb)
-		}
-		wg.Wait()
-	})
-
-	// LoadReporter: leader 전용 — NodeStatsStore에서 읽어 meta-Raft FSM에 부하 통계 커밋.
-	loadReporterStore := cluster.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
-	loadReporter := cluster.NewLoadReporter(nodeID, loadReporterStore, metaRaft, cluster.DefaultLoadReportInterval)
-	go loadReporter.Run(ctx)
-
-	distBackend.SetECConfig(effectiveEC)
-	log.Info().
-		Str("mode", "auto").
-		Int("effective_k", effectiveEC.DataShards).
-		Int("effective_m", effectiveEC.ParityShards).
-		Bool("active", effectiveEC.IsActive(len(allNodes))).
-		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
+	shardSvc := state.shardSvc
+	distBackend := state.distBackend
+	shardCache := state.shardCache
+	effectiveEC := state.effectiveEC
+	stopApply := state.stopApply
+	router := state.streamRouter
 
 	// Set up snapshot manager: auto-snapshot every 10000 applied entries
 	fsm := cluster.NewFSM(db)

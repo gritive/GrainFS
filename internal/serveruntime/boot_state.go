@@ -5,6 +5,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -74,6 +75,24 @@ type bootState struct {
 	rotationWorker   *cluster.RotationWorker
 	iamAdminAPI      *iam.AdminAPI
 	iamProposer      *iam.MetaProposer
+
+	// Storage runtime (populated by storage phases — bootShardService,
+	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
+	// service, stream multiplexing on QUIC, distributed backend, per-group
+	// raft instantiation, and EC config. effectiveEC is captured here so
+	// downstream phases (PR 6: balancer, healreceipt) can re-read the
+	// resolved EC profile without re-deriving from cluster size.
+	node             *raft.Node
+	rpcTransport     *raft.QUICRPCTransport
+	streamRouter     *transport.StreamRouter
+	shardSvc         *cluster.ShardService
+	distBackend      *cluster.DistributedBackend
+	shardCache       *shardcache.Cache
+	effectiveEC      cluster.ECConfig
+	stopApply        chan struct{}
+	rebalancer       *cluster.Rebalancer
+	loadReporter     *cluster.LoadReporter
+	loadReporterStor *cluster.NodeStatsStore
 }
 
 // newBootState returns an empty state bound to cfg. Caller is responsible for
