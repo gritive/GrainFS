@@ -36,8 +36,6 @@ func init() {
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
-	serveCmd.Flags().String("access-key", "", "S3 access key for authentication (enables auth when set)")
-	serveCmd.Flags().String("secret-key", "", "S3 secret key for authentication")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
@@ -164,23 +162,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	accessKey, _ := cmd.Flags().GetString("access-key")
-	secretKey, _ := cmd.Flags().GetString("secret-key")
-
-	// IAM Store always exists — Phase 2 unifies auth path through IAM. The
-	// flag-mode static creds bootstrap into IAM via Task 11/12; for now they
-	// also seed the static creds map so flag-mode users authenticate
-	// immediately on first request before bootstrap completes.
+	// IAM Store always exists. Static creds are no longer accepted via flag —
+	// bootstrap goes through admin UDS POST /v1/iam/sa (see docs/RUNBOOK.md).
 	iamStore := iam.NewStore()
-
-	var staticCreds []s3auth.Credentials
-	if accessKey != "" && secretKey != "" {
-		staticCreds = []s3auth.Credentials{{AccessKey: accessKey, SecretKey: secretKey}}
-	} else if accessKey == "" && secretKey == "" {
-		log.Warn().Msg("S3 authentication disabled — set --access-key and --secret-key for production")
-	}
-
-	inner := s3auth.NewVerifier(staticCreds)
+	inner := s3auth.NewVerifier(nil)
 	inner.SecretLookup = iam.NewSecretLookup(iamStore)
 	verifier := s3auth.NewCachingVerifier(inner, 4096, 5*time.Minute)
 
@@ -239,7 +224,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err := server.RunSystemPreflight(server.PreflightConfig{
 		DataDir:  dataDir,
 		HTTPAddr: addr,
-		NoAuth:   accessKey == "" || secretKey == "",
 	}); err != nil {
 		return err
 	}
@@ -248,7 +232,5 @@ func runServe(cmd *cobra.Command, args []string) error {
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
 	cfg := buildClusterConfig(cmd, addr, dataDir, nodeID, raftAddr, clusterKey, authOpts, shardEncryptor, iamStore, iamApplier)
-	cfg.BootstrapAccessKey = accessKey
-	cfg.BootstrapSecretKey = secretKey
 	return serveruntime.Run(ctx, cfg)
 }
