@@ -48,18 +48,7 @@
 - [ ] **§2.x 잔여 항목** (필요 시 design doc 재발굴) — 4-30 §2.3 snapshot servers persistence(#103 v0.0.6.11) 동일 series의 다른 violation 항목이 있었는지 다음 brainstorming session에서 확인.
 - [ ] Migration: NFS virtual overlay
 - [ ] Migration: NBD block proxying
-- [ ] **Migration: bucket-level server-side injection** — 현재 `grainfs migrate inject`는
-  외부에서 도는 stateless CLI (전체 객체 메모리 로드, 단일 고루틴, 재개/메타데이터/체크섬 부재).
-  대신 GrainFS 버킷에 migration 정책을 붙이는 모델로 재설계: (1) `import` (한 번만 끌어오기),
-  (2) `mirror` (지속 복제), (3) `pull-through` (요청 시 lazy fetch + cache — cutover 전
-  GrainFS를 cache 레이어로 시범 운영 가능). 상태는 BadgerDB(`migration:<bucket>:cursor|job`),
-  Raft로 워커 leader election (중복 pull 방지), admin API + dashboard로 진행률/오류/ETA
-  노출. 스트리밍 PUT, 워커 풀, retry/backoff, ETag·user-metadata·tag 보존 기본.
-  업계 참고: AWS S3 Replication, MinIO `mc replicate`, Ceph RGW Multisite. **선행:**
-  spec 작성 (S3 native vs admin API, BadgerDB 스키마, Raft 통합, 기존 `inject` CLI
-  운명: 제거 vs 새 API thin wrapper). **Depends on:** IAM Foundation (버킷 owner SA가
-  자기 source credential을 등록할 수 있어야 함), lifecycle/policy 시스템과의 상호작용
-  정리.
+- [ ] **Migration: bucket-level server-side injection (Phase 2+)** — **Phase 1 (credentials) shipped in v0.0.115.0** — see `docs/adr/0009-bucket-scoped-upstream.md`. The credentials substrate (per-bucket `BucketUpstream` IAM record, admin UDS API, CLI, IAM-backed pullthrough Resolver) is in place. **Remaining work:** (1) `import` mode (one-shot bulk copy with cursor in BadgerDB `migration:<bucket>:cursor|job`); (2) `mirror` mode (continuous replication); (3) explicit `cutover` verb + `status` field on `BucketUpstream` (active/cutover); (4) progress tracking + dashboard surface; (5) `List`/`Head`/`CopyObject` upstream operations (currently GET-only); (6) Raft-elected worker pool to prevent duplicate pulls. Industry references: AWS S3 Replication, MinIO `mc replicate`, Ceph RGW Multisite. **Spec needed:** S3-native admin verbs vs IAM AdminAPI extension, BadgerDB schema, Raft integration, deprecation path for legacy `migrate inject` CLI.
 - [ ] nbd over internet for edge computing (powered by wireguard)
 - [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
 
