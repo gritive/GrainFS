@@ -43,3 +43,80 @@ type AuditEmitter interface {
 
 // PrincipalResolver returns the SA id stored in ctx. iam.PrincipalFromContext satisfies this.
 type PrincipalResolver func(ctx context.Context) string
+
+// RequestAuthorizer composes IAM grant, bucket policy, and object ACL into a
+// single authz decision for one S3 request. See CONTEXT.md
+// § "S3 Request Authorization Decision" for the full contract.
+type RequestAuthorizer struct {
+	iam              IAMStore
+	iamCheck         IAMChecker
+	policy           PolicyChecker
+	audit            AuditEmitter
+	principalFromCtx PrincipalResolver
+}
+
+// NewRequestAuthorizer wires the authorizer with its dependencies. Any nil
+// dependency is tolerated:
+//   - iam == nil treats auth as disabled.
+//   - iamCheck == nil with auth enabled denies with "no_grant".
+//   - policy == nil treats every bucket-policy check as allow.
+//   - audit == nil silently drops audit records.
+//   - principalFromCtx == nil resolves saID to "".
+func NewRequestAuthorizer(
+	iam IAMStore,
+	iamCheck IAMChecker,
+	policy PolicyChecker,
+	audit AuditEmitter,
+	principalFromCtx PrincipalResolver,
+) *RequestAuthorizer {
+	return &RequestAuthorizer{
+		iam:              iam,
+		iamCheck:         iamCheck,
+		policy:           policy,
+		audit:            audit,
+		principalFromCtx: principalFromCtx,
+	}
+}
+
+// Decide evaluates the request against IAM grant, bucket policy, and (when
+// phase == PhasePostLoad) the loaded object's ACL. Audit records are emitted
+// for every call when auth is enabled; anonymous mode (auth disabled) does
+// not audit allows but still audits denies.
+func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase Phase) Decision {
+	saID := ""
+	if r.principalFromCtx != nil {
+		saID = r.principalFromCtx(ctx)
+	}
+	authEnabled := r.iam != nil && r.iam.AuthEnabled()
+
+	// Layer 1: IAM grant.
+	if authEnabled {
+		ok := r.iamCheck != nil && r.iamCheck(saID, in.Resource.Bucket, in.Action)
+		if !ok {
+			r.recordDeny(ctx, saID, in, "no_grant")
+			return Decision{Allow: false, Layer: "iam_grant", Reason: "no_grant"}
+		}
+	}
+
+	// Layer 2 + Layer 3 are added in subsequent tasks.
+
+	if authEnabled {
+		r.recordAllow(ctx, saID, in)
+		return Decision{Allow: true, Layer: "iam_grant"}
+	}
+	return Decision{Allow: true, Layer: "anonymous_pass"}
+}
+
+func (r *RequestAuthorizer) recordAllow(ctx context.Context, saID string, in PermCheckInput) {
+	if r.audit == nil {
+		return
+	}
+	r.audit.RecordAllow(ctx, saID, in.Resource.Bucket, in.Resource.Key, in.Action)
+}
+
+func (r *RequestAuthorizer) recordDeny(ctx context.Context, saID string, in PermCheckInput, reason string) {
+	if r.audit == nil {
+		return
+	}
+	r.audit.RecordDeny(ctx, saID, in.Resource.Bucket, in.Resource.Key, in.Action, reason)
+}
