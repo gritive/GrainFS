@@ -162,3 +162,94 @@ func TestSnapshot_Version3_HeaderByte(t *testing.T) {
 		t.Fatalf("first byte = %d, want 3", b[0])
 	}
 }
+
+func TestSnapshot_BucketUpstream_TrailerAppendRoundtrip(t *testing.T) {
+	src := NewStore()
+	enc := newTestEncryptor(t)
+
+	// A2: AAD = "bucket-upstream:"+bucket
+	wrapped1, _ := WrapSecret(enc, "bucket-upstream:shared", "secret-A")
+	wrapped2, _ := WrapSecret(enc, "bucket-upstream:archive", "secret-B")
+	src.applyBucketUpstreamPut(BucketUpstream{
+		Bucket: "shared", Endpoint: "http://up1:9000", AccessKey: "AK1",
+		SecretKey: "secret-A", SecretKeyEnc: wrapped1,
+		CreatedAt: time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC),
+		CreatedBy: "sa-admin",
+	})
+	src.applyBucketUpstreamPut(BucketUpstream{
+		Bucket: "archive", Endpoint: "http://up2:9000", AccessKey: "AK2",
+		SecretKey: "secret-B", SecretKeyEnc: wrapped2,
+		CreatedAt: time.Date(2026, 5, 8, 1, 0, 0, 0, time.UTC),
+		CreatedBy: "sa-admin",
+	})
+
+	var buf bytes.Buffer
+	if err := WriteSnapshot(&buf, src); err != nil {
+		t.Fatalf("WriteSnapshot: %v", err)
+	}
+
+	dst := NewStore()
+	if err := ReadSnapshot(bytes.NewReader(buf.Bytes()), dst, enc); err != nil {
+		t.Fatalf("ReadSnapshot: %v", err)
+	}
+
+	for _, want := range []struct {
+		bucket, ak, sk, endpoint string
+	}{
+		{"shared", "AK1", "secret-A", "http://up1:9000"},
+		{"archive", "AK2", "secret-B", "http://up2:9000"},
+	} {
+		got, ok := dst.LookupBucketUpstream(want.bucket)
+		if !ok {
+			t.Fatalf("LookupBucketUpstream(%s) missing after restore", want.bucket)
+		}
+		if got.AccessKey != want.ak || got.SecretKey != want.sk || got.Endpoint != want.endpoint {
+			t.Errorf("restored %s: got %+v want ak=%s sk=%s endpoint=%s",
+				want.bucket, got, want.ak, want.sk, want.endpoint)
+		}
+	}
+}
+
+// TestSnapshot_PreTrailerCompat_NoBucketUpstreamSection verifies that a snapshot
+// emitted before the bucket-upstreams trailer is appended (5 sections + EOF)
+// is still readable. This guards the A1 backward-compat property: v3 emitters
+// without the trailer remain readable by v3 readers WITH the trailer logic.
+func TestSnapshot_PreTrailerCompat_NoBucketUpstreamSection(t *testing.T) {
+	// Construct a manual snapshot with only the existing 5 sections (sas, keys,
+	// grants, wildcards, revoked), all empty.
+	var buf bytes.Buffer
+	buf.WriteByte(3) // version
+	for i := 0; i < 5; i++ {
+		var u32 [4]byte // each section: count = 0
+		buf.Write(u32[:])
+	}
+	dst := NewStore()
+	enc := newTestEncryptor(t)
+	if err := ReadSnapshot(bytes.NewReader(buf.Bytes()), dst, enc); err != nil {
+		t.Fatalf("ReadSnapshot v3 (pre-trailer): %v", err)
+	}
+}
+
+// TestSnapshot_PostTrailerReadsForward verifies a snapshot WITH bucket-upstreams
+// trailer is readable.
+func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
+	src := NewStore()
+	enc := newTestEncryptor(t)
+	wrapped, _ := WrapSecret(enc, "bucket-upstream:b1", "s1")
+	src.applyBucketUpstreamPut(BucketUpstream{
+		Bucket: "b1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+	})
+
+	var buf bytes.Buffer
+	if err := WriteSnapshot(&buf, src); err != nil {
+		t.Fatalf("WriteSnapshot: %v", err)
+	}
+
+	dst := NewStore()
+	if err := ReadSnapshot(bytes.NewReader(buf.Bytes()), dst, enc); err != nil {
+		t.Fatalf("ReadSnapshot: %v", err)
+	}
+	if _, ok := dst.LookupBucketUpstream("b1"); !ok {
+		t.Fatal("LookupBucketUpstream(b1) missing after restore")
+	}
+}
