@@ -100,6 +100,15 @@ func (s *Store) AuthEnabled() bool { return s.snapshot().authEnabled }
 // to decide whether to propose the default SA on flag presence.
 func (s *Store) IsEmpty() bool { return len(s.snapshot().sas) == 0 }
 
+// Reset wipes all in-memory state to a fresh empty Store. Called by the
+// MetaFSM raft Restore path to ensure snapshot install replaces (not
+// merges with) any state accumulated during local apply replay.
+func (s *Store) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Store(newEmptyState())
+}
+
 // --- apply* methods: called only from FSM apply path ---
 
 func (s *Store) cow() *iamState {

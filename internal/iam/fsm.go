@@ -22,6 +22,12 @@ func NewApplier(store *Store, enc *encrypt.Encryptor) *Applier {
 	return &Applier{store: store, enc: enc}
 }
 
+// Encryptor returns the underlying Encryptor used for decrypting secret_key_enc
+// payloads. Read-only accessor — used by MetaFSM snapshot/restore plumbing
+// to thread the encryption key into iam.ReadSnapshot without re-plumbing it
+// through SetIAM.
+func (a *Applier) Encryptor() *encrypt.Encryptor { return a.enc }
+
 // ApplySACreate decodes a SACreatePayload and inserts the SA. Idempotent
 // on existing sa_id (returns nil) — guards follower replay and the
 // leader-only bootstrap race.

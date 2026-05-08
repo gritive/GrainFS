@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sort"
 	"strings"
@@ -16,6 +18,15 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
+
+// iamSnapshotTrailerMagic is appended after the IAM section so post-fix
+// readers can distinguish "new snapshot with IAM trailer" from a legacy
+// snapshot that ends at the FlatBuffer root. ASCII "IAMG" (0x47414D49 little-endian).
+const iamSnapshotTrailerMagic uint32 = 0x47414D49
+
+// iamSnapshotTrailerLen is the on-disk size of the trailer footer:
+// [u32 iam_len][u32 magic]. Always 8 bytes when present.
+const iamSnapshotTrailerLen = 8
 
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
 type MetaCmdType = clusterpb.MetaCmdType
@@ -1419,7 +1430,31 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
-	return fbFinish(b, root), nil
+	bs := fbFinish(b, root)
+
+	// Append IAM section as a trailer AFTER the FlatBuffer root. Older
+	// readers that pre-date this trailer ignore everything past the FB root
+	// (FlatBuffer Go runtime walks from the root and tolerates trailing
+	// bytes); newer readers detect the trailer via the magic footer.
+	//
+	// Layout: [FB bytes][iam bytes][u32 iam_len][u32 magic].
+	// iam_len == 0 is valid (e.g., MetaFSM with no IAM applier wired).
+	var iamBytes []byte
+	if f.iamStore != nil {
+		var buf bytes.Buffer
+		if err := iam.WriteSnapshot(&buf, f.iamStore); err != nil {
+			return nil, fmt.Errorf("meta_fsm: Snapshot: encode IAM: %w", err)
+		}
+		iamBytes = buf.Bytes()
+	}
+	out := make([]byte, 0, len(bs)+len(iamBytes)+iamSnapshotTrailerLen)
+	out = append(out, bs...)
+	out = append(out, iamBytes...)
+	var footer [iamSnapshotTrailerLen]byte
+	binary.LittleEndian.PutUint32(footer[0:4], uint32(len(iamBytes)))
+	binary.LittleEndian.PutUint32(footer[4:8], iamSnapshotTrailerMagic)
+	out = append(out, footer[:]...)
+	return out, nil
 }
 
 // Restore deserializes a MetaStateSnapshot and replaces current state.
@@ -1427,6 +1462,27 @@ func (f *MetaFSM) Restore(data []byte) error {
 	if len(data) == 0 {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}
+
+	// Detect post-Phase-5d trailer (footer = [u32 iam_len][u32 magic=IAMG]).
+	// Layout when present: [FB bytes][iam bytes][u32 iam_len][u32 magic].
+	// Legacy snapshots end at the FB root and are accepted unchanged.
+	fbData := data
+	var iamData []byte
+	if len(data) >= iamSnapshotTrailerLen {
+		footer := data[len(data)-iamSnapshotTrailerLen:]
+		magic := binary.LittleEndian.Uint32(footer[4:8])
+		if magic == iamSnapshotTrailerMagic {
+			iamLen := binary.LittleEndian.Uint32(footer[0:4])
+			if int(iamLen)+iamSnapshotTrailerLen > len(data) {
+				return fmt.Errorf("meta_fsm: Restore: IAM trailer length %d exceeds snapshot size %d", iamLen, len(data))
+			}
+			iamEnd := len(data) - iamSnapshotTrailerLen
+			iamStart := iamEnd - int(iamLen)
+			iamData = data[iamStart:iamEnd]
+			fbData = data[:iamStart]
+		}
+	}
+
 	var (
 		snap   *clusterpb.MetaStateSnapshot
 		decErr error
@@ -1437,7 +1493,7 @@ func (f *MetaFSM) Restore(data []byte) error {
 				decErr = fmt.Errorf("meta_fsm: invalid MetaStateSnapshot flatbuffer: %v", r)
 			}
 		}()
-		snap = clusterpb.GetRootAsMetaStateSnapshot(data, 0)
+		snap = clusterpb.GetRootAsMetaStateSnapshot(fbData, 0)
 	}()
 	if decErr != nil {
 		return decErr
@@ -1589,6 +1645,29 @@ func (f *MetaFSM) Restore(data []byte) error {
 	}
 	// onRebalancePlan is intentionally NOT called here.
 	// Rebalancer handles resume on next tick by checking ActivePlan().
+
+	// IAM restore — replaces in-memory IAM state on the receiving node so
+	// raft log compaction (LogGCInterval) does not silently drop SAs/keys/
+	// grants/auth_enabled. Skip when there's no trailer (legacy snapshot)
+	// or no IAM data, or when IAM is not wired (anonymous/no-encryption mode).
+	if len(iamData) > 0 {
+		if f.iamStore == nil || f.iamApplier == nil {
+			log.Warn().Int("iam_len", len(iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
+		} else {
+			enc := f.iamApplier.Encryptor()
+			if enc == nil {
+				log.Warn().Msg("meta_fsm: Restore: IAM applier has no encryptor; skipping IAM restore")
+			} else {
+				// Wipe pre-restore state so a snapshot install REPLACES rather
+				// than MERGES — matches raft Restore semantics for the rest of
+				// MetaFSM (which reassigns each map outright above).
+				f.iamStore.Reset()
+				if err := iam.ReadSnapshot(bytes.NewReader(iamData), f.iamStore, enc); err != nil {
+					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
+				}
+			}
+		}
+	}
 	return nil
 }
 
