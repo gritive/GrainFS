@@ -91,6 +91,38 @@ func TestApplyInitFirstSA_SecondApply_IdempotentSkip(t *testing.T) {
 	require.False(t, ok, "second propose must be idempotent skip")
 }
 
+// TestApplyInitFirstSA_PartialFail_RetryFillsMissingSteps asserts that if
+// ApplyInitFirstSA committed only the SA (no key, no grant) on a prior
+// run — simulated by directly calling applySACreate, which mimics the
+// state after ApplyKeyCreate would have errored — a subsequent
+// ApplyInitFirstSA fires the missing key + wildcard grant rather than
+// taking the idempotent-skip branch. Regresses against an SA-presence-
+// only check that would leave the cluster permanently half-bootstrapped.
+func TestApplyInitFirstSA_PartialFail_RetryFillsMissingSteps(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+	store := NewStore()
+	applier := NewApplier(store, enc)
+
+	// Simulate a prior partial bootstrap: SA committed, key + grant absent
+	// (e.g. ApplyKeyCreate hit a transient encrypt error after the SA
+	// proposal already replicated). This is the failure mode the strong
+	// idempotency predicate must recover from.
+	now := time.Now().UTC()
+	store.applySACreate(ServiceAccount{ID: DefaultSAID, Name: "admin", CreatedAt: now})
+	require.False(t, isFirstSACommitted(store), "partial state must NOT be considered complete")
+
+	// Retry: full ApplyInitFirstSA must fill in the missing steps.
+	payload := buildTestInitFirstSAPayload(t, enc, "AKIA-retry", "sec-retry")
+	require.NoError(t, applier.ApplyInitFirstSA(payload))
+
+	require.True(t, isFirstSACommitted(store), "after retry, all 3 records must be present")
+	_, ok := store.LookupKey("AKIA-retry")
+	require.True(t, ok, "retry must commit the key that the partial run missed")
+	require.Equal(t, RoleAdmin, store.LookupGrant(DefaultSAID, "any-bucket"),
+		"retry must commit the wildcard grant that the partial run missed")
+}
+
 func TestSnapshotRoundtripV3(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(make([]byte, 32))
 	require.NoError(t, err)

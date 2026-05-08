@@ -12,41 +12,52 @@ import (
 const DefaultSAID = "sa-default"
 
 // ApplyInitFirstSA decodes a composite InitFirstSAPayload and applies
-// SA + AccessKey + WildcardGrant atomically. Idempotent: if DefaultSAID
-// already exists in the store, returns nil without applying anything.
-// This is the race guard for concurrent admin UDS callers on an empty
+// SA + AccessKey + WildcardGrant. Idempotent: if the first-SA bootstrap
+// already completed (SA + active key + wildcard grant all present),
+// returns nil. Race guard for concurrent admin UDS callers on an empty
 // cluster — both propose, FSM serializes via Raft FIFO, second Apply
-// sees existing SA and no-ops. Result: store converges to single SA.
+// sees committed state and no-ops. Result: store converges to single SA.
+//
+// Partial-fail recovery: each sub-Apply is independently idempotent, and
+// the completeness predicate isFirstSACommitted requires all three
+// records. If ApplySACreate succeeds but ApplyKeyCreate fails (e.g.
+// transient encrypt/decode error), the next Apply re-fires the missing
+// steps; an SA-presence-only check would wrongly skip and leave the
+// cluster permanently half-bootstrapped.
 func (a *Applier) ApplyInitFirstSA(payload []byte) error {
-	if _, exists := a.store.LookupSA(DefaultSAID); exists {
-		// Idempotent skip: another propose already committed.
+	if isFirstSACommitted(a.store) {
 		return nil
 	}
 	root := iampb.GetRootAsInitFirstSAPayload(payload, 0)
 
-	saBlob := readByteVector(root.SaCreateBlobLength, root.SaCreateBlob)
-	keyBlob := readByteVector(root.KeyCreateBlobLength, root.KeyCreateBlob)
-	gwBlob := readByteVector(root.GrantWildcardBlobLength, root.GrantWildcardBlob)
-
-	if err := a.ApplySACreate(saBlob); err != nil {
+	if err := a.ApplySACreate(root.SaCreateBlobBytes()); err != nil {
 		return err
 	}
-	if err := a.ApplyKeyCreate(keyBlob); err != nil {
+	if err := a.ApplyKeyCreate(root.KeyCreateBlobBytes()); err != nil {
 		return err
 	}
-	return a.ApplyGrantWildcardPut(gwBlob)
+	return a.ApplyGrantWildcardPut(root.GrantWildcardBlobBytes())
 }
 
-// readByteVector copies the FB byte-vector data into a fresh []byte.
-// Reads len() first because flatbuffers indexed accessors return single
-// bytes and we need a contiguous slice to feed back into ApplyXxx.
-func readByteVector(lenFn func() int, byteFn func(j int) byte) []byte {
-	n := lenFn()
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		out[i] = byteFn(i)
+// isFirstSACommitted reports whether the first-SA bootstrap reached its
+// terminal state: DefaultSAID exists, owns a wildcard grant, and has at
+// least one active key. Used as the idempotency predicate so a
+// partially-applied bootstrap (SA committed, key/grant missing) re-fires
+// the missing steps on next Apply.
+func isFirstSACommitted(s *Store) bool {
+	if _, ok := s.LookupSA(DefaultSAID); !ok {
+		return false
 	}
-	return out
+	st := s.snapshot()
+	if _, ok := st.wildcards[DefaultSAID]; !ok {
+		return false
+	}
+	for _, k := range st.keysByAK {
+		if k != nil && k.SAID == DefaultSAID && k.Status == KeyStatusActive {
+			return true
+		}
+	}
+	return false
 }
 
 // NewUUIDv7 returns a time-ordered UUID v7 string. Falls back to v4 if

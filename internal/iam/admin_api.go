@@ -120,7 +120,7 @@ func (a *AdminAPI) HandleSACreate(w http.ResponseWriter, r *http.Request) {
 		// 409 so the loser doesn't try to use a phantom secret.
 		if _, ok := a.store.LookupKey(accessKey); !ok {
 			http.Error(w,
-				"another operator concurrently bootstrapped the cluster; retry will be the no-op SA-create path",
+				"the cluster is already initialized — use existing admin credentials, or contact the operator who ran the first bootstrap",
 				http.StatusConflict)
 			return
 		}
