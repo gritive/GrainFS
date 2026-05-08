@@ -1,5 +1,100 @@
 # Changelog
 
+## [0.0.129.0] - 2026-05-09 — serveruntime boot decomposition PR 5: storage runtime phases (3 of ~20)
+
+### Refactored
+
+- `internal/serveruntime/boot_phases_storage_runtime.go` (new): three storage
+  data-plane phases that split the largest remaining inline block of
+  `Run` (lines ~155–443 pre-PR 5, ~280 lines) into typed phase functions:
+  - `bootShardService(ctx, state)` — completes cluster topology bootstrap
+    in non-join mode (wait meta-raft leader, propose `MetaNodeEntry`,
+    seed initial shard groups, sync the router and flip
+    `SetRequireExplicitAssignments(true)`), then constructs
+    `cluster.ShardService` with cfg-driven options (DirectIO, MeasureReadAmp,
+    AddressBook). Captures `state.effectiveEC` so downstream phases reuse
+    the same auto-resolved profile without re-deriving from cluster size.
+  - `bootStreamRouter(state)` — wires the QUIC stream multiplexer
+    (`StreamControl` → raft RPC, `StreamData` → shard RPC), registers
+    the body handlers (`StreamShardWriteBody`, `StreamShardReadBody`)
+    that consume body streams directly off `QUICTransport.HandleBody/HandleRead`,
+    and fires `node.Start()` on the data-plane raft. The body handler
+    registration is the regression fence for the 2024 fix where
+    `StreamShardWriteBody` fell through the catch-all router → stream
+    closed without response → `decode response: read header: EOF` →
+    N×replication produced only the leader's local copy.
+  - `bootOwnedGroupsAndEC(ctx, state, recordStartupDecision)` — the heavy
+    phase: constructs `DistributedBackend`, wires the group-0 wrapper for
+    legacy single-backend semantics, builds the EC `shardCache`, sets the
+    cluster `Router` + `ShardGroupSource` on the backend, constructs the
+    `Rebalancer` + `DataGroupPlanExecutor` and registers
+    `SetOnRebalancePlan`, runs synchronous cold-start instantiation for
+    every owned shard group (recording badgerrole decisions for opens
+    that fail), registers `SetOnShardGroupAdded` for runtime apply,
+    spins up the `LoadReporter`, sets the EC config on the backend, and
+    pushes the LIFO shutdown hook that drains owned groups in parallel
+    on cleanup. `recordStartupDecision` is plumbed via parameter so the
+    phase signature is honest about what it mutates outside of `state`.
+
+- `internal/serveruntime/boot_state.go`: typed fields added — `node
+  *raft.Node`, `rpcTransport *raft.QUICRPCTransport`, `streamRouter
+  *transport.StreamRouter`, `shardSvc *cluster.ShardService`, `distBackend
+  *cluster.DistributedBackend`, `shardCache *shardcache.Cache`,
+  `effectiveEC cluster.ECConfig`, `stopApply chan struct{}`, `rebalancer
+  *cluster.Rebalancer`, `loadReporter *cluster.LoadReporter`,
+  `loadReporterStor *cluster.NodeStatsStore`. Each field is populated by
+  exactly one phase; the phase ownership is annotated alongside the
+  declaration.
+
+- `internal/serveruntime/run.go`: ~258 lines of inline storage-runtime
+  setup collapse into three phase calls plus a small mirror block. The
+  "body handlers MUST register before node.Start" and "OnRebalancePlan
+  callback MUST register before rebalancer.Run" invariants — previously
+  protected only by source-line proximity — are now enforced by phase
+  ordering. `node` and `rpcTransport` are now also captured on
+  `bootState` immediately after construction so the storage phases can
+  read them from typed state. Run is down to 965 lines (from 1223).
+
+### Added
+
+- `internal/serveruntime/boot_phases_storage_runtime_test.go`: 4 unit
+  tests on real components (real BadgerDB, real QUIC transport, real
+  meta-raft) covering each storage phase plus the witness ordering
+  invariant:
+  - `TestBootShardService_ComputesEffectiveEC` — phase resolves the
+    auto EC profile (1+0 for a single-node cluster), constructs the
+    `ShardService`.
+  - `TestBootStreamRouter_RegistersHandlersAndStartsNode` — phase
+    populates `state.streamRouter` and pushes the data-plane node Stop
+    cleanup onto the LIFO stack.
+  - `TestBootOwnedGroupsAndEC_WiresDistBackend` — heavy integration:
+    phase wires `distBackend`, `shardCache`, `rebalancer`,
+    `loadReporter`, `loadReporterStor`, and `stopApply`.
+  - `TestBootStoragePhases_OrderingInvariant` — the witness test:
+    `shardSvc`/`streamRouter`/`distBackend` are nil before each phase,
+    populated after, and `effectiveEC.NumShards()` jumps from 0 to >0
+    only after `bootShardService`. A future re-order that runs
+    OwnedGroupsAndEC before StreamRouter (or skips ShardService) fails
+    this assertion chain.
+
+### Why
+
+PR 5 of the 6-PR milestone (see
+`docs/superpowers/specs/2026-05-08-serveruntime-boot-decomposition.md`).
+The storage runtime was the second-largest inline block in `Run` after
+the services + shutdown territory (PR 6). Splitting it into three
+phases makes the "ShardService → StreamRouter → distBackend" pipeline
+explicit and testable in isolation, and clears the way for PR 6 to
+collapse the remaining ~520 lines (snapshot+receipt, balancer, admin
+UDS, Hertz data plane, NFS/NBD startup, drain) on top of typed state
+that already has every storage handle named.
+
+Behavior preserved: phase order matches the prior inline order
+exactly, no error wrapping changed, no callback timing changed, no
+goroutine timing changed. `make test` (full unit suite) and
+`go test ./tests/e2e/ -run TestSmoke_DeploymentVerification` both
+green; the smoke test is the integration cover.
+
 ## [0.0.128.0] - 2026-05-09 — serveruntime boot decomposition PR 4: raft phases (4 of ~20)
 
 ### Refactored
