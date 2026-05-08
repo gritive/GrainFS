@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.103.0] - 2026-05-08 — remove dead PolicyStore (uncompiled)
+
+### Removed
+
+- `policy.PolicyStore` (the uncompiled bucket-policy cache) and its
+  `internal/server/policy_store.go` alias. `policy.CompiledPolicyStore` is
+  the production cache (zero-alloc hot path, wired into
+  `storage.Operations` via `WithPolicyStore`); `PolicyStore` had no
+  production callers and was only kept alive by its own tests and the
+  side-by-side benchmark fixture. `CompiledPolicyStore` already provides
+  Set / GetRaw / Delete / Allow with full superset semantics.
+- `TestPolicyStore_*` (6 tests) and the `BenchmarkOld_*` fixtures that
+  compared the dead path to the compiled path. `TestCompiledPolicyStore_*`
+  and the remaining `BenchmarkNew_*` continue to cover Allow/Deny rules,
+  cache update/delete, and zero-alloc evaluation perf.
+
 ## [0.0.102.0] - 2026-05-08 — S3 ListMultipartUploads + ListParts handlers
 
 ### Added
