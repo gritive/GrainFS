@@ -1029,8 +1029,11 @@ func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
 
 	t.Run("ZeroDeliveries", func(t *testing.T) {
 		n := makeNode(t)
-		// Unbuffered applyCh: every send blocks; pre-closed stopCh wins immediately.
-		n.applyCh = make(chan LogEntry)
+		// Unbuffered applyInCh: every send blocks; pre-closed stopCh wins immediately.
+		// (applyInCh replaces the actor's old direct applyCh send after the apply
+		// pipeline decoupling — Stop semantics now apply to "fully enqueued" rather
+		// than "fully delivered to FSM"; the contract is otherwise identical.)
+		n.applyInCh = make(chan LogEntry)
 		close(n.stopCh)
 
 		n.applyCommitted(0, 5)
@@ -1040,18 +1043,18 @@ func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
 
 	t.Run("PartialDelivery", func(t *testing.T) {
 		n := makeNode(t)
-		// Unbuffered applyCh; a consumer goroutine reads exactly K entries
+		// Unbuffered applyInCh; a consumer goroutine reads exactly K entries
 		// then closes stopCh. This makes the Stop point deterministic: the
 		// (K+1)-th iteration's select sees a buffered-ready stopCh AND a
-		// blocked applyCh send (no reader), so stopCh always wins.
+		// blocked applyInCh send (no reader), so stopCh always wins.
 		const K = 3
-		n.applyCh = make(chan LogEntry)
+		n.applyInCh = make(chan LogEntry)
 
 		consumerDone := make(chan struct{})
 		go func() {
 			defer close(consumerDone)
 			for i := 0; i < K; i++ {
-				<-n.applyCh
+				<-n.applyInCh
 			}
 			close(n.stopCh) // applyCommitted's next select will lose to stopCh.
 		}()
@@ -1060,6 +1063,6 @@ func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
 		<-consumerDone
 
 		require.Equal(t, uint64(K), n.st.commitIndex,
-			"commitIndex must equal K (last fully-delivered entry's index) after partial delivery")
+			"commitIndex must equal K (last fully-enqueued entry's index) after partial delivery")
 	})
 }
