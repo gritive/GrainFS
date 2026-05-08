@@ -94,6 +94,7 @@ func TestGetObject_SmallFilePartialReadReturns500(t *testing.T) {
 	data := bytes.Repeat([]byte("S"), 8*1024)
 	_, err = real.PutObject(context.Background(), "test-bucket", "small.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
+	require.NoError(t, real.SetObjectACL("test-bucket", "small.bin", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14872", &partialErrorBackend{Backend: real, failAfter: 512})
 	go func() { s.Run() }()
@@ -122,6 +123,7 @@ func TestGetObject_LargeFilePartialReadTruncates(t *testing.T) {
 	data := bytes.Repeat([]byte("L"), 64*1024)
 	_, err = real.PutObject(context.Background(), "test-bucket", "large.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
+	require.NoError(t, real.SetObjectACL("test-bucket", "large.bin", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14873", &partialErrorBackend{Backend: real, failAfter: 1024})
 	go func() { s.Run() }()
@@ -166,6 +168,7 @@ func TestColdDataIntegrity(t *testing.T) {
 
 			_, err := backend.PutObject(context.Background(), "test-bucket", key, bytes.NewReader(original), "application/octet-stream")
 			require.NoError(t, err)
+			require.NoError(t, backend.SetObjectACL("test-bucket", key, 1)) // ACLPublicRead
 
 			resp, err := http.Get("http://127.0.0.1:14874/test-bucket/" + key)
 			require.NoError(t, err)

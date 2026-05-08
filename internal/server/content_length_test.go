@@ -37,6 +37,7 @@ func TestGetObject_ContentLengthHeader(t *testing.T) {
 		data := bytes.Repeat([]byte("Z"), tc.size)
 		_, err := backend.PutObject(context.Background(), "test-bucket", tc.name, bytes.NewReader(data), "application/octet-stream")
 		require.NoError(t, err)
+		require.NoError(t, backend.SetObjectACL("test-bucket", tc.name, 1)) // ACLPublicRead
 	}
 
 	s := New("127.0.0.1:14875", backend)

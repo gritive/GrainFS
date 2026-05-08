@@ -1,32 +1,180 @@
 # Changelog
 
-## v0.0.107.0 — 2026-05-08
+## [0.0.110.0] - 2026-05-08 — IAM-only auth, drop --access-key flag
 
-**BREAKING CHANGES**
+### Removed (BREAKING)
 
-- Removed `--access-key` / `--secret-key` flags from `grainfs serve`. Bootstrap now goes
-  exclusively through admin UDS: `grainfs iam sa create admin --endpoint <data>/admin.sock`.
-- Removed sticky `auth_enabled` bit. authzMiddleware always evaluates IAM Layer (no
-  anonymous-mode escape hatch).
-- Snapshot binary bumped to v3 (drops authBit). v1/v2 readers no longer accepted.
-- E2E test helpers: `--access-key`/`--secret-key` flag pattern replaced by
-  `bootstrapAdminViaUDS()`. Existing test scripts using the old flags must update.
+- `--access-key` / `--secret-key` flags from `grainfs serve`. Bootstrap now goes
+  exclusively through the admin UDS:
+  `grainfs iam sa create admin --endpoint <data>/admin.sock`.
+- Sticky `auth_enabled` bit (`Store.AuthEnabled()`, `ApplyAuthEnable`,
+  `ProposeAuthEnable`, `MetaCmdTypeIAMAuthEnable` dispatcher case). The
+  authz middleware always evaluates the IAM layer; no anonymous-mode
+  escape hatch.
+- Snapshot v1 + v2 readers — v3 only. `auth_enabled` byte gone from the
+  snapshot header.
+- E2E `--access-key`/`--secret-key` flag pattern across 14+ test files;
+  replaced by the new `bootstrapAdminViaUDS()` helper.
+- `TestIAM_E2E_ET5_StickyAuth_ClusterRestart` — the sticky bit it exercised
+  no longer exists.
 
-**Features**
+### Added
 
-- New `IAMInitFirstSA` MetaCmdType (31) atomically commits SA + AccessKey + WildcardGrant
-  for first-SA bootstrap. Race guard via fixed `DefaultSAID` + idempotent FSM skip.
-  Concurrent admin UDS callers receive `409 Conflict` for non-winners.
+- `IAMInitFirstSA` MetaCmdType (31) — composite payload commits
+  `SA + AccessKey + WildcardGrant` atomically on the first admin-UDS
+  bootstrap. Race guard via fixed `DefaultSAID` + completeness predicate
+  `isFirstSACommitted` (4-point: SA + active key + wildcard); a partial
+  Apply re-fires on retry instead of leaving the cluster permanently
+  half-bootstrapped. Concurrent admin-UDS callers receive `409 Conflict`
+  if their access key didn't land.
+- `bootstrapAdminViaUDS(t, dataDir)` test helper plus the
+  `bootstrapAdminViaUDSAny(...)` cluster variant + shared encryption-key
+  helper used by multi-node e2e suites.
+- e2e bootstrap acceptance tests F1–F4 (`tests/e2e/iam_bootstrap_test.go`):
+  empty-store wildcard issuance, second-SA no-grant, pre-bootstrap 401,
+  post-bootstrap ListBuckets/PutObject/GetObject 200.
+- ADR 0008 `docs/adr/0008-drop-access-key-flag.md` capturing the design
+  decisions surfaced in `/grill-me` + `/plan-eng-review`.
+- RUNBOOK section "Admin UDS — Bootstrap & Permissions" documenting
+  socket perms (chmod 0660, `--admin-group` chown), the bootstrap CLI
+  flow, and the 409 race outcome.
 
-**Migration**
+### Changed
+
+- `HandleSACreate` dispatches by store state: empty → `ProposeInitFirstSA`
+  composite + grants response; non-empty → existing `SACreate` + `KeyCreate`
+  with no auto-grant.
+- `ApplyInitFirstSA` decodes the composite via the FlatBuffers zero-copy
+  `*BlobBytes()` accessors (drops the per-blob `readByteVector` alloc churn).
+- README Quick Start, CONTEXT.md, and CLAUDE.md Persona Test now describe
+  the admin-UDS bootstrap flow instead of the removed flags.
+
+### Migration
 
 Pre-1.0 product, no migration support. For existing clusters:
-- Cluster bootstrapped via the old `--access-key` flag: state already in IAM, upgrade is
-  effectively no-op (sticky bit was true → always-on now means same).
-- Cluster running in anonymous mode (no SA, sticky=false): all S3 traffic 401 after
-  upgrade. Run `grainfs iam sa create admin --endpoint <data>/admin.sock` to bootstrap.
 
-See `docs/adr/0008-drop-access-key-flag.md` for full rationale.
+- Bootstrapped previously via `--access-key`: state is already in IAM;
+  upgrade is effectively a no-op (sticky bit was true, "always on" now
+  means the same thing).
+- Running in anonymous mode (no SA, sticky=false): all S3 traffic 401
+  after upgrade. Run
+  `grainfs iam sa create admin --endpoint <data>/admin.sock` to
+  bootstrap. See `docs/adr/0008-drop-access-key-flag.md` for the full
+  rationale.
+
+## [0.0.109.0] - 2026-05-08 — raft v2 M2 prep: 4 correctness fixes
+
+### Added
+
+- `LogEntryNoOp` (type=3) in `internal/raft/v2/types.go`: dedicated log-entry
+  type for leader no-op entries. FSM consumers must skip entries of this type.
+- `becomeLeader` now appends a `LogEntryNoOp` at the new term immediately on
+  election (Raft §5.4.2). Prior-term uncommitted entries become commitable as a
+  side effect of the no-op's commit. FSM caller note: in a 3-voter cluster the
+  first applied entry is always the no-op; user `ProposeWait` returns index 2.
+- `buildAppendEntriesArgs` now caps the batch at `cfg.MaxEntriesPerAE` (default
+  512, matching v1). Prevents shipping the entire log to a fresh follower in one
+  RPC. Added `defaultMaxEntriesPerAE = 512` const in `actor.go`.
+- `handleAppendEntries` now validates `e.Index == target` for each entry in the
+  incoming batch. On mismatch, rejects the AE without mutating the log and sends
+  `ConflictIndex=target, ConflictTerm=0` to force leader resync (Log Matching
+  §5.3 correctness fix for future joint consensus / dueling leaders scope).
+- `applyConflictHint` replaces the O(N) backward scan with `sort.Search` binary
+  search. Raft terms are monotonically non-decreasing in the leader's log;
+  binary search finds the rightmost entry at ConflictTerm in O(log N).
+- 4 new tests in `replication_test.go`:
+  `TestBecomeLeader_AppendsNoOp`, `TestBuildAE_RespectsMaxEntriesPerAE`,
+  `TestAE_RejectsMismatchedEntryIndex`,
+  `TestApplyConflictHint_BoundedScanOnLargeLog` (2 sub-tests).
+
+### Notes
+
+- All 4 fixes are in `internal/raft/v2/actor.go`; no callers exist yet (v2 not
+  imported in production). Correctness prerequisites for M2 LogStore + crash
+  recovery: once persistence lands, silent corruption from latent bugs around
+  `currentTerm`/`commitIndex`/log mutation becomes a real data-loss risk.
+- Existing multi-voter tests updated to account for the no-op at index 1.
+  Equivalence tests note deliberate v1↔v2 index divergence (v1 requires
+  explicit `SetNoOpCommand`; v2 always emits no-op on election).
+
+## [0.0.108.0] - 2026-05-08 — raft v2 actor pattern foundation (M1 milestone)
+
+### Added
+
+- New `internal/raft/v2/` package: actor + channel concurrency model replacing
+  `internal/raft`'s mutex-protected design. Single goroutine owns mutable state;
+  hot-path readers (`State`, `Term`, `IsLeader`, `LeaderID`, `CommittedIndex`)
+  use `atomic.Pointer[readState]` for ~ns reads. Mirrors etcd-io/raft's
+  SoftState publication. v2 has zero callers; production wiring lands at M5.
+- Single-voter Propose round-trip with auto-leader bootstrap.
+- Multi-voter election state machine: randomized election timer, Candidate
+  state, vote sending via Transport, Leader transition on majority, heartbeat
+  ticker. Election outcome verified equivalent to v1 in 3-voter test.
+- Inbound RPC handling: full Raft §5.4 RequestVote vote-granting logic with
+  term step-down, votedFor state, log up-to-date check.
+- Log replication via AppendEntries: leader-side matchIndex/nextIndex
+  tracking, majority commit advancement under §5.4.2 term gate, follower
+  log validation + apply on leaderCommit.
+- AppendEntries conflict handling: ConflictTerm/ConflictIndex hint on
+  rejection, follower log truncation on accept, leader fast nextIndex
+  backoff (skip entire conflict term in one round-trip).
+- v1↔v2 equivalence harness (`equivalence_test.go`): drives both
+  implementations through identical scenarios, compares log + observable
+  state. Four scenarios shipped (single propose, multi propose, 3-voter
+  election, divergent log convergence).
+- Public API mirrors of v1 for M5 swap-time parity: `Bootstrap`,
+  `Configuration`, `AddVoter`/`AddVoterCtx`, `RemoveVoter`, `AddLearner`,
+  `PromoteToVoter`, `TransferLeadership`. Membership-change methods stub
+  with `ErrNotImplemented` (real impl lands in M2 with joint consensus).
+- Test coverage: 27 tests pass `go test -race -count=10` clean (~22s).
+
+### Notes
+
+- This PR ships v2 as new code only; nothing imports it yet. v1 raft remains
+  canonical. M2 (persistence + snapshots), M3 (property tests + chaos),
+  M4 (staging soak), M5 (per-package import flip) follow per
+  `docs/superpowers/plans/2026-05-08-raft-actor-redesign.md`.
+- See `internal/raft/v2/README.md` for design rationale and capability
+  matrix.
+
+## [0.0.107.0] - 2026-05-08 — S3 Request Authorization Decision (deepened authz seam)
+
+### Added
+
+- `internal/s3auth.RequestAuthorizer` composes IAM grant, bucket policy, and
+  object ACL into a single `Decision{Allow, Layer, Reason}` per request. Two
+  phases: `PhasePreLoad` (Layer 1+2, called from middleware before object load)
+  and `PhasePostLoad` (Layer 1+2+3, called from handlers after object load).
+  See `CONTEXT.md` § "S3 Request Authorization Decision" for the full contract.
+- `internal/server/authorizer_wiring_test.go` verifies the server builds a
+  non-nil authorizer.
+- `internal/server/handlers_copy_acl_test.go` covers anonymous CopyObject
+  source ACL gating.
+
+### Changed
+
+- `internal/server` authz middleware delegates Layers 1-3 (IAM grant + bucket
+  policy + post-load ACL) to `RequestAuthorizer`. Layer 0 (AccessKey bucket
+  scope, introduced in v0.0.106.0) stays in middleware because it depends on
+  iam-specific request context. Object handlers (`handleGet`, the standard-path
+  GET helper, `handleHead`) delegate post-load ACL decisions through the same
+  authorizer seam. Audit ownership unified — every allow and deny is recorded
+  by the authorizer rather than by middleware and handlers separately.
+- Object ACL evaluation now runs unconditionally at the post-load gate. In
+  no-auth-flag clusters (no `--access-key/--secret-key` and no IAM), private
+  ACL objects are no longer anonymously readable — they were previously
+  readable because the ACL probe was guarded by `s.verifier != nil`. Existing
+  tests that PUT objects without an explicit ACL and read them anonymously
+  were updated to use `public-read`. Iceberg-managed metadata files are now
+  written with `ACLPublicRead` so they remain anonymously readable in no-auth
+  mode.
+
+### Fixed
+
+- CopyObject now enforces source `GetObject` ACL. Previously a caller with
+  destination write permission could copy a private source object regardless
+  of source ACL, because the source object was loaded by the storage facade
+  for existence/precondition checks but no ACL gate ran on it.
 
 ## [0.0.106.0] - 2026-05-08 — IAM bucket-scoped access keys
 

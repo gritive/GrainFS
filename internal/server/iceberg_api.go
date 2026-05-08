@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -611,7 +612,16 @@ func (s *Server) writeIcebergMetadataObject(ctx context.Context, location string
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	_, err := s.ops.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
+	// In no-auth mode (no IAM and no SigV4 verifier), the post-load ACL gate
+	// would deny anonymous Iceberg clients reading metadata via S3 GET, so
+	// fall back to public-read. In auth-enabled clusters, write the default
+	// private ACL — clients use their own credentials and IAM grants/bucket
+	// policy gate access through the normal authz chain.
+	acl := uint8(s3auth.ACLPrivate)
+	if s.iamStore == nil || !s.iamStore.AuthEnabled() {
+		acl = uint8(s3auth.ACLPublicRead)
+	}
+	_, err := s.ops.PutObjectWithACL(ctx, bucket, key, bytes.NewReader(metadata), "application/json", acl)
 	if errors.Is(err, io.EOF) {
 		return nil
 	}

@@ -289,6 +289,58 @@ contract as `grainfs cluster`.
 Reference: `docs/adr/0007-iam-foundation.md`,
 `docs/superpowers/specs/2026-05-08-iam-foundation-design.md`.
 
+### S3 Request Authorization Decision
+
+A request authorization decision is the single composed verdict of IAM grant,
+bucket policy, and object ACL evaluation for one S3 operation. The decision is
+the public surface of `internal/s3auth.Authorizer`. It carries the
+allow/deny boolean and the layer that produced the verdict (`iam_grant`,
+`bucket_policy`, `acl_private`, `acl_public_read`, etc.) so audit, metrics,
+and tests can attribute decisions without parsing handler error strings.
+
+The authorizer is evaluated in two phases against the same `PermCheckInput`
+shape. The pre-load phase is invoked from authz middleware with
+`ObjectACL=0`; it evaluates Layer 1 (IAM grant) and Layer 2 (bucket policy)
+so unauthorized callers fail fast without loading the target object or
+invoking storage. The post-load phase is invoked from the handler after the
+target object has been read; it re-runs the authorizer with the loaded
+`ObjectACL` filled in and adds Layer 3 (object ACL). The re-run is required
+because per-object ACL is the only layer whose input depends on backend
+state, and because IAM grants may be revoked between the two phases.
+
+Bucket-scoped operations (`ListBucket`, `CreateBucket`, `DeleteBucket`,
+`*BucketPolicy`) have no Layer 3 input. They are decided by the pre-load
+phase only.
+
+Authentication-enabled state has a single source of truth:
+`iamStore.AuthEnabled()`. The SigV4 verifier (`s.verifier`) is a separate
+concern about whether request signatures are checked, not about whether
+bucket policy or object ACL apply. The authorizer must depend on the IAM
+predicate only; handlers and middleware must not gate authorization on
+verifier presence.
+
+Every decision the authorizer returns — allow or deny — is audited through
+`iam.AuditLogger` with the producing layer and reason. ACL deny is no longer
+silently emitted as a 403 from a handler; it is recorded the same way an IAM
+grant deny is recorded. Audit ownership belongs to the authorizer so handlers
+and middleware do not duplicate or drop entries.
+
+CopyObject calls the authorizer twice. Once with `Resource=source` and
+`Action=GetObject` after the storage facade has loaded the source object's
+ACL, and once with `Resource=destination` and `Action=PutObject` for the
+destination bucket as a pre-load decision. A copy that has destination
+write permission but lacks source read permission is denied at the source
+authorizer call. The source ACL check is part of the authorization decision,
+not of copy-source validation, which remains responsible for existence,
+delete-marker state, and copy-source preconditions only.
+
+Anonymous mode (`AuthEnabled()==false`) skips Layer 1. Bucket policy and
+object ACL remain authoritative. ACL `public-read` allows read actions from
+empty access keys; ACL `public-read-write` additionally allows write actions;
+ACL `private` requires a non-empty access key. Multi-tenant ownership
+(`OwnerKey`) is out of scope until Phase 14+; until then all authenticated
+callers are treated as owners of `private` objects.
+
 ### Volume Block I/O
 
 Volume block I/O is the volume-layer path that turns logical byte-range reads,
