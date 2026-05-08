@@ -17,6 +17,7 @@ package raftv2_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -66,6 +67,10 @@ type equivalentRaft interface {
 	Start(t *testing.T)
 	Stop()
 	Propose(cmd []byte) error
+	// ProposeWait submits a command and blocks until it is committed, returning
+	// the commit index. Both adapters delegate to their underlying node's
+	// ProposeWait method.
+	ProposeWait(ctx context.Context, cmd []byte) (uint64, error)
 	// DrainApply pulls up to n entries from the impl's ApplyCh, transcoding to
 	// harnessEntry. Returns early on timeout — that is itself a signal of
 	// divergence (one side delivered fewer entries than the scenario expected).
@@ -127,6 +132,10 @@ func (a *v1Adapter) Stop() { a.n.Stop() }
 
 func (a *v1Adapter) Propose(cmd []byte) error { return a.n.Propose(cmd) }
 
+func (a *v1Adapter) ProposeWait(ctx context.Context, cmd []byte) (uint64, error) {
+	return a.n.ProposeWait(ctx, cmd)
+}
+
 func (a *v1Adapter) DrainApply(n int, timeout time.Duration) []harnessEntry {
 	out := make([]harnessEntry, 0, n)
 	deadline := time.NewTimer(timeout)
@@ -176,6 +185,10 @@ func (a *v2Adapter) Start(t *testing.T) {
 func (a *v2Adapter) Stop() { a.n.Stop() }
 
 func (a *v2Adapter) Propose(cmd []byte) error { return a.n.Propose(cmd) }
+
+func (a *v2Adapter) ProposeWait(ctx context.Context, cmd []byte) (uint64, error) {
+	return a.n.ProposeWait(ctx, cmd)
+}
 
 func (a *v2Adapter) DrainApply(n int, timeout time.Duration) []harnessEntry {
 	out := make([]harnessEntry, 0, n)
@@ -330,5 +343,58 @@ func TestEquivalence_SingleNodePropose(t *testing.T) {
 				ExpectApply: 1,
 			},
 		},
+	})
+}
+
+// TestEquivalence_MultipleProposes drives both impls through 5 sequential
+// Proposes and asserts that both emit entries in submission order with
+// monotonically increasing indices.
+func TestEquivalence_MultipleProposes(t *testing.T) {
+	var steps []ScenarioStep
+	for i := 1; i <= 5; i++ {
+		cmd := []byte(fmt.Sprintf("cmd-%d", i))
+		steps = append(steps, ScenarioStep{
+			Action:      func(r equivalentRaft) error { return r.Propose(cmd) },
+			ExpectApply: 1,
+			Description: fmt.Sprintf("Propose cmd-%d", i),
+		})
+	}
+	runScenario(t, Scenario{
+		Name:      "5 sequential proposes",
+		NumVoters: 1,
+		Steps:     steps,
+	})
+}
+
+// TestEquivalence_ProposeWaitReturnsIndex verifies that ProposeWait blocks
+// until commit and returns sequential indices for sequential calls. Tests both
+// impls independently (not via runScenario) since Action only returns error
+// and we need the returned index value.
+func TestEquivalence_ProposeWaitReturnsIndex(t *testing.T) {
+	runProposeWaitTest(t, "v1", func() equivalentRaft { return newV1Adapter("n1", nil) })
+	runProposeWaitTest(t, "v2", func() equivalentRaft { return newV2Adapter("n1", nil) })
+}
+
+func runProposeWaitTest(t *testing.T, label string, makeImpl func() equivalentRaft) {
+	t.Helper()
+	t.Run(label, func(t *testing.T) {
+		impl := makeImpl()
+		impl.Start(t)
+		defer impl.Stop()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		idx1, err := impl.ProposeWait(ctx, []byte("first"))
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), idx1, "%s: first ProposeWait should return index 1", label)
+
+		idx2, err := impl.ProposeWait(ctx, []byte("second"))
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), idx2, "%s: second ProposeWait should return index 2", label)
+
+		// Drain to keep ApplyCh consumer happy (otherwise actor blocks on send during Stop).
+		entries := impl.DrainApply(2, 1*time.Second)
+		require.Len(t, entries, 2)
 	})
 }
