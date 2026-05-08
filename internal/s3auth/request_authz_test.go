@@ -171,3 +171,79 @@ func TestRequestAuthorizer_PreLoad_AnonymousMode_PolicyDenies(t *testing.T) {
 	assert.Equal(t, "bucket_policy", d.Layer)
 	assert.Equal(t, "policy_deny", d.Reason)
 }
+
+func TestRequestAuthorizer_PostLoad_ACLMatrix(t *testing.T) {
+	cases := []struct {
+		name       string
+		acl        ACLGrant
+		accessKey  string
+		action     S3Action
+		wantAllow  bool
+		wantLayer  string
+		wantReason string
+	}{
+		// Public-read-write: every action allowed including anonymous writes.
+		{"prw_anon_get", ACLPublicReadWrite, "", GetObject, true, "object_acl_public_read_write", ""},
+		{"prw_anon_put", ACLPublicReadWrite, "", PutObject, true, "object_acl_public_read_write", ""},
+		{"prw_auth_delete", ACLPublicReadWrite, "AK", DeleteObject, true, "object_acl_public_read_write", ""},
+
+		// Public-read: anonymous reads only.
+		{"pr_anon_get", ACLPublicRead, "", GetObject, true, "object_acl_public_read", ""},
+		{"pr_anon_head", ACLPublicRead, "", HeadObject, true, "object_acl_public_read", ""},
+		{"pr_anon_put_denied", ACLPublicRead, "", PutObject, false, "object_acl", "acl_anonymous_denied"},
+
+		// Private: authenticated only.
+		{"private_anon_get_denied", ACLPrivate, "", GetObject, false, "object_acl", "acl_anonymous_denied"},
+		{"private_auth_get", ACLPrivate, "AK", GetObject, true, "object_acl_authenticated", ""},
+		{"private_auth_put", ACLPrivate, "AK", PutObject, true, "object_acl_authenticated", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			audit := &fakeAudit{}
+			r := NewRequestAuthorizer(
+				stubStore{enabled: false}, // skip Layer 1 to isolate Layer 3
+				func(_, _ string, _ S3Action) bool { return true },
+				stubPolicy{allow: true},
+				audit,
+				func(_ context.Context) string { return "" },
+			)
+			in := PermCheckInput{
+				Principal: Principal{AccessKey: tc.accessKey},
+				Resource:  ResourceRef{Bucket: "b", Key: "k"},
+				Action:    tc.action,
+				ObjectACL: tc.acl,
+			}
+			d := r.Decide(context.Background(), in, PhasePostLoad)
+			assert.Equal(t, tc.wantAllow, d.Allow)
+			assert.Equal(t, tc.wantLayer, d.Layer)
+			assert.Equal(t, tc.wantReason, d.Reason)
+			if !tc.wantAllow {
+				if assert.Len(t, audit.denies, 1) {
+					assert.Equal(t, tc.wantReason, audit.denies[0].reason)
+				}
+			}
+		})
+	}
+}
+
+func TestRequestAuthorizer_PostLoad_ReRunsLayer1(t *testing.T) {
+	// Even if ACL would allow (public-read-write), Layer 1 must still gate.
+	audit := &fakeAudit{}
+	r := NewRequestAuthorizer(
+		stubStore{enabled: true},
+		func(_, _ string, _ S3Action) bool { return false },
+		stubPolicy{allow: true},
+		audit,
+		func(_ context.Context) string { return "sa-1" },
+	)
+	in := PermCheckInput{
+		Principal: Principal{AccessKey: "AK"},
+		Resource:  ResourceRef{Bucket: "b", Key: "k"},
+		Action:    GetObject,
+		ObjectACL: ACLPublicReadWrite,
+	}
+	d := r.Decide(context.Background(), in, PhasePostLoad)
+	assert.False(t, d.Allow)
+	assert.Equal(t, "iam_grant", d.Layer)
+	assert.Equal(t, "no_grant", d.Reason)
+}

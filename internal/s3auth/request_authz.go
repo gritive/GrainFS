@@ -107,7 +107,19 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 		}
 	}
 
-	// Layer 3 is added in the next task.
+	// Layer 3: object ACL (post-load only).
+	if phase == PhasePostLoad {
+		if !IsAuthorizedByACL(in.ObjectACL, in.Principal.AccessKey, in.Action) {
+			reason := aclDenyReason(in.Principal.AccessKey)
+			r.recordDeny(ctx, saID, in, reason)
+			return Decision{Allow: false, Layer: "object_acl", Reason: reason}
+		}
+		layer := postLoadAllowLayer(in)
+		if authEnabled {
+			r.recordAllow(ctx, saID, in)
+		}
+		return Decision{Allow: true, Layer: layer}
+	}
 
 	if authEnabled {
 		r.recordAllow(ctx, saID, in)
@@ -132,4 +144,21 @@ func (r *RequestAuthorizer) recordDeny(ctx context.Context, saID string, in Perm
 
 func isBucketPolicyAction(a S3Action) bool {
 	return a == GetBucketPolicy || a == PutBucketPolicy || a == DeleteBucketPolicy
+}
+
+func aclDenyReason(accessKey string) string {
+	if accessKey == "" {
+		return "acl_anonymous_denied"
+	}
+	return "acl_private_denied"
+}
+
+func postLoadAllowLayer(in PermCheckInput) string {
+	if in.ObjectACL&ACLPublicReadWrite != 0 {
+		return "object_acl_public_read_write"
+	}
+	if in.ObjectACL&ACLPublicRead != 0 && isReadAction(in.Action) {
+		return "object_acl_public_read"
+	}
+	return "object_acl_authenticated"
 }
