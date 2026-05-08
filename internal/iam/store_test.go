@@ -76,3 +76,46 @@ func TestStore_KeyExpired_LookupReturnsNotOk(t *testing.T) {
 		t.Fatal("LookupKey returned ok for expired key")
 	}
 }
+
+func TestStore_BucketUpstream_PutLookupDelete(t *testing.T) {
+	s := NewStore()
+
+	if _, ok := s.LookupBucketUpstream("missing"); ok {
+		t.Fatal("LookupBucketUpstream on empty store must return ok=false")
+	}
+
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	u := BucketUpstream{
+		Bucket:       "shared",
+		Endpoint:     "http://upstream.example:9000",
+		AccessKey:    "AKUP1234567890ABCDEF",
+		SecretKey:    "secret-plain",
+		SecretKeyEnc: []byte{0xAA, 0xBB},
+		CreatedAt:    now,
+		CreatedBy:    "sa-admin",
+	}
+	s.applyBucketUpstreamPut(u)
+
+	got, ok := s.LookupBucketUpstream("shared")
+	if !ok || got == nil {
+		t.Fatalf("LookupBucketUpstream(shared): want ok=true, got ok=%v got=%v", ok, got)
+	}
+	if got.Endpoint != u.Endpoint || got.AccessKey != u.AccessKey || got.SecretKey != u.SecretKey {
+		t.Errorf("LookupBucketUpstream(shared) mismatch: got=%+v want=%+v", got, u)
+	}
+
+	// Delete is idempotent on missing buckets.
+	s.applyBucketUpstreamDelete("never-existed")
+
+	s.applyBucketUpstreamDelete("shared")
+	if _, ok := s.LookupBucketUpstream("shared"); ok {
+		t.Fatal("LookupBucketUpstream(shared) after delete must return ok=false")
+	}
+
+	// Reset wipes the section.
+	s.applyBucketUpstreamPut(u)
+	s.Reset()
+	if _, ok := s.LookupBucketUpstream("shared"); ok {
+		t.Fatal("Reset did not clear bucketUpstreams")
+	}
+}

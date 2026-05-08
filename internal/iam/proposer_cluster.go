@@ -2,6 +2,7 @@ package iam
 
 import (
 	"context"
+	"errors"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
@@ -57,4 +58,14 @@ func (m *MetaProposer) ProposeGrantWildcardDelete(ctx context.Context, saID stri
 
 func (m *MetaProposer) ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error {
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMInitFirstSA, buildInitFirstSAPayload(sa, k, g))
+}
+
+// ProposeBucketUpstreamPut is a Task-1 stub. Real implementation lands in Task 6.
+func (m *MetaProposer) ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error {
+	return errors.New("ProposeBucketUpstreamPut: not yet implemented (Task 6)")
+}
+
+// ProposeBucketUpstreamDelete is a Task-1 stub. Real implementation lands in Task 6.
+func (m *MetaProposer) ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error {
+	return errors.New("ProposeBucketUpstreamDelete: not yet implemented (Task 6)")
 }
