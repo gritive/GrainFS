@@ -496,6 +496,11 @@ func (s *Server) HertzEngine() *server.Hertz { return s.hertz }
 // without round-tripping through New options.
 func (s *Server) VolumeManager() *volume.Manager { return s.volMgr }
 
+// Operations exposes the storage operations facade so external workflows
+// (e.g. serveruntime startup recovery) can invoke decorator-aware capability
+// helpers like SweepOrphanMultiparts without reaching into Server internals.
+func (s *Server) Operations() *storage.Operations { return s.ops }
+
 // Shutdown gracefully shuts down the server, draining in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.hertz.Shutdown(ctx)

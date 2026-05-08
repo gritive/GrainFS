@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.100.0] - 2026-05-08 — multipart orphan sweep moves into storage capability plan
+
+### Changed
+
+- Multipart orphan sweep moves from `internal/server/startup_cleanup.go` into a
+  storage-decorator capability (`storage.OrphanMultipartSweeper`). The
+  filesystem layout `<root>/parts/<uploadID>/` now lives only on
+  `LocalBackend` (alongside `partDir`/`partPath`); server startup recovery
+  no longer hardcodes the same path. `Operations.SweepOrphanMultiparts(ctx,
+  before)` walks the decorator stack via `unwrapOperationBackend` to find a
+  reachable sweeper, blocking on `RecoveryWriteGate` so gated runtimes
+  refuse mutation even on cleanup paths.
+- `RunStartupRecovery` signature gains a `*storage.Operations` parameter.
+  `*server.Server` exposes `Operations()` so `serveruntime.Run` can pass
+  the facade through. nil ops disables only the multipart sweep — the tmp
+  cleanup half is unaffected and tests-only callers can still pass nil.
+
+### Fixed
+
+- Per-removal HealEvent emission and `metrics.HealEventsTotal{outcome=success}`
+  no longer double-count multipart-sweep failures. The previous flow emitted
+  the success event before `os.RemoveAll`, then emitted the failure event on
+  error, so a single failed removal produced both. The new sweep result
+  carries `RemovedPaths` and emits exactly one event per confirmed removal.
+
 ## [0.0.99.0] - 2026-05-08 — volume health replica fetcher + handler wiring
 
 ### Added

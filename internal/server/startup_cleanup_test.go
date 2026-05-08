@@ -10,7 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// newOpsForTest constructs a *storage.Operations rooted at dir for tests
+// that exercise the multipart sweep capability path. Returns nil if dir
+// already has BadgerDB state we don't want to disturb (callers fall back
+// to ops=nil for tmp-only scenarios).
+func newOpsForTest(t *testing.T, dir string) *storage.Operations {
+	t.Helper()
+	b, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+	return storage.NewOperations(b)
+}
 
 // captureEmitter is a HealEvent sink for assertions; lives here too so the
 // startup tests stay independent of the scrubber test helpers.
@@ -36,7 +49,7 @@ func TestStartupRecovery_DeletesOldTmpFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(fresh, []byte("inflight"), 0o644))
 
 	cap := &captureSrvEmitter{}
-	res, err := RunStartupRecovery(context.Background(), root, cap)
+	res, err := RunStartupRecovery(context.Background(), root, nil, cap)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, res.OrphanTmpRemoved, "old .tmp must be removed, fresh must be kept")
@@ -68,7 +81,7 @@ func TestStartupRecovery_SkipsRaftBadgerInternalDirs(t *testing.T) {
 		require.NoError(t, os.Chtimes(p, past, past))
 	}
 
-	res, err := RunStartupRecovery(context.Background(), root, nil)
+	res, err := RunStartupRecovery(context.Background(), root, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, res.OrphanTmpRemoved)
 	require.NoFileExists(t, oldShardTmp)
@@ -90,7 +103,8 @@ func TestStartupRecovery_DeletesOldMultipartParts(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(freshUpload, "00001"), []byte("p"), 0o644))
 
 	cap := &captureSrvEmitter{}
-	res, err := RunStartupRecovery(context.Background(), root, cap)
+	ops := newOpsForTest(t, root)
+	res, err := RunStartupRecovery(context.Background(), root, ops, cap)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, res.OrphanMultipartRemoved)
@@ -117,7 +131,8 @@ func TestStartupRecovery_NothingToCleanEmitsNoEvents(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "parts"), 0o755))
 
 	cap := &captureSrvEmitter{}
-	res, err := RunStartupRecovery(context.Background(), root, cap)
+	ops := newOpsForTest(t, root)
+	res, err := RunStartupRecovery(context.Background(), root, ops, cap)
 	require.NoError(t, err)
 	require.Equal(t, 0, res.OrphanTmpRemoved+res.OrphanMultipartRemoved)
 	require.Empty(t, cap.events, "clean restart must not emit per-action HealEvents")
@@ -127,7 +142,7 @@ func TestStartupRecovery_MissingDataRoot(t *testing.T) {
 	// Pointing at a non-existent root must return cleanly — operator might be
 	// running --data on first boot before any state exists.
 	cap := &captureSrvEmitter{}
-	res, err := RunStartupRecovery(context.Background(), "/nonexistent/grainfs/data", cap)
+	res, err := RunStartupRecovery(context.Background(), "/nonexistent/grainfs/data", nil, cap)
 	require.NoError(t, err)
 	require.Equal(t, 0, res.OrphanTmpRemoved)
 	require.Equal(t, 0, res.OrphanMultipartRemoved)
@@ -140,7 +155,7 @@ func TestStartupRecovery_NilEmitterIsSafe(t *testing.T) {
 	past := time.Now().Add(-10 * time.Minute)
 	require.NoError(t, os.Chtimes(tmp, past, past))
 
-	_, err := RunStartupRecovery(context.Background(), root, nil)
+	_, err := RunStartupRecovery(context.Background(), root, nil, nil)
 	require.NoError(t, err)
 }
 
@@ -158,6 +173,6 @@ func TestStartupRecovery_ContextCancelStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := RunStartupRecovery(ctx, root, nil)
+	_, err := RunStartupRecovery(ctx, root, nil, nil)
 	require.ErrorIs(t, err, context.Canceled)
 }

@@ -3,10 +3,29 @@ package storage
 import (
 	"context"
 	"io"
+	"time"
 )
 
 func (o *Operations) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*MultipartUpload, error) {
 	return o.backend.CreateMultipartUpload(ctx, bucket, key, contentType)
+}
+
+// SweepOrphanMultiparts walks the decorator stack for an OrphanMultipartSweeper
+// and runs the sweep against entries whose mtime is at or before the cutoff.
+// Returns a zero-value result when no sweeper is reachable (no-op for backends
+// that don't own a multipart staging area). Returns the gate error verbatim
+// when a RecoveryWriteGate sits between the facade and the sweeper, mirroring
+// the policy that gated runtimes refuse mutation even on cleanup paths.
+func (o *Operations) SweepOrphanMultiparts(ctx context.Context, before time.Time) (OrphanMultipartSweepResult, error) {
+	for b := o.backend; b != nil; b = unwrapOperationBackend(b) {
+		if g, blocksWrites := b.(*RecoveryWriteGate); blocksWrites {
+			return OrphanMultipartSweepResult{}, g.err
+		}
+		if sw, ok := b.(OrphanMultipartSweeper); ok {
+			return sw.SweepOrphanMultiparts(ctx, before)
+		}
+	}
+	return OrphanMultipartSweepResult{}, nil
 }
 
 func (o *Operations) UploadPart(

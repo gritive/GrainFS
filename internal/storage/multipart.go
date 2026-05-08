@@ -222,3 +222,66 @@ func (b *LocalBackend) AbortMultipartUpload(ctx context.Context, bucket, key, up
 	os.RemoveAll(b.partDir(uploadID))
 	return nil
 }
+
+// OrphanMultipartSweepResult summarizes one sweep pass over the multipart
+// staging directory. RemovedPaths contains the absolute filesystem paths of
+// each removed uploadID directory so observability layers (HealEvent
+// emitters, dashboards) can render them per-entry. Removed equals
+// len(RemovedPaths). Errors collects per-entry failures that did not abort
+// the whole sweep.
+type OrphanMultipartSweepResult struct {
+	Removed      int
+	RemovedPaths []string
+	Errors       []string
+}
+
+// OrphanMultipartSweeper is the optional capability a backend exposes when it
+// owns a sweepable multipart staging area. The storage operations facade
+// discovers it through the decorator stack so callers don't reach through
+// wrappers (RecoveryWriteGate, SwappableBackend, ...) to find the
+// filesystem-aware backend.
+type OrphanMultipartSweeper interface {
+	SweepOrphanMultiparts(ctx context.Context, before time.Time) (OrphanMultipartSweepResult, error)
+}
+
+// SweepOrphanMultiparts walks <root>/parts and removes uploadID directories
+// whose mtime is at or before the before cutoff. Files at the parts/ root
+// (e.g. accidental drops) are intentionally ignored — only directories are
+// considered as in-progress upload staging. Per-entry errors are collected
+// into Errors so a single bad subtree does not abort the whole sweep.
+func (b *LocalBackend) SweepOrphanMultiparts(ctx context.Context, before time.Time) (OrphanMultipartSweepResult, error) {
+	var res OrphanMultipartSweepResult
+	partsRoot := filepath.Join(b.root, "parts")
+	entries, err := os.ReadDir(partsRoot)
+	if os.IsNotExist(err) {
+		return res, nil
+	}
+	if err != nil {
+		res.Errors = append(res.Errors, err.Error())
+		return res, nil
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		full := filepath.Join(partsRoot, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			res.Errors = append(res.Errors, err.Error())
+			continue
+		}
+		if info.ModTime().After(before) {
+			continue
+		}
+		if err := os.RemoveAll(full); err != nil {
+			res.Errors = append(res.Errors, err.Error())
+			continue
+		}
+		res.Removed++
+		res.RemovedPaths = append(res.RemovedPaths, full)
+	}
+	return res, nil
+}
