@@ -106,3 +106,10 @@ affect production.
   correctness corner cases (shutdown races, backpressure, post-stop
   calls, context cancellation paths) are deferred to the M2-M3 chaos
   suite per plan D6.
+
+- After `Start()` the actor goroutine schedules and publishes the
+  bootstrap `readState` asynchronously. A caller doing
+  `n.Start(); n.Propose(...)` immediately can race the bootstrap and
+  see `ErrNotLeader`. Callers that need the leader transition before
+  proposing should poll `n.IsLeader()` or watch `ApplyCh()`. Tests in
+  `node_test.go` use a `waitFor` helper.

@@ -6,8 +6,10 @@ import (
 )
 
 // Propose submits a command for replication and returns once the actor has
-// accepted it onto cmdCh. Returns ErrNotLeader if the snapshot says we are
-// not leader; the actor re-checks on receive (the snapshot may be stale).
+// accepted it onto cmdCh. Returns ErrNotLeader if our caller-side IsLeader()
+// snapshot says we are not leader; the actor re-checks on receive because the
+// caller-side snapshot can be stale (leader may have stepped down between the
+// snapshot read and the actor processing the command).
 // If the actor's re-check finds the node is no longer leader, the command is
 // silently dropped — Propose provides no rejection signal in that case.
 // Callers that need a definitive commit confirmation (or rejection) should
