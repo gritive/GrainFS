@@ -70,6 +70,42 @@ func TestIAMResolver_InvalidatesOnAccessKeyRotation(t *testing.T) {
 	}
 }
 
+func TestIAMResolver_InvalidatesOnSecretOnlyRotation(t *testing.T) {
+	store := iam.NewStore()
+	store.ApplyBucketUpstreamForTest(iam.BucketUpstream{
+		Bucket:       "rot",
+		Endpoint:     "http://up",
+		AccessKey:    "AK",
+		SecretKey:    "old",
+		SecretKeyEnc: []byte{1, 2, 3},
+		CreatedAt:    time.Now().UTC(),
+	})
+	r := NewIAMResolver(store)
+
+	first, ok := r.Resolve("rot")
+	if !ok || first == nil {
+		t.Fatalf("first Resolve: ok=%v up=%v", ok, first)
+	}
+
+	// Same endpoint + same AK; only SecretKey + SecretKeyEnc changed
+	// (typical AWS IAM secret-only rotation).
+	store.ApplyBucketUpstreamForTest(iam.BucketUpstream{
+		Bucket:       "rot",
+		Endpoint:     "http://up",
+		AccessKey:    "AK",
+		SecretKey:    "new",
+		SecretKeyEnc: []byte{4, 5, 6},
+		CreatedAt:    time.Now().UTC(),
+	})
+	second, ok := r.Resolve("rot")
+	if !ok || second == nil {
+		t.Fatalf("post-rotation Resolve: ok=%v up=%v", ok, second)
+	}
+	if first == second {
+		t.Error("cache did not invalidate after secret-only rotation: same *S3Upstream pointer returned")
+	}
+}
+
 func TestIAMResolver_InvalidatesOnDelete(t *testing.T) {
 	store := iam.NewStore()
 	store.ApplyBucketUpstreamForTest(iam.BucketUpstream{

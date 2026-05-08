@@ -1,6 +1,7 @@
 package pullthrough
 
 import (
+	"crypto/sha256"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -20,7 +21,15 @@ type Resolver interface {
 
 // IAMResolver implements Resolver against an *iam.Store. It builds a single
 // *S3Upstream per bucket on first hit, caches it, and rebuilds when the
-// (endpoint, access_key) tuple changes (rotation or reconfiguration).
+// (endpoint, access_key, secret_key) tuple changes (rotation or
+// reconfiguration).
+//
+// The cache key includes a SHA-256 of SecretKeyEnc so that rotations that
+// change ONLY the secret (same upstream URL, same AK — a normal AWS IAM
+// rotation) still invalidate the cached client. Without it the equality
+// check would still hold and the cached *S3Upstream would retain the OLD
+// secret baked in by credentials.NewStaticCredentialsProvider, silently
+// 401-ing every upstream GET until restart.
 //
 // Cache invalidation is lazy: every Resolve compares the cached tuple to
 // the live IAM record. No FSM event subscription is needed — callers see
@@ -36,9 +45,10 @@ type IAMResolver struct {
 }
 
 type resolverEntry struct {
-	endpoint  string
-	accessKey string
-	upstream  *S3Upstream
+	endpoint         string
+	accessKey        string
+	secretKeyEncHash [32]byte
+	upstream         *S3Upstream
 }
 
 // NewIAMResolver returns a Resolver backed by the given IAM Store. The store
@@ -70,10 +80,12 @@ func (r *IAMResolver) Resolve(bucket string) (Upstream, bool) {
 		return nil, false
 	}
 
-	// Fast path: cache hit with matching (endpoint, access_key).
+	secretHash := sha256.Sum256(rec.SecretKeyEnc)
+
+	// Fast path: cache hit with matching (endpoint, access_key, secret hash).
 	r.mu.RLock()
 	cached, hit := r.cache[bucket]
-	if hit && cached.endpoint == rec.Endpoint && cached.accessKey == rec.AccessKey {
+	if hit && cached.endpoint == rec.Endpoint && cached.accessKey == rec.AccessKey && cached.secretKeyEncHash == secretHash {
 		up := cached.upstream
 		r.mu.RUnlock()
 		return up, true
@@ -86,7 +98,7 @@ func (r *IAMResolver) Resolve(bucket string) (Upstream, bool) {
 
 	// Re-check after upgrading to write lock (another goroutine may have built it).
 	cached, hit = r.cache[bucket]
-	if hit && cached.endpoint == rec.Endpoint && cached.accessKey == rec.AccessKey {
+	if hit && cached.endpoint == rec.Endpoint && cached.accessKey == rec.AccessKey && cached.secretKeyEncHash == secretHash {
 		return cached.upstream, true
 	}
 
@@ -102,9 +114,10 @@ func (r *IAMResolver) Resolve(bucket string) (Upstream, bool) {
 		return nil, false
 	}
 	r.cache[bucket] = &resolverEntry{
-		endpoint:  rec.Endpoint,
-		accessKey: rec.AccessKey,
-		upstream:  up,
+		endpoint:         rec.Endpoint,
+		accessKey:        rec.AccessKey,
+		secretKeyEncHash: secretHash,
+		upstream:         up,
 	}
 	return up, true
 }
