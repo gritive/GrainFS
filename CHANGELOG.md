@@ -1,5 +1,87 @@
 # Changelog
 
+## [0.0.123.0] - 2026-05-09 — serveruntime boot decomposition PR 3: transport phases (3 of ~20)
+
+### Refactored
+
+- `internal/serveruntime/boot_phases_transport.go` (new): three phases for
+  the transport entry of `Run`:
+  - `bootQUICTransport(ctx, state)` — `ResolveClusterKey` (disk > flag >
+    ephemeral fallback in solo mode), `transport.NewQUICTransport`,
+    `SetTrafficLimits` for forwarded S3 PUT bulk fan-outs, `Listen`. On
+    success populates `state.quicTransport`, updates `state.raftAddr` to
+    the kernel-picked port (when operator passed `127.0.0.1:0`), and
+    queues `Close` on the cleanup stack.
+  - `bootPeerConnections(ctx, state)` — Connects to each peer; logs but
+    swallows individual connection failures so the transport can retry
+    lazily on the first send. No-op for solo mode.
+  - `bootGroupRaftMux(state)` — Constructs `raft.NewGroupRaftQUICMux` and
+    enables the mux mode when `cfg.QUICMuxEnabled`. Now runs **before**
+    raft node creation (was inline after node pre-PR 3) so the
+    "groupRaftMux exists before NewMetaTransportQUICMux" invariant is
+    enforced by phase ordering, not by source-line proximity.
+
+- `internal/serveruntime/boot_state.go`: typed fields added —
+  `transportPSK string`, `quicTransport *transport.QUICTransport`,
+  `groupRaftMux *raft.GroupRaftQUICMux`. `state.raftAddr` is mutated
+  in-place by `bootQUICTransport` to the resolved port.
+
+- `internal/serveruntime/run.go`: ~50 lines of QUIC + peer + mux setup
+  collapse into three phase calls plus a tiny mirror block. The
+  `groupRaftMux` block previously between raft node creation and
+  metaRaft construction is gone — `bootGroupRaftMux` runs immediately
+  after `bootPeerConnections`. The structural invariant is captured in
+  a 3-line comment instead of being implicit in line ordering.
+
+### Added
+
+- `internal/serveruntime/boot_phases_transport_test.go`: 6 unit tests
+  covering all three transport phases on real QUIC sockets:
+  - `TestBootQUICTransport_BindsLoopbackPort0` — Listens on `:0`,
+    `state.raftAddr` resolves to the kernel-picked port, matches
+    `LocalAddr()`.
+  - `TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode` — empty
+    ClusterKey + no peers → ephemeral PSK (≥ 32 chars) in
+    `state.transportPSK`.
+  - `TestBootPeerConnections_EmptyPeersIsNoOp` — solo mode is a clean
+    no-op; no panic on nil peer list.
+  - `TestBootGroupRaftMux_CreatesMux` — phase populates
+    `state.groupRaftMux`; `QUICMuxEnabled=false` does not call
+    `EnableMux`.
+  - `TestBootGroupRaftMux_EnabledHonorsConfig` — `QUICMuxEnabled=true`
+    with operator-supplied pool size + flush window wires the prototype
+    mux mode.
+  - `TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant`
+    — witnesses the central invariant: `state.groupRaftMux` is nil after
+    `bootQUICTransport` and `bootPeerConnections`, populated after
+    `bootGroupRaftMux`. A future `bootMetaRaft` phase would run after
+    the mux exists.
+
+### Why
+
+PR 3 of the 6-PR milestone (see
+`docs/superpowers/specs/2026-05-08-serveruntime-boot-decomposition.md`).
+Three transport phases now have explicit boundaries. The most important
+win: the "groupRaftMux must exist before metaTransport" invariant
+(previously a comment at line ~167 of run.go protected only by source
+ordering) is now enforced by phase ordering — moving the mux phase
+explicitly says: "this construction sequence is required for
+correctness, not coincidence."
+
+Behavior preserved: same cluster-key resolution order, same
+`SetTrafficLimits(Bulk: 64)`, same kernel-picked-port resolution, same
+`EnableMux` plumbing, same cleanup ordering. The only structural change
+is that `groupRaftMux` is now constructed after `bootPeerConnections`
+instead of after raft node creation; nothing in between reads the mux,
+so the move is behavior-neutral.
+
+PR 4 (raft phases — meta-raft wiring + register/start split, the
+invariant-critical PR) is next. The split between
+`bootMetaRaftWiring` (register only, callbacks set) and
+`bootMetaRaftStart` (Start fires the apply loop) becomes the testability
+win for the "OnBucketAssigned registered before Start" race-free
+guarantee at `run.go:343-348`.
+
 ## [0.0.122.0] - 2026-05-08 — raft v2: per-peer single-flight + Stop-race refactor (PR 13)
 
 ### Changed
