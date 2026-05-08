@@ -209,6 +209,15 @@ grainfs iam --endpoint $ENDPOINT key revoke 01931... AKGF<old>
 # Grant / SA 회수
 grainfs iam --endpoint $ENDPOINT grant delete 01931... mybucket
 grainfs iam --endpoint $ENDPOINT sa delete 01931...
+
+# Per-bucket pull-through upstream (v0.0.123.0+) — secret-key는 stdin/파일로만 입력
+grainfs iam --endpoint $ENDPOINT bucket-upstream set legacy-data \
+    --upstream-url http://minio.legacy:9000 \
+    --access-key MIGRATIONAK \
+    --secret-key-stdin <<< "$UPSTREAM_SECRET_KEY"
+grainfs iam --endpoint $ENDPOINT bucket-upstream get legacy-data
+grainfs iam --endpoint $ENDPOINT bucket-upstream list
+grainfs iam --endpoint $ENDPOINT bucket-upstream delete legacy-data
 ```
 
 Auth 모드:
@@ -222,7 +231,7 @@ Auth 모드:
 
 권한 평가는 두 단계 직렬이다: 먼저 IAM grant (특정 버킷 grant > wildcard grant), 그다음 bucket policy. 둘 다 통과해야 허용된다. Audit 이벤트는 zerolog의 `event=iam_audit` 구조화 필드로 발행된다.
 
-상세 설계는 [docs/adr/0007-iam-foundation.md](docs/adr/0007-iam-foundation.md) 참고.
+상세 설계는 [docs/adr/0007-iam-foundation.md](docs/adr/0007-iam-foundation.md) 참고. 버킷별 pull-through upstream 설계는 [docs/adr/0009-bucket-scoped-upstream.md](docs/adr/0009-bucket-scoped-upstream.md) 참고.
 
 ## 클러스터 Balancer
 

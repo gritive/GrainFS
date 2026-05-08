@@ -58,3 +58,11 @@ func (m *MetaProposer) ProposeGrantWildcardDelete(ctx context.Context, saID stri
 func (m *MetaProposer) ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error {
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMInitFirstSA, buildInitFirstSAPayload(sa, k, g))
 }
+
+func (m *MetaProposer) ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMBucketUpstreamPut, buildBucketUpstreamPutPayload(u))
+}
+
+func (m *MetaProposer) ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMBucketUpstreamDelete, buildBucketUpstreamDeletePayload(bucket))
+}

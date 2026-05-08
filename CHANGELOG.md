@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.123.0] - 2026-05-09 — serveruntime boot decomposition PR 3: transport phases (3 of ~20)
+## [0.0.124.0] - 2026-05-09 — serveruntime boot decomposition PR 3: transport phases (3 of ~20)
 
 ### Refactored
 
@@ -81,6 +81,28 @@ invariant-critical PR) is next. The split between
 `bootMetaRaftStart` (Start fires the apply loop) becomes the testability
 win for the "OnBucketAssigned registered before Start" race-free
 guarantee at `run.go:343-348`.
+## [0.0.123.0] — 2026-05-09 — bucket-scoped upstream credentials (drop --upstream* flags)
+
+### **Breaking**
+
+- **Removed** `--upstream`, `--upstream-access-key`, `--upstream-secret-key` cmdline flags from `grainfs serve`. Pull-through credentials now live in the IAM Store and are managed via `grainfs iam bucket-upstream set/get/list/delete` over admin UDS. Migration: register one record per bucket with the new CLI; one-shot, no per-restart redeclaration. Closes the cmdline plaintext-secret leak that PR #258 missed.
+
+### Added
+
+- New IAM record type `BucketUpstream` (per-bucket upstream config: bucket, endpoint, access_key, encrypted secret_key, created_at, created_by). Encryption AAD prefix `"bucket-upstream:"+bucket` makes the AAD space provably disjoint from the `sa_id` AAD used by SA secrets.
+- `MetaCmdType` IDs 32 (`IAMBucketUpstreamPut`) and 33 (`IAMBucketUpstreamDelete`).
+- Admin UDS endpoints under `/v1/iam/bucket-upstream` (POST/GET/GET-list/DELETE). Wire JSON key for the upstream URL is `upstream_url`.
+- `grainfs iam bucket-upstream` CLI subcommand group (set/get/list/delete). Secret-key input via `--secret-key-stdin` or `--secret-key-file=<path>` only — never `--secret-key=<value>`.
+- `pullthrough.Resolver` interface + `IAMResolver` impl with per-bucket cache and `sync.RWMutex` fast path. Lazy cache invalidation on access-key rotation.
+- ADR 0009: Bucket-Scoped Upstream Credentials. References `TODOS.md:63` broader migration design — this PR is Phase 1 (credentials).
+- e2e regression test `TestServe_RejectsRemovedUpstreamFlags` locks the breaking flag removal so future code can't silently re-add the flags.
+
+### Changed
+
+- `pullthrough.Backend` constructor signature: `NewBackend(local, upstream Upstream)` → `NewBackend(local, resolver Resolver)`.
+- `pullthrough.Backend.GetObject`: cache-miss with no resolver hit returns the original local 404 (no upstream attempt).
+- `serveruntime.Config`: removed `UpstreamEndpoint`, `UpstreamAccessKey`, `UpstreamSecretKey` fields. Pull-through wrapping is now unconditional; with zero `BucketUpstream` records, the resolver returns `(nil, false)` and the backend behaves identically to a bare local backend.
+- Snapshot format: bucket-upstream records appended as TRAILER bytes to the v3 IAM snapshot (no version bump). Pre-v0.0.123 readers ignore trailing bytes via existing EOF tolerance — bidirectional rolling upgrade preserved.
 
 ## [0.0.122.0] - 2026-05-08 — raft v2: per-peer single-flight + Stop-race refactor (PR 13)
 
@@ -464,7 +486,6 @@ inside the helper. Future PostLoad sites get the helper for free.
   default until PR 11 adds the config field and crash-recovery replay. Two
   implementations now satisfy the `LogStore` interface: in-memory (default) and
   persistent (opt-in via PR 11).
-
 ## [0.0.114.0] - 2026-05-08 — raft v2 M2 PR 9: LogStore interface (pure refactor)
 
 ### Added

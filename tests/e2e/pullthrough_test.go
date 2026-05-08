@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,9 +73,6 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 		"--port", fmt.Sprintf("%d", localPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--upstream", upEndpoint,
-		"--upstream-access-key", upAK,
-		"--upstream-secret-key", upSK,
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
@@ -86,6 +84,11 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 
 	waitForPort(t, localPort, 30*time.Second)
 	localAK, localSK := bootstrapAdminViaUDS(t, localDir)
+
+	// Register the upstream credentials for the "shared" bucket via admin UDS.
+	localSock := filepath.Join(localDir, "admin.sock")
+	iamSetBucketUpstream(t, localSock, "shared", upEndpoint, upAK, upSK)
+
 	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
 
 	// Bucket must exist on local (pull-through creates it if needed)
@@ -175,9 +178,6 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 		"--port", fmt.Sprintf("%d", localPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--upstream", upEndpoint,
-		"--upstream-access-key", upAK,
-		"--upstream-secret-key", upSK,
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
@@ -189,6 +189,11 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 
 	waitForPort(t, localPort, 30*time.Second)
 	localAK, localSK := bootstrapAdminViaUDS(t, localDir)
+
+	// Register the upstream credentials for the "large" bucket via admin UDS.
+	localSock := filepath.Join(localDir, "admin.sock")
+	iamSetBucketUpstream(t, localSock, "large", upEndpoint, upAK, upSK)
+
 	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
 
 	_, err = localClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})

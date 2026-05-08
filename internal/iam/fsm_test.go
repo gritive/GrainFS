@@ -2,6 +2,7 @@ package iam
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -424,5 +425,117 @@ func TestApplyKeyCreate_LegacyType23_NilScope(t *testing.T) {
 	}
 	if got.BucketScope != nil {
 		t.Fatalf("legacy path scope = %v, want nil", got.BucketScope)
+	}
+}
+
+func TestApplyBucketUpstreamPut_RoundTripDecryptsSecret(t *testing.T) {
+	s := NewStore()
+	enc := newTestEncryptor(t)
+	ap := NewApplier(s, enc)
+
+	// A2: AAD prefix is "bucket-upstream:" + bucket
+	wrapped, err := WrapSecret(enc, "bucket-upstream:shared", "upstream-secret-plain")
+	if err != nil {
+		t.Fatalf("WrapSecret: %v", err)
+	}
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	u := BucketUpstream{
+		Bucket: "shared", Endpoint: "http://up.example:9000",
+		AccessKey: "AKUP", SecretKeyEnc: wrapped,
+		CreatedAt: now, CreatedBy: "sa-admin",
+	}
+	if err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(u)); err != nil {
+		t.Fatalf("ApplyBucketUpstreamPut: %v", err)
+	}
+
+	got, ok := s.LookupBucketUpstream("shared")
+	if !ok {
+		t.Fatal("LookupBucketUpstream(shared) returned ok=false after Apply")
+	}
+	if got.SecretKey != "upstream-secret-plain" {
+		t.Errorf("decrypted SecretKey: got %q want %q", got.SecretKey, "upstream-secret-plain")
+	}
+	if got.AccessKey != "AKUP" || got.Endpoint != "http://up.example:9000" {
+		t.Errorf("scalar fields mismatch: got %+v", got)
+	}
+	if got.CreatedAt.UnixNano() != now.UnixNano() {
+		t.Errorf("CreatedAt: got %v want %v", got.CreatedAt, now)
+	}
+}
+
+func TestApplyBucketUpstreamDelete_Idempotent(t *testing.T) {
+	s := NewStore()
+	enc := newTestEncryptor(t)
+	ap := NewApplier(s, enc)
+
+	if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("ghost")); err != nil {
+		t.Fatalf("ApplyBucketUpstreamDelete on empty store: %v", err)
+	}
+
+	wrapped, _ := WrapSecret(enc, "bucket-upstream:buc1", "s")
+	if err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
+		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+	})); err != nil {
+		t.Fatalf("seed Apply: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("buc1")); err != nil {
+			t.Fatalf("ApplyBucketUpstreamDelete iter %d: %v", i, err)
+		}
+	}
+	if _, ok := s.LookupBucketUpstream("buc1"); ok {
+		t.Fatal("LookupBucketUpstream(b1) returned ok=true after delete")
+	}
+}
+
+func TestApplyBucketUpstreamPut_RejectsEmptyBucket(t *testing.T) {
+	s := NewStore()
+	enc := newTestEncryptor(t)
+	ap := NewApplier(s, enc)
+
+	wrapped, _ := WrapSecret(enc, "bucket-upstream:", "s")
+	err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
+		Bucket: "", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+	}))
+	if err == nil {
+		t.Fatal("ApplyBucketUpstreamPut with empty bucket: want error, got nil")
+	}
+}
+
+// Per A7(c): Sentinel bucket reject test.
+func TestApplyBucketUpstreamPut_RejectsSentinelBuckets(t *testing.T) {
+	s := NewStore()
+	enc := newTestEncryptor(t)
+	ap := NewApplier(s, enc)
+
+	for _, sentinel := range []string{WildcardBucket, SystemBucket} {
+		wrapped, _ := WrapSecret(enc, "bucket-upstream:"+sentinel, "s")
+		err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
+			Bucket: sentinel, Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+		}))
+		if err == nil {
+			t.Errorf("ApplyBucketUpstreamPut with sentinel %q: want error, got nil", sentinel)
+		}
+	}
+}
+
+// Per A7(b): wrong-AAD decrypt failure test.
+func TestApplyBucketUpstreamPut_WrongAADFailsDecrypt(t *testing.T) {
+	s := NewStore()
+	enc := newTestEncryptor(t)
+	ap := NewApplier(s, enc)
+
+	// Wrap with WRONG AAD (using bare bucket name without prefix — this should fail at apply).
+	wrapped, _ := WrapSecret(enc, "shared", "secret")
+
+	err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
+		Bucket: "shared", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+	}))
+	if err == nil {
+		t.Fatal("ApplyBucketUpstreamPut with wrong-AAD ciphertext: want error, got nil")
+	}
+	// Tighten: must specifically be the decrypt path, not validation rejection.
+	if !strings.Contains(err.Error(), "decrypt") {
+		t.Fatalf("expected decrypt-path error, got: %v", err)
 	}
 }

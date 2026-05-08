@@ -79,11 +79,6 @@ type Config struct {
 	HealReceiptGossipInterval time.Duration
 	HealReceiptWindow         int
 
-	// Backend chain
-	UpstreamEndpoint  string
-	UpstreamAccessKey string
-	UpstreamSecretKey string
-
 	// Snapshots (object PITR)
 	SnapInterval time.Duration
 	SnapRetain   int

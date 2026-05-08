@@ -680,15 +680,19 @@ func Run(ctx context.Context, cfg Config) error {
 	var backend storage.Backend = wal.NewBackend(clusterCoord, w)
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 
-	// Wrap with pull-through cache if upstream is configured.
-	if cfg.UpstreamEndpoint != "" {
-		up, err := pullthrough.NewS3Upstream(cfg.UpstreamEndpoint, cfg.UpstreamAccessKey, cfg.UpstreamSecretKey)
-		if err != nil {
-			return fmt.Errorf("init upstream: %w", err)
-		}
-		backend = pullthrough.NewBackend(backend, up)
-		log.Info().Str("upstream", cfg.UpstreamEndpoint).Msg("pull-through cache enabled")
+	// Wrap with pull-through cache. Resolver is IAM-backed: at request time it
+	// looks up the per-bucket BucketUpstream record. With zero records configured,
+	// the resolver always returns (nil, false) and the backend behaves like the
+	// bare local backend — no opt-in flag needed.
+	//
+	// Per /plan-eng-review override A10 — fail-fast at startup if cfg.IAMStore is
+	// nil. This guards against future construction-order regressions: NewIAMResolver
+	// requires a non-nil store and would panic on first request otherwise.
+	if cfg.IAMStore == nil {
+		return fmt.Errorf("pullthrough: IAMStore required (cfg.IAMStore is nil)")
 	}
+	backend = pullthrough.NewBackend(backend, pullthrough.NewIAMResolver(cfg.IAMStore))
+	log.Info().Msg("pull-through cache enabled (IAM-backed resolver)")
 	startupResult := badgerrole.ReduceStartupDecisions(roleRegistry, startupDecisions)
 	for _, decision := range startupResult.Decisions {
 		log.Info().

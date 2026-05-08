@@ -22,6 +22,8 @@ type Proposer interface {
 	ProposeGrantWildcardPut(ctx context.Context, g Grant) error
 	ProposeGrantWildcardDelete(ctx context.Context, saID string) error
 	ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error
+	ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error
+	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
 }
 
 // Role is the 3-tier permission level for a (SA, Bucket) grant.
@@ -96,6 +98,21 @@ type Grant struct {
 	Role      Role
 	CreatedAt time.Time
 	CreatedBy string // sa_id of creator
+}
+
+// BucketUpstream stores per-bucket pull-through upstream credentials. Created
+// and rotated through the admin UDS API; persisted via meta-FSM so all nodes
+// see the same record. SecretKey holds plaintext only in-memory after Apply;
+// SecretKeyEnc is the AES-256-GCM ciphertext (AAD = "bucket-upstream:"+bucket)
+// used for snapshot + raft log persistence.
+type BucketUpstream struct {
+	Bucket       string
+	Endpoint     string // e.g., http://minio:9000
+	AccessKey    string
+	SecretKey    string // in-memory plaintext; zero before Apply or after snapshot read with no encryptor
+	SecretKeyEnc []byte // AES-256-GCM ciphertext, AAD = "bucket-upstream:"+bucket
+	CreatedAt    time.Time
+	CreatedBy    string // sa_id of admin that issued the put
 }
 
 // RoleAllows reports whether `role` permits `action` on the target bucket.

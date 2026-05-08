@@ -41,6 +41,17 @@ func (m *mockIAMProposer) ProposeInitFirstSA(_ context.Context, _ iam.ServiceAcc
 	return nil
 }
 
+// ProposeBucketUpstreamPut satisfies iam.Proposer; this mock doesn't track
+// bucket-upstream calls because the createbucket_grant tests don't exercise
+// that path.
+func (m *mockIAMProposer) ProposeBucketUpstreamPut(_ context.Context, _ iam.BucketUpstream) error {
+	return nil
+}
+
+func (m *mockIAMProposer) ProposeBucketUpstreamDelete(_ context.Context, _ string) error {
+	return nil
+}
+
 func TestIssueCreatorGrant(t *testing.T) {
 	tests := []struct {
 		name         string
