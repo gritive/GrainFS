@@ -161,3 +161,166 @@ func TestIncidentMatchesVolume(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyHealthFromReplicas(t *testing.T) {
+	cases := []struct {
+		name        string
+		fact        ReplicaLayoutFact
+		wantHealth  string
+		wantReasons []string
+	}{
+		{
+			name:        "all current — no contribution",
+			fact:        ReplicaLayoutFact{CurrentCount: 10},
+			wantHealth:  "ok",
+			wantReasons: []string{},
+		},
+		{
+			name:        "downgrade-skipped only — no contribution",
+			fact:        ReplicaLayoutFact{DowngradeSkippedCount: 3},
+			wantHealth:  "ok",
+			wantReasons: []string{},
+		},
+		{
+			name:        "pending-upgrade — degraded with replica_missing",
+			fact:        ReplicaLayoutFact{PendingUpgradeCount: 2, CurrentCount: 5},
+			wantHealth:  "degraded",
+			wantReasons: []string{"replica_missing"},
+		},
+		{
+			name:        "repair-needed — critical with replica_repair_needed",
+			fact:        ReplicaLayoutFact{RepairNeededCount: 1, CurrentCount: 5},
+			wantHealth:  "critical",
+			wantReasons: []string{"replica_repair_needed"},
+		},
+		{
+			name:        "unknown layout — warning with replica_layout_unknown",
+			fact:        ReplicaLayoutFact{UnknownCount: 1},
+			wantHealth:  "warning",
+			wantReasons: []string{"replica_layout_unknown"},
+		},
+		{
+			name:        "repair-needed + pending-upgrade — critical with both reasons",
+			fact:        ReplicaLayoutFact{RepairNeededCount: 1, PendingUpgradeCount: 1},
+			wantHealth:  "critical",
+			wantReasons: []string{"replica_repair_needed", "replica_missing"},
+		},
+		{
+			name: "all gap states — critical with three reasons",
+			fact: ReplicaLayoutFact{
+				RepairNeededCount:   1,
+				PendingUpgradeCount: 1,
+				UnknownCount:        1,
+			},
+			wantHealth:  "critical",
+			wantReasons: []string{"replica_repair_needed", "replica_missing", "replica_layout_unknown"},
+		},
+		{
+			name:        "empty fact — no change",
+			fact:        ReplicaLayoutFact{},
+			wantHealth:  "ok",
+			wantReasons: []string{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := VolumeInfo{Name: "v1", Health: "ok", HealthReasons: []string{}}
+			applyHealthFromReplicas(&info, tc.fact)
+			if info.Health != tc.wantHealth {
+				t.Errorf("health = %q, want %q", info.Health, tc.wantHealth)
+			}
+			if !reflect.DeepEqual(info.HealthReasons, tc.wantReasons) {
+				t.Errorf("reasons = %v, want %v", info.HealthReasons, tc.wantReasons)
+			}
+		})
+	}
+}
+
+func TestAnnotateVolumeHealth_ReplicasMergeWithIncidents(t *testing.T) {
+	bucket := volume.VolumeBucketName
+	cases := []struct {
+		name        string
+		incidents   []incident.IncidentState
+		replicas    map[string]ReplicaLayoutFact
+		wantHealth  string
+		wantReasons []string
+	}{
+		{
+			name:        "warning incident + pending-upgrade replicas — degraded > warning",
+			incidents:   []incident.IncidentState{{Scope: incident.Scope{Bucket: bucket, Key: "v1"}, Severity: incident.SeverityWarning, State: incident.StateActing}},
+			replicas:    map[string]ReplicaLayoutFact{"v1": {PendingUpgradeCount: 1}},
+			wantHealth:  "degraded",
+			wantReasons: []string{"recent_incident", "replica_missing"},
+		},
+		{
+			name:        "warning incident + repair-needed replicas — critical wins",
+			incidents:   []incident.IncidentState{{Scope: incident.Scope{Bucket: bucket, Key: "v1"}, Severity: incident.SeverityWarning, State: incident.StateActing}},
+			replicas:    map[string]ReplicaLayoutFact{"v1": {RepairNeededCount: 1}},
+			wantHealth:  "critical",
+			wantReasons: []string{"recent_incident", "replica_repair_needed"},
+		},
+		{
+			name:        "critical incident + pending-upgrade replicas — critical stays, both reasons",
+			incidents:   []incident.IncidentState{{Scope: incident.Scope{Bucket: bucket, Key: "v1"}, Severity: incident.SeverityCritical, State: incident.StateActing}},
+			replicas:    map[string]ReplicaLayoutFact{"v1": {PendingUpgradeCount: 1}},
+			wantHealth:  "critical",
+			wantReasons: []string{"recent_incident", "replica_missing"},
+		},
+		{
+			name:        "no incidents + repair-needed — critical with replica reason only",
+			incidents:   nil,
+			replicas:    map[string]ReplicaLayoutFact{"v1": {RepairNeededCount: 1}},
+			wantHealth:  "critical",
+			wantReasons: []string{"replica_repair_needed"},
+		},
+		{
+			name:        "different volume's fact — ignored",
+			incidents:   nil,
+			replicas:    map[string]ReplicaLayoutFact{"other": {RepairNeededCount: 5}},
+			wantHealth:  "ok",
+			wantReasons: []string{},
+		},
+		{
+			name:        "nil replicas — incident-only behavior preserved",
+			incidents:   []incident.IncidentState{{Scope: incident.Scope{Bucket: bucket, Key: "v1"}, Severity: incident.SeverityWarning, State: incident.StateActing}},
+			replicas:    nil,
+			wantHealth:  "warning",
+			wantReasons: []string{"recent_incident"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vols := []VolumeInfo{{Name: "v1", Health: "ok", HealthReasons: []string{}}}
+			annotateVolumeHealth(vols, tc.incidents, tc.replicas)
+			if vols[0].Health != tc.wantHealth {
+				t.Errorf("health = %q, want %q", vols[0].Health, tc.wantHealth)
+			}
+			if !reflect.DeepEqual(vols[0].HealthReasons, tc.wantReasons) {
+				t.Errorf("reasons = %v, want %v", vols[0].HealthReasons, tc.wantReasons)
+			}
+		})
+	}
+}
+
+func TestWorseVolumeHealth_DegradedRank(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want string
+	}{
+		{"ok", "degraded", "degraded"},
+		{"warning", "degraded", "degraded"},
+		{"degraded", "warning", "degraded"},
+		{"degraded", "critical", "critical"},
+		{"critical", "degraded", "critical"},
+		{"degraded", "unknown", "unknown"},
+		{"degraded", "degraded", "degraded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.a+"+"+tc.b, func(t *testing.T) {
+			got := worseVolumeHealth(tc.a, tc.b)
+			if got != tc.want {
+				t.Errorf("worseVolumeHealth(%q,%q) = %q, want %q", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}

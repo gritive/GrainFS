@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.97.0] - 2026-05-08 — volume health replica/EC layout signals
+
+### Added
+
+- Volume health composer accepts replica/EC actual layout signals via
+  `ReplicaLayoutFact` (per-volume aggregate of `LayoutState` counts from
+  `internal/cluster/topology_policy.go`). Repair-needed objects raise the
+  volume to `critical` with reason `replica_repair_needed`; pending-upgrade
+  objects raise to `degraded` with reason `replica_missing`; unknown layout
+  raises to `warning` with reason `replica_layout_unknown`. Downgrade-skipped
+  and current counts contribute nothing.
+- `worseVolumeHealth` rank gains a `degraded` slot between `warning` and
+  `critical`. Relative order of pre-existing labels is preserved, so
+  incident-only callers see no change.
+
+### Changed
+
+- Existing handler call sites (`fetchAndAnnotateHealth`) still pass `nil`
+  for replicas, so production behavior is unchanged in this slice. A
+  follow-up adapter will populate `ReplicaLayoutFact` from the object index
+  for each volume's block prefix.
+
 ## [0.0.96.0] - 2026-05-08 — NFSv4 server bottleneck tuning (single-node)
 
 ### Changed
@@ -93,6 +115,7 @@
   surfaces it on both branches; non-race `go test` passes clean.
 
 
+## [0.0.95.0] - 2026-05-08 — volume health composer extraction
 
 ### Changed
 
