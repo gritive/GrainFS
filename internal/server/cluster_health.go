@@ -62,10 +62,7 @@ func (s *Server) deriveHealth() Health {
 		hasConfiguredPeers = len(peers) > 0
 
 		// Prefer typed peer_snapshot evidence when available.
-		var rows []cluster.PeerLivenessRow
-		if snap, ok := s.cluster.(clusterPeerSnapshot); ok {
-			rows = snap.PeerSnapshot()
-		}
+		rows := s.cluster.Snapshot().PeerSnapshot
 		if len(rows) > 0 {
 			h.Peers = mapPeerHealthRows(rows)
 		} else {

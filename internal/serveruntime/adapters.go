@@ -324,6 +324,19 @@ func (r *RaftClusterInfo) LivePeers() []string {
 	return out
 }
 
+// Snapshot composes the optional cluster topology / liveness data into a
+// single value the dashboard can read field-by-field. Replaces the seven
+// type-asserted mini-interfaces formerly used by the server package.
+func (r *RaftClusterInfo) Snapshot() cluster.ClusterStatus {
+	return cluster.ClusterStatus{
+		PeerSnapshot:      r.PeerSnapshot(),
+		PeerAddrs:         r.PeerAddrs(),
+		PeerStates:        r.PeerStates(),
+		BucketAssignments: r.BucketAssignments(),
+		ShardGroups:       r.ShardGroups(),
+	}
+}
+
 func (r *RaftClusterInfo) PeerAddrs() map[string]string {
 	out := make(map[string]string)
 	if r.addrBook == nil {

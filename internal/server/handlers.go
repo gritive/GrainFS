@@ -1351,23 +1351,21 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 		status["state"] = s.cluster.State()
 		status["term"] = s.cluster.Term()
 		status["leader_id"] = s.cluster.LeaderID()
-		var rows []cluster.PeerLivenessRow
-		if peerSnapshot, ok := s.cluster.(clusterPeerSnapshot); ok {
-			rows = peerSnapshot.PeerSnapshot()
-		}
-		if rows != nil {
-			status["peer_snapshot"] = rows
-			status["peers"] = legacyPeersFromSnapshot(rows)
-			status["peer_addrs"] = legacyPeerAddrsFromSnapshot(rows)
-			status["peer_states"] = legacyPeerStatesFromSnapshot(rows)
-			status["down_nodes"] = legacyDownNodesFromSnapshot(rows)
+
+		snap := s.cluster.Snapshot()
+		if snap.PeerSnapshot != nil {
+			status["peer_snapshot"] = snap.PeerSnapshot
+			status["peers"] = legacyPeersFromSnapshot(snap.PeerSnapshot)
+			status["peer_addrs"] = legacyPeerAddrsFromSnapshot(snap.PeerSnapshot)
+			status["peer_states"] = legacyPeerStatesFromSnapshot(snap.PeerSnapshot)
+			status["down_nodes"] = legacyDownNodesFromSnapshot(snap.PeerSnapshot)
 		} else {
 			status["peers"] = s.cluster.Peers()
-			if peerAddrs, ok := s.cluster.(clusterPeerAddrs); ok {
-				status["peer_addrs"] = peerAddrs.PeerAddrs()
+			if snap.PeerAddrs != nil {
+				status["peer_addrs"] = snap.PeerAddrs
 			}
-			if peerStates, ok := s.cluster.(clusterPeerStates); ok {
-				status["peer_states"] = peerStates.PeerStates()
+			if snap.PeerStates != nil {
+				status["peer_states"] = snap.PeerStates
 			}
 
 			// Compute down nodes: configured peers minus live peers.
@@ -1384,15 +1382,13 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 			}
 			status["down_nodes"] = downNodes
 		}
-		if assignments, ok := s.cluster.(clusterBucketAssignments); ok {
-			status["bucket_assignments"] = assignments.BucketAssignments()
+		if snap.BucketAssignments != nil {
+			status["bucket_assignments"] = snap.BucketAssignments
 		}
-		if groups, ok := s.cluster.(clusterShardGroups); ok {
-			status["shard_groups"] = clusterStatusShardGroups(groups.ShardGroups())
+		if snap.ShardGroups != nil {
+			status["shard_groups"] = clusterStatusShardGroups(snap.ShardGroups)
 		}
-		if index, ok := s.cluster.(clusterObjectIndexSummary); ok {
-			status["object_index_summary"] = index.ObjectIndexSummary(string(c.QueryArgs().Peek("bucket")))
-		}
+		status["object_index_summary"] = s.cluster.ObjectIndexSummary(string(c.QueryArgs().Peek("bucket")))
 	}
 
 	data, _ := json.Marshal(status)
@@ -1425,12 +1421,7 @@ func (s *Server) clusterPlacement(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, empty)
 		return
 	}
-	reporter, ok := s.cluster.(clusterPlacementReporter)
-	if !ok {
-		c.JSON(consts.StatusOK, empty)
-		return
-	}
-	c.JSON(consts.StatusOK, reporter.PlacementReport(bucket, key, limit))
+	c.JSON(consts.StatusOK, s.cluster.PlacementReport(bucket, key, limit))
 }
 
 type clusterStatusShardGroup struct {
@@ -1679,11 +1670,7 @@ func (s *Server) removePeerHandler(ctx context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) evaluateRemovePeerPreflight(id string) (cluster.RemovePeerPreflightResult, bool) {
-	peerSnapshot, ok := s.cluster.(clusterPeerSnapshot)
-	if !ok {
-		return cluster.RemovePeerPreflightResult{}, false
-	}
-	snapshot := peerSnapshot.PeerSnapshot()
+	snapshot := s.cluster.Snapshot().PeerSnapshot
 	if len(snapshot) == 0 {
 		return cluster.RemovePeerPreflightResult{}, false
 	}

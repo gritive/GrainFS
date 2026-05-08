@@ -38,7 +38,11 @@ import (
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
-// ClusterInfo provides cluster state for the monitoring dashboard.
+// ClusterInfo provides cluster state for the monitoring dashboard. Snapshot
+// folds the previously type-asserted optional capabilities (peer addrs/states/
+// liveness, bucket assignments, shard groups) into one call returning a
+// cluster.ClusterStatus value with nullable fields. Per-bucket and per-key
+// reports keep their own parameterized methods.
 type ClusterInfo interface {
 	NodeID() string
 	State() string // "Leader", "Follower", "Candidate"
@@ -48,33 +52,18 @@ type ClusterInfo interface {
 	// LivePeers returns the subset of peers that are currently reachable.
 	// Used to compute down_nodes in the cluster status endpoint.
 	LivePeers() []string
-}
-
-type clusterPeerAddrs interface {
-	PeerAddrs() map[string]string
-}
-
-type clusterPeerStates interface {
-	PeerStates() map[string]string
-}
-
-type clusterPeerSnapshot interface {
-	PeerSnapshot() []cluster.PeerLivenessRow
-}
-
-type clusterBucketAssignments interface {
-	BucketAssignments() map[string]string
-}
-
-type clusterShardGroups interface {
-	ShardGroups() []cluster.ShardGroupEntry
-}
-
-type clusterObjectIndexSummary interface {
+	// Snapshot returns a single-shot view of optional cluster topology /
+	// liveness data used by the dashboard. Implementations may leave any
+	// field nil/empty when the underlying source does not surface that
+	// capability for the current node.
+	Snapshot() cluster.ClusterStatus
+	// ObjectIndexSummary returns aggregate object-index counters for a
+	// bucket. Returns the zero value when the implementation does not
+	// surface this data.
 	ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary
-}
-
-type clusterPlacementReporter interface {
+	// PlacementReport returns shard placement detail for (bucket, key).
+	// maxRows caps the per-call row count. Returns the zero value when
+	// the implementation does not surface this data.
 	PlacementReport(bucket, key string, maxRows int) cluster.PlacementReport
 }
 

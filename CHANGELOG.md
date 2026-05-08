@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.0.118.0] - 2026-05-08 — ClusterInfo Snapshot (single seam for cluster topology fan-out)
+
+### Refactored
+
+- `internal/server/server.go`: 7 type-asserted mini-interfaces deleted —
+  `clusterPeerAddrs`, `clusterPeerStates`, `clusterPeerSnapshot`,
+  `clusterBucketAssignments`, `clusterShardGroups`,
+  `clusterObjectIndexSummary`, `clusterPlacementReporter`. Their methods
+  fold into `ClusterInfo` proper as one `Snapshot() cluster.ClusterStatus`
+  call (peer/topology data) plus `ObjectIndexSummary(bucket)` and
+  `PlacementReport(bucket, key, maxRows)` (parameterized reports).
+- `internal/cluster/cluster_status.go` (new): `ClusterStatus` struct with
+  nullable fields `PeerSnapshot`, `PeerAddrs`, `PeerStates`,
+  `BucketAssignments`, `ShardGroups`. Single-shot snapshot returned by
+  `ClusterInfo.Snapshot()`; nil/empty fields signal an unsurfaced
+  capability.
+- `internal/serveruntime/adapters.go`: `RaftClusterInfo.Snapshot()` added —
+  composes the existing `PeerSnapshot()` / `PeerAddrs()` / `PeerStates()` /
+  `BucketAssignments()` / `ShardGroups()` methods; production behavior
+  unchanged.
+- 9 type-assertion call sites collapse into direct method/field access:
+  - `handlers.go::clusterStatus` (6 of the 7 fan-outs lived here): one
+    `s.cluster.Snapshot()` plus `snap.PeerAddrs`/`snap.ShardGroups`/...
+    field reads.
+  - `handlers.go::clusterPlacement`: `s.cluster.PlacementReport(...)`
+    direct call (the `clusterPlacementReporter` ok-check disappears
+    because `PlacementReport` is mandatory on the interface; nil-cluster
+    branch above the call still short-circuits with the empty report).
+  - `handlers.go::evaluateRemovePeerPreflight`: peer snapshot read via
+    `s.cluster.Snapshot().PeerSnapshot`.
+  - `cluster_health.go`: peer snapshot read via the same path.
+- Test fakes updated: `fakeClusterInfo`, `fakeTopologyClusterInfo`,
+  `fakeClusterInfoWithoutSnapshot` (`cluster_remove_peer_test.go`) drop
+  the now-orphan `PeerAddrs/PeerStates/PeerSnapshot/BucketAssignments/
+  ShardGroups` methods, gain `Snapshot()` (composing their fields) and
+  zero-value `ObjectIndexSummary` / `PlacementReport` stubs.
+  `fakeTransferLeader` (`cluster_admin_uds_test.go`) inherits the new
+  methods via its `*fakeClusterInfo` embedding — no edit needed.
+
+Behavior preserved on production paths: `RaftClusterInfo` already
+implemented every former mini-interface, so dashboard JSON output is
+identical. The dashboard's `object_index_summary` field is now always
+present in cluster mode (previously absent when the impl didn't satisfy
+the optional interface — a meaningless distinction in practice because
+the only impl satisfied it). Net delta: −44 lines in server.go,
+−59 lines in test fakes (orphan method removals), +47 lines for the
+new struct + Snapshot composer + helper stubs.
+
+### Why
+
+Continuation of the deepening that produced #254 (MutationBroker) and
+#260 (authz PostLoad helper). `s.cluster.(...)` type assertions modeled
+"optional capability" at the type system level when in production every
+capability was always present — pure ceremony. Single-seam Snapshot
+collapses the fan-out, makes the dashboard's intent ("read a coherent
+view of cluster state") explicit, and prepares the ground for the
+DistributedBackend god-object decomposition by establishing what the
+cluster status surface actually is.
+
 ## [0.0.117.0] - 2026-05-08 — authz PostLoad helper (single seam for handler ACL re-checks)
 
 ### Refactored
