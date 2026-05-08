@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.104.0] - 2026-05-08 — wire NFSv4 cache invalidator into cluster registry
+
+### Fixed
+
+- Cross-protocol cache coherency for NFSv4 in cluster mode: an S3 PUT/DELETE
+  replicated via Raft from another node now invalidates this node's NFS
+  metadata caches (`StateManager.fileMeta`, parent-directory mtime). Before
+  this change `cluster.Registry.InvalidateAll` only fanned out to the S3
+  CachedBackend; NFSv4 readers could see stale stat data and stale READDIR
+  output until the next backend round-trip or natural cache expiry.
+
+### Added
+
+- `nfs4server.StateManager.InvalidateKey(key)` — drops the per-key
+  `fileMeta` entry and refreshes the parent directory's stored mtime so the
+  next READDIR is treated as a new generation. Filehandles are
+  intentionally preserved because NFS clients hold open handles across the
+  invalidation; stale `fhToPath` mappings surface as backend NotFound on
+  next access rather than producing wrong data.
+- `nfs4server.Server.Invalidate(bucket, key)` — duck-typed
+  `cluster.CacheInvalidator` entry point. Buckets other than `nfs4Bucket`
+  are no-ops.
+- `serveruntime.NodeServices.NFS4()` getter so the runtime can register
+  the NFS server's invalidator with `distBackend.RegisterCacheInvalidator`
+  after `StartNodeServices` returns. Registration is conditional on NFS4
+  being enabled (port > 0).
+
 ## [0.0.103.0] - 2026-05-08 — remove dead PolicyStore (uncompiled)
 
 ### Removed

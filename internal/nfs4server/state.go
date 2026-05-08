@@ -3,6 +3,7 @@ package nfs4server
 import (
 	"crypto/rand"
 	"encoding/hex"
+	pathPkg "path"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,6 +177,29 @@ func (sm *StateManager) ResolveFH(fh FileHandle) (string, bool) {
 	path, ok := sm.fhToPath[fh]
 	sm.fhMu.RUnlock()
 	return path, ok
+}
+
+// InvalidateKey clears NFS metadata caches for an out-of-band mutation on
+// an object key (e.g. an S3 PUT replicated via Raft from another cluster
+// node). The fileMeta cache is dropped so the next stat re-fetches the
+// sidecar; the parent directory's cached mtime is refreshed so the next
+// READDIR sees a new generation and re-lists. Filehandle mappings are
+// intentionally left in place because the authoritative state is the
+// backend object — a stale fh will surface as NotFound on the next access
+// rather than producing wrong data, and concurrent NFS clients keep their
+// open handles valid.
+//
+// Caller maps the source bucket+key to "/"+key (the NFS-path convention)
+// before computing the parent. We only refresh dirs that the StateManager
+// already tracks, mirroring the standalone NFS write path which marks
+// directories lazily as they are observed.
+func (sm *StateManager) InvalidateKey(key string) {
+	sm.fileMeta.Delete(key)
+	nfsPath := "/" + key
+	parent := pathPkg.Dir(nfsPath)
+	if _, ok := sm.dirs.Load(parent); ok {
+		sm.dirs.Store(parent, time.Now().UnixNano())
+	}
 }
 
 // InvalidateFH removes the filehandle mapping (e.g., after delete).
