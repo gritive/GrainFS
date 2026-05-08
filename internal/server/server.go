@@ -122,6 +122,10 @@ type Server struct {
 	// iamAudit logs IAM authz decisions. nil-safe: RecordAllow/RecordDeny
 	// are no-ops when this is nil. Wired by WithIAMAudit (Task 17).
 	iamAudit *iam.AuditLogger
+	// authz composes IAM grant, bucket policy, and object ACL into a single
+	// authorization decision per request. See CONTEXT.md
+	// § "S3 Request Authorization Decision".
+	authz *s3auth.RequestAuthorizer
 	// iamProposer issues IAM mutations through Raft (P5). nil before the
 	// meta-FSM is ready or in anonymous mode; CreateBucket falls back to
 	// no-op auto-grant when nil.
@@ -414,6 +418,7 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.buildAuthorizer()
 	if s.mutationGate == nil {
 		s.mutationGate = NewMutationGate(nil)
 	}
@@ -476,6 +481,28 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		s.startEventWorker()
 	}
 	return s
+}
+
+// buildAuthorizer wires the request authorizer using the server's current
+// dependencies. Call after Options have populated iamStore, iamAudit, and
+// policyStore so the authorizer captures their final values.
+func (s *Server) buildAuthorizer() {
+	var iamStore s3auth.IAMStore
+	if s.iamStore != nil {
+		iamStore = s.iamStore
+	}
+	s.authz = s3auth.NewRequestAuthorizer(
+		iamStore,
+		func(saID, bucket string, action s3auth.S3Action) bool {
+			if s.iamStore == nil {
+				return false
+			}
+			return iam.CheckAccess(s.iamStore, saID, bucket, action)
+		},
+		s.policyStore,
+		s.iamAudit,
+		iam.PrincipalFromContext,
+	)
 }
 
 // isDegraded reports whether the server is currently in EC degraded mode.

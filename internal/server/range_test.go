@@ -28,6 +28,7 @@ func TestGetObject_IfNoneMatch(t *testing.T) {
 	data := bytes.Repeat([]byte("X"), 1024)
 	obj, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("test-bucket", "file.txt", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14859", backend)
 	go func() { s.Run() }()
@@ -86,6 +87,7 @@ func TestGetObject_IfModifiedSince(t *testing.T) {
 	data := bytes.Repeat([]byte("Y"), 512)
 	_, err = backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("test-bucket", "file.txt", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14861", backend)
 	go func() { s.Run() }()
@@ -132,6 +134,7 @@ func TestGetObject_IfMatch(t *testing.T) {
 	data := bytes.Repeat([]byte("M"), 512)
 	obj, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("test-bucket", "file.txt", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14862", backend)
 	go func() { s.Run() }()
@@ -176,6 +179,7 @@ func TestHeadObject_ConditionalHeaders(t *testing.T) {
 	data := bytes.Repeat([]byte("H"), 256)
 	obj, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("test-bucket", "file.txt", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14863", backend)
 	go func() { s.Run() }()

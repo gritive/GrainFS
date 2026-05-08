@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.0.107.0] - 2026-05-08 — S3 Request Authorization Decision (deepened authz seam)
+
+### Added
+
+- `internal/s3auth.RequestAuthorizer` composes IAM grant, bucket policy, and
+  object ACL into a single `Decision{Allow, Layer, Reason}` per request. Two
+  phases: `PhasePreLoad` (Layer 1+2, called from middleware before object load)
+  and `PhasePostLoad` (Layer 1+2+3, called from handlers after object load).
+  See `CONTEXT.md` § "S3 Request Authorization Decision" for the full contract.
+- `internal/server/authorizer_wiring_test.go` verifies the server builds a
+  non-nil authorizer.
+- `internal/server/handlers_copy_acl_test.go` covers anonymous CopyObject
+  source ACL gating.
+
+### Changed
+
+- `internal/server` authz middleware delegates Layers 1-3 (IAM grant + bucket
+  policy + post-load ACL) to `RequestAuthorizer`. Layer 0 (AccessKey bucket
+  scope, introduced in v0.0.106.0) stays in middleware because it depends on
+  iam-specific request context. Object handlers (`handleGet`, the standard-path
+  GET helper, `handleHead`) delegate post-load ACL decisions through the same
+  authorizer seam. Audit ownership unified — every allow and deny is recorded
+  by the authorizer rather than by middleware and handlers separately.
+- Object ACL evaluation now runs unconditionally at the post-load gate. In
+  no-auth-flag clusters (no `--access-key/--secret-key` and no IAM), private
+  ACL objects are no longer anonymously readable — they were previously
+  readable because the ACL probe was guarded by `s.verifier != nil`. Existing
+  tests that PUT objects without an explicit ACL and read them anonymously
+  were updated to use `public-read`. Iceberg-managed metadata files are now
+  written with `ACLPublicRead` so they remain anonymously readable in no-auth
+  mode.
+
+### Fixed
+
+- CopyObject now enforces source `GetObject` ACL. Previously a caller with
+  destination write permission could copy a private source object regardless
+  of source ACL, because the source object was loaded by the storage facade
+  for existence/precondition checks but no ACL gate ran on it.
+
 ## [0.0.106.0] - 2026-05-08 — IAM bucket-scoped access keys
 
 ### Added

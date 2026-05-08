@@ -55,28 +55,20 @@ func s3ActionEnum(method, path string, hasKey, hasPolicyQuery bool) s3auth.S3Act
 	}
 }
 
-// authzMiddleware checks IAM grants and bucket policies for authorized
-// access. Must run after authMiddleware (which sets the access key and
-// IAM principal in context).
+// authzMiddleware checks IAM grants and bucket policies for authorized access.
+// Must run after authMiddleware (which sets the access key and IAM principal
+// in context).
 //
-// Two layers, evaluated in order:
-//  1. IAM grant (only when iamStore.AuthEnabled() is sticky-on). Looks up
-//     (sa_id, bucket) → role and the role's permission for the requested
-//     S3 action. Deny → 403, audited as deny+no_grant.
-//  2. Bucket policy (always, as second layer). Existing s.policyStore.Allow
-//     can further restrict what IAM permits but cannot loosen it. Deny → 403,
-//     audited as deny+policy_deny.
-//
-// Allow → audit allow, then forward.
-//
-// In anonymous mode (iamStore.AuthEnabled() == false), the IAM layer is
-// skipped and only the bucket policy applies — this preserves the v0.0.92
-// behavior for clusters that haven't enabled IAM.
+// Layer 0 (AccessKey bucket scope) lives here because it depends on iam-specific
+// request context (`iam.ScopeFromContext`). Layers 1-3 (IAM grant, bucket
+// policy, object ACL) are owned by `s3auth.RequestAuthorizer.Decide`; this
+// middleware invokes the authorizer at PhasePreLoad and handlers re-invoke at
+// PhasePostLoad after loading the target object's ACL.
 func (s *Server) authzMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		path := string(c.URI().Path())
 
-		// Skip non-S3 paths
+		// Skip non-S3 paths.
 		if path == "/" || path == "/metrics" || strings.HasPrefix(path, "/ui/") ||
 			strings.HasPrefix(path, "/iceberg/") || strings.HasPrefix(path, "/admin/") {
 			c.Next(ctx)
@@ -91,23 +83,14 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			return
 		}
 
-		// Phase 5d #4: ?policy CRUD now flows through the same 2-layer
-		// authz chain as object/bucket ops. Pre-fix this skipped both
-		// layers — any signed SA could read/write/delete any bucket's
-		// policy. s3ActionEnum maps ?policy GET/PUT/DELETE to dedicated
-		// S3Action values (GetBucketPolicy/PutBucketPolicy/DeleteBucketPolicy);
-		// RoleAllows requires Read+ for GET and Admin for PUT/DELETE.
 		hasPolicy := c.QueryArgs().Has("policy")
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
-		// Hoist AuthEnabled: computed once, used across all layers below.
-		authEnabled := s.iamStore != nil && s.iamStore.AuthEnabled()
-
 		// Layer 0: AccessKey bucket scope (only when auth is enabled).
-		// scope = key.BucketScope. nil/empty → unrestricted (legacy keys,
-		// backward compat). non-empty → bucket must be a member.
-		if authEnabled {
+		// Bucket-scoped keys must have this bucket in their scope; nil/empty
+		// scope means unrestricted (legacy keys, backward compat).
+		if s.iamStore != nil && s.iamStore.AuthEnabled() {
 			scope := iam.ScopeFromContext(ctx)
 			if !iam.ScopeAllows(scope, bucket) {
 				saID := iam.PrincipalFromContext(ctx)
@@ -118,41 +101,26 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			}
 		}
 
-		// Layer 1: IAM grant (only when auth is enabled).
-		if authEnabled {
-			saID := iam.PrincipalFromContext(ctx)
-			if !iam.CheckAccess(s.iamStore, saID, bucket, action) {
-				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "no_grant")
-				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "IAM grant denies this action")
-				c.Abort()
-				return
+		// Layers 1-3: IAM grant + bucket policy + (post-load ACL).
+		in := s3auth.PermCheckInput{
+			Principal: s3auth.Principal{AccessKey: accessKey},
+			Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+			Action:    action,
+		}
+		decision := s.authz.Decide(ctx, in, s3auth.PhasePreLoad)
+		if !decision.Allow {
+			msg := "AccessDenied"
+			switch decision.Reason {
+			case "no_grant":
+				msg = "IAM grant denies this action"
+			case "policy_deny":
+				msg = "bucket policy denies this action"
 			}
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", msg)
+			c.Abort()
+			return
 		}
 
-		// Layer 2: bucket policy (always applies, except for bucket-policy
-		// CRUD itself — chicken-and-egg: a deny-all policy must remain
-		// removable by the IAM-Admin SA without policy rules having to
-		// allow s3:GetBucketPolicy/s3:PutBucketPolicy/s3:DeleteBucketPolicy
-		// explicitly. IAM (Layer 1) already gates these operations.
-		if action != s3auth.GetBucketPolicy && action != s3auth.PutBucketPolicy && action != s3auth.DeleteBucketPolicy {
-			in := s3auth.PermCheckInput{
-				Principal: s3auth.Principal{AccessKey: accessKey},
-				Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
-				Action:    action,
-			}
-			if !s.policyStore.Allow(ctx, in) {
-				saID := iam.PrincipalFromContext(ctx)
-				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "policy_deny")
-				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "bucket policy denies this action")
-				c.Abort()
-				return
-			}
-		}
-
-		// Allow.
-		if authEnabled {
-			s.iamAudit.RecordAllow(ctx, iam.PrincipalFromContext(ctx), bucket, key, action)
-		}
 		c.Next(ctx)
 	}
 }
