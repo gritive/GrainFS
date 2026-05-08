@@ -478,3 +478,119 @@ func TestAdminAPI_GrantList_FilterByBucket(t *testing.T) {
 		t.Errorf("filter bucket=b1: got %v", items)
 	}
 }
+
+// TestHandleKeyCreate_Scoped_Happy: SA with grant on "logs", POST {buckets:["logs"]} → 200,
+// response echoes scope, ProposeKeyCreateScoped called.
+func TestHandleKeyCreate_Scoped_Happy(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleWrite})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	body, _ := json.Marshal(map[string]any{"buckets": []string{"logs"}})
+	req := httptest.NewRequest("POST", "/admin/iam/sa/sa-1/key", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleKeyCreate(w, req, "sa-1")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp KeyCreateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Buckets) != 1 || resp.Buckets[0] != "logs" {
+		t.Errorf("Buckets = %v, want [logs]", resp.Buckets)
+	}
+	// Must have used the scoped propose, not the legacy one.
+	found := false
+	for _, c := range p.calls {
+		if strings.HasPrefix(c, "KeyCreateScoped:") {
+			found = true
+		}
+		if strings.HasPrefix(c, "KeyCreate:") && !strings.HasPrefix(c, "KeyCreateScoped:") {
+			t.Errorf("legacy ProposeKeyCreate must not be called for scoped key; calls=%v", p.calls)
+		}
+	}
+	if !found {
+		t.Errorf("ProposeKeyCreateScoped not called; calls=%v", p.calls)
+	}
+}
+
+// TestHandleKeyCreate_OverScope_422: SA only has "logs" grant, POST {buckets:["logs","reports"]} → 422.
+func TestHandleKeyCreate_OverScope_422(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
+	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleWrite})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+
+	body, _ := json.Marshal(map[string]any{"buckets": []string{"logs", "reports"}})
+	req := httptest.NewRequest("POST", "/admin/iam/sa/sa-1/key", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleKeyCreate(w, req, "sa-1")
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "reports") {
+		t.Errorf("body = %q, want mention of 'reports'", w.Body.String())
+	}
+}
+
+// TestHandleKeyCreate_Sentinel_422: sentinel values ["*"] and ["__system__"] → 422.
+func TestHandleKeyCreate_Sentinel_422(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
+	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
+
+	for _, sentinel := range []string{"*", "__system__"} {
+		body, _ := json.Marshal(map[string]any{"buckets": []string{sentinel}})
+		req := httptest.NewRequest("POST", "/admin/iam/sa/sa-1/key", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		api.HandleKeyCreate(w, req, "sa-1")
+
+		if w.Code != http.StatusUnprocessableEntity {
+			t.Errorf("sentinel=%q: status = %d, want 422, body=%s", sentinel, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "sentinel") {
+			t.Errorf("sentinel=%q: body = %q, want 'sentinel' in error", sentinel, w.Body.String())
+		}
+	}
+}
+
+// TestHandleKeyCreate_EmptyBuckets_LegacyPath: POST {} → 200, legacy ProposeKeyCreate, no scoped call.
+func TestHandleKeyCreate_EmptyBuckets_LegacyPath(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	req := httptest.NewRequest("POST", "/admin/iam/sa/sa-1/key", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	api.HandleKeyCreate(w, req, "sa-1")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp KeyCreateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Buckets != nil {
+		t.Errorf("Buckets = %v, want nil for legacy path", resp.Buckets)
+	}
+	// Legacy propose must be called; scoped must NOT.
+	legacyCalled := false
+	for _, c := range p.calls {
+		if c == "KeyCreate:"+resp.AccessKey {
+			legacyCalled = true
+		}
+		if c == "KeyCreateScoped:"+resp.AccessKey {
+			t.Errorf("ProposeKeyCreateScoped must not be called for empty-bucket legacy path")
+		}
+	}
+	if !legacyCalled {
+		t.Errorf("ProposeKeyCreate not called; calls=%v", p.calls)
+	}
+}

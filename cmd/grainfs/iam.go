@@ -157,25 +157,35 @@ func iamSACmd() *cobra.Command {
 
 func iamKeyCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "key", Short: "Manage SA AccessKeys"}
-	cmd.AddCommand(
-		&cobra.Command{
-			Use:   "create <sa_id>",
-			Short: "Issue a new AccessKey for the SA (one-time secret_key in response)",
-			Args:  cobra.ExactArgs(1),
-			RunE: func(c *cobra.Command, args []string) error {
-				sock, err := iamEndpointFromCmd(c)
-				if err != nil {
-					return err
-				}
-				out, err := iamRequest(c.Context(), sock, "POST",
-					"/v1/iam/sa/"+url.PathEscape(args[0])+"/key", map[string]any{})
-				if err != nil {
-					return err
-				}
-				fmt.Fprintln(c.OutOrStdout(), string(out))
-				return nil
-			},
+
+	createCmd := &cobra.Command{
+		Use:   "create <sa_id>",
+		Short: "Issue a new AccessKey for the SA (one-time secret_key in response)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			sock, err := iamEndpointFromCmd(c)
+			if err != nil {
+				return err
+			}
+			buckets, _ := c.Flags().GetStringSlice("bucket")
+			body := map[string]any{}
+			if len(buckets) > 0 {
+				body["buckets"] = buckets
+			}
+			out, err := iamRequest(c.Context(), sock, "POST",
+				"/v1/iam/sa/"+url.PathEscape(args[0])+"/key", body)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(c.OutOrStdout(), string(out))
+			return nil
 		},
+	}
+	createCmd.Flags().StringSlice("bucket", nil,
+		"restrict the new key to specific buckets (repeatable; default: unrestricted)")
+
+	cmd.AddCommand(
+		createCmd,
 		&cobra.Command{
 			Use:   "revoke <sa_id> <access_key>",
 			Short: "Revoke an AccessKey",
