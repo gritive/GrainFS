@@ -20,10 +20,33 @@ import (
 // Sentinel errors mirrored from internal/raft so caller code can treat v1 and
 // v2 interchangeably during the M5 phased import flip.
 var (
-	ErrNotLeader      = errors.New("not the leader")
-	ErrProposalFailed = errors.New("proposal failed: node stepped down")
-	ErrNodeStopped    = errors.New("raft: node stopped")
+	ErrNotLeader           = errors.New("not the leader")
+	ErrProposalFailed      = errors.New("proposal failed: node stepped down")
+	ErrNodeStopped         = errors.New("raft: node stopped")
+	ErrAlreadyBootstrapped = errors.New("raft: cluster already bootstrapped")
+	ErrNotImplemented      = errors.New("raft/v2: not implemented (M2 scope)")
 )
+
+// ServerSuffrage is mirrored from v1 internal/raft/raft.go for M5 swap-time
+// API parity. Voter participates in elections and quorum; NonVoter (learner)
+// receives log entries but does not vote.
+type ServerSuffrage int
+
+const (
+	Voter ServerSuffrage = iota
+	NonVoter
+)
+
+// Server identifies a single cluster member with its voting role.
+type Server struct {
+	ID       string
+	Suffrage ServerSuffrage
+}
+
+// Configuration is a point-in-time view of the cluster's voter set.
+type Configuration struct {
+	Servers []Server
+}
 
 // NodeState represents the current role of a Raft node. Values match v1.
 type NodeState int

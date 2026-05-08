@@ -1,6 +1,7 @@
 package raftv2
 
 import (
+	"context"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,12 @@ type Node struct {
 	// rng powers the randomized election-timeout window. Seeded per-Node so
 	// concurrent multi-voter test clusters do not draw identical timeouts.
 	rng *rand.Rand
+
+	// bootstrapped records whether Bootstrap() has been called. PR 7 keeps
+	// Bootstrap a no-op and the auto-bootstrap path inside actor.run() fires
+	// regardless; this flag exists purely so a second Bootstrap() returns
+	// ErrAlreadyBootstrapped for v1 API parity.
+	bootstrapped atomic.Bool
 }
 
 // NewNode creates a Node from cfg. Call Start to launch the actor goroutine.
@@ -204,3 +211,62 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 // The channel is closed after Stop completes, so consumers may use
 // "for range ApplyCh()" to drain until shutdown.
 func (n *Node) ApplyCh() <-chan LogEntry { return n.applyCh }
+
+// Bootstrap initializes the cluster with the configured peer list. For a
+// single-voter cluster (cfg.Peers empty), Bootstrap is a no-op — Start auto-
+// promotes to Leader as before. For multi-voter clusters, Bootstrap is also
+// a no-op in PR 7; multi-voter elections begin via the election timer once
+// Start runs. Future PRs may make Bootstrap meaningful (e.g., persist the
+// initial configuration to LogStore in M2).
+//
+// API parity with v1's Node.Bootstrap. Returns nil on first call; calling
+// twice returns ErrAlreadyBootstrapped.
+func (n *Node) Bootstrap() error {
+	if n.bootstrapped.CompareAndSwap(false, true) {
+		return nil
+	}
+	return ErrAlreadyBootstrapped
+}
+
+// Configuration returns a point-in-time snapshot of the cluster's voter set.
+// Reads from the actor's published readState; lock-free.
+//
+// PR 7: cfg.Peers is static (set at NewNode). Configuration just returns
+// the initial set. M2 will make it dynamic via readState as joint consensus
+// lands.
+func (n *Node) Configuration() Configuration {
+	rs := n.rs.Load()
+	servers := make([]Server, 0, len(n.cfg.Peers)+1)
+	servers = append(servers, Server{ID: n.cfg.ID, Suffrage: Voter})
+	for _, peer := range n.cfg.Peers {
+		servers = append(servers, Server{ID: peer, Suffrage: Voter})
+	}
+	_ = rs // not used yet; future PRs may reflect membership changes through readState
+	return Configuration{Servers: servers}
+}
+
+// AddVoter is a stub for v1 API parity. Real implementation lands in M2
+// (configuration changes via joint consensus).
+func (n *Node) AddVoter(id, addr string) error { return ErrNotImplemented }
+
+// AddVoterCtx is a stub for v1 API parity. Real implementation lands in M2
+// (configuration changes via joint consensus).
+func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
+	return ErrNotImplemented
+}
+
+// RemoveVoter is a stub for v1 API parity. Real implementation lands in M2
+// (configuration changes via joint consensus).
+func (n *Node) RemoveVoter(id string) error { return ErrNotImplemented }
+
+// AddLearner is a stub for v1 API parity. Real implementation lands in M2
+// (configuration changes via joint consensus).
+func (n *Node) AddLearner(id, addr string) error { return ErrNotImplemented }
+
+// PromoteToVoter is a stub for v1 API parity. Real implementation lands in M2
+// (configuration changes via joint consensus).
+func (n *Node) PromoteToVoter(id string) error { return ErrNotImplemented }
+
+// TransferLeadership is a stub for v1 API parity. Real implementation lands
+// in M2 (configuration changes via joint consensus).
+func (n *Node) TransferLeadership() error { return ErrNotImplemented }

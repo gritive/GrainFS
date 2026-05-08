@@ -54,25 +54,29 @@ func (n *Node) Propose(cmd []byte) error {
 The actor goroutine (`actor.go::run`) is the only writer of `actorState`
 and the only caller of `publish`. Readers never touch `actorState`.
 
-## What's here vs what's coming
+## Capability matrix (M1 final state)
 
-**In PR 1:**
-- Actor goroutine skeleton (`actor.go`) — command loop, `handle` dispatch, `handlePropose`
-- `readState` + `actorState` structs (`state.go`), `publish`/`snapshot`
-- `Node` struct, `NewNode`/`Start`/`Stop` lifecycle (`node.go`)
-- `Propose` (fire-and-forget) + `ProposeWait` (ctx-aware blocking) (`propose.go`)
-- Single-voter auto-leader bootstrap (Peers empty → Leader at term 1)
-- Read-mostly methods: `State`, `Term`, `IsLeader`, `LeaderID`, `CommittedIndex`, `ApplyCh`
-- Single-node round-trip test (`node_test.go`)
-
-**Not yet (per plan):**
-- Election timer, vote RPC, AppendEntries — PR 4-5
-- Persistence (LogStore adapter) — PR 6+
-- Snapshots — PR 6+
-- Configuration changes / joint consensus — PR 10+
-- Equivalence harness skeleton — PR 2-3
-- Full property tests + chaos port — M3
-- Per-package import flip — M5
+| Capability | Status | PR |
+|---|---|---|
+| Single-voter Propose round-trip | ✅ | PR 1 |
+| Equivalence harness (v1 ↔ v2) | ✅ | PR 2-3 |
+| Inbound RequestVote (Raft §5.4) | ✅ | PR 4 |
+| Inbound AppendEntries (heartbeat path) | ✅ | PR 5a |
+| Election state machine + heartbeat | ✅ | PR 5a |
+| Multi-voter election (3+ nodes) | ✅ | PR 5a-5b |
+| 3-voter election equivalence | ✅ | PR 5b |
+| Log replication (happy path) | ✅ | PR 6a |
+| Log replication 3-voter equivalence | ✅ | PR 6a |
+| Log conflict handling + truncation | ✅ | PR 6b |
+| Conflict-term hint backoff (§5.3 optimization) | ✅ | PR 6b |
+| Bootstrap / Configuration() (read API) | ✅ | PR 7 |
+| Membership change (AddVoter / RemoveVoter / etc.) | ⏳ stub | M2 |
+| Persistence (LogStore) | ⏳ | M2 |
+| Snapshots | ⏳ | M2 |
+| Joint consensus (§4.3) | ⏳ | M2 |
+| ReadIndex linearizable reads | ⏳ | M2 |
+| Property-based tests + chaos suite | ⏳ | M3 |
+| Production caller migration | ⏳ | M5 |
 
 ## Caller migration (deferred)
 
