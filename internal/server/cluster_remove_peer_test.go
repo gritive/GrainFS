@@ -43,22 +43,26 @@ func (f *fakeClusterInfo) Term() uint64        { return f.term }
 func (f *fakeClusterInfo) LeaderID() string    { return f.leaderID }
 func (f *fakeClusterInfo) Peers() []string     { return f.peers }
 func (f *fakeClusterInfo) LivePeers() []string { return f.livePeers }
-func (f *fakeClusterInfo) PeerAddrs() map[string]string {
-	out := make(map[string]string, len(f.peerAddrs))
+func (f *fakeClusterInfo) Snapshot() cluster.ClusterStatus {
+	peerAddrs := make(map[string]string, len(f.peerAddrs))
 	for k, v := range f.peerAddrs {
-		out[k] = v
+		peerAddrs[k] = v
 	}
-	return out
-}
-func (f *fakeClusterInfo) PeerStates() map[string]string {
-	out := make(map[string]string, len(f.peerStates))
+	peerStates := make(map[string]string, len(f.peerStates))
 	for k, v := range f.peerStates {
-		out[k] = v
+		peerStates[k] = v
 	}
-	return out
+	return cluster.ClusterStatus{
+		PeerSnapshot: append([]cluster.PeerLivenessRow(nil), f.snapshot...),
+		PeerAddrs:    peerAddrs,
+		PeerStates:   peerStates,
+	}
 }
-func (f *fakeClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
-	return append([]cluster.PeerLivenessRow(nil), f.snapshot...)
+func (f *fakeClusterInfo) ObjectIndexSummary(string) cluster.ObjectIndexSummary {
+	return cluster.ObjectIndexSummary{}
+}
+func (f *fakeClusterInfo) PlacementReport(string, string, int) cluster.PlacementReport {
+	return cluster.PlacementReport{}
 }
 
 type fakeTopologyClusterInfo struct {
@@ -67,23 +71,20 @@ type fakeTopologyClusterInfo struct {
 	groups      []cluster.ShardGroupEntry
 }
 
-func (f *fakeTopologyClusterInfo) BucketAssignments() map[string]string {
-	out := make(map[string]string, len(f.assignments))
+func (f *fakeTopologyClusterInfo) Snapshot() cluster.ClusterStatus {
+	snap := f.fakeClusterInfo.Snapshot()
+	snap.BucketAssignments = make(map[string]string, len(f.assignments))
 	for k, v := range f.assignments {
-		out[k] = v
+		snap.BucketAssignments[k] = v
 	}
-	return out
-}
-
-func (f *fakeTopologyClusterInfo) ShardGroups() []cluster.ShardGroupEntry {
-	out := make([]cluster.ShardGroupEntry, 0, len(f.groups))
+	snap.ShardGroups = make([]cluster.ShardGroupEntry, 0, len(f.groups))
 	for _, group := range f.groups {
-		out = append(out, cluster.ShardGroupEntry{
+		snap.ShardGroups = append(snap.ShardGroups, cluster.ShardGroupEntry{
 			ID:      group.ID,
 			PeerIDs: append([]string(nil), group.PeerIDs...),
 		})
 	}
-	return out
+	return snap
 }
 
 type fakeClusterInfoWithoutSnapshot struct {
@@ -101,6 +102,15 @@ func (f *fakeClusterInfoWithoutSnapshot) Term() uint64        { return f.term }
 func (f *fakeClusterInfoWithoutSnapshot) LeaderID() string    { return f.leaderID }
 func (f *fakeClusterInfoWithoutSnapshot) Peers() []string     { return f.peers }
 func (f *fakeClusterInfoWithoutSnapshot) LivePeers() []string { return f.livePeers }
+func (f *fakeClusterInfoWithoutSnapshot) Snapshot() cluster.ClusterStatus {
+	return cluster.ClusterStatus{}
+}
+func (f *fakeClusterInfoWithoutSnapshot) ObjectIndexSummary(string) cluster.ObjectIndexSummary {
+	return cluster.ObjectIndexSummary{}
+}
+func (f *fakeClusterInfoWithoutSnapshot) PlacementReport(string, string, int) cluster.PlacementReport {
+	return cluster.PlacementReport{}
+}
 
 func liveMetaSnapshot(ids ...string) []cluster.PeerLivenessRow {
 	rows := make([]cluster.PeerLivenessRow, 0, len(ids))
