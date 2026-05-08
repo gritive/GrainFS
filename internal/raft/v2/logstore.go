@@ -20,6 +20,13 @@ var ErrLogIndexOutOfRange = errors.New("raftv2: log index out of range")
 // implementations may additionally return I/O errors; those propagate up and
 // should also cause a panic (log corruption is not recoverable without a
 // crash-recovery procedure handled by PR 11+).
+//
+// Canonical Command form: callers and implementations should treat
+// `len(Command) == 0` as equivalent to `Command == nil`. Persistent
+// implementations are free to round-trip an empty []byte as nil
+// (badgerLogStore does so). Application FSMs MUST length-check rather than
+// nil-check Command, especially for LogEntryNoOp (Command is always nil for
+// no-ops).
 type LogStore interface {
 	// FirstIndex returns the index of the first entry in the log.
 	// Returns 1 when the log is empty (next append goes to index 1).
