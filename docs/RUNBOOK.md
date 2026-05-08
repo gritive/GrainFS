@@ -275,11 +275,11 @@ grainfs serve \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
-### Optional: Pull-through cache for migration (v0.0.115.0+)
+### Optional: Pull-through cache for migration (v0.0.123.0+)
 
 If migrating from another S3-compatible source, register the upstream per
 bucket via the admin UDS. The `--upstream*` cmdline flags were removed in
-v0.0.115.0; the IAM-managed approach replaces them.
+v0.0.123.0; the IAM-managed approach replaces them.
 
 ```bash
 # Register the upstream for bucket "legacy-data".

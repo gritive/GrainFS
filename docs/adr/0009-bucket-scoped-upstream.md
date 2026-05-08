@@ -94,9 +94,9 @@ S3 clients with lazy invalidation on rotation.
 
 - **Snapshot compatibility (per /plan-eng-review override A1):** the IAM
   snapshot stays at version 3. The bucket-upstreams section is appended
-  as TRAILER bytes after the existing revoked-AKs section. Pre-v0.0.115
+  as TRAILER bytes after the existing revoked-AKs section. Pre-v0.0.123
   readers stop at their existing `return nil` after the revoked loop and
-  ignore the trailing bytes; v0.0.115+ readers consume the trailer.
+  ignore the trailing bytes; v0.0.123+ readers consume the trailer.
   Bidirectional rolling upgrade is preserved — downgrading a node back
   to v0.0.114 just makes the per-bucket records invisible until upgraded
   again. No "forward-only" trap.

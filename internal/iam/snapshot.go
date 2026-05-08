@@ -91,8 +91,8 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 		}
 	}
 
-	// Trailer (added in v0.0.115.0 for bucket-scoped upstream credentials).
-	// Forward-compatible: pre-v0.0.115 readers stop after the revoked-AKs
+	// Trailer (added in v0.0.123.0 for bucket-scoped upstream credentials).
+	// Forward-compatible: pre-v0.0.123 readers stop after the revoked-AKs
 	// section and ignore trailing bytes (their ReadSnapshot ends with `return
 	// nil` immediately after the revoked loop). Per /plan-eng-review override
 	// A1 — keep version at 3 to preserve bidirectional rolling upgrade.
@@ -202,7 +202,7 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 	}
 
 	// Trailer: bucket-upstreams. EOF here means the snapshot was emitted by a
-	// pre-v0.0.115 binary that didn't write the trailer — treat as zero
+	// pre-v0.0.123 binary that didn't write the trailer — treat as zero
 	// records (per A1 bidirectional-compat property).
 	nU, err := readUint32(r)
 	if err != nil {
