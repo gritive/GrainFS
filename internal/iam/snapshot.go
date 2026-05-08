@@ -210,9 +210,22 @@ func buildSACreatePayload(sa ServiceAccount) []byte {
 
 func buildKeyCreatePayload(k AccessKey) []byte {
 	b := flatbuffers.NewBuilder(128)
+	// Pre-create all offsets before StartObject.
 	ak := b.CreateString(k.AccessKey)
 	sa := b.CreateString(k.SAID)
 	encVec := b.CreateByteVector(k.SecretKeyEnc)
+	var scopeVec flatbuffers.UOffsetT
+	if len(k.BucketScope) > 0 {
+		offs := make([]flatbuffers.UOffsetT, len(k.BucketScope))
+		for i, s := range k.BucketScope {
+			offs[i] = b.CreateString(s)
+		}
+		iampb.KeyCreatePayloadStartBucketScopeVector(b, len(k.BucketScope))
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		scopeVec = b.EndVector(len(k.BucketScope))
+	}
 	iampb.KeyCreatePayloadStart(b)
 	iampb.KeyCreatePayloadAddAccessKey(b, ak)
 	iampb.KeyCreatePayloadAddSecretKeyEnc(b, encVec)
@@ -220,6 +233,9 @@ func buildKeyCreatePayload(k AccessKey) []byte {
 	iampb.KeyCreatePayloadAddCreatedAtUnixNs(b, k.CreatedAt.UnixNano())
 	if k.ExpiresAt != nil {
 		iampb.KeyCreatePayloadAddExpiresAtUnixNs(b, k.ExpiresAt.UnixNano())
+	}
+	if len(k.BucketScope) > 0 {
+		iampb.KeyCreatePayloadAddBucketScope(b, scopeVec)
 	}
 	b.Finish(iampb.KeyCreatePayloadEnd(b))
 	return b.FinishedBytes()

@@ -31,6 +31,10 @@ func (m *MetaProposer) ProposeKeyCreate(ctx context.Context, k AccessKey) error 
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMKeyCreate, buildKeyCreatePayload(k))
 }
 
+func (m *MetaProposer) ProposeKeyCreateScoped(ctx context.Context, k AccessKey) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMKeyCreateScoped, buildKeyCreatePayload(k))
+}
+
 func (m *MetaProposer) ProposeKeyRevoke(ctx context.Context, accessKey string) error {
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMKeyRevoke, buildKeyRevokePayload(accessKey))
 }

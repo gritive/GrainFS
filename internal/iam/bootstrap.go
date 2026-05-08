@@ -21,6 +21,7 @@ type Proposer interface {
 	ProposeSACreate(ctx context.Context, sa ServiceAccount) error
 	ProposeSADelete(ctx context.Context, saID string) error
 	ProposeKeyCreate(ctx context.Context, k AccessKey) error
+	ProposeKeyCreateScoped(ctx context.Context, k AccessKey) error
 	ProposeKeyRevoke(ctx context.Context, accessKey string) error
 	ProposeGrantPut(ctx context.Context, g Grant) error
 	ProposeGrantDelete(ctx context.Context, saID, bucket string) error
