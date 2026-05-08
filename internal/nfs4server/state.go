@@ -3,7 +3,6 @@ package nfs4server
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,21 +55,17 @@ type ExchangeIDResult struct {
 	SequenceID uint32
 }
 
-// fhState is an immutable snapshot of the filehandle maps.
-// Replaced atomically on every write (CoW). Reads take no lock.
-type fhState struct {
-	fhToPath map[FileHandle]string
-	pathToFH map[string]FileHandle
-}
-
 // StateManager tracks NFSv4 state: filehandles, clients, and open files.
 //
-// Hot path (ResolveFH / GetOrCreateFH cache-hit) touches zero mutexes:
-// it loads an atomic pointer and reads an immutable map snapshot.
-// Writers serialise on writeMu and publish a new snapshot via Store.
+// Filehandle maps live under a single RWMutex. The previous CoW design
+// allocated O(N) per insert (full map clone), which made small-file
+// create-storm workloads (e.g., container build extracting tens of thousands
+// of paths) burn GBs in `maps.Copy`. Per-op RLock cost is negligible vs
+// network/syscall latency on the NFS path.
 type StateManager struct {
-	fhMaps  atomic.Pointer[fhState] // read via Load(), no lock
-	writeMu sync.Mutex              // serialises writers
+	fhMu     sync.RWMutex
+	fhToPath map[FileHandle]string
+	pathToFH map[string]FileHandle
 
 	nextClientID atomic.Uint64
 	clients      sync.Map // map[uint64]*ClientState — lock-free reads
@@ -103,21 +98,19 @@ type StateManager struct {
 
 // NewStateManager creates a state manager.
 func NewStateManager() *StateManager {
-	sm := &StateManager{}
+	sm := &StateManager{
+		fhToPath: make(map[FileHandle]string),
+		pathToFH: make(map[string]FileHandle),
+	}
 	sm.nextClientID.Store(1)
 	sm.nextStateID.Store(1)
 	if _, err := rand.Read(sm.WriteVerf[:]); err != nil {
 		panic(err)
 	}
 
-	initial := &fhState{
-		fhToPath: make(map[FileHandle]string),
-		pathToFH: make(map[string]FileHandle),
-	}
 	rootFH := FileHandle{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
-	initial.fhToPath[rootFH] = "/"
-	initial.pathToFH["/"] = rootFH
-	sm.fhMaps.Store(initial)
+	sm.fhToPath[rootFH] = "/"
+	sm.pathToFH["/"] = rootFH
 
 	sm.dirs.Store("/", time.Now().UnixNano())
 
@@ -158,61 +151,43 @@ func (sm *StateManager) RemoveDir(p string) {
 }
 
 // GetOrCreateFH returns the filehandle for a path, creating one if needed.
-// Cache hits (the common case) return with no lock acquired.
 func (sm *StateManager) GetOrCreateFH(path string) FileHandle {
-	// Fast path: load snapshot, no lock.
-	if fh, ok := sm.fhMaps.Load().pathToFH[path]; ok {
+	sm.fhMu.RLock()
+	if fh, ok := sm.pathToFH[path]; ok {
+		sm.fhMu.RUnlock()
 		return fh
 	}
+	sm.fhMu.RUnlock()
 
-	// Slow path: CoW update under write lock.
-	sm.writeMu.Lock()
-	defer sm.writeMu.Unlock()
-
-	cur := sm.fhMaps.Load()
-	if fh, ok := cur.pathToFH[path]; ok { // re-check after acquiring lock
+	sm.fhMu.Lock()
+	defer sm.fhMu.Unlock()
+	if fh, ok := sm.pathToFH[path]; ok { // re-check after upgrading
 		return fh
 	}
-
 	fh := generateFH()
-	next := &fhState{
-		fhToPath: make(map[FileHandle]string, len(cur.fhToPath)+1),
-		pathToFH: make(map[string]FileHandle, len(cur.pathToFH)+1),
-	}
-	maps.Copy(next.fhToPath, cur.fhToPath)
-	maps.Copy(next.pathToFH, cur.pathToFH)
-	next.fhToPath[fh] = path
-	next.pathToFH[path] = fh
-	sm.fhMaps.Store(next)
+	sm.fhToPath[fh] = path
+	sm.pathToFH[path] = fh
 	return fh
 }
 
-// ResolveFH returns the path for a filehandle. No lock acquired.
+// ResolveFH returns the path for a filehandle.
 func (sm *StateManager) ResolveFH(fh FileHandle) (string, bool) {
-	path, ok := sm.fhMaps.Load().fhToPath[fh]
+	sm.fhMu.RLock()
+	path, ok := sm.fhToPath[fh]
+	sm.fhMu.RUnlock()
 	return path, ok
 }
 
 // InvalidateFH removes the filehandle mapping (e.g., after delete).
 func (sm *StateManager) InvalidateFH(path string) {
-	sm.writeMu.Lock()
-	defer sm.writeMu.Unlock()
-
-	cur := sm.fhMaps.Load()
-	fh, ok := cur.pathToFH[path]
+	sm.fhMu.Lock()
+	defer sm.fhMu.Unlock()
+	fh, ok := sm.pathToFH[path]
 	if !ok {
 		return
 	}
-
-	next := &fhState{
-		fhToPath: make(map[FileHandle]string, len(cur.fhToPath)),
-		pathToFH: make(map[string]FileHandle, len(cur.pathToFH)),
-	}
-	maps.Copy(next.fhToPath, cur.fhToPath)
-	maps.Copy(next.pathToFH, cur.pathToFH)
-	delete(next.fhToPath, fh)
-	delete(next.pathToFH, path)
-	sm.fhMaps.Store(next)
+	delete(sm.fhToPath, fh)
+	delete(sm.pathToFH, path)
 }
 
 // RootFH returns the root filehandle.
