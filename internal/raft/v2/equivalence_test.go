@@ -78,44 +78,38 @@ type equivalentRaft interface {
 }
 
 // v1Adapter wraps internal/raft.Node behind equivalentRaft.
-//
-// v1 does not expose CommittedIndex publicly; the harness approximates it by
-// remembering the highest index seen on ApplyCh (= last applied entry, which
-// for committed-then-applied semantics equals committedIndex up to that
-// point). This is sufficient for equivalence: both sides converge to the same
-// "last delivered index" after DrainApply returns. If a future scenario needs
-// strict committedIndex semantics that diverge from lastApplied (e.g. commit
-// without apply), this proxy must be revisited.
 type v1Adapter struct {
-	n                *v1.Node
-	lastDrainedIndex uint64
+	n *v1.Node
+	t *testing.T // set in Start; transport stubs dereference this
 }
 
 func newV1Adapter(id string, peers []string) *v1Adapter {
 	cfg := v1.DefaultConfig(id, peers)
-	// Tighten election timeout so single-voter promotion is fast in tests.
-	// Asymmetric vs v2 (which auto-promotes inside run()) — see decision note
-	// at top of file: "same Config" applies at observable-behavior level, not
-	// at config-construction level.
+	// Keep election timeout short so the single-voter node promotes quickly.
+	// A very long timeout would block the initial Follower→Leader transition.
+	// Re-election after winning is not possible for a stable single-voter
+	// leader (hasQuorum returns true immediately; no step-down path).
 	cfg.ElectionTimeout = 50 * time.Millisecond
 	n := v1.NewNode(cfg)
-	// Stub transports: never invoked for single-voter (PreVote returns true
-	// immediately when len(peers)==0), but v1 internals dereference the func
-	// pointers on multi-voter paths. Setting them up-front keeps the adapter
-	// usable as scenarios grow.
-	n.SetTransport(
-		func(peer string, args *v1.RequestVoteArgs) (*v1.RequestVoteReply, error) {
-			return &v1.RequestVoteReply{}, nil
-		},
-		func(peer string, args *v1.AppendEntriesArgs) (*v1.AppendEntriesReply, error) {
-			return &v1.AppendEntriesReply{}, nil
-		},
-	)
 	return &v1Adapter{n: n}
 }
 
 func (a *v1Adapter) Start(t *testing.T) {
 	t.Helper()
+	a.t = t
+	// Install transport stubs now that t is available. Fatal on any RPC: if a
+	// future scenario reaches multi-voter code paths without proper transport
+	// wiring, silent zero-value returns would mask election failures.
+	a.n.SetTransport(
+		func(peer string, args *v1.RequestVoteArgs) (*v1.RequestVoteReply, error) {
+			a.t.Fatalf("v1 RequestVote transport called unexpectedly (peer=%s)", peer)
+			return nil, nil
+		},
+		func(peer string, args *v1.AppendEntriesArgs) (*v1.AppendEntriesReply, error) {
+			a.t.Fatalf("v1 AppendEntries transport called unexpectedly (peer=%s)", peer)
+			return nil, nil
+		},
+	)
 	// Bootstrap is a no-op for in-memory nodes (store == nil) but the harness
 	// follows the documented v1 startup sequence so future PRs adding a store
 	// stay correct without harness changes.
@@ -143,14 +137,12 @@ func (a *v1Adapter) DrainApply(n int, timeout time.Duration) []harnessEntry {
 			if !ok {
 				return out
 			}
-			entry := harnessEntry{
+			out = append(out, harnessEntry{
 				Term:    e.Term,
 				Index:   e.Index,
 				Command: append([]byte(nil), e.Command...),
 				Type:    int8(e.Type),
-			}
-			a.lastDrainedIndex = entry.Index
-			out = append(out, entry)
+			})
 		case <-deadline.C:
 			return out
 		}
@@ -162,7 +154,7 @@ func (a *v1Adapter) State() harnessState    { return harnessState(a.n.State()) }
 func (a *v1Adapter) Term() uint64           { return a.n.Term() }
 func (a *v1Adapter) LeaderID() string       { return a.n.LeaderID() }
 func (a *v1Adapter) IsLeader() bool         { return a.n.IsLeader() }
-func (a *v1Adapter) CommittedIndex() uint64 { return a.lastDrainedIndex }
+func (a *v1Adapter) CommittedIndex() uint64 { return a.n.CommittedIndex() }
 
 // v2Adapter wraps internal/raft/v2.Node behind equivalentRaft.
 type v2Adapter struct {
