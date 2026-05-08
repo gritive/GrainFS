@@ -28,6 +28,8 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--snapshot-interval", "500ms",
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

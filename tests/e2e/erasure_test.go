@@ -48,6 +48,8 @@ func startECServer(t *testing.T) (*s3.Client, string, func()) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -99,6 +101,8 @@ func startECServerWithScrub(t *testing.T, scrubInterval time.Duration) (*s3.Clie
 		"--scrub-interval", scrubInterval.String(),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

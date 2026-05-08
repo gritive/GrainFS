@@ -126,6 +126,10 @@ type Server struct {
 	// authorization decision per request. See CONTEXT.md
 	// § "S3 Request Authorization Decision".
 	authz *s3auth.RequestAuthorizer
+	// mutations fans out S3 data-plane mutations (object write/delete/copy,
+	// bucket create/delete) to registered observers. Wired in NewServer
+	// after option application; nil-safe via *MutationBroker receivers.
+	mutations *MutationBroker
 	// iamProposer issues IAM mutations through Raft (P5). nil before the
 	// meta-FSM is ready or in anonymous mode; CreateBucket falls back to
 	// no-op auto-grant when nil.
@@ -419,6 +423,7 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		opt(s)
 	}
 	s.buildAuthorizer()
+	s.buildMutationBroker()
 	if s.mutationGate == nil {
 		s.mutationGate = NewMutationGate(nil)
 	}
@@ -502,6 +507,17 @@ func (s *Server) buildAuthorizer() {
 		s.policyStore,
 		s.iamAudit,
 		iam.PrincipalFromContext,
+	)
+}
+
+// buildMutationBroker wires the mutation broker with the two built-in
+// observers (sync metrics + async event emit). Called from NewServer
+// after option application so observer construction sees the final
+// emit closure.
+func (s *Server) buildMutationBroker() {
+	s.mutations = NewMutationBroker(
+		newMetricsObserver(),
+		newEventObserver(s.emitEvent),
 	)
 }
 

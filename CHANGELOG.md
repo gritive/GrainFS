@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.110.0] - 2026-05-08 — IAM-only auth, drop --access-key flag
+## [0.0.112.0] - 2026-05-08 — IAM-only auth, drop --access-key flag
 
 ### Removed (BREAKING)
 
@@ -61,6 +61,52 @@ Pre-1.0 product, no migration support. For existing clusters:
   `grainfs iam sa create admin --endpoint <data>/admin.sock` to
   bootstrap. See `docs/adr/0008-drop-access-key-flag.md` for the full
   rationale.
+
+### Note on master drift
+
+This PR was rebased twice over master while in flight: PR #250
+(`v0.0.107.0` RequestAuthorizer), PR #251 (`v0.0.108.0` raft v2 M1),
+PR #252 (raft v2 M2 prep), PR #253 (`v0.0.110.0` standalone E2E
+test flag fixes), and PR #254 (`v0.0.111.0` MutationBroker) all
+landed first. PR #253 is **superseded by this PR**: its `--access-key`
+re-additions are removed here in favor of the new `bootstrapAdminViaUDS()`
+helper. PR #250's `RequestAuthorizer.Decide` architecture is preserved;
+the old sticky-bit gates are replaced by a no-op `Store.AuthEnabled() bool { return true }`
+compat shim.
+
+## [0.0.111.0] - 2026-05-08 — MutationBroker + multipart/copy emit fixes
+
+### Added
+
+- `internal/server.MutationBroker`: single seam dispatching S3 mutation observations to metrics + event observers, replacing ad-hoc fan-out across 7 handler sites. Adding a new mutation kind becomes a compile-time error in every observer.
+- `metricsObserver` (sync) and `eventObserver` (async via injected emit closure) implement `MutationObserver`. `eventObserver` mirrors the closure-injection pattern at `heal_emitter.go:30` and preserves the existing bounded-channel drop-on-full semantics.
+- `Server.mutations *MutationBroker` field, wired in `NewWithServerStorage` after `buildAuthorizer()` so the observer captures the final `s.emitEvent` closure.
+
+### Fixed
+
+- `handleCompleteMultipartUpload` now emits `EventActionPut` to the event store at multipart finalize. Previously updated metrics only, leaving multipart-uploaded objects invisible to event subscribers (audit, dashboards, eventstore queries).
+- `handleCopyObject` now emits `EventActionPut` at the destination to the event store. Previously updated metrics only, leaving copies invisible to event subscribers. Source bucket/key are intentionally not encoded — `eventstore.Event` has no source field; copy surfaces as Put@destination, matching how legacy PutObject handlers emit.
+
+### Changed
+
+- 7 mutation call sites in `internal/server/handlers.go` migrated from ad-hoc `recordObjectWriteMetrics + s.emitEvent` pairs to single `s.mutations.OnObjectWrite/Delete/Copy/BucketCreate/BucketDelete` calls. Locality moved from 7 scattered sites to 1 broker; new observers (audit attribution, retention, lifecycle hooks) can now be added in one place instead of 7.
+
+### Notes
+
+- Read events (`EventActionGet` at handlers.go:550, 740) and system events (`EventTypeSystem` at handlers.go:1606, 1687) intentionally remain on the legacy `s.emitEvent` path — different conceptual seam.
+- No external `RegisterMutationObserver` API yet (YAGNI per locked decision R1). Add when an external component (plugin, audit shim) actually wants to register.
+
+## [0.0.110.0] - 2026-05-08 — fix standalone E2E tests broken since v0.0.98.0
+
+### Fixed
+
+- 11 E2E tests (`tests/e2e/{auto_snapshot,backup,cluster,dashboard_healing_card,encryption,erasure,jepsen_impl,migration_injector,pullthrough,restart_recovery,smoke}_test.go`) now pass `--access-key test --secret-key test` to their standalone `serve` invocations. These tests roll their own `exec.Command(binary, "serve", …)` rather than going through `helpers_test.go:Start()` (which already passes the flags), and were silently rejected with `AccessDenied: unknown access key: test` since v0.0.98.0 (#237 IAM Foundation) made the SigV4 verifier IAM-aware. The README still advertises an "익명 모드 (개발용)" mode for omitting the flags, but the code path went away with #237 — the README claim is currently a lie and is left for a separate cleanup PR.
+- `tests/e2e/migration_injector_test.go`: pass `--src-access-key/--src-secret-key/--dst-access-key/--dst-secret-key` to the `migrate inject` subcommand so it can sign requests against both source and destination servers.
+- `tests/e2e/pullthrough_test.go`: pass `--upstream-access-key/--upstream-secret-key` to the local server so its pull-through fetches authenticate against the upstream.
+
+### Notes
+
+- Two pre-existing baseline failures surfaced during this audit and are NOT addressed here (each fails on origin/master without these test fixes, so they are independent issues): `TestRestartRecovery_SweepsOrphanArtifacts` and `TestAutoSnapshot_CreatesSnapshotAutomatically` show timing/cleanup issues unrelated to authn. Tracked separately.
 
 ## [0.0.109.0] - 2026-05-08 — raft v2 M2 prep: 4 correctness fixes
 
