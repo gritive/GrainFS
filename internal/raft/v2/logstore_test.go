@@ -238,3 +238,98 @@ func TestLogStore_Entry_OutOfRange(t *testing.T) {
 		})
 	}
 }
+
+// TestLogStore_CompactBefore exercises the snapshot-driven compaction path
+// for both memLogStore and badgerLogStore. After CompactBefore(N):
+//   - FirstIndex() == N+1
+//   - Entries 1..N return ErrLogIndexOutOfRange
+//   - Entries N+1..last still readable
+//   - TermAt(N) returns the snapshot's prevTerm (boundary fast path)
+//   - TermAt(<N) returns ErrLogIndexOutOfRange
+//   - Append at N+last+1 still works (LastIndex grows past the boundary)
+//   - EntriesFrom with startIdx < FirstIndex returns ErrLogIndexOutOfRange
+func TestLogStore_CompactBefore(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			// Seed indices 1..10, with mixed terms so TermAt(boundary) is
+			// distinguishable from neighbours.
+			for i := uint64(1); i <= 10; i++ {
+				term := uint64(1)
+				if i >= 6 {
+					term = 2
+				}
+				require.NoError(t, s.Append([]LogEntry{{Term: term, Index: i}}))
+			}
+
+			// Compact through index 5. Entry at idx 5 has Term=1 → prevTerm=1.
+			require.NoError(t, s.CompactBefore(5))
+
+			require.Equal(t, uint64(6), s.FirstIndex(), "FirstIndex must advance to 6")
+			require.Equal(t, uint64(10), s.LastIndex(), "LastIndex must remain 10")
+
+			for i := uint64(1); i <= 5; i++ {
+				_, err := s.Entry(i)
+				require.ErrorIs(t, err, ErrLogIndexOutOfRange, "Entry(%d) must be compacted", i)
+			}
+			for i := uint64(6); i <= 10; i++ {
+				e, err := s.Entry(i)
+				require.NoError(t, err, "Entry(%d) must still be present", i)
+				require.Equal(t, i, e.Index)
+			}
+
+			// TermAt(5) — boundary fast path — returns prevTerm (=1, the
+			// term of the now-discarded entry at idx 5).
+			term, err := s.TermAt(5)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), term, "TermAt(boundary) returns prevTerm")
+
+			// TermAt(4) — strictly below boundary — errors.
+			_, err = s.TermAt(4)
+			require.ErrorIs(t, err, ErrLogIndexOutOfRange)
+
+			// EntriesFrom below FirstIndex must error.
+			_, err = s.EntriesFrom(5, 10)
+			require.ErrorIs(t, err, ErrLogIndexOutOfRange,
+				"EntriesFrom(<FirstIndex) must reject")
+
+			// Append continues working past LastIndex.
+			require.NoError(t, s.Append([]LogEntry{{Term: 3, Index: 11}}))
+			require.Equal(t, uint64(11), s.LastIndex())
+			e, err := s.Entry(11)
+			require.NoError(t, err)
+			require.Equal(t, uint64(3), e.Term)
+		})
+	}
+}
+
+// TestLogStore_CompactBefore_Idempotent: calling CompactBefore at or below
+// the current FirstIndex is a no-op.
+func TestLogStore_CompactBefore_Idempotent(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			for i := uint64(1); i <= 5; i++ {
+				require.NoError(t, s.Append([]LogEntry{{Term: 1, Index: i}}))
+			}
+			require.NoError(t, s.CompactBefore(3))
+			require.Equal(t, uint64(4), s.FirstIndex())
+			// Re-compact at a lower boundary (already covered) — no-op.
+			require.NoError(t, s.CompactBefore(2))
+			require.Equal(t, uint64(4), s.FirstIndex(), "FirstIndex must not regress")
+		})
+	}
+}
+
+// TestLogStore_CompactBefore_BeyondLast: CompactBefore at boundary > LastIndex
+// returns ErrLogIndexOutOfRange (no entry covers that index).
+func TestLogStore_CompactBefore_BeyondLast(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.NoError(t, s.Append([]LogEntry{{Term: 1, Index: 1}}))
+			err := s.CompactBefore(99)
+			require.ErrorIs(t, err, ErrLogIndexOutOfRange)
+		})
+	}
+}

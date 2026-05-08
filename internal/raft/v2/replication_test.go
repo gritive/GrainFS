@@ -219,6 +219,10 @@ func (d *dropAETransport) SendAppendEntries(peer string, args *AppendEntriesArgs
 	return nil, ErrUnknownPeer
 }
 
+func (d *dropAETransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return d.inner.SendInstallSnapshot(peer, args)
+}
+
 // TestReplication_LeaderStepDownReleasesWaiters: a Leader with an outstanding
 // ProposeWait that observes a higher-term inbound AppendEntries must drain
 // proposeWaiters and reply ErrProposalFailed — otherwise the caller blocks
@@ -587,6 +591,10 @@ func (c *countingAETransport) SendAppendEntries(peer string, args *AppendEntries
 	return c.inner.SendAppendEntries(peer, args)
 }
 
+func (c *countingAETransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return c.inner.SendInstallSnapshot(peer, args)
+}
+
 // capturingAETransport wraps a Transport and records the maximum number of
 // entries seen in any single SendAppendEntries call for a given peer.
 // RequestVote passes through transparently.
@@ -607,6 +615,10 @@ func (c *capturingAETransport) SendAppendEntries(peer string, args *AppendEntrie
 	}
 	c.mu.Unlock()
 	return c.inner.SendAppendEntries(peer, args)
+}
+
+func (c *capturingAETransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return c.inner.SendInstallSnapshot(peer, args)
 }
 
 // TestBuildAE_RespectsMaxEntriesPerAE verifies that buildAppendEntriesArgs caps
@@ -902,6 +914,10 @@ type blockingAETransport struct {
 
 func (b *blockingAETransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
 	return b.inner.SendRequestVote(peer, args)
+}
+
+func (b *blockingAETransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return b.inner.SendInstallSnapshot(peer, args)
 }
 
 func (b *blockingAETransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {

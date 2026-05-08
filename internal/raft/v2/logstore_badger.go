@@ -29,9 +29,37 @@ type badgerLogStore struct {
 	db        *badger.DB
 	keyPrefix []byte // copied on construction; immutable after that
 	lastIdx   atomic.Uint64
+	// firstIdx / prevTerm mirror memLogStore's compaction state. They are
+	// persisted under dedicated meta keys (see metaFirstIndexKey / metaPrevTermKey)
+	// and updated atomically with the prefix-key range deletion in CompactBefore.
+	// Loaded on open (newBadgerLogStore) and updated only by CompactBefore.
+	// Read on FirstIndex/TermAt/EntriesFrom, written only inside the actor goroutine.
+	firstIdx atomic.Uint64
+	prevTerm atomic.Uint64
 }
 
 const entryHeaderSize = 8 + 8 + 1 + 4 // Term + Index + Type + CommandLen
+
+// Meta keys live under keyPrefix + 0xFF + suffix. The 0xFF marker after the
+// caller's prefix sorts AFTER all be64-encoded entry keys (be64(2^64-1) has
+// every byte 0xFF, so meta keys with non-zero suffixes still sort strictly
+// after any conceivable index key — and indices in practice are tiny).
+// More importantly, meta keys have length != len(keyPrefix)+8, so the entry-
+// scan loop (which validates that exact length) skips them cleanly.
+const (
+	metaMarker           = 0xFF
+	metaFirstIndexSuffix = "meta/firstIndex"
+	metaPrevTermSuffix   = "meta/prevTerm"
+)
+
+// makeMetaKey returns prefix || 0xFF || suffix.
+func (s *badgerLogStore) makeMetaKey(suffix string) []byte {
+	key := make([]byte, len(s.keyPrefix)+1+len(suffix))
+	copy(key, s.keyPrefix)
+	key[len(s.keyPrefix)] = metaMarker
+	copy(key[len(s.keyPrefix)+1:], suffix)
+	return key
+}
 
 // newBadgerLogStore opens a LogStore view into db under the given prefix.
 // Multiple Raft groups can coexist in one Badger DB by using distinct prefixes
@@ -45,6 +73,28 @@ func newBadgerLogStore(db *badger.DB, prefix []byte) (*badgerLogStore, error) {
 	copy(p, prefix)
 
 	s := &badgerLogStore{db: db, keyPrefix: p}
+	// Default firstIdx == 1 (no compaction). prevTerm starts at 0 (no
+	// snapshot covers any entry yet). Loaded from meta keys below if present.
+	s.firstIdx.Store(1)
+
+	// Load compaction meta first — if a previous run left the log compacted,
+	// FirstIndex must reflect that before any caller queries.
+	err := db.View(func(txn *badger.Txn) error {
+		if v, err := readMetaUint64(txn, s.makeMetaKey(metaFirstIndexSuffix)); err != nil {
+			return fmt.Errorf("badgerLogStore: load firstIndex: %w", err)
+		} else if v > 0 {
+			s.firstIdx.Store(v)
+		}
+		if v, err := readMetaUint64(txn, s.makeMetaKey(metaPrevTermSuffix)); err != nil {
+			return fmt.Errorf("badgerLogStore: load prevTerm: %w", err)
+		} else {
+			s.prevTerm.Store(v)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Find the last index by seeking to the end of the prefix range and
 	// validate that the highest key's value decodes — defense against
@@ -52,47 +102,76 @@ func newBadgerLogStore(db *badger.DB, prefix []byte) (*badgerLogStore, error) {
 	// happens to share a leading subsequence, or non-LogStore data sharing
 	// the keyspace). A decode failure on the highest key means the prefix
 	// is unsafe; fail loudly rather than seed lastIdx with garbage.
-	err := db.View(func(txn *badger.Txn) error {
+	//
+	// Meta keys also live under this prefix (with length != len(p)+8). The
+	// reverse seek walks past them by length-validating each candidate key.
+	err = db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Reverse = true
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		// Seek past the prefix's last possible key: prefix || 0xFF...0xFF.
+		// Seek past the prefix's last possible entry key: prefix || 0xFF...0xFF (8 bytes).
+		// Meta keys (prefix || 0xFF || suffix) sort after this seek key in some
+		// cases — we step the iterator past them by checking key length.
 		seekKey := make([]byte, len(p)+8)
 		copy(seekKey, p)
 		for i := len(p); i < len(seekKey); i++ {
 			seekKey[i] = 0xFF
 		}
-		it.Seek(seekKey)
-		if !it.ValidForPrefix(p) {
+		for it.Seek(seekKey); it.ValidForPrefix(p); it.Next() {
+			key := it.Item().Key()
+			if len(key) != len(p)+8 {
+				// Meta key (or future variant) — skip; we want only entry keys.
+				continue
+			}
+			idx := binary.BigEndian.Uint64(key[len(p):])
+			// Validate the value decodes and the encoded Index matches the key.
+			if err := it.Item().Value(func(val []byte) error {
+				e, err := decodeEntry(val)
+				if err != nil {
+					return fmt.Errorf("decode highest entry: %w", err)
+				}
+				if e.Index != idx {
+					return fmt.Errorf("encoded Index (%d) disagrees with key (%d) — possible prefix collision", e.Index, idx)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			s.lastIdx.Store(idx)
 			return nil
 		}
-		key := it.Item().Key()
-		if len(key) < len(p)+8 {
-			return fmt.Errorf("highest key under prefix is shorter than expected (%d bytes)", len(key))
-		}
-		idx := binary.BigEndian.Uint64(key[len(p):])
-		// Validate the value decodes and the encoded Index matches the key.
-		if err := it.Item().Value(func(val []byte) error {
-			e, err := decodeEntry(val)
-			if err != nil {
-				return fmt.Errorf("decode highest entry: %w", err)
-			}
-			if e.Index != idx {
-				return fmt.Errorf("encoded Index (%d) disagrees with key (%d) — possible prefix collision", e.Index, idx)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		s.lastIdx.Store(idx)
+		// No entry keys found — empty log. lastIdx stays 0; if firstIdx was
+		// loaded > 1 from meta, LastIndex() returns firstIdx-1 (compacted but
+		// no entries appended after).
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("badgerLogStore: open scan: %w", err)
 	}
 	return s, nil
+}
+
+// readMetaUint64 reads an 8-byte big-endian uint64 from the given key. Returns
+// (0, nil) when the key is not found (default state).
+func readMetaUint64(txn *badger.Txn, key []byte) (uint64, error) {
+	item, err := txn.Get(key)
+	if err == badger.ErrKeyNotFound {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var v uint64
+	err = item.Value(func(val []byte) error {
+		if len(val) != 8 {
+			return fmt.Errorf("meta value must be 8 bytes, got %d", len(val))
+		}
+		v = binary.BigEndian.Uint64(val)
+		return nil
+	})
+	return v, err
 }
 
 // makeKey encodes an index into a key under the store's prefix.
@@ -153,19 +232,37 @@ func decodeEntry(val []byte) (LogEntry, error) {
 	return LogEntry{Term: term, Index: idx, Type: typ, Command: cmd}, nil
 }
 
-// FirstIndex returns 1. Log compaction (snapshots) is not implemented until
-// PR 12+; the first valid index is always 1.
-func (s *badgerLogStore) FirstIndex() uint64 { return 1 }
+// FirstIndex returns the index of the first non-compacted entry. Equals 1
+// before any CompactBefore call; equals (snapshot's LastIncludedIndex)+1
+// after compaction.
+func (s *badgerLogStore) FirstIndex() uint64 {
+	v := s.firstIdx.Load()
+	if v == 0 {
+		return 1
+	}
+	return v
+}
 
 // LastIndex returns the index of the most recently appended entry.
-// Returns 0 on an empty store.
-// Safe to call from any goroutine (reads a cached atomic).
-func (s *badgerLogStore) LastIndex() uint64 { return s.lastIdx.Load() }
+// Returns 0 on a fresh empty store. After compaction with no subsequent
+// appends, returns FirstIndex()-1 so the next Append lands at FirstIndex().
+// Safe to call from any goroutine (reads cached atomics).
+func (s *badgerLogStore) LastIndex() uint64 {
+	last := s.lastIdx.Load()
+	if last == 0 {
+		// No entries appended yet — but compaction may have advanced the
+		// boundary. LastIndex must equal FirstIndex-1 in that case so the
+		// next Append lands at FirstIndex.
+		return s.FirstIndex() - 1
+	}
+	return last
+}
 
 // Entry returns the log entry at 1-based logical index idx.
-// Returns ErrLogIndexOutOfRange if idx == 0 or idx > LastIndex().
+// Returns ErrLogIndexOutOfRange if idx == 0, idx < FirstIndex() (compacted),
+// or idx > LastIndex().
 func (s *badgerLogStore) Entry(idx uint64) (LogEntry, error) {
-	if idx == 0 || idx > s.lastIdx.Load() {
+	if idx == 0 || idx < s.FirstIndex() || idx > s.LastIndex() {
 		return LogEntry{}, ErrLogIndexOutOfRange
 	}
 	var entry LogEntry
@@ -209,6 +306,12 @@ func (s *badgerLogStore) TermAt(idx uint64) (uint64, error) {
 	if idx == 0 {
 		return 0, nil
 	}
+	// Snapshot-boundary fast path: TermAt(firstIndex-1) returns prevTerm so
+	// the leader's PrevLogTerm at the boundary still resolves after compaction.
+	first := s.FirstIndex()
+	if idx == first-1 {
+		return s.prevTerm.Load(), nil
+	}
 	e, err := s.Entry(idx)
 	if err != nil {
 		return 0, err
@@ -223,7 +326,7 @@ func (s *badgerLogStore) Append(entries []LogEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	if entries[0].Index != s.lastIdx.Load()+1 {
+	if entries[0].Index != s.LastIndex()+1 {
 		panic("raftv2: Append: non-contiguous index")
 	}
 	// Pre-encode all entries before opening the txn so an oversized Command
@@ -269,8 +372,10 @@ func (s *badgerLogStore) TruncateAfter(idx uint64) error {
 		return nil
 	}
 
-	// Collect all keys with index > idx before mutating.
+	// Collect all keys with index > idx before mutating. Filter to entry-key
+	// length to skip the meta keys (firstIndex/prevTerm) that share the prefix.
 	var toDelete [][]byte
+	wantLen := len(s.keyPrefix) + 8
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
@@ -279,6 +384,10 @@ func (s *badgerLogStore) TruncateAfter(idx uint64) error {
 
 		startKey := s.makeKey(idx + 1)
 		for it.Seek(startKey); it.ValidForPrefix(s.keyPrefix); it.Next() {
+			key := it.Item().Key()
+			if len(key) != wantLen {
+				continue // meta key — leave alone
+			}
 			toDelete = append(toDelete, it.Item().KeyCopy(nil))
 		}
 		return nil
@@ -326,14 +435,18 @@ func (s *badgerLogStore) TruncateAfter(idx uint64) error {
 
 // EntriesFrom returns entries starting at startIdx, capped at maxEntries.
 // maxEntries == 0 means unlimited.
-// Returns ErrLogIndexOutOfRange if startIdx > LastIndex()+1.
+// Returns ErrLogIndexOutOfRange if startIdx == 0, startIdx < FirstIndex()
+// (compacted), or startIdx > LastIndex()+1.
 // Each returned entry has its Command slice freshly allocated (deep copy);
 // callers may retain entries across subsequent store mutations.
 func (s *badgerLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntry, error) {
 	if startIdx == 0 {
 		return nil, ErrLogIndexOutOfRange
 	}
-	last := s.lastIdx.Load()
+	if startIdx < s.FirstIndex() {
+		return nil, ErrLogIndexOutOfRange
+	}
+	last := s.LastIndex()
 	if startIdx > last+1 {
 		return nil, ErrLogIndexOutOfRange
 	}
@@ -342,6 +455,7 @@ func (s *badgerLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntr
 	}
 
 	var result []LogEntry
+	wantLen := len(s.keyPrefix) + 8
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		it := txn.NewIterator(opts)
@@ -351,6 +465,10 @@ func (s *badgerLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntr
 		for it.Seek(startKey); it.ValidForPrefix(s.keyPrefix); it.Next() {
 			if maxEntries > 0 && len(result) >= maxEntries {
 				break
+			}
+			key := it.Item().Key()
+			if len(key) != wantLen {
+				continue // meta key — skip
 			}
 			var entry LogEntry
 			if err := it.Item().Value(func(val []byte) error {
@@ -371,4 +489,136 @@ func (s *badgerLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntr
 		return nil, err
 	}
 	return result, nil
+}
+
+// InstallSnapshotBoundary seeds firstIndex / prevTerm meta keys directly
+// without requiring entries to exist at the boundary. Used by InstallSnapshot
+// when the leader's snapshot covers indices the follower has never seen.
+// The log MUST be empty at call time (caller ensures via TruncateAfter(0)).
+// Persists durably (db.Sync).
+func (s *badgerLogStore) InstallSnapshotBoundary(lastIncludedIndex, lastIncludedTerm uint64) error {
+	if s.lastIdx.Load() != 0 {
+		// LastIndex > 0 means entry keys exist. InstallSnapshot must
+		// TruncateAfter(0) first.
+		return ErrLogIndexOutOfRange
+	}
+	firstBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(firstBuf, lastIncludedIndex+1)
+	prevTermBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(prevTermBuf, lastIncludedTerm)
+	err := s.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(s.makeMetaKey(metaFirstIndexSuffix), firstBuf); err != nil {
+			return err
+		}
+		return txn.Set(s.makeMetaKey(metaPrevTermSuffix), prevTermBuf)
+	})
+	if err != nil {
+		return fmt.Errorf("badgerLogStore: InstallSnapshotBoundary: %w", err)
+	}
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("badgerLogStore: InstallSnapshotBoundary sync: %w", err)
+	}
+	s.firstIdx.Store(lastIncludedIndex + 1)
+	s.prevTerm.Store(lastIncludedTerm)
+	return nil
+}
+
+// CompactBefore deletes all entry keys with index <= boundary and persists
+// the new firstIndex (= boundary+1) and prevTerm (= term of entry at boundary)
+// in a single Badger txn (chunked when the delete count is large), then
+// fsyncs. After return, FirstIndex() == boundary+1 and TermAt(boundary)
+// returns prevTerm.
+//
+// No-op if boundary < FirstIndex(). Returns ErrLogIndexOutOfRange if
+// boundary > LastIndex().
+func (s *badgerLogStore) CompactBefore(boundary uint64) error {
+	if boundary < s.FirstIndex() {
+		return nil
+	}
+	if boundary > s.LastIndex() {
+		return ErrLogIndexOutOfRange
+	}
+	// Capture term at boundary BEFORE deleting.
+	t, err := s.TermAt(boundary)
+	if err != nil {
+		return err
+	}
+
+	// Collect entry keys for indices [FirstIndex, boundary] to delete.
+	first := s.FirstIndex()
+	wantLen := len(s.keyPrefix) + 8
+	var toDelete [][]byte
+	err = s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		startKey := s.makeKey(first)
+		for it.Seek(startKey); it.ValidForPrefix(s.keyPrefix); it.Next() {
+			key := it.Item().Key()
+			if len(key) != wantLen {
+				continue // meta key
+			}
+			idx := binary.BigEndian.Uint64(key[len(s.keyPrefix):])
+			if idx > boundary {
+				break
+			}
+			toDelete = append(toDelete, it.Item().KeyCopy(nil))
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("badgerLogStore: CompactBefore scan: %w", err)
+	}
+
+	// Encode new meta values.
+	firstBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(firstBuf, boundary+1)
+	prevTermBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(prevTermBuf, t)
+
+	// Chunk deletes (mirror TruncateAfter). The final chunk's txn also
+	// updates the meta keys so a mid-compaction crash leaves either the
+	// pre-compaction state (no meta update) OR the fully compacted state
+	// (meta update + all deletes durable). The intermediate states (some
+	// deletes done, meta not updated) are recoverable: a re-run of
+	// CompactBefore at the same boundary is idempotent (no-ops on already-
+	// deleted keys, sets meta to the same values).
+	const chunkSize = 1024
+	for offset := 0; offset < len(toDelete) || offset == 0; offset += chunkSize {
+		end := offset + chunkSize
+		if end > len(toDelete) {
+			end = len(toDelete)
+		}
+		isLast := end == len(toDelete)
+		chunk := toDelete[offset:end]
+		err := s.db.Update(func(txn *badger.Txn) error {
+			for _, key := range chunk {
+				if err := txn.Delete(key); err != nil {
+					return fmt.Errorf("badgerLogStore: CompactBefore delete: %w", err)
+				}
+			}
+			if isLast {
+				if err := txn.Set(s.makeMetaKey(metaFirstIndexSuffix), firstBuf); err != nil {
+					return fmt.Errorf("badgerLogStore: CompactBefore set firstIndex: %w", err)
+				}
+				if err := txn.Set(s.makeMetaKey(metaPrevTermSuffix), prevTermBuf); err != nil {
+					return fmt.Errorf("badgerLogStore: CompactBefore set prevTerm: %w", err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if isLast {
+			break
+		}
+	}
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("badgerLogStore: CompactBefore sync: %w", err)
+	}
+	s.firstIdx.Store(boundary + 1)
+	s.prevTerm.Store(t)
+	return nil
 }

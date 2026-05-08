@@ -84,6 +84,15 @@ const (
 	// for a client request. FSM consumers MUST ignore entries of this type;
 	// the Command field is always nil for no-op entries.
 	LogEntryNoOp LogEntryType = 3
+	// LogEntrySnapshot is a synthetic entry delivered on applyCh when a
+	// follower installs a snapshot via InstallSnapshot RPC (Raft §7 / §6.3).
+	// It is NOT stored in the log. FSM consumers MUST recognise this Type
+	// and reset their state, then load from Command (which carries the
+	// snapshot's opaque Data bytes). Index/Term are the snapshot's
+	// LastIncludedIndex / LastIncludedTerm. After delivering this entry, the
+	// follower resumes normal AE replication starting at LastIncludedIndex+1,
+	// so subsequent applyCh entries continue in FIFO order.
+	LogEntrySnapshot LogEntryType = 4
 )
 
 // LogEntry represents a single entry in the Raft log. Identical to v1's
@@ -136,6 +145,26 @@ type AppendEntriesReply struct {
 	ConflictIndex uint64 // first index of ConflictTerm; 0 = not set
 }
 
+// InstallSnapshotArgs is sent by the leader to a follower whose nextIndex has
+// fallen below the leader's FirstIndex (i.e., the leader has compacted past
+// the entries the follower needs). PR 15 sends the entire snapshot in a
+// single RPC; chunked transmission is out of scope (acceptable for the
+// snapshot sizes seen in tests; future PR will chunk).
+type InstallSnapshotArgs struct {
+	Term              uint64
+	LeaderID          string
+	LastIncludedIndex uint64
+	LastIncludedTerm  uint64
+	Configuration     []string
+	Data              []byte
+}
+
+// InstallSnapshotReply is the response to an InstallSnapshot RPC. The
+// follower reports its currentTerm so a stale leader can step down.
+type InstallSnapshotReply struct {
+	Term uint64
+}
+
 // Config holds Raft node configuration. Field set is mirrored verbatim from
 // v1 so caller code compiles unchanged at swap time. PR 1 only consumes ID
 // and Peers; remaining fields are accepted but ignored until later PRs wire
@@ -167,4 +196,14 @@ type Config struct {
 	// §5.4.1 safety on restart — the caller is responsible for supplying
 	// both or neither.
 	StableStore StableStore
+
+	// SnapshotStore, if non-nil, is used to persist Raft snapshots (§7).
+	// Defaults to in-memory if nil. Pairing a persistent LogStore with an
+	// in-memory SnapshotStore is unsafe in the same way that pairing a
+	// persistent LogStore with an in-memory StableStore is unsafe — on
+	// restart the log's compaction boundary (FirstIndex) survives but the
+	// snapshot data needed to seed the FSM beyond that boundary is gone.
+	// The caller is responsible for supplying durable LogStore +
+	// StableStore + SnapshotStore together (or none of them).
+	SnapshotStore SnapshotStore
 }

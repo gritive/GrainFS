@@ -18,6 +18,11 @@ var ErrUnknownPeer = errors.New("raftv2: unknown peer")
 type Transport interface {
 	SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error)
 	SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error)
+	// SendInstallSnapshot ships a snapshot blob to a peer whose nextIndex
+	// has fallen below the leader's compaction floor (Raft §6.3 / §7).
+	// PR 15 sends the entire snapshot in one call; chunked transmission is
+	// out of scope.
+	SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error)
 }
 
 // memNetwork is a process-local Transport substrate for tests. It dispatches
@@ -77,4 +82,12 @@ func (t *memTransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (
 		return nil, ErrUnknownPeer
 	}
 	return dst.HandleAppendEntries(args), nil
+}
+
+func (t *memTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	dst := t.net.lookup(peer)
+	if dst == nil {
+		return nil, ErrUnknownPeer
+	}
+	return dst.HandleInstallSnapshot(args), nil
 }
