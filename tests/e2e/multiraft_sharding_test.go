@@ -43,6 +43,7 @@ type mrCluster struct {
 	httpURLs   []string
 	stopped    bool
 	clusterKey string
+	encKeyFile string
 	accessKey  string
 	secretKey  string
 	leaderIdx  int // last-known leader (set during probe)
@@ -88,8 +89,7 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 	c := &mrCluster{
 		t:          t,
 		clusterKey: "E2E-MR-SHARDING-KEY",
-		accessKey:  "mr-ak",
-		secretKey:  "mr-sk",
+		encKeyFile: makeSharedEncryptionKeyFile(t),
 	}
 	c.httpPorts = make([]int, numNodes)
 	c.raftPorts = make([]int, numNodes)
@@ -135,6 +135,9 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 		return nil, err
 	}
 	time.Sleep(4 * time.Second)
+
+	// Bootstrap the admin SA via the leader's UDS once quorum exists.
+	c.accessKey, c.secretKey = bootstrapAdminViaUDSAny(c.t, c.dataDirs, 60*time.Second)
 
 	// Wait for at least one node to be writable (leader elected).
 	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -189,15 +192,13 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 		"--raft-addr", raftAddr,
 		"--peers", strings.Join(peers, ","),
 		"--cluster-key", c.clusterKey,
-		"--access-key", c.accessKey,
-		"--secret-key", c.secretKey,
+		"--encryption-key-file", c.encKeyFile,
 		"--dedup=false",
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--no-encryption",
 	)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -928,9 +929,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 		"--port", fmt.Sprintf("%d", freePort()),
 		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--access-key", c.accessKey,
-		"--secret-key", c.secretKey,
-		"--no-encryption",
+		"--encryption-key-file", c.encKeyFile,
 	)
 	require.NoError(t, nfsProc.Start(), "start NFSv4 server")
 	defer func() {

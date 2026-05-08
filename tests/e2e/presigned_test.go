@@ -20,8 +20,20 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
-// startAuthServer starts grainfs with authentication enabled.
-func startAuthServer(t *testing.T) (*s3.Client, string, string, func()) {
+// authServer is the handle returned by startAuthServer. The credentials
+// are bootstrapped via the admin UDS after server start, so callers must
+// thread them through to s3auth.PresignURL etc.
+type authServer struct {
+	Client    *s3.Client
+	Endpoint  string
+	DataDir   string
+	AccessKey string
+	SecretKey string
+	Cleanup   func()
+}
+
+// startAuthServer starts grainfs and bootstraps an admin SA via UDS.
+func startAuthServer(t *testing.T) authServer {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-auth-e2e-*")
 	require.NoError(t, err)
@@ -32,8 +44,6 @@ func startAuthServer(t *testing.T) (*s3.Client, string, string, func()) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--access-key", "testkey",
-		"--secret-key", "testsecret",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
@@ -42,14 +52,17 @@ func startAuthServer(t *testing.T) (*s3.Client, string, string, func()) {
 	require.NoError(t, cmd.Start())
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 5*time.Second)
+	waitForPort(t, port, 30*time.Second)
+
+	ak, sk := bootstrapAdminViaUDS(t, dir)
 
 	client := s3.New(s3.Options{
 		BaseEndpoint: aws.String(endpoint),
 		Region:       "us-east-1",
-		Credentials:  credentials.NewStaticCredentialsProvider("testkey", "testsecret", ""),
+		Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
 		UsePathStyle: true,
 	})
+	require.NoError(t, waitForIAMReady(client, 30*time.Second))
 
 	cleanup := func() {
 		cmd.Process.Kill()
@@ -57,22 +70,29 @@ func startAuthServer(t *testing.T) (*s3.Client, string, string, func()) {
 		os.RemoveAll(dir)
 	}
 
-	return client, endpoint, dir, cleanup
+	return authServer{
+		Client:    client,
+		Endpoint:  endpoint,
+		DataDir:   dir,
+		AccessKey: ak,
+		SecretKey: sk,
+		Cleanup:   cleanup,
+	}
 }
 
 func TestPresigned_GET(t *testing.T) {
-	client, endpoint, _, cleanup := startAuthServer(t)
-	defer cleanup()
+	srv := startAuthServer(t)
+	defer srv.Cleanup()
 
 	ctx := context.Background()
 
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+	_, err := srv.Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String("presign-get"),
 	})
 	require.NoError(t, err)
 
 	content := "presigned content"
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	_, err = srv.Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("presign-get"),
 		Key:    aws.String("secret.txt"),
 		Body:   strings.NewReader(content),
@@ -80,8 +100,8 @@ func TestPresigned_GET(t *testing.T) {
 	require.NoError(t, err)
 
 	presigned, err := s3auth.PresignURL(http.MethodGet,
-		endpoint+"/presign-get/secret.txt",
-		"testkey", "testsecret", "us-east-1", 3600)
+		srv.Endpoint+"/presign-get/secret.txt",
+		srv.AccessKey, srv.SecretKey, "us-east-1", 3600)
 	require.NoError(t, err)
 
 	resp, err := http.Get(presigned)
@@ -94,19 +114,19 @@ func TestPresigned_GET(t *testing.T) {
 }
 
 func TestPresigned_PUT(t *testing.T) {
-	client, endpoint, _, cleanup := startAuthServer(t)
-	defer cleanup()
+	srv := startAuthServer(t)
+	defer srv.Cleanup()
 
 	ctx := context.Background()
 
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+	_, err := srv.Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String("presign-put"),
 	})
 	require.NoError(t, err)
 
 	presigned, err := s3auth.PresignURL(http.MethodPut,
-		endpoint+"/presign-put/uploaded.txt",
-		"testkey", "testsecret", "us-east-1", 3600)
+		srv.Endpoint+"/presign-put/uploaded.txt",
+		srv.AccessKey, srv.SecretKey, "us-east-1", 3600)
 	require.NoError(t, err)
 
 	content := "uploaded via presigned"
@@ -124,7 +144,7 @@ func TestPresigned_PUT(t *testing.T) {
 		return resp.StatusCode == http.StatusOK
 	}, 30*time.Second, 500*time.Millisecond, "presigned PUT status=%d err=%v", lastStatus, lastErr)
 
-	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+	getOut, err := srv.Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("presign-put"),
 		Key:    aws.String("uploaded.txt"),
 	})
@@ -136,12 +156,12 @@ func TestPresigned_PUT(t *testing.T) {
 }
 
 func TestPresigned_Expired(t *testing.T) {
-	_, endpoint, _, cleanup := startAuthServer(t)
-	defer cleanup()
+	srv := startAuthServer(t)
+	defer srv.Cleanup()
 
 	presigned, err := s3auth.PresignURLAt(http.MethodGet,
-		endpoint+"/presign-exp/file.txt",
-		"testkey", "testsecret", "us-east-1", 1, time.Now().Add(-10*time.Second))
+		srv.Endpoint+"/presign-exp/file.txt",
+		srv.AccessKey, srv.SecretKey, "us-east-1", 1, time.Now().Add(-10*time.Second))
 	require.NoError(t, err)
 
 	resp, err := http.Get(presigned)
@@ -151,12 +171,12 @@ func TestPresigned_Expired(t *testing.T) {
 }
 
 func TestPresigned_WrongKey(t *testing.T) {
-	_, endpoint, _, cleanup := startAuthServer(t)
-	defer cleanup()
+	srv := startAuthServer(t)
+	defer srv.Cleanup()
 
 	presigned, err := s3auth.PresignURL(http.MethodGet,
-		endpoint+"/presign-wrong/file.txt",
-		"testkey", "wrongsecret", "us-east-1", 3600)
+		srv.Endpoint+"/presign-wrong/file.txt",
+		srv.AccessKey, "wrongsecret", "us-east-1", 3600)
 	require.NoError(t, err)
 
 	resp, err := http.Get(presigned)
@@ -166,20 +186,20 @@ func TestPresigned_WrongKey(t *testing.T) {
 }
 
 func TestMetrics_Endpoint(t *testing.T) {
-	client, endpoint, _, cleanup := startAuthServer(t)
-	defer cleanup()
+	srv := startAuthServer(t)
+	defer srv.Cleanup()
 
 	ctx := context.Background()
 
 	// Make some API calls to populate metrics
-	client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("metrics-test")})
-	client.PutObject(ctx, &s3.PutObjectInput{
+	srv.Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("metrics-test")})
+	srv.Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("metrics-test"),
 		Key:    aws.String("file.txt"),
 		Body:   strings.NewReader("data"),
 	})
 
-	req, _ := http.NewRequest(http.MethodGet, endpoint+"/metrics", nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.Endpoint+"/metrics", nil)
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)

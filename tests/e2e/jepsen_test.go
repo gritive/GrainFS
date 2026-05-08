@@ -19,11 +19,12 @@ type JepsenTestRunner struct {
 	numOps     int
 }
 
-// NewJepsenTestRunner creates a test runner with multiple S3 clients.
-func NewJepsenTestRunner(endpoint string, numClients, numOps int) *JepsenTestRunner {
+// NewJepsenTestRunner creates a test runner with multiple S3 clients
+// signing as the supplied access key.
+func NewJepsenTestRunner(endpoint, accessKey, secretKey string, numClients, numOps int) *JepsenTestRunner {
 	clients := make([]*s3.Client, numClients)
 	for i := 0; i < numClients; i++ {
-		clients[i] = newS3Client(endpoint)
+		clients[i] = s3ClientFor(endpoint, accessKey, secretKey)
 	}
 	return &JepsenTestRunner{
 		clients:    clients,

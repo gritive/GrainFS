@@ -42,12 +42,13 @@ func TestSmoke_DeploymentVerification(t *testing.T) {
 	defer cmd.Process.Kill()
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 10*time.Second)
+	waitForPort(t, port, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	client := newS3Client(endpoint)
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	client := s3ClientFor(endpoint, ak, sk)
 
 	// Test 1: Health check
 	t.Run("HealthCheck", func(t *testing.T) {

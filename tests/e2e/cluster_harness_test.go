@@ -50,6 +50,7 @@ type e2eCluster struct {
 	pprofPorts    []int
 	httpURLs      []string
 	clusterKey    string
+	encKeyFile    string
 	accessKey     string
 	secretKey     string
 	logPrefix     string
@@ -143,6 +144,7 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 		t:             t,
 		mode:          opts.Mode,
 		clusterKey:    opts.ClusterKey,
+		encKeyFile:    makeSharedEncryptionKeyFile(t),
 		accessKey:     opts.AccessKey,
 		secretKey:     opts.SecretKey,
 		logPrefix:     opts.LogPrefix,
@@ -212,6 +214,13 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 		return nil, err
 	}
 	time.Sleep(2 * time.Second)
+
+	// Bootstrap admin SA on the seed node before any followers join.
+	// Node 0 is the leader at this point in dynamic-join mode, so the
+	// /v1/iam/sa propose succeeds against its admin UDS.
+	ak, sk := bootstrapAdminViaUDSAny(c.t, c.dataDirs[:1], 30*time.Second)
+	c.accessKey, c.secretKey = ak, sk
+
 	for i := 1; i < len(c.procs); i++ {
 		c.procs[i] = c.startNode(c.t, i)
 		if err := waitForPortsParallelErr(c.httpPorts[i:i+1], 90*time.Second); err != nil {
@@ -245,6 +254,12 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		return nil, err
 	}
 	time.Sleep(4 * time.Second)
+
+	// Bootstrap admin SA via UDS once the cluster has quorum. Try every
+	// node — only the leader's propose succeeds; others return an error
+	// and the helper retries the next data dir.
+	ak, sk := bootstrapAdminViaUDSAny(c.t, c.dataDirs, 60*time.Second)
+	c.accessKey, c.secretKey = ak, sk
 
 	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -287,15 +302,13 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 		"--node-id", c.nodeID(i),
 		"--raft-addr", c.raftAddr(i),
 		"--cluster-key", c.clusterKey,
-		"--access-key", c.accessKey,
-		"--secret-key", c.secretKey,
+		"--encryption-key-file", c.encKeyFile,
 		"--dedup=false",
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--snapshot-interval", "0",
 		"--scrub-interval", c.scrubIntervalArg(),
 		"--lifecycle-interval", "0",
-		"--no-encryption",
 	}
 	if c.pprofPorts[i] != 0 {
 		args = append(args, "--pprof-port", fmt.Sprintf("%d", c.pprofPorts[i]))

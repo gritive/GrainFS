@@ -42,13 +42,15 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	defer terminateProcess(cmd)
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 10*time.Second)
+	waitForPort(t, port, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+
 	// Create test bucket
-	client := newS3Client(endpoint)
+	client := s3ClientFor(endpoint, ak, sk)
 	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String("jepsen-test"),
 	})
@@ -57,7 +59,7 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 
 	// Run Jepsen test: 10 clients, 100 ops each
 	t.Log("Starting concurrent writes with 10 clients...")
-	runner := NewJepsenTestRunner(endpoint, 10, 100)
+	runner := NewJepsenTestRunner(endpoint, ak, sk, 10, 100)
 	errors := runner.RunConcurrentPuts(ctx, "jepsen-test", "conflict-key")
 
 	// All operations should succeed

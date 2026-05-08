@@ -24,6 +24,7 @@ type ecspikeNode struct {
 	endpoint string
 	dataDir  string
 	cmd      *exec.Cmd
+	ak, sk   string
 }
 
 func (n *ecspikeNode) kill() {
@@ -83,6 +84,9 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 			require.NoErrorf(t, err, "start node %d", i)
 		}
 		waitForPort(t, port, 30*time.Second)
+		ak, sk := bootstrapAdminViaUDS(t, dir)
+		nodes[i].ak = ak
+		nodes[i].sk = sk
 	}
 	return nodes, cleanup
 }
@@ -127,8 +131,8 @@ func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
 		endpoints[i] = n.endpoint
 	}
 	clients := make(map[string]*s3.Client, len(endpoints))
-	for _, ep := range endpoints {
-		clients[ep] = newS3Client(ep)
+	for _, n := range nodes {
+		clients[n.endpoint] = s3ClientFor(n.endpoint, n.ak, n.sk)
 	}
 	cfg := &ecspike.Config{
 		Nodes:   endpoints,
@@ -198,8 +202,8 @@ func measureECSpikeP95(t *testing.T) {
 		endpoints[i] = n.endpoint
 	}
 	clients := make(map[string]*s3.Client, len(endpoints))
-	for _, ep := range endpoints {
-		clients[ep] = newS3Client(ep)
+	for _, n := range nodes {
+		clients[n.endpoint] = s3ClientFor(n.endpoint, n.ak, n.sk)
 	}
 	cfg := &ecspike.Config{
 		Nodes:   endpoints,

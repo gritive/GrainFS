@@ -45,12 +45,11 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 
 	const (
 		clusterKey = "E2E-CLUSTER-SCRUBBER-KEY"
-		accessKey  = "sc-ak"
-		secretKey  = "sc-sk"
 		bucketName = "sc-bucket"
 		keyName    = "sc-obj"
 		numNodes   = 3
 	)
+	var accessKey, secretKey string
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
@@ -84,6 +83,7 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	// Scrub interval kept tight so the test doesn't wait minutes for a
 	// cycle. ShardPlacementMonitor piggybacks on this interval.
@@ -98,14 +98,12 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", scrubInterval,
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		if testing.Verbose() {
 			cmd.Stdout = os.Stdout
@@ -127,6 +125,8 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
 	time.Sleep(4 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()

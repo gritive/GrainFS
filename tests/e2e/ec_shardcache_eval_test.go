@@ -67,11 +67,10 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 
 	const (
 		clusterKey = "E2E-EC-SHARDCACHE-EVAL"
-		accessKey  = "ec-eval-ak"
-		secretKey  = "ec-eval-sk"
 		bucketName = "ec-shardcache-eval"
 		numNodes   = 3
 	)
+	var accessKey, secretKey string
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
@@ -99,6 +98,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	startNode := func(i int) *exec.Cmd {
 		cmd := exec.Command(binary, "serve",
@@ -108,8 +108,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			"--measure-read-amp", // ← the whole point of this test
 			"--block-cache-size=0",
 			"--shard-cache-size=0", // simulator-only baseline; real cache off
@@ -118,7 +117,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
 		return cmd
@@ -139,6 +137,8 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 	for i := 0; i < numNodes; i++ {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
@@ -348,11 +348,10 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 
 	const (
 		clusterKey = "E2E-EC-SHARDCACHE-ACTIVE"
-		accessKey  = "ec-active-ak"
-		secretKey  = "ec-active-sk"
 		bucketName = "ec-shardcache-active"
 		numNodes   = 3
 	)
+	var accessKey, secretKey string
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
@@ -380,6 +379,7 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	startNode := func(i int) *exec.Cmd {
 		cmd := exec.Command(binary, "serve",
@@ -389,8 +389,7 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			"--block-cache-size=0", // isolate: only EC shard cache active
 			// 256 MB total → 16 MB per-shard budget. A 5 MB object still
 			// bypasses CachedBackend while keeping single PutObject within
@@ -401,7 +400,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		require.NoError(t, cmd.Start(), "start node %d", i)
 		return cmd
@@ -422,6 +420,8 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 	for i := 0; i < numNodes; i++ {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()

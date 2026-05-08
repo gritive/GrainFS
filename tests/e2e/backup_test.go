@@ -37,6 +37,11 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	binary := getBinary()
 	port := freePort()
 
+	// Shared encryption key for source + restore: the IAM store on disk
+	// holds AES-GCM-wrapped secrets, so restoring those bytes into a server
+	// with a different encryption key would decrypt-fail on FSM apply.
+	encKeyFile := makeSharedEncryptionKeyFile(t)
+
 	// Step 1: Start GrainFS and create test data
 	t.Log("Step 1: Starting GrainFS and creating test data...")
 	cmd := exec.Command(binary, "serve",
@@ -45,7 +50,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--dedup=false",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
@@ -56,10 +61,11 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	defer terminateProcess(cmd)
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 10*time.Second)
+	waitForPort(t, port, 30*time.Second)
 
 	ctx := context.Background()
-	client := newS3Client(endpoint)
+	ak, sk := bootstrapAdminViaUDS(t, dataDir)
+	client := s3ClientFor(endpoint, ak, sk)
 
 	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String("backup-test"),
@@ -142,7 +148,10 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	//   restoreDir/data   (not restoreDir itself)
 	restoredDataDir := filepath.Join(restoreDir, filepath.Base(dataDir))
 
-	// Start GrainFS with restored data
+	// Start GrainFS with restored data. Shared encKeyFile so the IAM store
+	// rehydrates with the same secrets the source server wrote. The
+	// bootstrap creds from before the restore are still valid because the
+	// IAM store is identical (BadgerDB on disk).
 	restorePort := freePort()
 	cmd2 := exec.Command(binary, "serve",
 		"--data", restoredDataDir,
@@ -150,7 +159,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--dedup=false",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
@@ -163,7 +172,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 	restoreEndpoint := fmt.Sprintf("http://127.0.0.1:%d", restorePort)
 	waitForPort(t, restorePort, 60*time.Second)
 
-	client2 := newS3Client(restoreEndpoint)
+	client2 := s3ClientFor(restoreEndpoint, ak, sk)
 
 	// Verify all objects are present
 	var listOut *s3.ListObjectsV2Output

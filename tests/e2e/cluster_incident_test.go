@@ -54,8 +54,6 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 	}
 	const (
 		clusterKey = "E2E-CLUSTER-INCIDENT-KEY"
-		accessKey  = "incident-ak"
-		secretKey  = "incident-sk"
 		bucketName = "incident-bucket"
 		keyName    = "incident-obj"
 		numNodes   = 3
@@ -65,13 +63,12 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 		Nodes:         numNodes,
 		Mode:          ClusterModeStaticPeers,
 		ClusterKey:    clusterKey,
-		AccessKey:     accessKey,
-		SecretKey:     secretKey,
 		LogPrefix:     "grainfs-incident",
 		ScrubInterval: "2s",
 		DisableNFS:    true,
 		DisableNBD:    true,
 	})
+	accessKey, secretKey := c.accessKey, c.secretKey
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	endpoints := c.httpURLs
@@ -144,8 +141,6 @@ func TestE2E_QuarantineIncident(t *testing.T) {
 
 	const (
 		clusterKey = "E2E-QUARANTINE-INCIDENT-KEY"
-		accessKey  = "qi-ak"
-		secretKey  = "qi-sk"
 		bucketName = "qi-bucket"
 		numNodes   = 3
 	)
@@ -153,13 +148,12 @@ func TestE2E_QuarantineIncident(t *testing.T) {
 		Nodes:         numNodes,
 		Mode:          ClusterModeStaticPeers,
 		ClusterKey:    clusterKey,
-		AccessKey:     accessKey,
-		SecretKey:     secretKey,
 		LogPrefix:     "grainfs-quarantine-incident",
 		ScrubInterval: "2s",
 		DisableNFS:    true,
 		DisableNBD:    true,
 	})
+	accessKey, secretKey := c.accessKey, c.secretKey
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	leaderIdx, err := waitForWritableEndpoint(ctx, c.httpURLs, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
