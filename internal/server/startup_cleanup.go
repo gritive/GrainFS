@@ -38,6 +38,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // tmpInflightGuard is the minimum age before a *.tmp file is considered
@@ -62,9 +63,14 @@ type StartupRecoveryResult struct {
 // previous crashed process and removes them. Each removal emits a HealEvent
 // via emit (a NoopEmitter is acceptable; nil is also accepted for tests).
 //
+// ops carries the storage operations facade so the multipart-orphan sweep
+// flows through the storage capability plan (ADR 0001) instead of
+// duplicating the LocalBackend filesystem layout here. nil ops disables
+// the multipart sweep — useful for tests that only exercise tmp cleanup.
+//
 // The scan is bounded by ctx so a slow shutdown does not block the next
 // boot. Returns context.Canceled if the caller cancelled mid-scan.
-func RunStartupRecovery(ctx context.Context, dataRoot string, emit scrubber.Emitter) (StartupRecoveryResult, error) {
+func RunStartupRecovery(ctx context.Context, dataRoot string, ops *storage.Operations, emit scrubber.Emitter) (StartupRecoveryResult, error) {
 	var res StartupRecoveryResult
 	if emit == nil {
 		emit = scrubber.NoopEmitter{}
@@ -78,7 +84,7 @@ func RunStartupRecovery(ctx context.Context, dataRoot string, emit scrubber.Emit
 	if err := sweepOrphanTmp(ctx, dataRoot, emit, &res); err != nil {
 		return res, err
 	}
-	if err := sweepOrphanMultiparts(ctx, dataRoot, emit, &res); err != nil {
+	if err := sweepOrphanMultiparts(ctx, ops, emit, &res); err != nil {
 		return res, err
 	}
 
@@ -164,42 +170,32 @@ func shouldSkipStartupRecoveryDir(root, path string) bool {
 	}
 }
 
-// sweepOrphanMultiparts removes parts/<uploadID> directories untouched
-// for more than multipartOrphanAge.
-func sweepOrphanMultiparts(ctx context.Context, root string, emit scrubber.Emitter, res *StartupRecoveryResult) error {
-	partsRoot := filepath.Join(root, "parts")
-	entries, err := os.ReadDir(partsRoot)
-	if errors.Is(err, fs.ErrNotExist) {
+// sweepOrphanMultiparts delegates the parts/<uploadID> sweep to the storage
+// operations facade so the LocalBackend filesystem layout knowledge stays
+// inside the storage package (per ADR 0001 capability plan). The age policy
+// (multipartOrphanAge) and HealEvent emission stay here because they are
+// operator-facing: the sweep cutoff is observability tuning and the dashboard
+// wants per-removal events even when the filesystem walk happens elsewhere.
+func sweepOrphanMultiparts(ctx context.Context, ops *storage.Operations, emit scrubber.Emitter, res *StartupRecoveryResult) error {
+	if ops == nil {
 		return nil
+	}
+	cutoff := time.Now().Add(-multipartOrphanAge)
+	sweep, err := ops.SweepOrphanMultiparts(ctx, cutoff)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	if err != nil {
 		res.Errors = append(res.Errors, err.Error())
 		return nil
 	}
-	cutoff := time.Now().Add(-multipartOrphanAge)
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !entry.IsDir() {
-			continue
-		}
-		full := filepath.Join(partsRoot, entry.Name())
-		info, err := entry.Info()
-		if err != nil {
-			res.Errors = append(res.Errors, err.Error())
-			continue
-		}
-		if info.ModTime().After(cutoff) {
-			continue
-		}
-		emitStartup(emit, full, "orphan_multipart", scrubber.OutcomeSuccess)
-		if err := os.RemoveAll(full); err != nil {
-			res.Errors = append(res.Errors, err.Error())
-			emitStartup(emit, full, "orphan_multipart", scrubber.OutcomeFailed)
-			continue
-		}
-		res.OrphanMultipartRemoved++
+	res.OrphanMultipartRemoved += sweep.Removed
+	res.Errors = append(res.Errors, sweep.Errors...)
+	for _, path := range sweep.RemovedPaths {
+		emitStartup(emit, path, "orphan_multipart", scrubber.OutcomeSuccess)
+	}
+	for _, msg := range sweep.Errors {
+		emitStartup(emit, msg, "orphan_multipart", scrubber.OutcomeFailed)
 	}
 	return nil
 }

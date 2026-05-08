@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,4 +75,104 @@ func TestCompleteMultipartBucketNotFound(t *testing.T) {
 
 	_, err := b.CreateMultipartUpload(context.Background(), "nope", "file.bin", "application/octet-stream")
 	require.ErrorIs(t, err, ErrBucketNotFound)
+}
+
+func TestLocalBackend_SweepOrphanMultiparts(t *testing.T) {
+	b := setupTestBackend(t)
+	partsRoot := filepath.Join(b.root, "parts")
+	require.NoError(t, os.MkdirAll(partsRoot, 0o755))
+
+	// old1, old2 — older than cutoff, should be removed.
+	// fresh1 — newer than cutoff, should be retained.
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	fresh := now.Add(-1 * time.Minute)
+	for name, mtime := range map[string]time.Time{
+		"old1":   old,
+		"old2":   old,
+		"fresh1": fresh,
+	} {
+		dir := filepath.Join(partsRoot, name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.Chtimes(dir, mtime, mtime))
+	}
+	// stray regular file under parts/ — must be ignored (only directories sweepable).
+	straySrc := filepath.Join(partsRoot, "stray.txt")
+	require.NoError(t, os.WriteFile(straySrc, []byte("x"), 0o644))
+	require.NoError(t, os.Chtimes(straySrc, old, old))
+
+	cutoff := now.Add(-1 * time.Hour)
+	res, err := b.SweepOrphanMultiparts(context.Background(), cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Removed)
+	assert.Empty(t, res.Errors)
+
+	// Verify which entries remain.
+	for _, name := range []string{"fresh1", "stray.txt"} {
+		_, err := os.Stat(filepath.Join(partsRoot, name))
+		assert.NoError(t, err, "%q must remain", name)
+	}
+	for _, name := range []string{"old1", "old2"} {
+		_, err := os.Stat(filepath.Join(partsRoot, name))
+		assert.True(t, os.IsNotExist(err), "%q must be removed", name)
+	}
+}
+
+func TestLocalBackend_SweepOrphanMultiparts_NoPartsDir(t *testing.T) {
+	b := setupTestBackend(t)
+	res, err := b.SweepOrphanMultiparts(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.Removed)
+	assert.Empty(t, res.Errors)
+}
+
+func TestLocalBackend_SweepOrphanMultiparts_AllFresh(t *testing.T) {
+	b := setupTestBackend(t)
+	partsRoot := filepath.Join(b.root, "parts")
+	require.NoError(t, os.MkdirAll(partsRoot, 0o755))
+	dir := filepath.Join(partsRoot, "active")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	res, err := b.SweepOrphanMultiparts(context.Background(), time.Now().Add(-1*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.Removed)
+}
+
+func TestOperations_SweepOrphanMultiparts_DiscoversCapability(t *testing.T) {
+	b := setupTestBackend(t)
+	partsRoot := filepath.Join(b.root, "parts")
+	require.NoError(t, os.MkdirAll(filepath.Join(partsRoot, "old"), 0o755))
+	require.NoError(t, os.Chtimes(filepath.Join(partsRoot, "old"), time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)))
+
+	ops := NewOperations(b)
+	res, err := ops.SweepOrphanMultiparts(context.Background(), time.Now().Add(-1*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Removed)
+}
+
+type noSweepBackend struct{ Backend }
+
+func TestOperations_SweepOrphanMultiparts_NoCapability(t *testing.T) {
+	b := setupTestBackend(t)
+	ops := NewOperations(noSweepBackend{Backend: b})
+	res, err := ops.SweepOrphanMultiparts(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.Removed)
+}
+
+func TestOperations_SweepOrphanMultiparts_BlockedByRecoveryGate(t *testing.T) {
+	b := setupTestBackend(t)
+	partsRoot := filepath.Join(b.root, "parts")
+	require.NoError(t, os.MkdirAll(filepath.Join(partsRoot, "old"), 0o755))
+	require.NoError(t, os.Chtimes(filepath.Join(partsRoot, "old"), time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)))
+
+	gate := NewRecoveryWriteGate(b, ErrRecoveryWriteDisabled)
+	ops := NewOperations(gate)
+	res, err := ops.SweepOrphanMultiparts(context.Background(), time.Now().Add(-1*time.Hour))
+	require.ErrorIs(t, err, ErrRecoveryWriteDisabled)
+	assert.Equal(t, 0, res.Removed)
+
+	// Confirm the orphan dir was NOT removed (gate blocked the sweep).
+	_, statErr := os.Stat(filepath.Join(partsRoot, "old"))
+	assert.NoError(t, statErr, "gate should have prevented removal")
 }

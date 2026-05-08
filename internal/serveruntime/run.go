@@ -1208,7 +1208,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Phase 16 Week 3: cluster mode also needs startup recovery for the
 	// node's local data dir (per-node multipart parts + .tmp leftovers).
-	if rec, err := server.RunStartupRecovery(ctx, dataDir, activeEmitter); err != nil && !errors.Is(err, context.Canceled) {
+	if rec, err := server.RunStartupRecovery(ctx, dataDir, srv.Operations(), activeEmitter); err != nil && !errors.Is(err, context.Canceled) {
 		log.Warn().Err(err).Msg("startup recovery failed")
 	} else if rec.OrphanTmpRemoved+rec.OrphanMultipartRemoved+len(rec.Errors) > 0 {
 		log.Info().
