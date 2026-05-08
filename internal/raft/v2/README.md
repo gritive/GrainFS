@@ -77,7 +77,7 @@ and the only caller of `publish`. Readers never touch `actorState`.
 | Membership change (AddVoter / RemoveVoter / etc.) | ⏳ stub | M2 |
 | LogStore interface (in-memory backing) | ✅ | PR 9 |
 | LogStore persistence (BadgerDB backing) | ✅ | PR 10 |
-| Crash-recovery wiring (LogStore → replay) | ⏳ | PR 11 |
+| Crash-recovery wiring (StableStore + HardState) | ✅ | PR 11 |
 | Snapshots | ⏳ | M2 |
 | Joint consensus (§4.3) | ⏳ | M2 |
 | ReadIndex linearizable reads | ⏳ | M2 |
@@ -103,20 +103,49 @@ the `v2` import path is renamed to take its place. Until then, any
 changes to the external API in v2 are independent of v1 and do not
 affect production.
 
-## LogStore
+## LogStore and StableStore
 
 `LogStore` (defined in `logstore.go`) is the interface through which the actor
-goroutine reads and writes the Raft log. The current implementation is
-`memLogStore` — an in-memory slice owned exclusively by the actor goroutine
-(no locking needed). PR 10 adds `badgerLogStore` (in `logstore_badger.go`),
-a durable implementation backed by BadgerDB. It uses a prefix-scoped key
-layout (`prefix || be64(idx)`) so multiple Raft groups can share one DB, and
-encodes each entry as a compact 21-byte binary header plus payload (no JSON).
-`badgerLogStore` is not yet wired into `NewNode`; `memLogStore` remains the
-default until PR 11 adds the config field and crash-recovery replay from disk.
-PR 11 wires crash-recovery (replay from `applied+1` to `commitIndex` on
-restart). Callers of `Node` do not interact with `LogStore` directly; it is an
-implementation detail of the actor.
+goroutine reads and writes the Raft log. The default implementation is
+`memLogStore` — an in-memory slice. PR 10 adds `badgerLogStore` (in
+`logstore_badger.go`), a durable implementation backed by BadgerDB.
+
+`StableStore` (defined in `stablestore.go`) persists `HardState` — the
+`(currentTerm, votedFor)` pair that Raft §5.4.1 requires to survive crashes.
+The default is `memStableStore` (no persistence). PR 11 adds `badgerStableStore`
+(in `stablestore_badger.go`), a durable implementation using the same Badger DB
+with a distinct key prefix.
+
+### Crash recovery usage
+
+To enable full crash recovery, supply both a `LogStore` and a `StableStore` in
+`Config`:
+
+```go
+db, _ := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+logStore, _ := newBadgerLogStore(db, []byte("raft/v2/log/"))
+stable, _ := newBadgerStableStore(db, []byte("raft/v2/hardstate/"))
+
+n, err := NewNode(Config{
+    ID:          "node1",
+    Peers:       peers,
+    LogStore:    logStore,
+    StableStore: stable,
+})
+```
+
+On restart, `NewNode` loads `HardState` from `StableStore` and uses it to
+restore `currentTerm` and `votedFor` before the actor goroutine starts. The log
+is automatically available through `LogStore` (Badger retains all entries
+durably). `commitIndex` is volatile per Raft §5.3 — the leader re-establishes
+it via `LeaderCommit` on the next `AppendEntries`.
+
+**Safety note:** pairing a persistent `LogStore` with an in-memory `StableStore`
+violates §5.4.1 on restart (the recovered log contains entries whose grant was
+"forgotten"). Callers must supply both or neither for safety.
+
+Callers of `Node` do not interact with either store directly; they are
+implementation details of the actor.
 
 ## Read this if you're touching this package
 

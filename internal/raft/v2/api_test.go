@@ -9,13 +9,15 @@ import (
 )
 
 func TestAPI_BootstrapIdempotent(t *testing.T) {
-	n := v2.NewNode(v2.Config{ID: "n1"})
+	n, err := v2.NewNode(v2.Config{ID: "n1"})
+	require.NoError(t, err)
 	require.NoError(t, n.Bootstrap())
 	require.ErrorIs(t, n.Bootstrap(), v2.ErrAlreadyBootstrapped)
 }
 
 func TestAPI_ConfigurationReflectsConfig(t *testing.T) {
-	n := v2.NewNode(v2.Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	n, err := v2.NewNode(v2.Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	require.NoError(t, err)
 	cfg := n.Configuration()
 	require.Len(t, cfg.Servers, 3)
 	require.Equal(t, "n1", cfg.Servers[0].ID)
@@ -23,7 +25,8 @@ func TestAPI_ConfigurationReflectsConfig(t *testing.T) {
 }
 
 func TestAPI_MembershipStubsReturnErrNotImplemented(t *testing.T) {
-	n := v2.NewNode(v2.Config{ID: "n1"})
+	n, err := v2.NewNode(v2.Config{ID: "n1"})
+	require.NoError(t, err)
 	require.ErrorIs(t, n.AddVoter("n2", "addr"), v2.ErrNotImplemented)
 	require.ErrorIs(t, n.AddVoterCtx(context.Background(), "n2", "addr"), v2.ErrNotImplemented)
 	require.ErrorIs(t, n.RemoveVoter("n2"), v2.ErrNotImplemented)

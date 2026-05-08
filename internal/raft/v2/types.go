@@ -154,4 +154,17 @@ type Config struct {
 	LearnerCatchupThreshold       uint64
 	JointAbortTimeout             time.Duration
 	ElectionPriorityKey           string
+
+	// LogStore, if non-nil, is used as the durable log backing. Defaults to an
+	// in-memory implementation if nil. To enable crash recovery, supply a
+	// persistent impl such as badgerLogStore.
+	LogStore LogStore
+
+	// StableStore, if non-nil, is used to persist HardState (currentTerm,
+	// votedFor). Defaults to in-memory if nil. To enable crash recovery,
+	// supply a persistent impl such as badgerStableStore. Pairing a
+	// persistent LogStore with an in-memory StableStore violates Raft
+	// §5.4.1 safety on restart — the caller is responsible for supplying
+	// both or neither.
+	StableStore StableStore
 }

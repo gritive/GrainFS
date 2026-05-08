@@ -2,6 +2,7 @@ package raftv2
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,16 @@ type Node struct {
 	// stopOnce guards multi-call Stop().
 	stopOnce sync.Once
 
+	// stable persists HardState (currentTerm, votedFor) across crashes.
+	// Always non-nil after NewNode; defaults to memStableStore if Config.StableStore is nil.
+	stable StableStore
+
+	// lastPersistedHS caches the most recently saved HardState so persistHardState
+	// can short-circuit redundant SaveHardState calls (e.g. becomeFollower
+	// followed by handleRequestVote in the same tick at the same term/vote).
+	// Actor-only access; no locking required.
+	lastPersistedHS HardState
+
 	// transport is the outbound RPC sender. PR 4 stores it but never sends;
 	// PR 5 wires it into the election state machine. Set via SetTransport
 	// before Start. Read-only after Start, so no synchronization needed.
@@ -82,19 +93,47 @@ type Node struct {
 
 // NewNode creates a Node from cfg. Call Start to launch the actor goroutine.
 //
-// PR 1 ignores all Config fields except ID and Peers. Persistence (LogStore)
-// lands in PR 6+.
-func NewNode(cfg Config) *Node {
+// NewNode restores HardState (currentTerm, votedFor) from cfg.StableStore and
+// the log from cfg.LogStore on startup. This satisfies Raft §5.4.1: a restarted
+// node recovers the same term and vote as before the crash, so it cannot grant
+// a conflicting vote in an already-decided term.
+//
+// Returns an error only if loading HardState fails (I/O error on restart).
+// A missing key (first start) is not an error — zero HardState is used.
+func NewNode(cfg Config) (*Node, error) {
+	logStore := cfg.LogStore
+	if logStore == nil {
+		logStore = newMemLogStore()
+	}
+	stable := cfg.StableStore
+	if stable == nil {
+		stable = newMemStableStore()
+	}
+
+	// Recover HardState. A zero HardState (CurrentTerm=0, VotedFor="") is the
+	// "first start" case — equivalent to behaviour prior to PR 11.
+	hs, err := stable.HardState()
+	if err != nil {
+		return nil, fmt.Errorf("raftv2: NewNode: load HardState: %w", err)
+	}
+
 	n := &Node{
-		cfg:     cfg,
-		cmdCh:   make(chan command, cmdChBuffer),
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
-		applyCh: make(chan LogEntry, applyChBuffer),
+		cfg:             cfg,
+		cmdCh:           make(chan command, cmdChBuffer),
+		stopCh:          make(chan struct{}),
+		doneCh:          make(chan struct{}),
+		applyCh:         make(chan LogEntry, applyChBuffer),
+		stable:          stable,
+		lastPersistedHS: hs,
 		st: actorState{
-			id:    cfg.ID,
-			state: Follower,
-			log:   newMemLogStore(),
+			id:          cfg.ID,
+			state:       Follower,
+			currentTerm: hs.CurrentTerm,
+			votedFor:    hs.VotedFor,
+			log:         logStore,
+			// commitIndex is intentionally volatile per Raft §5.3; the leader
+			// re-establishes it via LeaderCommit on the next AppendEntries.
+			commitIndex: 0,
 		},
 		// Per-Node rng seeded with current time + ID hash so two Nodes started
 		// in the same nanosecond still draw different timeouts. Sole user is
@@ -111,7 +150,7 @@ func NewNode(cfg Config) *Node {
 	// Publish an initial readState so callers between NewNode and the actor's
 	// first publish see a coherent snapshot rather than a nil load.
 	n.rs.Store(n.st.snapshot())
-	return n
+	return n, nil
 }
 
 // hashID is a tiny non-cryptographic mixer for rng seeding. FNV-1a 32-bit so

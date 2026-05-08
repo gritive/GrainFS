@@ -53,7 +53,8 @@ func awaitAppendEntries(t *testing.T, n *Node, args *AppendEntriesArgs) *AppendE
 // teardown.
 func startSingleVoter(t *testing.T, id string) *Node {
 	t.Helper()
-	n := NewNode(Config{ID: id})
+	n, err := NewNode(Config{ID: id})
+	require.NoError(t, err)
 	n.Start()
 	t.Cleanup(n.Stop)
 	t.Cleanup(func() {
@@ -234,8 +235,10 @@ func TestHandleAppendEntries_HeartbeatStepDown(t *testing.T) {
 func TestMemTransport_RoutesRequestVote(t *testing.T) {
 	net := newMemNetwork()
 
-	n1 := NewNode(Config{ID: "n1"})
-	n2 := NewNode(Config{ID: "n2"})
+	n1, err := NewNode(Config{ID: "n1"})
+	require.NoError(t, err)
+	n2, err := NewNode(Config{ID: "n2"})
+	require.NoError(t, err)
 	n1.Start()
 	n2.Start()
 	t.Cleanup(n1.Stop)

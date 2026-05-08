@@ -173,7 +173,11 @@ type v2Adapter struct {
 }
 
 func newV2Adapter(id string, peers []string) *v2Adapter {
-	return &v2Adapter{n: v2.NewNode(v2.Config{ID: id, Peers: peers})}
+	n, err := v2.NewNode(v2.Config{ID: id, Peers: peers})
+	if err != nil {
+		panic("newV2Adapter: " + err.Error())
+	}
+	return &v2Adapter{n: n}
 }
 
 func (a *v2Adapter) Start(t *testing.T) {
@@ -557,7 +561,11 @@ func buildV2ClusterNet(t *testing.T, ids []string, fastID string) ([]*v2.Node, *
 		} else {
 			cfg.ElectionTimeout = 500 * time.Millisecond
 		}
-		nodes[i] = v2.NewNode(cfg)
+		n, nerr := v2.NewNode(cfg)
+		if nerr != nil {
+			t.Fatalf("buildV2ClusterNet: NewNode %s: %v", id, nerr)
+		}
+		nodes[i] = n
 	}
 	// Register all nodes with the network BEFORE any actor starts so the
 	// first Candidate's RequestVote can route immediately.

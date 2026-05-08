@@ -44,12 +44,13 @@ func startCluster(t *testing.T, ids ...string) (nodes []*Node, net *memNetwork) 
 		if i == 0 {
 			electionTimeout = fastElectionTimeout
 		}
-		n := NewNode(Config{
+		n, err := NewNode(Config{
 			ID:               id,
 			Peers:            peers,
 			ElectionTimeout:  electionTimeout,
 			HeartbeatTimeout: testHeartbeat,
 		})
+		require.NoError(t, err)
 		nodes = append(nodes, n)
 	}
 

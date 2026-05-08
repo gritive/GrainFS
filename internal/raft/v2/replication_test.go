@@ -67,12 +67,13 @@ func startCapturingCluster(t *testing.T, ids ...string) []*capturedNode {
 		if i == 0 {
 			electionTimeout = fastElectionTimeout
 		}
-		n := NewNode(Config{
+		n, err := NewNode(Config{
 			ID:               id,
 			Peers:            peers,
 			ElectionTimeout:  electionTimeout,
 			HeartbeatTimeout: testHeartbeat,
 		})
+		require.NoError(t, err)
 		caps = append(caps, &capturedNode{node: n, doneCh: make(chan struct{})})
 	}
 
@@ -233,12 +234,14 @@ func TestReplication_LeaderStepDownReleasesWaiters(t *testing.T) {
 		if id == "n1" {
 			electionTimeout = fastElectionTimeout
 		}
-		nodes[i] = NewNode(Config{
+		n, nerr := NewNode(Config{
 			ID:               id,
 			Peers:            peers,
 			ElectionTimeout:  electionTimeout,
 			HeartbeatTimeout: testHeartbeat,
 		})
+		require.NoError(t, nerr)
+		nodes[i] = n
 	}
 	// Wire transports. n1 gets a wrapper that drops AE so it can win the
 	// election (RequestVote still routes) but cannot commit anything.
@@ -322,12 +325,13 @@ func otherIDsLocal(ids []string, self string) []string {
 // the new entries; final log = [{T1,I1,A}, {T2,I2,X}, {T2,I3,Y}].
 func TestReplication_TruncateMultipleEntries(t *testing.T) {
 	// Two peers so the Node starts as Follower (single-voter would auto-Leader).
-	n := NewNode(Config{
+	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
 		ElectionTimeout:  time.Hour, // park election timer; we drive AE manually
 		HeartbeatTimeout: testHeartbeat,
 	})
+	require.NoError(t, err)
 	// Seed the log BEFORE Start. Safe: the actor goroutine has not yet been
 	// launched, so we are the sole writer.
 	seedLogEntries(n, []LogEntry{
@@ -378,12 +382,13 @@ func TestReplication_TruncateMultipleEntries(t *testing.T) {
 // PrevLogIndex. Reply must carry ConflictTerm=0 and
 // ConflictIndex=lastLogIndex+1 (Case 1 of the §5.3 hint).
 func TestReplication_ConflictHintShortLog(t *testing.T) {
-	n := NewNode(Config{
+	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
 		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
+	require.NoError(t, err)
 	// Seed: only one entry at index 1.
 	seedLogEntries(n, []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}})
 	n.st.currentTerm = 1
@@ -413,12 +418,13 @@ func TestReplication_ConflictHintShortLog(t *testing.T) {
 // PrevLogIndex but with a different term. The reply must carry the conflicting
 // term and the first index where that term begins (Case 2 of §5.3).
 func TestReplication_ConflictHintTermMismatch(t *testing.T) {
-	n := NewNode(Config{
+	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
 		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
+	require.NoError(t, err)
 	// Seed: log = [{T1,I1}, {T2,I2}, {T2,I3}, {T2,I4}, {T3,I5}].
 	// Leader probes PrevLogIndex=4 with PrevLogTerm=99 → mismatch at I4.
 	// Conflict term = 2; first index of term 2 in our log = 2.
@@ -467,12 +473,14 @@ func TestReplication_LeaderRetriesOnConflict(t *testing.T) {
 		if i == 0 {
 			electionTimeout = fastElectionTimeout
 		}
-		nodes[i] = NewNode(Config{
+		n, nerr := NewNode(Config{
 			ID:               id,
 			Peers:            otherIDsLocal(ids, id),
 			ElectionTimeout:  electionTimeout,
 			HeartbeatTimeout: testHeartbeat,
 		})
+		require.NoError(t, nerr)
+		nodes[i] = n
 	}
 
 	// Seed n1 with a single high-term entry so it's at-least-as-up-to-date as n2.
@@ -614,13 +622,15 @@ func TestBuildAE_RespectsMaxEntriesPerAE(t *testing.T) {
 		if i == 0 {
 			et = fastElectionTimeout
 		}
-		nodes[i] = NewNode(Config{
+		n, nerr := NewNode(Config{
 			ID:               id,
 			Peers:            otherIDsLocal(ids, id),
 			ElectionTimeout:  et,
 			HeartbeatTimeout: testHeartbeat,
 			MaxEntriesPerAE:  cap64,
 		})
+		require.NoError(t, nerr)
+		nodes[i] = n
 	}
 	capTr := &capturingAETransport{
 		inner:   net.Register("n1", nodes[0]),
@@ -673,12 +683,13 @@ func TestBuildAE_RespectsMaxEntriesPerAE(t *testing.T) {
 // an AE whose Entries[0].Index doesn't match args.PrevLogIndex+1.
 // Follower's log must remain unchanged on rejection.
 func TestAE_RejectsMismatchedEntryIndex(t *testing.T) {
-	n := NewNode(Config{
+	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
 		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
+	require.NoError(t, err)
 	seedLogEntries(n, []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}})
 	n.st.currentTerm = 1
 	n.rs.Store(n.st.snapshot())
@@ -728,12 +739,13 @@ func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
 	// peers p1/p2. Seeds actorState before Start so the actor's multi-voter
 	// Follower path (which only arms the election timer) leaves our state intact.
 	makeLeaderNode := func(id string, logTerm uint64) *Node {
-		n := NewNode(Config{
+		n, nerr := NewNode(Config{
 			ID:               id,
 			Peers:            []string{"p1", "p2"},
 			ElectionTimeout:  time.Hour, // park election timer — we want stable leader
 			HeartbeatTimeout: testHeartbeat,
 		})
+		require.NoError(t, nerr)
 		n.st.currentTerm = logTerm
 		n.st.state = Leader
 		n.st.leaderID = id

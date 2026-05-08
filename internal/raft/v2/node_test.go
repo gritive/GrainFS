@@ -16,7 +16,10 @@ import (
 //   - Stop returns cleanly without leaking goroutines.
 func TestSingleNode_ProposeRoundTrip(t *testing.T) {
 	cfg := Config{ID: "n1"} // single voter (Peers empty == only self)
-	n := NewNode(cfg)
+	n, err := NewNode(cfg)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
 
 	n.Start()
 	defer n.Stop()
@@ -70,7 +73,10 @@ func TestSingleNode_ProposeRoundTrip(t *testing.T) {
 // TestSingleNode_ProposeWait validates that ProposeWait blocks until the entry
 // is committed and returns its log index.
 func TestSingleNode_ProposeWait(t *testing.T) {
-	n := NewNode(Config{ID: "n1"})
+	n, err := NewNode(Config{ID: "n1"})
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
 	n.Start()
 	defer n.Stop()
 
