@@ -117,22 +117,28 @@ func TestReplication_BasicHappyPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	// becomeLeader appends a no-op at index 1 (Raft §5.4.2). The first user
+	// propose therefore lands at index 2.
 	idx, err := n1.ProposeWait(ctx, []byte("hello"))
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), idx, "first ProposeWait should return index 1")
+	require.Equal(t, uint64(2), idx, "first user ProposeWait returns index 2 (no-op at index 1)")
 
-	// All three nodes must reach commitIndex >= 1.
-	waitForCommitted(t, caps, 1, 2*time.Second)
+	// All three nodes must reach commitIndex >= 2.
+	waitForCommitted(t, caps, 2, 2*time.Second)
 
-	// Drain by stopping nodes; verify each captured exactly the proposed entry.
+	// Drain by stopping nodes; verify each captured the no-op and the proposed entry.
 	for _, c := range caps {
 		entries := c.readApplied()
-		require.Len(t, entries, 1, "%s applied count", c.node.cfg.ID)
-		require.Equal(t, uint64(1), entries[0].Index, "%s entry index", c.node.cfg.ID)
-		require.Equal(t, []byte("hello"), entries[0].Command, "%s entry command", c.node.cfg.ID)
+		require.Len(t, entries, 2, "%s applied count (no-op + hello)", c.node.cfg.ID)
+		// Index 1: no-op
+		require.Equal(t, uint64(1), entries[0].Index, "%s no-op index", c.node.cfg.ID)
+		require.Equal(t, LogEntryNoOp, entries[0].Type, "%s no-op type", c.node.cfg.ID)
+		// Index 2: user entry
+		require.Equal(t, uint64(2), entries[1].Index, "%s user entry index", c.node.cfg.ID)
+		require.Equal(t, []byte("hello"), entries[1].Command, "%s user entry command", c.node.cfg.ID)
 		// Term comes from the leader at propose time; since n1 won term 1
-		// uncontested, the entry must carry term 1.
-		require.Equal(t, uint64(1), entries[0].Term, "%s entry term", c.node.cfg.ID)
+		// uncontested, both entries must carry term 1.
+		require.Equal(t, uint64(1), entries[1].Term, "%s user entry term", c.node.cfg.ID)
 	}
 }
 
@@ -147,22 +153,26 @@ func TestReplication_MultiplePropose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// no-op is at index 1; user commands land at indices 2..N+1.
 	const N = 5
 	for i := 1; i <= N; i++ {
 		cmd := []byte(fmt.Sprintf("cmd-%d", i))
 		idx, err := n1.ProposeWait(ctx, cmd)
 		require.NoError(t, err)
-		require.Equal(t, uint64(i), idx, "ProposeWait #%d", i)
+		require.Equal(t, uint64(i+1), idx, "ProposeWait #%d returns index %d (no-op at 1)", i, i+1)
 	}
 
-	waitForCommitted(t, caps, N, 2*time.Second)
+	waitForCommitted(t, caps, N+1, 2*time.Second)
 
 	for _, c := range caps {
 		entries := c.readApplied()
-		require.Len(t, entries, N, "%s applied count", c.node.cfg.ID)
-		for i, e := range entries {
+		require.Len(t, entries, N+1, "%s applied count (no-op + %d user)", c.node.cfg.ID, N)
+		// entries[0] is the no-op; entries[1..N] are user commands.
+		require.Equal(t, LogEntryNoOp, entries[0].Type, "%s entries[0] is no-op", c.node.cfg.ID)
+		for i := 1; i <= N; i++ {
+			e := entries[i]
 			require.Equal(t, uint64(i+1), e.Index, "%s entry[%d].Index", c.node.cfg.ID, i)
-			require.Equal(t, []byte(fmt.Sprintf("cmd-%d", i+1)), e.Command,
+			require.Equal(t, []byte(fmt.Sprintf("cmd-%d", i)), e.Command,
 				"%s entry[%d].Command", c.node.cfg.ID, i)
 		}
 	}
@@ -480,24 +490,24 @@ func TestReplication_LeaderRetriesOnConflict(t *testing.T) {
 	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
 		"n1 did not become leader")
 
-	// Propose a new entry on n1. Convergence requires n2 to truncate its
-	// stale index 1 and replace it with n1's index 1 (term 5) plus the new
-	// index 2 entry. n3 simply receives both indexes.
+	// n1 has seeded log at index 1 (term 5). On election, becomeLeader appends
+	// a no-op at index 2 (term ≥ 5). ProposeWait("newcmd") therefore lands at
+	// index 3. n2 must truncate its stale index-1 entry and receive all three.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	idx, err := n1.ProposeWait(ctx, []byte("newcmd"))
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), idx, "ProposeWait returns index 2 (after seeded index 1)")
+	require.Equal(t, uint64(3), idx, "ProposeWait returns index 3 (seeded idx 1 + no-op idx 2 + user idx 3)")
 
-	// All nodes converge to commitIndex >= 2.
+	// All nodes converge to commitIndex >= 3.
 	require.NoError(t, waitFor(2*time.Second, func() bool {
 		for _, n := range nodes {
-			if n.CommittedIndex() < 2 {
+			if n.CommittedIndex() < 3 {
 				return false
 			}
 		}
 		return true
-	}), "not all nodes reached commitIndex 2")
+	}), "not all nodes reached commitIndex 3")
 
 	// Verify the AE round-trip count on n2 stayed bounded — the conflict-hint
 	// path should converge in O(1)-O(2) failed AEs, not by walking back
@@ -507,7 +517,7 @@ func TestReplication_LeaderRetriesOnConflict(t *testing.T) {
 	// after convergence its log[0] must carry term 5 (not the stale term 3).
 	nodes[1].Stop()
 	<-nodes[1].doneCh
-	require.GreaterOrEqual(t, len(nodes[1].st.log), 2, "n2 should have at least 2 entries")
+	require.GreaterOrEqual(t, len(nodes[1].st.log), 3, "n2 should have at least 3 entries")
 	require.Equal(t, uint64(5), nodes[1].st.log[0].Term,
 		"n2's index-1 entry should be replaced with n1's term-5 entry")
 	require.Equal(t, []byte("leader-old"), nodes[1].st.log[0].Command,
@@ -544,6 +554,265 @@ func (c *countingAETransport) SendAppendEntries(peer string, args *AppendEntries
 	return c.inner.SendAppendEntries(peer, args)
 }
 
+// capturingAETransport wraps a Transport and records the maximum number of
+// entries seen in any single SendAppendEntries call for a given peer.
+// RequestVote passes through transparently.
+type capturingAETransport struct {
+	inner   Transport
+	mu      sync.Mutex
+	maxSeen map[string]int // peer → max entries count seen in a single AE
+}
+
+func (c *capturingAETransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	return c.inner.SendRequestVote(peer, args)
+}
+
+func (c *capturingAETransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	c.mu.Lock()
+	if len(args.Entries) > c.maxSeen[peer] {
+		c.maxSeen[peer] = len(args.Entries)
+	}
+	c.mu.Unlock()
+	return c.inner.SendAppendEntries(peer, args)
+}
+
+// TestBuildAE_RespectsMaxEntriesPerAE verifies that buildAppendEntriesArgs caps
+// the batch to cfg.MaxEntriesPerAE. Whitebox: a 3-voter cluster with
+// MaxEntriesPerAE=64 proposes 200 entries; we capture AE payloads via
+// capturingAETransport and assert no batch exceeded 64 entries.
+func TestBuildAE_RespectsMaxEntriesPerAE(t *testing.T) {
+	const cap64 = 64
+	net := newMemNetwork()
+	ids := []string{"n1", "n2", "n3"}
+	nodes := make([]*Node, 3)
+	for i, id := range ids {
+		et := slowElectionTimeout
+		if i == 0 {
+			et = fastElectionTimeout
+		}
+		nodes[i] = NewNode(Config{
+			ID:               id,
+			Peers:            otherIDsLocal(ids, id),
+			ElectionTimeout:  et,
+			HeartbeatTimeout: testHeartbeat,
+			MaxEntriesPerAE:  cap64,
+		})
+	}
+	capTr := &capturingAETransport{
+		inner:   net.Register("n1", nodes[0]),
+		maxSeen: make(map[string]int),
+	}
+	nodes[0].SetTransport(capTr)
+	for _, n := range nodes[1:] {
+		n.SetTransport(net.Register(n.cfg.ID, n))
+	}
+	for _, n := range nodes {
+		n.Start()
+		t.Cleanup(n.Stop)
+		go func(n *Node) {
+			for range n.ApplyCh() {
+			}
+		}(n)
+	}
+	n1 := nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const N = 200
+	for i := 0; i < N; i++ {
+		_, err := n1.ProposeWait(ctx, []byte(fmt.Sprintf("entry-%d", i)))
+		require.NoError(t, err)
+	}
+
+	// Wait for all nodes to commit all entries.
+	require.NoError(t, waitFor(5*time.Second, func() bool {
+		for _, n := range nodes {
+			if n.CommittedIndex() < N {
+				return false
+			}
+		}
+		return true
+	}), "not all nodes committed %d entries", N)
+
+	capTr.mu.Lock()
+	maxN2 := capTr.maxSeen["n2"]
+	maxN3 := capTr.maxSeen["n3"]
+	capTr.mu.Unlock()
+
+	require.LessOrEqual(t, maxN2, cap64, "n2: max batch size must not exceed MaxEntriesPerAE")
+	require.LessOrEqual(t, maxN3, cap64, "n3: max batch size must not exceed MaxEntriesPerAE")
+}
+
+// TestAE_RejectsMismatchedEntryIndex verifies that handleAppendEntries rejects
+// an AE whose Entries[0].Index doesn't match args.PrevLogIndex+1.
+// Follower's log must remain unchanged on rejection.
+func TestAE_RejectsMismatchedEntryIndex(t *testing.T) {
+	n := NewNode(Config{
+		ID:               "n1",
+		Peers:            []string{"p1", "p2"},
+		ElectionTimeout:  time.Hour,
+		HeartbeatTimeout: testHeartbeat,
+	})
+	n.st.log = []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}}
+	n.st.currentTerm = 1
+	n.rs.Store(n.st.snapshot())
+
+	n.Start()
+	t.Cleanup(n.Stop)
+	go func() {
+		for range n.ApplyCh() {
+		}
+	}()
+
+	// Forged AE: PrevLogIndex=1 means next expected is index 2, but entry carries Index=99.
+	reply := n.HandleAppendEntries(&AppendEntriesArgs{
+		Term:         2,
+		LeaderID:     "leader",
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		Entries: []LogEntry{
+			{Term: 2, Index: 99, Command: []byte("forged")},
+		},
+		LeaderCommit: 0,
+	})
+	require.False(t, reply.Success, "AE with mismatched entry index must be rejected")
+
+	// Log must be unchanged.
+	n.Stop()
+	require.Len(t, n.st.log, 1, "follower log must be unchanged after rejection")
+	require.Equal(t, uint64(1), n.st.log[0].Index)
+	require.Equal(t, []byte("A"), n.st.log[0].Command)
+}
+
+// TestApplyConflictHint_BoundedScanOnLargeLog verifies that applyConflictHint
+// uses binary search rather than a linear scan when finding the last log entry
+// at ConflictTerm. Two sub-cases:
+//  1. Leader has ConflictTerm (term 1) → nextIndex advances past its last entry.
+//  2. Leader lacks ConflictTerm (term 9 absent) → nextIndex falls back to
+//     hbConflictIndex.
+//
+// The test seeds leader state (log, nextIndex, matchIndex) before Start() so
+// the actor sees an already-promoted Leader without running a real election.
+func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
+	const N = 100
+	const conflictIdx = uint64(5)
+
+	// Helper: build a pre-seeded Leader node with N log entries at term=logTerm,
+	// peers p1/p2. Seeds actorState before Start so the actor's multi-voter
+	// Follower path (which only arms the election timer) leaves our state intact.
+	makeLeaderNode := func(id string, logTerm uint64) *Node {
+		n := NewNode(Config{
+			ID:               id,
+			Peers:            []string{"p1", "p2"},
+			ElectionTimeout:  time.Hour, // park election timer — we want stable leader
+			HeartbeatTimeout: testHeartbeat,
+		})
+		n.st.currentTerm = logTerm
+		n.st.state = Leader
+		n.st.leaderID = id
+		n.st.log = make([]LogEntry, N)
+		for i := 0; i < N; i++ {
+			n.st.log[i] = LogEntry{Term: logTerm, Index: uint64(i + 1)}
+		}
+		n.st.nextIndex = map[string]uint64{"p1": N + 1, "p2": N + 1}
+		n.st.matchIndex = map[string]uint64{"p1": 0, "p2": 0}
+		n.rs.Store(n.st.snapshot())
+		return n
+	}
+
+	sendHBReply := func(n *Node, peer string, conflictTerm, conflictIndex uint64) {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			n.cmdCh <- command{
+				kind:            cmdHeartbeatReply,
+				hbPeer:          peer,
+				hbTerm:          n.st.currentTerm,
+				hbSuccess:       false,
+				hbConflictTerm:  conflictTerm,
+				hbConflictIndex: conflictIndex,
+				hbMatchAfter:    0,
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("cmdCh send timed out")
+		}
+	}
+
+	t.Run("leader_has_conflict_term", func(t *testing.T) {
+		// Leader log: 100 entries at term 1. Follower reports ConflictTerm=1.
+		// Binary search finds term 1 throughout; rightmost is at index N=100.
+		// nextIndex must = N+1 = 101.
+		n := makeLeaderNode("L1", 1)
+		n.Start()
+		t.Cleanup(n.Stop)
+		go func() {
+			for range n.ApplyCh() {
+			}
+		}()
+
+		sendHBReply(n, "p1", 1, conflictIdx)
+
+		// Give actor time to process.
+		time.Sleep(20 * time.Millisecond)
+		n.Stop()
+
+		require.Equal(t, uint64(N+1), n.st.nextIndex["p1"],
+			"nextIndex must be past the rightmost entry at ConflictTerm")
+	})
+
+	t.Run("leader_lacks_conflict_term", func(t *testing.T) {
+		// Leader log: 100 entries at term 5. Follower reports ConflictTerm=9 (absent).
+		// Binary search finds no entry at term 9; nextIndex falls back to ConflictIndex.
+		n := makeLeaderNode("L2", 5)
+		n.Start()
+		t.Cleanup(n.Stop)
+		go func() {
+			for range n.ApplyCh() {
+			}
+		}()
+
+		sendHBReply(n, "p1", 9, conflictIdx) // term 9 not in leader log
+
+		time.Sleep(20 * time.Millisecond)
+		n.Stop()
+
+		require.Equal(t, conflictIdx, n.st.nextIndex["p1"],
+			"nextIndex must fall back to ConflictIndex when leader lacks ConflictTerm")
+	})
+}
+
+// TestBecomeLeader_AppendsNoOp verifies that a newly elected multi-voter leader
+// appends a LogEntryNoOp entry at its current term immediately on election.
+// After replication settles, all followers' commitIndex must advance to 1 (the
+// no-op index).
+func TestBecomeLeader_AppendsNoOp(t *testing.T) {
+	caps := startCapturingCluster(t, "n1", "n2", "n3")
+	n1 := caps[0].node
+
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
+		"n1 did not become leader")
+
+	leaderTerm := n1.Term()
+
+	// All three nodes must commit the no-op at index 1.
+	waitForCommitted(t, caps, 1, 2*time.Second)
+
+	// Stop all nodes and inspect captured entries.
+	for _, c := range caps {
+		entries := c.readApplied()
+		require.GreaterOrEqual(t, len(entries), 1, "%s must have at least the no-op", c.node.cfg.ID)
+		noOp := entries[0]
+		require.Equal(t, uint64(1), noOp.Index, "%s no-op index", c.node.cfg.ID)
+		require.Equal(t, leaderTerm, noOp.Term, "%s no-op term", c.node.cfg.ID)
+		require.Equal(t, LogEntryNoOp, noOp.Type, "%s no-op type", c.node.cfg.ID)
+	}
+}
+
 // TestReplication_ApplyOrderAcrossFollowers: assert all three nodes apply
 // the same sequence of entries (no reordering) when multiple proposes happen
 // in rapid succession. Different from TestReplication_MultiplePropose because
@@ -561,17 +830,19 @@ func TestReplication_ApplyOrderAcrossFollowers(t *testing.T) {
 	// Three proposes serialised through ProposeWait (each blocks on commit).
 	// The actor processes them sequentially; between two adjacent proposes,
 	// the leader's commitIndex moves and a fresh AE round propagates.
+	// No-op at index 1; user entries at indices 2..N+1.
 	const N = 3
 	for i := 1; i <= N; i++ {
 		_, err := n1.ProposeWait(ctx, []byte(fmt.Sprintf("v%d", i)))
 		require.NoError(t, err)
 	}
 
-	waitForCommitted(t, caps, N, 2*time.Second)
+	waitForCommitted(t, caps, N+1, 2*time.Second)
 
 	for _, c := range caps {
 		entries := c.readApplied()
-		require.Len(t, entries, N)
+		require.Len(t, entries, N+1, "%s: N user + 1 no-op", c.node.cfg.ID)
+		// Index monotonically increasing: no-op at 1, user entries at 2..N+1.
 		for i, e := range entries {
 			require.Equal(t, uint64(i+1), e.Index, "%s entry[%d].Index", c.node.cfg.ID, i)
 		}

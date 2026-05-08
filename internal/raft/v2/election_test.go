@@ -129,14 +129,16 @@ func TestElection_LeaderStepsDownOnHigherTerm(t *testing.T) {
 	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
 	leaderTerm := n1.Term()
 
+	// The leader has a no-op entry at index 1 (becomeLeader §5.4.2). The
+	// intruder's log must be at least as up-to-date (same term, same index).
 	reply := n1.HandleRequestVote(&RequestVoteArgs{
 		Term:         leaderTerm + 5,
 		CandidateID:  "intruder",
-		LastLogIndex: 0,
-		LastLogTerm:  0,
+		LastLogIndex: 1,
+		LastLogTerm:  leaderTerm,
 	})
 
-	require.True(t, reply.VoteGranted, "leader with empty log must grant a higher-term vote")
+	require.True(t, reply.VoteGranted, "leader must grant a higher-term vote from an up-to-date candidate")
 	require.Equal(t, leaderTerm+5, reply.Term)
 	require.Equal(t, Follower, n1.State(), "leader must step down")
 	require.False(t, n1.IsLeader())

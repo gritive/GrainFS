@@ -1,6 +1,14 @@
 package raftv2
 
-import "time"
+import (
+	"sort"
+	"time"
+)
+
+// defaultMaxEntriesPerAE is the fallback cap for AppendEntries payload size when
+// cfg.MaxEntriesPerAE is zero. Mirrors v1's DefaultConfig value
+// (internal/raft/raft.go:212).
+const defaultMaxEntriesPerAE = 512
 
 // command is the unit of work passed from public methods (and outbound RPC
 // reply goroutines) to the actor goroutine over cmdCh. The actor handles
@@ -289,8 +297,24 @@ func (n *Node) handleAppendEntries(cmd command) {
 	// the term differs, truncate from that index onward and append the rest.
 	// If the term matches, the entry is already correct (skip — duplicate
 	// retry). If we run past lastLogIndex, append.
+	//
+	// Log Matching guard (§5.3 / M2 correctness blocker): each entry must carry
+	// the expected logical index. A mismatch indicates a buggy or byzantine
+	// leader; reject immediately and force resync via ConflictIndex.
 	for i, e := range args.Entries {
 		target := args.PrevLogIndex + uint64(i) + 1
+		if e.Index != target {
+			// Entry index disagrees with the expected logical position.
+			// Reject without mutating the log; leader will retry.
+			n.publish()
+			cmd.aeReply <- &AppendEntriesReply{
+				Term:          n.st.currentTerm,
+				Success:       false,
+				ConflictIndex: target,
+				ConflictTerm:  0, // force leader to resync from target
+			}
+			return
+		}
 		if target <= n.st.lastLogIndex() {
 			if n.st.log[target-1].Term != e.Term {
 				// Conflict at logical index target. Truncate and break — the
@@ -492,9 +516,23 @@ func (n *Node) becomeLeader() {
 	n.st.state = Leader
 	n.st.leaderID = n.st.id
 
+	// Raft §5.4.2 no-op: append a blank entry at the new term immediately on
+	// election so that maybeAdvanceCommitIndex can satisfy the term gate
+	// (log[N].Term == currentTerm) without waiting for a client request.
+	// This also causes prior-term uncommitted entries to be committed as a
+	// side effect once the no-op's commit advances the commit index. FSM
+	// consumers MUST ignore LogEntryNoOp entries (Command is always nil).
+	noOpIdx := n.st.lastLogIndex() + 1
+	n.st.log = append(n.st.log, LogEntry{
+		Term:  n.st.currentTerm,
+		Index: noOpIdx,
+		Type:  LogEntryNoOp,
+	})
+
 	// Initialise per-peer replication state per Raft §5.3: nextIndex starts
 	// at lastLogIndex+1 (optimistic — assume peer is in sync), matchIndex
-	// starts at 0 (we've confirmed nothing yet).
+	// starts at 0 (we've confirmed nothing yet). Set after no-op append so
+	// nextIndex[peer] accounts for the no-op.
 	last := n.st.lastLogIndex()
 	n.st.matchIndex = make(map[string]uint64, len(n.cfg.Peers))
 	n.st.nextIndex = make(map[string]uint64, len(n.cfg.Peers))
@@ -588,8 +626,18 @@ func (n *Node) buildAppendEntriesArgs(peer string) *AppendEntriesArgs {
 	prevTerm := n.st.lastLogTermAt(prevIdx)
 	var entries []LogEntry
 	if last := n.st.lastLogIndex(); last >= next {
+		// Cap the batch to cfg.MaxEntriesPerAE so we never attempt to ship the
+		// entire log in a single RPC (e.g. fresh follower with a 1 GB log).
+		// Mirrors v1 (internal/raft/raft.go:1511-1512). Default: 512.
+		maxAE := n.cfg.MaxEntriesPerAE
+		if maxAE == 0 {
+			maxAE = defaultMaxEntriesPerAE
+		}
 		// Copy to defend against concurrent log truncation (see PR 6b note above).
 		src := n.st.log[next-1:]
+		if uint64(len(src)) > maxAE {
+			src = src[:maxAE]
+		}
 		entries = make([]LogEntry, len(src))
 		copy(entries, src)
 	}
@@ -744,19 +792,30 @@ func (n *Node) applyConflictHint(cmd command) {
 		}
 		return
 	}
-	// Term-mismatch case: scan our log backwards for the last entry with
-	// ConflictTerm. log slice index i ↔ logical index i+1.
+	// Term-mismatch case: binary-search our log for the last entry at
+	// ConflictTerm. Raft terms are monotonically non-decreasing in the leader's
+	// log (leader-driven append + truncate-on-conflict preserves this invariant),
+	// so binary search is correct.
+	//
+	// Strategy: find the first index where term > ConflictTerm; the entry just
+	// before it (if its term == ConflictTerm) is the rightmost match.
+	// This replaces the O(N) backward scan with O(log N) — critical for large
+	// logs where a stale follower's reject would otherwise block the actor.
 	newNext := cmd.hbConflictIndex
-	for i := len(n.st.log) - 1; i >= 0; i-- {
-		t := n.st.log[i].Term
-		if t == cmd.hbConflictTerm {
-			newNext = uint64(i+1) + 1 // logical index + 1
-			break
+	log := n.st.log
+	if len(log) > 0 {
+		// firstGT = first slice index where term > ConflictTerm.
+		firstGT := sort.Search(len(log), func(i int) bool {
+			return log[i].Term > cmd.hbConflictTerm
+		})
+		// firstGT-1 is the last index with term <= ConflictTerm.
+		if firstGT > 0 && log[firstGT-1].Term == cmd.hbConflictTerm {
+			// Leader has ConflictTerm; advance past its last entry.
+			newNext = uint64(firstGT) + 1 // logical index = firstGT+1, nextIndex = logical+1
 		}
-		if t < cmd.hbConflictTerm {
-			// Leader doesn't have ConflictTerm; use follower's ConflictIndex.
-			break
-		}
+		// else: either firstGT==0 (all entries > ConflictTerm, leader never had
+		// it) or firstGT-1 has a term < ConflictTerm (same conclusion). Fall
+		// back to hbConflictIndex (already set above).
 	}
 	if newNext < 1 {
 		newNext = 1

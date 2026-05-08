@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.109.0] - 2026-05-08 — raft v2 M2 prep: 4 correctness fixes
+
+### Added
+
+- `LogEntryNoOp` (type=3) in `internal/raft/v2/types.go`: dedicated log-entry
+  type for leader no-op entries. FSM consumers must skip entries of this type.
+- `becomeLeader` now appends a `LogEntryNoOp` at the new term immediately on
+  election (Raft §5.4.2). Prior-term uncommitted entries become commitable as a
+  side effect of the no-op's commit. FSM caller note: in a 3-voter cluster the
+  first applied entry is always the no-op; user `ProposeWait` returns index 2.
+- `buildAppendEntriesArgs` now caps the batch at `cfg.MaxEntriesPerAE` (default
+  512, matching v1). Prevents shipping the entire log to a fresh follower in one
+  RPC. Added `defaultMaxEntriesPerAE = 512` const in `actor.go`.
+- `handleAppendEntries` now validates `e.Index == target` for each entry in the
+  incoming batch. On mismatch, rejects the AE without mutating the log and sends
+  `ConflictIndex=target, ConflictTerm=0` to force leader resync (Log Matching
+  §5.3 correctness fix for future joint consensus / dueling leaders scope).
+- `applyConflictHint` replaces the O(N) backward scan with `sort.Search` binary
+  search. Raft terms are monotonically non-decreasing in the leader's log;
+  binary search finds the rightmost entry at ConflictTerm in O(log N).
+- 4 new tests in `replication_test.go`:
+  `TestBecomeLeader_AppendsNoOp`, `TestBuildAE_RespectsMaxEntriesPerAE`,
+  `TestAE_RejectsMismatchedEntryIndex`,
+  `TestApplyConflictHint_BoundedScanOnLargeLog` (2 sub-tests).
+
+### Notes
+
+- All 4 fixes are in `internal/raft/v2/actor.go`; no callers exist yet (v2 not
+  imported in production). Correctness prerequisites for M2 LogStore + crash
+  recovery: once persistence lands, silent corruption from latent bugs around
+  `currentTerm`/`commitIndex`/log mutation becomes a real data-loss risk.
+- Existing multi-voter tests updated to account for the no-op at index 1.
+  Equivalence tests note deliberate v1↔v2 index divergence (v1 requires
+  explicit `SetNoOpCommand`; v2 always emits no-op on election).
+
 ## [0.0.108.0] - 2026-05-08 — raft v2 actor pattern foundation (M1 milestone)
 
 ### Added
