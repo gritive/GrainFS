@@ -1754,20 +1754,27 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		return
 	}
 
-	// Source GetObject ACL gate. Storage facade validates source existence
-	// and copy-source preconditions; ACL belongs to the authorization
-	// decision, not to copy-source validation.
+	// Source GetObject authorization. Middleware already gated the destination
+	// at PhasePreLoad (PUT to dst). The source bucket needs its own
+	// authorization chain — pre-load (IAM + bucket policy) before we touch
+	// storage so an unauthorized caller cannot probe object existence via
+	// HeadObject, then post-load (ACL) after the source object is loaded.
+	srcInput := s3auth.PermCheckInput{
+		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
+		Resource:  s3auth.ResourceRef{Bucket: src.Bucket, Key: src.Key},
+		Action:    s3auth.GetObject,
+	}
+	if !s.authz.Decide(ctx, srcInput, s3auth.PhasePreLoad).Allow {
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+		return
+	}
 	srcObj, srcErr := s.ops.HeadObject(ctx, src.Bucket, src.Key)
 	if srcErr != nil {
 		mapError(c, srcErr)
 		return
 	}
-	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
-		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
-		Resource:  s3auth.ResourceRef{Bucket: src.Bucket, Key: src.Key},
-		Action:    s3auth.GetObject,
-		ObjectACL: s3auth.ACLGrant(srcObj.ACL),
-	}, s3auth.PhasePostLoad).Allow {
+	srcInput.ObjectACL = s3auth.ACLGrant(srcObj.ACL)
+	if !s.authz.Decide(ctx, srcInput, s3auth.PhasePostLoad).Allow {
 		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
 		return
 	}
