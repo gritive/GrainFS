@@ -47,7 +47,7 @@ func TestPullThrough_GetObject_LocalHit(t *testing.T) {
 	_, err := local.PutObject(context.Background(), "b", "k", strings.NewReader("local-data"), "text/plain")
 	require.NoError(t, err)
 
-	pt := pullthrough.NewBackend(local, upstream)
+	pt := pullthrough.NewBackend(local, &staticResolver{up: upstream})
 	rc, obj, err := pt.GetObject(context.Background(), "b", "k")
 	require.NoError(t, err)
 	defer rc.Close()
@@ -63,7 +63,7 @@ func TestPullThrough_GetObject_FetchFromUpstream(t *testing.T) {
 
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
-	pt := pullthrough.NewBackend(local, upstream)
+	pt := pullthrough.NewBackend(local, &staticResolver{up: upstream})
 	rc, obj, err := pt.GetObject(context.Background(), "b", "img.png")
 	require.NoError(t, err, "must fetch from upstream on cache miss")
 	defer rc.Close()
@@ -86,7 +86,7 @@ func TestPullThrough_GetObject_NotFound(t *testing.T) {
 
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
-	pt := pullthrough.NewBackend(local, upstream)
+	pt := pullthrough.NewBackend(local, &staticResolver{up: upstream})
 	_, _, err := pt.GetObject(context.Background(), "b", "missing.txt")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound,
 		"must return ErrObjectNotFound when neither local nor upstream has the object")
@@ -121,7 +121,7 @@ func TestPullthrough_LargeObject_Streaming(t *testing.T) {
 	content := io.LimitReader(zeroReader{}, size)
 	upstream := &streamingUpstream{content: content, size: size}
 
-	pt := pullthrough.NewBackend(local, upstream)
+	pt := pullthrough.NewBackend(local, &staticResolver{up: upstream})
 	rc, obj, err := pt.GetObject(context.Background(), "b", "big.bin")
 	require.NoError(t, err)
 	defer rc.Close()
@@ -151,7 +151,7 @@ func TestPullthrough_CallerReceivesFullBody(t *testing.T) {
 	payload := bytes.Repeat([]byte("grainfs"), 1000) // 7000 bytes
 	upstream := &stubUpstream{objects: map[string]string{"b/x": string(payload)}}
 
-	pt := pullthrough.NewBackend(local, upstream)
+	pt := pullthrough.NewBackend(local, &staticResolver{up: upstream})
 	rc, _, err := pt.GetObject(context.Background(), "b", "x")
 	require.NoError(t, err)
 	defer rc.Close()
@@ -203,7 +203,7 @@ func TestPullthrough_UpstreamErrorMidStream(t *testing.T) {
 		size:   1000,
 	}
 
-	pt := pullthrough.NewBackend(local, upstream)
+	pt := pullthrough.NewBackend(local, &staticResolver{up: upstream})
 	rc, _, err := pt.GetObject(context.Background(), "b", "bad")
 	// Must propagate the error (either from pull or post-read)
 	if err == nil {
@@ -228,13 +228,70 @@ func (zeroReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// staticResolver is a test helper that always returns the same Upstream
+// regardless of bucket. Use mapResolver for per-bucket fan-out.
+type staticResolver struct{ up pullthrough.Upstream }
+
+func (s *staticResolver) Resolve(_ string) (pullthrough.Upstream, bool) {
+	if s.up == nil {
+		return nil, false
+	}
+	return s.up, true
+}
+
+// mapResolver routes by bucket name. Returns (nil, false) for unknown buckets,
+// which the Backend treats as "no upstream configured".
+type mapResolver struct {
+	m map[string]pullthrough.Upstream
+}
+
+func (r *mapResolver) Resolve(bucket string) (pullthrough.Upstream, bool) {
+	up, ok := r.m[bucket]
+	return up, ok
+}
+
+// TestPullThrough_PerBucketResolver_RoutesByBucket verifies that the Backend
+// asks the Resolver for an Upstream per request and routes by bucket. Buckets
+// not in the resolver map fall back to local-only (ErrObjectNotFound).
+func TestPullThrough_PerBucketResolver_RoutesByBucket(t *testing.T) {
+	local := newLocalBackend(t)
+	require.NoError(t, local.CreateBucket(context.Background(), "a"))
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+	require.NoError(t, local.CreateBucket(context.Background(), "c"))
+
+	upA := &stubUpstream{objects: map[string]string{"a/k": "from-A"}}
+	upB := &stubUpstream{objects: map[string]string{"b/k": "from-B"}}
+	r := &mapResolver{m: map[string]pullthrough.Upstream{"a": upA, "b": upB}}
+
+	pt := pullthrough.NewBackend(local, r)
+
+	// Bucket "a" routes to upA.
+	rc, _, err := pt.GetObject(context.Background(), "a", "k")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(rc)
+	rc.Close()
+	assert.Equal(t, "from-A", string(body), "bucket a must route to upstream A")
+
+	// Bucket "b" routes to upB.
+	rc, _, err = pt.GetObject(context.Background(), "b", "k")
+	require.NoError(t, err)
+	body, _ = io.ReadAll(rc)
+	rc.Close()
+	assert.Equal(t, "from-B", string(body), "bucket b must route to upstream B")
+
+	// Bucket "c" has no resolver entry → ErrObjectNotFound (no fallback fetch).
+	_, _, err = pt.GetObject(context.Background(), "c", "k")
+	assert.ErrorIs(t, err, storage.ErrObjectNotFound,
+		"bucket without resolver entry must surface the local 404")
+}
+
 func TestPullThrough_PutObject_GoesToLocal(t *testing.T) {
 	local := newLocalBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{}}
 
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
-	pt := pullthrough.NewBackend(local, upstream)
+	pt := pullthrough.NewBackend(local, &staticResolver{up: upstream})
 	_, err := pt.PutObject(context.Background(), "b", "new.txt", strings.NewReader("new"), "text/plain")
 	require.NoError(t, err)
 
