@@ -857,6 +857,18 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
+	// DELETE /:bucket/:key?uploadId=<id> — abort an in-progress multipart upload.
+	// Checked before ?versionId= because S3 routes the request to AbortMultipartUpload
+	// when uploadId is present, regardless of any other query string.
+	if uploadID := string(c.QueryArgs().Peek("uploadId")); uploadID != "" {
+		if err := s.ops.AbortMultipartUpload(ctx, bucket, key, uploadID); err != nil {
+			mapError(c, err)
+			return
+		}
+		c.Status(consts.StatusNoContent)
+		return
+	}
+
 	// DELETE /:bucket/:key?versionId=<id> — hard-delete specific version
 	if versionID := string(c.QueryArgs().Peek("versionId")); versionID != "" {
 		if err := s.ops.DeleteObjectVersion(bucket, key, versionID); err != nil {

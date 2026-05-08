@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.101.0] - 2026-05-08 — S3 AbortMultipartUpload handler
+
+### Added
+
+- `DELETE /:bucket/:key?uploadId=<id>` is now wired to
+  `Operations.AbortMultipartUpload`. Previously the request fell through to
+  `DeleteObject` because the handler had no `?uploadId=` branch, so S3
+  clients calling `AbortMultipartUpload` saw the wrong semantics (and
+  multipart staging directories survived for the 24h grace window). The
+  uploadId branch is checked before `?versionId=` because S3 routes the
+  request to AbortMultipartUpload whenever `uploadId` is present, and
+  returns `204 No Content` on success or `404 NoSuchUpload` on a missing
+  upload (the existing `mapError` already maps `storage.ErrUploadNotFound`
+  to that response shape).
+
 ## [0.0.100.0] - 2026-05-08 — multipart orphan sweep moves into storage capability plan
 
 ### Changed
