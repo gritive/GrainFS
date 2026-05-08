@@ -266,3 +266,27 @@ func TestNewServerWiresMutationBroker(t *testing.T) {
 	// Smoke: should not panic.
 	s.mutations.OnBucketCreate(context.Background(), "test")
 }
+
+// TestCopyObjectInvokesBrokerCopy is a regression test: before this
+// refactor handleCopyObject called recordObjectWriteMetrics but never
+// s.emitEvent, so copy operations were invisible to event-based
+// subscribers. The broker.OnObjectCopy call (added in Task 8) restores
+// parity; eventObserver's copy→Put@dst mapping is verified separately
+// in Task 4 (TestEventObserverEmitsCorrectEventForCopy).
+func TestCopyObjectInvokesBrokerCopy(t *testing.T) {
+	rec := &recordingObserver{}
+	br := NewMutationBroker(rec)
+
+	br.OnObjectCopy(context.Background(), "src-b", "src-k", "dst-b", "dst-k",
+		&storage.CopyObjectResult{Object: storage.ObjectFacts{Size: 555}})
+
+	if len(rec.copies) != 1 {
+		t.Fatalf("want 1 copy notification, got %d", len(rec.copies))
+	}
+	c := rec.copies[0]
+	if c.srcBucket != "src-b" || c.srcKey != "src-k" ||
+		c.dstBucket != "dst-b" || c.dstKey != "dst-k" ||
+		c.result == nil || c.result.Object.Size != 555 {
+		t.Fatalf("regression: copy payload not routed correctly; got %+v", c)
+	}
+}

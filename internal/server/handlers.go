@@ -1806,7 +1806,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		return
 	}
 	obj := result.Object
-	recordObjectWriteMetrics(result.Previous, obj.Size)
+	s.mutations.OnObjectCopy(ctx, src.Bucket, src.Key, dstBucket, dstKey, result)
 
 	response := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult>
