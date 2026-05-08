@@ -29,15 +29,19 @@ type command struct {
 	vrGranted bool
 	vrErr     error
 
-	// cmdHeartbeatReply payload — outbound AppendEntries reply (PR 6a uses the
-	// same kind for heartbeats and entry-bearing AEs since heartbeats are just
-	// AEs with empty Entries). hbMatchAfter = PrevLogIndex + len(Entries) sent;
+	// cmdHeartbeatReply payload — outbound AppendEntries reply (the same kind
+	// covers heartbeats and entry-bearing AEs since heartbeats are just AEs
+	// with empty Entries). hbMatchAfter = PrevLogIndex + len(Entries) sent;
 	// the leader uses it to advance matchIndex[peer] on success.
-	hbPeer       string
-	hbTerm       uint64
-	hbSuccess    bool
-	hbMatchAfter uint64
-	hbErr        error
+	// hbConflictTerm/hbConflictIndex carry the follower's conflict hint on
+	// failure (PR 6b); zero when unset.
+	hbPeer          string
+	hbTerm          uint64
+	hbSuccess       bool
+	hbMatchAfter    uint64
+	hbConflictTerm  uint64
+	hbConflictIndex uint64
+	hbErr           error
 }
 
 type cmdKind int
@@ -186,20 +190,24 @@ func (n *Node) handleRequestVote(cmd command) {
 	cmd.rvReply <- reply
 }
 
-// handleAppendEntries handles incoming AppendEntries RPCs. PR 6a implements
-// the §5.3 happy path:
+// handleAppendEntries handles incoming AppendEntries RPCs. Implements the
+// §5.3 path including conflict resolution:
 //
 //  1. Stale term (args.Term < currentTerm) → reject without state change.
 //  2. Higher term → step down, adopt the new term.
 //  3. Recognise the leader (Candidate→Follower if needed), reset election timer.
-//  4. Validate PrevLogIndex/PrevLogTerm; reject with Success=false on mismatch
-//     (PR 6b will hint via ConflictTerm/ConflictIndex; PR 6a leaves them zero).
-//  5. Append Entries; advance commitIndex = min(LeaderCommit, lastLogIndex);
-//     deliver newly-committed entries on ApplyCh.
+//  4. Validate PrevLogIndex/PrevLogTerm; on mismatch, populate
+//     ConflictTerm/ConflictIndex hints so the leader can back off by an entire
+//     conflicting term in a single round-trip (Raft §5.3 optimisation).
+//  5. Append Entries, truncating any conflicting suffix on the way; advance
+//     commitIndex = min(LeaderCommit, lastLogIndex); deliver newly-committed
+//     entries on ApplyCh.
 //
-// PR 6a assumes Entries always extend the local log cleanly (no truncation /
-// term-conflict scenarios). That holds for the happy-path scenarios this PR
-// targets; PR 6b adds conflict resolution.
+// PR 6b note on truncation policy: we only truncate on accept (Rule 5a),
+// matching the plan. v1 (raft.go:1860) also truncates eagerly on Rule 4
+// rejection, which converges one round faster in some scenarios. Both are
+// correct; the accept-only path is simpler and the leader's nextIndex will
+// drive the next AE to a matching prefix anyway.
 func (n *Node) handleAppendEntries(cmd command) {
 	args := cmd.aeArgs
 
@@ -238,38 +246,66 @@ func (n *Node) handleAppendEntries(cmd command) {
 	n.st.leaderID = args.LeaderID
 	n.resetElectionTimer()
 
-	// Rule 4: log consistency check. PR 6a only handles happy-path appends —
-	// reject (Success=false) when PrevLog{Index,Term} does not match. PR 6b
-	// will populate ConflictTerm/ConflictIndex hints to speed catch-up.
+	// Rule 4: log consistency check. On mismatch, populate the conflict hint
+	// so the leader can skip the entire offending term in one round-trip
+	// (Raft §5.3 optimisation; mirrors v1 raft.go:1843-1862).
 	if args.PrevLogIndex > n.st.lastLogIndex() {
+		// Case 1: follower's log too short. Hint ConflictTerm=0,
+		// ConflictIndex=lastLogIndex+1 so the leader jumps directly to where
+		// our log ends.
 		n.publish()
 		cmd.aeReply <- &AppendEntriesReply{
-			Term:    n.st.currentTerm,
-			Success: false,
+			Term:          n.st.currentTerm,
+			Success:       false,
+			ConflictTerm:  0,
+			ConflictIndex: n.st.lastLogIndex() + 1,
 		}
 		return
 	}
 	if args.PrevLogIndex > 0 && n.st.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+		// Case 2: term mismatch at PrevLogIndex. Walk back to the first index
+		// of the conflicting term so the leader can decide to skip the whole
+		// term (if it has it) or jump to that boundary (if it doesn't).
+		conflictTerm := n.st.log[args.PrevLogIndex-1].Term
+		conflictIdx := args.PrevLogIndex
+		// Logical index conflictIdx maps to slice index conflictIdx-1.
+		// We're walking back while the *previous* logical entry (conflictIdx-1)
+		// also has conflictTerm; that's slice index conflictIdx-2.
+		for conflictIdx > 1 && n.st.log[conflictIdx-2].Term == conflictTerm {
+			conflictIdx--
+		}
 		n.publish()
 		cmd.aeReply <- &AppendEntriesReply{
-			Term:    n.st.currentTerm,
-			Success: false,
+			Term:          n.st.currentTerm,
+			Success:       false,
+			ConflictTerm:  conflictTerm,
+			ConflictIndex: conflictIdx,
 		}
 		return
 	}
 
-	// Rule 5a: append entries. PR 6a happy path — we assume Entries extend the
-	// log cleanly. If the follower already has matching entries past
-	// PrevLogIndex (idempotent retry case), skip the duplicates rather than
-	// truncate; truncation on conflict is PR 6b territory.
+	// Rule 5a: append entries with conflict-aware truncation. Walk the entries;
+	// for each, if the follower already has an entry at that logical index AND
+	// the term differs, truncate from that index onward and append the rest.
+	// If the term matches, the entry is already correct (skip — duplicate
+	// retry). If we run past lastLogIndex, append.
 	for i, e := range args.Entries {
-		idx := args.PrevLogIndex + uint64(i+1)
-		if idx <= n.st.lastLogIndex() {
-			// Already present at this index. PR 6a invariant: same term/index
-			// implies same entry — skip without truncating.
+		target := args.PrevLogIndex + uint64(i) + 1
+		if target <= n.st.lastLogIndex() {
+			if n.st.log[target-1].Term != e.Term {
+				// Conflict at logical index target. Truncate and break — the
+				// remaining loop iterations would walk indices we just dropped.
+				n.st.log = n.st.log[:target-1]
+				n.st.log = append(n.st.log, args.Entries[i:]...)
+				break
+			}
+			// Same term/index → same entry by Raft Log Matching. Skip.
 			continue
 		}
-		n.st.log = append(n.st.log, e)
+		// target > lastLogIndex: pure extension. Append remaining entries in
+		// one shot and break out of the loop.
+		n.st.log = append(n.st.log, args.Entries[i:]...)
+		break
 	}
 
 	// Rule 5b: advance commitIndex and deliver newly-committed entries.
@@ -538,10 +574,11 @@ func (n *Node) broadcastHeartbeat() {
 }
 
 // buildAppendEntriesArgs constructs the AppendEntriesArgs for peer based on
-// current actor state. Caller must be inside the actor goroutine. The Entries
-// slice aliases n.st.log; goroutines that consume args MUST NOT mutate it,
-// and the actor MUST NOT truncate the underlying log while the goroutine is
-// in flight (PR 6a never truncates).
+// current actor state. Caller must be inside the actor goroutine. PR 6b copies
+// the entries slice rather than aliasing n.st.log — the follower-side
+// truncation path may now mutate the leader's own log when the leader steps
+// down, and an in-flight dispatch goroutine reading the aliased slice would
+// observe a torn view. The copy cost is bounded by MaxEntriesPerAE.
 func (n *Node) buildAppendEntriesArgs(peer string) *AppendEntriesArgs {
 	next := n.st.nextIndex[peer]
 	if next < 1 {
@@ -551,7 +588,10 @@ func (n *Node) buildAppendEntriesArgs(peer string) *AppendEntriesArgs {
 	prevTerm := n.st.lastLogTermAt(prevIdx)
 	var entries []LogEntry
 	if last := n.st.lastLogIndex(); last >= next {
-		entries = n.st.log[next-1:]
+		// Copy to defend against concurrent log truncation (see PR 6b note above).
+		src := n.st.log[next-1:]
+		entries = make([]LogEntry, len(src))
+		copy(entries, src)
 	}
 	return &AppendEntriesArgs{
 		Term:         n.st.currentTerm,
@@ -604,6 +644,8 @@ func (n *Node) dispatchAppendEntries(peer string, args *AppendEntriesArgs) {
 	if err == nil && reply != nil {
 		c.hbTerm = reply.Term
 		c.hbSuccess = reply.Success
+		c.hbConflictTerm = reply.ConflictTerm
+		c.hbConflictIndex = reply.ConflictIndex
 	}
 	select {
 	case n.cmdCh <- c:
@@ -636,13 +678,15 @@ func (n *Node) handleVoteReply(cmd command) {
 }
 
 // handleHeartbeatReply processes the reply from an outbound AppendEntries
-// (heartbeat or entry-bearing). PR 6a leader logic:
+// (heartbeat or entry-bearing). Leader logic:
 //   - Higher reply.Term → step down.
 //   - Stale reply (we're no longer Leader, or reply for a prior term) → drop.
 //   - Success → advance matchIndex/nextIndex for peer; recompute commitIndex
 //     and apply newly-committed entries.
-//   - Failure → decrement nextIndex by 1 (clamp to 1). PR 6b adds the
-//     ConflictTerm/ConflictIndex hint for faster catch-up.
+//   - Failure with conflict hint → roll nextIndex back to skip the entire
+//     conflicting term in one round-trip (Raft §5.3 optimisation; mirrors v1
+//     applyConflictHint at raft.go:1561-1594).
+//   - Failure without hint → conservative decrement-by-one (legacy peers).
 func (n *Node) handleHeartbeatReply(cmd command) {
 	if cmd.hbErr != nil {
 		return
@@ -666,11 +710,58 @@ func (n *Node) handleHeartbeatReply(cmd command) {
 		return
 	}
 
-	// Failure (PR 6a): conservative decrement-by-one. PR 6b will replace this
-	// with the ConflictIndex hint path.
-	if n.st.nextIndex[cmd.hbPeer] > 1 {
-		n.st.nextIndex[cmd.hbPeer]--
+	// Failure path: apply conflict hint if present.
+	n.applyConflictHint(cmd)
+}
+
+// applyConflictHint rolls nextIndex[peer] back according to the follower's
+// ConflictTerm/ConflictIndex hint. Caller must be Leader, and the reply must
+// already be confirmed same-term (handleHeartbeatReply gates on this).
+//
+// Three cases (mirrors v1 raft.go:1561-1594):
+//
+//  1. ConflictIndex == 0  → legacy peer with no hint. Decrement nextIndex by
+//     one entry, clamped to 1.
+//  2. ConflictTerm == 0   → follower's log is too short. Jump nextIndex
+//     directly to ConflictIndex (= follower's lastLogIndex+1).
+//  3. ConflictTerm  > 0   → follower's log has a different term at
+//     PrevLogIndex. Scan our log backwards: if we have ConflictTerm, set
+//     nextIndex past our last entry of that term (skip our slice of the bad
+//     term in one shot). If we don't, fall back to ConflictIndex.
+func (n *Node) applyConflictHint(cmd command) {
+	if cmd.hbConflictIndex == 0 {
+		// Legacy peer: no hint. Conservative decrement-by-one.
+		if n.st.nextIndex[cmd.hbPeer] > 1 {
+			n.st.nextIndex[cmd.hbPeer]--
+		}
+		return
 	}
+	if cmd.hbConflictTerm == 0 {
+		// Follower too short: jump directly.
+		n.st.nextIndex[cmd.hbPeer] = cmd.hbConflictIndex
+		if n.st.nextIndex[cmd.hbPeer] < 1 {
+			n.st.nextIndex[cmd.hbPeer] = 1
+		}
+		return
+	}
+	// Term-mismatch case: scan our log backwards for the last entry with
+	// ConflictTerm. log slice index i ↔ logical index i+1.
+	newNext := cmd.hbConflictIndex
+	for i := len(n.st.log) - 1; i >= 0; i-- {
+		t := n.st.log[i].Term
+		if t == cmd.hbConflictTerm {
+			newNext = uint64(i+1) + 1 // logical index + 1
+			break
+		}
+		if t < cmd.hbConflictTerm {
+			// Leader doesn't have ConflictTerm; use follower's ConflictIndex.
+			break
+		}
+	}
+	if newNext < 1 {
+		newNext = 1
+	}
+	n.st.nextIndex[cmd.hbPeer] = newNext
 }
 
 // maybeAdvanceCommitIndex finds the highest log index N such that a majority

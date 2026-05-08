@@ -18,6 +18,7 @@ package raftv2_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -451,20 +452,57 @@ func buildV1Cluster(t *testing.T, ids []string, fastID string) []*v1.Node {
 // external (raftv2_test) test package. It mirrors v2's package-private
 // memNetwork — kept here because memNetwork is unexported and equivalence_test
 // lives in raftv2_test by design (black-box adapter coverage for v1 + v2).
+//
+// Partition support (PR 6b): partitioned IDs are stored in a sync.Map gated
+// at dispatch time. Both directions to/from a partitioned node are blocked
+// (matches chaos.PartitionPeer semantics).
 type v2HarnessNetwork struct {
-	nodes map[string]*v2.Node
+	mu          sync.Mutex
+	nodes       map[string]*v2.Node
+	partitioned map[string]bool
 }
 
 func newV2HarnessNetwork() *v2HarnessNetwork {
-	return &v2HarnessNetwork{nodes: make(map[string]*v2.Node)}
+	return &v2HarnessNetwork{
+		nodes:       make(map[string]*v2.Node),
+		partitioned: make(map[string]bool),
+	}
 }
 
 // register installs node and returns a Transport that routes through the
-// shared registry. The registry is only mutated before any node starts, so no
-// lock is required.
+// shared registry. Mutated under mu so partition toggles are race-clean.
 func (n *v2HarnessNetwork) register(self string, node *v2.Node) v2.Transport {
+	n.mu.Lock()
 	n.nodes[self] = node
+	n.mu.Unlock()
 	return &v2HarnessTransport{self: self, net: n}
+}
+
+// partition blocks all RPCs to/from id until heal is called.
+func (n *v2HarnessNetwork) partition(id string) {
+	n.mu.Lock()
+	n.partitioned[id] = true
+	n.mu.Unlock()
+}
+
+func (n *v2HarnessNetwork) heal(id string) {
+	n.mu.Lock()
+	delete(n.partitioned, id)
+	n.mu.Unlock()
+}
+
+// shouldDeliver reports whether traffic between from/to is currently allowed.
+// Either endpoint partitioned → block.
+func (n *v2HarnessNetwork) shouldDeliver(from, to string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return !n.partitioned[from] && !n.partitioned[to]
+}
+
+func (n *v2HarnessNetwork) lookup(peer string) *v2.Node {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.nodes[peer]
 }
 
 type v2HarnessTransport struct {
@@ -473,16 +511,22 @@ type v2HarnessTransport struct {
 }
 
 func (t *v2HarnessTransport) SendRequestVote(peer string, args *v2.RequestVoteArgs) (*v2.RequestVoteReply, error) {
-	dst, ok := t.net.nodes[peer]
-	if !ok {
+	if !t.net.shouldDeliver(t.self, peer) {
+		return nil, v2.ErrUnknownPeer
+	}
+	dst := t.net.lookup(peer)
+	if dst == nil {
 		return nil, v2.ErrUnknownPeer
 	}
 	return dst.HandleRequestVote(args), nil
 }
 
 func (t *v2HarnessTransport) SendAppendEntries(peer string, args *v2.AppendEntriesArgs) (*v2.AppendEntriesReply, error) {
-	dst, ok := t.net.nodes[peer]
-	if !ok {
+	if !t.net.shouldDeliver(t.self, peer) {
+		return nil, v2.ErrUnknownPeer
+	}
+	dst := t.net.lookup(peer)
+	if dst == nil {
 		return nil, v2.ErrUnknownPeer
 	}
 	return dst.HandleAppendEntries(args), nil
@@ -491,6 +535,14 @@ func (t *v2HarnessTransport) SendAppendEntries(peer string, args *v2.AppendEntri
 // buildV2Cluster wires N v2 Nodes through v2HarnessNetwork with the same
 // asymmetric election-timeout setup as buildV1Cluster.
 func buildV2Cluster(t *testing.T, ids []string, fastID string) []*v2.Node {
+	t.Helper()
+	nodes, _ := buildV2ClusterNet(t, ids, fastID)
+	return nodes
+}
+
+// buildV2ClusterNet is the network-exposing variant of buildV2Cluster, used
+// by partition-based scenarios that need to drive partition/heal directly.
+func buildV2ClusterNet(t *testing.T, ids []string, fastID string) ([]*v2.Node, *v2HarnessNetwork) {
 	t.Helper()
 	net := newV2HarnessNetwork()
 	nodes := make([]*v2.Node, len(ids))
@@ -525,7 +577,7 @@ func buildV2Cluster(t *testing.T, ids []string, fastID string) []*v2.Node {
 			n.Stop()
 		}
 	})
-	return nodes
+	return nodes, net
 }
 
 // waitForV1Leader returns (leaderID, term) for the first leader observed
@@ -662,4 +714,160 @@ func TestEquivalence_ThreeVoterPropose(t *testing.T) {
 		}
 		return true
 	}), "not all nodes reached the proposed commit index")
+}
+
+// TestEquivalence_DivergentLogConverges drives a partition-induced divergent
+// log scenario against both v1 and v2 and asserts both converge to the same
+// committed log index on every node.
+//
+// Scenario (per cluster):
+//  1. n1 wins election (asymmetric timeouts).
+//  2. Partition n3 from the cluster.
+//  3. n1 proposes A — commits with quorum {n1,n2}, n3 misses out.
+//  4. n1 proposes B — same, n3 still partitioned.
+//  5. Heal n3. Leader's nextIndex[n3] is still optimistic (lastLogIndex+1);
+//     n3's first AE will fail the log consistency check (its log is empty
+//     while leader expects PrevLogIndex≥1). The conflict-hint backoff drives
+//     nextIndex[n3] down to 1, leader replays A,B, n3 catches up.
+//  6. All three nodes' CommittedIndex must reach the leader's (== 2).
+//
+// This is the §5.3 catch-up path under realistic conditions — equivalent to
+// "leader rejoin with stale log" / "follower replay after disagreement".
+// We do NOT seed any logs (which would require a v1 helper and is out of
+// scope for PR 6b); the divergence emerges organically from the partition.
+//
+// Equivalence assertion: both v1 and v2 reach the same final CommittedIndex
+// on every node. Apply transcripts are not directly compared because the
+// build-helpers drain ApplyCh in background goroutines (see comment on
+// TestEquivalence_ThreeVoterPropose at line 605).
+func TestEquivalence_DivergentLogConverges(t *testing.T) {
+	ids := []string{"n1", "n2", "n3"}
+	const fast = "n1"
+
+	// --- v1 cluster via chaos transport (supports PartitionPeer). ---
+	v1Cluster := buildV1ChaosCluster(t, ids, fast)
+	v1Lead := waitForV1LeaderInList(t, v1Cluster.Nodes(), fast, 2*time.Second)
+
+	// Pick a non-leader node to partition. chaos.Cluster names are not "n1..n3"
+	// (it generates "node-0".."node-2"), so we look up by exclusion of leader.
+	var v1Partitioned string
+	for _, id := range v1Cluster.NodeIDs() {
+		if id != v1Lead.ID() {
+			v1Partitioned = id
+			break
+		}
+	}
+	require.NotEmpty(t, v1Partitioned, "v1: no non-leader node to partition")
+	v1Cluster.PartitionPeer(v1Partitioned)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	idxA1, err := v1Lead.ProposeWait(ctx, []byte("A"))
+	require.NoError(t, err, "v1: ProposeWait A")
+	idxB1, err := v1Lead.ProposeWait(ctx, []byte("B"))
+	require.NoError(t, err, "v1: ProposeWait B")
+	require.Equal(t, uint64(1), idxA1)
+	require.Equal(t, uint64(2), idxB1)
+
+	v1Cluster.HealPartition(v1Partitioned)
+
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		for _, n := range v1Cluster.Nodes() {
+			if n.CommittedIndex() < 2 {
+				return false
+			}
+		}
+		return true
+	}), "v1: not all nodes reached commitIndex 2 after heal")
+
+	// --- v2 cluster via partition-capable harness network. ---
+	v2Nodes, v2Net := buildV2ClusterNet(t, ids, fast)
+	v2Lead := waitForV2LeaderID(t, v2Nodes, fast, 2*time.Second)
+
+	v2Net.partition("n3")
+
+	idxA2, err := v2Lead.ProposeWait(ctx, []byte("A"))
+	require.NoError(t, err, "v2: ProposeWait A")
+	idxB2, err := v2Lead.ProposeWait(ctx, []byte("B"))
+	require.NoError(t, err, "v2: ProposeWait B")
+	require.Equal(t, uint64(1), idxA2)
+	require.Equal(t, uint64(2), idxB2)
+
+	v2Net.heal("n3")
+
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		for _, n := range v2Nodes {
+			if n.CommittedIndex() < 2 {
+				return false
+			}
+		}
+		return true
+	}), "v2: not all nodes reached commitIndex 2 after heal")
+
+	// Equivalence: both impls converge every node to commitIndex 2.
+	require.Equal(t, idxA1, idxA2, "v1 vs v2 divergence on first proposed index")
+	require.Equal(t, idxB1, idxB2, "v1 vs v2 divergence on second proposed index")
+}
+
+// buildV1ChaosCluster wires N v1 Nodes via the chaos cluster harness so
+// PartitionPeer/HealPartition primitives are available. Asymmetric election
+// timeouts make fastID the deterministic winner.
+func buildV1ChaosCluster(t *testing.T, ids []string, fastID string) *chaosraft.Cluster {
+	t.Helper()
+	c := chaosraft.NewCluster(t, len(ids),
+		chaosraft.WithElectionTimeout(50*time.Millisecond),
+		chaosraft.WithHeartbeatTimeout(20*time.Millisecond),
+	)
+	// chaos.Cluster generates ids "node-0".."node-(N-1)", but the test asks
+	// for ids "n1"..."n3". To minimise the diff to the chaos package we
+	// adopt chaos's IDs in the v1 portion of this scenario; equivalence is
+	// against the v2 cluster which uses our ids. This is a deliberate
+	// asymmetry — the equivalence test only compares CommittedIndex across
+	// both impls (a numeric scalar), not node IDs.
+	c.StartAll()
+	// Drain ApplyCh on every node so the v1 actor never blocks on apply send.
+	// Mirrors what buildV2Cluster already does for v2.
+	for _, n := range c.Nodes() {
+		go func(n *v1.Node) {
+			for range n.ApplyCh() {
+			}
+		}(n)
+	}
+	return c
+}
+
+// waitForV1LeaderInList polls until any of the given nodes reports IsLeader.
+// Returns the leader. fastID is unused here (the chaos cluster picks its own
+// IDs) but kept in the signature for symmetry with the v2 helper.
+func waitForV1LeaderInList(t *testing.T, nodes []*v1.Node, _ string, timeout time.Duration) *v1.Node {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			if n.IsLeader() {
+				return n
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("waitForV1LeaderInList: no leader within %v", timeout)
+	return nil
+}
+
+// waitForV2LeaderID polls until the named node reports IsLeader, returning
+// it. Asymmetric election timeouts (fast 50ms) make this deterministic.
+func waitForV2LeaderID(t *testing.T, nodes []*v2.Node, leaderID string, timeout time.Duration) *v2.Node {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			if n.ID() == leaderID && n.IsLeader() {
+				return n
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("waitForV2LeaderID: %s did not become leader within %v", leaderID, timeout)
+	return nil
 }
