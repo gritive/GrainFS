@@ -68,3 +68,11 @@ func (o *Operations) CompleteMultipartUploadWithResult(
 func (o *Operations) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	return o.backend.AbortMultipartUpload(ctx, bucket, key, uploadID)
 }
+
+func (o *Operations) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*MultipartUpload, error) {
+	return o.backend.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+}
+
+func (o *Operations) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error) {
+	return o.backend.ListParts(ctx, bucket, key, uploadID, maxParts)
+}

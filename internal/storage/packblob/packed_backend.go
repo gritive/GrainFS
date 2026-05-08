@@ -538,3 +538,11 @@ func (pb *PackedBackend) CompleteMultipartUpload(ctx context.Context, bucket, ke
 func (pb *PackedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	return pb.inner.AbortMultipartUpload(ctx, bucket, key, uploadID)
 }
+
+func (pb *PackedBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	return pb.inner.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+}
+
+func (pb *PackedBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	return pb.inner.ListParts(ctx, bucket, key, uploadID, maxParts)
+}

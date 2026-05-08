@@ -115,6 +115,14 @@ func (sb *SwappableBackend) AbortMultipartUpload(ctx context.Context, bucket, ke
 	return (*sb.inner.Load()).AbortMultipartUpload(ctx, bucket, key, uploadID)
 }
 
+func (sb *SwappableBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*MultipartUpload, error) {
+	return (*sb.inner.Load()).ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+}
+
+func (sb *SwappableBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error) {
+	return (*sb.inner.Load()).ListParts(ctx, bucket, key, uploadID, maxParts)
+}
+
 // ListAllObjects implements Snapshotable by delegating to the inner backend.
 func (sb *SwappableBackend) ListAllObjects() ([]SnapshotObject, error) {
 	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {

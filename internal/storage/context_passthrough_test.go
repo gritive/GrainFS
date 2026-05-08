@@ -67,6 +67,14 @@ func (b *contextRecorderBackend) AbortMultipartUpload(ctx context.Context, bucke
 	b.ctx = ctx
 	return nil
 }
+func (b *contextRecorderBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*MultipartUpload, error) {
+	b.ctx = ctx
+	return nil, nil
+}
+func (b *contextRecorderBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error) {
+	b.ctx = ctx
+	return nil, nil
+}
 func (b *contextRecorderBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	b.ctx = ctx
 	return nil

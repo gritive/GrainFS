@@ -298,3 +298,9 @@ func (b *basicBackend) CompleteMultipartUpload(context.Context, string, string, 
 func (b *basicBackend) AbortMultipartUpload(context.Context, string, string, string) error {
 	return nil
 }
+func (b *basicBackend) ListMultipartUploads(context.Context, string, string, int) ([]*MultipartUpload, error) {
+	return nil, nil
+}
+func (b *basicBackend) ListParts(context.Context, string, string, string, int) ([]Part, error) {
+	return nil, nil
+}

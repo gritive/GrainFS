@@ -139,6 +139,14 @@ type Backend interface {
 	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
+	// ListMultipartUploads returns in-progress multipart uploads in bucket whose
+	// keys start with prefix, capped at maxUploads (0 = no cap). Order is not
+	// guaranteed across backends; LocalBackend returns by Initiated time.
+	ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*MultipartUpload, error)
+	// ListParts returns the parts already uploaded for one in-progress multipart
+	// upload, sorted by part number ascending, capped at maxParts (0 = no cap).
+	// Returns ErrUploadNotFound if uploadID does not match an active upload.
+	ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error)
 }
 
 // Truncatable is an optional interface for backends that can efficiently truncate an object.

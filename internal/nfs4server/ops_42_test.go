@@ -381,6 +381,12 @@ func (b *allocateTruncateBackend) CompleteMultipartUpload(context.Context, strin
 func (b *allocateTruncateBackend) AbortMultipartUpload(context.Context, string, string, string) error {
 	return nil
 }
+func (b *allocateTruncateBackend) ListMultipartUploads(context.Context, string, string, int) ([]*storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (b *allocateTruncateBackend) ListParts(context.Context, string, string, string, int) ([]storage.Part, error) {
+	return nil, nil
+}
 func (b *allocateTruncateBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	b.truncateCalls++
 	b.truncateBucket = bucket

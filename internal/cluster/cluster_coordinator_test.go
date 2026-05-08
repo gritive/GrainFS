@@ -109,6 +109,14 @@ func (f *fakeBackend) AbortMultipartUpload(ctx context.Context, bucket, key, upl
 	_ = ctx
 	return fmt.Errorf("fakeBackend.AbortMultipartUpload not implemented")
 }
+func (f *fakeBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	_ = ctx
+	return nil, fmt.Errorf("fakeBackend.ListMultipartUploads not implemented")
+}
+func (f *fakeBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	_ = ctx
+	return nil, fmt.Errorf("fakeBackend.ListParts not implemented")
+}
 
 // TestClusterCoordinator_CreateBucket_DelegatesToBase verifies that the 4
 // cluster-wide ops bypass routing entirely and delegate straight to the base

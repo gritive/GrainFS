@@ -1436,6 +1436,34 @@ func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, k
 	return parseReplyStatus(reply)
 }
 
+// ListMultipartUploads delegates to the local DistributedBackend, which scans
+// the FSM-replicated multipartKey range. First-slice limitation: cluster
+// multipart metadata does not yet record bucket+key, so this returns an empty
+// list in cluster mode. Single-node mode (LocalBackend) returns the real
+// list.
+func (c *ClusterCoordinator) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+}
+
+// ListParts routes by (bucket, key) to the data Raft group that owns the
+// upload's part files. If the local node is on the routed group, parts are
+// read directly; otherwise we surface the parts visible at the local
+// DistributedBackend (best-effort, see DistributedBackend.ListParts).
+// Forwarding ListParts to the remote group's leader is a follow-up.
+func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	target, _, err := c.routeObjectWrite(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
+		if err != nil {
+			return nil, err
+		}
+		return gb.ListParts(ctx, bucket, key, uploadID, maxParts)
+	}
+	return c.base.ListParts(ctx, bucket, key, uploadID, maxParts)
+}
+
 var (
 	_ storage.Backend     = (*ClusterCoordinator)(nil)
 	_ storage.PartialIO   = (*ClusterCoordinator)(nil)

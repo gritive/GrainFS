@@ -192,3 +192,9 @@ func (m *migrationNoSuchBucketBackend) CompleteMultipartUpload(ctx context.Conte
 func (m *migrationNoSuchBucketBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	return fmt.Errorf("unused")
 }
+func (m *migrationNoSuchBucketBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	return nil, fmt.Errorf("unused")
+}
+func (m *migrationNoSuchBucketBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	return nil, fmt.Errorf("unused")
+}
