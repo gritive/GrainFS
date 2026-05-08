@@ -31,7 +31,6 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -182,43 +181,17 @@ func Run(ctx context.Context, cfg Config) error {
 	stopApply := state.stopApply
 	router := state.streamRouter
 
-	// Set up snapshot manager: auto-snapshot every 10000 applied entries
-	fsm := cluster.NewFSM(db)
-	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 10000})
-	distBackend.SetSnapshotManager(snapMgr, node)
-
-	// Restore from snapshot on startup
-	snapIdx, err := snapMgr.Restore()
-	if err != nil {
-		log.Warn().Err(err).Msg("snapshot restore failed")
-	} else if snapIdx > 0 {
-		log.Info().Uint64("index", snapIdx).Msg("restored from snapshot")
+	// PR 6 services phase 1: snapshot manager + Restore + wrap chain (packblob
+	// + cachedBackend) + s3-cache invalidator + go RunApplyLoop. Phase ordering
+	// invariant: invalidator MUST register before the apply-loop goroutine
+	// fires — otherwise FSM-replicated writes can land before invalidator
+	// wiring and stale cache entries survive cross-node.
+	if err := bootSnapshotAndApplyLoop(state); err != nil {
+		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
-
-	// Wrapping chain (inner → outer): distBackend → packblob → cachedBackend →
-	// WAL → pullthrough. Mirrors the pre-unification local path so operators
-	// get identical semantics (small-object packing, LRU cache, PITR replay,
-	// upstream pull-through) regardless of peer count.
-	var inner storage.Backend = distBackend
-
-	// Pack small objects into blob files when --pack-threshold is set.
-	if cfg.PackThreshold > 0 {
-		blobDir := filepath.Join(dataDir, "blobs")
-		pb, err := packblob.NewPackedBackend(inner, blobDir, int64(cfg.PackThreshold))
-		if err != nil {
-			return fmt.Errorf("failed to initialize packed blob: %w", err)
-		}
-		inner = pb
-		log.Info().Int("threshold", cfg.PackThreshold).Msg("packed blob storage enabled")
-	}
-
-	// Wrap with LRU read cache. Raft FSM-based invalidation ensures cache
-	// consistency across nodes.
-	cachedBackend := storage.NewCachedBackend(inner)
-
-	distBackend.RegisterCacheInvalidator("s3-cache", cluster.CacheInvalidatorFunc(cachedBackend.InvalidateKey))
-
-	go distBackend.RunApplyLoop(stopApply)
+	fsm := state.fsm
+	_ = state.cachedBackend
+	_ = state.snapMgr
 
 	// Start balancer if enabled (cluster mode only).
 	var balancerProposer *cluster.BalancerProposer

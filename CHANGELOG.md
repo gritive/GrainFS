@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.0.130.0] - 2026-05-09 — serveruntime boot decomposition PR 6: snapshot + apply-loop phase (1 of ~6 services)
+
+### Refactored
+
+- `internal/serveruntime/boot_phases_services.go` (new): first services phase
+  in the post-storage-runtime block of `Run`:
+  - `bootSnapshotAndApplyLoop(state)` — wires the meta-FSM + SnapshotManager
+    onto `distBackend`, calls `Restore()` to replay any prior snapshot,
+    builds the `packblob → cachedBackend` wrap chain (packblob is gated on
+    `cfg.PackThreshold > 0`), registers the `s3-cache` cache invalidator
+    on `distBackend`, and fires `go distBackend.RunApplyLoop(state.stopApply)`.
+
+- `internal/serveruntime/boot_state.go`: typed fields added — `fsm
+  *cluster.FSM`, `snapMgr *raft.SnapshotManager`, `cachedBackend
+  *storage.CachedBackend`. Each is owned by `bootSnapshotAndApplyLoop`.
+
+- `internal/serveruntime/run.go`: ~37 inline lines (snapshot manager + Restore
+  + wrap chain + invalidator + go RunApplyLoop) collapse into a single phase
+  call plus a `fsm := state.fsm` mirror. The "invalidator must register
+  before apply-loop fires" invariant — previously a comment proximity in
+  run.go — is now enforced inside the phase function. The `packblob` import
+  moves to the phase file.
+
+### Added
+
+- `internal/serveruntime/boot_phases_services_test.go`: witness test on real
+  components (real BadgerDB, real QUIC transport, real meta-raft, real
+  data-plane raft, real distBackend):
+  - `TestBootSnapshotAndApplyLoop_PopulatesState` — asserts fsm / snapMgr /
+    cachedBackend are nil before the phase, populated after.
+
+### Why
+
+PR 6 of the 6-PR boot decomposition milestone (see
+`docs/superpowers/specs/2026-05-08-serveruntime-boot-decomposition.md`).
+
+Scope deviation from the original plan: the milestone spec sketched PR 6
+as "Services + Shutdown (4 phases)" covering the entire ~780-line
+post-storage block. After reviewing the territory in detail, the four
+named phases (`bootReceiptAndBalancer`, `bootAdminUDS`,
+`bootNodeServicesAndHertz`, `bootShutdownDrain`) do not align with the
+real data flow — the wrap chain, balancer, gossipReceiver, WAL,
+forwardSender, clusterCoord, snapshotter, IcebergCatalog selection,
+incident recorder, lifecycle, volume manager, mutationGate, srv.New,
+dashboard token, admin UDS, scrubber, reshard manager, NodeServices, and
+shutdown drain are heavily interleaved across that block.
+
+This PR ships a smaller, surgical first slice (the snapshot + apply-loop
+block) with a clear input/output contract, leaving the remaining
+services territory for follow-up PRs that can land on a typed-state
+foundation without forcing a 15-field bootState extension in one shot.
+
+Behavior preserved: phase order matches the prior inline order exactly,
+snapshot Restore still precedes the apply-loop go statement, the
+s3-cache invalidator still registers before the apply loop fires.
+
 ## [0.0.129.0] - 2026-05-09 — serveruntime boot decomposition PR 5: storage runtime phases (3 of ~20)
 
 ### Refactored
