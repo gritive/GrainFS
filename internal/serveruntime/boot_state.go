@@ -5,6 +5,8 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -57,6 +59,21 @@ type bootState struct {
 	transportPSK  string
 	quicTransport *transport.QUICTransport
 	groupRaftMux  *raft.GroupRaftQUICMux
+
+	// Meta-raft + DataGroup wiring (populated by raft phases —
+	// bootMetaRaftWiring, bootDataGroupRouter, bootRotationAndAdminAPI,
+	// bootMetaRaftStart). Phase ordering enforces "callbacks registered
+	// BEFORE Start fires the apply loop" race-free guarantee:
+	// bootDataGroupRouter and bootRotationAndAdminAPI register callbacks
+	// against state.metaRaft.FSM(); bootMetaRaftStart then calls Start.
+	metaRaft         *cluster.MetaRaft
+	metaTransport    *cluster.MetaTransportQUIC
+	dgMgr            *cluster.DataGroupManager
+	clusterRouter    *cluster.Router
+	rotationKeystore *transport.Keystore
+	rotationWorker   *cluster.RotationWorker
+	iamAdminAPI      *iam.AdminAPI
+	iamProposer      *iam.MetaProposer
 }
 
 // newBootState returns an empty state bound to cfg. Caller is responsible for
