@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.105.0] - 2026-05-08 — IAM bucket-scoped access keys
+
+### Added
+
+- IAM bucket-scoped access keys: `AccessKey.BucketScope []string` 차원 추가. POST
+  `/v1/iam/sa/{id}/key`에 `buckets:[]` 필드 (CLI: `grainfs iam key create --bucket
+  <name>`, 반복 가능). 발급 시 strict 검증 (`scope ⊆ SA grants`, sentinel
+  `*`/`__system__` reject → 422). Authz Layer 0에서 scope 위반 시 403 + audit
+  `reason=key_scope_mismatch`. Immutable at issue (변경 시 rotation).
+
+### Changed
+
+- 새 raft `MetaCmdType 30 IAMKeyCreateScoped` (scope 비어있으면 기존 type 23 사용).
+  Mixed-version 클러스터에서 v0.0.104.0 follower는 type 30을 unknown으로 graceful
+  no-op 처리하고 warn 로그를 남긴다 — 의도적 propagation 결손이므로 운영자는
+  rolling upgrade 완료 후에만 scoped key를 발급해야 한다.
+- IAM snapshot binary `version=2` (v1 호환 read path 보존, v3+ 거부).
+
+### Migration
+
+- v0.0.104.0 이하 키는 `BucketScope=nil`로 자동 unrestricted (backward compat).
+- Rolling upgrade: 모든 노드를 v0.0.105.0+로 올린 뒤에 scoped key 발급.
+
 ## [0.0.104.0] - 2026-05-08 — wire NFSv4 cache invalidator into cluster registry
 
 ### Fixed

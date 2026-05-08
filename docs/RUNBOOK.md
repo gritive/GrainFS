@@ -187,6 +187,14 @@ grainfs --version
 
 Expected: Version string matches expected deployment version
 
+**v0.0.105.0+ rolling upgrade gate (IAM bucket-scoped keys):** Scoped key 발급
+(`grainfs iam key create --bucket <name>`)은 모든 노드를 v0.0.105.0+ 로 올린
+뒤에만 수행하라. v0.0.104.0 이하 follower는 새 raft cmd `IAMKeyCreateScoped`
+(type 30) 를 unknown으로 graceful no-op 처리하고 warn 로그를 남긴다 — leader는
+성공 응답을 반환하지만 일부 follower 상태에 키가 반영되지 않아 leadership
+변경 시 키가 사라질 수 있다. Mixed-version window 동안에는 `--bucket` 플래그
+없이 발급되는 unrestricted 키만 안전하다.
+
 ---
 
 ### Step 4: Start GrainFS
