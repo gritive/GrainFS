@@ -14,14 +14,6 @@
 
 - [ ] **raft/v2: cmdCh backpressure cascade** — slow FSM consumer wedges actor's applyCh send → wedges cmdCh → wedges all incoming RPCs (HandleRequestVote/HandleAppendEntries) → peers election-timeout this node → cascading election storm. Structural fix: make applyCh delivery non-blocking from actor (separate apply goroutine reading from a buffered queue), OR at least give Propose a ctx variant + drop AE on cmdCh-full to keep election alive.
 
-- [ ] **raft/v2: triple-publish allocs in handleAppendEntries** — `actor.go:256/277/322` can each call `publish()` (atomic.Pointer.Store of a fresh snapshot) per AE. snapshot() allocates `*readState` each call. Hot-path per heartbeat. Fix: publish once at function exit.
-
-- [ ] **raft/v2: SetTransport race window after Start** — `node.go:166` says "must be called before Start" but nothing enforces it. Late SetTransport call is a data race the race detector won't catch unless test triggers a concurrent read. Fix: store via `atomic.Pointer[Transport]`, OR panic if called post-Start.
-
-- [ ] **raft/v2: Bootstrap flag is decorative** — `actor.run()` auto-promotes single-voter to Leader unconditionally. `Bootstrap()`'s CAS only controls return value. Caller expecting Bootstrap to gate cluster init (matching v1 semantics) gets silent auto-promotion. Either gate auto-promote on `bootstrapped.Load()` or document loudly that Bootstrap is informational-only in PR 7's stub state.
-
-- [ ] **raft/v2: single-voter auto-promote skips no-op** — PR 8 added `LogEntryNoOp` append in `becomeLeader()` for §5.4.2 safety, but the single-voter auto-promote path in `actor.run()` (`len(cfg.Peers)==0` branch) inlines state mutation and does NOT call `becomeLeader()`, so no no-op is appended. Safe today (fresh single-voter has no prior-term entries) but inconsistent contract for FSM consumers expecting "always see no-op on becomeLeader". Fix: route single-voter bootstrap through `becomeLeader()`, OR document the asymmetry in `LogEntryNoOp` doc + bootstrap comment.
-
 ### 기타
 
 - [ ] **RUNBOOK Docker bootstrap 절차 수정** — `docs/RUNBOOK.md` Docker 섹션(line ~510)이 `docker volume create grainfs-data` (named volume)을 쓰면서 host-side `admin.sock` 접근을 가정. named volume은 호스트 fs에 직접 노출되지 않으므로 잘못된 안내. 수정안: (a) 예제를 `-v /var/lib/grainfs:/data` host bind-mount로 변경, 또는 (b) `docker exec grainfs grainfs iam sa create admin --endpoint /data/admin.sock` 으로 컨테이너 내 실행. PR #258에서 식별, scope 분리.

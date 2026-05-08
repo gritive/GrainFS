@@ -63,10 +63,12 @@ type Node struct {
 	// Actor-only access; no locking required.
 	lastPersistedHS HardState
 
-	// transport is the outbound RPC sender. PR 4 stores it but never sends;
-	// PR 5 wires it into the election state machine. Set via SetTransport
-	// before Start. Read-only after Start, so no synchronization needed.
-	transport Transport
+	// transport is the outbound RPC sender. SetTransport stores it via atomic
+	// swap so a Late SetTransport (post-Start) is data-race-free, even though
+	// the documented contract is "set before Start". Reads from the actor
+	// goroutine and from sendRequestVote/dispatchAppendEntries dispatch
+	// goroutines all go through atomic.Pointer.Load.
+	transport atomic.Pointer[Transport]
 
 	// electionTimer fires when no leader contact has been received within the
 	// randomized election timeout. Owned by the actor; constructed in NewNode
@@ -84,10 +86,14 @@ type Node struct {
 	// concurrent multi-voter test clusters do not draw identical timeouts.
 	rng *rand.Rand
 
-	// bootstrapped records whether Bootstrap() has been called. PR 7 keeps
-	// Bootstrap a no-op and the auto-bootstrap path inside actor.run() fires
-	// regardless; this flag exists purely so a second Bootstrap() returns
-	// ErrAlreadyBootstrapped for v1 API parity.
+	// bootstrapped records whether Bootstrap() has been called. CURRENTLY
+	// INFORMATIONAL ONLY: actor.run() auto-promotes a single-voter cluster
+	// to Leader regardless of this flag, and multi-voter Nodes start as
+	// Follower regardless. The flag exists so a second Bootstrap() returns
+	// ErrAlreadyBootstrapped for v1 API parity. Callers MUST NOT depend on
+	// "Start without Bootstrap stays Follower" — that contract is reserved
+	// for a future PR (M2/M5) once the FSM caller migration begins. See the
+	// SetTransport convention as another "documented but unenforced" surface.
 	bootstrapped atomic.Bool
 }
 
@@ -199,10 +205,23 @@ func (n *Node) LeaderID() string { return n.rs.Load().leaderID }
 // CommittedIndex returns the latest committed log index. Hot path.
 func (n *Node) CommittedIndex() uint64 { return n.rs.Load().commitIndex }
 
-// SetTransport configures the outbound Transport. Must be called before
-// Start. PR 4 stores but does not exercise the transport for sending; this
-// is forward-compatibility for PR 5's election state machine.
-func (n *Node) SetTransport(t Transport) { n.transport = t }
+// SetTransport configures the outbound Transport. Documented contract:
+// call before Start. The atomic swap makes a late call data-race-free vs
+// concurrent transport reads from dispatch goroutines, but a late
+// SetTransport mid-flight is a logical bug — replies still in flight on
+// the old transport may arrive after the swap and be processed against
+// stale state. Best practice: set once at construction.
+func (n *Node) SetTransport(t Transport) { n.transport.Store(&t) }
+
+// loadTransport returns the configured Transport, or nil if SetTransport
+// was never called. Safe to call from any goroutine.
+func (n *Node) loadTransport() Transport {
+	p := n.transport.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
 
 // HandleRequestVote processes an incoming RequestVote RPC and returns the
 // reply. Safe to call from any goroutine; the call routes through the actor
@@ -251,15 +270,18 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 // "for range ApplyCh()" to drain until shutdown.
 func (n *Node) ApplyCh() <-chan LogEntry { return n.applyCh }
 
-// Bootstrap initializes the cluster with the configured peer list. For a
-// single-voter cluster (cfg.Peers empty), Bootstrap is a no-op — Start auto-
-// promotes to Leader as before. For multi-voter clusters, Bootstrap is also
-// a no-op in PR 7; multi-voter elections begin via the election timer once
-// Start runs. Future PRs may make Bootstrap meaningful (e.g., persist the
-// initial configuration to LogStore in M2).
+// Bootstrap is currently INFORMATIONAL ONLY — it sets a CAS flag so a second
+// call returns ErrAlreadyBootstrapped (v1 API parity). It does NOT gate
+// cluster initialisation: actor.run() auto-promotes single-voter clusters and
+// arms the election timer for multi-voter clusters regardless of whether
+// Bootstrap was called. Calling Bootstrap is therefore optional today.
 //
-// API parity with v1's Node.Bootstrap. Returns nil on first call; calling
-// twice returns ErrAlreadyBootstrapped.
+// This is a temporary stub. A future PR (timed with the M5 caller migration
+// from v1) will tighten the contract so Bootstrap actually persists initial
+// configuration to LogStore and gates cluster init. At that point callers
+// MUST call Bootstrap before Start; expect a documented breaking change.
+//
+// Returns nil on first call; calling twice returns ErrAlreadyBootstrapped.
 func (n *Node) Bootstrap() error {
 	if n.bootstrapped.CompareAndSwap(false, true) {
 		return nil
