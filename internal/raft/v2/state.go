@@ -27,6 +27,11 @@ type actorState struct {
 	leaderID    string
 	votedFor    string // candidate this node voted for in the current term ("" = none)
 
+	// votesGranted counts ballots received in the current Candidate term,
+	// including the self-vote. Reset to 1 on becomeCandidate; only meaningful
+	// while state == Candidate.
+	votesGranted int
+
 	// In-memory log. PR 1 has no persistence; the LogStore adapter lands in
 	// PR 6+. Indices are 1-based per Raft convention; log[0] corresponds to
 	// log index 1.

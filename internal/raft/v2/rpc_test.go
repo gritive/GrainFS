@@ -186,9 +186,10 @@ func TestHandleRequestVote_DenyStaleLog(t *testing.T) {
 	require.Equal(t, "", n.rs.Load().votedFor, "votedFor cleared on step-down, not granted to stale-log candidate")
 }
 
-// TestHandleAppendEntries_StubStepDown: PR 4 stub always replies Success=false
-// but must respect term step-down so the cluster term invariant holds.
-func TestHandleAppendEntries_StubStepDown(t *testing.T) {
+// TestHandleAppendEntries_HeartbeatStepDown: PR 5a accepts heartbeats. A
+// higher-term AE forces step-down; a follow-up same-term heartbeat from the
+// same leader is accepted and recorded as the current leader.
+func TestHandleAppendEntries_HeartbeatStepDown(t *testing.T) {
 	n := startSingleVoter(t, "n1")
 
 	require.True(t, n.IsLeader())
@@ -199,21 +200,32 @@ func TestHandleAppendEntries_StubStepDown(t *testing.T) {
 		LeaderID: "newleader",
 	})
 
-	require.False(t, reply.Success, "PR 4 stub never accepts")
+	require.True(t, reply.Success, "PR 5a accepts heartbeats")
 	require.Equal(t, uint64(2), reply.Term)
 	require.Equal(t, Follower, n.State(), "must step down on higher-term AE")
 	require.Equal(t, uint64(2), n.Term())
 	require.Equal(t, "", n.rs.Load().votedFor, "votedFor cleared on step-down")
+	require.Equal(t, "newleader", n.LeaderID(), "leader recognised on heartbeat")
 	require.False(t, n.IsLeader())
 
-	// Same-term AE: still rejected, no further state change.
+	// Same-term heartbeat from the same leader: accepted, no state churn.
 	reply2 := awaitAppendEntries(t, n, &AppendEntriesArgs{
 		Term:     2,
 		LeaderID: "newleader",
 	})
-	require.False(t, reply2.Success)
+	require.True(t, reply2.Success)
 	require.Equal(t, uint64(2), reply2.Term)
 	require.Equal(t, Follower, n.State())
+	require.Equal(t, "newleader", n.LeaderID())
+
+	// Stale-term AE: rejected, no state change.
+	reply3 := awaitAppendEntries(t, n, &AppendEntriesArgs{
+		Term:     1,
+		LeaderID: "oldleader",
+	})
+	require.False(t, reply3.Success, "stale-term AE must be rejected")
+	require.Equal(t, uint64(2), reply3.Term)
+	require.Equal(t, "newleader", n.LeaderID(), "leaderID unchanged on stale AE")
 }
 
 // TestMemTransport_RoutesRequestVote: smoke test that memTransport actually

@@ -1,8 +1,22 @@
 package raftv2
 
 import (
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
+)
+
+// Timer defaults applied when Config leaves the corresponding field zero.
+// Mirrors v1's defaults (internal/raft/raft.go) closely enough that tests
+// using zero-config Nodes inherit familiar election cadence.
+const (
+	defaultElectionTimeout  = 150 * time.Millisecond
+	defaultHeartbeatTimeout = 50 * time.Millisecond
+	// idleElectionTimeout parks the timer for single-voter Nodes (no election
+	// is needed; the bootstrap path makes us Leader). One hour is "effectively
+	// never" without complicating the select with a nil-channel branch.
+	idleElectionTimeout = time.Hour
 )
 
 // Channel sizing constants. cmdCh follows v1's proposalCh-style buffering for
@@ -41,6 +55,22 @@ type Node struct {
 	// PR 5 wires it into the election state machine. Set via SetTransport
 	// before Start. Read-only after Start, so no synchronization needed.
 	transport Transport
+
+	// electionTimer fires when no leader contact has been received within the
+	// randomized election timeout. Owned by the actor; constructed in NewNode
+	// so the actor's select can range on its C channel from the first tick.
+	// For single-voter Nodes it is parked at idleElectionTimeout (never fires
+	// in practice).
+	electionTimer *time.Timer
+
+	// heartbeatTicker is non-nil only while this Node is Leader. The actor
+	// creates it on becomeLeader and stops + nils it on step-down, leveraging
+	// the nil-channel select trick to skip heartbeat ticks when not leader.
+	heartbeatTicker *time.Ticker
+
+	// rng powers the randomized election-timeout window. Seeded per-Node so
+	// concurrent multi-voter test clusters do not draw identical timeouts.
+	rng *rand.Rand
 }
 
 // NewNode creates a Node from cfg. Call Start to launch the actor goroutine.
@@ -59,11 +89,34 @@ func NewNode(cfg Config) *Node {
 			state: Follower,
 			log:   make([]LogEntry, 0),
 		},
+		// Per-Node rng seeded with current time + ID hash so two Nodes started
+		// in the same nanosecond still draw different timeouts. Sole user is
+		// the actor goroutine, so no locking needed.
+		rng: rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(hashID(cfg.ID)))),
+	}
+	// Allocate the election timer in a stopped state. The actor's run() will
+	// arm it (multi-voter) or leave it parked (single-voter) on first tick.
+	// Stopped + drained timers are safe to Reset later.
+	n.electionTimer = time.NewTimer(idleElectionTimeout)
+	if !n.electionTimer.Stop() {
+		<-n.electionTimer.C
 	}
 	// Publish an initial readState so callers between NewNode and the actor's
 	// first publish see a coherent snapshot rather than a nil load.
 	n.rs.Store(n.st.snapshot())
 	return n
+}
+
+// hashID is a tiny non-cryptographic mixer for rng seeding. FNV-1a 32-bit so
+// two Nodes started in the same nanosecond pick distinct timeout draws.
+func hashID(id string) uint32 {
+	const offset, prime = uint32(2166136261), uint32(16777619)
+	h := offset
+	for i := 0; i < len(id); i++ {
+		h ^= uint32(id[i])
+		h *= prime
+	}
+	return h
 }
 
 // Start launches the actor goroutine. Safe to call exactly once per Node.
@@ -72,7 +125,9 @@ func (n *Node) Start() {
 }
 
 // Stop signals the actor to exit and waits for it to finish. Safe to call
-// multiple times; subsequent calls are no-ops.
+// multiple times; subsequent calls are no-ops. Timer cleanup happens inside
+// run() (via defer) once the actor observes stopCh; doing it here would race
+// with concurrent timer Reset calls inside the actor.
 func (n *Node) Stop() {
 	n.stopOnce.Do(func() {
 		close(n.stopCh)
