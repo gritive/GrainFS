@@ -103,6 +103,19 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 			Msg("iam: applyKeyCreateInternal: SA missing, noop")
 		return nil
 	}
+	// Defensive: re-validate scope shape (sentinels, empty entries, dedup).
+	// In production this duplicates the admin handler's NormalizeScope call,
+	// but it guards against any propose path that bypasses the handler
+	// (e.g., direct raft injection).
+	if len(scope) > 0 {
+		normalized, err := NormalizeScope(scope)
+		if err != nil {
+			log.Warn().Str("sa_id", saID).Str("ak", ak).Err(err).
+				Msg("iam: applyKeyCreateInternal: scope validation failed, noop")
+			return nil
+		}
+		scope = normalized
+	}
 	// Scope validation: every bucket in scope must have a grant on the SA.
 	for _, b := range scope {
 		if a.store.LookupGrant(saID, b) == RoleNone {
