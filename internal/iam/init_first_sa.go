@@ -1,8 +1,6 @@
 package iam
 
 import (
-	"context"
-
 	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 )
@@ -12,28 +10,6 @@ import (
 // guard collapses to a single SA via FSM idempotency on (sa_id) and on
 // duplicate KeyCreate for the same access_key.
 const DefaultSAID = "sa-default"
-
-// Proposer abstracts the meta-FSM Propose interface so admin API
-// handlers can be unit-tested without raft. Each method must propose
-// the corresponding MetaCmd payload through Raft and return only after
-// the command has been committed (not just enqueued).
-//
-// NOTE (Task 2): interface is relocated verbatim from bootstrap.go.
-// Task 3 swaps ProposeAuthEnable for ProposeInitFirstSA together with
-// the proposer_cluster.go + admin_api.go rewrites to keep the package
-// compiling at every commit boundary.
-type Proposer interface {
-	ProposeSACreate(ctx context.Context, sa ServiceAccount) error
-	ProposeSADelete(ctx context.Context, saID string) error
-	ProposeKeyCreate(ctx context.Context, k AccessKey) error
-	ProposeKeyCreateScoped(ctx context.Context, k AccessKey) error
-	ProposeKeyRevoke(ctx context.Context, accessKey string) error
-	ProposeGrantPut(ctx context.Context, g Grant) error
-	ProposeGrantDelete(ctx context.Context, saID, bucket string) error
-	ProposeGrantWildcardPut(ctx context.Context, g Grant) error
-	ProposeGrantWildcardDelete(ctx context.Context, saID string) error
-	ProposeAuthEnable(ctx context.Context) error
-}
 
 // ApplyInitFirstSA decodes a composite InitFirstSAPayload and applies
 // SA + AccessKey + WildcardGrant atomically. Idempotent: if DefaultSAID

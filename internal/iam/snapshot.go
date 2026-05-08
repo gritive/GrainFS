@@ -278,6 +278,23 @@ func buildGrantWildcardPutPayload(g Grant) []byte {
 	return b.FinishedBytes()
 }
 
+func buildInitFirstSAPayload(sa ServiceAccount, k AccessKey, g Grant) []byte {
+	saBlob := buildSACreatePayload(sa)
+	keyBlob := buildKeyCreatePayload(k)
+	gwBlob := buildGrantWildcardPutPayload(g)
+
+	b := flatbuffers.NewBuilder(256)
+	saOff := b.CreateByteVector(saBlob)
+	kOff := b.CreateByteVector(keyBlob)
+	gOff := b.CreateByteVector(gwBlob)
+	iampb.InitFirstSAPayloadStart(b)
+	iampb.InitFirstSAPayloadAddSaCreateBlob(b, saOff)
+	iampb.InitFirstSAPayloadAddKeyCreateBlob(b, kOff)
+	iampb.InitFirstSAPayloadAddGrantWildcardBlob(b, gOff)
+	b.Finish(iampb.InitFirstSAPayloadEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildSADeletePayload(saID string) []byte {
 	b := flatbuffers.NewBuilder(32)
 	idOff := b.CreateString(saID)

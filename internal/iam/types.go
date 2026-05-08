@@ -1,10 +1,28 @@
 package iam
 
 import (
+	"context"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
+
+// Proposer abstracts the meta-FSM Propose interface so admin API
+// handlers can be unit-tested without raft. Each method must propose
+// the corresponding MetaCmd payload through Raft and return only after
+// the command has been committed (not just enqueued).
+type Proposer interface {
+	ProposeSACreate(ctx context.Context, sa ServiceAccount) error
+	ProposeSADelete(ctx context.Context, saID string) error
+	ProposeKeyCreate(ctx context.Context, k AccessKey) error
+	ProposeKeyCreateScoped(ctx context.Context, k AccessKey) error
+	ProposeKeyRevoke(ctx context.Context, accessKey string) error
+	ProposeGrantPut(ctx context.Context, g Grant) error
+	ProposeGrantDelete(ctx context.Context, saID, bucket string) error
+	ProposeGrantWildcardPut(ctx context.Context, g Grant) error
+	ProposeGrantWildcardDelete(ctx context.Context, saID string) error
+	ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error
+}
 
 // Role is the 3-tier permission level for a (SA, Bucket) grant.
 type Role uint8

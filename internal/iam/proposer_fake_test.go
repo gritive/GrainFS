@@ -108,9 +108,9 @@ func (f *fakeProposer) ProposeGrantWildcardDelete(ctx context.Context, saID stri
 	f.calls = append(f.calls, "GrantWildcardDelete:"+saID)
 	return nil
 }
-func (f *fakeProposer) ProposeAuthEnable(ctx context.Context) error {
-	f.calls = append(f.calls, "AuthEnable")
-	return f.authEnableErr
+func (f *fakeProposer) ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error {
+	f.calls = append(f.calls, "InitFirstSA:"+sa.ID)
+	return nil
 }
 
 func equalSlices(a, b []string) bool {
