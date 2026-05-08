@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
@@ -509,22 +510,16 @@ func iamAdminRaw(t *testing.T, sock, method, path string, body any) (int, []byte
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
-		if err != nil {
-			t.Fatalf("iamAdminRaw: marshal: %v", err)
-		}
+		require.NoError(t, err, "iamAdminRaw: marshal")
 		rdr = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(context.Background(), method, "http://unix"+path, rdr)
-	if err != nil {
-		t.Fatalf("iamAdminRaw: build request: %v", err)
-	}
+	require.NoError(t, err, "iamAdminRaw: build request")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := iamUDSClient(sock).Do(req)
-	if err != nil {
-		t.Fatalf("iamAdminRaw: %s %s: %v", method, path, err)
-	}
+	require.NoErrorf(t, err, "iamAdminRaw: %s %s", method, path)
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, respBody
@@ -541,15 +536,13 @@ func TestE2E_IAM_ScopedKey_RightBucket_OK(t *testing.T) {
 	// Bootstrap client provisions the bucket and seeds an object.
 	bootCli := s3ClientFor(srv.S3URL, srv.BootstrapAK, srv.BootstrapSK)
 	const bucket = "st1-logs"
-	if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("CreateBucket logs: %v", err)
-	}
-	if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+	_, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err, "CreateBucket logs")
+	_, err = bootCli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket), Key: aws.String("obj1"),
 		Body: strings.NewReader("hello"),
-	}); err != nil {
-		t.Fatalf("PutObject: %v", err)
-	}
+	})
+	require.NoError(t, err, "PutObject")
 
 	// Create SA alice with Read grant on "logs".
 	alice := iamCreateSA(t, srv.AdminSock, "alice-st1")
@@ -563,14 +556,10 @@ func TestE2E_IAM_ScopedKey_RightBucket_OK(t *testing.T) {
 	out, err := cli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket), Key: aws.String("obj1"),
 	})
-	if err != nil {
-		t.Fatalf("GetObject on in-scope bucket: %v", err)
-	}
+	require.NoError(t, err, "GetObject on in-scope bucket")
 	defer out.Body.Close()
 	got, _ := io.ReadAll(out.Body)
-	if string(got) != "hello" {
-		t.Fatalf("GetObject body: got %q, want %q", string(got), "hello")
-	}
+	require.Equal(t, "hello", string(got), "GetObject body")
 }
 
 // TestE2E_IAM_ScopedKey_WrongBucket_403 — scoped key for "logs" is blocked on
@@ -586,16 +575,14 @@ func TestE2E_IAM_ScopedKey_WrongBucket_403(t *testing.T) {
 
 	// Create both buckets via bootstrap.
 	for _, bkt := range []string{"st2-logs", "st2-reports"} {
-		if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)}); err != nil {
-			t.Fatalf("CreateBucket %s: %v", bkt, err)
-		}
+		_, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)})
+		require.NoErrorf(t, err, "CreateBucket %s", bkt)
 	}
-	if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+	_, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("st2-reports"), Key: aws.String("secret"),
 		Body: strings.NewReader("classified"),
-	}); err != nil {
-		t.Fatalf("PutObject reports: %v", err)
-	}
+	})
+	require.NoError(t, err, "PutObject reports")
 
 	// SA alice gets grants on both buckets but a key scoped to "logs" only.
 	alice := iamCreateSA(t, srv.AdminSock, "alice-st2")
@@ -605,23 +592,20 @@ func TestE2E_IAM_ScopedKey_WrongBucket_403(t *testing.T) {
 	iamWaitKeyReady(t, srv.S3URL, scoped.AccessKey, scoped.SecretKey, 10*time.Second)
 
 	cli := s3ClientFor(srv.S3URL, scoped.AccessKey, scoped.SecretKey)
-	_, err := cli.GetObject(ctx, &s3.GetObjectInput{
+	_, err = cli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("st2-reports"), Key: aws.String("secret"),
 	})
-	if err == nil {
-		t.Fatal("GetObject on out-of-scope bucket succeeded; expected 403")
-	}
+	require.Error(t, err, "GetObject on out-of-scope bucket succeeded; expected 403")
 	status := httpStatusFrom(err)
-	if status != http.StatusForbidden && status != http.StatusUnauthorized {
-		t.Fatalf("GetObject out-of-scope: status=%d err=%v; want 403", status, err)
-	}
+	require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, status, "GetObject out-of-scope: err=%v; want 403", err)
 	// Audit reason key_scope_mismatch is asserted by server unit tests; here
 	// the 403 response is the observable contract.
 }
 
-// TestE2E_IAM_KeyCreate_OverScope_422 — requesting a key scoped to a bucket
-// the SA has no grant on must return 422 with the bucket name in the body.
-func TestE2E_IAM_KeyCreate_OverScope_422(t *testing.T) {
+// TestE2E_IAM_KeyCreate_OverScope_400 — requesting a key scoped to a bucket
+// the SA has no grant on must return 400 with the bucket name in the body.
+// (400 Bad Request matches the project's existing admin-validation pattern.)
+func TestE2E_IAM_KeyCreate_OverScope_400(t *testing.T) {
 	srv := startIAMTestServer(t)
 	defer srv.Stop()
 
@@ -634,12 +618,8 @@ func TestE2E_IAM_KeyCreate_OverScope_422(t *testing.T) {
 		"/v1/iam/sa/"+alice.SAID+"/key",
 		map[string]any{"buckets": []string{"st3-logs", "st3-reports"}},
 	)
-	if status != http.StatusUnprocessableEntity {
-		t.Fatalf("KeyCreate over-scope: status=%d body=%s; want 422", status, string(body))
-	}
-	if !bytes.Contains(body, []byte("st3-reports")) {
-		t.Fatalf("422 body does not mention denied bucket: %s", string(body))
-	}
+	require.Equalf(t, http.StatusBadRequest, status, "KeyCreate over-scope: body=%s", string(body))
+	require.Containsf(t, string(body), "st3-reports", "400 body does not mention denied bucket: body=%s", string(body))
 }
 
 // TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants is the R2 REGRESSION CRITICAL
@@ -653,15 +633,13 @@ func TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants(t *testing.T) {
 
 	bootCli := s3ClientFor(srv.S3URL, srv.BootstrapAK, srv.BootstrapSK)
 	for _, bkt := range []string{"st4-logs", "st4-reports"} {
-		if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)}); err != nil {
-			t.Fatalf("CreateBucket %s: %v", bkt, err)
-		}
-		if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+		_, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)})
+		require.NoErrorf(t, err, "CreateBucket %s", bkt)
+		_, err = bootCli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String("obj"),
 			Body: strings.NewReader("data"),
-		}); err != nil {
-			t.Fatalf("PutObject %s: %v", bkt, err)
-		}
+		})
+		require.NoErrorf(t, err, "PutObject %s", bkt)
 	}
 
 	// SA bob has grants on both buckets.
@@ -681,9 +659,7 @@ func TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants(t *testing.T) {
 		out, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String("obj"),
 		})
-		if err != nil {
-			t.Fatalf("legacy key GetObject on %s: %v (backward compat broken)", bkt, err)
-		}
+		require.NoErrorf(t, err, "legacy key GetObject on %s (backward compat broken)", bkt)
 		out.Body.Close()
 	}
 }
@@ -700,16 +676,14 @@ func TestE2E_IAM_ScopedKey_SnapshotRoundtrip(t *testing.T) {
 
 	// Provision buckets and seed an object before shutdown.
 	for _, bkt := range []string{"st5-logs", "st5-reports"} {
-		if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)}); err != nil {
-			t.Fatalf("CreateBucket %s: %v", bkt, err)
-		}
+		_, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)})
+		require.NoErrorf(t, err, "CreateBucket %s", bkt)
 	}
-	if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+	_, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("st5-logs"), Key: aws.String("obj"),
 		Body: strings.NewReader("persistent"),
-	}); err != nil {
-		t.Fatalf("PutObject st5-logs: %v", err)
-	}
+	})
+	require.NoError(t, err, "PutObject st5-logs")
 
 	// SA with grant on "st5-logs", issued a key scoped to "st5-logs".
 	alice := iamCreateSA(t, h.AdminSock, "alice-st5")
@@ -726,24 +700,18 @@ func TestE2E_IAM_ScopedKey_SnapshotRoundtrip(t *testing.T) {
 	scopedCli := s3ClientFor(h.S3URL, scoped.AccessKey, scoped.SecretKey)
 
 	// In-scope bucket must still work.
-	out, err := scopedCli.GetObject(ctx, &s3.GetObjectInput{
+	out, err2 := scopedCli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("st5-logs"), Key: aws.String("obj"),
 	})
-	if err != nil {
-		t.Fatalf("GetObject on in-scope bucket after restart: %v", err)
-	}
+	require.NoError(t, err2, "GetObject on in-scope bucket after restart")
 	out.Body.Close()
 
 	// Out-of-scope bucket must still be blocked.
-	_, err = scopedCli.GetObject(ctx, &s3.GetObjectInput{
+	_, err2 = scopedCli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("st5-reports"), Key: aws.String("obj"),
 	})
-	if err == nil {
-		t.Fatal("GetObject on out-of-scope bucket after restart succeeded; expected 403")
-	}
-	if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
-		t.Fatalf("GetObject out-of-scope after restart: status=%d; want 403", status)
-	}
+	require.Error(t, err2, "GetObject on out-of-scope bucket after restart succeeded; expected 403")
+	require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err2), "GetObject out-of-scope after restart: want 403")
 }
 
 // grepDataDir scans every regular file under root for needle. Returns the
