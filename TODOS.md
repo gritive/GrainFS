@@ -12,13 +12,6 @@
   맞춰 비대칭 해소. 별 PR 권장.
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation
-- [ ] **IAM Foundation (ServiceAccount + Bucket Grants)** — design APPROVED
-  (`docs/superpowers/specs/2026-05-08-iam-foundation-design.md`). multi-team 사내 공유
-  클러스터 타겟. ServiceAccount-only principal + (SA, Bucket, Role∈{Read,Write,Admin})
-  grant 테이블. AWS IAM JSON policy 안 함. meta-Raft state + lock-free in-memory.
-  기존 `--access-key/--secret-key` flag는 bootstrap shim으로 유지 (default SA + wildcard
-  grant). 6주 base / 8주 expected. **다른 IAM-의존 작업의 선행조건** —
-  `multi tenancy`, `quota`, bucket-level migration policy 모두 이 foundation 위에 올라감.
 - [ ] **multi tenancy** — IAM Foundation 위에 namespace/account 격리. v1 IAM이 충분히
   소화하면 별도 PR 불필요할 수도. IAM ship 후 재평가.
 - [ ] **quota** — SA/team 단위 용량 제한. IAM의 SA identity 위에 quota state 추가. **Depends on:** IAM Foundation.

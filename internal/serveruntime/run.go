@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
@@ -24,6 +25,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
@@ -332,6 +334,12 @@ func Run(ctx context.Context, cfg Config) error {
 	metaTransport := cluster.NewMetaTransportQUICMux(quicTransport, metaRaft.Node(), groupRaftMux)
 	metaRaft.SetTransport(metaTransport)
 
+	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.
+	// SetIAM is nil-safe for iamApplier (--no-encryption mode).
+	if cfg.IAMStore != nil && cfg.IAMApplier != nil {
+		metaRaft.FSM().SetIAM(cfg.IAMStore, cfg.IAMApplier)
+	}
+
 	// PR-D: DataGroupManager + Router — created before metaRaft.Start() so the
 	// OnBucketAssigned callback is registered before the apply loop starts (race-free).
 	dgMgr := cluster.NewDataGroupManager()
@@ -374,6 +382,51 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 	}
 	defer metaRaft.Close()
+
+	// Bootstrap shim: --access-key/--secret-key flag → default SA + wildcard
+	// + AuthEnable. Runs in a goroutine because IsLeader() is only meaningful
+	// AFTER Start. Polls for leader (with timeout); the elected leader fires
+	// the proposes once, the FSM Applier idempotently de-dupes follower
+	// replays. Multi-node clusters: every node spawns this goroutine, only
+	// the leader's call propagates state — others time out and exit.
+	if cfg.IAMStore != nil && cfg.IAMApplier != nil &&
+		cfg.BootstrapAccessKey != "" && cfg.BootstrapSecretKey != "" &&
+		cfg.Encryptor != nil {
+		go func() {
+			deadline := time.Now().Add(30 * time.Second)
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				if metaRaft.IsLeader() {
+					proposer := &iam.MetaProposer{Propose: metaRaft.Propose}
+					if err := iam.Bootstrap(ctx, cfg.IAMStore, proposer,
+						cfg.BootstrapAccessKey, cfg.BootstrapSecretKey,
+						true, cfg.Encryptor); err != nil {
+						log.Warn().Err(err).Msg("iam bootstrap shim failed")
+					}
+					return
+				}
+				if time.Now().After(deadline) {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
+
+	// Build the AdminAPI wired against the same MetaProposer the bootstrap
+	// shim uses. Only when IAM dependencies are wired — same gate as the
+	// bootstrap shim, minus the credential flag check.
+	var iamAdminAPI *iam.AdminAPI
+	var iamProposer *iam.MetaProposer
+	if cfg.IAMStore != nil && cfg.IAMApplier != nil && cfg.Encryptor != nil {
+		iamProposer = &iam.MetaProposer{Propose: metaRaft.Propose}
+		iamAdminAPI = iam.NewAdminAPI(cfg.IAMStore, iamProposer, cfg.Encryptor)
+	}
 
 	// Seed Router with any bucket assignments already persisted in FSM state.
 	// Start() returns before replay finishes; onBucketAssigned fires live updates.
@@ -1078,6 +1131,12 @@ func Run(ctx context.Context, cfg Config) error {
 
 	srv := server.New(addr, backend, srvOpts...)
 
+	// P5: wire IAM proposer so CreateBucket auto-issues an Admin grant to
+	// the creator SA. nil-safe when iamProposer was not built above.
+	if iamProposer != nil {
+		srv.SetIAMProposer(iamProposer)
+	}
+
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	// Open the dashboard auth token (creates <data>/dashboard.token mode 0600
 	// on first run). Install the middleware on /ui/* and register /ui/api/*
@@ -1111,10 +1170,15 @@ func Run(ctx context.Context, cfg Config) error {
 		adminSocket = filepath.Join(dataDir, "admin.sock")
 	}
 	adminSrv, err := admin.Start(admin.Config{
-		SocketPath:  adminSocket,
-		Group:       cfg.AdminGroup,
-		Deps:        adminDeps,
-		ExtraRoutes: srv.RegisterClusterAdminUDS,
+		SocketPath: adminSocket,
+		Group:      cfg.AdminGroup,
+		Deps:       adminDeps,
+		ExtraRoutes: func(h *hzserver.Hertz) {
+			srv.RegisterClusterAdminUDS(h)
+			if iamAdminAPI != nil {
+				RegisterIAMAdminRoutes(h, iamAdminAPI)
+			}
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("admin server: %w", err)

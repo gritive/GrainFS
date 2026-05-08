@@ -17,6 +17,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/iam"
 	grainotel "github.com/gritive/GrainFS/internal/otel"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
@@ -163,16 +164,36 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var authOpts []server.Option
 	accessKey, _ := cmd.Flags().GetString("access-key")
 	secretKey, _ := cmd.Flags().GetString("secret-key")
+
+	// IAM Store always exists — Phase 2 unifies auth path through IAM. The
+	// flag-mode static creds bootstrap into IAM via Task 11/12; for now they
+	// also seed the static creds map so flag-mode users authenticate
+	// immediately on first request before bootstrap completes.
+	iamStore := iam.NewStore()
+
+	var staticCreds []s3auth.Credentials
 	if accessKey != "" && secretKey != "" {
-		authOpts = append(authOpts, server.WithAuth([]s3auth.Credentials{
-			{AccessKey: accessKey, SecretKey: secretKey},
-		}))
-	} else {
+		staticCreds = []s3auth.Credentials{{AccessKey: accessKey, SecretKey: secretKey}}
+	} else if accessKey == "" && secretKey == "" {
 		log.Warn().Msg("S3 authentication disabled — set --access-key and --secret-key for production")
 	}
+
+	inner := s3auth.NewVerifier(staticCreds)
+	inner.SecretLookup = iam.NewSecretLookup(iamStore)
+	verifier := s3auth.NewCachingVerifier(inner, 4096, 5*time.Minute)
+
+	authOpts := []server.Option{
+		server.WithVerifier(verifier),
+		server.WithIAMStore(iamStore),
+	}
+	// IAM audit logger emits authz allow/deny events via zerolog. Always
+	// wired in production; tests can override or omit by using a different
+	// option set.
+	auditLogger := iam.NewAuditLogger(iam.NewLogAuditEmitter())
+	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
+
 	noEncryption, _ := cmd.Flags().GetBool("no-encryption")
 	var shardEncryptor *encrypt.Encryptor
 	if !noEncryption {
@@ -182,6 +203,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key, or --no-encryption to disable at-rest encryption", err)
 		}
+	}
+
+	// IAM Applier — only constructed when an encryptor is available, since
+	// secret_key wrap/unwrap requires it. In --no-encryption mode the
+	// applier is nil; cluster meta-FSM will reject IAM commands until
+	// encryption is enabled.
+	var iamApplier *iam.Applier
+	if shardEncryptor != nil {
+		iamApplier = iam.NewApplier(iamStore, shardEncryptor)
 	}
 
 	if pprofPort, _ := cmd.Flags().GetInt("pprof-port"); pprofPort > 0 {
@@ -217,6 +247,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	cfg := buildClusterConfig(cmd, addr, dataDir, nodeID, raftAddr, clusterKey, authOpts, shardEncryptor)
+	cfg := buildClusterConfig(cmd, addr, dataDir, nodeID, raftAddr, clusterKey, authOpts, shardEncryptor, iamStore, iamApplier)
+	cfg.BootstrapAccessKey = accessKey
+	cfg.BootstrapSecretKey = secretKey
 	return serveruntime.Run(ctx, cfg)
 }

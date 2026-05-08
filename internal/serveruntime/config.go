@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/server"
 )
@@ -36,6 +37,19 @@ type Config struct {
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts  []server.Option
 	Encryptor *encrypt.Encryptor
+
+	// IAM (Phase 2): store + applier for cluster IAM state. Both nil in
+	// fully unwired (test/legacy) configurations; cmd/grainfs/serve.go
+	// always provides them in production.
+	IAMStore   *iam.Store
+	IAMApplier *iam.Applier
+
+	// Bootstrap shim: when both fields are non-empty AND IAMStore is
+	// empty AND this node is the cluster leader at startup, the IAM
+	// bootstrap proposes a default SA + wildcard grant + AuthEnable so
+	// the legacy --access-key/--secret-key flag continues to work.
+	BootstrapAccessKey string
+	BootstrapSecretKey string
 
 	// Raft tuning
 	BadgerManagedMode     bool

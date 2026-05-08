@@ -42,7 +42,7 @@ func TestRunCluster_EmptyClusterKey_ReturnsError(t *testing.T) {
 	defer cancel()
 
 	cmd := newClusterTestCmd("")
-	cfg := buildClusterConfig(cmd, ":9000", t.TempDir(), "node1", "127.0.0.1:0", "", nil, nil)
+	cfg := buildClusterConfig(cmd, ":9000", t.TempDir(), "node1", "127.0.0.1:0", "", nil, nil, nil, nil)
 	err := serveruntime.Run(ctx, cfg)
 
 	if err == nil {

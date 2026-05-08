@@ -237,7 +237,16 @@ enum MetaCmdType : uint8 {
   RotateKeyAbort     = 17,  // phase 2: 롤백, phase 3: forward-roll (D18)
   ScrubTrigger      = 18,   // EC scrub cluster-wide trigger (PR4 — replicates to all nodes' Director.ApplyFromFSM)
   PutObjectIndex    = 19,
-  DeleteObjectIndex = 20
+  DeleteObjectIndex = 20,
+  IAMSACreate           = 21, // IAM: ServiceAccount create
+  IAMSADelete           = 22, // IAM: ServiceAccount delete (cascade keys + grants)
+  IAMKeyCreate          = 23, // IAM: AccessKey create / rotate (new pair)
+  IAMKeyRevoke          = 24, // IAM: AccessKey immediate revoke
+  IAMGrantPut           = 25, // IAM: Grant upsert (sa, bucket, role)
+  IAMGrantDelete        = 26, // IAM: Grant remove
+  IAMGrantWildcardPut   = 27, // IAM: Wildcard grant (bootstrap default SA only)
+  IAMAuthEnable         = 28, // IAM: sticky auth_enabled bit transition
+  IAMGrantWildcardDelete = 29, // IAM: Wildcard grant remove (admin-only)
 }
 
 table MetaNodeEntry {

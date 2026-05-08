@@ -21,7 +21,11 @@ type Credentials struct {
 
 // Verifier verifies AWS Signature V4 requests.
 type Verifier struct {
-	creds map[string]string // accessKey -> secretKey
+	creds map[string]string // accessKey -> secretKey (legacy static map; empty when IAM is the source of truth)
+
+	// SecretLookup is consulted when the static creds map misses. IAM
+	// wires this up to its Store; nil means static-only behavior (legacy).
+	SecretLookup func(accessKey string) (secret string, ok bool)
 }
 
 // NewVerifier creates a new SigV4 verifier.
@@ -33,9 +37,19 @@ func NewVerifier(creds []Credentials) *Verifier {
 	return &Verifier{creds: m}
 }
 
-// LookupSecret returns the secret key for the given access key, or empty if not found.
+// LookupSecret returns the secret key for the given access key.
+// Consults the static creds map first, then SecretLookup if non-nil.
+// Returns empty string if neither has the key.
 func (v *Verifier) LookupSecret(accessKey string) string {
-	return v.creds[accessKey]
+	if s, ok := v.creds[accessKey]; ok {
+		return s
+	}
+	if v.SecretLookup != nil {
+		if s, ok := v.SecretLookup(accessKey); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // Verify checks the Authorization header or query-string presigned parameters.
@@ -73,8 +87,8 @@ func (v *Verifier) Verify(r *http.Request) (string, error) {
 	region := credParts[2]
 	service := credParts[3]
 
-	secretKey, ok := v.creds[accessKey]
-	if !ok {
+	secretKey := v.LookupSecret(accessKey)
+	if secretKey == "" {
 		return "", fmt.Errorf("unknown access key: %s", accessKey)
 	}
 
@@ -135,8 +149,8 @@ func (v *Verifier) verifyPresigned(r *http.Request) (string, error) {
 	region := credParts[2]
 	service := credParts[3]
 
-	secretKey, ok := v.creds[accessKey]
-	if !ok {
+	secretKey := v.LookupSecret(accessKey)
+	if secretKey == "" {
 		return "", fmt.Errorf("unknown access key: %s", accessKey)
 	}
 

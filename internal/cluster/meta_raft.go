@@ -437,6 +437,22 @@ func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
 	}
 }
 
+// Propose wraps a typed IAM (or other) payload in a MetaCmd FlatBuffers
+// envelope and proposes it to the cluster, blocking until applied to the
+// local FSM. Used by external dispatchers (e.g., iam.MetaProposer) that
+// build their own payload bytes and need a generic propose path.
+func (m *MetaRaft) Propose(ctx context.Context, cmdType MetaCmdType, payload []byte) error {
+	data, err := encodeMetaCmd(cmdType, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitApplied(ctx, idx)
+}
+
 func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {
 	switch typ {
 	case MetaCmdTypeIcebergCreateNamespace:

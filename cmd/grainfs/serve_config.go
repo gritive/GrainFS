@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/serveruntime"
 )
@@ -22,6 +23,8 @@ func buildClusterConfig(
 	addr, dataDir, nodeID, raftAddr, clusterKey string,
 	authOpts []server.Option,
 	encryptor *encrypt.Encryptor,
+	iamStore *iam.Store,
+	iamApplier *iam.Applier,
 ) serveruntime.Config {
 	cfg := serveruntime.Config{
 		Version:          version,
@@ -33,6 +36,8 @@ func buildClusterConfig(
 		ClusterKey:       clusterKey,
 		AuthOpts:         authOpts,
 		Encryptor:        encryptor,
+		IAMStore:         iamStore,
+		IAMApplier:       iamApplier,
 	}
 
 	peersStr, _ := cmd.Flags().GetString("peers")

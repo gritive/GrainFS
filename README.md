@@ -173,6 +173,46 @@ grainfs cluster --endpoint $ENDPOINT remove-peer node-2 --force --yes
 
 `<id>`는 현재 `cluster --endpoint $ENDPOINT status` / `cluster --endpoint $ENDPOINT peers`가 표시하는 voter 식별자를 그대로 넘긴다. 정상 경로는 node ID이며, legacy metadata가 아직 raft address로만 남아 있으면 그 주소가 `unresolved_legacy` row로 표시된다. `cluster status`는 `peer_snapshot`에서 identity state와 liveness state를 분리해 보여주고, 기존 `peers` / `peer_addrs` / `peer_states` / `down_nodes` 필드는 호환성을 위해 같은 snapshot에서 파생된다. `remove-peer` pre-flight는 snapshot의 membership-mutation policy를 사용하므로 `self`와 최근 successful metaRaft AppendEntries evidence가 있는 명시적 `live` row만 alive로 세고, `configured` row는 아직 fresh liveness evidence가 없는 unknown으로 취급한다. Joint consensus(§4.3) 경로로 atomic 제거가 commit되며, 리더 본인을 제거하면 commit-time wakeup 후 follower로 강등되고 새 리더가 선출된다.
 
+### IAM (multi-team)
+
+여러 팀이 한 클러스터를 공유하면 `--access-key/--secret-key` 단일 자격 증명으로는 권한 분리가 불가능하다. GrainFS는 cluster meta-Raft 위에 IAM 모델 (ServiceAccount + AccessKey + Grant) 을 두어 운영자가 SA별 / 버킷별 권한을 부여한다. 모든 IAM 명령은 admin UDS (`<data-dir>/admin.sock`) 로 실행된다.
+
+```bash
+ENDPOINT=./data/admin.sock
+
+# SA 생성. secret_key는 응답에서 단 한번만 노출되므로 즉시 보관해야 한다.
+grainfs iam --endpoint $ENDPOINT sa create alice --description "data team"
+# {"sa_id":"01931...","name":"alice","access_key":"AKGF...","secret_key":"...","created_at":"..."}
+
+# SA 목록과 단건 조회
+grainfs iam --endpoint $ENDPOINT sa list
+grainfs iam --endpoint $ENDPOINT sa get 01931...
+
+# 버킷별 권한 부여 (Read | Write | Admin)
+grainfs iam --endpoint $ENDPOINT grant put 01931... mybucket Write
+grainfs iam --endpoint $ENDPOINT grant list --sa 01931...
+
+# Key 회전 — 새 키 발급 후 구 키 취소를 별도 호출로 분리해 client rollover 윈도를 확보한다
+grainfs iam --endpoint $ENDPOINT key create 01931...
+grainfs iam --endpoint $ENDPOINT key revoke 01931... AKGF<old>
+
+# Grant / SA 회수
+grainfs iam --endpoint $ENDPOINT grant delete 01931... mybucket
+grainfs iam --endpoint $ENDPOINT sa delete 01931...
+```
+
+Auth 모드:
+
+| 모드 | 동작 |
+| --- | --- |
+| `--access-key`/`--secret-key` 둘 다 미지정, SA 미등록 | 익명 모드 (개발용) |
+| `--access-key`/`--secret-key` 지정 | bootstrap 시점에 default SA (sa-default) + wildcard Admin grant 자동 생성. flag 자격 증명은 IAM에 등록된 키로 동작한다. |
+| 어떤 SA든 등록되면 | sticky `auth_enabled` 비트가 켜지고, 이후 모든 S3 호출은 SigV4 + IAM grant 통과를 요구한다. SA를 모두 삭제해도 비트는 꺼지지 않는다 (자격 증명 없는 클러스터로 회귀하지 않게 하는 안전장치). |
+
+권한 평가는 두 단계 직렬이다: 먼저 IAM grant (특정 버킷 grant > wildcard grant), 그다음 bucket policy. 둘 다 통과해야 허용된다. Audit 이벤트는 zerolog의 `event=iam_audit` 구조화 필드로 발행된다.
+
+상세 설계는 [docs/adr/0007-iam-foundation.md](docs/adr/0007-iam-foundation.md) 참고.
+
 ## 클러스터 Balancer
 
 클러스터 모드에서 노드 간 디스크 불균형이 20% 이상이면 자동으로 샤드를 이동한다.
