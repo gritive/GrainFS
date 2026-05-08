@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	v1 "github.com/gritive/GrainFS/internal/raft"
+	chaosraft "github.com/gritive/GrainFS/internal/raft/chaos"
 	v2 "github.com/gritive/GrainFS/internal/raft/v2"
 )
 
@@ -397,4 +398,195 @@ func runProposeWaitTest(t *testing.T, label string, makeImpl func() equivalentRa
 		entries := impl.DrainApply(2, 1*time.Second)
 		require.Len(t, entries, 2)
 	})
+}
+
+// otherIDs returns all entries of all except self, preserving order.
+func otherIDs(all []string, self string) []string {
+	out := make([]string, 0, len(all)-1)
+	for _, id := range all {
+		if id != self {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// buildV1Cluster wires N v1 Nodes through a ChaosTransport with asymmetric
+// election timeouts: fastID gets a short timeout (deterministic winner), all
+// other voters get a long timeout. Cleanup is registered via t.Cleanup.
+func buildV1Cluster(t *testing.T, ids []string, fastID string) []*v1.Node {
+	t.Helper()
+	transport := chaosraft.NewChaosTransport()
+	nodes := make([]*v1.Node, len(ids))
+	for i, id := range ids {
+		cfg := v1.DefaultConfig(id, otherIDs(ids, id))
+		// Asymmetric timeouts: v1 randomises within [base, 2*base). With
+		// fast=50ms and slow=500ms there is no overlap, so fastID always
+		// fires its candidate timer first and wins term 1 uncontested.
+		if id == fastID {
+			cfg.ElectionTimeout = 50 * time.Millisecond
+		} else {
+			cfg.ElectionTimeout = 500 * time.Millisecond
+		}
+		n := v1.NewNode(cfg)
+		nodes[i] = n
+		transport.Register(n)
+		transport.Wire(n)
+	}
+	for _, n := range nodes {
+		if err := n.Bootstrap(); err != nil {
+			t.Fatalf("v1 Bootstrap %s: %v", n.ID(), err)
+		}
+		n.Start()
+	}
+	t.Cleanup(func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	})
+	return nodes
+}
+
+// v2HarnessNetwork is a minimal in-process Transport substrate for the
+// external (raftv2_test) test package. It mirrors v2's package-private
+// memNetwork — kept here because memNetwork is unexported and equivalence_test
+// lives in raftv2_test by design (black-box adapter coverage for v1 + v2).
+type v2HarnessNetwork struct {
+	nodes map[string]*v2.Node
+}
+
+func newV2HarnessNetwork() *v2HarnessNetwork {
+	return &v2HarnessNetwork{nodes: make(map[string]*v2.Node)}
+}
+
+// register installs node and returns a Transport that routes through the
+// shared registry. The registry is only mutated before any node starts, so no
+// lock is required.
+func (n *v2HarnessNetwork) register(self string, node *v2.Node) v2.Transport {
+	n.nodes[self] = node
+	return &v2HarnessTransport{self: self, net: n}
+}
+
+type v2HarnessTransport struct {
+	self string
+	net  *v2HarnessNetwork
+}
+
+func (t *v2HarnessTransport) SendRequestVote(peer string, args *v2.RequestVoteArgs) (*v2.RequestVoteReply, error) {
+	dst, ok := t.net.nodes[peer]
+	if !ok {
+		return nil, v2.ErrUnknownPeer
+	}
+	return dst.HandleRequestVote(args), nil
+}
+
+func (t *v2HarnessTransport) SendAppendEntries(peer string, args *v2.AppendEntriesArgs) (*v2.AppendEntriesReply, error) {
+	dst, ok := t.net.nodes[peer]
+	if !ok {
+		return nil, v2.ErrUnknownPeer
+	}
+	return dst.HandleAppendEntries(args), nil
+}
+
+// buildV2Cluster wires N v2 Nodes through v2HarnessNetwork with the same
+// asymmetric election-timeout setup as buildV1Cluster.
+func buildV2Cluster(t *testing.T, ids []string, fastID string) []*v2.Node {
+	t.Helper()
+	net := newV2HarnessNetwork()
+	nodes := make([]*v2.Node, len(ids))
+	for i, id := range ids {
+		cfg := v2.Config{
+			ID:               id,
+			Peers:            otherIDs(ids, id),
+			HeartbeatTimeout: 50 * time.Millisecond,
+		}
+		if id == fastID {
+			cfg.ElectionTimeout = 50 * time.Millisecond
+		} else {
+			cfg.ElectionTimeout = 500 * time.Millisecond
+		}
+		nodes[i] = v2.NewNode(cfg)
+	}
+	// Register all nodes with the network BEFORE any actor starts so the
+	// first Candidate's RequestVote can route immediately.
+	for _, n := range nodes {
+		n.SetTransport(net.register(n.ID(), n))
+	}
+	for _, n := range nodes {
+		n.Start()
+		// Drain ApplyCh so actor goroutines never block on apply send.
+		go func(n *v2.Node) {
+			for range n.ApplyCh() {
+			}
+		}(n)
+	}
+	t.Cleanup(func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	})
+	return nodes
+}
+
+// waitForV1Leader returns (leaderID, term) for the first leader observed
+// across nodes, or fails the test on timeout.
+func waitForV1Leader(t *testing.T, nodes []*v1.Node, timeout time.Duration) (string, uint64) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			if n.IsLeader() {
+				return n.ID(), n.Term()
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("waitForV1Leader: no leader within %v", timeout)
+	return "", 0
+}
+
+// waitForV2Leader is the v2 counterpart of waitForV1Leader.
+func waitForV2Leader(t *testing.T, nodes []*v2.Node, timeout time.Duration) (string, uint64) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			if n.IsLeader() {
+				return n.ID(), n.Term()
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("waitForV2Leader: no leader within %v", timeout)
+	return "", 0
+}
+
+// TestEquivalence_ThreeVoterElection drives a 3-voter election independently
+// against v1 and v2 with asymmetric election timeouts (n1 fast, n2/n3 slow).
+// Both impls must elect n1 in term 1 — divergence on either leader or term
+// would surface a v2 election regression vs v1.
+//
+// Bypasses runScenario: that harness is single-voter only and compares
+// committed-log transcripts. Election outcome is the only observable that
+// matters here, and we want to drive both clusters' transports independently
+// (chaos for v1, memNetwork for v2).
+func TestEquivalence_ThreeVoterElection(t *testing.T) {
+	ids := []string{"n1", "n2", "n3"}
+	const fast = "n1"
+
+	v1Nodes := buildV1Cluster(t, ids, fast)
+	v2Nodes := buildV2Cluster(t, ids, fast)
+
+	v1Leader, v1Term := waitForV1Leader(t, v1Nodes, 2*time.Second)
+	v2Leader, v2Term := waitForV2Leader(t, v2Nodes, 2*time.Second)
+
+	// Asymmetric timeouts (fast 50ms vs slow 500ms, no overlap after
+	// randomisation) make n1 the deterministic winner in both clusters.
+	require.Equal(t, fast, v1Leader, "v1 leader (asymmetric timeouts should pick n1)")
+	require.Equal(t, fast, v2Leader, "v2 leader (asymmetric timeouts should pick n1)")
+
+	// Equivalence: same leader, same term.
+	require.Equal(t, v1Leader, v2Leader, "v1 and v2 should elect the same leader")
+	require.Equal(t, v1Term, v2Term, "v1 and v2 should agree on the term")
+	require.Equal(t, uint64(1), v1Term, "first uncontested election should produce term 1")
 }
