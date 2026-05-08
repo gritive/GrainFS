@@ -28,6 +28,13 @@ const (
 	DeleteBucket
 	CopyObject
 	ListMultipartUploads
+	// Phase 5d: policy CRUD becomes IAM-gated. Read maps to GetBucketPolicy
+	// (Read+ on bucket); Put/Delete map to Admin-only operations. Append
+	// only — never renumber existing values; iampb.Role and on-disk grant
+	// state both pin these enum values.
+	GetBucketPolicy
+	PutBucketPolicy
+	DeleteBucketPolicy
 )
 
 // Principal identifies the caller of an S3 request.

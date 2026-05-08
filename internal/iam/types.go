@@ -80,17 +80,20 @@ type Grant struct {
 }
 
 // RoleAllows reports whether `role` permits `action` on the target bucket.
-// Bucket-lifecycle operations (CreateBucket, DeleteBucket) require Admin.
-// Object writes (PutObject, DeleteObject, CopyObject) require Write or
-// higher. Reads (GetObject, HeadObject, ListBucket, ListMultipartUploads)
-// require Read or higher. UnknownAction always denies.
+// Bucket-lifecycle operations (CreateBucket, DeleteBucket) and policy
+// mutations (PutBucketPolicy, DeleteBucketPolicy) require Admin. Object
+// writes (PutObject, DeleteObject, CopyObject) require Write or higher.
+// Reads (GetObject, HeadObject, ListBucket, ListMultipartUploads,
+// GetBucketPolicy) require Read or higher. UnknownAction always denies.
 func RoleAllows(role Role, action s3auth.S3Action) bool {
 	switch action {
-	case s3auth.GetObject, s3auth.HeadObject, s3auth.ListBucket, s3auth.ListMultipartUploads:
+	case s3auth.GetObject, s3auth.HeadObject, s3auth.ListBucket, s3auth.ListMultipartUploads,
+		s3auth.GetBucketPolicy:
 		return role >= RoleRead
 	case s3auth.PutObject, s3auth.DeleteObject, s3auth.CopyObject:
 		return role >= RoleWrite
-	case s3auth.CreateBucket, s3auth.DeleteBucket:
+	case s3auth.CreateBucket, s3auth.DeleteBucket,
+		s3auth.PutBucketPolicy, s3auth.DeleteBucketPolicy:
 		return role >= RoleAdmin
 	case s3auth.UnknownAction:
 		return false

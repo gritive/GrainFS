@@ -13,7 +13,20 @@ import (
 
 // s3ActionEnum maps an HTTP method + path context to an S3Action enum value.
 // path is required to distinguish sub-resource operations (e.g., ?delete).
-func s3ActionEnum(method, path string, hasKey bool) s3auth.S3Action {
+// hasPolicyQuery distinguishes bucket-policy CRUD (?policy) from regular
+// bucket operations so authz can require Admin for Put/Delete and Read
+// for Get on the policy resource.
+func s3ActionEnum(method, path string, hasKey, hasPolicyQuery bool) s3auth.S3Action {
+	if hasPolicyQuery && !hasKey {
+		switch method {
+		case "GET":
+			return s3auth.GetBucketPolicy
+		case "PUT":
+			return s3auth.PutBucketPolicy
+		case "DELETE":
+			return s3auth.DeleteBucketPolicy
+		}
+	}
 	switch method {
 	case "GET":
 		if hasKey {
@@ -78,13 +91,14 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			return
 		}
 
-		// Skip policy CRUD endpoints — handled by dedicated handlers
-		if c.Query("policy") != "" || string(c.QueryArgs().Peek("policy")) == "" && c.QueryArgs().Has("policy") {
-			c.Next(ctx)
-			return
-		}
-
-		action := s3ActionEnum(string(c.Method()), path, key != "")
+		// Phase 5d #4: ?policy CRUD now flows through the same 2-layer
+		// authz chain as object/bucket ops. Pre-fix this skipped both
+		// layers — any signed SA could read/write/delete any bucket's
+		// policy. s3ActionEnum maps ?policy GET/PUT/DELETE to dedicated
+		// S3Action values (GetBucketPolicy/PutBucketPolicy/DeleteBucketPolicy);
+		// RoleAllows requires Read+ for GET and Admin for PUT/DELETE.
+		hasPolicy := c.QueryArgs().Has("policy")
+		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
 		// Layer 1: IAM grant (only when auth is enabled).
@@ -98,18 +112,24 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			}
 		}
 
-		// Layer 2: bucket policy (always applies).
-		in := s3auth.PermCheckInput{
-			Principal: s3auth.Principal{AccessKey: accessKey},
-			Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
-			Action:    action,
-		}
-		if !s.policyStore.Allow(ctx, in) {
-			saID := iam.PrincipalFromContext(ctx)
-			s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "policy_deny")
-			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "bucket policy denies this action")
-			c.Abort()
-			return
+		// Layer 2: bucket policy (always applies, except for bucket-policy
+		// CRUD itself — chicken-and-egg: a deny-all policy must remain
+		// removable by the IAM-Admin SA without policy rules having to
+		// allow s3:GetBucketPolicy/s3:PutBucketPolicy/s3:DeleteBucketPolicy
+		// explicitly. IAM (Layer 1) already gates these operations.
+		if action != s3auth.GetBucketPolicy && action != s3auth.PutBucketPolicy && action != s3auth.DeleteBucketPolicy {
+			in := s3auth.PermCheckInput{
+				Principal: s3auth.Principal{AccessKey: accessKey},
+				Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+				Action:    action,
+			}
+			if !s.policyStore.Allow(ctx, in) {
+				saID := iam.PrincipalFromContext(ctx)
+				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "policy_deny")
+				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "bucket policy denies this action")
+				c.Abort()
+				return
+			}
 		}
 
 		// Allow.
