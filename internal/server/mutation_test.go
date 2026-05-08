@@ -70,3 +70,64 @@ func TestMutationObserverInterfaceCompiles(t *testing.T) {
 	var obs MutationObserver = &recordingObserver{}
 	_ = obs
 }
+
+// TestMutationBrokerFansOutToAllObservers exercises every interface
+// method to guard against accidental copy-paste mistakes inside the
+// broker dispatch loop (e.g., OnBucketDelete forgetting to iterate).
+func TestMutationBrokerFansOutToAllObservers(t *testing.T) {
+	a, b := &recordingObserver{}, &recordingObserver{}
+	br := NewMutationBroker(a, b)
+	ctx := context.Background()
+
+	br.OnObjectWrite(ctx, "buck", "k", nil)
+	br.OnObjectDelete(ctx, "buck", "k", nil)
+	br.OnObjectCopy(ctx, "src-b", "src-k", "dst-b", "dst-k", nil)
+	br.OnBucketCreate(ctx, "newbuck")
+	br.OnBucketDelete(ctx, "oldbuck")
+
+	for label, o := range map[string]*recordingObserver{"a": a, "b": b} {
+		if len(o.writes) != 1 || o.writes[0].bucket != "buck" || o.writes[0].key != "k" {
+			t.Fatalf("%s.writes = %+v, want one entry for buck/k", label, o.writes)
+		}
+		if len(o.deletes) != 1 || o.deletes[0].bucket != "buck" {
+			t.Fatalf("%s.deletes = %+v", label, o.deletes)
+		}
+		if len(o.copies) != 1 || o.copies[0].dstBucket != "dst-b" || o.copies[0].dstKey != "dst-k" {
+			t.Fatalf("%s.copies = %+v", label, o.copies)
+		}
+		if len(o.creates) != 1 || o.creates[0] != "newbuck" {
+			t.Fatalf("%s.creates = %+v", label, o.creates)
+		}
+		if len(o.dropped) != 1 || o.dropped[0] != "oldbuck" {
+			t.Fatalf("%s.dropped = %+v", label, o.dropped)
+		}
+	}
+}
+
+func TestMutationBrokerNoObserversIsNoop(t *testing.T) {
+	br := NewMutationBroker()
+	br.OnObjectWrite(context.Background(), "b", "k", nil)
+	br.OnObjectDelete(context.Background(), "b", "k", nil)
+	br.OnObjectCopy(context.Background(), "b", "s", "b", "d", nil)
+	br.OnBucketCreate(context.Background(), "b")
+	br.OnBucketDelete(context.Background(), "b")
+	// no panic, no observers, no assertion needed
+}
+
+func TestMutationBrokerNilSafe(t *testing.T) {
+	// A nil *MutationBroker must not panic; handlers may run before the
+	// broker is wired in tests that bypass NewServer.
+	var br *MutationBroker
+	br.OnObjectWrite(context.Background(), "b", "k", nil) // must not panic
+}
+
+func TestMutationBrokerPreservesRegistrationOrder(t *testing.T) {
+	var order []string
+	a := &recordingObserver{name: "a", log: &order}
+	b := &recordingObserver{name: "b", log: &order}
+	br := NewMutationBroker(a, b)
+	br.OnObjectWrite(context.Background(), "x", "y", nil)
+	if len(order) != 2 || order[0] != "a:write" || order[1] != "b:write" {
+		t.Fatalf("order = %v, want [a:write b:write]", order)
+	}
+}

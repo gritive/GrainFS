@@ -22,3 +22,64 @@ type MutationObserver interface {
 	OnBucketCreate(ctx context.Context, bucket string)
 	OnBucketDelete(ctx context.Context, bucket string)
 }
+
+// MutationBroker dispatches mutation notifications to a fixed list of
+// observers in registration order. The broker itself does no work and
+// never errors; per-observer failure semantics are owned by the observer.
+//
+// Methods on a nil *MutationBroker are no-ops, which keeps tests that
+// construct a Server piecemeal from panicking.
+type MutationBroker struct {
+	observers []MutationObserver
+}
+
+// NewMutationBroker returns a broker that fans out to the given observers
+// in argument order. Pass zero observers for a no-op broker.
+func NewMutationBroker(observers ...MutationObserver) *MutationBroker {
+	return &MutationBroker{observers: observers}
+}
+
+func (b *MutationBroker) OnObjectWrite(ctx context.Context, bucket, key string, r *storage.PutObjectResult) {
+	if b == nil {
+		return
+	}
+	for _, o := range b.observers {
+		o.OnObjectWrite(ctx, bucket, key, r)
+	}
+}
+
+func (b *MutationBroker) OnObjectDelete(ctx context.Context, bucket, key string, r *storage.DeleteObjectResult) {
+	if b == nil {
+		return
+	}
+	for _, o := range b.observers {
+		o.OnObjectDelete(ctx, bucket, key, r)
+	}
+}
+
+func (b *MutationBroker) OnObjectCopy(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, r *storage.CopyObjectResult) {
+	if b == nil {
+		return
+	}
+	for _, o := range b.observers {
+		o.OnObjectCopy(ctx, srcBucket, srcKey, dstBucket, dstKey, r)
+	}
+}
+
+func (b *MutationBroker) OnBucketCreate(ctx context.Context, bucket string) {
+	if b == nil {
+		return
+	}
+	for _, o := range b.observers {
+		o.OnBucketCreate(ctx, bucket)
+	}
+}
+
+func (b *MutationBroker) OnBucketDelete(ctx context.Context, bucket string) {
+	if b == nil {
+		return
+	}
+	for _, o := range b.observers {
+		o.OnBucketDelete(ctx, bucket)
+	}
+}
