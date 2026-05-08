@@ -505,9 +505,12 @@ func (n *Node) applyLoop() {
 			}
 			buf = append(buf, e)
 		case outCh <- first:
-			// Slide window down. Reslice rather than re-allocate so the
-			// underlying array is reused; when buf empties, set to nil so the
-			// GC can reclaim it after a long quiet period.
+			// Slide window down. Zero the popped slot so the LogEntry's
+			// Command []byte can be GC'd before buf empties (otherwise the
+			// underlying array retains the slice header). When buf empties,
+			// set to nil so the GC can also reclaim the array.
+			var zero LogEntry
+			buf[0] = zero
 			buf = buf[1:]
 			if len(buf) == 0 {
 				buf = nil
@@ -752,12 +755,11 @@ func (n *Node) stepDownToFollower(term uint64) {
 		// Drain any queued ReadIndex requests with ErrProposalFailed — they
 		// queued under our (now-defunct) Leader term and the new leader will
 		// have its own commit history, so the barrier we captured no longer
-		// reflects a state we can serve linearizably.
+		// reflects a state we can serve linearizably. reply is cap-1 buffered
+		// and at-most-one send per req, so blocking is safe and matches the
+		// inline-reply paths in handleReadIndex / tryFlushReadIndex.
 		for _, req := range n.st.readIndexQueue {
-			select {
-			case req.reply <- readIndexResult{err: ErrProposalFailed}:
-			default:
-			}
+			req.reply <- readIndexResult{err: ErrProposalFailed}
 		}
 		n.st.readIndexQueue = nil
 		n.st.peerLastRound = nil

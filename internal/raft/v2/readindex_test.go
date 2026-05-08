@@ -17,8 +17,6 @@ func TestReadIndex_NotLeader(t *testing.T) {
 	n1, n2 := nodes[0], nodes[1]
 
 	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
-
-	// n2 is Follower (n1 is Leader).
 	require.False(t, n2.IsLeader())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -35,7 +33,6 @@ func TestReadIndex_NotLeader(t *testing.T) {
 func TestReadIndex_SingleVoter(t *testing.T) {
 	n := startSingleVoter(t, "solo")
 
-	// Get a baseline commit by proposing once.
 	pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer pcancel()
 	idx, err := n.ProposeWait(pctx, []byte("v1"))
@@ -57,7 +54,6 @@ func TestReadIndex_MultiVoter_LeaderConfirmation(t *testing.T) {
 	n1 := nodes[0]
 	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
 
-	// Commit at least one entry so commitIndex > 0.
 	pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer pcancel()
 	_, err := n1.ProposeWait(pctx, []byte("commit-1"))
@@ -76,9 +72,9 @@ func TestReadIndex_MultiVoter_LeaderConfirmation(t *testing.T) {
 // TestReadIndex_MultiVoter_StepDownDrains: a queued ReadIndex on a partitioned
 // leader must return ErrProposalFailed once the leader is forced to step down.
 func TestReadIndex_MultiVoter_StepDownDrains(t *testing.T) {
-	// Custom 3-voter setup: n1 is leader but its outbound AE drops, so a
-	// queued ReadIndex never confirms via heartbeat. Then we inject a
-	// higher-term AE so n1 steps down — the queue must drain.
+	// Custom 3-voter setup: n1 leads but its outbound AE drops, so a queued
+	// ReadIndex never confirms via heartbeat. Then we inject a higher-term AE
+	// so n1 steps down — the queue must drain.
 	net := newMemNetwork()
 	ids := []string{"n1", "n2", "n3"}
 	nodes := make([]*Node, 3)
@@ -118,7 +114,6 @@ func TestReadIndex_MultiVoter_StepDownDrains(t *testing.T) {
 	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
 	leaderTerm := n1.Term()
 
-	// Queue a ReadIndex; with AE dropped, no peer reply will advance peerLastRound.
 	type result struct {
 		idx uint64
 		err error
@@ -131,10 +126,8 @@ func TestReadIndex_MultiVoter_StepDownDrains(t *testing.T) {
 		resCh <- result{i, e}
 	}()
 
-	// Give the actor a tick to enqueue the request.
 	time.Sleep(50 * time.Millisecond)
 
-	// Force step-down via higher-term AE.
 	reply := n1.HandleAppendEntries(&AppendEntriesArgs{
 		Term:     leaderTerm + 5,
 		LeaderID: "intruder",
@@ -153,131 +146,81 @@ func TestReadIndex_MultiVoter_StepDownDrains(t *testing.T) {
 	}
 }
 
-// TestReadIndex_StaleRoundReplyIgnored: peerLastRound updates must be gated
-// on (state==Leader && term match). After becoming leader at a higher term,
-// an in-flight reply from a prior leader term must NOT advance peerLastRound
-// enough to satisfy a fresh ReadIndex.
+// TestReadIndex_StaleRoundReplyIgnored: peerLastRound advance must be gated
+// on (state==Leader && cmd.hbTerm == currentTerm). A stale-term reply with a
+// huge hbRoundID must NOT advance peerLastRound, otherwise re-leadership at
+// a higher term could pre-satisfy a fresh ReadIndex with stale evidence.
 //
-// We exercise this directly through the actor's command surface rather than
-// through transport — the test is about state-machine gating, not network
-// behavior.
+// Direct state-machine test (no network, no Start): we hand-construct Leader
+// state at term T2 and call handleHeartbeatReply with a synthetic term-T1
+// reply. The actor function is the unit under test; goroutine scheduling is
+// deliberately out of scope.
 func TestReadIndex_StaleRoundReplyIgnored(t *testing.T) {
 	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
-		ElectionTimeout:  time.Hour, // never auto-elect; we control state
+		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
 	require.NoError(t, err)
-	n.Start()
-	t.Cleanup(n.Stop)
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
+	// Hand-build Leader state at term 5. We do NOT call Start() — handle*
+	// are called directly so there's no race with the actor goroutine.
+	n.st.currentTerm = 5
+	n.st.state = Leader
+	n.st.leaderID = "n1"
+	n.st.matchIndex = map[string]uint64{"p1": 0, "p2": 0}
+	n.st.nextIndex = map[string]uint64{"p1": 1, "p2": 1}
+	n.st.peerInFlight = map[string]bool{"p1": false, "p2": false}
+	n.st.peerLastRound = map[string]uint64{"p1": 0, "p2": 0}
+	n.st.leaderRound = 0
+	n.rs.Store(n.st.snapshot())
 
-	// Drive the actor through a hand-built term sequence:
-	//  1. Become Leader at term 10 (via higher-term AE step-down + manufacture).
-	// Easiest path: send a higher-term AE so n1 lifts to follower at term 9, then
-	// inject a fake hbReply at term 10... but Leader transition needs election.
-	// Simpler: bypass via direct cmdCh enqueue with a synthetic stale reply
-	// targeting current state — we don't need realistic election mechanics for
-	// this gate test, just to verify peerLastRound update is gated.
-
-	// Step 1: drive the actor to Leader via a quick election. Force a step-down,
-	// then change Peers to empty for self-quorum bootstrap... no, peers are part
-	// of cfg. Instead use the inbound-AE path: a higher-term AE from "intruder"
-	// makes us Follower at that term. Then we trigger candidate via election
-	// timeout — but ElectionTimeout=1h.
-	//
-	// Pragmatic alternative: replace the Node with one that has Peers=nil so it
-	// auto-bootstraps to Leader at term 1, then artificially bump term via an
-	// inbound AE to simulate term churn. But Peers=nil → no peers → no heartbeat
-	// dispatch → no peerLastRound to test.
-	//
-	// Cleanest: 2-voter cluster. n1 with manual peers, n2 wired but unresponsive.
-	// We assert via Node.rs that the gate behaves correctly across term churn.
-	// For simplicity we instead directly verify the gate by injecting a synthetic
-	// cmdHeartbeatReply at an old term and confirming peerLastRound doesn't move.
-
-	// Wait for actor to be live (it's Follower with idle election timer; that's fine).
-	require.NoError(t, waitFor(time.Second, func() bool {
-		return n.rs.Load() != nil
-	}))
-
-	// Send a higher-term AE from "intruder" at term 5; actor steps down to Follower at term 5.
-	rep := n.HandleAppendEntries(&AppendEntriesArgs{Term: 5, LeaderID: "intruder"})
-	require.True(t, rep.Success)
-	require.Equal(t, uint64(5), n.Term())
-
-	// Inject a synthetic stale heartbeat reply for term 4 (older than current 5).
-	// peerLastRound would only update under (state==Leader && term match); we are
-	// Follower at term 5 → gate must reject the update.
-	beforeRS := n.rs.Load()
-	require.Equal(t, Follower, beforeRS.state)
-
-	// Direct cmdCh enqueue (test-only — bypasses public API for state-gate verification).
-	syntheticReply := command{
+	// Inject a stale-term reply (term 4 < currentTerm 5) with a huge hbRoundID.
+	// The handleHeartbeatReply stale-term gate must reject before peerLastRound
+	// advances. If the gate were broken, peerLastRound["p1"] would jump to 999.
+	n.handleHeartbeatReply(command{
 		kind:           cmdHeartbeatReply,
 		hbPeer:         "p1",
 		hbTerm:         4,
 		hbDispatchTerm: 4,
-		hbRoundID:      99, // would be a huge round if accepted
+		hbRoundID:      999,
 		hbSuccess:      true,
 		hbMatchAfter:   0,
-	}
-	select {
-	case n.cmdCh <- syntheticReply:
-	case <-time.After(time.Second):
-		t.Fatalf("cmdCh send timeout")
-	}
-	// Allow actor to process.
-	time.Sleep(50 * time.Millisecond)
+	})
+	require.Equal(t, uint64(0), n.st.peerLastRound["p1"],
+		"stale-term reply must NOT advance peerLastRound")
+	require.Equal(t, uint64(0), n.st.peerLastRound["p2"],
+		"untouched peer's peerLastRound stays 0")
 
-	// We should still be Follower at term 5 (the synthetic reply must not
-	// flip us back to Leader). Term-step-down on cmd.hbTerm > currentTerm is
-	// also a Follower transition; here hbTerm=4 < currentTerm=5 so handler hits
-	// the stale-term-or-not-Leader return and is a no-op.
-	require.Equal(t, Follower, n.State())
-	require.Equal(t, uint64(5), n.Term())
+	// Sanity: a same-term reply DOES advance peerLastRound.
+	n.handleHeartbeatReply(command{
+		kind:           cmdHeartbeatReply,
+		hbPeer:         "p1",
+		hbTerm:         5,
+		hbDispatchTerm: 5,
+		hbRoundID:      7,
+		hbSuccess:      true,
+		hbMatchAfter:   0,
+	})
+	require.Equal(t, uint64(7), n.st.peerLastRound["p1"],
+		"same-term reply must advance peerLastRound")
 }
 
 // TestReadIndex_PeerLastRoundResetOnLeaderRegain: a node leads at term T1,
-// steps down, leads again at term T2. peerLastRound from T1 must not be
-// retained — leaderRound restarts at 0 in becomeLeader and the map is
-// re-allocated, so a fresh ReadIndex's minPeerRound (T2's leaderRound==1)
-// cannot match a stale T1 round.
+// steps down, leads again at term T2. peerLastRound from T1 must NOT be
+// retained across the leadership transition — leaderRound restarts at 0 in
+// becomeLeader and the map is re-allocated, so a fresh ReadIndex's
+// minPeerRound cannot match a stale T1 round.
 func TestReadIndex_PeerLastRoundResetOnLeaderRegain(t *testing.T) {
-	// Direct state inspection via three-step lifecycle.
-	n, err := NewNode(Config{
-		ID:               "n1",
-		Peers:            []string{"p1", "p2"},
-		ElectionTimeout:  time.Hour, // we drive transitions explicitly
-		HeartbeatTimeout: testHeartbeat,
-	})
-	require.NoError(t, err)
-	n.Start()
-	t.Cleanup(n.Stop)
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
-
-	// Step 1: become Leader at term 1 via a synthetic vote-grant path. We
-	// bypass that by directly mutating actor state through a cmdCh round-trip
-	// is non-trivial; instead, observe end state through the readState after
-	// driving via in-process election: bootstrap a 3-voter group and use
-	// startCluster pattern.
-	n.Stop() // tear down the manual node — replaced with a cluster
 	nodes, _ := startCluster(t, "x1", "x2", "x3")
 	leader := nodes[0]
 	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
 	leaderTerm := leader.Term()
 
-	// Issue a ReadIndex to advance leaderRound + observe peerLastRound.
+	// Issue a ReadIndex to advance leaderRound + peerLastRound on the original term.
 	pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer pcancel()
-	_, err = leader.ReadIndex(pctx)
+	_, err := leader.ReadIndex(pctx)
 	require.NoError(t, err)
 
 	// Force step-down via higher-term AE.
@@ -288,10 +231,7 @@ func TestReadIndex_PeerLastRoundResetOnLeaderRegain(t *testing.T) {
 	require.True(t, reply.Success)
 	require.Equal(t, Follower, leader.State())
 
-	// Wait for the next election to settle on a new Leader. With slow
-	// election timeout on x2/x3, the original n1 (fast) might re-lead.
-	// Either way, the new leader must serve ReadIndex correctly — this
-	// exercises the becomeLeader reset path.
+	// Wait for any node to win the next election at a higher term.
 	require.NoError(t, waitFor(5*time.Second, func() bool {
 		for _, n := range nodes {
 			if n.IsLeader() && n.Term() > leaderTerm {
@@ -301,7 +241,6 @@ func TestReadIndex_PeerLastRoundResetOnLeaderRegain(t *testing.T) {
 		return false
 	}), "no new leader emerged at higher term")
 
-	// Find the new leader.
 	var newLeader *Node
 	for _, n := range nodes {
 		if n.IsLeader() {
@@ -312,8 +251,8 @@ func TestReadIndex_PeerLastRoundResetOnLeaderRegain(t *testing.T) {
 	require.NotNil(t, newLeader)
 
 	// Fresh ReadIndex on the new leader must succeed — proves becomeLeader
-	// reset peerLastRound + leaderRound, otherwise stale entries from prior
-	// term could either pre-satisfy (linearizability bug) or starve (deadlock).
+	// reset peerLastRound + leaderRound; otherwise either pre-satisfaction
+	// (linearizability bug) or perpetual block (deadlock) would fire.
 	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer rcancel()
 	idx, err := newLeader.ReadIndex(rctx)
@@ -321,10 +260,13 @@ func TestReadIndex_PeerLastRoundResetOnLeaderRegain(t *testing.T) {
 	require.GreaterOrEqual(t, idx, uint64(0))
 }
 
-// TestApplyPipeline_DecoupledFromActor: a slow FSM consumer (sleep per entry)
-// must not stall the actor's RPC handling. We commit many entries through a
-// 3-node cluster and verify Term()/IsLeader() respond fast even while the
-// applyCh consumer is slow.
+// TestApplyPipeline_DecoupledFromActor: with a slow FSM consumer holding
+// the apply pipeline back, the actor's cmdCh must remain live so concurrent
+// ReadIndex / Propose calls succeed within heartbeat-round latency. This
+// exercises the actor → applyInCh → applyLoop → applyCh decoupling end-to-end:
+// in the pre-PR direct-applyCh path, applyCh would fill (cap 64), the actor
+// would block on send, cmdCh would back up, and a new ReadIndex's enqueue
+// would time out under ctx pressure.
 func TestApplyPipeline_DecoupledFromActor(t *testing.T) {
 	net := newMemNetwork()
 	ids := []string{"a1", "a2", "a3"}
@@ -354,20 +296,11 @@ func TestApplyPipeline_DecoupledFromActor(t *testing.T) {
 	}
 
 	leader := nodes[0]
-
-	// Slow consumer on the leader's apply channel: 5ms sleep per entry.
-	// Fast drain on followers so they don't block replication.
-	var (
-		consumed   int
-		consumedMu sync.Mutex
-	)
+	// Slow consumer on leader: 5ms per entry. 200 entries × 5ms = 1s of FSM work.
 	go func() {
 		for entry := range leader.ApplyCh() {
 			_ = entry
 			time.Sleep(5 * time.Millisecond)
-			consumedMu.Lock()
-			consumed++
-			consumedMu.Unlock()
 		}
 	}()
 	for _, n := range nodes[1:] {
@@ -379,44 +312,33 @@ func TestApplyPipeline_DecoupledFromActor(t *testing.T) {
 
 	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
 
-	// Issue 100 proposes back-to-back. With 5ms apply delay × 100 = 500ms
-	// applied-time backlog. Actor must remain responsive throughout.
-	const N = 100
+	const N = 200
 	pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer pcancel()
 	for i := 0; i < N; i++ {
 		_, err := leader.ProposeWait(pctx, []byte{byte(i)})
-		require.NoError(t, err)
+		require.NoError(t, err, "propose %d failed; actor likely wedged on slow FSM", i)
 	}
 
-	// Actor responsiveness: hot-path readers must return without delay even
-	// while applyLoop is mid-drain.
-	deadline := time.Now().Add(50 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		start := time.Now()
-		_ = leader.Term()
-		_ = leader.IsLeader()
-		require.Less(t, time.Since(start), 5*time.Millisecond,
-			"hot-path read should not wait on slow FSM consumer")
-	}
+	// Proposes have all committed. applyLoop is now ~1s into a slow drain.
+	// Actor should still service cmdCh: a fresh ReadIndex must complete
+	// well within ctx (heartbeat round is testHeartbeat=30ms + RTT << 200ms).
+	rctx, rcancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer rcancel()
+	idx, err := leader.ReadIndex(rctx)
+	require.NoError(t, err, "ReadIndex during slow apply drain — actor wedged?")
+	require.GreaterOrEqual(t, idx, uint64(N), "barrier must reflect all committed entries")
 }
 
-// TestApplyPipeline_OrderingUnderSlowFSM: slow FSM consumer; verify FIFO order
-// preserved even when applyLoop's internal buffer grows.
+// TestApplyPipeline_OrderingUnderSlowFSM: slow FSM consumer; verify FIFO
+// order preserved end-to-end even when applyLoop's internal buffer grows.
 func TestApplyPipeline_OrderingUnderSlowFSM(t *testing.T) {
-	n := startSingleVoter(t, "n1")
-
-	// Replace startSingleVoter's drain goroutine — it already drains. We need
-	// to re-purpose: stop the existing drain by counting indexes from a fresh
-	// listener. Easier: build a fresh node here.
-	n.Stop() // tear down
-
-	n2, err := NewNode(Config{ID: "n2"})
+	n, err := NewNode(Config{ID: "n1"})
 	require.NoError(t, err)
-	n2.Start()
-	t.Cleanup(n2.Stop)
+	n.Start()
+	t.Cleanup(n.Stop)
 
-	require.NoError(t, waitFor(time.Second, func() bool { return n2.IsLeader() }))
+	require.NoError(t, waitFor(time.Second, func() bool { return n.IsLeader() }))
 
 	const N = 200
 	delivered := make([]uint64, 0, N)
@@ -424,18 +346,17 @@ func TestApplyPipeline_OrderingUnderSlowFSM(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		count := 0
-		for entry := range n2.ApplyCh() {
+		for entry := range n.ApplyCh() {
 			if entry.Type == LogEntryNoOp {
 				continue
 			}
-			// Slow consumer — 1ms per entry.
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond) // slow consumer
 			deliveredMu.Lock()
 			delivered = append(delivered, entry.Index)
 			count++
-			n := count
+			c := count
 			deliveredMu.Unlock()
-			if n >= N {
+			if c >= N {
 				close(done)
 				return
 			}
@@ -445,7 +366,7 @@ func TestApplyPipeline_OrderingUnderSlowFSM(t *testing.T) {
 	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer pcancel()
 	for i := 0; i < N; i++ {
-		_, err := n2.ProposeWait(pctx, []byte{byte(i)})
+		_, err := n.ProposeWait(pctx, []byte{byte(i)})
 		require.NoError(t, err)
 	}
 
