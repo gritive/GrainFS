@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -488,6 +489,260 @@ func TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA(t *testing.T) {
 		Key:    aws.String("k"),
 	}); err == nil {
 		t.Fatal("default SA still has access to other-sa's bucket after wildcard removal; expected 403")
+	}
+}
+
+// iamKeyCreateScoped issues a new scoped key for saID restricted to buckets.
+// Mirrors iamKeyCreateExpiringIn; returns the decoded KeyCreateResponse.
+func iamKeyCreateScoped(t *testing.T, sock, saID string, buckets []string) iamKeyResult {
+	t.Helper()
+	var out iamKeyResult
+	iamDo(t, sock, "POST", "/v1/iam/sa/"+saID+"/key",
+		map[string]any{"buckets": buckets}, &out)
+	return out
+}
+
+// iamAdminRaw issues a raw admin UDS request and returns (statusCode, body).
+// Unlike iamDo it does NOT fatal on 4xx so callers can assert error cases.
+func iamAdminRaw(t *testing.T, sock, method, path string, body any) (int, []byte) {
+	t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("iamAdminRaw: marshal: %v", err)
+		}
+		rdr = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), method, "http://unix"+path, rdr)
+	if err != nil {
+		t.Fatalf("iamAdminRaw: build request: %v", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := iamUDSClient(sock).Do(req)
+	if err != nil {
+		t.Fatalf("iamAdminRaw: %s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody
+}
+
+// TestE2E_IAM_ScopedKey_RightBucket_OK — scoped key for "logs" bucket grants
+// access to objects inside "logs".
+func TestE2E_IAM_ScopedKey_RightBucket_OK(t *testing.T) {
+	srv := startIAMTestServer(t)
+	defer srv.Stop()
+
+	ctx := context.Background()
+
+	// Bootstrap client provisions the bucket and seeds an object.
+	bootCli := s3ClientFor(srv.S3URL, srv.BootstrapAK, srv.BootstrapSK)
+	const bucket = "st1-logs"
+	if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		t.Fatalf("CreateBucket logs: %v", err)
+	}
+	if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String("obj1"),
+		Body: strings.NewReader("hello"),
+	}); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	// Create SA alice with Read grant on "logs".
+	alice := iamCreateSA(t, srv.AdminSock, "alice-st1")
+	iamGrantPut(t, srv.AdminSock, alice.SAID, bucket, "Read")
+
+	// Issue scoped key restricted to "logs".
+	scoped := iamKeyCreateScoped(t, srv.AdminSock, alice.SAID, []string{bucket})
+	iamWaitKeyReady(t, srv.S3URL, scoped.AccessKey, scoped.SecretKey, 10*time.Second)
+
+	cli := s3ClientFor(srv.S3URL, scoped.AccessKey, scoped.SecretKey)
+	out, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String("obj1"),
+	})
+	if err != nil {
+		t.Fatalf("GetObject on in-scope bucket: %v", err)
+	}
+	defer out.Body.Close()
+	got, _ := io.ReadAll(out.Body)
+	if string(got) != "hello" {
+		t.Fatalf("GetObject body: got %q, want %q", string(got), "hello")
+	}
+}
+
+// TestE2E_IAM_ScopedKey_WrongBucket_403 — scoped key for "logs" is blocked on
+// "reports". Audit reason key_scope_mismatch is enforced server-side (unit
+// coverage); here we verify the 403 surface behaviour.
+func TestE2E_IAM_ScopedKey_WrongBucket_403(t *testing.T) {
+	srv := startIAMTestServer(t)
+	defer srv.Stop()
+
+	ctx := context.Background()
+
+	bootCli := s3ClientFor(srv.S3URL, srv.BootstrapAK, srv.BootstrapSK)
+
+	// Create both buckets via bootstrap.
+	for _, bkt := range []string{"st2-logs", "st2-reports"} {
+		if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)}); err != nil {
+			t.Fatalf("CreateBucket %s: %v", bkt, err)
+		}
+	}
+	if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("st2-reports"), Key: aws.String("secret"),
+		Body: strings.NewReader("classified"),
+	}); err != nil {
+		t.Fatalf("PutObject reports: %v", err)
+	}
+
+	// SA alice gets grants on both buckets but a key scoped to "logs" only.
+	alice := iamCreateSA(t, srv.AdminSock, "alice-st2")
+	iamGrantPut(t, srv.AdminSock, alice.SAID, "st2-logs", "Read")
+	iamGrantPut(t, srv.AdminSock, alice.SAID, "st2-reports", "Read")
+	scoped := iamKeyCreateScoped(t, srv.AdminSock, alice.SAID, []string{"st2-logs"})
+	iamWaitKeyReady(t, srv.S3URL, scoped.AccessKey, scoped.SecretKey, 10*time.Second)
+
+	cli := s3ClientFor(srv.S3URL, scoped.AccessKey, scoped.SecretKey)
+	_, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("st2-reports"), Key: aws.String("secret"),
+	})
+	if err == nil {
+		t.Fatal("GetObject on out-of-scope bucket succeeded; expected 403")
+	}
+	status := httpStatusFrom(err)
+	if status != http.StatusForbidden && status != http.StatusUnauthorized {
+		t.Fatalf("GetObject out-of-scope: status=%d err=%v; want 403", status, err)
+	}
+	// Audit reason key_scope_mismatch is asserted by server unit tests; here
+	// the 403 response is the observable contract.
+}
+
+// TestE2E_IAM_KeyCreate_OverScope_422 — requesting a key scoped to a bucket
+// the SA has no grant on must return 422 with the bucket name in the body.
+func TestE2E_IAM_KeyCreate_OverScope_422(t *testing.T) {
+	srv := startIAMTestServer(t)
+	defer srv.Stop()
+
+	// SA alice has a grant on "st3-logs" only.
+	alice := iamCreateSA(t, srv.AdminSock, "alice-st3")
+	iamGrantPut(t, srv.AdminSock, alice.SAID, "st3-logs", "Read")
+
+	// Request a key scoped to both "st3-logs" and "st3-reports" (no grant).
+	status, body := iamAdminRaw(t, srv.AdminSock, "POST",
+		"/v1/iam/sa/"+alice.SAID+"/key",
+		map[string]any{"buckets": []string{"st3-logs", "st3-reports"}},
+	)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("KeyCreate over-scope: status=%d body=%s; want 422", status, string(body))
+	}
+	if !bytes.Contains(body, []byte("st3-reports")) {
+		t.Fatalf("422 body does not mention denied bucket: %s", string(body))
+	}
+}
+
+// TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants is the R2 REGRESSION CRITICAL
+// test. A key issued without --bucket (BucketScope == nil) must still access
+// all buckets the SA is granted on. Pre-v0.0.99.0 behaviour must be preserved.
+func TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants(t *testing.T) {
+	srv := startIAMTestServer(t)
+	defer srv.Stop()
+
+	ctx := context.Background()
+
+	bootCli := s3ClientFor(srv.S3URL, srv.BootstrapAK, srv.BootstrapSK)
+	for _, bkt := range []string{"st4-logs", "st4-reports"} {
+		if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)}); err != nil {
+			t.Fatalf("CreateBucket %s: %v", bkt, err)
+		}
+		if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bkt), Key: aws.String("obj"),
+			Body: strings.NewReader("data"),
+		}); err != nil {
+			t.Fatalf("PutObject %s: %v", bkt, err)
+		}
+	}
+
+	// SA bob has grants on both buckets.
+	bob := iamCreateSA(t, srv.AdminSock, "bob-st4")
+	iamGrantPut(t, srv.AdminSock, bob.SAID, "st4-logs", "Read")
+	iamGrantPut(t, srv.AdminSock, bob.SAID, "st4-reports", "Read")
+
+	// Legacy key: POST /key with empty body → BucketScope is nil.
+	var legacy iamKeyResult
+	iamDo(t, srv.AdminSock, "POST", "/v1/iam/sa/"+bob.SAID+"/key", map[string]any{}, &legacy)
+	iamWaitKeyReady(t, srv.S3URL, legacy.AccessKey, legacy.SecretKey, 10*time.Second)
+
+	cli := s3ClientFor(srv.S3URL, legacy.AccessKey, legacy.SecretKey)
+
+	// Legacy key must access both granted buckets without any scope restriction.
+	for _, bkt := range []string{"st4-logs", "st4-reports"} {
+		out, err := cli.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bkt), Key: aws.String("obj"),
+		})
+		if err != nil {
+			t.Fatalf("legacy key GetObject on %s: %v (backward compat broken)", bkt, err)
+		}
+		out.Body.Close()
+	}
+}
+
+// TestE2E_IAM_ScopedKey_SnapshotRoundtrip verifies that a bucket-scoped key
+// retains its scope after a cluster restart (snapshot + raft replay). The
+// key must still be accepted on the in-scope bucket and rejected on an
+// out-of-scope bucket after restart.
+func TestE2E_IAM_ScopedKey_SnapshotRoundtrip(t *testing.T) {
+	h := startIAMTestServerWithRestart(t)
+
+	ctx := context.Background()
+	bootCli := s3ClientFor(h.S3URL, h.BootstrapAK, h.BootstrapSK)
+
+	// Provision buckets and seed an object before shutdown.
+	for _, bkt := range []string{"st5-logs", "st5-reports"} {
+		if _, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)}); err != nil {
+			t.Fatalf("CreateBucket %s: %v", bkt, err)
+		}
+	}
+	if _, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("st5-logs"), Key: aws.String("obj"),
+		Body: strings.NewReader("persistent"),
+	}); err != nil {
+		t.Fatalf("PutObject st5-logs: %v", err)
+	}
+
+	// SA with grant on "st5-logs", issued a key scoped to "st5-logs".
+	alice := iamCreateSA(t, h.AdminSock, "alice-st5")
+	iamGrantPut(t, h.AdminSock, alice.SAID, "st5-logs", "Read")
+	scoped := iamKeyCreateScoped(t, h.AdminSock, alice.SAID, []string{"st5-logs"})
+	iamWaitKeyReady(t, h.S3URL, scoped.AccessKey, scoped.SecretKey, 10*time.Second)
+
+	// Stop and restart the cluster. The IAM store rehydrates from snapshot/raft.
+	h.Stop(t)
+	h.Start(t)
+
+	// Re-build the scoped client pointing at the restarted server.
+	iamWaitKeyReady(t, h.S3URL, scoped.AccessKey, scoped.SecretKey, 15*time.Second)
+	scopedCli := s3ClientFor(h.S3URL, scoped.AccessKey, scoped.SecretKey)
+
+	// In-scope bucket must still work.
+	out, err := scopedCli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("st5-logs"), Key: aws.String("obj"),
+	})
+	if err != nil {
+		t.Fatalf("GetObject on in-scope bucket after restart: %v", err)
+	}
+	out.Body.Close()
+
+	// Out-of-scope bucket must still be blocked.
+	_, err = scopedCli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("st5-reports"), Key: aws.String("obj"),
+	})
+	if err == nil {
+		t.Fatal("GetObject on out-of-scope bucket after restart succeeded; expected 403")
+	}
+	if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
+		t.Fatalf("GetObject out-of-scope after restart: status=%d; want 403", status)
 	}
 }
 
