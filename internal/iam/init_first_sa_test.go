@@ -2,6 +2,9 @@ package iam
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,4 +132,88 @@ func TestReadSnapshot_RejectsV1V2(t *testing.T) {
 		require.Error(t, err, "v%d must be rejected", ver)
 		require.Contains(t, err.Error(), "snapshot version")
 	}
+}
+
+// TestHandleSACreate_EmptyStore_DispatchesInitFirstSA verifies that on an
+// empty store the handler routes through ProposeInitFirstSA (composite cmd)
+// rather than the legacy 3-call SACreate+KeyCreate+GrantWildcardPut path,
+// and that the response advertises the auto-issued wildcard grant.
+func TestHandleSACreate_EmptyStore_DispatchesInitFirstSA(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+	store := NewStore()
+	prop := &fakeProposer{store: store, enc: enc}
+	api := NewAdminAPI(store, prop, enc)
+
+	req := httptest.NewRequest("POST", "/v1/iam/sa",
+		strings.NewReader(`{"name":"admin","description":"first admin"}`))
+	rec := httptest.NewRecorder()
+
+	api.HandleSACreate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	require.Equal(t, []string{"InitFirstSA"}, prop.dispatched, "must use composite cmd, not 3 individuals")
+
+	// Verify response shape: must include grants:[{bucket:"*", role:"admin"}].
+	require.Contains(t, rec.Body.String(), `"grants"`)
+	require.Contains(t, rec.Body.String(), `"bucket":"*"`)
+	require.Contains(t, rec.Body.String(), `"role":"admin"`)
+}
+
+// TestHandleSACreate_NonEmptyStore_DispatchesSACreatePlusKey verifies that
+// the second-and-onward SA goes through the regular two-step propose path
+// (SACreate → KeyCreate) and is NOT auto-granted any bucket access.
+func TestHandleSACreate_NonEmptyStore_DispatchesSACreatePlusKey(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+	store := NewStore()
+	// Pre-seed: an existing SA so the store is non-empty.
+	store.applySACreate(ServiceAccount{ID: DefaultSAID, Name: "admin"})
+
+	prop := &fakeProposer{store: store, enc: enc}
+	api := NewAdminAPI(store, prop, enc)
+
+	req := httptest.NewRequest("POST", "/v1/iam/sa",
+		strings.NewReader(`{"name":"user1"}`))
+	rec := httptest.NewRecorder()
+
+	api.HandleSACreate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	require.Equal(t, []string{"SACreate", "KeyCreate"}, prop.dispatched,
+		"must use individual cmds + no wildcard grant")
+	require.NotContains(t, rec.Body.String(), `"grants"`,
+		"non-bootstrap path must not emit a grants field")
+}
+
+// TestHandleSACreate_RaceConflict_Returns409 simulates the case where a
+// concurrent operator wins the bootstrap race between IsEmpty() and
+// ProposeInitFirstSA. The store starts empty (so the handler enters the
+// InitFirstSA branch), but the fake proposer — with initBlocked=true and
+// a raceWinnerKey configured — mimics the FSM dropping our payload and
+// committing the winner's records instead. Post-propose LookupKey for
+// our access_key fails → 409.
+func TestHandleSACreate_RaceConflict_Returns409(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+	store := NewStore()
+
+	prop := &fakeProposer{
+		store:       store,
+		enc:         enc,
+		initBlocked: true,
+		raceWinnerKey: AccessKey{
+			AccessKey: "AKIA-winner", SAID: DefaultSAID, Status: KeyStatusActive,
+		},
+	}
+	api := NewAdminAPI(store, prop, enc)
+
+	req := httptest.NewRequest("POST", "/v1/iam/sa",
+		strings.NewReader(`{"name":"loser"}`))
+	rec := httptest.NewRecorder()
+
+	api.HandleSACreate(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code, "race detection must return 409, body=%s", rec.Body.String())
+	require.Equal(t, []string{"InitFirstSA"}, prop.dispatched)
 }

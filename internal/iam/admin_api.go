@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
@@ -25,17 +23,25 @@ type SACreateRequest struct {
 // SACreateResponse returns the new SA along with the access_key/secret_key
 // pair created for it. SecretKey is plaintext, returned ONCE.
 //
-// Warning, when present, signals a non-fatal post-create step failed —
-// e.g. ProposeAuthEnable for the first SA could not commit. The SA + key
-// are already committed and useful, but the cluster may not yet enforce
-// auth. Operators should investigate and (if needed) re-run admin steps.
+// Grants is populated only on the first-SA bootstrap path: the empty-store
+// branch atomically commits SA + Key + WildcardGrant via ProposeInitFirstSA
+// and echoes the auto-issued grants back so the operator sees what role
+// was provisioned. On the regular path (non-empty store) Grants is nil
+// — admins issue grants explicitly via PUT /admin/iam/grant.
 type SACreateResponse struct {
-	SAID      string    `json:"sa_id"`
-	Name      string    `json:"name"`
-	AccessKey string    `json:"access_key"`
-	SecretKey string    `json:"secret_key"`
-	CreatedAt time.Time `json:"created_at"`
-	Warning   string    `json:"warning,omitempty"`
+	SAID      string             `json:"sa_id"`
+	Name      string             `json:"name"`
+	AccessKey string             `json:"access_key"`
+	SecretKey string             `json:"secret_key"`
+	CreatedAt time.Time          `json:"created_at"`
+	Grants    []SACreateGrantOut `json:"grants,omitempty"`
+}
+
+// SACreateGrantOut is the wire shape for an auto-issued grant on the
+// first-SA bootstrap response.
+type SACreateGrantOut struct {
+	Bucket string `json:"bucket"`
+	Role   string `json:"role"`
 }
 
 type SAListItem struct {
@@ -71,6 +77,58 @@ func (a *AdminAPI) HandleSACreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	accessKey, secretKey := genCredentialPair()
+
+	// Dispatch: empty store → atomic InitFirstSA composite (sa + key +
+	// wildcard grant). Non-empty store → regular 2-step path (sa create
+	// + key create, no auto-grant).
+	if a.store.IsEmpty() {
+		sa := ServiceAccount{
+			ID:          DefaultSAID, // fixed sa_id for FSM idempotency on race
+			Name:        req.Name,
+			Description: req.Description,
+			CreatedAt:   now,
+			CreatedBy:   PrincipalFromContext(r.Context()),
+		}
+		wrapped, err := WrapSecret(a.enc, sa.ID, secretKey)
+		if err != nil {
+			http.Error(w, "wrap secret: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		k := AccessKey{
+			AccessKey:    accessKey,
+			SecretKey:    secretKey,
+			SecretKeyEnc: wrapped,
+			SAID:         sa.ID,
+			Status:       KeyStatusActive,
+			CreatedAt:    now,
+		}
+		g := Grant{
+			SAID:      sa.ID,
+			Bucket:    WildcardBucket,
+			Role:      RoleAdmin,
+			CreatedAt: now,
+			CreatedBy: PrincipalFromContext(r.Context()),
+		}
+		if err := a.proposer.ProposeInitFirstSA(r.Context(), sa, k, g); err != nil {
+			http.Error(w, "propose init first SA: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Race detect: did our access_key actually land? If a concurrent
+		// caller won the race, FSM idempotent-skipped our payload and the
+		// store now holds a different access_key for DefaultSAID. Surface
+		// 409 so the loser doesn't try to use a phantom secret.
+		if _, ok := a.store.LookupKey(accessKey); !ok {
+			http.Error(w,
+				"another operator concurrently bootstrapped the cluster; retry will be the no-op SA-create path",
+				http.StatusConflict)
+			return
+		}
+		writeSACreateResponse(w, sa, accessKey, secretKey, now, []Grant{g})
+		return
+	}
+
+	// Non-empty store: regular SA + Key path, no auto wildcard grant.
 	sa := ServiceAccount{
 		ID:          NewUUIDv7(),
 		Name:        req.Name,
@@ -82,8 +140,6 @@ func (a *AdminAPI) HandleSACreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "propose SA: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	accessKey, secretKey := genCredentialPair()
 	wrapped, err := WrapSecret(a.enc, sa.ID, secretKey)
 	if err != nil {
 		http.Error(w, "wrap secret: "+err.Error(), http.StatusInternalServerError)
@@ -101,27 +157,28 @@ func (a *AdminAPI) HandleSACreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "propose key: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	writeSACreateResponse(w, sa, accessKey, secretKey, now, nil)
+}
 
-	// Sticky auth_enabled — first SA flips the bit. The SA + key are
-	// already committed; an AuthEnable failure here is non-fatal but must
-	// be surfaced so operators don't assume a permissive-by-default cluster
-	// is enforcing IAM. Pre-fix swallowed this error with `_ =`.
-	var warning string
-	if err := a.proposer.ProposeAuthEnable(r.Context()); err != nil {
-		log.Warn().
-			Err(err).
-			Str("sa_id", sa.ID).
-			Msg("iam: ProposeAuthEnable failed after SA create; sticky bit may not be set — re-run after cluster recovers")
-		warning = "AuthEnable failed: cluster may not enforce auth until next bootstrap. Check audit logs."
-	}
-
+// writeSACreateResponse encodes the JSON response, optionally including
+// auto-issued grants (only set on first-SA bootstrap).
+func writeSACreateResponse(w http.ResponseWriter, sa ServiceAccount, accessKey, secretKey string, now time.Time, grants []Grant) {
 	resp := SACreateResponse{
 		SAID:      sa.ID,
 		Name:      sa.Name,
 		AccessKey: accessKey,
 		SecretKey: secretKey,
 		CreatedAt: now,
-		Warning:   warning,
+	}
+	for _, g := range grants {
+		role := "admin"
+		switch g.Role {
+		case RoleRead:
+			role = "read"
+		case RoleWrite:
+			role = "write"
+		}
+		resp.Grants = append(resp.Grants, SACreateGrantOut{Bucket: g.Bucket, Role: role})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
