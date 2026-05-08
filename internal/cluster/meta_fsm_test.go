@@ -733,3 +733,32 @@ func TestMetaFSM_ActivePlan_Snapshot_Restore(t *testing.T) {
 	require.NoError(t, f2.Restore(snap))
 	assert.Equal(t, "plan-99", f2.ActivePlanID())
 }
+
+// TestMetaFSM_Dispatch_KeyCreateScoped verifies that MetaCmdTypeIAMKeyCreateScoped (type 30)
+// is present in the dispatch table. Without a configured IAM applier, applyIAM returns
+// "IAM applier not configured" — proving dispatch reached the IAM path rather than
+// falling through to the default (silent no-op) branch.
+func TestMetaFSM_Dispatch_KeyCreateScoped(t *testing.T) {
+	f := NewMetaFSM() // iamApplier is nil by default
+	cmd, err := encodeMetaCmd(MetaCmdTypeIAMKeyCreateScoped, []byte{})
+	require.NoError(t, err)
+
+	applyErr := f.applyCmd(cmd)
+	// If type 30 were not in the switch, default returns nil — this would fail.
+	require.Error(t, applyErr, "type 30 must not fall through to silent default")
+	assert.Contains(t, applyErr.Error(), "IAM applier not configured")
+}
+
+// TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp is the rolling-upgrade gate test.
+// A follower running an older binary (without knowledge of a new MetaCmdType) must
+// not crash or return an error — it should apply the entry as a no-op and let raft
+// advance. This mirrors how a v0.0.98.0 follower would handle type 30 before upgrading.
+func TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp(t *testing.T) {
+	f := NewMetaFSM()
+	cmd, err := encodeMetaCmd(MetaCmdType(99), nil)
+	require.NoError(t, err)
+
+	// Unknown types must be silently ignored — no error, no panic.
+	require.NoError(t, f.applyCmd(cmd), "unknown cmd must not fail (rolling-upgrade gate)")
+	assert.Empty(t, f.Nodes(), "unknown cmd must not mutate state")
+}
