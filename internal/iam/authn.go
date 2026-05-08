@@ -51,3 +51,22 @@ func PrincipalFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(principalCtxKey{}).(string)
 	return v
 }
+
+// scopeCtxKey is a separate ctx key for the AccessKey's BucketScope.
+// Distinct from principalCtxKey to keep saID and scope independently
+// readable; legacy callers of PrincipalFromContext keep working unchanged.
+type scopeCtxKey struct{}
+
+// WithPrincipalScope returns a new ctx with the AccessKey's bucket_scope
+// attached. nil/empty means unrestricted (no Layer 0 filter applied).
+func WithPrincipalScope(ctx context.Context, scope []string) context.Context {
+	return context.WithValue(ctx, scopeCtxKey{}, scope)
+}
+
+// ScopeFromContext returns the bucket_scope of the resolved AccessKey,
+// or nil if none was set (anonymous mode, pre-auth path, or legacy
+// unrestricted key).
+func ScopeFromContext(ctx context.Context) []string {
+	v, _ := ctx.Value(scopeCtxKey{}).([]string)
+	return v
+}

@@ -2,6 +2,7 @@ package iam
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -53,5 +54,23 @@ func TestPrincipalContext_RoundTrip(t *testing.T) {
 	// Original ctx is not mutated
 	if got := PrincipalFromContext(ctx); got != "" {
 		t.Fatalf("parent context mutated: got %q", got)
+	}
+}
+
+func TestWithPrincipalScope_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithPrincipal(ctx, "sa-alice")
+	ctx = WithPrincipalScope(ctx, []string{"logs", "reports"})
+	if got := PrincipalFromContext(ctx); got != "sa-alice" {
+		t.Fatalf("PrincipalFromContext = %q, want sa-alice", got)
+	}
+	if got := ScopeFromContext(ctx); !slices.Equal(got, []string{"logs", "reports"}) {
+		t.Fatalf("ScopeFromContext = %v, want [logs reports]", got)
+	}
+}
+
+func TestScopeFromContext_Empty(t *testing.T) {
+	if got := ScopeFromContext(context.Background()); got != nil {
+		t.Fatalf("empty ctx ScopeFromContext = %v, want nil", got)
 	}
 }
