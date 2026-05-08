@@ -1,5 +1,103 @@
 # Changelog
 
+## [0.0.125.0] - 2026-05-09 — serveruntime boot decomposition PR 4: raft phases (4 of ~20)
+
+### Refactored
+
+- `internal/serveruntime/boot_phases_raft.go` (new): four raft phases that
+  split the meta-raft control-plane setup into "register everything, THEN
+  Start" — making the central PR 4 invariant explicit at the phase
+  boundary instead of source-line proximity:
+  - `bootMetaRaftWiring(state)` — `cluster.NewMetaRaft`,
+    `NewMetaTransportQUICMux` (auto-registers `__meta__` group on the
+    mux), `SetTransport`, `SetIAM`. NO callbacks, NO Start. Pure wiring.
+  - `bootDataGroupRouter(state)` — constructs `DataGroupManager` +
+    `Router`, calls `SetDefault("group-0")`, registers
+    `SetOnBucketAssigned` on the meta-FSM. Callback-only phase.
+  - `bootRotationAndAdminAPI(state)` — constructs `RotationKeystore` +
+    `RotationWorker`, registers `SetOnRotationApplied`, seeds rotation
+    steady state via `DeriveClusterIdentity`. When IAM is configured,
+    also constructs `iamProposer` + `iamAdminAPI` (admin UDS POST
+    `/v1/iam/sa` boots the first SA). Callback-only phase.
+  - `bootMetaRaftStart(ctx, state, startRotationSocket)` — fires the
+    apply loop. `Bootstrap` (when not in join mode), `Start`,
+    `StartPreviousKeyCleanup`, `StartRotationSocket` (plumbed via
+    parameter so tests can pass nil), `state.AddCleanup(metaRaft.Close)`,
+    and `Router.Sync(BucketAssignments)` to seed the router with any
+    buckets that landed during the synchronous replay window.
+
+- `internal/serveruntime/boot_state.go`: typed fields added — `metaRaft
+  *cluster.MetaRaft`, `metaTransport *cluster.MetaTransportQUIC`,
+  `dgMgr *cluster.DataGroupManager`, `clusterRouter *cluster.Router`,
+  `rotationKeystore *transport.Keystore`, `rotationWorker
+  *cluster.RotationWorker`, `iamAdminAPI *iam.AdminAPI`, `iamProposer
+  *iam.MetaProposer`. Each field is populated by exactly one phase; the
+  phase ownership is annotated alongside the declaration.
+
+- `internal/serveruntime/run.go`: ~75 lines of inline meta-raft + router +
+  rotation + admin-API setup collapse into four phase calls plus a tiny
+  mirror block. The "callbacks before Start" invariant — previously a
+  comment at run.go:160-161 protected only by source ordering — is now
+  enforced by phase ordering: `bootDataGroupRouter` and
+  `bootRotationAndAdminAPI` complete before `bootMetaRaftStart` even
+  enters. A future refactor that re-orders Start ahead of either
+  callback phase will fail the witness ordering test.
+
+### Added
+
+- `internal/serveruntime/boot_phases_raft_test.go`: 5 unit tests on real
+  meta-raft (real BadgerDB, real QUIC transport) covering all four
+  raft phases plus the central ordering invariant:
+  - `TestBootMetaRaftWiring_PopulatesState` — phase populates `metaRaft`
+    and `metaTransport`; `dgMgr`, `clusterRouter`, and `rotationWorker`
+    remain nil (downstream phases own those).
+  - `TestBootDataGroupRouter_RegistersCallbackBeforeStart` — phase wires
+    `dgMgr` + `Router` + `SetDefault("group-0")` + `SetOnBucketAssigned`
+    callback. A brand-new bucket has no explicit assignment (proves
+    the callback hasn't fired yet — Start is gated by a later phase).
+  - `TestBootRotationAndAdminAPI_NoIAMSkipsAdmin` — rotation worker is
+    constructed unconditionally; `iamAdminAPI` and `iamProposer` stay
+    nil when IAM dependencies are absent (`--no-encryption` parity).
+  - `TestBootMetaRaftStart_FiresApplyLoop` — phase fires `Start`; the
+    underlying raft `Node` is alive afterwards. `metaRaft.Close` is
+    registered on the cleanup stack so `t.Cleanup(state.Cleanup)` tears
+    down the apply loop deterministically.
+  - `TestBootRaftPhases_OrderingInvariant` — the witness test:
+    `state.metaRaft` is nil before Wiring, populated after Wiring and
+    nil-callback-fields stay nil; `clusterRouter` is nil before
+    DataGroupRouter and populated after; `rotationWorker` is nil before
+    RotationAndAdminAPI and populated after; `metaRaft` is finally
+    Started only after all callback phases ran. A future re-order that
+    Starts before a callback phase will fail this assertion chain.
+
+### Why
+
+PR 4 of the 6-PR milestone (see
+`docs/superpowers/specs/2026-05-08-serveruntime-boot-decomposition.md`).
+The hardest PR in the milestone because the raft section concentrates
+the "must register before Start" invariant: any callback registered
+after the apply loop fires races the FSM mutex — `SetOnBucketAssigned`,
+`SetOnRotationApplied`, `SetRotationSteady` all take `f.mu.Lock()`,
+which the apply goroutine also takes.
+
+Pre-PR 4 the invariant was a 2-line comment ("must register before
+Start") protected by source-line ordering. After PR 4 the invariant is
+captured by phase boundaries: `bootDataGroupRouter` and
+`bootRotationAndAdminAPI` populate `state` BEFORE `bootMetaRaftStart`
+even runs. Re-ordering callbacks past Start now requires re-ordering
+phase calls, which the witness test
+`TestBootRaftPhases_OrderingInvariant` will catch.
+
+Behavior preserved: same `MetaRaft` constructor wiring, same transport
+mux registration, same IAM applier plumbing, same callback set, same
+Bootstrap/Start sequence, same `previous.key` cleanup goroutine, same
+rotation socket boot, same `metaRaft.Close` cleanup, same post-replay
+`Router.Sync`. The only visible structural change is `StartRotationSocket`
+is plumbed through the phase signature so tests can substitute a no-op.
+
+PR 5 (storage runtime phases — `bootShardService`, `bootStreamRouter`,
+`bootOwnedGroups+EC`) is next.
+
 ## [0.0.124.0] - 2026-05-09 — serveruntime boot decomposition PR 3: transport phases (3 of ~20)
 
 ### Refactored

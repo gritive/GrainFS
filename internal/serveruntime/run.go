@@ -22,7 +22,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/eventstore"
-	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
@@ -132,87 +131,27 @@ func Run(ctx context.Context, cfg Config) error {
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
 	rpcTransport.SetTransport()
 
-	// groupRaftMux already constructed by bootGroupRaftMux phase above
-	// (moved earlier to enforce "mux exists BEFORE NewMetaTransportQUICMux"
-	// invariant explicitly via phase ordering).
-
-	// Meta-Raft: dedicated control-plane Raft group for cluster membership.
-	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
-		NodeID:  nodeID,
-		Peers:   peers,
-		DataDir: dataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("init meta-raft: %w", err)
+	// PR 4 raft phases. Order matters: callbacks (DataGroupRouter,
+	// RotationAndAdminAPI) MUST register on metaRaft.FSM() BEFORE
+	// bootMetaRaftStart fires the apply loop, otherwise the first apply
+	// event races the SetOn* call. Phase ordering captures the invariant.
+	if err := bootMetaRaftWiring(state); err != nil {
+		return err
 	}
-	// Mux-aware constructor: auto-registers metaRaft.Node() on groupRaftMux
-	// under the magic groupID "__meta__" so receiver-side mux dispatch is
-	// wired before any meta heartbeat hits the wire.
-	metaTransport := cluster.NewMetaTransportQUICMux(quicTransport, metaRaft.Node(), groupRaftMux)
-	metaRaft.SetTransport(metaTransport)
-
-	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.
-	// SetIAM is nil-safe for iamApplier (--no-encryption mode).
-	if cfg.IAMStore != nil && cfg.IAMApplier != nil {
-		metaRaft.FSM().SetIAM(cfg.IAMStore, cfg.IAMApplier)
+	if err := bootDataGroupRouter(state); err != nil {
+		return err
 	}
-
-	// PR-D: DataGroupManager + Router — created before metaRaft.Start() so the
-	// OnBucketAssigned callback is registered before the apply loop starts (race-free).
-	dgMgr := cluster.NewDataGroupManager()
-	clusterRouter := cluster.NewRouter(dgMgr)
-	clusterRouter.SetDefault("group-0")
-	// SetOnBucketAssigned uses f.mu.Lock() internally; must be called before Start().
-	metaRaft.FSM().SetOnBucketAssigned(func(bucket, groupID string) {
-		clusterRouter.AssignBucket(bucket, groupID)
-	})
-
-	// 클러스터 키 회전 — RotationWorker가 FSM phase 변경에 반응하여 디스크
-	// I/O와 transport identity swap을 수행 (D16 분리). 콜백은 metaRaft.Start
-	// 전에 등록해야 첫 apply 이벤트를 놓치지 않는다 (race-free).
-	rotationKeystore := transport.NewKeystore(dataDir)
-	rotationWorker := cluster.NewRotationWorker(rotationKeystore, quicTransport, nodeID)
-	metaRaft.FSM().SetOnRotationApplied(func(st cluster.RotationState) {
-		_ = rotationWorker.OnPhaseChange(st)
-	})
-	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can be
-	// validated against the current cluster key (D10).
-	if _, activeSPKI, err := transport.DeriveClusterIdentity(state.transportPSK); err == nil {
-		metaRaft.FSM().SetRotationSteady(activeSPKI)
-	} else {
-		log.Warn().Err(err).Msg("failed to seed rotation FSM steady state; rotation will be unavailable until next restart")
+	if err := bootRotationAndAdminAPI(state); err != nil {
+		return err
 	}
-
-	if !joinMode {
-		if err := metaRaft.Bootstrap(); err != nil {
-			return fmt.Errorf("meta-raft bootstrap: %w", err)
-		}
+	if err := bootMetaRaftStart(ctx, state, StartRotationSocket); err != nil {
+		return err
 	}
-	if err := metaRaft.Start(ctx); err != nil {
-		return fmt.Errorf("meta-raft start: %w", err)
-	}
-	// previous.key cleanup goroutine — deletes keys.d/previous.key after
-	// RotationPreviousGrace expires. Runs on all nodes (FSM state is
-	// identical via raft); each node deletes its own local file.
-	metaRaft.StartPreviousKeyCleanup(ctx, rotationKeystore)
-	if err := StartRotationSocket(ctx, dataDir, metaRaft); err != nil {
-		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
-	}
-	state.AddCleanup(func() { metaRaft.Close() })
-
-	// Build the AdminAPI wired against the meta-FSM proposer. Only when IAM
-	// dependencies are wired. First-SA bootstrap is performed via admin UDS
-	// POST /v1/iam/sa (see docs/RUNBOOK.md).
-	var iamAdminAPI *iam.AdminAPI
-	var iamProposer *iam.MetaProposer
-	if cfg.IAMStore != nil && cfg.IAMApplier != nil && cfg.Encryptor != nil {
-		iamProposer = &iam.MetaProposer{Propose: metaRaft.Propose}
-		iamAdminAPI = iam.NewAdminAPI(cfg.IAMStore, iamProposer, cfg.Encryptor)
-	}
-
-	// Seed Router with any bucket assignments already persisted in FSM state.
-	// Start() returns before replay finishes; onBucketAssigned fires live updates.
-	clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
+	metaRaft := state.metaRaft
+	dgMgr := state.dgMgr
+	clusterRouter := state.clusterRouter
+	iamAdminAPI := state.iamAdminAPI
+	iamProposer := state.iamProposer
 
 	clusterSize := 1 + len(peers)
 	// Seed data groups from cluster size only. Operators no longer choose this:
