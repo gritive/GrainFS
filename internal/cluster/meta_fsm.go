@@ -60,8 +60,8 @@ const (
 	MetaCmdTypeIAMGrantPut            = clusterpb.MetaCmdTypeIAMGrantPut
 	MetaCmdTypeIAMGrantDelete         = clusterpb.MetaCmdTypeIAMGrantDelete
 	MetaCmdTypeIAMGrantWildcardPut    = clusterpb.MetaCmdTypeIAMGrantWildcardPut
-	MetaCmdTypeIAMAuthEnable          = clusterpb.MetaCmdTypeIAMAuthEnable
 	MetaCmdTypeIAMGrantWildcardDelete = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
+	MetaCmdTypeIAMInitFirstSA         = clusterpb.MetaCmdTypeIAMInitFirstSA
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -329,8 +329,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardPut)
 	case clusterpb.MetaCmdTypeIAMGrantWildcardDelete:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardDelete)
-	case clusterpb.MetaCmdTypeIAMAuthEnable:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyAuthEnable)
+	case clusterpb.MetaCmdTypeIAMInitFirstSA:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyInitFirstSA)
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
