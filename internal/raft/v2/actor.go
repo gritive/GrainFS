@@ -29,11 +29,15 @@ type command struct {
 	vrGranted bool
 	vrErr     error
 
-	// cmdHeartbeatReply payload — outbound AppendEntries (heartbeat) reply.
-	hbPeer    string
-	hbTerm    uint64
-	hbSuccess bool
-	hbErr     error
+	// cmdHeartbeatReply payload — outbound AppendEntries reply (PR 6a uses the
+	// same kind for heartbeats and entry-bearing AEs since heartbeats are just
+	// AEs with empty Entries). hbMatchAfter = PrevLogIndex + len(Entries) sent;
+	// the leader uses it to advance matchIndex[peer] on success.
+	hbPeer       string
+	hbTerm       uint64
+	hbSuccess    bool
+	hbMatchAfter uint64
+	hbErr        error
 }
 
 type cmdKind int
@@ -150,12 +154,19 @@ func (n *Node) handleRequestVote(cmd command) {
 	}
 
 	// Rule 2: step down on higher term. Clears any vote from the prior term.
+	// If we are Leader, route through becomeFollower so leader-only state
+	// (matchIndex, nextIndex, proposeWaiters, heartbeat ticker) is torn down
+	// — leaving outstanding ProposeWait callers hanging is a correctness bug.
 	if args.Term > n.st.currentTerm {
-		n.st.currentTerm = args.Term
-		n.st.state = Follower
-		n.st.votedFor = ""
-		n.st.leaderID = ""
-		n.publish()
+		if n.st.state == Leader {
+			n.becomeFollower(args.Term)
+		} else {
+			n.st.currentTerm = args.Term
+			n.st.state = Follower
+			n.st.votedFor = ""
+			n.st.leaderID = ""
+			n.publish()
+		}
 		reply.Term = n.st.currentTerm
 	}
 
@@ -175,18 +186,20 @@ func (n *Node) handleRequestVote(cmd command) {
 	cmd.rvReply <- reply
 }
 
-// handleAppendEntries handles incoming AppendEntries RPCs. PR 5a accepts
-// heartbeats (empty Entries with PrevLogIndex=0) so leaders can hold their
-// term across the cluster; full log replication lands in PR 6. The handler
-// covers three branches:
+// handleAppendEntries handles incoming AppendEntries RPCs. PR 6a implements
+// the §5.3 happy path:
 //
 //  1. Stale term (args.Term < currentTerm) → reject without state change.
-//  2. Higher term → step down, accept as the new leader, reset election timer.
-//  3. Same term → recognise the leader, drop Candidate→Follower if needed,
-//     reset election timer, accept the heartbeat.
+//  2. Higher term → step down, adopt the new term.
+//  3. Recognise the leader (Candidate→Follower if needed), reset election timer.
+//  4. Validate PrevLogIndex/PrevLogTerm; reject with Success=false on mismatch
+//     (PR 6b will hint via ConflictTerm/ConflictIndex; PR 6a leaves them zero).
+//  5. Append Entries; advance commitIndex = min(LeaderCommit, lastLogIndex);
+//     deliver newly-committed entries on ApplyCh.
 //
-// Real PrevLogIndex/PrevLogTerm matching is deferred to PR 6; PR 5a assumes
-// PrevLogIndex=0 and Entries=[] so the log is trivially consistent.
+// PR 6a assumes Entries always extend the local log cleanly (no truncation /
+// term-conflict scenarios). That holds for the happy-path scenarios this PR
+// targets; PR 6b adds conflict resolution.
 func (n *Node) handleAppendEntries(cmd command) {
 	args := cmd.aeArgs
 
@@ -200,12 +213,22 @@ func (n *Node) handleAppendEntries(cmd command) {
 		return
 	}
 
-	// Rule 2 (term advance): adopt the new term. Note we do NOT publish here —
-	// the same-term path below will publish once leaderID is also set, so we
-	// emit a single coherent snapshot rather than two intermediate ones.
+	// Rule 2 (term advance): adopt the new term. If we are Leader, route
+	// through becomeFollower so leader-only state (matchIndex, nextIndex,
+	// proposeWaiters, heartbeat ticker) is torn down — otherwise outstanding
+	// ProposeWait callers would hang until ctx timeout. Note we do NOT
+	// publish in the inline path; Rule 3 below publishes once leaderID is
+	// also set, emitting a single coherent snapshot.
 	if args.Term > n.st.currentTerm {
-		n.st.currentTerm = args.Term
-		n.st.votedFor = ""
+		if n.st.state == Leader {
+			n.becomeFollower(args.Term)
+			// becomeFollower already published with leaderID="" and rearmed
+			// the election timer; Rule 3's leaderID set + publish overrides
+			// that with the real leader.
+		} else {
+			n.st.currentTerm = args.Term
+			n.st.votedFor = ""
+		}
 	}
 
 	// Rule 3 (same/advanced term): recognise the leader. Candidate steps down,
@@ -213,26 +236,97 @@ func (n *Node) handleAppendEntries(cmd command) {
 	// violate Raft's election safety; if it does, treat as Follower).
 	n.st.state = Follower
 	n.st.leaderID = args.LeaderID
-	n.publish()
 	n.resetElectionTimer()
 
-	// PR 5a: assume Entries=[] and PrevLogIndex=0 → log is trivially consistent.
-	// Accept LeaderCommit (clamped to our log length, which is just our existing
-	// commitIndex when no entries are appended). Real replication in PR 6 will
-	// reuse this handler with proper PrevLog matching.
+	// Rule 4: log consistency check. PR 6a only handles happy-path appends —
+	// reject (Success=false) when PrevLog{Index,Term} does not match. PR 6b
+	// will populate ConflictTerm/ConflictIndex hints to speed catch-up.
+	if args.PrevLogIndex > n.st.lastLogIndex() {
+		n.publish()
+		cmd.aeReply <- &AppendEntriesReply{
+			Term:    n.st.currentTerm,
+			Success: false,
+		}
+		return
+	}
+	if args.PrevLogIndex > 0 && n.st.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+		n.publish()
+		cmd.aeReply <- &AppendEntriesReply{
+			Term:    n.st.currentTerm,
+			Success: false,
+		}
+		return
+	}
+
+	// Rule 5a: append entries. PR 6a happy path — we assume Entries extend the
+	// log cleanly. If the follower already has matching entries past
+	// PrevLogIndex (idempotent retry case), skip the duplicates rather than
+	// truncate; truncation on conflict is PR 6b territory.
+	for i, e := range args.Entries {
+		idx := args.PrevLogIndex + uint64(i+1)
+		if idx <= n.st.lastLogIndex() {
+			// Already present at this index. PR 6a invariant: same term/index
+			// implies same entry — skip without truncating.
+			continue
+		}
+		n.st.log = append(n.st.log, e)
+	}
+
+	// Rule 5b: advance commitIndex and deliver newly-committed entries.
+	if args.LeaderCommit > n.st.commitIndex {
+		newCommit := args.LeaderCommit
+		if last := n.st.lastLogIndex(); newCommit > last {
+			newCommit = last
+		}
+		if newCommit > n.st.commitIndex {
+			n.applyCommitted(n.st.commitIndex, newCommit)
+		}
+	}
+
+	n.publish()
 	cmd.aeReply <- &AppendEntriesReply{
 		Term:    n.st.currentTerm,
 		Success: true,
 	}
 }
 
-// handlePropose appends the proposed command to the in-memory log, commits it
-// (single-voter == self-quorum), publishes the new readState, sends the entry
-// to ApplyCh, and replies to the waiter.
+// applyCommitted advances commitIndex from oldCommit to newCommit, sending
+// each newly-committed entry on applyCh and resolving any matching
+// proposeWaiters. Caller is the actor goroutine. Both leader and follower
+// reuse this path; the only difference is that leaders also have waiters to
+// drain, while followers (proposeWaiters always nil for non-Leader) skip.
+func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
+	for i := oldCommit + 1; i <= newCommit; i++ {
+		entry := n.st.log[i-1]
+		select {
+		case n.applyCh <- entry:
+		case <-n.stopCh:
+			// Stop won the race — leave commitIndex at the highest value we
+			// successfully delivered. Mirrors the single-voter path's behaviour
+			// at handlePropose.
+			n.st.commitIndex = i - 1
+			return
+		}
+		if w, ok := n.st.proposeWaiters[i]; ok {
+			delete(n.st.proposeWaiters, i)
+			// Buffered cap-1 reply chan (propose.go:39) — non-blocking.
+			select {
+			case w <- proposalResult{index: i}:
+			default:
+			}
+		}
+	}
+	n.st.commitIndex = newCommit
+}
+
+// handlePropose appends the proposed command to the in-memory log and either
+// (single-voter) commits + applies inline, or (multi-voter) registers a
+// waiter and dispatches AppendEntries to every peer.
 //
-// PR 1 simplification: commit happens synchronously inside the actor. Once
-// replication lands (PR 4-5), commit will lag the propose and a waiter map
-// will gate the reply on the commit watermark.
+// Single-voter shortcut: with no peers, self-quorum is met immediately, so we
+// keep the PR 1 inline-commit path. Multi-voter callers wait for a majority of
+// matchIndex to reach the new entry's index before applyCommitted resolves
+// their proposeWaiter.
 func (n *Node) handlePropose(cmd command) {
 	if n.st.state != Leader {
 		if cmd.proposeReply != nil {
@@ -249,25 +343,44 @@ func (n *Node) handlePropose(cmd command) {
 		Type:    cmd.proposeType,
 	}
 	n.st.log = append(n.st.log, entry)
-	n.st.commitIndex = idx
-	n.publish()
 
-	// Deliver to FSM. Select on stopCh so Stop() never deadlocks against a
-	// slow ApplyCh reader (mirrors v1 raft.go:707-711).
-	select {
-	case n.applyCh <- entry:
-	case <-n.stopCh:
-		// NOTE: if Stop wins this select, the entry is committed in-memory but
-		// undelivered. Acceptable pre-persistence; future LogStore (PR 6+) will
-		// re-deliver on restart by replaying log[applied+1..commitIndex].
+	// Single-voter shortcut: self-quorum is met by appending.
+	if len(n.cfg.Peers) == 0 {
+		n.st.commitIndex = idx
+		n.publish()
+		// Deliver to FSM. Select on stopCh so Stop() never deadlocks against a
+		// slow ApplyCh reader (mirrors v1 raft.go:707-711).
+		select {
+		case n.applyCh <- entry:
+		case <-n.stopCh:
+			// If Stop wins, the entry is committed in-memory but undelivered.
+			// Acceptable pre-persistence; future LogStore (PR 6+) will re-
+			// deliver on restart by replaying log[applied+1..commitIndex].
+			if cmd.proposeReply != nil {
+				cmd.proposeReply <- proposalResult{err: ErrNodeStopped}
+			}
+			return
+		}
 		if cmd.proposeReply != nil {
-			cmd.proposeReply <- proposalResult{err: ErrNodeStopped}
+			cmd.proposeReply <- proposalResult{index: idx}
 		}
 		return
 	}
 
+	// Multi-voter: register the waiter BEFORE dispatching senders so a fast
+	// follower's reply (synchronous through memTransport) cannot race ahead of
+	// the waiter map.
 	if cmd.proposeReply != nil {
-		cmd.proposeReply <- proposalResult{index: idx}
+		if n.st.proposeWaiters == nil {
+			n.st.proposeWaiters = make(map[uint64]chan proposalResult)
+		}
+		n.st.proposeWaiters[idx] = cmd.proposeReply
+	}
+	n.publish()
+
+	for _, peer := range n.cfg.Peers {
+		args := n.buildAppendEntriesArgs(peer)
+		go n.dispatchAppendEntries(peer, args)
 	}
 }
 
@@ -342,6 +455,18 @@ func (n *Node) becomeCandidate() {
 func (n *Node) becomeLeader() {
 	n.st.state = Leader
 	n.st.leaderID = n.st.id
+
+	// Initialise per-peer replication state per Raft §5.3: nextIndex starts
+	// at lastLogIndex+1 (optimistic — assume peer is in sync), matchIndex
+	// starts at 0 (we've confirmed nothing yet).
+	last := n.st.lastLogIndex()
+	n.st.matchIndex = make(map[string]uint64, len(n.cfg.Peers))
+	n.st.nextIndex = make(map[string]uint64, len(n.cfg.Peers))
+	for _, peer := range n.cfg.Peers {
+		n.st.matchIndex[peer] = 0
+		n.st.nextIndex[peer] = last + 1
+	}
+
 	n.publish()
 
 	// Park the election timer — Leader does not hold one.
@@ -369,6 +494,10 @@ func (n *Node) becomeLeader() {
 // leaderID are cleared because the term advanced; if the caller already
 // knows the new leader they should set leaderID after this call. Heartbeat
 // ticker (if any) is stopped and the election timer is rearmed.
+//
+// Leader-only state (matchIndex, nextIndex, proposeWaiters) is cleared.
+// Outstanding waiters receive ErrProposalFailed since their entries' commit
+// fates are no longer this node's responsibility.
 func (n *Node) becomeFollower(term uint64) {
 	n.st.currentTerm = term
 	n.st.state = Follower
@@ -379,23 +508,58 @@ func (n *Node) becomeFollower(term uint64) {
 		n.heartbeatTicker.Stop()
 		n.heartbeatTicker = nil
 	}
+	// Clear leader-only replication state. Reply ErrProposalFailed to any
+	// waiter still attached so callers don't block forever. Sends are non-
+	// blocking (cap-1 buffered chan; one send guaranteed to succeed since the
+	// chan was created fresh per ProposeWait at propose.go:39).
+	for idx, w := range n.st.proposeWaiters {
+		select {
+		case w <- proposalResult{err: ErrProposalFailed}:
+		default:
+		}
+		delete(n.st.proposeWaiters, idx)
+	}
+	n.st.matchIndex = nil
+	n.st.nextIndex = nil
+	n.st.proposeWaiters = nil
 	n.publish()
 	n.resetElectionTimer()
 }
 
-// broadcastHeartbeat dispatches a heartbeat AppendEntries (Entries=[],
-// PrevLogIndex=0) to every peer. Caller must already be Leader.
+// broadcastHeartbeat dispatches an AppendEntries to every peer. PR 6a unifies
+// the heartbeat and replication paths: each per-peer message carries entries
+// log[nextIndex[peer]..lastLogIndex] (possibly empty when the peer is fully
+// caught up — that's the heartbeat case). Caller must already be Leader.
 func (n *Node) broadcastHeartbeat() {
-	args := &AppendEntriesArgs{
+	for _, peer := range n.cfg.Peers {
+		args := n.buildAppendEntriesArgs(peer)
+		go n.dispatchAppendEntries(peer, args)
+	}
+}
+
+// buildAppendEntriesArgs constructs the AppendEntriesArgs for peer based on
+// current actor state. Caller must be inside the actor goroutine. The Entries
+// slice aliases n.st.log; goroutines that consume args MUST NOT mutate it,
+// and the actor MUST NOT truncate the underlying log while the goroutine is
+// in flight (PR 6a never truncates).
+func (n *Node) buildAppendEntriesArgs(peer string) *AppendEntriesArgs {
+	next := n.st.nextIndex[peer]
+	if next < 1 {
+		next = 1 // defensive: nextIndex is 1-based
+	}
+	prevIdx := next - 1
+	prevTerm := n.st.lastLogTermAt(prevIdx)
+	var entries []LogEntry
+	if last := n.st.lastLogIndex(); last >= next {
+		entries = n.st.log[next-1:]
+	}
+	return &AppendEntriesArgs{
 		Term:         n.st.currentTerm,
 		LeaderID:     n.st.id,
-		PrevLogIndex: 0,
-		PrevLogTerm:  0,
-		Entries:      nil,
+		PrevLogIndex: prevIdx,
+		PrevLogTerm:  prevTerm,
+		Entries:      entries,
 		LeaderCommit: n.st.commitIndex,
-	}
-	for _, peer := range n.cfg.Peers {
-		go n.sendHeartbeat(peer, args)
 	}
 }
 
@@ -419,13 +583,24 @@ func (n *Node) sendRequestVote(peer string, args *RequestVoteArgs) {
 	}
 }
 
-// sendHeartbeat is sendRequestVote's heartbeat counterpart.
-func (n *Node) sendHeartbeat(peer string, args *AppendEntriesArgs) {
+// dispatchAppendEntries runs in a per-call goroutine; it dispatches the
+// outbound AppendEntries RPC and ships the reply back through cmdCh. The
+// matchAfter value (= PrevLogIndex + len(Entries)) is computed locally from
+// args so the actor's reply handler can advance matchIndex without rebuilding
+// the per-peer view. Select-on-stopCh prevents goroutine leaks when the
+// actor exits while a transport call is in flight.
+func (n *Node) dispatchAppendEntries(peer string, args *AppendEntriesArgs) {
 	if n.transport == nil {
 		return
 	}
+	matchAfter := args.PrevLogIndex + uint64(len(args.Entries))
 	reply, err := n.transport.SendAppendEntries(peer, args)
-	c := command{kind: cmdHeartbeatReply, hbPeer: peer, hbErr: err}
+	c := command{
+		kind:         cmdHeartbeatReply,
+		hbPeer:       peer,
+		hbErr:        err,
+		hbMatchAfter: matchAfter,
+	}
 	if err == nil && reply != nil {
 		c.hbTerm = reply.Term
 		c.hbSuccess = reply.Success
@@ -460,9 +635,14 @@ func (n *Node) handleVoteReply(cmd command) {
 	}
 }
 
-// handleHeartbeatReply processes the reply from an outbound heartbeat. The
-// only state-changing reaction is term advance → step down; PR 6 will use
-// Success=false to drive log catch-up.
+// handleHeartbeatReply processes the reply from an outbound AppendEntries
+// (heartbeat or entry-bearing). PR 6a leader logic:
+//   - Higher reply.Term → step down.
+//   - Stale reply (we're no longer Leader, or reply for a prior term) → drop.
+//   - Success → advance matchIndex/nextIndex for peer; recompute commitIndex
+//     and apply newly-committed entries.
+//   - Failure → decrement nextIndex by 1 (clamp to 1). PR 6b adds the
+//     ConflictTerm/ConflictIndex hint for faster catch-up.
 func (n *Node) handleHeartbeatReply(cmd command) {
 	if cmd.hbErr != nil {
 		return
@@ -471,7 +651,62 @@ func (n *Node) handleHeartbeatReply(cmd command) {
 		n.becomeFollower(cmd.hbTerm)
 		return
 	}
-	// PR 5a: heartbeat-only path; nothing else to do on reply.
+	// Stale-reply guard: only act if we're still Leader at the term the reply
+	// was generated for.
+	if n.st.state != Leader || cmd.hbTerm != n.st.currentTerm {
+		return
+	}
+
+	if cmd.hbSuccess {
+		if cmd.hbMatchAfter > n.st.matchIndex[cmd.hbPeer] {
+			n.st.matchIndex[cmd.hbPeer] = cmd.hbMatchAfter
+		}
+		n.st.nextIndex[cmd.hbPeer] = n.st.matchIndex[cmd.hbPeer] + 1
+		n.maybeAdvanceCommitIndex()
+		return
+	}
+
+	// Failure (PR 6a): conservative decrement-by-one. PR 6b will replace this
+	// with the ConflictIndex hint path.
+	if n.st.nextIndex[cmd.hbPeer] > 1 {
+		n.st.nextIndex[cmd.hbPeer]--
+	}
+}
+
+// maybeAdvanceCommitIndex finds the highest log index N such that a majority
+// of voters (self + peers) have matchIndex >= N AND log[N].Term ==
+// currentTerm. The term gate is Raft §5.4.2 — leaders may not commit entries
+// from prior terms by counting replicas alone. Caller must be Leader.
+func (n *Node) maybeAdvanceCommitIndex() {
+	last := n.st.lastLogIndex()
+	if last <= n.st.commitIndex {
+		return
+	}
+	// Walk from highest candidate down; first one that meets quorum + term
+	// gate becomes the new commitIndex.
+	newCommit := n.st.commitIndex
+	for N := last; N > n.st.commitIndex; N-- {
+		// §5.4.2 term gate: only commit entries from the current term directly.
+		if n.st.log[N-1].Term != n.st.currentTerm {
+			continue
+		}
+		// Self counts as matched at lastLogIndex (we definitionally have N
+		// since N <= last). Quorum threshold: floor(total/2)+1.
+		count := 1
+		for _, peer := range n.cfg.Peers {
+			if n.st.matchIndex[peer] >= N {
+				count++
+			}
+		}
+		if n.hasMajority(count) {
+			newCommit = N
+			break
+		}
+	}
+	if newCommit > n.st.commitIndex {
+		n.applyCommitted(n.st.commitIndex, newCommit)
+		n.publish()
+	}
 }
 
 // resetElectionTimer reschedules the election timer with a fresh randomized

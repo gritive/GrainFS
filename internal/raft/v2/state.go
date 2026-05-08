@@ -37,6 +37,18 @@ type actorState struct {
 	// log index 1.
 	log         []LogEntry
 	commitIndex uint64
+
+	// Leader-only replication tracking. Allocated in becomeLeader, cleared in
+	// becomeFollower. matchIndex[peer] is the highest log index known to be
+	// replicated on peer; nextIndex[peer] is the next log index to send.
+	matchIndex map[string]uint64
+	nextIndex  map[string]uint64
+
+	// proposeWaiters maps log index → reply channel for ProposeWait callers
+	// whose entries are still in flight (multi-voter path). Drained on
+	// commitIndex advance; replies ErrProposalFailed on Leader→Follower
+	// step-down. Single-voter path replies inline and never populates this.
+	proposeWaiters map[uint64]chan proposalResult
 }
 
 // snapshot builds a readState reflecting the current actor-owned state.
@@ -66,6 +78,16 @@ func (s *actorState) lastLogTerm() uint64 {
 		return 0
 	}
 	return s.log[len(s.log)-1].Term
+}
+
+// lastLogTermAt returns the term of the entry at log index idx, or 0 when
+// idx == 0. Caller must ensure idx <= lastLogIndex(); the function does no
+// bounds check beyond the idx==0 sentinel. 1-based indexing (idx=1 → log[0]).
+func (s *actorState) lastLogTermAt(idx uint64) uint64 {
+	if idx == 0 {
+		return 0
+	}
+	return s.log[idx-1].Term
 }
 
 // isLogUpToDate reports whether a candidate's log (lastIdx, lastTerm) is at

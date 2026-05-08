@@ -590,3 +590,76 @@ func TestEquivalence_ThreeVoterElection(t *testing.T) {
 	require.Equal(t, v1Term, v2Term, "v1 and v2 should agree on the term")
 	require.Equal(t, uint64(1), v1Term, "first uncontested election should produce term 1")
 }
+
+// TestEquivalence_ThreeVoterPropose drives a single ProposeWait("hello") on
+// the n1 leader of a 3-voter cluster against both v1 and v2 implementations
+// and asserts equivalent outcomes:
+//   - leader == n1, term == 1 (asymmetric election timeouts make this
+//     deterministic; also verified in TestEquivalence_ThreeVoterElection),
+//   - ProposeWait returns index 1 on both,
+//   - all three nodes' CommittedIndex reaches 1 within 2s.
+//
+// We do not compare apply transcripts here because both buildV1Cluster and
+// buildV2Cluster drain ApplyCh in background goroutines (see
+// equivalence_test.go:441 and :517). CommittedIndex is the observable
+// convergence signal — once it hits the proposed index on every node, the
+// committed-log replication path has completed identically on both impls.
+func TestEquivalence_ThreeVoterPropose(t *testing.T) {
+	ids := []string{"n1", "n2", "n3"}
+	const fast = "n1"
+
+	v1Nodes := buildV1Cluster(t, ids, fast)
+	v2Nodes := buildV2Cluster(t, ids, fast)
+
+	// Wait for leadership in both clusters.
+	v1Leader, v1Term := waitForV1Leader(t, v1Nodes, 2*time.Second)
+	v2Leader, v2Term := waitForV2Leader(t, v2Nodes, 2*time.Second)
+	require.Equal(t, fast, v1Leader)
+	require.Equal(t, fast, v2Leader)
+	require.Equal(t, v1Term, v2Term)
+
+	// Locate the leader nodes (n1 by id) for ProposeWait.
+	var v1Lead *v1.Node
+	for _, n := range v1Nodes {
+		if n.ID() == v1Leader {
+			v1Lead = n
+			break
+		}
+	}
+	var v2Lead *v2.Node
+	for _, n := range v2Nodes {
+		if n.ID() == v2Leader {
+			v2Lead = n
+			break
+		}
+	}
+	require.NotNil(t, v1Lead)
+	require.NotNil(t, v2Lead)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	v1Idx, err := v1Lead.ProposeWait(ctx, []byte("hello"))
+	require.NoError(t, err, "v1 ProposeWait")
+	v2Idx, err := v2Lead.ProposeWait(ctx, []byte("hello"))
+	require.NoError(t, err, "v2 ProposeWait")
+	require.Equal(t, v1Idx, v2Idx, "v1 and v2 should return the same commit index")
+	require.Equal(t, uint64(1), v1Idx)
+
+	// Equivalence: every voter's CommittedIndex eventually reaches the
+	// proposed index. The buildXCluster background drains keep ApplyCh
+	// flowing so CommittedIndex can advance on followers.
+	require.NoError(t, waitFor(2*time.Second, func() bool {
+		for _, n := range v1Nodes {
+			if n.CommittedIndex() < v1Idx {
+				return false
+			}
+		}
+		for _, n := range v2Nodes {
+			if n.CommittedIndex() < v2Idx {
+				return false
+			}
+		}
+		return true
+	}), "not all nodes reached the proposed commit index")
+}
