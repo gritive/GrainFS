@@ -268,6 +268,22 @@ func iamSADelete(t *testing.T, sock, saID string) {
 	iamDo(t, sock, "DELETE", "/v1/iam/sa/"+saID, nil, nil)
 }
 
+// iamSetBucketUpstream registers a bucket-upstream record via admin UDS.
+// Caller has already bootstrapped admin SA and confirmed the socket exists.
+//
+// Per /plan-eng-review override A9, the JSON wire key is "upstream_url"
+// (matches the CLI flag --upstream-url and server-side struct field UpstreamURL).
+func iamSetBucketUpstream(t *testing.T, sock, bucket, upstreamURL, ak, sk string) {
+	t.Helper()
+	body := map[string]string{
+		"bucket":       bucket,
+		"upstream_url": upstreamURL,
+		"access_key":   ak,
+		"secret_key":   sk,
+	}
+	iamDo(t, sock, "POST", "/v1/iam/bucket-upstream", body, nil)
+}
+
 // iamGrantPut PUTs an explicit grant (Role: Read|Write|Admin, exact bucket).
 func iamGrantPut(t *testing.T, sock, saID, bucket, role string) {
 	t.Helper()

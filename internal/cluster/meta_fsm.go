@@ -32,36 +32,38 @@ const iamSnapshotTrailerLen = 8
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                   = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode                = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode             = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup          = clusterpb.MetaCmdTypePutShardGroup        // PR-C
-	MetaCmdTypePutBucketAssignment    = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
-	MetaCmdTypeSetLoadSnapshot        = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
-	MetaCmdTypeProposeRebalancePlan   = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
-	MetaCmdTypeAbortPlan              = clusterpb.MetaCmdTypeAbortPlan            // PR-D
-	MetaCmdTypeIcebergCreateNamespace = clusterpb.MetaCmdTypeIcebergCreateNamespace
-	MetaCmdTypeIcebergDeleteNamespace = clusterpb.MetaCmdTypeIcebergDeleteNamespace
-	MetaCmdTypeIcebergCreateTable     = clusterpb.MetaCmdTypeIcebergCreateTable
-	MetaCmdTypeIcebergCommitTable     = clusterpb.MetaCmdTypeIcebergCommitTable
-	MetaCmdTypeIcebergDeleteTable     = clusterpb.MetaCmdTypeIcebergDeleteTable
-	MetaCmdTypeRotateKeyBegin         = clusterpb.MetaCmdTypeRotateKeyBegin
-	MetaCmdTypeRotateKeySwitch        = clusterpb.MetaCmdTypeRotateKeySwitch
-	MetaCmdTypeRotateKeyDrop          = clusterpb.MetaCmdTypeRotateKeyDrop
-	MetaCmdTypeRotateKeyAbort         = clusterpb.MetaCmdTypeRotateKeyAbort
-	MetaCmdTypeScrubTrigger           = clusterpb.MetaCmdTypeScrubTrigger // PR4
-	MetaCmdTypePutObjectIndex         = clusterpb.MetaCmdTypePutObjectIndex
-	MetaCmdTypeDeleteObjectIndex      = clusterpb.MetaCmdTypeDeleteObjectIndex
-	MetaCmdTypeIAMSACreate            = clusterpb.MetaCmdTypeIAMSACreate
-	MetaCmdTypeIAMSADelete            = clusterpb.MetaCmdTypeIAMSADelete
-	MetaCmdTypeIAMKeyCreate           = clusterpb.MetaCmdTypeIAMKeyCreate
-	MetaCmdTypeIAMKeyCreateScoped     = clusterpb.MetaCmdTypeIAMKeyCreateScoped
-	MetaCmdTypeIAMKeyRevoke           = clusterpb.MetaCmdTypeIAMKeyRevoke
-	MetaCmdTypeIAMGrantPut            = clusterpb.MetaCmdTypeIAMGrantPut
-	MetaCmdTypeIAMGrantDelete         = clusterpb.MetaCmdTypeIAMGrantDelete
-	MetaCmdTypeIAMGrantWildcardPut    = clusterpb.MetaCmdTypeIAMGrantWildcardPut
-	MetaCmdTypeIAMGrantWildcardDelete = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
-	MetaCmdTypeIAMInitFirstSA         = clusterpb.MetaCmdTypeIAMInitFirstSA
+	MetaCmdTypeNoOp                    = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode                 = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode              = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup           = clusterpb.MetaCmdTypePutShardGroup        // PR-C
+	MetaCmdTypePutBucketAssignment     = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
+	MetaCmdTypeSetLoadSnapshot         = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
+	MetaCmdTypeProposeRebalancePlan    = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
+	MetaCmdTypeAbortPlan               = clusterpb.MetaCmdTypeAbortPlan            // PR-D
+	MetaCmdTypeIcebergCreateNamespace  = clusterpb.MetaCmdTypeIcebergCreateNamespace
+	MetaCmdTypeIcebergDeleteNamespace  = clusterpb.MetaCmdTypeIcebergDeleteNamespace
+	MetaCmdTypeIcebergCreateTable      = clusterpb.MetaCmdTypeIcebergCreateTable
+	MetaCmdTypeIcebergCommitTable      = clusterpb.MetaCmdTypeIcebergCommitTable
+	MetaCmdTypeIcebergDeleteTable      = clusterpb.MetaCmdTypeIcebergDeleteTable
+	MetaCmdTypeRotateKeyBegin          = clusterpb.MetaCmdTypeRotateKeyBegin
+	MetaCmdTypeRotateKeySwitch         = clusterpb.MetaCmdTypeRotateKeySwitch
+	MetaCmdTypeRotateKeyDrop           = clusterpb.MetaCmdTypeRotateKeyDrop
+	MetaCmdTypeRotateKeyAbort          = clusterpb.MetaCmdTypeRotateKeyAbort
+	MetaCmdTypeScrubTrigger            = clusterpb.MetaCmdTypeScrubTrigger // PR4
+	MetaCmdTypePutObjectIndex          = clusterpb.MetaCmdTypePutObjectIndex
+	MetaCmdTypeDeleteObjectIndex       = clusterpb.MetaCmdTypeDeleteObjectIndex
+	MetaCmdTypeIAMSACreate             = clusterpb.MetaCmdTypeIAMSACreate
+	MetaCmdTypeIAMSADelete             = clusterpb.MetaCmdTypeIAMSADelete
+	MetaCmdTypeIAMKeyCreate            = clusterpb.MetaCmdTypeIAMKeyCreate
+	MetaCmdTypeIAMKeyCreateScoped      = clusterpb.MetaCmdTypeIAMKeyCreateScoped
+	MetaCmdTypeIAMKeyRevoke            = clusterpb.MetaCmdTypeIAMKeyRevoke
+	MetaCmdTypeIAMGrantPut             = clusterpb.MetaCmdTypeIAMGrantPut
+	MetaCmdTypeIAMGrantDelete          = clusterpb.MetaCmdTypeIAMGrantDelete
+	MetaCmdTypeIAMGrantWildcardPut     = clusterpb.MetaCmdTypeIAMGrantWildcardPut
+	MetaCmdTypeIAMGrantWildcardDelete  = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
+	MetaCmdTypeIAMInitFirstSA          = clusterpb.MetaCmdTypeIAMInitFirstSA
+	MetaCmdTypeIAMBucketUpstreamPut    = clusterpb.MetaCmdTypeIAMBucketUpstreamPut
+	MetaCmdTypeIAMBucketUpstreamDelete = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -331,6 +333,10 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardDelete)
 	case clusterpb.MetaCmdTypeIAMInitFirstSA:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyInitFirstSA)
+	case clusterpb.MetaCmdTypeIAMBucketUpstreamPut:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyBucketUpstreamPut)
+	case clusterpb.MetaCmdTypeIAMBucketUpstreamDelete:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyBucketUpstreamDelete)
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil

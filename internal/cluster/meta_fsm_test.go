@@ -749,6 +749,32 @@ func TestMetaFSM_Dispatch_KeyCreateScoped(t *testing.T) {
 	assert.Contains(t, applyErr.Error(), "IAM applier not configured")
 }
 
+// TestMetaFSM_Dispatch_BucketUpstreamPut verifies that MetaCmdTypeIAMBucketUpstreamPut
+// (type 32) is present in the dispatch table. Without a configured IAM applier,
+// applyIAM returns "IAM applier not configured" — proving dispatch reached the
+// IAM path rather than falling through to the default (silent no-op) branch.
+func TestMetaFSM_Dispatch_BucketUpstreamPut(t *testing.T) {
+	f := NewMetaFSM() // iamApplier is nil by default
+	cmd, err := encodeMetaCmd(MetaCmdTypeIAMBucketUpstreamPut, []byte{})
+	require.NoError(t, err)
+
+	applyErr := f.applyCmd(cmd)
+	require.Error(t, applyErr, "type 32 must not fall through to silent default")
+	assert.Contains(t, applyErr.Error(), "IAM applier not configured")
+}
+
+// TestMetaFSM_Dispatch_BucketUpstreamDelete verifies that MetaCmdTypeIAMBucketUpstreamDelete
+// (type 33) is present in the dispatch table.
+func TestMetaFSM_Dispatch_BucketUpstreamDelete(t *testing.T) {
+	f := NewMetaFSM() // iamApplier is nil by default
+	cmd, err := encodeMetaCmd(MetaCmdTypeIAMBucketUpstreamDelete, []byte{})
+	require.NoError(t, err)
+
+	applyErr := f.applyCmd(cmd)
+	require.Error(t, applyErr, "type 33 must not fall through to silent default")
+	assert.Contains(t, applyErr.Error(), "IAM applier not configured")
+}
+
 // TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp is the rolling-upgrade gate test.
 // A follower running an older binary (without knowledge of a new MetaCmdType) must
 // not crash or return an error — it should apply the entry as a no-op and let raft

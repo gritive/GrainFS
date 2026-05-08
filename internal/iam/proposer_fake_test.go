@@ -34,6 +34,11 @@ type fakeProposer struct {
 	saCreateErr    error     // if non-nil, ProposeSACreate returns this
 	keyCreateErr   error     // if non-nil, ProposeKeyCreate returns this
 	wildcardPutErr error     // if non-nil, ProposeGrantWildcardPut returns this
+
+	bucketUpstreamPuts      []BucketUpstream
+	bucketUpstreamDeletes   []string
+	bucketUpstreamPutErr    error
+	bucketUpstreamDeleteErr error
 }
 
 func newFakeProposer() *fakeProposer { return &fakeProposer{} }
@@ -170,6 +175,18 @@ func (f *fakeProposer) ProposeInitFirstSA(ctx context.Context, sa ServiceAccount
 		f.store.applyGrantWildcardPut(g)
 	}
 	return nil
+}
+
+func (f *fakeProposer) ProposeBucketUpstreamPut(_ context.Context, u BucketUpstream) error {
+	f.bucketUpstreamPuts = append(f.bucketUpstreamPuts, u)
+	f.dispatched = append(f.dispatched, "BucketUpstreamPut")
+	return f.bucketUpstreamPutErr
+}
+
+func (f *fakeProposer) ProposeBucketUpstreamDelete(_ context.Context, bucket string) error {
+	f.bucketUpstreamDeletes = append(f.bucketUpstreamDeletes, bucket)
+	f.dispatched = append(f.dispatched, "BucketUpstreamDelete")
+	return f.bucketUpstreamDeleteErr
 }
 
 func equalSlices(a, b []string) bool {

@@ -275,6 +275,38 @@ grainfs serve \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
+### Optional: Pull-through cache for migration (v0.0.123.0+)
+
+> **Rolling-upgrade ordering:** `bucket-upstream` records propagate via a new MetaCmdType (IDs 32/33) introduced in v0.0.123.0. While a cluster is mid-upgrade — some nodes still on v0.0.122 or earlier — DO NOT issue `grainfs iam bucket-upstream set/delete` commands. Pre-v0.0.123 followers will silently no-op the raft entry on apply (rolling-upgrade safety design). The records are recovered correctly via snapshot replay on next snapshot install, but during the apply gap the follower's view is inconsistent. Wait until every node reports v0.0.123.0+ before configuring bucket upstreams.
+
+If migrating from another S3-compatible source, register the upstream per
+bucket via the admin UDS. The `--upstream*` cmdline flags were removed in
+v0.0.123.0; the IAM-managed approach replaces them.
+
+```bash
+# Register the upstream for bucket "legacy-data".
+grainfs iam bucket-upstream set legacy-data \
+    --endpoint /grainfs/data/admin.sock \
+    --upstream-url http://minio.legacy:9000 \
+    --access-key MIGRATIONAK \
+    --secret-key-stdin <<< "$UPSTREAM_SECRET_KEY"
+
+# Verify (secret_key never returned).
+grainfs iam bucket-upstream get legacy-data --endpoint /grainfs/data/admin.sock
+
+# List all registered buckets.
+grainfs iam bucket-upstream list --endpoint /grainfs/data/admin.sock
+
+# Stop pull-through for a bucket (does NOT delete the bucket itself).
+grainfs iam bucket-upstream delete legacy-data --endpoint /grainfs/data/admin.sock
+```
+
+Pull-through is read-only and on-miss only: the first GET on a missing
+object proxies upstream and stores locally; subsequent GETs hit local
+cache. Migration "completion" semantics (cutover, progress) are not yet
+implemented — track via your own counters from the upstream side. See
+ADR 0009 for the deferred work.
+
 ---
 
 ### Step 5: Post-Deployment Verification

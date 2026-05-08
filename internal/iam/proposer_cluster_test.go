@@ -3,8 +3,10 @@ package iam
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/iam/iampb"
 )
 
 // TestMetaProposer_DispatchesCorrectCmdTypes verifies that each method
@@ -48,5 +50,53 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 		if captured[i] != w {
 			t.Errorf("idx %d: got %v, want %v", i, captured[i], w)
 		}
+	}
+}
+
+func TestMetaProposer_ProposeBucketUpstreamPut(t *testing.T) {
+	var seenType clusterpb.MetaCmdType
+	var seenPayload []byte
+	mp := &MetaProposer{
+		Propose: func(_ context.Context, ct clusterpb.MetaCmdType, p []byte) error {
+			seenType = ct
+			seenPayload = append([]byte(nil), p...)
+			return nil
+		},
+	}
+	u := BucketUpstream{
+		Bucket: "shared", Endpoint: "http://up:9000", AccessKey: "AK",
+		SecretKeyEnc: []byte{1, 2, 3}, CreatedAt: time.Now().UTC(),
+	}
+	if err := mp.ProposeBucketUpstreamPut(context.Background(), u); err != nil {
+		t.Fatalf("ProposeBucketUpstreamPut: %v", err)
+	}
+	if seenType != clusterpb.MetaCmdTypeIAMBucketUpstreamPut {
+		t.Errorf("cmd type: got %v want IAMBucketUpstreamPut", seenType)
+	}
+	pb := iampb.GetRootAsBucketUpstreamPutPayload(seenPayload, 0)
+	if string(pb.Bucket()) != "shared" || string(pb.AccessKey()) != "AK" {
+		t.Errorf("payload decode: got bucket=%q ak=%q", pb.Bucket(), pb.AccessKey())
+	}
+}
+
+func TestMetaProposer_ProposeBucketUpstreamDelete(t *testing.T) {
+	var seenType clusterpb.MetaCmdType
+	var seenPayload []byte
+	mp := &MetaProposer{
+		Propose: func(_ context.Context, ct clusterpb.MetaCmdType, p []byte) error {
+			seenType = ct
+			seenPayload = append([]byte(nil), p...)
+			return nil
+		},
+	}
+	if err := mp.ProposeBucketUpstreamDelete(context.Background(), "shared"); err != nil {
+		t.Fatalf("ProposeBucketUpstreamDelete: %v", err)
+	}
+	if seenType != clusterpb.MetaCmdTypeIAMBucketUpstreamDelete {
+		t.Errorf("cmd type: got %v want IAMBucketUpstreamDelete", seenType)
+	}
+	pb := iampb.GetRootAsBucketUpstreamDeletePayload(seenPayload, 0)
+	if string(pb.Bucket()) != "shared" {
+		t.Errorf("payload bucket: got %q want shared", pb.Bucket())
 	}
 }

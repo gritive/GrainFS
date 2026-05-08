@@ -90,6 +90,20 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 			return err
 		}
 	}
+
+	// Trailer (added in v0.0.123.0 for bucket-scoped upstream credentials).
+	// Forward-compatible: pre-v0.0.123 readers stop after the revoked-AKs
+	// section and ignore trailing bytes (their ReadSnapshot ends with `return
+	// nil` immediately after the revoked loop). Per /plan-eng-review override
+	// A1 — keep version at 3 to preserve bidirectional rolling upgrade.
+	if err := writeUint32(w, uint32(len(st.bucketUpstreams))); err != nil {
+		return err
+	}
+	for _, u := range st.bucketUpstreams {
+		if err := writeBlob(w, buildBucketUpstreamPutPayload(*u)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -185,6 +199,26 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 			return err
 		}
 		dst.applyKeyRevoke(string(blob))
+	}
+
+	// Trailer: bucket-upstreams. EOF here means the snapshot was emitted by a
+	// pre-v0.0.123 binary that didn't write the trailer — treat as zero
+	// records (per A1 bidirectional-compat property).
+	nU, err := readUint32(r)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	for i := uint32(0); i < nU; i++ {
+		blob, err := readBlob(r)
+		if err != nil {
+			return err
+		}
+		if err := ap.ApplyBucketUpstreamPut(blob); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -320,6 +354,42 @@ func buildGrantDeletePayload(saID, bucket string) []byte {
 	iampb.GrantDeletePayloadAddBucket(b, bkOff)
 	b.Finish(iampb.GrantDeletePayloadEnd(b))
 	return b.FinishedBytes()
+}
+
+func buildBucketUpstreamPutPayload(u BucketUpstream) []byte {
+	b := flatbuffers.NewBuilder(128)
+	bucketOff := b.CreateString(u.Bucket)
+	endpointOff := b.CreateString(u.Endpoint)
+	akOff := b.CreateString(u.AccessKey)
+	encVec := b.CreateByteVector(u.SecretKeyEnc)
+	cbOff := b.CreateString(u.CreatedBy)
+	iampb.BucketUpstreamPutPayloadStart(b)
+	iampb.BucketUpstreamPutPayloadAddBucket(b, bucketOff)
+	iampb.BucketUpstreamPutPayloadAddEndpoint(b, endpointOff)
+	iampb.BucketUpstreamPutPayloadAddAccessKey(b, akOff)
+	iampb.BucketUpstreamPutPayloadAddSecretKeyEnc(b, encVec)
+	iampb.BucketUpstreamPutPayloadAddCreatedAtUnixNs(b, u.CreatedAt.UnixNano())
+	iampb.BucketUpstreamPutPayloadAddCreatedBy(b, cbOff)
+	b.Finish(iampb.BucketUpstreamPutPayloadEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildBucketUpstreamDeletePayload(bucket string) []byte {
+	b := flatbuffers.NewBuilder(32)
+	bucketOff := b.CreateString(bucket)
+	iampb.BucketUpstreamDeletePayloadStart(b)
+	iampb.BucketUpstreamDeletePayloadAddBucket(b, bucketOff)
+	b.Finish(iampb.BucketUpstreamDeletePayloadEnd(b))
+	return b.FinishedBytes()
+}
+
+func readBucketUpstreamEncBytes(p *iampb.BucketUpstreamPutPayload) []byte {
+	n := p.SecretKeyEncLength()
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		out[i] = byte(p.SecretKeyEnc(i))
+	}
+	return out
 }
 
 func writeUint32(w io.Writer, v uint32) error {

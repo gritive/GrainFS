@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -465,6 +466,147 @@ func parseRoleString(s string) (Role, error) {
 	}
 }
 
+// BucketUpstreamPutRequest is the JSON body for POST /v1/iam/bucket-upstream.
+// Both creds are required; secret_key is plaintext on input and wrap-encrypted
+// before raft propose. Never echoed back in any response.
+//
+// JSON wire shape uses `upstream_url` (per /plan-eng-review override A9) so the
+// CLI flag --upstream-url and JSON key match.
+type BucketUpstreamPutRequest struct {
+	Bucket      string `json:"bucket"`
+	UpstreamURL string `json:"upstream_url"`
+	AccessKey   string `json:"access_key"`
+	SecretKey   string `json:"secret_key"`
+}
+
+// BucketUpstreamItem is the wire shape for both GET single and GET list.
+// SecretKey is intentionally absent — only access_key, upstream_url, and
+// metadata leave the server.
+type BucketUpstreamItem struct {
+	Bucket      string    `json:"bucket"`
+	UpstreamURL string    `json:"upstream_url"`
+	AccessKey   string    `json:"access_key"`
+	CreatedAt   time.Time `json:"created_at"`
+	CreatedBy   string    `json:"created_by,omitempty"`
+}
+
+func (a *AdminAPI) HandleBucketUpstreamPut(w http.ResponseWriter, r *http.Request) {
+	var req BucketUpstreamPutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Bucket == "" {
+		http.Error(w, "bucket required", http.StatusBadRequest)
+		return
+	}
+	if req.Bucket == WildcardBucket || req.Bucket == SystemBucket {
+		http.Error(w, "bucket must not be a sentinel name", http.StatusBadRequest)
+		return
+	}
+	// Length + charset bounds prevent unbounded raft growth from malformed input.
+	// AWS-compatible bucket name rules: 3-63 chars, lowercase alphanumerics + . -, must start/end with alnum.
+	if len(req.Bucket) < 3 || len(req.Bucket) > 63 {
+		http.Error(w, "bucket length must be 3-63 chars", http.StatusBadRequest)
+		return
+	}
+	if !validBucketName(req.Bucket) {
+		http.Error(w, "bucket must match ^[a-z0-9][a-z0-9.-]*[a-z0-9]$", http.StatusBadRequest)
+		return
+	}
+	if len(req.UpstreamURL) > 2048 {
+		http.Error(w, "upstream_url too long (max 2048)", http.StatusBadRequest)
+		return
+	}
+	if len(req.AccessKey) > 128 {
+		http.Error(w, "access_key too long (max 128)", http.StatusBadRequest)
+		return
+	}
+	if len(req.SecretKey) > 256 {
+		http.Error(w, "secret_key too long (max 256)", http.StatusBadRequest)
+		return
+	}
+	if req.UpstreamURL == "" {
+		http.Error(w, "upstream_url required", http.StatusBadRequest)
+		return
+	}
+	parsed, err := url.Parse(req.UpstreamURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		http.Error(w, "upstream_url must be a valid http(s) URL", http.StatusBadRequest)
+		return
+	}
+	if req.AccessKey == "" || req.SecretKey == "" {
+		http.Error(w, "access_key and secret_key required", http.StatusBadRequest)
+		return
+	}
+
+	// A2: AAD = "bucket-upstream:"+bucket — namespace-prefixed to be provably
+	// disjoint from the sa_id AAD space used by SA secrets.
+	wrapped, err := WrapSecret(a.enc, "bucket-upstream:"+req.Bucket, req.SecretKey)
+	if err != nil {
+		http.Error(w, "wrap secret: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u := BucketUpstream{
+		Bucket:       req.Bucket,
+		Endpoint:     req.UpstreamURL, // server-side struct field stays Endpoint for now
+		AccessKey:    req.AccessKey,
+		SecretKey:    req.SecretKey,
+		SecretKeyEnc: wrapped,
+		CreatedAt:    time.Now().UTC(),
+		CreatedBy:    PrincipalFromContext(r.Context()),
+	}
+	if err := a.proposer.ProposeBucketUpstreamPut(r.Context(), u); err != nil {
+		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *AdminAPI) HandleBucketUpstreamGet(w http.ResponseWriter, r *http.Request, bucket string) {
+	u, ok := a.store.LookupBucketUpstream(bucket)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(BucketUpstreamItem{
+		Bucket:      u.Bucket,
+		UpstreamURL: u.Endpoint,
+		AccessKey:   u.AccessKey,
+		CreatedAt:   u.CreatedAt,
+		CreatedBy:   u.CreatedBy,
+	})
+}
+
+func (a *AdminAPI) HandleBucketUpstreamList(w http.ResponseWriter, r *http.Request) {
+	st := a.store.snapshot()
+	out := make([]BucketUpstreamItem, 0, len(st.bucketUpstreams))
+	for _, u := range st.bucketUpstreams {
+		out = append(out, BucketUpstreamItem{
+			Bucket:      u.Bucket,
+			UpstreamURL: u.Endpoint,
+			AccessKey:   u.AccessKey,
+			CreatedAt:   u.CreatedAt,
+			CreatedBy:   u.CreatedBy,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (a *AdminAPI) HandleBucketUpstreamDelete(w http.ResponseWriter, r *http.Request, bucket string) {
+	if _, ok := a.store.LookupBucketUpstream(bucket); !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err := a.proposer.ProposeBucketUpstreamDelete(r.Context(), bucket); err != nil {
+		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // genCredentialPair returns a (access_key, secret_key) pair. AKGF prefix
 // distinguishes from AWS "AKIA*" so users don't confuse origins.
 func genCredentialPair() (string, string) {
@@ -475,4 +617,22 @@ func genCredentialPair() (string, string) {
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
 	return "AKGF" + strings.ToUpper(enc.EncodeToString(akBytes))[:16],
 		enc.EncodeToString(skBytes)
+}
+
+// validBucketName checks AWS-compatible bucket naming: lowercase alphanumerics, dots, hyphens.
+// First and last char must be alphanumeric. Length is checked by the caller.
+func validBucketName(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i, c := range s {
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-'
+		if !ok {
+			return false
+		}
+		if (i == 0 || i == len(s)-1) && (c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
 }

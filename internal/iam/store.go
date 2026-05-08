@@ -9,18 +9,20 @@ import (
 // iamState is the immutable in-memory snapshot of all IAM state. Replaced
 // atomically on every mutation; readers only ever see fully-formed state.
 type iamState struct {
-	sas       map[string]*ServiceAccount // sa_id → SA
-	keysByAK  map[string]*AccessKey      // access_key → AccessKey (plaintext SecretKey populated)
-	grants    map[string]map[string]Role // sa_id → bucket → role
-	wildcards map[string]Role            // sa_id → role (default SA only)
+	sas             map[string]*ServiceAccount // sa_id → SA
+	keysByAK        map[string]*AccessKey      // access_key → AccessKey (plaintext SecretKey populated)
+	grants          map[string]map[string]Role // sa_id → bucket → role
+	wildcards       map[string]Role            // sa_id → role (default SA only)
+	bucketUpstreams map[string]*BucketUpstream // bucket → upstream
 }
 
 func newEmptyState() *iamState {
 	return &iamState{
-		sas:       make(map[string]*ServiceAccount),
-		keysByAK:  make(map[string]*AccessKey),
-		grants:    make(map[string]map[string]Role),
-		wildcards: make(map[string]Role),
+		sas:             make(map[string]*ServiceAccount),
+		keysByAK:        make(map[string]*AccessKey),
+		grants:          make(map[string]map[string]Role),
+		wildcards:       make(map[string]Role),
+		bucketUpstreams: make(map[string]*BucketUpstream),
 	}
 }
 
@@ -118,10 +120,11 @@ func (s *Store) Reset() {
 func (s *Store) cow() *iamState {
 	old := s.snapshot()
 	ns := &iamState{
-		sas:       copySAMap(old.sas),
-		keysByAK:  copyKeyMap(old.keysByAK),
-		grants:    copyGrantMap(old.grants),
-		wildcards: copyRoleMap(old.wildcards),
+		sas:             copySAMap(old.sas),
+		keysByAK:        copyKeyMap(old.keysByAK),
+		grants:          copyGrantMap(old.grants),
+		wildcards:       copyRoleMap(old.wildcards),
+		bucketUpstreams: copyBucketUpstreamMap(old.bucketUpstreams),
 	}
 	return ns
 }
@@ -218,6 +221,35 @@ func (s *Store) applyGrantWildcardDelete(saID string) {
 	s.commit(ns)
 }
 
+func (s *Store) applyBucketUpstreamPut(u BucketUpstream) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ns := s.cow()
+	uc := u
+	ns.bucketUpstreams[u.Bucket] = &uc
+	s.commit(ns)
+}
+
+func (s *Store) applyBucketUpstreamDelete(bucket string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ns := s.cow()
+	delete(ns.bucketUpstreams, bucket)
+	s.commit(ns)
+}
+
+// LookupBucketUpstream returns the BucketUpstream record for the given bucket,
+// or (nil, false) if no upstream is configured. Lock-free read via atomic
+// snapshot pointer.
+func (s *Store) LookupBucketUpstream(bucket string) (*BucketUpstream, bool) {
+	st := s.snapshot()
+	u, ok := st.bucketUpstreams[bucket]
+	if !ok || u == nil {
+		return nil, false
+	}
+	return u, true
+}
+
 // --- map copy helpers (fresh maps so old state remains immutable) ---
 
 func copySAMap(in map[string]*ServiceAccount) map[string]*ServiceAccount {
@@ -254,6 +286,14 @@ func copyBucketRoleMap(in map[string]Role) map[string]Role {
 
 func copyRoleMap(in map[string]Role) map[string]Role {
 	out := make(map[string]Role, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func copyBucketUpstreamMap(in map[string]*BucketUpstream) map[string]*BucketUpstream {
+	out := make(map[string]*BucketUpstream, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

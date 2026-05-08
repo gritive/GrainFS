@@ -17,20 +17,21 @@ type Upstream interface {
 	GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error)
 }
 
-// Backend wraps a local storage.Backend with pull-through caching from upstream.
-// On GetObject miss, it fetches from upstream, stores locally, and returns the data.
+// Backend wraps a local storage.Backend with pull-through caching. The Resolver
+// returns per-bucket Upstreams; on Resolve miss the backend treats the request
+// as a plain local lookup with no fallback fetch.
 type Backend struct {
 	storage.Backend
-	upstream Upstream
+	resolver Resolver
 }
 
 var _ storage.Backend = (*Backend)(nil)
 
-// NewBackend creates a pull-through caching backend.
-// local: local GrainFS backend that acts as the cache
-// upstream: S3-compatible upstream to pull from on cache miss
-func NewBackend(local storage.Backend, upstream Upstream) *Backend {
-	return &Backend{Backend: local, upstream: upstream}
+// NewBackend creates a pull-through caching backend. The Resolver returns
+// per-bucket Upstreams; pass NewIAMResolver(store) for the IAM-backed routing.
+// For tests, pass a fake Resolver implementation.
+func NewBackend(local storage.Backend, resolver Resolver) *Backend {
+	return &Backend{Backend: local, resolver: resolver}
 }
 
 // HeadObject returns metadata from the local cache. On miss it pulls via GetObject
@@ -75,8 +76,13 @@ func (b *Backend) GetObject(ctx context.Context, bucket, key string) (io.ReadClo
 		return nil, nil, err
 	}
 
-	// Cache miss: fetch from upstream
-	upRC, upObj, err := b.upstream.GetObject(bucket, key)
+	// Cache miss: fetch from upstream if one is configured for this bucket.
+	upstream, ok := b.resolver.Resolve(bucket)
+	if !ok {
+		// No upstream registered — return the original 404 unchanged.
+		return nil, nil, err
+	}
+	upRC, upObj, err := upstream.GetObject(bucket, key)
 	if err != nil {
 		return nil, nil, err
 	}
