@@ -575,6 +575,10 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			}
 			if ok {
 				ctx = iam.WithPrincipal(ctx, saID)
+				// Propagate BucketScope so authzMiddleware Layer 0 can filter.
+				if k, kOK := s.iamStore.LookupKey(accessKey); kOK {
+					ctx = iam.WithPrincipalScope(ctx, k.BucketScope)
+				}
 			}
 		}
 		c.Next(ctx)

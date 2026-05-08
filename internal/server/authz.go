@@ -101,6 +101,20 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
+		// Layer 0: AccessKey bucket scope (only when auth is enabled).
+		// scope = key.BucketScope. nil/empty → unrestricted (legacy keys,
+		// backward compat). non-empty → bucket must be a member.
+		if s.iamStore != nil && s.iamStore.AuthEnabled() {
+			scope := iam.ScopeFromContext(ctx)
+			if !iam.ScopeAllows(scope, bucket) {
+				saID := iam.PrincipalFromContext(ctx)
+				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "key_scope_mismatch")
+				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access key scope denies this bucket")
+				c.Abort()
+				return
+			}
+		}
+
 		// Layer 1: IAM grant (only when auth is enabled).
 		if s.iamStore != nil && s.iamStore.AuthEnabled() {
 			saID := iam.PrincipalFromContext(ctx)
