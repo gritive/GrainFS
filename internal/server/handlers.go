@@ -1754,6 +1754,24 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		return
 	}
 
+	// Source GetObject ACL gate. Storage facade validates source existence
+	// and copy-source preconditions; ACL belongs to the authorization
+	// decision, not to copy-source validation.
+	srcObj, srcErr := s.ops.HeadObject(ctx, src.Bucket, src.Key)
+	if srcErr != nil {
+		mapError(c, srcErr)
+		return
+	}
+	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
+		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
+		Resource:  s3auth.ResourceRef{Bucket: src.Bucket, Key: src.Key},
+		Action:    s3auth.GetObject,
+		ObjectACL: s3auth.ACLGrant(srcObj.ACL),
+	}, s3auth.PhasePostLoad).Allow {
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+		return
+	}
+
 	var acl *uint8
 	if aclHeader := string(c.GetHeader("x-amz-acl")); aclHeader != "" {
 		parsed := uint8(s3auth.ParseACLHeader(aclHeader))
