@@ -8,6 +8,10 @@ import (
 // Propose submits a command for replication and returns once the actor has
 // accepted it onto cmdCh. Returns ErrNotLeader if the snapshot says we are
 // not leader; the actor re-checks on receive (the snapshot may be stale).
+// If the actor's re-check finds the node is no longer leader, the command is
+// silently dropped — Propose provides no rejection signal in that case.
+// Callers that need a definitive commit confirmation (or rejection) should
+// use ProposeWait instead.
 //
 // PR 1 only — does not wait for commit. Use ProposeWait to block until the
 // entry is committed.

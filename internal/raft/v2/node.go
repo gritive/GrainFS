@@ -95,4 +95,6 @@ func (n *Node) CommittedIndex() uint64 { return n.rs.Load().commitIndex }
 
 // ApplyCh returns the channel on which committed log entries are delivered.
 // The caller must drain this channel to avoid back-pressuring the actor.
+// The channel is closed after Stop completes, so consumers may use
+// "for range ApplyCh()" to drain until shutdown.
 func (n *Node) ApplyCh() <-chan LogEntry { return n.applyCh }

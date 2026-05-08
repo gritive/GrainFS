@@ -29,6 +29,7 @@ type proposalResult struct {
 // sole publisher of readState. All state transitions flow through this loop.
 func (n *Node) run() {
 	defer close(n.doneCh)
+	defer close(n.applyCh) // safe: actor is the sole sender; closing signals consumers.
 
 	// Bootstrap: a single-voter cluster (Peers empty == only self) auto-
 	// promotes to Leader at term 1. This is a PR 1 shortcut; real elections
@@ -91,6 +92,9 @@ func (n *Node) handlePropose(cmd command) {
 	select {
 	case n.applyCh <- entry:
 	case <-n.stopCh:
+		// NOTE: if Stop wins this select, the entry is committed in-memory but
+		// undelivered. Acceptable pre-persistence; future LogStore (PR 6+) will
+		// re-deliver on restart by replaying log[applied+1..commitIndex].
 		if cmd.proposeReply != nil {
 			cmd.proposeReply <- proposalResult{err: ErrNodeStopped}
 		}
