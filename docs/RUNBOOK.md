@@ -10,6 +10,47 @@ This runbook documents the step-by-step procedure to deploy GrainFS to productio
 
 ---
 
+## Admin UDS — Bootstrap & Permissions
+
+The admin Unix socket at `<data-dir>/admin.sock` is the **sole bootstrap path** for new
+clusters. It is also used by `grainfs cluster ...`, `grainfs iam ...` subcommands.
+
+### Permissions
+
+The socket is created with mode `0660` (hard-fail on chmod failure). Operators in the
+admin group can connect; others cannot.
+
+- Default: socket owned by the user running `grainfs serve`, group is the user's primary
+  group.
+- Multi-operator setups: pass `--admin-group <groupname>` to chown the socket to a shared
+  group. All operators must belong to that group.
+- File mode is hard-coded; do not chmod looser.
+
+### Bootstrap a new cluster
+
+```bash
+# 1) Start grainfs (no auth flags needed).
+grainfs serve --data ./data --port 9000 &
+
+# 2) Create the first admin SA (returns one-time secret_key).
+grainfs iam sa create admin --endpoint ./data/admin.sock
+# {"sa_id":"sa-default","access_key":"GRAIN...","secret_key":"<one-time>","grants":[{"bucket":"*","role":"admin"}]}
+
+# 3) Use the credentials for S3 traffic.
+aws --endpoint-url http://localhost:9000 \
+    --access-key-id GRAIN... --secret-access-key <secret> \
+    s3 mb s3://my-bucket
+```
+
+### Race condition
+
+If two operators concurrently call `iam sa create` on a fresh cluster, only the first
+proposal wins (idempotent FSM Apply on `DefaultSAID`). The second operator receives
+`409 Conflict`; their displayed access_key is invalid. Re-run `iam sa create <name>` to
+create a regular SA via the non-bootstrap path.
+
+---
+
 ## Pre-Flight Checklist
 
 Complete ALL items before proceeding with deployment. If ANY item fails, do NOT deploy.

@@ -25,6 +25,8 @@ import (
 var (
 	testServerURL     string
 	testServerDataDir string
+	testAccessKey     string
+	testSecretKey     string
 	testS3Client      *s3.Client
 	freePortCursor    uint32 = initialFreePortCursor()
 )
@@ -62,11 +64,7 @@ func TestMain(m *testing.M) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		// IAM bootstrap: e2e S3 client signs as test/test, so seed the
-		// default SA + wildcard Admin grant from these flags.
-		"--access-key", "test",
-		"--secret-key", "test"}
+		"--lifecycle-interval", "0"}
 
 	// GRAINFS_DEDUP=1 opts into dedup. Default is OFF for the e2e suite because
 	// dedup + snapshots is not implemented in Phase A — CoW E2E tests would
@@ -105,10 +103,24 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Bootstrap admin SA via UDS (replaces legacy --access-key/--secret-key
+	// flags). Stash the resulting creds in package-level vars so newS3Client
+	// and other helpers can sign with them.
+	ak, sk, err := bootstrapAdminViaUDSForTestMain(dir, 30*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bootstrap admin SA: %v\n", err)
+		terminateProcess(cmd)
+		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
+			fmt.Fprintln(os.Stderr, cleanupErr)
+		}
+		os.Exit(1)
+	}
+	testAccessKey = ak
+	testSecretKey = sk
+
 	testS3Client = newS3Client(testServerURL)
 
-	// Bootstrap shim is async (post-Start goroutine); poll HeadBucket until
-	// the IAM verifier accepts test/test creds (404=auth ready, 401=not yet).
+	// Verify SigV4 verifier has the new key wired in.
 	if err := waitForIAMReady(testS3Client, 30*time.Second); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		terminateProcess(cmd)
@@ -200,9 +212,26 @@ func newS3Client(endpoint string) *s3.Client {
 	return s3.New(s3.Options{
 		BaseEndpoint: aws.String(endpoint),
 		Region:       "us-east-1",
-		Credentials:  credentials.NewStaticCredentialsProvider("test", "test", ""),
+		Credentials:  credentials.NewStaticCredentialsProvider(testAccessKey, testSecretKey, ""),
 		UsePathStyle: true,
 	})
+}
+
+// bootstrapAdminViaUDSForTestMain is a TestMain-friendly variant of
+// bootstrapAdminViaUDS — no *testing.T because TestMain doesn't have one.
+func bootstrapAdminViaUDSForTestMain(dataDir string, timeout time.Duration) (string, string, error) {
+	sock := dataDir + "/admin.sock"
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return "", "", fmt.Errorf("admin socket %s did not appear within %v", sock, timeout)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return tryBootstrapAdminViaUDS(sock)
 }
 
 func freePort() int {
@@ -416,12 +445,6 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--dedup=false",
-		// Phase 2 IAM: the verifier is always installed, so unauthenticated
-		// requests get rejected. The default e2e S3 client signs with
-		// "test"/"test"; passing those as flags bootstraps a default SA with
-		// wildcard Admin grant so existing tests keep passing.
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -430,7 +453,11 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
-	cli := newS3Client(url)
+
+	// Bootstrap an admin SA via UDS for this isolated server. Each call
+	// gets its own creds since each call has its own data dir.
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	cli := s3ClientFor(url, ak, sk)
 	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
 	return url, cli
 }

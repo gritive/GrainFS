@@ -602,26 +602,20 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// Propagate identity to downstream handlers
 		ctx = WithAccessKey(ctx, accessKey)
 
-		// Resolve IAM principal when IAM is wired. Empty principal in
-		// context means anonymous (legacy WithAuth) or pre-bootstrap
-		// flag-mode (IAM still empty); both are valid.
+		// Resolve IAM principal when IAM is wired. Auth is always on:
+		// any SigV4-verified key that doesn't resolve to an IAM SA fails
+		// closed (e.g. revoked between Verify and Resolve).
 		if s.iamStore != nil {
 			k, saID, ok := iam.ResolveSA(s.iamStore, accessKey)
-			if !ok && s.iamStore.AuthEnabled() {
-				// Sticky auth_enabled is on but the SigV4-verified key is
-				// not (or no longer) in IAM — e.g. revoked between Verify
-				// and Resolve, or a flag-mode static credential that was
-				// not bootstrapped. Fail closed.
+			if !ok {
 				writeXMLError(c, consts.StatusUnauthorized, "InvalidAccessKeyId", "")
 				c.Abort()
 				return
 			}
-			if ok {
-				ctx = iam.WithPrincipal(ctx, saID)
-				// Propagate BucketScope so authzMiddleware Layer 0 can filter.
-				// k comes from the same atomic snapshot as saID — no second LookupKey needed.
-				ctx = iam.WithPrincipalScope(ctx, k.BucketScope)
-			}
+			ctx = iam.WithPrincipal(ctx, saID)
+			// Propagate BucketScope so authzMiddleware Layer 0 can filter.
+			// k comes from the same atomic snapshot as saID — no second LookupKey needed.
+			ctx = iam.WithPrincipalScope(ctx, k.BucketScope)
 		}
 		c.Next(ctx)
 	}

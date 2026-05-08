@@ -27,11 +27,13 @@ func TestIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dataDir)
 	raftPort := freePort()
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
-	server := startIcebergE2EServer(t, dataDir, raftPort)
-	createE2EBucket(t, server.endpoint, "grainfs-tables")
+	server := startIcebergE2EServer(t, dataDir, raftPort, encKeyFile)
+	ak, sk := bootstrapAdminViaUDS(t, dataDir)
+	createE2EBucketWithCreds(t, server.endpoint, "grainfs-tables", ak, sk)
 
-	runDuckDBIcebergSQL(t, server.endpoint, `
+	runDuckDBIcebergSQLWithCreds(t, server.endpoint, ak, sk, `
 CREATE SCHEMA grainfs_iceberg.ns_e2e;
 CREATE TABLE grainfs_iceberg.ns_e2e.t (a INTEGER);
 INSERT INTO grainfs_iceberg.ns_e2e.t VALUES (42), (7);
@@ -40,11 +42,11 @@ SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_e2e.t;
 
 	server.stop()
 
-	server = startIcebergE2EServer(t, dataDir, raftPort)
-	runDuckDBIcebergSQL(t, server.endpoint, `
+	server = startIcebergE2EServer(t, dataDir, raftPort, encKeyFile)
+	runDuckDBIcebergSQLWithCreds(t, server.endpoint, ak, sk, `
 SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_e2e.t;
 `, "49")
-	runDuckDBIcebergExec(t, server.endpoint, `
+	runDuckDBIcebergExecWithCreds(t, server.endpoint, ak, sk, `
 DROP TABLE grainfs_iceberg.ns_e2e.t;
 DROP SCHEMA grainfs_iceberg.ns_e2e;
 	`)
@@ -131,7 +133,7 @@ type icebergE2EServer struct {
 	stop     func()
 }
 
-func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int) icebergE2EServer {
+func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int, encKeyFile string) icebergE2EServer {
 	t.Helper()
 
 	port := freePort()
@@ -142,7 +144,7 @@ func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int) icebergE2
 		"--dedup=false",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 		"--snapshot-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -179,16 +181,11 @@ func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int) icebergE2
 	}
 }
 
-func createE2EBucket(t *testing.T, endpoint, bucket string) {
+func createE2EBucketWithCreds(t *testing.T, endpoint, bucket, accessKey, secretKey string) {
 	t.Helper()
-	client := newS3Client(endpoint)
+	client := s3ClientFor(endpoint, accessKey, secretKey)
 	_, err := client.CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(bucket)})
 	require.NoError(t, err)
-}
-
-func runDuckDBIcebergSQL(t *testing.T, endpoint, query, want string) {
-	t.Helper()
-	runDuckDBIcebergSQLWithCreds(t, endpoint, "test", "test", query, want)
 }
 
 func runDuckDBIcebergSQLWithCreds(t *testing.T, endpoint, accessKey, secretKey, query, want string) {
@@ -208,11 +205,6 @@ func runDuckDBIcebergSQLWithCreds(t *testing.T, endpoint, accessKey, secretKey, 
 	require.True(t, rows.Next(), "duckdb query returned no rows")
 	require.NoError(t, rows.Scan(&got))
 	require.Equal(t, want, got)
-}
-
-func runDuckDBIcebergExec(t *testing.T, endpoint, query string) {
-	t.Helper()
-	runDuckDBIcebergExecWithCreds(t, endpoint, "test", "test", query)
 }
 
 func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey, query string) {

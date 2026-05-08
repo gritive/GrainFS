@@ -14,9 +14,6 @@ func TestStore_EmptyReads(t *testing.T) {
 	if r := s.LookupGrant("sa-1", "bucket-1"); r != RoleNone {
 		t.Fatalf("LookupGrant on empty store = %v, want RoleNone", r)
 	}
-	if got := s.AuthEnabled(); got {
-		t.Fatal("empty store AuthEnabled = true, want false")
-	}
 }
 
 func TestStore_PutSAAndKey_Read(t *testing.T) {
@@ -77,18 +74,5 @@ func TestStore_KeyExpired_LookupReturnsNotOk(t *testing.T) {
 	s.applyKeyCreate(AccessKey{AccessKey: "AK", SAID: "sa-1", Status: KeyStatusActive, ExpiresAt: &past})
 	if _, ok := s.LookupKey("AK"); ok {
 		t.Fatal("LookupKey returned ok for expired key")
-	}
-}
-
-func TestStore_AuthEnable_Sticky(t *testing.T) {
-	s := NewStore()
-	s.applySACreate(ServiceAccount{ID: "sa-1"})
-	s.applyAuthEnable()
-	if !s.AuthEnabled() {
-		t.Fatal("AuthEnabled = false after enable")
-	}
-	s.applySADelete("sa-1")
-	if !s.AuthEnabled() {
-		t.Fatal("AuthEnabled became false after deleting all SAs (sticky violated)")
 	}
 }

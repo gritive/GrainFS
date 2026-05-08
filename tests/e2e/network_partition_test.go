@@ -81,11 +81,15 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	require.NoError(s.T(), cmd.Start())
 	defer cmd.Process.Kill()
 
-	waitForPort(s.T(), s.proxyPort, 10*time.Second)
-	waitForPort(s.T(), s.port, 10*time.Second)
+	waitForPort(s.T(), s.proxyPort, 30*time.Second)
+	waitForPort(s.T(), s.port, 30*time.Second)
+
+	// Bootstrap admin SA via the on-disk admin UDS (not through the
+	// proxy — UDS is on the same host as grainfs).
+	ak, sk := bootstrapAdminViaUDS(s.T(), s.dir)
 
 	// Create bucket and write data via proxy
-	s3Client := newS3Client(fmt.Sprintf("http://127.0.0.1:%d", s.proxyPort))
+	s3Client := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", s.proxyPort), ak, sk)
 	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String("partition-test"),
 	})

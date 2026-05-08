@@ -53,7 +53,6 @@ func (a *Applier) ApplySACreate(payload []byte) error {
 }
 
 // ApplySADelete removes the SA, cascading its keys, grants, and wildcard.
-// The sticky authEnabled bit is intentionally NOT cleared.
 func (a *Applier) ApplySADelete(payload []byte) error {
 	p := iampb.GetRootAsSADeletePayload(payload, 0)
 	saID := string(p.SaId())
@@ -281,12 +280,5 @@ func (a *Applier) ApplyGrantWildcardDelete(payload []byte) error {
 		return nil
 	}
 	a.store.applyGrantWildcardDelete(saID)
-	return nil
-}
-
-// ApplyAuthEnable flips the sticky auth_enabled bit. Idempotent.
-// Payload has no fields; presence in the raft log is the signal.
-func (a *Applier) ApplyAuthEnable(_ []byte) error {
-	a.store.applyAuthEnable()
 	return nil
 }

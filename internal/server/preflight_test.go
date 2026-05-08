@@ -20,7 +20,6 @@ func TestRunSystemPreflight_HappyPath(t *testing.T) {
 	err = RunSystemPreflight(PreflightConfig{
 		DataDir:  dir,
 		HTTPAddr: addr,
-		NoAuth:   false,
 	})
 	assert.NoError(t, err)
 }

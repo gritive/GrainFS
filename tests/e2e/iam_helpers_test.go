@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +23,125 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 )
+
+// makeSharedEncryptionKeyFile writes a 32-byte raw key to a temp file and
+// returns the path. All cluster nodes must pass --encryption-key-file=<path>
+// pointing at the same file so their shardEncryptors agree — IAM secret_key
+// wrap/unwrap must round-trip across the raft FSM on every node.
+func makeSharedEncryptionKeyFile(t testing.TB) string {
+	t.Helper()
+	f, err := os.CreateTemp("", "grainfs-e2e-enckey-*")
+	require.NoError(t, err)
+	var key [32]byte
+	_, err = rand.Read(key[:])
+	require.NoError(t, err)
+	_, err = f.Write(key[:])
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	t.Cleanup(func() { _ = os.Remove(f.Name()) })
+	return f.Name()
+}
+
+// bootstrapAdminViaUDS performs the post-serve admin SA bootstrap via the
+// admin UDS. Returns the access_key/secret_key pair for use in subsequent
+// S3 sigv4 requests. Replaces the legacy --access-key/--secret-key flag
+// pattern. Caller must have started `grainfs serve` and waited for the
+// admin socket to exist at <dataDir>/admin.sock.
+func bootstrapAdminViaUDS(t testing.TB, dataDir string) (accessKey, secretKey string) {
+	t.Helper()
+	sock := filepath.Join(dataDir, "admin.sock")
+
+	// Wait up to 10s for socket to appear (cluster bootstrap may need time).
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("admin socket %s did not appear within 10s", sock)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	client := iamUDSClient(sock)
+	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
+	req, err := http.NewRequestWithContext(context.Background(), "POST",
+		"http://unix/v1/iam/sa", body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equalf(t, http.StatusOK, resp.StatusCode, "bootstrap via %s", sock)
+
+	var out struct {
+		AccessKey string `json:"access_key"`
+		SecretKey string `json:"secret_key"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	require.NotEmpty(t, out.AccessKey)
+	require.NotEmpty(t, out.SecretKey)
+	return out.AccessKey, out.SecretKey
+}
+
+// bootstrapAdminViaUDSAny tries each candidate dataDir (one per cluster node)
+// in turn. The first call to /v1/iam/sa on a fresh cluster only succeeds on
+// the leader; followers may return propose errors. Cycles until one node
+// returns 200 or the timeout expires.
+func bootstrapAdminViaUDSAny(t testing.TB, dataDirs []string, timeout time.Duration) (accessKey, secretKey string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		for _, dir := range dataDirs {
+			sock := filepath.Join(dir, "admin.sock")
+			if _, err := os.Stat(sock); err != nil {
+				lastErr = err
+				continue
+			}
+			ak, sk, err := tryBootstrapAdminViaUDS(sock)
+			if err == nil {
+				return ak, sk
+			}
+			lastErr = err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("bootstrapAdminViaUDSAny: no node succeeded within %v: %v", timeout, lastErr)
+	return "", ""
+}
+
+func tryBootstrapAdminViaUDS(sock string) (string, string, error) {
+	client := iamUDSClient(sock)
+	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://unix/v1/iam/sa", body)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		buf, _ := io.ReadAll(resp.Body)
+		return "", "", fmt.Errorf("bootstrap %s -> %d: %s", sock, resp.StatusCode, string(buf))
+	}
+	var out struct {
+		AccessKey string `json:"access_key"`
+		SecretKey string `json:"secret_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", err
+	}
+	if out.AccessKey == "" || out.SecretKey == "" {
+		return "", "", fmt.Errorf("bootstrap %s: empty creds in response", sock)
+	}
+	return out.AccessKey, out.SecretKey, nil
+}
 
 // iamSAResult is the deserialized response from POST /v1/iam/sa.
 type iamSAResult struct {
@@ -215,20 +333,11 @@ type iamTestServer struct {
 // without surprise.
 func (s iamTestServer) Stop() {}
 
-// startIAMTestServer launches a single-node grainfs binary, bootstraps a
-// unique (per-test) Admin SA via --access-key/--secret-key, and returns a
-// handle the IAM e2e tests can use to drive both the S3 plane and the
-// admin UDS. Per-test bootstrap creds avoid collisions when tests run in
-// parallel against separate data dirs.
+// startIAMTestServer launches a single-node grainfs binary, bootstraps an
+// Admin SA via the admin UDS POST /v1/iam/sa, and returns a handle the IAM
+// e2e tests can use to drive both the S3 plane and the admin UDS.
 func startIAMTestServer(t *testing.T) iamTestServer {
 	t.Helper()
-
-	// 6-byte hex suffix → 12 hex chars; plenty of entropy for parallel runs.
-	var nonce [6]byte
-	_, _ = rand.Read(nonce[:])
-	tag := hex.EncodeToString(nonce[:])
-	bootAK := "iamtest" + tag
-	bootSK := "iamtest" + tag + "-secret"
 
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-*")
 	require.NoError(t, err, "mkdtemp")
@@ -244,8 +353,6 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--dedup=false",
-		"--access-key", bootAK,
-		"--secret-key", bootSK,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -254,6 +361,8 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 
 	s3URL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
+
+	bootAK, bootSK := bootstrapAdminViaUDS(t, dir)
 	cli := s3ClientFor(s3URL, bootAK, bootSK)
 	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
 
@@ -269,8 +378,8 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 
 // iamTestServerHandle is a server with explicit lifecycle control. Unlike
 // iamTestServer, the data dir + bootstrap creds + ports persist across
-// Stop()/Start() cycles, so cluster-restart scenarios (sticky bits, IAM
-// state durability) can be exercised in-process.
+// Stop()/Start() cycles, so IAM state durability scenarios across restarts
+// can be exercised in-process.
 type iamTestServerHandle struct {
 	DataDir     string
 	S3URL       string
@@ -283,9 +392,9 @@ type iamTestServerHandle struct {
 	cmd         *exec.Cmd
 	cli         *s3.Client
 	// firstStart tracks whether we've spawned the binary at least once.
-	// First Start passes --access-key/--secret-key (bootstraps IAM).
-	// Subsequent Start calls omit them — the persisted IAM store should
-	// self-rehydrate.
+	// First Start bootstraps an admin SA via UDS; subsequent Start calls
+	// reuse the persisted creds (the IAM store rehydrates from snapshot
+	// + raft replay).
 	firstStart bool
 }
 
@@ -295,24 +404,16 @@ type iamTestServerHandle struct {
 func startIAMTestServerWithRestart(t *testing.T) *iamTestServerHandle {
 	t.Helper()
 
-	var nonce [6]byte
-	_, _ = rand.Read(nonce[:])
-	tag := hex.EncodeToString(nonce[:])
-	bootAK := "iamtest" + tag
-	bootSK := "iamtest" + tag + "-secret"
-
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-restart-*")
 	require.NoError(t, err, "mkdtemp")
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	h := &iamTestServerHandle{
-		DataDir:     dir,
-		AdminSock:   filepath.Join(dir, "admin.sock"),
-		BootstrapAK: bootAK,
-		BootstrapSK: bootSK,
-		s3Port:      freePort(),
-		nfsPort:     freePort(),
-		nbdPort:     freePort(),
+		DataDir:   dir,
+		AdminSock: filepath.Join(dir, "admin.sock"),
+		s3Port:    freePort(),
+		nfsPort:   freePort(),
+		nbdPort:   freePort(),
 	}
 	h.S3URL = fmt.Sprintf("http://127.0.0.1:%d", h.s3Port)
 	t.Cleanup(func() {
@@ -327,9 +428,8 @@ func startIAMTestServerWithRestart(t *testing.T) *iamTestServerHandle {
 
 // Start (re)spawns the server bound to the persisted data dir + ports and
 // waits until the IAM verifier accepts the bootstrap creds. On the first
-// call --access-key/--secret-key are supplied; subsequent calls omit them
-// (the bootstrap shim no-ops on a non-empty store, so the persisted state
-// must rehydrate the bootstrap creds via snapshot/raft replay).
+// call the admin SA is bootstrapped via UDS; subsequent calls reuse the
+// persisted creds (snapshot/raft replay rehydrates the IAM store).
 func (h *iamTestServerHandle) Start(t *testing.T) {
 	t.Helper()
 
@@ -343,12 +443,6 @@ func (h *iamTestServerHandle) Start(t *testing.T) {
 		"--lifecycle-interval", "0",
 		"--dedup=false",
 	}
-	if !h.firstStart {
-		args = append(args,
-			"--access-key", h.BootstrapAK,
-			"--secret-key", h.BootstrapSK,
-		)
-	}
 
 	cmd := exec.Command(getBinary(), args...)
 	cmd.Stdout = os.Stdout
@@ -357,6 +451,13 @@ func (h *iamTestServerHandle) Start(t *testing.T) {
 	h.cmd = cmd
 
 	waitForPort(t, h.s3Port, 30*time.Second)
+
+	if !h.firstStart {
+		ak, sk := bootstrapAdminViaUDS(t, h.DataDir)
+		h.BootstrapAK = ak
+		h.BootstrapSK = sk
+	}
+
 	cli := s3ClientFor(h.S3URL, h.BootstrapAK, h.BootstrapSK)
 	h.cli = cli
 	require.NoError(t, waitForIAMReady(cli, 30*time.Second))

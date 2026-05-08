@@ -47,9 +47,10 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, func()) {
 	require.NoError(t, cmd.Start())
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 5*time.Second)
+	waitForPort(t, port, 30*time.Second)
 
-	client := newS3Client(endpoint)
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	client := s3ClientFor(endpoint, ak, sk)
 
 	cleanup := func() {
 		cmd.Process.Kill()

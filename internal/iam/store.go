@@ -9,11 +9,10 @@ import (
 // iamState is the immutable in-memory snapshot of all IAM state. Replaced
 // atomically on every mutation; readers only ever see fully-formed state.
 type iamState struct {
-	sas         map[string]*ServiceAccount // sa_id → SA
-	keysByAK    map[string]*AccessKey      // access_key → AccessKey (plaintext SecretKey populated)
-	grants      map[string]map[string]Role // sa_id → bucket → role
-	wildcards   map[string]Role            // sa_id → role (default SA only)
-	authEnabled bool                       // sticky once true
+	sas       map[string]*ServiceAccount // sa_id → SA
+	keysByAK  map[string]*AccessKey      // access_key → AccessKey (plaintext SecretKey populated)
+	grants    map[string]map[string]Role // sa_id → bucket → role
+	wildcards map[string]Role            // sa_id → role (default SA only)
 }
 
 func newEmptyState() *iamState {
@@ -93,12 +92,17 @@ func (s *Store) LookupSA(saID string) (*ServiceAccount, bool) {
 	return sa, ok
 }
 
-// AuthEnabled reports the sticky auth_enabled bit.
-func (s *Store) AuthEnabled() bool { return s.snapshot().authEnabled }
-
-// IsEmpty returns true when no SAs are registered. Used by bootstrap shim
-// to decide whether to propose the default SA on flag presence.
+// IsEmpty returns true when no SAs are registered. Used by HandleSACreate
+// to decide whether to dispatch IAMInitFirstSA (composite) or the regular
+// SACreate+KeyCreate path.
 func (s *Store) IsEmpty() bool { return len(s.snapshot().sas) == 0 }
+
+// AuthEnabled is a compatibility shim: v0.0.110.0+ removed the sticky
+// `auth_enabled` bit and made authz always-on, but the s3auth.IAMStore
+// interface (PR #250) still declares this method. Returning true keeps
+// PR #250's RequestAuthorizer.Decide layer evaluation enabled
+// unconditionally, which matches the "always-on" semantics.
+func (s *Store) AuthEnabled() bool { return true }
 
 // Reset wipes all in-memory state to a fresh empty Store. Called by the
 // MetaFSM raft Restore path to ensure snapshot install replaces (not
@@ -114,11 +118,10 @@ func (s *Store) Reset() {
 func (s *Store) cow() *iamState {
 	old := s.snapshot()
 	ns := &iamState{
-		sas:         copySAMap(old.sas),
-		keysByAK:    copyKeyMap(old.keysByAK),
-		grants:      copyGrantMap(old.grants),
-		wildcards:   copyRoleMap(old.wildcards),
-		authEnabled: old.authEnabled,
+		sas:       copySAMap(old.sas),
+		keysByAK:  copyKeyMap(old.keysByAK),
+		grants:    copyGrantMap(old.grants),
+		wildcards: copyRoleMap(old.wildcards),
 	}
 	return ns
 }
@@ -212,14 +215,6 @@ func (s *Store) applyGrantWildcardDelete(saID string) {
 	defer s.mu.Unlock()
 	ns := s.cow()
 	delete(ns.wildcards, saID)
-	s.commit(ns)
-}
-
-func (s *Store) applyAuthEnable() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ns := s.cow()
-	ns.authEnabled = true
 	s.commit(ns)
 }
 

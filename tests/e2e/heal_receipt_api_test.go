@@ -49,11 +49,8 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
-	const (
-		clusterKey = "E2E-RECEIPT-CLUSTER-KSJGH45"
-		accessKey  = "e2e-ak"
-		secretKey  = "e2e-sk-receipt-api"
-	)
+	const clusterKey = "E2E-RECEIPT-CLUSTER-KSJGH45"
+	var accessKey, secretKey string
 
 	// Allocate a single batch of ports up front. freePort returns a port the
 	// OS just closed — reusing the name `sock` avoids two nodes racing for
@@ -85,6 +82,7 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	// ReceiptIDs used across the test — literal ids make log output readable.
 	const (
@@ -115,8 +113,7 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			"--heal-receipt-window=1",
 			"--heal-receipt-gossip-interval=1s",
 			"--nfs4-port", "0",
@@ -124,7 +121,6 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -146,6 +142,15 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 	// Give the gossip loop (1s interval) a few ticks so node B learns which
 	// peer holds which receipt id.
 	time.Sleep(4 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
+
+	// Wait until each node's local IAM verifier accepts the bootstrap key.
+	// The propose returns once the leader applied; followers apply via raft
+	// replication, which is fast but not synchronous with the response.
+	for i := 0; i < 3; i++ {
+		iamWaitKeyReady(t, httpURL(i), accessKey, secretKey, 15*time.Second)
+	}
 
 	// DisableURIPathEscaping matches what the S3 client does — the server's
 	// verifier builds its canonical URI from r.URL.Path unchanged, so any

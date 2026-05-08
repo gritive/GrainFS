@@ -49,7 +49,8 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 
 	waitForPort(t, upPort, 30*time.Second)
 	upEndpoint := fmt.Sprintf("http://127.0.0.1:%d", upPort)
-	upClient := newS3Client(upEndpoint)
+	upAK, upSK := bootstrapAdminViaUDS(t, upDir)
+	upClient := s3ClientFor(upEndpoint, upAK, upSK)
 
 	// Put an object in the upstream
 	_, err = upClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("shared")})
@@ -74,13 +75,11 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--upstream", upEndpoint,
-		"--upstream-access-key", "test",
-		"--upstream-secret-key", "test",
+		"--upstream-access-key", upAK,
+		"--upstream-secret-key", upSK,
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	localCmd.Stdout = os.Stdout
 	localCmd.Stderr = os.Stderr
@@ -88,7 +87,8 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 	defer terminateProcess(localCmd)
 
 	waitForPort(t, localPort, 30*time.Second)
-	localClient := newS3Client(fmt.Sprintf("http://127.0.0.1:%d", localPort))
+	localAK, localSK := bootstrapAdminViaUDS(t, localDir)
+	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
 
 	// Bucket must exist on local (pull-through creates it if needed)
 	_, err = localClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("shared")})
@@ -148,7 +148,8 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 
 	waitForPort(t, upPort, 30*time.Second)
 	upEndpoint := fmt.Sprintf("http://127.0.0.1:%d", upPort)
-	upClient := newS3Client(upEndpoint)
+	upAK, upSK := bootstrapAdminViaUDS(t, upDir)
+	upClient := s3ClientFor(upEndpoint, upAK, upSK)
 
 	_, err = upClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})
 	require.NoError(t, err)
@@ -179,13 +180,11 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--upstream", upEndpoint,
-		"--upstream-access-key", "test",
-		"--upstream-secret-key", "test",
+		"--upstream-access-key", upAK,
+		"--upstream-secret-key", upSK,
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	localCmd.Stdout = os.Stdout
 	localCmd.Stderr = os.Stderr
@@ -193,7 +192,8 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 	defer terminateProcess(localCmd)
 
 	waitForPort(t, localPort, 30*time.Second)
-	localClient := newS3Client(fmt.Sprintf("http://127.0.0.1:%d", localPort))
+	localAK, localSK := bootstrapAdminViaUDS(t, localDir)
+	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
 
 	_, err = localClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})
 	require.NoError(t, err)

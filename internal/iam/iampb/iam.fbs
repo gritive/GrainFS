@@ -66,6 +66,21 @@ table GrantWildcardDeletePayload {
 
 table AuthEnablePayload {
   // no fields — presence in raft log marks the sticky transition.
+  // RESERVED: kept for snapshot v2 backward compat reads only; v3+ writers do not emit.
+}
+
+// InitFirstSAPayload is the composite payload for MetaCmdTypeIAMInitFirstSA.
+// It atomically wraps SA + Key + WildcardGrant blobs so a single FSM Apply
+// commits all three records together. Race guard: handler always sets
+// sa_create.sa_id = DefaultSAID ("sa-default"), so concurrent proposes on
+// an empty cluster collapse to one SA via FSM idempotency.
+//
+// secret_key plaintext is NEVER in this payload — handler wraps via
+// encrypt.Encryptor before encoding key_create_blob.
+table InitFirstSAPayload {
+  sa_create_blob:      [ubyte] (required); // SACreatePayload bytes
+  key_create_blob:     [ubyte] (required); // KeyCreatePayload bytes (secret_key_enc only)
+  grant_wildcard_blob: [ubyte] (required); // GrantWildcardPutPayload bytes
 }
 
 root_type SACreatePayload;

@@ -55,6 +55,6 @@ func (m *MetaProposer) ProposeGrantWildcardDelete(ctx context.Context, saID stri
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMGrantWildcardDelete, buildGrantWildcardDeletePayload(saID))
 }
 
-func (m *MetaProposer) ProposeAuthEnable(ctx context.Context) error {
-	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMAuthEnable, buildAuthEnablePayload())
+func (m *MetaProposer) ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMInitFirstSA, buildInitFirstSAPayload(sa, k, g))
 }

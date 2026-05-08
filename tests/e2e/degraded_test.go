@@ -33,11 +33,10 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 
 	const (
 		clusterKey = "E2E-DEGRADED-KEY"
-		accessKey  = "deg-ak"
-		secretKey  = "deg-sk"
 		bucketName = "degraded-test"
 		numNodes   = 5
 	)
+	var accessKey, secretKey string
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
@@ -67,6 +66,7 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	startNode := func(i int) *exec.Cmd {
 		cmd := exec.Command(binary, "serve",
@@ -76,15 +76,13 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 			"--degraded-check-interval", "1s",
-			"--no-encryption",
 		)
 		if testing.Verbose() {
 			cmd.Stdout = os.Stdout
@@ -114,6 +112,8 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	}
 	waitForPortsParallel(t, httpPorts, 60*time.Second)
 	time.Sleep(4 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()

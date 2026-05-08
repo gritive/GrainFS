@@ -58,7 +58,8 @@ func startECServer(t *testing.T) (*s3.Client, string, func()) {
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
 
-	client := newS3Client(endpoint)
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	client := s3ClientFor(endpoint, ak, sk)
 
 	cleanup := func() {
 		terminateProcess(cmd)
@@ -97,7 +98,6 @@ func startECServerWithScrub(t *testing.T, scrubInterval time.Duration) (*s3.Clie
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--no-encryption",
 		"--scrub-interval", scrubInterval.String(),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
@@ -109,9 +109,10 @@ func startECServerWithScrub(t *testing.T, scrubInterval time.Duration) (*s3.Clie
 	require.NoError(t, cmd.Start())
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 5*time.Second)
+	waitForPort(t, port, 30*time.Second)
 
-	client := newS3Client(baseURL)
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	client := s3ClientFor(baseURL, ak, sk)
 
 	cleanup := func() {
 		cmd.Process.Kill()

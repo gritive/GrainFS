@@ -23,7 +23,6 @@ const (
 type PreflightConfig struct {
 	DataDir  string // must be writable
 	HTTPAddr string // e.g. ":9000" — checked for port conflicts
-	NoAuth   bool   // true when neither --access-key nor --secret-key is set
 }
 
 // RunSystemPreflight runs boot-time environment checks and returns an error
@@ -34,7 +33,6 @@ type PreflightConfig struct {
 //  1. Data directory: exists and is writable.
 //  2. Disk space: at least 512 MiB free; warns below 2 GiB.
 //  3. HTTP port: not already bound by another process.
-//  4. Auth: logs a warning when authentication is disabled.
 func RunSystemPreflight(cfg PreflightConfig) error {
 	if err := checkDataDir(cfg.DataDir); err != nil {
 		return err
@@ -45,7 +43,6 @@ func RunSystemPreflight(cfg PreflightConfig) error {
 	if err := checkPortFree(cfg.HTTPAddr); err != nil {
 		return err
 	}
-	checkNoAuth(cfg.NoAuth)
 	return nil
 }
 
@@ -119,15 +116,6 @@ func checkPortFree(addr string) error {
 	}
 	_ = l.Close()
 	return nil
-}
-
-// checkNoAuth logs a prominent warning when auth is disabled.
-func checkNoAuth(noAuth bool) {
-	if noAuth {
-		log.Warn().
-			Msg("preflight: authentication is DISABLED — any client can read and write all data; " +
-				"set --access-key and --secret-key to enable S3 authentication")
-	}
 }
 
 func fmtBytes(b uint64) string {

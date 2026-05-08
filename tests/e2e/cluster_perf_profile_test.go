@@ -67,13 +67,20 @@ type workloadResult struct {
 const (
 	perfNumNodes         = 5
 	perfClusterKey       = "E2E-PERF-KEY"
-	perfAccessKey        = "perf-ak"
-	perfSecretKey        = "perf-sk"
 	perfMeasureSec       = 30 // 30s 메트릭 샘플 + 동시 30s CPU 프로파일
 	perfWorkloadTotalSec = 60 // 워크로드 총 지속 (CPU 30s는 그 안의 중간)
 	perfWorkloadConc     = 32
 	perfObjectSize       = 4 * 1024 * 1024 // 4 MiB
 	perfPrewarmObjects   = 16
+)
+
+// perf{Access,Secret}Key are populated by bootstrapAdminViaUDSAny inside
+// each scenario's runPerfScenario. They live at package scope so the
+// per-scenario helpers (waitForLeaderAndCreateBucket, startWorkload) can
+// continue to read them without threading creds through every signature.
+var (
+	perfAccessKey string
+	perfSecretKey string
 )
 
 // TestE2E_ClusterPerf_All 은 4개 시나리오를 차례로 실행하고 통합 리포트를 생성한다.
@@ -174,6 +181,7 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 		require.NoError(t, err)
 		dataDirs[i] = d
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	procs := make([]*exec.Cmd, perfNumNodes)
 	cleanup := func() {
@@ -198,15 +206,13 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", perfClusterKey,
-			"--access-key", perfAccessKey,
-			"--secret-key", perfSecretKey,
+			"--encryption-key-file", encKeyFile,
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
 			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		// C2 P0b: forward GRAINFS_PERF_SHARED_BADGER=1 → --shared-badger
 		if os.Getenv("GRAINFS_PERF_SHARED_BADGER") == "1" {
@@ -228,6 +234,9 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 	}
 	waitForPortsParallel(t, httpPorts, 180*time.Second)
 	waitForPortsParallel(t, pprofPorts, 30*time.Second)
+
+	// Bootstrap admin SA via the leader's UDS once quorum exists.
+	perfAccessKey, perfSecretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	// 리더 발견 + bucket 준비
 	bucket := fmt.Sprintf("perf-%s", strings.ToLower(strings.ReplaceAll(sc.name, "_", "-")))

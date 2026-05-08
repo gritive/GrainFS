@@ -42,8 +42,8 @@ func inProcessPropose(applier *iam.Applier) iam.ProposeFunc {
 			return applier.ApplyGrantDelete(payload)
 		case clusterpb.MetaCmdTypeIAMGrantWildcardPut:
 			return applier.ApplyGrantWildcardPut(payload)
-		case clusterpb.MetaCmdTypeIAMAuthEnable:
-			return applier.ApplyAuthEnable(payload)
+		case clusterpb.MetaCmdTypeIAMInitFirstSA:
+			return applier.ApplyInitFirstSA(payload)
 		default:
 			return fmt.Errorf("inProcessPropose: unhandled cmd type %v", t)
 		}

@@ -248,6 +248,7 @@ enum MetaCmdType : uint8 {
   IAMAuthEnable         = 28, // IAM: sticky auth_enabled bit transition
   IAMGrantWildcardDelete = 29, // IAM: Wildcard grant remove (admin-only)
   IAMKeyCreateScoped     = 30, // IAM: AccessKey create with bucket_scope restriction
+  IAMInitFirstSA         = 31, // IAM: atomic first-SA bootstrap (SA + Key + WildcardGrant via admin UDS)
 }
 
 table MetaNodeEntry {

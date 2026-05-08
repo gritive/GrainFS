@@ -383,44 +383,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer metaRaft.Close()
 
-	// Bootstrap shim: --access-key/--secret-key flag → default SA + wildcard
-	// + AuthEnable. Runs in a goroutine because IsLeader() is only meaningful
-	// AFTER Start. Polls for leader (with timeout); the elected leader fires
-	// the proposes once, the FSM Applier idempotently de-dupes follower
-	// replays. Multi-node clusters: every node spawns this goroutine, only
-	// the leader's call propagates state — others time out and exit.
-	if cfg.IAMStore != nil && cfg.IAMApplier != nil &&
-		cfg.BootstrapAccessKey != "" && cfg.BootstrapSecretKey != "" &&
-		cfg.Encryptor != nil {
-		go func() {
-			deadline := time.Now().Add(30 * time.Second)
-			ticker := time.NewTicker(200 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				if metaRaft.IsLeader() {
-					proposer := &iam.MetaProposer{Propose: metaRaft.Propose}
-					if err := iam.Bootstrap(ctx, cfg.IAMStore, proposer,
-						cfg.BootstrapAccessKey, cfg.BootstrapSecretKey,
-						true, cfg.Encryptor); err != nil {
-						log.Warn().Err(err).Msg("iam bootstrap shim failed")
-					}
-					return
-				}
-				if time.Now().After(deadline) {
-					return
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-			}
-		}()
-	}
-
-	// Build the AdminAPI wired against the same MetaProposer the bootstrap
-	// shim uses. Only when IAM dependencies are wired — same gate as the
-	// bootstrap shim, minus the credential flag check.
+	// Build the AdminAPI wired against the meta-FSM proposer. Only when IAM
+	// dependencies are wired. First-SA bootstrap is performed via admin UDS
+	// POST /v1/iam/sa (see docs/RUNBOOK.md).
 	var iamAdminAPI *iam.AdminAPI
 	var iamProposer *iam.MetaProposer
 	if cfg.IAMStore != nil && cfg.IAMApplier != nil && cfg.Encryptor != nil {

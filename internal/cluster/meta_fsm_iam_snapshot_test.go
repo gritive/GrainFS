@@ -96,9 +96,6 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 	if err := applier.ApplyGrantWildcardPut(buildGrantWildcardPutPayloadForTest("sa-test", iam.RoleAdmin, now)); err != nil {
 		t.Fatalf("ApplyGrantWildcardPut: %v", err)
 	}
-	if err := applier.ApplyAuthEnable(nil); err != nil {
-		t.Fatalf("ApplyAuthEnable: %v", err)
-	}
 
 	f := NewMetaFSM()
 	f.SetIAM(store, applier)
@@ -119,9 +116,6 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 
 	if _, ok := store2.LookupSA("sa-test"); !ok {
 		t.Fatal("SA lost across snapshot round-trip")
-	}
-	if !store2.AuthEnabled() {
-		t.Fatal("auth_enabled bit lost across snapshot round-trip")
 	}
 	if got := store2.LookupGrant("sa-test", "any-bucket"); got != iam.RoleAdmin {
 		t.Fatalf("wildcard grant lost: got %v, want RoleAdmin", got)
@@ -158,9 +152,6 @@ func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
 	if !store2.IsEmpty() {
 		t.Fatal("empty IAM snapshot caused dst to gain SAs")
 	}
-	if store2.AuthEnabled() {
-		t.Fatal("empty IAM snapshot flipped auth_enabled")
-	}
 }
 
 // TestMetaFSM_Snapshot_LegacySnapshot_Restores_NoIAM confirms that snapshots
@@ -191,8 +182,5 @@ func TestMetaFSM_Snapshot_LegacySnapshot_Restores_NoIAM(t *testing.T) {
 	}
 	if !store2.IsEmpty() {
 		t.Fatal("legacy snapshot somehow injected SAs")
-	}
-	if store2.AuthEnabled() {
-		t.Fatal("legacy snapshot somehow flipped auth_enabled")
 	}
 }

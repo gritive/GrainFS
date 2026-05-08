@@ -46,7 +46,8 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 	waitForPort(t, srcPort, 30*time.Second)
 
 	srcEndpoint := fmt.Sprintf("http://127.0.0.1:%d", srcPort)
-	srcClient := newS3Client(srcEndpoint)
+	srcAK, srcSK := bootstrapAdminViaUDS(t, srcDir)
+	srcClient := s3ClientFor(srcEndpoint, srcAK, srcSK)
 
 	_, err = srcClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("data")})
 	require.NoError(t, err)
@@ -92,16 +93,17 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 	waitForPort(t, dstPort, 30*time.Second)
 
 	dstEndpoint := fmt.Sprintf("http://127.0.0.1:%d", dstPort)
-	dstClient := newS3Client(dstEndpoint)
+	dstAK, dstSK := bootstrapAdminViaUDS(t, dstDir)
+	dstClient := s3ClientFor(dstEndpoint, dstAK, dstSK)
 
 	// --- Run migration injector ---
 	injectCmd := exec.Command(binary, "migrate", "inject",
 		"--src", srcEndpoint,
+		"--src-access-key", srcAK,
+		"--src-secret-key", srcSK,
 		"--dst", dstEndpoint,
-		"--src-access-key", "test",
-		"--src-secret-key", "test",
-		"--dst-access-key", "test",
-		"--dst-secret-key", "test",
+		"--dst-access-key", dstAK,
+		"--dst-secret-key", dstSK,
 	)
 	injectCmd.Stdout = os.Stdout
 	injectCmd.Stderr = os.Stderr

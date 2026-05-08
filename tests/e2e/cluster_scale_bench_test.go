@@ -31,10 +31,9 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 
 	const (
 		clusterKey = "E2E-SCALE-BENCH-KEY"
-		accessKey  = "scale-ak"
-		secretKey  = "scale-sk"
 		numNodes   = 5
 	)
+	var accessKey, secretKey string
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
@@ -70,6 +69,7 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	startNode := func(i int) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/scale-n%d-node-%d-stderr.log", n, i))
@@ -81,15 +81,13 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
 		cmd.Stderr = stderrFile
@@ -122,6 +120,8 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	}
 	waitForPortsParallel(t, httpPorts, 180*time.Second)
 	waitForPortsParallel(t, pprofPorts, 30*time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()

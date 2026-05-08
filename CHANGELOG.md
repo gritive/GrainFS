@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.0.112.0] - 2026-05-08 — IAM-only auth, drop --access-key flag
+
+### Removed (BREAKING)
+
+- `--access-key` / `--secret-key` flags from `grainfs serve`. Bootstrap now goes
+  exclusively through the admin UDS:
+  `grainfs iam sa create admin --endpoint <data>/admin.sock`.
+- Sticky `auth_enabled` bit (`Store.AuthEnabled()`, `ApplyAuthEnable`,
+  `ProposeAuthEnable`, `MetaCmdTypeIAMAuthEnable` dispatcher case). The
+  authz middleware always evaluates the IAM layer; no anonymous-mode
+  escape hatch.
+- Snapshot v1 + v2 readers — v3 only. `auth_enabled` byte gone from the
+  snapshot header.
+- E2E `--access-key`/`--secret-key` flag pattern across 14+ test files;
+  replaced by the new `bootstrapAdminViaUDS()` helper.
+- `TestIAM_E2E_ET5_StickyAuth_ClusterRestart` — the sticky bit it exercised
+  no longer exists.
+
+### Added
+
+- `IAMInitFirstSA` MetaCmdType (31) — composite payload commits
+  `SA + AccessKey + WildcardGrant` atomically on the first admin-UDS
+  bootstrap. Race guard via fixed `DefaultSAID` + completeness predicate
+  `isFirstSACommitted` (4-point: SA + active key + wildcard); a partial
+  Apply re-fires on retry instead of leaving the cluster permanently
+  half-bootstrapped. Concurrent admin-UDS callers receive `409 Conflict`
+  if their access key didn't land.
+- `bootstrapAdminViaUDS(t, dataDir)` test helper plus the
+  `bootstrapAdminViaUDSAny(...)` cluster variant + shared encryption-key
+  helper used by multi-node e2e suites.
+- e2e bootstrap acceptance tests F1–F4 (`tests/e2e/iam_bootstrap_test.go`):
+  empty-store wildcard issuance, second-SA no-grant, pre-bootstrap 401,
+  post-bootstrap ListBuckets/PutObject/GetObject 200.
+- ADR 0008 `docs/adr/0008-drop-access-key-flag.md` capturing the design
+  decisions surfaced in `/grill-me` + `/plan-eng-review`.
+- RUNBOOK section "Admin UDS — Bootstrap & Permissions" documenting
+  socket perms (chmod 0660, `--admin-group` chown), the bootstrap CLI
+  flow, and the 409 race outcome.
+
+### Changed
+
+- `HandleSACreate` dispatches by store state: empty → `ProposeInitFirstSA`
+  composite + grants response; non-empty → existing `SACreate` + `KeyCreate`
+  with no auto-grant.
+- `ApplyInitFirstSA` decodes the composite via the FlatBuffers zero-copy
+  `*BlobBytes()` accessors (drops the per-blob `readByteVector` alloc churn).
+- README Quick Start, CONTEXT.md, and CLAUDE.md Persona Test now describe
+  the admin-UDS bootstrap flow instead of the removed flags.
+
+### Migration
+
+Pre-1.0 product, no migration support. For existing clusters:
+
+- Bootstrapped previously via `--access-key`: state is already in IAM;
+  upgrade is effectively a no-op (sticky bit was true, "always on" now
+  means the same thing).
+- Running in anonymous mode (no SA, sticky=false): all S3 traffic 401
+  after upgrade. Run
+  `grainfs iam sa create admin --endpoint <data>/admin.sock` to
+  bootstrap. See `docs/adr/0008-drop-access-key-flag.md` for the full
+  rationale.
+
+### Note on master drift
+
+This PR was rebased twice over master while in flight: PR #250
+(`v0.0.107.0` RequestAuthorizer), PR #251 (`v0.0.108.0` raft v2 M1),
+PR #252 (raft v2 M2 prep), PR #253 (`v0.0.110.0` standalone E2E
+test flag fixes), and PR #254 (`v0.0.111.0` MutationBroker) all
+landed first. PR #253 is **superseded by this PR**: its `--access-key`
+re-additions are removed here in favor of the new `bootstrapAdminViaUDS()`
+helper. PR #250's `RequestAuthorizer.Decide` architecture is preserved;
+the old sticky-bit gates are replaced by a no-op `Store.AuthEnabled() bool { return true }`
+compat shim.
+
 ## [0.0.111.0] - 2026-05-08 — MutationBroker + multipart/copy emit fixes
 
 ### Added

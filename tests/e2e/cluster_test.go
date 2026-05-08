@@ -32,11 +32,16 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 
 	binary := getBinary()
 
+	// Shared encryption key — restart on the same dataDir requires the
+	// IAM secrets to round-trip across processes.
+	encKeyFile := makeSharedEncryptionKeyFile(t)
+
 	// Step 1: Start in no-peers mode, create some data
 	port1 := freePort()
 	cmd1 := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port1),
+		"--encryption-key-file", encKeyFile,
 		"--snapshot-interval", "0", // disable auto-snapshots for determinism
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
@@ -50,8 +55,9 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	require.NoError(t, cmd1.Start())
 
 	endpoint1 := fmt.Sprintf("http://127.0.0.1:%d", port1)
-	waitForPort(t, port1, 10*time.Second)
-	client1 := newS3Client(endpoint1)
+	waitForPort(t, port1, 30*time.Second)
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	client1 := s3ClientFor(endpoint1, ak, sk)
 
 	ctx := context.Background()
 
@@ -87,6 +93,7 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	cmd2 := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port2),
+		"--encryption-key-file", encKeyFile,
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
@@ -103,8 +110,8 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	}()
 
 	endpoint2 := fmt.Sprintf("http://127.0.0.1:%d", port2)
-	waitForPort(t, port2, 10*time.Second)
-	client2 := newS3Client(endpoint2)
+	waitForPort(t, port2, 30*time.Second)
+	client2 := s3ClientFor(endpoint2, ak, sk)
 
 	var listOut2 *s3.ListObjectsV2Output
 	require.Eventually(t, func() bool {
@@ -172,8 +179,9 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	}()
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 5*time.Second)
-	client := newS3Client(endpoint)
+	waitForPort(t, port, 30*time.Second)
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	client := s3ClientFor(endpoint, ak, sk)
 
 	ctx := context.Background()
 

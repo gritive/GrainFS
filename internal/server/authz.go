@@ -64,6 +64,10 @@ func s3ActionEnum(method, path string, hasKey, hasPolicyQuery bool) s3auth.S3Act
 // policy, object ACL) are owned by `s3auth.RequestAuthorizer.Decide`; this
 // middleware invokes the authorizer at PhasePreLoad and handlers re-invoke at
 // PhasePostLoad after loading the target object's ACL.
+//
+// Production wires IAM unconditionally (v0.0.110.0+ — sticky `auth_enabled`
+// bit removed). The iamStore!=nil guard remains so unit tests targeting
+// non-auth concerns can still drive the server with no IAM wiring.
 func (s *Server) authzMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		path := string(c.URI().Path())
@@ -87,10 +91,12 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
-		// Layer 0: AccessKey bucket scope (only when auth is enabled).
-		// Bucket-scoped keys must have this bucket in their scope; nil/empty
-		// scope means unrestricted (legacy keys, backward compat).
-		if s.iamStore != nil && s.iamStore.AuthEnabled() {
+		// Layer 0: AccessKey bucket scope (always-on; previously gated on
+		// the now-removed sticky `auth_enabled` bit). Bucket-scoped keys
+		// must have this bucket in their scope; nil/empty scope means
+		// unrestricted (legacy keys, backward compat). The iamStore!=nil
+		// guard preserves test setups that don't wire IAM at all.
+		if s.iamStore != nil {
 			scope := iam.ScopeFromContext(ctx)
 			if !iam.ScopeAllows(scope, bucket) {
 				saID := iam.PrincipalFromContext(ctx)
@@ -101,7 +107,8 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			}
 		}
 
-		// Layers 1-3: IAM grant + bucket policy + (post-load ACL).
+		// Layers 1-3: IAM grant + bucket policy + (post-load ACL) via
+		// s3auth.RequestAuthorizer (PR #250).
 		in := s3auth.PermCheckInput{
 			Principal: s3auth.Principal{AccessKey: accessKey},
 			Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},

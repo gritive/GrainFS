@@ -38,11 +38,10 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 
 	const (
 		clusterKey = "E2E-CLUSTER-EC-KEY-3P2"
-		accessKey  = "ec-ak"
-		secretKey  = "ec-sk"
 		bucketName = "ec-test"
 		numNodes   = 5
 	)
+	var accessKey, secretKey string
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
@@ -76,6 +75,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	startNode := func(i int) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/ec5-node-%d-stderr.log", i))
@@ -87,15 +87,13 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
 		cmd.Stderr = stderrFile
@@ -127,6 +125,9 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 90*time.Second)
+
+	// Bootstrap admin SA via UDS once quorum exists.
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	var client *s3.Client
 	var leaderIdx int
@@ -246,8 +247,6 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	}
 	const (
 		clusterKey = "E2E-EC-3NODE-KEY"
-		accessKey  = "3n-ak"
-		secretKey  = "3n-sk"
 		bucketName = "3n-test"
 		numNodes   = 3
 	)
@@ -256,12 +255,11 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		Nodes:      numNodes,
 		Mode:       ClusterModeStaticPeers,
 		ClusterKey: clusterKey,
-		AccessKey:  accessKey,
-		SecretKey:  secretKey,
 		LogPrefix:  "cluster-ec-3node",
 		DisableNFS: true,
 		DisableNBD: true,
 	})
+	accessKey, secretKey := c.accessKey, c.secretKey
 
 	var client *s3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -395,12 +393,11 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 
 	const (
 		clusterKey = "E2E-EC-TOPO-KEY"
-		accessKey  = "tp-ak"
-		secretKey  = "tp-sk"
 		bucketName = "topo-test"
 		// 6 nodes use auto 4+2; object groups with 5 voters record auto 3+2.
 		numNodes = 6
 	)
+	var accessKey, secretKey string
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
@@ -424,6 +421,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		dataDirs[i] = d
 		t.Cleanup(func() { _ = os.RemoveAll(d) })
 	}
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	// All 6 nodes are configured with the full peer list from the start so the
 	// leader elected among the first 3 nodes already knows about nodes 3,4,5.
@@ -451,14 +449,12 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--raft-addr", raftAddr(i),
 			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
-			"--access-key", accessKey,
-			"--secret-key", secretKey,
+			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--no-encryption",
 		)
 		cmd.Stdout = stderrFile
 		cmd.Stderr = stderrFile
@@ -502,6 +498,9 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	for i, port := range httpPorts {
 		t.Logf("node %d up (http :%d)", i, port)
 	}
+
+	// Bootstrap admin SA via the leader's UDS.
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()

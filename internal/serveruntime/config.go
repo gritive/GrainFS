@@ -44,13 +44,6 @@ type Config struct {
 	IAMStore   *iam.Store
 	IAMApplier *iam.Applier
 
-	// Bootstrap shim: when both fields are non-empty AND IAMStore is
-	// empty AND this node is the cluster leader at startup, the IAM
-	// bootstrap proposes a default SA + wildcard grant + AuthEnable so
-	// the legacy --access-key/--secret-key flag continues to work.
-	BootstrapAccessKey string
-	BootstrapSecretKey string
-
 	// Raft tuning
 	BadgerManagedMode     bool
 	RaftLogGCInterval     time.Duration
