@@ -74,3 +74,10 @@ func TestScopeFromContext_Empty(t *testing.T) {
 		t.Fatalf("empty ctx ScopeFromContext = %v, want nil", got)
 	}
 }
+
+func TestWithPrincipalScope_NilRoundtrip(t *testing.T) {
+	ctx := WithPrincipalScope(context.Background(), nil)
+	if got := ScopeFromContext(ctx); got != nil {
+		t.Fatalf("nil-scope ctx should roundtrip to nil, got %v", got)
+	}
+}
