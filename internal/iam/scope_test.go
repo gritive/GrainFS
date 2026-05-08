@@ -36,17 +36,23 @@ func TestNormalizeScope(t *testing.T) {
 }
 
 func TestScopeAllows(t *testing.T) {
-	if !ScopeAllows(nil, "any") {
-		t.Fatal("nil scope should allow any bucket")
+	tests := []struct {
+		name   string
+		scope  []string
+		bucket string
+		want   bool
+	}{
+		{"nil scope unrestricted", nil, "any", true},
+		{"empty scope unrestricted", []string{}, "any", true},
+		{"in scope", []string{"a", "b"}, "a", true},
+		{"out of scope", []string{"a", "b"}, "c", false},
 	}
-	if !ScopeAllows([]string{}, "any") {
-		t.Fatal("empty scope should allow any bucket")
-	}
-	if !ScopeAllows([]string{"a", "b"}, "a") {
-		t.Fatal("scope contains bucket → should allow")
-	}
-	if ScopeAllows([]string{"a", "b"}, "c") {
-		t.Fatal("scope missing bucket → should deny")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ScopeAllows(tt.scope, tt.bucket); got != tt.want {
+				t.Fatalf("ScopeAllows(%v, %q) = %v, want %v", tt.scope, tt.bucket, got, tt.want)
+			}
+		})
 	}
 }
 

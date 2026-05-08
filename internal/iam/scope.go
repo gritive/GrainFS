@@ -14,7 +14,7 @@ var (
 	ErrScopeSentinel   = errors.New("scope contains reserved sentinel (* or __system__)")
 )
 
-// NormalizeScope returns a sorted, dedupd, validated copy of the input.
+// NormalizeScope returns a sorted, deduplicated, validated copy of the input.
 // nil/empty → nil (unrestricted). Wildcard "*" or SystemBucket "__system__"
 // in the list → ErrScopeSentinel. Empty/whitespace-only entries →
 // ErrScopeEmptyEntry. Otherwise sorted ascending, no duplicates.
