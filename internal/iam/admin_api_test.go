@@ -518,8 +518,8 @@ func TestHandleKeyCreate_Scoped_Happy(t *testing.T) {
 	}
 }
 
-// TestHandleKeyCreate_OverScope_422: SA only has "logs" grant, POST {buckets:["logs","reports"]} → 422.
-func TestHandleKeyCreate_OverScope_422(t *testing.T) {
+// TestHandleKeyCreate_OverScope_400: SA only has "logs" grant, POST {buckets:["logs","reports"]} → 400.
+func TestHandleKeyCreate_OverScope_400(t *testing.T) {
 	store := NewStore()
 	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
 	store.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleWrite})
@@ -530,16 +530,16 @@ func TestHandleKeyCreate_OverScope_422(t *testing.T) {
 	w := httptest.NewRecorder()
 	api.HandleKeyCreate(w, req, "sa-1")
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422, body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "reports") {
 		t.Errorf("body = %q, want mention of 'reports'", w.Body.String())
 	}
 }
 
-// TestHandleKeyCreate_Sentinel_422: sentinel values ["*"] and ["__system__"] → 422.
-func TestHandleKeyCreate_Sentinel_422(t *testing.T) {
+// TestHandleKeyCreate_Sentinel_400: sentinel values ["*"] and ["__system__"] → 400.
+func TestHandleKeyCreate_Sentinel_400(t *testing.T) {
 	store := NewStore()
 	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
 	api := NewAdminAPI(store, newFakeProposer(), newTestEncryptor(t))
@@ -550,8 +550,8 @@ func TestHandleKeyCreate_Sentinel_422(t *testing.T) {
 		w := httptest.NewRecorder()
 		api.HandleKeyCreate(w, req, "sa-1")
 
-		if w.Code != http.StatusUnprocessableEntity {
-			t.Errorf("sentinel=%q: status = %d, want 422, body=%s", sentinel, w.Code, w.Body.String())
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("sentinel=%q: status = %d, want 400, body=%s", sentinel, w.Code, w.Body.String())
 		}
 		if !strings.Contains(w.Body.String(), "sentinel") {
 			t.Errorf("sentinel=%q: body = %q, want 'sentinel' in error", sentinel, w.Body.String())

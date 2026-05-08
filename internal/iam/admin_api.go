@@ -223,12 +223,12 @@ func (a *AdminAPI) HandleKeyCreate(w http.ResponseWriter, r *http.Request, saID 
 
 	scope, err := NormalizeScope(req.Buckets)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	for _, b := range scope {
 		if a.store.LookupGrant(saID, b) == RoleNone {
-			http.Error(w, fmt.Sprintf("scope contains %q but SA has no grant on it", b), http.StatusUnprocessableEntity)
+			http.Error(w, fmt.Sprintf("scope contains %q but SA has no grant on it", b), http.StatusBadRequest)
 			return
 		}
 	}
@@ -249,16 +249,13 @@ func (a *AdminAPI) HandleKeyCreate(w http.ResponseWriter, r *http.Request, saID 
 		ExpiresAt:    req.ExpiresAt,
 		BucketScope:  scope,
 	}
+	propose := a.proposer.ProposeKeyCreate
 	if len(scope) > 0 {
-		if err := a.proposer.ProposeKeyCreateScoped(r.Context(), k); err != nil {
-			http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	} else {
-		if err := a.proposer.ProposeKeyCreate(r.Context(), k); err != nil {
-			http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		propose = a.proposer.ProposeKeyCreateScoped
+	}
+	if err := propose(r.Context(), k); err != nil {
+		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(KeyCreateResponse{
