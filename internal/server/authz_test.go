@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"net/http"
 	"sync"
 	"testing"
@@ -299,4 +300,59 @@ func TestAuthz_Layer0_NilScope_PassToLayer1(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Empty(t, cap.lastReason())
+}
+
+// TestListBuckets_ScopedKey_FiltersToScope verifies that a scoped key can only
+// see buckets within its scope via GET / (ListBuckets). CR1 fix.
+func TestListBuckets_ScopedKey_FiltersToScope(t *testing.T) {
+	h := newIAMTestHelper(t)
+	h.applySACreate(t, "sa-admin")
+	h.applySACreate(t, "sa-alice")
+
+	// Admin: wildcard grant to create all three buckets.
+	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
+	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
+
+	// Alice: grant on bucket "alpha" only, scoped key to ["alpha"].
+	h.applyGrantPut(t, "sa-alice", "alpha", iam.RoleAdmin)
+	h.applyKeyCreateScoped(t, "AK-alice", "sa-alice", "aliceSecret", []string{"alpha"})
+
+	h.applyAuthEnable(t)
+
+	base := setupTestServerWithOptions(t,
+		WithIAMStore(h.store),
+		WithAuth([]s3auth.Credentials{
+			{AccessKey: "AK-admin", SecretKey: "adminSecret"},
+			{AccessKey: "AK-alice", SecretKey: "aliceSecret"},
+		}),
+	)
+
+	// Create buckets alpha, bravo, charlie using admin key.
+	for _, bkt := range []string{"alpha", "bravo", "charlie"} {
+		req, _ := http.NewRequest(http.MethodPut, base+"/"+bkt, nil)
+		req.Host = req.URL.Host
+		s3auth.SignRequest(req, "AK-admin", "adminSecret", "us-east-1")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode, "create bucket %s", bkt)
+	}
+
+	// List buckets using Alice's scoped key — should see only "alpha".
+	req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "AK-alice", "aliceSecret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result listBucketsResult
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&result))
+
+	names := make([]string, 0, len(result.Buckets))
+	for _, b := range result.Buckets {
+		names = append(names, b.Name)
+	}
+	assert.Equal(t, []string{"alpha"}, names, "scoped key must only see buckets in its scope")
 }

@@ -101,10 +101,13 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
+		// Hoist AuthEnabled: computed once, used across all layers below.
+		authEnabled := s.iamStore != nil && s.iamStore.AuthEnabled()
+
 		// Layer 0: AccessKey bucket scope (only when auth is enabled).
 		// scope = key.BucketScope. nil/empty → unrestricted (legacy keys,
 		// backward compat). non-empty → bucket must be a member.
-		if s.iamStore != nil && s.iamStore.AuthEnabled() {
+		if authEnabled {
 			scope := iam.ScopeFromContext(ctx)
 			if !iam.ScopeAllows(scope, bucket) {
 				saID := iam.PrincipalFromContext(ctx)
@@ -116,7 +119,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		}
 
 		// Layer 1: IAM grant (only when auth is enabled).
-		if s.iamStore != nil && s.iamStore.AuthEnabled() {
+		if authEnabled {
 			saID := iam.PrincipalFromContext(ctx)
 			if !iam.CheckAccess(s.iamStore, saID, bucket, action) {
 				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "no_grant")
@@ -147,7 +150,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		}
 
 		// Allow.
-		if s.iamStore != nil && s.iamStore.AuthEnabled() {
+		if authEnabled {
 			s.iamAudit.RecordAllow(ctx, iam.PrincipalFromContext(ctx), bucket, key, action)
 		}
 		c.Next(ctx)

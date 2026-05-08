@@ -106,7 +106,7 @@ func BenchmarkResolveSA_CheckAccess(b *testing.B) {
 		ak := aks[i%N]
 		bk := fmt.Sprintf("bucket-%d", (i%N)%100)
 		start := time.Now()
-		saID, ok := ResolveSA(s, ak)
+		_, saID, ok := ResolveSA(s, ak)
 		if !ok {
 			b.Fatalf("ResolveSA failed for %s", ak)
 		}

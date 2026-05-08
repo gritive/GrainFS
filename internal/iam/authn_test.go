@@ -33,11 +33,11 @@ func TestResolveSA_PopulatesPrincipal(t *testing.T) {
 	s.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
 	s.applyKeyCreate(AccessKey{AccessKey: "AK1", SAID: "sa-1", Status: KeyStatusActive})
 
-	saID, ok := ResolveSA(s, "AK1")
+	_, saID, ok := ResolveSA(s, "AK1")
 	if !ok || saID != "sa-1" {
 		t.Fatalf("ResolveSA = %q/%v, want sa-1/true", saID, ok)
 	}
-	if _, ok := ResolveSA(s, "missing"); ok {
+	if _, _, ok := ResolveSA(s, "missing"); ok {
 		t.Fatal("ResolveSA on missing returned ok=true")
 	}
 }

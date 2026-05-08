@@ -22,16 +22,16 @@ func NewSecretLookup(s *Store) SecretLookup {
 	}
 }
 
-// ResolveSA returns the sa_id for an access_key after Verifier has already
-// accepted the SigV4 signature. Active+unexpired keys only — a key that
-// passes Verify but is revoked between Verify and Resolve returns ok=false
-// (treat as 401 in the auth middleware).
-func ResolveSA(s *Store, accessKey string) (string, bool) {
+// ResolveSA returns (key, sa_id, ok). The *AccessKey is the resolved key
+// record (live snapshot pointer); callers can read BucketScope and other
+// fields without a second LookupKey call. Returns ok=false for revoked or
+// expired keys (callers must fail closed).
+func ResolveSA(s *Store, accessKey string) (*AccessKey, string, bool) {
 	k, ok := s.LookupKey(accessKey)
 	if !ok {
-		return "", false
+		return nil, "", false
 	}
-	return k.SAID, true
+	return k, k.SAID, true
 }
 
 // principalCtxKey is the unexported context key carrying the resolved sa_id.
