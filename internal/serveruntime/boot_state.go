@@ -7,10 +7,17 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // bootState carries the rolling state of Run's boot sequence. Phase functions
@@ -105,6 +112,46 @@ type bootState struct {
 	fsm           *cluster.FSM
 	snapMgr       *raft.SnapshotManager
 	cachedBackend *storage.CachedBackend
+
+	// PR-final services-extra phases. Each field's owning phase is annotated.
+
+	// bootBalancerAndGossip
+	balancerProposer *cluster.BalancerProposer
+	gossipReceiver   *cluster.GossipReceiver
+
+	// bootWALAndForwarders
+	wal               *wal.WAL
+	walDir            string
+	forwardSender     *cluster.ForwardSender
+	forwardReceiver   *cluster.ForwardReceiver
+	metaForwardSender *cluster.MetaProposeForwardSender
+	metaReadSender    *cluster.MetaCatalogReadSender
+	clusterCoord      *cluster.ClusterCoordinator
+	seedGroups        int
+
+	// bootBackendWrap
+	backend          storage.Backend
+	recoveryReadOnly bool
+	diskCollector    *cluster.DiskCollector
+
+	// bootSrvOptsAndReceipt
+	srvOpts          []server.Option
+	clusterAlerts    *server.AlertsState
+	receiptWiring    *HealReceiptWiring
+	incidentRecorder *incident.Recorder
+	lifecycleMgr     *cluster.LifecycleManager
+	mutationGate     *server.MutationGate
+	volMgr           *volume.Manager
+
+	// bootHTTPServerAndAdmin
+	srv        *server.Server
+	tokenStore *dashboard.TokenStore
+	adminDeps  *admin.Deps
+	adminSrv   *admin.Server
+
+	// bootRecoveryAndScrubber
+	scrubDirector *scrubber.Director
+	activeEmitter scrubber.Emitter
 }
 
 // newBootState returns an empty state bound to cfg. Caller is responsible for

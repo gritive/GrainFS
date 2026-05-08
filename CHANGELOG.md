@@ -1,5 +1,170 @@
 # Changelog
 
+## [0.0.131.0] - 2026-05-09 — serveruntime boot decomposition: services + shutdown phases (final, milestone complete)
+
+### Refactored
+
+- `internal/serveruntime/run.go` collapses from **938 lines** (pre-PR 1) → **136
+  lines** for the final PR. The `Run` function body is now a flat sequence
+  of phase calls:
+  - PR 2: `bootValidateConfig`, `bootAutoMigrate`, `bootOpenMetaDB`,
+    `bootValidateTimings`, `bootOpenRaftLogStore`, `bootOpenSharedRaftLogDB`.
+  - PR 3: `bootQUICTransport`, `bootPeerConnections`, `bootGroupRaftMux`.
+  - inline: data-plane `raft.Node` construction (consumed by PR 4 + PR 5).
+  - PR 4: `bootMetaRaftWiring`, `bootDataGroupRouter`,
+    `bootRotationAndAdminAPI`, `bootMetaRaftStart`.
+  - PR 5: `bootShardService`, `bootStreamRouter`, `bootOwnedGroupsAndEC`.
+  - PR 6: `bootSnapshotAndApplyLoop`.
+  - **New (this PR)**: `bootBalancerAndGossip`, `bootWALAndForwarders`,
+    `bootBackendWrap`, `bootSrvOptsAndReceipt`, `bootHTTPServerAndAdmin`,
+    `bootRecoveryAndScrubber`, `bootResharderAndDegraded`,
+    `bootNodeServices`, `bootShutdownDrain`.
+
+  Mirror-locals are gone — phase functions read `state.*` directly. Behavior
+  is preserved exactly: same constructor calls, same callback registration
+  order, same cleanup LIFO order, same shutdown orchestration. The only
+  change is structural.
+
+### Added (new phase files + tests)
+
+- `internal/serveruntime/boot_phases_balancer.go`: `bootBalancerAndGossip`
+  — starts the StartBalancer (cluster mode) and ensures a single
+  GossipReceiver drains `transport.Receive()` whenever heal-receipt is on.
+  Populates `state.balancerProposer`, `state.gossipReceiver`.
+
+- `internal/serveruntime/boot_phases_forwarders.go`: `bootWALAndForwarders`
+  — opens the WAL, computes `seedGroups`, builds `ForwardSender`/Receiver,
+  `MetaProposeForwardSender`/Receiver, `MetaCatalogReadSender`,
+  `MetaJoinReceiver`, and the `ClusterCoordinator`. Performs join-mode
+  meta-join + initial Router sync. Cleanup: `wal.Close` registered via
+  `state.AddCleanup`.
+
+- `internal/serveruntime/boot_phases_backend.go`: `bootBackendWrap` —
+  composes `wal.Backend → pullthrough.Backend → optional RecoveryWriteGate`,
+  reduces startup probe decisions, honours the recover-cluster marker,
+  constructs the `DiskCollector`, creates the default bucket on singleton
+  startup, kicks off the auto-snapshotter, emits the startup config snapshot.
+
+- `internal/serveruntime/boot_phases_srvopts.go`: `bootSrvOptsAndReceipt`
+  — assembles the `[]server.Option` slice (cluster info / membership /
+  event store / alerts / iceberg / auth / balancer / receipt / volume mgr /
+  block cache / shard cache / read-indexer / raft snapshotter /
+  mutation gate), wires the disk-threshold callbacks, opens the receipt DB,
+  the incident DB, and the resource guards. **Critical correctness work**:
+  every `defer X.Close()` and `defer resourcewatch.DeregisterDB(...)` from
+  the original `Run` body is converted to `state.AddCleanup(...)` so it
+  runs at `Run()` exit (LIFO) — not at phase-function exit.
+
+- `internal/serveruntime/boot_phases_admin.go`: `bootHTTPServerAndAdmin`
+  — `server.New`, IAM proposer wiring, dashboard token + middleware,
+  admin UI route registration, admin Unix Domain Socket Start. Spec A5
+  invariant: admin routes register **before** the data-plane Hertz starts
+  serving. Best-effort `adminSrv.Stop` registered via `state.AddCleanup`.
+
+- `internal/serveruntime/boot_phases_scrubber.go`: `bootRecoveryAndScrubber`
+  — startup recovery, scrubber Director (replication + EC sources),
+  ShardPlacementMonitor wiring (with receipt signing). The PR 4-style
+  "callbacks before Start" invariant is preserved:
+  `metaRaft.FSM().SetOnScrubTrigger(...)` and
+  `forwardReceiver.WithScrubSessionLookup(director)` register before
+  `director.Start(ctx)`. The receipt-tracking emitter `Close()` is moved to
+  `state.AddCleanup` so it tears down at `Run()` exit.
+
+- `internal/serveruntime/boot_phases_node_services.go`: three phases —
+  `bootResharderAndDegraded` (per-group ReshardManager loop, lifecycle
+  worker, degraded monitor, data-plane `srv.Run` goroutine),
+  `bootNodeServices` (universal NFS/NFSv4/NBD via `StartNodeServices` +
+  `nfs4` cache invalidator registration), and `bootShutdownDrain` (the
+  `<-ctx.Done()` block + ordered drain: admin first → HTTP second → raft
+  leadership transfer → close `stopApply`). Shutdown is **not** registered
+  through `AddCleanup` because its order is the inverse of generic LIFO —
+  admin must stop FIRST.
+
+- `internal/serveruntime/boot_phases_services_extra_test.go`: witness +
+  happy-path tests for the lightweight subset of the new phases:
+  - `TestBootBalancerAndGossip_NoFlagsSkips` — no-op when both flags off.
+  - `TestBootWALAndForwarders_PopulatesForwarders` — every sender/receiver
+    populated; `seedGroups ≥ 8`.
+  - `TestBootServicesExtraPhases_OrderingInvariant` — walks balancer +
+    WAL+forwarders, asserts each `state.*` field nil before its phase and
+    populated after. Mirrors `TestBootRaftPhases_OrderingInvariant`. The
+    heavier phases (backend wrap, srvOpts, admin, scrubber, node services,
+    shutdown) are covered by the smoke E2E
+    (`TestSmoke_DeploymentVerification`) — they require IAMStore, a real
+    admin UDS plumbing, and a fully-resolved data-plane raft leader, which
+    is what E2E provides.
+
+- `internal/serveruntime/boot_state.go`: typed fields added for the new
+  phases — `balancerProposer`, `gossipReceiver`, `wal`, `walDir`,
+  `forwardSender`, `forwardReceiver`, `metaForwardSender`, `metaReadSender`,
+  `clusterCoord`, `seedGroups`, `backend`, `recoveryReadOnly`,
+  `diskCollector`, `srvOpts`, `clusterAlerts`, `receiptWiring`,
+  `incidentRecorder`, `lifecycleMgr`, `mutationGate`, `volMgr`, `srv`,
+  `tokenStore`, `adminDeps`, `adminSrv`, `scrubDirector`, `activeEmitter`.
+  Each annotated with its owning phase.
+
+### Boundary rationale
+
+The original 6-phase plan listed `bootClusterCoordAndDomain` as a single
+phase covering ~330 lines (lines 232-566 of the pre-PR-final `Run`). That
+absorbed too much for one reviewable unit. We split along natural
+construction boundaries:
+
+1. WAL + forwarders + ClusterCoordinator + meta-join (everything that wires
+   the routing fabric).
+2. Backend wrap + recovery gates + disk collector + auto-snap + log (the
+   storage-chain-and-startup-services boundary).
+3. srvOpts + receipt + incident + lifecycle + volume mgr + mutation gate
+   (everything that mutates `[]server.Option` on its way to `server.New`).
+4. HTTP server + admin UDS (the data-plane construction).
+5. Recovery + scrubber director + placement monitors (the heal/scrub block).
+6. Resharder + degraded + lifecycle + `srv.Run` goroutine (background loops
+   that only need a wired-up server).
+7. Node services (NFS/NFSv4/NBD) + nfs4 invalidator.
+8. Shutdown drain (the ordered teardown sequence).
+
+Each phase has a single, narrow responsibility, a clear input/output
+contract on `bootState`, and a godoc explaining its phase ordering invariants.
+
+### Behavior preservation
+
+- All `defer X.Close()` / `defer resourcewatch.DeregisterDB(...)` lines
+  in the original `Run` body have been converted to `state.AddCleanup(...)`
+  to preserve LIFO-at-`Run()`-exit semantics. (Direct lift-and-move would
+  have changed behavior — those defers would have fired at phase-function
+  exit, closing DBs while `Run` was still using them.)
+- The shutdown drain remains an explicit ordered sequence (admin → HTTP →
+  raft leadership transfer → `close(stopApply)`) rather than `AddCleanup`
+  registrations, because the order is the inverse of generic cleanup LIFO.
+- The fallback `state.AddCleanup(adminSrv.Stop)` for early-return paths is
+  preserved; on the happy path the explicit shutdown still runs first
+  because `admin.Stop` is idempotent.
+
+### Verification
+
+- `make build`: clean.
+- `make test`: all packages green (cluster ~84s, volume ~54s, serveruntime ~20s).
+- `go test ./tests/e2e/ -run TestSmoke_DeploymentVerification`: passes (~6s).
+- `go test ./internal/serveruntime/ -run TestBoot -count=1`: 11s, all green
+  including the new ordering witness.
+
+### Milestone closeout
+
+This PR completes the **boot decomposition milestone**:
+
+| PR  | Subject                                        | Lines collapsed |
+| --- | ---------------------------------------------- | --------------- |
+| 1   | bootState scaffold + Cleanup LIFO              | scaffold        |
+| 2   | config + storage open phases                   | ~60             |
+| 3   | transport phases (QUIC + peers + mux)          | ~50             |
+| 4   | raft phases (witness ordering test)            | ~80             |
+| 5   | storage runtime phases                         | ~140            |
+| 6   | snapshot + apply-loop                          | ~37             |
+| 7   | services + shutdown (this PR)                  | ~600            |
+
+`Run()` body: **938 → 136 lines** (~85% reduction). Every inline construction
+is now isolated, named, godoc'd, and replaceable.
+
 ## [0.0.130.0] - 2026-05-09 — serveruntime boot decomposition PR 6: snapshot + apply-loop phase (1 of ~6 services)
 
 ### Refactored
