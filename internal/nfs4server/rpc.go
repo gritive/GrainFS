@@ -4,12 +4,19 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
 const (
 	// maxFrameSize caps ONC RPC frame size to prevent DoS (4MB).
 	// Must be larger than MAXWRITE (1MB) + RPC/COMPOUND overhead.
 	maxFrameSize = 4 * 1024 * 1024
+
+	// frameBufPoolCap caps frame buffers eligible for the pool. Buffers larger
+	// than this (rare oversized writes) are released to GC instead of
+	// retaining a 4 MiB arena per pool slot.
+	frameBufPoolCap = 256 * 1024
 
 	// RPC constants
 	rpcProgNFS  = 100003
@@ -20,6 +27,20 @@ const (
 	// Auth flavors
 	authNone = 0
 )
+
+// frameBufPool recycles RPC frame buffers across reads. Per-RPC concurrent
+// processing requires fresh buffers per read, so without a pool every frame
+// would alloc fresh — observed as 2 GB+ allocs in 30 s of NFS streaming.
+var frameBufPool = pool.New(func() []byte { return make([]byte, 0, 64*1024) })
+
+func getFrameBuf() []byte { return frameBufPool.Get()[:0] }
+
+func putFrameBuf(b []byte) {
+	if cap(b) > frameBufPoolCap {
+		return
+	}
+	frameBufPool.Put(b[:0])
+}
 
 // writeRPCFrame writes a TCP record-marked RPC frame.
 // Format: [4 bytes: length | 0x80000000 for last-fragment][payload]
