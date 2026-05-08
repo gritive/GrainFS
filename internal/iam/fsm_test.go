@@ -2,6 +2,7 @@ package iam
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -532,5 +533,9 @@ func TestApplyBucketUpstreamPut_WrongAADFailsDecrypt(t *testing.T) {
 	}))
 	if err == nil {
 		t.Fatal("ApplyBucketUpstreamPut with wrong-AAD ciphertext: want error, got nil")
+	}
+	// Tighten: must specifically be the decrypt path, not validation rejection.
+	if !strings.Contains(err.Error(), "decrypt") {
+		t.Fatalf("expected decrypt-path error, got: %v", err)
 	}
 }
