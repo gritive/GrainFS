@@ -58,6 +58,25 @@ type actorState struct {
 	// tick spawns a new goroutine while old ones block on the dead transport.
 	// Leader-only state — cleared in stepDownToFollower.
 	peerInFlight map[string]bool
+
+	// leaderRound increments on every broadcastHeartbeat dispatched by this
+	// node while Leader. Used as the round identifier for ReadIndex
+	// linearizability confirmation (Raft §6.4): a ReadIndex queued at round
+	// R is satisfied when a majority of peers reply with hbRoundID >= R for
+	// the current term. Reset to 0 in becomeLeader; irrelevant on step-down.
+	leaderRound uint64
+
+	// peerLastRound[peer] is the highest leaderRound the leader has confirmed
+	// the peer received in the current term, advanced on successful AE reply
+	// (gated by term match). Reset to a fresh map in becomeLeader, nil'd in
+	// stepDownToFollower so a regained leadership cannot pre-satisfy a fresh
+	// ReadIndex with stale evidence from a prior term.
+	peerLastRound map[string]uint64
+
+	// readIndexQueue holds pending ReadIndex requests awaiting heartbeat-round
+	// confirmation from a majority of peers. FIFO ordered by submission;
+	// drained with ErrProposalFailed on step-down. Leader-only.
+	readIndexQueue []readIndexReq
 }
 
 // snapshot builds a readState reflecting the current actor-owned state.

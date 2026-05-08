@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.126.0] - 2026-05-09 — serveruntime boot decomposition PR 5: storage runtime phases (3 of ~20)
+## [0.0.129.0] - 2026-05-09 — serveruntime boot decomposition PR 5: storage runtime phases (3 of ~20)
 
 ### Refactored
 
@@ -95,7 +95,7 @@ goroutine timing changed. `make test` (full unit suite) and
 `go test ./tests/e2e/ -run TestSmoke_DeploymentVerification` both
 green; the smoke test is the integration cover.
 
-## [0.0.125.0] - 2026-05-09 — serveruntime boot decomposition PR 4: raft phases (4 of ~20)
+## [0.0.128.0] - 2026-05-09 — serveruntime boot decomposition PR 4: raft phases (4 of ~20)
 
 ### Refactored
 
@@ -192,6 +192,115 @@ is plumbed through the phase signature so tests can substitute a no-op.
 
 PR 5 (storage runtime phases — `bootShardService`, `bootStreamRouter`,
 `bootOwnedGroups+EC`) is next.
+
+## [0.0.125.0] - 2026-05-09 — raft/v2 PR 14: ReadIndex (linearizable reads) + apply pipeline decoupling (M2 main + last M1 follow-up)
+
+### Added
+
+- `internal/raft/v2/readindex.go` (new) + `internal/raft/v2/readindex_test.go` (new):
+  Raft §6.4 leader-side ReadIndex implementation.
+  - `Node.ReadIndex(ctx) (uint64, error)` returns a barrier index after a
+    fresh heartbeat round confirms majority leadership at the current term.
+    Caller is responsible for waiting until its FSM `lastApplied >= barrier`
+    before serving the linearizable read.
+  - Single-voter shortcut: returns `commitIndex` inline (self-quorum at
+    every commit implies leadership).
+  - Multi-voter protocol: bumps `leaderRound`, captures `barrier =
+    commitIndex`, queues request with `minPeerRound = leaderRound`,
+    triggers `broadcastHeartbeat`. `tryFlushReadIndex` reaps the queue
+    once a majority of peers reply (gated on `state==Leader && term match`)
+    with `peerLastRound[peer] >= minPeerRound`.
+  - Step-down drains queued requests with `ErrProposalFailed`. `becomeLeader`
+    resets `leaderRound = 0` and re-allocates `peerLastRound` so re-leadership
+    at a higher term cannot pre-satisfy a fresh ReadIndex with stale evidence
+    from a prior term.
+  - SLA: idle-peer-majority case bounded by RTT; in-flight-peer-majority
+    case bounded by `heartbeatTimeout + RTT` (next tick re-dispatches the
+    bumped round). Tightening to one-shot redispatch on `peerInFlight`
+    clear is deferred to a follow-up PR.
+
+- `internal/raft/v2/actor.go` `applyLoop` goroutine + `applyInCh` channel
+  (apply pipeline decoupling — addresses TODO raft/v2 cmdCh backpressure
+  cascade, the last structural M1 follow-up):
+  - Actor's `applyCommitted` now enqueues to `applyInCh` (buffered 256)
+    instead of sending directly on `applyCh`. `applyLoop` drains
+    `applyInCh` aggressively into an unbounded in-goroutine buffer, then
+    forwards to `applyCh` in FIFO order.
+  - Decouples actor liveness from FSM consumer speed: a slow FSM no longer
+    wedges the actor's send → `applyCommitted` → AE/heartbeat handling →
+    cascade to election storms.
+  - Shutdown ordering: actor closes `applyInCh` on exit; `applyLoop`
+    drains its buffer to `applyCh`, then closes `applyCh` and signals
+    `applyDoneCh`. `Node.Stop` awaits both `doneCh` and `applyDoneCh` so
+    callers can rely on `applyCh` being closed by the time `Stop` returns.
+  - GC: `applyLoop` zeroes the popped slot before `buf = buf[1:]` so
+    delivered entries' `Command []byte` is reclaimable before the buffer
+    fully drains.
+
+### Changed
+
+- `internal/raft/v2/actor.go`:
+  - `dispatchAppendEntries(peer, args, roundID)` signature gains roundID
+    captured at dispatch time. `broadcastHeartbeat` and `handlePropose`
+    pass `n.st.leaderRound` as the round identifier.
+  - `handleHeartbeatReply` advances `peerLastRound[peer]` on success
+    (gated on existing `state==Leader && term match` check) and calls
+    `tryFlushReadIndex` to reap queued requests.
+  - `command` struct gains `hbRoundID` (captured by dispatch closure for
+    reply correlation) and `riReply` (ReadIndex reply chan).
+  - New `cmdReadIndex` cmdKind + `handleReadIndex` + `tryFlushReadIndex`.
+  - `becomeLeader` resets `leaderRound = 0`, allocates fresh
+    `peerLastRound`, clears `readIndexQueue`.
+  - `stepDownToFollower` drains `readIndexQueue` with `ErrProposalFailed`
+    (blocking sends — `riReply` is cap-1 buffered + at-most-one send per
+    req — and matches the inline-reply paths for consistency) and nils
+    `peerLastRound` + zeroes `leaderRound`.
+
+- `internal/raft/v2/state.go` `actorState`: new fields `leaderRound`,
+  `peerLastRound`, `readIndexQueue`. Comments document the invariants
+  (gate conditions, lifecycle).
+
+- `internal/raft/v2/replication_test.go`
+  `TestApplyCommitted_StopRaceLeavesCommitIndexConsistent`: retargeted
+  from `applyCh` to `applyInCh` to reflect the new actor boundary. Stop
+  semantics are equivalent (last fully-enqueued vs last fully-delivered);
+  actual FSM-side delivery is now `applyLoop`'s contract.
+
+### Tests
+
+- `TestReadIndex_NotLeader` — Follower rejects with `ErrNotLeader`.
+- `TestReadIndex_SingleVoter` — single-voter returns `commitIndex` inline.
+- `TestReadIndex_MultiVoter_LeaderConfirmation` — multi-voter blocks until
+  heartbeat round confirms majority.
+- `TestReadIndex_MultiVoter_StepDownDrains` — partitioned leader's queued
+  ReadIndex resolves with `ErrProposalFailed` on step-down.
+- `TestReadIndex_StaleRoundReplyIgnored` — direct state-machine test:
+  hand-built Leader at term 5 receives a synthetic term-4 reply with
+  `hbRoundID=999`; `peerLastRound` must NOT advance (term gate). Companion
+  same-term reply asserts the gate is term-specific, not blanket-rejecting.
+- `TestReadIndex_PeerLastRoundResetOnLeaderRegain` — leader steps down,
+  cluster re-elects; new leader's fresh ReadIndex must succeed (proves
+  `becomeLeader` resets `peerLastRound`/`leaderRound`).
+- `TestApplyPipeline_DecoupledFromActor` — slow FSM consumer (5ms/entry)
+  with 200 ProposeWaits + a fresh ReadIndex during the slow drain;
+  proves cmdCh + actor remain live (pre-PR direct-applyCh path would
+  wedge after applyCh fills).
+- `TestApplyPipeline_OrderingUnderSlowFSM` — 200 entries with slow
+  consumer; verify FIFO order preserved.
+
+### Cumulative status (raft/v2 actor-pattern rewrite)
+
+- M1 Foundation: 7/7 PRs (#251)
+- M2 Persistence + ReadIndex: 5/7 (PR 8 #252, PR 9 #256, PR 10 #259, PR 11
+  #261, PR 14 this).
+- M1 follow-ups: 7/7 (PR 12 #263, PR 13 #266, PR 14 closes the last —
+  cmdCh backpressure cascade — bundled here).
+
+Remaining M2: snapshots (log compaction + InstallSnapshot RPC), joint
+consensus (membership changes §4.3). Then M3 (test harness + chaos), M4
+(staging soak), M5 (production swap). Until production swap, all
+raft/v2 work continues in `.worktrees/raft-actor` on dedicated PR
+branches per the user-locked workflow.
 
 ## [0.0.124.0] - 2026-05-09 — serveruntime boot decomposition PR 3: transport phases (3 of ~20)
 
