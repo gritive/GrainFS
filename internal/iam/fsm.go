@@ -282,3 +282,42 @@ func (a *Applier) ApplyGrantWildcardDelete(payload []byte) error {
 	a.store.applyGrantWildcardDelete(saID)
 	return nil
 }
+
+// ApplyBucketUpstreamPut decodes a BucketUpstreamPutPayload and stores the
+// upstream record. SecretKeyEnc is decrypted with AAD = "bucket-upstream:"+bucket
+// (per /plan-eng-review override A2 — namespace-prefixed AAD provably disjoint
+// from sa_id AAD space). Resulting plaintext SecretKey is held in-memory only
+// and never persisted.
+func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
+	p := iampb.GetRootAsBucketUpstreamPutPayload(payload, 0)
+	bucket := string(p.Bucket())
+	if bucket == "" {
+		return fmt.Errorf("iam: BucketUpstreamPut missing bucket")
+	}
+	if bucket == WildcardBucket || bucket == SystemBucket {
+		return fmt.Errorf("iam: BucketUpstreamPut rejects sentinel bucket %q", bucket)
+	}
+	encBytes := readBucketUpstreamEncBytes(p)
+	plain, err := UnwrapSecret(a.enc, "bucket-upstream:"+bucket, encBytes)
+	if err != nil {
+		return fmt.Errorf("iam: BucketUpstreamPut decrypt: %w", err)
+	}
+	a.store.applyBucketUpstreamPut(BucketUpstream{
+		Bucket:       bucket,
+		Endpoint:     string(p.Endpoint()),
+		AccessKey:    string(p.AccessKey()),
+		SecretKey:    plain,
+		SecretKeyEnc: encBytes,
+		CreatedAt:    time.Unix(0, p.CreatedAtUnixNs()),
+		CreatedBy:    string(p.CreatedBy()),
+	})
+	return nil
+}
+
+// ApplyBucketUpstreamDelete removes the upstream record for the given bucket.
+// Idempotent on missing buckets.
+func (a *Applier) ApplyBucketUpstreamDelete(payload []byte) error {
+	p := iampb.GetRootAsBucketUpstreamDeletePayload(payload, 0)
+	a.store.applyBucketUpstreamDelete(string(p.Bucket()))
+	return nil
+}

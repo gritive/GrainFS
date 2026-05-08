@@ -322,6 +322,42 @@ func buildGrantDeletePayload(saID, bucket string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildBucketUpstreamPutPayload(u BucketUpstream) []byte {
+	b := flatbuffers.NewBuilder(128)
+	bucketOff := b.CreateString(u.Bucket)
+	endpointOff := b.CreateString(u.Endpoint)
+	akOff := b.CreateString(u.AccessKey)
+	encVec := b.CreateByteVector(u.SecretKeyEnc)
+	cbOff := b.CreateString(u.CreatedBy)
+	iampb.BucketUpstreamPutPayloadStart(b)
+	iampb.BucketUpstreamPutPayloadAddBucket(b, bucketOff)
+	iampb.BucketUpstreamPutPayloadAddEndpoint(b, endpointOff)
+	iampb.BucketUpstreamPutPayloadAddAccessKey(b, akOff)
+	iampb.BucketUpstreamPutPayloadAddSecretKeyEnc(b, encVec)
+	iampb.BucketUpstreamPutPayloadAddCreatedAtUnixNs(b, u.CreatedAt.UnixNano())
+	iampb.BucketUpstreamPutPayloadAddCreatedBy(b, cbOff)
+	b.Finish(iampb.BucketUpstreamPutPayloadEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildBucketUpstreamDeletePayload(bucket string) []byte {
+	b := flatbuffers.NewBuilder(32)
+	bucketOff := b.CreateString(bucket)
+	iampb.BucketUpstreamDeletePayloadStart(b)
+	iampb.BucketUpstreamDeletePayloadAddBucket(b, bucketOff)
+	b.Finish(iampb.BucketUpstreamDeletePayloadEnd(b))
+	return b.FinishedBytes()
+}
+
+func readBucketUpstreamEncBytes(p *iampb.BucketUpstreamPutPayload) []byte {
+	n := p.SecretKeyEncLength()
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		out[i] = byte(p.SecretKeyEnc(i))
+	}
+	return out
+}
+
 func writeUint32(w io.Writer, v uint32) error {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], v)
