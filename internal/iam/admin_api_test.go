@@ -3,6 +3,7 @@ package iam
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +39,40 @@ func TestAdminAPI_CreateSA(t *testing.T) {
 	}
 	if resp.SAID == "" {
 		t.Errorf("SAID empty")
+	}
+}
+
+// TestAdminAPI_CreateSA_AuthEnableFails_ReturnsWarning verifies that
+// when ProposeAuthEnable errors after SA + key are committed, the
+// handler returns 200 with the SA + key creds (so the operator does not
+// lose the one-time secret) AND a non-empty Warning field. Pre-fix
+// swallowed the error with `_ =`, leaving the operator unaware.
+func TestAdminAPI_CreateSA_AuthEnableFails_ReturnsWarning(t *testing.T) {
+	store := NewStore()
+	p := newFakeProposer()
+	p.authEnableErr = errors.New("raft: not leader")
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	body, _ := json.Marshal(SACreateRequest{Name: "alice"})
+	req := httptest.NewRequest("POST", "/admin/iam/sa", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleSACreate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	var resp SACreateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.AccessKey == "" || resp.SecretKey == "" {
+		t.Fatalf("creds missing despite SA + key committed: %+v", resp)
+	}
+	if resp.Warning == "" {
+		t.Fatalf("expected Warning field set on AuthEnable failure; got %+v", resp)
+	}
+	if !strings.Contains(resp.Warning, "AuthEnable") {
+		t.Errorf("Warning = %q, want substring 'AuthEnable'", resp.Warning)
 	}
 }
 

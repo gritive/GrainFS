@@ -31,12 +31,21 @@ type Proposer interface {
 
 // Bootstrap implements the --access-key/--secret-key shim. It is a no-op
 // unless: (1) both flags are present, (2) caller is the cluster leader,
-// and (3) the IAM store is currently empty. Idempotent — safe to invoke
-// on every node every boot; only the leader on an empty store proposes.
+// and (3) bootstrap is not yet "complete" (default SA + active key +
+// wildcard grant + sticky auth_enabled bit all present). Idempotent —
+// safe to invoke on every node every boot; only the leader proposes the
+// missing steps.
 //
 // Race guard: the FSM apply path is idempotent on (sa_id=DefaultSAID) and
-// on duplicate KeyCreate for the same access_key, so even if leadership
-// transitions mid-bootstrap the resulting state converges.
+// on duplicate KeyCreate for the same access_key. If a previous Bootstrap
+// run committed steps 1..2 but failed before AuthEnable, the next leader
+// election re-runs Bootstrap; bootstrapComplete() returns false (sticky
+// bit absent), so the missing steps re-fire and converge.
+//
+// Pre-fix: IsEmpty() short-circuited as soon as ANY SA existed. Leader
+// failure between SACreate and AuthEnable left a partial state where
+// auth_enabled was false → authzMiddleware skipped IAM layer →
+// permissive cluster despite operator-visible "bootstrap success".
 func Bootstrap(
 	ctx context.Context,
 	s *Store,
@@ -51,7 +60,7 @@ func Bootstrap(
 	if !isLeader {
 		return nil
 	}
-	if !s.IsEmpty() {
+	if bootstrapComplete(s) {
 		return nil
 	}
 
@@ -93,6 +102,33 @@ func Bootstrap(
 	}
 
 	return p.ProposeAuthEnable(ctx)
+}
+
+// bootstrapComplete reports whether all four bootstrap steps committed:
+// default SA exists, default SA has at least one active key, default SA
+// has a wildcard grant, and the sticky auth_enabled bit is set. Used by
+// Bootstrap to decide whether to re-fire any missing steps; each
+// ProposeXxx is idempotent at the FSM apply layer so re-running an
+// already-committed step is safe.
+func bootstrapComplete(s *Store) bool {
+	if _, ok := s.LookupSA(DefaultSAID); !ok {
+		return false
+	}
+	if !s.AuthEnabled() {
+		return false
+	}
+	st := s.snapshot()
+	if _, ok := st.wildcards[DefaultSAID]; !ok {
+		return false
+	}
+	hasActiveKey := false
+	for _, k := range st.keysByAK {
+		if k != nil && k.SAID == DefaultSAID && k.Status == KeyStatusActive {
+			hasActiveKey = true
+			break
+		}
+	}
+	return hasActiveKey
 }
 
 // NewUUIDv7 returns a time-ordered UUID v7 string. Falls back to v4 if

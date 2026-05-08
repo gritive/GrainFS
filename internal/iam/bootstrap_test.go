@@ -6,7 +6,11 @@ import (
 )
 
 type fakeProposer struct {
-	calls []string
+	calls          []string
+	authEnableErr  error // if non-nil, ProposeAuthEnable returns this
+	saCreateErr    error // if non-nil, ProposeSACreate returns this
+	keyCreateErr   error // if non-nil, ProposeKeyCreate returns this
+	wildcardPutErr error // if non-nil, ProposeGrantWildcardPut returns this
 }
 
 func newFakeProposer() *fakeProposer { return &fakeProposer{} }
@@ -67,7 +71,7 @@ func (f *fakeProposer) calledGrantWildcardDelete(saID string) bool {
 
 func (f *fakeProposer) ProposeSACreate(ctx context.Context, sa ServiceAccount) error {
 	f.calls = append(f.calls, "SACreate:"+sa.ID)
-	return nil
+	return f.saCreateErr
 }
 func (f *fakeProposer) ProposeSADelete(ctx context.Context, saID string) error {
 	f.calls = append(f.calls, "SADelete:"+saID)
@@ -75,7 +79,7 @@ func (f *fakeProposer) ProposeSADelete(ctx context.Context, saID string) error {
 }
 func (f *fakeProposer) ProposeKeyCreate(ctx context.Context, k AccessKey) error {
 	f.calls = append(f.calls, "KeyCreate:"+k.AccessKey)
-	return nil
+	return f.keyCreateErr
 }
 func (f *fakeProposer) ProposeKeyRevoke(ctx context.Context, accessKey string) error {
 	f.calls = append(f.calls, "KeyRevoke:"+accessKey)
@@ -91,7 +95,7 @@ func (f *fakeProposer) ProposeGrantDelete(ctx context.Context, saID, bucket stri
 }
 func (f *fakeProposer) ProposeGrantWildcardPut(ctx context.Context, g Grant) error {
 	f.calls = append(f.calls, "GrantWildcard:"+g.SAID)
-	return nil
+	return f.wildcardPutErr
 }
 func (f *fakeProposer) ProposeGrantWildcardDelete(ctx context.Context, saID string) error {
 	f.calls = append(f.calls, "GrantWildcardDelete:"+saID)
@@ -99,7 +103,7 @@ func (f *fakeProposer) ProposeGrantWildcardDelete(ctx context.Context, saID stri
 }
 func (f *fakeProposer) ProposeAuthEnable(ctx context.Context) error {
 	f.calls = append(f.calls, "AuthEnable")
-	return nil
+	return f.authEnableErr
 }
 
 func TestBootstrap_NoFlag_NoOp(t *testing.T) {
@@ -143,13 +147,57 @@ func TestBootstrap_NotLeader_NoProposal(t *testing.T) {
 
 func TestBootstrap_IAMNotEmpty_NoProposal(t *testing.T) {
 	s := NewStore()
-	s.applySACreate(ServiceAccount{ID: "sa-existing"})
+	// Fake "complete" bootstrap state so the new bootstrapComplete() guard
+	// short-circuits exactly like the pre-fix IsEmpty() did when a separate
+	// SA was registered. Pre-fix took ANY SA; post-fix is stricter.
+	s.applySACreate(ServiceAccount{ID: DefaultSAID})
+	wrapped, _ := WrapSecret(newTestEncryptor(t), DefaultSAID, "x")
+	s.applyKeyCreate(AccessKey{
+		AccessKey: "AKBOOT", SAID: DefaultSAID, SecretKey: "x",
+		SecretKeyEnc: wrapped, Status: KeyStatusActive,
+	})
+	s.applyGrantWildcardPut(Grant{SAID: DefaultSAID, Role: RoleAdmin})
+	s.applyAuthEnable()
 	p := &fakeProposer{}
 	if err := Bootstrap(context.Background(), s, p, "AKBOOT", "secret", true, newTestEncryptor(t)); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 	if len(p.calls) != 0 {
-		t.Fatalf("non-empty IAM must not propose; got %v", p.calls)
+		t.Fatalf("complete bootstrap must not propose; got %v", p.calls)
+	}
+}
+
+// TestBootstrap_PartialState_Retries verifies the bootstrapComplete()
+// completeness check — pre-fix used IsEmpty() and skipped the retry,
+// leaving auth_enabled false on a partial-state cluster.
+func TestBootstrap_PartialState_Retries(t *testing.T) {
+	enc := newTestEncryptor(t)
+	s := NewStore()
+	// Simulate an interrupted previous Bootstrap: SA + key + wildcard
+	// committed but AuthEnable never landed (auth_enabled still false).
+	s.applySACreate(ServiceAccount{ID: DefaultSAID, Name: "default"})
+	wrapped, _ := WrapSecret(enc, DefaultSAID, "secret")
+	s.applyKeyCreate(AccessKey{
+		AccessKey: "AKBOOT", SAID: DefaultSAID, SecretKey: "secret",
+		SecretKeyEnc: wrapped, Status: KeyStatusActive,
+	})
+	s.applyGrantWildcardPut(Grant{SAID: DefaultSAID, Role: RoleAdmin})
+
+	p := &fakeProposer{}
+	if err := Bootstrap(context.Background(), s, p, "AKBOOT", "secret", true, enc); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	// Each ProposeXxx is idempotent on the apply path; what matters is that
+	// AuthEnable fires (and the earlier ones are safe to re-issue).
+	saw := false
+	for _, c := range p.calls {
+		if c == "AuthEnable" {
+			saw = true
+			break
+		}
+	}
+	if !saw {
+		t.Fatalf("AuthEnable must re-fire when sticky bit absent; calls=%v", p.calls)
 	}
 }
 

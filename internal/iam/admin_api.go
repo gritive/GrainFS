@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
@@ -22,12 +24,18 @@ type SACreateRequest struct {
 
 // SACreateResponse returns the new SA along with the access_key/secret_key
 // pair created for it. SecretKey is plaintext, returned ONCE.
+//
+// Warning, when present, signals a non-fatal post-create step failed —
+// e.g. ProposeAuthEnable for the first SA could not commit. The SA + key
+// are already committed and useful, but the cluster may not yet enforce
+// auth. Operators should investigate and (if needed) re-run admin steps.
 type SACreateResponse struct {
 	SAID      string    `json:"sa_id"`
 	Name      string    `json:"name"`
 	AccessKey string    `json:"access_key"`
 	SecretKey string    `json:"secret_key"`
 	CreatedAt time.Time `json:"created_at"`
+	Warning   string    `json:"warning,omitempty"`
 }
 
 type SAListItem struct {
@@ -94,9 +102,18 @@ func (a *AdminAPI) HandleSACreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sticky auth_enabled — first SA flips the bit. Errors are non-fatal here:
-	// the SA + key are already committed; auth-enable is a separate command.
-	_ = a.proposer.ProposeAuthEnable(r.Context())
+	// Sticky auth_enabled — first SA flips the bit. The SA + key are
+	// already committed; an AuthEnable failure here is non-fatal but must
+	// be surfaced so operators don't assume a permissive-by-default cluster
+	// is enforcing IAM. Pre-fix swallowed this error with `_ =`.
+	var warning string
+	if err := a.proposer.ProposeAuthEnable(r.Context()); err != nil {
+		log.Warn().
+			Err(err).
+			Str("sa_id", sa.ID).
+			Msg("iam: ProposeAuthEnable failed after SA create; sticky bit may not be set — re-run after cluster recovers")
+		warning = "AuthEnable failed: cluster may not enforce auth until next bootstrap. Check audit logs."
+	}
 
 	resp := SACreateResponse{
 		SAID:      sa.ID,
@@ -104,6 +121,7 @@ func (a *AdminAPI) HandleSACreate(w http.ResponseWriter, r *http.Request) {
 		AccessKey: accessKey,
 		SecretKey: secretKey,
 		CreatedAt: now,
+		Warning:   warning,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
