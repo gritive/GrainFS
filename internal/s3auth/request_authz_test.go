@@ -122,3 +122,52 @@ func TestRequestAuthorizer_PreLoad_AuthEnabled_GrantOnly_Allows(t *testing.T) {
 	}
 	assert.Empty(t, audit.denies)
 }
+
+func TestRequestAuthorizer_PreLoad_PolicyDenies(t *testing.T) {
+	audit := &fakeAudit{}
+	r := NewRequestAuthorizer(
+		stubStore{enabled: true},
+		func(_, _ string, _ S3Action) bool { return true },
+		stubPolicy{allow: false},
+		audit,
+		func(_ context.Context) string { return "sa-1" },
+	)
+	d := r.Decide(context.Background(), basicInput(GetObject), PhasePreLoad)
+	assert.False(t, d.Allow)
+	assert.Equal(t, "bucket_policy", d.Layer)
+	assert.Equal(t, "policy_deny", d.Reason)
+	if assert.Len(t, audit.denies, 1) {
+		assert.Equal(t, "policy_deny", audit.denies[0].reason)
+	}
+}
+
+func TestRequestAuthorizer_PreLoad_PolicyExempt_BucketPolicyCRUD(t *testing.T) {
+	audit := &fakeAudit{}
+	r := NewRequestAuthorizer(
+		stubStore{enabled: true},
+		func(_, _ string, _ S3Action) bool { return true }, // IAM allows
+		stubPolicy{allow: false},                           // policy would deny
+		audit,
+		func(_ context.Context) string { return "sa-1" },
+	)
+	for _, action := range []S3Action{GetBucketPolicy, PutBucketPolicy, DeleteBucketPolicy} {
+		d := r.Decide(context.Background(), basicInput(action), PhasePreLoad)
+		assert.True(t, d.Allow, "action=%v must bypass policy when IAM allows", action)
+	}
+	assert.Empty(t, audit.denies, "no policy denies for bucket-policy CRUD")
+}
+
+func TestRequestAuthorizer_PreLoad_AnonymousMode_PolicyDenies(t *testing.T) {
+	audit := &fakeAudit{}
+	r := NewRequestAuthorizer(
+		stubStore{enabled: false}, // auth disabled
+		func(_, _ string, _ S3Action) bool { return false },
+		stubPolicy{allow: false},
+		audit,
+		func(_ context.Context) string { return "" },
+	)
+	d := r.Decide(context.Background(), basicInput(GetObject), PhasePreLoad)
+	assert.False(t, d.Allow)
+	assert.Equal(t, "bucket_policy", d.Layer)
+	assert.Equal(t, "policy_deny", d.Reason)
+}

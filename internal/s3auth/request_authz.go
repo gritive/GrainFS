@@ -98,7 +98,16 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 		}
 	}
 
-	// Layer 2 + Layer 3 are added in subsequent tasks.
+	// Layer 2: bucket policy. Skipped for *BucketPolicy CRUD to avoid
+	// chicken-and-egg lockout; IAM (Layer 1) already gates these actions.
+	if !isBucketPolicyAction(in.Action) && r.policy != nil {
+		if !r.policy.Allow(ctx, in) {
+			r.recordDeny(ctx, saID, in, "policy_deny")
+			return Decision{Allow: false, Layer: "bucket_policy", Reason: "policy_deny"}
+		}
+	}
+
+	// Layer 3 is added in the next task.
 
 	if authEnabled {
 		r.recordAllow(ctx, saID, in)
@@ -119,4 +128,8 @@ func (r *RequestAuthorizer) recordDeny(ctx context.Context, saID string, in Perm
 		return
 	}
 	r.audit.RecordDeny(ctx, saID, in.Resource.Bucket, in.Resource.Key, in.Action, reason)
+}
+
+func isBucketPolicyAction(a S3Action) bool {
+	return a == GetBucketPolicy || a == PutBucketPolicy || a == DeleteBucketPolicy
 }
