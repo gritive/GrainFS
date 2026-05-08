@@ -258,21 +258,63 @@ func TestApplier_GrantWildcardPut(t *testing.T) {
 func TestApplier_GrantWildcardDelete_RoundTrip(t *testing.T) {
 	s := NewStore()
 	ap := NewApplier(s, newTestEncryptor(t))
-	if err := ap.ApplyGrantWildcardPut(buildGrantWildcardPut(t, "sa-default", RoleAdmin, time.Unix(1, 0))); err != nil {
+	// Use a non-default SA so the lockout-invariant guard in
+	// ApplyGrantWildcardDelete (Phase 5d #3) doesn't apply — this test
+	// exercises plain round-trip semantics, not the sa-default invariant.
+	const saID = "sa-rt"
+	if err := ap.ApplyGrantWildcardPut(buildGrantWildcardPut(t, saID, RoleAdmin, time.Unix(1, 0))); err != nil {
 		t.Fatalf("ApplyGrantWildcardPut: %v", err)
 	}
-	if got := s.LookupGrant("sa-default", "any-bucket"); got != RoleAdmin {
+	if got := s.LookupGrant(saID, "any-bucket"); got != RoleAdmin {
 		t.Fatalf("pre-delete fallback = %v, want RoleAdmin", got)
 	}
-	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, "sa-default")); err != nil {
+	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, saID)); err != nil {
 		t.Fatalf("ApplyGrantWildcardDelete: %v", err)
 	}
-	if got := s.LookupGrant("sa-default", "any-bucket"); got != RoleNone {
+	if got := s.LookupGrant(saID, "any-bucket"); got != RoleNone {
 		t.Fatalf("post-delete = %v, want RoleNone", got)
 	}
 	// Idempotent on missing entry.
-	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, "sa-default")); err != nil {
+	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, saID)); err != nil {
 		t.Fatalf("second ApplyGrantWildcardDelete: %v", err)
+	}
+}
+
+// TestApplyGrantWildcardDelete_RejectsDefaultSALockout verifies that the
+// FSM apply path silently no-ops a wildcard delete on sa-default when no
+// explicit per-bucket grants exist — the lockout invariant. Pre-fix this
+// check lived only in HandleGrantDelete; two concurrent admin clients
+// could both pass the read-side guard and both propose, leaving zero
+// grants on sa-default + sticky auth_enabled = cluster lockout.
+func TestApplyGrantWildcardDelete_RejectsDefaultSALockout(t *testing.T) {
+	s := NewStore()
+	ap := NewApplier(s, newTestEncryptor(t))
+	// Seed the wildcard so the would-be removal has something to remove.
+	if err := ap.ApplyGrantWildcardPut(buildGrantWildcardPut(t, DefaultSAID, RoleAdmin, time.Unix(1, 0))); err != nil {
+		t.Fatalf("ApplyGrantWildcardPut: %v", err)
+	}
+	if got := s.LookupGrant(DefaultSAID, "any"); got != RoleAdmin {
+		t.Fatalf("pre-delete wildcard fallback = %v, want RoleAdmin", got)
+	}
+	// Apply must noop (return nil) but NOT remove the wildcard.
+	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, DefaultSAID)); err != nil {
+		t.Fatalf("ApplyGrantWildcardDelete: %v", err)
+	}
+	if got := s.LookupGrant(DefaultSAID, "any"); got != RoleAdmin {
+		t.Fatalf("wildcard removed despite lockout invariant: got %v, want RoleAdmin", got)
+	}
+
+	// With at least one explicit grant present, removal is allowed.
+	s.applyGrantPut(Grant{SAID: DefaultSAID, Bucket: "owned", Role: RoleAdmin})
+	if err := ap.ApplyGrantWildcardDelete(buildGrantWildcardDelete(t, DefaultSAID)); err != nil {
+		t.Fatalf("ApplyGrantWildcardDelete with explicit grant: %v", err)
+	}
+	if got := s.LookupGrant(DefaultSAID, "any"); got != RoleNone {
+		t.Fatalf("post-delete wildcard fallback = %v, want RoleNone", got)
+	}
+	// Explicit grant survives.
+	if got := s.LookupGrant(DefaultSAID, "owned"); got != RoleAdmin {
+		t.Fatalf("explicit grant clobbered by wildcard delete: %v", got)
 	}
 }
 

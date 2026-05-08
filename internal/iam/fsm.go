@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 )
@@ -153,11 +155,31 @@ func (a *Applier) ApplyGrantWildcardPut(payload []byte) error {
 
 // ApplyGrantWildcardDelete removes the wildcard grant for the given SA.
 // Idempotent on missing entries.
+//
+// Lockout invariant: refuse to remove the wildcard from sa-default when
+// no explicit per-bucket grants exist. The admin layer (HandleGrantDelete)
+// already checks NumExplicitGrants before proposing, but raft is
+// concurrent — two admin clients could both pass the read-side guard and
+// both propose. Single-applier raft serialization makes the apply check
+// race-free: at most one of the two applies sees explicit grants present;
+// the second sees the first's mutation reflected in store state.
+//
+// Determinism: the check reads from the same Store every node mirrors,
+// so all replicas reach the same decision. We log + skip-mutation rather
+// than return error so historical commits (pre-fix) replay cleanly across
+// rolling upgrades and the apply loop's per-entry error path doesn't
+// poison consensus telemetry.
 func (a *Applier) ApplyGrantWildcardDelete(payload []byte) error {
 	p := iampb.GetRootAsGrantWildcardDeletePayload(payload, 0)
 	saID := string(p.SaId())
 	if saID == "" {
 		return fmt.Errorf("iam: GrantWildcardDelete missing sa_id")
+	}
+	if saID == DefaultSAID && a.store.NumExplicitGrants(saID) == 0 {
+		log.Warn().
+			Str("sa_id", saID).
+			Msg("iam: refusing to apply wildcard delete on sa-default with no explicit grants — would lock cluster out of S3 plane")
+		return nil
 	}
 	a.store.applyGrantWildcardDelete(saID)
 	return nil
