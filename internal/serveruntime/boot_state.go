@@ -6,6 +6,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // bootState carries the rolling state of Run's boot sequence. Phase functions
@@ -47,6 +48,15 @@ type bootState struct {
 	// stores opened later (run.go around shared-log fan-out) reuse the
 	// same option set without re-deriving it from cfg.
 	storeOpts []raft.BadgerLogStoreOption
+
+	// Transport (populated by transport phases — bootQUICTransport,
+	// bootPeerConnections, bootGroupRaftMux). transportPSK records the
+	// resolved cluster key (disk > flag > ephemeral). raftAddr is updated
+	// in-place by bootQUICTransport once Listen resolves a kernel-picked
+	// port (operator passed 127.0.0.1:0).
+	transportPSK  string
+	quicTransport *transport.QUICTransport
+	groupRaftMux  *raft.GroupRaftQUICMux
 }
 
 // newBootState returns an empty state bound to cfg. Caller is responsible for

@@ -99,55 +99,24 @@ func Run(ctx context.Context, cfg Config) error {
 		startupDecisions = state.startupDecisions
 	}
 
-	// Start QUIC transport for inter-node communication. Resolution order
-	// (rotation-spec D10):
-	//   1. keys.d/current.key wins over --cluster-key flag if both differ
-	//      (warn emitted; refuse-to-start path explicitly NOT used).
-	//   2. Disk only: use disk silently.
-	//   3. Flag only: use flag, mirror to keys.d/current.key on first boot.
-	//   4. Both empty + cluster mode: refused upstream by ValidateClusterKey.
-	//      Both empty + solo mode: generate ephemeral so zero-config holds.
-	resolvedKey, warn, err := ResolveClusterKey(dataDir, clusterKey)
-	if err != nil {
-		return fmt.Errorf("resolve cluster key: %w", err)
+	// PR 3 transport phases.
+	if err := bootQUICTransport(ctx, state); err != nil {
+		return err
 	}
-	if warn != "" {
-		log.Warn().Msg(warn)
+	if err := bootPeerConnections(ctx, state); err != nil {
+		return err
 	}
-	transportPSK := resolvedKey
-	if transportPSK == "" {
-		ephemeral, err := GenerateEphemeralClusterKey()
-		if err != nil {
-			return fmt.Errorf("init QUIC transport: %w", err)
-		}
-		transportPSK = ephemeral
+	// groupRaftMux must exist BEFORE NewMetaTransportQUICMux (line ~190)
+	// so the meta-raft transport auto-registers on construction. Moving
+	// the mux phase here (vs after node creation, where it lived
+	// pre-PR 3) preserves that invariant — nothing between here and
+	// metaTransport reads the mux.
+	if err := bootGroupRaftMux(state); err != nil {
+		return err
 	}
-	quicTransport, err := transport.NewQUICTransport(transportPSK)
-	if err != nil {
-		return fmt.Errorf("init QUIC transport: %w", err)
-	}
-	// Forwarded S3 PUTs can fan out into EC shard body streams on the bucket
-	// owner. Keep enough bulk capacity for that nested data path while meta and
-	// raft traffic remain independently classed.
-	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 64})
-	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
-		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)
-	}
-	state.AddCleanup(func() { quicTransport.Close() })
-	// Resolve `raftAddr` to its actual bound port. When the operator asked
-	// for 127.0.0.1:0 (singleton default) QUIC picks a free UDP port; we
-	// need that concrete address in allNodes so shard placement produces
-	// dialable self entries.
-	if local := quicTransport.LocalAddr(); local != "" {
-		raftAddr = local
-	}
-
-	// Connect to all peers
-	for _, peer := range peers {
-		if err := quicTransport.Connect(ctx, peer); err != nil {
-			log.Warn().Str("peer", peer).Err(err).Msg("failed to connect to peer (will retry lazily)")
-		}
-	}
+	quicTransport := state.quicTransport
+	groupRaftMux := state.groupRaftMux
+	raftAddr = state.raftAddr // bootQUICTransport may have resolved 127.0.0.1:0 → bound port
 
 	raftCfg := raft.DefaultConfig(nodeID, peers)
 	raftCfg.ManagedMode = cfg.BadgerManagedMode
@@ -163,20 +132,9 @@ func Run(ctx context.Context, cfg Config) error {
 	rpcTransport := raft.NewQUICRPCTransport(quicTransport, node)
 	rpcTransport.SetTransport()
 
-	// GroupRaftQUICMux multiplexes per-group raft RPCs over StreamGroupRaft.
-	// Created BEFORE NewMetaTransportQUICMux so the meta-raft transport can
-	// auto-register its node on the mux at construction time. This closes
-	// the codex P1 #3 startup race: if EnableMux ran before metaNode was
-	// registered, all inbound meta calls would hit "mux: unknown group
-	// __meta__" and meta election would stall.
-	groupRaftMux := raft.NewGroupRaftQUICMux(quicTransport)
-	if cfg.QUICMuxEnabled {
-		groupRaftMux.EnableMux(cfg.QUICMuxPoolSize, cfg.QUICMuxFlushWindow)
-		log.Info().
-			Int("pool", cfg.QUICMuxPoolSize).
-			Dur("flush", cfg.QUICMuxFlushWindow).
-			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
-	}
+	// groupRaftMux already constructed by bootGroupRaftMux phase above
+	// (moved earlier to enforce "mux exists BEFORE NewMetaTransportQUICMux"
+	// invariant explicitly via phase ordering).
 
 	// Meta-Raft: dedicated control-plane Raft group for cluster membership.
 	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
@@ -219,7 +177,7 @@ func Run(ctx context.Context, cfg Config) error {
 	})
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can be
 	// validated against the current cluster key (D10).
-	if _, activeSPKI, err := transport.DeriveClusterIdentity(transportPSK); err == nil {
+	if _, activeSPKI, err := transport.DeriveClusterIdentity(state.transportPSK); err == nil {
 		metaRaft.FSM().SetRotationSteady(activeSPKI)
 	} else {
 		log.Warn().Err(err).Msg("failed to seed rotation FSM steady state; rotation will be unavailable until next restart")
