@@ -926,3 +926,28 @@ func TestDedupPartialWritePreservesUntouchedBytes(t *testing.T) {
 	assert.Equal(t, patch, got[patchOffset:patchOffset+patchLen], "patched region must be 0xBB")
 	assert.Equal(t, full[patchOffset+patchLen:], got[patchOffset+patchLen:], "bytes after patch must be unchanged (0xAA)")
 }
+
+func TestNameFromBlockKey(t *testing.T) {
+	cases := []struct {
+		name   string
+		key    string
+		want   string
+		wantOK bool
+	}{
+		{"valid block key", BlockKeyPrefix("v1") + "000000000001", "v1", true},
+		{"valid block key big number", BlockKeyPrefix("vol-2") + "000000999999", "vol-2", true},
+		{"empty key", "", "", false},
+		{"missing meta prefix", "v1/blk_000000000001", "", false},
+		{"meta prefix only", MetaPrefix, "", false},
+		{"name without blk separator", MetaPrefix + "v1/meta", "", false},
+		{"name without blk separator, no slash", MetaPrefix + "v1", "", false},
+		{"empty name segment", MetaPrefix + "/blk_000000000001", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := NameFromBlockKey(tc.key)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

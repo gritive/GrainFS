@@ -38,6 +38,21 @@ const VolumeBucketName = volumeBucketName
 // stored within VolumeBucketName.
 func BlockKeyPrefix(name string) string { return blockPrefix(name) }
 
+// NameFromBlockKey extracts the volume name from a block-storage key produced
+// by blockPrefix/blockKey (format: "__vol/{name}/blk_{N}"). Returns "", false
+// when key is not a block key.
+func NameFromBlockKey(key string) (string, bool) {
+	if len(key) <= len(metaPrefix) || key[:len(metaPrefix)] != metaPrefix {
+		return "", false
+	}
+	rest := key[len(metaPrefix):]
+	idx := strings.Index(rest, "/blk_")
+	if idx <= 0 {
+		return "", false
+	}
+	return rest[:idx], true
+}
+
 // MetaPrefix is the shared key prefix for every volume's metadata and blocks
 // inside VolumeBucketName. Useful as the walk root for cross-volume operations
 // (e.g. scrub).

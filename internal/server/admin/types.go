@@ -69,16 +69,27 @@ type VlogBreakdownResp = adminapi.VlogBreakdownResp
 type VlogCategoryBytes = adminapi.VlogCategoryBytes
 type VlogSmokeReport = adminapi.VlogSmokeReport
 
+// VolumePlacementSource is the slim interface admin handlers need to obtain
+// per-volume replica/EC actual layout signals (ADR 0007) for volume health
+// composition. Implemented by an adapter over the cluster meta-Raft FSM;
+// defined here so handler tests can substitute a fake. nil VolumePlacement
+// (or a non-cluster runtime) disables the replica contribution to volume
+// health, leaving incident-only signals.
+type VolumePlacementSource interface {
+	VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]ReplicaLayoutFact, error)
+}
+
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
 type Deps struct {
 	Manager         *volume.Manager
-	Incident        incident.StateStore // List(ctx, limit) — optional, nil OK
-	Director        DirectorAPI         // optional; nil disables scrub admin endpoints
-	PeerHealth      PeerHealthAPI       // optional; nil disables cluster peer admin endpoints
-	VlogBreakdown   VlogBreakdownAPI    // optional; nil disables vlog breakdown endpoint
-	ScrubProposer   ScrubProposer       // optional; nil disables POST /v1/scrub
-	ScrubAggregator ScrubAggregator     // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
+	Incident        incident.StateStore   // List(ctx, limit) — optional, nil OK
+	Director        DirectorAPI           // optional; nil disables scrub admin endpoints
+	PeerHealth      PeerHealthAPI         // optional; nil disables cluster peer admin endpoints
+	VlogBreakdown   VlogBreakdownAPI      // optional; nil disables vlog breakdown endpoint
+	ScrubProposer   ScrubProposer         // optional; nil disables POST /v1/scrub
+	ScrubAggregator ScrubAggregator       // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
+	VolumePlacement VolumePlacementSource // optional; nil disables replica/EC volume health signal
 	Token           *dashboard.TokenStore
 	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID          string

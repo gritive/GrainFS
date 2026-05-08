@@ -177,7 +177,8 @@ func StatVolume(ctx context.Context, d *Deps, name string) (StatResp, error) {
 				}
 			}
 			vols := []VolumeInfo{resp.Volume}
-			annotateVolumeHealth(vols, all, nil)
+			replicas := fetchReplicaSummaries(ctx, d, vols)
+			annotateVolumeHealth(vols, all, replicas)
 			resp.Volume = vols[0]
 		} else {
 			resp.Volume.Health = "unknown"
@@ -199,11 +200,13 @@ func incidentToWireMap(st incident.IncidentState) map[string]any {
 	return out
 }
 
-// fetchAndAnnotateHealth fetches active incident state and delegates health
-// composition to the pure annotateVolumeHealth composer in health.go. On
-// fetch error it stamps "unknown"/"incident_lookup_failed" on every volume
-// without invoking the composer; with no incident source configured it
-// leaves the toVolumeInfo defaults in place.
+// fetchAndAnnotateHealth fetches active incident state plus per-volume
+// replica/EC layout signals and delegates composition to the pure
+// annotateVolumeHealth composer in health.go. On incident-fetch error it
+// stamps "unknown"/"incident_lookup_failed" without invoking the composer.
+// VolumePlacement errors are silent — the composer falls back to incident-only
+// health rather than stamping a noisy "replica_lookup_failed" while clusters
+// are reconfiguring.
 func fetchAndAnnotateHealth(ctx context.Context, d *Deps, vols []VolumeInfo) {
 	if d.Incident == nil {
 		return
@@ -216,7 +219,26 @@ func fetchAndAnnotateHealth(ctx context.Context, d *Deps, vols []VolumeInfo) {
 		}
 		return
 	}
-	annotateVolumeHealth(vols, all, nil)
+	replicas := fetchReplicaSummaries(ctx, d, vols)
+	annotateVolumeHealth(vols, all, replicas)
+}
+
+// fetchReplicaSummaries calls the optional VolumePlacement source and returns
+// nil on absence or error. Pulled into its own helper so handlers stay simple
+// and the silent-on-error contract is named.
+func fetchReplicaSummaries(ctx context.Context, d *Deps, vols []VolumeInfo) map[string]ReplicaLayoutFact {
+	if d.VolumePlacement == nil {
+		return nil
+	}
+	names := make([]string, len(vols))
+	for i, v := range vols {
+		names[i] = v.Name
+	}
+	replicas, err := d.VolumePlacement.VolumeReplicaSummaries(ctx, names)
+	if err != nil {
+		return nil
+	}
+	return replicas
 }
 
 // WriteAtVolume writes bytes to a volume at the given offset. Used by debugging

@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.99.0] - 2026-05-08 — volume health replica fetcher + handler wiring
+
+### Added
+
+- `internal/serveruntime/VolumePlacementAdapter` implements the new
+  `admin.VolumePlacementSource` interface over the cluster meta-Raft FSM.
+  One pass over `ObjectIndexLatestEntries(__grainfs_volumes, "", 0)` plus
+  a single `ShardGroups()` snapshot is fed through a pure
+  `aggregateVolumeReplicaLayout` helper that calls `cluster.ClassifyObjectLayout`
+  per entry and tallies counts per volume.
+- `volume.NameFromBlockKey(key)` extracts the volume name from a block-storage
+  key (`__vol/{name}/blk_{N}`). Unit-tested with 8 cases including malformed
+  keys and meta-only keys.
+- `admin.Deps.VolumePlacement` (optional, nil OK). `serveruntime.Run` wires
+  `NewVolumePlacementAdapter(metaRaft)` so cluster runtimes get replica
+  signals; standalone runtimes pass nil and the composer falls back to
+  incident-only health.
+
+### Changed
+
+- `fetchAndAnnotateHealth` (and `StatVolume`) now ask `VolumePlacement` for
+  per-volume replica summaries and pass them to `annotateVolumeHealth`.
+  VolumePlacement errors are silent — the composer keeps incident-only output
+  rather than stamping a noisy `replica_lookup_failed` while clusters
+  reconfigure.
+
 ## [0.0.98.0] - 2026-05-08 — IAM Foundation (ServiceAccount + AccessKey + Grant)
 
 ### Added
@@ -77,7 +103,6 @@
 - Typed `internal/iamadmin/` CLI client. The inline `iamRequest` helper
   in `cmd/grainfs/iam.go` covers the single consumer; extract when a
   second consumer (web admin UI, automation) appears.
-
 
 
 ## [0.0.97.0] - 2026-05-08 — volume health replica/EC layout signals
