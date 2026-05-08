@@ -1157,6 +1157,7 @@ func Run(ctx context.Context, cfg Config) error {
 			WarnRatio:     cfg.VlogWarnRatio,
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
+		VolumePlacement: NewVolumePlacementAdapter(metaRaft),
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
