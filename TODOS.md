@@ -4,6 +4,30 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
+### raft v2 (M2-M5 follow-ups from M1 adversarial review)
+
+> 2026-05-08 /ship adversarial review on `internal/raft/v2/` (M1 milestone, 0 caller until M5) raised 13 findings. Filed here for M2/M3/M5 work. v2 ships as new code only; not yet exercised in production.
+
+- [ ] **raft/v2: Leader no-op on becomeLeader (Raft §5.4.2)** — current `becomeLeader` doesn't append a no-op. With idle clients and prior-term uncommitted entries, those entries sit forever (term gate at `actor.go:781` correctly refuses commit-without-current-term). Real impact emerges with persistence + crash recovery (M2). v1 emits a no-op on election. Fix: append a `LogEntryCommand` no-op (or dedicated type) inside becomeLeader so the term gate can immediately advance.
+
+- [ ] **raft/v2: Goroutine explosion on partitioned peer** — `broadcastHeartbeat` + `handlePropose` spawn `go n.dispatchAppendEntries(...)` per peer per tick. With 5 peers + 50ms heartbeat = 100 goroutines/sec/leader steady-state. Under network partition where transport hangs, goroutines accumulate unboundedly (~10k+/min/peer with QUIC keepalive timing). memTransport doesn't expose this (synchronous), but production QUIC transport would. Fix: per-peer single-flight (only dispatch if previous reply received). Implement at PR 5+ when multi-peer transport hardens.
+
+- [ ] **raft/v2: applyCommitted commitIndex regression on Stop** — `actor.go:343` rolls back `commitIndex = i - 1` when Stop wins the apply select. Entries i..newCommit remain in log + AE Success was already replied to leader, so leader counts matchIndex while this follower's local commitIndex regresses. Silent split-brain on commit semantics on a future restart with persistence (M2). Fix: reply Success only after applyCh delivery, OR don't roll back commitIndex (already promised durable to leader's quorum math).
+
+- [ ] **raft/v2: cfg.MaxEntriesPerAE never enforced** — `buildAppendEntriesArgs` copies `log[next-1:]` (entire suffix). With 1GB log + fresh follower, first AE attempts to ship 1GB. Comment claims cap exists but field is unread. Fix: cap entries at `cfg.MaxEntriesPerAE` (default 512 from v1).
+
+- [ ] **raft/v2: Conflict-hint O(N) backward scan** — `applyConflictHint` walks leader's log from `len(log)-1` down to 0 per reject. On a 1M-entry log with stale follower, every reject blocks the actor for a full backward scan. Fix: bound the scan or binary-search by term.
+
+- [ ] **raft/v2: cmdCh backpressure cascade** — slow FSM consumer wedges actor's applyCh send → wedges cmdCh → wedges all incoming RPCs (HandleRequestVote/HandleAppendEntries) → peers election-timeout this node → cascading election storm. Structural fix: make applyCh delivery non-blocking from actor (separate apply goroutine reading from a buffered queue), OR at least give Propose a ctx variant + drop AE on cmdCh-full to keep election alive.
+
+- [ ] **raft/v2: triple-publish allocs in handleAppendEntries** — `actor.go:256/277/322` can each call `publish()` (atomic.Pointer.Store of a fresh snapshot) per AE. snapshot() allocates `*readState` each call. Hot-path per heartbeat. Fix: publish once at function exit.
+
+- [ ] **raft/v2: Log Matching `e.Index` not validated against target** — `actor.go:292-309` truncate-on-conflict trusts term equality alone. Raft Log Matching is `(Index, Term)` — same-term + same-position = same-content holds for entries from same leader, but with membership churn / dueling leaders (M2 joint consensus territory) e.Index mismatch could be silently accepted from buggy leader. Fix: assert `e.Index == target` or ignore `e.Index` and recompute on follower.
+
+- [ ] **raft/v2: SetTransport race window after Start** — `node.go:166` says "must be called before Start" but nothing enforces it. Late SetTransport call is a data race the race detector won't catch unless test triggers a concurrent read. Fix: store via `atomic.Pointer[Transport]`, OR panic if called post-Start.
+
+- [ ] **raft/v2: Bootstrap flag is decorative** — `actor.run()` auto-promotes single-voter to Leader unconditionally. `Bootstrap()`'s CAS only controls return value. Caller expecting Bootstrap to gate cluster init (matching v1 semantics) gets silent auto-promotion. Either gate auto-promote on `bootstrapped.Load()` or document loudly that Bootstrap is informational-only in PR 7's stub state.
+
 ### 기타
 
 - [ ] **clusteradmin BaseOptions retro-fit** — `internal/clusteradmin/operations.go` 의
