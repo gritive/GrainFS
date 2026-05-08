@@ -1,27 +1,57 @@
 # Changelog
 
-## [0.0.105.0] - 2026-05-08 — IAM bucket-scoped access keys
+## [0.0.106.0] - 2026-05-08 — IAM bucket-scoped access keys
 
 ### Added
 
 - IAM bucket-scoped access keys: `AccessKey.BucketScope []string` 차원 추가. POST
   `/v1/iam/sa/{id}/key`에 `buckets:[]` 필드 (CLI: `grainfs iam key create --bucket
   <name>`, 반복 가능). 발급 시 strict 검증 (`scope ⊆ SA grants`, sentinel
-  `*`/`__system__` reject → 422). Authz Layer 0에서 scope 위반 시 403 + audit
+  `*`/`__system__` reject → 400). Authz Layer 0에서 scope 위반 시 403 + audit
   `reason=key_scope_mismatch`. Immutable at issue (변경 시 rotation).
+- ListBuckets (`GET /`) 응답이 scoped key의 BucketScope로 필터링됨 — scope에 없는
+  bucket은 응답에 미포함되어 enumeration leak 차단.
 
 ### Changed
 
 - 새 raft `MetaCmdType 30 IAMKeyCreateScoped` (scope 비어있으면 기존 type 23 사용).
-  Mixed-version 클러스터에서 v0.0.104.0 follower는 type 30을 unknown으로 graceful
+  Mixed-version 클러스터에서 v0.0.105.0 follower는 type 30을 unknown으로 graceful
   no-op 처리하고 warn 로그를 남긴다 — 의도적 propagation 결손이므로 운영자는
   rolling upgrade 완료 후에만 scoped key를 발급해야 한다.
 - IAM snapshot binary `version=2` (v1 호환 read path 보존, v3+ 거부).
+- `iam.ResolveSA`가 `(*AccessKey, string, bool)` 반환으로 시그니처 확장 — auth
+  middleware의 redundant `LookupKey` 호출 제거 (TOCTOU window 단축 + hot path
+  atomic load 1회로 통합).
 
 ### Migration
 
-- v0.0.104.0 이하 키는 `BucketScope=nil`로 자동 unrestricted (backward compat).
-- Rolling upgrade: 모든 노드를 v0.0.105.0+로 올린 뒤에 scoped key 발급.
+- v0.0.105.0 이하 키는 `BucketScope=nil`로 자동 unrestricted (backward compat).
+- Rolling upgrade: 모든 노드를 v0.0.106.0+로 올린 뒤에 scoped key 발급.
+
+## [0.0.105.0] - 2026-05-08 — LifecycleManager subscribes to raft leader events
+
+### Changed
+
+- `LifecycleManager` no longer polls `raft.Node.State()` every 250ms to
+  decide whether to run the worker. It registers a `raft.Event` channel
+  via `RegisterObserver` and reacts to `EventLeaderChange` events as they
+  arrive. The eager `reconcile` at startup is preserved so a node that is
+  already leader picks up the worker without waiting for the next event.
+  Net effect: leader-flip latency drops from up to 250ms to next-event
+  delivery (~heartbeat interval), and idle followers no longer wake every
+  250ms.
+- The internal `leadershipSource` interface gains
+  `RegisterObserver(chan<- raft.Event)` and `DeregisterObserver(chan<-
+  raft.Event)`. `*raft.Node` already implements these from
+  `internal/raft/observer.go`. The `pollEvery` field on the manager is
+  removed.
+- Test fake `fakeLeadership` was updated to mirror real `*raft.Node`
+  semantics: `set(state)` records the state and emits an
+  `EventLeaderChange` event to every registered observer, so the existing
+  Follower→Leader→Follower test driving still works without polling.
+- New tests verify observer registration/deregistration on Run lifecycle
+  and that non-leader-change events (e.g. `EventFailedHeartbeat`) do not
+  trigger reconcile.
 
 ## [0.0.104.0] - 2026-05-08 — wire NFSv4 cache invalidator into cluster registry
 
