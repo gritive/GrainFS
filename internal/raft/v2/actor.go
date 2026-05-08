@@ -141,13 +141,11 @@ func (n *Node) run() {
 			n.st.currentTerm = 1
 			n.persistHardState()
 		}
-		n.st.state = Leader
-		n.st.leaderID = n.cfg.ID
-		n.publish()
-		// Park the election timer. Single-voter Leader sends no heartbeats —
-		// PR 5a does not enable replication for the single-voter path; that
-		// stays the synchronous self-quorum path inherited from PR 1.
-		n.electionTimer.Reset(idleElectionTimeout)
+		// Route through becomeLeader so the §5.4.2 no-op append fires (FSM
+		// consumers see the same "no-op on becomeLeader" contract that the
+		// multi-voter path provides). becomeLeader skips the heartbeat ticker
+		// when Peers is empty, so this stays cheap.
+		n.becomeLeader()
 	} else {
 		// Multi-voter Follower: arm the election timer so a missing leader
 		// triggers a Candidate transition.
@@ -205,29 +203,20 @@ func (n *Node) handleRequestVote(cmd command) {
 	args := cmd.rvArgs
 	reply := &RequestVoteReply{Term: n.st.currentTerm}
 
-	// Rule 1: deny stale term.
+	// Rule 1: deny stale term — no state change → no publish.
 	if args.Term < n.st.currentTerm {
 		cmd.rvReply <- reply
 		return
 	}
 
-	// Rule 2: step down on higher term. Clears any vote from the prior term.
-	// If we are Leader, route through becomeFollower so leader-only state
-	// (matchIndex, nextIndex, proposeWaiters, heartbeat ticker) is torn down
-	// — leaving outstanding ProposeWait callers hanging is a correctness bug.
+	// Rule 2 mutates state if term advances; Rule 3 mutates votedFor on grant.
+	// Either way, publish exactly once at exit.
+	defer n.publish()
+
+	// Rule 2: step down on higher term. stepDownToFollower handles leader-only
+	// state cleanup, persists HardState, and does NOT publish.
 	if args.Term > n.st.currentTerm {
-		if n.st.state == Leader {
-			n.becomeFollower(args.Term)
-		} else {
-			n.st.currentTerm = args.Term
-			n.st.state = Follower
-			n.st.votedFor = ""
-			n.st.leaderID = ""
-			// Persist before publishing: the new term must survive a crash before
-			// we expose it to peers (reply.Term = currentTerm below).
-			n.persistHardState()
-			n.publish()
-		}
+		n.stepDownToFollower(args.Term)
 		reply.Term = n.st.currentTerm
 	}
 
@@ -239,7 +228,6 @@ func (n *Node) handleRequestVote(cmd command) {
 		// Persist before sending the reply — the vote must be durable before the
 		// candidate learns it was granted. §5.4.1 safety depends on this order.
 		n.persistHardState()
-		n.publish()
 		reply.VoteGranted = true
 		// Mirror v1's signalReset (raft.go:1807): granting a vote counts as
 		// "current leader contact" for election timer purposes. Without this
@@ -272,7 +260,7 @@ func (n *Node) handleAppendEntries(cmd command) {
 	args := cmd.aeArgs
 
 	// Rule 1: stale leader → reject. Reply with our higher term so the sender
-	// learns it is no longer leader.
+	// learns it is no longer leader. No state change → no publish needed.
 	if args.Term < n.st.currentTerm {
 		cmd.aeReply <- &AppendEntriesReply{
 			Term:    n.st.currentTerm,
@@ -281,25 +269,16 @@ func (n *Node) handleAppendEntries(cmd command) {
 		return
 	}
 
-	// Rule 2 (term advance): adopt the new term. If we are Leader, route
-	// through becomeFollower so leader-only state (matchIndex, nextIndex,
-	// proposeWaiters, heartbeat ticker) is torn down — otherwise outstanding
-	// ProposeWait callers would hang until ctx timeout. Note we do NOT
-	// publish in the inline path; Rule 3 below publishes once leaderID is
-	// also set, emitting a single coherent snapshot.
+	// From here on every reject/success path mutates state; publish exactly
+	// once at function exit instead of per-branch (hot path: per peer per
+	// heartbeat).
+	defer n.publish()
+
+	// Rule 2 (term advance): adopt the new term. stepDownToFollower handles
+	// leader-only state cleanup if applicable, persists HardState, and does
+	// NOT publish — Rule 3 sets leaderID before our deferred publish fires.
 	if args.Term > n.st.currentTerm {
-		if n.st.state == Leader {
-			n.becomeFollower(args.Term)
-			// becomeFollower already published with leaderID="" and rearmed
-			// the election timer; Rule 3's leaderID set + publish overrides
-			// that with the real leader.
-		} else {
-			n.st.currentTerm = args.Term
-			n.st.votedFor = ""
-			// Persist before proceeding — the new term must survive a crash
-			// before we send a reply that carries it (reply.Term = currentTerm).
-			n.persistHardState()
-		}
+		n.stepDownToFollower(args.Term)
 	}
 
 	// Rule 3 (same/advanced term): recognise the leader. Candidate steps down,
@@ -316,7 +295,6 @@ func (n *Node) handleAppendEntries(cmd command) {
 		// Case 1: follower's log too short. Hint ConflictTerm=0,
 		// ConflictIndex=lastLogIndex+1 so the leader jumps directly to where
 		// our log ends.
-		n.publish()
 		cmd.aeReply <- &AppendEntriesReply{
 			Term:          n.st.currentTerm,
 			Success:       false,
@@ -336,7 +314,6 @@ func (n *Node) handleAppendEntries(cmd command) {
 		for conflictIdx > 1 && n.mustTermAt(conflictIdx-1) == conflictTerm {
 			conflictIdx--
 		}
-		n.publish()
 		cmd.aeReply <- &AppendEntriesReply{
 			Term:          n.st.currentTerm,
 			Success:       false,
@@ -360,7 +337,6 @@ func (n *Node) handleAppendEntries(cmd command) {
 		if e.Index != target {
 			// Entry index disagrees with the expected logical position.
 			// Reject without mutating the log; leader will retry.
-			n.publish()
 			cmd.aeReply <- &AppendEntriesReply{
 				Term:          n.st.currentTerm,
 				Success:       false,
@@ -403,7 +379,6 @@ func (n *Node) handleAppendEntries(cmd command) {
 		}
 	}
 
-	n.publish()
 	cmd.aeReply <- &AppendEntriesReply{
 		Term:    n.st.currentTerm,
 		Success: true,
@@ -466,26 +441,23 @@ func (n *Node) handlePropose(cmd command) {
 		panic("raftv2: Append: " + err.Error())
 	}
 
-	// Single-voter shortcut: self-quorum is met by appending.
+	// Single-voter shortcut: self-quorum is met by appending. Route through
+	// applyCommitted so the becomeLeader no-op (idx 1, present after PR 12's
+	// uniform single/multi-voter Leader transition) is delivered to applyCh
+	// before this entry. The waiter is registered in proposeWaiters so
+	// applyCommitted resolves it.
 	if len(n.cfg.Peers) == 0 {
-		n.st.commitIndex = idx
-		n.publish()
-		// Deliver to FSM. Select on stopCh so Stop() never deadlocks against a
-		// slow ApplyCh reader (mirrors v1 raft.go:707-711).
-		select {
-		case n.applyCh <- entry:
-		case <-n.stopCh:
-			// If Stop wins, the entry is committed in-memory but undelivered.
-			// Acceptable pre-persistence; future LogStore (PR 6+) will re-
-			// deliver on restart by replaying log[applied+1..commitIndex].
-			if cmd.proposeReply != nil {
-				cmd.proposeReply <- proposalResult{err: ErrNodeStopped}
-			}
-			return
-		}
 		if cmd.proposeReply != nil {
-			cmd.proposeReply <- proposalResult{index: idx}
+			if n.st.proposeWaiters == nil {
+				n.st.proposeWaiters = make(map[uint64]chan proposalResult)
+			}
+			n.st.proposeWaiters[idx] = cmd.proposeReply
 		}
+		n.applyCommitted(n.st.commitIndex, idx)
+		n.publish()
+		// applyCommitted may rollback commitIndex on Stop race; if so the
+		// proposeWaiter never fires. Caller's ProposeWait handles that via
+		// its own ctx/stopCh select (propose.go:48-58).
 		return
 	}
 
@@ -582,19 +554,23 @@ func (n *Node) becomeLeader() {
 	n.st.state = Leader
 	n.st.leaderID = n.st.id
 
-	// Raft §5.4.2 no-op: append a blank entry at the new term immediately on
-	// election so that maybeAdvanceCommitIndex can satisfy the term gate
-	// (log[N].Term == currentTerm) without waiting for a client request.
-	// This also causes prior-term uncommitted entries to be committed as a
-	// side effect once the no-op's commit advances the commit index. FSM
-	// consumers MUST ignore LogEntryNoOp entries (Command is always nil).
-	noOpIdx := n.st.lastLogIndex() + 1
-	if err := n.st.log.Append([]LogEntry{{
-		Term:  n.st.currentTerm,
-		Index: noOpIdx,
-		Type:  LogEntryNoOp,
-	}}); err != nil {
-		panic("raftv2: Append no-op: " + err.Error())
+	// Raft §5.4.2 no-op: multi-voter only. Append a blank entry at the new
+	// term immediately on election so maybeAdvanceCommitIndex can satisfy
+	// the term gate (log[N].Term == currentTerm) without waiting for a
+	// client request, committing any prior-term uncommitted entries as a
+	// side effect. Single-voter clusters have self-quorum so entries commit
+	// at append time — there can never be a prior-term uncommitted entry
+	// at single-voter election, making the no-op unnecessary noise on the
+	// applyCh. FSM consumers MUST ignore LogEntryNoOp entries (Command nil).
+	if len(n.cfg.Peers) > 0 {
+		noOpIdx := n.st.lastLogIndex() + 1
+		if err := n.st.log.Append([]LogEntry{{
+			Term:  n.st.currentTerm,
+			Index: noOpIdx,
+			Type:  LogEntryNoOp,
+		}}); err != nil {
+			panic("raftv2: Append no-op: " + err.Error())
+		}
 	}
 
 	// Initialise per-peer replication state per Raft §5.3: nextIndex starts
@@ -620,53 +596,62 @@ func (n *Node) becomeLeader() {
 	}
 	n.electionTimer.Reset(idleElectionTimeout)
 
-	// Start heartbeat ticker.
-	interval := n.cfg.HeartbeatTimeout
-	if interval <= 0 {
-		interval = defaultHeartbeatTimeout
+	// Multi-voter only: start heartbeat ticker and fire an immediate AE so
+	// followers learn of the new leader without waiting a full interval.
+	// Single-voter clusters have no peers; skipping the ticker avoids waking
+	// the actor every 50ms for an empty broadcastHeartbeat.
+	if len(n.cfg.Peers) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+		n.broadcastHeartbeat()
 	}
-	n.heartbeatTicker = time.NewTicker(interval)
-
-	// Immediate heartbeat — followers learn of the new leader without waiting
-	// a full interval, and our election timer reset propagates to them.
-	n.broadcastHeartbeat()
 }
 
-// becomeFollower steps down to Follower at the given term. votedFor and
-// leaderID are cleared because the term advanced; if the caller already
-// knows the new leader they should set leaderID after this call. Heartbeat
-// ticker (if any) is stopped and the election timer is rearmed.
+// stepDownToFollower applies the state transition to Follower (term, vote,
+// leader, leader-only state cleanup) and persists HardState, but does NOT
+// publish() or resetElectionTimer(). Callers that will publish/reset
+// themselves at function exit (e.g. handleAppendEntries, handleRequestVote)
+// use this to avoid redundant readState allocations on the AE/RV hot path.
 //
-// Leader-only state (matchIndex, nextIndex, proposeWaiters) is cleared.
-// Outstanding waiters receive ErrProposalFailed since their entries' commit
-// fates are no longer this node's responsibility.
-func (n *Node) becomeFollower(term uint64) {
+// Outstanding ProposeWait callers receive ErrProposalFailed because the
+// entries' commit fate is no longer this node's responsibility.
+func (n *Node) stepDownToFollower(term uint64) {
+	if n.st.state == Leader {
+		if n.heartbeatTicker != nil {
+			n.heartbeatTicker.Stop()
+			n.heartbeatTicker = nil
+		}
+		// Clear leader-only replication state. Sends are non-blocking
+		// (cap-1 buffered chan per ProposeWait at propose.go:39).
+		for idx, w := range n.st.proposeWaiters {
+			select {
+			case w <- proposalResult{err: ErrProposalFailed}:
+			default:
+			}
+			delete(n.st.proposeWaiters, idx)
+		}
+		n.st.matchIndex = nil
+		n.st.nextIndex = nil
+		n.st.proposeWaiters = nil
+	}
 	n.st.currentTerm = term
 	n.st.state = Follower
 	n.st.votedFor = ""
 	n.st.leaderID = ""
 	n.st.votesGranted = 0
-	if n.heartbeatTicker != nil {
-		n.heartbeatTicker.Stop()
-		n.heartbeatTicker = nil
-	}
-	// Clear leader-only replication state. Reply ErrProposalFailed to any
-	// waiter still attached so callers don't block forever. Sends are non-
-	// blocking (cap-1 buffered chan; one send guaranteed to succeed since the
-	// chan was created fresh per ProposeWait at propose.go:39).
-	for idx, w := range n.st.proposeWaiters {
-		select {
-		case w <- proposalResult{err: ErrProposalFailed}:
-		default:
-		}
-		delete(n.st.proposeWaiters, idx)
-	}
-	n.st.matchIndex = nil
-	n.st.nextIndex = nil
-	n.st.proposeWaiters = nil
-	// Persist before publishing so external observers never see a term that has
-	// not yet survived a crash.
+	// Persist before any caller-visible side effect (reply.Term, publish).
 	n.persistHardState()
+}
+
+// becomeFollower steps down to Follower at the given term and immediately
+// publishes + rearms the election timer. Use stepDownToFollower instead from
+// hot paths (handleAppendEntries, handleRequestVote) that batch publish at
+// function exit.
+func (n *Node) becomeFollower(term uint64) {
+	n.stepDownToFollower(term)
 	n.publish()
 	n.resetElectionTimer()
 }
@@ -727,10 +712,11 @@ func (n *Node) buildAppendEntriesArgs(peer string) *AppendEntriesArgs {
 // The select-on-stopCh guard prevents a leak when the actor exits while a
 // transport call is in flight.
 func (n *Node) sendRequestVote(peer string, args *RequestVoteArgs) {
-	if n.transport == nil {
+	t := n.loadTransport()
+	if t == nil {
 		return
 	}
-	reply, err := n.transport.SendRequestVote(peer, args)
+	reply, err := t.SendRequestVote(peer, args)
 	c := command{kind: cmdVoteReply, vrPeer: peer, vrErr: err}
 	if err == nil && reply != nil {
 		c.vrTerm = reply.Term
@@ -749,11 +735,12 @@ func (n *Node) sendRequestVote(peer string, args *RequestVoteArgs) {
 // the per-peer view. Select-on-stopCh prevents goroutine leaks when the
 // actor exits while a transport call is in flight.
 func (n *Node) dispatchAppendEntries(peer string, args *AppendEntriesArgs) {
-	if n.transport == nil {
+	t := n.loadTransport()
+	if t == nil {
 		return
 	}
 	matchAfter := args.PrevLogIndex + uint64(len(args.Entries))
-	reply, err := n.transport.SendAppendEntries(peer, args)
+	reply, err := t.SendAppendEntries(peer, args)
 	c := command{
 		kind:         cmdHeartbeatReply,
 		hbPeer:       peer,

@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.0.119.0] - 2026-05-08 — raft v2 M1 follow-ups: 4 quick wins (PR 12)
+
+### Changed
+
+- `handleAppendEntries` and `handleRequestVote` now `defer n.publish()` after
+  the stale-term early return, instead of calling `n.publish()` per branch.
+  Eliminates per-AE/RV `*readState` allocation duplication on the heartbeat
+  hot path. (TODO #4)
+- New `stepDownToFollower(term)` helper performs the term-advance state
+  mutation (currentTerm, vote, leader, leader-only state cleanup) and
+  persists HardState without publishing or rearming the election timer —
+  caller is expected to do those at function exit. `becomeFollower` is now a
+  thin wrapper that adds publish + resetElectionTimer.
+- `Node.transport` is now `atomic.Pointer[Transport]`. `SetTransport` calls
+  Store; outbound dispatch goroutines (sendRequestVote, dispatchAppendEntries)
+  read via Load through `loadTransport()`. A late SetTransport after Start
+  is now data-race-free, though still discouraged. (TODO #5)
+- `Bootstrap()` doc tightened to call out that it is INFORMATIONAL ONLY today
+  — actor.run() auto-promotes single-voter regardless of whether Bootstrap
+  was called. Callers MUST NOT depend on "Start without Bootstrap stays
+  Follower"; that contract is reserved for the M5 caller migration. (TODO #6)
+- Single-voter auto-promote in `actor.run()` now routes through
+  `becomeLeader()` for state-transition consistency with multi-voter. The
+  becomeLeader path is uniform across single/multi-voter; `LogEntryNoOp` is
+  appended only when `len(cfg.Peers) > 0` (§5.4.2 motivation does not apply
+  to single-voter — self-quorum commits at append, no prior-term uncommitted
+  entries possible). Heartbeat ticker is also skipped for single-voter
+  (no peers to broadcast to). (TODO #7)
+- `handlePropose` single-voter shortcut now routes through `applyCommitted`
+  instead of inlining the apply logic — preserves the same behaviour but
+  consolidates the apply+waiter resolution path through one helper.
+
+### Notes
+
+- Pure correctness/perf bundle. No new public API surface. All 55+ tests
+  pass under `-race -count=10` (~33s).
+- 3 of the 7 raft v2 follow-up TODOs from the M1 adversarial review remain:
+  goroutine explosion on partitioned peer (#1), applyCommitted commitIndex
+  regression on Stop (#2), cmdCh backpressure cascade (#3). Larger
+  structural changes; deferred to dedicated PRs.
+
 ## [0.0.118.0] - 2026-05-08 — ClusterInfo Snapshot (single seam for cluster topology fan-out)
 
 ### Refactored
