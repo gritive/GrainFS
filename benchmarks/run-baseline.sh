@@ -38,8 +38,6 @@ echo "Starting GrainFS (data dir: $DATA_DIR)..."
 "$BINARY" serve \
   --data "$DATA_DIR" \
   --port "$BASE_PORT" \
-  --access-key "$ACCESS_KEY" \
-  --secret-key "$SECRET_KEY" \
   --nfs4-port 0 \
   --nbd-port 0 \
   $(bench_encryption_args) \

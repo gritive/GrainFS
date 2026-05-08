@@ -39,8 +39,6 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	upCmd.Stdout = os.Stdout
 	upCmd.Stderr = os.Stderr
@@ -138,8 +136,6 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	upCmd.Stdout = os.Stdout
 	upCmd.Stderr = os.Stderr

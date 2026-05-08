@@ -997,9 +997,10 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarders(metaRaft, backend, "s3://grainfs-tables/warehouse", metaForward, metaReadSender, metaReadTargets)))
 	}
-	// Propagate S3 auth from --access-key / --secret-key. Previously this
-	// was local-only; cluster mode silently ran without auth regardless of
-	// the flags.
+	// Propagate S3 auth (IAM verifier + secret lookup) into cluster mode.
+	// Previously the legacy --access-key/--secret-key wiring was local-only
+	// and cluster mode silently ran without auth; the IAM-only model
+	// shares the same authOpts across both code paths.
 	srvOpts = append(srvOpts, authOpts...)
 	if balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(NewBalancerInfoAdapter(balancerProposer)))

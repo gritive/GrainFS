@@ -35,8 +35,6 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

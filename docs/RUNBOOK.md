@@ -240,13 +240,18 @@ Expected: Version string matches expected deployment version
 
 ### Step 4: Start GrainFS
 
+`grainfs serve` no longer accepts `--access-key`/`--secret-key`. The first cluster
+operator runs the admin SA bootstrap (see "Admin UDS — Bootstrap & Permissions"
+above) immediately after the first node starts; the resulting `access_key`/
+`secret_key` are then used by **S3 clients** (e.g., `aws --endpoint-url`) and
+exported as `$GRAINFS_ACCESS_KEY`/`$GRAINFS_SECRET_KEY` for the rest of this
+runbook's `aws` examples.
+
 **Local mode:**
 ```bash
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
-  --access-key $GRAINFS_ACCESS_KEY \
-  --secret-key $GRAINFS_SECRET_KEY \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
@@ -258,8 +263,6 @@ grainfs serve \
   --port $GRAINFS_PORT \
   --node-id node-1 \
   --raft-addr node-1.example.com:9001 \
-  --access-key $GRAINFS_ACCESS_KEY \
-  --secret-key $GRAINFS_SECRET_KEY \
   > /var/log/grainfs/production.log 2>&1 &
 
 # Additional nodes join through any existing member's Raft address
@@ -269,8 +272,6 @@ grainfs serve \
   --node-id node-2 \
   --raft-addr node-2.example.com:9001 \
   --join node-1.example.com:9001 \
-  --access-key $GRAINFS_ACCESS_KEY \
-  --secret-key $GRAINFS_SECRET_KEY \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
@@ -332,8 +333,6 @@ cp $LATEST_BACKUP /usr/local/bin/grainfs
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
-  --access-key $GRAINFS_ACCESS_KEY \
-  --secret-key $GRAINFS_SECRET_KEY \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
@@ -512,10 +511,14 @@ docker run -d \
   --restart unless-stopped \
   -p 9000:9000 \
   -v grainfs-data:/data \
-  -e GRAINFS_ACCESS_KEY=<from-secrets-manager> \
-  -e GRAINFS_SECRET_KEY=<from-secrets-manager> \
   grainfs:latest
 ```
+
+After the container starts, run the admin SA bootstrap once via the host-side
+admin socket (`docker cp` is not needed — `grainfs iam sa create` against
+`<host-data-dir>/admin.sock` works since the volume is shared with the host).
+Export the returned credentials as `$GRAINFS_ACCESS_KEY`/`$GRAINFS_SECRET_KEY`
+for subsequent S3 client commands.
 
 The image default command is `serve --data /data --port 9000 --nfs4-port 0 --nbd-port 0`.
 It is intentionally S3-only so the non-root container can start without binding privileged
@@ -568,12 +571,6 @@ kubectl create namespace grainfs
 
 **Deployment:**
 ```bash
-# Create ConfigMap for configuration
-kubectl create configmap grainfs-config \
-  --from-literal=access-key="$GRAINFS_ACCESS_KEY" \
-  --from-literal=secret-key="$GRAINFS_SECRET_KEY" \
-  --namespace=grainfs
-
 # Create PersistentVolumeClaim
 kubectl apply -f k8s/pvc.yaml -n grainfs
 
@@ -613,17 +610,6 @@ spec:
           value: /grainfs/data
         - name: GRAINFS_PORT
           value: "9000"
-        env:
-        - name: GRAINFS_ACCESS_KEY
-          valueFrom:
-            configMapKeyRef:
-              name: grainfs-config
-              key: access-key
-        - name: GRAINFS_SECRET_KEY
-          valueFrom:
-            configMapKeyRef:
-              name: grainfs-config
-              key: secret-key
         volumeMounts:
         - name: data
           mountPath: /grainfs/data

@@ -36,8 +36,6 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	srcCmd.Stdout = os.Stdout
 	srcCmd.Stderr = os.Stderr
@@ -83,8 +81,6 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	dstCmd.Stdout = os.Stdout
 	dstCmd.Stderr = os.Stderr
