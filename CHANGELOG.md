@@ -11,13 +11,23 @@
   `dashboard_healing_card_test.go`, `encryption_test.go`,
   `erasure_test.go`, `jepsen_impl_test.go`, `migration_injector_test.go`,
   `pullthrough_test.go`, `restart_recovery_test.go`, and `smoke_test.go`.
+- `benchmarks/run-baseline.sh` and `tests/fuse_s3_colima/fuse_s3_colima_test.go`
+  had the same orphaned argument pair on their `grainfs serve`
+  invocations — caught by adversarial review. Both are off the
+  default test path (one is a benchmark script, the other lives
+  behind the `colima` build tag) so the unit + e2e suites didn't
+  surface them.
   In master 5748d2e0 (v0.0.112.0), `bootstrapAdminViaUDS()` calls had
   been **added** but the legacy lines had **not been removed** —
   cobra rejected the unknown flags with `Error: unknown flag: --access-key`
   on every invocation, so all 12 e2e tests hit `waitForPort` timeout.
 - `cmd/grainfs/serve_config.go`: removed `"secret-key"` from the
   redaction switch (the flag itself is gone in v0.0.112.0; the case was
-  dead). `cluster-key`, `alert-webhook-secret`, `heal-receipt-psk`
+  dead) and added `"upstream-secret-key"` to the redaction set —
+  caught by adversarial review as a pre-existing leak: the flag was
+  declared on `serveCmd` but never redacted, so its raw value landed
+  in the structured startup log and the on-disk flags snapshot.
+  `cluster-key`, `alert-webhook-secret`, `heal-receipt-psk`
   redaction unchanged.
 
 ### Changed
