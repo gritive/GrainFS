@@ -25,17 +25,18 @@ func NormalizeScope(in []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(in))
 	out := make([]string, 0, len(in))
 	for _, b := range in {
-		if strings.TrimSpace(b) == "" {
+		trimmed := strings.TrimSpace(b)
+		if trimmed == "" {
 			return nil, fmt.Errorf("%w: %q", ErrScopeEmptyEntry, b)
 		}
-		if b == WildcardBucket || b == SystemBucket {
-			return nil, fmt.Errorf("%w: %q", ErrScopeSentinel, b)
+		if trimmed == WildcardBucket || trimmed == SystemBucket {
+			return nil, fmt.Errorf("%w: %q", ErrScopeSentinel, trimmed)
 		}
-		if _, dup := seen[b]; dup {
+		if _, dup := seen[trimmed]; dup {
 			continue
 		}
-		seen[b] = struct{}{}
-		out = append(out, b)
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
 	}
 	slices.Sort(out)
 	return out, nil

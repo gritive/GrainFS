@@ -21,6 +21,9 @@ func TestNormalizeScope(t *testing.T) {
 		{"whitespace_only", []string{"a", "   "}, nil, true},
 		{"wildcard_sentinel", []string{"a", "*"}, nil, true},
 		{"system_sentinel", []string{"__system__"}, nil, true},
+		{"trim_leading_trailing", []string{" foo ", "bar "}, []string{"bar", "foo"}, false},
+		{"trim_then_dedup", []string{"foo", " foo ", "foo  "}, []string{"foo"}, false},
+		{"trim_then_sentinel_reject", []string{" * "}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
