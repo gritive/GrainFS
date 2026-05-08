@@ -2,6 +2,7 @@ package nfs4server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,6 +48,67 @@ func TestStateManager_InvalidateFH(t *testing.T) {
 	// New FH for recreated path should be different
 	fh2 := sm.GetOrCreateFH("/delete-me.txt")
 	assert.NotEqual(t, fh, fh2)
+}
+
+func TestStateManager_InvalidateKey_DropsFileMeta(t *testing.T) {
+	sm := NewStateManager()
+	sm.fileMeta.Store("dir/file.txt", nfsFileMeta{Mode: 0644})
+	sm.InvalidateKey("dir/file.txt")
+	_, ok := sm.fileMeta.Load("dir/file.txt")
+	assert.False(t, ok, "fileMeta entry must be removed after InvalidateKey")
+}
+
+func TestStateManager_InvalidateKey_RefreshesParentDirMtime(t *testing.T) {
+	sm := NewStateManager()
+	sm.MarkDir("/dir")
+	originalMtime := sm.DirMtime("/dir")
+	// Sleep a microsecond so the new mtime can differ.
+	time.Sleep(time.Microsecond)
+	sm.InvalidateKey("dir/file.txt")
+	updatedMtime := sm.DirMtime("/dir")
+	assert.Greater(t, updatedMtime, originalMtime, "parent dir mtime must advance so cached READDIR is seen as stale")
+}
+
+func TestStateManager_InvalidateKey_RootParent(t *testing.T) {
+	sm := NewStateManager()
+	originalMtime := sm.DirMtime("/")
+	time.Sleep(time.Microsecond)
+	sm.InvalidateKey("file.txt")
+	updatedMtime := sm.DirMtime("/")
+	assert.Greater(t, updatedMtime, originalMtime, "root mtime must advance for top-level key")
+}
+
+func TestStateManager_InvalidateKey_PreservesFilehandles(t *testing.T) {
+	sm := NewStateManager()
+	fh := sm.GetOrCreateFH("/dir/file.txt")
+	sm.InvalidateKey("dir/file.txt")
+	resolved, ok := sm.ResolveFH(fh)
+	require.True(t, ok, "fh mapping must survive an out-of-band invalidate (clients keep open handles)")
+	assert.Equal(t, "/dir/file.txt", resolved)
+}
+
+func TestStateManager_InvalidateKey_UntrackedParentSkipped(t *testing.T) {
+	sm := NewStateManager()
+	// /dir is NOT marked. Without explicit MarkDir, InvalidateKey leaves it
+	// unstored — we don't synthesize tracking for unseen directories.
+	sm.InvalidateKey("dir/file.txt")
+	assert.False(t, sm.IsDir("/dir"), "InvalidateKey must not synthesize untracked parent dirs")
+}
+
+func TestServer_Invalidate_BucketScoping(t *testing.T) {
+	// Server.Invalidate is the duck-typed cluster.CacheInvalidator entry.
+	// Different bucket → no-op; matching bucket → InvalidateKey runs.
+	sm := NewStateManager()
+	sm.fileMeta.Store("file.txt", nfsFileMeta{Mode: 0644})
+	srv := &Server{state: sm}
+
+	srv.Invalidate("other-bucket", "file.txt")
+	_, ok := sm.fileMeta.Load("file.txt")
+	assert.True(t, ok, "non-NFS bucket must be ignored")
+
+	srv.Invalidate(nfs4Bucket, "file.txt")
+	_, ok = sm.fileMeta.Load("file.txt")
+	assert.False(t, ok, "matching bucket must drop fileMeta")
 }
 
 func TestStateManager_SetClientID(t *testing.T) {

@@ -31,6 +31,11 @@ func (n *NodeServices) Close() {
 	// nfs4Srv exposes no Close; relies on context cancellation.
 }
 
+// NFS4 returns the started NFSv4 server, or nil when NFS4 was not enabled
+// (port 0). Exposed so the runtime can register the server's cache
+// invalidator with the cluster registry after StartNodeServices returns.
+func (n *NodeServices) NFS4() *nfs4server.Server { return n.nfs4Srv }
+
 // StartNodeServices spawns NFSv4 and NBD servers if their respective ports
 // are > 0. Returns the handle for shutdown. nbdVolumeSize is the default
 // volume size when the NBD worker auto-creates the "default" volume; ri

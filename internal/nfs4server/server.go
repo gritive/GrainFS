@@ -79,6 +79,23 @@ func (s *Server) Addr() net.Addr {
 	return nil
 }
 
+// Invalidate clears NFS metadata caches for an object that was mutated
+// out-of-band (e.g. an S3 PUT replicated via Raft from another cluster
+// node, dispatched here through cluster.Registry.InvalidateAll).
+//
+// Implements the cluster.CacheInvalidator interface shape via duck typing
+// so internal/nfs4server does not import internal/cluster. The Server is
+// registered in serveruntime.Run after StartNodeServices returns.
+//
+// Buckets other than nfs4Bucket are no-ops because NFS only ever serves
+// out of its dedicated bucket.
+func (s *Server) Invalidate(bucket, key string) {
+	if bucket != nfs4Bucket {
+		return
+	}
+	s.state.InvalidateKey(key)
+}
+
 // connRPCConcurrency caps the number of NFSv4 COMPOUND RPCs processed
 // concurrently per TCP connection. NFSv4 clients (Linux) typically use a
 // single connection per mount and rely on XID-based matching for out-of-order

@@ -1455,6 +1455,16 @@ func Run(ctx context.Context, cfg Config) error {
 	nodeSvc := StartNodeServices(ctx, backend, volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.NBDVolumeSize, distBackend)
 	defer nodeSvc.Close()
 
+	// Cross-protocol cache coherency: an S3 mutation replicated from another
+	// cluster node lands here as an FSM apply that fans out via
+	// distBackend.registry. Without this registration, NFS metadata caches
+	// (fileMeta, parent-dir mtimes) stay stale until the next backend stat
+	// re-fetches. Registers only when NFS4 actually started so non-NFS
+	// deployments don't pay for an empty invalidator.
+	if nfs := nodeSvc.NFS4(); nfs != nil {
+		distBackend.RegisterCacheInvalidator("nfs4", cluster.CacheInvalidatorFunc(nfs.Invalidate))
+	}
+
 	<-ctx.Done()
 	log.Info().Str("component", "server").Msg("graceful shutdown started")
 
