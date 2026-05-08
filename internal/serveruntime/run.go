@@ -61,6 +61,13 @@ func Run(ctx context.Context, cfg Config) error {
 	joinMode := cfg.JoinMode
 	raftAddrExplicit := cfg.RaftAddrExplicit
 
+	// PR 1 (boot decomposition milestone, see docs/superpowers/specs/2026-05-08-
+	// serveruntime-boot-decomposition.md): cleanup stack replaces inline defers
+	// so each phase records its teardown next to the artifact it constructs.
+	// Cleanup runs LIFO at function exit, matching the original defer order.
+	state := newBootState(cfg)
+	defer state.Cleanup()
+
 	if nodeID == "" {
 		var err error
 		nodeID, err = GenerateNodeID(dataDir)
@@ -151,9 +158,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("open metadata db at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK), see README#badger-troubleshooting", metaDir, err, metaDir)
 	}
-	defer db.Close()
+	state.AddCleanup(func() { db.Close() })
 	metaVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryMeta, db)
-	defer resourcewatch.DeregisterDB(metaVlogEntry)
+	state.AddCleanup(func() { resourcewatch.DeregisterDB(metaVlogEntry) })
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
 	recordStartupDecision(badgerrole.ProbeWritable(db, badgerrole.RoleMeta, "", metaDir))
 	if startupDecisions[len(startupDecisions)-1].Status != badgerrole.DecisionOK {
@@ -182,7 +189,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", raftDir, err, raftDir)
 	}
-	defer logStore.Close()
+	state.AddCleanup(func() { logStore.Close() })
 	if !logStore.IsShared() && logStore.DB() != nil {
 		raftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, logStore.DB())
 		defer resourcewatch.DeregisterDB(raftLogVlogEntry)
@@ -274,7 +281,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := quicTransport.Listen(ctx, raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", raftAddr, err, raftAddr)
 	}
-	defer quicTransport.Close()
+	state.AddCleanup(func() { quicTransport.Close() })
 	// Resolve `raftAddr` to its actual bound port. When the operator asked
 	// for 127.0.0.1:0 (singleton default) QUIC picks a free UDP port; we
 	// need that concrete address in allNodes so shard placement produces
@@ -381,7 +388,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := StartRotationSocket(ctx, dataDir, metaRaft); err != nil {
 		log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 	}
-	defer metaRaft.Close()
+	state.AddCleanup(func() { metaRaft.Close() })
 
 	// Build the AdminAPI wired against the meta-FSM proposer. Only when IAM
 	// dependencies are wired. First-SA bootstrap is performed via admin UDS
@@ -457,7 +464,7 @@ func Run(ctx context.Context, cfg Config) error {
 	quicTransport.HandleRead(transport.StreamShardReadBody, shardSvc.HandleReadBody())
 
 	node.Start()
-	defer node.Stop()
+	state.AddCleanup(func() { node.Stop() })
 
 	distBackend, err := cluster.NewDistributedBackend(dataDir, db, node)
 	if err != nil {
@@ -645,7 +652,7 @@ func Run(ctx context.Context, cfg Config) error {
 	})
 
 	// Shutdown hook: close all owned groups in parallel with 5s timeout each.
-	defer func() {
+	state.AddCleanup(func() {
 		metaRaft.FSM().SetOnShardGroupAdded(nil)
 		ownedGroups.mu.Lock()
 		ownedGroups.shuttingDown = true
@@ -669,7 +676,7 @@ func Run(ctx context.Context, cfg Config) error {
 			}(gb)
 		}
 		wg.Wait()
-	}()
+	})
 
 	// LoadReporter: leader 전용 — NodeStatsStore에서 읽어 meta-Raft FSM에 부하 통계 커밋.
 	loadReporterStore := cluster.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
@@ -763,7 +770,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("open WAL: %w", err)
 	}
-	defer w.Close()
+	state.AddCleanup(func() { w.Close() })
 
 	// v0.0.7.1 PR-D: Live multi-raft routing — ClusterCoordinator + ForwardSender/Receiver.
 	// ClusterCoordinator implements storage.Backend and routes bucket-scoped ops to the
@@ -1026,7 +1033,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("heal-receipt wiring: %w", err)
 	}
 	srvOpts = newSrvOpts
-	defer receiptWiring.Close()
+	state.AddCleanup(func() { receiptWiring.Close() })
 
 	var incidentRecorder *incident.Recorder
 	incidentDB, incidentDecision, err := badgerrole.OpenRole(roleRegistry, badgerrole.RoleIncidentState, badgerrole.PathContext{DataDir: dataDir})
@@ -1157,11 +1164,11 @@ func Run(ctx context.Context, cfg Config) error {
 	// shutdown path is bypassed (e.g. early return). The explicit shutdown
 	// sequence below stops admin BEFORE the data plane drains so operator
 	// commands cannot land on a half-shutdown server (spec A5).
-	defer func() {
+	state.AddCleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = adminSrv.Stop(stopCtx)
-	}()
+	})
 
 	// receiptWiring.keyStore may be nil when heal-receipt is disabled — in that
 	// case NewReceiptTrackingEmitter degrades to a pass-through (signing unhealthy).
@@ -1419,7 +1426,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// because runCluster never called the NFS/NBD wiring. Scrubber/lifecycle
 	// remain local-specific pending ECBackend→cluster integration (A.2).
 	nodeSvc := StartNodeServices(ctx, backend, volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.NBDVolumeSize, distBackend)
-	defer nodeSvc.Close()
+	state.AddCleanup(func() { nodeSvc.Close() })
 
 	// Cross-protocol cache coherency: an S3 mutation replicated from another
 	// cluster node lands here as an FSM apply that fans out via

@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.0.120.0] - 2026-05-08 — serveruntime boot decomposition PR 1: bootState + cleanup stack
+
+### Refactored
+
+- `internal/serveruntime/boot_state.go` (new): `bootState` struct with an
+  explicit cleanup stack. Methods:
+  - `newBootState(cfg Config) *bootState`
+  - `(*bootState).AddCleanup(fn func())` — push (mirrors a former `defer`
+    registration in `Run`).
+  - `(*bootState).Cleanup()` — LIFO drain. Idempotent (slice reset to nil
+    after first drain); panic-safe (each fn wrapped in `recover` so one
+    panicking cleanup does not skip the rest).
+- `internal/serveruntime/run.go`: 11 boot-related `defer`s replaced with
+  `state.AddCleanup(...)` registrations, exactly where the original defer
+  lived. The function exit registers a single `defer state.Cleanup()` near
+  the top so all teardown runs LIFO. The 12th `defer shutdownCancel()`
+  (line 1448) stays as a regular defer — it is the standard
+  `context.WithTimeout` cancel idiom, not boot teardown.
+
+### Added
+
+- `internal/serveruntime/boot_state_test.go`: 6 unit tests covering LIFO
+  ordering, drain idempotency, panic safety in one fn does not skip the
+  rest, nil-fn skip, nil-receiver safety, and config binding.
+
+### Why
+
+First step of a 6-PR milestone to decompose the 1463-line `Run` orchestrator
+into ~20 explicit boot phases. Motivation is testability: per-phase wiring
+invariants (e.g., "`OnBucketAssigned` registered before `metaRaft.Start`",
+`run.go:343-348`) are protected only by code comments today. The cleanup
+stack is the foundation; PRs 2-6 will move local variables into typed
+`bootState` fields and extract phase functions, enabling tests like:
+
+```go
+state := newTestBootState(t, testCfg(t))
+t.Cleanup(state.Cleanup)
+require.NoError(t, bootMetaDB(ctx, state))
+require.NoError(t, bootQUICTransport(ctx, state))
+require.NoError(t, bootMetaRaftWiring(ctx, state))  // register only
+// assert callbacks registered before Start runs in next phase
+require.NoError(t, bootMetaRaftStart(ctx, state))
+```
+
+Behavior is unchanged in this PR. The cleanup ordering is bit-identical to
+the original defers (LIFO push order = LIFO drain order). Full unit suite
+passes; `TestSmoke_DeploymentVerification` boots and tears down cleanly.
+
+### Milestone tracker
+
+See `docs/superpowers/specs/2026-05-08-serveruntime-boot-decomposition.md`
+(gitignored) for the full 6-PR plan, locked decisions, and per-phase test
+contracts. PR 1 = infra. PRs 2-6 = phase extraction in batches (config,
+transport, raft, storage, services).
+
 ## [0.0.119.0] - 2026-05-08 — raft v2 M1 follow-ups: 4 quick wins (PR 12)
 
 ### Changed
