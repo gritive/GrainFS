@@ -9,6 +9,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -93,6 +94,17 @@ type bootState struct {
 	rebalancer       *cluster.Rebalancer
 	loadReporter     *cluster.LoadReporter
 	loadReporterStor *cluster.NodeStatsStore
+
+	// Services + shutdown (populated by services phases — PR 6 onwards).
+	// bootSnapshotAndApplyLoop owns: fsm (meta-FSM bound to state.db),
+	// snapMgr (auto-snapshot every 10000 applied entries), cachedBackend
+	// (the post-pack LRU read cache; the wrapping chain inner→outer is
+	// distBackend → packblob (optional) → cachedBackend → WAL → pullthrough,
+	// and the final two wrappers are added downstream until later phases
+	// claim them).
+	fsm           *cluster.FSM
+	snapMgr       *raft.SnapshotManager
+	cachedBackend *storage.CachedBackend
 }
 
 // newBootState returns an empty state bound to cfg. Caller is responsible for
