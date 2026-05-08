@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -157,4 +158,71 @@ func TestMetricsObserverBucketLifecycleIsNoop(t *testing.T) {
 	obs := newMetricsObserver()
 	obs.OnBucketCreate(context.Background(), "b")
 	obs.OnBucketDelete(context.Background(), "b") // must not panic
+}
+
+func TestEventObserverEmitsCorrectEventForWrite(t *testing.T) {
+	var got []eventstore.Event
+	emit := func(e eventstore.Event) { got = append(got, e) }
+	obs := newEventObserver(emit)
+
+	obs.OnObjectWrite(context.Background(), "buck", "k", &storage.PutObjectResult{
+		Object: storage.ObjectFacts{Size: 42},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("want 1 event, got %d", len(got))
+	}
+	if got[0].Type != eventstore.EventTypeS3 || got[0].Action != eventstore.EventActionPut {
+		t.Fatalf("type/action mismatch: %+v", got[0])
+	}
+	if got[0].Bucket != "buck" || got[0].Key != "k" || got[0].Size != 42 {
+		t.Fatalf("payload mismatch: %+v", got[0])
+	}
+}
+
+func TestEventObserverEmitsCorrectEventForDelete(t *testing.T) {
+	var got []eventstore.Event
+	obs := newEventObserver(func(e eventstore.Event) { got = append(got, e) })
+	obs.OnObjectDelete(context.Background(), "buck", "k", &storage.DeleteObjectResult{})
+	if len(got) != 1 || got[0].Action != eventstore.EventActionDelete ||
+		got[0].Bucket != "buck" || got[0].Key != "k" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestEventObserverEmitsCorrectEventForCopy(t *testing.T) {
+	// Copy is a write at the destination from the event store's POV.
+	var got []eventstore.Event
+	obs := newEventObserver(func(e eventstore.Event) { got = append(got, e) })
+	obs.OnObjectCopy(context.Background(), "src-b", "src-k", "dst-b", "dst-k",
+		&storage.CopyObjectResult{Object: storage.ObjectFacts{Size: 7}})
+	if len(got) != 1 {
+		t.Fatalf("want 1 event, got %d", len(got))
+	}
+	if got[0].Action != eventstore.EventActionPut ||
+		got[0].Bucket != "dst-b" || got[0].Key != "dst-k" || got[0].Size != 7 {
+		t.Fatalf("got %+v", got[0])
+	}
+}
+
+func TestEventObserverEmitsBucketLifecycle(t *testing.T) {
+	var got []eventstore.Event
+	obs := newEventObserver(func(e eventstore.Event) { got = append(got, e) })
+	obs.OnBucketCreate(context.Background(), "newbuck")
+	obs.OnBucketDelete(context.Background(), "oldbuck")
+	if len(got) != 2 {
+		t.Fatalf("want 2, got %d", len(got))
+	}
+	if got[0].Action != eventstore.EventActionCreateBucket || got[0].Bucket != "newbuck" {
+		t.Fatalf("create: %+v", got[0])
+	}
+	if got[1].Action != eventstore.EventActionDeleteBucket || got[1].Bucket != "oldbuck" {
+		t.Fatalf("delete: %+v", got[1])
+	}
+}
+
+func TestEventObserverNilEmitFnIsNoop(t *testing.T) {
+	obs := newEventObserver(nil)
+	obs.OnObjectWrite(context.Background(), "b", "k", &storage.PutObjectResult{})
+	// no panic
 }
