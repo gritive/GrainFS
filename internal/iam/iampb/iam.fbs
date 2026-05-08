@@ -33,6 +33,7 @@ table KeyCreatePayload {
   sa_id:             string;
   created_at_unix_ns: int64;
   expires_at_unix_ns: int64;  // 0 = never
+  bucket_scope:      [string]; // nil = unrestricted (legacy backward compat); non-nil = allowed bucket subset
 }
 
 table KeyRevokePayload {
