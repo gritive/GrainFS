@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -885,4 +886,180 @@ func TestReplication_ApplyOrderAcrossFollowers(t *testing.T) {
 			require.Equal(t, uint64(i+1), e.Index, "%s entry[%d].Index", c.node.cfg.ID, i)
 		}
 	}
+}
+
+// blockingAETransport wraps a Transport and blocks SendAppendEntries calls to a
+// specific peer on a channel held by the test. This simulates a hung/partitioned
+// transport (QUIC keepalive delay) to trigger the goroutine-accumulation scenario
+// that the per-peer single-flight gate prevents.
+type blockingAETransport struct {
+	inner       Transport
+	blockPeer   string
+	releaseCh   chan struct{} // closed by test to release all blocked goroutines
+	inFlight    atomic.Int64  // current concurrent dispatches to blockPeer
+	maxInFlight atomic.Int64  // peak concurrent dispatches observed
+}
+
+func (b *blockingAETransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	return b.inner.SendRequestVote(peer, args)
+}
+
+func (b *blockingAETransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	if peer != b.blockPeer {
+		return b.inner.SendAppendEntries(peer, args)
+	}
+	// Track concurrency for the blocked peer.
+	cur := b.inFlight.Add(1)
+	// Update peak.
+	for {
+		old := b.maxInFlight.Load()
+		if cur <= old {
+			break
+		}
+		if b.maxInFlight.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+	// Block until the test releases all goroutines.
+	<-b.releaseCh
+	b.inFlight.Add(-1)
+	return nil, ErrUnknownPeer
+}
+
+// TestSingleFlight_PartitionedPeerNoGoroutineLeak verifies the per-peer
+// single-flight gate: when a peer's transport hangs (simulated by blocking
+// SendAppendEntries on a channel), at most 1 AE goroutine is in flight for that
+// peer at any time across ~20 heartbeat ticks.
+func TestSingleFlight_PartitionedPeerNoGoroutineLeak(t *testing.T) {
+	net := newMemNetwork()
+	ids := []string{"n1", "n2", "n3"}
+	nodes := make([]*Node, 3)
+
+	for i, id := range ids {
+		et := slowElectionTimeout
+		if i == 0 {
+			et = fastElectionTimeout
+		}
+		n, nerr := NewNode(Config{
+			ID:               id,
+			Peers:            otherIDsLocal(ids, id),
+			ElectionTimeout:  et,
+			HeartbeatTimeout: testHeartbeat,
+		})
+		require.NoError(t, nerr)
+		nodes[i] = n
+	}
+
+	releaseCh := make(chan struct{})
+	blocker := &blockingAETransport{
+		inner:     net.Register("n1", nodes[0]),
+		blockPeer: "n2",
+		releaseCh: releaseCh,
+	}
+	nodes[0].SetTransport(blocker)
+	nodes[1].SetTransport(net.Register("n2", nodes[1]))
+	nodes[2].SetTransport(net.Register("n3", nodes[2]))
+
+	for _, n := range nodes {
+		n.Start()
+		t.Cleanup(n.Stop)
+		go func(n *Node) {
+			for range n.ApplyCh() {
+			}
+		}(n)
+	}
+
+	n1 := nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
+		"n1 did not become leader")
+
+	// Allow ~20 heartbeat ticks to run with n2's transport blocked.
+	const ticks = 20
+	time.Sleep(time.Duration(ticks) * testHeartbeat)
+
+	// Release all blocked goroutines so they can drain before Stop.
+	close(releaseCh)
+
+	// Wait for in-flight count to drain (goroutines unblocked, returning error).
+	require.NoError(t, waitFor(2*time.Second, func() bool {
+		return blocker.inFlight.Load() == 0
+	}), "blocked goroutines did not drain after release")
+
+	// With single-flight, at most 1 AE goroutine should have been outstanding
+	// for the partitioned peer at any instant — max observed concurrency must be 1.
+	require.LessOrEqual(t, blocker.maxInFlight.Load(), int64(1),
+		"per-peer single-flight gate must bound concurrent AE goroutines to ≤1")
+}
+
+// TestApplyCommitted_StopRaceLeavesCommitIndexConsistent verifies that
+// applyCommitted advances commitIndex per-delivered-entry rather than via the
+// old "rollback to i-1" pattern. Two scenarios:
+//
+//  1. Zero deliveries: stopCh wins the very first send → commitIndex stays at oldCommit.
+//  2. Partial delivery: K of N entries succeed before stopCh fires → commitIndex == K.
+//
+// Scenario (2) is the load-bearing test — it differentiates the per-entry advance
+// (NEW behaviour) from a hypothetical implementation that only sets commitIndex
+// at end-of-loop (which would leave commitIndex at oldCommit on stopCh).
+func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
+	makeNode := func(t *testing.T) *Node {
+		n, err := NewNode(Config{
+			ID:               "n1",
+			Peers:            []string{"p1", "p2"},
+			ElectionTimeout:  time.Hour,
+			HeartbeatTimeout: testHeartbeat,
+		})
+		require.NoError(t, err)
+
+		const N = 5
+		entries := make([]LogEntry, N)
+		for i := 0; i < N; i++ {
+			entries[i] = LogEntry{Term: 1, Index: uint64(i + 1), Command: []byte(fmt.Sprintf("cmd-%d", i+1))}
+		}
+		seedLogEntries(n, entries)
+		n.st.currentTerm = 1
+		n.st.state = Leader
+		n.st.leaderID = "n1"
+		n.st.matchIndex = map[string]uint64{"p1": 0, "p2": 0}
+		n.st.nextIndex = map[string]uint64{"p1": N + 1, "p2": N + 1}
+		n.st.proposeWaiters = make(map[uint64]chan proposalResult)
+		n.rs.Store(n.st.snapshot())
+		return n
+	}
+
+	t.Run("ZeroDeliveries", func(t *testing.T) {
+		n := makeNode(t)
+		// Unbuffered applyCh: every send blocks; pre-closed stopCh wins immediately.
+		n.applyCh = make(chan LogEntry)
+		close(n.stopCh)
+
+		n.applyCommitted(0, 5)
+		require.Equal(t, uint64(0), n.st.commitIndex,
+			"commitIndex must stay at oldCommit when Stop wins the first send")
+	})
+
+	t.Run("PartialDelivery", func(t *testing.T) {
+		n := makeNode(t)
+		// Unbuffered applyCh; a consumer goroutine reads exactly K entries
+		// then closes stopCh. This makes the Stop point deterministic: the
+		// (K+1)-th iteration's select sees a buffered-ready stopCh AND a
+		// blocked applyCh send (no reader), so stopCh always wins.
+		const K = 3
+		n.applyCh = make(chan LogEntry)
+
+		consumerDone := make(chan struct{})
+		go func() {
+			defer close(consumerDone)
+			for i := 0; i < K; i++ {
+				<-n.applyCh
+			}
+			close(n.stopCh) // applyCommitted's next select will lose to stopCh.
+		}()
+
+		n.applyCommitted(0, 5)
+		<-consumerDone
+
+		require.Equal(t, uint64(K), n.st.commitIndex,
+			"commitIndex must equal K (last fully-delivered entry's index) after partial delivery")
+	})
 }

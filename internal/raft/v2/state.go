@@ -49,6 +49,15 @@ type actorState struct {
 	// commitIndex advance; replies ErrProposalFailed on Leader→Follower
 	// step-down. Single-voter path replies inline and never populates this.
 	proposeWaiters map[uint64]chan proposalResult
+
+	// peerInFlight tracks whether an AppendEntries goroutine is currently
+	// in flight for each peer. Set to true when dispatchAppendEntries is
+	// spawned, cleared when the reply (or error) returns via cmdHeartbeatReply.
+	// Single-flight per peer prevents goroutine accumulation when a
+	// partitioned/hung transport delays replies — without it, every heartbeat
+	// tick spawns a new goroutine while old ones block on the dead transport.
+	// Leader-only state — cleared in stepDownToFollower.
+	peerInFlight map[string]bool
 }
 
 // snapshot builds a readState reflecting the current actor-owned state.

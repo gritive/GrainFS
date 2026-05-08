@@ -8,10 +8,6 @@
 
 > 2026-05-08 /ship adversarial review on `internal/raft/v2/` (M1 milestone, 0 caller until M5) raised 13 findings. Filed here for M2/M3/M5 work. v2 ships as new code only; not yet exercised in production.
 
-- [ ] **raft/v2: Goroutine explosion on partitioned peer** — `broadcastHeartbeat` + `handlePropose` spawn `go n.dispatchAppendEntries(...)` per peer per tick. With 5 peers + 50ms heartbeat = 100 goroutines/sec/leader steady-state. Under network partition where transport hangs, goroutines accumulate unboundedly (~10k+/min/peer with QUIC keepalive timing). memTransport doesn't expose this (synchronous), but production QUIC transport would. Fix: per-peer single-flight (only dispatch if previous reply received). Implement at PR 5+ when multi-peer transport hardens.
-
-- [ ] **raft/v2: applyCommitted commitIndex regression on Stop** — `actor.go:343` rolls back `commitIndex = i - 1` when Stop wins the apply select. Entries i..newCommit remain in log + AE Success was already replied to leader, so leader counts matchIndex while this follower's local commitIndex regresses. Silent split-brain on commit semantics on a future restart with persistence (M2). Fix: reply Success only after applyCh delivery, OR don't roll back commitIndex (already promised durable to leader's quorum math).
-
 - [ ] **raft/v2: cmdCh backpressure cascade** — slow FSM consumer wedges actor's applyCh send → wedges cmdCh → wedges all incoming RPCs (HandleRequestVote/HandleAppendEntries) → peers election-timeout this node → cascading election storm. Structural fix: make applyCh delivery non-blocking from actor (separate apply goroutine reading from a buffered queue), OR at least give Propose a ctx variant + drop AE on cmdCh-full to keep election alive.
 
 ### 기타
