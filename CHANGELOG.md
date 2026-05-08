@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.108.0] - 2026-05-08 — raft v2 actor pattern foundation (M1 milestone)
+
+### Added
+
+- New `internal/raft/v2/` package: actor + channel concurrency model replacing
+  `internal/raft`'s mutex-protected design. Single goroutine owns mutable state;
+  hot-path readers (`State`, `Term`, `IsLeader`, `LeaderID`, `CommittedIndex`)
+  use `atomic.Pointer[readState]` for ~ns reads. Mirrors etcd-io/raft's
+  SoftState publication. v2 has zero callers; production wiring lands at M5.
+- Single-voter Propose round-trip with auto-leader bootstrap.
+- Multi-voter election state machine: randomized election timer, Candidate
+  state, vote sending via Transport, Leader transition on majority, heartbeat
+  ticker. Election outcome verified equivalent to v1 in 3-voter test.
+- Inbound RPC handling: full Raft §5.4 RequestVote vote-granting logic with
+  term step-down, votedFor state, log up-to-date check.
+- Log replication via AppendEntries: leader-side matchIndex/nextIndex
+  tracking, majority commit advancement under §5.4.2 term gate, follower
+  log validation + apply on leaderCommit.
+- AppendEntries conflict handling: ConflictTerm/ConflictIndex hint on
+  rejection, follower log truncation on accept, leader fast nextIndex
+  backoff (skip entire conflict term in one round-trip).
+- v1↔v2 equivalence harness (`equivalence_test.go`): drives both
+  implementations through identical scenarios, compares log + observable
+  state. Four scenarios shipped (single propose, multi propose, 3-voter
+  election, divergent log convergence).
+- Public API mirrors of v1 for M5 swap-time parity: `Bootstrap`,
+  `Configuration`, `AddVoter`/`AddVoterCtx`, `RemoveVoter`, `AddLearner`,
+  `PromoteToVoter`, `TransferLeadership`. Membership-change methods stub
+  with `ErrNotImplemented` (real impl lands in M2 with joint consensus).
+- Test coverage: 27 tests pass `go test -race -count=10` clean (~22s).
+
+### Notes
+
+- This PR ships v2 as new code only; nothing imports it yet. v1 raft remains
+  canonical. M2 (persistence + snapshots), M3 (property tests + chaos),
+  M4 (staging soak), M5 (per-package import flip) follow per
+  `docs/superpowers/plans/2026-05-08-raft-actor-redesign.md`.
+- See `internal/raft/v2/README.md` for design rationale and capability
+  matrix.
+
 ## [0.0.107.0] - 2026-05-08 — S3 Request Authorization Decision (deepened authz seam)
 
 ### Added
