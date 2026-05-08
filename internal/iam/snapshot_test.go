@@ -2,6 +2,7 @@ package iam
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 	"time"
 )
@@ -83,6 +84,43 @@ func TestSnapshot_EmptyStoreRoundtrip(t *testing.T) {
 	}
 	if dst.AuthEnabled() {
 		t.Fatal("authEnabled flipped on empty snapshot")
+	}
+}
+
+func TestSnapshot_PreservesBucketScope(t *testing.T) {
+	enc := newTestEncryptor(t)
+	src := NewStore()
+	src.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice", CreatedAt: time.Unix(1, 0)})
+	src.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleRead})
+	wrapped, err := WrapSecret(enc, "sa-1", "secret-scoped")
+	if err != nil {
+		t.Fatalf("WrapSecret: %v", err)
+	}
+	src.applyKeyCreate(AccessKey{
+		AccessKey:    "AK_S",
+		SecretKey:    "secret-scoped",
+		SecretKeyEnc: wrapped,
+		SAID:         "sa-1",
+		Status:       KeyStatusActive,
+		CreatedAt:    time.Unix(2, 0),
+		BucketScope:  []string{"logs"},
+	})
+
+	var buf bytes.Buffer
+	if err := WriteSnapshot(&buf, src); err != nil {
+		t.Fatalf("WriteSnapshot: %v", err)
+	}
+
+	dst := NewStore()
+	if err := ReadSnapshot(&buf, dst, enc); err != nil {
+		t.Fatalf("ReadSnapshot: %v", err)
+	}
+	got, ok := dst.LookupKey("AK_S")
+	if !ok {
+		t.Fatal("key not restored after snapshot round-trip")
+	}
+	if !slices.Equal(got.BucketScope, []string{"logs"}) {
+		t.Fatalf("scope = %v, want [logs]", got.BucketScope)
 	}
 }
 

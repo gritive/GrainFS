@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -135,7 +136,13 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		if err != nil {
 			return err
 		}
-		if err := ap.ApplyKeyCreate(blob); err != nil {
+		p := iampb.GetRootAsKeyCreatePayload(blob, 0)
+		encBytes := readEncBytes(p)
+		if err := ap.applyKeyCreateFromSnapshot(
+			string(p.SaId()), string(p.AccessKey()),
+			encBytes, time.Unix(0, p.CreatedAtUnixNs()),
+			readExpires(p), readScope(p),
+		); err != nil {
 			return err
 		}
 	}

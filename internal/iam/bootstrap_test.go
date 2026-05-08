@@ -83,7 +83,7 @@ func (f *fakeProposer) ProposeKeyCreate(ctx context.Context, k AccessKey) error 
 }
 func (f *fakeProposer) ProposeKeyCreateScoped(ctx context.Context, k AccessKey) error {
 	f.calls = append(f.calls, "KeyCreateScoped:"+k.AccessKey)
-	return nil
+	return f.keyCreateErr
 }
 func (f *fakeProposer) ProposeKeyRevoke(ctx context.Context, accessKey string) error {
 	f.calls = append(f.calls, "KeyRevoke:"+accessKey)

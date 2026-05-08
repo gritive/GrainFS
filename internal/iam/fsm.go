@@ -99,7 +99,8 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 	}
 	// SA must exist; noop on missing to keep raft replay deterministic.
 	if _, ok := a.store.LookupSA(saID); !ok {
-		log.Warn().Str("sa_id", saID).Str("ak", ak).Msg("iam: KeyCreate apply: SA missing, noop")
+		log.Warn().Str("sa_id", saID).Str("ak", ak).Bool("scoped", len(scope) > 0).
+			Msg("iam: applyKeyCreateInternal: SA missing, noop")
 		return nil
 	}
 	// Scope validation: every bucket in scope must have a grant on the SA.
@@ -113,6 +114,33 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 	plain, err := UnwrapSecret(a.enc, saID, encBytes)
 	if err != nil {
 		return fmt.Errorf("iam: KeyCreate decrypt: %w", err)
+	}
+	a.store.applyKeyCreate(AccessKey{
+		AccessKey:    ak,
+		SecretKey:    plain,
+		SecretKeyEnc: encBytes,
+		SAID:         saID,
+		Status:       KeyStatusActive,
+		CreatedAt:    createdAt,
+		ExpiresAt:    expires,
+		BucketScope:  scope,
+	})
+	return nil
+}
+
+// applyKeyCreateFromSnapshot persists an AccessKey during snapshot restore.
+// Unlike applyKeyCreateInternal, it skips scope validation because snapshot
+// restore reads SA → Keys → Grants in order — at key-restore time, grants
+// haven't loaded yet, so a `scope ⊄ grants` check would always false-noop.
+// Validation already happened at issue time (admin handler 422 + FSM
+// determinism guard); persisted state is trusted.
+func (a *Applier) applyKeyCreateFromSnapshot(saID, ak string, encBytes []byte, createdAt time.Time, expires *time.Time, scope []string) error {
+	if saID == "" || ak == "" {
+		return fmt.Errorf("iam: snapshot restore: KeyCreate missing sa_id or access_key")
+	}
+	plain, err := UnwrapSecret(a.enc, saID, encBytes)
+	if err != nil {
+		return fmt.Errorf("iam: snapshot restore: KeyCreate decrypt: %w", err)
 	}
 	a.store.applyKeyCreate(AccessKey{
 		AccessKey:    ak,
