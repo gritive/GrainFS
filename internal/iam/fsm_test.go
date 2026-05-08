@@ -331,20 +331,6 @@ func TestApplier_GrantWildcardDelete_EmptySAID(t *testing.T) {
 	}
 }
 
-func TestApplier_AuthEnable_Sticky(t *testing.T) {
-	s := NewStore()
-	ap := NewApplier(s, newTestEncryptor(t))
-	if err := ap.ApplyAuthEnable(nil); err != nil {
-		t.Fatalf("ApplyAuthEnable: %v", err)
-	}
-	if !s.AuthEnabled() {
-		t.Fatal("AuthEnabled = false after apply")
-	}
-	if err := ap.ApplyAuthEnable(nil); err != nil {
-		t.Fatalf("second ApplyAuthEnable: %v", err)
-	}
-}
-
 // buildKeyCreateScoped builds a KeyCreatePayload FlatBuffer with a bucket_scope vector.
 func buildKeyCreateScoped(t *testing.T, ak, saID string, encBytes []byte, ts time.Time, expires int64, scope []string) []byte {
 	t.Helper()

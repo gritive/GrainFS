@@ -19,7 +19,6 @@ func TestSnapshot_Roundtrip(t *testing.T) {
 	})
 	src.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleWrite})
 	src.applyGrantWildcardPut(Grant{SAID: "sa-default", Role: RoleAdmin})
-	src.applyAuthEnable()
 
 	var buf bytes.Buffer
 	if err := WriteSnapshot(&buf, src); err != nil {
@@ -36,9 +35,6 @@ func TestSnapshot_Roundtrip(t *testing.T) {
 	}
 	if got := dst.LookupGrant("sa-default", "any"); got != RoleAdmin {
 		t.Fatalf("wildcard after restore = %v, want RoleAdmin", got)
-	}
-	if !dst.AuthEnabled() {
-		t.Fatal("authEnabled lost after restore")
 	}
 	k, ok := dst.LookupKey("AK1")
 	if !ok {
@@ -82,9 +78,6 @@ func TestSnapshot_EmptyStoreRoundtrip(t *testing.T) {
 	}
 	if !dst.IsEmpty() {
 		t.Fatal("dst not empty after restoring empty snapshot")
-	}
-	if dst.AuthEnabled() {
-		t.Fatal("authEnabled flipped on empty snapshot")
 	}
 }
 

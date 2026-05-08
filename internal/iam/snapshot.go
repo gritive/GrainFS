@@ -33,11 +33,9 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 	if _, err := w.Write([]byte{snapshotVersion}); err != nil {
 		return err
 	}
-	authBit := byte(0)
-	if st.authEnabled {
-		authBit = 1
-	}
-	if _, err := w.Write([]byte{authBit}); err != nil {
+	// authEnabled bit removed; emit 0 placeholder to preserve v2 byte layout.
+	// Task 5 owns the v3 snapshot migration that drops this byte entirely.
+	if _, err := w.Write([]byte{0}); err != nil {
 		return err
 	}
 
@@ -195,9 +193,9 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		dst.applyKeyRevoke(string(blob))
 	}
 
-	if hdr[1] == 1 {
-		dst.applyAuthEnable()
-	}
+	// hdr[1] (legacy authEnabled bit) is intentionally ignored;
+	// Task 5 will rewrite the header read for snapshot v3.
+	_ = hdr[1]
 	return nil
 }
 

@@ -15,9 +15,6 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 	captured := make([]clusterpb.MetaCmdType, 0)
 	p := &MetaProposer{
 		Propose: func(ctx context.Context, t clusterpb.MetaCmdType, payload []byte) error {
-			if len(payload) == 0 && t != clusterpb.MetaCmdTypeIAMAuthEnable {
-				return nil // some payloads can be small but only AuthEnable is empty
-			}
 			captured = append(captured, t)
 			return nil
 		},
@@ -31,7 +28,7 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 	_ = p.ProposeGrantDelete(ctx, "sa-1", "b")
 	_ = p.ProposeGrantWildcardPut(ctx, Grant{SAID: "sa-1", Role: RoleAdmin})
 	_ = p.ProposeGrantWildcardDelete(ctx, "sa-1")
-	_ = p.ProposeAuthEnable(ctx)
+	_ = p.ProposeInitFirstSA(ctx, ServiceAccount{ID: "sa-1"}, AccessKey{AccessKey: "AK", SAID: "sa-1"}, Grant{SAID: "sa-1", Role: RoleAdmin})
 
 	want := []clusterpb.MetaCmdType{
 		clusterpb.MetaCmdTypeIAMSACreate,
@@ -42,9 +39,8 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 		clusterpb.MetaCmdTypeIAMGrantDelete,
 		clusterpb.MetaCmdTypeIAMGrantWildcardPut,
 		clusterpb.MetaCmdTypeIAMGrantWildcardDelete,
-		clusterpb.MetaCmdTypeIAMAuthEnable,
+		clusterpb.MetaCmdTypeIAMInitFirstSA,
 	}
-	// AuthEnable always captured (even though payload may be small)
 	if len(captured) < len(want) {
 		t.Fatalf("captured %d, want %d (got %v)", len(captured), len(want), captured)
 	}

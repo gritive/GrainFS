@@ -10,7 +10,7 @@ import (
 // bootstrap_test.go was removed in the IAM-only-auth migration.
 type fakeProposer struct {
 	calls          []string
-	authEnableErr  error // if non-nil, ProposeAuthEnable returns this
+	authEnableErr  error // legacy: kept for admin_api_test.go references; removed in Task 6
 	saCreateErr    error // if non-nil, ProposeSACreate returns this
 	keyCreateErr   error // if non-nil, ProposeKeyCreate returns this
 	wildcardPutErr error // if non-nil, ProposeGrantWildcardPut returns this
