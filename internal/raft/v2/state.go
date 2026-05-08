@@ -15,6 +15,7 @@ type readState struct {
 	leaderID    string
 	commitIndex uint64
 	isLeader    bool
+	votedFor    string // candidate this node voted for in the current term ("" = none)
 }
 
 // actorState is the mutable Raft state owned exclusively by the actor
@@ -24,6 +25,7 @@ type actorState struct {
 	currentTerm uint64
 	state       NodeState
 	leaderID    string
+	votedFor    string // candidate this node voted for in the current term ("" = none)
 
 	// In-memory log. PR 1 has no persistence; the LogStore adapter lands in
 	// PR 6+. Indices are 1-based per Raft convention; log[0] corresponds to
@@ -40,5 +42,34 @@ func (s *actorState) snapshot() *readState {
 		leaderID:    s.leaderID,
 		commitIndex: s.commitIndex,
 		isLeader:    s.state == Leader && s.leaderID == s.id && s.leaderID != "",
+		votedFor:    s.votedFor,
 	}
+}
+
+// lastLogIndex returns the highest log index in the actor's in-memory log,
+// or 0 if the log is empty. 1-based indexing per Raft convention.
+func (s *actorState) lastLogIndex() uint64 {
+	if len(s.log) == 0 {
+		return 0
+	}
+	return s.log[len(s.log)-1].Index
+}
+
+// lastLogTerm returns the term of the last log entry, or 0 if the log is empty.
+func (s *actorState) lastLogTerm() uint64 {
+	if len(s.log) == 0 {
+		return 0
+	}
+	return s.log[len(s.log)-1].Term
+}
+
+// isLogUpToDate reports whether a candidate's log (lastIdx, lastTerm) is at
+// least as up-to-date as ours per Raft §5.4.1: higher last-term wins, and
+// within the same term the longer log wins.
+func (s *actorState) isLogUpToDate(lastIdx, lastTerm uint64) bool {
+	myIdx, myTerm := s.lastLogIndex(), s.lastLogTerm()
+	if lastTerm != myTerm {
+		return lastTerm > myTerm
+	}
+	return lastIdx >= myIdx
 }

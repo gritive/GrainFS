@@ -67,6 +67,47 @@ type LogEntry struct {
 	Type    LogEntryType
 }
 
+// RPC types below mirror v1 verbatim from internal/raft/raft.go (RequestVote*
+// at 222-235, AppendEntries* at 237-253) so the M5 swap-time API parity is
+// preserved. PR 4 only consumes RequestVote* in HandleRequestVote and exposes
+// AppendEntries* via the stub HandleAppendEntries; full semantics for
+// AppendEntries land in PR 5+. Pre-vote and leader-transfer fields are
+// accepted but ignored until PR 5+.
+
+// RequestVoteArgs is sent by candidates to gather votes.
+type RequestVoteArgs struct {
+	Term           uint64
+	CandidateID    string
+	LastLogIndex   uint64
+	LastLogTerm    uint64
+	PreVote        bool // true = pre-vote round; receiver must not update state/term
+	LeaderTransfer bool // true = leadership transfer; receiver must bypass stickiness
+}
+
+// RequestVoteReply is the response to a RequestVote RPC.
+type RequestVoteReply struct {
+	Term        uint64
+	VoteGranted bool
+}
+
+// AppendEntriesArgs is sent by the leader to replicate log entries.
+type AppendEntriesArgs struct {
+	Term         uint64
+	LeaderID     string
+	PrevLogIndex uint64
+	PrevLogTerm  uint64
+	Entries      []LogEntry
+	LeaderCommit uint64
+}
+
+// AppendEntriesReply is the response to an AppendEntries RPC.
+type AppendEntriesReply struct {
+	Term          uint64
+	Success       bool
+	ConflictTerm  uint64 // term of conflicting entry; 0 = not set or old peer
+	ConflictIndex uint64 // first index of ConflictTerm; 0 = not set
+}
+
 // Config holds Raft node configuration. Field set is mirrored verbatim from
 // v1 so caller code compiles unchanged at swap time. PR 1 only consumes ID
 // and Peers; remaining fields are accepted but ignored until later PRs wire

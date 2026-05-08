@@ -36,6 +36,11 @@ type Node struct {
 
 	// stopOnce guards multi-call Stop().
 	stopOnce sync.Once
+
+	// transport is the outbound RPC sender. PR 4 stores it but never sends;
+	// PR 5 wires it into the election state machine. Set via SetTransport
+	// before Start. Read-only after Start, so no synchronization needed.
+	transport Transport
 }
 
 // NewNode creates a Node from cfg. Call Start to launch the actor goroutine.
@@ -92,6 +97,52 @@ func (n *Node) LeaderID() string { return n.rs.Load().leaderID }
 
 // CommittedIndex returns the latest committed log index. Hot path.
 func (n *Node) CommittedIndex() uint64 { return n.rs.Load().commitIndex }
+
+// SetTransport configures the outbound Transport. Must be called before
+// Start. PR 4 stores but does not exercise the transport for sending; this
+// is forward-compatibility for PR 5's election state machine.
+func (n *Node) SetTransport(t Transport) { n.transport = t }
+
+// HandleRequestVote processes an incoming RequestVote RPC and returns the
+// reply. Safe to call from any goroutine; the call routes through the actor
+// via cmdCh and waits synchronously for the actor's reply.
+//
+// If the node has been Stopped, returns a zero-value reply with the snapshot
+// term (matches v1's stopped-node behaviour at internal/raft/raft.go:1748-1750).
+func (n *Node) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
+	reply := make(chan *RequestVoteReply, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdRequestVote, rvArgs: args, rvReply: reply}:
+	case <-n.stopCh:
+		return &RequestVoteReply{Term: n.Term()}
+	}
+	select {
+	case r := <-reply:
+		return r
+	case <-n.stopCh:
+		return &RequestVoteReply{Term: n.Term()}
+	}
+}
+
+// HandleAppendEntries processes an incoming AppendEntries RPC and returns
+// the reply. Safe to call from any goroutine. PR 4 returns Success=false
+// for all requests; full log-replication semantics land in PR 5+ (heartbeat)
+// and PR 6+ (entry append). The handler still respects the term-step-down
+// rule so the term invariant holds.
+func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
+	reply := make(chan *AppendEntriesReply, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdAppendEntries, aeArgs: args, aeReply: reply}:
+	case <-n.stopCh:
+		return &AppendEntriesReply{Term: n.Term()}
+	}
+	select {
+	case r := <-reply:
+		return r
+	case <-n.stopCh:
+		return &AppendEntriesReply{Term: n.Term()}
+	}
+}
 
 // ApplyCh returns the channel on which committed log entries are delivered.
 // The caller must drain this channel to avoid back-pressuring the actor.

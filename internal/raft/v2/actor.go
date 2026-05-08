@@ -10,12 +10,22 @@ type command struct {
 	proposeCommand []byte
 	proposeType    LogEntryType
 	proposeReply   chan proposalResult
+
+	// RequestVote payload (kind == cmdRequestVote).
+	rvArgs  *RequestVoteArgs
+	rvReply chan *RequestVoteReply
+
+	// AppendEntries payload (kind == cmdAppendEntries).
+	aeArgs  *AppendEntriesArgs
+	aeReply chan *AppendEntriesReply
 }
 
 type cmdKind int
 
 const (
 	cmdPropose cmdKind = iota
+	cmdRequestVote
+	cmdAppendEntries
 )
 
 // proposalResult is delivered to ProposeWait callers when their entry commits
@@ -58,6 +68,76 @@ func (n *Node) handle(cmd command) {
 	switch cmd.kind {
 	case cmdPropose:
 		n.handlePropose(cmd)
+	case cmdRequestVote:
+		n.handleRequestVote(cmd)
+	case cmdAppendEntries:
+		n.handleAppendEntries(cmd)
+	}
+}
+
+// handleRequestVote implements the receiver side of Raft §5.4 vote granting.
+// Runs inside the actor goroutine; it is the sole writer to currentTerm,
+// votedFor, state, and leaderID.
+//
+// PR 4 simplification: pre-vote (args.PreVote), leader-transfer
+// (args.LeaderTransfer), leader stickiness (lastLeaderContact), and learner
+// handling are deferred to PR 5+. We mirror only the core §5.4 path:
+//  1. Stale term → deny.
+//  2. Higher term → step down (currentTerm = args.Term, state = Follower,
+//     votedFor cleared, leaderID cleared) before evaluating the vote.
+//  3. Grant if (votedFor == "" || votedFor == args.CandidateID) AND the
+//     candidate's log is at least as up-to-date as ours.
+func (n *Node) handleRequestVote(cmd command) {
+	args := cmd.rvArgs
+	reply := &RequestVoteReply{Term: n.st.currentTerm}
+
+	// Rule 1: deny stale term.
+	if args.Term < n.st.currentTerm {
+		cmd.rvReply <- reply
+		return
+	}
+
+	// Rule 2: step down on higher term. Clears any vote from the prior term.
+	if args.Term > n.st.currentTerm {
+		n.st.currentTerm = args.Term
+		n.st.state = Follower
+		n.st.votedFor = ""
+		n.st.leaderID = ""
+		n.publish()
+		reply.Term = n.st.currentTerm
+	}
+
+	// Rule 3: grant if we haven't voted (or already voted for this candidate)
+	// and the candidate's log is at least as up-to-date as ours.
+	if (n.st.votedFor == "" || n.st.votedFor == args.CandidateID) &&
+		n.st.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+		n.st.votedFor = args.CandidateID
+		n.publish()
+		reply.VoteGranted = true
+	}
+
+	cmd.rvReply <- reply
+}
+
+// handleAppendEntries is the PR 4 stub. It replies Success=false for every
+// request because log-replication semantics aren't implemented yet (PR 5+
+// heartbeat, PR 6+ entry append). The stub still observes the term invariant:
+// a higher-term AppendEntries forces a step-down so the actor's currentTerm
+// and votedFor stay consistent with the rest of the cluster.
+func (n *Node) handleAppendEntries(cmd command) {
+	args := cmd.aeArgs
+
+	if args.Term > n.st.currentTerm {
+		n.st.currentTerm = args.Term
+		n.st.state = Follower
+		n.st.votedFor = ""
+		n.st.leaderID = ""
+		n.publish()
+	}
+
+	cmd.aeReply <- &AppendEntriesReply{
+		Term:    n.st.currentTerm,
+		Success: false,
 	}
 }
 
