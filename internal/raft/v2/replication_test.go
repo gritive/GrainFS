@@ -10,6 +10,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// seedLogEntries replaces the node's log store with the given entries. Must be
+// called before Start — the actor goroutine is the sole writer after Start.
+func seedLogEntries(n *Node, entries []LogEntry) {
+	n.st.log = newMemLogStore()
+	if err := n.st.log.Append(entries); err != nil {
+		panic("seedLogEntries: " + err.Error())
+	}
+}
+
+// mustLogEntry reads entry at 1-based logical index idx from n's log. Panics
+// on error. Must be called after Stop (actor has exited; sole-writer invariant
+// holds for the reading goroutine).
+func mustLogEntry(n *Node, idx uint64) LogEntry {
+	e, err := n.st.log.Entry(idx)
+	if err != nil {
+		panic("mustLogEntry: " + err.Error())
+	}
+	return e
+}
+
 // startClusterCapture is the replication-test counterpart of startCluster.
 // Unlike startCluster, it does NOT drain ApplyCh in background goroutines;
 // instead it returns a per-node []LogEntry that captures every applied entry
@@ -310,11 +330,11 @@ func TestReplication_TruncateMultipleEntries(t *testing.T) {
 	})
 	// Seed the log BEFORE Start. Safe: the actor goroutine has not yet been
 	// launched, so we are the sole writer.
-	n.st.log = []LogEntry{
+	seedLogEntries(n, []LogEntry{
 		{Term: 1, Index: 1, Command: []byte("A")},
 		{Term: 1, Index: 2, Command: []byte("B")},
 		{Term: 1, Index: 3, Command: []byte("C")},
-	}
+	})
 	n.st.currentTerm = 1
 	n.rs.Store(n.st.snapshot()) // republish so initial readState is coherent
 
@@ -342,13 +362,16 @@ func TestReplication_TruncateMultipleEntries(t *testing.T) {
 	// Stop, then read st.log under quiescence (actor exited; sole-writer
 	// invariant trivially holds because we are the only goroutine left).
 	n.Stop()
-	require.Len(t, n.st.log, 3, "log length after truncate+append")
-	require.Equal(t, uint64(1), n.st.log[0].Term)
-	require.Equal(t, []byte("A"), n.st.log[0].Command)
-	require.Equal(t, uint64(2), n.st.log[1].Term)
-	require.Equal(t, []byte("X"), n.st.log[1].Command)
-	require.Equal(t, uint64(2), n.st.log[2].Term)
-	require.Equal(t, []byte("Y"), n.st.log[2].Command)
+	require.Equal(t, uint64(3), n.st.log.LastIndex(), "log length after truncate+append")
+	e1 := mustLogEntry(n, 1)
+	require.Equal(t, uint64(1), e1.Term)
+	require.Equal(t, []byte("A"), e1.Command)
+	e2 := mustLogEntry(n, 2)
+	require.Equal(t, uint64(2), e2.Term)
+	require.Equal(t, []byte("X"), e2.Command)
+	e3 := mustLogEntry(n, 3)
+	require.Equal(t, uint64(2), e3.Term)
+	require.Equal(t, []byte("Y"), e3.Command)
 }
 
 // TestReplication_ConflictHintShortLog: follower's log is shorter than
@@ -362,7 +385,7 @@ func TestReplication_ConflictHintShortLog(t *testing.T) {
 		HeartbeatTimeout: testHeartbeat,
 	})
 	// Seed: only one entry at index 1.
-	n.st.log = []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}}
+	seedLogEntries(n, []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}})
 	n.st.currentTerm = 1
 	n.rs.Store(n.st.snapshot())
 
@@ -399,13 +422,13 @@ func TestReplication_ConflictHintTermMismatch(t *testing.T) {
 	// Seed: log = [{T1,I1}, {T2,I2}, {T2,I3}, {T2,I4}, {T3,I5}].
 	// Leader probes PrevLogIndex=4 with PrevLogTerm=99 → mismatch at I4.
 	// Conflict term = 2; first index of term 2 in our log = 2.
-	n.st.log = []LogEntry{
+	seedLogEntries(n, []LogEntry{
 		{Term: 1, Index: 1},
 		{Term: 2, Index: 2},
 		{Term: 2, Index: 3},
 		{Term: 2, Index: 4},
 		{Term: 3, Index: 5},
-	}
+	})
 	n.st.currentTerm = 3
 	n.rs.Store(n.st.snapshot())
 
@@ -455,11 +478,11 @@ func TestReplication_LeaderRetriesOnConflict(t *testing.T) {
 	// Seed n1 with a single high-term entry so it's at-least-as-up-to-date as n2.
 	// Seed n2 with a stale entry at the same index but different term.
 	// n3 starts empty.
-	nodes[0].st.log = []LogEntry{{Term: 5, Index: 1, Command: []byte("leader-old")}}
+	seedLogEntries(nodes[0], []LogEntry{{Term: 5, Index: 1, Command: []byte("leader-old")}})
 	nodes[0].st.currentTerm = 5
 	nodes[0].rs.Store(nodes[0].st.snapshot())
 
-	nodes[1].st.log = []LogEntry{{Term: 3, Index: 1, Command: []byte("stale")}}
+	seedLogEntries(nodes[1], []LogEntry{{Term: 3, Index: 1, Command: []byte("stale")}})
 	nodes[1].st.currentTerm = 3
 	nodes[1].rs.Store(nodes[1].st.snapshot())
 
@@ -517,10 +540,11 @@ func TestReplication_LeaderRetriesOnConflict(t *testing.T) {
 	// after convergence its log[0] must carry term 5 (not the stale term 3).
 	nodes[1].Stop()
 	<-nodes[1].doneCh
-	require.GreaterOrEqual(t, len(nodes[1].st.log), 3, "n2 should have at least 3 entries")
-	require.Equal(t, uint64(5), nodes[1].st.log[0].Term,
+	require.GreaterOrEqual(t, nodes[1].st.log.LastIndex(), uint64(3), "n2 should have at least 3 entries")
+	n2e1 := mustLogEntry(nodes[1], 1)
+	require.Equal(t, uint64(5), n2e1.Term,
 		"n2's index-1 entry should be replaced with n1's term-5 entry")
-	require.Equal(t, []byte("leader-old"), nodes[1].st.log[0].Command,
+	require.Equal(t, []byte("leader-old"), n2e1.Command,
 		"n2's index-1 command should match n1's seed")
 	// Sanity: the wrapper saw at least one AE to n2 (otherwise transport bypassed).
 	require.Greater(t, cnt.ae["n2"], 0, "AE wrapper should have observed traffic to n2")
@@ -655,7 +679,7 @@ func TestAE_RejectsMismatchedEntryIndex(t *testing.T) {
 		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
-	n.st.log = []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}}
+	seedLogEntries(n, []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}})
 	n.st.currentTerm = 1
 	n.rs.Store(n.st.snapshot())
 
@@ -681,9 +705,10 @@ func TestAE_RejectsMismatchedEntryIndex(t *testing.T) {
 
 	// Log must be unchanged.
 	n.Stop()
-	require.Len(t, n.st.log, 1, "follower log must be unchanged after rejection")
-	require.Equal(t, uint64(1), n.st.log[0].Index)
-	require.Equal(t, []byte("A"), n.st.log[0].Command)
+	require.Equal(t, uint64(1), n.st.log.LastIndex(), "follower log must be unchanged after rejection")
+	e := mustLogEntry(n, 1)
+	require.Equal(t, uint64(1), e.Index)
+	require.Equal(t, []byte("A"), e.Command)
 }
 
 // TestApplyConflictHint_BoundedScanOnLargeLog verifies that applyConflictHint
@@ -712,10 +737,11 @@ func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
 		n.st.currentTerm = logTerm
 		n.st.state = Leader
 		n.st.leaderID = id
-		n.st.log = make([]LogEntry, N)
+		entries := make([]LogEntry, N)
 		for i := 0; i < N; i++ {
-			n.st.log[i] = LogEntry{Term: logTerm, Index: uint64(i + 1)}
+			entries[i] = LogEntry{Term: logTerm, Index: uint64(i + 1)}
 		}
+		seedLogEntries(n, entries)
 		n.st.nextIndex = map[string]uint64{"p1": N + 1, "p2": N + 1}
 		n.st.matchIndex = map[string]uint64{"p1": 0, "p2": 0}
 		n.rs.Store(n.st.snapshot())
