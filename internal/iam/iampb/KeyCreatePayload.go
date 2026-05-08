@@ -115,8 +115,25 @@ func (rcv *KeyCreatePayload) MutateExpiresAtUnixNs(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
+func (rcv *KeyCreatePayload) BucketScope(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *KeyCreatePayload) BucketScopeLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func KeyCreatePayloadStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func KeyCreatePayloadAddAccessKey(builder *flatbuffers.Builder, accessKey flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(accessKey), 0)
@@ -135,6 +152,12 @@ func KeyCreatePayloadAddCreatedAtUnixNs(builder *flatbuffers.Builder, createdAtU
 }
 func KeyCreatePayloadAddExpiresAtUnixNs(builder *flatbuffers.Builder, expiresAtUnixNs int64) {
 	builder.PrependInt64Slot(4, expiresAtUnixNs, 0)
+}
+func KeyCreatePayloadAddBucketScope(builder *flatbuffers.Builder, bucketScope flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(bucketScope), 0)
+}
+func KeyCreatePayloadStartBucketScopeVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func KeyCreatePayloadEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

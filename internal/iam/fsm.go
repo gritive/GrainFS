@@ -66,25 +66,67 @@ func (a *Applier) ApplySADelete(payload []byte) error {
 
 // ApplyKeyCreate decrypts SecretKeyEnc with AAD = sa_id and inserts the
 // AccessKey. Wrong AAD or tampered ciphertext returns an error.
+// This is the legacy type-23 path; BucketScope is always nil regardless of payload.
 func (a *Applier) ApplyKeyCreate(payload []byte) error {
 	p := iampb.GetRootAsKeyCreatePayload(payload, 0)
-	saID := string(p.SaId())
-	ak := string(p.AccessKey())
+	encBytes := readEncBytes(p)
+	return a.applyKeyCreateInternal(
+		string(p.SaId()), string(p.AccessKey()),
+		encBytes, time.Unix(0, p.CreatedAtUnixNs()), readExpires(p),
+		nil, // legacy type 23: scope always nil
+	)
+}
+
+// ApplyKeyCreateScoped decrypts SecretKeyEnc and inserts the AccessKey with
+// bucket_scope enforced. If the scope contains a bucket for which the SA has
+// no grant, the apply is a noop (return nil) for raft determinism.
+func (a *Applier) ApplyKeyCreateScoped(payload []byte) error {
+	p := iampb.GetRootAsKeyCreatePayload(payload, 0)
+	encBytes := readEncBytes(p)
+	return a.applyKeyCreateInternal(
+		string(p.SaId()), string(p.AccessKey()),
+		encBytes, time.Unix(0, p.CreatedAtUnixNs()), readExpires(p),
+		readScope(p),
+	)
+}
+
+// applyKeyCreateInternal is the shared implementation for ApplyKeyCreate and
+// ApplyKeyCreateScoped. Noops (return nil) on missing SA or scope overgrant
+// to keep raft replay deterministic.
+func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, createdAt time.Time, expires *time.Time, scope []string) error {
 	if saID == "" || ak == "" {
 		return fmt.Errorf("iam: KeyCreate missing sa_id or access_key")
 	}
-	encBytes := make([]byte, p.SecretKeyEncLength())
-	for i := 0; i < p.SecretKeyEncLength(); i++ {
-		encBytes[i] = byte(p.SecretKeyEnc(i))
+	// SA must exist; noop on missing to keep raft replay deterministic.
+	if _, ok := a.store.LookupSA(saID); !ok {
+		log.Warn().Str("sa_id", saID).Str("ak", ak).Bool("scoped", len(scope) > 0).
+			Msg("iam: applyKeyCreateInternal: SA missing, noop")
+		return nil
+	}
+	// Defensive: re-validate scope shape (sentinels, empty entries, dedup).
+	// In production this duplicates the admin handler's NormalizeScope call,
+	// but it guards against any propose path that bypasses the handler
+	// (e.g., direct raft injection).
+	if len(scope) > 0 {
+		normalized, err := NormalizeScope(scope)
+		if err != nil {
+			log.Warn().Str("sa_id", saID).Str("ak", ak).Err(err).
+				Msg("iam: applyKeyCreateInternal: scope validation failed, noop")
+			return nil
+		}
+		scope = normalized
+	}
+	// Scope validation: every bucket in scope must have a grant on the SA.
+	for _, b := range scope {
+		if a.store.LookupGrant(saID, b) == RoleNone {
+			log.Warn().Str("sa_id", saID).Str("ak", ak).Str("bucket", b).
+				Msg("iam: KeyCreateScoped apply: scope contains bucket without grant, noop (race)")
+			return nil
+		}
 	}
 	plain, err := UnwrapSecret(a.enc, saID, encBytes)
 	if err != nil {
 		return fmt.Errorf("iam: KeyCreate decrypt: %w", err)
-	}
-	var expires *time.Time
-	if p.ExpiresAtUnixNs() != 0 {
-		t := time.Unix(0, p.ExpiresAtUnixNs())
-		expires = &t
 	}
 	a.store.applyKeyCreate(AccessKey{
 		AccessKey:    ak,
@@ -92,10 +134,67 @@ func (a *Applier) ApplyKeyCreate(payload []byte) error {
 		SecretKeyEnc: encBytes,
 		SAID:         saID,
 		Status:       KeyStatusActive,
-		CreatedAt:    time.Unix(0, p.CreatedAtUnixNs()),
+		CreatedAt:    createdAt,
 		ExpiresAt:    expires,
+		BucketScope:  scope,
 	})
 	return nil
+}
+
+// applyKeyCreateFromSnapshot persists an AccessKey during snapshot restore.
+// Unlike applyKeyCreateInternal, it skips scope validation because snapshot
+// restore reads SA → Keys → Grants in order — at key-restore time, grants
+// haven't loaded yet, so a `scope ⊄ grants` check would always false-noop.
+// Validation already happened at issue time (admin handler 422 + FSM
+// determinism guard); persisted state is trusted.
+func (a *Applier) applyKeyCreateFromSnapshot(saID, ak string, encBytes []byte, createdAt time.Time, expires *time.Time, scope []string) error {
+	if saID == "" || ak == "" {
+		return fmt.Errorf("iam: snapshot restore: KeyCreate missing sa_id or access_key")
+	}
+	plain, err := UnwrapSecret(a.enc, saID, encBytes)
+	if err != nil {
+		return fmt.Errorf("iam: snapshot restore: KeyCreate decrypt: %w", err)
+	}
+	a.store.applyKeyCreate(AccessKey{
+		AccessKey:    ak,
+		SecretKey:    plain,
+		SecretKeyEnc: encBytes,
+		SAID:         saID,
+		Status:       KeyStatusActive,
+		CreatedAt:    createdAt,
+		ExpiresAt:    expires,
+		BucketScope:  scope,
+	})
+	return nil
+}
+
+func readEncBytes(p *iampb.KeyCreatePayload) []byte {
+	n := p.SecretKeyEncLength()
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		out[i] = byte(p.SecretKeyEnc(i))
+	}
+	return out
+}
+
+func readExpires(p *iampb.KeyCreatePayload) *time.Time {
+	if p.ExpiresAtUnixNs() == 0 {
+		return nil
+	}
+	t := time.Unix(0, p.ExpiresAtUnixNs())
+	return &t
+}
+
+func readScope(p *iampb.KeyCreatePayload) []string {
+	n := p.BucketScopeLength()
+	if n == 0 {
+		return nil
+	}
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = string(p.BucketScope(i))
+	}
+	return out
 }
 
 // ApplyKeyRevoke marks the AccessKey as revoked. Idempotent on

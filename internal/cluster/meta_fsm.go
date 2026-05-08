@@ -55,6 +55,7 @@ const (
 	MetaCmdTypeIAMSACreate            = clusterpb.MetaCmdTypeIAMSACreate
 	MetaCmdTypeIAMSADelete            = clusterpb.MetaCmdTypeIAMSADelete
 	MetaCmdTypeIAMKeyCreate           = clusterpb.MetaCmdTypeIAMKeyCreate
+	MetaCmdTypeIAMKeyCreateScoped     = clusterpb.MetaCmdTypeIAMKeyCreateScoped
 	MetaCmdTypeIAMKeyRevoke           = clusterpb.MetaCmdTypeIAMKeyRevoke
 	MetaCmdTypeIAMGrantPut            = clusterpb.MetaCmdTypeIAMGrantPut
 	MetaCmdTypeIAMGrantDelete         = clusterpb.MetaCmdTypeIAMGrantDelete
@@ -316,6 +317,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplySADelete)
 	case clusterpb.MetaCmdTypeIAMKeyCreate:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyCreate)
+	case clusterpb.MetaCmdTypeIAMKeyCreateScoped:
+		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyCreateScoped)
 	case clusterpb.MetaCmdTypeIAMKeyRevoke:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyRevoke)
 	case clusterpb.MetaCmdTypeIAMGrantPut:

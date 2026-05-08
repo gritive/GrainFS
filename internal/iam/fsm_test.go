@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -199,6 +200,8 @@ func TestApplier_KeyCreate_AADMismatchFails(t *testing.T) {
 	s := NewStore()
 	ap := NewApplier(s, enc)
 
+	// SA must exist so the apply path reaches the decrypt step.
+	_ = ap.ApplySACreate(buildSACreate(t, "sa-B", "bob", time.Unix(1, 0)))
 	wrappedForA, _ := WrapSecret(enc, "sa-A", "secret")
 	if err := ap.ApplyKeyCreate(buildKeyCreate(t, "AK1", "sa-B", wrappedForA, time.Unix(2, 0), 0)); err == nil {
 		t.Fatal("expected AAD mismatch error, got nil")
@@ -209,6 +212,8 @@ func TestApplier_KeyRevoke(t *testing.T) {
 	enc := newTestEncryptor(t)
 	s := NewStore()
 	ap := NewApplier(s, enc)
+	// SA must exist so the key is actually stored before revoking.
+	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
 	wrapped, _ := WrapSecret(enc, "sa-1", "secret")
 	_ = ap.ApplyKeyCreate(buildKeyCreate(t, "AK1", "sa-1", wrapped, time.Unix(2, 0), 0))
 	if err := ap.ApplyKeyRevoke(buildKeyRevoke(t, "AK1")); err != nil {
@@ -337,5 +342,101 @@ func TestApplier_AuthEnable_Sticky(t *testing.T) {
 	}
 	if err := ap.ApplyAuthEnable(nil); err != nil {
 		t.Fatalf("second ApplyAuthEnable: %v", err)
+	}
+}
+
+// buildKeyCreateScoped builds a KeyCreatePayload FlatBuffer with a bucket_scope vector.
+func buildKeyCreateScoped(t *testing.T, ak, saID string, encBytes []byte, ts time.Time, expires int64, scope []string) []byte {
+	t.Helper()
+	b := flatbuffers.NewBuilder(256)
+	// Pre-create all strings/vectors (must be done before StartObject).
+	akOff := b.CreateString(ak)
+	saOff := b.CreateString(saID)
+	encOff := b.CreateByteVector(encBytes)
+	// Build scope vector of strings.
+	scopeOffsets := make([]flatbuffers.UOffsetT, len(scope))
+	for i, s := range scope {
+		scopeOffsets[i] = b.CreateString(s)
+	}
+	iampb.KeyCreatePayloadStartBucketScopeVector(b, len(scope))
+	for i := len(scopeOffsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(scopeOffsets[i])
+	}
+	scopeVec := b.EndVector(len(scope))
+	iampb.KeyCreatePayloadStart(b)
+	iampb.KeyCreatePayloadAddAccessKey(b, akOff)
+	iampb.KeyCreatePayloadAddSecretKeyEnc(b, encOff)
+	iampb.KeyCreatePayloadAddSaId(b, saOff)
+	iampb.KeyCreatePayloadAddCreatedAtUnixNs(b, ts.UnixNano())
+	iampb.KeyCreatePayloadAddExpiresAtUnixNs(b, expires)
+	iampb.KeyCreatePayloadAddBucketScope(b, scopeVec)
+	end := iampb.KeyCreatePayloadEnd(b)
+	b.Finish(end)
+	return b.FinishedBytes()
+}
+
+func TestApplyKeyCreateScoped_Happy(t *testing.T) {
+	enc := newTestEncryptor(t)
+	s := NewStore()
+	ap := NewApplier(s, enc)
+
+	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
+	_ = ap.ApplyGrantPut(buildGrantPut(t, "sa-1", "logs", RoleRead, time.Unix(1, 0)))
+
+	wrapped, err := WrapSecret(enc, "sa-1", "secret")
+	if err != nil {
+		t.Fatalf("WrapSecret: %v", err)
+	}
+	payload := buildKeyCreateScoped(t, "AK1", "sa-1", wrapped, time.Unix(2, 0), 0, []string{"logs"})
+	if err := ap.ApplyKeyCreateScoped(payload); err != nil {
+		t.Fatalf("apply err: %v", err)
+	}
+	got, ok := s.LookupKey("AK1")
+	if !ok {
+		t.Fatal("key not persisted")
+	}
+	if !slices.Equal(got.BucketScope, []string{"logs"}) {
+		t.Fatalf("scope = %v, want [logs]", got.BucketScope)
+	}
+}
+
+func TestApplyKeyCreateScoped_OverScope_Noop(t *testing.T) {
+	enc := newTestEncryptor(t)
+	s := NewStore()
+	ap := NewApplier(s, enc)
+
+	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
+	_ = ap.ApplyGrantPut(buildGrantPut(t, "sa-1", "logs", RoleRead, time.Unix(1, 0)))
+
+	wrapped, _ := WrapSecret(enc, "sa-1", "secret")
+	// scope contains "reports" but SA has no grant on it
+	payload := buildKeyCreateScoped(t, "AK_BAD", "sa-1", wrapped, time.Unix(2, 0), 0, []string{"logs", "reports"})
+	if err := ap.ApplyKeyCreateScoped(payload); err != nil {
+		t.Fatalf("over-scope should noop, got err %v (raft determinism requires nil)", err)
+	}
+	if _, ok := s.LookupKey("AK_BAD"); ok {
+		t.Fatal("over-scope key must NOT be persisted")
+	}
+}
+
+func TestApplyKeyCreate_LegacyType23_NilScope(t *testing.T) {
+	enc := newTestEncryptor(t)
+	s := NewStore()
+	ap := NewApplier(s, enc)
+
+	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
+
+	wrapped, _ := WrapSecret(enc, "sa-1", "secret")
+	// Use legacy buildKeyCreate (no scope field)
+	payload := buildKeyCreate(t, "AK_LEGACY", "sa-1", wrapped, time.Unix(2, 0), 0)
+	if err := ap.ApplyKeyCreate(payload); err != nil {
+		t.Fatalf("apply err: %v", err)
+	}
+	got, ok := s.LookupKey("AK_LEGACY")
+	if !ok {
+		t.Fatal("key not persisted")
+	}
+	if got.BucketScope != nil {
+		t.Fatalf("legacy path scope = %v, want nil", got.BucketScope)
 	}
 }

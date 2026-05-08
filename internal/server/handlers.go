@@ -170,6 +170,18 @@ func (s *Server) listBuckets(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// CR1: filter by key's BucketScope so a scoped key cannot enumerate
+	// bucket names outside its scope. scope=nil means unrestricted (legacy keys).
+	if scope := iam.ScopeFromContext(ctx); len(scope) > 0 {
+		filtered := buckets[:0]
+		for _, name := range buckets {
+			if iam.ScopeAllows(scope, name) {
+				filtered = append(filtered, name)
+			}
+		}
+		buckets = filtered
+	}
+
 	result := listBucketsResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 	for _, name := range buckets {
 		result.Buckets = append(result.Buckets, bucketResult{

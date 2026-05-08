@@ -2,6 +2,7 @@ package iam
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -32,11 +33,11 @@ func TestResolveSA_PopulatesPrincipal(t *testing.T) {
 	s.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
 	s.applyKeyCreate(AccessKey{AccessKey: "AK1", SAID: "sa-1", Status: KeyStatusActive})
 
-	saID, ok := ResolveSA(s, "AK1")
+	_, saID, ok := ResolveSA(s, "AK1")
 	if !ok || saID != "sa-1" {
 		t.Fatalf("ResolveSA = %q/%v, want sa-1/true", saID, ok)
 	}
-	if _, ok := ResolveSA(s, "missing"); ok {
+	if _, _, ok := ResolveSA(s, "missing"); ok {
 		t.Fatal("ResolveSA on missing returned ok=true")
 	}
 }
@@ -53,5 +54,30 @@ func TestPrincipalContext_RoundTrip(t *testing.T) {
 	// Original ctx is not mutated
 	if got := PrincipalFromContext(ctx); got != "" {
 		t.Fatalf("parent context mutated: got %q", got)
+	}
+}
+
+func TestWithPrincipalScope_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithPrincipal(ctx, "sa-alice")
+	ctx = WithPrincipalScope(ctx, []string{"logs", "reports"})
+	if got := PrincipalFromContext(ctx); got != "sa-alice" {
+		t.Fatalf("PrincipalFromContext = %q, want sa-alice", got)
+	}
+	if got := ScopeFromContext(ctx); !slices.Equal(got, []string{"logs", "reports"}) {
+		t.Fatalf("ScopeFromContext = %v, want [logs reports]", got)
+	}
+}
+
+func TestScopeFromContext_Empty(t *testing.T) {
+	if got := ScopeFromContext(context.Background()); got != nil {
+		t.Fatalf("empty ctx ScopeFromContext = %v, want nil", got)
+	}
+}
+
+func TestWithPrincipalScope_NilRoundtrip(t *testing.T) {
+	ctx := WithPrincipalScope(context.Background(), nil)
+	if got := ScopeFromContext(ctx); got != nil {
+		t.Fatalf("nil-scope ctx should roundtrip to nil, got %v", got)
 	}
 }

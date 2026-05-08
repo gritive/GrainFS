@@ -194,17 +194,21 @@ func (a *AdminAPI) HandleSADelete(w http.ResponseWriter, r *http.Request, saID s
 
 // KeyCreateRequest is the JSON body for POST /admin/iam/sa/{id}/key.
 // Empty body is allowed; ExpiresAt nil = never.
+// Buckets, when non-empty, restricts the key to those buckets only.
 type KeyCreateRequest struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Buckets   []string   `json:"buckets,omitempty"`
 }
 
 // KeyCreateResponse returns the rotated key with one-time plaintext secret.
+// Buckets echoes the normalized scope if the key is bucket-scoped.
 type KeyCreateResponse struct {
 	AccessKey string     `json:"access_key"`
 	SecretKey string     `json:"secret_key"`
 	SAID      string     `json:"sa_id"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Buckets   []string   `json:"buckets,omitempty"`
 }
 
 func (a *AdminAPI) HandleKeyCreate(w http.ResponseWriter, r *http.Request, saID string) {
@@ -215,6 +219,18 @@ func (a *AdminAPI) HandleKeyCreate(w http.ResponseWriter, r *http.Request, saID 
 	var req KeyCreateRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req) // empty body OK
+	}
+
+	scope, err := NormalizeScope(req.Buckets)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	for _, b := range scope {
+		if a.store.LookupGrant(saID, b) == RoleNone {
+			http.Error(w, fmt.Sprintf("scope contains %q but SA has no grant on it", b), http.StatusBadRequest)
+			return
+		}
 	}
 
 	accessKey, secretKey := genCredentialPair()
@@ -231,8 +247,13 @@ func (a *AdminAPI) HandleKeyCreate(w http.ResponseWriter, r *http.Request, saID 
 		Status:       KeyStatusActive,
 		CreatedAt:    time.Now().UTC(),
 		ExpiresAt:    req.ExpiresAt,
+		BucketScope:  scope,
 	}
-	if err := a.proposer.ProposeKeyCreate(r.Context(), k); err != nil {
+	propose := a.proposer.ProposeKeyCreate
+	if len(scope) > 0 {
+		propose = a.proposer.ProposeKeyCreateScoped
+	}
+	if err := propose(r.Context(), k); err != nil {
 		http.Error(w, "propose: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -240,6 +261,7 @@ func (a *AdminAPI) HandleKeyCreate(w http.ResponseWriter, r *http.Request, saID 
 	_ = json.NewEncoder(w).Encode(KeyCreateResponse{
 		AccessKey: accessKey, SecretKey: secretKey,
 		SAID: saID, CreatedAt: k.CreatedAt, ExpiresAt: k.ExpiresAt,
+		Buckets: scope,
 	})
 }
 

@@ -563,7 +563,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// context means anonymous (legacy WithAuth) or pre-bootstrap
 		// flag-mode (IAM still empty); both are valid.
 		if s.iamStore != nil {
-			saID, ok := iam.ResolveSA(s.iamStore, accessKey)
+			k, saID, ok := iam.ResolveSA(s.iamStore, accessKey)
 			if !ok && s.iamStore.AuthEnabled() {
 				// Sticky auth_enabled is on but the SigV4-verified key is
 				// not (or no longer) in IAM — e.g. revoked between Verify
@@ -575,6 +575,9 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			}
 			if ok {
 				ctx = iam.WithPrincipal(ctx, saID)
+				// Propagate BucketScope so authzMiddleware Layer 0 can filter.
+				// k comes from the same atomic snapshot as saID — no second LookupKey needed.
+				ctx = iam.WithPrincipalScope(ctx, k.BucketScope)
 			}
 		}
 		c.Next(ctx)

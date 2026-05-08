@@ -22,16 +22,16 @@ func NewSecretLookup(s *Store) SecretLookup {
 	}
 }
 
-// ResolveSA returns the sa_id for an access_key after Verifier has already
-// accepted the SigV4 signature. Active+unexpired keys only — a key that
-// passes Verify but is revoked between Verify and Resolve returns ok=false
-// (treat as 401 in the auth middleware).
-func ResolveSA(s *Store, accessKey string) (string, bool) {
+// ResolveSA returns (key, sa_id, ok). The *AccessKey is the resolved key
+// record (live snapshot pointer); callers can read BucketScope and other
+// fields without a second LookupKey call. Returns ok=false for revoked or
+// expired keys (callers must fail closed).
+func ResolveSA(s *Store, accessKey string) (*AccessKey, string, bool) {
 	k, ok := s.LookupKey(accessKey)
 	if !ok {
-		return "", false
+		return nil, "", false
 	}
-	return k.SAID, true
+	return k, k.SAID, true
 }
 
 // principalCtxKey is the unexported context key carrying the resolved sa_id.
@@ -49,5 +49,24 @@ func WithPrincipal(ctx context.Context, saID string) context.Context {
 // empty string if no principal was set (anonymous mode or pre-auth path).
 func PrincipalFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(principalCtxKey{}).(string)
+	return v
+}
+
+// scopeCtxKey is a separate ctx key for the AccessKey's BucketScope.
+// Distinct from principalCtxKey to keep saID and scope independently
+// readable; legacy callers of PrincipalFromContext keep working unchanged.
+type scopeCtxKey struct{}
+
+// WithPrincipalScope returns a new ctx with the AccessKey's bucket_scope
+// attached. nil/empty means unrestricted (no Layer 0 filter applied).
+func WithPrincipalScope(ctx context.Context, scope []string) context.Context {
+	return context.WithValue(ctx, scopeCtxKey{}, scope)
+}
+
+// ScopeFromContext returns the bucket_scope of the resolved AccessKey,
+// or nil if none was set (anonymous mode, pre-auth path, or legacy
+// unrestricted key).
+func ScopeFromContext(ctx context.Context) []string {
+	v, _ := ctx.Value(scopeCtxKey{}).([]string)
 	return v
 }

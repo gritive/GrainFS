@@ -22,6 +22,9 @@ func (m *mockIAMProposer) ProposeSADelete(_ context.Context, _ string) error { r
 func (m *mockIAMProposer) ProposeKeyCreate(_ context.Context, _ iam.AccessKey) error {
 	return nil
 }
+func (m *mockIAMProposer) ProposeKeyCreateScoped(_ context.Context, _ iam.AccessKey) error {
+	return nil
+}
 func (m *mockIAMProposer) ProposeKeyRevoke(_ context.Context, _ string) error { return nil }
 func (m *mockIAMProposer) ProposeGrantPut(_ context.Context, g iam.Grant) error {
 	m.calls = append(m.calls, g)

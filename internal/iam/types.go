@@ -68,6 +68,7 @@ type AccessKey struct {
 	CreatedAt    time.Time
 	LastUsedAt   time.Time  // best-effort, updated on Verify hit
 	ExpiresAt    *time.Time // nil = never expires
+	BucketScope  []string   // nil/empty = unrestricted (backward compat); non-empty = subset filter on Layer 0 authz
 }
 
 // Grant authorizes a ServiceAccount to perform Role-level operations on a Bucket.

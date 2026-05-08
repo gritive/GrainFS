@@ -5,15 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 )
 
-// Snapshot binary format v1:
+// Snapshot binary format (current: v2, backward-compat: v1):
 //
-//	[u8 version=1]
+//	[u8 version=2]
 //	[u8 authEnabled flag]
 //	[u32 N_sas] [N_sas × (u32 len, FB SACreatePayload)]
 //	[u32 N_keys] [N_keys × (u32 len, FB KeyCreatePayload)]   // SecretKeyEnc only, never plaintext
@@ -21,8 +22,9 @@ import (
 //	[u32 N_wildcards] [N_wildcards × (u32 len, FB GrantWildcardPutPayload)]
 //	[u32 N_revoked] [N_revoked × (u32 len, raw access_key bytes)]
 //
+// v1 snapshots (IAM Foundation ≤v0.0.97) have no BucketScope; BucketScope=nil naturally.
 // All sizes are little-endian u32. Each FB blob is independently parseable.
-const snapshotVersion uint8 = 1
+const snapshotVersion uint8 = 2
 
 // WriteSnapshot serializes the entire IAM store to w. SecretKey plaintexts
 // are NEVER written; only SecretKeyEnc bytes are emitted.
@@ -107,8 +109,9 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 	if _, err := io.ReadFull(r, hdr); err != nil {
 		return err
 	}
-	if hdr[0] != snapshotVersion {
-		return fmt.Errorf("iam: unsupported snapshot version %d", hdr[0])
+	ver := hdr[0]
+	if ver != 1 && ver != 2 {
+		return fmt.Errorf("iam: snapshot version %d not supported (only 1 and 2)", ver)
 	}
 	ap := NewApplier(dst, enc)
 
@@ -135,7 +138,13 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		if err != nil {
 			return err
 		}
-		if err := ap.ApplyKeyCreate(blob); err != nil {
+		p := iampb.GetRootAsKeyCreatePayload(blob, 0)
+		encBytes := readEncBytes(p)
+		if err := ap.applyKeyCreateFromSnapshot(
+			string(p.SaId()), string(p.AccessKey()),
+			encBytes, time.Unix(0, p.CreatedAtUnixNs()),
+			readExpires(p), readScope(p),
+		); err != nil {
 			return err
 		}
 	}
@@ -210,9 +219,22 @@ func buildSACreatePayload(sa ServiceAccount) []byte {
 
 func buildKeyCreatePayload(k AccessKey) []byte {
 	b := flatbuffers.NewBuilder(128)
+	// Pre-create all offsets before StartObject.
 	ak := b.CreateString(k.AccessKey)
 	sa := b.CreateString(k.SAID)
 	encVec := b.CreateByteVector(k.SecretKeyEnc)
+	var scopeVec flatbuffers.UOffsetT
+	if len(k.BucketScope) > 0 {
+		offs := make([]flatbuffers.UOffsetT, len(k.BucketScope))
+		for i, s := range k.BucketScope {
+			offs[i] = b.CreateString(s)
+		}
+		iampb.KeyCreatePayloadStartBucketScopeVector(b, len(k.BucketScope))
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		scopeVec = b.EndVector(len(k.BucketScope))
+	}
 	iampb.KeyCreatePayloadStart(b)
 	iampb.KeyCreatePayloadAddAccessKey(b, ak)
 	iampb.KeyCreatePayloadAddSecretKeyEnc(b, encVec)
@@ -220,6 +242,9 @@ func buildKeyCreatePayload(k AccessKey) []byte {
 	iampb.KeyCreatePayloadAddCreatedAtUnixNs(b, k.CreatedAt.UnixNano())
 	if k.ExpiresAt != nil {
 		iampb.KeyCreatePayloadAddExpiresAtUnixNs(b, k.ExpiresAt.UnixNano())
+	}
+	if len(k.BucketScope) > 0 {
+		iampb.KeyCreatePayloadAddBucketScope(b, scopeVec)
 	}
 	b.Finish(iampb.KeyCreatePayloadEnd(b))
 	return b.FinishedBytes()

@@ -159,3 +159,71 @@ func TestIAMRequest_Non2xxReturnsError(t *testing.T) {
 		t.Errorf("error = %v, want 404 in message", err)
 	}
 }
+
+func TestCLI_KeyCreate_BucketFlag(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x/key", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_key":"AK1","secret_key":"SK1","sa_id":"sa-x","created_at":"2026-01-01T00:00:00Z","buckets":["logs","reports"]}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "key", "create", "sa-x", "--bucket", "logs", "--bucket", "reports"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+
+	// Verify the request body contained buckets: ["logs","reports"]
+	bucketsRaw, ok := gotBody["buckets"]
+	if !ok {
+		t.Fatalf("request body missing 'buckets' field; got %v", gotBody)
+	}
+	var buckets []string
+	for _, v := range bucketsRaw.([]any) {
+		buckets = append(buckets, v.(string))
+	}
+	if len(buckets) != 2 || buckets[0] != "logs" || buckets[1] != "reports" {
+		t.Errorf("buckets = %v, want [logs reports]", buckets)
+	}
+}
+
+func TestCLI_KeyCreate_NoBucketFlag(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x/key", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_key":"AK1","secret_key":"SK1","sa_id":"sa-x","created_at":"2026-01-01T00:00:00Z"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "key", "create", "sa-x"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+
+	// Verify the request body does NOT contain buckets field (preserves legacy {} wire format)
+	if _, present := gotBody["buckets"]; present {
+		t.Fatalf("body should not contain \"buckets\" key when --bucket not used; got %v", gotBody)
+	}
+}
