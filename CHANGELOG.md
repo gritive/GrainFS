@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.0.115.0] - 2026-05-08 — raft v2 M2 PR 10: BadgerDB LogStore implementation
+
+### Added
+
+- `badgerLogStore` in `internal/raft/v2/logstore_badger.go`: durable LogStore
+  backed by BadgerDB. Key format is `prefix || be64(idx)` (big-endian so
+  lexicographic order matches numeric order). Value encoding is a compact 21-byte
+  fixed header (Term 8B + Index 8B + Type 1B + CommandLen 4B) followed by the
+  command payload — binary, not JSON.
+- `newBadgerLogStore(db *badger.DB, prefix []byte)` constructor. A prefix-based
+  design allows multiple Raft groups to coexist in a single Badger DB. On open,
+  a reverse iterator O(1) scan populates the cached `lastIdx` atomic and the
+  highest entry's value is decoded as a sanity check (rejects prefix collision).
+- Chunked TruncateAfter (1024 keys/txn) so partition-heal-scale truncations
+  don't hit Badger's `ErrTxnTooBig`. CmdLen bounds-check at encode boundary
+  (rejects Commands ≥ 4 GiB rather than silently truncating).
+- `logstore_badger_test.go`: 4 persistence-specific tests —
+  `TestBadgerLogStore_EmptyDirectoryFirstOpen`,
+  `TestBadgerLogStore_PersistsAcrossReopen`,
+  `TestBadgerLogStore_TruncateAfterPersistsToDisk`,
+  `TestBadgerLogStore_TruncateAfter_LargeChunkedDeletes`,
+  `TestBadgerLogStore_RejectsCorruptHighestEntryOnOpen` — that close and reopen
+  the DB to verify durability at the store layer (crash-recovery wiring of
+  `NewNode` is PR 11).
+
+### Changed
+
+- `logstore_test.go` refactored to Option A factory pattern: `allStores` table
+  drives the 8 original LogStore scenario tests across both `mem` and `badger`
+  implementations. Test names updated from `TestMemLogStore_*` to
+  `TestLogStore_*`. Total test count: 35 → 44 (count=1 run).
+- LogStore interface doc: added canonical-Command convention (`len==0` ↔ `nil`);
+  FSMs must length-check rather than nil-check.
+
+### Notes
+
+- `badgerLogStore` is not yet wired into `NewNode`; `memLogStore` remains the
+  default until PR 11 adds the config field and crash-recovery replay. Two
+  implementations now satisfy the `LogStore` interface: in-memory (default) and
+  persistent (opt-in via PR 11).
+
 ## [0.0.114.0] - 2026-05-08 — raft v2 M2 PR 9: LogStore interface (pure refactor)
 
 ### Added

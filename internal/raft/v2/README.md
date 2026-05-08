@@ -76,7 +76,7 @@ and the only caller of `publish`. Readers never touch `actorState`.
 | Conflict-hint O(log N) binary search | ✅ | PR 8 |
 | Membership change (AddVoter / RemoveVoter / etc.) | ⏳ stub | M2 |
 | LogStore interface (in-memory backing) | ✅ | PR 9 |
-| LogStore persistence (BadgerDB backing) | ⏳ | PR 10 |
+| LogStore persistence (BadgerDB backing) | ✅ | PR 10 |
 | Crash-recovery wiring (LogStore → replay) | ⏳ | PR 11 |
 | Snapshots | ⏳ | M2 |
 | Joint consensus (§4.3) | ⏳ | M2 |
@@ -108,10 +108,15 @@ affect production.
 `LogStore` (defined in `logstore.go`) is the interface through which the actor
 goroutine reads and writes the Raft log. The current implementation is
 `memLogStore` — an in-memory slice owned exclusively by the actor goroutine
-(no locking needed). PR 10 adds a `badgerLogStore` backed by BadgerDB for
-durability; PR 11 wires crash-recovery (replay from `applied+1` to
-`commitIndex` on restart). Callers of `Node` do not interact with `LogStore`
-directly; it is an implementation detail of the actor.
+(no locking needed). PR 10 adds `badgerLogStore` (in `logstore_badger.go`),
+a durable implementation backed by BadgerDB. It uses a prefix-scoped key
+layout (`prefix || be64(idx)`) so multiple Raft groups can share one DB, and
+encodes each entry as a compact 21-byte binary header plus payload (no JSON).
+`badgerLogStore` is not yet wired into `NewNode`; `memLogStore` remains the
+default until PR 11 adds the config field and crash-recovery replay from disk.
+PR 11 wires crash-recovery (replay from `applied+1` to `commitIndex` on
+restart). Callers of `Node` do not interact with `LogStore` directly; it is an
+implementation detail of the actor.
 
 ## Read this if you're touching this package
 
