@@ -226,3 +226,22 @@ func TestEventObserverNilEmitFnIsNoop(t *testing.T) {
 	obs.OnObjectWrite(context.Background(), "b", "k", &storage.PutObjectResult{})
 	// no panic
 }
+
+func TestNewServerWiresMutationBroker(t *testing.T) {
+	// Construct a minimal server via NewWithServerStorage with a real local
+	// backend (matches the pattern in authorizer_wiring_test.go and
+	// server_storage_test.go). NewMutationBroker should be wired in
+	// regardless of which storage paths are configured.
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalBackend: %v", err)
+	}
+	t.Cleanup(func() { backend.Close() })
+
+	s := NewWithServerStorage("127.0.0.1:0", NewServerStorage(backend, nil), nil)
+	if s.mutations == nil {
+		t.Fatal("Server.mutations is nil — broker not wired")
+	}
+	// Smoke: should not panic.
+	s.mutations.OnBucketCreate(context.Background(), "test")
+}
