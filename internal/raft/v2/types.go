@@ -79,6 +79,11 @@ const (
 	LogEntryCommand         LogEntryType = 0
 	LogEntryConfChange      LogEntryType = 1
 	LogEntryJointConfChange LogEntryType = 2 // reserved; not implemented
+	// LogEntryNoOp is a leader-blank entry appended immediately on election
+	// (Raft §5.4.2) so the new term's commit index can advance without waiting
+	// for a client request. FSM consumers MUST ignore entries of this type;
+	// the Command field is always nil for no-op entries.
+	LogEntryNoOp LogEntryType = 3
 )
 
 // LogEntry represents a single entry in the Raft log. Identical to v1's

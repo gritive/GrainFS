@@ -54,7 +54,7 @@ func (n *Node) Propose(cmd []byte) error {
 The actor goroutine (`actor.go::run`) is the only writer of `actorState`
 and the only caller of `publish`. Readers never touch `actorState`.
 
-## Capability matrix (M1 final state)
+## Capability matrix (M1 final state + M2 prep fixes)
 
 | Capability | Status | PR |
 |---|---|---|
@@ -70,6 +70,10 @@ and the only caller of `publish`. Readers never touch `actorState`.
 | Log conflict handling + truncation | ✅ | PR 6b |
 | Conflict-term hint backoff (§5.3 optimization) | ✅ | PR 6b |
 | Bootstrap / Configuration() (read API) | ✅ | PR 7 |
+| Leader no-op on election (§5.4.2) | ✅ | PR 8 |
+| MaxEntriesPerAE batch cap | ✅ | PR 8 |
+| Log Matching e.Index validation | ✅ | PR 8 |
+| Conflict-hint O(log N) binary search | ✅ | PR 8 |
 | Membership change (AddVoter / RemoveVoter / etc.) | ⏳ stub | M2 |
 | Persistence (LogStore) | ⏳ | M2 |
 | Snapshots | ⏳ | M2 |
@@ -77,6 +81,15 @@ and the only caller of `publish`. Readers never touch `actorState`.
 | ReadIndex linearizable reads | ⏳ | M2 |
 | Property-based tests + chaos suite | ⏳ | M3 |
 | Production caller migration | ⏳ | M5 |
+
+### FSM consumer note on LogEntryNoOp
+
+`becomeLeader` appends a `LogEntryNoOp` entry (type=3, Command=nil) immediately
+on election (Raft §5.4.2). This entry is delivered on `ApplyCh` like any other
+committed entry. **FSM consumers must check `e.Type == LogEntryNoOp` and skip
+these entries** — they carry no application payload. In a 3-voter cluster, the
+first entry applied after election is always the no-op at index 1; the first
+user-visible `ProposeWait` return value is therefore index 2.
 
 ## Caller migration (deferred)
 

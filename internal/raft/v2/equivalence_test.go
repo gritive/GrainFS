@@ -645,17 +645,21 @@ func TestEquivalence_ThreeVoterElection(t *testing.T) {
 
 // TestEquivalence_ThreeVoterPropose drives a single ProposeWait("hello") on
 // the n1 leader of a 3-voter cluster against both v1 and v2 implementations
-// and asserts equivalent outcomes:
+// and asserts convergence:
 //   - leader == n1, term == 1 (asymmetric election timeouts make this
 //     deterministic; also verified in TestEquivalence_ThreeVoterElection),
-//   - ProposeWait returns index 1 on both,
-//   - all three nodes' CommittedIndex reaches 1 within 2s.
+//   - all three nodes' CommittedIndex reaches the proposed index within 2s.
+//
+// NOTE: index equivalence (v1Idx == v2Idx) is intentionally NOT asserted here.
+// v2 appends a no-op entry at index 1 on becomeLeader (Raft §5.4.2); the first
+// user ProposeWait therefore returns index 2 in v2 but index 1 in v1 (which
+// only emits a no-op when SetNoOpCommand is called explicitly). This is a
+// deliberate v2 correctness improvement, not a regression.
 //
 // We do not compare apply transcripts here because both buildV1Cluster and
-// buildV2Cluster drain ApplyCh in background goroutines (see
-// equivalence_test.go:441 and :517). CommittedIndex is the observable
-// convergence signal — once it hits the proposed index on every node, the
-// committed-log replication path has completed identically on both impls.
+// buildV2Cluster drain ApplyCh in background goroutines. CommittedIndex is the
+// observable convergence signal — once it hits the proposed index on every
+// node, the committed-log replication path has completed on both impls.
 func TestEquivalence_ThreeVoterPropose(t *testing.T) {
 	ids := []string{"n1", "n2", "n3"}
 	const fast = "n1"
@@ -695,8 +699,11 @@ func TestEquivalence_ThreeVoterPropose(t *testing.T) {
 	require.NoError(t, err, "v1 ProposeWait")
 	v2Idx, err := v2Lead.ProposeWait(ctx, []byte("hello"))
 	require.NoError(t, err, "v2 ProposeWait")
-	require.Equal(t, v1Idx, v2Idx, "v1 and v2 should return the same commit index")
-	require.Equal(t, uint64(1), v1Idx)
+
+	// v1 without SetNoOpCommand: first user entry at index 1.
+	require.Equal(t, uint64(1), v1Idx, "v1: first user entry at index 1 (no no-op)")
+	// v2 with §5.4.2 no-op: first user entry at index 2 (no-op at index 1).
+	require.Equal(t, uint64(2), v2Idx, "v2: first user entry at index 2 (no-op at index 1)")
 
 	// Equivalence: every voter's CommittedIndex eventually reaches the
 	// proposed index. The buildXCluster background drains keep ApplyCh
@@ -767,6 +774,7 @@ func TestEquivalence_DivergentLogConverges(t *testing.T) {
 	require.NoError(t, err, "v1: ProposeWait A")
 	idxB1, err := v1Lead.ProposeWait(ctx, []byte("B"))
 	require.NoError(t, err, "v1: ProposeWait B")
+	// v1 has no no-op: A at index 1, B at index 2.
 	require.Equal(t, uint64(1), idxA1)
 	require.Equal(t, uint64(2), idxB1)
 
@@ -791,23 +799,26 @@ func TestEquivalence_DivergentLogConverges(t *testing.T) {
 	require.NoError(t, err, "v2: ProposeWait A")
 	idxB2, err := v2Lead.ProposeWait(ctx, []byte("B"))
 	require.NoError(t, err, "v2: ProposeWait B")
-	require.Equal(t, uint64(1), idxA2)
-	require.Equal(t, uint64(2), idxB2)
+	// v2 emits a no-op at index 1 (§5.4.2); A at index 2, B at index 3.
+	require.Equal(t, uint64(2), idxA2, "v2: A at index 2 (no-op at index 1)")
+	require.Equal(t, uint64(3), idxB2, "v2: B at index 3")
 
 	v2Net.heal("n3")
 
 	require.NoError(t, waitFor(3*time.Second, func() bool {
 		for _, n := range v2Nodes {
-			if n.CommittedIndex() < 2 {
+			if n.CommittedIndex() < idxB2 {
 				return false
 			}
 		}
 		return true
-	}), "v2: not all nodes reached commitIndex 2 after heal")
+	}), "v2: not all nodes reached commitIndex %d after heal", idxB2)
 
-	// Equivalence: both impls converge every node to commitIndex 2.
-	require.Equal(t, idxA1, idxA2, "v1 vs v2 divergence on first proposed index")
-	require.Equal(t, idxB1, idxB2, "v1 vs v2 divergence on second proposed index")
+	// Both impls converge all nodes: v1 to commitIndex 2, v2 to commitIndex 3.
+	// Index values differ (v2 has a no-op at index 1); what matters is both
+	// clusters reach their respective final commitIndex on every node.
+	require.Equal(t, uint64(2), idxB1, "v1: B at index 2 (no no-op)")
+	require.Equal(t, uint64(3), idxB2, "v2: B at index 3 (no-op at index 1)")
 }
 
 // buildV1ChaosCluster wires N v1 Nodes via the chaos cluster harness so
