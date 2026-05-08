@@ -12,30 +12,24 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 )
 
-// Snapshot binary format (current: v2, backward-compat: v1):
+// Snapshot binary format (current: v3):
 //
-//	[u8 version=2]
-//	[u8 authEnabled flag]
+//	[u8 version=3]
 //	[u32 N_sas] [N_sas × (u32 len, FB SACreatePayload)]
 //	[u32 N_keys] [N_keys × (u32 len, FB KeyCreatePayload)]   // SecretKeyEnc only, never plaintext
 //	[u32 N_grants] [N_grants × (u32 len, FB GrantPutPayload)]
 //	[u32 N_wildcards] [N_wildcards × (u32 len, FB GrantWildcardPutPayload)]
 //	[u32 N_revoked] [N_revoked × (u32 len, raw access_key bytes)]
 //
-// v1 snapshots (IAM Foundation ≤v0.0.97) have no BucketScope; BucketScope=nil naturally.
+// v3 dropped the authBit byte (sticky auth_enabled removed). v1/v2 readers are NOT supported.
 // All sizes are little-endian u32. Each FB blob is independently parseable.
-const snapshotVersion uint8 = 2
+const snapshotVersion uint8 = 3
 
 // WriteSnapshot serializes the entire IAM store to w. SecretKey plaintexts
 // are NEVER written; only SecretKeyEnc bytes are emitted.
 func WriteSnapshot(w io.Writer, s *Store) error {
 	st := s.snapshot()
 	if _, err := w.Write([]byte{snapshotVersion}); err != nil {
-		return err
-	}
-	// authEnabled bit removed; emit 0 placeholder to preserve v2 byte layout.
-	// Task 5 owns the v3 snapshot migration that drops this byte entirely.
-	if _, err := w.Write([]byte{0}); err != nil {
 		return err
 	}
 
@@ -103,13 +97,13 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 // required to decrypt SecretKeyEnc into in-memory plaintext SecretKey
 // (matches FSM Apply path semantics).
 func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
-	hdr := make([]byte, 2)
+	hdr := make([]byte, 1)
 	if _, err := io.ReadFull(r, hdr); err != nil {
 		return err
 	}
 	ver := hdr[0]
-	if ver != 1 && ver != 2 {
-		return fmt.Errorf("iam: snapshot version %d not supported (only 1 and 2)", ver)
+	if ver != 3 {
+		return fmt.Errorf("iam: snapshot version %d not supported (only v3)", ver)
 	}
 	ap := NewApplier(dst, enc)
 
@@ -193,9 +187,6 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		dst.applyKeyRevoke(string(blob))
 	}
 
-	// hdr[1] (legacy authEnabled bit) is intentionally ignored;
-	// Task 5 will rewrite the header read for snapshot v3.
-	_ = hdr[1]
 	return nil
 }
 

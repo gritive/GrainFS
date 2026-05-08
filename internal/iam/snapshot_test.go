@@ -3,7 +3,6 @@ package iam
 import (
 	"bytes"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -152,41 +151,14 @@ func TestSnapshot_RevokedKeyStatusPreserved(t *testing.T) {
 	}
 }
 
-func TestSnapshot_Version2_HeaderByte(t *testing.T) {
+func TestSnapshot_Version3_HeaderByte(t *testing.T) {
 	store := NewStore()
 	var buf bytes.Buffer
 	if err := WriteSnapshot(&buf, store); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	b := buf.Bytes()
-	if len(b) == 0 || b[0] != 2 {
-		t.Fatalf("first byte = %d, want 2", b[0])
-	}
-}
-
-func TestSnapshot_V1_StillReadable(t *testing.T) {
-	// Hand-craft a minimal v1 blob: header byte 1, authBit 0, four zero u32 counts.
-	// Format: [u8 version=1][u8 authBit=0][u32 nSA=0][u32 nKeys=0][u32 nGrants=0][u32 nWildcards=0]
-	// Note: nRevoked section is optional (EOF = 0).
-	buf := []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	r := bytes.NewReader(buf)
-	enc := newTestEncryptor(t)
-	dst := NewStore()
-	if err := ReadSnapshot(r, dst, enc); err != nil {
-		t.Fatalf("v1 read should succeed (forward compat), got %v", err)
-	}
-}
-
-func TestSnapshot_V3_Rejected(t *testing.T) {
-	buf := []byte{3, 0}
-	r := bytes.NewReader(buf)
-	enc := newTestEncryptor(t)
-	dst := NewStore()
-	err := ReadSnapshot(r, dst, enc)
-	if err == nil {
-		t.Fatal("expected version error, got nil")
-	}
-	if !strings.Contains(err.Error(), "version") {
-		t.Fatalf("err = %v, expected to mention 'version'", err)
+	if len(b) == 0 || b[0] != 3 {
+		t.Fatalf("first byte = %d, want 3", b[0])
 	}
 }

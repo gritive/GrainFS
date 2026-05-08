@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -85,4 +86,47 @@ func TestApplyInitFirstSA_SecondApply_IdempotentSkip(t *testing.T) {
 	require.True(t, ok, "first key must persist")
 	_, ok = store.LookupKey("AKIA-002")
 	require.False(t, ok, "second propose must be idempotent skip")
+}
+
+func TestSnapshotRoundtripV3(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+
+	src := NewStore()
+	applier := NewApplier(src, enc)
+
+	payload := buildTestInitFirstSAPayload(t, enc, "AKIA-snap", "sec-snap")
+	require.NoError(t, applier.ApplyInitFirstSA(payload))
+
+	var buf bytes.Buffer
+	require.NoError(t, WriteSnapshot(&buf, src))
+
+	// Header byte must be version 3.
+	require.Equal(t, uint8(3), buf.Bytes()[0], "snapshot header must be v3")
+	// V2 had an authBit byte at offset 1; v3 must NOT.
+	// Next byte at offset 1 must be the start of the SA count u32 (LE).
+	// We don't check exact value, just that decoding succeeds.
+
+	dst := NewStore()
+	require.NoError(t, ReadSnapshot(&buf, dst, enc))
+
+	sa, ok := dst.LookupSA(DefaultSAID)
+	require.True(t, ok)
+	require.Equal(t, "admin", sa.Name)
+
+	role := dst.LookupGrant(DefaultSAID, "anybucket")
+	require.Equal(t, RoleAdmin, role)
+}
+
+func TestReadSnapshot_RejectsV1V2(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+
+	for _, ver := range []byte{1, 2} {
+		buf := bytes.NewReader([]byte{ver, 0, 0, 0, 0, 0}) // dummy header
+		dst := NewStore()
+		err := ReadSnapshot(buf, dst, enc)
+		require.Error(t, err, "v%d must be rejected", ver)
+		require.Contains(t, err.Error(), "snapshot version")
+	}
 }
