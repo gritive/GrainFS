@@ -1,6 +1,98 @@
 # Changelog
 
-## [0.0.95.0] - 2026-05-08 — volume health composer extraction
+## [0.0.96.0] - 2026-05-08 — NFSv4 server bottleneck tuning (single-node)
+
+### Changed
+
+- **NFSv4 server processes COMPOUND ops concurrently per TCP connection.**
+  `handleConn` previously serialized read → dispatch → write per-connection.
+  Linux NFSv4 clients use a single connection per mount, so multi-threaded
+  fio workloads were funneled through one in-flight RPC at a time. Each RPC
+  frame now dispatches to a worker goroutine (cap 64 in-flight per
+  connection) with a write mutex serializing TCP frame writes; out-of-order
+  replies are matched by XID per RFC 7530.
+- **NFSv4 server recycles RPC frame buffers** through a `frameBufPool`
+  (`sync.Pool` of `[]byte`). The concurrency change above made each read
+  allocate a fresh frame; without the pool, fresh
+  `resizeFrameBuffer` calls dominated heap traffic (2.37 GB / 2.71 GB total
+  in 30 s of streaming) and regressed read throughput. With the pool,
+  streaming read jumps from 256 → 348 MiB/s (+37 % over the pre-change
+  baseline) on a single-node Colima loopback mount.
+- **NFSv4 `StateManager` filehandle maps switch from CoW to RWMutex.** The
+  previous design cloned the full `pathToFH`/`fhToPath` maps on every
+  insert under `writeMu` and atomically swapped an `atomic.Pointer`. Reads
+  were lock-free, but writes were O(N) per insert — catastrophic on
+  small-file create storms. A 10,000 × 4 KB workload allocated 6.24 GB
+  inside `maps.Copy` alone (93 % of the run's allocations). Replacing
+  with plain maps under `RWMutex` brings allocations down to 95.85 MB and
+  raises files/sec from 428 → 515 (+20 %). Read concurrency is preserved
+  via `RLock` on the hot path; the lock cost is in the noise vs NFS RPC
+  RTT.
+- **`DistributedBackend.WriteAt` no longer rehashes the full file on
+  partial writes.** The previous `writeAtETag` re-read the whole object
+  into MD5 on every offset > 0 pwrite, making NFS append O(n²) — a 1 GiB
+  4 KB sequential append never completed in fio's runtime cap. Partial
+  writes now publish an empty ETag and rely on the scrubber's
+  `ReplicationVerifier` to skip empty-ETag blocks (existing
+  `TestReplicationVerifier_LegacyETagSkipped` regression-guards the
+  contract). EC parity still detects shard-level corruption on read.
+  Append regression-guard workload now finishes 1 GiB in 47 s.
+- **`DistributedBackend.Truncate` materializes parent dir + file** via
+  `ensureInternalObjectDir` + `OpenFile(O_CREATE|O_RDWR)` + `Truncate(size)`.
+  Previously called `os.Truncate` directly, which failed for paths whose
+  parent directory had not been materialized by an earlier PUT.
+- **NFSv4 `OPEN(CREATE)` uses `Truncate(0)` for new file materialization**
+  instead of a zero-byte `PutObject`, when the backend implements
+  `storage.Truncatable`. Skips the object-index Propose round-trip on
+  every fresh OPEN — measurable on small-file create storms.
+- **`ClusterCoordinator.routeObjectLatest` short-circuits the
+  object-index lookup for internal buckets.** Internal buckets (NFS4,
+  VFS, NBD) are pinned to a single placement group via
+  `Router.AssignBucket`; any index entry would always agree with the
+  bucket route. Skipping the lookup avoids one
+  `indexWriter.Propose` round-trip per first-time NFS pwrite.
+  `TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing`
+  locks the invariant.
+- **`ClusterCoordinator.PreferWriteAt` exposes the routed single-leader
+  fast path** so consumers can detect when WriteAt avoids the
+  object-index path without reaching into backend internals.
+
+### Added
+
+- **NFS profile bench script gains a `WORKLOAD` selector**
+  (`benchmarks/bench_nfs_profile.sh`). Three workloads:
+  - `streaming` (default — preserves prior 3-fio behavior).
+  - `metadata` — 10,000 small-file create storm via parallel `dd`
+    (4 KB files, parallel=8). Targets NFSv4 OPEN+WRITE+CLOSE per-op
+    latency and per-create allocation behavior.
+  - `append` — single-thread 4 KB writes to a 1 GiB target. fio
+    bandwidth log is post-processed with awk to compute first-window vs
+    last-window throughput ratio; ratio < 0.8 fires the `O(n²)`
+    regression guard.
+
+  Encryption is mandatory (`NO_ENCRYPTION=1` is rejected) — mirrors
+  `bench_three_node_s3_matrix.sh`.
+
+### Notes
+
+- **Streaming write throughput** moves from 24.8 → 31.4 MiB/s (+27 %)
+  but does not reach the plan's 200 MiB/s primary target. With server
+  CPU at 17 % and 80 %+ idle, the remaining ceiling is the loopback NFS
+  RPC RTT — ~4 ms per RPC × 4 fio threads × \\~100 ops/sec/thread ≈ the
+  observed throughput. Further write headroom requires removing the
+  network-layer floor, not the server. Plan terminated on the
+  "external hotspot" condition.
+- **Cluster phase deferred to a follow-up PR.** This PR is the
+  single-node measurement substrate; cluster-phase bottleneck shape
+  differs (meta-raft propose dominates rather than RPC RTT). NBD WIP
+  is also held back for a separate per-protocol PR per the project's
+  one-protocol-per-PR convention.
+- **Pre-existing data race** in
+  `DistributedBackend.SetSnapshotManager` vs `RunApplyLoop` exists on
+  master and is not introduced here. `go test -race ./internal/cluster`
+  surfaces it on both branches; non-race `go test` passes clean.
+
+
 
 ### Changed
 

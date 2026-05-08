@@ -1295,14 +1295,10 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 	b.internalSizeCache.Store(cacheKey, newSize)
 	now := time.Now().Unix()
 
-	// ETag = MD5(file). Required as the corruption-detection oracle for
-	// volume scrub on cluster nodes. Mirrors LocalBackend.WriteAt: when the
-	// write covers the entire file we can hash the in-memory buffer; for
-	// partial writes (NFS4 SETATTR/WRITE) we re-read.
-	etag, herr := writeAtETag(f, data, offset, newSize)
-	if herr != nil {
-		return nil, fmt.Errorf("md5 object: %w", herr)
-	}
+	// Full-file MD5 after every pwrite makes NFS/NBD append workloads O(n^2).
+	// Keep an ETag oracle only when this call overwrites the full object from
+	// byte zero; scrubber treats empty ETags as "no oracle" and skips them.
+	etag := writeAtETag(data, offset, newSize)
 
 	meta, err := marshalObjectMeta(objectMeta{
 		Key:          key,
@@ -1330,31 +1326,21 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 	}, nil
 }
 
-// writeAtETag computes the MD5 ETag for an object after a partial-write
-// update. When the write covered the whole file (offset 0 + len matches),
-// MD5(data) is the answer; otherwise the file is re-read.
-func writeAtETag(f *os.File, data []byte, offset uint64, size int64) (string, error) {
+// writeAtETag computes a cheap MD5 ETag when a WriteAt call overwrites the
+// whole object. Partial writes return an empty ETag so scrubber skips the
+// object instead of forcing every NFS/NBD write to re-read the full file.
+//
+// Empty ETag contract: scrubber's ReplicationVerifier reports such blocks as
+// Skipped (not Corrupt) — see internal/scrubber/replication.go:106-113 and
+// TestReplicationVerifier_LegacyETagSkipped. Trade-off: files that have only
+// ever been touched via partial writes lose the per-block MD5 oracle; EC
+// parity still detects shard-level corruption on read.
+func writeAtETag(data []byte, offset uint64, size int64) string {
 	if offset == 0 && int64(len(data)) == size {
 		h := md5.Sum(data)
-		return hex.EncodeToString(h[:]), nil
+		return hex.EncodeToString(h[:])
 	}
-	h := md5.New()
-	buf := make([]byte, 64*1024)
-	var off int64
-	for off < size {
-		n, rerr := f.ReadAt(buf, off)
-		if n > 0 {
-			_, _ = h.Write(buf[:n])
-			off += int64(n)
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return "", rerr
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return ""
 }
 
 // ReadAt implements partial object reads. Internal buckets use the historical
@@ -1423,6 +1409,13 @@ func (b *DistributedBackend) PreferReadAt(bucket string) bool {
 	return true
 }
 
+func (b *DistributedBackend) PreferWriteAt(bucket string) bool {
+	if !storage.IsInternalBucket(bucket) {
+		return false
+	}
+	return len(b.liveNodes()) <= 1
+}
+
 // Truncate implements the internal-bucket fast path used by NFS SETATTR size.
 // It updates the fixed "current" object and metadata in place, avoiding the
 // full-object read/append/write fallback used by generic object stores.
@@ -1435,8 +1428,19 @@ func (b *DistributedBackend) Truncate(ctx context.Context, bucket, key string, s
 	}
 	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
 	objPath := b.internalObjectPath(bucket, key)
-	if err := os.Truncate(objPath.path, size); err != nil {
+	if err := b.ensureInternalObjectDir(objPath.dir); err != nil {
+		return fmt.Errorf("create object dir: %w", err)
+	}
+	f, err := os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open object: %w", err)
+	}
+	if err := f.Truncate(size); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("truncate object: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close object: %w", err)
 	}
 	b.internalSizeCache.Store(cacheKey, size)
 

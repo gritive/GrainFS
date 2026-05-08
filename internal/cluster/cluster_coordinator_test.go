@@ -581,18 +581,56 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, w.Close()) })
 	wrapped := wal.NewBackend(c, w)
+	require.True(t, wrapped.PreferWriteAt(storage.NFS4BucketName))
+	require.False(t, wrapped.PreferWriteAt("photos"))
+
+	require.NoError(t, wrapped.Truncate(context.Background(), storage.NFS4BucketName, "fio/sparse.bin", 12))
+	sparse := make([]byte, 12)
+	n, err := wrapped.ReadAt(context.Background(), storage.NFS4BucketName, "fio/sparse.bin", 0, sparse)
+	require.NoError(t, err)
+	require.Equal(t, 12, n)
+	require.Equal(t, make([]byte, 12), sparse)
 
 	obj, err := wrapped.WriteAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 4, []byte("data"))
 	require.NoError(t, err)
 	require.Equal(t, int64(8), obj.Size)
+	require.Empty(t, obj.ETag)
 
 	require.NoError(t, wrapped.Truncate(context.Background(), storage.NFS4BucketName, "fio/file.bin", 6))
 
 	buf := make([]byte, 8)
-	n, err := wrapped.ReadAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 0, buf)
+	n, err = wrapped.ReadAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 0, buf)
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, 6, n)
 	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
+}
+
+func TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing(t *testing.T) {
+	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
+	gb := newTestGroupBackend(t, "group-1")
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket(storage.NFS4BucketName, "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	require.NoError(t, c.Truncate(context.Background(), storage.NFS4BucketName, "fio/file.bin", 5))
+	_, err := c.WriteAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 1, []byte("abc"))
+	require.NoError(t, err)
+
+	obj, err := c.HeadObject(context.Background(), storage.NFS4BucketName, "fio/file.bin")
+	require.NoError(t, err)
+	require.Equal(t, int64(5), obj.Size)
+
+	buf := make([]byte, 5)
+	n, err := c.ReadAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, []byte{0, 'a', 'b', 'c', 0}, buf)
 }
 
 func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) {

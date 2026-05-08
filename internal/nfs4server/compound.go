@@ -947,8 +947,18 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 		}
 		_, headErr := d.backend.HeadObject(context.Background(), nfs4Bucket, key)
 		if headErr != nil {
-			if _, putErr := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(nil), "application/octet-stream"); putErr != nil {
-				return OpResult{OpCode: OpOpen, Status: NFS4ERR_IO}
+			created := false
+			if tr, ok := d.backend.(storage.Truncatable); ok {
+				if truncErr := tr.Truncate(context.Background(), nfs4Bucket, key, 0); truncErr == nil {
+					created = true
+				} else {
+					log.Debug().Err(truncErr).Str("key", key).Msg("nfs4: OPEN CREATE truncate fallback")
+				}
+			}
+			if !created {
+				if _, putErr := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(nil), "application/octet-stream"); putErr != nil {
+					return OpResult{OpCode: OpOpen, Status: NFS4ERR_IO}
+				}
 			}
 			log.Debug().Str("key", key).Msg("nfs4: OPEN CREATE created file")
 		}

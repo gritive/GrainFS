@@ -460,10 +460,19 @@ func (c *ClusterCoordinator) routeDataGroupSnapshot(group ShardGroupEntry) (rout
 	return t, nil
 }
 
+// routeObjectLatest resolves a (bucket, key) to a placement-group target.
+//
+// Internal buckets (NFS4, VFS, NBD) bypass the object-index lookup and route
+// straight through bucket-level routing. Invariant: internal buckets are
+// pinned to a single placement group via Router.AssignBucket, so the index
+// entry — if any — would always agree with the bucket route. Skipping the
+// index avoids one indexWriter.Propose round-trip per first-time NFS/NBD
+// pwrite. See TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing
+// for the regression guard.
 func (c *ClusterCoordinator) routeObjectLatest(bucket, key string) (routeTarget, ObjectIndexEntry, error) {
 	src, ok := c.meta.(objectIndexSource)
 	if !ok {
-		if c.indexWriter == nil {
+		if c.indexWriter == nil || storage.IsInternalBucket(bucket) {
 			target, err := c.routeBucket(bucket)
 			return target, ObjectIndexEntry{Bucket: bucket, Key: key, PlacementGroupID: target.groupID}, err
 		}
@@ -471,7 +480,7 @@ func (c *ClusterCoordinator) routeObjectLatest(bucket, key string) (routeTarget,
 	}
 	entry, ok := src.ObjectIndexLatest(bucket, key)
 	if !ok {
-		if c.indexWriter == nil {
+		if c.indexWriter == nil || storage.IsInternalBucket(bucket) {
 			target, err := c.routeBucket(bucket)
 			return target, ObjectIndexEntry{Bucket: bucket, Key: key, PlacementGroupID: target.groupID}, err
 		}
@@ -1313,6 +1322,21 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {
 	return true
+}
+
+func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
+	if !storage.IsInternalBucket(bucket) {
+		return false
+	}
+	target, err := c.routeBucket(bucket)
+	if err != nil {
+		return false
+	}
+	gb, ok, err := c.localWriteBackend(context.Background(), target)
+	if !ok || err != nil {
+		return false
+	}
+	return gb.PreferWriteAt(bucket)
 }
 
 func (c *ClusterCoordinator) UploadPart(

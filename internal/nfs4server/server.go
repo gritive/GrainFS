@@ -79,49 +79,74 @@ func (s *Server) Addr() net.Addr {
 	return nil
 }
 
+// connRPCConcurrency caps the number of NFSv4 COMPOUND RPCs processed
+// concurrently per TCP connection. NFSv4 clients (Linux) typically use a
+// single connection per mount and rely on XID-based matching for out-of-order
+// replies, so per-connection parallelism is the dominant throughput axis for
+// fio-style multi-threaded workloads. The cap protects against runaway
+// goroutine fan-out from a single misbehaving client.
+const connRPCConcurrency = 64
+
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	s.logger.Debug().Str("remote", conn.RemoteAddr().String()).Msg("nfs4: new connection")
 
-	var frameBuf []byte
-	reply := &XDRWriter{}
+	var writeMu sync.Mutex
+	sem := make(chan struct{}, connRPCConcurrency)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for {
-		reply.resetForReuse()
-		frame, err := readRPCFrameInto(conn, frameBuf)
+		// Frame buffers come from a pool: per-RPC concurrent processing means
+		// the worker needs to read its own bytes, so reusing one connection-
+		// local buffer would alias. The pool keeps alloc churn bounded.
+		frame, err := readRPCFrameInto(conn, getFrameBuf())
 		if err != nil {
 			return
 		}
-		frameBuf = frame
 
-		header, args, err := ParseRPCCall(frame)
-		if err != nil {
-			s.logger.Debug().Err(err).Msg("RPC parse error")
-			continue
-		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(f []byte) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer putFrameBuf(f)
 
-		w := reply
-		w.WriteUint32(header.XID)
-		w.WriteUint32(rpcMsgReply)
-		w.WriteUint32(0)        // MSG_ACCEPTED
-		w.WriteUint32(authNone) // verifier flavor
-		w.WriteUint32(0)        // verifier body length
-		w.WriteUint32(0)        // ACCEPT_SUCCESS
+			header, args, err := ParseRPCCall(f)
+			if err != nil {
+				s.logger.Debug().Err(err).Msg("RPC parse error")
+				return
+			}
 
-		if header.Program == rpcProgNFS && header.ProgVers == rpcVersNFS4 && header.Procedure == 1 {
-			s.handleCompoundInto(args, w)
-		} else {
-			s.logger.Debug().
-				Uint32("prog", header.Program).
-				Uint32("vers", header.ProgVers).
-				Uint32("proc", header.Procedure).
-				Msg("non-compound RPC call")
-		}
+			w := getXDRWriter()
+			defer putXDRWriter(w)
 
-		if err := writeRPCFrame(conn, w.Bytes()); err != nil {
-			s.logger.Debug().Err(err).Msg("nfs: write rpc frame")
-			return
-		}
+			w.WriteUint32(header.XID)
+			w.WriteUint32(rpcMsgReply)
+			w.WriteUint32(0)        // MSG_ACCEPTED
+			w.WriteUint32(authNone) // verifier flavor
+			w.WriteUint32(0)        // verifier body length
+			w.WriteUint32(0)        // ACCEPT_SUCCESS
+
+			if header.Program == rpcProgNFS && header.ProgVers == rpcVersNFS4 && header.Procedure == 1 {
+				s.handleCompoundInto(args, w)
+			} else {
+				s.logger.Debug().
+					Uint32("prog", header.Program).
+					Uint32("vers", header.ProgVers).
+					Uint32("proc", header.Procedure).
+					Msg("non-compound RPC call")
+			}
+
+			writeMu.Lock()
+			werr := writeRPCFrame(conn, w.Bytes())
+			writeMu.Unlock()
+			if werr != nil {
+				s.logger.Debug().Err(werr).Msg("nfs: write rpc frame")
+				_ = conn.Close()
+			}
+		}(frame)
 	}
 }
 
