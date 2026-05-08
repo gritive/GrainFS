@@ -221,7 +221,7 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 	}
 	metrics.BucketsTotal.Inc()
 	s.issueCreatorGrant(ctx, bucket)
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionCreateBucket, Bucket: bucket})
+	s.mutations.OnBucketCreate(ctx, bucket)
 	c.Header("Location", "/"+bucket)
 	c.Status(consts.StatusOK)
 }
@@ -295,7 +295,7 @@ func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	metrics.BucketsTotal.Dec()
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDeleteBucket, Bucket: bucket})
+	s.mutations.OnBucketDelete(ctx, bucket)
 	c.Status(consts.StatusNoContent)
 }
 
