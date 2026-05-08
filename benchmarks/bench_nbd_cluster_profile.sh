@@ -129,6 +129,7 @@ LEADER_NBD_PORT="$(nbd_port "$LEADER_INDEX")"
 LEADER_PPROF_PORT="$(pprof_port "$LEADER_INDEX")"
 echo "  leader node-$LEADER_INDEX NBD=:$LEADER_NBD_PORT pprof=:$LEADER_PPROF_PORT"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
+bench_wait_tcp_port "127.0.0.1" "$LEADER_NBD_PORT" "leader NBD listener" 50 0.2
 
 bench_colima_ssh sudo modprobe nbd max_part=0 2>/dev/null || true
 bench_colima_ssh sudo nbd-client -d "$NBD_DEV" 2>/dev/null || true

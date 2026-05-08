@@ -88,19 +88,10 @@ fi
 SERVER_PID=$!
 echo "GrainFS PID=$SERVER_PID"
 
-echo -n "Waiting for HTTP health..."
-for i in $(seq 1 30); do
-  if curl -sf "http://127.0.0.1:${HTTP_PORT}/" >/dev/null 2>&1; then
-    echo " ready"
-    break
-  fi
-  if [[ "$i" -eq 30 ]]; then
-    echo " TIMEOUT"
-    exit 1
-  fi
-  echo -n "."
-  sleep 1
-done
+if ! bench_wait_http_ready "http://127.0.0.1:${HTTP_PORT}/" "server" 30 1; then
+  exit 1
+fi
+bench_wait_tcp_port "127.0.0.1" "$NBD_PORT" "NBD listener" 50 0.2
 
 # ─── 2. Connect nbd-client in Colima ────────────────────────────────────────
 echo ""
