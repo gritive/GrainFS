@@ -221,7 +221,7 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 	}
 	metrics.BucketsTotal.Inc()
 	s.issueCreatorGrant(ctx, bucket)
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionCreateBucket, Bucket: bucket})
+	s.mutations.OnBucketCreate(ctx, bucket)
 	c.Header("Location", "/"+bucket)
 	c.Status(consts.StatusOK)
 }
@@ -295,7 +295,7 @@ func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	metrics.BucketsTotal.Dec()
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDeleteBucket, Bucket: bucket})
+	s.mutations.OnBucketDelete(ctx, bucket)
 	c.Status(consts.StatusNoContent)
 }
 
@@ -434,13 +434,12 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 	obj := result.Object
 
-	recordObjectWriteMetrics(result.Previous, obj.Size)
+	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
 	c.Status(consts.StatusOK)
 }
 
@@ -951,8 +950,7 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 		c.Header("x-amz-delete-marker", "true")
 		c.Header("x-amz-version-id", result.Deleted.VersionID)
 	}
-	recordObjectDeleteMetrics(result.Previous)
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDelete, Bucket: bucket, Key: key})
+	s.mutations.OnObjectDelete(ctx, bucket, key, result)
 	c.Status(consts.StatusNoContent)
 }
 
@@ -1093,8 +1091,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	obj := result.Object
 
-	recordObjectWriteMetrics(result.Previous, obj.Size)
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: bucket, Key: key, Size: obj.Size})
+	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
@@ -1269,7 +1266,7 @@ func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestCont
 		return
 	}
 	obj := result.Object
-	recordObjectWriteMetrics(result.Previous, obj.Size)
+	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
@@ -1809,7 +1806,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		return
 	}
 	obj := result.Object
-	recordObjectWriteMetrics(result.Previous, obj.Size)
+	s.mutations.OnObjectCopy(ctx, src.Bucket, src.Key, dstBucket, dstKey, result)
 
 	response := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult>

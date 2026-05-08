@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.111.0] - 2026-05-08 — MutationBroker + multipart/copy emit fixes
+
+### Added
+
+- `internal/server.MutationBroker`: single seam dispatching S3 mutation observations to metrics + event observers, replacing ad-hoc fan-out across 7 handler sites. Adding a new mutation kind becomes a compile-time error in every observer.
+- `metricsObserver` (sync) and `eventObserver` (async via injected emit closure) implement `MutationObserver`. `eventObserver` mirrors the closure-injection pattern at `heal_emitter.go:30` and preserves the existing bounded-channel drop-on-full semantics.
+- `Server.mutations *MutationBroker` field, wired in `NewWithServerStorage` after `buildAuthorizer()` so the observer captures the final `s.emitEvent` closure.
+
+### Fixed
+
+- `handleCompleteMultipartUpload` now emits `EventActionPut` to the event store at multipart finalize. Previously updated metrics only, leaving multipart-uploaded objects invisible to event subscribers (audit, dashboards, eventstore queries).
+- `handleCopyObject` now emits `EventActionPut` at the destination to the event store. Previously updated metrics only, leaving copies invisible to event subscribers. Source bucket/key are intentionally not encoded — `eventstore.Event` has no source field; copy surfaces as Put@destination, matching how legacy PutObject handlers emit.
+
+### Changed
+
+- 7 mutation call sites in `internal/server/handlers.go` migrated from ad-hoc `recordObjectWriteMetrics + s.emitEvent` pairs to single `s.mutations.OnObjectWrite/Delete/Copy/BucketCreate/BucketDelete` calls. Locality moved from 7 scattered sites to 1 broker; new observers (audit attribution, retention, lifecycle hooks) can now be added in one place instead of 7.
+
+### Notes
+
+- Read events (`EventActionGet` at handlers.go:550, 740) and system events (`EventTypeSystem` at handlers.go:1606, 1687) intentionally remain on the legacy `s.emitEvent` path — different conceptual seam.
+- No external `RegisterMutationObserver` API yet (YAGNI per locked decision R1). Add when an external component (plugin, audit shim) actually wants to register.
+
 ## [0.0.110.0] - 2026-05-08 — fix standalone E2E tests broken since v0.0.98.0
 
 ### Fixed
