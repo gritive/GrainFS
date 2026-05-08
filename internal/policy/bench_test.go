@@ -54,17 +54,6 @@ func makeLargePolicy(t testing.TB, n int) []byte {
 	return data
 }
 
-func benchmarkOld(b *testing.B, n int, policy func(testing.TB, int) []byte) {
-	b.Helper()
-	ps := NewPolicyStore()
-	require.NoError(b, ps.Set("bench", policy(b, n)))
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		ps.IsAllowed("benchuser", "s3:GetObject", "bench", "key")
-	}
-}
-
 func benchmarkNew(b *testing.B, n int, policy func(testing.TB, int) []byte) {
 	b.Helper()
 	cs := NewCompiledPolicyStore()
@@ -83,17 +72,11 @@ func benchmarkNew(b *testing.B, n int, policy func(testing.TB, int) []byte) {
 }
 
 // Same-action: worst case for CompiledPolicyStore (all stmts in same action bucket).
-func BenchmarkOld_SameAction_10(b *testing.B)  { benchmarkOld(b, 10, makeLargePolicy) }
 func BenchmarkNew_SameAction_10(b *testing.B)  { benchmarkNew(b, 10, makeLargePolicy) }
-func BenchmarkOld_SameAction_50(b *testing.B)  { benchmarkOld(b, 50, makeLargePolicy) }
 func BenchmarkNew_SameAction_50(b *testing.B)  { benchmarkNew(b, 50, makeLargePolicy) }
-func BenchmarkOld_SameAction_100(b *testing.B) { benchmarkOld(b, 100, makeLargePolicy) }
 func BenchmarkNew_SameAction_100(b *testing.B) { benchmarkNew(b, 100, makeLargePolicy) }
 
 // Mixed-action: typical real-world case.
-func BenchmarkOld_Mixed_10(b *testing.B)  { benchmarkOld(b, 10, makeMixedPolicy) }
 func BenchmarkNew_Mixed_10(b *testing.B)  { benchmarkNew(b, 10, makeMixedPolicy) }
-func BenchmarkOld_Mixed_50(b *testing.B)  { benchmarkOld(b, 50, makeMixedPolicy) }
 func BenchmarkNew_Mixed_50(b *testing.B)  { benchmarkNew(b, 50, makeMixedPolicy) }
-func BenchmarkOld_Mixed_100(b *testing.B) { benchmarkOld(b, 100, makeMixedPolicy) }
 func BenchmarkNew_Mixed_100(b *testing.B) { benchmarkNew(b, 100, makeMixedPolicy) }
