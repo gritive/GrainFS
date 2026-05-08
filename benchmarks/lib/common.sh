@@ -46,10 +46,17 @@ bench_wait_http_ready() {
   local attempts="${3:-50}"
   local sleep_seconds="${4:-0.2}"
 
+  # Accept any HTTP response code as "server is up". The S3 root path now
+  # returns 403 once IAM is in scope (commit e4cfbb2 / PR #237), so a strict
+  # `curl -sf` against `/` would never return success even though the server
+  # is fully reachable. The bench scripts only need a TCP-up + HTTP-handler
+  # signal here, not an authenticated 200.
   echo "  waiting for $label..."
   for _ in $(seq 1 "$attempts"); do
-    if curl -sf "$url" >/dev/null 2>&1; then
-      echo "  $label ready"
+    local code
+    code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+    if [[ "$code" != "000" ]]; then
+      echo "  $label ready (HTTP $code)"
       return 0
     fi
     sleep "$sleep_seconds"
