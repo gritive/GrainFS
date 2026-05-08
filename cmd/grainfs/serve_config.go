@@ -76,10 +76,6 @@ func buildClusterConfig(
 	cfg.HealReceiptGossipInterval, _ = cmd.Flags().GetDuration("heal-receipt-gossip-interval")
 	cfg.HealReceiptWindow, _ = cmd.Flags().GetInt("heal-receipt-window")
 
-	cfg.UpstreamEndpoint, _ = cmd.Flags().GetString("upstream")
-	cfg.UpstreamAccessKey, _ = cmd.Flags().GetString("upstream-access-key")
-	cfg.UpstreamSecretKey, _ = cmd.Flags().GetString("upstream-secret-key")
-
 	cfg.SnapInterval, _ = cmd.Flags().GetDuration("snapshot-interval")
 	cfg.SnapRetain, _ = cmd.Flags().GetInt("snapshot-retain")
 
@@ -121,14 +117,14 @@ func buildClusterConfig(
 
 // collectFlagsSnapshot walks every cobra flag once and produces the
 // map[string]string consumed by serveruntime.LogStartupConfigSnapshot.
-// Secret-bearing flags (cluster-key, alert-webhook-secret, heal-receipt-psk,
-// upstream-secret-key) are redacted at the source so neither the structured
-// log nor the on-disk snapshot ever sees the raw value.
+// Secret-bearing flags (cluster-key, alert-webhook-secret, heal-receipt-psk)
+// are redacted at the source so neither the structured log nor the on-disk
+// snapshot ever sees the raw value.
 func collectFlagsSnapshot(cmd *cobra.Command) map[string]string {
 	snap := make(map[string]string, 64)
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		switch f.Name {
-		case "cluster-key", "alert-webhook-secret", "heal-receipt-psk", "upstream-secret-key":
+		case "cluster-key", "alert-webhook-secret", "heal-receipt-psk":
 			if f.Value.String() != "" {
 				snap[f.Name] = "<redacted>"
 			}
