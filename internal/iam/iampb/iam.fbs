@@ -83,4 +83,17 @@ table InitFirstSAPayload {
   grant_wildcard_blob: [ubyte] (required); // GrantWildcardPutPayload bytes
 }
 
+table BucketUpstreamPutPayload {
+  bucket:             string;
+  endpoint:           string;
+  access_key:         string;
+  secret_key_enc:     [ubyte]; // AES-256-GCM ciphertext, AAD = "bucket-upstream:"+bucket
+  created_at_unix_ns: int64;
+  created_by:         string;
+}
+
+table BucketUpstreamDeletePayload {
+  bucket: string;
+}
+
 root_type SACreatePayload;

@@ -7,108 +7,114 @@ import "strconv"
 type MetaCmdType byte
 
 const (
-	MetaCmdTypeNoOp                   MetaCmdType = 0
-	MetaCmdTypeAddNode                MetaCmdType = 1
-	MetaCmdTypeRemoveNode             MetaCmdType = 2
-	MetaCmdTypePutShardGroup          MetaCmdType = 3
-	MetaCmdTypeSetActivePlan          MetaCmdType = 4
-	MetaCmdTypePutBucketAssignment    MetaCmdType = 5
-	MetaCmdTypeSetLoadSnapshot        MetaCmdType = 6
-	MetaCmdTypeProposeRebalancePlan   MetaCmdType = 7
-	MetaCmdTypeAbortPlan              MetaCmdType = 8
-	MetaCmdTypeIcebergCreateNamespace MetaCmdType = 9
-	MetaCmdTypeIcebergDeleteNamespace MetaCmdType = 10
-	MetaCmdTypeIcebergCreateTable     MetaCmdType = 11
-	MetaCmdTypeIcebergCommitTable     MetaCmdType = 12
-	MetaCmdTypeIcebergDeleteTable     MetaCmdType = 13
-	MetaCmdTypeRotateKeyBegin         MetaCmdType = 14
-	MetaCmdTypeRotateKeySwitch        MetaCmdType = 15
-	MetaCmdTypeRotateKeyDrop          MetaCmdType = 16
-	MetaCmdTypeRotateKeyAbort         MetaCmdType = 17
-	MetaCmdTypeScrubTrigger           MetaCmdType = 18
-	MetaCmdTypePutObjectIndex         MetaCmdType = 19
-	MetaCmdTypeDeleteObjectIndex      MetaCmdType = 20
-	MetaCmdTypeIAMSACreate            MetaCmdType = 21
-	MetaCmdTypeIAMSADelete            MetaCmdType = 22
-	MetaCmdTypeIAMKeyCreate           MetaCmdType = 23
-	MetaCmdTypeIAMKeyRevoke           MetaCmdType = 24
-	MetaCmdTypeIAMGrantPut            MetaCmdType = 25
-	MetaCmdTypeIAMGrantDelete         MetaCmdType = 26
-	MetaCmdTypeIAMGrantWildcardPut    MetaCmdType = 27
-	MetaCmdTypeIAMAuthEnable          MetaCmdType = 28
-	MetaCmdTypeIAMGrantWildcardDelete MetaCmdType = 29
-	MetaCmdTypeIAMKeyCreateScoped     MetaCmdType = 30
-	MetaCmdTypeIAMInitFirstSA         MetaCmdType = 31
+	MetaCmdTypeNoOp                    MetaCmdType = 0
+	MetaCmdTypeAddNode                 MetaCmdType = 1
+	MetaCmdTypeRemoveNode              MetaCmdType = 2
+	MetaCmdTypePutShardGroup           MetaCmdType = 3
+	MetaCmdTypeSetActivePlan           MetaCmdType = 4
+	MetaCmdTypePutBucketAssignment     MetaCmdType = 5
+	MetaCmdTypeSetLoadSnapshot         MetaCmdType = 6
+	MetaCmdTypeProposeRebalancePlan    MetaCmdType = 7
+	MetaCmdTypeAbortPlan               MetaCmdType = 8
+	MetaCmdTypeIcebergCreateNamespace  MetaCmdType = 9
+	MetaCmdTypeIcebergDeleteNamespace  MetaCmdType = 10
+	MetaCmdTypeIcebergCreateTable      MetaCmdType = 11
+	MetaCmdTypeIcebergCommitTable      MetaCmdType = 12
+	MetaCmdTypeIcebergDeleteTable      MetaCmdType = 13
+	MetaCmdTypeRotateKeyBegin          MetaCmdType = 14
+	MetaCmdTypeRotateKeySwitch         MetaCmdType = 15
+	MetaCmdTypeRotateKeyDrop           MetaCmdType = 16
+	MetaCmdTypeRotateKeyAbort          MetaCmdType = 17
+	MetaCmdTypeScrubTrigger            MetaCmdType = 18
+	MetaCmdTypePutObjectIndex          MetaCmdType = 19
+	MetaCmdTypeDeleteObjectIndex       MetaCmdType = 20
+	MetaCmdTypeIAMSACreate             MetaCmdType = 21
+	MetaCmdTypeIAMSADelete             MetaCmdType = 22
+	MetaCmdTypeIAMKeyCreate            MetaCmdType = 23
+	MetaCmdTypeIAMKeyRevoke            MetaCmdType = 24
+	MetaCmdTypeIAMGrantPut             MetaCmdType = 25
+	MetaCmdTypeIAMGrantDelete          MetaCmdType = 26
+	MetaCmdTypeIAMGrantWildcardPut     MetaCmdType = 27
+	MetaCmdTypeIAMAuthEnable           MetaCmdType = 28
+	MetaCmdTypeIAMGrantWildcardDelete  MetaCmdType = 29
+	MetaCmdTypeIAMKeyCreateScoped      MetaCmdType = 30
+	MetaCmdTypeIAMInitFirstSA          MetaCmdType = 31
+	MetaCmdTypeIAMBucketUpstreamPut    MetaCmdType = 32
+	MetaCmdTypeIAMBucketUpstreamDelete MetaCmdType = 33
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
-	MetaCmdTypeNoOp:                   "NoOp",
-	MetaCmdTypeAddNode:                "AddNode",
-	MetaCmdTypeRemoveNode:             "RemoveNode",
-	MetaCmdTypePutShardGroup:          "PutShardGroup",
-	MetaCmdTypeSetActivePlan:          "SetActivePlan",
-	MetaCmdTypePutBucketAssignment:    "PutBucketAssignment",
-	MetaCmdTypeSetLoadSnapshot:        "SetLoadSnapshot",
-	MetaCmdTypeProposeRebalancePlan:   "ProposeRebalancePlan",
-	MetaCmdTypeAbortPlan:              "AbortPlan",
-	MetaCmdTypeIcebergCreateNamespace: "IcebergCreateNamespace",
-	MetaCmdTypeIcebergDeleteNamespace: "IcebergDeleteNamespace",
-	MetaCmdTypeIcebergCreateTable:     "IcebergCreateTable",
-	MetaCmdTypeIcebergCommitTable:     "IcebergCommitTable",
-	MetaCmdTypeIcebergDeleteTable:     "IcebergDeleteTable",
-	MetaCmdTypeRotateKeyBegin:         "RotateKeyBegin",
-	MetaCmdTypeRotateKeySwitch:        "RotateKeySwitch",
-	MetaCmdTypeRotateKeyDrop:          "RotateKeyDrop",
-	MetaCmdTypeRotateKeyAbort:         "RotateKeyAbort",
-	MetaCmdTypeScrubTrigger:           "ScrubTrigger",
-	MetaCmdTypePutObjectIndex:         "PutObjectIndex",
-	MetaCmdTypeDeleteObjectIndex:      "DeleteObjectIndex",
-	MetaCmdTypeIAMSACreate:            "IAMSACreate",
-	MetaCmdTypeIAMSADelete:            "IAMSADelete",
-	MetaCmdTypeIAMKeyCreate:           "IAMKeyCreate",
-	MetaCmdTypeIAMKeyRevoke:           "IAMKeyRevoke",
-	MetaCmdTypeIAMGrantPut:            "IAMGrantPut",
-	MetaCmdTypeIAMGrantDelete:         "IAMGrantDelete",
-	MetaCmdTypeIAMGrantWildcardPut:    "IAMGrantWildcardPut",
-	MetaCmdTypeIAMAuthEnable:          "IAMAuthEnable",
-	MetaCmdTypeIAMGrantWildcardDelete: "IAMGrantWildcardDelete",
-	MetaCmdTypeIAMKeyCreateScoped:     "IAMKeyCreateScoped",
-	MetaCmdTypeIAMInitFirstSA:         "IAMInitFirstSA",
+	MetaCmdTypeNoOp:                    "NoOp",
+	MetaCmdTypeAddNode:                 "AddNode",
+	MetaCmdTypeRemoveNode:              "RemoveNode",
+	MetaCmdTypePutShardGroup:           "PutShardGroup",
+	MetaCmdTypeSetActivePlan:           "SetActivePlan",
+	MetaCmdTypePutBucketAssignment:     "PutBucketAssignment",
+	MetaCmdTypeSetLoadSnapshot:         "SetLoadSnapshot",
+	MetaCmdTypeProposeRebalancePlan:    "ProposeRebalancePlan",
+	MetaCmdTypeAbortPlan:               "AbortPlan",
+	MetaCmdTypeIcebergCreateNamespace:  "IcebergCreateNamespace",
+	MetaCmdTypeIcebergDeleteNamespace:  "IcebergDeleteNamespace",
+	MetaCmdTypeIcebergCreateTable:      "IcebergCreateTable",
+	MetaCmdTypeIcebergCommitTable:      "IcebergCommitTable",
+	MetaCmdTypeIcebergDeleteTable:      "IcebergDeleteTable",
+	MetaCmdTypeRotateKeyBegin:          "RotateKeyBegin",
+	MetaCmdTypeRotateKeySwitch:         "RotateKeySwitch",
+	MetaCmdTypeRotateKeyDrop:           "RotateKeyDrop",
+	MetaCmdTypeRotateKeyAbort:          "RotateKeyAbort",
+	MetaCmdTypeScrubTrigger:            "ScrubTrigger",
+	MetaCmdTypePutObjectIndex:          "PutObjectIndex",
+	MetaCmdTypeDeleteObjectIndex:       "DeleteObjectIndex",
+	MetaCmdTypeIAMSACreate:             "IAMSACreate",
+	MetaCmdTypeIAMSADelete:             "IAMSADelete",
+	MetaCmdTypeIAMKeyCreate:            "IAMKeyCreate",
+	MetaCmdTypeIAMKeyRevoke:            "IAMKeyRevoke",
+	MetaCmdTypeIAMGrantPut:             "IAMGrantPut",
+	MetaCmdTypeIAMGrantDelete:          "IAMGrantDelete",
+	MetaCmdTypeIAMGrantWildcardPut:     "IAMGrantWildcardPut",
+	MetaCmdTypeIAMAuthEnable:           "IAMAuthEnable",
+	MetaCmdTypeIAMGrantWildcardDelete:  "IAMGrantWildcardDelete",
+	MetaCmdTypeIAMKeyCreateScoped:      "IAMKeyCreateScoped",
+	MetaCmdTypeIAMInitFirstSA:          "IAMInitFirstSA",
+	MetaCmdTypeIAMBucketUpstreamPut:    "IAMBucketUpstreamPut",
+	MetaCmdTypeIAMBucketUpstreamDelete: "IAMBucketUpstreamDelete",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
-	"NoOp":                   MetaCmdTypeNoOp,
-	"AddNode":                MetaCmdTypeAddNode,
-	"RemoveNode":             MetaCmdTypeRemoveNode,
-	"PutShardGroup":          MetaCmdTypePutShardGroup,
-	"SetActivePlan":          MetaCmdTypeSetActivePlan,
-	"PutBucketAssignment":    MetaCmdTypePutBucketAssignment,
-	"SetLoadSnapshot":        MetaCmdTypeSetLoadSnapshot,
-	"ProposeRebalancePlan":   MetaCmdTypeProposeRebalancePlan,
-	"AbortPlan":              MetaCmdTypeAbortPlan,
-	"IcebergCreateNamespace": MetaCmdTypeIcebergCreateNamespace,
-	"IcebergDeleteNamespace": MetaCmdTypeIcebergDeleteNamespace,
-	"IcebergCreateTable":     MetaCmdTypeIcebergCreateTable,
-	"IcebergCommitTable":     MetaCmdTypeIcebergCommitTable,
-	"IcebergDeleteTable":     MetaCmdTypeIcebergDeleteTable,
-	"RotateKeyBegin":         MetaCmdTypeRotateKeyBegin,
-	"RotateKeySwitch":        MetaCmdTypeRotateKeySwitch,
-	"RotateKeyDrop":          MetaCmdTypeRotateKeyDrop,
-	"RotateKeyAbort":         MetaCmdTypeRotateKeyAbort,
-	"ScrubTrigger":           MetaCmdTypeScrubTrigger,
-	"PutObjectIndex":         MetaCmdTypePutObjectIndex,
-	"DeleteObjectIndex":      MetaCmdTypeDeleteObjectIndex,
-	"IAMSACreate":            MetaCmdTypeIAMSACreate,
-	"IAMSADelete":            MetaCmdTypeIAMSADelete,
-	"IAMKeyCreate":           MetaCmdTypeIAMKeyCreate,
-	"IAMKeyRevoke":           MetaCmdTypeIAMKeyRevoke,
-	"IAMGrantPut":            MetaCmdTypeIAMGrantPut,
-	"IAMGrantDelete":         MetaCmdTypeIAMGrantDelete,
-	"IAMGrantWildcardPut":    MetaCmdTypeIAMGrantWildcardPut,
-	"IAMAuthEnable":          MetaCmdTypeIAMAuthEnable,
-	"IAMGrantWildcardDelete": MetaCmdTypeIAMGrantWildcardDelete,
-	"IAMKeyCreateScoped":     MetaCmdTypeIAMKeyCreateScoped,
-	"IAMInitFirstSA":         MetaCmdTypeIAMInitFirstSA,
+	"NoOp":                    MetaCmdTypeNoOp,
+	"AddNode":                 MetaCmdTypeAddNode,
+	"RemoveNode":              MetaCmdTypeRemoveNode,
+	"PutShardGroup":           MetaCmdTypePutShardGroup,
+	"SetActivePlan":           MetaCmdTypeSetActivePlan,
+	"PutBucketAssignment":     MetaCmdTypePutBucketAssignment,
+	"SetLoadSnapshot":         MetaCmdTypeSetLoadSnapshot,
+	"ProposeRebalancePlan":    MetaCmdTypeProposeRebalancePlan,
+	"AbortPlan":               MetaCmdTypeAbortPlan,
+	"IcebergCreateNamespace":  MetaCmdTypeIcebergCreateNamespace,
+	"IcebergDeleteNamespace":  MetaCmdTypeIcebergDeleteNamespace,
+	"IcebergCreateTable":      MetaCmdTypeIcebergCreateTable,
+	"IcebergCommitTable":      MetaCmdTypeIcebergCommitTable,
+	"IcebergDeleteTable":      MetaCmdTypeIcebergDeleteTable,
+	"RotateKeyBegin":          MetaCmdTypeRotateKeyBegin,
+	"RotateKeySwitch":         MetaCmdTypeRotateKeySwitch,
+	"RotateKeyDrop":           MetaCmdTypeRotateKeyDrop,
+	"RotateKeyAbort":          MetaCmdTypeRotateKeyAbort,
+	"ScrubTrigger":            MetaCmdTypeScrubTrigger,
+	"PutObjectIndex":          MetaCmdTypePutObjectIndex,
+	"DeleteObjectIndex":       MetaCmdTypeDeleteObjectIndex,
+	"IAMSACreate":             MetaCmdTypeIAMSACreate,
+	"IAMSADelete":             MetaCmdTypeIAMSADelete,
+	"IAMKeyCreate":            MetaCmdTypeIAMKeyCreate,
+	"IAMKeyRevoke":            MetaCmdTypeIAMKeyRevoke,
+	"IAMGrantPut":             MetaCmdTypeIAMGrantPut,
+	"IAMGrantDelete":          MetaCmdTypeIAMGrantDelete,
+	"IAMGrantWildcardPut":     MetaCmdTypeIAMGrantWildcardPut,
+	"IAMAuthEnable":           MetaCmdTypeIAMAuthEnable,
+	"IAMGrantWildcardDelete":  MetaCmdTypeIAMGrantWildcardDelete,
+	"IAMKeyCreateScoped":      MetaCmdTypeIAMKeyCreateScoped,
+	"IAMInitFirstSA":          MetaCmdTypeIAMInitFirstSA,
+	"IAMBucketUpstreamPut":    MetaCmdTypeIAMBucketUpstreamPut,
+	"IAMBucketUpstreamDelete": MetaCmdTypeIAMBucketUpstreamDelete,
 }
 
 func (v MetaCmdType) String() string {
