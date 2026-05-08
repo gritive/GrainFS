@@ -882,6 +882,159 @@ func TestAbortMultipartUpload_DoesNotAffectOtherUploads(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "survivor multipart must still complete")
 }
 
+func TestListMultipartUploads_Success(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	openUpload := func(key string) string {
+		req, _ := http.NewRequest(http.MethodPost, base+"/mybucket/"+key+"?uploads", nil)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		var r initiateMultipartUploadResult
+		xml.NewDecoder(resp.Body).Decode(&r)
+		resp.Body.Close()
+		require.NotEmpty(t, r.UploadId)
+		return r.UploadId
+	}
+	id1 := openUpload("logs/a.bin")
+	id2 := openUpload("logs/b.bin")
+	id3 := openUpload("snapshots/c.bin")
+
+	// GET /:bucket?uploads — full bucket listing
+	req, _ = http.NewRequest(http.MethodGet, base+"/mybucket?uploads", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var listed listMultipartUploadsResult
+	require.NoError(t, xml.Unmarshal(body, &listed))
+	assert.Equal(t, "mybucket", listed.Bucket)
+	assert.Equal(t, 1000, listed.MaxUploads)
+	assert.False(t, listed.IsTruncated)
+
+	gotIDs := make(map[string]string)
+	for _, u := range listed.Uploads {
+		gotIDs[u.UploadId] = u.Key
+	}
+	assert.Equal(t, "logs/a.bin", gotIDs[id1])
+	assert.Equal(t, "logs/b.bin", gotIDs[id2])
+	assert.Equal(t, "snapshots/c.bin", gotIDs[id3])
+
+	// Prefix filter via ?prefix=
+	req, _ = http.NewRequest(http.MethodGet, base+"/mybucket?uploads&prefix=logs/", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var filtered listMultipartUploadsResult
+	require.NoError(t, xml.Unmarshal(body, &filtered))
+	gotPrefixIDs := make(map[string]bool)
+	for _, u := range filtered.Uploads {
+		gotPrefixIDs[u.UploadId] = true
+	}
+	assert.True(t, gotPrefixIDs[id1])
+	assert.True(t, gotPrefixIDs[id2])
+	assert.False(t, gotPrefixIDs[id3], "snapshots/ upload must not match logs/ prefix")
+
+	// Aborting one upload removes it from the listing.
+	req, _ = http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("%s/mybucket/logs/a.bin?uploadId=%s", base, id1), nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodGet, base+"/mybucket?uploads", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var afterAbort listMultipartUploadsResult
+	require.NoError(t, xml.Unmarshal(body, &afterAbort))
+	for _, u := range afterAbort.Uploads {
+		assert.NotEqual(t, id1, u.UploadId, "aborted upload must not appear after abort")
+	}
+}
+
+func TestListMultipartUploads_BucketNotFound(t *testing.T) {
+	base := setupTestServer(t)
+	req, _ := http.NewRequest(http.MethodGet, base+"/ghost?uploads", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Contains(t, string(body), "NoSuchBucket")
+}
+
+func TestListParts_Success(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	req, _ = http.NewRequest(http.MethodPost, base+"/mybucket/big.bin?uploads", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	var initResult initiateMultipartUploadResult
+	xml.NewDecoder(resp.Body).Decode(&initResult)
+	resp.Body.Close()
+	uploadID := initResult.UploadId
+
+	uploadedETags := map[int]string{}
+	for _, n := range []int{2, 1, 3} {
+		data := bytes.Repeat([]byte{byte('x' + n)}, 4096)
+		req, _ = http.NewRequest(http.MethodPut,
+			fmt.Sprintf("%s/mybucket/big.bin?uploadId=%s&partNumber=%d", base, uploadID, n),
+			bytes.NewReader(data))
+		resp, _ = http.DefaultClient.Do(req)
+		etag := strings.Trim(resp.Header.Get("Etag"), "\"")
+		resp.Body.Close()
+		uploadedETags[n] = etag
+	}
+
+	req, _ = http.NewRequest(http.MethodGet,
+		fmt.Sprintf("%s/mybucket/big.bin?uploadId=%s", base, uploadID),
+		nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var listed listPartsResult
+	require.NoError(t, xml.Unmarshal(body, &listed))
+	assert.Equal(t, "mybucket", listed.Bucket)
+	assert.Equal(t, "big.bin", listed.Key)
+	assert.Equal(t, uploadID, listed.UploadId)
+	require.Len(t, listed.Parts, 3)
+	for i, p := range listed.Parts {
+		assert.Equal(t, i+1, p.PartNumber, "ListParts must return parts sorted by part number")
+		assert.Equal(t, int64(4096), p.Size)
+		gotETag := strings.Trim(p.ETag, "\"")
+		assert.Equal(t, uploadedETags[p.PartNumber], gotETag, "ETag must match upload-time hash")
+	}
+}
+
+func TestListParts_NotFound(t *testing.T) {
+	base := setupTestServer(t)
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	req, _ = http.NewRequest(http.MethodGet,
+		base+"/mybucket/whatever.bin?uploadId=does-not-exist", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Contains(t, string(body), "NoSuchUpload")
+}
+
 func TestListObjects_WithMaxKeys(t *testing.T) {
 	base := setupTestServer(t)
 

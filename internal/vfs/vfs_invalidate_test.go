@@ -149,3 +149,11 @@ func (m *mockBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, 
 func (m *mockBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	return errors.New("not implemented")
 }
+
+func (m *mockBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	return nil, errors.New("not implemented")
+}

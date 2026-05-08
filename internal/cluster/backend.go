@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3679,6 +3680,82 @@ func contextForMultipartComplete(
 		}
 	}
 	return ContextWithPlacementGroupEntry(ctx, group), nil
+}
+
+// ListMultipartUploads returns an empty list in cluster mode for now. The
+// FSM-replicated multipartKey value (clusterMultipartMeta) only carries
+// ContentType + PlacementGroupID — bucket and key are not persisted, so a
+// faithful bucket-scoped listing cannot be reconstructed from local FSM
+// state. Single-node deployments use LocalBackend directly and are not
+// affected. Extending the FSM schema to surface bucket+key per upload is a
+// follow-up (#3 follow-on T2-cluster).
+func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	_ = ctx
+	_ = bucket
+	_ = prefix
+	_ = maxUploads
+	return []*storage.MultipartUpload{}, nil
+}
+
+// ListParts walks the local node's partDir for the given uploadID. Parts
+// uploaded against another node's routed group are not visible from here;
+// callers that need the full set should target the routed group directly
+// (see ClusterCoordinator routing). uploadID existence is checked against
+// the FSM-replicated multipart record so a missing uploadID returns
+// ErrUploadNotFound consistently across nodes even when no parts landed
+// locally.
+func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	_ = ctx
+	_ = bucket
+	_ = key
+	err := b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(multipartKey(uploadID))
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrUploadNotFound
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(b.partDir(uploadID))
+	if os.IsNotExist(err) {
+		return []storage.Part{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read part dir: %w", err)
+	}
+	out := make([]storage.Part, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		partNumber, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil || partNumber <= 0 {
+			continue
+		}
+		full := filepath.Join(b.partDir(uploadID), entry.Name())
+		f, err := os.Open(full)
+		if err != nil {
+			return nil, fmt.Errorf("open part %d: %w", partNumber, err)
+		}
+		h := md5.New()
+		size, err := io.Copy(h, f)
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("hash part %d: %w", partNumber, err)
+		}
+		out = append(out, storage.Part{
+			PartNumber: partNumber,
+			ETag:       hex.EncodeToString(h.Sum(nil)),
+			Size:       size,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PartNumber < out[j].PartNumber })
+	if maxParts > 0 && len(out) > maxParts {
+		out = out[:maxParts]
+	}
+	return out, nil
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

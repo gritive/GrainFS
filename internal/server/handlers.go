@@ -84,6 +84,39 @@ type completeMultipartUploadResult struct {
 	ETag    string   `xml:"ETag"`
 }
 
+type listMultipartUploadsResult struct {
+	XMLName     xml.Name             `xml:"ListMultipartUploadsResult"`
+	Xmlns       string               `xml:"xmlns,attr"`
+	Bucket      string               `xml:"Bucket"`
+	Prefix      string               `xml:"Prefix,omitempty"`
+	MaxUploads  int                  `xml:"MaxUploads"`
+	IsTruncated bool                 `xml:"IsTruncated"`
+	Uploads     []multipartUploadXML `xml:"Upload"`
+}
+
+type multipartUploadXML struct {
+	Key       string `xml:"Key"`
+	UploadId  string `xml:"UploadId"`
+	Initiated string `xml:"Initiated"`
+}
+
+type listPartsResult struct {
+	XMLName     xml.Name      `xml:"ListPartsResult"`
+	Xmlns       string        `xml:"xmlns,attr"`
+	Bucket      string        `xml:"Bucket"`
+	Key         string        `xml:"Key"`
+	UploadId    string        `xml:"UploadId"`
+	MaxParts    int           `xml:"MaxParts"`
+	IsTruncated bool          `xml:"IsTruncated"`
+	Parts       []partInfoXML `xml:"Part"`
+}
+
+type partInfoXML struct {
+	PartNumber int    `xml:"PartNumber"`
+	ETag       string `xml:"ETag"`
+	Size       int64  `xml:"Size"`
+}
+
 type s3Error struct {
 	XMLName xml.Name `xml:"Error"`
 	Code    string   `xml:"Code"`
@@ -281,6 +314,12 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// GET /:bucket?uploads — list in-progress multipart uploads
+	if c.QueryArgs().Has("uploads") {
+		s.listMultipartUploads(ctx, c, bucket)
+		return
+	}
+
 	prefix := string(c.QueryArgs().Peek("prefix"))
 	maxKeys := 1000
 	if mk := string(c.QueryArgs().Peek("max-keys")); mk != "" {
@@ -443,6 +482,14 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 
 	bucket := c.Param("bucket")
 	key := getKey(c)
+
+	// GET /:bucket/:key?uploadId=<id> — list parts for one in-progress multipart.
+	// Checked before versionId / Range because S3 routes the request to ListParts
+	// whenever uploadId is present, even when other query strings appear.
+	if uploadID := string(c.QueryArgs().Peek("uploadId")); uploadID != "" {
+		s.listParts(ctx, c, bucket, key, uploadID)
+		return
+	}
 
 	versionID := string(c.QueryArgs().Peek("versionId"))
 	rangeHeader := string(c.GetHeader("Range"))
@@ -1070,6 +1117,81 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	default:
 		c.Status(consts.StatusNoContent)
 	}
+}
+
+// listMultipartUploads renders the in-progress multipart uploads for a bucket
+// as the S3 ListMultipartUploadsResult XML payload. Honors ?prefix= and
+// ?max-uploads= (default 1000). IsTruncated is set conservatively when the
+// returned count equals max-uploads — consumers needing exact pagination
+// should re-request with smaller max-uploads or wait for follow-up paging
+// support. Returns NoSuchBucket when the bucket does not exist.
+func (s *Server) listMultipartUploads(ctx context.Context, c *app.RequestContext, bucket string) {
+	prefix := string(c.QueryArgs().Peek("prefix"))
+	maxUploads := 1000
+	if mu := string(c.QueryArgs().Peek("max-uploads")); mu != "" {
+		if v, err := strconv.Atoi(mu); err == nil && v > 0 {
+			maxUploads = v
+		}
+	}
+
+	uploads, err := s.ops.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+
+	result := listMultipartUploadsResult{
+		Xmlns:       "http://s3.amazonaws.com/doc/2006-03-01/",
+		Bucket:      bucket,
+		Prefix:      prefix,
+		MaxUploads:  maxUploads,
+		IsTruncated: len(uploads) >= maxUploads,
+	}
+	for _, up := range uploads {
+		result.Uploads = append(result.Uploads, multipartUploadXML{
+			Key:       up.Key,
+			UploadId:  up.UploadID,
+			Initiated: time.Unix(up.CreatedAt, 0).UTC().Format(time.RFC3339),
+		})
+	}
+	data, _ := xml.Marshal(result)
+	c.Data(consts.StatusOK, "application/xml", data)
+}
+
+// listParts renders the parts uploaded so far for one multipart upload as the
+// S3 ListPartsResult XML payload. Honors ?max-parts= (default 1000). Returns
+// NoSuchUpload (404) when the uploadID does not match an active upload.
+func (s *Server) listParts(ctx context.Context, c *app.RequestContext, bucket, key, uploadID string) {
+	maxParts := 1000
+	if mp := string(c.QueryArgs().Peek("max-parts")); mp != "" {
+		if v, err := strconv.Atoi(mp); err == nil && v > 0 {
+			maxParts = v
+		}
+	}
+
+	parts, err := s.ops.ListParts(ctx, bucket, key, uploadID, maxParts)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+
+	result := listPartsResult{
+		Xmlns:       "http://s3.amazonaws.com/doc/2006-03-01/",
+		Bucket:      bucket,
+		Key:         key,
+		UploadId:    uploadID,
+		MaxParts:    maxParts,
+		IsTruncated: len(parts) >= maxParts,
+	}
+	for _, p := range parts {
+		result.Parts = append(result.Parts, partInfoXML{
+			PartNumber: p.PartNumber,
+			ETag:       fmt.Sprintf("\"%s\"", p.ETag),
+			Size:       p.Size,
+		})
+	}
+	data, _ := xml.Marshal(result)
+	c.Data(consts.StatusOK, "application/xml", data)
 }
 
 func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContext, bucket, key string) {

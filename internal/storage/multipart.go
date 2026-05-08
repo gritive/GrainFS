@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -200,6 +202,123 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	os.RemoveAll(b.partDir(uploadID))
 
 	return obj, nil
+}
+
+// ListMultipartUploads scans the multipart-meta keyspace and returns uploads
+// matching bucket and prefix. The scan is metadata-only (no part files) so
+// the cost is bounded by the number of in-progress uploads, not their byte
+// count. Sorted by CreatedAt ascending so resumed uploads are stable across
+// repeated calls. maxUploads <= 0 means no cap.
+func (b *LocalBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*MultipartUpload, error) {
+	_ = ctx
+	if err := b.HeadBucket(context.Background(), bucket); err != nil {
+		return nil, err
+	}
+	out := make([]*MultipartUpload, 0)
+	err := b.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		mpuPrefix := []byte("mpu:")
+		for it.Seek(mpuPrefix); it.ValidForPrefix(mpuPrefix); it.Next() {
+			err := it.Item().Value(func(val []byte) error {
+				meta, err := unmarshalMultipartMeta(val)
+				if err != nil {
+					return err
+				}
+				if meta.Bucket != bucket {
+					return nil
+				}
+				if prefix != "" && !strings.HasPrefix(meta.Key, prefix) {
+					return nil
+				}
+				out = append(out, &MultipartUpload{
+					UploadID:    meta.UploadID,
+					Bucket:      meta.Bucket,
+					Key:         meta.Key,
+					ContentType: meta.ContentType,
+					CreatedAt:   meta.CreatedAt,
+				})
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].UploadID < out[j].UploadID
+	})
+	if maxUploads > 0 && len(out) > maxUploads {
+		out = out[:maxUploads]
+	}
+	return out, nil
+}
+
+// ListParts returns parts already uploaded for an in-progress multipart, sorted
+// by part number ascending. ETag is recomputed by re-hashing the part file —
+// fine for first slice (ListParts is not a hot path) and avoids storing a
+// sidecar. maxParts <= 0 means no cap. Returns ErrUploadNotFound when no
+// matching multipart record exists, even if the partDir happens to be empty.
+func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error) {
+	_ = ctx
+	err := b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(b.multipartKey(uploadID))
+		if err == badger.ErrKeyNotFound {
+			return ErrUploadNotFound
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(b.partDir(uploadID))
+	if os.IsNotExist(err) {
+		return []Part{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read part dir: %w", err)
+	}
+	out := make([]Part, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		partNumber, parseErr := strconv.Atoi(name)
+		if parseErr != nil || partNumber <= 0 {
+			continue
+		}
+		full := filepath.Join(b.partDir(uploadID), name)
+		f, err := os.Open(full)
+		if err != nil {
+			return nil, fmt.Errorf("open part %d: %w", partNumber, err)
+		}
+		h := md5.New()
+		size, err := io.Copy(h, f)
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("hash part %d: %w", partNumber, err)
+		}
+		out = append(out, Part{
+			PartNumber: partNumber,
+			ETag:       hex.EncodeToString(h.Sum(nil)),
+			Size:       size,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].PartNumber < out[j].PartNumber
+	})
+	if maxParts > 0 && len(out) > maxParts {
+		out = out[:maxParts]
+	}
+	return out, nil
 }
 
 func (b *LocalBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

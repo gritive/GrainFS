@@ -62,3 +62,9 @@ func (b *fileMetaCacheBackend) CompleteMultipartUpload(context.Context, string, 
 func (b *fileMetaCacheBackend) AbortMultipartUpload(context.Context, string, string, string) error {
 	return nil
 }
+func (b *fileMetaCacheBackend) ListMultipartUploads(context.Context, string, string, int) ([]*storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (b *fileMetaCacheBackend) ListParts(context.Context, string, string, string, int) ([]storage.Part, error) {
+	return nil, nil
+}

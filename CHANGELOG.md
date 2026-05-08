@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.102.0] - 2026-05-08 — S3 ListMultipartUploads + ListParts handlers
+
+### Added
+
+- `GET /:bucket?uploads` is wired to `Operations.ListMultipartUploads`. The
+  handler renders the S3 `ListMultipartUploadsResult` XML payload with
+  `?prefix=` filtering and `?max-uploads=` capping (default 1000).
+- `GET /:bucket/:key?uploadId=<id>` is wired to `Operations.ListParts`,
+  rendered as `ListPartsResult` XML with `?max-parts=` cap (default 1000).
+  Returns `404 NoSuchUpload` when the uploadID does not match an active
+  upload, sorted by part number ascending.
+- `Backend` interface gains `ListMultipartUploads(ctx, bucket, prefix,
+  maxUploads)` and `ListParts(ctx, bucket, key, uploadID, maxParts)`.
+  `LocalBackend` scans the BadgerDB `mpu:` prefix for in-progress uploads
+  and walks the per-uploadID partDir for parts (re-hashing each part file
+  for the ETag — acceptable for first slice since list is not a hot path).
+  `SwappableBackend`, `PackedBackend`, and the test fakes get the matching
+  pass-throughs; `RecoveryWriteGate` and `pullthrough.Backend` use embedded
+  Backend so the read methods auto-pass.
+
+### Notes
+
+- Cluster-mode limitations (first slice, follow-up planned):
+  `DistributedBackend.ListMultipartUploads` returns an empty list because
+  the FSM-replicated multipart record (`clusterMultipartMeta`) only stores
+  ContentType + PlacementGroupID — bucket and key are not yet replicated.
+  `DistributedBackend.ListParts` reads only the local node's part directory
+  for the upload, so parts uploaded against another node's routed group are
+  not visible from this node. Single-node deployments (LocalBackend) return
+  the full list in both cases.
+
 ## [0.0.101.0] - 2026-05-08 — S3 AbortMultipartUpload handler
 
 ### Added
