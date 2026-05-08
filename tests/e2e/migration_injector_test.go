@@ -36,6 +36,8 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	srcCmd.Stdout = os.Stdout
 	srcCmd.Stderr = os.Stderr
@@ -80,6 +82,8 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--access-key", "test",
+		"--secret-key", "test",
 	)
 	dstCmd.Stdout = os.Stdout
 	dstCmd.Stderr = os.Stderr
@@ -94,6 +98,10 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 	injectCmd := exec.Command(binary, "migrate", "inject",
 		"--src", srcEndpoint,
 		"--dst", dstEndpoint,
+		"--src-access-key", "test",
+		"--src-secret-key", "test",
+		"--dst-access-key", "test",
+		"--dst-secret-key", "test",
 	)
 	injectCmd.Stdout = os.Stdout
 	injectCmd.Stderr = os.Stderr

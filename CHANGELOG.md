@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.110.0] - 2026-05-08 — fix standalone E2E tests broken since v0.0.98.0
+
+### Fixed
+
+- 11 E2E tests (`tests/e2e/{auto_snapshot,backup,cluster,dashboard_healing_card,encryption,erasure,jepsen_impl,migration_injector,pullthrough,restart_recovery,smoke}_test.go`) now pass `--access-key test --secret-key test` to their standalone `serve` invocations. These tests roll their own `exec.Command(binary, "serve", …)` rather than going through `helpers_test.go:Start()` (which already passes the flags), and were silently rejected with `AccessDenied: unknown access key: test` since v0.0.98.0 (#237 IAM Foundation) made the SigV4 verifier IAM-aware. The README still advertises an "익명 모드 (개발용)" mode for omitting the flags, but the code path went away with #237 — the README claim is currently a lie and is left for a separate cleanup PR.
+- `tests/e2e/migration_injector_test.go`: pass `--src-access-key/--src-secret-key/--dst-access-key/--dst-secret-key` to the `migrate inject` subcommand so it can sign requests against both source and destination servers.
+- `tests/e2e/pullthrough_test.go`: pass `--upstream-access-key/--upstream-secret-key` to the local server so its pull-through fetches authenticate against the upstream.
+
+### Notes
+
+- Two pre-existing baseline failures surfaced during this audit and are NOT addressed here (each fails on origin/master without these test fixes, so they are independent issues): `TestRestartRecovery_SweepsOrphanArtifacts` and `TestAutoSnapshot_CreatesSnapshotAutomatically` show timing/cleanup issues unrelated to authn. Tracked separately.
+
 ## [0.0.109.0] - 2026-05-08 — raft v2 M2 prep: 4 correctness fixes
 
 ### Added
