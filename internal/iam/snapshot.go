@@ -322,13 +322,6 @@ func buildGrantDeletePayload(saID, bucket string) []byte {
 	return b.FinishedBytes()
 }
 
-func buildAuthEnablePayload() []byte {
-	b := flatbuffers.NewBuilder(8)
-	iampb.AuthEnablePayloadStart(b)
-	b.Finish(iampb.AuthEnablePayloadEnd(b))
-	return b.FinishedBytes()
-}
-
 func writeUint32(w io.Writer, v uint32) error {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], v)

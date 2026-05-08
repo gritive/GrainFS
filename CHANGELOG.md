@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.0.107.0 — 2026-05-08
+
+**BREAKING CHANGES**
+
+- Removed `--access-key` / `--secret-key` flags from `grainfs serve`. Bootstrap now goes
+  exclusively through admin UDS: `grainfs iam sa create admin --endpoint <data>/admin.sock`.
+- Removed sticky `auth_enabled` bit. authzMiddleware always evaluates IAM Layer (no
+  anonymous-mode escape hatch).
+- Snapshot binary bumped to v3 (drops authBit). v1/v2 readers no longer accepted.
+- E2E test helpers: `--access-key`/`--secret-key` flag pattern replaced by
+  `bootstrapAdminViaUDS()`. Existing test scripts using the old flags must update.
+
+**Features**
+
+- New `IAMInitFirstSA` MetaCmdType (31) atomically commits SA + AccessKey + WildcardGrant
+  for first-SA bootstrap. Race guard via fixed `DefaultSAID` + idempotent FSM skip.
+  Concurrent admin UDS callers receive `409 Conflict` for non-winners.
+
+**Migration**
+
+Pre-1.0 product, no migration support. For existing clusters:
+- Cluster bootstrapped via the old `--access-key` flag: state already in IAM, upgrade is
+  effectively no-op (sticky bit was true → always-on now means same).
+- Cluster running in anonymous mode (no SA, sticky=false): all S3 traffic 401 after
+  upgrade. Run `grainfs iam sa create admin --endpoint <data>/admin.sock` to bootstrap.
+
+See `docs/adr/0008-drop-access-key-flag.md` for full rationale.
+
 ## [0.0.106.0] - 2026-05-08 — IAM bucket-scoped access keys
 
 ### Added
