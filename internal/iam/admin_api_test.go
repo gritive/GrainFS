@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -622,13 +623,16 @@ func TestAdminAPI_BucketUpstream_PutValidationErrors(t *testing.T) {
 	}{
 		// All bodies use the new JSON shape with `upstream_url` per A9.
 		{"empty bucket", `{"bucket":"","upstream_url":"http://x","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
-		{"empty upstream_url", `{"bucket":"b","upstream_url":"","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
-		{"bad upstream_url scheme", `{"bucket":"b","upstream_url":"ftp://x","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
-		{"empty ak", `{"bucket":"b","upstream_url":"http://x","access_key":"","secret_key":"S"}`, http.StatusBadRequest},
-		{"empty sk", `{"bucket":"b","upstream_url":"http://x","access_key":"AK","secret_key":""}`, http.StatusBadRequest},
+		{"empty upstream_url", `{"bucket":"valid","upstream_url":"","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
+		{"bad upstream_url scheme", `{"bucket":"valid","upstream_url":"ftp://x","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
+		{"empty ak", `{"bucket":"valid","upstream_url":"http://x","access_key":"","secret_key":"S"}`, http.StatusBadRequest},
+		{"empty sk", `{"bucket":"valid","upstream_url":"http://x","access_key":"AK","secret_key":""}`, http.StatusBadRequest},
 		{"wildcard bucket", `{"bucket":"*","upstream_url":"http://x","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
 		{"system bucket", `{"bucket":"__system__","upstream_url":"http://x","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
 		{"malformed JSON", `{not json`, http.StatusBadRequest},
+		{"bucket too short", `{"bucket":"ab","upstream_url":"http://x","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
+		{"bucket invalid char", `{"bucket":"Foo!","upstream_url":"http://x","access_key":"AK","secret_key":"S"}`, http.StatusBadRequest},
+		{"upstream_url too long", fmt.Sprintf(`{"bucket":"valid","upstream_url":"http://%s","access_key":"AK","secret_key":"S"}`, strings.Repeat("a", 2049)), http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

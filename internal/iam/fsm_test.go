@@ -472,18 +472,18 @@ func TestApplyBucketUpstreamDelete_Idempotent(t *testing.T) {
 		t.Fatalf("ApplyBucketUpstreamDelete on empty store: %v", err)
 	}
 
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:b1", "s")
+	wrapped, _ := WrapSecret(enc, "bucket-upstream:buc1", "s")
 	if err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
-		Bucket: "b1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 	})); err != nil {
 		t.Fatalf("seed Apply: %v", err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("b1")); err != nil {
+		if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("buc1")); err != nil {
 			t.Fatalf("ApplyBucketUpstreamDelete iter %d: %v", i, err)
 		}
 	}
-	if _, ok := s.LookupBucketUpstream("b1"); ok {
+	if _, ok := s.LookupBucketUpstream("buc1"); ok {
 		t.Fatal("LookupBucketUpstream(b1) returned ok=true after delete")
 	}
 }

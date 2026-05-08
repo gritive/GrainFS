@@ -504,6 +504,28 @@ func (a *AdminAPI) HandleBucketUpstreamPut(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "bucket must not be a sentinel name", http.StatusBadRequest)
 		return
 	}
+	// Length + charset bounds prevent unbounded raft growth from malformed input.
+	// AWS-compatible bucket name rules: 3-63 chars, lowercase alphanumerics + . -, must start/end with alnum.
+	if len(req.Bucket) < 3 || len(req.Bucket) > 63 {
+		http.Error(w, "bucket length must be 3-63 chars", http.StatusBadRequest)
+		return
+	}
+	if !validBucketName(req.Bucket) {
+		http.Error(w, "bucket must match ^[a-z0-9][a-z0-9.-]*[a-z0-9]$", http.StatusBadRequest)
+		return
+	}
+	if len(req.UpstreamURL) > 2048 {
+		http.Error(w, "upstream_url too long (max 2048)", http.StatusBadRequest)
+		return
+	}
+	if len(req.AccessKey) > 128 {
+		http.Error(w, "access_key too long (max 128)", http.StatusBadRequest)
+		return
+	}
+	if len(req.SecretKey) > 256 {
+		http.Error(w, "secret_key too long (max 256)", http.StatusBadRequest)
+		return
+	}
 	if req.UpstreamURL == "" {
 		http.Error(w, "upstream_url required", http.StatusBadRequest)
 		return
@@ -595,4 +617,22 @@ func genCredentialPair() (string, string) {
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
 	return "AKGF" + strings.ToUpper(enc.EncodeToString(akBytes))[:16],
 		enc.EncodeToString(skBytes)
+}
+
+// validBucketName checks AWS-compatible bucket naming: lowercase alphanumerics, dots, hyphens.
+// First and last char must be alphanumeric. Length is checked by the caller.
+func validBucketName(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i, c := range s {
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-'
+		if !ok {
+			return false
+		}
+		if (i == 0 || i == len(s)-1) && (c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
 }

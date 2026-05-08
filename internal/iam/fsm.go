@@ -297,6 +297,11 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 	if bucket == WildcardBucket || bucket == SystemBucket {
 		return fmt.Errorf("iam: BucketUpstreamPut rejects sentinel bucket %q", bucket)
 	}
+	// Defense-in-depth: admin handler enforces this too, but a direct raft
+	// inject must not bypass the hard length bounds.
+	if len(bucket) < 3 || len(bucket) > 63 {
+		return fmt.Errorf("iam: BucketUpstreamPut bucket length out of range (3-63), got %d", len(bucket))
+	}
 	encBytes := readBucketUpstreamEncBytes(p)
 	plain, err := UnwrapSecret(a.enc, "bucket-upstream:"+bucket, encBytes)
 	if err != nil {

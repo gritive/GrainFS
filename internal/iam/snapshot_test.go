@@ -235,9 +235,9 @@ func TestSnapshot_PreTrailerCompat_NoBucketUpstreamSection(t *testing.T) {
 func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
 	src := NewStore()
 	enc := newTestEncryptor(t)
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:b1", "s1")
+	wrapped, _ := WrapSecret(enc, "bucket-upstream:buc1", "s1")
 	src.applyBucketUpstreamPut(BucketUpstream{
-		Bucket: "b1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 	})
 
 	var buf bytes.Buffer
@@ -249,7 +249,7 @@ func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
 	if err := ReadSnapshot(bytes.NewReader(buf.Bytes()), dst, enc); err != nil {
 		t.Fatalf("ReadSnapshot: %v", err)
 	}
-	if _, ok := dst.LookupBucketUpstream("b1"); !ok {
+	if _, ok := dst.LookupBucketUpstream("buc1"); !ok {
 		t.Fatal("LookupBucketUpstream(b1) missing after restore")
 	}
 }
