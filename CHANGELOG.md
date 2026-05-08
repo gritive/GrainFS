@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.113.0] - 2026-05-08 — Complete IAM-only cleanup (PR #255 follow-up)
+
+### Fixed
+
+- 12 e2e test files that PR #255 left half-migrated: the legacy
+  `"--access-key", "test", "--secret-key", "test"` argument pair was
+  deleted from `cmd/serve` invocations in
+  `auto_snapshot_test.go`, `backup_test.go`, `cluster_test.go`,
+  `dashboard_healing_card_test.go`, `encryption_test.go`,
+  `erasure_test.go`, `jepsen_impl_test.go`, `migration_injector_test.go`,
+  `pullthrough_test.go`, `restart_recovery_test.go`, and `smoke_test.go`.
+  In master 5748d2e0 (v0.0.112.0), `bootstrapAdminViaUDS()` calls had
+  been **added** but the legacy lines had **not been removed** —
+  cobra rejected the unknown flags with `Error: unknown flag: --access-key`
+  on every invocation, so all 12 e2e tests hit `waitForPort` timeout.
+- `cmd/grainfs/serve_config.go`: removed `"secret-key"` from the
+  redaction switch (the flag itself is gone in v0.0.112.0; the case was
+  dead). `cluster-key`, `alert-webhook-secret`, `heal-receipt-psk`
+  redaction unchanged.
+
+### Changed
+
+- `docs/RUNBOOK.md`: production deployment examples no longer pass
+  `--access-key $GRAINFS_ACCESS_KEY` / `--secret-key $GRAINFS_SECRET_KEY`
+  to `grainfs serve` (Step 4 local + cluster modes; Docker `-e`; K8s
+  ConfigMap + Deployment env). Added a Step 4 preamble explaining that
+  `$GRAINFS_ACCESS_KEY`/`$GRAINFS_SECRET_KEY` now refer to the admin SA
+  credentials obtained via the bootstrap flow and are used only by S3
+  client-side examples (`aws --endpoint-url`).
+
 ## [0.0.112.0] - 2026-05-08 — IAM-only auth, drop --access-key flag
 
 ### Removed (BREAKING)

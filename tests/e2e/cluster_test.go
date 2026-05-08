@@ -47,8 +47,6 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
@@ -99,8 +97,6 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
@@ -168,8 +164,6 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--access-key", "test",
-		"--secret-key", "test",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

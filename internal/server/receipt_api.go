@@ -25,11 +25,11 @@ func (s *Server) registerReceiptAPI(h *server.Hertz) {
 		return
 	}
 
-	// Build handler chains conditionally. When no S3 credentials are
-	// configured, s.verifier is nil and the global auth middleware was
-	// skipped in New() — attaching authMiddleware here would NPE on
-	// s.verifier.Verify. Matching the global pattern keeps behavior
-	// consistent: "no --access-key" means "no auth anywhere".
+	// Build handler chains conditionally. When s.verifier is nil (e.g.,
+	// test setups that skip the IAM wiring), the global auth middleware
+	// was also skipped in New() — attaching authMiddleware here would
+	// NPE on s.verifier.Verify. Matching the global pattern keeps
+	// behavior consistent: nil verifier means no auth across every path.
 	getByID := func(_ context.Context, c *app.RequestContext) {
 		id := c.Param("id")
 		s.receiptAPI.ServeGetReceipt(newResponseWriter(c), toHTTPRequest(c), id)
