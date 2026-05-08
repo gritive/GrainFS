@@ -4,178 +4,237 @@ import (
 	"errors"
 	"testing"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
-// TestMemLogStore_Empty verifies empty-store invariants.
-func TestMemLogStore_Empty(t *testing.T) {
-	s := newMemLogStore()
-	require.Equal(t, uint64(1), s.FirstIndex(), "FirstIndex on empty store")
-	require.Equal(t, uint64(0), s.LastIndex(), "LastIndex on empty store")
-
-	_, err := s.Entry(1)
-	require.ErrorIs(t, err, ErrLogIndexOutOfRange, "Entry(1) on empty store")
-
-	term, err := s.TermAt(0)
-	require.NoError(t, err, "TermAt(0) sentinel")
-	require.Equal(t, uint64(0), term, "TermAt(0) returns 0")
-
-	_, err = s.TermAt(1)
-	require.ErrorIs(t, err, ErrLogIndexOutOfRange, "TermAt(1) on empty store")
-
-	entries, err := s.EntriesFrom(1, 10)
-	require.NoError(t, err, "EntriesFrom(1) on empty store is not an error")
-	require.Empty(t, entries)
+// logStoreFactory describes a named LogStore constructor for table-driven tests.
+// Both memLogStore and badgerLogStore are driven through the same scenarios.
+type logStoreFactory struct {
+	name string
+	new  func(t *testing.T) LogStore
 }
 
-// TestMemLogStore_AppendAndRead appends 3 entries and verifies random access.
-func TestMemLogStore_AppendAndRead(t *testing.T) {
-	s := newMemLogStore()
-	batch := []LogEntry{
-		{Term: 1, Index: 1, Command: []byte("a")},
-		{Term: 1, Index: 2, Command: []byte("b")},
-		{Term: 2, Index: 3, Command: []byte("c")},
+var allStores = []logStoreFactory{
+	{
+		name: "mem",
+		new:  func(t *testing.T) LogStore { return newMemLogStore() },
+	},
+	{
+		name: "badger",
+		new: func(t *testing.T) LogStore {
+			dir := t.TempDir()
+			db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			store, err := newBadgerLogStore(db, []byte("raft/v2/log/"))
+			require.NoError(t, err)
+			return store
+		},
+	},
+}
+
+// TestLogStore_Empty verifies empty-store invariants.
+func TestLogStore_Empty(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.Equal(t, uint64(1), s.FirstIndex(), "FirstIndex on empty store")
+			require.Equal(t, uint64(0), s.LastIndex(), "LastIndex on empty store")
+
+			_, err := s.Entry(1)
+			require.ErrorIs(t, err, ErrLogIndexOutOfRange, "Entry(1) on empty store")
+
+			term, err := s.TermAt(0)
+			require.NoError(t, err, "TermAt(0) sentinel")
+			require.Equal(t, uint64(0), term, "TermAt(0) returns 0")
+
+			_, err = s.TermAt(1)
+			require.ErrorIs(t, err, ErrLogIndexOutOfRange, "TermAt(1) on empty store")
+
+			entries, err := s.EntriesFrom(1, 10)
+			require.NoError(t, err, "EntriesFrom(1) on empty store is not an error")
+			require.Empty(t, entries)
+		})
 	}
-	require.NoError(t, s.Append(batch))
+}
 
-	require.Equal(t, uint64(3), s.LastIndex())
+// TestLogStore_AppendAndRead appends 3 entries and verifies random access.
+func TestLogStore_AppendAndRead(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			batch := []LogEntry{
+				{Term: 1, Index: 1, Command: []byte("a")},
+				{Term: 1, Index: 2, Command: []byte("b")},
+				{Term: 2, Index: 3, Command: []byte("c")},
+			}
+			require.NoError(t, s.Append(batch))
 
-	for _, want := range batch {
-		got, err := s.Entry(want.Index)
-		require.NoError(t, err, "Entry(%d)", want.Index)
-		require.Equal(t, want, got, "Entry(%d)", want.Index)
+			require.Equal(t, uint64(3), s.LastIndex())
+
+			for _, want := range batch {
+				got, err := s.Entry(want.Index)
+				require.NoError(t, err, "Entry(%d)", want.Index)
+				require.Equal(t, want, got, "Entry(%d)", want.Index)
+			}
+
+			term, err := s.TermAt(2)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), term)
+
+			term, err = s.TermAt(3)
+			require.NoError(t, err)
+			require.Equal(t, uint64(2), term)
+		})
 	}
-
-	term, err := s.TermAt(2)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), term)
-
-	term, err = s.TermAt(3)
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), term)
 }
 
-// TestMemLogStore_TruncateAfter verifies TruncateAfter semantics.
-func TestMemLogStore_TruncateAfter(t *testing.T) {
-	s := newMemLogStore()
-	require.NoError(t, s.Append([]LogEntry{
-		{Term: 1, Index: 1},
-		{Term: 1, Index: 2},
-		{Term: 1, Index: 3},
-	}))
+// TestLogStore_TruncateAfter verifies TruncateAfter semantics.
+func TestLogStore_TruncateAfter(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.NoError(t, s.Append([]LogEntry{
+				{Term: 1, Index: 1},
+				{Term: 1, Index: 2},
+				{Term: 1, Index: 3},
+			}))
 
-	// Truncate to index 2: entry at 3 gone.
-	require.NoError(t, s.TruncateAfter(2))
-	require.Equal(t, uint64(2), s.LastIndex())
-	_, err := s.Entry(3)
-	require.ErrorIs(t, err, ErrLogIndexOutOfRange, "entry 3 removed after TruncateAfter(2)")
+			// Truncate to index 2: entry at 3 gone.
+			require.NoError(t, s.TruncateAfter(2))
+			require.Equal(t, uint64(2), s.LastIndex())
+			_, err := s.Entry(3)
+			require.ErrorIs(t, err, ErrLogIndexOutOfRange, "entry 3 removed after TruncateAfter(2)")
 
-	// Truncate to 0: store is empty.
-	require.NoError(t, s.TruncateAfter(0))
-	require.Equal(t, uint64(0), s.LastIndex())
+			// Truncate to 0: store is empty.
+			require.NoError(t, s.TruncateAfter(0))
+			require.Equal(t, uint64(0), s.LastIndex())
 
-	// No-op truncation on empty store.
-	require.NoError(t, s.TruncateAfter(5))
-	require.Equal(t, uint64(0), s.LastIndex())
+			// No-op truncation on empty store.
+			require.NoError(t, s.TruncateAfter(5))
+			require.Equal(t, uint64(0), s.LastIndex())
+		})
+	}
 }
 
-// TestMemLogStore_EntriesFrom exercises range reads and cap.
-func TestMemLogStore_EntriesFrom(t *testing.T) {
-	s := newMemLogStore()
-	require.NoError(t, s.Append([]LogEntry{
-		{Term: 1, Index: 1},
-		{Term: 1, Index: 2},
-		{Term: 1, Index: 3},
-		{Term: 2, Index: 4},
-	}))
+// TestLogStore_EntriesFrom exercises range reads and cap.
+func TestLogStore_EntriesFrom(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.NoError(t, s.Append([]LogEntry{
+				{Term: 1, Index: 1},
+				{Term: 1, Index: 2},
+				{Term: 1, Index: 3},
+				{Term: 2, Index: 4},
+			}))
 
-	// Uncapped: all entries from index 2.
-	got, err := s.EntriesFrom(2, 0)
-	require.NoError(t, err)
-	require.Len(t, got, 3)
-	require.Equal(t, uint64(2), got[0].Index)
-	require.Equal(t, uint64(4), got[2].Index)
+			// Uncapped: all entries from index 2.
+			got, err := s.EntriesFrom(2, 0)
+			require.NoError(t, err)
+			require.Len(t, got, 3)
+			require.Equal(t, uint64(2), got[0].Index)
+			require.Equal(t, uint64(4), got[2].Index)
 
-	// Capped at 1.
-	got, err = s.EntriesFrom(2, 1)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	require.Equal(t, uint64(2), got[0].Index)
+			// Capped at 1.
+			got, err = s.EntriesFrom(2, 1)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			require.Equal(t, uint64(2), got[0].Index)
 
-	// Out of range.
-	_, err = s.EntriesFrom(10, 10)
-	require.ErrorIs(t, err, ErrLogIndexOutOfRange)
+			// Out of range.
+			_, err = s.EntriesFrom(10, 10)
+			require.ErrorIs(t, err, ErrLogIndexOutOfRange)
+		})
+	}
 }
 
-// TestMemLogStore_EntriesFromReturnsCopy verifies the returned slice does not
+// TestLogStore_EntriesFromReturnsCopy verifies the returned slice does not
 // alias internal storage — mutations to the returned slice must not affect
 // subsequent reads from the store.
-func TestMemLogStore_EntriesFromReturnsCopy(t *testing.T) {
-	s := newMemLogStore()
-	require.NoError(t, s.Append([]LogEntry{
-		{Term: 1, Index: 1, Command: []byte("original")},
-	}))
+func TestLogStore_EntriesFromReturnsCopy(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.NoError(t, s.Append([]LogEntry{
+				{Term: 1, Index: 1, Command: []byte("original")},
+			}))
 
-	got, err := s.EntriesFrom(1, 10)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
+			got, err := s.EntriesFrom(1, 10)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
 
-	// Mutate the returned slice — both a scalar field and the Command byte slice.
-	// The byte-slice mutation is the real aliasing risk: a shallow struct copy
-	// shares the underlying []byte header.
-	got[0].Term = 99
-	got[0].Command[0] = 'X'
+			// Mutate the returned slice — both a scalar field and the Command byte slice.
+			// The byte-slice mutation is the real aliasing risk: a shallow struct copy
+			// shares the underlying []byte header.
+			got[0].Term = 99
+			got[0].Command[0] = 'X'
 
-	// Store must be unaffected on both axes.
-	entry, err := s.Entry(1)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), entry.Term, "store must not reflect scalar mutation of returned slice")
-	require.Equal(t, byte('o'), entry.Command[0], "store must not reflect Command byte mutation")
+			// Store must be unaffected on both axes.
+			entry, err := s.Entry(1)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), entry.Term, "store must not reflect scalar mutation of returned slice")
+			require.Equal(t, byte('o'), entry.Command[0], "store must not reflect Command byte mutation")
+		})
+	}
 }
 
-// TestMemLogStore_Append_NonContiguous verifies that Append panics when the
+// TestLogStore_Append_NonContiguous verifies that Append panics when the
 // first entry's Index does not immediately follow LastIndex.
-func TestMemLogStore_Append_NonContiguous(t *testing.T) {
-	s := newMemLogStore()
-	require.NoError(t, s.Append([]LogEntry{{Term: 1, Index: 1}}))
+func TestLogStore_Append_NonContiguous(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.NoError(t, s.Append([]LogEntry{{Term: 1, Index: 1}}))
 
-	require.PanicsWithValue(t, "raftv2: Append: non-contiguous index", func() {
-		// Index 3 is not contiguous after LastIndex()==1.
-		_ = s.Append([]LogEntry{{Term: 1, Index: 3}})
-	}, "non-contiguous Append must panic with the documented message")
+			require.PanicsWithValue(t, "raftv2: Append: non-contiguous index", func() {
+				// Index 3 is not contiguous after LastIndex()==1.
+				_ = s.Append([]LogEntry{{Term: 1, Index: 3}})
+			}, "non-contiguous Append must panic with the documented message")
+		})
+	}
 }
 
-// TestMemLogStore_TruncateThenAppend exercises the conflict-resolution sequence
+// TestLogStore_TruncateThenAppend exercises the conflict-resolution sequence
 // the actor follows: TruncateAfter on conflict, then Append the new suffix.
 // Catches grow-from-truncated slice aliasing bugs (capacity/length confusion).
-func TestMemLogStore_TruncateThenAppend(t *testing.T) {
-	s := newMemLogStore()
-	require.NoError(t, s.Append([]LogEntry{
-		{Term: 1, Index: 1},
-		{Term: 1, Index: 2},
-		{Term: 1, Index: 3},
-	}))
+func TestLogStore_TruncateThenAppend(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.NoError(t, s.Append([]LogEntry{
+				{Term: 1, Index: 1},
+				{Term: 1, Index: 2},
+				{Term: 1, Index: 3},
+			}))
 
-	require.NoError(t, s.TruncateAfter(2))
-	require.Equal(t, uint64(2), s.LastIndex())
+			require.NoError(t, s.TruncateAfter(2))
+			require.Equal(t, uint64(2), s.LastIndex())
 
-	// Append a new entry at index 3 (replacing the truncated one).
-	require.NoError(t, s.Append([]LogEntry{{Term: 2, Index: 3, Command: []byte("new")}}))
+			// Append a new entry at index 3 (replacing the truncated one).
+			require.NoError(t, s.Append([]LogEntry{{Term: 2, Index: 3, Command: []byte("new")}}))
 
-	got, err := s.Entry(3)
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), got.Term, "term reflects new appended entry, not pre-truncate value")
-	require.Equal(t, []byte("new"), got.Command)
+			got, err := s.Entry(3)
+			require.NoError(t, err)
+			require.Equal(t, uint64(2), got.Term, "term reflects new appended entry, not pre-truncate value")
+			require.Equal(t, []byte("new"), got.Command)
+		})
+	}
 }
 
-// TestMemLogStore_Entry_OutOfRange verifies ErrLogIndexOutOfRange on 0 and beyond LastIndex.
-func TestMemLogStore_Entry_OutOfRange(t *testing.T) {
-	s := newMemLogStore()
-	require.NoError(t, s.Append([]LogEntry{{Term: 1, Index: 1}}))
+// TestLogStore_Entry_OutOfRange verifies ErrLogIndexOutOfRange on 0 and beyond LastIndex.
+func TestLogStore_Entry_OutOfRange(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			require.NoError(t, s.Append([]LogEntry{{Term: 1, Index: 1}}))
 
-	_, err := s.Entry(0)
-	require.True(t, errors.Is(err, ErrLogIndexOutOfRange), "Entry(0) must error")
+			_, err := s.Entry(0)
+			require.True(t, errors.Is(err, ErrLogIndexOutOfRange), "Entry(0) must error")
 
-	_, err = s.Entry(2)
-	require.True(t, errors.Is(err, ErrLogIndexOutOfRange), "Entry(2) beyond LastIndex must error")
+			_, err = s.Entry(2)
+			require.True(t, errors.Is(err, ErrLogIndexOutOfRange), "Entry(2) beyond LastIndex must error")
+		})
+	}
 }
