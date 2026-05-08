@@ -32,10 +32,10 @@ type actorState struct {
 	// while state == Candidate.
 	votesGranted int
 
-	// In-memory log. PR 1 has no persistence; the LogStore adapter lands in
-	// PR 6+. Indices are 1-based per Raft convention; log[0] corresponds to
-	// log index 1.
-	log         []LogEntry
+	// log holds the Raft log entries via the LogStore interface. The concrete
+	// implementation is memLogStore (in-memory); BadgerDB backing lands in PR 10.
+	// All access is from the actor goroutine only — no locking required.
+	log         LogStore
 	commitIndex uint64
 
 	// Leader-only replication tracking. Allocated in becomeLeader, cleared in
@@ -63,31 +63,23 @@ func (s *actorState) snapshot() *readState {
 	}
 }
 
-// lastLogIndex returns the highest log index in the actor's in-memory log,
-// or 0 if the log is empty. 1-based indexing per Raft convention.
+// lastLogIndex returns the highest log index in the log, or 0 if empty.
+// 1-based indexing per Raft convention.
 func (s *actorState) lastLogIndex() uint64 {
-	if len(s.log) == 0 {
-		return 0
-	}
-	return s.log[len(s.log)-1].Index
+	return s.log.LastIndex()
 }
 
 // lastLogTerm returns the term of the last log entry, or 0 if the log is empty.
 func (s *actorState) lastLogTerm() uint64 {
-	if len(s.log) == 0 {
+	last := s.log.LastIndex()
+	if last == 0 {
 		return 0
 	}
-	return s.log[len(s.log)-1].Term
-}
-
-// lastLogTermAt returns the term of the entry at log index idx, or 0 when
-// idx == 0. Caller must ensure idx <= lastLogIndex(); the function does no
-// bounds check beyond the idx==0 sentinel. 1-based indexing (idx=1 → log[0]).
-func (s *actorState) lastLogTermAt(idx uint64) uint64 {
-	if idx == 0 {
-		return 0
+	t, err := s.log.TermAt(last)
+	if err != nil {
+		panic("raftv2: lastLogTerm: " + err.Error())
 	}
-	return s.log[idx-1].Term
+	return t
 }
 
 // isLogUpToDate reports whether a candidate's log (lastIdx, lastTerm) is at

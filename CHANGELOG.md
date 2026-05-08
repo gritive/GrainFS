@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.0.114.0] - 2026-05-08 — raft v2 M2 PR 9: LogStore interface (pure refactor)
+
+### Added
+
+- `LogStore` interface in `internal/raft/v2/logstore.go`: defines the contract
+  for Raft log access (`FirstIndex`, `LastIndex`, `Entry`, `TermAt`, `Append`,
+  `TruncateAfter`, `EntriesFrom`). M2 persistence foundation — BadgerDB backing
+  lands in PR 10; crash-recovery wiring in PR 11.
+- `memLogStore` in-memory implementation (same file): actor-goroutine-owned,
+  no locks. `EntriesFrom` returns a deep copy (slice header + each entry's
+  `Command []byte`) so callers may retain the slice across subsequent store
+  mutations and freely mutate the returned bytes.
+- `ErrLogIndexOutOfRange` sentinel error; actor panics on out-of-range access
+  (programmer bug, not a recoverable runtime condition).
+- `mustEntry` / `mustTermAt` helpers in `actor.go`: wrap the panic-on-error
+  path to keep call sites readable.
+- `logstore_test.go`: 8 table-driven tests covering empty-store invariants,
+  append/read, truncation, range reads, cap enforcement, deep-copy semantics
+  (including `Command []byte` aliasing), `Append` non-contiguous panic with
+  exact message match, and the truncate-then-append round-trip the actor
+  exercises during conflict resolution.
+
+### Changed
+
+- `actorState.log` field type: `[]LogEntry` → `LogStore` (pure refactor, no
+  behavior change). All 15 mutation/read sites in `actor.go` and 3 helper
+  methods in `state.go` updated to use the LogStore interface.
+- `NewNode` initializes `actorState.log` with `newMemLogStore()`.
+- `lastLogTermAt` removed from `state.go`; sole call site (`buildAppendEntriesArgs`)
+  now uses `mustTermAt` directly. One panic-wrapper instead of two.
+- Test seeding sites in `replication_test.go` updated to use `seedLogEntries`
+  helper (replaces direct slice assignment). Post-Stop assertions updated to
+  use `LogStore.Entry` / `LastIndex` (replaces direct slice indexing).
+
+### Notes
+
+- No behavior change. All 33 prior tests continue to pass under `-race
+  -count=10`; +2 new LogStore tests pass alongside (35 total). This PR is the
+  persistence interface layer only — `memLogStore` is the sole implementation
+  until PR 10 adds BadgerDB backing.
+
 ## [0.0.113.0] - 2026-05-08 — Complete IAM-only cleanup (PR #255 follow-up)
 
 ### Fixed

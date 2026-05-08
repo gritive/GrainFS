@@ -10,6 +10,27 @@ import (
 // (internal/raft/raft.go:212).
 const defaultMaxEntriesPerAE = 512
 
+// mustEntry retrieves the log entry at 1-based logical index idx from the
+// actor's log. Panics if the index is out of range — log indexing bugs are
+// programmer errors, not recoverable runtime conditions.
+func (n *Node) mustEntry(idx uint64) LogEntry {
+	e, err := n.st.log.Entry(idx)
+	if err != nil {
+		panic("raftv2: mustEntry: " + err.Error())
+	}
+	return e
+}
+
+// mustTermAt retrieves the term of the entry at 1-based logical index idx.
+// Returns 0 for idx==0 (Raft sentinel). Panics on out-of-range access.
+func (n *Node) mustTermAt(idx uint64) uint64 {
+	t, err := n.st.log.TermAt(idx)
+	if err != nil {
+		panic("raftv2: mustTermAt: " + err.Error())
+	}
+	return t
+}
+
 // command is the unit of work passed from public methods (and outbound RPC
 // reply goroutines) to the actor goroutine over cmdCh. The actor handles
 // each command serially; reply (if any) is delivered via the embedded reply
@@ -270,16 +291,15 @@ func (n *Node) handleAppendEntries(cmd command) {
 		}
 		return
 	}
-	if args.PrevLogIndex > 0 && n.st.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+	if args.PrevLogIndex > 0 && n.mustTermAt(args.PrevLogIndex) != args.PrevLogTerm {
 		// Case 2: term mismatch at PrevLogIndex. Walk back to the first index
 		// of the conflicting term so the leader can decide to skip the whole
 		// term (if it has it) or jump to that boundary (if it doesn't).
-		conflictTerm := n.st.log[args.PrevLogIndex-1].Term
+		conflictTerm := n.mustTermAt(args.PrevLogIndex)
 		conflictIdx := args.PrevLogIndex
-		// Logical index conflictIdx maps to slice index conflictIdx-1.
-		// We're walking back while the *previous* logical entry (conflictIdx-1)
-		// also has conflictTerm; that's slice index conflictIdx-2.
-		for conflictIdx > 1 && n.st.log[conflictIdx-2].Term == conflictTerm {
+		// Walk back while the previous logical entry (conflictIdx-1) also has
+		// conflictTerm.
+		for conflictIdx > 1 && n.mustTermAt(conflictIdx-1) == conflictTerm {
 			conflictIdx--
 		}
 		n.publish()
@@ -316,11 +336,15 @@ func (n *Node) handleAppendEntries(cmd command) {
 			return
 		}
 		if target <= n.st.lastLogIndex() {
-			if n.st.log[target-1].Term != e.Term {
+			if n.mustTermAt(target) != e.Term {
 				// Conflict at logical index target. Truncate and break — the
 				// remaining loop iterations would walk indices we just dropped.
-				n.st.log = n.st.log[:target-1]
-				n.st.log = append(n.st.log, args.Entries[i:]...)
+				if err := n.st.log.TruncateAfter(target - 1); err != nil {
+					panic("raftv2: TruncateAfter: " + err.Error())
+				}
+				if err := n.st.log.Append(args.Entries[i:]); err != nil {
+					panic("raftv2: Append: " + err.Error())
+				}
 				break
 			}
 			// Same term/index → same entry by Raft Log Matching. Skip.
@@ -328,7 +352,9 @@ func (n *Node) handleAppendEntries(cmd command) {
 		}
 		// target > lastLogIndex: pure extension. Append remaining entries in
 		// one shot and break out of the loop.
-		n.st.log = append(n.st.log, args.Entries[i:]...)
+		if err := n.st.log.Append(args.Entries[i:]); err != nil {
+			panic("raftv2: Append: " + err.Error())
+		}
 		break
 	}
 
@@ -357,7 +383,7 @@ func (n *Node) handleAppendEntries(cmd command) {
 // drain, while followers (proposeWaiters always nil for non-Leader) skip.
 func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
 	for i := oldCommit + 1; i <= newCommit; i++ {
-		entry := n.st.log[i-1]
+		entry := n.mustEntry(i)
 		select {
 		case n.applyCh <- entry:
 		case <-n.stopCh:
@@ -395,14 +421,16 @@ func (n *Node) handlePropose(cmd command) {
 		return
 	}
 
-	idx := uint64(len(n.st.log)) + 1
+	idx := n.st.log.LastIndex() + 1
 	entry := LogEntry{
 		Term:    n.st.currentTerm,
 		Index:   idx,
 		Command: cmd.proposeCommand,
 		Type:    cmd.proposeType,
 	}
-	n.st.log = append(n.st.log, entry)
+	if err := n.st.log.Append([]LogEntry{entry}); err != nil {
+		panic("raftv2: Append: " + err.Error())
+	}
 
 	// Single-voter shortcut: self-quorum is met by appending.
 	if len(n.cfg.Peers) == 0 {
@@ -523,11 +551,13 @@ func (n *Node) becomeLeader() {
 	// side effect once the no-op's commit advances the commit index. FSM
 	// consumers MUST ignore LogEntryNoOp entries (Command is always nil).
 	noOpIdx := n.st.lastLogIndex() + 1
-	n.st.log = append(n.st.log, LogEntry{
+	if err := n.st.log.Append([]LogEntry{{
 		Term:  n.st.currentTerm,
 		Index: noOpIdx,
 		Type:  LogEntryNoOp,
-	})
+	}}); err != nil {
+		panic("raftv2: Append no-op: " + err.Error())
+	}
 
 	// Initialise per-peer replication state per Raft §5.3: nextIndex starts
 	// at lastLogIndex+1 (optimistic — assume peer is in sync), matchIndex
@@ -623,7 +653,7 @@ func (n *Node) buildAppendEntriesArgs(peer string) *AppendEntriesArgs {
 		next = 1 // defensive: nextIndex is 1-based
 	}
 	prevIdx := next - 1
-	prevTerm := n.st.lastLogTermAt(prevIdx)
+	prevTerm := n.mustTermAt(prevIdx)
 	var entries []LogEntry
 	if last := n.st.lastLogIndex(); last >= next {
 		// Cap the batch to cfg.MaxEntriesPerAE so we never attempt to ship the
@@ -633,13 +663,13 @@ func (n *Node) buildAppendEntriesArgs(peer string) *AppendEntriesArgs {
 		if maxAE == 0 {
 			maxAE = defaultMaxEntriesPerAE
 		}
-		// Copy to defend against concurrent log truncation (see PR 6b note above).
-		src := n.st.log[next-1:]
-		if uint64(len(src)) > maxAE {
-			src = src[:maxAE]
+		// EntriesFrom returns a copy, defending against concurrent log truncation
+		// (see PR 6b note above). The memLogStore copy cost is bounded by maxAE.
+		var err error
+		entries, err = n.st.log.EntriesFrom(next, int(maxAE))
+		if err != nil {
+			panic("raftv2: EntriesFrom: " + err.Error())
 		}
-		entries = make([]LogEntry, len(src))
-		copy(entries, src)
 	}
 	return &AppendEntriesArgs{
 		Term:         n.st.currentTerm,
@@ -797,25 +827,26 @@ func (n *Node) applyConflictHint(cmd command) {
 	// log (leader-driven append + truncate-on-conflict preserves this invariant),
 	// so binary search is correct.
 	//
-	// Strategy: find the first index where term > ConflictTerm; the entry just
-	// before it (if its term == ConflictTerm) is the rightmost match.
-	// This replaces the O(N) backward scan with O(log N) — critical for large
-	// logs where a stale follower's reject would otherwise block the actor.
+	// Strategy: find the first 1-based logical index where term > ConflictTerm;
+	// the entry just before it (if its term == ConflictTerm) is the rightmost
+	// match. This replaces the O(N) backward scan with O(log N).
 	newNext := cmd.hbConflictIndex
-	log := n.st.log
-	if len(log) > 0 {
-		// firstGT = first slice index where term > ConflictTerm.
-		firstGT := sort.Search(len(log), func(i int) bool {
-			return log[i].Term > cmd.hbConflictTerm
+	last := n.st.lastLogIndex()
+	if last > 0 {
+		// sort.Search over [0, last): i maps to logical index i+1.
+		// firstGT = first slice-index (0-based) where term > ConflictTerm.
+		firstGT := sort.Search(int(last), func(i int) bool {
+			return n.mustTermAt(uint64(i)+1) > cmd.hbConflictTerm
 		})
-		// firstGT-1 is the last index with term <= ConflictTerm.
-		if firstGT > 0 && log[firstGT-1].Term == cmd.hbConflictTerm {
-			// Leader has ConflictTerm; advance past its last entry.
-			newNext = uint64(firstGT) + 1 // logical index = firstGT+1, nextIndex = logical+1
+		// firstGT-1 (slice) → logical index firstGT → the last entry ≤ ConflictTerm.
+		if firstGT > 0 && n.mustTermAt(uint64(firstGT)) == cmd.hbConflictTerm {
+			// Leader has ConflictTerm; advance nextIndex past its last entry.
+			// logical index of last ConflictTerm entry = firstGT; nextIndex = firstGT+1.
+			newNext = uint64(firstGT) + 1
 		}
-		// else: either firstGT==0 (all entries > ConflictTerm, leader never had
-		// it) or firstGT-1 has a term < ConflictTerm (same conclusion). Fall
-		// back to hbConflictIndex (already set above).
+		// else: firstGT==0 (all entries > ConflictTerm) or the entry at firstGT
+		// has term < ConflictTerm (leader never had ConflictTerm). Fall back to
+		// hbConflictIndex (already set above).
 	}
 	if newNext < 1 {
 		newNext = 1
@@ -837,7 +868,7 @@ func (n *Node) maybeAdvanceCommitIndex() {
 	newCommit := n.st.commitIndex
 	for N := last; N > n.st.commitIndex; N-- {
 		// §5.4.2 term gate: only commit entries from the current term directly.
-		if n.st.log[N-1].Term != n.st.currentTerm {
+		if n.mustTermAt(N) != n.st.currentTerm {
 			continue
 		}
 		// Self counts as matched at lastLogIndex (we definitionally have N

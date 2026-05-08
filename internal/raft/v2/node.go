@@ -94,7 +94,7 @@ func NewNode(cfg Config) *Node {
 		st: actorState{
 			id:    cfg.ID,
 			state: Follower,
-			log:   make([]LogEntry, 0),
+			log:   newMemLogStore(),
 		},
 		// Per-Node rng seeded with current time + ID hash so two Nodes started
 		// in the same nanosecond still draw different timeouts. Sole user is

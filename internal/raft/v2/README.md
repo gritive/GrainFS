@@ -75,7 +75,9 @@ and the only caller of `publish`. Readers never touch `actorState`.
 | Log Matching e.Index validation | ✅ | PR 8 |
 | Conflict-hint O(log N) binary search | ✅ | PR 8 |
 | Membership change (AddVoter / RemoveVoter / etc.) | ⏳ stub | M2 |
-| Persistence (LogStore) | ⏳ | M2 |
+| LogStore interface (in-memory backing) | ✅ | PR 9 |
+| LogStore persistence (BadgerDB backing) | ⏳ | PR 10 |
+| Crash-recovery wiring (LogStore → replay) | ⏳ | PR 11 |
 | Snapshots | ⏳ | M2 |
 | Joint consensus (§4.3) | ⏳ | M2 |
 | ReadIndex linearizable reads | ⏳ | M2 |
@@ -100,6 +102,16 @@ then remaining packages, and finally `internal/raft` (v1) is deleted and
 the `v2` import path is renamed to take its place. Until then, any
 changes to the external API in v2 are independent of v1 and do not
 affect production.
+
+## LogStore
+
+`LogStore` (defined in `logstore.go`) is the interface through which the actor
+goroutine reads and writes the Raft log. The current implementation is
+`memLogStore` — an in-memory slice owned exclusively by the actor goroutine
+(no locking needed). PR 10 adds a `badgerLogStore` backed by BadgerDB for
+durability; PR 11 wires crash-recovery (replay from `applied+1` to
+`commitIndex` on restart). Callers of `Node` do not interact with `LogStore`
+directly; it is an implementation detail of the actor.
 
 ## Read this if you're touching this package
 
