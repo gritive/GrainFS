@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.105.0] - 2026-05-08 — LifecycleManager subscribes to raft leader events
+
+### Changed
+
+- `LifecycleManager` no longer polls `raft.Node.State()` every 250ms to
+  decide whether to run the worker. It registers a `raft.Event` channel
+  via `RegisterObserver` and reacts to `EventLeaderChange` events as they
+  arrive. The eager `reconcile` at startup is preserved so a node that is
+  already leader picks up the worker without waiting for the next event.
+  Net effect: leader-flip latency drops from up to 250ms to next-event
+  delivery (~heartbeat interval), and idle followers no longer wake every
+  250ms.
+- The internal `leadershipSource` interface gains
+  `RegisterObserver(chan<- raft.Event)` and `DeregisterObserver(chan<-
+  raft.Event)`. `*raft.Node` already implements these from
+  `internal/raft/observer.go`. The `pollEvery` field on the manager is
+  removed.
+- Test fake `fakeLeadership` was updated to mirror real `*raft.Node`
+  semantics: `set(state)` records the state and emits an
+  `EventLeaderChange` event to every registered observer, so the existing
+  Follower→Leader→Follower test driving still works without polling.
+- New tests verify observer registration/deregistration on Run lifecycle
+  and that non-leader-change events (e.g. `EventFailedHeartbeat`) do not
+  trigger reconcile.
+
 ## [0.0.104.0] - 2026-05-08 — wire NFSv4 cache invalidator into cluster registry
 
 ### Fixed
