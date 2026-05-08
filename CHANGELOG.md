@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.0.122.0] - 2026-05-08 — raft v2: per-peer single-flight + Stop-race refactor (PR 13)
+
+### Changed
+
+- `internal/raft/v2/state.go`: added `peerInFlight map[string]bool` to
+  `actorState`. Tracks whether an AppendEntries goroutine is currently in
+  flight for each peer. Leader-only state: allocated in `becomeLeader`,
+  cleared in `stepDownToFollower`.
+- `broadcastHeartbeat` and the multi-voter dispatch loop in `handlePropose`
+  now skip peers with `peerInFlight[peer] == true` and set the flag to `true`
+  before spawning `go dispatchAppendEntries`. Without this gate, every
+  heartbeat tick spawns a new goroutine per peer while old ones block on a
+  hung/partitioned transport — O(ticks × peers) goroutines accumulate until
+  OOM or scheduler thrash.
+- `handleHeartbeatReply` clears `peerInFlight[peer]`, gated on
+  `cmd.hbDispatchTerm == n.st.currentTerm` so a goroutine from a prior
+  leader term (step-down → re-election → stale return) cannot corrupt the
+  fresh term's gate.
+- New `command.hbDispatchTerm uint64` captures the term at dispatch time.
+- `dispatchAppendEntries` sends a synthetic error reply when
+  `loadTransport()` returns nil so the gate clears even on the
+  transport-misconfigured path. Without this, peerInFlight stays true
+  forever and the leader silently stops dispatching.
+- `applyCommitted` refactored: `commitIndex` is now advanced per-entry
+  inside the loop (after each successful `applyCh` send) instead of via
+  end-of-loop set + Stop-race rollback. The post-condition is identical
+  to the previous rollback path; the per-entry pattern just makes the
+  invariant ("commitIndex tracks delivered entries exactly") obvious in
+  the code.
+
+### Notes
+
+- Two new tests in `replication_test.go`:
+  - `TestSingleFlight_PartitionedPeerNoGoroutineLeak`: 3-voter cluster
+    with a blocking transport on one peer; counter-based assertion that
+    max-concurrent dispatches per peer ≤ 1.
+  - `TestApplyCommitted_StopRaceLeavesCommitIndexConsistent`: two
+    subtests — `ZeroDeliveries` (pre-closed stopCh wins first send) and
+    `PartialDelivery` (consumer goroutine reads K=3 then closes stopCh,
+    asserts `commitIndex == K`).
+- All 60+ tests pass under `-race -count=10` (~40s; 2× consecutive runs
+  verified stable).
+- 1 of 7 raft v2 follow-up TODOs from M1 adversarial review remains:
+  cmdCh backpressure cascade (#3) — structural, separate apply
+  goroutine, deferred to dedicated PR.
+
 ## [0.0.121.0] - 2026-05-08 — serveruntime boot decomposition PR 2: config + storage phases (6 of ~20)
 
 ### Refactored

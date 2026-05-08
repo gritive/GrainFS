@@ -1,6 +1,7 @@
 package raftv2
 
 import (
+	"fmt"
 	"sort"
 	"time"
 )
@@ -64,8 +65,13 @@ type command struct {
 	// the leader uses it to advance matchIndex[peer] on success.
 	// hbConflictTerm/hbConflictIndex carry the follower's conflict hint on
 	// failure (PR 6b); zero when unset.
+	// hbDispatchTerm captures args.Term at dispatch time so handleHeartbeatReply
+	// can detect stale replies from a previous leader term (leader churn scenario:
+	// step-down → re-election → old goroutine returns with stale term → must not
+	// clear the fresh peerInFlight entry allocated by the new leader term).
 	hbPeer          string
 	hbTerm          uint64
+	hbDispatchTerm  uint64
 	hbSuccess       bool
 	hbMatchAfter    uint64
 	hbConflictTerm  uint64
@@ -390,16 +396,24 @@ func (n *Node) handleAppendEntries(cmd command) {
 // proposeWaiters. Caller is the actor goroutine. Both leader and follower
 // reuse this path; the only difference is that leaders also have waiters to
 // drain, while followers (proposeWaiters always nil for non-Leader) skip.
+//
+// commitIndex is advanced per-entry inside the loop so that a Stop mid-iteration
+// leaves commitIndex at the last fully-delivered entry (not rolled back). Entries
+// that didn't get through will be re-delivered on restart via the next leader's
+// AE (LeaderCommit > local commitIndex triggers replay). The leader's view of
+// our matchIndex is unaffected: matchIndex already advanced via prior successful
+// replies, so quorum math remains correct.
 func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
 	for i := oldCommit + 1; i <= newCommit; i++ {
 		entry := n.mustEntry(i)
 		select {
 		case n.applyCh <- entry:
 		case <-n.stopCh:
-			// Stop won the race — leave commitIndex at the highest value we
-			// successfully delivered. Mirrors the single-voter path's behaviour
-			// at handlePropose.
-			n.st.commitIndex = i - 1
+			// Stop won the race. commitIndex stays at the last fully-delivered
+			// entry's index (set by the previous iteration via the per-entry
+			// advance below). Entries that didn't get through will be
+			// re-delivered after restart via the next leader's AE — leader's
+			// LeaderCommit > our commitIndex triggers the replay path.
 			return
 		}
 		if w, ok := n.st.proposeWaiters[i]; ok {
@@ -410,8 +424,10 @@ func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
 			default:
 			}
 		}
+		// Advance commitIndex after each successful delivery so Stop mid-iteration
+		// leaves commitIndex at the last fully-delivered entry.
+		n.st.commitIndex = i
 	}
-	n.st.commitIndex = newCommit
 }
 
 // handlePropose appends the proposed command to the in-memory log and either
@@ -455,9 +471,9 @@ func (n *Node) handlePropose(cmd command) {
 		}
 		n.applyCommitted(n.st.commitIndex, idx)
 		n.publish()
-		// applyCommitted may rollback commitIndex on Stop race; if so the
-		// proposeWaiter never fires. Caller's ProposeWait handles that via
-		// its own ctx/stopCh select (propose.go:48-58).
+		// On Stop mid-delivery, applyCommitted leaves commitIndex at the last
+		// fully-delivered entry. If the proposeWaiter never fires, ProposeWait
+		// handles that via its own ctx/stopCh select (propose.go:48-58).
 		return
 	}
 
@@ -473,7 +489,11 @@ func (n *Node) handlePropose(cmd command) {
 	n.publish()
 
 	for _, peer := range n.cfg.Peers {
+		if n.st.peerInFlight[peer] {
+			continue
+		}
 		args := n.buildAppendEntriesArgs(peer)
+		n.st.peerInFlight[peer] = true
 		go n.dispatchAppendEntries(peer, args)
 	}
 }
@@ -580,6 +600,7 @@ func (n *Node) becomeLeader() {
 	last := n.st.lastLogIndex()
 	n.st.matchIndex = make(map[string]uint64, len(n.cfg.Peers))
 	n.st.nextIndex = make(map[string]uint64, len(n.cfg.Peers))
+	n.st.peerInFlight = make(map[string]bool, len(n.cfg.Peers))
 	for _, peer := range n.cfg.Peers {
 		n.st.matchIndex[peer] = 0
 		n.st.nextIndex[peer] = last + 1
@@ -636,6 +657,7 @@ func (n *Node) stepDownToFollower(term uint64) {
 		n.st.matchIndex = nil
 		n.st.nextIndex = nil
 		n.st.proposeWaiters = nil
+		n.st.peerInFlight = nil
 	}
 	n.st.currentTerm = term
 	n.st.state = Follower
@@ -660,9 +682,19 @@ func (n *Node) becomeFollower(term uint64) {
 // the heartbeat and replication paths: each per-peer message carries entries
 // log[nextIndex[peer]..lastLogIndex] (possibly empty when the peer is fully
 // caught up — that's the heartbeat case). Caller must already be Leader.
+//
+// Per-peer single-flight gate: if an AE goroutine is already in flight for a
+// peer (peerInFlight[peer] == true), skip that peer. This prevents goroutine
+// accumulation when the transport is slow or partitioned — without the gate,
+// every heartbeat tick would spawn a new goroutine while old ones block on the
+// dead transport.
 func (n *Node) broadcastHeartbeat() {
 	for _, peer := range n.cfg.Peers {
+		if n.st.peerInFlight[peer] {
+			continue
+		}
 		args := n.buildAppendEntriesArgs(peer)
+		n.st.peerInFlight[peer] = true
 		go n.dispatchAppendEntries(peer, args)
 	}
 }
@@ -735,23 +767,29 @@ func (n *Node) sendRequestVote(peer string, args *RequestVoteArgs) {
 // the per-peer view. Select-on-stopCh prevents goroutine leaks when the
 // actor exits while a transport call is in flight.
 func (n *Node) dispatchAppendEntries(peer string, args *AppendEntriesArgs) {
+	matchAfter := args.PrevLogIndex + uint64(len(args.Entries))
+	c := command{
+		kind:           cmdHeartbeatReply,
+		hbPeer:         peer,
+		hbMatchAfter:   matchAfter,
+		hbDispatchTerm: args.Term,
+	}
 	t := n.loadTransport()
 	if t == nil {
-		return
-	}
-	matchAfter := args.PrevLogIndex + uint64(len(args.Entries))
-	reply, err := t.SendAppendEntries(peer, args)
-	c := command{
-		kind:         cmdHeartbeatReply,
-		hbPeer:       peer,
-		hbErr:        err,
-		hbMatchAfter: matchAfter,
-	}
-	if err == nil && reply != nil {
-		c.hbTerm = reply.Term
-		c.hbSuccess = reply.Success
-		c.hbConflictTerm = reply.ConflictTerm
-		c.hbConflictIndex = reply.ConflictIndex
+		// No transport configured (test setup, or pre-SetTransport call). Send
+		// a synthetic error reply so handleHeartbeatReply clears peerInFlight
+		// — otherwise the gate stays true forever and the leader silently
+		// stops dispatching to this peer on every subsequent heartbeat.
+		c.hbErr = fmt.Errorf("raftv2: no transport configured")
+	} else {
+		reply, err := t.SendAppendEntries(peer, args)
+		c.hbErr = err
+		if err == nil && reply != nil {
+			c.hbTerm = reply.Term
+			c.hbSuccess = reply.Success
+			c.hbConflictTerm = reply.ConflictTerm
+			c.hbConflictIndex = reply.ConflictIndex
+		}
 	}
 	select {
 	case n.cmdCh <- c:
@@ -794,6 +832,16 @@ func (n *Node) handleVoteReply(cmd command) {
 //     applyConflictHint at raft.go:1561-1594).
 //   - Failure without hint → conservative decrement-by-one (legacy peers).
 func (n *Node) handleHeartbeatReply(cmd command) {
+	// Clear the per-peer in-flight gate so the next heartbeat tick can retry.
+	// Gate on (state == Leader && same dispatch term): a reply from a goroutine
+	// dispatched in a previous leader term (leader churn: step-down → re-election
+	// → stale goroutine finally returns) must NOT clear the fresh entry set by
+	// the new term's broadcastHeartbeat, or it would open a slot for a duplicate
+	// in-flight goroutine. Transport errors also clear the gate so the next tick
+	// can retry a partitioned peer.
+	if n.st.state == Leader && n.st.peerInFlight != nil && cmd.hbDispatchTerm == n.st.currentTerm {
+		n.st.peerInFlight[cmd.hbPeer] = false
+	}
 	if cmd.hbErr != nil {
 		return
 	}
