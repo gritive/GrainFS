@@ -132,19 +132,15 @@ func TestMutationBrokerPreservesRegistrationOrder(t *testing.T) {
 	}
 }
 
-func TestMetricsObserverWriteUpdatesGauges(t *testing.T) {
-	// Snapshot current metric values, run observer, assert delta.
-	// recordObjectWriteMetrics already has coverage in handlers_test.go;
-	// here we only verify the observer correctly delegates to it.
-	prev := storage.PreviousObject{} // fresh write, no previous
+func TestMetricsObserverWriteDoesNotPanic(t *testing.T) {
+	// Smoke test: observer correctly delegates to recordObjectWriteMetrics
+	// without panicking. Pure-delta correctness is covered by
+	// object_metrics_test.go (objectWriteMetricDelta tests). End-to-end
+	// gauge mutation is exercised by handler-level integration tests.
 	res := &storage.PutObjectResult{
-		Object:   storage.ObjectFacts{Size: 100},
-		Previous: prev,
+		Object: storage.ObjectFacts{Size: 100},
 	}
 	obs := newMetricsObserver()
-	// Capturing exact gauge values requires reading from prometheus; instead
-	// verify the call does not panic and returns. Behavioural correctness
-	// is covered by existing helpers_test.go::TestObjectWriteMetricDelta.
 	obs.OnObjectWrite(context.Background(), "b", "k", res)
 }
 
