@@ -23,9 +23,13 @@ const (
 
 // Channel sizing constants. cmdCh follows v1's proposalCh-style buffering for
 // burst tolerance; applyCh mirrors v1's 64-entry buffer (internal/raft/raft.go:409).
+// applyInChBuffer absorbs scheduling jitter between actor's enqueue and applyLoop's
+// dequeue; the unbounded buf-in-goroutine inside applyLoop handles sustained slow
+// FSM consumers without back-pressuring the actor.
 const (
-	cmdChBuffer   = 256
-	applyChBuffer = 64
+	cmdChBuffer     = 256
+	applyChBuffer   = 64
+	applyInChBuffer = 256
 )
 
 // Node is a single Raft consensus node, actor-pattern edition. The public
@@ -43,8 +47,22 @@ type Node struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 
-	// applyCh delivers committed entries to the FSM consumer.
+	// applyCh delivers committed entries to the FSM consumer. Owned by the
+	// applyLoop goroutine; closed by applyLoop on shutdown after draining.
 	applyCh chan LogEntry
+
+	// applyInCh is the actor → applyLoop pipeline. The actor enqueues every
+	// committed entry here; the applyLoop forwards to applyCh from an
+	// unbounded in-goroutine buffer. This decouples actor liveness from FSM
+	// consumer speed (TODO raft/v2: cmdCh backpressure cascade): a slow FSM
+	// can no longer wedge the actor's applyCh send → applyCommitted →
+	// AE/heartbeat handling → cascade to election storms.
+	applyInCh chan LogEntry
+
+	// applyDoneCh is closed when the applyLoop goroutine exits. Stop waits
+	// on it after doneCh so callers can rely on applyCh being closed before
+	// Stop returns.
+	applyDoneCh chan struct{}
 
 	// Actor-owned mutable state. Access is single-goroutine by construction;
 	// no locking. Public methods MUST NOT touch st directly.
@@ -129,6 +147,8 @@ func NewNode(cfg Config) (*Node, error) {
 		stopCh:          make(chan struct{}),
 		doneCh:          make(chan struct{}),
 		applyCh:         make(chan LogEntry, applyChBuffer),
+		applyInCh:       make(chan LogEntry, applyInChBuffer),
+		applyDoneCh:     make(chan struct{}),
 		stable:          stable,
 		lastPersistedHS: hs,
 		st: actorState{
@@ -171,20 +191,27 @@ func hashID(id string) uint32 {
 	return h
 }
 
-// Start launches the actor goroutine. Safe to call exactly once per Node.
+// Start launches the actor and applyLoop goroutines. Safe to call exactly once.
 func (n *Node) Start() {
 	go n.run()
+	go n.applyLoop()
 }
 
 // Stop signals the actor to exit and waits for it to finish. Safe to call
 // multiple times; subsequent calls are no-ops. Timer cleanup happens inside
 // run() (via defer) once the actor observes stopCh; doing it here would race
 // with concurrent timer Reset calls inside the actor.
+//
+// Lifecycle ordering: doneCh closes first (actor exit + close(applyInCh)),
+// then applyLoop drains its buffer to applyCh and exits, closing applyDoneCh
+// + applyCh. Callers that want a guarantee that applyCh has been closed by
+// the time Stop returns can rely on this ordering.
 func (n *Node) Stop() {
 	n.stopOnce.Do(func() {
 		close(n.stopCh)
 	})
 	<-n.doneCh
+	<-n.applyDoneCh
 }
 
 // ID returns the node's configured ID. Immutable post-construction.
