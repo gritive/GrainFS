@@ -199,11 +199,6 @@ func (h *iamTestHelper) applyKeyCreate(t *testing.T, ak, saID, secret string) {
 	require.NoError(t, h.applier.ApplyKeyCreate(b.FinishedBytes()))
 }
 
-func (h *iamTestHelper) applyAuthEnable(t *testing.T) {
-	t.Helper()
-	require.NoError(t, h.applier.ApplyAuthEnable(nil))
-}
-
 // TestAuthz_Layer0_ScopeMismatch_403 verifies that a scoped key targeting a
 // bucket outside its scope is denied at Layer 0 with reason "key_scope_mismatch".
 func TestAuthz_Layer0_ScopeMismatch_403(t *testing.T) {
@@ -216,7 +211,6 @@ func TestAuthz_Layer0_ScopeMismatch_403(t *testing.T) {
 	h.applyGrantPut(t, "sa-alice", "logs", iam.RoleAdmin)
 	// Key is scoped only to "logs".
 	h.applyKeyCreateScoped(t, "AK-scoped", "sa-alice", "secret123", []string{"logs"})
-	h.applyAuthEnable(t)
 
 	base := setupTestServerWithOptions(t,
 		WithIAMStore(h.store),
@@ -249,7 +243,6 @@ func TestAuthz_Layer0_ScopeMatch_PassToLayer1(t *testing.T) {
 	h.applyGrantPut(t, "sa-alice", "logs", iam.RoleAdmin)
 	// Key scoped to "logs".
 	h.applyKeyCreateScoped(t, "AK-scoped", "sa-alice", "secret123", []string{"logs"})
-	h.applyAuthEnable(t)
 
 	base := setupTestServerWithOptions(t,
 		WithIAMStore(h.store),
@@ -282,7 +275,6 @@ func TestAuthz_Layer0_NilScope_PassToLayer1(t *testing.T) {
 	h.applyGrantWildcardPut(t, "sa-legacy", iam.RoleAdmin)
 	// Legacy key with nil scope.
 	h.applyKeyCreate(t, "AK-legacy", "sa-legacy", "secret456")
-	h.applyAuthEnable(t)
 
 	base := setupTestServerWithOptions(t,
 		WithIAMStore(h.store),
@@ -316,8 +308,6 @@ func TestListBuckets_ScopedKey_FiltersToScope(t *testing.T) {
 	// Alice: grant on bucket "alpha" only, scoped key to ["alpha"].
 	h.applyGrantPut(t, "sa-alice", "alpha", iam.RoleAdmin)
 	h.applyKeyCreateScoped(t, "AK-alice", "sa-alice", "aliceSecret", []string{"alpha"})
-
-	h.applyAuthEnable(t)
 
 	base := setupTestServerWithOptions(t,
 		WithIAMStore(h.store),

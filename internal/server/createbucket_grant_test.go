@@ -37,7 +37,9 @@ func (m *mockIAMProposer) ProposeGrantWildcardPut(_ context.Context, _ iam.Grant
 func (m *mockIAMProposer) ProposeGrantWildcardDelete(_ context.Context, _ string) error {
 	return nil
 }
-func (m *mockIAMProposer) ProposeAuthEnable(_ context.Context) error { return nil }
+func (m *mockIAMProposer) ProposeInitFirstSA(_ context.Context, _ iam.ServiceAccount, _ iam.AccessKey, _ iam.Grant) error {
+	return nil
+}
 
 func TestIssueCreatorGrant(t *testing.T) {
 	tests := []struct {

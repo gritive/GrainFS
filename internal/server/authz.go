@@ -59,19 +59,22 @@ func s3ActionEnum(method, path string, hasKey, hasPolicyQuery bool) s3auth.S3Act
 // access. Must run after authMiddleware (which sets the access key and
 // IAM principal in context).
 //
-// Two layers, evaluated in order:
-//  1. IAM grant (only when iamStore.AuthEnabled() is sticky-on). Looks up
-//     (sa_id, bucket) → role and the role's permission for the requested
-//     S3 action. Deny → 403, audited as deny+no_grant.
-//  2. Bucket policy (always, as second layer). Existing s.policyStore.Allow
-//     can further restrict what IAM permits but cannot loosen it. Deny → 403,
+// Layers, evaluated in order:
+//  0. AccessKey bucket scope (only when IAM is wired). scope =
+//     key.BucketScope. nil/empty → unrestricted (legacy keys). non-empty
+//     → bucket must be a member.
+//  1. IAM grant (only when IAM is wired). Looks up (sa_id, bucket) →
+//     role and the role's permission for the requested S3 action.
+//     Deny → 403, audited as deny+no_grant.
+//  2. Bucket policy (always). Existing s.policyStore.Allow can further
+//     restrict what IAM permits but cannot loosen it. Deny → 403,
 //     audited as deny+policy_deny.
 //
-// Allow → audit allow, then forward.
+// Allow → audit allow (when IAM is wired), then forward.
 //
-// In anonymous mode (iamStore.AuthEnabled() == false), the IAM layer is
-// skipped and only the bucket policy applies — this preserves the v0.0.92
-// behavior for clusters that haven't enabled IAM.
+// Production wires IAM unconditionally (v0.0.107.0+). The iamStore!=nil
+// guard exists so unit tests targeting non-auth concerns can still drive
+// the server with no IAM wiring.
 func (s *Server) authzMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		path := string(c.URI().Path())
@@ -101,26 +104,22 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
-		// Hoist AuthEnabled: computed once, used across all layers below.
-		authEnabled := s.iamStore != nil && s.iamStore.AuthEnabled()
+		saID := iam.PrincipalFromContext(ctx)
 
-		// Layer 0: AccessKey bucket scope (only when auth is enabled).
-		// scope = key.BucketScope. nil/empty → unrestricted (legacy keys,
-		// backward compat). non-empty → bucket must be a member.
-		if authEnabled {
+		// Layers 0 and 1 only run when IAM is wired (production: always).
+		if s.iamStore != nil {
+			// Layer 0: AccessKey bucket scope. scope = key.BucketScope.
+			// nil/empty → unrestricted (legacy keys, backward compat).
+			// non-empty → bucket must be a member.
 			scope := iam.ScopeFromContext(ctx)
 			if !iam.ScopeAllows(scope, bucket) {
-				saID := iam.PrincipalFromContext(ctx)
 				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "key_scope_mismatch")
 				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access key scope denies this bucket")
 				c.Abort()
 				return
 			}
-		}
 
-		// Layer 1: IAM grant (only when auth is enabled).
-		if authEnabled {
-			saID := iam.PrincipalFromContext(ctx)
+			// Layer 1: IAM grant.
 			if !iam.CheckAccess(s.iamStore, saID, bucket, action) {
 				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "no_grant")
 				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "IAM grant denies this action")
@@ -141,7 +140,6 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 				Action:    action,
 			}
 			if !s.policyStore.Allow(ctx, in) {
-				saID := iam.PrincipalFromContext(ctx)
 				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "policy_deny")
 				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "bucket policy denies this action")
 				c.Abort()
@@ -150,8 +148,8 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		}
 
 		// Allow.
-		if authEnabled {
-			s.iamAudit.RecordAllow(ctx, iam.PrincipalFromContext(ctx), bucket, key, action)
+		if s.iamStore != nil {
+			s.iamAudit.RecordAllow(ctx, saID, bucket, key, action)
 		}
 		c.Next(ctx)
 	}
