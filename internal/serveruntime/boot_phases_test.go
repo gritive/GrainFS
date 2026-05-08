@@ -1,0 +1,245 @@
+package serveruntime
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgerrole"
+)
+
+// TestBootValidateConfig_AutogeneratesNodeID exercises the path where cfg has
+// no nodeID. GenerateNodeID writes a node-id file in dataDir as a side effect.
+func TestBootValidateConfig_AutogeneratesNodeID(t *testing.T) {
+	dir := t.TempDir()
+	state := newBootState(Config{DataDir: dir})
+
+	require.NoError(t, bootValidateConfig(state))
+	assert.NotEmpty(t, state.nodeID, "auto-generated node ID must be set")
+	assert.Equal(t, "127.0.0.1:0", state.raftAddr, "no peers, no raft-addr → loopback default")
+	assert.False(t, state.clusterMode)
+	assert.Equal(t, filepath.Join(dir, "meta"), state.metaDir)
+	assert.Equal(t, filepath.Join(dir, "raft"), state.raftDir)
+}
+
+// TestBootValidateConfig_JoinWithoutRaftAddr — invariant from run.go that
+// --join requires --raft-addr; bootValidateConfig surfaces the error before
+// any I/O so cmd/serve fails fast.
+func TestBootValidateConfig_JoinWithoutRaftAddr(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", JoinMode: true, ClusterKey: "x"})
+
+	err := bootValidateConfig(state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--raft-addr is required when --join is set")
+}
+
+// TestBootValidateConfig_JoinAndPeersConflict — --join and --peers cannot
+// coexist; bootValidateConfig rejects.
+func TestBootValidateConfig_JoinAndPeersConflict(t *testing.T) {
+	state := newBootState(Config{
+		DataDir:    t.TempDir(),
+		NodeID:     "n1",
+		RaftAddr:   "127.0.0.1:9000",
+		JoinMode:   true,
+		Peers:      []string{"p1"},
+		ClusterKey: "x",
+	})
+
+	err := bootValidateConfig(state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--join cannot be used with --peers")
+}
+
+// TestBootValidateConfig_PeersWithoutRaftAddr — explicit cluster mode with
+// peers requires raftAddr. bootValidateConfig rejects with a helpful message.
+func TestBootValidateConfig_PeersWithoutRaftAddr(t *testing.T) {
+	state := newBootState(Config{
+		DataDir:    t.TempDir(),
+		NodeID:     "n1",
+		Peers:      []string{"p1"},
+		ClusterKey: "x",
+	})
+
+	err := bootValidateConfig(state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--raft-addr is required when --peers is set")
+}
+
+// TestBootAutoMigrate_NoOpOnFreshDir — empty dataDir means no legacy meta
+// to migrate; bootAutoMigrate returns silently.
+func TestBootAutoMigrate_NoOpOnFreshDir(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+
+	require.NoError(t, bootAutoMigrate(state), "fresh dataDir is a no-op")
+	_, err := os.Stat(state.raftDir)
+	assert.True(t, os.IsNotExist(err), "auto-migrate must not create raftDir on a no-op")
+}
+
+// TestBootAutoMigrate_NoOpWhenRaftDirAlreadyExists — once raftDir exists the
+// layout is already cluster-format; auto-migrate must not run again.
+func TestBootAutoMigrate_NoOpWhenRaftDirAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "raft"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta"), 0o755))
+	// Drop a sentinel into meta to prove migrate did NOT touch it.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta", "marker"), []byte("untouched"), 0o644))
+
+	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+	require.NoError(t, bootAutoMigrate(state))
+
+	contents, err := os.ReadFile(filepath.Join(dir, "meta", "marker"))
+	require.NoError(t, err)
+	assert.Equal(t, "untouched", string(contents), "raftDir present → migrate is no-op")
+}
+
+// TestBootAutoMigrate_NoOpWhenMetaDirEmpty — raftDir absent + metaDir empty
+// is a fresh deploy, not a legacy layout. No migration.
+func TestBootAutoMigrate_NoOpWhenMetaDirEmpty(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta"), 0o755))
+
+	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+	require.NoError(t, bootAutoMigrate(state))
+}
+
+// TestBootOpenMetaDB_CreatesAndOpens — happy path: fresh dataDir; phase
+// creates metaDir, opens BadgerDB, registers cleanups, runs preflight.
+// Verifies state fields are set and cleanup tears down without error.
+func TestBootOpenMetaDB_CreatesAndOpens(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+
+	require.NoError(t, bootOpenMetaDB(state))
+	require.NotNil(t, state.db, "state.db populated after bootOpenMetaDB")
+	require.NotEmpty(t, state.startupDecisions, "preflight decision recorded")
+	assert.Equal(t, badgerrole.RoleMeta, state.startupDecisions[0].Role)
+	assert.Equal(t, badgerrole.DecisionOK, state.startupDecisions[0].Status)
+
+	// Cleanup must close the DB cleanly. Calling Cleanup twice is safe.
+	state.Cleanup()
+	state.Cleanup()
+}
+
+// TestBootValidateTimings_RejectsTooFastElection — election timeout below
+// 3× heartbeat is rejected (Raft §5.2 timing requirement).
+func TestBootValidateTimings_RejectsTooFastElection(t *testing.T) {
+	state := newBootState(Config{
+		RaftHeartbeatInterval: 100 * time.Millisecond,
+		RaftElectionTimeout:   200 * time.Millisecond, // < 3× hb
+	})
+	err := bootValidateTimings(state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be >= 3")
+}
+
+// TestBootValidateTimings_RejectsFlushNotMuchSmallerThanHeartbeat — quic mux
+// flush window must be << raft heartbeat for hb to dispatch on time.
+func TestBootValidateTimings_RejectsFlushNotMuchSmallerThanHeartbeat(t *testing.T) {
+	state := newBootState(Config{
+		QUICMuxEnabled:        true,
+		QUICMuxFlushWindow:    100 * time.Millisecond,
+		RaftHeartbeatInterval: 100 * time.Millisecond, // not <<
+	})
+	err := bootValidateTimings(state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be <<")
+}
+
+// TestBootValidateTimings_AcceptsValidConfig — happy path: 200ms hb +
+// 1s election + 2ms flush satisfies all three bounds.
+func TestBootValidateTimings_AcceptsValidConfig(t *testing.T) {
+	state := newBootState(Config{
+		QUICMuxEnabled:        true,
+		QUICMuxFlushWindow:    2 * time.Millisecond,
+		RaftHeartbeatInterval: 200 * time.Millisecond,
+		RaftElectionTimeout:   1 * time.Second,
+	})
+	assert.NoError(t, bootValidateTimings(state))
+}
+
+// TestBootOpenRaftLogStore_OpensAndAppendsManagedMode — phase opens the raft
+// log store and propagates BadgerManagedMode via state.storeOpts so later
+// shared-log opens (run.go fan-out) reuse the same option set.
+func TestBootOpenRaftLogStore_OpensAndAppendsManagedMode(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", BadgerManagedMode: true})
+	require.NoError(t, bootValidateConfig(state))
+
+	require.NoError(t, bootOpenRaftLogStore(state))
+	require.NotNil(t, state.logStore)
+	assert.NotEmpty(t, state.storeOpts, "BadgerManagedMode must surface as a storeOpt for fan-out reuse")
+
+	// Last decision is the raft-log role; verify ordering invariant.
+	last := state.startupDecisions[len(state.startupDecisions)-1]
+	assert.Equal(t, badgerrole.RoleMetaRaftLog, last.Role)
+
+	state.Cleanup()
+}
+
+// TestBootOpenSharedRaftLogDB_DisabledNoOp — when SharedBadgerEnabled=false,
+// phase is a no-op; sharedRaftLogDB stays nil; no cleanups added beyond
+// what previous phases registered.
+func TestBootOpenSharedRaftLogDB_DisabledNoOp(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+
+	beforeCleanups := len(state.cleanups)
+	require.NoError(t, bootOpenSharedRaftLogDB(state))
+	assert.Nil(t, state.sharedRaftLogDB)
+	assert.Equal(t, beforeCleanups, len(state.cleanups), "no-op must not register cleanups")
+}
+
+// TestBootOpenSharedRaftLogDB_RefusesLegacyPerGroupRaftDirs — invariant from
+// run.go: enabling --shared-badger on a deployment that has legacy per-group
+// raft state would silently reset every group's term/votedFor/log. Phase
+// must refuse with a clear migration message.
+func TestBootOpenSharedRaftLogDB_RefusesLegacyPerGroupRaftDirs(t *testing.T) {
+	dir := t.TempDir()
+	legacyRaft := filepath.Join(dir, "groups", "group-0", "raft")
+	require.NoError(t, os.MkdirAll(legacyRaft, 0o755))
+	// Drop a fake badger MANIFEST so the dir looks populated.
+	require.NoError(t, os.WriteFile(filepath.Join(legacyRaft, "MANIFEST"), []byte{}, 0o644))
+
+	state := newBootState(Config{DataDir: dir, NodeID: "n1", SharedBadgerEnabled: true})
+	require.NoError(t, bootValidateConfig(state))
+
+	err := bootOpenSharedRaftLogDB(state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shared-badger=true incompatible with legacy per-group raft dir")
+}
+
+// TestBootOpenSharedRaftLogDB_OpensWhenEnabled — happy path: SharedBadger=true
+// on a fresh dataDir opens the shared DB at the expected path.
+func TestBootOpenSharedRaftLogDB_OpensWhenEnabled(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", SharedBadgerEnabled: true})
+	require.NoError(t, bootValidateConfig(state))
+
+	require.NoError(t, bootOpenSharedRaftLogDB(state))
+	require.NotNil(t, state.sharedRaftLogDB)
+	last := state.startupDecisions[len(state.startupDecisions)-1]
+	assert.Equal(t, badgerrole.RoleSharedRaftLog, last.Role)
+
+	state.Cleanup()
+}
+
+// TestBootMetaDB_PreflightRejectsCorruptDB — when the BadgerDB on disk fails
+// the writability probe (e.g., a corrupt manifest), bootOpenMetaDB returns
+// a structured PreflightBadger error instead of plain badger.Open output.
+//
+// We simulate "corrupt" by pre-opening a DB and writing a sentinel through
+// it, then re-opening with a sentinel that fails — the cheaper alternative
+// is to touch the underlying check directly. For now the DecisionOK path is
+// exercised by TestBootOpenMetaDB_CreatesAndOpens; the preflight-failure
+// path is covered by server.PreflightBadger's own tests in internal/server.
+//
+// This stub exists to document the intent and surface a TODO if ProbeWritable
+// gains a forced-failure injection point.
+func TestBootMetaDB_PreflightRejectsCorruptDB(t *testing.T) {
+	t.Skip("preflight rejection requires DB corruption that cannot be safely simulated in unit; covered by integration tests")
+}

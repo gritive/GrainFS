@@ -1,25 +1,52 @@
 package serveruntime
 
 import (
+	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// bootState carries the rolling state of Run's boot sequence. PR 1 introduces
-// only the cleanup stack; PRs 2-6 will move per-phase artifacts (db, QUIC,
-// metaRaft, …) onto typed fields here, replacing local variables in Run.
+// bootState carries the rolling state of Run's boot sequence. Phase functions
+// populate typed fields here; the rest of Run reads them. Cleanups registered
+// via AddCleanup run LIFO at function exit, matching Go's defer semantics.
 //
 // Lifecycle:
 //
 //	state := newBootState(cfg)
 //	defer state.Cleanup()
-//	// phases construct artifacts and register their teardown via state.AddCleanup
-//
-// AddCleanup is called as each artifact is created successfully — exactly the
-// position a `defer X.Close()` previously occupied. Cleanup() runs the stack
-// LIFO at function exit, matching Go's defer semantics.
+//	if err := bootValidateConfig(state); err != nil { return err }
+//	if err := bootOpenMetaDB(state); err != nil { return err }
+//	// state.db, state.nodeID, ... populated for downstream phases
 type bootState struct {
 	cfg      Config
 	cleanups []func()
+
+	// Resolved config (populated by bootValidateConfig).
+	nodeID      string
+	raftAddr    string
+	peers       []string
+	clusterMode bool
+	metaDir     string
+	raftDir     string
+
+	// Storage role tracking (populated incrementally by storage phases;
+	// readers in run.go body use these for the boot decision summary).
+	roleRegistry     badgerrole.Registry
+	startupDecisions []badgerrole.Decision
+
+	// Open DBs and log stores. Each phase that opens one of these also
+	// registers the matching teardown via AddCleanup.
+	db              *badger.DB           // bootOpenMetaDB
+	logStore        *raft.BadgerLogStore // bootOpenRaftLogStore
+	sharedRaftLogDB *badger.DB           // bootOpenSharedRaftLogDB (optional)
+
+	// storeOpts are the raft.BadgerLogStoreOption set used to open the
+	// meta log store. Captured on bootState so per-data-group shared log
+	// stores opened later (run.go around shared-log fan-out) reuse the
+	// same option set without re-deriving it from cfg.
+	storeOpts []raft.BadgerLogStoreOption
 }
 
 // newBootState returns an empty state bound to cfg. Caller is responsible for

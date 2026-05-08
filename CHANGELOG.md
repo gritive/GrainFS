@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.0.121.0] - 2026-05-08 — serveruntime boot decomposition PR 2: config + storage phases (6 of ~20)
+
+### Refactored
+
+- `internal/serveruntime/boot_phases.go` (new): six explicit phase functions
+  carved out of the top of `Run()`. Each takes `*bootState`, returns `error`,
+  and registers its teardown via `state.AddCleanup`:
+  - `bootValidateConfig` — validates flag combinations, resolves nodeID via
+    `GenerateNodeID` (the only side effect), sets clusterMode, defaults
+    `raftAddr` for solo mode, stages `metaDir`/`raftDir` paths, initializes
+    `roleRegistry` and `startupDecisions`.
+  - `bootAutoMigrate` — runs `cluster.MigrateLegacyMetaToCluster` only when
+    `raftDir` is absent and `metaDir` holds a populated legacy meta DB.
+    Otherwise a no-op. Must run before any FS or lock side effects.
+  - `bootOpenMetaDB` — `MkdirAll(metaDir)` + `badger.Open` + `RegisterDB` +
+    writability preflight. Registers two cleanups (close DB, deregister
+    resourcewatch). Returns the structured `PreflightBadger` error on
+    rejection.
+  - `bootValidateTimings` — cross-validates raft/QUIC mux timing flags
+    (election ≥ 3× heartbeat; QUIC mux flush ≪ heartbeat; flush ≪ meta
+    heartbeat).
+  - `bootOpenRaftLogStore` — `raft.NewBadgerLogStore` for the meta raft log,
+    propagates `BadgerManagedMode` via `state.storeOpts` so per-data-group
+    shared-log opens later in `Run` reuse the same option set without
+    re-deriving from cfg.
+  - `bootOpenSharedRaftLogDB` — optional C2 P0b shared raft-log DB. No-op
+    when `cfg.SharedBadgerEnabled` is false. Refuses to silently abandon
+    legacy per-group raft logs (data-loss guard) with a clear migration
+    message.
+
+- `internal/serveruntime/boot_state.go`: typed fields added —
+  `nodeID`, `raftAddr`, `peers`, `clusterMode`, `metaDir`, `raftDir`,
+  `roleRegistry`, `startupDecisions`, `db`, `logStore`, `sharedRaftLogDB`,
+  `storeOpts`. Phase functions populate these; the rest of `Run` reads
+  through local-variable mirrors (PRs 3-6 will migrate downstream readers
+  to read state directly and drop the mirrors).
+
+- `internal/serveruntime/run.go`: top of `Run` shrinks from ~190 lines of
+  imperative wiring to six `if err := bootX(state); err != nil { return err }`
+  calls plus a small mirror-copy block that reads phase outputs into the
+  local variables that PRs 3-6's downstream wiring still uses. Net file
+  size: 1470 → 1322 lines.
+
+### Added
+
+- `internal/serveruntime/boot_phases_test.go`: 13 unit tests covering all
+  six phases with real I/O on `t.TempDir()`:
+  - Config validation: nodeID auto-gen, `--join` without `--raft-addr`,
+    `--join` + `--peers` conflict, `--peers` without `--raft-addr`.
+  - Auto-migrate: no-op on fresh dir, no-op when raftDir already exists
+    (sentinel proves migrate did not touch metaDir), no-op when metaDir
+    is empty.
+  - Meta DB: creates and opens, preflight decision recorded; cleanup is
+    idempotent.
+  - Timing validation: rejects too-fast election; rejects flush not <<
+    heartbeat; accepts valid (200ms hb / 1s election / 2ms flush).
+  - Raft log store: opens, propagates `BadgerManagedMode` via storeOpts.
+  - Shared raft-log DB: disabled is a no-op (no extra cleanups), legacy
+    per-group raft dirs trigger the data-loss guard, happy path opens at
+    the expected path with the expected role.
+
+### Why
+
+PR 2 of the 6-PR milestone (see
+`docs/superpowers/specs/2026-05-08-serveruntime-boot-decomposition.md`).
+Six phases with real-component integration tests now cover the
+config + storage entry of `Run`. Test discoverable invariants that
+were previously protected only by code comments — e.g., auto-migrate
+ordering relative to MkdirAll/badger.Open, shared-badger refusing to
+overwrite legacy per-group state.
+
+PR 3 (transport phases — QUIC, peer connections, raft RPC mux) is next.
+
 ## [0.0.120.0] - 2026-05-08 — serveruntime boot decomposition PR 1: bootState + cleanup stack
 
 ### Refactored

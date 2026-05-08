@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
@@ -20,7 +18,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/badgerrole"
-	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
@@ -52,199 +49,54 @@ import (
 func Run(ctx context.Context, cfg Config) error {
 	addr := cfg.Addr
 	dataDir := cfg.DataDir
-	nodeID := cfg.NodeID
-	raftAddr := cfg.RaftAddr
 	clusterKey := cfg.ClusterKey
 	authOpts := cfg.AuthOpts
 	encryptor := cfg.Encryptor
-	peers := cfg.Peers
-	joinMode := cfg.JoinMode
 	raftAddrExplicit := cfg.RaftAddrExplicit
 
-	// PR 1 (boot decomposition milestone, see docs/superpowers/specs/2026-05-08-
-	// serveruntime-boot-decomposition.md): cleanup stack replaces inline defers
-	// so each phase records its teardown next to the artifact it constructs.
-	// Cleanup runs LIFO at function exit, matching the original defer order.
+	// PR 1+2 (boot decomposition milestone, see docs/superpowers/specs/
+	// 2026-05-08-serveruntime-boot-decomposition.md): bootState carries
+	// per-phase artifacts; Cleanup runs LIFO at function exit; phase
+	// functions populate state and register their teardown.
 	state := newBootState(cfg)
 	defer state.Cleanup()
 
-	if nodeID == "" {
-		var err error
-		nodeID, err = GenerateNodeID(dataDir)
-		if err != nil {
-			return fmt.Errorf("generate node ID: %w", err)
-		}
-		log.Info().Str("component", "server").Str("node_id", nodeID).Msg("auto-generated node ID")
+	// PR 2 phases: config validation + storage open.
+	if err := bootValidateConfig(state); err != nil {
+		return err
+	}
+	if err := bootAutoMigrate(state); err != nil {
+		return err
+	}
+	if err := bootOpenMetaDB(state); err != nil {
+		return err
+	}
+	if err := bootValidateTimings(state); err != nil {
+		return err
+	}
+	if err := bootOpenRaftLogStore(state); err != nil {
+		return err
+	}
+	if err := bootOpenSharedRaftLogDB(state); err != nil {
+		return err
 	}
 
-	// D6/D7: --cluster-key is required when running in actual cluster mode
-	// (peers > 0 || join != ""). Solo runs through this same function but
-	// does not require a cluster key — Run handles both modes.
-	clusterMode := len(peers) > 0 || joinMode
-	if clusterMode {
-		if err := transport.ValidateClusterKey(clusterKey); err != nil {
-			if errors.Is(err, transport.ErrEmptyClusterKey) {
-				return fmt.Errorf("--cluster-key is required in cluster mode (generate with: openssl rand -hex 32)")
-			}
-			log.Warn().Err(err).Msg("--cluster-key is below recommended length")
-		}
-	}
-	if joinMode {
-		if len(peers) > 0 {
-			return fmt.Errorf("--join cannot be used with --peers")
-		}
-		if raftAddr == "" {
-			return fmt.Errorf("--raft-addr is required when --join is set")
-		}
-		peers = []string{cfg.JoinAddr}
-	}
-
-	// When no peers are configured, we boot a singleton Raft node on a
-	// loopback port so a single-machine deployment still goes through the
-	// unified storage path (versioning, scrubber, lifecycle, WAL all work).
-	// Operators who later want to expand the cluster pick a concrete
-	// --raft-addr and --peers list; the loopback default is only for the
-	// "just start it" path.
-	if raftAddr == "" {
-		if len(peers) > 0 {
-			return fmt.Errorf("--raft-addr is required when --peers is set")
-		}
-		// Singleton: let the kernel pick a free port so multiple instances
-		// (dev, tests) coexist without collisions. No peer will ever reach it.
-		raftAddr = "127.0.0.1:0"
-	}
-
-	metaDir := filepath.Join(dataDir, "meta")
-	raftDir := filepath.Join(dataDir, "raft")
-	roleRegistry := badgerrole.DefaultRegistry()
-	startupDecisions := make([]badgerrole.Decision, 0, 8)
+	// Locals mirror state fields so the rest of Run (PRs 3-6 will migrate
+	// these too) keeps using the same names. After PR 6 these will be
+	// gone and downstream phases will read state directly.
+	nodeID := state.nodeID
+	raftAddr := state.raftAddr
+	peers := state.peers
+	joinMode := cfg.JoinMode
+	roleRegistry := state.roleRegistry
+	db := state.db
+	logStore := state.logStore
+	sharedRaftLogDB := state.sharedRaftLogDB
+	storeOpts := state.storeOpts
+	startupDecisions := state.startupDecisions
 	recordStartupDecision := func(decision badgerrole.Decision) {
-		startupDecisions = append(startupDecisions, decision)
-	}
-
-	// Auto-migrate BEFORE any filesystem or lock side effects. If Raft dir
-	// doesn't exist but meta dir holds an existing local BadgerDB, convert
-	// in place. Two things previously broke this branch on fresh cluster
-	// starts with an empty dataDir:
-	//   1. MkdirAll ran before this check, so os.Stat(metaDir) succeeded
-	//      on a freshly-created empty dir and triggered a spurious
-	//      migration.
-	//   2. The migration opens the meta DB, but we had already opened it
-	//      here, and BadgerDB takes an exclusive directory lock, so the
-	//      migration aborted with "Another process is using this Badger
-	//      database".
-	// Moving the migration above both MkdirAll and badger.Open removes
-	// both failure modes.
-	if _, err := os.Stat(raftDir); os.IsNotExist(err) {
-		if info, err := os.Stat(metaDir); err == nil && info.IsDir() {
-			// A populated local meta dir has .sst / .vlog / MANIFEST files.
-			// Distinguish "real data" from "empty dir someone pre-created"
-			// by checking for any entries; empty → skip migration.
-			if entries, err := os.ReadDir(metaDir); err == nil && len(entries) > 0 {
-				log.Info().Str("component", "migrate").Msg("auto-migrating local metadata to cluster format")
-				if err := cluster.MigrateLegacyMetaToCluster(dataDir, nodeID); err != nil {
-					return fmt.Errorf("auto-migrate: %w", err)
-				}
-				log.Info().Str("component", "migrate").Msg("auto-migration complete")
-			}
-		}
-	}
-
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
-		return fmt.Errorf("create meta dir at %s: %w\n  recovery: check that the parent directory exists and the user has write permission", metaDir, err)
-	}
-	dbOpts := badgerutil.SmallOptions(metaDir)
-	db, err := badger.Open(dbOpts)
-	if err != nil {
-		return fmt.Errorf("open metadata db at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK), see README#badger-troubleshooting", metaDir, err, metaDir)
-	}
-	state.AddCleanup(func() { db.Close() })
-	metaVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryMeta, db)
-	state.AddCleanup(func() { resourcewatch.DeregisterDB(metaVlogEntry) })
-	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
-	recordStartupDecision(badgerrole.ProbeWritable(db, badgerrole.RoleMeta, "", metaDir))
-	if startupDecisions[len(startupDecisions)-1].Status != badgerrole.DecisionOK {
-		return server.PreflightBadger(db, metaDir, nil)
-	}
-
-	if cfg.RaftElectionTimeout > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.RaftElectionTimeout < 3*cfg.RaftHeartbeatInterval {
-		return fmt.Errorf("--raft-election-timeout (%s) must be >= 3 * --raft-heartbeat-interval (%s)", cfg.RaftElectionTimeout, cfg.RaftHeartbeatInterval)
-	}
-	if cfg.QUICMuxEnabled && cfg.QUICMuxFlushWindow > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.QUICMuxFlushWindow >= cfg.RaftHeartbeatInterval {
-		return fmt.Errorf("--quic-mux-flush (%s) must be << --raft-heartbeat-interval (%s)", cfg.QUICMuxFlushWindow, cfg.RaftHeartbeatInterval)
-	}
-	// Meta-raft heartbeat is fixed (not user-configurable) and shares the
-	// same coalescer flush window. If the flush window were larger than
-	// the meta heartbeat, meta hb dispatch could be delayed past the meta
-	// election deadline. Cap conservatively at < half of the meta heartbeat.
-	if cfg.QUICMuxEnabled && cfg.QUICMuxFlushWindow > 0 && cfg.QUICMuxFlushWindow*2 >= cluster.MetaRaftHeartbeatInterval {
-		return fmt.Errorf("--quic-mux-flush (%s) must be << meta-raft heartbeat (%s); meta-raft uses a fixed 150ms heartbeat / 750ms election", cfg.QUICMuxFlushWindow, cluster.MetaRaftHeartbeatInterval)
-	}
-
-	var storeOpts []raft.BadgerLogStoreOption
-	if cfg.BadgerManagedMode {
-		storeOpts = append(storeOpts, raft.WithManagedMode())
-	}
-	logStore, err := raft.NewBadgerLogStore(raftDir, storeOpts...)
-	if err != nil {
-		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", raftDir, err, raftDir)
-	}
-	state.AddCleanup(func() { logStore.Close() })
-	if !logStore.IsShared() && logStore.DB() != nil {
-		raftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, logStore.DB())
-		defer resourcewatch.DeregisterDB(raftLogVlogEntry)
-	}
-	recordStartupDecision(badgerrole.Decision{
-		Role:   badgerrole.RoleMetaRaftLog,
-		Path:   raftDir,
-		Status: badgerrole.DecisionOK,
-		Action: badgerrole.RecoveryActionNone,
-	})
-
-	// C2 P0b prototype: optionally open one shared raft-log BadgerDB so all
-	// data groups share a single instance instead of opening their own. Reduces
-	// process-level BadgerDB instance count from (2N+1) → (2+1) for the log
-	// half. FSM state DB consolidation deferred to full C2.
-	var sharedRaftLogDB *badger.DB
-	if cfg.SharedBadgerEnabled {
-		// Refuse to silently abandon legacy per-group raft logs. Existing
-		// deployments that started before P0b have raft state under
-		// <dataDir>/groups/*/raft. Ignoring those and opening a fresh shared
-		// DB would silently reset every group's term/votedFor/log — i.e.,
-		// data loss. Fail with a clear migration message instead.
-		groupsDir := filepath.Join(dataDir, "groups")
-		if entries, _ := os.ReadDir(groupsDir); len(entries) > 0 {
-			for _, e := range entries {
-				if !e.IsDir() {
-					continue
-				}
-				legacyRaftDir := filepath.Join(groupsDir, e.Name(), "raft")
-				if st, err := os.Stat(legacyRaftDir); err == nil && st.IsDir() {
-					return fmt.Errorf("shared-badger=true incompatible with legacy per-group raft dir %s. "+
-						"This deployment was started before C2 P0b. Use --shared-badger=false to keep "+
-						"per-group raft logs, or wipe %s to start fresh on the new layout (DESTRUCTIVE — "+
-						"only on test clusters or after a full backup)", legacyRaftDir, dataDir)
-				}
-			}
-		}
-		sharedDir := filepath.Join(dataDir, "shared-raft-log")
-		if err := os.MkdirAll(sharedDir, 0o755); err != nil {
-			return fmt.Errorf("mkdir shared raft-log dir: %w", err)
-		}
-		sharedRaftLogDB, err = badger.Open(badgerutil.RaftLogOptions(sharedDir, true))
-		if err != nil {
-			return fmt.Errorf("open shared raft-log badger at %s: %w", sharedDir, err)
-		}
-		defer sharedRaftLogDB.Close()
-		sharedRaftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, sharedRaftLogDB)
-		defer resourcewatch.DeregisterDB(sharedRaftLogVlogEntry)
-		recordStartupDecision(badgerrole.Decision{
-			Role:   badgerrole.RoleSharedRaftLog,
-			Path:   sharedDir,
-			Status: badgerrole.DecisionOK,
-			Action: badgerrole.RecoveryActionNone,
-		})
-		log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
+		state.startupDecisions = append(state.startupDecisions, decision)
+		startupDecisions = state.startupDecisions
 	}
 
 	// Start QUIC transport for inter-node communication. Resolution order
