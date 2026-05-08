@@ -24,7 +24,7 @@ func ListVolumes(ctx context.Context, d *Deps) (ListVolumesResp, error) {
 	for i, v := range vs {
 		out[i] = toVolumeInfo(v)
 	}
-	applyVolumeHealth(ctx, d, out)
+	fetchAndAnnotateHealth(ctx, d, out)
 	return ListVolumesResp{Volumes: out}, nil
 }
 
@@ -67,7 +67,7 @@ func GetVolume(ctx context.Context, d *Deps, name string) (VolumeInfo, error) {
 		return VolumeInfo{}, NewInternal(err.Error())
 	}
 	out := []VolumeInfo{toVolumeInfo(v)}
-	applyVolumeHealth(ctx, d, out)
+	fetchAndAnnotateHealth(ctx, d, out)
 	return out[0], nil
 }
 
@@ -168,17 +168,17 @@ func StatVolume(ctx context.Context, d *Deps, name string) (StatResp, error) {
 		if lerr == nil {
 			blockPrefix := volume.BlockKeyPrefix(name)
 			for _, st := range all {
-				if st.Scope.Bucket != volume.VolumeBucketName {
+				if !incidentMatchesVolume(st, name, blockPrefix) {
 					continue
 				}
-				if st.Scope.Key == name || strings.HasPrefix(st.Scope.Key, blockPrefix) {
-					resp.RecentIncidents = append(resp.RecentIncidents, incidentToWireMap(st))
-					if len(resp.RecentIncidents) >= 50 {
-						break
-					}
+				resp.RecentIncidents = append(resp.RecentIncidents, incidentToWireMap(st))
+				if len(resp.RecentIncidents) >= 50 {
+					break
 				}
 			}
-			applyHealthFromIncidents(&resp.Volume, all)
+			vols := []VolumeInfo{resp.Volume}
+			annotateVolumeHealth(vols, all, nil)
+			resp.Volume = vols[0]
 		} else {
 			resp.Volume.Health = "unknown"
 			resp.Volume.HealthReasons = []string{"incident_lookup_failed"}
@@ -199,72 +199,24 @@ func incidentToWireMap(st incident.IncidentState) map[string]any {
 	return out
 }
 
-func applyVolumeHealth(ctx context.Context, d *Deps, volumes []VolumeInfo) {
+// fetchAndAnnotateHealth fetches active incident state and delegates health
+// composition to the pure annotateVolumeHealth composer in health.go. On
+// fetch error it stamps "unknown"/"incident_lookup_failed" on every volume
+// without invoking the composer; with no incident source configured it
+// leaves the toVolumeInfo defaults in place.
+func fetchAndAnnotateHealth(ctx context.Context, d *Deps, vols []VolumeInfo) {
 	if d.Incident == nil {
 		return
 	}
 	all, err := d.Incident.List(ctx, 500)
 	if err != nil {
-		for i := range volumes {
-			volumes[i].Health = "unknown"
-			volumes[i].HealthReasons = []string{"incident_lookup_failed"}
+		for i := range vols {
+			vols[i].Health = "unknown"
+			vols[i].HealthReasons = []string{"incident_lookup_failed"}
 		}
 		return
 	}
-	for i := range volumes {
-		applyHealthFromIncidents(&volumes[i], all)
-	}
-}
-
-func applyHealthFromIncidents(info *VolumeInfo, incidents []incident.IncidentState) {
-	info.Health = "ok"
-	info.HealthReasons = []string{}
-	blockPrefix := volume.BlockKeyPrefix(info.Name)
-	for _, st := range incidents {
-		if !incidentMatchesVolume(st, info.Name, blockPrefix) || incidentResolved(st) {
-			continue
-		}
-		info.Health = worseVolumeHealth(info.Health, healthForIncident(st))
-		info.HealthReasons = appendReason(info.HealthReasons, "recent_incident")
-	}
-}
-
-func incidentMatchesVolume(st incident.IncidentState, name, blockPrefix string) bool {
-	if st.Scope.Bucket != volume.VolumeBucketName {
-		return false
-	}
-	return st.Scope.Key == name || strings.HasPrefix(st.Scope.Key, blockPrefix)
-}
-
-func incidentResolved(st incident.IncidentState) bool {
-	return st.State == incident.StateFixed || st.State == incident.StateIsolated
-}
-
-func healthForIncident(st incident.IncidentState) string {
-	if st.Severity == incident.SeverityCritical ||
-		st.State == incident.StateBlocked ||
-		st.State == incident.StateNeedsHuman ||
-		st.State == incident.StateProofUnavailable {
-		return "critical"
-	}
-	return "warning"
-}
-
-func worseVolumeHealth(a, b string) string {
-	rank := map[string]int{"ok": 0, "warning": 1, "critical": 2, "unknown": 3}
-	if rank[b] > rank[a] {
-		return b
-	}
-	return a
-}
-
-func appendReason(reasons []string, reason string) []string {
-	for _, existing := range reasons {
-		if existing == reason {
-			return reasons
-		}
-	}
-	return append(reasons, reason)
+	annotateVolumeHealth(vols, all, nil)
 }
 
 // WriteAtVolume writes bytes to a volume at the given offset. Used by debugging

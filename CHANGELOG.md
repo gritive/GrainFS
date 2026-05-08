@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.95.0] - 2026-05-08 — volume health composer extraction
+
+### Changed
+
+- Volume health synthesis (`Healthy`/`Degraded`/`Failed` labels and reasons
+  on admin volume responses) moves out of `internal/server/admin/handlers_volume.go`
+  into a pure composer in `internal/server/admin/health.go`. Handlers now
+  fetch incident state and delegate composition; the composer performs no
+  I/O and is directly unit-tested with literal inputs, mirroring the
+  Cluster Peer Liveness Snapshot pattern in `CONTEXT.md`.
+- `StatVolume` reuses the shared `incidentMatchesVolume` matcher when
+  collecting `RecentIncidents`, so volume-scoped incident filtering is
+  defined in one place instead of inlined twice.
+
+### Added
+
+- Table-driven unit tests for volume health composition cover incident
+  scope matching, severity-to-label rules, resolved-state suppression,
+  label rank merging, and reason deduplication. Multi-volume independence
+  and the matcher itself are also tested.
+- A `ReplicaLayoutFact` placeholder input on the composer reserves a
+  per-volume seam for replica/EC actual layout signals (ADR 0007). The
+  first slice is incident-only; a follow-up adapter will populate it.
+
 ## [0.0.94.0] - 2026-05-08 — topology durability hardening
 
 ### Added
