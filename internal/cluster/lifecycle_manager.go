@@ -23,9 +23,12 @@ import (
 
 // leadershipSource is the minimum surface the manager needs from a Raft node.
 // Keeping it as an interface makes the manager trivially testable without a
-// real raft.Node — unit tests swap in a value that toggles Leader/Follower.
+// real raft.Node — unit tests swap in a value that toggles Leader/Follower
+// and emits events on the registered observer channels.
 type leadershipSource interface {
 	State() raft.NodeState
+	RegisterObserver(ch chan<- raft.Event)
+	DeregisterObserver(ch chan<- raft.Event)
 }
 
 // LifecycleManager starts/stops the lifecycle worker based on Raft leadership.
@@ -35,7 +38,6 @@ type LifecycleManager struct {
 	store      *lifecycle.Store
 	worker     *lifecycle.Worker
 	interval   time.Duration
-	pollEvery  time.Duration
 
 	mu       sync.Mutex
 	running  bool
@@ -61,20 +63,25 @@ func NewLifecycleManager(backend *DistributedBackend, interval time.Duration) *L
 		store:      store,
 		worker:     worker,
 		interval:   interval,
-		pollEvery:  250 * time.Millisecond,
 		logger:     log.With().Str("component", "lifecycle-manager").Logger(),
 	}
 }
 
-// Run watches leadership changes until ctx is done, starting/stopping the worker.
-// Poll cadence is 250ms — cheap enough to be ignorable and tight enough to catch
-// a leadership flip within one heartbeat interval.
+// Run watches leadership changes until ctx is done, starting/stopping the
+// worker. Subscribes to the Raft observer stream so a leader-flip is reflected
+// at the next event delivery instead of waiting for a polling tick.
+//
+// The events channel is intentionally buffered: raft.Node.notifyObservers
+// drops on a full channel, but reconcile reads State() fresh on every wake,
+// so any single missed event would still surface on the next event or on
+// ctx.Done()-triggered stop.
 func (m *LifecycleManager) Run(ctx context.Context) {
-	ticker := time.NewTicker(m.pollEvery)
-	defer ticker.Stop()
+	events := make(chan raft.Event, 4)
+	m.leadership.RegisterObserver(events)
+	defer m.leadership.DeregisterObserver(events)
 
 	// Evaluate immediately so a node that is already leader at startup picks
-	// the worker up without waiting a full poll interval.
+	// the worker up without waiting for the next leader-change event.
 	m.reconcile(ctx)
 
 	for {
@@ -82,7 +89,10 @@ func (m *LifecycleManager) Run(ctx context.Context) {
 		case <-ctx.Done():
 			m.stop()
 			return
-		case <-ticker.C:
+		case e := <-events:
+			if e.Type != raft.EventLeaderChange {
+				continue
+			}
 			m.reconcile(ctx)
 		}
 	}
