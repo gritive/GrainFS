@@ -950,8 +950,7 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 		c.Header("x-amz-delete-marker", "true")
 		c.Header("x-amz-version-id", result.Deleted.VersionID)
 	}
-	recordObjectDeleteMetrics(result.Previous)
-	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionDelete, Bucket: bucket, Key: key})
+	s.mutations.OnObjectDelete(ctx, bucket, key, result)
 	c.Status(consts.StatusNoContent)
 }
 
