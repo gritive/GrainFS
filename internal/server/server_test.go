@@ -769,6 +769,119 @@ func TestCompleteMultipartUpload_MalformedXML(t *testing.T) {
 	assert.Contains(t, string(body), "MalformedXML")
 }
 
+func TestAbortMultipartUpload_Success(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// Initiate multipart upload
+	req, _ = http.NewRequest(http.MethodPost, base+"/mybucket/abandon.bin?uploads", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	var initResult initiateMultipartUploadResult
+	xml.NewDecoder(resp.Body).Decode(&initResult)
+	resp.Body.Close()
+	require.NotEmpty(t, initResult.UploadId)
+	uploadID := initResult.UploadId
+
+	// Upload one part so the staging dir exists.
+	req, _ = http.NewRequest(http.MethodPut,
+		fmt.Sprintf("%s/mybucket/abandon.bin?uploadId=%s&partNumber=1", base, uploadID),
+		bytes.NewReader([]byte("part-data")))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Abort: DELETE with ?uploadId=
+	req, _ = http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("%s/mybucket/abandon.bin?uploadId=%s", base, uploadID),
+		nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// A second abort with the same uploadID must surface NoSuchUpload — confirms
+	// the first abort actually removed the multipart record, not just hung up.
+	req, _ = http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("%s/mybucket/abandon.bin?uploadId=%s", base, uploadID),
+		nil)
+	resp, _ = http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Contains(t, string(body), "NoSuchUpload")
+}
+
+func TestAbortMultipartUpload_NotFound(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	req, _ = http.NewRequest(http.MethodDelete,
+		base+"/mybucket/missing.bin?uploadId=does-not-exist",
+		nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Contains(t, string(body), "NoSuchUpload")
+}
+
+func TestAbortMultipartUpload_DoesNotAffectOtherUploads(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	// Open two parallel multipart uploads on the same key.
+	openUpload := func() string {
+		req, _ := http.NewRequest(http.MethodPost, base+"/mybucket/parallel.bin?uploads", nil)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		var r initiateMultipartUploadResult
+		xml.NewDecoder(resp.Body).Decode(&r)
+		resp.Body.Close()
+		require.NotEmpty(t, r.UploadId)
+		return r.UploadId
+	}
+	doomed := openUpload()
+	survivor := openUpload()
+	require.NotEqual(t, doomed, survivor)
+
+	// Upload one part on the survivor so we can complete it after the abort.
+	partData := []byte("survivor-part")
+	req, _ = http.NewRequest(http.MethodPut,
+		fmt.Sprintf("%s/mybucket/parallel.bin?uploadId=%s&partNumber=1", base, survivor),
+		bytes.NewReader(partData))
+	resp, _ := http.DefaultClient.Do(req)
+	etag := resp.Header.Get("Etag")
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Abort the doomed upload.
+	req, _ = http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("%s/mybucket/parallel.bin?uploadId=%s", base, doomed),
+		nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// Survivor must still complete cleanly.
+	completeXML := fmt.Sprintf(`<CompleteMultipartUpload>
+		<Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+	</CompleteMultipartUpload>`, etag)
+	req, _ = http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/mybucket/parallel.bin?uploadId=%s", base, survivor),
+		bytes.NewReader([]byte(completeXML)))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "survivor multipart must still complete")
+}
+
 func TestListObjects_WithMaxKeys(t *testing.T) {
 	base := setupTestServer(t)
 
