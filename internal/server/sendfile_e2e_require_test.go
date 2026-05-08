@@ -187,9 +187,11 @@ func TestE2EZeroCopyHTTPServer(t *testing.T) {
 
 	_, err = backend.PutObject(context.Background(), "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream")
 	require.NoError(t, err, "Failed to put small object")
+	require.NoError(t, backend.SetObjectACL("test-bucket", "small", 1)) // ACLPublicRead
 
 	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
 	require.NoError(t, err, "Failed to put large object")
+	require.NoError(t, backend.SetObjectACL("test-bucket", "large", 1)) // ACLPublicRead
 
 	// Start server
 	s := New("127.0.0.1:14857", backend)
@@ -256,6 +258,7 @@ func TestE2EZeroCopyRangeRequest(t *testing.T) {
 	largeData := bytes.Repeat([]byte("R"), 64*1024)
 	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("test-bucket", "large", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14858", backend)
 	go func() {
@@ -312,6 +315,7 @@ func TestE2EZeroCopyRangeEdgeCases(t *testing.T) {
 	largeData := bytes.Repeat([]byte("E"), 64*1024)
 	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("test-bucket", "large", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14860", backend)
 	go func() {

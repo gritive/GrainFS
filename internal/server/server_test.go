@@ -43,6 +43,12 @@ func setupTestServer(t *testing.T) string {
 
 func setupTestServerWithOptions(t *testing.T, opts ...Option) string {
 	t.Helper()
+	base, _ := setupTestServerWithBackend(t, opts...)
+	return base
+}
+
+func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.LocalBackend) {
+	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err, "NewLocalBackend")
@@ -61,7 +67,7 @@ func setupTestServerWithOptions(t *testing.T, opts ...Option) string {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return "http://" + addr
+	return "http://" + addr, backend
 }
 
 type recordingReadIndexer struct {
@@ -241,6 +247,7 @@ func TestPutGetObject(t *testing.T) {
 	body := "hello grainfs"
 	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/hello.txt", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err, "put object")
 	resp.Body.Close()
@@ -266,6 +273,7 @@ func TestGetAndHeadObjectUseReadIndexer(t *testing.T) {
 	resp.Body.Close()
 
 	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("data")))
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -291,6 +299,7 @@ func TestHeadObject(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
 	http.DefaultClient.Do(req)
 	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("data")))
+	req.Header.Set("x-amz-acl", "public-read")
 	http.DefaultClient.Do(req)
 
 	req, _ = http.NewRequest(http.MethodHead, base+"/mybucket/file.txt", nil)
@@ -405,7 +414,7 @@ func TestGetObjectNotFound(t *testing.T) {
 }
 
 func TestMultipartUploadAPI(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
 
 	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
 	http.DefaultClient.Do(req)
@@ -452,6 +461,9 @@ func TestMultipartUploadAPI(t *testing.T) {
 	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "complete multipart")
+
+	// Grant anonymous read so the anonymous GET below can succeed.
+	require.NoError(t, backend.SetObjectACL("mybucket", "big-file.bin", 1)) // ACLPublicRead
 
 	// Verify the object exists
 	resp, _ = http.Get(base + "/mybucket/big-file.bin")
@@ -1068,8 +1080,9 @@ func TestPutObject_Overwrite(t *testing.T) {
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Put object second time (overwrite) → should succeed
+	// Put object second time (overwrite) → should succeed; public-read for anonymous GET below
 	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("second")))
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -1116,6 +1129,7 @@ func TestCopyObjectParsesEncodedSourceVersionAndReplacesContentType(t *testing.T
 	req.Header.Set("x-amz-copy-source", "/src/dir%20one/file.txt")
 	req.Header.Set("x-amz-metadata-directive", "REPLACE")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()

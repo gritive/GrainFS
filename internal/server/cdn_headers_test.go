@@ -26,6 +26,7 @@ func TestGetObject_CacheControlHeader(t *testing.T) {
 	body := bytes.NewReader([]byte("cdn content"))
 	req, _ = http.NewRequest(http.MethodPut, base+"/cdn-bucket/asset.js", body)
 	req.Header.Set("Content-Type", "application/javascript")
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -56,6 +57,7 @@ func TestHeadObject_CacheControlHeader(t *testing.T) {
 	body := bytes.NewReader([]byte("head content"))
 	req, _ = http.NewRequest(http.MethodPut, base+"/cdn-bucket2/file.css", body)
 	req.Header.Set("Content-Type", "text/css")
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -83,6 +85,7 @@ func TestGetObject_ConditionalGet_ETag(t *testing.T) {
 
 	body := bytes.NewReader([]byte("etag test content"))
 	req, _ = http.NewRequest(http.MethodPut, base+"/etag-bucket/obj.txt", body)
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()

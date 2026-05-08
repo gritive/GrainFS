@@ -24,6 +24,7 @@ func TestGetObject_IfUnmodifiedSince(t *testing.T) {
 	data := bytes.Repeat([]byte("U"), 512)
 	_, err = backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("test-bucket", "file.txt", 1)) // ACLPublicRead
 
 	s := New("127.0.0.1:14876", backend)
 	go func() { s.Run() }()

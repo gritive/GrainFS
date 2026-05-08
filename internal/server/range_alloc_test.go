@@ -47,6 +47,7 @@ func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	payload := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	_, err = local.PutObject(context.Background(), "b", "obj", bytes.NewReader(payload), "application/octet-stream")
 	require.NoError(t, err)
+	require.NoError(t, local.SetObjectACL("b", "obj", 1)) // ACLPublicRead
 
 	backend := &countingReadAtBackend{Backend: local}
 	port := freePort(t)
@@ -85,6 +86,7 @@ func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 32<<20)
 	_, err = backend.PutObject(context.Background(), "b", "large.bin", bytes.NewReader(payload), "application/octet-stream")
 	require.NoError(t, err)
+	require.NoError(t, backend.SetObjectACL("b", "large.bin", 1)) // ACLPublicRead
 
 	port := freePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)

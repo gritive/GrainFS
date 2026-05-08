@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -611,7 +612,7 @@ func (s *Server) writeIcebergMetadataObject(ctx context.Context, location string
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	_, err := s.ops.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
+	_, err := s.ops.PutObjectWithACL(ctx, bucket, key, bytes.NewReader(metadata), "application/json", uint8(s3auth.ACLPublicRead))
 	if errors.Is(err, io.EOF) {
 		return nil
 	}

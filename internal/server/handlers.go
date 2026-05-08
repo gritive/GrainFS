@@ -538,13 +538,14 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		}
 	}()
 
-	// ACL secondary check: anonymous requests require public-read or public-read-write ACL.
-	if s.verifier != nil {
-		accessKey := AccessKeyFromContext(ctx)
-		if !s3auth.IsAuthorizedByACL(s3auth.ACLGrant(obj.ACL), accessKey, s3auth.GetObject) {
-			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
-			return
-		}
+	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
+		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
+		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+		Action:    s3auth.GetObject,
+		ObjectACL: s3auth.ACLGrant(obj.ACL),
+	}, s3auth.PhasePostLoad).Allow {
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+		return
 	}
 
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionGet, Bucket: bucket, Key: key, Size: obj.Size})
@@ -716,12 +717,14 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 		c.Header("Cache-Control", "public, max-age=3600")
 	}
 
-	if s.verifier != nil {
-		accessKey := AccessKeyFromContext(ctx)
-		if !s3auth.IsAuthorizedByACL(s3auth.ACLGrant(obj.ACL), accessKey, s3auth.GetObject) {
-			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
-			return true
-		}
+	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
+		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
+		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+		Action:    s3auth.GetObject,
+		ObjectACL: s3auth.ACLGrant(obj.ACL),
+	}, s3auth.PhasePostLoad).Allow {
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+		return true
 	}
 	if !checkConditionals(c, etag, obj.LastModified) {
 		return true
@@ -841,13 +844,14 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// ACL secondary check: anonymous requests require public-read or public-read-write ACL.
-	if s.verifier != nil {
-		accessKey := AccessKeyFromContext(ctx)
-		if !s3auth.IsAuthorizedByACL(s3auth.ACLGrant(obj.ACL), accessKey, s3auth.HeadObject) {
-			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
-			return
-		}
+	if !s.authz.Decide(ctx, s3auth.PermCheckInput{
+		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
+		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
+		Action:    s3auth.HeadObject,
+		ObjectACL: s3auth.ACLGrant(obj.ACL),
+	}, s3auth.PhasePostLoad).Allow {
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
+		return
 	}
 
 	if obj.VersionID != "" {

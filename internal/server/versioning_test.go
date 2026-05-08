@@ -145,6 +145,7 @@ func TestGetObjectByVersionID_EC(t *testing.T) {
 
 	// PUT v1
 	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("content-v1"))
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	versionID1 := resp.Header.Get("X-Amz-Version-Id")
@@ -153,6 +154,7 @@ func TestGetObjectByVersionID_EC(t *testing.T) {
 
 	// PUT v2
 	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("content-v2"))
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	versionID2 := resp.Header.Get("X-Amz-Version-Id")
@@ -380,6 +382,7 @@ func TestHeadObjectVersion_EC(t *testing.T) {
 	resp.Body.Close()
 
 	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	versionID := resp.Header.Get("X-Amz-Version-Id")
