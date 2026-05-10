@@ -19,23 +19,6 @@ var iamCmd = &cobra.Command{
 	Short: "Manage GrainFS IAM (ServiceAccounts, AccessKeys, Grants)",
 }
 
-// iamEndpointFromCmd resolves --endpoint and validates it. Mirrors
-// clusterEndpointFromCmd: rejects http(s):// URLs because the IAM CLI
-// talks to the admin Unix socket.
-func iamEndpointFromCmd(cmd *cobra.Command) (string, error) {
-	ep, _ := cmd.Flags().GetString("endpoint")
-	ep = strings.TrimSpace(ep)
-	if ep == "" {
-		return "", fmt.Errorf("admin endpoint not configured.\n" +
-			"  Hint: grainfs iam --endpoint <data-dir>/admin.sock <subcommand>")
-	}
-	if strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") {
-		return "", fmt.Errorf("admin endpoint must be a UDS socket path; got %q.\n"+
-			"  Use the admin socket: --endpoint <data-dir>/admin.sock", ep)
-	}
-	return strings.TrimPrefix(ep, "unix:"), nil
-}
-
 // iamHTTPClient builds an http.Client that dials the admin UDS.
 func iamHTTPClient(sock string) *http.Client {
 	return &http.Client{
@@ -86,7 +69,7 @@ func iamSACmd() *cobra.Command {
 		Short: "Create a ServiceAccount; returns the first AccessKey + one-time secret",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -106,7 +89,7 @@ func iamSACmd() *cobra.Command {
 		Use:   "list",
 		Short: "List ServiceAccounts",
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -124,7 +107,7 @@ func iamSACmd() *cobra.Command {
 		Short: "Show SA detail",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -142,7 +125,7 @@ func iamSACmd() *cobra.Command {
 		Short: "Delete an SA (cascades to its keys + grants via FSM)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -163,7 +146,7 @@ func iamKeyCmd() *cobra.Command {
 		Short: "Issue a new AccessKey for the SA (one-time secret_key in response)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -191,7 +174,7 @@ func iamKeyCmd() *cobra.Command {
 			Short: "Revoke an AccessKey",
 			Args:  cobra.ExactArgs(2),
 			RunE: func(c *cobra.Command, args []string) error {
-				sock, err := iamEndpointFromCmd(c)
+				sock, err := adminEndpointFromCmd(c)
 				if err != nil {
 					return err
 				}
@@ -212,7 +195,7 @@ func iamGrantCmd() *cobra.Command {
 		Short: "Grant role on bucket to SA (role: Read|Write|Admin)",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -227,7 +210,7 @@ func iamGrantCmd() *cobra.Command {
 		Short: "Remove grant from SA on bucket",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -241,7 +224,7 @@ func iamGrantCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List grants (filter with --sa or --bucket)",
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}

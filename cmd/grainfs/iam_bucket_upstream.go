@@ -22,7 +22,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 		Short: "Register or rotate the upstream credentials for a bucket",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -68,7 +68,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 		Short: "Show the upstream config for a bucket (secret_key never returned)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -86,7 +86,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all bucket-upstream configurations",
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -104,7 +104,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 		Short: "Remove the upstream config for a bucket",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}

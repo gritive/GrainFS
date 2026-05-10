@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -73,4 +75,21 @@ func jsonOut(cmd *cobra.Command) bool {
 // printJSON pretty-prints v as JSON to cmd's stdout.
 func printJSON(cmd *cobra.Command, v any) error {
 	return volumeadmin.PrintJSON(cmd.OutOrStdout(), v)
+}
+
+// adminEndpointFromCmd resolves --endpoint and validates it. Used by all admin
+// CLI groups (iam, bucket, …) that talk to the admin Unix socket. Rejects
+// http(s):// URLs because admin protocol runs over UDS only.
+func adminEndpointFromCmd(cmd *cobra.Command) (string, error) {
+	ep, _ := cmd.Flags().GetString("endpoint")
+	ep = strings.TrimSpace(ep)
+	if ep == "" {
+		return "", fmt.Errorf("admin endpoint not configured.\n" +
+			"  Hint: use --endpoint <data-dir>/admin.sock")
+	}
+	if strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") {
+		return "", fmt.Errorf("admin endpoint must be a UDS socket path; got %q.\n"+
+			"  Use the admin socket: --endpoint <data-dir>/admin.sock", ep)
+	}
+	return strings.TrimPrefix(ep, "unix:"), nil
 }
