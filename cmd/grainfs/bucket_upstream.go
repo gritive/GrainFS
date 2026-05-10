@@ -11,14 +11,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func iamBucketUpstreamCmd() *cobra.Command {
+func bucketUpstreamCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "bucket-upstream",
+		Use:   "upstream",
 		Short: "Manage per-bucket pull-through upstream credentials",
 	}
 
-	setCmd := &cobra.Command{
-		Use:   "set <bucket>",
+	putCmd := &cobra.Command{
+		Use:   "put <bucket>",
 		Short: "Register or rotate the upstream credentials for a bucket",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -57,11 +57,10 @@ func iamBucketUpstreamCmd() *cobra.Command {
 			return err
 		},
 	}
-	// Per A9: parent --endpoint is admin UDS path; child uses --upstream-url for upstream S3 URL
-	setCmd.Flags().String("upstream-url", "", "upstream S3 endpoint URL (e.g., http://minio:9000)")
-	setCmd.Flags().String("access-key", "", "upstream access key")
-	setCmd.Flags().Bool("secret-key-stdin", false, "read upstream secret key from stdin (one line, trailing newline trimmed)")
-	setCmd.Flags().String("secret-key-file", "", "read upstream secret key from file (whitespace-trimmed)")
+	putCmd.Flags().String("upstream-url", "", "upstream S3 endpoint URL (e.g., http://minio:9000)")
+	putCmd.Flags().String("access-key", "", "upstream access key")
+	putCmd.Flags().Bool("secret-key-stdin", false, "read upstream secret key from stdin (one line, trailing newline trimmed)")
+	putCmd.Flags().String("secret-key-file", "", "read upstream secret key from file (whitespace-trimmed)")
 
 	getCmd := &cobra.Command{
 		Use:   "get <bucket>",
@@ -114,7 +113,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(setCmd, getCmd, listCmd, deleteCmd)
+	cmd.AddCommand(putCmd, getCmd, listCmd, deleteCmd)
 	return cmd
 }
 

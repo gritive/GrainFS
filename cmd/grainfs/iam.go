@@ -259,6 +259,6 @@ func iamGrantCmd() *cobra.Command {
 func init() {
 	iamCmd.PersistentFlags().String("endpoint", "",
 		"admin Unix socket path (required, e.g. ./tmp/admin.sock)")
-	iamCmd.AddCommand(iamSACmd(), iamKeyCmd(), iamGrantCmd(), iamBucketUpstreamCmd())
+	iamCmd.AddCommand(iamSACmd(), iamKeyCmd(), iamGrantCmd())
 	rootCmd.AddCommand(iamCmd)
 }
