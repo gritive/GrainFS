@@ -21,7 +21,7 @@ import (
 func TestBucketUpstream_CLIRoundtrip(t *testing.T) {
 	binary := getBinary()
 
-	dir, err := os.MkdirTemp("", "grainfs-iam-bu-cli-*")
+	dir, err := os.MkdirTemp("", "grainfs-bucket-upstream-cli-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
