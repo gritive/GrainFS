@@ -83,6 +83,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			srv.RegisterClusterAdminUDS(h)
 			if state.iamAdminAPI != nil {
 				RegisterIAMAdminRoutes(h, state.iamAdminAPI)
+				RegisterBucketAdminRoutes(h, state.iamAdminAPI)
 			}
 		},
 	})

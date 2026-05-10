@@ -14,14 +14,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestIAMBucketUpstream_CLIRoundtrip verifies that `grainfs iam bucket-upstream
-// set/get/list/delete` actually talk to the admin UDS end-to-end. This guards
+// TestBucketUpstream_CLIRoundtrip verifies that `grainfs bucket upstream
+// put/get/list/delete` actually talk to the admin UDS end-to-end. This guards
 // against regressions in the CLI -> JSON shape -> handler chain (per
 // /plan-eng-review override A7g).
-func TestIAMBucketUpstream_CLIRoundtrip(t *testing.T) {
+func TestBucketUpstream_CLIRoundtrip(t *testing.T) {
 	binary := getBinary()
 
-	dir, err := os.MkdirTemp("", "grainfs-iam-bu-cli-*")
+	dir, err := os.MkdirTemp("", "grainfs-bucket-upstream-cli-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
@@ -45,26 +45,26 @@ func TestIAMBucketUpstream_CLIRoundtrip(t *testing.T) {
 
 	sock := filepath.Join(dir, "admin.sock")
 
-	// SET — registers a bucket-upstream record. Secret is fed via stdin.
+	// PUT — registers a bucket upstream record. Secret is fed via stdin.
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		setCmd := exec.CommandContext(ctx, binary, "iam", "bucket-upstream", "set", "shared",
+		putCmd := exec.CommandContext(ctx, binary, "bucket", "upstream", "put", "shared",
 			"--endpoint", sock,
 			"--upstream-url", "http://upstream.example:9000",
 			"--access-key", "AKUP",
 			"--secret-key-stdin",
 		)
-		setCmd.Stdin = strings.NewReader("upstream-secret-plain\n")
-		out, err := setCmd.CombinedOutput()
-		require.NoError(t, err, "set: %s", string(out))
+		putCmd.Stdin = strings.NewReader("upstream-secret-plain\n")
+		out, err := putCmd.CombinedOutput()
+		require.NoError(t, err, "put: %s", string(out))
 	}
 
 	// GET — confirm record present, secret_key NOT in response.
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, binary, "iam", "bucket-upstream", "get", "shared",
+		out, err := exec.CommandContext(ctx, binary, "bucket", "upstream", "get", "shared",
 			"--endpoint", sock,
 		).CombinedOutput()
 		require.NoError(t, err, "get: %s", string(out))
@@ -79,7 +79,7 @@ func TestIAMBucketUpstream_CLIRoundtrip(t *testing.T) {
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, binary, "iam", "bucket-upstream", "list",
+		out, err := exec.CommandContext(ctx, binary, "bucket", "upstream", "list",
 			"--endpoint", sock,
 		).CombinedOutput()
 		require.NoError(t, err, "list: %s", string(out))
@@ -92,7 +92,7 @@ func TestIAMBucketUpstream_CLIRoundtrip(t *testing.T) {
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, binary, "iam", "bucket-upstream", "delete", "shared",
+		out, err := exec.CommandContext(ctx, binary, "bucket", "upstream", "delete", "shared",
 			"--endpoint", sock,
 		).CombinedOutput()
 		require.NoError(t, err, "delete: %s", string(out))
@@ -101,10 +101,50 @@ func TestIAMBucketUpstream_CLIRoundtrip(t *testing.T) {
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, binary, "iam", "bucket-upstream", "get", "shared",
+		out, err := exec.CommandContext(ctx, binary, "bucket", "upstream", "get", "shared",
 			"--endpoint", sock,
 		).CombinedOutput()
 		require.Error(t, err, "GET after delete must fail; output: %s", string(out))
 		assert.Contains(t, string(out), "404", "post-delete GET must surface 404 in output")
+	}
+}
+
+// TestBucketUpstream_LegacyCLI_Removed asserts that `grainfs iam bucket-upstream …`
+// no longer exists. Regression test for ADR 0010 surface relocation: the old
+// CLI path was a real interface in v0.0.123.0–v0.0.131.0; users with scripts
+// depend on the failure mode being clear (non-zero exit).
+//
+// Cobra v1.10+ shows parent help (exit 0) for unknown subcommands on group
+// commands when no flags are passed. The meaningful assertions are:
+//  1. "bucket-upstream" is NOT listed in `grainfs iam --help` (discoverability).
+//  2. A typical legacy script form (with flags) exits non-zero — cobra rejects
+//     --upstream-url as an unknown flag, so scripts break loudly, not silently.
+func TestBucketUpstream_LegacyCLI_Removed(t *testing.T) {
+	binary := getBinary()
+
+	// Assertion 1: `grainfs iam --help` must NOT mention "bucket-upstream".
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, _ := exec.CommandContext(ctx, binary, "iam", "--help").CombinedOutput()
+		if strings.Contains(string(out), "bucket-upstream") {
+			t.Fatalf("expected 'bucket-upstream' to be absent from `grainfs iam --help`, got: %s", out)
+		}
+	}
+
+	// Assertion 2: a typical legacy script form must exit non-zero. cobra
+	// surfaces "unknown flag: --upstream-url" because the subcommand tree is
+	// gone — this is the user-facing contract the spec requires.
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		legacy := exec.CommandContext(ctx, binary, "iam", "bucket-upstream", "set", "xb",
+			"--endpoint", "/tmp/nonexistent.sock",
+			"--upstream-url", "http://x:1",
+			"--access-key", "x",
+			"--secret-key-file", "/dev/null",
+		)
+		out, err := legacy.CombinedOutput()
+		require.Error(t, err, "legacy `iam bucket-upstream set …` must exit non-zero; got output: %s", out)
 	}
 }

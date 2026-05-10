@@ -11,18 +11,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func iamBucketUpstreamCmd() *cobra.Command {
+func bucketUpstreamCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "bucket-upstream",
+		Use:   "upstream",
 		Short: "Manage per-bucket pull-through upstream credentials",
 	}
 
-	setCmd := &cobra.Command{
-		Use:   "set <bucket>",
+	putCmd := &cobra.Command{
+		Use:   "put <bucket>",
 		Short: "Register or rotate the upstream credentials for a bucket",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
@@ -53,27 +53,26 @@ func iamBucketUpstreamCmd() *cobra.Command {
 				"access_key":   ak,
 				"secret_key":   sk,
 			}
-			_, err = iamRequest(c.Context(), sock, "POST", "/v1/iam/bucket-upstream", body)
+			_, err = iamRequest(c.Context(), sock, "PUT", "/v1/buckets/upstream", body)
 			return err
 		},
 	}
-	// Per A9: parent --endpoint is admin UDS path; child uses --upstream-url for upstream S3 URL
-	setCmd.Flags().String("upstream-url", "", "upstream S3 endpoint URL (e.g., http://minio:9000)")
-	setCmd.Flags().String("access-key", "", "upstream access key")
-	setCmd.Flags().Bool("secret-key-stdin", false, "read upstream secret key from stdin (one line, trailing newline trimmed)")
-	setCmd.Flags().String("secret-key-file", "", "read upstream secret key from file (whitespace-trimmed)")
+	putCmd.Flags().String("upstream-url", "", "upstream S3 endpoint URL (e.g., http://minio:9000)")
+	putCmd.Flags().String("access-key", "", "upstream access key")
+	putCmd.Flags().Bool("secret-key-stdin", false, "read upstream secret key from stdin (one line, trailing newline trimmed)")
+	putCmd.Flags().String("secret-key-file", "", "read upstream secret key from file (whitespace-trimmed)")
 
 	getCmd := &cobra.Command{
 		Use:   "get <bucket>",
 		Short: "Show the upstream config for a bucket (secret_key never returned)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
 			out, err := iamRequest(c.Context(), sock, "GET",
-				"/v1/iam/bucket-upstream/"+url.PathEscape(args[0]), nil)
+				"/v1/buckets/"+url.PathEscape(args[0])+"/upstream", nil)
 			if err != nil {
 				return err
 			}
@@ -86,11 +85,11 @@ func iamBucketUpstreamCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all bucket-upstream configurations",
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
-			out, err := iamRequest(c.Context(), sock, "GET", "/v1/iam/bucket-upstream", nil)
+			out, err := iamRequest(c.Context(), sock, "GET", "/v1/buckets/upstream", nil)
 			if err != nil {
 				return err
 			}
@@ -104,17 +103,17 @@ func iamBucketUpstreamCmd() *cobra.Command {
 		Short: "Remove the upstream config for a bucket",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			sock, err := iamEndpointFromCmd(c)
+			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
 			_, err = iamRequest(c.Context(), sock, "DELETE",
-				"/v1/iam/bucket-upstream/"+url.PathEscape(args[0]), nil)
+				"/v1/buckets/"+url.PathEscape(args[0])+"/upstream", nil)
 			return err
 		},
 	}
 
-	cmd.AddCommand(setCmd, getCmd, listCmd, deleteCmd)
+	cmd.AddCommand(putCmd, getCmd, listCmd, deleteCmd)
 	return cmd
 }
 

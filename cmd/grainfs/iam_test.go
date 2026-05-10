@@ -15,18 +15,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestIAMEndpointFromCmd_Empty(t *testing.T) {
+func TestAdminEndpointFromCmd_Empty(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("endpoint", "", "")
-	if _, err := iamEndpointFromCmd(cmd); err == nil {
+	if _, err := adminEndpointFromCmd(cmd); err == nil {
 		t.Fatal("expected error for empty endpoint")
 	}
 }
 
-func TestIAMEndpointFromCmd_StripUnixPrefix(t *testing.T) {
+func TestAdminEndpointFromCmd_StripUnixPrefix(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("endpoint", "unix:/tmp/admin.sock", "")
-	got, err := iamEndpointFromCmd(cmd)
+	got, err := adminEndpointFromCmd(cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,10 +35,10 @@ func TestIAMEndpointFromCmd_StripUnixPrefix(t *testing.T) {
 	}
 }
 
-func TestIAMEndpointFromCmd_RejectHTTP(t *testing.T) {
+func TestAdminEndpointFromCmd_RejectHTTP(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("endpoint", "http://example.com", "")
-	if _, err := iamEndpointFromCmd(cmd); err == nil {
+	if _, err := adminEndpointFromCmd(cmd); err == nil {
 		t.Fatal("expected rejection of http:// scheme")
 	}
 }
