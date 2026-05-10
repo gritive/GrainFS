@@ -1181,23 +1181,17 @@ func (n *Node) maybeAdvanceCommitIndex() {
 	if last <= n.st.commitIndex {
 		return
 	}
-	// Build the per-voter match view: self matches at last (we definitionally
-	// have every entry up to last), peers contribute their tracked matchIndex.
-	match := make(map[string]uint64, len(n.st.matchIndex)+1)
-	for k, v := range n.st.matchIndex {
-		match[k] = v
-	}
-	match[n.st.id] = last
-
 	// Walk from highest candidate down; first one that meets quorum + term
-	// gate becomes the new commitIndex.
+	// gate becomes the new commitIndex. Self is looked up via selfID/selfMatch
+	// inside commitOK so we avoid materialising a per-call map that overlays
+	// self onto matchIndex.
 	newCommit := n.st.commitIndex
 	for N := last; N > n.st.commitIndex; N-- {
 		// §5.4.2 term gate: only commit entries from the current term directly.
 		if n.mustTermAt(N) != n.st.currentTerm {
 			continue
 		}
-		if n.st.currentConfig.commitOK(N, match) {
+		if n.st.currentConfig.commitOK(N, n.st.matchIndex, n.st.id, last) {
 			newCommit = N
 			break
 		}
@@ -1282,18 +1276,12 @@ func (n *Node) tryFlushReadIndex() {
 			req.reply <- readIndexResult{err: ErrProposalFailed}
 			continue
 		}
-		// Build a confirmed-set view: self confirmed at any round; peers
+		// Joint-aware quorum check: self confirmed at any round; peers
 		// confirmed if their tracked peerLastRound is at or beyond the
-		// request's minPeerRound. Joint-aware quorum check handles both
-		// Cold and Cnew majorities.
-		confirmed := make(map[string]bool, len(n.st.peerLastRound)+1)
-		confirmed[n.st.id] = true
-		for peer, r := range n.st.peerLastRound {
-			if r >= req.minPeerRound {
-				confirmed[peer] = true
-			}
-		}
-		if n.st.currentConfig.quorumOK(confirmed) {
+		// request's minPeerRound. quorumOKByRound consumes peerLastRound
+		// directly to avoid per-entry map allocation on the ReadIndex hot
+		// path.
+		if n.st.currentConfig.quorumOKByRound(n.st.peerLastRound, n.st.id, req.minPeerRound) {
 			req.reply <- readIndexResult{index: req.barrier}
 			continue
 		}

@@ -300,22 +300,61 @@ func majorityFromSet(set []string, granted map[string]bool) bool {
 }
 
 // commitOK reports whether match[v] >= idx for a majority of voters in each
-// relevant set. Self counts as match[self] = lastIndex implicitly by the
-// caller passing it in match.
-func (c effectiveConfig) commitOK(idx uint64, match map[string]uint64) bool {
+// relevant set. Self is looked up separately (selfID, selfMatch) so callers
+// avoid materializing a per-call map that overlays self onto matchIndex —
+// matchIndex is the leader's actor-owned map and is passed by header
+// (zero alloc).
+func (c effectiveConfig) commitOK(idx uint64, matchIndex map[string]uint64, selfID string, selfMatch uint64) bool {
 	if !c.joint {
-		return majorityMatchSet(c.voters, idx, match)
+		return majorityMatchSet(c.voters, idx, matchIndex, selfID, selfMatch)
 	}
-	return majorityMatchSet(c.voters, idx, match) && majorityMatchSet(c.oldVoters, idx, match)
+	return majorityMatchSet(c.voters, idx, matchIndex, selfID, selfMatch) &&
+		majorityMatchSet(c.oldVoters, idx, matchIndex, selfID, selfMatch)
 }
 
-func majorityMatchSet(set []string, idx uint64, match map[string]uint64) bool {
+func majorityMatchSet(set []string, idx uint64, matchIndex map[string]uint64, selfID string, selfMatch uint64) bool {
 	if len(set) == 0 {
 		return true
 	}
 	count := 0
 	for _, v := range set {
-		if match[v] >= idx {
+		var m uint64
+		if v == selfID {
+			m = selfMatch
+		} else {
+			m = matchIndex[v]
+		}
+		if m >= idx {
+			count++
+		}
+	}
+	return count >= len(set)/2+1
+}
+
+// quorumOKByRound reports whether a majority of voters have peerLastRound
+// at or above minRound. Self counts as confirmed at any round (the leader
+// trivially satisfies its own round). Mirrors quorumOK's joint-aware
+// semantics but consumes the leader's actor-owned peerLastRound map
+// directly so the ReadIndex flush path avoids per-entry map allocation.
+func (c effectiveConfig) quorumOKByRound(peerLastRound map[string]uint64, selfID string, minRound uint64) bool {
+	if !c.joint {
+		return majorityRoundSet(c.voters, peerLastRound, selfID, minRound)
+	}
+	return majorityRoundSet(c.voters, peerLastRound, selfID, minRound) &&
+		majorityRoundSet(c.oldVoters, peerLastRound, selfID, minRound)
+}
+
+func majorityRoundSet(set []string, peerLastRound map[string]uint64, selfID string, minRound uint64) bool {
+	if len(set) == 0 {
+		return true
+	}
+	count := 0
+	for _, v := range set {
+		if v == selfID {
+			count++
+			continue
+		}
+		if peerLastRound[v] >= minRound {
 			count++
 		}
 	}
