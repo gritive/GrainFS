@@ -67,3 +67,46 @@ func (e *LocalExecution) ResolveRead(ctx context.Context, target RouteTarget) (*
 	}
 	return gb, nil
 }
+
+// ResolveWrite returns the local *GroupBackend if the write can be answered
+// locally (self is currently leader, OR self is the only voter and acquires
+// leadership within localExecSelfOnlyLeaderWait). Returns nil to signal
+// forward when self is non-leader at execute time.
+//
+// F3: re-checks leaderProbe().IsLeader() at entry to close the route→execute
+// leadership flip race. The legacy code trusted RouteTarget.SelfIsLeader,
+// which could be stale when leadership changed between route resolution
+// and write execution.
+func (e *LocalExecution) ResolveWrite(ctx context.Context, target RouteTarget) (*GroupBackend, error) {
+	gb := e.groups.Backend(target.GroupID)
+	if gb == nil {
+		return nil, nil
+	}
+	probe := gb.leaderProbe()
+	if probe == nil {
+		return nil, nil
+	}
+	if target.SelfIsLeader && probe.IsLeader() {
+		return gb, nil
+	}
+	if !target.SelfIsOnlyVoter {
+		return nil, nil
+	}
+	if probe.IsLeader() {
+		return gb, nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, localExecSelfOnlyLeaderWait)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			return nil, waitCtx.Err()
+		case <-ticker.C:
+			if probe.IsLeader() {
+				return gb, nil
+			}
+		}
+	}
+}
