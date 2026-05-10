@@ -105,6 +105,15 @@ type actorState struct {
 	// behaviour: one in-flight membership change at a time).
 	appendedConfigIndex uint64
 
+	// leaderPeersScratch caches the peer set (every voter ID except self) for
+	// hot-path leaders. Recomputed lazily by peerSet() when nil; invalidated
+	// (set to nil) at every site that mutates currentConfig. broadcastHeartbeat
+	// fires this every 50ms tick and handlePropose fires it per write — the
+	// pre-cache implementation allocated a fresh []string each time, which
+	// dominated steady-state allocations on a healthy leader. The slice is
+	// read-only — callers MUST NOT mutate it.
+	leaderPeersScratch []string
+
 	// pendingConfChange holds the per-change state the leader needs to drive
 	// a joint-consensus membership change to completion. When non-nil, a
 	// joint entry is in flight and applyCommitted, on observing commit
@@ -192,12 +201,28 @@ func (s *actorState) lastLogTerm() uint64 {
 	return t
 }
 
-// peers returns the live peer set (every voter ID except self) per the
+// peerSet returns the live peer set (every voter ID except self) per the
 // effective configuration. In joint state this is Cold ∪ Cnew minus self;
-// in single state it is voters minus self. The returned slice is fresh and
-// caller-owned.
-func (s *actorState) peers() []string {
-	return s.currentConfig.peersExcluding(s.id)
+// in single state it is voters minus self.
+//
+// The returned slice is cached on actorState and reused across calls until
+// the next currentConfig mutation invalidates it (invalidatePeerSet). It
+// is READ-ONLY — callers MUST NOT mutate the slice or retain it past a
+// config-changing call. The cache trades a per-config allocation for
+// alloc-free hot paths (broadcastHeartbeat, handlePropose) which fire
+// every heartbeat tick and every write respectively.
+func (s *actorState) peerSet() []string {
+	if s.leaderPeersScratch == nil {
+		s.leaderPeersScratch = s.currentConfig.peersExcluding(s.id)
+	}
+	return s.leaderPeersScratch
+}
+
+// invalidatePeerSet clears the cached peer slice so the next peerSet() call
+// rebuilds it from currentConfig. Must be called by every site that mutates
+// currentConfig.
+func (s *actorState) invalidatePeerSet() {
+	s.leaderPeersScratch = nil
 }
 
 // isSoloVoter reports whether the cluster reduces to {self} only — used by

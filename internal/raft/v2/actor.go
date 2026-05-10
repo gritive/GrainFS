@@ -645,7 +645,7 @@ func (n *Node) handlePropose(cmd command) {
 	}
 	n.publish()
 
-	for _, peer := range n.st.peers() {
+	for _, peer := range n.st.peerSet() {
 		// dispatchOne picks AE vs InstallSnapshot based on nextIndex[peer]
 		// vs FirstIndex(); single-flight gate honoured inside.
 		n.dispatchOne(peer)
@@ -723,7 +723,7 @@ func (n *Node) becomeCandidate() {
 
 	// Single-voter Candidate is impossible under the bootstrap path (single-
 	// voter starts at Leader). Multi-voter dispatch:
-	for _, peer := range n.st.peers() {
+	for _, peer := range n.st.peerSet() {
 		go n.sendRequestVote(peer, args)
 	}
 
@@ -752,7 +752,7 @@ func (n *Node) becomeLeader() {
 	// at append time — there can never be a prior-term uncommitted entry
 	// at single-voter election, making the no-op unnecessary noise on the
 	// applyCh. FSM consumers MUST ignore LogEntryNoOp entries (Command nil).
-	peers := n.st.peers()
+	peers := n.st.peerSet()
 	if len(peers) > 0 {
 		noOpIdx := n.st.lastLogIndex() + 1
 		if err := n.st.log.Append([]LogEntry{{
@@ -907,7 +907,7 @@ func (n *Node) becomeFollower(term uint64) {
 // round; ReadIndex requests in flight during a snapshot install simply wait
 // for the next heartbeat round.
 func (n *Node) broadcastHeartbeat() {
-	for _, peer := range n.st.peers() {
+	for _, peer := range n.st.peerSet() {
 		n.dispatchOne(peer)
 	}
 }

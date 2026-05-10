@@ -180,6 +180,7 @@ func (n *Node) handleInstallSnapshot(cmd command) {
 	n.st.currentConfig = newSingleConfig(args.Configuration)
 	n.st.configHistory = nil
 	n.st.appendedConfigIndex = 0
+	n.st.invalidatePeerSet()
 
 	// Deliver the snapshot signal to the FSM. Use the same applyInCh pipeline
 	// as committed entries so FIFO ordering is preserved across the

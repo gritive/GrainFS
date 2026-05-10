@@ -77,6 +77,7 @@ func (n *Node) handleConfChange(cmd command) {
 	})
 	n.st.currentConfig = newJointConfig(old, newV)
 	n.st.appendedConfigIndex = jointIdx
+	n.st.invalidatePeerSet()
 
 	// On entering the joint state, peers may have grown (Cnew adds). Add
 	// any newcomers to the leader's per-peer replication maps so the next
@@ -84,7 +85,7 @@ func (n *Node) handleConfChange(cmd command) {
 	// is the joint entry's index + 1; matchIndex stays at 0 until we get a
 	// successful AE reply. Existing peers keep their tracked indices.
 	last := n.st.lastLogIndex()
-	for _, p := range n.st.currentConfig.peersExcluding(n.st.id) {
+	for _, p := range n.st.peerSet() {
 		if _, ok := n.st.nextIndex[p]; !ok {
 			n.st.nextIndex[p] = last + 1
 			n.st.matchIndex[p] = 0
@@ -103,7 +104,7 @@ func (n *Node) handleConfChange(cmd command) {
 
 	// Solo-voter → multi-voter transition: the previous becomeLeader skipped
 	// the heartbeat ticker for an empty peer set, so start one now.
-	if n.heartbeatTicker == nil && len(n.st.currentConfig.peersExcluding(n.st.id)) > 0 {
+	if n.heartbeatTicker == nil && len(n.st.peerSet()) > 0 {
 		interval := n.cfg.HeartbeatTimeout
 		if interval <= 0 {
 			interval = defaultHeartbeatTimeout
@@ -173,6 +174,7 @@ func (n *Node) advanceConfChangePhase() {
 		// Leave joint state, settle on Cnew.
 		n.st.currentConfig = newSingleConfig(pcc.newVoters)
 		n.st.appendedConfigIndex = finalIdx
+		n.st.invalidatePeerSet()
 		pcc.finalIndex = finalIdx
 
 		// Stale replication-map entries for now-non-voters are benign:
@@ -313,6 +315,7 @@ func (n *Node) appendAndTrackConfig(entries []LogEntry) {
 		})
 		n.st.currentConfig = applyConfigEntry(prev, e)
 		n.st.appendedConfigIndex = e.Index
+		n.st.invalidatePeerSet()
 	}
 }
 
@@ -336,6 +339,7 @@ func (n *Node) truncateAndRevertConfig(idx uint64) {
 	// The popped entry's prev becomes the candidate currentConfig — the
 	// LAST popped (deepest) prev is the correct revert target because pop
 	// order is from newest to oldest.
+	reverted := false
 	for len(n.st.configHistory) > 0 {
 		top := n.st.configHistory[len(n.st.configHistory)-1]
 		if top.logIndex <= idx {
@@ -343,6 +347,10 @@ func (n *Node) truncateAndRevertConfig(idx uint64) {
 		}
 		n.st.currentConfig = top.prev
 		n.st.configHistory = n.st.configHistory[:len(n.st.configHistory)-1]
+		reverted = true
+	}
+	if reverted {
+		n.st.invalidatePeerSet()
 	}
 	// Recompute appendedConfigIndex: the highest surviving config-entry
 	// index, or 0 if none.
