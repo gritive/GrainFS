@@ -193,11 +193,12 @@ func (n *Node) run() {
 		}
 	}()
 
-	// Bootstrap: a single-voter cluster (Peers empty == only self) auto-
-	// promotes to Leader at term 1 without running an election. Multi-voter
-	// Nodes start as Follower and rely on the election timer firing.
-	// Convention follows v1's "Peers excludes self" (internal/raft/raft.go:184).
-	if len(n.cfg.Peers) == 0 {
+	// Bootstrap: a single-voter cluster ({self} only in the effective config)
+	// auto-promotes to Leader at term 1 without running an election. Multi-
+	// voter Nodes start as Follower and rely on the election timer firing.
+	// The effective config was reconstructed in NewNode from snapshot + log
+	// replay; cfg.Peers is the seed-only fallback when no snapshot exists.
+	if n.st.isSoloVoter() {
 		// Only advance currentTerm to 1 if we haven't already been here
 		// (recovery case: persisted currentTerm >= 1 means we were Leader before).
 		if n.st.currentTerm < 1 {
@@ -607,7 +608,7 @@ func (n *Node) handlePropose(cmd command) {
 	// uniform single/multi-voter Leader transition) is delivered to applyCh
 	// before this entry. The waiter is registered in proposeWaiters so
 	// applyCommitted resolves it.
-	if len(n.cfg.Peers) == 0 {
+	if n.st.isSoloVoter() {
 		if cmd.proposeReply != nil {
 			if n.st.proposeWaiters == nil {
 				n.st.proposeWaiters = make(map[uint64]chan proposalResult)
@@ -633,7 +634,7 @@ func (n *Node) handlePropose(cmd command) {
 	}
 	n.publish()
 
-	for _, peer := range n.cfg.Peers {
+	for _, peer := range n.st.peers() {
 		// dispatchOne picks AE vs InstallSnapshot based on nextIndex[peer]
 		// vs FirstIndex(); single-flight gate honoured inside.
 		n.dispatchOne(peer)
@@ -677,7 +678,7 @@ func (n *Node) becomeCandidate() {
 	n.st.state = Candidate
 	n.st.votedFor = n.st.id
 	n.st.leaderID = ""
-	n.st.votesGranted = 1 // self-vote
+	n.st.votesGranted = map[string]bool{n.st.id: true} // self-vote
 	// Persist before broadcasting: peers must see a durable self-vote before
 	// we send RequestVote RPCs. A crash after dispatch but before persist
 	// would let us re-enter the same term without the self-vote, violating §5.4.1.
@@ -695,7 +696,7 @@ func (n *Node) becomeCandidate() {
 
 	// Single-voter Candidate is impossible under the bootstrap path (single-
 	// voter starts at Leader). Multi-voter dispatch:
-	for _, peer := range n.cfg.Peers {
+	for _, peer := range n.st.peers() {
 		go n.sendRequestVote(peer, args)
 	}
 
@@ -703,7 +704,7 @@ func (n *Node) becomeCandidate() {
 	// is misconfigured to a single-voter via Peers=[]; the bootstrap path
 	// above already covers that, so this branch is theoretical). Keep it
 	// explicit for safety.
-	if n.hasMajority(n.st.votesGranted) {
+	if n.st.currentConfig.quorumOK(n.st.votesGranted) {
 		n.becomeLeader()
 	}
 }
@@ -724,7 +725,8 @@ func (n *Node) becomeLeader() {
 	// at append time — there can never be a prior-term uncommitted entry
 	// at single-voter election, making the no-op unnecessary noise on the
 	// applyCh. FSM consumers MUST ignore LogEntryNoOp entries (Command nil).
-	if len(n.cfg.Peers) > 0 {
+	peers := n.st.peers()
+	if len(peers) > 0 {
 		noOpIdx := n.st.lastLogIndex() + 1
 		if err := n.st.log.Append([]LogEntry{{
 			Term:  n.st.currentTerm,
@@ -740,18 +742,18 @@ func (n *Node) becomeLeader() {
 	// starts at 0 (we've confirmed nothing yet). Set after no-op append so
 	// nextIndex[peer] accounts for the no-op.
 	last := n.st.lastLogIndex()
-	n.st.matchIndex = make(map[string]uint64, len(n.cfg.Peers))
-	n.st.nextIndex = make(map[string]uint64, len(n.cfg.Peers))
-	n.st.peerInFlight = make(map[string]bool, len(n.cfg.Peers))
+	n.st.matchIndex = make(map[string]uint64, len(peers))
+	n.st.nextIndex = make(map[string]uint64, len(peers))
+	n.st.peerInFlight = make(map[string]bool, len(peers))
 	// Reset ReadIndex tracking for this term — peerLastRound from any prior
 	// term must NOT pre-satisfy a fresh ReadIndex (load-bearing for §6.4
 	// linearizability). leaderRound restarts at 0, so a queued req from a
 	// prior term that still references its old minPeerRound (>0) cannot match
 	// even if peerLastRound were stale; we nil both anyway as defense in depth.
 	n.st.leaderRound = 0
-	n.st.peerLastRound = make(map[string]uint64, len(n.cfg.Peers))
+	n.st.peerLastRound = make(map[string]uint64, len(peers))
 	n.st.readIndexQueue = nil
-	for _, peer := range n.cfg.Peers {
+	for _, peer := range peers {
 		n.st.matchIndex[peer] = 0
 		n.st.nextIndex[peer] = last + 1
 		n.st.peerLastRound[peer] = 0
@@ -772,7 +774,7 @@ func (n *Node) becomeLeader() {
 	// followers learn of the new leader without waiting a full interval.
 	// Single-voter clusters have no peers; skipping the ticker avoids waking
 	// the actor every 50ms for an empty broadcastHeartbeat.
-	if len(n.cfg.Peers) > 0 {
+	if len(peers) > 0 {
 		interval := n.cfg.HeartbeatTimeout
 		if interval <= 0 {
 			interval = defaultHeartbeatTimeout
@@ -826,7 +828,7 @@ func (n *Node) stepDownToFollower(term uint64) {
 	n.st.state = Follower
 	n.st.votedFor = ""
 	n.st.leaderID = ""
-	n.st.votesGranted = 0
+	n.st.votesGranted = nil
 	// Persist before any caller-visible side effect (reply.Term, publish).
 	n.persistHardState()
 }
@@ -857,7 +859,7 @@ func (n *Node) becomeFollower(term uint64) {
 // round; ReadIndex requests in flight during a snapshot install simply wait
 // for the next heartbeat round.
 func (n *Node) broadcastHeartbeat() {
-	for _, peer := range n.cfg.Peers {
+	for _, peer := range n.st.peers() {
 		n.dispatchOne(peer)
 	}
 }
@@ -984,8 +986,13 @@ func (n *Node) handleVoteReply(cmd command) {
 	if !cmd.vrGranted {
 		return
 	}
-	n.st.votesGranted++
-	if n.hasMajority(n.st.votesGranted) {
+	if n.st.votesGranted == nil {
+		// Defensive: should be allocated in becomeCandidate. A nil map here
+		// indicates a logic bug; treat as fresh and continue.
+		n.st.votesGranted = make(map[string]bool)
+	}
+	n.st.votesGranted[cmd.vrPeer] = true
+	if n.st.currentConfig.quorumOK(n.st.votesGranted) {
 		n.becomeLeader()
 	}
 }
@@ -1115,14 +1122,25 @@ func (n *Node) applyConflictHint(cmd command) {
 }
 
 // maybeAdvanceCommitIndex finds the highest log index N such that a majority
-// of voters (self + peers) have matchIndex >= N AND log[N].Term ==
+// of voters (per effective config) have matchIndex >= N AND log[N].Term ==
 // currentTerm. The term gate is Raft §5.4.2 — leaders may not commit entries
 // from prior terms by counting replicas alone. Caller must be Leader.
+//
+// In joint state (Raft §4.3), the quorum check requires a majority from
+// BOTH Cold and Cnew independently. effectiveConfig.commitOK encodes that.
 func (n *Node) maybeAdvanceCommitIndex() {
 	last := n.st.lastLogIndex()
 	if last <= n.st.commitIndex {
 		return
 	}
+	// Build the per-voter match view: self matches at last (we definitionally
+	// have every entry up to last), peers contribute their tracked matchIndex.
+	match := make(map[string]uint64, len(n.st.matchIndex)+1)
+	for k, v := range n.st.matchIndex {
+		match[k] = v
+	}
+	match[n.st.id] = last
+
 	// Walk from highest candidate down; first one that meets quorum + term
 	// gate becomes the new commitIndex.
 	newCommit := n.st.commitIndex
@@ -1131,15 +1149,7 @@ func (n *Node) maybeAdvanceCommitIndex() {
 		if n.mustTermAt(N) != n.st.currentTerm {
 			continue
 		}
-		// Self counts as matched at lastLogIndex (we definitionally have N
-		// since N <= last). Quorum threshold: floor(total/2)+1.
-		count := 1
-		for _, peer := range n.cfg.Peers {
-			if n.st.matchIndex[peer] >= N {
-				count++
-			}
-		}
-		if n.hasMajority(count) {
+		if n.st.currentConfig.commitOK(N, match) {
 			newCommit = N
 			break
 		}
@@ -1169,14 +1179,6 @@ func (n *Node) resetElectionTimer() {
 	n.electionTimer.Reset(timeout)
 }
 
-// hasMajority reports whether n votes constitutes a majority of the
-// configured cluster. Total voters = len(Peers)+1 (Peers excludes self per
-// v1 convention). Majority = floor(total/2)+1.
-func (n *Node) hasMajority(votes int) bool {
-	total := len(n.cfg.Peers) + 1
-	return votes >= total/2+1
-}
-
 // handleReadIndex processes a queued ReadIndex request (Raft §6.4). The
 // linearizability protocol:
 //
@@ -1196,7 +1198,7 @@ func (n *Node) handleReadIndex(cmd command) {
 		cmd.riReply <- readIndexResult{err: ErrNotLeader}
 		return
 	}
-	if len(n.cfg.Peers) == 0 {
+	if n.st.isSoloVoter() {
 		cmd.riReply <- readIndexResult{index: n.st.commitIndex}
 		return
 	}
@@ -1232,13 +1234,18 @@ func (n *Node) tryFlushReadIndex() {
 			req.reply <- readIndexResult{err: ErrProposalFailed}
 			continue
 		}
-		count := 1 // self
-		for _, peer := range n.cfg.Peers {
-			if n.st.peerLastRound[peer] >= req.minPeerRound {
-				count++
+		// Build a confirmed-set view: self confirmed at any round; peers
+		// confirmed if their tracked peerLastRound is at or beyond the
+		// request's minPeerRound. Joint-aware quorum check handles both
+		// Cold and Cnew majorities.
+		confirmed := make(map[string]bool, len(n.st.peerLastRound)+1)
+		confirmed[n.st.id] = true
+		for peer, r := range n.st.peerLastRound {
+			if r >= req.minPeerRound {
+				confirmed[peer] = true
 			}
 		}
-		if n.hasMajority(count) {
+		if n.st.currentConfig.quorumOK(confirmed) {
 			req.reply <- readIndexResult{index: req.barrier}
 			continue
 		}

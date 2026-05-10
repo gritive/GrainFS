@@ -430,20 +430,20 @@ func (n *Node) Bootstrap() error {
 	return ErrAlreadyBootstrapped
 }
 
-// Configuration returns a point-in-time snapshot of the cluster's voter set.
-// Reads from the actor's published readState; lock-free.
+// Configuration returns a point-in-time snapshot of the cluster's voter set
+// per the most recent effective configuration. Reads from the actor's
+// published readState; lock-free.
 //
-// PR 7: cfg.Peers is static (set at NewNode). Configuration just returns
-// the initial set. M2 will make it dynamic via readState as joint consensus
-// lands.
+// In joint state (Raft §4.3), Servers contains the union Cold ∪ Cnew with
+// Cnew first; callers that need the joint distinction should use the
+// internal readState path. The flat Server list matches v1's API shape.
 func (n *Node) Configuration() Configuration {
 	rs := n.rs.Load()
-	servers := make([]Server, 0, len(n.cfg.Peers)+1)
-	servers = append(servers, Server{ID: n.cfg.ID, Suffrage: Voter})
-	for _, peer := range n.cfg.Peers {
-		servers = append(servers, Server{ID: peer, Suffrage: Voter})
+	all := rs.config.allVoters()
+	servers := make([]Server, 0, len(all))
+	for _, id := range all {
+		servers = append(servers, Server{ID: id, Suffrage: Voter})
 	}
-	_ = rs // not used yet; future PRs may reflect membership changes through readState
 	return Configuration{Servers: servers}
 }
 

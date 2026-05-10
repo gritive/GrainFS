@@ -16,6 +16,10 @@ type readState struct {
 	commitIndex uint64
 	isLeader    bool
 	votedFor    string // candidate this node voted for in the current term ("" = none)
+	// config is a copy of the live effective configuration. Read by
+	// Configuration() from any goroutine. Updated whenever the actor
+	// publishes after a config-bearing log mutation.
+	config effectiveConfig
 }
 
 // actorState is the mutable Raft state owned exclusively by the actor
@@ -27,10 +31,13 @@ type actorState struct {
 	leaderID    string
 	votedFor    string // candidate this node voted for in the current term ("" = none)
 
-	// votesGranted counts ballots received in the current Candidate term,
-	// including the self-vote. Reset to 1 on becomeCandidate; only meaningful
-	// while state == Candidate.
-	votesGranted int
+	// votesGranted is the set of voter IDs that granted a vote in the current
+	// Candidate term, including self. Reset on becomeCandidate; only
+	// meaningful while state == Candidate. Using a set (not a count) lets
+	// joint-state elections check majority of Cold AND majority of Cnew
+	// independently per Raft §4.3 — a single counter loses the per-voter
+	// information needed for the joint check.
+	votesGranted map[string]bool
 
 	// log holds the Raft log entries via the LogStore interface. The concrete
 	// implementation is memLogStore (in-memory); BadgerDB backing lands in PR 10.
@@ -110,6 +117,18 @@ type configHistoryEntry struct {
 
 // snapshot builds a readState reflecting the current actor-owned state.
 func (s *actorState) snapshot() *readState {
+	// Defensive-copy the effectiveConfig slices so the published readState
+	// is fully detached from the actor-owned state. Reads from
+	// Configuration() can then traverse the slices without locking.
+	cfgCopy := effectiveConfig{joint: s.currentConfig.joint}
+	if len(s.currentConfig.voters) > 0 {
+		cfgCopy.voters = make([]string, len(s.currentConfig.voters))
+		copy(cfgCopy.voters, s.currentConfig.voters)
+	}
+	if len(s.currentConfig.oldVoters) > 0 {
+		cfgCopy.oldVoters = make([]string, len(s.currentConfig.oldVoters))
+		copy(cfgCopy.oldVoters, s.currentConfig.oldVoters)
+	}
 	return &readState{
 		state:       s.state,
 		term:        s.currentTerm,
@@ -117,6 +136,7 @@ func (s *actorState) snapshot() *readState {
 		commitIndex: s.commitIndex,
 		isLeader:    s.state == Leader && s.leaderID == s.id && s.leaderID != "",
 		votedFor:    s.votedFor,
+		config:      cfgCopy,
 	}
 }
 
@@ -137,6 +157,28 @@ func (s *actorState) lastLogTerm() uint64 {
 		panic("raftv2: lastLogTerm: " + err.Error())
 	}
 	return t
+}
+
+// peers returns the live peer set (every voter ID except self) per the
+// effective configuration. In joint state this is Cold ∪ Cnew minus self;
+// in single state it is voters minus self. The returned slice is fresh and
+// caller-owned.
+func (s *actorState) peers() []string {
+	return s.currentConfig.peersExcluding(s.id)
+}
+
+// isSoloVoter reports whether the cluster reduces to {self} only — used by
+// the single-voter shortcut paths (auto-promote on bootstrap, inline commit
+// on propose, skip heartbeat ticker, inline ReadIndex). After membership
+// changes this can flip true → false (1→2 voter add) or false → true
+// (final voter step-down), so callers MUST consult it via this helper
+// rather than caching.
+func (s *actorState) isSoloVoter() bool {
+	if s.currentConfig.joint {
+		return false
+	}
+	v := s.currentConfig.voters
+	return len(v) == 1 && v[0] == s.id
 }
 
 // isLogUpToDate reports whether a candidate's log (lastIdx, lastTerm) is at

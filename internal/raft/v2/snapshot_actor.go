@@ -33,13 +33,20 @@ func (n *Node) handleCreateSnapshot(cmd command) {
 		return
 	}
 
-	// Capture the configuration as a flat voter list. Joint-consensus
-	// encoding is task 2's concern; for now this is the static voter set
-	// (self + Peers). TODO(raftv2 task 2): wire dynamic membership through
-	// readState and serialise joint-config state here.
-	cfgVoters := make([]string, 0, len(n.cfg.Peers)+1)
-	cfgVoters = append(cfgVoters, n.cfg.ID)
-	cfgVoters = append(cfgVoters, n.cfg.Peers...)
+	// Capture the configuration from the live effective config (Raft §4.3).
+	// Snapshots flatten to a single voter list, so we refuse to snapshot
+	// while the cluster is in the joint state — joint windows are short
+	// (one or two AE round-trips) and the operator should retry once the
+	// final ConfChange entry commits. Without this guard, a snapshot taken
+	// mid-joint would silently drop the Cold/Cnew distinction and a
+	// follower restoring from it would resume in the wrong (non-joint)
+	// state, breaking quorum invariants until a new config entry arrives.
+	if n.st.currentConfig.joint {
+		cmd.csReply <- fmt.Errorf("raftv2: CreateSnapshot: cannot snapshot during joint configuration; retry after final ConfChange commits")
+		return
+	}
+	cfgVoters := make([]string, len(n.st.currentConfig.voters))
+	copy(cfgVoters, n.st.currentConfig.voters)
 
 	snap := &Snapshot{
 		LastIncludedIndex: cmd.csIndex,
