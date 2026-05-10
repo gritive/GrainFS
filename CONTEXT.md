@@ -244,6 +244,50 @@ whether an operation is frame-only, body-streamed, or read-streamed, and
 whether it mutates data. FlatBuffers encoding, reply parsing, retry policy,
 leader-hint dialing, and storage semantics remain in their existing modules.
 
+### Storage Op Routing
+
+Storage op routing is the cluster module that resolves an S3-level operation
+to a placement-group target. Input is `(bucket, key, version)` plus intent
+(bucket-only, object-read, object-write); output is a route target — group
+ID, dial-ready peer list, and self-leader/voter facts.
+
+The module owns object-index lookup, internal-bucket bypass, the
+object-index-missing fallback to bucket routing, write target selection via
+`SelectObjectPlacementGroup` over the EC config, and peer address resolution
+through the address book. It is ctx-free and performs no I/O; address book
+lookup is an in-memory snapshot read, not network probing.
+
+The interface has three methods, one per intent. `RouteBucket(bucket)`
+returns a target alone. `RouteObjectRead(bucket, key, versionID)` returns a
+target plus the resolved object-index entry, where empty `versionID` means
+latest. `RouteObjectWrite(bucket, key)` returns a target plus the chosen
+shard group entry so callers can commit the object-index record after the
+write succeeds.
+
+Transport-shape selection, ctx-blocking local-vs-forward decisions, the
+forwarded reply parsing, and the post-write object-index commit remain in
+their owning modules. Unresolved legacy peer rows fail at this seam rather
+than leaking through to forward dispatch, consistent with ADR 0003.
+
+### Local Execution Decision
+
+The local execution decision is the ctx-aware sibling of storage op routing.
+It takes a route target plus read/write intent and decides whether the local
+GroupBackend can answer the operation without going to the wire.
+
+For writes, the local backend is selected only when self is the group
+leader, with a bounded leader-wait when self is the only voter. For reads,
+the local backend is selected when self is leader or only voter; for
+follower voters, a `ReadIndex` plus `WaitApplied` against a short deadline
+gates the local read. Failed gates return a forward signal rather than an
+error so callers proceed to the forward path on the same call.
+
+The interface returns either a `*GroupBackend` or `nil`. A nil backend
+means the caller must forward; a non-nil backend is dial-ready local
+execution. The module owns the follower-read deadline and the self-only-voter
+leader-wait timing; transport dispatch, reply parsing, and storage semantics
+remain in their owning modules.
+
 ### IAM (ServiceAccount + AccessKey + Grant)
 
 `internal/iam/` is the cluster IAM domain: it owns the ServiceAccount /

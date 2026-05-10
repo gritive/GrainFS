@@ -12,6 +12,7 @@
 
 ### 기타
 
+- [ ] **Forward + commitObjectIndex crash window** — `internal/cluster/cluster_coordinator.go:1142,1160,1182,1107,1121` 등 PutObject/CompleteMultipartUpload forward 경로에서 `forward.Send` 성공 후 `commitObjectIndex` 호출 사이에 originating node가 crash하면 데이터는 원격 leader에 있지만 object index에 엔트리 없음 → orphan blob. 구조적 수정안: leader (handlePutObject in `forward_receiver.go`) 쪽에서 storage write와 함께 ProposeObjectIndex 수행. 2026-05-11 `/plan-eng-review` (storage op routing grilling, F2)에서 식별, refactor scope 외로 분리.
 - [ ] **RUNBOOK Docker bootstrap 절차 수정** — `docs/RUNBOOK.md` Docker 섹션(line ~510)이 `docker volume create grainfs-data` (named volume)을 쓰면서 host-side `admin.sock` 접근을 가정. named volume은 호스트 fs에 직접 노출되지 않으므로 잘못된 안내. 수정안: (a) 예제를 `-v /var/lib/grainfs:/data` host bind-mount로 변경, 또는 (b) `docker exec grainfs grainfs iam sa create admin --endpoint /data/admin.sock` 으로 컨테이너 내 실행. PR #258에서 식별, scope 분리.
 - [ ] **RUNBOOK K8s admin SA bootstrap 절차 추가** — `docs/RUNBOOK.md` K8s 섹션(line ~570)에서 access-key ConfigMap을 제거했지만 admin UDS bootstrap 한 줄 안내 없음. 추가안: `kubectl exec deploy/grainfs -- grainfs iam sa create admin --endpoint /grainfs/data/admin.sock` 한 줄. PR #258에서 식별, scope 분리.
 - [ ] **clusteradmin BaseOptions retro-fit** — `internal/clusteradmin/operations.go` 의
