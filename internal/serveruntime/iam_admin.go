@@ -26,10 +26,8 @@ import (
 //	PUT    /v1/iam/grant
 //	DELETE /v1/iam/grant
 //	GET    /v1/iam/grant
-//	POST   /v1/iam/bucket-upstream
-//	GET    /v1/iam/bucket-upstream
-//	GET    /v1/iam/bucket-upstream/:bucket
-//	DELETE /v1/iam/bucket-upstream/:bucket
+//
+// Bucket-upstream routes are under /v1/buckets/* — see RegisterBucketAdminRoutes.
 func RegisterIAMAdminRoutes(h *hzserver.Hertz, api *iam.AdminAPI) {
 	g := h.Group("/v1/iam")
 	g.POST("/sa", wrapStdlibNoParam(api.HandleSACreate))
@@ -41,10 +39,6 @@ func RegisterIAMAdminRoutes(h *hzserver.Hertz, api *iam.AdminAPI) {
 	g.PUT("/grant", wrapStdlibNoParam(api.HandleGrantPut))
 	g.DELETE("/grant", wrapStdlibNoParam(api.HandleGrantDelete))
 	g.GET("/grant", wrapStdlibNoParam(api.HandleGrantList))
-	g.POST("/bucket-upstream", wrapStdlibNoParam(api.HandleBucketUpstreamPut))
-	g.GET("/bucket-upstream", wrapStdlibNoParam(api.HandleBucketUpstreamList))
-	g.GET("/bucket-upstream/:bucket", wrapStdlibOneParam("bucket", api.HandleBucketUpstreamGet))
-	g.DELETE("/bucket-upstream/:bucket", wrapStdlibOneParam("bucket", api.HandleBucketUpstreamDelete))
 }
 
 func wrapStdlibNoParam(fn func(http.ResponseWriter, *http.Request)) app.HandlerFunc {

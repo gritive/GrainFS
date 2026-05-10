@@ -466,7 +466,7 @@ func parseRoleString(s string) (Role, error) {
 	}
 }
 
-// BucketUpstreamPutRequest is the JSON body for POST /v1/iam/bucket-upstream.
+// BucketUpstreamPutRequest is the JSON body for PUT /v1/buckets/upstream.
 // Both creds are required; secret_key is plaintext on input and wrap-encrypted
 // before raft propose. Never echoed back in any response.
 //

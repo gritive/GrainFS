@@ -53,7 +53,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 				"access_key":   ak,
 				"secret_key":   sk,
 			}
-			_, err = iamRequest(c.Context(), sock, "POST", "/v1/iam/bucket-upstream", body)
+			_, err = iamRequest(c.Context(), sock, "PUT", "/v1/buckets/upstream", body)
 			return err
 		},
 	}
@@ -73,7 +73,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 				return err
 			}
 			out, err := iamRequest(c.Context(), sock, "GET",
-				"/v1/iam/bucket-upstream/"+url.PathEscape(args[0]), nil)
+				"/v1/buckets/"+url.PathEscape(args[0])+"/upstream", nil)
 			if err != nil {
 				return err
 			}
@@ -90,7 +90,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out, err := iamRequest(c.Context(), sock, "GET", "/v1/iam/bucket-upstream", nil)
+			out, err := iamRequest(c.Context(), sock, "GET", "/v1/buckets/upstream", nil)
 			if err != nil {
 				return err
 			}
@@ -109,7 +109,7 @@ func iamBucketUpstreamCmd() *cobra.Command {
 				return err
 			}
 			_, err = iamRequest(c.Context(), sock, "DELETE",
-				"/v1/iam/bucket-upstream/"+url.PathEscape(args[0]), nil)
+				"/v1/buckets/"+url.PathEscape(args[0])+"/upstream", nil)
 			return err
 		},
 	}

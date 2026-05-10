@@ -87,7 +87,7 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 
 	// Register the upstream credentials for the "shared" bucket via admin UDS.
 	localSock := filepath.Join(localDir, "admin.sock")
-	iamSetBucketUpstream(t, localSock, "shared", upEndpoint, upAK, upSK)
+	iamPutBucketUpstream(t, localSock, "shared", upEndpoint, upAK, upSK)
 
 	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
 
@@ -192,7 +192,7 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 
 	// Register the upstream credentials for the "large" bucket via admin UDS.
 	localSock := filepath.Join(localDir, "admin.sock")
-	iamSetBucketUpstream(t, localSock, "large", upEndpoint, upAK, upSK)
+	iamPutBucketUpstream(t, localSock, "large", upEndpoint, upAK, upSK)
 
 	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
 
