@@ -667,6 +667,18 @@ func (n *Node) onElectionTimeout() {
 		n.resetElectionTimer()
 		return
 	}
+	// Non-voter guard (Raft §4.3): if self is not a voter in the current
+	// effective configuration (Cnew side in joint state), we are a
+	// removed/learner node that must not run for office. Re-arm the timer
+	// so we can try again later in case our config catches up via AE
+	// replay. In single-state with self absent, this loops indefinitely
+	// until either (a) we're added back via a future ConfChange or (b)
+	// the operator stops the node — both are the correct behaviour for
+	// a node that has been ejected.
+	if !n.st.currentConfig.containsVoter(n.st.id) {
+		n.resetElectionTimer()
+		return
+	}
 	n.becomeCandidate()
 }
 
@@ -793,6 +805,17 @@ func (n *Node) becomeLeader() {
 		n.heartbeatTicker = time.NewTicker(interval)
 		n.broadcastHeartbeat()
 	}
+
+	// Leader-churn mid-joint recovery (Raft §4.3): if the prior leader died
+	// after appending the joint entry but before appending the final
+	// LogEntryConfChange, the live config we just inherited is joint and
+	// no caller is waiting on a pendingConfChange. Without intervention the
+	// joint state never settles — every future AddVoter / RemoveVoter
+	// returns ErrConfChangeInFlight forever. Synthesize a pendingConfChange
+	// so applyCommitted's hook fires phase 2 once the joint entry's commit
+	// is re-confirmed under the new term. The reply chan is a cap-1
+	// throwaway since no caller is waiting.
+	n.recoverInFlightJoint()
 }
 
 // stepDownToFollower applies the state transition to Follower (term, vote,

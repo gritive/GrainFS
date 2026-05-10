@@ -175,20 +175,10 @@ func (n *Node) advanceConfChangePhase() {
 		n.st.appendedConfigIndex = finalIdx
 		pcc.finalIndex = finalIdx
 
-		// Drop replication state for any peer that is no longer a voter
-		// (post-final-entry effective config). A removed voter still
-		// receives one or two more AEs (the final entry replicates to
-		// them so they learn they're out), but we stop tracking their
-		// matchIndex for quorum decisions immediately because Cnew alone
-		// drives commit from now on.
-		keep := make(map[string]struct{}, len(n.st.currentConfig.voters))
-		for _, v := range n.st.currentConfig.peersExcluding(n.st.id) {
-			keep[v] = struct{}{}
-		}
-		// Best-effort cleanup: leaving stale entries is benign because
-		// commitOK consults currentConfig, not the maps. Skip on memory
-		// budget unless they grow unbounded — for now we let them age out
-		// at the next becomeLeader.
+		// Stale replication-map entries for now-non-voters are benign:
+		// commitOK and quorumOK both consult currentConfig (not the maps)
+		// for membership, so an entry for a dropped voter has no effect
+		// on commit decisions. They age out at the next becomeLeader.
 
 		n.publish()
 		n.broadcastHeartbeat()
@@ -200,17 +190,73 @@ func (n *Node) advanceConfChangePhase() {
 	}
 }
 
-// maybeStepDownAfterRemoval implements the Raft §4.3 self-removed-leader
-// rule: a leader that is in Cold but not in Cnew stays leader until the
-// final ConfChange entry commits, then steps down. The check is post-
-// commit, post-phase-advance, so by the time we land here the leader's
-// pendingConfChange has been resolved (or the leader was a follower
-// that committed its own removal via AE replay).
+// recoverInFlightJoint resurrects a pendingConfChange when a new leader
+// inherits a joint state with no following final entry. Reads the joint
+// entry's encoded Cnew so phase 2 can append the right payload once
+// commit is re-confirmed under the new term.
 //
-// Detection: the committed configuration (the most recent committed
-// LogEntryConfChange) excludes self. Without re-reading the log we can
-// approximate by: if the live (non-joint) currentConfig excludes self
-// AND the appended config index is committed, we have lost our seat.
+// Pre-conditions (caller's responsibility): we just became Leader, no
+// pendingConfChange is set, and currentConfig.joint is true.
+//
+// If the live log lacks the originating joint entry (because the
+// snapshot ate it but a follower's currentConfig is stale — should not
+// happen since handleInstallSnapshot resets currentConfig, but defensive
+// nonetheless), the recovery is a no-op. The ErrConfChangeInFlight gate
+// would still apply, requiring operator intervention; that is preferable
+// to dispatching a fabricated entry.
+func (n *Node) recoverInFlightJoint() {
+	if n.st.pendingConfChange != nil {
+		return
+	}
+	if !n.st.currentConfig.joint {
+		return
+	}
+	if n.st.appendedConfigIndex == 0 {
+		return
+	}
+	idx := n.st.appendedConfigIndex
+	first := n.st.log.FirstIndex()
+	if idx < first || idx > n.st.lastLogIndex() {
+		return
+	}
+	e, err := n.st.log.Entry(idx)
+	if err != nil {
+		return
+	}
+	if e.Type != LogEntryJointConfChange {
+		// The latest config entry isn't a joint entry — nothing to
+		// recover. Should not happen given currentConfig.joint == true,
+		// but guard against state corruption.
+		return
+	}
+	p := configEntryPayload(e)
+	// Reply is a buffered throwaway: no caller is waiting because the
+	// original AddVoter/RemoveVoter call died with the previous leader.
+	n.st.pendingConfChange = &pendingConfChange{
+		jointIndex: idx,
+		newVoters:  p.NewVoters,
+		reply:      make(chan confChangeResult, 1),
+	}
+	// applyCommitted will fire advanceConfChangePhase the next time
+	// commitIndex advances; if the joint entry was already committed
+	// before we became leader, drive it inline now.
+	if n.st.commitIndex >= idx {
+		n.advanceConfChangePhase()
+	}
+}
+
+// maybeStepDownAfterRemoval implements the Raft §4.3 self-removed-leader
+// rule: a leader that is in Cold but not in Cnew stays at its post until
+// the final ConfChange entry commits, then steps down. Called after every
+// applyCommitted advance.
+//
+// Step-down condition: live config is non-joint, the most recent appended
+// config entry (appendedConfigIndex) is committed, and self is not a
+// voter in the resulting Cnew. Checking commit (rather than just append)
+// is load-bearing — advanceConfChangePhase appends and immediately swaps
+// currentConfig to Cnew before the new entry commits, so a step-down
+// gated on append alone would fire one tick too early and drain the
+// caller's pendingConfChange with ErrProposalFailed.
 func (n *Node) maybeStepDownAfterRemoval() {
 	if n.st.state != Leader {
 		return
@@ -221,9 +267,17 @@ func (n *Node) maybeStepDownAfterRemoval() {
 	if n.st.currentConfig.containsVoter(n.st.id) {
 		return
 	}
-	// We are the leader but not in the (settled) effective config. Step
-	// down so a Cnew voter can take over. stepDownToFollower drains
-	// in-flight ProposeWait callers and clears leader-only state.
+	if n.st.appendedConfigIndex == 0 || n.st.appendedConfigIndex > n.st.commitIndex {
+		// The Cnew entry that excludes us has not yet committed (or there
+		// is no config entry at all — degenerate case where cfg.Peers
+		// already excluded us at boot, which is operator misconfiguration).
+		// Stay at our post.
+		return
+	}
+	// Cnew is committed and excludes us. Step down so a Cnew voter can
+	// take over. stepDownToFollower drains leader-only state including
+	// any residual pendingConfChange (which advanceConfChangePhase has
+	// already resolved by this point on the happy path).
 	n.becomeFollower(n.st.currentTerm)
 }
 

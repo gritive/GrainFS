@@ -234,3 +234,131 @@ func TestMembership_AddVoterRejectsConcurrent(t *testing.T) {
 		return sawInFlight
 	}, 5*time.Second, 50*time.Millisecond, "expected at least one concurrent AddVoter to see ErrConfChangeInFlight")
 }
+
+// TestMembership_TruncateAfterRevertsConfig: a follower with a config entry
+// in its log gets that suffix truncated by a conflicting AE; effective
+// config must revert to whatever was active just before the dropped
+// config entry. Direct unit test on truncateAndRevertConfig.
+func TestMembership_TruncateAfterRevertsConfig(t *testing.T) {
+	n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	require.NoError(t, err)
+	// Seed the log with a normal entry, then a joint entry, then a final
+	// entry. currentConfig should track to the final state.
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
+	}})
+	require.True(t, n.st.currentConfig.joint)
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 3, Type: LogEntryConfChange,
+		Command: encodeConfChange([]string{"n1", "n2", "n3", "n4"}),
+	}})
+	require.False(t, n.st.currentConfig.joint)
+	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, n.st.currentConfig.voters)
+	require.Equal(t, uint64(3), n.st.appendedConfigIndex)
+	require.Len(t, n.st.configHistory, 2)
+
+	// Truncate past index 1 — drops both config entries; revert to the
+	// pre-history config (the original {n1,n2,n3}).
+	n.truncateAndRevertConfig(1)
+	require.False(t, n.st.currentConfig.joint)
+	require.Equal(t, []string{"n1", "n2", "n3"}, n.st.currentConfig.voters)
+	require.Equal(t, uint64(0), n.st.appendedConfigIndex)
+	require.Empty(t, n.st.configHistory)
+	require.Equal(t, uint64(1), n.st.log.LastIndex())
+}
+
+// TestMembership_TruncateRevertsToJoint: truncate past only the FINAL entry
+// (idx 2) so the joint entry survives. Effective config must end up in
+// joint state.
+func TestMembership_TruncateRevertsToJoint(t *testing.T) {
+	n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	require.NoError(t, err)
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
+	}})
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 3, Type: LogEntryConfChange,
+		Command: encodeConfChange([]string{"n1", "n2", "n3", "n4"}),
+	}})
+
+	n.truncateAndRevertConfig(2) // drops idx 3 only
+	require.True(t, n.st.currentConfig.joint, "after truncating final, must be back in joint state")
+	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, n.st.currentConfig.voters)
+	require.Equal(t, []string{"n1", "n2", "n3"}, n.st.currentConfig.oldVoters)
+	require.Equal(t, uint64(2), n.st.appendedConfigIndex)
+	require.Len(t, n.st.configHistory, 1)
+}
+
+// TestMembership_InstallSnapshotResetsConfig: a follower whose live config
+// is in the joint state receives an InstallSnapshot RPC carrying a
+// post-joint Cnew. Its effective config must reset to the snapshot's
+// voter set (non-joint).
+func TestMembership_InstallSnapshotResetsConfig(t *testing.T) {
+	n, err := NewNode(Config{ID: "follower", Peers: []string{"leader"}})
+	require.NoError(t, err)
+
+	// Force the follower into a joint state via direct state manipulation
+	// (pre-Start so the actor goroutine is not running). Append a joint
+	// entry to the log and update tracking.
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"leader", "follower"}, []string{"leader", "follower", "newcomer"}),
+	}})
+	require.True(t, n.st.currentConfig.joint)
+	require.Equal(t, uint64(2), n.st.appendedConfigIndex)
+
+	n.Start()
+	t.Cleanup(n.Stop)
+	go func() {
+		for range n.ApplyCh() {
+		}
+	}()
+
+	// Inject a snapshot whose Configuration is post-joint Cnew.
+	reply := n.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "leader",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  1,
+		Configuration:     []string{"leader", "follower", "newcomer"},
+		Data:              []byte("snap"),
+	})
+	require.NotNil(t, reply)
+
+	// Configuration must reset to the snapshot's voter set.
+	require.NoError(t, waitFor(time.Second, func() bool {
+		got := sortedVoterIDs(n.Configuration())
+		return len(got) == 3 && got[0] == "follower" && got[1] == "leader" && got[2] == "newcomer"
+	}), "Configuration did not reset to snapshot voters")
+
+	rs := n.rs.Load()
+	require.False(t, rs.config.joint, "must exit joint state after snapshot install")
+}
+
+// TestMembership_SelfRemovedLeaderStepsDown: 3-voter cluster, leader
+// removes itself. After the final ConfChange entry commits, the leader
+// must step down to Follower and one of the remaining voters must
+// eventually win the next election.
+func TestMembership_SelfRemovedLeaderStepsDown(t *testing.T) {
+	fix := startMembershipCluster(t, []string{"n1", "n2", "n3"})
+	leader := fix.nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
+
+	require.NoError(t, leader.RemoveVoter("n1"))
+
+	// Leader steps down once Cnew (excluding n1) commits.
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		return !leader.IsLeader() && leader.State() == Follower
+	}), "self-removed leader did not step down")
+
+	// One of the remaining voters must take over (election may take a
+	// few hundred milliseconds because n2 and n3 use slowElectionTimeout).
+	require.NoError(t, waitFor(5*time.Second, func() bool {
+		return fix.nodes[1].IsLeader() || fix.nodes[2].IsLeader()
+	}), "no successor leader after self-removal")
+}

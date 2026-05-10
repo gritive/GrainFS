@@ -171,6 +171,16 @@ func (n *Node) handleInstallSnapshot(cmd command) {
 	// snapshot replay covering them.
 	n.st.commitIndex = args.LastIncludedIndex
 
+	// Reset the effective configuration to the snapshot's voter set. The
+	// log was just truncated to FirstIndex-1, so there are no surviving
+	// config entries in the live log; the snapshot's Configuration is the
+	// authoritative committed config at LastIncludedIndex (snapshot
+	// CreateSnapshot refuses to write while joint, so this is always a
+	// non-joint voter list — see handleCreateSnapshot guard).
+	n.st.currentConfig = newSingleConfig(args.Configuration)
+	n.st.configHistory = nil
+	n.st.appendedConfigIndex = 0
+
 	// Deliver the snapshot signal to the FSM. Use the same applyInCh pipeline
 	// as committed entries so FIFO ordering is preserved across the
 	// install + subsequent AE replay path. The Command field carries the
