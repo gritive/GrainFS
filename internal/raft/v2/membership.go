@@ -35,13 +35,13 @@ func (n *Node) handleConfChange(cmd command) {
 		cmd.ccReply <- confChangeResult{err: ErrConfChangeInFlight}
 		return
 	}
-	// Defensive: cannot have a sane joint config and pendingConfChange == nil
-	// after a leader takeover (becomeLeader does not currently rebuild
-	// pendingConfChange from log replay). If we observe a joint state on
-	// becoming leader, the new leader cannot continue someone else's
-	// half-finished change — refuse to start a fresh one until the joint
-	// settles via the existing log entry being re-replicated. The simplest
-	// safe answer: refuse.
+	// Defense-in-depth: becomeLeader now rebuilds pendingConfChange from
+	// log replay via recoverInFlightJoint, so the pendingConfChange != nil
+	// gate above will normally catch a half-finished joint. This branch
+	// remains as a last-resort guard against a hypothetical state where
+	// currentConfig.joint is set but recovery did not synthesize a pending
+	// entry (e.g. the joint log entry was truncated below our window). In
+	// that case we still cannot safely start a fresh change — refuse.
 	if n.st.currentConfig.joint {
 		cmd.ccReply <- confChangeResult{err: ErrConfChangeInFlight}
 		return
@@ -232,6 +232,11 @@ func (n *Node) recoverInFlightJoint() {
 	p := configEntryPayload(e)
 	// Reply is a buffered throwaway: no caller is waiting because the
 	// original AddVoter/RemoveVoter call died with the previous leader.
+	// Cap-1 buffer is load-bearing: advanceConfChangePhase and
+	// stepDownToFollower both send into reply unconditionally, and the
+	// buffer absorbs the single send so neither path can block on a
+	// receiverless channel. A future refactor that makes either send
+	// blocking (or removes the buffer) would deadlock the actor here.
 	n.st.pendingConfChange = &pendingConfChange{
 		jointIndex: idx,
 		newVoters:  p.NewVoters,
