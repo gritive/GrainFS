@@ -1,7 +1,6 @@
 package raftv2_test
 
 import (
-	"context"
 	"testing"
 
 	v2 "github.com/gritive/GrainFS/internal/raft/v2"
@@ -24,12 +23,14 @@ func TestAPI_ConfigurationReflectsConfig(t *testing.T) {
 	require.Equal(t, v2.Voter, cfg.Servers[0].Suffrage)
 }
 
+// TestAPI_MembershipStubsReturnErrNotImplemented covers the surfaces still
+// awaiting implementation (AddLearner, PromoteToVoter, TransferLeadership).
+// AddVoter / RemoveVoter are now wired through joint consensus and return
+// ErrNotLeader from a non-running follower; their happy paths live in
+// membership_test.go.
 func TestAPI_MembershipStubsReturnErrNotImplemented(t *testing.T) {
 	n, err := v2.NewNode(v2.Config{ID: "n1"})
 	require.NoError(t, err)
-	require.ErrorIs(t, n.AddVoter("n2", "addr"), v2.ErrNotImplemented)
-	require.ErrorIs(t, n.AddVoterCtx(context.Background(), "n2", "addr"), v2.ErrNotImplemented)
-	require.ErrorIs(t, n.RemoveVoter("n2"), v2.ErrNotImplemented)
 	require.ErrorIs(t, n.AddLearner("n2", "addr"), v2.ErrNotImplemented)
 	require.ErrorIs(t, n.PromoteToVoter("n2"), v2.ErrNotImplemented)
 	require.ErrorIs(t, n.TransferLeadership(), v2.ErrNotImplemented)

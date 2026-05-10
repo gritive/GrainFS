@@ -33,13 +33,20 @@ func (n *Node) handleCreateSnapshot(cmd command) {
 		return
 	}
 
-	// Capture the configuration as a flat voter list. Joint-consensus
-	// encoding is task 2's concern; for now this is the static voter set
-	// (self + Peers). TODO(raftv2 task 2): wire dynamic membership through
-	// readState and serialise joint-config state here.
-	cfgVoters := make([]string, 0, len(n.cfg.Peers)+1)
-	cfgVoters = append(cfgVoters, n.cfg.ID)
-	cfgVoters = append(cfgVoters, n.cfg.Peers...)
+	// Capture the configuration from the live effective config (Raft §4.3).
+	// Snapshots flatten to a single voter list, so we refuse to snapshot
+	// while the cluster is in the joint state — joint windows are short
+	// (one or two AE round-trips) and the operator should retry once the
+	// final ConfChange entry commits. Without this guard, a snapshot taken
+	// mid-joint would silently drop the Cold/Cnew distinction and a
+	// follower restoring from it would resume in the wrong (non-joint)
+	// state, breaking quorum invariants until a new config entry arrives.
+	if n.st.currentConfig.joint {
+		cmd.csReply <- fmt.Errorf("raftv2: CreateSnapshot: cannot snapshot during joint configuration; retry after final ConfChange commits")
+		return
+	}
+	cfgVoters := make([]string, len(n.st.currentConfig.voters))
+	copy(cfgVoters, n.st.currentConfig.voters)
 
 	snap := &Snapshot{
 		LastIncludedIndex: cmd.csIndex,
@@ -163,6 +170,17 @@ func (n *Node) handleInstallSnapshot(cmd command) {
 	// commitIndex advance past entries it never received without the
 	// snapshot replay covering them.
 	n.st.commitIndex = args.LastIncludedIndex
+
+	// Reset the effective configuration to the snapshot's voter set. The
+	// log was just truncated to FirstIndex-1, so there are no surviving
+	// config entries in the live log; the snapshot's Configuration is the
+	// authoritative committed config at LastIncludedIndex (snapshot
+	// CreateSnapshot refuses to write while joint, so this is always a
+	// non-joint voter list — see handleCreateSnapshot guard).
+	n.st.currentConfig = newSingleConfig(args.Configuration)
+	n.st.configHistory = nil
+	n.st.appendedConfigIndex = 0
+	n.st.invalidatePeerSet()
 
 	// Deliver the snapshot signal to the FSM. Use the same applyInCh pipeline
 	// as committed entries so FIFO ordering is preserved across the

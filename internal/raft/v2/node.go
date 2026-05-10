@@ -176,6 +176,17 @@ func NewNode(cfg Config) (*Node, error) {
 		}
 	}
 
+	// Reconstruct the effective configuration. Per Raft §4.3, the live config
+	// is whatever the most recent config-bearing log entry says — even if
+	// uncommitted. Bootstrap order:
+	//  1. Seed from snapshot voters if a snapshot exists; otherwise from
+	//     {cfg.ID} ∪ cfg.Peers (cfg.Peers is "peers excludes self" per v1).
+	//  2. Walk log entries from snap.LastIncludedIndex+1 → LastIndex, applying
+	//     any LogEntryConfChange / LogEntryJointConfChange to advance the
+	//     effective config. configHistory is rebuilt in lockstep so any
+	//     subsequent truncation can revert correctly.
+	currentConfig, history, appendedIdx := reconstructConfig(snap, logStore, cfg.ID, cfg.Peers)
+
 	n := &Node{
 		cfg:             cfg,
 		cmdCh:           make(chan command, cmdChBuffer),
@@ -198,7 +209,10 @@ func NewNode(cfg Config) (*Node, error) {
 			// committed (the snapshot encodes the FSM state at that point).
 			// On a non-snapshotted restart, this is 0; the next leader's
 			// AE will re-establish via LeaderCommit.
-			commitIndex: initialCommitIndex,
+			commitIndex:         initialCommitIndex,
+			currentConfig:       currentConfig,
+			configHistory:       history,
+			appendedConfigIndex: appendedIdx,
 		},
 		// Per-Node rng seeded with current time + ID hash so two Nodes started
 		// in the same nanosecond still draw different timeouts. Sole user is
@@ -416,36 +430,85 @@ func (n *Node) Bootstrap() error {
 	return ErrAlreadyBootstrapped
 }
 
-// Configuration returns a point-in-time snapshot of the cluster's voter set.
-// Reads from the actor's published readState; lock-free.
+// Configuration returns a point-in-time snapshot of the cluster's voter set
+// per the most recent effective configuration. Reads from the actor's
+// published readState; lock-free.
 //
-// PR 7: cfg.Peers is static (set at NewNode). Configuration just returns
-// the initial set. M2 will make it dynamic via readState as joint consensus
-// lands.
+// In joint state (Raft §4.3), Servers contains the union Cold ∪ Cnew with
+// Cnew first; callers that need the joint distinction should use the
+// internal readState path. The flat Server list matches v1's API shape.
 func (n *Node) Configuration() Configuration {
 	rs := n.rs.Load()
-	servers := make([]Server, 0, len(n.cfg.Peers)+1)
-	servers = append(servers, Server{ID: n.cfg.ID, Suffrage: Voter})
-	for _, peer := range n.cfg.Peers {
-		servers = append(servers, Server{ID: peer, Suffrage: Voter})
+	all := rs.config.allVoters()
+	servers := make([]Server, 0, len(all))
+	for _, id := range all {
+		servers = append(servers, Server{ID: id, Suffrage: Voter})
 	}
-	_ = rs // not used yet; future PRs may reflect membership changes through readState
 	return Configuration{Servers: servers}
 }
 
-// AddVoter is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) AddVoter(id, addr string) error { return ErrNotImplemented }
-
-// AddVoterCtx is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
-	return ErrNotImplemented
+// AddVoter submits an Add-voter membership change and blocks until both
+// phases of the Raft §4.3 joint-consensus protocol commit. Equivalent to
+// AddVoterCtx with a background context.
+//
+// addr is the transport address; v2 does not interpret it (the Transport
+// implementation is responsible for resolving peer IDs to addresses), so
+// the parameter is preserved for v1 API parity but otherwise unused.
+func (n *Node) AddVoter(id, addr string) error {
+	return n.AddVoterCtx(context.Background(), id, addr)
 }
 
-// RemoveVoter is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) RemoveVoter(id string) error { return ErrNotImplemented }
+// AddVoterCtx submits an Add-voter membership change. Returns once the
+// final LogEntryConfChange entry (Cnew alone) has committed, or the
+// context cancels, or the node steps down.
+//
+// Errors:
+//   - ErrNotLeader: caller-side snapshot says we are not leader, or the
+//     actor's recheck finds the same.
+//   - ErrConfChangeInFlight: a previous membership change has not yet
+//     completed both phases.
+//   - ErrProposalFailed: leader stepped down before phase 2 committed.
+//   - ctx.Err: context cancelled.
+//
+// addr is unused; see AddVoter docstring.
+func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
+	_ = addr
+	return n.submitConfChange(ctx, id, true)
+}
+
+// RemoveVoter submits a Remove-voter membership change and blocks until
+// both phases of the Raft §4.3 joint-consensus protocol commit. The
+// removed voter MAY be the current leader: in that case the leader stays
+// at its post until the final entry commits, then steps down to Follower
+// (Diego's thesis §4.3, "self-removed leader" rule).
+func (n *Node) RemoveVoter(id string) error {
+	return n.submitConfChange(context.Background(), id, false)
+}
+
+// submitConfChange is the shared implementation backing AddVoter,
+// AddVoterCtx, and RemoveVoter. It enqueues a cmdConfChange and waits for
+// the actor's reply.
+func (n *Node) submitConfChange(ctx context.Context, id string, add bool) error {
+	if !n.IsLeader() {
+		return ErrNotLeader
+	}
+	reply := make(chan confChangeResult, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdConfChange, ccID: id, ccAdd: add, ccReply: reply}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+	select {
+	case res := <-reply:
+		return res.err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+}
 
 // AddLearner is a stub for v1 API parity. Real implementation lands in M2
 // (configuration changes via joint consensus).

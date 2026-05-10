@@ -74,13 +74,13 @@ and the only caller of `publish`. Readers never touch `actorState`.
 | MaxEntriesPerAE batch cap | ✅ | PR 8 |
 | Log Matching e.Index validation | ✅ | PR 8 |
 | Conflict-hint O(log N) binary search | ✅ | PR 8 |
-| Membership change (AddVoter / RemoveVoter / etc.) | ⏳ stub | M2 |
+| Membership change (AddVoter / RemoveVoter) | ✅ | PR 16 |
 | LogStore interface (in-memory backing) | ✅ | PR 9 |
 | LogStore persistence (BadgerDB backing) | ✅ | PR 10 |
 | Crash-recovery wiring (StableStore + HardState) | ✅ | PR 11 |
-| Snapshots | ⏳ | M2 |
-| Joint consensus (§4.3) | ⏳ | M2 |
-| ReadIndex linearizable reads | ⏳ | M2 |
+| Snapshots | ✅ | PR 15 |
+| Joint consensus (§4.3) | ✅ | PR 16 |
+| ReadIndex linearizable reads | ✅ | M2 |
 | Property-based tests + chaos suite | ⏳ | M3 |
 | Production caller migration | ⏳ | M5 |
 
@@ -92,6 +92,66 @@ committed entry. **FSM consumers must check `e.Type == LogEntryNoOp` and skip
 these entries** — they carry no application payload. In a 3-voter cluster, the
 first entry applied after election is always the no-op at index 1; the first
 user-visible `ProposeWait` return value is therefore index 2.
+
+## Joint consensus membership changes (Raft §4.3)
+
+`AddVoter(id, addr)` and `RemoveVoter(id)` perform an **atomic** voter-set
+change via a transitional joint configuration. The leader sequences each
+change in two log entries:
+
+  * **Phase 1 — `LogEntryJointConfChange`:** payload encodes both
+    `Cold` (the configuration in effect immediately before the change) and
+    `Cnew` (the target configuration). Once the actor appends this entry,
+    every subsequent quorum decision (commit, election, ReadIndex round)
+    requires a **majority from BOTH `Cold` and `Cnew` independently**.
+    The effective configuration is updated in memory at append time, even
+    though the entry is not yet committed (per the §4.3 "most recent
+    appended log entry" rule).
+  * **Phase 2 — `LogEntryConfChange`:** appended by
+    `advanceConfChangePhase` once the joint entry commits. Payload
+    encodes `Cnew` alone. Quorum reverts to a single-set majority. The
+    caller's `AddVoter`/`RemoveVoter` blocks until this entry commits.
+
+Encoding is binary big-endian (no JSON, per the project's internal-comms
+rule); see `confchange.go` for the wire format.
+
+### Operator-visible behaviour
+
+  * **One in-flight change at a time.** A second `AddVoter` /
+    `RemoveVoter` issued before the first commits both phases returns
+    `ErrConfChangeInFlight`. Mirrors hashicorp/raft's pragmatic rule.
+  * **Self-removed leader.** A leader that removes itself stays at its
+    post until the final `LogEntryConfChange` (Cnew alone) commits, then
+    steps down to Follower. While in this transitional window
+    `currentConfig` excludes self only after Cnew commits.
+  * **Snapshots refuse joint state.** `CreateSnapshot` returns an error
+    if the live configuration is in the joint state; the operator should
+    retry once the final entry commits. Joint windows are bounded by
+    one or two AE round-trips, so this is rarely user-visible.
+  * **Truncation reverts effective config.** A follower whose conflicting
+    AE drops a previously-appended config entry rolls
+    `currentConfig` back to whatever was active just before the dropped
+    entry. The actor maintains a `configHistory` stack for O(1) revert.
+  * **InstallSnapshot resets effective config.** A follower whose log is
+    replaced by `InstallSnapshot` adopts the snapshot's voter list as
+    its new (non-joint) effective configuration. `configHistory` and
+    `appendedConfigIndex` are cleared.
+  * **Leader-churn mid-joint recovery.** If the prior leader appended a
+    joint entry then died before phase 2, the new leader synthesizes a
+    `pendingConfChange` from the inherited log tail and drives phase 2
+    to completion under the new term. No operator intervention required.
+
+### FSM consumer note on config entries
+
+`LogEntryConfChange` and `LogEntryJointConfChange` are delivered on
+`ApplyCh` like any other committed entry. **FSM consumers must skip
+these entries** the same way they skip `LogEntryNoOp`; only
+`LogEntryCommand` carries application payload.
+
+### Pending capability
+
+  * `AddLearner`, `PromoteToVoter`, `TransferLeadership` are still
+    stubs returning `ErrNotImplemented`.
 
 ## Caller migration (deferred)
 
