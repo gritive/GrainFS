@@ -447,19 +447,68 @@ func (n *Node) Configuration() Configuration {
 	return Configuration{Servers: servers}
 }
 
-// AddVoter is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) AddVoter(id, addr string) error { return ErrNotImplemented }
-
-// AddVoterCtx is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
-	return ErrNotImplemented
+// AddVoter submits an Add-voter membership change and blocks until both
+// phases of the Raft §4.3 joint-consensus protocol commit. Equivalent to
+// AddVoterCtx with a background context.
+//
+// addr is the transport address; v2 does not interpret it (the Transport
+// implementation is responsible for resolving peer IDs to addresses), so
+// the parameter is preserved for v1 API parity but otherwise unused.
+func (n *Node) AddVoter(id, addr string) error {
+	return n.AddVoterCtx(context.Background(), id, addr)
 }
 
-// RemoveVoter is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) RemoveVoter(id string) error { return ErrNotImplemented }
+// AddVoterCtx submits an Add-voter membership change. Returns once the
+// final LogEntryConfChange entry (Cnew alone) has committed, or the
+// context cancels, or the node steps down.
+//
+// Errors:
+//   - ErrNotLeader: caller-side snapshot says we are not leader, or the
+//     actor's recheck finds the same.
+//   - ErrConfChangeInFlight: a previous membership change has not yet
+//     completed both phases.
+//   - ErrProposalFailed: leader stepped down before phase 2 committed.
+//   - ctx.Err: context cancelled.
+//
+// addr is unused; see AddVoter docstring.
+func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
+	_ = addr
+	return n.submitConfChange(ctx, id, true)
+}
+
+// RemoveVoter submits a Remove-voter membership change and blocks until
+// both phases of the Raft §4.3 joint-consensus protocol commit. The
+// removed voter MAY be the current leader: in that case the leader stays
+// at its post until the final entry commits, then steps down to Follower
+// (Diego's thesis §4.3, "self-removed leader" rule).
+func (n *Node) RemoveVoter(id string) error {
+	return n.submitConfChange(context.Background(), id, false)
+}
+
+// submitConfChange is the shared implementation backing AddVoter,
+// AddVoterCtx, and RemoveVoter. It enqueues a cmdConfChange and waits for
+// the actor's reply.
+func (n *Node) submitConfChange(ctx context.Context, id string, add bool) error {
+	if !n.IsLeader() {
+		return ErrNotLeader
+	}
+	reply := make(chan confChangeResult, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdConfChange, ccID: id, ccAdd: add, ccReply: reply}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+	select {
+	case res := <-reply:
+		return res.err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+}
 
 // AddLearner is a stub for v1 API parity. Real implementation lands in M2
 // (configuration changes via joint consensus).

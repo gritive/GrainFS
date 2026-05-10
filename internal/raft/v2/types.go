@@ -25,6 +25,12 @@ var (
 	ErrNodeStopped         = errors.New("raft: node stopped")
 	ErrAlreadyBootstrapped = errors.New("raft: cluster already bootstrapped")
 	ErrNotImplemented      = errors.New("raft/v2: not implemented (M2 scope)")
+	// ErrConfChangeInFlight is returned by AddVoter / RemoveVoter when a
+	// previous Raft §4.3 joint-consensus membership change has not yet
+	// committed both phases (joint entry + final ConfChange entry). One
+	// in-flight membership change at a time mirrors hashicorp/raft's
+	// pragmatic rule and avoids pipelining edge cases.
+	ErrConfChangeInFlight = errors.New("raft: configuration change already in flight")
 )
 
 // ServerSuffrage is mirrored from v1 internal/raft/raft.go for M5 swap-time

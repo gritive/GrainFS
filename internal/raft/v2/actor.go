@@ -111,6 +111,13 @@ type command struct {
 	isrDispatchTerm uint64
 	isrLastIndex    uint64 // LastIncludedIndex shipped — matchIndex target on success
 	isrErr          error
+
+	// ConfChange payload (kind == cmdConfChange). ccID is the voter being
+	// added or removed; ccAdd discriminates add vs remove. Reply delivered
+	// via ccReply once the final phase-2 entry commits.
+	ccID    string
+	ccAdd   bool
+	ccReply chan confChangeResult
 }
 
 type cmdKind int
@@ -125,6 +132,7 @@ const (
 	cmdCreateSnapshot
 	cmdInstallSnapshot
 	cmdInstallSnapshotReply
+	cmdConfChange
 )
 
 // proposalResult is delivered to ProposeWait callers when their entry commits
@@ -256,6 +264,8 @@ func (n *Node) handle(cmd command) {
 		n.handleInstallSnapshot(cmd)
 	case cmdInstallSnapshotReply:
 		n.handleInstallSnapshotReply(cmd)
+	case cmdConfChange:
+		n.handleConfChange(cmd)
 	}
 }
 
@@ -444,12 +454,8 @@ func (n *Node) handleAppendEntries(cmd command) {
 			if n.mustTermAt(target) != e.Term {
 				// Conflict at logical index target. Truncate and break — the
 				// remaining loop iterations would walk indices we just dropped.
-				if err := n.st.log.TruncateAfter(target - 1); err != nil {
-					panic("raftv2: TruncateAfter: " + err.Error())
-				}
-				if err := n.st.log.Append(args.Entries[i:]); err != nil {
-					panic("raftv2: Append: " + err.Error())
-				}
+				n.truncateAndRevertConfig(target - 1)
+				n.appendAndTrackConfig(args.Entries[i:])
 				break
 			}
 			// Same term/index → same entry by Raft Log Matching. Skip.
@@ -457,9 +463,7 @@ func (n *Node) handleAppendEntries(cmd command) {
 		}
 		// target > lastLogIndex: pure extension. Append remaining entries in
 		// one shot and break out of the loop.
-		if err := n.st.log.Append(args.Entries[i:]); err != nil {
-			panic("raftv2: Append: " + err.Error())
-		}
+		n.appendAndTrackConfig(args.Entries[i:])
 		break
 	}
 
@@ -522,6 +526,13 @@ func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
 		// leaves commitIndex at the last fully-enqueued entry.
 		n.st.commitIndex = i
 	}
+	// Joint-consensus phase progression hook: if commit just advanced past
+	// our pendingConfChange's joint or final index, drive the next phase
+	// (or resolve the caller). Idempotent — safe to call after any commit.
+	n.advanceConfChangePhase()
+	// Self-removed-leader hook (Raft §4.3): if we are no longer in the
+	// committed Cnew, step down so a Cnew member can take over.
+	n.maybeStepDownAfterRemoval()
 }
 
 // applyLoop is the FSM-feeder goroutine. It receives committed entries from
@@ -823,6 +834,16 @@ func (n *Node) stepDownToFollower(term uint64) {
 		n.st.nextIndex = nil
 		n.st.proposeWaiters = nil
 		n.st.peerInFlight = nil
+		// Drain any in-flight membership change with ErrProposalFailed —
+		// the new leader will start its own (or the operator retries).
+		// Reply chan is cap-1 buffered.
+		if n.st.pendingConfChange != nil {
+			select {
+			case n.st.pendingConfChange.reply <- confChangeResult{err: ErrProposalFailed}:
+			default:
+			}
+			n.st.pendingConfChange = nil
+		}
 	}
 	n.st.currentTerm = term
 	n.st.state = Follower

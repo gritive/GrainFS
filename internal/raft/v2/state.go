@@ -104,6 +104,39 @@ type actorState struct {
 	// previous change is still in flight (mirrors hashicorp/raft pragmatic
 	// behaviour: one in-flight membership change at a time).
 	appendedConfigIndex uint64
+
+	// pendingConfChange holds the per-change state the leader needs to drive
+	// a joint-consensus membership change to completion. When non-nil, a
+	// joint entry is in flight and applyCommitted, on observing commit
+	// past the joint index, must append the final LogEntryConfChange
+	// entry. Cleared once the final entry commits and the caller's reply
+	// has been delivered. Leader-only — cleared on stepDownToFollower.
+	pendingConfChange *pendingConfChange
+}
+
+// pendingConfChange tracks an in-flight Raft §4.3 joint-consensus
+// membership change. The leader sequences the change in two phases:
+//
+//	Phase 1: append LogEntryJointConfChange (Cold ∪ Cnew); wait for commit.
+//	Phase 2: append LogEntryConfChange (Cnew alone); wait for commit.
+//
+// The actor allocates this on AddVoter / RemoveVoter, advances the phase
+// when applyCommitted sees commitIndex pass jointIndex (then finalIndex
+// is set), and replies to the caller (via reply) once the final entry
+// commits.
+type pendingConfChange struct {
+	jointIndex uint64                // log index of the joint entry (always set)
+	finalIndex uint64                // log index of the final ConfChange entry (set after phase 2 dispatched)
+	newVoters  []string              // Cnew — used to build the final entry's payload
+	reply      chan confChangeResult // single-reply channel; cap-1 buffered
+}
+
+// confChangeResult is delivered to AddVoter / RemoveVoter callers once the
+// membership change has finished committing both phases (or failed via
+// step-down). Index is the final ConfChange entry's log index on success.
+type confChangeResult struct {
+	index uint64
+	err   error
 }
 
 // configHistoryEntry records the config that was effective immediately
