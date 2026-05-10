@@ -114,9 +114,14 @@ func (n *Node) handleInstallSnapshot(cmd command) {
 	// LastIncludedIndex with the same term, the snapshot is no-op territory —
 	// normal AE replication has already covered this state. We still reply
 	// success (the leader needs a positive ack to advance its matchIndex).
+	// Per Figure 13 step 6, we also nudge commitIndex up to LastIncludedIndex
+	// if the leader knows of a higher commit than we have observed so far.
 	if args.LastIncludedIndex <= n.st.lastLogIndex() {
 		myTerm, err := n.st.log.TermAt(args.LastIncludedIndex)
 		if err == nil && myTerm == args.LastIncludedTerm {
+			if args.LastIncludedIndex > n.st.commitIndex {
+				n.st.commitIndex = args.LastIncludedIndex
+			}
 			cmd.isReply <- &InstallSnapshotReply{Term: n.st.currentTerm}
 			return
 		}
@@ -150,6 +155,13 @@ func (n *Node) handleInstallSnapshot(cmd command) {
 	if err := n.st.log.(snapshotInstaller).InstallSnapshotBoundary(args.LastIncludedIndex, args.LastIncludedTerm); err != nil {
 		panic("raftv2: InstallSnapshot: InstallSnapshotBoundary: " + err.Error())
 	}
+	// commitIndex advances BEFORE the applyInCh send (the inverse of
+	// applyCommitted's per-entry "advance after enqueue" rule). This is safe
+	// because the Snapshot is already durable in SnapshotStore: if Stop wins
+	// the send race below, the next start re-discovers via LatestSnapshot and
+	// re-delivers the signal. The runtime FSM consumer therefore cannot see
+	// commitIndex advance past entries it never received without the
+	// snapshot replay covering them.
 	n.st.commitIndex = args.LastIncludedIndex
 
 	// Deliver the snapshot signal to the FSM. Use the same applyInCh pipeline
