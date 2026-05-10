@@ -112,19 +112,39 @@ func TestBucketUpstream_CLIRoundtrip(t *testing.T) {
 // TestBucketUpstream_LegacyCLI_Removed asserts that `grainfs iam bucket-upstream …`
 // no longer exists. Regression test for ADR 0010 surface relocation: the old
 // CLI path was a real interface in v0.0.123.0–v0.0.131.0; users with scripts
-// depend on the failure mode being clear.
+// depend on the failure mode being clear (non-zero exit).
 //
 // Cobra v1.10+ shows parent help (exit 0) for unknown subcommands on group
-// commands. The meaningful assertion is that "bucket-upstream" is NOT listed
-// as an available subcommand under `grainfs iam`.
+// commands when no flags are passed. The meaningful assertions are:
+//  1. "bucket-upstream" is NOT listed in `grainfs iam --help` (discoverability).
+//  2. A typical legacy script form (with flags) exits non-zero — cobra rejects
+//     --upstream-url as an unknown flag, so scripts break loudly, not silently.
 func TestBucketUpstream_LegacyCLI_Removed(t *testing.T) {
 	binary := getBinary()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
-	// `grainfs iam --help` must NOT mention "bucket-upstream".
-	out, _ := exec.CommandContext(ctx, binary, "iam", "--help").CombinedOutput()
-	if strings.Contains(string(out), "bucket-upstream") {
-		t.Fatalf("expected 'bucket-upstream' to be absent from `grainfs iam --help`, got: %s", out)
+	// Assertion 1: `grainfs iam --help` must NOT mention "bucket-upstream".
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, _ := exec.CommandContext(ctx, binary, "iam", "--help").CombinedOutput()
+		if strings.Contains(string(out), "bucket-upstream") {
+			t.Fatalf("expected 'bucket-upstream' to be absent from `grainfs iam --help`, got: %s", out)
+		}
+	}
+
+	// Assertion 2: a typical legacy script form must exit non-zero. cobra
+	// surfaces "unknown flag: --upstream-url" because the subcommand tree is
+	// gone — this is the user-facing contract the spec requires.
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		legacy := exec.CommandContext(ctx, binary, "iam", "bucket-upstream", "set", "xb",
+			"--endpoint", "/tmp/nonexistent.sock",
+			"--upstream-url", "http://x:1",
+			"--access-key", "x",
+			"--secret-key-file", "/dev/null",
+		)
+		out, err := legacy.CombinedOutput()
+		require.Error(t, err, "legacy `iam bucket-upstream set …` must exit non-zero; got output: %s", out)
 	}
 }
