@@ -1,5 +1,106 @@
 # Changelog
 
+## [0.0.134.0] - 2026-05-11 — raft/v2 PR 16: Joint Consensus — atomic multi-server membership change (M2 7 of 7, M2 COMPLETE)
+
+### Added
+
+- `internal/raft/v2/confchange.go` (new, 394 LoC): wire format + state machine
+  for joint consensus. `effectiveConfig{joint bool, voters, oldVoters []string}`
+  represents single (`joint=false`) and joint (`joint=true`) states. Helpers:
+  `commitOK(idx, matchIndex, selfID, selfMatch)` — joint-aware commit quorum
+  check; `quorumOK(granted map[string]bool)` — vote-counting quorum;
+  `quorumOKByRound(peerLastRound, selfID, minRound)` — ReadIndex round
+  confirmation. `containsVoter(id)` — Cnew-only (used for self-removed leader
+  stepdown); `containsAnyVoter(id)` — Cold ∪ Cnew (used for election eligibility
+  per §4.3 "any server from either configuration may serve as leader"). Binary
+  versioned encoding for ConfChange and JointConfChange entry payloads
+  (length-prefixed BE). `reconstructConfig(snap, logStore, selfID, peers)`
+  bootstrap helper walks snapshot voters + log entries to recover effective
+  config across restarts.
+- `internal/raft/v2/membership.go` (new, 394 LoC): leader-driven §4.3 flow.
+  `handleConfChange` appends `LogEntryJointConfChange` (Cold ∪ Cnew),
+  `advanceConfChangePhase` appends `LogEntryConfChange` (Cnew alone) after the
+  joint entry commits. `truncateAndRevertConfig` reverts effective config on
+  AE truncation (Diego thesis §4.3 — server uses config in latest APPENDED
+  entry, not latest committed; reverts to last surviving entry on truncate).
+  `recoverInFlightJoint` (called from `becomeLeader`) resurrects a
+  `pendingConfChange` from a joint entry left by the previous leader so a
+  leadership change mid-joint does not stall the cluster.
+  `maybeStepDownAfterRemoval` gates self-removed leader stepdown on
+  `appendedConfigIndex <= commitIndex` so the leader does not abandon the
+  final entry's commit responsibility.
+- `Node.AddVoter` / `Node.AddVoterCtx` / `Node.RemoveVoter` — replace
+  `ErrNotImplemented` stubs at `node.go:436-448`. Route through the cmdCh
+  with bounded reply channels and ctx/stopCh select. Reject concurrent changes
+  with `ErrConfChangeInFlight` when `pendingConfChange != nil`, the previous
+  config entry is uncommitted (`appendedConfigIndex > commitIndex`), or
+  `currentConfig.joint` (defense-in-depth — `recoverInFlightJoint` covers
+  the leader-churn case).
+- New tests: `confchange_test.go` (228 LoC) — wire format roundtrip + helper
+  semantics; `membership_test.go` (~396 LoC) — joint quorum requires both
+  majorities, AddVoter/RemoveVoter happy paths, leader-churn joint recovery,
+  AE truncation reverts effective config, InstallSnapshot resets effective
+  config, self-removed-leader stepdown gated on commit, Cold-only voter can
+  elect during joint state (regression test for §4.3 liveness).
+
+### Changed
+
+- `effectiveConfig` replaces `cfg.Peers` as the runtime source of truth for
+  the voter set. `cfg.Peers` is now read only at bootstrap (in `NewNode`
+  when no snapshot exists) — the v2 actor never reads it after start.
+- Election/replication/commit/ReadIndex paths route through the new joint-aware
+  helpers (`commitOK`, `quorumOK`, `quorumOKByRound`, `peerSet`). Joint state
+  enforces "majority of Cold AND majority of Cnew separately" for every quorum
+  decision.
+- `handleInstallSnapshot` resets `currentConfig` from the snapshot's voters
+  and clears `configHistory` + `appendedConfigIndex` — fixes a missed reset
+  that left a stale joint config in memory after a follower's log was replaced.
+- Election timeout's voter-membership guard at `onElectionTimeout` switched
+  from `containsVoter` (Cnew-only) to `containsAnyVoter` (Cold ∪ Cnew). Under
+  the old code, a server in Cold but not in Cnew would never call an election
+  during the joint period — a liveness violation when the Cnew-only candidates
+  are unreachable. `containsVoter` is retained for `maybeStepDownAfterRemoval`
+  where Cnew-only is the correct check.
+- Snapshot voters reflect committed effective config (joint state refused
+  with `ErrConfChangeInProgress` — joint cannot be flattened into a single
+  voter list).
+- `actorState` peer-set caching: `peerSet()` returns a cached slice reused
+  across calls (invalidated at every `currentConfig` mutation site). Removes
+  per-tick `[]string` allocation from `broadcastHeartbeat` (50 ms cadence) and
+  per-write allocation from `handlePropose`. `commitOK` + `quorumOKByRound`
+  refactored to take maps/scalars directly instead of materializing fresh
+  per-call maps. Restores the v1 zero-alloc baseline on the hottest leader
+  paths.
+
+### Internal contract notes
+
+- Effective config rule (Diego thesis §4.3): a server uses the configuration
+  from the latest log entry it has APPENDED (not committed). Truncation reverts.
+- Joint quorum: every quorum decision requires majority from Cold AND Cnew
+  separately during joint state. Single state: majority of voters.
+- Self-removed leader: stays Leader until Cnew commits (so it can finish
+  driving the change), then steps down. Gated on `appendedConfigIndex <= commitIndex`.
+- Leader churn mid-joint: new leader rebuilds `pendingConfChange` from the
+  joint log entry; the previous-leader caller's `AddVoter`/`RemoveVoter` has
+  already returned `ErrProposalFailed` (drained on stepdown), but the joint
+  state itself is durable in the log and recovery completes it.
+- `AddLearner` / `PromoteToVoter` / `TransferLeadership` remain
+  `ErrNotImplemented` (out of scope for M2 — joint consensus is sufficient
+  for atomic voter changes).
+
+### Status
+
+- M2 (Persistence + ReadIndex + Snapshots + Joint Consensus): **7/7 COMPLETE**.
+- M1: 7/7 complete.
+- Next: M3 (test harness + chaos), M4 (staging soak), M5 (production swap).
+
+### Known follow-ups (not blocking)
+
+- `matchIndex`/`nextIndex`/`peerInFlight`/`peerLastRound` map entries for
+  removed voters are not pruned at config-change time; they age out at the
+  next `becomeLeader`. Benign because quorum paths consult `currentConfig`,
+  not the maps, but flagged for future cleanup.
+
 ## v0.0.133.0 — 2026-05-09
 
 ### Breaking
