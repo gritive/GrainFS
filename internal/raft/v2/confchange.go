@@ -252,6 +252,26 @@ func (c effectiveConfig) containsVoter(id string) bool {
 	return false
 }
 
+// containsAnyVoter reports whether id is a voter in EITHER side of the
+// effective config (Cold ∪ Cnew). Per Raft §4.3, "any server from either
+// configuration may serve as leader" during the joint period, so election
+// eligibility must consult both sides — a Cold-only voter that has not yet
+// observed the joint commit is still a legitimate voter and may be the
+// only node able to drive the joint forward (e.g. shrink scenarios where
+// a Cnew member is partitioned mid-transition). In the non-joint state
+// this is identical to containsVoter.
+func (c effectiveConfig) containsAnyVoter(id string) bool {
+	if c.containsVoter(id) {
+		return true
+	}
+	for _, v := range c.oldVoters {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
 // quorumOK reports whether granted is a majority of the relevant voter set(s).
 // In single state, granted must contain a majority of voters. In joint state,
 // granted must contain a majority of voters AND a majority of oldVoters.

@@ -667,15 +667,19 @@ func (n *Node) onElectionTimeout() {
 		n.resetElectionTimer()
 		return
 	}
-	// Non-voter guard (Raft §4.3): if self is not a voter in the current
-	// effective configuration (Cnew side in joint state), we are a
-	// removed/learner node that must not run for office. Re-arm the timer
-	// so we can try again later in case our config catches up via AE
-	// replay. In single-state with self absent, this loops indefinitely
-	// until either (a) we're added back via a future ConfChange or (b)
-	// the operator stops the node — both are the correct behaviour for
-	// a node that has been ejected.
-	if !n.st.currentConfig.containsVoter(n.st.id) {
+	// Non-voter guard (Raft §4.3): if self is not a voter in EITHER side
+	// of the current effective configuration (Cold ∪ Cnew during joint),
+	// we are a removed/learner node that must not run for office. During
+	// a joint state, a server in Cold-only is still a legitimate voter
+	// — "any server from either configuration may serve as leader" —
+	// and may be the only node able to drive the joint forward, so we
+	// must NOT short-circuit it. Re-arm the timer so we can try again
+	// later in case our config catches up via AE replay. In single-state
+	// with self absent, this loops indefinitely until either (a) we're
+	// added back via a future ConfChange or (b) the operator stops the
+	// node — both are the correct behaviour for a node that has been
+	// ejected.
+	if !n.st.currentConfig.containsAnyVoter(n.st.id) {
 		n.resetElectionTimer()
 		return
 	}

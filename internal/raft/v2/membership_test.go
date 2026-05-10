@@ -362,3 +362,35 @@ func TestMembership_SelfRemovedLeaderStepsDown(t *testing.T) {
 		return fix.nodes[1].IsLeader() || fix.nodes[2].IsLeader()
 	}), "no successor leader after self-removal")
 }
+
+// TestMembership_ColdOnlyVoterCanElect: per Raft §4.3, a server in Cold but
+// not in Cnew is still a legitimate voter during the joint period — "any
+// server from either configuration may serve as leader." Concrete scenario:
+// 2→1 shrink (Cold={a,b}, Cnew={b}). If b is partitioned mid-joint, a must
+// be allowed to call an election to drive the joint forward; the
+// onElectionTimeout guard must consult Cold ∪ Cnew, not Cnew alone.
+func TestMembership_ColdOnlyVoterCanElect(t *testing.T) {
+	n, err := NewNode(Config{ID: "a", Peers: []string{"b"}})
+	require.NoError(t, err)
+	// Drive the node into a joint state with Cold={a,b} and Cnew={b}.
+	// Pre-Start state manipulation, mirroring TestMembership_TruncateAfterRevertsConfig.
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"a", "b"}, []string{"b"}),
+	}})
+	require.True(t, n.st.currentConfig.joint)
+	require.False(t, n.st.currentConfig.containsVoter("a"), "a is in Cold but not Cnew")
+
+	startTerm := n.st.currentTerm
+	require.Equal(t, Follower, n.st.state)
+
+	// onElectionTimeout must NOT short-circuit a Cold-only voter — it must
+	// transition to Candidate and bump the term so the joint can make
+	// progress. Pre-Start: transport is nil so RV broadcasts no-op safely;
+	// stable store is in-memory so persistHardState is non-blocking.
+	n.onElectionTimeout()
+
+	require.Equal(t, Candidate, n.st.state, "Cold-only voter must be allowed to become Candidate during joint state")
+	require.Equal(t, startTerm+1, n.st.currentTerm, "becomeCandidate must bump term")
+}
