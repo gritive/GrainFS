@@ -103,3 +103,60 @@ func TestOpRouter_RouteBucket_LeaderShortCircuit(t *testing.T) {
 	require.True(t, got.SelfIsLeader)
 	require.Empty(t, got.Peers, "leader path skips peer resolution")
 }
+
+func TestOpRouter_RouteObjectRead_LatestFromIndex(t *testing.T) {
+	probe := &fakeLeaderProbe{}
+	r := routerForTestWithBucket(t, probe)
+	r.index.(*fakeObjectIndex).latest["b1/k1"] = ObjectIndexEntry{
+		Bucket: "b1", Key: "k1", VersionID: "v-A", PlacementGroupID: "g1",
+		Size: 100, ETag: "etag-A",
+	}
+	got, entry, err := r.RouteObjectRead("b1", "k1", "")
+	require.NoError(t, err)
+	require.Equal(t, "g1", got.GroupID)
+	require.Equal(t, "v-A", entry.VersionID)
+	require.Equal(t, "etag-A", entry.ETag)
+}
+
+func TestOpRouter_RouteObjectRead_VersionFromIndex(t *testing.T) {
+	probe := &fakeLeaderProbe{}
+	r := routerForTestWithBucket(t, probe)
+	r.index.(*fakeObjectIndex).version["b1/k1#v-B"] = ObjectIndexEntry{
+		Bucket: "b1", Key: "k1", VersionID: "v-B", PlacementGroupID: "g1", Size: 200,
+	}
+	got, entry, err := r.RouteObjectRead("b1", "k1", "v-B")
+	require.NoError(t, err)
+	require.Equal(t, "g1", got.GroupID)
+	require.Equal(t, int64(200), entry.Size)
+}
+
+func TestOpRouter_RouteObjectRead_MissingLatest(t *testing.T) {
+	probe := &fakeLeaderProbe{}
+	r := routerForTestWithBucket(t, probe)
+	_, _, err := r.RouteObjectRead("b1", "missing", "")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
+func TestOpRouter_RouteObjectRead_InternalBucketBypassesIndex(t *testing.T) {
+	probe := &fakeLeaderProbe{}
+	r := routerForTestWithBucket(t, probe)
+	// Register the internal bucket's group with the underlying DataGroupManager
+	// and the ShardGroupSource so routeGroup can resolve peers.
+	r.router = routerWithGroups(t, map[string][]string{
+		"g1": {"node-1", "node-2", "node-3"},
+	})
+	r.router.AssignBucket(storage.NFS4BucketName, "g1")
+	got, entry, err := r.RouteObjectRead(storage.NFS4BucketName, "obj", "")
+	require.NoError(t, err)
+	require.Equal(t, "g1", got.GroupID)
+	require.Equal(t, "g1", entry.PlacementGroupID)
+	require.Equal(t, storage.NFS4BucketName, entry.Bucket)
+}
+
+func TestOpRouter_RouteObjectRead_NilIndexReturnsError(t *testing.T) {
+	probe := &fakeLeaderProbe{}
+	r := routerForTestWithBucket(t, probe)
+	r.index = nil
+	_, _, err := r.RouteObjectRead("b1", "k1", "")
+	require.ErrorIs(t, err, ErrObjectIndexRequired)
+}

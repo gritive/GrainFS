@@ -105,3 +105,34 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 	t.Peers = peers
 	return t, nil
 }
+
+// RouteObjectRead resolves an object read to its placement-group target via
+// the meta-FSM object index. Empty versionID means the latest version.
+// Internal buckets (storage.IsInternalBucket) bypass the object index per
+// ADR 0004's pinned-bucket invariant.
+//
+// F1: nil objectIndexLookup is a configuration error, not a fallback.
+func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, error) {
+	if storage.IsInternalBucket(bucket) {
+		target, err := r.RouteBucket(bucket)
+		entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: target.GroupID}
+		return target, entry, err
+	}
+	if r.index == nil {
+		return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
+	}
+	var (
+		entry ObjectIndexEntry
+		ok    bool
+	)
+	if versionID == "" {
+		entry, ok = r.index.ObjectIndexLatest(bucket, key)
+	} else {
+		entry, ok = r.index.ObjectIndexVersion(bucket, key, versionID)
+	}
+	if !ok {
+		return RouteTarget{}, ObjectIndexEntry{}, storage.ErrObjectNotFound
+	}
+	target, err := r.routeGroup(entry.PlacementGroupID)
+	return target, entry, err
+}
