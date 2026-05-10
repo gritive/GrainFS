@@ -1034,11 +1034,6 @@ func (n *Node) handleVoteReply(cmd command) {
 	if !cmd.vrGranted {
 		return
 	}
-	if n.st.votesGranted == nil {
-		// Defensive: should be allocated in becomeCandidate. A nil map here
-		// indicates a logic bug; treat as fresh and continue.
-		n.st.votesGranted = make(map[string]bool)
-	}
 	n.st.votesGranted[cmd.vrPeer] = true
 	if n.st.currentConfig.quorumOK(n.st.votesGranted) {
 		n.becomeLeader()

@@ -234,11 +234,12 @@ func (n *Node) recoverInFlightJoint() {
 	p := configEntryPayload(e)
 	// Reply is a buffered throwaway: no caller is waiting because the
 	// original AddVoter/RemoveVoter call died with the previous leader.
-	// Cap-1 buffer is load-bearing: advanceConfChangePhase and
-	// stepDownToFollower both send into reply unconditionally, and the
-	// buffer absorbs the single send so neither path can block on a
-	// receiverless channel. A future refactor that makes either send
-	// blocking (or removes the buffer) would deadlock the actor here.
+	// Cap-1 buffer is load-bearing for advanceConfChangePhase's
+	// unconditional send (membership.go ~L150); the buffer absorbs that
+	// single send so the actor cannot block on a receiverless channel.
+	// stepDownToFollower's send uses select-with-default so it does not
+	// depend on the buffer. A future refactor that makes the phase-advance
+	// send blocking (or removes the buffer) would deadlock the actor here.
 	n.st.pendingConfChange = &pendingConfChange{
 		jointIndex: idx,
 		newVoters:  p.NewVoters,
