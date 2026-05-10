@@ -87,6 +87,30 @@ type command struct {
 	// ReadIndex payload (kind == cmdReadIndex). riReply receives the barrier
 	// index after a heartbeat round confirms leadership at the current term.
 	riReply chan readIndexResult
+
+	// CreateSnapshot payload (kind == cmdCreateSnapshot). csIndex is the
+	// snapshot's LastIncludedIndex; csData is the opaque FSM state bytes.
+	// csReply delivers nil on success or an error on validation failure.
+	csIndex uint64
+	csData  []byte
+	csReply chan error
+
+	// InstallSnapshot inbound payload (kind == cmdInstallSnapshot).
+	isArgs  *InstallSnapshotArgs
+	isReply chan *InstallSnapshotReply
+
+	// InstallSnapshot outbound reply payload (kind == cmdInstallSnapshotReply).
+	// Carried back via cmdCh by dispatchInstallSnapshot. We use a dedicated
+	// kind (rather than reusing cmdHeartbeatReply) because the success-side
+	// semantics differ: matchIndex jumps to LastIncludedIndex regardless of
+	// any matchAfter math, and the dispatch-term/state gating is identical
+	// to AE but the action on success is not. Keeping them separate avoids
+	// a forest of conditionals inside handleHeartbeatReply.
+	isrPeer         string
+	isrTerm         uint64
+	isrDispatchTerm uint64
+	isrLastIndex    uint64 // LastIncludedIndex shipped — matchIndex target on success
+	isrErr          error
 }
 
 type cmdKind int
@@ -98,6 +122,9 @@ const (
 	cmdVoteReply
 	cmdHeartbeatReply
 	cmdReadIndex
+	cmdCreateSnapshot
+	cmdInstallSnapshot
+	cmdInstallSnapshotReply
 )
 
 // proposalResult is delivered to ProposeWait callers when their entry commits
@@ -222,6 +249,12 @@ func (n *Node) handle(cmd command) {
 		n.handleHeartbeatReply(cmd)
 	case cmdReadIndex:
 		n.handleReadIndex(cmd)
+	case cmdCreateSnapshot:
+		n.handleCreateSnapshot(cmd)
+	case cmdInstallSnapshot:
+		n.handleInstallSnapshot(cmd)
+	case cmdInstallSnapshotReply:
+		n.handleInstallSnapshotReply(cmd)
 	}
 }
 
@@ -326,6 +359,23 @@ func (n *Node) handleAppendEntries(cmd command) {
 	n.st.leaderID = args.LeaderID
 	n.resetElectionTimer()
 
+	// Rule 4 prelude (compaction): if the leader's PrevLogIndex falls below
+	// our snapshot boundary (FirstIndex-1), we cannot validate it against
+	// our log — those entries are gone. Reply with a hint that pushes the
+	// leader's nextIndex up to FirstIndex so the next dispatch picks
+	// InstallSnapshot. The follower-side compaction floor is FirstIndex-1
+	// itself (TermAt returns prevTerm at that index), but anything strictly
+	// below it is unreachable.
+	if first := n.st.log.FirstIndex(); args.PrevLogIndex > 0 && args.PrevLogIndex < first-1 {
+		cmd.aeReply <- &AppendEntriesReply{
+			Term:          n.st.currentTerm,
+			Success:       false,
+			ConflictTerm:  0,
+			ConflictIndex: first,
+		}
+		return
+	}
+
 	// Rule 4: log consistency check. On mismatch, populate the conflict hint
 	// so the leader can skip the entire offending term in one round-trip
 	// (Raft §5.3 optimisation; mirrors v1 raft.go:1843-1862).
@@ -348,8 +398,14 @@ func (n *Node) handleAppendEntries(cmd command) {
 		conflictTerm := n.mustTermAt(args.PrevLogIndex)
 		conflictIdx := args.PrevLogIndex
 		// Walk back while the previous logical entry (conflictIdx-1) also has
-		// conflictTerm.
-		for conflictIdx > 1 && n.mustTermAt(conflictIdx-1) == conflictTerm {
+		// conflictTerm. Floor at FirstIndex: indices below FirstIndex-1 are
+		// compacted into the snapshot and TermAt would panic. Stopping at
+		// floor=FirstIndex (so conflictIdx-1 stays ≥ FirstIndex-1, where TermAt
+		// returns the snapshot's prevTerm) keeps the hint correct — if the
+		// leader's view of ConflictTerm extends into the snapshot, it falls
+		// back to ConflictIndex and dispatchOne picks InstallSnapshot.
+		floor := n.st.log.FirstIndex()
+		for conflictIdx > floor && n.mustTermAt(conflictIdx-1) == conflictTerm {
 			conflictIdx--
 		}
 		cmd.aeReply <- &AppendEntriesReply{
@@ -578,12 +634,9 @@ func (n *Node) handlePropose(cmd command) {
 	n.publish()
 
 	for _, peer := range n.cfg.Peers {
-		if n.st.peerInFlight[peer] {
-			continue
-		}
-		args := n.buildAppendEntriesArgs(peer)
-		n.st.peerInFlight[peer] = true
-		go n.dispatchAppendEntries(peer, args, n.st.leaderRound)
+		// dispatchOne picks AE vs InstallSnapshot based on nextIndex[peer]
+		// vs FirstIndex(); single-flight gate honoured inside.
+		n.dispatchOne(peer)
 	}
 }
 
@@ -788,27 +841,24 @@ func (n *Node) becomeFollower(term uint64) {
 	n.resetElectionTimer()
 }
 
-// broadcastHeartbeat dispatches an AppendEntries to every peer. PR 6a unifies
-// the heartbeat and replication paths: each per-peer message carries entries
-// log[nextIndex[peer]..lastLogIndex] (possibly empty when the peer is fully
-// caught up — that's the heartbeat case). Caller must already be Leader.
+// broadcastHeartbeat dispatches an outbound RPC (AE or InstallSnapshot) to
+// every peer. dispatchOne picks the right RPC kind for each peer based on
+// whether nextIndex[peer] has fallen below FirstIndex() (snapshot) or not
+// (AE). Caller must already be Leader.
 //
-// Per-peer single-flight gate: if an AE goroutine is already in flight for a
-// peer (peerInFlight[peer] == true), skip that peer. This prevents goroutine
-// accumulation when the transport is slow or partitioned — without the gate,
-// every heartbeat tick would spawn a new goroutine while old ones block on the
-// dead transport.
+// Per-peer single-flight gate (in dispatchOne): if a goroutine is already in
+// flight for a peer (peerInFlight[peer] == true), the dispatch is skipped.
+// This prevents goroutine accumulation when the transport is slow or
+// partitioned.
 //
-// Each dispatch carries the current leaderRound as hbRoundID so handleHeartbeatReply
-// can advance peerLastRound for ReadIndex linearizability confirmation.
+// Each AE dispatch carries the current leaderRound as hbRoundID so
+// handleHeartbeatReply can advance peerLastRound for ReadIndex
+// linearizability confirmation. InstallSnapshot dispatches do NOT carry a
+// round; ReadIndex requests in flight during a snapshot install simply wait
+// for the next heartbeat round.
 func (n *Node) broadcastHeartbeat() {
 	for _, peer := range n.cfg.Peers {
-		if n.st.peerInFlight[peer] {
-			continue
-		}
-		args := n.buildAppendEntriesArgs(peer)
-		n.st.peerInFlight[peer] = true
-		go n.dispatchAppendEntries(peer, args, n.st.leaderRound)
+		n.dispatchOne(peer)
 	}
 }
 
@@ -1029,26 +1079,34 @@ func (n *Node) applyConflictHint(cmd command) {
 	// log (leader-driven append + truncate-on-conflict preserves this invariant),
 	// so binary search is correct.
 	//
-	// Strategy: find the first 1-based logical index where term > ConflictTerm;
-	// the entry just before it (if its term == ConflictTerm) is the rightmost
+	// Strategy: find the first logical index where term > ConflictTerm; the
+	// entry just before it (if its term == ConflictTerm) is the rightmost
 	// match. This replaces the O(N) backward scan with O(log N).
+	//
+	// Snapshot floor: search range is [FirstIndex, LastIndex] only. Indices
+	// below FirstIndex are compacted into the snapshot — mustTermAt would panic.
+	// If ConflictTerm lives entirely in the compacted prefix, the predicate
+	// finds no match and we fall back to hbConflictIndex; if that index also
+	// falls below FirstIndex, dispatchOne picks InstallSnapshot on the next
+	// dispatch and replication recovers via the snapshot path.
 	newNext := cmd.hbConflictIndex
 	last := n.st.lastLogIndex()
-	if last > 0 {
-		// sort.Search over [0, last): i maps to logical index i+1.
-		// firstGT = first slice-index (0-based) where term > ConflictTerm.
-		firstGT := sort.Search(int(last), func(i int) bool {
-			return n.mustTermAt(uint64(i)+1) > cmd.hbConflictTerm
-		})
-		// firstGT-1 (slice) → logical index firstGT → the last entry ≤ ConflictTerm.
-		if firstGT > 0 && n.mustTermAt(uint64(firstGT)) == cmd.hbConflictTerm {
-			// Leader has ConflictTerm; advance nextIndex past its last entry.
-			// logical index of last ConflictTerm entry = firstGT; nextIndex = firstGT+1.
-			newNext = uint64(firstGT) + 1
+	first := n.st.log.FirstIndex()
+	if last >= first {
+		// Search over [first, last+1): probe maps to logical index first+i.
+		count := int(last - first + 1)
+		firstGT := uint64(sort.Search(count, func(i int) bool {
+			return n.mustTermAt(first+uint64(i)) > cmd.hbConflictTerm
+		}))
+		firstGTLogical := first + firstGT
+		// firstGTLogical-1 is the last logical index ≤ ConflictTerm. If its
+		// term matches, advance nextIndex past it. Guard firstGTLogical > first
+		// so we never look below FirstIndex (where prevTerm-equality would
+		// mean ConflictTerm extends into the snapshot — fall through to
+		// hbConflictIndex in that case).
+		if firstGTLogical > first && n.mustTermAt(firstGTLogical-1) == cmd.hbConflictTerm {
+			newNext = firstGTLogical
 		}
-		// else: firstGT==0 (all entries > ConflictTerm) or the entry at firstGT
-		// has term < ConflictTerm (leader never had ConflictTerm). Fall back to
-		// hbConflictIndex (already set above).
 	}
 	if newNext < 1 {
 		newNext = 1

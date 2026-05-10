@@ -75,6 +75,14 @@ type Node struct {
 	// Always non-nil after NewNode; defaults to memStableStore if Config.StableStore is nil.
 	stable StableStore
 
+	// snaps persists Raft snapshots (§7). Always non-nil after NewNode;
+	// defaults to memSnapshotStore if Config.SnapshotStore is nil. Writes
+	// happen only inside the actor goroutine (via cmdCreateSnapshot or
+	// cmdInstallSnapshot); reads via LatestSnapshot are safe from any
+	// goroutine because the underlying impl synchronises through Badger
+	// or is single-writer (memSnapshotStore is only read after Save).
+	snaps SnapshotStore
+
 	// lastPersistedHS caches the most recently saved HardState so persistHardState
 	// can short-circuit redundant SaveHardState calls (e.g. becomeFollower
 	// followed by handleRequestVote in the same tick at the same term/vote).
@@ -133,12 +141,39 @@ func NewNode(cfg Config) (*Node, error) {
 	if stable == nil {
 		stable = newMemStableStore()
 	}
+	snaps := cfg.SnapshotStore
+	if snaps == nil {
+		snaps = newMemSnapshotStore()
+	}
 
 	// Recover HardState. A zero HardState (CurrentTerm=0, VotedFor="") is the
 	// "first start" case — equivalent to behaviour prior to PR 11.
 	hs, err := stable.HardState()
 	if err != nil {
 		return nil, fmt.Errorf("raftv2: NewNode: load HardState: %w", err)
+	}
+
+	// Recover snapshot, if any. The snapshot's LastIncludedIndex bounds
+	// commitIndex from below — those entries are by definition committed
+	// (the snapshot contains their effect on the FSM). The log itself, if
+	// persistent, must already have FirstIndex == LastIncludedIndex+1
+	// because CompactBefore was called atomically with Save. A mismatch
+	// here is a stale-state bug (e.g. crash mid-CreateSnapshot leaving log
+	// uncompacted) — we panic loudly rather than silently risk a follower
+	// applying entries the leader thinks are gone.
+	snap, err := snaps.Latest()
+	if err != nil {
+		return nil, fmt.Errorf("raftv2: NewNode: load snapshot: %w", err)
+	}
+	initialCommitIndex := uint64(0)
+	if snap != nil {
+		initialCommitIndex = snap.LastIncludedIndex
+		if logStore.FirstIndex() < snap.LastIncludedIndex+1 {
+			panic(fmt.Sprintf(
+				"raftv2: NewNode: log FirstIndex (%d) lags snapshot LastIncludedIndex+1 (%d) — "+
+					"likely crashed mid-CreateSnapshot; manual recovery required",
+				logStore.FirstIndex(), snap.LastIncludedIndex+1))
+		}
 	}
 
 	n := &Node{
@@ -150,6 +185,7 @@ func NewNode(cfg Config) (*Node, error) {
 		applyInCh:       make(chan LogEntry, applyInChBuffer),
 		applyDoneCh:     make(chan struct{}),
 		stable:          stable,
+		snaps:           snaps,
 		lastPersistedHS: hs,
 		st: actorState{
 			id:          cfg.ID,
@@ -157,9 +193,12 @@ func NewNode(cfg Config) (*Node, error) {
 			currentTerm: hs.CurrentTerm,
 			votedFor:    hs.VotedFor,
 			log:         logStore,
-			// commitIndex is intentionally volatile per Raft §5.3; the leader
-			// re-establishes it via LeaderCommit on the next AppendEntries.
-			commitIndex: 0,
+			// commitIndex is volatile per Raft §5.3, but the snapshot floor
+			// is durable: any entry covered by the snapshot is by definition
+			// committed (the snapshot encodes the FSM state at that point).
+			// On a non-snapshotted restart, this is 0; the next leader's
+			// AE will re-establish via LeaderCommit.
+			commitIndex: initialCommitIndex,
 		},
 		// Per-Node rng seeded with current time + ID hash so two Nodes started
 		// in the same nanosecond still draw different timeouts. Sole user is
@@ -268,6 +307,67 @@ func (n *Node) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 		return r
 	case <-n.stopCh:
 		return &RequestVoteReply{Term: n.Term()}
+	}
+}
+
+// LatestSnapshot returns the most recent snapshot persisted by SnapshotStore,
+// or (nil, nil) if none exists. Safe to call from any goroutine — reads pass
+// through to the underlying SnapshotStore impl.
+//
+// FSM-restore ordering: callers SHOULD invoke LatestSnapshot immediately
+// after Start (before draining ApplyCh), reset their FSM state from
+// snap.Data, then drain ApplyCh — which delivers entries from
+// snap.LastIncludedIndex+1 onwards (or, if the leader installs a fresher
+// snapshot mid-flight, a LogEntrySnapshot signal followed by entries past
+// the new boundary). FIFO order across ApplyCh is preserved.
+func (n *Node) LatestSnapshot() (*Snapshot, error) {
+	return n.snaps.Latest()
+}
+
+// CreateSnapshot persists a snapshot at lastIncludedIndex with the given FSM
+// state bytes, then compacts the log up to (and including) lastIncludedIndex.
+// Routed through the actor goroutine so the log compaction is atomic with
+// respect to AE handling.
+//
+// Returns an error if:
+//   - lastIncludedIndex > commitIndex (cannot snapshot uncommitted state)
+//   - lastIncludedIndex < FirstIndex (already covered by an earlier snapshot)
+//
+// Storage failures during Save or CompactBefore panic the actor — durability
+// is unrecoverable, mirroring StableStore semantics.
+func (n *Node) CreateSnapshot(lastIncludedIndex uint64, data []byte) error {
+	reply := make(chan error, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdCreateSnapshot, csIndex: lastIncludedIndex, csData: data, csReply: reply}:
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+}
+
+// HandleInstallSnapshot processes an incoming InstallSnapshot RPC and returns
+// the reply. Safe to call from any goroutine; the call routes through the
+// actor via cmdCh and waits synchronously for the actor's reply.
+//
+// If the node has been Stopped, returns a zero-value reply with the snapshot
+// term (matches HandleAppendEntries' stopped-node behaviour).
+func (n *Node) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshotReply {
+	reply := make(chan *InstallSnapshotReply, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdInstallSnapshot, isArgs: args, isReply: reply}:
+	case <-n.stopCh:
+		return &InstallSnapshotReply{Term: n.Term()}
+	}
+	select {
+	case r := <-reply:
+		return r
+	case <-n.stopCh:
+		return &InstallSnapshotReply{Term: n.Term()}
 	}
 }
 

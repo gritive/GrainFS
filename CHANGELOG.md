@@ -1,5 +1,109 @@
 # Changelog
 
+## [0.0.132.0] - 2026-05-11 — raft/v2 PR 15: Snapshots — log compaction + InstallSnapshot RPC (M2 6 of 7)
+
+### Added
+
+- `internal/raft/v2/snapshot.go` (new): `Snapshot` data type and
+  `SnapshotStore` interface plus an in-memory `memSnapshotStore` impl.
+  Snapshot captures `LastIncludedIndex`, `LastIncludedTerm`, the cluster
+  configuration at snapshot time (flat voter list — joint-config encoding
+  is deferred to PR 16), and FSM state bytes opaque to Node.
+- `internal/raft/v2/snapshot_badger.go` (new): `badgerSnapshotStore` with
+  versioned binary encoding (`[ver:1][LastIdx:8BE][LastTerm:8BE][NumVoters:4BE]
+  ([VoterIDLen:4BE][VoterID]...)[DataLen:8BE][Data]`); single key
+  `"snap/latest"` replaced atomically; `db.Sync()` after every Save for
+  power-loss durability.
+- `internal/raft/v2/snapshot_actor.go` (new): actor handlers
+  `cmdCreateSnapshot` + `cmdInstallSnapshot`, plus the leader-side
+  `dispatchOne(peer)` helper that picks AE vs InstallSnapshot based on
+  `nextIndex[peer]` vs `LogStore.FirstIndex()`.
+- `LogStore.CompactBefore(boundary)` interface method — advances FirstIndex
+  past the compacted prefix; both `memLogStore` and `badgerLogStore`
+  track `firstIndex` + `prevTerm` so `TermAt(boundary)` returns the
+  snapshot's `LastIncludedTerm` post-compaction (load-bearing for AE
+  PrevLogIndex/PrevLogTerm consistency at the snapshot boundary).
+- Non-public `snapshotInstaller` interface with `InstallSnapshotBoundary`
+  for the InstallSnapshot follower path that needs to seed
+  firstIndex+prevTerm beyond LastIndex (when boundary > LastIndex). Both
+  in-tree LogStore impls satisfy it; type-asserted at the single call
+  site in `handleInstallSnapshot`.
+- New `LogEntryType = LogEntrySnapshot (4)`. FSM consumers MUST recognise
+  it on `applyCh`, reset their state, and reload from the entry's
+  `Command` bytes (which carry the snapshot Data). Same applyCh /
+  applyInCh / applyLoop pipeline preserves FIFO with subsequent
+  committed entries.
+- `Node.CreateSnapshot(lastIncludedIndex, data)` — caller-driven (FSM
+  decides snapshot cadence). Validates `lastIncludedIndex <= commitIndex`
+  AND `>= FirstIndex`; rejects otherwise. Rejects when joint config is
+  active (defer to PR 16). Saves snapshot durably, then compacts the log.
+- `Node.HandleInstallSnapshot(args)` — follower-side RPC handler.
+  Truncates the log, installs the snapshot boundary, sets `commitIndex
+  = LastIncludedIndex`, and delivers a `LogEntrySnapshot` signal via
+  `applyInCh` (FIFO with committed entries).
+- `Node.LatestSnapshot()` — FSM consumer reads the latest snapshot
+  after Start to restore its state.
+- `InstallSnapshotArgs` / `InstallSnapshotReply` RPC types in `types.go`.
+- `Transport` interface gains `SendInstallSnapshot`. `memTransport`
+  routes it through the in-process network for tests.
+- `Config.SnapshotStore` field. NewNode defaults to memSnapshotStore;
+  pairing persistent LogStore with in-memory SnapshotStore is documented
+  as unsafe (mirrors StableStore pairing rule).
+- 10 new tests in `snapshot_test.go` and `logstore_test.go`:
+  TestSnapshot_{CreateAndCompact, RejectUncommitted, RejectAlreadyCompacted,
+  RecoveryFromBadger}, TestInstallSnapshot_{FollowerInstalls,
+  StaleTermRejected, LeaderSendsWhenFollowerBehind, SecondInstallOverPriorSnapshot,
+  StaleSnapshotIgnored, SkipWhenAlreadyCaughtUp},
+  TestLogStore_CompactBefore{,_Idempotent,_BeyondLast} (table-driven over
+  mem + badger).
+
+### Recovery
+
+- `NewNode` loads `LatestSnapshot` after HardState + log; if a snapshot
+  exists, `commitIndex` is seeded to `snap.LastIncludedIndex`. The
+  log's persisted `firstIndex` must be `>= snap.LastIncludedIndex+1`
+  (mid-CreateSnapshot crash recovery is out of scope; panic with a
+  clear "manual recovery required" message guards the invariant).
+
+### Fixed (review findings)
+
+- `actor.go applyConflictHint` binary search and case-2 conflict walkback
+  now respect `FirstIndex` floor — pre-PR these would panic on
+  `mustTermAt` for compacted indices once snapshot/CompactBefore made
+  `FirstIndex > 1` reachable. Search range shifts to
+  `[FirstIndex, LastIndex]`; walkback stops at `floor = FirstIndex`.
+  When `ConflictTerm` lives entirely in the compacted prefix, fall
+  through to `hbConflictIndex`; `dispatchOne` then picks
+  InstallSnapshot.
+- `handleInstallSnapshot` Rule 4b (skip-when-already-caught-up) now
+  nudges `commitIndex` to `LastIncludedIndex` when the leader's known
+  commit is ahead of ours (Figure 13 step 6 wording).
+
+### Known follow-ups
+
+- `handleInstallSnapshot` truncate + `InstallSnapshotBoundary` are two
+  separate fsynced txns. Recovery is non-fatal (NewNode rebuilds
+  consistent state from independent firstIdx+lastIdx reads), but the
+  asymmetry with `CreateSnapshot`'s atomic chunked-txn approach is
+  ugly. Optional fold-into-final-txn cleanup deferred.
+- `TestHandleAppendEntries_HeartbeatStepDown` flakes ~1/12 under race
+  in unrelated timing race between actor's reply send and deferred
+  publish. Pre-existing; orthogonal to this PR.
+
+### Cumulative status (raft/v2 actor-pattern rewrite)
+
+- M1 Foundation: 7/7 (#251)
+- M2 Persistence + ReadIndex + Snapshots: 6/7 (PR 8 #252, PR 9 #256,
+  PR 10 #259, PR 11 #261, PR 14 #272, PR 15 this).
+- M2 final piece — joint consensus (§4.3 atomic membership change) —
+  scheduled for PR 16. Implementer subagent quota line that runs
+  the JC implementer is rate-limited until 2026-05-12; resume after
+  reset. Snapshot encoding's `Configuration []string` will need
+  joint-config extension at that time.
+- Then M3 (test harness + chaos), M4 (staging soak), M5 (production
+  swap). All raft/v2 work continues in `.worktrees/raft-actor` on
+  dedicated PR branches per the user-locked workflow.
+
 ## [0.0.131.0] - 2026-05-09 — serveruntime boot decomposition: services + shutdown phases (final, milestone complete)
 
 ### Refactored

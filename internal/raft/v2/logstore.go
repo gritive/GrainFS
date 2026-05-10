@@ -64,43 +64,93 @@ type LogStore interface {
 	// capped at maxEntries. The returned slice is a copy — it does NOT alias
 	// internal storage — so the caller may retain it across subsequent
 	// mutations of the store (e.g. across a step-down truncation).
-	// Returns ErrLogIndexOutOfRange if startIdx > LastIndex()+1.
+	// Returns ErrLogIndexOutOfRange if startIdx > LastIndex()+1, OR if
+	// startIdx < FirstIndex() (caller cannot ask for entries already
+	// compacted into a snapshot).
 	EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntry, error)
+
+	// CompactBefore removes all entries with index <= boundary. After a
+	// successful call, FirstIndex() returns boundary+1 (or LastIndex()+1 if
+	// the log is now empty). Implementations must persist the new boundary
+	// durably before returning.
+	//
+	// CompactBefore is the only operation that advances FirstIndex past 1.
+	// Callers MUST ensure boundary <= the snapshot's LastIncludedIndex; the
+	// snapshot itself covers all entries up to and including boundary.
+	//
+	// The store also tracks the term of the entry at boundary (the snapshot's
+	// LastIncludedTerm) so TermAt(boundary) continues to return the correct
+	// term after compaction. This is load-bearing for AE consistency: when
+	// the leader sends entries starting at boundary+1, PrevLogTerm equals
+	// the snapshot's LastIncludedTerm. Queries at indices below boundary
+	// return ErrLogIndexOutOfRange (compacted away); idx == 0 still returns 0
+	// (Raft sentinel).
+	//
+	// No-op if boundary < FirstIndex() (already compacted past). Must error
+	// if boundary > LastIndex() — caller bug, no entry covers that index.
+	CompactBefore(boundary uint64) error
 }
 
 // memLogStore is an in-memory LogStore backed by a single slice. It is owned
-// exclusively by the actor goroutine and requires no locking. Logical index i
-// maps to entries[i-1] (0-based slice, 1-based Raft index).
+// exclusively by the actor goroutine and requires no locking.
+//
+// Index translation: logical Raft index i maps to entries[i-firstIndex]. Before
+// any CompactBefore call, firstIndex == 1, so the mapping reduces to
+// entries[i-1]. After CompactBefore(N), firstIndex = N+1 and prevTerm holds
+// the term of the (now-discarded) entry at index N — TermAt(N) returns
+// prevTerm so AE consistency checks at the snapshot boundary still work.
 type memLogStore struct {
-	entries []LogEntry
+	entries    []LogEntry
+	firstIndex uint64 // 1-based; 1 when no compaction
+	// prevTerm is the term of the entry at firstIndex-1 (== snapshot's
+	// LastIncludedTerm after CompactBefore). 0 before any compaction (no
+	// snapshot exists). TermAt(firstIndex-1) returns this value so the
+	// leader's PrevLogTerm at the snapshot boundary still resolves.
+	prevTerm uint64
 }
 
-func newMemLogStore() *memLogStore { return &memLogStore{} }
+func newMemLogStore() *memLogStore { return &memLogStore{firstIndex: 1} }
 
-func (s *memLogStore) FirstIndex() uint64 { return 1 }
+func (s *memLogStore) FirstIndex() uint64 {
+	if s.firstIndex == 0 {
+		return 1
+	}
+	return s.firstIndex
+}
 
 func (s *memLogStore) LastIndex() uint64 {
 	if len(s.entries) == 0 {
-		return 0
+		// firstIndex-1 is the snapshot boundary (or 0 when no compaction);
+		// LastIndex must equal firstIndex-1 for an empty post-compaction log
+		// so subsequent appends land at firstIndex (= LastIndex()+1).
+		return s.FirstIndex() - 1
 	}
-	return uint64(len(s.entries))
+	return s.FirstIndex() + uint64(len(s.entries)) - 1
 }
 
 func (s *memLogStore) Entry(idx uint64) (LogEntry, error) {
-	if idx == 0 || idx > uint64(len(s.entries)) {
+	first := s.FirstIndex()
+	if idx == 0 || idx < first || idx > s.LastIndex() {
 		return LogEntry{}, ErrLogIndexOutOfRange
 	}
-	return s.entries[idx-1], nil
+	return s.entries[idx-first], nil
 }
 
 func (s *memLogStore) TermAt(idx uint64) (uint64, error) {
 	if idx == 0 {
 		return 0, nil // Raft sentinel: "no previous entry"
 	}
-	if idx > uint64(len(s.entries)) {
+	first := s.FirstIndex()
+	// Snapshot-boundary fast path: TermAt(firstIndex-1) returns prevTerm so
+	// the leader's PrevLogTerm at the boundary still resolves after compaction.
+	// Without compaction, first==1 → boundary==0 (already handled above).
+	if idx == first-1 {
+		return s.prevTerm, nil
+	}
+	if idx < first || idx > s.LastIndex() {
 		return 0, ErrLogIndexOutOfRange
 	}
-	return s.entries[idx-1].Term, nil
+	return s.entries[idx-first].Term, nil
 }
 
 func (s *memLogStore) Append(entries []LogEntry) error {
@@ -115,10 +165,22 @@ func (s *memLogStore) Append(entries []LogEntry) error {
 }
 
 func (s *memLogStore) TruncateAfter(idx uint64) error {
-	if idx >= uint64(len(s.entries)) {
+	last := s.LastIndex()
+	if idx >= last {
 		return nil // no-op
 	}
-	s.entries = s.entries[:idx]
+	first := s.FirstIndex()
+	// idx < first-1 would discard the snapshot boundary itself — invalid.
+	// idx == first-1 is the "truncate everything since the snapshot" case;
+	// leaves the slice empty but firstIndex/prevTerm intact.
+	if idx < first-1 {
+		// Defensive: mirror Append's panic-on-bug philosophy. Truncating below
+		// the snapshot boundary is a programmer error.
+		panic("raftv2: TruncateAfter: idx below FirstIndex-1 (snapshot boundary)")
+	}
+	// keep entries[0 .. idx-first+1) (i.e., logical indices [first, idx]).
+	keep := idx - first + 1
+	s.entries = s.entries[:keep]
 	return nil
 }
 
@@ -126,14 +188,20 @@ func (s *memLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntry, 
 	if startIdx == 0 {
 		return nil, ErrLogIndexOutOfRange
 	}
-	last := uint64(len(s.entries))
+	first := s.FirstIndex()
+	if startIdx < first {
+		// Caller asked for entries already compacted into a snapshot. They
+		// must use the snapshot path instead.
+		return nil, ErrLogIndexOutOfRange
+	}
+	last := s.LastIndex()
 	if startIdx > last+1 {
 		return nil, ErrLogIndexOutOfRange
 	}
 	if startIdx > last {
 		return nil, nil
 	}
-	src := s.entries[startIdx-1:]
+	src := s.entries[startIdx-first:]
 	if maxEntries > 0 && len(src) > maxEntries {
 		src = src[:maxEntries]
 	}
@@ -153,4 +221,54 @@ func (s *memLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntry, 
 		}
 	}
 	return out, nil
+}
+
+// InstallSnapshotBoundary seeds firstIndex / prevTerm directly without
+// requiring entries to exist at the boundary. Used by InstallSnapshot RPC
+// when the leader's snapshot covers indices the follower has never seen.
+// The log MUST be empty at call time (caller ensures via TruncateAfter(0)).
+//
+// Not part of the LogStore interface — only InstallSnapshot calls it, and
+// it is type-asserted via the unexported snapshotInstaller interface.
+func (s *memLogStore) InstallSnapshotBoundary(lastIncludedIndex, lastIncludedTerm uint64) error {
+	if len(s.entries) > 0 {
+		return ErrLogIndexOutOfRange
+	}
+	s.firstIndex = lastIncludedIndex + 1
+	s.prevTerm = lastIncludedTerm
+	return nil
+}
+
+// CompactBefore drops entries with index <= boundary. The term of the entry
+// at boundary is captured into prevTerm so TermAt(boundary) continues to
+// return the snapshot's LastIncludedTerm after the entries are gone.
+func (s *memLogStore) CompactBefore(boundary uint64) error {
+	first := s.FirstIndex()
+	if boundary < first {
+		return nil // already compacted past this point
+	}
+	last := s.LastIndex()
+	if boundary > last {
+		return ErrLogIndexOutOfRange
+	}
+	// Capture the term at boundary BEFORE we discard it.
+	t, err := s.TermAt(boundary)
+	if err != nil {
+		return err
+	}
+	// drop = number of entries to discard = boundary - first + 1.
+	drop := boundary - first + 1
+	// Reslice: keep entries[drop:]. Zero the dropped slots so any retained
+	// Command []byte slices can be GC'd.
+	for i := uint64(0); i < drop; i++ {
+		s.entries[i] = LogEntry{}
+	}
+	s.entries = s.entries[drop:]
+	// Reset to a fresh slice when empty so the underlying array can be GC'd.
+	if len(s.entries) == 0 {
+		s.entries = nil
+	}
+	s.firstIndex = boundary + 1
+	s.prevTerm = t
+	return nil
 }
