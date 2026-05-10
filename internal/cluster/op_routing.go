@@ -136,3 +136,34 @@ func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, 
 	target, err := r.routeGroup(entry.PlacementGroupID)
 	return target, entry, err
 }
+
+// RouteObjectWrite picks the placement group for a new object write via
+// SelectObjectPlacementGroup. Returns the chosen ShardGroupEntry alongside
+// the RouteTarget so callers can commit the object-index entry after the
+// storage write succeeds (Q3).
+//
+// Internal buckets bypass placement selection (ADR 0004); EC profile too
+// large for the topology falls back to the bucket-routed group.
+func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroupEntry, error) {
+	if r.groups == nil {
+		return RouteTarget{}, ShardGroupEntry{}, ErrCoordinatorNoRouter
+	}
+	if storage.IsInternalBucket(bucket) {
+		target, err := r.RouteBucket(bucket)
+		return target, ShardGroupEntry{ID: target.GroupID}, err
+	}
+	group, err := SelectObjectPlacementGroup(bucket, key, r.groups.ShardGroups(), r.ec)
+	if err != nil {
+		target, routeErr := r.RouteBucket(bucket)
+		if routeErr != nil {
+			return RouteTarget{}, ShardGroupEntry{}, err
+		}
+		groupSnapshot, ok := r.groups.ShardGroup(target.GroupID)
+		if !ok {
+			return RouteTarget{}, ShardGroupEntry{}, err
+		}
+		return target, groupSnapshot, nil
+	}
+	target, err := r.routeGroup(group.ID)
+	return target, group, err
+}

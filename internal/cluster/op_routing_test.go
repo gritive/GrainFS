@@ -160,3 +160,65 @@ func TestOpRouter_RouteObjectRead_NilIndexReturnsError(t *testing.T) {
 	_, _, err := r.RouteObjectRead("b1", "k1", "")
 	require.ErrorIs(t, err, ErrObjectIndexRequired)
 }
+
+func routerForTestWithECGroups(t *testing.T, ec ECConfig) *OpRouter {
+	t.Helper()
+	rt := routerWithGroups(t, map[string][]string{
+		"g1": {"node-1", "node-2", "node-3", "node-4", "node-5", "node-6"},
+		"g2": {"node-1", "node-2", "node-3", "node-4", "node-5", "node-6"},
+	})
+	groups := &fakeShardGroupSource{
+		groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"node-1", "node-2", "node-3", "node-4", "node-5", "node-6"}},
+			"g2": {ID: "g2", PeerIDs: []string{"node-1", "node-2", "node-3", "node-4", "node-5", "node-6"}},
+		},
+	}
+	addr := &fakeNodeAddressBook{nodes: []MetaNodeEntry{
+		{ID: "node-1", Address: "10.0.0.1:7000"}, {ID: "node-2", Address: "10.0.0.2:7000"},
+		{ID: "node-3", Address: "10.0.0.3:7000"}, {ID: "node-4", Address: "10.0.0.4:7000"},
+		{ID: "node-5", Address: "10.0.0.5:7000"}, {ID: "node-6", Address: "10.0.0.6:7000"},
+	}}
+	idx := &fakeObjectIndex{latest: map[string]ObjectIndexEntry{}, version: map[string]ObjectIndexEntry{}}
+	probe := &fakeLeaderProbe{}
+	return NewOpRouter(rt, groups, idx, addr, probe, ec, "node-2", nil)
+}
+
+func TestOpRouter_RouteObjectWrite_PicksECCapableGroup(t *testing.T) {
+	r := routerForTestWithECGroups(t, ECConfig{DataShards: 4, ParityShards: 2})
+	target, group, err := r.RouteObjectWrite("b1", "key-1")
+	require.NoError(t, err)
+	require.Contains(t, []string{"g1", "g2"}, target.GroupID)
+	require.Equal(t, target.GroupID, group.ID)
+	require.GreaterOrEqual(t, len(group.PeerIDs), 6)
+}
+
+func TestOpRouter_RouteObjectWrite_InternalBucketUsesBucketRoute(t *testing.T) {
+	r := routerForTestWithECGroups(t, ECConfig{DataShards: 4, ParityShards: 2})
+	r.router.AssignBucket(storage.NFS4BucketName, "g1")
+	target, group, err := r.RouteObjectWrite(storage.NFS4BucketName, "k")
+	require.NoError(t, err)
+	require.Equal(t, "g1", target.GroupID)
+	require.Equal(t, "g1", group.ID)
+}
+
+func TestOpRouter_RouteObjectWrite_NoECCapableFallsBackToBucketRoute(t *testing.T) {
+	rt := routerWithGroups(t, map[string][]string{
+		"g-small": {"node-1", "node-2", "node-3"},
+	})
+	rt.AssignBucket("b-fallback", "g-small")
+	groups := &fakeShardGroupSource{
+		groups: map[string]ShardGroupEntry{
+			"g-small": {ID: "g-small", PeerIDs: []string{"node-1", "node-2", "node-3"}},
+		},
+	}
+	addr := &fakeNodeAddressBook{nodes: []MetaNodeEntry{
+		{ID: "node-1", Address: "10.0.0.1:7000"}, {ID: "node-2", Address: "10.0.0.2:7000"},
+		{ID: "node-3", Address: "10.0.0.3:7000"},
+	}}
+	idx := &fakeObjectIndex{}
+	r := NewOpRouter(rt, groups, idx, addr, &fakeLeaderProbe{}, ECConfig{DataShards: 4, ParityShards: 2}, "node-2", nil)
+	target, group, err := r.RouteObjectWrite("b-fallback", "k")
+	require.NoError(t, err)
+	require.Equal(t, "g-small", target.GroupID)
+	require.Equal(t, "g-small", group.ID)
+}
