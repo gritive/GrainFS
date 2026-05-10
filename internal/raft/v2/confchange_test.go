@@ -171,3 +171,58 @@ func TestApplyConfigEntry_Joint(t *testing.T) {
 	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, got.voters)
 	require.Equal(t, []string{"n1", "n2", "n3"}, got.oldVoters)
 }
+
+// TestReconstructConfig_SeedFromCfg: no snapshot, no log entries — fall back
+// to {cfg.ID} ∪ cfg.Peers.
+func TestReconstructConfig_SeedFromCfg(t *testing.T) {
+	store := newMemLogStore()
+	cfg, hist, appendedIdx := reconstructConfig(nil, store, "n1", []string{"n2", "n3"})
+	require.False(t, cfg.joint)
+	require.Equal(t, []string{"n1", "n2", "n3"}, cfg.voters)
+	require.Empty(t, hist)
+	require.Equal(t, uint64(0), appendedIdx)
+}
+
+// TestReconstructConfig_SeedFromSnapshot: snapshot voters override cfg.Peers.
+// Useful when a node is brought up after a snapshot from a cluster whose
+// membership has already drifted from the original Peers list.
+func TestReconstructConfig_SeedFromSnapshot(t *testing.T) {
+	store := newMemLogStore()
+	require.NoError(t, store.InstallSnapshotBoundary(10, 3))
+	snap := &Snapshot{LastIncludedIndex: 10, LastIncludedTerm: 3, Configuration: []string{"x", "y", "z"}}
+	cfg, hist, appendedIdx := reconstructConfig(snap, store, "x", []string{"y", "z", "stale"})
+	require.False(t, cfg.joint)
+	require.Equal(t, []string{"x", "y", "z"}, cfg.voters)
+	require.Empty(t, hist)
+	require.Equal(t, uint64(0), appendedIdx)
+}
+
+// TestReconstructConfig_ReplaysJointThenSingle: cfg-seeded baseline with two
+// config entries replayed forward (joint then settle to Cnew). The history
+// stack records BOTH entries with their respective pre-states.
+func TestReconstructConfig_ReplaysJointThenSingle(t *testing.T) {
+	store := newMemLogStore()
+	// Index 1: a normal entry to populate the log a bit.
+	require.NoError(t, store.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	// Index 2: joint entry transitioning {n1,n2,n3} → {n1,n2,n3,n4}.
+	require.NoError(t, store.Append([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
+	}}))
+	// Index 3: final entry settling on Cnew.
+	require.NoError(t, store.Append([]LogEntry{{
+		Term: 1, Index: 3, Type: LogEntryConfChange,
+		Command: encodeConfChange([]string{"n1", "n2", "n3", "n4"}),
+	}}))
+
+	cfg, hist, appendedIdx := reconstructConfig(nil, store, "n1", []string{"n2", "n3"})
+	require.False(t, cfg.joint)
+	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, cfg.voters)
+	require.Equal(t, uint64(3), appendedIdx)
+	require.Len(t, hist, 2)
+	require.Equal(t, uint64(2), hist[0].logIndex)
+	require.False(t, hist[0].prev.joint)
+	require.Equal(t, []string{"n1", "n2", "n3"}, hist[0].prev.voters)
+	require.Equal(t, uint64(3), hist[1].logIndex)
+	require.True(t, hist[1].prev.joint)
+}

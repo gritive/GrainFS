@@ -176,6 +176,17 @@ func NewNode(cfg Config) (*Node, error) {
 		}
 	}
 
+	// Reconstruct the effective configuration. Per Raft §4.3, the live config
+	// is whatever the most recent config-bearing log entry says — even if
+	// uncommitted. Bootstrap order:
+	//  1. Seed from snapshot voters if a snapshot exists; otherwise from
+	//     {cfg.ID} ∪ cfg.Peers (cfg.Peers is "peers excludes self" per v1).
+	//  2. Walk log entries from snap.LastIncludedIndex+1 → LastIndex, applying
+	//     any LogEntryConfChange / LogEntryJointConfChange to advance the
+	//     effective config. configHistory is rebuilt in lockstep so any
+	//     subsequent truncation can revert correctly.
+	currentConfig, history, appendedIdx := reconstructConfig(snap, logStore, cfg.ID, cfg.Peers)
+
 	n := &Node{
 		cfg:             cfg,
 		cmdCh:           make(chan command, cmdChBuffer),
@@ -198,7 +209,10 @@ func NewNode(cfg Config) (*Node, error) {
 			// committed (the snapshot encodes the FSM state at that point).
 			// On a non-snapshotted restart, this is 0; the next leader's
 			// AE will re-establish via LeaderCommit.
-			commitIndex: initialCommitIndex,
+			commitIndex:         initialCommitIndex,
+			currentConfig:       currentConfig,
+			configHistory:       history,
+			appendedConfigIndex: appendedIdx,
 		},
 		// Per-Node rng seeded with current time + ID hash so two Nodes started
 		// in the same nanosecond still draw different timeouts. Sole user is

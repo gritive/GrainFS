@@ -326,3 +326,49 @@ func applyConfigEntry(prev effectiveConfig, e LogEntry) effectiveConfig {
 	_ = prev
 	return newSingleConfig(p.NewVoters)
 }
+
+// seedConfigFromCfg builds the bootstrap effective config from cfg.ID +
+// cfg.Peers (which excludes self). Used when no snapshot exists.
+func seedConfigFromCfg(selfID string, peers []string) effectiveConfig {
+	voters := make([]string, 0, len(peers)+1)
+	voters = append(voters, selfID)
+	voters = append(voters, peers...)
+	return newSingleConfig(voters)
+}
+
+// reconstructConfig rebuilds the effective config (and configHistory +
+// appendedConfigIndex) from durable state on startup. Walks any config-
+// bearing entries in the live log forward from the snapshot boundary so a
+// restarted node observes the same effective config it had before the
+// crash.
+//
+// Caller passes the loaded snapshot (may be nil), the log store with its
+// FirstIndex/LastIndex already populated, and the seed identity. Returns
+// the live config + a configHistory slice + the index of the last config
+// entry observed.
+func reconstructConfig(snap *Snapshot, logStore LogStore, selfID string, peers []string) (effectiveConfig, []configHistoryEntry, uint64) {
+	var current effectiveConfig
+	if snap != nil && len(snap.Configuration) > 0 {
+		current = newSingleConfig(snap.Configuration)
+	} else {
+		current = seedConfigFromCfg(selfID, peers)
+	}
+
+	var history []configHistoryEntry
+	var appendedIdx uint64
+	first := logStore.FirstIndex()
+	last := logStore.LastIndex()
+	for i := first; i <= last; i++ {
+		e, err := logStore.Entry(i)
+		if err != nil {
+			panic(fmt.Sprintf("raftv2: reconstructConfig: log Entry(%d): %v", i, err))
+		}
+		if e.Type != LogEntryConfChange && e.Type != LogEntryJointConfChange {
+			continue
+		}
+		history = append(history, configHistoryEntry{logIndex: i, prev: current})
+		current = applyConfigEntry(current, e)
+		appendedIdx = i
+	}
+	return current, history, appendedIdx
+}

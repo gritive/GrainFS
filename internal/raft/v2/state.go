@@ -77,6 +77,35 @@ type actorState struct {
 	// confirmation from a majority of peers. FIFO ordered by submission;
 	// drained with ErrProposalFailed on step-down. Leader-only.
 	readIndexQueue []readIndexReq
+
+	// currentConfig is the cluster's effective voter set per Raft §4.3 — the
+	// configuration in the most recent log entry this server has appended,
+	// even if not yet committed. Quorum, election, replication, and ReadIndex
+	// all consult this rather than cfg.Peers (which is now seed-only at boot).
+	currentConfig effectiveConfig
+
+	// configHistory records (logIndex, prev) pairs in append order. On every
+	// LogEntryConfChange / LogEntryJointConfChange append, the pre-transition
+	// config is pushed; on a Rule 5a truncation past idx, entries with
+	// logIndex > idx are popped and currentConfig reverts to the most recent
+	// surviving prev (Raft §4.3 truncation revert).
+	configHistory []configHistoryEntry
+
+	// appendedConfigIndex is the index of the most recent config entry this
+	// node has appended, or 0 when no config entry exists in the live log.
+	// The leader uses this to refuse a fresh AddVoter / RemoveVoter while a
+	// previous change is still in flight (mirrors hashicorp/raft pragmatic
+	// behaviour: one in-flight membership change at a time).
+	appendedConfigIndex uint64
+}
+
+// configHistoryEntry records the config that was effective immediately
+// BEFORE a config log entry at logIndex was appended. Popped on truncation
+// so the post-truncate effective config equals whatever was active just
+// before the dropped entry was appended.
+type configHistoryEntry struct {
+	logIndex uint64
+	prev     effectiveConfig
 }
 
 // snapshot builds a readState reflecting the current actor-owned state.
