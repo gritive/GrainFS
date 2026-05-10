@@ -24,7 +24,7 @@ admin path와 CLI도 `iam` 카테고리 아래(`/v1/iam/bucket-upstream`,
   MetaCmdType IDs 32/33, FlatBuffers payload 모두 보존
 
 ## Consequences
-- v0.0.122 ↔ v0.0.132 raft 호환성 유지 (payload/snapshot 무변경)
+- v0.0.122 ↔ v0.0.133 raft 호환성 유지 (payload/snapshot 무변경)
 - BREAKING: 기존 CLI 명령 사용자 스크립트는 수정 필요. CHANGELOG 매핑 표 제공
 - 향후 bucket sub-resource(policy/lifecycle/event 등)가 같은 `/v1/buckets/:bucket/*`
   prefix와 `grainfs bucket *` 트리에 합류 가능

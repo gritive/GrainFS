@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.0.133.0 — 2026-05-09
+
+### Breaking
+- **Moved** `grainfs iam bucket-upstream` → `grainfs bucket upstream`. Verb `set` → `put`.
+  Migration mapping:
+
+  | v0.0.123–v0.0.132 | v0.0.133+ |
+  |---|---|
+  | `grainfs iam bucket-upstream set <bucket> ...` | `grainfs bucket upstream put <bucket> ...` |
+  | `grainfs iam bucket-upstream get/list/delete ...` | `grainfs bucket upstream get/list/delete ...` |
+- **Moved** admin UDS endpoints `/v1/iam/bucket-upstream*` → `/v1/buckets/[:bucket/]upstream`.
+  HTTP method for upsert: POST → PUT. Legacy `/v1/iam/bucket-upstream*` removed (no alias).
+
+### Changed (non-breaking)
+- ADR 0010 records the surface relocation; ADR 0009's storage decisions
+  (IAM Store, AAD `"bucket-upstream:"+bucket`, MetaCmdType IDs 32/33,
+  IAM v3 snapshot trailer) are preserved → v0.0.122 ↔ v0.0.133 raft
+  compatibility unchanged.
+
 ## [0.0.132.0] - 2026-05-11 — raft/v2 PR 15: Snapshots — log compaction + InstallSnapshot RPC (M2 6 of 7)
 
 ### Added

@@ -277,7 +277,7 @@ grainfs serve \
 
 ### Optional: Pull-through cache for migration (v0.0.123.0+)
 
-> **Rolling-upgrade ordering:** `bucket-upstream` records propagate via a new MetaCmdType (IDs 32/33) introduced in v0.0.123.0. While a cluster is mid-upgrade — some nodes still on v0.0.122 or earlier — DO NOT issue `grainfs iam bucket-upstream set/delete` commands. Pre-v0.0.123 followers will silently no-op the raft entry on apply (rolling-upgrade safety design). The records are recovered correctly via snapshot replay on next snapshot install, but during the apply gap the follower's view is inconsistent. Wait until every node reports v0.0.123.0+ before configuring bucket upstreams.
+> **Rolling-upgrade ordering:** `bucket-upstream` records propagate via a new MetaCmdType (IDs 32/33) introduced in v0.0.123.0. While a cluster is mid-upgrade — some nodes still on v0.0.122 or earlier — DO NOT issue `grainfs bucket upstream put/delete` commands. Pre-v0.0.123 followers will silently no-op the raft entry on apply (rolling-upgrade safety design). The records are recovered correctly via snapshot replay on next snapshot install, but during the apply gap the follower's view is inconsistent. Wait until every node reports v0.0.123.0+ before configuring bucket upstreams. The CLI/admin path was relocated in v0.0.133.0 (see ADR 0010); FSM/snapshot format is unchanged so v0.0.122 ↔ v0.0.133 raft compatibility is preserved.
 
 If migrating from another S3-compatible source, register the upstream per
 bucket via the admin UDS. The `--upstream*` cmdline flags were removed in
@@ -285,20 +285,15 @@ v0.0.123.0; the IAM-managed approach replaces them.
 
 ```bash
 # Register the upstream for bucket "legacy-data".
-grainfs iam bucket-upstream set legacy-data \
-    --endpoint /grainfs/data/admin.sock \
-    --upstream-url http://minio.legacy:9000 \
-    --access-key MIGRATIONAK \
-    --secret-key-stdin <<< "$UPSTREAM_SECRET_KEY"
+grainfs bucket upstream put legacy-data \
+  --endpoint /grainfs/data/admin.sock \
+  --upstream-url http://upstream-minio:9000 \
+  --access-key legacy-ak \
+  --secret-key-stdin <<<"legacy-sk"
 
-# Verify (secret_key never returned).
-grainfs iam bucket-upstream get legacy-data --endpoint /grainfs/data/admin.sock
-
-# List all registered buckets.
-grainfs iam bucket-upstream list --endpoint /grainfs/data/admin.sock
-
-# Stop pull-through for a bucket (does NOT delete the bucket itself).
-grainfs iam bucket-upstream delete legacy-data --endpoint /grainfs/data/admin.sock
+grainfs bucket upstream get legacy-data --endpoint /grainfs/data/admin.sock
+grainfs bucket upstream list --endpoint /grainfs/data/admin.sock
+grainfs bucket upstream delete legacy-data --endpoint /grainfs/data/admin.sock
 ```
 
 Pull-through is read-only and on-miss only: the first GET on a missing
