@@ -29,11 +29,13 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 	raftv2 "github.com/gritive/GrainFS/internal/raft/v2"
 )
@@ -58,7 +60,10 @@ func newRaftV2Node(n *raftv2.Node) *raftV2Node {
 func (a *raftV2Node) Start() { a.n.Start() }
 
 // Close maps to v2's Stop(). v1 callers use Close(); v2's lifecycle method is Stop().
-func (a *raftV2Node) Close() { a.n.Stop() }
+func (a *raftV2Node) Close() {
+	metrics.RaftV2StopCount.Inc()
+	a.n.Stop()
+}
 
 // --- Identity ---
 
@@ -108,14 +113,41 @@ func (a *raftV2Node) Peers() []string {
 
 // --- Bootstrapping ---
 
-func (a *raftV2Node) Bootstrap() error { return a.n.Bootstrap() }
+func (a *raftV2Node) Bootstrap() error {
+	err := a.n.Bootstrap()
+	if err != nil {
+		metrics.RaftV2BootstrapOutcome.WithLabelValues("error").Inc()
+	} else {
+		metrics.RaftV2BootstrapOutcome.WithLabelValues("success").Inc()
+	}
+	return err
+}
 
 // --- Write path ---
 
 func (a *raftV2Node) Propose(command []byte) error { return a.n.Propose(command) }
 
 func (a *raftV2Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
-	return a.n.ProposeWait(ctx, command)
+	start := time.Now()
+	idx, err := a.n.ProposeWait(ctx, command)
+	outcome := proposeOutcome(err)
+	metrics.RaftV2ProposeCount.WithLabelValues(outcome).Inc()
+	metrics.RaftV2ProposeLatency.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
+	return idx, err
+}
+
+// proposeOutcome maps a ProposeWait error to a bounded outcome label.
+func proposeOutcome(err error) string {
+	if err == nil {
+		return "success"
+	}
+	if errors.Is(err, raftv2.ErrNotLeader) {
+		return "not_leader"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	return "error"
 }
 
 // --- Read path ---
@@ -134,16 +166,22 @@ func (a *raftV2Node) WaitApplied(ctx context.Context, index uint64) error {
 	if index == 0 {
 		return nil
 	}
+	start := time.Now()
+	var err error
 	for {
 		if a.n.CommittedIndex() >= index {
-			return nil
+			break
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			err = ctx.Err()
+			goto done
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
+done:
+	metrics.RaftV2WaitAppliedLatency.Observe(time.Since(start).Seconds())
+	return err
 }
 
 // --- Apply channel ---
