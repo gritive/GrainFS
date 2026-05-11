@@ -2,6 +2,8 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/xml"
+	"fmt"
 	"time"
 )
 
@@ -62,4 +64,21 @@ func (s *Service) Get(bucket string) (*LifecycleConfiguration, error) {
 // (ADR 0011).
 func (s *Service) GetRaw(bucket string) ([]byte, error) {
 	return s.store.GetRaw(bucket)
+}
+
+// Apply validates a raw S3 wire XML lifecycle configuration and proposes it
+// through the meta-Raft FSM. The raw bytes are stored verbatim so GET returns
+// byte-for-byte what the operator sent.
+func (s *Service) Apply(ctx context.Context, bucket string, raw []byte) error {
+	var cfg LifecycleConfiguration
+	if err := xml.Unmarshal(raw, &cfg); err != nil {
+		return fmt.Errorf("lifecycle: malformed XML: %w", err)
+	}
+	if len(cfg.Rules) == 0 {
+		return fmt.Errorf("lifecycle: configuration must contain at least one rule")
+	}
+	if err := Validate(&cfg); err != nil {
+		return fmt.Errorf("lifecycle: invalid configuration: %w", err)
+	}
+	return s.proposer.ProposeLifecyclePut(ctx, bucket, raw)
 }
