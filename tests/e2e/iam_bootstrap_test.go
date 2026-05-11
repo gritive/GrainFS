@@ -173,7 +173,6 @@ func startUnbootstrappedE2EServer(t testing.TB) (dataDir, s3URL, adminSock strin
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--dedup=false",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

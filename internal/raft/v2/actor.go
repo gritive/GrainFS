@@ -211,6 +211,7 @@ func (n *Node) run() {
 		// (recovery case: persisted currentTerm >= 1 means we were Leader before).
 		if n.st.currentTerm < 1 {
 			n.st.currentTerm = 1
+			actorTermBumps.Inc()
 			n.persistHardState()
 		}
 		// Route through becomeLeader so the §5.4.2 no-op append fires (FSM
@@ -340,10 +341,16 @@ func (n *Node) handleRequestVote(cmd command) {
 // drive the next AE to a matching prefix anyway.
 func (n *Node) handleAppendEntries(cmd command) {
 	args := cmd.aeArgs
+	aeStart := time.Now()
+	aeOutcome := "success"
+	defer func() {
+		actorAppendEntriesRPCDuration.WithLabelValues(aeOutcome).Observe(time.Since(aeStart).Seconds())
+	}()
 
 	// Rule 1: stale leader → reject. Reply with our higher term so the sender
 	// learns it is no longer leader. No state change → no publish needed.
 	if args.Term < n.st.currentTerm {
+		aeOutcome = "error"
 		cmd.aeReply <- &AppendEntriesReply{
 			Term:    n.st.currentTerm,
 			Success: false,
@@ -378,6 +385,7 @@ func (n *Node) handleAppendEntries(cmd command) {
 	// itself (TermAt returns prevTerm at that index), but anything strictly
 	// below it is unreachable.
 	if first := n.st.log.FirstIndex(); args.PrevLogIndex > 0 && args.PrevLogIndex < first-1 {
+		aeOutcome = "conflict"
 		cmd.aeReply <- &AppendEntriesReply{
 			Term:          n.st.currentTerm,
 			Success:       false,
@@ -394,6 +402,7 @@ func (n *Node) handleAppendEntries(cmd command) {
 		// Case 1: follower's log too short. Hint ConflictTerm=0,
 		// ConflictIndex=lastLogIndex+1 so the leader jumps directly to where
 		// our log ends.
+		aeOutcome = "conflict"
 		cmd.aeReply <- &AppendEntriesReply{
 			Term:          n.st.currentTerm,
 			Success:       false,
@@ -419,6 +428,7 @@ func (n *Node) handleAppendEntries(cmd command) {
 		for conflictIdx > floor && n.mustTermAt(conflictIdx-1) == conflictTerm {
 			conflictIdx--
 		}
+		aeOutcome = "conflict"
 		cmd.aeReply <- &AppendEntriesReply{
 			Term:          n.st.currentTerm,
 			Success:       false,
@@ -442,6 +452,7 @@ func (n *Node) handleAppendEntries(cmd command) {
 		if e.Index != target {
 			// Entry index disagrees with the expected logical position.
 			// Reject without mutating the log; leader will retry.
+			aeOutcome = "conflict"
 			cmd.aeReply <- &AppendEntriesReply{
 				Term:          n.st.currentTerm,
 				Success:       false,
@@ -693,6 +704,7 @@ func (n *Node) onHeartbeatTick() {
 	if n.st.state != Leader {
 		return
 	}
+	actorCmdChDepthGauge.Set(float64(len(n.cmdCh)))
 	n.broadcastHeartbeat()
 }
 
@@ -702,6 +714,7 @@ func (n *Node) onHeartbeatTick() {
 // fast-arriving reply cannot race ahead of the timer arm.
 func (n *Node) becomeCandidate() {
 	n.st.currentTerm++
+	actorTermBumps.Inc()
 	n.st.state = Candidate
 	n.st.votedFor = n.st.id
 	n.st.leaderID = ""
@@ -741,6 +754,7 @@ func (n *Node) becomeCandidate() {
 // fire an immediate heartbeat so followers don't time out waiting for the
 // first tick.
 func (n *Node) becomeLeader() {
+	actorLeaderTransitions.Inc()
 	n.st.state = Leader
 	n.st.leaderID = n.st.id
 
@@ -832,6 +846,7 @@ func (n *Node) becomeLeader() {
 // entries' commit fate is no longer this node's responsibility.
 func (n *Node) stepDownToFollower(term uint64) {
 	if n.st.state == Leader {
+		actorLeaderTransitions.Inc()
 		if n.heartbeatTicker != nil {
 			n.heartbeatTicker.Stop()
 			n.heartbeatTicker = nil
@@ -871,6 +886,9 @@ func (n *Node) stepDownToFollower(term uint64) {
 			}
 			n.st.pendingConfChange = nil
 		}
+	}
+	if term > n.st.currentTerm {
+		actorTermBumps.Inc()
 	}
 	n.st.currentTerm = term
 	n.st.state = Follower

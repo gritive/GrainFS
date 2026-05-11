@@ -368,7 +368,6 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--dedup=false",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -457,7 +456,6 @@ func (h *iamTestServerHandle) Start(t *testing.T) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--dedup=false",
 	}
 
 	cmd := exec.Command(getBinary(), args...)

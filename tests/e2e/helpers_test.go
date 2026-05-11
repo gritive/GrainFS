@@ -66,13 +66,6 @@ func TestMain(m *testing.M) {
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0"}
 
-	// GRAINFS_DEDUP=1 opts into dedup. Default is OFF for the e2e suite because
-	// dedup + snapshots is not implemented in Phase A — CoW E2E tests would
-	// fail starting from the second snapshot otherwise.
-	if os.Getenv("GRAINFS_DEDUP") != "1" {
-		args = append(args, "--dedup=false")
-	}
-
 	// GRAINFS_PPROF=1 enables comprehensive pprof profiling.
 	// CPU profile is collected concurrently with the test run (25s window).
 	// All profiles are saved to /tmp/grainfs-e2e-*.out after tests complete.
@@ -444,7 +437,6 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--dedup=false",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

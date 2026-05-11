@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.136.0] - 2026-05-11 — feat(lifecycle): Bucket Lifecycle Policy deep module (ADR 0011)
+## [0.0.141.0] - 2026-05-11 — feat(lifecycle): Bucket Lifecycle Policy deep module (ADR 0011)
 
 ### Added
 
@@ -33,6 +33,99 @@
   §5.4.2): a freshly elected meta-Raft leader commits an entry in its own term,
   unlocking backlogged previous-term entries (e.g. lifecycle config written by
   the prior leader).
+
+## [0.0.140.0] - 2026-05-11 — fix(storage/pullthrough): forward Snapshotable through the pull-through decorator
+
+- fix(storage/pullthrough): `pullthrough.Backend` now implements `storage.Snapshotable`/`storage.BucketSnapshotable` (and `Unwrap()`) by delegating to the wrapped backend. It only embedded `storage.Backend`, which does not promote the snapshot interfaces — so on the serve path (`pullthrough(wal(ClusterCoordinator))`) the backend chain stopped satisfying `Snapshotable`. Effect: `GET /admin/snapshots` returned 500 ("backend does not support snapshots") and the PITR auto-snapshotter was silently skipped on single-node serve. Regression since the pull-through layer entered the boot chain. Fixes `TestAutoSnapshot_CreatesSnapshotAutomatically`.
+
+## [0.0.139.0] - 2026-05-11 — cli/test: --dedup flag deprecated; e2e workaround removed (PR-C of dedup+snapshot series)
+
+- cli(serve): `--dedup` flag is now hidden and deprecated (`MarkHidden` + `MarkDeprecated`) — dedup is always enabled by default. The flag value is still honored (passing `--dedup=false` keeps the S3-backed `s3SnapshotStore` path) and will be removed entirely in v0.1.0.
+- test(e2e): removed the `--dedup=false` workaround from the shared e2e server and 6 test files, plus the `GRAINFS_DEDUP` env gate. The e2e suite now runs with dedup on by default (matching production). `volume_scrub_test.go` retains explicit `--dedup=false`/`--dedup=true` calls — those are deliberate dedup-off-vs-on comparisons.
+
+## [0.0.138.0] - 2026-05-11 — feat(volume): dedup-aware snapshot (PR-B of dedup+snapshot series)
+
+- feat(volume): dedup+snapshot integration — `badgerSnapshotStore` implements the `SnapshotStore` interface for dedup-enabled volumes. Snapshot maps live in BadgerDB (`vd:s:` keyspace) with refcount-shared canonicals; lifecycle (Begin/AppendChunk/Commit/Abort/Delete/Rollback/Clone) uses chunked Badger transactions + state markers + MVCC views for crash safety.
+- feat(volume): `Manager.RecoverOnBoot` reconciles in-progress snapshots, stuck rollbacks, and stuck clones on startup (idempotent re-apply).
+- fix(volume): remove the `dedup + snapshots not supported in Phase A` hard error — the CLI default (`--dedup=true` + `--snapshot-interval=1h`) no longer breaks from the second snapshot onward.
+
+## [0.0.137.0] - 2026-05-11 — raft/v2 M3 milestone COMPLETE — test harness + property suite + chaos
+
+### M3 PRs 17-21 (Test Harness Phase)
+
+**Phase summary:** raft v2 now has a comprehensive test harness covering property-based,
+chaos, and v1-corpus-derived test coverage. The package's correctness story is now:
+6 Raft invariants asserted under random op sequences + sustained chaos (kill/restart,
+drop, reorder, partition) + categorized v1 corpus coverage.
+
+### PR 17 — property test framework + 2 invariants
+
+- `pgregory.net/rapid` v1.3.0 added (state-machine property tests).
+- Election Safety + Leader Append-Only invariants.
+- 100k random sequences clean (nightly: -rapid.checks=100000).
+
+### PR 18 — Log Matching + Leader Completeness + State Machine Safety + Liveness
+
+- 4 additional invariants (3 safety + 1 liveness).
+- Liveness "Eventual Commit Under Stable Leadership" — checks that a stable 50-action
+  suffix with leader present commits every successful Propose.
+
+### PR 19 — v1 21-test corpus port
+
+- Outcome: 10 GREEN (8 EXISTING + 2 PORTED) / 11 SKIPPED / 0 V2-BUG.
+- Plan target ≥17 green not met because v2 architecturally simplified away v1 components
+  (Batcher, HeartbeatCoalescer, PeerReplicator, GroupRaftQUICMux, RaftConn,
+  membershipView, FlatBuffers wire codec) — those 11 SKIPPED files have legit
+  "no v2 equivalent by design" rationale.
+- Ported: persistence post-Stop RPC safety + Stop idempotency; concurrent
+  Configuration() reads + Stop goroutine cleanup.
+- See `internal/raft/v2/PORT_MATRIX.md` for the file-by-file matrix.
+
+### PR 20 — chaos suite
+
+- partitionNet extended with probabilistic drop (0-100%) + reorder delay.
+- `chaosCluster` with KillNode/StartNode (BadgerDB recovery).
+- 8-action `TestChaos_Sustained` with all 6 invariants asserted throughout.
+- Make target `test-raft-v2-chaos`; nightly cadence via `RAFT_CHAOS_DURATION=30m`.
+
+### PR 21 — perf snapshot + M3 close
+
+- v2 benchmark harness: single-node Propose (no-fsync + Badger-default),
+  3-voter in-process commit, 1 GiB InstallSnapshot.
+- v1 vs v2 comparison deferred — redesign goal was safety/maintainability
+  per plan §Driver, not throughput. Absolute v2 numbers below.
+
+### v2 benchmark results (2026-05-11, Apple M3)
+
+Methodology: `go test -bench=. -benchmem -benchtime=2s -count=3 -run '^$' ./internal/raft/v2`.
+Snapshot bench: `-benchtime=1x -count=1` (setup dominates).
+
+| Benchmark | ns/op (med) | B/op | allocs/op | Notes |
+|---|---|---|---|---|
+| ProposeWait_SingleNode_NoFsync | ~935 ns | ~660 B | 5 | memLogStore + memStableStore; pure actor overhead |
+| ProposeWait_SingleNode_BadgerDefault | ~28 µs | ~2.4 KB | 57 | BadgerDB + explicit db.Sync() per Append+SaveHardState |
+| ProposeAndCommit_3Voter | ~4.2 µs | ~2.3 KB | 24 | 3 in-process nodes via memNetwork; no real network |
+| InstallSnapshot_1GiB | ~350 ms | 1 GiB | ~120 | in-memory copy; 1 GiB FSM blob; leader→follower install |
+
+### M3 status: COMPLETE (5/5)
+
+Q7 success criteria measured at M3:
+
+- Race detector clean: yes (all v2 tests + chaos sustained 30s smoke clean)
+- Dual-impl harness equivalence: yes (existing M1 PR 2-3 harness; PR 18 extended invariant coverage)
+- Property tests 5 invariants: yes — 6 invariants implemented (5 safety + 1 liveness); 100k seqs clean nightly
+- Throughput regression vs v1: SKIPPED (per plan §Driver — redesign goal is safety, not throughput)
+- v1 21-test corpus port: yes — 21/21 categorized; 10 green + 11 SKIPPED with rationale
+- Cyclomatic complexity: deferred to M5 close per PR 7 note
+- Staging soak / mutex reduction: M4/M2 measured separately
+
+Next: M4 (staging soak, feature flag, long-tail bug fix). M3 → M4 handoff blocking on user direction.
+
+---
+
+## [0.0.136.0] - 2026-05-11 — refactor(volume): SnapshotStore extraction (PR-A)
+
+- refactor(volume): introduce SnapshotStore interface; move S3-backed snapshot ops to s3SnapshotStore (no behavior change)
 
 ## [0.0.135.0] - 2026-05-11 — refactor(cluster): extract OpRouter + LocalExecution from ClusterCoordinator
 
@@ -92,7 +185,6 @@
   unexported `routeTarget` struct. Constants `defaultFollowerReadWait` and
   `defaultSelfOnlyLeaderWait` superseded by `localExecFollowerReadDeadline`
   and `localExecSelfOnlyLeaderWait` in `exec_policy.go`.
-
 ## [0.0.134.0] - 2026-05-11 — raft/v2 PR 16: Joint Consensus — atomic multi-server membership change (M2 7 of 7, M2 COMPLETE)
 
 ### Added

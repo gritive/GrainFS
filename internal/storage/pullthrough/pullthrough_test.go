@@ -302,3 +302,40 @@ func TestPullThrough_PutObject_GoesToLocal(t *testing.T) {
 	body, _ := io.ReadAll(rc)
 	assert.Equal(t, "new", string(body))
 }
+
+// TestPullThrough_ForwardsSnapshotable verifies the pull-through decorator
+// satisfies storage.Snapshotable and storage.BucketSnapshotable by delegating
+// to the wrapped backend. Regression for the bug where embedding storage.Backend
+// did not promote Snapshotable, so PITR snapshots (and GET /admin/snapshots)
+// silently broke whenever the boot chain wrapped the backend in pull-through.
+func TestPullThrough_ForwardsSnapshotable(t *testing.T) {
+	local := newLocalBackend(t)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+	_, err := local.PutObject(context.Background(), "b", "k", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+
+	pt := pullthrough.NewBackend(local, &staticResolver{up: &stubUpstream{}})
+
+	snap, ok := storage.Backend(pt).(storage.Snapshotable)
+	require.True(t, ok, "pullthrough.Backend must satisfy storage.Snapshotable")
+
+	objs, err := snap.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, objs, 1, "ListAllObjects must see through the pull-through layer")
+	assert.Equal(t, "b", objs[0].Bucket)
+	assert.Equal(t, "k", objs[0].Key)
+
+	bs, ok := storage.Backend(pt).(storage.BucketSnapshotable)
+	require.True(t, ok, "pullthrough.Backend must satisfy storage.BucketSnapshotable")
+	// LocalBackend does not track per-bucket versioning, so it does not implement
+	// BucketSnapshotable; the forward returns (nil, nil) in that case. Just assert
+	// the call is wired and does not error.
+	_, err = bs.ListAllBuckets()
+	require.NoError(t, err)
+
+	// Unwrap exposes the inner backend.
+	type unwrapper interface{ Unwrap() storage.Backend }
+	uw, ok := storage.Backend(pt).(unwrapper)
+	require.True(t, ok, "pullthrough.Backend must expose Unwrap()")
+	assert.Equal(t, local, uw.Unwrap())
+}
