@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.0.141.0] - 2026-05-11 — feat(lifecycle): Bucket Lifecycle Policy deep module (ADR 0011)
+
+### Added
+
+- `internal/lifecycle.Service` — the deep module for the Bucket Lifecycle Policy
+  domain: validates incoming policy, replicates it through the meta-Raft FSM,
+  persists it, and runs the leader-only expiration executor. Single seam for
+  server handlers (`Apply`/`Get`/`GetRaw`/`Delete`/`Enabled`/`Status`/`Run`).
+- `MetaCmdType` `BucketLifecyclePut` (34) / `BucketLifecycleDelete` (35) carrying
+  the per-bucket policy as opaque S3 wire XML bytes; `lifecycle.Store.PutRaw`/
+  `GetRaw` for byte-for-byte operator round-trip.
+- `cluster.LifecycleProposer` + `cluster.RaftLeadership` adapters satisfying the
+  `lifecycle.Proposer` / `lifecycle.LeadershipSignal` seams.
+- `MetaRaft.SetForwarder` — follower→leader propose forwarding via the meta-Raft
+  forward path so an S3 `PUT ?lifecycle` on any node replicates correctly.
+- E2E: `TestLifecycle_FollowerPutLeaderGet`, `TestLifecycle_LeaderChangePreservesConfig`.
+
+### Changed
+
+- `server.WithLifecycleStore` → `server.WithLifecycleService`. S3 lifecycle
+  handlers call the service; they no longer reach the raw BadgerDB store.
+- Lifecycle config changes are now replicated via meta-Raft (ADR 0011) instead
+  of a direct local BadgerDB write — fixes silent loss on follower PUT and on
+  leader change.
+- `cluster.LifecycleManager` removed; its leader-only reconcile loop is now
+  `lifecycle.Service.Run`.
+
+### Fixed
+
+- `MetaRaft` now wires a `MetaCmdTypeNoOp` via `node.SetNoOpCommand` (Raft
+  §5.4.2): a freshly elected meta-Raft leader commits an entry in its own term,
+  unlocking backlogged previous-term entries (e.g. lifecycle config written by
+  the prior leader).
+
 ## [0.0.140.0] - 2026-05-11 — fix(storage/pullthrough): forward Snapshotable through the pull-through decorator
 
 - fix(storage/pullthrough): `pullthrough.Backend` now implements `storage.Snapshotable`/`storage.BucketSnapshotable` (and `Unwrap()`) by delegating to the wrapped backend. It only embedded `storage.Backend`, which does not promote the snapshot interfaces — so on the serve path (`pullthrough(wal(ClusterCoordinator))`) the backend chain stopped satisfying `Snapshotable`. Effect: `GET /admin/snapshots` returned 500 ("backend does not support snapshots") and the PITR auto-snapshotter was silently skipped on single-node serve. Regression since the pull-through layer entered the boot chain. Fixes `TestAutoSnapshot_CreatesSnapshotAutomatically`.

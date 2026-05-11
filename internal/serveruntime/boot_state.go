@@ -10,6 +10,7 @@ import (
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
@@ -139,7 +140,7 @@ type bootState struct {
 	clusterAlerts    *server.AlertsState
 	receiptWiring    *HealReceiptWiring
 	incidentRecorder *incident.Recorder
-	lifecycleMgr     *cluster.LifecycleManager
+	lifecycleSvc     *lifecycle.Service
 	mutationGate     *server.MutationGate
 	volMgr           *volume.Manager
 

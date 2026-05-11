@@ -6,11 +6,13 @@ import (
 	"testing"
 	"time"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/lifecycle"
 )
 
 func makeAddNodeCmd(t *testing.T, id, addr string, role uint8) []byte {
@@ -787,4 +789,45 @@ func TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp(t *testing.T) {
 	// Unknown types must be silently ignored — no error, no panic.
 	require.NoError(t, f.applyCmd(cmd), "unknown cmd must not fail (rolling-upgrade gate)")
 	assert.Empty(t, f.Nodes(), "unknown cmd must not mutate state")
+}
+
+func newTestLifecycleDB(t *testing.T) *badger.DB {
+	t.Helper()
+	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
+	db, err := badger.Open(opts)
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestApplyBucketLifecyclePut_WritesStore(t *testing.T) {
+	f := NewMetaFSM()
+	store := lifecycle.NewStore(newTestLifecycleDB(t))
+	f.SetLifecycle(store)
+
+	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>`)
+	payload := lifecycle.EncodePutPayload("b1", raw)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeBucketLifecyclePut, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+
+	got, err := store.Get("b1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+}
+
+func TestApplyBucketLifecycleDelete_RemovesStore(t *testing.T) {
+	f := NewMetaFSM()
+	store := lifecycle.NewStore(newTestLifecycleDB(t))
+	f.SetLifecycle(store)
+	require.NoError(t, store.PutRaw("b1", []byte(`<LifecycleConfiguration><Rule><ID>r1</ID></Rule></LifecycleConfiguration>`)))
+
+	payload := lifecycle.EncodeDeletePayload("b1")
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeBucketLifecycleDelete, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+
+	got, err := store.Get("b1")
+	require.NoError(t, err)
+	require.Nil(t, got)
 }
