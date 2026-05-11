@@ -28,20 +28,18 @@ func servicesPhasePrereqs(t *testing.T) *bootState {
 // which closes stopApply via the bootOwnedGroupsAndEC ownership.
 //
 // As of M5 PR 29 the v1 SnapshotManager is no longer wired; raftv2 owns
-// snapshot lifecycle internally so state.snapMgr stays nil.
+// snapshot lifecycle internally.
 func TestBootSnapshotAndApplyLoop_PopulatesState(t *testing.T) {
 	state := servicesPhasePrereqs(t)
 
 	// Before the phase: services-owned fields nil; effectiveEC is set by
 	// storage phase but fsm/cachedBackend belong to services.
 	assert.Nil(t, state.fsm, "fsm nil before phase")
-	assert.Nil(t, state.snapMgr, "snapMgr nil before phase")
 	assert.Nil(t, state.cachedBackend, "cachedBackend nil before phase")
 
 	require.NoError(t, bootSnapshotAndApplyLoop(state))
 
-	// After: services fields populated. snapMgr stays nil — raftv2 owns it.
+	// After: services fields populated.
 	assert.NotNil(t, state.fsm, "fsm populated")
-	assert.Nil(t, state.snapMgr, "snapMgr stays nil (raftv2 owns snapshot lifecycle in PR 29)")
 	assert.NotNil(t, state.cachedBackend, "cachedBackend populated")
 }
