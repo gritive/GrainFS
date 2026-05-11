@@ -718,6 +718,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Balancer health API
 	s.registerBalancerAPI(h)
+	s.registerLifecycleStatusAPI(h)
 
 	// Volume management endpoints removed from the data plane in Phase B.
 	// The CLI (`grainfs volume *`) talks to the admin Unix socket; the web UI

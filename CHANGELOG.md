@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.0.144.0] - 2026-05-11 — Lifecycle / Cluster follow-ups
+
+### Fixed
+
+- raft: a node no longer adds its own address to `config.Peers` when applying
+  (or replaying from the log) its own `AddVoter`/`Promote` ConfChange. The
+  phantom self-entry inflated `currentVoters` (`n.id ++ config.Peers`), so a
+  3-node `ClusterModeDynamicJoin` cluster required a 3-of-4 majority and two
+  survivors could not re-elect after a leader died.
+  (`internal/raft/membership.go`: `applyConfChangeLocked`, `rebuildConfigFromLog`.)
+- `clusterpb`: `cluster.fbs` now declares `MetaCmdType.BucketLifecyclePut` (34) /
+  `BucketLifecycleDelete` (35). PR #284 hand-edited the generated `MetaCmdType.go`
+  but left the `.fbs` source untouched, so `make fbs` (run by `make build`)
+  clobbered the hand-edit and the build failed.
+- `cluster transfer-leader`: `RaftClusterInfo` exposes `IsLeader`/`TransferLeadership`,
+  fixing the `503 "cluster adapter does not support transfer-leader"` regression
+  from the OpRouter extraction (#277). NOTE: the endpoint now returns 200, but the
+  meta-Raft `TransferLeadership` handoff itself is still incomplete (no
+  `SendTimeoutNow` plumbing) — tracked in `TODOS.md`; `TestE2E_ClusterTransferLeader`
+  is skipped pending that work.
+
+### Added
+
+- `internal/lifecycle.Service.Status()` surfaces executor worker stats (running
+  flag, `LastRun`, `ObjectsChecked`, `Expired`, `VersionsPruned`) plus the list
+  of buckets with a locally-persisted lifecycle config (ADR 0011 deferred surface);
+  exposed via `GET /api/cluster/lifecycle/status` (mirrors `/api/cluster/balancer/status`).
+- `internal/lifecycle.Store.ListBuckets()` iterates the `lifecycle:` prefix.
+- On leadership acquire, the lifecycle service logs the buckets that have a config
+  in the local store, so operators can spot pre-FSM-era leftover `lifecycle:{bucket}`
+  keys (remediation stays manual — re-apply the policy — per ADR 0011).
+- E2E: `TestE2E_DynamicJoinTwoSurvivorReelect` (3-node dynamic-join, SIGKILL the
+  leader, two survivors must re-elect — regression for the quorum-inflation fix).
+
 ## [0.0.143.0] - 2026-05-11 — fix(cluster): GetObjectVersion reconstructs EC-stored versions
 
 - fix(cluster): `DistributedBackend.GetObjectVersion` now reconstructs erasure-coded objects from their shards before falling back to a plain data file — mirroring `GetObject`. Previously it only tried `os.Open(objectPathV)` then the legacy unversioned path, so any versioned read of an EC-stored object (S3 `GET ?versionId=`, `CopyObject` from a versioned source, object-index reconcile against an EC bucket) failed with `open versioned object: ... no such file or directory` — the bytes live as shards, not a plain file. Adds `placementMetaForVersion` (reads the per-version meta, extracts the same `RingVersion`/`ECData`/`ECParity`/`NodeIDs` `PlacementMeta` that `headObjectMeta` builds) and wires the same `shardSvc → ResolvePlacement → getObjectECReaderAtShardKey` block. Non-EC and legacy objects fall through unchanged (`ResolvePlacement` returns `ErrNotEC`); a meta-read error here propagates rather than masking the real problem behind the plain-file `no such file`.

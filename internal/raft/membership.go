@@ -225,22 +225,31 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) bool {
 		peerKey = cc.Address
 	}
 
+	// A node never lists itself in config.Peers (which is "peers excluding
+	// self") or learnerIDs. Replaying our own AddLearner/Promote (DynamicJoin
+	// catch-up) must be a no-op for the local membership view — otherwise
+	// publishMembershipViewLocked counts self twice (n.id ++ config.Peers)
+	// and quorum inflates.
+	selfRef := cc.ID == n.id || peerKey == n.id
+
 	changed := false
 	switch cc.Op {
 	case ConfChangeAddVoter:
-		alreadyPresent := false
-		for _, p := range n.config.Peers {
-			if p == peerKey {
-				alreadyPresent = true
-				break
+		if !selfRef {
+			alreadyPresent := false
+			for _, p := range n.config.Peers {
+				if p == peerKey {
+					alreadyPresent = true
+					break
+				}
 			}
-		}
-		if !alreadyPresent {
-			n.config.Peers = append(n.config.Peers, peerKey)
-			changed = true
-			if n.state == Leader {
-				n.nextIndex[peerKey] = n.lastLogIdx() + 1
-				n.matchIndex[peerKey] = 0
+			if !alreadyPresent {
+				n.config.Peers = append(n.config.Peers, peerKey)
+				changed = true
+				if n.state == Leader {
+					n.nextIndex[peerKey] = n.lastLogIdx() + 1
+					n.matchIndex[peerKey] = 0
+				}
 			}
 		}
 
@@ -262,12 +271,14 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) bool {
 		}
 
 	case ConfChangeAddLearner:
-		if _, exists := n.learnerIDs[cc.ID]; !exists {
-			n.learnerIDs[cc.ID] = peerKey
-			changed = true
-			if n.state == Leader {
-				n.nextIndex[peerKey] = n.lastLogIdx() + 1
-				n.matchIndex[peerKey] = 0
+		if !selfRef {
+			if _, exists := n.learnerIDs[cc.ID]; !exists {
+				n.learnerIDs[cc.ID] = peerKey
+				changed = true
+				if n.state == Leader {
+					n.nextIndex[peerKey] = n.lastLogIdx() + 1
+					n.matchIndex[peerKey] = 0
+				}
 			}
 		}
 		if cc.ManagedByJoint {
@@ -281,6 +292,12 @@ func (n *Node) applyConfChangeLocked(entry LogEntry) bool {
 		}
 
 	case ConfChangePromote:
+		if selfRef {
+			// Belt-and-suspenders: covers a log written by old code where
+			// self WAS recorded in learnerIDs. Still a real log entry.
+			n.pendingConfChangeIndex = entry.Index
+			return false
+		}
 		pk, ok := n.learnerIDs[cc.ID]
 		if !ok {
 			break // idempotent: already promoted or not tracked
@@ -463,17 +480,25 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 			if cc.Address != "" {
 				peerKey = cc.Address
 			}
+			// Mirror applyConfChangeLocked: a node never lists itself in
+			// config.Peers ("peers excluding self") or learnerIDs. Replaying our
+			// own AddLearner/Promote (DynamicJoin catch-up) must be a no-op for
+			// the local membership view — otherwise publishMembershipViewLocked
+			// counts self twice (n.id ++ config.Peers) and quorum inflates.
+			selfRef := cc.ID == n.id || peerKey == n.id
 			switch cc.Op {
 			case ConfChangeAddVoter:
-				found := false
-				for _, p := range peers {
-					if p == peerKey {
-						found = true
-						break
+				if !selfRef {
+					found := false
+					for _, p := range peers {
+						if p == peerKey {
+							found = true
+							break
+						}
 					}
-				}
-				if !found {
-					peers = append(peers, peerKey)
+					if !found {
+						peers = append(peers, peerKey)
+					}
 				}
 			case ConfChangeRemoveVoter:
 				out := peers[:0]
@@ -484,11 +509,18 @@ func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseL
 				}
 				peers = out
 			case ConfChangeAddLearner:
-				learnerAddrs[cc.ID] = peerKey
+				if !selfRef {
+					learnerAddrs[cc.ID] = peerKey
+				}
 				if cc.ManagedByJoint {
 					managedLearners[cc.ID] = struct{}{}
 				}
 			case ConfChangePromote:
+				if selfRef {
+					// Belt-and-suspenders: covers a log written by old code
+					// where self WAS recorded in learnerAddrs.
+					break
+				}
 				if pk, ok := learnerAddrs[cc.ID]; ok {
 					delete(learnerAddrs, cc.ID)
 					found := false

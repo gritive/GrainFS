@@ -310,6 +310,16 @@ func (r *RaftClusterInfo) Peers() []string {
 	return nilToEmpty(r.normalizePeerIDs(r.node.Peers()))
 }
 
+// IsLeader reports whether this node is the current Raft leader. Exposed so
+// the server's transfer-leader handler (which type-asserts s.cluster) can find
+// it; previously this lived on *cluster.ClusterCoordinator.
+func (r *RaftClusterInfo) IsLeader() bool { return r.node.IsLeader() }
+
+// TransferLeadership asks the underlying Raft node to hand leadership to the
+// most caught-up voter. Returns raft.ErrNoPeers / raft.ErrNotLeader which the
+// handler maps to 503 / 409 respectively.
+func (r *RaftClusterInfo) TransferLeadership() error { return r.node.TransferLeadership() }
+
 // LivePeers reports all metaRaft voters as live: self plus every remote.
 // PR-D unifies peer identity so the fallback no longer mixes node IDs
 // and raft addresses. Fine-grained liveness remains a later peer-health

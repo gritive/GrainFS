@@ -43,6 +43,7 @@ type Service struct {
 	running  bool
 	cancelFn context.CancelFunc
 	workerWG sync.WaitGroup
+	worker   *Worker // non-nil only while the executor goroutine runs; guarded by mu
 
 	logger zerolog.Logger
 }
@@ -76,6 +77,46 @@ func (s *Service) Get(bucket string) (*LifecycleConfiguration, error) {
 // (ADR 0011).
 func (s *Service) GetRaw(bucket string) ([]byte, error) {
 	return s.store.GetRaw(bucket)
+}
+
+// Status is a point-in-time view of the lifecycle executor for the
+// /api/cluster/lifecycle/status admin endpoint. When the node is not the
+// leader the executor is not running and all counters are zero.
+type Status struct {
+	Running        bool      `json:"running"`
+	LastRun        time.Time `json:"last_run,omitempty"`
+	ObjectsChecked int64     `json:"objects_checked"`
+	Expired        int64     `json:"expired"`
+	VersionsPruned int64     `json:"versions_pruned"`
+	Buckets        []string  `json:"buckets"` // buckets with a lifecycle config persisted locally
+}
+
+// Status returns the current executor status. Safe to call on any node; a
+// follower returns Status{Running: false}.
+func (s *Service) Status() Status {
+	s.mu.Lock()
+	w := s.worker
+	running := s.running
+	s.mu.Unlock()
+	buckets, err := s.store.ListBuckets()
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("lifecycle status: ListBuckets failed")
+	}
+	if buckets == nil {
+		buckets = []string{}
+	}
+	if w == nil || !running {
+		return Status{Running: false, Buckets: buckets}
+	}
+	st := w.Stats()
+	return Status{
+		Running:        true,
+		LastRun:        st.LastRun,
+		ObjectsChecked: st.ObjectsChecked,
+		Expired:        st.Expired,
+		VersionsPruned: st.VersionsPruned,
+		Buckets:        buckets,
+	}
 }
 
 // Apply validates a raw S3 wire XML lifecycle configuration and proposes it
@@ -132,6 +173,12 @@ func (s *Service) reconcile(ctx context.Context) {
 	s.mu.Unlock()
 	switch {
 	case isLeader && !running:
+		if buckets, err := s.store.ListBuckets(); err != nil {
+			s.logger.Warn().Err(err).Msg("lifecycle: could not audit local config keys on leadership acquire")
+		} else {
+			s.logger.Info().Strs("buckets", buckets).Int("count", len(buckets)).
+				Msg("lifecycle configs present in local store at leadership acquire (re-apply policy to clear pre-FSM-era leftovers if any)")
+		}
 		s.start(ctx)
 	case !isLeader && running:
 		s.stop()
@@ -153,6 +200,7 @@ func (s *Service) start(parent context.Context) {
 	s.running = true
 	s.workerWG.Add(1)
 	w := NewWorker(s.store, s.backend, s.deleter, s.interval)
+	s.worker = w
 	go func() {
 		defer s.workerWG.Done()
 		s.logger.Info().Dur("interval", s.interval).Msg("starting lifecycle executor (now leader)")
@@ -170,6 +218,7 @@ func (s *Service) stop() {
 	cancel := s.cancelFn
 	s.cancelFn = nil
 	s.running = false
+	s.worker = nil
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()

@@ -1,11 +1,15 @@
 package lifecycle
 
 import (
+	"bytes"
 	"encoding/xml"
 	"errors"
+	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
 )
+
+var lifecyclePrefix = []byte("lifecycle:")
 
 // Store persists lifecycle configurations in BadgerDB.
 // Key format: "lifecycle:{bucket}"
@@ -92,4 +96,28 @@ func (s *Store) Delete(bucket string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(s.key(bucket))
 	})
+}
+
+// ListBuckets returns the names of all buckets that have a lifecycle
+// configuration persisted locally, in Badger key order (lexical). Used for
+// operator audit of pre-FSM-era leftover keys; callers must not assume the
+// list matches FSM-applied state on a follower.
+func (s *Store) ListBuckets() ([]string, error) {
+	var out []string
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = lifecyclePrefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.ValidForPrefix(lifecyclePrefix); it.Next() {
+			key := it.Item().KeyCopy(nil)
+			out = append(out, string(bytes.TrimPrefix(key, lifecyclePrefix)))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle: list buckets: %w", err)
+	}
+	return out, nil
 }

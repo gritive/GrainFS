@@ -251,6 +251,8 @@ enum MetaCmdType : uint8 {
   IAMInitFirstSA         = 31, // IAM: atomic first-SA bootstrap (SA + Key + WildcardGrant via admin UDS)
   IAMBucketUpstreamPut    = 32, // IAM: bucket-scoped upstream upsert
   IAMBucketUpstreamDelete = 33, // IAM: bucket-scoped upstream remove
+  BucketLifecyclePut      = 34, // Bucket lifecycle policy upsert (ADR 0011)
+  BucketLifecycleDelete   = 35, // Bucket lifecycle policy remove (ADR 0011)
 }
 
 table MetaNodeEntry {

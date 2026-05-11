@@ -134,6 +134,45 @@ func (s *signalLeadership) set(leader bool) {
 	}
 }
 
+func TestService_Status_NotRunning(t *testing.T) {
+	be := &mockBackend{buckets: []string{}}
+	del := &mockDeleter{}
+	lead := &signalLeadership{leader: false}
+	s := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+	st := s.Status()
+	assert.False(t, st.Running)
+	assert.True(t, st.LastRun.IsZero())
+	assert.Zero(t, st.ObjectsChecked)
+	assert.Zero(t, st.Expired)
+	assert.Zero(t, st.VersionsPruned)
+	assert.Empty(t, st.Buckets)
+}
+
+func TestService_Status_IncludesBuckets(t *testing.T) {
+	s := newServiceForTest(t)
+	require.NoError(t, s.store.PutRaw("b1", []byte("<x/>")))
+	require.NoError(t, s.store.PutRaw("b2", []byte("<x/>")))
+	st := s.Status()
+	assert.ElementsMatch(t, []string{"b1", "b2"}, st.Buckets)
+}
+
+func TestService_Status_RunningReflectsWorker(t *testing.T) {
+	be := &mockBackend{buckets: []string{}}
+	del := &mockDeleter{}
+	lead := &signalLeadership{leader: false}
+	s := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	lead.set(true) // become leader → executor starts
+	require.Eventually(t, func() bool { return s.workerRunningForTest() }, 2*time.Second, 10*time.Millisecond)
+	st := s.Status()
+	assert.True(t, st.Running)
+	lead.set(false) // become follower → executor stops
+	require.Eventually(t, func() bool { return !s.workerRunningForTest() }, 2*time.Second, 10*time.Millisecond)
+	assert.False(t, s.Status().Running)
+}
+
 func TestService_Run_StartsWorkerOnLeader_StopsOnFollower(t *testing.T) {
 	lead := &signalLeadership{leader: false}
 	be := &mockBackend{buckets: []string{}} // existing in worker_test.go
