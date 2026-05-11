@@ -226,6 +226,20 @@ func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (R
 	return target, err
 }
 
+// routeWriteOrBucket picks RouteObjectWrite (EC-aware placement) when an
+// object index proposer or EC config is configured (production wiring), and
+// falls back to a bucket-only route when neither is set. Preserves the legacy
+// routeObjectWrite short-circuit:
+//
+//	indexWriter == nil && ecConfig.NumShards() == 0 → routeBucket
+func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget, ShardGroupEntry, error) {
+	if c.indexWriter == nil && c.ecConfig.NumShards() == 0 {
+		target, err := c.opRouter.RouteBucket(bucket)
+		return target, ShardGroupEntry{ID: target.GroupID}, err
+	}
+	return c.opRouter.RouteObjectWrite(bucket, key)
+}
+
 func (c *ClusterCoordinator) matchSelfPeer(id string) bool {
 	_, ok := NewShardGroupPeerSet(ShardGroupEntry{PeerIDs: []string{id}}).MatchLocal(c.selfID, c.selfAliases...)
 	return ok
@@ -948,20 +962,29 @@ func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key strin
 
 func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (string, error) {
 	ctx := context.Background()
-	target, entry, err := c.routeObjectLatest(bucket, key)
+	var (
+		target RouteTarget
+		entry  ObjectIndexEntry
+		err    error
+	)
+	if c.indexWriter == nil {
+		target, err = c.opRouter.RouteBucket(bucket)
+		entry = ObjectIndexEntry{Bucket: bucket, Key: key, PlacementGroupID: target.GroupID}
+	} else {
+		target, entry, err = c.opRouter.RouteObjectRead(bucket, key, "")
+	}
 	if err != nil {
 		return "", err
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return "", err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return "", err
+	} else if gb != nil {
 		markerID, err := gb.DeleteObjectReturningMarker(bucket, key)
 		if err != nil {
 			return "", err
 		}
 		marker := &storage.Object{Key: key, VersionID: markerID, LastModified: time.Now().Unix()}
-		if err := c.commitObjectIndex(ctx, bucket, key, marker, ShardGroupEntry{ID: target.groupID, PeerIDs: entry.NodeIDs}, true); err != nil {
+		if err := c.commitObjectIndex(ctx, bucket, key, marker, ShardGroupEntry{ID: target.GroupID, PeerIDs: entry.NodeIDs}, true); err != nil {
 			return "", err
 		}
 		return markerID, nil
@@ -970,13 +993,13 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 		return "", ErrCoordinatorNoRouter
 	}
 	args := buildDeleteObjectArgs(bucket, key)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpDeleteObject, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpDeleteObject, args)
 	if err != nil {
 		return "", err
 	}
 	obj, err := objectFromReply(reply)
 	if err == nil {
-		if err := c.commitObjectIndex(ctx, bucket, key, obj, ShardGroupEntry{ID: target.groupID, PeerIDs: entry.NodeIDs}, true); err != nil {
+		if err := c.commitObjectIndex(ctx, bucket, key, obj, ShardGroupEntry{ID: target.GroupID, PeerIDs: entry.NodeIDs}, true); err != nil {
 			return "", err
 		}
 		return obj.VersionID, nil
@@ -989,14 +1012,13 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 
 func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) error {
 	ctx := context.Background()
-	target, _, err := c.routeObjectVersion(bucket, key, versionID)
+	target, err := c.routeReadOrBucket(bucket, key, versionID)
 	if err != nil {
 		return err
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
 		if err := gb.DeleteObjectVersion(bucket, key, versionID); err != nil {
 			return err
 		}
@@ -1009,7 +1031,7 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 		return ErrCoordinatorNoRouter
 	}
 	args := buildDeleteObjectVersionArgs(bucket, key, versionID)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpDeleteObjectVersion, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpDeleteObjectVersion, args)
 	if err != nil {
 		return err
 	}
@@ -1141,17 +1163,16 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 }
 
 func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
-	target, group, err := c.routeObjectWrite(bucket, key)
+	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
 	}
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		upload, err := gb.CreateMultipartUpload(ctx, bucket, key, contentType)
 		if err == nil {
 			_ = group
@@ -1162,7 +1183,7 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildCreateMultipartUploadArgs(bucket, key, contentType)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpCreateMultipartUpload, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1170,17 +1191,16 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 }
 
 func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
-	target, group, err := c.routeObjectWrite(bucket, key)
+	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
 	}
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		obj, err := gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 		if err != nil {
 			return nil, err
@@ -1191,7 +1211,7 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildCompleteMultipartUploadArgs(bucket, key, uploadID, parts)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpCompleteMultipartUpload, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCompleteMultipartUpload, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1205,17 +1225,16 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 func (c *ClusterCoordinator) PutObject(
 	ctx context.Context, bucket, key string, r io.Reader, contentType string,
 ) (*storage.Object, error) {
-	target, group, err := c.routeObjectWrite(bucket, key)
+	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
 	}
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		obj, err := gb.PutObject(ctx, bucket, key, r, contentType)
 		if err != nil {
 			return nil, err
@@ -1229,8 +1248,8 @@ func (c *ClusterCoordinator) PutObject(
 	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
 		args := buildPutObjectArgs(bucket, key, contentType, nil)
 		streamCtx := ctx
-		peers := c.forward.ResolveLeaderPeers(streamCtx, target.peers, target.groupID, bucket, key)
-		reply, err := c.forward.SendStream(streamCtx, peers, target.groupID, raftpb.ForwardOpPutObject, args, r)
+		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
+		reply, err := c.forward.SendStream(streamCtx, peers, target.GroupID, raftpb.ForwardOpPutObject, args, r)
 		if err != nil {
 			return nil, err
 		}
@@ -1249,7 +1268,7 @@ func (c *ClusterCoordinator) PutObject(
 		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildPutObjectArgs(bucket, key, contentType, body)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpPutObject, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpPutObject, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1420,17 +1439,16 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 func (c *ClusterCoordinator) UploadPart(
 	ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader,
 ) (*storage.Part, error) {
-	target, _, err := c.routeObjectWrite(bucket, key)
+	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		return gb.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
 	}
 	if c.forward == nil {
@@ -1440,8 +1458,8 @@ func (c *ClusterCoordinator) UploadPart(
 	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
 		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
 		streamCtx := ctx
-		peers := c.forward.ResolveLeaderPeers(streamCtx, target.peers, target.groupID, bucket, key)
-		reply, err := c.forward.SendStream(streamCtx, peers, target.groupID, raftpb.ForwardOpUploadPart, args, r)
+		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
+		reply, err := c.forward.SendStream(streamCtx, peers, target.GroupID, raftpb.ForwardOpUploadPart, args, r)
 		if err != nil {
 			return nil, err
 		}
@@ -1456,7 +1474,7 @@ func (c *ClusterCoordinator) UploadPart(
 		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpUploadPart, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1490,24 +1508,23 @@ func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
-	target, _, err := c.routeObjectWrite(bucket, key)
+	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return err
 	}
 	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.groupID)
+		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
 		return gb.AbortMultipartUpload(ctx, bucket, key, uploadID)
 	}
 	if c.forward == nil {
 		return ErrCoordinatorNoRouter
 	}
 	args := buildAbortMultipartUploadArgs(bucket, key, uploadID)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpAbortMultipartUpload, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpAbortMultipartUpload, args)
 	if err != nil {
 		return err
 	}
@@ -1529,14 +1546,13 @@ func (c *ClusterCoordinator) ListMultipartUploads(ctx context.Context, bucket, p
 // DistributedBackend (best-effort, see DistributedBackend.ListParts).
 // Forwarding ListParts to the remote group's leader is a follow-up.
 func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
-	target, _, err := c.routeObjectWrite(bucket, key)
+	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		return gb.ListParts(ctx, bucket, key, uploadID, maxParts)
 	}
 	return c.base.ListParts(ctx, bucket, key, uploadID, maxParts)
