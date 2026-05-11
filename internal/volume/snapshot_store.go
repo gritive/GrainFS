@@ -24,8 +24,14 @@ type SnapshotStore interface {
 	// Returns the dst Volume with metadata fields populated; caller persists
 	// the metadata key after this returns success.
 	Clone(ctx context.Context, srcVol *Volume, dstName string) (*Volume, error)
-	// RecoverOnBoot is invoked once at Manager startup. Used by
-	// badgerSnapshotStore to roll back any begin-but-not-committed snapshots
-	// from a prior crash. s3SnapshotStore returns nil.
+	// RecoverOnBoot is invoked once after the Manager (and DedupIndex, if any)
+	// are constructed, before serving traffic. Used by badgerSnapshotStore to
+	// roll back any begun-but-not-committed snapshots from a prior crash.
+	// s3SnapshotStore returns nil.
+	//
+	// TODO(PR-B): wire this into the serveruntime boot path
+	// (internal/serveruntime/volume_manager.go BuildVolumeManager). Until then,
+	// the s3 implementation is a no-op so calling it is harmless but also
+	// pointless. The badger implementation in PR-B will require this wiring.
 	RecoverOnBoot(ctx context.Context) error
 }
