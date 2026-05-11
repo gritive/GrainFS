@@ -14,7 +14,6 @@ package raftv2
 //   4. Leader Completeness — if entry committed in term T, all sampled leaders in T'>T have it.
 //   5. State Machine Safety — all FSMs apply the same entry at each index.
 //
-// Invariants planned for later PR 18 steps (not yet present):
 //   6. Liveness          — under stable leadership a proposed entry eventually commits.
 //
 // Count knob: TestProperty_* uses rapid.Check default (100 sequences) for CI.
@@ -38,9 +37,15 @@ import (
 // The cluster is started in newRaftStateMachine() and torn down via t.Cleanup.
 // The invObserver accumulates leader and apply observations; Check() drains
 // pending observations from ObsCh and then asserts both invariants.
+//
+// actionHistory records one actionRecord per rapid action in order of
+// execution. It is used by checkEventualCommit (Invariant 6) to detect whether
+// the final K actions form a "stable suffix" (no Partition/StepDown, leader
+// present at suffix start) under which all successful proposals must commit.
 type raftStateMachine struct {
-	cluster *propertyCluster
-	obs     *invObserver
+	cluster       *propertyCluster
+	obs           *invObserver
+	actionHistory []actionRecord
 }
 
 // newRaftStateMachine creates a fresh 3-voter cluster for one rapid property run.
@@ -106,29 +111,46 @@ func (sm *raftStateMachine) Check(t *rapid.T) {
 	if err := checkStateMachineSafety(sm.obs.nodeApplied); err != nil {
 		t.Fatal(err)
 	}
+	if err := checkEventualCommit(sm.actionHistory, sm.obs.nodeApplied); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Propose generates a random command and submits it to the current leader.
 // If there is no leader, or if ProposeWait fails (valid during partitions /
 // step-downs), the error is silently ignored — it is not a violation.
+// On success, the assigned log index is recorded in actionHistory for the
+// Eventual Commit invariant (Invariant 6).
 func (sm *raftStateMachine) Propose(t *rapid.T) {
+	leaderExisted := sm.cluster.leader() != nil
+	ar := actionRecord{kind: actionPropose, leaderExisted: leaderExisted}
+
 	leader := sm.cluster.leader()
-	if leader == nil {
-		return
+	if leader != nil {
+		sm.obs.proposeCounter++
+		cmd := []byte(fmt.Sprintf("cmd-%d", sm.obs.proposeCounter))
+		// 500ms ≈ 1.25× propSlowElectionTimeout (400ms): tolerate one full leadership
+		// transition without false-positive timeout. Errors are swallowed below.
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		// Capture index on success; errors are tolerated (leadership change, timeout).
+		if idx, err := leader.ProposeWait(ctx, cmd); err == nil {
+			ar.proposed = &proposedEntry{index: idx}
+		}
 	}
-	sm.obs.proposeCounter++
-	cmd := []byte(fmt.Sprintf("cmd-%d", sm.obs.proposeCounter))
-	// 500ms ≈ 1.25× propSlowElectionTimeout (400ms): tolerate one full leadership
-	// transition without false-positive timeout. Errors are swallowed below.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	// Tolerate error: leadership may change between leader() check and ProposeWait.
-	leader.ProposeWait(ctx, cmd) //nolint:errcheck
+
+	sm.actionHistory = append(sm.actionHistory, ar)
 }
 
 // StepDownLeader injects a higher-term RequestVote into the current leader,
 // forcing it to step down. If there is no leader, the action is a no-op.
 func (sm *raftStateMachine) StepDownLeader(t *rapid.T) {
+	leaderExisted := sm.cluster.leader() != nil
+	sm.actionHistory = append(sm.actionHistory, actionRecord{
+		kind:          actionStepDownLeader,
+		leaderExisted: leaderExisted,
+	})
+
 	leader := sm.cluster.leader()
 	if leader == nil {
 		return
@@ -153,6 +175,12 @@ func (sm *raftStateMachine) StepDownLeader(t *rapid.T) {
 // Partition isolates one randomly chosen node from the rest of the cluster.
 // The partition is applied bidirectionally via partitionNet.
 func (sm *raftStateMachine) Partition(t *rapid.T) {
+	leaderExisted := sm.cluster.leader() != nil
+	sm.actionHistory = append(sm.actionHistory, actionRecord{
+		kind:          actionPartition,
+		leaderExisted: leaderExisted,
+	})
+
 	// Pick one node index to isolate (0, 1, or 2).
 	idx := rapid.IntRange(0, 2).Draw(t, "partitioned_node_idx")
 	peer := sm.cluster.Nodes[idx].ID()
@@ -161,6 +189,12 @@ func (sm *raftStateMachine) Partition(t *rapid.T) {
 
 // Heal removes all partitions, restoring full connectivity.
 func (sm *raftStateMachine) Heal(t *rapid.T) {
+	leaderExisted := sm.cluster.leader() != nil
+	sm.actionHistory = append(sm.actionHistory, actionRecord{
+		kind:          actionHeal,
+		leaderExisted: leaderExisted,
+	})
+
 	sm.cluster.Net.Heal()
 }
 

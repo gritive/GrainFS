@@ -405,3 +405,167 @@ func TestCheckStateMachineSafety_Valid(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// proposedEntry records the result of a single successful Propose action.
+// index is the log index returned by ProposeWait.
+type proposedEntry struct {
+	index uint64
+}
+
+// actionKind categorises rapid actions for liveness-suffix analysis.
+type actionKind int
+
+const (
+	actionPropose actionKind = iota
+	actionStepDownLeader
+	actionPartition
+	actionHeal
+)
+
+// actionRecord captures what happened during one rapid action invocation.
+type actionRecord struct {
+	kind          actionKind
+	leaderExisted bool           // true if a leader was present when this action started
+	proposed      *proposedEntry // non-nil if a Propose succeeded (returned non-error)
+}
+
+// checkEventualCommit asserts Invariant 6 (Eventual Commit Under Stable
+// Leadership): every proposal that succeeded in the final K-action stable
+// suffix must have committed by the end of the sequence.
+//
+// "Stable suffix" means: the final K actions contain no Partition or
+// StepDownLeader action, and a leader existed at the start of that suffix.
+// If the suffix is too short, or contains destabilising actions, or no
+// leader existed at suffix start, the check is skipped (returns nil) — this
+// is a conditional invariant and most random sequences will not satisfy the
+// stability condition.
+//
+// K = 50 is the recommended stable-window size (as per PR 18 spec).
+func checkEventualCommit(history []actionRecord, nodeApplied map[string][]LogEntry) error {
+	const K = 50
+	if len(history) < K {
+		return nil // insufficient history
+	}
+
+	suffix := history[len(history)-K:]
+
+	// Check that the suffix contains no destabilising actions.
+	for _, ar := range suffix {
+		if ar.kind == actionPartition || ar.kind == actionStepDownLeader {
+			return nil // not stable; skip
+		}
+	}
+
+	// Check that a leader existed at the start of the suffix.
+	if !suffix[0].leaderExisted {
+		return nil // no leader at suffix start; skip
+	}
+
+	// Compute the maximum committed index across all nodes.
+	var maxCommitted uint64
+	for _, entries := range nodeApplied {
+		for _, e := range entries {
+			if e.Index > maxCommitted {
+				maxCommitted = e.Index
+			}
+		}
+	}
+
+	// Every successful propose in the suffix must have committed.
+	for i, ar := range suffix {
+		if ar.proposed == nil {
+			continue
+		}
+		if ar.proposed.index > maxCommitted {
+			return fmt.Errorf(
+				"liveness violated: proposed entry at index %d (suffix action %d) not committed; max committed index across all nodes is %d",
+				ar.proposed.index, i, maxCommitted,
+			)
+		}
+	}
+	return nil
+}
+
+func TestCheckEventualCommit_Violation(t *testing.T) {
+	// Build a stable suffix of K=50 propose-only actions with leader present.
+	// One propose claims index=999 which exceeds the max committed (10).
+	const K = 50
+	history := make([]actionRecord, K)
+	for i := range history {
+		history[i] = actionRecord{kind: actionPropose, leaderExisted: true}
+	}
+	// Inject a successful propose at index 999 in the last action.
+	history[K-1].proposed = &proposedEntry{index: 999}
+
+	nodeApplied := map[string][]LogEntry{
+		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
+	}
+	if err := checkEventualCommit(history, nodeApplied); err == nil {
+		t.Fatal("expected liveness violation, got nil")
+	}
+}
+
+func TestCheckEventualCommit_SkipOnPartition(t *testing.T) {
+	// If the suffix contains a Partition action, check must be skipped.
+	const K = 50
+	history := make([]actionRecord, K)
+	for i := range history {
+		history[i] = actionRecord{kind: actionPropose, leaderExisted: true}
+	}
+	history[K-5] = actionRecord{kind: actionPartition, leaderExisted: true}
+	history[K-1].proposed = &proposedEntry{index: 999}
+
+	nodeApplied := map[string][]LogEntry{
+		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
+	}
+	if err := checkEventualCommit(history, nodeApplied); err != nil {
+		t.Fatalf("expected skip on partition, got: %v", err)
+	}
+}
+
+func TestCheckEventualCommit_SkipOnNoLeader(t *testing.T) {
+	// If no leader at suffix start, check must be skipped.
+	const K = 50
+	history := make([]actionRecord, K)
+	for i := range history {
+		history[i] = actionRecord{kind: actionPropose, leaderExisted: false}
+	}
+	history[K-1].proposed = &proposedEntry{index: 999}
+
+	nodeApplied := map[string][]LogEntry{
+		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
+	}
+	if err := checkEventualCommit(history, nodeApplied); err != nil {
+		t.Fatalf("expected skip on no-leader, got: %v", err)
+	}
+}
+
+func TestCheckEventualCommit_SkipOnShortHistory(t *testing.T) {
+	history := []actionRecord{
+		{kind: actionPropose, leaderExisted: true, proposed: &proposedEntry{index: 999}},
+	}
+	nodeApplied := map[string][]LogEntry{
+		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
+	}
+	if err := checkEventualCommit(history, nodeApplied); err != nil {
+		t.Fatalf("expected skip on short history, got: %v", err)
+	}
+}
+
+func TestCheckEventualCommit_Valid(t *testing.T) {
+	const K = 50
+	history := make([]actionRecord, K)
+	for i := range history {
+		history[i] = actionRecord{kind: actionPropose, leaderExisted: true}
+	}
+	// A committed propose at index 5 — well within max committed.
+	history[K-1].proposed = &proposedEntry{index: 5}
+
+	nodeApplied := map[string][]LogEntry{
+		"a": {{Index: 5, Term: 1, Command: []byte("cmd-1")}},
+		"b": {{Index: 5, Term: 1, Command: []byte("cmd-1")}},
+	}
+	if err := checkEventualCommit(history, nodeApplied); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
