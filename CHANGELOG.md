@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.138.0] - 2026-05-11 — feat(volume): dedup-aware snapshot (PR-B of dedup+snapshot series)
+
+- feat(volume): dedup+snapshot integration — `badgerSnapshotStore` implements the `SnapshotStore` interface for dedup-enabled volumes. Snapshot maps live in BadgerDB (`vd:s:` keyspace) with refcount-shared canonicals; lifecycle (Begin/AppendChunk/Commit/Abort/Delete/Rollback/Clone) uses chunked Badger transactions + state markers + MVCC views for crash safety.
+- feat(volume): `Manager.RecoverOnBoot` reconciles in-progress snapshots, stuck rollbacks, and stuck clones on startup (idempotent re-apply).
+- fix(volume): remove the `dedup + snapshots not supported in Phase A` hard error — the CLI default (`--dedup=true` + `--snapshot-interval=1h`) no longer breaks from the second snapshot onward.
+
 ## [0.0.137.0] - 2026-05-11 — raft/v2 M3 milestone COMPLETE — test harness + property suite + chaos
 
 ### M3 PRs 17-21 (Test Harness Phase)

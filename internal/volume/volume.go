@@ -128,7 +128,11 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 		opts:     opts,
 		blkPool:  pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
 	}
-	m.snapStore = newS3SnapshotStore(m)
+	if opts.DedupIndex != nil {
+		m.snapStore = newBadgerSnapshotStore(m, opts.DedupIndex)
+	} else {
+		m.snapStore = newS3SnapshotStore(m)
+	}
 	return m
 }
 
@@ -720,12 +724,10 @@ func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// When dedup is active, block mappings live in BadgerDB (vd:b: prefix).
-	// S3 live_map is not used; snapshots are incompatible with dedup in Phase A.
+	// Dedup-aware: live block→canonical mappings are in BadgerDB; the S3
+	// live_map file is not used. badgerSnapshotStore handles snapshot maps
+	// directly via the DedupIndex.
 	if m.dedup != nil {
-		if vol.SnapshotCount > 0 {
-			return nil, errors.New("dedup + snapshots not supported in Phase A")
-		}
 		m.liveMaps[name] = nil
 		return nil, nil
 	}
@@ -905,6 +907,16 @@ func (m *Manager) Clone(srcName, dstName string) error {
 	m.volumes[dstName] = dstVol
 	m.liveMaps[dstName] = nil
 	return nil
+}
+
+// RecoverOnBoot must be invoked once after the Manager and DedupIndex are
+// constructed, before serving traffic. Wires through to the SnapshotStore so
+// in-progress snapshots, stuck rollbacks, and stuck clones from a prior crash
+// are reconciled.
+func (m *Manager) RecoverOnBoot(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.snapStore.RecoverOnBoot(ctx)
 }
 
 // copyObjectFallback copies by reading source and writing to destination.
