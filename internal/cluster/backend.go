@@ -154,7 +154,7 @@ type BucketAssigner interface {
 type DistributedBackend struct {
 	root             string
 	db               *badger.DB
-	node             *raft.Node
+	node             RaftNode
 	fsm              *FSM
 	logger           zerolog.Logger
 	lastApplied      atomic.Uint64
@@ -206,7 +206,7 @@ type internalObjectPath struct {
 
 // NewDistributedBackend creates a new distributed storage backend.
 // The FSM apply loop must be started separately via RunApplyLoop.
-func NewDistributedBackend(root string, db *badger.DB, node *raft.Node) (*DistributedBackend, error) {
+func NewDistributedBackend(root string, db *badger.DB, node RaftNode) (*DistributedBackend, error) {
 	dataDir := filepath.Join(root, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -4020,7 +4020,11 @@ func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
 }
 
-// RaftNode returns the underlying raft.Node for direct API access (e.g. learner management).
+// RaftNode returns the underlying *raft.Node via type assertion for direct API
+// access (e.g. learner management via dataRaftNode interface). Returns nil if
+// the underlying implementation is not v1 (e.g. when GRAINFS_RAFT_V2=cluster
+// is set). Callers in DataGroupPlanExecutor must nil-check the result.
 func (b *DistributedBackend) RaftNode() *raft.Node {
-	return b.node
+	v1, _ := b.node.(*raft.Node)
+	return v1
 }
