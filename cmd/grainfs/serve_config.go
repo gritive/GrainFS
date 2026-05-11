@@ -52,7 +52,6 @@ func buildClusterConfig(
 	cfg.QUICMuxEnabled, _ = cmd.Flags().GetBool("quic-mux")
 	cfg.QUICMuxPoolSize, _ = cmd.Flags().GetInt("quic-mux-pool")
 	cfg.QUICMuxFlushWindow, _ = cmd.Flags().GetDuration("quic-mux-flush")
-	cfg.SharedBadgerEnabled, _ = cmd.Flags().GetBool("shared-badger")
 
 	cfg.DirectIO, _ = cmd.Flags().GetBool("direct-io")
 	cfg.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")

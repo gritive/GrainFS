@@ -193,36 +193,12 @@ func bootOpenRaftLogStore(state *bootState) error {
 	return nil
 }
 
-// bootOpenSharedRaftLogDB opens the optional shared raft-log BadgerDB used
-// by the C2 P0b prototype to consolidate per-group log instances. No-op when
-// cfg.SharedBadgerEnabled is false. Refuses to silently abandon legacy
-// per-group raft logs: returns an error directing the operator to either
-// keep --shared-badger=false or wipe the legacy layout.
+// bootOpenSharedRaftLogDB opens the per-node shared raft-log BadgerDB at
+// <dataDir>/shared-raft-log/. Every data group's Raft log is a key-prefixed
+// view of this one DB (C2 P0b — see docs/architecture/badger-consolidation.md).
+// Registers the DB's Close as a cleanup and a resourcewatch entry.
 func bootOpenSharedRaftLogDB(state *bootState) error {
 	cfg := state.cfg
-	if !cfg.SharedBadgerEnabled {
-		return nil
-	}
-	// Refuse to silently abandon legacy per-group raft logs. Existing
-	// deployments that started before P0b have raft state under
-	// <dataDir>/groups/*/raft. Ignoring those and opening a fresh shared
-	// DB would silently reset every group's term/votedFor/log — i.e.,
-	// data loss. Fail with a clear migration message instead.
-	groupsDir := filepath.Join(cfg.DataDir, "groups")
-	if entries, _ := os.ReadDir(groupsDir); len(entries) > 0 {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			legacyRaftDir := filepath.Join(groupsDir, e.Name(), "raft")
-			if st, err := os.Stat(legacyRaftDir); err == nil && st.IsDir() {
-				return fmt.Errorf("shared-badger=true incompatible with legacy per-group raft dir %s. "+
-					"This deployment was started before C2 P0b. Use --shared-badger=false to keep "+
-					"per-group raft logs, or wipe %s to start fresh on the new layout (DESTRUCTIVE — "+
-					"only on test clusters or after a full backup)", legacyRaftDir, cfg.DataDir)
-			}
-		}
-	}
 	sharedDir := filepath.Join(cfg.DataDir, "shared-raft-log")
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir shared raft-log dir: %w", err)
@@ -241,6 +217,6 @@ func bootOpenSharedRaftLogDB(state *bootState) error {
 		Status: badgerrole.DecisionOK,
 		Action: badgerrole.RecoveryActionNone,
 	})
-	log.Info().Str("dir", sharedDir).Msg("shared raft-log DB enabled (C2 P0b prototype)")
+	log.Info().Str("dir", sharedDir).Msg("shared raft-log DB opened")
 	return nil
 }

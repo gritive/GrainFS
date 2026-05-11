@@ -22,18 +22,16 @@ var errShutdownTimeout = errors.New("group lifecycle: shutdown timed out")
 
 // GroupLifecycleConfig collects the wiring needed to instantiate a local group.
 type OpenGroupStateDBFunc func(groupID, path string) (*badger.DB, error)
-type OpenGroupLogStoreFunc func(groupID, path string) (raft.LogStore, error)
 
 type GroupLifecycleConfig struct {
-	NodeID       string
-	DataDir      string
-	ShardSvc     *ShardService // may be nil for in-process / single-node tests
-	EC           ECConfig
-	LogStore     raft.LogStore // optional — if nil, BadgerLogStore is created at {groupDir}/raft
-	OpenStateDB  OpenGroupStateDBFunc
-	OpenLogStore OpenGroupLogStoreFunc
-	Transport    groupTransport
-	AddrBook     NodeAddressBook
+	NodeID      string
+	DataDir     string
+	ShardSvc    *ShardService // may be nil for in-process / single-node tests
+	EC          ECConfig
+	LogStore    raft.LogStore // required — the group's Raft log store (production: a shared-log view via raft.OpenSharedLogStore; tests: raft.NewBadgerLogStore)
+	OpenStateDB OpenGroupStateDBFunc
+	Transport   groupTransport
+	AddrBook    NodeAddressBook
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
@@ -94,6 +92,9 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("instantiateLocalGroup: empty NodeID")
 	}
+	if cfg.LogStore == nil {
+		return nil, fmt.Errorf("instantiateLocalGroup: nil LogStore")
+	}
 
 	groupDir := filepath.Join(cfg.DataDir, "groups", entry.ID)
 	if err := os.MkdirAll(filepath.Join(groupDir, "blobs"), 0o755); err != nil {
@@ -134,30 +135,11 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	rcfg.ElectionPriorityKey = entry.ID
 
 	logStore := cfg.LogStore
-	if logStore == nil {
-		raftDir := filepath.Join(groupDir, "raft")
-		openLogStore := cfg.OpenLogStore
-		if openLogStore == nil {
-			openLogStore = func(_ string, path string) (raft.LogStore, error) {
-				return raft.NewBadgerLogStore(path)
-			}
-		}
-		ls, lerr := openLogStore(entry.ID, raftDir)
-		if lerr != nil {
-			resourcewatch.DeregisterDB(groupVlogEntry)
-			_ = db.Close()
-			return nil, fmt.Errorf("group %s: open raft log store: %w", entry.ID, lerr)
-		}
-		logStore = ls
-	}
 
 	node, err := newRaftNode(rcfg, logStore)
 	if err != nil {
 		resourcewatch.DeregisterDB(groupVlogEntry)
 		_ = db.Close()
-		if logStore != cfg.LogStore {
-			_ = logStore.Close()
-		}
 		return nil, fmt.Errorf("group %s: newRaftNode: %w", entry.ID, err)
 	}
 	if cfg.Transport != nil {

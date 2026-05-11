@@ -230,13 +230,11 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			ElectionTimeout:  state.cfg.RaftElectionTimeout,
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
 		}
-		if state.sharedRaftLogDB != nil {
-			ls, lerr := raft.OpenSharedLogStore(state.sharedRaftLogDB, entry.ID, state.storeOpts...)
-			if lerr != nil {
-				return fmt.Errorf("group %s: open shared log store: %w", entry.ID, lerr)
-			}
-			glc.LogStore = ls
+		ls, lerr := raft.OpenSharedLogStore(state.sharedRaftLogDB, entry.ID, state.storeOpts...)
+		if lerr != nil {
+			return fmt.Errorf("group %s: open shared log store: %w", entry.ID, lerr)
 		}
+		glc.LogStore = ls
 		gb, err := cluster.InstantiateLocalGroup(glc, entry)
 		if err != nil {
 			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
