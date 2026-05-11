@@ -5,7 +5,7 @@
 **Shipped:**
 - **C1** (v0.0.13.0): `WithNumCompactors(2)` per-instance reduction. idle goroutines −7%, CPU −4%.
 - **P0a** (v0.0.13.0): load-N32 baseline + scaling cliff 확인 (5 nodes × 32 groups × 2 BadgerDB = 320 instances).
-- **P0b** (v0.0.13.0): shared raft-log DB. idle-N8: goroutines −16%, heap −19%, RSS −25%. `OpenSharedLogStore` + `--shared-badger=true` 기본.
+- **P0b** (v0.0.13.0 → finalized v0.0.145.0): shared raft-log DB. idle-N8: goroutines −16%, heap −19%, RSS −25%. `OpenSharedLogStore`; shared raft-log is the only layout (the `--shared-badger` flag was removed in v0.0.145.0).
 
 **Paused (P3):**
 - FSM state DB 노드당 1개로 통합. design v2 codex 리뷰에서 13개 이슈 (live snapshot Restore가 FSM 우회, DropPrefix DB-wide stall 등). 추정 11-14일.
@@ -388,7 +388,7 @@ Just enough to run `cluster_perf_profile_test` matrix end-to-end.
 Compare: idle-N8/16 goroutines & CPU; load-N8/16 PUT error rate;
 load-N32 (does it boot now?).
 
-## P0b — Shared raft-log prototype (code landed, measurements pending)
+## P0b — Shared raft-log (finalized v0.0.145.0)
 
 Code wired in commit `<TBD>`:
 
@@ -453,6 +453,20 @@ GRAINFS_PERF=1 GRAINFS_PERF_SHARED_BADGER=1 GRAINFS_PERF_SCENARIO=idle-N8 \
 
 Then sweep `idle-N8,idle-N16,load-N8,load-N16,load-N32` and update this
 section with the comparison table.
+
+### Status: FINALIZED (v0.0.145.0)
+
+P0b is no longer a prototype. `--shared-badger` was the default from v0.0.13.0;
+the validation it was waiting on landed (idle-N8: goroutines −16%, heap −19%,
+RSS −25%; reconfirmed after R+H QUIC stream-reuse cut idle CPU 70%→3.5%). As of
+v0.0.145.0 the flag, the `Config.SharedBadgerEnabled` field, and the
+`groups/*/raft/` legacy-detection guard are removed — shared raft-log is the
+only layout. Pre-1.0, no deployment carried the legacy per-group layout, so no
+migration tool was needed; a fresh `<dataDir>` simply gets `shared-raft-log/`.
+
+What is still per-group: the FSM-state DB at `groups/*/badger/` (P3, paused —
+13 open design issues, re-open conditions in `TODOS.md`). `recover-cluster` /
+`migrate` operate on the meta-Raft log only and are unaffected.
 
 ## P3 — FSM state DB consolidation (implementation design)
 

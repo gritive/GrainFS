@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.145.0] - 2026-05-11 — refactor(serve): remove `--shared-badger` flag
+
+### Removed
+
+- `serve --shared-badger` flag and `Config.SharedBadgerEnabled`. The C2 P0b
+  shared raft-log layout (one `<dataDir>/shared-raft-log/` BadgerDB viewed by
+  every data group's Raft log via a 4-byte length-prefixed key namespace) has
+  been the default since v0.0.13.0 and is now the only layout. GrainFS is
+  pre-1.0 with no deployments on the legacy per-group `groups/*/raft/` layout,
+  so the toggle and its legacy-detection startup guard were dead weight.
+- `bootOpenSharedRaftLogDB`'s `groups/*/raft/` legacy-layout refusal — there is
+  no longer any way to produce that layout.
+- `GroupLifecycleConfig.OpenLogStore` / `OpenGroupLogStoreFunc` — unused
+  indirection. The `LogStore == nil → BadgerLogStore at {groupDir}/raft`
+  fallback remains (used by `internal/cluster` unit tests).
+- `GRAINFS_PERF_SHARED_BADGER` forwarding in `cluster_perf_profile_test.go`.
+
+### Unchanged
+
+- The meta-Raft log store at `<dataDir>/raft/` (`RoleMetaRaftLog`) — never
+  governed by this flag.
+- Per-group FSM-state BadgerDB at `<dataDir>/groups/*/badger/` — C2 P3, still
+  paused (see `docs/architecture/badger-consolidation.md` / `TODOS.md`).
+
 ## [0.0.144.0] - 2026-05-11 — Lifecycle / Cluster follow-ups
 
 ### Fixed

@@ -577,7 +577,7 @@ func TestOpenSharedLogStore_Validation(t *testing.T) {
 }
 
 // openSharedDBForTest opens a *badger.DB with the same options the production
-// shared-badger path uses.
+// shared raft-log path uses.
 func openSharedDBForTest(t *testing.T, dir string) (*badger.DB, error) {
 	t.Helper()
 	return badger.Open(badger.DefaultOptions(dir).
