@@ -340,6 +340,10 @@ func (s *snapshotCountingTransport) SendInstallSnapshot(peer string, args *Insta
 	return s.inner.SendInstallSnapshot(peer, args)
 }
 
+func (s *snapshotCountingTransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return s.inner.SendTimeoutNow(peer, args)
+}
+
 // TestInstallSnapshot_LeaderSendsWhenFollowerBehind: 3-voter cluster. n1 is
 // leader; n2 starts late (its transport is wired before Start, but the node
 // is started AFTER n1 has built up a log AND compacted past the early

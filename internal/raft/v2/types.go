@@ -25,6 +25,9 @@ var (
 	ErrNodeStopped         = errors.New("raft: node stopped")
 	ErrAlreadyBootstrapped = errors.New("raft: cluster already bootstrapped")
 	ErrNotImplemented      = errors.New("raft/v2: not implemented (M2 scope)")
+	// ErrNoPeers is returned by TransferLeadership when the cluster has no
+	// peer voters to transfer leadership to.
+	ErrNoPeers = errors.New("raft: no peers to transfer leadership to")
 	// ErrConfChangeInFlight is returned by AddVoter / RemoveVoter when a
 	// previous Raft §4.3 joint-consensus membership change has not yet
 	// committed both phases (joint entry + final ConfChange entry). One
@@ -169,6 +172,22 @@ type InstallSnapshotArgs struct {
 // follower reports its currentTerm so a stale leader can step down.
 type InstallSnapshotReply struct {
 	Term uint64
+}
+
+// TimeoutNowArgs is sent by the leader to its chosen transfer target to trigger
+// an immediate election (Raft §3.10). The target starts an election in a new
+// term without waiting for its election timer to expire.
+type TimeoutNowArgs struct {
+	Term   uint64 // leader's currentTerm
+	Leader string // leader's ID (for logging only)
+}
+
+// TimeoutNowReply is the response to a TimeoutNow RPC. The target reports its
+// currentTerm so a stale leader can step down. Success is false when the target
+// ignores the request (e.g., it is already a candidate/leader).
+type TimeoutNowReply struct {
+	Term    uint64 // target's currentTerm
+	Success bool   // true if target accepted the transfer
 }
 
 // Config holds Raft node configuration. Field set is mirrored verbatim from
