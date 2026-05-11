@@ -54,6 +54,7 @@ type bootState struct {
 	db              *badger.DB           // bootOpenMetaDB
 	logStore        *raft.BadgerLogStore // bootOpenRaftLogStore
 	sharedRaftLogDB *badger.DB           // bootOpenSharedRaftLogDB (optional)
+	sharedFSMDB     *badger.DB           // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
 
 	// storeOpts are the raft.BadgerLogStoreOption set used to open the
 	// meta log store. Captured on bootState so per-data-group shared log
@@ -108,7 +109,8 @@ type bootState struct {
 	loadReporterStor *cluster.NodeStatsStore
 
 	// Services + shutdown (populated by services phases — PR 6 onwards).
-	// bootSnapshotAndApplyLoop owns: fsm (meta-FSM bound to state.db),
+	// bootSnapshotAndApplyLoop owns: fsm (the distBackend's FSM —
+	// distBackend.FSMRef() — group-0 keyspace over the shared FSM-state DB),
 	// cachedBackend (the post-pack LRU read cache; the wrapping chain
 	// inner→outer is distBackend → packblob (optional) → cachedBackend →
 	// WAL → pullthrough, and the final two wrappers are added downstream

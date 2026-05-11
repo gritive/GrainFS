@@ -43,6 +43,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootOpenSharedRaftLogDB(state); err != nil {
 		return err
 	}
+	if err := bootOpenSharedFSMDB(state); err != nil {
+		return err
+	}
 
 	// PR 3: transport.
 	if err := bootQUICTransport(ctx, state); err != nil {

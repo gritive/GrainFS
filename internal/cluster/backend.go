@@ -240,6 +240,19 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 	return b, nil
 }
 
+// NewDistributedBackendForGroup builds a DistributedBackend whose FSM-state
+// keys carry groupID's keyspace prefix and which opens in shared-DB mode
+// (Close does NOT close db — the caller owns the shared DB's lifecycle).
+// serveruntime uses this for the group-0 main backend over the per-node
+// shared FSM-state DB (C2 P3). groupID must be non-empty.
+func NewDistributedBackendForGroup(root string, db *badger.DB, node RaftNode, groupID string) (*DistributedBackend, error) {
+	keys, err := newStateKeyspace(groupID)
+	if err != nil {
+		return nil, fmt.Errorf("group %s: keyspace: %w", groupID, err)
+	}
+	return NewDistributedBackend(root, db, node, keys, true)
+}
+
 // ks returns the effective stateKeyspace for this backend. When b.keys is nil
 // (backend constructed via struct literal in tests) it falls back to the identity
 // keyspace so all methods work correctly without requiring the constructor.

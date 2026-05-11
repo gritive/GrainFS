@@ -31,6 +31,12 @@ func DefaultRegistry() Registry {
 			SourceContract: SourceContractRaftLog, ReadOnlyEligible: false,
 			QuarantineEligible: false, MaxProbeConcurrency: 1,
 		},
+		RoleSharedFSM: {
+			Role: RoleSharedFSM, DisplayName: "shared FSM state", RelativePath: "shared-fsm",
+			OptionsKind: OptionsSmall, Criticality: CriticalityRequired,
+			SourceContract: SourceContractBadgerSelf, ReadOnlyEligible: false,
+			QuarantineEligible: false, MaxProbeConcurrency: 1,
+		},
 		RoleGroupState: {
 			Role: RoleGroupState, DisplayName: "data group state", RelativePath: "groups/{group}/badger",
 			OptionsKind: OptionsSmall, Criticality: CriticalityReadOnly,

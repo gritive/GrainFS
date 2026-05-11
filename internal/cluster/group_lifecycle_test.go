@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,6 +22,18 @@ func openTestGroupLogStore(t *testing.T, dataDir, groupID string) raft.LogStore 
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ls.Close() })
 	return ls
+}
+
+// openTestFSMStore opens the per-node shared FSM-state BadgerDB at
+// <dataDir>/shared-fsm/. Tests must supply it now that
+// GroupLifecycleConfig.FSMStore is required; in shared mode GroupBackend.Close
+// does NOT close it, so the t.Cleanup here owns the close.
+func openTestFSMStore(t *testing.T, dataDir string) *badger.DB {
+	t.Helper()
+	db, err := badger.Open(badger.DefaultOptions(filepath.Join(dataDir, "shared-fsm")).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 type recordingGroupTransport struct {
@@ -47,16 +58,18 @@ func TestInstantiateLocalGroup_Success(t *testing.T) {
 		DataDir: dir,
 	}
 	cfg.LogStore = openTestGroupLogStore(t, dir, "group-x")
+	cfg.FSMStore = openTestFSMStore(t, dir)
 	entry := ShardGroupEntry{ID: "group-x", PeerIDs: []string{"self"}}
 	gb, err := instantiateLocalGroup(cfg, entry)
 	require.NoError(t, err)
 	require.NotNil(t, gb)
 	require.Equal(t, "group-x", gb.ID())
 
-	// Files exist
-	require.DirExists(t, filepath.Join(dir, "groups", "group-x", "badger"))
+	// blobs stays per-group; raft is the per-group log dir; FSM state is in
+	// the shared DB now, so no per-group groups/<id>/badger dir.
 	require.DirExists(t, filepath.Join(dir, "groups", "group-x", "raft"))
 	require.DirExists(t, filepath.Join(dir, "groups", "group-x", "blobs"))
+	require.NoDirExists(t, filepath.Join(dir, "groups", "group-x", "badger"))
 
 	require.NoError(t, shutdownLocalGroup(context.Background(), gb, 5*time.Second))
 }
@@ -64,6 +77,7 @@ func TestInstantiateLocalGroup_Success(t *testing.T) {
 func TestInstantiateLocalGroup_Idempotent_Recovery(t *testing.T) {
 	dir := t.TempDir()
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
+	cfg.FSMStore = openTestFSMStore(t, dir)
 	entry := ShardGroupEntry{ID: "group-y", PeerIDs: []string{"self"}}
 
 	cfg.LogStore = openTestGroupLogStore(t, dir, "group-y")
@@ -79,41 +93,12 @@ func TestInstantiateLocalGroup_Idempotent_Recovery(t *testing.T) {
 	require.NoError(t, shutdownLocalGroup(context.Background(), gb2, 5*time.Second))
 }
 
-func TestInstantiateLocalGroup_BadgerOpenFails_ReturnsError(t *testing.T) {
+func TestInstantiateLocalGroup_NilFSMStore_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
-	// Block BadgerDB by creating a non-directory at the expected path.
-	groupsDir := filepath.Join(dir, "groups")
-	require.NoError(t, os.MkdirAll(groupsDir, 0o755))
-	groupDir := filepath.Join(groupsDir, "group-z")
-	require.NoError(t, os.MkdirAll(groupDir, 0o755))
-	// Place a regular file where the badger directory should go.
-	require.NoError(t, os.WriteFile(filepath.Join(groupDir, "badger"), []byte("blocker"), 0o644))
-
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-z")
-	entry := ShardGroupEntry{ID: "group-z", PeerIDs: []string{"self"}}
-	_, err := instantiateLocalGroup(cfg, entry)
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-nofsm")
+	_, err := instantiateLocalGroup(cfg, ShardGroupEntry{ID: "group-nofsm", PeerIDs: []string{"self"}})
 	require.Error(t, err)
-}
-
-func TestInstantiateLocalGroup_UsesInjectedBadgerOpen(t *testing.T) {
-	dir := t.TempDir()
-	called := false
-	cfg := GroupLifecycleConfig{
-		NodeID:   "self",
-		DataDir:  dir,
-		LogStore: openTestGroupLogStore(t, dir, "group-injected"),
-		OpenStateDB: func(groupID, path string) (*badger.DB, error) {
-			called = true
-			require.Equal(t, "group-injected", groupID)
-			return badger.Open(badger.DefaultOptions(path).WithLogger(nil))
-		},
-	}
-
-	gb, err := instantiateLocalGroup(cfg, ShardGroupEntry{ID: "group-injected", PeerIDs: []string{"self"}})
-	require.NoError(t, err)
-	require.True(t, called)
-	require.NoError(t, shutdownLocalGroup(context.Background(), gb, 5*time.Second))
 }
 
 func TestInstantiateLocalGroup_EmptyGroupID(t *testing.T) {
@@ -147,6 +132,7 @@ func TestShutdownLocalGroup_Timeout_Ungraceful(t *testing.T) {
 	dir := t.TempDir()
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
 	cfg.LogStore = openTestGroupLogStore(t, dir, "group-slow")
+	cfg.FSMStore = openTestFSMStore(t, dir)
 	gb, err := instantiateLocalGroup(cfg, ShardGroupEntry{ID: "group-slow", PeerIDs: []string{"self"}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = gb.Close() })
@@ -175,6 +161,7 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 	// second in the alphabetically-sorted PeerIDs slice.
 	cfg := GroupLifecycleConfig{NodeID: "node-b", DataDir: dir}
 	cfg.LogStore = openTestGroupLogStore(t, dir, "group-selfaddr")
+	cfg.FSMStore = openTestFSMStore(t, dir)
 	entry := ShardGroupEntry{
 		ID:      "group-selfaddr",
 		PeerIDs: []string{"node-a", "node-b", "node-c"}, // alphabetically sorted, self not first

@@ -33,6 +33,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootValidateTimings(state))
 	require.NoError(t, bootOpenRaftLogStore(state))
 	require.NoError(t, bootOpenSharedRaftLogDB(state))
+	require.NoError(t, bootOpenSharedFSMDB(state))
 	t.Cleanup(state.Cleanup)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

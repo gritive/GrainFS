@@ -151,7 +151,11 @@ type ownedGroupsState struct {
 // body reads for the boot summary; passing it in keeps the phase signature
 // honest about what's mutated.
 func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDecision func(badgerrole.Decision)) error {
-	distBackend, err := cluster.NewDistributedBackend(state.cfg.DataDir, state.db, state.node, nil, false)
+	// group-0 main backend: FSM state lives in the per-node shared FSM-state
+	// DB under the "group-0" keyspace prefix (C2 P3). The shared DB is owned
+	// by bootOpenSharedFSMDB; this backend opens in shared mode (Close no-ops
+	// the DB close).
+	distBackend, err := cluster.NewDistributedBackendForGroup(state.cfg.DataDir, state.sharedFSMDB, state.node, "group-0")
 	if err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
@@ -239,6 +243,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			EC:               state.effectiveEC,
 			ElectionTimeout:  state.cfg.RaftElectionTimeout,
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
+			FSMStore:         state.sharedFSMDB,
 		}
 		ls, lerr := raft.OpenSharedLogStore(state.sharedRaftLogDB, entry.ID, state.storeOpts...)
 		if lerr != nil {

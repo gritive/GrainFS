@@ -220,3 +220,33 @@ func bootOpenSharedRaftLogDB(state *bootState) error {
 	log.Info().Str("dir", sharedDir).Msg("shared raft-log DB opened")
 	return nil
 }
+
+// bootOpenSharedFSMDB opens the per-node shared FSM-state BadgerDB at
+// <dataDir>/shared-fsm/. Each data group's metadata state is a key-prefixed
+// view of this one DB (C2 P3 — see docs/architecture/badger-consolidation.md).
+// Any legacy per-group <dataDir>/groups/*/badger/ dir from a pre-P3 deployment
+// is IGNORED — pre-1.0, no migration. Registers the DB's Close as a cleanup
+// and a resourcewatch entry.
+func bootOpenSharedFSMDB(state *bootState) error {
+	cfg := state.cfg
+	sharedDir := filepath.Join(cfg.DataDir, "shared-fsm")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir shared FSM-state dir: %w", err)
+	}
+	sharedDB, err := badger.Open(badgerutil.SmallOptions(sharedDir))
+	if err != nil {
+		return fmt.Errorf("open shared FSM-state badger at %s: %w", sharedDir, err)
+	}
+	state.sharedFSMDB = sharedDB
+	state.AddCleanup(func() { sharedDB.Close() })
+	sharedVlog := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedFSM, sharedDB)
+	state.AddCleanup(func() { resourcewatch.DeregisterDB(sharedVlog) })
+	state.startupDecisions = append(state.startupDecisions, badgerrole.Decision{
+		Role:   badgerrole.RoleSharedFSM,
+		Path:   sharedDir,
+		Status: badgerrole.DecisionOK,
+		Action: badgerrole.RecoveryActionNone,
+	})
+	log.Info().Str("dir", sharedDir).Msg("shared FSM-state DB opened")
+	return nil
+}

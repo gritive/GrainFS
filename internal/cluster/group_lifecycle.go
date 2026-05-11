@@ -10,9 +10,7 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 
-	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/resourcewatch"
 )
 
 // errShutdownTimeout signals snapshot/close did not finish within the configured
@@ -21,17 +19,15 @@ import (
 var errShutdownTimeout = errors.New("group lifecycle: shutdown timed out")
 
 // GroupLifecycleConfig collects the wiring needed to instantiate a local group.
-type OpenGroupStateDBFunc func(groupID, path string) (*badger.DB, error)
-
 type GroupLifecycleConfig struct {
-	NodeID      string
-	DataDir     string
-	ShardSvc    *ShardService // may be nil for in-process / single-node tests
-	EC          ECConfig
-	LogStore    raft.LogStore // required — the group's Raft log store (production: a shared-log view via raft.OpenSharedLogStore; tests: raft.NewBadgerLogStore)
-	OpenStateDB OpenGroupStateDBFunc
-	Transport   groupTransport
-	AddrBook    NodeAddressBook
+	NodeID    string
+	DataDir   string
+	ShardSvc  *ShardService // may be nil for in-process / single-node tests
+	EC        ECConfig
+	LogStore  raft.LogStore // required — the group's Raft log store (production: a shared-log view via raft.OpenSharedLogStore; tests: raft.NewBadgerLogStore)
+	FSMStore  *badger.DB    // required — the per-node shared FSM-state DB; each group gets a prefixed view (C2 P3)
+	Transport groupTransport
+	AddrBook  NodeAddressBook
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
@@ -95,27 +91,22 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if cfg.LogStore == nil {
 		return nil, fmt.Errorf("instantiateLocalGroup: nil LogStore")
 	}
+	if cfg.FSMStore == nil {
+		return nil, fmt.Errorf("instantiateLocalGroup: nil FSMStore")
+	}
 
 	groupDir := filepath.Join(cfg.DataDir, "groups", entry.ID)
 	if err := os.MkdirAll(filepath.Join(groupDir, "blobs"), 0o755); err != nil {
 		return nil, fmt.Errorf("group %s: mkdir blobs: %w", entry.ID, err)
 	}
 
-	dbDir := filepath.Join(groupDir, "badger")
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
-		return nil, fmt.Errorf("group %s: mkdir badger: %w", entry.ID, err)
-	}
-	openStateDB := cfg.OpenStateDB
-	if openStateDB == nil {
-		openStateDB = func(_ string, path string) (*badger.DB, error) {
-			return badger.Open(badgerutil.SmallOptions(path))
-		}
-	}
-	db, err := openStateDB(entry.ID, dbDir)
+	// FSM state is a key-prefixed view of the per-node shared DB (C2 P3); the
+	// shared DB is owned by the boot phase and registered with resourcewatch
+	// once there — no per-group open/register here.
+	ks, err := newStateKeyspace(entry.ID)
 	if err != nil {
-		return nil, fmt.Errorf("group %s: open badger: %w", entry.ID, err)
+		return nil, fmt.Errorf("group %s: keyspace: %w", entry.ID, err)
 	}
-	groupVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryGroupRaft, db)
 
 	// peers = all PeerIDs except self
 	peers := make([]string, 0, len(entry.PeerIDs))
@@ -138,8 +129,6 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 
 	node, v2Close, err := newRaftNode(rcfg, logStore, groupDir)
 	if err != nil {
-		resourcewatch.DeregisterDB(groupVlogEntry)
-		_ = db.Close()
 		return nil, fmt.Errorf("group %s: newRaftNode: %w", entry.ID, err)
 	}
 	if cfg.Transport != nil {
@@ -174,19 +163,18 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:           entry.ID,
 		Root:         groupDir,
-		DB:           db,
+		DB:           cfg.FSMStore,
 		Node:         node,
 		LogStore:     logStore,
-		VlogEntry:    groupVlogEntry,
 		ShardSvc:     cfg.ShardSvc,
 		PeerIDs:      peerIDsSelfFirst,
 		EC:           cfg.EC,
+		Keyspace:     ks,
+		Shared:       true,
 		V2StoreClose: v2Close,
 	})
 	if err != nil {
 		node.Close()
-		resourcewatch.DeregisterDB(groupVlogEntry)
-		_ = db.Close()
 		if v2Close != nil {
 			_ = v2Close()
 		}
