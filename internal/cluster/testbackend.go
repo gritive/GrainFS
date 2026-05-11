@@ -18,6 +18,9 @@ import (
 // Exported (despite its "ForTest" feel) because Go cannot import _test.go
 // helpers from another package. Callers outside of test context should
 // construct DistributedBackend directly.
+//
+// As of M5 PR 29 the GRAINFS_RAFT_V2 flag is gone; this helper always
+// instantiates a v2 raft node via newRaftNode.
 func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
@@ -28,15 +31,12 @@ func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 		t.Fatalf("open badger: %v", err)
 	}
 
-	raftDir := dir + "/raft"
-	logStore, err := raft.NewBadgerLogStore(raftDir)
+	cfg := raft.DefaultConfig("test-node", nil)
+	node, closeFn, err := newRaftNode(cfg, nil, dir)
 	if err != nil {
 		db.Close()
-		t.Fatalf("open raft store: %v", err)
+		t.Fatalf("newRaftNode: %v", err)
 	}
-
-	cfg := raft.DefaultConfig("test-node", nil)
-	node := raft.NewNode(cfg, logStore)
 	node.SetTransport(
 		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 			return nil, fmt.Errorf("no peers")
@@ -46,14 +46,17 @@ func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 		},
 	)
 	node.Start()
+	if err := node.Bootstrap(); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 
 	for range 200 {
-		if node.State() == raft.Leader {
+		if node.IsLeader() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if node.State() != raft.Leader {
+	if !node.IsLeader() {
 		t.Fatalf("no-peers node must become leader")
 	}
 
@@ -67,9 +70,11 @@ func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 
 	t.Cleanup(func() {
 		close(stopApply)
-		node.Stop()
+		node.Close()
+		if closeFn != nil {
+			_ = closeFn()
+		}
 		db.Close()
-		logStore.Close()
 	})
 
 	return backend

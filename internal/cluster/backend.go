@@ -135,11 +135,6 @@ type OnApplyFunc func(cmdType CommandType, bucket, key string)
 type raftSnapshotRequest struct {
 	ctx  context.Context
 	resp chan raftSnapshotResponse
-	// v2Snap is non-nil when the request is for the v2 snapshot path; the
-	// apply-loop forwards through this interface (RaftV2Snapshotter) instead
-	// of the v1 snapMgr. Both paths still serialize through the apply loop so
-	// lastApplied is read consistently.
-	v2Snap RaftV2Snapshotter
 }
 
 type raftSnapshotResponse struct {
@@ -368,51 +363,19 @@ func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node 
 }
 
 // TriggerRaftSnapshot forces a Raft FSM snapshot on the current leader.
+// As of M5 PR 29 v2 owns snapshot lifecycle exclusively; the apply loop
+// forwards through RaftNode.CreateSnapshot (formerly the RaftV2Snapshotter
+// interface, folded into RaftNode).
 func (b *DistributedBackend) TriggerRaftSnapshot(ctx context.Context) (raft.SnapshotResult, error) {
 	if err := ctx.Err(); err != nil {
 		return raft.SnapshotResult{}, err
 	}
-	// v2 mode: snapMgr/snapNode are nil because v2 owns snapshot lifecycle
-	// internally. Forward through the RaftV2Snapshotter interface, gated on a
-	// leader check via the active RaftNode.
-	if b.snapMgr == nil {
-		v2Snap, ok := b.node.(RaftV2Snapshotter)
-		if !ok {
-			return raft.SnapshotResult{}, fmt.Errorf("raft snapshot manager unavailable")
-		}
-		if !b.node.IsLeader() {
-			return raft.SnapshotResult{}, raft.ErrNotLeader
-		}
-		if b.snapRequests == nil {
-			return raft.SnapshotResult{}, fmt.Errorf("raft snapshot apply loop unavailable")
-		}
-		req := raftSnapshotRequest{
-			ctx:    ctx,
-			resp:   make(chan raftSnapshotResponse, 1),
-			v2Snap: v2Snap,
-		}
-		select {
-		case b.snapRequests <- req:
-		case <-ctx.Done():
-			return raft.SnapshotResult{}, ctx.Err()
-		}
-		select {
-		case resp := <-req.resp:
-			return resp.result, resp.err
-		case <-ctx.Done():
-			return raft.SnapshotResult{}, ctx.Err()
-		}
-	}
-	if b.snapNode == nil {
-		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot manager unavailable")
-	}
-	if !b.snapNode.IsLeader() {
+	if !b.node.IsLeader() {
 		return raft.SnapshotResult{}, raft.ErrNotLeader
 	}
 	if b.snapRequests == nil {
 		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot apply loop unavailable")
 	}
-
 	req := raftSnapshotRequest{
 		ctx:  ctx,
 		resp: make(chan raftSnapshotResponse, 1),
@@ -430,49 +393,19 @@ func (b *DistributedBackend) TriggerRaftSnapshot(ctx context.Context) (raft.Snap
 	}
 }
 
-func (b *DistributedBackend) triggerRaftSnapshotInApplyLoop(ctx context.Context) (raft.SnapshotResult, error) {
-	if err := ctx.Err(); err != nil {
-		return raft.SnapshotResult{}, err
-	}
-	if b.snapMgr == nil || b.snapNode == nil {
-		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot manager unavailable")
-	}
-	if !b.snapNode.IsLeader() {
-		return raft.SnapshotResult{}, raft.ErrNotLeader
-	}
-	idx := b.lastApplied.Load()
-	term := b.lastAppliedTerm.Load()
-	if idx == 0 {
-		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot unavailable: no applied entries")
-	}
-	result, err := b.snapMgr.Trigger(idx, term, b.snapNode.Configuration().Servers)
-	if err != nil {
-		return raft.SnapshotResult{}, err
-	}
-	b.snapNode.CompactLog(result.Index)
-	return result, nil
-}
-
 func (b *DistributedBackend) completeRaftSnapshotRequest(req raftSnapshotRequest) {
-	var result raft.SnapshotResult
-	var err error
-	if req.v2Snap != nil {
-		result, err = b.triggerRaftV2SnapshotInApplyLoop(req.ctx, req.v2Snap)
-	} else {
-		result, err = b.triggerRaftSnapshotInApplyLoop(req.ctx)
-	}
+	result, err := b.triggerRaftSnapshotInApplyLoop(req.ctx)
 	select {
 	case req.resp <- raftSnapshotResponse{result: result, err: err}:
 	case <-req.ctx.Done():
 	}
 }
 
-// triggerRaftV2SnapshotInApplyLoop is the v2 counterpart of
-// triggerRaftSnapshotInApplyLoop. Runs inside RunApplyLoop so lastApplied is
+// triggerRaftSnapshotInApplyLoop runs inside RunApplyLoop so lastApplied is
 // stable. Captures FSM bytes via FSM.Snapshot, then forwards through
-// RaftV2Snapshotter.CreateSnapshot which serializes inside v2's actor
-// (compacting the log).
-func (b *DistributedBackend) triggerRaftV2SnapshotInApplyLoop(ctx context.Context, snap RaftV2Snapshotter) (raft.SnapshotResult, error) {
+// RaftNode.CreateSnapshot which serializes inside v2's actor (compacting the
+// log).
+func (b *DistributedBackend) triggerRaftSnapshotInApplyLoop(ctx context.Context) (raft.SnapshotResult, error) {
 	if err := ctx.Err(); err != nil {
 		return raft.SnapshotResult{}, err
 	}
@@ -486,25 +419,18 @@ func (b *DistributedBackend) triggerRaftV2SnapshotInApplyLoop(ctx context.Contex
 	}
 	data, err := b.fsm.Snapshot()
 	if err != nil {
-		return raft.SnapshotResult{}, fmt.Errorf("raft v2 snapshot: %w", err)
+		return raft.SnapshotResult{}, fmt.Errorf("raft snapshot: %w", err)
 	}
-	if err := snap.CreateSnapshot(idx, data); err != nil {
-		return raft.SnapshotResult{}, fmt.Errorf("raft v2 create snapshot: %w", err)
+	if err := b.node.CreateSnapshot(idx, data); err != nil {
+		return raft.SnapshotResult{}, fmt.Errorf("raft create snapshot: %w", err)
 	}
 	return raft.SnapshotResult{Index: idx, Term: term, SizeBytes: len(data)}, nil
 }
 
-// RaftSnapshotStatus reports the latest persisted Raft FSM snapshot. In v2
-// mode (snapMgr nil) the call is delegated to the v2 adapter via
-// RaftV2Snapshotter.
+// RaftSnapshotStatus reports the latest persisted Raft FSM snapshot via the
+// RaftNode interface (folded from the former RaftV2Snapshotter in PR 29).
 func (b *DistributedBackend) RaftSnapshotStatus() (raft.SnapshotStatus, error) {
-	if b.snapMgr == nil {
-		if v2Snap, ok := b.node.(RaftV2Snapshotter); ok {
-			return v2Snap.SnapshotStatus()
-		}
-		return raft.SnapshotStatus{}, fmt.Errorf("raft snapshot manager unavailable")
-	}
-	return b.snapMgr.Status()
+	return b.node.SnapshotStatus()
 }
 
 // RegisterCacheInvalidator adds a cache invalidator for committed object mutations.
@@ -4125,10 +4051,11 @@ func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
 }
 
-// RaftNode returns the underlying *raft.Node via type assertion for direct API
-// access (e.g. learner management via dataRaftNode interface). Returns nil if
-// the underlying implementation is not v1 (e.g. when GRAINFS_RAFT_V2=cluster
-// is set). Callers in DataGroupPlanExecutor must nil-check the result.
+// RaftNode returns the underlying *raft.Node via type assertion. Since M5 PR
+// 29 removed the GRAINFS_RAFT_V2 flag, b.node is always *raftV2Node in
+// production and this returns nil. PR 30 deletes the v1 raft package and
+// this method outright; kept here so existing nil-checking callers
+// (DataGroupPlanExecutor) compile.
 func (b *DistributedBackend) RaftNode() *raft.Node {
 	v1, _ := b.node.(*raft.Node)
 	return v1
