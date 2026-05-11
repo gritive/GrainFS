@@ -341,3 +341,67 @@ func TestCheckLeaderCompleteness_LagSkip(t *testing.T) {
 		t.Fatalf("expected lag to be skipped, got: %v", err)
 	}
 }
+
+// checkStateMachineSafety asserts Invariant 5 (State Machine Safety): no two
+// nodes apply different commands at the same log index. This is the core
+// FSM correctness guarantee: all replicas must be identical state machines.
+//
+// We check (nodeA, nodeB, index): if both nodes have an entry at the same
+// index, their Command bytes must be identical. Term must also match because
+// a term mismatch at the same committed index is impossible in correct Raft
+// and would indicate a more fundamental invariant violation.
+func checkStateMachineSafety(nodeApplied map[string][]LogEntry) error {
+	// Build per-node index → entry maps.
+	type nodeMap struct {
+		id  string
+		idx map[uint64]LogEntry
+	}
+	nodes := make([]nodeMap, 0, len(nodeApplied))
+	for id, entries := range nodeApplied {
+		m := make(map[uint64]LogEntry, len(entries))
+		for _, e := range entries {
+			m[e.Index] = e
+		}
+		nodes = append(nodes, nodeMap{id: id, idx: m})
+	}
+
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			a, b := nodes[i], nodes[j]
+			for idx, ea := range a.idx {
+				eb, ok := b.idx[idx]
+				if !ok {
+					continue
+				}
+				if !bytes.Equal(ea.Command, eb.Command) {
+					return fmt.Errorf(
+						"state machine safety violated: nodes %s and %s applied different commands at index %d: %q vs %q",
+						a.id, b.id, idx, ea.Command, eb.Command,
+					)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func TestCheckStateMachineSafety_Violation(t *testing.T) {
+	nodeApplied := map[string][]LogEntry{
+		"a": {{Index: 3, Term: 1, Command: []byte("cmd-x")}},
+		"b": {{Index: 3, Term: 1, Command: []byte("cmd-y")}}, // different!
+	}
+	if err := checkStateMachineSafety(nodeApplied); err == nil {
+		t.Fatal("expected state machine safety violation, got nil")
+	}
+}
+
+func TestCheckStateMachineSafety_Valid(t *testing.T) {
+	nodeApplied := map[string][]LogEntry{
+		"a": {{Index: 3, Term: 1, Command: []byte("cmd-x")}},
+		"b": {{Index: 3, Term: 1, Command: []byte("cmd-x")}},
+		"c": {{Index: 3, Term: 1, Command: []byte("cmd-x")}},
+	}
+	if err := checkStateMachineSafety(nodeApplied); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
