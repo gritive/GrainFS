@@ -270,6 +270,29 @@ func TestSnapshotRollbackSwapsLive(t *testing.T) {
 	require.False(t, found)
 }
 
+func TestSnapshotCloneIncRefsAllSrcBlocks(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+	var ha, hb [32]byte
+	ha[0] = 1
+	hb[0] = 2
+	_, err := idx.WriteBlock("src", 0, ha, "ka")
+	require.NoError(t, err)
+	_, err = idx.WriteBlock("src", 1, hb, "kb")
+	require.NoError(t, err)
+
+	require.NoError(t, idx.SnapshotClone("src", "dst"))
+
+	// Dst sees same canonicals.
+	canon, found, err := idx.ReadBlock("dst", 0)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "ka", canon)
+
+	// Refcounts doubled.
+	require.Equal(t, int32(2), readRefcount(t, idx, "ka"))
+	require.Equal(t, int32(2), readRefcount(t, idx, "kb"))
+}
+
 // R6: invariant test
 // TestWriteBlockDoesNotDeleteSnapshotPinnedCanonical asserts the load-bearing
 // invariant of the (α) refcount-shared design: when a snapshot holds refcount

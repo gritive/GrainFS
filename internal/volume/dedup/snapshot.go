@@ -551,7 +551,80 @@ func (b *badgerIndex) SnapshotRollback(vol, snapID string) ([]string, error) {
 }
 
 func (b *badgerIndex) SnapshotClone(srcVol, dstVol string) error {
-	return errNotImpl("SnapshotClone")
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	clKey := cloneStateKey(dstVol)
+	if err := b.db.Update(func(txn *badger.Txn) error { return txn.Set(clKey, []byte{1}) }); err != nil {
+		return err
+	}
+
+	srcPrefix := blockBadgerPrefix(srcVol)
+	const chunk = 256
+
+	// Collect src entries snapshot (single MVCC view).
+	type pair struct {
+		blkNum int64
+		canon  string
+	}
+	var entries []pair
+	if err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = srcPrefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			suffix := item.Key()[len(srcPrefix):]
+			if len(suffix) < 12 {
+				continue
+			}
+			blk, err := strconv.ParseInt(string(suffix[:12]), 10, 64)
+			if err != nil {
+				return err
+			}
+			var canon string
+			if err := item.Value(func(v []byte) error { canon = string(v); return nil }); err != nil {
+				return err
+			}
+			entries = append(entries, pair{blk, canon})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	for i := 0; i < len(entries); i += chunk {
+		end := i + chunk
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+		if err := retry(maxRetries, func() error {
+			return b.db.Update(func(txn *badger.Txn) error {
+				for _, e := range batch {
+					dstKey := blockBadgerKey(dstVol, e.blkNum)
+					if _, err := txn.Get(dstKey); err == nil {
+						// Resume: dst entry already present from a prior partial clone; skip.
+						continue
+					} else if !errors.Is(err, badger.ErrKeyNotFound) {
+						return err
+					}
+					if err := txn.Set(dstKey, []byte(e.canon)); err != nil {
+						return err
+					}
+					if err := incrRefcount(txn, e.canon); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}); err != nil {
+			return err
+		}
+	}
+
+	return b.db.Update(func(txn *badger.Txn) error { return txn.Delete(clKey) })
 }
 
 // IterLiveBlocks walks vd:b:{vol}:* under a single Badger MVCC view (R1).
