@@ -87,8 +87,7 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 	}
 
 	// Register transports and start nodes.
-	for i, n := range cc.nodes {
-		_ = i
+	for _, n := range cc.nodes {
 		n.SetTransport(net.Register(n.ID(), n))
 	}
 	for i, n := range cc.nodes {
@@ -561,16 +560,31 @@ func TestChaos_Sustained(t *testing.T) {
 
 	deadline := time.Now().Add(duration)
 	actionCount := 0
+	actionCounts := make(map[chaosActionKind]int)
 	for time.Now().Before(deadline) {
 		fn := actions[rng.Intn(len(actions))]
 		ar := fn()
 		history = append(history, ar)
 		actionCount++
+		actionCounts[ar.kind]++
 
 		if err := obs.checkAll(cc, history); err != nil {
 			t.Fatalf("invariant violation after %d chaos actions: %v", actionCount, err)
 		}
 	}
 
+	kindNames := map[chaosActionKind]string{
+		chaosPropose:         "Propose",
+		chaosStepDown:        "StepDown",
+		chaosPartition:       "Partition",
+		chaosHeal:            "Heal",
+		chaosSetDropRate:     "SetDropRate",
+		chaosSetReorderDelay: "SetReorderDelay",
+		chaosKillFollower:    "KillFollower",
+		chaosRestartKilled:   "RestartKilled",
+	}
 	t.Logf("TestChaos_Sustained: %d actions in %s", actionCount, duration)
+	for k, name := range kindNames {
+		t.Logf("  %-20s %d", name, actionCounts[k])
+	}
 }
