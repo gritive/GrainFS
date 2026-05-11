@@ -106,6 +106,22 @@ type RaftNode interface {
 	// calls — not atomic (partial failure leaves intermediate state; see
 	// raftv2adapter.go for the WARN: caveat).
 	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
+
+	// Inbound Raft RPC handlers — invoked by the QUIC RPC server when a peer
+	// delivers a Raft message. Argument and reply types are v1's (raft.*) so
+	// the QUIC wire codec is shared across v1 and v2. v2's adapter translates
+	// at the boundary (see raftv2adapter.go::Handle*).
+	//
+	// Added in M5 PR 27 so the v2 QUIC RPC bridge can dispatch into either
+	// raft.Node (direct) or raftv2.Node (via translation).
+	HandleRequestVote(args *raft.RequestVoteArgs) *raft.RequestVoteReply
+	HandleAppendEntries(args *raft.AppendEntriesArgs) *raft.AppendEntriesReply
+	HandleInstallSnapshot(args *raft.InstallSnapshotArgs) *raft.InstallSnapshotReply
+	// HandleTimeoutNow accepts an empty args struct (v1 wire format carries no
+	// payload). The v2 adapter synthesises args.Term = receiver currentTerm so
+	// v2's stale-term check (Raft §3.10) accepts the call; PR 30 will rework
+	// the wire format if v2 needs to propagate the leader's term.
+	HandleTimeoutNow()
 }
 
 // compile-time check: *raft.Node must satisfy RaftNode.
