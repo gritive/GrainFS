@@ -661,3 +661,38 @@ func TestRebuildConfigFromLog_AbortThenEnterThenLeave(t *testing.T) {
 	require.Equal(t, []string{"n6", "n7"}, peers,
 		"second cycle Leave must apply; jAborted from first cycle must not bleed over")
 }
+
+// TestApplyConfChange_DoesNotAddSelfAsVoter: a joining node, in DynamicJoin,
+// replays its own AddLearner+Promote ConfChanges. It must NOT add its own
+// address to config.Peers — doing so inflates currentVoters (n.id ++
+// config.Peers) and breaks quorum.
+func TestApplyConfChange_DoesNotAddSelfAsVoter(t *testing.T) {
+	n := NewNode(DefaultConfig("A", []string{"B-addr", "C-addr"}))
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// AddLearner(self): must not put self into learnerIDs.
+	add := LogEntry{Index: 10, Term: 1, Type: LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddLearner, ID: "A", Address: "A-addr"})}
+	n.applyConfChangeLocked(add)
+	_, selfIsLearner := n.learnerIDs["A"]
+	assert.False(t, selfIsLearner, "self must not be recorded as a learner")
+
+	// Promote(self): must be a no-op for config.Peers.
+	prom := LogEntry{Index: 11, Term: 1, Type: LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: "A", Address: "A-addr"})}
+	n.applyConfChangeLocked(prom)
+	assert.ElementsMatch(t, []string{"B-addr", "C-addr"}, n.config.Peers, "self must not be appended to config.Peers")
+
+	// AddVoter(self) directly: also a no-op.
+	addV := LogEntry{Index: 12, Term: 1, Type: LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "A", Address: "A-addr"})}
+	n.applyConfChangeLocked(addV)
+	assert.ElementsMatch(t, []string{"B-addr", "C-addr"}, n.config.Peers)
+
+	// Sanity: a real remote AddVoter still works.
+	addD := LogEntry{Index: 13, Term: 1, Type: LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "D", Address: "D-addr"})}
+	n.applyConfChangeLocked(addD)
+	assert.ElementsMatch(t, []string{"B-addr", "C-addr", "D-addr"}, n.config.Peers)
+}
