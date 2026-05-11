@@ -17,9 +17,6 @@ import (
 // adapter), bootstraps it, and waits for it to elect itself leader.
 func newV2LeaderForMembership(t *testing.T) RaftNode {
 	t.Helper()
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("membership-n1", nil)
 	node, _, err := newRaftNode(rcfg, nil, "")
@@ -54,9 +51,6 @@ func newV2LeaderForMembership(t *testing.T) RaftNode {
 // calls return ErrNotLeader without touching the network.
 func newV2FollowerForMembership(t *testing.T) RaftNode {
 	t.Helper()
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
 
 	// Supply a peer so the node is NOT a solo voter (solo voters auto-elect).
 	rcfg := raft.DefaultConfig("membership-follower", []string{"membership-peer"})

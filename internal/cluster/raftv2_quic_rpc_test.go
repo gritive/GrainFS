@@ -22,9 +22,6 @@ type v2QUICCluster struct {
 
 func newV2QUICCluster(t *testing.T, n int) *v2QUICCluster {
 	t.Helper()
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
 
 	ctx := context.Background()
 	transports := make([]*transport.QUICTransport, n)

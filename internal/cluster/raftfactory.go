@@ -1,10 +1,10 @@
 package cluster
 
-// raftfactory.go — factory function that dispatches raft node creation to v1
-// or v2 based on the GRAINFS_RAFT_V2 environment flag.
+// raftfactory.go — factory function that constructs raft v2 nodes for the
+// per-group cluster path. As of M5 PR 29 the GRAINFS_RAFT_V2 flag is gone;
+// v2 is the only path. PR 30 will delete internal/raft/ v1 entirely.
 //
 // Only group_lifecycle.go (instantiateLocalGroup) routes through this factory.
-// MetaRaft and the migrate path remain v1-only in PR 22 per plan §M4 scope.
 
 import (
 	"fmt"
@@ -32,41 +32,35 @@ var (
 // v2 BadgerLogStore was never durably wired before PR 26 (in-memory only).
 const raftV2StoreSubdir = "raft-v2"
 
-// newRaftNode creates a RaftNode using either v1 or v2 based on the
-// GRAINFS_RAFT_V2=cluster flag.
+// newRaftNode constructs a v2 RaftNode wrapped in the cluster adapter.
 //
 // v1→v2 Config translation: v2.Config mirrors v1.Config field-by-field.
-// v1 fields that have no v2 equivalent are ignored when v2 is selected:
+// v1 fields that have no v2 behavior in PR 22+ are accepted but ignored:
 //   - ManagedMode: v2 has the field but no auto-promote watcher in PR 22
 //   - LogGCInterval: v2 has no periodic log GC watcher in PR 22
 //   - MaxAppendEntriesInflightBytes: accepted by v2 but ignored
 //   - LearnerCatchupThreshold: v2 field present but unused until AddLearner lands
 //   - JointAbortTimeout: v2 has joint consensus but no abort timeout in PR 22
 //
-// logStore is used for v1. For v2 the LogStore interfaces are incompatible
-// (v1: AppendEntries/GetEntry vs v2: Append/EntriesFrom/CompactBefore). When
-// v2StoreDir is non-empty, v2 opens a Badger DB at <v2StoreDir>/raft-v2/ and
-// wires durable LogStore + StableStore + SnapshotStore — closing the PR 22
-// deferral. When v2StoreDir is empty, v2 falls back to its built-in in-memory
-// store (used by smoke tests with no on-disk lifecycle).
+// When v2StoreDir is non-empty, v2 opens a Badger DB at <v2StoreDir>/raft-v2/
+// and wires durable LogStore + StableStore + SnapshotStore. When v2StoreDir
+// is empty, v2 falls back to its built-in in-memory store (used by smoke
+// tests with no on-disk lifecycle).
 //
 // The returned closeFn must be invoked when the node shuts down to release
-// the v2 Badger DB handle. closeFn is nil for the v1 path (the BadgerLogStore
-// lifecycle is owned by the caller).
-func newRaftNode(rcfg raft.Config, logStore raft.LogStore, v2StoreDir string) (RaftNode, func() error, error) {
-	if IsV2Enabled("cluster") {
-		node, closeFn, err := newRaftNodeV2(rcfg, v2StoreDir)
-		return node, closeFn, err
-	}
-	return raft.NewNode(rcfg, logStore), nil, nil
+// the v2 Badger DB handle.
+//
+// logStore is accepted for source-compat with PR 28b callers and ignored;
+// PR 30 removes the parameter when the v1 LogStore type is deleted.
+func newRaftNode(rcfg raft.Config, _ raft.LogStore, v2StoreDir string) (RaftNode, func() error, error) {
+	return newRaftNodeV2(rcfg, v2StoreDir)
 }
 
 // newRaftNodeV2 instantiates a v2 node wrapped in the adapter. When
 // v2StoreDir is non-empty, durable Badger-backed LogStore + StableStore +
-// SnapshotStore are wired into v2.Config (closing the PR 22 in-memory
-// deferral). When empty, all three default to the in-memory implementations
-// (matches the PR 22 behaviour for unit tests that never call SetTransport
-// against a real network).
+// SnapshotStore are wired into v2.Config. When empty, all three default to
+// the in-memory implementations (matches PR 22 behaviour for unit tests that
+// never call SetTransport against a real network).
 func newRaftNodeV2(rcfg raft.Config, v2StoreDir string) (*raftV2Node, func() error, error) {
 	v2cfg := raftv2.Config{
 		ID:                            rcfg.ID,
@@ -107,17 +101,12 @@ func newRaftNodeV2(rcfg raft.Config, v2StoreDir string) (*raftV2Node, func() err
 }
 
 // NewRaftV2NodeForServeruntime is the serveruntime entry point that
-// constructs a v2 Raft node directly (bypassing the cluster factory's v1/v2
-// dispatch). serveruntime never routes through newRaftNode; its raft node
-// is constructed once per process at boot.
+// constructs a v2 Raft node. serveruntime never routes through newRaftNode;
+// its raft node is constructed once per process at boot.
 //
 // raftDir is the meta-raft root directory; v2 stores land at
 // <raftDir>/raft-v2/. The returned closeFn must be invoked at shutdown to
 // release the Badger DB handle (caller registers via bootState.AddCleanup).
-//
-// IsV2Enabled("serveruntime") is the only opt-in trigger; this helper does
-// NOT consult the flag itself — call it only when the caller has already
-// decided to take the v2 path.
 func NewRaftV2NodeForServeruntime(rcfg raft.Config, raftDir string) (RaftNode, func() error, error) {
 	return newRaftNodeV2(rcfg, raftDir)
 }

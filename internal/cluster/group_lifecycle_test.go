@@ -188,29 +188,11 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 		"selfAddr must equal cfg.NodeID regardless of PeerIDs sort order")
 }
 
-func TestInstantiateLocalGroup_UsesGroupIDAsElectionPriorityKey(t *testing.T) {
-	// ElectionPriorityKey is a v1-only accessor (not on cluster.RaftNode);
-	// pin v1 since M5 PR 28b flips the cluster default to v2. The factory
-	// still threads rcfg.ElectionPriorityKey through to v2 under the hood,
-	// but the assertion shape requires *raft.Node.
-	t.Setenv("GRAINFS_RAFT_V2", "off")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
-
-	dir := t.TempDir()
-	cfg := GroupLifecycleConfig{NodeID: "node-b", DataDir: dir}
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-priority")
-	entry := ShardGroupEntry{
-		ID:      "group-priority",
-		PeerIDs: []string{"node-a", "node-b", "node-c"},
-	}
-
-	gb, err := instantiateLocalGroup(cfg, entry)
-	require.NoError(t, err)
-	defer shutdownLocalGroup(context.Background(), gb, 5*time.Second) //nolint:errcheck
-
-	require.Equal(t, "group-priority", gb.RaftNode().ElectionPriorityKey())
-}
+// TestInstantiateLocalGroup_UsesGroupIDAsElectionPriorityKey was retired in
+// M5 PR 29. The assertion shape required v1's *raft.Node.ElectionPriorityKey()
+// accessor; v2 has no equivalent accessor on cluster.RaftNode. The factory
+// still threads rcfg.ElectionPriorityKey through to v2 under the hood (see
+// raftfactory.go::newRaftNodeV2). PR 30 will delete v1 entirely.
 
 func TestResolvingGroupTransport_ResolvesNodeIDBeforeDial(t *testing.T) {
 	f := NewMetaFSM()

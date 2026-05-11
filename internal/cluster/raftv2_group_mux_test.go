@@ -34,9 +34,6 @@ type v2GroupMuxCluster struct {
 
 func newV2GroupMuxCluster(t *testing.T, n int, groupID string) *v2GroupMuxCluster {
 	t.Helper()
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
 
 	ctx := context.Background()
 	transports := make([]*transport.QUICTransport, n)

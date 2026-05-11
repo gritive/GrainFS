@@ -64,47 +64,33 @@ func Run(ctx context.Context, cfg Config) error {
 	raftCfg.ManagedMode = cfg.BadgerManagedMode
 	raftCfg.LogGCInterval = cfg.RaftLogGCInterval
 
-	if cluster.IsV2Enabled("serveruntime") {
-		// M5 PR 26: GRAINFS_RAFT_V2=serveruntime — construct the v2 node
-		// behind the cluster.RaftNode interface. Durable LogStore +
-		// StableStore + SnapshotStore live in <raftDir>/raft-v2/ (sibling
-		// to the v1 raft/ directory; v1 and v2 on-disk schemas differ).
-		v2Node, v2Close, err := cluster.NewRaftV2NodeForServeruntime(raftCfg, state.raftDir)
-		if err != nil {
-			return fmt.Errorf("raft v2 init: %w", err)
-		}
-		state.AddCleanup(func() {
-			if v2Close != nil {
-				_ = v2Close()
-			}
-		})
-		if !cfg.JoinMode {
-			if err := v2Node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
-				return fmt.Errorf("raft v2 bootstrap: %w", err)
-			}
-		}
-		state.node = v2Node
-		// M5 PR 27: wire the v2 QUIC RPC bridge so multi-node v2 clusters
-		// can exchange Raft RPCs. The bridge re-implements v1's QUIC RPC
-		// dispatch on top of cluster.RaftNode.Handle* (the v2 adapter
-		// translates to raftv2.Node). Wire format is byte-identical to v1
-		// (see internal/cluster/raftv2_quic_codec.go); v1 is frozen until
-		// PR 30 deletes it.
-		v2RPCTransport := cluster.NewRaftV2QUICRPCTransport(state.quicTransport, v2Node)
-		v2RPCTransport.SetTransport()
-		log.Info().Msg("raft v2: QUIC RPC transport wired (M5 PR 27)")
-	} else {
-		node := raft.NewNode(raftCfg, state.logStore)
-		if !cfg.JoinMode {
-			if err := node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
-				return fmt.Errorf("raft bootstrap: %w", err)
-			}
-		}
-		state.node = node
-		rpcTransport := raft.NewQUICRPCTransport(state.quicTransport, node)
-		rpcTransport.SetTransport()
-		state.rpcTransport = rpcTransport
+	// M5 PR 29: raft v2 is the only path. The GRAINFS_RAFT_V2 flag is gone;
+	// v1 (*raft.Node) is unreachable from serveruntime. PR 30 deletes the v1
+	// package outright. Durable LogStore + StableStore + SnapshotStore live
+	// in <raftDir>/raft-v2/.
+	v2Node, v2Close, err := cluster.NewRaftV2NodeForServeruntime(raftCfg, state.raftDir)
+	if err != nil {
+		return fmt.Errorf("raft v2 init: %w", err)
 	}
+	state.AddCleanup(func() {
+		if v2Close != nil {
+			_ = v2Close()
+		}
+	})
+	if !cfg.JoinMode {
+		if err := v2Node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
+			return fmt.Errorf("raft v2 bootstrap: %w", err)
+		}
+	}
+	state.node = v2Node
+	// M5 PR 27: wire the v2 QUIC RPC bridge so multi-node v2 clusters can
+	// exchange Raft RPCs. The bridge re-implements v1's QUIC RPC dispatch on
+	// top of cluster.RaftNode.Handle* (the v2 adapter translates to
+	// raftv2.Node). Wire format is byte-identical to v1; v1 is frozen until
+	// PR 30 deletes it.
+	v2RPCTransport := cluster.NewRaftV2QUICRPCTransport(state.quicTransport, v2Node)
+	v2RPCTransport.SetTransport()
+	log.Info().Msg("raft v2: QUIC RPC transport wired")
 
 	// PR 4: meta-raft callback registration BEFORE Start.
 	if err := bootMetaRaftWiring(state); err != nil {
