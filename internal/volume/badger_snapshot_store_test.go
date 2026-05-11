@@ -8,7 +8,6 @@ import (
 )
 
 func TestBadgerSnapshotStoreCreateRollback(t *testing.T) {
-	t.Skip("requires badgerSnapshotStore wiring in B10")
 	mgr := setupDedupManager(t)
 	const name = "rb"
 	_, err := mgr.Create(name, 64*1024)

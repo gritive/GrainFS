@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/dgraph-io/badger/v4"
@@ -33,18 +34,29 @@ func BuildVolumeManager(opts VolumeManagerOptions, dataDir string, backend stora
 	}
 	mopts := volume.ManagerOptions{BlockCache: cache}
 	if !opts.DedupEnabled {
-		return volume.NewManagerWithOptions(backend, mopts), cache, nil, nil
+		mgr := volume.NewManagerWithOptions(backend, mopts)
+		if err := mgr.RecoverOnBoot(context.Background()); err != nil {
+			return nil, nil, nil, fmt.Errorf("volume recover on boot: %w", err)
+		}
+		return mgr, cache, nil, nil
 	}
 	reg := badgerrole.DefaultRegistry()
 	db, decision, err := badgerrole.OpenRole(reg, badgerrole.RoleDedup, badgerrole.PathContext{DataDir: dataDir})
 	if err != nil {
 		if feature, ok := OptionalRoleDisabled(reg, decision); ok {
 			LogOptionalRoleDisabled(badgerrole.RoleDedup, feature, err)
-			return volume.NewManagerWithOptions(backend, mopts), cache, nil, nil
+			mgr := volume.NewManagerWithOptions(backend, mopts)
+			if err := mgr.RecoverOnBoot(context.Background()); err != nil {
+				return nil, nil, nil, fmt.Errorf("volume recover on boot: %w", err)
+			}
+			return mgr, cache, nil, nil
 		}
 		return nil, nil, nil, fmt.Errorf("open dedup db: %w", err)
 	}
 	mopts.DedupIndex = dedup.NewBadgerIndex(db)
 	mgr := volume.NewManagerWithOptions(backend, mopts)
+	if err := mgr.RecoverOnBoot(context.Background()); err != nil {
+		return nil, nil, nil, fmt.Errorf("volume recover on boot: %w", err)
+	}
 	return mgr, cache, db, nil
 }
