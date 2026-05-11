@@ -130,12 +130,14 @@ func (a *raftV2Node) Bootstrap() error {
 	} else {
 		metrics.RaftV2BootstrapOutcome.WithLabelValues("success").Inc()
 	}
-	return err
+	return translateV2SentinelErr(err)
 }
 
 // --- Write path ---
 
-func (a *raftV2Node) Propose(command []byte) error { return a.n.Propose(command) }
+func (a *raftV2Node) Propose(command []byte) error {
+	return translateV2SentinelErr(a.n.Propose(command))
+}
 
 func (a *raftV2Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
 	start := time.Now()
@@ -143,7 +145,28 @@ func (a *raftV2Node) ProposeWait(ctx context.Context, command []byte) (uint64, e
 	outcome := proposeOutcome(err)
 	metrics.RaftV2ProposeCount.WithLabelValues(outcome).Inc()
 	metrics.RaftV2ProposeLatency.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
-	return idx, err
+	return idx, translateV2SentinelErr(err)
+}
+
+// translateV2SentinelErr maps a raftv2 sentinel error to its v1 equivalent so
+// callers that use errors.Is(err, raft.ErrNotLeader) (or sibling sentinels)
+// continue to match under v2. Errors that have no v1 counterpart (e.g.
+// ErrProposalFailed, ErrConfChangeInFlight) pass through unchanged.
+//
+// PR 30 (v1 deletion) removes this shim; v2's sentinels become canonical.
+func translateV2SentinelErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, raftv2.ErrNotLeader):
+		return raft.ErrNotLeader
+	case errors.Is(err, raftv2.ErrNoPeers):
+		return raft.ErrNoPeers
+	case errors.Is(err, raftv2.ErrAlreadyBootstrapped):
+		return raft.ErrAlreadyBootstrapped
+	}
+	return err
 }
 
 // proposeOutcome maps a ProposeWait error to a bounded outcome label.
@@ -163,7 +186,8 @@ func proposeOutcome(err error) string {
 // --- Read path ---
 
 func (a *raftV2Node) ReadIndex(ctx context.Context) (uint64, error) {
-	return a.n.ReadIndex(ctx)
+	idx, err := a.n.ReadIndex(ctx)
+	return idx, translateV2SentinelErr(err)
 }
 
 // WaitApplied blocks until CommittedIndex >= index or ctx is done.
@@ -339,15 +363,19 @@ func (a *raftV2Node) DeregisterObserver(_ chan<- raft.Event) {}
 // --- Membership: direct passthrough (v2 has these methods) ---
 
 // AddVoter passes through to the v2 node's AddVoter implementation.
-func (a *raftV2Node) AddVoter(id, addr string) error { return a.n.AddVoter(id, addr) }
+func (a *raftV2Node) AddVoter(id, addr string) error {
+	return translateV2SentinelErr(a.n.AddVoter(id, addr))
+}
 
 // AddVoterCtx passes through to the v2 node's AddVoterCtx implementation.
 func (a *raftV2Node) AddVoterCtx(ctx context.Context, id, addr string) error {
-	return a.n.AddVoterCtx(ctx, id, addr)
+	return translateV2SentinelErr(a.n.AddVoterCtx(ctx, id, addr))
 }
 
 // RemoveVoter passes through to the v2 node's RemoveVoter implementation.
-func (a *raftV2Node) RemoveVoter(id string) error { return a.n.RemoveVoter(id) }
+func (a *raftV2Node) RemoveVoter(id string) error {
+	return translateV2SentinelErr(a.n.RemoveVoter(id))
+}
 
 // --- Membership: passthrough to ErrNotImplemented (v2 stubs) ---
 
@@ -363,7 +391,9 @@ func (a *raftV2Node) PromoteToVoter(id string) error { return a.n.PromoteToVoter
 
 // TransferLeadership passes through to v2 (Raft §3.10, implemented in
 // v0.0.143.0 / PR #288).
-func (a *raftV2Node) TransferLeadership() error { return a.n.TransferLeadership() }
+func (a *raftV2Node) TransferLeadership() error {
+	return translateV2SentinelErr(a.n.TransferLeadership())
+}
 
 // --- PeerMatchIndex: v2 does not expose per-peer replication state ---
 
@@ -391,7 +421,7 @@ func (a *raftV2Node) ChangeMembership(ctx context.Context, adds []raft.ServerEnt
 			return err
 		}
 		if err := a.n.AddVoterCtx(ctx, add.ID, add.Address); err != nil {
-			return err
+			return translateV2SentinelErr(err)
 		}
 	}
 	for _, id := range removes {
@@ -399,7 +429,7 @@ func (a *raftV2Node) ChangeMembership(ctx context.Context, adds []raft.ServerEnt
 			return err
 		}
 		if err := a.n.RemoveVoter(id); err != nil {
-			return err
+			return translateV2SentinelErr(err)
 		}
 	}
 	return nil

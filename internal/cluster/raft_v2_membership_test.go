@@ -84,8 +84,8 @@ func TestRaftV2Membership_AddVoter_PassesThroughToV2(t *testing.T) {
 	err := node.AddVoter("n2", "addr-n2")
 	require.Error(t, err, "AddVoter on a follower must return an error")
 	assert.True(t,
-		errors.Is(err, raftv2.ErrNotLeader),
-		"expected ErrNotLeader, got: %v", err)
+		errors.Is(err, raft.ErrNotLeader),
+		"expected raft.ErrNotLeader (translated from raftv2), got: %v", err)
 }
 
 // TestRaftV2Membership_RemoveVoter_PassesThroughToV2 verifies that RemoveVoter
@@ -96,8 +96,8 @@ func TestRaftV2Membership_RemoveVoter_PassesThroughToV2(t *testing.T) {
 	err := node.RemoveVoter("n2")
 	require.Error(t, err, "RemoveVoter on a follower must return an error")
 	assert.True(t,
-		errors.Is(err, raftv2.ErrNotLeader),
-		"expected ErrNotLeader, got: %v", err)
+		errors.Is(err, raft.ErrNotLeader),
+		"expected raft.ErrNotLeader (translated from raftv2), got: %v", err)
 }
 
 // TestRaftV2Membership_AddLearner_ReturnsErrNotImplemented verifies that under
@@ -121,8 +121,8 @@ func TestRaftV2Membership_TransferLeadership_PassesThroughToV2(t *testing.T) {
 	err := node.TransferLeadership()
 	require.Error(t, err, "TransferLeadership on single-voter leader must return an error")
 	assert.True(t,
-		errors.Is(err, raftv2.ErrNoPeers),
-		"expected ErrNoPeers, got: %v", err)
+		errors.Is(err, raft.ErrNoPeers),
+		"expected raft.ErrNoPeers (translated from raftv2), got: %v", err)
 }
 
 // TestRaftV2Membership_PromoteToVoter_ReturnsErrNotImplemented verifies that
@@ -160,8 +160,8 @@ func TestRaftV2Membership_ChangeMembership_SequencesAddsRemoves(t *testing.T) {
 		err := node.ChangeMembership(ctx, nil, []string{"n2"})
 		require.Error(t, err, "ChangeMembership with a remove on a follower must return an error")
 		assert.True(t,
-			errors.Is(err, raftv2.ErrNotLeader),
-			"expected ErrNotLeader from sequenced RemoveVoter, got: %v", err)
+			errors.Is(err, raft.ErrNotLeader),
+			"expected raft.ErrNotLeader from sequenced RemoveVoter, got: %v", err)
 	})
 
 	t.Run("add_on_follower_returns_not_leader", func(t *testing.T) {
@@ -173,8 +173,8 @@ func TestRaftV2Membership_ChangeMembership_SequencesAddsRemoves(t *testing.T) {
 		err := node.ChangeMembership(ctx, adds, nil)
 		require.Error(t, err, "ChangeMembership with an add on a follower must return an error")
 		assert.True(t,
-			errors.Is(err, raftv2.ErrNotLeader),
-			"expected ErrNotLeader from sequenced AddVoterCtx, got: %v", err)
+			errors.Is(err, raft.ErrNotLeader),
+			"expected raft.ErrNotLeader from sequenced AddVoterCtx, got: %v", err)
 	})
 
 	t.Run("ctx_cancelled_before_remove", func(t *testing.T) {
