@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.0.135.0] - 2026-05-11 — refactor(cluster): extract OpRouter + LocalExecution from ClusterCoordinator
+
+### Added
+
+- `internal/cluster/op_routing.go` (new, 171 LoC): `OpRouter` — ctx-free routing
+  module that resolves S3-level operations to placement-group targets.
+  `RouteTarget` value type with exported fields (`GroupID`, `Peers`, `SelfIsLeader`,
+  `SelfIsVoter`, `SelfIsOnlyVoter`) and `CanReadLocal()` predicate. Three methods:
+  `RouteBucket(bucket)`, `RouteObjectRead(bucket, key, versionID)`,
+  `RouteObjectWrite(bucket, key)`. Owns object-index lookup, internal-bucket
+  bypass, write target selection via `SelectObjectPlacementGroup`, and peer
+  address resolution through the address book.
+- `internal/cluster/exec_policy.go` (new, 112 LoC): `LocalExecution` — ctx-aware
+  sibling module that takes a `RouteTarget` plus intent and returns either a
+  local `*GroupBackend` (use it) or `nil` (forward signal). Owns follower-read
+  `ReadIndex+WaitApplied` deadline and self-only-voter leader-wait.
+- `internal/cluster/op_routing_test.go` + `internal/cluster/exec_policy_test.go`
+  (new, 346 LoC combined): unit tests for both modules including
+  `TestLocalExecution_ResolveWrite_LeadershipFlipMidCall` regression guard.
+
+### Changed
+
+- `internal/cluster/cluster_coordinator.go` (1623 → 1446 LoC, -177 net): every
+  bucket-scoped public method now routes through `c.opRouter.RouteXxx` and
+  `c.localExec.ResolveXxx`. The legacy `(gb, ok, err)` 3-tuple from
+  `localXxxBackend` collapses to `(gb, err)` where `gb != nil` means use it.
+  19 methods migrated: `RestoreObjects`, `ListObjects`, `ListObjectVersions`,
+  `WalkObjects`, `WriteAt`, `Truncate`, `PreferWriteAt`, `GetObject`,
+  `GetObjectVersion`, `HeadObject`, `ReadAt`, `DeleteObjectReturningMarker`,
+  `DeleteObjectVersion`, `CreateMultipartUpload`, `CompleteMultipartUpload`,
+  `PutObject`, `UploadPart`, `AbortMultipartUpload`, `ListParts`.
+  `internal/cluster/object_reconcile.go` also migrated
+  (`ReconcileObjectIndexLatest`, `headObjectVersionAt`).
+- `internal/cluster/group_backend.go`: added unexported `raftLeaderProbe`
+  interface + `testLeaderProbe` field + `leaderProbe()` method as a minimal
+  test seam for the F3 regression test. Production `RaftNode()` accessor
+  unchanged.
+- `CONTEXT.md`: two new domain sections — "Storage Op Routing" and
+  "Local Execution Decision".
+
+### Fixed
+
+- **Route→execute leadership flip race (F3)**: `LocalExecution.ResolveWrite`
+  re-checks `RaftNode().IsLeader()` at entry instead of trusting the
+  potentially stale `target.SelfIsLeader` flag captured at route time. The
+  legacy `localWriteBackend` could let a no-longer-leader node propose a
+  write between OpRouter resolution and execution. Closed by 1 atomic load
+  per write call; verified by `TestLocalExecution_ResolveWrite_LeadershipFlipMidCall`.
+
+### Removed
+
+- Legacy private helpers from `cluster_coordinator.go`: `routeBucket`,
+  `routeGroup`, `routeDataGroupSnapshot`, `routeObjectLatest`,
+  `routeObjectVersion`, `routeObjectWrite`, `localReadBackend`,
+  `localWriteBackend`, `peersForForward`, `canReadLocal`, and the
+  unexported `routeTarget` struct. Constants `defaultFollowerReadWait` and
+  `defaultSelfOnlyLeaderWait` superseded by `localExecFollowerReadDeadline`
+  and `localExecSelfOnlyLeaderWait` in `exec_policy.go`.
+
 ## [0.0.134.0] - 2026-05-11 — raft/v2 PR 16: Joint Consensus — atomic multi-server membership change (M2 7 of 7, M2 COMPLETE)
 
 ### Added
