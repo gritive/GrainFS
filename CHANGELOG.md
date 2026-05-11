@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.0.136.0] - 2026-05-11 — refactor(volume): SnapshotStore extraction (PR-A)
+
+- refactor(volume): introduce SnapshotStore interface; move S3-backed snapshot ops to s3SnapshotStore (no behavior change)
+
 ## [0.0.135.0] - 2026-05-11 — refactor(cluster): extract OpRouter + LocalExecution from ClusterCoordinator
 
 ### Added
@@ -58,7 +62,6 @@
   unexported `routeTarget` struct. Constants `defaultFollowerReadWait` and
   `defaultSelfOnlyLeaderWait` superseded by `localExecFollowerReadDeadline`
   and `localExecSelfOnlyLeaderWait` in `exec_policy.go`.
-
 ## [0.0.134.0] - 2026-05-11 — raft/v2 PR 16: Joint Consensus — atomic multi-server membership change (M2 7 of 7, M2 COMPLETE)
 
 ### Added
