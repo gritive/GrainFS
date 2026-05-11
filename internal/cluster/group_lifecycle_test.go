@@ -14,6 +14,17 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
+// openTestGroupLogStore opens a per-group BadgerLogStore at the same path the
+// (now-removed) instantiateLocalGroup fallback used. Tests must supply a
+// LogStore explicitly now that GroupLifecycleConfig.LogStore is required.
+func openTestGroupLogStore(t *testing.T, dataDir, groupID string) raft.LogStore {
+	t.Helper()
+	ls, err := raft.NewBadgerLogStore(filepath.Join(dataDir, "groups", groupID, "raft"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ls.Close() })
+	return ls
+}
+
 type recordingGroupTransport struct {
 	votePeers   []string
 	appendPeers []string
@@ -35,6 +46,7 @@ func TestInstantiateLocalGroup_Success(t *testing.T) {
 		NodeID:  "self",
 		DataDir: dir,
 	}
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-x")
 	entry := ShardGroupEntry{ID: "group-x", PeerIDs: []string{"self"}}
 	gb, err := instantiateLocalGroup(cfg, entry)
 	require.NoError(t, err)
@@ -54,11 +66,13 @@ func TestInstantiateLocalGroup_Idempotent_Recovery(t *testing.T) {
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
 	entry := ShardGroupEntry{ID: "group-y", PeerIDs: []string{"self"}}
 
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-y")
 	gb1, err := instantiateLocalGroup(cfg, entry)
 	require.NoError(t, err)
 	require.NoError(t, shutdownLocalGroup(context.Background(), gb1, 5*time.Second))
 
 	// Re-instantiate using the same dataDir (recovery path). Must succeed.
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-y")
 	gb2, err := instantiateLocalGroup(cfg, entry)
 	require.NoError(t, err)
 	require.Equal(t, "group-y", gb2.ID())
@@ -76,6 +90,7 @@ func TestInstantiateLocalGroup_BadgerOpenFails_ReturnsError(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(groupDir, "badger"), []byte("blocker"), 0o644))
 
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-z")
 	entry := ShardGroupEntry{ID: "group-z", PeerIDs: []string{"self"}}
 	_, err := instantiateLocalGroup(cfg, entry)
 	require.Error(t, err)
@@ -85,8 +100,9 @@ func TestInstantiateLocalGroup_UsesInjectedBadgerOpen(t *testing.T) {
 	dir := t.TempDir()
 	called := false
 	cfg := GroupLifecycleConfig{
-		NodeID:  "self",
-		DataDir: dir,
+		NodeID:   "self",
+		DataDir:  dir,
+		LogStore: openTestGroupLogStore(t, dir, "group-injected"),
 		OpenStateDB: func(groupID, path string) (*badger.DB, error) {
 			called = true
 			require.Equal(t, "group-injected", groupID)
@@ -130,6 +146,7 @@ func (s *slowGroupCloser) Close() error {
 func TestShutdownLocalGroup_Timeout_Ungraceful(t *testing.T) {
 	dir := t.TempDir()
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-slow")
 	gb, err := instantiateLocalGroup(cfg, ShardGroupEntry{ID: "group-slow", PeerIDs: []string{"self"}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = gb.Close() })
@@ -157,6 +174,7 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 	// "node-b" sorts between "node-a" and "node-c" — PickVoters would place it
 	// second in the alphabetically-sorted PeerIDs slice.
 	cfg := GroupLifecycleConfig{NodeID: "node-b", DataDir: dir}
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-selfaddr")
 	entry := ShardGroupEntry{
 		ID:      "group-selfaddr",
 		PeerIDs: []string{"node-a", "node-b", "node-c"}, // alphabetically sorted, self not first
@@ -173,6 +191,7 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 func TestInstantiateLocalGroup_UsesGroupIDAsElectionPriorityKey(t *testing.T) {
 	dir := t.TempDir()
 	cfg := GroupLifecycleConfig{NodeID: "node-b", DataDir: dir}
+	cfg.LogStore = openTestGroupLogStore(t, dir, "group-priority")
 	entry := ShardGroupEntry{
 		ID:      "group-priority",
 		PeerIDs: []string{"node-a", "node-b", "node-c"},

@@ -28,7 +28,7 @@ type GroupLifecycleConfig struct {
 	DataDir     string
 	ShardSvc    *ShardService // may be nil for in-process / single-node tests
 	EC          ECConfig
-	LogStore    raft.LogStore // optional — if nil, a per-group BadgerLogStore is created at {groupDir}/raft
+	LogStore    raft.LogStore // required — the group's Raft log store (production: a shared-log view via raft.OpenSharedLogStore; tests: raft.NewBadgerLogStore)
 	OpenStateDB OpenGroupStateDBFunc
 	Transport   groupTransport
 	AddrBook    NodeAddressBook
@@ -92,6 +92,9 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("instantiateLocalGroup: empty NodeID")
 	}
+	if cfg.LogStore == nil {
+		return nil, fmt.Errorf("instantiateLocalGroup: nil LogStore")
+	}
 
 	groupDir := filepath.Join(cfg.DataDir, "groups", entry.ID)
 	if err := os.MkdirAll(filepath.Join(groupDir, "blobs"), 0o755); err != nil {
@@ -132,23 +135,11 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	rcfg.ElectionPriorityKey = entry.ID
 
 	logStore := cfg.LogStore
-	if logStore == nil {
-		ls, lerr := raft.NewBadgerLogStore(filepath.Join(groupDir, "raft"))
-		if lerr != nil {
-			resourcewatch.DeregisterDB(groupVlogEntry)
-			_ = db.Close()
-			return nil, fmt.Errorf("group %s: open raft log store: %w", entry.ID, lerr)
-		}
-		logStore = ls
-	}
 
 	node, err := newRaftNode(rcfg, logStore)
 	if err != nil {
 		resourcewatch.DeregisterDB(groupVlogEntry)
 		_ = db.Close()
-		if logStore != cfg.LogStore {
-			_ = logStore.Close()
-		}
 		return nil, fmt.Errorf("group %s: newRaftNode: %w", entry.ID, err)
 	}
 	if cfg.Transport != nil {
