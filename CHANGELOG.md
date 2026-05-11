@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.0.143.0] - 2026-05-11 — fix(cluster): GetObjectVersion reconstructs EC-stored versions
+
+- fix(cluster): `DistributedBackend.GetObjectVersion` now reconstructs erasure-coded objects from their shards before falling back to a plain data file — mirroring `GetObject`. Previously it only tried `os.Open(objectPathV)` then the legacy unversioned path, so any versioned read of an EC-stored object (S3 `GET ?versionId=`, `CopyObject` from a versioned source, object-index reconcile against an EC bucket) failed with `open versioned object: ... no such file or directory` — the bytes live as shards, not a plain file. Adds `placementMetaForVersion` (reads the per-version meta, extracts the same `RingVersion`/`ECData`/`ECParity`/`NodeIDs` `PlacementMeta` that `headObjectMeta` builds) and wires the same `shardSvc → ResolvePlacement → getObjectECReaderAtShardKey` block. Non-EC and legacy objects fall through unchanged (`ResolvePlacement` returns `ErrNotEC`); a meta-read error here propagates rather than masking the real problem behind the plain-file `no such file`.
+
 ## [0.0.142.0] - 2026-05-11 — fix(cluster): ListAllObjects tolerates unreadable blobs (PITR snapshot resilience)
 
 - fix(cluster): `ClusterCoordinator.ListAllObjects` no longer aborts the whole listing when a single object's data file can't be opened. It opens each blob only to enrich ETag/Size/ContentType; on failure it now logs a warning and falls back to the version-listing metadata instead of returning an error. Previously one unreadable blob (e.g. `__grainfs_volumes/__vol/default/meta` mid-boot, or an EC-stored object with no plain-file fallback in `GetObjectVersion`) made `Manager.Create()` fail on every PITR auto-snapshot tick after the first — surfacing as a flaky `TestAutoSnapshot_CreatesSnapshotAutomatically` under load. A metadata snapshot must succeed even on a partially-degraded cluster.
