@@ -111,7 +111,17 @@ func (sm *raftStateMachine) Check(t *rapid.T) {
 	if err := checkStateMachineSafety(sm.obs.nodeApplied); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkEventualCommit(sm.actionHistory, sm.obs.nodeApplied); err != nil {
+
+	// maxCommitted is the highest commitIndex across all nodes, sampled now.
+	// This must NOT be derived from nodeApplied (applied entries lag commit —
+	// ProposeWait returns when the leader commits, not when followers apply).
+	var maxCommitted uint64
+	for _, n := range sm.cluster.Nodes {
+		if ci := n.CommittedIndex(); ci > maxCommitted {
+			maxCommitted = ci
+		}
+	}
+	if err := checkEventualCommit(sm.actionHistory, sm.obs.nodeApplied, maxCommitted); err != nil {
 		t.Fatal(err)
 	}
 }

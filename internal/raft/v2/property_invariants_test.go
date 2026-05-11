@@ -440,8 +440,13 @@ type actionRecord struct {
 // is a conditional invariant and most random sequences will not satisfy the
 // stability condition.
 //
+// maxCommitted is max(n.CommittedIndex()) sampled across all cluster nodes
+// just before this call. It must NOT be derived from nodeApplied (applied
+// entries lag behind commit — ProposeWait returns when the leader commits,
+// not when followers apply).
+//
 // K = 50 is the recommended stable-window size (as per PR 18 spec).
-func checkEventualCommit(history []actionRecord, nodeApplied map[string][]LogEntry) error {
+func checkEventualCommit(history []actionRecord, nodeApplied map[string][]LogEntry, maxCommitted uint64) error {
 	const K = 50
 	if len(history) < K {
 		return nil // insufficient history
@@ -459,16 +464,6 @@ func checkEventualCommit(history []actionRecord, nodeApplied map[string][]LogEnt
 	// Check that a leader existed at the start of the suffix.
 	if !suffix[0].leaderExisted {
 		return nil // no leader at suffix start; skip
-	}
-
-	// Compute the maximum committed index across all nodes.
-	var maxCommitted uint64
-	for _, entries := range nodeApplied {
-		for _, e := range entries {
-			if e.Index > maxCommitted {
-				maxCommitted = e.Index
-			}
-		}
 	}
 
 	// Every successful propose in the suffix must have committed.
@@ -500,7 +495,7 @@ func TestCheckEventualCommit_Violation(t *testing.T) {
 	nodeApplied := map[string][]LogEntry{
 		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
 	}
-	if err := checkEventualCommit(history, nodeApplied); err == nil {
+	if err := checkEventualCommit(history, nodeApplied, 10); err == nil {
 		t.Fatal("expected liveness violation, got nil")
 	}
 }
@@ -518,7 +513,7 @@ func TestCheckEventualCommit_SkipOnPartition(t *testing.T) {
 	nodeApplied := map[string][]LogEntry{
 		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
 	}
-	if err := checkEventualCommit(history, nodeApplied); err != nil {
+	if err := checkEventualCommit(history, nodeApplied, 10); err != nil {
 		t.Fatalf("expected skip on partition, got: %v", err)
 	}
 }
@@ -535,7 +530,7 @@ func TestCheckEventualCommit_SkipOnNoLeader(t *testing.T) {
 	nodeApplied := map[string][]LogEntry{
 		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
 	}
-	if err := checkEventualCommit(history, nodeApplied); err != nil {
+	if err := checkEventualCommit(history, nodeApplied, 10); err != nil {
 		t.Fatalf("expected skip on no-leader, got: %v", err)
 	}
 }
@@ -547,7 +542,7 @@ func TestCheckEventualCommit_SkipOnShortHistory(t *testing.T) {
 	nodeApplied := map[string][]LogEntry{
 		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
 	}
-	if err := checkEventualCommit(history, nodeApplied); err != nil {
+	if err := checkEventualCommit(history, nodeApplied, 10); err != nil {
 		t.Fatalf("expected skip on short history, got: %v", err)
 	}
 }
@@ -565,7 +560,7 @@ func TestCheckEventualCommit_Valid(t *testing.T) {
 		"a": {{Index: 5, Term: 1, Command: []byte("cmd-1")}},
 		"b": {{Index: 5, Term: 1, Command: []byte("cmd-1")}},
 	}
-	if err := checkEventualCommit(history, nodeApplied); err != nil {
+	if err := checkEventualCommit(history, nodeApplied, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
