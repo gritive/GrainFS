@@ -686,7 +686,7 @@ func (f *FSM) applyMigrationDone(data []byte) error {
 }
 
 // Snapshot serializes this group's metadata state for Raft snapshots. Keys in
-// the snapshot blob are GROUP-RELATIVE (the group prefix is stripped); RestoreV2
+// the snapshot blob are GROUP-RELATIVE (the group prefix is stripped); Restore
 // re-applies the prefix on write. For the empty keyspace the group prefix is nil,
 // so this is a whole-DB scan exactly as before.
 func (f *FSM) Snapshot() ([]byte, error) {
@@ -707,7 +707,7 @@ func (f *FSM) Snapshot() ([]byte, error) {
 	return marshalSnapshotState(state)
 }
 
-// dropAllKeys deletes every key in the underlying DB. Used by RestoreV2's
+// dropAllKeys deletes every key in the underlying DB. Used by Restore's
 // empty-keyspace branch (single-group / pre-shared mode), where a snapshot owns
 // the whole DB. The shared branch uses DropPrefix on the group prefix instead.
 func (f *FSM) dropAllKeys() error {
@@ -727,18 +727,13 @@ func (f *FSM) dropAllKeys() error {
 	})
 }
 
-// Restore satisfies raft.Snapshotter; it forwards to RestoreV2, which enforces
-// the snapshot FormatVersion. SnapshotManager.Restore supplies the store-meta
-// record loaded alongside the snapshot payload.
+// Restore replaces this group's metadata state from a snapshot, refusing any
+// snapshot whose store-meta record does not carry FormatVersion 2 (satisfies
+// raft.Snapshotter; SnapshotManager.Restore supplies the store-meta record
+// loaded alongside the payload). Snapshot blob keys must be GROUP-RELATIVE; the
+// group prefix is applied on write. Validation runs BEFORE any mutation so a
+// rejected restore leaves existing state intact.
 func (f *FSM) Restore(meta raft.SnapshotMeta, data []byte) error {
-	return f.RestoreV2(meta, data)
-}
-
-// RestoreV2 replaces this group's metadata state from a snapshot, refusing any
-// snapshot whose store-meta record does not carry FormatVersion 2. Snapshot blob
-// keys must be GROUP-RELATIVE; the group prefix is applied on write. Validation
-// runs BEFORE any mutation so a rejected restore leaves existing state intact.
-func (f *FSM) RestoreV2(meta raft.SnapshotMeta, data []byte) error {
 	if meta.FormatVersion != raft.FSMSnapshotFormatVersion {
 		return fmt.Errorf("FSM.Restore: unsupported snapshot FormatVersion %d (want %d)", meta.FormatVersion, raft.FSMSnapshotFormatVersion)
 	}

@@ -9,7 +9,7 @@ import (
 
 // FSMSnapshotFormatVersion is the format version stamped into every snapshot's
 // store-meta record (C2 P3). FSM implementations that care (see
-// cluster.FSM.RestoreV2) refuse a restore whose meta carries any other value.
+// cluster.FSM.Restore) refuse a restore whose meta carries any other value.
 const FSMSnapshotFormatVersion uint8 = 2
 
 // Snapshotter creates and restores state machine snapshots. Restore receives the

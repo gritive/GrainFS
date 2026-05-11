@@ -43,7 +43,7 @@ func newStateKeyspace(groupID string) (*stateKeyspace, error) {
 	return &stateKeyspace{prefix: p}, nil
 }
 
-// isShared reports a non-empty group prefix; used by FSM.RestoreV2 to choose DropPrefix vs whole-DB delete.
+// isShared reports a non-empty group prefix; used by FSM.Restore to choose DropPrefix vs whole-DB delete.
 func (ks *stateKeyspace) isShared() bool { return len(ks.prefix) > 0 }
 
 // Key returns prefix||raw. Use for point Get/Set/Delete.

@@ -36,7 +36,7 @@ type Snapshot struct {
 	// FormatVersion identifies the FSM snapshot-payload encoding (C2 P3).
 	// 0 = legacy whole-DB FSM snapshot (pre-shared-state-DB); written by
 	// binaries before this field existed and decoded as the zero value.
-	// 2 = group-prefix-scoped snapshot with group-RELATIVE keys. FSM.RestoreV2
+	// 2 = group-prefix-scoped snapshot with group-RELATIVE keys. FSM.Restore
 	// refuses anything other than 2.
 	FormatVersion uint8
 }

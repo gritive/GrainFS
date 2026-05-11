@@ -161,7 +161,7 @@ func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 	// Restore into a fresh FSM and verify no stale placement rows appear.
 	freshDB := newTestDB(t)
 	freshFSM := NewFSM(freshDB, newStateKeyspaceEmpty())
-	require.NoError(t, freshFSM.RestoreV2(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
+	require.NoError(t, freshFSM.Restore(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
 
 	got, err := freshFSM.LookupShardPlacement("b", "k")
 	require.NoError(t, err)

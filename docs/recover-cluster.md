@@ -53,6 +53,12 @@ grainfs recover cluster verify \
 - Snapshots captured during joint consensus are refused unless the operator
   explicitly reruns `plan`/`execute` with `--strip-joint-state` to recover as a
   clean single-node cluster.
+- `execute` requires the source data dir's last FSM snapshot to be
+  `format_version == 2` — i.e. written by a binary that includes the C2-P3
+  shared-FSM-state changes. A pre-C2-P3 source fails with
+  `FSM.Restore: unsupported snapshot FormatVersion 0 (want 2)`. To recover from
+  such a dir, first bring it up on a current binary so it produces a v2 snapshot,
+  stop it cleanly, then run `plan`/`execute` against the new data dir.
 - Active recovered snapshot membership is rewritten to exactly one voter: the
   new node ID. Original membership is preserved in
   `recovery/recovercluster.json`.

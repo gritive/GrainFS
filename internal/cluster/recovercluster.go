@@ -156,7 +156,7 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 		return fmt.Errorf("open target meta db: %w", err)
 	}
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	if err := fsm.RestoreV2(raft.SnapshotMeta{Index: snap.Index, Term: snap.Term, FormatVersion: snap.FormatVersion}, snap.Data); err != nil {
+	if err := fsm.Restore(raft.SnapshotMeta{Index: snap.Index, Term: snap.Term, FormatVersion: snap.FormatVersion}, snap.Data); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("restore FSM snapshot: %w", err)
 	}

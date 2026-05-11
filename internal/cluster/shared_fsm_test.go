@@ -228,7 +228,7 @@ func TestSharedFSM_RestoreReplacesOnlyOwnGroup(t *testing.T) {
 		"obj:bucket/new-A": []byte("new-A-payload"),
 	})
 	require.NoError(t, err)
-	require.NoError(t, fA.RestoreV2(raft.SnapshotMeta{FormatVersion: v2Format}, blob))
+	require.NoError(t, fA.Restore(raft.SnapshotMeta{FormatVersion: v2Format}, blob))
 
 	assert.False(t, fsmHasKey(t, fA, "obj:bucket/old-A"), "old-A must be gone after restore")
 	assert.True(t, fsmHasKey(t, fA, "obj:bucket/new-A"), "new-A must be present after restore")
@@ -248,7 +248,7 @@ func TestSharedFSM_RestoreRejectsWrongFormatVersion(t *testing.T) {
 	blob, err := fA.Snapshot()
 	require.NoError(t, err)
 
-	err = fA.RestoreV2(raft.SnapshotMeta{FormatVersion: 1}, blob)
+	err = fA.Restore(raft.SnapshotMeta{FormatVersion: 1}, blob)
 	require.Error(t, err)
 	assert.True(t, fsmHasKey(t, fA, "obj:bucket/objA"), "pre-existing state must be untouched on rejected restore")
 }
@@ -267,12 +267,12 @@ func TestSharedFSM_RestoreRejectsAlreadyPrefixedKeys(t *testing.T) {
 		string(ksA.Key([]byte("obj:b/z"))): []byte("z"),
 	})
 	require.NoError(t, err)
-	err = fA.RestoreV2(raft.SnapshotMeta{FormatVersion: v2Format}, blob)
+	err = fA.Restore(raft.SnapshotMeta{FormatVersion: v2Format}, blob)
 	require.Error(t, err)
 	assert.True(t, fsmHasKey(t, fA, "obj:bucket/objA"), "pre-existing state must be untouched on rejected restore")
 }
 
-func TestFSM_RestoreV2_EmptyKeyspace_WholeDBReplace(t *testing.T) {
+func TestFSM_Restore_EmptyKeyspace_WholeDBReplace(t *testing.T) {
 	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
@@ -285,7 +285,7 @@ func TestFSM_RestoreV2_EmptyKeyspace_WholeDBReplace(t *testing.T) {
 		"obj:bucket/new": []byte("new-payload"),
 	})
 	require.NoError(t, err)
-	require.NoError(t, f.RestoreV2(raft.SnapshotMeta{FormatVersion: v2Format}, blob))
+	require.NoError(t, f.Restore(raft.SnapshotMeta{FormatVersion: v2Format}, blob))
 
 	assert.False(t, fsmHasKey(t, f, "obj:bucket/old"), "old key must be gone (whole-DB drop)")
 	// Empty keyspace ⇒ raw key, no prefix added.
