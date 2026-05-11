@@ -876,63 +876,11 @@ func (m *Manager) deleteSnapshotUnlocked(name, snapID string) error {
 func (m *Manager) Rollback(name, snapID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if _, err := m.getVolUnlocked(name); err != nil {
+	vol, err := m.getVolUnlocked(name)
+	if err != nil {
 		return err
 	}
-
-	// Load snapshot map
-	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))
-	if err != nil {
-		return fmt.Errorf("snapshot %q not found for volume %q", snapID, name)
-	}
-	snapMap, err := parseLiveMap(rc)
-	rc.Close()
-	if err != nil {
-		return fmt.Errorf("parse snapshot map: %w", err)
-	}
-
-	// Load current live_map (create empty if needed)
-	liveMap, err := m.getLiveMapUnlocked(name)
-	if err != nil {
-		return fmt.Errorf("load live_map: %w", err)
-	}
-	if liveMap == nil {
-		liveMap = make(map[int64]string)
-		m.liveMaps[name] = liveMap
-	}
-
-	copier, hasCopier := m.backend.(storage.Copier)
-
-	// For each block in snapshot, copy back into live namespace with a new versioned key
-	for blkNum, snapKey := range snapMap {
-		newKey := cowBlockKey(name, blkNum)
-		if hasCopier {
-			if _, err := copier.CopyObject(volumeBucketName, snapKey, volumeBucketName, newKey); err != nil {
-				return fmt.Errorf("rollback block %d: %w", blkNum, err)
-			}
-		} else {
-			if err := m.copyObjectFallback(volumeBucketName, snapKey, volumeBucketName, newKey); err != nil {
-				return fmt.Errorf("rollback block %d: %w", blkNum, err)
-			}
-		}
-
-		// Delete the old live physical object
-		if oldKey, ok := liveMap[blkNum]; ok && oldKey != "" {
-			m.backend.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
-		}
-		liveMap[blkNum] = newKey
-	}
-
-	// Also delete any live blocks NOT in the snapshot (they shouldn't be read after rollback)
-	for blkNum, oldKey := range liveMap {
-		if _, inSnap := snapMap[blkNum]; !inSnap {
-			m.backend.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
-			delete(liveMap, blkNum)
-		}
-	}
-
-	return m.persistLiveMapUnlocked(name, liveMap)
+	return m.snapStore.Rollback(context.Background(), vol, snapID)
 }
 
 // Clone creates a new volume that initially shares blocks with the source volume.
