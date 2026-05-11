@@ -1,0 +1,45 @@
+# v1 → v2 Test Corpus Port Matrix (PR 19)
+
+| v1 file | outcome | v2 coverage / rationale |
+|---|---|---|
+| batcher_test.go | SKIPPED | v2 uses actor pattern; batching is implicit in the actor event loop with no separate Batcher type. 8 tests cover v1-only Batcher internals (HighLoad, LowLoad, NotLeader, Shutdown, ReplicationTrigger, IdleDoesNotAllocateTimers, AdaptiveMetrics_Transition, PersistPanic). |
+| group_id_test.go | SKIPPED | v2 is single-group only; there is no ValidateGroupID API or multi-group mux in v2. TestValidateGroupID tests a v1-only helper. |
+| group_transport_mux_meta_test.go | SKIPPED | v2 has no GroupRaftQUICMux / meta-node concept; multi-group multiplexing is a v1 transport layer that does not exist in v2. 11 tests cover v1-only mux dispatch table. |
+| group_transport_mux_test.go | SKIPPED | v2 has no GroupRaftQUICMux; mux dispatch, coalescer wiring, and fallback logic are v1-only. 3 tests cover v1-only GroupRaftMux. |
+| heartbeat_coalescer_test.go | SKIPPED | v2 has no HeartbeatCoalescer; v2 sends heartbeats as ordinary AppendEntries RPCs via the actor loop. 9 tests cover v1-only coalescer internals. |
+| integration_test.go | GREEN-EXISTING | Election + replication scenarios covered by v2/equivalence_test.go (TestEquivalence_ThreeVoterElection, TestEquivalence_ThreeVoterPropose, TestEquivalence_DivergentLogConverges) and v2/election_test.go. QUIC-specific tests use memTransport equivalent in v2. Learner/managed-learner tests (TestAddVoter_E2E_*, TestManagedLearner_*, TestChangeMembership_ReturnsErrJointAborted) are SKIPPED-within-file: v2 AddLearner / managed-learner features are not yet implemented (PR 22+ scope). TestRestoreFromStore_LegacySnapshot is SKIPPED-within-file: v1-wire-format-specific. |
+| joint_test.go | GREEN-EXISTING | Core joint-config behaviors (roundtrip encode/decode, dual-quorum math, enter/leave apply, concurrent rejection, E2E remove) are covered by v2/confchange_test.go (TestConfChange_RoundtripJoint, TestEffectiveConfig_QuorumJointRequiresBoth, TestApplyConfigEntry_Joint, TestReconstructConfig_*) and v2/membership_test.go (TestMembership_AddVoterHappyPath, RemoveVoterHappyPath, TruncateAfterRevertsConfig, SelfRemovedLeaderStepsDown, ColdOnlyVoterCanElect). ForceAbortJoint, JointAbortTimeout, ProposeJointConfChangeWait, chaos tests, and joint result-channel drain tests are SKIPPED-within-file: they test v1-specific joint-state-machine internals (abort timer, dual-phase wait channels) that do not exist in v2. Chaos tests (TestJoint_Chaos_*) deferred to PR 20. |
+| membership_test.go | GREEN-EXISTING | Covered by v2/membership_test.go (AddVoter happy path, duplicate rejection, concurrent rejection, truncate-reverts, install-snapshot resets, self-removal step-down) and v2/confchange_test.go (ReconstructConfig, ApplyConfigEntry). v1-specific tests (ManagedByJoint payload, promoteCh, JointOpAbort managed-learner tracking, RebuildConfigFromLog abort-chain scenarios) are SKIPPED-within-file: they test v1-specific internal state not present in v2. |
+| membership_view_test.go | SKIPPED | Tests a v1-specific `membershipView` atomic snapshot type that does not exist in v2. v2 derives membership state from EffectiveConfig (confchange.go) on each actor tick without a separately published view struct. The covered behaviors (quorum checks, publish-on-apply, hot-reads without alloc) are exercised at the behavioral level via v2/confchange_test.go and v2/membership_test.go. |
+| persistence_test.go | GREEN-PORTED | Persistence-across-restart behavior covered by v2/recovery_test.go. After-close RPC safety (TestNode_RequestVoteAfterCloseDoesNotPersist, TestNode_AppendEntriesAfterCloseDoesNotPersist, TestNode_InstallSnapshotAfterCloseDoesNotPersist) have no v2 equivalent; ported to v2/ported_persistence_test.go. v1 white-box field access (node.mu / node.votedFor / node.log) is not ported — behavior verified via public API in recovery_test.go. |
+| propose_wait_test.go | GREEN-EXISTING | Covered by v2/node_test.go (TestSingleNode_ProposeWait) and v2/equivalence_test.go (TestEquivalence_ProposeWaitReturnsIndex). NotLeader path covered by v2/replication_test.go (TestReplication_LeaderStepDownReleasesWaiters). Context-cancelled path covered by v2/node_test.go structure. |
+| quic_rpc_codec_test.go | SKIPPED | v2 uses memTransport for tests; there is no FlatBuffers wire codec in v2. rpc.go in v2 dispatches via Go function calls. Codec correctness is a v1 concern only. |
+| raft_conn_test.go | SKIPPED | Tests v1's RaftConn/QUIC stream-pool abstraction, which does not exist in v2. v2 replaces this with direct actor dispatch via memTransport (rpc_test.go). |
+| raft_test.go | GREEN-PORTED | Core election, vote-granting, AppendEntries, quorum, and confchange behaviors covered by v2/election_test.go, v2/rpc_test.go, v2/replication_test.go, and v2/confchange_test.go. Gaps ported to v2/ported_raft_test.go: Bootstrap auto-detect of existing store data, Node.Close idempotency, Node.Stop waits for goroutines. SKIPPED-within-file: Observer (v2 has no RegisterObserver API), ElectionPriority (group-scoped keys; v2 is single-group), LogGC (Config field accepted but not yet wired in v2 actor), TrailingLogs-CompactLog (v1-internal CompactLog method; v2 uses CreateSnapshot/CompactBefore). |
+| readindex_test.go | GREEN-EXISTING | Covered by v2/readindex_test.go (TestReadIndex_NotLeader, TestReadIndex_SingleVoter, TestReadIndex_MultiVoter_LeaderConfirmation, TestReadIndex_MultiVoter_StepDownDrains, TestApplyPipeline_DecoupledFromActor, TestApplyPipeline_OrderingUnderSlowFSM). WaitApplied tests (fast path, blocks, context, stopped) map to v2 ApplyCh ordering and step-down tests. |
+| replication_test.go | GREEN-EXISTING | Fully covered by v2/replication_test.go (TestReplication_BasicHappyPath covers ProposeAndReplicate + CommitIndex_Advances + ApplyCh_DeliversCommitted; TestReplication_ConflictHint* covers LogConsistencyAfterLeaderChange; TestReplication_LeaderStepDownReleasesWaiters covers follower rejection). |
+| replicator_bench_test.go | SKIPPED | Benchmark-only file; v2 has no PeerReplicator type. Perf benchmarks scoped to PR 21. |
+| replicator_test.go | SKIPPED | Tests v1's PeerReplicator, InflightTracker, and replication-evidence structs, which are v1-specific. v2 manages per-peer replication state inline in the actor loop without a separate Replicator type. |
+| snapshot_test.go | GREEN-EXISTING | SnapshotManager (v1-specific class wrapping trigger/threshold/consecutive logic) does not exist in v2; those tests are SKIPPED-within-file. LeaderTransfer tests are SKIPPED-within-file (v2 TransferLeadership returns ErrNotImplemented). ManagedLearners-in-snapshots tests are SKIPPED-within-file (v2 has no managed learners). Core snapshot behaviors covered by v2/snapshot_test.go (TestSnapshot_CreateAndCompact, TestSnapshot_RecoveryFromBadger, TestInstallSnapshot_FollowerInstalls, TestInstallSnapshot_StaleTermRejected, TestInstallSnapshot_LeaderSendsWhenFollowerBehind, etc.). |
+| store_bench_test.go | SKIPPED | Benchmark-only file; perf benchmarks scoped to PR 21. |
+| store_test.go | GREEN-EXISTING | Covered by v2/logstore_test.go (AppendAndRead, GetEntries, LastIndex, TruncateAfter, TruncateThenAppend, entry-out-of-range, CompactBefore/Idempotent/BeyondLast), v2/logstore_badger_test.go (PersistsAcrossReopen, TruncateAfterPersistsToDisk, LargeChunkedDeletes, RejectsCorruptHighestEntry), and v2/stablestore_test.go (RoundTrip, RoundTripEmptyVotedFor, OverwritePreservesLatest, PersistsAcrossReopen). SharedLogStore (v1 multi-group namespace) is SKIPPED-within-file: v2 is single-group. ManagedMode tests are SKIPPED-within-file: v2 Config field accepted but not yet fully wired. |
+
+## Summary
+
+**File-level outcomes (21 total):**
+- GREEN-EXISTING: 11 (integration, joint, membership, persistence†, propose_wait, raft†, readindex, replication, snapshot, store, store — wait, 11 unique)
+- GREEN-PORTED: 2 (persistence_test.go → ported_persistence_test.go; raft_test.go → ported_raft_test.go)
+- SKIPPED: 8 (batcher, group_id, group_transport_mux, group_transport_mux_meta, heartbeat_coalescer, membership_view, quic_rpc_codec, raft_conn, replicator, replicator_bench, store_bench)
+
+**Recounted exactly:**
+
+| outcome | files |
+|---|---|
+| GREEN-EXISTING | integration, joint, membership, propose_wait, readindex, replication, snapshot, store (8) |
+| GREEN-PORTED | persistence, raft (2) |
+| SKIPPED | batcher, group_id, group_transport_mux, group_transport_mux_meta, heartbeat_coalescer, membership_view, quic_rpc_codec, raft_conn, replicator, replicator_bench, store_bench (11) |
+| V2-BUG | 0 |
+
+**Total: 8 + 2 + 11 = 21. GREEN total = 10 (8 existing + 2 ported). SKIPPED = 11. V2-BUG = 0.**
+
+> Note: Many GREEN-EXISTING files have specific test functions within them that are SKIPPED-within-file due to v1-specific APIs (LegacySnapshot format, SnapshotManager, Observer registration, managed learners, SharedLogStore, ElectionPriority group keys, ForceAbortJoint, JointAbortTimeout). The file-level outcome is GREEN because the dominant behavioral coverage exists in v2.
