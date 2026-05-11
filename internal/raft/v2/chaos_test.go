@@ -3,7 +3,7 @@ package raftv2
 // Chaos suite for raft/v2.
 //
 // TestChaos_Sustained runs a duration-bounded imperative chaos loop that
-// randomly interleaves eight fault injection actions against a 3-voter cluster:
+// randomly interleaves nine fault injection actions against a 3-voter cluster:
 //
 //  1. Propose          — submit a command to the current leader.
 //  2. StepDownLeader   — inject a higher-term RequestVote to force step-down.
@@ -13,6 +13,7 @@ package raftv2
 //  6. SetReorderDelay  — enable delivery delay up to 20ms.
 //  7. KillFollower     — stop a non-leader node's actor goroutine.
 //  8. RestartKilled    — restart a previously killed node from its BadgerDB stores.
+//  9. TransferLeader   — ask the leader to step down gracefully (Raft §3.10).
 //
 // All six Raft safety+liveness invariants (PR 17+18) are checked after every
 // action. The loop terminates when RAFT_CHAOS_DURATION elapses (default 30s for
@@ -375,6 +376,7 @@ const (
 	chaosSetReorderDelay
 	chaosKillFollower
 	chaosRestartKilled
+	chaosTransferLeader // TransferLeadership: leader steps down gracefully (Raft §3.10)
 )
 
 // chaosActionRecord captures what happened during one chaos loop action.
@@ -398,7 +400,7 @@ func checkEventualCommitChaos(history []chaosActionRecord, maxCommitted uint64) 
 
 	for _, ar := range suffix {
 		switch ar.kind {
-		case chaosPartition, chaosStepDown, chaosKillFollower, chaosSetDropRate, chaosSetReorderDelay:
+		case chaosPartition, chaosStepDown, chaosKillFollower, chaosSetDropRate, chaosSetReorderDelay, chaosTransferLeader:
 			return nil // not stable; skip
 		}
 	}
@@ -556,6 +558,18 @@ func TestChaos_Sustained(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 			return ar
 		},
+		// 9. TransferLeader — ask the current leader to step down gracefully
+		func() chaosActionRecord {
+			ar := chaosActionRecord{kind: chaosTransferLeader, leaderExisted: cc.leader() != nil}
+			leader := cc.leader()
+			if leader == nil {
+				return ar
+			}
+			// Errors are intentionally ignored: ErrNoPeers is valid for a
+			// cluster that is momentarily partitioned to a single voter.
+			leader.TransferLeadership() //nolint:errcheck
+			return ar
+		},
 	}
 
 	deadline := time.Now().Add(duration)
@@ -582,6 +596,7 @@ func TestChaos_Sustained(t *testing.T) {
 		chaosSetReorderDelay: "SetReorderDelay",
 		chaosKillFollower:    "KillFollower",
 		chaosRestartKilled:   "RestartKilled",
+		chaosTransferLeader:  "TransferLeader",
 	}
 	t.Logf("TestChaos_Sustained: %d actions in %s", actionCount, duration)
 	for k, name := range kindNames {

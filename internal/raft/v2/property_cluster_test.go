@@ -177,6 +177,13 @@ func (t *partitionTransport) SendInstallSnapshot(peer string, args *InstallSnaps
 	return t.inner.SendInstallSnapshot(peer, args)
 }
 
+func (t *partitionTransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	if err := t.chaosCheck(peer); err != nil {
+		return nil, err
+	}
+	return t.inner.SendTimeoutNow(peer, args)
+}
+
 // propertyCluster is a 3-voter cluster set up for property tests. It exposes
 // the partitionNet directly so state machine commands can call Partition/Heal.
 // ApplyCh from each node is drained by a per-node goroutine that forwards

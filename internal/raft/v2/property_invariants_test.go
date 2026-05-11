@@ -420,6 +420,7 @@ const (
 	actionStepDownLeader
 	actionPartition
 	actionHeal
+	actionTransferLeader // TransferLeadership: leader steps down; like StepDown, destabilises
 )
 
 // actionRecord captures what happened during one rapid action invocation.
@@ -456,7 +457,7 @@ func checkEventualCommit(history []actionRecord, maxCommitted uint64) error {
 
 	// Check that the suffix contains no destabilising actions.
 	for _, ar := range suffix {
-		if ar.kind == actionPartition || ar.kind == actionStepDownLeader {
+		if ar.kind == actionPartition || ar.kind == actionStepDownLeader || ar.kind == actionTransferLeader {
 			return nil // not stable; skip
 		}
 	}

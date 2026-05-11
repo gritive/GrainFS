@@ -298,6 +298,14 @@ func (b *v2TransportBridge) SendInstallSnapshot(_ string, _ *raftv2.InstallSnaps
 	return nil, raftv2.ErrNotImplemented
 }
 
+// SendTimeoutNow satisfies v2.Transport. The cluster package does not yet wire
+// a dedicated TimeoutNow RPC; returning an error causes TransferLeadership to
+// degrade gracefully — the leader still steps down (Raft §3.10), and the
+// transfer target wins the next natural election instead of an immediate one.
+func (b *v2TransportBridge) SendTimeoutNow(_ string, _ *raftv2.TimeoutNowArgs) (*raftv2.TimeoutNowReply, error) {
+	return nil, raftv2.ErrNotImplemented
+}
+
 // --- No-op stubs ---
 
 // SetNoOpCommand is a no-op for v2. The actor emits no-op entries on leader

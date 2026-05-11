@@ -112,17 +112,17 @@ func TestRaftV2Membership_AddLearner_ReturnsErrNotImplemented(t *testing.T) {
 		"expected ErrNotImplemented, got: %v", err)
 }
 
-// TestRaftV2Membership_TransferLeadership_ReturnsErrNotImplemented verifies that
-// under v2, TransferLeadership surfaces ErrNotImplemented rather than a silent
-// nil-skip.
-func TestRaftV2Membership_TransferLeadership_ReturnsErrNotImplemented(t *testing.T) {
+// TestRaftV2Membership_TransferLeadership_PassesThroughToV2 verifies that
+// under v2, TransferLeadership on a single-voter leader returns ErrNoPeers
+// (no peer to transfer to), proving the call reaches v2 code.
+func TestRaftV2Membership_TransferLeadership_PassesThroughToV2(t *testing.T) {
 	node := newV2LeaderForMembership(t)
 
 	err := node.TransferLeadership()
-	require.Error(t, err, "TransferLeadership must return an error under v2")
+	require.Error(t, err, "TransferLeadership on single-voter leader must return an error")
 	assert.True(t,
-		errors.Is(err, raftv2.ErrNotImplemented),
-		"expected ErrNotImplemented, got: %v", err)
+		errors.Is(err, raftv2.ErrNoPeers),
+		"expected ErrNoPeers, got: %v", err)
 }
 
 // TestRaftV2Membership_PromoteToVoter_ReturnsErrNotImplemented verifies that

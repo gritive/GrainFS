@@ -23,6 +23,10 @@ type Transport interface {
 	// PR 15 sends the entire snapshot in one call; chunked transmission is
 	// out of scope.
 	SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error)
+	// SendTimeoutNow triggers an immediate election on the transfer target
+	// (Raft §3.10). The leader calls this after selecting the most-caught-up
+	// peer and steps down regardless of whether the RPC succeeds.
+	SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error)
 }
 
 // memNetwork is a process-local Transport substrate for tests. It dispatches
@@ -90,4 +94,12 @@ func (t *memTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArg
 		return nil, ErrUnknownPeer
 	}
 	return dst.HandleInstallSnapshot(args), nil
+}
+
+func (t *memTransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	dst := t.net.lookup(peer)
+	if dst == nil {
+		return nil, ErrUnknownPeer
+	}
+	return dst.HandleTimeoutNow(args), nil
 }

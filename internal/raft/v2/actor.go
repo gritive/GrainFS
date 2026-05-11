@@ -118,6 +118,15 @@ type command struct {
 	ccID    string
 	ccAdd   bool
 	ccReply chan confChangeResult
+
+	// TimeoutNow inbound payload (kind == cmdHandleTimeoutNow). Sent by the
+	// leader to trigger an immediate election on the target (Raft §3.10).
+	tnArgs  *TimeoutNowArgs
+	tnReply chan *TimeoutNowReply
+
+	// TransferLeadership payload (kind == cmdTransferLeadership). tlReply
+	// delivers nil on success (or ErrNoPeers / ErrNotLeader on rejection).
+	tlReply chan error
 }
 
 type cmdKind int
@@ -133,6 +142,8 @@ const (
 	cmdInstallSnapshot
 	cmdInstallSnapshotReply
 	cmdConfChange
+	cmdHandleTimeoutNow   // inbound TimeoutNow from leader (Raft §3.10)
+	cmdTransferLeadership // local call to initiate leadership transfer
 )
 
 // proposalResult is delivered to ProposeWait callers when their entry commits
@@ -267,6 +278,10 @@ func (n *Node) handle(cmd command) {
 		n.handleInstallSnapshotReply(cmd)
 	case cmdConfChange:
 		n.handleConfChange(cmd)
+	case cmdHandleTimeoutNow:
+		n.handleTimeoutNow(cmd)
+	case cmdTransferLeadership:
+		n.handleTransferLeadership(cmd)
 	}
 }
 
@@ -907,6 +922,102 @@ func (n *Node) becomeFollower(term uint64) {
 	n.stepDownToFollower(term)
 	n.publish()
 	n.resetElectionTimer()
+}
+
+// handleTimeoutNow processes an inbound TimeoutNow RPC (Raft §3.10). Called
+// from the actor goroutine only. The receiver must be a Follower — if it is
+// already a Candidate or Leader it ignores the request (another election is
+// already in progress or we are the leader). On acceptance the node calls
+// becomeCandidate() which bumps the term and fires RequestVote immediately,
+// bypassing the election timer.
+func (n *Node) handleTimeoutNow(cmd command) {
+	args := cmd.tnArgs
+	reply := &TimeoutNowReply{Term: n.st.currentTerm}
+
+	// Reject stale-term requests immediately (Raft §3.10). A leader whose term
+	// is lower than ours is outdated; do not start an election on its behalf.
+	if args.Term < n.st.currentTerm {
+		cmd.tnReply <- reply // Success=false, Term=currentTerm
+		return
+	}
+
+	// Step down first if the request carries a higher term.
+	if args.Term > n.st.currentTerm {
+		n.stepDownToFollower(args.Term)
+	}
+
+	// Only Followers accept TimeoutNow — Candidates are already running an
+	// election, Leaders should not be getting this.
+	if n.st.state != Follower {
+		// Reply with our current term so the sender can step down if stale.
+		reply.Term = n.st.currentTerm
+		cmd.tnReply <- reply
+		return
+	}
+
+	reply.Success = true
+	reply.Term = n.st.currentTerm
+	cmd.tnReply <- reply
+
+	// Trigger immediate election. becomeCandidate bumps term, votes for self,
+	// publishes, resets the election timer, and dispatches RequestVote to peers.
+	n.becomeCandidate()
+}
+
+// handleTransferLeadership processes a local TransferLeadership() call (Raft
+// §3.10). Called from the actor goroutine only. The algorithm:
+//  1. Reject if not Leader (ErrNotLeader).
+//  2. Reject if no peers in the effective config (ErrNoPeers).
+//  3. Pick the peer with the highest matchIndex; tie-break by lexicographically
+//     lowest ID for determinism.
+//  4. Send TimeoutNow to the chosen target in a goroutine (best-effort — the
+//     leader steps down even if the RPC fails).
+//  5. Step down to Follower at the current term so our heartbeat ticker stops
+//     and we no longer claim leadership.
+func (n *Node) handleTransferLeadership(cmd command) {
+	if n.st.state != Leader {
+		cmd.tlReply <- ErrNotLeader
+		return
+	}
+
+	peers := n.st.peerSet()
+	if len(peers) == 0 {
+		cmd.tlReply <- ErrNoPeers
+		return
+	}
+
+	// Pick the most-caught-up peer. Tie-break on lexicographically lowest ID
+	// for determinism.
+	target := peers[0]
+	for _, p := range peers[1:] {
+		mi := n.st.matchIndex[p]
+		mt := n.st.matchIndex[target]
+		if mi > mt || (mi == mt && p < target) {
+			target = p
+		}
+	}
+
+	// Send TimeoutNow best-effort; step down regardless.
+	tnArgs := &TimeoutNowArgs{
+		Term:   n.st.currentTerm,
+		Leader: n.st.id,
+	}
+	transport := n.loadTransport()
+	go func() {
+		if transport == nil {
+			return
+		}
+		// Errors are intentionally ignored: the leader steps down regardless
+		// (Raft §3.10). A failed TimeoutNow means the target wins the next
+		// natural election rather than an immediate one.
+		transport.SendTimeoutNow(target, tnArgs) //nolint:errcheck
+	}()
+
+	// Step down immediately — we are no longer the leader regardless of
+	// whether the target won its election.
+	n.becomeFollower(n.st.currentTerm)
+
+	cmd.tlReply <- nil
 }
 
 // broadcastHeartbeat dispatches an outbound RPC (AE or InstallSnapshot) to

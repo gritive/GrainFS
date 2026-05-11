@@ -518,6 +518,45 @@ func (n *Node) AddLearner(id, addr string) error { return ErrNotImplemented }
 // (configuration changes via joint consensus).
 func (n *Node) PromoteToVoter(id string) error { return ErrNotImplemented }
 
-// TransferLeadership is a stub for v1 API parity. Real implementation lands
-// in M2 (configuration changes via joint consensus).
-func (n *Node) TransferLeadership() error { return ErrNotImplemented }
+// HandleTimeoutNow processes an incoming TimeoutNow RPC from the current leader
+// (Raft §3.10). Safe to call from any goroutine; routes through the actor and
+// waits synchronously for the reply. If the node is Stopped, returns a
+// zero-value reply (Success=false) rather than blocking.
+func (n *Node) HandleTimeoutNow(args *TimeoutNowArgs) *TimeoutNowReply {
+	reply := make(chan *TimeoutNowReply, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdHandleTimeoutNow, tnArgs: args, tnReply: reply}:
+	case <-n.stopCh:
+		return &TimeoutNowReply{Term: n.Term()}
+	}
+	select {
+	case r := <-reply:
+		return r
+	case <-n.stopCh:
+		return &TimeoutNowReply{Term: n.Term()}
+	}
+}
+
+// TransferLeadership initiates a graceful leadership transfer per Raft §3.10.
+// It selects the most-caught-up peer (tie-break: lowest ID), sends it a
+// TimeoutNow RPC to trigger an immediate election, and then steps down to
+// Follower regardless of whether the RPC succeeded. Callers receive nil when
+// the step-down is complete; the actual leader election happens asynchronously.
+//
+// Returns ErrNotLeader if this node is not the current leader, ErrNoPeers if
+// the cluster has no peer voters (single-voter cluster), or ErrNodeStopped if
+// the node has been shut down.
+func (n *Node) TransferLeadership() error {
+	reply := make(chan error, 1)
+	select {
+	case n.cmdCh <- command{kind: cmdTransferLeadership, tlReply: reply}:
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+}
