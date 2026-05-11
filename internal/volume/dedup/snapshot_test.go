@@ -293,6 +293,99 @@ func TestSnapshotCloneIncRefsAllSrcBlocks(t *testing.T) {
 	require.Equal(t, int32(2), readRefcount(t, idx, "kb"))
 }
 
+func TestSnapshotRecoverInProgress(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+	var h [32]byte
+	h[0] = 1
+	_, err := idx.WriteBlock("v", 0, h, "k0")
+	require.NoError(t, err)
+
+	require.NoError(t, idx.SnapshotBegin("v", "begun"))
+	require.NoError(t, idx.SnapshotAppendChunk("v", "begun", []SnapshotBlockEntry{{0, "k0"}}))
+	// simulate crash: no Commit / no Abort.
+
+	inProg, err := idx.SnapshotListInProgress()
+	require.NoError(t, err)
+	require.Len(t, inProg, 1)
+	require.Equal(t, "v", inProg[0].Vol)
+	require.Equal(t, "begun", inProg[0].SnapID)
+
+	toDel, err := idx.SnapshotAbort("v", "begun")
+	require.NoError(t, err)
+	require.Empty(t, toDel)
+	require.Equal(t, int32(1), readRefcount(t, idx, "k0"))
+	// state entry gone
+	inProg, err = idx.SnapshotListInProgress()
+	require.NoError(t, err)
+	require.Empty(t, inProg)
+}
+
+func TestSnapshotListPendingRollbacksDiscoversMarkers(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+
+	// No markers yet.
+	got, err := idx.SnapshotListPendingRollbacks()
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	// Inject stuck rollback markers (simulate crash mid-Rollback).
+	require.NoError(t, idx.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(rollbackStateKey("v1", "s1"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(rollbackStateKey("v2", "s7"), []byte{1})
+	}))
+
+	got, err = idx.SnapshotListPendingRollbacks()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []struct{ Vol, SnapID string }{
+		{"v1", "s1"}, {"v2", "s7"},
+	}, got)
+
+	// After SnapshotRollback completes for v1/s1, marker is gone.
+	// (We can't run real Rollback here without a committed snapshot;
+	// simulate by deleting the marker.)
+	require.NoError(t, idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(rollbackStateKey("v1", "s1"))
+	}))
+
+	got, err = idx.SnapshotListPendingRollbacks()
+	require.NoError(t, err)
+	require.Equal(t, []struct{ Vol, SnapID string }{{"v2", "s7"}}, got)
+}
+
+func TestSnapshotListPendingClonesDiscoversMarkers(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+
+	got, err := idx.SnapshotListPendingClones()
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	require.NoError(t, idx.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(cloneStateKey("dst1"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(cloneStateKey("dst2"), []byte{1})
+	}))
+
+	got, err = idx.SnapshotListPendingClones()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"dst1", "dst2"}, got)
+
+	// After a successful SnapshotClone, the marker is cleared.
+	// Verify by running real Clone (which clears its own marker on success).
+	var h [32]byte
+	h[0] = 1
+	_, err = idx.WriteBlock("src", 0, h, "k0")
+	require.NoError(t, err)
+	require.NoError(t, idx.SnapshotClone("src", "fresh-dst"))
+
+	// fresh-dst should NOT appear as pending.
+	got, err = idx.SnapshotListPendingClones()
+	require.NoError(t, err)
+	require.NotContains(t, got, "fresh-dst")
+}
+
 // R6: invariant test
 // TestWriteBlockDoesNotDeleteSnapshotPinnedCanonical asserts the load-bearing
 // invariant of the (α) refcount-shared design: when a snapshot holds refcount
