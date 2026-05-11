@@ -214,6 +214,18 @@ func (c *ClusterCoordinator) rebuild() {
 	c.localExec = NewLocalExecution(dataGroupManagerLocalBackend{m: c.groups})
 }
 
+// routeReadOrBucket picks RouteObjectRead when an object index is configured
+// (production wiring), and falls back to RouteBucket when not (test wiring
+// without an objectIndexProposer / objectIndexSource). Preserves the legacy
+// routeObjectLatest/Version dispatch behavior that callers depended on.
+func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
+	if c.indexWriter == nil {
+		return c.opRouter.RouteBucket(bucket)
+	}
+	target, _, err := c.opRouter.RouteObjectRead(bucket, key, versionID)
+	return target, err
+}
+
 func (c *ClusterCoordinator) matchSelfPeer(id string) bool {
 	_, ok := NewShardGroupPeerSet(ShardGroupEntry{PeerIDs: []string{id}}).MatchLocal(c.selfID, c.selfAliases...)
 	return ok
@@ -794,14 +806,13 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // response body bytes after the metadata reply; legacy tests can still use the
 // single-frame read_body fallback.
 func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	target, _, err := c.routeObjectLatest(bucket, key)
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return nil, nil, err
 	}
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return nil, nil, err
-		}
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return nil, nil, err
+	} else if gb != nil {
 		return gb.GetObject(ctx, bucket, key)
 	}
 	if c.forward == nil {
@@ -809,9 +820,9 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	}
 	args := buildGetObjectArgs(bucket, key)
 	if c.forward.readDialer != nil {
-		return c.forwardReadObject(ctx, target.peers, target.groupID, raftpb.ForwardOpGetObject, args)
+		return c.forwardReadObject(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObject, args)
 	}
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpGetObject, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObject, args)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -835,14 +846,13 @@ func (c *ClusterCoordinator) GetObjectVersion(
 	bucket, key, versionID string,
 ) (io.ReadCloser, *storage.Object, error) {
 	ctx := context.Background()
-	target, _, err := c.routeObjectVersion(bucket, key, versionID)
+	target, err := c.routeReadOrBucket(bucket, key, versionID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return nil, nil, err
-		}
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return nil, nil, err
+	} else if gb != nil {
 		return gb.GetObjectVersion(bucket, key, versionID)
 	}
 	if c.forward == nil {
@@ -850,9 +860,9 @@ func (c *ClusterCoordinator) GetObjectVersion(
 	}
 	args := buildGetObjectVersionArgs(bucket, key, versionID)
 	if c.forward.readDialer != nil {
-		return c.forwardReadObject(ctx, target.peers, target.groupID, raftpb.ForwardOpGetObjectVersion, args)
+		return c.forwardReadObject(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObjectVersion, args)
 	}
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpGetObjectVersion, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObjectVersion, args)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -911,21 +921,20 @@ func (r *forwardReadValidator) Close() error {
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, _, err := c.routeObjectLatest(bucket, key)
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return nil, err
 	}
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		return gb.HeadObject(ctx, bucket, key)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildHeadObjectArgs(bucket, key)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpHeadObject, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpHeadObject, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1335,14 +1344,13 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, _, err := c.routeObjectLatest(bucket, key)
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return 0, err
 	}
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return 0, err
-		}
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return 0, err
+	} else if gb != nil {
 		return gb.ReadAt(ctx, bucket, key, offset, buf)
 	}
 
@@ -1363,7 +1371,7 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 
 	args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
 	if int64(len(buf)) <= c.maxBody {
-		reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpReadAt, args)
+		reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpReadAt, args)
 		if err != nil {
 			return 0, err
 		}
@@ -1379,7 +1387,7 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		return n, nil
 	}
 
-	reply, body, err := c.forward.SendReadStream(ctx, target.peers, target.groupID, raftpb.ForwardOpReadAt, args)
+	reply, body, err := c.forward.SendReadStream(ctx, target.Peers, target.GroupID, raftpb.ForwardOpReadAt, args)
 	if err != nil {
 		return 0, err
 	}
