@@ -182,42 +182,32 @@ func TestBootOpenRaftLogStore_OpensAndAppendsManagedMode(t *testing.T) {
 	state.Cleanup()
 }
 
-// TestBootOpenSharedRaftLogDB_DisabledNoOp — when SharedBadgerEnabled=false,
-// phase is a no-op; sharedRaftLogDB stays nil; no cleanups added beyond
-// what previous phases registered.
-func TestBootOpenSharedRaftLogDB_DisabledNoOp(t *testing.T) {
+// TestBootOpenSharedRaftLogDB_Opens — happy path: a fresh dataDir gets a
+// shared raft-log BadgerDB at <dataDir>/shared-raft-log/ and the matching
+// startup decision.
+func TestBootOpenSharedRaftLogDB_Opens(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
 	require.NoError(t, bootValidateConfig(state))
 
-	beforeCleanups := len(state.cleanups)
 	require.NoError(t, bootOpenSharedRaftLogDB(state))
-	assert.Nil(t, state.sharedRaftLogDB)
-	assert.Equal(t, beforeCleanups, len(state.cleanups), "no-op must not register cleanups")
+	require.NotNil(t, state.sharedRaftLogDB)
+	last := state.startupDecisions[len(state.startupDecisions)-1]
+	assert.Equal(t, badgerrole.RoleSharedRaftLog, last.Role)
+
+	state.Cleanup()
 }
 
-// TestBootOpenSharedRaftLogDB_RefusesLegacyPerGroupRaftDirs — invariant from
-// run.go: enabling --shared-badger on a deployment that has legacy per-group
-// raft state would silently reset every group's term/votedFor/log. Phase
-// must refuse with a clear migration message.
-func TestBootOpenSharedRaftLogDB_RefusesLegacyPerGroupRaftDirs(t *testing.T) {
+// TestBootOpenSharedRaftLogDB_IgnoresLegacyPerGroupDir — a stale pre-P0b
+// <dataDir>/groups/*/raft/ directory must NOT block boot. The flag and the
+// refusal guard are gone; the phase opens the shared DB and moves on. If a
+// guard ever comes back by accident, this fails.
+func TestBootOpenSharedRaftLogDB_IgnoresLegacyPerGroupDir(t *testing.T) {
 	dir := t.TempDir()
 	legacyRaft := filepath.Join(dir, "groups", "group-0", "raft")
 	require.NoError(t, os.MkdirAll(legacyRaft, 0o755))
-	// Drop a fake badger MANIFEST so the dir looks populated.
 	require.NoError(t, os.WriteFile(filepath.Join(legacyRaft, "MANIFEST"), []byte{}, 0o644))
 
-	state := newBootState(Config{DataDir: dir, NodeID: "n1", SharedBadgerEnabled: true})
-	require.NoError(t, bootValidateConfig(state))
-
-	err := bootOpenSharedRaftLogDB(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "shared-badger=true incompatible with legacy per-group raft dir")
-}
-
-// TestBootOpenSharedRaftLogDB_OpensWhenEnabled — happy path: SharedBadger=true
-// on a fresh dataDir opens the shared DB at the expected path.
-func TestBootOpenSharedRaftLogDB_OpensWhenEnabled(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", SharedBadgerEnabled: true})
+	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
 	require.NoError(t, bootValidateConfig(state))
 
 	require.NoError(t, bootOpenSharedRaftLogDB(state))
