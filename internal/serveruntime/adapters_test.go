@@ -95,3 +95,15 @@ func (f *fakeMembershipNode) ChangeMembership(_ context.Context, _ []raft.Server
 	f.removes = append(f.removes, append([]string(nil), removes...))
 	return nil
 }
+
+// transferLeaderConformance mirrors the unexported server.clusterTransferLeader
+// interface — the transfer-leader handler type-asserts s.cluster against it, so
+// RaftClusterInfo must satisfy this method set or the endpoint 503s.
+type transferLeaderConformance interface {
+	TransferLeadership() error
+	IsLeader() bool
+}
+
+func TestRaftClusterInfo_SatisfiesTransferLeader(t *testing.T) {
+	var _ transferLeaderConformance = (*RaftClusterInfo)(nil)
+}
