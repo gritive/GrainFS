@@ -14,6 +14,10 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// restoreCrashAfterDrop, set only by tests, fires inside FSM.Restore right after DropPrefix
+// and before the re-write — simulates a process crash mid-Restore.
+var restoreCrashAfterDrop func()
+
 // FSM applies committed Raft log entries to BadgerDB metadata store.
 type FSM struct {
 	db   *badger.DB
@@ -760,6 +764,9 @@ func (f *FSM) Restore(meta raft.SnapshotMeta, data []byte) error {
 		if err := f.dropAllKeys(); err != nil {
 			return fmt.Errorf("FSM.Restore: drop existing keys: %w", err)
 		}
+	}
+	if restoreCrashAfterDrop != nil {
+		restoreCrashAfterDrop()
 	}
 	// Re-encode keys with the group prefix on write.
 	return f.db.Update(func(txn *badger.Txn) error {
