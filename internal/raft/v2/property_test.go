@@ -200,6 +200,24 @@ func (sm *raftStateMachine) Partition(t *rapid.T) {
 	sm.cluster.Net.Partition(peer)
 }
 
+// TransferLeader calls TransferLeadership on the current leader, if one exists.
+// The leader steps down regardless of whether the TimeoutNow RPC succeeds, so
+// this is a destabilising action: it triggers a new election. Errors are
+// silently ignored — any error (ErrNotLeader, ErrNoPeers, ErrNodeStopped) is
+// valid and not a Raft safety violation.
+func (sm *raftStateMachine) TransferLeader(t *rapid.T) {
+	leader := sm.cluster.leader()
+	sm.actionHistory = append(sm.actionHistory, actionRecord{
+		kind:          actionTransferLeader,
+		leaderExisted: leader != nil,
+	})
+	if leader == nil {
+		return
+	}
+	// Errors are intentionally ignored; the invariant checks fire in Check().
+	leader.TransferLeadership() //nolint:errcheck
+}
+
 // Heal removes all partitions, restoring full connectivity.
 func (sm *raftStateMachine) Heal(t *rapid.T) {
 	leaderExisted := sm.cluster.leader() != nil

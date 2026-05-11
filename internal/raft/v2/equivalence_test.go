@@ -547,6 +547,17 @@ func (t *v2HarnessTransport) SendInstallSnapshot(peer string, args *v2.InstallSn
 	return dst.HandleInstallSnapshot(args), nil
 }
 
+func (t *v2HarnessTransport) SendTimeoutNow(peer string, args *v2.TimeoutNowArgs) (*v2.TimeoutNowReply, error) {
+	if !t.net.shouldDeliver(t.self, peer) {
+		return nil, v2.ErrUnknownPeer
+	}
+	dst := t.net.lookup(peer)
+	if dst == nil {
+		return nil, v2.ErrUnknownPeer
+	}
+	return dst.HandleTimeoutNow(args), nil
+}
+
 // buildV2Cluster wires N v2 Nodes through v2HarnessNetwork with the same
 // asymmetric election-timeout setup as buildV1Cluster.
 func buildV2Cluster(t *testing.T, ids []string, fastID string) []*v2.Node {

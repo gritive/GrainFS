@@ -3784,11 +3784,22 @@ func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, k
 // HeadObjectVersion returns metadata for a specific version. Returns
 // storage.ErrObjectNotFound if the version doesn't exist or is a delete marker.
 func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
+	obj, _, err := b.headObjectMetaV(bucket, key, versionID)
+	return obj, err
+}
+
+// headObjectMetaV reads a specific version's metadata and its EC placement
+// fields in one transaction. Returns storage.ErrObjectNotFound for a missing
+// version and storage.ErrMethodNotAllowed for a delete-marker version (S3
+// semantics — the server handler maps that to a 405 with x-amz-delete-marker).
+// Parallels headObjectMeta, which does the same for the latest version.
+func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*storage.Object, PlacementMeta, error) {
 	ctx := context.Background()
 	if err := b.HeadBucket(ctx, bucket); err != nil {
-		return nil, err
+		return nil, PlacementMeta{}, err
 	}
 	var obj storage.Object
+	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
 		if err == badger.ErrKeyNotFound {
@@ -3803,10 +3814,6 @@ func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*
 				return err
 			}
 			if m.ETag == deleteMarkerETag {
-				// S3 semantics: HEAD on a delete marker version returns 405
-				// MethodNotAllowed. storage.ErrMethodNotAllowed is the sentinel
-				// the server handler maps to that response, including the
-				// x-amz-delete-marker: true header.
 				return storage.ErrMethodNotAllowed
 			}
 			obj = storage.Object{
@@ -3818,20 +3825,27 @@ func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*
 				VersionID:    versionID,
 				ACL:          m.ACL,
 			}
+			placement = PlacementMeta{
+				VersionID:   versionID,
+				RingVersion: RingVersion(m.RingVersion),
+				ECData:      m.ECData,
+				ECParity:    m.ECParity,
+				NodeIDs:     m.NodeIDs,
+			}
 			return nil
 		})
 	})
 	if err != nil {
-		return nil, err
+		return nil, PlacementMeta{}, err
 	}
-	return &obj, nil
+	return &obj, placement, nil
 }
 
 // GetObjectVersion reads a specific version's data. Returns
 // storage.ErrObjectNotFound if the version doesn't exist. For delete markers,
 // returns ErrMethodNotAllowed to mirror the erasure backend's behavior.
 func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
-	obj, err := b.HeadObjectVersion(bucket, key, versionID)
+	obj, meta, err := b.headObjectMetaV(bucket, key, versionID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3842,6 +3856,23 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
 		return nil, nil, objectQuarantinedError(bucket, key, q)
+	}
+	// EC path: reconstruct from shards when the bucket is erasure-coded.
+	// Mirrors GetObject — versioned objects use shardKey = key+"/"+versionID,
+	// which ResolvePlacement derives from PlacementMeta.VersionID. Non-EC and
+	// legacy objects fall through to the plain-file path (ResolvePlacement → ErrNotEC).
+	if b.shardSvc != nil {
+		resolved, rerr := b.ResolvePlacement(context.Background(), bucket, key, meta)
+		if rerr == nil {
+			rc, ecErr := b.getObjectECReaderAtShardKey(context.Background(), bucket, resolved.ShardKey, resolved.Record, obj.Size)
+			if ecErr != nil {
+				return nil, nil, fmt.Errorf("ec reconstruct %s/%s@%s via %s: %w", bucket, key, versionID, resolved.Source, ecErr)
+			}
+			return rc, obj, nil
+		}
+		if !errors.Is(rerr, ErrNotEC) {
+			return nil, nil, fmt.Errorf("resolve placement for %s/%s@%s: %w", bucket, key, versionID, rerr)
+		}
 	}
 	// Prefer the versioned local file; fall back to legacy unversioned path if
 	// the version happens to be the legacy latest (uncommon mid-transition case).

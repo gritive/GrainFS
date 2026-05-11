@@ -177,9 +177,14 @@ func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	return g.DistributedBackend.CompleteMultipartUpload(g.placementContext(ctx), bucket, key, uploadID, parts)
 }
 
+// Node returns the RaftNode interface for this group. Prefer this over
+// RaftNode() for membership operations; it works for both v1 and v2.
+func (g *GroupBackend) Node() RaftNode { return g.node }
+
 // RaftNode returns the underlying *raft.Node via type assertion. Returns nil
-// when the node is a v2 adapter (GRAINFS_RAFT_V2=cluster). Callers that use
-// the result for membership operations (DataGroupPlanExecutor) must nil-check.
+// when the node is a v2 adapter (GRAINFS_RAFT_V2=cluster). Use Node() for
+// membership operations; use RaftNode() only for v1-specific methods
+// (JointSnapshotState, CompactLog, SetInstallSnapshotTransport, etc.).
 func (g *GroupBackend) RaftNode() *raft.Node {
 	v1, _ := g.node.(*raft.Node)
 	return v1

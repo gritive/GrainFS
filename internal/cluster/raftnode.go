@@ -39,6 +39,12 @@ type RaftNode interface {
 	// v2 derives this from Configuration(); the adapter filters out the local ID.
 	Peers() []string
 
+	// PeerMatchIndex returns the last known replicated index for the given
+	// peerKey (address or nodeID). Used by DataGroupPlanExecutor to wait for
+	// catch-up before leadership transfer. v2 adapter returns (0, false) because
+	// v2 does not expose per-peer replication state; callers must tolerate this.
+	PeerMatchIndex(peerKey string) (uint64, bool)
+
 	// Bootstrapping.
 	Bootstrap() error
 
@@ -68,6 +74,38 @@ type RaftNode interface {
 	// that log a warning once. Staging soak will exercise without observers.
 	RegisterObserver(ch chan<- raft.Event)
 	DeregisterObserver(ch chan<- raft.Event)
+
+	// Membership mutation — added in M4 follow-up to close the v2 nil-skip gap.
+	// v2 delegates to raftv2adapter.go; methods that v2 has not yet implemented
+	// surface raftv2.ErrNotImplemented so operators see a clear error.
+
+	// AddVoter proposes adding a new full voting member to the cluster.
+	// Performs learner-first (v1) or joint-consensus (v2): learner → voter.
+	AddVoter(id, addr string) error
+
+	// AddVoterCtx is AddVoter with an explicit context for cancellation/timeout.
+	AddVoterCtx(ctx context.Context, id, addr string) error
+
+	// RemoveVoter proposes removing a voting member from the cluster.
+	RemoveVoter(id string) error
+
+	// AddLearner proposes adding a non-voting observer to the cluster.
+	// v2 returns ErrNotImplemented (M2 scope).
+	AddLearner(id, addr string) error
+
+	// PromoteToVoter promotes a learner to a full voting member.
+	// v2 returns ErrNotImplemented (M2 scope).
+	PromoteToVoter(id string) error
+
+	// TransferLeadership initiates a leadership transfer to another voter.
+	// v2 returns ErrNotImplemented (M2 scope).
+	TransferLeadership() error
+
+	// ChangeMembership atomically transitions the cluster membership.
+	// v1: uses §4.3 joint consensus. v2: sequences AddVoterCtx + RemoveVoter
+	// calls — not atomic (partial failure leaves intermediate state; see
+	// raftv2adapter.go for the WARN: caveat).
+	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
 }
 
 // compile-time check: *raft.Node must satisfy RaftNode.

@@ -26,8 +26,9 @@ type ShardGroupUpdater interface {
 	ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error
 }
 
-// dataRaftNode is the subset of *raft.Node used by DataGroupPlanExecutor.
-// Defined as an interface to allow fake injection in unit tests.
+// dataRaftNode is the subset of RaftNode used by DataGroupPlanExecutor.
+// It is a strict subset of the RaftNode interface; any RaftNode satisfies it.
+// Defined separately to allow minimal fake injection in unit tests.
 type dataRaftNode interface {
 	IsLeader() bool
 	CommittedIndex() uint64
@@ -79,12 +80,11 @@ func NewDataGroupPlanExecutor(
 		catchUpTimeout: 30 * time.Second,
 	}
 	e.nodeFor = func(dg *DataGroup) dataRaftNode {
-		// RaftNode() returns nil when the underlying impl is v2 (typed-nil safe:
-		// we explicitly return untyped nil to avoid a non-nil interface with nil ptr).
-		if rn := dg.Backend().RaftNode(); rn != nil {
-			return rn
-		}
-		return nil
+		// Node() returns the RaftNode interface, which satisfies dataRaftNode
+		// for both v1 (*raft.Node) and v2 (*raftV2Node). Under v2, membership
+		// methods that are not yet implemented surface ErrNotImplemented so
+		// operators see a clear error rather than a silent skip.
+		return dg.Backend().Node()
 	}
 	return e
 }

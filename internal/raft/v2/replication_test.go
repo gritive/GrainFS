@@ -223,6 +223,10 @@ func (d *dropAETransport) SendInstallSnapshot(peer string, args *InstallSnapshot
 	return d.inner.SendInstallSnapshot(peer, args)
 }
 
+func (d *dropAETransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return d.inner.SendTimeoutNow(peer, args)
+}
+
 // TestReplication_LeaderStepDownReleasesWaiters: a Leader with an outstanding
 // ProposeWait that observes a higher-term inbound AppendEntries must drain
 // proposeWaiters and reply ErrProposalFailed — otherwise the caller blocks
@@ -595,6 +599,10 @@ func (c *countingAETransport) SendInstallSnapshot(peer string, args *InstallSnap
 	return c.inner.SendInstallSnapshot(peer, args)
 }
 
+func (c *countingAETransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return c.inner.SendTimeoutNow(peer, args)
+}
+
 // capturingAETransport wraps a Transport and records the maximum number of
 // entries seen in any single SendAppendEntries call for a given peer.
 // RequestVote passes through transparently.
@@ -619,6 +627,10 @@ func (c *capturingAETransport) SendAppendEntries(peer string, args *AppendEntrie
 
 func (c *capturingAETransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
 	return c.inner.SendInstallSnapshot(peer, args)
+}
+
+func (c *capturingAETransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return c.inner.SendTimeoutNow(peer, args)
 }
 
 // TestBuildAE_RespectsMaxEntriesPerAE verifies that buildAppendEntriesArgs caps
@@ -918,6 +930,10 @@ func (b *blockingAETransport) SendRequestVote(peer string, args *RequestVoteArgs
 
 func (b *blockingAETransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
 	return b.inner.SendInstallSnapshot(peer, args)
+}
+
+func (b *blockingAETransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return b.inner.SendTimeoutNow(peer, args)
 }
 
 func (b *blockingAETransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {

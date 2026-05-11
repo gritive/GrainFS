@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -533,6 +534,35 @@ func TestClusterCoordinator_ListAllObjects_RoutesThroughDataGroup(t *testing.T) 
 	}, objs[0])
 	require.NotEmpty(t, objs[0].ETag)
 	require.NotEmpty(t, objs[0].VersionID)
+}
+
+func TestClusterCoordinator_ListAllObjects_TolerantOfUnreadableBlob(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb := newTestGroupBackend(t, "group-1")
+	v, err := gb.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+
+	// Delete the on-disk blob so GetObjectVersion fails, while the meta/version
+	// record stays. ListAllObjects must still return the object using the
+	// version-listing metadata rather than aborting the whole snapshot.
+	require.NoError(t, os.Remove(gb.objectPathV("photos", "a.txt", v.VersionID)))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	objs, err := c.ListAllObjects()
+	require.NoError(t, err, "listing must not fail just because one blob is unreadable")
+	require.Len(t, objs, 1)
+	require.Equal(t, "photos", objs[0].Bucket)
+	require.Equal(t, "a.txt", objs[0].Key)
+	require.Equal(t, v.VersionID, objs[0].VersionID)
+	require.True(t, objs[0].IsLatest)
 }
 
 func TestClusterCoordinator_ListAllObjects_PreservesVersionsAndDeleteMarkers(t *testing.T) {
