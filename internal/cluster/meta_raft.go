@@ -42,6 +42,13 @@ type MetaRaftConfig struct {
 	Transport MetaTransport
 }
 
+// metaProposerNode abstracts the raft.Node methods used by proposeOrForward
+// so the forwarding path can be unit-tested with a fake.
+type metaProposerNode interface {
+	IsLeader() bool
+	ProposeWait(ctx context.Context, data []byte) (uint64, error)
+}
+
 // MetaRaft wraps a raft.Node dedicated to cluster control-plane operations.
 type MetaRaft struct {
 	node      *raft.Node
@@ -52,6 +59,11 @@ type MetaRaft struct {
 	cfg       MetaRaftConfig
 	cancel    context.CancelFunc
 	done      chan struct{}
+
+	// forwardFn is called when Propose runs on a non-leader node. It RPCs the
+	// encoded MetaCmd to the current leader and returns the resulting raft log
+	// index. nil = leader-only (Propose on a follower returns an error).
+	forwardFn func(ctx context.Context, data []byte) (uint64, error)
 
 	// lastApplied is read atomically from waitApplied (hot path).
 	// applyNotifyMu protects applyNotify channel swaps only.
@@ -142,6 +154,13 @@ func (m *MetaRaft) FSM() *MetaFSM { return m.fsm }
 func (m *MetaRaft) SetTransport(t MetaTransport) {
 	m.cfg.Transport = t
 	m.wireTransport(t)
+}
+
+// SetForwarder injects the follower→leader propose-forwarding closure. Wire
+// from boot before raft Start so a Propose that lands on a follower (e.g. an
+// S3 PUT ?lifecycle on a non-leader node) forwards instead of failing.
+func (m *MetaRaft) SetForwarder(fn func(ctx context.Context, data []byte) (uint64, error)) {
+	m.forwardFn = fn
 }
 
 func (m *MetaRaft) wireTransport(t MetaTransport) {
@@ -441,16 +460,40 @@ func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
 // envelope and proposes it to the cluster, blocking until applied to the
 // local FSM. Used by external dispatchers (e.g., iam.MetaProposer) that
 // build their own payload bytes and need a generic propose path.
+//
+// When the local node is not the leader and a forwardFn has been set via
+// SetForwarder, the encoded command is forwarded to the leader instead.
 func (m *MetaRaft) Propose(ctx context.Context, cmdType MetaCmdType, payload []byte) error {
 	data, err := encodeMetaCmd(cmdType, payload)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}
-	idx, err := m.node.ProposeWait(ctx, data)
+	idx, err := m.proposeOrForward(ctx, m.node, data)
 	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+		return err
 	}
 	return m.waitApplied(ctx, idx)
+}
+
+// proposeOrForward submits data to the local raft node when this node is the
+// leader, otherwise forwards it via the configured forwardFn. Extracted so it
+// can be unit-tested without a real raft node.
+func (m *MetaRaft) proposeOrForward(ctx context.Context, node metaProposerNode, data []byte) (uint64, error) {
+	if node.IsLeader() {
+		idx, err := node.ProposeWait(ctx, data)
+		if err != nil {
+			return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
+		}
+		return idx, nil
+	}
+	if m.forwardFn == nil {
+		return 0, fmt.Errorf("meta_raft: not leader and no forwarder configured")
+	}
+	idx, err := m.forwardFn(ctx, data)
+	if err != nil {
+		return 0, fmt.Errorf("meta_raft: forward to leader: %w", err)
+	}
+	return idx, nil
 }
 
 func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {

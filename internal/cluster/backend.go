@@ -545,6 +545,14 @@ func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr stri
 	return index, nil
 }
 
+// ForwardPropose RPCs the encoded MetaCmd bytes to leaderAddr and returns the
+// resulting raft log index. Used by MetaRaft's follower→leader forwarding
+// seam. The caller is responsible for resolving leaderID to a dialable address
+// before calling (e.g. via cluster.ResolveNodeAddress(metaRaft.FSM(), id)).
+func (b *DistributedBackend) ForwardPropose(ctx context.Context, leaderAddr string, data []byte) (uint64, error) {
+	return b.forwardPropose(ctx, leaderAddr, data)
+}
+
 // RegisterProposeForwardHandler는 StreamProposeForward 핸들러를 QUIC 라우터에 등록한다.
 // 리더 노드에서 호출해야 하며, 팔로워의 propose를 대신 처리한다.
 func (b *DistributedBackend) RegisterProposeForwardHandler() {
