@@ -30,6 +30,8 @@ type dataGroupLeaderProbe interface {
 	GroupLeaderIsSelf(groupID string) bool
 }
 
+// OpRouter resolves S3-level operations to placement-group targets via
+// bucket, object-index, or EC-placement lookups. Ctx-free; performs no I/O.
 type OpRouter struct {
 	router      *Router
 	groups      ShardGroupSource

@@ -43,9 +43,9 @@ type raftLeaderProbe interface {
 	IsLeader() bool
 }
 
-// leaderProbe returns the IsLeader source for ResolveWrite — the
-// test-injected override when set, otherwise the real raft.Node. Returns nil
-// when neither is available.
+// leaderProbe returns the IsLeader source for ResolveWrite. Exists to allow
+// tests to inject a fake via testLeaderProbe; production callers should use
+// RaftNode() directly.
 func (g *GroupBackend) leaderProbe() raftLeaderProbe {
 	if g.testLeaderProbe != nil {
 		return g.testLeaderProbe

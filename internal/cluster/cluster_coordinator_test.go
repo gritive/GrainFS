@@ -38,10 +38,10 @@ func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
 	require.True(t, c.matchSelfPeer("127.0.0.1:9001"))
 	require.False(t, c.matchSelfPeer("node-b"))
 
-	peers := c.peersForForward(ShardGroupEntry{
+	peers := NewShardGroupPeerSet(ShardGroupEntry{
 		ID:      "group-1",
 		PeerIDs: []string{"127.0.0.1:9001", "127.0.0.1:9002", "node-a"},
-	})
+	}).ForwardOrder(c.selfID, c.selfAliases...)
 	require.Equal(t, []string{"127.0.0.1:9002", "127.0.0.1:9001", "node-a"}, peers)
 }
 
@@ -688,147 +688,6 @@ func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, objs, 1)
 	require.Equal(t, "keep.txt", objs[0].Key)
-}
-
-// TestClusterCoordinator_RouteBucket_NoRouter verifies that routeBucket fails
-// fast when the coordinator was constructed without a router (test/legacy
-// solo-node configurations). Caller sees a clear error, not a nil panic.
-func TestClusterCoordinator_RouteBucket_NoRouter(t *testing.T) {
-	base := &fakeBackend{}
-	c := NewClusterCoordinator(base, nil, nil, nil, "self")
-	_, err := c.routeBucket("bk")
-	require.Error(t, err)
-}
-
-// TestClusterCoordinator_RouteBucket_UnknownBucket verifies that a bucket
-// without a shard-group assignment surfaces as ErrNoSuchBucket — distinct
-// from base.ErrBucketNotFound (which fires when the bucket dir is missing).
-func TestClusterCoordinator_RouteBucket_UnknownBucket(t *testing.T) {
-	base := &fakeBackend{}
-	mgr := NewDataGroupManager()
-	router := NewRouter(mgr)
-	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{}}
-	c := NewClusterCoordinator(base, mgr, router, meta, "self")
-	_, err := c.routeBucket("missing")
-	require.ErrorIs(t, err, storage.ErrNoSuchBucket)
-}
-
-// TestClusterCoordinator_RouteBucket_SelfIsVoter_NotLeader verifies that when
-// self is in the peer list but not the leader (no GroupBackend wired to make
-// it a leader), routeBucket returns selfIsVoter=true, selfIsLeader=false.
-// This is the path that forwards to a peer rather than calling local backend.
-func TestClusterCoordinator_RouteBucket_SelfIsVoter_NotLeader(t *testing.T) {
-	base := &fakeBackend{}
-	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroup("group-1", []string{"a", "self", "b"})) // no backend
-	router := NewRouter(mgr)
-	router.AssignBucket("photos", "group-1")
-	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
-		"group-1": {ID: "group-1", PeerIDs: []string{"a", "self", "b"}},
-	}}
-	c := NewClusterCoordinator(base, mgr, router, meta, "self")
-	target, err := c.routeBucket("photos")
-	require.NoError(t, err)
-	require.Equal(t, "group-1", target.groupID)
-	require.True(t, target.selfIsVoter)
-	require.False(t, target.selfIsLeader)
-	// PeersForForward order: non-self first, self last.
-	require.Equal(t, []string{"a", "b", "self"}, target.peers)
-}
-
-func TestClusterCoordinator_RouteBucket_ResolvesNodeIDPeersToAddresses(t *testing.T) {
-	base := &fakeBackend{}
-	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroup("group-1", []string{"node-a", "self", "node-b"}))
-	router := NewRouter(mgr)
-	router.AssignBucket("photos", "group-1")
-	meta := NewMetaFSM()
-	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
-	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-b", "10.0.0.2:7001", 0)))
-	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "self", "10.0.0.3:7001", 0)))
-	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"node-a", "self", "node-b"})))
-
-	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithNodeAddressResolver(meta)
-	target, err := c.routeBucket("photos")
-	require.NoError(t, err)
-	require.Equal(t, []string{"10.0.0.1:7001", "10.0.0.2:7001", "10.0.0.3:7001"}, target.peers)
-	require.True(t, target.selfIsVoter)
-}
-
-func TestClusterCoordinator_RouteGroup_ResolvesNodeIDPeersToAddresses(t *testing.T) {
-	base := &fakeBackend{}
-	mgr := NewDataGroupManager()
-	meta := NewMetaFSM()
-	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
-	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "node-b", "10.0.0.2:7001", 0)))
-	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "self", "10.0.0.3:7001", 0)))
-	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-2", []string{"node-a", "self", "node-b"})))
-
-	c := NewClusterCoordinator(base, mgr, nil, meta, "self").WithNodeAddressResolver(meta)
-	target, err := c.routeGroup("group-2")
-	require.NoError(t, err)
-	require.Equal(t, "group-2", target.groupID)
-	require.Equal(t, []string{"10.0.0.1:7001", "10.0.0.2:7001", "10.0.0.3:7001"}, target.peers)
-	require.True(t, target.selfIsVoter)
-}
-
-type countingAddressBook struct {
-	calls int
-}
-
-func (b *countingAddressBook) ResolveNodeAddress(idOrAddr string) (string, bool) {
-	b.calls++
-	return idOrAddr, true
-}
-
-func (b *countingAddressBook) Nodes() []MetaNodeEntry {
-	b.calls++
-	return nil
-}
-
-func TestClusterCoordinator_RouteBucket_LocalLeaderSkipsPeerResolution(t *testing.T) {
-	base := &fakeBackend{}
-	gb := newTestGroupBackend(t, "group-1")
-	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-a", "self", "node-b"}, gb))
-	router := NewRouter(mgr)
-	router.AssignBucket("photos", "group-1")
-	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
-		"group-1": {ID: "group-1", PeerIDs: []string{"node-a", "self", "node-b"}},
-	}}
-	addr := &countingAddressBook{}
-	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithNodeAddressResolver(addr)
-
-	target, err := c.routeBucket("photos")
-	require.NoError(t, err)
-	require.True(t, target.selfIsVoter)
-	require.True(t, target.selfIsLeader)
-	require.Zero(t, addr.calls, "local leader fast path should not allocate/resolve forward peers")
-	require.Empty(t, target.peers)
-
-	allocs := testing.AllocsPerRun(100, func() {
-		target, err := c.routeBucket("photos")
-		require.NoError(t, err)
-		require.True(t, target.selfIsLeader, "routeBucket lost local leader fast path")
-	})
-	require.Zero(t, allocs, "local leader route should not allocate")
-}
-
-func TestClusterCoordinator_RouteBucket_MetaFSMUsesNormalizedRuntimeView(t *testing.T) {
-	base := &fakeBackend{}
-	gb := newTestGroupBackend(t, "group-1")
-	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-a", "self", "node-b"}, gb))
-	router := NewRouter(mgr)
-	router.AssignBucket("photos", "group-1")
-	meta := NewMetaFSM()
-	require.NoError(t, meta.applyCmd(makeAddNodeCmd(t, "self", "127.0.0.1:7001", 0)))
-	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"node-a", "127.0.0.1:7001", "node-b"})))
-	c := NewClusterCoordinator(base, mgr, router, meta, "self")
-
-	target, err := c.routeBucket("photos")
-	require.NoError(t, err)
-	require.True(t, target.selfIsLeader)
 }
 
 // --- T6 forward-path test scaffolding ---

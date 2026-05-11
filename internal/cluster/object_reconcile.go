@@ -29,7 +29,7 @@ type ObjectIndexIssue struct {
 // first: callers can surface the issue without treating a dual-write mismatch
 // as a successful object operation.
 func (c *ClusterCoordinator) ReconcileObjectIndexLatest(ctx context.Context, bucket, key string) ([]ObjectIndexIssue, error) {
-	target, entry, err := c.routeObjectLatest(bucket, key)
+	target, entry, err := c.opRouter.RouteObjectRead(bucket, key, "")
 	if err != nil {
 		return nil, err
 	}
@@ -105,11 +105,10 @@ func (c *ClusterCoordinator) FindObjectIndexOrphans(ctx context.Context) ([]Obje
 	return issues, nil
 }
 
-func (c *ClusterCoordinator) headObjectVersionAt(ctx context.Context, target routeTarget, bucket, key, versionID string) (*storage.Object, error) {
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+func (c *ClusterCoordinator) headObjectVersionAt(ctx context.Context, target RouteTarget, bucket, key, versionID string) (*storage.Object, error) {
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		return gb.HeadObjectVersion(bucket, key, versionID)
 	}
 	if c.forward == nil {
