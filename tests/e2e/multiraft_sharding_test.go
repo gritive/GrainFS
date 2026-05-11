@@ -193,7 +193,6 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 		"--peers", strings.Join(peers, ","),
 		"--cluster-key", c.clusterKey,
 		"--encryption-key-file", c.encKeyFile,
-		"--dedup=false",
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--snapshot-interval", "0",

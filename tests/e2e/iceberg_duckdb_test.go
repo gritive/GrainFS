@@ -141,7 +141,6 @@ func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int, encKeyFil
 		"--data", dataDir,
 		"--port", fmt.Sprintf("%d", port),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
-		"--dedup=false",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--encryption-key-file", encKeyFile,
