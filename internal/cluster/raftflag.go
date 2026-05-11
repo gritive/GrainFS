@@ -1,10 +1,11 @@
 package cluster
 
 import (
-	"log/slog"
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 // raftV2FlagEnv is the environment variable that opts packages into raft v2.
@@ -42,7 +43,7 @@ func ParseRaftV2Flag(env string) map[string]bool {
 			continue
 		}
 		if !validRaftV2Pkgs[pkg] {
-			slog.Warn("GRAINFS_RAFT_V2: unknown package name ignored", "pkg", pkg)
+			log.Warn().Str("pkg", pkg).Msg("GRAINFS_RAFT_V2: unknown package name ignored")
 			continue
 		}
 		if pkg == "all" {

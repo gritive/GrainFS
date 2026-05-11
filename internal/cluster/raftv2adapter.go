@@ -29,9 +29,10 @@ package cluster
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/raft"
 	raftv2 "github.com/gritive/GrainFS/internal/raft/v2"
@@ -150,6 +151,15 @@ func (a *raftV2Node) WaitApplied(ctx context.Context, index uint64) error {
 // ApplyCh returns a channel of v1-typed raft.LogEntry values. Because the
 // channel types differ (v2.LogEntry vs raft.LogEntry), a bridge goroutine
 // copies entries. The bridge is started lazily on first call.
+//
+// The bridge filters out non-Command entries (ConfChange, JointConfChange,
+// NoOp, Snapshot — v2 LogEntryType > 0). Those are Raft protocol entries
+// that the v2 actor publishes for completeness but the v1-style FSM.Apply
+// path is not equipped to decode them — forwarding would produce spurious
+// "unmarshal command: empty data" Error logs on every leader election
+// (v2's NoOp emission rate is higher than v1's). Cluster bookkeeping for
+// membership changes runs internally inside v2 (per actor.go applyConfigEntry);
+// the adapter only surfaces FSM-bound Command entries.
 func (a *raftV2Node) ApplyCh() <-chan raft.LogEntry {
 	a.applyOnce.Do(func() {
 		ch := make(chan raft.LogEntry, 64)
@@ -157,6 +167,9 @@ func (a *raftV2Node) ApplyCh() <-chan raft.LogEntry {
 		src := a.n.ApplyCh()
 		go func() {
 			for entry := range src {
+				if entry.Type != raftv2.LogEntryCommand {
+					continue
+				}
 				ch <- raft.LogEntry{
 					Term:    entry.Term,
 					Index:   entry.Index,
@@ -256,12 +269,15 @@ func (a *raftV2Node) SetNoOpCommand(_ []byte) {}
 // detection must use State() polling. A one-time warning is logged.
 func (a *raftV2Node) RegisterObserver(_ chan<- raft.Event) {
 	a.once.Do(func() {
-		slog.Warn("raftV2Node: RegisterObserver not supported by raft v2 — " +
+		log.Warn().Msg("raftV2Node: RegisterObserver not supported by raft v2 — " +
 			"leadership detection falls back to State() polling. See plan §M4.")
 	})
 }
 
 // DeregisterObserver is a no-op matching RegisterObserver.
+// v2 has no observer pattern — RegisterObserver also no-ops with a one-time
+// warning. Deregister is silent because callers commonly pair Register/Deregister
+// in defer blocks; warning on every Stop() path would be noise.
 func (a *raftV2Node) DeregisterObserver(_ chan<- raft.Event) {}
 
 // compile-time check: *raftV2Node must satisfy RaftNode.
