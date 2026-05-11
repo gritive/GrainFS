@@ -130,7 +130,7 @@ func (sm *raftStateMachine) StepDownLeader(t *rapid.T) {
 func (sm *raftStateMachine) Partition(t *rapid.T) {
 	// Pick one node index to isolate (0, 1, or 2).
 	idx := rapid.IntRange(0, 2).Draw(t, "partitioned_node_idx")
-	peer := sm.cluster.Nodes[idx].cfg.ID
+	peer := sm.cluster.Nodes[idx].ID()
 	sm.cluster.Net.Partition(peer)
 }
 

@@ -160,12 +160,12 @@ func newPropertyCluster(t testing.TB, ids [3]string) *propertyCluster {
 
 	// Register transports before Start so initial RequestVote routes immediately.
 	for _, n := range pc.Nodes {
-		n.SetTransport(net.Register(n.cfg.ID, n))
+		n.SetTransport(net.Register(n.ID(), n))
 	}
 
 	for _, n := range pc.Nodes {
 		n.Start()
-		id := n.cfg.ID
+		id := n.ID()
 		applyCh := n.ApplyCh()
 		pc.drained.Add(1)
 		go func() {
