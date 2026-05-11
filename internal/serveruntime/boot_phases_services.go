@@ -33,9 +33,9 @@ import (
 // which the v2 path does not produce. We skip the SnapshotManager wiring;
 // DistributedBackend.RunApplyLoop already nil-checks snapMgr (backend.go
 // line ~472) so apply-loop traffic continues unaffected. RaftSnapshotStatus
-// / TriggerRaftSnapshot will return "unavailable" under v2 — an accepted
-// staging limitation tracked in TODOS.md until v2 snapshot triggers are
-// surfaced through the RaftNode interface in a future PR.
+// / TriggerRaftSnapshot work under v2 via the cluster.RaftV2Snapshotter
+// sibling interface (M5 PR 27); the backend type-asserts b.node and
+// forwards CreateSnapshot / SnapshotStatus through the v2 adapter.
 func bootSnapshotAndApplyLoop(state *bootState) error {
 	state.fsm = cluster.NewFSM(state.db)
 	if v1Node, ok := state.node.(*raft.Node); ok {
