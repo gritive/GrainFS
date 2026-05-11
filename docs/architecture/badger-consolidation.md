@@ -943,6 +943,47 @@ parameter tuning, different scaling axis) shows more leverage.
 If after measurement P3 is still the right move, address the 13
 issues above before any code lands.
 
+### Status: FINALIZED (v0.0.x — this PR)
+
+Implemented per the 2026-05-11 `/grill-me` triage (all 13 v2-review issues resolved or descoped — see `docs/superpowers/plans/2026-05-11-shared-fsm-state-db-p3.md` and the `## Eng review decisions (2026-05-11)` section there). Per-group `groups/*/badger/` retired; `<dataDir>/shared-fsm/` is the only layout; `GroupLifecycleConfig.FSMStore` required; `state.distBackend` uses the shared DB with a `"group-0"` keyspace via `cluster.NewDistributedBackendForGroup`. `FSM.Snapshot`/`FSM.Restore` are group-prefix-scoped; `FormatVersion` carried in the raft snapshot-meta record. Live InstallSnapshot RPC catch-up FSM-restore remains a separate pre-existing bug (`TODOS.md`). DestroyGroupData / permanent-group-removal explicitly out of scope.
+
+**Test coverage shipped:** `stateKeyspace` unit tests (round-trip, pathological IDs, scan helper); `TestSharedFSM_*` invariant suite (prefix isolation across all FSM/backend paths, pathological-ID e2e, group-close-doesn't-close-shared-DB, snapshot containment, restore replaces only own group, restore rejects wrong FormatVersion / already-prefixed keys / corrupt bytes before drop, empty-keyspace whole-DB replace, restart persistence, restore-crash-mid-DropPrefix self-heal via reboot). `make lint-keyspace` gate prevents new raw FSM-state key literals in `internal/cluster`.
+
+**Lifecycle keys (`lifecycle:{bucket}`, meta-Raft-replicated, process-global)** now live in the shared FSM DB unprefixed (previously in the meta DB — `state.distBackend.FSMDB()` switched DBs). No key collision (a group prefix is `4-byte-len||groupID`; the first 4 bytes can't be `"life"`). Pre-1.0, no existing lifecycle data, so no migration was needed.
+
+**`grainfs recover-cluster`** now requires the source data dir's last FSM snapshot to be `format_version == 2` (a binary including these P3 changes); pre-P3 snapshots are rejected with `FSM.Restore: unsupported snapshot FormatVersion 0 (want 2)`. See `docs/recover-cluster.md`.
+
+#### Perf matrix sweep — DEFERRED to a quiet-host run
+
+The original Task 13 called for an idle-N8 / idle-N16 / load-N8 / load-N16 / load-N32 perf matrix sweep via `tests/e2e/cluster_perf_profile_test.go` to measure goroutines/RSS/heap/CPU deltas vs the P0b baseline (`internal/raft.OpenSharedLogStore` shared raft-log, v0.0.13.0). That sweep was NOT performed in the implementation flow because it requires a clean idle host (per this doc's earlier P0b note: "host contention invalidates the numbers"). The shape of the run, when done:
+
+```bash
+for sc in idle-N8 idle-N16 load-N8 load-N16 load-N32; do
+  GRAINFS_PERF=1 GRAINFS_PERF_SCENARIO=$sc GRAINFS_PERF_DIR=/tmp/grainfs-perf-p3-$sc \
+    go test -run '^TestE2E_ClusterPerf_All$' -count=1 -timeout 900s -v ./tests/e2e/ 2>&1 | tee /tmp/p3-$sc.log
+done
+```
+
+Capture per scenario: boot time, RSS/node, heap/node, CPU%/node, goroutines/node, PUT ok/err. Compare against the P0b baseline tables earlier in this doc. The headline expectation: **load-N32 boots** (the boot-ceiling lift was C2's primary value prop — P0b alone may already do this; with both halves of the consolidation in place it definitely should), and idle-N8 goroutines/RSS drop incrementally vs P0b (the FSM-state half of the `2N+1 → 3` instance collapse).
+
+When the sweep is done, fill in this table:
+
+| scenario | boot | RSS/node | heap/node | CPU/node | gor/node | PUT ok/err | vs P0b |
+|---|---|---|---|---|---|---|---|
+| idle-N8 | … | … | … | … | … | — | … |
+| idle-N16 | … | … | … | … | … | — | … |
+| load-N8 | … | … | … | … | … | … | … |
+| load-N16 | … | … | … | … | … | … | … |
+| load-N32 | … | … | … | … | … | … | boots: yes/no |
+
+#### Follow-up trigger — key-build alloc optimization
+
+`stateKeyspace`'s semantic builders (`BucketKey`/`ObjectMetaKey`/...) currently do `ks.Key([]byte("<prefix>:" + b + "/" + k))` — two allocs per key build (the string-concat slice, then `prefix||that` in `Key`). The pre-P3 free functions did one alloc. The Eng-review decision (Perf#1) was to ship the obvious two-alloc form and use the perf matrix sweep above as the trigger to optimize: if PUT throughput or `alloc_objects` regress meaningfully vs the P0b baseline, switch each builder to a single-alloc `make([]byte, 0, len(prefix)+len("<prefix>:")+len(b)+1+len(k))` filled directly. Until the sweep happens, the current form ships as-is.
+
+#### Re-open triggers for further C2 work
+
+(unchanged — see the "Paused" notes at the top of this doc; the "FSM state badger as a hotspot" trigger is the relevant one for any v0.1.x follow-up, now that the shared-FSM layout is the baseline.)
+
 ## References
 
 - C1 PR: #128 `perf/badger-compactor` (cheap compactor reduction baseline)
