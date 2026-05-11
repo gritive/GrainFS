@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
@@ -203,6 +204,10 @@ type MetaFSM struct {
 	// always non-nil (default empty); iamApplier is nil until SetIAM is called.
 	iamStore   *iam.Store
 	iamApplier *iam.Applier
+
+	// lifecycleStore is wired via SetLifecycle. nil = lifecycle commands return
+	// an error (not configured).
+	lifecycleStore *lifecycle.Store
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -232,6 +237,14 @@ func (f *MetaFSM) SetIAM(store *iam.Store, applier *iam.Applier) {
 
 // IAMStore returns the IAM Store for read access (auth checks, bootstrap shim).
 func (f *MetaFSM) IAMStore() *iam.Store { return f.iamStore }
+
+// SetLifecycle wires the lifecycle store into the MetaFSM. Must be called
+// before raft Start so apply does not race with replay.
+func (f *MetaFSM) SetLifecycle(store *lifecycle.Store) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lifecycleStore = store
+}
 
 // Rotation returns the rotation sub-FSM. State is decoupled from the rest of
 // MetaFSM and has its own RWMutex; callers can read snapshots concurrently.
@@ -339,6 +352,10 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyBucketUpstreamPut)
 	case clusterpb.MetaCmdTypeIAMBucketUpstreamDelete:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyBucketUpstreamDelete)
+	case clusterpb.MetaCmdTypeBucketLifecyclePut:
+		return f.applyBucketLifecyclePut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeBucketLifecycleDelete:
+		return f.applyBucketLifecycleDelete(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -352,6 +369,28 @@ func (f *MetaFSM) applyIAM(payload []byte, fn func(*iam.Applier, []byte) error) 
 		return fmt.Errorf("meta_fsm: IAM applier not configured")
 	}
 	return fn(f.iamApplier, payload)
+}
+
+func (f *MetaFSM) applyBucketLifecyclePut(payload []byte) error {
+	if f.lifecycleStore == nil {
+		return fmt.Errorf("meta_fsm: lifecycle store not wired")
+	}
+	bucket, raw, err := lifecycle.DecodePutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: BucketLifecyclePut: %w", err)
+	}
+	return f.lifecycleStore.PutRaw(bucket, raw)
+}
+
+func (f *MetaFSM) applyBucketLifecycleDelete(payload []byte) error {
+	if f.lifecycleStore == nil {
+		return fmt.Errorf("meta_fsm: lifecycle store not wired")
+	}
+	bucket, err := lifecycle.DecodeDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: BucketLifecycleDelete: %w", err)
+	}
+	return f.lifecycleStore.Delete(bucket)
 }
 
 func (f *MetaFSM) applyAddNode(data []byte) error {
