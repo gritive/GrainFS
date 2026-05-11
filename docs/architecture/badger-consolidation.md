@@ -390,6 +390,13 @@ load-N32 (does it boot now?).
 
 ## P0b — Shared raft-log (finalized v0.0.145.0)
 
+> The sub-sections below up to **"What's NOT in P0b"** describe the **prototype-era
+> state** (v0.0.13.0, behind `--shared-badger`). They are kept as the design record.
+> The current state is in **"Status: FINALIZED (v0.0.145.0)"** further down — the flag,
+> the `Config.SharedBadgerEnabled` field, the legacy-detection guard, and the
+> `GRAINFS_PERF_SHARED_BADGER` env forwarding are all gone; shared raft-log is the
+> only layout.
+
 Code wired in commit `<TBD>`:
 
 - `internal/raft/store.go`: `BadgerLogStore` gains `prefix []byte` + `shared bool`
@@ -733,7 +740,7 @@ slip through "no per-group dirs, fresh start".
 |---|---|
 | no `groups/*/badger/`, no `shared-fsm/` | fresh — proceed shared-fsm enabled |
 | no `groups/*/badger/`, `shared-fsm/` exists | continuing previous shared-fsm install — proceed |
-| any `groups/*/badger/`, no `shared-fsm/` | legacy — refuse with `--shared-badger=false` instruction |
+| any `groups/*/badger/`, no `shared-fsm/` | legacy — refuse with a migrate-or-wipe instruction (the old `--shared-badger=false` escape hatch is gone; P3 will need a new mechanism) |
 | any `groups/*/badger/`, `shared-fsm/` exists | **mixed** — fail closed, refuse to start (corruption likely; don't guess) |
 | `groups/*/badger/` removed but `groups/<id>/blobs/` lingering | suspicious; require explicit operator confirmation flag (out of scope) |
 
