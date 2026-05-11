@@ -151,7 +151,15 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 		logStore = ls
 	}
 
-	node := raft.NewNode(rcfg, logStore)
+	node, err := newRaftNode(rcfg, logStore)
+	if err != nil {
+		resourcewatch.DeregisterDB(groupVlogEntry)
+		_ = db.Close()
+		if logStore != cfg.LogStore {
+			_ = logStore.Close()
+		}
+		return nil, fmt.Errorf("group %s: newRaftNode: %w", entry.ID, err)
+	}
 	if cfg.Transport != nil {
 		tr := cfg.Transport
 		if cfg.AddrBook != nil {

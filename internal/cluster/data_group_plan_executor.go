@@ -78,7 +78,14 @@ func NewDataGroupPlanExecutor(
 		sgUpdater:      sgUpdater,
 		catchUpTimeout: 30 * time.Second,
 	}
-	e.nodeFor = func(dg *DataGroup) dataRaftNode { return dg.Backend().RaftNode() }
+	e.nodeFor = func(dg *DataGroup) dataRaftNode {
+		// RaftNode() returns nil when the underlying impl is v2 (typed-nil safe:
+		// we explicitly return untyped nil to avoid a non-nil interface with nil ptr).
+		if rn := dg.Backend().RaftNode(); rn != nil {
+			return rn
+		}
+		return nil
+	}
 	return e
 }
 

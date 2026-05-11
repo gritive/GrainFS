@@ -1,0 +1,29 @@
+groups:
+  - name: grainfs_raft_v2_soak
+    rules:
+      - alert: RaftV2ProposeLatencyDegradation
+        expr: |
+          histogram_quantile(0.99, rate(grainfs_raft_v2_propose_latency_seconds_bucket[5m]))
+          >
+          2 * histogram_quantile(0.99, rate(grainfs_raft_propose_latency_seconds_bucket[5m]))
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "v2 propose p99 > 2x v1 baseline for 10m"
+          description: |
+            GrainFS raft v2 propose latency (p99 over 5m) has exceeded 2× the v1 baseline
+            for more than 10 minutes. Investigate:
+              - grainfs_raft_v2_actor_cmd_ch_depth: elevated depth indicates actor backpressure
+              - grainfs_raft_v2_actor_leader_transitions_total: elevated rate indicates leader churn
+              - grainfs_raft_v2_actor_term_bumps_total: elevated rate indicates election storms
+              - grainfs_raft_v2_actor_append_entries_duration_seconds: high conflict rate slows
+                leader commit convergence, which cascades into propose latency
+
+            NOTE: The v1 baseline metric grainfs_raft_propose_latency_seconds may not exist
+            as a standalone metric in the current codebase (v1 uses per-group metrics via
+            hashicorp/raft instrumentation). If this metric is absent, the alert expression
+            will evaluate to "no data" and never fire. Operator MUST adjust the denominator
+            to the actual v1 propose latency metric name available in the environment, or
+            replace with an absolute threshold (e.g. > 0.5 for 500ms p99) until a v1 baseline
+            metric is established.

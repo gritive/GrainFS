@@ -70,7 +70,7 @@ type GroupBackendConfig struct {
 	ID        string
 	Root      string
 	DB        *badger.DB
-	Node      *raft.Node
+	Node      RaftNode
 	LogStore  raft.LogStore               // optional — owned by GroupBackend (closed on Close)
 	VlogEntry *resourcewatch.RegisteredDB // optional — owned by GroupBackend (deregistered on Close)
 	ShardSvc  *ShardService               // may be nil for in-process / single-node tests
@@ -177,9 +177,13 @@ func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	return g.DistributedBackend.CompleteMultipartUpload(g.placementContext(ctx), bucket, key, uploadID, parts)
 }
 
-// RaftNode returns the underlying raft.Node — used by DataGroupPlanExecutor for
-// AddVoter/RemoveVoter membership operations.
-func (g *GroupBackend) RaftNode() *raft.Node { return g.node }
+// RaftNode returns the underlying *raft.Node via type assertion. Returns nil
+// when the node is a v2 adapter (GRAINFS_RAFT_V2=cluster). Callers that use
+// the result for membership operations (DataGroupPlanExecutor) must nil-check.
+func (g *GroupBackend) RaftNode() *raft.Node {
+	v1, _ := g.node.(*raft.Node)
+	return v1
+}
 
 // Close shuts down BadgerDB and raft.Node. Idempotent — safe to call multiple
 // times. The wrapped DistributedBackend.Close() handles BadgerDB; we close
