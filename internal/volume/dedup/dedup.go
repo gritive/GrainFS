@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 )
@@ -20,6 +21,30 @@ type WriteResult struct {
 	Canonical string // objectKey to use; call backend.PutObject when IsNew=true
 	IsNew     bool   // true = first time this hash is seen; caller must store the object
 	ToDelete  string // non-empty = previous block's object has refcount 0; caller must DeleteObject
+}
+
+// SnapshotState marks the state of an in-flight snapshot create.
+type SnapshotState uint8
+
+const (
+	SnapshotBegun     SnapshotState = 1
+	SnapshotCommitted SnapshotState = 2
+	// NOTE: SnapshotAborted is intentionally absent. Aborted snapshots are
+	// torn down synchronously by SnapshotAbort (no persisted "aborted" state).
+)
+
+// SnapshotBlockEntry represents one block in a snapshot map.
+type SnapshotBlockEntry struct {
+	BlkNum    int64
+	Canonical string
+}
+
+// SnapshotMeta describes a committed snapshot. Stored in BadgerDB
+// under vd:sm:{vol}:{snapID} as binary-encoded fields (no JSON).
+type SnapshotMeta struct {
+	SnapID     string
+	CreatedAt  time.Time
+	BlockCount int64
 }
 
 // DedupIndex tracks block-level deduplication state in BadgerDB.
@@ -45,6 +70,73 @@ type DedupIndex interface {
 	// DeleteVolume removes all block mappings for vol and decrements refcounts.
 	// Returns the S3 object keys that must be deleted (those whose refcount reached zero).
 	DeleteVolume(vol string) (toDelete []string, err error)
+
+	// SnapshotBegin marks (vol, snapID) as in-progress. Subsequent
+	// SnapshotAppendChunk calls populate the map; SnapshotCommit finalizes,
+	// SnapshotAbort rolls back. Idempotent: returns nil if already begun.
+	SnapshotBegin(vol, snapID string) error
+
+	// SnapshotAppendChunk records entries and IncRefs each canonical inside
+	// a single Badger txn. Caller chunks input to stay within Badger's txn
+	// size budget (recommended <= 1024 entries per call).
+	SnapshotAppendChunk(vol, snapID string, entries []SnapshotBlockEntry) error
+
+	// SnapshotCommit finalizes the snapshot map and persists SnapshotMeta
+	// atomically. After this returns nil, the snapshot is durable and readable.
+	SnapshotCommit(vol, snapID string, meta SnapshotMeta) error
+
+	// SnapshotAbort tears down a begun-but-not-committed snapshot: walks
+	// vd:s:{vol}:{snapID}: entries, DecRefs each canonical, removes entries,
+	// returns S3 object keys whose refcount reached zero so caller can
+	// DeleteObject them.
+	SnapshotAbort(vol, snapID string) (toDelete []string, err error)
+
+	// SnapshotIter walks committed snapshot entries in blkNum order. fn
+	// returning a non-nil error aborts iteration with that error.
+	SnapshotIter(vol, snapID string, fn func(blkNum int64, canonical string) error) error
+
+	// SnapshotReadBlock looks up a single block in a committed snapshot.
+	SnapshotReadBlock(vol, snapID string, blkNum int64) (canonical string, found bool, err error)
+
+	// SnapshotDelete removes a committed snapshot, DecRefs canonicals.
+	// Behaves like SnapshotAbort for committed state. Chunked internally.
+	SnapshotDelete(vol, snapID string) (toDelete []string, err error)
+
+	// SnapshotListInProgress returns (vol, snapID) pairs that are Begun but
+	// not Committed. Used by Manager.RecoverOnBoot to clean up after a crash.
+	SnapshotListInProgress() ([]struct{ Vol, SnapID string }, error)
+
+	// SnapshotListPendingRollbacks returns (vol, snapID) pairs whose
+	// vd:rb: rollback-in-progress marker exists. Used by RecoverOnBoot to
+	// re-apply interrupted rollback operations.
+	SnapshotListPendingRollbacks() ([]struct{ Vol, SnapID string }, error)
+
+	// SnapshotListPendingClones returns dstVol names whose vd:cl: clone-in-progress
+	// marker exists. Used by RecoverOnBoot to re-apply interrupted clone operations.
+	SnapshotListPendingClones() ([]string, error)
+
+	// SnapshotRollback atomically swaps the live (vol, blkNum) → canonical
+	// mapping to match snapID's mapping. Chunked + idempotent (re-callable after crash).
+	// Returns S3 keys to DeleteObject for refcount-zero canonicals.
+	SnapshotRollback(vol, snapID string) (toDelete []string, err error)
+
+	// SnapshotClone copies (vol, blkNum) → canonical mapping to (dstVol,
+	// blkNum) and IncRefs each canonical. Chunked + idempotent.
+	SnapshotClone(srcVol, dstVol string) error
+
+	// IterLiveBlocks walks all (vol, blkNum) → canonical mappings under a
+	// single Badger MVCC view. Used by CreateSnapshot to enumerate live blocks
+	// without scanning vol.Size/vol.BlockSize linearly.
+	// fn returning a non-nil error aborts iteration with that error.
+	IterLiveBlocks(vol string, fn func(blkNum int64, canonical string) error) error
+
+	// SnapshotPutMeta persists snapshot metadata atomically. Typically called
+	// as part of SnapshotCommit's txn (or invoked directly by it) to avoid
+	// split-brain between Badger snapshot map and S3 metadata.
+	SnapshotPutMeta(vol string, meta SnapshotMeta) error
+
+	// SnapshotList returns all committed snapshots for vol, ordered by CreatedAt.
+	SnapshotList(vol string) ([]SnapshotMeta, error)
 }
 
 const (
