@@ -97,3 +97,20 @@ func TestStore_GetRaw_NotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
+
+func TestStore_ListBuckets(t *testing.T) {
+	st := NewStore(newTestDB(t))
+	require.NoError(t, st.PutRaw("bucket-a", []byte("<x/>")))
+	require.NoError(t, st.PutRaw("bucket-c", []byte("<x/>")))
+	require.NoError(t, st.PutRaw("bucket-b", []byte("<x/>")))
+	got, err := st.ListBuckets()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bucket-a", "bucket-b", "bucket-c"}, got) // Badger iterates keys in lexical order
+}
+
+func TestStore_ListBuckets_Empty(t *testing.T) {
+	st := NewStore(newTestDB(t))
+	got, err := st.ListBuckets()
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
