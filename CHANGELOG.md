@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.139.0] - 2026-05-11 — cli/test: --dedup flag deprecated; e2e workaround removed (PR-C of dedup+snapshot series)
+
+- cli(serve): `--dedup` flag is now hidden and deprecated (`MarkHidden` + `MarkDeprecated`) — dedup is always enabled by default. The flag value is still honored (passing `--dedup=false` keeps the S3-backed `s3SnapshotStore` path) and will be removed entirely in v0.1.0.
+- test(e2e): removed the `--dedup=false` workaround from the shared e2e server and 6 test files, plus the `GRAINFS_DEDUP` env gate. The e2e suite now runs with dedup on by default (matching production). `volume_scrub_test.go` retains explicit `--dedup=false`/`--dedup=true` calls — those are deliberate dedup-off-vs-on comparisons.
+
 ## [0.0.138.0] - 2026-05-11 — feat(volume): dedup-aware snapshot (PR-B of dedup+snapshot series)
 
 - feat(volume): dedup+snapshot integration — `badgerSnapshotStore` implements the `SnapshotStore` interface for dedup-enabled volumes. Snapshot maps live in BadgerDB (`vd:s:` keyspace) with refcount-shared canonicals; lifecycle (Begin/AppendChunk/Commit/Abort/Delete/Rollback/Clone) uses chunked Badger transactions + state markers + MVCC views for crash safety.
