@@ -21,11 +21,12 @@ package cluster
 //   SetInstallSnapshotTransport, SetTimeoutNowTransport, HandleRequestVote,
 //   HandleAppendEntries, HandleInstallSnapshot, BatchMetrics, …
 //
-// Unbridged methods that v2 structurally cannot satisfy (inoperative in PR 22):
-//   TransferLeadership, AddLearner, PromoteToVoter, ChangeMembership,
-//   PeerMatchIndex — accessed via GroupBackend.RaftNode() type assertion which
-//   returns nil under v2. DataGroupPlanExecutor is therefore inoperative under
-//   v2 in this PR. See plan §M4 DONE_WITH_CONCERNS note.
+// M4 follow-up membership bridge (this PR):
+//   AddVoter, AddVoterCtx, RemoveVoter — direct passthrough (v2 has them).
+//   AddLearner, PromoteToVoter, TransferLeadership — passthrough to ErrNotImplemented
+//     (v2 stubs; callers get a clear error instead of a silent skip).
+//   ChangeMembership — sequenced bridge (not atomic; see WARN: in method body).
+//   PeerMatchIndex — returns (0, false); v2 has no per-peer replication state.
 
 import (
 	"context"
@@ -317,6 +318,72 @@ func (a *raftV2Node) RegisterObserver(_ chan<- raft.Event) {
 // warning. Deregister is silent because callers commonly pair Register/Deregister
 // in defer blocks; warning on every Stop() path would be noise.
 func (a *raftV2Node) DeregisterObserver(_ chan<- raft.Event) {}
+
+// --- Membership: direct passthrough (v2 has these methods) ---
+
+// AddVoter passes through to the v2 node's AddVoter implementation.
+func (a *raftV2Node) AddVoter(id, addr string) error { return a.n.AddVoter(id, addr) }
+
+// AddVoterCtx passes through to the v2 node's AddVoterCtx implementation.
+func (a *raftV2Node) AddVoterCtx(ctx context.Context, id, addr string) error {
+	return a.n.AddVoterCtx(ctx, id, addr)
+}
+
+// RemoveVoter passes through to the v2 node's RemoveVoter implementation.
+func (a *raftV2Node) RemoveVoter(id string) error { return a.n.RemoveVoter(id) }
+
+// --- Membership: passthrough to ErrNotImplemented (v2 stubs) ---
+
+// AddLearner passes through to v2. v2 returns ErrNotImplemented (M2 scope);
+// the adapter surfaces this error so operators see a clear failure rather than
+// a silent skip.
+func (a *raftV2Node) AddLearner(id, addr string) error { return a.n.AddLearner(id, addr) }
+
+// PromoteToVoter passes through to v2. v2 returns ErrNotImplemented (M2 scope).
+func (a *raftV2Node) PromoteToVoter(id string) error { return a.n.PromoteToVoter(id) }
+
+// TransferLeadership passes through to v2. v2 returns ErrNotImplemented (M2 scope).
+func (a *raftV2Node) TransferLeadership() error { return a.n.TransferLeadership() }
+
+// --- PeerMatchIndex: v2 does not expose per-peer replication state ---
+
+// PeerMatchIndex returns (0, false) for v2. v2 does not expose per-peer
+// matchIndex; callers (DataGroupPlanExecutor.peerCaughtUp) must treat (0, false)
+// as "not caught up" and either time out or skip the wait.
+func (a *raftV2Node) PeerMatchIndex(_ string) (uint64, bool) { return 0, false }
+
+// --- Membership: sequenced bridge (v2 has no atomic ChangeMembership) ---
+
+// ChangeMembership sequences AddVoterCtx calls for each add then RemoveVoter
+// calls for each remove. Returns the first error encountered; stops processing
+// on the first failure.
+//
+// WARN: This is NOT atomic. v1's ChangeMembership used §4.3 joint consensus
+// (all changes commit as one atomic unit). v2 sequences individual membership
+// changes: a partial failure (e.g. AddVoterCtx succeeds then ctx is cancelled
+// before RemoveVoter) leaves the cluster in an intermediate state. The caller
+// is responsible for reconciling; no rollback of already-applied adds is
+// attempted. If ctx.Done() fires mid-sequence, ctx.Err() is returned immediately
+// without processing remaining entries.
+func (a *raftV2Node) ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error {
+	for _, add := range adds {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := a.n.AddVoterCtx(ctx, add.ID, add.Address); err != nil {
+			return err
+		}
+	}
+	for _, id := range removes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := a.n.RemoveVoter(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // compile-time check: *raftV2Node must satisfy RaftNode.
 var _ RaftNode = (*raftV2Node)(nil)
