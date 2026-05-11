@@ -110,7 +110,7 @@ func TestOwnedShards(t *testing.T) {
 func TestRaftNodeID_NilNode(t *testing.T) {
 	// DistributedBackend with node == nil must return "" (no panic).
 	db := newTestDB(t)
-	b := &DistributedBackend{db: db, fsm: NewFSM(db)}
+	b := &DistributedBackend{db: db, fsm: NewFSM(db, newStateKeyspaceEmpty())}
 	assert.Equal(t, "", b.RaftNodeID())
 }
 
@@ -131,7 +131,7 @@ func TestOwnedShards_EmptyVersionID(t *testing.T) {
 
 func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	b := &DistributedBackend{db: db, fsm: fsm}
 
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{

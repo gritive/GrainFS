@@ -30,7 +30,7 @@ import (
 // starts — otherwise FSM-replicated writes can land before invalidator
 // wiring and stale cache entries survive cross-node.
 func bootSnapshotAndApplyLoop(state *bootState) error {
-	state.fsm = cluster.NewFSM(state.db)
+	state.fsm = cluster.NewFSM(state.db, nil)
 
 	// Wrapping chain (inner → outer): distBackend → packblob → cachedBackend.
 	// The WAL + pullthrough wrappers are added downstream in run.go (later

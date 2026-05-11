@@ -76,7 +76,7 @@ func TestDeleteShardPlacementCmd_EncodeDecode(t *testing.T) {
 // does not write placement records (ring-derived placement has no BadgerDB footprint).
 func TestFSM_PutShardPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	nodes := []string{"n0", "n1", "n2", "n3", "n4", "n5"}
 	raw, err := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
@@ -94,7 +94,7 @@ func TestFSM_PutShardPlacement(t *testing.T) {
 }
 
 func TestFSM_LookupShardPlacement_NotFound(t *testing.T) {
-	fsm := NewFSM(newTestDB(t))
+	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
 	got, err := fsm.LookupShardPlacement("ghost", "obj")
 	assert.NoError(t, err)
 	assert.Equal(t, PlacementRecord{}, got)
@@ -102,7 +102,7 @@ func TestFSM_LookupShardPlacement_NotFound(t *testing.T) {
 
 func TestFSM_DeleteShardPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	put, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
 		Bucket: "b", Key: "k", NodeIDs: []string{"a", "b"},
@@ -124,7 +124,7 @@ func TestFSM_DeleteShardPlacement(t *testing.T) {
 // CmdPutShardPlacement is a no-op; repeated applies don't cause errors.
 func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	v1, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
 		Bucket: "b", Key: "k", NodeIDs: []string{"n0", "n1"},
@@ -145,7 +145,7 @@ func TestFSM_PutShardPlacement_Overwrite(t *testing.T) {
 // CmdPutShardPlacement no-op: snapshot does not include placement rows.
 func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	put, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
 		Bucket: "b", Key: "k", NodeIDs: []string{"n0", "n1", "n2", "n3"},
@@ -158,7 +158,7 @@ func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 
 	// Restore into a fresh FSM and verify no stale placement rows appear.
 	freshDB := newTestDB(t)
-	freshFSM := NewFSM(freshDB)
+	freshFSM := NewFSM(freshDB, newStateKeyspaceEmpty())
 	require.NoError(t, freshFSM.Restore(snap))
 
 	got, err := freshFSM.LookupShardPlacement("b", "k")
@@ -168,7 +168,7 @@ func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 
 func TestFSM_DeleteObject_CascadesToPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Bucket + object meta
 	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
@@ -197,7 +197,7 @@ func TestFSM_DeleteObject_CascadesToPlacement(t *testing.T) {
 // versioned delete (tombstone path) removes the placement record stored under
 // key+"/"+prevVersionID, not just the bare key.
 func TestFSM_DeleteObject_Tombstone_CascadesToVersionedPlacement(t *testing.T) {
-	fsm := NewFSM(newTestDB(t))
+	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
 
 	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
 	require.NoError(t, fsm.Apply(cb))
@@ -228,7 +228,7 @@ func TestFSM_DeleteObject_Tombstone_CascadesToVersionedPlacement(t *testing.T) {
 // TestFSM_DeleteObjectVersion_CascadesToPlacement verifies that hard-deleting
 // a specific version removes its versioned placement record.
 func TestFSM_DeleteObjectVersion_CascadesToPlacement(t *testing.T) {
-	fsm := NewFSM(newTestDB(t))
+	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
 
 	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
 	require.NoError(t, fsm.Apply(cb))
@@ -286,7 +286,7 @@ func TestShardPlacementCmd_EmptyNodes(t *testing.T) {
 
 	// Applying it should succeed and LookupShardPlacement should return ok=true.
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	require.NoError(t, fsm.Apply(raw))
 	got, err := fsm.LookupShardPlacement("b", "k")
 	require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestShardPlacementCmd_EmptyNodes(t *testing.T) {
 // that no placement keys are written (placement is derived from the ring instead).
 func TestFSM_PlacementIsolation(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	p1, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
 		Bucket: "b", Key: "k1", NodeIDs: []string{"n0", "n1"},

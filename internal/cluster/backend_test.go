@@ -497,7 +497,7 @@ func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set snapshot threshold to 5 entries
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 5})
 	backend.SetSnapshotManager(snapMgr, node)
 

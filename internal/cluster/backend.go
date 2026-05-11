@@ -212,7 +212,7 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode) (*Distribu
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	if noOp, err := EncodeNoOpCommand(); err == nil {
 		node.SetNoOpCommand(noOp)

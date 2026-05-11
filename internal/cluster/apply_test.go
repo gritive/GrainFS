@@ -25,7 +25,7 @@ func newTestDB(t *testing.T) *badger.DB {
 
 func TestFSM_CreateBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "test-bucket"})
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestFSM_CreateBucket(t *testing.T) {
 
 func TestFSM_DeleteBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Create then delete
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "to-delete"})
@@ -59,7 +59,7 @@ func TestFSM_DeleteBucket(t *testing.T) {
 
 func TestFSM_PutObjectMeta(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      "b",
@@ -94,7 +94,7 @@ func TestFSM_PutObjectMeta(t *testing.T) {
 
 func TestFSM_DeleteObject(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Put then delete
 	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
@@ -114,7 +114,7 @@ func TestFSM_DeleteObject(t *testing.T) {
 
 func TestFSM_SnapshotRestore(t *testing.T) {
 	db1 := newTestDB(t)
-	fsm1 := NewFSM(db1)
+	fsm1 := NewFSM(db1, newStateKeyspaceEmpty())
 
 	// Apply some commands
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "snap-bucket"})
@@ -130,7 +130,7 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 
 	// Restore to a new DB
 	db2 := newTestDB(t)
-	fsm2 := NewFSM(db2)
+	fsm2 := NewFSM(db2, newStateKeyspaceEmpty())
 	require.NoError(t, fsm2.Restore(snap))
 
 	// Verify state
@@ -147,7 +147,7 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 
 func TestFSM_MultipartCycle(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Create multipart
 	data, _ := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
@@ -186,7 +186,7 @@ func TestFSM_MultipartCycle(t *testing.T) {
 
 func TestFSM_AbortMultipart(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID: "upload-abort", Bucket: "b", Key: "abort.bin", ContentType: "binary", CreatedAt: 100,
@@ -207,7 +207,7 @@ func TestFSM_AbortMultipart(t *testing.T) {
 
 func TestFSM_SetBucketPolicy(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[]}`)
 
@@ -234,7 +234,7 @@ func TestFSM_SetBucketPolicy(t *testing.T) {
 
 func TestFSM_DeleteBucketPolicy(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Set a policy first
 	policyJSON := []byte(`{"Version":"2012-10-17"}`)
@@ -257,7 +257,7 @@ func TestFSM_DeleteBucketPolicy(t *testing.T) {
 
 func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Deleting a non-existent policy should not error (ErrKeyNotFound → nil)
 	data, _ := EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "no-policy"})
@@ -267,7 +267,7 @@ func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
 
 func TestFSM_AbortMultipart_NotExist(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Aborting a non-existent multipart should not error (ErrKeyNotFound → nil)
 	data, _ := EncodeCommand(CmdAbortMultipart, AbortMultipartCmd{
@@ -279,7 +279,7 @@ func TestFSM_AbortMultipart_NotExist(t *testing.T) {
 
 func TestFSM_DeleteObject_NotExist(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Deleting a non-existent object should not error (ErrKeyNotFound → nil)
 	data, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "nope.txt"})
@@ -289,7 +289,7 @@ func TestFSM_DeleteObject_NotExist(t *testing.T) {
 
 func TestFSM_Apply_CorruptData(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	err := fsm.Apply([]byte("definitely not protobuf"))
 	assert.Error(t, err, "Apply should fail on corrupt data")
@@ -297,7 +297,7 @@ func TestFSM_Apply_CorruptData(t *testing.T) {
 
 func TestFSM_Restore_CorruptData(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	err := fsm.Restore([]byte("not valid protobuf snapshot"))
 	assert.Error(t, err, "Restore should fail on corrupt snapshot data")
@@ -306,7 +306,7 @@ func TestFSM_Restore_CorruptData(t *testing.T) {
 func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 	// Test Restore overwrites existing data in the target DB
 	db1 := newTestDB(t)
-	fsm1 := NewFSM(db1)
+	fsm1 := NewFSM(db1, newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "src-bucket"})
 	require.NoError(t, fsm1.Apply(data))
@@ -316,7 +316,7 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 
 	// Create a second DB with different data
 	db2 := newTestDB(t)
-	fsm2 := NewFSM(db2)
+	fsm2 := NewFSM(db2, newStateKeyspaceEmpty())
 	data, _ = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "old-bucket"})
 	require.NoError(t, fsm2.Apply(data))
 
@@ -339,7 +339,7 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 
 func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	ch := make(chan MigrationTask, 1)
 	fsm.SetMigrationHooks(ch, nil, nil)
@@ -366,7 +366,7 @@ func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
 
 func TestFSM_MigrationDone_NotifiesCommit(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	notified := make(chan struct{}, 1)
 	fsm.SetMigrationHooks(nil, &migrationDoneNotifier{fn: func(bucket, key, versionID string) {
@@ -405,7 +405,7 @@ func TestFSM_MigrateShard_ChannelFull_PersistsToDB(t *testing.T) {
 	// When migration channel is full, applyMigrateShard should persist the task
 	// to BadgerDB under "pending-migration:" key.
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Zero-capacity channel — always full
 	ch := make(chan MigrationTask, 0)
@@ -428,7 +428,7 @@ func TestFSM_MigrateShard_ChannelFull_PersistsToDB(t *testing.T) {
 func TestFSM_RecoverPending_ReplaysTasks(t *testing.T) {
 	// RecoverPending reads all pending-migration keys and sends them to the channel.
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Manually write a pending-migration key to simulate a crash after persistence
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
@@ -451,7 +451,7 @@ func TestFSM_RecoverPending_ReplaysTasks(t *testing.T) {
 func TestFSM_MigrationDone_DeletesPendingKey(t *testing.T) {
 	// applyMigrationDone should delete the pending-migration key from BadgerDB.
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Pre-write a pending-migration entry
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
@@ -474,7 +474,7 @@ func TestFSM_MigrationDone_DeletesPendingKey(t *testing.T) {
 
 func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	ch := make(chan MigrationTask, 10)
 	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
 	assert.Empty(t, ch)
@@ -482,7 +482,7 @@ func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
 
 func TestFSM_SetBucketVersioning(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Bucket must exist first.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "vbucket"})
@@ -505,7 +505,7 @@ func TestFSM_SetBucketVersioning(t *testing.T) {
 
 func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "ghost", State: "Enabled"})
 	err := fsm.Apply(data)
@@ -514,7 +514,7 @@ func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
 
 func TestFSM_SetObjectACL(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Write object meta first.
 	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
@@ -543,7 +543,7 @@ func TestFSM_SetObjectACL(t *testing.T) {
 
 func TestFSM_SetObjectACL_NotFound(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "ghost.txt", ACL: 2})
 	err := fsm.Apply(data)
@@ -552,7 +552,7 @@ func TestFSM_SetObjectACL_NotFound(t *testing.T) {
 
 func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Create bucket first.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
@@ -608,4 +608,18 @@ func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
 	}))
 	assert.Equal(t, aclPublicRead, legacyACL, "legacy key ACL")
 	assert.Equal(t, aclPublicRead, versionedACL, "versioned key ACL")
+}
+
+func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
+	db := newTestDB(t)
+	f := NewFSM(db, newStateKeyspaceEmpty())
+	data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"})
+	require.NoError(t, err)
+	require.NoError(t, f.Apply(data))
+	if err := db.View(func(txn *badger.Txn) error {
+		_, e := txn.Get([]byte("bucket:b1")) // empty keyspace => raw layout preserved
+		return e
+	}); err != nil {
+		t.Fatalf("expected bucket:b1 present with raw layout, got %v", err)
+	}
 }

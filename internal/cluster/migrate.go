@@ -124,7 +124,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 	}
 
 	// Start FSM apply loop to keep metadata in sync
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	stopApply := make(chan struct{})
 	go func() {
 		for {

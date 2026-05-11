@@ -195,7 +195,7 @@ func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, 
 	metaDir := filepath.Join(dataDir, "meta")
 	db, err := badger.Open(badger.DefaultOptions(metaDir).WithLogger(nil))
 	require.NoError(t, err)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	cmd, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "photos"})
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(cmd))

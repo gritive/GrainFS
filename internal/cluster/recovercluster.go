@@ -155,7 +155,7 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 	if err != nil {
 		return fmt.Errorf("open target meta db: %w", err)
 	}
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	if err := fsm.Restore(snap.Data); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("restore FSM snapshot: %w", err)

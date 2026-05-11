@@ -12,7 +12,7 @@ import (
 func newResolverTestBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	return &DistributedBackend{db: db, fsm: fsm, ecConfig: ECConfig{DataShards: 2, ParityShards: 1}}
 }
 
@@ -118,7 +118,7 @@ func TestResolvePlacement_ReturnsErrPlacementCorruptForMissingRing(t *testing.T)
 
 func TestIterObjectMetas_YieldsVersionIDAndNodeIDs(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      "bkt",
 		Key:         "obj/with/slash",
@@ -149,7 +149,7 @@ func TestIterObjectMetas_YieldsVersionIDAndNodeIDs(t *testing.T) {
 
 func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	b := &DistributedBackend{db: db, fsm: fsm}
 
 	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "bkt"})
