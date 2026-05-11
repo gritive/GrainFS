@@ -3827,6 +3827,40 @@ func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*
 	return &obj, nil
 }
 
+// placementMetaForVersion reads the per-version object meta and extracts the EC
+// placement fields. Used by GetObjectVersion to drive the same EC reader path
+// GetObject uses. A missing version key returns storage.ErrObjectNotFound.
+func (b *DistributedBackend) placementMetaForVersion(bucket, key, versionID string) (PlacementMeta, error) {
+	var pm PlacementMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			pm = PlacementMeta{
+				VersionID:   versionID,
+				RingVersion: RingVersion(m.RingVersion),
+				ECData:      m.ECData,
+				ECParity:    m.ECParity,
+				NodeIDs:     m.NodeIDs,
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return PlacementMeta{}, err
+	}
+	return pm, nil
+}
+
 // GetObjectVersion reads a specific version's data. Returns
 // storage.ErrObjectNotFound if the version doesn't exist. For delete markers,
 // returns ErrMethodNotAllowed to mirror the erasure backend's behavior.
@@ -3842,6 +3876,29 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
 		return nil, nil, objectQuarantinedError(bucket, key, q)
+	}
+	// EC path: reconstruct from shards when the bucket is erasure-coded.
+	// Mirrors GetObject — versioned objects use shardKey = key+"/"+versionID,
+	// which ResolvePlacement derives from PlacementMeta.VersionID. HeadObjectVersion
+	// above already proved the version meta exists, so an error reading it here is a
+	// real race/corruption signal — propagate it rather than masking it behind the
+	// plain-file fallback's misleading "no such file" for an EC bucket.
+	if b.shardSvc != nil {
+		meta, perr := b.placementMetaForVersion(bucket, key, versionID)
+		if perr != nil {
+			return nil, nil, fmt.Errorf("read placement meta for %s/%s@%s: %w", bucket, key, versionID, perr)
+		}
+		resolved, rerr := b.ResolvePlacement(context.Background(), bucket, key, meta)
+		if rerr == nil {
+			rc, ecErr := b.getObjectECReaderAtShardKey(context.Background(), bucket, resolved.ShardKey, resolved.Record, obj.Size)
+			if ecErr != nil {
+				return nil, nil, fmt.Errorf("ec reconstruct %s/%s@%s via %s: %w", bucket, key, versionID, resolved.Source, ecErr)
+			}
+			return rc, obj, nil
+		}
+		if !errors.Is(rerr, ErrNotEC) {
+			return nil, nil, fmt.Errorf("resolve placement for %s/%s@%s: %w", bucket, key, versionID, rerr)
+		}
 	}
 	// Prefer the versioned local file; fall back to legacy unversioned path if
 	// the version happens to be the legacy latest (uncommon mid-transition case).
