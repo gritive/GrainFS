@@ -70,6 +70,54 @@ func TestSnapshotAppendChunkIncRefs(t *testing.T) {
 	require.Equal(t, int32(2), rc)
 }
 
+func TestSnapshotAbortReleasesRefs(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+	var h0 [32]byte
+	h0[0] = 1
+	_, err := idx.WriteBlock("v", 0, h0, "key0")
+	require.NoError(t, err)
+
+	require.NoError(t, idx.SnapshotBegin("v", "s-aborted"))
+	require.NoError(t, idx.SnapshotAppendChunk("v", "s-aborted", []SnapshotBlockEntry{{0, "key0"}}))
+	require.Equal(t, int32(2), readRefcount(t, idx, "key0"))
+
+	toDelete, err := idx.SnapshotAbort("v", "s-aborted")
+	require.NoError(t, err)
+	require.Empty(t, toDelete) // refcount went 2→1, not zero
+	require.Equal(t, int32(1), readRefcount(t, idx, "key0"))
+	// State entry gone
+	inProg, err := idx.SnapshotListInProgress()
+	require.NoError(t, err)
+	require.Empty(t, inProg)
+}
+
+func TestSnapshotDeleteReleasesCanonical(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+	var h0 [32]byte
+	h0[0] = 1
+	_, err := idx.WriteBlock("v", 0, h0, "key0")
+	require.NoError(t, err)
+	require.NoError(t, idx.SnapshotBegin("v", "s1"))
+	require.NoError(t, idx.SnapshotAppendChunk("v", "s1", []SnapshotBlockEntry{{0, "key0"}}))
+	require.NoError(t, idx.SnapshotCommit("v", "s1", testMeta("s1")))
+
+	// FreeBlock live → refcount 2→1 (snap still holds)
+	_, shouldDel, err := idx.FreeBlock("v", 0)
+	require.NoError(t, err)
+	require.False(t, shouldDel)
+	require.Equal(t, int32(1), readRefcount(t, idx, "key0"))
+
+	toDelete, err := idx.SnapshotDelete("v", "s1")
+	require.NoError(t, err)
+	require.Equal(t, []string{"key0"}, toDelete)
+	// meta should also be gone — verifiable via raw db check
+	require.NoError(t, idx.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(snapMetaKey("v", "s1"))
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+		return nil
+	}))
+}
+
 // R6: invariant test
 // TestWriteBlockDoesNotDeleteSnapshotPinnedCanonical asserts the load-bearing
 // invariant of the (α) refcount-shared design: when a snapshot holds refcount

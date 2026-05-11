@@ -2,8 +2,10 @@ package dedup
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -193,8 +195,104 @@ func (b *badgerIndex) SnapshotCommit(vol, snapID string, meta SnapshotMeta) erro
 	})
 }
 
+// teardownSnapshot is the common path for Abort (Begun) and Delete (Committed).
+// Walks vd:s:{vol}:{snapID}: entries chunked, DecRefs each canonical, returns S3 keys
+// that hit refcount zero. Removes vd:ss: state entry on success; also removes
+// vd:sm: meta entry if it exists (only set when Committed).
+func (b *badgerIndex) teardownSnapshot(vol, snapID string, expectStates ...SnapshotState) ([]string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Verify state under a read txn.
+	if err := b.db.View(func(txn *badger.Txn) error {
+		st, ok, err := b.snapState(txn, vol, snapID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("dedup: snapshot %s/%s not found", vol, snapID)
+		}
+		for _, want := range expectStates {
+			if st == want {
+				return nil
+			}
+		}
+		return fmt.Errorf("dedup: snapshot %s/%s state %d not in %v", vol, snapID, st, expectStates)
+	}); err != nil {
+		return nil, err
+	}
+
+	prefix := snapBlockPrefixKey(vol, snapID)
+	var toDelete []string
+	const chunk = 512
+
+	for {
+		batch := make([][]byte, 0, chunk)
+		batchCanon := make([]string, 0, chunk)
+		if err := b.db.View(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Rewind(); it.Valid() && len(batch) < chunk; it.Next() {
+				item := it.Item()
+				key := append([]byte{}, item.Key()...)
+				var canon string
+				if err := item.Value(func(v []byte) error { canon = string(v); return nil }); err != nil {
+					return err
+				}
+				batch = append(batch, key)
+				batchCanon = append(batchCanon, canon)
+			}
+			return nil
+		}); err != nil {
+			return toDelete, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+
+		if err := retry(maxRetries, func() error {
+			return b.db.Update(func(txn *badger.Txn) error {
+				for i, k := range batch {
+					if err := txn.Delete(k); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+						return err
+					}
+					shouldDel, hash, err := decrementRefcount(txn, batchCanon[i])
+					if err != nil {
+						return err
+					}
+					if shouldDel {
+						hashKey := []byte(hashPrefix + hex.EncodeToString(hash[:]))
+						_ = txn.Delete(hashKey)
+						_ = txn.Delete([]byte(refPrefix + batchCanon[i]))
+						toDelete = append(toDelete, batchCanon[i])
+					}
+				}
+				return nil
+			})
+		}); err != nil {
+			return toDelete, err
+		}
+	}
+
+	// Remove state + meta entries. Meta key may not exist (Abort case) — ignore NotFound.
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Delete(snapStateKey(vol, snapID)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		if err := txn.Delete(snapMetaKey(vol, snapID)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return toDelete, err
+	}
+	return toDelete, nil
+}
+
 func (b *badgerIndex) SnapshotAbort(vol, snapID string) ([]string, error) {
-	return nil, errNotImpl("SnapshotAbort")
+	return b.teardownSnapshot(vol, snapID, SnapshotBegun)
 }
 
 func (b *badgerIndex) SnapshotIter(vol, snapID string, fn func(blkNum int64, canonical string) error) error {
@@ -206,11 +304,45 @@ func (b *badgerIndex) SnapshotReadBlock(vol, snapID string, blkNum int64) (strin
 }
 
 func (b *badgerIndex) SnapshotDelete(vol, snapID string) ([]string, error) {
-	return nil, errNotImpl("SnapshotDelete")
+	return b.teardownSnapshot(vol, snapID, SnapshotCommitted)
 }
 
 func (b *badgerIndex) SnapshotListInProgress() ([]struct{ Vol, SnapID string }, error) {
-	return nil, errNotImpl("SnapshotListInProgress")
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []struct{ Vol, SnapID string }
+	err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = snapStatePrefixKey()
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key())
+			var st SnapshotState
+			if err := item.Value(func(v []byte) error {
+				if len(v) != 1 {
+					return fmt.Errorf("dedup: bad state len %d", len(v))
+				}
+				st = SnapshotState(v[0])
+				return nil
+			}); err != nil {
+				return err
+			}
+			if st != SnapshotBegun {
+				continue
+			}
+			// key = vd:ss:{vol}:{snapID}
+			rest := key[len(snapStatePrefix):]
+			parts := strings.SplitN(rest, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			out = append(out, struct{ Vol, SnapID string }{parts[0], parts[1]})
+		}
+		return nil
+	})
+	return out, err
 }
 
 func (b *badgerIndex) SnapshotListPendingRollbacks() ([]struct{ Vol, SnapID string }, error) {
