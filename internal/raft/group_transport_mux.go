@@ -167,12 +167,14 @@ func (m *GroupRaftQUICMux) handleMuxRequest(payload []byte) ([]byte, error) {
 	}
 }
 
-// lookupNode resolves a groupID to a local *Node. metaGroupID routes to the
-// atomic meta-raft pointer; everything else hits the nodes sync.Map. Returns
-// "mux: unknown group <id>" so senders can detect mixed-version peers via
-// the unknown-group sentinel and fall back to the legacy StreamMetaRaft path
-// (codex P1 #6).
-func (m *GroupRaftQUICMux) lookupNode(groupID string) (*Node, error) {
+// lookupNode resolves a groupID to its local RaftV2Handler. metaGroupID
+// routes to the atomic meta-raft pointer; everything else hits the nodes
+// sync.Map. The meta-raft node is v1-only on this mux — meta-raft v2 goes
+// through the cluster-layer StreamControl bridge (PR 27) and does not appear
+// here. Returns "mux: unknown group <id>" so senders can detect mixed-version
+// peers via the unknown-group sentinel and fall back to the legacy
+// StreamMetaRaft path (codex P1 #6).
+func (m *GroupRaftQUICMux) lookupNode(groupID string) (RaftV2Handler, error) {
 	if groupID == metaGroupID {
 		if mn := m.metaNode.Load(); mn != nil {
 			return mn, nil
@@ -183,7 +185,7 @@ func (m *GroupRaftQUICMux) lookupNode(groupID string) (*Node, error) {
 	if !ok {
 		return nil, fmt.Errorf("mux: unknown group %s", groupID)
 	}
-	return v.(*Node), nil
+	return v.(RaftV2Handler), nil
 }
 
 // dispatchToLocalGroup is invoked per-batch-item on the receiver side for

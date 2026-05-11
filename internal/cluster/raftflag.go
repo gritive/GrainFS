@@ -11,16 +11,17 @@ import (
 // raftV2FlagEnv is the environment variable that controls raft v2 selection.
 // Value is a comma-separated list of package names.
 //
-// As of M5 PR 28 the phased per-package flip begins with serveruntime: leaving
-// the env var unset selects v2 for serveruntime by default while cluster
-// remains v1 until its group-raft mux is wired through the v2 RPC bridge
-// (PR 28b follow-up — tracked in TODOS.md). The remaining values are:
+// As of M5 PR 28b the phased flip is complete: leaving the env var unset
+// selects v2 for both serveruntime and cluster. The cluster default-on was
+// gated on wiring the per-group QUIC mux through a v2-aware dispatch
+// (raft.GroupRaftQUICMux.RegisterV2 — see internal/raft/group_transport_quic.go).
+// The remaining values are:
 //
-//   - unset (default):     serveruntime → v2. cluster → v1.
+//   - unset (default):     serveruntime → v2. cluster → v2.
 //   - "off":               v2 disabled everywhere (operator escape hatch;
 //     PR 29 removes the flag entirely once v2 is validated in production).
-//   - "all":               every supported package → v2 (explicit opt-in for
-//     the full flip; useful for staging soak ahead of PR 28b).
+//   - "all":               every supported package → v2 (now equivalent to
+//     unset; preserved so old test harnesses keep working).
 //   - "cluster", "serveruntime", or a comma-separated mix: only the named
 //     packages get v2. Backward-compatible with PR 26/27 opt-in tests.
 //
@@ -38,9 +39,10 @@ var validRaftV2Pkgs = map[string]bool{
 }
 
 // raftV2DefaultOnPkgs lists the packages whose default (env-unset) selection
-// is v2 as of M5 PR 28. PR 28b adds "cluster" once the group-raft mux is
-// wired through the v2 RPC bridge; PR 29 removes this list entirely.
-var raftV2DefaultOnPkgs = []string{"serveruntime"}
+// is v2. M5 PR 28 added serveruntime; M5 PR 28b adds cluster now that the
+// per-group QUIC mux is wired through RegisterV2. PR 29 removes this list
+// entirely.
+var raftV2DefaultOnPkgs = []string{"serveruntime", "cluster"}
 
 // raftV2Flag is the parsed flag set, populated once at init time.
 var (
