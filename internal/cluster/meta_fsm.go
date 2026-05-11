@@ -64,6 +64,8 @@ const (
 	MetaCmdTypeIAMInitFirstSA          = clusterpb.MetaCmdTypeIAMInitFirstSA
 	MetaCmdTypeIAMBucketUpstreamPut    = clusterpb.MetaCmdTypeIAMBucketUpstreamPut
 	MetaCmdTypeIAMBucketUpstreamDelete = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
+	MetaCmdTypeBucketLifecyclePut      = clusterpb.MetaCmdTypeBucketLifecyclePut
+	MetaCmdTypeBucketLifecycleDelete   = clusterpb.MetaCmdTypeBucketLifecycleDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
