@@ -71,18 +71,28 @@ func TestStateKeyspace_NoCrossGroupCollision_PathologicalIDs(t *testing.T) {
 		strings.Repeat("a", 300),    // length >= 256
 		"with\x00nul", "with:colon", // weird bytes
 	}
+	raw := []byte("obj:bucket/key")
 	keyspaces := map[string]*stateKeyspace{}
 	for _, id := range ids {
-		ks, err := newStateKeyspace(id)
-		if err != nil {
-			t.Fatalf("newStateKeyspace(%q): %v", id, err)
-		}
-		keyspaces[id] = ks
+		id := id
+		t.Run(id, func(t *testing.T) {
+			ks, err := newStateKeyspace(id)
+			if err != nil {
+				t.Fatalf("newStateKeyspace(%q): %v", id, err)
+			}
+			full := ks.Key(raw)
+			if !ks.HasPrefix(full) {
+				t.Fatalf("HasPrefix(Key(raw)) = false for id %q", id)
+			}
+			if got := ks.MustStrip(full); !bytes.Equal(got, raw) {
+				t.Fatalf("MustStrip round-trip for id %q = %q, want %q", id, got, raw)
+			}
+			keyspaces[id] = ks
+		})
 	}
 	if _, err := newStateKeyspace(""); err == nil {
 		t.Fatal("newStateKeyspace(\"\") should error")
 	}
-	raw := []byte("obj:bucket/key")
 	seen := map[string]string{}
 	for id, ks := range keyspaces {
 		enc := string(ks.Key(raw))

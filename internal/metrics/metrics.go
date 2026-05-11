@@ -460,4 +460,12 @@ var (
 		Name: "grainfs_replication_skipped_total",
 		Help: "Total replication writes skipped due to unhealthy peer.",
 	}, []string{"peer", "bucket"})
+
+	// FsmKeyspaceLeakTotal counts FSM-state keys observed without the expected
+	// group prefix at a scoped strip-site. A non-zero value means a
+	// prefix-scoping bug — the process also panics on the offending op.
+	FsmKeyspaceLeakTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_fsm_keyspace_leak_total",
+		Help: "FSM-state keys observed without the expected group prefix at a scoped strip-site (indicates a prefix-scoping bug; the op also panics).",
+	})
 )

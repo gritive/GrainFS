@@ -7,18 +7,9 @@ import (
 	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-)
 
-// keyspaceLeakTotal counts keys that reached a scoped strip-site without the
-// expected group prefix. A non-zero value means a prefix-scoping bug — the
-// process panics on the offending op (see MustStrip); the counter is the
-// metric trail.
-var keyspaceLeakTotal = promauto.NewCounter(prometheus.CounterOpts{
-	Name: "grainfs_fsm_keyspace_leak_total",
-	Help: "FSM-state keys observed without the expected group prefix at a scoped strip-site (indicates a prefix-scoping bug; the op also panics).",
-})
+	"github.com/gritive/GrainFS/internal/metrics"
+)
 
 // errStopScan, returned from a scanGroupPrefix callback, halts the scan cleanly
 // (scanGroupPrefix returns nil). Use for early-break loops.
@@ -52,7 +43,7 @@ func newStateKeyspace(groupID string) (*stateKeyspace, error) {
 	return &stateKeyspace{prefix: p}, nil
 }
 
-// isShared reports whether this keyspace carries a non-empty group prefix.
+// isShared reports a non-empty group prefix; used by FSM.RestoreV2 to choose DropPrefix vs whole-DB delete.
 func (ks *stateKeyspace) isShared() bool { return len(ks.prefix) > 0 }
 
 // Key returns prefix||raw. Use for point Get/Set/Delete.
@@ -98,7 +89,7 @@ func (ks *stateKeyspace) MustStrip(fullKey []byte) []byte {
 		return fullKey
 	}
 	if !bytes.HasPrefix(fullKey, ks.prefix) {
-		keyspaceLeakTotal.Inc()
+		metrics.FsmKeyspaceLeakTotal.Inc()
 		panic(fmt.Sprintf("stateKeyspace: key %q lacks expected group prefix (len=%d) — prefix-scoping bug", fullKey, len(ks.prefix)))
 	}
 	return fullKey[len(ks.prefix):]
