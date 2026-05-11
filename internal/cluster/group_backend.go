@@ -26,13 +26,41 @@ import (
 // instances — only on the coordinator.
 type GroupBackend struct {
 	*DistributedBackend
-	groupID   string
-	peerIDs   []string
-	logStore  raft.LogStore               // owned: closed on GroupBackend.Close (nil if wrapped)
-	vlogEntry *resourcewatch.RegisteredDB // owned: deregistered on Close (nil if wrapped)
-	wrapped   bool                        // true → Close is no-op (caller owns lifecycle)
-	closed    atomic.Bool
-	closeOnce sync.Once
+	groupID         string
+	peerIDs         []string
+	logStore        raft.LogStore               // owned: closed on GroupBackend.Close (nil if wrapped)
+	vlogEntry       *resourcewatch.RegisteredDB // owned: deregistered on Close (nil if wrapped)
+	wrapped         bool                        // true → Close is no-op (caller owns lifecycle)
+	closed          atomic.Bool
+	closeOnce       sync.Once
+	testLeaderProbe raftLeaderProbe // test-only override for leaderProbe(); nil in production
+}
+
+// raftLeaderProbe is the minimal interface LocalExecution.ResolveWrite needs to
+// consult leadership. Satisfied by *raft.Node in production and by fakes in
+// unit tests.
+type raftLeaderProbe interface {
+	IsLeader() bool
+}
+
+// leaderProbe returns the IsLeader source for ResolveWrite. Exists to allow
+// tests to inject a fake via testLeaderProbe; production callers should use
+// RaftNode() directly.
+func (g *GroupBackend) leaderProbe() raftLeaderProbe {
+	if g.testLeaderProbe != nil {
+		return g.testLeaderProbe
+	}
+	if g.node == nil {
+		return nil
+	}
+	return g.node
+}
+
+// newGroupBackendWithRaftForTest is a test-only constructor returning a
+// GroupBackend whose leaderProbe() reflects the provided fake. Production
+// callers must use NewGroupBackend / WrapDistributedBackend.
+func newGroupBackendWithRaftForTest(p raftLeaderProbe) *GroupBackend {
+	return &GroupBackend{testLeaderProbe: p}
 }
 
 // GroupBackendConfig wires GroupBackend dependencies. DB/Node/ShardSvc are
