@@ -225,6 +225,51 @@ func TestSnapshotListAndPutMeta(t *testing.T) {
 	require.Empty(t, got)
 }
 
+func TestSnapshotRollbackSwapsLive(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+
+	// vol "v": block 0 = canonical "k0a" initially.
+	var h0a, h0b [32]byte
+	h0a[0] = 1
+	h0b[0] = 2
+	_, err := idx.WriteBlock("v", 0, h0a, "k0a")
+	require.NoError(t, err)
+
+	// Snapshot s1 captures k0a.
+	require.NoError(t, idx.SnapshotBegin("v", "s1"))
+	require.NoError(t, idx.SnapshotAppendChunk("v", "s1", []SnapshotBlockEntry{{0, "k0a"}}))
+	require.NoError(t, idx.SnapshotCommit("v", "s1", testMeta("s1")))
+
+	// Overwrite block 0 with k0b — live canonical changes; snap still holds k0a.
+	_, err = idx.WriteBlock("v", 0, h0b, "k0b")
+	require.NoError(t, err)
+	require.Equal(t, int32(1), readRefcount(t, idx, "k0a")) // only snap
+	require.Equal(t, int32(1), readRefcount(t, idx, "k0b")) // only live
+
+	// Write block 1 with k1 in live (not in snap).
+	var h1 [32]byte
+	h1[0] = 3
+	_, err = idx.WriteBlock("v", 1, h1, "k1")
+	require.NoError(t, err)
+
+	toDelete, err := idx.SnapshotRollback("v", "s1")
+	require.NoError(t, err)
+	// Expected: k0b refcount → 0 (delete), k1 refcount → 0 (delete).
+	// k0a refcount → 2 (snap + new live).
+	require.ElementsMatch(t, []string{"k0b", "k1"}, toDelete)
+	require.Equal(t, int32(2), readRefcount(t, idx, "k0a"))
+
+	// Live block 0 now resolves to k0a.
+	canon, found, err := idx.ReadBlock("v", 0)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "k0a", canon)
+	// Live block 1 gone.
+	_, found, err = idx.ReadBlock("v", 1)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
 // R6: invariant test
 // TestWriteBlockDoesNotDeleteSnapshotPinnedCanonical asserts the load-bearing
 // invariant of the (α) refcount-shared design: when a snapshot holds refcount

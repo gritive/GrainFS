@@ -396,7 +396,158 @@ func (b *badgerIndex) SnapshotListPendingClones() ([]string, error) {
 }
 
 func (b *badgerIndex) SnapshotRollback(vol, snapID string) ([]string, error) {
-	return nil, errNotImpl("SnapshotRollback")
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 1. Verify snap is committed.
+	if err := b.db.View(func(txn *badger.Txn) error {
+		st, ok, err := b.snapState(txn, vol, snapID)
+		if err != nil {
+			return err
+		}
+		if !ok || st != SnapshotCommitted {
+			return fmt.Errorf("dedup: snapshot %s/%s not committed", vol, snapID)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// 2. Mark rollback in-progress.
+	rbKey := rollbackStateKey(vol, snapID)
+	if err := b.db.Update(func(txn *badger.Txn) error { return txn.Set(rbKey, []byte{1}) }); err != nil {
+		return nil, err
+	}
+
+	var toDelete []string
+	const chunk = 256
+
+	// 3. Collect snap entries (snap is immutable while committed).
+	type pair struct {
+		blkNum int64
+		canon  string
+	}
+	var snapEntries []pair
+	snapByBlk := make(map[int64]string)
+	if err := b.SnapshotIter(vol, snapID, func(blk int64, c string) error {
+		snapEntries = append(snapEntries, pair{blk, c})
+		snapByBlk[blk] = c
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// 4. Walk live (vd:b:{vol}:*) entries; collect blkNums that need delete (not in snap).
+	livePrefix := blockBadgerPrefix(vol)
+	var liveOnly []pair
+	if err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = livePrefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := item.Key()
+			suffix := key[len(livePrefix):]
+			if len(suffix) < 12 {
+				continue
+			}
+			blk, err := strconv.ParseInt(string(suffix[:12]), 10, 64)
+			if err != nil {
+				return err
+			}
+			if _, inSnap := snapByBlk[blk]; inSnap {
+				continue
+			}
+			var canon string
+			if err := item.Value(func(v []byte) error { canon = string(v); return nil }); err != nil {
+				return err
+			}
+			liveOnly = append(liveOnly, pair{blk, canon})
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// 5. Apply snap entries to live, chunked.
+	for i := 0; i < len(snapEntries); i += chunk {
+		end := i + chunk
+		if end > len(snapEntries) {
+			end = len(snapEntries)
+		}
+		batch := snapEntries[i:end]
+		if err := retry(maxRetries, func() error {
+			return b.db.Update(func(txn *badger.Txn) error {
+				for _, e := range batch {
+					blkKey := blockBadgerKey(vol, e.blkNum)
+					var prevCanon string
+					if item, err := txn.Get(blkKey); err == nil {
+						_ = item.Value(func(v []byte) error { prevCanon = string(v); return nil })
+					}
+					if prevCanon == e.canon {
+						continue
+					}
+					if err := incrRefcount(txn, e.canon); err != nil {
+						return err
+					}
+					if prevCanon != "" {
+						shouldDel, hash, err := decrementRefcount(txn, prevCanon)
+						if err != nil {
+							return err
+						}
+						if shouldDel {
+							_ = txn.Delete([]byte(hashPrefix + hex.EncodeToString(hash[:])))
+							_ = txn.Delete([]byte(refPrefix + prevCanon))
+							toDelete = append(toDelete, prevCanon)
+						}
+					}
+					if err := txn.Set(blkKey, []byte(e.canon)); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}); err != nil {
+			return toDelete, err
+		}
+	}
+
+	// 6. Remove live-only blocks, chunked.
+	for i := 0; i < len(liveOnly); i += chunk {
+		end := i + chunk
+		if end > len(liveOnly) {
+			end = len(liveOnly)
+		}
+		batch := liveOnly[i:end]
+		if err := retry(maxRetries, func() error {
+			return b.db.Update(func(txn *badger.Txn) error {
+				for _, e := range batch {
+					if err := txn.Delete(blockBadgerKey(vol, e.blkNum)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+						return err
+					}
+					shouldDel, hash, err := decrementRefcount(txn, e.canon)
+					if err != nil {
+						return err
+					}
+					if shouldDel {
+						_ = txn.Delete([]byte(hashPrefix + hex.EncodeToString(hash[:])))
+						_ = txn.Delete([]byte(refPrefix + e.canon))
+						toDelete = append(toDelete, e.canon)
+					}
+				}
+				return nil
+			})
+		}); err != nil {
+			return toDelete, err
+		}
+	}
+
+	// 7. Clear rollback marker.
+	if err := b.db.Update(func(txn *badger.Txn) error { return txn.Delete(rbKey) }); err != nil {
+		return toDelete, err
+	}
+	return toDelete, nil
 }
 
 func (b *badgerIndex) SnapshotClone(srcVol, dstVol string) error {
