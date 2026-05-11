@@ -24,14 +24,14 @@ func TestAPI_ConfigurationReflectsConfig(t *testing.T) {
 }
 
 // TestAPI_MembershipStubsReturnErrNotImplemented covers the surfaces still
-// awaiting implementation (AddLearner, PromoteToVoter, TransferLeadership).
+// awaiting implementation (AddLearner, PromoteToVoter).
 // AddVoter / RemoveVoter are now wired through joint consensus and return
 // ErrNotLeader from a non-running follower; their happy paths live in
 // membership_test.go.
+// TransferLeadership is now implemented; its error cases live in transfer_test.go.
 func TestAPI_MembershipStubsReturnErrNotImplemented(t *testing.T) {
 	n, err := v2.NewNode(v2.Config{ID: "n1"})
 	require.NoError(t, err)
 	require.ErrorIs(t, n.AddLearner("n2", "addr"), v2.ErrNotImplemented)
 	require.ErrorIs(t, n.PromoteToVoter("n2"), v2.ErrNotImplemented)
-	require.ErrorIs(t, n.TransferLeadership(), v2.ErrNotImplemented)
 }
