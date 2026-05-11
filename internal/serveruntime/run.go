@@ -84,13 +84,15 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 		}
 		state.node = v2Node
-		// PR 26 scope deliberately stops here for v2: QUIC RPC inbound
-		// dispatch (raft.NewQUICRPCTransport) accesses v1-only
-		// HandleRequestVote / HandleAppendEntries etc. The parallel v2
-		// QUIC RPC bridge lands in PR 27. Without it, a multi-node v2
-		// cluster cannot exchange Raft RPCs — acceptable because the
-		// flag is opt-in and PR 28 (default-on) is gated on PR 27.
-		log.Warn().Msg("raft v2: skipping QUIC RPC transport wiring (deferred to PR 27); multi-node Raft RPCs will not flow")
+		// M5 PR 27: wire the v2 QUIC RPC bridge so multi-node v2 clusters
+		// can exchange Raft RPCs. The bridge re-implements v1's QUIC RPC
+		// dispatch on top of cluster.RaftNode.Handle* (the v2 adapter
+		// translates to raftv2.Node). Wire format is byte-identical to v1
+		// (see internal/cluster/raftv2_quic_codec.go); v1 is frozen until
+		// PR 30 deletes it.
+		v2RPCTransport := cluster.NewRaftV2QUICRPCTransport(state.quicTransport, v2Node)
+		v2RPCTransport.SetTransport()
+		log.Info().Msg("raft v2: QUIC RPC transport wired (M5 PR 27)")
 	} else {
 		node := raft.NewNode(raftCfg, state.logStore)
 		if !cfg.JoinMode {
