@@ -13,8 +13,12 @@
 - `bootOpenSharedRaftLogDB`'s `groups/*/raft/` legacy-layout refusal — there is
   no longer any way to produce that layout.
 - `GroupLifecycleConfig.OpenLogStore` / `OpenGroupLogStoreFunc` — unused
-  indirection. The `LogStore == nil → BadgerLogStore at {groupDir}/raft`
-  fallback remains (used by `internal/cluster` unit tests).
+  indirection.
+- The per-group raft-log layout itself: `instantiateLocalGroup` no longer
+  auto-creates a `<dataDir>/groups/*/raft/` BadgerDB when `LogStore` is unset —
+  `GroupLifecycleConfig.LogStore` is now **required** (production passes a
+  shared-log view via `raft.OpenSharedLogStore`; `internal/cluster` tests pass
+  `raft.NewBadgerLogStore` explicitly). Nothing creates `groups/*/raft/` anymore.
 - `GRAINFS_PERF_SHARED_BADGER` forwarding in `cluster_perf_profile_test.go`.
 
 ### Unchanged
