@@ -21,9 +21,11 @@ var noopAE = func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntrie
 	return nil, fmt.Errorf("no transport")
 }
 
-// TestRaftV2Smoke_DefaultIsV1 verifies that with no flag set, newRaftNode
-// returns a v1 node, and that GroupBackend.RaftNode() type-asserts correctly.
-func TestRaftV2Smoke_DefaultIsV1(t *testing.T) {
+// TestRaftV2Smoke_DefaultClusterIsV1 verifies that with no flag set, the
+// cluster package still selects a v1 node. M5 PR 28 default-on covers
+// serveruntime only; cluster is held until PR 28b (group-raft mux wired
+// through the v2 RPC bridge — see raftV2DefaultOnPkgs in raftflag.go).
+func TestRaftV2Smoke_DefaultClusterIsV1(t *testing.T) {
 	t.Setenv("GRAINFS_RAFT_V2", "")
 	resetRaftV2FlagForTest()
 	t.Cleanup(resetRaftV2FlagForTest)
@@ -32,9 +34,8 @@ func TestRaftV2Smoke_DefaultIsV1(t *testing.T) {
 	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 
-	// Should be *raft.Node (v1).
 	v1, ok := node.(*raft.Node)
-	assert.True(t, ok, "expected *raft.Node (v1) when flag is unset")
+	assert.True(t, ok, "expected *raft.Node (v1) for cluster when flag is unset")
 	assert.NotNil(t, v1)
 
 	node.SetTransport(noopRV, noopAE)
@@ -42,6 +43,45 @@ func TestRaftV2Smoke_DefaultIsV1(t *testing.T) {
 	defer node.Close()
 
 	assert.Equal(t, "node-1", node.ID())
+}
+
+// TestRaftV2Smoke_DefaultServeruntimeIsV2 documents the M5 PR 28 phased flip:
+// serveruntime is now v2 by default while cluster remains v1.
+func TestRaftV2Smoke_DefaultServeruntimeIsV2(t *testing.T) {
+	t.Setenv("GRAINFS_RAFT_V2", "")
+	resetRaftV2FlagForTest()
+	t.Cleanup(resetRaftV2FlagForTest)
+
+	assert.True(t, IsV2Enabled("serveruntime"),
+		"expected serveruntime to default to v2 when GRAINFS_RAFT_V2 is unset")
+	assert.False(t, IsV2Enabled("cluster"),
+		"expected cluster to stay v1 when GRAINFS_RAFT_V2 is unset (held for PR 28b)")
+}
+
+// TestRaftV2Smoke_OffEscapeHatchDisablesV2 verifies the operator escape hatch:
+// GRAINFS_RAFT_V2=off disables v2 for every package (reverts serveruntime back
+// to v1; cluster stays v1).
+func TestRaftV2Smoke_OffEscapeHatchDisablesV2(t *testing.T) {
+	t.Setenv("GRAINFS_RAFT_V2", "off")
+	resetRaftV2FlagForTest()
+	t.Cleanup(resetRaftV2FlagForTest)
+
+	assert.False(t, IsV2Enabled("serveruntime"),
+		"GRAINFS_RAFT_V2=off must disable v2 for serveruntime")
+	assert.False(t, IsV2Enabled("cluster"),
+		"GRAINFS_RAFT_V2=off must disable v2 for cluster")
+
+	rcfg := raft.DefaultConfig("node-1", nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
+	require.NoError(t, err)
+
+	v1, ok := node.(*raft.Node)
+	assert.True(t, ok, "expected *raft.Node (v1) when GRAINFS_RAFT_V2=off")
+	assert.NotNil(t, v1)
+
+	node.SetTransport(noopRV, noopAE)
+	node.Start()
+	defer node.Close()
 }
 
 // TestRaftV2Smoke_ClusterFlagSelectsV2 verifies that GRAINFS_RAFT_V2=cluster
@@ -118,23 +158,27 @@ func TestRaftV2Smoke_OtherPkgFlagDoesNotAffectCluster(t *testing.T) {
 	os.Remove(node.ID()) // cleanup any state files
 }
 
-// TestRaftV2Smoke_ParseFlag verifies the flag parser handles all documented cases.
+// TestRaftV2Smoke_ParseFlag verifies the flag parser handles all documented
+// cases. As of M5 PR 28 an empty env defaults to serveruntime=v2 (cluster
+// stays v1 until PR 28b); "off" is the escape hatch that disables v2.
 func TestRaftV2Smoke_ParseFlag(t *testing.T) {
 	cases := []struct {
+		name    string
 		env     string
 		cluster bool
 		srv     bool
 	}{
-		{"", false, false},
-		{"cluster", true, false},
-		{"serveruntime", false, true},
-		{"cluster,serveruntime", true, true},
-		{"all", true, true},
-		{"unknown", false, false},
-		{"cluster,unknown", true, false},
+		{"empty_defaults_to_serveruntime_v2", "", false, true},
+		{"off_disables_all", "off", false, false},
+		{"cluster_only", "cluster", true, false},
+		{"serveruntime_only", "serveruntime", false, true},
+		{"both_named", "cluster,serveruntime", true, true},
+		{"all_alias", "all", true, true},
+		{"unknown_ignored", "unknown", false, false},
+		{"unknown_plus_cluster", "junk,cluster", true, false},
 	}
 	for _, tc := range cases {
-		t.Run(tc.env, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			got := ParseRaftV2Flag(tc.env)
 			assert.Equal(t, tc.cluster, got["cluster"], "cluster")
 			assert.Equal(t, tc.srv, got["serveruntime"], "serveruntime")
