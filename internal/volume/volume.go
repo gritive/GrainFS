@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -102,14 +101,15 @@ type SnapshotInfo struct {
 
 // Manager manages volumes on top of a storage.Backend.
 type Manager struct {
-	backend  storage.Backend
-	mu       sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장. lock-free actor 검토 — Manager는 메타·dedup·live_map 다중 자료구조의 cross-volume 원자성을 요구하고, 모든 read/write/snapshot operations이 통과하므로 channel-based actor는 핫패스 round-trip 비용 + 메타 RMW 시퀀싱 복잡도가 mutex보다 큼. 추후 sharded mutex 분리 검토 가능.
-	volumes  map[string]*Volume          // 인메모리 캐시
-	liveMaps map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
-	dedup    dedup.DedupIndex            // nil = dedup 비활성화
-	blocks   *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
-	opts     ManagerOptions
-	blkPool  *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
+	backend   storage.Backend
+	mu        sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장. lock-free actor 검토 — Manager는 메타·dedup·live_map 다중 자료구조의 cross-volume 원자성을 요구하고, 모든 read/write/snapshot operations이 통과하므로 channel-based actor는 핫패스 round-trip 비용 + 메타 RMW 시퀀싱 복잡도가 mutex보다 큼. 추후 sharded mutex 분리 검토 가능.
+	volumes   map[string]*Volume          // 인메모리 캐시
+	liveMaps  map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
+	dedup     dedup.DedupIndex            // nil = dedup 비활성화
+	blocks    *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
+	opts      ManagerOptions
+	blkPool   *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
+	snapStore SnapshotStore
 }
 
 // NewManager creates a new volume manager.
@@ -119,7 +119,7 @@ func NewManager(backend storage.Backend) *Manager {
 
 // NewManagerWithOptions creates a new volume manager with the given options.
 func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manager {
-	return &Manager{
+	m := &Manager{
 		backend:  backend,
 		volumes:  make(map[string]*Volume),
 		liveMaps: make(map[string]map[int64]string),
@@ -128,6 +128,8 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 		opts:     opts,
 		blkPool:  pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
 	}
+	m.snapStore = newS3SnapshotStore(m)
+	return m
 }
 
 // getBlkBuf returns a zeroed block buffer from the pool, or allocates one for non-default sizes.
@@ -808,69 +810,10 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	liveMap, err := m.getLiveMapUnlocked(name)
+	snapID, err := m.snapStore.CreateSnapshot(context.Background(), vol)
 	if err != nil {
-		return "", fmt.Errorf("load live_map: %w", err)
+		return "", err
 	}
-
-	snapID := uuid.Must(uuid.NewV7()).String()
-
-	// Build snapshot_map from current live state
-	snapMap := make(map[int64]string)
-	if len(liveMap) == 0 {
-		// No live_map: enumerate default block objects
-		if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
-			blkNum, ok := parseBlockNum(obj.Key)
-			if ok {
-				snapMap[blkNum] = obj.Key
-			}
-			return nil
-		}); err != nil {
-			return "", fmt.Errorf("list blocks: %w", err)
-		}
-	} else {
-		for k, v := range liveMap {
-			snapMap[k] = v
-		}
-	}
-
-	// CopyObject each block into snapshot namespace
-	copier, hasCopier := m.backend.(storage.Copier)
-	for blkNum, srcKey := range snapMap {
-		dstKey := snapBlockKey(name, snapID, blkNum)
-		if hasCopier {
-			if _, err := copier.CopyObject(volumeBucketName, srcKey, volumeBucketName, dstKey); err != nil {
-				return "", fmt.Errorf("copy block %d to snapshot: %w", blkNum, err)
-			}
-		} else {
-			if err := m.copyObjectFallback(volumeBucketName, srcKey, volumeBucketName, dstKey); err != nil {
-				return "", fmt.Errorf("copy block %d to snapshot: %w", blkNum, err)
-			}
-		}
-		snapMap[blkNum] = dstKey
-	}
-
-	// Persist snapshot map
-	var mapBuf bytes.Buffer
-	if err := serializeLiveMap(snapMap, &mapBuf); err != nil {
-		return "", fmt.Errorf("serialize snapshot map: %w", err)
-	}
-	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, snapMapKey(name, snapID), &mapBuf, "text/plain"); err != nil {
-		return "", fmt.Errorf("store snapshot map: %w", err)
-	}
-
-	// Persist snapshot metadata
-	meta := snapshotMetaJSON{ID: snapID, CreatedAt: time.Now().UTC(), BlockCount: int64(len(snapMap))}
-	metaData, err := json.Marshal(meta)
-	if err != nil {
-		return "", fmt.Errorf("marshal snapshot meta: %w", err)
-	}
-	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, snapMetaKey(name, snapID), bytes.NewReader(metaData), "application/json"); err != nil {
-		return "", fmt.Errorf("store snapshot meta: %w", err)
-	}
-
-	// Increment snapshot_count and persist volume metadata
 	vol.SnapshotCount++
 	data, err := marshalVolume(vol)
 	if err != nil {
@@ -879,10 +822,6 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return "", fmt.Errorf("persist volume meta: %w", err)
 	}
-
-	// Invalidate live_map cache so next operation reloads
-	delete(m.liveMaps, name)
-
 	return snapID, nil
 }
 
@@ -890,39 +829,17 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.listSnapshotsUnlocked(name)
+	if _, err := m.getVolUnlocked(name); err != nil {
+		return nil, err
+	}
+	return m.snapStore.ListSnapshots(context.Background(), name)
 }
 
 func (m *Manager) listSnapshotsUnlocked(name string) ([]SnapshotInfo, error) {
 	if _, err := m.getVolUnlocked(name); err != nil {
 		return nil, err
 	}
-
-	prefix := snapPrefix(name)
-	var snaps []SnapshotInfo
-	if err := m.backend.WalkObjects(context.Background(), volumeBucketName, prefix, func(obj *storage.Object) error {
-		if !strings.HasSuffix(obj.Key, "/meta") {
-			return nil
-		}
-		rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, obj.Key)
-		if err != nil {
-			return nil
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil
-		}
-		var meta snapshotMetaJSON
-		if err := json.Unmarshal(data, &meta); err != nil {
-			return nil
-		}
-		snaps = append(snaps, SnapshotInfo(meta))
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("list snapshots: %w", err)
-	}
-	return snaps, nil
+	return m.snapStore.ListSnapshots(context.Background(), name)
 }
 
 // DeleteSnapshot removes a snapshot and frees its block objects.
@@ -937,32 +854,16 @@ func (m *Manager) deleteSnapshotUnlocked(name, snapID string) error {
 	if err != nil {
 		return err
 	}
-
-	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))
-	if err != nil {
-		return fmt.Errorf("snapshot %q not found for volume %q", snapID, name)
+	if err := m.snapStore.DeleteSnapshot(context.Background(), vol, snapID); err != nil {
+		return err
 	}
-	snapMap, err := parseLiveMap(rc)
-	rc.Close()
-	if err != nil {
-		return fmt.Errorf("parse snapshot map: %w", err)
-	}
-
-	for _, key := range snapMap {
-		m.backend.DeleteObject(context.Background(), volumeBucketName, key) //nolint:errcheck
-	}
-	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))  //nolint:errcheck
-	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMetaKey(name, snapID)) //nolint:errcheck
-
 	if vol.SnapshotCount > 0 {
 		vol.SnapshotCount--
 	}
-
 	if vol.SnapshotCount == 0 {
 		m.backend.DeleteObject(context.Background(), volumeBucketName, liveMapKey(name)) //nolint:errcheck
 		delete(m.liveMaps, name)
 	}
-
 	data, err := marshalVolume(vol)
 	if err != nil {
 		return fmt.Errorf("marshal volume: %w", err)
@@ -975,128 +876,24 @@ func (m *Manager) deleteSnapshotUnlocked(name, snapID string) error {
 func (m *Manager) Rollback(name, snapID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if _, err := m.getVolUnlocked(name); err != nil {
+	vol, err := m.getVolUnlocked(name)
+	if err != nil {
 		return err
 	}
-
-	// Load snapshot map
-	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))
-	if err != nil {
-		return fmt.Errorf("snapshot %q not found for volume %q", snapID, name)
-	}
-	snapMap, err := parseLiveMap(rc)
-	rc.Close()
-	if err != nil {
-		return fmt.Errorf("parse snapshot map: %w", err)
-	}
-
-	// Load current live_map (create empty if needed)
-	liveMap, err := m.getLiveMapUnlocked(name)
-	if err != nil {
-		return fmt.Errorf("load live_map: %w", err)
-	}
-	if liveMap == nil {
-		liveMap = make(map[int64]string)
-		m.liveMaps[name] = liveMap
-	}
-
-	copier, hasCopier := m.backend.(storage.Copier)
-
-	// For each block in snapshot, copy back into live namespace with a new versioned key
-	for blkNum, snapKey := range snapMap {
-		newKey := cowBlockKey(name, blkNum)
-		if hasCopier {
-			if _, err := copier.CopyObject(volumeBucketName, snapKey, volumeBucketName, newKey); err != nil {
-				return fmt.Errorf("rollback block %d: %w", blkNum, err)
-			}
-		} else {
-			if err := m.copyObjectFallback(volumeBucketName, snapKey, volumeBucketName, newKey); err != nil {
-				return fmt.Errorf("rollback block %d: %w", blkNum, err)
-			}
-		}
-
-		// Delete the old live physical object
-		if oldKey, ok := liveMap[blkNum]; ok && oldKey != "" {
-			m.backend.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
-		}
-		liveMap[blkNum] = newKey
-	}
-
-	// Also delete any live blocks NOT in the snapshot (they shouldn't be read after rollback)
-	for blkNum, oldKey := range liveMap {
-		if _, inSnap := snapMap[blkNum]; !inSnap {
-			m.backend.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
-			delete(liveMap, blkNum)
-		}
-	}
-
-	return m.persistLiveMapUnlocked(name, liveMap)
+	return m.snapStore.Rollback(context.Background(), vol, snapID)
 }
 
 // Clone creates a new volume that initially shares blocks with the source volume.
 func (m *Manager) Clone(srcName, dstName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	srcVol, err := m.getVolUnlocked(srcName)
 	if err != nil {
 		return fmt.Errorf("source volume: %w", err)
 	}
-
-	if err := m.ensureBucket(); err != nil {
-		return fmt.Errorf("ensure bucket: %w", err)
-	}
-
-	// Fail if dst already exists
-	if _, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(dstName)); err == nil {
-		return fmt.Errorf("volume %q already exists", dstName)
-	}
-
-	srcLiveMap, err := m.getLiveMapUnlocked(srcName)
+	dstVol, err := m.snapStore.Clone(context.Background(), srcVol, dstName)
 	if err != nil {
-		return fmt.Errorf("load live_map: %w", err)
-	}
-
-	copier, hasCopier := m.backend.(storage.Copier)
-
-	doCopy := func(srcKey, dstKey string) error {
-		if hasCopier {
-			_, err := copier.CopyObject(volumeBucketName, srcKey, volumeBucketName, dstKey)
-			return err
-		}
-		return m.copyObjectFallback(volumeBucketName, srcKey, volumeBucketName, dstKey)
-	}
-
-	if len(srcLiveMap) > 0 {
-		// Case 1: source has a live_map — copy each physical block to default keys in dst
-		for blkNum, srcKey := range srcLiveMap {
-			dstKey := blockKey(dstName, blkNum)
-			if err := doCopy(srcKey, dstKey); err != nil {
-				return fmt.Errorf("clone block %d: %w", blkNum, err)
-			}
-		}
-	} else {
-		// Case 2: no live_map — enumerate default blk_N objects
-		if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(srcName), func(obj *storage.Object) error {
-			blkNum, ok := parseBlockNum(obj.Key)
-			if !ok {
-				return nil
-			}
-			dstKey := blockKey(dstName, blkNum)
-			return doCopy(obj.Key, dstKey)
-		}); err != nil {
-			return fmt.Errorf("clone blocks: %w", err)
-		}
-	}
-
-	// Create dst volume metadata (SnapshotCount=0, no live_map)
-	dstVol := &Volume{
-		Name:            dstName,
-		Size:            srcVol.Size,
-		BlockSize:       srcVol.BlockSize,
-		AllocatedBlocks: srcVol.AllocatedBlocks,
-		SnapshotCount:   0,
+		return err
 	}
 	data, err := marshalVolume(dstVol)
 	if err != nil {
@@ -1105,9 +902,8 @@ func (m *Manager) Clone(srcName, dstName string) error {
 	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(dstName), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return fmt.Errorf("store dst volume meta: %w", err)
 	}
-
 	m.volumes[dstName] = dstVol
-	m.liveMaps[dstName] = nil // dst starts with no live_map
+	m.liveMaps[dstName] = nil
 	return nil
 }
 
