@@ -128,6 +128,9 @@ func newPropertyCluster(t testing.TB, ids [3]string) *propertyCluster {
 	t.Helper()
 
 	net := newPartitionNet()
+	// 4096: generous buffer; Check drains every action so steady-state depth
+	// is well under 100. Larger size absorbs burst-apply windows during
+	// post-partition catch-up without blocking applyLoop.
 	obs := make(chan nodeEntry, 4096)
 	stopCh := make(chan struct{})
 	pc := &propertyCluster{

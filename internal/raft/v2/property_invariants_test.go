@@ -2,17 +2,17 @@ package raftv2
 
 import (
 	"fmt"
-	"sync/atomic"
 )
 
 // invObserver is a shared observation store used by invariant checkers.
 // It accumulates (term, leaderID) pairs observed across all nodes, and per-node
 // applied-entry sequences for the Leader Append-Only invariant.
 //
-// All mutation must happen from a single goroutine (the rapid state machine
-// Check method) to avoid data races. The drain goroutines in propertyCluster
-// forward entries to ObsCh; Check drains ObsCh into the observer atomically
-// before each check — no concurrent writes to the slices.
+// All mutation happens from a single goroutine: rapid.StateMachine actions and
+// Check fire sequentially per sequence (rapid v1.3.0 contract). The drain
+// goroutines in propertyCluster forward applied entries to ObsCh; Check
+// drains ObsCh before invoking invariant assertions — no concurrent writes
+// to the slices/maps/counter.
 type invObserver struct {
 	// leaderObs records every distinct (term, leaderID) pair seen.
 	// Invariant 1 (Election Safety): for each term, at most one leaderID.
@@ -23,8 +23,11 @@ type invObserver struct {
 	// must be strictly monotone (no rewrites of already-applied indices).
 	nodeApplied map[string][]LogEntry
 
-	// proposeCounter is incremented by Propose actions to generate unique commands.
-	proposeCounter atomic.Int64
+	// proposeCounter is incremented by Propose actions to generate unique
+	// commands. Single-goroutine access per the struct contract above; plain
+	// int64 (not atomic) — atomic would imply concurrent writes that do not
+	// occur under rapid's sequential action dispatch.
+	proposeCounter int64
 }
 
 type termLeader struct {

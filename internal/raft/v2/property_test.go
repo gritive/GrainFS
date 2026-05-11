@@ -64,15 +64,23 @@ func newRaftStateMachine(t *testing.T, rt *rapid.T) *raftStateMachine {
 }
 
 // observeCurrentLeaders samples each node and records a (term, id) pair only
-// for nodes that believe themselves to be the current leader (IsLeader()==true).
+// for nodes that believe themselves to be the current leader (rs.isLeader=true).
 // Recording only self-claimed leadership is the precise definition of Election
 // Safety: "at most one node can be Leader in any given term." Recording follower
 // beliefs of who is leader would introduce false-positive violations during term
 // transitions where a follower's leaderID lags behind the new term.
+//
+// Loads readState exactly once per node (rs.Load()) and reads isLeader+term
+// from the same snapshot. Calling n.IsLeader() then n.Term() separately would
+// span two Load calls; per state.go contract that is a TOCTOU and can record
+// a spurious (newTerm, oldLeaderID) tuple after a step-down+term-bump race —
+// directly producing false-positive Election Safety violations under sustained
+// StepDownLeader actions.
 func (sm *raftStateMachine) observeCurrentLeaders() {
 	for _, n := range sm.cluster.Nodes {
-		if n.IsLeader() {
-			sm.obs.recordLeader(n.Term(), n.ID())
+		rs := n.rs.Load()
+		if rs.isLeader {
+			sm.obs.recordLeader(rs.term, rs.leaderID)
 		}
 	}
 }
@@ -99,8 +107,10 @@ func (sm *raftStateMachine) Propose(t *rapid.T) {
 	if leader == nil {
 		return
 	}
-	n := sm.obs.proposeCounter.Add(1)
-	cmd := []byte(fmt.Sprintf("cmd-%d", n))
+	sm.obs.proposeCounter++
+	cmd := []byte(fmt.Sprintf("cmd-%d", sm.obs.proposeCounter))
+	// 500ms ≈ 1.25× propSlowElectionTimeout (400ms): tolerate one full leadership
+	// transition without false-positive timeout. Errors are swallowed below.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	// Tolerate error: leadership may change between leader() check and ProposeWait.
@@ -114,9 +124,15 @@ func (sm *raftStateMachine) StepDownLeader(t *rapid.T) {
 	if leader == nil {
 		return
 	}
+	// +10: ensure term-jump survives a concurrent election tick that could also
+	// be advancing currentTerm; +1 would race the natural election timer.
 	higherTerm := leader.Term() + 10
-	// Use the leader's own last log entry to make the intruder's log at least
+	// Use the leader's own commit index to make the intruder's log at least
 	// as up-to-date, satisfying the Raft election restriction (§5.4.1).
+	// CommittedIndex is a lower bound on LastLogIndex (the leader may have
+	// uncommitted entries past commit); the intruder's claimed LastLogTerm
+	// (higherTerm) exceeds anything in the leader's log so the up-to-date
+	// check still passes via the term-dominance branch.
 	leader.HandleRequestVote(&RequestVoteArgs{
 		Term:         higherTerm,
 		CandidateID:  "intruder",
