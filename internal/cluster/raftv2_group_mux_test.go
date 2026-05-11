@@ -4,7 +4,7 @@
 // Mirrors the PR 27 TestV2QUICCluster_ThreeNode_* tests but exercises the
 // per-group QUIC mux path (raft.GroupRaftQUICMux) rather than the meta-raft
 // StreamControl path. The two paths share a wire codec but diverge in
-// dispatch: meta-raft v2 goes through cluster.RaftV2QUICRPCTransport;
+// dispatch: meta-raft v2 goes through cluster.RaftQUICRPCTransport;
 // per-group v2 has to dispatch via raft.GroupRaftQUICMux.RegisterV2 so the
 // receiver routes inbound RPCs into the v2 adapter instead of nil-deref'ing
 // a typed-nil *raft.Node.

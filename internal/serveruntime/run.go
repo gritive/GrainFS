@@ -88,7 +88,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// top of cluster.RaftNode.Handle* (the v2 adapter translates to
 	// raftv2.Node). Wire format is byte-identical to v1; v1 is frozen until
 	// PR 30 deletes it.
-	v2RPCTransport := cluster.NewRaftV2QUICRPCTransport(state.quicTransport, v2Node)
+	v2RPCTransport := cluster.NewRaftQUICRPCTransport(state.quicTransport, v2Node)
 	v2RPCTransport.SetTransport()
 	log.Info().Msg("raft v2: QUIC RPC transport wired")
 

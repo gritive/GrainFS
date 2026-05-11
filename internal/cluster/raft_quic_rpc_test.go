@@ -12,12 +12,12 @@ import (
 )
 
 // v2QUICCluster wires up N raft v2 nodes connected via real QUIC transport
-// through the new RaftV2QUICRPCTransport bridge. It is the v2 counterpart of
+// through the new RaftQUICRPCTransport bridge. It is the v2 counterpart of
 // internal/raft.quicCluster.
 type v2QUICCluster struct {
 	nodes      []RaftNode
 	transports []*transport.QUICTransport
-	rpcs       []*RaftV2QUICRPCTransport
+	rpcs       []*RaftQUICRPCTransport
 }
 
 func newV2QUICCluster(t *testing.T, n int) *v2QUICCluster {
@@ -69,9 +69,9 @@ func newV2QUICCluster(t *testing.T, n int) *v2QUICCluster {
 	}
 
 	// Register the v2 QUIC RPC bridge per node.
-	rpcs := make([]*RaftV2QUICRPCTransport, n)
+	rpcs := make([]*RaftQUICRPCTransport, n)
 	for i := range nodes {
-		rpcs[i] = NewRaftV2QUICRPCTransport(transports[i], nodes[i])
+		rpcs[i] = NewRaftQUICRPCTransport(transports[i], nodes[i])
 		rpcs[i].SetTransport()
 	}
 
