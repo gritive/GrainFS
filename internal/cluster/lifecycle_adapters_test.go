@@ -1,82 +1,67 @@
 package cluster
 
 import (
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// fakeRaftNode implements raftNodeAccess for tests. Thread-safe access to the
-// observer so the test goroutine can push events.
+// fakeRaftNode implements raftNodeAccess for tests. State is updated via
+// SetState; RaftLeadership.Subscribe polls so transitions are detected.
 type fakeRaftNode struct {
-	mu       sync.Mutex
-	state    raft.NodeState
-	observer chan<- raft.Event
+	state atomic.Int32 // raft.NodeState
 }
 
-func (f *fakeRaftNode) State() raft.NodeState {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.state
-}
-func (f *fakeRaftNode) RegisterObserver(ch chan<- raft.Event) {
-	f.mu.Lock()
-	f.observer = ch
-	f.mu.Unlock()
-}
-func (f *fakeRaftNode) DeregisterObserver(ch chan<- raft.Event) {
-	f.mu.Lock()
-	f.observer = nil
-	f.mu.Unlock()
-}
-func (f *fakeRaftNode) push(e raft.Event) {
-	f.mu.Lock()
-	ch := f.observer
-	f.mu.Unlock()
-	if ch != nil {
-		ch <- e
-	}
+func (f *fakeRaftNode) State() raft.NodeState { return raft.NodeState(f.state.Load()) }
+
+func (f *fakeRaftNode) SetState(s raft.NodeState) { f.state.Store(int32(s)) }
+
+func newFakeRaftNode(s raft.NodeState) *fakeRaftNode {
+	f := &fakeRaftNode{}
+	f.SetState(s)
+	return f
 }
 
-func TestRaftLeadership_Subscribe_EmitsOnLeaderChange(t *testing.T) {
-	fake := &fakeRaftNode{state: raft.Leader}
-	rl := &RaftLeadership{Node: fake}
+// quickRaftLeadership wires a short poll interval so tests stay fast.
+func quickRaftLeadership(f *fakeRaftNode) *RaftLeadership {
+	return &RaftLeadership{Node: f, PollInterval: 5 * time.Millisecond}
+}
+
+func TestRaftLeadership_Subscribe_EmitsOnLeaderTransition(t *testing.T) {
+	fake := newFakeRaftNode(raft.Follower)
+	rl := quickRaftLeadership(fake)
 	events, cancel := rl.Subscribe()
 	defer cancel()
 
-	fake.push(raft.Event{Type: raft.EventLeaderChange, IsLeader: true, Term: 1})
+	fake.SetState(raft.Leader)
 
 	select {
 	case <-events:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected leader-change signal")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected leader-change signal after transition to leader")
 	}
 }
 
-func TestRaftLeadership_Subscribe_IgnoresOtherEventTypes(t *testing.T) {
-	fake := &fakeRaftNode{}
-	rl := &RaftLeadership{Node: fake}
+func TestRaftLeadership_Subscribe_NoEmitWhenStateUnchanged(t *testing.T) {
+	fake := newFakeRaftNode(raft.Follower)
+	rl := quickRaftLeadership(fake)
 	events, cancel := rl.Subscribe()
 	defer cancel()
 
-	// Use EventType(99) so the test is independent of which other events exist.
-	fake.push(raft.Event{Type: raft.EventType(99)})
-
 	select {
 	case <-events:
-		t.Fatal("must not emit on non-leader-change event")
+		t.Fatal("must not emit when leadership state is unchanged")
 	case <-time.After(50 * time.Millisecond):
 	}
 }
 
 func TestRaftLeadership_Subscribe_CancelClosesEventsChannel(t *testing.T) {
-	fake := &fakeRaftNode{}
-	rl := &RaftLeadership{Node: fake}
+	fake := newFakeRaftNode(raft.Follower)
+	rl := quickRaftLeadership(fake)
 	events, cancel := rl.Subscribe()
 	cancel()
 
@@ -84,8 +69,12 @@ func TestRaftLeadership_Subscribe_CancelClosesEventsChannel(t *testing.T) {
 		_, ok := <-events
 		return !ok
 	}, 200*time.Millisecond, 5*time.Millisecond, "events must close on cancel")
-	fake.mu.Lock()
-	obs := fake.observer
-	fake.mu.Unlock()
-	assert.Nil(t, obs, "raw observer must be deregistered")
+}
+
+func TestRaftLeadership_IsLeader(t *testing.T) {
+	fake := newFakeRaftNode(raft.Follower)
+	rl := &RaftLeadership{Node: fake}
+	require.False(t, rl.IsLeader())
+	fake.SetState(raft.Leader)
+	require.True(t, rl.IsLeader())
 }

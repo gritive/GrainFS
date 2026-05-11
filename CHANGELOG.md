@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.0.146.0] - 2026-05-12 — feat(raft/v2): M5 PR 28 default GRAINFS_RAFT_V2=serveruntime on (off escape hatch retained)
+
+### Changed
+
+- `internal/cluster/raftflag.go` — phased per-package default-on flip. With
+  `GRAINFS_RAFT_V2` unset, `serveruntime` now selects raft v2 by default; the
+  `cluster` package still selects v1 until PR 28b wires the group-raft mux
+  through the v2 RPC bridge (`raftV2DefaultOnPkgs` tracks the per-package
+  rollout — PR 29 removes the flag entirely once v2 is validated).
+- `internal/cluster/lifecycle_adapters.go` — `RaftLeadership.Subscribe` no
+  longer subscribes to the v1 observer pattern (which the v2 adapter no-ops);
+  it now polls `State()` every 500ms. Latency for lifecycle reconcile is
+  bounded by the poll interval and works for both v1 and v2. The
+  `raftNodeAccess` interface drops `RegisterObserver`/`DeregisterObserver`.
+- `internal/cluster/backend.go` — adds `(*DistributedBackend).Node() RaftNode`
+  so production callers that need leadership/state queries can use a
+  v1/v2-agnostic surface (the existing `RaftNode() *raft.Node` v1-only
+  accessor stays for true v1-internal paths like the snapshot manager).
+- `internal/serveruntime/boot_phases_srvopts.go` — `RaftLeadership` is now
+  wired against `state.distBackend.Node()` (interface) rather than
+  `RaftNode()` (v1 concrete), fixing the nil-deref panic that surfaced when
+  serveruntime=v2 boots the lifecycle service.
+
+### Added
+
+- `GRAINFS_RAFT_V2=off` operator escape hatch. Disables raft v2 for every
+  package (reverts serveruntime back to v1) — the production bail-out if v2
+  exhibits a regression. PR 29 removes the flag entirely; until then this is
+  the documented rollback.
+
+### Notes
+
+- Backward compat preserved: `GRAINFS_RAFT_V2=cluster`,
+  `GRAINFS_RAFT_V2=serveruntime`, `GRAINFS_RAFT_V2=all`, and unknown-token
+  warnings all behave exactly as in PR 26/27.
+- The 3-node QUIC v2 cluster smoke
+  (`TestV2QUICCluster_ThreeNode_ElectsLeader`,
+  `TestV2QUICCluster_ThreeNode_Propose_Replicate`) still passes.
+
 ## [0.0.145.0] - 2026-05-11 — refactor(serve): remove `--shared-badger` flag
 
 ### Removed

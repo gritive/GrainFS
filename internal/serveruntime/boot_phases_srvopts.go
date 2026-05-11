@@ -182,7 +182,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	if cfg.LifecycleInterval > 0 {
 		lstore := lifecycle.NewStore(state.distBackend.FSMDB())
 		prop := &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
-		lead := &cluster.RaftLeadership{Node: state.distBackend.RaftNode()}
+		// Use Node() (interface) — not RaftNode() (v1 concrete) — so the
+		// v2 adapter resolves under M5 PR 28 serveruntime=v2 default.
+		// RaftLeadership.Subscribe polls State() (raftLeadershipPollInterval),
+		// which works for both v1 and v2.
+		lead := &cluster.RaftLeadership{Node: state.distBackend.Node()}
 		state.metaRaft.FSM().SetLifecycle(lstore) // pattern from boot_phases_scrubber.go:127
 		state.lifecycleSvc = lifecycle.NewService(
 			lstore, prop, lead,

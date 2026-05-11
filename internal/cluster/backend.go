@@ -4133,3 +4133,8 @@ func (b *DistributedBackend) RaftNode() *raft.Node {
 	v1, _ := b.node.(*raft.Node)
 	return v1
 }
+
+// Node returns the RaftNode interface for v1/v2-agnostic access (State,
+// observer registration, leadership queries). Prefer this over RaftNode() in
+// code that must work under raft v2 (M5 PR 28 serveruntime default-on).
+func (b *DistributedBackend) Node() RaftNode { return b.node }

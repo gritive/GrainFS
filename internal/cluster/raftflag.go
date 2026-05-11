@@ -8,13 +8,27 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// raftV2FlagEnv is the environment variable that opts packages into raft v2.
+// raftV2FlagEnv is the environment variable that controls raft v2 selection.
 // Value is a comma-separated list of package names.
 //
-// Supported values: "cluster", "serveruntime", "all".
+// As of M5 PR 28 the phased per-package flip begins with serveruntime: leaving
+// the env var unset selects v2 for serveruntime by default while cluster
+// remains v1 until its group-raft mux is wired through the v2 RPC bridge
+// (PR 28b follow-up — tracked in TODOS.md). The remaining values are:
 //
-// Example: GRAINFS_RAFT_V2=cluster
+//   - unset (default):     serveruntime → v2. cluster → v1.
+//   - "off":               v2 disabled everywhere (operator escape hatch;
+//     PR 29 removes the flag entirely once v2 is validated in production).
+//   - "all":               every supported package → v2 (explicit opt-in for
+//     the full flip; useful for staging soak ahead of PR 28b).
+//   - "cluster", "serveruntime", or a comma-separated mix: only the named
+//     packages get v2. Backward-compatible with PR 26/27 opt-in tests.
+//
+// Example (revert to v1 in an emergency): GRAINFS_RAFT_V2=off
 const raftV2FlagEnv = "GRAINFS_RAFT_V2"
+
+// raftV2FlagOff disables raft v2 for every package — the operator escape hatch.
+const raftV2FlagOff = "off"
 
 // validRaftV2Pkgs is the set of recognised package names.
 var validRaftV2Pkgs = map[string]bool{
@@ -23,20 +37,40 @@ var validRaftV2Pkgs = map[string]bool{
 	"all":          true,
 }
 
+// raftV2DefaultOnPkgs lists the packages whose default (env-unset) selection
+// is v2 as of M5 PR 28. PR 28b adds "cluster" once the group-raft mux is
+// wired through the v2 RPC bridge; PR 29 removes this list entirely.
+var raftV2DefaultOnPkgs = []string{"serveruntime"}
+
 // raftV2Flag is the parsed flag set, populated once at init time.
 var (
 	raftV2FlagOnce sync.Once
 	raftV2Enabled  map[string]bool
 )
 
+// defaultRaftV2Enabled returns the env-unset default: only the packages listed
+// in raftV2DefaultOnPkgs map to true.
+func defaultRaftV2Enabled() map[string]bool {
+	enabled := make(map[string]bool, len(raftV2DefaultOnPkgs))
+	for _, pkg := range raftV2DefaultOnPkgs {
+		enabled[pkg] = true
+	}
+	return enabled
+}
+
 // ParseRaftV2Flag parses env (the value of GRAINFS_RAFT_V2) into a set of
 // package names that have v2 enabled. Unknown values are logged as warnings
-// and ignored. "all" expands to every supported package name.
+// and ignored. "all" expands to every supported package name. As of M5 PR 28,
+// an empty env defaults to v2-on for serveruntime only (see
+// raftV2DefaultOnPkgs); "off" is the escape hatch that disables v2 everywhere.
 func ParseRaftV2Flag(env string) map[string]bool {
-	enabled := make(map[string]bool)
 	if env == "" {
-		return enabled
+		return defaultRaftV2Enabled()
 	}
+	if strings.TrimSpace(env) == raftV2FlagOff {
+		return make(map[string]bool)
+	}
+	enabled := make(map[string]bool)
 	for _, part := range strings.Split(env, ",") {
 		pkg := strings.TrimSpace(part)
 		if pkg == "" {
