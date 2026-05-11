@@ -303,7 +303,6 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 		"--raft-addr", c.raftAddr(i),
 		"--cluster-key", c.clusterKey,
 		"--encryption-key-file", c.encKeyFile,
-		"--dedup=false",
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--snapshot-interval", "0",
