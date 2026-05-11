@@ -17,7 +17,7 @@ package raftv2
 //   6. Liveness          — under stable leadership a proposed entry eventually commits.
 //
 // Count knob: TestProperty_* uses rapid.Check default (100 sequences) for CI.
-// For the full 100k-sequence hardening run, pass -rapid.checks=100000 on the CLI:
+// Nightly CI: -rapid.checks=100000. Manual hardening: -rapid.checks=1000000 (~5h).
 //
 //	go test -race -count=1 ./internal/raft/v2/... -run TestProperty -rapid.checks=100000
 //
