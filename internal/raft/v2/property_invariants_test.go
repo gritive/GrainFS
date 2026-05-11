@@ -210,3 +210,134 @@ func TestCheckLogMatching_Valid(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// checkLeaderCompleteness asserts Invariant 4 (Leader Completeness): if an
+// entry was committed in term T, every leader of any term T' > T has that
+// entry in its log.
+//
+// Operationally: for each observed leader at term T', look up every entry
+// that was applied (= committed) in some term T ≤ T' by any node. If the
+// leader's applied stream has reached that entry's index (i.e., the leader
+// has applied entries beyond that index), then the leader's entry at that
+// index must match (same Term and Command). If the leader's stream has not
+// yet reached that index, the check is skipped — the leader may still be
+// catching up (sampling lag), and absence of the entry in the observation
+// window is not a safety violation.
+//
+// Limitation: leaderObs captures leaders at action-boundary samples. A
+// leader that served briefly between two observations is not captured; the
+// invariant therefore only asserts on sampled leaders. This is documented
+// and accepted.
+func checkLeaderCompleteness(leaderObs []termLeader, nodeApplied map[string][]LogEntry) error {
+	// Build per-node index → entry maps.
+	nodeIdx := make(map[string]map[uint64]LogEntry, len(nodeApplied))
+	for id, entries := range nodeApplied {
+		m := make(map[uint64]LogEntry, len(entries))
+		for _, e := range entries {
+			m[e.Index] = e
+		}
+		nodeIdx[id] = m
+	}
+
+	// For each sampled leader, verify completeness for all earlier-committed entries.
+	for _, tl := range leaderObs {
+		leaderEntries, ok := nodeIdx[tl.leaderID]
+		if !ok {
+			continue // leader never appeared in applied stream; nothing to check
+		}
+		// Find max index in the leader's applied stream.
+		var leaderMaxIdx uint64
+		for idx := range leaderEntries {
+			if idx > leaderMaxIdx {
+				leaderMaxIdx = idx
+			}
+		}
+
+		// Check every other node's committed entries against this leader.
+		for nodeID, entries := range nodeIdx {
+			if nodeID == tl.leaderID {
+				continue
+			}
+			for idx, e := range entries {
+				// Only check entries committed in term ≤ this leader's term.
+				if e.Term > tl.term {
+					continue
+				}
+				// Skip if the leader hasn't applied this far yet (sampling lag).
+				if idx > leaderMaxIdx {
+					continue
+				}
+				le, leaderHas := leaderEntries[idx]
+				if !leaderHas {
+					return fmt.Errorf(
+						"leader completeness violated: leader %s (term %d) is missing committed entry at index %d (committed in term %d by node %s)",
+						tl.leaderID, tl.term, idx, e.Term, nodeID,
+					)
+				}
+				if le.Term != e.Term || !bytes.Equal(le.Command, e.Command) {
+					return fmt.Errorf(
+						"leader completeness violated: leader %s (term %d) has different entry at index %d: got term=%d, want term=%d",
+						tl.leaderID, tl.term, idx, le.Term, e.Term,
+					)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func TestCheckLeaderCompleteness_Violation(t *testing.T) {
+	// Leader "a" at term 3 is missing entry at index=1 that was committed in term 1.
+	leaderObs := []termLeader{{term: 3, leaderID: "a"}}
+	nodeApplied := map[string][]LogEntry{
+		"a": {
+			// index 1 is absent — leader skipped it
+			{Index: 2, Term: 2, Command: []byte("cmd-2")},
+			{Index: 3, Term: 3, Command: []byte("cmd-3")},
+		},
+		"b": {
+			{Index: 1, Term: 1, Command: []byte("cmd-1")},
+			{Index: 2, Term: 2, Command: []byte("cmd-2")},
+			{Index: 3, Term: 3, Command: []byte("cmd-3")},
+		},
+	}
+	if err := checkLeaderCompleteness(leaderObs, nodeApplied); err == nil {
+		t.Fatal("expected leader completeness violation, got nil")
+	}
+}
+
+func TestCheckLeaderCompleteness_Valid(t *testing.T) {
+	leaderObs := []termLeader{{term: 3, leaderID: "a"}}
+	nodeApplied := map[string][]LogEntry{
+		"a": {
+			{Index: 1, Term: 1, Command: []byte("cmd-1")},
+			{Index: 2, Term: 2, Command: []byte("cmd-2")},
+			{Index: 3, Term: 3, Command: []byte("cmd-3")},
+		},
+		"b": {
+			{Index: 1, Term: 1, Command: []byte("cmd-1")},
+			{Index: 2, Term: 2, Command: []byte("cmd-2")},
+		},
+	}
+	if err := checkLeaderCompleteness(leaderObs, nodeApplied); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckLeaderCompleteness_LagSkip(t *testing.T) {
+	// Leader "a" at term 3 has only applied index=1; node "b" has index=5.
+	// The check must skip index=5 (sampling lag), not fail.
+	leaderObs := []termLeader{{term: 3, leaderID: "a"}}
+	nodeApplied := map[string][]LogEntry{
+		"a": {
+			{Index: 1, Term: 1, Command: []byte("cmd-1")},
+		},
+		"b": {
+			{Index: 1, Term: 1, Command: []byte("cmd-1")},
+			{Index: 5, Term: 2, Command: []byte("cmd-5")},
+		},
+	}
+	if err := checkLeaderCompleteness(leaderObs, nodeApplied); err != nil {
+		t.Fatalf("expected lag to be skipped, got: %v", err)
+	}
+}

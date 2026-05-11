@@ -11,9 +11,9 @@ package raftv2
 //   1. Election Safety   — at most one leader per term.
 //   2. Leader Append-Only — per-node ApplyCh index sequence is strictly monotone.
 //   3. Log Matching      — if two logs agree at (index, term), they agree on all prior entries.
+//   4. Leader Completeness — if entry committed in term T, all sampled leaders in T'>T have it.
 //
 // Invariants planned for later PR 18 steps (not yet present):
-//   4. Leader Completeness — if entry committed in term T, all sampled leaders in T'>T have it.
 //   5. State Machine Safety — all FSMs apply the same entry at each index.
 //   6. Liveness          — under stable leadership a proposed entry eventually commits.
 //
@@ -98,6 +98,9 @@ func (sm *raftStateMachine) Check(t *rapid.T) {
 		t.Fatal(err)
 	}
 	if err := checkLogMatching(sm.obs.nodeApplied); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkLeaderCompleteness(sm.obs.leaderObs, sm.obs.nodeApplied); err != nil {
 		t.Fatal(err)
 	}
 }
