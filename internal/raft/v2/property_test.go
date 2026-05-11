@@ -121,7 +121,7 @@ func (sm *raftStateMachine) Check(t *rapid.T) {
 			maxCommitted = ci
 		}
 	}
-	if err := checkEventualCommit(sm.actionHistory, sm.obs.nodeApplied, maxCommitted); err != nil {
+	if err := checkEventualCommit(sm.actionHistory, maxCommitted); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -132,10 +132,12 @@ func (sm *raftStateMachine) Check(t *rapid.T) {
 // On success, the assigned log index is recorded in actionHistory for the
 // Eventual Commit invariant (Invariant 6).
 func (sm *raftStateMachine) Propose(t *rapid.T) {
-	leaderExisted := sm.cluster.leader() != nil
-	ar := actionRecord{kind: actionPropose, leaderExisted: leaderExisted}
-
+	// Single leader() call: prevents conservative undercounting where leadership
+	// changes between two samples would mis-record leaderExisted=false despite
+	// a leader serving the propose.
 	leader := sm.cluster.leader()
+	ar := actionRecord{kind: actionPropose, leaderExisted: leader != nil}
+
 	if leader != nil {
 		sm.obs.proposeCounter++
 		cmd := []byte(fmt.Sprintf("cmd-%d", sm.obs.proposeCounter))
@@ -155,13 +157,14 @@ func (sm *raftStateMachine) Propose(t *rapid.T) {
 // StepDownLeader injects a higher-term RequestVote into the current leader,
 // forcing it to step down. If there is no leader, the action is a no-op.
 func (sm *raftStateMachine) StepDownLeader(t *rapid.T) {
-	leaderExisted := sm.cluster.leader() != nil
+	// Single leader() call: same rationale as Propose. The actionHistory append
+	// is deferred until after the leader read so we record the actual sampled
+	// state, not a stale earlier read.
+	leader := sm.cluster.leader()
 	sm.actionHistory = append(sm.actionHistory, actionRecord{
 		kind:          actionStepDownLeader,
-		leaderExisted: leaderExisted,
+		leaderExisted: leader != nil,
 	})
-
-	leader := sm.cluster.leader()
 	if leader == nil {
 		return
 	}

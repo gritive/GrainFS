@@ -347,9 +347,9 @@ func TestCheckLeaderCompleteness_LagSkip(t *testing.T) {
 // FSM correctness guarantee: all replicas must be identical state machines.
 //
 // We check (nodeA, nodeB, index): if both nodes have an entry at the same
-// index, their Command bytes must be identical. Term must also match because
-// a term mismatch at the same committed index is impossible in correct Raft
-// and would indicate a more fundamental invariant violation.
+// index, their Command bytes must be identical. Term mismatches at the same
+// index are caught earlier by checkLogMatching (Invariant 3); this checker
+// only asserts the command-equivalence half of state machine safety.
 func checkStateMachineSafety(nodeApplied map[string][]LogEntry) error {
 	// Build per-node index → entry maps.
 	type nodeMap struct {
@@ -446,7 +446,7 @@ type actionRecord struct {
 // not when followers apply).
 //
 // K = 50 is the recommended stable-window size (as per PR 18 spec).
-func checkEventualCommit(history []actionRecord, nodeApplied map[string][]LogEntry, maxCommitted uint64) error {
+func checkEventualCommit(history []actionRecord, maxCommitted uint64) error {
 	const K = 50
 	if len(history) < K {
 		return nil // insufficient history
@@ -492,10 +492,7 @@ func TestCheckEventualCommit_Violation(t *testing.T) {
 	// Inject a successful propose at index 999 in the last action.
 	history[K-1].proposed = &proposedEntry{index: 999}
 
-	nodeApplied := map[string][]LogEntry{
-		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
-	}
-	if err := checkEventualCommit(history, nodeApplied, 10); err == nil {
+	if err := checkEventualCommit(history, 10); err == nil {
 		t.Fatal("expected liveness violation, got nil")
 	}
 }
@@ -510,10 +507,7 @@ func TestCheckEventualCommit_SkipOnPartition(t *testing.T) {
 	history[K-5] = actionRecord{kind: actionPartition, leaderExisted: true}
 	history[K-1].proposed = &proposedEntry{index: 999}
 
-	nodeApplied := map[string][]LogEntry{
-		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
-	}
-	if err := checkEventualCommit(history, nodeApplied, 10); err != nil {
+	if err := checkEventualCommit(history, 10); err != nil {
 		t.Fatalf("expected skip on partition, got: %v", err)
 	}
 }
@@ -527,10 +521,7 @@ func TestCheckEventualCommit_SkipOnNoLeader(t *testing.T) {
 	}
 	history[K-1].proposed = &proposedEntry{index: 999}
 
-	nodeApplied := map[string][]LogEntry{
-		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
-	}
-	if err := checkEventualCommit(history, nodeApplied, 10); err != nil {
+	if err := checkEventualCommit(history, 10); err != nil {
 		t.Fatalf("expected skip on no-leader, got: %v", err)
 	}
 }
@@ -539,10 +530,7 @@ func TestCheckEventualCommit_SkipOnShortHistory(t *testing.T) {
 	history := []actionRecord{
 		{kind: actionPropose, leaderExisted: true, proposed: &proposedEntry{index: 999}},
 	}
-	nodeApplied := map[string][]LogEntry{
-		"a": {{Index: 10, Term: 1, Command: []byte("cmd-1")}},
-	}
-	if err := checkEventualCommit(history, nodeApplied, 10); err != nil {
+	if err := checkEventualCommit(history, 10); err != nil {
 		t.Fatalf("expected skip on short history, got: %v", err)
 	}
 }
@@ -556,11 +544,7 @@ func TestCheckEventualCommit_Valid(t *testing.T) {
 	// A committed propose at index 5 — well within max committed.
 	history[K-1].proposed = &proposedEntry{index: 5}
 
-	nodeApplied := map[string][]LogEntry{
-		"a": {{Index: 5, Term: 1, Command: []byte("cmd-1")}},
-		"b": {{Index: 5, Term: 1, Command: []byte("cmd-1")}},
-	}
-	if err := checkEventualCommit(history, nodeApplied, 5); err != nil {
+	if err := checkEventualCommit(history, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
