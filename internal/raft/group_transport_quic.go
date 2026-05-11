@@ -13,6 +13,19 @@ import (
 
 const groupRaftRPCTimeout = 80 * time.Millisecond
 
+// RaftV2Handler is the subset of inbound Raft RPC entry points the per-group
+// mux needs to dispatch into a v2 raft node. *Node (v1) satisfies this
+// interface natively (HandleRequestVote / HandleAppendEntries are the same
+// shape); the cluster-layer v2 adapter satisfies it via raftv2adapter.go.
+//
+// Defined locally inside internal/raft to avoid an import cycle with
+// internal/cluster (cluster already imports raft). M5 PR 28b — once v1 is
+// deleted in PR 30 this can fold into Node's method set.
+type RaftV2Handler interface {
+	HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply
+	HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply
+}
+
 // GroupRaftQUICMux multiplexes per-group raft RPCs over the StreamGroupRaft
 // stream type. A single mux instance is shared across all per-group raft nodes
 // on a server; incoming RPCs are dispatched to the correct node by group ID.
@@ -22,9 +35,14 @@ const groupRaftRPCTimeout = 80 * time.Millisecond
 // Optional mux mode (--quic-mux=true): see group_transport_mux.go. When mux
 // mode is enabled, sends use a persistent RaftConn and entries-empty
 // AppendEntries calls are coalesced per peer via HeartbeatCoalescer.
+//
+// nodes stores RaftV2Handler. Both v1 (*Node) and the cluster-layer v2 adapter
+// satisfy that interface, so the dispatch sites (handleRPC,
+// handleMuxRequest, dispatchToLocalGroup) are agnostic to which raft engine
+// owns the group. Senders are unaffected — the wire format is byte-identical.
 type GroupRaftQUICMux struct {
 	tr    *transport.QUICTransport
-	nodes sync.Map // string(groupID) → *Node
+	nodes sync.Map // string(groupID) → RaftV2Handler
 
 	// metaNode is the meta-raft node registered for the magic groupID
 	// metaGroupID ("__meta__"). Atomic so receiver paths
@@ -55,11 +73,32 @@ func NewGroupRaftQUICMux(tr *transport.QUICTransport) *GroupRaftQUICMux {
 // Panics on reserved or empty groupID — by the time we're here, upstream
 // validation in applyPutShardGroup should have already rejected anything
 // invalid, so reaching this with a bad ID is a programming bug.
+//
+// v1 entry point; *Node satisfies RaftV2Handler natively. v2 callers should
+// use RegisterV2 to pass the cluster-layer RaftNode adapter directly.
 func (m *GroupRaftQUICMux) Register(groupID string, node *Node) {
 	if err := ValidateGroupID(groupID); err != nil {
 		panic(fmt.Sprintf("GroupRaftQUICMux.Register: invalid groupID: %v", err))
 	}
-	m.nodes.Store(groupID, node)
+	m.nodes.Store(groupID, RaftV2Handler(node))
+}
+
+// RegisterV2 associates a v2 raft node (or any RaftV2Handler implementer) with
+// groupID for incoming RPC dispatch. Mirrors Register but accepts the v2
+// adapter interface so cluster.RaftNode (v2 path) plugs in without an import
+// cycle on internal/raft. M5 PR 28b.
+//
+// Same validation contract as Register. Passing nil is rejected to prevent a
+// nil-deref crash on the dispatch path (a v2-on caller landing here with nil
+// is a programming bug — the cluster factory must produce a non-nil node).
+func (m *GroupRaftQUICMux) RegisterV2(groupID string, h RaftV2Handler) {
+	if err := ValidateGroupID(groupID); err != nil {
+		panic(fmt.Sprintf("GroupRaftQUICMux.RegisterV2: invalid groupID: %v", err))
+	}
+	if h == nil {
+		panic(fmt.Sprintf("GroupRaftQUICMux.RegisterV2: nil handler for groupID %q", groupID))
+	}
+	m.nodes.Store(groupID, h)
 }
 
 // RegisterMetaNode wires the meta-raft node onto the shared mux. Idempotent;
@@ -106,7 +145,7 @@ func (m *GroupRaftQUICMux) handleRPC(req *transport.Message) *transport.Message 
 	if !ok {
 		return nil
 	}
-	node := v.(*Node)
+	node := v.(RaftV2Handler)
 
 	rpcType, data, err := decodeRPC(payload)
 	if err != nil {

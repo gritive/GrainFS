@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.0.147.0] - 2026-05-12 — feat(raft/v2): M5 PR 28b cluster default-on + per-group QUIC mux v2 bridge
+
+### Changed
+
+- `internal/cluster/raftflag.go` — `cluster` joins `serveruntime` in
+  `raftV2DefaultOnPkgs`. With `GRAINFS_RAFT_V2` unset, both packages now
+  default to raft v2. The phased flip is complete; PR 29 removes the flag
+  entirely. `GRAINFS_RAFT_V2=off` remains the operator escape hatch.
+- `internal/raft/group_transport_quic.go` — `GroupRaftQUICMux.nodes`
+  sync.Map is retyped from `*Node` to a new local `RaftV2Handler` interface
+  (`HandleRequestVote` / `HandleAppendEntries`). Both v1 `*Node` and the
+  cluster-layer v2 adapter satisfy this shape, so inbound dispatch is
+  engine-agnostic. The `Register` method keeps its `*Node` signature for v1
+  callers; v2 callers use the new `RegisterV2(groupID, RaftV2Handler)` entry
+  point. Defined locally inside `internal/raft` to avoid an import cycle on
+  `internal/cluster`.
+- `internal/raft/group_transport_mux.go` — `lookupNode` returns the
+  `RaftV2Handler` interface so all three dispatch sites (legacy `handleRPC`,
+  mux-mode `handleMuxRequest`, and heartbeat-coalescer `dispatchToLocalGroup`)
+  route v2 inbound RPCs through the adapter. The `metaNode atomic.Pointer`
+  is unchanged — meta-raft v2 goes through the cluster-layer `StreamControl`
+  bridge (PR 27) and bypasses this mux entirely.
+- `internal/serveruntime/boot_phases_storage_runtime.go` — the per-group mux
+  registration now selects between `Register` (v1, `gb.RaftNode()` non-nil)
+  and `RegisterV2` (v2, falls back to `gb.Node()` interface) at the call
+  site, fixing the typed-nil-deref that would otherwise crash v2 group raft
+  the first time a peer delivered a RequestVote.
+
+### Added
+
+- `internal/cluster/raftv2_group_mux_test.go` — three-node real-QUIC
+  coverage for per-group v2 raft elections and replication
+  (`TestV2GroupMuxCluster_ThreeNode_ElectsLeader`,
+  `TestV2GroupMuxCluster_ThreeNode_Propose_Replicate`,
+  `TestV2GroupMuxCluster_ThreeNode_MuxMode_Propose_Replicate`). The
+  mux-mode variant exercises the heartbeat-coalescer dispatch site so the
+  third dispatch path is covered too.
+
+### Removed / Replaced
+
+- `TestRaftV2Smoke_DefaultClusterIsV1` and `TestRaftV2Smoke_DefaultServeruntimeIsV2`
+  were renamed to `TestRaftV2Smoke_DefaultClusterIsV2` and
+  `TestRaftV2Smoke_DefaultsAreV2`, with assertions flipped to match the
+  PR 28b default. The `ParseFlag` table's empty-env row now expects
+  `cluster=true`.
+
 ## [0.0.146.0] - 2026-05-12 — feat(raft/v2): M5 PR 28 default GRAINFS_RAFT_V2=serveruntime on (off escape hatch retained)
 
 ### Changed

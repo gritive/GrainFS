@@ -21,11 +21,11 @@ var noopAE = func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntrie
 	return nil, fmt.Errorf("no transport")
 }
 
-// TestRaftV2Smoke_DefaultClusterIsV1 verifies that with no flag set, the
-// cluster package still selects a v1 node. M5 PR 28 default-on covers
-// serveruntime only; cluster is held until PR 28b (group-raft mux wired
-// through the v2 RPC bridge — see raftV2DefaultOnPkgs in raftflag.go).
-func TestRaftV2Smoke_DefaultClusterIsV1(t *testing.T) {
+// TestRaftV2Smoke_DefaultClusterIsV2 verifies that with no flag set, the
+// cluster package now selects a v2 node. M5 PR 28b adds "cluster" to
+// raftV2DefaultOnPkgs once the per-group QUIC mux dispatch is wired through
+// RegisterV2 (see internal/raft/group_transport_quic.go).
+func TestRaftV2Smoke_DefaultClusterIsV2(t *testing.T) {
 	t.Setenv("GRAINFS_RAFT_V2", "")
 	resetRaftV2FlagForTest()
 	t.Cleanup(resetRaftV2FlagForTest)
@@ -34,9 +34,10 @@ func TestRaftV2Smoke_DefaultClusterIsV1(t *testing.T) {
 	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 
-	v1, ok := node.(*raft.Node)
-	assert.True(t, ok, "expected *raft.Node (v1) for cluster when flag is unset")
-	assert.NotNil(t, v1)
+	_, isV1 := node.(*raft.Node)
+	assert.False(t, isV1, "expected v2 adapter for cluster when flag is unset (PR 28b)")
+	_, isV2 := node.(*raftV2Node)
+	assert.True(t, isV2, "expected *raftV2Node adapter for cluster when flag is unset")
 
 	node.SetTransport(noopRV, noopAE)
 	node.Start()
@@ -45,17 +46,17 @@ func TestRaftV2Smoke_DefaultClusterIsV1(t *testing.T) {
 	assert.Equal(t, "node-1", node.ID())
 }
 
-// TestRaftV2Smoke_DefaultServeruntimeIsV2 documents the M5 PR 28 phased flip:
-// serveruntime is now v2 by default while cluster remains v1.
-func TestRaftV2Smoke_DefaultServeruntimeIsV2(t *testing.T) {
+// TestRaftV2Smoke_DefaultsAreV2 documents the M5 PR 28b completion of the
+// phased flip: both serveruntime and cluster default to v2.
+func TestRaftV2Smoke_DefaultsAreV2(t *testing.T) {
 	t.Setenv("GRAINFS_RAFT_V2", "")
 	resetRaftV2FlagForTest()
 	t.Cleanup(resetRaftV2FlagForTest)
 
 	assert.True(t, IsV2Enabled("serveruntime"),
 		"expected serveruntime to default to v2 when GRAINFS_RAFT_V2 is unset")
-	assert.False(t, IsV2Enabled("cluster"),
-		"expected cluster to stay v1 when GRAINFS_RAFT_V2 is unset (held for PR 28b)")
+	assert.True(t, IsV2Enabled("cluster"),
+		"expected cluster to default to v2 when GRAINFS_RAFT_V2 is unset (PR 28b)")
 }
 
 // TestRaftV2Smoke_OffEscapeHatchDisablesV2 verifies the operator escape hatch:
@@ -137,7 +138,9 @@ func TestRaftV2Smoke_ClusterFlagSelectsV2(t *testing.T) {
 }
 
 // TestRaftV2Smoke_OtherPkgFlagDoesNotAffectCluster verifies that setting
-// GRAINFS_RAFT_V2=serveruntime does NOT enable v2 for the cluster package.
+// GRAINFS_RAFT_V2=serveruntime overrides the empty-env default (which would
+// otherwise enable v2 for both pkgs after PR 28b) and pins cluster back to v1
+// — a named-package list is exhaustive, not additive.
 func TestRaftV2Smoke_OtherPkgFlagDoesNotAffectCluster(t *testing.T) {
 	t.Setenv("GRAINFS_RAFT_V2", "serveruntime")
 	resetRaftV2FlagForTest()
@@ -147,9 +150,9 @@ func TestRaftV2Smoke_OtherPkgFlagDoesNotAffectCluster(t *testing.T) {
 	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 
-	// Must still be v1.
+	// Must still be v1 — explicit serveruntime-only list excludes cluster.
 	_, isV1 := node.(*raft.Node)
-	assert.True(t, isV1, "GRAINFS_RAFT_V2=serveruntime must not affect cluster package")
+	assert.True(t, isV1, "GRAINFS_RAFT_V2=serveruntime must not enable v2 for cluster")
 
 	node.SetTransport(noopRV, noopAE)
 	node.Start()
@@ -159,8 +162,8 @@ func TestRaftV2Smoke_OtherPkgFlagDoesNotAffectCluster(t *testing.T) {
 }
 
 // TestRaftV2Smoke_ParseFlag verifies the flag parser handles all documented
-// cases. As of M5 PR 28 an empty env defaults to serveruntime=v2 (cluster
-// stays v1 until PR 28b); "off" is the escape hatch that disables v2.
+// cases. As of M5 PR 28b an empty env defaults to both serveruntime=v2 and
+// cluster=v2; "off" is the escape hatch that disables v2.
 func TestRaftV2Smoke_ParseFlag(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -168,7 +171,7 @@ func TestRaftV2Smoke_ParseFlag(t *testing.T) {
 		cluster bool
 		srv     bool
 	}{
-		{"empty_defaults_to_serveruntime_v2", "", false, true},
+		{"empty_defaults_to_both_v2", "", true, true},
 		{"off_disables_all", "off", false, false},
 		{"cluster_only", "cluster", true, false},
 		{"serveruntime_only", "serveruntime", false, true},
