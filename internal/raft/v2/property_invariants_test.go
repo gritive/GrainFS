@@ -1,7 +1,9 @@
 package raftv2
 
 import (
+	"bytes"
 	"fmt"
+	"testing"
 )
 
 // invObserver is a shared observation store used by invariant checkers.
@@ -112,4 +114,99 @@ func checkLeaderAppendOnly(nodeApplied map[string][]LogEntry) error {
 		}
 	}
 	return nil
+}
+
+// checkLogMatching asserts Invariant 3 (Log Matching): if any two nodes have
+// both applied an entry at index i with the same Term, then all entries at
+// j < i in both streams must have identical (Term, Command) pairs.
+//
+// The applied stream is indexed by position, not by LogEntry.Index directly,
+// so we build a lookup map[index]LogEntry for each node and then compare.
+// This catches diverged histories that could arise if Raft's log matching
+// property were violated during AppendEntries conflict resolution.
+func checkLogMatching(nodeApplied map[string][]LogEntry) error {
+	// Build per-node index → entry maps.
+	type nodeMap struct {
+		id  string
+		idx map[uint64]LogEntry
+	}
+	nodes := make([]nodeMap, 0, len(nodeApplied))
+	for id, entries := range nodeApplied {
+		m := make(map[uint64]LogEntry, len(entries))
+		for _, e := range entries {
+			m[e.Index] = e
+		}
+		nodes = append(nodes, nodeMap{id: id, idx: m})
+	}
+
+	// Check every pair.
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			a, b := nodes[i], nodes[j]
+			// Find matching (index, term) positions.
+			for idx, ea := range a.idx {
+				eb, ok := b.idx[idx]
+				if !ok {
+					continue
+				}
+				if ea.Term != eb.Term {
+					// Different terms at same index — not a log matching violation per se
+					// (could be a no-op vs command distinction), but not possible in a
+					// correct Raft: terms at the same committed index must match.
+					return fmt.Errorf(
+						"log matching violated: nodes %s and %s disagree on term at index %d (%d vs %d)",
+						a.id, b.id, idx, ea.Term, eb.Term,
+					)
+				}
+				// Same (index, term): verify all prior entries match.
+				for prior := uint64(1); prior < idx; prior++ {
+					pa, aHas := a.idx[prior]
+					pb, bHas := b.idx[prior]
+					if !aHas || !bHas {
+						continue // one node hasn't applied this yet; not a violation
+					}
+					if pa.Term != pb.Term || !bytes.Equal(pa.Command, pb.Command) {
+						return fmt.Errorf(
+							"log matching violated: nodes %s and %s agree at (index=%d, term=%d) but differ at prior index %d: terms %d vs %d",
+							a.id, b.id, idx, ea.Term, prior, pa.Term, pb.Term,
+						)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func TestCheckLogMatching_Violation(t *testing.T) {
+	// Nodes a and b agree at (index=2, term=1) but differ at prior index=1.
+	nodeApplied := map[string][]LogEntry{
+		"a": {
+			{Index: 1, Term: 1, Command: []byte("cmd-a")},
+			{Index: 2, Term: 1, Command: []byte("cmd-2")},
+		},
+		"b": {
+			{Index: 1, Term: 1, Command: []byte("cmd-b")}, // different!
+			{Index: 2, Term: 1, Command: []byte("cmd-2")},
+		},
+	}
+	if err := checkLogMatching(nodeApplied); err == nil {
+		t.Fatal("expected log matching violation, got nil")
+	}
+}
+
+func TestCheckLogMatching_Valid(t *testing.T) {
+	nodeApplied := map[string][]LogEntry{
+		"a": {
+			{Index: 1, Term: 1, Command: []byte("cmd-1")},
+			{Index: 2, Term: 1, Command: []byte("cmd-2")},
+		},
+		"b": {
+			{Index: 1, Term: 1, Command: []byte("cmd-1")},
+			{Index: 2, Term: 1, Command: []byte("cmd-2")},
+		},
+	}
+	if err := checkLogMatching(nodeApplied); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
