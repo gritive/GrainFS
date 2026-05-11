@@ -22,18 +22,16 @@ var errShutdownTimeout = errors.New("group lifecycle: shutdown timed out")
 
 // GroupLifecycleConfig collects the wiring needed to instantiate a local group.
 type OpenGroupStateDBFunc func(groupID, path string) (*badger.DB, error)
-type OpenGroupLogStoreFunc func(groupID, path string) (raft.LogStore, error)
 
 type GroupLifecycleConfig struct {
-	NodeID       string
-	DataDir      string
-	ShardSvc     *ShardService // may be nil for in-process / single-node tests
-	EC           ECConfig
-	LogStore     raft.LogStore // optional — if nil, BadgerLogStore is created at {groupDir}/raft
-	OpenStateDB  OpenGroupStateDBFunc
-	OpenLogStore OpenGroupLogStoreFunc
-	Transport    groupTransport
-	AddrBook     NodeAddressBook
+	NodeID      string
+	DataDir     string
+	ShardSvc    *ShardService // may be nil for in-process / single-node tests
+	EC          ECConfig
+	LogStore    raft.LogStore // optional — if nil, a per-group BadgerLogStore is created at {groupDir}/raft
+	OpenStateDB OpenGroupStateDBFunc
+	Transport   groupTransport
+	AddrBook    NodeAddressBook
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
@@ -135,14 +133,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 
 	logStore := cfg.LogStore
 	if logStore == nil {
-		raftDir := filepath.Join(groupDir, "raft")
-		openLogStore := cfg.OpenLogStore
-		if openLogStore == nil {
-			openLogStore = func(_ string, path string) (raft.LogStore, error) {
-				return raft.NewBadgerLogStore(path)
-			}
-		}
-		ls, lerr := openLogStore(entry.ID, raftDir)
+		ls, lerr := raft.NewBadgerLogStore(filepath.Join(groupDir, "raft"))
 		if lerr != nil {
 			resourcewatch.DeregisterDB(groupVlogEntry)
 			_ = db.Close()
