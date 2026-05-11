@@ -127,7 +127,7 @@ type Server struct {
 	hub            *Hub
 	volMgr         *volume.Manager
 	policyStore    *CompiledPolicyStore
-	lifecycleStore *lifecycle.Store
+	lifecycle      *lifecycle.Service
 	icebergCatalog icebergcatalog.Catalog
 	cluster        ClusterInfo       // nil in no-peers mode
 	membership     ClusterMembership // nil = remove-peer endpoint returns 503
@@ -313,10 +313,12 @@ func WithScrubber(sc *scrubber.BackgroundScrubber) Option {
 	}
 }
 
-// WithLifecycleStore attaches a lifecycle rule store to the server.
-func WithLifecycleStore(store *lifecycle.Store) Option {
+// WithLifecycleService attaches the lifecycle service (deep module). The
+// service is the single seam between server handlers and the lifecycle
+// domain — never reach into the underlying Store directly.
+func WithLifecycleService(svc *lifecycle.Service) Option {
 	return func(s *Server) {
-		s.lifecycleStore = store
+		s.lifecycle = svc
 	}
 }
 

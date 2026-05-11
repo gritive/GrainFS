@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net"
@@ -17,7 +19,28 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func setupLifecycleServer(t *testing.T) (base string, store *lifecycle.Store) {
+// directProposer writes lifecycle changes straight to the store — no Raft
+// required for unit tests.
+type directProposer struct{ store *lifecycle.Store }
+
+func (p *directProposer) ProposeLifecyclePut(_ context.Context, bucket string, raw []byte) error {
+	return p.store.PutRaw(bucket, raw)
+}
+func (p *directProposer) ProposeLifecycleDelete(_ context.Context, bucket string) error {
+	return p.store.Delete(bucket)
+}
+
+// noopLeadership satisfies lifecycle.LeadershipSignal for tests that do not
+// exercise the executor.
+type noopLeadership struct{}
+
+func (noopLeadership) IsLeader() bool { return false }
+func (noopLeadership) Subscribe() (<-chan struct{}, func()) {
+	ch := make(chan struct{})
+	return ch, func() {}
+}
+
+func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service) {
 	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
@@ -30,11 +53,12 @@ func setupLifecycleServer(t *testing.T) (base string, store *lifecycle.Store) {
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
-	store = lifecycle.NewStore(db)
+	store := lifecycle.NewStore(db)
+	svc = lifecycle.NewService(store, &directProposer{store: store}, noopLeadership{}, nil, nil, 0)
 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := New(addr, backend, WithLifecycleStore(store))
+	srv := New(addr, backend, WithLifecycleService(svc))
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 50; i++ {
 		conn, err2 := net.Dial("tcp", addr)
@@ -44,7 +68,7 @@ func setupLifecycleServer(t *testing.T) (base string, store *lifecycle.Store) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return "http://" + addr, store
+	return "http://" + addr, svc
 }
 
 const testLifecycleXML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -144,4 +168,36 @@ func TestLifecycleAPI_PutInvalidXML(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestLifecycleAPI_GetReturnsRawXML verifies that GET returns the verbatim
+// bytes sent by the caller (ADR 0011 round-trip requirement).
+func TestLifecycleAPI_GetReturnsRawXML(t *testing.T) {
+	base, _ := setupLifecycleServer(t)
+
+	// create bucket
+	req, _ := http.NewRequest(http.MethodPut, base+"/raw-bkt", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	// PUT lifecycle — use canonical form
+	req, _ = http.NewRequest(http.MethodPut, base+"/raw-bkt?lifecycle",
+		strings.NewReader(testLifecycleXML))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// GET lifecycle — should come back as valid XML
+	resp, err = http.Get(base + "/raw-bkt?lifecycle")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	var cfg lifecycle.LifecycleConfiguration
+	require.NoError(t, xml.Unmarshal(body, &cfg), "GET response must be valid XML")
+	require.Len(t, cfg.Rules, 1)
+	assert.Equal(t, "expire-logs", cfg.Rules[0].ID)
 }
