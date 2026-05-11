@@ -21,12 +21,21 @@ package cluster
 //   SetInstallSnapshotTransport, SetTimeoutNowTransport, HandleRequestVote,
 //   HandleAppendEntries, HandleInstallSnapshot, BatchMetrics, …
 //
-// M4 follow-up membership bridge (this PR):
+// M4 follow-up membership bridge:
 //   AddVoter, AddVoterCtx, RemoveVoter — direct passthrough (v2 has them).
-//   AddLearner, PromoteToVoter, TransferLeadership — passthrough to ErrNotImplemented
-//     (v2 stubs; callers get a clear error instead of a silent skip).
+//   TransferLeadership — direct passthrough (Raft §3.10, implemented in
+//     v0.0.143.0 / PR #288).
+//   AddLearner, PromoteToVoter — passthrough to ErrNotImplemented (deferred
+//     beyond M5; v2 has no learner support). Callers receive a clear error
+//     instead of a silent skip.
 //   ChangeMembership — sequenced bridge (not atomic; see WARN: in method body).
 //   PeerMatchIndex — returns (0, false); v2 has no per-peer replication state.
+//
+// M5 PR 27 follow-up:
+//   Handle{RequestVote,AppendEntries,InstallSnapshot,TimeoutNow} — translate v1
+//     wire types to v2 native types and dispatch into raftv2.Node. See the
+//     dedicated section near the bottom of this file for the two known
+//     translation gaps (TimeoutNow.Term, InstallSnapshot.Servers vs Configuration).
 
 import (
 	"context"
@@ -121,12 +130,14 @@ func (a *raftV2Node) Bootstrap() error {
 	} else {
 		metrics.RaftV2BootstrapOutcome.WithLabelValues("success").Inc()
 	}
-	return err
+	return translateV2SentinelErr(err)
 }
 
 // --- Write path ---
 
-func (a *raftV2Node) Propose(command []byte) error { return a.n.Propose(command) }
+func (a *raftV2Node) Propose(command []byte) error {
+	return translateV2SentinelErr(a.n.Propose(command))
+}
 
 func (a *raftV2Node) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
 	start := time.Now()
@@ -134,7 +145,28 @@ func (a *raftV2Node) ProposeWait(ctx context.Context, command []byte) (uint64, e
 	outcome := proposeOutcome(err)
 	metrics.RaftV2ProposeCount.WithLabelValues(outcome).Inc()
 	metrics.RaftV2ProposeLatency.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
-	return idx, err
+	return idx, translateV2SentinelErr(err)
+}
+
+// translateV2SentinelErr maps a raftv2 sentinel error to its v1 equivalent so
+// callers that use errors.Is(err, raft.ErrNotLeader) (or sibling sentinels)
+// continue to match under v2. Errors that have no v1 counterpart (e.g.
+// ErrProposalFailed, ErrConfChangeInFlight) pass through unchanged.
+//
+// PR 30 (v1 deletion) removes this shim; v2's sentinels become canonical.
+func translateV2SentinelErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, raftv2.ErrNotLeader):
+		return raft.ErrNotLeader
+	case errors.Is(err, raftv2.ErrNoPeers):
+		return raft.ErrNoPeers
+	case errors.Is(err, raftv2.ErrAlreadyBootstrapped):
+		return raft.ErrAlreadyBootstrapped
+	}
+	return err
 }
 
 // proposeOutcome maps a ProposeWait error to a bounded outcome label.
@@ -154,7 +186,8 @@ func proposeOutcome(err error) string {
 // --- Read path ---
 
 func (a *raftV2Node) ReadIndex(ctx context.Context) (uint64, error) {
-	return a.n.ReadIndex(ctx)
+	idx, err := a.n.ReadIndex(ctx)
+	return idx, translateV2SentinelErr(err)
 }
 
 // WaitApplied blocks until CommittedIndex >= index or ctx is done.
@@ -330,28 +363,37 @@ func (a *raftV2Node) DeregisterObserver(_ chan<- raft.Event) {}
 // --- Membership: direct passthrough (v2 has these methods) ---
 
 // AddVoter passes through to the v2 node's AddVoter implementation.
-func (a *raftV2Node) AddVoter(id, addr string) error { return a.n.AddVoter(id, addr) }
+func (a *raftV2Node) AddVoter(id, addr string) error {
+	return translateV2SentinelErr(a.n.AddVoter(id, addr))
+}
 
 // AddVoterCtx passes through to the v2 node's AddVoterCtx implementation.
 func (a *raftV2Node) AddVoterCtx(ctx context.Context, id, addr string) error {
-	return a.n.AddVoterCtx(ctx, id, addr)
+	return translateV2SentinelErr(a.n.AddVoterCtx(ctx, id, addr))
 }
 
 // RemoveVoter passes through to the v2 node's RemoveVoter implementation.
-func (a *raftV2Node) RemoveVoter(id string) error { return a.n.RemoveVoter(id) }
+func (a *raftV2Node) RemoveVoter(id string) error {
+	return translateV2SentinelErr(a.n.RemoveVoter(id))
+}
 
 // --- Membership: passthrough to ErrNotImplemented (v2 stubs) ---
 
-// AddLearner passes through to v2. v2 returns ErrNotImplemented (M2 scope);
-// the adapter surfaces this error so operators see a clear failure rather than
-// a silent skip.
+// AddLearner passes through to v2. v2 returns ErrNotImplemented (deferred
+// beyond M5; v2 currently has no learner support — see
+// internal/raft/v2/node.go::AddLearner). The adapter surfaces this error so
+// operators see a clear failure rather than a silent skip.
 func (a *raftV2Node) AddLearner(id, addr string) error { return a.n.AddLearner(id, addr) }
 
-// PromoteToVoter passes through to v2. v2 returns ErrNotImplemented (M2 scope).
+// PromoteToVoter passes through to v2. v2 returns ErrNotImplemented (deferred
+// beyond M5 with AddLearner).
 func (a *raftV2Node) PromoteToVoter(id string) error { return a.n.PromoteToVoter(id) }
 
-// TransferLeadership passes through to v2. v2 returns ErrNotImplemented (M2 scope).
-func (a *raftV2Node) TransferLeadership() error { return a.n.TransferLeadership() }
+// TransferLeadership passes through to v2 (Raft §3.10, implemented in
+// v0.0.143.0 / PR #288).
+func (a *raftV2Node) TransferLeadership() error {
+	return translateV2SentinelErr(a.n.TransferLeadership())
+}
 
 // --- PeerMatchIndex: v2 does not expose per-peer replication state ---
 
@@ -379,7 +421,7 @@ func (a *raftV2Node) ChangeMembership(ctx context.Context, adds []raft.ServerEnt
 			return err
 		}
 		if err := a.n.AddVoterCtx(ctx, add.ID, add.Address); err != nil {
-			return err
+			return translateV2SentinelErr(err)
 		}
 	}
 	for _, id := range removes {
@@ -387,10 +429,123 @@ func (a *raftV2Node) ChangeMembership(ctx context.Context, adds []raft.ServerEnt
 			return err
 		}
 		if err := a.n.RemoveVoter(id); err != nil {
-			return err
+			return translateV2SentinelErr(err)
 		}
 	}
 	return nil
+}
+
+// --- Inbound RPC handlers (M5 PR 27) ---
+//
+// These methods accept v1 wire types (raft.*) and translate to v2 native types
+// before dispatching to raftv2.Node. The translation is byte-semantically
+// equivalent to v1's HandleRequestVote / HandleAppendEntries / etc., with two
+// documented gaps:
+//
+//   1. TimeoutNow.Term: v1 wire carries no Term field. We synthesise
+//      args.Term = receiver's currentTerm so v2's Raft §3.10 stale-term check
+//      accepts the call. v2 also reads args.Leader (informational only); we
+//      pass the v2 node's LeaderID() so log lines are not empty. The legitimate
+//      stale-leader guard is lost on the v1 wire — same exposure v1 has by
+//      construction. PR 30 may extend the wire format if needed.
+//
+//   2. InstallSnapshotArgs.Servers vs v2's .Configuration: v1 carries
+//      []Server{ID, Suffrage}; v2 only stores []string (voter IDs). Suffrage
+//      info is dropped on the boundary. v2 has no learner support
+//      (AddLearner returns ErrNotImplemented) so this is currently acceptable.
+
+func (a *raftV2Node) HandleRequestVote(args *raft.RequestVoteArgs) *raft.RequestVoteReply {
+	v2args := &raftv2.RequestVoteArgs{
+		Term:           args.Term,
+		CandidateID:    args.CandidateID,
+		LastLogIndex:   args.LastLogIndex,
+		LastLogTerm:    args.LastLogTerm,
+		PreVote:        args.PreVote,
+		LeaderTransfer: args.LeaderTransfer,
+	}
+	reply := a.n.HandleRequestVote(v2args)
+	return &raft.RequestVoteReply{Term: reply.Term, VoteGranted: reply.VoteGranted}
+}
+
+func (a *raftV2Node) HandleAppendEntries(args *raft.AppendEntriesArgs) *raft.AppendEntriesReply {
+	entries := make([]raftv2.LogEntry, len(args.Entries))
+	for i, e := range args.Entries {
+		entries[i] = raftv2.LogEntry{
+			Term:    e.Term,
+			Index:   e.Index,
+			Command: e.Command,
+			Type:    raftv2.LogEntryType(e.Type),
+		}
+	}
+	v2args := &raftv2.AppendEntriesArgs{
+		Term:         args.Term,
+		LeaderID:     args.LeaderID,
+		PrevLogIndex: args.PrevLogIndex,
+		PrevLogTerm:  args.PrevLogTerm,
+		Entries:      entries,
+		LeaderCommit: args.LeaderCommit,
+	}
+	reply := a.n.HandleAppendEntries(v2args)
+	return &raft.AppendEntriesReply{
+		Term:          reply.Term,
+		Success:       reply.Success,
+		ConflictTerm:  reply.ConflictTerm,
+		ConflictIndex: reply.ConflictIndex,
+	}
+}
+
+func (a *raftV2Node) HandleInstallSnapshot(args *raft.InstallSnapshotArgs) *raft.InstallSnapshotReply {
+	cfg := make([]string, len(args.Servers))
+	for i, s := range args.Servers {
+		cfg[i] = s.ID
+	}
+	v2args := &raftv2.InstallSnapshotArgs{
+		Term:              args.Term,
+		LeaderID:          args.LeaderID,
+		LastIncludedIndex: args.LastIncludedIndex,
+		LastIncludedTerm:  args.LastIncludedTerm,
+		Configuration:     cfg,
+		Data:              args.Data,
+	}
+	reply := a.n.HandleInstallSnapshot(v2args)
+	return &raft.InstallSnapshotReply{Term: reply.Term}
+}
+
+// HandleTimeoutNow synthesises a v2 TimeoutNowArgs using the receiver's own
+// term so v2's stale-term check accepts the call. See package-level note.
+func (a *raftV2Node) HandleTimeoutNow() {
+	v2args := &raftv2.TimeoutNowArgs{
+		Term:   a.n.Term(),
+		Leader: a.n.LeaderID(),
+	}
+	_ = a.n.HandleTimeoutNow(v2args)
+}
+
+// CreateSnapshot satisfies cluster.RaftV2Snapshotter. Forwards to v2's
+// CreateSnapshot which persists the snapshot via the configured SnapshotStore
+// and compacts the log up to lastIncludedIndex inside the actor goroutine.
+func (a *raftV2Node) CreateSnapshot(lastIncludedIndex uint64, data []byte) error {
+	return a.n.CreateSnapshot(lastIncludedIndex, data)
+}
+
+// SnapshotStatus satisfies cluster.RaftV2Snapshotter. Returns v1's
+// raft.SnapshotStatus shape (Available / Index / Term / SizeBytes) computed
+// from v2's LatestSnapshot. An absent snapshot yields a zero-value status
+// (Available=false), matching v1 SnapshotManager.Status semantics.
+func (a *raftV2Node) SnapshotStatus() (raft.SnapshotStatus, error) {
+	snap, err := a.n.LatestSnapshot()
+	if err != nil {
+		return raft.SnapshotStatus{}, err
+	}
+	if snap == nil || snap.LastIncludedIndex == 0 {
+		return raft.SnapshotStatus{}, nil
+	}
+	return raft.SnapshotStatus{
+		Available: true,
+		Index:     snap.LastIncludedIndex,
+		Term:      snap.LastIncludedTerm,
+		SizeBytes: len(snap.Data),
+	}, nil
 }
 
 // compile-time check: *raftV2Node must satisfy RaftNode.

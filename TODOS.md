@@ -10,13 +10,13 @@
 
 - [ ] **raft/v2: cmdCh backpressure cascade** — slow FSM consumer wedges actor's applyCh send → wedges cmdCh → wedges all incoming RPCs (HandleRequestVote/HandleAppendEntries) → peers election-timeout this node → cascading election storm. Structural fix: make applyCh delivery non-blocking from actor (separate apply goroutine reading from a buffered queue), OR at least give Propose a ctx variant + drop AE on cmdCh-full to keep election alive.
 
-### raft v2 — M5 PR 27 follow-up (left open by PR 26)
+### raft v2 — M5 PR 28 follow-up (left open by PR 27)
 
-> 2026-05-11 PR 26 landed serveruntime + cluster-factory v2 dispatch behind `GRAINFS_RAFT_V2=serveruntime` / `=cluster`. The remaining wire-up before the PR 28 default-on flip:
+> 2026-05-12 PR 27 landed the v2 QUIC RPC bridge (`cluster.RaftV2QUICRPCTransport` + `cluster.RaftV2Snapshotter` + sentinel translation in `raftv2adapter.go`). Wire codec is byte-identical to v1 (golden hex test). 3-node v2 cluster proven over real QUIC (`TestV2QUICCluster_ThreeNode_*`). Remaining work before deletion:
 
-- [ ] **PR 27: v2 QUIC RPC inbound bridge** — `internal/raft/quic_rpc.go::handleRPC` reaches v1-only `HandleRequestVote / HandleAppendEntries / HandleInstallSnapshot / HandleTimeoutNow`. v2 has all four (per-`internal/raft/v2/node.go`); a parallel `cluster.RaftV2QUICRPCTransport` must register `transport.StreamControl`, decode the same wire format, and dispatch into the v2 node through new `Handle*` methods on `cluster.RaftNode`. Wire codec: `encodeRPC/decodeRPC` in `internal/raft/quic_rpc_codec.go` are unexported and v1 is frozen, so the cluster-side bridge must duplicate the wire format (byte-identical) until v1 is deleted in PR 30. Without this, a multi-node v2 cluster cannot exchange Raft RPCs. **Blocks PR 28 default-on flip.**
-- [ ] **PR 27: v2 snapshot trigger surface** — `DistributedBackend.RaftSnapshotStatus / TriggerRaftSnapshot` return "unavailable" in v2 mode because `bootSnapshotAndApplyLoop` skips the v1 `SnapshotManager` (v2 owns snapshot lifecycle internally). Surface v2's `CreateSnapshot` through a `cluster.RaftNode` extension (or a sibling interface) so the admin endpoint works under the flag.
-- [ ] **PR 27: PR 22 / PR 26 stale-doc audit** — `internal/cluster/raftv2adapter.go` still labels `TransferLeadership` / `AddLearner` / `PromoteToVoter` as M2-scope ErrNotImplemented stubs even though `TransferLeadership` was implemented in v0.0.143.0. Refresh the comment block and adjust the M4 / PR 22 deferral notes that PR 26 closed.
+- [ ] **PR 28: default GRAINFS_RAFT_V2=all on** — flip the default value of `ParseRaftV2Flag` so v2 is selected for both `cluster` and `serveruntime` when the env var is unset. Stage in a single small PR with clear rollback (revert).
+- [ ] **PR 29: remove GRAINFS_RAFT_V2 flag + raftv2adapter cleanup** — drop the flag entirely, fold `cluster.RaftV2Snapshotter` into `cluster.RaftNode` (CreateSnapshot / SnapshotStatus become canonical), remove `translateV2SentinelErr` and the dual encoder, refactor `cluster.RaftV2QUICRPCTransport` → `cluster.RaftQUICRPCTransport`.
+- [ ] **PR 30: delete internal/raft/ v1 package** — remove `internal/raft` and rename `internal/raft/v2` → `internal/raft`. Update all imports. v1's sentinels (`raft.ErrNotLeader`, etc.) move to the new `raft` package; v2's `raftv2.*` aliases become unnecessary. Wire codec at `internal/cluster/raftv2_quic_codec.go` becomes the sole encoder (rename the file + symbols, drop the `v2` prefix).
 
 ### 기타
 

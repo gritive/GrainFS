@@ -106,6 +106,38 @@ type RaftNode interface {
 	// calls — not atomic (partial failure leaves intermediate state; see
 	// raftv2adapter.go for the WARN: caveat).
 	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
+
+	// Inbound Raft RPC handlers — invoked by the QUIC RPC server when a peer
+	// delivers a Raft message. Argument and reply types are v1's (raft.*) so
+	// the QUIC wire codec is shared across v1 and v2. v2's adapter translates
+	// at the boundary (see raftv2adapter.go::Handle*).
+	//
+	// Added in M5 PR 27 so the v2 QUIC RPC bridge can dispatch into either
+	// raft.Node (direct) or raftv2.Node (via translation).
+	HandleRequestVote(args *raft.RequestVoteArgs) *raft.RequestVoteReply
+	HandleAppendEntries(args *raft.AppendEntriesArgs) *raft.AppendEntriesReply
+	HandleInstallSnapshot(args *raft.InstallSnapshotArgs) *raft.InstallSnapshotReply
+	// HandleTimeoutNow accepts an empty args struct (v1 wire format carries no
+	// payload). The v2 adapter synthesises args.Term = receiver currentTerm so
+	// v2's stale-term check (Raft §3.10) accepts the call; PR 30 will rework
+	// the wire format if v2 needs to propagate the leader's term.
+	HandleTimeoutNow()
+}
+
+// RaftV2Snapshotter is an optional interface implemented by the v2 RaftNode
+// adapter. The v1 path uses the long-standing *raft.SnapshotManager
+// (DistributedBackend.SetSnapshotManager); v2 owns snapshot lifecycle
+// internally, so the admin TriggerRaftSnapshot path discovers v2 via this
+// type-assertion and forwards through CreateSnapshot / SnapshotStatus.
+//
+// PR 30 (v1 deletion) folds this into RaftNode.
+type RaftV2Snapshotter interface {
+	// CreateSnapshot persists an FSM snapshot at lastIncludedIndex and compacts
+	// the log up to that index inside v2's actor goroutine.
+	CreateSnapshot(lastIncludedIndex uint64, data []byte) error
+	// SnapshotStatus reports the latest persisted v2 snapshot using v1's
+	// raft.SnapshotStatus shape so callers can use a single type.
+	SnapshotStatus() (raft.SnapshotStatus, error)
 }
 
 // compile-time check: *raft.Node must satisfy RaftNode.
