@@ -30,6 +30,7 @@ type GroupBackend struct {
 	peerIDs         []string
 	logStore        raft.LogStore               // owned: closed on GroupBackend.Close (nil if wrapped)
 	vlogEntry       *resourcewatch.RegisteredDB // owned: deregistered on Close (nil if wrapped)
+	v2StoreClose    func() error                // owned: invoked on Close (nil when v2 not in use)
 	wrapped         bool                        // true → Close is no-op (caller owns lifecycle)
 	closed          atomic.Bool
 	closeOnce       sync.Once
@@ -76,6 +77,10 @@ type GroupBackendConfig struct {
 	ShardSvc  *ShardService               // may be nil for in-process / single-node tests
 	PeerIDs   []string                    // EC node pool = group voter set
 	EC        ECConfig
+	// V2StoreClose, if non-nil, is invoked on Close to release the per-group
+	// Badger DB that backs the v2 LogStore + StableStore + SnapshotStore
+	// trio. Nil for v1 paths (the BadgerLogStore field is the v1 closer).
+	V2StoreClose func() error
 }
 
 // WrapDistributedBackend wraps an EXISTING DistributedBackend as a GroupBackend.
@@ -129,6 +134,7 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 		peerIDs:            cloneStringSlice(cfg.PeerIDs),
 		logStore:           cfg.LogStore,
 		vlogEntry:          cfg.VlogEntry,
+		v2StoreClose:       cfg.V2StoreClose,
 	}, nil
 }
 
@@ -207,6 +213,11 @@ func (g *GroupBackend) Close() error {
 		err = g.DistributedBackend.Close() // closes meta BadgerDB
 		if g.logStore != nil {
 			if cErr := g.logStore.Close(); cErr != nil && err == nil {
+				err = cErr
+			}
+		}
+		if g.v2StoreClose != nil {
+			if cErr := g.v2StoreClose(); cErr != nil && err == nil {
 				err = cErr
 			}
 		}

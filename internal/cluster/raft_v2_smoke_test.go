@@ -29,7 +29,7 @@ func TestRaftV2Smoke_DefaultIsV1(t *testing.T) {
 	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("node-1", nil)
-	node, err := newRaftNode(rcfg, nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 
 	// Should be *raft.Node (v1).
@@ -52,7 +52,7 @@ func TestRaftV2Smoke_ClusterFlagSelectsV2(t *testing.T) {
 	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("node-1", nil)
-	node, err := newRaftNode(rcfg, nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 
 	// Should NOT be *raft.Node — it's the v2 adapter.
@@ -104,7 +104,7 @@ func TestRaftV2Smoke_OtherPkgFlagDoesNotAffectCluster(t *testing.T) {
 	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("node-1", nil)
-	node, err := newRaftNode(rcfg, nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 
 	// Must still be v1.

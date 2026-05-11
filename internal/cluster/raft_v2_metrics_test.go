@@ -31,7 +31,7 @@ func newV2NodeForMetricsTest(t *testing.T) RaftNode {
 	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("metrics-node-1", nil)
-	node, err := newRaftNode(rcfg, nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRVMetrics, noopAEMetrics)
 	node.Start()
@@ -124,7 +124,7 @@ func TestRaftV2Metrics_StopCountIncremented(t *testing.T) {
 	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("stop-test-node", nil)
-	node, err := newRaftNode(rcfg, nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRVMetrics, noopAEMetrics)
 	node.Start()
