@@ -29,16 +29,20 @@ type BalancerOptions struct {
 	MigrationPendingTTL time.Duration
 }
 
-// RaftBalancerAdapter wraps *raft.Node to implement
+// RaftBalancerAdapter wraps cluster.RaftNode to implement
 // cluster.RaftBalancerNode. Used internally by StartBalancer; exported so
 // tests outside this package can supply their own adapter when wiring a
 // fake balancer.
+//
+// The node field accepts both v1 (*raft.Node) and v2 (*raftV2Node) through
+// the cluster.RaftNode interface so M5 PR 26 can swap implementations
+// behind GRAINFS_RAFT_V2=serveruntime without touching the balancer.
 type RaftBalancerAdapter struct {
-	node  *raft.Node
+	node  cluster.RaftNode
 	peers []string
 }
 
-func NewRaftBalancerAdapter(node *raft.Node, peers []string) *RaftBalancerAdapter {
+func NewRaftBalancerAdapter(node cluster.RaftNode, peers []string) *RaftBalancerAdapter {
 	return &RaftBalancerAdapter{node: node, peers: peers}
 }
 
@@ -58,7 +62,7 @@ func StartBalancer(
 	opts BalancerOptions,
 	nodeID, dataDir string,
 	statsStore *cluster.NodeStatsStore,
-	node *raft.Node,
+	node cluster.RaftNode,
 	peers []string,
 	fsm *cluster.FSM,
 	quicTransport transport.Transport,

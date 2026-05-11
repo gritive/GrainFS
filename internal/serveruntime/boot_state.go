@@ -91,7 +91,11 @@ type bootState struct {
 	// raft instantiation, and EC config. effectiveEC is captured here so
 	// downstream phases (PR 6: balancer, healreceipt) can re-read the
 	// resolved EC profile without re-deriving from cluster size.
-	node             *raft.Node
+	// node is the data-plane Raft node. cluster.RaftNode interface (not
+	// *raft.Node) so M5 PR 26 can swap in the v2 adapter behind
+	// GRAINFS_RAFT_V2=serveruntime. v1 (*raft.Node) and v2 (*raftV2Node)
+	// both satisfy.
+	node             cluster.RaftNode
 	rpcTransport     *raft.QUICRPCTransport
 	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService

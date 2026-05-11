@@ -99,7 +99,10 @@ func bootStreamRouter(state *bootState) error {
 	state.quicTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
 
 	state.node.Start()
-	state.AddCleanup(func() { state.node.Stop() })
+	// state.node.Close() goes through the cluster.RaftNode interface:
+	// for v1 this maps to raft.Node.Close (Stop + wg.Wait); for v2
+	// (raftV2Node) it maps to raftv2.Node.Stop (drains the actor).
+	state.AddCleanup(func() { state.node.Close() })
 	return nil
 }
 
