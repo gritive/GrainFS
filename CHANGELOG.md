@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.0.141.0] - 2026-05-11 — fix(cluster): ListAllObjects tolerates unreadable blobs (PITR snapshot resilience)
+
+- fix(cluster): `ClusterCoordinator.ListAllObjects` no longer aborts the whole listing when a single object's data file can't be opened. It opens each blob only to enrich ETag/Size/ContentType; on failure it now logs a warning and falls back to the version-listing metadata instead of returning an error. Previously one unreadable blob (e.g. `__grainfs_volumes/__vol/default/meta` mid-boot, or an EC-stored object with no plain-file fallback in `GetObjectVersion`) made `Manager.Create()` fail on every PITR auto-snapshot tick after the first — surfacing as a flaky `TestAutoSnapshot_CreatesSnapshotAutomatically` under load. A metadata snapshot must succeed even on a partially-degraded cluster.
+
 ## [0.0.140.0] - 2026-05-11 — fix(storage/pullthrough): forward Snapshotable through the pull-through decorator
 
 - fix(storage/pullthrough): `pullthrough.Backend` now implements `storage.Snapshotable`/`storage.BucketSnapshotable` (and `Unwrap()`) by delegating to the wrapped backend. It only embedded `storage.Backend`, which does not promote the snapshot interfaces — so on the serve path (`pullthrough(wal(ClusterCoordinator))`) the backend chain stopped satisfying `Snapshotable`. Effect: `GET /admin/snapshots` returned 500 ("backend does not support snapshots") and the PITR auto-snapshotter was silently skipped on single-node serve. Regression since the pull-through layer entered the boot chain. Fixes `TestAutoSnapshot_CreatesSnapshotAutomatically`.
