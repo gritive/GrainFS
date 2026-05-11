@@ -67,11 +67,9 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 	return f.db.View(func(txn *badger.Txn) error {
 		seen := make(map[string]struct{}) // "bucket\x00key" → visited
 
-		latPrefix := []byte("lat:")
-		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
-		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
-			item := itLat.Item()
-			rest := string(item.Key()[len(latPrefix):])
+		rawLatPrefix := []byte("lat:")
+		if serr := f.keys.scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
+			rest := string(raw[len(rawLatPrefix):])
 			slash := -1
 			for i, c := range rest {
 				if c == '/' {
@@ -80,7 +78,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				}
 			}
 			if slash < 0 {
-				continue
+				return nil
 			}
 			bucket := rest[:slash]
 			key := rest[slash+1:]
@@ -90,12 +88,12 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				versionID = string(v)
 				return nil
 			}); err != nil || versionID == "" {
-				continue
+				return nil
 			}
 
-			metaItem, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+			metaItem, err := txn.Get(f.keys.ObjectMetaKeyV(bucket, key, versionID))
 			if err != nil {
-				continue
+				return nil
 			}
 			var ref ObjectMetaRef
 			ref.Bucket = bucket
@@ -120,29 +118,23 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				ref.PlacementGroupID = m.PlacementGroupID
 				return nil
 			}); verr != nil {
-				itLat.Close()
 				return verr
 			}
 			if skip {
-				continue
+				return nil
 			}
 			seen[bucket+"\x00"+key] = struct{}{}
-			if err := fn(ref); err != nil {
-				itLat.Close()
-				return err
-			}
+			return fn(ref)
+		}); serr != nil {
+			return serr
 		}
-		itLat.Close()
 
 		// Fallback: legacy unversioned obj:{bucket}/{key} entries with no
 		// lat: pointer. Split on first '/' — these predate versioning and
 		// therefore carry no embedded versionID.
-		objPrefix := []byte("obj:")
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
-			item := it.Item()
-			trimmed := string(item.Key()[len(objPrefix):])
+		rawObjPrefix := []byte("obj:")
+		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item *badger.Item) error {
+			trimmed := string(raw[len(rawObjPrefix):])
 			slash := -1
 			for i, c := range trimmed {
 				if c == '/' {
@@ -151,7 +143,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				}
 			}
 			if slash < 0 {
-				continue
+				return nil
 			}
 			bucket := trimmed[:slash]
 			key := trimmed[slash+1:]
@@ -159,7 +151,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			// Skip: handled via lat: pass already, OR this is a versioned
 			// sub-entry whose base key was covered above.
 			if _, ok := seen[bucket+"\x00"+key]; ok {
-				continue
+				return nil
 			}
 			// Skip versioned sub-entries whose base is in seen. The suffix
 			// after the last '/' is a versionID when the base has a lat pointer.
@@ -170,7 +162,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				base := trimmed[:lastSlash]
 				baseKey := base[slash+1:]
 				if _, ok := seen[bucket+"\x00"+baseKey]; ok {
-					continue
+					return nil
 				}
 			}
 
@@ -195,11 +187,8 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				return verr
 			}
 			seen[bucket+"\x00"+key] = struct{}{}
-			if err := fn(ref); err != nil {
-				return err
-			}
-		}
-		return nil
+			return fn(ref)
+		})
 	})
 }
 
@@ -219,13 +208,9 @@ func lastIndexByte(s string, b byte) int {
 // to scan for missing shards.
 func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecord) error) error {
 	return f.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		prefix := []byte("placement:")
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			item := it.Item()
-			rawKey := string(item.Key())
-			trimmed := rawKey[len(prefix):]
+		rawPrefix := []byte("placement:")
+		return f.keys.scanGroupPrefix(txn, rawPrefix, func(raw []byte, item *badger.Item) error {
+			trimmed := string(raw[len(rawPrefix):])
 			slash := -1
 			for i, c := range trimmed {
 				if c == '/' {
@@ -234,7 +219,7 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecor
 				}
 			}
 			if slash < 0 {
-				continue
+				return nil
 			}
 			bucket := trimmed[:slash]
 			key := trimmed[slash+1:]
@@ -250,11 +235,8 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecor
 			if verr != nil {
 				return verr
 			}
-			if err := fn(bucket, key, rec); err != nil {
-				return err
-			}
-		}
-		return nil
+			return fn(bucket, key, rec)
+		})
 	})
 }
 
@@ -267,7 +249,7 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecor
 func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
 	var versionID string
 	err := f.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(latestKey(bucket, key))
+		item, err := txn.Get(f.keys.LatestKey(bucket, key))
 		if err != nil {
 			return err
 		}
@@ -289,7 +271,7 @@ func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
 func (f *FSM) LookupShardPlacement(bucket, key string) (PlacementRecord, error) {
 	var rec PlacementRecord
 	err := f.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(shardPlacementKey(bucket, key))
+		item, err := txn.Get(f.keys.ShardPlacementKey(bucket, key))
 		if err != nil {
 			return err
 		}
@@ -373,7 +355,7 @@ func decodePlacementValue(data []byte) (PlacementRecord, error) {
 // metadata (N× replication mode). Returns (0, 0, err) on a real BadgerDB read error.
 func (f *FSM) LookupObjectECShards(bucket, key, versionID string) (k, m int, err error) {
 	err = f.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+		item, err := txn.Get(f.keys.ObjectMetaKeyV(bucket, key, versionID))
 		if err != nil {
 			return err
 		}

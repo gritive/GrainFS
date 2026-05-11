@@ -24,38 +24,37 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 	for _, bucket := range buckets {
 		if err := b.db.View(func(txn *badger.Txn) error {
 			latest := make(map[string]string)
-			latPrefix := []byte("lat:" + bucket + "/")
-			latIt := txn.NewIterator(badger.DefaultIteratorOptions)
-			for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
-				key := string(latIt.Item().Key()[len(latPrefix):])
-				_ = latIt.Item().Value(func(v []byte) error {
+			rawLatPrefix := []byte("lat:" + bucket + "/")
+			if err := b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
+				key := string(raw[len(rawLatPrefix):])
+				_ = item.Value(func(v []byte) error {
 					latest[key] = string(v)
 					return nil
 				})
+				return nil
+			}); err != nil {
+				return err
 			}
-			latIt.Close()
 
-			objPrefix := []byte("obj:" + bucket + "/")
-			it := txn.NewIterator(badger.DefaultIteratorOptions)
-			defer it.Close()
-			for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
-				rest := string(it.Item().Key()[len(objPrefix):])
+			rawObjPrefix := []byte("obj:" + bucket + "/")
+			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item *badger.Item) error {
+				rest := string(raw[len(rawObjPrefix):])
 				slash := strings.LastIndex(rest, "/")
 				if slash < 0 {
-					continue
+					return nil
 				}
 				key := rest[:slash]
 				versionID := rest[slash+1:]
 				if key == "" || versionID == "" {
-					continue
+					return nil
 				}
 				var meta objectMeta
-				if err := it.Item().Value(func(v []byte) error {
+				if err := item.Value(func(v []byte) error {
 					var derr error
 					meta, derr = unmarshalObjectMeta(v)
 					return derr
 				}); err != nil {
-					continue
+					return nil
 				}
 				result = append(result, storage.SnapshotObject{
 					Bucket:         bucket,
@@ -69,8 +68,8 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 					IsLatest:       latest[key] == versionID,
 					ACL:            meta.ACL,
 				})
-			}
-			return nil
+				return nil
+			})
 		}); err != nil {
 			return nil, fmt.Errorf("list objects in bucket %s: %w", bucket, err)
 		}
@@ -149,23 +148,21 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 	}
 	for _, bucket := range buckets {
 		if err := b.db.View(func(txn *badger.Txn) error {
-			objPrefix := []byte("obj:" + bucket + "/")
-			it := txn.NewIterator(badger.DefaultIteratorOptions)
-			defer it.Close()
-			for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
-				rest := string(it.Item().Key()[len(objPrefix):])
+			rawObjPrefix := []byte("obj:" + bucket + "/")
+			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, _ *badger.Item) error {
+				rest := string(raw[len(rawObjPrefix):])
 				slash := strings.LastIndex(rest, "/")
 				if slash < 0 {
-					continue
+					return nil
 				}
 				key := rest[:slash]
 				versionID := rest[slash+1:]
 				if _, wanted := want[bucket+"\x00"+key+"\x00"+versionID]; wanted {
-					continue
+					return nil
 				}
 				toDelete = append(toDelete, latEntry{bucket, key, versionID})
-			}
-			return nil
+				return nil
+			})
 		}); err != nil {
 			return 0, nil, fmt.Errorf("scan bucket %s: %w", bucket, err)
 		}
@@ -222,7 +219,7 @@ func (b *DistributedBackend) blobExists(bucket, key, versionID string) bool {
 		// Resolve versionID from the lat: pointer so WAL-replayed objects
 		// (which carry no versionID) can still be located on disk.
 		_ = b.db.View(func(txn *badger.Txn) error {
-			item, err := txn.Get([]byte("lat:" + bucket + "/" + key))
+			item, err := txn.Get(b.ks().LatestKey(bucket, key))
 			if err != nil {
 				return err
 			}
