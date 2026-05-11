@@ -696,3 +696,23 @@ func TestApplyConfChange_DoesNotAddSelfAsVoter(t *testing.T) {
 	n.applyConfChangeLocked(addD)
 	assert.ElementsMatch(t, []string{"B-addr", "C-addr", "D-addr"}, n.config.Peers)
 }
+
+// TestRebuildConfigFromLog_ExcludesSelf: a node restarting replays its own
+// AddLearner+Promote entries from the log; rebuildConfigFromLog must not
+// resurrect the phantom self-entry (the restart twin of
+// TestApplyConfChange_DoesNotAddSelfAsVoter).
+func TestRebuildConfigFromLog_ExcludesSelf(t *testing.T) {
+	n := NewNode(DefaultConfig("A", nil)) // n.id="A", empty starting peers
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.log = []LogEntry{
+		{Index: 1, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "B", Address: "B-addr"})},
+		{Index: 2, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddLearner, ID: "A", Address: "A-addr"})},
+		{Index: 3, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: "A", Address: "A-addr"})},
+		{Index: 4, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "C", Address: "C-addr"})},
+	}
+	n.rebuildConfigFromLog(0, nil, nil)
+	assert.ElementsMatch(t, []string{"B-addr", "C-addr"}, n.config.Peers, "self (A-addr) must not be in rebuilt config.Peers")
+	_, selfLearner := n.learnerIDs["A"]
+	assert.False(t, selfLearner, "self must not be recorded as a learner on replay")
+}
