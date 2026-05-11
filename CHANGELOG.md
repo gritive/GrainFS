@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.0.140.0] - 2026-05-11 — fix(storage/pullthrough): forward Snapshotable through the pull-through decorator
+
+- fix(storage/pullthrough): `pullthrough.Backend` now implements `storage.Snapshotable`/`storage.BucketSnapshotable` (and `Unwrap()`) by delegating to the wrapped backend. It only embedded `storage.Backend`, which does not promote the snapshot interfaces — so on the serve path (`pullthrough(wal(ClusterCoordinator))`) the backend chain stopped satisfying `Snapshotable`. Effect: `GET /admin/snapshots` returned 500 ("backend does not support snapshots") and the PITR auto-snapshotter was silently skipped on single-node serve. Regression since the pull-through layer entered the boot chain. Fixes `TestAutoSnapshot_CreatesSnapshotAutomatically`.
+
 ## [0.0.139.0] - 2026-05-11 — cli/test: --dedup flag deprecated; e2e workaround removed (PR-C of dedup+snapshot series)
 
 - cli(serve): `--dedup` flag is now hidden and deprecated (`MarkHidden` + `MarkDeprecated`) — dedup is always enabled by default. The flag value is still honored (passing `--dedup=false` keeps the S3-backed `s3SnapshotStore` path) and will be removed entirely in v0.1.0.
