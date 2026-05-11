@@ -108,6 +108,14 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	snapMgr.SetJointStateProvider(node.JointSnapshotState)
 	snapMgr.SetJointStateRestorer(node.RestoreJointStateFromSnapshot)
 
+	// §5.4.2: new leader must commit an entry in its own term to allow previous-term
+	// entries to be committed (leader completeness). Wire a MetaCmdTypeNoOp so
+	// runLeader automatically proposes it on every leadership win, committing any
+	// backlogged entries (e.g. lifecycle config from the dead leader's term).
+	if noOp, err := encodeMetaCmd(MetaCmdTypeNoOp, nil); err == nil {
+		node.SetNoOpCommand(noOp)
+	}
+
 	m := &MetaRaft{
 		node:           node,
 		store:          store,
