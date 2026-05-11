@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.0.142.0] - 2026-05-11 — fix(cluster): ListAllObjects tolerates unreadable blobs (PITR snapshot resilience)
+
+- fix(cluster): `ClusterCoordinator.ListAllObjects` no longer aborts the whole listing when a single object's data file can't be opened. It opens each blob only to enrich ETag/Size/ContentType; on failure it now logs a warning and falls back to the version-listing metadata instead of returning an error. Previously one unreadable blob (e.g. `__grainfs_volumes/__vol/default/meta` mid-boot, or an EC-stored object with no plain-file fallback in `GetObjectVersion`) made `Manager.Create()` fail on every PITR auto-snapshot tick after the first — surfacing as a flaky `TestAutoSnapshot_CreatesSnapshotAutomatically` under load. A metadata snapshot must succeed even on a partially-degraded cluster.
+
 ## [0.0.141.0] - 2026-05-11 — feat(lifecycle): Bucket Lifecycle Policy deep module (ADR 0011)
 
 ### Added

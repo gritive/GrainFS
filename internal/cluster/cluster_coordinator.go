@@ -10,6 +10,7 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -362,16 +363,22 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 				IsLatest:       version.IsLatest,
 			}
 			if !version.IsDeleteMarker {
-				rc, obj, err := c.GetObjectVersion(bucket, version.Key, version.VersionID)
-				if err != nil {
-					return nil, err
+				// Enrich metadata from the data file when readable. A metadata
+				// snapshot must not fail just because one blob is currently
+				// unreadable (e.g. mid-write, EC-stored without a plain-file
+				// fallback) — fall back to the version-listing fields.
+				if rc, obj, err := c.GetObjectVersion(bucket, version.Key, version.VersionID); err == nil {
+					_ = rc.Close()
+					snap.ETag = obj.ETag
+					snap.Size = obj.Size
+					snap.ContentType = obj.ContentType
+					snap.Modified = obj.LastModified
+					snap.ACL = obj.ACL
+				} else {
+					log.Warn().Str("bucket", bucket).Str("key", version.Key).
+						Str("version", version.VersionID).Err(err).
+						Msg("ListAllObjects: object data unreadable, snapshotting metadata only")
 				}
-				_ = rc.Close()
-				snap.ETag = obj.ETag
-				snap.Size = obj.Size
-				snap.ContentType = obj.ContentType
-				snap.Modified = obj.LastModified
-				snap.ACL = obj.ACL
 			}
 			out = append(out, snap)
 		}
