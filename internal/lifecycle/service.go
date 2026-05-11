@@ -82,3 +82,8 @@ func (s *Service) Apply(ctx context.Context, bucket string, raw []byte) error {
 	}
 	return s.proposer.ProposeLifecyclePut(ctx, bucket, raw)
 }
+
+// Delete proposes removal of the bucket's lifecycle configuration.
+func (s *Service) Delete(ctx context.Context, bucket string) error {
+	return s.proposer.ProposeLifecycleDelete(ctx, bucket)
+}

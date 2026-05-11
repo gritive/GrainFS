@@ -90,3 +90,10 @@ func TestService_Apply_FailsValidation(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, prop.putCalls)
 }
+
+func TestService_Delete_CallsProposer(t *testing.T) {
+	prop := &fakeProposer{}
+	svc := NewService(NewStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
+	require.NoError(t, svc.Delete(context.Background(), "b"))
+	require.Equal(t, []string{"b"}, prop.deleteCalls)
+}
