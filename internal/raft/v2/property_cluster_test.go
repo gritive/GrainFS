@@ -1,6 +1,7 @@
 package raftv2
 
 import (
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -9,18 +10,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// partitionNet is a memNetwork wrapper that supports bidirectional partitioning.
-// When a peer is isolated, all RPCs to/from that peer return ErrUnknownPeer,
-// simulating a network partition. The partition state is stored as an atomic
-// pointer to a string set so reads from hot-path goroutines need no lock.
+// partitionNet is a memNetwork wrapper that supports bidirectional partitioning,
+// probabilistic packet drops, and delay-based reordering.
+//
+// Partition: When a peer is isolated all RPCs to/from that peer return ErrUnknownPeer.
+// Drop rate: each message is dropped with probability dropRate (0.0 = none, 1.0 = all).
+// Reorder: each message sleeps up to reorderMaxDelay before delivery, effectively
+//
+//	reordering messages that arrive in quick succession. This is the delay-based
+//	approach (option A from the design): simpler shutdown semantics than a true
+//	buffered queue while providing sufficient chaos for race detection.
+//
+// All three mechanisms are orthogonal and may be active simultaneously.
 type partitionNet struct {
 	inner *memNetwork
 
-	// isolated is the set of peer IDs currently partitioned off.
-	// Written under mu; readers load via the atomic snapshot.
-	mu       sync.Mutex
-	isolated map[string]bool
-	snap     atomic.Pointer[map[string]bool]
+	// mu protects isolated, dropRate, reorderMaxDelay, and rng.
+	// Transport send paths run from multiple goroutines concurrently; all
+	// shared state must be read under this lock.
+	mu              sync.Mutex
+	isolated        map[string]bool
+	dropRate        float64       // 0.0–1.0
+	reorderMaxDelay time.Duration // 0 = disabled
+	rng             *rand.Rand
+
+	// snap is an atomic snapshot of isolated for partition-only hot-path reads.
+	// Written under mu; readers load via atomic.
+	snap atomic.Pointer[map[string]bool]
 }
 
 func newPartitionNet() *partitionNet {
@@ -28,9 +44,54 @@ func newPartitionNet() *partitionNet {
 	p := &partitionNet{
 		inner:    newMemNetwork(),
 		isolated: make(map[string]bool),
+		rng:      rand.New(rand.NewSource(42)), //nolint:gosec // deterministic seed for reproducibility
 	}
 	p.snap.Store(&empty)
 	return p
+}
+
+// SetDropRate configures the probability that each in-flight message is silently
+// dropped before delivery. p must be in [0.0, 1.0]. Orthogonal to partition and
+// reorder. Safe to call from any goroutine.
+func (p *partitionNet) SetDropRate(rate float64) {
+	p.mu.Lock()
+	p.dropRate = rate
+	p.mu.Unlock()
+}
+
+// SetReorderDelay configures the maximum random delay injected before each
+// message delivery. Callers in distinct goroutines that both draw delays in
+// [0, maxDelay) will be delivered in shuffled order relative to their call time.
+// A zero duration disables reordering. Orthogonal to partition and drop.
+// Safe to call from any goroutine.
+func (p *partitionNet) SetReorderDelay(maxDelay time.Duration) {
+	p.mu.Lock()
+	p.reorderMaxDelay = maxDelay
+	p.mu.Unlock()
+}
+
+// shouldDrop returns true if this message should be silently discarded.
+// Must be called with mu held. Advances rng.
+func (p *partitionNet) shouldDrop() bool {
+	if p.dropRate <= 0 {
+		return false
+	}
+	return p.rng.Float64() < p.dropRate
+}
+
+// reorderSleep sleeps for a random duration in [0, reorderMaxDelay) if
+// reordering is enabled. Must be called WITHOUT mu held (sleeps outside the lock).
+func (p *partitionNet) reorderSleep() {
+	p.mu.Lock()
+	d := p.reorderMaxDelay
+	var delay time.Duration
+	if d > 0 {
+		delay = time.Duration(p.rng.Int63n(int64(d)))
+	}
+	p.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 }
 
 // Register associates self → node and returns a partition-aware Transport.
@@ -68,30 +129,50 @@ func (p *partitionNet) isIsolated(id string) bool {
 	return (*snap)[id]
 }
 
-// partitionTransport wraps a memTransport and blocks RPCs to/from isolated peers.
+// partitionTransport wraps a memTransport and blocks RPCs to/from isolated peers,
+// applies probabilistic drop, and injects reorder delays. All three mechanisms
+// are checked on every send.
 type partitionTransport struct {
 	self  string
 	net   *partitionNet
 	inner Transport
 }
 
+// chaosCheck gates a send: returns ErrUnknownPeer if the message should not be
+// delivered (partition or probabilistic drop), otherwise applies any reorder
+// delay and returns nil so the caller may proceed to deliver.
+func (t *partitionTransport) chaosCheck(peer string) error {
+	// Check partition and drop rate under a single lock so both share the same rng.
+	t.net.mu.Lock()
+	partitioned := t.net.isolated[t.self] || t.net.isolated[peer]
+	drop := !partitioned && t.net.shouldDrop()
+	t.net.mu.Unlock()
+
+	if partitioned || drop {
+		return ErrUnknownPeer
+	}
+	// Reorder delay runs outside the lock to avoid holding it during sleep.
+	t.net.reorderSleep()
+	return nil
+}
+
 func (t *partitionTransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
-	if t.net.isIsolated(t.self) || t.net.isIsolated(peer) {
-		return nil, ErrUnknownPeer
+	if err := t.chaosCheck(peer); err != nil {
+		return nil, err
 	}
 	return t.inner.SendRequestVote(peer, args)
 }
 
 func (t *partitionTransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
-	if t.net.isIsolated(t.self) || t.net.isIsolated(peer) {
-		return nil, ErrUnknownPeer
+	if err := t.chaosCheck(peer); err != nil {
+		return nil, err
 	}
 	return t.inner.SendAppendEntries(peer, args)
 }
 
 func (t *partitionTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
-	if t.net.isIsolated(t.self) || t.net.isIsolated(peer) {
-		return nil, ErrUnknownPeer
+	if err := t.chaosCheck(peer); err != nil {
+		return nil, err
 	}
 	return t.inner.SendInstallSnapshot(peer, args)
 }
