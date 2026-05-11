@@ -491,5 +491,32 @@ func (a *raftV2Node) HandleTimeoutNow() {
 	_ = a.n.HandleTimeoutNow(v2args)
 }
 
+// CreateSnapshot satisfies cluster.RaftV2Snapshotter. Forwards to v2's
+// CreateSnapshot which persists the snapshot via the configured SnapshotStore
+// and compacts the log up to lastIncludedIndex inside the actor goroutine.
+func (a *raftV2Node) CreateSnapshot(lastIncludedIndex uint64, data []byte) error {
+	return a.n.CreateSnapshot(lastIncludedIndex, data)
+}
+
+// SnapshotStatus satisfies cluster.RaftV2Snapshotter. Returns v1's
+// raft.SnapshotStatus shape (Available / Index / Term / SizeBytes) computed
+// from v2's LatestSnapshot. An absent snapshot yields a zero-value status
+// (Available=false), matching v1 SnapshotManager.Status semantics.
+func (a *raftV2Node) SnapshotStatus() (raft.SnapshotStatus, error) {
+	snap, err := a.n.LatestSnapshot()
+	if err != nil {
+		return raft.SnapshotStatus{}, err
+	}
+	if snap == nil || snap.LastIncludedIndex == 0 {
+		return raft.SnapshotStatus{}, nil
+	}
+	return raft.SnapshotStatus{
+		Available: true,
+		Index:     snap.LastIncludedIndex,
+		Term:      snap.LastIncludedTerm,
+		SizeBytes: len(snap.Data),
+	}, nil
+}
+
 // compile-time check: *raftV2Node must satisfy RaftNode.
 var _ RaftNode = (*raftV2Node)(nil)

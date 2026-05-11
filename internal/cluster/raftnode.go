@@ -124,5 +124,21 @@ type RaftNode interface {
 	HandleTimeoutNow()
 }
 
+// RaftV2Snapshotter is an optional interface implemented by the v2 RaftNode
+// adapter. The v1 path uses the long-standing *raft.SnapshotManager
+// (DistributedBackend.SetSnapshotManager); v2 owns snapshot lifecycle
+// internally, so the admin TriggerRaftSnapshot path discovers v2 via this
+// type-assertion and forwards through CreateSnapshot / SnapshotStatus.
+//
+// PR 30 (v1 deletion) folds this into RaftNode.
+type RaftV2Snapshotter interface {
+	// CreateSnapshot persists an FSM snapshot at lastIncludedIndex and compacts
+	// the log up to that index inside v2's actor goroutine.
+	CreateSnapshot(lastIncludedIndex uint64, data []byte) error
+	// SnapshotStatus reports the latest persisted v2 snapshot using v1's
+	// raft.SnapshotStatus shape so callers can use a single type.
+	SnapshotStatus() (raft.SnapshotStatus, error)
+}
+
 // compile-time check: *raft.Node must satisfy RaftNode.
 var _ RaftNode = (*raft.Node)(nil)
