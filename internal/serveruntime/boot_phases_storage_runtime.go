@@ -250,16 +250,10 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
 		}
 		gb.SetShardCache(state.shardCache)
-		// v1 vs v2 mux registration. gb.RaftNode() returns nil under v2 (the
-		// group's raft node is the cluster-layer adapter, not *raft.Node);
-		// using the v1 Register path there would store a typed-nil and cause
-		// inbound RPC dispatch to nil-deref. RegisterV2 takes the
-		// raft.RaftV2Handler interface satisfied by the v2 adapter (M5 PR 28b).
-		if v1 := gb.RaftNode(); v1 != nil {
-			state.groupRaftMux.Register(entry.ID, v1)
-		} else {
-			state.groupRaftMux.RegisterV2(entry.ID, gb.Node())
-		}
+		// Register the group's raft handler on the per-server mux. As of M5
+		// PR 29 the v1 dispatch is gone — the group's raft node is always
+		// the cluster-layer v2 adapter, satisfying raft.RaftV2Handler.
+		state.groupRaftMux.Register(entry.ID, gb.Node())
 		state.dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
 		go gb.RunApplyLoop(state.stopApply)
 		owned.mu.Lock()

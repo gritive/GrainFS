@@ -6,54 +6,31 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
 )
 
-// bootSnapshotAndApplyLoop wires the meta-FSM snapshot manager onto the
-// distributed backend, restores any prior snapshot, builds the
-// packblob+cachedBackend wrap chain, registers the s3-cache invalidator, and
-// fires the distBackend apply loop goroutine.
+// bootSnapshotAndApplyLoop builds the packblob+cachedBackend wrap chain,
+// registers the s3-cache invalidator, and fires the distBackend apply loop
+// goroutine.
 //
-// Inputs: state.db, state.logStore, state.node, state.distBackend,
-// state.stopApply, cfg.PackThreshold, cfg.DataDir.
+// Inputs: state.db, state.node, state.distBackend, state.stopApply,
+// cfg.PackThreshold, cfg.DataDir.
 //
-// Outputs: state.fsm, state.snapMgr (nil in v2 mode), state.cachedBackend.
+// Outputs: state.fsm, state.cachedBackend.
 //
-// Phase ordering rationale: snapshot Restore must precede the apply-loop go
-// statement; otherwise applies between Restore() and SetSnapshotManager would
-// be dropped from the snapshot. The s3-cache invalidator MUST register before
-// the apply loop goroutine starts — otherwise FSM-replicated writes can land
-// before invalidator wiring and stale cache entries survive cross-node.
+// As of M5 PR 29 v2 is the only raft engine; raftv2 owns snapshot lifecycle
+// internally via SnapshotStore + CreateSnapshot + InstallSnapshot
+// (internal/raft/v2/snapshot_badger.go). The v1 raft.SnapshotManager is no
+// longer wired — DistributedBackend.RaftSnapshotStatus /
+// TriggerRaftSnapshot route through RaftNode.SnapshotStatus /
+// RaftNode.CreateSnapshot directly.
 //
-// v2 mode (GRAINFS_RAFT_V2=serveruntime): raftv2 owns snapshot lifecycle
-// internally via SnapshotStore + CreateSnapshot + InstallSnapshot. The v1
-// raft.SnapshotManager would require *raft.Node and *raft.BadgerLogStore
-// which the v2 path does not produce. We skip the SnapshotManager wiring;
-// DistributedBackend.RunApplyLoop already nil-checks snapMgr (backend.go
-// line ~472) so apply-loop traffic continues unaffected. RaftSnapshotStatus
-// / TriggerRaftSnapshot work under v2 via the cluster.RaftV2Snapshotter
-// sibling interface (M5 PR 27); the backend type-asserts b.node and
-// forwards CreateSnapshot / SnapshotStatus through the v2 adapter.
+// The s3-cache invalidator MUST register before the apply loop goroutine
+// starts — otherwise FSM-replicated writes can land before invalidator
+// wiring and stale cache entries survive cross-node.
 func bootSnapshotAndApplyLoop(state *bootState) error {
 	state.fsm = cluster.NewFSM(state.db)
-	if v1Node, ok := state.node.(*raft.Node); ok {
-		state.snapMgr = raft.NewSnapshotManager(state.logStore, state.fsm, raft.SnapshotConfig{Threshold: 10000})
-		state.distBackend.SetSnapshotManager(state.snapMgr, v1Node)
-
-		snapIdx, err := state.snapMgr.Restore()
-		if err != nil {
-			log.Warn().Err(err).Msg("snapshot restore failed")
-		} else if snapIdx > 0 {
-			log.Info().Uint64("index", snapIdx).Msg("restored from snapshot")
-		}
-	} else {
-		// v2 path: SnapshotManager is v1-only. raftv2 handles snapshots
-		// natively (see internal/raft/v2/snapshot_badger.go); the apply
-		// loop's nil-check tolerates state.snapMgr == nil.
-		log.Info().Msg("raft v2: skipping v1 SnapshotManager (v2 handles snapshots internally)")
-	}
 
 	// Wrapping chain (inner → outer): distBackend → packblob → cachedBackend.
 	// The WAL + pullthrough wrappers are added downstream in run.go (later

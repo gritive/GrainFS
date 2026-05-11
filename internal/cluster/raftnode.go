@@ -7,14 +7,17 @@ import (
 )
 
 // RaftNode is the interface that internal/cluster uses to drive a Raft
-// consensus node. It is satisfied by *raft.Node (v1) in production and by
-// *raftV2Node (the v2 adapter) when GRAINFS_RAFT_V2=cluster is set.
+// consensus node. In production it is satisfied by *raftV2Node (the v2
+// adapter). As of M5 PR 29 the GRAINFS_RAFT_V2 flag is gone and v2 is the
+// only production path; *raft.Node (v1) still satisfies the interface via
+// stubs in internal/raft/v2compat.go so v1-specific tests keep compiling.
+// PR 30 deletes the v1 raft package outright.
 //
 // Method set is derived from a usage survey of internal/cluster/*.go (non-test)
-// as of the M4 integration milestone. Only methods actually called through this
-// interface are listed; v1-internal methods (JointSnapshotState, CompactLog,
-// SetInstallSnapshotTransport, …) remain on *raft.Node and are accessed via
-// GroupBackend.RaftNode() type assertion in v1-only code paths.
+// as of the M4 integration milestone. v1-internal methods (JointSnapshotState,
+// CompactLog, SetInstallSnapshotTransport, …) remain on *raft.Node and are
+// accessed via GroupBackend.RaftNode() type assertion in v1-only code paths
+// (also dead post-PR-29; PR 30 cleans those up).
 //
 // v1 ↔ v2 mismatches are resolved in raftv2adapter.go; callers see v1 names.
 type RaftNode interface {
@@ -122,23 +125,24 @@ type RaftNode interface {
 	// v2's stale-term check (Raft §3.10) accepts the call; PR 30 will rework
 	// the wire format if v2 needs to propagate the leader's term.
 	HandleTimeoutNow()
-}
 
-// RaftV2Snapshotter is an optional interface implemented by the v2 RaftNode
-// adapter. The v1 path uses the long-standing *raft.SnapshotManager
-// (DistributedBackend.SetSnapshotManager); v2 owns snapshot lifecycle
-// internally, so the admin TriggerRaftSnapshot path discovers v2 via this
-// type-assertion and forwards through CreateSnapshot / SnapshotStatus.
-//
-// PR 30 (v1 deletion) folds this into RaftNode.
-type RaftV2Snapshotter interface {
-	// CreateSnapshot persists an FSM snapshot at lastIncludedIndex and compacts
-	// the log up to that index inside v2's actor goroutine.
+	// Snapshot surface (folded from the former RaftV2Snapshotter interface in
+	// M5 PR 29). v2 owns snapshot lifecycle internally — CreateSnapshot
+	// persists an FSM snapshot at lastIncludedIndex and compacts the log up
+	// to that index inside the v2 actor goroutine; SnapshotStatus reports the
+	// latest persisted v2 snapshot in v1's raft.SnapshotStatus shape so
+	// admin callers (TriggerRaftSnapshot / RaftSnapshotStatus) use a single
+	// type.
+	//
+	// v1's *raft.Node satisfies these methods via panicking stubs in
+	// internal/raft/v2compat.go (PR 29). The v1 path is unreachable from
+	// production code; the stubs exist only so v1-specific test files keep
+	// compiling. PR 30 deletes the v1 package outright.
 	CreateSnapshot(lastIncludedIndex uint64, data []byte) error
-	// SnapshotStatus reports the latest persisted v2 snapshot using v1's
-	// raft.SnapshotStatus shape so callers can use a single type.
 	SnapshotStatus() (raft.SnapshotStatus, error)
 }
 
-// compile-time check: *raft.Node must satisfy RaftNode.
+// compile-time check: *raft.Node must satisfy RaftNode. The v2 RaftNode
+// methods (CreateSnapshot, SnapshotStatus) are stubbed on v1 in
+// internal/raft/v2compat.go; PR 30 deletes v1 and this assertion.
 var _ RaftNode = (*raft.Node)(nil)

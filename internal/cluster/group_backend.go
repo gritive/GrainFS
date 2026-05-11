@@ -187,10 +187,10 @@ func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 // RaftNode() for membership operations; it works for both v1 and v2.
 func (g *GroupBackend) Node() RaftNode { return g.node }
 
-// RaftNode returns the underlying *raft.Node via type assertion. Returns nil
-// when the node is a v2 adapter (GRAINFS_RAFT_V2=cluster). Use Node() for
-// membership operations; use RaftNode() only for v1-specific methods
-// (JointSnapshotState, CompactLog, SetInstallSnapshotTransport, etc.).
+// RaftNode returns the underlying *raft.Node via type assertion. Always
+// returns nil in production as of M5 PR 29 (the v1 path is unreachable now
+// that the GRAINFS_RAFT_V2 flag is gone). Kept for source-compat with
+// v1-specific callers until PR 30 deletes the v1 raft package.
 func (g *GroupBackend) RaftNode() *raft.Node {
 	v1, _ := g.node.(*raft.Node)
 	return v1

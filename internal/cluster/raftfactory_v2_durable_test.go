@@ -12,15 +12,11 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// TestNewRaftNode_V2DurableStoresAtV2Subdir verifies that
-// GRAINFS_RAFT_V2=cluster + a non-empty v2 store dir causes newRaftNode to
-// open a Badger DB at <dir>/raft-v2/. Closes the PR 22 deferral: v2's
-// BadgerLogStore was implemented but never wired through the factory.
+// TestNewRaftNode_V2DurableStoresAtV2Subdir verifies that a non-empty v2
+// store dir causes newRaftNode to open a Badger DB at <dir>/raft-v2/. Closes
+// the PR 22 deferral: v2's BadgerLogStore was implemented but never wired
+// through the factory.
 func TestNewRaftNode_V2DurableStoresAtV2Subdir(t *testing.T) {
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
-
 	tmp := t.TempDir()
 	rcfg := raft.DefaultConfig("node-A", nil)
 
@@ -42,9 +38,9 @@ func TestNewRaftNode_V2DurableStoresAtV2Subdir(t *testing.T) {
 	require.NoError(t, err, "v2 store sub-directory must exist")
 	require.True(t, info.IsDir(), "v2 store path must be a directory")
 
-	// Verify it's the v2 adapter, not v1.
+	// Verify it's the v2 adapter, not v1 (PR 30 deletes the v1 package).
 	_, isV1 := node.(*raft.Node)
-	require.False(t, isV1, "expected v2 adapter when GRAINFS_RAFT_V2=cluster + v2 store dir set")
+	require.False(t, isV1, "expected v2 adapter (v1 path was removed in PR 29)")
 }
 
 // TestNewRaftNode_V2DurableStoresSurviveRestart verifies the closed PR 22
@@ -53,10 +49,6 @@ func TestNewRaftNode_V2DurableStoresAtV2Subdir(t *testing.T) {
 // state persists. Exercises the full v2 LogStore wire-up:
 // open → Append → fsync → close → reopen → read.
 func TestNewRaftNode_V2DurableStoresSurviveRestart(t *testing.T) {
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
-
 	tmp := t.TempDir()
 	rcfg := raft.DefaultConfig("node-A", nil)
 
@@ -140,10 +132,6 @@ func TestNewRaftNode_V2DurableStoresSurviveRestart(t *testing.T) {
 // backward-compat behaviour: empty v2StoreDir keeps the v2 path on memory
 // stores (matches PR 22 behaviour for tests that never pass a directory).
 func TestNewRaftNode_V2EmptyDirFallsBackToMemoryStore(t *testing.T) {
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
-
 	rcfg := raft.DefaultConfig("node-A", nil)
 	node, closeFn, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)

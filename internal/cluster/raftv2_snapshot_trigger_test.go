@@ -20,10 +20,6 @@ import (
 // trigger), apply one mutation via CreateBucket, then trigger a snapshot and
 // assert the status surfaces it.
 func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
-
 	dir := t.TempDir()
 	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
 	require.NoError(t, err)

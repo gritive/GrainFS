@@ -14,8 +14,8 @@ import (
 )
 
 // TestNewRaftV2NodeForServeruntime_DurableStoresAtSubdir verifies the
-// serveruntime entry point used by run.go when GRAINFS_RAFT_V2=serveruntime
-// is set. The node is constructed against a durable Badger DB at
+// serveruntime entry point used by run.go. As of M5 PR 29 v2 is the only
+// path. The node is constructed against a durable Badger DB at
 // <raftDir>/raft-v2/ and returns a closeFn the caller must register on the
 // bootState cleanup stack.
 func TestNewRaftV2NodeForServeruntime_DurableStoresAtSubdir(t *testing.T) {

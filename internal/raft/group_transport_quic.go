@@ -68,35 +68,23 @@ func NewGroupRaftQUICMux(tr *transport.QUICTransport) *GroupRaftQUICMux {
 	return m
 }
 
-// Register associates node with groupID for incoming RPC dispatch. Must be
-// called after InstantiateLocalGroup returns so the node pointer is stable.
-// Panics on reserved or empty groupID — by the time we're here, upstream
-// validation in applyPutShardGroup should have already rejected anything
-// invalid, so reaching this with a bad ID is a programming bug.
+// Register associates a raft handler with groupID for incoming RPC dispatch.
+// Must be called after InstantiateLocalGroup returns so the handler pointer
+// is stable. Panics on reserved or empty groupID — by the time we're here,
+// upstream validation in applyPutShardGroup should have already rejected
+// anything invalid, so reaching this with a bad ID is a programming bug.
+// Passing nil is rejected to prevent a nil-deref crash on the dispatch path.
 //
-// v1 entry point; *Node satisfies RaftV2Handler natively. v2 callers should
-// use RegisterV2 to pass the cluster-layer RaftNode adapter directly.
-func (m *GroupRaftQUICMux) Register(groupID string, node *Node) {
+// As of M5 PR 29 the v1 Register(*Node) form is gone (v2 is the only path);
+// callers pass the cluster-layer v2 adapter via the RaftV2Handler interface.
+// *Node (v1) still satisfies RaftV2Handler — v1 tests use it — but the
+// production path is v2-only.
+func (m *GroupRaftQUICMux) Register(groupID string, h RaftV2Handler) {
 	if err := ValidateGroupID(groupID); err != nil {
 		panic(fmt.Sprintf("GroupRaftQUICMux.Register: invalid groupID: %v", err))
 	}
-	m.nodes.Store(groupID, RaftV2Handler(node))
-}
-
-// RegisterV2 associates a v2 raft node (or any RaftV2Handler implementer) with
-// groupID for incoming RPC dispatch. Mirrors Register but accepts the v2
-// adapter interface so cluster.RaftNode (v2 path) plugs in without an import
-// cycle on internal/raft. M5 PR 28b.
-//
-// Same validation contract as Register. Passing nil is rejected to prevent a
-// nil-deref crash on the dispatch path (a v2-on caller landing here with nil
-// is a programming bug — the cluster factory must produce a non-nil node).
-func (m *GroupRaftQUICMux) RegisterV2(groupID string, h RaftV2Handler) {
-	if err := ValidateGroupID(groupID); err != nil {
-		panic(fmt.Sprintf("GroupRaftQUICMux.RegisterV2: invalid groupID: %v", err))
-	}
 	if h == nil {
-		panic(fmt.Sprintf("GroupRaftQUICMux.RegisterV2: nil handler for groupID %q", groupID))
+		panic(fmt.Sprintf("GroupRaftQUICMux.Register: nil handler for groupID %q", groupID))
 	}
 	m.nodes.Store(groupID, h)
 }

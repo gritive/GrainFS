@@ -465,6 +465,7 @@ func TestDistributedBackend_MultipartBadBucket(t *testing.T) {
 }
 
 func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
+	t.Skip("v1-only: M5 PR 29 routes TriggerRaftSnapshot through RaftNode.CreateSnapshot (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
 	dir := t.TempDir()
 
 	metaDir := dir + "/meta"
@@ -526,6 +527,7 @@ func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
 }
 
 func TestDistributedBackend_TriggerRaftSnapshotLeader(t *testing.T) {
+	t.Skip("v1-only: M5 PR 29 routes TriggerRaftSnapshot through RaftNode.CreateSnapshot (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
 	dir := t.TempDir()
 	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
 	require.NoError(t, err)
@@ -571,6 +573,7 @@ func TestDistributedBackend_TriggerRaftSnapshotLeader(t *testing.T) {
 }
 
 func TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop(t *testing.T) {
+	t.Skip("v1-only: M5 PR 29 routes TriggerRaftSnapshot through RaftNode.CreateSnapshot (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
 	dir := t.TempDir()
 	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
 	require.NoError(t, err)
@@ -642,6 +645,7 @@ func TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop(t *testin
 }
 
 func TestDistributedBackend_TriggerRaftSnapshotRejectsFollower(t *testing.T) {
+	t.Skip("v1-only: M5 PR 29 routes RaftSnapshotStatus / TriggerRaftSnapshot through RaftNode (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
 	dir := t.TempDir()
 	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
 	require.NoError(t, err)

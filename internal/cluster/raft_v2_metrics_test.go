@@ -26,9 +26,6 @@ var noopAEMetrics = func(peer string, args *raft.AppendEntriesArgs) (*raft.Appen
 // and returns it ready to use (transport set, started, leader elected).
 func newV2NodeForMetricsTest(t *testing.T) RaftNode {
 	t.Helper()
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("metrics-node-1", nil)
 	node, _, err := newRaftNode(rcfg, nil, "")
@@ -119,10 +116,6 @@ func TestRaftV2Metrics_BootstrapOutcomeIncremented(t *testing.T) {
 // TestRaftV2Metrics_StopCountIncremented verifies that Close() increments
 // RaftV2StopCount. We create a dedicated node for this test and call Close explicitly.
 func TestRaftV2Metrics_StopCountIncremented(t *testing.T) {
-	t.Setenv("GRAINFS_RAFT_V2", "cluster")
-	resetRaftV2FlagForTest()
-	t.Cleanup(resetRaftV2FlagForTest)
-
 	rcfg := raft.DefaultConfig("stop-test-node", nil)
 	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
