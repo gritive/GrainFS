@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // Proposer is the seam between Service and the cluster meta-Raft proposer.
@@ -34,6 +38,13 @@ type Service struct {
 	backend    Scrubbable    // for executor; may be nil in unit tests
 	deleter    ObjectDeleter // for executor; may be nil in unit tests
 	interval   time.Duration
+
+	mu       sync.Mutex
+	running  bool
+	cancelFn context.CancelFunc
+	workerWG sync.WaitGroup
+
+	logger zerolog.Logger
 }
 
 // NewService wires the service. backend/deleter may be nil for tests that do
@@ -46,6 +57,7 @@ func NewService(store *Store, prop Proposer, lead LeadershipSignal, backend Scru
 		backend:    backend,
 		deleter:    deleter,
 		interval:   interval,
+		logger:     log.With().Str("component", "lifecycle-service").Logger(),
 	}
 }
 
@@ -86,4 +98,88 @@ func (s *Service) Apply(ctx context.Context, bucket string, raw []byte) error {
 // Delete proposes removal of the bucket's lifecycle configuration.
 func (s *Service) Delete(ctx context.Context, bucket string) error {
 	return s.proposer.ProposeLifecycleDelete(ctx, bucket)
+}
+
+// Run watches leadership changes until ctx is done, starting/stopping the
+// executor. Ported from cluster.LifecycleManager.Run, adapted to use the
+// LeadershipSignal seam so this module does not depend on internal/raft.
+func (s *Service) Run(ctx context.Context) {
+	events, cancel := s.leadership.Subscribe()
+	defer cancel()
+
+	s.reconcile(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.stop()
+			return
+		case _, ok := <-events:
+			if !ok {
+				// LeadershipSignal closed the channel; treat as terminal.
+				s.stop()
+				return
+			}
+			s.reconcile(ctx)
+		}
+	}
+}
+
+func (s *Service) reconcile(ctx context.Context) {
+	isLeader := s.leadership.IsLeader()
+	s.mu.Lock()
+	running := s.running
+	s.mu.Unlock()
+	switch {
+	case isLeader && !running:
+		s.start(ctx)
+	case !isLeader && running:
+		s.stop()
+	}
+}
+
+func (s *Service) start(parent context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return
+	}
+	if s.backend == nil || s.deleter == nil {
+		s.logger.Warn().Msg("executor not started: backend/deleter unset")
+		return
+	}
+	workerCtx, cancel := context.WithCancel(parent)
+	s.cancelFn = cancel
+	s.running = true
+	s.workerWG.Add(1)
+	w := NewWorker(s.store, s.backend, s.deleter, s.interval)
+	go func() {
+		defer s.workerWG.Done()
+		s.logger.Info().Dur("interval", s.interval).Msg("starting lifecycle executor (now leader)")
+		w.Run(workerCtx)
+		s.logger.Info().Msg("lifecycle executor stopped")
+	}()
+}
+
+func (s *Service) stop() {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return
+	}
+	cancel := s.cancelFn
+	s.cancelFn = nil
+	s.running = false
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.workerWG.Wait()
+}
+
+// workerRunningForTest exposes internal state to package-internal tests only.
+func (s *Service) workerRunningForTest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
 }

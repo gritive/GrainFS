@@ -2,7 +2,9 @@ package lifecycle
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,4 +98,63 @@ func TestService_Delete_CallsProposer(t *testing.T) {
 	svc := NewService(NewStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
 	require.NoError(t, svc.Delete(context.Background(), "b"))
 	require.Equal(t, []string{"b"}, prop.deleteCalls)
+}
+
+// signalLeadership emits leader-change events on demand. Implements
+// LeadershipSignal.
+type signalLeadership struct {
+	mu     sync.Mutex
+	leader bool
+	subs   []chan struct{}
+}
+
+func (s *signalLeadership) IsLeader() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leader
+}
+func (s *signalLeadership) Subscribe() (<-chan struct{}, func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch := make(chan struct{}, 4)
+	s.subs = append(s.subs, ch)
+	cancel := func() {} // tests do not exercise unsubscribe
+	return ch, cancel
+}
+func (s *signalLeadership) set(leader bool) {
+	s.mu.Lock()
+	s.leader = leader
+	subs := append([]chan struct{}(nil), s.subs...)
+	s.mu.Unlock()
+	for _, c := range subs {
+		select {
+		case c <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func TestService_Run_StartsWorkerOnLeader_StopsOnFollower(t *testing.T) {
+	lead := &signalLeadership{leader: false}
+	be := &mockBackend{buckets: []string{}} // existing in worker_test.go
+	del := &mockDeleter{}                   // existing in worker_test.go
+	svc := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { svc.Run(ctx); close(done) }()
+
+	// Initially follower: worker must not be running.
+	time.Sleep(40 * time.Millisecond)
+	assert.False(t, svc.workerRunningForTest())
+
+	lead.set(true)
+	require.Eventually(t, svc.workerRunningForTest, 200*time.Millisecond, 5*time.Millisecond, "worker should start on leader")
+
+	lead.set(false)
+	require.Eventually(t, func() bool { return !svc.workerRunningForTest() }, 200*time.Millisecond, 5*time.Millisecond, "worker should stop on follower")
+
+	cancel()
+	<-done
 }
