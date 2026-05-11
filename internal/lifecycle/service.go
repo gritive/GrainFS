@@ -88,6 +88,7 @@ type Status struct {
 	ObjectsChecked int64     `json:"objects_checked"`
 	Expired        int64     `json:"expired"`
 	VersionsPruned int64     `json:"versions_pruned"`
+	Buckets        []string  `json:"buckets"` // buckets with a lifecycle config persisted locally
 }
 
 // Status returns the current executor status. Safe to call on any node; a
@@ -97,8 +98,15 @@ func (s *Service) Status() Status {
 	w := s.worker
 	running := s.running
 	s.mu.Unlock()
+	buckets, err := s.store.ListBuckets()
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("lifecycle status: ListBuckets failed")
+	}
+	if buckets == nil {
+		buckets = []string{}
+	}
 	if w == nil || !running {
-		return Status{Running: false}
+		return Status{Running: false, Buckets: buckets}
 	}
 	st := w.Stats()
 	return Status{
@@ -107,6 +115,7 @@ func (s *Service) Status() Status {
 		ObjectsChecked: st.ObjectsChecked,
 		Expired:        st.Expired,
 		VersionsPruned: st.VersionsPruned,
+		Buckets:        buckets,
 	}
 }
 
@@ -164,6 +173,12 @@ func (s *Service) reconcile(ctx context.Context) {
 	s.mu.Unlock()
 	switch {
 	case isLeader && !running:
+		if buckets, err := s.store.ListBuckets(); err != nil {
+			s.logger.Warn().Err(err).Msg("lifecycle: could not audit local config keys on leadership acquire")
+		} else {
+			s.logger.Info().Strs("buckets", buckets).Int("count", len(buckets)).
+				Msg("lifecycle configs present in local store at leadership acquire (re-apply policy to clear pre-FSM-era leftovers if any)")
+		}
 		s.start(ctx)
 	case !isLeader && running:
 		s.stop()

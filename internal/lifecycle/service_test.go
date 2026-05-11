@@ -145,6 +145,15 @@ func TestService_Status_NotRunning(t *testing.T) {
 	assert.Zero(t, st.ObjectsChecked)
 	assert.Zero(t, st.Expired)
 	assert.Zero(t, st.VersionsPruned)
+	assert.Empty(t, st.Buckets)
+}
+
+func TestService_Status_IncludesBuckets(t *testing.T) {
+	s := newServiceForTest(t)
+	require.NoError(t, s.store.PutRaw("b1", []byte("<x/>")))
+	require.NoError(t, s.store.PutRaw("b2", []byte("<x/>")))
+	st := s.Status()
+	assert.ElementsMatch(t, []string{"b1", "b2"}, st.Buckets)
 }
 
 func TestService_Status_RunningReflectsWorker(t *testing.T) {
