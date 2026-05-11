@@ -144,6 +144,16 @@
 
 - [ ] **`cluster remove-peer` negative liveness signal — metaRaft down detection** — positive signal은 successful metaRaft AppendEntries evidence로 해결한다. `/api/cluster/status` 의 `peer_snapshot` 은 leader-side fresh replication evidence가 있는 remote voter를 `live` 로 표시하고, remove-peer preflight 는 그 row를 alive 로 센다. 남은 단순화: failed heartbeat만으로는 `probe_failed` 를 만들지 않으므로 dead-peer를 자동으로 **detect하지 않음** → 운영자가 외부 신호 (모니터링/SSH 접속 실패) 로 죽음을 확인한 뒤 명시 호출하거나 `force=true` 로 override 해야 한다. **후속 작업:** 운영 데이터 기반으로 negative metaRaft probe/health monitor를 별도 설계한다. 이때 `cluster peers` STATE 컬럼이 진짜 down을 반영하고, failure threshold / cooldown / follower display policy를 다시 grill한다. **Re-open trigger:** 운영자가 자동 dead-peer detection 을 요구하거나 metaRaft negative liveness 설계를 시작할 때.
 
+## Lifecycle / Cluster follow-ups
+
+- [ ] **Lifecycle worker stats admin/dashboard surface** — `lifecycle.Service.Status()` (현재 미구현) 으로 worker stats (LastRun, ObjectsChecked, Expired, VersionsPruned) 를 노출하고 admin/dashboard 가 읽도록. ADR 0011 의 Out-of-scope 로 명시 deferred. **Depends on:** Bucket Lifecycle Policy deep module landed. **Re-open trigger:** 운영자가 "어젯밤 lifecycle 가 몇 개 지웠나" 를 묻는데 답이 로그에만 있을 때, 또는 dashboard observability slice 작업이 lifecycle 를 포함할 때.
+
+- [ ] **Pre-FSM-era follower-local orphan lifecycle keys** — ADR 0011 이전에 lifecycle config 를 PUT 한 클러스터는 follower 노드의 BadgerDB 에 orphan `lifecycle:{bucket}` 키가 남을 수 있다. 새 worker 는 leader 의 store 만 보므로 실행에는 영향 없지만 BadgerDB 직접 inspect 시 보인다. ADR 0011 의 운영 가이드: 정책을 한 번 재적용하면 정리됨. **Re-open trigger:** 운영자 audit 에서 orphan 키가 compliance 우려로 떠오르거나, follower-promotion path 가 이 키를 방어적으로 정리해야 할 때.
+
+- [ ] **`cluster transfer-leader` 회귀 — "cluster adapter does not support transfer-leader"** — `internal/server/cluster_transfer_leader.go:52-58` 의 타입 assertion `s.cluster.(clusterTransferLeader)` 가 실패해 503 을 반환한다. 7358b808 (`refactor(cluster): extract OpRouter + LocalExecution from ClusterCoordinator`) 이후 broken 으로 보이며, 기존 e2e `TestE2E_ClusterTransferLeader` 도 같은 이유로 실패한다. lifecycle PR 의 책임이 아니므로 e2e leader-change 테스트는 SIGKILL + 재선출로 우회했다. **Re-open trigger:** day-2 운영에서 graceful leader transfer 가 필요해지거나 누군가 cluster adapter 회귀를 정리할 때.
+
+- [ ] **DynamicJoin quorum inflation — self-address accumulation in config.Peers** — `ClusterModeDynamicJoin` 에서 노드가 자신의 `ConfChange(AddLearner+Promote)` 를 처리할 때 자기 raft 주소를 `config.Peers` 에 추가해 3-노드 클러스터의 quorum 이 2 에서 3+ 으로 부풀어, 2-survivor 재선출이 불가능해진다. e2e `TestLifecycle_LeaderChangePreservesConfig` 가 `ClusterModeStaticPeers` 를 쓰는 이유. **Re-open trigger:** DynamicJoin 클러스터에서 노드 장애 후 재선출이 안 되는 운영 incident, 또는 ConfChange self-handling 경로 리뷰.
+
 ## Cluster Day-2 Operations
 
 `docs/superpowers/specs/2026-05-07-cluster-day2-ops-design.md` (예정) Phase 1 (metaRaft 한정 5명령: transfer-leader, drain, health, placement, balancer status) 이후 단계. Phase 1 PR이 명시적으로 metaRaft scope로 제한했기 때문에 아래 항목은 후속 spec 필요.
