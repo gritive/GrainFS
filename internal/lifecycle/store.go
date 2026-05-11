@@ -54,6 +54,39 @@ func (s *Store) Put(bucket string, cfg *LifecycleConfiguration) error {
 	})
 }
 
+// PutRaw stores raw S3 wire XML bytes as the lifecycle configuration for
+// bucket. Used by the meta-Raft FSM apply path so the operator's GET round-
+// trip remains byte-for-byte. Callers must have validated the XML upstream.
+func (s *Store) PutRaw(bucket string, raw []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(s.key(bucket), append([]byte(nil), raw...))
+	})
+}
+
+// GetRaw returns the raw S3 wire XML bytes for bucket, or (nil, nil) if not
+// set. Used by the S3 GET handler so the operator round-trip is byte-for-byte
+// (ADR 0011).
+func (s *Store) GetRaw(bucket string) ([]byte, error) {
+	var out []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(s.key(bucket))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			out = append([]byte(nil), val...)
+			return nil
+		})
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Delete removes the lifecycle configuration for bucket (no-op if not set).
 func (s *Store) Delete(bucket string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
