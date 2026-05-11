@@ -722,3 +722,23 @@ func TestSharedLogStore_RestartPersistence(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, bootB, "B should still be unbootstrapped")
 }
+
+func TestBadgerLogStore_SnapshotFormatVersionRoundTrip(t *testing.T) {
+	store := setupTestStore(t)
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 7, Term: 2, Data: []byte("x"), FormatVersion: 2}))
+	snap, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7), snap.Index)
+	assert.Equal(t, uint8(2), snap.FormatVersion)
+}
+
+func TestBadgerLogStore_LegacySnapshotMetaReadsAsVersionZero(t *testing.T) {
+	store := setupTestStore(t)
+	// A snapshot written without FormatVersion (the pre-C2-P3 shape) must decode
+	// with FormatVersion == 0 and not error.
+	require.NoError(t, store.SaveSnapshot(Snapshot{Index: 3, Term: 1, Data: []byte("legacy")}))
+	snap, err := store.LoadSnapshot()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), snap.Index)
+	assert.Equal(t, uint8(0), snap.FormatVersion)
+}

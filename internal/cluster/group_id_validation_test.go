@@ -91,7 +91,7 @@ func TestMetaFSM_Restore_DropsReservedShardGroups(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	// Reserved IDs dropped.
 	got := f2.ShardGroups()

@@ -210,6 +210,7 @@ func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, 
 	snap.Term = 3
 	snap.Data = data
 	snap.Servers = servers
+	snap.FormatVersion = raft.FSMSnapshotFormatVersion
 	require.NoError(t, store.SaveSnapshot(snap))
 	require.NoError(t, store.Close())
 	return data

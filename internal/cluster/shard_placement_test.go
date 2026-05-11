@@ -6,6 +6,8 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 func TestShardPlacementCmd_EncodeDecode(t *testing.T) {
@@ -159,7 +161,7 @@ func TestFSM_Snapshot_IncludesPlacement(t *testing.T) {
 	// Restore into a fresh FSM and verify no stale placement rows appear.
 	freshDB := newTestDB(t)
 	freshFSM := NewFSM(freshDB, newStateKeyspaceEmpty())
-	require.NoError(t, freshFSM.Restore(snap))
+	require.NoError(t, freshFSM.RestoreV2(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
 
 	got, err := freshFSM.LookupShardPlacement("b", "k")
 	require.NoError(t, err)

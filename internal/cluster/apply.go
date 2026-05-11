@@ -10,6 +10,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -684,22 +685,21 @@ func (f *FSM) applyMigrationDone(data []byte) error {
 	return nil
 }
 
-// Snapshot serializes the full metadata state for Raft snapshots.
+// Snapshot serializes this group's metadata state for Raft snapshots. Keys in
+// the snapshot blob are GROUP-RELATIVE (the group prefix is stripped); RestoreV2
+// re-applies the prefix on write. For the empty keyspace the group prefix is nil,
+// so this is a whole-DB scan exactly as before.
 func (f *FSM) Snapshot() ([]byte, error) {
 	state := make(map[string][]byte)
 	err := f.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			key := string(item.Key())
+		return f.keys.scanGroupPrefix(txn, nil, func(rawKey []byte, item *badger.Item) error {
 			val, err := item.ValueCopy(nil)
 			if err != nil {
 				return err
 			}
-			state[key] = val
-		}
-		return nil
+			state[string(rawKey)] = val
+			return nil
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -707,32 +707,69 @@ func (f *FSM) Snapshot() ([]byte, error) {
 	return marshalSnapshotState(state)
 }
 
-// Restore replaces the metadata state from a snapshot.
-func (f *FSM) Restore(data []byte) error {
-	state, err := unmarshalSnapshotState(data)
-	if err != nil {
-		return err
-	}
-
-	// Drop all existing keys and write snapshot state
+// dropAllKeys deletes every key in the underlying DB. Used by RestoreV2's
+// empty-keyspace branch (single-group / pre-shared mode), where a snapshot owns
+// the whole DB. The shared branch uses DropPrefix on the group prefix instead.
+func (f *FSM) dropAllKeys() error {
 	return f.db.Update(func(txn *badger.Txn) error {
-		// Delete existing
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		var keysToDelete [][]byte
 		for it.Rewind(); it.Valid(); it.Next() {
 			keysToDelete = append(keysToDelete, it.Item().KeyCopy(nil))
 		}
 		it.Close()
-
 		for _, k := range keysToDelete {
 			if err := txn.Delete(k); err != nil {
 				return err
 			}
 		}
+		return nil
+	})
+}
 
-		// Write snapshot state
+// Restore satisfies raft.Snapshotter; it forwards to RestoreV2, which enforces
+// the snapshot FormatVersion. SnapshotManager.Restore supplies the store-meta
+// record loaded alongside the snapshot payload.
+func (f *FSM) Restore(meta raft.SnapshotMeta, data []byte) error {
+	return f.RestoreV2(meta, data)
+}
+
+// RestoreV2 replaces this group's metadata state from a snapshot, refusing any
+// snapshot whose store-meta record does not carry FormatVersion 2. Snapshot blob
+// keys must be GROUP-RELATIVE; the group prefix is applied on write. Validation
+// runs BEFORE any mutation so a rejected restore leaves existing state intact.
+func (f *FSM) RestoreV2(meta raft.SnapshotMeta, data []byte) error {
+	if meta.FormatVersion != raft.FSMSnapshotFormatVersion {
+		return fmt.Errorf("FSM.Restore: unsupported snapshot FormatVersion %d (want %d)", meta.FormatVersion, raft.FSMSnapshotFormatVersion)
+	}
+	state, err := unmarshalSnapshotState(data)
+	if err != nil {
+		return fmt.Errorf("FSM.Restore: decode snapshot: %w", err)
+	}
+	// Keys in the blob must be group-RELATIVE. Reject any that already carry this
+	// group's prefix (a mis-encode). Only meaningful when we actually have a prefix.
+	if f.keys.isShared() {
+		for k := range state {
+			if f.keys.HasPrefix([]byte(k)) {
+				return fmt.Errorf("FSM.Restore: snapshot key %q already carries a group prefix — refusing", k)
+			}
+		}
+	}
+	// Drop only this group's keys; for the empty keyspace fall back to the legacy
+	// whole-DB delete loop (the snapshot owns the entire DB in that mode).
+	if f.keys.isShared() {
+		if err := f.db.DropPrefix(f.keys.Prefix(nil)); err != nil {
+			return fmt.Errorf("FSM.Restore: DropPrefix: %w", err)
+		}
+	} else {
+		if err := f.dropAllKeys(); err != nil {
+			return fmt.Errorf("FSM.Restore: drop existing keys: %w", err)
+		}
+	}
+	// Re-encode keys with the group prefix on write.
+	return f.db.Update(func(txn *badger.Txn) error {
 		for k, v := range state {
-			if err := txn.Set([]byte(k), v); err != nil {
+			if err := txn.Set(f.keys.Key([]byte(k)), v); err != nil {
 				return err
 			}
 		}

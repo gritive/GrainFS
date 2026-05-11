@@ -22,7 +22,7 @@ func (m *mockSnapshotter) Snapshot() ([]byte, error) {
 	return m.snapshotData, m.snapshotErr
 }
 
-func (m *mockSnapshotter) Restore(data []byte) error {
+func (m *mockSnapshotter) Restore(_ SnapshotMeta, data []byte) error {
 	m.restoreCalls++
 	m.restoredData = data
 	return m.restoreErr

@@ -10,6 +10,7 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // newIAMTestEncryptor builds a deterministic 32-byte AES-256-GCM key
@@ -110,7 +111,7 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 	applier2 := iam.NewApplier(store2, enc)
 	f2 := NewMetaFSM()
 	f2.SetIAM(store2, applier2)
-	if err := f2.Restore(snap); err != nil {
+	if err := f2.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
@@ -146,7 +147,7 @@ func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
 	applier2 := iam.NewApplier(store2, enc)
 	f2 := NewMetaFSM()
 	f2.SetIAM(store2, applier2)
-	if err := f2.Restore(snap); err != nil {
+	if err := f2.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 	if !store2.IsEmpty() {
@@ -177,7 +178,7 @@ func TestMetaFSM_Snapshot_LegacySnapshot_Restores_NoIAM(t *testing.T) {
 	applier2 := iam.NewApplier(store2, enc)
 	f2 := NewMetaFSM()
 	f2.SetIAM(store2, applier2)
-	if err := f2.Restore(legacy); err != nil {
+	if err := f2.Restore(raft.SnapshotMeta{}, legacy); err != nil {
 		t.Fatalf("Restore legacy: %v", err)
 	}
 	if !store2.IsEmpty() {

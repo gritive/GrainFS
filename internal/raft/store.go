@@ -32,6 +32,13 @@ type Snapshot struct {
 	JointNewVoters       []string
 	JointEnterIndex      uint64
 	JointManagedLearners []string // PR-K3: learners added by ChangeMembership
+
+	// FormatVersion identifies the FSM snapshot-payload encoding (C2 P3).
+	// 0 = legacy whole-DB FSM snapshot (pre-shared-state-DB); written by
+	// binaries before this field existed and decoded as the zero value.
+	// 2 = group-prefix-scoped snapshot with group-RELATIVE keys. FSM.RestoreV2
+	// refuses anything other than 2.
+	FormatVersion uint8
 }
 
 // SnapshotMeta describes a persisted snapshot without loading the snapshot
@@ -47,6 +54,7 @@ type SnapshotMeta struct {
 	JointNewVoters       []string
 	JointEnterIndex      uint64
 	JointManagedLearners []string
+	FormatVersion        uint8 // C2 P3: see Snapshot.FormatVersion
 }
 
 // LogStore provides durable storage for Raft log entries and state.
@@ -541,6 +549,9 @@ func (s *BadgerLogStore) SaveSnapshot(snap Snapshot) error {
 	if jointManagedVec != 0 {
 		pb.SnapshotMetaAddJointManagedLearners(b, jointManagedVec)
 	}
+	if snap.FormatVersion != 0 {
+		pb.SnapshotMetaAddFormatVersion(b, snap.FormatVersion)
+	}
 	root := pb.SnapshotMetaEnd(b)
 	meta := fbFinishRPC(b, root)
 
@@ -604,6 +615,7 @@ func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 					snap.JointManagedLearners[i] = string(m.JointManagedLearners(i))
 				}
 			}
+			snap.FormatVersion = m.FormatVersion()
 			return nil
 		}); err != nil {
 			return err
@@ -702,6 +714,7 @@ func InspectSnapshotMetaReadOnly(path string) (SnapshotMeta, error) {
 					meta.JointManagedLearners[i] = string(m.JointManagedLearners(i))
 				}
 			}
+			meta.FormatVersion = m.FormatVersion()
 			return nil
 		}); err != nil {
 			return err
@@ -775,6 +788,7 @@ func loadSnapshotFromDB(db *badger.DB) (Snapshot, error) {
 					snap.JointManagedLearners[i] = string(m.JointManagedLearners(i))
 				}
 			}
+			snap.FormatVersion = m.FormatVersion()
 			return nil
 		}); err != nil {
 			return err

@@ -39,7 +39,7 @@ func (s *blockingSnapshotter) Snapshot() ([]byte, error) {
 	return []byte("blocked-snapshot"), nil
 }
 
-func (s *blockingSnapshotter) Restore([]byte) error {
+func (s *blockingSnapshotter) Restore(raft.SnapshotMeta, []byte) error {
 	return nil
 }
 

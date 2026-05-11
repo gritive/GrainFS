@@ -8,6 +8,8 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 func newTestDB(t *testing.T) *badger.DB {
@@ -131,7 +133,7 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 	// Restore to a new DB
 	db2 := newTestDB(t)
 	fsm2 := NewFSM(db2, newStateKeyspaceEmpty())
-	require.NoError(t, fsm2.Restore(snap))
+	require.NoError(t, fsm2.RestoreV2(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
 
 	// Verify state
 	err = db2.View(func(txn *badger.Txn) error {
@@ -299,7 +301,7 @@ func TestFSM_Restore_CorruptData(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
-	err := fsm.Restore([]byte("not valid protobuf snapshot"))
+	err := fsm.RestoreV2(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, []byte("not valid protobuf snapshot"))
 	assert.Error(t, err, "Restore should fail on corrupt snapshot data")
 }
 
@@ -321,7 +323,7 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 	require.NoError(t, fsm2.Apply(data))
 
 	// Restore overwrites db2
-	require.NoError(t, fsm2.Restore(snap))
+	require.NoError(t, fsm2.RestoreV2(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
 
 	// old-bucket should be gone, src-bucket should exist
 	err = db2.View(func(txn *badger.Txn) error {

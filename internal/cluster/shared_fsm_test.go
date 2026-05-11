@@ -147,3 +147,150 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	_, _, err = backendB.headObjectMeta(ctx, bucket, "obj2-only-in-A")
 	assert.Error(t, err, "obj2-only-in-A should not be visible from group-B")
 }
+
+// putObjViaApply writes a bucket + object into a group's FSM via the apply path.
+func putObjViaApply(t *testing.T, f *FSM, bucket, key, etag string) {
+	t.Helper()
+	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+	require.NoError(t, err)
+	_ = f.Apply(raw) // idempotent
+	raw, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.Apply(raw))
+}
+
+// fsmHasKey reports whether the group-relative key exists in f's keyspace.
+func fsmHasKey(t *testing.T, f *FSM, rawKey string) bool {
+	t.Helper()
+	found := false
+	require.NoError(t, f.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(f.keys.Key([]byte(rawKey)))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+		return nil
+	}))
+	return found
+}
+
+const v2Format = raft.FSMSnapshotFormatVersion
+
+func TestSharedFSM_SnapshotContainsOnlyOwnGroup(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	ksA, err := newStateKeyspace("group-A")
+	require.NoError(t, err)
+	ksB, err := newStateKeyspace("group-B")
+	require.NoError(t, err)
+	fA := NewFSM(db, ksA)
+	fB := NewFSM(db, ksB)
+
+	putObjViaApply(t, fA, "bucket", "objA", "A-pay")
+	putObjViaApply(t, fB, "bucket", "objB", "B-pay")
+
+	blob, err := fA.Snapshot()
+	require.NoError(t, err)
+	state, err := unmarshalSnapshotState(blob)
+	require.NoError(t, err)
+
+	for k := range state {
+		assert.False(t, ksB.HasPrefix([]byte(k)), "snapshot key %q must not belong to group B", k)
+		assert.False(t, ksA.HasPrefix([]byte(k)), "snapshot key %q must be group-RELATIVE (not prefixed)", k)
+	}
+	_, ok := state["obj:bucket/objA"]
+	assert.True(t, ok, "fA's own object key must be present in group-relative form")
+}
+
+func TestSharedFSM_RestoreReplacesOnlyOwnGroup(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	ksA, err := newStateKeyspace("group-A")
+	require.NoError(t, err)
+	ksB, err := newStateKeyspace("group-B")
+	require.NoError(t, err)
+	fA := NewFSM(db, ksA)
+	fB := NewFSM(db, ksB)
+
+	putObjViaApply(t, fA, "bucket", "old-A", "old")
+	putObjViaApply(t, fB, "bucket", "keep-B", "keep")
+
+	blob, err := marshalSnapshotState(map[string][]byte{
+		"obj:bucket/new-A": []byte("new-A-payload"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, fA.RestoreV2(raft.SnapshotMeta{FormatVersion: v2Format}, blob))
+
+	assert.False(t, fsmHasKey(t, fA, "obj:bucket/old-A"), "old-A must be gone after restore")
+	assert.True(t, fsmHasKey(t, fA, "obj:bucket/new-A"), "new-A must be present after restore")
+	assert.True(t, fsmHasKey(t, fB, "obj:bucket/keep-B"), "sibling group B's key must survive restore of A")
+}
+
+func TestSharedFSM_RestoreRejectsWrongFormatVersion(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	ksA, err := newStateKeyspace("group-A")
+	require.NoError(t, err)
+	fA := NewFSM(db, ksA)
+	putObjViaApply(t, fA, "bucket", "objA", "pay")
+
+	blob, err := fA.Snapshot()
+	require.NoError(t, err)
+
+	err = fA.RestoreV2(raft.SnapshotMeta{FormatVersion: 1}, blob)
+	require.Error(t, err)
+	assert.True(t, fsmHasKey(t, fA, "obj:bucket/objA"), "pre-existing state must be untouched on rejected restore")
+}
+
+func TestSharedFSM_RestoreRejectsAlreadyPrefixedKeys(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	ksA, err := newStateKeyspace("group-A")
+	require.NoError(t, err)
+	fA := NewFSM(db, ksA)
+	putObjViaApply(t, fA, "bucket", "objA", "pay")
+
+	blob, err := marshalSnapshotState(map[string][]byte{
+		string(ksA.Key([]byte("obj:b/z"))): []byte("z"),
+	})
+	require.NoError(t, err)
+	err = fA.RestoreV2(raft.SnapshotMeta{FormatVersion: v2Format}, blob)
+	require.Error(t, err)
+	assert.True(t, fsmHasKey(t, fA, "obj:bucket/objA"), "pre-existing state must be untouched on rejected restore")
+}
+
+func TestFSM_RestoreV2_EmptyKeyspace_WholeDBReplace(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	f := NewFSM(db, newStateKeyspaceEmpty())
+	putObjViaApply(t, f, "bucket", "old", "old")
+	require.True(t, fsmHasKey(t, f, "obj:bucket/old"))
+
+	blob, err := marshalSnapshotState(map[string][]byte{
+		"obj:bucket/new": []byte("new-payload"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.RestoreV2(raft.SnapshotMeta{FormatVersion: v2Format}, blob))
+
+	assert.False(t, fsmHasKey(t, f, "obj:bucket/old"), "old key must be gone (whole-DB drop)")
+	// Empty keyspace ⇒ raw key, no prefix added.
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get([]byte("obj:bucket/new"))
+		return err
+	}))
+}
