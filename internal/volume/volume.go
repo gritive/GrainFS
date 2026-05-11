@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -830,39 +829,17 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.listSnapshotsUnlocked(name)
+	if _, err := m.getVolUnlocked(name); err != nil {
+		return nil, err
+	}
+	return m.snapStore.ListSnapshots(context.Background(), name)
 }
 
 func (m *Manager) listSnapshotsUnlocked(name string) ([]SnapshotInfo, error) {
 	if _, err := m.getVolUnlocked(name); err != nil {
 		return nil, err
 	}
-
-	prefix := snapPrefix(name)
-	var snaps []SnapshotInfo
-	if err := m.backend.WalkObjects(context.Background(), volumeBucketName, prefix, func(obj *storage.Object) error {
-		if !strings.HasSuffix(obj.Key, "/meta") {
-			return nil
-		}
-		rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, obj.Key)
-		if err != nil {
-			return nil
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil
-		}
-		var meta snapshotMetaJSON
-		if err := json.Unmarshal(data, &meta); err != nil {
-			return nil
-		}
-		snaps = append(snaps, SnapshotInfo(meta))
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("list snapshots: %w", err)
-	}
-	return snaps, nil
+	return m.snapStore.ListSnapshots(context.Background(), name)
 }
 
 // DeleteSnapshot removes a snapshot and frees its block objects.
@@ -877,32 +854,16 @@ func (m *Manager) deleteSnapshotUnlocked(name, snapID string) error {
 	if err != nil {
 		return err
 	}
-
-	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))
-	if err != nil {
-		return fmt.Errorf("snapshot %q not found for volume %q", snapID, name)
+	if err := m.snapStore.DeleteSnapshot(context.Background(), vol, snapID); err != nil {
+		return err
 	}
-	snapMap, err := parseLiveMap(rc)
-	rc.Close()
-	if err != nil {
-		return fmt.Errorf("parse snapshot map: %w", err)
-	}
-
-	for _, key := range snapMap {
-		m.backend.DeleteObject(context.Background(), volumeBucketName, key) //nolint:errcheck
-	}
-	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMapKey(name, snapID))  //nolint:errcheck
-	m.backend.DeleteObject(context.Background(), volumeBucketName, snapMetaKey(name, snapID)) //nolint:errcheck
-
 	if vol.SnapshotCount > 0 {
 		vol.SnapshotCount--
 	}
-
 	if vol.SnapshotCount == 0 {
 		m.backend.DeleteObject(context.Background(), volumeBucketName, liveMapKey(name)) //nolint:errcheck
 		delete(m.liveMaps, name)
 	}
-
 	data, err := marshalVolume(vol)
 	if err != nil {
 		return fmt.Errorf("marshal volume: %w", err)
