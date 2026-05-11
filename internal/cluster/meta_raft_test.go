@@ -411,3 +411,57 @@ func TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds(t *testing.T) {
 	}
 	assert.GreaterOrEqual(t, successCount, 1, "at least one concurrent Join must succeed")
 }
+
+// fakeProposerNode is a stub metaProposerNode for testing proposeOrForward
+// without a real raft.Node.
+type fakeProposerNode struct {
+	isLeader     bool
+	proposeIdx   uint64
+	proposeErr   error
+	proposeCalls int
+}
+
+func (f *fakeProposerNode) IsLeader() bool { return f.isLeader }
+func (f *fakeProposerNode) ProposeWait(_ context.Context, _ []byte) (uint64, error) {
+	f.proposeCalls++
+	return f.proposeIdx, f.proposeErr
+}
+
+func TestMetaRaft_proposeOrForward_ForwardsWhenFollower(t *testing.T) {
+	m := &MetaRaft{}
+	var forwardCalled bool
+	var forwardData []byte
+	m.forwardFn = func(_ context.Context, data []byte) error {
+		forwardCalled = true
+		forwardData = data
+		return nil
+	}
+	node := &fakeProposerNode{isLeader: false}
+
+	err := m.proposeOrForward(context.Background(), node, []byte("payload"))
+	require.NoError(t, err)
+	assert.True(t, forwardCalled, "forwardFn must be called on follower")
+	assert.Equal(t, []byte("payload"), forwardData)
+	assert.Equal(t, 0, node.proposeCalls, "ProposeWait must not be called on follower")
+}
+
+func TestMetaRaft_proposeOrForward_NoForwarder_Errors(t *testing.T) {
+	m := &MetaRaft{} // forwardFn is nil
+	node := &fakeProposerNode{isLeader: false}
+
+	err := m.proposeOrForward(context.Background(), node, []byte("payload"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no forwarder configured")
+}
+
+func TestMetaRaft_proposeOrForward_LeaderProposesLocally(t *testing.T) {
+	m := &MetaRaft{
+		applyNotify: make(chan struct{}),
+	}
+	m.lastApplied.Store(7)
+	node := &fakeProposerNode{isLeader: true, proposeIdx: 7}
+
+	err := m.proposeOrForward(context.Background(), node, []byte("payload"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, node.proposeCalls, "ProposeWait must be called when leader")
+}

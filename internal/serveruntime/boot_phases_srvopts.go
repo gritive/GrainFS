@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
+	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
@@ -176,10 +177,20 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	state.incidentRecorder = incidentRecorder
 
-	// Slice 4 of refactor/unify-storage-paths: cluster-mode lifecycle.
+	// Bucket Lifecycle Policy (ADR 0011): replicate via meta-Raft FSM,
+	// executor leader-only.
 	if cfg.LifecycleInterval > 0 {
-		state.lifecycleMgr = cluster.NewLifecycleManager(state.distBackend, cfg.LifecycleInterval)
-		srvOpts = append(srvOpts, server.WithLifecycleStore(state.lifecycleMgr.Store()))
+		lstore := lifecycle.NewStore(state.distBackend.FSMDB())
+		prop := &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
+		lead := &cluster.RaftLeadership{Node: state.distBackend.RaftNode()}
+		state.metaRaft.FSM().SetLifecycle(lstore) // pattern from boot_phases_scrubber.go:127
+		state.lifecycleSvc = lifecycle.NewService(
+			lstore, prop, lead,
+			state.distBackend,                        // Scrubbable
+			storage.NewOperations(state.distBackend), // ObjectDeleter
+			cfg.LifecycleInterval,
+		)
+		srvOpts = append(srvOpts, server.WithLifecycleService(state.lifecycleSvc))
 	}
 
 	volMgr, blockCache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{DedupEnabled: cfg.DedupEnabled, BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)

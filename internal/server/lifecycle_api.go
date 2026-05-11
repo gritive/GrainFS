@@ -2,90 +2,65 @@ package server
 
 import (
 	"context"
-	"encoding/xml"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-
-	"github.com/gritive/GrainFS/internal/lifecycle"
 )
 
-const maxLifecycleBodyBytes = 64 * 1024 // 64 KiB — enough for any reasonable lifecycle config
+const maxLifecycleBodyBytes = 64 * 1024
 
-// putBucketLifecycle handles PUT /{bucket}?lifecycle.
 func (s *Server) putBucketLifecycle(ctx context.Context, c *app.RequestContext, bucket string) {
 	if s.blockIfMutationDisabled(c, "bucket_lifecycle_put") {
 		return
 	}
-	if s.lifecycleStore == nil {
+	if s.lifecycle == nil {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "lifecycle not configured")
 		return
 	}
-
 	if err := s.ops.HeadBucket(ctx, bucket); err != nil {
 		mapError(c, err)
 		return
 	}
-
-	if len(c.Request.Body()) > maxLifecycleBodyBytes {
+	body := c.Request.Body()
+	if len(body) > maxLifecycleBodyBytes {
 		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", "lifecycle configuration exceeds 64 KiB limit")
 		return
 	}
-
-	var cfg lifecycle.LifecycleConfiguration
-	if err := xml.Unmarshal(c.Request.Body(), &cfg); err != nil {
-		writeXMLError(c, consts.StatusBadRequest, "MalformedXML", "invalid lifecycle configuration XML")
-		return
-	}
-	if err := lifecycle.Validate(&cfg); err != nil {
+	if err := s.lifecycle.Apply(ctx, bucket, body); err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
-		return
-	}
-
-	if err := s.lifecycleStore.Put(bucket, &cfg); err != nil {
-		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	c.Status(consts.StatusOK)
 }
 
-// getBucketLifecycle handles GET /{bucket}?lifecycle.
-func (s *Server) getBucketLifecycle(c *app.RequestContext, bucket string) {
-	if s.lifecycleStore == nil {
+func (s *Server) getBucketLifecycle(ctx context.Context, c *app.RequestContext, bucket string) {
+	_ = ctx
+	if s.lifecycle == nil {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "lifecycle not configured")
 		return
 	}
-
-	cfg, err := s.lifecycleStore.Get(bucket)
+	raw, err := s.lifecycle.GetRaw(bucket)
 	if err != nil {
 		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	if cfg == nil {
+	if raw == nil {
 		writeXMLError(c, consts.StatusNotFound, "NoSuchLifecycleConfiguration",
 			"the lifecycle configuration does not exist")
 		return
 	}
-
-	data, err := xml.Marshal(cfg)
-	if err != nil {
-		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
-		return
-	}
-	c.Data(consts.StatusOK, "application/xml", data)
+	c.Data(consts.StatusOK, "application/xml", raw)
 }
 
-// deleteBucketLifecycle handles DELETE /{bucket}?lifecycle.
-func (s *Server) deleteBucketLifecycle(c *app.RequestContext, bucket string) {
+func (s *Server) deleteBucketLifecycle(ctx context.Context, c *app.RequestContext, bucket string) {
 	if s.blockIfMutationDisabled(c, "bucket_lifecycle_delete") {
 		return
 	}
-	if s.lifecycleStore == nil {
+	if s.lifecycle == nil {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "lifecycle not configured")
 		return
 	}
-
-	if err := s.lifecycleStore.Delete(bucket); err != nil {
+	if err := s.lifecycle.Delete(ctx, bucket); err != nil {
 		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}

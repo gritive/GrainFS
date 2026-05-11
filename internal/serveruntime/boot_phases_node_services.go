@@ -16,7 +16,7 @@ import (
 // Inputs:  state.cfg.ReshardInterval/LifecycleInterval/DegradedInterval,
 //
 //	state.dgMgr, state.distBackend, state.clusterAlerts, state.node,
-//	state.lifecycleMgr, state.srv, state.cfg.Addr.
+//	state.lifecycleSvc, state.srv, state.cfg.Addr.
 func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
@@ -58,9 +58,9 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 	// Start the leader-aware worker loop. Only the Raft leader runs the
 	// worker; followers skip the scan so we don't waste IO on proposals that
 	// would be rejected anyway.
-	if state.lifecycleMgr != nil {
-		go state.lifecycleMgr.Run(ctx)
-		log.Info().Dur("interval", cfg.LifecycleInterval).Msg("cluster lifecycle manager started")
+	if state.lifecycleSvc != nil {
+		go state.lifecycleSvc.Run(ctx)
+		log.Info().Dur("interval", cfg.LifecycleInterval).Msg("cluster lifecycle service started")
 	}
 
 	// Start the degraded mode monitor — checks live node count vs EC threshold

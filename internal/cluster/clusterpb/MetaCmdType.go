@@ -41,6 +41,8 @@ const (
 	MetaCmdTypeIAMInitFirstSA          MetaCmdType = 31
 	MetaCmdTypeIAMBucketUpstreamPut    MetaCmdType = 32
 	MetaCmdTypeIAMBucketUpstreamDelete MetaCmdType = 33
+	MetaCmdTypeBucketLifecyclePut      MetaCmdType = 34
+	MetaCmdTypeBucketLifecycleDelete   MetaCmdType = 35
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -78,6 +80,8 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeIAMInitFirstSA:          "IAMInitFirstSA",
 	MetaCmdTypeIAMBucketUpstreamPut:    "IAMBucketUpstreamPut",
 	MetaCmdTypeIAMBucketUpstreamDelete: "IAMBucketUpstreamDelete",
+	MetaCmdTypeBucketLifecyclePut:      "BucketLifecyclePut",
+	MetaCmdTypeBucketLifecycleDelete:   "BucketLifecycleDelete",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -115,6 +119,8 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"IAMInitFirstSA":          MetaCmdTypeIAMInitFirstSA,
 	"IAMBucketUpstreamPut":    MetaCmdTypeIAMBucketUpstreamPut,
 	"IAMBucketUpstreamDelete": MetaCmdTypeIAMBucketUpstreamDelete,
+	"BucketLifecyclePut":      MetaCmdTypeBucketLifecyclePut,
+	"BucketLifecycleDelete":   MetaCmdTypeBucketLifecycleDelete,
 }
 
 func (v MetaCmdType) String() string {

@@ -68,3 +68,32 @@ func TestStore_PutOverwrites(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "new", got.Rules[0].ID)
 }
+
+func TestStore_PutRaw_RoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>`)
+	require.NoError(t, s.PutRaw("b", raw))
+	got, err := s.Get("b")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.Rules, 1)
+	require.Equal(t, "r1", got.Rules[0].ID)
+}
+
+func TestStore_GetRaw_ReturnsByteForByte(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>`)
+	require.NoError(t, s.PutRaw("b", raw))
+	got, err := s.GetRaw("b")
+	require.NoError(t, err)
+	assert.Equal(t, raw, got)
+}
+
+func TestStore_GetRaw_NotFound(t *testing.T) {
+	s := NewStore(newTestDB(t))
+	got, err := s.GetRaw("nope")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}

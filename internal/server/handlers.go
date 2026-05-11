@@ -280,7 +280,7 @@ func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 
 	// DELETE /:bucket?lifecycle — delete bucket lifecycle configuration
 	if c.QueryArgs().Has("lifecycle") {
-		s.deleteBucketLifecycle(c, bucket)
+		s.deleteBucketLifecycle(ctx, c, bucket)
 		return
 	}
 
@@ -304,7 +304,7 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 
 	// GET /:bucket?lifecycle — get bucket lifecycle configuration
 	if c.QueryArgs().Has("lifecycle") {
-		s.getBucketLifecycle(c, bucket)
+		s.getBucketLifecycle(ctx, c, bucket)
 		return
 	}
 
