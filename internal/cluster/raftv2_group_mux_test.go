@@ -1,13 +1,13 @@
 // raftv2_group_mux_test.go — multi-node election + replication test for the
-// PR 28b v2 group-raft mux bridge.
+// v2 group-raft mux bridge (introduced in PR 28b, collapsed to the single
+// Register entry point in PR 29).
 //
 // Mirrors the PR 27 TestV2QUICCluster_ThreeNode_* tests but exercises the
 // per-group QUIC mux path (raft.GroupRaftQUICMux) rather than the meta-raft
 // StreamControl path. The two paths share a wire codec but diverge in
 // dispatch: meta-raft v2 goes through cluster.RaftQUICRPCTransport;
-// per-group v2 has to dispatch via raft.GroupRaftQUICMux.RegisterV2 so the
-// receiver routes inbound RPCs into the v2 adapter instead of nil-deref'ing
-// a typed-nil *raft.Node.
+// per-group v2 dispatches via raft.GroupRaftQUICMux.Register so the receiver
+// routes inbound RPCs into the v2 adapter.
 
 package cluster
 
@@ -25,7 +25,7 @@ import (
 // v2GroupMuxCluster wires up N per-group v2 raft nodes, each registered on
 // its own GroupRaftQUICMux under the same groupID, connected over real QUIC.
 // The outbound side comes from mux.ForGroup; the inbound side from
-// mux.RegisterV2 (the PR 28b new path).
+// mux.Register.
 type v2GroupMuxCluster struct {
 	nodes      []RaftNode
 	transports []*transport.QUICTransport
@@ -84,10 +84,10 @@ func newV2GroupMuxCluster(t *testing.T, n int, groupID string) *v2GroupMuxCluste
 		require.NoError(t, err)
 		sender := muxes[i].ForGroup(groupID)
 		node.SetTransport(sender.RequestVote, sender.AppendEntries)
-		// PR 28b: register via the v2-aware path so inbound RPCs dispatch
-		// into the cluster.RaftNode adapter (not the underlying *raft.Node,
-		// which is nil under v2).
-		muxes[i].RegisterV2(groupID, node)
+		// Register the v2 adapter as the group's handler. PR 28b added the
+		// V2-aware path; PR 29 collapsed it back into Register now that
+		// v1 is unreachable.
+		muxes[i].Register(groupID, node)
 		nodes[i] = node
 	}
 
@@ -127,10 +127,11 @@ func (c *v2GroupMuxCluster) waitForLeader(timeout time.Duration) RaftNode {
 }
 
 // TestV2GroupMuxCluster_ThreeNode_ElectsLeader is the proof-of-life for the
-// M5 PR 28b per-group QUIC mux bridge: three v2 raft nodes registered on the
-// mux under the same groupID must elect exactly one leader. Without RegisterV2
-// (or with dispatch lookup still typed to *raft.Node), inbound RPCs would
-// hit a typed-nil and the election would hang.
+// per-group QUIC mux v2 bridge (introduced in M5 PR 28b, collapsed in PR
+// 29): three v2 raft nodes registered on the mux under the same groupID
+// must elect exactly one leader. If dispatch lookup were still typed to
+// *raft.Node, inbound RPCs would hit a typed-nil and the election would
+// hang.
 func TestV2GroupMuxCluster_ThreeNode_ElectsLeader(t *testing.T) {
 	cluster := newV2GroupMuxCluster(t, 3, "group-pr28b")
 	cluster.startAll()
