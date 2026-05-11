@@ -111,9 +111,10 @@ type DedupIndex interface {
 	// re-apply interrupted rollback operations.
 	SnapshotListPendingRollbacks() ([]struct{ Vol, SnapID string }, error)
 
-	// SnapshotListPendingClones returns dstVol names whose vd:cl: clone-in-progress
-	// marker exists. Used by RecoverOnBoot to re-apply interrupted clone operations.
-	SnapshotListPendingClones() ([]string, error)
+	// SnapshotListPendingClones returns (dstVol, srcVol) pairs whose
+	// vd:cl: clone-in-progress marker exists. Used by RecoverOnBoot to
+	// re-apply interrupted clones by calling SnapshotClone(srcVol, dstVol).
+	SnapshotListPendingClones() ([]struct{ DstVol, SrcVol string }, error)
 
 	// SnapshotRollback atomically swaps the live (vol, blkNum) → canonical
 	// mapping to match snapID's mapping. Chunked + idempotent (re-callable after crash).

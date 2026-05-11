@@ -362,15 +362,17 @@ func TestSnapshotListPendingClonesDiscoversMarkers(t *testing.T) {
 	require.Empty(t, got)
 
 	require.NoError(t, idx.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(cloneStateKey("dst1"), []byte{1}); err != nil {
+		if err := txn.Set(cloneStateKey("dst1"), []byte("src1")); err != nil {
 			return err
 		}
-		return txn.Set(cloneStateKey("dst2"), []byte{1})
+		return txn.Set(cloneStateKey("dst2"), []byte("src2"))
 	}))
 
 	got, err = idx.SnapshotListPendingClones()
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"dst1", "dst2"}, got)
+	require.ElementsMatch(t, []struct{ DstVol, SrcVol string }{
+		{"dst1", "src1"}, {"dst2", "src2"},
+	}, got)
 
 	// After a successful SnapshotClone, the marker is cleared.
 	// Verify by running real Clone (which clears its own marker on success).
@@ -383,7 +385,9 @@ func TestSnapshotListPendingClonesDiscoversMarkers(t *testing.T) {
 	// fresh-dst should NOT appear as pending.
 	got, err = idx.SnapshotListPendingClones()
 	require.NoError(t, err)
-	require.NotContains(t, got, "fresh-dst")
+	for _, p := range got {
+		require.NotEqual(t, "fresh-dst", p.DstVol)
+	}
 }
 
 // R6: invariant test

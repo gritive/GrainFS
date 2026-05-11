@@ -413,25 +413,34 @@ func (b *badgerIndex) SnapshotListPendingRollbacks() ([]struct{ Vol, SnapID stri
 }
 
 // SnapshotListPendingClones iterates vd:cl:{dstVol} markers.
-// Used by RecoverOnBoot to re-run SnapshotClone on each stuck marker.
-// NOTE: the marker key encodes only dstVol; srcVol must be re-derived by the
-// caller (badgerSnapshotStore tracks clone source separately in its own marker).
-func (b *badgerIndex) SnapshotListPendingClones() ([]string, error) {
+// Used by RecoverOnBoot to re-apply interrupted clones by calling
+// SnapshotClone(srcVol, dstVol) for each returned pair.
+func (b *badgerIndex) SnapshotListPendingClones() ([]struct{ DstVol, SrcVol string }, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	var out []string
+	var out []struct{ DstVol, SrcVol string }
 	err := b.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = cloneStatePrefixKey()
 		it := txn.NewIterator(opts)
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
-			key := string(it.Item().Key())
-			dstVol := key[len(clonePrefix):]
+			item := it.Item()
+			dstVol := string(item.Key())[len(clonePrefix):]
 			if dstVol == "" {
 				continue
 			}
-			out = append(out, dstVol)
+			var srcVol string
+			if err := item.Value(func(v []byte) error {
+				srcVol = string(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if srcVol == "" {
+				continue
+			}
+			out = append(out, struct{ DstVol, SrcVol string }{dstVol, srcVol})
 		}
 		return nil
 	})
@@ -598,7 +607,7 @@ func (b *badgerIndex) SnapshotClone(srcVol, dstVol string) error {
 	defer b.mu.Unlock()
 
 	clKey := cloneStateKey(dstVol)
-	if err := b.db.Update(func(txn *badger.Txn) error { return txn.Set(clKey, []byte{1}) }); err != nil {
+	if err := b.db.Update(func(txn *badger.Txn) error { return txn.Set(clKey, []byte(srcVol)) }); err != nil {
 		return err
 	}
 
