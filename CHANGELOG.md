@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.149.0] - 2026-05-12 — feat(cluster): per-node shared FSM-state DB (C2 P3)
+
+### Changed
+- Per-group `<dataDir>/groups/<id>/badger/` FSM-state BadgerDBs consolidated into one per-node `<dataDir>/shared-fsm/` DB. Each raft group's keys carry a 4-byte-big-endian-length || groupID prefix via the new (package-private) `cluster.stateKeyspace` (byte-identical encoding to `raft.OpenSharedLogStore`'s P0b prefix). `GroupLifecycleConfig.FSMStore` is now a required field (the per-group `OpenStateDB` injection seam is gone — mirrors how #290 made `LogStore` required). `state.distBackend` uses the shared DB with a `"group-0"` keyspace via `cluster.NewDistributedBackendForGroup`. A legacy `groups/*/badger/` dir is IGNORED on startup (pre-1.0, no migration).
+- `FSM.Snapshot` / `FSM.Restore` are now group-prefix-scoped: a snapshot's keys are group-relative; restore drops only the calling group's prefix (or whole-DB for empty keyspace) and rewrites with the group prefix. Restore validates before mutating (refuses wrong `FormatVersion`, refuses already-prefixed keys) so a rejected/corrupt snapshot leaves existing state intact. A new `FormatVersion uint8` field on the raft snapshot-meta record (last field of the FlatBuffers `SnapshotMeta`, so old records decode with `0`) carries the version; this binary writes `2`.
+- `grainfs recover-cluster` now requires the source data dir's last FSM snapshot to be `format_version == 2`; pre-P3 dirs are rejected with a clear error. See `docs/recover-cluster.md`.
+- Bucket lifecycle policy keys (`lifecycle:{bucket}`) now live in the shared FSM DB unprefixed (`state.distBackend.FSMDB()` switched DBs as part of the wiring) — process-global namespace, no collision with group-prefixed keys (the 4-byte length prefix guarantees this). Pre-1.0, no existing lifecycle data.
+
+### Added
+- `make lint-keyspace`: lint gate that rejects raw `[]byte("bucket:"|"obj:"|"lat:"|"mpu:"|"placement:"|"policy:"|"bucketver:"|"pending-migration:"|"quarantine:")` literals reaching Badger ops in `internal/cluster/` — forces FSM-state keys through `stateKeyspace`. Hooked into `make lint`.
+- `resourcewatch.DBCategorySharedFSM` + `badgerrole.RoleSharedFSM` for the new per-node shared FSM-state DB.
+- Invariant test suite: prefix-isolation across all FSM/backend paths, pathological group IDs (length ≥ 256, NUL bytes, prefix-of-prefix), group-close-doesn't-close-shared-DB, snapshot containment, restore replaces only own group, restore rejects wrong `FormatVersion` / already-prefixed keys / corrupt bytes (decode-before-drop), empty-keyspace whole-DB replace, restart persistence, restore-crash-mid-DropPrefix self-heals on reboot via the durable snapshot (kill-point hook).
+
+### Performance
+- Per-node BadgerDB instance count goes from 2N+1 to 3 (shared raft-log from P0b + shared FSM-state from this PR + the process-level meta DB). The expected wins (boot ceiling at high N, idle goroutines / RSS) are documented in `docs/architecture/badger-consolidation.md` §"Status: FINALIZED"; the full idle-N8/N16/load-N8/N16/N32 matrix sweep is deferred to a quiet-host run (host contention invalidates the numbers).
+
+### Removed
+- `GroupLifecycleConfig.OpenStateDB` field + `OpenGroupStateDBFunc` type (the per-group state-DB injection seam is gone).
+- Per-group `<dataDir>/groups/<id>/badger/` directories (the shared FSM DB is the only layout).
+
 ## [0.0.148.0] - 2026-05-12 — feat(raft/v2): M5 PR 29 remove GRAINFS_RAFT_V2 flag + raftv2adapter cleanup
 
 ### BREAKING — operator-facing
