@@ -111,18 +111,9 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 
 	// MetaRaft.Propose follower→leader forwarding: when the local node is not
 	// the meta-Raft leader, forward encoded MetaCmd bytes to the current leader
-	// via the existing QUIC forwardPropose RPC. Address resolution uses the
-	// meta-FSM node map (same pattern as ForwardSender.WithLeaderHintResolver).
-	state.metaRaft.SetForwarder(func(ctx context.Context, data []byte) (uint64, error) {
-		leaderID := state.metaRaft.LeaderID()
-		if leaderID == "" {
-			return 0, fmt.Errorf("meta_raft forward: no leader known")
-		}
-		addr, ok := cluster.ResolveNodeAddress(state.metaRaft.FSM(), leaderID)
-		if !ok {
-			return 0, fmt.Errorf("meta_raft forward: cannot resolve leader %q address", leaderID)
-		}
-		return state.distBackend.ForwardPropose(ctx, addr, data)
+	// via StreamMetaProposeForward (the same path iceberg commits use).
+	metaRaft.SetForwarder(func(ctx context.Context, data []byte) error {
+		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data)
 	})
 
 	state.distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {

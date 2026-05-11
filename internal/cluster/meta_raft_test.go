@@ -431,16 +431,15 @@ func TestMetaRaft_proposeOrForward_ForwardsWhenFollower(t *testing.T) {
 	m := &MetaRaft{}
 	var forwardCalled bool
 	var forwardData []byte
-	m.forwardFn = func(_ context.Context, data []byte) (uint64, error) {
+	m.forwardFn = func(_ context.Context, data []byte) error {
 		forwardCalled = true
 		forwardData = data
-		return 42, nil
+		return nil
 	}
 	node := &fakeProposerNode{isLeader: false}
 
-	idx, err := m.proposeOrForward(context.Background(), node, []byte("payload"))
+	err := m.proposeOrForward(context.Background(), node, []byte("payload"))
 	require.NoError(t, err)
-	assert.Equal(t, uint64(42), idx, "proposeOrForward must return forwardFn's index")
 	assert.True(t, forwardCalled, "forwardFn must be called on follower")
 	assert.Equal(t, []byte("payload"), forwardData)
 	assert.Equal(t, 0, node.proposeCalls, "ProposeWait must not be called on follower")
@@ -450,17 +449,19 @@ func TestMetaRaft_proposeOrForward_NoForwarder_Errors(t *testing.T) {
 	m := &MetaRaft{} // forwardFn is nil
 	node := &fakeProposerNode{isLeader: false}
 
-	_, err := m.proposeOrForward(context.Background(), node, []byte("payload"))
+	err := m.proposeOrForward(context.Background(), node, []byte("payload"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no forwarder configured")
 }
 
 func TestMetaRaft_proposeOrForward_LeaderProposesLocally(t *testing.T) {
-	m := &MetaRaft{}
+	m := &MetaRaft{
+		applyNotify: make(chan struct{}),
+	}
+	m.lastApplied.Store(7)
 	node := &fakeProposerNode{isLeader: true, proposeIdx: 7}
 
-	idx, err := m.proposeOrForward(context.Background(), node, []byte("payload"))
+	err := m.proposeOrForward(context.Background(), node, []byte("payload"))
 	require.NoError(t, err)
-	assert.Equal(t, uint64(7), idx)
 	assert.Equal(t, 1, node.proposeCalls, "ProposeWait must be called when leader")
 }
