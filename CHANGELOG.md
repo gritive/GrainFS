@@ -1,5 +1,98 @@
 # Changelog
 
+## [0.0.148.0] - 2026-05-12 — feat(raft/v2): M5 PR 29 remove GRAINFS_RAFT_V2 flag + raftv2adapter cleanup
+
+### BREAKING — operator-facing
+
+- The `GRAINFS_RAFT_V2` environment variable is no longer read. Setting
+  `GRAINFS_RAFT_V2=off` (the former escape hatch back to raft v1) has NO
+  effect — raft v2 is now the only path for both `serveruntime` and
+  `cluster`. Operators on v2 since PR 28b stay on v2; there is no longer
+  a way to revert to v1 short of rolling back the binary. PR 30 deletes
+  `internal/raft/` (the v1 package) outright.
+
+### Removed
+
+- `internal/cluster/raftflag.go` — entire file deleted. `IsV2Enabled`,
+  `ParseRaftV2Flag`, `resetRaftV2FlagForTest`, `raftV2DefaultOnPkgs`,
+  `raftV2FlagOff`, `raftV2FlagEnv` are gone.
+- `cluster.RaftV2Snapshotter` interface — folded into `cluster.RaftNode`.
+  `DistributedBackend.TriggerRaftSnapshot` and `RaftSnapshotStatus`
+  dispatch through `b.node.CreateSnapshot` / `b.node.SnapshotStatus`
+  directly. The `raftSnapshotRequest.v2Snap` field is gone; there is no
+  longer a v1-vs-v2 branch in `completeRaftSnapshotRequest`.
+- `internal/cluster/backend.go::triggerRaftV2SnapshotInApplyLoop` (the v2
+  counterpart of the v1 SnapshotManager dispatcher) is gone — its body is
+  inlined into `triggerRaftSnapshotInApplyLoop`, which is now the only
+  apply-loop snapshot path.
+
+### Changed
+
+- `internal/cluster/raftfactory.go::newRaftNode` always constructs the v2
+  adapter via `newRaftNodeV2`. The `logStore` parameter is accepted for
+  source-compat with PR 28b callers and ignored; PR 30 removes the
+  parameter when v1's `LogStore` type disappears.
+- `internal/serveruntime/run.go` — drops the v1/v2 if/else for raft node
+  construction. Always builds the v2 node via
+  `cluster.NewRaftV2NodeForServeruntime` + `cluster.NewRaftQUICRPCTransport`.
+- `internal/serveruntime/boot_phases_services.go::bootSnapshotAndApplyLoop`
+  — drops the `raft.SnapshotManager` wiring entirely. raftv2 owns snapshot
+  lifecycle internally (SnapshotStore + CreateSnapshot + InstallSnapshot)
+  so the v1 manager is no longer needed.
+- `internal/serveruntime/boot_phases_storage_runtime.go` — the per-group
+  mux registration is a single `state.groupRaftMux.Register(entry.ID,
+  gb.Node())` call; the v1/v2 dispatch branch is gone.
+- `internal/raft/group_transport_quic.go` — collapsed
+  `Register(groupID, *Node)` + `RegisterV2(groupID, RaftV2Handler)` into a
+  single `Register(groupID, RaftV2Handler)` entry point with a nil-handler
+  guard. `*Node` (v1) still satisfies `RaftV2Handler` so internal v1
+  tests inside `internal/raft/` compile.
+- Renamed `cluster.RaftV2QUICRPCTransport` →
+  `cluster.RaftQUICRPCTransport` (and the file
+  `raftv2_quic_rpc.go` → `raft_quic_rpc.go`). v2 is the only path; the
+  `V2` disambiguator is noise.
+- `internal/cluster/raftnode.go` — `RaftNode` interface gains
+  `CreateSnapshot` and `SnapshotStatus`. v1's `*raft.Node` still satisfies
+  the interface via panicking stubs in `internal/raft/v2compat.go` so
+  v1-specific test files (in `internal/cluster/backend_test.go`,
+  `cluster_coordinator_test.go`, `degraded_monitor_test.go`,
+  `group_backend_test.go`, etc.) still compile. PR 30 deletes the v1
+  package and these stubs together.
+
+### Added
+
+- `internal/raft/v2compat.go` — temporary compile-only shim that adds
+  `*raft.Node.CreateSnapshot` and `*raft.Node.SnapshotStatus` panicking
+  stubs so v1 `*raft.Node` continues to satisfy the cluster.RaftNode
+  interface. Deleted by PR 30.
+
+### Test churn
+
+- `internal/cluster/raft_v2_smoke_test.go` — `TestRaftV2Smoke_*` tests
+  that asserted flag-gated behavior (`OffEscapeHatchDisablesV2`,
+  `ClusterFlagSelectsV2`, `OtherPkgFlagDoesNotAffectCluster`,
+  `ParseFlag`, `DefaultsAreV2`) are gone. Two tests remain:
+  `TestRaftV2Smoke_DefaultClusterIsV2` (newRaftNode returns the v2
+  adapter) and `TestRaftV2Smoke_BootstrapProposeRoundtrip` (single-node
+  v2 round-trip).
+- `internal/cluster/group_lifecycle_test.go::TestInstantiateLocalGroup_UsesGroupIDAsElectionPriorityKey`
+  retired — assertion shape required v1's `*raft.Node.ElectionPriorityKey()`
+  accessor and there is no equivalent on cluster.RaftNode.
+- `internal/cluster/backend_test.go::TestDistributedBackend_SnapshotTriggersAfterThreshold`,
+  `TestDistributedBackend_TriggerRaftSnapshotLeader`,
+  `TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop`,
+  `TestDistributedBackend_TriggerRaftSnapshotRejectsFollower` — all
+  `t.Skip`'d. They exercise v1 `raft.SnapshotManager` semantics; PR 30
+  deletes the v1 package and these tests together.
+- All remaining test files: `t.Setenv("GRAINFS_RAFT_V2", …)` +
+  `resetRaftV2FlagForTest` calls stripped (the flag is gone, v2 is the
+  default).
+- `internal/cluster/testbackend.go::NewSingletonBackendForTest` migrated
+  to the v2 path (`newRaftNode` instead of `raft.NewNode`).
+- `internal/serveruntime/boot_phases_services_test.go::TestBootSnapshotAndApplyLoop_PopulatesState`
+  — assertion flipped: `state.snapMgr` stays nil because the v1
+  SnapshotManager is no longer wired.
+
 ## [0.0.147.0] - 2026-05-12 — feat(raft/v2): M5 PR 28b cluster default-on + per-group QUIC mux v2 bridge
 
 ### Changed
