@@ -214,10 +214,6 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
-		// C2 P0b: forward GRAINFS_PERF_SHARED_BADGER=1 → --shared-badger
-		if os.Getenv("GRAINFS_PERF_SHARED_BADGER") == "1" {
-			cmd.Args = append(cmd.Args, "--shared-badger")
-		}
 		// R+H prototype: forward GRAINFS_PERF_QUIC_MUX=1 → --quic-mux for
 		// before/after CPU measurement on the same scenario.
 		if os.Getenv("GRAINFS_PERF_QUIC_MUX") == "1" {
