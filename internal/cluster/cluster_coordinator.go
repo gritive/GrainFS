@@ -386,11 +386,11 @@ func (c *ClusterCoordinator) RestoreObjects(objects []storage.SnapshotObject) (i
 
 	byGroup := make(map[string][]storage.SnapshotObject)
 	for _, obj := range objects {
-		target, err := c.routeBucket(obj.Bucket)
+		target, err := c.opRouter.RouteBucket(obj.Bucket)
 		if err != nil {
 			return 0, nil, err
 		}
-		byGroup[target.groupID] = append(byGroup[target.groupID], obj)
+		byGroup[target.GroupID] = append(byGroup[target.GroupID], obj)
 	}
 
 	var restored int
@@ -1025,21 +1025,20 @@ func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix str
 		}
 		return objects, nil
 	}
-	target, err := c.routeBucket(bucket)
+	target, err := c.opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		return gb.ListObjects(ctx, bucket, prefix, maxKeys)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildListObjectsArgs(bucket, prefix, int32(maxKeys))
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpListObjects, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjects, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1067,21 +1066,20 @@ func (c *ClusterCoordinator) ListObjectVersions(
 		}
 		return versions, nil
 	}
-	target, err := c.routeBucket(bucket)
+	target, err := c.opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		return gb.ListObjectVersions(bucket, prefix, maxKeys)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildListObjectVersionsArgs(bucket, prefix, int32(maxKeys))
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpListObjectVersions, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjectVersions, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1104,21 +1102,20 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 		}
 		return nil
 	}
-	target, err := c.routeBucket(bucket)
+	target, err := c.opRouter.RouteBucket(bucket)
 	if err != nil {
 		return err
 	}
-	if gb, ok, err := c.localReadBackend(ctx, target); ok {
-		if err != nil {
-			return err
-		}
+	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
 		return gb.WalkObjects(ctx, bucket, prefix, fn)
 	}
 	if c.forward == nil {
 		return ErrCoordinatorNoRouter
 	}
 	args := buildWalkObjectsArgs(bucket, prefix)
-	reply, err := c.forward.Send(ctx, target.peers, target.groupID, raftpb.ForwardOpWalkObjects, args)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpWalkObjects, args)
 	if err != nil {
 		return err
 	}
@@ -1261,14 +1258,13 @@ func (c *ClusterCoordinator) PutObject(
 // NFSv4. WAL exposes WriteAt to NFS, so the coordinator must either pass it to
 // the local group leader or provide a correct routed fallback.
 func (c *ClusterCoordinator) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
-	target, err := c.routeBucket(bucket)
+	target, err := c.opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return nil, err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
 		return gb.WriteAt(ctx, bucket, key, offset, data)
 	}
 
@@ -1300,14 +1296,13 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 	if size < 0 {
 		return storage.ErrEntityTooLarge
 	}
-	target, err := c.routeBucket(bucket)
+	target, err := c.opRouter.RouteBucket(bucket)
 	if err != nil {
 		return err
 	}
-	if gb, ok, err := c.localWriteBackend(ctx, target); ok {
-		if err != nil {
-			return err
-		}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
 		return gb.Truncate(ctx, bucket, key, size)
 	}
 
@@ -1403,12 +1398,12 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 	if !storage.IsInternalBucket(bucket) {
 		return false
 	}
-	target, err := c.routeBucket(bucket)
+	target, err := c.opRouter.RouteBucket(bucket)
 	if err != nil {
 		return false
 	}
-	gb, ok, err := c.localWriteBackend(context.Background(), target)
-	if !ok || err != nil {
+	gb, err := c.localExec.ResolveWrite(context.Background(), target)
+	if err != nil || gb == nil {
 		return false
 	}
 	return gb.PreferWriteAt(bucket)
