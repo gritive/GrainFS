@@ -77,7 +77,7 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 	}
 	require.Equal(t, raft.Leader, node.State(), "no-peers node must become leader")
 
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
 
 	stopApply := make(chan struct{})
@@ -493,7 +493,7 @@ func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
 		return node.State() == raft.Leader
 	}, 3*time.Second, 10*time.Millisecond)
 
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
 
 	// Set snapshot threshold to 5 entries
@@ -544,7 +544,7 @@ func TestDistributedBackend_TriggerRaftSnapshotLeader(t *testing.T) {
 	)
 	node.Start()
 	require.Eventually(t, func() bool { return node.State() == raft.Leader }, 3*time.Second, 10*time.Millisecond)
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
 	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, backend.fsm, raft.SnapshotConfig{Threshold: 100}), node)
 
@@ -590,7 +590,7 @@ func TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop(t *testin
 	)
 	node.Start()
 	require.Eventually(t, func() bool { return node.State() == raft.Leader }, 3*time.Second, 10*time.Millisecond)
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
 
 	stopApply := make(chan struct{})
@@ -655,7 +655,7 @@ func TestDistributedBackend_TriggerRaftSnapshotRejectsFollower(t *testing.T) {
 	defer logStore.Close()
 
 	node := raft.NewNode(raft.DefaultConfig("follower", []string{"leader"}), logStore)
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
 	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, backend.fsm, raft.SnapshotConfig{Threshold: 100}), node)
 
@@ -689,7 +689,7 @@ func TestDistributedBackend_Close(t *testing.T) {
 	defer node.Stop()
 	defer logStore.Close()
 
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
 
 	err = backend.Close()

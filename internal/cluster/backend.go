@@ -156,6 +156,8 @@ type DistributedBackend struct {
 	db               *badger.DB
 	node             RaftNode
 	fsm              *FSM
+	keys             *stateKeyspace
+	shared           bool
 	logger           zerolog.Logger
 	lastApplied      atomic.Uint64
 	lastAppliedTerm  atomic.Uint64
@@ -206,13 +208,19 @@ type internalObjectPath struct {
 
 // NewDistributedBackend creates a new distributed storage backend.
 // The FSM apply loop must be started separately via RunApplyLoop.
-func NewDistributedBackend(root string, db *badger.DB, node RaftNode) (*DistributedBackend, error) {
+// keys may be nil (uses an identity keyspace); shared controls whether Close
+// skips closing the BadgerDB (for shared-DB mode where the caller owns the DB lifecycle).
+func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stateKeyspace, shared bool) (*DistributedBackend, error) {
 	dataDir := filepath.Join(root, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	if keys == nil {
+		keys = newStateKeyspaceEmpty()
+	}
+
+	fsm := NewFSM(db, keys)
 
 	if noOp, err := EncodeNoOpCommand(); err == nil {
 		node.SetNoOpCommand(noOp)
@@ -223,11 +231,23 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode) (*Distribu
 		db:           db,
 		node:         node,
 		fsm:          fsm,
+		keys:         keys,
+		shared:       shared,
 		logger:       log.With().Str("component", "distributed-backend").Logger(),
 		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
 	}
 	return b, nil
+}
+
+// ks returns the effective stateKeyspace for this backend. When b.keys is nil
+// (backend constructed via struct literal in tests) it falls back to the identity
+// keyspace so all methods work correctly without requiring the constructor.
+func (b *DistributedBackend) ks() *stateKeyspace {
+	if b.keys == nil {
+		return newStateKeyspaceEmpty()
+	}
+	return b.keys
 }
 
 // SetShardCache configures the EC shard cache. Pass a cache built with
@@ -710,8 +730,12 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	return lastErr
 }
 
-// Close closes the metadata database.
+// Close closes the metadata database. When shared is true the DB is owned by
+// the caller and Close is a no-op for the DB (only internal state is released).
 func (b *DistributedBackend) Close() error {
+	if b.shared {
+		return nil
+	}
 	return b.db.Close()
 }
 
@@ -744,7 +768,7 @@ func (b *DistributedBackend) SetShardGroupSource(s ShardGroupSource) { b.shardGr
 func (b *DistributedBackend) CreateBucket(ctx context.Context, bucket string) error {
 	// Check if already exists (read local)
 	err := b.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(bucketKey(bucket))
+		_, err := txn.Get(b.ks().BucketKey(bucket))
 		return err
 	})
 	if err == nil {
@@ -805,7 +829,7 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 		return nil
 	}
 	return b.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(bucketKey(bucket))
+		_, err := txn.Get(b.ks().BucketKey(bucket))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrBucketNotFound
 		}
@@ -816,7 +840,7 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	// Check existence and emptiness
 	err := b.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(bucketKey(bucket))
+		_, err := txn.Get(b.ks().BucketKey(bucket))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrBucketNotFound
 		}
@@ -824,7 +848,7 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 			return err
 		}
 
-		prefix := []byte("obj:" + bucket + "/")
+		prefix := b.ks().Prefix([]byte("obj:" + bucket + "/"))
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 		it.Seek(prefix)
@@ -879,7 +903,7 @@ func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
 	var state string
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte("bucketver:" + bucket))
+		item, err := txn.Get(b.ks().BucketVerKey(bucket))
 		if err == badger.ErrKeyNotFound {
 			state = "Unversioned"
 			return nil
@@ -898,15 +922,11 @@ func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) 
 func (b *DistributedBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	var buckets []string
 	err := b.db.View(func(txn *badger.Txn) error {
-		prefix := []byte("bucket:")
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			key := string(it.Item().Key())
-			name := strings.TrimPrefix(key, "bucket:")
+		return b.ks().scanGroupPrefix(txn, []byte("bucket:"), func(rawKey []byte, item *badger.Item) error {
+			name := strings.TrimPrefix(string(rawKey), "bucket:")
 			buckets = append(buckets, name)
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -3195,15 +3215,15 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 			return decodeMeta(item, "current")
 		}
 
-		metaKeyBytes := objectMetaKey(bucket, key)
+		metaKeyBytes := b.ks().ObjectMetaKey(bucket, key)
 		versionID := ""
-		if latItem, lerr := txn.Get(latestKey(bucket, key)); lerr == nil {
+		if latItem, lerr := txn.Get(b.ks().LatestKey(bucket, key)); lerr == nil {
 			_ = latItem.Value(func(v []byte) error {
 				versionID = string(v)
 				return nil
 			})
 			if versionID != "" {
-				metaKeyBytes = objectMetaKeyV(bucket, key, versionID)
+				metaKeyBytes = b.ks().ObjectMetaKeyV(bucket, key, versionID)
 			}
 		} else if lerr != badger.ErrKeyNotFound {
 			return lerr
@@ -3227,9 +3247,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) PlacementMeta {
 	meta := PlacementMeta{VersionID: versionID}
 	_ = b.db.View(func(txn *badger.Txn) error {
-		dbKey := objectMetaKey(bucket, key)
+		dbKey := b.ks().ObjectMetaKey(bucket, key)
 		if versionID != "" {
-			dbKey = objectMetaKeyV(bucket, key, versionID)
+			dbKey = b.ks().ObjectMetaKeyV(bucket, key, versionID)
 		}
 		item, err := txn.Get(dbKey)
 		if err != nil {
@@ -3297,10 +3317,12 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 		// Load latest-version pointers for this bucket so we can dedupe versioned
 		// entries down to a single row per base key (skipping delete markers).
 		latMap := make(map[string]string) // base key → latest versionID
-		latPrefix := []byte("lat:" + bucket + "/")
+		rawLatPrefix := []byte("lat:" + bucket + "/")
+		latPrefix := b.ks().Prefix(rawLatPrefix)
 		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
 		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
-			baseKey := string(itLat.Item().Key()[len(latPrefix):])
+			rawKey := b.ks().MustStrip(itLat.Item().Key())
+			baseKey := string(rawKey[len(rawLatPrefix):])
 			_ = itLat.Item().Value(func(v []byte) error {
 				latMap[baseKey] = string(v)
 				return nil
@@ -3313,8 +3335,9 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 		// versioned entries. For keys not in latMap (legacy non-versioned data)
 		// we emit the single entry we find.
 		emitted := make(map[string]bool)
-		pfx := []byte("obj:" + bucket + "/" + prefix)
-		bucketPfx := []byte("obj:" + bucket + "/")
+		rawBucketPfx := []byte("obj:" + bucket + "/")
+		pfx := b.ks().Prefix([]byte("obj:" + bucket + "/" + prefix))
+		bucketPfx := b.ks().Prefix(rawBucketPfx)
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 		count := 0
@@ -3325,8 +3348,8 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 			if count >= maxKeys {
 				break
 			}
-			k := string(it.Item().Key())
-			rest := k[len(bucketPfx):]
+			rawKey := b.ks().MustStrip(it.Item().Key())
+			rest := string(rawKey[len(rawBucketPfx):])
 
 			// Derive the base key. A versioned key is "{baseKey}/{versionID}";
 			// a legacy key is just "{baseKey}" with no trailing segment.
@@ -3406,10 +3429,12 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 	}
 	return b.db.View(func(txn *badger.Txn) error {
 		latMap := make(map[string]string)
-		latPrefix := []byte("lat:" + bucket + "/")
+		rawLatPrefix := []byte("lat:" + bucket + "/")
+		latPrefix := b.ks().Prefix(rawLatPrefix)
 		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
 		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
-			baseKey := string(itLat.Item().Key()[len(latPrefix):])
+			rawKey := b.ks().MustStrip(itLat.Item().Key())
+			baseKey := string(rawKey[len(rawLatPrefix):])
 			_ = itLat.Item().Value(func(v []byte) error {
 				latMap[baseKey] = string(v)
 				return nil
@@ -3418,13 +3443,17 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 		itLat.Close()
 
 		emitted := make(map[string]bool)
-		pfx := []byte("obj:" + bucket + "/" + prefix)
-		bucketPfx := []byte("obj:" + bucket + "/")
+		rawBucketPfx := []byte("obj:" + bucket + "/")
+		pfx := b.ks().Prefix([]byte("obj:" + bucket + "/" + prefix))
+		bucketPfx := b.ks().Prefix(rawBucketPfx)
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
-		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
-			k := string(it.Item().Key())
-			rest := k[len(bucketPfx):]
+		for it.Seek(pfx); it.ValidForPrefix(bucketPfx); it.Next() {
+			if !it.ValidForPrefix(pfx) {
+				break
+			}
+			rawKey := b.ks().MustStrip(it.Item().Key())
+			rest := string(rawKey[len(rawBucketPfx):])
 
 			baseKey := rest
 			isVersioned := false
@@ -3529,7 +3558,7 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	// Verify upload exists (read local metadata)
 	err := b.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey(uploadID))
+		_, err := txn.Get(b.ks().MultipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
@@ -3566,7 +3595,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	// Read upload metadata
 	var meta clusterMultipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(multipartKey(uploadID))
+		item, err := txn.Get(b.ks().MultipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
@@ -3709,7 +3738,7 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 	_ = bucket
 	_ = key
 	err := b.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey(uploadID))
+		_, err := txn.Get(b.ks().MultipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
@@ -3760,7 +3789,7 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	err := b.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey(uploadID))
+		_, err := txn.Get(b.ks().MultipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
@@ -3801,7 +3830,7 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 	var obj storage.Object
 	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+		item, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
 		if err == badger.ErrKeyNotFound {
 			return storage.ErrObjectNotFound
 		}
@@ -3915,11 +3944,12 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 	latestMap := map[string]string{} // key → latestVID
 	err := b.db.View(func(txn *badger.Txn) error {
 		// Pre-scan latest pointers for the prefix so each version can tag IsLatest.
-		latPrefix := []byte("lat:" + bucket + "/" + prefix)
+		rawLatSemanticPfx := []byte("lat:" + bucket + "/" + prefix)
+		latPrefix := b.ks().Prefix(rawLatSemanticPfx)
 		latIt := txn.NewIterator(badger.DefaultIteratorOptions)
 		for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
-			k := string(latIt.Item().Key())
-			key := strings.TrimPrefix(k, "lat:"+bucket+"/")
+			rawKey := b.ks().MustStrip(latIt.Item().Key())
+			key := strings.TrimPrefix(string(rawKey), "lat:"+bucket+"/")
 			_ = latIt.Item().Value(func(v []byte) error { latestMap[key] = string(v); return nil })
 		}
 		latIt.Close()
@@ -3927,12 +3957,13 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 		// Match any object key starting with `prefix` — iterate the per-bucket
 		// versioned store and filter in-memory. The version ID is the last
 		// path segment after the final `/`; everything before is the S3 key.
-		objPrefix := []byte("obj:" + bucket + "/")
+		rawObjBucketPfx := []byte("obj:" + bucket + "/")
+		objPrefix := b.ks().Prefix(rawObjBucketPfx)
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
-			k := string(it.Item().Key())
-			rest := strings.TrimPrefix(k, "obj:"+bucket+"/")
+			rawKey := b.ks().MustStrip(it.Item().Key())
+			rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/")
 			// Versioned format: {key}/{versionID}. Unversioned legacy: {key}.
 			slash := strings.LastIndex(rest, "/")
 			if slash < 0 {
@@ -3995,7 +4026,7 @@ func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObje
 		return cached.(internalObjectPath)
 	}
 	path := b.objectPathV(bucket, key, "current")
-	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: objectMetaKey(bucket, key)}
+	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: b.ks().ObjectMetaKey(bucket, key)}
 	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
 	return actual.(internalObjectPath)
 }

@@ -151,7 +151,7 @@ type ownedGroupsState struct {
 // body reads for the boot summary; passing it in keeps the phase signature
 // honest about what's mutated.
 func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDecision func(badgerrole.Decision)) error {
-	distBackend, err := cluster.NewDistributedBackend(state.cfg.DataDir, state.db, state.node)
+	distBackend, err := cluster.NewDistributedBackend(state.cfg.DataDir, state.db, state.node, nil, false)
 	if err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
