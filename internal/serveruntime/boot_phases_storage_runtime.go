@@ -92,14 +92,24 @@ func bootShardService(ctx context.Context, state *bootState) error {
 // applied entries flow.
 func bootStreamRouter(state *bootState) error {
 	state.streamRouter = transport.NewStreamRouter()
-	state.streamRouter.Handle(transport.StreamControl, state.rpcTransport.Handler())
+	if state.rpcTransport != nil {
+		// v1 path: register the v1 RPC handler on StreamControl. The
+		// parallel v2 handler is deferred to PR 27 (the cluster-side
+		// raftv2 QUIC bridge). Without it, GRAINFS_RAFT_V2=serveruntime
+		// produces a v2 node whose inbound Raft RPCs are not handled —
+		// acceptable for the PR 26 smoke milestone (opt-in flag).
+		state.streamRouter.Handle(transport.StreamControl, state.rpcTransport.Handler())
+	}
 	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
 	state.quicTransport.SetStreamHandler(state.streamRouter.Dispatch)
 	state.quicTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
 	state.quicTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
 
 	state.node.Start()
-	state.AddCleanup(func() { state.node.Stop() })
+	// state.node.Close() goes through the cluster.RaftNode interface:
+	// for v1 this maps to raft.Node.Close (Stop + wg.Wait); for v2
+	// (raftV2Node) it maps to raftv2.Node.Stop (drains the actor).
+	state.AddCleanup(func() { state.node.Close() })
 	return nil
 }
 

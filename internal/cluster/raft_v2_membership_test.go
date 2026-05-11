@@ -22,7 +22,7 @@ func newV2LeaderForMembership(t *testing.T) RaftNode {
 	t.Cleanup(resetRaftV2FlagForTest)
 
 	rcfg := raft.DefaultConfig("membership-n1", nil)
-	node, err := newRaftNode(rcfg, nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRV, noopAE)
 	node.Start()
@@ -60,7 +60,7 @@ func newV2FollowerForMembership(t *testing.T) RaftNode {
 
 	// Supply a peer so the node is NOT a solo voter (solo voters auto-elect).
 	rcfg := raft.DefaultConfig("membership-follower", []string{"membership-peer"})
-	node, err := newRaftNode(rcfg, nil)
+	node, _, err := newRaftNode(rcfg, nil, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRV, noopAE)
 	node.Start()

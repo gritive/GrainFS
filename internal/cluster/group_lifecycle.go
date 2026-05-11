@@ -136,7 +136,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 
 	logStore := cfg.LogStore
 
-	node, err := newRaftNode(rcfg, logStore)
+	node, v2Close, err := newRaftNode(rcfg, logStore, groupDir)
 	if err != nil {
 		resourcewatch.DeregisterDB(groupVlogEntry)
 		_ = db.Close()
@@ -172,20 +172,24 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	}
 
 	gb, err := NewGroupBackend(GroupBackendConfig{
-		ID:        entry.ID,
-		Root:      groupDir,
-		DB:        db,
-		Node:      node,
-		LogStore:  logStore,
-		VlogEntry: groupVlogEntry,
-		ShardSvc:  cfg.ShardSvc,
-		PeerIDs:   peerIDsSelfFirst,
-		EC:        cfg.EC,
+		ID:           entry.ID,
+		Root:         groupDir,
+		DB:           db,
+		Node:         node,
+		LogStore:     logStore,
+		VlogEntry:    groupVlogEntry,
+		ShardSvc:     cfg.ShardSvc,
+		PeerIDs:      peerIDsSelfFirst,
+		EC:           cfg.EC,
+		V2StoreClose: v2Close,
 	})
 	if err != nil {
 		node.Close()
 		resourcewatch.DeregisterDB(groupVlogEntry)
 		_ = db.Close()
+		if v2Close != nil {
+			_ = v2Close()
+		}
 		return nil, fmt.Errorf("group %s: NewGroupBackend: %w", entry.ID, err)
 	}
 	return gb, nil

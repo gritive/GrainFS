@@ -10,6 +10,14 @@
 
 - [ ] **raft/v2: cmdCh backpressure cascade** — slow FSM consumer wedges actor's applyCh send → wedges cmdCh → wedges all incoming RPCs (HandleRequestVote/HandleAppendEntries) → peers election-timeout this node → cascading election storm. Structural fix: make applyCh delivery non-blocking from actor (separate apply goroutine reading from a buffered queue), OR at least give Propose a ctx variant + drop AE on cmdCh-full to keep election alive.
 
+### raft v2 — M5 PR 27 follow-up (left open by PR 26)
+
+> 2026-05-11 PR 26 landed serveruntime + cluster-factory v2 dispatch behind `GRAINFS_RAFT_V2=serveruntime` / `=cluster`. The remaining wire-up before the PR 28 default-on flip:
+
+- [ ] **PR 27: v2 QUIC RPC inbound bridge** — `internal/raft/quic_rpc.go::handleRPC` reaches v1-only `HandleRequestVote / HandleAppendEntries / HandleInstallSnapshot / HandleTimeoutNow`. v2 has all four (per-`internal/raft/v2/node.go`); a parallel `cluster.RaftV2QUICRPCTransport` must register `transport.StreamControl`, decode the same wire format, and dispatch into the v2 node through new `Handle*` methods on `cluster.RaftNode`. Wire codec: `encodeRPC/decodeRPC` in `internal/raft/quic_rpc_codec.go` are unexported and v1 is frozen, so the cluster-side bridge must duplicate the wire format (byte-identical) until v1 is deleted in PR 30. Without this, a multi-node v2 cluster cannot exchange Raft RPCs. **Blocks PR 28 default-on flip.**
+- [ ] **PR 27: v2 snapshot trigger surface** — `DistributedBackend.RaftSnapshotStatus / TriggerRaftSnapshot` return "unavailable" in v2 mode because `bootSnapshotAndApplyLoop` skips the v1 `SnapshotManager` (v2 owns snapshot lifecycle internally). Surface v2's `CreateSnapshot` through a `cluster.RaftNode` extension (or a sibling interface) so the admin endpoint works under the flag.
+- [ ] **PR 27: PR 22 / PR 26 stale-doc audit** — `internal/cluster/raftv2adapter.go` still labels `TransferLeadership` / `AddLearner` / `PromoteToVoter` as M2-scope ErrNotImplemented stubs even though `TransferLeadership` was implemented in v0.0.143.0. Refresh the comment block and adjust the M4 / PR 22 deferral notes that PR 26 closed.
+
 ### 기타
 
 - [ ] **Forward + commitObjectIndex crash window** — `internal/cluster/cluster_coordinator.go:1142,1160,1182,1107,1121` 등 PutObject/CompleteMultipartUpload forward 경로에서 `forward.Send` 성공 후 `commitObjectIndex` 호출 사이에 originating node가 crash하면 데이터는 원격 leader에 있지만 object index에 엔트리 없음 → orphan blob. 구조적 수정안: leader (handlePutObject in `forward_receiver.go`) 쪽에서 storage write와 함께 ProposeObjectIndex 수행. 2026-05-11 `/plan-eng-review` (storage op routing grilling, F2)에서 식별, refactor scope 외로 분리.

@@ -284,21 +284,30 @@ func (a *BalancerInfoAdapter) Status() server.BalancerStatusResult {
 	}
 }
 
-// RaftClusterInfo adapts raft.Node to server.ClusterInfo. addrBook
+// RaftClusterInfo adapts cluster.RaftNode to server.ClusterInfo. addrBook
 // resolves stable node IDs from raft peer aliases (PR-D peer-identity
 // unification).
+//
+// The node field accepts both v1 (*raft.Node) and v2 (*raftV2Node via the
+// cluster.RaftNode interface) so M5 PR 26 can swap implementations behind
+// GRAINFS_RAFT_V2=serveruntime without touching this adapter.
 type RaftClusterInfo struct {
-	node     *raft.Node
+	node     cluster.RaftNode
 	peers    []string
 	backend  *cluster.DistributedBackend
 	addrBook cluster.NodeAddressBook
 }
 
+// peerReplicationEvidenceSource is a v1-only extension. v2 does not expose
+// per-peer replication state (raftv2adapter.go's PeerMatchIndex returns
+// (0, false) and there is no PeerReplicationEvidence equivalent). The type
+// assertion in PeerSnapshot fails gracefully for v2 and the snapshot
+// degrades to the configured-only liveness fallback.
 type peerReplicationEvidenceSource interface {
 	PeerReplicationEvidence() []raft.PeerReplicationEvidence
 }
 
-func NewRaftClusterInfo(node *raft.Node, peers []string, backend *cluster.DistributedBackend, addrBook cluster.NodeAddressBook) *RaftClusterInfo {
+func NewRaftClusterInfo(node cluster.RaftNode, peers []string, backend *cluster.DistributedBackend, addrBook cluster.NodeAddressBook) *RaftClusterInfo {
 	return &RaftClusterInfo{node: node, peers: peers, backend: backend, addrBook: addrBook}
 }
 
@@ -495,17 +504,21 @@ type raftMembershipNode interface {
 	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
 }
 
-// RaftMembership adapts raft.Node to server.ClusterMembership for the
+// RaftMembership adapts cluster.RaftNode to server.ClusterMembership for the
 // remove-peer endpoint. Public cluster status exposes canonical node IDs, while
 // legacy Raft peer keys may still be raft addresses after learner promotion.
 // The adapter resolves remote node IDs back to the engine's peer key before
 // invoking joint consensus (§4.3).
+//
+// The node field is the cluster.RaftNode interface so v1 (*raft.Node) and v2
+// (*raftV2Node) both satisfy it. v2's ChangeMembership sequences AddVoter +
+// RemoveVoter calls (not atomic — see raftv2adapter.go WARN).
 type RaftMembership struct {
 	node     raftMembershipNode
 	addrBook cluster.NodeAddressBook
 }
 
-func NewRaftMembership(node *raft.Node, addrBook cluster.NodeAddressBook) *RaftMembership {
+func NewRaftMembership(node cluster.RaftNode, addrBook cluster.NodeAddressBook) *RaftMembership {
 	return &RaftMembership{node: node, addrBook: addrBook}
 }
 
