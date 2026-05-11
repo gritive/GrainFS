@@ -106,6 +106,22 @@ func newRaftNodeV2(rcfg raft.Config, v2StoreDir string) (*raftV2Node, func() err
 	return newRaftV2Node(n), closeFn, nil
 }
 
+// NewRaftV2NodeForServeruntime is the serveruntime entry point that
+// constructs a v2 Raft node directly (bypassing the cluster factory's v1/v2
+// dispatch). serveruntime never routes through newRaftNode; its raft node
+// is constructed once per process at boot.
+//
+// raftDir is the meta-raft root directory; v2 stores land at
+// <raftDir>/raft-v2/. The returned closeFn must be invoked at shutdown to
+// release the Badger DB handle (caller registers via bootState.AddCleanup).
+//
+// IsV2Enabled("serveruntime") is the only opt-in trigger; this helper does
+// NOT consult the flag itself — call it only when the caller has already
+// decided to take the v2 path.
+func NewRaftV2NodeForServeruntime(rcfg raft.Config, raftDir string) (RaftNode, func() error, error) {
+	return newRaftNodeV2(rcfg, raftDir)
+}
+
 // openRaftV2Stores opens a Badger DB at <dir>/raft-v2/ and returns the three
 // v2 durable stores keyed under distinct prefixes. Caller is responsible for
 // closing db (returned for that purpose).

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -54,22 +57,52 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	// Construct the data-plane raft.Node here (between transport and meta-raft
-	// phases) — it is consumed by both PR 4 (RPC transport wiring) and PR 5
-	// (storage runtime). Bootstrap runs in non-join mode.
+	// Construct the data-plane raft node here (between transport and meta-raft
+	// phases) — consumed by both PR 4 (RPC transport wiring) and PR 5 (storage
+	// runtime). Bootstrap runs in non-join mode.
 	raftCfg := raft.DefaultConfig(state.nodeID, state.peers)
 	raftCfg.ManagedMode = cfg.BadgerManagedMode
 	raftCfg.LogGCInterval = cfg.RaftLogGCInterval
-	node := raft.NewNode(raftCfg, state.logStore)
-	if !cfg.JoinMode {
-		if err := node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
-			return fmt.Errorf("raft bootstrap: %w", err)
+
+	if cluster.IsV2Enabled("serveruntime") {
+		// M5 PR 26: GRAINFS_RAFT_V2=serveruntime — construct the v2 node
+		// behind the cluster.RaftNode interface. Durable LogStore +
+		// StableStore + SnapshotStore live in <raftDir>/raft-v2/ (sibling
+		// to the v1 raft/ directory; v1 and v2 on-disk schemas differ).
+		v2Node, v2Close, err := cluster.NewRaftV2NodeForServeruntime(raftCfg, state.raftDir)
+		if err != nil {
+			return fmt.Errorf("raft v2 init: %w", err)
 		}
+		state.AddCleanup(func() {
+			if v2Close != nil {
+				_ = v2Close()
+			}
+		})
+		if !cfg.JoinMode {
+			if err := v2Node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
+				return fmt.Errorf("raft v2 bootstrap: %w", err)
+			}
+		}
+		state.node = v2Node
+		// PR 26 scope deliberately stops here for v2: QUIC RPC inbound
+		// dispatch (raft.NewQUICRPCTransport) accesses v1-only
+		// HandleRequestVote / HandleAppendEntries etc. The parallel v2
+		// QUIC RPC bridge lands in PR 27. Without it, a multi-node v2
+		// cluster cannot exchange Raft RPCs — acceptable because the
+		// flag is opt-in and PR 28 (default-on) is gated on PR 27.
+		log.Warn().Msg("raft v2: skipping QUIC RPC transport wiring (deferred to PR 27); multi-node Raft RPCs will not flow")
+	} else {
+		node := raft.NewNode(raftCfg, state.logStore)
+		if !cfg.JoinMode {
+			if err := node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
+				return fmt.Errorf("raft bootstrap: %w", err)
+			}
+		}
+		state.node = node
+		rpcTransport := raft.NewQUICRPCTransport(state.quicTransport, node)
+		rpcTransport.SetTransport()
+		state.rpcTransport = rpcTransport
 	}
-	state.node = node
-	rpcTransport := raft.NewQUICRPCTransport(state.quicTransport, node)
-	rpcTransport.SetTransport()
-	state.rpcTransport = rpcTransport
 
 	// PR 4: meta-raft callback registration BEFORE Start.
 	if err := bootMetaRaftWiring(state); err != nil {
