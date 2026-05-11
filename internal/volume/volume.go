@@ -887,65 +887,13 @@ func (m *Manager) Rollback(name, snapID string) error {
 func (m *Manager) Clone(srcName, dstName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	srcVol, err := m.getVolUnlocked(srcName)
 	if err != nil {
 		return fmt.Errorf("source volume: %w", err)
 	}
-
-	if err := m.ensureBucket(); err != nil {
-		return fmt.Errorf("ensure bucket: %w", err)
-	}
-
-	// Fail if dst already exists
-	if _, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(dstName)); err == nil {
-		return fmt.Errorf("volume %q already exists", dstName)
-	}
-
-	srcLiveMap, err := m.getLiveMapUnlocked(srcName)
+	dstVol, err := m.snapStore.Clone(context.Background(), srcVol, dstName)
 	if err != nil {
-		return fmt.Errorf("load live_map: %w", err)
-	}
-
-	copier, hasCopier := m.backend.(storage.Copier)
-
-	doCopy := func(srcKey, dstKey string) error {
-		if hasCopier {
-			_, err := copier.CopyObject(volumeBucketName, srcKey, volumeBucketName, dstKey)
-			return err
-		}
-		return m.copyObjectFallback(volumeBucketName, srcKey, volumeBucketName, dstKey)
-	}
-
-	if len(srcLiveMap) > 0 {
-		// Case 1: source has a live_map — copy each physical block to default keys in dst
-		for blkNum, srcKey := range srcLiveMap {
-			dstKey := blockKey(dstName, blkNum)
-			if err := doCopy(srcKey, dstKey); err != nil {
-				return fmt.Errorf("clone block %d: %w", blkNum, err)
-			}
-		}
-	} else {
-		// Case 2: no live_map — enumerate default blk_N objects
-		if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(srcName), func(obj *storage.Object) error {
-			blkNum, ok := parseBlockNum(obj.Key)
-			if !ok {
-				return nil
-			}
-			dstKey := blockKey(dstName, blkNum)
-			return doCopy(obj.Key, dstKey)
-		}); err != nil {
-			return fmt.Errorf("clone blocks: %w", err)
-		}
-	}
-
-	// Create dst volume metadata (SnapshotCount=0, no live_map)
-	dstVol := &Volume{
-		Name:            dstName,
-		Size:            srcVol.Size,
-		BlockSize:       srcVol.BlockSize,
-		AllocatedBlocks: srcVol.AllocatedBlocks,
-		SnapshotCount:   0,
+		return err
 	}
 	data, err := marshalVolume(dstVol)
 	if err != nil {
@@ -954,9 +902,8 @@ func (m *Manager) Clone(srcName, dstName string) error {
 	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(dstName), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return fmt.Errorf("store dst volume meta: %w", err)
 	}
-
 	m.volumes[dstName] = dstVol
-	m.liveMaps[dstName] = nil // dst starts with no live_map
+	m.liveMaps[dstName] = nil
 	return nil
 }
 
