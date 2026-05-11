@@ -102,14 +102,15 @@ type SnapshotInfo struct {
 
 // Manager manages volumes on top of a storage.Backend.
 type Manager struct {
-	backend  storage.Backend
-	mu       sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장. lock-free actor 검토 — Manager는 메타·dedup·live_map 다중 자료구조의 cross-volume 원자성을 요구하고, 모든 read/write/snapshot operations이 통과하므로 channel-based actor는 핫패스 round-trip 비용 + 메타 RMW 시퀀싱 복잡도가 mutex보다 큼. 추후 sharded mutex 분리 검토 가능.
-	volumes  map[string]*Volume          // 인메모리 캐시
-	liveMaps map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
-	dedup    dedup.DedupIndex            // nil = dedup 비활성화
-	blocks   *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
-	opts     ManagerOptions
-	blkPool  *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
+	backend   storage.Backend
+	mu        sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장. lock-free actor 검토 — Manager는 메타·dedup·live_map 다중 자료구조의 cross-volume 원자성을 요구하고, 모든 read/write/snapshot operations이 통과하므로 channel-based actor는 핫패스 round-trip 비용 + 메타 RMW 시퀀싱 복잡도가 mutex보다 큼. 추후 sharded mutex 분리 검토 가능.
+	volumes   map[string]*Volume          // 인메모리 캐시
+	liveMaps  map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
+	dedup     dedup.DedupIndex            // nil = dedup 비활성화
+	blocks    *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
+	opts      ManagerOptions
+	blkPool   *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
+	snapStore SnapshotStore
 }
 
 // NewManager creates a new volume manager.
@@ -119,7 +120,7 @@ func NewManager(backend storage.Backend) *Manager {
 
 // NewManagerWithOptions creates a new volume manager with the given options.
 func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manager {
-	return &Manager{
+	m := &Manager{
 		backend:  backend,
 		volumes:  make(map[string]*Volume),
 		liveMaps: make(map[string]map[int64]string),
@@ -128,6 +129,8 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 		opts:     opts,
 		blkPool:  pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
 	}
+	m.snapStore = newS3SnapshotStore(m)
+	return m
 }
 
 // getBlkBuf returns a zeroed block buffer from the pool, or allocates one for non-default sizes.
@@ -808,69 +811,10 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	liveMap, err := m.getLiveMapUnlocked(name)
+	snapID, err := m.snapStore.CreateSnapshot(context.Background(), vol)
 	if err != nil {
-		return "", fmt.Errorf("load live_map: %w", err)
+		return "", err
 	}
-
-	snapID := uuid.Must(uuid.NewV7()).String()
-
-	// Build snapshot_map from current live state
-	snapMap := make(map[int64]string)
-	if len(liveMap) == 0 {
-		// No live_map: enumerate default block objects
-		if err := m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
-			blkNum, ok := parseBlockNum(obj.Key)
-			if ok {
-				snapMap[blkNum] = obj.Key
-			}
-			return nil
-		}); err != nil {
-			return "", fmt.Errorf("list blocks: %w", err)
-		}
-	} else {
-		for k, v := range liveMap {
-			snapMap[k] = v
-		}
-	}
-
-	// CopyObject each block into snapshot namespace
-	copier, hasCopier := m.backend.(storage.Copier)
-	for blkNum, srcKey := range snapMap {
-		dstKey := snapBlockKey(name, snapID, blkNum)
-		if hasCopier {
-			if _, err := copier.CopyObject(volumeBucketName, srcKey, volumeBucketName, dstKey); err != nil {
-				return "", fmt.Errorf("copy block %d to snapshot: %w", blkNum, err)
-			}
-		} else {
-			if err := m.copyObjectFallback(volumeBucketName, srcKey, volumeBucketName, dstKey); err != nil {
-				return "", fmt.Errorf("copy block %d to snapshot: %w", blkNum, err)
-			}
-		}
-		snapMap[blkNum] = dstKey
-	}
-
-	// Persist snapshot map
-	var mapBuf bytes.Buffer
-	if err := serializeLiveMap(snapMap, &mapBuf); err != nil {
-		return "", fmt.Errorf("serialize snapshot map: %w", err)
-	}
-	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, snapMapKey(name, snapID), &mapBuf, "text/plain"); err != nil {
-		return "", fmt.Errorf("store snapshot map: %w", err)
-	}
-
-	// Persist snapshot metadata
-	meta := snapshotMetaJSON{ID: snapID, CreatedAt: time.Now().UTC(), BlockCount: int64(len(snapMap))}
-	metaData, err := json.Marshal(meta)
-	if err != nil {
-		return "", fmt.Errorf("marshal snapshot meta: %w", err)
-	}
-	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, snapMetaKey(name, snapID), bytes.NewReader(metaData), "application/json"); err != nil {
-		return "", fmt.Errorf("store snapshot meta: %w", err)
-	}
-
-	// Increment snapshot_count and persist volume metadata
 	vol.SnapshotCount++
 	data, err := marshalVolume(vol)
 	if err != nil {
@@ -879,10 +823,6 @@ func (m *Manager) CreateSnapshot(name string) (string, error) {
 	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
 		return "", fmt.Errorf("persist volume meta: %w", err)
 	}
-
-	// Invalidate live_map cache so next operation reloads
-	delete(m.liveMaps, name)
-
 	return snapID, nil
 }
 
