@@ -35,6 +35,53 @@ var ErrCoordinatorNoRouter = errors.New("coordinator: router not configured")
 
 var ErrObjectIndexRequired = errors.New("coordinator: object index entry required")
 
+// dataGroupManagerLeaderProbe adapts *DataGroupManager to OpRouter's
+// dataGroupLeaderProbe interface — keeps raft node access details in
+// cluster_coordinator.go rather than leaking *DataGroupManager into the
+// new op_routing.go module.
+type dataGroupManagerLeaderProbe struct{ m *DataGroupManager }
+
+func (p dataGroupManagerLeaderProbe) GroupLeaderIsSelf(groupID string) bool {
+	if p.m == nil {
+		return false
+	}
+	dg := p.m.Get(groupID)
+	if dg == nil {
+		return false
+	}
+	b := dg.Backend()
+	if b == nil || b.RaftNode() == nil {
+		return false
+	}
+	return b.RaftNode().IsLeader()
+}
+
+// dataGroupManagerLocalBackend adapts *DataGroupManager to LocalExecution's
+// localBackendLookup interface.
+type dataGroupManagerLocalBackend struct{ m *DataGroupManager }
+
+func (a dataGroupManagerLocalBackend) Backend(groupID string) *GroupBackend {
+	if a.m == nil {
+		return nil
+	}
+	dg := a.m.Get(groupID)
+	if dg == nil {
+		return nil
+	}
+	return dg.Backend()
+}
+
+// metaObjectIndexAdapter exposes the meta-FSM's object-index methods as the
+// narrow objectIndexLookup interface that OpRouter consumes. Returns nil if
+// meta does not implement the index (test wiring); production meta-FSM
+// always does.
+func metaObjectIndexAdapter(meta ShardGroupSource) objectIndexLookup {
+	if src, ok := meta.(objectIndexLookup); ok {
+		return src
+	}
+	return nil
+}
+
 // ErrForwardBodySizeMismatch is returned when a forwarded data-plane reply
 // reports success but the returned metadata size does not match the body bytes
 // that crossed the wire. Treating this as success can commit an empty object
@@ -63,6 +110,9 @@ type ClusterCoordinator struct {
 	addr        NodeAddressBook
 	ecConfig    ECConfig
 	indexWriter objectIndexProposer
+
+	opRouter  *OpRouter
+	localExec *LocalExecution
 
 	maxBody int64
 }
@@ -94,7 +144,7 @@ func NewClusterCoordinator(
 	meta ShardGroupSource,
 	selfID string,
 ) *ClusterCoordinator {
-	return &ClusterCoordinator{
+	c := &ClusterCoordinator{
 		base:    base,
 		groups:  groups,
 		router:  router,
@@ -102,12 +152,15 @@ func NewClusterCoordinator(
 		selfID:  selfID,
 		maxBody: DefaultMaxForwardBodyBytes,
 	}
+	c.rebuild()
+	return c
 }
 
 // WithForwardSender attaches the QUIC dialer used to send 0x08 forward calls
 // to peer nodes. Returns the receiver for builder-style chaining in serve.go.
 func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordinator {
 	c.forward = s
+	c.rebuild()
 	return c
 }
 
@@ -115,6 +168,7 @@ func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordin
 // nodeID PeerIDs into dialable QUIC addresses for runtime forwarding.
 func (c *ClusterCoordinator) WithNodeAddressResolver(book NodeAddressBook) *ClusterCoordinator {
 	c.addr = book
+	c.rebuild()
 	return c
 }
 
@@ -126,17 +180,38 @@ func (c *ClusterCoordinator) WithSelfPeerAlias(id string) *ClusterCoordinator {
 		return c
 	}
 	c.selfAliases = append(c.selfAliases, id)
+	c.rebuild()
 	return c
 }
 
 func (c *ClusterCoordinator) WithECConfig(cfg ECConfig) *ClusterCoordinator {
 	c.ecConfig = cfg
+	c.rebuild()
 	return c
 }
 
 func (c *ClusterCoordinator) WithObjectIndexProposer(p objectIndexProposer) *ClusterCoordinator {
 	c.indexWriter = p
+	c.rebuild()
 	return c
+}
+
+// rebuild constructs the embedded OpRouter and LocalExecution from the
+// current dependency state. Called from every builder method and from
+// NewClusterCoordinator. Keeping the modules embedded rather than passed
+// per-call avoids per-request allocations on the hot path.
+func (c *ClusterCoordinator) rebuild() {
+	c.opRouter = NewOpRouter(
+		c.router,
+		c.meta,
+		metaObjectIndexAdapter(c.meta),
+		c.addr,
+		dataGroupManagerLeaderProbe{m: c.groups},
+		c.ecConfig,
+		c.selfID,
+		c.selfAliases,
+	)
+	c.localExec = NewLocalExecution(dataGroupManagerLocalBackend{m: c.groups})
 }
 
 func (c *ClusterCoordinator) matchSelfPeer(id string) bool {
