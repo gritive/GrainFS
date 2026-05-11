@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -296,11 +298,51 @@ func (b *badgerIndex) SnapshotAbort(vol, snapID string) ([]string, error) {
 }
 
 func (b *badgerIndex) SnapshotIter(vol, snapID string, fn func(blkNum int64, canonical string) error) error {
-	return errNotImpl("SnapshotIter")
+	prefix := snapBlockPrefixKey(vol, snapID)
+	return b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := item.Key()
+			suffix := key[len(prefix):]
+			if len(suffix) < 12 {
+				continue
+			}
+			blkNum, err := strconv.ParseInt(string(suffix[:12]), 10, 64)
+			if err != nil {
+				return err
+			}
+			var canon string
+			if err := item.Value(func(v []byte) error { canon = string(v); return nil }); err != nil {
+				return err
+			}
+			if err := fn(blkNum, canon); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (b *badgerIndex) SnapshotReadBlock(vol, snapID string, blkNum int64) (string, bool, error) {
-	return "", false, errNotImpl("SnapshotReadBlock")
+	k := snapBlockKey(vol, snapID, blkNum)
+	var canon string
+	found := false
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(k)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+		return item.Value(func(v []byte) error { canon = string(v); return nil })
+	})
+	return canon, found, err
 }
 
 func (b *badgerIndex) SnapshotDelete(vol, snapID string) ([]string, error) {
@@ -361,14 +403,86 @@ func (b *badgerIndex) SnapshotClone(srcVol, dstVol string) error {
 	return errNotImpl("SnapshotClone")
 }
 
+// IterLiveBlocks walks vd:b:{vol}:* under a single Badger MVCC view (R1).
+// Used by badgerSnapshotStore.CreateSnapshot to enumerate live blocks
+// without scanning vol.Size/vol.BlockSize linearly.
 func (b *badgerIndex) IterLiveBlocks(vol string, fn func(blkNum int64, canonical string) error) error {
-	return errNotImpl("IterLiveBlocks")
+	prefix := blockBadgerPrefix(vol)
+	return b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := item.Key()
+			suffix := key[len(prefix):]
+			if len(suffix) < 12 {
+				continue
+			}
+			blkNum, err := strconv.ParseInt(string(suffix[:12]), 10, 64)
+			if err != nil {
+				return err
+			}
+			var canon string
+			if err := item.Value(func(v []byte) error { canon = string(v); return nil }); err != nil {
+				return err
+			}
+			if err := fn(blkNum, canon); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
+// SnapshotPutMeta writes vd:sm:{vol}:{meta.SnapID} = binary-encoded meta.
+// Called independently of SnapshotCommit when meta needs to be updated
+// (e.g., post-commit refinement). Returns error if meta.SnapID is empty.
 func (b *badgerIndex) SnapshotPutMeta(vol string, meta SnapshotMeta) error {
-	return errNotImpl("SnapshotPutMeta")
+	if meta.SnapID == "" {
+		return fmt.Errorf("dedup: SnapshotPutMeta requires non-empty SnapID")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return retry(maxRetries, func() error {
+		return b.db.Update(func(txn *badger.Txn) error {
+			return b.setSnapMeta(txn, vol, meta)
+		})
+	})
 }
 
+// SnapshotList returns all committed snapshots for vol, ordered by CreatedAt asc.
 func (b *badgerIndex) SnapshotList(vol string) ([]SnapshotMeta, error) {
-	return nil, errNotImpl("SnapshotList")
+	prefix := snapMetaPrefixKey(vol)
+	var out []SnapshotMeta
+	err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key())
+			snapID := key[len(prefix):]
+			var val []byte
+			if err := item.Value(func(v []byte) error {
+				val = append([]byte{}, v...)
+				return nil
+			}); err != nil {
+				return err
+			}
+			m, err := decodeSnapMeta(snapID, val)
+			if err != nil {
+				return err
+			}
+			out = append(out, m)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
 }

@@ -1,6 +1,7 @@
 package dedup
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -116,6 +117,112 @@ func TestSnapshotDeleteReleasesCanonical(t *testing.T) {
 		require.ErrorIs(t, err, badger.ErrKeyNotFound)
 		return nil
 	}))
+}
+
+func TestSnapshotIterAndReadBlock(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+	require.NoError(t, idx.SnapshotBegin("v", "s1"))
+	entries := []SnapshotBlockEntry{{0, "k0"}, {2, "k2"}, {5, "k5"}}
+	// Seed canonicals so IncRef succeeds.
+	for _, e := range entries {
+		var h [32]byte
+		h[0] = byte(e.BlkNum + 1)
+		_, err := idx.WriteBlock("seed", e.BlkNum, h, e.Canonical)
+		require.NoError(t, err)
+	}
+	require.NoError(t, idx.SnapshotAppendChunk("v", "s1", entries))
+	require.NoError(t, idx.SnapshotCommit("v", "s1", testMeta("s1")))
+
+	var got []SnapshotBlockEntry
+	require.NoError(t, idx.SnapshotIter("v", "s1", func(b int64, c string) error {
+		got = append(got, SnapshotBlockEntry{b, c})
+		return nil
+	}))
+	require.Equal(t, entries, got) // sorted by blkNum (zero-padded key order)
+
+	canon, found, err := idx.SnapshotReadBlock("v", "s1", 2)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "k2", canon)
+
+	_, found, err = idx.SnapshotReadBlock("v", "s1", 99)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestIterLiveBlocks(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+	// Write 3 blocks.
+	for i := int64(0); i < 3; i++ {
+		var h [32]byte
+		h[0] = byte(i + 1)
+		_, err := idx.WriteBlock("v", i, h, fmt.Sprintf("k%d", i))
+		require.NoError(t, err)
+	}
+
+	var got []SnapshotBlockEntry
+	require.NoError(t, idx.IterLiveBlocks("v", func(blk int64, canon string) error {
+		got = append(got, SnapshotBlockEntry{blk, canon})
+		return nil
+	}))
+	require.Equal(t, []SnapshotBlockEntry{
+		{0, "k0"}, {1, "k1"}, {2, "k2"},
+	}, got)
+
+	// Other volumes are skipped.
+	var h [32]byte
+	h[0] = 99
+	_, err := idx.WriteBlock("other", 0, h, "kOther")
+	require.NoError(t, err)
+
+	got = got[:0]
+	require.NoError(t, idx.IterLiveBlocks("v", func(blk int64, canon string) error {
+		got = append(got, SnapshotBlockEntry{blk, canon})
+		return nil
+	}))
+	require.Len(t, got, 3) // unchanged — "other" volume not iterated
+}
+
+func TestSnapshotListAndPutMeta(t *testing.T) {
+	idx := NewBadgerIndex(newTestBadger(t)).(*badgerIndex)
+
+	// SnapshotList on empty vol → nil
+	got, err := idx.SnapshotList("v")
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	// Commit two snapshots, the second one later.
+	require.NoError(t, idx.SnapshotBegin("v", "s-early"))
+	require.NoError(t, idx.SnapshotCommit("v", "s-early", SnapshotMeta{
+		SnapID: "s-early", CreatedAt: time.Unix(1000, 0).UTC(), BlockCount: 1,
+	}))
+	require.NoError(t, idx.SnapshotBegin("v", "s-late"))
+	require.NoError(t, idx.SnapshotCommit("v", "s-late", SnapshotMeta{
+		SnapID: "s-late", CreatedAt: time.Unix(2000, 0).UTC(), BlockCount: 2,
+	}))
+
+	got, err = idx.SnapshotList("v")
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	// Ordered by CreatedAt ascending.
+	require.Equal(t, "s-early", got[0].SnapID)
+	require.Equal(t, "s-late", got[1].SnapID)
+	require.Equal(t, int64(1), got[0].BlockCount)
+	require.Equal(t, int64(2), got[1].BlockCount)
+	require.True(t, got[0].CreatedAt.Equal(time.Unix(1000, 0).UTC()))
+
+	// SnapshotPutMeta updates meta of an existing snapshot.
+	require.NoError(t, idx.SnapshotPutMeta("v", SnapshotMeta{
+		SnapID: "s-late", CreatedAt: time.Unix(2000, 0).UTC(), BlockCount: 42,
+	}))
+	got, err = idx.SnapshotList("v")
+	require.NoError(t, err)
+	require.Equal(t, int64(42), got[1].BlockCount)
+
+	// Other volume meta is isolated.
+	got, err = idx.SnapshotList("other")
+	require.NoError(t, err)
+	require.Empty(t, got)
 }
 
 // R6: invariant test
