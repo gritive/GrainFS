@@ -518,7 +518,9 @@ func (n *Node) restoreFromStore() {
 // becomes leader. The command must be recognised and ignored by the FSM (no-op).
 // Call before Start().
 func (n *Node) SetNoOpCommand(cmd []byte) {
+	n.mu.Lock()
 	n.noOpCmd = cmd
+	n.mu.Unlock()
 }
 
 // Bootstrap initializes the cluster for the first time by saving a bootstrap
@@ -1382,11 +1384,16 @@ func (n *Node) runLeader() {
 
 	// Propose a no-op in the new term so advanceCommitIndex can commit entries
 	// from previous terms (Raft §8: leader completeness via no-op).
-	if len(n.noOpCmd) > 0 {
+	// Snapshot noOpCmd under mu: SetNoOpCommand may be called concurrently
+	// when the backend is constructed after Start() (e.g., in tests).
+	n.mu.Lock()
+	noOpCmd := n.noOpCmd
+	n.mu.Unlock()
+	if len(noOpCmd) > 0 {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, _ = n.ProposeWait(ctx, n.noOpCmd)
+			_, _ = n.ProposeWait(ctx, noOpCmd)
 		}()
 	}
 
