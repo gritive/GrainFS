@@ -97,7 +97,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 					dataDir:  cfg.DataDir,
 					raftAddr: state.raftAddr,
 					cancel:   state.cancel,
-					state:    state,
+					nodes:    state.metaRaft,
 				}
 				h.POST("/v1/cluster/join", joinH.Handle)
 			}

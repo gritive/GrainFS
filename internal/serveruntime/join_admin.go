@@ -10,7 +10,15 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/cluster"
 )
+
+// clusterNodes is a minimal interface for querying the cluster membership.
+// Satisfied by *cluster.MetaRaft in production; a stub in tests.
+type clusterNodes interface {
+	Nodes() []cluster.MetaNodeEntry
+}
 
 // JoinHandler handles POST /v1/cluster/join requests from the `grainfs join`
 // CLI. If the node is already a multi-node cluster member the request is a
@@ -20,7 +28,7 @@ type JoinHandler struct {
 	dataDir  string
 	raftAddr string
 	cancel   context.CancelFunc
-	state    *bootState
+	nodes    clusterNodes
 }
 
 // JoinRequest is the body for POST /v1/cluster/join.
@@ -47,7 +55,7 @@ func (h *JoinHandler) Handle(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Already a multi-node cluster member → no-op.
-	nodes := h.state.metaRaft.Nodes()
+	nodes := h.nodes.Nodes()
 	if len(nodes) > 1 {
 		c.JSON(200, JoinResponse{Status: "already_member", Message: "node is already part of a multi-node cluster"})
 		return
