@@ -24,7 +24,7 @@ import (
 //
 //	state.streamRouter, state.dgMgr, state.clusterRouter, state.shardSvc,
 //	state.distBackend, state.nodeID, state.raftAddr, state.peers,
-//	state.effectiveEC, state.cfg.JoinMode.
+//	state.effectiveEC, state.joinMode.
 //
 // Outputs: state.wal, state.walDir, state.forwardSender, state.forwardReceiver,
 //
@@ -151,8 +151,8 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 
-	if state.cfg.JoinMode {
-		if err := PerformMetaJoin(ctx, quicTransport, peers, state.nodeID, state.raftAddr); err != nil {
+	if state.joinMode {
+		if err := PerformMetaJoin(ctx, quicTransport, []string{state.joinAddr}, state.nodeID, state.raftAddr); err != nil {
 			return err
 		}
 		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {

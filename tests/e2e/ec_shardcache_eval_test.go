@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -80,16 +79,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 	}
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
@@ -106,7 +95,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
 			"--encryption-key-file", encKeyFile,
 			"--measure-read-amp", // ← the whole point of this test
@@ -130,14 +118,22 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			}
 		}
 	})
-	for i := 0; i < numNodes; i++ {
+
+	// Start seed node first, then let followers join via .join-pending.
+	procs[0] = startNode(0)
+	waitForPort(t, httpPorts[0], 60*time.Second)
+	time.Sleep(2 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+
+	for i := 1; i < numNodes; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
 		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
 	}
 	for i := 0; i < numNodes; i++ {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
-
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
@@ -360,16 +356,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 	}
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
@@ -386,7 +372,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
 			"--encryption-key-file", encKeyFile,
 			"--block-cache-size=0", // isolate: only EC shard cache active
@@ -412,14 +397,22 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			}
 		}
 	})
-	for i := 0; i < numNodes; i++ {
+
+	// Start seed node first, then let followers join via .join-pending.
+	procs[0] = startNode(0)
+	waitForPort(t, httpPorts[0], 60*time.Second)
+	time.Sleep(2 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+
+	for i := 1; i < numNodes; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
 		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
 	}
 	for i := 0; i < numNodes; i++ {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
-
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()

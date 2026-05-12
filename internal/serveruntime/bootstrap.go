@@ -9,19 +9,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// FilterEmpty drops empty entries produced by strings.Split. Used during
-// runCluster bootstrap to clean up the comma-split --peers list so empty
-// strings don't waste a gossip tick each.
-func FilterEmpty(ss []string) []string {
-	out := ss[:0]
-	for _, s := range ss {
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // ShouldCreateDefaultBucketOnStartup reports whether the singleton path
 // should auto-create the "default" bucket. In cluster mode this is a
 // cluster-wide metadata operation and must be driven by an explicit

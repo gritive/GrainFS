@@ -123,10 +123,23 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 
 	t.Cleanup(c.Stop)
 
-	// Static peers require every node to know the full peer list. Start the
-	// complete peer set before waiting for HTTP so startup QUIC dials do not
-	// spend the port-wait budget on intentionally absent peers.
-	for i := 0; i < numNodes; i++ {
+	// Start node 0 as seed leader, then let followers join via .join-pending.
+	c.procs[0] = c.startNode(0)
+	if err := waitForPortsParallelErr(c.httpPorts[:1], 60*time.Second); err != nil {
+		c.Stop()
+		return nil, err
+	}
+	time.Sleep(2 * time.Second)
+
+	// Bootstrap admin SA on the seed node before followers join.
+	c.accessKey, c.secretKey = bootstrapAdminViaUDSAny(c.t, c.dataDirs[:1], 60*time.Second)
+
+	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
+	for i := 1; i < numNodes; i++ {
+		if err := writeNodeJoinPending(c.dataDirs[i], seedRaftAddr); err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("write join-pending node %d: %w", i, err)
+		}
 		c.procs[i] = c.startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -135,9 +148,6 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 		return nil, err
 	}
 	time.Sleep(4 * time.Second)
-
-	// Bootstrap the admin SA via the leader's UDS once quorum exists.
-	c.accessKey, c.secretKey = bootstrapAdminViaUDSAny(c.t, c.dataDirs, 60*time.Second)
 
 	// Wait for at least one node to be writable (leader elected).
 	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -184,18 +194,11 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 			_ = os.Remove(logFile.Name())
 		}
 	})
-	var peers []string
-	for j := range c.raftPorts {
-		if j != i {
-			peers = append(peers, fmt.Sprintf("127.0.0.1:%d", c.raftPorts[j]))
-		}
-	}
 	cmd := exec.Command(binary, "serve",
 		"--data", c.dataDirs[i],
 		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
-		"--peers", strings.Join(peers, ","),
 		"--cluster-key", c.clusterKey,
 		"--encryption-key-file", c.encKeyFile,
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),

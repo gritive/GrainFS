@@ -26,49 +26,6 @@ func TestBootValidateConfig_AutogeneratesNodeID(t *testing.T) {
 	assert.Equal(t, filepath.Join(dir, "raft"), state.raftDir)
 }
 
-// TestBootValidateConfig_JoinWithoutRaftAddr — invariant from run.go that
-// --join requires --raft-addr; bootValidateConfig surfaces the error before
-// any I/O so cmd/serve fails fast.
-func TestBootValidateConfig_JoinWithoutRaftAddr(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", JoinMode: true, ClusterKey: "x"})
-
-	err := bootValidateConfig(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--raft-addr is required when --join is set")
-}
-
-// TestBootValidateConfig_JoinAndPeersConflict — --join and --peers cannot
-// coexist; bootValidateConfig rejects.
-func TestBootValidateConfig_JoinAndPeersConflict(t *testing.T) {
-	state := newBootState(Config{
-		DataDir:    t.TempDir(),
-		NodeID:     "n1",
-		RaftAddr:   "127.0.0.1:9000",
-		JoinMode:   true,
-		Peers:      []string{"p1"},
-		ClusterKey: "x",
-	})
-
-	err := bootValidateConfig(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--join cannot be used with --peers")
-}
-
-// TestBootValidateConfig_PeersWithoutRaftAddr — explicit cluster mode with
-// peers requires raftAddr. bootValidateConfig rejects with a helpful message.
-func TestBootValidateConfig_PeersWithoutRaftAddr(t *testing.T) {
-	state := newBootState(Config{
-		DataDir:    t.TempDir(),
-		NodeID:     "n1",
-		Peers:      []string{"p1"},
-		ClusterKey: "x",
-	})
-
-	err := bootValidateConfig(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--raft-addr is required when --peers is set")
-}
-
 // TestBootAutoMigrate_NoOpOnFreshDir — empty dataDir means no legacy meta
 // to migrate; bootAutoMigrate returns silently.
 func TestBootAutoMigrate_NoOpOnFreshDir(t *testing.T) {
@@ -266,4 +223,57 @@ func TestBootOpenSharedFSMDB_IgnoresLegacyPerGroupDir(t *testing.T) {
 // gains a forced-failure injection point.
 func TestBootMetaDB_PreflightRejectsCorruptDB(t *testing.T) {
 	t.Skip("preflight rejection requires DB corruption that cannot be safely simulated in unit; covered by integration tests")
+}
+
+func TestBootValidateConfig_JoinPendingFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".join-pending"), []byte("127.0.0.1:9999"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta_raft"), 0o755))
+
+	state := newBootState(Config{
+		DataDir:    dir,
+		NodeID:     "n1",
+		RaftAddr:   "127.0.0.1:8301",
+		ClusterKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+	require.NoError(t, bootValidateConfig(state))
+
+	assert.True(t, state.joinMode)
+	assert.Equal(t, "127.0.0.1:9999", state.joinAddr)
+	_, err := os.Stat(filepath.Join(dir, "meta_raft"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(dir, "meta_raft.pre-join-backup"))
+	assert.NoError(t, err)
+}
+
+func TestBootValidateConfig_JoinPendingFile_EmptyPeer(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".join-pending"), []byte("   "), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta_raft"), 0o755))
+
+	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+
+	assert.False(t, state.joinMode)
+	_, err := os.Stat(filepath.Join(dir, "meta_raft"))
+	assert.NoError(t, err)
+}
+
+func TestBootValidateConfig_NoJoinPending_SoloBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+	assert.False(t, state.joinMode)
+}
+
+func TestBootValidateConfig_ExistingRaftState_Reconnect(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta_raft"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta_raft", "MANIFEST"), []byte("data"), 0o600))
+
+	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+	assert.False(t, state.joinMode)
+	_, err := os.Stat(filepath.Join(dir, "meta_raft"))
+	assert.NoError(t, err)
 }

@@ -19,6 +19,9 @@ type ClusterMode string
 const (
 	ClusterModeDynamicJoin ClusterMode = "dynamic-join"
 	ClusterModeStaticPeers ClusterMode = "static-peers"
+
+	// joinPendingFile mirrors serveruntime.JoinPendingFile to avoid an import cycle.
+	joinPendingFile = ".join-pending"
 )
 
 type e2eClusterOptions struct {
@@ -216,12 +219,17 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 	time.Sleep(2 * time.Second)
 
 	// Bootstrap admin SA on the seed node before any followers join.
-	// Node 0 is the leader at this point in dynamic-join mode, so the
-	// /v1/iam/sa propose succeeds against its admin UDS.
+	// Node 0 is the leader at this point, so the /v1/iam/sa propose succeeds.
 	ak, sk := bootstrapAdminViaUDSAny(c.t, c.dataDirs[:1], 30*time.Second)
 	c.accessKey, c.secretKey = ak, sk
 
+	// Followers: write .join-pending before starting so they boot directly in
+	// join mode without a separate restart step.
 	for i := 1; i < len(c.procs); i++ {
+		if err := c.writeJoinPending(i, c.raftAddr(0)); err != nil {
+			c.Stop()
+			return nil, err
+		}
 		c.procs[i] = c.startNode(c.t, i)
 		if err := waitForPortsParallelErr(c.httpPorts[i:i+1], 90*time.Second); err != nil {
 			c.Stop()
@@ -229,27 +237,25 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 		}
 	}
 	c.leaderIdx = 0
-	// Disable auto-snapshot cluster-wide for deterministic e2e behavior.
-	// PATCH is Raft-replicated so calling it on the leader's UDS suffices.
-	// Tests that need auto-snapshot enable it explicitly.
 	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
 	return c, nil
 }
 
 func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
-	initialNodes := len(c.procs)
-	if len(c.procs) > 1 {
-		initialNodes = len(c.procs)/2 + 1
-	}
-	for i := 0; i < initialNodes; i++ {
-		c.procs[i] = c.startNode(c.t, i)
-		time.Sleep(150 * time.Millisecond)
-	}
-	if err := waitForPortsParallelErr(c.httpPorts[:initialNodes], 60*time.Second); err != nil {
+	// Bootstrap node 0 as the seed leader.
+	c.procs[0] = c.startNode(c.t, 0)
+	if err := waitForPortsParallelErr(c.httpPorts[:1], 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}
-	for i := initialNodes; i < len(c.procs); i++ {
+	time.Sleep(2 * time.Second)
+
+	// Followers: write .join-pending before starting so they boot in join mode.
+	for i := 1; i < len(c.procs); i++ {
+		if err := c.writeJoinPending(i, c.raftAddr(0)); err != nil {
+			c.Stop()
+			return nil, err
+		}
 		c.procs[i] = c.startNode(c.t, i)
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -259,9 +265,7 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 	}
 	time.Sleep(4 * time.Second)
 
-	// Bootstrap admin SA via UDS once the cluster has quorum. Try every
-	// node — only the leader's propose succeeds; others return an error
-	// and the helper retries the next data dir.
+	// Bootstrap admin SA via UDS once the cluster has quorum.
 	ak, sk := bootstrapAdminViaUDSAny(c.t, c.dataDirs, 60*time.Second)
 	c.accessKey, c.secretKey = ak, sk
 
@@ -283,9 +287,6 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		return nil, fmt.Errorf("no writable endpoint found within timeout: %w", err)
 	}
 	c.leaderIdx = leaderIdx
-	// Disable auto-snapshot cluster-wide for deterministic e2e behavior.
-	// PATCH is Raft-replicated so calling it on the leader's UDS suffices.
-	// Tests that need auto-snapshot enable it explicitly.
 	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
 	return c, nil
 }
@@ -319,12 +320,6 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 	if c.pprofPorts[i] != 0 {
 		args = append(args, "--pprof-port", fmt.Sprintf("%d", c.pprofPorts[i]))
 	}
-	if c.mode == ClusterModeDynamicJoin && i > 0 {
-		args = append(args, "--join", c.raftAddr(0))
-	}
-	if c.mode == ClusterModeStaticPeers {
-		args = append(args, "--peers", c.staticPeersFor(i))
-	}
 	args = append(args, c.extraArgs...)
 
 	cmd := exec.Command(getBinary(), args...)
@@ -342,9 +337,6 @@ func (c *e2eCluster) scrubIntervalArg() string {
 }
 
 func (c *e2eCluster) nodeID(i int) string {
-	if c.mode == ClusterModeStaticPeers {
-		return c.raftAddr(i)
-	}
 	return fmt.Sprintf("n%d", i+1)
 }
 
@@ -352,14 +344,20 @@ func (c *e2eCluster) raftAddr(i int) string {
 	return fmt.Sprintf("127.0.0.1:%d", c.raftPorts[i])
 }
 
-func (c *e2eCluster) staticPeersFor(i int) string {
-	peers := make([]string, 0, len(c.raftPorts)-1)
-	for j := range c.raftPorts {
-		if j != i {
-			peers = append(peers, c.raftAddr(j))
-		}
-	}
-	return strings.Join(peers, ",")
+// writeJoinPending writes the .join-pending sentinel into node i's data dir
+// so that grainfs serve boots directly in join mode without a separate restart.
+func (c *e2eCluster) writeJoinPending(i int, seedRaftAddr string) error {
+	return writeNodeJoinPending(c.dataDirs[i], seedRaftAddr)
+}
+
+// writeNodeJoinPending writes the .join-pending sentinel into dataDir so that
+// grainfs serve boots directly in join mode. Use before starting non-seed nodes
+// in tests that manage processes directly (outside e2eCluster).
+func writeNodeJoinPending(dataDir, seedRaftAddr string) error {
+	return os.WriteFile(
+		fmt.Sprintf("%s/%s", dataDir, joinPendingFile),
+		[]byte(seedRaftAddr), 0o600,
+	)
 }
 
 func (c *e2eCluster) Stop() {

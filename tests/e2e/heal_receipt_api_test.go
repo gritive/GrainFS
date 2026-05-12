@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -64,16 +63,6 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 	httpURL := func(i int) string {
 		return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i])
 	}
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 
 	dataDirs := make([]string, 3)
 	for i := range dataDirs {
@@ -103,15 +92,12 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 	seedReceipt(t, dataDirs[2], clusterKey, idCOld, baseTime.Add(10*time.Minute), bucketName, objectKey)
 	seedReceipt(t, dataDirs[2], clusterKey, idCHot, baseTime.Add(1*time.Hour), bucketName, objectKey)
 
-	// Spawn 3 nodes sharing cluster-key and S3 credentials.
-	procs := make([]*exec.Cmd, 3)
-	for i := 0; i < 3; i++ {
+	startNode := func(i int) *exec.Cmd {
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
 			"--encryption-key-file", encKeyFile,
 			"--heal-receipt-window=1",
@@ -124,8 +110,12 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		require.NoError(t, cmd.Start(), "start node %d", i)
-		procs[i] = cmd
+		return cmd
 	}
+
+	// Spawn 3 nodes: seed first, then followers via .join-pending.
+	procs := make([]*exec.Cmd, 3)
+	procs[0] = startNode(0)
 	t.Cleanup(func() {
 		for _, p := range procs {
 			if p != nil && p.Process != nil {
@@ -135,14 +125,22 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 		}
 	})
 
+	waitForPort(t, httpPorts[0], 15*time.Second)
+	time.Sleep(2 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+
+	for i := 1; i < 3; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
+	}
 	for i := range procs {
 		waitForPort(t, httpPorts[i], 15*time.Second)
 	}
 	// Give the gossip loop (1s interval) a few ticks so node B learns which
 	// peer holds which receipt id.
 	time.Sleep(4 * time.Second)
-
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	// Wait until each node's local IAM verifier accepts the bootstrap key.
 	// The propose returns once the leader applied; followers apply via raft

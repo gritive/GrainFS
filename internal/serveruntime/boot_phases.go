@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
@@ -18,6 +19,36 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
+// JoinPendingFile is the sentinel written by the UDS join handler and read at
+// startup to perform a pending cluster join. Its presence means the solo Raft
+// state must be wiped so the node can bootstrap cleanly in join mode.
+// Exported so tests in cmd/grainfs can write it without duplicating the path.
+const JoinPendingFile = ".join-pending"
+
+// wipeSoloRaftState renames meta_raft/, raft/, and shared-raft-log/ to
+// *.pre-join-backup/ so the join-mode boot starts with no existing Raft state.
+// Backups are removed by Run after a successful join. On failure the caller
+// should not proceed with join mode.
+func wipeSoloRaftState(dataDir string) error {
+	for _, dir := range []string{"meta_raft", "raft", "shared-raft-log"} {
+		src := filepath.Join(dataDir, dir)
+		dst := src + ".pre-join-backup"
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue // nothing to back up
+		}
+		if _, err := os.Stat(dst); err == nil {
+			// Backup from a previous failed join attempt exists; overwrite it
+			// only now that we have a fresh src to replace it with.
+			log.Warn().Str("backup", dst).Msg("overwriting pre-join backup from prior attempt")
+			_ = os.RemoveAll(dst)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return fmt.Errorf("backup %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
 // bootValidateConfig validates flag combinations, resolves nodeID, computes
 // clusterMode, defaults raftAddr for solo mode, and stages metaDir/raftDir
 // paths. No I/O on DB or network; the only side effect is GenerateNodeID
@@ -26,7 +57,6 @@ func bootValidateConfig(state *bootState) error {
 	cfg := state.cfg
 	state.nodeID = cfg.NodeID
 	state.raftAddr = cfg.RaftAddr
-	state.peers = cfg.Peers
 
 	if state.nodeID == "" {
 		var err error
@@ -37,10 +67,24 @@ func bootValidateConfig(state *bootState) error {
 		log.Info().Str("component", "server").Str("node_id", state.nodeID).Msg("auto-generated node ID")
 	}
 
-	// D6/D7: --cluster-key is required when running in actual cluster mode
-	// (peers > 0 || join != ""). Solo runs through this same function but
-	// does not require a cluster key — Run handles both modes.
-	state.clusterMode = len(state.peers) > 0 || cfg.JoinMode
+	// File-based join detection: written by `grainfs join` UDS handler.
+	// Takes precedence over any other bootstrap logic.
+	pendingFile := filepath.Join(cfg.DataDir, JoinPendingFile)
+	if rawPeer, err := os.ReadFile(pendingFile); err == nil {
+		peerAddr := strings.TrimSpace(string(rawPeer))
+		if peerAddr != "" {
+			if err := wipeSoloRaftState(cfg.DataDir); err != nil {
+				return fmt.Errorf("wipe solo state for join: %w", err)
+			}
+			state.joinAddr = peerAddr
+			state.joinMode = true
+			state.peers = []string{peerAddr}
+			log.Info().Str("peer", peerAddr).Msg("join-pending: entering join mode")
+		}
+	}
+
+	// --cluster-key is required in join mode.
+	state.clusterMode = state.joinMode
 	if state.clusterMode {
 		if err := transport.ValidateClusterKey(cfg.ClusterKey); err != nil {
 			if errors.Is(err, transport.ErrEmptyClusterKey) {
@@ -49,28 +93,13 @@ func bootValidateConfig(state *bootState) error {
 			log.Warn().Err(err).Msg("--cluster-key is below recommended length")
 		}
 	}
-	if cfg.JoinMode {
-		if len(state.peers) > 0 {
-			return fmt.Errorf("--join cannot be used with --peers")
-		}
-		if state.raftAddr == "" {
-			return fmt.Errorf("--raft-addr is required when --join is set")
-		}
-		state.peers = []string{cfg.JoinAddr}
-	}
 
-	// When no peers are configured, we boot a singleton Raft node on a
-	// loopback port so a single-machine deployment still goes through the
-	// unified storage path (versioning, scrubber, lifecycle, WAL all work).
-	// Operators who later want to expand the cluster pick a concrete
-	// --raft-addr and --peers list; the loopback default is only for the
-	// "just start it" path.
+	// Solo mode: let the kernel pick a free loopback port so multiple instances
+	// (dev, tests) coexist without collisions.
 	if state.raftAddr == "" {
-		if len(state.peers) > 0 {
-			return fmt.Errorf("--raft-addr is required when --peers is set")
+		if state.clusterMode {
+			return fmt.Errorf("--raft-addr is required in cluster mode")
 		}
-		// Singleton: let the kernel pick a free port so multiple instances
-		// (dev, tests) coexist without collisions. No peer will ever reach it.
 		state.raftAddr = "127.0.0.1:0"
 	}
 
