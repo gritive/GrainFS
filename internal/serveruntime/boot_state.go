@@ -1,6 +1,8 @@
 package serveruntime
 
 import (
+	"context"
+
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
@@ -35,6 +37,7 @@ import (
 type bootState struct {
 	cfg      Config
 	cleanups []func()
+	cancel   context.CancelFunc // set by Run; triggers graceful shutdown
 
 	// Resolved config (populated by bootValidateConfig).
 	nodeID      string

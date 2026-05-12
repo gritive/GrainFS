@@ -23,7 +23,10 @@ import (
 // 2026-05-08-serveruntime-boot-decomposition.md): phase functions populate
 // state and register cleanup. Cleanup runs LIFO at function exit.
 func Run(ctx context.Context, cfg Config) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	state := newBootState(cfg)
+	state.cancel = cancel
 	defer state.Cleanup()
 
 	// PR 2: config + storage open.
