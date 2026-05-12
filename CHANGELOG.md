@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.166.0] - 2026-05-13 — feat(cluster): forward operation atomicity — leader handles index commit
+
+follower가 storage write를 leader로 포워딩한 후 index commit을 follower에서 별도로 수행하던 방식을 제거.
+이제 ForwardReceiver가 leader 측에서 storage write + index commit을 원자적으로 처리하므로,
+두 단계 사이 크래시로 인한 고아 shard 생성 가능성이 없어짐.
+
+### Changed
+- `ForwardReceiver`: `PutObject`, `PutObjectStream`, `CompleteMultipartUpload`, `DeleteObject` (delete-marker), `DeleteObjectVersion` 핸들러에서 리더 측 `ProposeObjectIndex`/`ProposeDeleteObjectIndex` 호출 추가.
+- `ClusterCoordinator`: 포워딩 후 중복으로 수행하던 index commit 5곳 제거.
+- `bootWALAndForwarders`: `indexProposer`를 공유 로컬 변수로 추출하여 `ForwardingObjectIndexProposer`와 `ForwardReceiver` 양쪽에 전달.
+
+### Added
+- `internal/cluster/forward_receiver_test.go`: 5개 포워딩 경로의 index-propose 검증 테스트 10개.
+- `internal/cluster/backend_test.go`, `cluster_coordinator_test.go`: 판별 테스트 각 1개.
+
 ## [0.0.165.0] - 2026-05-13 — feat(reshard): separate ring-reshard-interval from reshard-interval
 
 ring reshard(EC 오브젝트 ring topology 마이그레이션)를 EC reshard(N×→EC 변환/프로파일 업그레이드)에서 분리.
