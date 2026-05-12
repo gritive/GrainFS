@@ -132,3 +132,44 @@ func TestForwardReceiver_HandlePutObject_ProposeError_ReturnsInternal(t *testing
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
 }
+
+func TestForwardReceiver_HandlePutObjectStream_CommitsObjectIndex(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	proposer := &recordingObjectIndexProposer{}
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(proposer)
+
+	args := buildPutObjectArgs("bucket", "streamkey", "text/plain", nil)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	body := bytes.NewReader([]byte("streamed body"))
+
+	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, body)
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
+	require.Len(t, proposer.entries, 1, "expected exactly one index commit")
+	require.Equal(t, "bucket", proposer.entries[0].Bucket)
+	require.Equal(t, "streamkey", proposer.entries[0].Key)
+	require.NotEmpty(t, proposer.entries[0].VersionID)
+	require.Equal(t, "group-1", proposer.entries[0].PlacementGroupID)
+}
+
+func TestForwardReceiver_HandlePutObjectStream_ProposeError_ReturnsInternal(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(&failingObjectIndexProposer{})
+
+	args := buildPutObjectArgs("bucket", "streamkey", "text/plain", nil)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+
+	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, bytes.NewReader([]byte("body")))
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
+}

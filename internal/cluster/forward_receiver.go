@@ -275,17 +275,20 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
 	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
-	obj, err := dg.Backend().PutObject(
-		ctx,
-		string(pa.Bucket()),
-		string(pa.Key()),
-		body,
-		string(pa.ContentType()),
-	)
+	bucket := string(pa.Bucket())
+	key := string(pa.Key())
+	obj, err := dg.Backend().PutObject(ctx, bucket, key, body, string(pa.ContentType()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, string(pa.Bucket()))}
+	if r.indexProposer != nil {
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
