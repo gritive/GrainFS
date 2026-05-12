@@ -76,9 +76,38 @@ type Options struct {
 	Clock func() time.Time
 }
 
+// AlertCfgReader is the slice of cluster-config that the webhook dispatcher
+// reads on every Send so URL/secret rotations land without a restart.
+// *cluster.ClusterConfig satisfies this contract.
+type AlertCfgReader interface {
+	AlertWebhook() string
+	AlertWebhookSecretWrapped() []byte
+}
+
+// SecretDecrypter unwraps the cluster-config secret blob produced by
+// EncryptWithAAD. *encrypt.Encryptor satisfies this.
+type SecretDecrypter interface {
+	DecryptWithAAD(ciphertext, aad []byte) ([]byte, error)
+}
+
 // Dispatcher delivers Alerts to a single webhook URL.
+//
+// Two modes:
+//   - Static (NewDispatcher): URL + Options.Secret are fixed at construction.
+//     Used by tests and any caller that does not run under cluster-config.
+//   - Live (NewDispatcherWithConfig): URL + wrapped secret are read from an
+//     AlertCfgReader on every Send so rotations via cluster-config PATCH take
+//     effect without restart. secretAAD must be supplied for unwrap.
 type Dispatcher struct {
-	url       string
+	// Static config (used when cfg == nil).
+	url string
+
+	// Live config (used when cfg != nil); cfg.AlertWebhook() returning "" makes
+	// Send a no-op exactly like the empty static URL case.
+	cfg       AlertCfgReader
+	enc       SecretDecrypter
+	secretAAD []byte
+
 	opts      Options
 	onFailure FailureCallback
 
@@ -103,9 +132,31 @@ type Dispatcher struct {
 	inFlight map[string]struct{}
 }
 
-// NewDispatcher constructs a Dispatcher. An empty url turns Send into a
-// no-op so operators who never set --alert-webhook are not punished.
+// NewDispatcher constructs a static-config Dispatcher. An empty url turns Send
+// into a no-op so operators who never set --alert-webhook are not punished.
 func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatcher {
+	d := newDispatcher(opts, onFailure)
+	d.url = url
+	return d
+}
+
+// NewDispatcherWithConfig constructs a Dispatcher that reads URL + wrapped
+// secret from cfg on every Send. enc unwraps the secret using secretAAD; if
+// enc is nil or the wrapped secret is empty, no signature header is written
+// (matches the empty-secret behaviour of the static constructor). cfg.AlertWebhook()
+// returning "" makes Send a no-op so cluster-config can disable alerts live.
+//
+// Options.Secret is ignored in this mode — the live wrapped secret takes
+// precedence so a stale flag value cannot shadow a rotated cluster-config secret.
+func NewDispatcherWithConfig(cfg AlertCfgReader, enc SecretDecrypter, secretAAD []byte, opts Options, onFailure FailureCallback) *Dispatcher {
+	d := newDispatcher(opts, onFailure)
+	d.cfg = cfg
+	d.enc = enc
+	d.secretAAD = secretAAD
+	return d
+}
+
+func newDispatcher(opts Options, onFailure FailureCallback) *Dispatcher {
 	if opts.DedupWindow == 0 {
 		opts.DedupWindow = 10 * time.Minute
 	}
@@ -125,7 +176,6 @@ func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatc
 		opts.Clock = time.Now
 	}
 	return &Dispatcher{
-		url:       url,
 		opts:      opts,
 		onFailure: onFailure,
 		lastSent:  map[string]time.Time{},
@@ -140,7 +190,11 @@ func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatc
 // Send is synchronous so the caller controls scheduling. Wrap in a goroutine
 // when calling from a hot path.
 func (d *Dispatcher) Send(a Alert) error {
-	if d.url == "" {
+	// Resolve URL + secret at fire time so cluster-config rotations land
+	// without a restart. Static-mode dispatchers fall through with the
+	// constructor-supplied url and Options.Secret.
+	url, secret := d.resolveLive()
+	if url == "" {
 		return nil // operator declined to configure webhooks
 	}
 	if a.Time.IsZero() {
@@ -167,7 +221,7 @@ func (d *Dispatcher) Send(a Alert) error {
 		if attempt > 0 {
 			time.Sleep(d.backoff(attempt))
 		}
-		lastErr = d.deliver(body)
+		lastErr = d.deliver(url, secret, body)
 		if lastErr == nil {
 			return nil
 		}
@@ -220,15 +274,39 @@ func dedupKey(a Alert) string {
 	return a.Type + "|" + a.Resource
 }
 
+// resolveLive returns the URL + signing secret to use for the next delivery.
+// In live (cluster-config) mode the values come from the AlertCfgReader and
+// SecretDecrypter on every call so a config PATCH between sends lands without
+// a restart. In static mode the constructor values are returned.
+//
+// A wrapped-secret decrypt failure is non-fatal: we log nothing (callers
+// already see delivery succeed/fail metrics) and proceed with an empty secret
+// so the webhook still fires unsigned rather than getting silently dropped.
+func (d *Dispatcher) resolveLive() (string, string) {
+	if d.cfg == nil {
+		return d.url, d.opts.Secret
+	}
+	url := d.cfg.AlertWebhook()
+	wrapped := d.cfg.AlertWebhookSecretWrapped()
+	if len(wrapped) == 0 || d.enc == nil {
+		return url, ""
+	}
+	secret, err := d.enc.DecryptWithAAD(wrapped, d.secretAAD)
+	if err != nil {
+		return url, ""
+	}
+	return url, string(secret)
+}
+
 // deliver does one POST. 2xx → success. Anything else is a retryable error.
-func (d *Dispatcher) deliver(body []byte) error {
-	req, err := http.NewRequest(http.MethodPost, d.url, bytes.NewReader(body))
+func (d *Dispatcher) deliver(url, secret string, body []byte) error {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if d.opts.Secret != "" {
-		req.Header.Set("X-GrainFS-Signature", sign(body, d.opts.Secret))
+	if secret != "" {
+		req.Header.Set("X-GrainFS-Signature", sign(body, secret))
 	}
 
 	resp, err := d.opts.HTTPClient.Do(req)

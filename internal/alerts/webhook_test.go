@@ -193,6 +193,108 @@ func TestDispatcher_NoURL_NoOp(t *testing.T) {
 	assert.NoError(t, d.Send(alerts.Alert{Type: "t", Severity: alerts.SeverityCritical, Message: "m"}))
 }
 
+// fakeAlertCfg satisfies alerts.AlertCfgReader with mutable URL + wrapped
+// secret slots for the hot-reload tests.
+type fakeAlertCfg struct {
+	mu      sync.Mutex
+	url     string
+	wrapped []byte
+}
+
+func (f *fakeAlertCfg) AlertWebhook() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.url
+}
+
+func (f *fakeAlertCfg) AlertWebhookSecretWrapped() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.wrapped
+}
+
+func (f *fakeAlertCfg) setURL(s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.url = s
+}
+
+// fakeDecrypter returns plaintext unchanged so tests can pin a known secret
+// without spinning up a real Encryptor.
+type fakeDecrypter struct {
+	plaintext []byte
+	err       error
+}
+
+func (f *fakeDecrypter) DecryptWithAAD(_, _ []byte) ([]byte, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.plaintext, nil
+}
+
+// TestWebhook_HotReload_URL locks in the cluster-config contract: a dispatcher
+// built with an empty AlertWebhook() must be a no-op, but as soon as the
+// config rotates in a URL, the very next Send must hit that URL. No restart,
+// no reconstruction.
+func TestWebhook_HotReload_URL(t *testing.T) {
+	srv, captured, mu := stubReceiver(t, http.StatusOK)
+	cfg := &fakeAlertCfg{}
+
+	d := alerts.NewDispatcherWithConfig(cfg, nil, nil, alerts.Options{}, nil)
+
+	// Empty URL → Send is a no-op, no request reaches the receiver.
+	require.NoError(t, d.Send(alerts.Alert{Type: "t", Severity: alerts.SeverityWarning, Message: "m1"}))
+	mu.Lock()
+	require.Empty(t, *captured, "empty-URL config must produce zero deliveries")
+	mu.Unlock()
+
+	// Operator PATCHes cluster-config; the next Send must observe the new URL.
+	cfg.setURL(srv.URL)
+	require.NoError(t, d.Send(alerts.Alert{Type: "t2", Severity: alerts.SeverityWarning, Resource: "r", Message: "m2"}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, *captured, 1, "post-PATCH Send must deliver to the live URL")
+}
+
+// TestWebhook_HotReload_Secret locks in that the live wrapped secret is read
+// (and unwrapped via the SecretDecrypter) on each Send so a secret rotation
+// lands without a restart.
+func TestWebhook_HotReload_Secret(t *testing.T) {
+	srv, captured, mu := stubReceiver(t, http.StatusOK)
+	cfg := &fakeAlertCfg{url: srv.URL}
+	dec := &fakeDecrypter{plaintext: []byte("rotated-secret")}
+
+	d := alerts.NewDispatcherWithConfig(cfg, dec, []byte("aad"), alerts.Options{}, nil)
+
+	// No wrapped secret yet → no signature header (matches static empty-secret).
+	require.NoError(t, d.Send(alerts.Alert{Type: "t1", Severity: alerts.SeverityWarning, Resource: "r1", Message: "m"}))
+
+	// Operator PATCHes the wrapped secret. Decrypter returns "rotated-secret"
+	// and the next Send must sign with it.
+	cfg.mu.Lock()
+	cfg.wrapped = []byte("ciphertext-blob")
+	cfg.mu.Unlock()
+
+	require.NoError(t, d.Send(alerts.Alert{Type: "t2", Severity: alerts.SeverityWarning, Resource: "r2", Message: "m"}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, *captured, 2)
+
+	assert.Empty(t, (*captured)[0].headers.Get("X-Grainfs-Signature"),
+		"pre-rotation send must be unsigned")
+
+	gotSig := (*captured)[1].headers.Get("X-Grainfs-Signature")
+	require.NotEmpty(t, gotSig, "post-rotation send must be signed")
+
+	mac := hmac.New(sha256.New, []byte("rotated-secret"))
+	mac.Write((*captured)[1].body)
+	want := hex.EncodeToString(mac.Sum(nil))
+	assert.Equal(t, want, gotSig, "signature must use the rotated secret")
+}
+
 // TestDispatcher_ConcurrentSameKeyOnlyOneDelivered regression-tests the dedup
 // race that existed before the inFlight set landed: shouldSuppress → unlock →
 // HTTP retry → recordSent left a wide window where a second goroutine calling

@@ -47,7 +47,26 @@ import (
 func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
-	state.clusterAlerts = server.NewAlertsState(cfg.AlertWebhook, alerts.Options{Secret: cfg.AlertSecret}, alerts.DegradedConfig{})
+	// Route webhook URL + secret through ClusterConfig so a PATCH that
+	// rotates either lands without a serve restart. The serveruntime.Config
+	// flag-derived fields (AlertWebhook, AlertSecret) are bootstrap seeds for
+	// ClusterConfig and are scheduled for removal in a follow-up task.
+	//
+	// Pass the encryptor as a typed nil-safe interface — assigning a typed
+	// (*encrypt.Encryptor)(nil) directly to an interface parameter would
+	// produce a non-nil interface holding a nil pointer, defeating the
+	// `enc == nil` guard inside the dispatcher.
+	var alertDecrypter alerts.SecretDecrypter
+	if cfg.Encryptor != nil {
+		alertDecrypter = cfg.Encryptor
+	}
+	state.clusterAlerts = server.NewAlertsStateWithConfig(
+		state.metaRaft.FSM().ClusterConfig(),
+		alertDecrypter,
+		cluster.ClusterConfigAlertSecretAAD,
+		alerts.Options{},
+		alerts.DegradedConfig{},
+	)
 
 	// Wire predictive disk warnings into the collector now that clusterAlerts
 	// exists. Thresholds are taken as fractions on the flag (more natural for
