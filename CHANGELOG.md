@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.170.0] - 2026-05-13 — refactor: remove --nbd-volume-size flag and NBD auto-volume creation
+
+### Removed
+- `--nbd-volume-size` CLI flag: NBD 서버 시작 시 "default" 볼륨을 자동으로 생성하던 동작을 제거. 오퍼레이터가 NBD 서버 기동 전 볼륨을 명시적으로 생성해야 함. 볼륨 없이 클라이언트 연결 시 오류를 명확히 반환.
+- `EnsureDefaultNBDVolume` 함수 및 `Config.NBDVolumeSize` 필드 제거.
+
 ## [0.0.169.0] - 2026-05-13 — feat: always-cluster mode + solo data guard for grainfs join
 
 ### Changed
