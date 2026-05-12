@@ -41,7 +41,7 @@ type JoinHandler struct {
 // JoinRequest is the body for POST /v1/cluster/join.
 type JoinRequest struct {
 	PeerAddr string `json:"peer_addr"`
-	Force    bool   `json:"force,omitempty"`
+	Force    bool   `json:"force"`
 }
 
 // JoinResponse is the response body for POST /v1/cluster/join.
