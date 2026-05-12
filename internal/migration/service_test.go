@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -152,4 +153,104 @@ func (n *noopDst) PutObject(_ context.Context, _, _ string, body io.Reader, _ st
 }
 func (n *noopDst) GetObject(_ context.Context, _, _ string) (io.ReadCloser, *storage.Object, error) {
 	return nil, nil, storage.ErrObjectNotFound
+}
+
+// storeWritingProposer captures ProposeJobDone calls and writes the final job
+// state back to the store so the Worker sees the job as no longer StatusRunning.
+type storeWritingProposer struct {
+	mu    sync.Mutex
+	done  []jobDoneCall
+	store *JobStore
+}
+
+type jobDoneCall struct {
+	bucket         string
+	copied, errors int64
+}
+
+func (p *storeWritingProposer) ProposeJobStart(_ context.Context, _ string) error { return nil }
+func (p *storeWritingProposer) ProposeJobDone(_ context.Context, bucket string, copied, errors int64) error {
+	p.mu.Lock()
+	p.done = append(p.done, jobDoneCall{bucket, copied, errors})
+	p.mu.Unlock()
+	return p.store.SaveJob(&JobState{Bucket: bucket, Status: StatusComplete, Copied: copied, Errors: errors})
+}
+func (p *storeWritingProposer) ProposeJobFailed(_ context.Context, _, _ string, _ int64) error {
+	return nil
+}
+func (p *storeWritingProposer) doneCalls() []jobDoneCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]jobDoneCall{}, p.done...)
+}
+
+// fakeSource returns one page with ["key1"] on the first call, then empty pages.
+type fakeSource struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *fakeSource) ListBuckets() ([]string, error) { return nil, nil }
+func (s *fakeSource) ListObjectsPage(_, _ string) ([]string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.calls == 0 {
+		s.calls++
+		return []string{"key1"}, "cursor1", nil
+	}
+	return nil, "", nil
+}
+func (s *fakeSource) GetObject(_, _ string) (io.ReadCloser, *storage.Object, error) {
+	return io.NopCloser(strings.NewReader("data")), nil, nil
+}
+
+// fakeDst accepts all operations.
+type fakeDst struct{}
+
+func (fakeDst) CreateBucket(_ context.Context, _ string) error { return nil }
+func (fakeDst) PutObject(_ context.Context, _, _ string, r io.Reader, _ string) (*storage.Object, error) {
+	_, _ = io.Copy(io.Discard, r)
+	return &storage.Object{}, nil
+}
+func (fakeDst) GetObject(_ context.Context, _, _ string) (io.ReadCloser, *storage.Object, error) {
+	return nil, nil, storage.ErrObjectNotFound
+}
+
+func TestService_SubmitJob_ThenWorkerProcesses(t *testing.T) {
+	db := newTestDB(t)
+	store := NewJobStore(db)
+
+	// Seed a running job.
+	require.NoError(t, store.SaveJob(&JobState{
+		Bucket: "test-bucket",
+		Status: StatusRunning,
+	}))
+
+	prop := &storeWritingProposer{store: store}
+	lead := &fakeLeadership{leader: true}
+	src := &fakeSource{}
+	dst := fakeDst{}
+
+	svc := NewService(store, prop, lead, src, dst, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+
+	// Give worker time to start, then submit (trigger).
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, svc.SubmitJob(ctx, "test-bucket"))
+
+	// Wait for ProposeJobDone to be called.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls := prop.doneCalls()
+		if len(calls) > 0 {
+			assert.Equal(t, "test-bucket", calls[0].bucket)
+			assert.Equal(t, int64(1), calls[0].copied)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("ProposeJobDone not called within timeout")
 }
