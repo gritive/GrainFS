@@ -25,11 +25,11 @@ func NewJobStore(db *badger.DB) *JobStore {
 }
 
 func (s *JobStore) jobKey(bucket string) []byte {
-	return []byte("migration:job:" + bucket)
+	return append(append([]byte{}, jobPrefix...), []byte(bucket)...)
 }
 
 func (s *JobStore) cursorKey(bucket string) []byte {
-	return []byte("migration:cursor:" + bucket)
+	return append(append([]byte{}, cursorPrefix...), []byte(bucket)...)
 }
 
 // GetCursor returns the last saved S3 pagination cursor for bucket, or "" if none.
