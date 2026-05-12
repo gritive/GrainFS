@@ -254,16 +254,17 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 // syncCB updates (or creates) per-peer circuit breakers from the latest gossip stats.
 // Must be called from the actor goroutine only.
 func (p *BalancerProposer) syncCB(peers []NodeStats) {
+	thresholdPct := p.clusterCfg.BalancerCBThreshold() * 100
 	for _, ns := range peers {
 		if ns.NodeID == p.nodeID {
 			continue // skip self
 		}
 		cb, ok := p.cbs[ns.NodeID]
 		if !ok {
-			cb = newCircuitBreaker(p.clusterCfg.BalancerCBThreshold())
+			cb = newCircuitBreaker()
 			p.cbs[ns.NodeID] = cb
 		}
-		cb.update(ns)
+		cb.update(ns, thresholdPct)
 		if !cb.allow() {
 			metrics.BalancerCBOpen.WithLabelValues(ns.NodeID).Set(1)
 		} else {
