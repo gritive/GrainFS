@@ -77,5 +77,12 @@ func init() {
 	clusterCmd.AddCommand(clusterHealthCmd())
 	clusterCmd.AddCommand(clusterPlacementCmd())
 	clusterCmd.AddCommand(clusterBalancerCmd)
+
+	// Task 12: read-only cluster config inspection.
+	clusterConfigShowCmd.Flags().Bool("json", false, "raw JSON output")
+	clusterConfigGetCmd.Flags().Bool("json", false, "raw JSON output")
+	clusterConfigCmd.AddCommand(clusterConfigShowCmd, clusterConfigGetCmd, clusterConfigDiffCmd)
+	clusterCmd.AddCommand(clusterConfigCmd)
+
 	rootCmd.AddCommand(clusterCmd)
 }
