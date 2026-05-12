@@ -5,6 +5,8 @@ import (
 	"crypto/md5"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,14 +109,72 @@ func TestECObjectWriter_WriteSingleLocalReaderAddsHeaderAndHash(t *testing.T) {
 	}
 }
 
+func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "node-a",
+		shards: shards,
+	}
+	dir := t.TempDir()
+	spoolPath := filepath.Join(dir, "object")
+	if err := os.WriteFile(spoolPath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write spool: %v", err)
+	}
+	sp := &spooledObject{Path: spoolPath, Size: 5, ETag: "etag"}
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 1, ParityShards: 0},
+		Placement:        []string{"node-b"},
+		RingVersion:      7,
+		ContentType:      "text/plain",
+	}
+
+	result, err := writer.writeSpooledShards(context.Background(), plan, dir, sp)
+	if err != nil {
+		t.Fatalf("writeSpooledShards error = %v", err)
+	}
+
+	if got, want := len(shards.bufferedWrites), 1; got != want {
+		t.Fatalf("buffered remote writes = %d, want %d", got, want)
+	}
+	write := shards.bufferedWrites[0]
+	if got, want := write.peer, "node-b"; got != want {
+		t.Fatalf("peer = %q, want %q", got, want)
+	}
+	if got, want := write.key, "object/v1"; got != want {
+		t.Fatalf("key = %q, want %q", got, want)
+	}
+	if got, want := result.Size, int64(5); got != want {
+		t.Fatalf("result size = %d, want %d", got, want)
+	}
+	if got, want := result.ETag, "etag"; got != want {
+		t.Fatalf("result ETag = %q, want %q", got, want)
+	}
+	if got, want := result.ECData, uint8(1); got != want {
+		t.Fatalf("ECData = %d, want %d", got, want)
+	}
+}
+
 type fakeECObjectWriterShards struct {
 	writeShardErr     map[string]error
 	localWrites       []fakeECObjectWriterLocalWrite
+	bufferedWrites    []fakeECObjectWriterBufferedWrite
 	deleteLocalCalls  []string
 	deleteRemoteCalls []string
 }
 
 type fakeECObjectWriterLocalWrite struct {
+	bucket   string
+	key      string
+	shardIdx int
+	body     []byte
+}
+
+type fakeECObjectWriterBufferedWrite struct {
+	peer     string
 	bucket   string
 	key      string
 	shardIdx int
@@ -129,6 +189,20 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, sha
 		shardIdx: shardIdx,
 		body:     data,
 	})
+	return nil
+}
+
+func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
+	f.bufferedWrites = append(f.bufferedWrites, fakeECObjectWriterBufferedWrite{
+		peer:     peer,
+		bucket:   bucket,
+		key:      key,
+		shardIdx: shardIdx,
+		body:     append([]byte(nil), data...),
+	})
+	if err := f.writeShardErr[peer]; err != nil {
+		return err
+	}
 	return nil
 }
 
