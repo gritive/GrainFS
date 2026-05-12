@@ -192,6 +192,14 @@ func addJoinedNodeToLegacyDataRaft(ctx context.Context, node legacyDataRaftMembe
 	if addr == "" {
 		return fmt.Errorf("add joined node to legacy data raft: node %q not found in meta membership", nodeID)
 	}
+	// Legacy group-0 data raft uses voter IDs directly as QUIC dial targets;
+	// v2 AddVoterCtx currently ignores its addr parameter. Only auto-extend
+	// this raft when the node ID is already the dialable raft address. Stable
+	// node IDs continue through the per-group/meta paths until this legacy
+	// transport can resolve node IDs via the address book.
+	if nodeID != addr {
+		return nil
+	}
 	for _, peer := range node.Peers() {
 		if peer == nodeID || peer == addr {
 			return nil
