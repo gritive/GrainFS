@@ -24,6 +24,7 @@ Example:
 
 func runJoin(cmd *cobra.Command, args []string) error {
 	peerAddr := args[0]
+	force, _ := cmd.Flags().GetBool("force")
 	client, err := adminClientFromCmd(cmd)
 	if err != nil {
 		return err
@@ -33,7 +34,8 @@ func runJoin(cmd *cobra.Command, args []string) error {
 
 	req := struct {
 		PeerAddr string `json:"peer_addr"`
-	}{PeerAddr: peerAddr}
+		Force    bool   `json:"force,omitempty"`
+	}{PeerAddr: peerAddr, Force: force}
 	var resp struct {
 		Status  string `json:"status"`
 		Message string `json:"message"`
@@ -51,5 +53,6 @@ func runJoin(cmd *cobra.Command, args []string) error {
 func init() {
 	registerAdminEndpointFlag(joinCmd)
 	registerAdminTimeoutFlag(joinCmd)
+	joinCmd.Flags().Bool("force", false, "force join even if solo node has user data (data will be discarded)")
 	rootCmd.AddCommand(joinCmd)
 }
