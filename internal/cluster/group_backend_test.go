@@ -94,6 +94,23 @@ func TestGroupBackend_PutGetRoundTrip(t *testing.T) {
 	require.True(t, bytes.Equal(body, got), "round-trip body mismatch: got %q want %q", got, body)
 }
 
+func TestGroupBackend_InternalPutObjectReadableViaReadAt(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-internal-readat")
+
+	const bucket = "__grainfs_volumes"
+	require.NoError(t, gb.CreateBucket(context.Background(), bucket))
+
+	body := []byte("nbd-block-payload")
+	_, err := gb.PutObject(context.Background(), bucket, "__vol/default/blk_000000000000", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+
+	buf := make([]byte, len(body))
+	n, err := gb.ReadAt(context.Background(), bucket, "__vol/default/blk_000000000000", 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, len(body), n)
+	require.Equal(t, body, buf)
+}
+
 func TestGroupBackend_ListBuckets(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-l")
 	for _, b := range []string{"a", "b", "c"} {

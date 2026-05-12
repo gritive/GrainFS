@@ -1403,11 +1403,13 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	}
 	if storage.IsInternalBucket(bucket) {
 		f, err := os.Open(b.internalObjectPath(bucket, key).path)
-		if err != nil {
+		if err == nil {
+			defer f.Close()
+			return f.ReadAt(buf, offset)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
 			return 0, err
 		}
-		defer f.Close()
-		return f.ReadAt(buf, offset)
 	}
 
 	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
@@ -2559,7 +2561,19 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		// most recent version. Falls back to the legacy single-key read when
 		// no lat: pointer exists (e.g., legacy replay).
 		if storage.IsInternalBucket(bucket) {
+			versionID := ""
 			metaKeyBytes := b.internalObjectPath(bucket, key).metaKey
+			if latItem, lerr := txn.Get(b.ks().LatestKey(bucket, key)); lerr == nil {
+				_ = latItem.Value(func(v []byte) error {
+					versionID = string(v)
+					return nil
+				})
+				if versionID != "" {
+					metaKeyBytes = b.ks().ObjectMetaKeyV(bucket, key, versionID)
+				}
+			} else if lerr != badger.ErrKeyNotFound {
+				return lerr
+			}
 			item, err := txn.Get(metaKeyBytes)
 			if err == badger.ErrKeyNotFound {
 				return storage.ErrObjectNotFound
@@ -2567,7 +2581,10 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 			if err != nil {
 				return err
 			}
-			return decodeMeta(item, "current")
+			if versionID == "" {
+				versionID = "current"
+			}
+			return decodeMeta(item, versionID)
 		}
 
 		metaKeyBytes := b.ks().ObjectMetaKey(bucket, key)
