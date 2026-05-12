@@ -66,10 +66,6 @@ type Config struct {
 	HealReceiptGossipInterval time.Duration
 	HealReceiptWindow         int
 
-	// Snapshots (object PITR)
-	SnapInterval time.Duration
-	SnapRetain   int
-
 	// Lifecycle / dedup / cache
 	LifecycleInterval time.Duration
 	DedupEnabled      bool

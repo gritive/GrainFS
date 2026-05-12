@@ -29,7 +29,7 @@ import (
 //
 //	state.roleRegistry, state.startupDecisions, state.cfg.DataDir,
 //	state.peers, state.cfg.RaftAddrExplicit, state.cfg.JoinMode,
-//	state.cfg.SnapInterval/SnapRetain, state.walDir, state.nodeID,
+//	state.walDir, state.nodeID,
 //	state.raftAddr, state.addr from cfg, state.cfg.FlagsSnapshot.
 //
 // Outputs: state.backend, state.recoveryReadOnly, state.diskCollector.
@@ -102,7 +102,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.
-	if err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, cfg.SnapInterval, cfg.SnapRetain, 30*time.Second); err != nil {
+	if err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), 30*time.Second); err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}
 
