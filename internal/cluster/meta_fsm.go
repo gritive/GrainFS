@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -214,6 +215,12 @@ type MetaFSM struct {
 	// apply goroutine via applyClusterConfigPatch / Restore. Consumers read
 	// lock-free via atomic.Pointer.
 	clusterCfg *ClusterConfig
+
+	// encryptor is used to gate cluster-config patches that carry a wrapped
+	// alert-webhook secret. nil = --no-encryption mode; such patches are
+	// rejected at apply time (see applyClusterConfigPatch). Wired via
+	// SetEncryptor before the raft log starts replaying.
+	encryptor *encrypt.Encryptor
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -248,6 +255,19 @@ func (f *MetaFSM) SetIAM(store *iam.Store, applier *iam.Applier) {
 
 // IAMStore returns the IAM Store for read access (auth checks, bootstrap shim).
 func (f *MetaFSM) IAMStore() *iam.Store { return f.iamStore }
+
+// SetEncryptor wires the cluster-wide encryptor used to gate cluster-config
+// patches carrying wrapped secrets. Must be called before the raft log starts
+// replaying. nil = --no-encryption mode; cluster-config patches with a wrapped
+// secret will be rejected at apply.
+func (f *MetaFSM) SetEncryptor(e *encrypt.Encryptor) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.encryptor = e
+}
+
+// Encryptor returns the registered encryptor (nil in --no-encryption mode).
+func (f *MetaFSM) Encryptor() *encrypt.Encryptor { return f.encryptor }
 
 // SetLifecycle wires the lifecycle store into the MetaFSM. Must be called
 // before raft Start so apply does not race with replay.

@@ -20,6 +20,13 @@ func (f *MetaFSM) applyClusterConfigPatch(data []byte) error {
 		return fmt.Errorf("meta_fsm: ClusterConfigPatch: %w", err)
 	}
 
+	// Reject wrapped-secret patches when no encryptor is registered
+	// (--no-encryption mode). The handler (Task 10) maps this error to HTTP
+	// 403 by matching the literal "encryption disabled" substring.
+	if len(p.AlertWebhookSecretWrapped) > 0 && f.encryptor == nil {
+		return fmt.Errorf("cluster-config alert-webhook-secret rejected: encryption disabled on this node (--no-encryption)")
+	}
+
 	current := f.clusterCfg
 	if p.ExpectedRev != 0 && current.Rev() != p.ExpectedRev {
 		return fmt.Errorf("cluster config CAS mismatch: expected rev %d, current %d: %w",

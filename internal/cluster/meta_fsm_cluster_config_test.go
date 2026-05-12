@@ -85,8 +85,31 @@ func TestMetaFSM_Apply_ClusterConfigPatch_ResetKeys(t *testing.T) {
 	require.Equal(t, uint64(2), f.ClusterConfig().Rev())
 }
 
+// TestMetaFSM_Apply_ClusterConfigPatch_RejectsSecretWithoutEncryptor verifies
+// that a patch carrying a wrapped webhook secret is rejected when the FSM has
+// no encryptor (e.g. --no-encryption mode). The error must mention
+// "encryption disabled" so the HTTP handler (Task 10) can map it to 403.
+func TestMetaFSM_Apply_ClusterConfigPatch_RejectsSecretWithoutEncryptor(t *testing.T) {
+	f := NewMetaFSM()
+	// f.encryptor stays nil (no-encryption mode)
+
+	patch := ClusterConfigPatch{
+		AlertWebhook:              ptrString("https://hooks.example/x"),
+		AlertWebhookSecretWrapped: []byte{0x01, 0x02, 0x03}, // pretending wrapped
+	}
+	err := f.applyCmd(buildClusterConfigPatchCmd(t, patch))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "encryption disabled")
+
+	// FSM unchanged — rev still 0, no webhook set.
+	cfg := f.ClusterConfig()
+	require.Equal(t, uint64(0), cfg.Rev())
+	require.Equal(t, "", cfg.AlertWebhook())
+}
+
 func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
 	src := NewMetaFSM()
+	src.SetEncryptor(newIAMTestEncryptor(t)) // gate for AlertWebhookSecretWrapped
 	require.NoError(t, src.applyCmd(buildClusterConfigPatchCmd(t, ClusterConfigPatch{
 		BalancerImbalanceTriggerPct: ptrFloat(33.0),
 		AlertWebhook:                ptrString("https://hooks.example/sr"),
