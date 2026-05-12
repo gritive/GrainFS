@@ -2,47 +2,19 @@ package volumeadmin
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
-// Error is the typed error returned by Client and Run* on non-2xx responses
-// from the admin server. Status mirrors HTTP; Code mirrors the admin error
-// JSON envelope; Details is the raw JSON-decoded detail map.
-type Error struct {
-	Code    string         `json:"code"`
-	Message string         `json:"error"`
-	Details map[string]any `json:"details,omitempty"`
-	Status  int            `json:"-"`
+// Error is the typed error returned on non-2xx admin responses.
+// Aliased to adminapi.Error so transport-level handling is shared with
+// clusteradmin while volumeadmin keeps endpoint-specific Detail views.
+type Error = adminapi.Error
 
-	// cause carries the wrapped transport-level error (e.g. context.Canceled)
-	// so errors.Is / errors.As can still see through the typed envelope.
-	cause error `json:"-"`
-}
-
-// Error implements error. Returns Message if set, otherwise Code.
-func (e *Error) Error() string {
-	if e.Message != "" {
-		return e.Message
-	}
-	return e.Code
-}
-
-// Unwrap exposes a wrapped underlying error so callers can use errors.Is /
-// errors.As to inspect e.g. context.Canceled / context.DeadlineExceeded
-// while still receiving a typed *Error envelope.
-func (e *Error) Unwrap() error { return e.cause }
-
-// IsCode reports whether err is a *Error with the given code. Convenience
-// over errors.As when callers only need the Code branch.
-func IsCode(err error, code string) bool {
-	var e *Error
-	if !errors.As(err, &e) {
-		return false
-	}
-	return e.Code == code
-}
+// IsCode reports whether err is a *Error with the given code.
+func IsCode(err error, code string) bool { return adminapi.IsCode(err, code) }
 
 // DeleteConflictDetails is the typed view of `details` on a 409 conflict from
 // DELETE /v1/volumes/<name> (no --force, snapshots present).
@@ -62,7 +34,7 @@ type DeleteRecentEntry struct {
 
 // AsDeleteConflict returns typed details if e is a delete-conflict error.
 // Best-effort: returns nil if the JSON shape doesn't match.
-func (e *Error) AsDeleteConflict() *DeleteConflictDetails {
+func AsDeleteConflict(e *Error) *DeleteConflictDetails {
 	if e == nil || e.Code != "conflict" || e.Details == nil {
 		return nil
 	}
@@ -83,7 +55,7 @@ type ResizeUnsupportedDetails struct {
 }
 
 // AsResizeUnsupported returns typed details if e is a shrink-unsupported error.
-func (e *Error) AsResizeUnsupported() *ResizeUnsupportedDetails {
+func AsResizeUnsupported(e *Error) *ResizeUnsupportedDetails {
 	if e == nil || e.Code != "unsupported" || e.Details == nil {
 		return nil
 	}
@@ -94,8 +66,7 @@ func (e *Error) AsResizeUnsupported() *ResizeUnsupportedDetails {
 	return &d
 }
 
-// remapJSON re-encodes a generic JSON map into a typed struct. Used to
-// materialize typed Detail views from the loose Details map.
+// remapJSON re-encodes a generic JSON map into a typed struct.
 func remapJSON(in map[string]any, out any) error {
 	buf, err := json.Marshal(in)
 	if err != nil {
@@ -111,7 +82,7 @@ func FormatDeleteConflict(w io.Writer, e *Error) {
 		return
 	}
 	fmt.Fprintln(w, e.Message)
-	d := e.AsDeleteConflict()
+	d := AsDeleteConflict(e)
 	if d == nil {
 		return
 	}
@@ -135,7 +106,7 @@ func FormatResizeUnsupported(w io.Writer, e *Error) {
 		return
 	}
 	fmt.Fprintln(w, e.Message)
-	d := e.AsResizeUnsupported()
+	d := AsResizeUnsupported(e)
 	if d == nil {
 		return
 	}

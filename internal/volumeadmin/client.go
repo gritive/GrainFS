@@ -1,140 +1,40 @@
 package volumeadmin
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
-// Client talks to the GrainFS admin Hertz server. The endpoint is a UDS path
-// (production; admin server is UDS-only) or an http(s):// URL (test injection).
+// Client speaks to the volumeadmin endpoints on the admin HTTP server.
+// Transport plumbing lives in adminapi; this type only wires endpoint methods.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
+	*adminapi.Transport
 }
 
 // NewClient resolves the endpoint and returns a ready-to-use client.
 //
 // The endpoint argument is the raw value of --endpoint (may be empty); the
 // final endpoint is determined by ResolveEndpoint, walking flag → env.
-//
-// Transport dispatch on the resolved value:
-//   - http(s)://...  — HTTP client (test injection only)
-//   - unix:<path>    — UDS dialer (legacy form, still accepted)
-//   - <bare path>    — UDS dialer (CLI-facing form)
 func NewClient(endpoint string) (*Client, error) {
 	ep, err := ResolveEndpoint(endpoint)
 	if err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") {
-		return &Client{
-			httpClient: &http.Client{},
-			baseURL:    strings.TrimRight(ep, "/"),
-		}, nil
+	tp, err := adminapi.NewTransport(ep)
+	if err != nil {
+		return nil, err
 	}
-	sock := strings.TrimPrefix(ep, "unix:")
-	return &Client{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", sock)
-				},
-			},
-		},
-		baseURL: "http://unix",
-	}, nil
+	return &Client{Transport: tp}, nil
 }
 
-// NewClientForURL builds a Client targeting an explicit http(s) base URL with
+// NewClientForURL builds a Client against an explicit http(s) base URL with
 // no auto-discovery. Used by tests against httptest.Server.
 func NewClientForURL(rawurl string) *Client {
-	return &Client{
-		httpClient: &http.Client{},
-		baseURL:    strings.TrimRight(rawurl, "/"),
-	}
-}
-
-// Get issues a GET against path and decodes the JSON response into out (if
-// non-nil). Exposed so other admin CLI commands (dashboard, bucket scrub)
-// can share the HTTP plumbing without redefining their own client.
-func (c *Client) Get(ctx context.Context, path string, out any) error {
-	return c.Do(ctx, http.MethodGet, path, nil, out)
-}
-
-// Post issues a POST with optional JSON body and decoded JSON response.
-func (c *Client) Post(ctx context.Context, path string, in any, out any) error {
-	return c.Do(ctx, http.MethodPost, path, in, out)
-}
-
-// Delete issues a DELETE and decodes the JSON response if any.
-func (c *Client) Delete(ctx context.Context, path string, out any) error {
-	return c.Do(ctx, http.MethodDelete, path, nil, out)
-}
-
-// Do is the shared HTTP transport. Non-2xx responses surface as *Error so
-// callers can errors.As to inspect Code/Status/Details.
-func (c *Client) Do(ctx context.Context, method, path string, in any, out any) error {
-	var body io.Reader
-	if in != nil {
-		buf, err := json.Marshal(in)
-		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
-		}
-		body = bytes.NewReader(buf)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		// Map well-known transport-level conditions to the typed *Error
-		// envelope so callers can errors.As(err, &*Error) without losing
-		// the underlying cause (Unwrap exposes context.Canceled etc).
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return &Error{Code: "transient", Message: "admin request cancelled: " + err.Error(), cause: err}
-		}
-		var ne *net.OpError
-		if errors.As(err, &ne) {
-			return &Error{Code: "transient", Message: "admin server unreachable: " + err.Error(), cause: err}
-		}
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if out != nil && len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, out); err != nil {
-				return fmt.Errorf("decode response: %w", err)
-			}
-		}
-		return nil
-	}
-	var wire adminapi.Error
-	cerr := &Error{Status: resp.StatusCode}
-	if err := json.Unmarshal(respBody, &wire); err != nil || wire.Code == "" {
-		cerr.Code = "internal"
-		cerr.Message = string(respBody)
-	} else {
-		cerr.Code = wire.Code
-		cerr.Message = wire.Message
-		cerr.Details = wire.Details
-	}
-	return cerr
+	tp, _ := adminapi.NewTransport(rawurl)
+	return &Client{Transport: tp}
 }
 
 // --- Typed endpoints ---

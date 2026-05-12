@@ -157,7 +157,7 @@ func TestClient_DeleteVolume_ConflictReturnsTypedError(t *testing.T) {
 	if e.Code != "conflict" {
 		t.Errorf("code=%q", e.Code)
 	}
-	d := e.AsDeleteConflict()
+	d := AsDeleteConflict(e)
 	if d == nil || d.SnapshotCount != 3 || len(d.Recent) != 1 {
 		t.Errorf("typed details unexpected: %+v", d)
 	}
@@ -183,7 +183,7 @@ func TestClient_ResizeVolume_UnsupportedShrink(t *testing.T) {
 	if !errors.As(err, &e) {
 		t.Fatalf("expected *Error: %v", err)
 	}
-	d := e.AsResizeUnsupported()
+	d := AsResizeUnsupported(e)
 	if d == nil || d.Hint == "" {
 		t.Errorf("typed details missing: %+v", d)
 	}
@@ -284,13 +284,6 @@ func TestClient_Scrub_Lifecycle(t *testing.T) {
 	}
 }
 
-func TestClient_NewClientForURL_TrimsSlash(t *testing.T) {
-	c := NewClientForURL("http://example.com/")
-	if !strings.HasSuffix(c.baseURL, "com") {
-		t.Errorf("trailing slash not trimmed: %q", c.baseURL)
-	}
-}
-
 func TestClient_Do_MalformedJSONOn2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -305,23 +298,6 @@ func TestClient_Do_MalformedJSONOn2xx(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "decode response") {
 		t.Errorf("err=%q, want substring %q", err.Error(), "decode response")
-	}
-}
-
-func TestNewClientForURL_NoHTTPClientTimeoutCap(t *testing.T) {
-	c := NewClientForURL("http://example.com")
-	if c.httpClient.Timeout != 0 {
-		t.Errorf("httpClient.Timeout = %v, want 0 (no cap, ctx-based only)", c.httpClient.Timeout)
-	}
-}
-
-func TestNewClient_NoHTTPClientTimeoutCap_HTTPEndpoint(t *testing.T) {
-	c, err := NewClient("http://example.com:9000")
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	if c.httpClient.Timeout != 0 {
-		t.Errorf("httpClient.Timeout = %v, want 0 (ctx-based only)", c.httpClient.Timeout)
 	}
 }
 
