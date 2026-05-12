@@ -9,11 +9,17 @@ package raft
 // After a snapshot is durable, log entries up to and including LastIncludedIndex
 // can be discarded (CompactBefore on the LogStore).
 type Snapshot struct {
-	LastIncludedIndex uint64
-	LastIncludedTerm  uint64
-	Index             uint64
-	Term              uint64
-	Servers           []Server
+	LastIncludedIndex    uint64
+	LastIncludedTerm     uint64
+	Index                uint64
+	Term                 uint64
+	Servers              []Server
+	FormatVersion        uint8
+	JointPhase           JointPhase
+	JointOldVoters       []string
+	JointNewVoters       []string
+	JointEnterIndex      uint64
+	JointManagedLearners []string
 	// Configuration at snapshot time. Voter ID list only — learners ride
 	// in Learners (added M6.0). Empty/nil for tests that don't care about
 	// config recovery.
@@ -32,6 +38,34 @@ type SnapshotStatus struct {
 	Term      uint64
 	SizeBytes int
 }
+
+const FSMSnapshotFormatVersion uint8 = 2
+
+type SnapshotMeta struct {
+	Index                uint64
+	Term                 uint64
+	Servers              []Server
+	FormatVersion        uint8
+	JointPhase           JointPhase
+	JointOldVoters       []string
+	JointNewVoters       []string
+	JointEnterIndex      uint64
+	JointManagedLearners []string
+}
+
+type SnapshotResult struct {
+	Index     uint64
+	Term      uint64
+	SizeBytes int
+}
+
+type JointPhase uint8
+
+const (
+	JointNone JointPhase = iota
+	JointEntering
+	JointLeaving
+)
 
 // SnapshotStore manages the durable snapshot. PR 15 keeps "at most one
 // snapshot at a time" — Save replaces the prior. Multi-snapshot retention
@@ -62,7 +96,7 @@ func (s *memSnapshotStore) Save(snap *Snapshot) error {
 		s.snap = nil
 		return nil
 	}
-	cp := *snap
+	cp := normalizedSnapshot(*snap)
 	if len(snap.Configuration) > 0 {
 		cp.Configuration = make([]string, len(snap.Configuration))
 		copy(cp.Configuration, snap.Configuration)
@@ -79,4 +113,46 @@ func (s *memSnapshotStore) Save(snap *Snapshot) error {
 	}
 	s.snap = &cp
 	return nil
+}
+
+func normalizedSnapshot(snap Snapshot) Snapshot {
+	if snap.LastIncludedIndex == 0 {
+		snap.LastIncludedIndex = snap.Index
+	}
+	if snap.LastIncludedTerm == 0 {
+		snap.LastIncludedTerm = snap.Term
+	}
+	if snap.Index == 0 {
+		snap.Index = snap.LastIncludedIndex
+	}
+	if snap.Term == 0 {
+		snap.Term = snap.LastIncludedTerm
+	}
+	if len(snap.Configuration) == 0 && len(snap.Servers) > 0 {
+		snap.Configuration = make([]string, 0, len(snap.Servers))
+		if snap.Learners == nil {
+			snap.Learners = make(map[string]string)
+		}
+		for _, srv := range snap.Servers {
+			switch srv.Suffrage {
+			case Voter:
+				snap.Configuration = append(snap.Configuration, srv.ID)
+			case NonVoter:
+				snap.Learners[srv.ID] = srv.ID
+			}
+		}
+	}
+	if len(snap.Servers) == 0 && (len(snap.Configuration) > 0 || len(snap.Learners) > 0) {
+		snap.Servers = make([]Server, 0, len(snap.Configuration)+len(snap.Learners))
+		for _, id := range snap.Configuration {
+			snap.Servers = append(snap.Servers, Server{ID: id, Suffrage: Voter})
+		}
+		for id := range snap.Learners {
+			snap.Servers = append(snap.Servers, Server{ID: id, Suffrage: NonVoter})
+		}
+	}
+	if snap.FormatVersion == 0 {
+		snap.FormatVersion = FSMSnapshotFormatVersion
+	}
+	return snap
 }

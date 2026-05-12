@@ -222,7 +222,8 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 	}
 
 	transports := make([]*transport.QUICTransport, numNodes)
-	dataNodes := make([]*raft.Node, numNodes)
+	dataNodes := make([]RaftNode, numNodes)
+	dataClosers := make([]func() error, numNodes)
 	metaNodes := make([]*MetaRaft, numNodes)
 	for i := range metaNodes {
 		peers := make([]string, 0, numNodes-1)
@@ -234,8 +235,9 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 
 		tr := transport.MustNewQUICTransport("shared-raft-quic-test")
 		require.NoError(t, tr.Listen(context.Background(), addrs[i]))
-		dataNode := raft.NewNode(raft.DefaultConfig(fmt.Sprintf("node-%d", i), peers))
-		dataRPC := raft.NewQUICRPCTransport(tr, dataNode)
+		dataNode, dataClose, err := newRaftNode(raft.DefaultConfig(fmt.Sprintf("node-%d", i), peers), "")
+		require.NoError(t, err)
+		dataRPC := NewRaftQUICRPCTransport(tr, dataNode)
 		dataRPC.SetTransport()
 		metaNode, err := NewMetaRaft(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
@@ -248,6 +250,7 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 
 		transports[i] = tr
 		dataNodes[i] = dataNode
+		dataClosers[i] = dataClose
 		metaNodes[i] = metaNode
 	}
 
@@ -260,6 +263,11 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 		for _, n := range dataNodes {
 			if n != nil {
 				n.Close()
+			}
+		}
+		for _, closeFn := range dataClosers {
+			if closeFn != nil {
+				_ = closeFn()
 			}
 		}
 		for _, tr := range transports {

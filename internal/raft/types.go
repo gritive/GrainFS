@@ -20,11 +20,12 @@ import (
 // Sentinel errors mirrored from internal/raft so caller code can treat v1 and
 // v2 interchangeably during the M5 phased import flip.
 var (
-	ErrNotLeader           = errors.New("not the leader")
-	ErrProposalFailed      = errors.New("proposal failed: node stepped down")
-	ErrNodeStopped         = errors.New("raft: node stopped")
-	ErrAlreadyBootstrapped = errors.New("raft: cluster already bootstrapped")
-	ErrNotImplemented      = errors.New("raft/v2: not implemented (M2 scope)")
+	ErrNotLeader                      = errors.New("not the leader")
+	ErrProposalFailed                 = errors.New("proposal failed: node stepped down")
+	ErrNodeStopped                    = errors.New("raft: node stopped")
+	ErrAlreadyBootstrapped            = errors.New("raft: cluster already bootstrapped")
+	ErrNotImplemented                 = errors.New("raft/v2: not implemented (M2 scope)")
+	ErrMixedVersionNoMembershipChange = errors.New("raft: membership change blocked by mixed-version cluster")
 	// ErrNoPeers is returned by TransferLeadership when the cluster has no
 	// peer voters to transfer leadership to.
 	ErrNoPeers = errors.New("raft: no peers to transfer leadership to")
@@ -108,8 +109,9 @@ type Server struct {
 }
 
 type ServerEntry struct {
-	ID      string
-	Address string
+	ID       string
+	Address  string
+	Suffrage ServerSuffrage
 }
 
 // Configuration is a point-in-time view of the cluster's voter set.
@@ -118,6 +120,11 @@ type Configuration struct {
 }
 
 type Event struct{}
+
+type PeerReplicationEvidence struct {
+	PeerID            string
+	LastAppendSuccess time.Time
+}
 
 // NodeState represents the current role of a Raft node. Values match v1.
 type NodeState int
@@ -307,4 +314,19 @@ type Config struct {
 	// The caller is responsible for supplying durable LogStore +
 	// StableStore + SnapshotStore together (or none of them).
 	SnapshotStore SnapshotStore
+}
+
+func DefaultConfig(id string, peers []string) Config {
+	return Config{
+		ID:                            id,
+		Peers:                         peers,
+		ElectionTimeout:               750 * time.Millisecond,
+		HeartbeatTimeout:              150 * time.Millisecond,
+		MaxEntriesPerAE:               defaultMaxEntriesPerAE,
+		MaxAppendEntriesInflight:      64,
+		MaxAppendEntriesInflightBytes: 4 << 20,
+		TrailingLogs:                  128,
+		LearnerCatchupThreshold:       128,
+		JointAbortTimeout:             30 * time.Second,
+	}
 }

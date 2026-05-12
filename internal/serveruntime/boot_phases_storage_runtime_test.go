@@ -34,7 +34,6 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootOpenMetaDB(state))
 	require.NoError(t, bootValidateTimings(state))
 	require.NoError(t, bootOpenSharedFSMDB(state))
-	t.Cleanup(state.Cleanup)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -54,6 +53,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 			_ = closeNode()
 		}
 	})
+	t.Cleanup(state.Cleanup)
 	state.node = node
 	state.rpcTransport = cluster.NewRaftQUICRPCTransport(state.quicTransport, node)
 	state.rpcTransport.SetTransport()

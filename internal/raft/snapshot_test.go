@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,6 +82,42 @@ func TestSnapshot_CreatePreservesLearners(t *testing.T) {
 	snap, err := n.LatestSnapshot()
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"n2": "addr2"}, snap.Learners)
+}
+
+func TestBadgerSnapshotStore_RoundTripsCanonicalMetadata(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	store, err := NewBadgerSnapshotStore(db, []byte("raft/v2/snap/"))
+	require.NoError(t, err)
+	in := &Snapshot{
+		Index:                12,
+		Term:                 3,
+		Servers:              []Server{{ID: "old-a", Suffrage: Voter}, {ID: "learner-a", Suffrage: NonVoter}},
+		FormatVersion:        99,
+		JointPhase:           JointEntering,
+		JointOldVoters:       []string{"old-a", "old-b"},
+		JointNewVoters:       []string{"old-a", "old-c"},
+		JointEnterIndex:      11,
+		JointManagedLearners: []string{"learner-a"},
+		Data:                 []byte("fsm"),
+	}
+
+	require.NoError(t, store.Save(in))
+	out, err := store.Latest()
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.Equal(t, uint64(12), out.Index)
+	require.Equal(t, uint64(3), out.Term)
+	require.Equal(t, []Server{{ID: "old-a", Suffrage: Voter}, {ID: "learner-a", Suffrage: NonVoter}}, out.Servers)
+	require.Equal(t, uint8(99), out.FormatVersion)
+	require.Equal(t, JointEntering, out.JointPhase)
+	require.Equal(t, []string{"old-a", "old-b"}, out.JointOldVoters)
+	require.Equal(t, []string{"old-a", "old-c"}, out.JointNewVoters)
+	require.Equal(t, uint64(11), out.JointEnterIndex)
+	require.Equal(t, []string{"learner-a"}, out.JointManagedLearners)
+	require.Equal(t, []byte("fsm"), out.Data)
 }
 
 func TestInstallSnapshot_PreservesLearners(t *testing.T) {

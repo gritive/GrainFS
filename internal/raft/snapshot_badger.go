@@ -13,7 +13,7 @@ import (
 //
 // Encoding (after the 1-byte version prefix):
 //
-//	[Version: 1B = 0x02]  // bumped from 0x01 in M6.0 for learners section
+//	[Version: 1B = 0x03]  // bumped from 0x02 for canonical snapshot metadata
 //	[LastIncludedIndex: 8B BE]
 //	[LastIncludedTerm:  8B BE]
 //	[NumVoters: 4B BE]
@@ -24,6 +24,12 @@ import (
 //	  Repeated NumLearners times:
 //	    [LearnerIDLen:   2B BE][LearnerID]
 //	    [LearnerAddrLen: 2B BE][LearnerAddr]
+//	[FormatVersion: 1B]
+//	[JointPhase: 1B]
+//	[JointEnterIndex: 8B BE]
+//	[NumJointOldVoters: 4B BE][string...]
+//	[NumJointNewVoters: 4B BE][string...]
+//	[NumJointManagedLearners: 4B BE][string...]
 //	[DataLen: 8B BE]
 //	[Data: DataLen bytes]
 //
@@ -40,7 +46,10 @@ type badgerSnapshotStore struct {
 	keyPrefix []byte // copied at construction; immutable
 }
 
-const snapshotEncodingVersion byte = 0x02
+const (
+	snapshotEncodingVersion       byte = 0x03
+	snapshotEncodingVersionLegacy byte = 0x02
+)
 
 // newBadgerSnapshotStore opens a SnapshotStore view into db under prefix.
 // Multiple Raft groups can coexist in one Badger DB with distinct prefixes.
@@ -93,7 +102,8 @@ func (s *badgerSnapshotStore) Save(snap *Snapshot) error {
 	if snap == nil {
 		return fmt.Errorf("badgerSnapshotStore: Save: nil snapshot")
 	}
-	val := encodeSnapshot(snap)
+	normalized := normalizedSnapshot(*snap)
+	val := encodeSnapshot(&normalized)
 	err := s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(s.latestKey(), val)
 	})
@@ -110,6 +120,9 @@ func (s *badgerSnapshotStore) Save(snap *Snapshot) error {
 // on the type. The version prefix lets future encodings break old readers
 // loudly rather than silently misinterpret the blob.
 func encodeSnapshot(snap *Snapshot) []byte {
+	normalized := normalizedSnapshot(*snap)
+	snap = &normalized
+
 	// Pre-compute size to allocate exactly once.
 	size := 1 + 8 + 8 + 4 // version + lastIdx + lastTerm + numVoters
 	for _, v := range snap.Configuration {
@@ -119,6 +132,10 @@ func encodeSnapshot(snap *Snapshot) []byte {
 	for id, addr := range snap.Learners {
 		size += 2 + len(id) + 2 + len(addr)
 	}
+	size += 1 + 1 + 8 // FormatVersion + JointPhase + JointEnterIndex
+	size += stringListEncodedSize(snap.JointOldVoters)
+	size += stringListEncodedSize(snap.JointNewVoters)
+	size += stringListEncodedSize(snap.JointManagedLearners)
 	size += 8 + len(snap.Data) // dataLen + data
 	buf := make([]byte, size)
 
@@ -149,10 +166,39 @@ func encodeSnapshot(snap *Snapshot) []byte {
 		copy(buf[off:], addr)
 		off += len(addr)
 	}
+	buf[off] = snap.FormatVersion
+	off++
+	buf[off] = byte(snap.JointPhase)
+	off++
+	binary.BigEndian.PutUint64(buf[off:], snap.JointEnterIndex)
+	off += 8
+	off = encodeStringList(buf, off, snap.JointOldVoters)
+	off = encodeStringList(buf, off, snap.JointNewVoters)
+	off = encodeStringList(buf, off, snap.JointManagedLearners)
 	binary.BigEndian.PutUint64(buf[off:], uint64(len(snap.Data)))
 	off += 8
 	copy(buf[off:], snap.Data)
 	return buf
+}
+
+func stringListEncodedSize(values []string) int {
+	size := 4
+	for _, value := range values {
+		size += 4 + len(value)
+	}
+	return size
+}
+
+func encodeStringList(buf []byte, off int, values []string) int {
+	binary.BigEndian.PutUint32(buf[off:], uint32(len(values)))
+	off += 4
+	for _, value := range values {
+		binary.BigEndian.PutUint32(buf[off:], uint32(len(value)))
+		off += 4
+		copy(buf[off:], value)
+		off += len(value)
+	}
+	return off
 }
 
 // decodeSnapshot is the inverse of encodeSnapshot. Errors on any structural
@@ -162,8 +208,9 @@ func decodeSnapshot(val []byte) (*Snapshot, error) {
 	if len(val) < 1 {
 		return nil, fmt.Errorf("badgerSnapshotStore: empty value")
 	}
-	if val[0] != snapshotEncodingVersion {
-		return nil, fmt.Errorf("badgerSnapshotStore: unknown version 0x%02x", val[0])
+	version := val[0]
+	if version != snapshotEncodingVersion && version != snapshotEncodingVersionLegacy {
+		return nil, fmt.Errorf("badgerSnapshotStore: unknown version 0x%02x", version)
 	}
 	off := 1
 	if len(val) < off+8+8+4 {
@@ -223,6 +270,36 @@ func decodeSnapshot(val []byte) (*Snapshot, error) {
 			off += addrLen
 		}
 	}
+	formatVersion := FSMSnapshotFormatVersion
+	jointPhase := JointNone
+	var jointEnterIndex uint64
+	var jointOldVoters []string
+	var jointNewVoters []string
+	var jointManagedLearners []string
+	if version == snapshotEncodingVersion {
+		if len(val) < off+1+1+8 {
+			return nil, fmt.Errorf("badgerSnapshotStore: short snapshot metadata")
+		}
+		formatVersion = val[off]
+		off++
+		jointPhase = JointPhase(val[off])
+		off++
+		jointEnterIndex = binary.BigEndian.Uint64(val[off:])
+		off += 8
+		var err error
+		jointOldVoters, off, err = decodeStringList(val, off, "JointOldVoters")
+		if err != nil {
+			return nil, err
+		}
+		jointNewVoters, off, err = decodeStringList(val, off, "JointNewVoters")
+		if err != nil {
+			return nil, err
+		}
+		jointManagedLearners, off, err = decodeStringList(val, off, "JointManagedLearners")
+		if err != nil {
+			return nil, err
+		}
+	}
 	if len(val) < off+8 {
 		return nil, fmt.Errorf("badgerSnapshotStore: short DataLen")
 	}
@@ -236,11 +313,43 @@ func decodeSnapshot(val []byte) (*Snapshot, error) {
 		data = make([]byte, dataLen)
 		copy(data, val[off:off+dataLen])
 	}
-	return &Snapshot{
-		LastIncludedIndex: lastIdx,
-		LastIncludedTerm:  lastTerm,
-		Configuration:     voters,
-		Learners:          learners,
-		Data:              data,
-	}, nil
+	snap := normalizedSnapshot(Snapshot{
+		LastIncludedIndex:    lastIdx,
+		LastIncludedTerm:     lastTerm,
+		FormatVersion:        uint8(formatVersion),
+		JointPhase:           jointPhase,
+		JointOldVoters:       jointOldVoters,
+		JointNewVoters:       jointNewVoters,
+		JointEnterIndex:      jointEnterIndex,
+		JointManagedLearners: jointManagedLearners,
+		Configuration:        voters,
+		Learners:             learners,
+		Data:                 data,
+	})
+	return &snap, nil
+}
+
+func decodeStringList(val []byte, off int, name string) ([]string, int, error) {
+	if len(val) < off+4 {
+		return nil, off, fmt.Errorf("badgerSnapshotStore: short %s count", name)
+	}
+	count := int(binary.BigEndian.Uint32(val[off:]))
+	off += 4
+	if count == 0 {
+		return nil, off, nil
+	}
+	values := make([]string, count)
+	for i := 0; i < count; i++ {
+		if len(val) < off+4 {
+			return nil, off, fmt.Errorf("badgerSnapshotStore: short %s[%d] len", name, i)
+		}
+		valueLen := int(binary.BigEndian.Uint32(val[off:]))
+		off += 4
+		if len(val) < off+valueLen {
+			return nil, off, fmt.Errorf("badgerSnapshotStore: short %s[%d] body", name, i)
+		}
+		values[i] = string(val[off : off+valueLen])
+		off += valueLen
+	}
+	return values, off, nil
 }

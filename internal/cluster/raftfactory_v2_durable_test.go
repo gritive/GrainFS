@@ -39,7 +39,7 @@ func TestNewRaftNode_V2DurableStoresAtV2Subdir(t *testing.T) {
 	require.True(t, info.IsDir(), "v2 store path must be a directory")
 
 	// Verify it's the v2 adapter, not v1 (PR 30 deletes the v1 package).
-	_, isV1 := node.(*raft.Node)
+	_, isV1 := any(node).(*raft.Node)
 	require.False(t, isV1, "expected v2 adapter (v1 path was removed in PR 29)")
 }
 

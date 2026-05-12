@@ -253,9 +253,8 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBac
 	dir := t.TempDir()
 	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
 	require.NoError(t, err)
-	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
+	node, closeRaft, err := newRaftNode(raft.DefaultConfig(nodeID, nil), dir)
 	require.NoError(t, err)
-	node := raft.NewNode(raft.DefaultConfig(nodeID, nil), logStore)
 	node.SetTransport(
 		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 			return nil, fmt.Errorf("no peers")
@@ -274,7 +273,9 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBac
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, gb.Close())
-		require.NoError(t, logStore.Close())
+		if closeRaft != nil {
+			require.NoError(t, closeRaft())
+		}
 	})
 	return gb
 }

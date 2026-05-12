@@ -28,7 +28,7 @@ func TestRaftV2Smoke_DefaultClusterIsV2(t *testing.T) {
 	node, _, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 
-	_, isV1 := node.(*raft.Node)
+	_, isV1 := any(node).(*raft.Node)
 	assert.False(t, isV1, "expected v2 adapter (v1 path was removed in PR 29)")
 	_, isV2 := node.(*raftNodeAdapter)
 	assert.True(t, isV2, "expected *raftNodeAdapter adapter")

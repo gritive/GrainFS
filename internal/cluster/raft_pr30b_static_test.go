@@ -12,8 +12,6 @@ func TestPR30BNoV1RaftProductionReferences(t *testing.T) {
 	root := repoRootForPR30B(t)
 	forbidden := []string{
 		"github.com/gritive/GrainFS/internal/raft/v2",
-		"raft.NewNode(",
-		"raft.NewBadgerLogStore(",
 		"raft.OpenSharedLogStore(",
 		"raft.NewSnapshotManager(",
 		"RaftNode() *raft.Node",

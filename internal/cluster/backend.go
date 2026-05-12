@@ -162,8 +162,6 @@ type DistributedBackend struct {
 	lastAppliedTerm  atomic.Uint64
 	snapRequests     chan raftSnapshotRequest
 	onApply          OnApplyFunc
-	snapMgr          *raft.SnapshotManager
-	snapNode         *raft.Node // node for CompactLog after snapshot
 	shardSvc         *ShardService
 	allNodes         []string // all node addresses (including self) for shard placement
 	selfAddr         string   // this node's raft address (matches entries in allNodes)
@@ -382,18 +380,6 @@ func (b *DistributedBackend) ecWriteNodes() []string {
 	return b.clusterNodes()
 }
 
-// SetSnapshotManager configures automatic snapshot creation after N applied entries.
-// Must be called before RunApplyLoop.
-func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node *raft.Node) {
-	b.snapMgr = mgr
-	b.snapNode = node
-	if mgr != nil && node != nil {
-		// §4.3 joint state persistence: capture on snapshot, restore on load.
-		mgr.SetJointStateProvider(node.JointSnapshotState)
-		mgr.SetJointStateRestorer(node.RestoreJointStateFromSnapshot)
-	}
-}
-
 // TriggerRaftSnapshot forces a Raft FSM snapshot on the current leader.
 // As of M5 PR 29 v2 owns snapshot lifecycle exclusively; the apply loop
 // forwards through RaftNode.CreateSnapshot (formerly the RaftV2Snapshotter
@@ -521,15 +507,6 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			b.lastApplied.Store(entry.Index)
 			b.lastAppliedTerm.Store(entry.Term)
 
-			// Check if snapshot should be taken
-			if b.snapMgr != nil {
-				if b.snapMgr.MaybeTrigger(entry.Index, entry.Term, b.snapNode.Configuration().Servers) {
-					b.logger.Info().Uint64("index", entry.Index).Uint64("term", entry.Term).Msg("snapshot taken")
-					if b.snapNode != nil {
-						b.snapNode.CompactLog(entry.Index)
-					}
-				}
-			}
 		}
 	}
 }

@@ -9,7 +9,6 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 
-	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/storage"
 )

@@ -23,7 +23,7 @@ func TestRecoverClusterPlanRejectsGroups(t *testing.T) {
 		NewNodeID:   "node-recovered",
 		NewRaftAddr: "127.0.0.1:19000",
 	})
-	require.ErrorContains(t, err, "multi-Raft group recovery is not supported in v1")
+	require.ErrorContains(t, err, "multi-Raft group recovery is not supported")
 }
 
 func TestRecoverClusterPlanRequiresOptions(t *testing.T) {
@@ -34,9 +34,9 @@ func TestRecoverClusterPlanRequiresOptions(t *testing.T) {
 func TestRecoverClusterPlanRequiresSnapshot(t *testing.T) {
 	source := t.TempDir()
 	target := t.TempDir()
-	store, err := raft.NewBadgerLogStore(filepath.Join(source, "raft"))
+	db, _, _, _, err := openRaftV2Stores(filepath.Join(source, "raft"))
 	require.NoError(t, err)
-	require.NoError(t, store.Close())
+	require.NoError(t, db.Close())
 
 	_, err = BuildRecoverClusterPlan(RecoverClusterOptions{
 		SourceData:  source,
@@ -45,35 +45,6 @@ func TestRecoverClusterPlanRequiresSnapshot(t *testing.T) {
 		NewRaftAddr: "127.0.0.1:19000",
 	})
 	require.ErrorIs(t, err, ErrRecoverClusterNoSnapshot)
-}
-
-func TestRecoverClusterPlanRejectsJointSnapshotUnlessStripped(t *testing.T) {
-	source := t.TempDir()
-	target := t.TempDir()
-	writeRecoverClusterSourceSnapshotWithExtra(t, source, []raft.Server{{ID: "old-a", Suffrage: raft.Voter}}, raft.Snapshot{
-		JointPhase:      raft.JointEntering,
-		JointOldVoters:  []string{"old-a", "old-b"},
-		JointNewVoters:  []string{"old-a", "old-c"},
-		JointEnterIndex: 12,
-	})
-
-	_, err := BuildRecoverClusterPlan(RecoverClusterOptions{
-		SourceData:  source,
-		TargetData:  target,
-		NewNodeID:   "node-recovered",
-		NewRaftAddr: "127.0.0.1:19000",
-	})
-	require.ErrorContains(t, err, "--strip-joint-state")
-
-	plan, err := BuildRecoverClusterPlan(RecoverClusterOptions{
-		SourceData:      source,
-		TargetData:      target,
-		NewNodeID:       "node-recovered",
-		NewRaftAddr:     "127.0.0.1:19000",
-		StripJointState: true,
-	})
-	require.NoError(t, err)
-	require.Equal(t, raft.JointEntering, plan.JointPhase)
 }
 
 func TestRecoverClusterExecuteRewritesMembershipAndMarker(t *testing.T) {
@@ -95,10 +66,10 @@ func TestRecoverClusterExecuteRewritesMembershipAndMarker(t *testing.T) {
 
 	require.NoError(t, ExecuteRecoverClusterPlan(plan))
 
-	store, err := raft.NewBadgerLogStore(filepath.Join(target, "raft"))
+	dbSnap, _, _, snaps, err := openRaftV2StoresReadOnly(filepath.Join(target, "raft"))
 	require.NoError(t, err)
-	defer store.Close()
-	snap, err := store.LoadSnapshot()
+	defer dbSnap.Close()
+	snap, err := snaps.Latest()
 	require.NoError(t, err)
 	require.Equal(t, []raft.Server{{ID: "node-recovered", Suffrage: raft.Voter}}, snap.Servers)
 
@@ -171,11 +142,48 @@ func TestRecoverClusterPlanRejectsRecoveryMarkerInTarget(t *testing.T) {
 	require.ErrorContains(t, err, "target is not fresh")
 }
 
-func writeRecoverClusterSourceSnapshot(t *testing.T, dataDir string, servers []raft.Server) []byte {
-	return writeRecoverClusterSourceSnapshotWithExtra(t, dataDir, servers, raft.Snapshot{})
+func TestRecoverClusterPlanRejectsJointSnapshotUnlessStripped(t *testing.T) {
+	source := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	writeRecoverClusterSourceSnapshotWithOptions(t, source, []raft.Server{
+		{ID: "old-a", Suffrage: raft.Voter},
+		{ID: "old-b", Suffrage: raft.Voter},
+	}, raft.Snapshot{
+		JointPhase:           raft.JointEntering,
+		JointOldVoters:       []string{"old-a", "old-b"},
+		JointNewVoters:       []string{"old-a", "old-c"},
+		JointEnterIndex:      11,
+		JointManagedLearners: []string{"learner-a"},
+	})
+
+	_, err := BuildRecoverClusterPlan(RecoverClusterOptions{
+		SourceData:  source,
+		TargetData:  target,
+		NewNodeID:   "node-recovered",
+		NewRaftAddr: "127.0.0.1:19000",
+	})
+	require.ErrorContains(t, err, "--strip-joint-state")
+
+	plan, err := BuildRecoverClusterPlan(RecoverClusterOptions{
+		SourceData:      source,
+		TargetData:      target,
+		NewNodeID:       "node-recovered",
+		NewRaftAddr:     "127.0.0.1:19000",
+		StripJointState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, raft.JointEntering, plan.JointPhase)
+	require.Equal(t, []string{"old-a", "old-b"}, plan.JointOldVoters)
+	require.Equal(t, []string{"old-a", "old-c"}, plan.JointNewVoters)
+	require.Equal(t, uint64(11), plan.JointEnterIndex)
+	require.Equal(t, []string{"learner-a"}, plan.JointManagedLearners)
 }
 
-func writeRecoverClusterSourceSnapshotWithExtra(t *testing.T, dataDir string, servers []raft.Server, extra raft.Snapshot) []byte {
+func writeRecoverClusterSourceSnapshot(t *testing.T, dataDir string, servers []raft.Server) []byte {
+	return writeRecoverClusterSourceSnapshotWithOptions(t, dataDir, servers, raft.Snapshot{})
+}
+
+func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, servers []raft.Server, extra raft.Snapshot) []byte {
 	t.Helper()
 	metaDir := filepath.Join(dataDir, "meta")
 	db, err := badger.Open(badger.DefaultOptions(metaDir).WithLogger(nil))
@@ -188,15 +196,24 @@ func writeRecoverClusterSourceSnapshotWithExtra(t *testing.T, dataDir string, se
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	store, err := raft.NewBadgerLogStore(filepath.Join(dataDir, "raft"))
+	dbSnap, logs, _, snaps, err := openRaftV2Stores(filepath.Join(dataDir, "raft"))
 	require.NoError(t, err)
+	defer dbSnap.Close()
 	snap := extra
+	snap.LastIncludedIndex = 12
+	snap.LastIncludedTerm = 3
 	snap.Index = 12
 	snap.Term = 3
 	snap.Data = data
 	snap.Servers = servers
-	snap.FormatVersion = raft.FSMSnapshotFormatVersion
-	require.NoError(t, store.SaveSnapshot(snap))
-	require.NoError(t, store.Close())
+	if snap.FormatVersion == 0 {
+		snap.FormatVersion = raft.FSMSnapshotFormatVersion
+	}
+	require.NoError(t, snaps.Save(&snap))
+	installer, ok := logs.(interface {
+		InstallSnapshotBoundary(lastIncludedIndex, lastIncludedTerm uint64) error
+	})
+	require.True(t, ok)
+	require.NoError(t, installer.InstallSnapshotBoundary(12, 3))
 	return data
 }

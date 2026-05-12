@@ -17,15 +17,12 @@ import (
 // directory, waits until it becomes leader, and registers cleanup. Unlike
 // newTestDistributedBackend, the BadgerDB is NOT opened here — it is supplied
 // by the caller so multiple backends can share the same DB.
-func newTestNodeForSharedDB(t *testing.T, nodeID string) (node *raft.Node, logStore raft.LogStore) {
+func newTestNodeForSharedDB(t *testing.T, nodeID string) (node RaftNode, closeFn func() error) {
 	t.Helper()
 	dir := t.TempDir()
-	var err error
-	logStore, err = raft.NewBadgerLogStore(dir + "/raft")
-	require.NoError(t, err)
-
 	cfg := raft.DefaultConfig(nodeID, nil)
-	node = raft.NewNode(cfg, logStore)
+	node, closeFn, err := newRaftNode(cfg, dir)
+	require.NoError(t, err)
 	node.SetTransport(
 		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 			return nil, fmt.Errorf("no peers")
@@ -35,18 +32,21 @@ func newTestNodeForSharedDB(t *testing.T, nodeID string) (node *raft.Node, logSt
 		},
 	)
 	node.Start()
+	require.NoError(t, node.Bootstrap())
 	for range 200 {
-		if node.State() == raft.Leader {
+		if node.IsLeader() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	require.Equal(t, raft.Leader, node.State(), "test node %s must become leader", nodeID)
+	require.True(t, node.IsLeader(), "test node %s must become leader", nodeID)
 	t.Cleanup(func() {
-		node.Stop()
-		logStore.Close()
+		node.Close()
+		if closeFn != nil {
+			_ = closeFn()
+		}
 	})
-	return node, logStore
+	return node, closeFn
 }
 
 // TestSharedFSM_BackendListObjects_ScopedToGroup verifies that two

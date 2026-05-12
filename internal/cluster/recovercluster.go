@@ -10,6 +10,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -21,11 +22,12 @@ var (
 )
 
 type RecoverClusterOptions struct {
-	SourceData      string
-	TargetData      string
-	NewNodeID       string
-	NewRaftAddr     string
-	StripJointState bool
+	SourceData        string
+	TargetData        string
+	NewNodeID         string
+	NewRaftAddr       string
+	BadgerManagedMode bool
+	StripJointState   bool
 }
 
 type RecoverClusterPlan struct {
@@ -42,6 +44,8 @@ type RecoverClusterPlan struct {
 	JointNewVoters       []string
 	JointEnterIndex      uint64
 	JointManagedLearners []string
+	SourceManagedMode    bool
+	ManagedModePresent   bool
 	TargetFresh          bool
 	BlockedReason        string
 }
@@ -75,18 +79,18 @@ func BuildRecoverClusterPlan(opts RecoverClusterOptions) (*RecoverClusterPlan, e
 	targetMetaDir := filepath.Join(opts.TargetData, "meta")
 
 	if hasGroups(opts.SourceData) {
-		return nil, fmt.Errorf("multi-Raft group recovery is not supported in v1: %s exists", filepath.Join(opts.SourceData, "groups"))
+		return nil, fmt.Errorf("multi-Raft group recovery is not supported: %s exists", filepath.Join(opts.SourceData, "groups"))
 	}
 
-	meta, err := raft.InspectSnapshotMetaReadOnly(sourceRaftDir)
+	snap, err := inspectV2SnapshotReadOnly(sourceRaftDir)
 	if err != nil {
 		return nil, err
 	}
-	if meta.Index == 0 {
+	if snap == nil || snap.Index == 0 {
 		return nil, ErrRecoverClusterNoSnapshot
 	}
-	if meta.JointPhase != raft.JointNone && !opts.StripJointState {
-		return nil, fmt.Errorf("source snapshot is in joint consensus phase %d; rerun with --strip-joint-state to recover as a clean single-node cluster", meta.JointPhase)
+	if snap.JointPhase != raft.JointNone && !opts.StripJointState {
+		return nil, fmt.Errorf("source snapshot is in joint consensus phase %d; rerun with --strip-joint-state to recover as a clean single-node cluster", snap.JointPhase)
 	}
 	if err := checkRecoverTargetFresh(opts.TargetData); err != nil {
 		return nil, err
@@ -97,15 +101,17 @@ func BuildRecoverClusterPlan(opts RecoverClusterOptions) (*RecoverClusterPlan, e
 		SourceRaftDir:        sourceRaftDir,
 		TargetRaftDir:        targetRaftDir,
 		TargetMetaDir:        targetMetaDir,
-		SnapshotIndex:        meta.Index,
-		SnapshotTerm:         meta.Term,
-		SnapshotSize:         meta.DataSize,
-		OriginalServers:      meta.Servers,
-		JointPhase:           meta.JointPhase,
-		JointOldVoters:       meta.JointOldVoters,
-		JointNewVoters:       meta.JointNewVoters,
-		JointEnterIndex:      meta.JointEnterIndex,
-		JointManagedLearners: meta.JointManagedLearners,
+		SnapshotIndex:        snap.Index,
+		SnapshotTerm:         snap.Term,
+		SnapshotSize:         int64(len(snap.Data)),
+		OriginalServers:      snap.Servers,
+		JointPhase:           snap.JointPhase,
+		JointOldVoters:       snap.JointOldVoters,
+		JointNewVoters:       snap.JointNewVoters,
+		JointEnterIndex:      snap.JointEnterIndex,
+		JointManagedLearners: snap.JointManagedLearners,
+		SourceManagedMode:    false,
+		ManagedModePresent:   false,
 		TargetFresh:          true,
 	}, nil
 }
@@ -117,11 +123,11 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 	if err := checkRecoverTargetFresh(plan.Options.TargetData); err != nil {
 		return err
 	}
-	snap, err := raft.LoadSnapshotReadOnly(plan.SourceRaftDir)
+	snap, err := inspectV2SnapshotReadOnly(plan.SourceRaftDir)
 	if err != nil {
 		return err
 	}
-	if snap.Index == 0 || len(snap.Data) == 0 {
+	if snap == nil || snap.Index == 0 || len(snap.Data) == 0 {
 		return ErrRecoverClusterNoSnapshot
 	}
 	marker := RecoverClusterMarker{
@@ -152,24 +158,37 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 		return fmt.Errorf("close target meta db: %w", err)
 	}
 
-	store, err := raft.NewBadgerLogStore(plan.TargetRaftDir)
+	storeDB, logs, _, snaps, err := openRaftV2Stores(plan.TargetRaftDir)
 	if err != nil {
-		return fmt.Errorf("open target raft store: %w", err)
+		return fmt.Errorf("open target raft stores: %w", err)
 	}
-	defer store.Close()
+	defer storeDB.Close()
 
-	recovered := raft.Snapshot{
-		Index:         snap.Index,
-		Term:          snap.Term,
-		Data:          snap.Data,
-		Servers:       []raft.Server{{ID: plan.Options.NewNodeID, Suffrage: raft.Voter}},
-		FormatVersion: snap.FormatVersion,
+	recovered := &raft.Snapshot{
+		LastIncludedIndex: snap.Index,
+		LastIncludedTerm:  snap.Term,
+		Index:             snap.Index,
+		Term:              snap.Term,
+		Data:              snap.Data,
+		Configuration:     []string{plan.Options.NewNodeID},
+		Servers:           []raft.Server{{ID: plan.Options.NewNodeID, Suffrage: raft.Voter}},
+		FormatVersion:     snap.FormatVersion,
 	}
-	if err := store.SaveSnapshot(recovered); err != nil {
+	if err := snaps.Save(recovered); err != nil {
 		return fmt.Errorf("write recovered snapshot: %w", err)
 	}
-	if err := store.SaveBootstrapMarker(); err != nil {
-		return fmt.Errorf("write bootstrap marker: %w", err)
+	if err := logs.TruncateAfter(logs.FirstIndex() - 1); err != nil {
+		return fmt.Errorf("clear recovered raft log: %w", err)
+	}
+	type snapshotBoundaryInstaller interface {
+		InstallSnapshotBoundary(lastIncludedIndex, lastIncludedTerm uint64) error
+	}
+	installer, ok := logs.(snapshotBoundaryInstaller)
+	if !ok {
+		return fmt.Errorf("target raft log store cannot install snapshot boundary")
+	}
+	if err := installer.InstallSnapshotBoundary(recovered.Index, recovered.Term); err != nil {
+		return fmt.Errorf("write recovered snapshot boundary: %w", err)
 	}
 	return nil
 }
@@ -200,11 +219,11 @@ func VerifyRecoverClusterTarget(dataDir string, marker RecoverClusterMarker) err
 		return fmt.Errorf("verify target meta db close: %w", err)
 	}
 
-	snap, err := raft.InspectSnapshotMetaReadOnly(filepath.Join(dataDir, "raft"))
+	snap, err := inspectV2SnapshotReadOnly(filepath.Join(dataDir, "raft"))
 	if err != nil {
 		return fmt.Errorf("verify target raft snapshot: %w", err)
 	}
-	if snap.Index == 0 {
+	if snap == nil || snap.Index == 0 {
 		return ErrRecoverClusterNoSnapshot
 	}
 	if snap.Index != marker.SourceSnapshot.Index || snap.Term != marker.SourceSnapshot.Term {
@@ -215,6 +234,39 @@ func VerifyRecoverClusterTarget(dataDir string, marker RecoverClusterMarker) err
 		return fmt.Errorf("verify target raft snapshot: active membership is not recovered single voter %q", marker.RecoveredNodeID)
 	}
 	return nil
+}
+
+func inspectV2SnapshotReadOnly(dir string) (*raft.Snapshot, error) {
+	db, _, _, snaps, err := openRaftV2StoresReadOnly(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return snaps.Latest()
+}
+
+func openRaftV2StoresReadOnly(dir string) (*badger.DB, raft.LogStore, raft.StableStore, raft.SnapshotStore, error) {
+	storeDir := filepath.Join(dir, raftV2StoreSubdir)
+	db, err := badger.Open(badgerutil.SmallOptions(storeDir).WithReadOnly(true))
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("open badger %s: %w", storeDir, err)
+	}
+	ls, err := raft.NewBadgerLogStore(db, raftV2LogPrefix)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, nil, nil, err
+	}
+	ss, err := raft.NewBadgerStableStore(db, raftV2StablePrefix)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, nil, nil, err
+	}
+	sn, err := raft.NewBadgerSnapshotStore(db, raftV2SnapPrefix)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, nil, nil, err
+	}
+	return db, ls, ss, sn, nil
 }
 
 func LoadRecoverClusterMarker(dataDir string) (*RecoverClusterMarker, error) {

@@ -136,7 +136,13 @@ func TestDegradedMonitor_CheckDoesNotShortCircuitOnPeerHealth(t *testing.T) {
 		"127.0.0.1:3",
 		"127.0.0.1:4",
 	}
-	node := raft.NewNode(raft.DefaultConfig("self", nodes[1:]))
+	node, closeRaft, err := newRaftNode(raft.DefaultConfig("self", nodes[1:]), "")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if closeRaft != nil {
+			require.NoError(t, closeRaft())
+		}
+	})
 	backend := &DistributedBackend{
 		allNodes:   nodes,
 		selfAddr:   "self",

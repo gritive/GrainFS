@@ -53,12 +53,9 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 	db, err := badger.Open(dbOpts)
 	require.NoError(t, err)
 
-	raftDir := dir + "/raft"
-	logStore, err := raft.NewBadgerLogStore(raftDir)
-	require.NoError(t, err)
-
 	cfg := raft.DefaultConfig("test-node", nil)
-	node := raft.NewNode(cfg, logStore)
+	node, closeRaft, err := newRaftNode(cfg, dir)
+	require.NoError(t, err)
 	node.SetTransport(
 		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 			return nil, fmt.Errorf("no peers")
@@ -68,14 +65,15 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 		},
 	)
 	node.Start()
+	require.NoError(t, node.Bootstrap())
 
 	for range 200 {
-		if node.State() == raft.Leader {
+		if node.IsLeader() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	require.Equal(t, raft.Leader, node.State(), "no-peers node must become leader")
+	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
 	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
@@ -85,9 +83,11 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 
 	t.Cleanup(func() {
 		close(stopApply)
-		node.Stop()
+		node.Close()
 		db.Close()
-		logStore.Close()
+		if closeRaft != nil {
+			_ = closeRaft()
+		}
 	})
 
 	return backend
@@ -479,205 +479,6 @@ func TestDistributedBackend_MultipartBadBucket(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
-func TestDistributedBackend_SnapshotTriggersAfterThreshold(t *testing.T) {
-	t.Skip("v1-only: M5 PR 29 routes TriggerRaftSnapshot through RaftNode.CreateSnapshot (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
-	dir := t.TempDir()
-
-	metaDir := dir + "/meta"
-	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
-	db, err := badger.Open(dbOpts)
-	require.NoError(t, err)
-
-	raftDir := dir + "/raft"
-	logStore, err := raft.NewBadgerLogStore(raftDir)
-	require.NoError(t, err)
-
-	cfg := raft.DefaultConfig("test-node", nil)
-	node := raft.NewNode(cfg, logStore)
-	node.SetTransport(
-		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-			return nil, fmt.Errorf("no peers")
-		},
-		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-			return nil, fmt.Errorf("no peers")
-		},
-	)
-	node.Start()
-
-	require.Eventually(t, func() bool {
-		return node.State() == raft.Leader
-	}, 3*time.Second, 10*time.Millisecond)
-
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
-	require.NoError(t, err)
-
-	// Set snapshot threshold to 5 entries
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	snapMgr := raft.NewSnapshotManager(logStore, fsm, raft.SnapshotConfig{Threshold: 5})
-	backend.SetSnapshotManager(snapMgr, node)
-
-	stopApply := make(chan struct{})
-	go backend.RunApplyLoop(stopApply)
-
-	t.Cleanup(func() {
-		close(stopApply)
-		node.Stop()
-		db.Close()
-		logStore.Close()
-	})
-
-	// Create 6 buckets (6 Raft entries, exceeding threshold of 5)
-	for i := range 6 {
-		require.NoError(t, backend.CreateBucket(context.Background(), fmt.Sprintf("snap-bucket-%d", i)))
-	}
-
-	// Wait for entries to be applied
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify snapshot was saved
-	snap, err := logStore.LoadSnapshot()
-	require.NoError(t, err)
-	require.Greater(t, snap.Index, uint64(0), "snapshot should have been saved")
-	require.NotNil(t, snap.Data, "snapshot data should exist")
-}
-
-func TestDistributedBackend_TriggerRaftSnapshotLeader(t *testing.T) {
-	t.Skip("v1-only: M5 PR 29 routes TriggerRaftSnapshot through RaftNode.CreateSnapshot (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
-	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
-	require.NoError(t, err)
-	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
-	require.NoError(t, err)
-	node := raft.NewNode(raft.DefaultConfig("leader", nil), logStore)
-	node.SetTransport(
-		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-			return nil, fmt.Errorf("no peers")
-		},
-		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-			return nil, fmt.Errorf("no peers")
-		},
-	)
-	node.Start()
-	require.Eventually(t, func() bool { return node.State() == raft.Leader }, 3*time.Second, 10*time.Millisecond)
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
-	require.NoError(t, err)
-	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, backend.fsm, raft.SnapshotConfig{Threshold: 100}), node)
-
-	stopApply := make(chan struct{})
-	go backend.RunApplyLoop(stopApply)
-	t.Cleanup(func() {
-		close(stopApply)
-		node.Stop()
-		db.Close()
-		logStore.Close()
-	})
-
-	require.NoError(t, backend.CreateBucket(context.Background(), "manual-snap"))
-	require.Eventually(t, func() bool {
-		return backend.lastApplied.Load() > 0
-	}, 3*time.Second, 10*time.Millisecond)
-
-	result, err := backend.TriggerRaftSnapshot(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, backend.lastApplied.Load(), result.Index)
-
-	status, err := backend.RaftSnapshotStatus()
-	require.NoError(t, err)
-	require.True(t, status.Available)
-	require.Equal(t, result.Index, status.Index)
-}
-
-func TestDistributedBackend_TriggerRaftSnapshotSerializesWithApplyLoop(t *testing.T) {
-	t.Skip("v1-only: M5 PR 29 routes TriggerRaftSnapshot through RaftNode.CreateSnapshot (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
-	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
-	require.NoError(t, err)
-	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
-	require.NoError(t, err)
-	node := raft.NewNode(raft.DefaultConfig("leader", nil), logStore)
-	node.SetTransport(
-		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-			return nil, fmt.Errorf("no peers")
-		},
-		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-			return nil, fmt.Errorf("no peers")
-		},
-	)
-	node.Start()
-	require.Eventually(t, func() bool { return node.State() == raft.Leader }, 3*time.Second, 10*time.Millisecond)
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
-	require.NoError(t, err)
-
-	stopApply := make(chan struct{})
-	go backend.RunApplyLoop(stopApply)
-	t.Cleanup(func() {
-		close(stopApply)
-		node.Stop()
-		db.Close()
-		logStore.Close()
-	})
-
-	require.NoError(t, backend.CreateBucket(context.Background(), "before-snapshot"))
-	initialApplied := backend.lastApplied.Load()
-	require.NotZero(t, initialApplied)
-
-	blockingSnap := newBlockingSnapshotter()
-	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, blockingSnap, raft.SnapshotConfig{Threshold: 100}), node)
-
-	triggerDone := make(chan error, 1)
-	go func() {
-		_, err := backend.TriggerRaftSnapshot(context.Background())
-		triggerDone <- err
-	}()
-	require.Eventually(t, func() bool {
-		select {
-		case <-blockingSnap.entered:
-			return true
-		default:
-			return false
-		}
-	}, time.Second, 10*time.Millisecond)
-
-	applyDone := make(chan error, 1)
-	go func() {
-		applyDone <- backend.CreateBucket(context.Background(), "during-snapshot")
-	}()
-
-	require.Never(t, func() bool {
-		return backend.lastApplied.Load() > initialApplied
-	}, 150*time.Millisecond, 10*time.Millisecond, "apply loop must not advance while manual snapshot is reading FSM state")
-	select {
-	case err := <-applyDone:
-		require.NoError(t, err)
-		require.Fail(t, "CreateBucket applied before snapshot finished")
-	default:
-	}
-
-	close(blockingSnap.release)
-	require.NoError(t, <-triggerDone)
-	require.NoError(t, <-applyDone)
-	require.Greater(t, backend.lastApplied.Load(), initialApplied)
-}
-
-func TestDistributedBackend_TriggerRaftSnapshotRejectsFollower(t *testing.T) {
-	t.Skip("v1-only: M5 PR 29 routes RaftSnapshotStatus / TriggerRaftSnapshot through RaftNode (v2 surface); v1 stub panics. PR 30 deletes v1 and this test.")
-	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
-	require.NoError(t, err)
-	defer db.Close()
-	logStore, err := raft.NewBadgerLogStore(dir + "/raft")
-	require.NoError(t, err)
-	defer logStore.Close()
-
-	node := raft.NewNode(raft.DefaultConfig("follower", []string{"leader"}), logStore)
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
-	require.NoError(t, err)
-	backend.SetSnapshotManager(raft.NewSnapshotManager(logStore, backend.fsm, raft.SnapshotConfig{Threshold: 100}), node)
-
-	_, err = backend.TriggerRaftSnapshot(context.Background())
-	require.ErrorIs(t, err, raft.ErrNotLeader)
-}
-
 func TestDistributedBackend_Close(t *testing.T) {
 	dir := t.TempDir()
 
@@ -686,12 +487,9 @@ func TestDistributedBackend_Close(t *testing.T) {
 	db, err := badger.Open(dbOpts)
 	require.NoError(t, err)
 
-	raftDir := dir + "/raft"
-	logStore, err := raft.NewBadgerLogStore(raftDir)
-	require.NoError(t, err)
-
 	cfg := raft.DefaultConfig("test-node", nil)
-	node := raft.NewNode(cfg, logStore)
+	node, closeRaft, err := newRaftNode(cfg, dir)
+	require.NoError(t, err)
 	node.SetTransport(
 		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 			return nil, fmt.Errorf("no peers")
@@ -701,8 +499,12 @@ func TestDistributedBackend_Close(t *testing.T) {
 		},
 	)
 	node.Start()
-	defer node.Stop()
-	defer logStore.Close()
+	defer node.Close()
+	defer func() {
+		if closeRaft != nil {
+			_ = closeRaft()
+		}
+	}()
 
 	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
