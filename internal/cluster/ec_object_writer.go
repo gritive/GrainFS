@@ -1,8 +1,12 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"time"
 
@@ -11,6 +15,7 @@ import (
 
 type ecObjectShardStore interface {
 	WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error
+	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
 	DeleteLocalShards(bucket, key string) error
 	DeleteShards(ctx context.Context, peer, bucket, key string) error
@@ -51,6 +56,20 @@ type ecObjectWriteResult struct {
 	ECParity    uint8
 }
 
+type ecObjectShardWriteError struct {
+	shardIdx int
+	node     string
+	err      error
+}
+
+func (e *ecObjectShardWriteError) Error() string {
+	return fmt.Sprintf("ec write shard %d to %s: %v", e.shardIdx, e.node, e.err)
+}
+
+func (e *ecObjectShardWriteError) Unwrap() error {
+	return e.err
+}
+
 func newECObjectWriter(selfID string, shards ecObjectShardStore, peerHealth ecObjectPeerHealth) ecObjectWriter {
 	return ecObjectWriter{
 		selfID:        selfID,
@@ -66,6 +85,91 @@ func (w ecObjectWriter) writeShardReaders(
 	plan ecObjectWritePlan,
 	sp *spooledObject,
 	openShard func(idx int) (io.Reader, error),
+	metricPath string,
+) (ecObjectWriteResult, error) {
+	return w.writeShardReadersWithSize(ctx, plan, sp, openShard, nil, metricPath)
+}
+
+func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWritePlan, sp *spooledObject) (ecObjectWriteResult, error) {
+	stageStart := time.Now()
+	src, err := sp.Open()
+	if err != nil {
+		return ecObjectWriteResult{}, fmt.Errorf("open spooled object: %w", err)
+	}
+	data, readErr := io.ReadAll(src)
+	closeErr := src.Close()
+	if readErr != nil {
+		return ecObjectWriteResult{}, fmt.Errorf("read spooled object: %w", readErr)
+	}
+	if closeErr != nil {
+		return ecObjectWriteResult{}, fmt.Errorf("close spooled object: %w", closeErr)
+	}
+	if int64(len(data)) != sp.Size {
+		return ecObjectWriteResult{}, fmt.Errorf("read spooled object: got %d bytes, expected %d", len(data), sp.Size)
+	}
+	observePutStage("ec_memory", "read_object", stageStart)
+
+	stageStart = time.Now()
+	shards, err := ECSplit(plan.Config, data)
+	clear(data)
+	data = nil
+	if err != nil {
+		return ecObjectWriteResult{}, err
+	}
+	observePutStage("ec_memory", "split_encode", stageStart)
+	defer func() {
+		for _, shard := range shards {
+			clear(shard)
+		}
+	}()
+
+	return w.writeShardReaders(ctx, plan, sp, func(idx int) (io.Reader, error) {
+		if idx < 0 || idx >= len(shards) {
+			return nil, fmt.Errorf("ec memory shard %d out of range", idx)
+		}
+		return bytes.NewReader(shards[idx]), nil
+	}, "ec_memory")
+}
+
+func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
+	shards, err := ECSplit(plan.Config, data)
+	if err != nil {
+		return ecObjectWriteResult{}, fmt.Errorf("ec split: %w", err)
+	}
+	h := md5.Sum(data)
+	sp := &spooledObject{
+		Size: int64(len(data)),
+		ETag: hex.EncodeToString(h[:]),
+	}
+
+	return w.writeShardReaders(ctx, plan, sp, func(idx int) (io.Reader, error) {
+		if idx < 0 || idx >= len(shards) {
+			return nil, fmt.Errorf("ec data shard %d out of range", idx)
+		}
+		return bytes.NewReader(shards[idx]), nil
+	}, "ec")
+}
+
+func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {
+	stageStart := time.Now()
+	shards, err := spoolECShards(ctx, plan.Config, spoolDir, sp)
+	if err != nil {
+		return ecObjectWriteResult{}, err
+	}
+	observePutStage("ec", "spool_shards", stageStart)
+	defer shards.Cleanup()
+
+	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+		return shards.OpenShard(idx)
+	}, shards.ShardSize, "ec")
+}
+
+func (w ecObjectWriter) writeShardReadersWithSize(
+	ctx context.Context,
+	plan ecObjectWritePlan,
+	sp *spooledObject,
+	openShard func(idx int) (io.Reader, error),
+	shardSize func(idx int) (int64, error),
 	metricPath string,
 ) (ecObjectWriteResult, error) {
 	shardKey := plan.Key + "/" + plan.VersionID
@@ -95,9 +199,14 @@ func (w ecObjectWriter) writeShardReaders(
 					return fmt.Errorf("open ec shard %d: %w", i, err)
 				}
 				werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
+				if closer, ok := body.(io.Closer); ok {
+					if closeErr := closer.Close(); werr == nil && closeErr != nil {
+						werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+					}
+				}
 				observePutStage("ec_write_shard", "local", shardStageStart)
 			} else {
-				werr = w.writeRemoteShard(gctx, openShard, i, node, plan.Bucket, shardKey)
+				werr = w.writeRemoteShard(gctx, openShard, shardSize, i, node, plan.Bucket, shardKey)
 				observePutStage("ec_write_shard", "remote", shardStageStart)
 				if w.peerHealth != nil {
 					if werr != nil {
@@ -108,7 +217,7 @@ func (w ecObjectWriter) writeShardReaders(
 				}
 			}
 			if werr != nil {
-				return fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
+				return &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}
 			}
 			written <- node
 			return nil
@@ -133,7 +242,49 @@ func (w ecObjectWriter) writeShardReaders(
 	}, nil
 }
 
-func (w ecObjectWriter) writeRemoteShard(ctx context.Context, openShard func(int) (io.Reader, error), shardIdx int, node, bucket, shardKey string) error {
+func (w ecObjectWriter) writeSingleLocalReader(
+	plan ecObjectWritePlan,
+	sp *spooledObject,
+	body io.Reader,
+	metricPath string,
+	bodyHash hash.Hash,
+) (ecObjectWriteResult, error) {
+	shardKey := plan.Key + "/" + plan.VersionID
+	stageStart := time.Now()
+
+	header := encodeShardHeader(sp.Size)
+	if bodyHash != nil {
+		body = io.TeeReader(body, bodyHash)
+	}
+	shardBody := io.MultiReader(bytes.NewReader(header[:]), body)
+	if err := w.shards.WriteLocalShardStream(plan.Bucket, shardKey, 0, shardBody); err != nil {
+		return ecObjectWriteResult{}, fmt.Errorf("write single local shard: %w", err)
+	}
+	observePutStage(metricPath, "write_local_shard", stageStart)
+
+	if bodyHash != nil {
+		sp.ETag = hex.EncodeToString(bodyHash.Sum(nil))
+	}
+
+	return ecObjectWriteResult{
+		Size:        sp.Size,
+		ETag:        sp.ETag,
+		ModTime:     time.Now().Unix(),
+		ShardKey:    shardKey,
+		Placement:   cloneStringSlice(plan.Placement),
+		RingVersion: plan.RingVersion,
+		ECData:      1,
+		ECParity:    0,
+	}, nil
+}
+
+func (w ecObjectWriter) writeRemoteShard(
+	ctx context.Context,
+	openShard func(int) (io.Reader, error),
+	shardSize func(int) (int64, error),
+	shardIdx int,
+	node, bucket, shardKey string,
+) error {
 	attempts := w.writeAttempts
 	if attempts <= 0 {
 		attempts = ecShardWriteAttempts
@@ -151,7 +302,19 @@ func (w ecObjectWriter) writeRemoteShard(ctx context.Context, openShard func(int
 		}
 
 		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
-		err = w.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+		if shardSize != nil {
+			if size, sizeErr := shardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
+				var data []byte
+				data, err = io.ReadAll(body)
+				if err == nil {
+					err = w.shards.WriteShard(writeCtx, node, bucket, shardKey, shardIdx, data)
+				}
+			} else {
+				err = w.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, body)
+			}
+		} else {
+			err = w.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+		}
 		if closer, ok := body.(io.Closer); ok {
 			if closeErr := closer.Close(); err == nil && closeErr != nil {
 				err = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)

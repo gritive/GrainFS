@@ -1584,10 +1584,6 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 
 	liveNodes := b.ecWriteNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
-	shards, err := ECSplit(effectiveCfg, data)
-	if err != nil {
-		return nil, fmt.Errorf("ec split: %w", err)
-	}
 
 	// ShardService's key parameter carries the versionID as a suffix so shards
 	// for different versions land at different paths without changing the API.
@@ -1599,95 +1595,26 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
 	}
-	selfID := b.selfAddr
-
-	// Track nodes we wrote to so cleanup can target them precisely.
-	// writtenMu: concurrent goroutines append to written simultaneously.
-	var (
-		writtenMu sync.Mutex
-		written   []string
-	)
-	cleanup := func() {
-		// Called after g.Wait() — single goroutine, no mutex needed here.
-		for _, n := range written {
-			if n == selfID {
-				_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
-				continue
-			}
-			_ = b.shardSvc.DeleteShards(ctx, n, bucket, shardKey)
-		}
-	}
-
-	// Fan-out: write all shards in parallel. Write-all consistency.
-	// Total latency = max(per-shard latency) instead of Σ(per-shard latency).
-	// Each remote write gets a bounded deadline so a dead peer fails without
-	// letting the object PUT hang forever.
-	g, gctx := errgroup.WithContext(ctx)
-	for i, node := range placement {
-		i, node := i, node
-		g.Go(func() error {
-			var werr error
-			if node == selfID {
-				werr = b.shardSvc.WriteLocalShard(bucket, shardKey, i, shards[i])
-			} else {
-				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
-				defer writeCancel()
-				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, i, shards[i])
-				if b.peerHealth != nil {
-					if werr != nil {
-						b.peerHealth.MarkUnhealthy(node)
-					} else {
-						b.peerHealth.MarkHealthy(node)
-					}
-				}
-			}
-			if werr != nil {
-				return fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
-			}
-			writtenMu.Lock()
-			written = append(written, node)
-			writtenMu.Unlock()
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		cleanup()
-		return nil, err
-	}
-
-	h := md5.Sum(data)
-	etag := hex.EncodeToString(h[:])
-	now := time.Now().Unix()
 
 	// Commit metadata. RingVersion + ECData/ECParity + NodeIDs stored so reads
 	// can reconstruct shards without a separate placement record (NodeIDs fallback
 	// is used when RingVersion==0 and no placement record exists).
 	// On failure, best-effort cleanup of orphaned shards.
-	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	plan := ecObjectWritePlan{
 		Bucket:      bucket,
 		Key:         key,
-		Size:        int64(len(data)),
-		ContentType: contentType,
-		ETag:        etag,
-		ModTime:     now,
 		VersionID:   versionID,
+		Config:      effectiveCfg,
+		Placement:   placement,
 		RingVersion: ringVer,
-		ECData:      uint8(effectiveCfg.DataShards),
-		ECParity:    uint8(effectiveCfg.ParityShards),
-		NodeIDs:     placement,
-	}); merr != nil {
-		go b.deleteShardsAsync(bucket, placement, shardKey)
-		return nil, merr
+		ContentType: contentType,
 	}
-
-	return &storage.Object{
-		Key:          key,
-		Size:         int64(len(data)),
-		ContentType:  contentType,
-		ETag:         etag,
-		LastModified: now,
-		VersionID:    versionID,
-	}, nil
+	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	result, err := writer.writeDataShards(ctx, plan, data)
+	if err != nil {
+		return nil, err
+	}
+	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
@@ -1739,108 +1666,36 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		}
 	}
 
-	stageStart = time.Now()
-	shards, err := spoolECShards(ctx, effectiveCfg, b.ecSpoolDir(), sp)
-	if err != nil {
-		return nil, err
-	}
-	observePutStage("ec", "spool_shards", stageStart)
-	defer shards.Cleanup()
-
-	var (
-		writtenMu sync.Mutex
-		written   []string
-	)
-	cleanup := func() {
-		for _, n := range written {
-			if n == selfID {
-				_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
-				continue
-			}
-			_ = b.shardSvc.DeleteShards(ctx, n, bucket, shardKey)
-		}
-	}
-
-	stageStart = time.Now()
-	g, gctx := errgroup.WithContext(ctx)
-	for i, node := range placement {
-		i, node := i, node
-		g.Go(func() error {
-			shardStageStart := time.Now()
-			var werr error
-			if node == selfID {
-				body, err := shards.OpenShard(i)
-				if err != nil {
-					return fmt.Errorf("open ec shard %d: %w", i, err)
-				}
-				defer body.Close()
-				werr = b.shardSvc.WriteLocalShardStream(bucket, shardKey, i, body)
-				observePutStage("ec_write_shard", "local", shardStageStart)
-			} else {
-				werr = b.writeSpooledECShardStream(gctx, shards, i, node, bucket, shardKey)
-				observePutStage("ec_write_shard", "remote", shardStageStart)
-				if b.peerHealth != nil {
-					if werr != nil {
-						b.peerHealth.MarkUnhealthy(node)
-					} else {
-						b.peerHealth.MarkHealthy(node)
-					}
-				}
-			}
-			if werr != nil {
-				if topologyWrite {
-					return &ErrInsufficientPlacementTargets{
-						Operation:     "put_object",
-						GroupID:       topologyGroup.ID,
-						Desired:       effectiveCfg,
-						Configured:    cloneStringSlice(topologyGroup.PeerIDs),
-						Unavailable:   []string{node},
-						FailureReason: fmt.Sprintf("ec write shard %d failed: %v", i, werr),
-					}
-				}
-				return fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
-			}
-			writtenMu.Lock()
-			written = append(written, node)
-			writtenMu.Unlock()
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		cleanup()
-		return nil, err
-	}
-	observePutStage("ec", "write_shards", stageStart)
-
-	now := time.Now().Unix()
-	stageStart = time.Now()
-	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	plan := ecObjectWritePlan{
 		Bucket:           bucket,
 		Key:              key,
-		Size:             sp.Size,
-		ContentType:      contentType,
-		ETag:             sp.ETag,
-		ModTime:          now,
 		VersionID:        versionID,
 		PlacementGroupID: placementGroupID,
+		Config:           effectiveCfg,
+		Placement:        placement,
 		RingVersion:      ringVer,
-		ECData:           uint8(effectiveCfg.DataShards),
-		ECParity:         uint8(effectiveCfg.ParityShards),
-		NodeIDs:          placement,
-	}); merr != nil {
-		go b.deleteShardsAsync(bucket, placement, shardKey)
-		return nil, merr
+		ContentType:      contentType,
 	}
-	observePutStage("ec", "propose_meta", stageStart)
+	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	result, err := writer.writeSpooledShards(ctx, plan, b.ecSpoolDir(), sp)
+	if err != nil {
+		if topologyWrite {
+			var shardErr *ecObjectShardWriteError
+			if errors.As(err, &shardErr) {
+				return nil, &ErrInsufficientPlacementTargets{
+					Operation:     "put_object",
+					GroupID:       topologyGroup.ID,
+					Desired:       effectiveCfg,
+					Configured:    cloneStringSlice(topologyGroup.PeerIDs),
+					Unavailable:   []string{shardErr.node},
+					FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
+				}
+			}
+		}
+		return nil, err
+	}
 
-	return &storage.Object{
-		Key:          key,
-		Size:         sp.Size,
-		ContentType:  contentType,
-		ETag:         sp.ETag,
-		LastModified: now,
-		VersionID:    versionID,
-	}, nil
+	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
 }
 
 func (b *DistributedBackend) tryPutObjectECMemoryShards(
@@ -1852,55 +1707,34 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	sp *spooledObject,
 	contentType string,
 ) (*storage.Object, bool, error) {
-	stageStart := time.Now()
-	src, err := sp.Open()
-	if err != nil {
-		return nil, true, fmt.Errorf("open spooled object: %w", err)
-	}
-	data, readErr := io.ReadAll(src)
-	closeErr := src.Close()
-	if readErr != nil {
-		return nil, true, fmt.Errorf("read spooled object: %w", readErr)
-	}
-	if closeErr != nil {
-		return nil, true, fmt.Errorf("close spooled object: %w", closeErr)
-	}
-	if int64(len(data)) != sp.Size {
-		return nil, true, fmt.Errorf("read spooled object: got %d bytes, expected %d", len(data), sp.Size)
-	}
-	observePutStage("ec_memory", "read_object", stageStart)
-
-	stageStart = time.Now()
-	shards, err := ECSplit(cfg, data)
-	clear(data)
-	data = nil
+	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	result, err := writer.writeMemoryShards(ctx, ecObjectWritePlan{
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        versionID,
+		PlacementGroupID: placementGroupID,
+		Config:           cfg,
+		Placement:        placement,
+		RingVersion:      ringVer,
+		ContentType:      contentType,
+	}, sp)
 	if err != nil {
 		return nil, true, err
 	}
-	observePutStage("ec_memory", "split_encode", stageStart)
-	defer func() {
-		for _, shard := range shards {
-			clear(shard)
-		}
-	}()
 
-	obj, err := b.putObjectECShardReaders(
+	obj, err := b.commitECObjectWriteResult(
 		ctx,
-		bucket,
-		key,
-		versionID,
-		placementGroupID,
-		ringVer,
-		placement,
-		cfg,
-		sp,
-		contentType,
-		func(idx int) (io.Reader, error) {
-			if idx < 0 || idx >= len(shards) {
-				return nil, fmt.Errorf("ec memory shard %d out of range", idx)
-			}
-			return bytes.NewReader(shards[idx]), nil
+		ecObjectWritePlan{
+			Bucket:           bucket,
+			Key:              key,
+			VersionID:        versionID,
+			PlacementGroupID: placementGroupID,
+			Config:           cfg,
+			Placement:        placement,
+			RingVersion:      ringVer,
+			ContentType:      contentType,
 		},
+		result,
 		"ec_memory",
 	)
 	return obj, true, err
@@ -1932,33 +1766,51 @@ func (b *DistributedBackend) putObjectECShardReaders(
 		return nil, err
 	}
 
-	stageStart := time.Now()
-	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	return b.commitECObjectWriteResult(ctx, ecObjectWritePlan{
 		Bucket:           bucket,
 		Key:              key,
-		Size:             result.Size,
-		ContentType:      contentType,
-		ETag:             result.ETag,
-		ModTime:          result.ModTime,
 		VersionID:        versionID,
 		PlacementGroupID: placementGroupID,
+		Config:           cfg,
+		Placement:        placement,
+		RingVersion:      ringVer,
+		ContentType:      contentType,
+	}, result, metricPath)
+}
+
+func (b *DistributedBackend) commitECObjectWriteResult(
+	ctx context.Context,
+	plan ecObjectWritePlan,
+	result ecObjectWriteResult,
+	metricPath string,
+) (*storage.Object, error) {
+	stageStart := time.Now()
+	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:           plan.Bucket,
+		Key:              plan.Key,
+		Size:             result.Size,
+		ContentType:      plan.ContentType,
+		ETag:             result.ETag,
+		ModTime:          result.ModTime,
+		VersionID:        plan.VersionID,
+		PlacementGroupID: plan.PlacementGroupID,
 		RingVersion:      result.RingVersion,
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          result.Placement,
 	}); merr != nil {
-		go b.deleteShardsAsync(bucket, result.Placement, result.ShardKey)
+		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
 	}
 	observePutStage(metricPath, "propose_meta", stageStart)
 
 	return &storage.Object{
-		Key:          key,
+		Key:          plan.Key,
 		Size:         result.Size,
-		ContentType:  contentType,
+		ContentType:  plan.ContentType,
 		ETag:         result.ETag,
 		LastModified: result.ModTime,
-		VersionID:    versionID,
+		VersionID:    plan.VersionID,
 	}, nil
 }
 
@@ -2013,129 +1865,49 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	metricPath string,
 	bodyHash hash.Hash,
 ) (*storage.Object, error) {
-	shardKey := key + "/" + versionID
-	stageStart := time.Now()
-	header := encodeShardHeader(sp.Size)
-	if bodyHash != nil {
-		body = io.TeeReader(body, bodyHash)
-	}
-	shardBody := io.MultiReader(bytes.NewReader(header[:]), body)
-	if err := b.shardSvc.WriteLocalShardStream(bucket, shardKey, 0, shardBody); err != nil {
-		return nil, fmt.Errorf("write single local shard: %w", err)
-	}
-	observePutStage(metricPath, "write_local_shard", stageStart)
-	if bodyHash != nil {
-		sp.ETag = hex.EncodeToString(bodyHash.Sum(nil))
+	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	result, err := writer.writeSingleLocalReader(ecObjectWritePlan{
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        versionID,
+		PlacementGroupID: placementGroupID,
+		Config:           ECConfig{DataShards: 1, ParityShards: 0},
+		Placement:        placement,
+		RingVersion:      ringVer,
+		ContentType:      contentType,
+	}, sp, body, metricPath, bodyHash)
+	if err != nil {
+		return nil, err
 	}
 
-	now := time.Now().Unix()
-	stageStart = time.Now()
+	stageStart := time.Now()
 	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:           bucket,
 		Key:              key,
-		Size:             sp.Size,
+		Size:             result.Size,
 		ContentType:      contentType,
-		ETag:             sp.ETag,
-		ModTime:          now,
+		ETag:             result.ETag,
+		ModTime:          result.ModTime,
 		VersionID:        versionID,
 		PlacementGroupID: placementGroupID,
-		RingVersion:      ringVer,
-		ECData:           1,
-		ECParity:         0,
-		NodeIDs:          placement,
+		RingVersion:      result.RingVersion,
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          result.Placement,
 	}); merr != nil {
-		_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
+		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
 		return nil, merr
 	}
 	observePutStage("ec_single", "propose_meta", stageStart)
 
 	return &storage.Object{
 		Key:          key,
-		Size:         sp.Size,
+		Size:         result.Size,
 		ContentType:  contentType,
-		ETag:         sp.ETag,
-		LastModified: now,
+		ETag:         result.ETag,
+		LastModified: result.ModTime,
 		VersionID:    versionID,
 	}, nil
-}
-
-func (b *DistributedBackend) writeSpooledECShardStream(ctx context.Context, shards *spooledECShards, shardIdx int, node, bucket, shardKey string) error {
-	var lastErr error
-	for attempt := 1; attempt <= ecShardWriteAttempts; attempt++ {
-		body, err := shards.OpenShard(shardIdx)
-		if err != nil {
-			return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
-		}
-
-		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
-		if size, sizeErr := shards.ShardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
-			var data []byte
-			data, err = io.ReadAll(body)
-			if err == nil {
-				err = b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, shardIdx, data)
-			}
-		} else {
-			err = b.shardSvc.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, body)
-		}
-		closeErr := body.Close()
-		writeCancel()
-		if err == nil {
-			if closeErr != nil {
-				return fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
-			}
-			return nil
-		}
-
-		lastErr = err
-		if ctx.Err() != nil || attempt == ecShardWriteAttempts {
-			return lastErr
-		}
-
-		timer := time.NewTimer(time.Duration(attempt) * ecShardWriteBackoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return lastErr
-		case <-timer.C:
-		}
-	}
-	return lastErr
-}
-
-func (b *DistributedBackend) writeECShardReaderStream(ctx context.Context, openShard func(int) (io.Reader, error), shardIdx int, node, bucket, shardKey string) error {
-	var lastErr error
-	for attempt := 1; attempt <= ecShardWriteAttempts; attempt++ {
-		body, err := openShard(shardIdx)
-		if err != nil {
-			return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
-		}
-
-		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
-		err = b.shardSvc.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
-		if closer, ok := body.(io.Closer); ok {
-			if closeErr := closer.Close(); err == nil && closeErr != nil {
-				err = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
-			}
-		}
-		writeCancel()
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-		if ctx.Err() != nil || attempt == ecShardWriteAttempts {
-			return lastErr
-		}
-
-		timer := time.NewTimer(time.Duration(attempt) * ecShardWriteBackoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return lastErr
-		case <-timer.C:
-		}
-	}
-	return lastErr
 }
 
 // deleteShardsAsync는 propose 실패 시 고아 샤드를 백그라운드에서 삭제한다.
