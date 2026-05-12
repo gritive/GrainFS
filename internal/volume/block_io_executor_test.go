@@ -15,7 +15,6 @@ func executorForTest(store *fakeBlockStore, cache blockCache, dedup blockDedupIn
 		objects:   store,
 		dedup:     dedup,
 		cache:     cache,
-		meter:     &fakeBlockReadMeter{},
 		getBlkBuf: func(size int) []byte { return make([]byte, size) },
 		putBlkBuf: func([]byte) {},
 	}

@@ -15,7 +15,6 @@ type blockIOExecutor struct {
 	objects   blockObjectStore
 	dedup     blockDedupIndex
 	cache     blockCache
-	meter     blockReadMeter
 	deferred  blockDeferredWriter
 	getBlkBuf func(int) []byte
 	putBlkBuf func([]byte)
