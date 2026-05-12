@@ -56,7 +56,7 @@ func (goldenFixtureCluster) PlacementReport(bucket, key string, maxRows int) clu
 				ActualECParity:   2,
 				DesiredECData:    4,
 				DesiredECParity:  2,
-				LayoutState:      cluster.LayoutCurrent,
+				LayoutState:      string(cluster.LayoutCurrent),
 				NodeIDs:          []string{"n1", "n2", "n3"},
 				Size:             1024,
 			},

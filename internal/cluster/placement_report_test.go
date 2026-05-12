@@ -34,5 +34,5 @@ func TestBuildPlacementReport_RepairNeededMetadataOnly(t *testing.T) {
 	}, groups, PlacementReportOptions{Bucket: "b", MaxRows: 10})
 
 	require.Equal(t, 1, report.RepairNeededCount)
-	require.Equal(t, LayoutRepairNeeded, report.Details[0].LayoutState)
+	require.Equal(t, string(LayoutRepairNeeded), report.Details[0].LayoutState)
 }

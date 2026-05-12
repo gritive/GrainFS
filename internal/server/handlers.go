@@ -1354,7 +1354,7 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 
 		snap := s.cluster.Snapshot()
 		if snap.PeerSnapshot != nil {
-			status["peer_snapshot"] = snap.PeerSnapshot
+			status["peer_snapshot"] = cluster.PeerLivenessRowsToWire(snap.PeerSnapshot)
 			status["peers"] = legacyPeersFromSnapshot(snap.PeerSnapshot)
 			status["peer_addrs"] = legacyPeerAddrsFromSnapshot(snap.PeerSnapshot)
 			status["peer_states"] = legacyPeerStatesFromSnapshot(snap.PeerSnapshot)
