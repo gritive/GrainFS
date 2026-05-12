@@ -69,12 +69,13 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	)
 
 	// Wire predictive disk warnings into the collector now that clusterAlerts
-	// exists. Thresholds are taken as fractions on the flag (more natural for
-	// operators) but DiskCollector works in percent.
+	// exists. The warn/critical fractions themselves are read live from
+	// ClusterConfig inside the collector at each tick (wired at
+	// NewDiskCollector time in bootBackendWrap), so a `cluster config set
+	// disk-warn-threshold ...` PATCH lands without a serve restart.
 	clusterAlerts := state.clusterAlerts
 	nodeID := state.nodeID
 	dataDir := cfg.DataDir
-	state.diskCollector.SetThresholds(cfg.DiskWarnFrac*100, cfg.DiskCritFrac*100)
 	state.diskCollector.SetOnThreshold(func(level cluster.DiskThresholdLevel, pct float64, availBytes uint64) {
 		// Webhook send may block on retries — dispatch in a goroutine so the
 		// collect loop is never delayed.

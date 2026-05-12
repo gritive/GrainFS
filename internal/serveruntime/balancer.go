@@ -60,6 +60,8 @@ func (a *RaftBalancerAdapter) TransferLeadership() error { return a.node.Transfe
 //
 // clusterCfg is the live ClusterConfig view (typically metaFSM.ClusterConfig())
 // — the balancer reads its 10 cluster-managed tunables from it every tick.
+// diskCfg is the same view narrowed to disk thresholds for the standalone
+// DiskCollector spun up here; pass the same *ClusterConfig as clusterCfg.
 func StartBalancer(
 	ctx context.Context,
 	opts BalancerOptions,
@@ -72,6 +74,7 @@ func StartBalancer(
 	shardSvc *cluster.ShardService,
 	numShards int,
 	clusterCfg cluster.BalancerClusterCfg,
+	diskCfg cluster.DiskCfgReader,
 ) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
 	if opts.CBThreshold < 0 || opts.CBThreshold > 1 {
 		return nil, nil, fmt.Errorf("balancer cb-threshold must be in [0, 1], got %g", opts.CBThreshold)
@@ -106,7 +109,7 @@ func StartBalancer(
 		JoinedAt: time.Now(),
 	})
 
-	collector := cluster.NewDiskCollector(nodeID, dataDir, statsStore, opts.GossipInterval)
+	collector := cluster.NewDiskCollector(nodeID, dataDir, statsStore, opts.GossipInterval, diskCfg)
 	if testPctStr := os.Getenv("GRAINFS_TEST_DISK_PCT"); testPctStr != "" {
 		var testPct float64
 		if _, err := fmt.Sscanf(testPctStr, "%f", &testPct); err != nil {

@@ -88,7 +88,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	// would emit disk stats. Register unconditionally — duplicate registration
 	// is guarded inside NewDiskCollector. Threshold + OnThreshold + Run are
 	// wired in bootSrvOptsAndReceipt once clusterAlerts is built.
-	state.diskCollector = cluster.NewDiskCollector(state.nodeID, cfg.DataDir, nil, 30*time.Second)
+	state.diskCollector = cluster.NewDiskCollector(state.nodeID, cfg.DataDir, nil, 30*time.Second, state.metaRaft.FSM().ClusterConfig())
 
 	// Auto-create "default" bucket only for singleton startup. In cluster mode,
 	// bucket creation is a cluster-wide metadata operation and must be driven by

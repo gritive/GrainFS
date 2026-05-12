@@ -10,11 +10,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fakeDiskCfg is a hot-reloadable DiskCfgReader for tests. Fractions are
+// stored in atomic.Pointer so a Set() from one goroutine is observed by the
+// collect loop on its next tick.
+type fakeDiskCfg struct {
+	warn atomic.Pointer[float64]
+	crit atomic.Pointer[float64]
+}
+
+func newFakeDiskCfg(warn, crit float64) *fakeDiskCfg {
+	c := &fakeDiskCfg{}
+	c.Set(warn, crit)
+	return c
+}
+
+func (c *fakeDiskCfg) DiskWarnFrac() float64     { return *c.warn.Load() }
+func (c *fakeDiskCfg) DiskCriticalFrac() float64 { return *c.crit.Load() }
+func (c *fakeDiskCfg) Set(warn, crit float64) {
+	c.warn.Store(&warn)
+	c.crit.Store(&crit)
+}
+
 func TestDiskCollector_CollectUpdatesStore(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 80.0, 5000 })
 
 	dc.collect()
@@ -29,7 +50,7 @@ func TestDiskCollector_SetStatFunc_OverridesDefault(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 
 	var called bool
 	dc.SetStatFunc(func(string) (float64, uint64) {
@@ -47,7 +68,7 @@ func TestDiskCollector_SetStatFunc_OverridesDefault(t *testing.T) {
 func TestDiskCollector_CollectNoopIfNodeNotInStore(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 80.0, 5000 })
 
 	assert.NotPanics(t, func() { dc.collect() })
@@ -58,7 +79,7 @@ func TestDiskCollector_Collect_SkipsOnZeroStats(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 50.0})
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 0, 0 })
 	dc.collect()
 
@@ -71,7 +92,7 @@ func TestDiskCollector_Collect_ClampsNegativeUsedPct(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return -10.0, 1000 })
 	dc.collect()
 
@@ -84,7 +105,7 @@ func TestDiskCollector_Collect_ClampsOverHundredUsedPct(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 150.0, 1000 })
 	dc.collect()
 
@@ -97,7 +118,7 @@ func TestDiskCollector_RunCallsCollectOnInterval(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Millisecond)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Millisecond, nil)
 
 	var count atomic.Int64
 	dc.SetStatFunc(func(string) (float64, uint64) {
@@ -123,7 +144,9 @@ func TestDiskCollector_Threshold_FiresOnceOnEntry(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
 
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	// Defaults: 0.80 warn, 0.90 critical (matches DefaultClusterDiskWarnFrac/CriticalFrac).
+	cfg := newFakeDiskCfg(0.80, 0.90)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, cfg)
 
 	var calls []thresholdCall
 	dc.SetOnThreshold(func(l DiskThresholdLevel, p float64, a uint64) {
@@ -158,38 +181,63 @@ func TestDiskCollector_Threshold_NoCallback_NoOp(t *testing.T) {
 	// Unset callback must not panic at any disk percentage.
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
+	cfg := newFakeDiskCfg(0.80, 0.90)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, cfg)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 95.0, 100 })
 	assert.NotPanics(t, func() { dc.collect() })
 }
 
-func TestDiskCollector_SetThresholds_OverridesDefaults(t *testing.T) {
+func TestDiskCollector_Threshold_NilCfg_NoOp(t *testing.T) {
+	// nil cfg disables threshold callback entirely (used by standalone balancer
+	// collector which only emits stats). Must not panic and must not invoke the
+	// callback.
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
-	dc.SetThresholds(50, 70) // tighter
-
-	var got DiskThresholdLevel
-	dc.SetOnThreshold(func(l DiskThresholdLevel, _ float64, _ uint64) { got = l })
-	dc.SetStatFunc(func(string) (float64, uint64) { return 60.0, 1000 })
-	dc.collect()
-	assert.Equal(t, DiskLevelWarn, got, "60% should be warn under (50,70)")
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
+	var called bool
+	dc.SetOnThreshold(func(DiskThresholdLevel, float64, uint64) { called = true })
+	dc.SetStatFunc(func(string) (float64, uint64) { return 95.0, 100 })
+	assert.NotPanics(t, func() { dc.collect() })
+	assert.False(t, called, "threshold callback must not fire when cfg is nil")
 }
 
-func TestDiskCollector_SetThresholds_RejectsInvalidInput(t *testing.T) {
+func TestDiskCollector_Threshold_HotReload(t *testing.T) {
+	// Pin the rotation contract: a cluster-config PATCH that tightens the
+	// thresholds is observed on the next collect tick — no restart, no
+	// re-construction.
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "n1"})
-	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second)
 
-	dc.SetThresholds(90, 80) // warn > critical, invalid
-	dc.SetThresholds(0, 50)  // warn=0, invalid
-	dc.SetThresholds(50, 0)  // critical=0, invalid
-	dc.SetThresholds(-1, 90) // negative, invalid
+	cfg := newFakeDiskCfg(0.80, 0.90)
+	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, cfg)
 
-	var got DiskThresholdLevel
-	dc.SetOnThreshold(func(l DiskThresholdLevel, _ float64, _ uint64) { got = l })
-	dc.SetStatFunc(func(string) (float64, uint64) { return 85.0, 100 })
+	var calls []thresholdCall
+	dc.SetOnThreshold(func(l DiskThresholdLevel, p float64, a uint64) {
+		calls = append(calls, thresholdCall{l, p, a})
+	})
+
+	// 60% under (0.80, 0.90) → OK → first transition fires.
+	dc.SetStatFunc(func(string) (float64, uint64) { return 60.0, 1000 })
 	dc.collect()
-	// Defaults (80, 90) must still be in effect — 85% should be Warn.
-	assert.Equal(t, DiskLevelWarn, got, "invalid SetThresholds calls must be ignored")
+	require.Len(t, calls, 1)
+	assert.Equal(t, DiskLevelOK, calls[0].level)
+
+	// Operator tightens thresholds via cluster-config PATCH: now (0.50, 0.70).
+	// 60% under the new thresholds → Warn. Next tick must observe the change.
+	cfg.Set(0.50, 0.70)
+	dc.collect()
+	require.Len(t, calls, 2, "tightened thresholds must take effect on next tick")
+	assert.Equal(t, DiskLevelWarn, calls[1].level)
+
+	// Operator tightens further to (0.30, 0.50). 60% → Critical.
+	cfg.Set(0.30, 0.50)
+	dc.collect()
+	require.Len(t, calls, 3)
+	assert.Equal(t, DiskLevelCritical, calls[2].level)
+
+	// Loosen back to defaults. 60% → OK.
+	cfg.Set(0.80, 0.90)
+	dc.collect()
+	require.Len(t, calls, 4)
+	assert.Equal(t, DiskLevelOK, calls[3].level)
 }

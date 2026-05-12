@@ -154,7 +154,7 @@ func TestBalancerIntegration_DiskCollector(t *testing.T) {
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 
 	// Real DiskCollector with injected 80% disk usage.
-	collector := NewDiskCollector("leader", "/tmp", store, 10*time.Millisecond)
+	collector := NewDiskCollector("leader", "/tmp", store, 10*time.Millisecond, nil)
 	collector.SetStatFunc(func(string) (float64, uint64) { return 80.0, 1 << 30 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
