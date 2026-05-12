@@ -38,6 +38,7 @@ func init() {
 	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
+	_ = serveCmd.Flags().MarkHidden("no-encryption")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")
 	serveCmd.Flags().Int64("nbd-volume-size", 1024*1024*1024, "default NBD volume size in bytes")
@@ -103,6 +104,7 @@ func init() {
 	// (some overlayfs/tmpfs) fall back to the buffered path automatically;
 	// pass --direct-io=false to force buffered everywhere.
 	serveCmd.Flags().Bool("direct-io", true, "bypass page cache on local EC shard writes (Linux O_DIRECT / macOS F_NOCACHE)")
+	_ = serveCmd.Flags().MarkHidden("direct-io")
 	// Phase 2 #3 evaluation flag: when on, every volume-block and EC-shard
 	// read is fed to the read-amplification simulator at three cache sizes
 	// (16/64/256 MB equivalent) per path. Hit/miss counters appear at
@@ -133,9 +135,12 @@ func init() {
 	_ = serveCmd.Flags().MarkDeprecated("dedup", "dedup is always enabled; this flag will be removed in v0.1.0")
 	serveCmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with QUIC stream-open cost.")
 	serveCmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
-	serveCmd.Flags().Bool("quic-mux", true, "use multiplexed QUIC streams + heartbeat coalescing for per-group raft RPCs. idle-N8 measurement: 78pct drop in CPU samples, 17x drop in recvmsg syscalls vs legacy per-message path. Falls back to legacy on peer ALPN mismatch (older binaries).")
-	serveCmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer when --quic-mux=true (avoids HoL with raft pipelining)")
-	serveCmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window when --quic-mux=true (must be << heartbeat-interval)")
+	// Multiplexed QUIC raft RPCs are always on (idle-N8 measurement: 78pct drop
+	// in CPU samples, 17x drop in recvmsg syscalls vs the legacy per-message
+	// path; per-peer ALPN fallback to the legacy path is retained for older
+	// binaries). These two knobs tune the always-on mux path.
+	serveCmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining)")
+	serveCmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval)")
 	serveCmd.Flags().String("join", "", "join an existing cluster through this leader/follower raft address")
 	rootCmd.AddCommand(serveCmd)
 }

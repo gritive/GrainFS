@@ -82,7 +82,6 @@ Flags:
       --scrub-interval duration  EC shard scrub 주기 (default 24h, 0=비활성)
       --reshard-interval duration EC background reshard 주기 (default 24h, 0=비활성)
       --encryption-key-file      암호화 키 파일 경로
-      --no-encryption            암호화 비활성화
       --node-id string           노드 ID (클러스터 모드)
       --raft-addr string         Raft 주소 (클러스터 모드)
       --join string              기존 클러스터의 Raft 주소로 동적 참가

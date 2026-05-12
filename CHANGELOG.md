@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.151.0] - 2026-05-12 — chore: trim serve flags (hide no-encryption/direct-io, remove quic-mux)
+
+### Changed
+- `--no-encryption` and `--direct-io` are now hidden flags. Both still work and behave exactly as before — they're escape hatches operators normally shouldn't touch (encryption-off for benchmarks/recovery; `--direct-io=false` for filesystems that reject O_DIRECT). Hiding them keeps `serve --help` focused without removing the capability.
+
+### Removed
+- `--quic-mux` CLI flag. Multiplexed QUIC raft RPCs are now unconditionally on (78% drop in CPU samples / 17x fewer recvmsg syscalls vs the legacy per-message path; the per-peer ALPN fallback to the legacy path for older peers is retained). `--quic-mux-pool` and `--quic-mux-flush` remain as tuning knobs for the always-on mux path.
+
 ## [0.0.150.0] - 2026-05-12 — chore: remove dead --raft-log-fsync flag
 
 ### Removed
