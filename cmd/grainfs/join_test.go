@@ -1,64 +1,83 @@
 package main
 
 import (
-	"context"
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func newClusterJoinTestCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "join <peer>", Args: cobra.ExactArgs(1), RunE: runClusterJoin}
-	cmd.Flags().String("data-dir", "", "")
-	cmd.Flags().String("node-id", "", "")
-	cmd.Flags().String("raft-addr", "", "")
-	cmd.Flags().String("cluster-key", "", "")
+func newJoinTestCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "join <peer>", Args: cobra.ExactArgs(1), RunE: runJoin}
+	registerAdminEndpointFlag(cmd)
+	registerAdminTimeoutFlag(cmd)
 	return cmd
 }
 
-func TestRunClusterJoinCallsSharedRealJoinPath(t *testing.T) {
-	var got struct {
-		called     bool
-		peer       string
-		dataDir    string
-		nodeID     string
-		raftAddr   string
-		clusterKey string
-	}
-	prev := runClusterJoinNode
-	runClusterJoinNode = func(ctx context.Context, peer, dataDir, nodeID, raftAddr, clusterKey string) error {
-		got.called = true
-		got.peer = peer
-		got.dataDir = dataDir
-		got.nodeID = nodeID
-		got.raftAddr = raftAddr
-		got.clusterKey = clusterKey
-		return ctx.Err()
-	}
-	t.Cleanup(func() { runClusterJoinNode = prev })
-
-	cmd := newClusterJoinTestCommand()
-	require.NoError(t, cmd.Flags().Set("data-dir", t.TempDir()))
-	require.NoError(t, cmd.Flags().Set("node-id", "node-b"))
-	require.NoError(t, cmd.Flags().Set("raft-addr", "127.0.0.1:9002"))
-	require.NoError(t, cmd.Flags().Set("cluster-key", "join-key"))
-
-	require.NoError(t, runClusterJoin(cmd, []string{"127.0.0.1:9001"}))
-	require.True(t, got.called)
-	require.Equal(t, "127.0.0.1:9001", got.peer)
-	require.Equal(t, "node-b", got.nodeID)
-	require.Equal(t, "127.0.0.1:9002", got.raftAddr)
-	require.Equal(t, "join-key", got.clusterKey)
-	require.NotEmpty(t, got.dataDir)
+func runJoinCmd(t *testing.T, sock string, peerAddr string) (string, error) {
+	t.Helper()
+	cmd := newJoinTestCmd()
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--endpoint", sock, peerAddr})
+	err := cmd.Execute()
+	return out.String(), err
 }
 
-func TestRunClusterJoinNodeReal_EmptyClusterKey_ReturnsError(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+type stubJoinServer struct {
+	calls    atomic.Int32
+	lastPeer atomic.Value // string
+	response map[string]any
+}
 
-	err := runClusterJoinNodeReal(ctx, "127.0.0.1:7001", t.TempDir(),
-		"join-node", "127.0.0.1:0", "" /* clusterKey */)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--cluster-key is required")
+func (s *stubJoinServer) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/cluster/join", func(w http.ResponseWriter, r *http.Request) {
+		s.calls.Add(1)
+		var req struct {
+			PeerAddr string `json:"peer_addr"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		s.lastPeer.Store(req.PeerAddr)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s.response)
+	})
+	return mux
+}
+
+func TestJoinCmd_RestartInitiated(t *testing.T) {
+	stub := &stubJoinServer{
+		response: map[string]any{
+			"status":  "restart_initiated",
+			"message": "node will restart and join 127.0.0.1:8300",
+		},
+	}
+	sock := startUDSStubServer(t, stub.handler())
+
+	out, err := runJoinCmd(t, sock, "127.0.0.1:8300")
+	require.NoError(t, err, out)
+	assert.Equal(t, int32(1), stub.calls.Load())
+	assert.Equal(t, "127.0.0.1:8300", stub.lastPeer.Load())
+	assert.Contains(t, out, "restart_initiated")
+}
+
+func TestJoinCmd_AlreadyMember(t *testing.T) {
+	stub := &stubJoinServer{
+		response: map[string]any{
+			"status":  "already_member",
+			"message": "node is already part of a multi-node cluster",
+		},
+	}
+	sock := startUDSStubServer(t, stub.handler())
+
+	out, err := runJoinCmd(t, sock, "127.0.0.1:8300")
+	require.NoError(t, err, out)
+	assert.Contains(t, strings.ToLower(out), "already_member")
 }
