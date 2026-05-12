@@ -80,7 +80,7 @@ var _ ObjectDeleter = (*storage.Operations)(nil)
 func TestWorker_UsesStorageOperationsForMutations(t *testing.T) {
 	db := newTestDB(t)
 	store := NewStore(db)
-	require.NoError(t, store.Put("bucket", &LifecycleConfiguration{
+	require.NoError(t, store.put("bucket", &LifecycleConfiguration{
 		Rules: []Rule{{
 			ID:         "expire-1",
 			Status:     "Enabled",
@@ -142,7 +142,7 @@ func TestWorker_ExpiresOldObject(t *testing.T) {
 			Expiration: &Expiration{Days: 30},
 		}},
 	}
-	require.NoError(t, store.Put("bucket", cfg))
+	require.NoError(t, store.put("bucket", cfg))
 
 	oldTime := time.Now().Add(-31 * 24 * time.Hour).Unix()
 	backend := &mockBackend{
@@ -168,7 +168,7 @@ func TestWorker_SkipsRecentObject(t *testing.T) {
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r", Status: "Enabled", Expiration: &Expiration{Days: 30}}},
 	}
-	require.NoError(t, store.Put("bucket", cfg))
+	require.NoError(t, store.put("bucket", cfg))
 
 	newTime := time.Now().Add(-10 * 24 * time.Hour).Unix()
 	backend := &mockBackend{
@@ -193,7 +193,7 @@ func TestWorker_SkipsDisabledRule(t *testing.T) {
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r", Status: "Disabled", Expiration: &Expiration{Days: 1}}},
 	}
-	require.NoError(t, store.Put("bucket", cfg))
+	require.NoError(t, store.put("bucket", cfg))
 
 	oldTime := time.Now().Add(-100 * 24 * time.Hour).Unix()
 	backend := &mockBackend{
@@ -223,7 +223,7 @@ func TestWorker_PrefixFilter(t *testing.T) {
 			Expiration: &Expiration{Days: 1},
 		}},
 	}
-	require.NoError(t, store.Put("bucket", cfg))
+	require.NoError(t, store.put("bucket", cfg))
 
 	oldTime := time.Now().Add(-2 * 24 * time.Hour).Unix()
 	backend := &mockBackend{
@@ -279,7 +279,7 @@ func TestWorker_NoncurrentVersionExpiration_ByCount(t *testing.T) {
 			},
 		}},
 	}
-	require.NoError(t, store.Put("bucket", cfg))
+	require.NoError(t, store.put("bucket", cfg))
 
 	oldTime := time.Now().Add(-100 * 24 * time.Hour).Unix()
 	backend := &mockBackend{
@@ -319,7 +319,7 @@ func TestWorker_NoncurrentVersionExpiration_ByAge(t *testing.T) {
 			NoncurrentVersionExpiration: &NoncurrentVersionExpiration{NoncurrentDays: 7},
 		}},
 	}
-	require.NoError(t, store.Put("bucket", cfg))
+	require.NoError(t, store.put("bucket", cfg))
 
 	recentTime := time.Now().Add(-3 * 24 * time.Hour).Unix()
 	oldTime := time.Now().Add(-10 * 24 * time.Hour).Unix()
@@ -353,7 +353,7 @@ func TestWorker_Stats(t *testing.T) {
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r", Status: "Enabled", Expiration: &Expiration{Days: 1}}},
 	}
-	require.NoError(t, store.Put("bucket", cfg))
+	require.NoError(t, store.put("bucket", cfg))
 
 	oldTime := time.Now().Add(-2 * 24 * time.Hour).Unix()
 	backend := &mockBackend{

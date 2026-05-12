@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.168.0] - 2026-05-13 — refactor(lifecycle): deepen Store.put seam + Apply→Worker round-trip test
+
+### Changed
+- `Store.Put()` → unexported `Store.put()`: FSM apply 경로(`PutRaw`)를 우회하는 public write 경로 제거. 운영 코드에서는 반드시 Raft proposal(`ProposeLifecyclePut` → FSM → `PutRaw`)을 통해서만 쓰기 가능.
+- `ListBuckets()` 주석 정리: "pre-FSM-era leftover" 문구 제거.
+- `reconcile()` 리더십 획득 로그 메시지 단순화.
+
+### Added
+- `fakeProposerWithStore` 테스트 헬퍼: `PutRaw`를 직접 호출해 동기 FSM apply를 시뮬레이션, 실제 Raft 노드 없이 Apply→Worker 라운드트립 검증 가능.
+- `TestService_Apply_ThenWorkerProcesses`: Apply() 후 Worker가 실제로 만료 객체를 삭제하는 end-to-end 모듈 불변 조건 테스트. race detector 통과 확인.
+
 ## [0.0.167.0] - 2026-05-13 — feat(cluster): runtime UDS join + .join-pending boot simplification
 
 클러스터 join 워크플로우 단순화. 모든 노드가 동일한 `grainfs serve` 명령으로 기동.

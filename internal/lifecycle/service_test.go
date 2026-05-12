@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
 // fakeProposer captures the last propose call for assertions.
@@ -171,6 +173,65 @@ func TestService_Status_RunningReflectsWorker(t *testing.T) {
 	lead.set(false) // become follower → executor stops
 	require.Eventually(t, func() bool { return !s.workerRunningForTest() }, 2*time.Second, 10*time.Millisecond)
 	assert.False(t, s.Status().Running)
+}
+
+// fakeProposerWithStore simulates a synchronous FSM apply: ProposeLifecyclePut
+// writes directly to the store, letting tests verify the Apply→Worker round-trip
+// without spinning up a real Raft node.
+type fakeProposerWithStore struct {
+	store *Store
+}
+
+func (f *fakeProposerWithStore) ProposeLifecyclePut(_ context.Context, bucket string, raw []byte) error {
+	return f.store.PutRaw(bucket, raw)
+}
+func (f *fakeProposerWithStore) ProposeLifecycleDelete(_ context.Context, bucket string) error {
+	return f.store.Delete(bucket)
+}
+
+// TestService_Apply_ThenWorkerProcesses verifies the full module invariant:
+// a lifecycle config written via Apply() is eventually processed by the Worker.
+func TestService_Apply_ThenWorkerProcesses(t *testing.T) {
+	db := newTestDB(t)
+	store := NewStore(db)
+	prop := &fakeProposerWithStore{store: store}
+
+	oldTime := time.Now().Add(-2 * 24 * time.Hour).Unix()
+	be := &mockBackend{
+		buckets: []string{"b"},
+		objects: map[string][]scrubber.ObjectRecord{
+			"b": {{Bucket: "b", Key: "old.log", DataShards: 4, LastModified: oldTime}},
+		},
+	}
+	del := &mockDeleter{}
+	lead := &signalLeadership{leader: false}
+
+	svc := NewService(store, prop, lead, be, del, 10*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { svc.Run(ctx); close(runDone) }()
+
+	// Apply config via service (simulates FSM: writes to store via PutRaw).
+	raw := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>`)
+	require.NoError(t, svc.Apply(context.Background(), "b", raw))
+
+	// Become leader → Worker starts and processes the config.
+	lead.set(true)
+	require.Eventually(t, func() bool {
+		del.mu.Lock()
+		defer del.mu.Unlock()
+		return len(del.deleted) > 0
+	}, 2*time.Second, 10*time.Millisecond, "worker should delete expired object after Apply")
+
+	// Stop the service and wait for Run to fully exit (including workerWG.Wait) before
+	// asserting, so no worker cycle can race with the assertion. The worker may have
+	// run more than one cycle, so check Contains rather than exact-slice equality.
+	cancel()
+	<-runDone
+	del.mu.Lock()
+	assert.Contains(t, del.deleted, "b/old.log")
+	del.mu.Unlock()
 }
 
 func TestService_Run_StartsWorkerOnLeader_StopsOnFollower(t *testing.T) {
