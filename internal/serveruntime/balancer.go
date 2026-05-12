@@ -14,21 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// BalancerOptions captures the cobra-flag-derived knobs that StartBalancer
-// previously read directly from a cobra.Command. Caller (cmd) is
-// responsible for translating flag values into this struct.
-type BalancerOptions struct {
-	GossipInterval      time.Duration
-	WarmupTimeout       time.Duration
-	ImbalanceTriggerPct float64
-	ImbalanceStopPct    float64
-	MigrationRate       int
-	LeaderTenureMin     time.Duration
-	CBThreshold         float64
-	MigrationMaxRetries int
-	MigrationPendingTTL time.Duration
-}
-
 // RaftBalancerAdapter wraps cluster.RaftNode to implement
 // cluster.RaftBalancerNode. Used internally by StartBalancer; exported so
 // tests outside this package can supply their own adapter when wiring a
@@ -64,7 +49,6 @@ func (a *RaftBalancerAdapter) TransferLeadership() error { return a.node.Transfe
 // DiskCollector spun up here; pass the same *ClusterConfig as clusterCfg.
 func StartBalancer(
 	ctx context.Context,
-	opts BalancerOptions,
 	nodeID, dataDir string,
 	statsStore *cluster.NodeStatsStore,
 	node cluster.RaftNode,
@@ -76,9 +60,9 @@ func StartBalancer(
 	clusterCfg cluster.BalancerClusterCfg,
 	diskCfg cluster.DiskCfgReader,
 ) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
-	if opts.CBThreshold < 0 || opts.CBThreshold > 1 {
-		return nil, nil, fmt.Errorf("balancer cb-threshold must be in [0, 1], got %g", opts.CBThreshold)
-	}
+	gossipInterval := clusterCfg.BalancerGossipInterval()
+	migrationPendingTTL := clusterCfg.BalancerMigrationPendingTTL()
+	migrationMaxRetries := int(clusterCfg.BalancerMigrationMaxRetries())
 
 	adapter := NewRaftBalancerAdapter(node, peers)
 	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, clusterCfg)
@@ -87,16 +71,16 @@ func StartBalancer(
 
 	taskCh := make(chan cluster.MigrationTask, 256)
 
-	exec := cluster.NewMigrationExecutorWithTTL(shardSvc, adapter, numShards, opts.MigrationPendingTTL)
-	if opts.MigrationMaxRetries > 0 {
-		exec.SetMaxWriteRetries(opts.MigrationMaxRetries)
+	exec := cluster.NewMigrationExecutorWithTTL(shardSvc, adapter, numShards, migrationPendingTTL)
+	if migrationMaxRetries > 0 {
+		exec.SetMaxWriteRetries(migrationMaxRetries)
 	}
 	exec.SetShardCounter(ECShardCounterFor(fsm))
 	exec.Start(ctx)
 
 	fsm.SetMigrationHooks(taskCh, exec, balancer)
 
-	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, opts.GossipInterval)
+	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval)
 	receiver := cluster.NewGossipReceiver(quicTransport, statsStore)
 
 	go sender.Run(ctx)
@@ -109,7 +93,7 @@ func StartBalancer(
 		JoinedAt: time.Now(),
 	})
 
-	collector := cluster.NewDiskCollector(nodeID, dataDir, statsStore, opts.GossipInterval, diskCfg)
+	collector := cluster.NewDiskCollector(nodeID, dataDir, statsStore, gossipInterval, diskCfg)
 	if testPctStr := os.Getenv("GRAINFS_TEST_DISK_PCT"); testPctStr != "" {
 		var testPct float64
 		if _, err := fmt.Sscanf(testPctStr, "%f", &testPct); err != nil {
@@ -128,6 +112,9 @@ func StartBalancer(
 	}
 
 	log.Info().Str("component", "balancer").
-		Dur("gossip_interval", opts.GossipInterval).Float64("trigger_pct", opts.ImbalanceTriggerPct).Float64("stop_pct", opts.ImbalanceStopPct).Msg("balancer started")
+		Dur("gossip_interval", gossipInterval).
+		Float64("trigger_pct", clusterCfg.BalancerImbalanceTriggerPct()).
+		Float64("stop_pct", clusterCfg.BalancerImbalanceStopPct()).
+		Msg("balancer started")
 	return balancer, receiver, nil
 }

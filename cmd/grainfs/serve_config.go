@@ -58,17 +58,6 @@ func buildClusterConfig(
 	cfg.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
 	cfg.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")
 
-	cfg.BalancerEnabled, _ = cmd.Flags().GetBool("balancer-enabled")
-	cfg.BalancerGossipInterval, _ = cmd.Flags().GetDuration("balancer-gossip-interval")
-	cfg.BalancerImbalanceTriggerPct, _ = cmd.Flags().GetFloat64("balancer-imbalance-trigger-pct")
-	cfg.BalancerImbalanceStopPct, _ = cmd.Flags().GetFloat64("balancer-imbalance-stop-pct")
-	cfg.BalancerMigrationRate, _ = cmd.Flags().GetInt("balancer-migration-rate")
-	cfg.BalancerLeaderTenureMin, _ = cmd.Flags().GetDuration("balancer-leader-tenure-min")
-	cfg.BalancerWarmupTimeout, _ = cmd.Flags().GetDuration("balancer-warmup-timeout")
-	cfg.BalancerCBThreshold, _ = cmd.Flags().GetFloat64("balancer-cb-threshold")
-	cfg.BalancerMigrationMaxRetries, _ = cmd.Flags().GetInt("balancer-migration-max-retries")
-	cfg.BalancerMigrationPendingTTL, _ = cmd.Flags().GetDuration("balancer-migration-pending-ttl")
-
 	cfg.HealReceiptEnabled, _ = cmd.Flags().GetBool("heal-receipt-enabled")
 	cfg.HealReceiptPSK, _ = cmd.Flags().GetString("heal-receipt-psk")
 	cfg.HealReceiptRetention, _ = cmd.Flags().GetDuration("heal-receipt-retention")
@@ -77,11 +66,6 @@ func buildClusterConfig(
 
 	cfg.SnapInterval, _ = cmd.Flags().GetDuration("snapshot-interval")
 	cfg.SnapRetain, _ = cmd.Flags().GetInt("snapshot-retain")
-
-	cfg.AlertWebhook, _ = cmd.Flags().GetString("alert-webhook")
-	cfg.AlertSecret, _ = cmd.Flags().GetString("alert-webhook-secret")
-	cfg.DiskWarnFrac, _ = cmd.Flags().GetFloat64("disk-warn-threshold")
-	cfg.DiskCritFrac, _ = cmd.Flags().GetFloat64("disk-critical-threshold")
 
 	cfg.LifecycleInterval, _ = cmd.Flags().GetDuration("lifecycle-interval")
 	cfg.DedupEnabled, _ = cmd.Flags().GetBool("dedup")

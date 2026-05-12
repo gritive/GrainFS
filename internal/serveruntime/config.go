@@ -59,18 +59,6 @@ type Config struct {
 	ShardCacheSize int64
 	PackThreshold  int
 
-	// Balancer
-	BalancerEnabled             bool
-	BalancerGossipInterval      time.Duration
-	BalancerImbalanceTriggerPct float64
-	BalancerImbalanceStopPct    float64
-	BalancerMigrationRate       int
-	BalancerLeaderTenureMin     time.Duration
-	BalancerWarmupTimeout       time.Duration
-	BalancerCBThreshold         float64
-	BalancerMigrationMaxRetries int
-	BalancerMigrationPendingTTL time.Duration
-
 	// Heal receipts
 	HealReceiptEnabled        bool
 	HealReceiptPSK            string
@@ -81,12 +69,6 @@ type Config struct {
 	// Snapshots (object PITR)
 	SnapInterval time.Duration
 	SnapRetain   int
-
-	// Alerts
-	AlertWebhook string
-	AlertSecret  string
-	DiskWarnFrac float64
-	DiskCritFrac float64
 
 	// Lifecycle / dedup / cache
 	LifecycleInterval time.Duration
