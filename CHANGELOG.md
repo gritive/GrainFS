@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.159.0] - 2026-05-12 — refactor(cluster): EC object writer owns the full data path
+
+### Changed
+- EC object writes now route single-local writes, in-memory shard materialization, spooled shard materialization, and legacy data-slice writes through the private `EC Object Writer` module.
+- `DistributedBackend` now keeps placement selection and Raft metadata commits while delegating EC data-plane side effects, cleanup, retry, and peer-health marking to the writer.
+- `CONTEXT.md` now describes `EC Object Writer` as the owner of shard materialization and single-local fast-path writes, not just shard-reader fan-out.
+
+### Removed
+- Removed the old `DistributedBackend` EC shard streaming helpers that duplicated writer retry and cleanup behavior.
+
+### Added
+- Added writer-level coverage for single-local shard header/hash encoding, spooled shard materialization, and direct data-shard object facts.
+
 ## [0.0.158.0] - 2026-05-12 — refactor(cluster): EC object shard writes move behind private writer
 
 ### Changed
