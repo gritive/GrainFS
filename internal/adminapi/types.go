@@ -1,14 +1,50 @@
 // Package adminapi owns the JSON wire schema for the GrainFS admin HTTP API.
 package adminapi
 
+import "errors"
+
 // Error is the JSON envelope returned by admin HTTP handlers on failures.
+// Generic transport-level error envelope; per-endpoint typed wrappers live in
+// the owning admin client package (e.g. clusteradmin.RemovePeerError).
 type Error struct {
 	Code    string         `json:"code"`
 	Message string         `json:"error"`
 	Details map[string]any `json:"details,omitempty"`
+
+	// Status mirrors the HTTP status code. Not serialized.
+	Status int `json:"-"`
+
+	// cause carries the wrapped transport-level error so errors.Is/As can
+	// still see through the typed envelope.
+	cause error `json:"-"`
 }
 
-func (e *Error) Error() string { return e.Message }
+// Error implements error. Returns Message if set, otherwise Code.
+func (e *Error) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return e.Code
+}
+
+// Unwrap exposes the wrapped underlying error.
+func (e *Error) Unwrap() error { return e.cause }
+
+// WithCause returns a copy of e with cause set.
+func (e *Error) WithCause(cause error) *Error {
+	copy := *e
+	copy.cause = cause
+	return &copy
+}
+
+// IsCode reports whether err is a *Error with the given code.
+func IsCode(err error, code string) bool {
+	var e *Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Code == code
+}
 
 // ClusterPeerInfo is the JSON form of one peer's health state.
 type ClusterPeerInfo struct {
