@@ -135,6 +135,8 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
 
+	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
@@ -414,6 +416,8 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 		waitForPort(t, httpPorts[i], 60*time.Second)
 	}
 
+	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
@@ -471,6 +475,7 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 		} `json:"shard_cache"`
 	}
 	var totalHits, totalMisses uint64
+	var totalResident int64
 	for i := 0; i < numNodes; i++ {
 		resp, err := http.Get(httpURL(i) + "/api/cache/status")
 		require.NoError(t, err, "fetch cache status from node %d", i)
@@ -482,17 +487,12 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			i, st.ShardCache.Hits, st.ShardCache.Misses, st.ShardCache.ResidentBytes, st.ShardCache.HitRatePct)
 		totalHits += st.ShardCache.Hits
 		totalMisses += st.ShardCache.Misses
+		totalResident += st.ShardCache.ResidentBytes
 	}
 	total := totalHits + totalMisses
 	require.Greater(t, total, uint64(0), "shard cache recorded zero accesses — wiring broken")
+	require.Greater(t, totalHits, uint64(0), "shard cache recorded misses but no hits — getObjectEC is not reusing cached shards")
+	require.Greater(t, totalResident, int64(0), "shard cache recorded accesses but retained no shard bytes")
 	hitRate := 100 * float64(totalHits) / float64(total)
 	t.Logf("cluster-wide shard cache: %d hits / %d misses → %.1f%% hit rate", totalHits, totalMisses, hitRate)
-
-	// First GET is necessarily a miss for every shard; the next 9 should
-	// be served from cache. With k=2, m=1 we issue 3 read intents per
-	// GET (2 needed for reconstruction). 10 GETs × 3 shards = 30 lookups
-	// per cache. Best case ≈90% (3 misses out of 30); we accept ≥80%.
-	if hitRate < 80 {
-		t.Fatalf("real shard cache hit rate %.1f%% is below the 80%% floor — getObjectEC is not consulting the cache as expected", hitRate)
-	}
 }

@@ -90,6 +90,24 @@ func bootstrapAdminViaUDS(t testing.TB, dataDir string) (accessKey, secretKey st
 // returns 200 or the timeout expires.
 func bootstrapAdminViaUDSAny(t testing.TB, dataDirs []string, timeout time.Duration) (accessKey, secretKey string) {
 	t.Helper()
+	out, _ := bootstrapAdminViaUDSAnyResult(t, dataDirs, timeout)
+	return out.AccessKey, out.SecretKey
+}
+
+func bootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB, dataDirs []string, timeout time.Duration, buckets ...string) (accessKey, secretKey string) {
+	t.Helper()
+	out, sock := bootstrapAdminViaUDSAnyResult(t, dataDirs, timeout)
+	if !bootstrapResultHasWildcardAdmin(out) {
+		if out.SAID == "" {
+			t.Fatalf("bootstrap response for %s had no wildcard grant and no sa_id", sock)
+		}
+		grantAdminOnBucketsViaUDSAny(t, dataDirs, out.SAID, buckets, timeout)
+	}
+	return out.AccessKey, out.SecretKey
+}
+
+func bootstrapAdminViaUDSAnyResult(t testing.TB, dataDirs []string, timeout time.Duration) (iamSAResult, string) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -99,57 +117,320 @@ func bootstrapAdminViaUDSAny(t testing.TB, dataDirs []string, timeout time.Durat
 				lastErr = err
 				continue
 			}
-			ak, sk, err := tryBootstrapAdminViaUDS(sock)
+			out, err := tryBootstrapAdminViaUDSResult(sock)
 			if err == nil {
-				return ak, sk
+				return out, sock
 			}
 			lastErr = err
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("bootstrapAdminViaUDSAny: no node succeeded within %v: %v", timeout, lastErr)
-	return "", ""
+	return iamSAResult{}, ""
+}
+
+func bootstrapResultHasWildcardAdmin(out iamSAResult) bool {
+	for _, grant := range out.Grants {
+		if grant.Bucket == "*" && strings.EqualFold(grant.Role, "admin") {
+			return true
+		}
+	}
+	return false
+}
+
+func grantAdminOnBucketsViaUDSAny(t testing.TB, dataDirs []string, saID string, buckets []string, timeout time.Duration) {
+	t.Helper()
+	for _, bucket := range buckets {
+		deadline := time.Now().Add(timeout)
+		var lastErr error
+		granted := false
+		for time.Now().Before(deadline) {
+			for _, dir := range dataDirs {
+				sock := filepath.Join(dir, "admin.sock")
+				if _, err := os.Stat(sock); err != nil {
+					lastErr = err
+					continue
+				}
+				if err := tryIAMGrantPut(sock, saID, bucket, "Admin"); err != nil {
+					lastErr = err
+					continue
+				}
+				granted = true
+				break
+			}
+			if granted {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if !granted {
+			t.Fatalf("grant Admin for %s on %s did not succeed within %v: %v", saID, bucket, timeout, lastErr)
+		}
+	}
+}
+
+func tryIAMGrantPut(sock, saID, bucket, role string) error {
+	body, err := json.Marshal(map[string]string{"sa_id": saID, "bucket": bucket, "role": role})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "PUT", "http://unix/v1/iam/grant", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := iamUDSClient(sock).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("grant %s %s on %s via %s -> %d: %s", role, saID, bucket, sock, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func TestTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(sock) })
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	defer ln.Close()
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "/v1/iam/sa", r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{
+				"sa_id":"019e-test-sa",
+				"name":"admin",
+				"access_key":"ak",
+				"secret_key":"sk",
+				"created_at":"2026-05-13T00:00:00Z",
+				"grants":[{"sa_id":"019e-test-sa","bucket":"ec-test","role":"admin"}]
+			}`)
+		}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = srv.Serve(ln)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+
+	got, err := tryBootstrapAdminViaUDSResult(sock)
+	require.NoError(t, err)
+	require.Equal(t, "019e-test-sa", got.SAID)
+	require.Equal(t, "ak", got.AccessKey)
+	require.Equal(t, "sk", got.SecretKey)
+	require.Len(t, got.Grants, 1)
+	require.Equal(t, "ec-test", got.Grants[0].Bucket)
+	require.Equal(t, "admin", got.Grants[0].Role)
+}
+
+func TestBootstrapAdminViaUDSAnyWithBucketGrantsIssuesExplicitGrantForRegularSA(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	defer ln.Close()
+
+	granted := make(chan map[string]string, 1)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/iam/sa":
+				require.Equal(t, http.MethodPost, r.Method)
+				_, _ = io.WriteString(w, `{
+					"sa_id":"regular-sa",
+					"name":"admin",
+					"access_key":"ak",
+					"secret_key":"sk",
+					"created_at":"2026-05-13T00:00:00Z"
+				}`)
+			case "/v1/iam/grant":
+				require.Equal(t, http.MethodPut, r.Method)
+				var body map[string]string
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				granted <- body
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = srv.Serve(ln)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+
+	ak, sk := bootstrapAdminViaUDSAnyWithBucketGrants(t, []string{dir}, time.Second, "__probe")
+	require.Equal(t, "ak", ak)
+	require.Equal(t, "sk", sk)
+
+	select {
+	case body := <-granted:
+		require.Equal(t, "regular-sa", body["sa_id"])
+		require.Equal(t, "__probe", body["bucket"])
+		require.Equal(t, "Admin", body["role"])
+	case <-time.After(time.Second):
+		t.Fatal("expected explicit grant request")
+	}
+}
+
+func TestE2EClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "grainfs-cluster-grant-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	defer ln.Close()
+
+	granted := make(chan map[string]string, 1)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "/v1/iam/grant", r.URL.Path)
+			require.Equal(t, http.MethodPut, r.Method)
+			var body map[string]string
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			granted <- body
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = srv.Serve(ln)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+
+	c := &e2eCluster{
+		t:        t,
+		dataDirs: []string{dir},
+		saID:     "regular-sa",
+	}
+	c.GrantAdminOnBuckets("__probe")
+
+	select {
+	case body := <-granted:
+		require.Equal(t, "regular-sa", body["sa_id"])
+		require.Equal(t, "__probe", body["bucket"])
+		require.Equal(t, "Admin", body["role"])
+	case <-time.After(time.Second):
+		t.Fatal("expected explicit grant request")
+	}
+}
+
+func TestMRClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "grainfs-mr-cluster-grant-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	defer ln.Close()
+
+	granted := make(chan map[string]string, 1)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "/v1/iam/grant", r.URL.Path)
+			require.Equal(t, http.MethodPut, r.Method)
+			var body map[string]string
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			granted <- body
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = srv.Serve(ln)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+
+	c := &mrCluster{
+		t:        t,
+		dataDirs: []string{dir},
+		saID:     "regular-sa",
+	}
+	c.GrantAdminOnBuckets("__probe")
+
+	select {
+	case body := <-granted:
+		require.Equal(t, "regular-sa", body["sa_id"])
+		require.Equal(t, "__probe", body["bucket"])
+		require.Equal(t, "Admin", body["role"])
+	case <-time.After(time.Second):
+		t.Fatal("expected explicit grant request")
+	}
 }
 
 func tryBootstrapAdminViaUDS(sock string) (string, string, error) {
+	out, err := tryBootstrapAdminViaUDSResult(sock)
+	if err != nil {
+		return "", "", err
+	}
+	return out.AccessKey, out.SecretKey, nil
+}
+
+func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
 	client := iamUDSClient(sock)
 	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", "http://unix/v1/iam/sa", body)
 	if err != nil {
-		return "", "", err
+		return iamSAResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", err
+		return iamSAResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		buf, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("bootstrap %s -> %d: %s", sock, resp.StatusCode, string(buf))
+		return iamSAResult{}, fmt.Errorf("bootstrap %s -> %d: %s", sock, resp.StatusCode, string(buf))
 	}
-	var out struct {
-		AccessKey string `json:"access_key"`
-		SecretKey string `json:"secret_key"`
-	}
+	var out iamSAResult
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", "", err
+		return iamSAResult{}, err
 	}
 	if out.AccessKey == "" || out.SecretKey == "" {
-		return "", "", fmt.Errorf("bootstrap %s: empty creds in response", sock)
+		return iamSAResult{}, fmt.Errorf("bootstrap %s: empty creds in response", sock)
 	}
-	return out.AccessKey, out.SecretKey, nil
+	return out, nil
 }
 
 // iamSAResult is the deserialized response from POST /v1/iam/sa.
 type iamSAResult struct {
-	SAID      string    `json:"sa_id"`
-	Name      string    `json:"name"`
-	AccessKey string    `json:"access_key"`
-	SecretKey string    `json:"secret_key"`
-	CreatedAt time.Time `json:"created_at"`
+	SAID      string     `json:"sa_id"`
+	Name      string     `json:"name"`
+	AccessKey string     `json:"access_key"`
+	SecretKey string     `json:"secret_key"`
+	CreatedAt time.Time  `json:"created_at"`
+	Grants    []iamGrant `json:"grants,omitempty"`
 }
 
 // iamKeyResult is the deserialized response from POST /v1/iam/sa/{id}/key.

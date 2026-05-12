@@ -56,6 +56,8 @@ type e2eCluster struct {
 	encKeyFile    string
 	accessKey     string
 	secretKey     string
+	saID          string
+	wildcardAdmin bool
 	logPrefix     string
 	scrubInterval string
 	extraArgs     []string
@@ -219,9 +221,12 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 	time.Sleep(2 * time.Second)
 
 	// Bootstrap admin SA on the seed node before any followers join.
-	// Node 0 is the leader at this point, so the /v1/iam/sa propose succeeds.
-	ak, sk := bootstrapAdminViaUDSAny(c.t, c.dataDirs[:1], 30*time.Second)
-	c.accessKey, c.secretKey = ak, sk
+	// Node 0 is the leader at this point in dynamic-join mode, so the
+	// /v1/iam/sa propose succeeds against its admin UDS.
+	admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs[:1], 30*time.Second)
+	c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
+	c.saID = admin.SAID
+	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
 
 	// Followers: write .join-pending before starting so they boot directly in
 	// join mode without a separate restart step.
@@ -265,9 +270,15 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 	}
 	time.Sleep(4 * time.Second)
 
-	// Bootstrap admin SA via UDS once the cluster has quorum.
-	ak, sk := bootstrapAdminViaUDSAny(c.t, c.dataDirs, 60*time.Second)
-	c.accessKey, c.secretKey = ak, sk
+	// Bootstrap admin SA via UDS once the cluster has quorum. Try every
+	// node — only the leader's propose succeeds; others return an error
+	// and the helper retries the next data dir.
+	probeBucket := "__e2e-static-leader-probe"
+	admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs, 60*time.Second)
+	c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
+	c.saID = admin.SAID
+	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
+	c.GrantAdminOnBuckets(probeBucket)
 
 	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -279,7 +290,7 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		1*time.Second,
 		func(ctx context.Context, endpoint string) error {
 			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
-			return tryCreateBucket(ctx, cli, fmt.Sprintf("__e2e-static-leader-probe-%d", time.Now().UnixNano()))
+			return tryCreateBucket(ctx, cli, probeBucket)
 		},
 	)
 	if err != nil {
@@ -394,4 +405,15 @@ func (c *e2eCluster) Stop() {
 
 func (c *e2eCluster) S3Client(i int) *s3.Client {
 	return ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
+}
+
+func (c *e2eCluster) GrantAdminOnBuckets(buckets ...string) {
+	c.t.Helper()
+	if len(buckets) == 0 || c.wildcardAdmin {
+		return
+	}
+	if c.saID == "" {
+		c.t.Fatalf("cannot grant bucket admin without bootstrap sa_id")
+	}
+	grantAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
 }

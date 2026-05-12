@@ -64,6 +64,7 @@ func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	cluster.GrantAdminOnBuckets("grainfs-tables")
 	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
 	require.NoError(t, err)

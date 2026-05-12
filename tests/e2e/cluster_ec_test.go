@@ -119,7 +119,7 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	waitForPortsParallel(t, httpPorts, 90*time.Second)
 
 	// Bootstrap admin SA via UDS once quorum exists.
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
+	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
 
 	var client *s3.Client
 	var leaderIdx int
@@ -251,6 +251,7 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 		DisableNFS: true,
 		DisableNBD: true,
 	})
+	c.GrantAdminOnBuckets(bucketName)
 	accessKey, secretKey := c.accessKey, c.secretKey
 
 	var client *s3.Client
@@ -477,7 +478,7 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 
 	// Bootstrap admin SA via the leader's UDS.
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
+	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
@@ -570,24 +571,45 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 		var lastGetErr error
 		ok := false
 		for time.Now().Before(deadline) {
+			type getResult struct {
+				node int
+				url  string
+				body []byte
+				err  error
+			}
+			live := 0
+			results := make(chan getResult, numNodes)
+			roundCtx, cancelRound := context.WithCancel(ctx)
 			for j := 0; j < numNodes; j++ {
 				if procs[j] == nil {
 					continue
 				}
-				c := ecS3Client(httpURL(j), accessKey, secretKey)
-				got, err := getObjectBytes(ctx, c, bucketName, obj.key)
-				if err != nil {
-					lastGetErr = fmt.Errorf("node %d %s: %w", j, httpURL(j), err)
+				live++
+				j := j
+				go func() {
+					url := httpURL(j)
+					c := ecS3Client(url, accessKey, secretKey)
+					got, err := getObjectBytes(roundCtx, c, bucketName, obj.key)
+					results <- getResult{node: j, url: url, body: got, err: err}
+				}()
+			}
+			for i := 0; i < live; i++ {
+				res := <-results
+				if res.err != nil {
+					lastGetErr = fmt.Errorf("node %d %s: %w", res.node, res.url, res.err)
 					continue
 				}
-				if sha256.Sum256(got) == obj.sum {
-					client = c
-					lastGetErr = nil
-					ok = true
-					break
+				if sha256.Sum256(res.body) != obj.sum {
+					lastGetErr = fmt.Errorf("node %d %s: sha256 mismatch", res.node, res.url)
+					continue
 				}
-				lastGetErr = fmt.Errorf("node %d %s: sha256 mismatch", j, httpURL(j))
+				client = ecS3Client(res.url, accessKey, secretKey)
+				lastGetErr = nil
+				ok = true
+				cancelRound()
+				break
 			}
+			cancelRound()
 			if ok {
 				break
 			}

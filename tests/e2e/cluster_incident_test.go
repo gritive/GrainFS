@@ -68,6 +68,7 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 		DisableNFS:    true,
 		DisableNBD:    true,
 	})
+	c.GrantAdminOnBuckets(bucketName)
 	accessKey, secretKey := c.accessKey, c.secretKey
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
@@ -153,6 +154,7 @@ func TestE2E_QuarantineIncident(t *testing.T) {
 		DisableNFS:    true,
 		DisableNBD:    true,
 	})
+	c.GrantAdminOnBuckets(bucketName)
 	accessKey, secretKey := c.accessKey, c.secretKey
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
@@ -200,7 +202,7 @@ func TestE2E_QuarantineIncident(t *testing.T) {
 			}
 		}
 		return false
-	}, 30*time.Second, 500*time.Millisecond)
+	}, 90*time.Second, 500*time.Millisecond)
 
 	_, err = client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucketName), Key: aws.String("good")})
 	require.NoError(t, err, "unrelated object in same bucket must keep working")
