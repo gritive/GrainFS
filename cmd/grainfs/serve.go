@@ -39,7 +39,6 @@ func init() {
 	_ = serveCmd.Flags().MarkHidden("no-encryption")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")
-	serveCmd.Flags().Int64("nbd-volume-size", 1024*1024*1024, "default NBD volume size in bytes")
 	serveCmd.Flags().Int("pack-threshold", 0, "pack objects below this size into blob files (0 = disabled, e.g. 65536)")
 	serveCmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")
 	serveCmd.Flags().Duration("reshard-interval", defaultReshardInterval, "background EC reshard interval (always on; 0 resets to default 24h)")

@@ -329,10 +329,21 @@ latest. `RouteObjectWrite(bucket, key)` returns a target plus the chosen
 shard group entry so callers can commit the object-index record after the
 write succeeds.
 
-Transport-shape selection, ctx-blocking local-vs-forward decisions, the
-forwarded reply parsing, and the post-write object-index commit remain in
-their owning modules. Unresolved legacy peer rows fail at this seam rather
-than leaking through to forward dispatch, consistent with ADR 0003.
+Transport-shape selection, ctx-blocking local-vs-forward decisions, and
+forwarded reply parsing remain in their owning modules. Unresolved legacy
+peer rows fail at this seam rather than leaking through to forward dispatch,
+consistent with ADR 0003.
+
+**Forward operation atomicity invariant**: for any mutating forward operation
+(PutObject, CompleteMultipartUpload, DeleteObject, DeleteObjectVersion), the
+storage write and the corresponding object-index commit must both complete on
+the leader side before the response is returned to the originating node. The
+originating node does not perform a post-forward index commit. Violations
+produce orphan storage objects (put/delete-marker) or stale index entries
+(delete-version) that are detectable only by the background scrubber. The
+local execution path (originating node is leader) has no remote hand-off and
+accepts the same best-effort semantics: a node crash between storage write
+and ProposeObjectIndex leaves an orphan that the scrubber resolves.
 
 ### Local Execution Decision
 

@@ -101,7 +101,7 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 // registers the NFS4 cache invalidator on distBackend so cross-protocol cache
 // coherency works in cluster mode.
 //
-// Inputs:  state.backend, state.volMgr, state.cfg.NFS4Port/NBDPort/NBDVolumeSize,
+// Inputs:  state.backend, state.volMgr, state.cfg.NFS4Port/NBDPort,
 //
 //	state.distBackend.
 //
@@ -110,7 +110,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4/NBD)
 	// are now wired in cluster mode too, not just local.
-	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.NBDVolumeSize, state.distBackend)
+	nodeSvc := StartNodeServices(state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, state.distBackend)
 	state.AddCleanup(func() { nodeSvc.Close() })
 
 	// Cross-protocol cache coherency: an S3 mutation replicated from another

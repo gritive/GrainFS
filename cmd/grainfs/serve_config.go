@@ -76,7 +76,6 @@ func buildClusterConfig(
 
 	cfg.NFS4Port, _ = cmd.Flags().GetInt("nfs4-port")
 	cfg.NBDPort, _ = cmd.Flags().GetInt("nbd-port")
-	cfg.NBDVolumeSize, _ = cmd.Flags().GetInt64("nbd-volume-size")
 
 	cfg.FDWatchEnabled = fdWatchEnabled(cmd)
 	cfg.FDOpts = fdOptionsFromCmd(cmd)
