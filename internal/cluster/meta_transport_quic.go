@@ -5,22 +5,27 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// MetaTransportQUIC is the QUIC-backed MetaTransport using StreamMetaRaft.
-// It satisfies MetaTransport via *raft.MetaRaftQUICTransport method set.
-type MetaTransportQUIC = raft.MetaRaftQUICTransport
+// MetaTransportQUIC is the QUIC-backed MetaTransport. As of M6.2 step 3 it
+// dispatches to the raft v2 bridge (RaftV2MetaQUICTransport, raftv2_meta_quic.go).
+// PR 30b drops the type alias and renames the v2 file.
+type MetaTransportQUIC = RaftV2MetaQUICTransport
 
-// NewMetaTransportQUIC wires a MetaRaftQUICTransport into the shared QUIC
-// transport. The returned value satisfies MetaTransport and should be passed
-// to MetaRaft.SetTransport before calling Start.
-func NewMetaTransportQUIC(tr *transport.QUICTransport, node *raft.Node) *MetaTransportQUIC {
-	return raft.NewMetaRaftQUICTransport(tr, node)
+// NewMetaTransportQUIC constructs the v2 meta-Raft QUIC transport. The node
+// parameter is the cluster.RaftNode interface; v1's *raft.Node satisfies it
+// via the compile-time check at raftnode.go:148, so existing callers that
+// pass metaRaft.Node() (still typed *raft.Node until M6.3 flips meta_raft.go)
+// continue to compile unchanged.
+func NewMetaTransportQUIC(tr *transport.QUICTransport, node RaftNode) *MetaTransportQUIC {
+	return NewRaftV2MetaQUICTransport(tr, node)
 }
 
-// NewMetaTransportQUICMux is the mux-aware variant. groupMux must already
-// exist; the constructor auto-registers node under the magic groupID
-// "__meta__" so the receiver-side mux dispatch is wired up before
-// EnableMux installs the accept handler. Pass nil groupMux to fall back to
-// legacy-only behavior (equivalent to NewMetaTransportQUIC).
-func NewMetaTransportQUICMux(tr *transport.QUICTransport, node *raft.Node, groupMux *raft.GroupRaftQUICMux) *MetaTransportQUIC {
-	return raft.NewMetaRaftQUICTransportMux(tr, node, groupMux)
+// NewMetaTransportQUICMux keeps the mux-aware constructor signature for boot
+// wiring compat. Meta-Raft does not participate in the per-group mux
+// (StreamMetaRaft != StreamControl), so groupMux is unused on the v2 path.
+// Kept here so internal/serveruntime/boot_phases_raft.go's three-arg call
+// continues to compile; PR 30b can clean up the signature once boot is
+// audited.
+func NewMetaTransportQUICMux(tr *transport.QUICTransport, node RaftNode, groupMux *raft.GroupRaftQUICMux) *MetaTransportQUIC {
+	_ = groupMux
+	return NewRaftV2MetaQUICTransport(tr, node)
 }

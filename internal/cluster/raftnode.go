@@ -69,6 +69,12 @@ type RaftNode interface {
 		sendAppendEntries func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error),
 	)
 
+	// SetInstallSnapshotTransport wires the outbound InstallSnapshot send
+	// callback. v1's *raft.Node already has this method; v2's adapter stores
+	// the callback on the v2TransportBridge so v2.Transport.SendInstallSnapshot
+	// delegates to it. Must be called before Start().
+	SetInstallSnapshotTransport(send func(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error))
+
 	// SetNoOpCommand configures the FSM no-op payload proposed on leader election.
 	// v2 handles no-op entries internally; the adapter is a no-op.
 	SetNoOpCommand(cmd []byte)
