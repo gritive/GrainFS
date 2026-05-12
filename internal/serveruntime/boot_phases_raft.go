@@ -20,9 +20,19 @@ import (
 // IAM applier wiring also happens here (it does not register a runtime
 // callback, just plumbs the apply path into the FSM).
 func bootMetaRaftWiring(state *bootState) error {
+	// In join mode, state.peers is the join target transport address (used by
+	// PerformMetaJoin), not a meta-raft node-ID list. Passing it through as
+	// MetaRaftConfig.Peers would seed the initial voter set with a transport
+	// address as a voter ID — see run.go's raftPeers comment for the term-
+	// storm mechanism. The joiner is added to meta-raft as a voter by the
+	// leader after PerformMetaJoin succeeds.
+	metaPeers := state.peers
+	if state.cfg.JoinMode {
+		metaPeers = nil
+	}
 	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
 		NodeID:  state.nodeID,
-		Peers:   state.peers,
+		Peers:   metaPeers,
 		DataDir: state.cfg.DataDir,
 	})
 	if err != nil {
