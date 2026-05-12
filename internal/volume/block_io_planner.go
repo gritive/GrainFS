@@ -11,10 +11,8 @@ import (
 // It performs read-only I/O (HeadObject, dedup.ReadBlock) to determine the
 // action kind and key layout for each block, then validates pool quota.
 type blockIOPlanner struct {
-	objects   blockObjectStore
-	dedup     blockDedupIndex
-	getBlkBuf func(int) []byte
-	putBlkBuf func([]byte)
+	objects blockObjectStore
+	dedup   blockDedupIndex
 }
 
 // planWrite builds a []BlockAction for a WriteAt call.

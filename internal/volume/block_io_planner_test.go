@@ -11,12 +11,7 @@ import (
 
 // plannerForTest builds a blockIOPlanner with fake dependencies.
 func plannerForTest(store *fakeBlockStore, di blockDedupIndex) blockIOPlanner {
-	return blockIOPlanner{
-		objects:   store,
-		dedup:     di,
-		getBlkBuf: func(size int) []byte { return make([]byte, size) },
-		putBlkBuf: func([]byte) {},
-	}
+	return blockIOPlanner{objects: store, dedup: di}
 }
 
 func TestPlanWrite_DirectNewBlock(t *testing.T) {
@@ -190,6 +185,3 @@ func (d *fakeDedupIndex) FreeBlock(_ string, blkNum int64) (string, bool, error)
 	}
 	return key, ok, nil
 }
-
-// Ensure fakeDedupIndex is used to avoid "imported and not used" errors.
-var _ = fmt.Sprintf
