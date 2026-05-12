@@ -14,7 +14,7 @@ import (
 // (no peers) uses 127.0.0.1:0; bootQUICTransport must Listen, then resolve
 // state.raftAddr to the kernel-picked port so peers see a dialable self.
 func TestBootQUICTransport_BindsLoopbackPort0(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
 
@@ -35,7 +35,7 @@ func TestBootQUICTransport_BindsLoopbackPort0(t *testing.T) {
 // ClusterKey nor keys.d/current.key exists and no peers are configured,
 // bootQUICTransport must generate an ephemeral key so zero-config holds.
 func TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
 
@@ -51,7 +51,7 @@ func TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode(t *testing.T) {
 // bootPeerConnections must return cleanly without panicking on a nil/empty
 // peer list.
 func TestBootPeerConnections_EmptyPeersIsNoOp(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
 
@@ -66,7 +66,7 @@ func TestBootPeerConnections_EmptyPeersIsNoOp(t *testing.T) {
 // state.quicTransport. With QUICMuxEnabled=false, EnableMux must NOT fire
 // (default mux mode).
 func TestBootGroupRaftMux_CreatesMux(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
 
@@ -85,6 +85,7 @@ func TestBootGroupRaftMux_EnabledHonorsConfig(t *testing.T) {
 	state := newBootState(Config{
 		DataDir:            t.TempDir(),
 		NodeID:             "n1",
+		ClusterKey:         "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 		QUICMuxEnabled:     true,
 		QUICMuxPoolSize:    8,
 		QUICMuxFlushWindow: 2 * time.Millisecond,
@@ -108,7 +109,7 @@ func TestBootGroupRaftMux_EnabledHonorsConfig(t *testing.T) {
 // transport phase trio, state.groupRaftMux is non-nil and observable to a
 // hypothetical bootMetaRaft phase that would consume it next.
 func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
 

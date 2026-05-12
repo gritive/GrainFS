@@ -63,7 +63,8 @@ func TestMain(m *testing.M) {
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
-		"--lifecycle-interval", "0"}
+		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}
 
 	// GRAINFS_PPROF=1 enables comprehensive pprof profiling.
 	// CPU profile is collected concurrently with the test run (25s window).
@@ -447,6 +448,7 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
