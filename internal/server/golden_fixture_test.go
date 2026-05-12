@@ -2,47 +2,33 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"flag"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/network/standard"
-	"github.com/stretchr/testify/require"
-
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // goldenFixtureCluster is a deterministic ClusterInfo for wire golden tests.
-// 3 voters: n1 (self/leader), n2 (live), n3 (live cooldown peer for variety).
-type goldenFixtureCluster struct{}
+// Embeds *fakeClusterInfo for the base methods; overrides Snapshot() to add
+// BucketAssignments + ShardGroups (matching fakeTopologyClusterInfo's pattern)
+// and ObjectIndexSummary/PlacementReport for placement endpoint coverage.
+type goldenFixtureCluster struct {
+	*fakeClusterInfo
+}
 
-func (goldenFixtureCluster) NodeID() string      { return "n1" }
-func (goldenFixtureCluster) State() string       { return "Leader" }
-func (goldenFixtureCluster) Term() uint64        { return 7 }
-func (goldenFixtureCluster) LeaderID() string    { return "n1" }
-func (goldenFixtureCluster) Peers() []string     { return []string{"n2", "n3"} }
-func (goldenFixtureCluster) LivePeers() []string { return []string{"n1", "n2", "n3"} }
-
-func (goldenFixtureCluster) Snapshot() cluster.ClusterStatus {
-	return cluster.ClusterStatus{
-		PeerSnapshot: []cluster.PeerLivenessRow{
-			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive, Reason: "self"},
-			{PeerID: "n2", RaftAddr: "10.0.0.2:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
-			{PeerID: "n3", RaftAddr: "10.0.0.3:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
-		},
-		BucketAssignments: map[string]string{"b": "g1"},
-		ShardGroups: []cluster.ShardGroupEntry{
-			{ID: "g1", PeerIDs: []string{"n1", "n2", "n3"}},
-		},
+func (g goldenFixtureCluster) Snapshot() cluster.ClusterStatus {
+	snap := g.fakeClusterInfo.Snapshot()
+	snap.BucketAssignments = map[string]string{"b": "g1"}
+	snap.ShardGroups = []cluster.ShardGroupEntry{
+		{ID: "g1", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
+	return snap
 }
 
 func (goldenFixtureCluster) ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary {
@@ -124,58 +110,33 @@ func (goldenFixtureBalancer) Status() BalancerStatusResult {
 }
 
 // newGoldenFixtureServer brings up a Hertz instance on a UDS with the four
-// admin endpoints under test wired to deterministic fixtures. Returns an
-// http.Client that dials the UDS and a base URL "http://unix" the caller
-// appends paths to.
+// admin endpoints under test wired to deterministic fixtures. Reuses the
+// shared UDS helpers from cluster_admin_uds_test.go. Returns an http.Client
+// that dials the UDS and a base URL "http://unix" the caller appends paths to.
 func newGoldenFixtureServer(t *testing.T) (*http.Client, string) {
 	t.Helper()
 
-	d, err := os.MkdirTemp("/tmp", "gs-golden-")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(d) })
-	sock := filepath.Join(d, "a.sock")
-
 	srv := &Server{
-		cluster:  goldenFixtureCluster{},
+		cluster: goldenFixtureCluster{
+			fakeClusterInfo: &fakeClusterInfo{
+				nodeID:    "n1",
+				state:     "Leader",
+				term:      7,
+				leaderID:  "n1",
+				peers:     []string{"n2", "n3"},
+				livePeers: []string{"n1", "n2", "n3"},
+				snapshot: []cluster.PeerLivenessRow{
+					{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive, Reason: "self"},
+					{PeerID: "n2", RaftAddr: "10.0.0.2:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
+					{PeerID: "n3", RaftAddr: "10.0.0.3:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
+				},
+			},
+		},
 		balancer: goldenFixtureBalancer{},
 	}
 
-	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-
-	h := server.New(
-		server.WithListener(ln),
-		server.WithTransport(standard.NewTransporter),
-		server.WithHostPorts(""),
-	)
-	srv.RegisterClusterAdminUDS(h)
-
-	go h.Spin() //nolint:errcheck
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = h.Shutdown(ctx)
-	})
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, dialErr := net.Dial("unix", sock)
-		if dialErr == nil {
-			conn.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	cli := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", sock)
-			},
-		},
-		Timeout: 5 * time.Second,
-	}
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServerWithSrv(t, sock, srv)
 	return cli, "http://unix"
 }
 
@@ -184,7 +145,9 @@ func newGoldenFixtureServer(t *testing.T) (*http.Client, string) {
 var updateGolden = flag.Bool("update-golden", false, "rewrite testdata/*.golden.json")
 
 // assertGoldenJSON compares the raw response body (JSON) against the file at
-// testdata/<name>. With -update-golden it rewrites the file instead.
+// testdata/<name>. With -update-golden it rewrites the file instead. Goldens
+// are written with a trailing newline; comparison trims a single trailing
+// newline from both sides so editor-added newlines don't cause spurious diffs.
 func assertGoldenJSON(t *testing.T, name string, raw []byte) {
 	t.Helper()
 
@@ -198,7 +161,8 @@ func assertGoldenJSON(t *testing.T, name string, raw []byte) {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, indented.Bytes(), 0o644); err != nil {
+		out := append(indented.Bytes(), '\n')
+		if err := os.WriteFile(path, out, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -208,9 +172,11 @@ func assertGoldenJSON(t *testing.T, name string, raw []byte) {
 	if err != nil {
 		t.Fatalf("read golden %s: %v (run with -update-golden to create)", path, err)
 	}
-	if !bytes.Equal(indented.Bytes(), want) {
+	got := bytes.TrimSuffix(indented.Bytes(), []byte("\n"))
+	wantTrim := bytes.TrimSuffix(want, []byte("\n"))
+	if !bytes.Equal(got, wantTrim) {
 		t.Fatalf("wire diff for %s:\n--- got\n%s\n--- want\n%s",
-			name, indented.String(), string(want))
+			name, string(got), string(wantTrim))
 	}
 }
 
