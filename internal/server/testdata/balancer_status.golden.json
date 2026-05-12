@@ -1,0 +1,31 @@
+{
+  "available": true,
+  "active": true,
+  "imbalance_pct": 12.5,
+  "nodes": [
+    {
+      "node_id": "n1",
+      "disk_used_pct": 55,
+      "disk_avail_bytes": 107374182400,
+      "requests_per_sec": 10,
+      "joined_at": "2026-01-02T03:04:05Z",
+      "updated_at": "2026-01-02T04:05:06Z"
+    },
+    {
+      "node_id": "n2",
+      "disk_used_pct": 72.5,
+      "disk_avail_bytes": 64424509440,
+      "requests_per_sec": 4.5,
+      "joined_at": "2026-01-02T03:04:05Z",
+      "updated_at": "2026-01-02T04:05:06Z"
+    },
+    {
+      "node_id": "n3",
+      "disk_used_pct": 0,
+      "disk_avail_bytes": 214748364800,
+      "requests_per_sec": 0,
+      "joined_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-01-02T04:05:06Z"
+    }
+  ]
+}

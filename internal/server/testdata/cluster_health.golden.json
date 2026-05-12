@@ -1,0 +1,28 @@
+{
+  "mode": "cluster",
+  "degraded": false,
+  "leader_id": "n1",
+  "term": 7,
+  "quorum": {
+    "voters_total": 3,
+    "alive_count": 3,
+    "required": 2,
+    "healthy": true
+  },
+  "peers": [
+    {
+      "peer_id": "n1",
+      "state": "self"
+    },
+    {
+      "peer_id": "n2",
+      "state": "live",
+      "raft_addr": "10.0.0.2:7001"
+    },
+    {
+      "peer_id": "n3",
+      "state": "live",
+      "raft_addr": "10.0.0.3:7001"
+    }
+  ]
+}

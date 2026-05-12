@@ -1,0 +1,62 @@
+{
+  "bucket_assignments": {
+    "b": "g1"
+  },
+  "degraded": false,
+  "down_nodes": [],
+  "leader_id": "n1",
+  "mode": "cluster",
+  "node_id": "n1",
+  "object_index_summary": {
+    "placement_group_counts": {
+      "g1": 3
+    }
+  },
+  "peer_addrs": {
+    "n2": "10.0.0.2:7001",
+    "n3": "10.0.0.3:7001"
+  },
+  "peer_snapshot": [
+    {
+      "peer_id": "n1",
+      "identity_state": "self",
+      "liveness_state": "live",
+      "reason": "self"
+    },
+    {
+      "peer_id": "n2",
+      "raft_addr": "10.0.0.2:7001",
+      "identity_state": "resolved",
+      "liveness_state": "live",
+      "reason": "probe_live"
+    },
+    {
+      "peer_id": "n3",
+      "raft_addr": "10.0.0.3:7001",
+      "identity_state": "resolved",
+      "liveness_state": "live",
+      "reason": "probe_live"
+    }
+  ],
+  "peer_states": {
+    "n2": "live",
+    "n3": "live"
+  },
+  "peers": [
+    "n2",
+    "n3"
+  ],
+  "shard_groups": [
+    {
+      "id": "g1",
+      "peer_ids": [
+        "n1",
+        "n2",
+        "n3"
+      ]
+    }
+  ],
+  "split_brain_suspected": false,
+  "state": "Leader",
+  "term": 7
+}

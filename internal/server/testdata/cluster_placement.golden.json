@@ -1,0 +1,32 @@
+{
+  "desired_policy_basis": "group_voter_count",
+  "bucket": "b",
+  "object_count": 1,
+  "bytes": 1024,
+  "actual_profile_counts": {
+    "4+2": 1
+  },
+  "pending_upgrade_count": 0,
+  "downgrade_skipped_count": 0,
+  "unknown_layout_count": 0,
+  "repair_needed_count": 0,
+  "details": [
+    {
+      "bucket": "b",
+      "key": "obj-1",
+      "version_id": "v1",
+      "placement_group_id": "g1",
+      "actual_ec_data": 4,
+      "actual_ec_parity": 2,
+      "desired_ec_data": 4,
+      "desired_ec_parity": 2,
+      "layout_state": "current",
+      "node_ids": [
+        "n1",
+        "n2",
+        "n3"
+      ],
+      "size": 1024
+    }
+  ]
+}
