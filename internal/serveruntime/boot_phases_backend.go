@@ -110,5 +110,30 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 		Str("node_id", state.nodeID).Str("raft_addr", state.raftAddr).Strs("peers", state.peers).
 		Str("addr", cfg.Addr).Str("data", cfg.DataDir).Msg("server started")
 	LogStartupConfigSnapshot(cfg.FlagsSnapshot, cfg.Addr, cfg.DataDir, state.nodeID, state.raftAddr, state.peers)
+	logClusterConfigLoaded(state.metaRaft.FSM().ClusterConfig())
 	return nil
+}
+
+// logClusterConfigLoaded emits a single structured event with the effective
+// view of ClusterConfig after raft is up and any restored snapshot has been
+// applied. Secret bytes are never logged — only a bool indicating presence.
+func logClusterConfigLoaded(cfg *cluster.ClusterConfig) {
+	log.Info().
+		Str("event", "cluster_config_loaded").
+		Uint64("rev", cfg.Rev()).
+		Bool("balancer-enabled", cfg.BalancerEnabled()).
+		Float64("balancer-imbalance-trigger-pct", cfg.BalancerImbalanceTriggerPct()).
+		Float64("balancer-imbalance-stop-pct", cfg.BalancerImbalanceStopPct()).
+		Int32("balancer-migration-rate", cfg.BalancerMigrationRate()).
+		Dur("balancer-leader-tenure-min", cfg.BalancerLeaderTenureMin()).
+		Dur("balancer-warmup-timeout", cfg.BalancerWarmupTimeout()).
+		Float64("balancer-cb-threshold", cfg.BalancerCBThreshold()).
+		Int32("balancer-migration-max-retries", cfg.BalancerMigrationMaxRetries()).
+		Dur("balancer-migration-pending-ttl", cfg.BalancerMigrationPendingTTL()).
+		Dur("balancer-gossip-interval", cfg.BalancerGossipInterval()).
+		Str("alert-webhook", cfg.AlertWebhook()).
+		Bool("alert-webhook-secret-set", len(cfg.AlertWebhookSecretWrapped()) > 0).
+		Float64("disk-warn-threshold", cfg.DiskWarnFrac()).
+		Float64("disk-critical-threshold", cfg.DiskCriticalFrac()).
+		Msg("cluster config loaded")
 }
