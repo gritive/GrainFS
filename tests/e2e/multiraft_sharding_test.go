@@ -936,6 +936,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--encryption-key-file", c.encKeyFile,
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	require.NoError(t, nfsProc.Start(), "start NFSv4 server")
 	defer func() {
