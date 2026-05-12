@@ -1,9 +1,12 @@
 package cluster
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -105,6 +108,51 @@ func TestMetaFSM_Apply_ClusterConfigPatch_RejectsSecretWithoutEncryptor(t *testi
 	cfg := f.ClusterConfig()
 	require.Equal(t, uint64(0), cfg.Rev())
 	require.Equal(t, "", cfg.AlertWebhook())
+}
+
+// TestMetaFSM_Apply_ClusterConfigPatch_EmitsAuditLog verifies that a successful
+// patch apply emits a structured zerolog event with event=cluster_config_changed
+// and the changed keys present as fields. Keys not in the patch must not leak.
+func TestMetaFSM_Apply_ClusterConfigPatch_EmitsAuditLog(t *testing.T) {
+	f := NewMetaFSM()
+
+	var buf bytes.Buffer
+	prev := log.Logger
+	log.Logger = zerolog.New(&buf).With().Timestamp().Logger()
+	defer func() { log.Logger = prev }()
+
+	require.NoError(t, f.applyCmd(buildClusterConfigPatchCmd(t, ClusterConfigPatch{
+		BalancerImbalanceTriggerPct: ptrFloat(40.0),
+	})))
+
+	s := buf.String()
+	require.Contains(t, s, `"event":"cluster_config_changed"`)
+	require.Contains(t, s, `"rev":1`)
+	require.Contains(t, s, `balancer-imbalance-trigger-pct`)
+	require.NotContains(t, s, `alert-webhook-secret`) // not present in this patch — must not leak
+}
+
+// TestMetaFSM_Apply_ClusterConfigPatch_RedactsSecret verifies that when a patch
+// carries AlertWebhookSecretWrapped, the audit log emits "<redacted>" instead
+// of the raw bytes.
+func TestMetaFSM_Apply_ClusterConfigPatch_RedactsSecret(t *testing.T) {
+	f := NewMetaFSM()
+	f.SetEncryptor(newIAMTestEncryptor(t)) // gate for AlertWebhookSecretWrapped
+
+	var buf bytes.Buffer
+	prev := log.Logger
+	log.Logger = zerolog.New(&buf).With().Timestamp().Logger()
+	defer func() { log.Logger = prev }()
+
+	require.NoError(t, f.applyCmd(buildClusterConfigPatchCmd(t, ClusterConfigPatch{
+		AlertWebhook:              ptrString("https://hooks.example/r"),
+		AlertWebhookSecretWrapped: []byte{0xAA, 0xBB},
+	})))
+
+	s := buf.String()
+	require.Contains(t, s, `"alert_webhook_secret":"<redacted>"`)
+	require.NotContains(t, s, "AABB") // raw bytes hex must not appear
+	require.NotContains(t, s, "aabb")
 }
 
 func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
