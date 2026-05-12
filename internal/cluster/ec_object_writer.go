@@ -1,8 +1,11 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"time"
 
@@ -130,6 +133,42 @@ func (w ecObjectWriter) writeShardReaders(
 		RingVersion: plan.RingVersion,
 		ECData:      uint8(plan.Config.DataShards),
 		ECParity:    uint8(plan.Config.ParityShards),
+	}, nil
+}
+
+func (w ecObjectWriter) writeSingleLocalReader(
+	plan ecObjectWritePlan,
+	sp *spooledObject,
+	body io.Reader,
+	metricPath string,
+	bodyHash hash.Hash,
+) (ecObjectWriteResult, error) {
+	shardKey := plan.Key + "/" + plan.VersionID
+	stageStart := time.Now()
+
+	header := encodeShardHeader(sp.Size)
+	if bodyHash != nil {
+		body = io.TeeReader(body, bodyHash)
+	}
+	shardBody := io.MultiReader(bytes.NewReader(header[:]), body)
+	if err := w.shards.WriteLocalShardStream(plan.Bucket, shardKey, 0, shardBody); err != nil {
+		return ecObjectWriteResult{}, fmt.Errorf("write single local shard: %w", err)
+	}
+	observePutStage(metricPath, "write_local_shard", stageStart)
+
+	if bodyHash != nil {
+		sp.ETag = hex.EncodeToString(bodyHash.Sum(nil))
+	}
+
+	return ecObjectWriteResult{
+		Size:        sp.Size,
+		ETag:        sp.ETag,
+		ModTime:     time.Now().Unix(),
+		ShardKey:    shardKey,
+		Placement:   cloneStringSlice(plan.Placement),
+		RingVersion: plan.RingVersion,
+		ECData:      1,
+		ECParity:    0,
 	}, nil
 }
 

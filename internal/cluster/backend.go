@@ -2013,48 +2013,47 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	metricPath string,
 	bodyHash hash.Hash,
 ) (*storage.Object, error) {
-	shardKey := key + "/" + versionID
-	stageStart := time.Now()
-	header := encodeShardHeader(sp.Size)
-	if bodyHash != nil {
-		body = io.TeeReader(body, bodyHash)
-	}
-	shardBody := io.MultiReader(bytes.NewReader(header[:]), body)
-	if err := b.shardSvc.WriteLocalShardStream(bucket, shardKey, 0, shardBody); err != nil {
-		return nil, fmt.Errorf("write single local shard: %w", err)
-	}
-	observePutStage(metricPath, "write_local_shard", stageStart)
-	if bodyHash != nil {
-		sp.ETag = hex.EncodeToString(bodyHash.Sum(nil))
+	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	result, err := writer.writeSingleLocalReader(ecObjectWritePlan{
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        versionID,
+		PlacementGroupID: placementGroupID,
+		Config:           ECConfig{DataShards: 1, ParityShards: 0},
+		Placement:        placement,
+		RingVersion:      ringVer,
+		ContentType:      contentType,
+	}, sp, body, metricPath, bodyHash)
+	if err != nil {
+		return nil, err
 	}
 
-	now := time.Now().Unix()
-	stageStart = time.Now()
+	stageStart := time.Now()
 	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:           bucket,
 		Key:              key,
-		Size:             sp.Size,
+		Size:             result.Size,
 		ContentType:      contentType,
-		ETag:             sp.ETag,
-		ModTime:          now,
+		ETag:             result.ETag,
+		ModTime:          result.ModTime,
 		VersionID:        versionID,
 		PlacementGroupID: placementGroupID,
-		RingVersion:      ringVer,
-		ECData:           1,
-		ECParity:         0,
-		NodeIDs:          placement,
+		RingVersion:      result.RingVersion,
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          result.Placement,
 	}); merr != nil {
-		_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
+		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
 		return nil, merr
 	}
 	observePutStage("ec_single", "propose_meta", stageStart)
 
 	return &storage.Object{
 		Key:          key,
-		Size:         sp.Size,
+		Size:         result.Size,
 		ContentType:  contentType,
-		ETag:         sp.ETag,
-		LastModified: now,
+		ETag:         result.ETag,
+		LastModified: result.ModTime,
 		VersionID:    versionID,
 	}, nil
 }

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/md5"
 	"errors"
 	"io"
 	"strings"
@@ -49,14 +50,85 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestECObjectWriter_WriteSingleLocalReaderAddsHeaderAndHash(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "node-a",
+		shards: shards,
+	}
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 1, ParityShards: 0},
+		Placement:        []string{"node-a"},
+		RingVersion:      7,
+		ContentType:      "text/plain",
+	}
+	sp := &spooledObject{Size: 5}
+
+	result, err := writer.writeSingleLocalReader(plan, sp, strings.NewReader("hello"), "test", md5.New())
+	if err != nil {
+		t.Fatalf("writeSingleLocalReader error = %v", err)
+	}
+
+	if got, want := len(shards.localWrites), 1; got != want {
+		t.Fatalf("local writes = %d, want %d", got, want)
+	}
+	gotBody := shards.localWrites[0].body
+	if got, want := len(gotBody), shardHeaderSize+len("hello"); got != want {
+		t.Fatalf("local write len = %d, want %d", got, want)
+	}
+	gotSize, _, err := decodeShardHeader(gotBody[:shardHeaderSize])
+	if err != nil {
+		t.Fatalf("decode header: %v", err)
+	}
+	if got, want := gotSize, int64(5); got != want {
+		t.Fatalf("header size = %d, want %d", got, want)
+	}
+	if got, want := string(gotBody[shardHeaderSize:]), "hello"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+	if got, want := result.ETag, "5d41402abc4b2a76b9719d911017c592"; got != want {
+		t.Fatalf("etag = %q, want %q", got, want)
+	}
+	if got, want := sp.ETag, result.ETag; got != want {
+		t.Fatalf("sp ETag = %q, want result ETag %q", got, want)
+	}
+	if got, want := result.ShardKey, "object/v1"; got != want {
+		t.Fatalf("shard key = %q, want %q", got, want)
+	}
+	if got, want := result.ECData, uint8(1); got != want {
+		t.Fatalf("ECData = %d, want %d", got, want)
+	}
+	if got, want := result.ECParity, uint8(0); got != want {
+		t.Fatalf("ECParity = %d, want %d", got, want)
+	}
+}
+
 type fakeECObjectWriterShards struct {
 	writeShardErr     map[string]error
+	localWrites       []fakeECObjectWriterLocalWrite
 	deleteLocalCalls  []string
 	deleteRemoteCalls []string
 }
 
+type fakeECObjectWriterLocalWrite struct {
+	bucket   string
+	key      string
+	shardIdx int
+	body     []byte
+}
+
 func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
-	_, _ = io.Copy(io.Discard, body)
+	data, _ := io.ReadAll(body)
+	f.localWrites = append(f.localWrites, fakeECObjectWriterLocalWrite{
+		bucket:   bucket,
+		key:      key,
+		shardIdx: shardIdx,
+		body:     data,
+	})
 	return nil
 }
 
