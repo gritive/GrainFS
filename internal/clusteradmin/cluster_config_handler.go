@@ -78,6 +78,8 @@ func (h *ClusterConfigHandler) serveGet(w http.ResponseWriter, _ *http.Request) 
 		"alert-webhook-secret":           redactedSecret(cfg.AlertWebhookSecretWrapped()),
 		"disk-warn-threshold":            cfg.DiskWarnFrac(),
 		"disk-critical-threshold":        cfg.DiskCriticalFrac(),
+		"snapshot-interval":              cfg.SnapshotInterval().String(),
+		"snapshot-retain":                cfg.SnapshotRetain(),
 	}
 	keys := cluster.AllConfigKeys()
 	source := make(map[string]string, len(keys))
@@ -124,6 +126,8 @@ type ClusterConfigPatchRequest struct {
 	AlertWebhookSecretPlaintext *string  `json:"alert-webhook-secret,omitempty"`
 	DiskWarnFrac                *float64 `json:"disk-warn-threshold,omitempty"`
 	DiskCriticalFrac            *float64 `json:"disk-critical-threshold,omitempty"`
+	SnapshotInterval            *string  `json:"snapshot-interval,omitempty"` // ParseDuration; "0" disables
+	SnapshotRetain              *int32   `json:"snapshot-retain,omitempty"`
 	ResetKeys                   []string `json:"reset_keys,omitempty"`
 }
 
@@ -205,6 +209,7 @@ func (req ClusterConfigPatchRequest) toPatch(enc *encrypt.Encryptor) (cluster.Cl
 	p.AlertWebhook = req.AlertWebhook
 	p.DiskWarnFrac = req.DiskWarnFrac
 	p.DiskCriticalFrac = req.DiskCriticalFrac
+	p.SnapshotRetain = req.SnapshotRetain
 	p.ResetKeys = req.ResetKeys
 
 	parseDur := func(name string, s *string) (*time.Duration, error) {
@@ -228,6 +233,9 @@ func (req ClusterConfigPatchRequest) toPatch(enc *encrypt.Encryptor) (cluster.Cl
 		return p, err
 	}
 	if p.BalancerGossipInterval, err = parseDur("balancer-gossip-interval", req.BalancerGossipInterval); err != nil {
+		return p, err
+	}
+	if p.SnapshotInterval, err = parseDur("snapshot-interval", req.SnapshotInterval); err != nil {
 		return p, err
 	}
 
