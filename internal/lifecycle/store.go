@@ -47,8 +47,9 @@ func (s *Store) Get(bucket string) (*LifecycleConfiguration, error) {
 	return &cfg, nil
 }
 
-// Put stores cfg as the lifecycle configuration for bucket.
-func (s *Store) Put(bucket string, cfg *LifecycleConfiguration) error {
+// put stores cfg as the lifecycle configuration for bucket.
+// Test-only: production writes go through PutRaw (FSM apply path).
+func (s *Store) put(bucket string, cfg *LifecycleConfiguration) error {
 	data, err := xml.Marshal(cfg)
 	if err != nil {
 		return err
@@ -99,9 +100,8 @@ func (s *Store) Delete(bucket string) error {
 }
 
 // ListBuckets returns the names of all buckets that have a lifecycle
-// configuration persisted locally, in Badger key order (lexical). Used for
-// operator audit of pre-FSM-era leftover keys; callers must not assume the
-// list matches FSM-applied state on a follower.
+// configuration persisted locally, in Badger key order (lexical). Callers
+// must not assume the list matches FSM-applied state on a follower.
 func (s *Store) ListBuckets() ([]string, error) {
 	var out []string
 	err := s.db.View(func(txn *badger.Txn) error {

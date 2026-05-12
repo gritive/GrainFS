@@ -177,7 +177,7 @@ func (s *Service) reconcile(ctx context.Context) {
 			s.logger.Warn().Err(err).Msg("lifecycle: could not audit local config keys on leadership acquire")
 		} else {
 			s.logger.Info().Strs("buckets", buckets).Int("count", len(buckets)).
-				Msg("lifecycle configs present in local store at leadership acquire (re-apply policy to clear pre-FSM-era leftovers if any)")
+				Msg("lifecycle configs present in local store at leadership acquire")
 		}
 		s.start(ctx)
 	case !isLeader && running:
