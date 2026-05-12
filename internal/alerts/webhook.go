@@ -443,9 +443,13 @@ func classifyDecryptErr(err error) string {
 	switch {
 	case strings.Contains(msg, "key not found"), strings.Contains(msg, "unknown key id"):
 		return "key_not_found"
-	case strings.Contains(msg, "aad"), strings.Contains(msg, "AAD"):
+	case strings.Contains(msg, "message authentication failed"),
+		strings.Contains(msg, "aad"), strings.Contains(msg, "AAD"):
 		return "aad_mismatch"
-	case strings.Contains(msg, "decode"), strings.Contains(msg, "unmarshal"), strings.Contains(msg, "header"):
+	case strings.Contains(msg, "magic header"),
+		strings.Contains(msg, "too short"),
+		strings.Contains(msg, "decode"), strings.Contains(msg, "unmarshal"),
+		strings.Contains(msg, "header"):
 		return "decode_error"
 	default:
 		return "other"
