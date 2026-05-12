@@ -1,24 +1,33 @@
 package clusteradmin
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
+// RemovePeerErrorDetails mirrors the JSON shape of the structured "details"
+// object the server emits for /v1/cluster/remove-peer non-2xx responses (or
+// the top-level fields on a legacy flat-shape body — json.Unmarshal ignores
+// unknown keys like "code"/"error" so the same struct works for both).
+type RemovePeerErrorDetails struct {
+	LeaderID    string `json:"leader_id,omitempty"`
+	VotersAfter int    `json:"voters_after,omitempty"`
+	AliveAfter  int    `json:"alive_after,omitempty"`
+	NewQuorum   int    `json:"new_quorum,omitempty"`
+}
+
 // RemovePeerError carries server-supplied structured fields for non-2xx
 // responses to /v1/cluster/remove-peer (leader hint, quorum math). Envelope
-// is the transport-level *adminapi.Error; LeaderID/VotersAfter/... are the
-// typed view of envelope.Details.
+// is the transport-level *adminapi.Error; the embedded
+// RemovePeerErrorDetails is the typed view of envelope.Details.
 type RemovePeerError struct {
-	Envelope    *adminapi.Error
-	Status      int
-	Message     string
-	LeaderID    string
-	VotersAfter int
-	AliveAfter  int
-	NewQuorum   int
+	Envelope *adminapi.Error
+	Status   int
+	Message  string
+	RemovePeerErrorDetails
 }
 
 // Error renders a cluster-specific message format with leader hint.
@@ -44,10 +53,7 @@ func parseRemovePeerError(e *adminapi.Error) *RemovePeerError {
 		Status:   e.Status,
 		Message:  e.Message,
 	}
-	out.LeaderID, _ = e.Details["leader_id"].(string)
-	out.VotersAfter = intField(e.Details, "voters_after")
-	out.AliveAfter = intField(e.Details, "alive_after")
-	out.NewQuorum = intField(e.Details, "new_quorum")
+	_ = json.Unmarshal(e.Details, &out.RemovePeerErrorDetails)
 	return out
 }
 
@@ -60,10 +66,7 @@ func parseTransferLeaderError(e *adminapi.Error) *TransferLeaderError {
 		StatusCode: e.Status,
 		Message:    e.Message,
 	}
-	out.LeaderID, _ = e.Details["leader_id"].(string)
-	if r, ok := e.Details["retry"].(bool); ok {
-		out.Retry = r
-	}
+	_ = json.Unmarshal(e.Details, &out.TransferLeaderErrorDetails)
 	return out
 }
 
@@ -71,18 +74,4 @@ func parseTransferLeaderError(e *adminapi.Error) *TransferLeaderError {
 func asAdminError(err error) (*adminapi.Error, bool) {
 	var e *adminapi.Error
 	return e, errors.As(err, &e)
-}
-
-func intField(m map[string]any, key string) int {
-	v, ok := m[key]
-	if !ok {
-		return 0
-	}
-	switch x := v.(type) {
-	case float64:
-		return int(x)
-	case int:
-		return x
-	}
-	return 0
 }

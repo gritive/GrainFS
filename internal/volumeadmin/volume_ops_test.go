@@ -3,6 +3,7 @@ package volumeadmin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -178,12 +179,12 @@ func TestRunDelete_ConflictPrintsBlockToStderr(t *testing.T) {
 		method: "DELETE", path: "/v1/volumes/v1",
 		status: 409, errResp: &Error{
 			Code: "conflict", Message: "v1 has 3 snapshots; refused without --force",
-			Details: map[string]any{
-				"snapshot_count":  3,
-				"recent":          []map[string]any{{"id": "snap-1", "created_at": "t", "block_count": 1}},
+			Details: json.RawMessage(`{
+				"snapshot_count": 3,
+				"recent": [{"id":"snap-1","created_at":"t","block_count":1}],
 				"cascade_command": "grainfs volume delete v1 --force",
-				"list_command":    "grainfs volume snapshot list v1",
-			},
+				"list_command": "grainfs volume snapshot list v1"
+			}`),
 		},
 	}})
 	defer srv.Close()
@@ -240,7 +241,7 @@ func TestRunResize_UnsupportedShrink_PrintsHint(t *testing.T) {
 		method: "POST", path: "/v1/volumes/v1/resize",
 		status: 422, errResp: &Error{
 			Code: "unsupported", Message: "shrink not supported",
-			Details: map[string]any{"hint": "clone", "clone_command": "grainfs volume clone v1 <new>"},
+			Details: json.RawMessage(`{"hint":"clone","clone_command":"grainfs volume clone v1 <new>"}`),
 		},
 	}})
 	defer srv.Close()

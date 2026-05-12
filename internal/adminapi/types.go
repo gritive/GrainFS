@@ -1,15 +1,23 @@
 // Package adminapi owns the JSON wire schema for the GrainFS admin HTTP API.
 package adminapi
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // Error is the JSON envelope returned by admin HTTP handlers on failures.
 // Generic transport-level error envelope; per-endpoint typed wrappers live in
 // the owning admin client package (e.g. clusteradmin.RemovePeerError).
+//
+// Details holds the raw JSON of the structured "details" object (or, for
+// legacy flat-shape responses, the raw body bytes). Callers decode into an
+// endpoint-specific typed struct via json.Unmarshal so transport stays
+// schema-agnostic while per-endpoint code remains strongly typed.
 type Error struct {
-	Code    string         `json:"code"`
-	Message string         `json:"error"`
-	Details map[string]any `json:"details,omitempty"`
+	Code    string          `json:"code"`
+	Message string          `json:"error"`
+	Details json.RawMessage `json:"details,omitempty"`
 
 	// Status mirrors the HTTP status code. Not serialized.
 	Status int `json:"-"`
