@@ -1481,6 +1481,13 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	icebergTableVec := buildIcebergTableEntriesVector(b, icebergTables)
 	objectIndexVec := buildMetaObjectIndexEntriesVector(b, objectEntries)
 
+	// ClusterConfig: serialize the wrapper's current snap into a stand-alone
+	// FBS buffer and embed it as a [ubyte] vector. Always emit — the inner
+	// buffer is small (~tens of bytes) and a zero-rev empty config round-trips
+	// to the same zero clusterConfigSnap on Restore.
+	ccBytes := serializeClusterConfig(f.clusterCfg)
+	clusterConfigVec := b.CreateByteVector(ccBytes)
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
@@ -1492,6 +1499,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddIcebergNamespaces(b, icebergNamespaceVec)
 	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
+	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -1692,6 +1700,20 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
+	// ClusterConfig: decode the embedded FBS blob and atomically swap into
+	// f.clusterCfg via ReplaceSnap so the outer *ClusterConfig handle held
+	// by consumers (e.g. balancer, alerts, disk monitor) stays valid across
+	// snapshot install. Empty/missing blob (legacy pre-Slice-1 snapshots)
+	// leaves the existing clusterCfg untouched.
+	var newClusterCfgSnap *clusterConfigSnap
+	if snap.ClusterConfigLength() > 0 {
+		cs, err := deserializeClusterConfig(snap.ClusterConfigBytes())
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode cluster config: %w", err)
+		}
+		newClusterCfgSnap = cs
+	}
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
@@ -1704,6 +1726,10 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.icebergTables = newIcebergTables
 	cb := f.onBucketAssigned
 	f.mu.Unlock()
+
+	if newClusterCfgSnap != nil {
+		f.clusterCfg.ReplaceSnap(newClusterCfgSnap)
+	}
 	if cb != nil {
 		for bucket, groupID := range newBucketAssignments {
 			cb(bucket, groupID)
