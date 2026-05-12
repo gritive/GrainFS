@@ -498,14 +498,28 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 				b.logger.Debug().Msg("apply loop: ApplyCh closed; exiting")
 				return
 			}
-			if err := b.fsm.Apply(entry.Command); err != nil {
-				b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
+			switch entry.Type {
+			case raft.LogEntryCommand:
+				if err := b.fsm.Apply(entry.Command); err != nil {
+					b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
+				}
+				// Notify cache invalidators and legacy metrics callback.
+				b.notifyOnApply(entry.Command)
+			case raft.LogEntrySnapshot:
+				meta := raft.SnapshotMeta{
+					Index:         entry.Index,
+					Term:          entry.Term,
+					Servers:       b.node.Configuration().Servers,
+					FormatVersion: raft.FSMSnapshotFormatVersion,
+				}
+				if err := b.fsm.Restore(meta, entry.Command); err != nil {
+					b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm restore snapshot error")
+				}
+			default:
+				continue
 			}
 			b.lastApplied.Store(entry.Index)
 			b.lastAppliedTerm.Store(entry.Term)
-
-			// Notify cache invalidators and legacy metrics callback.
-			b.notifyOnApply(entry.Command)
 
 			// Check if snapshot should be taken
 			if b.snapMgr != nil {

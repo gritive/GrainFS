@@ -13,7 +13,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
@@ -37,7 +36,8 @@ type MetaTransport interface {
 // MetaRaftConfig configures a MetaRaft instance.
 type MetaRaftConfig struct {
 	NodeID    string
-	Peers     []string // addresses of other meta-Raft peers
+	RaftID    string   // raft peer ID; production uses the QUIC address
+	Peers     []string // raft peer IDs; production uses peer QUIC addresses
 	DataDir   string   // directory for BadgerDB; meta store lives at DataDir/meta_raft
 	Transport MetaTransport
 }
@@ -51,14 +51,12 @@ type metaProposerNode interface {
 
 // MetaRaft wraps a raft.Node dedicated to cluster control-plane operations.
 type MetaRaft struct {
-	node      *raft.Node
-	store     *raft.BadgerLogStore
-	vlogEntry *resourcewatch.RegisteredDB
-	snapMgr   *raft.SnapshotManager
-	fsm       *MetaFSM
-	cfg       MetaRaftConfig
-	cancel    context.CancelFunc
-	done      chan struct{}
+	node    RaftNode
+	closeDB func() error
+	fsm     *MetaFSM
+	cfg     MetaRaftConfig
+	cancel  context.CancelFunc
+	done    chan struct{}
 
 	// forwardFn is called when Propose runs on a non-leader node. It RPCs the
 	// encoded MetaCmd to the current leader via the meta-raft forward path.
@@ -73,6 +71,8 @@ type MetaRaft struct {
 
 	icebergMu      sync.Mutex
 	icebergWaiters map[string]chan error
+
+	lastSnapshotIndex uint64
 }
 
 // NewMetaRaft constructs a MetaRaft from config. The node is not started yet;
@@ -80,33 +80,23 @@ type MetaRaft struct {
 // SetTransport (needed when the QUIC transport requires the node handle first).
 func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	storePath := filepath.Join(cfg.DataDir, "meta_raft")
-	store, err := raft.NewBadgerLogStore(storePath)
-	if err != nil {
-		return nil, fmt.Errorf("meta_raft: open store: %w", err)
+	raftID := cfg.RaftID
+	if raftID == "" {
+		raftID = cfg.NodeID
 	}
-	var vlogEntry *resourcewatch.RegisteredDB
-	if !store.IsShared() && store.DB() != nil {
-		vlogEntry = resourcewatch.RegisterDB(resourcewatch.DBCategoryMeta, store.DB())
-	}
-
-	fsm := NewMetaFSM()
-	snapMgr := raft.NewSnapshotManager(store, fsm, raft.SnapshotConfig{
-		Threshold:    1024,
-		TrailingLogs: 512,
-	})
-
-	nodeCfg := raft.DefaultConfig(cfg.NodeID, cfg.Peers)
+	nodeCfg := raft.DefaultConfig(raftID, cfg.Peers)
 	// Meta-Raft shares the QUIC transport and process with data Raft, shard RPC,
 	// S3 startup probes, and per-group Raft workers. Give the control plane a
 	// wider election window so local/CI CPU contention does not leave bucket
 	// assignment without a stable leader during multi-process cold starts.
 	nodeCfg.ElectionTimeout = MetaRaftElectionTimeout
 	nodeCfg.HeartbeatTimeout = MetaRaftHeartbeatInterval
-	node := raft.NewNode(nodeCfg, store)
+	node, closeDB, err := newRaftNodeV2(nodeCfg, storePath)
+	if err != nil {
+		return nil, fmt.Errorf("meta_raft: new raft v2 node: %w", err)
+	}
 
-	// §4.3 joint state persistence wiring (Sub-project 2 PR-J5).
-	snapMgr.SetJointStateProvider(node.JointSnapshotState)
-	snapMgr.SetJointStateRestorer(node.RestoreJointStateFromSnapshot)
+	fsm := NewMetaFSM()
 
 	// §5.4.2: new leader must commit an entry in its own term to allow previous-term
 	// entries to be committed (leader completeness). Wire a MetaCmdTypeNoOp so
@@ -118,9 +108,7 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 
 	m := &MetaRaft{
 		node:           node,
-		store:          store,
-		vlogEntry:      vlogEntry,
-		snapMgr:        snapMgr,
+		closeDB:        closeDB,
 		fsm:            fsm,
 		cfg:            cfg,
 		done:           make(chan struct{}),
@@ -135,8 +123,8 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	return m, nil
 }
 
-// Node returns the underlying raft.Node for external transport wiring.
-func (m *MetaRaft) Node() *raft.Node { return m.node }
+// Node returns the underlying raft node for external transport wiring.
+func (m *MetaRaft) Node() RaftNode { return m.node }
 
 // IsLeader reports whether this MetaRaft node is the current cluster leader.
 func (m *MetaRaft) IsLeader() bool { return m.node.IsLeader() }
@@ -189,6 +177,16 @@ func (m *MetaRaft) Bootstrap() error {
 func (m *MetaRaft) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
+	if snap, err := m.node.LatestSnapshot(); err != nil {
+		return fmt.Errorf("meta_raft: load latest snapshot: %w", err)
+	} else if snap != nil && snap.Index > 0 {
+		meta := raft.SnapshotMeta{Index: snap.Index, Term: snap.Term, Servers: snap.Servers}
+		if err := m.fsm.Restore(meta, snap.Data); err != nil {
+			return fmt.Errorf("meta_raft: restore latest snapshot: %w", err)
+		}
+		m.lastApplied.Store(snap.Index)
+		m.lastSnapshotIndex = snap.Index
+	}
 	m.node.Start()
 	go m.runApplyLoop(ctx)
 	go m.runRotationAutoProgress(ctx)
@@ -205,22 +203,30 @@ func (m *MetaRaft) Close() error {
 	} else {
 		m.node.Close()
 	}
-	if m.vlogEntry != nil {
-		resourcewatch.DeregisterDB(m.vlogEntry)
+	if m.closeDB != nil {
+		return m.closeDB()
 	}
-	return m.store.Close()
+	return nil
 }
 
 // Join adds node with id/addr as a learner, waits for catch-up/promotion via the
 // raft membership API, and records it in the FSM. If FSM registration fails
 // after promotion, best-effort cleanup removes the promoted voter by address.
 func (m *MetaRaft) Join(ctx context.Context, id, addr string) error {
-	if err := m.node.AddVoterCtx(ctx, id, addr); err != nil {
-		_ = m.node.RemoveVoter(addr)
-		return fmt.Errorf("meta_raft: AddVoterCtx %s: %w", id, err)
+	raftID := addr
+	if raftID == "" {
+		raftID = id
+	}
+	if err := m.node.AddLearner(raftID, addr); err != nil {
+		_ = m.node.RemoveVoter(raftID)
+		return fmt.Errorf("meta_raft: AddLearner %s: %w", id, err)
+	}
+	if err := m.node.PromoteToVoter(raftID); err != nil {
+		_ = m.node.RemoveVoter(raftID)
+		return fmt.Errorf("meta_raft: PromoteToVoter %s: %w", id, err)
 	}
 	if err := m.ProposeAddNode(ctx, MetaNodeEntry{ID: id, Address: addr, Role: 0}); err != nil {
-		_ = m.node.RemoveVoter(addr)
+		_ = m.node.RemoveVoter(raftID)
 		return err
 	}
 	return nil
@@ -613,11 +619,26 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if entry.Type == raft.LogEntryCommand && len(entry.Command) > 0 {
+			switch entry.Type {
+			case raft.LogEntryCommand:
+				if len(entry.Command) == 0 {
+					break
+				}
 				if err := m.fsm.applyCmd(entry.Command); err != nil {
 					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM apply error")
 				}
-				m.snapMgr.MaybeTrigger(entry.Index, entry.Term, m.node.Configuration().Servers)
+				m.maybeCreateSnapshot(entry.Index)
+			case raft.LogEntrySnapshot:
+				meta := raft.SnapshotMeta{
+					Index:   entry.Index,
+					Term:    entry.Term,
+					Servers: m.node.Configuration().Servers,
+				}
+				if err := m.fsm.Restore(meta, entry.Command); err != nil {
+					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM snapshot restore error")
+				} else {
+					m.lastSnapshotIndex = entry.Index
+				}
 			}
 			m.lastApplied.Store(entry.Index)
 			m.applyNotifyMu.Lock()
@@ -629,4 +650,21 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (m *MetaRaft) maybeCreateSnapshot(index uint64) {
+	const threshold uint64 = 1024
+	if !m.node.IsLeader() || index == 0 || index-m.lastSnapshotIndex < threshold {
+		return
+	}
+	data, err := m.fsm.Snapshot()
+	if err != nil {
+		log.Error().Err(err).Uint64("index", index).Msg("meta_raft: snapshot encode error")
+		return
+	}
+	if err := m.node.CreateSnapshot(index, data); err != nil {
+		log.Error().Err(err).Uint64("index", index).Msg("meta_raft: create snapshot error")
+		return
+	}
+	m.lastSnapshotIndex = index
 }

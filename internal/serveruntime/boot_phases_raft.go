@@ -34,6 +34,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	}
 	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
 		NodeID:  state.nodeID,
+		RaftID:  state.raftAddr,
 		Peers:   metaPeers,
 		DataDir: state.cfg.DataDir,
 	})

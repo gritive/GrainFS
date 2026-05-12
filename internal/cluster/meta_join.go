@@ -111,10 +111,13 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		leaderID := r.meta.LeaderID()
 		leaderAddr := ""
 		for _, n := range r.meta.Nodes() {
-			if n.ID == leaderID {
+			if n.ID == leaderID || n.Address == leaderID {
 				leaderAddr = n.Address
 				break
 			}
+		}
+		if leaderAddr == "" {
+			leaderAddr = leaderID
 		}
 		return joinMessage(JoinReply{
 			Accepted:   false,

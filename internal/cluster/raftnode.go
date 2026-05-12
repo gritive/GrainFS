@@ -151,6 +151,7 @@ type RaftNode interface {
 	// compiling. PR 30 deletes the v1 package outright.
 	CreateSnapshot(lastIncludedIndex uint64, data []byte) error
 	SnapshotStatus() (raft.SnapshotStatus, error)
+	LatestSnapshot() (*raft.Snapshot, error)
 }
 
 // compile-time check: *raft.Node must satisfy RaftNode. The v2 RaftNode

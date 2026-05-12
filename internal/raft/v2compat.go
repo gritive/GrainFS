@@ -25,3 +25,8 @@ func (n *Node) CreateSnapshot(lastIncludedIndex uint64, data []byte) error {
 func (n *Node) SnapshotStatus() (SnapshotStatus, error) {
 	panic("internal/raft.Node.SnapshotStatus: v1 raft path is unreachable as of M5 PR 29; PR 30 deletes the v1 package")
 }
+
+// LatestSnapshot is a v1 stub that panics. Same rationale as CreateSnapshot.
+func (n *Node) LatestSnapshot() (*Snapshot, error) {
+	panic("internal/raft.Node.LatestSnapshot: v1 raft path is unreachable as of M5 PR 29; PR 30 deletes the v1 package")
+}

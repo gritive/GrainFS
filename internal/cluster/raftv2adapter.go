@@ -6,7 +6,7 @@ package cluster
 // v1 ↔ v2 name/signature differences resolved here:
 //
 //   - v1 Close()         → v2 Stop()       : adapter wraps Stop
-//   - v1 Snapshot()      : NOT on RaftNode; no caller in cluster uses it
+//   - v1 Snapshot()      : v2 LatestSnapshot is exposed for startup restore
 //   - v1 SetTransport(rv,ae func)  → v2 SetTransport(Transport interface)
 //                                  : adapter synthesises a v2TransportBridge
 //   - v1 SetNoOpCommand  : v2 handles no-ops internally; adapter is a no-op
@@ -18,24 +18,22 @@ package cluster
 //
 // Methods not on the RaftNode interface (v1-only, not called via this path):
 //   JointSnapshotState, RestoreJointStateFromSnapshot, CompactLog,
-//   SetInstallSnapshotTransport, SetTimeoutNowTransport, HandleRequestVote,
-//   HandleAppendEntries, HandleInstallSnapshot, BatchMetrics, …
+//   SetTimeoutNowTransport, BatchMetrics, …
 //
 // M4 follow-up membership bridge:
 //   AddVoter, AddVoterCtx, RemoveVoter — direct passthrough (v2 has them).
 //   TransferLeadership — direct passthrough (Raft §3.10, implemented in
 //     v0.0.143.0 / PR #288).
-//   AddLearner, PromoteToVoter — passthrough to ErrNotImplemented (deferred
-//     beyond M5; v2 has no learner support). Callers receive a clear error
-//     instead of a silent skip.
+//   AddLearner, PromoteToVoter — direct passthrough (v2 learner support landed
+//     in M6.0).
 //   ChangeMembership — sequenced bridge (not atomic; see WARN: in method body).
 //   PeerMatchIndex — returns (0, false); v2 has no per-peer replication state.
 //
 // M5 PR 27 follow-up:
 //   Handle{RequestVote,AppendEntries,InstallSnapshot,TimeoutNow} — translate v1
 //     wire types to v2 native types and dispatch into raftv2.Node. See the
-//     dedicated section near the bottom of this file for the two known
-//     translation gaps (TimeoutNow.Term, InstallSnapshot.Servers vs Configuration).
+//     dedicated section near the bottom of this file for the known
+//     TimeoutNow.Term translation gap.
 
 import (
 	"context"
@@ -58,6 +56,7 @@ type raftV2Node struct {
 	once        sync.Once // for observer no-op warning
 	applyOnce   sync.Once // for apply channel bridge goroutine
 	applyBridge chan raft.LogEntry
+	started     atomic.Bool
 
 	// bridge holds the v2.Transport adapter created by SetTransport. Stored on
 	// the adapter so SetInstallSnapshotTransport can publish the IS callback
@@ -81,11 +80,17 @@ func newRaftV2Node(n *raftv2.Node) *raftV2Node {
 
 // --- Lifecycle ---
 
-func (a *raftV2Node) Start() { a.n.Start() }
+func (a *raftV2Node) Start() {
+	a.started.Store(true)
+	a.n.Start()
+}
 
 // Close maps to v2's Stop(). v1 callers use Close(); v2's lifecycle method is Stop().
 func (a *raftV2Node) Close() {
 	metrics.RaftV2StopCount.Inc()
+	if !a.started.Load() {
+		return
+	}
 	a.n.Stop()
 }
 
@@ -243,14 +248,11 @@ done:
 // channel types differ (v2.LogEntry vs raft.LogEntry), a bridge goroutine
 // copies entries. The bridge is started lazily on first call.
 //
-// The bridge filters out non-Command entries (ConfChange, JointConfChange,
-// NoOp, Snapshot — v2 LogEntryType > 0). Those are Raft protocol entries
-// that the v2 actor publishes for completeness but the v1-style FSM.Apply
-// path is not equipped to decode them — forwarding would produce spurious
-// "unmarshal command: empty data" Error logs on every leader election
-// (v2's NoOp emission rate is higher than v1's). Cluster bookkeeping for
-// membership changes runs internally inside v2 (per actor.go applyConfigEntry);
-// the adapter only surfaces FSM-bound Command entries.
+// The bridge filters out Raft protocol log entries (ConfChange,
+// JointConfChange, NoOp) that the v1-style FSM.Apply path is not equipped
+// to decode. It DOES forward LogEntrySnapshot: v2 emits that synthetic
+// entry when InstallSnapshot replaces the follower's FSM state, and
+// cluster/meta apply loops must route it to FSM.Restore.
 func (a *raftV2Node) ApplyCh() <-chan raft.LogEntry {
 	a.applyOnce.Do(func() {
 		ch := make(chan raft.LogEntry, 64)
@@ -258,7 +260,7 @@ func (a *raftV2Node) ApplyCh() <-chan raft.LogEntry {
 		src := a.n.ApplyCh()
 		go func() {
 			for entry := range src {
-				if entry.Type != raftv2.LogEntryCommand {
+				if entry.Type != raftv2.LogEntryCommand && entry.Type != raftv2.LogEntrySnapshot {
 					continue
 				}
 				ch <- raft.LogEntry{
@@ -512,8 +514,8 @@ func (a *raftV2Node) ChangeMembership(ctx context.Context, adds []raft.ServerEnt
 //
 // These methods accept v1 wire types (raft.*) and translate to v2 native types
 // before dispatching to raftv2.Node. The translation is byte-semantically
-// equivalent to v1's HandleRequestVote / HandleAppendEntries / etc., with two
-// documented gaps:
+// equivalent to v1's HandleRequestVote / HandleAppendEntries / etc., with one
+// documented gap:
 //
 //   1. TimeoutNow.Term: v1 wire carries no Term field. We synthesise
 //      args.Term = receiver's currentTerm so v2's Raft §3.10 stale-term check
@@ -521,11 +523,6 @@ func (a *raftV2Node) ChangeMembership(ctx context.Context, adds []raft.ServerEnt
 //      pass the v2 node's LeaderID() so log lines are not empty. The legitimate
 //      stale-leader guard is lost on the v1 wire — same exposure v1 has by
 //      construction. PR 30 may extend the wire format if needed.
-//
-//   2. InstallSnapshotArgs.Servers vs v2's .Configuration: v1 carries
-//      []Server{ID, Suffrage}; v2 only stores []string (voter IDs). Suffrage
-//      info is dropped on the boundary. v2 has no learner support
-//      (AddLearner returns ErrNotImplemented) so this is currently acceptable.
 
 func (a *raftV2Node) HandleRequestVote(args *raft.RequestVoteArgs) *raft.RequestVoteReply {
 	v2args := &raftv2.RequestVoteArgs{
@@ -628,6 +625,30 @@ func (a *raftV2Node) SnapshotStatus() (raft.SnapshotStatus, error) {
 		Term:      snap.LastIncludedTerm,
 		SizeBytes: len(snap.Data),
 	}, nil
+}
+
+func (a *raftV2Node) LatestSnapshot() (*raft.Snapshot, error) {
+	snap, err := a.n.LatestSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	return &raft.Snapshot{
+		Index:   snap.LastIncludedIndex,
+		Term:    snap.LastIncludedTerm,
+		Servers: serversFromV2Snapshot(snap),
+		Data:    append([]byte(nil), snap.Data...),
+	}, nil
+}
+
+func serversFromV2Snapshot(snap *raftv2.Snapshot) []raft.Server {
+	servers := make([]raft.Server, 0, len(snap.Configuration)+len(snap.Learners))
+	for _, id := range snap.Configuration {
+		servers = append(servers, raft.Server{ID: id, Suffrage: raft.Voter})
+	}
+	for id := range snap.Learners {
+		servers = append(servers, raft.Server{ID: id, Suffrage: raft.NonVoter})
+	}
+	return servers
 }
 
 // compile-time check: *raftV2Node must satisfy RaftNode.

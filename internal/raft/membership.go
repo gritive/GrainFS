@@ -23,6 +23,8 @@ const (
 	LogEntryCommand         LogEntryType = 0
 	LogEntryConfChange      LogEntryType = 1
 	LogEntryJointConfChange LogEntryType = 2 // reserved; not implemented
+	LogEntryNoOp            LogEntryType = 3
+	LogEntrySnapshot        LogEntryType = 4
 )
 
 // ConfChangeOp is the membership change operation.
