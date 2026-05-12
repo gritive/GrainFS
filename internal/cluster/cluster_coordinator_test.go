@@ -487,6 +487,33 @@ func TestClusterCoordinator_ListObjects_UsesObjectIndexAcrossPlacementGroups(t *
 	require.Equal(t, []string{"a.txt", "b.txt"}, []string{versions[0].Key, versions[1].Key})
 }
 
+func TestClusterCoordinator_GetObjectFallsBackToPlacementWhenIndexIsLagging(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "photos"))
+	_, err := gb.PutObject(context.Background(), "photos", "img.jpg", strings.NewReader("image"), "image/jpeg")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	rc, obj, err := c.GetObject(context.Background(), "photos", "img.jpg")
+	require.NoError(t, err)
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "img.jpg", obj.Key)
+	require.Equal(t, "image", string(body))
+}
+
 func TestClusterCoordinator_DeleteObjectVersion_RemovesObjectIndex(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")

@@ -222,6 +222,12 @@ func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (R
 		return c.opRouter.RouteBucket(bucket)
 	}
 	target, _, err := c.opRouter.RouteObjectRead(bucket, key, versionID)
+	if errors.Is(err, storage.ErrObjectNotFound) {
+		fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key)
+		if fallbackErr == nil {
+			return fallback, nil
+		}
+	}
 	return target, err
 }
 

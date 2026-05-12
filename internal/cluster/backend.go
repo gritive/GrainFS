@@ -693,9 +693,23 @@ func (b *DistributedBackend) ReadIndex(ctx context.Context) (uint64, error) {
 	}
 }
 
-// WaitApplied blocks until the node's FSM has applied at least index or ctx is done.
+// WaitApplied blocks until this backend's FSM has applied at least index or ctx is done.
 func (b *DistributedBackend) WaitApplied(ctx context.Context, index uint64) error {
-	return b.node.WaitApplied(ctx, index)
+	if index == 0 {
+		return nil
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if b.lastApplied.Load() >= index {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
@@ -1661,6 +1675,11 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
 	}
+	if topologyWrite {
+		if err := b.checkTopologyPlacementHealth(topologyGroup, effectiveCfg, placement); err != nil {
+			return nil, err
+		}
+	}
 	observePutStage("ec", "placement", stageStart)
 
 	selfID := b.selfAddr
@@ -1670,6 +1689,9 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 
 	if sp.Size <= maxECMemoryShardFastPathBytes {
 		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType)
+		if err != nil && topologyWrite {
+			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
+		}
 		if handled || err != nil {
 			return obj, err
 		}
@@ -1689,22 +1711,49 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 	result, err := writer.writeSpooledShards(ctx, plan, b.ecSpoolDir(), sp)
 	if err != nil {
 		if topologyWrite {
-			var shardErr *ecObjectShardWriteError
-			if errors.As(err, &shardErr) {
-				return nil, &ErrInsufficientPlacementTargets{
-					Operation:     "put_object",
-					GroupID:       topologyGroup.ID,
-					Desired:       effectiveCfg,
-					Configured:    cloneStringSlice(topologyGroup.PeerIDs),
-					Unavailable:   []string{shardErr.node},
-					FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
-				}
-			}
+			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
 		return nil, err
 	}
 
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
+}
+
+func topologyShardWriteError(group ShardGroupEntry, cfg ECConfig, err error) error {
+	var shardErr *ecObjectShardWriteError
+	if !errors.As(err, &shardErr) {
+		return err
+	}
+	return &ErrInsufficientPlacementTargets{
+		Operation:     "put_object",
+		GroupID:       group.ID,
+		Desired:       cfg,
+		Configured:    cloneStringSlice(group.PeerIDs),
+		Unavailable:   []string{shardErr.node},
+		FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
+	}
+}
+
+func (b *DistributedBackend) checkTopologyPlacementHealth(group ShardGroupEntry, cfg ECConfig, placement []string) error {
+	if b.peerHealth == nil {
+		return nil
+	}
+	for _, node := range placement {
+		if node == b.selfAddr {
+			continue
+		}
+		if !b.peerHealth.IsHealthy(node) {
+			return &ErrInsufficientPlacementTargets{
+				Operation:     "put_object",
+				GroupID:       group.ID,
+				Desired:       cfg,
+				Configured:    cloneStringSlice(group.PeerIDs),
+				Unavailable:   []string{node},
+				FailureReason: "known unhealthy placement target",
+			}
+		}
+	}
+	return nil
 }
 
 func (b *DistributedBackend) tryPutObjectECMemoryShards(

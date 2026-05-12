@@ -203,6 +203,47 @@ func TestDistributedBackend_PutObject_NilShardSvc_WithPlacementCtx_TakesNxPath(t
 	require.Equal(t, "key.txt", obj.Key)
 }
 
+func TestDistributedBackend_PutObjectTopologyWriteReportsUnavailableTarget(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardService(NewShardService(t.TempDir(), nil), []string{"n1", "n2", "n3"})
+
+	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
+	ctx := ContextWithPlacementGroupEntry(context.Background(), group)
+
+	_, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
+	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
+}
+
+func TestDistributedBackend_PutObjectTopologyWriteRejectsUnhealthyTargetBeforeShardWrite(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardService(NewShardService(t.TempDir(), nil), []string{"n1", "n2", "n3"})
+	b.peerHealth.MarkUnhealthy("n2")
+
+	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
+	ctx := ContextWithPlacementGroupEntry(context.Background(), group)
+
+	_, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
+	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
+	require.ErrorContains(t, err, "known unhealthy placement target")
+}
+
+func TestDistributedBackend_WaitAppliedUsesBackendApplyProgress(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	applied := b.lastApplied.Load()
+	require.NotZero(t, applied)
+	b.lastApplied.Store(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := b.WaitApplied(ctx, applied)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestDistributedBackend_HeadObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
