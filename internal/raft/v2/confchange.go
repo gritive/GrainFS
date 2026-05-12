@@ -175,14 +175,29 @@ func decodeVoters(val []byte, off int, label string) ([]string, int, error) {
 // In the joint state (joint == true), the cluster is Voters ∪ OldVoters and
 // every quorum decision must be confirmed by a majority of BOTH sets
 // independently.
+//
+// learners is an additive (Path B) sibling map of non-voting observers per
+// M6.0. Learners receive replicated entries (via the leader replicating to
+// every server) but their acks are NEVER counted in voter quorum math.
+// Joint quorum semantics (voters / oldVoters) are byte-for-byte unchanged.
 type effectiveConfig struct {
 	joint     bool
 	voters    []string // Cnew when joint, otherwise the only set
 	oldVoters []string // Cold; only populated when joint == true
+
+	// learners maps learner ID → its transport address. Address is
+	// advisory (mirrors AddVoter's addr parameter — uninterpreted by v2
+	// today, but persisted so operators can recover learner identity from
+	// the log/snapshot during disaster recovery). Nil/empty map means no
+	// learners. NEVER overlaps with voters or oldVoters — a server is
+	// either Voter (in some side of the voter set) or Learner, never both.
+	learners map[string]string
 }
 
 // newSingleConfig builds a non-joint effectiveConfig from voters. The slice
-// is copied so the caller's mutations cannot perturb actor state.
+// is copied so the caller's mutations cannot perturb actor state. Learners
+// default to nil; callers that need to preserve a learners map across the
+// transition must set it explicitly on the returned config.
 func newSingleConfig(voters []string) effectiveConfig {
 	cp := make([]string, len(voters))
 	copy(cp, voters)
@@ -190,13 +205,28 @@ func newSingleConfig(voters []string) effectiveConfig {
 }
 
 // newJointConfig builds a joint effectiveConfig from old and new voter sets.
-// Both slices are copied.
+// Both slices are copied. Learners default to nil (callers preserve them
+// via cloneLearners on the prior config).
 func newJointConfig(oldV, newV []string) effectiveConfig {
 	o := make([]string, len(oldV))
 	copy(o, oldV)
 	n := make([]string, len(newV))
 	copy(n, newV)
 	return effectiveConfig{joint: true, voters: n, oldVoters: o}
+}
+
+// cloneLearners returns a fresh copy of c.learners (nil if empty). Used by
+// applyConfigEntry to carry learners across voter-set transitions and by
+// snapshot() to detach published readState from the actor-owned map.
+func (c effectiveConfig) cloneLearners() map[string]string {
+	if len(c.learners) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(c.learners))
+	for k, v := range c.learners {
+		out[k] = v
+	}
+	return out
 }
 
 // allVoters returns every voter ID the actor needs to send to (Cold ∪ Cnew
@@ -228,7 +258,9 @@ func (c effectiveConfig) allVoters() []string {
 }
 
 // peersExcluding returns every voter ID except self. This is the set of
-// peers the leader replicates to.
+// peers the leader replicates to FOR QUORUM PURPOSES (RequestVote, commit
+// advance, ReadIndex round confirmation). Learners are NOT included — use
+// replicasExcluding for the broader replication-send set.
 func (c effectiveConfig) peersExcluding(self string) []string {
 	all := c.allVoters()
 	out := all[:0]
@@ -239,6 +271,47 @@ func (c effectiveConfig) peersExcluding(self string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// replicasExcluding returns every server the leader replicates log entries
+// to: voters (Cold ∪ Cnew when joint) plus learners, minus self. Learners
+// are addressed by the leader so they catch up, but their acks NEVER
+// contribute to quorum math (commitOK / quorumOK / quorumOKByRound iterate
+// only over voter slices).
+//
+// Used by send paths (broadcastHeartbeat, dispatchAppendEntries). For
+// quorum-shaped work — RequestVote dispatch, peerLastRound semantics —
+// callers must keep using peersExcluding.
+func (c effectiveConfig) replicasExcluding(self string) []string {
+	all := c.allVoters()
+	out := make([]string, 0, len(all)+len(c.learners))
+	for _, v := range all {
+		if v == self {
+			continue
+		}
+		out = append(out, v)
+	}
+	for id := range c.learners {
+		if id == self {
+			// Defensive: a learner is never self in practice, but the
+			// guard keeps this loop coherent if invariants ever slip.
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// isLearner reports whether id is registered as a learner in the effective
+// configuration. Mutually exclusive with containsAnyVoter — used by the
+// election-timer guard (a learner must never become Candidate) and by the
+// catchup gate (PromoteToVoter requires id to be a learner).
+func (c effectiveConfig) isLearner(id string) bool {
+	if c.learners == nil {
+		return false
+	}
+	_, ok := c.learners[id]
+	return ok
 }
 
 // containsVoter reports whether id is a voter in the (Cnew side of the)
@@ -375,15 +448,22 @@ func configEntryPayload(e LogEntry) confChangePayload {
 // applyConfigEntry returns the effectiveConfig that results from appending
 // a config entry to a log under prev. It does NOT mutate prev. Callers use
 // this both at append time and at log replay time during recovery.
+//
+// Learners survive every voter-set transition unchanged (the joint encoder
+// is voter-only; learners ride out-of-band in actorState). M6.0 commit 2/3
+// adds Op-tag dispatch for learner-targeted single entries.
 func applyConfigEntry(prev effectiveConfig, e LogEntry) effectiveConfig {
 	p := configEntryPayload(e)
 	if e.Type == LogEntryJointConfChange {
 		// Joint entry: encoded as old + new. Move into joint state.
-		return newJointConfig(p.OldVoters, p.NewVoters)
+		next := newJointConfig(p.OldVoters, p.NewVoters)
+		next.learners = prev.cloneLearners()
+		return next
 	}
-	// LogEntryConfChange: leave joint, settle on Cnew.
-	_ = prev
-	return newSingleConfig(p.NewVoters)
+	// LogEntryConfChange: leave joint, settle on Cnew. Carry learners.
+	next := newSingleConfig(p.NewVoters)
+	next.learners = prev.cloneLearners()
+	return next
 }
 
 // seedConfigFromCfg builds the bootstrap effective config from cfg.ID +

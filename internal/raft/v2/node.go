@@ -440,9 +440,14 @@ func (n *Node) Bootstrap() error {
 func (n *Node) Configuration() Configuration {
 	rs := n.rs.Load()
 	all := rs.config.allVoters()
-	servers := make([]Server, 0, len(all))
+	servers := make([]Server, 0, len(all)+len(rs.config.learners))
 	for _, id := range all {
 		servers = append(servers, Server{ID: id, Suffrage: Voter})
+	}
+	// Learners (Path B sibling): emit each as NonVoter so callers
+	// (Configuration consumers, the dashboard, e2e checks) can see them.
+	for id := range rs.config.learners {
+		servers = append(servers, Server{ID: id, Suffrage: NonVoter})
 	}
 	return Configuration{Servers: servers}
 }

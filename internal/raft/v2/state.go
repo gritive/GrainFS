@@ -171,6 +171,7 @@ func (s *actorState) snapshot() *readState {
 		cfgCopy.oldVoters = make([]string, len(s.currentConfig.oldVoters))
 		copy(cfgCopy.oldVoters, s.currentConfig.oldVoters)
 	}
+	cfgCopy.learners = s.currentConfig.cloneLearners()
 	return &readState{
 		state:       s.state,
 		term:        s.currentTerm,
