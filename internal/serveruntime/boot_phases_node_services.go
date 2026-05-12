@@ -20,14 +20,23 @@ import (
 func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
-	// Background EC resharding is group-local: each locally-owned DataGroup has
-	// its own Raft leader and object metadata DB. Followers skip each pass in
-	// ReshardManager, but we still start one manager per local group so
-	// leadership changes are picked up without serve-level rewiring.
-	if cfg.ReshardInterval > 0 {
+	// Ring reshard and EC reshard share a DataGroup manager registry but run on
+	// independent intervals. Both are always-on (validated in buildClusterConfig).
+	// Ring reshard is correctness-critical (stale ring placement blocks reads when
+	// old nodes are removed); EC reshard is optimization-only (N×→EC, profile upgrade).
+	{
 		dgMgr := state.dgMgr
-		reshardManagers := NewReshardManagerRegistry()
-		startReshardManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
+
+		startRingManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
+			gb := dg.Backend()
+			leader := gb.RaftNode()
+			if leader == nil {
+				log.Warn().Str("group", dg.ID()).Msg("ring-reshard manager skipped: group has no raft node")
+				return
+			}
+			go cluster.NewRingReshardManager(gb, leader, cfg.RingReshardInterval).Start(managerCtx)
+		}
+		startECManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
 			leader := gb.RaftNode()
 			if leader == nil {
@@ -36,23 +45,30 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 			}
 			go cluster.NewReshardManager(gb, leader, cfg.ReshardInterval).Start(managerCtx)
 		}
-		refreshReshardManagers := func() {
-			reshardManagers.Refresh(ctx, dgMgr.All(), startReshardManager)
-		}
-		refreshReshardManagers()
-		go func() {
-			ticker := time.NewTicker(cfg.ReshardInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					refreshReshardManagers()
+
+		ringManagers := NewReshardManagerRegistry()
+		ringManagers.Refresh(ctx, dgMgr.All(), startRingManager)
+		log.Info().Dur("interval", cfg.RingReshardInterval).Msg("ring reshard manager started")
+
+		ecManagers := NewReshardManagerRegistry()
+		ecManagers.Refresh(ctx, dgMgr.All(), startECManager)
+		log.Info().Dur("interval", cfg.ReshardInterval).Msg("EC reshard manager started")
+
+		if cfg.DataGroupRefreshInterval > 0 {
+			go func() {
+				ticker := time.NewTicker(cfg.DataGroupRefreshInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						ringManagers.Refresh(ctx, dgMgr.All(), startRingManager)
+						ecManagers.Refresh(ctx, dgMgr.All(), startECManager)
+					}
 				}
-			}
-		}()
-		log.Info().Dur("interval", cfg.ReshardInterval).Msg("cluster reshard manager started")
+			}()
+		}
 	}
 
 	// Start the leader-aware worker loop. Only the Raft leader runs the

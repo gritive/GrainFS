@@ -64,6 +64,7 @@ type ReshardManager struct {
 	logger   zerolog.Logger
 
 	maxObjectsPerRun int
+	ecReshardEnabled bool
 
 	totalConverted atomic.Uint64
 	totalSkipped   atomic.Uint64
@@ -76,10 +77,23 @@ type ReshardManager struct {
 // full pass; use longer intervals (≥ 5 min) to limit I/O on large clusters.
 func NewReshardManager(backend Converter, leader Leader, interval time.Duration) *ReshardManager {
 	return &ReshardManager{
-		backend:  backend,
-		leader:   leader,
-		interval: interval,
-		logger:   log.With().Str("component", "reshard-manager").Logger(),
+		backend:          backend,
+		leader:           leader,
+		interval:         interval,
+		logger:           log.With().Str("component", "reshard-manager").Logger(),
+		ecReshardEnabled: true,
+	}
+}
+
+// NewRingReshardManager returns a ReshardManager that only runs ring-topology
+// placement migration. EC conversion/upgrade is disabled.
+func NewRingReshardManager(backend Converter, leader Leader, interval time.Duration) *ReshardManager {
+	return &ReshardManager{
+		backend:          backend,
+		leader:           leader,
+		interval:         interval,
+		logger:           log.With().Str("component", "ring-reshard-manager").Logger(),
+		ecReshardEnabled: false,
 	}
 }
 
@@ -94,6 +108,15 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 		m.logger.Debug().Msg("reshard: skipping — not leader")
 		return 0, 0, 0
 	}
+
+	if !m.ecReshardEnabled {
+		cv, sk, er := m.runRingOnly(ctx)
+		m.totalConverted.Add(uint64(cv))
+		m.totalSkipped.Add(uint64(sk))
+		m.totalErrors.Add(uint64(er))
+		return cv, sk, er
+	}
+
 	if !m.backend.ECActive() {
 		m.logger.Debug().Msg("reshard: skipping — EC not active on this cluster")
 		return 0, 0, 0
@@ -210,6 +233,62 @@ func (m *ReshardManager) desiredConfigForRef(ref ObjectMetaRef) (ECConfig, bool)
 		return DesiredECConfigForGroup(group), true
 	}
 	return m.backend.EffectiveECConfig(), true
+}
+
+// runRingOnly walks EC objects and reshards any whose RingVersion differs from
+// the current ring. Non-EC objects are skipped. Returns (converted, skipped, errs).
+func (m *ReshardManager) runRingOnly(ctx context.Context) (converted, skipped, errs int) {
+	currentRingVersion := m.backend.CurrentRingVersion()
+	if currentRingVersion == 0 {
+		m.logger.Debug().Msg("ring-reshard: skipping — no ring configured")
+		return 0, 0, 0
+	}
+
+	fsm := m.backend.FSMRef()
+	if fsm == nil {
+		return 0, 0, 0
+	}
+
+	var refs []ObjectMetaRef
+	err := fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
+		refs = append(refs, ref)
+		return nil
+	})
+	if err != nil {
+		m.logger.Warn().Err(err).Msg("ring-reshard: iter failed")
+		return 0, 0, 1
+	}
+
+	for _, ref := range refs {
+		if ctx.Err() != nil {
+			break
+		}
+		if m.leader != nil && !m.leader.IsLeader() {
+			break
+		}
+		if ref.ECData == 0 {
+			skipped++
+			continue
+		}
+		if ref.RingVersion == currentRingVersion {
+			skipped++
+			continue
+		}
+		if rerr := m.backend.ReshardToRing(ctx, ref.Bucket, ref.Key, ref.RingVersion); rerr != nil {
+			errs++
+			m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).
+				Uint64("obj_ring_ver", uint64(ref.RingVersion)).
+				Uint64("current_ring_ver", uint64(currentRingVersion)).
+				Err(rerr).Msg("ring-reshard: reshard failed")
+			continue
+		}
+		converted++
+	}
+
+	if converted > 0 || errs > 0 {
+		m.logger.Info().Int("converted", converted).Int("skipped", skipped).Int("errors", errs).Msg("ring-reshard: pass complete")
+	}
+	return converted, skipped, errs
 }
 
 // Start runs Run in a loop until ctx is cancelled.

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.165.0] - 2026-05-13 — feat(reshard): separate ring-reshard-interval from reshard-interval
+
+ring reshard(EC 오브젝트 ring topology 마이그레이션)를 EC reshard(N×→EC 변환/프로파일 업그레이드)에서 분리.
+`--reshard-interval=0` 설정 시 correctness-critical ring reshard까지 꺼지던 버그 해결.
+`--scrub-interval`, `--reshard-interval`, `--ring-reshard-interval` 세 인터벌 모두 always-on;
+0으로 설정 시 default 복원 + warn 로그.
+
+### Added
+- `NewRingReshardManager()`: `ecReshardEnabled=false` 플래그로 ring-only 모드 동작.
+- `runRingOnly()`: EC 오브젝트 중 `RingVersion` 불일치 항목만 `ReshardToRing()` 호출.
+- `ValidateRequiredIntervals()`: scrub/reshard/ring-reshard 인터벌이 0이면 default 복원 + warn 로그.
+- `--ring-reshard-interval` flag (default `1h`): ring reshard 전용 주기.
+- `--datagroup-refresh-interval` flag (default `1m`): DataGroup 갱신 주기.
+
+### Changed
+- boot phase: 기존 `if cfg.ReshardInterval > 0` guard 제거. ring/EC manager 항상 시작.
+- ring manager(`ReshardManagerRegistry`)와 EC manager를 독립 인스턴스로 분리.
+- `runRingOnly` 루프 안에 leader check 추가 (EC path와 동일한 leadership transfer 처리).
+
+### Fixed
+- **race condition** (`raft.Node`): `SetNoOpCommand`가 `runLeader` 고루틴과 `noOpCmd` 필드를 경쟁하던 data race 수정. `n.mu`로 write/read 모두 보호.
+
 ## [0.0.164.0] - 2026-05-13 — refactor(cluster): extract EC object reader
 
 `DistributedBackend`에 흩어져 있던 EC 읽기 경로(~450줄)를 `ecObjectReader` 모듈로 추출.
