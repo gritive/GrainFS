@@ -241,3 +241,136 @@ type CreateSnapshotResp struct {
 	ID         string `json:"id"`
 	BlockCount int64  `json:"block_count"`
 }
+
+// --- Cluster wire types ---
+
+// Status mirrors the JSON body of GET /v1/cluster/status. The server emits
+// this shape from a map[string]any handler; clients decode through this view.
+type Status struct {
+	Mode              string            `json:"mode"`
+	NodeID            string            `json:"node_id,omitempty"`
+	State             string            `json:"state,omitempty"`
+	Term              uint64            `json:"term,omitempty"`
+	LeaderID          string            `json:"leader_id,omitempty"`
+	Peers             []string          `json:"peers,omitempty"`
+	DownNodes         []string          `json:"down_nodes,omitempty"`
+	PeerAddrs         map[string]string `json:"peer_addrs,omitempty"`
+	PeerStates        map[string]string `json:"peer_states,omitempty"`
+	PeerSnapshot      []PeerLivenessRow `json:"peer_snapshot,omitempty"`
+	BucketAssignments map[string]string `json:"bucket_assignments,omitempty"`
+	ShardGroups       []ShardGroup      `json:"shard_groups,omitempty"`
+}
+
+// PeerLivenessRow is one row of the cluster peer liveness snapshot. Mirrors
+// cluster.PeerLivenessRow but with plain string enum fields (cluster.* uses
+// typed enums like PeerIdentityState/PeerLivenessState). The wire form uses
+// plain strings so the schema is closed.
+type PeerLivenessRow struct {
+	PeerID        string `json:"peer_id"`
+	RaftAddr      string `json:"raft_addr,omitempty"`
+	IdentityState string `json:"identity_state"`
+	LivenessState string `json:"liveness_state"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+// ShardGroup describes a shard placement group on the wire.
+type ShardGroup struct {
+	ID      string   `json:"id"`
+	PeerIDs []string `json:"peer_ids"`
+}
+
+// Health mirrors GET /v1/cluster/health.
+type Health struct {
+	Mode     string          `json:"mode"`
+	Degraded bool            `json:"degraded"`
+	LeaderID string          `json:"leader_id,omitempty"`
+	Term     uint64          `json:"term,omitempty"`
+	Quorum   QuorumInfo      `json:"quorum"`
+	Peers    []PeerHealthRow `json:"peers,omitempty"`
+	Issues   []string        `json:"issues,omitempty"`
+}
+
+// QuorumInfo summarises voter health for Health.Quorum.
+type QuorumInfo struct {
+	VotersTotal int  `json:"voters_total"`
+	AliveCount  int  `json:"alive_count"`
+	Required    int  `json:"required"`
+	Healthy     bool `json:"healthy"`
+}
+
+// PeerHealthRow is one row of Health.Peers.
+type PeerHealthRow struct {
+	PeerID   string `json:"peer_id"`
+	State    string `json:"state"`
+	RaftAddr string `json:"raft_addr,omitempty"`
+}
+
+// PlacementReport mirrors GET /v1/cluster/placement.
+type PlacementReport struct {
+	DesiredPolicyBasis    string                 `json:"desired_policy_basis"`
+	Bucket                string                 `json:"bucket,omitempty"`
+	Key                   string                 `json:"key,omitempty"`
+	ObjectCount           int                    `json:"object_count"`
+	Bytes                 int64                  `json:"bytes"`
+	ActualProfileCounts   map[string]int         `json:"actual_profile_counts"`
+	PendingUpgradeCount   int                    `json:"pending_upgrade_count"`
+	DowngradeSkippedCount int                    `json:"downgrade_skipped_count"`
+	UnknownLayoutCount    int                    `json:"unknown_layout_count"`
+	RepairNeededCount     int                    `json:"repair_needed_count"`
+	Details               []PlacementReportEntry `json:"details,omitempty"`
+}
+
+// PlacementReportEntry is one row of PlacementReport.Details.
+type PlacementReportEntry struct {
+	Bucket           string   `json:"bucket"`
+	Key              string   `json:"key"`
+	VersionID        string   `json:"version_id"`
+	PlacementGroupID string   `json:"placement_group_id"`
+	ActualECData     uint8    `json:"actual_ec_data"`
+	ActualECParity   uint8    `json:"actual_ec_parity"`
+	DesiredECData    int      `json:"desired_ec_data"`
+	DesiredECParity  int      `json:"desired_ec_parity"`
+	LayoutState      string   `json:"layout_state"`
+	NodeIDs          []string `json:"node_ids,omitempty"`
+	Size             int64    `json:"size"`
+}
+
+// BalancerStatus mirrors GET /v1/cluster/balancer/status.
+type BalancerStatus struct {
+	Available    bool                 `json:"available"`
+	Active       bool                 `json:"active"`
+	ImbalancePct float64              `json:"imbalance_pct"`
+	Nodes        []BalancerNodeStatus `json:"nodes"`
+}
+
+// BalancerNodeStatus is one row of BalancerStatus.Nodes. JoinedAt/UpdatedAt
+// are RFC3339 strings emitted by the server boundary; empty means unknown.
+type BalancerNodeStatus struct {
+	NodeID         string  `json:"node_id"`
+	DiskUsedPct    float64 `json:"disk_used_pct"`
+	DiskAvailBytes uint64  `json:"disk_avail_bytes"`
+	RequestsPerSec float64 `json:"requests_per_sec"`
+	JoinedAt       string  `json:"joined_at,omitempty"`
+	UpdatedAt      string  `json:"updated_at,omitempty"`
+}
+
+// Event mirrors one entry of GET /v1/cluster/eventlog. Mirrors eventstore.Event
+// without importing the server package, which would cycle internal/server ->
+// internal/clusteradmin -> cmd back into internal/server through wiring.
+type Event struct {
+	Timestamp int64          `json:"ts"`
+	Type      string         `json:"type"`
+	Action    string         `json:"action"`
+	Bucket    string         `json:"bucket,omitempty"`
+	Key       string         `json:"key,omitempty"`
+	User      string         `json:"user,omitempty"`
+	Size      int64          `json:"size,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+// TransferLeaderResult mirrors the 200 response of POST /v1/cluster/transfer-leader.
+type TransferLeaderResult struct {
+	OldLeader  string `json:"old_leader"`
+	Term       uint64 `json:"term"`
+	TargetHint string `json:"target_hint,omitempty"`
+}
