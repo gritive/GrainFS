@@ -208,6 +208,12 @@ type MetaFSM struct {
 	// lifecycleStore is wired via SetLifecycle. nil = lifecycle commands return
 	// an error (not configured).
 	lifecycleStore *lifecycle.Store
+
+	// clusterCfg holds the cluster-wide policy snapshot. Initialised to an
+	// empty ClusterConfig (defaults) in NewMetaFSM; mutated only from the FSM
+	// apply goroutine via applyClusterConfigPatch / Restore. Consumers read
+	// lock-free via atomic.Pointer.
+	clusterCfg *ClusterConfig
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -222,8 +228,13 @@ func NewMetaFSM() *MetaFSM {
 		icebergTables:     make(map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
 		iamStore:          iam.NewStore(),
+		clusterCfg:        NewClusterConfig(),
 	}
 }
+
+// ClusterConfig returns the cluster-wide policy snapshot. Read-only; consumers
+// call its getters at use-time. Safe for concurrent reads.
+func (f *MetaFSM) ClusterConfig() *ClusterConfig { return f.clusterCfg }
 
 // SetIAM wires the IAM Applier into the MetaFSM. Must be called before the
 // raft log starts replaying; set alongside the Encryptor used to decrypt
@@ -356,6 +367,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyBucketLifecyclePut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketLifecycleDelete:
 		return f.applyBucketLifecycleDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeClusterConfigPatch:
+		return f.applyClusterConfigPatch(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
