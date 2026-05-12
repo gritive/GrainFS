@@ -428,6 +428,15 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
+	if r.indexProposer != nil {
+		ctx := contextForForwardedGroup(context.Background(), dg)
+		marker := &storage.Object{Key: key, VersionID: markerID}
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, marker, true)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex (delete marker) failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
 	return &transport.Message{Payload: buildObjectReply(&storage.Object{
 		Key:       key,
 		VersionID: markerID,

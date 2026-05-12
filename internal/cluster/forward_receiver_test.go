@@ -229,3 +229,50 @@ func TestForwardReceiver_HandleCompleteMultipartUpload_ProposeError_ReturnsInter
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
 }
+
+func TestForwardReceiver_HandleDeleteObject_CommitsDeleteMarkerIndex(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+	_, err := gb.PutObject(context.Background(), "bucket", "del-key", bytes.NewReader([]byte("data")), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	proposer := &recordingObjectIndexProposer{}
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(proposer)
+
+	args := buildDeleteObjectArgs("bucket", "del-key")
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpDeleteObject, args)
+
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
+	require.Len(t, proposer.entries, 1, "expected exactly one index commit")
+	require.Equal(t, "bucket", proposer.entries[0].Bucket)
+	require.Equal(t, "del-key", proposer.entries[0].Key)
+	require.NotEmpty(t, proposer.entries[0].VersionID)
+	require.Equal(t, "group-1", proposer.entries[0].PlacementGroupID)
+	require.True(t, proposer.entries[0].IsDeleteMarker, "delete object must commit a delete-marker entry")
+}
+
+func TestForwardReceiver_HandleDeleteObject_ProposeError_ReturnsInternal(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+	_, err := gb.PutObject(context.Background(), "bucket", "del-key", bytes.NewReader([]byte("data")), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(&failingObjectIndexProposer{})
+
+	args := buildDeleteObjectArgs("bucket", "del-key")
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpDeleteObject, args)
+
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
+}
