@@ -1,6 +1,10 @@
 package cluster
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
+)
 
 type PlacementReportOptions struct {
 	Bucket  string
@@ -8,33 +12,14 @@ type PlacementReportOptions struct {
 	MaxRows int
 }
 
-type PlacementReport struct {
-	DesiredPolicyBasis    string                 `json:"desired_policy_basis"`
-	Bucket                string                 `json:"bucket,omitempty"`
-	Key                   string                 `json:"key,omitempty"`
-	ObjectCount           int                    `json:"object_count"`
-	Bytes                 int64                  `json:"bytes"`
-	ActualProfileCounts   map[string]int         `json:"actual_profile_counts"`
-	PendingUpgradeCount   int                    `json:"pending_upgrade_count"`
-	DowngradeSkippedCount int                    `json:"downgrade_skipped_count"`
-	UnknownLayoutCount    int                    `json:"unknown_layout_count"`
-	RepairNeededCount     int                    `json:"repair_needed_count"`
-	Details               []PlacementReportEntry `json:"details,omitempty"`
-}
-
-type PlacementReportEntry struct {
-	Bucket           string      `json:"bucket"`
-	Key              string      `json:"key"`
-	VersionID        string      `json:"version_id"`
-	PlacementGroupID string      `json:"placement_group_id"`
-	ActualECData     uint8       `json:"actual_ec_data"`
-	ActualECParity   uint8       `json:"actual_ec_parity"`
-	DesiredECData    int         `json:"desired_ec_data"`
-	DesiredECParity  int         `json:"desired_ec_parity"`
-	LayoutState      LayoutState `json:"layout_state"`
-	NodeIDs          []string    `json:"node_ids,omitempty"`
-	Size             int64       `json:"size"`
-}
+// PlacementReport and PlacementReportEntry are aliases to the wire types in
+// adminapi (single source of truth). LayoutState on the entry is a plain
+// string on the wire; cluster builders convert their typed LayoutState via
+// string(...) at the assignment site.
+type (
+	PlacementReport      = adminapi.PlacementReport
+	PlacementReportEntry = adminapi.PlacementReportEntry
+)
 
 func BuildPlacementReport(entries []ObjectIndexEntry, groups map[string]ShardGroupEntry, opts PlacementReportOptions) PlacementReport {
 	if opts.MaxRows <= 0 {
@@ -80,7 +65,7 @@ func BuildPlacementReport(entries []ObjectIndexEntry, groups map[string]ShardGro
 				ActualECParity:   entry.ECParity,
 				DesiredECData:    desired.DataShards,
 				DesiredECParity:  desired.ParityShards,
-				LayoutState:      state,
+				LayoutState:      string(state),
 				NodeIDs:          cloneStringSlice(entry.NodeIDs),
 				Size:             entry.Size,
 			})

@@ -6,156 +6,36 @@
 package clusteradmin
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
-// Client speaks to a single grainfs server's admin endpoints.
-//
-// Production CLI callers pass a UDS path (e.g. "<data-dir>/admin.sock"); the
-// client dispatches on prefix:
-//   - bare path        — UDS dialer (CLI-facing form)
-//   - "unix:<path>"    — UDS dialer (legacy form)
-//   - "http(s)://..."  — direct HTTP dial (test injection)
-//
-// HTTP routes are /v1/cluster/* on the admin UDS server. The legacy
-// dashboard routes /api/cluster/* on the data-plane HTTP server are not
-// touched by this client.
+// Client speaks to a single grainfs server's admin endpoints. Transport
+// plumbing (UDS/HTTP dispatch, JSON marshal, error envelope) lives in
+// adminapi; this type only wires endpoint methods.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	sockPath   string // populated for UDS transport; "" for HTTP transport
+	*adminapi.Transport
 }
 
-// NewClient constructs a Client honoring the endpoint scheme. See Client doc.
+// NewClient honors the endpoint scheme. The signature returns *Client without
+// error to match many existing CLI call sites; an unconstructable Transport
+// (impossible after the F1 resolution — empty endpoint is now accepted and
+// fails at request time) would surface at the first method call.
 func NewClient(endpoint string) *Client {
-	ep := strings.TrimSpace(endpoint)
-	if strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") {
-		return &Client{
-			httpClient: &http.Client{},
-			baseURL:    strings.TrimRight(ep, "/"),
-		}
-	}
-	sock := strings.TrimPrefix(ep, "unix:")
-	return &Client{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", sock)
-				},
-			},
-		},
-		baseURL:  "http://unix",
-		sockPath: sock,
-	}
-}
-
-// Status mirrors the JSON shape returned by /v1/cluster/status. Fields
-// not present (e.g. local mode) decode to zero values; callers should branch
-// on Mode.
-type Status struct {
-	Mode              string                    `json:"mode"`
-	NodeID            string                    `json:"node_id,omitempty"`
-	State             string                    `json:"state,omitempty"`
-	Term              uint64                    `json:"term,omitempty"`
-	LeaderID          string                    `json:"leader_id,omitempty"`
-	Peers             []string                  `json:"peers,omitempty"`
-	DownNodes         []string                  `json:"down_nodes,omitempty"`
-	PeerAddrs         map[string]string         `json:"peer_addrs,omitempty"`
-	PeerStates        map[string]string         `json:"peer_states,omitempty"`
-	PeerSnapshot      []cluster.PeerLivenessRow `json:"peer_snapshot,omitempty"`
-	BucketAssignments map[string]string         `json:"bucket_assignments,omitempty"`
-	ShardGroups       []ShardGroup              `json:"shard_groups,omitempty"`
-}
-
-type ShardGroup struct {
-	ID      string   `json:"id"`
-	PeerIDs []string `json:"peer_ids"`
-}
-
-type PlacementOptions struct {
-	Bucket string
-	Key    string
-	Limit  int
-}
-
-type PlacementReport struct {
-	DesiredPolicyBasis    string                 `json:"desired_policy_basis"`
-	Bucket                string                 `json:"bucket,omitempty"`
-	Key                   string                 `json:"key,omitempty"`
-	ObjectCount           int                    `json:"object_count"`
-	Bytes                 int64                  `json:"bytes"`
-	ActualProfileCounts   map[string]int         `json:"actual_profile_counts"`
-	PendingUpgradeCount   int                    `json:"pending_upgrade_count"`
-	DowngradeSkippedCount int                    `json:"downgrade_skipped_count"`
-	UnknownLayoutCount    int                    `json:"unknown_layout_count"`
-	RepairNeededCount     int                    `json:"repair_needed_count"`
-	Details               []PlacementReportEntry `json:"details,omitempty"`
-}
-
-type PlacementReportEntry struct {
-	Bucket           string   `json:"bucket"`
-	Key              string   `json:"key"`
-	VersionID        string   `json:"version_id"`
-	PlacementGroupID string   `json:"placement_group_id"`
-	ActualECData     uint8    `json:"actual_ec_data"`
-	ActualECParity   uint8    `json:"actual_ec_parity"`
-	DesiredECData    int      `json:"desired_ec_data"`
-	DesiredECParity  int      `json:"desired_ec_parity"`
-	LayoutState      string   `json:"layout_state"`
-	NodeIDs          []string `json:"node_ids,omitempty"`
-	Size             int64    `json:"size"`
-}
-
-// Event mirrors eventstore.Event without importing the server package, which
-// would cycle internal/server -> internal/clusteradmin -> cmd back into
-// internal/server through wiring.
-type Event struct {
-	Timestamp int64          `json:"ts"`
-	Type      string         `json:"type"`
-	Action    string         `json:"action"`
-	Bucket    string         `json:"bucket,omitempty"`
-	Key       string         `json:"key,omitempty"`
-	User      string         `json:"user,omitempty"`
-	Size      int64          `json:"size,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
-}
-
-// RemovePeerError carries the structured fields the server returns for
-// 404/409/503 responses so the CLI can render contextual messages
-// (leader hint, quorum math) without re-parsing JSON.
-type RemovePeerError struct {
-	StatusCode  int
-	Message     string
-	LeaderID    string
-	VotersAfter int
-	AliveAfter  int
-	NewQuorum   int
-}
-
-func (e *RemovePeerError) Error() string {
-	if e.LeaderID != "" {
-		return fmt.Sprintf("server: %s (leader=%s)", e.Message, e.LeaderID)
-	}
-	return "server: " + e.Message
+	tp, _ := adminapi.NewTransport(endpoint)
+	return &Client{Transport: tp}
 }
 
 // Status fetches /v1/cluster/status. ctx controls the deadline; pass a
 // context.WithTimeout to bound the call.
 func (c *Client) Status(ctx context.Context) (*Status, error) {
-	body, err := c.getJSON(ctx, "/v1/cluster/status")
+	body, err := c.GetRaw(ctx, "/v1/cluster/status")
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +53,7 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 //
 // For text output, prefer Status() which returns a typed struct.
 func (c *Client) StatusRaw(ctx context.Context) ([]byte, error) {
-	return c.getJSON(ctx, "/v1/cluster/status")
+	return c.GetRaw(ctx, "/v1/cluster/status")
 }
 
 func (c *Client) Placement(ctx context.Context, opts PlacementOptions) (*PlacementReport, error) {
@@ -191,13 +71,9 @@ func (c *Client) Placement(ctx context.Context, opts PlacementOptions) (*Placeme
 	if encoded := q.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	body, err := c.getJSON(ctx, path)
-	if err != nil {
-		return nil, err
-	}
 	var report PlacementReport
-	if err := json.Unmarshal(body, &report); err != nil {
-		return nil, fmt.Errorf("parse placement report: %w", err)
+	if err := c.Get(ctx, path, &report); err != nil {
+		return nil, err
 	}
 	return &report, nil
 }
@@ -206,217 +82,54 @@ func (c *Client) Placement(ctx context.Context, opts PlacementOptions) (*Placeme
 // returned error is *RemovePeerError so callers can branch on status code
 // and surface server-supplied context.
 func (c *Client) RemovePeer(ctx context.Context, id string, force bool) error {
-	body, _ := json.Marshal(map[string]any{"id": id, "force": force})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/cluster/remove-peer", bytes.NewReader(body))
-	if err != nil {
+	body := map[string]any{"id": id, "force": force}
+	if err := c.Post(ctx, "/v1/cluster/remove-peer", body, nil); err != nil {
+		if ae, ok := asAdminError(err); ok {
+			return parseRemovePeerError(ae)
+		}
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return wrapDialError(err, c.sockPath)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode == http.StatusOK {
-		return nil
-	}
-
-	parsed := map[string]any{}
-	_ = json.Unmarshal(raw, &parsed)
-	rpe := &RemovePeerError{StatusCode: resp.StatusCode}
-	if msg, ok := parsed["error"].(string); ok && msg != "" {
-		rpe.Message = msg
-	} else {
-		rpe.Message = fmt.Sprintf("HTTP %d", resp.StatusCode)
-	}
-	if leader, ok := parsed["leader_id"].(string); ok {
-		rpe.LeaderID = leader
-	}
-	rpe.VotersAfter = intField(parsed, "voters_after")
-	rpe.AliveAfter = intField(parsed, "alive_after")
-	rpe.NewQuorum = intField(parsed, "new_quorum")
-	return rpe
+	return nil
 }
 
 // EventLog fetches /v1/cluster/eventlog with the given since (lookback
 // duration) and limit. The server endpoint is gated by UDS file mode.
 func (c *Client) EventLog(ctx context.Context, since time.Duration, limit int) ([]Event, error) {
-	url := fmt.Sprintf("%s/v1/cluster/eventlog?since=%d&limit=%d", c.baseURL, int64(since.Seconds()), limit)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, wrapDialError(err, c.sockPath)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("eventlog endpoint returned %d: %s", resp.StatusCode, string(body))
-	}
+	path := fmt.Sprintf("/v1/cluster/eventlog?since=%d&limit=%d", int64(since.Seconds()), limit)
 	var out []Event
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("parse events: %w", err)
+	if err := c.Get(ctx, path, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
-}
-
-// TransferLeaderResult mirrors the 200 response of /v1/cluster/transfer-leader.
-type TransferLeaderResult struct {
-	OldLeader  string `json:"old_leader"`
-	Term       uint64 `json:"term"`
-	TargetHint string `json:"target_hint,omitempty"`
 }
 
 // TransferLeader issues POST /v1/cluster/transfer-leader. On non-2xx the
 // returned error is *TransferLeaderError so callers can branch on Retry.
 func (c *Client) TransferLeader(ctx context.Context) (*TransferLeaderResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/v1/cluster/transfer-leader", bytes.NewReader([]byte(`{}`)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, wrapDialError(err, c.sockPath)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusOK {
-		var out TransferLeaderResult
-		if err := json.Unmarshal(raw, &out); err != nil {
-			return nil, fmt.Errorf("parse transfer-leader: %w", err)
+	var out TransferLeaderResult
+	if err := c.Post(ctx, "/v1/cluster/transfer-leader", struct{}{}, &out); err != nil {
+		if ae, ok := asAdminError(err); ok {
+			return nil, parseTransferLeaderError(ae)
 		}
-		return &out, nil
+		return nil, err
 	}
-	parsed := map[string]any{}
-	_ = json.Unmarshal(raw, &parsed)
-	tle := &TransferLeaderError{StatusCode: resp.StatusCode}
-	if msg, ok := parsed["error"].(string); ok && msg != "" {
-		tle.Message = msg
-	} else {
-		tle.Message = fmt.Sprintf("HTTP %d", resp.StatusCode)
-	}
-	if leader, ok := parsed["leader_id"].(string); ok {
-		tle.LeaderID = leader
-	}
-	if retry, ok := parsed["retry"].(bool); ok {
-		tle.Retry = retry
-	}
-	return nil, tle
-}
-
-// Health mirrors GET /v1/cluster/health response. Server-side derivation
-// of Issues so the dashboard and CLI render the same diagnostics.
-type Health struct {
-	Mode     string          `json:"mode"`
-	Degraded bool            `json:"degraded"`
-	LeaderID string          `json:"leader_id,omitempty"`
-	Term     uint64          `json:"term,omitempty"`
-	Quorum   QuorumInfo      `json:"quorum"`
-	Peers    []PeerHealthRow `json:"peers,omitempty"`
-	Issues   []string        `json:"issues,omitempty"`
-}
-
-type QuorumInfo struct {
-	VotersTotal int  `json:"voters_total"`
-	AliveCount  int  `json:"alive_count"`
-	Required    int  `json:"required"`
-	Healthy     bool `json:"healthy"`
-}
-
-type PeerHealthRow struct {
-	PeerID   string `json:"peer_id"`
-	State    string `json:"state"`
-	RaftAddr string `json:"raft_addr,omitempty"`
+	return &out, nil
 }
 
 // Health fetches GET /v1/cluster/health (typed parse).
 func (c *Client) Health(ctx context.Context) (*Health, error) {
-	body, err := c.getJSON(ctx, "/v1/cluster/health")
-	if err != nil {
-		return nil, err
-	}
 	var h Health
-	if err := json.Unmarshal(body, &h); err != nil {
-		return nil, fmt.Errorf("parse health: %w", err)
+	if err := c.Get(ctx, "/v1/cluster/health", &h); err != nil {
+		return nil, err
 	}
 	return &h, nil
 }
 
-// BalancerStatus mirrors the JSON shape produced by
-// /v1/cluster/balancer/status (snake_case fields per balancer_api.go).
-type BalancerStatus struct {
-	Available    bool                 `json:"available"`
-	Active       bool                 `json:"active"`
-	ImbalancePct float64              `json:"imbalance_pct"`
-	Nodes        []BalancerNodeStatus `json:"nodes"`
-}
-
-type BalancerNodeStatus struct {
-	NodeID         string  `json:"node_id"`
-	DiskUsedPct    float64 `json:"disk_used_pct"`
-	DiskAvailBytes uint64  `json:"disk_avail_bytes"`
-	RequestsPerSec float64 `json:"requests_per_sec"`
-	JoinedAt       string  `json:"joined_at,omitempty"`
-	UpdatedAt      string  `json:"updated_at,omitempty"`
-}
-
 // BalancerStatus fetches GET /v1/cluster/balancer/status (typed parse).
 func (c *Client) BalancerStatus(ctx context.Context) (*BalancerStatus, error) {
-	body, err := c.getJSON(ctx, "/v1/cluster/balancer/status")
-	if err != nil {
-		return nil, err
-	}
 	var b BalancerStatus
-	if err := json.Unmarshal(body, &b); err != nil {
-		return nil, fmt.Errorf("parse balancer status: %w", err)
+	if err := c.Get(ctx, "/v1/cluster/balancer/status", &b); err != nil {
+		return nil, err
 	}
 	return &b, nil
-}
-
-func (c *Client) getJSON(ctx context.Context, path string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, wrapDialError(err, c.sockPath)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s returned %d: %s", path, resp.StatusCode, string(body))
-	}
-	return body, nil
-}
-
-func intField(m map[string]any, key string) int {
-	v, ok := m[key]
-	if !ok {
-		return 0
-	}
-	switch x := v.(type) {
-	case float64:
-		return int(x)
-	case int:
-		return x
-	}
-	return 0
 }

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.153.0] - 2026-05-12 — refactor: unify admin client transport via adminapi
+
+### Changed
+- `internal/adminapi`가 admin HTTP API의 단일 출처로 확장됨. wire types(`Status`, `Health`, `PlacementReport`, `BalancerStatus`, `Event`, `PeerLivenessRow`, ...), generic `Transport` (UDS/HTTP dispatch + `Do/Get/Post/Delete/GetRaw`), generic `Error` envelope(`Status`/`cause`/`Unwrap()`) 모두 한 패키지에 모음.
+- `volumeadmin.Client`와 `clusteradmin.Client`가 `*adminapi.Transport`를 embed해서 약 250 LOC의 중복 transport 코드 제거. CLI 호출 인터페이스(`NewClient`, endpoint method 시그니처)는 변경 없음.
+- `server`가 balancer 응답을 `adminapi.BalancerStatus`로 직접 emit. `cluster.PeerLivenessRowsToWire()`가 typed enum → plain string 변환을 단일 지점에서 처리.
+- CONTEXT.md "Admin API Wire Schema" 단락이 transport + error envelope 책임까지 포괄하도록 갱신.
+
+### Added
+- 4개 admin endpoint(`cluster/status`, `cluster/health`, `cluster/placement`, `cluster/balancer/status`) wire byte를 캡처하는 golden file characterization 테스트. 향후 admin wire 변경 시 자동 회귀 검출.
+- `adminapi.Error`에 `IsCode(err, code)` 헬퍼 + `WithCause(err)` 빌더. `errors.Is(err, context.Canceled)`이 typed envelope을 통과해 transport-level cause를 보게 됨.
+- `clusteradmin.RemovePeerError`/`TransferLeaderError`가 `*adminapi.Error`를 embed 또는 wrap하는 typed sub-error wrapper로 재구성. `parseRemovePeerError`/`parseTransferLeaderError` 파서로 `Details` map → typed 도메인 필드 lift.
+
+### Fixed
+- balancer 응답의 zero-time `JoinedAt`/`UpdatedAt`이 이전엔 `"0001-01-01T00:00:00Z"`로 emit되던 것을 `omitempty`로 누락 처리. `TestBalancerWire_ZeroTime_OmitsField` 회귀 테스트로 고정. 의도된 wire 변화 — missing field == empty time이라 모든 합리적 JSON 소비자에 호환.
+
 ## [0.0.152.0] - 2026-05-12 — feat(raft/v2): M6.0 — AddLearner + PromoteToVoter (Path B)
 
 ### Added

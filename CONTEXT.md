@@ -92,14 +92,40 @@ request `ContentType`; arbitrary user metadata remains unsupported.
 
 ### Admin API Wire Schema
 
-`internal/adminapi` is the single source of truth for admin HTTP JSON body
-types. Server admin handlers and the `volumeadmin` client package use aliases
-to those wire types so response fields such as scrub peer failure details and
-volume snapshot metadata cannot drift between producer and consumer packages.
+`internal/adminapi` is the single source of truth for the admin HTTP API. It
+owns three things:
+
+- **Wire types** — request/response JSON body shapes (`VolumeInfo`, `Status`,
+  `Health`, `PlacementReport`, `BalancerStatus`, `Event`, `PeerLivenessRow`
+  wire form, ...). The server admin handlers and the `volumeadmin` /
+  `clusteradmin` client packages alias these types so response fields cannot
+  drift between producer and consumer packages.
+- **Generic transport** — `Transport` (UDS/HTTP endpoint dispatch +
+  `Do/Get/Post/Delete/GetRaw`) and dial-error wrapping (`udsDialHint`). Both
+  admin client packages embed `*adminapi.Transport` so plumbing is shared.
+- **Generic error envelope** — `Error{Status, Code, Message, Details, cause}`
+  with `Unwrap()` so `errors.Is(context.Canceled)` walks through the typed
+  envelope. The transport synthesizes `*Error` from non-2xx responses and
+  transport-level failures.
+
+Per-endpoint typed sub-error wrappers stay in their owning admin client
+package: `clusteradmin.RemovePeerError`/`TransferLeaderError`,
+`volumeadmin.DeleteConflictDetails`/`ResizeUnsupportedDetails`. They lift
+the generic `*adminapi.Error.Details` map into a domain-specific shape via
+`parse*Error` helpers. CONTEXT-level rule: this carve-out applies to
+**endpoint-specific** typed errors only — the generic envelope itself lives
+in `adminapi`.
+
+Some server-side producer types intentionally differ from their wire form
+(`server.BalancerStatusResult`, `cluster.PeerLivenessRow`). For those, the
+producer converts at the boundary — `cluster.PeerLivenessRowsToWire()` and
+the balancer handler's inline `formatRFC3339OrEmpty` map domain time/enum
+fields to wire-friendly strings. When domain shape == wire shape (Health,
+PlacementReport), the type is aliased and no conversion is needed.
 
 Runtime concerns stay outside `adminapi`: handler dependencies, CLI options,
-HTTP transport behavior, typed client errors, and server domain models remain
-in their owning packages.
+endpoint-specific typed errors, and server-side domain models remain in
+their owning packages.
 
 ### Shard Group Peer Identity
 

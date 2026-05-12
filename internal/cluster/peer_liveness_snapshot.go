@@ -1,6 +1,10 @@
 package cluster
 
-import "time"
+import (
+	"time"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
+)
 
 type PeerIdentityState string
 
@@ -96,6 +100,30 @@ func BuildPeerLivenessSnapshot(input PeerLivenessInput) []PeerLivenessRow {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// ToWire converts the domain row (typed enum strings) to the wire shape.
+// Single source for the conversion so server handlers don't re-implement.
+func (r PeerLivenessRow) ToWire() adminapi.PeerLivenessRow {
+	return adminapi.PeerLivenessRow{
+		PeerID:        r.PeerID,
+		RaftAddr:      r.RaftAddr,
+		IdentityState: string(r.IdentityState),
+		LivenessState: string(r.LivenessState),
+		Reason:        r.Reason,
+	}
+}
+
+// PeerLivenessRowsToWire applies ToWire to a slice.
+func PeerLivenessRowsToWire(rows []PeerLivenessRow) []adminapi.PeerLivenessRow {
+	if rows == nil {
+		return nil
+	}
+	out := make([]adminapi.PeerLivenessRow, len(rows))
+	for i, r := range rows {
+		out[i] = r.ToWire()
+	}
+	return out
 }
 
 func IsExplicitlyDown(row PeerLivenessRow) bool {

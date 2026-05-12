@@ -9,7 +9,7 @@ import (
 
 func TestErrorUnwrap(t *testing.T) {
 	cause := errors.New("underlying")
-	e := &Error{Code: "transient", Message: "wrapped", cause: cause}
+	e := (&Error{Code: "transient", Message: "wrapped"}).WithCause(cause)
 	if !errors.Is(e, cause) {
 		t.Errorf("errors.Is should see through Unwrap")
 	}
@@ -54,7 +54,7 @@ func TestAsDeleteConflict(t *testing.T) {
 			"list_command":    "grainfs volume snapshot list v1",
 		},
 	}
-	d := e.AsDeleteConflict()
+	d := AsDeleteConflict(e)
 	if d == nil {
 		t.Fatal("expected typed details")
 	}
@@ -70,10 +70,10 @@ func TestAsDeleteConflict(t *testing.T) {
 }
 
 func TestAsDeleteConflict_WrongCode(t *testing.T) {
-	if (&Error{Code: "internal"}).AsDeleteConflict() != nil {
+	if AsDeleteConflict(&Error{Code: "internal"}) != nil {
 		t.Errorf("non-conflict should return nil")
 	}
-	if (&Error{Code: "conflict"}).AsDeleteConflict() != nil {
+	if AsDeleteConflict(&Error{Code: "conflict"}) != nil {
 		t.Errorf("conflict without details should return nil")
 	}
 }
@@ -88,7 +88,7 @@ func TestAsResizeUnsupported(t *testing.T) {
 			"clone_command": "grainfs volume clone v1 <new>",
 		},
 	}
-	d := e.AsResizeUnsupported()
+	d := AsResizeUnsupported(e)
 	if d == nil {
 		t.Fatal("expected typed details")
 	}
