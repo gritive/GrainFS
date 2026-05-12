@@ -42,7 +42,6 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port1),
 		"--encryption-key-file", encKeyFile,
-		"--snapshot-interval", "0", // disable auto-snapshots for determinism
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
@@ -92,7 +91,6 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port2),
 		"--encryption-key-file", encKeyFile,
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
@@ -159,7 +157,6 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),

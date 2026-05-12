@@ -1,8 +1,8 @@
 package snapshot
 
 // RunPruneOld exposes pruneOld for white-box testing.
-func RunPruneOld(a *AutoSnapshotter) {
-	a.pruneOld()
+func RunPruneOld(a *AutoSnapshotter, maxRetain int) {
+	a.pruneOld(maxRetain)
 }
 
 // WriteSnapshotForTest exposes writeSnapshot for tests that need to craft

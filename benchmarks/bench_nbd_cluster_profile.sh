@@ -94,7 +94,6 @@ for i in 0 1 2; do
     --nbd-port "$(nbd_port "$i")" \
     --nbd-volume-size "$VOL_SIZE" \
     --pprof-port "$(pprof_port "$i")" \
-    --snapshot-interval 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
     --dedup=false \

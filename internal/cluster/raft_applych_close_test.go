@@ -20,21 +20,21 @@ type applyChCloseStubNode struct {
 func (s *applyChCloseStubNode) ApplyCh() <-chan raft.LogEntry { return s.ch }
 
 // Lifecycle/identity/state — unused on the close-handling path.
-func (s *applyChCloseStubNode) Start()                         {}
-func (s *applyChCloseStubNode) Close()                         {}
-func (s *applyChCloseStubNode) ID() string                     { return "stub" }
-func (s *applyChCloseStubNode) State() raft.NodeState          { return raft.Follower }
-func (s *applyChCloseStubNode) Term() uint64                   { return 0 }
-func (s *applyChCloseStubNode) IsLeader() bool                 { return false }
-func (s *applyChCloseStubNode) LeaderID() string               { return "" }
-func (s *applyChCloseStubNode) CommittedIndex() uint64         { return 0 }
+func (s *applyChCloseStubNode) Start()                 {}
+func (s *applyChCloseStubNode) Close()                 {}
+func (s *applyChCloseStubNode) ID() string             { return "stub" }
+func (s *applyChCloseStubNode) State() raft.NodeState  { return raft.Follower }
+func (s *applyChCloseStubNode) Term() uint64           { return 0 }
+func (s *applyChCloseStubNode) IsLeader() bool         { return false }
+func (s *applyChCloseStubNode) LeaderID() string       { return "" }
+func (s *applyChCloseStubNode) CommittedIndex() uint64 { return 0 }
 func (s *applyChCloseStubNode) Configuration() raft.Configuration {
 	return raft.Configuration{}
 }
-func (s *applyChCloseStubNode) Peers() []string                            { return nil }
-func (s *applyChCloseStubNode) PeerMatchIndex(string) (uint64, bool)       { return 0, false }
-func (s *applyChCloseStubNode) Bootstrap() error                           { return nil }
-func (s *applyChCloseStubNode) Propose([]byte) error                       { panic("unused") }
+func (s *applyChCloseStubNode) Peers() []string                      { return nil }
+func (s *applyChCloseStubNode) PeerMatchIndex(string) (uint64, bool) { return 0, false }
+func (s *applyChCloseStubNode) Bootstrap() error                     { return nil }
+func (s *applyChCloseStubNode) Propose([]byte) error                 { panic("unused") }
 func (s *applyChCloseStubNode) ProposeWait(context.Context, []byte) (uint64, error) {
 	panic("unused")
 }
@@ -51,17 +51,17 @@ func (s *applyChCloseStubNode) SetInstallSnapshotTransport(
 	func(string, *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error),
 ) {
 }
-func (s *applyChCloseStubNode) SetNoOpCommand([]byte)                  {}
-func (s *applyChCloseStubNode) RegisterObserver(chan<- raft.Event)     {}
-func (s *applyChCloseStubNode) DeregisterObserver(chan<- raft.Event)   {}
-func (s *applyChCloseStubNode) AddVoter(string, string) error          { panic("unused") }
+func (s *applyChCloseStubNode) SetNoOpCommand([]byte)                {}
+func (s *applyChCloseStubNode) RegisterObserver(chan<- raft.Event)   {}
+func (s *applyChCloseStubNode) DeregisterObserver(chan<- raft.Event) {}
+func (s *applyChCloseStubNode) AddVoter(string, string) error        { panic("unused") }
 func (s *applyChCloseStubNode) AddVoterCtx(context.Context, string, string) error {
 	panic("unused")
 }
-func (s *applyChCloseStubNode) RemoveVoter(string) error              { panic("unused") }
-func (s *applyChCloseStubNode) AddLearner(string, string) error       { panic("unused") }
-func (s *applyChCloseStubNode) PromoteToVoter(string) error           { panic("unused") }
-func (s *applyChCloseStubNode) TransferLeadership() error             { panic("unused") }
+func (s *applyChCloseStubNode) RemoveVoter(string) error        { panic("unused") }
+func (s *applyChCloseStubNode) AddLearner(string, string) error { panic("unused") }
+func (s *applyChCloseStubNode) PromoteToVoter(string) error     { panic("unused") }
+func (s *applyChCloseStubNode) TransferLeadership() error       { panic("unused") }
 func (s *applyChCloseStubNode) ChangeMembership(context.Context, []raft.ServerEntry, []string) error {
 	panic("unused")
 }
@@ -74,8 +74,8 @@ func (s *applyChCloseStubNode) HandleAppendEntries(*raft.AppendEntriesArgs) *raf
 func (s *applyChCloseStubNode) HandleInstallSnapshot(*raft.InstallSnapshotArgs) *raft.InstallSnapshotReply {
 	panic("unused")
 }
-func (s *applyChCloseStubNode) HandleTimeoutNow()                          {}
-func (s *applyChCloseStubNode) CreateSnapshot(uint64, []byte) error        { panic("unused") }
+func (s *applyChCloseStubNode) HandleTimeoutNow()                   {}
+func (s *applyChCloseStubNode) CreateSnapshot(uint64, []byte) error { panic("unused") }
 func (s *applyChCloseStubNode) SnapshotStatus() (raft.SnapshotStatus, error) {
 	return raft.SnapshotStatus{}, nil
 }

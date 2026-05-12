@@ -210,7 +210,6 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
 			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)

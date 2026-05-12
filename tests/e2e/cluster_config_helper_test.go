@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -60,6 +61,41 @@ func SetClusterConfig(t *testing.T, dataDir string, body map[string]any) uint64 
 	}
 	require.NoError(t, json.Unmarshal(respBody, &out))
 	return out.Rev
+}
+
+// patchSnapshotInterval PATCHes /v1/cluster/config on the given node's admin
+// UDS to set "snapshot-interval" to dur. dur="0s" disables the auto-snapshot
+// loop (used by e2e harnesses for determinism); a non-zero duration ("100ms",
+// "5s") enables it. PATCH is Raft-replicated, so calling it once per cluster
+// on any voter's admin UDS is sufficient.
+func patchSnapshotInterval(t testing.TB, dataDir string, dur string) {
+	t.Helper()
+	require.NoError(t, patchSnapshotIntervalM(dataDir, dur), "PATCH snapshot-interval")
+}
+
+// patchSnapshotIntervalM is the TestMain-friendly variant of
+// patchSnapshotInterval — no *testing.T because TestMain doesn't have one.
+// Returns an error instead of failing the test directly.
+func patchSnapshotIntervalM(dataDir string, dur string) error {
+	body, err := json.Marshal(map[string]any{"snapshot-interval": dur})
+	if err != nil {
+		return fmt.Errorf("marshal patch body: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPatch, "http://unix/v1/cluster/config", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build PATCH request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := adminUDSClient(dataDir).Do(req)
+	if err != nil {
+		return fmt.Errorf("PATCH /v1/cluster/config: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		buf, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PATCH /v1/cluster/config status %d: %s", resp.StatusCode, string(buf))
+	}
+	return nil
 }
 
 // GetClusterConfig GETs /v1/cluster/config on the given node's admin UDS and

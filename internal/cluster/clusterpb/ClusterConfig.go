@@ -263,8 +263,34 @@ func (rcv *ClusterConfig) DiskCriticalFrac(obj *DoubleBox) *DoubleBox {
 	return nil
 }
 
+func (rcv *ClusterConfig) SnapshotIntervalNs(obj *Int64Box) *Int64Box {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(Int64Box)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+func (rcv *ClusterConfig) SnapshotRetain(obj *Int32Box) *Int32Box {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(Int32Box)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
 func ClusterConfigStart(builder *flatbuffers.Builder) {
-	builder.StartObject(16)
+	builder.StartObject(18)
 }
 func ClusterConfigAddRev(builder *flatbuffers.Builder, rev uint64) {
 	builder.PrependUint64Slot(0, rev, 0)
@@ -316,6 +342,12 @@ func ClusterConfigAddDiskWarnFrac(builder *flatbuffers.Builder, diskWarnFrac fla
 }
 func ClusterConfigAddDiskCriticalFrac(builder *flatbuffers.Builder, diskCriticalFrac flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(diskCriticalFrac), 0)
+}
+func ClusterConfigAddSnapshotIntervalNs(builder *flatbuffers.Builder, snapshotIntervalNs flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(snapshotIntervalNs), 0)
+}
+func ClusterConfigAddSnapshotRetain(builder *flatbuffers.Builder, snapshotRetain flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(snapshotRetain), 0)
 }
 func ClusterConfigEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

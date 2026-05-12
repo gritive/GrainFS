@@ -72,7 +72,6 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--no-encryption",
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -119,7 +118,6 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--no-encryption",
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

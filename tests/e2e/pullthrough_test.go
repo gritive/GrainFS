@@ -37,7 +37,6 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 		"--port", fmt.Sprintf("%d", upPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -73,7 +72,6 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 		"--port", fmt.Sprintf("%d", localPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -136,7 +134,6 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 		"--port", fmt.Sprintf("%d", upPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -178,7 +175,6 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 		"--port", fmt.Sprintf("%d", localPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

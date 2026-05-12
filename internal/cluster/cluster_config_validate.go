@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Validate runs cross-field invariants over the *effective* (merged) values
@@ -55,6 +56,15 @@ func (c *ClusterConfig) Validate() error {
 	}
 	if dw > dc {
 		errs = append(errs, fmt.Sprintf("disk-warn-threshold must be <= disk-critical-threshold (warn=%v crit=%v)", dw, dc))
+	}
+
+	if d := c.SnapshotInterval(); d < 0 {
+		errs = append(errs, fmt.Sprintf("snapshot-interval must be >= 0 (0=disable), got %v", d))
+	} else if d > 0 && d < time.Second {
+		errs = append(errs, fmt.Sprintf("snapshot-interval must be 0 (disable) or >= 1s, got %v", d))
+	}
+	if r := c.SnapshotRetain(); r < 1 {
+		errs = append(errs, fmt.Sprintf("snapshot-retain must be >= 1, got %v", r))
 	}
 
 	if u := c.AlertWebhook(); u != "" {

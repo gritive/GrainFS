@@ -365,7 +365,6 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -453,7 +452,6 @@ func (h *iamTestServerHandle) Start(t *testing.T) {
 		"--port", fmt.Sprintf("%d", h.s3Port),
 		"--nfs4-port", fmt.Sprintf("%d", h.nfsPort),
 		"--nbd-port", fmt.Sprintf("%d", h.nbdPort),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

@@ -93,7 +93,6 @@ for i in 0 1 2; do
     --nfs4-port "$(nfs_port "$i")" \
     --nbd-port 0 \
     --pprof-port "$(pprof_port "$i")" \
-    --snapshot-interval 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
     --log-level warn \

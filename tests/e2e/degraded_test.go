@@ -79,7 +79,6 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 			"--degraded-check-interval", "1s",

@@ -118,7 +118,6 @@ func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 			"--heal-receipt-gossip-interval=1s",
 			"--nfs4-port", "0",
 			"--nbd-port", "0",
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)

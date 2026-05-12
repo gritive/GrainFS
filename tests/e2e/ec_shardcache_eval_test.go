@@ -114,7 +114,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 			"--shard-cache-size=0", // simulator-only baseline; real cache off
 			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
@@ -397,7 +396,6 @@ func TestE2E_ECShardCacheActive(t *testing.T) {
 			"--shard-cache-size=268435456",
 			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
