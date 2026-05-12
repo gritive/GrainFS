@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.163.0] - 2026-05-13 — refactor(volume): split blockIOEngine.write into planner + executor
+
+`blockIOEngine.write()` 의 라우팅 결정 로직과 I/O 실행 로직을 분리.
+`blockIOPlanner`(read-only, HeadObject/dedup.ReadBlock으로 `[]BlockAction` 결정)와
+`blockIOExecutor`(write-only, `[]BlockAction` 소비)로 분리. 테스트 커버리지 대폭 확대.
+partial block write 시 HeadObject + GetObject(2 round-trip) 대신 GetObject만 호출하도록
+성능 회귀도 함께 수정.
+
+### Changed
+- `blockIOEngine.write()` → `blockIOPlanner.planWrite()` + `blockIOExecutor.executeWrite()` 로 분리.
+  라우팅 결정(ActionDirect/ActionDedup/ActionCow)이 뮤테이션 없는 단일 진입점에 집중됨.
+- `blockIOExecutor.executeWrite()` 시그니처에서 `off` 파라미터 제거; `WriteAt` 분기는 `PreferWriteAt()` guard로 이동.
+
+### Fixed
+- **성능 회귀** (partial block HeadObject): `poolQuota=0` 일 때 partial block write가 HeadObject(존재 확인)를 불필요하게 호출하던 문제 수정. 이제 `isFullBlk || poolQuota > 0` 조건에서만 HeadObject 호출.
+- `executeDirectAsync` partial-block 경로에서 `io.ReadFull` / `rc.Close` 에러를 무시하던 버그 수정 (silent zero-pad 데이터 손상 가능성).
+- CoW 신규 블록의 OldKey를 불필요하게 캐시 무효화하던 spurious invalidation 제거.
+
+### Tests
+- `block_io_planner_test.go`: DirectNewBlock, DirectExistingBlock, AsyncEligible, CowMode, DedupMode, QuotaExceeded/Ok, MultipleBlocks, PartialBlockAtOffset, CowExistingBlock, DedupExistingBlock, PartialDirectNoHeadObject, PartialCowNoHeadObject, DedupReadBlockError 총 13개 케이스.
+- `block_io_executor_test.go`: DirectNew/Existing, InvalidatesCache, AsyncCollectsCommitFn, DedupNew/Duplicate/ToDelete, CowWritesToCowKey/NewBlockSkipsRead, DirectWriteAtPath, DirectPartialBlock, AsyncDirectPartialBlock, PartialDirectNewBlockCountsAllocation, InvalidateAllNilCache 총 12개 케이스.
+
 ## [0.0.162.0] - 2026-05-12 — feat(cluster-config): snapshot-interval / snapshot-retain → cluster config
 
 자동 스냅샷 정책을 노드 실행 flag에서 cluster config(Raft-replicated + admin API hot-patchable)로 이주. 운영 중 RPO 조정 시 노드 재시작 불필요.
