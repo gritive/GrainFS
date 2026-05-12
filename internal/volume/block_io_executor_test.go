@@ -260,6 +260,25 @@ func TestExecuteWrite_CowNewBlockSkipsRead(t *testing.T) {
 	require.Empty(t, store.gets) // no GetObject called for new CoW block
 }
 
+func TestExecuteWrite_PartialDirectNewBlockCountsAllocation(t *testing.T) {
+	store := newFakeBlockStore() // block does not exist
+	ex := executorForTest(store, newFakeBlockCache(), nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := []byte("hello")
+	key := blockKey("v", 0)
+	// planner sets IsNew=false for partial blocks (skips HeadObject)
+	actions := []BlockAction{
+		{Kind: ActionDirect, BlkNum: 0, BlkOff: 10, DataStart: 0, CanWrite: 5,
+			Key: key, OldKey: key, IsNew: false},
+	}
+
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta,
+		"partial write to non-existent block must count as new allocation")
+}
+
 func TestExecuteWrite_InvalidateAllNilCache(t *testing.T) {
 	store := newFakeBlockStore()
 	ex := executorForTest(store, nil, nil)

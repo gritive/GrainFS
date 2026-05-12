@@ -123,9 +123,11 @@ func (ex blockIOExecutor) executeCowAction(
 	blkData := ex.getBlkBuf(vol.BlockSize)
 	defer ex.putBlkBuf(blkData)
 
+	blockFound := false
 	if !action.IsNew {
 		rc, _, readErr := ex.objects.GetObject(ctx, volumeBucketName, action.OldKey)
 		if readErr == nil {
+			blockFound = true
 			if _, err := io.ReadFull(rc, blkData); err != nil {
 				_ = rc.Close()
 				return fmt.Errorf("read block %d: %w", action.BlkNum, err)
@@ -143,13 +145,14 @@ func (ex blockIOExecutor) executeCowAction(
 		bytes.NewReader(blkData), "application/octet-stream"); err != nil {
 		return fmt.Errorf("write block %d: %w", action.BlkNum, err)
 	}
-	if action.OldKey != action.Key && !action.IsNew {
+	isNew := !blockFound // true when planner said IsNew=true (blockFound=false) or GetObject failed
+	if action.OldKey != action.Key && !isNew {
 		ex.objects.DeleteObject(ctx, volumeBucketName, action.OldKey) //nolint:errcheck
 	}
 	liveMap[action.BlkNum] = action.Key
 	result.LiveMapDirty = true
 	result.InvalidatedKeys = append(result.InvalidatedKeys, action.OldKey, action.Key)
-	if action.IsNew {
+	if isNew {
 		*newBlocks++
 	}
 	return nil
@@ -206,6 +209,10 @@ func (ex blockIOExecutor) executeDirectAction(
 			bytes.NewReader(blkData), "application/octet-stream"); err != nil {
 			return fmt.Errorf("write block %d: %w", action.BlkNum, err)
 		}
+		if readErr != nil {
+			*newBlocks++
+		}
+		return nil
 	}
 	if action.IsNew {
 		*newBlocks++
@@ -257,6 +264,10 @@ func (ex blockIOExecutor) executeDirectAsync(
 			return fmt.Errorf("write block %d: %w", action.BlkNum, err)
 		}
 		result.CommitFns = append(result.CommitFns, commitFn)
+		if readErr != nil {
+			*newBlocks++
+		}
+		return nil
 	}
 	if action.IsNew {
 		*newBlocks++

@@ -191,6 +191,30 @@ func TestPlanWrite_DedupExistingBlock(t *testing.T) {
 	require.Equal(t, "existing-canonical", a.OldKey)
 }
 
+func TestPlanWrite_PartialDirectNoHeadObject(t *testing.T) {
+	store := newFakeBlockStore()
+	pl := plannerForTest(store, nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := make([]byte, 100) // partial block
+
+	_, err := pl.planWrite("v", vol, p, 512, nil, 0, 0, false)
+
+	require.NoError(t, err)
+	require.Empty(t, store.heads, "partial block must not call HeadObject")
+}
+
+func TestPlanWrite_PartialCowNoHeadObject(t *testing.T) {
+	store := newFakeBlockStore()
+	pl := plannerForTest(store, nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize, SnapshotCount: 1}
+	p := make([]byte, 100) // partial block
+
+	_, err := pl.planWrite("v", vol, p, 512, nil, 0, 0, false)
+
+	require.NoError(t, err)
+	require.Empty(t, store.heads, "partial CoW block must not call HeadObject")
+}
+
 func TestPlanWrite_DedupReadBlockError(t *testing.T) {
 	store := newFakeBlockStore()
 	di := &fakeDedupIndex{blocks: map[int64]string{}, readErr: fmt.Errorf("index error")}

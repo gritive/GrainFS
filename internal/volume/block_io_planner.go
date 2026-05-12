@@ -48,6 +48,7 @@ func (pl blockIOPlanner) planWrite(
 			canWrite = int(vol.Size - pos)
 		}
 
+		isFullBlk := blkOff == 0 && canWrite == int(bs)
 		action := BlockAction{
 			BlkNum:    blkNum,
 			BlkOff:    blkOff,
@@ -72,26 +73,32 @@ func (pl blockIOPlanner) planWrite(
 
 		case useCow:
 			oldKey := physicalKey(name, blkNum, liveMap)
-			_, headErr := pl.objects.HeadObject(context.Background(), volumeBucketName, oldKey)
 			action.Kind = ActionCow
 			action.Key = cowBlockKey(name, blkNum)
 			action.OldKey = oldKey
-			action.IsNew = headErr != nil
-			if action.IsNew {
-				newBlocks++
+			if isFullBlk || poolQuota > 0 {
+				_, headErr := pl.objects.HeadObject(context.Background(), volumeBucketName, oldKey)
+				action.IsNew = headErr != nil
+				if action.IsNew {
+					newBlocks++
+				}
 			}
+			// partial without quota: executor determines IsNew via GetObject
 
 		default: // ActionDirect
 			key := blockKey(name, blkNum)
-			_, headErr := pl.objects.HeadObject(context.Background(), volumeBucketName, key)
 			action.Kind = ActionDirect
 			action.Key = key
 			action.OldKey = key
-			action.IsNew = headErr != nil
 			action.Async = asyncEligible
-			if action.IsNew {
-				newBlocks++
+			if isFullBlk || poolQuota > 0 {
+				_, headErr := pl.objects.HeadObject(context.Background(), volumeBucketName, key)
+				action.IsNew = headErr != nil
+				if action.IsNew {
+					newBlocks++
+				}
 			}
+			// partial without quota: executor determines IsNew via GetObject
 		}
 
 		actions = append(actions, action)
