@@ -5,16 +5,18 @@ import (
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-// RegisterClusterConfigRoutes wires GET /v1/cluster/config (and the PATCH stub
-// — 501 until Task 10) onto the admin UDS Hertz server. The handler is a plain
-// net/http handler bridged via wrapStdlibNoParam.
+// RegisterClusterConfigRoutes wires GET/PATCH /v1/cluster/config onto the
+// admin UDS Hertz server. The handler is a plain net/http handler bridged via
+// wrapStdlibNoParam.
 //
-// proposer may be nil during Task 9; Task 10 will pass a real raft proposer
-// once the propose path lands.
-func RegisterClusterConfigRoutes(h *hzserver.Hertz, fsm *cluster.MetaFSM, proposer adminapi.ClusterConfigProposer) {
-	handler := adminapi.NewClusterConfigHandler(fsm, proposer)
+// proposer may be nil when raft has not yet been initialized — PATCH then
+// returns 503. enc may be nil in --no-encryption mode; PATCH with a webhook
+// secret is then rejected with 403 early (before propose).
+func RegisterClusterConfigRoutes(h *hzserver.Hertz, fsm *cluster.MetaFSM, proposer adminapi.ClusterConfigProposer, enc *encrypt.Encryptor) {
+	handler := adminapi.NewClusterConfigHandler(fsm, proposer, enc)
 	h.GET("/v1/cluster/config", wrapStdlibNoParam(handler.ServeHTTP))
 	h.PATCH("/v1/cluster/config", wrapStdlibNoParam(handler.ServeHTTP))
 }

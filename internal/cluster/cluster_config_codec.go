@@ -13,6 +13,18 @@ import (
 // MetaClusterConfigPatchCmd payload. Used by operator/admin endpoints to
 // propose a cluster-config patch via Raft.
 func EncodeClusterConfigPatchCmd(p ClusterConfigPatch) ([]byte, error) {
+	inner, err := EncodeClusterConfigPatchInner(p)
+	if err != nil {
+		return nil, err
+	}
+	return encodeMetaCmd(clusterpb.MetaCmdTypeClusterConfigPatch, inner)
+}
+
+// EncodeClusterConfigPatchInner builds only the inner MetaClusterConfigPatchCmd
+// FlatBuffer payload (without the outer MetaCmd envelope). Used by the
+// production proposer path which routes through MetaRaft.Propose(cmdType,
+// payload) so leader-forwarding works on followers.
+func EncodeClusterConfigPatchInner(p ClusterConfigPatch) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 
 	// Strings / byte vector must be built before the parent table Start.
@@ -140,8 +152,7 @@ func EncodeClusterConfigPatchCmd(p ClusterConfigPatch) ([]byte, error) {
 		clusterpb.MetaClusterConfigPatchCmdAddExpectedRev(b, p.ExpectedRev)
 	}
 	inner := fbFinish(b, clusterpb.MetaClusterConfigPatchCmdEnd(b))
-
-	return encodeMetaCmd(clusterpb.MetaCmdTypeClusterConfigPatch, inner)
+	return inner, nil
 }
 
 // DecodeClusterConfigPatchCmd is the inverse of EncodeClusterConfigPatchCmd's

@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+// ClusterConfigAlertSecretAAD is the additional-authenticated-data binding the
+// wrapped alert-webhook-secret ciphertext to this specific cluster-config
+// field. Mirrors IAM's per-SA AAD pattern: prevents cross-ciphertext
+// substitution by the storage layer. Constant — never rotated.
+// Referenced by adminapi (PATCH wrap) and alerts consumer (unwrap).
+var ClusterConfigAlertSecretAAD = []byte("cluster_config.alert_webhook_secret")
+
 // ClusterConfigPatch is the in-memory equivalent of MetaClusterConfigPatchCmd.
 // Each pointer field: nil = leave alone, non-nil = set explicit value.
 // alert-webhook is treated specially: empty string means "leave alone";

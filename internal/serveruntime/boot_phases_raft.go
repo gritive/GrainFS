@@ -41,6 +41,12 @@ func bootMetaRaftWiring(state *bootState) error {
 	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil {
 		metaRaft.FSM().SetIAM(state.cfg.IAMStore, state.cfg.IAMApplier)
 	}
+	// Cluster-config PATCH with alert-webhook-secret requires the encryptor on
+	// the FSM (apply-side gate, Task 7). Nil in --no-encryption mode — Apply
+	// then rejects such patches with "encryption disabled".
+	if state.cfg.Encryptor != nil {
+		metaRaft.FSM().SetEncryptor(state.cfg.Encryptor)
+	}
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
@@ -86,8 +87,11 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				RegisterBucketAdminRoutes(h, state.iamAdminAPI)
 			}
 			if state.metaRaft != nil {
-				// proposer is nil until Task 10 wires the raft propose path.
-				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), nil)
+				// Production proposer routes through MetaRaft.Propose, which
+				// transparently leader-forwards on followers via the existing
+				// forward path (see meta_raft.proposeOrForward).
+				proposer := &cluster.ClusterConfigProposer{Propose: state.metaRaft.Propose}
+				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), proposer, state.cfg.Encryptor)
 			}
 		},
 	})
