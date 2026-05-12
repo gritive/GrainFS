@@ -76,6 +76,17 @@ func TestRaftMembershipRemoveVoterKeepsSelfNodeID(t *testing.T) {
 	require.Equal(t, [][]string{{"n1"}}, node.removes)
 }
 
+func TestRaftClusterInfoLeaderIDNormalizesRaftAddress(t *testing.T) {
+	info := NewRaftClusterInfo(&fakeRaftNode{
+		id:       "n1",
+		leaderID: "10.0.0.2:7001",
+	}, nil, nil, fakeAddressBook{nodes: []cluster.MetaNodeEntry{
+		{ID: "n2", Address: "10.0.0.2:7001"},
+	}})
+
+	require.Equal(t, "n2", info.LeaderID())
+}
+
 type fakeAddressBook struct {
 	nodes []cluster.MetaNodeEntry
 }
@@ -127,17 +138,23 @@ func TestRaftClusterInfo_PeerSnapshotMarksLivePeersLiveWithoutReplicationEvidenc
 }
 
 type fakeRaftNode struct {
-	id    string
-	peers []string
+	id       string
+	leaderID string
+	peers    []string
 }
 
-func (f *fakeRaftNode) Start()                                              {}
-func (f *fakeRaftNode) Close()                                              {}
-func (f *fakeRaftNode) ID() string                                          { return f.id }
-func (f *fakeRaftNode) State() raft.NodeState                               { return raft.Leader }
-func (f *fakeRaftNode) Term() uint64                                        { return 1 }
-func (f *fakeRaftNode) IsLeader() bool                                      { return true }
-func (f *fakeRaftNode) LeaderID() string                                    { return f.id }
+func (f *fakeRaftNode) Start()                {}
+func (f *fakeRaftNode) Close()                {}
+func (f *fakeRaftNode) ID() string            { return f.id }
+func (f *fakeRaftNode) State() raft.NodeState { return raft.Leader }
+func (f *fakeRaftNode) Term() uint64          { return 1 }
+func (f *fakeRaftNode) IsLeader() bool        { return true }
+func (f *fakeRaftNode) LeaderID() string {
+	if f.leaderID != "" {
+		return f.leaderID
+	}
+	return f.id
+}
 func (f *fakeRaftNode) CommittedIndex() uint64                              { return 0 }
 func (f *fakeRaftNode) Configuration() raft.Configuration                   { return raft.Configuration{} }
 func (f *fakeRaftNode) Peers() []string                                     { return append([]string(nil), f.peers...) }

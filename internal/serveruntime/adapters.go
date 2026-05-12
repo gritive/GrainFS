@@ -311,10 +311,16 @@ func NewRaftClusterInfo(node cluster.RaftNode, peers []string, backend *cluster.
 	return &RaftClusterInfo{node: node, peers: peers, backend: backend, addrBook: addrBook}
 }
 
-func (r *RaftClusterInfo) NodeID() string   { return r.node.ID() }
-func (r *RaftClusterInfo) State() string    { return r.node.State().String() }
-func (r *RaftClusterInfo) Term() uint64     { return r.node.Term() }
-func (r *RaftClusterInfo) LeaderID() string { return r.node.LeaderID() }
+func (r *RaftClusterInfo) NodeID() string { return r.node.ID() }
+func (r *RaftClusterInfo) State() string  { return r.node.State().String() }
+func (r *RaftClusterInfo) Term() uint64   { return r.node.Term() }
+func (r *RaftClusterInfo) LeaderID() string {
+	leaderID := r.node.LeaderID()
+	if resolved := cluster.ResolveShardGroupPeer(r.addrBook, leaderID); resolved.NodeID != "" {
+		return resolved.NodeID
+	}
+	return leaderID
+}
 func (r *RaftClusterInfo) Peers() []string {
 	return nilToEmpty(r.normalizePeerIDs(r.node.Peers()))
 }
