@@ -239,6 +239,26 @@ with identity state `self`. Compatibility adapters may omit self when filling
 legacy wire fields such as `peers`, but the module's own interface represents
 the whole membership view.
 
+### EC Object Writer
+
+The EC object writer is the private cluster module that executes resolved
+shard-reader write plans for erasure-coded object data. In the first slice it
+owns local/remote shard fan-out, best-effort cleanup of shards written before
+failure, and peer-health marking from shard write outcomes. Shard
+materialization and single-local fast-path selection still live in
+`DistributedBackend` until they are moved behind the same module.
+
+The EC object writer does not choose bucket routing, placement group identity,
+or object metadata semantics. Callers pass a resolved write plan: bucket, key,
+version ID, placement group ID, EC profile, shard placement, ring version, and
+content type. The writer returns the facts needed to commit object metadata,
+but the Raft metadata mutation stays at the `DistributedBackend` seam.
+
+This keeps object placement policy and metadata commit ordering outside the
+writer while concentrating data-plane write side effects in one place. The
+module's interface is the test surface for write-all consistency, shard cleanup
+on partial failure, and peer-health transitions.
+
 The cluster status wire response keeps legacy fields while adding a full
 `peer_snapshot` row list. Legacy fields such as `peers`, `peer_addrs`,
 `peer_states`, and `down_nodes` are derived from the snapshot rather than

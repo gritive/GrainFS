@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.158.0] - 2026-05-12 — refactor(cluster): EC object shard writes move behind private writer
+
+### Changed
+- EC memory-shard object writes now run local/remote shard fan-out through a private `EC Object Writer` module. The metadata commit still stays in `DistributedBackend`, so the Raft mutation ordering remains unchanged while shard-write side effects become easier to test.
+- The new writer owns cleanup of shards written before a write failure and peer-health marking from remote shard outcomes. This concentrates EC write-all failure behavior behind one internal test surface.
+- `CONTEXT.md` now records the `EC Object Writer` domain term and its current slice: shard-reader write execution first, with shard materialization and single-local fast path still left in `DistributedBackend`.
+
+### Added
+- Unit coverage for the partial-failure path where a remote shard write fails after a local shard succeeded. The test verifies the original write error is preserved and the already-written local shard is cleaned up.
+
 ## [0.0.157.0] - 2026-05-12 — refactor(server): clusterStatus emits typed adminapi.Status
 
 ### Changed
