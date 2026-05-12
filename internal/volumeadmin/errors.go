@@ -35,11 +35,11 @@ type DeleteRecentEntry struct {
 // AsDeleteConflict returns typed details if e is a delete-conflict error.
 // Best-effort: returns nil if the JSON shape doesn't match.
 func AsDeleteConflict(e *Error) *DeleteConflictDetails {
-	if e == nil || e.Code != "conflict" || e.Details == nil {
+	if e == nil || e.Code != "conflict" || len(e.Details) == 0 {
 		return nil
 	}
 	var d DeleteConflictDetails
-	if err := remapJSON(e.Details, &d); err != nil {
+	if err := json.Unmarshal(e.Details, &d); err != nil {
 		return nil
 	}
 	return &d
@@ -56,23 +56,14 @@ type ResizeUnsupportedDetails struct {
 
 // AsResizeUnsupported returns typed details if e is a shrink-unsupported error.
 func AsResizeUnsupported(e *Error) *ResizeUnsupportedDetails {
-	if e == nil || e.Code != "unsupported" || e.Details == nil {
+	if e == nil || e.Code != "unsupported" || len(e.Details) == 0 {
 		return nil
 	}
 	var d ResizeUnsupportedDetails
-	if err := remapJSON(e.Details, &d); err != nil {
+	if err := json.Unmarshal(e.Details, &d); err != nil {
 		return nil
 	}
 	return &d
-}
-
-// remapJSON re-encodes a generic JSON map into a typed struct.
-func remapJSON(in map[string]any, out any) error {
-	buf, err := json.Marshal(in)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(buf, out)
 }
 
 // FormatDeleteConflict writes a human-friendly description of a delete

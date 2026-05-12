@@ -2,6 +2,7 @@ package volumeadmin
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -47,12 +48,12 @@ func TestIsCode(t *testing.T) {
 func TestAsDeleteConflict(t *testing.T) {
 	e := &Error{
 		Code: "conflict",
-		Details: map[string]any{
-			"snapshot_count":  float64(3),
-			"recent":          []any{map[string]any{"id": "snap-1", "created_at": "2026-01-01T00:00:00Z", "block_count": float64(42)}},
+		Details: json.RawMessage(`{
+			"snapshot_count": 3,
+			"recent": [{"id":"snap-1","created_at":"2026-01-01T00:00:00Z","block_count":42}],
 			"cascade_command": "grainfs volume delete v1 --force",
-			"list_command":    "grainfs volume snapshot list v1",
-		},
+			"list_command": "grainfs volume snapshot list v1"
+		}`),
 	}
 	d := AsDeleteConflict(e)
 	if d == nil {
@@ -81,12 +82,12 @@ func TestAsDeleteConflict_WrongCode(t *testing.T) {
 func TestAsResizeUnsupported(t *testing.T) {
 	e := &Error{
 		Code: "unsupported",
-		Details: map[string]any{
-			"current_size":  float64(2 << 30),
-			"requested":     float64(1 << 30),
-			"hint":          "clone to a smaller new volume instead",
-			"clone_command": "grainfs volume clone v1 <new>",
-		},
+		Details: json.RawMessage(`{
+			"current_size": 2147483648,
+			"requested": 1073741824,
+			"hint": "clone to a smaller new volume instead",
+			"clone_command": "grainfs volume clone v1 <new>"
+		}`),
 	}
 	d := AsResizeUnsupported(e)
 	if d == nil {
@@ -104,12 +105,12 @@ func TestFormatDeleteConflict(t *testing.T) {
 	e := &Error{
 		Code:    "conflict",
 		Message: "volume \"v1\" has 3 snapshots; refused without --force",
-		Details: map[string]any{
-			"snapshot_count":  float64(3),
-			"recent":          []any{map[string]any{"id": "snap-1", "created_at": "2026-01-01T00:00:00Z", "block_count": float64(42)}},
+		Details: json.RawMessage(`{
+			"snapshot_count": 3,
+			"recent": [{"id":"snap-1","created_at":"2026-01-01T00:00:00Z","block_count":42}],
 			"cascade_command": "grainfs volume delete v1 --force",
-			"list_command":    "grainfs volume snapshot list v1",
-		},
+			"list_command": "grainfs volume snapshot list v1"
+		}`),
 	}
 	var buf bytes.Buffer
 	FormatDeleteConflict(&buf, e)
@@ -141,10 +142,10 @@ func TestFormatResizeUnsupported(t *testing.T) {
 	e := &Error{
 		Code:    "unsupported",
 		Message: "shrink not supported",
-		Details: map[string]any{
-			"hint":          "clone to a smaller new volume instead",
-			"clone_command": "grainfs volume clone v1 <new>",
-		},
+		Details: json.RawMessage(`{
+			"hint": "clone to a smaller new volume instead",
+			"clone_command": "grainfs volume clone v1 <new>"
+		}`),
 	}
 	var buf bytes.Buffer
 	FormatResizeUnsupported(&buf, e)

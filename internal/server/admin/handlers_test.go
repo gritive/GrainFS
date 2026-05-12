@@ -201,17 +201,20 @@ func TestDeleteVolume_RefusesWithSnapshots(t *testing.T) {
 	if !errors.As(err, &ae) || ae.Code != "conflict" {
 		t.Fatalf("err = %v, want conflict", err)
 	}
-	det := ae.Details
-	if det["snapshot_count"].(int) != 1 {
-		t.Fatalf("snapshot_count = %v, want 1", det["snapshot_count"])
+	var det struct {
+		SnapshotCount  int                  `json:"snapshot_count"`
+		CascadeCommand string               `json:"cascade_command"`
+		Recent         []admin.SnapshotInfo `json:"recent"`
 	}
-	if det["cascade_command"] != "grainfs volume delete v1 --force" {
-		t.Fatalf("cascade_command = %v", det["cascade_command"])
+	require.NoError(t, json.Unmarshal(ae.Details, &det))
+	if det.SnapshotCount != 1 {
+		t.Fatalf("snapshot_count = %d, want 1", det.SnapshotCount)
 	}
-	recent, ok := det["recent"].([]admin.SnapshotInfo)
-	require.True(t, ok, "recent details type = %T", det["recent"])
-	require.Len(t, recent, 1)
-	require.NotEmpty(t, recent[0].CreatedAt)
+	if det.CascadeCommand != "grainfs volume delete v1 --force" {
+		t.Fatalf("cascade_command = %q", det.CascadeCommand)
+	}
+	require.Len(t, det.Recent, 1)
+	require.NotEmpty(t, det.Recent[0].CreatedAt)
 
 	buf, err := json.Marshal(ae)
 	require.NoError(t, err)

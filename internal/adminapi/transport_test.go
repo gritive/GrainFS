@@ -97,8 +97,14 @@ func TestTransport_JSONErrorEnvelope(t *testing.T) {
 	if ae.Code != "conflict" || ae.Status != http.StatusConflict {
 		t.Fatalf("got %+v", ae)
 	}
-	if ae.Details["k"].(float64) != 1 {
-		t.Fatalf("details=%v", ae.Details)
+	var d struct {
+		K int `json:"k"`
+	}
+	if err := json.Unmarshal(ae.Details, &d); err != nil {
+		t.Fatalf("decode details: %v", err)
+	}
+	if d.K != 1 {
+		t.Fatalf("details k=%d, want 1", d.K)
 	}
 }
 

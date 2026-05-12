@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.156.0] - 2026-05-12 — refactor(adminapi): Details → json.RawMessage + typed structs
+
+### Changed
+- `adminapi.Error.Details` 타입이 `map[string]any` → `json.RawMessage`로 전환. 캘러는 endpoint별 typed struct에 `json.Unmarshal(e.Details, &d)` 한 줄로 디코드 — typed-everything 일관성 완성, `map[string]any` 타입어설션 보일러 제거.
+- `clusteradmin.RemovePeerError`/`TransferLeaderError`가 새 `RemovePeerErrorDetails`/`TransferLeaderErrorDetails` typed struct를 embed. `e.LeaderID`/`.VotersAfter`/`.Retry` 외부 API는 Go field promotion으로 그대로 동작 — caller 무변경.
+- `clusteradmin.intField` helper 폐기. JSON number → int 변환은 `encoding/json`이 typed struct 필드 타입에 따라 자동 처리.
+- `volumeadmin.AsDeleteConflict`/`AsResizeUnsupported`가 `remapJSON`(map→bytes→typed) 우회 단계 제거하고 `json.Unmarshal` 직접 호출.
+- `adminapi.Transport.parseErrorBody` legacy flat-shape 경로: 원본 body bytes를 그대로 `Details`에 할당 (zero-alloc; typed struct가 `code`/`error` 키 자연 무시).
+- `server/admin.NewConflict`/`NewUnsupported` 헬퍼가 입력 map[string]any를 내부에서 marshal 후 RawMessage로 채움 — 호출 시그니처는 보존, 호출부 무변경.
+- wire bytes 무변경 — JSON 응답 모양 동일. 모든 변경은 Go 측 표현형 (map → bytes + typed struct).
+
 ## [0.0.155.0] - 2026-05-12 — BREAKING: cluster-wide policy moved to admin API
 
 Cluster-wide policy values are now stored in MetaFSM (Raft-replicated) and

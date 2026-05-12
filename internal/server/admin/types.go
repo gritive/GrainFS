@@ -6,6 +6,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/dashboard"
@@ -101,10 +102,12 @@ func NewNotFound(msg string) *Error { return &Error{Code: "not_found", Message: 
 func NewInvalid(msg string) *Error  { return &Error{Code: "invalid", Message: msg} }
 func NewInternal(msg string) *Error { return &Error{Code: "internal", Message: msg} }
 func NewConflict(msg string, details map[string]any) *Error {
-	return &Error{Code: "conflict", Message: msg, Details: details}
+	raw, _ := json.Marshal(details)
+	return &Error{Code: "conflict", Message: msg, Details: raw}
 }
 func NewUnsupported(msg string, details map[string]any) *Error {
-	return &Error{Code: "unsupported", Message: msg, Details: details}
+	raw, _ := json.Marshal(details)
+	return &Error{Code: "unsupported", Message: msg, Details: raw}
 }
 
 type WriteAtVolumeReq = adminapi.WriteAtVolumeReq

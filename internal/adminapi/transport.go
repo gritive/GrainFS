@@ -133,21 +133,19 @@ func (t *Transport) parseErrorBody(status int, body []byte) error {
 		return &wire
 	}
 	// Legacy flat shape: {"error":"...","leader_id":"...",...}
-	// Decode as a generic map and lift "error" → Message, rest → Details so
-	// endpoint-specific parsers (e.g. parseRemovePeerError) can read fields
-	// regardless of envelope shape.
-	var flat map[string]any
-	if err := json.Unmarshal(body, &flat); err == nil && len(flat) > 0 {
-		out := &Error{Status: status, Code: "internal"}
-		if msg, ok := flat["error"].(string); ok && msg != "" {
-			out.Message = msg
+	// Lift "error" → Message and hand the raw body to Details. Endpoint-
+	// specific parsers (e.g. parseRemovePeerError) json.Unmarshal Details
+	// into their typed struct; unknown keys (code/error) are ignored, so the
+	// same parser works for structured and flat envelopes alike.
+	var probe struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &probe); err == nil {
+		out := &Error{Status: status, Code: "internal", Details: body}
+		if probe.Error != "" {
+			out.Message = probe.Error
 		} else {
 			out.Message = string(body)
-		}
-		delete(flat, "code")
-		delete(flat, "error")
-		if len(flat) > 0 {
-			out.Details = flat
 		}
 		return out
 	}

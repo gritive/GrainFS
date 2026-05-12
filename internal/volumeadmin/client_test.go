@@ -135,16 +135,17 @@ func TestClient_DeleteVolume_ForceQuery(t *testing.T) {
 }
 
 func TestClient_DeleteVolume_ConflictReturnsTypedError(t *testing.T) {
+	conflictDetails, _ := json.Marshal(map[string]any{
+		"snapshot_count":  3,
+		"recent":          []map[string]any{{"id": "snap-1", "created_at": "t", "block_count": 1}},
+		"cascade_command": "...",
+		"list_command":    "...",
+	})
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "DELETE", path: "/v1/volumes/v1",
 		status: 409, errResp: &Error{
 			Code: "conflict", Message: "has snapshots",
-			Details: map[string]any{
-				"snapshot_count":  3,
-				"recent":          []map[string]any{{"id": "snap-1", "created_at": "t", "block_count": 1}},
-				"cascade_command": "...",
-				"list_command":    "...",
-			},
+			Details: conflictDetails,
 		},
 	}})
 	defer srv.Close()
@@ -164,16 +165,17 @@ func TestClient_DeleteVolume_ConflictReturnsTypedError(t *testing.T) {
 }
 
 func TestClient_ResizeVolume_UnsupportedShrink(t *testing.T) {
+	unsupportedDetails, _ := json.Marshal(map[string]any{
+		"current_size":  2 << 30,
+		"requested":     1 << 30,
+		"hint":          "clone instead",
+		"clone_command": "grainfs volume clone v1 <new>",
+	})
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "POST", path: "/v1/volumes/v1/resize",
 		status: 422, errResp: &Error{
 			Code: "unsupported", Message: "shrink not supported",
-			Details: map[string]any{
-				"current_size":  2 << 30,
-				"requested":     1 << 30,
-				"hint":          "clone instead",
-				"clone_command": "grainfs volume clone v1 <new>",
-			},
+			Details: unsupportedDetails,
 		},
 	}})
 	defer srv.Close()
