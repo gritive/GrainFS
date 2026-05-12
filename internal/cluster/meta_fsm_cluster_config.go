@@ -36,7 +36,17 @@ func (f *MetaFSM) applyClusterConfigPatch(data []byte) error {
 			p.ExpectedRev, current.Rev(), ErrClusterConfigCAS)
 	}
 
-	ts := time.Now()
+	// FSM Apply must be deterministic: every replica writes the same
+	// clusterConfigSnap.updatedAt for the same Raft log entry, otherwise
+	// snapshots diverge byte-for-byte by leader. Use the proposer-stamped
+	// timestamp (single source of truth) and fall back to time.Now() only
+	// for legacy/unstamped entries (test paths, pre-fix log entries).
+	var ts time.Time
+	if p.UpdatedAtUnixMs != 0 {
+		ts = time.UnixMilli(p.UpdatedAtUnixMs)
+	} else {
+		ts = time.Now()
+	}
 
 	// Trial apply on a clone so we can validate before committing.
 	trial := cloneClusterConfig(current)

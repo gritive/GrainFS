@@ -66,6 +66,12 @@ table MetaClusterConfigPatchCmd {
 
   reset_keys:                         [string];     // explicit field names to remove from FSM (default-restore)
   expected_rev:                       uint64;       // 0 = no CAS; nonzero = If-Match-Rev semantics
+
+  // updated_at_unix_ms is stamped by the proposer (single source of truth) so
+  // that the FSM apply path is deterministic — every replica writes the same
+  // clusterConfigSnap.updatedAt for the same Raft log entry, keeping snapshots
+  // byte-identical. 0 = legacy/unstamped (FSM falls back to time.Now()).
+  updated_at_unix_ms:                 int64;
 }
 
 table CreateBucketCmd {

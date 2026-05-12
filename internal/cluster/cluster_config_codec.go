@@ -151,6 +151,9 @@ func EncodeClusterConfigPatchInner(p ClusterConfigPatch) ([]byte, error) {
 	if p.ExpectedRev != 0 {
 		clusterpb.MetaClusterConfigPatchCmdAddExpectedRev(b, p.ExpectedRev)
 	}
+	if p.UpdatedAtUnixMs != 0 {
+		clusterpb.MetaClusterConfigPatchCmdAddUpdatedAtUnixMs(b, p.UpdatedAtUnixMs)
+	}
 	inner := fbFinish(b, clusterpb.MetaClusterConfigPatchCmdEnd(b))
 	return inner, nil
 }
@@ -229,6 +232,7 @@ func DecodeClusterConfigPatchCmd(data []byte) (ClusterConfigPatch, error) {
 		}
 	}
 	p.ExpectedRev = t.ExpectedRev()
+	p.UpdatedAtUnixMs = t.UpdatedAtUnixMs()
 	return p, nil
 }
 

@@ -268,8 +268,20 @@ func (rcv *MetaClusterConfigPatchCmd) MutateExpectedRev(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(34, n)
 }
 
+func (rcv *MetaClusterConfigPatchCmd) UpdatedAtUnixMs() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaClusterConfigPatchCmd) MutateUpdatedAtUnixMs(n int64) bool {
+	return rcv._tab.MutateInt64Slot(36, n)
+}
+
 func MetaClusterConfigPatchCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(16)
+	builder.StartObject(17)
 }
 func MetaClusterConfigPatchCmdAddBalancerEnabled(builder *flatbuffers.Builder, balancerEnabled flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(balancerEnabled), 0)
@@ -324,6 +336,9 @@ func MetaClusterConfigPatchCmdStartResetKeysVector(builder *flatbuffers.Builder,
 }
 func MetaClusterConfigPatchCmdAddExpectedRev(builder *flatbuffers.Builder, expectedRev uint64) {
 	builder.PrependUint64Slot(15, expectedRev, 0)
+}
+func MetaClusterConfigPatchCmdAddUpdatedAtUnixMs(builder *flatbuffers.Builder, updatedAtUnixMs int64) {
+	builder.PrependInt64Slot(16, updatedAtUnixMs, 0)
 }
 func MetaClusterConfigPatchCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

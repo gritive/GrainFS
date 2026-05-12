@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
@@ -25,6 +26,12 @@ type ClusterConfigProposer struct {
 // ProposeClusterConfigPatch encodes p and submits it via the configured
 // Propose closure. Errors propagate raw — adminapi maps them to HTTP codes.
 func (m *ClusterConfigProposer) ProposeClusterConfigPatch(p ClusterConfigPatch) error {
+	// Stamp the proposer wall clock so the FSM apply path is deterministic
+	// across replicas (every node writes the same updatedAt for the same
+	// log entry). Single source of truth: the leader at propose time.
+	if p.UpdatedAtUnixMs == 0 {
+		p.UpdatedAtUnixMs = time.Now().UnixMilli()
+	}
 	payload, err := EncodeClusterConfigPatchInner(p)
 	if err != nil {
 		return err

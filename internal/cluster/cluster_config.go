@@ -36,6 +36,14 @@ type ClusterConfigPatch struct {
 
 	ResetKeys   []string
 	ExpectedRev uint64 // 0 = no CAS
+
+	// UpdatedAtUnixMs is the wall-clock timestamp stamped by the proposer
+	// before the patch is sent through Raft. The FSM apply path uses this
+	// value (instead of time.Now()) so every replica writes the same
+	// clusterConfigSnap.updatedAt for the same log entry — required for
+	// deterministic FSM state and byte-identical snapshots.
+	// 0 = unstamped (legacy/test path; FSM falls back to time.Now()).
+	UpdatedAtUnixMs int64
 }
 
 // ClusterConfig is the merged view that consumers read. The "explicit" inner
