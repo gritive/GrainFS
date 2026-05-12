@@ -1,4 +1,4 @@
-package adminapi
+package clusteradmin
 
 import (
 	"encoding/json"
