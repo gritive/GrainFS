@@ -5,73 +5,158 @@ import (
 	"fmt"
 )
 
-// confChangeEncodingVersion is the leading byte of every ConfChange /
-// JointConfChange payload. Bumping the version lets future encodings reject
-// blobs they cannot parse rather than silently misinterpret them.
+// ConfChange wire encoding (binary, big-endian — internal-comms rule
+// prohibits JSON).
 //
-// Wire format (binary, big-endian — internal-comms rule prohibits JSON):
+// Two formats coexist; the leading version byte discriminates:
+//
+// Joint entries (LogEntryJointConfChange) — UNCHANGED by M6.0 (§M6.0.0
+// amendment #3). Joint quorum math is voter-only and learners are
+// out-of-band; joint transitions never carry learner state on the wire.
 //
 //	[Version: 1B = 0x01]
-//	[Kind:    1B]              // 0 = single config, 1 = joint config
-//	[NumNew:  4B BE]
-//	  Repeated NumNew times:
-//	    [LenN: 4B BE][BytesN: LenN bytes]
-//	If Kind == joint:
-//	  [NumOld: 4B BE]
-//	    Repeated NumOld times:
-//	      [LenO: 4B BE][BytesO: LenO bytes]
+//	[Kind:    1B = 0x01]       // joint
+//	[NumNew:  4B BE][(LenN: 4B BE, BytesN) × NumNew]
+//	[NumOld:  4B BE][(LenO: 4B BE, BytesO) × NumOld]
 //
-// "New" means Cnew (the target configuration). For a single config entry,
-// only Cnew is encoded. For a joint entry, both Cold (the configuration
-// effective immediately before the change) and Cnew (the configuration we
-// transition to once joint commits) are encoded.
-const confChangeEncodingVersion byte = 0x01
+// Single entries (LogEntryConfChange) — Path B (M6.0) format. Carries the
+// Op tag + the learner-targeted ID/Address (when applicable) + the full
+// resulting voter and learner sets so a follower replaying the entry
+// reconstructs both halves of effectiveConfig.
+//
+//	[Version: 1B = 0x02]
+//	[Kind:    1B = 0x00]       // single
+//	[Op:      1B]              // ConfChangeOp
+//	[LearnerIDLen:   2B BE][LearnerID:   variable]
+//	[LearnerAddrLen: 2B BE][LearnerAddr: variable]
+//	[NumVoters:   4B BE][(LenV: 4B BE, BytesV) × NumVoters]
+//	[NumLearners: 4B BE][(LenLID: 2B BE, BytesLID, LenLAddr: 2B BE, BytesLAddr) × NumLearners]
+//
+// The schema-version key in logstore_badger refuses to open a pre-M6.0
+// single payload (version 0x01 + kind 0x00); operators must wipe and
+// re-bootstrap. Joint payload version 0x01 stays valid going forward.
+const (
+	confChangeVersionJoint  byte = 0x01
+	confChangeVersionSingle byte = 0x02
+)
 
 const (
 	confChangeKindSingle byte = 0
 	confChangeKindJoint  byte = 1
 )
 
-// confChangePayload is the decoded form. NewVoters is always populated;
-// OldVoters is populated only when IsJoint == true.
+// confChangePayload is the decoded form.
+//
+// Joint entries (IsJoint == true): only NewVoters + OldVoters populated.
+// Single entries (IsJoint == false): Op + LearnerID/LearnerAddress (when
+// the op targets a learner) + NewVoters + NewLearners populated.
 type confChangePayload struct {
-	IsJoint   bool
-	NewVoters []string
-	OldVoters []string
+	IsJoint        bool
+	Op             ConfChangeOp // single-only; ignored when IsJoint
+	LearnerID      string       // target of an AddLearner / PromoteStage1 / RemoveLearner
+	LearnerAddress string       // target's transport address (AddLearner only)
+	NewVoters      []string     // resulting voter set after the entry
+	OldVoters      []string     // joint-only: Cold side
+	NewLearners    []confLearner
 }
 
-// encodeConfChange encodes a single-config ConfChange (Cnew only) — the
-// payload of LogEntryConfChange.
-func encodeConfChange(newVoters []string) []byte {
-	return encodePayload(false, newVoters, nil)
+// confLearner is a single learner entry in the resulting learners snapshot
+// of a single-config ConfChange payload.
+type confLearner struct {
+	ID      string
+	Address string
+}
+
+// encodeConfChange encodes a single-config ConfChange (Path B v2 wire) —
+// the payload of LogEntryConfChange. Carries Op + the resulting voter set
+// + the resulting learners set so followers replay the entry into both
+// halves of effectiveConfig.
+//
+// learnerID/learnerAddress are the target of the op (empty for
+// voter-only ops like a joint-exit AddVoter).
+func encodeConfChange(op ConfChangeOp, learnerID, learnerAddress string, newVoters []string, newLearners []confLearner) []byte {
+	size := 1 + 1 + 1 // version + kind + op
+	size += 2 + len(learnerID)
+	size += 2 + len(learnerAddress)
+	size += 4 // numVoters
+	for _, v := range newVoters {
+		size += 4 + len(v)
+	}
+	size += 4 // numLearners
+	for _, l := range newLearners {
+		size += 2 + len(l.ID) + 2 + len(l.Address)
+	}
+	buf := make([]byte, size)
+	off := 0
+	buf[off] = confChangeVersionSingle
+	off++
+	buf[off] = confChangeKindSingle
+	off++
+	buf[off] = byte(op)
+	off++
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(learnerID)))
+	off += 2
+	copy(buf[off:], learnerID)
+	off += len(learnerID)
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(learnerAddress)))
+	off += 2
+	copy(buf[off:], learnerAddress)
+	off += len(learnerAddress)
+	binary.BigEndian.PutUint32(buf[off:], uint32(len(newVoters)))
+	off += 4
+	for _, v := range newVoters {
+		binary.BigEndian.PutUint32(buf[off:], uint32(len(v)))
+		off += 4
+		copy(buf[off:], v)
+		off += len(v)
+	}
+	binary.BigEndian.PutUint32(buf[off:], uint32(len(newLearners)))
+	off += 4
+	for _, l := range newLearners {
+		binary.BigEndian.PutUint16(buf[off:], uint16(len(l.ID)))
+		off += 2
+		copy(buf[off:], l.ID)
+		off += len(l.ID)
+		binary.BigEndian.PutUint16(buf[off:], uint16(len(l.Address)))
+		off += 2
+		copy(buf[off:], l.Address)
+		off += len(l.Address)
+	}
+	return buf
+}
+
+// encodeJointExitConfChange is a convenience wrapper for the final entry
+// of a joint-consensus AddVoter/RemoveVoter transition. The op is
+// ConfChangeAddVoter and no learner is targeted; the resulting voter set
+// becomes Cnew and any live learners are carried through unchanged.
+func encodeJointExitConfChange(newVoters []string, learners map[string]string) []byte {
+	var ls []confLearner
+	if len(learners) > 0 {
+		ls = make([]confLearner, 0, len(learners))
+		for id, addr := range learners {
+			ls = append(ls, confLearner{ID: id, Address: addr})
+		}
+	}
+	return encodeConfChange(ConfChangeAddVoter, "", "", newVoters, ls)
 }
 
 // encodeJointConfChange encodes a joint-config entry (Cold ∪ Cnew) — the
-// payload of LogEntryJointConfChange.
+// payload of LogEntryJointConfChange. UNCHANGED by M6.0 (§M6.0.0
+// amendment #3): learners are not carried in joint entries.
 func encodeJointConfChange(oldVoters, newVoters []string) []byte {
-	return encodePayload(true, newVoters, oldVoters)
-}
-
-func encodePayload(joint bool, newVoters, oldVoters []string) []byte {
 	size := 1 + 1 + 4 // version + kind + numNew
 	for _, v := range newVoters {
 		size += 4 + len(v)
 	}
-	if joint {
-		size += 4
-		for _, v := range oldVoters {
-			size += 4 + len(v)
-		}
+	size += 4
+	for _, v := range oldVoters {
+		size += 4 + len(v)
 	}
 	buf := make([]byte, size)
 	off := 0
-	buf[off] = confChangeEncodingVersion
+	buf[off] = confChangeVersionJoint
 	off++
-	if joint {
-		buf[off] = confChangeKindJoint
-	} else {
-		buf[off] = confChangeKindSingle
-	}
+	buf[off] = confChangeKindJoint
 	off++
 	binary.BigEndian.PutUint32(buf[off:], uint32(len(newVoters)))
 	off += 4
@@ -81,64 +166,115 @@ func encodePayload(joint bool, newVoters, oldVoters []string) []byte {
 		copy(buf[off:], v)
 		off += len(v)
 	}
-	if joint {
-		binary.BigEndian.PutUint32(buf[off:], uint32(len(oldVoters)))
+	binary.BigEndian.PutUint32(buf[off:], uint32(len(oldVoters)))
+	off += 4
+	for _, v := range oldVoters {
+		binary.BigEndian.PutUint32(buf[off:], uint32(len(v)))
 		off += 4
-		for _, v := range oldVoters {
-			binary.BigEndian.PutUint32(buf[off:], uint32(len(v)))
-			off += 4
-			copy(buf[off:], v)
-			off += len(v)
-		}
+		copy(buf[off:], v)
+		off += len(v)
 	}
 	return buf
 }
 
-// decodeConfChange decodes either a single or joint payload. Caller is
-// expected to dispatch on the LogEntryType, but the payload itself is
-// self-describing via the Kind byte.
+// decodeConfChange decodes either a single or joint payload. The version
+// byte discriminates: 0x01 + kind 0x01 = joint (unchanged), 0x02 + kind
+// 0x00 = single Path B. Any other (version, kind) tuple is rejected.
 func decodeConfChange(val []byte) (confChangePayload, error) {
 	var out confChangePayload
-	if len(val) < 1 {
-		return out, fmt.Errorf("raftv2: confchange: empty payload")
+	if len(val) < 2 {
+		return out, fmt.Errorf("raftv2: confchange: short header (%d bytes)", len(val))
 	}
-	if val[0] != confChangeEncodingVersion {
-		return out, fmt.Errorf("raftv2: confchange: unknown version 0x%02x", val[0])
-	}
-	off := 1
-	if len(val) < off+1 {
-		return out, fmt.Errorf("raftv2: confchange: short kind")
-	}
-	kind := val[off]
-	off++
-	switch kind {
-	case confChangeKindSingle:
-		out.IsJoint = false
-	case confChangeKindJoint:
+	ver := val[0]
+	kind := val[1]
+	off := 2
+	switch {
+	case ver == confChangeVersionJoint && kind == confChangeKindJoint:
 		out.IsJoint = true
-	default:
-		return out, fmt.Errorf("raftv2: confchange: unknown kind 0x%02x", kind)
-	}
-
-	newV, off2, err := decodeVoters(val, off, "new")
-	if err != nil {
-		return out, err
-	}
-	out.NewVoters = newV
-	off = off2
-
-	if out.IsJoint {
+		newV, off2, err := decodeVoters(val, off, "new")
+		if err != nil {
+			return out, err
+		}
+		out.NewVoters = newV
+		off = off2
 		oldV, off3, err := decodeVoters(val, off, "old")
 		if err != nil {
 			return out, err
 		}
 		out.OldVoters = oldV
 		off = off3
+		if off != len(val) {
+			return out, fmt.Errorf("raftv2: confchange: trailing %d bytes", len(val)-off)
+		}
+		return out, nil
+	case ver == confChangeVersionSingle && kind == confChangeKindSingle:
+		// Path B single-format.
+		if len(val) < off+1 {
+			return out, fmt.Errorf("raftv2: confchange: short op")
+		}
+		out.Op = ConfChangeOp(val[off])
+		off++
+		var err error
+		out.LearnerID, off, err = readLenU16String(val, off, "learnerID")
+		if err != nil {
+			return out, err
+		}
+		out.LearnerAddress, off, err = readLenU16String(val, off, "learnerAddr")
+		if err != nil {
+			return out, err
+		}
+		newV, off2, err := decodeVoters(val, off, "voters")
+		if err != nil {
+			return out, err
+		}
+		out.NewVoters = newV
+		off = off2
+		if len(val) < off+4 {
+			return out, fmt.Errorf("raftv2: confchange: short learners count")
+		}
+		n := int(binary.BigEndian.Uint32(val[off:]))
+		off += 4
+		if n > 0 {
+			out.NewLearners = make([]confLearner, n)
+			for i := 0; i < n; i++ {
+				var l confLearner
+				l.ID, off, err = readLenU16String(val, off, fmt.Sprintf("learner[%d].id", i))
+				if err != nil {
+					return out, err
+				}
+				l.Address, off, err = readLenU16String(val, off, fmt.Sprintf("learner[%d].addr", i))
+				if err != nil {
+					return out, err
+				}
+				out.NewLearners[i] = l
+			}
+		}
+		if off != len(val) {
+			return out, fmt.Errorf("raftv2: confchange: trailing %d bytes", len(val)-off)
+		}
+		return out, nil
+	case ver == confChangeVersionJoint && kind == confChangeKindSingle:
+		// Pre-M6.0 single payload — refuse loudly. The logstore schema
+		// gate should have caught the store, but defense-in-depth here
+		// keeps log replay from silently misinterpreting old voters as
+		// new ones with a missing Op tag.
+		return out, fmt.Errorf("raftv2: confchange: pre-M6.0 single payload (version 0x01 kind 0x00) — wipe and re-bootstrap")
 	}
-	if off != len(val) {
-		return out, fmt.Errorf("raftv2: confchange: trailing %d bytes", len(val)-off)
+	return out, fmt.Errorf("raftv2: confchange: unknown (version, kind) = (0x%02x, 0x%02x)", ver, kind)
+}
+
+func readLenU16String(val []byte, off int, label string) (string, int, error) {
+	if len(val) < off+2 {
+		return "", off, fmt.Errorf("raftv2: confchange: short %s len", label)
 	}
-	return out, nil
+	n := int(binary.BigEndian.Uint16(val[off:]))
+	off += 2
+	if len(val) < off+n {
+		return "", off, fmt.Errorf("raftv2: confchange: short %s body", label)
+	}
+	s := string(val[off : off+n])
+	off += n
+	return s, off, nil
 }
 
 func decodeVoters(val []byte, off int, label string) ([]string, int, error) {
@@ -449,20 +585,29 @@ func configEntryPayload(e LogEntry) confChangePayload {
 // a config entry to a log under prev. It does NOT mutate prev. Callers use
 // this both at append time and at log replay time during recovery.
 //
-// Learners survive every voter-set transition unchanged (the joint encoder
-// is voter-only; learners ride out-of-band in actorState). M6.0 commit 2/3
-// adds Op-tag dispatch for learner-targeted single entries.
+// Joint entries (LogEntryJointConfChange) carry only voter-set transitions
+// — learners survive unchanged (the joint encoder is voter-only).
+//
+// Single entries (LogEntryConfChange) carry the full resulting voter +
+// learner snapshot per the Path B wire format. Followers replay each
+// single entry by adopting NewVoters wholesale (settling out of joint
+// state, if any) and rebuilding learners from NewLearners.
 func applyConfigEntry(prev effectiveConfig, e LogEntry) effectiveConfig {
 	p := configEntryPayload(e)
 	if e.Type == LogEntryJointConfChange {
-		// Joint entry: encoded as old + new. Move into joint state.
 		next := newJointConfig(p.OldVoters, p.NewVoters)
 		next.learners = prev.cloneLearners()
 		return next
 	}
-	// LogEntryConfChange: leave joint, settle on Cnew. Carry learners.
+	// Single-phase: settle on Cnew (which equals prev.voters for an
+	// AddLearner/Promote/RemoveLearner op, or Cnew for a joint-exit).
 	next := newSingleConfig(p.NewVoters)
-	next.learners = prev.cloneLearners()
+	if len(p.NewLearners) > 0 {
+		next.learners = make(map[string]string, len(p.NewLearners))
+		for _, l := range p.NewLearners {
+			next.learners[l.ID] = l.Address
+		}
+	}
 	return next
 }
 

@@ -34,7 +34,62 @@ var (
 	// in-flight membership change at a time mirrors hashicorp/raft's
 	// pragmatic rule and avoids pipelining edge cases.
 	ErrConfChangeInFlight = errors.New("raft: configuration change already in flight")
+	// ErrLearnerNotCaughtUp is returned by PromoteToVoter when the
+	// learner's matchIndex lags more than cfg.LearnerCatchupThreshold
+	// entries behind the leader's commit index. Callers should wait for
+	// the learner to drain and retry.
+	ErrLearnerNotCaughtUp = errors.New("raft: learner not caught up to leader commit")
+	// ErrNotALearner is returned by PromoteToVoter when the target id is
+	// not registered as a learner in the live configuration.
+	ErrNotALearner = errors.New("raft: target is not a learner")
+	// ErrAlreadyLearner is returned by AddLearner when id is already
+	// either a voter or a learner.
+	ErrAlreadyLearner = errors.New("raft: id is already a voter or learner")
 )
+
+// ConfChangeOp tags a single-phase LogEntryConfChange entry so the actor
+// can dispatch on the membership change kind without consulting external
+// state. Added in M6.0 (Path B). The joint encoder (LogEntryJointConfChange)
+// is voter-only and does NOT carry an Op tag — joint entries are always
+// "carry the voter set into a Cold ∪ Cnew transition".
+//
+// Op values must be stable across upgrades — they are persisted in
+// LogStore entries. New ops should be appended; values must not be
+// reordered.
+type ConfChangeOp uint8
+
+const (
+	// ConfChangeAddVoter tags the single-phase final entry of a joint
+	// AddVoter/RemoveVoter transition (Cnew settles). Also the wire op
+	// used by legacy-style v2 voter-set joint exits.
+	ConfChangeAddVoter ConfChangeOp = 0
+	// ConfChangeAddLearner is a single-phase append that registers a new
+	// non-voting observer. Quorum unchanged; voter slices unchanged.
+	ConfChangeAddLearner ConfChangeOp = 1
+	// ConfChangePromoteStage1 is the first of two log entries that
+	// implement PromoteToVoter (Path B). Drops the target from the
+	// learners map. The follow-up ConfChangeAddVoter joint transition
+	// then adds the target as a Voter.
+	ConfChangePromoteStage1 ConfChangeOp = 2
+	// ConfChangeRemoveLearner is a single-phase entry that drops a
+	// learner without joint consensus (quorum unchanged).
+	ConfChangeRemoveLearner ConfChangeOp = 3
+)
+
+func (o ConfChangeOp) String() string {
+	switch o {
+	case ConfChangeAddVoter:
+		return "AddVoter"
+	case ConfChangeAddLearner:
+		return "AddLearner"
+	case ConfChangePromoteStage1:
+		return "PromoteStage1"
+	case ConfChangeRemoveLearner:
+		return "RemoveLearner"
+	default:
+		return fmt.Sprintf("Unknown(%d)", uint8(o))
+	}
+}
 
 // ServerSuffrage is mirrored from v1 internal/raft/raft.go for M5 swap-time
 // API parity. Voter participates in elections and quorum; NonVoter (learner)

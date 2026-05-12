@@ -159,7 +159,7 @@ func (n *Node) advanceConfChangePhase() {
 			Term:    n.st.currentTerm,
 			Index:   finalIdx,
 			Type:    LogEntryConfChange,
-			Command: encodeConfChange(pcc.newVoters),
+			Command: encodeJointExitConfChange(pcc.newVoters, n.st.currentConfig.learners),
 		}
 		if err := n.st.log.Append([]LogEntry{finalEntry}); err != nil {
 			panic("raftv2: advanceConfChangePhase: Append final: " + err.Error())

@@ -252,7 +252,7 @@ func TestMembership_TruncateAfterRevertsConfig(t *testing.T) {
 	require.True(t, n.st.currentConfig.joint)
 	n.appendAndTrackConfig([]LogEntry{{
 		Term: 1, Index: 3, Type: LogEntryConfChange,
-		Command: encodeConfChange([]string{"n1", "n2", "n3", "n4"}),
+		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
 	}})
 	require.False(t, n.st.currentConfig.joint)
 	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, n.st.currentConfig.voters)
@@ -282,7 +282,7 @@ func TestMembership_TruncateRevertsToJoint(t *testing.T) {
 	}})
 	n.appendAndTrackConfig([]LogEntry{{
 		Term: 1, Index: 3, Type: LogEntryConfChange,
-		Command: encodeConfChange([]string{"n1", "n2", "n3", "n4"}),
+		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
 	}})
 
 	n.truncateAndRevertConfig(2) // drops idx 3 only
